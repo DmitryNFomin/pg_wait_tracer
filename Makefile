@@ -90,8 +90,11 @@ bench:
 $(BUILD_DIR):
 	@mkdir -p $(BUILD_DIR)
 
+$(INC_DIR):
+	@mkdir -p $(INC_DIR)
+
 # Step 1: Generate vmlinux.h from kernel BTF
-$(INC_DIR)/vmlinux.h:
+$(INC_DIR)/vmlinux.h: | $(INC_DIR)
 	@echo "  VMLINUX  $@"
 	@$(BPFTOOL) btf dump file /sys/kernel/btf/vmlinux format c > $@
 
@@ -104,7 +107,7 @@ $(BUILD_DIR)/pg_wait_tracer.bpf.o: $(BPF_DIR)/pg_wait_tracer.bpf.c \
 	@$(LLVM_STRIP) -g $@
 
 # Step 3: Generate BPF skeleton
-$(INC_DIR)/pg_wait_tracer.skel.h: $(BUILD_DIR)/pg_wait_tracer.bpf.o
+$(INC_DIR)/pg_wait_tracer.skel.h: $(BUILD_DIR)/pg_wait_tracer.bpf.o | $(INC_DIR)
 	@echo "  SKEL     $@"
 	@$(BPFTOOL) gen skeleton $< > $@
 
