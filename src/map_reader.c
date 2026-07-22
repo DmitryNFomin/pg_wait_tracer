@@ -178,6 +178,14 @@ void pgwt_read_state_map(struct pgwt_daemon *d)
              * Only reached in tiered mode during escalation, where every
              * ATTACHED backend has wp_live = 1 from the preseed. */
             if (!sval.wp_live) {
+                if (getenv("PGWT_DBG_LIVEREAD"))
+                    fprintf(stderr, "LIVEREAD pid=%u SKIP wp_live=0 "
+                            "we=%u cpu_total=%llu on_cpu_ts=%llu last_cpu=%llu "
+                            "last_ts=%llu\n", snext, sval.last_event,
+                            (unsigned long long)sval.cpu_ns_total,
+                            (unsigned long long)sval.on_cpu_ts,
+                            (unsigned long long)sval.last_cpu_ns,
+                            (unsigned long long)sval.last_ts);
                 skey = snext;
                 continue;
             }
@@ -245,6 +253,16 @@ void pgwt_read_state_map(struct pgwt_daemon *d)
                         cpu_open = m < open_ns ? m : open_ns;   /* clamp to wall */
                     }
                 }
+                if (we == 0 && getenv("PGWT_DBG_LIVEREAD"))
+                    fprintf(stderr, "LIVEREAD pid=%u we=0 wp_live=%u open_ns=%llu "
+                            "cpu_total=%llu on_cpu_ts=%llu last_cpu=%llu now=%llu "
+                            "cpu_open=%llu has_closed=%d\n", snext, sval.wp_live,
+                            (unsigned long long)open_ns,
+                            (unsigned long long)sval.cpu_ns_total,
+                            (unsigned long long)sval.on_cpu_ts,
+                            (unsigned long long)sval.last_cpu_ns,
+                            (unsigned long long)now,
+                            (unsigned long long)cpu_open, (int)has_closed_data);
 
                 /* Per-PID accumulation */
                 struct pgwt_pid_accum *pa = pgwt_get_or_create_pid(&d->accum, snext);

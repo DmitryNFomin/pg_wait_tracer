@@ -203,6 +203,7 @@ jobs:
           sudo env "PATH=/usr/lib/postgresql/$V/bin:$PATH" \
             "GITHUB_STEP_SUMMARY=$GITHUB_STEP_SUMMARY" \
             "BPFTOOL=$BPFTOOL" \
+            "PGWT_STRADDLE_DEBUG=1" \
             tests/ci_smoke.sh --pg-version "$V" $FLAGS
 
   web-ui:

@@ -757,7 +757,11 @@ def phase_pure_cpu_straddle(pm_pid, mode):
     be_pid = None
     oncpu_before = oncpu_after = None
     win_from = win_shutdown = 0
-    tracer = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    _dbg_env = {**os.environ}
+    if os.environ.get("PGWT_STRADDLE_DEBUG"):
+        _dbg_env["PGWT_DBG_LIVEREAD"] = "1"   # temporary: diagnose live CPU*=0
+    tracer = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              env=_dbg_env)
     try:
         time.sleep(3.0)                 # BPF load + scan/attach seeds the backend
         be_pid = find_active_do_backend()
@@ -786,6 +790,15 @@ def phase_pure_cpu_straddle(pm_pid, mode):
     #    Pre-T8 this row was 0.0 for a waitless command (the exact symptom).
     live = parse_time_model(out)
     live_cpu = live.get('CPU*', 0.0)
+    if live_cpu <= 0.0 and os.environ.get("PGWT_STRADDLE_DEBUG"):
+        # Dump the full tracer stdout+stderr (incl. LIVEREAD debug) so the
+        # failing tick's state_map read is inspectable. Temporary diagnostic.
+        with open("/tmp/straddle_fail_out.txt", "w") as f:
+            f.write(out)
+        with open("/tmp/straddle_fail_err.txt", "w") as f:
+            f.write(err)
+        print("=== STRADDLE LIVE CPU*=0 — LIVEREAD dump (be_pid=%s) ===" % be_pid)
+        print("\n".join(l for l in err.splitlines() if "LIVEREAD" in l)[-4000:])
     check(live_cpu > 0.0,
           f"pure-CPU straddle live view shows CPU* > 0 (--mode {mode}): "
           f"CPU* = {live_cpu:.0f}ms (pre-T8 ~0; stderr {err[-160:]!r})")
