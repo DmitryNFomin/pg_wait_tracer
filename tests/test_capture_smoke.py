@@ -724,6 +724,14 @@ def phase_pure_cpu_straddle(pm_pid, mode):
     the same [attach, shutdown] window (±20%). The loop count is huge so it
     straddles capture end on any box; it starts BEFORE the tracer so its
     command start-edge is already past at attach."""
+    # DIAG (diag-straddle-livecpu branch): loop the live-view scenario HERE,
+    # in-context (after the preceding phases — the isolated top-of-run loop did
+    # not reproduce, the in-context real phase did), taking many shots + dumping
+    # the time_model blocks on the first catch.
+    if mode == 'full' and os.environ.get("PGWT_STRADDLE_DEBUG"):
+        phase_straddle_livecpu_loop(pm_pid)
+        return
+
     print(f"--- Phase: PURE-CPU straddle, --mode {mode} (no waits — empty-trace "
           f"repro) ---")
     trace_dir = tempfile.mkdtemp(prefix="pgwt_smoke_purecpu_")
@@ -1246,11 +1254,6 @@ def main():
     psql("CREATE EXTENSION IF NOT EXISTS pg_stat_statements")
 
     cleanup_stale_backends()
-
-    # DIAG (diag-straddle-livecpu branch): take many shots at the intermittent
-    # live CPU*=0 straddle flake up front, so one CI run reproduces it.
-    if args.mode == 'full' and os.environ.get("PGWT_STRADDLE_DEBUG"):
-        phase_straddle_livecpu_loop(pm_pid)
 
     core = args.capture_core
     phase_live_system_event(pm_pid, args.mode, core=core)
