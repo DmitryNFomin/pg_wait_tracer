@@ -917,7 +917,7 @@ def phase_straddle_recovery(pm_pid, mode):
     subprocess.run(["rm", "-rf", trace_dir])
 
 
-def phase_straddle_livecpu_loop(pm_pid, iters=10):
+def phase_straddle_livecpu_loop(pm_pid, iters=40):
     """DIAG only. Run the pure-CPU straddle live-view scenario `iters` times;
     on the FIRST time the live time_model shows CPU* <= 0, dump the per-tick
     LIVEREAD state and all time_model blocks so the failing read is
@@ -966,12 +966,15 @@ def phase_straddle_livecpu_loop(pm_pid, iters=10):
         subprocess.run(["rm", "-rf", trace_dir])
         if cpu <= 0.0:
             print(f"=== CAUGHT: live CPU*=0 at iter {it} (be_pid={be_pid}) ===")
-            print("--- LIVEREAD per-tick state ---")
-            for l in err.splitlines():
-                if "LIVEREAD" in l:
-                    print(l)
-            print("--- full time_model stdout (last 4000 chars) ---")
-            print(out[-4000:])
+            # Per-block CPU* across all printed time_model blocks: reveals
+            # whether the LAST block is 0 (print/parse) or ALL are 0 (read).
+            blocks = re.split(r'-{3,}\s*\d{4}-\d\d-\d\d', out)
+            for bi, blk in enumerate(blocks):
+                mm = [l for l in blk.splitlines() if 'CPU*' in l]
+                if mm:
+                    print(f"  block {bi}: {mm[0].strip()}")
+            print("--- FULL time_model stdout ---")
+            print(out)
             print("--- stderr tail (last 1500 chars) ---")
             print(err[-1500:])
             check(False, f"DIAG caught straddle live CPU*=0 at iter {it}")
