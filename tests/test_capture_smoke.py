@@ -917,6 +917,68 @@ def phase_straddle_recovery(pm_pid, mode):
     subprocess.run(["rm", "-rf", trace_dir])
 
 
+def phase_straddle_livecpu_loop(pm_pid, iters=10):
+    """DIAG only. Run the pure-CPU straddle live-view scenario `iters` times;
+    on the FIRST time the live time_model shows CPU* <= 0, dump the per-tick
+    LIVEREAD state and all time_model blocks so the failing read is
+    inspectable, then fail. ~10 shots per CI run raise the odds of catching
+    the intermittent 2-vCPU flake in one run."""
+    print(f"--- DIAG: straddle live-CPU loop ({iters}x) ---")
+    for it in range(iters):
+        trace_dir = tempfile.mkdtemp(prefix="pgwt_diag_")
+        os.chmod(trace_dir, 0o755)
+        hog = subprocess.Popen(
+            ["psql", "-U", "postgres", "-d", "postgres"],
+            stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, text=True)
+        hog.stdin.write(
+            "DO $$ DECLARE x bigint := 0; BEGIN "
+            "FOR o IN 1..100000 LOOP "
+            "FOR i IN 1..1000000 LOOP x := x + i; END LOOP; x := 0; "
+            "END LOOP; END $$;\n")
+        hog.stdin.flush()
+        time.sleep(2.5)
+        env = {**os.environ, "PGWT_DBG_LIVEREAD": "1"}
+        tracer = subprocess.Popen(
+            [TRACER, "--mode", "full", "--pid", str(pm_pid), "-T", trace_dir,
+             "--duration", "12", "--interval", "5", "--view", "time_model"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+        be_pid = None
+        try:
+            time.sleep(3.0)
+            be_pid = find_active_do_backend()
+            stdout, stderr = tracer.communicate(timeout=45)
+        except subprocess.TimeoutExpired:
+            tracer.kill()
+            stdout, stderr = tracer.communicate()
+        finally:
+            try:
+                hog.stdin.write("\\q\n"); hog.stdin.flush()
+            except (BrokenPipeError, ValueError):
+                pass
+            hog.terminate()
+            cleanup_stale_backends()
+        out = STRIP_ANSI.sub('', stdout.decode('utf-8', errors='replace'))
+        err = stderr.decode('utf-8', errors='replace')
+        live = parse_time_model(out)
+        cpu = live.get('CPU*', 0.0)
+        print(f"  iter {it}: live CPU*={cpu:.0f}ms  be_pid={be_pid}")
+        subprocess.run(["rm", "-rf", trace_dir])
+        if cpu <= 0.0:
+            print(f"=== CAUGHT: live CPU*=0 at iter {it} (be_pid={be_pid}) ===")
+            print("--- LIVEREAD per-tick state ---")
+            for l in err.splitlines():
+                if "LIVEREAD" in l:
+                    print(l)
+            print("--- full time_model stdout (last 4000 chars) ---")
+            print(out[-4000:])
+            print("--- stderr tail (last 1500 chars) ---")
+            print(err[-1500:])
+            check(False, f"DIAG caught straddle live CPU*=0 at iter {it}")
+            return
+    check(True, f"DIAG: all {iters} straddle iters had CPU*>0 (not caught)")
+
+
 def phase_sampled_aas_truth(pm_pid):
     """T2 (AAS-1) definition-of-done: sampled AAS — now CPU-inclusive —
     must match pg_stat_activity 1s-sampling ground truth. A CPU-bound
@@ -1181,6 +1243,11 @@ def main():
     psql("CREATE EXTENSION IF NOT EXISTS pg_stat_statements")
 
     cleanup_stale_backends()
+
+    # DIAG (diag-straddle-livecpu branch): take many shots at the intermittent
+    # live CPU*=0 straddle flake up front, so one CI run reproduces it.
+    if args.mode == 'full' and os.environ.get("PGWT_STRADDLE_DEBUG"):
+        phase_straddle_livecpu_loop(pm_pid)
 
     core = args.capture_core
     phase_live_system_event(pm_pid, args.mode, core=core)
