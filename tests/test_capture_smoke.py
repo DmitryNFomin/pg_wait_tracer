@@ -904,6 +904,95 @@ def phase_straddle_recovery(pm_pid, mode):
     subprocess.run(["rm", "-rf", trace_dir])
 
 
+def phase_straddle_livecpu_deterministic(pm_pid):
+    """DETERMINISTIC regression for the live-view CPU*=0 straddle flake (the
+    on_watchpoint on_cpu_ts open, src/bpf/pg_wait_tracer.bpf.c). phase_pure_cpu_
+    straddle above exercises the same edge, but the miss is a TIMING race: it
+    needs the backend to (a) be in a wait at the attach instant so its seed
+    leaves on_cpu_ts=0, AND (b) then run uninterrupted so no sched_switch opens
+    on_cpu_ts — reproducing only ~2% of runs on 2-vCPU CI (PG13), never on a
+    real box. The live read then measures exact==cpu_ns_total (flat) and reports
+    CPU*=0 for the whole on-CPU stretch, while the terminal flush records it
+    correctly (the observed "live=0 but trace+magnitude pass").
+
+    This forces BOTH conditions so the miss is reproduced ON EVERY RUN:
+      (a) the backend is in Timeout:PgSleep when the tracer seeds it (a real
+          wait → current_wei != 0 → on_cpu_ts seeded 0), then runs a WAITLESS
+          pure-CPU loop; and
+      (b) PGWT_TEST_NO_SCHED_ONCPU makes sched_switch inert AND forces the seed
+          on_cpu_ts to 0, so on_cpu_ts can be established ONLY by a watchpoint
+          fire.
+    The single pg_sleep→loop transition is that fire: WITH the fix it opens
+    on_cpu_ts and the live view reads CPU* ≈ wall-since-loop-start; WITHOUT it
+    on_cpu_ts stays 0 and CPU* is exactly 0 — the exact CI failure, made
+    deterministic. Full mode only (needs watchpoints + cpu_accounting)."""
+    print("--- Phase: straddle live-CPU DETERMINISTIC (pg_sleep→loop, "
+          "sched_switch inert) ---")
+    trace_dir = tempfile.mkdtemp(prefix="pgwt_smoke_detcpu_")
+    os.chmod(trace_dir, 0o755)
+
+    # pg_sleep long enough that the tracer's BPF-load + scan seeds the backend
+    # WHILE it is still in the wait (so current_wei != 0 → on_cpu_ts=0), then a
+    # waitless pure-CPU loop (same int4-safe nested loop as the straddle hog).
+    hog = subprocess.Popen(
+        ["psql", "-U", "postgres", "-d", "postgres"],
+        stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL, text=True)
+    hog.stdin.write(
+        "SELECT pg_sleep(8);\n"
+        "DO $$ DECLARE x bigint := 0; BEGIN "
+        "FOR o IN 1..100000 LOOP "
+        "FOR i IN 1..1000000 LOOP x := x + i; END LOOP; x := 0; "
+        "END LOOP; END $$;\n")
+    hog.stdin.flush()
+    time.sleep(0.3)   # backend is entering pg_sleep before the tracer attaches
+
+    argv = [TRACER, "--mode", "full", "--pid", str(pm_pid),
+            "-T", trace_dir, "--duration", "20", "--interval", "4",
+            "--view", "time_model"]
+    env = {**os.environ, "PGWT_TEST_NO_SCHED_ONCPU": "1"}
+    tracer = subprocess.Popen(argv, stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, env=env)
+    try:
+        stdout, stderr = tracer.communicate(timeout=55)
+    except subprocess.TimeoutExpired:
+        tracer.kill()
+        stdout, stderr = tracer.communicate()
+    finally:
+        try:
+            hog.stdin.write("\\q\n"); hog.stdin.flush()
+        except (BrokenPipeError, ValueError):
+            pass
+        hog.terminate()
+        cleanup_stale_backends()
+    out = STRIP_ANSI.sub('', stdout.decode('utf-8', errors='replace'))
+    err = stderr.decode('utf-8', errors='replace')
+
+    # The hook must actually have armed (else the test proves nothing).
+    check("PGWT_TEST_NO_SCHED_ONCPU" in err,
+          "sched_switch on_cpu_ts open suppressed (test hook active)")
+    # The payoff: the pg_sleep→loop watchpoint fire opened on_cpu_ts, so the
+    # waitless loop's ongoing on-CPU stretch is measured LIVE — several seconds
+    # of it by the final tick (its on-CPU time from pg_sleep end to trace end,
+    # ~8s, independent of box speed since the loop is CPU-bound). WITHOUT the fix
+    # the open interval reads 0 and CPU* is only a fixed ~tens-of-ms background
+    # floor (idle bgworkers' brief closed on-CPU intervals, counted at wall);
+    # measured 9027ms vs 66ms on PG13 — a >130x separation. The 2000ms gate sits
+    # ~4x below the multi-second signal and ~30x above that floor: a
+    # discriminator, not a tuned pass line. (A CPU/DB-Time ratio can't be used —
+    # DB Time also carries the 8s pg_sleep wait, diluting even the fixed run to
+    # ~27%.)
+    live = parse_time_model(out)
+    live_cpu = live.get('CPU*', 0.0)
+    check(live_cpu > 2000.0,
+          f"pg_sleep→loop straddler shows MULTI-SECOND live CPU* via the "
+          f"watchpoint on_cpu_ts open (sched_switch inert): CPU* = {live_cpu:.0f}ms "
+          f"(pre-fix ~0 loop CPU, only a ~tens-of-ms background floor; "
+          f"stderr {err[-120:]!r})")
+
+    subprocess.run(["rm", "-rf", trace_dir])
+
+
 def phase_sampled_aas_truth(pm_pid):
     """T2 (AAS-1) definition-of-done: sampled AAS — now CPU-inclusive —
     must match pg_stat_activity 1s-sampling ground truth. A CPU-bound
@@ -1201,6 +1290,11 @@ def main():
         # (covered by phase_pure_cpu_straddle above), not this recovery.
         if args.mode == 'full':
             phase_straddle_recovery(pm_pid, args.mode)
+            # Deterministic regression for the live-view CPU*=0 straddle flake:
+            # a pg_sleep→loop straddler with sched_switch forced inert reads
+            # multi-second live CPU* only if the watchpoint fire opens on_cpu_ts
+            # (the fix). Full mode only (needs watchpoints + cpu_accounting).
+            phase_straddle_livecpu_deterministic(pm_pid)
         if args.mode == 'tiered':
             # T2 (AAS semantics): CPU-inclusive sampled AAS vs pg_stat_activity
             # ground truth, and the CPU-storm escalation + tier-switch

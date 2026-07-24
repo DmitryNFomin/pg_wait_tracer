@@ -211,7 +211,13 @@ static int preseed_state_map(struct pgwt_daemon *d, pid_t pid, uint64_t addr,
              * (we==0) so a command straddling attach has its CPU measured from
              * the seed instant. attach_ts is CLOCK_MONOTONIC == bpf_ktime. */
             .cpu_ns_total = 0,
-            .on_cpu_ts    = (d->cpu_accounting && current_wei == 0) ? attach_ts : 0,
+            /* Open the on-CPU stretch at the seed iff the backend is running
+             * (we==0) now. TEST HOOK PGWT_TEST_NO_SCHED_ONCPU also forces this
+             * to 0 so on_cpu_ts can ONLY come from a watchpoint fire, making the
+             * straddle live-CPU repro deterministic (background backends on-CPU
+             * at seed can't then pollute the system-wide live CPU*). */
+            .on_cpu_ts    = (d->cpu_accounting && current_wei == 0 &&
+                             !getenv("PGWT_TEST_NO_SCHED_ONCPU")) ? attach_ts : 0,
             .last_cpu_ns  = 0,
         };
         uint32_t pid_key = pid;
