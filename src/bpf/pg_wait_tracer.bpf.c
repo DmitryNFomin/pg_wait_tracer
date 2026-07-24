@@ -48,6 +48,17 @@ volatile const u64 debug_query_string_addr = 0; /* VA of debug_query_string glob
  * load even where the field is absent, so this is a belt-and-suspenders gate. */
 volatile const bool cpu_accounting = 0;
 
+/* TEST HOOK (PGWT_TEST_NO_SCHED_ONCPU): deterministically reproduce the
+ * live-view CPU*=0 straddle flake. When 1, on_sched_switch does NOT open
+ * on_cpu_ts for the incoming task, so a backend's on-CPU stretch is opened
+ * ONLY by the seed (current_wei==0) or a watchpoint fire. A backend that seeds
+ * OFF-CPU (in a real wait at attach, so on_cpu_ts starts 0) and then runs a
+ * waitless pure-CPU loop therefore reads live CPU* == 0 without the
+ * watchpoint-fire on_cpu_ts open below, and CPU* > 0 with it — on EVERY run,
+ * independent of the scheduler. This isolates exactly that fix. Test-only;
+ * never set in production (it disables sched-driven CPU accounting). */
+volatile const bool test_no_sched_oncpu = 0;
+
 /* Command-open gate (T2, docs/AAS_SEMANTICS_DECISION.md): per-PG-version
  * BackendState enum values for the pgstat_report_activity uprobe. PG13-17:
  * STATE_RUNNING=2, STATE_FASTPATH=4; PG18+ inserted STATE_STARTING so they
@@ -255,6 +266,13 @@ int BPF_PROG(on_sched_switch, bool preempt,
 {
     if (!cpu_accounting)
         return 0;
+    /* TEST HOOK: with sched_switch inert, on_cpu_ts is established ONLY by the
+     * seed (current_wei==0, also forced to 0 under this hook — see backend.c)
+     * or a watchpoint fire. A backend seeded off-CPU that then runs a waitless
+     * loop therefore has live CPU iff the watchpoint-fire on_cpu_ts open exists,
+     * making the straddle-CPU repro deterministic. Test-only. */
+    if (test_no_sched_oncpu)
+        return 0;
     u64 now = bpf_ktime_get_ns();
 
     u32 ppid = BPF_CORE_READ(prev, pid);
@@ -312,6 +330,13 @@ int on_watchpoint(struct bpf_perf_event_data *ctx)
              * it, just establish last_cpu_ns so the next real transition's
              * cpu_ns delta is correct. */
             st->last_cpu_ns = read_task_cpu_ns_for(st, seed_now);
+            /* Same on-CPU open as the real-transition path below: the backend
+             * is executing this write, so if no sched_switch-in has opened its
+             * stretch, open it here — otherwise the live read stays flat at 0
+             * for a backend that runs uninterrupted after seeding. No-op when
+             * cpu_accounting is off (read_task_cpu_ns_for returns 0 anyway). */
+            if (st->on_cpu_ts == 0)
+                st->on_cpu_ts = seed_now;
             st->wp_live = 1;
             return 0;
         }
@@ -363,6 +388,21 @@ int on_watchpoint(struct bpf_perf_event_data *ctx)
         /* Advance the CPU base on every emitted transition (T8). */
         st->last_cpu_ns = cpu_now;
 
+        /* S3 live-read fix: the backend is ON-CPU at this fire — it is executing
+         * this write. If no sched_switch-in has opened its on-CPU stretch (we
+         * attached mid-run and never saw its switch-in, or it seeded from a
+         * transient wait so on_cpu_ts started 0), on_cpu_ts is 0 here and
+         * read_task_cpu_ns_for() returns a FLAT cpu_ns_total. A backend that
+         * then runs uninterrupted (no sched_switch — common when a CPU-bound
+         * backend owns a core on a low-CPU host) keeps exact == last_cpu_ns, so
+         * the live view reads cpu_open == 0 for the whole on-CPU interval that
+         * starts here — even though the terminal flush (post-switch accumulator)
+         * records it correctly. Open the stretch now so the live read measures
+         * it. The "== 0" guard never clobbers a stretch sched_switch is already
+         * tracking; `now` is a conservative lower bound on the true start. */
+        if (st->on_cpu_ts == 0)
+            st->on_cpu_ts = now;
+
         /* Clear query_id when entering Client:ClientRead or any idle event.
          * At this point no query is running — the backend is waiting for
          * the next command. Without this, Client:ClientRead time between
@@ -386,8 +426,11 @@ int on_watchpoint(struct bpf_perf_event_data *ctx)
             .wait_event_addr = wait_addr,
             /* S3: the backend is on-CPU now (it just wrote wait_event_info);
              * open its on-CPU stretch here so the first interval measures. The
-             * base is 0 — cpu_ns deltas are taken from this attach onward. */
-            .on_cpu_ts = init_now,
+             * base is 0 — cpu_ns deltas are taken from this attach onward.
+             * (test_no_sched_oncpu forces 0 so this path cannot contribute live
+             * CPU either — under the hook on_cpu_ts is established ONLY by the
+             * real-transition open above, isolating that fix for the test.) */
+            .on_cpu_ts = test_no_sched_oncpu ? 0 : init_now,
             .cpu_ns_total = 0,
             .last_cpu_ns = 0,
         };

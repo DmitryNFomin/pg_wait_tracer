@@ -429,6 +429,14 @@ int pgwt_daemon_init(struct pgwt_daemon *d)
      * schedstat-less kernels is deferred; see the PR notes.) */
     d->cpu_accounting = (access("/sys/kernel/btf/vmlinux", R_OK) == 0);
     d->skel->rodata->cpu_accounting = d->cpu_accounting;
+    /* TEST HOOK: see pg_wait_tracer.bpf.c test_no_sched_oncpu. Forces the
+     * live CPU*=0 straddle repro deterministically by suppressing the
+     * sched_switch on_cpu_ts open. Test-only; loud so it can never be missed. */
+    if (getenv("PGWT_TEST_NO_SCHED_ONCPU")) {
+        d->skel->rodata->test_no_sched_oncpu = true;
+        fprintf(stderr, "WARN: PGWT_TEST_NO_SCHED_ONCPU — sched_switch on_cpu_ts "
+                "open suppressed (deterministic straddle-CPU repro; TEST ONLY)\n");
+    }
     if (!d->cpu_accounting) {
         /* No BTF → tp_btf/sched_switch can't load: don't try, and fall back
          * to gap-inference (cpu_ns UNKNOWN, no Off-CPU*). */

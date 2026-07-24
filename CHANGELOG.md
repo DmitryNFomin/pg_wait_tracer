@@ -10,6 +10,22 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+- **fix(cpu): pure-CPU straddler live CPU\*.** The measured-CPU live view
+  intermittently reported `CPU* = 0` for a waitless pure-CPU command that
+  straddled capture (~2% of runs, PG13 on 2-vCPU CI, never on a real box; the
+  terminal flush and the `/proc` magnitude cross-check were correct — only the
+  periodic live read was 0). A backend momentarily in a wait at the attach
+  instant seeds `on_cpu_ts = 0`; after it leaves that wait the `on_watchpoint`
+  transition to on-CPU advanced `last_cpu_ns` but never opened `on_cpu_ts`, so a
+  backend that then ran uninterrupted (no `sched_switch` to open it — common
+  when a CPU-bound backend owns a core on a quiet host) kept its on-CPU
+  accumulator flat and read `cpu_open == 0` for the whole stretch. Fixed by
+  opening `on_cpu_ts` at every watchpoint fire (the backend is provably on-CPU
+  there) — a no-op in normal operation. New deterministic regression
+  `phase_straddle_livecpu_deterministic` + a `PGWT_TEST_NO_SCHED_ONCPU` hook
+  (sched_switch inert) reproduces the miss on every run (live `CPU*` 9027ms with
+  the fix vs a 66ms background floor without).
+
 ## [0.13] — 2026-07-21
 
 The **Trust Milestone** (Track T, `docs/ROADMAP_AND_STATUS.md`) — a
