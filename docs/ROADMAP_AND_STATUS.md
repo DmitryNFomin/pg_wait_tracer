@@ -2855,6 +2855,81 @@ LEFT / research, except §3.2 Discovery (transitions + variants) which is DONE:*
   XOR / AND / loop structure).
 - (Research phases §8: QT metrics → anomaly → conformance → rules → MVA, in that order.)
 
+### Community-proposed features: span tracing, waterfall UI, OTel export, plan-node attribution
+
+Proposed by **@AesaKamar** in PRs **#33** (span tracing + parallel-worker waterfall UI)
+and **#34** (superset: + plan-node algebra), 2026-07-02/04. Evaluated 2026-07-28 with a
+four-slice review (BPF/attach, parser/server, web/tooling/tests, trace-format). The PRs
+forked pre-Trust-Milestone (84 commits behind; 12-file conflicts; as a raw diff they
+revert T5/T6/CAP/PIE fixes and collide with the v3 trace format), so they cannot merge
+as-is — but the **ideas are adopted** here, with the review findings preserved as the
+constraints any implementation must satisfy.
+
+**F-C1. Traceparent / sqlcommenter capture — ADOPT (small).**
+Parse W3C `traceparent` from SQL comments to link DB waits to app-side distributed
+traces. The PR's mechanism is right: parse at query-text capture time, store
+`trace_id`/`parent_span_id` as extra JSONL fields in `query_texts.jsonl` — no hot path,
+no trace-format bump; and its parser is memory-safe (55-char remain guard). Deltas
+required: accept the **quoted** sqlcommenter form `traceparent='00-…'` (real OTel
+SQLCommenter output; the PR parses only unquoted `:`/`=`), keep master's DUR-4 append +
+DUR-10 0640 perms (the PR predates them), reject all-zero ids (W3C invalid), and bound
+the rescan cost (the PR's loop is O(n²) on crafted text).
+
+**F-C2. Per-execution waterfall view + `leader_pid` grouping — ADOPT (medium).**
+Gantt of one execution: leader + parallel-worker rows, wait segments colored by class —
+the missing "zoom in on this one execution" story (read-only over already-captured
+data; `leader_pid` is a +2-line backend_meta addition). Reusable from the PR:
+`lib/builders/waterfall.js` is verified CORRECT (class encoding matches the densified
+order end-to-end) and `tests/test_data_waterfall.py` is a real deterministic test.
+Deltas required: escape every interpolation (the PR's view has stored-XSS via
+`innerHTML` for query_text/db/user/parent_span_id — it never imports `esc`); no
+hardcoded `:8385` WS redirect (master serves HTTP+WS on one port; the hack breaks the
+default deployment); drop the `?v=5` cache-bust import; server side needs a
+`pt_map_clear` freeing per-entry `nodes` (the PR leaks them on every `info` refresh)
+and ONE query_id string representation (the PR splits signed `top_queries` %lld vs
+unsigned `execution_detail` %llu — filter round-trips break for high-bit ids;
+`parse_filters` must use strtoull).
+
+**F-C3. OTel/OTLP export tool — ADOPT (small).**
+Offline `tools/export_otel.py`: finished trace → OTLP JSON for Jaeger/Tempo; zero
+capture risk; pairs with F-C1 to join app↔DB traces. Deltas required: the wait-class
+array must follow the densified order (CPU, IO, Lock, LWLock, IPC, Client, Timeout,
+BufferPin, Activity, Extension — the PR's order mislabels 7 of 10 classes); worker
+CPU-gap spans must use the worker's own start/end, not the leader's (the PR emits
+children outside their parent — invalid OTLP nesting); 64-bit int attributes as strings
+per proto3-JSON; validate hex ids before emitting.
+
+**F-C4. Plan-shape sidecar (once per query_id) — ADOPT IDEA, REDESIGN (medium).**
+At the existing `ExecutorStart` uprobe, walk `PlannedStmt→Plan` once per NEW query_id
+(bounded) and emit a `plan_trees.jsonl` sidecar `{q, nodes:[{id,type,…}]}` so the UI
+shows the plan shape next to the wait profile. The PR's PG14–17 offsets verified
+correct against real headers (`Plan.plan_node_id`@40, `lefttree`@64, `righttree`@72,
+sizeof(Plan)=104, `PlannedStmt.planTree`@32). Deltas required: **PG18 `planTree` is 40,
+not 32** (PG18 inserted `planId` after `queryId`); NodeTag numbers are per-major
+build-generated — store RAW tags and map per-version offline (the PR hardcodes a PG17
+table → wrong operator labels on 14/15/16/18, the lock-class-mislabel anti-pattern);
+fail-loud offset validation like `pgwt_validate_wait_addr` (the PR walks silently);
+loud dedup-cap warnings (the PR's 4096-entry `seen[]` fills silently — the DUR-10
+anti-pattern).
+
+**F-C5. Per-wait plan-node attribution — RESEARCH (parked).**
+The end goal: ASH-style row-source attribution (which plan node was running during each
+wait). The PR's mechanism is REJECTED: uprobe+uretprobe pairs on 19 per-tuple `Exec*`
+functions at pid=-1 cost ~2 kernel traps per tuple instance-wide; uretprobes are
+skipped by `elog(ERROR)` `siglongjmp` unwinds → the node stack desyncs permanently →
+cross-query misattribution (fail-loud violation); and the PR's `va>0x400000` offset
+heuristic never fires on PIE builds (PGDG/EL9) — master's `pgwt_vaddr_to_file_offset`
+is the fix it reverted. Candidate mechanisms (unvalidated): (a) `bpf_get_stackid` at
+the existing watchpoint fire → symbolize offline to the `Exec*` frame → active node
+TYPE per wait, zero new probes; (b) uprobe `ExecProcNodeFirst` only — PG swaps the
+ExecProcNode pointer after the first call, so it fires once per node instance →
+node-start timeline at O(plan nodes); (c) no capture at all — post-hoc join with
+`auto_explain` per-node timings. Trace-format constraint for any exact variant: master
+v3 owns transitions column 7 (`cpu_ns` varint, frozen in `golden/rev3`); an
+`active_node_id` must be a NEW column 8 under **v4 = "cpu_ns AND active_node_id"**,
+with the range reader gate and a `rev4/` golden fixture (the PR's v3/v4 redefinition is
+byte-incompatible both directions).
+
 ---
 
 ## Housekeeping notes (doc hygiene)
