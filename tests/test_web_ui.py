@@ -1313,18 +1313,34 @@ def test_no_double_refresh(page):
         msgs = page.evaluate("window.__wsMsgLog")
         # A single refresh() calls refreshChart() + refreshTable()
         # = 1 aas + 1 top_events = 2 messages. Double refresh = 4.
+        #
+        # UPDATED in U2a (camera-lite): the AAS mount now also PRELOADS the
+        # strip cache — one background `aas` fetch over the 3x-skirt window
+        # via the transport's non-superseding send() (the drill invalidated
+        # the cache, so exactly one strip refill is the INTENDED behavior,
+        # not a double refresh). Strips are distinguishable on the wire by
+        # their bucket count: the poll asks for <= 300 window buckets, a
+        # strip for [3x, 6x) that target. Pin BOTH: exactly one poll aas
+        # (the original no-double-refresh regression) and at most one strip
+        # (the cache's in-flight dedup).
         cmds = [m.get("cmd") for m in msgs]
-        aas_count = cmds.count("aas")
+        aas_polls = [m for m in msgs if m.get("cmd") == "aas"
+                     and (m.get("buckets") or 0) <= 300]
+        aas_strips = [m for m in msgs if m.get("cmd") == "aas"
+                      and (m.get("buckets") or 0) > 300]
         table_count = sum(1 for c in cmds if c in
                           ("top_events", "top_sessions", "top_queries",
                            "time_model", "heatmap", "session_timeline"))
 
-        check(aas_count == 1,
-              f"Drill-down sent {aas_count} aas request(s) (expected 1)")
+        check(len(aas_polls) == 1,
+              f"Drill-down sent {len(aas_polls)} window aas request(s) (expected 1)")
+        check(len(aas_strips) <= 1,
+              f"Drill-down sent {len(aas_strips)} strip prefetch(es) (expected <= 1)")
         check(table_count == 1,
               f"Drill-down sent {table_count} table request(s) (expected 1)")
     else:
         check(False, "No clickable row for double-refresh test")
+        check(False, "(skipped)")
         check(False, "(skipped)")
 
 

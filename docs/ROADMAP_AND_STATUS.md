@@ -3069,11 +3069,17 @@ the AAS pane is expected to move to a uPlot substrate behind a written gate
   18 series, in a real browser.
 
 **Phase U2b — uPlot AAS instrument pane (1–3 weeks)  [GATED] ⬜**
-- **Gate (written, pre-registered):** p95 gesture-to-paint **> 16.7 ms**
-  sustained after a ≤3-day tuning timebox → schedule; **> 33 ms** → begin
-  immediately. (Expected to trip: the measured ECharts pipeline floor is
-  20/33 ms p50/p95 at even the low preload corner.) Accepting 30 fps instead
-  would be a product decision to write down, not a threshold to hide behind.
+- **Gate (written, pre-registered): TRIPPED RED 2026-07-31 — begin (b)
+  immediately.** Measured on the real app in real Chromium (U2a harness
+  `tests/test_gesture_gate.py`, 3 runs, 1258-bucket × 16-series cached strip,
+  40 wheel-zoom + 20 shift-drag-pan steps each, input-arrival →
+  chart-'finished'): combined gesture-to-paint **p50 ≈ 43 ms, p95 = 61.2 /
+  59.4 / 67.6 ms** — ~2× the 33 ms begin-immediately line, ~4× the 16.7 ms
+  60 fps bar (secondary action→paint p50 ≈ 16 ms matches the pre-registered
+  SSR floor 20.4/32.8, confirming the ECharts pipeline as the budget item).
+  Verdict per the rule: **U2b is scheduled, no longer gated.** Numbers live
+  in `tests/results/gesture_gate.json`; harness re-runnable via
+  `PGWT_RUN_GESTURE_GATE=1`.
 - Other triggers, any one suffices: raw-**sample** attribution (needs
   client-resident raw samples — a data-residency milestone favoring an owned
   renderer); single-camera **compare** overlay design; live cadence ≤1 s

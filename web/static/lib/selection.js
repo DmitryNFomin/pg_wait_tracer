@@ -8,18 +8,29 @@
  * Split:
  *   pixelRangeToTime(pixels, chart)   PURE: maps an [x1,x2] pixel pair (in the
  *                                     chart's coordinate space) to a sorted
- *                                     {from,to} ns range via ECharts'
- *                                     convertFromPixel. Tested with a fake
- *                                     `chart` that exposes convertFromPixel.
+ *                                     {from,to} range via ECharts'
+ *                                     convertFromPixel. The result is in the
+ *                                     chart's X-AXIS UNITS — ms since epoch on
+ *                                     the U2a AAS time axis (the consumer
+ *                                     converts to ns); whatever the axis holds
+ *                                     elsewhere. Tested with a fake `chart`
+ *                                     that exposes convertFromPixel.
  *   attachSelection(el, chart, opts)  thin: pointer events on `el`, a styled
  *                                     band div, and a callback with the time
  *                                     range when the drag completes.
+ *
+ * Gesture split with the camera (U2a, constraint C): PLAIN drag = this
+ * brush-select overlay; SHIFT+drag = the inside-dataZoom pan
+ * (moveOnMouseMove:'shift'); wheel = cursor-anchored dataZoom zoom. onDown
+ * therefore ignores shift-modified drags — the overlay must never draw a
+ * selection band over an ECharts pan.
  */
 
 const MIN_DRAG_PX = 5;   // ignore micro-drags (treat as clicks)
 
 /* Pure: convert a pixel x-range to a time range using the chart's
  * convertFromPixel. `chart` only needs convertFromPixel([x,y]) -> [valueX,..].
+ * Values are rounded to integers in the AXIS UNITS (ms on the U2a time axis).
  * Returns null for a degenerate range. */
 export function pixelRangeToTime(x1, x2, chart) {
     const lo = Math.min(x1, x2);
@@ -65,7 +76,9 @@ export function attachSelection(el, chart, opts) {
     }
 
     function onDown(e) {
-        if (e.button !== 0) return;
+        // Shift+drag is the camera pan (inside-dataZoom moveOnMouseMove:
+        // 'shift', U2a) — not a brush. See the header's gesture split.
+        if (e.button !== 0 || e.shiftKey) return;
         dragging = true;
         startX = localX(e);
         band.style.left = startX + 'px';

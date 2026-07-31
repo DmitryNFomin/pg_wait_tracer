@@ -16,6 +16,8 @@
 
 import { ServerInfo, TimeRange, FilterStack } from './lib/state.js';
 import { Transport, TransportError, CancelledError } from './lib/transport.js';
+import { Camera } from './lib/camera.js';
+import { StripCache } from './lib/stripcache.js';
 import { ViewManager } from './lib/view-manager.js';
 import { mountTable } from './lib/table.js';
 import {
@@ -43,6 +45,33 @@ const transport = new Transport();
 
 let activeView = null;       // persistent AAS chart view ("active")
 let vm = null;               // ViewManager for tab views
+
+// ── Camera-lite: the AAS instrument state (Track U, U2a) ─────────────────────
+// The camera is the AAS pane's viewport as pure client state (lib/camera.js);
+// the strip cache is its tile store (lib/stripcache.js). The camera is
+// AUTHORITATIVE BY CONVENTION (INSTRUMENT_ARCHITECTURE §5): ECharts'
+// inside-dataZoom gestures are mirrored INTO it (views/active.js), and every
+// app-side window change is mirrored into it via syncCamera() (suppressed so
+// it never re-enters the gesture pipeline). Gestures detach the camera and
+// pause live via the U0 machinery; the Live button re-attaches to NOW.
+const camera = new Camera({ fromNs: 0, toNs: 0 });
+// Strip fetches go through the transport's NON-SUPERSEDING send() path — a
+// cache fill must bypass the single-flight channel cancel and the
+// view-manager epoch discard (stale-but-useful retention is the point; §5's
+// documented exception to the dashboard transport rules). Same params as the
+// poll path so a strip is exactly "the aas view over a wider window".
+const stripCache = new StripCache({
+    fetchStrip: ({ fromNs, toNs, buckets }) => {
+        const params = { from: fromNs, to: toNs, buckets,
+                         filters: filters.snapshot() };
+        const f = filters.filters;
+        if (f.class && !f.event_id) params.detail = 'events';
+        return transport.send('aas', params);
+    },
+});
+let cameraSyncing = false;   // true while app state is being MIRRORED into the camera
+let cameraSettleTimer = null;
+const CAMERA_SETTLE_MS = 150;   // settle-refine debounce after the last gesture event
 
 // ── Daemon control plane (B5) ─────────────────────────────────────────────────
 // Latest daemon status/metrics from the control socket (proxied by pgwt-server
@@ -107,6 +136,9 @@ let chartEl, tableEl, summaryEl, tooltipEl;
 function makeCtx() {
     return {
         transport, server, timeRange, filters,
+        // U2a: the AAS camera + strip cache (views/active.js wires gestures
+        // into the camera and preloads/paints strips through the cache).
+        camera, stripCache,
         echarts: window.echarts,
         chartEl, summaryEl, tooltipEl,
         mountTable,
@@ -522,6 +554,10 @@ function drill(intent) {
     if (!intent) return;
     stopAutoRefresh();   // P4: drilling is an investigation gesture, like zoom
     filters.drill(intent.filterKey, intent.filterValue, intent.label, vm.activeId());
+    // U2a: cached strips carry the OLD filters' meaning (and possibly the old
+    // class/event breakdown mode) — they must never be served under the new
+    // ones. In-flight fills land stale and are dropped.
+    stripCache.invalidate();
     const pivot = PIVOT[intent.filterKey];
     if (pivot) setTabView(pivot);
     updateBreadcrumb();
@@ -531,6 +567,7 @@ function drill(intent) {
 function drillUp(index) {
     stopAutoRefresh();   // P4: breadcrumb navigation pauses live too
     const view = filters.drillUp(index);
+    stripCache.invalidate();   // U2a: filters changed — old strips are stale
     if (view) setTabView(view);
     updateBreadcrumb();
     refresh();
@@ -539,6 +576,7 @@ function drillUp(index) {
 function clearFilters() {
     stopAutoRefresh();   // P4: ✕ rewinds the investigation — Live is the way back
     filters.clear();
+    stripCache.invalidate();   // U2a: filters changed — old strips are stale
     setTabView('overview');
     updateBreadcrumb();
     refresh();
@@ -577,6 +615,103 @@ function dotHtml(name) {
     return '<span class="class-dot" style="background:' + color + '"></span>';
 }
 
+// ── Camera-lite orchestration (Track U, U2a) ──────────────────────────────────
+//
+// Two mirror directions, one suppression flag:
+//   app → camera   syncCamera(), called from updateTimeRange() (the chokepoint
+//                  every timeRange mutation already flows through) and from
+//                  start/stopAutoRefresh. Runs under cameraSyncing so the
+//                  camera's onChange never re-enters the gesture pipeline.
+//   camera → app   onCameraChange(): a REAL gesture (zoom/pan from the chart's
+//                  inside-dataZoom, mirrored in views/active.js) pauses live
+//                  exactly like every other investigation gesture (U0
+//                  machinery), mirrors the window into timeRange, and
+//                  debounces the settle-refine (~150 ms after the last event).
+//
+// Settle = re-render the AAS pane from the strip cache under a freshly
+// quantized axis (re-centers the 3x gesture skirt), kick the exact-strip
+// fetch (deduped, non-superseding send), and bring the tab views to the new
+// window. The AAS pane itself NEVER re-enters the poll path here — the server
+// stays out of the gesture loop (INSTRUMENT_ARCHITECTURE §4a/§5).
+
+/* Mirror the app's timeRange + live state into the camera. Follow mode's
+ * right edge is timeRange.to — which anchorLive() just set to the server's
+ * NOW, so "live means NOW" holds structurally (camera.attachFollow /
+ * followTick re-anchor to exactly that edge). */
+function syncCamera() {
+    cameraSyncing = true;
+    try {
+        const sameWin = camera.fromNs === timeRange.from &&
+                        camera.toNs === timeRange.to;
+        if (!sameWin) {
+            const isTick = autoRefreshOn && camera.mode === 'follow' &&
+                timeRange.to > camera.toNs &&
+                (timeRange.to - timeRange.from) === camera.span();
+            // followTick for the pure live slide; setWindow for everything
+            // else (span changes, jumps, restores). setWindow detaches, so
+            // re-attach below whenever live mode is on.
+            if (!isTick || !camera.followTick(timeRange.to)) {
+                camera.setWindow(timeRange.from, timeRange.to);
+            }
+        }
+        if (autoRefreshOn) {
+            if (camera.mode !== 'follow') camera.attachFollow(timeRange.to);
+        } else if (camera.mode !== 'detached') {
+            camera.detach();
+        }
+    } finally {
+        cameraSyncing = false;
+    }
+}
+
+/* Camera events that were NOT app-initiated are chart gestures: pause live,
+ * mirror into timeRange, settle-refine. One event per gesture step (the
+ * camera fires zoom/pan/set with the detach folded in). */
+function onCameraChange(ev) {
+    if (cameraSyncing || !uiInitialized) return;
+    if (ev.cause !== 'zoom' && ev.cause !== 'pan' && ev.cause !== 'set') return;
+    // Mirror BEFORE stopAutoRefresh: its syncCamera must see the new window
+    // (and then no-op) — never clobber the gesture with the old timeRange.
+    timeRange.set(camera.fromNs, camera.toNs);
+    stopAutoRefresh();   // P4/U0: a camera gesture is an investigation
+    updateTimeRange();
+    scheduleCameraSettle();
+}
+
+function scheduleCameraSettle() {
+    if (cameraSettleTimer) clearTimeout(cameraSettleTimer);
+    cameraSettleTimer = setTimeout(() => {
+        cameraSettleTimer = null;
+        settleCamera();
+    }, CAMERA_SETTLE_MS);
+}
+
+function settleCamera() {
+    // Instant repaint from whatever the cache holds (stale/coarse ok) under
+    // the re-quantized strip axis; renderFromCamera also ensure()s the exact
+    // strip, which swaps in via onStripData when it lands.
+    if (activeView && activeView.renderFromCamera) {
+        activeView.renderFromCamera(activeCtx());
+    }
+    // The tab views are dashboard panes: they follow the window like any
+    // other window change (single-flight channels supersede as usual).
+    if (vm) vm.refresh();
+}
+
+/* Strip arrival: repaint the AAS pane from the cache while detached (the
+ * contract says re-run get() on ANY arrival — an older overlapping strip can
+ * still refine an empty view). In follow mode the 5 s poll-and-replace owns
+ * the paint; arrivals only warm the cache for the first gesture. */
+function onStripData() {
+    if (!uiInitialized || camera.mode !== 'detached') return;
+    if (activeView && activeView.renderFromCamera) {
+        activeView.renderFromCamera(activeCtx());
+    }
+}
+
+camera.onChange(onCameraChange);
+stripCache.onData(onStripData);
+
 // ── Time window / zoom ────────────────────────────────────────────────────────
 
 function setStatus(text, cls) {
@@ -602,6 +737,9 @@ function renderVersionSkew() {
 }
 
 function updateTimeRange() {
+    // U2a: every timeRange mutation flows through here — the one place the
+    // camera mirror needs to hook (suppressed, so no gesture pipeline).
+    syncCamera();
     const el = document.getElementById('time-range');
     const from = fmtTime(timeRange.from);
     const to = fmtTime(timeRange.to);
@@ -613,12 +751,22 @@ function updateTimeRange() {
 async function zoomTo(from, to) {
     timeRange.zoomTo(from, to);
     updateTimeRange();
+    // U2a instant feedback: paint whatever the strip cache holds for the new
+    // window RIGHT NOW (stale/coarse ok — Maps-style), before the poll below
+    // swaps in the exact window data. No-op on a cache miss.
+    if (activeView && activeView.renderFromCamera) {
+        activeView.renderFromCamera(activeCtx());
+    }
     await refresh();
 }
 
 async function zoomOut() {
     timeRange.zoomOut();
     updateTimeRange();
+    // Same instant stale-paint as zoomTo (dblclick zoom-out, header button).
+    if (activeView && activeView.renderFromCamera) {
+        activeView.renderFromCamera(activeCtx());
+    }
     await refresh();
 }
 
@@ -682,6 +830,14 @@ function initTimePicker() {
             if (secs === 0) {
                 await zoomTo(server.fromNs, server.toNs);
             } else {
+                // U2a review F3: same freshness rule as the Live button —
+                // server.nowNs can be minutes stale after a paused
+                // investigation, and attachFollow is only as fresh as its
+                // caller. Fetch info first; fall back to last-known NOW.
+                try {
+                    const info = await transport.send('info');
+                    server.update(info);
+                } catch (e) { /* anchor to last known NOW */ }
                 timeRange.anchorLive(secs);
                 updateTimeRange();
                 await refresh();
@@ -711,6 +867,7 @@ function startAutoRefresh(rangeSecs) {
     stopAutoRefresh();
     autoRefreshOn = true;
     setLiveButton(true);
+    syncCamera();   // U2a: live on => camera follows (right edge = NOW)
     const myId = ++autoRefreshId;
     (async function loop() {
         await new Promise(r => setTimeout(r, 5000));
@@ -743,6 +900,9 @@ function stopAutoRefresh() {
     autoRefreshOn = false;
     autoRefreshId++;   // invalidate any running loop
     setLiveButton(false);
+    // U2a: live off => the camera detaches (a later tick can never re-anchor
+    // the view; camera.followTick is a strict no-op while detached).
+    if (uiInitialized) syncCamera();
 }
 
 function setLiveButton(on) {
@@ -755,18 +915,29 @@ function setLiveButton(on) {
 function initLiveMode() {
     const btn = document.getElementById('live-btn');
     if (!btn) return;
-    btn.addEventListener('click', () => {
+    btn.addEventListener('click', async () => {
         if (autoRefreshOn) {
             stopAutoRefresh();
-        } else {
-            // P4: resume live at the CURRENT span (timeRange.liveRangeSecs is
-            // the one source of truth), re-anchored to NOW — never a surprise
-            // jump to a different window size.
-            timeRange.anchorLive(timeRange.liveRangeSecs);
-            updateTimeRange();
-            startAutoRefresh(timeRange.liveRangeSecs);
-            refresh();
+            return;
         }
+        // P4: resume live at the CURRENT span (timeRange.liveRangeSecs is
+        // the one source of truth), re-anchored to NOW — never a surprise
+        // jump to a different window size.
+        // U2a: "live means NOW" — fetch a FRESH server clock before the
+        // re-anchor. server.nowNs goes stale while live is paused (ticks
+        // stop), so anchoring to it after a long investigation would show a
+        // minutes-old right edge as "live". On failure fall back to the last
+        // known clock; the degraded machinery owns that visibility.
+        try {
+            const info = await transport.send('info');
+            server.update(info);
+        } catch (e) { /* anchor to last known NOW */ }
+        timeRange.anchorLive(timeRange.liveRangeSecs);
+        // startAutoRefresh BEFORE updateTimeRange so syncCamera sees live
+        // mode and re-attaches the camera (attachFollow to the fresh NOW).
+        startAutoRefresh(timeRange.liveRangeSecs);
+        updateTimeRange();
+        refresh();
     });
 }
 
@@ -890,6 +1061,9 @@ function boot() {
     // Debug/test handle: the UI no longer has a single mutable global `state`,
     // so expose the explicit modules for Playwright assertions (read-only use).
     window.__pgwt = { server, timeRange, filters, transport,
+        // U2a: read-only camera + strip-cache handles for Playwright
+        // assertions and the gate agent's gesture-to-paint instrumentation.
+        camera, stripCache,
         get activeTab() { return vm ? vm.activeId() : null; },
         // B5: read-only accessors for Playwright assertions on the daemon state.
         daemon,

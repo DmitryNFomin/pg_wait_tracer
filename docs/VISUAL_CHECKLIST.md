@@ -162,18 +162,20 @@ describing shading that is no longer on screen (P2).
 
 ---
 
-## First catch: stacked AAS layers are not painted at all (found building U1)
+## First catch: stacked AAS layers were not painted at all — FIXED by U2a
 
-A worked example of the vocabulary doing its job. Every `aas` gallery cell
-shows it, most plainly `gallery-aas-dense` and `gallery-aas-dense-events`:
-**only the first series' area renders; every stacked layer above it is
-invisible.** The committed production baseline
-`tests/web_snapshots/aas_chart_overview.png` pins the same defect — a single
-green CPU sawtooth peaking at 2.4 while the mock's `max_aas` is 4.5 with IO /
-LWLock / Timeout / Extension all non-zero. Named properly: an **ALIGNMENT**
-violation (marks not where the data says — the layers are missing), with a
-**SEMANTICS** consequence (the chart reads "CPU-only load" during a mixed
-storm).
+**Status: FIXED (Track U, U2a camera wiring — `type:'time'` axis).** Kept as
+the worked example of the vocabulary doing its job.
+
+As found building U1, every `aas` gallery cell showed it, most plainly
+`gallery-aas-dense` and `gallery-aas-dense-events`: **only the first series'
+area rendered; every stacked layer above it was invisible.** The then-current
+production baseline `tests/web_snapshots/aas_chart_overview.png` pinned the
+same defect — a single green CPU sawtooth peaking at 2.4 while the mock's
+`max_aas` is 4.5 with IO / LWLock / Timeout / Extension all non-zero. Named
+properly: an **ALIGNMENT** violation (marks not where the data says — the
+layers were missing), with a **SEMANTICS** consequence (the chart read
+"CPU-only load" during a mixed storm).
 
 Root cause (SSR bisect + real-Chromium canvas verification against the
 vendored 5.5.1 bundle, 2026-07-31): ECharts' stacked-area rendering drops
@@ -181,11 +183,18 @@ every layer above `series[0]` whenever stacked 2D data rides a `type:'value'`
 x-axis — at ANY x magnitude (reproduced at t0=0, t0=1000, and full ns/ms/s
 epochs alike; the layer-2 polygon computes at astronomically wrong pixel
 coordinates and is discarded). Only a `type:'time'` x-axis is demonstrated
-sane, even with raw ns values. Consequence for the U2 chassis item "ms time
-coordinates at the builder boundary": neither ms conversion NOR
-window-relative offsets fix this — the AAS time axis MUST become
-`type:'time'` (binding constraint for the U2a camera wiring). Owned by the
-U2a/chassis work, not by the gallery.
+sane, even with raw ns values. Neither ms conversion NOR window-relative
+offsets fix it — the AAS time axis had to become `type:'time'`.
+
+**The fix (U2a):** `lib/builders/aas.js` now emits `xAxis.type:'time'` with
+an explicitly pinned `[min,max]` (ns→ms exactly once at the option boundary)
+and TZ-stable UTC label/tooltip formatters. Every `aas` gallery cell and
+`aas_chart_overview.png` / `fidelity_sampled_shading.png` now pin the
+CORRECT multi-layer render — the full stacked set with UTC time-axis labels
+(baselines regenerated 2026-07-31, same PR as the axis fix; see
+`tests/web_snapshots/README.md`). The regression is also pinned dataside by
+the `type:'time'` + pinned-window tests in `tests/web_unit/aas.test.mjs`, so
+a reintroduction fails in `node --test` before any pixel diff runs.
 
 ---
 
