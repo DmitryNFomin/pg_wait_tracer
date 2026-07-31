@@ -1045,9 +1045,14 @@ def run_stale_seed_capture(pm_pid, extra_env):
             "--view", "time_model"]
     env = {**os.environ, "PGWT_TEST_STALE_SEED": "1",
            "PGWT_TEST_NO_SCHED_ONCPU": "1", **extra_env}
+    win_from = time.time_ns()
     tracer = subprocess.Popen(argv, stdout=subprocess.PIPE,
                               stderr=subprocess.PIPE, env=env)
+    hog_pid = None
+    hog_cpu_ms = 0.0
     try:
+        time.sleep(3.0)                 # BPF load + scan seeds the backend
+        hog_pid = find_active_do_backend()
         stdout, stderr = tracer.communicate(timeout=50)
     except subprocess.TimeoutExpired:
         tracer.kill()
@@ -1059,9 +1064,26 @@ def run_stale_seed_capture(pm_pid, extra_env):
             pass
         hog.terminate()
         cleanup_stale_backends()
+    # Pid-scoped trace CPU for THE HOG (the phase_pure_cpu_straddle integral
+    # pattern): busy CI runners inflate the GLOBAL live CPU* through OTHER
+    # firing backends — under the sched-inert hook, any backend's we==0 gap
+    # between fires reads as wall-as-CPU (measured on CI: global 31176ms
+    # positive / 13074ms negative while the box read 7990/24ms) — so the
+    # discriminator must isolate the hog's own contribution via the trace.
+    if hog_pid:
+        win_to = time.time_ns() + 3_000_000_000   # include the terminal flush
+        aresp = server_query(trace_dir, "aas",
+                             extra={"from": win_from, "to": win_to,
+                                    "buckets": 12,
+                                    "filters": {"pid": hog_pid}})
+        abuckets = aresp.get("buckets", [])
+        cpu_mean = (sum(b.get("cpu", 0.0) for b in abuckets) / len(abuckets)
+                    if abuckets else 0.0)
+        hog_cpu_ms = cpu_mean * (win_to - win_from) / 1e9 * 1000.0
     subprocess.run(["rm", "-rf", trace_dir])
     return (STRIP_ANSI.sub('', stdout.decode('utf-8', errors='replace')),
-            stderr.decode('utf-8', errors='replace'))
+            stderr.decode('utf-8', errors='replace'),
+            hog_pid, hog_cpu_ms)
 
 
 def phase_stale_seed_sweep(pm_pid):
@@ -1091,16 +1113,21 @@ def phase_stale_seed_sweep(pm_pid):
 
     NEGATIVE (mirrors phase_straddle_recovery's documented negative): with
     PGWT_TEST_NO_STALE_SWEEP=1 the same poisoned sched-inert run keeps the
-    recovery (PR #52) fully active yet reads only the ~tens-of-ms background
-    floor — proving (a) this test detects the bug class and (b) the sweep,
-    not the recovery, is the repairing agent. Same 2000ms discriminator gate
-    as phase_straddle_livecpu_deterministic: ~4x below the measured ~8-10s
-    signal, ~30x above the floor. Full mode only (needs watchpoints + cpu_accounting)."""
+    recovery (PR #52) fully active yet THE HOG contributes nothing — proving
+    (a) this test detects the bug class and (b) the sweep, not the recovery,
+    is the repairing agent. The negative's discriminator is PID-SCOPED (the
+    hog's own aas cpu integral from the trace): the global time_model CPU*
+    is not usable on busy hosts — under the sched-inert hook every OTHER
+    firing backend's we==0 gap reads as wall-as-CPU, and 2-vCPU CI runners
+    inflated the global figure to 13074ms (positive: 31176ms) while the quiet
+    EL8 box read 24ms (7990ms) for the identical build. The hog-scoped gates
+    (>2000ms positive, <500ms negative vs the measured ~8-13s signal) hold on
+    both. Full mode only (needs watchpoints + cpu_accounting)."""
     print("--- Phase: stale-seed sweep DETERMINISTIC (seed→arm race, "
           "poisoned attach seed) ---")
 
     # Positive: sweep enabled — it must repair the poisoned seed.
-    out, err = run_stale_seed_capture(pm_pid, {})
+    out, err, hog_pid, hog_cpu_ms = run_stale_seed_capture(pm_pid, {})
     check("PGWT_TEST_STALE_SEED" in err,
           "attach seed poisoned with a fake stale wait (test hook active)")
     check("PGWT_TEST_NO_SCHED_ONCPU" in err,
@@ -1112,11 +1139,20 @@ def phase_stale_seed_sweep(pm_pid):
     check(live_cpu > 2000.0,
           f"stale-seeded pure-CPU straddler shows MULTI-SECOND live CPU* via "
           f"the sweep reseed: CPU* = {live_cpu:.0f}ms")
+    check(hog_pid is not None and hog_cpu_ms > 2000.0,
+          f"positive: THE HOG's own trace CPU is multi-second (pid-scoped "
+          f"aas integral, ambient-noise-immune): {hog_cpu_ms:.0f}ms "
+          f"(pid={hog_pid})")
 
     # Negative: sweep disabled (ONLY the sweep — recovery stays active) — the
-    # poisoned entry must stay frozen and live CPU* must stay at the floor,
-    # proving the test detects the bug class.
-    out, err = run_stale_seed_capture(pm_pid, {"PGWT_TEST_NO_STALE_SWEEP": "1"})
+    # poisoned entry must stay frozen. DISCRIMINATOR IS PID-SCOPED: on busy
+    # CI runners other firing backends inflate the GLOBAL CPU* to multi-second
+    # values under the sched-inert hook (wall-as-CPU in their we==0 gaps; CI
+    # measured 13074ms global while the hog contributed nothing), so the
+    # global time_model figure cannot discriminate — the hog's own pid-scoped
+    # trace CPU can, deterministically on any host.
+    out, err, hog_pid, hog_cpu_ms = run_stale_seed_capture(
+        pm_pid, {"PGWT_TEST_NO_STALE_SWEEP": "1"})
     check("PGWT_TEST_STALE_SEED" in err,
           "negative: attach seed poisoned (test hook active)")
     check("PGWT_TEST_NO_SCHED_ONCPU" in err,
@@ -1124,10 +1160,11 @@ def phase_stale_seed_sweep(pm_pid):
           "active)")
     check("reseeded stale state" not in err,
           "negative: sweep disabled — no repair line")
-    live_cpu = parse_time_model(out).get('CPU*', 0.0)
-    check(live_cpu < 2000.0,
-          f"negative: without the sweep the poisoned straddler stays at the "
-          f"background floor: CPU* = {live_cpu:.0f}ms (the exact CI failure)")
+    check(hog_pid is not None and hog_cpu_ms < 500.0,
+          f"negative: without the sweep THE HOG's trace CPU stays at the "
+          f"floor (pid-scoped): {hog_cpu_ms:.0f}ms (pid={hog_pid}; the frozen "
+          f"entry attributes its whole run to the dead wait — the exact CI "
+          f"failure, isolated from ambient-backend CPU)")
 
 
 def phase_sampled_aas_truth(pm_pid):
