@@ -51,7 +51,10 @@ each test below.
 Usage: python3 tests/test_web_ui_chaos.py
   (No root, no PG, no SSH needed — uses mock_server.py with PGWT_CHAOS=1)
 """
+import collections
 import os
+import re
+import socket
 import sys
 import subprocess
 import time
@@ -70,8 +73,17 @@ except ImportError:
 
 # Reuse a distinct port so this can run alongside test_web_ui.py.
 MOCK_PORT = int(os.environ.get("PGWT_TEST_PORT", "18811"))
-MOCK_URL = f"http://127.0.0.1:{MOCK_PORT}"
 MOCK_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mock_server.py")
+
+
+def app_url(http_port):
+    """Page URL pointing the client's WebSocket at the mock's WS port (+1).
+    The client honors `?ws=<full ws url>` verbatim (app.js connect(), U0) —
+    no WebSocket monkey-patch needed."""
+    return f"http://127.0.0.1:{http_port}/?ws=ws://127.0.0.1:{http_port + 1}/ws"
+
+
+MOCK_URL = app_url(MOCK_PORT)
 
 # ── Result accounting ─────────────────────────────────────────────────────────
 # Gating tests fail the suite. XFAIL tests (the B3 targets) report their
@@ -81,6 +93,37 @@ gating_checks = []   # (ok, msg)
 xfail_results = {}    # test_name -> {"failed": bool, "msgs": [...]}
 
 _current_xfail = None  # set while an xfail test runs
+
+# ── Failure artifacts (Track U U0 suite hygiene) ──────────────────────────────
+# On any GATING check() failure: a full-page screenshot + the recent console
+# tail land here (CI uploads the directory as the `web-ui-failures` artifact).
+# Shared with test_web_ui.py — file names are prefixed per suite.
+FAIL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "results", "web_ui_failures")
+
+_capture = {"page": None, "guard": None, "n": 0}
+
+
+def set_failure_capture(page, guard):
+    """Point check()'s failure capture at the currently driven page."""
+    _capture["page"], _capture["guard"] = page, guard
+
+
+def _capture_failure(msg):
+    page, guard = _capture["page"], _capture["guard"]
+    if page is None:
+        return
+    _capture["n"] += 1
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", msg)[:60]
+    base = os.path.join(FAIL_DIR, f"chaos_{_capture['n']:02d}_{safe}")
+    try:
+        os.makedirs(FAIL_DIR, exist_ok=True)
+        page.screenshot(path=base + ".png", full_page=True)
+        with open(base + "-console.txt", "w") as f:
+            f.write("\n".join(guard.tail if guard else ()) + "\n")
+        print(f"    (failure artifacts: {base}.png / -console.txt)")
+    except Exception as e:
+        print(f"    (failure-artifact capture failed: {e})")
 
 
 def check(cond, msg):
@@ -97,6 +140,8 @@ def check(cond, msg):
     else:
         gating_checks.append((cond, msg))
         print(f"  {'PASS' if cond else 'FAIL'}: {msg}")
+        if not cond:
+            _capture_failure(msg)
 
 
 # ── Console error guard (Phase B1, reused) ────────────────────────────────────
@@ -113,14 +158,18 @@ window.addEventListener('unhandledrejection', e => {
 class ConsoleErrorGuard:
     def __init__(self, page):
         self.errors = []
+        # Rolling tail of ALL console traffic, for check()'s failure artifacts.
+        self.tail = collections.deque(maxlen=50)
         page.on("console", self._on_console)
         page.on("pageerror", self._on_pageerror)
 
     def _on_console(self, msg):
+        self.tail.append(f"[{msg.type}] {msg.text}")
         if msg.type == "error":
             self.errors.append(f"console: {msg.text}")
 
     def _on_pageerror(self, err):
+        self.tail.append(f"[pageerror] {err}")
         self.errors.append(f"pageerror: {err}")
 
     def drain(self):
@@ -129,16 +178,50 @@ class ConsoleErrorGuard:
         return errors
 
 
+def _is_pgwt_error(e):
+    """U0/P1: console.error('[pgwt] ...') is the app REPORTING a failure —
+    the expected error surface, never a crash. Recorded, not fatal. A
+    pageerror can never qualify."""
+    return e.startswith("console: [pgwt]")
+
+
 def assert_no_console_errors(page, guard, name, allow=()):
     page.wait_for_timeout(1200)  # chaos delays are long; let late errors land
     errors = guard.drain()
-    unexpected = [e for e in errors if not any(p in e for p in allow)]
+    for e in errors:
+        if _is_pgwt_error(e):
+            print(f"  note: [pgwt] error surface: {e[:100]}")
+    unexpected = [e for e in errors
+                  if not _is_pgwt_error(e) and not any(p in e for p in allow)]
     check(len(unexpected) == 0,
           f"[{name}] no console errors "
           f"(got {len(unexpected)}: {unexpected[:3]})")
 
 
 # ── Mock server (chaos mode) ──────────────────────────────────────────────────
+
+def _wait_ports(proc, ports, timeout=10.0):
+    """Poll until every port accepts a TCP connection or the process dies.
+    Replaces the old blind 1.5 s startup sleep (both slow and racy)."""
+    deadline = time.time() + timeout
+    for p in ports:
+        while True:
+            if proc.poll() is not None:
+                return False
+            try:
+                with socket.create_connection(("127.0.0.1", p), timeout=0.25):
+                    break
+            except OSError:
+                if time.time() >= deadline:
+                    return False
+                time.sleep(0.05)
+    # A stale FOREIGN listener on one of the ports can answer the probe while
+    # OUR process dies on the bind conflict moments later — give it a beat and
+    # confirm it survived, so the conflict is reported here, not as a baffling
+    # connection-refused mid-suite.
+    time.sleep(0.2)
+    return proc.poll() is None
+
 
 def start_mock_server():
     env = dict(os.environ)
@@ -147,8 +230,10 @@ def start_mock_server():
         [sys.executable, MOCK_SCRIPT, "--port", str(MOCK_PORT), "--chaos"],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
     )
-    time.sleep(1.5)
-    if proc.poll() is not None:
+    # Wait until both listeners (HTTP :port, WS :port+1) accept connections.
+    if not _wait_ports(proc, (MOCK_PORT, MOCK_PORT + 1)):
+        if proc.poll() is None:
+            proc.kill()
         out, err = proc.communicate()
         print(f"mock_server failed to start:\n{out.decode()}\n{err.decode()}")
         sys.exit(1)
@@ -571,24 +656,13 @@ def main():
             context = browser.new_context(
                 viewport={"width": 1280, "height": 900})
 
-            ws_port = MOCK_PORT + 1
-            context.add_init_script(f"""(function() {{
-                const _WS = window.WebSocket;
-                window.WebSocket = function(url, protocols) {{
-                    url = url.replace(':{MOCK_PORT}/', ':{ws_port}/');
-                    if (protocols !== undefined) return new _WS(url, protocols);
-                    return new _WS(url);
-                }};
-                window.WebSocket.prototype = _WS.prototype;
-                window.WebSocket.CONNECTING = _WS.CONNECTING;
-                window.WebSocket.OPEN = _WS.OPEN;
-                window.WebSocket.CLOSING = _WS.CLOSING;
-                window.WebSocket.CLOSED = _WS.CLOSED;
-            }})();""")
+            # MOCK_URL's ?ws= override (see app_url) points the client's
+            # WebSocket at the mock's WS port — no monkey-patch.
             context.add_init_script(UNHANDLED_REJECTION_HOOK)
 
             page = context.new_page()
             guard = ConsoleErrorGuard(page)
+            set_failure_capture(page, guard)
 
             # Gating chaos tests (none yet — kept for promoted xpasses).
             for fn in GATING_TESTS:

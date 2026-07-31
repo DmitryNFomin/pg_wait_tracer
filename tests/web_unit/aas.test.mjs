@@ -93,6 +93,42 @@ test('aas values rounded to 4 decimals', () => {
     assert.equal(cpu.data[0][1], 0.1235);
 });
 
+/* U0 (review P2): the x-axis ends at the LAST BUCKET START, not win.to — a
+ * mark placed at win.to sat past the axis max and ECharts DROPPED it, so the
+ * escalation edge never rendered in any state. Invariant: every emitted mark
+ * x coordinate lies within the axis range, and the escalation edge is pinned
+ * at the axis max (clamped from the off-axis win.to). */
+test('escalation + fidelity marks: every mark x within the axis range', () => {
+    const data = { bucket_ns: 1, max_aas: 1, fidelity: 'sampled',
+        buckets: classBuckets(5) };                    // bucket starts 1000..1004
+    const { option } = buildAasOption(data, {
+        numCpus: 2,
+        win: { from: 990, to: 1100 },                  // win.to past the axis max
+        escalationStatus: { tier: 'escalated', escalation_reason: 'manual',
+            escalation_seconds_remaining: 30, observed_start_ns: 1002 },
+    });
+    const s0 = option.series[0];
+    const xs = [];
+    s0.markLine.data.forEach(d => { if (d.xAxis != null) xs.push(d.xAxis); });
+    s0.markArea.data.forEach(pair => pair.forEach(pt => {
+        if (pt && pt.xAxis != null) xs.push(pt.xAxis);
+    }));
+    assert.ok(xs.length >= 5, 'escalation line + band + sampled band emitted');
+    for (const x of xs) {
+        assert.ok(x >= option.xAxis.min && x <= option.xAxis.max,
+            'mark x ' + x + ' within [' + option.xAxis.min + ', ' + option.xAxis.max + ']');
+    }
+    // The escalation edge paints AT the axis max (the last bucket start).
+    const escLine = s0.markLine.data.find(d => d.xAxis != null);
+    assert.equal(escLine.xAxis, option.xAxis.max);
+});
+
+test('option root disables animation (U0: no replayed draw-in on refresh)', () => {
+    const { option } = buildAasOption(
+        { buckets: classBuckets(1), max_aas: 1, bucket_ns: 1 }, { numCpus: 1 });
+    assert.equal(option.animation, false);
+});
+
 test('tooltip totals visible series and orders top-of-stack first', () => {
     const params = [
         { seriesName: 'CPU', value: [1000, 1.0], color: '#1' },

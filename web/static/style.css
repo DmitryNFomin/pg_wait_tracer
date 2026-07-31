@@ -188,6 +188,7 @@ h1 { font-size: 18px; font-weight: 600; color: #fff; }
 #aas-chart-container {
   min-height: 300px;
   background: #1e1e3a;
+  position: relative;   /* anchors the overlaid .pane-error card (P1) */
 }
 
 /* Chart resize handle */
@@ -462,6 +463,53 @@ tr:hover td.sticky-col-1 { background: #2a2a5a; }
   text-align: center;
   padding: 40px;
   color: #666;
+}
+
+/* Per-pane error card (P1): a failed pane must LOOK failed — view build/mount
+   throws and server-refused commands (e.g. window_too_large) paint this card.
+   Low-key, mirrors the unavailable-panel look. */
+.pane-error {
+  text-align: center;
+  padding: 20px 24px;
+  margin: 16px auto;
+  max-width: 560px;
+  color: #aaa;
+  background: #1e1e3a;
+  border: 1px solid #5c4a1e;
+  border-radius: 6px;
+}
+.pane-error-title { font-size: 14px; color: #ffc107; margin-bottom: 8px; }
+.pane-error-detail {
+  font-size: 11px;
+  color: #888;
+  font-family: monospace;
+  margin-bottom: 8px;
+}
+.pane-error-hint { font-size: 12px; line-height: 1.5; color: #999; margin-bottom: 12px; }
+.pane-error-retry {
+  background: none;
+  border: 1px solid #4fc3f7;
+  color: #4fc3f7;
+  font-size: 12px;
+  padding: 4px 14px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+.pane-error-retry:hover { background: #15324a; }
+.pane-error-retry:disabled { opacity: 0.4; cursor: default; }
+/* Inside the fixed-height AAS chart pane the card overlays the chart canvas
+   instead of displacing it (the chart instance survives for retry). */
+#aas-chart-container > .pane-error {
+  position: absolute;
+  left: 50%;
+  top: 24px;
+  transform: translateX(-50%);
+  margin: 0;
+  width: max-content;
+  max-width: 80%;
+  z-index: 5;
+  background: rgba(30, 30, 58, 0.95);
 }
 
 /* ── Fidelity-aware UI (Phase B5) ──────────────────────────────────────────── */

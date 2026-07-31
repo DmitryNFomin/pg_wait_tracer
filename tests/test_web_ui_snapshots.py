@@ -42,7 +42,9 @@ Baselines live in tests/web_snapshots/<name>.png.
 
 No root, no PG, no SSH — uses mock_server.py, exactly like test_web_ui.py.
 """
+import collections
 import os
+import socket
 import sys
 import subprocess
 import time
@@ -76,10 +78,19 @@ except ImportError:
 # A separate port from test_web_ui.py so the two suites can run back to back
 # without colliding (test_web_ui uses 18799/+1 and B5 on +10).
 MOCK_PORT = int(os.environ.get("PGWT_SNAP_PORT", "18820"))
-MOCK_URL = f"http://127.0.0.1:{MOCK_PORT}"
+
+
+def app_url(http_port):
+    """Page URL pointing the client's WebSocket at the mock's WS port (+1).
+    The client honors `?ws=<full ws url>` verbatim (app.js connect(), U0) —
+    no WebSocket monkey-patch needed."""
+    return f"http://127.0.0.1:{http_port}/?ws=ws://127.0.0.1:{http_port + 1}/ws"
+
+
+MOCK_URL = app_url(MOCK_PORT)
 # Sampled+daemon mock for the B5 fidelity-state snapshots.
 SAMPLED_PORT = MOCK_PORT + 10
-SAMPLED_URL = f"http://127.0.0.1:{SAMPLED_PORT}"
+SAMPLED_URL = app_url(SAMPLED_PORT)
 
 MOCK_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mock_server.py")
 SNAP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web_snapshots")
@@ -109,16 +120,42 @@ VOLATILE_SELECTORS = ["#status", "#time-range"]
 
 # ── Mock server lifecycle (mirrors test_web_ui.py) ─────────────────────────────
 
+def _wait_ports(proc, ports, timeout=10.0):
+    """Poll until every port accepts a TCP connection or the process dies.
+    Replaces the old blind 1.5 s startup sleep (both slow and racy)."""
+    deadline = time.time() + timeout
+    for p in ports:
+        while True:
+            if proc.poll() is not None:
+                return False
+            try:
+                with socket.create_connection(("127.0.0.1", p), timeout=0.25):
+                    break
+            except OSError:
+                if time.time() >= deadline:
+                    return False
+                time.sleep(0.05)
+    # A stale FOREIGN listener on one of the ports can answer the probe while
+    # OUR process dies on the bind conflict moments later — give it a beat and
+    # confirm it survived, so the conflict is reported here, not as a baffling
+    # connection-refused mid-suite.
+    time.sleep(0.2)
+    return proc.poll() is None
+
+
 def start_mock_server(extra_env=None, port=None):
     env = dict(os.environ)
     if extra_env:
         env.update(extra_env)
+    http_port = port or MOCK_PORT
     proc = subprocess.Popen(
-        [sys.executable, MOCK_SCRIPT, "--port", str(port or MOCK_PORT)],
+        [sys.executable, MOCK_SCRIPT, "--port", str(http_port)],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
     )
-    time.sleep(1.5)
-    if proc.poll() is not None:
+    # Wait until both listeners (HTTP :port, WS :port+1) accept connections.
+    if not _wait_ports(proc, (http_port, http_port + 1)):
+        if proc.poll() is None:
+            proc.kill()
         out, err = proc.communicate()
         print(f"mock_server failed to start:\n{out.decode()}\n{err.decode()}")
         sys.exit(1)
@@ -134,23 +171,34 @@ def stop_mock_server(proc):
         proc.wait()
 
 
-def ws_redirect_script(http_port):
-    """Redirect app.js's WebSocket from the HTTP port to the WS port (port+1).
-    Identical technique to test_web_ui.py."""
-    ws_port = http_port + 1
-    return f"""(function() {{
-        const _WS = window.WebSocket;
-        window.WebSocket = function(url, protocols) {{
-            url = url.replace(':{http_port}/', ':{ws_port}/');
-            if (protocols !== undefined) return new _WS(url, protocols);
-            return new _WS(url);
-        }};
-        window.WebSocket.prototype = _WS.prototype;
-        window.WebSocket.CONNECTING = _WS.CONNECTING;
-        window.WebSocket.OPEN = _WS.OPEN;
-        window.WebSocket.CLOSING = _WS.CLOSING;
-        window.WebSocket.CLOSED = _WS.CLOSED;
-    }})();"""
+# ── Failure artifacts (Track U U0 suite hygiene) ──────────────────────────────
+# On any snapshot failure: a full-page screenshot + the recent console tail
+# land here (CI uploads the directory as the `snapshots-failures` artifact) —
+# complementing the -actual/-diff PNGs, which only exist once a capture
+# compared. Shared with the other web suites; names are prefixed per suite.
+FAIL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "results", "web_ui_failures")
+
+# Rolling tail of all console traffic (the two pages run sequentially, so one
+# shared buffer is unambiguous).
+_console_tail = collections.deque(maxlen=50)
+
+
+def attach_console_tail(page):
+    page.on("console", lambda m: _console_tail.append(f"[{m.type}] {m.text}"))
+    page.on("pageerror", lambda e: _console_tail.append(f"[pageerror] {e}"))
+
+
+def capture_failure(page, name, detail):
+    try:
+        os.makedirs(FAIL_DIR, exist_ok=True)
+        base = os.path.join(FAIL_DIR, f"snapshots_{name}")
+        page.screenshot(path=base + ".png", full_page=True)
+        with open(base + "-console.txt", "w") as f:
+            f.write(f"{name}: {detail}\n\n" + "\n".join(_console_tail) + "\n")
+        print(f"    (failure artifacts: {base}.png / -console.txt)")
+    except Exception as e:
+        print(f"    (failure-artifact capture failed: {e})")
 
 
 # ── Snapshot core ──────────────────────────────────────────────────────────────
@@ -182,6 +230,7 @@ def snapshot(page, name, selector):
     if el is None:
         results.append((name, False, f"selector not found: {selector}"))
         print(f"  FAIL: {name} (selector {selector} not found)")
+        capture_failure(page, name, f"selector not found: {selector}")
         return
 
     _mask_volatile(page)
@@ -209,6 +258,8 @@ def snapshot(page, name, selector):
     ok, detail = _compare(png, baseline_path, name)
     results.append((name, ok, detail))
     print(f"  {'PASS' if ok else 'FAIL'}: {name} ({detail})")
+    if not ok:
+        capture_failure(page, name, detail)
 
 
 def _compare(actual_png_bytes, baseline_path, name):
@@ -314,6 +365,7 @@ def snap_exact_suite(page):
     else:
         results.append(("session_timeline", False, "no session row to drill"))
         print("  FAIL: session_timeline (no session row)")
+        capture_failure(page, "session_timeline", "no session row to drill")
 
 
 def snap_fidelity_suite(page):
@@ -334,6 +386,7 @@ def snap_fidelity_suite(page):
     else:
         results.append(("fidelity_unavailable_panel", False, "no unavailable panel"))
         print("  FAIL: fidelity_unavailable_panel (panel absent)")
+        capture_failure(page, "fidelity_unavailable_panel", "no unavailable panel")
 
     # Daemon self-metrics panel.
     open_app(page, SAMPLED_URL)
@@ -345,6 +398,7 @@ def snap_fidelity_suite(page):
     else:
         results.append(("fidelity_metrics_panel", False, "metrics button hidden"))
         print("  FAIL: fidelity_metrics_panel (metrics button hidden)")
+        capture_failure(page, "fidelity_metrics_panel", "metrics button hidden")
 
 
 # ── Main ────────────────────────────────────────────────────────────────────
@@ -377,15 +431,17 @@ def main():
                 color_scheme="dark",
             )
 
+            # The page URLs carry the ?ws= override (see app_url) — the pages
+            # reach each mock's WS port without any WebSocket monkey-patch.
             exact_ctx = browser.new_context(**ctx_kw)
-            exact_ctx.add_init_script(ws_redirect_script(MOCK_PORT))
             exact_page = exact_ctx.new_page()
+            attach_console_tail(exact_page)
             snap_exact_suite(exact_page)
             exact_ctx.close()
 
             sampled_ctx = browser.new_context(**ctx_kw)
-            sampled_ctx.add_init_script(ws_redirect_script(SAMPLED_PORT))
             sampled_page = sampled_ctx.new_page()
+            attach_console_tail(sampled_page)
             snap_fidelity_suite(sampled_page)
             sampled_ctx.close()
 

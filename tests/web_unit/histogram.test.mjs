@@ -41,6 +41,10 @@ test('heatmap visualMap min 0 / max = max_count with the 6-stop ramp', () => {
     assert.equal(option.visualMap.inRange.color[5], '#F44336');
 });
 
+test('option root disables animation (U0: no replayed draw-in on refresh)', () => {
+    assert.equal(buildHeatmapOption(heatmap()).option.animation, false);
+});
+
 test('heatmap empty / absent -> hasData false, no option', () => {
     assert.equal(buildHeatmapOption(null).hasData, false);
     assert.equal(buildHeatmapOption({ cells: [] }).hasData, false);

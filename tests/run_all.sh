@@ -223,6 +223,19 @@ else
     done
 fi
 
+# Step 4.5: Web-UI builder unit tests (Node, no browser — Track U U0). The
+# same layer CI's build-and-unit job runs: pure builders and the state/
+# transport/selection modules fail here in milliseconds, no Playwright needed.
+# Locally a missing node is a skip; in CI ($CI set) it is a FAILURE.
+if command -v node >/dev/null 2>&1; then
+    run_test "web_unit (node --test)" node --test "$SCRIPT_DIR"/web_unit/*.test.mjs
+elif [[ -n "${CI:-}" ]]; then
+    run_test "web_unit (node --test)" bash -c \
+        'echo "ERROR: node not installed — required in CI"; exit 1'
+else
+    skip_test "web_unit (node --test)" "node not installed"
+fi
+
 # Step 5: Web UI tests (needs playwright + websockets, no root needed)
 # Locally a missing dependency is a skip; in CI ($CI set) it is a FAILURE —
 # the UI suite silently not running is how regressions slip through.
@@ -244,11 +257,14 @@ fi
 
 # Visual-regression snapshots (Phase B4). Needs playwright + Pillow + numpy AND
 # committed baselines (tests/web_snapshots/*.png). Baselines are environment-
-# specific (generated in CI's chromium) so this gates only where they match —
-# the authoritative run is the dedicated CI `snapshots` job. Here it's a skip
-# when deps or baselines are absent (never a spurious red on a dev box whose
-# fonts differ from CI).
-if python3 -c "import playwright, websockets, PIL, numpy" 2>/dev/null \
+# specific (generated in CI's chromium, see tests/web_snapshots/VERSION), so
+# the authoritative gating run is the dedicated CI `snapshots` job — which
+# invokes the suite directly, not via this script. On a dev box the compare
+# mostly churns font diffs, so it is OPT-IN here via PGWT_RUN_SNAPSHOTS=1
+# (Track U U0); without it this is a skip, never a spurious local red.
+if [[ "${PGWT_RUN_SNAPSHOTS:-}" != "1" ]]; then
+    skip_test "test_web_ui_snapshots" "opt-in: set PGWT_RUN_SNAPSHOTS=1 (CI snapshots job is authoritative)"
+elif python3 -c "import playwright, websockets, PIL, numpy" 2>/dev/null \
    && ls "$SCRIPT_DIR"/web_snapshots/*.png >/dev/null 2>&1; then
     run_test "test_web_ui_snapshots" python3 "$SCRIPT_DIR/test_web_ui_snapshots.py"
 else

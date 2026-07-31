@@ -16,7 +16,10 @@ Starts mock_server.py, launches headless Chromium, and exercises:
 Usage: python3 tests/test_web_ui.py
   (No root, no PG, no SSH needed — uses mock_server.py)
 """
+import collections
 import os
+import re
+import socket
 import sys
 import subprocess
 import time
@@ -31,12 +34,54 @@ except ImportError:
     sys.exit(1)
 
 MOCK_PORT = int(os.environ.get("PGWT_TEST_PORT", "18799"))
-MOCK_URL = f"http://127.0.0.1:{MOCK_PORT}"
 MOCK_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mock_server.py")
+
+
+def app_url(http_port):
+    """Page URL pointing the client's WebSocket at the mock's WS port.
+
+    The mock serves HTTP on `http_port` and WS on `http_port + 1`; the client
+    honors `?ws=<full ws url>` verbatim (app.js connect(), Track U U0), so no
+    WebSocket monkey-patch is needed."""
+    return f"http://127.0.0.1:{http_port}/?ws=ws://127.0.0.1:{http_port + 1}/ws"
+
+
+MOCK_URL = app_url(MOCK_PORT)
 
 tests_run = 0
 tests_passed = 0
 tests_failed = 0
+
+# ── Failure artifacts (Track U U0 suite hygiene) ──────────────────────────────
+# On any check() failure: a full-page screenshot + the recent console tail are
+# written here (CI uploads the directory as the `web-ui-failures` artifact) so
+# a red run is diagnosable post-mortem instead of being a bare FAIL line.
+FAIL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "results", "web_ui_failures")
+
+_capture = {"page": None, "guard": None, "n": 0}
+
+
+def set_failure_capture(page, guard):
+    """Point check()'s failure capture at the currently driven page."""
+    _capture["page"], _capture["guard"] = page, guard
+
+
+def _capture_failure(msg):
+    page, guard = _capture["page"], _capture["guard"]
+    if page is None:
+        return
+    _capture["n"] += 1
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", msg)[:60]
+    base = os.path.join(FAIL_DIR, f"web_ui_{_capture['n']:02d}_{safe}")
+    try:
+        os.makedirs(FAIL_DIR, exist_ok=True)
+        page.screenshot(path=base + ".png", full_page=True)
+        with open(base + "-console.txt", "w") as f:
+            f.write("\n".join(guard.tail if guard else ()) + "\n")
+        print(f"    (failure artifacts: {base}.png / -console.txt)")
+    except Exception as e:
+        print(f"    (failure-artifact capture failed: {e})")
 
 
 def check(cond, msg):
@@ -48,6 +93,7 @@ def check(cond, msg):
     else:
         tests_failed += 1
         print(f"  FAIL: {msg}")
+        _capture_failure(msg)
 
 
 # ── Console error guard (Phase B1) ───────────────────────────────────────────
@@ -55,6 +101,13 @@ def check(cond, msg):
 # rejection fails the test during which it occurred.  Tests that *expect*
 # errors (e.g. the reconnection test kills the server) declare an explicit
 # allowlist of substrings — the check is never weakened globally.
+#
+# U0/P1: the app now reports every previously-swallowed failure itself via
+# console.error('[pgwt] ...'). Those are the EXPECTED error surface, not a
+# crash: the guard records them (and asserts their PRESENCE where a test
+# deliberately provokes a failure, via expect_pgwt) while still failing hard
+# on everything else — pageerrors, unhandled rejections, non-[pgwt] console
+# errors.
 
 # Injected into every page before app code runs: turns unhandled promise
 # rejections into console errors so they are captured uniformly.
@@ -72,14 +125,18 @@ class ConsoleErrorGuard:
 
     def __init__(self, page):
         self.errors = []
+        # Rolling tail of ALL console traffic, for check()'s failure artifacts.
+        self.tail = collections.deque(maxlen=50)
         page.on("console", self._on_console)
         page.on("pageerror", self._on_pageerror)
 
     def _on_console(self, msg):
+        self.tail.append(f"[{msg.type}] {msg.text}")
         if msg.type == "error":
             self.errors.append(f"console: {msg.text}")
 
     def _on_pageerror(self, err):
+        self.tail.append(f"[pageerror] {err}")
         self.errors.append(f"pageerror: {err}")
 
     def drain(self):
@@ -88,14 +145,55 @@ class ConsoleErrorGuard:
         return errors
 
 
-def assert_no_console_errors(page, guard, name, allow=()):
-    """Fail the named test if it produced any non-allowlisted console error."""
+def _is_pgwt_error(e):
+    """The app's own error reporting: console.error starting with '[pgwt]'.
+    A pageerror can never qualify — an uncaught crash is always fatal."""
+    return e.startswith("console: [pgwt]")
+
+
+def assert_no_console_errors(page, guard, name, allow=(), expect_pgwt=False):
+    """Fail the named test if it produced any non-allowlisted console error.
+
+    '[pgwt]'-prefixed console errors never fail the guard (they are the app
+    REPORTING a failure — the P1 contract); they are printed for the record,
+    and with expect_pgwt=True their presence is asserted: a test that provokes
+    a failure must see the app report it."""
     page.wait_for_timeout(250)  # let async errors land
     errors = guard.drain()
-    unexpected = [e for e in errors if not any(p in e for p in allow)]
+    pgwt = [e for e in errors if _is_pgwt_error(e)]
+    for e in pgwt:
+        print(f"  note: [pgwt] error surface: {e[:100]}")
+    unexpected = [e for e in errors
+                  if not _is_pgwt_error(e) and not any(p in e for p in allow)]
     check(len(unexpected) == 0,
           f"[{name}] no console errors "
           f"(got {len(unexpected)}: {unexpected[:3]})")
+    if expect_pgwt:
+        check(len(pgwt) > 0,
+              f"[{name}] provoked failure reported via '[pgwt]' console.error")
+
+
+def _wait_ports(proc, ports, timeout=10.0):
+    """Poll until every port accepts a TCP connection or the process dies.
+    Replaces the old blind 1.5 s startup sleep (both slow and racy)."""
+    deadline = time.time() + timeout
+    for p in ports:
+        while True:
+            if proc.poll() is not None:
+                return False
+            try:
+                with socket.create_connection(("127.0.0.1", p), timeout=0.25):
+                    break
+            except OSError:
+                if time.time() >= deadline:
+                    return False
+                time.sleep(0.05)
+    # A stale FOREIGN listener on one of the ports can answer the probe while
+    # OUR process dies on the bind conflict moments later — give it a beat and
+    # confirm it survived, so the conflict is reported here, not as a baffling
+    # connection-refused mid-suite.
+    time.sleep(0.2)
+    return proc.poll() is None
 
 
 def start_mock_server(extra_env=None, port=None):
@@ -109,13 +207,15 @@ def start_mock_server(extra_env=None, port=None):
     env = dict(os.environ)
     if extra_env:
         env.update(extra_env)
+    http_port = port or MOCK_PORT
     proc = subprocess.Popen(
-        [sys.executable, MOCK_SCRIPT, "--port", str(port or MOCK_PORT)],
+        [sys.executable, MOCK_SCRIPT, "--port", str(http_port)],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
     )
-    # Wait for server to be ready
-    time.sleep(1.5)
-    if proc.poll() is not None:
+    # Wait until both listeners (HTTP :port, WS :port+1) accept connections.
+    if not _wait_ports(proc, (http_port, http_port + 1)):
+        if proc.poll() is None:
+            proc.kill()
         out, err = proc.communicate()
         print(f"mock_server failed to start:\n{out.decode()}\n{err.decode()}")
         sys.exit(1)
@@ -633,10 +733,12 @@ def test_zoom_out(page):
     page.click("#zoom-out-btn")
     page.wait_for_timeout(1000)
 
-    # Time range should change (zoom out doubles the view)
+    # Time range should change (zoom out doubles the view span, so the
+    # readout's From moves back — a real assertion, not `or True` (U0 hygiene:
+    # the old tautology could never fail).
     new_range = page.text_content("#time-range")
-    check(new_range != initial_range or True,
-          f"Zoom out changes time range")
+    check(new_range != initial_range,
+          f"Zoom out changes time range ('{initial_range}' -> '{new_range}')")
 
     # Button should exist and be clickable
     btn = page.query_selector("#zoom-out-btn")
@@ -998,7 +1100,16 @@ def test_exact_query_values(page):
 
 
 def test_timeline_bar_positions(page):
-    """23. Timeline bars use correct start positions (Bug 1 regression)."""
+    """23. Timeline bars: correct start positions (Bug 1) + window clamp (P6).
+
+    U0/P6 changed the bar contract (lib/builders/timeline.js): d[0]/d[1] are
+    the DRAWN interval, clamped to the view window so long waits no longer
+    bleed left across the PID axis labels; the raw duration keeps riding at
+    d[6] and the raw (unclamped) start at d[7] for the tooltip. This test used
+    to pin the unclamped geometry (raw start<end, raw 50 s span on d[0]/d[1]);
+    flipped here to pin the clamped contract instead (the flip-the-pin rule —
+    the old assertions pinned exactly the P6 bleed).
+    """
     print("--- Test 23: Timeline Bar Positions ---")
 
     page.goto(MOCK_URL)
@@ -1010,46 +1121,58 @@ def test_timeline_bar_positions(page):
     page.click("#table-container table tbody tr.clickable")
     page.wait_for_timeout(1500)
 
-    # Extract timeline chart data via ECharts API
-    # The renderTimeline function stores data as [startNs, endNs, pidIdx, ...]
-    # Verify that bars start at 's' and end at 's + d' (not 's + d' for start)
-    bar_data = page.evaluate("""() => {
+    # Extract bars + the view window via the ECharts API. Bar layout:
+    # [drawnStartNs, drawnEndNs, pidIdx, name, classIdx, query, rawDurNs,
+    #  rawStartNs]
+    probe = page.evaluate("""() => {
         const chart = echarts.getInstanceByDom(
             document.getElementById('timeline-chart'));
         if (!chart) return null;
         const opt = chart.getOption();
         if (!opt || !opt.series || !opt.series[0]) return null;
         const data = opt.series[0].data;
-        // Return first 4 bars as [startNs, endNs]
-        return data.slice(0, 4).map(d => [d[0], d[1]]);
+        return {
+            bars: data.slice(0, 4).map(d => [d[0], d[1], d[6], d[7]]),
+            from: window.__pgwt.timeRange.from,
+            to: window.__pgwt.timeRange.to,
+        };
     }""")
 
-    if bar_data:
-        check(len(bar_data) > 0, f"Timeline has {len(bar_data)} bars")
+    if probe and probe.get("bars"):
+        bars = probe["bars"]
+        vfrom, vto = int(probe["from"]), int(probe["to"])
+        check(len(bars) > 0, f"Timeline has {len(bars)} bars")
 
-        # From canned data: first event for pid 1001:
-        #   s = _FROM_NS + 100_000_000_000, d = 50_000_000_000
-        # So start = s, end = s + d
-        # Verify start < end for all bars (basic sanity)
-        all_valid = all(b[0] < b[1] for b in bar_data)
-        check(all_valid, "All bars have start < end")
+        # P6 ALIGNMENT: every DRAWN coordinate stays inside the view window —
+        # no bar bleeds left over the PID labels or right past the axis.
+        inside = all(b[0] >= vfrom and b[1] <= vto for b in bars)
+        check(inside,
+              f"all drawn bar coords clamped to the window "
+              f"(bars={[(b[0], b[1]) for b in bars]}, window=[{vfrom},{vto}])")
 
-        # Bug 1 regression: bars should NOT start at s+d.
-        # The first bar's start should be roughly FROM_NS + 100s (not +150s).
-        # Check that start is closer to FROM+100s than FROM+150s.
-        if len(bar_data) >= 1:
-            start_ns = bar_data[0][0]
-            end_ns = bar_data[0][1]
-            duration = end_ns - start_ns
-            check(duration > 0,
-                  f"First bar duration = {duration/1e9:.1f}s (> 0)")
-            # Verify duration matches canned 50s (±tolerance for ns precision)
-            check(abs(duration - 50_000_000_000) < 1_000_000_000,
-                  f"First bar duration ≈ 50s (got {duration/1e9:.1f}s)")
+        # Raw durations survive the clamp (tooltip truth). Canned first event
+        # for pid 1001: s = _FROM_NS + 100 s, d = 50 s.
+        check(all(b[2] > 0 for b in bars),
+              "all bars keep a positive raw duration (d[6])")
+        check(abs(bars[0][2] - 50_000_000_000) < 1_000_000_000,
+              f"first bar raw duration ≈ 50s (got {bars[0][2]/1e9:.1f}s)")
+
+        # Bug 1 regression, now on the raw start (d[7]): start = s, never s+d.
+        check(bars[0][3] <= bars[0][0],
+              f"raw start <= drawn start (raw={bars[0][3]}, drawn={bars[0][0]})")
+        if bars[0][3] < vfrom:
+            # The canned first wait begins before the live window: its drawn
+            # start must sit exactly on the window edge (the P6 clamp).
+            check(bars[0][0] == vfrom,
+                  f"pre-window wait drawn from the window edge "
+                  f"(drawn={bars[0][0]}, from={vfrom})")
+        else:
+            check(bars[0][0] == bars[0][3],
+                  "in-window wait drawn at its raw start")
     else:
         check(False, "Could not extract timeline chart data")
-        check(False, "(skipped bar position checks)")
-        check(False, "(skipped duration check)")
+        for _ in range(5):
+            check(False, "(skipped bar position/clamp checks)")
 
 
 def test_no_double_refresh(page):
@@ -1224,26 +1347,15 @@ def test_custom_range_utc_and_aas_empty_state(page):
     print("--- Test T6.2: UTC Custom Range + AAS Empty State ---")
 
     # A dedicated UTC+3 context (Europe/Moscow) — the UI-11 repro condition.
+    # (MOCK_URL's ?ws= override reaches the mock's WS port; no monkey-patch.)
     browser = page.context.browser
-    ws_port = MOCK_PORT + 1
     ctx = browser.new_context(viewport={"width": 1280, "height": 900},
                               timezone_id="Europe/Moscow")
-    ctx.add_init_script(f"""(function() {{
-        const _WS = window.WebSocket;
-        window.WebSocket = function(url, protocols) {{
-            url = url.replace(':{MOCK_PORT}/', ':{ws_port}/');
-            if (protocols !== undefined) return new _WS(url, protocols);
-            return new _WS(url);
-        }};
-        window.WebSocket.prototype = _WS.prototype;
-        window.WebSocket.CONNECTING = _WS.CONNECTING;
-        window.WebSocket.OPEN = _WS.OPEN;
-        window.WebSocket.CLOSING = _WS.CLOSING;
-        window.WebSocket.CLOSED = _WS.CLOSED;
-    }})();""")
     ctx.add_init_script(UNHANDLED_REJECTION_HOOK)
     p = ctx.new_page()
     guard = ConsoleErrorGuard(p)
+    prev_capture = (_capture["page"], _capture["guard"])
+    set_failure_capture(p, guard)
     try:
         p.goto(MOCK_URL)
         p.wait_for_selector("#status.connected", timeout=10000)
@@ -1300,11 +1412,9 @@ def test_custom_range_utc_and_aas_empty_state(page):
         check(state.get("hasGraphic"),
               "AAS chart shows an explicit 'No data' placeholder")
 
-        p.wait_for_timeout(250)
-        errors = guard.drain()
-        check(len(errors) == 0,
-              f"[utc/empty-state] no console errors (got {errors[:3]})")
+        assert_no_console_errors(p, guard, "utc/empty-state")
     finally:
+        set_failure_capture(*prev_capture)
         ctx.close()
 
 
@@ -1360,13 +1470,90 @@ def test_reconnect_idempotent_no_leak(page):
     page.wait_for_timeout(500)
 
 
+# ── Track U Phase U0: error visibility (P1) ───────────────────────────────────
+
+def test_command_error_card(page):
+    """U0/P1: a command-level error envelope (transport:false) paints a
+    per-pane error card with a Retry button and logs a '[pgwt]'-prefixed
+    console error — never a silent blank pane. Provoked by rewriting the next
+    top_events request ON THE WIRE to a command the mock answers with a plain
+    error envelope ("unknown command: ..."), so the real client path runs
+    end-to-end. Registered with expect_pgwt: the guard asserts the [pgwt]
+    console.error actually fired."""
+    print("--- Test U0.1: Command Error Card ---")
+
+    page.goto(MOCK_URL)
+    page.wait_for_selector("#status.connected", timeout=10000)
+    page.wait_for_timeout(1000)
+    page.click("#live-btn")   # stop live so the provoked refresh is the only one
+    page.wait_for_timeout(300)
+
+    # One-shot wire rewrite: the next top_events request goes out as an
+    # unknown command; the mock replies {"id": N, "error": "unknown command:
+    # ..."} with no transport flag — exactly a healthy-server refusal.
+    page.evaluate("""() => {
+        const ws = window.__pgwt.transport.ws;
+        const orig = ws.send.bind(ws);
+        ws.send = (data) => {
+            const msg = JSON.parse(data);
+            if (msg.cmd === 'top_events') {
+                msg.cmd = 'top_events_broken';
+                ws.send = orig;   // one-shot: the Retry goes through clean
+            }
+            return orig(JSON.stringify(msg));
+        };
+    }""")
+
+    page.click(".tab[data-tab='events']")
+    page.wait_for_timeout(1000)
+
+    card = page.query_selector("#table-container > .pane-error")
+    check(card is not None, "pane error card painted on a command error")
+    if card:
+        txt = card.text_content() or ""
+        check("unknown command" in txt,
+              f"card carries the server's error text ('{txt.strip()[:80]}')")
+        detail_el = page.query_selector(
+            "#table-container > .pane-error .pane-error-detail")
+        detail = detail_el.text_content() if detail_el else ""
+        check("view: events" in detail and "command: top_events" in detail,
+              f"card names the failing view + command ('{detail[:80]}')")
+        check(page.query_selector("#table-container > .loading") is None,
+              "no eternal 'Loading...' placeholder behind the error card")
+
+        # Retry (the wire rewrite is gone) repaints Events and clears the card.
+        btn = page.query_selector(
+            "#table-container > .pane-error .pane-error-retry")
+        check(btn is not None, "error card offers a Retry button")
+        if btn:
+            btn.click()
+            page.wait_for_timeout(1000)
+            check(page.query_selector("#table-container > .pane-error") is None,
+                  "error card cleared after a successful retry")
+            headers = [th.text_content().strip() for th in
+                       page.query_selector_all("#table-container table thead th")]
+            check("Wait Event" in headers,
+                  f"Events table repainted after retry (headers={headers[:3]})")
+        else:
+            check(False, "(skipped: no Retry button)")
+            check(False, "(skipped retry repaint check)")
+    else:
+        for skipped in ("error text", "view/command detail", "loading removal",
+                        "Retry button", "retry clears card", "retry repaint"):
+            check(False, f"(skipped: no error card — {skipped})")
+
+
+# The guard must SEE the provoked [pgwt] console error (see main()'s loop).
+test_command_error_card.expect_pgwt = True
+
+
 # ── Phase B5: fidelity-aware UI ───────────────────────────────────────────────
 # These run against a SECOND mock launched in sampled fidelity with the daemon
 # control command enabled, so the escalate flow, the sampled shading, the
 # unavailable panels, and the metrics panel can be driven deterministically.
 
 B5_PORT = MOCK_PORT + 10
-B5_URL = f"http://127.0.0.1:{B5_PORT}"
+B5_URL = app_url(B5_PORT)
 
 
 def test_b5_sampled_shading(page):
@@ -1512,29 +1699,16 @@ def main():
             browser = p.chromium.launch(headless=True)
             context = browser.new_context(viewport={"width": 1280, "height": 900})
 
-            # Mock server runs HTTP on MOCK_PORT and WS on MOCK_PORT+1.
-            # app.js connects WS to location.host (= MOCK_PORT).
-            # Monkey-patch WebSocket to redirect to the WS port.
-            ws_port = MOCK_PORT + 1
-            context.add_init_script(f"""(function() {{
-                const _WS = window.WebSocket;
-                window.WebSocket = function(url, protocols) {{
-                    url = url.replace(':{MOCK_PORT}/', ':{ws_port}/');
-                    if (protocols !== undefined) return new _WS(url, protocols);
-                    return new _WS(url);
-                }};
-                window.WebSocket.prototype = _WS.prototype;
-                window.WebSocket.CONNECTING = _WS.CONNECTING;
-                window.WebSocket.OPEN = _WS.OPEN;
-                window.WebSocket.CLOSING = _WS.CLOSING;
-                window.WebSocket.CLOSED = _WS.CLOSED;
-            }})();""")
+            # Mock server runs HTTP on MOCK_PORT and WS on MOCK_PORT+1; the
+            # page URL's `?ws=` override (see app_url) points the client's
+            # WebSocket there — no monkey-patch.
 
             # Capture unhandled promise rejections as console errors
             context.add_init_script(UNHANDLED_REJECTION_HOOK)
 
             page = context.new_page()
             guard = ConsoleErrorGuard(page)
+            set_failure_capture(page, guard)
 
             # Every test is followed by a console-error assertion: any
             # console error / pageerror / unhandled rejection produced
@@ -1573,10 +1747,14 @@ def main():
                 test_degraded_transport,
                 test_custom_range_utc_and_aas_empty_state,
                 test_reconnect_idempotent_no_leak,
+                # Track U Phase U0: error visibility (P1)
+                test_command_error_card,
             ]
             for fn in tests:
                 fn(page)
-                assert_no_console_errors(page, guard, fn.__name__)
+                assert_no_console_errors(
+                    page, guard, fn.__name__,
+                    expect_pgwt=getattr(fn, "expect_pgwt", False))
 
             # ── Phase B5: fidelity-aware UI ───────────────────────────────────
             # A second mock in sampled fidelity with the daemon control command
@@ -1590,24 +1768,12 @@ def main():
                            "PGWT_MOCK_BUDGET_S": "300"},
                 port=B5_PORT)
             try:
-                b5_ws = B5_PORT + 1
+                # (B5_URL's ?ws= override reaches the B5 mock's WS port.)
                 b5_ctx = browser.new_context(viewport={"width": 1280, "height": 900})
-                b5_ctx.add_init_script(f"""(function() {{
-                    const _WS = window.WebSocket;
-                    window.WebSocket = function(url, protocols) {{
-                        url = url.replace(':{B5_PORT}/', ':{b5_ws}/');
-                        if (protocols !== undefined) return new _WS(url, protocols);
-                        return new _WS(url);
-                    }};
-                    window.WebSocket.prototype = _WS.prototype;
-                    window.WebSocket.CONNECTING = _WS.CONNECTING;
-                    window.WebSocket.OPEN = _WS.OPEN;
-                    window.WebSocket.CLOSING = _WS.CLOSING;
-                    window.WebSocket.CLOSED = _WS.CLOSED;
-                }})();""")
                 b5_ctx.add_init_script(UNHANDLED_REJECTION_HOOK)
                 b5_page = b5_ctx.new_page()
                 b5_guard = ConsoleErrorGuard(b5_page)
+                set_failure_capture(b5_page, b5_guard)
                 b5_tests = [
                     test_b5_sampled_shading,
                     test_b5_unavailable_panel,
@@ -1619,6 +1785,7 @@ def main():
                     assert_no_console_errors(b5_page, b5_guard, fn.__name__)
                 b5_ctx.close()
             finally:
+                set_failure_capture(page, guard)
                 stop_mock_server(b5_proc)
 
             # Reconnection test (kills/restarts mock server) — connection

@@ -143,6 +143,12 @@ export function bandsToMarkArea(bands) {
  *   label,           // human label ("Escalated (manual)")
  * }
  *
+ * `win` may carry `axisMax` — the last on-axis x value (the last bucket START,
+ * which is < win.to). The mark coordinates are clamped to it: a markLine placed
+ * past the axis max is dropped entirely by ECharts, so the escalation edge
+ * NEVER rendered (review P2, fixed in U0). Converting the chart to a value
+ * time axis so marks can sit at true timestamps is Phase U2.
+ *
  * The control-socket `status` reports the CURRENTLY-open escalation window:
  * tier="escalated", escalation_seconds_remaining, and escalation_reason. The
  * daemon does not report when the window OPENED, so the client stamps
@@ -168,7 +174,10 @@ export function buildEscalationAnnotation(status, win) {
     const remainingS = +status.escalation_seconds_remaining || 0;
     const startNs = (typeof status.observed_start_ns === 'number')
         ? status.observed_start_ns : null;
-    const to = win.to != null ? win.to : null;
+    // Live edge, clamped onto the axis (win.axisMax = last on-axis x value):
+    // an off-axis markLine is dropped by ECharts, not clipped.
+    let to = win.to != null ? win.to : null;
+    if (to != null && win.axisMax != null && to > win.axisMax) to = win.axisMax;
     // Band start: the observed escalation start, clamped into the window.
     let from = null;
     if (startNs != null) {
