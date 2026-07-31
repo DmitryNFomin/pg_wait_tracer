@@ -2933,7 +2933,7 @@ v3 owns transitions column 7 (`cpu_ns` varint, frozen in `golden/rev3`); an
 with the range reader gate and a `rev4/` golden fixture (the PR's v3/v4 redefinition is
 byte-incompatible both directions).
 
-### Track U — UI: the OEM loop + instrument (consolidated plan)  **[ADOPTED 2026-07-31; all phases ⬜]**
+### Track U — UI: the OEM loop + instrument (consolidated plan)  **[ADOPTED 2026-07-31; U0 ✅ (PR #59), U1+ ⬜]**
 
 **Goal:** the full ASH investigation loop — notice → localize (brush) → attribute
 (re-rank) → isolate (drill) → inspect → compare → share — with instrument-grade
@@ -2948,7 +2948,7 @@ paths, §6 amendments). Renderer verdict: ECharts stays for secondary views;
 the AAS pane is expected to move to a uPlot substrate behind a written gate
 (U2b). Subsumes the REWORK **B6** bucket (waterfall / scatter / matrix → U3).
 
-**Phase U0 — Quick wins (days) ⬜**
+**Phase U0 — Quick wins  ✅ [DONE — PR #59, 2026-07-31]** (validation: node 144/144, Playwright UI 209/209 incl. the new error-card test, chaos 25/25, snapshots 13/13 — no baseline regen; `?ws=` override gated to loopback per review; U1 follow-ups noted: stricter [pgwt] default, empty-state fixture cells, VERSION chromium-build confirmation)
 - **Error visibility (review P1):** `console.error` at the four swallow sites
   (`lib/view-manager.js:112-121`, `app.js:333-334`, `app.js:243-246`); per-pane
   error card (view, command, server `code`/`hint`, retry) for build/mount throws

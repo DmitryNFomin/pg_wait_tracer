@@ -10,6 +10,20 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+- **ui(U0): error visibility, live-pause, misplaced marks, test infra** (Track U
+  Phase U0, PR #59). Failures now paint a per-pane error card (view, command,
+  server code/hint, Retry) instead of being pixel-identical to an idle DB — the
+  `window_too_large` refusal is finally presented; `[pgwt]`-prefixed console
+  error surface; formatter null-guards. Drill/breadcrumb/filter-clear pause
+  live refresh (Live button resumes, one span source of truth). Burst markers
+  use containing-bucket arithmetic (newest burst no longer draws far-left),
+  session-timeline bars clip to the window (no more painting over PID labels),
+  the escalation markLine renders for the first time (was placed past the
+  axis), `animation:false` in every builder. Tests: five copy-pasted FakeWS
+  monkey-patches replaced by a loopback-gated `?ws=` override; console guard
+  re-scoped; playwright pinned + baseline VERSION provenance; run_all.sh runs
+  the node unit layer; three tests that pinned the confirmed bugs flipped.
+
 - **fix(cpu): pure-CPU straddler live CPU\*.** The measured-CPU live view
   intermittently reported `CPU* = 0` for a waitless pure-CPU command that
   straddled capture (~2% of runs, PG13 on 2-vCPU CI, never on a real box; the
