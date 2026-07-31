@@ -25,7 +25,15 @@ export function createActiveView() {
     let chart = null;          // ECharts instance — owned here, nowhere else
     let detachSel = null;      // selection-overlay teardown
     let el = null;             // chart container
-    let selected = null;       // Set of visible series indices (legend state)
+    // Legend state, keyed by series NAME (U1, review P2 — an index Set turned
+    // a CPU solo into an arbitrary-event solo once the server re-ranked the
+    // event series). `selected` = visible names; `hovered` = the name being
+    // hover-soloed (re-applied after a mid-hover live tick); `names` = the
+    // last rendered series set, so a set change resets the selection.
+    const legend = { selected: null, hovered: null, names: null };
+    const resetLegend = () => {
+        legend.selected = null; legend.hovered = null; legend.names = null;
+    };
 
     return {
         id: 'active',
@@ -76,7 +84,7 @@ export function createActiveView() {
                 if (legDiv) legDiv.innerHTML = '';
                 const chip = document.getElementById('aas-fidelity-chip');
                 if (chip) chip.remove();
-                selected = null;
+                resetLegend();
                 if (ctx.setStatus) {
                     ctx.setStatus(ctx.server.numCpus + ' CPUs · ' +
                         fmtDuration(ctx.timeRange.span()) + ' window · no data',
@@ -85,7 +93,7 @@ export function createActiveView() {
                 return;
             }
             chart.setOption(model.option, true);
-            renderLegend(model, chart, ctx, () => selected, (s) => { selected = s; });
+            renderLegend(model, chart, ctx, legend);
             renderFidelityChip(model, ctx);
 
             // Status line: window + peak AAS (kept identical to old behavior).
@@ -101,7 +109,7 @@ export function createActiveView() {
             el = ctx.chartEl;
             if (!el) return;
             chart = ctx.echarts.init(el, 'dark');
-            selected = null;
+            resetLegend();
             // Drag-select overlay → zoom the window.
             detachSel = attachSelection(el, chart, {
                 onSelect: (range) => {
@@ -116,7 +124,7 @@ export function createActiveView() {
             const chip = document.getElementById('aas-fidelity-chip');
             if (chip) chip.remove();
             el = null;
-            selected = null;
+            resetLegend();
         },
 
         resize() { if (chart) chart.resize(); },
@@ -176,16 +184,30 @@ function renderFidelityChip(model, ctx) {
 }
 
 /* External HTML legend with solo / multi-select / hover — kept out of the chart
- * for full control (matches the old ApexCharts custom legend behavior). Toggles
- * series visibility via ECharts' legend.select API on the chart instance. */
-function renderLegend(model, chart, ctx, getSelected, setSelected) {
+ * for full control (matches the old ApexCharts custom legend behavior).
+ *
+ * U1 (review P2): selection is keyed by series NAME and lives in `leg`
+ * ({selected, hovered, names}, owned by the view). It resets whenever the
+ * series set changes — class<->event mode switch, or the top-N event set
+ * shifting between ticks — so a CPU solo can never silently become a solo of
+ * whatever series inherited the index. Visibility is applied as ONE batched
+ * setOption({legend:{selected}}) per gesture (the per-name dispatchAction
+ * storm is gone), and an in-progress hover-solo is tracked in leg.hovered and
+ * RE-APPLIED after a live-tick rebuild — the old trailing apply(sel) used to
+ * cancel the solo under a stationary cursor. */
+function renderLegend(model, chart, ctx, leg) {
     const names = model.seriesNames;
     const colors = model.seriesColors;
     const host = ctx.chartEl;
     if (!host) return;
 
-    let sel = getSelected();
-    if (!sel) { sel = new Set(names.map((_, i) => i)); setSelected(sel); }
+    const sameSet = !!leg.names && leg.names.length === names.length &&
+        leg.names.every((n, i) => n === names[i]);
+    if (!sameSet) {
+        leg.selected = new Set(names);
+        leg.hovered = null;
+    }
+    leg.names = names.slice();
 
     let legDiv = document.getElementById('aas-legend');
     if (!legDiv) {
@@ -204,38 +226,62 @@ function renderLegend(model, chart, ctx, getSelected, setSelected) {
         `${esc(name)}</span>`
     ).join('');
 
-    function apply(set) {
-        names.forEach((n, i) => chart.dispatchAction({
-            type: set.has(i) ? 'legendSelect' : 'legendUnSelect', name: n,
-        }));
-        legDiv.querySelectorAll('.aleg').forEach(elx => {
-            elx.style.opacity = set.has(+elx.dataset.i) ? '1' : '0.3';
-        });
+    // One batched legend update per gesture. The annotation series is not in
+    // `names`, so its trust marks can never be switched off from here.
+    function applyChart(visible) {
+        const sel = {};
+        names.forEach(n => { sel[n] = visible.has(n); });
+        chart.setOption({ legend: { selected: sel } });
     }
 
-    function showOnly(idx) {
-        names.forEach((n, i) => chart.dispatchAction({
-            type: i === idx ? 'legendSelect' : 'legendUnSelect', name: n,
-        }));
+    // Chip opacity always reflects the persistent selection, not a hover.
+    function paintChips() {
+        legDiv.querySelectorAll('.aleg').forEach(elx => {
+            elx.style.opacity = leg.selected.has(names[+elx.dataset.i]) ? '1' : '0.3';
+        });
     }
 
     legDiv.querySelectorAll('.aleg').forEach(elx => {
-        const idx = +elx.dataset.i;
-        elx.addEventListener('mouseenter', () => showOnly(idx));
-        elx.addEventListener('mouseleave', () => apply(getSelected()));
+        const name = names[+elx.dataset.i];
+        elx.addEventListener('mouseenter', () => {
+            leg.hovered = name;
+            applyChart(new Set([name]));
+        });
+        elx.addEventListener('mouseleave', () => {
+            leg.hovered = null;
+            applyChart(leg.selected);
+        });
         elx.addEventListener('click', (e) => {
-            let set = getSelected();
+            let set = leg.selected;
             if (e.metaKey || e.ctrlKey) {
-                if (set.has(idx)) { if (set.size > 1) set.delete(idx); }
-                else set.add(idx);
+                if (set.has(name)) { if (set.size > 1) set.delete(name); }
+                else set.add(name);
             } else {
-                if (set.size === 1 && set.has(idx)) set = new Set(names.map((_, i) => i));
-                else set = new Set([idx]);
+                if (set.size === 1 && set.has(name)) set = new Set(names);
+                else set = new Set([name]);
             }
-            setSelected(set);
-            apply(set);
+            leg.selected = set;
+            // The click states the user's new intent; a later refresh must
+            // show this selection, not resurrect the pre-click hover solo.
+            leg.hovered = null;
+            paintChips();
+            applyChart(set);
         });
     });
 
-    apply(sel);
+    // A live tick replaces the chips mid-hover; the detached chip never fires
+    // mouseleave, so clear a stuck hover when the cursor leaves the legend
+    // itself. Plain assignment (not addEventListener): legDiv persists across
+    // refreshes and must carry exactly one, current-closure handler.
+    legDiv.onmouseleave = () => {
+        if (leg.hovered != null) {
+            leg.hovered = null;
+            applyChart(leg.selected);
+        }
+    };
+
+    paintChips();
+    // Re-apply the CURRENT state after the rebuild: the in-progress
+    // hover-solo if there is one, else the persistent selection.
+    applyChart(leg.hovered != null ? new Set([leg.hovered]) : leg.selected);
 }

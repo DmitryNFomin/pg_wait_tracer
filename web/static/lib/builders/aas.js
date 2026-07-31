@@ -11,10 +11,16 @@
  * the old ApexCharts "N CPUs" annotation.
  */
 
-import { WAIT_CLASSES, EVENT_PALETTE, fmtTime, esc } from '../format.js';
+import { WAIT_CLASSES, classIndex, eventColor, fmtTime, esc } from '../format.js';
 import {
     buildFidelityShading, buildEscalationAnnotation, fidelityOf, fidelityLabel,
 } from './fidelity.js';
+
+/* Name of the dedicated silent annotation series that carries EVERY mark
+ * (fidelity shading, escalation band/edge, the N-CPUs line). It is excluded
+ * from seriesNames and legend.data, so no legend/hover state can remove the
+ * trust annotations (U1, review P2). */
+export const AAS_ANNOTATION_SERIES = 'pgwt-annotations';
 
 /* data: aas response { buckets[], bucket_ns, max_aas, breakdown?, series?,
  *                      fidelity, sample_period_ns, fidelity_ranges? }
@@ -32,11 +38,30 @@ export function buildAasOption(data, opts) {
 
     let seriesDefs, seriesColors;
     if (isEventBreakdown) {
-        seriesDefs = data.series.map((s, idx) => ({
-            name: s.name,
-            data: buckets.map(b => [b.t, +(b.aas[idx] || 0).toFixed(4)]),
+        // U1 (review P2): order series by stable IDENTITY — class (canonical
+        // WAIT_CLASSES order, matching class mode), then event name — never by
+        // the server's per-window AAS rank. The server re-ranks the top-N
+        // every tick, which reshuffled stack positions (and, with the retired
+        // index-keyed palette, colors) on every live refresh. Each bucket's
+        // aas[] array stays indexed by the SERVER order, so every series keeps
+        // its original index for data extraction; per-bucket totals are
+        // invariant under any input permutation. Unrecognized class prefixes
+        // sort after all known classes.
+        const order = data.series.map((s, idx) => ({ name: s.name, idx }));
+        order.sort((a, b) => {
+            const ca = classIndex(a.name), cb = classIndex(b.name);
+            const ra = ca < 0 ? WAIT_CLASSES.length : ca;
+            const rb = cb < 0 ? WAIT_CLASSES.length : cb;
+            if (ra !== rb) return ra - rb;
+            return a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
+        });
+        seriesDefs = order.map(o => ({
+            name: o.name,
+            data: buckets.map(b => [b.t, +(b.aas[o.idx] || 0).toFixed(4)]),
         }));
-        seriesColors = data.series.map((_, idx) => EVENT_PALETTE[idx % EVENT_PALETTE.length]);
+        // Identity-keyed color: a deterministic tint of the class hue (U1
+        // color service) — same event, same color, in every view, every tick.
+        seriesColors = order.map(o => eventColor(null, o.name));
     } else {
         seriesDefs = WAIT_CLASSES.map(wc => ({
             name: wc.label,
@@ -67,10 +92,10 @@ export function buildAasOption(data, opts) {
         data: s.data,
     }));
 
-    // Fidelity shading + escalation annotation are attached to the first
-    // series' markArea / markLine (they paint behind the stacked areas). The
-    // window for full-extent bands comes from opts.win, falling back to the
-    // bucket span so a sampled window shades end-to-end even with sparse data.
+    // Fidelity shading + escalation annotation ride the dedicated annotation
+    // series built below (they paint behind the stacked areas). The window
+    // for full-extent bands comes from opts.win, falling back to the bucket
+    // span so a sampled window shades end-to-end even with sparse data.
     const win = opts.win || { from: xMin, to: xMax };
     const shading = buildFidelityShading(data, win);
     // axisMax pins the escalation marks ON the axis: the x-axis ends at the
@@ -94,9 +119,8 @@ export function buildAasOption(data, opts) {
     if (escAnno && escAnno.markArea) markAreaData = markAreaData.concat(clampPairs(escAnno.markArea.data));
 
     // markLine: CPU reference line plus an optional escalation-edge line. Both
-    // live in one markLine.data array (per-entry label/lineStyle) so we keep a
-    // single markLine per series — no extra series that would pollute the
-    // legend or the "series with data" assertions.
+    // live in one markLine.data array (per-entry label/lineStyle) on the
+    // annotation series.
     const markLineData = [];
     if (numCpus > 0) {
         markLineData.push({
@@ -123,13 +147,28 @@ export function buildAasOption(data, opts) {
         });
     }
 
-    if (series.length) {
+    // U1 (review P2): EVERY mark rides a dedicated SILENT, dataless
+    // annotation series — never series[0]. When the marks rode series[0],
+    // legend-unselecting or hover-soloing away that series removed the N-CPUs
+    // line and the sampled-honesty shading with it (empirically verified via
+    // SSR of the vendored bundle). The annotation series' name is excluded
+    // from seriesNames and legend.data, so no legend/hover state can touch
+    // it. It sits FIRST so the marks keep painting behind the stacked areas.
+    if (markAreaData.length || markLineData.length) {
+        const anno = {
+            name: AAS_ANNOTATION_SERIES,
+            type: 'line',
+            data: [],
+            silent: true,
+            showSymbol: false,
+        };
         if (markAreaData.length) {
-            series[0].markArea = { silent: true, data: markAreaData };
+            anno.markArea = { silent: true, data: markAreaData };
         }
         if (markLineData.length) {
-            series[0].markLine = { silent: true, symbol: 'none', data: markLineData };
+            anno.markLine = { silent: true, symbol: 'none', data: markLineData };
         }
+        series.unshift(anno);
     }
 
     const option = {

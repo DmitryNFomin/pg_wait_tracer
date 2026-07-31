@@ -27,14 +27,6 @@ WAIT_CLASSES.forEach(c => {
     CLASS_COLOR_MAP[c.key] = c.color;
 });
 
-// Palette for per-event series in drill-down charts
-export const EVENT_PALETTE = [
-    'rgb(30,144,255)', 'rgb(255,99,71)', 'rgb(50,205,50)', 'rgb(255,215,0)',
-    'rgb(138,43,226)', 'rgb(0,206,209)', 'rgb(255,140,0)', 'rgb(220,20,60)',
-    'rgb(0,191,255)', 'rgb(255,105,180)', 'rgb(127,255,0)', 'rgb(255,69,0)',
-    'rgb(75,0,130)', 'rgb(0,250,154)', 'rgb(255,182,193)', 'rgb(100,149,237)',
-];
-
 export function classColor(name) {
     if (!name) return null;
     const lower = name.toLowerCase();
@@ -47,6 +39,118 @@ export function classColor(name) {
     const stripped = lower.replace('*', '');
     if (CLASS_COLOR_MAP[stripped]) return CLASS_COLOR_MAP[stripped];
     return null;
+}
+
+/* Index of a class — or of a "Class:Event" name's class prefix — in
+ * WAIT_CLASSES, or -1 when unrecognized. This is the canonical class order;
+ * per-event series stack in it (U1 stable stack order). */
+export function classIndex(name) {
+    if (!name) return -1;
+    const lower = String(name).toLowerCase();
+    const colon = lower.indexOf(':');
+    const cls = (colon > 0 ? lower.substring(0, colon) : lower).replace('*', '');
+    for (let i = 0; i < WAIT_CLASSES.length; i++) {
+        if (WAIT_CLASSES[i].key === cls || WAIT_CLASSES[i].label.toLowerCase() === cls)
+            return i;
+    }
+    return -1;
+}
+
+// -- Event color service (U1, review P2) --------------------------------------
+//
+// One deterministic color per wait EVENT: a tint of its class's semantic hue.
+// The retired EVENT_PALETTE keyed colors by ARRAY POSITION while the server
+// re-ranks the top-N event series by total AAS every window — so the same
+// event changed color on every live tick, in hues (tomato/limegreen/gold)
+// that mean Lock/CPU/Client everywhere else. Here the HUE always comes from
+// the event's class (semantics preserved; the WAIT_CLASSES colors are
+// untouched) and a stable hash of the event NAME picks one of EVENT_TINTS
+// lightness/saturation steps within that hue. Same event = same color in
+// every view, forever, regardless of rank, order, or refresh.
+//
+// EVENT_TINTS and the FNV-1a hash are part of the visual contract: changing
+// either recolors every event everywhere (a pixel-baseline change).
+
+/* [lightness delta, saturation delta] steps within the class hue. Step 0 is
+ * the class color itself; the rest are visibly distinct tints of it. */
+export const EVENT_TINTS = [
+    [0.00, 0.00],
+    [0.14, -0.10],
+    [-0.12, 0.00],
+    [0.24, -0.20],
+    [-0.20, 0.05],
+    [0.07, -0.30],
+];
+
+/* FNV-1a over the event name -> tint step. The stable identity hash. */
+export function eventTintStep(name) {
+    const s = String(name == null ? '' : name);
+    let h = 0x811c9dc5;
+    for (let i = 0; i < s.length; i++) {
+        h ^= s.charCodeAt(i);
+        h = Math.imul(h, 0x01000193) >>> 0;
+    }
+    return h % EVENT_TINTS.length;
+}
+
+function rgbToHsl(r, g, b) {
+    r /= 255; g /= 255; b /= 255;
+    const max = Math.max(r, g, b), min = Math.min(r, g, b);
+    const l = (max + min) / 2;
+    let h = 0, s = 0;
+    const d = max - min;
+    if (d !== 0) {
+        s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+        if (max === r) h = (g - b) / d + (g < b ? 6 : 0);
+        else if (max === g) h = (b - r) / d + 2;
+        else h = (r - g) / d + 4;
+        h /= 6;
+    }
+    return [h, s, l];
+}
+
+function hslToRgb(h, s, l) {
+    if (s === 0) {
+        const v = Math.round(l * 255);
+        return [v, v, v];
+    }
+    const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+    const p = 2 * l - q;
+    const conv = (t) => {
+        if (t < 0) t += 1;
+        if (t > 1) t -= 1;
+        if (t < 1 / 6) return p + (q - p) * 6 * t;
+        if (t < 1 / 2) return q;
+        if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6;
+        return p;
+    };
+    return [Math.round(conv(h + 1 / 3) * 255), Math.round(conv(h) * 255),
+            Math.round(conv(h - 1 / 3) * 255)];
+}
+
+/* eventColor(classIdx_or_name, eventName) -> 'rgb(r,g,b)'.
+ *
+ * `cls` may be a WAIT_CLASSES index, any class spelling classColor accepts
+ * ('io', 'IO', 'LWLock'), or null — then the class is derived from the
+ * eventName's "Class:Event" prefix (falling back to the Unknown gray). The
+ * tint step depends ONLY on eventName, so every caller that names the same
+ * event gets the same color no matter how it identifies the class. */
+export function eventColor(cls, eventName) {
+    let base = null;
+    if (typeof cls === 'number') base = WAIT_CLASSES[cls] ? WAIT_CLASSES[cls].color : null;
+    else if (cls != null) base = classColor(String(cls));
+    if (!base && eventName != null) base = classColor(String(eventName));
+    if (!base) base = CLASS_COLOR_MAP.unknown;
+    const m = /^rgb\((\d+),\s*(\d+),\s*(\d+)\)$/.exec(base);
+    if (!m) return base;
+    const [dl, ds] = EVENT_TINTS[eventTintStep(eventName)];
+    const [h, s, l] = rgbToHsl(+m[1], +m[2], +m[3]);
+    // Achromatic bases (the Unknown gray) must stay achromatic: adding
+    // saturation would smuggle in a hue (red) that means Lock elsewhere.
+    const s2 = s === 0 ? 0 : Math.min(1, Math.max(0.15, s + ds));
+    const l2 = Math.min(0.88, Math.max(0.18, l + dl));
+    const [r, g, b] = hslToRgb(h, s2, l2);
+    return 'rgb(' + r + ',' + g + ',' + b + ')';
 }
 
 // -- Time / number formatting -------------------------------------------------

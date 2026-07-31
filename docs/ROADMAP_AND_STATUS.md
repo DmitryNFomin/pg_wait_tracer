@@ -3021,6 +3021,12 @@ the AAS pane is expected to move to a uPlot substrate behind a written gate
   truncation rows.
 - DFG: persisted instance, rAF-throttled slider, preserved drag positions,
   layout re-run on resize (P5); P11 minors opportunistically.
+- **Color-service adoption backlog (U1 review F4):** remaining flat-class-hue
+  sites — `builders/transitions.js:69,152` (DFG nodes/variant steps; flip
+  `transitions.test.mjs:70` and regenerate `transitions_dfg.png`) and
+  `builders/table-configs.js:31,64` (overview/events pctBar fills) — adopt
+  `eventColor()` so "same event = same color" holds in every view (hue-family
+  is already consistent; this is tint-level completeness).
 - **Server backlog (small):** closed-data watermark + clock-generation stamp in
   responses (`server.c:1168-1184` re-anchoring hazard, `server.c:1070-1077`
   escalation window); wire compression (permessage-deflate in `bridge.go` or

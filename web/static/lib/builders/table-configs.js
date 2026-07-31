@@ -12,7 +12,7 @@
  */
 
 import {
-    WAIT_CLASSES, EVENT_PALETTE, classColor,
+    WAIT_CLASSES, classColor, eventColor,
     fmtMs, fmtUs, fmtCount, fmtPct, fmtAas, esc,
 } from '../format.js';
 import { dot, pctBar, stackedBar, eventStackedBar } from '../table.js';
@@ -103,7 +103,7 @@ export const queriesConfig = {
         { key: 'total_ms', label: 'DB Time', cls: 'num', format: (r) => fmtMs(r.total_ms) },
         { key: 'pct', label: '%DB', cls: 'num', format: (r) => fmtPct(r.pct) },
         { key: 'classes', label: 'Wait Profile', format: (r) =>
-            r.events ? eventStackedBar(r.events, r.total_ms, EVENT_PALETTE, classColor, fmtMs)
+            r.events ? eventStackedBar(r.events, r.total_ms, eventColor, fmtMs)
                      : stackedBar(r.classes, r.total_ms, WAIT_CLASSES, fmtMs) },
         { key: 'exec_count', label: 'Execs', cls: 'num', format: (r) =>
             r.exec_count != null ? fmtCount(r.exec_count) : '—' },

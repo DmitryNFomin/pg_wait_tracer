@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<!-- pgwt — dev fixture gallery (Phase U1, review §6 item 3).
+
+     Every pure builder × every curated fixture state, rendered through the
+     REAL builders on deterministic data — where "looks weird" becomes a named
+     docs/VISUAL_CHECKLIST.md violation with a cell id, and where the
+     tight-threshold gallery-cell snapshots point.
+
+     How to open (no WebSocket needed — the page is fully static):
+       python3 tests/mock_server.py
+         → http://127.0.0.1:18765/dev/gallery.html
+       or, from the repo root:
+       python3 -m http.server 8000 --directory web/static
+         → http://127.0.0.1:8000/dev/gallery.html
+     (A plain file:// open does NOT work: ES-module imports need HTTP.)
+
+     Fixtures: web/static/dev/fixtures/*.mjs (canonical; re-exported for Node
+     at tests/fixtures/*.mjs). Cell ids are gallery-<builder>-<state>; cells
+     with a ▶ replay a recorded live-tick sequence through the app's real
+     builder + setOption(option, true) path at 1 s/tick (⏮/⏭ step
+     deterministically; Playwright uses window.__gallery.setTick).
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>pgwt fixture gallery</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: #12122a; color: #e0e0e0;
+    font: 13px/1.45 -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  }
+  a { color: #4fc3f7; text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  #page { display: flex; }
+  nav {
+    position: sticky; top: 0; align-self: flex-start;
+    width: 220px; flex: none; height: 100vh; overflow-y: auto;
+    padding: 12px 14px; border-right: 1px solid #2a2a4a;
+  }
+  nav h1 { font-size: 15px; margin: 0 0 2px; color: #fff; }
+  #counts { color: #666; font-size: 11px; margin-bottom: 8px; }
+  .toc-builder {
+    margin: 10px 0 2px; color: #888; font-weight: 600;
+    text-transform: uppercase; font-size: 11px; letter-spacing: 0.05em;
+  }
+  nav a { display: block; padding: 1px 0 1px 10px; font-size: 12px; color: #aac; }
+  .how {
+    margin-top: 14px; padding-top: 10px; border-top: 1px solid #2a2a4a;
+    color: #666; font-size: 11px;
+  }
+  .how code { color: #888; }
+
+  main { flex: 1; min-width: 0; padding: 14px; }
+  #grid { display: flex; flex-wrap: wrap; gap: 14px; }
+
+  .cell {
+    background: #1a1a2e; border: 1px solid #2a2a4a; border-radius: 6px;
+    width: 650px; max-width: 100%; overflow: hidden;
+    scroll-margin-top: 10px;
+  }
+  .cell.failed { border-color: #E53935; }
+  .cell header {
+    display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+    padding: 6px 10px; border-bottom: 1px solid #2a2a4a; background: #1e1e3a;
+  }
+  .cell header code { color: #4fc3f7; font-size: 12px; }
+  .tag {
+    font-size: 10px; padding: 1px 6px; border-radius: 8px;
+    border: 1px solid #3a3a5a; color: #ccc;
+  }
+  .tag-word { border-color: #7986cb; color: #aab6fe; }
+  .tag-free { color: #888; }
+  .cell-body { padding: 8px 10px; max-height: 520px; overflow: auto; }
+  .cell footer {
+    padding: 6px 10px; border-top: 1px solid #2a2a4a;
+    color: #888; font-size: 11px;
+  }
+  .cell footer .facts { color: #667; margin-top: 2px; font-family: monospace; }
+
+  .empty-state { color: #666; padding: 40px 0; text-align: center; }
+  .render-error {
+    color: #fff; background: #5c1f1f; border: 1px solid #E53935;
+    border-radius: 4px; padding: 12px; font-family: monospace;
+  }
+
+  .tick-bar { display: flex; align-items: center; gap: 6px; margin-top: 6px; }
+  .tick-bar button, .panel-card button {
+    background: #2a2a4a; color: #e0e0e0; border: 1px solid #3a3a5a;
+    border-radius: 4px; padding: 2px 10px; cursor: pointer; font-size: 12px;
+  }
+  .tick-bar button:hover, .panel-card button:hover:not(:disabled) { background: #34345a; }
+  .panel-card button:disabled { color: #666; cursor: not-allowed; }
+  .tick-label { color: #888; font-size: 11px; font-family: monospace; }
+
+  /* Fidelity model cards */
+  .band-track {
+    position: relative; height: 26px; margin: 6px 0 10px;
+    background: #14142e; border: 1px solid #2a2a4a; border-radius: 3px;
+  }
+  .band { position: absolute; top: 0; bottom: 0; }
+  .band-sampled { background: rgba(255, 193, 7, 0.25); border: 1px dashed rgba(255, 193, 7, 0.6); }
+  .band-mixed   { background: rgba(120, 144, 255, 0.25); border: 1px dashed rgba(120, 144, 255, 0.6); }
+  .band-esc     { background: rgba(229, 57, 53, 0.25); border: 1px solid rgba(229, 57, 53, 0.7); }
+  .band-edge    { position: absolute; top: -3px; bottom: -3px; width: 2px; background: #4fc3f7; }
+  .cell-body pre {
+    margin: 0; padding: 8px; background: #14142e; border-radius: 4px;
+    color: #9a9ac0; font-size: 10px; max-height: 220px; overflow: auto;
+  }
+  .panel-card { padding: 8px 4px; }
+  .panel-title { color: #fff; font-weight: 600; margin-bottom: 4px; }
+  .panel-msg { color: #ffca7a; font-size: 12px; margin-bottom: 4px; }
+  .panel-hint { color: #888; font-size: 11px; margin: 4px 0 8px; }
+  table.metrics { border-collapse: collapse; font-size: 12px; }
+  table.metrics td { padding: 2px 12px 2px 0; border-bottom: 1px solid #22224a; }
+  table.metrics tr.warn td { color: #ffab91; }
+
+  /* Shared table/variants chrome (subset of the app's style.css so the
+     lib/table.js + variants HTML render legibly without importing it). */
+  .data-table, .table-host table { border-collapse: collapse; width: 100%; font-size: 12px; }
+  .data-table th, .table-host th {
+    text-align: left; color: #888; padding: 4px 8px;
+    border-bottom: 1px solid #3a3a5a; white-space: nowrap;
+  }
+  .data-table td, .table-host td {
+    padding: 4px 8px; border-bottom: 1px solid #22224a; white-space: nowrap;
+  }
+  .table-host td.num, .table-host th.num { text-align: right; }
+  .class-dot {
+    display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+    margin-right: 5px;
+  }
+  .pct-bar {
+    position: relative; min-width: 90px; height: 16px; background: #14142e;
+    border-radius: 2px; overflow: hidden;
+  }
+  .pct-fill { position: absolute; top: 0; bottom: 0; left: 0; opacity: 0.45; }
+  .pct-bar span { position: relative; padding-left: 4px; font-size: 11px; }
+  .stacked-bar, .event-stacked-bar { display: flex; height: 14px; min-width: 120px;
+    border-radius: 2px; overflow: hidden; }
+  .stacked-bar > div, .event-stacked-bar > div { min-width: 2px; }
+  .query-id { color: #888; font-family: monospace; }
+</style>
+</head>
+<body>
+<div id="page">
+  <nav>
+    <h1>pgwt fixture gallery</h1>
+    <div id="counts">loading…</div>
+    <div id="toc"></div>
+    <div class="how">
+      Serve (no WS needed):<br>
+      <code>python3 tests/mock_server.py</code><br>
+      → <code>/dev/gallery.html</code> on :18765<br><br>
+      or <code>python3 -m http.server 8000 --directory web/static</code><br><br>
+      Vocabulary: <code>docs/VISUAL_CHECKLIST.md</code>.
+      Report bugs as "&lt;WORD&gt; violation, cell &lt;id&gt;, tick N".
+    </div>
+  </nav>
+  <main>
+    <div id="grid"></div>
+  </main>
+</div>
+<script src="../vendor/echarts.min.js"></script>
+<script type="module">
+  import { main } from './gallery.js';
+  main();
+</script>
+</body>
+</html>
