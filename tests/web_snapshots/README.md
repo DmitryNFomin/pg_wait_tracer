@@ -82,3 +82,17 @@ web-ui and snapshots jobs), regenerate the baselines as above, and update
 On a compare failure the suite writes `<name>-actual.png` and `<name>-diff.png`
 next to the baseline (uploaded by CI as the `snapshot-diffs` artifact). These
 are git-ignored — only the baselines are tracked.
+
+### 2026-07-31 — five gallery cells re-baselined from CI chromium
+
+`gallery/{timeline-single-point,histogram-dense,concurrency-dense-bursts,
+table-configs-queries-hostile-sql,aas-live-ticks-tick4}.png` drifted
+0.003-0.011 (one +4px height) between local chromium 145 (playwright 1.58)
+and the CI-pinned chromium 148 (playwright 1.60) — above the tight 0.002
+gallery gate, invisible at the 0.02 pane gate. Regenerated via the
+update_snapshots workflow dispatch (run 30653754206) so these five are
+CI-chromium-authoritative. Consequence for local runs on playwright 1.58:
+exactly these cells may show sub-0.011 drift locally; either install the
+pinned playwright (1.60.0) locally or exclude them with PGWT_SNAP_ONLY
+when iterating. The panes and the remaining gallery cells match on both
+chromium builds.
