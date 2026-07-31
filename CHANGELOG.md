@@ -10,6 +10,20 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+- **ui(U1+U2a): fixture gallery, chart identity, camera-lite instrument**
+  (Track U, PRs #60/#62). Gallery: 49 deterministic builder states +
+  7-word visual checklist + tight-threshold cell snapshots — and it caught
+  a flagship bug on day one (stacked areas on a value x-axis only ever
+  painted series[0]). Identity: deterministic per-event colors, stable
+  stack order, name-keyed legend surviving live ticks, honesty overlays
+  moved to a silent annotation series (no longer vanish on hover). U2a:
+  camera + strip-cache modules; wheel-zoom under cursor and shift+drag pan
+  on the AAS chart with no server round-trip in the gesture (150ms
+  settle-refine); type:'time'+useUTC axis fixes the stacked-area bug with
+  TZ-stable ticks. The pre-registered gesture gate measured RED
+  (p95 61-68ms vs 33ms line, 3 runs) — U2b (uPlot AAS substrate) is now
+  scheduled per the written rule.
+
 - **ui(U0): error visibility, live-pause, misplaced marks, test infra** (Track U
   Phase U0, PR #59). Failures now paint a per-pane error card (view, command,
   server code/hint, Retry) instead of being pixel-identical to an idle DB — the

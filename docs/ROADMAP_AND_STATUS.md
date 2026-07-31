@@ -2951,7 +2951,7 @@ v3 owns transitions column 7 (`cpu_ns` varint, frozen in `golden/rev3`); an
 with the range reader gate and a `rev4/` golden fixture (the PR's v3/v4 redefinition is
 byte-incompatible both directions).
 
-### Track U — UI: the OEM loop + instrument (consolidated plan)  **[ADOPTED 2026-07-31; U0 ✅ (PR #59), U1+ ⬜]**
+### Track U — UI: the OEM loop + instrument (consolidated plan)  **[ADOPTED 2026-07-31; U0 ✅ (#59), U1 ✅ (#60), U2a ✅ (#62); U2b SCHEDULED (gate RED); U2/U3 ⬜]**
 
 **Goal:** the full ASH investigation loop — notice → localize (brush) → attribute
 (re-rank) → isolate (drill) → inspect → compare → share — with instrument-grade
@@ -2997,7 +2997,7 @@ the AAS pane is expected to move to a uPlot substrate behind a written gate
   port-poll instead of the 1.5 s sleep; on-failure screenshot + console tail as
   CI artifacts.
 
-**Phase U1 — Seeing infrastructure + chart identity (1–2 weeks) ⬜**
+**Phase U1 — Seeing infrastructure + chart identity  ✅ [DONE — PR #60, 2026-07-31]** (49-cell gallery; First-catch: the gallery exposed that stacked areas on a value x-axis only ever painted series[0] — fixed in U2a; 13 tight-threshold cell baselines; identity cluster shipped incl. mutation-tested legend coverage)
 - **Fixture gallery** `web/static/dev/gallery.html` + `tests/fixtures/*.mjs`:
   every pure builder × curated states (empty, single-point, dense 300
   buckets/50 PIDs/16+ events, degenerate/all-zero/unicode/hostile-SQL,
@@ -3053,7 +3053,7 @@ the AAS pane is expected to move to a uPlot substrate behind a written gate
   deferred: FIFO cancellation/priority (`server.c:3300-3313`) — compute is
   3–22 ms; revisit only if prefetch traffic materializes.
 
-**Phase U2a — Camera-lite: the instrument on ECharts (days) ⬜**
+**Phase U2a — Camera-lite: the instrument on ECharts  ✅ [DONE — PR #62, 2026-07-31]** (camera+stripcache pure modules 35 tests; wheel-zoom/shift-drag-pan, zero round-trips in-gesture; type:'time'+useUTC fixes First-catch; gate measured RED → U2b scheduled)
 - `lib/camera.js` (~150–200 LOC, pure, Node-tested): TimeWindow,
   cursor-anchored zoom math, power-of-2 LOD quantization, **follow/detached
   state machine** with tested transitions (pan detaches — the 5 s tick must
