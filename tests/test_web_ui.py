@@ -899,6 +899,114 @@ def test_concurrency_tab(page):
           "Burst section has content")
 
 
+def test_legend_hover_survives_tick(page):
+    """15c. U1: a legend-chip hover-solo survives a live-tick legend rebuild.
+
+    Regression pin for the U1 legend rework (active.js renderLegend): the
+    selection is keyed by series NAME and an in-progress hover-solo
+    (leg.hovered) is RE-APPLIED after a live tick replaces the chips — the
+    pre-U1 trailing apply(selected) popped the chart back to all-selected
+    under a stationary cursor. And since the DETACHED chip can never fire
+    mouseleave, leaving the legend itself (legDiv.onmouseleave) must unstick.
+    """
+    print("--- Test 15c: Legend Hover Survives Live Tick ---")
+
+    page.goto(MOCK_URL)
+    page.wait_for_selector("#status.connected", timeout=10000)
+    # Live mode is on by default (5 s tick cadence, app.js startAutoRefresh);
+    # wait for the external legend chips instead of a fixed sleep.
+    page.wait_for_selector("#aas-legend .aleg", timeout=10000)
+
+    # Reads the hidden ECharts legend selection the external chips drive.
+    read_selected = """() => {
+        const c = echarts.getInstanceByDom(
+            document.getElementById('aas-chart-container'));
+        if (!c) return null;
+        const leg = c.getOption().legend;
+        return (leg && leg[0] && leg[0].selected) || null;
+    }"""
+
+    # Hover the IO chip and LEAVE the mouse there. Exact-text engine on
+    # purpose: :has-text('IO') would also match 'Extension' (case-insensitive
+    # substring). IO is stable — class mode always renders the fixed
+    # WAIT_CLASSES set, so the same name exists on every tick.
+    io_sel = "#aas-legend .aleg:text-is('IO')"
+    check(page.query_selector(io_sel) is not None, "IO legend chip rendered")
+    page.hover(io_sel)
+
+    # mouseenter → ONE batched setOption({legend:{selected}}) soloing IO.
+    page.wait_for_function("""() => {
+        const c = echarts.getInstanceByDom(
+            document.getElementById('aas-chart-container'));
+        if (!c) return false;
+        const leg = c.getOption().legend;
+        const sel = leg && leg[0] && leg[0].selected;
+        if (!sel) return false;
+        const on = Object.keys(sel).filter(n => sel[n]);
+        return on.length === 1 && on[0] === 'IO';
+    }""", timeout=5000)
+    sel = page.evaluate(read_selected)
+    on = sorted(n for n, v in (sel or {}).items() if v)
+    check(on == ["IO"], f"hover solos the IO series (visible={on})")
+
+    # Record every legend apply from here on (same wire-tap idiom as the
+    # ws.send hooks): the FINAL state alone is too weak — after the rebuild
+    # Chromium delivers a boundary mouseenter to the new chip under the
+    # stationary cursor, which would quietly re-solo and mask the pre-U1 bug.
+    # The bug is the rebuild's own trailing apply(selected): a synchronous
+    # all-on setOption that cancels (at least flickers away) the solo.
+    page.evaluate("""() => {
+        const c = echarts.getInstanceByDom(
+            document.getElementById('aas-chart-container'));
+        window.__legendApplies = [];
+        const orig = c.setOption.bind(c);
+        c.setOption = (opt, ...rest) => {
+            if (opt && opt.legend && opt.legend.selected)
+                window.__legendApplies.push({...opt.legend.selected});
+            return orig(opt, ...rest);
+        };
+    }""")
+
+    # While STILL hovering, let a live tick rebuild the legend: every mount
+    # replaces legDiv.innerHTML, detaching the chip under the cursor. Wait on
+    # that detachment (tick cadence 5 s) — a condition, not a sleep.
+    chip = page.query_selector(io_sel)
+    page.wait_for_function("el => !el.isConnected", arg=chip, timeout=15000)
+
+    # U1 regression: the rebuild must RE-APPLY the in-progress hover-solo —
+    # every legend apply across the rebuild keeps the IO solo. The pre-U1
+    # trailing apply(sel) shows up here as an all-on apply.
+    applies = page.evaluate("window.__legendApplies")
+    bad = [sorted(n for n, v in a.items() if v)
+           for a in applies if sorted(n for n, v in a.items() if v) != ["IO"]]
+    check(len(applies) > 0 and not bad,
+          f"hover-solo survived the live-tick rebuild "
+          f"({len(applies)} applies, non-solo={bad[:2]})")
+    sel = page.evaluate(read_selected)
+    on = sorted(n for n, v in (sel or {}).items() if v)
+    check(on == ["IO"],
+          f"chart still solos IO after the rebuild (visible={on})")
+
+    # Leave the legend: the original chip is detached and can never fire
+    # mouseleave, so the persistent legDiv.onmouseleave must clear the stuck
+    # hover and restore the all-on selection.
+    page.mouse.move(640, 8)
+    page.wait_for_function("""() => {
+        const c = echarts.getInstanceByDom(
+            document.getElementById('aas-chart-container'));
+        if (!c) return false;
+        const leg = c.getOption().legend;
+        const sel = leg && leg[0] && leg[0].selected;
+        if (!sel) return false;
+        const names = Object.keys(sel);
+        return names.length > 0 && names.every(n => sel[n]);
+    }""", timeout=5000)
+    sel = page.evaluate(read_selected)
+    off = sorted(n for n, v in (sel or {}).items() if not v)
+    check(bool(sel) and not off,
+          f"selection returns to all-on after leaving the legend (off={off})")
+
+
 def test_reconnection(page, mock_proc):
     """16. WebSocket reconnects after disconnect."""
     print("--- Test 16: Reconnection ---")
@@ -1732,6 +1840,7 @@ def main():
                 test_auto_refresh,
                 test_chart_rendering,
                 test_concurrency_tab,
+                test_legend_hover_survives_tick,
                 test_session_drill_to_timeline,
                 test_query_drill,
                 # Sprint 5.3: Exact data display tests

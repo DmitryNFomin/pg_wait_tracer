@@ -315,6 +315,8 @@ jobs:
           path: |
             tests/web_snapshots/*-actual.png
             tests/web_snapshots/*-diff.png
+            tests/web_snapshots/gallery/*-actual.png
+            tests/web_snapshots/gallery/*-diff.png
           if-no-files-found: ignore
 
       # U0 suite hygiene: the suite also wrote a full-page screenshot +
@@ -341,4 +343,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: snapshot-baselines
-          path: tests/web_snapshots/*.png
+          path: |
+            tests/web_snapshots/*.png
+            tests/web_snapshots/gallery/*.png

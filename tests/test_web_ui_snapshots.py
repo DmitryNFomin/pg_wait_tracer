@@ -37,12 +37,18 @@ compares them. We therefore:
 Usage:
   python3 tests/test_web_ui_snapshots.py                 # COMPARE (gating)
   python3 tests/test_web_ui_snapshots.py --update-snapshots   # write baselines
+  # Regenerate/compare a SUBSET (fnmatch patterns, comma-separated) — for an
+  # intentional single-baseline change, so unrelated baselines cannot churn:
+  python3 tests/test_web_ui_snapshots.py --update-snapshots --only=table_queries
+  PGWT_SNAP_ONLY='gallery/*' python3 tests/test_web_ui_snapshots.py
 
-Baselines live in tests/web_snapshots/<name>.png.
+Baselines live in tests/web_snapshots/<name>.png (gallery cells under
+tests/web_snapshots/gallery/ — see snap_gallery_suite).
 
 No root, no PG, no SSH — uses mock_server.py, exactly like test_web_ui.py.
 """
 import collections
+import fnmatch
 import os
 import socket
 import sys
@@ -92,6 +98,38 @@ MOCK_URL = app_url(MOCK_PORT)
 SAMPLED_PORT = MOCK_PORT + 10
 SAMPLED_URL = app_url(SAMPLED_PORT)
 
+# U1 fixture gallery — static page under the mock's HTTP root (no WebSocket;
+# the fixtures are fully deterministic, see web/static/dev/fixtures/).
+GALLERY_URL = f"http://127.0.0.1:{MOCK_PORT}/dev/gallery.html"
+
+# Gallery cells snapshotted at the tight GALLERY_* tolerance. Cell DOM ids are
+# the manifest's stable 'gallery-<builder>-<state>' contract
+# (web/static/dev/fixtures/manifest.mjs); baseline name = gallery/<builder>-<state>.
+# Coverage: dense/degenerate/fidelity/i18n/injection/empty per the U1 plan.
+GALLERY_STATIC_CELLS = [
+    "gallery-aas-dense",                        # 300-bucket class-mode stack
+    "gallery-aas-dense-events",                 # event-mode: P2 identity colors
+    "gallery-aas-sampled",                      # fidelity: amber sampled band
+    "gallery-aas-mixed-escalation",             # fidelity: mixed sub-ranges
+    "gallery-aas-escalated-live-edge",          # fidelity: escalation edge line
+    "gallery-aas-unicode-names",                # i18n event names
+    "gallery-aas-empty",                        # empty state (placeholder card)
+    "gallery-timeline-dense-50pids",            # dense timeline (480px cap)
+    "gallery-timeline-single-point",            # degenerate timeline
+    "gallery-histogram-dense",                  # dense heatmap
+    "gallery-concurrency-dense-bursts",         # overlay chart + burst tables
+    "gallery-table-configs-queries-hostile-sql",  # hostile SQL + event tints
+]
+# The recorded live-replay cell, captured at ONE fixed tick (stepped there via
+# the deterministic ⏭ button — never the ▶ 1 s timer).
+GALLERY_TICK_CELL = "gallery-aas-live-ticks"
+GALLERY_TICK_STEP = 4
+
+
+def _gallery_name(cell_id):
+    """'gallery-aas-dense' -> baseline name 'gallery/aas-dense'."""
+    return "gallery/" + cell_id[len("gallery-"):]
+
 MOCK_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mock_server.py")
 SNAP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web_snapshots")
 
@@ -105,7 +143,39 @@ DEVICE_SCALE = 1
 PIXEL_THRESHOLD = 28
 MAX_DIFF_RATIO = 0.02
 
+# Gallery cells (U1) gate MUCH tighter than the 28/0.02 full-pane budget: each
+# cell is a single chart at fixed CSS pixels + devicePixelRatio 1 on fully
+# deterministic fixture data, so there is no layout/volatile-text slack to
+# absorb. 8/0.002 lets subpixel antialiasing through while a one-series
+# recolor or a dropped annotation (hundreds of pixels) fails.
+GALLERY_PIXEL_THRESHOLD = 8
+GALLERY_MAX_DIFF_RATIO = 0.002
+
 UPDATE = "--update-snapshots" in sys.argv or os.environ.get("PGWT_UPDATE_SNAPSHOTS") == "1"
+
+
+def _parse_only():
+    """Snapshot-name filter from PGWT_SNAP_ONLY and/or --only= (comma-separated
+    fnmatch patterns). Empty = run everything."""
+    pats = [p.strip() for p in os.environ.get("PGWT_SNAP_ONLY", "").split(",")
+            if p.strip()]
+    for arg in sys.argv[1:]:
+        if arg.startswith("--only="):
+            pats += [p.strip() for p in arg[len("--only="):].split(",")
+                     if p.strip()]
+    return pats
+
+
+ONLY = _parse_only()
+
+
+def selected(name):
+    """Does `name` participate in this run? The --only=/PGWT_SNAP_ONLY filter
+    exists so an INTENTIONAL single-baseline change can be regenerated alone
+    (`--update-snapshots --only=table_queries`) without silently rewriting —
+    and thereby un-gating — every other baseline."""
+    return not ONLY or any(fnmatch.fnmatch(name, p) for p in ONLY)
+
 
 results = []  # list of (name, ok, detail)
 
@@ -192,7 +262,8 @@ def attach_console_tail(page):
 def capture_failure(page, name, detail):
     try:
         os.makedirs(FAIL_DIR, exist_ok=True)
-        base = os.path.join(FAIL_DIR, f"snapshots_{name}")
+        # Gallery names contain '/' (subdir baselines) — flatten for artifacts.
+        base = os.path.join(FAIL_DIR, f"snapshots_{name.replace('/', '_')}")
         page.screenshot(path=base + ".png", full_page=True)
         with open(base + "-console.txt", "w") as f:
             f.write(f"{name}: {detail}\n\n" + "\n".join(_console_tail) + "\n")
@@ -218,14 +289,19 @@ def _mask_volatile(page):
     )
 
 
-def snapshot(page, name, selector):
+def snapshot(page, name, selector, pixel_threshold=PIXEL_THRESHOLD,
+             max_diff_ratio=MAX_DIFF_RATIO):
     """Screenshot `selector` and compare to (or write) tests/web_snapshots/<name>.png.
 
     Animations are disabled for the capture. On compare, a per-channel threshold
     + max-diff-ratio decides pass/fail; on a mismatch the actual + diff PNGs are
     written next to the baseline (…-actual.png / …-diff.png) for PR review.
+    `name` may contain '/' (gallery baselines live in a subdirectory);
+    per-snapshot thresholds let the gallery cells gate tighter than the panes.
     """
-    os.makedirs(SNAP_DIR, exist_ok=True)
+    if not selected(name):
+        return
+    os.makedirs(os.path.join(SNAP_DIR, os.path.dirname(name)), exist_ok=True)
     el = page.query_selector(selector)
     if el is None:
         results.append((name, False, f"selector not found: {selector}"))
@@ -255,14 +331,16 @@ def snapshot(page, name, selector):
             f.write(png)
         return
 
-    ok, detail = _compare(png, baseline_path, name)
+    ok, detail = _compare(png, baseline_path, name, pixel_threshold,
+                          max_diff_ratio)
     results.append((name, ok, detail))
     print(f"  {'PASS' if ok else 'FAIL'}: {name} ({detail})")
     if not ok:
         capture_failure(page, name, detail)
 
 
-def _compare(actual_png_bytes, baseline_path, name):
+def _compare(actual_png_bytes, baseline_path, name, pixel_threshold,
+             max_diff_ratio):
     import io
     actual = Image.open(io.BytesIO(actual_png_bytes)).convert("RGB")
     baseline = Image.open(baseline_path).convert("RGB")
@@ -276,20 +354,20 @@ def _compare(actual_png_bytes, baseline_path, name):
     b = np.asarray(baseline, dtype=np.int16)
     # Max per-channel absolute difference per pixel.
     chan_diff = np.abs(a - b).max(axis=2)
-    differing = chan_diff > PIXEL_THRESHOLD
+    differing = chan_diff > pixel_threshold
     n_diff = int(differing.sum())
     total = differing.size
     ratio = n_diff / total if total else 0.0
 
-    if ratio > MAX_DIFF_RATIO:
+    if ratio > max_diff_ratio:
         actual.save(os.path.join(SNAP_DIR, f"{name}-actual.png"))
         # A red diff mask over a dimmed baseline for quick PR triage.
         diff_img = (b // 3).astype(np.uint8)
         diff_img[differing] = [255, 0, 0]
         Image.fromarray(diff_img).save(os.path.join(SNAP_DIR, f"{name}-diff.png"))
-        return False, f"diff ratio {ratio:.4f} > {MAX_DIFF_RATIO} ({n_diff}/{total} px)"
+        return False, f"diff ratio {ratio:.4f} > {max_diff_ratio} ({n_diff}/{total} px)"
 
-    return True, f"diff ratio {ratio:.4f} <= {MAX_DIFF_RATIO}"
+    return True, f"diff ratio {ratio:.4f} <= {max_diff_ratio}"
 
 
 # ── Navigation helpers ─────────────────────────────────────────────────────────
@@ -362,7 +440,7 @@ def snap_exact_suite(page):
         row.click()
         page.wait_for_timeout(1800)
         snapshot(page, "session_timeline", "#timeline-chart")
-    else:
+    elif selected("session_timeline"):
         results.append(("session_timeline", False, "no session row to drill"))
         print("  FAIL: session_timeline (no session row)")
         capture_failure(page, "session_timeline", "no session row to drill")
@@ -383,7 +461,7 @@ def snap_fidelity_suite(page):
     panel = page.query_selector(".unavailable-panel")
     if panel:
         snapshot(page, "fidelity_unavailable_panel", ".unavailable-panel")
-    else:
+    elif selected("fidelity_unavailable_panel"):
         results.append(("fidelity_unavailable_panel", False, "no unavailable panel"))
         print("  FAIL: fidelity_unavailable_panel (panel absent)")
         capture_failure(page, "fidelity_unavailable_panel", "no unavailable panel")
@@ -395,10 +473,64 @@ def snap_fidelity_suite(page):
         mbtn.click()
         page.wait_for_timeout(900)
         snapshot(page, "fidelity_metrics_panel", "#daemon-metrics")
-    else:
+    elif selected("fidelity_metrics_panel"):
         results.append(("fidelity_metrics_panel", False, "metrics button hidden"))
         print("  FAIL: fidelity_metrics_panel (metrics button hidden)")
         capture_failure(page, "fidelity_metrics_panel", "metrics button hidden")
+
+
+def snap_gallery_suite(page):
+    """U1 gallery-cell snapshots (docs/VISUALIZATION_REVIEW.md §6 item 8).
+
+    web/static/dev/gallery.html renders every (builder × state) fixture through
+    the REAL pure builders at fixed CSS pixels + devicePixelRatio 1, fully
+    deterministic (no wall-clock, no randomness). Each snapshot here is ONE
+    cell — chart + header + facts footer — screenshotted by its stable
+    #gallery-<builder>-<state> id and gated at the tight 8/0.002 tolerance
+    (GALLERY_*), so a single-series recolor or a dropped annotation fails even
+    though it would drown inside a 0.02 full-pane budget. Baselines live in
+    tests/web_snapshots/gallery/. Vocabulary for failures:
+    docs/VISUAL_CHECKLIST.md ("<WORD> violation, cell <id>, tick N").
+
+    The gallery is fully static (ES modules over HTTP; no WebSocket), served by
+    the exact mock's static root.
+    """
+    tick_name = f"gallery/aas-live-ticks-tick{GALLERY_TICK_STEP}"
+    wanted = [_gallery_name(c) for c in GALLERY_STATIC_CELLS] + [tick_name]
+    if not any(selected(n) for n in wanted):
+        return  # --only filter selects no gallery cell; skip the page load
+
+    print("--- Snapshots: fixture gallery (U1 tight-threshold cells) ---")
+    page.goto(GALLERY_URL)
+    # gallery.js sets data-gallery-ready="1" after every cell has rendered.
+    page.wait_for_selector("body[data-gallery-ready='1']", timeout=15000)
+    page.wait_for_timeout(500)  # font/canvas settle (charts animate: false)
+
+    for cell_id in GALLERY_STATIC_CELLS:
+        snapshot(page, _gallery_name(cell_id), f"#{cell_id}",
+                 pixel_threshold=GALLERY_PIXEL_THRESHOLD,
+                 max_diff_ratio=GALLERY_MAX_DIFF_RATIO)
+
+    # Tick replay at a FIXED step: click the ⏭ step button GALLERY_TICK_STEP
+    # times (never the ▶ interval timer — a timer capture would race the
+    # screenshot) and wait for the cell's data-tick attribute to confirm the
+    # deterministic position before capturing.
+    if selected(tick_name):
+        step_btn = page.query_selector(
+            f"#{GALLERY_TICK_CELL} .tick-bar button:nth-of-type(3)")
+        if step_btn is None:
+            results.append((tick_name, False, "tick step button not found"))
+            print(f"  FAIL: {tick_name} (tick step button not found)")
+            capture_failure(page, tick_name, "tick step button not found")
+        else:
+            for _ in range(GALLERY_TICK_STEP):
+                step_btn.click()
+            page.wait_for_selector(
+                f"#{GALLERY_TICK_CELL}[data-tick='{GALLERY_TICK_STEP}']",
+                timeout=5000)
+            snapshot(page, tick_name, f"#{GALLERY_TICK_CELL}",
+                     pixel_threshold=GALLERY_PIXEL_THRESHOLD,
+                     max_diff_ratio=GALLERY_MAX_DIFF_RATIO)
 
 
 # ── Main ────────────────────────────────────────────────────────────────────
@@ -407,6 +539,8 @@ def main():
     print("=== test_web_ui_snapshots ===")
     print(f"mode: {'UPDATE baselines' if UPDATE else 'COMPARE (gating)'}")
     print(f"snapshot dir: {SNAP_DIR}")
+    if ONLY:
+        print(f"only: {','.join(ONLY)}")
 
     exact_proc = start_mock_server(port=MOCK_PORT)
     sampled_proc = start_mock_server(
@@ -444,6 +578,12 @@ def main():
             attach_console_tail(sampled_page)
             snap_fidelity_suite(sampled_page)
             sampled_ctx.close()
+
+            gallery_ctx = browser.new_context(**ctx_kw)
+            gallery_page = gallery_ctx.new_page()
+            attach_console_tail(gallery_page)
+            snap_gallery_suite(gallery_page)
+            gallery_ctx.close()
 
             browser.close()
     finally:

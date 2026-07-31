@@ -1,8 +1,51 @@
-# Visual-regression baselines (Phase B4)
+# Visual-regression baselines (Phase B4 + U1 gallery cells)
 
 The `*.png` files in this directory are the committed baseline screenshots for
 `tests/test_web_ui_snapshots.py`. The CI `snapshots` job screenshots each web
 view against the fixed `mock_server.py` dataset and diffs against these.
+
+## Gallery-cell baselines (`gallery/`, Track U U1)
+
+`gallery/*.png` are single-cell captures of the fixture gallery
+(`web/static/dev/gallery.html` — every pure builder × deterministic fixture
+state), screenshotted by their stable `#gallery-<builder>-<state>` cell ids.
+Because each cell is one chart at fixed CSS pixels + devicePixelRatio 1 on
+fully deterministic data, they gate at a much TIGHTER tolerance
+(pixel delta 8, ratio 0.002) than the 28/0.02 full-pane budget — a one-series
+recolor fails here even if it would drown inside a full-pane diff. The
+`gallery/aas-live-ticks-tick4` baseline is the recorded live-replay cell
+stepped to tick index 4 via the deterministic step button (never the ▶ timer).
+Failure vocabulary: `docs/VISUAL_CHECKLIST.md` ("<WORD> violation, cell <id>").
+
+KNOWN-DEFECT PIN: the `gallery/aas-*` chart cells currently pin the
+"First catch" render defect documented in `docs/VISUAL_CHECKLIST.md` (ECharts
+stacked areas on a `type:'value'` x-axis paint only `series[0]`'s area at
+epoch-magnitude x values — same defect `aas_chart_overview.png` pins). When
+the axis fix lands, regenerate every `gallery/aas-*` baseline (and
+`aas_chart_overview.png`) in the same PR.
+
+## Regenerating a SUBSET (intentional single-baseline change)
+
+`--only=<patterns>` (or `PGWT_SNAP_ONLY=<patterns>`, comma-separated fnmatch)
+restricts both compare and update to matching snapshot names, so an intentional
+change regenerates ONLY its baseline without silently rewriting — and thereby
+un-gating — every other one:
+
+```
+python3 tests/test_web_ui_snapshots.py --update-snapshots --only=table_queries
+python3 tests/test_web_ui_snapshots.py --update-snapshots --only='gallery/*'
+```
+
+## Baseline history
+
+- 2026-06-16: initial 13 pane baselines, CI snapshots job (see `VERSION`).
+- 2026-07-31 (Track U U1): `table_queries.png` regenerated — deliberate P2
+  identity change (per-event tints from the `eventColor()` color service in the
+  queries-view Wait Profile stacked bars, replacing flat class hues; gallery
+  evidence cells `gallery-aas-dense-events`,
+  `gallery-table-configs-queries-hostile-sql`). All 12 other pane baselines
+  measured unchanged (<= 0.0003) against the U1 tree. Added the 13 `gallery/`
+  cell baselines. See `VERSION` for the generation environment.
 
 ## Do NOT regenerate baselines locally
 
@@ -39,3 +82,17 @@ web-ui and snapshots jobs), regenerate the baselines as above, and update
 On a compare failure the suite writes `<name>-actual.png` and `<name>-diff.png`
 next to the baseline (uploaded by CI as the `snapshot-diffs` artifact). These
 are git-ignored — only the baselines are tracked.
+
+### 2026-07-31 — five gallery cells re-baselined from CI chromium
+
+`gallery/{timeline-single-point,histogram-dense,concurrency-dense-bursts,
+table-configs-queries-hostile-sql,aas-live-ticks-tick4}.png` drifted
+0.003-0.011 (one +4px height) between local chromium 145 (playwright 1.58)
+and the CI-pinned chromium 148 (playwright 1.60) — above the tight 0.002
+gallery gate, invisible at the 0.02 pane gate. Regenerated via the
+update_snapshots workflow dispatch (run 30653754206) so these five are
+CI-chromium-authoritative. Consequence for local runs on playwright 1.58:
+exactly these cells may show sub-0.011 drift locally; either install the
+pinned playwright (1.60.0) locally or exclude them with PGWT_SNAP_ONLY
+when iterating. The panes and the remaining gallery cells match on both
+chromium builds.

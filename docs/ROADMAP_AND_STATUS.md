@@ -1283,6 +1283,24 @@ said KEEP — **code KEPT it**.
 Parked with rationale so nothing is lost; each ships only when built (then it moves
 to a CHANGELOG entry).
 
+- **Residual straddle live-CPU flake: the seed→arm race (observed 2026-07-31,
+  PG17 CI, first sighting since PR #56).** PR #56 opens `on_cpu_ts` at every
+  watchpoint fire, which closed the missed-switch-in mode. One rarer window
+  remains: the backend's transient wait ends in the microseconds BETWEEN the
+  preseed's `/proc` wei read (`backend.c preseed_state_map`) and
+  `PERF_EVENT_IOC_ENABLE` — the wei write happens before the watchpoint is
+  armed, so no fire ever occurs; if the backend then runs a waitless loop
+  uninterrupted for the whole capture (no sched_switch on a quiet 2-vCPU
+  host), `on_cpu_ts` stays 0 and live CPU* reads 0 while the terminal flush
+  stays correct (same signature as the fixed bugs). Fix direction
+  (level-triggered, matching the recovery philosophy): extend the per-tick
+  recovery to ATTACHED backends — if wp is armed and cmd_open and the
+  state_map entry shows `on_cpu_ts==0 && cpu_ns_total` flat while
+  `/proc/<pid>/stat` shows the task RUNNING, re-open the stretch (and refresh
+  `last_cpu_ns`). Deterministic test via a PGWT_TEST hook that suppresses the
+  arm-window fire. Probability per run is tiny (µs window × zero-switch
+  capture); rerun-on-flake until fixed.
+
 - **Multi-window %DB: windowed-delta drift of measured-CPU vs wall.** The
   multi-window `--view` (Last 1s / Last 3s) differences two cumulative ring
   snapshots; CPU* carries MEASURED on-CPU ns while DB Time carries WALL. Per single
@@ -3021,6 +3039,12 @@ the AAS pane is expected to move to a uPlot substrate behind a written gate
   truncation rows.
 - DFG: persisted instance, rAF-throttled slider, preserved drag positions,
   layout re-run on resize (P5); P11 minors opportunistically.
+- **Color-service adoption backlog (U1 review F4):** remaining flat-class-hue
+  sites — `builders/transitions.js:69,152` (DFG nodes/variant steps; flip
+  `transitions.test.mjs:70` and regenerate `transitions_dfg.png`) and
+  `builders/table-configs.js:31,64` (overview/events pctBar fills) — adopt
+  `eventColor()` so "same event = same color" holds in every view (hue-family
+  is already consistent; this is tint-level completeness).
 - **Server backlog (small):** closed-data watermark + clock-generation stamp in
   responses (`server.c:1168-1184` re-anchoring hazard, `server.c:1070-1077`
   escalation window); wire compression (permessage-deflate in `bridge.go` or

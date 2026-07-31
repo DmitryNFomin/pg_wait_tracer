@@ -167,7 +167,7 @@ export function stackedBar(classes, total, WAIT_CLASSES, fmtMs) {
     return html;
 }
 
-export function eventStackedBar(events, total, EVENT_PALETTE, classColor, fmtMs) {
+export function eventStackedBar(events, total, eventColor, fmtMs) {
     if (!events || !events.length || !total || total <= 0) return '';
     let html = '<div class="stacked-bar">';
     let shownPct = 0;
@@ -175,7 +175,9 @@ export function eventStackedBar(events, total, EVENT_PALETTE, classColor, fmtMs)
         const pct = events[i].ms / total * 100;
         if (pct < 0.3) continue;
         shownPct += pct;
-        const color = classColor(events[i].name) || EVENT_PALETTE[i % EVENT_PALETTE.length];
+        // U1 identity color service: a deterministic per-event tint of the
+        // class hue (was class color, or an index-keyed palette slot).
+        const color = eventColor(null, events[i].name);
         html += '<div class="bar-seg" style="width:' + pct.toFixed(1) +
                 '%;background:' + color + '" title="' +
                 esc(events[i].name) + ': ' + fmtMs(events[i].ms) +
