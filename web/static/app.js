@@ -19,7 +19,7 @@ import { Transport, TransportError, CancelledError } from './lib/transport.js';
 import { ViewManager } from './lib/view-manager.js';
 import { mountTable } from './lib/table.js';
 import {
-    classColor, fmtTime, fmtDuration, esc,
+    classColor, fmtTime, fmtDuration, esc, fmtCount,
     nsToDatetimeLocalUTC, datetimeLocalUTCToNs, versionSkew,
 } from './lib/format.js';
 import { controlStatus, controlMetrics, ControlUnavailable } from './lib/control.js';
@@ -126,6 +126,9 @@ function makeCtx() {
         // UI-1: request failures bubble here (view-manager chokepoint + the
         // active view) so a dead transport becomes visible, not "No data".
         onRequestError: onRequestError,
+        // P1: view build/mount throws bubble here (view-manager) so a broken
+        // view paints a per-pane error card, never a silent stale pane.
+        onViewError: onViewError,
     };
 }
 
@@ -155,8 +158,16 @@ async function connect() {
     if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
     setStatus('Connecting...', 'connecting');
     const token = await fetchSessionToken();
-    const url = 'ws://' + location.host + '/ws' +
-        (token ? '?token=' + encodeURIComponent(token) : '');
+    // Test-harness override: `?ws=<full ws url>` is used verbatim as the WS
+    // endpoint (mock reachability — no Go bridge, no token). Honored only on
+    // loopback: a crafted link must not point a real deployment's data plane
+    // at an attacker-controlled socket (U0 review F1).
+    const isLoopback = location.hostname === '127.0.0.1' ||
+        location.hostname === 'localhost' || location.hostname === '[::1]';
+    const wsOverride = isLoopback
+        ? new URLSearchParams(location.search).get('ws') : null;
+    const url = wsOverride || ('ws://' + location.host + '/ws' +
+        (token ? '?token=' + encodeURIComponent(token) : ''));
     const ws = new WebSocket(url);
 
     ws.onopen = () => {
@@ -208,7 +219,10 @@ async function onConnected() {
             startDaemonPoll();
 
             await refresh();
-            startAutoRefresh(900);   // start in live mode (last 15 min)
+            // Start in live mode. The span comes from timeRange.liveRangeSecs
+            // (the ONE source of truth for the live span; initDefault set the
+            // 900s = 15 min boot default) — the Live button resumes it (P4).
+            startAutoRefresh(timeRange.liveRangeSecs);
             return;
         }
 
@@ -240,9 +254,19 @@ function initOnce() {
 
 // ── Degraded-transport handling (UI-1) ────────────────────────────────────────
 
-function onRequestError(e) {
+function onRequestError(e, pane) {
     if (e instanceof CancelledError) return;
-    if (e instanceof TransportError && e.transport) setDegraded(e.message);
+    if (e instanceof TransportError && e.transport) { setDegraded(e.message); return; }
+    // P1: a command-level error from a healthy server (transport:false
+    // envelope — e.g. the DUR-9 window_too_large refusal) used to be silently
+    // dropped here. Make it loud and paint it into the failing pane.
+    console.error('[pgwt] command error:', (pane && pane.view) || '(no pane)', e);
+    if (pane) {
+        renderPaneError(pane.el, {
+            view: pane.view, cmd: e.cmd, code: e.code, hint: e.hint,
+            maxEvents: e.maxEvents, message: e.message, retry: pane.retry,
+        });
+    }
 }
 
 function setDegraded(reason) {
@@ -304,6 +328,64 @@ async function onTransportRecovered() {
     await refresh();
 }
 
+// ── Per-pane error card (P1) ──────────────────────────────────────────────────
+//
+// A failed pane must LOOK failed — before this, broken ≡ empty ≡ stale. The
+// card is PREPENDED into the pane (never clobbering a view's chart DOM, which
+// shell-preserving views like the histogram reuse across refreshes) and removed
+// on the next successful paint; a "Loading..." placeholder is replaced, never
+// left up forever. Look mirrors the unavailable-panel: low-key, dark-theme.
+
+/* Hook for the view-manager: a view build/mount throw becomes a visible card
+ * (the console.error happens at the throw site). `pane` = { view, el, retry }. */
+function onViewError(pane, err) {
+    renderPaneError(pane.el, { view: pane.view, message: err && err.message,
+                               retry: pane.retry });
+}
+
+/* Paint the card. info: { view, cmd, code, hint, maxEvents, message, retry }. */
+function renderPaneError(el, info) {
+    if (!el) return;
+    clearPaneError(el);
+    const loading = el.querySelector(':scope > .loading');
+    if (loading) loading.remove();   // never an eternal "Loading..."
+
+    let title;
+    if (info.code === 'window_too_large') {
+        // DUR-9: the server refused a PARTIAL load — say so in analyst terms.
+        title = 'Window too large for full detail' +
+            (info.maxEvents ? ' — over ' + fmtCount(info.maxEvents) + ' events' : '') +
+            '; zoom in or pick a shorter range';
+    } else {
+        title = info.message || 'view failed to render';
+    }
+    const detail = [info.view ? 'view: ' + info.view : '',
+                    info.cmd ? 'command: ' + info.cmd : '',
+                    info.code ? 'code: ' + info.code : '']
+        .filter(Boolean).join(' · ');
+
+    const card = document.createElement('div');
+    card.className = 'pane-error';
+    card.innerHTML =
+        '<div class="pane-error-title">⚠ ' + esc(title) + '</div>' +
+        (detail ? '<div class="pane-error-detail">' + esc(detail) + '</div>' : '') +
+        (info.hint ? '<div class="pane-error-hint">' + esc(info.hint) + '</div>' : '') +
+        '<button class="pane-error-retry">Retry</button>';
+    const btn = card.querySelector('.pane-error-retry');
+    btn.addEventListener('click', () => {
+        btn.disabled = true;
+        btn.textContent = 'Retrying…';
+        if (info.retry) info.retry();   // success removes the card; failure repaints it
+    });
+    el.prepend(card);
+}
+
+function clearPaneError(el) {
+    if (!el) return;
+    const card = el.querySelector(':scope > .pane-error');
+    if (card) card.remove();
+}
+
 // ── Refresh orchestration ─────────────────────────────────────────────────────
 //
 // One refresh = (1) re-render the persistent active/AAS chart, then (2) ask the
@@ -325,13 +407,29 @@ async function refreshActive() {
     } catch (e) {
         // Superseded: silent. Transport failure: surface the degraded state
         // (UI-1) — the current paint stays but under the connection-lost
-        // overlay, never pretending to be fresh.
-        onRequestError(e);
+        // overlay, never pretending to be fresh. Command-level errors paint
+        // an error card into the chart pane (P1).
+        onRequestError(e, { view: 'active', el: chartEl, retry: refreshActive });
         return;
     }
     let model;
-    try { model = activeView.build(data, ctx); } catch (e) { return; }
-    try { activeView.mount(chartEl, model, ctx); } catch (e) { /* best-effort */ }
+    try {
+        model = activeView.build(data, ctx);
+    } catch (e) {
+        // P1: loud + visible — never a silently stale AAS chart.
+        console.error('[pgwt] view build failed:', 'active', e);
+        renderPaneError(chartEl, { view: 'active', message: e && e.message,
+                                   retry: refreshActive });
+        return;
+    }
+    try {
+        activeView.mount(chartEl, model, ctx);
+        clearPaneError(chartEl);
+    } catch (e) {
+        console.error('[pgwt] view mount failed:', 'active', e);
+        renderPaneError(chartEl, { view: 'active', message: e && e.message,
+                                   retry: refreshActive });
+    }
 }
 
 // ctx for the persistent active view: it manages its own single-flight channel
@@ -372,6 +470,13 @@ function initTabs() {
     vm.register(createTransitionsView());
     vm.register(createConcurrencyView());
 
+    // P4: these views are too heavy for the 5s live loop — entering them
+    // pauses live mode. Set here as a view property because the view
+    // definitions (views/*.js) are outside this change's slice; follow-up:
+    // declare `pausesLive` in the view objects themselves.
+    vm.views['transitions'].pausesLive = true;
+    vm.views['concurrency'].pausesLive = true;
+
     // Enter the default tab without a network refresh (init() does the first).
     vm.active = vm.views['overview'];
     vm.active.enter(vm._viewCtx());
@@ -388,7 +493,8 @@ function setActiveTabButton(tab) {
 }
 
 async function switchTab(tab) {
-    if (tab === 'concurrency' || tab === 'transitions') stopAutoRefresh();
+    const next = vm.views[tab];
+    if (next && next.pausesLive) stopAutoRefresh();
     setActiveTabButton(tab);
     summaryEl.innerHTML = '';
     tableEl.innerHTML = '<div class="loading">Loading...</div>';
@@ -414,6 +520,7 @@ const PIVOT = { class: 'events', event_id: 'queries', pid: 'timeline', query_id:
 
 function drill(intent) {
     if (!intent) return;
+    stopAutoRefresh();   // P4: drilling is an investigation gesture, like zoom
     filters.drill(intent.filterKey, intent.filterValue, intent.label, vm.activeId());
     const pivot = PIVOT[intent.filterKey];
     if (pivot) setTabView(pivot);
@@ -422,6 +529,7 @@ function drill(intent) {
 }
 
 function drillUp(index) {
+    stopAutoRefresh();   // P4: breadcrumb navigation pauses live too
     const view = filters.drillUp(index);
     if (view) setTabView(view);
     updateBreadcrumb();
@@ -429,6 +537,7 @@ function drillUp(index) {
 }
 
 function clearFilters() {
+    stopAutoRefresh();   // P4: ✕ rewinds the investigation — Live is the way back
     filters.clear();
     setTabView('overview');
     updateBreadcrumb();
@@ -650,9 +759,12 @@ function initLiveMode() {
         if (autoRefreshOn) {
             stopAutoRefresh();
         } else {
-            timeRange.anchorLive(300);
+            // P4: resume live at the CURRENT span (timeRange.liveRangeSecs is
+            // the one source of truth), re-anchored to NOW — never a surprise
+            // jump to a different window size.
+            timeRange.anchorLive(timeRange.liveRangeSecs);
             updateTimeRange();
-            startAutoRefresh(300);
+            startAutoRefresh(timeRange.liveRangeSecs);
             refresh();
         }
     });

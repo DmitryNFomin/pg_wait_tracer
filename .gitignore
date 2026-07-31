@@ -55,3 +55,4 @@ web/web
 pgwt-darwin-amd64
 pgwt-darwin-arm64
 .claude/
+tests/results/web_ui_failures/

@@ -5,9 +5,11 @@
  * ECharts custom-series option); the data->bar mapping is pure and Node-testable.
  * It owns NO chart instance and touches NO DOM.
  *
- * Mapping is byte-identical to the old legacy adapter in app.js (renderTimeline):
+ * Mapping matches the old legacy adapter in app.js (renderTimeline), except the
+ * drawn interval is clamped to the view window (fixed in U0, see buildTimelineOption):
  *   - one y-category per PID ("PID <n>")
- *   - bar data triples-plus = [startNs, endNs, pidIdx, name, classIdx, query, durNs]
+ *   - bar data = [startNs, endNs, pidIdx, name, classIdx, query, durNs, rawStartNs]
+ *     (start/end clamped to the window; the raw start rides along for the tooltip)
  *   - custom renderItem draws a class-colored rect per wait (60% of band height)
  *   - x-axis spans the current view window [from, to]
  */
@@ -35,12 +37,14 @@ export function timelineRenderItem(params, api) {
 
 /* Pure tooltip renderer (exported for testing). The query text (d[5]) comes
  * from arbitrary user SQL and MUST be escaped — it is injected into the DBA's
- * browser otherwise (UI-6). */
+ * browser otherwise (UI-6). Start shows the RAW start (d[7]), not the drawn
+ * start (d[0]) — d[0] is clamped to the window and analysts must see when the
+ * wait truly began. */
 export function timelineTooltipFormatter(params) {
     const d = params.data;
     let s = '<b>' + esc(d[3]) + '</b><br>';
     s += 'Duration: <b>' + fmtUs(d[6] / 1000) + '</b><br>';
-    s += 'Start: ' + fmtTime(d[0]) + '<br>';
+    s += 'Start: ' + fmtTime(d[7]) + '<br>';
     if (d[5] && d[5] !== '0') s += 'Query: ' + esc(d[5]);
     return s;
 }
@@ -60,12 +64,21 @@ export function buildTimelineOption(data, opts) {
     const pidLabels = pids.map(p => 'PID ' + p);
     const pidIndexMap = {};
     pids.forEach((p, i) => { pidIndexMap[p] = i; });
-    const barData = events.map(ev => [
-        ev.s, ev.s + ev.d, pidIndexMap[ev.p] || 0, ev.n, ev.c, ev.q, ev.d,
-    ]);
+    // Clamp the drawn interval to the view window (P6): the server emits
+    // start_ns = timestamp - duration with NO clamp to from_ns, so long waits
+    // routinely start before the window and the bars bled left across the PID
+    // axis labels. The raw start rides along at [7] for the tooltip.
+    const from = opts.from, to = opts.to;
+    const barData = events.map(ev => {
+        const rawEnd = ev.s + ev.d;
+        const s = from != null ? Math.max(ev.s, from) : ev.s;
+        const e = to != null ? Math.min(rawEnd, to) : rawEnd;
+        return [s, e, pidIndexMap[ev.p] || 0, ev.n, ev.c, ev.q, ev.d, ev.s];
+    });
 
     const option = {
         backgroundColor: 'transparent',
+        animation: false,
         tooltip: {
             trigger: 'item', backgroundColor: '#1e1e3a', borderColor: '#333',
             textStyle: { color: '#e0e0e0', fontSize: 12 },
@@ -85,6 +98,9 @@ export function buildTimelineOption(data, opts) {
         series: [{
             type: 'custom',
             renderItem: timelineRenderItem,
+            // Custom series default clip:false in this ECharts bundle — combined
+            // with unclamped starts the rects painted over the axis labels (P6).
+            clip: true,
             encode: { x: [0, 1], y: 2 },
             data: barData,
         }],

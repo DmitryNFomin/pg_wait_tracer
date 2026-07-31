@@ -2,7 +2,7 @@
  *
  * Runs under `node --test`. Proves the concurrency data -> ECharts line option +
  * burst markers, and the top-peaks / burst HTML tables: peak series mapping,
- * burst marker placement (first bucket >= timestamp), top-10-by-max ordering,
+ * burst marker placement (containing bucket, clamped), top-10-by-max ordering,
  * and empty-input handling.
  */
 import { test } from 'node:test';
@@ -13,7 +13,9 @@ import {
 
 function data() {
     return {
-        bucket_ns: 60_000_000_000,
+        // bucket_ns matches the peak t spacing (peak t values are bucket
+        // STARTS) — the containing-bucket arithmetic depends on it.
+        bucket_ns: 1_000,
         peaks: [
             { t: 1000, t_ms: 1, max: 2, event: 'A' },
             { t: 2000, t_ms: 2, max: 8, event: 'B' },
@@ -36,14 +38,36 @@ test('line series maps per-bucket peak max; area + symbol-none', () => {
     assert.deepEqual(option.xAxis.data, [1000, 2000, 3000]);
 });
 
-test('burst marker placed at first bucket whose t >= burst timestamp', () => {
+/* FLIPPED in U0 (P6): this test used to pin the findIndex(p.t >= ts) placement,
+ * which is off-by-one — timestamp 2500 landed at index 2 (t=3000), the bucket
+ * AFTER the containing one. The marker now sits in the CONTAINING bucket. */
+test('burst marker placed in the containing bucket', () => {
     const { option } = buildConcurrencyOption(data());
     const mp = option.series[0].markPoint.data;
     assert.equal(mp.length, 1);
-    // timestamp_ns 2500 -> first peak with t>=2500 is index 2 (t=3000)
-    assert.equal(mp[0].coord[0], 2);
+    // timestamp_ns 2500 lies in bucket [2000, 3000) -> index 1
+    assert.equal(mp[0].coord[0], 1);
+    assert.equal(mp[0].coord[1], 8);       // y = the containing bucket's peak
     assert.equal(mp[0].value, 8);
     assert.equal(mp[0].symbol, 'triangle');
+});
+
+/* P6 regression: a burst inside the FINAL bucket has no peak with t >= ts, so
+ * the old findIndex returned -1 and Math.max clamped the marker to bucket 0 —
+ * a far-left triangle for exactly the burst you care about most (the latest). */
+test('burst inside the final bucket -> marker at the last bucket, not bucket 0', () => {
+    const d = data();
+    // 3350 lies in the last bucket [3000, 4000): no peak t >= 3350.
+    d.bursts = [{ timestamp_ns: 3350, timestamp_ms: 3, event: 'C', sessions: 4,
+                  pids: [1, 2, 3, 4] }];
+    const { option } = buildConcurrencyOption(d);
+    const mp = option.series[0].markPoint.data;
+    assert.equal(mp[0].coord[0], 2);       // last bucket (n-1), not 0
+    assert.equal(mp[0].coord[1], 5);       // y = that bucket's peak, not sessions
+});
+
+test('option root disables animation (U0: no replayed draw-in on refresh)', () => {
+    assert.equal(buildConcurrencyOption(data()).option.animation, false);
 });
 
 test('no bursts -> markPoint omitted', () => {

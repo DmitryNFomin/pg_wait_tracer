@@ -8,10 +8,15 @@ view against the fixed `mock_server.py` dataset and diffs against these.
 
 Playwright screenshots are environment-sensitive (font rendering, antialiasing,
 chromium build). Baselines must be produced in the **same** environment that
-compares them — `ubuntu-latest` + the chromium that the CI workflow's
-`playwright install` pins. Local rendering will not match and will churn diffs.
+compares them — `ubuntu-latest` + the chromium build bundled with the
+**pinned** playwright version. Note that `playwright install` pins the browser
+per playwright *version* only (each playwright release bundles one specific
+chromium build; the command itself follows whatever playwright is installed),
+so playwright must be — and is — pinned in `.github/workflows/ci.yml`, with
+the exact playwright + chromium versions recorded in `VERSION` next to this
+file. Local rendering will not match and will churn diffs.
 
-## Regenerating baselines (intentional UI change)
+## Regenerating baselines (intentional UI change or playwright bump)
 
 When a UI change legitimately alters appearance, regenerate the baselines in CI:
 
@@ -24,6 +29,10 @@ git commit -m "B4: update visual-snapshot baselines (<why>)"
 ```
 
 Then the normal `snapshots` job (compare mode) on the PR validates them.
+
+When bumping playwright: update BOTH pins in `.github/workflows/ci.yml` (the
+web-ui and snapshots jobs), regenerate the baselines as above, and update
+`VERSION` — all in the same PR.
 
 ## Transient artifacts
 

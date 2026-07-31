@@ -110,12 +110,16 @@ test('escalation annotation: manual vs anomaly use distinct colors + labels', ()
 
     const anomaly = buildEscalationAnnotation(
         { tier: 'escalated', escalation_reason: 'anomaly',
-          escalation_seconds_remaining: 30, observed_start_ns: 1500 }, WIN);
+          escalation_seconds_remaining: 30, observed_start_ns: 1500 },
+        { ...WIN, axisMax: 1900 });
     assert.equal(anomaly.isAnomaly, true);
     assert.match(anomaly.label, /anomaly/);
     assert.equal(anomaly.markArea.data[0][1].itemStyle.color, ESC_ANOMALY_COLOR);
-    // The markLine sits at the live edge of the window.
-    assert.equal(anomaly.markLine.data[0].xAxis, 2000);
+    // FLIPPED in U0 (review P2): this used to pin the markLine at win.to
+    // (2000) — but the x-axis ends at the last bucket START, so an off-axis
+    // markLine was DROPPED by ECharts and the edge never rendered. It now
+    // clamps to axisMax, the last on-axis x value, and actually paints.
+    assert.equal(anomaly.markLine.data[0].xAxis, 1900);
 });
 
 /* UI-10: the band must cover only the escalation window actually observed —
@@ -141,11 +145,21 @@ test('escalation annotation: observed start clamps to the view window', () => {
 test('escalation annotation: unknown start -> markLine only, NO fabricated band', () => {
     const a = buildEscalationAnnotation(
         { tier: 'escalated', escalation_reason: 'manual',
-          escalation_seconds_remaining: 42 }, WIN);
+          escalation_seconds_remaining: 42 }, { ...WIN, axisMax: 1900 });
     assert.notEqual(a, null, 'annotation still present');
     assert.equal(a.markArea, null, 'no band when the start is unknown');
-    assert.equal(a.markLine.data[0].xAxis, 2000, 'live-edge markLine remains');
+    // FLIPPED in U0 (review P2): was pinned at win.to (2000, off-axis, never
+    // rendered); now clamped to axisMax so the markLine actually paints.
+    assert.equal(a.markLine.data[0].xAxis, 1900, 'live-edge markLine remains, on-axis');
     assert.match(a.label, /manual/);
+});
+
+test('escalation annotation: no axisMax -> live edge stays at win.to (no clamp)', () => {
+    const a = buildEscalationAnnotation(
+        { tier: 'escalated', escalation_reason: 'manual',
+          escalation_seconds_remaining: 42, observed_start_ns: 1500 }, WIN);
+    assert.equal(a.to, 2000);
+    assert.equal(a.markLine.data[0].xAxis, 2000);
 });
 
 // ── unavailable panel ────────────────────────────────────────────────────────

@@ -32,6 +32,7 @@ export function buildHeatmapOption(data) {
 
     const option = {
         backgroundColor: 'transparent',
+        animation: false,
         tooltip: {
             position: 'top', backgroundColor: '#1e1e3a', borderColor: '#333',
             textStyle: { color: '#e0e0e0', fontSize: 12 },

@@ -137,6 +137,7 @@ export function dot(name, classColor) {
 }
 
 export function pctBar(pct, color) {
+    if (pct == null || isNaN(pct)) return '—';   // null/NaN: em-dash like fmtMs (P1)
     const w = Math.min(Math.max(pct, 0), 100);
     const c = color || '#4fc3f7';
     return '<div class="pct-bar">' +

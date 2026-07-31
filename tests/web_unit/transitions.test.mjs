@@ -47,6 +47,11 @@ test('default threshold 20%: edges below 100 (=500*0.2) are hidden', () => {
     assert.ok(!option.series[0].data.some(n => n.name === 'LWLock:WALInsert'));
 });
 
+test('option root disables animation (U0: no replayed draw-in on refresh)', () => {
+    const { option } = buildTransitionsOption(data(), 20, { width: 800, height: 550 });
+    assert.equal(option.animation, false);
+});
+
 test('threshold 0%: all edges + nodes visible, sorted by total_ms desc', () => {
     const { option, visibleCount } = buildTransitionsOption(data(), 0, { width: 800, height: 550 });
     assert.equal(visibleCount, 3);

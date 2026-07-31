@@ -73,12 +73,25 @@ export function buildAasOption(data, opts) {
     // bucket span so a sampled window shades end-to-end even with sparse data.
     const win = opts.win || { from: xMin, to: xMax };
     const shading = buildFidelityShading(data, win);
-    const escAnno = buildEscalationAnnotation(opts.escalationStatus, win);
+    // axisMax pins the escalation marks ON the axis: the x-axis ends at the
+    // last bucket START (xMax) < win.to, and ECharts DROPS a markLine placed
+    // past the axis max — the escalation edge never rendered (review P2,
+    // fixed in U0). A value time axis that removes the clamp is Phase U2.
+    const escAnno = buildEscalationAnnotation(opts.escalationStatus,
+        { from: win.from, to: win.to, axisMax: xMax });
+
+    // Every emitted mark x must lie within [xMin, xMax]. For markAreas the
+    // clamp is pixel-identical (ECharts clips them to the plot edge anyway);
+    // it exists so the on-axis invariant holds for every mark we emit.
+    const clampX = (x) => Math.min(Math.max(x, xMin), xMax);
+    const clampPoint = (pt) => (pt && pt.xAxis != null)
+        ? Object.assign({}, pt, { xAxis: clampX(pt.xAxis) }) : pt;
+    const clampPairs = (pairs) => pairs.map(pair => pair.map(clampPoint));
 
     // markArea: fidelity band(s) first, then the escalation window on top.
     let markAreaData = [];
-    if (shading.markArea) markAreaData = markAreaData.concat(shading.markArea.data);
-    if (escAnno && escAnno.markArea) markAreaData = markAreaData.concat(escAnno.markArea.data);
+    if (shading.markArea) markAreaData = markAreaData.concat(clampPairs(shading.markArea.data));
+    if (escAnno && escAnno.markArea) markAreaData = markAreaData.concat(clampPairs(escAnno.markArea.data));
 
     // markLine: CPU reference line plus an optional escalation-edge line. Both
     // live in one markLine.data array (per-entry label/lineStyle) so we keep a
@@ -100,7 +113,7 @@ export function buildAasOption(data, opts) {
         const border = escAnno.isAnomaly
             ? 'rgba(229, 57, 53, 0.8)' : 'rgba(79, 195, 247, 0.7)';
         markLineData.push({
-            xAxis: escAnno.to,
+            xAxis: clampX(escAnno.to),
             lineStyle: { color: border, type: 'solid', width: 1 },
             label: {
                 formatter: escAnno.label, position: 'insideStartTop',

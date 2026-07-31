@@ -1,0 +1,18 @@
+# Provenance of the committed baseline PNGs in this directory (Track U U0).
+#
+# `playwright install` pins the browser build PER PLAYWRIGHT VERSION only —
+# each playwright release bundles one specific chromium build, and the command
+# always installs whatever build the installed playwright wants. So the
+# playwright version itself is pinned in .github/workflows/ci.yml (both the
+# web-ui and snapshots jobs) and recorded here. Bumping playwright means
+# regenerating the baselines (see README.md) and updating BOTH ci.yml pins
+# and this file in the same commit.
+#
+# Baselines generated: 2026-06-16 (commit e5ee6a4) by the CI snapshots job
+# (workflow_dispatch update_snapshots=true) on ubuntu-latest. At that date the
+# job's `pip install playwright` (then unpinned) resolved to the version
+# below; ci.yml now pins exactly it.
+
+playwright==1.60.0
+chromium-build=1223
+chromium-version=148.0.7778.96

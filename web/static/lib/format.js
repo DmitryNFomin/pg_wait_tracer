@@ -84,14 +84,17 @@ export function fmtMs(ms) {
     return '<1µs';
 }
 
+// P1 null-guards: a missing/NaN value renders as an em-dash (like fmtMs/fmtUs
+// always did), never a TypeError that blanks the whole pane.
 export function fmtCount(n) {
+    if (n == null || isNaN(n)) return '—';
     if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
     if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
     return n.toString();
 }
 
-export function fmtPct(p) { return p.toFixed(1) + '%'; }
-export function fmtAas(a) { return a.toFixed(2); }
+export function fmtPct(p) { if (p == null || isNaN(p)) return '—'; return p.toFixed(1) + '%'; }
+export function fmtAas(a) { if (a == null || isNaN(a)) return '—'; return a.toFixed(2); }
 export function fmtUs(us) {
     // null = gated latency column (sampled-only row, no real durations —
     // T1/FID-3); render as em-dash like fmtMs does.

@@ -35,7 +35,10 @@ export class CancelledError extends Error {
  * as opposed to a command-level error from a healthy server (e.g. the control
  * proxy's "daemon not running"). Consumers use this flag to distinguish
  * "transport degraded" (show the connection-lost state) from "this particular
- * command failed" (degrade just that feature). */
+ * command failed" (degrade just that feature). Command-level envelopes may
+ * additionally carry `cmd` (the request's command) and the server's structured
+ * fields `code` / `hint` / `maxEvents` (DUR-9 window_too_large) so the client
+ * can present the refusal (P1). */
 export class TransportError extends Error {
     constructor(msg, opts) {
         super(msg || 'request failed');
@@ -48,7 +51,7 @@ export class Transport {
     constructor() {
         this.ws = null;
         this.nextId = 1;
-        this.pending = {};        // id -> { resolve, reject, timer, channel }
+        this.pending = {};        // id -> { resolve, reject, timer, channel, cmd }
         this.channelId = {};      // channel -> current (latest) request id
         this.timeoutMs = 30000;
     }
@@ -74,7 +77,14 @@ export class Transport {
          * tags its own (connection-level) envelopes with "transport":true;
          * everything else is a command-level error from a live server. */
         if (typeof data.error === 'string' && data.error !== '') {
-            p.reject(new TransportError(data.error, { transport: !!data.transport }));
+            const err = new TransportError(data.error, { transport: !!data.transport });
+            // P1: keep the structured error fields the server emitted exactly
+            // so the client can present them (server.c reject_overload).
+            err.cmd = p.cmd;
+            if (typeof data.code === 'string') err.code = data.code;
+            if (typeof data.hint === 'string') err.hint = data.hint;
+            if (typeof data.max_events === 'number') err.maxEvents = data.max_events;
+            p.reject(err);
             return;
         }
         p.resolve(data);
@@ -124,7 +134,7 @@ export class Transport {
                 }
                 reject(new TransportError('timeout', { transport: true }));
             }, this.timeoutMs);
-            this.pending[id] = { resolve, reject, timer, channel };
+            this.pending[id] = { resolve, reject, timer, channel, cmd };
             if (channel) this.channelId[channel] = id;
             this.ws.send(msg);
         });

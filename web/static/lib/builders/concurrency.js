@@ -6,9 +6,10 @@
  * ECharts option); the data->series/markPoint/table mapping is pure and
  * Node-testable. It owns NO chart instance and touches NO DOM.
  *
- * Mapping is byte-identical to the old legacy adapter in app.js (render):
+ * Mapping matches the old legacy adapter in app.js (render), except the burst
+ * markers (fixed in U0, see below):
  *   - line series of per-bucket peak max, area fill, x = bucket time
- *   - burst markers placed at the first bucket >= the burst timestamp
+ *   - burst markers placed in the CONTAINING bucket (arithmetic, clamped)
  *   - top-peaks table: peaks with max>1, sorted desc, top 10
  *   - bursts table: every burst (4+ sessions within 10ms)
  */
@@ -29,8 +30,13 @@ export function buildConcurrencyOption(data) {
     const peakEvents = data.peaks.map(p => p.event || '');
 
     const burstPoints = (data.bursts || []).map(b => {
-        const idx = data.peaks.findIndex(p => p.t >= b.timestamp_ns);
-        const at = Math.max(0, idx);
+        // Containing bucket by arithmetic (P6): peak t values are bucket
+        // STARTS, so the old findIndex(p.t >= ts) was off-by-one for in-range
+        // bursts (bucket AFTER the containing one) and returned -1 for any
+        // burst inside the FINAL bucket, clamping the marker to bucket 0.
+        const idx = bns > 0
+            ? Math.floor((b.timestamp_ns - data.peaks[0].t) / bns) : 0;
+        const at = Math.min(Math.max(idx, 0), data.peaks.length - 1);
         return {
             coord: [at, peakData[at] || b.sessions],
             value: b.sessions, symbol: 'triangle',
@@ -41,6 +47,7 @@ export function buildConcurrencyOption(data) {
     });
 
     const option = {
+        animation: false,
         title: {
             text: 'Peak Concurrent Sessions per Wait Event', left: 'center',
             textStyle: { color: '#ccc', fontSize: 14 },

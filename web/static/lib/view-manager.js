@@ -81,7 +81,8 @@ export class ViewManager {
 
     /* Re-fetch + re-render the active view under a fresh epoch. `opts.userInitiated`
      * is informational for the app (e.g. to stop auto-refresh); the chokepoint
-     * fires regardless. Returns when the render (or drop) is done. */
+     * fires regardless. (Still unwired — the app pauses live itself before any
+     * switch/drill/zoom, P4.) Returns when the render (or drop) is done. */
     async refresh(opts) {
         if (!this.active) return;
         const view = this.active;
@@ -99,7 +100,11 @@ export class ViewManager {
             // stale epoch's failure is nobody's business, same rule as data).
             if (this.active === view && myEpoch === this.epoch &&
                 this.ctx.onRequestError) {
-                try { this.ctx.onRequestError(e); } catch (e2) { /* best-effort */ }
+                // P1: hand over the pane too, so a command-level error
+                // (transport:false envelope) paints an error card there
+                // instead of being silently dropped.
+                try { this.ctx.onRequestError(e, this._pane(view)); }
+                catch (e2) { /* best-effort */ }
             }
             return;
         }
@@ -112,13 +117,45 @@ export class ViewManager {
         try {
             model = view.build(data, ctx);
         } catch (e) {
+            // P1: a build throw must be LOUD — console + per-pane error card —
+            // never a silent stale pane.
+            console.error('[pgwt] view build failed:', view.id, e);
+            this._viewError(view, e);
             return;
         }
         if (this.active !== view || myEpoch !== this.epoch) return;
 
         try {
             view.mount(this.containerEl, model, ctx);
-        } catch (e) { /* mount best-effort */ }
+            this._clearPaneError();
+        } catch (e) {
+            console.error('[pgwt] view mount failed:', view.id, e);
+            this._viewError(view, e);
+        }
+    }
+
+    /* P1: the pane descriptor handed to the app's error hooks — which view
+     * failed, where its error card should paint, and how to retry. */
+    _pane(view) {
+        return { view: view.id, el: this.containerEl,
+                 retry: () => this.refresh() };
+    }
+
+    /* P1: report a build/mount throw to the app (it paints the error card). */
+    _viewError(view, err) {
+        if (!this.ctx.onViewError) return;
+        try { this.ctx.onViewError(this._pane(view), err); }
+        catch (e2) { /* best-effort */ }
+    }
+
+    /* P1: a successful mount clears any leftover error card in the pane.
+     * Views that rebuild el.innerHTML clear it implicitly; shell-preserving
+     * views (histogram) do not. No-op under Node tests (bare-object container). */
+    _clearPaneError() {
+        const el = this.containerEl;
+        if (!el || !el.querySelector) return;
+        const card = el.querySelector(':scope > .pane-error');
+        if (card) card.remove();
     }
 
     /* Build the per-call ctx: the shared bag plus view-scoped helpers. */
