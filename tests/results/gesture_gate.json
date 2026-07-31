@@ -1,0 +1,92 @@
+{
+  "generated_at": "2026-07-31T20:00:12.367427+00:00",
+  "harness": "tests/test_gesture_gate.py",
+  "gate": {
+    "green_p95_ms": 16.7,
+    "amber_p95_ms": 33.0,
+    "source": "docs/INSTRUMENT_ARCHITECTURE.md \u00a75 trigger 1"
+  },
+  "environment": {
+    "platform": "Linux-6.8.0-110-generic-x86_64-with-glibc2.39",
+    "headless_chromium": true,
+    "viewport": {
+      "width": 1280,
+      "height": 800
+    },
+    "note": "in-page performance.now() timing; CPU-raster canvas (headless, no GPU)"
+  },
+  "scale": {
+    "strip_payload_buckets": 1258,
+    "strip_series": 16,
+    "chart_data_series": 16,
+    "chart_series_total": 17,
+    "chart_points_min_across_settles": 1258,
+    "chart_points_max_across_settles": 1258,
+    "aas_wire_requests_densified": 5
+  },
+  "method": {
+    "t0": "zrender input event arrival (wheel / drag mousemove)",
+    "paint": "finished",
+    "inter_step_ms": 30,
+    "burst_len": 10,
+    "settle_pause_ms": 500,
+    "secondary": "action_to_paint = 'datazoom' action -> paint (excludes input throttle; SSR-floor-comparable plus paint)"
+  },
+  "zoom": {
+    "steps": 40,
+    "p50_ms": 62.1,
+    "p95_ms": 121.5,
+    "mean_ms": 69.22,
+    "min_ms": 28.8,
+    "max_ms": 159.0,
+    "action_to_paint": {
+      "steps": 40,
+      "p50_ms": 28.9,
+      "p95_ms": 43.7,
+      "mean_ms": 29.0,
+      "min_ms": 14.6,
+      "max_ms": 54.5
+    }
+  },
+  "pan": {
+    "steps": 20,
+    "p50_ms": 40.2,
+    "p95_ms": 69.7,
+    "mean_ms": 46.55,
+    "min_ms": 34.7,
+    "max_ms": 76.3,
+    "action_to_paint": {
+      "steps": 20,
+      "p50_ms": 17.5,
+      "p95_ms": 29.5,
+      "mean_ms": 19.85,
+      "min_ms": 13.6,
+      "max_ms": 30.1
+    }
+  },
+  "combined": {
+    "steps": 60,
+    "p50_ms": 58.4,
+    "p95_ms": 111.4,
+    "mean_ms": 61.66,
+    "min_ms": 28.8,
+    "max_ms": 159.0,
+    "action_to_paint": {
+      "steps": 60,
+      "p50_ms": 26.4,
+      "p95_ms": 43.3,
+      "mean_ms": 25.95,
+      "min_ms": 13.6,
+      "max_ms": 54.5
+    }
+  },
+  "verdict": "RED",
+  "verdict_text": "p95 111.4 ms > 33.0 ms \u2014 begin path (b) (uPlot AAS instrument pane) immediately",
+  "ssr_floor_reference": {
+    "scale": "1200x18",
+    "p50_ms": 20.4,
+    "p95_ms": 32.8,
+    "note": "Node-SSR action-only pipeline floor (no browser paint); pre-registered in docs/INSTRUMENT_ARCHITECTURE.md \u00a74a"
+  },
+  "mechanics_failures": []
+}

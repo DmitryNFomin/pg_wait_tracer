@@ -17,12 +17,14 @@ recolor fails here even if it would drown inside a full-pane diff. The
 stepped to tick index 4 via the deterministic step button (never the ▶ timer).
 Failure vocabulary: `docs/VISUAL_CHECKLIST.md` ("<WORD> violation, cell <id>").
 
-KNOWN-DEFECT PIN: the `gallery/aas-*` chart cells currently pin the
-"First catch" render defect documented in `docs/VISUAL_CHECKLIST.md` (ECharts
-stacked areas on a `type:'value'` x-axis paint only `series[0]`'s area at
-epoch-magnitude x values — same defect `aas_chart_overview.png` pins). When
-the axis fix lands, regenerate every `gallery/aas-*` baseline (and
-`aas_chart_overview.png`) in the same PR.
+FORMER KNOWN-DEFECT PIN (resolved 2026-07-31, Track U U2a): the
+`gallery/aas-*` cells and `aas_chart_overview.png` used to pin the
+"First catch" render defect (`docs/VISUAL_CHECKLIST.md` — ECharts stacked
+areas on a `type:'value'` x-axis paint only `series[0]`'s area). The U2a
+camera wiring switched the AAS axis to `type:'time'`, and all nine affected
+baselines were regenerated in the same PR (see Baseline history below): they
+now pin the CORRECT full multi-layer stacked render with UTC time-axis
+labels.
 
 ## Regenerating a SUBSET (intentional single-baseline change)
 
@@ -46,6 +48,27 @@ python3 tests/test_web_ui_snapshots.py --update-snapshots --only='gallery/*'
   `gallery-table-configs-queries-hostile-sql`). All 12 other pane baselines
   measured unchanged (<= 0.0003) against the U1 tree. Added the 13 `gallery/`
   cell baselines. See `VERSION` for the generation environment.
+- 2026-07-31 (Track U U2a): NINE baselines regenerated for the First-catch
+  axis fix (`builders/aas.js` x-axis → `type:'time'`, all stacked layers now
+  paint, UTC time-tick labels): `aas_chart_overview.png`,
+  `fidelity_sampled_shading.png`, and `gallery/aas-{dense, dense-events,
+  sampled, mixed-escalation, escalated-live-edge, unicode-names,
+  live-ticks-tick4}.png`. Pre-regen diff ratios 0.13–0.47 — the intended
+  ALIGNMENT/SEMANTICS fix, not drift. All 17 other baselines verified
+  byte-stable in the same full update run and restored untouched. Generated
+  LOCALLY (playwright 1.58.0 / chromium 145.0.7632.6 — same environment and
+  justification as the U1 entry in `VERSION`); if the CI compare churns on
+  the seven tight-tolerance `gallery/aas-*` cells (or `aas-live-ticks-tick4`,
+  which was previously CI-chromium-authoritative), regenerate them in CI via
+  the workflow below — same PR.
+  Suite-hygiene note discovered during this regen: a FAILING cell's
+  `capture_failure()` full-page screenshot perturbs text-glyph antialiasing
+  of cells captured AFTER it in the same run (element screenshots re-scroll
+  the page). That was the entire "neighbor drift" on `gallery/aas-empty` /
+  `gallery/timeline-dense-50pids` while the aas cells were still failing —
+  both match their ORIGINAL baselines at 0.0000 again now — and it is why
+  the five README-documented local-vs-CI cells can report slightly elevated
+  ratios in a full local run while earlier cells are red.
 
 ## Do NOT regenerate baselines locally
 

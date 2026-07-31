@@ -40,7 +40,12 @@ function hueOf(rgbStr) {
     return h * 60;
 }
 
-test('class mode: one series per wait class, x=ts y=aas', () => {
+/* FLIPPED in U2a: bucket x values used to be raw ns on a type:'value' axis —
+ * which is exactly the First-catch bug (docs/VISUAL_CHECKLIST.md): stacked 2D
+ * data on a value x-axis drops every layer above series[0]. The axis is now
+ * type:'time' and the option boundary converts ns -> UNIX ms exactly once, so
+ * bucket pairs are [tMs, aas]. */
+test('class mode: one series per wait class, x=tMs y=aas', () => {
     const data = { bucket_ns: 1, max_aas: 2.0, buckets: classBuckets(3) };
     const { option, seriesNames, seriesColors } = buildAasOption(data, { numCpus: 4 });
 
@@ -49,7 +54,8 @@ test('class mode: one series per wait class, x=ts y=aas', () => {
     assert.deepEqual(seriesColors, WAIT_CLASSES.map(c => c.color));
 
     const cpu = option.series.find(s => s.name === 'CPU');
-    assert.deepEqual(cpu.data, [[1000, 1], [1001, 1], [1002, 1]]);
+    // t = 1000..1002 ns -> 0.001..0.001002 ms (ns / 1e6, the ONE conversion).
+    assert.deepEqual(cpu.data, [[0.001, 1], [0.001001, 1], [0.001002, 1]]);
     // Stacked area
     assert.equal(cpu.stack, 'aas');
     assert.ok(cpu.areaStyle);
@@ -104,22 +110,30 @@ test('event breakdown mode: one series per event with identity-keyed colors', ()
     assert.deepEqual(seriesColors,
         [eventColor(null, 'IO:DataFileRead'), eventColor(null, 'IO:WalSync')]);
     const sd = dataSeries(option);
-    assert.deepEqual(sd[0].data, [[10, 0.4], [11, 0.5]]);
-    assert.deepEqual(sd[1].data, [[10, 0.2], [11, 0.25]]);
+    // FLIPPED in U2a: x is ms on the time axis (t=10 ns -> 1e-5 ms).
+    assert.deepEqual(sd[0].data, [[0.00001, 0.4], [0.000011, 0.5]]);
+    assert.deepEqual(sd[1].data, [[0.00001, 0.2], [0.000011, 0.25]]);
 });
 
 test('empty data: no crash, hasData false', () => {
     const m = buildAasOption({ buckets: [], max_aas: 0, bucket_ns: 0 }, { numCpus: 4 });
     assert.equal(m.hasData, false);
+    // U2a: with no buckets and no window the axis degrades to a sane 1 ms
+    // placeholder extent (0..1 in axis MS units); the empty state is never
+    // mounted anyway (the view clears the chart).
     assert.equal(m.option.xAxis.min, 0);
     assert.equal(m.option.xAxis.max, 1);
 });
 
-test('x axis spans first..last bucket timestamp', () => {
+/* FLIPPED in U2a: without opts.win the axis still falls back to the bucket
+ * extent, but the pinned min/max are now MS on the type:'time' axis. With a
+ * window (the production path) the axis pins to the window, not the last
+ * bucket start — see the First-catch regression test below. */
+test('x axis falls back to first..last bucket timestamp (ms) without a window', () => {
     const opt = buildAasOption({ buckets: classBuckets(5), max_aas: 1, bucket_ns: 1 },
         { numCpus: 1 }).option;
-    assert.equal(opt.xAxis.min, 1000);
-    assert.equal(opt.xAxis.max, 1004);
+    assert.equal(opt.xAxis.min, 0.001);      // 1000 ns
+    assert.equal(opt.xAxis.max, 0.001004);   // 1004 ns
 });
 
 test('aas values rounded to 4 decimals', () => {
@@ -129,19 +143,19 @@ test('aas values rounded to 4 decimals', () => {
     assert.equal(cpu.data[0][1], 0.1235);
 });
 
-/* U0 (review P2): the x-axis ends at the LAST BUCKET START, not win.to — a
- * mark placed at win.to sat past the axis max and ECharts DROPPED it, so the
- * escalation edge never rendered in any state. Invariant: every emitted mark
- * x coordinate lies within the axis range, and the escalation edge is pinned
- * at the axis max (clamped from the off-axis win.to). U1 moved every mark
- * from series[0] onto the dedicated annotation series; the on-axis invariant
- * is unchanged. */
+/* U0 (review P2) pinned this invariant when the value axis ended at the LAST
+ * BUCKET START: a mark at win.to sat past the axis max and ECharts DROPPED it
+ * (an off-axis markLine is dropped, not clipped), so the escalation edge
+ * never rendered. FLIPPED in U2a: the type:'time' axis is now PINNED to the
+ * window, so win.to is on-axis BY CONSTRUCTION and the escalation edge sits
+ * exactly at win.to == axis max. The every-mark-on-axis invariant survives as
+ * the builder's defensive clamp (mark coordinates are in axis MS now). */
 test('escalation + fidelity marks: every mark x within the axis range', () => {
     const data = { bucket_ns: 1, max_aas: 1, fidelity: 'sampled',
         buckets: classBuckets(5) };                    // bucket starts 1000..1004
     const { option } = buildAasOption(data, {
         numCpus: 2,
-        win: { from: 990, to: 1100 },                  // win.to past the axis max
+        win: { from: 990, to: 1100 },                  // win.to beyond the buckets
         escalationStatus: { tier: 'escalated', escalation_reason: 'manual',
             escalation_seconds_remaining: 30, observed_start_ns: 1002 },
     });
@@ -157,9 +171,11 @@ test('escalation + fidelity marks: every mark x within the axis range', () => {
         assert.ok(x >= option.xAxis.min && x <= option.xAxis.max,
             'mark x ' + x + ' within [' + option.xAxis.min + ', ' + option.xAxis.max + ']');
     }
-    // The escalation edge paints AT the axis max (the last bucket start).
+    // The escalation edge paints AT win.to — which IS the axis max now that
+    // the axis pins to the window (U2a), no longer a clamped stand-in.
     const escLine = anno.markLine.data.find(d => d.xAxis != null);
     assert.equal(escLine.xAxis, option.xAxis.max);
+    assert.equal(escLine.xAxis, 1100 / 1e6);           // win.to in axis ms
 });
 
 test('option root disables animation (U0: no replayed draw-in on refresh)', () => {
@@ -275,6 +291,102 @@ test('eventColor: deterministic tint that keeps the class hue', () => {
     assert.ok(gm && gm[1] === gm[2] && gm[2] === gm[3], 'gray stays gray: ' + g);
 });
 
+// ── U2a camera-lite: time axis + gesture dataZoom (Track U) ──────────────────
+
+/* FIRST-CATCH REGRESSION (docs/VISUAL_CHECKLIST.md "First catch"): the AAS
+ * x-axis MUST be type:'time' with an explicitly pinned [min,max]. On a
+ * type:'value' x-axis, ECharts drops every stacked layer above series[0] at
+ * ANY x magnitude (verified in real Chromium against the vendored 5.5.1
+ * bundle, 2026-07-31) — the production chart had only ever painted the first
+ * series' area. Value axes are forbidden here; this test pins the fix. */
+test('x axis is type time, pinned to the window (First-catch regression)', () => {
+    const win = { from: 1_700_000_000_000_000_000, to: 1_700_000_900_000_000_000 };
+    const { option } = buildAasOption(
+        { bucket_ns: 3e9, max_aas: 1, buckets: classBuckets(3) },
+        { numCpus: 4, win });
+    assert.equal(option.xAxis.type, 'time');
+    assert.equal(option.xAxis.min, win.from / 1e6);   // pinned, in UNIX ms
+    assert.equal(option.xAxis.max, win.to / 1e6);
+});
+
+/* Constraint B: axis labels and the tooltip time must be TZ-STABLE (explicit
+ * UTC formatters) — never ECharts' locale/TZ-dependent defaults — so pixel
+ * baselines are identical on any machine. */
+test('axis label + tooltip formatters render UTC regardless of host TZ', () => {
+    const { option } = buildAasOption(
+        { bucket_ns: 60e9, max_aas: 1, buckets: classBuckets(2) },
+        { numCpus: 1 });
+    const ms = Date.UTC(2026, 0, 15, 12, 34, 56);
+    assert.equal(option.xAxis.axisLabel.formatter(ms), '12:34:56');
+    const html = aasTooltip([{ seriesName: 'CPU', value: [ms, 1.5], color: '#1' }], 60e9);
+    assert.ok(html.includes('12:34:56'), 'tooltip renders the UTC time: ' + html);
+});
+
+/* The inside dataZoom is the camera's gesture source (U2a): wheel =
+ * cursor-anchored zoom, shift+drag = pan (plain drag stays with the
+ * brush-select overlay — constraint C), filterMode 'none' so the cached
+ * strip is never filtered and the pinned axis + [startValue,endValue] do the
+ * visible cropping. */
+test('inside dataZoom: gesture config + window crop pinned to win', () => {
+    const win = { from: 2e15, to: 3e15 };
+    const { option } = buildAasOption(
+        { bucket_ns: 1e9, max_aas: 1, buckets: classBuckets(2) },
+        { numCpus: 1, win });
+    const dz = option.dataZoom[0];
+    assert.equal(dz.type, 'inside');
+    assert.equal(dz.filterMode, 'none');
+    assert.equal(dz.zoomOnMouseWheel, true);
+    assert.equal(dz.moveOnMouseMove, 'shift');
+    assert.equal(dz.moveOnMouseWheel, false);
+    assert.equal(dz.preventDefaultMouseMove, true);
+    assert.equal(dz.startValue, win.from / 1e6);
+    assert.equal(dz.endValue, win.to / 1e6);
+    assert.equal(dz.minValueSpan, 1);   // the camera's MIN_SPAN_NS floor (1 ms)
+});
+
+/* opts.axis (the camera's quantized 3x strip skirt) widens the pinned axis
+ * beyond the window — that skirt is what gives pan/zoom-out gestures room
+ * (the dataZoom window cannot leave the axis extent). The window keeps doing
+ * the visible crop, and the escalation edge stays at the WINDOW's live edge,
+ * never drifting to the skirt edge (constraint D). */
+test('opts.axis widens the pinned axis; window still crops; marks stay put', () => {
+    const win = { from: 2e15, to: 3e15 };
+    const axis = { from: 1e15, to: 4e15 };            // 3x strip skirt
+    const m = buildAasOption(
+        { bucket_ns: 1e9, max_aas: 1, fidelity: 'sampled', buckets: classBuckets(2) },
+        { numCpus: 2, win, axis,
+          escalationStatus: { tier: 'escalated', escalation_reason: 'manual',
+              escalation_seconds_remaining: 30, observed_start_ns: 2.5e15 } });
+    assert.equal(m.option.xAxis.min, axis.from / 1e6);
+    assert.equal(m.option.xAxis.max, axis.to / 1e6);
+    assert.equal(m.option.dataZoom[0].startValue, win.from / 1e6);
+    assert.equal(m.option.dataZoom[0].endValue, win.to / 1e6);
+    // ns geometry reported back for the mount layer's percent->time mapping.
+    assert.deepEqual(m.axisRange, { from: axis.from, to: axis.to });
+    assert.deepEqual(m.window, { from: win.from, to: win.to });
+    // Escalation edge at the window's live edge (interior of the axis now).
+    const anno = m.option.series.find(s => s.name === AAS_ANNOTATION_SERIES);
+    const escLine = anno.markLine.data.find(d => d.xAxis != null);
+    assert.equal(escLine.xAxis, win.to / 1e6);
+    // Sampled shading covers the FULL rendered extent (any data the camera
+    // can pan onto mid-gesture is shaded — honesty geometry, constraint D).
+    const band = anno.markArea.data[0];
+    assert.equal(band[0].xAxis, axis.from / 1e6);
+    assert.equal(band[1].xAxis, axis.to / 1e6);
+});
+
+/* The axis must always CONTAIN the window (axis = opts.axis ∪ win): a
+ * mis-passed narrower axis would let ECharts clamp the dataZoom crop away
+ * from the camera window. */
+test('axis extent is the union of opts.axis and win (invariant)', () => {
+    const win = { from: 2e15, to: 3e15 };
+    const m = buildAasOption(
+        { bucket_ns: 1e9, max_aas: 1, buckets: classBuckets(2) },
+        { numCpus: 1, win, axis: { from: 2.2e15, to: 2.8e15 } });   // narrower
+    assert.equal(m.option.xAxis.min, win.from / 1e6);
+    assert.equal(m.option.xAxis.max, win.to / 1e6);
+});
+
 test('tooltip totals visible series and orders top-of-stack first', () => {
     const params = [
         { seriesName: 'CPU', value: [1000, 1.0], color: '#1' },
@@ -286,4 +398,12 @@ test('tooltip totals visible series and orders top-of-stack first', () => {
     // IO is later in params (top of stack) -> appears first after reverse
     assert.ok(html.indexOf('IO') < html.indexOf('CPU'));
     assert.ok(!html.includes('Idle'));
+});
+
+// U2a review F1: formatters alone don't pin tick POSITIONS — ECharts time-scale
+// tick generation is local-calendar unless option.useUTC is set. Guard the root.
+test('option root pins useUTC (tick positions TZ-stable)', () => {
+  const { option } = buildAasOption(
+    { buckets: classBuckets(1), max_aas: 1, bucket_ns: 1 }, { numCpus: 4 });
+  assert.strictEqual(option.useUTC, true);
 });

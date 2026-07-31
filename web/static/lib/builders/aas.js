@@ -4,11 +4,26 @@
  * builder is library-shaped only at the edge (it emits an ECharts option); the
  * data->series mapping is pure and Node-testable. It owns NO chart instance and
  * touches NO DOM. The overview view's mount() feeds the option to its ECharts
- * instance; the selection overlay (lib/selection.js) handles drag-zoom.
+ * instance; the selection overlay (lib/selection.js) handles drag-zoom, and the
+ * option's inside-dataZoom (U2a) handles wheel-zoom + shift-drag pan.
  *
  * Stacked area, one series per wait class (or per event in breakdown mode),
- * x = bucket timestamp (ns, numeric), y = AAS. A markLine at numCpus mirrors
- * the old ApexCharts "N CPUs" annotation.
+ * x = bucket timestamp, y = AAS. A markLine at numCpus mirrors the old
+ * ApexCharts "N CPUs" annotation.
+ *
+ * ── Time coordinates (U2a, Track U) ─────────────────────────────────────────
+ * The x axis is type:'time' with an explicitly pinned [min,max] — NEVER a
+ * value axis. Root cause (SSR bisect + real-Chromium verification against the
+ * vendored 5.5.1 bundle, 2026-07-31, docs/VISUAL_CHECKLIST.md "First catch"):
+ * ECharts drops every stacked layer above series[0] whenever stacked 2D data
+ * rides a type:'value' x axis, at ANY x magnitude — the AAS chart had only
+ * ever painted series[0]'s area. Only type:'time' renders the full stack.
+ * Axis coordinates are UNIX MILLISECONDS; the ns→ms conversion happens
+ * exactly once, here, at the option boundary (NS_PER_MS). Everything upstream
+ * (camera, strip cache, fidelity/escalation view-model geometry) stays in ns.
+ * Axis labels + tooltip use explicit UTC formatters (fmtTime renders via
+ * toUTCString): TZ-stable for pixel baselines, per the project's
+ * all-times-are-UTC convention (UI-11) — never ECharts' locale defaults.
  */
 
 import { WAIT_CLASSES, classIndex, eventColor, fmtTime, esc } from '../format.js';
@@ -22,12 +37,31 @@ import {
  * trust annotations (U1, review P2). */
 export const AAS_ANNOTATION_SERIES = 'pgwt-annotations';
 
+/* ns→ms at the option boundary — the ONE conversion site (see header). */
+const NS_PER_MS = 1e6;
+const nsToMs = (ns) => ns / NS_PER_MS;
+
 /* data: aas response { buckets[], bucket_ns, max_aas, breakdown?, series?,
  *                      fidelity, sample_period_ns, fidelity_ranges? }
- * opts: { numCpus, win:{from,to}, escalationStatus }
- * Returns { option, seriesNames, seriesColors, fidelity, shading } — names/
- * colors drive the external HTML legend; fidelity + shading drive the
- * sampled/exact legend chip and the background band (Phase B5). */
+ * opts: {
+ *   numCpus,
+ *   win:  { from, to },   // ns — the VISIBLE (camera) window: drives the
+ *                         //   dataZoom crop, the escalation live edge, and
+ *                         //   (when no axis opt) the pinned axis extent
+ *   axis: { from, to },   // ns, OPTIONAL — the pinned axis extent (the
+ *                         //   camera's quantized 3x strip skirt). Widening
+ *                         //   the axis beyond the window is what gives the
+ *                         //   inside-dataZoom pan/zoom-out gestures room:
+ *                         //   the dataZoom window can never leave the axis
+ *                         //   extent. Always unioned with win so the crop
+ *                         //   is never clamped away from the camera.
+ *   escalationStatus,
+ * }
+ * Returns { option, seriesNames, seriesColors, fidelity, shading, axisRange,
+ * window } — names/colors drive the external HTML legend; fidelity + shading
+ * drive the sampled/exact legend chip and the background band (Phase B5);
+ * axisRange/window (ns) let the mount layer map dataZoom percents back to
+ * time. */
 export function buildAasOption(data, opts) {
     opts = opts || {};
     const numCpus = opts.numCpus || 0;
@@ -57,7 +91,7 @@ export function buildAasOption(data, opts) {
         });
         seriesDefs = order.map(o => ({
             name: o.name,
-            data: buckets.map(b => [b.t, +(b.aas[o.idx] || 0).toFixed(4)]),
+            data: buckets.map(b => [nsToMs(b.t), +(b.aas[o.idx] || 0).toFixed(4)]),
         }));
         // Identity-keyed color: a deterministic tint of the class hue (U1
         // color service) — same event, same color, in every view, every tick.
@@ -65,7 +99,7 @@ export function buildAasOption(data, opts) {
     } else {
         seriesDefs = WAIT_CLASSES.map(wc => ({
             name: wc.label,
-            data: buckets.map(b => [b.t, +(b[wc.key] || 0).toFixed(4)]),
+            data: buckets.map(b => [nsToMs(b.t), +(b[wc.key] || 0).toFixed(4)]),
         }));
         seriesColors = WAIT_CLASSES.map(c => c.color);
     }
@@ -77,8 +111,22 @@ export function buildAasOption(data, opts) {
         1
     );
 
-    const xMin = buckets.length ? buckets[0].t : 0;
-    const xMax = buckets.length ? buckets[buckets.length - 1].t : 1;
+    // Fallback extent when no window is supplied (Node tests, degenerate
+    // callers): the bucket span, or a 1 ms placeholder for empty data (the
+    // empty state is never mounted — views clear the chart instead).
+    const xMinNs = buckets.length ? buckets[0].t : 0;
+    const xMaxNs = buckets.length ? buckets[buckets.length - 1].t : NS_PER_MS;
+    const win = opts.win || { from: xMinNs, to: xMaxNs };
+
+    // Pinned axis extent = (opts.axis ∪ win). U0's clamp-to-last-bucket-start
+    // plumbing is gone: the axis is pinned to the window (or the wider strip
+    // skirt), so marks at win.to are ON the axis by construction — the
+    // escalation edge no longer needs rescuing from past-the-axis drops.
+    let axisFromNs = (opts.axis && opts.axis.from != null) ? opts.axis.from : win.from;
+    let axisToNs = (opts.axis && opts.axis.to != null) ? opts.axis.to : win.to;
+    if (win.from < axisFromNs) axisFromNs = win.from;
+    if (win.to > axisToNs) axisToNs = win.to;
+    if (!(axisToNs > axisFromNs)) axisToNs = axisFromNs + NS_PER_MS;
 
     const series = seriesDefs.map((s, i) => ({
         name: s.name,
@@ -93,24 +141,26 @@ export function buildAasOption(data, opts) {
     }));
 
     // Fidelity shading + escalation annotation ride the dedicated annotation
-    // series built below (they paint behind the stacked areas). The window
-    // for full-extent bands comes from opts.win, falling back to the bucket
-    // span so a sampled window shades end-to-end even with sparse data.
-    const win = opts.win || { from: xMin, to: xMax };
-    const shading = buildFidelityShading(data, win);
-    // axisMax pins the escalation marks ON the axis: the x-axis ends at the
-    // last bucket START (xMax) < win.to, and ECharts DROPS a markLine placed
-    // past the axis max — the escalation edge never rendered (review P2,
-    // fixed in U0). A value time axis that removes the clamp is Phase U2.
+    // series built below (they paint behind the stacked areas). The sampled/
+    // mixed shading covers the FULL rendered extent (the strip skirt): any
+    // data the camera can pan onto mid-gesture is shaded wherever it is —
+    // the honesty band is view-model geometry, never lost under a camera
+    // state (U2a constraint D). The escalation live edge stays at win.to.
+    const shading = buildFidelityShading(data, { from: axisFromNs, to: axisToNs });
+    // axisMax is a defensive clamp only since U2a: the time axis is pinned to
+    // the window/strip extent, so win.to is always on-axis (contrast U0,
+    // where the value axis ended at the last bucket START and the escalation
+    // edge was dropped by ECharts until clamped, review P2).
     const escAnno = buildEscalationAnnotation(opts.escalationStatus,
-        { from: win.from, to: win.to, axisMax: xMax });
+        { from: win.from, to: win.to, axisMax: axisToNs });
 
-    // Every emitted mark x must lie within [xMin, xMax]. For markAreas the
-    // clamp is pixel-identical (ECharts clips them to the plot edge anyway);
-    // it exists so the on-axis invariant holds for every mark we emit.
-    const clampX = (x) => Math.min(Math.max(x, xMin), xMax);
+    // Every emitted mark x must lie within the pinned axis extent — kept as a
+    // defensive invariant (an off-axis markLine is dropped entirely, not
+    // clipped). clampPoint also performs the single ns→ms conversion for
+    // annotation geometry.
+    const clampX = (x) => Math.min(Math.max(x, axisFromNs), axisToNs);
     const clampPoint = (pt) => (pt && pt.xAxis != null)
-        ? Object.assign({}, pt, { xAxis: clampX(pt.xAxis) }) : pt;
+        ? Object.assign({}, pt, { xAxis: nsToMs(clampX(pt.xAxis)) }) : pt;
     const clampPairs = (pairs) => pairs.map(pair => pair.map(clampPoint));
 
     // markArea: fidelity band(s) first, then the escalation window on top.
@@ -137,7 +187,7 @@ export function buildAasOption(data, opts) {
         const border = escAnno.isAnomaly
             ? 'rgba(229, 57, 53, 0.8)' : 'rgba(79, 195, 247, 0.7)';
         markLineData.push({
-            xAxis: clampX(escAnno.to),
+            xAxis: nsToMs(clampX(escAnno.to)),
             lineStyle: { color: border, type: 'solid', width: 1 },
             label: {
                 formatter: escAnno.label, position: 'insideStartTop',
@@ -174,17 +224,30 @@ export function buildAasOption(data, opts) {
     const option = {
         backgroundColor: 'transparent',
         animation: false,
+        // U2a review F1: label formatters alone are NOT enough — ECharts'
+        // time-scale TICK GENERATION uses local calendar boundaries unless
+        // useUTC is set at the option root (SSR-verified: a 6h window under
+        // TZ=Asia/Kathmandu places hour ticks at :15 without it). Baselines
+        // and non-UTC users depend on this line.
+        useUTC: true,
         // Hidden legend component so the external HTML legend can drive series
         // visibility via legendSelect/legendUnSelect dispatchAction.
         legend: { show: false, data: seriesDefs.map(s => s.name) },
         grid: { left: 55, right: 20, top: 14, bottom: 28 },
         xAxis: {
-            type: 'value',
-            min: xMin,
-            max: xMax,
+            // type:'time' is LOAD-BEARING — see the file header / the First
+            // catch section of docs/VISUAL_CHECKLIST.md. min/max pin the axis
+            // so it never derives from data (marks at win.to stay on-axis and
+            // the dataZoom percent domain is exactly [min, max]).
+            type: 'time',
+            min: nsToMs(axisFromNs),
+            max: nsToMs(axisToNs),
             axisLabel: {
                 color: '#888', fontSize: 10,
-                formatter: (v) => fmtTime(v, bns),
+                // Explicit UTC formatter (constraint B): fmtTime renders via
+                // toUTCString, so labels are TZ-stable for pixel baselines —
+                // never ECharts' locale/TZ-dependent time-axis defaults.
+                formatter: (v) => fmtTime(v * NS_PER_MS, bns),
                 hideOverlap: true,
             },
             axisLine: { lineStyle: { color: '#333' } },
@@ -208,6 +271,25 @@ export function buildAasOption(data, opts) {
             axisPointer: { type: 'line', lineStyle: { color: '#666', width: 1, type: 'dashed' } },
             formatter: (params) => aasTooltip(params, bns),
         },
+        // Inside (gesture) dataZoom — the camera's event source (U2a).
+        // filterMode 'none': the full cached strip stays resident and stacked
+        // totals never recompute from a filtered subset; the [startValue,
+        // endValue] window does the visible cropping against the pinned axis.
+        // Wheel = cursor-anchored zoom; shift+drag = pan (plain drag belongs
+        // to the brush-select overlay, lib/selection.js — constraint C).
+        // minValueSpan mirrors the camera's MIN_SPAN_NS floor (1 ms).
+        dataZoom: [{
+            type: 'inside',
+            xAxisIndex: 0,
+            filterMode: 'none',
+            zoomOnMouseWheel: true,
+            moveOnMouseMove: 'shift',
+            moveOnMouseWheel: false,
+            preventDefaultMouseMove: true,
+            startValue: nsToMs(win.to > win.from ? win.from : axisFromNs),
+            endValue: nsToMs(win.to > win.from ? win.to : axisToNs),
+            minValueSpan: 1,
+        }],
         series,
     };
 
@@ -222,14 +304,21 @@ export function buildAasOption(data, opts) {
         fidelityLabel: fidelityLabel(fidelityOf(data)),
         shading,
         escalation: escAnno,
+        // U2a camera geometry (ns): the pinned axis extent and the visible
+        // window. The mount layer records axisRange to map inside-dataZoom
+        // percent events (start/end of [0,100] over the axis extent) back to
+        // absolute time for the camera.
+        axisRange: { from: axisFromNs, to: axisToNs },
+        window: { from: win.from, to: win.to },
     };
 }
 
 /* Pure tooltip renderer (exported for testing). `params` is the ECharts axis
- * tooltip param array. */
+ * tooltip param array; value[0] is the bucket time in AXIS units — ms on the
+ * U2a time axis — converted back to ns for the UTC fmtTime rendering. */
 export function aasTooltip(params, bns) {
     if (!params || !params.length) return '';
-    const t = fmtTime(params[0].value[0], bns);
+    const t = fmtTime(params[0].value[0] * NS_PER_MS, bns);
     let total = 0;
     const items = [];
     for (const p of params) {

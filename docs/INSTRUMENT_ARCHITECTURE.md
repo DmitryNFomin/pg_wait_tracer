@@ -356,6 +356,8 @@ shared data layer that makes (b) cheap.
 1. **Frame budget:** target is **p95 gesture-to-paint ≤ 16.7 ms** (the 60fps bar
    every studied instrument holds); p95 > 16.7 ms sustained after a *timeboxed*
    (≤3 days) tuning pass → schedule (b); p95 > 33 ms → begin (b) immediately.
+   **MEASURED 2026-07-31 (U2a shipped the harness): p95 = 61.2/59.4/67.6 ms
+   over three runs at a 1258×16 cached strip — RED; (b) begins immediately.**
    Measured via recorded gesture scripts in the fixture gallery at ≥1200 cached
    buckets × 18 series. If 30 fps is instead accepted as sufficient, that is a
    product decision to be written down as such — not hidden inside a threshold.

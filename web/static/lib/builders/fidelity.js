@@ -143,11 +143,13 @@ export function bandsToMarkArea(bands) {
  *   label,           // human label ("Escalated (manual)")
  * }
  *
- * `win` may carry `axisMax` — the last on-axis x value (the last bucket START,
- * which is < win.to). The mark coordinates are clamped to it: a markLine placed
- * past the axis max is dropped entirely by ECharts, so the escalation edge
- * NEVER rendered (review P2, fixed in U0). Converting the chart to a value
- * time axis so marks can sit at true timestamps is Phase U2.
+ * `win` may carry `axisMax` — the last on-axis x value. The mark coordinates
+ * are clamped to it: a markLine placed past the axis max is dropped entirely
+ * by ECharts (not clipped), so an off-axis escalation edge NEVER rendered
+ * (review P2, fixed in U0 by clamping to the last bucket start). Since U2a
+ * the AAS x axis is type:'time' pinned to the window/strip extent, so win.to
+ * is on-axis by construction and the clamp there is a defensive no-op — it
+ * still guards any caller that passes a tighter axis extent.
  *
  * The control-socket `status` reports the CURRENTLY-open escalation window:
  * tier="escalated", escalation_seconds_remaining, and escalation_reason. The
@@ -175,7 +177,8 @@ export function buildEscalationAnnotation(status, win) {
     const startNs = (typeof status.observed_start_ns === 'number')
         ? status.observed_start_ns : null;
     // Live edge, clamped onto the axis (win.axisMax = last on-axis x value):
-    // an off-axis markLine is dropped by ECharts, not clipped.
+    // an off-axis markLine is dropped by ECharts, not clipped. Under the U2a
+    // pinned time axis win.to <= axisMax always, so this is defense-in-depth.
     let to = win.to != null ? win.to : null;
     if (to != null && win.axisMax != null && to > win.axisMax) to = win.axisMax;
     // Band start: the observed escalation start, clamped into the window.

@@ -162,6 +162,20 @@ test('escalation annotation: no axisMax -> live edge stays at win.to (no clamp)'
     assert.equal(a.markLine.data[0].xAxis, 2000);
 });
 
+/* U2a: the AAS time axis is pinned to the window (or the wider strip skirt),
+ * so the aas builder now passes axisMax >= win.to and the U0 clamp is a
+ * defensive no-op there — the live edge must sit at win.to exactly, never
+ * drift out to a wider axis/skirt edge. */
+test('escalation annotation: axisMax >= win.to (U2a pinned axis) leaves the edge at win.to', () => {
+    const a = buildEscalationAnnotation(
+        { tier: 'escalated', escalation_reason: 'manual',
+          escalation_seconds_remaining: 42, observed_start_ns: 1500 },
+        { ...WIN, axisMax: 5000 });   // wider skirt: no clamp, no drift
+    assert.equal(a.to, 2000);
+    assert.equal(a.markLine.data[0].xAxis, 2000);
+    assert.equal(a.markArea.data[0][1].xAxis, 2000);
+});
+
 // ── unavailable panel ────────────────────────────────────────────────────────
 
 test('unavailable panel: offers escalate when supported, with the server message', () => {

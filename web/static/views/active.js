@@ -12,6 +12,33 @@
  * the { id, requests, build, mount, enter, leave } contract: it owns its
  * ECharts instance (created in enter, disposed in leave — no module globals)
  * and its builder (lib/builders/aas.js) is pure and Node-tested.
+ *
+ * ── U2a: the camera-lite instrument pane ────────────────────────────────────
+ * The AAS pane is the first instrument surface (docs/INSTRUMENT_ARCHITECTURE
+ * §1/§4a/§5): "where am I looking" is the CAMERA (ctx.camera, lib/camera.js),
+ * mutated at input speed; the server is never inside the gesture loop.
+ *
+ *   gestures   ECharts inside-dataZoom (wheel = cursor-anchored zoom,
+ *              shift+drag = pan; built into the builder's option) fires
+ *              'datazoom' percent events; enter()'s handler maps them over
+ *              the last rendered axis extent and mirrors them INTO the camera
+ *              (authoritative by convention, §5). Plain drag stays with the
+ *              brush-select overlay — the two coexist (the overlay ignores
+ *              shift-drags).
+ *   data       the strip cache (ctx.stripCache, lib/stripcache.js) holds 3x
+ *              window strips keyed by the camera's power-of-2 quantization.
+ *              mount() preloads the current strip on every paint (deduped);
+ *              renderFromCamera() paints synchronously from whatever the
+ *              cache holds (stale/coarse ok) and kicks the exact fetch —
+ *              app.js calls it on gesture settle, zoom jumps, and strip
+ *              arrivals.
+ *   axis       every render pins the time axis to the camera's quantized
+ *              strip extent (3x skirt) with the dataZoom window cropped to
+ *              the visible camera window — so pan/zoom-out gestures always
+ *              have room (the dataZoom window cannot leave the axis extent).
+ *   live       follow mode stays poll-and-replace at 5 s (requests/build/
+ *              mount unchanged); the live tick's mount doubles as the
+ *              live-edge strip refresh.
  */
 
 import { buildAasOption } from '../lib/builders/aas.js';
@@ -21,10 +48,17 @@ import {
 import { attachSelection } from '../lib/selection.js';
 import { esc, fmtDuration } from '../lib/format.js';
 
+const NS_PER_MS = 1e6;
+
 export function createActiveView() {
     let chart = null;          // ECharts instance — owned here, nowhere else
     let detachSel = null;      // selection-overlay teardown
     let el = null;             // chart container
+    // U2a: the ns extent of the last mounted option's pinned time axis.
+    // 'datazoom' events carry start/end PERCENTS of exactly this extent
+    // (verified against the vendored bundle: the dataZoom percent domain is
+    // the axis' explicit [min,max]); the handler maps them back to ns.
+    let renderedAxis = null;
     // Legend state, keyed by series NAME (U1, review P2 — an index Set turned
     // a CPU solo into an arbitrary-event solo once the server re-ranked the
     // event series). `selected` = visible names; `hovered` = the name being
@@ -34,6 +68,40 @@ export function createActiveView() {
     const resetLegend = () => {
         legend.selected = null; legend.hovered = null; legend.names = null;
     };
+
+    // One resolution knob for the poll fetch AND the camera quantization, so
+    // strip resolution tracks the pane width exactly like the poll does.
+    function targetBuckets() {
+        return Math.min(Math.floor((el ? el.clientWidth : 800) / 4), 300);
+    }
+
+    /* Fire-and-forget preload/refine of the camera's quantized 3x strip.
+     * ensure() never rejects and dedups by strip key, so calling this on
+     * every paint is one Map lookup when warm. Arrivals repaint through the
+     * app's stripCache.onData subscription. */
+    function ensureStrip(ctx) {
+        if (!ctx.camera || !ctx.stripCache) return;
+        const q = ctx.camera.quantize(targetBuckets());
+        // U2a review F2: in follow mode the window slides every 5 s tick, so
+        // the quantized strip KEY changes every tick and a naive ensure()
+        // refetches the full 3x strip each time (~4-6x the AAS wire bytes,
+        // continuously). Perfetto-style refill instead: keep serving the
+        // cached strip while it still covers the window at adequate
+        // resolution, and refetch only when the window drifts within a
+        // quarter-span of the strip's right edge (or resolution degrades
+        // beyond one power of two). Detached-mode gestures still refine
+        // immediately (their windows change key only when the user moves).
+        const have = ctx.stripCache.get(q);
+        if (have && have.exact) return;                 // exact strip cached
+        if (have &&
+            have.resNs <= q.resNs * 2 &&
+            have.stripFrom <= q.winFromNs &&
+            have.stripTo >= q.winToNs &&
+            (have.stripTo - q.winToNs) > (q.winToNs - q.winFromNs) / 4) {
+            return;                                     // still covered, far from edge
+        }
+        ctx.stripCache.ensure(q);
+    }
 
     return {
         id: 'active',
@@ -45,7 +113,7 @@ export function createActiveView() {
             const params = {
                 from: t.from,
                 to: t.to,
-                buckets: Math.min(Math.floor((el ? el.clientWidth : 800) / 4), 300),
+                buckets: targetBuckets(),
                 filters: ctx.filters.snapshot(),
             };
             // Class drill-down (no specific event): break down by events.
@@ -55,22 +123,33 @@ export function createActiveView() {
         },
 
         /* PURE: data -> ECharts option + legend metadata. Threads the current
-         * window (for full-extent fidelity bands) and the daemon escalation
-         * status (for the active-window annotation) through to the builder. */
+         * window (for the dataZoom crop + escalation edge), the camera's
+         * quantized strip extent (the pinned-axis gesture skirt), and the
+         * daemon escalation status through to the builder. */
         build(data, ctx) {
-            return buildAasOption(data, {
+            const opts = {
                 numCpus: ctx.server.numCpus,
                 win: { from: ctx.timeRange.from, to: ctx.timeRange.to },
                 escalationStatus: ctx.getEscalationStatus ? ctx.getEscalationStatus() : null,
-            });
+            };
+            if (ctx.camera) {
+                const q = ctx.camera.quantize(targetBuckets());
+                opts.axis = { from: q.stripFrom, to: q.stripTo };
+            }
+            return buildAasOption(data, opts);
         },
 
         mount(_el, model, ctx) {
             if (!chart) return;                     // disposed
+            // U2a preload: warm/refine the strip cache for the current camera
+            // window on every paint (initial load, each 5 s live tick — the
+            // live-edge strip refresh — and every camera render). Deduped.
+            ensureStrip(ctx);
             if (!model.hasData) {
                 // UI-5: an empty window must not leave the PREVIOUS window's
                 // paint on screen while the tables say "No data" — clear the
                 // chart and say so explicitly.
+                renderedAxis = null;
                 chart.clear();
                 chart.setOption({
                     backgroundColor: 'transparent',
@@ -93,6 +172,7 @@ export function createActiveView() {
                 return;
             }
             chart.setOption(model.option, true);
+            renderedAxis = model.axisRange || null;
             renderLegend(model, chart, ctx, legend);
             renderFidelityChip(model, ctx);
 
@@ -105,16 +185,68 @@ export function createActiveView() {
             }
         },
 
+        /* U2a: synchronous repaint from the strip cache for the CURRENT
+         * camera window — stale/coarse strips are served stretched at their
+         * true time positions (the Maps model); the exact strip is ensured in
+         * the background and swaps in via the app's onData subscription.
+         * Never touches the network path directly. Returns whether a cached
+         * strip was painted (false = keep the current gesture paint). */
+        renderFromCamera(ctx) {
+            if (!chart || !ctx.camera || !ctx.stripCache) return false;
+            const q = ctx.camera.quantize(targetBuckets());
+            ctx.stripCache.ensure(q);            // refine (deduped, never rejects)
+            const hit = ctx.stripCache.get(q);
+            if (!hit) return false;              // nothing cached overlaps: keep paint
+            const model = this.build(hit.payload, ctx);
+            this.mount(el, model, ctx);
+            return true;
+        },
+
         enter(ctx) {
             el = ctx.chartEl;
             if (!el) return;
             chart = ctx.echarts.init(el, 'dark');
             resetLegend();
-            // Drag-select overlay → zoom the window.
+            renderedAxis = null;
+            // Drag-select overlay → zoom the window. PLAIN drag only — the
+            // overlay ignores shift-drags, which belong to the inside-dataZoom
+            // pan (constraint C). pixelRangeToTime returns x-axis units, ms on
+            // the U2a time axis: convert to ns at this boundary.
             detachSel = attachSelection(el, chart, {
                 onSelect: (range) => {
-                    if (ctx.onZoom) ctx.onZoom(range.from, range.to);
+                    if (ctx.onZoom) ctx.onZoom(range.from * NS_PER_MS,
+                                               range.to * NS_PER_MS);
                 },
+            });
+            // U2a gesture mirror: inside-dataZoom events → camera. The batch
+            // entries carry start/end as PERCENTS of the pinned axis extent;
+            // dispatched actions may instead carry startValue/endValue (ms).
+            // The camera is authoritative by convention (§5): mirroring
+            // detaches it, and app.js's onChange subscription pauses live +
+            // schedules the settle-refine. Our own setOption never fires
+            // 'datazoom', so every event here is a real user gesture.
+            chart.on('datazoom', (e) => {
+                const cam = ctx.camera;
+                if (!cam || !renderedAxis) return;
+                const b = (e && e.batch && e.batch[0]) || e || {};
+                let fromNs, toNs;
+                if (b.startValue != null && b.endValue != null) {
+                    fromNs = b.startValue * NS_PER_MS;
+                    toNs = b.endValue * NS_PER_MS;
+                } else if (b.start != null && b.end != null) {
+                    const span = renderedAxis.to - renderedAxis.from;
+                    fromNs = renderedAxis.from + (b.start / 100) * span;
+                    toNs = renderedAxis.from + (b.end / 100) * span;
+                } else {
+                    return;
+                }
+                if (!(toNs > fromNs)) return;
+                // Percent round-trip guard: ignore sub-ppm echoes of the
+                // current camera window (a no-op "gesture" must not detach).
+                const eps = (toNs - fromNs) * 1e-6;
+                if (Math.abs(fromNs - cam.fromNs) < eps &&
+                    Math.abs(toNs - cam.toNs) < eps) return;
+                cam.setWindow(fromNs, toNs);
             });
         },
 
@@ -124,6 +256,7 @@ export function createActiveView() {
             const chip = document.getElementById('aas-fidelity-chip');
             if (chip) chip.remove();
             el = null;
+            renderedAxis = null;
             resetLegend();
         },
 

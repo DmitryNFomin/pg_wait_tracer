@@ -42,6 +42,8 @@ tests/__pycache__/
 # Visual-snapshot diff/actual artifacts (transient — only baselines are tracked)
 tests/web_snapshots/*-actual.png
 tests/web_snapshots/*-diff.png
+tests/web_snapshots/gallery/*-actual.png
+tests/web_snapshots/gallery/*-diff.png
 
 # Go build artifacts
 poc/web/pgwt-poc
