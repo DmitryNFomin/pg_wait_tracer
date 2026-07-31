@@ -69,7 +69,10 @@
 - **Plan-id capture** (`st_plan_id`, PG18+) — in three docs, never implemented.
 - **B6 analysis-view UIs** — per-execution waterfall, latency scatter, transition
   matrix; plus deferred UI for concurrency/burst markers and lock-chain /
-  interference (the compute **endpoints** exist; only the UI is missing).
+  interference (the compute **endpoints** exist; only the UI is missing). Now
+  sequenced inside **Track U — UI: OEM loop + instrument** (Part 4, adopted
+  2026-07-31): P1/P2 fixes → gallery → chassis/drill/URL → camera-lite →
+  gated uPlot instrument pane → B6-on-chassis.
 - **Prometheus exporter** — metric names are Prometheus-ready; no exporter.
 - **CLI `--format json` / `csv`** — dropped; JSON ships via the web protocol.
 
@@ -2815,7 +2818,7 @@ Everything in this chapter that is **not** shipped, in one list:
   annotation markers → drill-to-timeline UI LEFT.
 - **Lock-chain UI** (#7) — `handle_lock_chains` has no Locks view/tab.
 - **Cross-session interference UI** (#8) — `handle_interference` has no report view.
-- **REWORK B6 net-new views** (⬜ not started, resume after Trust-Milestone T1/T3):
+- **REWORK B6 net-new views** (⬜ not started; the T1/T3 gate is met — now sequenced as **Track U Phase U3**, this Part):
   per-execution **waterfall** (10046 view), **latency scatter** (with server-side density
   downsampling), **transition matrix** (Sankey's scalable sibling / toggle).
 
@@ -2930,25 +2933,164 @@ v3 owns transitions column 7 (`cpu_ns` varint, frozen in `golden/rev3`); an
 with the range reader gate and a `rev4/` golden fixture (the PR's v3/v4 redefinition is
 byte-incompatible both directions).
 
-### UI instrument architecture (camera + strip cache) — ADOPTED direction (2026-07-31)
+### Track U — UI: the OEM loop + instrument (consolidated plan)  **[ADOPTED 2026-07-31; all phases ⬜]**
 
-**Decision:** the web UI's AAS surface moves from the request/response
-"dashboard" model (drag-select → server round-trip → repaint — the model OEM
-ASH Analytics and RDS PI themselves use) to an **instrument** model: a
-client-side camera (the time window as pure client state; cursor-anchored
-wheel-zoom and drag-pan; an explicit follow/detached live state machine
-honoring live-means-NOW) over a client-resident multi-resolution strip cache
-fed by the existing `{from,to,buckets}` server interface — the server demoted
-to background refiner, never inside the gesture loop. The backend already
-serves this (arbitrary-resolution strips, measured 3–22 ms); the missing half
-is client-side. Full analysis, measurements, costed paths, triggers, and
-guardrails: **docs/INSTRUMENT_ARCHITECTURE.md** (it also amends
-docs/VISUALIZATION_REVIEW.md — §6 there). Sequencing: review P1 (error
-visibility) + P2 (chart identity) first → camera-lite on ECharts (days;
-"Phase 2a") → uPlot-substrate AAS pane behind a written p95 ≤ 16.7 ms gesture
-gate (~1–3 weeks; the measured ECharts pipeline floor means the gate is
-expected to trip). Full Perfetto-style track engine rejected absent a product
-pivot.
+**Goal:** the full ASH investigation loop — notice → localize (brush) → attribute
+(re-rank) → isolate (drill) → inspect → compare → share — with instrument-grade
+interaction on the AAS surface: continuous cursor-anchored zoom/pan over a
+client-side camera + multi-resolution strip cache (the TradingView/Perfetto
+model; the incumbents OEM ASH / RDS PI are request/response dashboards, so this
+is how to surpass them, not the entry price). **Evidence docs** (analysis lives
+there, the PLAN lives here): `docs/VISUALIZATION_REVIEW.md` (findings P1–P11,
+the 7-word defect decoder, non-issues) and `docs/INSTRUMENT_ARCHITECTURE.md`
+(camera primer, paradigm analysis, measured ECharts pipeline floor, costed
+paths, §6 amendments). Renderer verdict: ECharts stays for secondary views;
+the AAS pane is expected to move to a uPlot substrate behind a written gate
+(U2b). Subsumes the REWORK **B6** bucket (waterfall / scatter / matrix → U3).
+
+**Phase U0 — Quick wins (days) ⬜**
+- **Error visibility (review P1):** `console.error` at the four swallow sites
+  (`lib/view-manager.js:112-121`, `app.js:333-334`, `app.js:243-246`); per-pane
+  error card (view, command, server `code`/`hint`, retry) for build/mount throws
+  and `transport:false` envelopes — including rendering the DUR-9
+  `window_too_large` refusal (today silently dropped; the string appears nowhere
+  in `web/static`); null-guard `fmtPct`/`fmtAas`/`fmtCount`/`pctBar` to "—";
+  re-scope the Playwright console-error guard to an allowlist.
+- **Mock reachability:** `?ws=` param or `ws_url` in `/session`; delete the five
+  copy-pasted FakeWS monkey-patches (`test_web_ui.py:1231/1519/1595`,
+  chaos `:576`, snapshots `:141-152`).
+- **Snapshot provenance:** pin `playwright==X.Y.Z` in both CI jobs; commit
+  `tests/web_snapshots/VERSION`.
+- **run_all.sh:** run the `node --test` layer (skip without node locally, fail
+  in CI); local pixel snapshots behind `PGWT_RUN_SNAPSHOTS=1`.
+- **Misplaced marks (P6):** burst-marker containing-bucket clamp
+  (`floor((ts−peaks[0].t)/bucket_ns)`, clamped) + last-bucket unit test (fix
+  `concurrency.test.mjs:39-47` which pins the off-by-one); timeline `clip:true`
+  + clamp `[s,s+d]` to `[from,to]` in the builder (raw start kept for tooltip)
+  + pre-window-start test.
+- **Escalation markLine** clamp/axis pin (it has never rendered) + flip
+  `fidelity.test.mjs:118,147`.
+- `animation:false` in every builder, pinned by one assert each.
+- **Live-vs-investigation (P4):** pause live on drill/breadcrumb exactly as
+  zoom does; unify the Live span (`app.js:653` vs `:211`); pauses-live as a
+  view property (wire the unused `opts.userInitiated` hook,
+  `view-manager.js:82`).
+- Suite hygiene: fix the tautological `check(x or True)` (`test_web_ui.py:638`);
+  port-poll instead of the 1.5 s sleep; on-failure screenshot + console tail as
+  CI artifacts.
+
+**Phase U1 — Seeing infrastructure + chart identity (1–2 weeks) ⬜**
+- **Fixture gallery** `web/static/dev/gallery.html` + `tests/fixtures/*.mjs`:
+  every pure builder × curated states (empty, single-point, dense 300
+  buckets/50 PIDs/16+ events, degenerate/all-zero/unicode/hostile-SQL,
+  sampled/mixed/escalated fidelity) + recorded **live-tick replay** with a play
+  button + recorded **gesture scripts** (this is also U2b's gate harness; the
+  Node-SSR pipeline floor 8.9→42.5 ms p50/step at 300→2400 buckets is the
+  pre-registered baseline).
+- `docs/VISUAL_CHECKLIST.md` — the 7-word decoder (STABILITY / CONTINUITY /
+  ALIGNMENT / OCCLUSION / SEMANTICS / HIERARCHY / FEEDBACK) keyed to gallery
+  cells.
+- **Identity cluster (P2):** one color service (event → deterministic tint
+  within its class hue; retire `EVENT_PALETTE`); stable stack order by event
+  identity; legend selection keyed by series **name** with reset on set change;
+  all annotations moved to a dedicated silent annotation series (fixes the
+  vanish-on-hover, empirically verified); flip `aas.test.mjs:70, 48-56` which
+  pin the bugs.
+- Gallery-cell snapshots with tight thresholds (~8/0.002) — first visual
+  coverage of drilled/sorted/error/fidelity-variant states.
+
+**Phase U2 — Chassis + drill wiring + URL state (weeks) ⬜**
+- **Chassis:** one themed base option (kills the triplicated chrome);
+  instance-reuse mount helper with the animation policy (the
+  `views/histogram.js:64-65` pattern everywhere — ends dispose/re-init churn,
+  P5); ms time coordinates at the builder boundary; click→intent plumbing.
+- **The seven drill wires (P3):** (1) AAS `chart.on('click')` → class drill
+  (event drill in breakdown mode); (2) burst/peak rows → `zoomTo(burst ± pad)`;
+  (3) session-timeline zoom via `attachSelection` refetch; (4) heatmap cell →
+  event+time drill; (5) DFG node → event drill (server emits `event_id` in node
+  JSON — one line at `server.c:2563`); (6) events percentile cells → histogram
+  tab; (7) persistent filter bar + tab badges; histogram dropdowns write
+  through to FilterStack (delete the second filter state).
+- **URL state (P9):** `{tab, from, to, live|span, filters, sort}` in the hash
+  (~50 lines; ns as strings; restored `live=1` re-anchors to NOW).
+- **Axis/anchor policies:** yMax CPU-line cap + hysteresis, window quantization
+  (merges into the camera's power-of-2 quantization); heatmap `log1p` +
+  single-hue ramp + sticky visualMap max + open-dropdown guard (P8).
+- **Fidelity beyond the AAS chart (P10):** per-pane fidelity badges;
+  percentile-basis footnotes ("exact-captured only: N of M"); "N others"
+  truncation rows.
+- DFG: persisted instance, rAF-throttled slider, preserved drag positions,
+  layout re-run on resize (P5); P11 minors opportunistically.
+- **Server backlog (small):** closed-data watermark + clock-generation stamp in
+  responses (`server.c:1168-1184` re-anchoring hazard, `server.c:1070-1077`
+  escalation window); wire compression (permessage-deflate in `bridge.go` or
+  `ssh -C`; 4–5× measured); strip channel through `transport.send` bypassing
+  the epoch-discard (`view-manager.js:109`) for cache fills. Explicitly
+  deferred: FIFO cancellation/priority (`server.c:3300-3313`) — compute is
+  3–22 ms; revisit only if prefetch traffic materializes.
+
+**Phase U2a — Camera-lite: the instrument on ECharts (days) ⬜**
+- `lib/camera.js` (~150–200 LOC, pure, Node-tested): TimeWindow,
+  cursor-anchored zoom math, power-of-2 LOD quantization, **follow/detached
+  state machine** with tested transitions (pan detaches — the 5 s tick must
+  never re-anchor the user; follow never shows a stale right edge; restored
+  live re-anchors to NOW).
+- `lib/stripcache.js`: strips keyed `{from,to,resolution,generation}`,
+  stale-but-useful retention.
+- AAS pane: ms value-axis pinned to `[from,to]`; preload strip beyond the
+  visible window; `dataZoom:{type:'inside'}` wheel+drag with
+  `filterMode:'none'`; settle-refine (debounced ~150 ms) fetches the finer
+  strip and swaps it under the fixed axis; live tick stays poll-and-replace 5 s.
+- Measure the gate via U1's recorded gesture scripts at ≥1200 cached buckets ×
+  18 series, in a real browser.
+
+**Phase U2b — uPlot AAS instrument pane (1–3 weeks)  [GATED] ⬜**
+- **Gate (written, pre-registered):** p95 gesture-to-paint **> 16.7 ms**
+  sustained after a ≤3-day tuning timebox → schedule; **> 33 ms** → begin
+  immediately. (Expected to trip: the measured ECharts pipeline floor is
+  20/33 ms p50/p95 at even the low preload corner.) Accepting 30 fps instead
+  would be a product decision to write down, not a threshold to hide behind.
+- Other triggers, any one suffices: raw-**sample** attribution (needs
+  client-resident raw samples — a data-residency milestone favoring an owned
+  renderer); single-camera **compare** overlay design; live cadence ≤1 s
+  (ECharts has no stacked-area append path — `appendData` is scatter/`lines`
+  only).
+- Substrate: **uPlot** (~500–900 owned LOC; official 159-LOC `stack.js` recipe;
+  Grafana precedent; the `ROADMAP_AND_STATUS.md:202` pre-scoped adapter swap).
+  Fallback bespoke canvas: ~2.5–4k LOC / 5–8 weeks full scope, ~1.8–2.5k /
+  3–5 weeks mouse-first single-TZ descope (calibration table in
+  INSTRUMENT_ARCHITECTURE.md §4b). Discarded on swap: camera↔dataZoom sync
+  glue + one AAS pixel-rebaseline (~2–4 days, priced and accepted).
+- **Guardrails (every phase):** honesty overlays (sampled shading, escalation
+  bands, N-CPUs line, DUR-9 refusal regions) are camera-space view-model
+  geometry under EVERY renderer, never renderer decorations; camera/cache/
+  stacked-geometry stay pure Node-tested modules; U0/U1 (error visibility +
+  identity) land before any instrument work is judged.
+
+**Phase U3 — B6 views on the chassis ⬜**  *(subsumes REWORK B6)*
+- Per-execution **waterfall** (the 10046 view; same custom-series technique as
+  the session timeline) — **zoom + click-to-inspect in its definition of
+  done**; **transition matrix** (heatmap builder as template; log/piecewise
+  visualMap from day one); **latency scatter** (server-side density capping;
+  ECharts large-mode + log y; 2D box-select by extending `pixelRangeToTime`).
+- **Compare mode** — the one genuinely new capability (every ASH peer ends
+  here); design after URL state lands; two cameras over one strip cache is
+  substantially cheaper than two dashboards.
+
+**Parked / acknowledged (decisions, not omissions):** accessibility is zero
+(no aria/roles/keyboard; mouse-only drill); no `@media` handling; long-tab
+memory soak (add to chaos when instance reuse lands — a leaked chart then
+lives forever); CLI (`src/output.c`) presentation-semantics audit against the
+web's once pinned; UTC/local toggle; `saveAsImage` export once a toolbox
+exists.
+
+**What NOT to do (from both docs, binding):** no wholesale library migration
+and no renderer trials outside the builder/mount seam; don't slim the vendored
+bundle; don't hand-roll a DFG renderer; no SPA framework/router beyond hash
+state; no preemptive table virtualization; no `appendData` streaming pursuit;
+no multi-value filter algebra yet (chips over FilterStack cover the 80% case);
+no batch visual fixes before the gallery exists; **never put the server inside
+the pan/zoom gesture loop.**
 
 ---
 
