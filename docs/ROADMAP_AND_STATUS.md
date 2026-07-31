@@ -2930,6 +2930,26 @@ v3 owns transitions column 7 (`cpu_ns` varint, frozen in `golden/rev3`); an
 with the range reader gate and a `rev4/` golden fixture (the PR's v3/v4 redefinition is
 byte-incompatible both directions).
 
+### UI instrument architecture (camera + strip cache) — ADOPTED direction (2026-07-31)
+
+**Decision:** the web UI's AAS surface moves from the request/response
+"dashboard" model (drag-select → server round-trip → repaint — the model OEM
+ASH Analytics and RDS PI themselves use) to an **instrument** model: a
+client-side camera (the time window as pure client state; cursor-anchored
+wheel-zoom and drag-pan; an explicit follow/detached live state machine
+honoring live-means-NOW) over a client-resident multi-resolution strip cache
+fed by the existing `{from,to,buckets}` server interface — the server demoted
+to background refiner, never inside the gesture loop. The backend already
+serves this (arbitrary-resolution strips, measured 3–22 ms); the missing half
+is client-side. Full analysis, measurements, costed paths, triggers, and
+guardrails: **docs/INSTRUMENT_ARCHITECTURE.md** (it also amends
+docs/VISUALIZATION_REVIEW.md — §6 there). Sequencing: review P1 (error
+visibility) + P2 (chart identity) first → camera-lite on ECharts (days;
+"Phase 2a") → uPlot-substrate AAS pane behind a written p95 ≤ 16.7 ms gesture
+gate (~1–3 weeks; the measured ECharts pipeline floor means the gate is
+expected to trip). Full Perfetto-style track engine rejected absent a product
+pivot.
+
 ---
 
 ## Housekeeping notes (doc hygiene)
