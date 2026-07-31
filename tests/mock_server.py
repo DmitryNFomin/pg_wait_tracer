@@ -500,6 +500,7 @@ class DaemonState:
             "state_map_full_total": 0,
             "seen_query_ids_full_total": 0,
             "invalid_wait_reads_total": 0,
+            "state_reseeds_total": 0,
             "sampler_healthy": True,
             "ringbuf_drops_total": 3,
             "trace_events_written_total": 1_250_000,

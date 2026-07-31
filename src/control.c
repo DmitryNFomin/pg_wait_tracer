@@ -184,7 +184,9 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
      * preseed/seed failures (each one is a backend recording nothing or
      * losing query attribution — CAP-1). seen_query_ids_full_total = query
      * text capture lost for new ids (CAP-6). invalid_wait_reads_total =
-     * garbage class-byte readings dropped (wrong offset backstop, CAP-2/5). */
+     * garbage class-byte readings dropped (wrong offset backstop, CAP-2/5).
+     * state_reseeds_total = frozen-stale entries reseeded by the per-tick
+     * sweep (seed→arm race repair, one INFO line each). */
     cjson_add_uint64(root, "state_map_full_total",
                      ctr->state_map_full_total
                      + pgwt_read_bpf_fail_counter((struct pgwt_daemon *)d,
@@ -194,6 +196,8 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
                                                 PGWT_BPF_FAIL_SEEN_QIDS));
     cjson_add_uint64(root, "invalid_wait_reads_total",
                      ctr->invalid_wait_reads_total);
+    cjson_add_uint64(root, "state_reseeds_total",
+                     ctr->state_reseeds_total);
     cJSON_AddBoolToObject(root, "sampler_healthy",
                           !(d->sampler && !d->sampler->health.healthy));
 

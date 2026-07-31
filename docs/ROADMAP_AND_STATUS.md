@@ -1284,22 +1284,36 @@ Parked with rationale so nothing is lost; each ships only when built (then it mo
 to a CHANGELOG entry).
 
 - **Residual straddle live-CPU flake: the seed→arm race (observed 2026-07-31,
-  PG17 CI, first sighting since PR #56).** PR #56 opens `on_cpu_ts` at every
-  watchpoint fire, which closed the missed-switch-in mode. One rarer window
-  remains: the backend's transient wait ends in the microseconds BETWEEN the
-  preseed's `/proc` wei read (`backend.c preseed_state_map`) and
+  PG17 CI, first sighting since PR #56; then 3 hits in one day across
+  PG13/17/18).** ✅ **FIXED — `pgwt_sweep_stale_state` (src/backend.c), the
+  ATTACHED-backend sibling of the #52 recovery.** PR #56 opens `on_cpu_ts` at
+  every watchpoint fire, which closed the missed-switch-in mode. One rarer
+  window remained: the backend's transient wait ends in the microseconds
+  BETWEEN the preseed's `/proc` wei read (`backend.c preseed_state_map`) and
   `PERF_EVENT_IOC_ENABLE` — the wei write happens before the watchpoint is
   armed, so no fire ever occurs; if the backend then runs a waitless loop
   uninterrupted for the whole capture (no sched_switch on a quiet 2-vCPU
-  host), `on_cpu_ts` stays 0 and live CPU* reads 0 while the terminal flush
-  stays correct (same signature as the fixed bugs). Fix direction
-  (level-triggered, matching the recovery philosophy): extend the per-tick
-  recovery to ATTACHED backends — if wp is armed and cmd_open and the
-  state_map entry shows `on_cpu_ts==0 && cpu_ns_total` flat while
-  `/proc/<pid>/stat` shows the task RUNNING, re-open the stretch (and refresh
-  `last_cpu_ns`). Deterministic test via a PGWT_TEST hook that suppresses the
-  arm-window fire. Probability per run is tiny (µs window × zero-switch
-  capture); rerun-on-flake until fixed.
+  host), the entry stays frozen at the dead wait and live CPU* reads 0 while
+  the terminal flush stays correct (same signature as the fixed bugs). The
+  shipped fix is level-triggered per the recovery philosophy but keys on the
+  STATE mismatch, not the originally-sketched `/proc/stat` RUNNING check
+  (which would miss a stale entry on a preempted backend and can never see
+  the wrong LABEL): each timer tick, every attached backend's actual
+  `/proc` wei is compared to its state_map `last_event`; a STABLE mismatch
+  (two reads 2ms apart, equal, both != `last_event`) on a FROZEN entry (no
+  fire for ≥1s) with an entry re-check (a real fire between the reads
+  disqualifies — the clobber guard) is repaired by the exact attach reseed
+  (`preseed_state_map`) — the never-bounded stale interval is DROPPED, never
+  emitted. One INFO line per repair + `state_reseeds_total` on the control
+  socket. Deterministic regression `phase_stale_seed_sweep` via the
+  `PGWT_TEST_STALE_SEED` hook (attach seed poisoned with a fake stale wait —
+  the missed fire on every run) incl. the negative under
+  `PGWT_TEST_NO_STALE_SWEEP` (sweep disabled, recovery active → live CPU*
+  stays at the floor). Both runs also hold sched_switch inert
+  (`PGWT_TEST_NO_SCHED_ONCPU`, the #56 house pattern) — a busy host otherwise
+  opens the hog's stretch by preemption and defeats the negative (observed on
+  the EL8 box) — with the sweep's repair reseed exempt from that hook's seed
+  force (the one sanctioned non-fire opener; `preseed_state_map`).
 
 - **Multi-window %DB: windowed-delta drift of measured-CPU vs wall.** The
   multi-window `--view` (Last 1s / Last 3s) differences two cumulative ring

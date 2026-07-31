@@ -153,6 +153,7 @@ for k in ('events_total', 'events_per_sec', 'lifecycle_events_total',
           # T4 capture-hardening counters (CAP-1/2/5/6, SMP-1/3)
           'state_map_full_total', 'seen_query_ids_full_total',
           'invalid_wait_reads_total', 'sampler_ticks_missed_total',
+          'state_reseeds_total',
           # T8 measured-CPU counters (§5.6). Present + numeric here; the exact
           # magnitudes are proven by the pure-CPU straddle acceptance test.
           'cpu_ns_total', 'offcpu_ns_total', 'cpu_clamped_total',

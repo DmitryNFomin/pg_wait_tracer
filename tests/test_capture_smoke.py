@@ -724,6 +724,8 @@ def phase_cpu_straddle(pm_pid, mode):
               f"in-flight command's CPU is counted (--mode {mode}): "
               f"cpu AAS = {cpu_mean:.2f} (edge-vs-level regression; pre-fix ~0)")
 
+    subprocess.run(["rm", "-rf", trace_dir])
+
 
 def phase_pure_cpu_straddle(pm_pid, mode):
     """T8 (docs/ROADMAP_AND_STATUS.md) — THE measured-CPU acceptance
@@ -1006,6 +1008,126 @@ def phase_straddle_livecpu_deterministic(pm_pid):
           f"stderr {err[-120:]!r})")
 
     subprocess.run(["rm", "-rf", trace_dir])
+
+
+def run_stale_seed_capture(pm_pid, extra_env):
+    """One tracer run for phase_stale_seed_sweep: a waitless pure-CPU hog
+    already in flight at attach (the int4-safe nested DO loop), traced with
+    PGWT_TEST_STALE_SEED=1 + PGWT_TEST_NO_SCHED_ONCPU=1 (+ extra_env).
+
+    sched_switch must be inert (the phase_straddle_livecpu_deterministic house
+    pattern): on a busy host a single preemption of the hog opens on_cpu_ts
+    and the NEGATIVE reads multi-second CPU* with the sweep disabled —
+    observed on the EL8 box mid-ci_smoke (CPU* = 12430ms) while the same
+    negative read 0-23ms on the quiet box. Under the hook the stretch can be
+    opened ONLY by a watchpoint fire — which the poisoned waitless hog
+    guarantees never comes — or by the sweep's repair reseed (the one
+    sanctioned non-fire opener; see preseed_state_map), so the CPU*
+    discriminator isolates the sweep as the repairing agent in BOTH runs.
+    Returns (out, err)."""
+    trace_dir = tempfile.mkdtemp(prefix="pgwt_smoke_stale_")
+    os.chmod(trace_dir, 0o755)
+
+    hog = subprocess.Popen(
+        ["psql", "-U", "postgres", "-d", "postgres"],
+        stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL, text=True)
+    hog.stdin.write(
+        "DO $$ DECLARE x bigint := 0; BEGIN "
+        "FOR o IN 1..100000 LOOP "
+        "FOR i IN 1..1000000 LOOP x := x + i; END LOOP; x := 0; "
+        "END LOOP; END $$;\n")
+    hog.stdin.flush()
+    time.sleep(2.5)   # the command is in flight; its start-edge is past
+
+    argv = [TRACER, "--mode", "full", "--pid", str(pm_pid),
+            "-T", trace_dir, "--duration", "16", "--interval", "4",
+            "--view", "time_model"]
+    env = {**os.environ, "PGWT_TEST_STALE_SEED": "1",
+           "PGWT_TEST_NO_SCHED_ONCPU": "1", **extra_env}
+    tracer = subprocess.Popen(argv, stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, env=env)
+    try:
+        stdout, stderr = tracer.communicate(timeout=50)
+    except subprocess.TimeoutExpired:
+        tracer.kill()
+        stdout, stderr = tracer.communicate()
+    finally:
+        try:
+            hog.stdin.write("\\q\n"); hog.stdin.flush()
+        except (BrokenPipeError, ValueError):
+            pass
+        hog.terminate()
+        cleanup_stale_backends()
+    subprocess.run(["rm", "-rf", trace_dir])
+    return (STRIP_ANSI.sub('', stdout.decode('utf-8', errors='replace')),
+            stderr.decode('utf-8', errors='replace'))
+
+
+def phase_stale_seed_sweep(pm_pid):
+    """DETERMINISTIC regression for the seed→arm race (pgwt_sweep_stale_state,
+    src/backend.c; docs/ROADMAP_AND_STATUS.md). The two prior straddle fixes
+    (#52 recovery, #56 fire-time on_cpu_ts open) both need a watchpoint FIRE or
+    an attach to repair from; this race produces neither: preseed_state_map
+    reads wait_event_info microseconds before PERF_EVENT_IOC_ENABLE, the seeded
+    wait ends inside that window, and the wei write to 0 lands before the arm —
+    no fire, ever. The entry stays frozen (last_event = a wait that ended long
+    ago, on_cpu_ts=0), so the live reader attributes the whole open interval to
+    the dead wait and a waitless pure-CPU straddler reads live CPU* = 0 for the
+    entire capture while the terminal flush and /proc magnitude cross-check
+    stay correct — the three 2026-07-31 CI hits (PG13/17/18).
+
+    PGWT_TEST_STALE_SEED forces that exact end state ON EVERY RUN: the attach
+    seed carries a FAKE nonzero wait (Timeout:PgSleep) with on_cpu_ts=0
+    regardless of the actual reading — a missed arm-window fire, made
+    deterministic. PGWT_TEST_NO_SCHED_ONCPU (both runs; see
+    run_stale_seed_capture) holds sched_switch inert so a busy host cannot
+    ambiently open the hog's on-CPU stretch — under it, only a watchpoint
+    fire (never comes: the hog is waitless) or the sweep's repair reseed can.
+    The per-tick sweep must then observe the stable /proc-vs-state mismatch
+    on a frozen entry and RESEED (repair at the first ~4s tick; live CPU*
+    accrues for the rest of the capture — measured ~8-10s of signal on both
+    the quiet and busy EL8 box, attributable ONLY to the sweep).
+
+    NEGATIVE (mirrors phase_straddle_recovery's documented negative): with
+    PGWT_TEST_NO_STALE_SWEEP=1 the same poisoned sched-inert run keeps the
+    recovery (PR #52) fully active yet reads only the ~tens-of-ms background
+    floor — proving (a) this test detects the bug class and (b) the sweep,
+    not the recovery, is the repairing agent. Same 2000ms discriminator gate
+    as phase_straddle_livecpu_deterministic: ~4x below the measured ~8-10s
+    signal, ~30x above the floor. Full mode only (needs watchpoints + cpu_accounting)."""
+    print("--- Phase: stale-seed sweep DETERMINISTIC (seed→arm race, "
+          "poisoned attach seed) ---")
+
+    # Positive: sweep enabled — it must repair the poisoned seed.
+    out, err = run_stale_seed_capture(pm_pid, {})
+    check("PGWT_TEST_STALE_SEED" in err,
+          "attach seed poisoned with a fake stale wait (test hook active)")
+    check("PGWT_TEST_NO_SCHED_ONCPU" in err,
+          "sched_switch on_cpu_ts open suppressed (isolation hook active)")
+    check("reseeded stale state" in err,
+          f"pgwt_sweep_stale_state repaired the frozen entry "
+          f"(stderr {err[-200:]!r})")
+    live_cpu = parse_time_model(out).get('CPU*', 0.0)
+    check(live_cpu > 2000.0,
+          f"stale-seeded pure-CPU straddler shows MULTI-SECOND live CPU* via "
+          f"the sweep reseed: CPU* = {live_cpu:.0f}ms")
+
+    # Negative: sweep disabled (ONLY the sweep — recovery stays active) — the
+    # poisoned entry must stay frozen and live CPU* must stay at the floor,
+    # proving the test detects the bug class.
+    out, err = run_stale_seed_capture(pm_pid, {"PGWT_TEST_NO_STALE_SWEEP": "1"})
+    check("PGWT_TEST_STALE_SEED" in err,
+          "negative: attach seed poisoned (test hook active)")
+    check("PGWT_TEST_NO_SCHED_ONCPU" in err,
+          "negative: sched_switch on_cpu_ts open suppressed (isolation hook "
+          "active)")
+    check("reseeded stale state" not in err,
+          "negative: sweep disabled — no repair line")
+    live_cpu = parse_time_model(out).get('CPU*', 0.0)
+    check(live_cpu < 2000.0,
+          f"negative: without the sweep the poisoned straddler stays at the "
+          f"background floor: CPU* = {live_cpu:.0f}ms (the exact CI failure)")
 
 
 def phase_sampled_aas_truth(pm_pid):
@@ -1310,6 +1432,10 @@ def main():
             # multi-second live CPU* only if the watchpoint fire opens on_cpu_ts
             # (the fix). Full mode only (needs watchpoints + cpu_accounting).
             phase_straddle_livecpu_deterministic(pm_pid)
+            # Deterministic regression for the seed→arm race: a poisoned attach
+            # seed (fake stale wait, no fire ever) must be repaired by the
+            # per-tick pgwt_sweep_stale_state — positive AND negative run.
+            phase_stale_seed_sweep(pm_pid)
         if args.mode == 'tiered':
             # T2 (AAS semantics): CPU-inclusive sampled AAS vs pg_stat_activity
             # ground truth, and the CPU-storm escalation + tier-switch
