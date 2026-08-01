@@ -49,6 +49,15 @@ int pgwt_scan_existing_backends(struct pgwt_daemon *d);
  * Idempotent; safe to call every tick. Returns the count recovered. */
 int pgwt_recover_unattached_backends(struct pgwt_daemon *d);
 
+/* Periodic state-consistency sweep for ATTACHED backends (the sibling of the
+ * recovery above): reseed any state_map entry frozen on a wait the backend
+ * provably left long ago — the seed→arm race, where the seeded wait ended
+ * before PERF_EVENT_IOC_ENABLE so its ending write never fired. Conservative
+ * two-read staleness predicate; repair drops the never-bounded stale interval
+ * rather than fabricating it. Idempotent; safe to call every tick. Returns
+ * the count reseeded. */
+int pgwt_sweep_stale_state(struct pgwt_daemon *d);
+
 /* Handle a new fork from postmaster. Attaches bootstrap watchpoint. */
 int pgwt_handle_fork(struct pgwt_daemon *d, pid_t child_pid);
 

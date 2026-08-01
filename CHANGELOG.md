@@ -10,6 +10,30 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+- **fix(cpu): seed→arm race — stale-state sweep for attached backends.** The
+  residual pure-CPU straddle live-view flake (three CI hits in one day,
+  PG13/17/18): the preseed reads `wait_event_info` microseconds before
+  `PERF_EVENT_IOC_ENABLE` arms the watchpoint; if the seeded wait ends inside
+  that window, its ending write never fires and the state_map entry stays
+  frozen at a wait that ended long ago (`on_cpu_ts = 0`), so a waitless
+  pure-CPU straddler read live `CPU* = 0` for the whole capture while the
+  terminal flush and the `/proc` magnitude cross-check stayed correct (PR #56's
+  fire-time `on_cpu_ts` open never runs — there IS no fire). Fixed by
+  `pgwt_sweep_stale_state` (the attached-backend sibling of PR #52's
+  `pgwt_recover_unattached_backends`, same per-tick level-triggered slot): a
+  STABLE actual-vs-state wei mismatch (two `/proc` reads 2ms apart) on a FROZEN
+  entry (no fire ≥1s), re-checked against a racing real fire, is repaired by
+  the exact attach reseed — the never-bounded stale interval is dropped, never
+  emitted. One INFO line per repair + new `state_reseeds_total` metric. New
+  deterministic regression `phase_stale_seed_sweep` + `PGWT_TEST_STALE_SEED`
+  hook (attach seed poisoned with a fake stale wait — the missed fire on every
+  run), with a negative under `PGWT_TEST_NO_STALE_SWEEP` proving the sweep is
+  the repairing agent. Both runs hold sched_switch inert via
+  `PGWT_TEST_NO_SCHED_ONCPU` — on a busy host a single preemption of the hog
+  otherwise opens the on-CPU stretch without the sweep (observed on the EL8
+  box) — with the sweep's repair reseed exempt from that hook's seed force as
+  the one sanctioned non-fire opener.
+
 - **ui(U1+U2a): fixture gallery, chart identity, camera-lite instrument**
   (Track U, PRs #60/#62). Gallery: 49 deterministic builder states +
   7-word visual checklist + tight-threshold cell snapshots — and it caught

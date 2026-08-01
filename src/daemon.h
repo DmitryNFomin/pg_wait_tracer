@@ -45,6 +45,8 @@ struct pgwt_counters {
     uint64_t state_map_full_total;     /* userspace state_map inserts failed (map full, CAP-1) */
     uint64_t invalid_wait_reads_total; /* wait_event_info reads with a garbage class byte (CAP-2/5) */
     uint64_t sampler_ticks_missed_total; /* sampler timer expirations coalesced/missed (SMP-3) */
+    uint64_t state_reseeds_total;      /* frozen-stale state_map entries reseeded by
+                                        * pgwt_sweep_stale_state (seed→arm race repair) */
 
     /* T8 measured-CPU observability (docs/ROADMAP_AND_STATUS.md).
      * Lifetime totals over the exact tier's measured intervals — the closed

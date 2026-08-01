@@ -6,6 +6,7 @@
 #include "cmdline.h"
 #include "backend_meta.h"
 #include "pg_wait_tracer.h"
+#include "wait_event.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -105,6 +106,11 @@ static void report_state_map_full(struct pgwt_daemon *d, pid_t pid)
             pid);
 }
 
+/* TEST HOOK (PGWT_TEST_STALE_SEED): the FAKE wait the poisoned seed carries —
+ * Timeout:PgSleep (class 0x09, event 2), a real encoding the smoke tests
+ * already know, so the stale state renders with a recognizable name. */
+#define PGWT_TEST_STALE_WEI (((uint32_t)PG_WAIT_TIMEOUT << 24) | 2)
+
 /* Pre-seed the BPF state_map for a backend whose wait_event_info address is
  * already resolved (be->wp_addr). Reads the backend's CURRENT wait_event_info
  * and query_id and writes them as the initial state, so the first watchpoint
@@ -116,9 +122,15 @@ static void report_state_map_full(struct pgwt_daemon *d, pid_t pid)
  * versions, re-exercised on each escalation): a garbage class byte means the
  * resolved address is wrong — counted + logged loudly, and never seeded as
  * if it were a real wait. A non-zero valid reading (re)confirms the offset.
+ *
+ * sweep_reseed: false for the attach-time seed (scan/init/escalation), true
+ * when called as pgwt_sweep_stale_state's REPAIR. The only difference is the
+ * PGWT_TEST_STALE_SEED hook below, which must poison ONLY the attach seed —
+ * poisoning the repair too would re-inject the very staleness the sweep just
+ * removed, forever.
  * Returns 0 on success, -1 if the state_map insert failed (map full). */
 static int preseed_state_map(struct pgwt_daemon *d, pid_t pid, uint64_t addr,
-                             uint64_t attach_ts)
+                             uint64_t attach_ts, bool sweep_reseed)
 {
     char mem_path[64];
     snprintf(mem_path, sizeof(mem_path), "/proc/%d/mem", pid);
@@ -152,6 +164,29 @@ static int preseed_state_map(struct pgwt_daemon *d, pid_t pid, uint64_t addr,
             break;
         default:
             break;   /* zero: consistent, not proof */
+        }
+
+        /* TEST HOOK (PGWT_TEST_STALE_SEED): deterministically reproduce the
+         * seed→arm race (docs/ROADMAP_AND_STATUS.md). In the real race the
+         * wait read here ends in the microseconds before PERF_EVENT_IOC_ENABLE
+         * arms the watchpoint: the wei write to 0 never fires, so the entry
+         * stays last_event=<ended wait>, on_cpu_ts=0 forever (a waitless loop
+         * produces no later fire and a quiet host no sched_switch). Force that
+         * exact end state on EVERY attach seed: a FAKE nonzero wait
+         * (Timeout:PgSleep) regardless of the actual reading — on_cpu_ts then
+         * seeds 0 via the current_wei != 0 branch below, matching the missed
+         * fire. pgwt_sweep_stale_state must repair it. NEVER applied to the
+         * sweep's own repair reseed (sweep_reseed — see the function comment);
+         * never set in production (it fabricates the seeded opening label). */
+        if (!sweep_reseed && getenv("PGWT_TEST_STALE_SEED")) {
+            char fake_name[64];
+            pgwt_event_full_name(PGWT_TEST_STALE_WEI, fake_name,
+                                 sizeof(fake_name));
+            fprintf(stderr, "WARN: PGWT_TEST_STALE_SEED — seeding PID %d with "
+                    "FAKE stale wait %s (actual 0x%08x; "
+                    "deterministic seed→arm-race repro; TEST ONLY)\n",
+                    pid, fake_name, current_wei);
+            current_wei = PGWT_TEST_STALE_WEI;
         }
 
         /* Read current query_id from MyBEEntry->st_query_id */
@@ -215,9 +250,16 @@ static int preseed_state_map(struct pgwt_daemon *d, pid_t pid, uint64_t addr,
              * (we==0) now. TEST HOOK PGWT_TEST_NO_SCHED_ONCPU also forces this
              * to 0 so on_cpu_ts can ONLY come from a watchpoint fire, making the
              * straddle live-CPU repro deterministic (background backends on-CPU
-             * at seed can't then pollute the system-wide live CPU*). */
+             * at seed can't then pollute the system-wide live CPU*) — EXCEPT
+             * the sweep's repair reseed (sweep_reseed): the sweep exists
+             * precisely to recover from a MISSED fire, so under the hook its
+             * repair is the one sanctioned non-fire opener. Without this
+             * exemption the hook would neuter the very repair
+             * phase_stale_seed_sweep uses it to isolate (the backend it
+             * repairs is waitless — no fire will ever open the stretch). */
             .on_cpu_ts    = (d->cpu_accounting && current_wei == 0 &&
-                             !getenv("PGWT_TEST_NO_SCHED_ONCPU")) ? attach_ts : 0,
+                             (sweep_reseed ||
+                              !getenv("PGWT_TEST_NO_SCHED_ONCPU"))) ? attach_ts : 0,
             .last_cpu_ns  = 0,
         };
         uint32_t pid_key = pid;
@@ -258,7 +300,7 @@ int pgwt_attach_backend_watchpoint(struct pgwt_daemon *d,
 
     if (be->attach_ts == 0)
         be->attach_ts = now_ns();
-    preseed_state_map(d, be->pid, be->wp_addr, be->attach_ts);
+    preseed_state_map(d, be->pid, be->wp_addr, be->attach_ts, false);
 
     if (pgwt_watchpoint_enable(be->wp_fd) != 0) {
         pgwt_close_watchpoint(be->wp_fd);
@@ -528,6 +570,140 @@ int pgwt_recover_unattached_backends(struct pgwt_daemon *d)
     }
     closedir(proc);
     return recovered;
+}
+
+/* Staleness predicate knobs (pgwt_sweep_stale_state below).
+ * FROZEN: the entry must have seen NO EMITTED transition for at least this
+ * long (last_ts is stamped by BPF on every emitted transition and by the
+ * seed; redundant-write-suppressed fires return BEFORE stamping — but a
+ * suppressed fire implies wei == last_event, so it can never satisfy the
+ * mismatch arm simultaneously). A healthy backend transitioning normally
+ * always has a fresher last_ts, so only a genuinely transition-less entry
+ * can qualify. With a 1s display interval the seed
+ * is already ~interval old at the first tick, so repair lands on the first or
+ * (borderline) second tick — level-triggered, so either is fine.
+ * RECHECK: the wei mismatch must survive a re-read this far apart. A real
+ * in-flight transition (wei read mid-flip) cannot hold one value across the
+ * recheck AND leave last_ts frozen for >= 1s at the same time. */
+#define PGWT_SWEEP_FROZEN_NS   1000000000ULL   /* 1s */
+#define PGWT_SWEEP_RECHECK_US  2000            /* 2ms */
+
+/* Level-triggered state-consistency sweep for ATTACHED backends — the sibling
+ * of pgwt_recover_unattached_backends above, which only covers UNattached
+ * ones. Closes the residual seed→arm race (docs/ROADMAP_AND_STATUS.md): the
+ * preseed reads wait_event_info microseconds before PERF_EVENT_IOC_ENABLE
+ * arms the watchpoint; if the seeded wait ENDS inside that window, the wei
+ * write to 0 lands before the arm and never fires. The entry then stays
+ * frozen at last_event=<a wait that ended long ago>, on_cpu_ts=0 — a waitless
+ * pure-CPU loop produces no later fire, and on a quiet low-CPU host no
+ * sched_switch opens the stretch either — so the live view attributes the
+ * whole open interval to the dead wait and reads CPU* = 0 (PR #56's
+ * fire-time on_cpu_ts open never runs: there IS no fire).
+ *
+ * PREDICATE (conservative — a genuine in-flight transition must never trip
+ * it): the entry is FROZEN (no fire for >= PGWT_SWEEP_FROZEN_NS) AND the
+ * actual /proc wei differs from last_event STABLY (two reads
+ * PGWT_SWEEP_RECHECK_US apart, equal to each other, both != last_event) AND
+ * the entry is still unchanged when re-checked after the second read (a real
+ * fire in between updates last_event/last_ts and disqualifies — this is the
+ * reseed-vs-real-fire clobber guard). Garbage readings never trigger anything
+ * (CAP-2/5) — counted like the preseed counts them.
+ *
+ * REPAIR = RESEED, never fabricate: the exact attach-time seed
+ * (preseed_state_map — last_event=actual wei, last_ts=now, CPU base reset,
+ * on_cpu_ts opened iff actually on-CPU, cmd_open preserved). The stale open
+ * interval tracked under the dead label is DROPPED, not emitted — its
+ * boundary was never observed, and emitting an invented duration would
+ * fabricate data. Loud: one INFO line per repair + state_reseeds_total on the
+ * control socket. Idempotent; cheap when healthy (one map lookup per attached
+ * backend, /proc reads only on a frozen entry). Returns the number of entries
+ * reseeded. */
+int pgwt_sweep_stale_state(struct pgwt_daemon *d)
+{
+    if (!pgwt_mode_uses_watchpoints(d))
+        return 0;
+
+    int state_fd = bpf_map__fd(d->skel->maps.state_map);
+    uint64_t now = now_ns();
+    int repaired = 0;
+
+    for (int i = 0; i < d->backends.count; i++) {
+        struct pgwt_backend *be = &d->backends.entries[i];
+        if (!be->is_alive || be->pid <= 0 || be->wp_fd < 0 || be->wp_addr == 0)
+            continue;
+
+        uint32_t pid_key = be->pid;
+        struct pgwt_pid_state st;
+        if (bpf_map_lookup_elem(state_fd, &pid_key, &st) != 0)
+            continue;
+        /* Seed-only entries (no live watchpoint) carry no interval state. */
+        if (!st.wp_live)
+            continue;
+        /* FROZEN gate — the common case (fresh last_ts) exits here. */
+        if (now < st.last_ts || now - st.last_ts < PGWT_SWEEP_FROZEN_NS)
+            continue;
+
+        char mem_path[64];
+        snprintf(mem_path, sizeof(mem_path), "/proc/%d/mem", be->pid);
+        int mem_fd = open(mem_path, O_RDONLY);
+        if (mem_fd < 0)
+            continue;   /* backend gone — the exit path owns the entry */
+
+        uint32_t wei_a = 0;
+        if (pread(mem_fd, &wei_a, sizeof(wei_a), be->wp_addr) !=
+            sizeof(wei_a)) {
+            close(mem_fd);
+            continue;
+        }
+        if (pgwt_classify_wei(wei_a) == PGWT_WEI_GARBAGE) {
+            /* Same backstop as the preseed (CAP-2/5): a garbage class byte
+             * means the address is suspect — count it, never act on it. */
+            d->counters.invalid_wait_reads_total++;
+            close(mem_fd);
+            continue;
+        }
+        if (wei_a == st.last_event) {
+            close(mem_fd);
+            continue;   /* consistent — a long genuine wait or CPU stretch */
+        }
+
+        /* STABILITY recheck: the mismatch must hold across a short delay so a
+         * transition caught mid-flip can never qualify. */
+        usleep(PGWT_SWEEP_RECHECK_US);
+        uint32_t wei_b = 0;
+        ssize_t got = pread(mem_fd, &wei_b, sizeof(wei_b), be->wp_addr);
+        close(mem_fd);
+        if (got != (ssize_t)sizeof(wei_b) || wei_b != wei_a)
+            continue;
+
+        /* Clobber guard: a REAL fire during the recheck window updates
+         * last_event/last_ts — re-check the entry and stand down if the
+         * watchpoint turned out to be alive after all. This shrinks the
+         * reseed-vs-real-fire race to the µs between this lookup and the
+         * BPF_ANY update below, and a fire-less entry (the only kind that
+         * reaches here) by definition has nothing racing in that window. */
+        struct pgwt_pid_state st2;
+        if (bpf_map_lookup_elem(state_fd, &pid_key, &st2) != 0)
+            continue;
+        if (st2.last_event != st.last_event || st2.last_ts != st.last_ts)
+            continue;
+
+        /* REPAIR = RESEED (see the function comment). The reseed re-reads the
+         * backend's CURRENT wei itself — level-triggered: seed present truth,
+         * never a value from a few ms ago. */
+        char stale_name[80], actual_name[80];
+        pgwt_event_full_name(st.last_event, stale_name, sizeof(stale_name));
+        pgwt_event_full_name(wei_a, actual_name, sizeof(actual_name));
+        if (preseed_state_map(d, be->pid, be->wp_addr, now_ns(), true) == 0) {
+            d->counters.state_reseeds_total++;
+            fprintf(stderr, "INFO: reseeded stale state for PID %d: state "
+                    "said %s, actual %s (missed watchpoint fire — seed→arm "
+                    "race; state_reseeds_total counts these)\n",
+                    be->pid, stale_name, actual_name);
+            repaired++;
+        }
+    }
+    return repaired;
 }
 
 /* CAP-2/3: post-scan offset confirmation. Only reached when the initial scan

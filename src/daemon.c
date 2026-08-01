@@ -85,6 +85,22 @@ static void handle_timer(struct pgwt_daemon *d)
     if (!d->lightweight_mode && !getenv("PGWT_TEST_NO_RECOVERY"))
         pgwt_recover_unattached_backends(d);
 
+    /* Stale-seed sweep — the ATTACHED-backend sibling of the recovery above
+     * (the seed→arm race, docs/ROADMAP_AND_STATUS.md): reseed any state_map
+     * entry frozen on a wait the backend provably left long ago, so the live
+     * view stops attributing the open interval (and its CPU) to a dead wait.
+     * Deliberately guarded by its OWN test env, not PGWT_TEST_NO_RECOVERY:
+     * that guard keeps meaning exactly "no unattached-backend recovery" (the
+     * PR #52 negative is untouched — an unattached backend has wp_fd < 0, so
+     * this sweep never touches it anyway), and the stale-seed negative test
+     * disables ONLY the sweep while the recovery stays production-active,
+     * proving the sweep — not the recovery — is the repairing agent. Not run
+     * in the startup settle: the seed is by definition fresher than the 1s
+     * frozen gate there, so the first timer tick is the earliest a stale
+     * entry is distinguishable from a fresh one. */
+    if (!d->lightweight_mode && !getenv("PGWT_TEST_NO_STALE_SWEEP"))
+        pgwt_sweep_stale_state(d);
+
     /* ESC-1: enforce the escalation budget mid-window (cheap no-op unless a
      * budget-limited window is open and has reached its cap). */
     pgwt_escalation_check_budget(d);
