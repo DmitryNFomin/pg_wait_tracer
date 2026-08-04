@@ -18,7 +18,7 @@
  * fetch it from the mock's static root.
  */
 
-import { states as aas } from './aas.mjs';
+import { states as aas, uplotStates as uplotAas } from './aas.mjs';
 import { states as fidelity } from './fidelity.mjs';
 import { states as timeline } from './timeline.mjs';
 import { states as histogram } from './histogram.mjs';
@@ -26,11 +26,16 @@ import { states as transitions } from './transitions.mjs';
 import { states as concurrency } from './concurrency.mjs';
 import { states as tableConfigs } from './table-configs.mjs';
 
-export const BUILDER_ORDER = ['aas', 'fidelity', 'timeline', 'histogram',
-    'transitions', 'concurrency', 'table-configs'];
+// 'uplot-aas' (U2b): the SAME aas fixture states rendered through
+// buildUplotSpec + a real uPlot mount — both AAS renderers stay eyeballable
+// while the ?renderer= seam exists (aas.mjs uplotStates shares objects with
+// states, so the two cell sets can never drift apart).
+export const BUILDER_ORDER = ['aas', 'uplot-aas', 'fidelity', 'timeline',
+    'histogram', 'transitions', 'concurrency', 'table-configs'];
 
 export const FIXTURES = {
     'aas': aas,
+    'uplot-aas': uplotAas,
     'fidelity': fidelity,
     'timeline': timeline,
     'histogram': histogram,

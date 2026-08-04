@@ -25,6 +25,9 @@
 
 import { MANIFEST, FIXTURES } from './fixtures/manifest.mjs';
 import { buildAasOption } from '../lib/builders/aas.js';
+import {
+    buildUplotSpec, overlayGeometry, overlayHooks,
+} from '../lib/uplot-aas.js';
 import { buildTimelineOption } from '../lib/builders/timeline.js';
 import { buildHeatmapOption } from '../lib/builders/histogram.js';
 import {
@@ -232,6 +235,90 @@ function renderAasTicks(body, foot, state, cell) {
         ticks[0].data.series.length + ' ranking changes between ticks');
 }
 
+/* ── uPlot AAS adapters (U2b) ────────────────────────────────────────────────
+ *
+ * The renderer-swap twin of the aas cells: the SAME fixture states through
+ * buildUplotSpec + a REAL uPlot mount, exactly the app's mount contract
+ * (views/active.js): real pixel dims at construct, overlay hooks merged
+ * before construction recomputing honesty geometry against the CURRENT x
+ * scale, setScale('x', spec.xWindow) to land on the window. The gallery
+ * treats the spec as a black box — it paints what the builder returns. */
+
+function mountUplotAas(host, data, opts) {
+    const spec = buildUplotSpec(data, opts);
+    if (!spec.hasData) return null;
+    host.style.width = CHART_W + 'px';
+    host.style.height = CHART_H + 'px';
+    const o = spec.uplotOpts;
+    o.width = CHART_W;
+    o.height = CHART_H;
+    o.hooks = overlayHooks((u) => overlayGeometry(data, opts,
+        { min: u.scales.x.min, max: u.scales.x.max }));
+    const u = new uPlot(o, spec.alignedData, host);
+    u.setScale('x', spec.xWindow);
+    return { u, spec };
+}
+
+function renderUplotAasStatic(body, foot, state) {
+    const host = div('chart', body);
+    const m = mountUplotAas(host, state.data, state.opts);
+    if (!m) {
+        host.remove();
+        emptyCard(body, 'No data in selected range');
+        return;
+    }
+    factLine(foot, 'renderer: uPlot · fidelity: ' + m.spec.fidelityLabel +
+        ' · series: ' + m.spec.seriesNames.length + ' · maxAas: ' + m.spec.maxAas);
+}
+
+function renderUplotAasTicks(body, foot, state, cell) {
+    const ticks = state.ticks;
+    const host = div('chart', body);
+    let mounted = mountUplotAas(host, ticks[0].data, ticks[0].opts);
+
+    const bar = div('tick-bar', body);
+    const label = document.createElement('span');
+    label.className = 'tick-label';
+
+    let tick = 0;
+    let timer = null;
+    const setTick = (n) => {
+        tick = ((n % ticks.length) + ticks.length) % ticks.length;
+        // The app's series-set-change path (views/active.js mountUplot): the
+        // top-N ranking churns between ticks, so each tick REBUILDS the
+        // instance — the rare, non-gesture rebuild, never the setScale loop.
+        if (mounted) { mounted.u.destroy(); mounted = null; }
+        host.textContent = '';
+        mounted = mountUplotAas(host, ticks[tick].data, ticks[tick].opts);
+        cell.dataset.tick = String(tick);
+        label.textContent = 'tick ' + (tick + 1) + '/' + ticks.length;
+    };
+
+    const btn = (text, onClick) => {
+        const b = document.createElement('button');
+        b.textContent = text;
+        b.addEventListener('click', onClick);
+        bar.appendChild(b);
+        return b;
+    };
+    btn('⏮', () => setTick(tick - 1));
+    const play = btn('▶', () => {
+        if (timer) {
+            clearInterval(timer); timer = null; play.textContent = '▶';
+        } else {
+            timer = setInterval(() => setTick(tick + 1), 1000);
+            play.textContent = '⏸';
+        }
+    });
+    btn('⏭', () => setTick(tick + 1));
+    bar.appendChild(label);
+
+    setTick(0);
+    tickHooks[cell.id] = setTick;
+    factLine(foot, 'renderer: uPlot · ' + ticks.length + ' recorded ticks · top-' +
+        ticks[0].data.series.length + ' ranking changes between ticks');
+}
+
 function renderTimeline(body, foot, state) {
     const m = buildTimelineOption(state.data, state.opts);
     if (!m.hasData) { emptyCard(body, 'No timeline events in window'); return; }
@@ -293,6 +380,9 @@ const RENDERERS = {
     'aas': (body, foot, state, cell) => (state.ticks
         ? renderAasTicks(body, foot, state, cell)
         : renderAasStatic(body, foot, state)),
+    'uplot-aas': (body, foot, state, cell) => (state.ticks
+        ? renderUplotAasTicks(body, foot, state, cell)
+        : renderUplotAasStatic(body, foot, state)),
     'fidelity': renderFidelity,
     'timeline': renderTimeline,
     'histogram': renderHistogram,

@@ -140,6 +140,9 @@ function makeCtx() {
         // into the camera and preloads/paints strips through the cache).
         camera, stripCache,
         echarts: window.echarts,
+        // U2b: the vendored uPlot constructor for the AAS pane's default
+        // renderer (views/active.js; ?renderer=echarts keeps the old path).
+        uplot: window.uPlot,
         chartEl, summaryEl, tooltipEl,
         mountTable,
         setStatus,
@@ -1064,6 +1067,12 @@ function boot() {
         // U2a: read-only camera + strip-cache handles for Playwright
         // assertions and the gate agent's gesture-to-paint instrumentation.
         camera, stripCache,
+        // U2b: which AAS renderer is active + the view's read-only debug
+        // snapshot (painted series/viewport/honesty-overlay geometry) so
+        // tests assert renderer state without reaching into canvas pixels.
+        get aasRenderer() { return activeView ? activeView.renderer : null; },
+        aasDebug: () => (activeView && activeView.debug)
+            ? activeView.debug() : null,
         get activeTab() { return vm ? vm.activeId() : null; },
         // B5: read-only accessors for Playwright assertions on the daemon state.
         daemon,

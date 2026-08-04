@@ -363,6 +363,17 @@ shared data layer that makes (b) cheap.
    product decision to be written down as such — not hidden inside a threshold.
    (A >33 ms-only gate would allow permanent ~35 fps choppiness without ever
    tripping — hence the two-level rule.)
+   **OUTCOME RECORDED 2026-08-04 — (b) shipped (U2b, uPlot substrate), same
+   harness extended to an A/B (both renderers, one invocation, same
+   mock/strip/steps, 3 runs each): measured uPlot p95 = 5.4/7.0/5.2 ms vs
+   ECharts re-measured 65.5/69.4/81.0 ms in the same sitting (a first
+   sitting the same day measured 5.3/5.3/5.2 vs 61.7/65.6/69.6 — preserved
+   under `history`; both GREEN). Number → rule → action: worst uPlot run
+   7.0 ms ≤ 16.7 ms → the 60 fps bar HOLDS (~2.4× headroom); no tuning
+   pass, the §4b bespoke-canvas fallback stays unexercised. The AAS pane's default renderer is uPlot;
+   `?renderer=echarts` is the retained rollback. Record:
+   `tests/results/gesture_gate.json` (pre-swap RED run preserved under
+   `history`).**
 2. **Sample-level attribution** — "click this pixel → which backend/query
    produced it." Band+bucket drill works in ECharts today (`triggerLineEvent` +
    `convertFromPixel` + ~30 lines); this trigger fires only when **raw-sample**

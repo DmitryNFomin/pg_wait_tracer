@@ -805,23 +805,58 @@ def test_auto_refresh(page):
 
 
 def test_chart_rendering(page):
-    """15. AAS chart is rendered (ECharts in #aas-chart-container).
+    """15. AAS chart is rendered — uPlot by default (U2b renderer swap), with
+    the ECharts A/B baseline still mountable via ?renderer=echarts.
 
-    B3: the AAS chart migrated from ApexCharts to ECharts (the "active" view
-    owns its own ECharts instance). The assertion now checks the ECharts
-    instance + a stacked-area series with data, instead of ApexCharts SVG paths.
-    """
+    B3 moved the AAS chart to ECharts; U2b swapped the default renderer to
+    uPlot (the measured ECharts gesture floor tripped the
+    INSTRUMENT_ARCHITECTURE §5 gate RED). The default-path assertions now go
+    through the view's read-only debug surface (window.__pgwt.aasDebug) plus
+    the uPlot canvas; the echarts leg pins that the rollback renderer still
+    paints series data."""
     print("--- Test 15: Chart Rendering ---")
 
     page.goto(MOCK_URL)
     page.wait_for_selector("#status.connected", timeout=10000)
     page.wait_for_timeout(1500)
 
-    # ECharts renders into a canvas inside the container.
-    canvas = page.query_selector("#aas-chart-container canvas")
-    check(canvas is not None, "AAS chart canvas rendered")
+    # Default renderer is uPlot.
+    renderer = page.evaluate("window.__pgwt.aasRenderer")
+    check(renderer == "uplot", f"default AAS renderer is uplot (got {renderer})")
 
-    # The ECharts instance must hold series with actual data points.
+    # uPlot renders into a canvas inside the host div.
+    canvas = page.query_selector("#aas-chart-container .aas-uplot-host canvas")
+    check(canvas is not None, "AAS uPlot canvas rendered")
+
+    # The painted spec must hold series with actual data buckets, and the
+    # viewport (x scale) must be the camera window.
+    dbg = page.evaluate("window.__pgwt.aasDebug()")
+    check(bool(dbg and dbg.get("mounted")), "uPlot instance mounted")
+    check(bool(dbg and dbg.get("bucketCount", 0) > 0 and
+               len(dbg.get("seriesNames", [])) > 0),
+          f"AAS spec has series with data (buckets={dbg and dbg.get('bucketCount')}, "
+          f"series={dbg and len(dbg.get('seriesNames', []))})")
+    cam = page.evaluate(
+        "() => [window.__pgwt.camera.fromNs, window.__pgwt.camera.toNs]")
+    xs = dbg.get("xScale") if dbg else None
+    check(bool(xs) and abs(xs["min"] * 1e6 - cam[0]) < 1e4 and
+          abs(xs["max"] * 1e6 - cam[1]) < 1e4,
+          f"x scale is exactly the camera window (scale={xs}, cam={cam})")
+
+    # Chart container should have reasonable dimensions
+    height = page.evaluate("""() => {
+        const el = document.getElementById('aas-chart-container');
+        return el ? el.offsetHeight : -1;
+    }""")
+    check(height > 100, f"Chart height = {height}px (expected > 100)")
+
+    # A/B baseline: ?renderer=echarts still mounts the ECharts path with
+    # stacked series data (the documented rollback for the U2b swap).
+    page.goto(MOCK_URL + "&renderer=echarts")
+    page.wait_for_selector("#status.connected", timeout=10000)
+    page.wait_for_timeout(1500)
+    check(page.evaluate("window.__pgwt.aasRenderer") == "echarts",
+          "?renderer=echarts selects the ECharts baseline")
     chart_status = page.evaluate("""() => {
         const el = document.getElementById('aas-chart-container');
         if (!el) return 'no container';
@@ -834,14 +869,7 @@ def test_chart_rendering(page):
         return 'ok:' + withData.length;
     }""")
     check(chart_status.startswith("ok"),
-          f"AAS chart has series with data ({chart_status})")
-
-    # Chart container should have reasonable dimensions
-    height = page.evaluate("""() => {
-        const el = document.getElementById('aas-chart-container');
-        return el ? el.offsetHeight : -1;
-    }""")
-    check(height > 100, f"Chart height = {height}px (expected > 100)")
+          f"ECharts baseline has series with data ({chart_status})")
 
 
 def test_concurrency_tab(page):
@@ -908,10 +936,18 @@ def test_legend_hover_survives_tick(page):
     pre-U1 trailing apply(selected) popped the chart back to all-selected
     under a stationary cursor. And since the DETACHED chip can never fire
     mouseleave, leaving the legend itself (legDiv.onmouseleave) must unstick.
-    """
-    print("--- Test 15c: Legend Hover Survives Live Tick ---")
 
-    page.goto(MOCK_URL)
+    U2b: PINNED TO ?renderer=echarts on purpose — this test's wire-tap idiom
+    (hooking chart.setOption to record every legend.selected apply) is
+    ECharts-specific AAS internals, and the ECharts path must keep exactly
+    these semantics while it exists as the A/B baseline. The shared
+    renderLegend semantics under the DEFAULT uPlot renderer are covered by
+    test_uplot_legend (same hover-solo-survives-tick pin, via the series
+    show flags).
+    """
+    print("--- Test 15c: Legend Hover Survives Live Tick (echarts baseline) ---")
+
+    page.goto(MOCK_URL + "&renderer=echarts")
     page.wait_for_selector("#status.connected", timeout=10000)
     # Live mode is on by default (5 s tick cadence, app.js startAutoRefresh);
     # wait for the external legend chips instead of a fixed sleep.
@@ -1005,6 +1041,164 @@ def test_legend_hover_survives_tick(page):
     off = sorted(n for n, v in (sel or {}).items() if not v)
     check(bool(sel) and not off,
           f"selection returns to all-on after leaving the legend (off={off})")
+
+
+def test_uplot_legend(page):
+    """15d. U2b: the U1 legend semantics under the DEFAULT uPlot renderer.
+
+    renderLegend is shared code; the renderer hook is applyVisible (uPlot:
+    the stack.js-recipe restack + setSeries/bands/setData swap). Pins:
+    hover-solo shows exactly one series; the solo SURVIVES a live-tick mount
+    rebuild (the U1 re-apply rule, same as 15c's echarts pin); leaving the
+    legend restores the persistent all-on selection. Series visibility is
+    read from the view's debug surface (uPlot series show flags)."""
+    print("--- Test 15d: uPlot Legend Semantics ---")
+
+    page.goto(MOCK_URL)
+    page.wait_for_selector("#status.connected", timeout=10000)
+    page.wait_for_selector("#aas-legend .aleg", timeout=10000)
+
+    def visible_names():
+        d = page.evaluate("window.__pgwt.aasDebug()")
+        if not d or not d.get("mounted"):
+            return None
+        return sorted(n for n, show in
+                      zip(d["seriesNames"], d["seriesShow"]) if show)
+
+    # Hover the IO chip and LEAVE the mouse there (class mode: the fixed
+    # WAIT_CLASSES set, so 'IO' exists on every tick).
+    io_sel = "#aas-legend .aleg:text-is('IO')"
+    check(page.query_selector(io_sel) is not None, "IO legend chip rendered")
+    page.hover(io_sel)
+    page.wait_for_function("""() => {
+        const d = window.__pgwt.aasDebug();
+        if (!d || !d.mounted) return false;
+        const on = d.seriesNames.filter((n, i) => d.seriesShow[i]);
+        return on.length === 1 && on[0] === 'IO';
+    }""", timeout=5000)
+    check(visible_names() == ["IO"], "hover solos the IO series (uPlot show flags)")
+
+    # While STILL hovering, let a live tick rebuild the chips (5 s cadence);
+    # the detached-chip wait is a condition, not a sleep.
+    chip = page.query_selector(io_sel)
+    page.wait_for_function("el => !el.isConnected", arg=chip, timeout=15000)
+    page.wait_for_timeout(300)   # trailing applyVisible after the rebuild
+    check(visible_names() == ["IO"],
+          f"hover-solo survived the live-tick rebuild (visible={visible_names()})")
+
+    # Leave the legend: the persistent selection (all-on) must come back.
+    page.mouse.move(640, 8)
+    page.wait_for_function("""() => {
+        const d = window.__pgwt.aasDebug();
+        if (!d || !d.mounted) return false;
+        return d.seriesShow.length > 0 && d.seriesShow.every(s => s);
+    }""", timeout=5000)
+    d = page.evaluate("window.__pgwt.aasDebug()")
+    off = [n for n, s in zip(d["seriesNames"], d["seriesShow"]) if not s]
+    check(not off, f"all series visible after leaving the legend (off={off})")
+
+
+def test_uplot_gestures(page):
+    """15e. U2b: the camera-owned gesture language on the uPlot pane.
+
+    The payoff of the renderer swap: gestures mutate the CAMERA and the
+    renderer draws FROM camera state (a setScale viewport transform — no
+    fetch, no rebuild). Language parity pins (unchanged wording): wheel =
+    cursor-anchored zoom; shift+drag = pan; plain drag = brush-select;
+    dblclick = zoom-out. Every gesture detaches the camera and pauses live
+    via the existing U0/U2a machinery."""
+    print("--- Test 15e: uPlot Camera Gestures ---")
+
+    page.goto(MOCK_URL)
+    page.wait_for_selector("#status.connected", timeout=10000)
+    page.wait_for_timeout(1500)
+
+    dbg = page.evaluate("window.__pgwt.aasDebug()")
+    check(bool(dbg and dbg.get("mounted")), "uPlot pane mounted before gestures")
+    check(page.evaluate("window.__pgwt.camera.mode") == "follow",
+          "camera follows (live) before any gesture")
+
+    box = page.evaluate("""() => {
+        const el = document.querySelector('.aas-uplot-host .u-over');
+        const r = el.getBoundingClientRect();
+        return { x: r.left, y: r.top, w: r.width, h: r.height };
+    }""")
+    cx = box["x"] + box["w"] * 0.5
+    cy = box["y"] + box["h"] * 0.5
+
+    # Wheel = cursor-anchored zoom IN: span shrinks, camera detaches, live
+    # pauses, and the x scale lands EXACTLY on the camera window.
+    span0 = page.evaluate("window.__pgwt.camera.toNs - window.__pgwt.camera.fromNs")
+    page.mouse.move(cx, cy)
+    page.mouse.wheel(0, -100)
+    page.wait_for_timeout(400)   # rAF paint + settle headroom
+    span1 = page.evaluate("window.__pgwt.camera.toNs - window.__pgwt.camera.fromNs")
+    check(span1 < span0, f"wheel zooms in (span {span0} -> {span1})")
+    check(page.evaluate("window.__pgwt.camera.mode") == "detached",
+          "wheel gesture detaches the camera")
+    live_on = page.evaluate(
+        "document.getElementById('live-btn').classList.contains('active')")
+    check(not live_on, "gesture paused live mode (U0 machinery)")
+    state = page.evaluate("""() => {
+        const d = window.__pgwt.aasDebug();
+        return { xs: d && d.xScale,
+                 from: window.__pgwt.camera.fromNs,
+                 to: window.__pgwt.camera.toNs };
+    }""")
+    xs = state["xs"]
+    check(bool(xs) and abs(xs["min"] * 1e6 - state["from"]) < 1e4 and
+          abs(xs["max"] * 1e6 - state["to"]) < 1e4,
+          f"viewport = camera window after zoom (scale={xs})")
+
+    # Shift+drag = pan: dragging the canvas LEFT moves the window FORWARD.
+    from_before = page.evaluate("window.__pgwt.camera.fromNs")
+    page.keyboard.down("Shift")
+    page.mouse.move(cx, cy)
+    page.mouse.down()
+    page.mouse.move(cx - 120, cy, steps=6)
+    page.mouse.up()
+    page.keyboard.up("Shift")
+    page.wait_for_timeout(400)
+    from_after = page.evaluate("window.__pgwt.camera.fromNs")
+    check(from_after > from_before,
+          f"shift+drag pans forward (from {from_before} -> {from_after})")
+    # No brush zoom happened: the selection overlay must ignore shift-drags.
+    span2 = page.evaluate("window.__pgwt.camera.toNs - window.__pgwt.camera.fromNs")
+    check(abs(span2 - span1) < span1 * 1e-6,
+          f"pan preserved the span (span {span1} -> {span2})")
+
+    # Plain drag = brush-select: the window narrows to the dragged sub-range.
+    win_before = page.evaluate(
+        "() => [window.__pgwt.timeRange.from, window.__pgwt.timeRange.to]")
+    x1 = box["x"] + box["w"] * 0.30
+    x2 = box["x"] + box["w"] * 0.60
+    page.mouse.move(x1, cy)
+    page.mouse.down()
+    page.mouse.move(x2, cy, steps=5)
+    page.mouse.up()
+    page.wait_for_timeout(600)
+    win_after = page.evaluate(
+        "() => [window.__pgwt.timeRange.from, window.__pgwt.timeRange.to]")
+    check(win_after[1] - win_after[0] < win_before[1] - win_before[0] and
+          win_after[0] >= win_before[0] - 1e6 and
+          win_after[1] <= win_before[1] + 1e6,
+          f"plain drag brush-selects a sub-window ({win_before} -> {win_after})")
+
+    # dblclick = zoom-out (the app's handler; uPlot's own dblclick autoscale
+    # is unbound so it can never race this).
+    span3 = page.evaluate("window.__pgwt.timeRange.to - window.__pgwt.timeRange.from")
+    page.mouse.dblclick(cx, cy)
+    page.wait_for_timeout(600)
+    span4 = page.evaluate("window.__pgwt.timeRange.to - window.__pgwt.timeRange.from")
+    check(span4 > span3, f"dblclick zooms out (span {span3} -> {span4})")
+
+    # Honesty overlays exist under this zoomed camera state: the N-CPUs line
+    # is y-space geometry and must be present in EVERY camera state.
+    dbg = page.evaluate("window.__pgwt.aasDebug()")
+    hl = (dbg or {}).get("overlays", {}) or {}
+    kinds = [l.get("kind") for l in hl.get("hlines", [])]
+    check("ncpus" in kinds,
+          f"N-CPUs overlay line present under the gestured camera (hlines={kinds})")
 
 
 def test_reconnection(page, mock_proc):
@@ -1489,15 +1683,11 @@ def test_custom_range_utc_and_aas_empty_state(page):
         check(" UTC" in (p.text_content("#time-range") or ""),
               "time-range readout labeled UTC")
 
-        # AAS chart has series data initially.
-        has_series = p.evaluate("""() => {
-            const c = echarts.getInstanceByDom(
-                document.getElementById('aas-chart-container'));
-            if (!c) return false;
-            const opt = c.getOption();
-            return !!(opt.series && opt.series.some(s => s.data && s.data.length));
-        }""")
-        check(has_series, "AAS chart painted for the live window")
+        # AAS chart has series data initially (default uPlot renderer; the
+        # debug surface reads the painted spec — U2b).
+        d = p.evaluate("window.__pgwt.aasDebug()")
+        check(bool(d and d.get("mounted") and d.get("bucketCount", 0) > 0),
+              "AAS chart painted for the live window")
 
         # Apply a custom range far outside the data. Typed values are UTC:
         # 2039-01-01 00:00-01:00 UTC, regardless of the browser's UTC+3 zone.
@@ -1520,21 +1710,22 @@ def test_custom_range_utc_and_aas_empty_state(page):
               f"custom From parsed as UTC (want {want_from}, got {int(got_from)})")
 
         # UI-5: the empty window CLEARED the chart (no stale series paint).
+        # uPlot form (U2b): the instance is destroyed and an explicit
+        # empty-state card takes the pane — same contract as the old ECharts
+        # clear + 'No data' graphic.
         state = p.evaluate("""() => {
-            const c = echarts.getInstanceByDom(
-                document.getElementById('aas-chart-container'));
-            if (!c) return { instance: false };
-            const opt = c.getOption();
-            const hasSeries = !!(opt.series &&
-                opt.series.some(s => s.data && s.data.length));
-            const hasGraphic = !!(opt.graphic && opt.graphic.length &&
-                JSON.stringify(opt.graphic).includes('No data'));
-            return { instance: true, hasSeries, hasGraphic };
+            const d = window.__pgwt.aasDebug();
+            const card = document.querySelector(
+                '#aas-chart-container .aas-empty');
+            return { renderer: d && d.renderer, mounted: !!(d && d.mounted),
+                     hasData: !!(d && d.hasData),
+                     cardText: card ? card.textContent : null };
         }""")
-        check(state.get("instance") and not state.get("hasSeries"),
+        check(not state.get("mounted") and not state.get("hasData"),
               f"AAS chart cleared on empty window ({state})")
-        check(state.get("hasGraphic"),
-              "AAS chart shows an explicit 'No data' placeholder")
+        check(state.get("cardText") == "No data in selected range",
+              f"AAS chart shows an explicit 'No data' placeholder "
+              f"(got {state.get('cardText')!r})")
 
         assert_no_console_errors(p, guard, "utc/empty-state")
     finally:
@@ -1570,6 +1761,14 @@ def test_reconnect_idempotent_no_leak(page):
     }""")
     check(charts <= 2,
           f"no ECharts instance leak after 3 reconnects (live instances={charts})")
+
+    # U2b: the AAS pane is uPlot by default — exactly ONE uPlot root must
+    # exist (resync mounts reuse the instance; a leaking init would add one
+    # .uplot per reconnect).
+    uplot_roots = page.evaluate(
+        "document.querySelectorAll('#aas-chart-container .uplot').length")
+    check(uplot_roots == 1,
+          f"no uPlot instance leak after 3 reconnects (roots={uplot_roots})")
 
     # Tab listeners not duplicated: one tab click must produce exactly one
     # table request + one aas request (N+1 listeners would send N+1 each).
@@ -1688,21 +1887,23 @@ def test_b5_sampled_shading(page):
     page.wait_for_selector("#status.connected", timeout=10000)
     page.wait_for_timeout(1500)
 
-    # The AAS builder must attach a markArea band on the first series, and the
-    # fidelity legend chip must explain it.
+    # U2b: under the default uPlot renderer the sampled-honesty band is
+    # overlay GEOMETRY painted by the draw hooks (lib/uplot-aas.js
+    # overlayGeometry) — assert a sampled rect exists under the CURRENT
+    # viewport, and that the chip explains it. (The ECharts markArea form of
+    # this pin lives on via the fidelity_sampled_shading snapshot +
+    # ?renderer=echarts.)
     shading = page.evaluate("""() => {
-        const el = document.getElementById('aas-chart-container');
-        const c = echarts.getInstanceByDom(el);
-        if (!c) return 'no instance';
-        const opt = c.getOption();
-        const s0 = opt.series && opt.series[0];
-        if (!s0) return 'no series';
-        const ma = s0.markArea;
-        if (!ma || !ma.data || !ma.data.length) return 'no markArea';
-        return 'ok:' + ma.data.length;
+        const d = window.__pgwt.aasDebug();
+        if (!d || !d.mounted) return 'no instance';
+        if (!d.overlays) return 'no overlays';
+        const bands = d.overlays.rects.filter(
+            r => r.kind === 'sampled' || r.kind === 'mixed');
+        if (!bands.length) return 'no fidelity band';
+        return 'ok:' + bands.length;
     }""")
     check(shading.startswith("ok"),
-          f"AAS chart has a fidelity markArea band ({shading})")
+          f"AAS pane has a fidelity shading band in view ({shading})")
 
     chip = page.query_selector("#aas-fidelity-chip")
     check(chip is not None, "Fidelity legend chip rendered")
@@ -1857,6 +2058,9 @@ def main():
                 test_chart_rendering,
                 test_concurrency_tab,
                 test_legend_hover_survives_tick,
+                # Track U Phase U2b: uPlot default renderer
+                test_uplot_legend,
+                test_uplot_gestures,
                 test_session_drill_to_timeline,
                 test_query_drill,
                 # Sprint 5.3: Exact data display tests

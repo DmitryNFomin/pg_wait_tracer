@@ -114,16 +114,31 @@ GALLERY_STATIC_CELLS = [
     "gallery-aas-escalated-live-edge",          # fidelity: escalation edge line
     "gallery-aas-unicode-names",                # i18n event names
     "gallery-aas-empty",                        # empty state (placeholder card)
+    # U2b renderer-swap twins: the SAME aas fixture states (shared by
+    # reference in dev/fixtures/aas.mjs) through buildUplotSpec + a real
+    # uPlot mount — one data source, two renderers. The echarts aas-* cells
+    # above STAY: ?renderer=echarts still renders via buildAasOption, so
+    # both pixel sets gate for as long as the rollback seam exists.
+    "gallery-uplot-aas-dense",                  # uPlot: class-mode stack
+    "gallery-uplot-aas-dense-events",           # uPlot: identity colors
+    "gallery-uplot-aas-sampled",                # uPlot: sampled overlay rect
+    "gallery-uplot-aas-mixed-escalation",       # uPlot: mixed + escalation band
+    "gallery-uplot-aas-escalated-live-edge",    # uPlot: edge vline (drop-never-move)
     "gallery-timeline-dense-50pids",            # dense timeline (480px cap)
     "gallery-timeline-single-point",            # degenerate timeline
     "gallery-histogram-dense",                  # dense heatmap
     "gallery-concurrency-dense-bursts",         # overlay chart + burst tables
     "gallery-table-configs-queries-hostile-sql",  # hostile SQL + event tints
 ]
-# The recorded live-replay cell, captured at ONE fixed tick (stepped there via
-# the deterministic ⏭ button — never the ▶ 1 s timer).
-GALLERY_TICK_CELL = "gallery-aas-live-ticks"
-GALLERY_TICK_STEP = 4
+# The recorded live-replay cells, captured at ONE fixed tick each (stepped
+# there via the deterministic ⏭ button — never the ▶ 1 s timer). The uplot
+# twin rebuilds its instance per tick — the app's real series-set-change
+# path (views/active.js mountUplot) — so its baseline also pins that
+# rebuild rendering.
+GALLERY_TICK_CELLS = [
+    ("gallery-aas-live-ticks", 4),
+    ("gallery-uplot-aas-live-ticks", 4),
+]
 
 
 def _gallery_name(cell_id):
@@ -495,8 +510,10 @@ def snap_gallery_suite(page):
     The gallery is fully static (ES modules over HTTP; no WebSocket), served by
     the exact mock's static root.
     """
-    tick_name = f"gallery/aas-live-ticks-tick{GALLERY_TICK_STEP}"
-    wanted = [_gallery_name(c) for c in GALLERY_STATIC_CELLS] + [tick_name]
+    tick_names = {cell: f"{_gallery_name(cell)}-tick{step}"
+                  for cell, step in GALLERY_TICK_CELLS}
+    wanted = ([_gallery_name(c) for c in GALLERY_STATIC_CELLS] +
+              list(tick_names.values()))
     if not any(selected(n) for n in wanted):
         return  # --only filter selects no gallery cell; skip the page load
 
@@ -511,26 +528,27 @@ def snap_gallery_suite(page):
                  pixel_threshold=GALLERY_PIXEL_THRESHOLD,
                  max_diff_ratio=GALLERY_MAX_DIFF_RATIO)
 
-    # Tick replay at a FIXED step: click the ⏭ step button GALLERY_TICK_STEP
+    # Tick replay at a FIXED step: click each cell's ⏭ step button `step`
     # times (never the ▶ interval timer — a timer capture would race the
     # screenshot) and wait for the cell's data-tick attribute to confirm the
     # deterministic position before capturing.
-    if selected(tick_name):
+    for cell, step in GALLERY_TICK_CELLS:
+        tick_name = tick_names[cell]
+        if not selected(tick_name):
+            continue
         step_btn = page.query_selector(
-            f"#{GALLERY_TICK_CELL} .tick-bar button:nth-of-type(3)")
+            f"#{cell} .tick-bar button:nth-of-type(3)")
         if step_btn is None:
             results.append((tick_name, False, "tick step button not found"))
             print(f"  FAIL: {tick_name} (tick step button not found)")
             capture_failure(page, tick_name, "tick step button not found")
-        else:
-            for _ in range(GALLERY_TICK_STEP):
-                step_btn.click()
-            page.wait_for_selector(
-                f"#{GALLERY_TICK_CELL}[data-tick='{GALLERY_TICK_STEP}']",
-                timeout=5000)
-            snapshot(page, tick_name, f"#{GALLERY_TICK_CELL}",
-                     pixel_threshold=GALLERY_PIXEL_THRESHOLD,
-                     max_diff_ratio=GALLERY_MAX_DIFF_RATIO)
+            continue
+        for _ in range(step):
+            step_btn.click()
+        page.wait_for_selector(f"#{cell}[data-tick='{step}']", timeout=5000)
+        snapshot(page, tick_name, f"#{cell}",
+                 pixel_threshold=GALLERY_PIXEL_THRESHOLD,
+                 max_diff_ratio=GALLERY_MAX_DIFF_RATIO)
 
 
 # ── Main ────────────────────────────────────────────────────────────────────

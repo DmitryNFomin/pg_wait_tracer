@@ -9,6 +9,12 @@
      supply-chain exposure from a floating CDN tag. ApexCharts was removed in
      B3 (the AAS chart moved to ECharts with a custom selection overlay). -->
 <script src="vendor/echarts.min.js"></script>
+<!-- uPlot vendored at an exact version (U2b renderer swap — the AAS pane's
+     default instrument substrate; provenance + verify procedure in
+     web/static/vendor/README.md). ECharts stays loaded: it renders every tab
+     view, and ?renderer=echarts keeps the AAS A/B baseline mountable. -->
+<link rel="stylesheet" href="vendor/uPlot.min.css">
+<script src="vendor/uPlot.iife.min.js"></script>
 </head>
 <body>
 

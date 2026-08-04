@@ -2965,7 +2965,7 @@ v3 owns transitions column 7 (`cpu_ns` varint, frozen in `golden/rev3`); an
 with the range reader gate and a `rev4/` golden fixture (the PR's v3/v4 redefinition is
 byte-incompatible both directions).
 
-### Track U — UI: the OEM loop + instrument (consolidated plan)  **[ADOPTED 2026-07-31; U0 ✅ (#59), U1 ✅ (#60), U2a ✅ (#62); U2b SCHEDULED (gate RED); U2/U3 ⬜]**
+### Track U — UI: the OEM loop + instrument (consolidated plan)  **[ADOPTED 2026-07-31; U0 ✅ (#59), U1 ✅ (#60), U2a ✅ (#62), U2b ✅ (2026-08-04, gate GREEN); U2/U3 ⬜]**
 
 **Goal:** the full ASH investigation loop — notice → localize (brush) → attribute
 (re-rank) → isolate (drill) → inspect → compare → share — with instrument-grade
@@ -3082,7 +3082,7 @@ the AAS pane is expected to move to a uPlot substrate behind a written gate
 - Measure the gate via U1's recorded gesture scripts at ≥1200 cached buckets ×
   18 series, in a real browser.
 
-**Phase U2b — uPlot AAS instrument pane (1–3 weeks)  [GATED] ⬜**
+**Phase U2b — uPlot AAS instrument pane  ✅ [DONE — 2026-08-04, gate GREEN]**
 - **Gate (written, pre-registered): TRIPPED RED 2026-07-31 — begin (b)
   immediately.** Measured on the real app in real Chromium (U2a harness
   `tests/test_gesture_gate.py`, 3 runs, 1258-bucket × 16-series cached strip,
@@ -3091,20 +3091,56 @@ the AAS pane is expected to move to a uPlot substrate behind a written gate
   59.4 / 67.6 ms** — ~2× the 33 ms begin-immediately line, ~4× the 16.7 ms
   60 fps bar (secondary action→paint p50 ≈ 16 ms matches the pre-registered
   SSR floor 20.4/32.8, confirming the ECharts pipeline as the budget item).
-  Verdict per the rule: **U2b is scheduled, no longer gated.** Numbers live
-  in `tests/results/gesture_gate.json`; harness re-runnable via
-  `PGWT_RUN_GESTURE_GATE=1`.
-- Other triggers, any one suffices: raw-**sample** attribution (needs
+  Verdict per the rule: **U2b is scheduled, no longer gated.**
+- **Outcome — measured 2026-08-04 (the same harness, extended to an A/B: both
+  renderers in one invocation, same mock/strip/steps, 3 runs per renderer):
+  uPlot combined gesture-to-paint p50 ≈ 2.6–3.4 ms, p95 = 5.4 / 7.0 / 5.2 ms;
+  the retained ECharts path re-measured p50 ≈ 46–48 ms, p95 = 65.5 / 69.4 /
+  81.0 ms in the same sitting (a first sitting the same day: uPlot p95
+  5.3/5.3/5.2 vs ECharts 61.7/65.6/69.6 — preserved under `history`; both
+  sittings GREEN). Number → rule → action: worst uPlot run p95
+  7.0 ms ≤ 16.7 ms → GREEN — target met with ~2.4× headroom (~9–12× the
+  ECharts pipeline); no tuning pass, bespoke-canvas fallback unexercised.** Probe
+  equivalence is documented in the harness: uPlot 1.6.32 commits via
+  queueMicrotask — scale mutation and the full synchronous canvas write are
+  atomic inside the commit, and pending scales are invisible before it, so a
+  wrapped rAF callback observing the moved x scale can never precede the
+  canvas write (the double-rAF chain queued in the camera dispatch guarantees
+  a same-frame callback — load-bearing, not merely a fallback): the same
+  pre-compositor canvas-written instant ECharts' 'finished' reports. Numbers
+  live in `tests/results/gesture_gate.json` (the pre-swap RED record is
+  preserved under `history`); re-runnable via `PGWT_RUN_GESTURE_GATE=1`.
+- **What shipped:** vendored uPlot 1.6.32 (MIT, sha256-pinned provenance in
+  `web/static/vendor/README.md`); `lib/uplot-aas.js` pure module (official
+  stack.js recipe, hidden-series slot stability, `hitTest`, honesty overlays
+  as absolute camera-space geometry — 33 Node tests incl. cross-renderer
+  parity: identical names/colors/yMax/window/axis-label text/overlay
+  coordinates vs `buildAasOption`); `views/active.js` mount swap behind a
+  `?renderer=echarts|uplot` seam (default uplot; ECharts kept fully intact as
+  A/B baseline + rollback). The camera is now GENUINELY authoritative —
+  closes U2a's "authoritative by convention" caveat: our handlers mutate the
+  camera (wheel = cursor-anchored zoom, shift+drag = pan, plain drag = brush,
+  dblclick = zoom-out — language unchanged) and the renderer draws FROM
+  camera state via one rAF-coalesced `u.setScale` over resident data; strip
+  swaps ride `setData(…, false)` under the fixed window. Honesty overlays
+  redraw against the CURRENT x scale on every draw (rects clamp, lines drop
+  but never move into view) — verified at ~22× zoom-in, ~9× zoom-out, and
+  panned fully off-data. Gallery gained 6 `uplot-aas` twin cells; the AAS
+  pane baselines regenerated + 6 cell baselines added (the priced ~2–4 day
+  rebaseline; residual diffs were exactly the predicted tick placement/font
+  raster/antialiasing — colors, alpha, and overlay coordinates parity-pinned).
+- Other triggers, any one suffices (recorded for completeness; all fired-or-
+  future ones remain future): raw-**sample** attribution (needs
   client-resident raw samples — a data-residency milestone favoring an owned
   renderer); single-camera **compare** overlay design; live cadence ≤1 s
   (ECharts has no stacked-area append path — `appendData` is scatter/`lines`
   only).
-- Substrate: **uPlot** (~500–900 owned LOC; official 159-LOC `stack.js` recipe;
-  Grafana precedent; the `ROADMAP_AND_STATUS.md:202` pre-scoped adapter swap).
-  Fallback bespoke canvas: ~2.5–4k LOC / 5–8 weeks full scope, ~1.8–2.5k /
-  3–5 weeks mouse-first single-TZ descope (calibration table in
-  INSTRUMENT_ARCHITECTURE.md §4b). Discarded on swap: camera↔dataZoom sync
-  glue + one AAS pixel-rebaseline (~2–4 days, priced and accepted).
+- Substrate was: **uPlot** (~500–900 owned LOC; official 159-LOC `stack.js`
+  recipe; Grafana precedent; the `ROADMAP_AND_STATUS.md:202` pre-scoped
+  adapter swap) — landed at ~560 module LOC. Fallback bespoke canvas
+  (~2.5–4k LOC / 5–8 weeks; calibration table in INSTRUMENT_ARCHITECTURE.md
+  §4b) not needed. Discarded on swap, as priced: camera↔dataZoom sync glue
+  stays only on the `?renderer=echarts` path + one AAS pixel-rebaseline.
 - **Guardrails (every phase):** honesty overlays (sampled shading, escalation
   bands, N-CPUs line, DUR-9 refusal regions) are camera-space view-model
   geometry under EVERY renderer, never renderer decorations; camera/cache/

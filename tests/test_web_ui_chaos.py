@@ -467,11 +467,18 @@ def test_dragzoom_during_refresh(page):
     the chart out from under the active selection, the zoom maps to the wrong
     time range, or the chart instance is mutated mid-render.
 
-    B3: the AAS chart is now an ECharts instance owned by the "active" view
+    B3: the AAS chart is a renderer instance owned by the "active" view
     (created in enter, disposed in leave — no module-level chart global), and
     drag-select is a custom overlay (lib/selection.js: pointer events + a band
-    div + convertFromPixel). The aas fetch is single-flight on the active.aas
-    transport channel, so a new refresh supersedes the pending one structurally.
+    div + pixel->time conversion). The aas fetch is single-flight on the
+    active.aas transport channel, so a new refresh supersedes the pending one
+    structurally.
+
+    U2b (renderer swap): the default renderer is uPlot; ECharts remains the
+    ?renderer=echarts A/B baseline. The "chart still painted with series"
+    probe below dispatches on window.__pgwt.aasRenderer — via the view's
+    aasDebug() surface for uPlot, via echarts.getInstanceByDom for the
+    baseline — so this race pin holds under whichever renderer is mounted.
     """
     goto_ready(page)
     page.click("#live-btn")
@@ -494,10 +501,16 @@ def test_dragzoom_during_refresh(page):
 
     page.wait_for_timeout(3500)  # let zoom + late responses settle
 
-    # The chart must still be a live, rendered ECharts instance with series.
+    # The chart must still be a live, rendered instance with series data,
+    # probed through whichever renderer is actually mounted (U2b seam).
     canvas = page.query_selector("#aas-chart-container canvas")
     check(canvas is not None, "AAS chart canvas still present after drag-zoom")
     has_series = page.evaluate("""() => {
+        if (window.__pgwt && window.__pgwt.aasRenderer === 'uplot') {
+            const d = window.__pgwt.aasDebug();
+            return !!(d && d.mounted && d.bucketCount > 0 &&
+                      d.seriesNames.length > 0);
+        }
         const el = document.getElementById('aas-chart-container');
         if (!el || typeof echarts === 'undefined') return false;
         const c = echarts.getInstanceByDom(el);
@@ -506,7 +519,7 @@ def test_dragzoom_during_refresh(page):
         return !!(opt.series && opt.series.some(s => s.data && s.data.length));
     }""")
     check(has_series is True,
-          "AAS chart still has ECharts series with data after drag-zoom")
+          "AAS chart still painted with series data after drag-zoom")
 
     # Time range and view window must be self-consistent (from < to). State is
     # now the explicit TimeRange module, exposed for tests as window.__pgwt.
@@ -524,10 +537,13 @@ def test_dragzoom_during_refresh(page):
 # "stable listener/handler counts (no leak)" acceptance item — the restructure's
 # enter()/leave() chart ownership must dispose every per-tab chart it created.
 
-# Count of live ECharts instances + pending transport requests. Each per-tab
-# chart view disposes its instance in leave(); a leak would show as a growing
-# instance count after many switches. We scan every element ECharts could have
-# attached to (it stamps a private id on the host node).
+# Count of live ECharts instances + uPlot roots + pending transport requests.
+# Each per-tab chart view disposes its instance in leave(); a leak would show
+# as a growing instance count after many switches. We scan every element
+# ECharts could have attached to (it stamps a private id on the host node).
+# U2b: the AAS pane's default renderer is uPlot — a re-mount leak there would
+# show as multiple `.uplot` roots (uPlot stamps that class on its root div),
+# invisible to the ECharts scan, so both are counted.
 _LEAK_PROBE = """() => {
     let charts = 0;
     if (typeof echarts !== 'undefined') {
@@ -535,9 +551,10 @@ _LEAK_PROBE = """() => {
             try { if (echarts.getInstanceByDom(el)) charts++; } catch (e) {}
         }
     }
+    const uplots = document.querySelectorAll('.uplot').length;
     const t = window.__pgwt && window.__pgwt.transport;
     const pending = t ? Object.keys(t.pending).length : -1;
-    return { charts, pending };
+    return { charts, uplots, pending };
 }"""
 
 # A pseudo-random but deterministic action stream (no wall-clock RNG) so the
@@ -598,11 +615,16 @@ def test_soak_random_navigation(page):
 
     probe = page.evaluate(_LEAK_PROBE)
     # On a no-chart table tab, only the persistent AAS chart should remain.
-    # Allow a small slack (>=1, <=2) to absorb a just-disposed/just-created
-    # transient, but a leak (one per switch) would push this to dozens.
+    # Under the default uPlot renderer that is 0 ECharts instances and exactly
+    # 1 uPlot root; allow small ECharts slack (<=2) to absorb a just-disposed/
+    # just-created per-tab transient, but a leak (one per switch) would push
+    # these to dozens.
     check(probe["charts"] <= 2,
           f"no ECharts instance leak after {N} transitions "
-          f"(live instances={probe['charts']}, expected ~1 AAS)")
+          f"(live instances={probe['charts']})")
+    check(probe["uplots"] <= 1,
+          f"no uPlot root leak after {N} transitions "
+          f"(roots={probe['uplots']}, expected 1 AAS pane)")
     check(probe["pending"] == 0,
           f"no transport requests left pending after soak "
           f"(pending={probe['pending']})")
@@ -611,9 +633,10 @@ def test_soak_random_navigation(page):
     # mid-transition.
     page.wait_for_timeout(1500)
     probe2 = page.evaluate(_LEAK_PROBE)
-    check(probe2["charts"] <= 2 and probe2["pending"] == 0,
+    check(probe2["charts"] <= 2 and probe2["uplots"] <= 1
+          and probe2["pending"] == 0,
           f"resource counts stable on re-probe (charts={probe2['charts']}, "
-          f"pending={probe2['pending']})")
+          f"uplots={probe2['uplots']}, pending={probe2['pending']})")
 
 
 # ── Registry ──────────────────────────────────────────────────────────────────

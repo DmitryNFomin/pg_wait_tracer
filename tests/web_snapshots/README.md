@@ -48,6 +48,50 @@ python3 tests/test_web_ui_snapshots.py --update-snapshots --only='gallery/*'
   `gallery-table-configs-queries-hostile-sql`). All 12 other pane baselines
   measured unchanged (<= 0.0003) against the U1 tree. Added the 13 `gallery/`
   cell baselines. See `VERSION` for the generation environment.
+- 2026-08-04 (Track U U2b): TWO pane baselines regenerated + SIX `gallery/`
+  cell baselines added for the AAS renderer swap (the pane's default renderer
+  is now uPlot behind the `?renderer=echarts|uplot` seam).
+  `aas_chart_overview.png` and `fidelity_sampled_shading.png` both screenshot
+  `#aas-chart-container`, which now renders via `lib/uplot-aas.js` + the
+  vendored uPlot bundle — pre-regen diff ratios 0.082/0.089, the priced U2b
+  rebaseline (tick placement/density, font raster, area-edge antialiasing;
+  series colors, 0.85 area alpha, and honesty-overlay coordinates are
+  parity-pinned against the ECharts builder in
+  `tests/web_unit/uplot-aas.test.mjs`). Added `gallery/uplot-aas-{dense,
+  dense-events, sampled, mixed-escalation, escalated-live-edge,
+  live-ticks-tick4}.png` — renderer-swap twins of the aas cells (same fixture
+  states by reference, real uPlot mounts; the tick cell rebuilds its instance
+  per tick, the app's series-set-change path). The ECharts `gallery/aas-*`
+  cells are RETAINED and measured 0.0000 against the U2b tree — the
+  `?renderer=echarts` rollback path still renders through `buildAasOption`,
+  so both pixel sets gate. Generated LOCALLY (playwright 1.58.0 / chromium
+  145.0.7632.6 — same environment and justification as the U1/U2a entries)
+  via `--update-snapshots --only=…` so the 24 untouched baselines were never
+  rewritten; follow-up compare matched 28/28 excluding exactly the four
+  2026-07-31 CI-chromium-authoritative cells below. Full-run caveat: those
+  four cells' `capture_failure()` full-page screenshots trigger the
+  documented neighbor drift on BOTH `*live-ticks-tick4` cells (captured
+  last), 0.0106/0.0135 in a full local run — both verified 0.0000 in
+  isolation (`PGWT_SNAP_ONLY='gallery/*live-ticks*'`). If the CI compare
+  churns on the tight-tolerance `gallery/uplot-aas-*` cells, regenerate them
+  in CI via the workflow below — same PR.
+  Layout-phase note (measured 2026-08-04): gallery cells have always sat at
+  FRACTIONAL page offsets (heights like 376.375), so an element screenshot's
+  rasterization depends on the layout phase above the cell. Inserting the
+  `uplot-aas` section mid-page shifts every cell below it by +2400.125 CSS
+  px (local chromium 145). A same-browser A/B against the pre-U2b tree shows
+  this phase change alone re-rasterizes exactly three of the four
+  CI-authoritative cells — `histogram-dense` (header glyph AA),
+  `concurrency-dense-bursts` (footer glyph AA), and
+  `table-configs-queries-hostile-sql` (screenshot clip widens 245→246 px:
+  top fraction .672→.797 under floor(top)/ceil(bottom) clip rounding) —
+  while `timeline-single-point` and every other below-section cell are
+  pixel-identical across trees. Consequence: expect CI churn on those three
+  cells with this change; that churn is the layout shift, not chromium
+  drift — regenerate them in CI, same PR. (Root-cause hardening — integer-
+  quantized gallery cell heights so captures are phase-independent — would
+  itself rebaseline every gallery cell, so it is deliberately not bundled
+  into the U2b PR.)
 - 2026-07-31 (Track U U2a): NINE baselines regenerated for the First-catch
   axis fix (`builders/aas.js` x-axis → `type:'time'`, all stacked layers now
   paint, UTC time-tick labels): `aas_chart_overview.png`,
