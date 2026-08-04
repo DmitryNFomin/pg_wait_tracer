@@ -35,7 +35,8 @@ export const UNAVAILABLE_MSG = 'requires full-fidelity data';
 /* True when a view response is the structured "needs full-fidelity data"
  * marker rather than real data. */
 export function isUnavailable(data) {
-    return !!(data && typeof data.unavailable === 'string');
+    return !!(data && (data.code === 'full_fidelity_required' ||
+        typeof data.unavailable === 'string'));
 }
 
 /* Normalize a response's fidelity token to one of exact|sampled|mixed|none.
@@ -238,9 +239,10 @@ export function buildUnavailablePanel(data, opts) {
         canEscalate: supported,
         title: 'No full-fidelity data in this window',
         hint: supported
-            ? 'This view needs exact transition data. The current window is ' +
-              fidelityLabel(fidelity).toLowerCase() +
-              '. Escalate to capture full fidelity, then refresh.'
+            ? ((data && typeof data.hint === 'string' && data.hint) ||
+              ('This view needs exact transition data. The current window is ' +
+               fidelityLabel(fidelity).toLowerCase() +
+               '. Escalate to capture full fidelity, then refresh.'))
             : 'This view needs exact transition data, which is only captured ' +
               'while escalated. Escalation is not available (run the daemon in ' +
               '--mode tiered).',

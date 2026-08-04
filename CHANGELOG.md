@@ -10,6 +10,32 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+- **ui(U3): the B6 analysis views — per-execution waterfall, latency
+  scatter, transition matrix** (Track U Phase U3). Server: new
+  `executions` / `execution_detail` / `exec_scatter` commands built on the
+  EXEC/PLAN lifecycle markers — in-progress executions never get invented
+  ends, window-straddling executions surface with started_before_window,
+  arbitrary detail windows are refused (never fabricated), class/event
+  filters apply like every other compute, the scatter reservoir keeps
+  every bucket's outlier AND redistributes unused quota, and leader_pid
+  (long a documented gap) lands additively in backends.jsonl. UI: the
+  10046 waterfall (leader + parallel-worker lanes, plan band, measured-CPU
+  tooltips distinguishing null from zero, resident-data drag-zoom proven
+  to send zero requests, click-to-inspect readout), execution scatter
+  (time axis + log-y, honest split exclusion notes, 2D box-select,
+  point→waterfall), transition matrix (log piecewise single-hue ramp,
+  volume-honest hidden notes, cell→drill incl. CPU targets); three tabs
+  with URL deep links incl. exact scatter→waterfall selection identity;
+  full_fidelity_required refusals render as expected-unavailability
+  panels with the server's own hint. Built by staged delegation with an
+  adversarial review between stages: 3 blocking / 5 high / 8 medium / 7
+  low findings all fixed with regression pins (notably: drag-select was
+  10px off on padded chart hosts — the shared helper now converts
+  canvas-relative like the AAS path). Validation: node 317/317,
+  Playwright 379/379, execution data tests 81/81, protocol drift 57/57,
+  chaos green, snapshots green modulo the six documented CI-authoritative
+  cells.
+
 - **ui(U2): the OEM investigation loop is complete** (Track U Phase U2).
   The seven drill wires: click an AAS band to drill (both renderers, via
   the uPlot hitTest / ECharts cumulative walk), burst rows jump-zoom to

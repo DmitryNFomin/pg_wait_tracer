@@ -37,9 +37,9 @@ test('events present -> event stacked bar; only classes -> class stacked bar', (
         events: [{ name: 'CPU*', ms: 60 }, { name: 'IO:DataFileRead', ms: 40 }] })] }, null);
     const withClasses = buildQueriesModel({ rows: [q({ total_ms: 100,
         classes: [60, 40, 0, 0, 0, 0, 0, 0, 0, 0, 0] })] }, null);
-    // Wait Profile is the 5th column (index 4)
-    assert.ok(withEvents.table.rows[0].cells[4].html.includes('stacked-bar'));
-    assert.ok(withClasses.table.rows[0].cells[4].html.includes('stacked-bar'));
+    // Waterfall is deliberately early, so Wait Profile is column 6 (index 5).
+    assert.ok(withEvents.table.rows[0].cells[5].html.includes('stacked-bar'));
+    assert.ok(withClasses.table.rows[0].cells[5].html.includes('stacked-bar'));
 });
 
 test('long query text gets a qt-hover cell carrying the full text', () => {
@@ -74,6 +74,19 @@ test('drill intent targets query_id (-> events); label is text prefix', () => {
     assert.deepEqual(
         queriesConfig.onClick(q({ query_id: '42', text: '' })),
         { filterKey: 'query_id', filterValue: '42', label: 'Query 42' });
+});
+
+test('dedicated Waterfall cell emits query-executions without changing row drill', () => {
+    const row = q({ query_id: '10', text: 'SELECT * FROM accounts' });
+    const m = buildQueriesModel({ rows: [row] }, null);
+    const cell = m.table.rows[0].cells[2];
+    assert.equal(m.table.headers[2].label, 'Waterfall');
+    assert.equal(cell.intent.pivot, 'query-executions');
+    assert.equal(cell.intent.filterKey, 'query_id');
+    assert.equal(cell.intent.filterValue, '10');
+    assert.ok(cell.html.includes('Executions'));
+    assert.equal(queriesConfig.onClick(row).filterKey, 'query_id');
+    assert.equal(queriesConfig.onClick(row).pivot, undefined);
 });
 
 test('empty + single-row edge cases', () => {

@@ -141,6 +141,13 @@ export const queriesConfig = {
                 esc(r.text).replace(/"/g, '&quot;') + '">' +
                 _dot(r.top_wait) + truncated + '</span>';
         }},
+        { key: '_executions', label: 'Waterfall', sortable: false,
+          cls: 'query-executions-cell',
+          format: () => '<span class="cell-drill query-executions-action" ' +
+              'title="Open individual executions">Executions →</span>',
+          intent: (r) => ({ pivot: 'query-executions', filterKey: 'query_id',
+              filterValue: r.query_id,
+              label: r.text ? r.text.substring(0, 40) : 'Query ' + r.query_id }) },
         { key: 'total_ms', label: 'DB Time', cls: 'num', format: (r) => fmtMs(r.total_ms) },
         { key: 'pct', label: '%DB', cls: 'num', format: (r) => fmtPct(r.pct) },
         { key: 'classes', label: 'Wait Profile', format: (r) =>

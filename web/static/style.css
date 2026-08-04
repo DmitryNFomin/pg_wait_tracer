@@ -383,6 +383,44 @@ h1 { font-size: 18px; font-weight: 600; color: #fff; }
   border-top: 1px solid #2a2a4a;
   overflow-x: auto;
 }
+
+/* B6 execution waterfall / scatter / transition matrix. */
+.view-title {
+  padding: 10px 12px 7px;
+  color: #ddd;
+  font-size: 13px;
+  font-weight: 600;
+}
+.view-title span { color: #777; font-size: 11px; font-weight: 400; margin-left: 8px; }
+.execution-list { max-height: 310px; overflow: auto; border-bottom: 1px solid #343454; }
+.execution-list table { min-width: 820px; }
+tr.selected-execution td { background: #173653; }
+.execution-open { color: #ffd166; font-size: 11px; }
+.query-executions-action { color: #4fc3f7; white-space: nowrap; }
+.waterfall-pane, .scatter-shell, .matrix-shell { position: relative; }
+.waterfall-banner {
+  display: flex; justify-content: space-between; gap: 16px;
+  padding: 8px 14px; color: #9ab9cb; background: #17263c;
+  border-bottom: 1px solid #2a405a; font-size: 11px;
+}
+#waterfall-chart { min-height: 240px; padding: 4px 10px; }
+#scatter-chart { height: 480px; padding: 4px 10px; }
+#matrix-chart { height: 660px; padding: 4px 10px; }
+.chart-readout {
+  display: flex; gap: 14px; flex-wrap: wrap; align-items: center;
+  min-height: 34px; padding: 7px 14px; color: #aaa; font-size: 11px;
+  background: #16162c; border-top: 1px solid #2a2a4a;
+}
+.wf-inspect-name { color: #fff; font-weight: 600; }
+.honesty-note, .chart-notes {
+  padding: 6px 14px; color: #ffd166; font-size: 11px; background: #312b18;
+}
+.chart-notes:empty { display: none; }
+.scatter-shell > .chart-notes, .matrix-shell > .chart-notes {
+  position: absolute; top: 37px; right: 20px; z-index: 4;
+  max-width: 520px; border-radius: 3px; background: rgba(49,43,24,0.92);
+  pointer-events: none;
+}
 table {
   width: 100%;
   border-collapse: collapse;

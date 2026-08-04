@@ -94,6 +94,10 @@ class ServerHarness:
         if "filters" in kwargs:
             req["filters"] = kwargs.pop("filters")
 
+        # Additive command-specific fields (for example limit/max_points and
+        # execution_detail's decimal-string bounds) pass through unchanged.
+        req.update(kwargs)
+
         # Auto-inject expanded time range if not specified
         if "from" not in req and hasattr(self, "_from_ns") and self._from_ns > 0:
             req["from"] = self._from_ns

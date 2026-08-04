@@ -30,6 +30,9 @@ import {
 } from '../lib/uplot-aas.js';
 import { buildTimelineOption } from '../lib/builders/timeline.js';
 import { buildHeatmapOption } from '../lib/builders/histogram.js';
+import { buildWaterfallOption } from '../lib/builders/waterfall.js';
+import { buildExecScatterOption } from '../lib/builders/exec-scatter.js';
+import { buildMatrixOption } from '../lib/builders/matrix.js';
 import {
     buildTransitionsOption, buildVariantsHtml,
 } from '../lib/builders/transitions.js';
@@ -337,6 +340,36 @@ function renderHistogram(body, foot, state) {
         ' · max_count: ' + state.data.max_count);
 }
 
+function renderWaterfall(body, foot, state) {
+    const m = buildWaterfallOption(state.data, state.opts);
+    if (!m.hasData) { emptyCard(body, 'No execution events captured'); return; }
+    makeChart(div('chart', body), m.option, Math.min(m.chartHeight, 420));
+    factLine(foot, 'lanes: ' + m.lanes.length + ' · events: ' + m.kept_count +
+        (m.total_count == null ? '' : ' of ' + m.total_count) +
+        ' · plan: ' + (state.data.plan ? 'present' : 'absent') +
+        ' · truncated: ' + m.truncated);
+}
+
+function renderExecScatter(body, foot, state) {
+    const m = buildExecScatterOption(state.data);
+    if (!m.hasData) {
+        emptyCard(body, 'No completed, positive-duration executions');
+        if (m.notes.length) factLine(foot, m.notes.join(' · '));
+        return;
+    }
+    makeChart(div('chart', body), m.option, 340);
+    factLine(foot, 'plotted: ' + m.points.length + ' · excluded: ' +
+        m.excludedCount + (m.notes.length ? ' · ' + m.notes.join(' · ') : ''));
+}
+
+function renderMatrix(body, foot, state) {
+    const m = buildMatrixOption(state.data, state.opts);
+    if (!m.hasData) { emptyCard(body, 'No transitions found'); return; }
+    makeChart(div('chart', body), m.option, 500);
+    factLine(foot, 'events: ' + m.visibleCount + ' · cells: ' + m.cells.length +
+        (m.notes.length ? ' · ' + m.notes.join(' · ') : ''));
+}
+
 function renderTransitions(body, foot, state) {
     if (state.variants) {
         const wrap = div('variants', body);
@@ -388,6 +421,9 @@ const RENDERERS = {
     'histogram': renderHistogram,
     'transitions': renderTransitions,
     'concurrency': renderConcurrency,
+    'waterfall': renderWaterfall,
+    'exec-scatter': renderExecScatter,
+    'matrix': renderMatrix,
     'table-configs': renderTable,
 };
 

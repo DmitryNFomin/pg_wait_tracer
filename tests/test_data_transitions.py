@@ -37,6 +37,17 @@ try:
         links = data.get("links", [])
 
         t.check(data.get("total") == 8, "total transitions = 8")
+        t.check(data.get("truncated") is False and
+                data.get("link_count") == data.get("total_link_count"),
+                "uncapped response declares complete link coverage")
+
+        capped = srv.query("transitions", buckets=2)
+        t.check(capped.get("truncated") is True,
+                "server discloses when its transition-link cap fires")
+        t.check(capped.get("link_count") == 2 and
+                capped.get("total_link_count", 0) > 2 and
+                capped.get("total") == 8,
+                "capped links retain total link and transition volumes")
 
         def find_link(src_substr, tgt_substr):
             for l in links:

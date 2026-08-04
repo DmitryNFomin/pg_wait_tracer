@@ -223,7 +223,7 @@ export class FilterStack {
 const HASH_FILTER_KEYS = { class: true, event_id: true, pid: true, query_id: true };
 const HASH_NUMERIC_FILTER_MAX = { event_id: 0xffffffff, pid: 0x7fffffff };
 
-/* state: { tab, live, spanSecs, fromNs, toNs, filters, sort } -> hash string
+/* state: { tab, live, spanSecs, fromNs, toNs, filters, sort, execution } -> hash string
  * (no leading '#'). Canonical: same state always yields the same string. */
 export function serializeHashState(s) {
     const parts = [];
@@ -245,6 +245,16 @@ export function serializeHashState(s) {
     if (s.sort && s.sort.key) {
         push('sort', s.sort.key + '.' + (s.sort.asc ? 'asc' : 'desc'));
     }
+    const execution = s.execution;
+    if (execution && Number.isInteger(Number(execution.pid)) &&
+        Number(execution.pid) > 0 && /^\d+$/.test(String(execution.start_ns || ''))) {
+        push('exec.pid', Number(execution.pid));
+        push('exec.start', String(execution.start_ns));
+        if (execution.end_ns != null && /^\d+$/.test(String(execution.end_ns)))
+            push('exec.end', String(execution.end_ns));
+        if (execution.query_id != null)
+            push('exec.query', String(execution.query_id));
+    }
     return parts.join('&');
 }
 
@@ -257,7 +267,9 @@ export function parseHashState(hash) {
     if (raw.startsWith('#')) raw = raw.slice(1);
     if (!raw) return null;
     const s = { tab: null, live: false, spanSecs: null,
-                fromNs: null, toNs: null, filters: {}, sort: null };
+                fromNs: null, toNs: null, filters: {}, sort: null,
+                execution: null };
+    const execution = {};
     let any = false;
     for (const part of raw.split('&')) {
         const eq = part.indexOf('=');
@@ -298,7 +310,29 @@ export function parseHashState(hash) {
                 s.sort = { key: v.slice(0, dot), asc: v.slice(dot + 1) === 'asc' };
                 any = true;
             }
+        } else if (k === 'exec.pid') {
+            const n = Number(v);
+            if (Number.isInteger(n) && n > 0 && n <= 0x7fffffff) {
+                execution.pid = n;
+            }
+        } else if (k === 'exec.start' || k === 'exec.end') {
+            if (/^\d+$/.test(v)) {
+                try {
+                    const n = BigInt(v);
+                    if (n > 0n && n <= 18446744073709551615n) {
+                        execution[k === 'exec.start' ? 'start_ns' : 'end_ns'] = v;
+                    }
+                } catch (e) { /* drop hostile integer */ }
+            }
+        } else if (k === 'exec.query' && /^-?\d+$/.test(v)) {
+            execution.query_id = v;
         }
+    }
+    if (execution.pid && execution.start_ns) {
+        if (execution.end_ns && BigInt(execution.end_ns) <= BigInt(execution.start_ns))
+            delete execution.end_ns;
+        s.execution = execution;
+        any = true;
     }
     if (!any) return null;
     if (s.live) { s.fromNs = null; s.toNs = null; }         // live means NOW

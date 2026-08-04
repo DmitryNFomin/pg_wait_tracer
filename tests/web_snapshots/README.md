@@ -41,6 +41,27 @@ python3 tests/test_web_ui_snapshots.py --update-snapshots --only='gallery/*'
 ## Baseline history
 
 - 2026-06-16: initial 13 pane baselines, CI snapshots job (see `VERSION`).
+- 2026-08-04 (Track U U3 + adversarial-review fixes): SIX U3 baselines added
+  for the three execution-analysis panes and their deterministic gallery cells:
+  `waterfall_execution.png`, `execution_scatter.png`,
+  `transition_matrix.png`, and `gallery/{waterfall-dense-plan-3lanes,
+  exec-scatter-dense-downsampled,matrix-dense-top20}.png`. TWO existing
+  baselines regenerated: `table_queries.png` and
+  `gallery/table-configs-queries-hostile-sql.png`. The query Waterfall action
+  moved beside Query Text so the flagship pivot is visible at the standard
+  1280px viewport (M5), deliberately changing `table_queries` at pre-regen
+  ratio 0.0925 and, unlike U2, placing that action inside the hostile-SQL
+  cell's 650px clip; keeping the old CI-authoritative cell would therefore
+  conceal the intended affordance, so its 650×245 baseline is deliberately
+  replaced by the 650×250 U3 render. Review fixes also changed honest chart
+  copy/geometry: canvas-relative waterfall coordinates (pane 0.0068; gallery
+  0.0205), in-progress scatter wording + edge padding (pane 0.0042; gallery
+  0.1117), and transition-volume/link-cap notes (pane 0.0095; matrix gallery
+  650×597→650×613). Generated LOCALLY (Linux 6.8, playwright 1.58.0,
+  chromium 145.0.7632.6) with `--update-snapshots --only=…` over exactly these
+  eight baselines; no unrelated baseline was rewritten. A follow-up compare
+  over the same `--only` set matched 8/8 at 0.0000. Re-arbitrate these local
+  baselines in CI via the workflow below if the pinned CI Chromium churns.
 - 2026-07-31 (Track U U1): `table_queries.png` regenerated — deliberate P2
   identity change (per-event tints from the `eventColor()` color service in the
   queries-view Wait Profile stacked bars, replacing flat class hues; gallery
@@ -210,3 +231,14 @@ uplot-aas-live-ticks-tick4}.png`. These six are CI-authoritative; local
 runs on the unpinned playwright may show sub-0.014 drift on exactly these
 cells (use PGWT_SNAP_ONLY to exclude them when iterating, or install the
 pinned playwright).
+
+### 2026-08-04 — four baselines re-pinned after the U3 review-fix round
+
+The stage-3 fixes changed these renders after their baselines were first
+generated in the same working set: `fidelity_unavailable_panel` (M7: the
+panel now renders the server's `full_fidelity_required` hint — +19px),
+`gallery/waterfall-dense-plan-3lanes` (M4 column rename),
+`gallery/exec-scatter-dense-downsampled` (L5 axis edge padding + M6
+split exclusion notes), `gallery/matrix-dense-top20` (L1 legend range
+endpoints + L3/H2 volume-honest notes). Regenerated locally
+(chromium matches the CI pin), isolated compare 0.0000 each.

@@ -30,8 +30,9 @@ Key capabilities:
 - **Control socket**: `{trace_dir}/pgwt.sock` JSON-line `status`/`metrics`/
   `escalate`/`deescalate`, proxied by `pgwt-server` for the web client, with
   Prometheus-ready self-observability metrics
-- **7 diagnostic views**: time_model, system_event, session_event, histogram,
-  query_event, active, transitions (Sankey diagram) — each tagged with its data
+- **Diagnostic views**: time model, events, sessions, queries, histogram,
+  timeline, transition graph, concurrency, per-execution waterfall, execution
+  latency scatter, and transition matrix — each tagged with its data
   fidelity (sampled / exact / mixed); exact-only views prompt to escalate over
   sampled-only windows instead of silently showing nothing
 - **Web investigation client** (`pgwt`): browser UI with ECharts AAS chart,
@@ -157,7 +158,8 @@ sudo ./pg_wait_tracer --mode sampled --sample-rate 50
 ```
 
 In `tiered` mode, EXACT-required views (histogram, transitions, fingerprints,
-lock chains, interference, concurrency) report `requires full-fidelity data`
+lock chains, interference, concurrency, executions/waterfall, execution
+scatter, and transition matrix) report `requires full-fidelity data`
 over windows with no escalation, rather than returning silently empty results
 — the web client renders an explicit "escalate to capture" state.
 
@@ -1225,7 +1227,7 @@ playwright install chromium
 
 **What it tests:**
 - Page load and WebSocket connection
-- All 6 tabs (Overview, Events, Sessions, Queries, Histogram, Timeline)
+- All 11 tabs, including Waterfall, Scatter, and Matrix
 - Summary bar metrics (DB Time, AAS, CPUs)
 - Table rendering with correct row counts and data
 - Column sorting with direction indicators
@@ -1233,6 +1235,11 @@ playwright install chromium
 - Breadcrumb navigation and filter clear
 - Session → Timeline drill-down
 - Query → Events drill-down
+- Query → Waterfall and Scatter → selected Waterfall execution pivots
+- Waterfall row selection, resident-data drag zoom, double-click restore, and
+  bar inspection; Scatter 2-D box selection; Matrix target-event drill
+- Structured full-fidelity refusal panels and URL deep links for all three
+  exact-only B6 tabs
 - Time picker and zoom out
 - ECharts canvas rendering (AAS chart, heatmap, timeline)
 - WebSocket reconnection after server restart
@@ -1241,11 +1248,35 @@ playwright install chromium
 
 ```bash
 python3 tests/test_web_ui.py
-# Output: 67/67 tests passed
 ```
 
-The mock server starts automatically on port 18799 (HTTP) and 18800 (WS),
-runs all 18 tests, then shuts down. No cleanup needed.
+The mock server starts automatically on port 18799 (HTTP) and 18800 (WS), then
+shuts down. Override the isolated port pair with `PGWT_TEST_PORT=18975`.
+
+Pure web builders run without a browser:
+
+```bash
+node --test
+```
+
+Visual baselines are selector-scoped. Regenerate only the B6 panes, their
+gallery cells, and the Queries table changed by its new Waterfall affordance:
+
+```bash
+python3 tests/test_web_ui_snapshots.py --update-snapshots \
+  --only=table_queries,waterfall_execution,execution_scatter,transition_matrix,\
+gallery/waterfall-dense-plan-3lanes,gallery/exec-scatter-dense-downsampled,\
+gallery/matrix-dense-top20,gallery/table-configs-queries-hostile-sql
+
+# Compare the same reviewed baseline set without rewriting it:
+python3 tests/test_web_ui_snapshots.py \
+  --only=table_queries,waterfall_execution,execution_scatter,transition_matrix,\
+gallery/waterfall-dense-plan-3lanes,gallery/exec-scatter-dense-downsampled,\
+gallery/matrix-dense-top20,gallery/table-configs-queries-hostile-sql
+```
+
+Baselines live in `tests/web_snapshots/`; deterministic gallery data lives in
+`web/static/dev/fixtures/` with Node re-export shims in `tests/fixtures/`.
 
 ## How It Works
 

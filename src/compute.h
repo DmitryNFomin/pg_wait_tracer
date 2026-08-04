@@ -160,6 +160,8 @@ pgwt_fidelity_unavailable(enum pgwt_required_fidelity req, enum pgwt_fidelity fi
 
 /* Canonical message for an EXACT-required view over a sampled-only window. */
 #define PGWT_UNAVAILABLE_MSG "requires full-fidelity data"
+#define PGWT_UNAVAILABLE_CODE "full_fidelity_required"
+#define PGWT_UNAVAILABLE_HINT "capture an exact window (escalate) and retry"
 
 /* ── Filters ──────────────────────────────────────────────── */
 
@@ -397,6 +399,7 @@ struct pgwt_transition_row {
 struct pgwt_transitions_result {
     struct pgwt_transition_row *rows;  /* malloc'd, caller frees */
     int    num_rows;
+    int    total_rows;                 /* distinct links before max_rows cap */
     uint64_t total_transitions;
 };
 
@@ -504,6 +507,93 @@ struct pgwt_interference_result {
 void pgwt_compute_interference(const struct pgwt_trace_event *events, int count,
                                 const struct pgwt_filter *f, int max_rows,
                                 struct pgwt_interference_result *out);
+
+/* ── Execution waterfall / scatter data (U3/B6) ────────────────── */
+
+/* Minimal backend relationship needed by the execution compute.  The server
+ * derives this from backends.jsonl and passes it sorted by pid; keeping it
+ * separate from display metadata makes the marker/event walk independently
+ * testable. */
+struct pgwt_backend_link {
+    uint32_t pid;
+    uint32_t leader_pid;
+};
+
+struct pgwt_execution {
+    uint32_t pid;
+    uint64_t query_id;
+    uint64_t start_ns;
+    uint64_t end_ns;          /* 0 while the execution is in progress */
+    uint64_t plan_start_ns;
+    uint64_t plan_end_ns;
+    int      has_plan;
+    int      in_progress;
+    int      started_before_window;
+    int      matches_event_filter;
+    int      n_events;
+    int      n_workers;
+};
+
+struct pgwt_executions_result {
+    struct pgwt_execution *rows;  /* malloc'd, caller frees */
+    int num_rows;
+    int failed;                   /* allocation failure; rows are unusable */
+};
+
+/* Extract every execution overlapping [from_ns,to_ns], including an execution
+ * whose EXEC_START precedes the window, pair it with a later EXEC_END from the
+ * same PID when present, and retain unpaired starts explicitly.
+ * PLAN_START/END immediately preceding an execution are associated by PID and
+ * query_id. Rows are not filtered or truncated here; callers can serve tables
+ * and scatter plots from the same complete, honest extraction. */
+void pgwt_compute_executions(const struct pgwt_trace_event *events, int count,
+                             uint64_t from_ns, uint64_t to_ns,
+                             const struct pgwt_filter *f,
+                             const struct pgwt_backend_link *links, int n_links,
+                             struct pgwt_executions_result *out);
+
+struct pgwt_exec_event {
+    uint32_t event_id;
+    char     name[64];
+    uint64_t start_ns;        /* raw interval start; may precede the window */
+    uint64_t duration_ns;     /* raw duration; the client clips visually */
+    uint64_t cpu_ns;
+    int      has_cpu;
+};
+
+struct pgwt_exec_lane {
+    uint32_t pid;
+    struct pgwt_exec_event *events; /* malloc'd, caller frees */
+    int num_events;                 /* retained events */
+    int total_events;               /* before per-lane cap */
+};
+
+struct pgwt_execution_detail_result {
+    struct pgwt_exec_lane leader;
+    struct pgwt_exec_lane *workers; /* malloc'd, caller frees each events */
+    int num_workers;
+    uint64_t query_id;
+    uint64_t plan_start_ns;
+    uint64_t plan_end_ns;
+    int has_plan;
+    int total_events;
+    int kept_events;
+    int found_execution;          /* exact leader EXEC_START matched start_ns */
+    int failed;                   /* allocation failure; payload is unusable */
+};
+
+/* Build one marker-identified execution waterfall. Only exact transition
+ * records are eligible; sampled observations never acquire fabricated
+ * interval durations. Events are selected by interval overlap and keep their
+ * raw starts/durations. */
+void pgwt_compute_execution_detail(
+    const struct pgwt_trace_event *events, int count,
+    uint32_t leader_pid, uint64_t start_ns, uint64_t end_ns,
+    const struct pgwt_filter *f,
+    const struct pgwt_backend_link *links, int n_links, int max_events_per_lane,
+    struct pgwt_execution_detail_result *out);
+
+void pgwt_free_execution_detail(struct pgwt_execution_detail_result *out);
 
 /* ── Variants (per-query execution flow patterns) ─────────── */
 

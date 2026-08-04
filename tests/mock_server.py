@@ -405,13 +405,15 @@ _FIDELITY_VIEWS = {
     "aas", "time_model", "top_events", "top_sessions", "top_queries",
     "heatmap", "session_timeline", "transitions", "fingerprints",
     "concurrency", "lock_chains", "interference", "variants",
+    "executions", "execution_detail", "exec_scatter",
 }
 
 # EXACT-required views (mirror src/server.c's PGWT_REQ_EXACT handlers): over a
 # sampled-only window these return the structured unavailable marker instead of
 # data. The web UI renders the "escalate to capture" panel for these.
 _EXACT_VIEWS = {"heatmap", "transitions", "concurrency", "lock_chains",
-                "interference"}
+                "interference", "executions", "execution_detail",
+                "exec_scatter"}
 
 # ── Fidelity + control configuration (Phase B5) ───────────────────────────────
 # The mock can present a SAMPLED or MIXED window so the UI's fidelity shading +
@@ -619,6 +621,8 @@ def handle_request(msg):
     # window still has transition data, so it stays available.
     if cmd in _EXACT_VIEWS and _FID.fidelity == "sampled":
         return {"id": req_id, "unavailable": "requires full-fidelity data",
+                "code": "full_fidelity_required",
+                "hint": "capture an exact window (escalate) and retry",
                 "fidelity": "sampled"}
 
     resp = _handle_request_inner(cmd, req_id, msg)
@@ -704,10 +708,79 @@ def _handle_request_inner(cmd, req_id, msg):
             return resp
         return {"id": req_id, "events": [], "pids": [], "truncated": False, "total_count": 0}
 
+    if cmd == "executions":
+        filters = msg.get("filters", {})
+        qid = str(filters.get("query_id", "100"))
+        rows = [
+            # Latest first, like server.c handle_executions.
+            {"pid": 1002, "query_id": qid,
+             "start_ns": "10000100000000", "end_ns": "10000180000000",
+             "duration_ms": 80.0, "plan_ms": None,
+             "n_events": 2, "n_workers": 0, "in_progress": False,
+             "started_before_window": False},
+            {"pid": 1000, "query_id": qid,
+             "start_ns": "10000000000000", "end_ns": "10000030001000",
+             "duration_ms": 30.001, "plan_ms": 1.0,
+             "n_events": 5, "n_workers": 2, "in_progress": False,
+             "started_before_window": False},
+        ]
+        if "pid" in filters:
+            rows = [r for r in rows if r["pid"] == filters["pid"]]
+        return {"id": req_id, "rows": rows,
+                "total_count": len(rows), "truncated": False}
+
+    if cmd == "execution_detail":
+        filters = msg.get("filters", {})
+        pid = filters.get("pid", 1000)
+        qid = str(filters.get("query_id", "100"))
+        start = str(msg.get("start_ns", "10000000000000"))
+        if pid == 1002:
+            events = [
+                {"we": 0x0100004e, "name": "IO:WalSync",
+                 "start_ns": start, "dur_ns": "20000000", "cpu_ns": None},
+                {"we": 0, "name": "CPU*", "start_ns": "10000130000000",
+                 "dur_ns": "30000000", "cpu_ns": None},
+            ]
+            return {"id": req_id, "query_id": qid,
+                    "leader": {"pid": pid, "query_id": qid,
+                               "events": events, "total_count": 2,
+                               "truncated": False},
+                    "workers": [], "plan": None,
+                    "total_count": 2, "kept_count": 2, "truncated": False}
+        event = {"we": 0x01000015, "name": "IO:DataFileRead",
+                 "start_ns": start, "dur_ns": "10000000", "cpu_ns": None}
+        return {"id": req_id, "query_id": qid,
+                "leader": {"pid": pid, "query_id": qid,
+                           "events": [event,
+                                {"we": 0, "name": "CPU*",
+                                 "start_ns": "10000012000000",
+                                "dur_ns": "8000000", "cpu_ns": None}],
+                           "total_count": 2, "truncated": False},
+                "workers": [
+                    {"pid": 1006, "events": [dict(event)],
+                     "total_count": 1, "truncated": False},
+                    {"pid": 1008, "events": [dict(event)],
+                     "total_count": 1, "truncated": False},
+                ],
+                "plan": {"start_ns": "9999998000000",
+                         "end_ns": "9999999000000"},
+                "total_count": 4, "kept_count": 4, "truncated": False}
+
+    if cmd == "exec_scatter":
+        return {"id": req_id, "points": [
+            {"t": "10000000000000", "duration_ms": 30.001,
+             "pid": 1000, "query_id": "100", "in_progress": False},
+            {"t": "10000100000000", "duration_ms": 80.0,
+             "pid": 1002, "query_id": "200", "in_progress": False},
+            {"t": "10000200000000", "duration_ms": None,
+             "pid": 1004, "query_id": "300", "in_progress": True},
+        ], "total_count": 3, "kept_count": 3, "downsampled": False}
+
     if cmd == "transitions":
         # event_id mirrors server.c's DFG node JSON (U2 / P3 wire 5: node
         # click pivots on the event; 0 = the CPU* pseudo-node).
-        return {"id": req_id, "total": 1500, "nodes": [
+        return {"id": req_id, "total": 1800, "link_count": 5,
+                "total_link_count": 8, "truncated": True, "nodes": [
             {"name": "CPU*", "total_ms": 4800, "class": "CPU", "event_id": 0},
             {"name": "IO:DataFileRead", "total_ms": 2100, "class": "IO", "event_id": 0x01000015},
             {"name": "LWLock:WALInsert", "total_ms": 900, "class": "LWLock", "event_id": 0x04000007},

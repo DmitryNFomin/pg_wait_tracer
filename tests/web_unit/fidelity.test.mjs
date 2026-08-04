@@ -31,6 +31,7 @@ test('fidelityOf: defaults to exact; passes through known tokens', () => {
 
 test('isUnavailable: only true for the structured marker', () => {
     assert.equal(isUnavailable({ unavailable: UNAVAILABLE_MSG }), true);
+    assert.equal(isUnavailable({ code: 'full_fidelity_required' }), true);
     assert.equal(isUnavailable({ rows: [] }), false);
     assert.equal(isUnavailable(null), false);
 });
@@ -186,6 +187,14 @@ test('unavailable panel: offers escalate when supported, with the server message
     assert.equal(m.fidelity, 'sampled');
     assert.equal(m.canEscalate, true);
     assert.match(m.hint, /Escalate/);
+});
+
+test('unavailable panel consumes the server refusal hint when supplied', () => {
+    const m = buildUnavailablePanel({
+        code: 'full_fidelity_required', unavailable: UNAVAILABLE_MSG,
+        fidelity: 'sampled', hint: 'capture an exact window and retry',
+    }, { escalationSupported: true });
+    assert.equal(m.hint, 'capture an exact window and retry');
 });
 
 test('unavailable panel: hides escalate when escalation unsupported, explains why', () => {

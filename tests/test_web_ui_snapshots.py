@@ -128,6 +128,9 @@ GALLERY_STATIC_CELLS = [
     "gallery-timeline-single-point",            # degenerate timeline
     "gallery-histogram-dense",                  # dense heatmap
     "gallery-concurrency-dense-bursts",         # overlay chart + burst tables
+    "gallery-waterfall-dense-plan-3lanes",      # leader/workers + plan band
+    "gallery-exec-scatter-dense-downsampled",   # log latency modes + count note
+    "gallery-matrix-dense-top20",               # log-piecewise cells + top-N
     "gallery-table-configs-queries-hostile-sql",  # hostile SQL + event tints
 ]
 # The recorded live-replay cells, captured at ONE fixed tick each (stepped
@@ -325,7 +328,12 @@ def snapshot(page, name, selector, pixel_threshold=PIXEL_THRESHOLD,
         return
 
     _mask_volatile(page)
-    # Settle layout/fonts before capture.
+    # Hover-neutral capture: selector screenshots scroll each later gallery
+    # cell under the pointer position left by the prior capture. If that point
+    # lands on an ECharts canvas, emphasis dims sibling series and makes the
+    # result depend on suite order. Park outside every chart before settling.
+    page.mouse.move(1, 1)
+    # Settle layout/fonts and the resulting mouseout before capture.
     page.wait_for_timeout(300)
     png = el.screenshot(animations="disabled")
 
@@ -446,6 +454,19 @@ def snap_exact_suite(page):
     page.wait_for_timeout(1200)
     snapshot(page, "concurrency_chart", "#concurrency-chart")
     snapshot(page, "concurrency_burst_table", "#burst-table")
+
+    # U3/B6: the three exact-only analysis views.
+    goto_tab(page, "waterfall")
+    page.wait_for_timeout(900)
+    snapshot(page, "waterfall_execution", "#table-container")
+
+    goto_tab(page, "scatter")
+    page.wait_for_timeout(900)
+    snapshot(page, "execution_scatter", ".scatter-shell")
+
+    goto_tab(page, "matrix")
+    page.wait_for_timeout(900)
+    snapshot(page, "transition_matrix", ".matrix-shell")
 
     # Session timeline: drill in from Sessions.
     open_app(page, MOCK_URL)

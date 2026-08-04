@@ -65,6 +65,24 @@ static void cjson_add_int64(cJSON *obj, const char *name, int64_t val)
     cJSON_AddRawToObject(obj, name, buf);
 }
 
+/* Nanosecond timestamps/durations in the B6 contracts are strings: browser
+ * JSON numbers cannot exactly represent the trace clock once it exceeds 2^53. */
+static void cjson_add_uint64_string(cJSON *obj, const char *name, uint64_t val)
+{
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%llu", (unsigned long long)val);
+    cJSON_AddStringToObject(obj, name, buf);
+}
+
+/* PostgreSQL exposes query_id through signed bigint-facing surfaces. Match
+ * top_queries/query_texts so high-bit IDs join and filter consistently. */
+static void cjson_add_query_id_string(cJSON *obj, const char *name, uint64_t val)
+{
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%lld", (long long)(int64_t)val);
+    cJSON_AddStringToObject(obj, name, buf);
+}
+
 /* Create a raw uint64 item for arrays */
 static cJSON *cjson_create_uint64(uint64_t val)
 {
@@ -95,6 +113,7 @@ struct qt_entry {
 
 struct bm_entry {
     uint32_t pid;
+    uint32_t leader_pid;
     char     type[32];
     char     user[64];
     char     db[64];
@@ -249,9 +268,22 @@ struct pgwt_request {
     uint64_t from_ns;
     uint64_t to_ns;
     int      num_buckets;
+    int      limit;
+    int      max_points;
+    uint64_t start_ns;
+    uint64_t end_ns;
     char     detail[16];       /* "events" for per-event AAS breakdown */
     struct pgwt_filter filter;
 };
+
+static uint64_t parse_json_uint64(cJSON *item)
+{
+    if (cJSON_IsString(item) && item->valuestring && item->valuestring[0])
+        return strtoull(item->valuestring, NULL, 10);
+    if (cJSON_IsNumber(item))
+        return (uint64_t)item->valuedouble;
+    return 0;
+}
 
 static void parse_filters(cJSON *root, struct pgwt_filter *f)
 {
@@ -296,22 +328,42 @@ static void parse_request(const char *line, struct pgwt_request *req)
         snprintf(req->cmd, sizeof(req->cmd), "%s", cmd->valuestring);
 
     cJSON *from = cJSON_GetObjectItem(root, "from");
-    if (cJSON_IsNumber(from))
-        req->from_ns = (uint64_t)from->valuedouble;
+    req->from_ns = parse_json_uint64(from);
 
     cJSON *to = cJSON_GetObjectItem(root, "to");
-    if (cJSON_IsNumber(to))
-        req->to_ns = (uint64_t)to->valuedouble;
+    req->to_ns = parse_json_uint64(to);
 
     cJSON *buckets = cJSON_GetObjectItem(root, "buckets");
     if (cJSON_IsNumber(buckets))
         req->num_buckets = (int)buckets->valuedouble;
+
+    cJSON *limit = cJSON_GetObjectItem(root, "limit");
+    if (cJSON_IsNumber(limit))
+        req->limit = (int)limit->valuedouble;
+
+    cJSON *max_points = cJSON_GetObjectItem(root, "max_points");
+    if (cJSON_IsNumber(max_points))
+        req->max_points = (int)max_points->valuedouble;
+
+    req->start_ns = parse_json_uint64(cJSON_GetObjectItem(root, "start_ns"));
+    req->end_ns = parse_json_uint64(cJSON_GetObjectItem(root, "end_ns"));
 
     cJSON *detail = cJSON_GetObjectItem(root, "detail");
     if (cJSON_IsString(detail) && detail->valuestring)
         snprintf(req->detail, sizeof(req->detail), "%s", detail->valuestring);
 
     parse_filters(root, &req->filter);
+
+    /* B6 accepts its documented top-level pid/query_id parameters while the
+     * existing filters object remains supported for protocol consistency. */
+    if (req->filter.pid == 0) {
+        cJSON *pid = cJSON_GetObjectItem(root, "pid");
+        if (cJSON_IsNumber(pid))
+            req->filter.pid = (uint32_t)pid->valuedouble;
+    }
+    if (req->filter.query_id == 0)
+        req->filter.query_id = parse_json_uint64(
+            cJSON_GetObjectItem(root, "query_id"));
 
     cJSON_Delete(root);
 }
@@ -427,7 +479,8 @@ static void server_load_query_texts(struct pgwt_server *srv)
 /* ── Backend metadata map ─────────────────────────────────── */
 
 static void bm_map_insert(struct pgwt_server *srv, uint32_t pid,
-                            const char *type, const char *user, const char *db)
+                          uint32_t leader_pid, const char *type,
+                          const char *user, const char *db)
 {
     if (!srv->bm_map) return;
     int mask = srv->bm_capacity - 1;
@@ -436,6 +489,7 @@ static void bm_map_insert(struct pgwt_server *srv, uint32_t pid,
         struct bm_entry *e = &srv->bm_map[idx];
         if (e->pid == 0) {
             e->pid = pid;
+            e->leader_pid = leader_pid;
             snprintf(e->type, sizeof(e->type), "%s", type);
             snprintf(e->user, sizeof(e->user), "%s", user ? user : "");
             snprintf(e->db, sizeof(e->db), "%s", db ? db : "");
@@ -444,6 +498,7 @@ static void bm_map_insert(struct pgwt_server *srv, uint32_t pid,
         }
         if (e->pid == pid) {
             /* Update with latest info */
+            if (leader_pid != 0) e->leader_pid = leader_pid;
             snprintf(e->type, sizeof(e->type), "%s", type);
             if (user && user[0]) snprintf(e->user, sizeof(e->user), "%s", user);
             if (db && db[0]) snprintf(e->db, sizeof(e->db), "%s", db);
@@ -468,8 +523,39 @@ static const struct bm_entry *bm_map_lookup(const struct pgwt_server *srv,
     return NULL;
 }
 
+static int cmp_backend_link_pid(const void *a, const void *b)
+{
+    const struct pgwt_backend_link *la = a, *lb = b;
+    return (la->pid > lb->pid) - (la->pid < lb->pid);
+}
+
+static struct pgwt_backend_link *server_backend_links(
+    const struct pgwt_server *srv, int *out_count)
+{
+    *out_count = 0;
+    if (!srv->bm_map || srv->bm_capacity <= 0 || srv->bm_count <= 0)
+        return NULL;
+
+    struct pgwt_backend_link *links = calloc(srv->bm_count, sizeof(*links));
+    if (!links) {
+        *out_count = -1;
+        return NULL;
+    }
+    for (int i = 0; i < srv->bm_capacity; i++) {
+        const struct bm_entry *bm = &srv->bm_map[i];
+        if (bm->pid == 0 || bm->leader_pid == 0)
+            continue;
+        links[*out_count].pid = bm->pid;
+        links[*out_count].leader_pid = bm->leader_pid;
+        (*out_count)++;
+    }
+    qsort(links, *out_count, sizeof(*links), cmp_backend_link_pid);
+    return links;
+}
+
 /* Load backends.jsonl from trace dir.
- * Format: {"pid":<int>,"type":"<str>","user":"<str>","db":"<str>"} */
+ * Format: {"pid":<int>,"type":"<str>","user":"<str>","db":"<str>",
+ *          "leader_pid":<int, optional>} */
 static void server_load_backends(struct pgwt_server *srv)
 {
     char path[600];
@@ -497,12 +583,15 @@ static void server_load_backends(struct pgwt_server *srv)
         cJSON *type_item = cJSON_GetObjectItem(root, "type");
         cJSON *user_item = cJSON_GetObjectItem(root, "user");
         cJSON *db_item   = cJSON_GetObjectItem(root, "db");
+        cJSON *leader_item = cJSON_GetObjectItem(root, "leader_pid");
 
         const char *type = cJSON_IsString(type_item) ? type_item->valuestring : "unknown";
         const char *user = cJSON_IsString(user_item) ? user_item->valuestring : "";
         const char *db   = cJSON_IsString(db_item)   ? db_item->valuestring   : "";
+        uint32_t leader_pid = cJSON_IsNumber(leader_item)
+                            ? (uint32_t)leader_item->valuedouble : 0;
 
-        bm_map_insert(srv, pid, type, user, db);
+        bm_map_insert(srv, pid, leader_pid, type, user, db);
         cJSON_Delete(root);
     }
 
@@ -730,7 +819,7 @@ static int load_max_events(void)
  * stops when *total reaches load_max_events(). */
 static void load_file_range_mono(const char *path,
                                  uint64_t from_mono, uint64_t to_mono,
-                                 uint32_t pid,
+                                 uint32_t pid, int markers_only,
                                  struct pgwt_trace_event **events,
                                  int *total, int *cap, int *overloaded)
 {
@@ -756,6 +845,8 @@ static void load_file_range_mono(const char *path,
             if (ts_mono < from_mono) continue;
             if (ts_mono > to_mono) break;
             if (pid != 0 && block_buf[i].pid != pid)
+                continue;
+            if (markers_only && !PGWT_IS_MARKER(block_buf[i].old_event))
                 continue;
 
             if (*total >= max_events) {
@@ -1340,10 +1431,10 @@ static struct pgwt_wfid window_fidelity(struct pgwt_server *srv,
  * "window too large" error instead of rendering the partial result.
  */
 static struct pgwt_trace_event *
-server_load_events_fi(struct pgwt_server *srv,
-                      uint64_t from_wall_ns, uint64_t to_wall_ns,
-                      uint32_t pid,
-                      int *out_count, struct pgwt_load_info *info)
+server_load_events_fi_mode(struct pgwt_server *srv,
+                           uint64_t from_wall_ns, uint64_t to_wall_ns,
+                           uint32_t pid, int markers_only,
+                           int *out_count, struct pgwt_load_info *info)
 {
     *out_count = 0;
     if (info) memset(info, 0, sizeof(*info));
@@ -1394,13 +1485,13 @@ server_load_events_fi(struct pgwt_server *srv,
 
         if (fc->is_current) {
             /* On-demand: read only blocks in [from, to] */
-            load_file_range_mono(fc->path, from_m, to_m, pid,
+            load_file_range_mono(fc->path, from_m, to_m, pid, markers_only,
                                  &events, &total, &cap, &overloaded);
         } else {
             struct file_cache_entry *ce = get_cached_immutable(srv, fc->path);
             if (!ce || !ce->events) {
                 /* Cache miss (file too large or alloc failed) */
-                load_file_range_mono(fc->path, from_m, to_m, pid,
+                load_file_range_mono(fc->path, from_m, to_m, pid, markers_only,
                                      &events, &total, &cap, &overloaded);
             } else {
                 for (int i = 0; i < ce->count; i++) {
@@ -1408,6 +1499,8 @@ server_load_events_fi(struct pgwt_server *srv,
                     if (ts < from_m) continue;
                     if (ts > to_m) break;
                     if (pid != 0 && ce->events[i].pid != pid)
+                        continue;
+                    if (markers_only && !PGWT_IS_MARKER(ce->events[i].old_event))
                         continue;
 
                     if (total >= max_events) {
@@ -1483,7 +1576,8 @@ server_load_events_fi(struct pgwt_server *srv,
      * backends.jsonl) and the PLAN/EXEC/CMD marker windows; classify exact
      * we==0 intervals against the command gate. One pass feeding every raw
      * estimator (docs/AAS_SEMANTICS_DECISION.md). */
-    pgwt_tag_events(events, total, srv->pid_cats, srv->n_pid_cats);
+    if (!markers_only)
+        pgwt_tag_events(events, total, srv->pid_cats, srv->n_pid_cats);
 
     if (info) {
         info->has_transitions = has_transitions;
@@ -1499,6 +1593,29 @@ server_load_events_fi(struct pgwt_server *srv,
 
     *out_count = total;
     return events;
+}
+
+static struct pgwt_trace_event *
+server_load_events_fi(struct pgwt_server *srv,
+                      uint64_t from_wall_ns, uint64_t to_wall_ns,
+                      uint32_t pid,
+                      int *out_count, struct pgwt_load_info *info)
+{
+    return server_load_events_fi_mode(srv, from_wall_ns, to_wall_ns, pid, 0,
+                                      out_count, info);
+}
+
+/* Lifecycle context is sparse but can span a long capture. Retain only
+ * structural markers so row extraction can find a pre-window EXEC_START
+ * without making ordinary waits consume the raw-load event budget. */
+static struct pgwt_trace_event *
+server_load_markers_fi(struct pgwt_server *srv,
+                       uint64_t from_wall_ns, uint64_t to_wall_ns,
+                       uint32_t pid,
+                       int *out_count, struct pgwt_load_info *info)
+{
+    return server_load_events_fi_mode(srv, from_wall_ns, to_wall_ns, pid, 1,
+                                      out_count, info);
 }
 
 /* Free everything the server owns (cache, coverage, metadata maps) so
@@ -1629,6 +1746,8 @@ static void emit_unavailable(uint64_t req_id, enum pgwt_fidelity fid)
     cJSON *root = cJSON_CreateObject();
     cJSON_AddNumberToObject(root, "id", (double)req_id);
     cJSON_AddStringToObject(root, "unavailable", PGWT_UNAVAILABLE_MSG);
+    cJSON_AddStringToObject(root, "code", PGWT_UNAVAILABLE_CODE);
+    cJSON_AddStringToObject(root, "hint", PGWT_UNAVAILABLE_HINT);
     cJSON_AddStringToObject(root, "fidelity", pgwt_fidelity_str(fid));
     emit_json(root);
 }
@@ -1637,13 +1756,17 @@ static void emit_unavailable(uint64_t req_id, enum pgwt_fidelity fid)
  * Rendering it would silently under-report; emit a structured error the
  * client can present ("window too large") instead. Frees the partial array
  * and returns 1 when the handler must stop. */
-static int reject_overload(const struct pgwt_request *req,
+static int reject_overload(struct pgwt_server *srv,
+                           const struct pgwt_request *req,
                            struct pgwt_trace_event *events,
                            const struct pgwt_load_info *info)
 {
     if (!info->overloaded)
         return 0;
     free(events);
+    /* Keep the refusal's fidelity label in the same freshly-refreshed
+     * coverage generation as the load which detected the bound. */
+    coverage_refresh(srv);
     cJSON *root = cJSON_CreateObject();
     cJSON_AddNumberToObject(root, "id", (double)req->id);
     cJSON_AddStringToObject(root, "error", "window too large");
@@ -1651,6 +1774,15 @@ static int reject_overload(const struct pgwt_request *req,
     cJSON_AddNumberToObject(root, "max_events", load_max_events());
     cJSON_AddStringToObject(root, "hint",
         "narrow the time range or add a pid/query filter");
+    uint64_t from = req->from_ns ? req->from_ns : srv->earliest_wall_ns;
+    uint64_t to = req->to_ns ? req->to_ns : srv->latest_wall_ns;
+    if (strcmp(req->cmd, "execution_detail") == 0 &&
+        req->start_ns && req->end_ns) {
+        from = req->start_ns;
+        to = req->end_ns;
+    }
+    struct pgwt_wfid wf = window_fidelity(srv, from, to);
+    add_fidelity_window(root, &wf);
     emit_json(root);
     return 1;
 }
@@ -1721,7 +1853,7 @@ static void handle_aas(struct pgwt_server *srv, struct pgwt_request *req)
         struct pgwt_trace_event *events =
             server_load_events_fi(srv, req->from_ns, req->to_ns,
                                   req->filter.pid, &count, &linfo);
-        if (reject_overload(req, events, &linfo)) return;
+        if (reject_overload(srv, req, events, &linfo)) return;
         pgwt_compute_aas(events, count, &req->filter, from, to, num_buckets,
                          detail_events, AAS_MAX_EVENT_SERIES, &aas);
         free(events);
@@ -1811,7 +1943,7 @@ static void handle_time_model(struct pgwt_server *srv, struct pgwt_request *req)
         struct pgwt_trace_event *events =
             server_load_events_fi(srv, req->from_ns, req->to_ns,
                                   req->filter.pid, &count, &linfo);
-        if (reject_overload(req, events, &linfo)) return;
+        if (reject_overload(srv, req, events, &linfo)) return;
         pgwt_compute_time_model(events, count, &req->filter, wall_ms, &tm);
         free(events);
     }
@@ -1890,7 +2022,7 @@ static void handle_top_events(struct pgwt_server *srv, struct pgwt_request *req)
         struct pgwt_trace_event *events =
             server_load_events_fi(srv, req->from_ns, req->to_ns,
                                   req->filter.pid, &count, &linfo);
-        if (reject_overload(req, events, &linfo)) return;
+        if (reject_overload(srv, req, events, &linfo)) return;
         pgwt_compute_top_events(events, count, &req->filter, wall_ms, &res);
         free(events);
     }
@@ -1963,7 +2095,7 @@ static void handle_top_sessions(struct pgwt_server *srv, struct pgwt_request *re
         struct pgwt_trace_event *events =
             server_load_events_fi(srv, req->from_ns, req->to_ns,
                                   req->filter.pid, &count, &linfo);
-        if (reject_overload(req, events, &linfo)) return;
+        if (reject_overload(srv, req, events, &linfo)) return;
         pgwt_compute_top_sessions(events, count, &req->filter, wall_ms, &res);
         free(events);
     }
@@ -2021,7 +2153,7 @@ static void handle_top_queries(struct pgwt_server *srv, struct pgwt_request *req
      * across ALL pids (markers never pass the uniform filter). */
     all_events = server_load_events_fi(srv, req->from_ns, req->to_ns, 0,
                                        &ecount, &linfo);
-    if (reject_overload(req, all_events, &linfo)) return;
+    if (reject_overload(srv, req, all_events, &linfo)) return;
     if (!has_event_filter && should_use_summaries(srv, req, &wfid)) {
         pgwt_compute_top_queries_from_summaries(srv->trace_dir, from, to,
                                                  &req->filter, wall_ms, &res);
@@ -2275,7 +2407,7 @@ static void handle_heatmap(struct pgwt_server *srv, struct pgwt_request *req)
         struct pgwt_trace_event *events =
             server_load_events_fi(srv, req->from_ns, req->to_ns,
                                   req->filter.pid, &count, &linfo);
-        if (reject_overload(req, events, &linfo)) return;
+        if (reject_overload(srv, req, events, &linfo)) return;
         enum pgwt_fidelity fid = load_fidelity(&linfo);
         if (pgwt_fidelity_unavailable(PGWT_REQ_EXACT, fid)) {
             free(events);
@@ -2344,7 +2476,7 @@ static void handle_session_timeline(struct pgwt_server *srv, struct pgwt_request
     struct pgwt_trace_event *events =
         server_load_events_fi(srv, req->from_ns, req->to_ns,
                               req->filter.pid, &count, &linfo);
-    if (reject_overload(req, events, &linfo)) return;
+    if (reject_overload(srv, req, events, &linfo)) return;
 
     /* First pass: count matching events and collect unique PIDs */
     uint32_t pids[TIMELINE_MAX_PIDS];
@@ -2510,6 +2642,503 @@ static void handle_session_timeline(struct pgwt_server *srv, struct pgwt_request
     free(events);
 }
 
+/* ── Execution waterfall / scatter (U3/B6) ─────────────────────── */
+
+#define EXECUTIONS_DEFAULT_LIMIT 100
+#define EXECUTIONS_MAX_LIMIT     500
+#define EXEC_DETAIL_LANE_CAP     2000
+#define EXEC_SCATTER_DEFAULT     2000
+#define EXEC_SCATTER_MAX         5000
+#define EXEC_PLAN_LOOKBACK_NS    (15ULL * 60ULL * 1000000000ULL)
+
+static int cmp_execution_start_desc(const void *a, const void *b)
+{
+    const struct pgwt_execution *ea = a, *eb = b;
+    if (eb->start_ns > ea->start_ns) return 1;
+    if (eb->start_ns < ea->start_ns) return -1;
+    return (eb->pid > ea->pid) - (eb->pid < ea->pid);
+}
+
+static int cmp_execution_start_asc(const void *a, const void *b)
+{
+    const struct pgwt_execution *ea = a, *eb = b;
+    if (ea->start_ns > eb->start_ns) return 1;
+    if (ea->start_ns < eb->start_ns) return -1;
+    return (ea->pid > eb->pid) - (ea->pid < eb->pid);
+}
+
+static int execution_matches_request(const struct pgwt_execution *row,
+                                     const struct pgwt_request *req)
+{
+    if (req->filter.pid && row->pid != req->filter.pid)
+        return 0;
+    if (req->filter.query_id && row->query_id != req->filter.query_id)
+        return 0;
+    if ((req->filter.class_name[0] || req->filter.event_id) &&
+        !row->matches_event_filter)
+        return 0;
+    return 1;
+}
+
+static void serialize_execution_row(cJSON *rows,
+                                    const struct pgwt_execution *row)
+{
+    cJSON *r = cJSON_CreateObject();
+    cJSON_AddNumberToObject(r, "pid", row->pid);
+    cjson_add_query_id_string(r, "query_id", row->query_id);
+    cjson_add_uint64_string(r, "start_ns", row->start_ns);
+    if (row->in_progress) {
+        cJSON_AddNullToObject(r, "end_ns");
+        cJSON_AddNullToObject(r, "duration_ms");
+    } else {
+        cjson_add_uint64_string(r, "end_ns", row->end_ns);
+        cJSON_AddNumberToObject(r, "duration_ms",
+            (double)(row->end_ns - row->start_ns) / 1e6);
+    }
+    if (row->has_plan)
+        cJSON_AddNumberToObject(r, "plan_ms",
+            (double)(row->plan_end_ns - row->plan_start_ns) / 1e6);
+    else
+        cJSON_AddNullToObject(r, "plan_ms");
+    cJSON_AddNumberToObject(r, "n_events", row->n_events);
+    cJSON_AddNumberToObject(r, "n_workers", row->n_workers);
+    cJSON_AddBoolToObject(r, "in_progress", row->in_progress);
+    cJSON_AddBoolToObject(r, "started_before_window",
+                          row->started_before_window);
+    cJSON_AddItemToArray(rows, r);
+}
+
+static void emit_execution_compute_failed(const struct pgwt_request *req,
+                                          const struct pgwt_load_info *info)
+{
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(root, "id", (double)req->id);
+    cJSON_AddStringToObject(root, "error", "execution compute failed");
+    cJSON_AddStringToObject(root, "code", "compute_failed");
+    cJSON_AddStringToObject(root, "hint", "narrow the time range and retry");
+    add_fidelity(root, info);
+    emit_json(root);
+}
+
+static int load_execution_rows(struct pgwt_server *srv,
+                               struct pgwt_request *req,
+                               struct pgwt_executions_result *res,
+                               struct pgwt_load_info *linfo)
+{
+    uint64_t from = req->from_ns ? req->from_ns : srv->earliest_wall_ns;
+    uint64_t to = req->to_ns ? req->to_ns : srv->latest_wall_ns;
+    int window_count;
+    struct pgwt_trace_event *window_events = server_load_events_fi(
+        srv, from, to, 0, &window_count, linfo);
+    if (reject_overload(srv, req, window_events, linfo))
+        return -1;
+
+    enum pgwt_fidelity fid = load_fidelity(linfo);
+    if (pgwt_fidelity_unavailable(PGWT_REQ_EXACT, fid)) {
+        free(window_events);
+        emit_unavailable(req->id, fid);
+        return -1;
+    }
+
+    /* A window can begin in the middle of an execution. Read the earlier
+     * lifecycle stream as markers only (optionally with leader-pid pushdown),
+     * then append the requested window's full events. This preserves the real
+     * EXEC_START without letting historical waits consume the load budget. */
+    int context_count = 0;
+    struct pgwt_load_info context_info = {0};
+    struct pgwt_trace_event *events = NULL;
+    if (from > srv->earliest_wall_ns && from > 0) {
+        events = server_load_markers_fi(srv, srv->earliest_wall_ns, from - 1,
+                                        req->filter.pid, &context_count,
+                                        &context_info);
+        if (reject_overload(srv, req, events, &context_info)) {
+            free(window_events);
+            return -1;
+        }
+    }
+    int count = context_count + window_count;
+    struct pgwt_trace_event *combined = realloc(
+        events, (count > 0 ? count : 1) * sizeof(*combined));
+    if (!combined) {
+        free(events);
+        free(window_events);
+        emit_execution_compute_failed(req, linfo);
+        return -1;
+    }
+    events = combined;
+    if (window_count > 0)
+        memcpy(events + context_count, window_events,
+               window_count * sizeof(*window_events));
+    free(window_events);
+
+    int n_links = 0;
+    struct pgwt_backend_link *links = server_backend_links(srv, &n_links);
+    if (n_links < 0) {
+        free(events);
+        emit_execution_compute_failed(req, linfo);
+        return -1;
+    }
+    pgwt_compute_executions(events, count, from, to, &req->filter,
+                            links, n_links, res);
+    free(links);
+    free(events);
+    if (res->failed) {
+        emit_execution_compute_failed(req, linfo);
+        return -1;
+    }
+    return 0;
+}
+
+static void handle_executions(struct pgwt_server *srv,
+                              struct pgwt_request *req)
+{
+    struct pgwt_load_info linfo = {0};
+    struct pgwt_executions_result res;
+    if (load_execution_rows(srv, req, &res, &linfo) != 0)
+        return;
+
+    int kept = 0;
+    for (int i = 0; i < res.num_rows; i++)
+        if (execution_matches_request(&res.rows[i], req))
+            res.rows[kept++] = res.rows[i];
+    res.num_rows = kept;
+    qsort(res.rows, res.num_rows, sizeof(res.rows[0]),
+          cmp_execution_start_desc);
+
+    int limit = req->limit > 0 ? req->limit : EXECUTIONS_DEFAULT_LIMIT;
+    if (limit > EXECUTIONS_MAX_LIMIT) limit = EXECUTIONS_MAX_LIMIT;
+    int returned = res.num_rows < limit ? res.num_rows : limit;
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(root, "id", (double)req->id);
+    add_fidelity(root, &linfo);
+    cJSON *rows = cJSON_AddArrayToObject(root, "rows");
+    for (int i = 0; i < returned; i++)
+        serialize_execution_row(rows, &res.rows[i]);
+    cJSON_AddNumberToObject(root, "total_count", res.num_rows);
+    cJSON_AddBoolToObject(root, "truncated", returned < res.num_rows);
+    emit_json(root);
+    free(res.rows);
+}
+
+static cJSON *serialize_exec_lane(const struct pgwt_exec_lane *lane,
+                                  uint64_t query_id, int is_leader)
+{
+    cJSON *obj = cJSON_CreateObject();
+    cJSON_AddNumberToObject(obj, "pid", lane->pid);
+    if (is_leader)
+        cjson_add_query_id_string(obj, "query_id", query_id);
+    cJSON *arr = cJSON_AddArrayToObject(obj, "events");
+    for (int i = 0; i < lane->num_events; i++) {
+        const struct pgwt_exec_event *ev = &lane->events[i];
+        cJSON *item = cJSON_CreateObject();
+        cJSON_AddNumberToObject(item, "we", ev->event_id);
+        cJSON_AddStringToObject(item, "name", ev->name);
+        cjson_add_uint64_string(item, "start_ns", ev->start_ns);
+        cjson_add_uint64_string(item, "dur_ns", ev->duration_ns);
+        if (ev->has_cpu)
+            cjson_add_uint64_string(item, "cpu_ns", ev->cpu_ns);
+        else
+            cJSON_AddNullToObject(item, "cpu_ns");
+        cJSON_AddItemToArray(arr, item);
+    }
+    cJSON_AddNumberToObject(obj, "total_count", lane->total_events);
+    cJSON_AddBoolToObject(obj, "truncated",
+                          lane->num_events < lane->total_events);
+    return obj;
+}
+
+static int cmp_exec_lane_pid(const void *a, const void *b)
+{
+    const struct pgwt_exec_lane *la = a, *lb = b;
+    return (la->pid > lb->pid) - (la->pid < lb->pid);
+}
+
+static void emit_invalid_execution_detail(struct pgwt_server *srv,
+                                          const struct pgwt_request *req)
+{
+    coverage_refresh(srv);
+    struct pgwt_wfid wf = window_fidelity(srv, req->start_ns, req->end_ns);
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(root, "id", (double)req->id);
+    cJSON_AddStringToObject(root, "error",
+                            "pid, start_ns, and end_ns are required");
+    cJSON_AddStringToObject(root, "code", "invalid_request");
+    cJSON_AddStringToObject(root, "hint",
+                            "send pid and decimal-string start_ns/end_ns");
+    add_fidelity_window(root, &wf);
+    emit_json(root);
+}
+
+static void emit_execution_not_found(const struct pgwt_request *req,
+                                     const struct pgwt_load_info *info)
+{
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(root, "id", (double)req->id);
+    cJSON_AddStringToObject(root, "error",
+                            "execution start marker not found");
+    cJSON_AddStringToObject(root, "code", "not_found");
+    cJSON_AddStringToObject(root, "hint",
+                            "select a marker-identified execution and retry");
+    add_fidelity(root, info);
+    emit_json(root);
+}
+
+static void handle_execution_detail(struct pgwt_server *srv,
+                                    struct pgwt_request *req)
+{
+    if (req->filter.pid == 0 || req->start_ns == 0 || req->end_ns == 0 ||
+        req->end_ns <= req->start_ns) {
+        emit_invalid_execution_detail(srv, req);
+        return;
+    }
+
+    /* Classify from records actually loaded in the requested execution
+     * window. Coverage metadata deliberately tolerates one sample period at
+     * edges for summary routing; that slop must not turn a small sampled-only
+     * detail request into fidelity=none. */
+    int window_count;
+    struct pgwt_load_info window_info = {0};
+    struct pgwt_trace_event *window_events = server_load_events_fi(
+        srv, req->start_ns, req->end_ns, 0, &window_count, &window_info);
+    if (reject_overload(srv, req, window_events, &window_info))
+        return;
+    enum pgwt_fidelity fid = load_fidelity(&window_info);
+    if (pgwt_fidelity_unavailable(PGWT_REQ_EXACT, fid)) {
+        free(window_events);
+        emit_unavailable(req->id, fid);
+        return;
+    }
+
+    /* Planning context is a bounded, leader-only marker pre-scan. The detail
+     * window itself still contains all pids so parallel-worker lanes remain
+     * visible, but unrelated historical waits are never decoded into this
+     * per-click request's working array. */
+    uint64_t context_from = req->start_ns > EXEC_PLAN_LOOKBACK_NS
+                          ? req->start_ns - EXEC_PLAN_LOOKBACK_NS : 0;
+    int context_count = 0;
+    struct pgwt_load_info context_info = {0};
+    struct pgwt_trace_event *events = server_load_markers_fi(
+        srv, context_from, req->start_ns > 0 ? req->start_ns - 1 : 0,
+        req->filter.pid, &context_count, &context_info);
+    if (reject_overload(srv, req, events, &context_info)) {
+        free(window_events);
+        return;
+    }
+    int count = context_count + window_count;
+    struct pgwt_trace_event *combined = realloc(
+        events, (count > 0 ? count : 1) * sizeof(*combined));
+    if (!combined) {
+        free(events);
+        free(window_events);
+        emit_execution_compute_failed(req, &window_info);
+        return;
+    }
+    events = combined;
+    if (window_count > 0)
+        memcpy(events + context_count, window_events,
+               window_count * sizeof(*window_events));
+    free(window_events);
+
+    int n_links = 0;
+    struct pgwt_backend_link *links = server_backend_links(srv, &n_links);
+    if (n_links < 0) {
+        free(events);
+        emit_execution_compute_failed(req, &window_info);
+        return;
+    }
+    struct pgwt_execution_detail_result detail;
+    pgwt_compute_execution_detail(events, count, req->filter.pid,
+                                  req->start_ns, req->end_ns,
+                                  &req->filter,
+                                  links, n_links, EXEC_DETAIL_LANE_CAP, &detail);
+    free(links);
+    free(events);
+    if (detail.failed) {
+        pgwt_free_execution_detail(&detail);
+        emit_execution_compute_failed(req, &window_info);
+        return;
+    }
+    if (!detail.found_execution) {
+        pgwt_free_execution_detail(&detail);
+        emit_execution_not_found(req, &window_info);
+        return;
+    }
+
+    qsort(detail.workers, detail.num_workers, sizeof(detail.workers[0]),
+          cmp_exec_lane_pid);
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(root, "id", (double)req->id);
+    add_fidelity(root, &window_info);
+    cjson_add_query_id_string(root, "query_id", detail.query_id);
+    cJSON_AddItemToObject(root, "leader",
+                          serialize_exec_lane(&detail.leader,
+                                              detail.query_id, 1));
+    cJSON *workers = cJSON_AddArrayToObject(root, "workers");
+    for (int i = 0; i < detail.num_workers; i++)
+        cJSON_AddItemToArray(workers,
+                            serialize_exec_lane(&detail.workers[i], 0, 0));
+    if (detail.has_plan) {
+        cJSON *plan = cJSON_AddObjectToObject(root, "plan");
+        cjson_add_uint64_string(plan, "start_ns", detail.plan_start_ns);
+        cjson_add_uint64_string(plan, "end_ns", detail.plan_end_ns);
+    } else {
+        cJSON_AddNullToObject(root, "plan");
+    }
+    cJSON_AddNumberToObject(root, "total_count", detail.total_events);
+    cJSON_AddNumberToObject(root, "kept_count", detail.kept_events);
+    cJSON_AddBoolToObject(root, "truncated",
+                          detail.kept_events < detail.total_events);
+    emit_json(root);
+    pgwt_free_execution_detail(&detail);
+}
+
+static uint64_t scatter_rand(uint64_t x)
+{
+    x += 0x9e3779b97f4a7c15ULL;
+    x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    x = (x ^ (x >> 27)) * 0x94d049bb133111ebULL;
+    return x ^ (x >> 31);
+}
+
+static uint64_t execution_duration_ns(const struct pgwt_execution *row)
+{
+    return row->in_progress ? 0 : row->end_ns - row->start_ns;
+}
+
+/* Two-pass outlier-preserving reservoir. Pass one reserves the maximum
+ * duration from every non-empty time bucket. Pass two redistributes every
+ * unused bucket quota through one global deterministic reservoir, so
+ * clustered workloads fill the requested budget instead of leaving most
+ * slots empty. */
+static struct pgwt_execution *scatter_downsample(
+    const struct pgwt_execution *rows, int count, int max_points,
+    uint64_t from_ns, uint64_t to_ns, int *out_count)
+{
+    *out_count = 0;
+    int nb = max_points >= 4 ? max_points / 4 : 1;
+    if (nb > count) nb = count;
+    int *bucket_max = malloc(nb * sizeof(*bucket_max));
+    if (!bucket_max) return NULL;
+    for (int b = 0; b < nb; b++) bucket_max[b] = -1;
+    uint64_t range = to_ns > from_ns ? to_ns - from_ns : 1;
+
+    /* Pass one: one guaranteed local maximum per occupied time bucket. */
+    for (int i = 0; i < count; i++) {
+        uint64_t rel = rows[i].start_ns > from_ns
+                     ? rows[i].start_ns - from_ns : 0;
+        int b = (int)(((__uint128_t)rel * nb) / range);
+        if (b >= nb) b = nb - 1;
+        int old = bucket_max[b];
+        if (old < 0 || execution_duration_ns(&rows[i]) >
+                       execution_duration_ns(&rows[old]))
+            bucket_max[b] = i;
+    }
+
+    struct pgwt_execution *sample = calloc(max_points, sizeof(*sample));
+    int *reservoir = malloc(max_points * sizeof(*reservoir));
+    unsigned char *is_reserved = calloc(count, sizeof(*is_reserved));
+    if (!sample || !reservoir || !is_reserved) {
+        free(sample);
+        free(reservoir);
+        free(is_reserved);
+        free(bucket_max);
+        return NULL;
+    }
+
+    int reserved = 0;
+    for (int b = 0; b < nb; b++) {
+        if (bucket_max[b] >= 0) {
+            sample[reserved++] = rows[bucket_max[b]];
+            is_reserved[bucket_max[b]] = 1;
+        }
+    }
+    int cap = max_points - reserved;
+    uint64_t seen = 0;
+    int used = 0;
+    for (int i = 0; i < count && cap > 0; i++) {
+        if (is_reserved[i]) continue;
+        seen++;
+        if (used < cap) {
+            reservoir[used++] = i;
+            continue;
+        }
+        uint64_t rnd = scatter_rand(rows[i].start_ns ^
+                                    ((uint64_t)rows[i].pid << 32) ^ seen);
+        uint64_t replace = rnd % seen;
+        if (replace < (uint64_t)cap)
+            reservoir[replace] = i;
+    }
+    for (int i = 0; i < used; i++)
+        sample[reserved + i] = rows[reservoir[i]];
+    *out_count = reserved + used;
+    free(reservoir);
+    free(is_reserved);
+    free(bucket_max);
+    return sample;
+}
+
+static void handle_exec_scatter(struct pgwt_server *srv,
+                                struct pgwt_request *req)
+{
+    struct pgwt_load_info linfo = {0};
+    struct pgwt_executions_result res;
+    if (load_execution_rows(srv, req, &res, &linfo) != 0)
+        return;
+
+    /* Open executions remain points too: their duration is explicit null,
+     * never a fabricated window-edge duration. */
+    int total = 0;
+    for (int i = 0; i < res.num_rows; i++)
+        if (execution_matches_request(&res.rows[i], req))
+            res.rows[total++] = res.rows[i];
+    res.num_rows = total;
+
+    int max_points = req->max_points > 0
+                   ? req->max_points : EXEC_SCATTER_DEFAULT;
+    if (max_points > EXEC_SCATTER_MAX) max_points = EXEC_SCATTER_MAX;
+    uint64_t from = req->from_ns ? req->from_ns : srv->earliest_wall_ns;
+    uint64_t to = req->to_ns ? req->to_ns : srv->latest_wall_ns;
+    int kept = total;
+    struct pgwt_execution *points = res.rows;
+    if (total > max_points) {
+        points = scatter_downsample(res.rows, total, max_points,
+                                    from, to, &kept);
+        if (!points) {
+            /* Allocation failure is not permission to return a partial chart. */
+            free(res.rows);
+            emit_execution_compute_failed(req, &linfo);
+            return;
+        }
+    }
+    qsort(points, kept, sizeof(points[0]), cmp_execution_start_asc);
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(root, "id", (double)req->id);
+    add_fidelity(root, &linfo);
+    cJSON *arr = cJSON_AddArrayToObject(root, "points");
+    for (int i = 0; i < kept; i++) {
+        cJSON *p = cJSON_CreateObject();
+        cjson_add_uint64_string(p, "t", points[i].start_ns);
+        if (points[i].in_progress)
+            cJSON_AddNullToObject(p, "duration_ms");
+        else
+            cJSON_AddNumberToObject(p, "duration_ms",
+                (double)execution_duration_ns(&points[i]) / 1e6);
+        cJSON_AddNumberToObject(p, "pid", points[i].pid);
+        cjson_add_query_id_string(p, "query_id", points[i].query_id);
+        cJSON_AddBoolToObject(p, "in_progress", points[i].in_progress);
+        cJSON_AddItemToArray(arr, p);
+    }
+    cJSON_AddNumberToObject(root, "total_count", total);
+    cJSON_AddNumberToObject(root, "kept_count", kept);
+    cJSON_AddBoolToObject(root, "downsampled", kept < total);
+    emit_json(root);
+    if (points != res.rows) free(points);
+    free(res.rows);
+}
+
 /* ── Dispatch ─────────────────────────────────────────────── */
 
 static void handle_transitions(struct pgwt_server *srv, struct pgwt_request *req)
@@ -2519,7 +3148,7 @@ static void handle_transitions(struct pgwt_server *srv, struct pgwt_request *req
     struct pgwt_trace_event *events =
         server_load_events_fi(srv, req->from_ns, req->to_ns,
                               req->filter.pid, &count, &linfo);
-    if (reject_overload(req, events, &linfo)) return;
+    if (reject_overload(srv, req, events, &linfo)) return;
 
     /* Transitions need real old→new order: EXACT-required. */
     enum pgwt_fidelity fid = load_fidelity(&linfo);
@@ -2537,6 +3166,9 @@ static void handle_transitions(struct pgwt_server *srv, struct pgwt_request *req
     cJSON_AddNumberToObject(root, "id", (double)req->id);
     cJSON_AddStringToObject(root, "fidelity", pgwt_fidelity_str(fid));
     cjson_add_uint64(root, "total", res.total_transitions);
+    cJSON_AddNumberToObject(root, "link_count", res.num_rows);
+    cJSON_AddNumberToObject(root, "total_link_count", res.total_rows);
+    cJSON_AddBoolToObject(root, "truncated", res.num_rows < res.total_rows);
 
     /* Compute per-node total time directly from ALL events.
      * Use a simple hash table keyed by event_id for O(1) lookup. */
@@ -2620,7 +3252,7 @@ static void handle_fingerprints(struct pgwt_server *srv, struct pgwt_request *re
     struct pgwt_trace_event *events =
         server_load_events_fi(srv, req->from_ns, req->to_ns,
                               req->filter.pid, &count, &linfo);
-    if (reject_overload(req, events, &linfo)) return;
+    if (reject_overload(srv, req, events, &linfo)) return;
 
     /* Fingerprints aggregate transition sequences: EXACT-required. */
     enum pgwt_fidelity fid = load_fidelity(&linfo);
@@ -2676,7 +3308,7 @@ static void handle_lock_chains(struct pgwt_server *srv, struct pgwt_request *req
     struct pgwt_trace_event *events =
         server_load_events_fi(srv, req->from_ns, req->to_ns,
                               req->filter.pid, &count, &linfo);
-    if (reject_overload(req, events, &linfo)) return;
+    if (reject_overload(srv, req, events, &linfo)) return;
 
     /* Lock-chain inference needs real wait/CPU overlap intervals: EXACT. */
     enum pgwt_fidelity fid = load_fidelity(&linfo);
@@ -2717,7 +3349,7 @@ static void handle_interference(struct pgwt_server *srv, struct pgwt_request *re
     struct pgwt_trace_event *events =
         server_load_events_fi(srv, req->from_ns, req->to_ns,
                               req->filter.pid, &count, &linfo);
-    if (reject_overload(req, events, &linfo)) return;
+    if (reject_overload(srv, req, events, &linfo)) return;
 
     /* Interference scoring needs real simultaneous-wait overlap: EXACT. */
     enum pgwt_fidelity fid = load_fidelity(&linfo);
@@ -2758,7 +3390,7 @@ static void handle_concurrency(struct pgwt_server *srv, struct pgwt_request *req
     struct pgwt_trace_event *events =
         server_load_events_fi(srv, req->from_ns, req->to_ns,
                               req->filter.pid, &count, &linfo);
-    if (reject_overload(req, events, &linfo)) return;
+    if (reject_overload(srv, req, events, &linfo)) return;
 
     /* Burst detection needs real simultaneous-wait intervals: EXACT. */
     enum pgwt_fidelity fid = load_fidelity(&linfo);
@@ -2881,7 +3513,7 @@ static void handle_variants(struct pgwt_server *srv, struct pgwt_request *req)
                                * exec/plan markers, which never pass the
                                * uniform per-event filter */ 0,
                               &count, &linfo);
-    if (reject_overload(req, events, &linfo)) return;
+    if (reject_overload(srv, req, events, &linfo)) return;
 
     /* Variants are built from marker-delimited transition sequences, which
      * only exist in full-fidelity data: EXACT-required. */
@@ -3065,6 +3697,12 @@ static void dispatch(struct pgwt_server *srv, struct pgwt_request *req,
         handle_heatmap(srv, req);
     else if (strcmp(req->cmd, "session_timeline") == 0)
         handle_session_timeline(srv, req);
+    else if (strcmp(req->cmd, "executions") == 0)
+        handle_executions(srv, req);
+    else if (strcmp(req->cmd, "execution_detail") == 0)
+        handle_execution_detail(srv, req);
+    else if (strcmp(req->cmd, "exec_scatter") == 0)
+        handle_exec_scatter(srv, req);
     else if (strcmp(req->cmd, "transitions") == 0)
         handle_transitions(srv, req);
     else if (strcmp(req->cmd, "fingerprints") == 0)
