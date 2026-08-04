@@ -1341,6 +1341,16 @@ to a CHANGELOG entry).
   `STATEDUMP-TICK` (per-tick cpu_open computation inputs in the live
   reader, same env gate) — the next hit shows what each tick actually
   computed.
+  **SECOND CAPTURE (2026-08-04, PG13 CI, U3 branch):** shutdown entry again
+  healthy/countable (we==0 from seed, on_cpu open, cpu_ns_total=16.7s,
+  cpu_accounting=1, 23 tick prints) — and **ZERO STATEDUMP-TICK lines from
+  ANY pid**: the live reader's we==0 open-interval block never executed
+  during ticks, in a process whose shutdown dump iterates the same map
+  successfully. The CPU math is exonerated; the failure lives in the tick
+  path's reach (handle_timer gating, the tick-time map iteration, or an
+  early skip taken by every entry). Third-generation instrumentation queued:
+  STATEDUMP-TIMER (per-tick gate decision) + STATEDUMP-SCAN (iteration and
+  skip-path counters).
 
 - **Multi-window %DB: windowed-delta drift of measured-CPU vs wall.** The
   multi-window `--view` (Last 1s / Last 3s) differences two cumulative ring
@@ -2992,7 +3002,7 @@ v3 owns transitions column 7 (`cpu_ns` varint, frozen in `golden/rev3`); an
 with the range reader gate and a `rev4/` golden fixture (the PR's v3/v4 redefinition is
 byte-incompatible both directions).
 
-### Track U — UI: the OEM loop + instrument (consolidated plan)  **[ADOPTED 2026-07-31; U0 ✅ (#59), U1 ✅ (#60), U2a ✅ (#62), U2b ✅ (#64, gate GREEN), U2 ✅ (#66 — the OEM loop is COMPLETE); U3 ⬜]**
+### Track U — UI: the OEM loop + instrument (consolidated plan)  **[COMPLETE 2026-08-04 — U0 ✅ (#59), U1 ✅ (#60), U2a ✅ (#62), U2b ✅ (#64, gate GREEN), U2 ✅ (#66), U3 ✅ (#67). Remaining: only the parked list]**
 
 **Goal:** the full ASH investigation loop — notice → localize (brush) → attribute
 (re-rank) → isolate (drill) → inspect → compare → share — with instrument-grade
@@ -3174,7 +3184,7 @@ the AAS pane is expected to move to a uPlot substrate behind a written gate
   stacked-geometry stay pure Node-tested modules; U0/U1 (error visibility +
   identity) land before any instrument work is judged.
 
-**Phase U3 — B6 views on the chassis ⬜**  *(subsumes REWORK B6)*
+**Phase U3 — B6 views on the chassis  ✅ [DONE — PR #67, 2026-08-04]**  *(subsumes REWORK B6; staged delegation — server → gate → UI → adversarial review, 3 blocking/5 high found+fixed with pins → supervisor probes; ships the per-execution 10046 waterfall, latency scatter, transition matrix + executions/execution_detail/exec_scatter commands, leader_pid in backends.jsonl, honest EXACT refusals end to end)*
 - Per-execution **waterfall** (the 10046 view; same custom-series technique as
   the session timeline) — **zoom + click-to-inspect in its definition of
   done**; **transition matrix** (heatmap builder as template; log/piecewise
