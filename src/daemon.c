@@ -9,6 +9,7 @@
 #include "output.h"
 #include "perf_event.h"
 #include "provider_coop.h"
+#include "wait_event.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -452,6 +453,15 @@ int pgwt_daemon_init(struct pgwt_daemon *d)
         d->skel->rodata->test_no_sched_oncpu = true;
         fprintf(stderr, "WARN: PGWT_TEST_NO_SCHED_ONCPU — sched_switch on_cpu_ts "
                 "open suppressed (deterministic straddle-CPU repro; TEST ONLY)\n");
+    }
+    /* DEBUG HOOK (PGWT_DEBUG_DUMP_STATE): see pgwt_debug_dump_state_map — the
+     * final state_map is dumped to stderr at shutdown for the reopened
+     * straddle live-CPU investigation. Announced here so the hook can never
+     * be active silently, same discipline as the PGWT_TEST_* hooks above. */
+    if (getenv("PGWT_DEBUG_DUMP_STATE")) {
+        fprintf(stderr, "WARN: PGWT_DEBUG_DUMP_STATE — final state_map will be "
+                "dumped to stderr at shutdown (STATEDUMP lines; DEBUG ONLY, "
+                "never set in production)\n");
     }
     if (!d->cpu_accounting) {
         /* No BTF → tp_btf/sched_switch can't load: don't try, and fall back
@@ -1029,8 +1039,106 @@ int pgwt_daemon_run(struct pgwt_daemon *d)
     return 0;
 }
 
+/* PGWT_DEBUG_DUMP_STATE (DEBUG ONLY): dump the final BPF state_map to stderr
+ * at shutdown — the self-diagnosing payload for the reopened straddle
+ * live-CPU flake (docs/ROADMAP_AND_STATUS.md "REOPENED 2026-08-04 — a FOURTH
+ * straddle live-CPU mode exists"). Three shipped fixes each closed a distinct
+ * mode (#52 scan recovery, #56 fire-time on_cpu_ts open, #63 stale-state
+ * sweep) yet a `live CPU* = 0ms, trace correct` run still occurs, and every
+ * CI hit so far cost an inference cycle because the hog's end-state died with
+ * the daemon. This prints each entry's RAW fields exactly as the last live
+ * tick saw them — decoded alongside, fabricating nothing (no clamping, no
+ * derived verdicts) — plus one STATEDUMP-META line with the self-metrics
+ * (control.c names) that discriminate between the known modes. Capped at
+ * PGWT_STATEDUMP_MAX entries: the flaky phase tracks a handful of backends,
+ * and a capped dump on a big map says so loudly instead of flooding.
+ * Zero cost when the env is unset (one getenv per shutdown). */
+#define PGWT_STATEDUMP_MAX 64
+
+static void pgwt_debug_dump_state_map(struct pgwt_daemon *d)
+{
+    if (!getenv("PGWT_DEBUG_DUMP_STATE") || !d->skel)
+        return;
+    int state_fd = bpf_map__fd(d->skel->maps.state_map);
+    if (state_fd < 0)
+        return;   /* init-failure path: skeleton opened but never loaded */
+
+    /* Same clock base as bpf_ktime / attach_ts (see preseed_state_map), so
+     * the printed ages are directly comparable to the entry timestamps. */
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    uint64_t now = (uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
+
+    int backends_tracked = 0;
+    for (int i = 0; i < d->backends.count; i++)
+        if (d->backends.entries[i].is_alive)
+            backends_tracked++;
+
+    /* META first so a truncated/partial log still carries the counters. */
+    fprintf(stderr,
+            "STATEDUMP-META: cpu_accounting=%d backends_tracked=%d "
+            "state_reseeds_total=%llu invalid_wait_reads_total=%llu "
+            "wp_attach_failures_total=%llu state_map_full_total=%llu "
+            "cpu_ns_total=%llu offcpu_ns_total=%llu "
+            "cpu_clamped_ns_total=%llu wait_gap_cpu_ns_total=%llu\n",
+            d->cpu_accounting ? 1 : 0, backends_tracked,
+            (unsigned long long)d->counters.state_reseeds_total,
+            (unsigned long long)d->counters.invalid_wait_reads_total,
+            (unsigned long long)d->counters.wp_attach_failures_total,
+            (unsigned long long)d->counters.state_map_full_total,
+            (unsigned long long)d->counters.cpu_ns_total,
+            (unsigned long long)d->counters.offcpu_ns_total,
+            (unsigned long long)d->counters.cpu_clamped_ns_total,
+            (unsigned long long)d->counters.wait_gap_cpu_ns_total);
+
+    uint32_t key = 0, next;
+    struct pgwt_pid_state st;
+    int n = 0;
+    while (bpf_map_get_next_key(state_fd, &key, &next) == 0) {
+        if (bpf_map_lookup_elem(state_fd, &next, &st) == 0) {
+            if (++n > PGWT_STATEDUMP_MAX) {
+                fprintf(stderr, "STATEDUMP: ... truncated at %d entries "
+                        "(map holds more)\n", PGWT_STATEDUMP_MAX);
+                break;
+            }
+            char ev_name[80];
+            pgwt_event_full_name(st.last_event, ev_name, sizeof(ev_name));
+            /* on_cpu_ts: 0 = no open on-CPU stretch (the straddle-flake
+             * signature when paired with a stale wait label); nonzero is
+             * printed raw with its age. Ages are signed on purpose — a
+             * negative age would itself be a finding (clock skew), never
+             * clamped away. */
+            char oncpu[64];
+            if (st.on_cpu_ts)
+                snprintf(oncpu, sizeof(oncpu), "%llu(age_ms=%.1f)",
+                         (unsigned long long)st.on_cpu_ts,
+                         ((double)now - (double)st.on_cpu_ts) / 1e6);
+            else
+                snprintf(oncpu, sizeof(oncpu), "0");
+            fprintf(stderr,
+                    "STATEDUMP: pid=%u wp_live=%u cmd_open=%u "
+                    "last_event=0x%08x(%s) last_ts=%llu(age_ms=%.1f) "
+                    "on_cpu_ts=%s cpu_ns_total=%llu last_cpu_ns=%llu "
+                    "last_query_id=0x%llx\n",
+                    next, st.wp_live, st.cmd_open, st.last_event, ev_name,
+                    (unsigned long long)st.last_ts,
+                    ((double)now - (double)st.last_ts) / 1e6,
+                    oncpu,
+                    (unsigned long long)st.cpu_ns_total,
+                    (unsigned long long)st.last_cpu_ns,
+                    (unsigned long long)st.last_query_id);
+        }
+        key = next;
+    }
+}
+
 void pgwt_daemon_cleanup(struct pgwt_daemon *d)
 {
+    /* DEBUG (PGWT_DEBUG_DUMP_STATE): capture the state_map's end-state BEFORE
+     * anything below detaches watchpoints or flushes entries — the dump must
+     * show exactly what the last live tick saw. No-op unless the env is set. */
+    pgwt_debug_dump_state_map(d);
+
     /* Close any open escalation window (detaches watchpoints, writes the END
      * marker) before the event writer is torn down. */
     pgwt_escalation_cleanup(d);

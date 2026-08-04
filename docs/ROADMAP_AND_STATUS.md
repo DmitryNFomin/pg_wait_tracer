@@ -1329,6 +1329,18 @@ to a CHANGELOG entry).
   (`state_reseeds_total`, sched counters), so the next CI hit yields the
   entry's actual `{last_event, last_ts, on_cpu_ts, cpu_ns_total,
   last_cpu_ns, wp_live}` instead of another inference cycle.
+  **FIRST CAPTURE (2026-08-04, PG18 CI, the dump's maiden run):** the hog's
+  shutdown entry was HEALTHY AND COUNTABLE — `last_event=CPU*, cmd_open=1,
+  on_cpu_ts open (age 90ms), cpu_ns_total=14.93s, last_cpu_ns=0` — i.e. the
+  live read's inputs at shutdown yield cpu_open ≈ 15s, byte-identical in
+  shape to a PASSING box run's end state. The fourth mode is therefore a
+  TICK-TIME phenomenon invisible to the shutdown snapshot. Context captured:
+  a ZOMBIE second CPU hog from a prior phase (cmd_open=0, still burning at
+  shutdown) sharing the 2 vCPUs, `wp_attach_failures_total=1`,
+  `wait_gap_cpu_ns_total=1.77s`. Instrumentation extended with
+  `STATEDUMP-TICK` (per-tick cpu_open computation inputs in the live
+  reader, same env gate) — the next hit shows what each tick actually
+  computed.
 
 - **Multi-window %DB: windowed-delta drift of measured-CPU vs wall.** The
   multi-window `--view` (Last 1s / Last 3s) differences two cumulative ring

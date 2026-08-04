@@ -774,7 +774,16 @@ def phase_pure_cpu_straddle(pm_pid, mode):
     be_pid = None
     oncpu_before = oncpu_after = None
     win_from = win_shutdown = 0
-    tracer = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    # Self-diagnosis (docs/ROADMAP_AND_STATUS.md "REOPENED 2026-08-04 — a
+    # FOURTH straddle live-CPU mode exists"): this phase's live-CPU check is
+    # the flake's only witness, so ALWAYS arm the daemon's shutdown state_map
+    # dump (STATEDUMP:/STATEDUMP-META: stderr lines, pgwt_debug_dump_state_map
+    # in src/daemon.c). A passing run keeps the dump inside the captured
+    # stderr and prints nothing extra; a failing run surfaces it below, so
+    # the next CI hit hands us the hog's actual end-state instead of another
+    # inference cycle.
+    tracer = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              env={**os.environ, "PGWT_DEBUG_DUMP_STATE": "1"})
     try:
         time.sleep(3.0)                 # BPF load + scan/attach seeds the backend
         be_pid = find_active_do_backend()
@@ -803,6 +812,17 @@ def phase_pure_cpu_straddle(pm_pid, mode):
     #    Pre-T8 this row was 0.0 for a waitless command (the exact symptom).
     live = parse_time_model(out)
     live_cpu = live.get('CPU*', 0.0)
+    if live_cpu <= 0.0:
+        # THE flake fired (see the Popen env above): print the hog pid and
+        # the daemon's shutdown state_map dump BEFORE check() records the
+        # failure, so the CI log itself answers which end-state produced
+        # live CPU* = 0. Raw daemon lines, unfiltered by content — the dump
+        # is the diagnostic payload, never interpreted here.
+        print(f"=== STRADDLE LIVE CPU* = 0 — shutdown state_map dump "
+              f"(hog be_pid={be_pid}) ===")
+        for _line in err.splitlines():
+            if _line.startswith("STATEDUMP"):
+                print(_line)
     check(live_cpu > 0.0,
           f"pure-CPU straddle live view shows CPU* > 0 (--mode {mode}): "
           f"CPU* = {live_cpu:.0f}ms (pre-T8 ~0; stderr {err[-160:]!r})")
