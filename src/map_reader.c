@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
+#include <errno.h>
 #include <time.h>
 
 #ifndef PGWT_SERVER
@@ -169,8 +170,27 @@ void pgwt_read_state_map(struct pgwt_daemon *d)
     uint32_t skey = 0, snext;
     struct pgwt_pid_state sval;
     uint64_t now = now_ns();
+    int entries = 0;
+    int we0_open = 0;
+    int skipped_not_live = 0;
+    int skipped_closed = 0;
+    static int dbg_scan = -1;
+    int next_rc;
 
-    while (bpf_map_get_next_key(state_fd, &skey, &snext) == 0) {
+    if (dbg_scan < 0)
+        dbg_scan = getenv("PGWT_DEBUG_DUMP_STATE") != NULL;
+    if (dbg_scan)
+        fprintf(stderr, "STATEDUMP-SCAN: entries=%d we0_open=%d "
+                "skipped_not_live=%d skipped_closed=%d\n",
+                entries, we0_open, skipped_not_live, skipped_closed);
+
+    errno = 0;
+    next_rc = bpf_map_get_next_key(state_fd, &skey, &snext);
+    if (next_rc != 0 && dbg_scan)
+        fprintf(stderr, "STATEDUMP-SCAN: iteration-empty errno=%d\n", errno);
+
+    while (next_rc == 0) {
+        entries++;
         if (bpf_map_lookup_elem(state_fd, &snext, &sval) == 0) {
             /* T2: entries without a live watchpoint are query-id/cmd-gate
              * seeds — their last_event/last_ts are NOT interval state.
@@ -179,11 +199,16 @@ void pgwt_read_state_map(struct pgwt_daemon *d)
              * Only reached in tiered mode during escalation, where every
              * ATTACHED backend has wp_live = 1 from the preseed. */
             if (!sval.wp_live) {
+                skipped_not_live++;
                 skey = snext;
+                next_rc = bpf_map_get_next_key(state_fd, &skey, &snext);
                 continue;
             }
             uint64_t open_ns = now - sval.last_ts;
             uint32_t we = sval.last_event;
+
+            if (we == 0 && open_ns > 0)
+                we0_open++;
 
             /* Store current state for active sessions view */
             struct pgwt_pid_accum *pa_cur = pgwt_get_or_create_pid(&d->accum, snext);
@@ -223,6 +248,8 @@ void pgwt_read_state_map(struct pgwt_daemon *d)
                     }
                 }
             }
+            if (has_closed_data)
+                skipped_closed++;
 
             if (open_ns > 0 && !has_closed_data) {
                 /* T8 symptom #3: for an on-CPU (we==0) in-progress interval,
@@ -324,7 +351,13 @@ void pgwt_read_state_map(struct pgwt_daemon *d)
             }
         }
         skey = snext;
+        next_rc = bpf_map_get_next_key(state_fd, &skey, &snext);
     }
+
+    if (dbg_scan)
+        fprintf(stderr, "STATEDUMP-SCAN: entries=%d we0_open=%d "
+                "skipped_not_live=%d skipped_closed=%d\n",
+                entries, we0_open, skipped_not_live, skipped_closed);
 }
 
 /* Read BPF accum_map (PERCPU lightweight mode) and merge into event_accum.
