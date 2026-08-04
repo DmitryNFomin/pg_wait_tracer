@@ -1315,6 +1315,21 @@ to a CHANGELOG entry).
   the EL8 box) — with the sweep's repair reseed exempt from that hook's seed
   force (the one sanctioned non-fire opener; `preseed_state_map`).
 
+- **REOPENED 2026-08-04 — a FOURTH straddle live-CPU mode exists.** A
+  `capture-smoke (PG 17)` run on the U2b branch (which includes the #63
+  sweep) failed with the exact `live CPU* = 0ms, trace correct` signature
+  and **no `reseeded stale state` INFO line** — the sweep never fired, so
+  the entry was NOT in the frozen-mismatch state and this is not the
+  seed→arm race. The three shipped fixes (#52 scan recovery, #56 fire-time
+  open, #63 stale-state sweep) each carry a deterministic regression and
+  remain correct; a distinct mode remains. Next step (queued): make the
+  failure self-diagnosing — on `phase_pure_cpu_straddle` live-CPU FAIL,
+  dump the hog's state_map entry (a debug control-socket command or a
+  targeted stderr dump at final tick) + the control metrics
+  (`state_reseeds_total`, sched counters), so the next CI hit yields the
+  entry's actual `{last_event, last_ts, on_cpu_ts, cpu_ns_total,
+  last_cpu_ns, wp_live}` instead of another inference cycle.
+
 - **Multi-window %DB: windowed-delta drift of measured-CPU vs wall.** The
   multi-window `--view` (Last 1s / Last 3s) differences two cumulative ring
   snapshots; CPU* carries MEASURED on-CPU ns while DB Time carries WALL. Per single
