@@ -38,6 +38,9 @@ import { createHistogramView } from './views/histogram.js';
 import { createTimelineView } from './views/timeline.js';
 import { createTransitionsView } from './views/transitions.js';
 import { createConcurrencyView } from './views/concurrency.js';
+import { createWaterfallView } from './views/waterfall.js';
+import { createExecScatterView } from './views/exec-scatter.js';
+import { createMatrixView } from './views/matrix.js';
 
 // ── Core services ─────────────────────────────────────────────────────────────
 
@@ -161,6 +164,9 @@ let pendingHashApply = null;
 
 function currentHashState() {
     const tab = vm ? vm.activeId() : null;
+    const activeView = tab && vm ? vm.views[tab] : null;
+    const execution = activeView && typeof activeView.getSelection === 'function'
+        ? activeView.getSelection() : null;
     return {
         tab,
         live: autoRefreshOn,
@@ -169,6 +175,7 @@ function currentHashState() {
         toNs: timeRange.to,
         filters: filters.snapshot(),
         sort: tab ? getSort(tab) : null,
+        execution,
     };
 }
 
@@ -196,6 +203,10 @@ async function applyHashOnce(s) {
     if (s.sort) tabSort[tab] = s.sort;
     else delete tabSort[tab];        // Back to a pre-sort entry undoes the sort
     setTabView(tab);
+    if (s.execution && vm.views[tab] &&
+        typeof vm.views[tab].selectExecution === 'function') {
+        vm.views[tab].selectExecution(s.execution);
+    }
     updateBreadcrumb();
     if (s.live) {
         // Fresh server clock first — same rule as the Live button (the
@@ -278,6 +289,7 @@ function makeCtx() {
         // comment above PIVOT/PIVOTS in the drill section below.
         onDrill: drill,
         onZoom: (from, to) => { stopAutoRefresh(); zoomTo(from, to); },
+        onZoomOut: () => { stopAutoRefresh(); zoomOut(); },
         isLiveTick: () => autoRefreshOn && lastLiveTickTo === timeRange.to,
         // Table views: per-tab sort state + a re-render hook used after a
         // header-sort click (re-runs requests/build/mount under a fresh epoch).
@@ -677,6 +689,9 @@ function initTabs() {
     vm.register(createTimelineView());
     vm.register(createTransitionsView());
     vm.register(createConcurrencyView());
+    vm.register(createWaterfallView());
+    vm.register(createExecScatterView());
+    vm.register(createMatrixView());
 
     // P4: these views are too heavy for the 5s live loop — entering them
     // pauses live mode. Set here as a view property because the view
@@ -775,6 +790,10 @@ const PIVOTS = {
     'heatmap-cell':    { tab: 'queries' },
     'dfg-event':       { tab: 'queries' },
     'burst-zoom':      { tab: null },
+    'query-executions': { tab: 'waterfall' },
+    'scatter-execution': { tab: 'waterfall', intentMethod: 'selectExecution' },
+    'waterfall-execution': { tab: 'waterfall', intentMethod: 'selectExecution' },
+    'matrix-cell':     { tab: 'queries' },
 };
 
 function drill(intent) {
@@ -815,6 +834,10 @@ function pivotDrill(intent) {
     }
     const tab = intent.tab !== undefined ? intent.tab : reg.tab;
     if (tab && vm.views[tab]) setTabView(tab);
+    if (tab && reg.intentMethod && vm.views[tab] &&
+        typeof vm.views[tab][reg.intentMethod] === 'function') {
+        vm.views[tab][reg.intentMethod](intent);
+    }
     updateBreadcrumb();
     if (intent.from != null && intent.to != null && intent.to > intent.from) {
         // zoomTo owns the ONE history push for this compound investigation

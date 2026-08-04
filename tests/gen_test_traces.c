@@ -72,6 +72,7 @@
 
 struct test_backend {
     uint32_t pid;
+    uint32_t leader_pid;
     char     type[32];
     char     user[64];
     char     db[64];
@@ -177,6 +178,9 @@ static int parse_backends(const char *arr, struct scenario *sc)
 
         const char *v;
         if ((v = find_key(p, "pid"))) { b->pid = (uint32_t)strtoull(v, NULL, 10); }
+        if ((v = find_key(p, "leader_pid")) && v < end) {
+            b->leader_pid = (uint32_t)strtoull(v, NULL, 10);
+        }
         if ((v = find_key(p, "type"))) { parse_string(&v, b->type, sizeof(b->type)); }
         if ((v = find_key(p, "user"))) { parse_string(&v, b->user, sizeof(b->user)); }
         if ((v = find_key(p, "db")))   { parse_string(&v, b->db, sizeof(b->db)); }
@@ -243,8 +247,9 @@ static int parse_events(const char *arr, struct scenario *sc)
         /* T8: measured on-CPU ns for the interval (only meaningful with
          * top-level "cpu_measured":1). Absent → 0; for we==0 CPU gaps that
          * makes CPU*=0/OffCPU*=full, so a measured scenario should set it. */
-        ev->cpu_ns = (v = find_key(p, "cpu")) ? strtoull(v, NULL, 10)
-                                              : PGWT_CPU_NS_UNKNOWN;
+        v = find_key(p, "cpu");
+        ev->cpu_ns = (v && v < end) ? strtoull(v, NULL, 10)
+                                    : PGWT_CPU_NS_UNKNOWN;
 
         sc->num_events++;
         p = end + 1;
@@ -334,11 +339,14 @@ static int write_backends_jsonl(const char *dir, struct scenario *sc)
     for (int i = 0; i < sc->num_backends; i++) {
         struct test_backend *b = &sc->backends[i];
         if (b->user[0] && b->db[0]) {
-            fprintf(f, "{\"pid\":%u,\"type\":\"%s\",\"user\":\"%s\",\"db\":\"%s\",\"addr\":\"127.0.0.1(5432)\"}\n",
+            fprintf(f, "{\"pid\":%u,\"type\":\"%s\",\"user\":\"%s\",\"db\":\"%s\",\"addr\":\"127.0.0.1(5432)\"",
                     b->pid, b->type, b->user, b->db);
         } else {
-            fprintf(f, "{\"pid\":%u,\"type\":\"%s\"}\n", b->pid, b->type);
+            fprintf(f, "{\"pid\":%u,\"type\":\"%s\"", b->pid, b->type);
         }
+        if (b->leader_pid > 0)
+            fprintf(f, ",\"leader_pid\":%u", b->leader_pid);
+        fprintf(f, "}\n");
     }
 
     fclose(f);

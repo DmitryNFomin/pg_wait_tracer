@@ -77,6 +77,7 @@ SCENARIO = {
         {"pid": 1003, "type": "client", "user": "u", "db": "d"},
         {"pid": 1004, "type": "client", "user": "u", "db": "d"},
         {"pid": 1005, "type": "client", "user": "u", "db": "d"},
+        {"pid": 1006, "type": "parallel_worker", "leader_pid": 1000},
     ],
     "queries": [
         {"id": 100, "text": "SELECT 1"},
@@ -114,6 +115,9 @@ SCENARIO = {
             "old": IO_DATA_FILE_READ, "new": CPU, "qid": 200},
            {"pid": 1005, "ts": BASE + 9 * MS, "dur": 2 * MS,
             "old": CPU, "new": IO_DATA_FILE_READ, "qid": 200}]
+        # PID 1006 is a parallel worker for leader 1000 (B6 leader_pid lane).
+        + [{"pid": 1006, "ts": BASE + 11 * MS, "dur": 3 * MS,
+            "old": IO_DATA_FILE_READ, "new": CPU, "qid": 100}]
         # PID 1000 lifecycle: plan+exec span around the wait sequence above,
         # then a second short plan+exec of the same query (different wait
         # pattern → second variant; 2 samples → p95/p99 lifecycle fields)
@@ -148,6 +152,11 @@ COMMANDS = [
     ("top_queries",           "top_queries",      {}),
     ("heatmap",               "heatmap",          {}),
     ("session_timeline pid",  "session_timeline", {"filters": {"pid": 1000}}),
+    ("executions",            "executions",       {"limit": 100}),
+    ("execution_detail",      "execution_detail", {"pid": 1000,
+                                                     "start_ns": str(BASE),
+                                                     "end_ns": str(BASE + 30 * MS + 1000)}),
+    ("exec_scatter",          "exec_scatter",     {"max_points": 2000}),
     ("transitions",           "transitions",      {}),
     ("fingerprints",          "fingerprints",     {}),
     ("concurrency",           "concurrency",      {"buckets": 30}),
@@ -278,6 +287,10 @@ def mock_query(cmd, req_id, **kwargs):
         msg["detail"] = kwargs["detail"]
     if "filters" in kwargs:
         msg["filters"] = kwargs["filters"]
+    for key in ("limit", "max_points", "pid", "query_id",
+                "start_ns", "end_ns"):
+        if key in kwargs:
+            msg[key] = kwargs[key]
     return mock_server.handle_request(msg)
 
 

@@ -52,6 +52,23 @@ test('serialize: canonical — filter key order is sorted, same state same strin
     assert.equal(a, b);
 });
 
+test('execution identity round-trips as exact decimal strings', () => {
+    const execution = { pid: 1000, start_ns: '1719792000123456789',
+        end_ns: '1719792000135956789', query_id: '42' };
+    const h = serializeHashState({ tab: 'waterfall', live: true, spanSecs: 900,
+        filters: {}, sort: null, execution });
+    assert.ok(h.includes('exec.start=1719792000123456789'));
+    assert.deepEqual(parseHashState('#' + h).execution, execution);
+});
+
+test('execution identity rejects incomplete, inverted, or non-decimal input', () => {
+    assert.equal(parseHashState('#tab=waterfall&exec.pid=7').execution, null);
+    const s = parseHashState('#tab=waterfall&exec.pid=7&exec.start=100&exec.end=99');
+    assert.deepEqual(s.execution, { pid: 7, start_ns: '100' });
+    assert.equal(parseHashState('#tab=waterfall&exec.pid=7&exec.start=nope').execution,
+        null);
+});
+
 test('serialize: values are URI-encoded (hostile SQL in a query label-less value)', () => {
     const h = serializeHashState({ tab: 'queries', live: true, spanSecs: 60,
         filters: { query_id: '123&f.pid=9#x' }, sort: null });

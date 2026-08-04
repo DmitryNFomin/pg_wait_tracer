@@ -35,6 +35,8 @@ void pgwt_bm_write(struct pgwt_backend_meta_writer *bm,
         cJSON_AddStringToObject(obj, "db", meta->datname);
     if (meta->client_addr[0])
         cJSON_AddStringToObject(obj, "addr", meta->client_addr);
+    if (meta->leader_pid > 0)
+        cJSON_AddNumberToObject(obj, "leader_pid", meta->leader_pid);
 
     char *str = cJSON_PrintUnformatted(obj);
     if (str) {

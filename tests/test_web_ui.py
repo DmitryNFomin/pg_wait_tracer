@@ -265,7 +265,8 @@ def test_tabs(page):
 
     tabs = page.query_selector_all(".tab")
     tab_names = [t.text_content() for t in tabs]
-    expected = ["Overview", "Events", "Sessions", "Queries", "Histogram", "Timeline", "Transitions", "Concurrency"]
+    expected = ["Overview", "Events", "Sessions", "Queries", "Histogram", "Timeline",
+                "Transitions", "Concurrency", "Waterfall", "Scatter", "Matrix"]
     check(tab_names == expected,
           f"Tabs: {tab_names}")
 
@@ -2198,6 +2199,294 @@ def test_dfg_node_drill(page):
           f"breadcrumb labels the drilled node ('{breadcrumb.strip()[:50]}')")
 
 
+# ── U3 Stage 2 / B6: executions waterfall, latency scatter, matrix ──────────
+
+def test_waterfall_view(page):
+    """Waterfall renders the latest execution, row selection swaps detail,
+    local drag clips resident data, dblclick restores it, and bar click paints
+    the compact inspection panel."""
+    print("--- Test U3.1: Execution Waterfall ---")
+    page.goto(MOCK_URL)
+    page.wait_for_selector("#status.connected", timeout=10000)
+    page.click(".tab[data-tab='waterfall']")
+    page.wait_for_selector("#waterfall-chart canvas", timeout=5000)
+    page.wait_for_timeout(700)
+
+    rows = page.query_selector_all("#executions-table tbody tr.clickable")
+    check(len(rows) == 2, f"execution selector rendered 2 latest-first rows ({len(rows)})")
+    selected = page.query_selector("#executions-table tr.selected-execution")
+    check(selected is not None and "1002" in selected.text_content(),
+          "latest execution is selected initially")
+    lane_count = page.evaluate("""() => {
+        const c = echarts.getInstanceByDom(document.getElementById('waterfall-chart'));
+        return c.getOption().yAxis[0].data.length;
+    }""")
+    check(lane_count == 1, f"latest execution detail has one leader lane ({lane_count})")
+
+    rows[1].click()
+    page.wait_for_timeout(1000)
+    selected = page.query_selector("#executions-table tr.selected-execution")
+    check(selected is not None and "1000" in selected.text_content(),
+          "row click selected the older execution")
+    lane_count = page.evaluate("""() => {
+        const c = echarts.getInstanceByDom(document.getElementById('waterfall-chart'));
+        return c.getOption().yAxis[0].data.length;
+    }""")
+    check(lane_count == 3, f"selected execution rendered leader + 2 workers ({lane_count} lanes)")
+
+    # The detail payload is fully resident: local zoom/restore must not send
+    # executions or execution_detail again.
+    page.evaluate("""() => {
+        window.__wfMsgLog = [];
+        const ws = window.__pgwt.transport.ws;
+        const send = ws.send.bind(ws);
+        ws.send = data => { window.__wfMsgLog.push(JSON.parse(data)); return send(data); };
+    }""")
+
+    span_before = page.evaluate("""() => {
+        const c = echarts.getInstanceByDom(document.getElementById('waterfall-chart'));
+        const x = c.getOption().xAxis[0]; return x.max - x.min;
+    }""")
+    box = page.query_selector("#waterfall-chart").bounding_box()
+    y = box["y"] + box["height"] * .5
+    drag = page.evaluate("""() => {
+        const el = document.getElementById('waterfall-chart');
+        const c = echarts.getInstanceByDom(el);
+        const h = el.getBoundingClientRect(), cv = el.querySelector('canvas').getBoundingClientRect();
+        // Playwright/Chromium dispatch mouse coordinates at integral CSS px;
+        // compute the oracle from those same delivered coordinates.
+        const x1 = Math.round(h.left + h.width * .32);
+        const x2 = Math.round(h.left + h.width * .68);
+        return {x1, x2,
+            from: c.convertFromPixel({gridIndex:0}, [x1-cv.left, 0])[0],
+            to: c.convertFromPixel({gridIndex:0}, [x2-cv.left, 0])[0]};
+    }""")
+    page.mouse.move(drag["x1"], y)
+    page.mouse.down()
+    page.mouse.move(drag["x2"], y, steps=6)
+    page.mouse.up()
+    page.wait_for_timeout(500)
+    span_zoom = page.evaluate("""() => {
+        const c = echarts.getInstanceByDom(document.getElementById('waterfall-chart'));
+        const x = c.getOption().xAxis[0]; return x.max - x.min;
+    }""")
+    check(0 < span_zoom < span_before * .6,
+          f"plain drag locally zoomed resident detail ({span_before} -> {span_zoom})")
+    applied = page.evaluate("""() => {
+        const x=echarts.getInstanceByDom(document.getElementById('waterfall-chart'))
+            .getOption().xAxis[0]; return {from:x.min,to:x.max};
+    }""")
+    check(abs(applied["from"] - round(drag["from"])) <= 1 and
+          abs(applied["to"] - round(drag["to"])) <= 1,
+          f"padded waterfall drag applied canvas-relative band ({drag} -> {applied})")
+    check("Zoomed:" in (page.text_content("#waterfall-zoom-state") or ""),
+          "waterfall labels its local zoom state")
+
+    page.dblclick("#waterfall-chart", position={"x": box["width"] * .5,
+                                                "y": box["height"] * .5})
+    page.wait_for_timeout(500)
+    span_restored = page.evaluate("""() => {
+        const c = echarts.getInstanceByDom(document.getElementById('waterfall-chart'));
+        const x = c.getOption().xAxis[0]; return x.max - x.min;
+    }""")
+    check(abs(span_restored - span_before) < 1000,
+          f"double-click restored full execution ({span_restored})")
+    cmds = [m.get("cmd") for m in page.evaluate("window.__wfMsgLog")]
+    check("executions" not in cmds and "execution_detail" not in cmds,
+          f"local zoom/restore used resident detail with no refetch (cmds={cmds})")
+
+    point = page.evaluate("""() => {
+        const el = document.getElementById('waterfall-chart');
+        const c = echarts.getInstanceByDom(el);
+        const d = c.getOption().series[0].data.find(v => v[9] === 'event');
+        const px = c.convertToPixel({gridIndex: 0}, [(d[0] + d[1]) / 2, d[2]]);
+        const r = el.querySelector('canvas').getBoundingClientRect();
+        return {x:r.left + px[0], y:r.top + px[1], name:d[3]};
+    }""")
+    page.mouse.click(point["x"], point["y"])
+    page.wait_for_timeout(300)
+    readout = page.text_content("#waterfall-readout") or ""
+    check(point["name"] in readout and "PID" in readout and "Duration" in readout,
+          f"bar click opened compact readout ('{readout[:90]}')")
+
+
+def test_query_to_waterfall_pivot(page):
+    """The dedicated query cell reaches waterfall while the normal row drill
+    remains the existing query→Events behavior (covered by test_query_drill)."""
+    print("--- Test U3.2: Query -> Waterfall Pivot ---")
+    page.goto(MOCK_URL)
+    page.wait_for_selector("#status.connected", timeout=10000)
+    page.click(".tab[data-tab='queries']")
+    page.wait_for_selector(".query-executions-action", timeout=5000)
+    action_box = page.query_selector(".query-executions-action").bounding_box()
+    viewport_width = page.evaluate("window.innerWidth")
+    check(action_box is not None and action_box["x"] + action_box["width"] <= viewport_width,
+          f"query Waterfall action is visible without horizontal scroll ({action_box})")
+    page.click(".query-executions-action")
+    check(_wait_tab(page, "waterfall"), "dedicated query action pivoted to Waterfall")
+    filters = page.evaluate("window.__pgwt.filters.filters")
+    check(filters.get("query_id") == "3886912043147135675",
+          f"query-executions pivot applied query_id through FilterStack ({filters})")
+    try:
+        page.wait_for_selector("#waterfall-chart canvas", timeout=5000)
+        loaded = True
+    except Exception:
+        loaded = False
+    check(loaded,
+          "query pivot loaded selected execution detail")
+
+
+def test_scatter_view(page):
+    """Scatter excludes the open execution, clicks a completed point into its
+    exact waterfall selection, and a 2-D box applies time zoom + y context."""
+    print("--- Test U3.3: Execution Scatter ---")
+    page.goto(MOCK_URL)
+    page.wait_for_selector("#status.connected", timeout=10000)
+    page.click(".tab[data-tab='scatter']")
+    page.wait_for_selector("#scatter-chart canvas", timeout=5000)
+    page.wait_for_timeout(700)
+    status = page.evaluate("""() => {
+        const c = echarts.getInstanceByDom(document.getElementById('scatter-chart'));
+        const o = c.getOption(); return {type:o.xAxis[0].type, y:o.yAxis[0].type,
+            large:o.series[0].large, n:o.series[0].data.length};
+    }""")
+    check(status == {"type": "time", "y": "log", "large": True, "n": 2},
+          f"scatter rendered time/log large series with 2 completed points ({status})")
+    check("1 in-progress execution" in (page.text_content("#scatter-notes") or ""),
+          "scatter states the one excluded in-progress point")
+
+    point = page.evaluate("""() => {
+        const el=document.getElementById('scatter-chart'), c=echarts.getInstanceByDom(el);
+        const d=c.getOption().series[0].data.find(v => v[2] === 1002);
+        const px=c.convertToPixel({seriesIndex:0}, [d[0],d[1]]);
+        const r=el.querySelector('canvas').getBoundingClientRect();
+        return {x:r.left+px[0],y:r.top+px[1]};
+    }""")
+    page.mouse.click(point["x"], point["y"])
+    check(_wait_tab(page, "waterfall"), "scatter point pivoted to Waterfall")
+    page.wait_for_timeout(700)
+    selected = page.text_content("#executions-table tr.selected-execution") or ""
+    check("1002" in selected, f"scatter handoff selected interior PID 1002 execution ('{selected[:60]}')")
+    selected_hash = page.evaluate("location.hash")
+    check("exec.pid=1002" in selected_hash and "exec.start=10000100000000" in selected_hash,
+          f"scatter execution identity is URL state ({selected_hash})")
+    page.reload()
+    page.wait_for_selector("#waterfall-chart canvas", timeout=10000)
+    restored = page.text_content("#executions-table tr.selected-execution") or ""
+    check("1002" in restored, f"reload restored the exact scatter selection ('{restored[:60]}')")
+
+    # Fresh scatter for box selection.
+    page.goto(MOCK_URL + "#tab=scatter&live=1&span=900")
+    page.wait_for_selector("#scatter-chart canvas", timeout=10000)
+    before = page.evaluate("window.__pgwt.timeRange.to-window.__pgwt.timeRange.from")
+    box = page.query_selector("#scatter-chart").bounding_box()
+    page.mouse.move(box["x"] + box["width"] * .28, box["y"] + box["height"] * .44)
+    page.mouse.down()
+    page.mouse.move(box["x"] + box["width"] * .72, box["y"] + box["height"] * .55,
+                    steps=8)
+    page.mouse.up()
+    page.wait_for_timeout(1000)
+    after = page.evaluate("window.__pgwt.timeRange.to-window.__pgwt.timeRange.from")
+    check(0 < after < before, f"2-D box made time the primary zoom semantic ({before} -> {after})")
+    readout = page.text_content("#scatter-readout") or ""
+    check("latency context" in readout and "time and latency ranges applied" in readout,
+          f"meaningful y box disclosed both applied dimensions ('{readout}')")
+    yrange = page.evaluate("""() => {
+        const y=echarts.getInstanceByDom(document.getElementById('scatter-chart'))
+            .getOption().yAxis[0]; return {min:y.min,max:y.max};
+    }""")
+    check(yrange["min"] is not None and yrange["max"] is not None and
+          yrange["max"] > yrange["min"],
+          f"2-D selection actually constrained the latency axis ({yrange})")
+
+    # A purely horizontal drag is the primary time gesture and uses canvas-
+    # relative pixels even though the ECharts host has horizontal padding.
+    page.goto(MOCK_URL + "#tab=scatter&live=1&span=900")
+    page.wait_for_selector("#scatter-chart canvas", timeout=10000)
+    drag = page.evaluate("""() => {
+        const el=document.getElementById('scatter-chart'), c=echarts.getInstanceByDom(el);
+        const h=el.getBoundingClientRect(), cv=el.querySelector('canvas').getBoundingClientRect();
+        const x1=h.left+h.width*.30, x2=h.left+h.width*.70, y=h.top+h.height*.50;
+        const a=c.convertFromPixel({gridIndex:0},[x1-cv.left,y-cv.top]);
+        const b=c.convertFromPixel({gridIndex:0},[x2-cv.left,y-cv.top]);
+        return {x1,x2,y,from:Math.min(a[0],b[0]),to:Math.max(a[0],b[0])};
+    }""")
+    page.mouse.move(drag["x1"], drag["y"])
+    page.mouse.down()
+    page.mouse.move(drag["x2"], drag["y"], steps=8)
+    page.mouse.up()
+    page.wait_for_timeout(1000)
+    applied = page.evaluate("() => ({from:window.__pgwt.timeRange.from,to:window.__pgwt.timeRange.to})")
+    check(abs(applied["from"] - round(drag["from"] * 1e6)) <= 1024 and
+          abs(applied["to"] - round(drag["to"] * 1e6)) <= 1024,
+          f"horizontal padded-host drag applied the canvas-relative time range ({drag} -> {applied})")
+
+
+def test_matrix_view(page):
+    """Matrix renders a log-piecewise heatmap and drills a cell to the target
+    event through the standard event destination."""
+    print("--- Test U3.4: Transition Matrix ---")
+    page.goto(MOCK_URL)
+    page.wait_for_selector("#status.connected", timeout=10000)
+    page.evaluate("""() => {
+        window.__matrixMsgLog = [];
+        const ws = window.__pgwt.transport.ws, send = ws.send.bind(ws);
+        ws.send = data => { window.__matrixMsgLog.push(JSON.parse(data)); return send(data); };
+    }""")
+    page.click(".tab[data-tab='matrix']")
+    page.wait_for_selector("#matrix-chart canvas", timeout=5000)
+    page.wait_for_timeout(700)
+    shape = page.evaluate("""() => {
+        const c=echarts.getInstanceByDom(document.getElementById('matrix-chart'));
+        const o=c.getOption(); return {type:o.series[0].type,
+            vm:o.visualMap[0].type, dim:o.visualMap[0].dimension,
+            n:o.series[0].data.length};
+    }""")
+    check(shape["type"] == "heatmap" and shape["vm"] == "piecewise" and
+          shape["dim"] == 2 and shape["n"] > 0,
+          f"matrix rendered heatmap with log-piecewise dimension ({shape})")
+    note = page.text_content("#matrix-notes") or ""
+    check("Showing 1,670 of 1,800 transitions; 130 not shown" in note and
+          "Server returned 5 of 8 transition links" in note,
+          f"matrix note is volume-honest and discloses the server link cap ('{note}')")
+    matrix_req = next((m for m in page.evaluate("window.__matrixMsgLog")
+                       if m.get("cmd") == "transitions"), {})
+    check(matrix_req.get("buckets") == 200 and "num_buckets" not in matrix_req,
+          f"matrix requests the real server's buckets parameter ({matrix_req})")
+    point = page.evaluate("""() => {
+        const el=document.getElementById('matrix-chart'), c=echarts.getInstanceByDom(el);
+        const d=c.getOption().series[0].data.find(v => v[5] > 0);
+        const px=c.convertToPixel({seriesIndex:0}, [d[0],d[1]]);
+        const r=el.querySelector('canvas').getBoundingClientRect();
+        return {x:r.left+px[0], y:r.top+px[1], target:d[5]};
+    }""")
+    page.mouse.click(point["x"], point["y"])
+    check(_wait_tab(page, "queries"), "matrix cell pivoted to Queries")
+    filters = page.evaluate("window.__pgwt.filters.filters")
+    check(filters.get("event_id") == point["target"],
+          f"matrix cell drilled the TARGET event id ({filters})")
+
+
+def test_b6_deep_links(page):
+    """Each new tab is hash-addressable; waterfall hydrates query_id before
+    its initial executions request."""
+    print("--- Test U3.5: B6 Deep Links ---")
+    qid = "3886912043147135675"
+    page.goto(MOCK_URL + f"#tab=waterfall&live=1&span=900&f.query_id={qid}")
+    page.wait_for_selector("#waterfall-chart canvas", timeout=10000)
+    check(page.evaluate("window.__pgwt.activeTab") == "waterfall" and
+          page.evaluate("window.__pgwt.filters.filters.query_id") == qid,
+          "waterfall deep link hydrated tab + query_id filter")
+    page.goto(MOCK_URL + "#tab=scatter&live=1&span=900")
+    page.wait_for_selector("#scatter-chart canvas", timeout=10000)
+    check(page.evaluate("window.__pgwt.activeTab") == "scatter",
+          "scatter deep link hydrated")
+    page.goto(MOCK_URL + "#tab=matrix&live=1&span=900")
+    page.wait_for_selector("#matrix-chart canvas", timeout=10000)
+    check(page.evaluate("window.__pgwt.activeTab") == "matrix",
+          "matrix deep link hydrated")
+
+
 def test_percentile_cell_pivot(page):
     """U2.f (P3 wire 6 / P10): an events P50/P95/P99 cell pivots to THAT
     event's latency distribution — the 'histogram-event' intent → Histogram
@@ -2363,6 +2652,8 @@ def test_histogram_dropdown_writethrough(page):
     page.evaluate("h => { location.hash = h; }", external_hash)
     page.wait_for_function(
         "() => !('event_id' in window.__pgwt.filters.filters)", timeout=5000)
+    page.wait_for_function(
+        "() => document.getElementById('hm-event')?.value === ''", timeout=5000)
     check(page.input_value("#hm-event") == "",
           "external filter change synced the non-focused event select")
 
@@ -2710,6 +3001,15 @@ def test_b5_unavailable_panel(page):
     check(page.query_selector(".unavailable-panel") is not None,
           "Histogram shows the unavailable panel")
 
+    # All three U3/B6 views are EXACT-required too. Their structured refusal
+    # is expected unavailability (panels.js), never the red U0 error card.
+    for tab in ("waterfall", "scatter", "matrix"):
+        page.click(f".tab[data-tab='{tab}']")
+        page.wait_for_timeout(1000)
+        check(page.query_selector(".unavailable-panel") is not None and
+              page.query_selector(".pane-error") is None,
+              f"{tab} shows expected full-fidelity refusal panel")
+
 
 def test_b5_escalate_flow(page):
     """B5.3: clicking Escalate transitions the daemon to escalated + budget drops."""
@@ -2855,6 +3155,12 @@ def main():
                 test_hash_sort_clear,
                 test_rapid_hash_traversal,
                 test_url_state_roundtrip,
+                # U3 Stage 2: the three B6 analysis views.
+                test_waterfall_view,
+                test_query_to_waterfall_pivot,
+                test_scatter_view,
+                test_matrix_view,
+                test_b6_deep_links,
             ]
             for fn in tests:
                 fn(page)

@@ -2281,6 +2281,7 @@ void pgwt_compute_transitions(const struct pgwt_trace_event *events, int count,
 
     out->rows = rows;
     out->num_rows = nr;
+    out->total_rows = n;
     out->total_transitions = total;
 }
 
@@ -2852,6 +2853,408 @@ void pgwt_compute_interference(const struct pgwt_trace_event *events, int count,
 }
 
 /* ── Variants ─────────────────────────────────────────────── */
+
+/* ── Execution waterfall / scatter data (U3/B6) ────────────────── */
+
+struct exec_pid_state {
+    uint32_t pid;
+    int active_row;
+    uint64_t plan_start_ns;
+    uint64_t plan_query_id;
+    int plan_open;
+    uint64_t ready_plan_start_ns;
+    uint64_t ready_plan_end_ns;
+    uint64_t ready_plan_query_id;
+    int plan_ready;
+};
+
+static int exec_pid_state_get(struct exec_pid_state **states, int *n_states,
+                              int *cap_states, uint32_t pid)
+{
+    for (int i = 0; i < *n_states; i++)
+        if ((*states)[i].pid == pid)
+            return i;
+
+    if (*n_states >= *cap_states) {
+        int new_cap = *cap_states ? *cap_states * 2 : 64;
+        struct exec_pid_state *tmp = realloc(*states,
+                                             new_cap * sizeof(**states));
+        if (!tmp)
+            return -1;
+        *states = tmp;
+        *cap_states = new_cap;
+    }
+
+    int idx = (*n_states)++;
+    memset(&(*states)[idx], 0, sizeof((*states)[idx]));
+    (*states)[idx].pid = pid;
+    (*states)[idx].active_row = -1;
+    return idx;
+}
+
+static int execution_append(struct pgwt_execution **rows, int *n_rows,
+                            int *cap_rows, const struct pgwt_execution *row)
+{
+    if (*n_rows >= *cap_rows) {
+        int new_cap = *cap_rows ? *cap_rows * 2 : 128;
+        struct pgwt_execution *tmp = realloc(*rows,
+                                             new_cap * sizeof(**rows));
+        if (!tmp)
+            return -1;
+        *rows = tmp;
+        *cap_rows = new_cap;
+    }
+    (*rows)[*n_rows] = *row;
+    return (*n_rows)++;
+}
+
+static int worker_link_index(const struct pgwt_backend_link *links, int n_links,
+                             uint32_t pid)
+{
+    int lo = 0, hi = n_links;
+    while (lo < hi) {
+        int mid = (lo + hi) / 2;
+        if (links[mid].pid < pid) lo = mid + 1;
+        else                      hi = mid;
+    }
+    return lo < n_links && links[lo].pid == pid && links[lo].leader_pid != 0
+         ? lo : -1;
+}
+
+static int interval_overlaps(uint64_t event_end, uint64_t duration,
+                             uint64_t from_ns, uint64_t to_ns);
+
+void pgwt_compute_executions(const struct pgwt_trace_event *events, int count,
+                             uint64_t from_ns, uint64_t to_ns,
+                             const struct pgwt_filter *f,
+                             const struct pgwt_backend_link *links, int n_links,
+                             struct pgwt_executions_result *out)
+{
+    memset(out, 0, sizeof(*out));
+
+    struct pgwt_execution *rows = NULL;
+    int n_rows = 0, cap_rows = 0;
+    struct exec_pid_state *states = NULL;
+    int n_states = 0, cap_states = 0;
+    int *worker_last_row = NULL;
+    if (n_links > 0) {
+        worker_last_row = malloc(n_links * sizeof(*worker_last_row));
+        if (!worker_last_row) {
+            out->failed = 1;
+            return;
+        }
+        for (int i = 0; i < n_links; i++) worker_last_row[i] = -1;
+    }
+
+    for (int i = 0; i < count; i++) {
+        const struct pgwt_trace_event *ev = &events[i];
+        int si = exec_pid_state_get(&states, &n_states, &cap_states, ev->pid);
+        if (si < 0) {
+            out->failed = 1;
+            break;
+        }
+        struct exec_pid_state *st = &states[si];
+        uint32_t marker = ev->old_event;
+
+        if (marker == PGWT_MARKER_PLAN_START) {
+            st->plan_start_ns = ev->timestamp_ns;
+            st->plan_query_id = ev->query_id;
+            st->plan_open = 1;
+            continue;
+        }
+        if (marker == PGWT_MARKER_PLAN_END) {
+            if (st->plan_open && ev->timestamp_ns >= st->plan_start_ns) {
+                st->ready_plan_start_ns = st->plan_start_ns;
+                st->ready_plan_end_ns = ev->timestamp_ns;
+                st->ready_plan_query_id = st->plan_query_id
+                                        ? st->plan_query_id : ev->query_id;
+                st->plan_ready = 1;
+            }
+            st->plan_open = 0;
+            continue;
+        }
+        if (marker == PGWT_MARKER_EXEC_START) {
+            /* A second start does not manufacture an end for the first one:
+             * the prior row remains explicitly in progress. */
+            st->active_row = -1;
+            if (ev->timestamp_ns <= to_ns) {
+                struct pgwt_execution row;
+                memset(&row, 0, sizeof(row));
+                row.pid = ev->pid;
+                row.query_id = ev->query_id;
+                row.start_ns = ev->timestamp_ns;
+                row.in_progress = 1;
+                row.started_before_window = ev->timestamp_ns < from_ns;
+                if (st->plan_ready &&
+                    (st->ready_plan_query_id == 0 || row.query_id == 0 ||
+                     st->ready_plan_query_id == row.query_id)) {
+                    row.plan_start_ns = st->ready_plan_start_ns;
+                    row.plan_end_ns = st->ready_plan_end_ns;
+                    row.has_plan = 1;
+                }
+                st->active_row = execution_append(&rows, &n_rows, &cap_rows,
+                                                  &row);
+                if (st->active_row < 0) {
+                    out->failed = 1;
+                    break;
+                }
+            }
+            /* A completed plan belongs to this next execution, including a
+             * start outside the caller's output window. Never reuse it. */
+            st->plan_ready = 0;
+            continue;
+        }
+        if (marker == PGWT_MARKER_EXEC_END) {
+            if (st->active_row >= 0 && st->active_row < n_rows &&
+                ev->timestamp_ns >= rows[st->active_row].start_ns) {
+                struct pgwt_execution *row = &rows[st->active_row];
+                row->end_ns = ev->timestamp_ns;
+                row->in_progress = 0;
+                if (row->query_id == 0)
+                    row->query_id = ev->query_id;
+            }
+            st->active_row = -1;
+            continue;
+        }
+        if (PGWT_IS_MARKER(marker) ||
+            (ev->flags & PGWT_EVENT_FLAG_SAMPLE))
+            continue;
+
+        /* The transition stream is ordered by interval end. Lifecycle END is
+         * emitted after the final interval closes, so active-row accounting
+         * is both linear and faithful to interval overlap at execution edges. */
+        struct pgwt_filter event_filter = f ? *f : (struct pgwt_filter){0};
+        /* A pid filter identifies the leader execution. Parallel-worker
+         * membership supplies pid scope; the shared matcher applies the
+         * event-level class/event_id/query_id dimensions. */
+        event_filter.pid = 0;
+        int event_matches =
+            interval_overlaps(ev->timestamp_ns, ev->duration_ns,
+                              from_ns, to_ns) &&
+            pgwt_filter_matches(&event_filter, ev);
+        if (event_matches && st->active_row >= 0 && st->active_row < n_rows) {
+            rows[st->active_row].n_events++;
+            rows[st->active_row].matches_event_filter = 1;
+        }
+
+        int wi = worker_last_row
+               ? worker_link_index(links, n_links, ev->pid) : -1;
+        if (wi >= 0) {
+            int li = exec_pid_state_get(&states, &n_states, &cap_states,
+                                        links[wi].leader_pid);
+            if (li < 0) {
+                out->failed = 1;
+                break;
+            } else {
+                int row_idx = states[li].active_row;
+                if (event_matches && row_idx >= 0 && row_idx < n_rows &&
+                    worker_last_row[wi] != row_idx) {
+                    rows[row_idx].n_workers++;
+                    rows[row_idx].matches_event_filter = 1;
+                    worker_last_row[wi] = row_idx;
+                }
+            }
+        }
+    }
+
+    free(worker_last_row);
+    free(states);
+    if (out->failed) {
+        free(rows);
+    } else {
+        int kept = 0;
+        for (int i = 0; i < n_rows; i++) {
+            if (rows[i].start_ns > to_ns)
+                continue;
+            if (!rows[i].in_progress && rows[i].end_ns < from_ns)
+                continue;
+            rows[kept++] = rows[i];
+        }
+        out->rows = rows;
+        out->num_rows = kept;
+    }
+}
+
+static int interval_overlaps(uint64_t event_end, uint64_t duration,
+                             uint64_t from_ns, uint64_t to_ns)
+{
+    uint64_t event_start = event_end >= duration ? event_end - duration : 0;
+    return event_start < to_ns && event_end > from_ns;
+}
+
+static int detail_worker_leader(const struct pgwt_backend_link *links,
+                                int n_links, uint32_t pid)
+{
+    int idx = worker_link_index(links, n_links, pid);
+    return idx >= 0 ? (int)links[idx].leader_pid : 0;
+}
+
+static struct pgwt_exec_lane *detail_worker_lane(
+    struct pgwt_execution_detail_result *out, uint32_t pid, int create)
+{
+    for (int i = 0; i < out->num_workers; i++)
+        if (out->workers[i].pid == pid)
+            return &out->workers[i];
+    if (!create)
+        return NULL;
+
+    struct pgwt_exec_lane *tmp = realloc(
+        out->workers, (out->num_workers + 1) * sizeof(*out->workers));
+    if (!tmp) {
+        out->failed = 1;
+        return NULL;
+    }
+    out->workers = tmp;
+    struct pgwt_exec_lane *lane = &out->workers[out->num_workers++];
+    memset(lane, 0, sizeof(*lane));
+    lane->pid = pid;
+    return lane;
+}
+
+static int detail_lane_add(struct pgwt_exec_lane *lane,
+                           const struct pgwt_trace_event *ev, int max_events)
+{
+    lane->total_events++;
+    if (lane->num_events >= max_events)
+        return 0;
+    if (!lane->events) {
+        lane->events = calloc(max_events, sizeof(*lane->events));
+        if (!lane->events)
+            return -1;
+    }
+
+    struct pgwt_exec_event *dst = &lane->events[lane->num_events++];
+    dst->event_id = ev->old_event;
+    dst->start_ns = ev->timestamp_ns >= ev->duration_ns
+                  ? ev->timestamp_ns - ev->duration_ns : 0;
+    dst->duration_ns = ev->duration_ns;
+    dst->has_cpu = ev->cpu_ns != PGWT_CPU_NS_UNKNOWN;
+    dst->cpu_ns = dst->has_cpu ? ev->cpu_ns : 0;
+    if (ev->old_event == 0)
+        snprintf(dst->name, sizeof(dst->name), "CPU*");
+    else
+        pgwt_event_full_name(ev->old_event, dst->name, sizeof(dst->name));
+    return 0;
+}
+
+void pgwt_compute_execution_detail(
+    const struct pgwt_trace_event *events, int count,
+    uint32_t leader_pid, uint64_t start_ns, uint64_t end_ns,
+    const struct pgwt_filter *f,
+    const struct pgwt_backend_link *links, int n_links, int max_events_per_lane,
+    struct pgwt_execution_detail_result *out)
+{
+    memset(out, 0, sizeof(*out));
+    out->leader.pid = leader_pid;
+    if (max_events_per_lane <= 0)
+        return;
+
+    uint64_t plan_start = 0, plan_qid = 0;
+    uint64_t ready_plan_start = 0, ready_plan_end = 0, ready_plan_qid = 0;
+    int plan_open = 0, plan_ready = 0, found_exec = 0, inside_exec = 0;
+
+    for (int i = 0; i < count; i++) {
+        const struct pgwt_trace_event *ev = &events[i];
+        if (ev->pid == leader_pid) {
+            if (ev->old_event == PGWT_MARKER_PLAN_START) {
+                plan_start = ev->timestamp_ns;
+                plan_qid = ev->query_id;
+                plan_open = 1;
+                continue;
+            }
+            if (ev->old_event == PGWT_MARKER_PLAN_END) {
+                if (plan_open && ev->timestamp_ns >= plan_start) {
+                    ready_plan_start = plan_start;
+                    ready_plan_end = ev->timestamp_ns;
+                    ready_plan_qid = plan_qid ? plan_qid : ev->query_id;
+                    plan_ready = 1;
+                    if (found_exec && !out->has_plan &&
+                        ready_plan_end <= end_ns &&
+                        (ready_plan_qid == 0 || out->query_id == 0 ||
+                         ready_plan_qid == out->query_id)) {
+                        out->plan_start_ns = ready_plan_start;
+                        out->plan_end_ns = ready_plan_end;
+                        out->has_plan = 1;
+                    }
+                }
+                plan_open = 0;
+                continue;
+            }
+            if (ev->old_event == PGWT_MARKER_EXEC_START) {
+                if (ev->timestamp_ns == start_ns) {
+                    found_exec = 1;
+                    inside_exec = 1;
+                    out->found_execution = 1;
+                    out->query_id = ev->query_id;
+                    if (plan_ready &&
+                        (ready_plan_qid == 0 || out->query_id == 0 ||
+                         ready_plan_qid == out->query_id)) {
+                        out->plan_start_ns = ready_plan_start;
+                        out->plan_end_ns = ready_plan_end;
+                        out->has_plan = 1;
+                    }
+                } else if (inside_exec) {
+                    inside_exec = 0;
+                }
+                /* A completed plan belongs to the next execution only. Scan
+                 * context may contain earlier executions, so consume it even
+                 * when this is not the requested start. */
+                plan_ready = 0;
+                continue;
+            }
+            if (ev->old_event == PGWT_MARKER_EXEC_END) {
+                if (inside_exec)
+                    inside_exec = 0;
+                continue;
+            }
+        }
+
+        if (PGWT_IS_MARKER(ev->old_event) ||
+            (ev->flags & PGWT_EVENT_FLAG_SAMPLE) ||
+            !inside_exec ||
+            !interval_overlaps(ev->timestamp_ns, ev->duration_ns,
+                               start_ns, end_ns))
+            continue;
+
+        struct pgwt_filter event_filter = f ? *f : (struct pgwt_filter){0};
+        event_filter.pid = 0;
+        if (!pgwt_filter_matches(&event_filter, ev))
+            continue;
+
+        struct pgwt_exec_lane *lane = NULL;
+        if (ev->pid == leader_pid) {
+            lane = &out->leader;
+        } else if (detail_worker_leader(links, n_links, ev->pid) ==
+                   (int)leader_pid) {
+            lane = detail_worker_lane(out, ev->pid, 1);
+        }
+        if (lane && detail_lane_add(lane, ev, max_events_per_lane) != 0) {
+            out->failed = 1;
+            break;
+        }
+        if (out->failed)
+            break;
+    }
+
+    out->total_events = out->leader.total_events;
+    out->kept_events = out->leader.num_events;
+    for (int i = 0; i < out->num_workers; i++) {
+        out->total_events += out->workers[i].total_events;
+        out->kept_events += out->workers[i].num_events;
+    }
+}
+
+void pgwt_free_execution_detail(struct pgwt_execution_detail_result *out)
+{
+    if (!out) return;
+    free(out->leader.events);
+    for (int i = 0; i < out->num_workers; i++)
+        free(out->workers[i].events);
+    free(out->workers);
+    memset(out, 0, sizeof(*out));
+}
+
+/* ── Variants ────────────────────────────────────────────── */
 
 /* One raw execution: events between EXEC_START and EXEC_END */
 struct raw_exec {

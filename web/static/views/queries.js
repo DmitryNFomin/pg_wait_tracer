@@ -62,6 +62,7 @@ export function createQueriesView() {
                     const intent = queriesConfig.onClick(row);
                     if (intent) ctx.onDrill(intent);
                 },
+                onCellDrill: (intent) => ctx.onDrill(intent),
                 truncation: model.truncation,
                 tooltipEl: ctx.tooltipEl,
             });

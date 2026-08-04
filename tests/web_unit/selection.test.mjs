@@ -5,7 +5,9 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { pixelRangeToTime } from '../../web/static/lib/selection.js';
+import {
+    pixelRangeToTime, pixelBoxToValues, pointerCoordinates,
+} from '../../web/static/lib/selection.js';
 
 // Fake chart: linear pixel->value map, value = px * 1e6 (so pixels read as ms).
 function linearChart(scale = 1e6, offset = 0) {
@@ -44,4 +46,32 @@ test('rounds to integer nanoseconds', () => {
     const frac = { convertFromPixel(_f, [x]) { return [x + 0.4]; } };
     const r = pixelRangeToTime(10, 90, frac);
     assert.deepEqual(r, { from: 10, to: 90 });  // 10.4->10, 90.4->90
+});
+
+test('2D box maps and sorts time plus inverted pixel-y values', () => {
+    const chart = { convertFromPixel: (_finder, [x, y]) => [x * 10, 1000 / y] };
+    assert.deepEqual(pixelBoxToValues(30, 100, 10, 20, chart), {
+        from: 100, to: 300, yFrom: 10, yTo: 50,
+    });
+});
+
+test('2D box rejects degenerate or invalid conversion', () => {
+    const chart = { convertFromPixel: () => [NaN, 1] };
+    assert.equal(pixelBoxToValues(0, 0, 20, 20, chart), null);
+    assert.equal(pixelBoxToValues(0, 0, 0, 20, chart), null);
+});
+
+test('horizontal-only box retains a valid time range with degenerate y', () => {
+    const chart = { convertFromPixel: (_finder, [x, y]) => [x * 10, y] };
+    assert.deepEqual(pixelBoxToValues(10, 25, 30, 25, chart), {
+        from: 100, to: 300, yFrom: 25, yTo: 25,
+    });
+});
+
+test('padded host keeps band host-local and conversion canvas-local', () => {
+    const p = pointerCoordinates(330, 608,
+        { left: 20, top: 584 }, { left: 30, top: 588 });
+    assert.deepEqual(p, {
+        hostX: 310, hostY: 24, chartX: 300, chartY: 20,
+    });
 });

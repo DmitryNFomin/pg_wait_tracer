@@ -122,6 +122,7 @@ if [[ -x "$PROJECT_DIR/pgwt-server" ]] && [[ -x "$SCRIPT_DIR/gen_test_traces" ]]
     run_test "test_data_esc_coverage" python3 "$SCRIPT_DIR/test_data_esc_coverage.py"
     run_test "test_data_summary_honesty" python3 "$SCRIPT_DIR/test_data_summary_honesty.py"
     run_test "test_data_markers" python3 "$SCRIPT_DIR/test_data_markers.py"
+    run_test "test_data_executions" python3 "$SCRIPT_DIR/test_data_executions.py"
     run_test "test_data_categories" python3 "$SCRIPT_DIR/test_data_categories.py"
     run_test "test_data_window_bound" python3 "$SCRIPT_DIR/test_data_window_bound.py"
     run_test "test_current_trace" python3 "$SCRIPT_DIR/test_current_trace.py"

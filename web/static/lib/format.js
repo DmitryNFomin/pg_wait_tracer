@@ -165,6 +165,27 @@ export function fmtTime(ns, bucketNs) {
     return hms + '.' + frac.toFixed(6).slice(2);                                // us
 }
 
+/* Exact decimal-nanosecond formatter for marker/waterfall payloads. Epoch-ns
+ * values exceed Number's integer range; split with BigInt before constructing
+ * the millisecond Date so sub-microsecond digits are never quantized away. */
+export function fmtTimeNs(ns, bucketNs) {
+    if (ns == null || ns === '' || ns === 0 || ns === '0') return '--';
+    let value;
+    try {
+        value = typeof ns === 'bigint' ? ns :
+            (typeof ns === 'number' ? BigInt(Math.round(ns)) : BigInt(ns));
+    } catch (e) { return '--'; }
+    const d = new Date(Number(value / 1000000n));
+    if (!Number.isFinite(d.getTime())) return '--';
+    const hms = d.toUTCString().slice(17, 25);
+    const bucket = bucketNs == null ? 0n : BigInt(Math.round(Number(bucketNs)));
+    if (!bucket || bucket >= 1000000000n) return hms;
+    const frac = (value % 1000000000n + 1000000000n) % 1000000000n;
+    const digits = frac.toString().padStart(9, '0');
+    if (bucket >= 1000000n) return hms + '.' + digits.slice(0, 3);
+    return hms + '.' + digits.slice(0, 6);
+}
+
 export function fmtTimeMs(ms) {
     if (!ms) return '--';
     const d = new Date(ms);
