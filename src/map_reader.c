@@ -10,6 +10,7 @@
 
 #include <string.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <stdbool.h>
 #include <time.h>
 
@@ -244,6 +245,27 @@ void pgwt_read_state_map(struct pgwt_daemon *d)
                         uint64_t m = exact - sval.last_cpu_ns;
                         cpu_open = m < open_ns ? m : open_ns;   /* clamp to wall */
                     }
+                    /* PGWT_DEBUG_DUMP_STATE tick-time companion of the
+                     * shutdown STATEDUMP (fourth-mode investigation): the
+                     * 2026-08-04 CI hit proved the SHUTDOWN state healthy and
+                     * countable while every tick printed CPU* = 0 — the
+                     * discriminator is what THIS computation saw per tick.
+                     * DEBUG ONLY; env checked once. */
+                    static int dbg_tick = -1;
+                    if (dbg_tick < 0)
+                        dbg_tick = getenv("PGWT_DEBUG_DUMP_STATE") != NULL;
+                    if (dbg_tick)
+                        fprintf(stderr, "STATEDUMP-TICK: pid=%u open_ns=%llu "
+                                "cpu_ns_total=%llu on_cpu_age=%lld exact=%llu "
+                                "last_cpu_ns=%llu cpu_open=%llu\n",
+                                snext,
+                                (unsigned long long)open_ns,
+                                (unsigned long long)sval.cpu_ns_total,
+                                sval.on_cpu_ts
+                                    ? (long long)(now - sval.on_cpu_ts) : -1,
+                                (unsigned long long)exact,
+                                (unsigned long long)sval.last_cpu_ns,
+                                (unsigned long long)cpu_open);
                 }
 
                 /* Per-PID accumulation */
