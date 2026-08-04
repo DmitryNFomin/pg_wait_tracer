@@ -14,15 +14,20 @@
  *   - Long query text shows a hover tooltip (lib/table.js tooltipEl wiring).
  */
 
-import { buildTableModel } from '../lib/table.js';
+import { buildTableModel, buildTruncationRow } from '../lib/table.js';
 import { queriesConfig } from '../lib/builders/table-configs.js';
+import { buildPaneFidelity, paneFidelityBadgeHtml } from '../lib/panels.js';
 
-/* PURE: top_queries response + sort -> render model. Exported for testing. */
+/* PURE: top_queries response + sort -> render model. Exported for testing.
+ * U2 (review P10): carries the pane fidelity badge (sampled/mixed numbers are
+ * scaled estimates) and the server-flagged truncation row. */
 export function buildQueriesModel(data, sort) {
     const rows = (data && data.rows) || [];
     return {
         hasRows: rows.length > 0,
         table: buildTableModel(queriesConfig, rows, sort),
+        paneFidelity: buildPaneFidelity(data),
+        truncation: buildTruncationRow(data),
     };
 }
 
@@ -46,7 +51,8 @@ export function createQueriesView() {
         mount(el, model, ctx) {
             if (ctx.summaryEl) ctx.summaryEl.innerHTML = '';
             if (!model.hasRows) {
-                el.innerHTML = '<div class="loading">No data for selected range</div>';
+                el.innerHTML = paneFidelityBadgeHtml(model.paneFidelity) +
+                    '<div class="loading">No data for selected range</div>';
                 return;
             }
             ctx.mountTable(el, queriesConfig, model.table, {
@@ -56,8 +62,11 @@ export function createQueriesView() {
                     const intent = queriesConfig.onClick(row);
                     if (intent) ctx.onDrill(intent);
                 },
+                truncation: model.truncation,
                 tooltipEl: ctx.tooltipEl,
             });
+            el.insertAdjacentHTML('afterbegin',
+                paneFidelityBadgeHtml(model.paneFidelity));
         },
 
         enter() { /* no chart */ },

@@ -10,6 +10,31 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+- **ui(U2): the OEM investigation loop is complete** (Track U Phase U2).
+  The seven drill wires: click an AAS band to drill (both renderers, via
+  the uPlot hitTest / ECharts cumulative walk), burst rows jump-zoom to
+  their burst, the session timeline gained real drag-zoom, heatmap cells
+  drill to event+window, DFG nodes drill by event (additive event_id in
+  the node protocol), events-table percentile cells pivot to the
+  histogram, and a persistent filter bar + tab badges make "tabs are
+  lenses" visible. URL hash state: tab/window/filters/sort survive F5 and
+  back/forward; ns timestamps as strings; a restored live link re-anchors
+  to NOW; hostile hashes are allowlisted and rejected, never clamped.
+  Policies: yMax cap + off-scale "N CPUs ↑" affordance with live-tick-only
+  hysteresis (parity-pinned across renderers); heatmap log1p single-hue
+  ramp with window-anchored sticky max; DFG persisted instance with
+  coalesced slider/resize layout and drag positions preserved (grab-offset
+  correct). Honesty beyond the AAS pane: per-pane fidelity badges,
+  percentile-basis footnotes, "N others" truncation rows, honest stacked
+  bars (separators, two-meaning remainder split, exact width math) — no
+  count is ever fabricated. All filter mutations flow through one
+  app-level gate that pauses live, invalidates the strip cache, and
+  updates hash+breadcrumbs atomically (the state-unity rule that review
+  finding B1 enforced). Validation: node 282/282, Playwright 338/338
+  (incl. per-finding pins: histogram-clear cache coherence, slow
+  double-click exclusion, rapid back/forward coalescing), chaos green,
+  snapshots green except the six documented CI-authoritative cells.
+
 - **ui(U2b): uPlot AAS instrument pane — the pre-registered 60 fps gate is
   met** (Track U). The AAS pane's default renderer is now vendored uPlot
   1.6.32 (sha256-pinned provenance) behind a `?renderer=echarts|uplot` seam,

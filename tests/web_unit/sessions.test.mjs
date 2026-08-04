@@ -65,3 +65,24 @@ test('empty + single-row edge cases', () => {
     assert.equal(m.table.rows.length, 1);
     assert.equal(m.table.rows[0].row.pid, 7);
 });
+
+// ── U2 review P10: fidelity badge + truncation reach the sessions model ─────
+
+test('exact window: no badge, no truncation (noise-free common case)', () => {
+    const m = buildSessionsModel({ fidelity: 'exact', rows: [sess({ pid: 1 })] }, null);
+    assert.equal(m.paneFidelity, null);
+    assert.equal(m.truncation, null);
+});
+
+test('sampled window: the pane badge model is present', () => {
+    const m = buildSessionsModel({ fidelity: 'sampled', rows: [sess({ pid: 1 })] }, null);
+    assert.ok(m.paneFidelity);
+    assert.equal(m.paneFidelity.fidelity, 'sampled');
+    assert.equal(m.paneFidelity.label, 'Sampled (estimated)');
+});
+
+test('server-flagged truncation reaches the sessions model', () => {
+    const m = buildSessionsModel(
+        { truncated: true, rows: [sess({ pid: 1 })] }, null);
+    assert.deepEqual(m.truncation, { omitted: null, text: '… more not shown' });
+});

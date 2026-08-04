@@ -72,6 +72,65 @@ const WHEEL_NOTCH_FACTOR = 1.25;
 const WHEEL_FACTOR_MIN = 0.5;
 const WHEEL_FACTOR_MAX = 2;
 
+/* ── Click→drill gesture discrimination (U2, review P3 wire 1) ───────────────
+ * A drill CLICK must not fire for (a) a brush drag — the selection overlay
+ * owns plain drags, and the browser still emits `click` after one — or (b)
+ * the first click of the dblclick zoom-out. The heuristic, documented here
+ * because it IS the gesture-language boundary:
+ *   movement   pointerdown→click displacement > CLICK_SLOP_PX (the selection
+ *              overlay's own MIN_DRAG_PX threshold) ⇒ it was a drag: ignore.
+ *   delay      the drill fires only after DRILL_CLICK_DELAY_MS with no second
+ *              click; a second click inside the window cancels it and lets
+ *              the app's dblclick zoom-out win. The 550 ms window covers
+ *              Blink's 500 ms double-click interval; the pane's actual
+ *              `dblclick` event ALSO cancels pending work, so correctness is
+ *              event-driven rather than only a timer guess.
+ *   modifiers  shift belongs to pan, ctrl/meta to legend multi-select: any
+ *              modifier ⇒ not a drill. Button 0 only.
+ * The hit is resolved at CLICK time (coordinates are only valid then); only
+ * the ACTION is deferred. */
+const CLICK_SLOP_PX = 5;
+const DRILL_CLICK_DELAY_MS = 550;
+
+/* Tiny shared gate used by both renderer paths. onClick resolves the hit
+ * immediately but defers the ACTION; cancel() clears a pending action
+ * (leave()). Any click within the delay window of the previous one counts
+ * as the dblclick's second half — even if the first click resolved to
+ * nothing (empty area) — so a zoom-out can never be chased by a drill. */
+function makeClickGate() {
+    let down = null;
+    let timer = null;
+    let lastClickTs = 0;
+    return {
+        onPointerDown(e) {
+            down = (e.button === 0 && !e.shiftKey && !e.ctrlKey && !e.metaKey)
+                ? { x: e.clientX, y: e.clientY } : null;
+        },
+        onClick(e, resolve) {
+            if (!down) return;
+            const moved = Math.abs(e.clientX - down.x) > CLICK_SLOP_PX ||
+                          Math.abs(e.clientY - down.y) > CLICK_SLOP_PX;
+            down = null;
+            if (moved) return;                       // drag: the brush owns it
+            const now = Date.now();
+            const second = (now - lastClickTs) < DRILL_CLICK_DELAY_MS;
+            lastClickTs = now;
+            if (second) {                            // dblclick pair:
+                if (timer) { clearTimeout(timer); timer = null; }
+                return;                              // zoom-out owns it
+            }
+            const action = resolve();                // hit-test NOW
+            if (!action) return;
+            timer = setTimeout(() => { timer = null; action(); },
+                DRILL_CLICK_DELAY_MS);
+        },
+        cancel() {
+            if (timer) { clearTimeout(timer); timer = null; }
+            down = null;
+        },
+    };
+}
+
 /* The uPlot renderer's URL seam. Reading location is guarded so the module
  * stays importable under Node (the pure builders it re-exports are
  * Node-tested elsewhere; this view itself is browser-only). */
@@ -100,12 +159,78 @@ export function createActiveView() {
         legend.selected = null; legend.hovered = null; legend.names = null;
     };
 
+    // ── yMax hysteresis (U2, review P7 — THE view-level home) ───────────────
+    // The builders compute the pure per-payload policy yMax; smoothing it
+    // over time is view state, so it lives here (both renderers). Rule:
+    // GROW immediately (a spike must never clip), SHRINK only after
+    // Y_SHRINK_HOLD_TICKS consecutive data mounts whose policy yMax stayed
+    // below the applied one — then adopt the latest target. "Tick" means ONLY
+    // a successful 5 s live poll; deliberate window/filter changes reset the
+    // state, and provisional strip-cache repaints neither seed nor advance it.
+    // "stable" = the shrink demand persisted, not that the target was
+    // byte-identical (live data wobbles; demanding equality would pin the
+    // axis high forever). Reset on empty state and on leave().
+    const Y_SHRINK_HOLD_TICKS = 3;
+    const yHyst = { applied: null, run: 0 };
+    function applyYMaxHysteresis(target) {
+        if (yHyst.applied == null || target >= yHyst.applied) {
+            yHyst.applied = target;
+            yHyst.run = 0;
+        } else if (++yHyst.run >= Y_SHRINK_HOLD_TICKS) {
+            yHyst.applied = target;
+            yHyst.run = 0;
+        }
+        return yHyst.applied;
+    }
+    function resetYMaxHysteresis() { yHyst.applied = null; yHyst.run = 0; }
+    function yMaxForMount(target, ctx) {
+        const reason = ctx && ctx.aasMountReason;
+        if (reason === 'live-tick') return applyYMaxHysteresis(target);
+        resetYMaxHysteresis();
+        if (reason === 'provisional') return target;
+        return applyYMaxHysteresis(target);
+    }
+
+    // ── Click→drill resolution (U2, review P3 wire 1) ────────────────────────
+    // Shared by both renderers once a click resolves to a hitTest result over
+    // a spec-shaped surface ({seriesNames, seriesIds, breakdown}):
+    //   class mode  → drill into the clicked class (filterKey 'class', value =
+    //                 the class label — the same intent the overview table
+    //                 emits);
+    //   event mode  → drill into the clicked event by event_id (the events-
+    //                 table filter); a payload without ids (old server) does
+    //                 not drill — never guess an id.
+    // The returned closure is what the click gate defers behind the dblclick
+    // window; ctx.onDrill pauses live + pivots (app.js PIVOT/FilterStack).
+    function drillActionForHit(hit, spec, ctx) {
+        if (!hit || !ctx.onDrill) return null;
+        if (spec.breakdown === 'events') {
+            const id = spec.seriesIds ? spec.seriesIds[hit.seriesIdx - 1] : null;
+            if (id == null) return null;
+            return () => ctx.onDrill({
+                filterKey: 'event_id', filterValue: id, label: hit.seriesName,
+            });
+        }
+        return () => ctx.onDrill({
+            filterKey: 'class', filterValue: hit.seriesName,
+            label: hit.seriesName,
+        });
+    }
+
+    // Click→drill gate (U2, P3 wire 1) — one instance, whichever renderer is
+    // active owns it; see makeClickGate for the documented heuristic.
+    const drillGate = makeClickGate();
+
     // ── ECharts-only state ───────────────────────────────────────────────────
     let chart = null;          // ECharts instance — owned here, nowhere else
     let detachSel = null;      // selection-overlay teardown (both renderers)
     // U2a: the ns extent of the last mounted option's pinned time axis.
     // 'datazoom' events carry start/end PERCENTS of exactly this extent.
     let renderedAxis = null;
+    // U2 (P3 wire 1): the last mounted ECharts payload — the click walk
+    // rebuilds a spec-shaped surface from it (see onEchartsDrillClick).
+    let echartsLatest = null;  // { data, opts, model }
+    let echartsCtx = null;     // ctx captured at enter (drill wiring)
 
     // ── uPlot-only state ─────────────────────────────────────────────────────
     let UPlotCtor = null;      // the vendored constructor (ctx.uplot)
@@ -239,11 +364,16 @@ export function createActiveView() {
 
     /* Current-view overlay geometry for the draw hooks: recomputed from the
      * latest painted payload against the CURRENT x scale on every draw, so
-     * the honesty overlays track every camera state AND every data swap. */
+     * the honesty overlays track every camera state AND every data swap.
+     * The CURRENT y scale top rides along (P7): an N-CPUs reference above it
+     * becomes the explicit top-edge "N CPUs ↑" affordance — decided against
+     * the hysteresis-applied scale, so the reference line reappears the
+     * instant the axis actually accommodates it. */
     function overlayGeo(uu) {
         if (!latest) return { rects: [], vlines: [], hlines: [] };
         return overlayGeometry(latest.data, latest.opts,
-            { min: uu.scales.x.min, max: uu.scales.x.max });
+            { min: uu.scales.x.min, max: uu.scales.x.max,
+              yMax: uu.scales.y.max });
     }
 
     /* Construct a fresh instance from a spec (initial mount + the rare
@@ -274,9 +404,14 @@ export function createActiveView() {
         // uPlot merges cursor opts deeply, so only dblclick is overridden.
         o.cursor = Object.assign({}, o.cursor,
             { bind: { dblclick: () => null } });
+        // P7 hysteresis: the constructed instance pins y to the APPLIED top
+        // (>= the spec's policy value while a shrink is being held).
+        const displayYMax = yMaxForMount(spec.yMax, ctx);
+        o.scales = Object.assign({}, o.scales,
+            { y: Object.assign({}, o.scales.y, { range: [0, displayYMax] }) });
         u = new UPlotCtor(o, spec.alignedData, uHost);
         u.setScale('x', viewportScale(ctx, spec));
-        paintedYMax = spec.yMax;
+        paintedYMax = displayYMax;
     }
 
     /* Restack + repaint for a visibility change (legend chips). Follows the
@@ -310,6 +445,7 @@ export function createActiveView() {
         latest = null;
         hiddenKey = null;
         paintedYMax = null;
+        resetYMaxHysteresis();   // P7: a fresh window starts a fresh axis
         if (readoutEl) readoutEl.style.display = 'none';
         if (uHost) {
             uHost.innerHTML =
@@ -355,18 +491,21 @@ export function createActiveView() {
             // Data swap under a live instance (5 s tick, settle-refine strip
             // swap, stripcache arrival): setData(…, false) never re-ranges x;
             // the camera window is re-asserted explicitly. yMax is pinned via
-            // an explicit y setScale when the payload's scale top moved
-            // (verified against the pinned bundle: explicit min/max land
-            // exactly — with data present they bypass the range fn).
+            // an explicit y setScale when the APPLIED scale top moved —
+            // spec.yMax first passes the P7 view-level hysteresis (grow now,
+            // shrink after 3 held ticks), so live wobble never breathes the
+            // axis (verified against the pinned bundle: explicit min/max
+            // land exactly — with data present they bypass the range fn).
+            const displayYMax = yMaxForMount(spec.yMax, ctx);
             u.batch(() => {
                 u.delBand(null);
                 spec.bands.forEach(b => u.addBand({ series: b.series.slice() }));
                 names.forEach((n, i) =>
                     u.setSeries(i + 1, { show: visible.has(n) }, false));
                 u.setData(spec.alignedData, false);
-                if (spec.yMax !== paintedYMax) {
-                    u.setScale('y', { min: 0, max: spec.yMax });
-                    paintedYMax = spec.yMax;
+                if (displayYMax !== paintedYMax) {
+                    u.setScale('y', { min: 0, max: displayYMax });
+                    paintedYMax = displayYMax;
                 }
                 u.setScale('x', viewportScale(ctx, spec));
             });
@@ -462,6 +601,25 @@ export function createActiveView() {
 
     function onPointerUp() { panning = null; }
 
+    /* Click→drill (U2, P3 wire 1), uPlot path: pointerup-without-drag →
+     * u.posToVal over the plot area → pure hitTest → drill intent. The hit
+     * resolves against latest.spec, which already reflects legend visibility
+     * (hidden series are out of the cumulative chain) — a click can never
+     * drill into a band that is not on screen. Clicks outside the plot box
+     * (axes, padding) resolve to nothing. */
+    function onUplotDrillClick(e) {
+        drillGate.onClick(e, () => {
+            if (!u || !latest || !enterCtx) return null;
+            const r = u.over.getBoundingClientRect();
+            const px = e.clientX - r.left;
+            const py = e.clientY - r.top;
+            if (px < 0 || py < 0 || px > r.width || py > r.height) return null;
+            const hit = hitTest(latest.spec,
+                u.posToVal(px, 'x'), u.posToVal(py, 'y'));
+            return drillActionForHit(hit, latest.spec, enterCtx);
+        });
+    }
+
     function onCameraChanged() {
         // Every camera movement — gesture zoom/pan, brush 'set', live 'tick'
         // slide, Live-button 'attach' — repaints as a pure viewport
@@ -505,6 +663,11 @@ export function createActiveView() {
         el.addEventListener('pointerdown', onPointerDown);
         window.addEventListener('pointermove', onPointerMove);
         window.addEventListener('pointerup', onPointerUp);
+        // Click→drill (P3 wire 1): the gate tracks pointerdown for its
+        // movement check and defers the drill behind the dblclick window.
+        el.addEventListener('pointerdown', drillGate.onPointerDown);
+        el.addEventListener('click', onUplotDrillClick);
+        el.addEventListener('dblclick', drillGate.cancel);
         if (ctx.camera) unsubCamera = ctx.camera.onChange(onCameraChanged);
     }
 
@@ -517,7 +680,11 @@ export function createActiveView() {
         if (el) {
             el.removeEventListener('wheel', onWheel);
             el.removeEventListener('pointerdown', onPointerDown);
+            el.removeEventListener('pointerdown', drillGate.onPointerDown);
+            el.removeEventListener('click', onUplotDrillClick);
+            el.removeEventListener('dblclick', drillGate.cancel);
         }
+        drillGate.cancel();
         window.removeEventListener('pointermove', onPointerMove);
         window.removeEventListener('pointerup', onPointerUp);
         if (detachSel) { detachSel(); detachSel = null; }
@@ -531,6 +698,7 @@ export function createActiveView() {
         latest = null;
         hiddenKey = null;
         paintedYMax = null;
+        resetYMaxHysteresis();
         panning = null;
         enterCtx = null;
     }
@@ -545,6 +713,8 @@ export function createActiveView() {
             // paint on screen while the tables say "No data" — clear the
             // chart and say so explicitly.
             renderedAxis = null;
+            echartsLatest = null;
+            resetYMaxHysteresis();          // P7: fresh window, fresh axis
             chart.clear();
             chart.setOption({
                 backgroundColor: 'transparent',
@@ -558,8 +728,21 @@ export function createActiveView() {
             setEmptyStatus(ctx);
             return;
         }
+        // P7 view-level hysteresis, ECharts form: decide BOTH the axis top and
+        // the N-CPUs line/chip against the applied top. Rebuild only while a
+        // live-tick shrink is held; the builder stays pure and its honesty
+        // decision sees the same live scale that uPlot's overlayGeometry gets.
+        const displayYMax = yMaxForMount(model.option.yAxis.max, ctx);
+        if (displayYMax !== model.option.yAxis.max) {
+            const painted = buildAasOption(model.data,
+                Object.assign({}, model.opts, { appliedYMax: displayYMax }));
+            painted.data = model.data;
+            painted.opts = model.opts;
+            model = painted;
+        }
         chart.setOption(model.option, true);
         renderedAxis = model.axisRange || null;
+        echartsLatest = { data: model.data, opts: model.opts, model };
         // One batched legend update per gesture. The annotation series is not
         // in seriesNames, so its trust marks can never be switched off here.
         const applyVisible = (visible) => {
@@ -572,9 +755,42 @@ export function createActiveView() {
         setStatusLine(ctx, model);
     }
 
+    /* Click→drill (U2, P3 wire 1), ECharts fallback path: the review-spec'd
+     * mechanism — series triggerLineEvent (set in buildAasOption, so the
+     * stacked band polygons are event-bearing), convertFromPixel, and the
+     * cumulative-sum walk. The walk REUSES the pure hitTest by rebuilding
+     * the spec surface over the same payload with the painted visibility
+     * (one tested walk implementation, zero drift between renderers). The
+     * gate listens at the DOM level so a second click ANYWHERE — including
+     * off-band — cancels the pending drill (dblclick zoom-out discipline). */
+    function onEchartsDrillClick(e) {
+        drillGate.onClick(e, () => {
+            if (!chart || !echartsLatest || !echartsCtx) return null;
+            const r = el.getBoundingClientRect();
+            const px = e.clientX - r.left;
+            const py = e.clientY - r.top;
+            if (!chart.containPixel({ gridIndex: 0 }, [px, py])) return null;
+            const pt = chart.convertFromPixel({ gridIndex: 0 }, [px, py]);
+            if (!pt || pt[0] == null || pt[1] == null) return null;
+            const names = echartsLatest.model.seriesNames;
+            const visible = legend.hovered != null
+                ? new Set([legend.hovered])
+                : (legend.selected || new Set(names));
+            const hidden = names.filter(n => !visible.has(n));
+            const spec = buildUplotSpec(echartsLatest.data,
+                Object.assign({}, echartsLatest.opts, { hiddenNames: hidden }));
+            return drillActionForHit(hitTest(spec, pt[0], pt[1]), spec,
+                echartsCtx);
+        });
+    }
+
     function enterEcharts(ctx) {
         chart = ctx.echarts.init(el, 'dark');
         renderedAxis = null;
+        echartsCtx = ctx;
+        el.addEventListener('pointerdown', drillGate.onPointerDown);
+        el.addEventListener('click', onEchartsDrillClick);
+        el.addEventListener('dblclick', drillGate.cancel);
         // Drag-select overlay → zoom the window. PLAIN drag only — the
         // overlay ignores shift-drags, which belong to the inside-dataZoom
         // pan (constraint C). pixelRangeToTime returns x-axis units, ms on
@@ -618,8 +834,17 @@ export function createActiveView() {
 
     function leaveEcharts() {
         if (detachSel) { detachSel(); detachSel = null; }
+        if (el) {
+            el.removeEventListener('pointerdown', drillGate.onPointerDown);
+            el.removeEventListener('click', onEchartsDrillClick);
+            el.removeEventListener('dblclick', drillGate.cancel);
+        }
+        drillGate.cancel();
         if (chart) { chart.dispose(); chart = null; }
         renderedAxis = null;
+        echartsLatest = null;
+        echartsCtx = null;
+        resetYMaxHysteresis();
     }
 
     // ── The view object ──────────────────────────────────────────────────────
@@ -660,7 +885,12 @@ export function createActiveView() {
                     seriesNames: spec.seriesNames,
                 };
             }
-            return buildAasOption(data, opts);
+            const m = buildAasOption(data, opts);
+            // U2 (P3 wire 1): the raw payload + builder opts ride along so
+            // the click walk can rebuild the spec surface as painted.
+            m.data = data;
+            m.opts = opts;
+            return m;
         },
 
         mount(_el, model, ctx) {
@@ -728,13 +958,16 @@ export function createActiveView() {
                     xScale: (u && u.scales && u.scales.x)
                         ? { min: u.scales.x.min, max: u.scales.x.max } : null,
                     yMax: paintedYMax,
+                    yHysteresis: { applied: yHyst.applied, run: yHyst.run },
                     overlays: (latest && u)
                         ? overlayGeometry(latest.data, latest.opts,
-                            { min: u.scales.x.min, max: u.scales.x.max })
+                            { min: u.scales.x.min, max: u.scales.x.max,
+                              yMax: u.scales.y.max })
                         : null,
                 };
             }
-            return { renderer, mounted: !!chart };
+            return { renderer, mounted: !!chart,
+                     yHysteresis: { applied: yHyst.applied, run: yHyst.run } };
         },
     };
 }

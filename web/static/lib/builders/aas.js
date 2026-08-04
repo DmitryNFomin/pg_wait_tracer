@@ -41,6 +41,28 @@ export const AAS_ANNOTATION_SERIES = 'pgwt-annotations';
 const NS_PER_MS = 1e6;
 const nsToMs = (ns) => ns / NS_PER_MS;
 
+/* ── y-axis policy (Track U Phase U2, review P7) ─────────────────────────────
+ * yMax = max(maxAas*1.2, min(numCpus*1.5, maxAas*4), 1).
+ * The min() term is the P7 cap: the N-CPUs reference line may lift the axis
+ * to at most 4x the data peak. Before the cap, a 64-vCPU host idling at
+ * AAS≈3 rendered the entire stack in the bottom ~3% of the pane under a
+ * dominant red capacity line (HIERARCHY violation — reference dwarfing
+ * data). When the cap puts the CPU line off-scale, the builder emits an
+ * explicit "N CPUs ↑" affordance at the top edge instead (see below) — the
+ * capacity reference is never silently dropped. Duplicated verbatim in
+ * lib/uplot-aas.js (the builders stay drop-in interchangeable while both
+ * exist); the parity test in tests/web_unit/uplot-aas.test.mjs pins the two
+ * implementations together. Hysteresis (grow now, shrink after 3 stable
+ * ticks) deliberately does NOT live here: builders are pure per-payload,
+ * so the smoothing state belongs to the view (views/active.js). */
+function policyYMax(maxAas, numCpus) {
+    return Math.max(
+        maxAas * 1.2,
+        numCpus > 0 ? Math.min(numCpus * 1.5, maxAas * 4) : 0,
+        1
+    );
+}
+
 /* data: aas response { buckets[], bucket_ns, max_aas, breakdown?, series?,
  *                      fidelity, sample_period_ns, fidelity_ranges? }
  * opts: {
@@ -55,6 +77,8 @@ const nsToMs = (ns) => ns / NS_PER_MS;
  *                         //   the dataZoom window can never leave the axis
  *                         //   extent. Always unioned with win so the crop
  *                         //   is never clamped away from the camera.
+ *   appliedYMax,          // OPTIONAL — view hysteresis' current axis top;
+ *                         //   ECharts' CPU line/chip decision uses THIS top
  *   escalationStatus,
  * }
  * Returns { option, seriesNames, seriesColors, fidelity, shading, axisRange,
@@ -70,7 +94,7 @@ export function buildAasOption(data, opts) {
 
     const isEventBreakdown = data && data.breakdown === 'events' && data.series;
 
-    let seriesDefs, seriesColors;
+    let seriesDefs, seriesColors, seriesIds;
     if (isEventBreakdown) {
         // U1 (review P2): order series by stable IDENTITY — class (canonical
         // WAIT_CLASSES order, matching class mode), then event name — never by
@@ -96,20 +120,25 @@ export function buildAasOption(data, opts) {
         // Identity-keyed color: a deterministic tint of the class hue (U1
         // color service) — same event, same color, in every view, every tick.
         seriesColors = order.map(o => eventColor(null, o.name));
+        // U2 (P3 wire 1): the server's per-series event_id rides along so an
+        // AAS band click can drill by event_id (the filter the events table
+        // uses); null for servers/fixtures that omit it.
+        seriesIds = order.map(o => {
+            const id = data.series[o.idx] && data.series[o.idx].event_id;
+            return id != null ? id : null;
+        });
     } else {
         seriesDefs = WAIT_CLASSES.map(wc => ({
             name: wc.label,
             data: buckets.map(b => [nsToMs(b.t), +(b[wc.key] || 0).toFixed(4)]),
         }));
         seriesColors = WAIT_CLASSES.map(c => c.color);
+        seriesIds = WAIT_CLASSES.map(() => null);   // class drills go by name
     }
 
     const maxAas = (data && data.max_aas) || 0;
-    const yMax = Math.max(
-        maxAas * 1.2,
-        numCpus > 0 ? numCpus * 1.5 : 0,
-        1
-    );
+    const policyMax = policyYMax(maxAas, numCpus);
+    const yMax = opts.appliedYMax != null ? opts.appliedYMax : policyMax;
 
     // Fallback extent when no window is supplied (Node tests, degenerate
     // callers): the bucket span, or a 1 ms placeholder for empty data (the
@@ -137,6 +166,12 @@ export function buildAasOption(data, opts) {
         symbol: 'none',
         emphasis: { disabled: true },
         color: seriesColors[i],
+        // U2 (P3 wire 1): since ECharts 5.2.2 triggerLineEvent packs event
+        // data onto the area polygon too, so a click anywhere inside a
+        // stacked band reaches chart.on('click') — the fallback renderer's
+        // click→drill source (the review's spec'd mechanism; the mount layer
+        // adds convertFromPixel + the cumulative-sum walk).
+        triggerLineEvent: true,
         data: s.data,
     }));
 
@@ -171,8 +206,15 @@ export function buildAasOption(data, opts) {
     // markLine: CPU reference line plus an optional escalation-edge line. Both
     // live in one markLine.data array (per-entry label/lineStyle) on the
     // annotation series.
+    //
+    // P7: when the yMax cap puts the capacity line OFF-SCALE (numCpus > yMax),
+    // the markLine is not emitted — ECharts drops an off-axis markLine
+    // entirely, which is exactly the silent-vanish failure mode — and an
+    // explicit "N CPUs ↑" graphic label at the top edge takes its place
+    // (`graphic` below). The reference is always one of the two, never absent.
+    const cpuLineOffScale = numCpus > 0 && numCpus > yMax;
     const markLineData = [];
-    if (numCpus > 0) {
+    if (numCpus > 0 && !cpuLineOffScale) {
         markLineData.push({
             yAxis: numCpus,
             lineStyle: { color: '#E53935', type: 'dashed', width: 1 },
@@ -293,10 +335,38 @@ export function buildAasOption(data, opts) {
         series,
     };
 
+    // P7 off-scale affordance: the capacity reference as a top-edge chip in
+    // the markLine label's exact dress (white on the reference red). Pinned
+    // to the grid's top-right corner — the same spot the on-scale label
+    // occupies when the line hugs the top. `silent` — it is a reference,
+    // not a control.
+    if (cpuLineOffScale) {
+        option.graphic = [{
+            type: 'text',
+            right: 24,                       // grid right (20) + breathing room
+            top: 16,                         // just under the grid top (14)
+            silent: true,
+            style: {
+                text: numCpus + ' CPUs ↑',
+                fill: '#fff',
+                backgroundColor: '#E53935',
+                padding: [2, 5, 2, 5],
+                fontSize: 11,
+            },
+            z: 100,
+        }];
+    }
+
     return {
         option,
         seriesNames: seriesDefs.map(s => s.name),
         seriesColors,
+        // U2 (P3 wire 1): parallel to seriesNames — event_id per series in
+        // event-breakdown mode, null entries in class mode. The mount layer's
+        // click→drill resolves a hit band to its drill intent through these
+        // (parity-pinned against buildUplotSpec).
+        seriesIds,
+        breakdown: isEventBreakdown ? 'events' : 'classes',
         maxAas,
         hasData: buckets.length > 0,
         // Fidelity surface (B5): drives the sampled/exact legend chip + tooltip.

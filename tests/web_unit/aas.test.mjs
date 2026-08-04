@@ -61,15 +61,76 @@ test('class mode: one series per wait class, x=tMs y=aas', () => {
     assert.ok(cpu.areaStyle);
 });
 
-test('y max accounts for cpu count and max_aas', () => {
-    // numCpus*1.5 dominates when max_aas is small
+/* FLIPPED in U2 (review P7): this used to pin yMax = max(maxAas*1.2,
+ * numCpus*1.5, 1) — the un-capped CPU term is exactly the P7 flattening bug
+ * (a 64-vCPU host at AAS≈3 rendered the whole stack in ~3% of the pane under
+ * the red capacity line). The policy is now
+ *   yMax = max(maxAas*1.2, min(numCpus*1.5, maxAas*4), 1)
+ * — the capacity reference may lift the axis to at most 4x the data peak;
+ * when that puts the line off-scale, an explicit "N CPUs ↑" affordance takes
+ * its place (pinned below). */
+test('y max policy: maxAas floor, capped CPU influence (P7)', () => {
+    // The CPU term is CAPPED at maxAas*4: 8 CPUs, max_aas 1 -> min(12, 4) = 4
+    // (pre-P7 this was 12 and the data lived in the bottom third).
     let opt = buildAasOption({ buckets: classBuckets(1), max_aas: 1, bucket_ns: 1 },
         { numCpus: 8 }).option;
-    assert.equal(opt.yAxis.max, 12);  // 8 * 1.5
-    // max_aas*1.2 dominates when AAS is high
+    assert.equal(opt.yAxis.max, 4);
+    // max_aas*1.2 dominates when AAS is high (cap inactive: data >= capacity).
     opt = buildAasOption({ buckets: classBuckets(1), max_aas: 100, bucket_ns: 1 },
         { numCpus: 4 }).option;
     assert.equal(opt.yAxis.max, 120);  // 100 * 1.2
+    // CPU term still wins inside the cap: 4 CPUs, max_aas 4.5 ->
+    // min(6, 18) = 6 > 5.4 (the mock server's default shape — unchanged).
+    opt = buildAasOption({ buckets: classBuckets(1), max_aas: 4.5, bucket_ns: 1 },
+        { numCpus: 4 }).option;
+    assert.equal(opt.yAxis.max, 6);
+    // The P7 flagship case: 64 vCPUs, AAS peak 3 -> 12 (= 3*4), not 96.
+    opt = buildAasOption({ buckets: classBuckets(1), max_aas: 3, bucket_ns: 1 },
+        { numCpus: 64 }).option;
+    assert.equal(opt.yAxis.max, 12);
+    // Floor: never below 1 (all-zero window, no CPUs reported).
+    opt = buildAasOption({ buckets: classBuckets(1), max_aas: 0, bucket_ns: 1 },
+        { numCpus: 0 }).option;
+    assert.equal(opt.yAxis.max, 1);
+});
+
+/* P7: when the cap puts the capacity line off-scale (numCpus > yMax) the
+ * markLine is NOT emitted (ECharts silently drops off-axis markLines — the
+ * exact vanish bug class) and the explicit top-edge "N CPUs ↑" graphic takes
+ * its place. One of the two is ALWAYS present for numCpus > 0. */
+test('off-scale CPU reference becomes the "N CPUs ↑" graphic (P7)', () => {
+    const off = buildAasOption({ buckets: classBuckets(1), max_aas: 3, bucket_ns: 1 },
+        { numCpus: 64 });
+    const annoOff = off.option.series.find(s => s.name === AAS_ANNOTATION_SERIES);
+    const yLines = annoOff && annoOff.markLine
+        ? annoOff.markLine.data.filter(d => d.yAxis != null) : [];
+    assert.equal(yLines.length, 0, 'no off-axis markLine (it would be dropped)');
+    assert.ok(off.option.graphic, 'graphic affordance present');
+    assert.equal(off.option.graphic[0].style.text, '64 CPUs ↑');
+    assert.equal(off.option.graphic[0].silent, true);
+
+    // On-scale: the markLine renders, no graphic.
+    const on = buildAasOption({ buckets: classBuckets(1), max_aas: 100, bucket_ns: 1 },
+        { numCpus: 4 });
+    const annoOn = on.option.series.find(s => s.name === AAS_ANNOTATION_SERIES);
+    assert.equal(annoOn.markLine.data.filter(d => d.yAxis != null)[0].yAxis, 4);
+    assert.equal(on.option.graphic, undefined);
+});
+
+test('ECharts CPU reference decision uses the hysteresis-applied axis top', () => {
+    const data = { buckets: classBuckets(1), max_aas: 3, bucket_ns: 1 };
+    const held = buildAasOption(data, { numCpus: 64, appliedYMax: 96 });
+    assert.equal(held.option.yAxis.max, 96);
+    const anno = held.option.series.find(s => s.name === AAS_ANNOTATION_SERIES);
+    assert.equal(anno.markLine.data.filter(d => d.yAxis != null)[0].yAxis, 64);
+    assert.equal(held.option.graphic, undefined,
+        'on the painted axis the capacity line is on-scale, so no up-chip');
+
+    const shrunk = buildAasOption(data, { numCpus: 64, appliedYMax: 12 });
+    const yLines = shrunk.option.series.find(s => s.name === AAS_ANNOTATION_SERIES);
+    assert.ok(!yLines || !yLines.markLine ||
+        yLines.markLine.data.every(d => d.yAxis == null));
+    assert.equal(shrunk.option.graphic[0].style.text, '64 CPUs ↑');
 });
 
 /* FLIPPED in U1 (review P2): this used to pin the CPU markLine onto
@@ -113,6 +174,33 @@ test('event breakdown mode: one series per event with identity-keyed colors', ()
     // FLIPPED in U2a: x is ms on the time axis (t=10 ns -> 1e-5 ms).
     assert.deepEqual(sd[0].data, [[0.00001, 0.4], [0.000011, 0.5]]);
     assert.deepEqual(sd[1].data, [[0.00001, 0.2], [0.000011, 0.25]]);
+});
+
+/* U2 (review P3 wire 1): the AAS chart is a drill SOURCE now. The model
+ * carries seriesIds (event_id per series in event mode, nulls in class mode)
+ * + a breakdown discriminator so the mount layer's click→drill can emit the
+ * same intents the tables do; and every data series sets triggerLineEvent so
+ * the stacked band polygons are event-bearing on the ECharts path (the
+ * review-spec'd click mechanism, available since ECharts 5.2.2). */
+test('drill surface: seriesIds + breakdown + triggerLineEvent (P3 wire 1)', () => {
+    const ev = buildAasOption({
+        bucket_ns: 1, max_aas: 1, breakdown: 'events',
+        series: [{ name: 'Lock:relation', event_id: 42 },
+                 { name: 'IO:DataFileRead', event_id: 7 }],
+        buckets: [{ t: 10, aas: [0.3, 0.1] }],
+    }, { numCpus: 2 });
+    // Identity order sorts IO before Lock; ids follow their events.
+    assert.deepEqual(ev.seriesNames, ['IO:DataFileRead', 'Lock:relation']);
+    assert.deepEqual(ev.seriesIds, [7, 42]);
+    assert.equal(ev.breakdown, 'events');
+
+    const cls = buildAasOption(
+        { bucket_ns: 1, max_aas: 1, buckets: classBuckets(1) }, { numCpus: 2 });
+    assert.equal(cls.breakdown, 'classes');
+    assert.deepEqual(cls.seriesIds, WAIT_CLASSES.map(() => null));
+    for (const s of dataSeries(cls.option)) {
+        assert.equal(s.triggerLineEvent, true, s.name + ' area is clickable');
+    }
 });
 
 test('empty data: no crash, hasData false', () => {

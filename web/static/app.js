@@ -14,7 +14,10 @@
  * lib/view-manager.js epochs), replacing the old _refreshGen counters.
  */
 
-import { ServerInfo, TimeRange, FilterStack } from './lib/state.js';
+import {
+    ServerInfo, TimeRange, FilterStack,
+    serializeHashState, parseHashState,
+} from './lib/state.js';
 import { Transport, TransportError, CancelledError } from './lib/transport.js';
 import { Camera } from './lib/camera.js';
 import { StripCache } from './lib/stripcache.js';
@@ -69,6 +72,15 @@ const stripCache = new StripCache({
         return transport.send('aas', params);
     },
 });
+
+/* The one FilterStack mutation boundary. Strip keys are intentionally
+ * filter-blind, so every successful filter-set mutation invalidates the cache
+ * here — no caller can remember the state change and forget its data meaning. */
+function mutateFilters(mutate) {
+    const changed = mutate();
+    if (changed !== false) stripCache.invalidate();
+    return changed;
+}
 let cameraSyncing = false;   // true while app state is being MIRRORED into the camera
 let cameraSettleTimer = null;
 const CAMERA_SETTLE_MS = 150;   // settle-refine debounce after the last gesture event
@@ -114,6 +126,7 @@ let clientProtocol = null;
 // Auto-refresh (live mode) bookkeeping.
 let autoRefreshId = 0;
 let autoRefreshOn = false;
+let lastLiveTickTo = null;
 
 // Sort state per table view. getSort returns the current { key, asc } (or null
 // for server order); toggleSort cycles desc→asc on repeated clicks of the same
@@ -125,6 +138,120 @@ function toggleSort(tab, key) {
     const cur = tabSort[tab];
     if (cur && cur.key === key) tabSort[tab] = { key, asc: !cur.asc };
     else tabSort[tab] = { key, asc: false };
+    updateHash(false);   // P9: sort is bookmarkable state (replace, not push)
+}
+
+// ── URL hash state plumbing (Track U Phase U2, review P9) ─────────────────────
+//
+// The codec is pure (lib/state.js: serializeHashState/parseHashState); this
+// is the WHEN. Two write modes:
+//   updateHash(true)   PUSH a history entry — investigation steps (drill,
+//                      breadcrumb, tab switch, zoom, live toggle, camera
+//                      settle), so browser back/forward retraces them;
+//   updateHash(false)  REPLACE — passive/minor changes (sort). Live-mode
+//                      hashes carry live=1&span, never from/to, so the 5 s
+//                      tick does not touch the URL at all.
+// popstate applies the target hash; an in-flight apply coalesces to the latest
+// traversal instead of dropping it. `applyingHash` suppresses re-entrant
+// writes while an apply is mutating state. Deliberately hash-only: no
+// router, no path pushState (roadmap: "no SPA framework/router beyond hash
+// state").
+let applyingHash = false;
+let pendingHashApply = null;
+
+function currentHashState() {
+    const tab = vm ? vm.activeId() : null;
+    return {
+        tab,
+        live: autoRefreshOn,
+        spanSecs: timeRange.liveRangeSecs,
+        fromNs: timeRange.from,
+        toNs: timeRange.to,
+        filters: filters.snapshot(),
+        sort: tab ? getSort(tab) : null,
+    };
+}
+
+function updateHash(push) {
+    if (!uiInitialized || applyingHash) return;
+    const h = serializeHashState(currentHashState());
+    const cur = (location.hash || '').replace(/^#/, '');
+    if (h === cur) return;
+    if (push) {
+        // Fragment navigation: pushes a history entry (back retraces it).
+        location.hash = h;
+    } else {
+        history.replaceState(null, '', '#' + h);
+    }
+}
+
+/* Apply a parsed hash state: filters + tab + window/live + sort, then one
+ * refresh. Used by the !uiInitialized hydration and by popstate (back/
+ * forward). A restored live=1 RE-ANCHORS to a freshly fetched NOW — the
+ * live-means-NOW rule; a live deep link can never resurrect stale time. */
+async function applyHashOnce(s) {
+    stopAutoRefresh();               // restarted below iff s.live
+    mutateFilters(() => { filters.restore(s.filters); });
+    const tab = (s.tab && vm.views[s.tab]) ? s.tab : vm.activeId();
+    if (s.sort) tabSort[tab] = s.sort;
+    else delete tabSort[tab];        // Back to a pre-sort entry undoes the sort
+    setTabView(tab);
+    updateBreadcrumb();
+    if (s.live) {
+        // Fresh server clock first — same rule as the Live button (the
+        // stored nowNs may be minutes stale after a paused session).
+        try {
+            const info = await transport.send('info');
+            server.update(info);
+        } catch (e) { /* anchor to last known NOW */ }
+        timeRange.anchorLive(s.spanSecs || timeRange.liveRangeSecs);
+        // Respect pausesLive views (transitions/concurrency): the window
+        // still means NOW, but the 5 s loop stays off — exactly what
+        // switching to that tab live would have done.
+        if (!(vm.views[tab] && vm.views[tab].pausesLive)) {
+            startAutoRefresh(timeRange.liveRangeSecs);
+        }
+    } else if (s.fromNs != null && s.toNs != null) {
+        timeRange.set(s.fromNs, s.toNs);
+    }
+    updateTimeRange();
+    await refresh();
+    await resolveRestoredFilterLabels();
+}
+
+/* reason='hydrate' is the one normalization site for a hand-typed initial
+ * hash. Traversal applies never replaceState the entry the browser selected.
+ * If Back/Forward moves again while network work is in flight, only the latest
+ * target matters; loop until no newer target is pending. */
+async function applyHash(s, reason) {
+    if (!s) return;
+    const request = { state: s, reason: reason || 'traversal' };
+    if (applyingHash) { pendingHashApply = request; return; }
+    applyingHash = true;
+    let current = request;
+    let normalize = false;
+    try {
+        while (current) {
+            pendingHashApply = null;
+            await applyHashOnce(current.state);
+            normalize = current.reason === 'hydrate';
+            current = pendingHashApply;
+        }
+    } finally {
+        applyingHash = false;
+    }
+    if (normalize) updateHash(false);
+}
+
+function initHashNavigation() {
+    // Fragment traversal fires popstate (and our own pushes echo through it):
+    // a hash that already matches the current state is OUR echo — skip it.
+    window.addEventListener('popstate', () => {
+        const raw = (location.hash || '').replace(/^#/, '');
+        if (!applyingHash && raw === serializeHashState(currentHashState())) return;
+        const s = parseHashState(location.hash);
+        if (s) applyHash(s, 'traversal');
+    });
 }
 
 // ── DOM handles (resolved once at bootstrap) ──────────────────────────────────
@@ -146,8 +273,12 @@ function makeCtx() {
         chartEl, summaryEl, tooltipEl,
         mountTable,
         setStatus,
+        // The ONE navigation intent surface (U2, review P3). Accepts both
+        // intent shapes — filter drills and pivot intents — see the contract
+        // comment above PIVOT/PIVOTS in the drill section below.
         onDrill: drill,
         onZoom: (from, to) => { stopAutoRefresh(); zoomTo(from, to); },
+        isLiveTick: () => autoRefreshOn && lastLiveTickTo === timeRange.to,
         // Table views: per-tab sort state + a re-render hook used after a
         // header-sort click (re-runs requests/build/mount under a fresh epoch).
         getSort, toggleSort,
@@ -253,11 +384,21 @@ async function onConnected() {
             await pollDaemon();
             startDaemonPoll();
 
+            // P9: deep-link hydration — a hash restores {tab, window|live,
+            // filters, sort} instead of the boot defaults. A restored live=1
+            // re-anchors to NOW inside applyHash (never to the link's time).
+            const hs = parseHashState(location.hash);
+            if (hs) {
+                await applyHash(hs, 'hydrate');
+                return;
+            }
+
             await refresh();
             // Start in live mode. The span comes from timeRange.liveRangeSecs
             // (the ONE source of truth for the live span; initDefault set the
             // 900s = 15 min boot default) — the Live button resumes it (P4).
             startAutoRefresh(timeRange.liveRangeSecs);
+            updateHash(false);   // P9: the URL always names the current state
             return;
         }
 
@@ -284,6 +425,7 @@ function initOnce() {
     initTimePicker();
     initLiveMode();
     initMetricsButton();
+    initHashNavigation();   // P9: back/forward retrace the investigation
     window.addEventListener('resize', onResize);
 }
 
@@ -428,14 +570,14 @@ function clearPaneError(el) {
 // single-flight + the view-manager epoch chokepoint, so a user action mid-flight
 // supersedes stale responses without any manual generation counters.
 
-async function refresh() {
-    await refreshActive();
+async function refresh(aasMountReason) {
+    await refreshActive(aasMountReason);
     await vm.refresh();
 }
 
-async function refreshActive() {
+async function refreshActive(aasMountReason) {
     if (!activeView) return;
-    const ctx = activeCtx();
+    const ctx = activeCtx(aasMountReason || 'deliberate');
     let data;
     try {
         data = await activeView.requests(ctx);
@@ -469,11 +611,42 @@ async function refreshActive() {
 
 // ctx for the persistent active view: it manages its own single-flight channel
 // (not tied to the tab view-manager) so tab switches never cancel the AAS fetch.
-function activeCtx() {
+function activeCtx(aasMountReason) {
     return Object.assign(makeCtx(), {
         viewId: 'active',
+        // AAS y-axis hysteresis smooths live ticks only. Deliberate refreshes
+        // reset it; provisional strip-cache paints neither seed nor advance it.
+        aasMountReason: aasMountReason || 'deliberate',
         channel: (name) => 'active.' + name,
     });
+}
+
+/* URL restore serializes filter values, not presentation labels. Once the
+ * restored window has fetched successfully, resolve the event chip from the
+ * authoritative event list and repaint the projections. Until this finishes,
+ * renderFilterBar's honest key=value fallback remains visible. */
+async function resolveRestoredFilterLabels() {
+    const restored = filters.snapshot();
+    const labels = {};
+    if (restored.class != null) labels.class = String(restored.class);
+    if (restored.pid != null) labels.pid = 'PID ' + restored.pid;
+    if (restored.query_id != null) labels.query_id = 'Query ' + restored.query_id;
+    if (restored.event_id != null) {
+        try {
+            const data = await transport.send('top_events', {
+                from: timeRange.from, to: timeRange.to, filters: {},
+            });
+            const row = ((data && data.rows) || []).find(r =>
+                r && r.event_id === restored.event_id);
+            if (row && row.name) labels.event_id = row.name;
+        } catch (e) { /* key=value remains honest until a later real drill */ }
+    }
+    // A coalesced traversal may have advanced while the label fetch was in
+    // flight. Never attach names to a different filter set.
+    if (JSON.stringify(filters.snapshot()) !== JSON.stringify(restored)) return;
+    if (!Object.keys(labels).length) return;
+    filters.labels = Object.assign({}, filters.labels, labels);
+    updateBreadcrumb();
 }
 
 // ── Chart view (persistent AAS) ───────────────────────────────────────────────
@@ -536,6 +709,7 @@ async function switchTab(tab) {
     // The active/AAS chart reflects the same window across tabs; refresh it too.
     await refreshActive();
     await vm.switchTo(tab);
+    updateHash(true);   // P9: tab choice is shareable state ("tabs are lenses")
 }
 
 // Switch the active tab WITHOUT triggering a separate refresh (used by drill
@@ -549,43 +723,149 @@ function setTabView(tab) {
     setActiveTabButton(tab);
 }
 
-// ── Drill-down / breadcrumb ───────────────────────────────────────────────────
+// ── Drill-down / breadcrumb / pivot intents ───────────────────────────────────
+//
+// U2 (review P3): ONE intent surface, `ctx.onDrill(intent)`, two intent
+// shapes — both flow through FilterStack + the registries below; no view
+// carries its own navigation logic or a second filter state.
+//
+//   FILTER DRILL (the original shape, tables + the AAS chart click):
+//     { filterKey: 'class'|'event_id'|'pid'|'query_id',
+//       filterValue,             // class: label string ('IO'); event_id/pid:
+//                                //   number; query_id: string (uint64)
+//       label }                  // human text for chip/breadcrumb
+//     → pushes the filter (FilterStack.drill) and pivots to
+//       PIVOT[filterKey]'s tab.
+//
+//   PIVOT INTENT (U2 — the cross-view wires; consumed by the app, EMITTED by
+//   views; the emitting views are other slices, the registry is normative):
+//     { pivot: <key>,            // one of PIVOTS below
+//       filterKey?, filterValue?, label?,   // optional filter drill to apply
+//                                           //   (same field contract as above)
+//       removeKey?,              // key or keys to remove through the same
+//                                //   app-owned FilterStack mutation boundary
+//       from?, to?,              // optional ns window → zoomTo(from, to)
+//       tab? }                   // optional destination override
+//     Semantics: pause live (P4), apply the filter if given (recorded as a
+//     normal FilterStack drill — breadcrumbs/chips/URL all follow), switch
+//     to intent.tab || PIVOTS[key].tab (null keeps the current tab), then
+//     zoomTo(from,to) if a window was given (zoom history records it, so
+//     dblclick backs out), else plain refresh. Unknown pivot keys are loud
+//     no-ops (console.error) — a typo must not silently eat a click.
+//
+//   Registry (destination defaults):
+//     'histogram-event' events P50/P95/P99 cell → THAT event's latency
+//                       distribution: filter {event_id} + histogram tab
+//                       (review wire 6).
+//     'heatmap-cell'    heatmap cell → event+time isolate: filter
+//                       {event_id} + zoomTo(bucket window) + queries tab —
+//                       "which queries drove this event, then" (wire 4).
+//     'dfg-event'       DFG node → standard event drill: filter {event_id}
+//                       + queries tab, identical destination to an events-
+//                       table row click (wire 5; server emits event_id in
+//                       node JSON).
+//     'burst-zoom'      burst/peak row → pure time jump: zoomTo(burst ± pad;
+//                       the EMITTER pads), no filter, current tab kept
+//                       (wire 2).
 
 const PIVOT = { class: 'events', event_id: 'queries', pid: 'timeline', query_id: 'events' };
 
+const PIVOTS = {
+    'histogram-event': { tab: 'histogram' },
+    'heatmap-cell':    { tab: 'queries' },
+    'dfg-event':       { tab: 'queries' },
+    'burst-zoom':      { tab: null },
+};
+
 function drill(intent) {
     if (!intent) return;
+    if (intent.pivot) { pivotDrill(intent); return; }
     stopAutoRefresh();   // P4: drilling is an investigation gesture, like zoom
-    filters.drill(intent.filterKey, intent.filterValue, intent.label, vm.activeId());
-    // U2a: cached strips carry the OLD filters' meaning (and possibly the old
-    // class/event breakdown mode) — they must never be served under the new
-    // ones. In-flight fills land stale and are dropped.
-    stripCache.invalidate();
+    mutateFilters(() => filters.drill(intent.filterKey, intent.filterValue,
+        intent.label, vm.activeId()));
     const pivot = PIVOT[intent.filterKey];
     if (pivot) setTabView(pivot);
     updateBreadcrumb();
+    updateHash(true);    // P9: a drill is an investigation step — back undoes it
     refresh();
+}
+
+function pivotDrill(intent) {
+    const reg = PIVOTS[intent.pivot];
+    if (!reg) {
+        console.error('[pgwt] unknown pivot intent:', intent.pivot, intent);
+        return;
+    }
+    stopAutoRefresh();   // P4: every pivot is an investigation gesture
+    const removeKeys = intent.removeKey == null ? [] :
+        (Array.isArray(intent.removeKey) ? intent.removeKey : [intent.removeKey]);
+    if (removeKeys.length || intent.filterKey) {
+        mutateFilters(() => {
+            let changed = false;
+            for (const key of removeKeys) {
+                changed = filters.removeFilter(key, vm.activeId()) || changed;
+            }
+            if (intent.filterKey) {
+                filters.drill(intent.filterKey, intent.filterValue, intent.label,
+                    vm.activeId());
+                changed = true;
+            }
+            return changed;
+        });
+    }
+    const tab = intent.tab !== undefined ? intent.tab : reg.tab;
+    if (tab && vm.views[tab]) setTabView(tab);
+    updateBreadcrumb();
+    if (intent.from != null && intent.to != null && intent.to > intent.from) {
+        // zoomTo owns the ONE history push for this compound investigation
+        // step; no never-rendered intermediate pivot entry.
+        zoomTo(intent.from, intent.to);   // records zoom history + refreshes
+    } else {
+        updateHash(true);
+        refresh();
+    }
 }
 
 function drillUp(index) {
     stopAutoRefresh();   // P4: breadcrumb navigation pauses live too
-    const view = filters.drillUp(index);
-    stripCache.invalidate();   // U2a: filters changed — old strips are stale
+    const view = mutateFilters(() => filters.drillUp(index));
     if (view) setTabView(view);
     updateBreadcrumb();
+    updateHash(true);
+    refresh();
+}
+
+/* U2 (wire 7): a filter-bar chip's ✕ — drop ONE dimension, keep the rest.
+ * FilterStack records it as a new investigation step (append-only history),
+ * so the breadcrumb/back-button can restore the removed filter. */
+function removeFilter(key) {
+    stopAutoRefresh();   // P4: reshaping the filter set is an investigation
+    if (!mutateFilters(() => filters.removeFilter(key, vm.activeId()))) return;
+    updateBreadcrumb();
+    updateHash(true);
     refresh();
 }
 
 function clearFilters() {
     stopAutoRefresh();   // P4: ✕ rewinds the investigation — Live is the way back
-    filters.clear();
-    stripCache.invalidate();   // U2a: filters changed — old strips are stale
+    mutateFilters(() => { filters.clear(); });
     setTabView('overview');
     updateBreadcrumb();
+    updateHash(true);
     refresh();
 }
 
+/* One render pass for every FilterStack-derived surface: the breadcrumb
+ * trail, the persistent filter-bar chips, and the tab badges. They are three
+ * PROJECTIONS of the same state — updating them together is what keeps
+ * "tabs are lenses" true on screen (wire 7). */
 function updateBreadcrumb() {
+    renderBreadcrumbTrail();
+    renderFilterBar();
+    renderTabBadges();
+}
+
+function renderBreadcrumbTrail() {
     const el = document.getElementById('breadcrumb');
     if (filters.isEmpty()) { el.innerHTML = ''; return; }
 
@@ -610,6 +890,41 @@ function updateBreadcrumb() {
     });
     const clearBtn = el.querySelector('.crumb-clear');
     if (clearBtn) clearBtn.addEventListener('click', clearFilters);
+}
+
+/* U2 (wire 7): the persistent compact filter bar — one chip per ACTIVE
+ * FilterStack entry (filters.filters), each with its own ✕. Pure projection:
+ * chips render FROM the stack (labels via FilterStack.labels, falling back
+ * to key=value after a URL restore) — there is no chip-side state. Lives in
+ * the tab strip so the "every tab is a lens over these filters" relationship
+ * is spatially explicit. */
+function renderFilterBar() {
+    const bar = document.getElementById('filter-bar');
+    if (!bar) return;
+    const entries = Object.entries(filters.filters);
+    if (!entries.length) { bar.innerHTML = ''; return; }
+    bar.innerHTML = entries.map(([k, v]) => {
+        const label = filters.labels[k] || (k + '=' + v);
+        return '<span class="fchip" title="' + esc(k + ' = ' + v) + '">' +
+            dotHtml(label) + esc(label) +
+            '<span class="fchip-x" data-key="' + esc(k) +
+            '" title="Remove this filter">✕</span></span>';
+    }).join('');
+    bar.querySelectorAll('.fchip-x').forEach(x => {
+        x.addEventListener('click', (e) => {
+            e.stopPropagation();
+            removeFilter(x.dataset.key);
+        });
+    });
+}
+
+/* U2 (wire 7): a dot on EVERY tab button while any filter is active — all
+ * tabs are lenses over the same FilterStack, so all of them are "filtered". */
+function renderTabBadges() {
+    const active = Object.keys(filters.filters).length > 0;
+    document.querySelectorAll('.tab').forEach(b => {
+        b.classList.toggle('filtered', active);
+    });
 }
 
 function dotHtml(name) {
@@ -690,11 +1005,15 @@ function scheduleCameraSettle() {
 }
 
 function settleCamera() {
+    // P9: the gesture came to rest — this window is an investigation step
+    // browser-back should undo (in-gesture camera events never touch the URL;
+    // only the settled window does).
+    updateHash(true);
     // Instant repaint from whatever the cache holds (stale/coarse ok) under
     // the re-quantized strip axis; renderFromCamera also ensure()s the exact
     // strip, which swaps in via onStripData when it lands.
     if (activeView && activeView.renderFromCamera) {
-        activeView.renderFromCamera(activeCtx());
+        activeView.renderFromCamera(activeCtx('provisional'));
     }
     // The tab views are dashboard panes: they follow the window like any
     // other window change (single-flight channels supersede as usual).
@@ -708,7 +1027,7 @@ function settleCamera() {
 function onStripData() {
     if (!uiInitialized || camera.mode !== 'detached') return;
     if (activeView && activeView.renderFromCamera) {
-        activeView.renderFromCamera(activeCtx());
+        activeView.renderFromCamera(activeCtx('provisional'));
     }
 }
 
@@ -754,11 +1073,12 @@ function updateTimeRange() {
 async function zoomTo(from, to) {
     timeRange.zoomTo(from, to);
     updateTimeRange();
+    updateHash(true);   // P9: a zoom is an investigation step — back undoes it
     // U2a instant feedback: paint whatever the strip cache holds for the new
     // window RIGHT NOW (stale/coarse ok — Maps-style), before the poll below
     // swaps in the exact window data. No-op on a cache miss.
     if (activeView && activeView.renderFromCamera) {
-        activeView.renderFromCamera(activeCtx());
+        activeView.renderFromCamera(activeCtx('provisional'));
     }
     await refresh();
 }
@@ -766,9 +1086,10 @@ async function zoomTo(from, to) {
 async function zoomOut() {
     timeRange.zoomOut();
     updateTimeRange();
+    updateHash(true);   // P9: same rule as zoomTo
     // Same instant stale-paint as zoomTo (dblclick zoom-out, header button).
     if (activeView && activeView.renderFromCamera) {
-        activeView.renderFromCamera(activeCtx());
+        activeView.renderFromCamera(activeCtx('provisional'));
     }
     await refresh();
 }
@@ -844,7 +1165,10 @@ function initTimePicker() {
                 timeRange.anchorLive(secs);
                 updateTimeRange();
                 await refresh();
-                if (autoRefreshId === myId) startAutoRefresh(secs);
+                if (autoRefreshId === myId) {
+                    startAutoRefresh(secs);
+                    updateHash(true);   // P9: live span choice is state
+                }
             }
         });
     });
@@ -869,6 +1193,7 @@ function initTimePicker() {
 function startAutoRefresh(rangeSecs) {
     stopAutoRefresh();
     autoRefreshOn = true;
+    lastLiveTickTo = null;   // attach/resume is deliberate; only the loop marks ticks
     setLiveButton(true);
     syncCamera();   // U2a: live on => camera follows (right edge = NOW)
     const myId = ++autoRefreshId;
@@ -885,10 +1210,11 @@ function startAutoRefresh(rangeSecs) {
                     if (info) {
                         server.update(info);
                         timeRange.anchorLive(rangeSecs);
+                        lastLiveTickTo = timeRange.to;
                         updateTimeRange();
                     }
                     if (autoRefreshId !== myId) break;
-                    await refresh();
+                    await refresh('live-tick');
                 } catch (e) {
                     if (autoRefreshId === myId) onRequestError(e);
                 }
@@ -901,6 +1227,7 @@ function startAutoRefresh(rangeSecs) {
 
 function stopAutoRefresh() {
     autoRefreshOn = false;
+    lastLiveTickTo = null;
     autoRefreshId++;   // invalidate any running loop
     setLiveButton(false);
     // U2a: live off => the camera detaches (a later tick can never re-anchor
@@ -921,6 +1248,7 @@ function initLiveMode() {
     btn.addEventListener('click', async () => {
         if (autoRefreshOn) {
             stopAutoRefresh();
+            updateHash(true);   // P9: live→paused freezes the window into the URL
             return;
         }
         // P4: resume live at the CURRENT span (timeRange.liveRangeSecs is
@@ -940,6 +1268,7 @@ function initLiveMode() {
         // mode and re-attaches the camera (attachFollow to the fresh NOW).
         startAutoRefresh(timeRange.liveRangeSecs);
         updateTimeRange();
+        updateHash(true);   // P9: back from here returns to the paused window
         refresh();
     });
 }

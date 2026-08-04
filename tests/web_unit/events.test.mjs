@@ -1,11 +1,22 @@
 /* Node unit tests for the pure events builder (views/events.js) over the shared
  * eventsConfig (lib/builders/table-configs.js). Proves row shape, sort
  * correctness, drill-intent, and edge cases without a browser.
+ *
+ * U2 (review P10): the model now also carries the pane fidelity badge, the
+ * percentile-basis footnote and the truncation-row model — all derived from
+ * the response, never fabricated.
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { buildEventsModel } from '../../web/static/views/events.js';
 import { eventsConfig } from '../../web/static/lib/builders/table-configs.js';
+import {
+    buildPaneFidelity, paneFidelityBadgeHtml,
+    buildPercentileBasis, percentileBasisHtml,
+} from '../../web/static/lib/panels.js';
+import {
+    SAMPLED_BAND_COLOR, SAMPLED_BORDER, MIXED_BAND_COLOR,
+} from '../../web/static/lib/builders/fidelity.js';
 
 function ev(over) {
     return Object.assign({
@@ -97,4 +108,109 @@ test('non-idle event with numeric pct still renders a pct-bar', () => {
     const cell = m.table.rows[0].cells[PCT_COL].html;
     assert.ok(cell.includes('pct-bar'), `expected pct-bar, got: ${cell}`);
     assert.ok(cell.includes('16.8%'), `expected 16.8%, got: ${cell}`);
+});
+
+// ── U2 review P10: pane fidelity badge ──────────────────────────────────────
+
+test('exact window: no badge, no percentile note, no truncation row', () => {
+    const m = buildEventsModel({ fidelity: 'exact', rows: [ev({})] }, null);
+    assert.equal(m.paneFidelity, null);
+    assert.equal(m.percentileBasis, null);
+    assert.equal(m.truncation, null);
+    // The HTML side renders NOTHING for the null models (common case stays
+    // noise-free, matching the AAS chip).
+    assert.equal(paneFidelityBadgeHtml(null), '');
+    assert.equal(percentileBasisHtml(null), '');
+});
+
+test('legacy response without a fidelity field defaults to exact: no badge', () => {
+    assert.equal(buildPaneFidelity({ rows: [] }), null);
+});
+
+test('sampled window: badge model reuses the AAS chip colors + label', () => {
+    const m = buildEventsModel({ fidelity: 'sampled', rows: [ev({})] }, null);
+    assert.ok(m.paneFidelity);
+    assert.equal(m.paneFidelity.fidelity, 'sampled');
+    assert.equal(m.paneFidelity.label, 'Sampled (estimated)');
+    assert.equal(m.paneFidelity.fill, SAMPLED_BAND_COLOR);
+    assert.equal(m.paneFidelity.border, SAMPLED_BORDER);
+    const html = paneFidelityBadgeHtml(m.paneFidelity);
+    assert.ok(html.includes('pane-fidelity-badge'), html);
+    assert.ok(html.includes('Sampled (estimated)'), html);
+    assert.ok(html.includes(SAMPLED_BAND_COLOR), html);
+    assert.ok(html.includes('scaled estimates'), html);   // the honesty copy
+});
+
+test('mixed window: badge uses the mixed chip colors', () => {
+    const b = buildPaneFidelity({ fidelity: 'mixed', rows: [] });
+    assert.equal(b.fidelity, 'mixed');
+    assert.equal(b.fill, MIXED_BAND_COLOR);
+    assert.equal(b.label, 'Mixed (sampled + exact)');
+});
+
+// ── U2 review P10: percentile-basis footnote ────────────────────────────────
+
+test('mixed window with percentiles: qualitative basis note (no counts today)', () => {
+    // The server does not emit per-row exact_count (recorded gap), so the
+    // note states the BASIS without inventing N/M.
+    const m = buildEventsModel({ fidelity: 'mixed', rows: [
+        ev({ p50_us: 10, p95_us: 40, p99_us: 90 }),
+    ] }, null);
+    assert.ok(m.percentileBasis);
+    assert.equal(m.percentileBasis.exact, null);
+    assert.equal(m.percentileBasis.total, null);
+    assert.ok(m.percentileBasis.text.includes('exact-captured events only'),
+        m.percentileBasis.text);
+    assert.ok(!/\d+ of \d+/.test(m.percentileBasis.text),
+        `no fabricated counts: ${m.percentileBasis.text}`);
+});
+
+test('sampled window, all percentiles null: note explains the em-dashes', () => {
+    const m = buildEventsModel({ fidelity: 'sampled', rows: [
+        ev({ avg_us: null, p50_us: null, p95_us: null, p99_us: null, max_us: null }),
+    ] }, null);
+    assert.ok(m.percentileBasis);
+    assert.ok(m.percentileBasis.text.includes('none'), m.percentileBasis.text);
+});
+
+test('percentile basis renders exact "N of M" ONLY when every row carries counts', () => {
+    // Forward contract for the recorded server gap: once handle_top_events
+    // emits per-row exact_count (the field already exists in
+    // struct pgwt_event_row), the same builder upgrades to real counts.
+    const withCounts = buildPercentileBasis({ fidelity: 'mixed', rows: [
+        { count: 100, exact_count: 20, p50_us: 5 },
+        { count: 50, exact_count: 30, p50_us: 9 },
+    ] });
+    assert.equal(withCounts.exact, 50);
+    assert.equal(withCounts.total, 150);
+    assert.ok(withCounts.text.includes('50 of 150'), withCounts.text);
+    // One row missing the field -> back to qualitative (no partial sums).
+    const partial = buildPercentileBasis({ fidelity: 'mixed', rows: [
+        { count: 100, exact_count: 20, p50_us: 5 },
+        { count: 50, p50_us: 9 },
+    ] });
+    assert.equal(partial.exact, null);
+    assert.ok(!/\d+ of \d+/.test(partial.text), partial.text);
+});
+
+// ── U2 review P10: truncation row + P3 wire 6 in the assembled model ────────
+
+test('server-flagged truncation reaches the events model', () => {
+    const m = buildEventsModel({ truncated: true, total_count: 40,
+        rows: [ev({}), ev({})] }, null);
+    assert.deepEqual(m.truncation,
+        { omitted: 38, text: '… 38 more below threshold' });
+});
+
+test('percentile cells in the assembled model carry the histogram pivot intent', () => {
+    const m = buildEventsModel({ rows: [
+        ev({ name: 'IO:DataFileRead', event_id: 0x01000015,
+             p50_us: 8, p95_us: 40, p99_us: 90 }),
+    ] }, null);
+    // P50 column (index 4) — the same intent shape app.js PIVOTS consumes.
+    const cell = m.table.rows[0].cells[4];
+    assert.deepEqual(cell.intent, {
+        pivot: 'histogram-event', filterKey: 'event_id',
+        filterValue: 0x01000015, label: 'IO:DataFileRead',
+    });
 });

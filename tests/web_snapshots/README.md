@@ -92,6 +92,40 @@ python3 tests/test_web_ui_snapshots.py --update-snapshots --only='gallery/*'
   quantized gallery cell heights so captures are phase-independent — would
   itself rebaseline every gallery cell, so it is deliberately not bundled
   into the U2b PR.)
+- 2026-08-04 (Track U U2, OEM-loop visuals): FOUR pane baselines + ONE
+  gallery cell regenerated, each justified by a U2 review fix:
+  `histogram_heatmap.png` + `gallery/histogram-dense.png` — the P8 heatmap
+  recolor (linear 6-stop rainbow → log1p-domain single-hue violet ramp
+  `['#763e84'…'#eac3f4']`, visualMap labels now raw counts via the expm1
+  formatter); pre-regen ratios 0.1300 / 0.2375 — the intended SEMANTICS
+  change, unit-pinned in `tests/web_unit/histogram.test.mjs`.
+  `transitions_dfg.png` — F4 identity tints (DFG node fills/borders + variant
+  flow bars move from flat class hues to `eventColor()` per-event tints;
+  0.0343). `table_events.png` — %DB bars adopt eventColor tints + the wire-6
+  drill affordance on the P50/P95/P99 cells (0.0009 — inside the 0.02 pane
+  gate, but the baseline now pins the intended pixels). `table_queries.png` —
+  the P11 bar-truth model (1px inset separators, below-threshold vs
+  other/unattributed split segments, pre-normalized flex widths; 0.0013).
+  `gallery/table-configs-queries-hostile-sql.png` was deliberately NOT
+  regenerated: the bar changes land outside that cell's 650px clip — a trial
+  local regen produced pixels IDENTICAL to the committed CI baseline (0.0000
+  at channel threshold 8, same 650×246 size), so the CI-authoritative file is
+  kept. Generated LOCALLY (playwright 1.58.0 / chromium 145.0.7632.6 — same
+  environment and justification as the U1/U2a/U2b entries) via
+  `--update-snapshots --only=…`, so the 26 untouched baselines were never
+  rewritten; a follow-up `--only` compare matched all five regens at 0.0000.
+  NOTE: `gallery/histogram-dense` was one of the six CI-authoritative cells —
+  its provenance is local again and it must be re-arbitrated in CI via the
+  workflow below, same PR. Local full-run expectation after this regen: the
+  failure set is EXACTLY the six 2026-08-04 CI-authoritative cells
+  (timeline-single-point 0.0033, histogram-dense 0.0066,
+  concurrency-dense-bursts 0.0053, table-configs-queries-hostile-sql the
+  650×250-vs-246 clip flap, aas-live-ticks-tick4 0.0106,
+  uplot-aas-live-ticks-tick4 0.0135) — all capture-phase/cross-chromium
+  drift, not content: histogram-dense verifies 0.0000 in isolation
+  (`PGWT_SNAP_ONLY='gallery/histogram-dense'`), and the concurrency/
+  table-configs diff masks were inspected — glyph antialiasing only, zero
+  chart/table content change from the U2 non-painting row attributes.
 - 2026-07-31 (Track U U2a): NINE baselines regenerated for the First-catch
   axis fix (`builders/aas.js` x-axis → `type:'time'`, all stacked layers now
   paint, UTC time-tick labels): `aas_chart_overview.png`,

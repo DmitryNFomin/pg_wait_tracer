@@ -8,15 +8,18 @@
  * the grid layout math are pure and Node-testable. It owns NO chart instance and
  * touches NO DOM.
  *
- * Mapping is byte-identical to the old legacy adapter in app.js (renderDFG /
- * renderVariantSection):
- *   - nodes sorted by total_ms desc, laid out on a roughly-golden grid
- *   - node size = 15..120 by sqrt(ms/maxMs); class color; below-node label
+ * Mapping matches the old legacy adapter in app.js (renderDFG /
+ * renderVariantSection) except colors (U2, the U1-F4 backlog):
+ *   - nodes sorted by total_ms desc, laid out on a roughly-golden grid;
+ *     posOverrides (user-dragged coordinates, P5) win over the grid
+ *   - node size = 15..120 by sqrt(ms/maxMs); eventColor identity tint (the
+ *     same event = same color contract as the AAS chart); below-node label
+ *   - nodes carry eventId/className (server-emitted event_id — P3 wire 5)
  *   - edges filtered by `threshold`% of the max edge count; self-loops curve more
  *   - layout 'none', roam + draggable, arrow edge symbol
  */
 
-import { classColor, esc as escHtml } from '../format.js';
+import { eventColor, esc as escHtml } from '../format.js';
 
 /* Build the layout-independent pieces: the maximum edge count and a name->node
  * lookup. Cheap, exported so the slider re-render can reuse it. */
@@ -32,10 +35,13 @@ export function transitionsContext(data) {
 /* PURE: data + threshold% + container dimensions -> ECharts graph option.
  *
  * `dims` = { width, height } of the DFG container (for the grid layout); the
- * view passes the live container size, tests pass fixed dimensions. Returns
- * { option, visibleCount }. visibleCount is the number of laid-out nodes (0 =>
- * "no transitions above threshold"). */
-export function buildTransitionsOption(data, threshold, dims) {
+ * view passes the live container size, tests pass fixed dimensions.
+ * `posOverrides` (optional) = { nodeName: { x, y } } — user-dragged positions
+ * the view read back from the live instance (P5); they beat the grid layout
+ * so a refresh/re-layout never snaps a hand-placed node back.
+ * Returns { option, visibleCount }. visibleCount is the number of laid-out
+ * nodes (0 => "no transitions above threshold"). */
+export function buildTransitionsOption(data, threshold, dims, posOverrides) {
     dims = dims || {};
     const cW = dims.width || 800, cH = dims.height || 550;
     const links = (data && data.links) || [];
@@ -65,13 +71,22 @@ export function buildTransitionsOption(data, threshold, dims) {
     const ecNodes = sortedNodes.map((nd, i) => {
         const info = nodeMap[nd.name] || {};
         const ms = nd.ms;
-        const cls = (info.class || 'unknown').toLowerCase();
-        const color = classColor(nd.name) || classColor(cls) || '#888';
+        // U2 (U1-F4 backlog): eventColor, not the flat class hue — "same event
+        // = same color" now holds against the AAS chart and every other view.
+        const color = eventColor(info.class != null ? info.class : null, nd.name);
         const size = Math.max(15, Math.min(120, 15 + Math.sqrt(ms / maxNodeMs) * 105));
         const timeStr = ms >= 1000 ? (ms / 1000).toFixed(1) + 's' : ms.toFixed(0) + 'ms';
         const col = i % cols, row = Math.floor(i / cols);
+        const ov = posOverrides ? posOverrides[nd.name] : null;
         return {
-            name: nd.name, x: padX + col * cellW, y: padY + row * cellH,
+            name: nd.name,
+            x: ov ? ov.x : padX + col * cellW,
+            y: ov ? ov.y : padY + row * cellH,
+            // P3 wire 5: the server-emitted event_id rides on the node so a
+            // click can become the 'dfg-event' pivot intent (0 = CPU* pseudo-
+            // node, absent on servers predating the field).
+            eventId: info.event_id != null ? info.event_id : null,
+            className: info.class || null,
             symbolSize: size,
             itemStyle: { color, borderColor: color, borderWidth: 2 },
             label: {
@@ -149,7 +164,9 @@ export function buildVariantSectionHtml(vdata, title, esc) {
             'background:#1a1a2e;border:1px solid #2a2a4a;margin:4px 0">';
         v.steps.forEach(st => {
             const w = Math.max(2, (st.avg_ms / stepTotalMs) * 100);
-            const color = classColor(st.name) || classColor(st.class) || '#888';
+            // U2 (U1-F4 backlog): variant steps use the eventColor identity
+            // tint too — a step is the same event the DFG/AAS color.
+            const color = eventColor(st.class != null ? st.class : null, st.name);
             const label = st.name.indexOf(':') > 0 ? st.name.substring(st.name.indexOf(':') + 1) : st.name;
             const durStr = st.avg_ms >= 1 ? st.avg_ms.toFixed(1) + 'ms' :
                 st.avg_ms >= 0.001 ? (st.avg_ms * 1000).toFixed(0) + 'μs' : '';
