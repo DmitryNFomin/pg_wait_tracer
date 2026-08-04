@@ -10,6 +10,32 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+- **ui(U2b): uPlot AAS instrument pane — the pre-registered 60 fps gate is
+  met** (Track U). The AAS pane's default renderer is now vendored uPlot
+  1.6.32 (sha256-pinned provenance) behind a `?renderer=echarts|uplot` seam,
+  with the ECharts path retained intact as A/B baseline and rollback. The
+  camera is now genuinely authoritative (closing U2a's "authoritative by
+  convention" caveat): wheel = cursor-anchored zoom, shift+drag = pan, plain
+  drag = brush-select, dblclick = zoom-out — all mutate the camera, and the
+  renderer draws FROM camera state via one rAF-coalesced `setScale` over
+  resident data (no fetch, no rebuild in the gesture loop). Honesty overlays
+  (sampled/mixed shading, escalation band + live edge, N-CPUs line) are
+  absolute camera-space geometry redrawn against the current viewport in
+  every camera state — rects clamp, lines drop but never move into view.
+  Measured A/B (harness extended to both renderers in one invocation, same
+  mock / 1258-bucket × 16-series strip / 40+20 steps, 3 runs each):
+  gesture-to-paint p95 = **5.4/7.0/5.2 ms uPlot vs 65.5/69.4/81.0 ms
+  ECharts** (an earlier same-day sitting: 5.3/5.3/5.2 vs 61.7/65.6/69.6,
+  preserved under `history`; both sittings GREEN) — GREEN against the
+  written 16.7 ms bar (the gate that tripped RED on 2026-07-31 and
+  scheduled this phase; full record with history in
+  `tests/results/gesture_gate.json`). 33 new Node tests (stacking recipe,
+  cross-renderer parity, hitTest, overlay clamp/drop semantics; 224 total),
+  Playwright legend/gesture coverage under both renderers, 6 uplot-aas
+  gallery twin cells; AAS pane baselines regenerated + 6 cell baselines
+  added (the priced U2b rebaseline — colors/alpha/overlay coordinates
+  parity-pinned, residual diffs are tick placement/font raster only).
+
 - **fix(cpu): seed→arm race — stale-state sweep for attached backends.** The
   residual pure-CPU straddle live-view flake (three CI hits in one day,
   PG13/17/18): the preseed reads `wait_event_info` microseconds before

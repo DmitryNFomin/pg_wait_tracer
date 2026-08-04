@@ -377,3 +377,21 @@ export const states = {
         ticks: buildTicks(),
     },
 };
+
+/* ── U2b: the uPlot-renderer cell set ────────────────────────────────────────
+ * The SAME deterministic states rendered through buildUplotSpec + a real
+ * uPlot mount (gallery RENDERERS['uplot-aas']), so both renderers stay
+ * eyeballable side by side while the ?renderer= seam exists. Object
+ * references are shared with `states` — one data source, two renderers; a
+ * fixture edit can never fork them. Deliberately small: dense class + event
+ * stacks, the fidelity/honesty trio (sampled band, mixed + escalation band,
+ * edge-only), and the tick replay (series-set churn drives the app's real
+ * rebuild-instance path). */
+export const uplotStates = {
+    'dense': states['dense'],
+    'dense-events': states['dense-events'],
+    'sampled': states['sampled'],
+    'mixed-escalation': states['mixed-escalation'],
+    'escalated-live-edge': states['escalated-live-edge'],
+    'live-ticks': states['live-ticks'],
+};

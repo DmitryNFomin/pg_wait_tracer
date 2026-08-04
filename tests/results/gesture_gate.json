@@ -1,21 +1,464 @@
 {
-  "generated_at": "2026-07-31T20:00:12.367427+00:00",
-  "harness": "tests/test_gesture_gate.py",
-  "gate": {
+ "generated_at": "2026-08-04T12:47:48.299040+00:00",
+ "harness": "tests/test_gesture_gate.py",
+ "mode": "A/B renderer measurement (U2b: uplot default vs echarts rollback, one invocation, same mock/strip/steps)",
+ "gate": {
+  "green_p95_ms": 16.7,
+  "amber_p95_ms": 33.0,
+  "source": "docs/INSTRUMENT_ARCHITECTURE.md \u00a75 trigger 1",
+  "applies_to": "renderer 'uplot' (the AAS default since U2b); judged on the worst run's combined p95"
+ },
+ "environment": {
+  "platform": "Linux-6.8.0-110-generic-x86_64-with-glibc2.39",
+  "headless_chromium": true,
+  "viewport": {
+   "width": 1280,
+   "height": 800
+  },
+  "note": "in-page performance.now() timing; CPU-raster canvas (headless, no GPU)"
+ },
+ "method": {
+  "runs_per_renderer": 3,
+  "inter_step_ms": 30,
+  "burst_len": 10,
+  "settle_pause_ms": 500,
+  "probes": {
+   "echarts": {
+    "t0": "zrender input event arrival (wheel / drag mousemove)",
+    "action": "'datazoom' action",
+    "paint": "chart 'finished' (fallback 'rendered' + double-rAF, recorded per step)"
+   },
+   "uplot": {
+    "t0": "capture-phase DOM input arrival on the pane (wheel / pointermove; capture precedes the app's own handlers)",
+    "action": "camera.onChange commit (zoomAt/panByFrac \u2014 the gesture's state mutation, the 'datazoom' analog)",
+    "paint": "completion of the first rAF callback whose frame shows the x scale moved (rAF-coalesced u.setScale; uPlot 1.6.32 commits via queueMicrotask \u2014 scale mutation and synchronous canvas write are atomic in the commit and pending scales are invisible before it, so the callback cannot precede the canvas write; the double-rAF chain queued in the camera dispatch guarantees a same-frame callback, load-bearing rather than fallback; same pre-compositor instant as ECharts 'finished'; fallback source='raf2' recorded per step)"
+   }
+  },
+  "secondary": "action_to_paint = state-commit -> paint (excludes input delivery; ECharts side is SSR-floor-comparable plus paint)"
+ },
+ "renderers": {
+  "uplot": {
+   "runs": [
+    {
+     "run": 1,
+     "paint_event": "finished",
+     "scale": {
+      "strip_payload_buckets": 1258,
+      "strip_series": 16,
+      "chart_data_series": 16,
+      "chart_series_total": 16,
+      "chart_points_min_across_settles": 1258,
+      "chart_points_max_across_settles": 1258,
+      "aas_wire_requests_densified": 4
+     },
+     "zoom": {
+      "steps": 40,
+      "p50_ms": 3.5,
+      "p95_ms": 5.3,
+      "mean_ms": 3.69,
+      "min_ms": 1.8,
+      "max_ms": 6.1,
+      "action_to_paint": {
+       "steps": 40,
+       "p50_ms": 3.3,
+       "p95_ms": 5.1,
+       "mean_ms": 3.49,
+       "min_ms": 1.6,
+       "max_ms": 6.0
+      }
+     },
+     "pan": {
+      "steps": 20,
+      "p50_ms": 2.8,
+      "p95_ms": 4.0,
+      "mean_ms": 3.0,
+      "min_ms": 1.7,
+      "max_ms": 5.1,
+      "action_to_paint": {
+       "steps": 20,
+       "p50_ms": 2.7,
+       "p95_ms": 3.9,
+       "mean_ms": 2.86,
+       "min_ms": 1.6,
+       "max_ms": 4.9
+      }
+     },
+     "combined": {
+      "steps": 60,
+      "p50_ms": 3.4,
+      "p95_ms": 5.3,
+      "mean_ms": 3.46,
+      "min_ms": 1.7,
+      "max_ms": 6.1,
+      "action_to_paint": {
+       "steps": 60,
+       "p50_ms": 3.3,
+       "p95_ms": 5,
+       "mean_ms": 3.28,
+       "min_ms": 1.6,
+       "max_ms": 6.0
+      }
+     }
+    },
+    {
+     "run": 2,
+     "paint_event": "finished",
+     "scale": {
+      "strip_payload_buckets": 1258,
+      "strip_series": 16,
+      "chart_data_series": 16,
+      "chart_series_total": 16,
+      "chart_points_min_across_settles": 1258,
+      "chart_points_max_across_settles": 1258,
+      "aas_wire_requests_densified": 4
+     },
+     "zoom": {
+      "steps": 40,
+      "p50_ms": 4.0,
+      "p95_ms": 5.3,
+      "mean_ms": 3.83,
+      "min_ms": 2.0,
+      "max_ms": 5.7,
+      "action_to_paint": {
+       "steps": 40,
+       "p50_ms": 3.8,
+       "p95_ms": 5.0,
+       "mean_ms": 3.63,
+       "min_ms": 1.7,
+       "max_ms": 5.5
+      }
+     },
+     "pan": {
+      "steps": 20,
+      "p50_ms": 3.2,
+      "p95_ms": 4.4,
+      "mean_ms": 3.37,
+      "min_ms": 1.7,
+      "max_ms": 8.0,
+      "action_to_paint": {
+       "steps": 20,
+       "p50_ms": 3.1,
+       "p95_ms": 4.3,
+       "mean_ms": 3.25,
+       "min_ms": 1.6,
+       "max_ms": 7.8
+      }
+     },
+     "combined": {
+      "steps": 60,
+      "p50_ms": 3.6,
+      "p95_ms": 5.3,
+      "mean_ms": 3.68,
+      "min_ms": 1.7,
+      "max_ms": 8.0,
+      "action_to_paint": {
+       "steps": 60,
+       "p50_ms": 3.4,
+       "p95_ms": 5.0,
+       "mean_ms": 3.5,
+       "min_ms": 1.6,
+       "max_ms": 7.8
+      }
+     }
+    },
+    {
+     "run": 3,
+     "paint_event": "finished",
+     "scale": {
+      "strip_payload_buckets": 1258,
+      "strip_series": 16,
+      "chart_data_series": 16,
+      "chart_series_total": 16,
+      "chart_points_min_across_settles": 1258,
+      "chart_points_max_across_settles": 1258,
+      "aas_wire_requests_densified": 4
+     },
+     "zoom": {
+      "steps": 40,
+      "p50_ms": 3.5,
+      "p95_ms": 5.5,
+      "mean_ms": 3.65,
+      "min_ms": 1.8,
+      "max_ms": 6.8,
+      "action_to_paint": {
+       "steps": 40,
+       "p50_ms": 3.3,
+       "p95_ms": 5.3,
+       "mean_ms": 3.46,
+       "min_ms": 1.7,
+       "max_ms": 6.5
+      }
+     },
+     "pan": {
+      "steps": 20,
+      "p50_ms": 2.9,
+      "p95_ms": 3.9,
+      "mean_ms": 3.03,
+      "min_ms": 1.7,
+      "max_ms": 4.2,
+      "action_to_paint": {
+       "steps": 20,
+       "p50_ms": 2.8,
+       "p95_ms": 3.7,
+       "mean_ms": 2.85,
+       "min_ms": 1.5,
+       "max_ms": 3.9
+      }
+     },
+     "combined": {
+      "steps": 60,
+      "p50_ms": 3.4,
+      "p95_ms": 5.2,
+      "mean_ms": 3.44,
+      "min_ms": 1.7,
+      "max_ms": 6.8,
+      "action_to_paint": {
+       "steps": 60,
+       "p50_ms": 3.2,
+       "p95_ms": 4.9,
+       "mean_ms": 3.25,
+       "min_ms": 1.5,
+       "max_ms": 6.5
+      }
+     }
+    }
+   ],
+   "combined_p95_ms_runs": [
+    5.3,
+    5.3,
+    5.2
+   ],
+   "combined_p50_ms_runs": [
+    3.4,
+    3.6,
+    3.4
+   ]
+  },
+  "echarts": {
+   "runs": [
+    {
+     "run": 1,
+     "paint_event": "finished",
+     "scale": {
+      "strip_payload_buckets": 1258,
+      "strip_series": 16,
+      "chart_data_series": 16,
+      "chart_series_total": 17,
+      "chart_points_min_across_settles": 1258,
+      "chart_points_max_across_settles": 1258,
+      "aas_wire_requests_densified": 4
+     },
+     "zoom": {
+      "steps": 40,
+      "p50_ms": 51.0,
+      "p95_ms": 70,
+      "mean_ms": 49.66,
+      "min_ms": 14.4,
+      "max_ms": 78.1,
+      "action_to_paint": {
+       "steps": 40,
+       "p50_ms": 15.1,
+       "p95_ms": 27.2,
+       "mean_ms": 17.24,
+       "min_ms": 13.6,
+       "max_ms": 31.3
+      }
+     },
+     "pan": {
+      "steps": 20,
+      "p50_ms": 42.2,
+      "p95_ms": 57.1,
+      "mean_ms": 44.16,
+      "min_ms": 34.3,
+      "max_ms": 61.7,
+      "action_to_paint": {
+       "steps": 20,
+       "p50_ms": 14.8,
+       "p95_ms": 24.9,
+       "mean_ms": 16.0,
+       "min_ms": 13.5,
+       "max_ms": 25.2
+      }
+     },
+     "combined": {
+      "steps": 60,
+      "p50_ms": 48.4,
+      "p95_ms": 61.7,
+      "mean_ms": 47.83,
+      "min_ms": 14.4,
+      "max_ms": 78.1,
+      "action_to_paint": {
+       "steps": 60,
+       "p50_ms": 14.9,
+       "p95_ms": 25.2,
+       "mean_ms": 16.83,
+       "min_ms": 13.5,
+       "max_ms": 31.3
+      }
+     }
+    },
+    {
+     "run": 2,
+     "paint_event": "finished",
+     "scale": {
+      "strip_payload_buckets": 1258,
+      "strip_series": 16,
+      "chart_data_series": 16,
+      "chart_series_total": 17,
+      "chart_points_min_across_settles": 1258,
+      "chart_points_max_across_settles": 1258,
+      "aas_wire_requests_densified": 4
+     },
+     "zoom": {
+      "steps": 40,
+      "p50_ms": 53.6,
+      "p95_ms": 65.6,
+      "mean_ms": 51.43,
+      "min_ms": 14.5,
+      "max_ms": 68.8,
+      "action_to_paint": {
+       "steps": 40,
+       "p50_ms": 15.0,
+       "p95_ms": 26.0,
+       "mean_ms": 16.7,
+       "min_ms": 13.5,
+       "max_ms": 29.1
+      }
+     },
+     "pan": {
+      "steps": 20,
+      "p50_ms": 41.9,
+      "p95_ms": 57.7,
+      "mean_ms": 46.12,
+      "min_ms": 33.5,
+      "max_ms": 69.5,
+      "action_to_paint": {
+       "steps": 20,
+       "p50_ms": 14.4,
+       "p95_ms": 22.0,
+       "mean_ms": 15.32,
+       "min_ms": 13.3,
+       "max_ms": 24.0
+      }
+     },
+     "combined": {
+      "steps": 60,
+      "p50_ms": 50.3,
+      "p95_ms": 65.6,
+      "mean_ms": 49.66,
+      "min_ms": 14.5,
+      "max_ms": 69.5,
+      "action_to_paint": {
+       "steps": 60,
+       "p50_ms": 14.9,
+       "p95_ms": 24.0,
+       "mean_ms": 16.24,
+       "min_ms": 13.3,
+       "max_ms": 29.1
+      }
+     }
+    },
+    {
+     "run": 3,
+     "paint_event": "finished",
+     "scale": {
+      "strip_payload_buckets": 1258,
+      "strip_series": 16,
+      "chart_data_series": 16,
+      "chart_series_total": 17,
+      "chart_points_min_across_settles": 1258,
+      "chart_points_max_across_settles": 1258,
+      "aas_wire_requests_densified": 4
+     },
+     "zoom": {
+      "steps": 40,
+      "p50_ms": 51.6,
+      "p95_ms": 69.8,
+      "mean_ms": 52.55,
+      "min_ms": 16.5,
+      "max_ms": 91.5,
+      "action_to_paint": {
+       "steps": 40,
+       "p50_ms": 15.8,
+       "p95_ms": 27.6,
+       "mean_ms": 17.56,
+       "min_ms": 13.6,
+       "max_ms": 29.8
+      }
+     },
+     "pan": {
+      "steps": 20,
+      "p50_ms": 39.6,
+      "p95_ms": 56.8,
+      "mean_ms": 42.89,
+      "min_ms": 34.1,
+      "max_ms": 61.1,
+      "action_to_paint": {
+       "steps": 20,
+       "p50_ms": 15.1,
+       "p95_ms": 17.6,
+       "mean_ms": 15.37,
+       "min_ms": 14,
+       "max_ms": 20.6
+      }
+     },
+     "combined": {
+      "steps": 60,
+      "p50_ms": 48.9,
+      "p95_ms": 69.6,
+      "mean_ms": 49.33,
+      "min_ms": 16.5,
+      "max_ms": 91.5,
+      "action_to_paint": {
+       "steps": 60,
+       "p50_ms": 15.4,
+       "p95_ms": 25.3,
+       "mean_ms": 16.83,
+       "min_ms": 13.6,
+       "max_ms": 29.8
+      }
+     }
+    }
+   ],
+   "combined_p95_ms_runs": [
+    61.7,
+    65.6,
+    69.6
+   ],
+   "combined_p50_ms_runs": [
+    48.4,
+    50.3,
+    48.9
+   ]
+  }
+ },
+ "verdict": "GREEN",
+ "verdict_text": "uPlot worst-run p95 5.3 ms <= 16.7 ms \u2014 the 60 fps bar holds; U2b target met",
+ "ssr_floor_reference": {
+  "scale": "1200x18",
+  "p50_ms": 20.4,
+  "p95_ms": 32.8,
+  "note": "Node-SSR action-only ECharts pipeline floor (no browser paint); pre-registered in docs/INSTRUMENT_ARCHITECTURE.md \u00a74a"
+ },
+ "history": [
+  {
+   "generated_at": "2026-07-31T20:00:12.367427+00:00",
+   "harness": "tests/test_gesture_gate.py",
+   "gate": {
     "green_p95_ms": 16.7,
     "amber_p95_ms": 33.0,
     "source": "docs/INSTRUMENT_ARCHITECTURE.md \u00a75 trigger 1"
-  },
-  "environment": {
+   },
+   "environment": {
     "platform": "Linux-6.8.0-110-generic-x86_64-with-glibc2.39",
     "headless_chromium": true,
     "viewport": {
-      "width": 1280,
-      "height": 800
+     "width": 1280,
+     "height": 800
     },
     "note": "in-page performance.now() timing; CPU-raster canvas (headless, no GPU)"
-  },
-  "scale": {
+   },
+   "scale": {
     "strip_payload_buckets": 1258,
     "strip_series": 16,
     "chart_data_series": 16,
@@ -23,16 +466,16 @@
     "chart_points_min_across_settles": 1258,
     "chart_points_max_across_settles": 1258,
     "aas_wire_requests_densified": 5
-  },
-  "method": {
+   },
+   "method": {
     "t0": "zrender input event arrival (wheel / drag mousemove)",
     "paint": "finished",
     "inter_step_ms": 30,
     "burst_len": 10,
     "settle_pause_ms": 500,
     "secondary": "action_to_paint = 'datazoom' action -> paint (excludes input throttle; SSR-floor-comparable plus paint)"
-  },
-  "zoom": {
+   },
+   "zoom": {
     "steps": 40,
     "p50_ms": 62.1,
     "p95_ms": 121.5,
@@ -40,15 +483,15 @@
     "min_ms": 28.8,
     "max_ms": 159.0,
     "action_to_paint": {
-      "steps": 40,
-      "p50_ms": 28.9,
-      "p95_ms": 43.7,
-      "mean_ms": 29.0,
-      "min_ms": 14.6,
-      "max_ms": 54.5
+     "steps": 40,
+     "p50_ms": 28.9,
+     "p95_ms": 43.7,
+     "mean_ms": 29.0,
+     "min_ms": 14.6,
+     "max_ms": 54.5
     }
-  },
-  "pan": {
+   },
+   "pan": {
     "steps": 20,
     "p50_ms": 40.2,
     "p95_ms": 69.7,
@@ -56,15 +499,15 @@
     "min_ms": 34.7,
     "max_ms": 76.3,
     "action_to_paint": {
-      "steps": 20,
-      "p50_ms": 17.5,
-      "p95_ms": 29.5,
-      "mean_ms": 19.85,
-      "min_ms": 13.6,
-      "max_ms": 30.1
+     "steps": 20,
+     "p50_ms": 17.5,
+     "p95_ms": 29.5,
+     "mean_ms": 19.85,
+     "min_ms": 13.6,
+     "max_ms": 30.1
     }
-  },
-  "combined": {
+   },
+   "combined": {
     "steps": 60,
     "p50_ms": 58.4,
     "p95_ms": 111.4,
@@ -72,21 +515,24 @@
     "min_ms": 28.8,
     "max_ms": 159.0,
     "action_to_paint": {
-      "steps": 60,
-      "p50_ms": 26.4,
-      "p95_ms": 43.3,
-      "mean_ms": 25.95,
-      "min_ms": 13.6,
-      "max_ms": 54.5
+     "steps": 60,
+     "p50_ms": 26.4,
+     "p95_ms": 43.3,
+     "mean_ms": 25.95,
+     "min_ms": 13.6,
+     "max_ms": 54.5
     }
-  },
-  "verdict": "RED",
-  "verdict_text": "p95 111.4 ms > 33.0 ms \u2014 begin path (b) (uPlot AAS instrument pane) immediately",
-  "ssr_floor_reference": {
+   },
+   "verdict": "RED",
+   "verdict_text": "p95 111.4 ms > 33.0 ms \u2014 begin path (b) (uPlot AAS instrument pane) immediately",
+   "ssr_floor_reference": {
     "scale": "1200x18",
     "p50_ms": 20.4,
     "p95_ms": 32.8,
     "note": "Node-SSR action-only pipeline floor (no browser paint); pre-registered in docs/INSTRUMENT_ARCHITECTURE.md \u00a74a"
-  },
-  "mechanics_failures": []
+   },
+   "mechanics_failures": []
+  }
+ ],
+ "mechanics_failures": []
 }
