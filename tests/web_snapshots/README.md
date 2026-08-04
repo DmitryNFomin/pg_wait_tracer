@@ -163,3 +163,16 @@ exactly these cells may show sub-0.011 drift locally; either install the
 pinned playwright (1.60.0) locally or exclude them with PGWT_SNAP_ONLY
 when iterating. The panes and the remaining gallery cells match on both
 chromium builds.
+
+### 2026-08-04 — six tight-gate gallery cells re-arbitrated from CI chromium (U2b)
+
+U2b's style additions shifted the four previously CI-authoritative cells by
+~1px on CI, and the two live-tick cells (echarts + uplot twins) carry the
+usual cross-chromium drift from local generation. All six regenerated on
+CI's own chromium via the update_snapshots dispatch (run 30915354745):
+`gallery/{timeline-single-point,histogram-dense,concurrency-dense-bursts,
+table-configs-queries-hostile-sql,aas-live-ticks-tick4,
+uplot-aas-live-ticks-tick4}.png`. These six are CI-authoritative; local
+runs on the unpinned playwright may show sub-0.014 drift on exactly these
+cells (use PGWT_SNAP_ONLY to exclude them when iterating, or install the
+pinned playwright).
