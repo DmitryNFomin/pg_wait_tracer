@@ -2577,6 +2577,9 @@ static void handle_transitions(struct pgwt_server *srv, struct pgwt_request *req
         cJSON *node = cJSON_CreateObject();
         cJSON_AddStringToObject(node, "name", node_ht[i].name);
         cJSON_AddNumberToObject(node, "total_ms", node_ht[i].total_ms);
+        /* U2 / P3 wire 5: the UI's DFG node click pivots on the event —
+         * emit the id the table is already keyed by (0 = CPU*). */
+        cJSON_AddNumberToObject(node, "event_id", node_ht[i].event_id);
         /* Extract wait class for coloring */
         const char *colon = strchr(node_ht[i].name, ':');
         if (colon) {

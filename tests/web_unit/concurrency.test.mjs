@@ -102,6 +102,32 @@ test('tables HTML: top-peaks + burst sections, PID truncation at 8', () => {
     assert.ok(html.includes('1, 2, 3, 4, 5, 6, 7, 8...'));
 });
 
+/* U2 / P3 wire 2: peak + burst rows are zoom intents. The pure builder embeds
+ * the target window (ts ± 5×bucket_ns, ns) as data-from/data-to; the view
+ * delegates a click straight into ctx.onZoom. Bursts are 4+ sessions in 10ms —
+ * unreachable by drag-select at ~1s/pixel, so the row is the only way in. */
+test('rows carry the ±5-bucket zoom window as data-from/data-to', () => {
+    const m = buildConcurrencyOption(data());
+    const html = buildConcurrencyTables(m);
+    // Burst at timestamp_ns 2500, bucket 1000 -> pad 5000 -> [-2500, 7500].
+    assert.ok(html.includes('data-from="-2500" data-to="7500"'));
+    // Top peak row t=2000 (max 8) -> [-3000, 7000].
+    assert.ok(html.includes('data-from="-3000" data-to="7000"'));
+    // Affordance: pointer cursor + .row-zoom hook + a title.
+    assert.ok(html.includes('class="row-zoom"'));
+    assert.ok(html.includes('cursor:pointer'));
+    assert.ok(html.includes('title="Zoom to'));
+});
+
+test('rows are inert (no zoom attributes) when bucket_ns is missing', () => {
+    // Without a bucket width there is no honest pad — emit plain rows rather
+    // than a zero-width zoom target.
+    const d = { ...data(), bucket_ns: undefined };
+    const html = buildConcurrencyTables(buildConcurrencyOption(d));
+    assert.ok(!html.includes('data-from'));
+    assert.ok(!html.includes('row-zoom'));
+});
+
 test('tables HTML: no bursts -> explicit "No burst events" line', () => {
     const m = buildConcurrencyOption({ ...data(), bursts: [] });
     const html = buildConcurrencyTables(m);

@@ -101,6 +101,24 @@ export const AREA_FILL_ALPHA = 0.85;
 /* N-CPUs reference line color (same as the ECharts markLine). */
 export const NCPUS_COLOR = '#E53935';
 
+/* ── y-axis policy (Track U Phase U2, review P7) ─────────────────────────────
+ * yMax = max(maxAas*1.2, min(numCpus*1.5, maxAas*4), 1) — the capacity
+ * reference may lift the axis to at most 4x the data peak, so a 64-vCPU host
+ * at AAS≈3 no longer flattens the stack into a sliver under the red line.
+ * When the cap puts the line off-scale, overlayGeometry (given the live y
+ * scale top) swaps it for an explicit 'ncpus-offscale' top-edge affordance —
+ * the reference never silently vanishes. Duplicated verbatim in
+ * lib/builders/aas.js (drop-in interchangeable builders); the parity test
+ * pins both. Hysteresis (grow now, shrink after 3 stable ticks) lives at the
+ * VIEW level (views/active.js), never here — builders stay pure per-payload. */
+function policyYMax(maxAas, numCpus) {
+    return Math.max(
+        maxAas * 1.2,
+        numCpus > 0 ? Math.min(numCpus * 1.5, maxAas * 4) : 0,
+        1
+    );
+}
+
 /* 'rgb(r,g,b)' -> 'rgba(r,g,b,a)'. Non-rgb() strings pass through untouched
  * (the color service only ever emits rgb(), pinned by its tests). */
 export function withAlpha(color, alpha) {
@@ -146,6 +164,12 @@ function identitySeries(data) {
         return {
             names: order.map(o => o.name),
             colors: order.map(o => eventColor(null, o.name)),
+            // U2 (P3 wire 1): per-series event_id for click→drill (null when
+            // the server/fixture omits it) — same contract as buildAasOption.
+            ids: order.map(o => {
+                const id = data.series[o.idx] && data.series[o.idx].event_id;
+                return id != null ? id : null;
+            }),
             values: order.map(o =>
                 buckets.map(b => +(b.aas[o.idx] || 0).toFixed(4))),
         };
@@ -153,6 +177,7 @@ function identitySeries(data) {
     return {
         names: WAIT_CLASSES.map(wc => wc.label),
         colors: WAIT_CLASSES.map(c => c.color),
+        ids: WAIT_CLASSES.map(() => null),   // class drills go by name
         values: WAIT_CLASSES.map(wc =>
             buckets.map(b => +(b[wc.key] || 0).toFixed(4))),
     };
@@ -232,7 +257,7 @@ export function buildUplotSpec(data, opts) {
     const bns = (data && data.bucket_ns) || 0;
     const buckets = (data && data.buckets) || [];
 
-    const { names, colors, values } = identitySeries(data);
+    const { names, colors, ids, values } = identitySeries(data);
     const hiddenSet = new Set(opts.hiddenNames || []);
     const hidden = names.map(n => hiddenSet.has(n));
 
@@ -241,11 +266,7 @@ export function buildUplotSpec(data, opts) {
     const alignedData = [xs].concat(stacked);
 
     const maxAas = (data && data.max_aas) || 0;
-    const yMax = Math.max(
-        maxAas * 1.2,
-        numCpus > 0 ? numCpus * 1.5 : 0,
-        1
-    );
+    const yMax = policyYMax(maxAas, numCpus);
 
     // Window / axis extents (ns) — the same derivation as buildAasOption:
     // win falls back to the bucket span (Node tests, degenerate callers);
@@ -348,6 +369,13 @@ export function buildUplotSpec(data, opts) {
         stackIdxs,
         seriesNames: names,
         seriesColors: colors,
+        // U2 (P3 wire 1): parallel to seriesNames — event_id per series in
+        // event mode, nulls in class mode; plus which mode this spec is in.
+        // hitTest gives seriesIdx; seriesIds[seriesIdx-1] + breakdown resolve
+        // the click to a drill intent (parity-pinned vs buildAasOption).
+        seriesIds: ids,
+        breakdown: (data && data.breakdown === 'events' && data.series)
+            ? 'events' : 'classes',
         rawValues: values,
         overlays: overlayGeometry(data, opts, null),
         xWindow,
@@ -426,20 +454,30 @@ export function hitTest(spec, xMs, yAas) {
  * it nor stretch it over data it does not cover.
  *
  *   data, opts    exactly buildUplotSpec's inputs
- *   scaleWindow   OPTIONAL {min,max} in ms — the current x scale range.
+ *   scaleWindow   OPTIONAL {min,max} in ms — the current x scale range —
+ *                 plus an optional yMax: the CURRENT y scale top (the view
+ *                 passes u.scales.y.max, so the decision below respects the
+ *                 view-level yMax hysteresis, not just the per-payload
+ *                 policy).
  *                 When given: rects are CLAMPED to it (visual clip) and
  *                 dropped when fully outside; vlines outside it are DROPPED,
  *                 never clamped — dragging the escalation edge into view
- *                 would fabricate its position. When null: absolute,
- *                 viewport-independent geometry (what spec.overlays holds;
- *                 the painters also clip to the plot box, so either form
- *                 renders correctly).
+ *                 would fabricate its position; and an N-CPUs line above
+ *                 yMax becomes an 'ncpus-offscale' TOP-EDGE affordance
+ *                 ("N CPUs ↑") instead of a silently dropped reference
+ *                 (P7 — the capacity reference must never vanish; drawing
+ *                 the line itself at the rim would lie about where capacity
+ *                 sits, so only the labeled arrow chip is painted). When
+ *                 null: absolute, viewport-independent geometry (what
+ *                 spec.overlays holds; the painters also clip to the plot
+ *                 box, so either form renders correctly).
  *
  * Returns {
  *   rects:  [{ kind:'sampled'|'mixed'|'escalation', x0, x1 (ms),
  *              fill, stroke, dash }],          // full plot height
  *   vlines: [{ kind:'escalation-edge', x (ms), color, label }],
- *   hlines: [{ kind:'ncpus', y (AAS), color, dash, label }],
+ *   hlines: [{ kind:'ncpus', y (AAS), color, dash, label } |
+ *            { kind:'ncpus-offscale', y (= scale top), color, label }],
  * }
  *
  * Whole-response fidelity bands anchor to axisRange (opts.axis ∪ win — the
@@ -531,7 +569,25 @@ export function overlayGeometry(data, opts, scaleWindow) {
         const kept = vlines.filter(l => l.x >= lo && l.x <= hi);
         vlines.length = 0;
         vlines.push(...kept);
-        // hlines are y-space: unaffected by the x viewport.
+        // hlines are y-space: unaffected by the x viewport — EXCEPT the P7
+        // off-scale transform: with the CURRENT y scale top supplied, an
+        // N-CPUs reference above it turns into the explicit top-edge
+        // affordance (label-only; the painter draws no line for it — a line
+        // at the rim would claim capacity sits there).
+        if (scaleWindow.yMax != null) {
+            for (let i = 0; i < hlines.length; i++) {
+                const l = hlines[i];
+                if (l.kind === 'ncpus' && l.y > scaleWindow.yMax) {
+                    hlines[i] = {
+                        kind: 'ncpus-offscale',
+                        y: scaleWindow.yMax,
+                        color: l.color,
+                        dash: null,
+                        label: opts.numCpus + ' CPUs ↑',
+                    };
+                }
+            }
+        }
     }
 
     return { rects, vlines, hlines };
@@ -628,14 +684,19 @@ export function drawOverlayLines(u, geo) {
     for (const l of hlines) {
         const y = u.valToPos(l.y, 'y', true);
         if (y < top || y > top + height) continue;
-        ctx.strokeStyle = l.color;
-        ctx.lineWidth = dpr;
-        ctx.setLineDash((l.dash || []).map(d => d * dpr));
-        ctx.beginPath();
-        ctx.moveTo(left, y);
-        ctx.lineTo(left + width, y);
-        ctx.stroke();
-        ctx.setLineDash([]);
+        // P7 off-scale affordance: label chip only, at the top edge — never a
+        // line (the reference is ABOVE the scale; a rim line would lie).
+        const lineless = l.kind === 'ncpus-offscale';
+        if (!lineless) {
+            ctx.strokeStyle = l.color;
+            ctx.lineWidth = dpr;
+            ctx.setLineDash((l.dash || []).map(d => d * dpr));
+            ctx.beginPath();
+            ctx.moveTo(left, y);
+            ctx.lineTo(left + width, y);
+            ctx.stroke();
+            ctx.setLineDash([]);
+        }
         if (l.label) {
             const w = ctx.measureText(l.label).width + 2 * pad;
             const lh = 12 * dpr + 2 * pad;

@@ -90,14 +90,30 @@ export function buildConcurrencyOption(data) {
     return { option, hasData: true, topPeaks, bursts: data.bursts || [], bucketNs: bns };
 }
 
-/* PURE: the two HTML tables under the chart. Exported for testing — it returns
- * an HTML string identical to the old adapter's #burst-table content. */
+/* P3 wire 2: the row's zoom-intent attributes. Bursts are 4+ sessions inside
+ * 10ms — at a 15-min window drag-select resolves ~1s/pixel, so the moment is
+ * genuinely unreachable by gesture; the row IS the drill. The target window
+ * is ts ± 5 buckets (the burst centered with context on both sides); the ns
+ * values ride as data attributes the view feeds straight to ctx.onZoom.
+ * cursor/title are the affordance (rows also carry .row-zoom for styling). */
+function zoomAttrs(tsNs, bucketNs) {
+    const pad = 5 * (bucketNs || 0);
+    if (!(pad > 0) || !(tsNs > 0)) return '';
+    return ' class="row-zoom" data-from="' + (tsNs - pad) + '" data-to="' +
+        (tsNs + pad) + '" style="cursor:pointer"' +
+        ' title="Zoom to ±5 buckets around this moment"';
+}
+
+/* PURE: the two HTML tables under the chart. Exported for testing — same
+ * content as the old adapter's #burst-table, plus the wire-2 zoom attributes
+ * on every peak/burst row. */
 export function buildConcurrencyTables(model) {
     let html = '<h3 style="color:#ccc;margin:10px 0 5px">Top Peak Moments</h3>' +
         '<table class="data-table"><thead><tr>' +
         '<th>Time</th><th>Wait Event</th><th>Simultaneous Sessions</th></tr></thead><tbody>';
     model.topPeaks.forEach(p => {
-        html += '<tr><td>' + fmtTimeMs(p.t_ms) + '</td><td>' + esc(p.event || 'CPU*') +
+        html += '<tr' + zoomAttrs(p.t, model.bucketNs) + '><td>' + fmtTimeMs(p.t_ms) +
+            '</td><td>' + esc(p.event || 'CPU*') +
             '</td><td><b>' + p.max + '</b></td></tr>';
     });
     html += '</tbody></table>';
@@ -111,7 +127,8 @@ export function buildConcurrencyTables(model) {
             const time = fmtTimeMs(b.timestamp_ms);
             const pids = (b.pids || []).slice(0, 8).join(', ') +
                 (b.pids && b.pids.length > 8 ? '...' : '');
-            html += '<tr><td>' + time + '</td><td>' + esc(b.event) + '</td><td><b>' +
+            html += '<tr' + zoomAttrs(b.timestamp_ns, model.bucketNs) + '><td>' + time +
+                '</td><td>' + esc(b.event) + '</td><td><b>' +
                 b.sessions + '</b></td><td>' + pids + '</td></tr>';
         });
         html += '</tbody></table>';

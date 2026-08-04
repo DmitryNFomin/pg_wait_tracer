@@ -5,7 +5,11 @@
  * strings), so buildTableModel() over a config is Node-testable. onClick here
  * is a *descriptor* — it returns the drill intent { filterKey, filterValue,
  * label } rather than performing navigation, keeping the config free of app
- * wiring. The view translates the intent into filters.drill().
+ * wiring. The view translates the intent into filters.drill(). A column may
+ * additionally carry `intent(row) -> intent|null` — a per-CELL drill
+ * descriptor (U2 wire 6: the events percentile cells emit the
+ * 'histogram-event' pivot); lib/table.js marks such cells drillable and the
+ * view routes them through ctx.onDrill like every other intent.
  *
  * Used by the migrated overview, events, sessions and queries views (the
  * drill-down tables all share lib/table.js via these configs).
@@ -19,6 +23,34 @@ import { dot, pctBar, stackedBar, eventStackedBar } from '../table.js';
 
 const _dot = (name) => dot(name, classColor);
 
+/* U2 wire 6 (review P3): the events table's percentile cells drill into the
+ * latency-distribution view for THAT event. The intent is the app's pivot
+ * shape ({pivot:'histogram-event'} + a normal event_id filter drill); it is
+ * null — cell not drillable — when the value itself is null (sampled-only
+ * row: no exact durations, no distribution to show, FID-3) or for CPU*
+ * (event_id 0 is not a wait event; the histogram is a wait-latency view and
+ * an event_id=0 filter means "unfiltered" server-side). */
+function histogramIntent(key) {
+    return (r) => {
+        if (!(r.event_id > 0) || r[key] == null) return null;
+        return { pivot: 'histogram-event', filterKey: 'event_id',
+                 filterValue: r.event_id, label: r.name };
+    };
+}
+
+/* Percentile cell: the value, wrapped in a visible drill affordance when the
+ * cell is drillable (same predicate as histogramIntent). */
+function pctlCell(key) {
+    const intent = histogramIntent(key);
+    return (r) => {
+        const v = fmtUs(r[key]);
+        if (!intent(r)) return v;
+        return '<span class="cell-drill" style="border-bottom:1px dotted #778"' +
+               ' title="' + esc('View the latency distribution of ' + r.name) +
+               '">' + v + '</span>';
+    };
+}
+
 export const overviewConfig = {
     columns: [
         { key: 'name', label: 'Stat Name', format: (r) => {
@@ -28,7 +60,12 @@ export const overviewConfig = {
         { key: 'ms', label: 'Time', cls: 'num', format: (r) => fmtMs(r.ms) },
         { key: 'pct', label: '%DB Time', cls: 'num', format: (r) => {
             if (r.indent === 0 && r.name === 'DB Time') return fmtPct(r.pct);
-            const color = classColor(r.name) || '#4fc3f7';
+            /* U2 (U1-review F4): event rows (indent 2) take the event's
+             * identity tint so "same event = same color" holds against the
+             * AAS breakdown and the wait-profile bars; class rows (indent 1)
+             * keep the flat class hue — they ARE the class. */
+            const color = (r.indent >= 2 ? eventColor(null, r.name)
+                                         : classColor(r.name)) || '#4fc3f7';
             return pctBar(r.pct, color);
         }},
         { key: 'aas', label: 'AAS', cls: 'num', format: (r) => fmtAas(r.aas) },
@@ -52,16 +89,20 @@ export const eventsConfig = {
         { key: 'count', label: 'Count', cls: 'num', format: (r) => fmtCount(r.count) },
         { key: 'total_ms', label: 'Total', cls: 'num', format: (r) => fmtMs(r.total_ms) },
         { key: 'avg_us', label: 'Avg', cls: 'num', format: (r) => fmtUs(r.avg_us) },
-        { key: 'p50_us', label: 'P50', cls: 'num', format: (r) => fmtUs(r.p50_us) },
-        { key: 'p95_us', label: 'P95', cls: 'num', format: (r) => fmtUs(r.p95_us) },
-        { key: 'p99_us', label: 'P99', cls: 'num', format: (r) => fmtUs(r.p99_us) },
+        { key: 'p50_us', label: 'P50', cls: 'num', format: pctlCell('p50_us'),
+          intent: histogramIntent('p50_us') },
+        { key: 'p95_us', label: 'P95', cls: 'num', format: pctlCell('p95_us'),
+          intent: histogramIntent('p95_us') },
+        { key: 'p99_us', label: 'P99', cls: 'num', format: pctlCell('p99_us'),
+          intent: histogramIntent('p99_us') },
         { key: 'max_us', label: 'Max', cls: 'num', format: (r) => fmtUs(r.max_us) },
         { key: 'pct', label: '%DB', cls: 'num', format: (r) => {
             /* Idle-but-visible events (e.g. Client:ClientRead) have time but
              * no meaningful share of DB Time; the server sends pct=null so we
              * render "—" instead of a bogus bar. */
             if (r.pct == null) return '<span style="color:#555">—</span>';
-            const color = classColor(r.name) || '#4fc3f7';
+            /* U2 (U1-review F4): identity tint, not the flat class hue. */
+            const color = eventColor(null, r.name) || '#4fc3f7';
             return pctBar(r.pct, color);
         }},
         { key: 'aas', label: 'AAS', cls: 'num', format: (r) => fmtAas(r.aas) },

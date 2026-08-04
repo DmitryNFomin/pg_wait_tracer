@@ -705,11 +705,13 @@ def _handle_request_inner(cmd, req_id, msg):
         return {"id": req_id, "events": [], "pids": [], "truncated": False, "total_count": 0}
 
     if cmd == "transitions":
+        # event_id mirrors server.c's DFG node JSON (U2 / P3 wire 5: node
+        # click pivots on the event; 0 = the CPU* pseudo-node).
         return {"id": req_id, "total": 1500, "nodes": [
-            {"name": "CPU*", "total_ms": 4800, "class": "CPU"},
-            {"name": "IO:DataFileRead", "total_ms": 2100, "class": "IO"},
-            {"name": "LWLock:WALInsert", "total_ms": 900, "class": "LWLock"},
-            {"name": "IO:WalSync", "total_ms": 800, "class": "IO"},
+            {"name": "CPU*", "total_ms": 4800, "class": "CPU", "event_id": 0},
+            {"name": "IO:DataFileRead", "total_ms": 2100, "class": "IO", "event_id": 0x01000015},
+            {"name": "LWLock:WALInsert", "total_ms": 900, "class": "LWLock", "event_id": 0x04000007},
+            {"name": "IO:WalSync", "total_ms": 800, "class": "IO", "event_id": 0x0100004e},
         ], "links": [
             {"source": "CPU*", "target": "IO:DataFileRead", "value": 500, "duration_ms": 2500.0},
             {"source": "IO:DataFileRead", "target": "CPU*", "value": 480, "duration_ms": 1920.0},

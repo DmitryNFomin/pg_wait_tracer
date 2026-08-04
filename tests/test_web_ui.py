@@ -12,6 +12,10 @@ Starts mock_server.py, launches headless Chromium, and exercises:
   8. Histogram and Timeline tabs
   9. Time picker
  10. Reconnection behavior
+ 11. Track U U2 OEM loop: cross-view drill wires (AAS band click, burst rows,
+     timeline drag-zoom, heatmap cells, DFG nodes, percentile cells), the
+     FilterStack projections (filter-bar chips + tab badges), and the URL
+     hash state (deep-link restore + live-means-NOW re-anchor)
 
 Usage: python3 tests/test_web_ui.py
   (No root, no PG, no SSH needed — uses mock_server.py)
@@ -668,6 +672,22 @@ def test_transitions_tab(page):
     """)
     check(chart_status.startswith("ok"),
           f"Transitions DFG rendered with data ({chart_status})")
+
+    # Resize storms use the SAME rAF layout coalescer as the simplify slider:
+    # one chart resize + one setOption for a whole frame, not one full DFG
+    # layout per DOM resize event.
+    page.evaluate("""() => {
+        const c = echarts.getInstanceByDom(document.getElementById('dfg-container'));
+        window.__dfgResizeCounts = { resize: 0, layout: 0 };
+        const resize = c.resize.bind(c), setOption = c.setOption.bind(c);
+        c.resize = (...args) => { window.__dfgResizeCounts.resize++; return resize(...args); };
+        c.setOption = (...args) => { window.__dfgResizeCounts.layout++; return setOption(...args); };
+        for (let i = 0; i < 20; i++) window.dispatchEvent(new Event('resize'));
+    }""")
+    page.wait_for_timeout(100)
+    resize_counts = page.evaluate("window.__dfgResizeCounts")
+    check(resize_counts == {"resize": 1, "layout": 1},
+          f"DFG resize storm coalesced to one layout ({resize_counts})")
 
     # Variant sections (served by the mock's `variants` command) render below
     check("Execution" in container_text or "Variant" in container_text,
@@ -1870,6 +1890,749 @@ def test_command_error_card(page):
 test_command_error_card.expect_pgwt = True
 
 
+# ── Track U Phase U2: the OEM investigation loop ─────────────────────────────
+# The seven cross-view wires (docs/VISUALIZATION_REVIEW.md P3), the FilterStack
+# projections (filter bar / tab badges), and the URL hash state (P9). One
+# focused test per wire, all against the deterministic mock dataset.
+
+def _wait_tab(page, tab, timeout=5000):
+    """Wait for the app's active tab (via the __pgwt debug surface); returns
+    False on timeout instead of throwing so the caller can check() it and the
+    remaining assertions still run."""
+    try:
+        page.wait_for_function("t => window.__pgwt.activeTab === t",
+                               arg=tab, timeout=timeout)
+        return True
+    except Exception:
+        return False
+
+
+def _aas_plot_box(page):
+    """The uPlot plot-area (u-over) rect in page coordinates."""
+    return page.evaluate("""() => {
+        const el = document.querySelector('.aas-uplot-host .u-over');
+        const r = el.getBoundingClientRect();
+        return { x: r.left, y: r.top, w: r.width, h: r.height };
+    }""")
+
+
+def test_aas_click_drill(page):
+    """U2.a (P3 wire 1): a plain CLICK on an AAS band drills into that band
+    under the DEFAULT uPlot renderer — click → pure hitTest → class drill
+    intent → Events tab + FilterStack entry. The click gate (views/active.js
+    makeClickGate) defers the action behind the 550 ms dblclick window and
+    treats >5 px movement as the brush's; this pins the happy path
+    end-to-end. Deterministic hit: 88% down the plot ≈ 0.7 AAS on the P7
+    policy axis (yMax 6 for the mock), inside the bottom CPU band everywhere
+    (mock cpu ≥ 1.2 in every bucket)."""
+    print("--- Test U2.a: AAS Band Click -> Drill ---")
+
+    page.goto(MOCK_URL)
+    page.wait_for_selector("#status.connected", timeout=10000)
+    page.wait_for_timeout(1500)
+
+    dbg = page.evaluate("window.__pgwt.aasDebug()")
+    check(bool(dbg and dbg.get("mounted")), "uPlot pane mounted before click")
+
+    box = _aas_plot_box(page)
+    page.mouse.click(box["x"] + box["w"] * 0.5, box["y"] + box["h"] * 0.88)
+
+    # The drill is DEFERRED ~550 ms (dblclick discrimination), then pivots.
+    check(_wait_tab(page, "events"), "band click pivoted to the Events tab")
+    filters = page.evaluate("window.__pgwt.filters.filters")
+    check(filters.get("class") == "CPU",
+          f"class-mode band click drilled class=CPU (filters={filters})")
+    live_on = page.evaluate(
+        "document.getElementById('live-btn').classList.contains('active')")
+    check(not live_on, "drill paused live mode (P4)")
+    breadcrumb = page.text_content("#breadcrumb") or ""
+    check("CPU" in breadcrumb,
+          f"breadcrumb shows the drilled class ('{breadcrumb.strip()[:40]}')")
+    chips = page.query_selector_all("#filter-bar .fchip")
+    check(len(chips) == 1, f"filter bar shows 1 chip after the drill ({len(chips)})")
+    # The Events table is now the CPU lens (mock filters class=CPU → CPU* only).
+    rows = page.query_selector_all("#table-container table tbody tr")
+    check(len(rows) == 1 and "CPU*" in rows[0].text_content(),
+          f"Events table filtered to the drilled class ({len(rows)} rows)")
+
+
+def test_burst_row_zoom(page):
+    """U2.b (P3 wire 2): a concurrency peak/burst row is a zoom intent — the
+    pure builder embeds data-from/data-to = ts ± 5 buckets and a row click
+    emits the 'burst-zoom' pivot: a pure time jump (zoomTo), no filter, the
+    current tab kept."""
+    print("--- Test U2.b: Burst Row -> Zoom ---")
+
+    page.goto(MOCK_URL)
+    page.wait_for_selector("#status.connected", timeout=10000)
+    page.click(".tab[data-tab='concurrency']")     # pausesLive view
+    page.wait_for_timeout(3000)
+
+    row = page.query_selector("#burst-table tr.row-zoom[data-from]")
+    check(row is not None, "burst/peak rows carry the zoom-intent attributes")
+    if not row:
+        for _ in range(4):
+            check(False, "(skipped: no zoomable row)")
+        return
+    row.click()
+    page.wait_for_timeout(800)
+
+    # The window must equal the row's own ns range EXACTLY — compared in JS so
+    # both sides go through the identical Number() float64 conversion.
+    zoomed = page.evaluate("""() => {
+        const tr = document.querySelector('#burst-table tr.row-zoom[data-from]');
+        return { okFrom: window.__pgwt.timeRange.from === Number(tr.dataset.from),
+                 okTo: window.__pgwt.timeRange.to === Number(tr.dataset.to),
+                 spanS: (Number(tr.dataset.to) - Number(tr.dataset.from)) / 1e9 };
+    }""")
+    check(zoomed["okFrom"] and zoomed["okTo"],
+          f"row click zoomed to exactly data-from..data-to "
+          f"(±5-bucket window, span={zoomed['spanS']:.0f}s)")
+    check(page.evaluate("window.__pgwt.activeTab") == "concurrency",
+          "burst-zoom keeps the current tab (pure time jump)")
+    filters = page.evaluate("window.__pgwt.filters.filters")
+    check(len(filters) == 0, f"burst-zoom applied no filter ({filters})")
+    # zoomTo semantics: the jump is recorded, so zoom-out can back out of it.
+    hist = page.evaluate("window.__pgwt.timeRange.zoomHistory.length")
+    check(hist >= 1, f"zoom recorded in history (len={hist})")
+
+
+def test_timeline_drag_zoom(page):
+    """U2.c (P3 wire 3): the session timeline is drag-zoomable — a plain drag
+    on the chart narrows the window (shared selection overlay → ctx.onZoom →
+    zoomTo) and REFETCHES session_timeline: the server coalesces/truncates
+    per window, so detail genuinely needs the round trip (the roadmap says do
+    not camera-ize the timeline)."""
+    print("--- Test U2.c: Timeline Drag-Zoom ---")
+
+    page.goto(MOCK_URL)
+    page.wait_for_selector("#status.connected", timeout=10000)
+    page.click(".tab[data-tab='sessions']")
+    page.wait_for_timeout(1000)
+    page.click("#table-container table tbody tr.clickable")
+    page.wait_for_timeout(1500)
+    check(page.evaluate("window.__pgwt.activeTab") == "timeline",
+          "drilled from Sessions into the timeline")
+
+    # Wire-tap sends so the refetch is provable (house idiom).
+    page.evaluate("""() => {
+        window.__wsMsgLog = [];
+        const ws = window.__pgwt.transport.ws;
+        const origSend = ws.send.bind(ws);
+        ws.send = (data) => {
+            window.__wsMsgLog.push(JSON.parse(data));
+            return origSend(data);
+        };
+    }""")
+    win_before = page.evaluate(
+        "() => [window.__pgwt.timeRange.from, window.__pgwt.timeRange.to]")
+
+    # P5 (U2): the chart INSTANCE and its host node must survive the refetch.
+    # This view was P5's first-named symptom — it ran
+    # dispose/echarts.init/setOption(_, true) on EVERY mount, so each 5 s tick
+    # and each of its own zoom refetches flashed a teardown and dropped the
+    # open tooltip/hover state. Stamp the node and record the ECharts instance
+    # id now; both must be IDENTICAL after the drag-zoom's remount.
+    life_before = page.evaluate("""() => {
+        const host = document.getElementById('timeline-chart');
+        host.dataset.pgwtLifecycleStamp = 'pre-zoom';
+        const inst = window.echarts.getInstanceByDom(host);
+        return { id: inst ? inst.id : null, h: host.style.height };
+    }""")
+    check(life_before["id"] is not None, "timeline chart instance is resolvable")
+
+    box = page.query_selector("#timeline-chart").bounding_box()
+    y = box["y"] + box["height"] * 0.5
+    page.mouse.move(box["x"] + box["width"] * 0.35, y)
+    page.mouse.down()
+    page.mouse.move(box["x"] + box["width"] * 0.65, y, steps=6)
+    page.mouse.up()
+    page.wait_for_timeout(1200)
+
+    win_after = page.evaluate(
+        "() => [window.__pgwt.timeRange.from, window.__pgwt.timeRange.to]")
+    span_before = win_before[1] - win_before[0]
+    span_after = win_after[1] - win_after[0]
+    check(0 < span_after < span_before * 0.6,
+          f"drag narrowed the window ({span_before / 1e9:.0f}s -> "
+          f"{span_after / 1e9:.0f}s)")
+    check(win_after[0] >= win_before[0] - 1e6 and
+          win_after[1] <= win_before[1] + 1e6,
+          f"zoomed window is a sub-range of the old ({win_before} -> {win_after})")
+    cmds = [m.get("cmd") for m in page.evaluate("window.__wsMsgLog")]
+    check(cmds.count("session_timeline") == 1,
+          f"drag-zoom refetched the timeline exactly once (cmds={cmds})")
+
+    life_after = page.evaluate("""() => {
+        const host = document.getElementById('timeline-chart');
+        const inst = window.echarts.getInstanceByDom(host);
+        return { id: inst ? inst.id : null,
+                 stamp: host.dataset.pgwtLifecycleStamp || null,
+                 h: host.style.height,
+                 banner: !!document.getElementById('timeline-banner') };
+    }""")
+    check(life_after["stamp"] == "pre-zoom",
+          "P5: the timeline chart HOST node survived the refetch remount")
+    check(life_after["id"] == life_before["id"],
+          f"P5: the ECharts instance was REUSED, not disposed/re-init "
+          f"({life_before['id']} -> {life_after['id']})")
+    check(life_after["banner"],
+          "P5: the stable shell keeps a banner slot above the chart")
+
+
+def test_heatmap_cell_drill(page):
+    """U2.d (P3 wire 4 / P8): a heatmap cell click emits the 'heatmap-cell'
+    pivot — a TIME-bucket isolate (zoomTo the cell's bucket window) landing
+    on the Queries tab ("which queries drove this event, then"). The cell's
+    event/class scope already lives in the FilterStack via the dropdown
+    write-through, so the intent carries NO duplicate filter drill."""
+    print("--- Test U2.d: Heatmap Cell -> Drill ---")
+
+    page.goto(MOCK_URL)
+    page.wait_for_selector("#status.connected", timeout=10000)
+    page.click("#live-btn")   # stop live so the heatmap paint is stable
+    page.wait_for_timeout(300)
+    page.click(".tab[data-tab='histogram']")
+    page.wait_for_timeout(1500)
+
+    # Cell [30, 3] is the canned dataset's peak (count 5000). Resolve its
+    # pixel through the chart's own coordinate mapping and click it for real.
+    # convertToPixel is relative to the ECharts root (the container's CONTENT
+    # box — #heatmap-container has 10px/20px padding), so anchor on the
+    # canvas rect, not the container rect.
+    pt = page.evaluate("""() => {
+        const el = document.getElementById('heatmap-container');
+        const c = el && echarts.getInstanceByDom(el);
+        if (!c) return null;
+        const px = c.convertToPixel({ seriesIndex: 0 }, [30, 3]);
+        const r = el.querySelector('canvas').getBoundingClientRect();
+        return { x: r.left + px[0], y: r.top + px[1] };
+    }""")
+    check(pt is not None, "heatmap chart mounted (cell pixel resolved)")
+    if not pt:
+        for _ in range(3):
+            check(False, "(skipped: no heatmap)")
+        return
+    before_pivot = page.evaluate("""() => ({
+        hash: location.hash, tab: window.__pgwt.activeTab,
+        from: window.__pgwt.timeRange.from, to: window.__pgwt.timeRange.to })""")
+    page.mouse.click(pt["x"], pt["y"])
+    check(_wait_tab(page, "queries"),
+          "cell click pivoted to the Queries tab")
+
+    # times[30] = mock now - 1800 s; bucket_ns = 60 s (mock constants). Both
+    # bounds are exactly float64-representable, so equality is exact.
+    ok = page.evaluate("""() => {
+        const t0 = 1774000000000000000 - 1800 * 1e9;
+        return window.__pgwt.timeRange.from === t0 &&
+               window.__pgwt.timeRange.to === t0 + 60 * 1e9;
+    }""")
+    check(ok, "window zoomed to exactly the clicked cell's bucket")
+    filters = page.evaluate("window.__pgwt.filters.filters")
+    check(len(filters) == 0,
+          f"no duplicate filter drill (scope stays FilterStack-owned): {filters}")
+    # One Back must skip directly to the previously RENDERED histogram state.
+    # The old double-push landed on an invisible intermediate Queries entry.
+    page.evaluate("history.back()")
+    page.wait_for_function("""s =>
+        location.hash === s.hash && window.__pgwt.activeTab === s.tab &&
+        window.__pgwt.timeRange.from === s.from &&
+        window.__pgwt.timeRange.to === s.to
+    """, arg=before_pivot, timeout=5000)
+    check(page.evaluate("window.__pgwt.activeTab") == "histogram",
+          "one Back from a windowed pivot returned directly to Histogram")
+
+
+def test_dfg_node_drill(page):
+    """U2.e (P3 wire 5): a DFG node click emits the 'dfg-event' pivot carrying
+    the server-emitted event_id → the standard event drill (filter
+    {event_id} + Queries tab). The CPU* pseudo-node (event_id 0) refuses to
+    pivot — event_id 0 is not a wait event."""
+    print("--- Test U2.e: DFG Node -> Drill ---")
+
+    page.goto(MOCK_URL)
+    page.wait_for_selector("#status.connected", timeout=10000)
+    page.click(".tab[data-tab='transitions']")     # pausesLive view
+    page.wait_for_timeout(3000)
+
+    def node_point(name):
+        return page.evaluate("""(name) => {
+            const el = document.getElementById('dfg-container');
+            const c = el && echarts.getInstanceByDom(el);
+            if (!c) return null;
+            const nodes = c.getOption().series[0].data;
+            const n = nodes.find(nd => nd && nd.name === name);
+            if (!n) return null;
+            const px = c.convertToPixel({ seriesIndex: 0 }, [n.x, n.y]);
+            // Anchor on the canvas rect: convertToPixel is relative to the
+            // ECharts root (the container's content box), not the container.
+            const r = el.querySelector('canvas').getBoundingClientRect();
+            return { x: r.left + px[0], y: r.top + px[1], eventId: n.eventId };
+        }""", name)
+
+    cpu = node_point("CPU*")
+    check(cpu is not None and cpu["eventId"] == 0,
+          f"CPU* node carries eventId 0 ({cpu})")
+    if cpu:
+        page.mouse.click(cpu["x"], cpu["y"])
+        page.wait_for_timeout(700)
+        check(page.evaluate("window.__pgwt.activeTab") == "transitions",
+              "CPU* pseudo-node click does not pivot")
+    else:
+        check(False, "(skipped CPU* inertness)")
+
+    io = node_point("IO:DataFileRead")
+    check(io is not None and io["eventId"] == 0x01000015,
+          f"IO:DataFileRead node carries the server event_id ({io})")
+    if not io:
+        for _ in range(3):
+            check(False, "(skipped: node not found)")
+        return
+    page.mouse.click(io["x"], io["y"])
+    check(_wait_tab(page, "queries"), "node click pivoted to the Queries tab")
+    filters = page.evaluate("window.__pgwt.filters.filters")
+    check(filters.get("event_id") == 0x01000015,
+          f"node drill filtered event_id (filters={filters})")
+    breadcrumb = page.text_content("#breadcrumb") or ""
+    check("IO:DataFileRead" in breadcrumb,
+          f"breadcrumb labels the drilled node ('{breadcrumb.strip()[:50]}')")
+
+
+def test_percentile_cell_pivot(page):
+    """U2.f (P3 wire 6 / P10): an events P50/P95/P99 cell pivots to THAT
+    event's latency distribution — the 'histogram-event' intent → Histogram
+    tab + event_id FilterStack entry, with the histogram dropdown reflecting
+    it (single source). CPU* percentile cells are inert (event_id 0), and the
+    cell click must not also fire the row drill (stopPropagation)."""
+    print("--- Test U2.f: Percentile Cell -> Histogram Pivot ---")
+
+    page.goto(MOCK_URL)
+    page.wait_for_selector("#status.connected", timeout=10000)
+    page.click("#live-btn")
+    page.wait_for_timeout(300)
+    page.click(".tab[data-tab='events']")
+    page.wait_for_timeout(1000)
+
+    # Row 1 = CPU* (inert), row 2 = IO:DataFileRead (drillable).
+    cpu_cells = page.query_selector_all(
+        "#table-container table tbody tr:first-child td.drillable")
+    check(len(cpu_cells) == 0,
+          f"CPU* row has no drillable percentile cells ({len(cpu_cells)})")
+    io_cells = page.query_selector_all(
+        "#table-container table tbody tr:nth-child(2) td.drillable")
+    check(len(io_cells) == 3,
+          f"IO:DataFileRead row has 3 drillable percentile cells ({len(io_cells)})")
+    if len(io_cells) < 2:
+        for _ in range(4):
+            check(False, "(skipped: no drillable cells)")
+        return
+
+    io_cells[1].click()   # the P95 cell
+    # If stopPropagation were broken the ROW drill would also fire and the
+    # final destination would be Queries — this wait doubles as that pin.
+    check(_wait_tab(page, "histogram"),
+          "P95 cell pivoted to the Histogram tab (row drill did NOT fire)")
+    filters = page.evaluate("window.__pgwt.filters.filters")
+    check(filters.get("event_id") == 0x01000015,
+          f"percentile cell drilled event_id (filters={filters})")
+    page.wait_for_timeout(800)
+    sel_val = page.evaluate(
+        "(document.getElementById('hm-event') || {}).value")
+    check(sel_val == str(0x01000015),
+          f"histogram event dropdown reflects the FilterStack ({sel_val!r})")
+    breadcrumb = page.text_content("#breadcrumb") or ""
+    check("IO:DataFileRead" in breadcrumb,
+          f"breadcrumb labels the drilled event ('{breadcrumb.strip()[:50]}')")
+
+
+def test_filter_bar_chips_and_badges(page):
+    """U2.g (P3 wire 7): the persistent filter bar renders one chip per ACTIVE
+    FilterStack dimension with a per-chip ✕ (append-only removal — the prior
+    state is pushed as a breadcrumb, so drillUp restores it), and EVERY tab
+    wears the filtered badge while any filter is active. All pure projections
+    of the one FilterStack — no second filter state."""
+    print("--- Test U2.g: Filter Bar Chips + Tab Badges ---")
+
+    page.goto(MOCK_URL)
+    page.wait_for_selector("#status.connected", timeout=10000)
+    page.wait_for_timeout(1000)
+
+    check(len(page.query_selector_all("#filter-bar .fchip")) == 0,
+          "no chips while unfiltered")
+    check(len(page.query_selector_all(".tab.filtered")) == 0,
+          "no tab badges while unfiltered")
+
+    # Drill 1: Overview class row → class filter.
+    page.query_selector("tr.indent-1.clickable").click()
+    page.wait_for_timeout(1000)
+    chips = page.query_selector_all("#filter-bar .fchip")
+    check(len(chips) == 1, f"1 chip after the class drill ({len(chips)})")
+    ntabs = len(page.query_selector_all(".tab"))
+    badges = len(page.query_selector_all(".tab.filtered"))
+    check(badges == ntabs,
+          f"ALL {ntabs} tabs badge while filtered — every tab is a lens "
+          f"(got {badges})")
+
+    # Drill 2: Events row → event filter stacked on top.
+    page.query_selector("#table-container table tbody tr.clickable").click()
+    page.wait_for_timeout(1000)
+    chips = page.query_selector_all("#filter-bar .fchip")
+    check(len(chips) == 2, f"2 chips after the event drill ({len(chips)})")
+
+    # Chip ✕ removes ONE dimension and appends a breadcrumb (history is
+    # append-only reality); the other chip and the badges stay.
+    crumbs_before = page.evaluate("window.__pgwt.filters.breadcrumbs.length")
+    x = page.query_selector("#filter-bar .fchip-x[data-key='class']")
+    check(x is not None, "class chip has its own ✕")
+    if x:
+        x.click()
+        page.wait_for_timeout(1000)
+    filters = page.evaluate("window.__pgwt.filters.filters")
+    check("class" not in filters and "event_id" in filters,
+          f"✕ removed only the class dimension (filters={filters})")
+    check(page.evaluate("window.__pgwt.filters.breadcrumbs.length") ==
+          crumbs_before + 1,
+          "removal recorded as a NEW breadcrumb (append-only)")
+    check(len(page.query_selector_all("#filter-bar .fchip")) == 1,
+          "one chip remains after the ✕")
+    check(len(page.query_selector_all(".tab.filtered")) == ntabs,
+          "badges stay while a filter remains")
+
+    # Remove the last chip: badges off; the breadcrumb TRAIL survives (the
+    # investigation history is not erased by reaching zero filters).
+    page.query_selector("#filter-bar .fchip-x").click()
+    page.wait_for_timeout(1000)
+    check(len(page.query_selector_all("#filter-bar .fchip")) == 0,
+          "no chips after removing the last filter")
+    check(len(page.query_selector_all(".tab.filtered")) == 0,
+          "tab badges off with no active filters")
+    check(len(page.query_selector_all("#breadcrumb .crumb")) >= 1,
+          "breadcrumb trail survives (drillUp can restore the removed filter)")
+
+
+def test_histogram_dropdown_writethrough(page):
+    """U2.h (P8 + P3 wire 7): the histogram class/event selects WRITE THROUGH
+    to the FilterStack via the one intent surface — no second (DOM) filter
+    state. Selecting drills (chips/URL/pause-live all follow), a tab
+    round-trip re-derives the select values FROM the stack, and clearing
+    removes the dimensions via FilterStack.removeFilter."""
+    print("--- Test U2.h: Histogram Dropdown Write-Through ---")
+
+    page.goto(MOCK_URL)
+    page.wait_for_selector("#status.connected", timeout=10000)
+    page.click(".tab[data-tab='histogram']")
+    page.wait_for_timeout(1500)
+
+    page.select_option("#hm-class", "IO")
+    page.wait_for_timeout(1000)
+    filters = page.evaluate("window.__pgwt.filters.filters")
+    check(filters.get("class") == "IO",
+          f"class select wrote through to the FilterStack ({filters})")
+    check(page.evaluate("window.__pgwt.activeTab") == "histogram",
+          "histogram-event intent keeps the histogram tab")
+    check(len(page.query_selector_all("#filter-bar .fchip")) == 1,
+          "filter bar chip follows the dropdown edit")
+    check("f.class=IO" in page.evaluate("location.hash"),
+          "URL hash carries the dropdown filter (P9)")
+    live_on = page.evaluate(
+        "document.getElementById('live-btn').classList.contains('active')")
+    check(not live_on, "dropdown edit paused live (investigation gesture)")
+
+    page.select_option("#hm-event", str(0x01000015))
+    page.wait_for_timeout(1000)
+    filters = page.evaluate("window.__pgwt.filters.filters")
+    check(filters.get("event_id") == 0x01000015 and filters.get("class") == "IO",
+          f"event select stacked event_id on class ({filters})")
+
+    # Tab away and back: the selects are re-derived FROM the FilterStack —
+    # the single source survives the DOM being rebuilt.
+    page.click(".tab[data-tab='events']")
+    page.wait_for_timeout(800)
+    page.click(".tab[data-tab='histogram']")
+    page.wait_for_timeout(1200)
+    vals = page.evaluate("""() => ({
+        cls: document.getElementById('hm-class').value,
+        ev: document.getElementById('hm-event').value })""")
+    check(vals["cls"] == "IO" and vals["ev"] == str(0x01000015),
+          f"selects re-derived from the FilterStack after a tab round-trip ({vals})")
+
+    # External state change while ONE dropdown is focused: protect only that
+    # open select. The other select must still synchronize from FilterStack.
+    external_hash = re.sub(r"&f\.event_id=[^&]*", "", page.evaluate("location.hash"))
+    page.focus("#hm-class")
+    page.evaluate("h => { location.hash = h; }", external_hash)
+    page.wait_for_function(
+        "() => !('event_id' in window.__pgwt.filters.filters)", timeout=5000)
+    check(page.input_value("#hm-event") == "",
+          "external filter change synced the non-focused event select")
+
+    # Back to All: clears BOTH dimensions through FilterStack.removeFilter.
+    page.select_option("#hm-class", "")
+    page.wait_for_timeout(1000)
+    filters = page.evaluate("window.__pgwt.filters.filters")
+    check(len(filters) == 0,
+          f"clearing the class removed both dimensions ({filters})")
+    check(len(page.query_selector_all("#filter-bar .fchip")) == 0,
+          "chips cleared with the filters")
+
+
+def test_histogram_clear_invalidates_strip(page):
+    """U2 review B1/H2: histogram IO -> All mutates filters only through the
+    app boundary, bumps the filter-blind strip generation, and a following AAS
+    wheel zoom can paint/request only unfiltered class data. The provisional
+    cache repaint also resets but does not seed live-tick y hysteresis."""
+    print("--- Test U2.j: Histogram Clear -> Strip Invalidation ---")
+
+    page.goto(MOCK_URL)
+    page.wait_for_selector("#status.connected", timeout=10000)
+    page.click(".tab[data-tab='histogram']")
+    page.wait_for_timeout(1200)
+
+    page.select_option("#hm-class", "IO")
+    page.wait_for_function(
+        "() => window.__pgwt.filters.filters.class === 'IO'", timeout=5000)
+    gen_filtered = page.evaluate("window.__pgwt.stripCache.generation")
+    page.select_option("#hm-class", "")
+    page.wait_for_function(
+        "() => Object.keys(window.__pgwt.filters.filters).length === 0", timeout=5000)
+    page.wait_for_timeout(1200)
+    gen_clear = page.evaluate("window.__pgwt.stripCache.generation")
+    check(gen_clear == gen_filtered + 1,
+          f"All-clear invalidated the strip generation ({gen_filtered} -> {gen_clear})")
+    page.wait_for_function("() => window.__pgwt.stripCache.size() > 0", timeout=5000)
+
+    page.evaluate("""() => {
+        window.__aasAfterClear = [];
+        const ws = window.__pgwt.transport.ws;
+        const send = ws.send.bind(ws);
+        ws.send = data => {
+            const msg = JSON.parse(data);
+            if (msg.cmd === 'aas') window.__aasAfterClear.push(msg);
+            return send(data);
+        };
+    }""")
+    box = _aas_plot_box(page)
+    page.mouse.move(box["x"] + box["w"] * 0.5, box["y"] + box["h"] * 0.5)
+    page.mouse.wheel(0, -100)
+    page.wait_for_timeout(500)
+    sent = page.evaluate("window.__aasAfterClear")
+    check(len(sent) >= 1 and all(not m.get("filters") for m in sent),
+          f"wheel strip requests are unfiltered after All ({sent})")
+    dbg = page.evaluate("window.__pgwt.aasDebug()")
+    names = (dbg or {}).get("seriesNames", [])
+    check("CPU" in names and "IO" in names,
+          f"painted strip is class-mode/unfiltered after wheel ({names[:4]})")
+    yh = (dbg or {}).get("yHysteresis", {})
+    check(yh.get("applied") is None and yh.get("run") == 0,
+          f"provisional window repaint did not count as a live tick ({yh})")
+
+
+def test_aas_slow_double_click(page):
+    """U2 review B2: two band clicks 400 ms apart are one dblclick zoom-out,
+    never two delayed drills — the pane's dblclick event cancels the gate."""
+    print("--- Test U2.k: 400 ms Double-Click Arbitration ---")
+
+    page.goto(MOCK_URL)
+    page.wait_for_selector("#status.connected", timeout=10000)
+    page.wait_for_timeout(1200)
+    if page.evaluate("document.getElementById('live-btn').classList.contains('active')"):
+        page.click("#live-btn")
+        page.wait_for_timeout(200)
+    box = _aas_plot_box(page)
+    x = box["x"] + box["w"] * 0.5
+    y = box["y"] + box["h"] * 0.88
+    before = page.evaluate("""() => ({
+        from: window.__pgwt.timeRange.from, to: window.__pgwt.timeRange.to,
+        traceFrom: window.__pgwt.server.fromNs, traceTo: window.__pgwt.server.toNs })""")
+    span_before = before["to"] - before["from"]
+
+    page.mouse.move(x, y)
+    page.mouse.down(click_count=1)
+    page.mouse.up(click_count=1)
+    page.wait_for_timeout(400)
+    page.mouse.down(click_count=2)
+    page.mouse.up(click_count=2)
+    page.wait_for_timeout(900)
+
+    filters = page.evaluate("window.__pgwt.filters.filters")
+    span_after = page.evaluate("window.__pgwt.timeRange.span()")
+    check(len(filters) == 0, f"400 ms dblclick fired zero drills ({filters})")
+    check(span_after > span_before,
+          f"400 ms dblclick widened the window ({span_before} -> {span_after})")
+    mid = (before["from"] + before["to"]) / 2
+    expected_from = max(before["traceFrom"], mid - span_before)
+    expected_to = min(before["traceTo"], mid + span_before)
+    after = page.evaluate(
+        "() => [window.__pgwt.timeRange.from, window.__pgwt.timeRange.to]")
+    check(after == [expected_from, expected_to],
+          f"400 ms dblclick applied zoom-out exactly once ({after})")
+
+
+def test_hash_sort_clear(page):
+    """U2 review M3: applying a parsed same-tab hash with no sort removes the
+    current tabSort entry, so historical/pre-sort state really is unsorted."""
+    print("--- Test U2.l: Hash Without Sort Clears Sort ---")
+
+    page.goto(MOCK_URL)
+    page.wait_for_selector("#status.connected", timeout=10000)
+    page.click(".tab[data-tab='events']")
+    page.wait_for_timeout(1000)
+    page.click("th[data-sort='count']")
+    page.wait_for_timeout(500)
+    sorted_hash = page.evaluate("location.hash")
+    check("sort=" in sorted_hash, f"sorted entry names its sort ({sorted_hash})")
+    no_sort = re.sub(r"&sort=[^&]*", "", sorted_hash)
+    page.evaluate("h => { location.hash = h; }", no_sort)
+    page.wait_for_function("""() => {
+        const th = document.querySelector("th[data-sort='count']");
+        return th && !/[▲▼]/.test(th.textContent);
+    }""", timeout=5000)
+    count_th = page.text_content("th[data-sort='count']")
+    check("▲" not in count_th and "▼" not in count_th,
+          f"sort-less hash cleared tabSort ({count_th!r})")
+
+
+def test_rapid_hash_traversal(page):
+    """U2 review B3: drill -> zoom -> rapid Back -> Back coalesces to the first
+    entry, does not replace the traversed hash, and leaves Forward usable."""
+    print("--- Test U2.m: Rapid Hash Traversal Coalescing ---")
+
+    page.goto(MOCK_URL)
+    page.wait_for_selector("#status.connected", timeout=10000)
+    page.wait_for_timeout(1200)
+    initial = page.evaluate("""() => ({
+        hash: location.hash, tab: window.__pgwt.activeTab,
+        live: document.getElementById('live-btn').classList.contains('active') })""")
+
+    page.query_selector("tr.indent-1.clickable").click()
+    check(_wait_tab(page, "events"), "history setup drilled to Events")
+    page.wait_for_timeout(600)
+    drilled_hash = page.evaluate("location.hash")
+    box = _aas_plot_box(page)
+    y = box["y"] + box["h"] * 0.5
+    page.mouse.move(box["x"] + box["w"] * 0.3, y)
+    page.mouse.down()
+    page.mouse.move(box["x"] + box["w"] * 0.6, y, steps=5)
+    page.mouse.up()
+    page.wait_for_timeout(700)
+
+    # Keep the first traversal apply in flight long enough for the second Back
+    # to arrive; this deterministically exercises the coalescer, not timing luck.
+    page.evaluate("""() => {
+        const request = window.__pgwt.transport.request.bind(window.__pgwt.transport);
+        window.__pgwt.transport.request = async (...args) => {
+            await new Promise(r => setTimeout(r, 250));
+            return request(...args);
+        };
+        history.back();
+        setTimeout(() => history.back(), 50);
+    }""")
+    page.wait_for_function("""h =>
+        location.hash === h && window.__pgwt.activeTab === 'overview' &&
+        Object.keys(window.__pgwt.filters.filters).length === 0 &&
+        document.getElementById('live-btn').classList.contains('active')
+    """, arg=initial["hash"], timeout=10000)
+    final_state = page.evaluate("""() => ({
+        hash: location.hash, tab: window.__pgwt.activeTab,
+        filters: window.__pgwt.filters.filters })""")
+    check(final_state["hash"] == initial["hash"] and
+          final_state["tab"] == initial["tab"] and not final_state["filters"],
+          f"rapid Back/Back reached the first entry ({final_state})")
+
+    page.evaluate("history.forward()")
+    page.wait_for_function("""h =>
+        location.hash === h && window.__pgwt.activeTab === 'events' &&
+        Object.keys(window.__pgwt.filters.filters).length === 1
+    """, arg=drilled_hash, timeout=10000)
+    check(page.evaluate("location.hash") == drilled_hash,
+          "Forward restored the drill entry after rapid traversal")
+
+
+def test_url_state_roundtrip(page):
+    """U2.i (P9): the URL hash names the investigation state. A drill + brush
+    zoom survives F5 exactly ({tab, window, filters} restored, canonical hash
+    stable); a live=1 deep link restores live MODE but re-anchors to the
+    server's NOW (live-means-NOW — asserted against the mock clock), never to
+    stored time."""
+    print("--- Test U2.i: URL State Round-Trip ---")
+
+    page.goto(MOCK_URL)
+    page.wait_for_selector("#status.connected", timeout=10000)
+    page.wait_for_timeout(1000)
+
+    # Investigate: class drill (Overview → Events) + an AAS brush zoom.
+    page.query_selector("tr.indent-1.clickable").click()
+    page.wait_for_timeout(1000)
+    box = _aas_plot_box(page)
+    y = box["y"] + box["h"] * 0.5
+    page.mouse.move(box["x"] + box["w"] * 0.3, y)
+    page.mouse.down()
+    page.mouse.move(box["x"] + box["w"] * 0.6, y, steps=5)
+    page.mouse.up()
+    page.wait_for_timeout(1000)
+
+    read_state = """() => ({
+        hash: location.hash, tab: window.__pgwt.activeTab,
+        from: window.__pgwt.timeRange.from, to: window.__pgwt.timeRange.to,
+        filters: window.__pgwt.filters.filters })"""
+    before = page.evaluate(read_state)
+    check(before["tab"] == "events" and "class" in before["filters"],
+          f"investigation state built (tab={before['tab']}, "
+          f"filters={before['filters']})")
+    check("from=" in before["hash"] and "f.class=" in before["hash"],
+          f"hash names window + filters ('{before['hash'][:70]}')")
+
+    page.reload()
+    page.wait_for_selector("#status.connected", timeout=10000)
+    page.wait_for_timeout(1500)
+    after = page.evaluate(read_state)
+    check(after["tab"] == before["tab"],
+          f"tab restored from the deep link ({after['tab']})")
+    check(after["filters"] == before["filters"],
+          f"filters restored ns-typed ({after['filters']})")
+    check(after["from"] == before["from"] and after["to"] == before["to"],
+          f"window restored ns-exact ([{after['from']}, {after['to']}])")
+    check(after["hash"] == before["hash"],
+          "canonical hash stable across the reload")
+    check(len(page.query_selector_all("#filter-bar .fchip")) == 1,
+          "filter chip restored from the deep link")
+    live_on = page.evaluate(
+        "document.getElementById('live-btn').classList.contains('active')")
+    check(not live_on, "frozen-window link restores paused, not live")
+
+    # live=1 deep link: live MODE restores, but the window re-anchors to the
+    # freshly fetched server clock — the mock's now_ns — never link time.
+    page.goto(MOCK_URL + "#tab=events&live=1&span=300")
+    page.reload()   # force full boot hydration (not the popstate path)
+    page.wait_for_selector("#status.connected", timeout=10000)
+    page.wait_for_timeout(1500)
+    state = page.evaluate("""() => ({
+        live: document.getElementById('live-btn').classList.contains('active'),
+        atNow: window.__pgwt.timeRange.to === 1774000000000000000,
+        span: window.__pgwt.timeRange.to - window.__pgwt.timeRange.from,
+        hash: location.hash })""")
+    check(state["live"], "live=1 deep link restored live mode")
+    check(state["atNow"],
+          "live restore re-anchored to the server clock NOW (mock now_ns)")
+    check(state["span"] == 300 * 1e9,
+          f"span=300s honored ({state['span']})")
+    check("live=1" in state["hash"] and "from=" not in state["hash"],
+          f"live hash carries span, never a window ('{state['hash']}')")
+
+    # Restored filters honestly show key=value until payload-backed names are
+    # available; the first post-hydrate event-list fetch resolves the chip.
+    page.goto(MOCK_URL +
+              "#tab=events&live=1&span=300&f.event_id=16777237")
+    page.wait_for_selector("#status.connected", timeout=10000)
+    page.wait_for_function("""() => {
+        const chip = document.querySelector('#filter-bar .fchip');
+        return chip && chip.textContent.includes('IO:DataFileRead');
+    }""", timeout=5000)
+    chip = page.text_content("#filter-bar .fchip") or ""
+    check("IO:DataFileRead" in chip,
+          f"deep-linked event chip resolved its payload name ({chip.strip()!r})")
+
+
 # ── Phase B5: fidelity-aware UI ───────────────────────────────────────────────
 # These run against a SECOND mock launched in sampled fidelity with the daemon
 # control command enabled, so the escalate flow, the sampled shading, the
@@ -2078,6 +2841,20 @@ def main():
                 test_reconnect_idempotent_no_leak,
                 # Track U Phase U0: error visibility (P1)
                 test_command_error_card,
+                # Track U Phase U2: the OEM investigation loop (P3/P8/P9)
+                test_aas_click_drill,
+                test_burst_row_zoom,
+                test_timeline_drag_zoom,
+                test_heatmap_cell_drill,
+                test_dfg_node_drill,
+                test_percentile_cell_pivot,
+                test_filter_bar_chips_and_badges,
+                test_histogram_dropdown_writethrough,
+                test_histogram_clear_invalidates_strip,
+                test_aas_slow_double_click,
+                test_hash_sort_clear,
+                test_rapid_hash_traversal,
+                test_url_state_roundtrip,
             ]
             for fn in tests:
                 fn(page)

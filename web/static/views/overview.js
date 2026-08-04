@@ -9,8 +9,9 @@
  * config and turned into navigation by the shared onRowClick wiring.
  */
 
-import { buildTableModel } from '../lib/table.js';
+import { buildTableModel, buildTruncationRow } from '../lib/table.js';
 import { overviewConfig } from '../lib/builders/table-configs.js';
+import { buildPaneFidelity, paneFidelityBadgeHtml } from '../lib/panels.js';
 import { fmtMs, fmtAas } from '../lib/format.js';
 
 /* PURE: time_model response -> summary metrics array. Exported for testing. */
@@ -50,7 +51,15 @@ export function createOverviewView() {
             // Overview keeps its server-defined hierarchy: no client sort.
             const table = buildTableModel(overviewConfig, data && data.rows, null);
             const summary = buildSummary(data, ctx.server.numCpus);
-            return { table, summary, hasRows: !!(data && data.rows && data.rows.length) };
+            return {
+                table, summary,
+                hasRows: !!(data && data.rows && data.rows.length),
+                // U2 (review P10): sampled/mixed numbers are scaled
+                // estimates — badge the pane; render the truncation row
+                // when the server flags the list incomplete.
+                paneFidelity: buildPaneFidelity(data),
+                truncation: buildTruncationRow(data),
+            };
         },
 
         mount(el, model, ctx) {
@@ -58,7 +67,8 @@ export function createOverviewView() {
             if (summaryEl) summaryEl.innerHTML = summaryHtml(model.summary);
 
             if (!model.hasRows) {
-                el.innerHTML = '<div class="loading">No data for selected range</div>';
+                el.innerHTML = paneFidelityBadgeHtml(model.paneFidelity) +
+                    '<div class="loading">No data for selected range</div>';
                 return;
             }
             ctx.mountTable(el, overviewConfig, model.table, {
@@ -66,7 +76,10 @@ export function createOverviewView() {
                     const intent = overviewConfig.onClick(row);
                     if (intent) ctx.onDrill(intent);
                 },
+                truncation: model.truncation,
             });
+            el.insertAdjacentHTML('afterbegin',
+                paneFidelityBadgeHtml(model.paneFidelity));
         },
 
         enter() { /* no chart */ },

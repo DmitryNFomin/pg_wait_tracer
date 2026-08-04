@@ -3,12 +3,18 @@
  * Migrated to the { id, requests, build, mount, enter, leave } contract (B3
  * part 3). requests() fetches concurrency on a single-flight channel; build()
  * is PURE (lib/builders/concurrency.js -> ECharts option + table models);
- * mount() builds the chart + table containers, feeds the option to the
- * view-owned ECharts instance, and paints the tables. The view OWNS its ECharts
- * instance: created in mount (its inner #concurrency-chart node is built there),
- * disposed in leave() — no module-level chart global.
+ * mount() reuses a stable shell (the histogram ensureShell pattern, P5): the
+ * ECharts instance is created ONCE and fed setOption on every refresh — the
+ * old dispose/echarts.init/setOption(_, true) per mount replayed the ~1s
+ * draw-in on every tab entry/zoom and destroyed open tooltips. The view OWNS
+ * its instance: disposed in leave() — no module-level chart global.
  *
- * Behavior is identical to the old legacy adapter in app.js:
+ * U2 (P3 wire 2): peak/burst table rows are zoom intents — clicking one
+ * emits the 'burst-zoom' pivot (ctx.onDrill; zoomTo(ts ± 5 buckets), no
+ * filter, current tab kept). The pure builder embeds the ns range as
+ * data-from/data-to on each row; the view only delegates the click.
+ *
+ * Behavior otherwise matches the old legacy adapter in app.js:
  *   - Empty peaks → "No concurrency data".
  *   - Peak area-line with burst markers + the top-peaks and burst tables.
  *   - Bucket count scales with the AAS chart width (same heuristic as before).
@@ -19,9 +25,35 @@ import { isUnavailable } from '../lib/builders/fidelity.js';
 import { mountUnavailablePanel } from '../lib/panels.js';
 
 export function createConcurrencyView() {
-    let chart = null;   // ECharts instance — owned here, nowhere else
+    let chart = null;    // ECharts instance — owned here, nowhere else
+    let ctxRef = null;   // last ctx (row-click → onZoom)
 
     function disposeChart() { if (chart) { chart.dispose(); chart = null; } }
+
+    /* P5: build the chart + table containers ONCE; refreshes only setOption /
+     * re-fill the table. Rebuilt lazily whenever another view (or an
+     * unavailable/no-data mount) replaced the container's content. */
+    function ensureShell(el) {
+        if (document.getElementById('concurrency-chart')) return;
+        disposeChart();   // shell is being rebuilt — any old chart DOM is gone
+        el.innerHTML =
+            '<div id="concurrency-chart" style="width:100%;height:350px;"></div>' +
+            '<div id="burst-table" style="padding:10px;"></div>';
+        // P3 wire 2: one delegated listener; rows carry data-from/data-to (ns)
+        // from the pure builder (the EMITTER pads, per the app's registry).
+        // Number() loses <256ns at epoch scale — the same double precision
+        // every ns value in the app already lives with. Emitted as the
+        // 'burst-zoom' pivot intent (pure time jump, current tab kept);
+        // ctx.onZoom is the fallback for an app shell without the registry.
+        document.getElementById('burst-table').addEventListener('click', (e) => {
+            const tr = e.target && e.target.closest && e.target.closest('tr[data-from]');
+            if (!tr || !ctxRef) return;
+            const from = Number(tr.dataset.from), to = Number(tr.dataset.to);
+            if (!isFinite(from) || !isFinite(to) || to <= from) return;
+            if (ctxRef.onDrill) ctxRef.onDrill({ pivot: 'burst-zoom', from, to });
+            else if (ctxRef.onZoom) ctxRef.onZoom(from, to);
+        });
+    }
 
     return {
         id: 'concurrency',
@@ -43,6 +75,7 @@ export function createConcurrencyView() {
         },
 
         mount(el, model, ctx) {
+            ctxRef = ctx;
             if (model.unavailable) {
                 disposeChart();
                 mountUnavailablePanel(el, model.unavailable, ctx);
@@ -54,19 +87,16 @@ export function createConcurrencyView() {
                 el.innerHTML = '<p style="color:#888;padding:20px">No concurrency data</p>';
                 return;
             }
-            el.innerHTML =
-                '<div id="concurrency-chart" style="width:100%;height:350px;"></div>' +
-                '<div id="burst-table" style="padding:10px;"></div>';
-
-            const host = document.getElementById('concurrency-chart');
-            disposeChart();
-            chart = ctx.echarts.init(host, 'dark');
+            ensureShell(el);
+            if (!chart) {
+                chart = ctx.echarts.init(
+                    document.getElementById('concurrency-chart'), 'dark');
+            }
             chart.setOption(model.option, true);
-
             document.getElementById('burst-table').innerHTML = buildConcurrencyTables(model);
         },
 
-        enter() { /* chart created in mount (its inner node lives there) */ },
+        enter(ctx) { ctxRef = ctx; /* chart created lazily in mount */ },
         leave() { disposeChart(); },
         resize() { if (chart) chart.resize(); },
     };

@@ -10,10 +10,23 @@
  *   - Rows arrive in server order (CPU* first); no default client sort.
  *   - Clicking a column header sorts (first click desc, toggles to asc).
  *   - Clicking a row drills into that event_id (→ queries, per the app PIVOT).
+ *
+ * U2 additions (reviews P10 + P3 wire 6), all response-derived:
+ *   - Per-pane fidelity badge for sampled/mixed windows (the table's scaled
+ *     estimates must not render pixel-identically to exact numbers).
+ *   - Percentile-basis footnote: Avg/P50/P95/P99/Max come from exact-captured
+ *     events only; over a non-exact window the footnote states that basis.
+ *   - Truncation row when the server flags the row list incomplete.
+ *   - Percentile CELLS drill to that event's latency distribution (the
+ *     'histogram-event' pivot intent via ctx.onDrill; row-click unchanged).
  */
 
-import { buildTableModel } from '../lib/table.js';
+import { buildTableModel, buildTruncationRow } from '../lib/table.js';
 import { eventsConfig } from '../lib/builders/table-configs.js';
+import {
+    buildPaneFidelity, paneFidelityBadgeHtml,
+    buildPercentileBasis, percentileBasisHtml,
+} from '../lib/panels.js';
 
 /* PURE: top_events response + sort -> render model. Exported for testing. */
 export function buildEventsModel(data, sort) {
@@ -21,6 +34,9 @@ export function buildEventsModel(data, sort) {
     return {
         hasRows: rows.length > 0,
         table: buildTableModel(eventsConfig, rows, sort),
+        paneFidelity: buildPaneFidelity(data),
+        percentileBasis: buildPercentileBasis(data),
+        truncation: buildTruncationRow(data),
     };
 }
 
@@ -44,7 +60,8 @@ export function createEventsView() {
         mount(el, model, ctx) {
             if (ctx.summaryEl) ctx.summaryEl.innerHTML = '';
             if (!model.hasRows) {
-                el.innerHTML = '<div class="loading">No data for selected range</div>';
+                el.innerHTML = paneFidelityBadgeHtml(model.paneFidelity) +
+                    '<div class="loading">No data for selected range</div>';
                 return;
             }
             ctx.mountTable(el, eventsConfig, model.table, {
@@ -54,8 +71,15 @@ export function createEventsView() {
                     const intent = eventsConfig.onClick(row);
                     if (intent) ctx.onDrill(intent);
                 },
+                // Wire 6: percentile cell → 'histogram-event' pivot intent.
+                onCellDrill: (intent) => ctx.onDrill(intent),
+                truncation: model.truncation,
                 tooltipEl: ctx.tooltipEl,
             });
+            el.insertAdjacentHTML('afterbegin',
+                paneFidelityBadgeHtml(model.paneFidelity));
+            el.insertAdjacentHTML('beforeend',
+                percentileBasisHtml(model.percentileBasis));
         },
 
         enter() { /* no chart */ },

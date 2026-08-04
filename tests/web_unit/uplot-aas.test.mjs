@@ -207,6 +207,57 @@ test('PARITY: seriesNames/seriesColors identical to buildAasOption (both modes)'
     }
 });
 
+/* U2 (review P7): the yMax policy — yMax = max(maxAas*1.2,
+ * min(numCpus*1.5, maxAas*4), 1) — is implemented in BOTH builders (they
+ * stay drop-in interchangeable); this parity pin holds the two copies
+ * together across the exact regimes the cap distinguishes. */
+test('PARITY: P7 yMax policy identical in both builders across regimes', () => {
+    const cases = [
+        { max_aas: 1, numCpus: 8, want: 4 },      // cap active: min(12, 4)
+        { max_aas: 3, numCpus: 64, want: 12 },    // P7 flagship: min(96, 12)
+        { max_aas: 4.5, numCpus: 4, want: 6 },    // cap inactive: min(6, 18)
+        { max_aas: 100, numCpus: 4, want: 120 },  // data dominates
+        { max_aas: 0, numCpus: 0, want: 1 },      // floor
+    ];
+    for (const c of cases) {
+        const data = { bucket_ns: 1, max_aas: c.max_aas, buckets: classBuckets(1) };
+        const u = buildUplotSpec(data, { numCpus: c.numCpus });
+        const e = buildAasOption(data, { numCpus: c.numCpus });
+        assert.equal(u.yMax, c.want, 'uplot ' + JSON.stringify(c));
+        assert.equal(e.option.yAxis.max, c.want, 'echarts ' + JSON.stringify(c));
+        assert.deepEqual(u.uplotOpts.scales.y.range, [0, c.want]);
+    }
+});
+
+/* U2 (review P3 wire 1): both builders expose the same drill surface —
+ * seriesIds parallel to seriesNames (event_id in event mode, nulls in class
+ * mode) and the breakdown discriminator — so the click→drill mount code is
+ * renderer-agnostic. */
+test('PARITY: seriesIds + breakdown identical to buildAasOption', () => {
+    const ev = {
+        bucket_ns: 1, max_aas: 1, breakdown: 'events',
+        series: [{ name: 'Lock:relation', event_id: 42 },
+                 { name: 'IO:DataFileRead', event_id: 7 },
+                 { name: 'IO:WalSync' }],                 // id omitted -> null
+        buckets: [{ t: 10, aas: [0.3, 0.1, 0.2] }],
+    };
+    const u = buildUplotSpec(ev, {});
+    const e = buildAasOption(ev, {});
+    assert.deepEqual(u.seriesNames,
+        ['IO:DataFileRead', 'IO:WalSync', 'Lock:relation']);
+    assert.deepEqual(u.seriesIds, [7, null, 42]);   // ids follow identity order
+    assert.deepEqual(u.seriesIds, e.seriesIds);
+    assert.equal(u.breakdown, 'events');
+    assert.equal(e.breakdown, 'events');
+
+    const cls = { bucket_ns: 1, max_aas: 1, buckets: classBuckets(1) };
+    const uc = buildUplotSpec(cls, {});
+    const ec = buildAasOption(cls, {});
+    assert.equal(uc.breakdown, 'classes');
+    assert.deepEqual(uc.seriesIds, WAIT_CLASSES.map(() => null));
+    assert.deepEqual(uc.seriesIds, ec.seriesIds);
+});
+
 test('PARITY: y pin, x window and axis-label text match the ECharts option', () => {
     const win = { from: 2e15, to: 3e15 };
     const data = { bucket_ns: 60e9, max_aas: 1, buckets: classBuckets(2) };
@@ -486,6 +537,42 @@ test('exact window: no fidelity rects; N-CPUs hline iff numCpus > 0', () => {
     }]);
     const noCpus = overlayGeometry(data, { numCpus: 0, win }, null);
     assert.deepEqual(noCpus.hlines, []);
+});
+
+/* U2 (review P7): with the CURRENT y scale top supplied (scaleWindow.yMax —
+ * the view passes u.scales.y.max, i.e. the hysteresis-applied top), an
+ * N-CPUs reference ABOVE it becomes the explicit 'ncpus-offscale' top-edge
+ * affordance: label "N CPUs ↑" pinned at the scale top, NO line (a line at
+ * the rim would claim capacity sits there). The reference must never
+ * silently vanish — off-scale is a rendered state, not a dropped one. */
+test('N-CPUs above the y scale top -> ncpus-offscale affordance (P7)', () => {
+    const data = { bucket_ns: 1e9, max_aas: 3, fidelity: 'exact',
+        buckets: classBuckets(2) };
+    const win = { from: 2e15, to: 3e15 };
+    const scale = { min: 2e9, max: 3e9, yMax: 12 };   // policy top for 64 CPUs
+
+    const off = overlayGeometry(data, { numCpus: 64, win }, scale);
+    assert.deepEqual(off.hlines, [{
+        kind: 'ncpus-offscale', y: 12, color: NCPUS_COLOR, dash: null,
+        label: '64 CPUs ↑',
+    }]);
+
+    // On-scale under the same viewport: the plain reference line survives.
+    const on = overlayGeometry(data, { numCpus: 4, win }, scale);
+    assert.deepEqual(on.hlines, [{
+        kind: 'ncpus', y: 4, color: NCPUS_COLOR, dash: [4, 4], label: '4 CPUs',
+    }]);
+
+    // Exactly AT the top is on-scale (the line hugs the rim, honestly).
+    const rim = overlayGeometry(data, { numCpus: 12, win },
+        { min: 2e9, max: 3e9, yMax: 12 });
+    assert.equal(rim.hlines[0].kind, 'ncpus');
+
+    // Absolute geometry (scaleWindow null) knows no viewport: the reference
+    // stays a plain hline at its true y — spec.overlays is never transformed.
+    const abs = overlayGeometry(data, { numCpus: 64, win }, null);
+    assert.equal(abs.hlines[0].kind, 'ncpus');
+    assert.equal(abs.hlines[0].y, 64);
 });
 
 test('escalation: observed span band + live-edge line; anomaly recolors', () => {
