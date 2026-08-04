@@ -2992,7 +2992,7 @@ v3 owns transitions column 7 (`cpu_ns` varint, frozen in `golden/rev3`); an
 with the range reader gate and a `rev4/` golden fixture (the PR's v3/v4 redefinition is
 byte-incompatible both directions).
 
-### Track U — UI: the OEM loop + instrument (consolidated plan)  **[ADOPTED 2026-07-31; U0 ✅ (#59), U1 ✅ (#60), U2a ✅ (#62), U2b ✅ (2026-08-04, gate GREEN); U2/U3 ⬜]**
+### Track U — UI: the OEM loop + instrument (consolidated plan)  **[ADOPTED 2026-07-31; U0 ✅ (#59), U1 ✅ (#60), U2a ✅ (#62), U2b ✅ (#64, gate GREEN), U2 ✅ (#66 — the OEM loop is COMPLETE); U3 ⬜]**
 
 **Goal:** the full ASH investigation loop — notice → localize (brush) → attribute
 (re-rank) → isolate (drill) → inspect → compare → share — with instrument-grade
@@ -3058,7 +3058,7 @@ the AAS pane is expected to move to a uPlot substrate behind a written gate
 - Gallery-cell snapshots with tight thresholds (~8/0.002) — first visual
   coverage of drilled/sorted/error/fidelity-variant states.
 
-**Phase U2 — Chassis + drill wiring + URL state (weeks) ⬜**
+**Phase U2 — Chassis + drill wiring + URL state  ✅ [DONE — PR #66, 2026-08-04]** (seven wires + URL hash state + yMax/heatmap/DFG policies + table honesty; adversarial review found 3 blocking/4 high/5 medium — all fixed with per-finding pins, state-unity enforced architecturally via the single mutateFilters gate; node 282/282, Playwright 338/338, OEM loop 12/12)
 - **Chassis:** one themed base option (kills the triplicated chrome);
   instance-reuse mount helper with the animation policy (the
   `views/histogram.js:64-65` pattern everywhere — ends dispose/re-init churn,
