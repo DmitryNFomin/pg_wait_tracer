@@ -119,7 +119,15 @@ static void handle_timer(struct pgwt_daemon *d)
     struct pgwt_time_model saved_tm = d->accum.tm;
     pgwt_accum_copy_used(&d->accum, d->event_accum);
     d->accum.prev_tm = saved_tm;
-    if (pgwt_mode_uses_watchpoints(d))
+    bool mode_uses_wp = pgwt_mode_uses_watchpoints(d);
+    static int dbg_timer = -1;
+    if (dbg_timer < 0)
+        dbg_timer = getenv("PGWT_DEBUG_DUMP_STATE") != NULL;
+    if (dbg_timer)
+        fprintf(stderr, "STATEDUMP-TIMER: tick=%d mode_uses_wp=%d "
+                "lightweight=%d\n",
+                d->tick, (int)mode_uses_wp, (int)d->lightweight_mode);
+    if (mode_uses_wp)
         pgwt_read_state_map(d);
 
     if (d->ring.slots)
