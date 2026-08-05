@@ -3002,7 +3002,7 @@ v3 owns transitions column 7 (`cpu_ns` varint, frozen in `golden/rev3`); an
 with the range reader gate and a `rev4/` golden fixture (the PR's v3/v4 redefinition is
 byte-incompatible both directions).
 
-### Track U — UI: the OEM loop + instrument (consolidated plan)  **[COMPLETE 2026-08-04 — U0 ✅ (#59), U1 ✅ (#60), U2a ✅ (#62), U2b ✅ (#64, gate GREEN), U2 ✅ (#66), U3 ✅ (#67). Remaining: only the parked list]**
+### Track U — UI: the OEM loop + instrument (consolidated plan)  **[COMPLETE 2026-08-04 — U0 ✅ (#59), U1 ✅ (#60), U2a ✅ (#62), U2b ✅ (#64, gate GREEN), U2 ✅ (#66), U3 ✅ (#67). U4 compare mode DESIGNED (docs/COMPARE_MODE_DESIGN.md); otherwise only the parked list]**
 
 **Goal:** the full ASH investigation loop — notice → localize (brush) → attribute
 (re-rank) → isolate (drill) → inspect → compare → share — with instrument-grade
@@ -3185,6 +3185,18 @@ the AAS pane is expected to move to a uPlot substrate behind a written gate
   identity) land before any instrument work is judged.
 
 **Phase U3 — B6 views on the chassis  ✅ [DONE — PR #67, 2026-08-04]**  *(subsumes REWORK B6; staged delegation — server → gate → UI → adversarial review, 3 blocking/5 high found+fixed with pins → supervisor probes; ships the per-execution 10046 waterfall, latency scatter, transition matrix + executions/execution_detail/exec_scatter commands, leader_pid in backends.jsonl, honest EXACT refusals end to end)*
+
+**Phase U4 — Compare mode  ⬜ [DESIGNED 2026-08-05 — docs/COMPARE_MODE_DESIGN.md; awaiting build approval]**
+The last OEM capability (AWR-Compare-Periods class): baseline-as-OFFSET
+(compare survives live follow — "now vs yesterday, continuously"; one camera
++ one scalar, no second-camera sync), ghost-outline + per-class diff strip
+on the AAS pane, delta-first tables (A|B|Δ|× with honest new/gone labels and
+a change-floor truncation row), per-window fidelity badges with a
+mixed-evidence warning chip (flagged, never silent, never blocked),
+`cmp=1&b_off=` in the URL hash. Zero server changes in v1 (B rides the same
+strip cache and commands). EXACT-required views excluded from v1; pinned
+fixed baselines and a server-side compare command recorded as v1.1/v2.
+Build = the established triangle, UI-only, ~600–900 LOC.
 - Per-execution **waterfall** (the 10046 view; same custom-series technique as
   the session timeline) — **zoom + click-to-inspect in its definition of
   done**; **transition matrix** (heatmap builder as template; log/piecewise
