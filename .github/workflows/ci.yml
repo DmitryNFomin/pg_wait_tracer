@@ -26,9 +26,9 @@ on:
         type: boolean
         default: false
       iterations:
-        description: "Number of full-mode pure-CPU straddle attempts"
+        description: "Number of full ci_smoke.sh sequence runs"
         type: string
-        default: "80"
+        default: "25"
       pg:
         description: "PostgreSQL major version for the mode-4 hunt"
         type: string
@@ -291,6 +291,7 @@ jobs:
         env:
           HUNT_ITERATIONS: ${{ inputs.iterations }}
           PG_MAJOR: ${{ inputs.pg }}
+          PGWT_DEBUG_DUMP_STATE: "1"
         run: |
           set -euo pipefail
           burn_cpu() {
@@ -306,12 +307,10 @@ jobs:
           }
           trap cleanup_burners EXIT
 
-          sudo env "PATH=/usr/lib/postgresql/$PG_MAJOR/bin:$PATH" \
-            "PGWT_DEBUG_DUMP_STATE=1" \
+          PATH="/usr/lib/postgresql/$PG_MAJOR/bin:$PATH" \
             python3 .github/scripts/mode4_hunt.py \
               --iterations "$HUNT_ITERATIONS" \
-              --postmaster-pid-file \
-              "/var/lib/postgresql/$PG_MAJOR/main/postmaster.pid"
+              --pg-version "$PG_MAJOR"
 
       - name: Upload mode-4 hunt artifacts
         if: always()
