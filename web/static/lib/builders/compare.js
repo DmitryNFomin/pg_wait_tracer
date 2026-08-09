@@ -28,6 +28,17 @@ function entityLabel(kind, row) {
     return String(row.name || '');
 }
 
+/* The overview hierarchy contains two indent-0 accounting rows which are not
+ * change entities: DB Time is the aggregate of the rows beneath it, and Idle
+ * is deliberately outside DB Time (pct/aas are zero). Including either in the
+ * |delta| set double-counts the hierarchy and buries the wait classes D3 is
+ * meant to rank. The ordinary overview still receives the untouched payload. */
+function isDeltaEntity(kind, row) {
+    if (kind !== 'overview' || !row || Number(row.indent) !== 0) return true;
+    const name = String(row.name || '');
+    return name !== 'DB Time' && !name.includes('Idle');
+}
+
 function dbTimeMs(data) {
     if (data && Number.isFinite(Number(data.db_time_ms))) {
         return finiteMs(data.db_time_ms);
@@ -39,7 +50,7 @@ function dbTimeMs(data) {
 
 /* Returns a render-neutral comparison model:
  *   rows: joined entities with a_ms/b_ms/delta_ms/abs_delta_ms/ratio
- *   floor: max(1% of the larger A/B window DB-time, 50 ms)
+ *   floor: max(1% of investigation window A's DB-time, 50 ms)
  *   belowFloor: exact count of joined entities omitted by that rule
  *
  * One-sided entities carry status='new'|'gone' and ratio=null. A zero divisor
@@ -59,12 +70,12 @@ export function buildDeltaComparison(kind, dataA, dataB, opts) {
         };
     }
 
-    const aRows = (dataA && dataA.rows) || [];
-    const bRows = (dataB && dataB.rows) || [];
+    const aRows = ((dataA && dataA.rows) || []).filter(r => isDeltaEntity(kind, r));
+    const bRows = ((dataB && dataB.rows) || []).filter(r => isDeltaEntity(kind, r));
     const aMap = new Map(aRows.map(r => [entityKey(kind, r), r]));
     const bMap = new Map(bRows.map(r => [entityKey(kind, r), r]));
     const keys = new Set([...aMap.keys(), ...bMap.keys()]);
-    const floorMs = Math.max(0.01 * Math.max(dbTimeMs(dataA), dbTimeMs(dataB)), 50);
+    const floorMs = Math.max(0.01 * dbTimeMs(dataA), 50);
 
     const rows = [];
     let belowFloor = 0;

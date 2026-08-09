@@ -528,10 +528,63 @@ export function compareHooks(getGeo) {
     return { drawAxes: [(u) => drawCompareGhost(u, getGeo(u))] };
 }
 
+/* Pure signed-lane geometry. uPlot reports bbox in device pixels while the
+ * lane canvas is laid out in CSS pixels, so normalize at this boundary. The
+ * label owns y=0..12; the signed drawing region beneath it is split exactly
+ * in half so equal positive/negative magnitudes get equal pixel heights. */
+export function diffStripLayout(cssW, cssH, plotBbox, dpr) {
+    cssW = Math.max(1, Number(cssW) || 1);
+    cssH = Math.max(1, Number(cssH) || 1);
+    dpr = Number(dpr) > 0 ? Number(dpr) : 1;
+    let plotLeft = 0;
+    let plotWidth = cssW;
+    if (plotBbox && Number(plotBbox.width) > 0) {
+        plotLeft = Math.max(0, Math.min(cssW, Number(plotBbox.left) / dpr));
+        plotWidth = Math.max(0, Math.min(cssW - plotLeft,
+            Number(plotBbox.width) / dpr));
+    }
+    const top = Math.min(13, Math.max(0, cssH - 2));
+    const bottom = Math.max(top, cssH - 2);
+    const zero = (top + bottom) / 2;
+    return {
+        plotLeft,
+        plotWidth,
+        plotRight: plotLeft + plotWidth,
+        zero,
+        halfHeight: Math.max(1, (bottom - top) / 2),
+        top,
+        bottom,
+    };
+}
+
+export function diffStripXPosition(x, scaleWindow, layout) {
+    const lo = scaleWindow && scaleWindow.min;
+    const hi = scaleWindow && scaleWindow.max;
+    if (!(hi > lo) || !layout) return NaN;
+    return layout.plotLeft + (x - lo) / (hi - lo) * layout.plotWidth;
+}
+
+export function diffStripVisibleMax(items, scaleWindow) {
+    const lo = scaleWindow && scaleWindow.min;
+    const hi = scaleWindow && scaleWindow.max;
+    if (!(hi > lo)) return 0;
+    let max = 0;
+    for (const b of (items || [])) {
+        if (!(b.x1 > lo && b.x0 < hi)) continue;
+        let pos = 0, neg = 0;
+        for (const c of b.classes) {
+            if (c.deltaSeconds >= 0) pos += c.deltaSeconds;
+            else neg -= c.deltaSeconds;
+        }
+        max = Math.max(max, pos, neg);
+    }
+    return max;
+}
+
 /* Thin painter for the separate signed lane below uPlot. Positive class
  * contributions stack upward in their canonical hues; negative contributions
  * stack downward with the dimmed colors already chosen by the pure builder. */
-export function drawDiffStrip(canvas, geo, scaleWindow) {
+export function drawDiffStrip(canvas, geo, scaleWindow, plotBbox) {
     if (!canvas || !canvas.getContext) return;
     const cssW = canvas.clientWidth || 1;
     const cssH = canvas.clientHeight || 1;
@@ -548,31 +601,28 @@ export function drawDiffStrip(canvas, geo, scaleWindow) {
     ctx.font = '10px sans-serif';
     ctx.fillStyle = '#777';
     ctx.fillText('Δ AAS·s', 4, 10);
-    const zero = Math.round(cssH * 0.56) + 0.5;
+    const layout = diffStripLayout(cssW, cssH, plotBbox, dpr);
+    const zero = layout.zero;
     ctx.strokeStyle = '#555';
     ctx.lineWidth = 1;
-    ctx.beginPath(); ctx.moveTo(0, zero); ctx.lineTo(cssW, zero); ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(layout.plotLeft, zero);
+    ctx.lineTo(layout.plotRight, zero);
+    ctx.stroke();
     const items = (geo && geo.diff) || [];
     const lo = scaleWindow && scaleWindow.min;
     const hi = scaleWindow && scaleWindow.max;
     if (!(hi > lo) || !items.length) return;
     const visible = items.filter(b => b.x1 > lo && b.x0 < hi);
-    let max = 0;
-    for (const b of visible) {
-        let pos = 0, neg = 0;
-        for (const c of b.classes) {
-            if (c.deltaSeconds >= 0) pos += c.deltaSeconds;
-            else neg -= c.deltaSeconds;
-        }
-        max = Math.max(max, pos, neg);
-    }
+    // Intentional qualitative lane: with no y labels, scale to the largest
+    // signed stack in the visible window so local shape changes stay legible
+    // while panning. This is not a cross-window magnitude ruler.
+    const max = diffStripVisibleMax(items, scaleWindow);
     if (!(max > 0)) return;
-    const topRoom = Math.max(1, zero - 13);
-    const bottomRoom = Math.max(1, cssH - zero - 2);
-    const xPos = x => (x - lo) / (hi - lo) * cssW;
+    const xPos = x => diffStripXPosition(x, scaleWindow, layout);
     for (const b of visible) {
-        let x0 = Math.max(0, xPos(b.x0));
-        let x1 = Math.min(cssW, xPos(b.x1));
+        let x0 = Math.max(layout.plotLeft, xPos(b.x0));
+        let x1 = Math.min(layout.plotRight, xPos(b.x1));
         if (!(x1 > x0)) continue;
         x1 = Math.max(x0 + 1, x1 - 0.5);
         let up = zero, down = zero;
@@ -580,11 +630,11 @@ export function drawDiffStrip(canvas, geo, scaleWindow) {
         for (const c of b.classes) {
             ctx.fillStyle = c.color;
             if (c.deltaSeconds >= 0) {
-                const dh = c.deltaSeconds / max * topRoom;
+                const dh = c.deltaSeconds / max * layout.halfHeight;
                 ctx.fillRect(x0, up - dh, x1 - x0, dh);
                 up -= dh;
             } else {
-                const dh = -c.deltaSeconds / max * bottomRoom;
+                const dh = -c.deltaSeconds / max * layout.halfHeight;
                 ctx.fillRect(x0, down, x1 - x0, dh);
                 down += dh;
             }

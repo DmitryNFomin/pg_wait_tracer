@@ -272,6 +272,20 @@ h1 { font-size: 18px; font-weight: 600; color: #fff; }
   height: 54px;
   border-top: 1px solid #39394f;
 }
+.aas-compare-note {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  z-index: 3;
+  max-width: calc(100% - 80px);
+  padding: 3px 7px;
+  border: 1px solid rgba(100, 100, 125, .45);
+  border-radius: 3px;
+  background: rgba(25, 25, 47, .88);
+  font-size: 11px;
+  pointer-events: none;
+}
+.compare-baseline-unavailable { margin: 0 2px 7px; font-size: 11px; }
 #aas-chart-container .u-cursor-x {
   border-right: 1px dashed rgba(160, 160, 180, 0.55);
 }

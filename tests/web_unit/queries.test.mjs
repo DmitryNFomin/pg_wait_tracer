@@ -96,3 +96,14 @@ test('empty + single-row edge cases', () => {
         { key: 'total_ms', asc: false });
     assert.equal(m.table.rows.length, 1);
 });
+
+test('B-only compare failure falls back to the ordinary A queries model', () => {
+    const a = { fidelity: 'exact', rows: [q({ query_id: 'A', total_ms: 250 })] };
+    const m = buildQueriesModel({ compare: true, a, b: null,
+        baselineUnavailable: true }, null);
+    assert.equal(m.baselineUnavailable, true);
+    assert.equal(m.compare, undefined);
+    assert.deepEqual(m.table.rows.map(r => r.row.query_id), ['A']);
+    assert.ok(m.table.headers.some(h => h.label === 'Query ID'));
+    assert.ok(!m.table.headers.some(h => h.label === 'B'));
+});

@@ -3078,8 +3078,8 @@ def test_b5_metrics_panel(page):
 
 # ── Track U Phase U4: compare mode ──────────────────────────────────────────
 
-def _enable_compare_5m(page):
-    page.goto(COMPARE_URL)
+def _enable_compare_5m(page, url=COMPARE_URL):
+    page.goto(url)
     page.wait_for_selector("#status.connected", timeout=10000)
     page.click("#compare-btn")
     page.fill("#compare-custom-value", "5")
@@ -3182,6 +3182,128 @@ def test_compare_baseline_predates(page):
           "predating baseline renders neither ghost nor diff")
     check(page.locator("#aas-chart-container .pane-error").count() == 0,
           "predating baseline is not an error card")
+
+
+def test_compare_superseded_baseline_is_silent(page):
+    """H3: a B strip invalidated by a newer compare refresh never paints P1."""
+    print("--- Test U4.6: Superseded B strip is silent ---")
+    page.goto(COMPARE_URL)
+    page.wait_for_selector("#status.connected", timeout=10000)
+    if page.evaluate("document.getElementById('live-btn').classList.contains('active')"):
+        page.click("#live-btn")
+        page.wait_for_timeout(200)
+
+    # Hold the first cache fetch after compare is enabled. Changing the offset
+    # invalidates its generation and starts a newer B; releasing this old fetch
+    # then deterministically produces ensure() -> {ok:false, stale:true}.
+    page.evaluate("""() => {
+        const cache = window.__pgwt.stripCache;
+        const original = cache.fetchStrip.bind(cache);
+        let held = false;
+        cache.fetchStrip = args => {
+            if (window.__pgwt.compare.enabled && !held) {
+                held = true;
+                window.__baselineHeld = true;
+                return new Promise((resolve, reject) => {
+                    window.__releaseHeldBaseline = () =>
+                        original(args).then(resolve, reject);
+                });
+            }
+            return original(args);
+        };
+    }""")
+    page.click("#compare-btn")
+    page.fill("#compare-custom-value", "5")
+    page.select_option("#compare-custom-unit", "60")
+    page.click("#compare-custom-apply")
+    page.wait_for_function("window.__baselineHeld === true", timeout=5000)
+
+    # A second offset owns the pane and invalidates the held B generation.
+    page.click("#compare-btn")
+    page.fill("#compare-custom-value", "10")
+    page.select_option("#compare-custom-unit", "60")
+    page.click("#compare-custom-apply")
+    page.wait_for_function("""() => {
+        const d = window.__pgwt.aasDebug();
+        return window.__pgwt.compare.offsetNs === -600000000000 &&
+            d && d.mounted && d.compare && d.compare.diff.length > 0;
+    }""", timeout=10000)
+    page.evaluate("window.__releaseHeldBaseline()")
+    page.wait_for_timeout(500)
+    check(page.locator("#aas-chart-container > .pane-error").count() == 0,
+          "superseded B result produced no active-pane error card")
+    check(page.evaluate("window.__pgwt.aasDebug().mounted"),
+          "newer compare refresh still owns the rendered AAS pane")
+
+
+def test_compare_baseline_failure_degrades_to_a(page):
+    """H3: genuine B command failures keep A visible in chart and all tables."""
+    print("--- Test U4.7: B-only command failure degrades to A ---")
+    page.goto(COMPARE_URL)
+    page.wait_for_selector("#status.connected", timeout=10000)
+    if page.evaluate("document.getElementById('live-btn').classList.contains('active')"):
+        page.click("#live-btn")
+        page.wait_for_timeout(200)
+
+    # Rewrite only requests whose time midpoint is closer to derived B than A.
+    # The mock answers the unknown command with a healthy-server error envelope.
+    page.evaluate("""() => {
+        const ws = window.__pgwt.transport.ws;
+        const send = ws.send.bind(ws);
+        ws.send = data => {
+            const msg = JSON.parse(data);
+            const s = window.__pgwt.compareSnapshot();
+            if (s.enabled && msg.from != null && msg.to != null &&
+                ['aas', 'time_model', 'top_events', 'top_queries'].includes(msg.cmd)) {
+                const mid = (msg.from + msg.to) / 2;
+                const amid = (s.a.from + s.a.to) / 2;
+                const bmid = (s.b.from + s.b.to) / 2;
+                if (Math.abs(mid - bmid) < Math.abs(mid - amid))
+                    msg.cmd += '_broken_baseline';
+            }
+            return send(JSON.stringify(msg));
+        };
+    }""")
+    page.click("#compare-btn")
+    page.fill("#compare-custom-value", "5")
+    page.select_option("#compare-custom-unit", "60")
+    page.click("#compare-custom-apply")
+    page.wait_for_selector("#aas-chart-container .aas-compare-note",
+                           state="visible", timeout=10000)
+    note = page.text_content("#aas-chart-container .aas-compare-note")
+    check("Baseline unavailable" in note,
+          f"AAS pane explains the B-only degradation ('{note}')")
+    check(page.evaluate("window.__pgwt.aasDebug().mounted"),
+          "AAS investigation window A remains rendered")
+    check(page.locator("#aas-chart-container > .pane-error").count() == 0,
+          "B-only AAS failure does not paint a P1 error card")
+
+    for tab, expected in (("overview", "DB Time"),
+                          ("events", "Wait Event"),
+                          ("queries", "Query ID")):
+        page.click(f".tab[data-tab='{tab}']")
+        page.wait_for_selector("#table-container .compare-baseline-unavailable",
+                               timeout=10000)
+        body = page.text_content("#table-container")
+        check(expected in body,
+              f"{tab} renders investigation window A after B failure")
+        check("Baseline unavailable" in body,
+              f"{tab} carries the quiet baseline-unavailable note")
+        check(page.locator("#table-container > .pane-error").count() == 0,
+              f"{tab} B-only failure does not paint a P1 error card")
+
+
+def test_compare_echarts_renderer_note(page):
+    """L1: rollback renderer remains available but never silently omits D2."""
+    print("--- Test U4.8: ECharts compare limitation is explicit ---")
+    _enable_compare_5m(page, COMPARE_URL + "&renderer=echarts")
+    check(page.evaluate("window.__pgwt.aasRenderer") == "echarts",
+          "test is exercising the ECharts rollback renderer")
+    note = page.text_content("#aas-chart-container .aas-compare-note")
+    check("Compare visuals require the uPlot renderer" in note,
+          f"ECharts compare omission is explicit ('{note}')")
+    check(page.locator("#aas-chart-container canvas").count() > 0,
+          "ECharts still renders investigation window A")
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
@@ -3327,6 +3449,9 @@ def main():
                     test_compare_fidelity_mismatch,
                     test_compare_url_roundtrip,
                     test_compare_baseline_predates,
+                    test_compare_superseded_baseline_is_silent,
+                    test_compare_baseline_failure_degrades_to_a,
+                    test_compare_echarts_renderer_note,
                 ]
                 for fn in compare_tests:
                     fn(compare_page)

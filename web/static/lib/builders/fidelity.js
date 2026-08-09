@@ -71,7 +71,8 @@ function evidencePhrase(fid) {
 export function buildCompareFidelity(dataA, dataB, opts) {
     opts = opts || {};
     const a = fidelityOf(dataA);
-    const b = opts.baselinePredates ? 'none' : fidelityOf(dataB);
+    const unavailable = !!(opts.baselinePredates || opts.baselineUnavailable);
+    const b = unavailable ? 'none' : fidelityOf(dataB);
     return {
         a: { fidelity: a, label: fidelityLabel(a) },
         b: { fidelity: b, label: fidelityLabel(b) },
@@ -80,7 +81,9 @@ export function buildCompareFidelity(dataA, dataB, opts) {
             ? 'Δ compares ' + evidencePhrase(a) + ' against ' + evidencePhrase(b)
             : null,
         baselinePredates: !!opts.baselinePredates,
-        note: opts.baselinePredates ? 'baseline predates the trace' : null,
+        baselineUnavailable: !!opts.baselineUnavailable,
+        note: opts.baselinePredates ? 'baseline predates the trace'
+            : (opts.baselineUnavailable ? 'baseline unavailable' : null),
     };
 }
 

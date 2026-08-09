@@ -135,6 +135,7 @@ let autoRefreshId = 0;
 let autoRefreshOn = false;
 let lastLiveTickTo = null;
 let compareEvidence = null;
+let activeRefreshEpoch = 0;
 
 // Sort state per table view. getSort returns the current { key, asc } (or null
 // for server order); toggleSort cycles desc→asc on repeated clicks of the same
@@ -604,11 +605,13 @@ async function refresh(aasMountReason) {
 
 async function refreshActive(aasMountReason) {
     if (!activeView) return;
+    const myEpoch = ++activeRefreshEpoch;
     const ctx = activeCtx(aasMountReason || 'deliberate');
     let data;
     try {
         data = await activeView.requests(ctx);
     } catch (e) {
+        if (myEpoch !== activeRefreshEpoch) return;
         // Superseded: silent. Transport failure: surface the degraded state
         // (UI-1) — the current paint stays but under the connection-lost
         // overlay, never pretending to be fresh. Command-level errors paint
@@ -616,6 +619,7 @@ async function refreshActive(aasMountReason) {
         onRequestError(e, { view: 'active', el: chartEl, retry: refreshActive });
         return;
     }
+    if (myEpoch !== activeRefreshEpoch) return;
     let model;
     try {
         model = activeView.build(data, ctx);
@@ -626,6 +630,7 @@ async function refreshActive(aasMountReason) {
                                    retry: refreshActive });
         return;
     }
+    if (myEpoch !== activeRefreshEpoch) return;
     try {
         activeView.mount(chartEl, model, ctx);
         clearPaneError(chartEl);
@@ -1272,14 +1277,14 @@ function renderCompareHeader() {
             '<span class="compare-note">loading baseline evidence…</span>');
 }
 
-function setCompareEvidence(dataA, dataB, predates) {
+function setCompareEvidence(dataA, dataB, predates, unavailable) {
     if (!compare.enabled) {
         compareEvidence = null;
         renderCompareHeader();
         return;
     }
     compareEvidence = buildComparePaneFidelity(dataA, dataB,
-        { baselinePredates: !!predates });
+        { baselinePredates: !!predates, baselineUnavailable: !!unavailable });
     renderCompareHeader();
 }
 

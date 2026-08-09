@@ -92,6 +92,12 @@ export function buildComparePaneFidelity(dataA, dataB, opts) {
     return buildCompareFidelity(dataA, dataB, opts);
 }
 
+export function baselineUnavailableHtml(unavailable) {
+    if (!unavailable) return '';
+    return '<div class="compare-note compare-baseline-unavailable">' +
+        'Baseline unavailable; showing investigation window A only</div>';
+}
+
 /* ── Percentile-basis footnote (U2, review P10) ──────────────────────────────
  *
  * The events table's Avg/P50/P95/P99/Max come from EXACT-captured events

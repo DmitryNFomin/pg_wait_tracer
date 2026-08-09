@@ -59,6 +59,15 @@ test('compare baseline before retention is a quiet no-data note', () => {
     assert.equal(m.note, 'baseline predates the trace');
 });
 
+test('compare baseline command failure is a quiet unavailable note', () => {
+    const m = buildCompareFidelity({ fidelity: 'sampled' }, null,
+        { baselineUnavailable: true });
+    assert.equal(m.a.fidelity, 'sampled');
+    assert.equal(m.b.fidelity, 'none');
+    assert.equal(m.mismatch, false);
+    assert.equal(m.note, 'baseline unavailable');
+});
+
 // ── fidelity shading ─────────────────────────────────────────────────────────
 
 test('shading: exact window → no bands, no markArea, no legend', () => {

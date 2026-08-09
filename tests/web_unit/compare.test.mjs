@@ -4,7 +4,9 @@ import {
     buildDeltaComparison, defaultDeltaSort,
 } from '../../web/static/lib/builders/compare.js';
 import { buildTableModel } from '../../web/static/lib/table.js';
-import { compareEventsConfig } from '../../web/static/lib/builders/table-configs.js';
+import {
+    compareEventsConfig, compareOverviewConfig,
+} from '../../web/static/lib/builders/table-configs.js';
 
 const ev = (event_id, name, total_ms) => ({
     event_id, name, class: name.split(':')[0], total_ms,
@@ -52,6 +54,40 @@ test('noise floor collapses exact count into the honest change-floor row', () =>
     assert.equal(d.belowFloor, 1);
     assert.equal(d.truncation.text, '… 1 entities below the change floor');
     assert.ok(!d.rows.some(r => r.event_id === 3));
+});
+
+test('overview delta ranking excludes DB Time aggregate and Idle accounting row', () => {
+    const a = { db_time_ms: 12_500, rows: [
+        { indent: 0, name: 'DB Time', ms: 12_500 },
+        { indent: 1, name: 'CPU*', ms: 4_800 },
+        { indent: 1, name: 'IO', ms: 3_200 },
+        { indent: 1, name: 'Lock', ms: 1_500 },
+        { indent: 0, name: 'Idle', ms: 45_000, pct: 0, aas: 0 },
+    ] };
+    const b = { db_time_ms: 10_000, rows: [
+        { indent: 0, name: 'DB Time', ms: 10_000 },
+        { indent: 1, name: 'CPU*', ms: 3_840 },
+        { indent: 1, name: 'IO', ms: 2_560 },
+        { indent: 1, name: 'Lock', ms: 1_200 },
+        { indent: 0, name: 'Idle', ms: 36_000, pct: 0, aas: 0 },
+    ] };
+    const d = buildDeltaComparison('overview', a, b);
+    const m = buildTableModel(compareOverviewConfig, d.rows, defaultDeltaSort(null));
+    assert.deepEqual(m.rows.map(r => r.row.name), ['CPU*', 'IO', 'Lock']);
+    assert.equal(m.rows[0].row.delta_ms, 960,
+        'real wait-class change, not aggregate/idle accounting, ranks first');
+    assert.ok(!d.rows.some(r => r.name === 'DB Time' || r.name === 'Idle'));
+});
+
+test('noise floor uses investigation window A even when baseline B is much busier', () => {
+    const d = buildDeltaComparison('events',
+        { db_time_ms: 1_000, rows: [ev(77, 'Lock:new-in-A', 100)] },
+        { db_time_ms: 100_000, rows: [] });
+    assert.equal(d.floorMs, 50);
+    assert.equal(d.belowFloor, 0);
+    assert.equal(d.rows.length, 1);
+    assert.equal(d.rows[0].event_id, 77);
+    assert.equal(d.rows[0].status, 'new');
 });
 
 test('one-window entities are new/gone and never receive infinity ratios', () => {

@@ -58,6 +58,8 @@ import {
     compareHooks, drawDiffStrip,
 } from '../lib/uplot-aas.js';
 import { shiftQuantized, shiftWindow } from '../lib/camera.js';
+import { fullyCoversStrip } from '../lib/stripcache.js';
+import { CancelledError } from '../lib/transport.js';
 import {
     SAMPLED_BAND_COLOR, MIXED_BAND_COLOR, SAMPLED_BORDER, MIXED_BORDER,
 } from '../lib/builders/fidelity.js';
@@ -240,6 +242,8 @@ export function createActiveView() {
     let uHost = null;          // inner host div (el keeps its padding box)
     let readoutEl = null;      // compact crosshair readout card
     let diffCanvas = null;     // D2 signed A-B lane below the uPlot pane
+    let compareNoteEl = null;  // quiet B-loading/failure/renderer honesty note
+    let baselineFailed = false; // persists across provisional A-only repaints
     // The latest painted state: { data, opts, spec }. The overlay draw hooks,
     // the hit-test readout, and the legend restack all read THIS — it is the
     // single source for "what is on the canvas right now".
@@ -336,6 +340,39 @@ export function createActiveView() {
         resetLegend();
     }
 
+    function renderCompareNote(model, ctx) {
+        const notes = [];
+        if (ctx && ctx.compare && ctx.compare.enabled && renderer === 'echarts') {
+            notes.push('Compare visuals require the uPlot renderer');
+        }
+        if (model && model.baselineUnavailable) {
+            notes.push('Baseline unavailable; showing A only');
+        } else if (model && model.baselineLoading) {
+            notes.push('Baseline loading; showing A only');
+        }
+        if (!notes.length) {
+            if (compareNoteEl) compareNoteEl.style.display = 'none';
+            return;
+        }
+        if (!compareNoteEl) {
+            compareNoteEl = document.createElement('div');
+            compareNoteEl.className = 'aas-compare-note compare-note';
+            el.appendChild(compareNoteEl);
+        }
+        compareNoteEl.textContent = notes.join(' · ');
+        compareNoteEl.style.display = 'block';
+    }
+
+    function rememberBaselineState(model, ctx) {
+        if (!ctx || !ctx.compare || !ctx.compare.enabled ||
+            (model && (model.baselinePredates || model.compareData))) {
+            baselineFailed = false;
+        } else if (model && model.baselineUnavailable) {
+            baselineFailed = true;
+        }
+        // baselineLoading is provisional: it must not erase a known failure.
+    }
+
     // ── uPlot mount path ─────────────────────────────────────────────────────
 
     /* The x scale target: the camera window when available (the camera is the
@@ -366,7 +403,8 @@ export function createActiveView() {
         u.setScale('x', { min: cam.fromNs / NS_PER_MS,
                           max: cam.toNs / NS_PER_MS });
         if (latest) drawDiffStrip(diffCanvas, latest.spec.compare,
-            { min: cam.fromNs / NS_PER_MS, max: cam.toNs / NS_PER_MS });
+            { min: cam.fromNs / NS_PER_MS, max: cam.toNs / NS_PER_MS },
+            u.bbox);
     }
 
     function measureUplot() {
@@ -404,7 +442,8 @@ export function createActiveView() {
         if (el) el.classList.toggle('compare-active', active);
         if (!active) return;
         drawDiffStrip(diffCanvas, spec && spec.compare,
-            viewportScale(ctx, spec || { xWindow: { min: 0, max: 1 } }));
+            viewportScale(ctx, spec || { xWindow: { min: 0, max: 1 } }),
+            u && u.bbox);
     }
 
     /* Construct a fresh instance from a spec (initial mount + the rare
@@ -493,14 +532,17 @@ export function createActiveView() {
         if (ctx.setCompareEvidence) {
             ctx.setCompareEvidence(model && model.isCompare ? model.data : null,
                 (model && model.compareData) || null,
-                !!(model && model.baselinePredates));
+                !!(model && model.baselinePredates),
+                !!(model && model.baselineUnavailable));
         }
         setEmptyStatus(ctx);
     }
 
     function mountUplot(model, ctx) {
         if (!uHost) return;                 // disposed
+        rememberBaselineState(model, ctx);
         ensureStrip(ctx);
+        renderCompareNote(model, ctx);
         if (!model.hasData) { uplotEmptyState(ctx, model); return; }
 
         const spec0 = model.spec;
@@ -559,7 +601,8 @@ export function createActiveView() {
         paintDiff(ctx, spec);
         if (ctx.setCompareEvidence) {
             ctx.setCompareEvidence(model.isCompare ? model.data : null,
-                model.compareData || null, !!model.baselinePredates);
+                model.compareData || null, !!model.baselinePredates,
+                !!model.baselineUnavailable);
         }
         setStatusLine(ctx, spec);
     }
@@ -751,6 +794,10 @@ export function createActiveView() {
             diffCanvas.parentNode.removeChild(diffCanvas);
         }
         diffCanvas = null;
+        if (compareNoteEl && compareNoteEl.parentNode) {
+            compareNoteEl.parentNode.removeChild(compareNoteEl);
+        }
+        compareNoteEl = null;
         if (el) el.classList.remove('compare-active');
         latest = null;
         hiddenKey = null;
@@ -758,13 +805,16 @@ export function createActiveView() {
         resetYMaxHysteresis();
         panning = null;
         enterCtx = null;
+        baselineFailed = false;
     }
 
     // ── ECharts mount path (U2a, kept intact — A/B baseline + rollback) ─────
 
     function mountEcharts(model, ctx) {
         if (!chart) return;                 // disposed
+        rememberBaselineState(model, ctx);
         ensureStrip(ctx);
+        renderCompareNote(model, ctx);
         if (!model.hasData) {
             // UI-5: an empty window must not leave the PREVIOUS window's
             // paint on screen while the tables say "No data" — clear the
@@ -784,7 +834,8 @@ export function createActiveView() {
             clearLegendAndChip();
             if (ctx.setCompareEvidence) {
                 ctx.setCompareEvidence(model.isCompare ? model.data : null,
-                    model.compareData || null, !!model.baselinePredates);
+                    model.compareData || null, !!model.baselinePredates,
+                    !!model.baselineUnavailable);
             }
             setEmptyStatus(ctx);
             return;
@@ -815,7 +866,8 @@ export function createActiveView() {
         renderFidelityChip(model, ctx);
         if (ctx.setCompareEvidence) {
             ctx.setCompareEvidence(model.isCompare ? model.data : null,
-                model.compareData || null, !!model.baselinePredates);
+                model.compareData || null, !!model.baselinePredates,
+                !!model.baselineUnavailable);
         }
         setStatusLine(ctx, model);
     }
@@ -942,10 +994,14 @@ export function createActiveView() {
                 ctx.compare.offsetNs);
             const [aData, bResult] = await Promise.all([a, ctx.stripCache.ensure(q)]);
             if (!bResult.ok) {
-                throw (bResult.error || new Error('baseline strip unavailable'));
+                if (bResult.stale) {
+                    throw new CancelledError('superseded baseline strip');
+                }
+                return { compare: true, a: aData, b: null,
+                    baselinePredates: false, baselineUnavailable: true };
             }
             return { compare: true, a: aData, b: bResult.payload,
-                baselinePredates: false };
+                baselinePredates: false, baselineUnavailable: false };
         },
 
         /* PURE: data -> renderer model. Same inputs to both builders (the
@@ -968,6 +1024,8 @@ export function createActiveView() {
                 return {
                     data: primary, compareData: pair && pair.b,
                     baselinePredates: !!(pair && pair.baselinePredates),
+                    baselineUnavailable: !!(pair && pair.baselineUnavailable),
+                    baselineLoading: !!(pair && pair.baselineLoading),
                     isCompare: !!pair, opts, spec,
                     hasData: spec.hasData,
                     maxAas: spec.maxAas,
@@ -980,6 +1038,8 @@ export function createActiveView() {
             m.data = primary;
             m.compareData = pair && pair.b;
             m.baselinePredates = !!(pair && pair.baselinePredates);
+            m.baselineUnavailable = !!(pair && pair.baselineUnavailable);
+            m.baselineLoading = !!(pair && pair.baselineLoading);
             m.isCompare = !!pair;
             m.opts = opts;
             return m;
@@ -1011,11 +1071,12 @@ export function createActiveView() {
                     const bq = shiftQuantized(q, ctx.compare.offsetNs);
                     ctx.stripCache.ensure(bq);
                     const bhit = ctx.stripCache.get(bq);
-                    if (!bhit) return false;
-                    b = bhit.payload;
+                    if (fullyCoversStrip(bhit, bq)) b = bhit.payload;
                 }
                 payload = { compare: true, a: hit.payload, b,
-                    baselinePredates: predates };
+                    baselinePredates: predates,
+                    baselineUnavailable: !predates && !b && baselineFailed,
+                    baselineLoading: !predates && !b && !baselineFailed };
             }
             const model = this.build(payload, ctx);
             this.mount(el, model, ctx);
@@ -1035,7 +1096,12 @@ export function createActiveView() {
             else leaveEcharts();
             const chip = document.getElementById('aas-fidelity-chip');
             if (chip) chip.remove();
+            if (compareNoteEl && compareNoteEl.parentNode) {
+                compareNoteEl.parentNode.removeChild(compareNoteEl);
+            }
+            compareNoteEl = null;
             el = null;
+            baselineFailed = false;
             resetLegend();
         },
 
