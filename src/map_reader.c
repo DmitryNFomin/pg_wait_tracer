@@ -172,6 +172,9 @@ void pgwt_read_state_map(struct pgwt_daemon *d)
     uint64_t now = now_ns();
     int entries = 0;
     int we0_open = 0;
+    int lookup_failed = 0;
+    int we_nonzero = 0;
+    int open_zero = 0;
     int skipped_not_live = 0;
     int skipped_closed = 0;
     static int dbg_scan = -1;
@@ -181,8 +184,10 @@ void pgwt_read_state_map(struct pgwt_daemon *d)
         dbg_scan = getenv("PGWT_DEBUG_DUMP_STATE") != NULL;
     if (dbg_scan)
         fprintf(stderr, "STATEDUMP-SCAN: entries=%d we0_open=%d "
+                "lookup_failed=%d we_nonzero=%d open_zero=%d "
                 "skipped_not_live=%d skipped_closed=%d\n",
-                entries, we0_open, skipped_not_live, skipped_closed);
+                entries, we0_open, lookup_failed, we_nonzero, open_zero,
+                skipped_not_live, skipped_closed);
 
     errno = 0;
     next_rc = bpf_map_get_next_key(state_fd, &skey, &snext);
@@ -207,8 +212,14 @@ void pgwt_read_state_map(struct pgwt_daemon *d)
             uint64_t open_ns = now - sval.last_ts;
             uint32_t we = sval.last_event;
 
-            if (we == 0 && open_ns > 0)
-                we0_open++;
+            if (dbg_scan) {
+                if (we != 0)
+                    we_nonzero++;
+                else if (open_ns == 0)
+                    open_zero++;
+                else
+                    we0_open++;
+            }
 
             /* Store current state for active sessions view */
             struct pgwt_pid_accum *pa_cur = pgwt_get_or_create_pid(&d->accum, snext);
@@ -349,15 +360,71 @@ void pgwt_read_state_map(struct pgwt_daemon *d)
                     }
                 }
             }
+        } else if (dbg_scan) {
+            lookup_failed++;
         }
         skey = snext;
         next_rc = bpf_map_get_next_key(state_fd, &skey, &snext);
     }
 
-    if (dbg_scan)
+    if (dbg_scan) {
         fprintf(stderr, "STATEDUMP-SCAN: entries=%d we0_open=%d "
-                "skipped_not_live=%d skipped_closed=%d\n",
-                entries, we0_open, skipped_not_live, skipped_closed);
+                "lookup_failed=%d we_nonzero=%d open_zero=%d "
+                "skipped_not_live=%d skipped_closed=%d "
+                "state_fd=%d mode=%d cpu_acct=%d\n",
+                entries, we0_open, lookup_failed, we_nonzero, open_zero,
+                skipped_not_live, skipped_closed, state_fd, (int)d->mode,
+                d->cpu_accounting ? 1 : 0);
+
+        int registry_pids = 0;
+        int found = 0;
+        int direct_we0_open = 0;
+        int direct_we_nonzero = 0;
+        int direct_open_zero = 0;
+        int not_found = 0;
+        int pid_lines = 0;
+
+        for (int i = 0; i < d->backends.count; i++) {
+            struct pgwt_backend *be = &d->backends.entries[i];
+            if (!be->is_alive || be->pid <= 0)
+                continue;
+
+            uint32_t pid = (uint32_t)be->pid;
+            struct pgwt_pid_state direct_sval;
+            uint64_t open_ns = 0;
+            int pid_found =
+                bpf_map_lookup_elem(state_fd, &pid, &direct_sval) == 0;
+
+            registry_pids++;
+            if (pid_found) {
+                found++;
+                open_ns = now - direct_sval.last_ts;
+                if (direct_sval.last_event != 0)
+                    direct_we_nonzero++;
+                else if (open_ns == 0)
+                    direct_open_zero++;
+                else
+                    direct_we0_open++;
+            } else {
+                not_found++;
+                memset(&direct_sval, 0, sizeof(direct_sval));
+            }
+
+            if (pid_lines < 8) {
+                fprintf(stderr, "STATEDUMP-DIRECT-PID: pid=%d found=%d "
+                        "we=0x%llx open_ns=%llu\n",
+                        be->pid, pid_found,
+                        (unsigned long long)direct_sval.last_event,
+                        (unsigned long long)open_ns);
+                pid_lines++;
+            }
+        }
+
+        fprintf(stderr, "STATEDUMP-DIRECT: registry_pids=%d found=%d "
+                "we0_open=%d we_nonzero=%d open_zero=%d not_found=%d\n",
+                registry_pids, found, direct_we0_open, direct_we_nonzero,
+                direct_open_zero, not_found);
+    }
 }
 
 /* Read BPF accum_map (PERCPU lightweight mode) and merge into event_accum.
