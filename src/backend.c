@@ -83,10 +83,15 @@ static uint64_t now_ns(void)
  * if the backend has not set MyProc / the pointer yet. */
 uint64_t pgwt_resolve_backend_wait_addr(struct pgwt_daemon *d, pid_t pid)
 {
+    uint64_t started_ns = pgwt_debug_block_begin(d);
+    uint64_t addr;
     if (d->use_myproc)
-        return pgwt_resolve_wait_addr_via_myproc(pid, d->my_wait_ptr_addr,
+        addr = pgwt_resolve_wait_addr_via_myproc(pid, d->my_wait_ptr_addr,
                                                  d->pgproc_wait_offset);
-    return pgwt_read_pointer(pid, d->my_wait_ptr_addr);
+    else
+        addr = pgwt_read_pointer(pid, d->my_wait_ptr_addr);
+    pgwt_debug_block_end(d, "backend_wait_addr_resolve", pid, started_ns);
+    return addr;
 }
 
 /* Loud, once-only report that the BPF state_map is full (CAP-1). Every
@@ -291,7 +296,11 @@ int pgwt_attach_backend_watchpoint(struct pgwt_daemon *d,
      * an unseeded (or stale, on re-escalation) state entry and the opening
      * interval was mis-timed. */
     int wp_prog_fd = bpf_program__fd(d->skel->progs.on_watchpoint);
+    uint64_t started_ns = pgwt_debug_block_begin(d);
     be->wp_fd = pgwt_open_watchpoint_disabled(be->pid, be->wp_addr, wp_prog_fd);
+    pgwt_debug_block_end(d, be->wp_fd < 0 ? "watchpoint_open_failed"
+                                          : "watchpoint_open",
+                         be->pid, started_ns);
     if (be->wp_fd < 0) {
         /* Process likely exited before attach — caller decides on cleanup. */
         d->counters.wp_attach_failures_total++;
@@ -300,10 +309,19 @@ int pgwt_attach_backend_watchpoint(struct pgwt_daemon *d,
 
     if (be->attach_ts == 0)
         be->attach_ts = now_ns();
+    started_ns = pgwt_debug_block_begin(d);
     preseed_state_map(d, be->pid, be->wp_addr, be->attach_ts, false);
+    pgwt_debug_block_end(d, "watchpoint_preseed", be->pid, started_ns);
 
-    if (pgwt_watchpoint_enable(be->wp_fd) != 0) {
+    started_ns = pgwt_debug_block_begin(d);
+    int enable_rc = pgwt_watchpoint_enable(be->wp_fd);
+    pgwt_debug_block_end(d, enable_rc != 0 ? "watchpoint_enable_failed"
+                                           : "watchpoint_enable",
+                         be->pid, started_ns);
+    if (enable_rc != 0) {
+        started_ns = pgwt_debug_block_begin(d);
         pgwt_close_watchpoint(be->wp_fd);
+        pgwt_debug_block_end(d, "watchpoint_close", be->pid, started_ns);
         be->wp_fd = -1;
         d->counters.wp_attach_failures_total++;
         return -1;
@@ -407,7 +425,10 @@ int pgwt_scan_existing_backends(struct pgwt_daemon *d)
          *                         whole scan proves nothing,
          *                         pgwt_confirm_wait_offset() re-polls. */
         if (!d->wait_offset_validated) {
+            uint64_t started_ns = pgwt_debug_block_begin(d);
             int v = pgwt_validate_wait_addr(pid, ptr);
+            pgwt_debug_block_end(d, "backend_wait_addr_validate", pid,
+                                 started_ns);
             if (v == PGWT_WEI_GARBAGE) {
                 fprintf(stderr,
                         "FATAL: resolved wait_event_info for PID %d holds a value "
@@ -477,10 +498,16 @@ int pgwt_scan_existing_backends(struct pgwt_daemon *d)
             continue;
         }
 
-        if (pgwt_parse_cmdline(pid, &be->meta) == 0)
+        uint64_t started_ns = pgwt_debug_block_begin(d);
+        int cmdline_rc = pgwt_parse_cmdline(pid, &be->meta);
+        pgwt_debug_block_end(d, "backend_cmdline_read", pid, started_ns);
+        if (cmdline_rc == 0)
             be->meta_parsed = true;
-        if (d->backend_meta)
+        if (d->backend_meta) {
+            started_ns = pgwt_debug_block_begin(d);
             pgwt_bm_write(d->backend_meta, pid, &be->meta);
+            pgwt_debug_block_end(d, "backend_meta_write", pid, started_ns);
+        }
 
         if (d->verbose)
             fprintf(stderr, "INFO: attached to PID %d (%s), watchpoint at 0x%lx\n",
@@ -559,7 +586,10 @@ int pgwt_recover_unattached_backends(struct pgwt_daemon *d)
          * level-triggered version of handle_fork's direct-attach fast path. A
          * still-initializing backend (local dummy) is left to bootstrap. */
         uint64_t ptr = pgwt_resolve_backend_wait_addr(d, pid);
-        if (ptr != 0 && pgwt_addr_is_shared(pid, ptr) == 1) {
+        uint64_t started_ns = pgwt_debug_block_begin(d);
+        int addr_shared = ptr != 0 ? pgwt_addr_is_shared(pid, ptr) : 0;
+        pgwt_debug_block_end(d, "backend_addr_shared", pid, started_ns);
+        if (ptr != 0 && addr_shared == 1) {
             if (pgwt_handle_init(d, pid, ptr) == 0) {
                 recovered++;
                 if (d->verbose)
@@ -807,8 +837,14 @@ int pgwt_handle_fork(struct pgwt_daemon *d, pid_t child_pid)
 
     /* Attach bootstrap watchpoint on my_wait_event_info pointer address */
     int bootstrap_prog_fd = bpf_program__fd(d->skel->progs.on_bootstrap);
+    uint64_t started_ns = pgwt_debug_block_begin(d);
     be->bootstrap_fd = pgwt_open_watchpoint(child_pid, d->my_wait_ptr_addr,
                                              bootstrap_prog_fd);
+    pgwt_debug_block_end(d,
+                         be->bootstrap_fd < 0
+                             ? "bootstrap_watchpoint_open_failed"
+                             : "bootstrap_watchpoint_open",
+                         child_pid, started_ns);
     if (be->bootstrap_fd < 0) {
         /* Race: child may have already exited or initialized.
          * Try direct init path (version-aware address resolution). */
@@ -843,7 +879,10 @@ int pgwt_handle_fork(struct pgwt_daemon *d, pid_t child_pid)
      * watchpoint will catch that write. (PG<17: MyProc starts NULL, and a
      * non-NULL PGPROC is in shm, so the same predicate holds.) */
     uint64_t ptr = pgwt_resolve_backend_wait_addr(d, child_pid);
-    if (ptr != 0 && pgwt_addr_is_shared(child_pid, ptr) == 1) {
+    started_ns = pgwt_debug_block_begin(d);
+    int addr_shared = ptr != 0 ? pgwt_addr_is_shared(child_pid, ptr) : 0;
+    pgwt_debug_block_end(d, "backend_addr_shared", child_pid, started_ns);
+    if (ptr != 0 && addr_shared == 1) {
         if (d->verbose)
             fprintf(stderr, "INFO: fork PID %d already initialized "
                     "(fork->attach race) — attaching directly\n", child_pid);
@@ -867,13 +906,17 @@ int pgwt_handle_init(struct pgwt_daemon *d, pid_t pid, uint64_t addr)
 
     /* Close bootstrap watchpoint if any */
     if (be->bootstrap_fd >= 0) {
+        uint64_t started_ns = pgwt_debug_block_begin(d);
         pgwt_close_watchpoint(be->bootstrap_fd);
+        pgwt_debug_block_end(d, "bootstrap_watchpoint_close", pid, started_ns);
         be->bootstrap_fd = -1;
     }
 
     /* Close previous watchpoint if re-initializing */
     if (be->wp_fd >= 0) {
+        uint64_t started_ns = pgwt_debug_block_begin(d);
         pgwt_close_watchpoint(be->wp_fd);
+        pgwt_debug_block_end(d, "watchpoint_close", pid, started_ns);
         be->wp_fd = -1;
     }
 
@@ -883,7 +926,9 @@ int pgwt_handle_init(struct pgwt_daemon *d, pid_t pid, uint64_t addr)
      * the offset/address is wrong — refuse rather than trace nonsense; a
      * zero reading is NOT proof (keep validating on later backends). */
     if (!d->wait_offset_validated) {
+        uint64_t started_ns = pgwt_debug_block_begin(d);
         int v = pgwt_validate_wait_addr(pid, addr);
+        pgwt_debug_block_end(d, "backend_wait_addr_validate", pid, started_ns);
         if (v == PGWT_WEI_GARBAGE) {
             fprintf(stderr,
                     "FATAL: resolved wait_event_info for PID %d holds a value "
@@ -915,10 +960,16 @@ int pgwt_handle_init(struct pgwt_daemon *d, pid_t pid, uint64_t addr)
         return -1;
     }
 
-    if (pgwt_parse_cmdline(pid, &be->meta) == 0)
+    uint64_t started_ns = pgwt_debug_block_begin(d);
+    int cmdline_rc = pgwt_parse_cmdline(pid, &be->meta);
+    pgwt_debug_block_end(d, "backend_cmdline_read", pid, started_ns);
+    if (cmdline_rc == 0)
         be->meta_parsed = true;
-    if (d->backend_meta)
+    if (d->backend_meta) {
+        started_ns = pgwt_debug_block_begin(d);
         pgwt_bm_write(d->backend_meta, pid, &be->meta);
+        pgwt_debug_block_end(d, "backend_meta_write", pid, started_ns);
+    }
 
     if (d->verbose)
         fprintf(stderr, "INFO: PID %d initialized (%s), real watchpoint at 0x%lx\n",
@@ -933,15 +984,19 @@ int pgwt_handle_exit(struct pgwt_daemon *d, pid_t pid)
     if (!be) return 0;
 
     /* Close watchpoint fds */
+    uint64_t started_ns = pgwt_debug_block_begin(d);
     pgwt_close_watchpoint(be->wp_fd);
     be->wp_fd = -1;
     pgwt_close_watchpoint(be->bootstrap_fd);
     be->bootstrap_fd = -1;
+    pgwt_debug_block_end(d, "watchpoint_close", pid, started_ns);
 
     /* Delete BPF map entries for this PID */
     int state_fd = bpf_map__fd(d->skel->maps.state_map);
     uint32_t key = pid;
+    started_ns = pgwt_debug_block_begin(d);
     bpf_map_delete_elem(state_fd, &key);
+    pgwt_debug_block_end(d, "backend_state_delete", pid, started_ns);
 
     be->is_alive = false;
 
