@@ -1,134 +1,123 @@
 #!/usr/bin/env python3
-"""Repeat the full-mode pure-CPU straddle phase until its live view misses."""
+"""Repeat the full ci_smoke.sh sequence until mode 4 is reproduced."""
 
 import argparse
 import os
 from pathlib import Path
-import re
 import subprocess
 import sys
-import traceback
 
 
 REPO = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(REPO / "tests"))
-
-import test_capture_smoke as t  # noqa: E402
-
-
-PROC_CPU_RE = re.compile(r"/proc on-CPU ([0-9]+(?:\.[0-9]+)?)ms")
-
-
-def write_failure(stderr, summary):
-    strike_path = REPO / "mode4-strike.log"
-    summary_path = REPO / "mode4-hunt-summary.txt"
-    if isinstance(stderr, str):
-        stderr = stderr.encode("utf-8", errors="replace")
-    strike_path.write_bytes(stderr)
-    summary_path.write_text(summary + "\n", encoding="utf-8")
-    print(summary)
-    print("=== complete tracer stderr ===")
-    sys.stdout.write(stderr.decode("utf-8", errors="replace"))
-    if stderr and not stderr.endswith(b"\n"):
-        print()
+CI_SMOKE = REPO / "tests" / "ci_smoke.sh"
+STRIKE_LOG = REPO / "mode4-strike.log"
+SUMMARY_LOG = REPO / "mode4-hunt-summary.txt"
+STRIKE_SIGNATURE = b"FAIL: pure-CPU straddle live view shows CPU* > 0"
+STRAY_PROCESSES = ("pg_wait_tracer", "pgwt-server")
 
 
-def main():
+def sudo_env():
+    """Return the environment assignments needed by the full smoke test."""
+    assignments = [
+        f"PATH={os.environ.get('PATH', '')}",
+        "PGWT_DEBUG_DUMP_STATE=1",
+    ]
+    for name in ("BPFTOOL", "GITHUB_STEP_SUMMARY"):
+        value = os.environ.get(name)
+        if value:
+            assignments.append(f"{name}={value}")
+    return assignments
+
+
+def run_full_sequence(pg_version):
+    command = [
+        "sudo", "env", *sudo_env(), str(CI_SMOKE),
+        "--pg-version", pg_version,
+    ]
+    return subprocess.run(
+        command,
+        cwd=REPO,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=False,
+    )
+
+
+def kill_stray_processes():
+    """Remove tracer processes without disturbing the PostgreSQL cluster."""
+    for signal in ("-TERM", "-KILL"):
+        for process_name in STRAY_PROCESSES:
+            result = subprocess.run(
+                ["sudo", "pkill", signal, "-x", process_name],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+            # pkill returns 1 when no matching process exists.
+            if result.returncode not in (0, 1):
+                raise RuntimeError(
+                    f"could not clean up stray {process_name} process "
+                    f"(pkill rc={result.returncode})")
+
+
+def first_fail_line(output):
+    for raw_line in output.splitlines():
+        line = raw_line.decode("utf-8", errors="replace").strip()
+        if "FAIL" in line:
+            return line
+    return "no FAIL line found"
+
+
+def write_strike(output, verdict):
+    STRIKE_LOG.write_bytes(output)
+    SUMMARY_LOG.write_text(verdict + "\n", encoding="utf-8")
+    print(verdict, flush=True)
+    sys.stdout.buffer.write(output)
+    if output and not output.endswith(b"\n"):
+        sys.stdout.buffer.write(b"\n")
+    sys.stdout.buffer.flush()
+
+
+def write_not_reproduced(iterations):
+    verdict = f"not reproduced in {iterations} full-sequence runs"
+    STRIKE_LOG.write_text(verdict + "\n", encoding="utf-8")
+    SUMMARY_LOG.write_text(verdict + "\n", encoding="utf-8")
+    print(verdict)
+
+
+def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--iterations", type=int, required=True)
-    parser.add_argument("--postmaster-pid-file", type=Path, required=True)
-    args = parser.parse_args()
+    parser.add_argument("--pg-version", required=True)
+    args = parser.parse_args(argv)
     if args.iterations <= 0:
         parser.error("--iterations must be positive")
 
-    pm_pid = int(args.postmaster_pid_file.read_text(encoding="utf-8")
-                 .splitlines()[0])
-    t.TRACER = str(REPO / "pg_wait_tracer")
-    t.SERVER = str(REPO / "pgwt-server")
-    os.environ["PGWT_DEBUG_DUMP_STATE"] = "1"
+    for iteration in range(1, args.iterations + 1):
+        result = run_full_sequence(args.pg_version)
+        output = result.stdout or b""
 
-    current = {"stderr": b""}
-    iteration_checks = []
-    original_popen = subprocess.Popen
-    original_check = t.check
+        if STRIKE_SIGNATURE in output:
+            verdict = (
+                f"iteration {iteration}/{args.iterations}: STRIKE "
+                "(pure-CPU straddle live CPU*=0)")
+            write_strike(output, verdict)
+            return 1
 
-    class CapturingPopen(original_popen):
-        def __init__(self, *popen_args, **popen_kwargs):
-            command = (popen_args[0] if popen_args
-                       else popen_kwargs.get("args", []))
-            executable = command[0] if isinstance(command, (list, tuple)) \
-                and command else command
-            self._mode4_tracer = (
-                executable is not None
-                and os.path.abspath(os.fspath(executable)) == t.TRACER)
-            super().__init__(*popen_args, **popen_kwargs)
+        if result.returncode:
+            detail = first_fail_line(output)
+            print(
+                f"iteration {iteration}/{args.iterations}: "
+                f"non-mode-4 failure ({detail})",
+                flush=True,
+            )
+        else:
+            print(f"iteration {iteration}/{args.iterations}: passed", flush=True)
 
-        def communicate(self, *comm_args, **comm_kwargs):
-            stdout, stderr = super().communicate(*comm_args, **comm_kwargs)
-            if self._mode4_tracer:
-                current["stderr"] = stderr or b""
-            return stdout, stderr
+        if iteration < args.iterations:
+            kill_stray_processes()
 
-    def capture_check(condition, message):
-        iteration_checks.append((bool(condition), str(message)))
-        original_check(condition, message)
-
-    t.subprocess.Popen = CapturingPopen
-    t.check = capture_check
-
-    try:
-        for iteration in range(1, args.iterations + 1):
-            current["stderr"] = b""
-            iteration_checks.clear()
-            try:
-                t.phase_pure_cpu_straddle(pm_pid, "full")
-            except Exception:
-                detail = traceback.format_exc()
-                stderr = current["stderr"] + detail.encode("utf-8")
-                write_failure(
-                    stderr,
-                    f"iteration {iteration}/{args.iterations}: driver error")
-                return 1
-
-            live_failed = any(
-                not passed
-                and message.startswith("pure-CPU straddle live view")
-                for passed, message in iteration_checks)
-            proc_cpu_ms = [
-                float(match.group(1))
-                for _, message in iteration_checks
-                for match in [PROC_CPU_RE.search(message)]
-                if match
-            ]
-            proc_burned = any(value > 0.0 for value in proc_cpu_ms)
-            failed_checks = [
-                message for passed, message in iteration_checks if not passed]
-
-            if live_failed and proc_burned:
-                summary = (
-                    f"iteration {iteration}/{args.iterations}: REPRODUCED; "
-                    f"live CPU*=0 while /proc CPU delta was "
-                    f"{max(proc_cpu_ms):.0f}ms")
-                write_failure(current["stderr"], summary)
-                return 1
-
-            if failed_checks:
-                summary = (
-                    f"iteration {iteration}/{args.iterations}: unexpected "
-                    f"phase failure: {'; '.join(failed_checks)}")
-                write_failure(current["stderr"], summary)
-                return 1
-
-            print(f"iteration {iteration}/{args.iterations}: passed")
-    finally:
-        t.subprocess.Popen = original_popen
-        t.check = original_check
-
-    summary = f"not reproduced in {args.iterations}"
-    (REPO / "mode4-strike.log").write_text(summary + "\n", encoding="utf-8")
-    (REPO / "mode4-hunt-summary.txt").write_text(
-        summary + "\n", encoding="utf-8")
-    print(summary)
+    write_not_reproduced(args.iterations)
     return 0
 
 
