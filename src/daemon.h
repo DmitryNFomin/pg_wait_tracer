@@ -241,9 +241,45 @@ struct pgwt_daemon {
     volatile bool running;
     uint64_t start_ts;
 
+    /* PGWT_DEBUG_DUMP_STATE main-loop liveness probe. These fields are read
+     * and updated only when the debug env is set; production takes no clocks
+     * and emits no diagnostics. debug_timer_entries is deliberately separate
+     * from tick: tick advances only after handle_timer completes, so it cannot
+     * tell "never entered" from "entered and stalled before completion". */
+    bool        debug_dump_state;
+    uint64_t    debug_loop_iterations;
+    uint64_t    debug_timer_entries;
+    uint64_t    debug_timer_expirations;
+    uint64_t    debug_max_timer_expirations;
+    uint64_t    debug_last_loop_ts_ns;
+    uint64_t    debug_max_loop_gap_ns;
+    int         debug_timer_settime_rc;   /* 0 or saved -errno */
+    int         debug_timer_epoll_rc;     /* 0 or saved -errno */
+
     /* Placed at end of struct to survive field overflow corruption */
     char       *pg_binary_saved;        /* heap-allocated postgres binary path for USDT */
 };
+
+/* PGWT_DEBUG_DUMP_STATE duration probe shared by the daemon loop and the
+ * synchronous backend/watchpoint paths it dispatches. The env-off case is
+ * inline: no helper call and, critically, no clock syscall. Durations above
+ * 50ms emit one STATEDUMP-BLOCK line. */
+uint64_t pgwt_debug_monotonic_ns(void);
+void pgwt_debug_block_report(const char *op, pid_t pid, uint64_t started_ns);
+
+static inline uint64_t pgwt_debug_block_begin(const struct pgwt_daemon *d)
+{
+    return d->debug_dump_state ? pgwt_debug_monotonic_ns() : 0;
+}
+
+static inline void pgwt_debug_block_end(const struct pgwt_daemon *d,
+                                        const char *op, pid_t pid,
+                                        uint64_t started_ns)
+{
+    (void)d;
+    if (started_ns)
+        pgwt_debug_block_report(op, pid, started_ns);
+}
 
 /* True when watchpoints should be attached RIGHT NOW.
  *   FULL    — always (the original watchpoint behavior).
