@@ -14,7 +14,20 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { Camera, MIN_RES_NS, MIN_SPAN_NS } from '../../web/static/lib/camera.js';
+import {
+    Camera, MIN_RES_NS, MIN_SPAN_NS, shiftWindow, shiftQuantized,
+} from '../../web/static/lib/camera.js';
+
+test('baseline shift derives B without changing resolution or bucket count', () => {
+    const q = { resNs: 1024, stripFrom: 10_000, stripTo: 20_000,
+        winFromNs: 12_000, winToNs: 18_000, buckets: 10 };
+    assert.deepEqual(shiftQuantized(q, -5000), {
+        resNs: 1024, stripFrom: 5000, stripTo: 15_000,
+        winFromNs: 7000, winToNs: 13_000, buckets: 10,
+    });
+    assert.deepEqual(shiftWindow({ from: 12_000, to: 18_000 }, -5000),
+        { from: 7000, to: 13_000 });
+});
 
 // A 2026-02-ish wall-clock epoch in ns (float64 ulp here is 256 ns).
 const EPOCH_2026 = 1_770_000_000_000_000_000;

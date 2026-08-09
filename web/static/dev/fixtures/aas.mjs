@@ -288,6 +288,29 @@ function buildTicks() {
 const DENSE = denseData();
 const WIN_DENSE = { from: BASE_NS, to: BASE_NS + 300 * B12 };
 const WIN_60 = { from: BASE_NS, to: BASE_NS + 60 * B60 };
+const COMPARE_OFFSET = -5 * MIN_NS;
+const COMPARE_BASELINE = (() => {
+    const buckets = DENSE.buckets.map(b => classBucket(b.t + COMPARE_OFFSET, {
+        cpu: r4(b.cpu * 0.68), io: r4(b.io * 1.25),
+        lock: r4(b.lock * 0.45), lwlock: r4(b.lwlock * 0.8),
+        ipc: b.ipc, client: b.client, timeout: r4(b.timeout * 1.1),
+        bufferpin: b.bufferpin, activity: b.activity,
+        extension: r4(b.extension * 0.75), unknown: b.unknown,
+    }));
+    return { bucket_ns: B12, max_aas: maxTotal(buckets), buckets,
+        fidelity: 'exact' };
+})();
+const COMPARE_STATE = {
+    description: 'Compare ON: dashed B-total ghost behind A plus signed per-class A−B AAS·s geometry (final bucket provisional).',
+    tags: ['ALIGNMENT', 'SEMANTICS', 'compare'],
+    data: DENSE,
+    opts: {
+        numCpus: 8, win: WIN_DENSE,
+        compareData: COMPARE_BASELINE,
+        compareOffsetNs: COMPARE_OFFSET,
+        compareProvisional: true,
+    },
+};
 
 export const states = {
     'empty': {
@@ -394,4 +417,5 @@ export const uplotStates = {
     'mixed-escalation': states['mixed-escalation'],
     'escalated-live-edge': states['escalated-live-edge'],
     'live-ticks': states['live-ticks'],
+    'compare-ghost-diff': COMPARE_STATE,
 };

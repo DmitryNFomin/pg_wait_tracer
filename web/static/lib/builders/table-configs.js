@@ -23,6 +23,29 @@ import { dot, pctBar, stackedBar, eventStackedBar } from '../table.js';
 
 const _dot = (name) => dot(name, classColor);
 
+function fmtSignedMs(ms) {
+    if (!Number.isFinite(ms)) return '—';
+    if (ms === 0) return fmtMs(0);
+    return (ms > 0 ? '+' : '−') + fmtMs(Math.abs(ms));
+}
+
+function fmtRatio(r) {
+    if (r.status) return '<span class="delta-status ' + r.status + '">' +
+        r.status + '</span>';
+    if (!(r.ratio > 0) || !Number.isFinite(r.ratio)) return '—';
+    return r.ratio.toFixed(2) + '×';
+}
+
+const deltaColumns = [
+    { key: 'a_ms', label: 'A', cls: 'num', format: r => r._a ? fmtMs(r.a_ms) : '—' },
+    { key: 'b_ms', label: 'B', cls: 'num', sortable: false,
+      format: r => r._b ? fmtMs(r.b_ms) : '—' },
+    { key: 'abs_delta_ms', label: 'Δ', cls: 'num', format: r =>
+        '<span class="delta-value ' + (r.delta_ms >= 0 ? 'grew' : 'shrank') + '">' +
+        fmtSignedMs(r.delta_ms) + '</span>' },
+    { key: 'ratio', label: '×', cls: 'num', format: fmtRatio },
+];
+
 /* U2 wire 6 (review P3): the events table's percentile cells drill into the
  * latency-distribution view for THAT event. The intent is the app's pivot
  * shape ({pivot:'histogram-event'} + a normal event_id filter drill); it is
@@ -180,4 +203,47 @@ export const queriesConfig = {
         filterKey: 'query_id', filterValue: r.query_id,
         label: r.text ? r.text.substring(0, 40) : 'Query ' + r.query_id,
     }),
+};
+
+/* D3 compare-mode configs: identity + A | B | Δ | ×. The source entity's
+ * normal drill identity rides on each joined delta row, so drills still act
+ * on A exactly as they do outside compare. */
+export const compareOverviewConfig = {
+    columns: [{ key: '_entityLabel', label: 'Stat Name', sortable: false, format: r => {
+        const dotName = r.indent >= 1 ? _dot(r.name) : '';
+        return dotName + esc(r.name);
+    }}].concat(deltaColumns),
+    rowClass: r => {
+        let c = r.indent === 1 ? ' indent-1 clickable' : '';
+        if (r.indent === 2) c += ' indent-2';
+        return c;
+    },
+    onClick: overviewConfig.onClick,
+};
+
+export const compareEventsConfig = {
+    columns: [{ key: '_entityLabel', label: 'Wait Event', sortable: false, format: r =>
+        _dot(r.name) + esc(r.name) }].concat(deltaColumns),
+    rowClass: () => 'clickable',
+    onClick: eventsConfig.onClick,
+};
+
+export const compareQueriesConfig = {
+    columns: [
+        { key: '_entityLabel', label: 'Query ID', sortable: false,
+          cls: 'sticky-col sticky-col-0',
+          format: r => '<span class="query-id">' + esc(r.query_id) + '</span>' },
+        { key: 'text', label: 'Query Text', sortable: false,
+          cls: 'sticky-col sticky-col-1',
+          format: r => {
+              if (!r.text) return '<span style="color:#555">—</span>';
+              const truncated = esc(r.text.substring(0, 80)) +
+                  (r.text.length > 80 ? '...' : '');
+              return '<span class="qt-hover" data-fulltext="' +
+                  esc(r.text).replace(/"/g, '&quot;') + '">' +
+                  _dot(r.top_wait) + truncated + '</span>';
+          }},
+    ].concat(deltaColumns),
+    rowClass: () => 'clickable',
+    onClick: queriesConfig.onClick,
 };

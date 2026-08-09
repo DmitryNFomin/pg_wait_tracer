@@ -22,14 +22,32 @@
  */
 
 import { buildTableModel, buildTruncationRow } from '../lib/table.js';
-import { eventsConfig } from '../lib/builders/table-configs.js';
+import { eventsConfig, compareEventsConfig } from '../lib/builders/table-configs.js';
+import { buildDeltaComparison, defaultDeltaSort } from '../lib/builders/compare.js';
+import { shiftWindow } from '../lib/camera.js';
 import {
     buildPaneFidelity, paneFidelityBadgeHtml,
     buildPercentileBasis, percentileBasisHtml,
+    buildComparePaneFidelity, compareFidelityHtml,
 } from '../lib/panels.js';
 
 /* PURE: top_events response + sort -> render model. Exported for testing. */
 export function buildEventsModel(data, sort) {
+    if (data && data.compare) {
+        const delta = buildDeltaComparison('events', data.a, data.b,
+            { baselineUnavailable: data.baselinePredates });
+        const appliedSort = defaultDeltaSort(sort);
+        return {
+            compare: true,
+            hasRows: delta.rows.length > 0 || !!delta.truncation,
+            table: buildTableModel(compareEventsConfig, delta.rows, appliedSort),
+            compareFidelity: buildComparePaneFidelity(data.a, data.b,
+                { baselinePredates: data.baselinePredates }),
+            truncation: delta.truncation,
+            sort: appliedSort,
+            baselinePredates: delta.baselineUnavailable,
+        };
+    }
     const rows = (data && data.rows) || [];
     return {
         hasRows: rows.length > 0,
@@ -45,11 +63,19 @@ export function createEventsView() {
         id: 'events',
 
         async requests(ctx) {
-            return ctx.transport.request(ctx.channel('table'), 'top_events', {
+            const aParams = {
                 from: ctx.timeRange.from,
                 to: ctx.timeRange.to,
                 filters: ctx.filters.snapshot(),
-            });
+            };
+            const a = ctx.transport.request(ctx.channel('table.a'), 'top_events', aParams);
+            if (!ctx.compare || !ctx.compare.enabled) return a;
+            const bw = shiftWindow(aParams, ctx.compare.offsetNs);
+            const predates = bw.from < ctx.server.fromNs;
+            const b = predates ? Promise.resolve(null) : ctx.transport.request(
+                    ctx.channel('table.b'), 'top_events', Object.assign({}, aParams, bw));
+            const pair = await Promise.all([a, b]);
+            return { compare: true, a: pair[0], b: pair[1], baselinePredates: predates };
         },
 
         build(data, ctx) {
@@ -60,15 +86,20 @@ export function createEventsView() {
         mount(el, model, ctx) {
             if (ctx.summaryEl) ctx.summaryEl.innerHTML = '';
             if (!model.hasRows) {
-                el.innerHTML = paneFidelityBadgeHtml(model.paneFidelity) +
-                    '<div class="loading">No data for selected range</div>';
+                el.innerHTML = (model.compare
+                    ? compareFidelityHtml(model.compareFidelity)
+                    : paneFidelityBadgeHtml(model.paneFidelity)) +
+                    '<div class="loading">' + (model.baselinePredates
+                        ? 'Baseline unavailable for comparison'
+                        : 'No data for selected range') + '</div>';
                 return;
             }
-            ctx.mountTable(el, eventsConfig, model.table, {
-                sort: ctx.getSort('events'),
+            const config = model.compare ? compareEventsConfig : eventsConfig;
+            ctx.mountTable(el, config, model.table, {
+                sort: model.compare ? model.sort : ctx.getSort('events'),
                 onSort: (key) => { ctx.toggleSort('events', key); ctx.refresh(); },
                 onRowClick: (row) => {
-                    const intent = eventsConfig.onClick(row);
+                    const intent = config.onClick(row);
                     if (intent) ctx.onDrill(intent);
                 },
                 // Wire 6: percentile cell → 'histogram-event' pivot intent.
@@ -77,8 +108,9 @@ export function createEventsView() {
                 tooltipEl: ctx.tooltipEl,
             });
             el.insertAdjacentHTML('afterbegin',
-                paneFidelityBadgeHtml(model.paneFidelity));
-            el.insertAdjacentHTML('beforeend',
+                model.compare ? compareFidelityHtml(model.compareFidelity)
+                              : paneFidelityBadgeHtml(model.paneFidelity));
+            if (!model.compare) el.insertAdjacentHTML('beforeend',
                 percentileBasisHtml(model.percentileBasis));
         },
 

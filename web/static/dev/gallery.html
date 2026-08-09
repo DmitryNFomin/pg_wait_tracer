@@ -109,6 +109,19 @@
     color: #9a9ac0; font-size: 10px; max-height: 220px; overflow: auto;
   }
   .panel-card { padding: 8px 4px; }
+  .compare-evidence { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  .compare-side { color:#888; }
+  .compare-evidence-chip { border:1px solid #566; border-radius:8px; padding:1px 6px; color:#bbb; }
+  .compare-evidence-chip.sampled { border-color:rgba(255,193,7,.7); border-style:dashed; }
+  .compare-evidence-chip.none { color:#777; border-color:#444; }
+  .compare-warning { color:#ffd166; background:#312b18; border-radius:9px; padding:2px 8px; }
+  .compare-note { color:#777; font-style:italic; }
+  #gallery-table-configs-compare-delta .delta-status { border:1px solid #555; border-radius:8px; padding:1px 5px; font-size:10px; }
+  #gallery-table-configs-compare-delta .delta-status.new { color:#7de89a; }
+  #gallery-table-configs-compare-delta .delta-status.gone { color:#9ba3b0; }
+  #gallery-table-configs-compare-delta .delta-value.grew { color:#7de89a; }
+  #gallery-table-configs-compare-delta .delta-value.shrank { color:#8e97a6; }
+  #gallery-table-configs-compare-delta .truncation-row td { color:#666; font-style:italic; }
   .panel-title { color: #fff; font-weight: 600; margin-bottom: 4px; }
   .panel-msg { color: #ffca7a; font-size: 12px; margin-bottom: 4px; }
   .panel-hint { color: #888; font-size: 11px; margin: 4px 0 8px; }

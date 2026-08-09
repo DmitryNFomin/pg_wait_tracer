@@ -22,7 +22,7 @@
 
 import {
     buildUnavailablePanel, buildEscalateControl, buildMetricsPanel,
-    buildEscalateResult, fidelityOf, fidelityLabel,
+    buildEscalateResult, fidelityOf, fidelityLabel, buildCompareFidelity,
     SAMPLED_BAND_COLOR, MIXED_BAND_COLOR, SAMPLED_BORDER, MIXED_BORDER,
 } from './builders/fidelity.js';
 import {
@@ -70,6 +70,26 @@ export function paneFidelityBadgeHtml(model) {
         ';font-size:11px;color:#aaa">' +
         '<span style="width:8px;height:8px;border-radius:50%;background:' +
         model.border + '"></span>' + esc(model.label) + '</div>';
+}
+
+export function compareFidelityHtml(model) {
+    if (!model) return '';
+    const chip = (side) => '<span class="compare-evidence-chip ' +
+        esc(side.fidelity) + '">' + esc(side.label) + '</span>';
+    return '<span class="compare-evidence">' +
+        '<span class="compare-side">A ' + chip(model.a) + '</span>' +
+        '<span class="compare-side">B ' + chip(model.b) + '</span>' +
+        (model.warning
+            ? '<span class="compare-warning">⚠ ' + esc(model.warning) + '</span>'
+            : '') +
+        (model.note
+            ? '<span class="compare-note">' + esc(model.note) + '</span>'
+            : '') +
+        '</span>';
+}
+
+export function buildComparePaneFidelity(dataA, dataB, opts) {
+    return buildCompareFidelity(dataA, dataB, opts);
 }
 
 /* ── Percentile-basis footnote (U2, review P10) ──────────────────────────────

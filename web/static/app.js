@@ -15,7 +15,7 @@
  */
 
 import {
-    ServerInfo, TimeRange, FilterStack,
+    ServerInfo, TimeRange, FilterStack, CompareState,
     serializeHashState, parseHashState,
 } from './lib/state.js';
 import { Transport, TransportError, CancelledError } from './lib/transport.js';
@@ -28,7 +28,10 @@ import {
     nsToDatetimeLocalUTC, datetimeLocalUTCToNs, versionSkew,
 } from './lib/format.js';
 import { controlStatus, controlMetrics, ControlUnavailable } from './lib/control.js';
-import { mountEscalateControl, mountMetricsPanel } from './lib/panels.js';
+import {
+    mountEscalateControl, mountMetricsPanel,
+    buildComparePaneFidelity, compareFidelityHtml,
+} from './lib/panels.js';
 import { createActiveView } from './views/active.js';
 import { createOverviewView } from './views/overview.js';
 import { createEventsView } from './views/events.js';
@@ -47,6 +50,7 @@ import { createMatrixView } from './views/matrix.js';
 const server = new ServerInfo();
 const timeRange = new TimeRange(server);
 const filters = new FilterStack();
+const compare = new CompareState();
 const transport = new Transport();
 
 let activeView = null;       // persistent AAS chart view ("active")
@@ -130,6 +134,7 @@ let clientProtocol = null;
 let autoRefreshId = 0;
 let autoRefreshOn = false;
 let lastLiveTickTo = null;
+let compareEvidence = null;
 
 // Sort state per table view. getSort returns the current { key, asc } (or null
 // for server order); toggleSort cycles desc→asc on repeated clicks of the same
@@ -176,6 +181,8 @@ function currentHashState() {
         filters: filters.snapshot(),
         sort: tab ? getSort(tab) : null,
         execution,
+        compare: compare.enabled,
+        baselineOffsetNs: compare.offsetNs,
     };
 }
 
@@ -198,7 +205,13 @@ function updateHash(push) {
  * live-means-NOW rule; a live deep link can never resurrect stale time. */
 async function applyHashOnce(s) {
     stopAutoRefresh();               // restarted below iff s.live
-    mutateFilters(() => { filters.restore(s.filters); });
+    mutateFilters(() => {
+        filters.restore(s.filters);
+        compare.set(s.compare, s.baselineOffsetNs);
+        return true;
+    });
+    compareEvidence = null;
+    renderCompareControl();
     const tab = (s.tab && vm.views[s.tab]) ? s.tab : vm.activeId();
     if (s.sort) tabSort[tab] = s.sort;
     else delete tabSort[tab];        // Back to a pre-sort entry undoes the sort
@@ -273,7 +286,7 @@ let chartEl, tableEl, summaryEl, tooltipEl;
 
 function makeCtx() {
     return {
-        transport, server, timeRange, filters,
+        transport, server, timeRange, filters, compare,
         // U2a: the AAS camera + strip cache (views/active.js wires gestures
         // into the camera and preloads/paints strips through the cache).
         camera, stripCache,
@@ -284,6 +297,7 @@ function makeCtx() {
         chartEl, summaryEl, tooltipEl,
         mountTable,
         setStatus,
+        setCompareEvidence,
         // The ONE navigation intent surface (U2, review P3). Accepts both
         // intent shapes — filter drills and pivot intents — see the contract
         // comment above PIVOT/PIVOTS in the drill section below.
@@ -435,6 +449,7 @@ function initOnce() {
     initChartResize();
     initTabs();
     initTimePicker();
+    initCompareControl();
     initLiveMode();
     initMetricsButton();
     initHashNavigation();   // P9: back/forward retrace the investigation
@@ -1091,6 +1106,7 @@ function updateTimeRange() {
     const dur = fmtDuration(timeRange.span());
     // All pgwt times are UTC — say so (UI-11).
     el.textContent = from + ' – ' + to + ' UTC (' + dur + ')';
+    renderCompareHeader();
 }
 
 async function zoomTo(from, to) {
@@ -1209,6 +1225,123 @@ function initTimePicker() {
     });
 
     zoomOutBtn.addEventListener('click', () => { stopAutoRefresh(); zoomOut(); });
+}
+
+// ── Compare mode (Track U Phase U4, D1/D4/D5) ───────────────────────────────
+
+function compareOffsetLabel(offsetNs) {
+    const seconds = Math.abs(offsetNs) / 1e9;
+    if (seconds % 86400 === 0) return (seconds / 86400) + ' d';
+    if (seconds % 3600 === 0) return (seconds / 3600) + ' h';
+    if (seconds % 60 === 0) return (seconds / 60) + ' min';
+    return seconds + ' s';
+}
+
+function baselinePredatesCurrent() {
+    return compare.enabled && timeRange.from + compare.offsetNs < server.fromNs;
+}
+
+function renderCompareControl() {
+    const btn = document.getElementById('compare-btn');
+    const exitBtn = document.getElementById('compare-exit');
+    if (!btn || !exitBtn) return;
+    btn.classList.toggle('active', compare.enabled);
+    btn.textContent = compare.enabled
+        ? 'vs ' + compareOffsetLabel(compare.offsetNs) + ' ago ▾'
+        : 'Compare ▾';
+    exitBtn.style.display = compare.enabled ? '' : 'none';
+    renderCompareHeader();
+}
+
+function renderCompareHeader() {
+    const el = document.getElementById('compare-header');
+    if (!el) return;
+    if (!compare.enabled) {
+        el.style.display = 'none';
+        el.innerHTML = '';
+        return;
+    }
+    el.style.display = 'flex';
+    let evidence = compareEvidence;
+    if (baselinePredatesCurrent()) {
+        evidence = buildComparePaneFidelity(null, null, { baselinePredates: true });
+    }
+    el.innerHTML = '<span class="compare-offset">A vs ' +
+        esc(compareOffsetLabel(compare.offsetNs)) + ' ago</span>' +
+        (evidence ? compareFidelityHtml(evidence) :
+            '<span class="compare-note">loading baseline evidence…</span>');
+}
+
+function setCompareEvidence(dataA, dataB, predates) {
+    if (!compare.enabled) {
+        compareEvidence = null;
+        renderCompareHeader();
+        return;
+    }
+    compareEvidence = buildComparePaneFidelity(dataA, dataB,
+        { baselinePredates: !!predates });
+    renderCompareHeader();
+}
+
+function setCompareOffset(offsetNs) {
+    const wasEnabled = compare.enabled;
+    const changed = mutateFilters(() => compare.set(true, offsetNs));
+    if (!changed) return;
+    if (!wasEnabled) {
+        // Entering compare starts each eligible table at the binding |Δ|
+        // default, regardless of its previous ordinary-table sort.
+        delete tabSort.overview;
+        delete tabSort.events;
+        delete tabSort.queries;
+    }
+    compareEvidence = null;
+    renderCompareControl();
+    updateHash(true);
+    refresh();
+}
+
+function exitCompare() {
+    if (!mutateFilters(() => compare.disable())) return;
+    for (const tab of ['overview', 'events', 'queries']) {
+        const s = tabSort[tab];
+        if (s && (s.key === 'abs_delta_ms' || s.key === 'ratio' ||
+                  s.key === 'a_ms' || s.key === 'b_ms')) delete tabSort[tab];
+    }
+    compareEvidence = null;
+    renderCompareControl();
+    updateHash(true);                 // one ✕ = one history entry
+    refresh();
+}
+
+function initCompareControl() {
+    const btn = document.getElementById('compare-btn');
+    const menu = document.getElementById('compare-picker');
+    const exitBtn = document.getElementById('compare-exit');
+    if (!btn || !menu || !exitBtn) return;
+    btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        menu.style.display = menu.style.display === 'none' ? 'block' : 'none';
+    });
+    menu.addEventListener('click', e => e.stopPropagation());
+    document.addEventListener('click', e => {
+        if (!menu.contains(e.target) && e.target !== btn) menu.style.display = 'none';
+    });
+    menu.querySelectorAll('[data-b-offset]').forEach(preset => {
+        preset.addEventListener('click', () => {
+            menu.style.display = 'none';
+            setCompareOffset(Number(preset.dataset.bOffset));
+        });
+    });
+    document.getElementById('compare-custom-apply').addEventListener('click', () => {
+        const amount = Number(document.getElementById('compare-custom-value').value);
+        const unit = Number(document.getElementById('compare-custom-unit').value);
+        const ns = amount * unit * 1e9;
+        if (!(amount > 0) || !Number.isSafeInteger(ns)) return;
+        menu.style.display = 'none';
+        setCompareOffset(-ns);
+    });
+    exitBtn.addEventListener('click', exitCompare);
+    renderCompareControl();
 }
 
 // ── Live mode / auto-refresh ──────────────────────────────────────────────────
@@ -1415,7 +1548,7 @@ function boot() {
 
     // Debug/test handle: the UI no longer has a single mutable global `state`,
     // so expose the explicit modules for Playwright assertions (read-only use).
-    window.__pgwt = { server, timeRange, filters, transport,
+    window.__pgwt = { server, timeRange, filters, compare, transport,
         // U2a: read-only camera + strip-cache handles for Playwright
         // assertions and the gate agent's gesture-to-paint instrumentation.
         camera, stripCache,
@@ -1425,6 +1558,14 @@ function boot() {
         get aasRenderer() { return activeView ? activeView.renderer : null; },
         aasDebug: () => (activeView && activeView.debug)
             ? activeView.debug() : null,
+        compareSnapshot: () => ({
+            enabled: compare.enabled,
+            offsetNs: compare.offsetNs,
+            a: { from: timeRange.from, to: timeRange.to },
+            b: { from: timeRange.from + compare.offsetNs,
+                 to: timeRange.to + compare.offsetNs },
+            baselinePredates: baselinePredatesCurrent(),
+        }),
         get activeTab() { return vm ? vm.activeId() : null; },
         // B5: read-only accessors for Playwright assertions on the daemon state.
         daemon,

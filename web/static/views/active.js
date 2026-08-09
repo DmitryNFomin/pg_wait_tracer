@@ -55,7 +55,9 @@
 import { buildAasOption } from '../lib/builders/aas.js';
 import {
     buildUplotSpec, overlayGeometry, overlayHooks, hitTest,
+    compareHooks, drawDiffStrip,
 } from '../lib/uplot-aas.js';
+import { shiftQuantized, shiftWindow } from '../lib/camera.js';
 import {
     SAMPLED_BAND_COLOR, MIXED_BAND_COLOR, SAMPLED_BORDER, MIXED_BORDER,
 } from '../lib/builders/fidelity.js';
@@ -237,6 +239,7 @@ export function createActiveView() {
     let u = null;              // uPlot instance — owned here, nowhere else
     let uHost = null;          // inner host div (el keeps its padding box)
     let readoutEl = null;      // compact crosshair readout card
+    let diffCanvas = null;     // D2 signed A-B lane below the uPlot pane
     // The latest painted state: { data, opts, spec }. The overlay draw hooks,
     // the hit-test readout, and the legend restack all read THIS — it is the
     // single source for "what is on the canvas right now".
@@ -252,6 +255,13 @@ export function createActiveView() {
     // strip resolution tracks the pane width exactly like the poll does.
     function targetBuckets() {
         return Math.min(Math.floor((el ? el.clientWidth : 800) / 4), 300);
+    }
+
+    function baselinePredates(ctx) {
+        if (!ctx.compare || !ctx.compare.enabled) return false;
+        const b = shiftWindow({ from: ctx.timeRange.from, to: ctx.timeRange.to },
+            ctx.compare.offsetNs);
+        return b.from < ctx.server.fromNs;
     }
 
     /* Fire-and-forget preload/refine of the camera's quantized 3x strip.
@@ -271,15 +281,20 @@ export function createActiveView() {
         // beyond one power of two). Detached-mode gestures still refine
         // immediately (their windows change key only when the user moves).
         const have = ctx.stripCache.get(q);
-        if (have && have.exact) return;                 // exact strip cached
-        if (have &&
+        if (have && have.exact) {
+            // A can be warm while a newly-enabled B is not.
+        } else if (have &&
             have.resNs <= q.resNs * 2 &&
             have.stripFrom <= q.winFromNs &&
             have.stripTo >= q.winToNs &&
             (have.stripTo - q.winToNs) > (q.winToNs - q.winFromNs) / 4) {
-            return;                                     // still covered, far from edge
+            // still covered, far from edge
+        } else {
+            ctx.stripCache.ensure(q);
         }
-        ctx.stripCache.ensure(q);
+        if (ctx.compare && ctx.compare.enabled && !baselinePredates(ctx)) {
+            ctx.stripCache.ensure(shiftQuantized(q, ctx.compare.offsetNs));
+        }
     }
 
     /* Builder opts shared by both renderers: the current window, the camera's
@@ -350,6 +365,8 @@ export function createActiveView() {
         if (!(cam.toNs > cam.fromNs)) return;
         u.setScale('x', { min: cam.fromNs / NS_PER_MS,
                           max: cam.toNs / NS_PER_MS });
+        if (latest) drawDiffStrip(diffCanvas, latest.spec.compare,
+            { min: cam.fromNs / NS_PER_MS, max: cam.toNs / NS_PER_MS });
     }
 
     function measureUplot() {
@@ -357,7 +374,7 @@ export function createActiveView() {
         // the content width; el's min-height (CSS) / explicit height (the
         // resize handle) give the pane height.
         const w = uHost ? uHost.clientWidth : 800;
-        let h = el ? el.clientHeight : 300;
+        let h = uHost ? uHost.clientHeight : (el ? el.clientHeight : 300);
         if (!(h > 0)) h = 300;
         return { width: Math.max(200, w || 800), height: Math.max(120, h) };
     }
@@ -374,6 +391,20 @@ export function createActiveView() {
         return overlayGeometry(latest.data, latest.opts,
             { min: uu.scales.x.min, max: uu.scales.x.max,
               yMax: uu.scales.y.max });
+    }
+
+    function compareGeo() {
+        return latest && latest.spec ? latest.spec.compare : null;
+    }
+
+    function paintDiff(ctx, spec) {
+        if (!diffCanvas) return;
+        const active = !!(ctx && ctx.compare && ctx.compare.enabled);
+        diffCanvas.style.display = active ? 'block' : 'none';
+        if (el) el.classList.toggle('compare-active', active);
+        if (!active) return;
+        drawDiffStrip(diffCanvas, spec && spec.compare,
+            viewportScale(ctx, spec || { xWindow: { min: 0, max: 1 } }));
     }
 
     /* Construct a fresh instance from a spec (initial mount + the rare
@@ -395,9 +426,13 @@ export function createActiveView() {
         // Honesty overlays (rects behind the series, lines above) + the
         // crosshair readout, merged before construction per the module
         // contract.
-        o.hooks = Object.assign({}, overlayHooks(overlayGeo), {
+        const honestyHooks = overlayHooks(overlayGeo);
+        const ghostHooks = compareHooks(compareGeo);
+        o.hooks = {
+            drawAxes: (honestyHooks.drawAxes || []).concat(ghostHooks.drawAxes || []),
+            draw: honestyHooks.draw || [],
             setCursor: [(uu) => updateReadout(uu)],
-        });
+        };
         // uPlot's dblclick handler autoscales x to the full data extent —
         // that would fight the app's dblclick zoom-out (initChartView), so
         // unbind it. The spec already disables cursor drag select/zoom;
@@ -412,6 +447,7 @@ export function createActiveView() {
         u = new UPlotCtor(o, spec.alignedData, uHost);
         u.setScale('x', viewportScale(ctx, spec));
         paintedYMax = displayYMax;
+        paintDiff(ctx, spec);
     }
 
     /* Restack + repaint for a visibility change (legend chips). Follows the
@@ -435,9 +471,10 @@ export function createActiveView() {
             u.setData(spec.alignedData, false);   // false: x window stays put
             u.setScale('x', viewportScale(enterCtx || {}, spec));
         });
+        paintDiff(enterCtx, spec);
     }
 
-    function uplotEmptyState(ctx) {
+    function uplotEmptyState(ctx, model) {
         // UI-5: an empty window must not leave the PREVIOUS window's paint on
         // screen while the tables say "No data" — same contract as the
         // ECharts branch, uPlot form: destroy the instance, say so.
@@ -447,18 +484,24 @@ export function createActiveView() {
         paintedYMax = null;
         resetYMaxHysteresis();   // P7: a fresh window starts a fresh axis
         if (readoutEl) readoutEl.style.display = 'none';
+        paintDiff(ctx, { compare: null, xWindow: { min: 0, max: 1 } });
         if (uHost) {
             uHost.innerHTML =
                 '<div class="aas-empty">No data in selected range</div>';
         }
         clearLegendAndChip();
+        if (ctx.setCompareEvidence) {
+            ctx.setCompareEvidence(model && model.isCompare ? model.data : null,
+                (model && model.compareData) || null,
+                !!(model && model.baselinePredates));
+        }
         setEmptyStatus(ctx);
     }
 
     function mountUplot(model, ctx) {
         if (!uHost) return;                 // disposed
         ensureStrip(ctx);
-        if (!model.hasData) { uplotEmptyState(ctx); return; }
+        if (!model.hasData) { uplotEmptyState(ctx, model); return; }
 
         const spec0 = model.spec;
         const names = spec0.seriesNames;
@@ -513,6 +556,11 @@ export function createActiveView() {
 
         renderLegend(spec, applyUplotVisibility, ctx, legend);
         renderFidelityChip(spec, ctx);
+        paintDiff(ctx, spec);
+        if (ctx.setCompareEvidence) {
+            ctx.setCompareEvidence(model.isCompare ? model.data : null,
+                model.compareData || null, !!model.baselinePredates);
+        }
         setStatusLine(ctx, spec);
     }
 
@@ -641,6 +689,10 @@ export function createActiveView() {
         readoutEl.className = 'aas-readout';
         readoutEl.style.display = 'none';
         el.appendChild(readoutEl);
+        diffCanvas = document.createElement('canvas');
+        diffCanvas.className = 'aas-diff-strip';
+        diffCanvas.style.display = 'none';
+        el.appendChild(diffCanvas);
 
         // Plain-drag brush select via the shared overlay. The adapter maps
         // el-local pixels to axis ms through the LIVE x scale (u.posToVal),
@@ -695,6 +747,11 @@ export function createActiveView() {
             readoutEl.parentNode.removeChild(readoutEl);
         }
         readoutEl = null;
+        if (diffCanvas && diffCanvas.parentNode) {
+            diffCanvas.parentNode.removeChild(diffCanvas);
+        }
+        diffCanvas = null;
+        if (el) el.classList.remove('compare-active');
         latest = null;
         hiddenKey = null;
         paintedYMax = null;
@@ -725,6 +782,10 @@ export function createActiveView() {
                 }],
             }, true);
             clearLegendAndChip();
+            if (ctx.setCompareEvidence) {
+                ctx.setCompareEvidence(model.isCompare ? model.data : null,
+                    model.compareData || null, !!model.baselinePredates);
+            }
             setEmptyStatus(ctx);
             return;
         }
@@ -752,6 +813,10 @@ export function createActiveView() {
         };
         renderLegend(model, applyVisible, ctx, legend);
         renderFidelityChip(model, ctx);
+        if (ctx.setCompareEvidence) {
+            ctx.setCompareEvidence(model.isCompare ? model.data : null,
+                model.compareData || null, !!model.baselinePredates);
+        }
         setStatusLine(ctx, model);
     }
 
@@ -866,7 +931,21 @@ export function createActiveView() {
             // Class drill-down (no specific event): break down by events.
             const f = ctx.filters.filters;
             if (f.class && !f.event_id) params.detail = 'events';
-            return ctx.transport.request(ctx.channel('aas'), 'aas', params);
+            const a = ctx.transport.request(ctx.channel('aas'), 'aas', params);
+            if (!ctx.compare || !ctx.compare.enabled) return a;
+            const predates = baselinePredates(ctx);
+            if (predates) {
+                return { compare: true, a: await a, b: null,
+                    baselinePredates: true };
+            }
+            const q = shiftQuantized(ctx.camera.quantize(targetBuckets()),
+                ctx.compare.offsetNs);
+            const [aData, bResult] = await Promise.all([a, ctx.stripCache.ensure(q)]);
+            if (!bResult.ok) {
+                throw (bResult.error || new Error('baseline strip unavailable'));
+            }
+            return { compare: true, a: aData, b: bResult.payload,
+                baselinePredates: false };
         },
 
         /* PURE: data -> renderer model. Same inputs to both builders (the
@@ -875,20 +954,33 @@ export function createActiveView() {
          * layer restacks on visibility changes and the overlay hooks
          * recompute geometry from it on every draw. */
         build(data, ctx) {
+            const pair = data && data.compare ? data : null;
+            const primary = pair ? pair.a : data;
             const opts = builderOpts(ctx);
+            if (pair) {
+                opts.compareData = pair.b;
+                opts.compareOffsetNs = ctx.compare.offsetNs;
+                opts.baselinePredates = pair.baselinePredates;
+                opts.compareProvisional = !!(ctx.isLiveTick && ctx.isLiveTick());
+            }
             if (renderer === 'uplot') {
-                const spec = buildUplotSpec(data, opts);
+                const spec = buildUplotSpec(primary, opts);
                 return {
-                    data, opts, spec,
+                    data: primary, compareData: pair && pair.b,
+                    baselinePredates: !!(pair && pair.baselinePredates),
+                    isCompare: !!pair, opts, spec,
                     hasData: spec.hasData,
                     maxAas: spec.maxAas,
                     seriesNames: spec.seriesNames,
                 };
             }
-            const m = buildAasOption(data, opts);
+            const m = buildAasOption(primary, opts);
             // U2 (P3 wire 1): the raw payload + builder opts ride along so
             // the click walk can rebuild the spec surface as painted.
-            m.data = data;
+            m.data = primary;
+            m.compareData = pair && pair.b;
+            m.baselinePredates = !!(pair && pair.baselinePredates);
+            m.isCompare = !!pair;
             m.opts = opts;
             return m;
         },
@@ -911,7 +1003,21 @@ export function createActiveView() {
             ctx.stripCache.ensure(q);        // refine (deduped, never rejects)
             const hit = ctx.stripCache.get(q);
             if (!hit) return false;          // nothing cached overlaps: keep paint
-            const model = this.build(hit.payload, ctx);
+            let payload = hit.payload;
+            if (ctx.compare && ctx.compare.enabled) {
+                const predates = baselinePredates(ctx);
+                let b = null;
+                if (!predates) {
+                    const bq = shiftQuantized(q, ctx.compare.offsetNs);
+                    ctx.stripCache.ensure(bq);
+                    const bhit = ctx.stripCache.get(bq);
+                    if (!bhit) return false;
+                    b = bhit.payload;
+                }
+                payload = { compare: true, a: hit.payload, b,
+                    baselinePredates: predates };
+            }
+            const model = this.build(payload, ctx);
             this.mount(el, model, ctx);
             return true;
         },
@@ -935,7 +1041,10 @@ export function createActiveView() {
 
         resize() {
             if (renderer === 'uplot') {
-                if (u) u.setSize(measureUplot());
+                if (u) {
+                    u.setSize(measureUplot());
+                    if (latest) paintDiff(enterCtx, latest.spec);
+                }
                 return;
             }
             if (chart) chart.resize();
@@ -964,6 +1073,7 @@ export function createActiveView() {
                             { min: u.scales.x.min, max: u.scales.x.max,
                               yMax: u.scales.y.max })
                         : null,
+                    compare: latest ? latest.spec.compare : null,
                 };
             }
             return { renderer, mounted: !!chart,

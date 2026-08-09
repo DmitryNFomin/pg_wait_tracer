@@ -35,6 +35,30 @@
     <button id="metrics-btn" class="metrics-btn" title="Daemon self-metrics" style="display:none">⚙</button>
     <button id="zoom-out-btn" class="zoom-out-btn" title="Zoom out">&#x2296;</button>
     <span id="time-range" class="time-range-btn"></span>
+    <span class="compare-control-wrap">
+      <button id="compare-btn" class="compare-btn">Compare ▾</button>
+      <button id="compare-exit" class="compare-exit" style="display:none"
+              title="Exit compare">✕</button>
+      <div id="compare-picker" class="compare-picker" style="display:none">
+        <div class="tp-label">Baseline offset</div>
+        <div class="compare-presets">
+          <button data-b-offset="-3600000000000">1 hour ago</button>
+          <button data-b-offset="-86400000000000">24 hours ago</button>
+          <button data-b-offset="-604800000000000">7 days ago</button>
+        </div>
+        <div class="tp-label">Custom offset</div>
+        <div class="compare-custom">
+          <input id="compare-custom-value" type="number" min="1" step="1" value="1"
+                 aria-label="Custom baseline offset">
+          <select id="compare-custom-unit" aria-label="Custom baseline unit">
+            <option value="60">minutes</option>
+            <option value="3600" selected>hours</option>
+            <option value="86400">days</option>
+          </select>
+          <button id="compare-custom-apply">Apply</button>
+        </div>
+      </div>
+    </span>
     <button id="live-btn" class="live-btn" title="Auto-refresh (5s)">Live</button>
     <div id="time-picker" class="time-picker" style="display:none">
       <div class="tp-section">
@@ -64,6 +88,8 @@
     </div>
   </div>
 </header>
+
+<div id="compare-header" class="compare-header" style="display:none"></div>
 
 <!-- Daemon self-metrics panel (B5): toggled by #metrics-btn. -->
 <div id="daemon-metrics" class="daemon-metrics" style="display:none"></div>

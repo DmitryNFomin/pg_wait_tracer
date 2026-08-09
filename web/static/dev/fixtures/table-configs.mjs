@@ -114,4 +114,23 @@ export const states = {
               events: null },
         ],
     },
+    'compare-delta': {
+        description: 'Compare events: |Δ|-ranked rows with new/gone labels and one honest below-change-floor row.',
+        tags: ['HIERARCHY', 'SEMANTICS', 'compare'],
+        config: 'compare-events',
+        sort: { key: 'abs_delta_ms', asc: false },
+        compare: {
+            kind: 'events',
+            a: { db_time_ms: 10000, fidelity: 'exact', rows: [
+                { event_id: 1, name: 'IO:DataFileRead', class: 'IO', total_ms: 3200 },
+                { event_id: 2, name: 'Lock:new_in_A', class: 'Lock', total_ms: 700 },
+                { event_id: 3, name: 'IPC:below_floor', class: 'IPC', total_ms: 140 },
+            ] },
+            b: { db_time_ms: 10000, fidelity: 'exact', rows: [
+                { event_id: 1, name: 'IO:DataFileRead', class: 'IO', total_ms: 1200 },
+                { event_id: 3, name: 'IPC:below_floor', class: 'IPC', total_ms: 100 },
+                { event_id: 4, name: 'Client:gone_from_A', class: 'Client', total_ms: 500 },
+            ] },
+        },
+    },
 };

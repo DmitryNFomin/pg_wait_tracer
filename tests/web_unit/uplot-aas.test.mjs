@@ -29,7 +29,7 @@ process.env.TZ = 'Pacific/Chatham';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    buildUplotSpec, stackSeries, hitTest, overlayGeometry,
+    buildUplotSpec, stackSeries, hitTest, overlayGeometry, buildCompareGeometry,
     utcTzDate, withAlpha, AREA_FILL_ALPHA, NCPUS_COLOR,
 } from '../../web/static/lib/uplot-aas.js';
 import {
@@ -43,6 +43,40 @@ import {
 
 const approx = (a, b, eps = 1e-9) =>
     assert.ok(Math.abs(a - b) < eps, a + ' ~= ' + b);
+
+test('compare ghost and diff geometry is honest at strip boundaries', () => {
+    const BN = 10e9;
+    const a = { bucket_ns: BN, max_aas: 4, buckets: [
+        { t: 100e9, cpu: 2, io: 0 },
+        { t: 110e9, cpu: 3, io: 0 },
+        { t: 120e9, cpu: 4, io: 0 },
+    ] };
+    const b = { bucket_ns: BN, max_aas: 2, buckets: [
+        { t: 60e9, cpu: 1, io: 1 },
+        { t: 70e9, cpu: 1, io: 1 },
+    ] };
+    const g = buildCompareGeometry(a, b, {
+        offsetNs: -50e9, provisional: true,
+        win: { from: 100e9, to: 130e9 },
+    });
+    assert.deepEqual(g.ghost.map(p => p.x), [110_000, 120_000]);
+    assert.deepEqual(g.ghost.map(p => p.total), [2, 2]);
+    assert.equal(g.maxGhostAas, 2);
+    assert.deepEqual(g.diff.map(d => d.x0), [110_000, 120_000]);
+    assert.equal(g.diff[0].classes.find(c => c.key === 'cpu').deltaSeconds, 20);
+    assert.equal(g.diff[0].classes.find(c => c.key === 'io').deltaSeconds, -10);
+    assert.match(g.diff[0].classes.find(c => c.key === 'io').color, /^rgba\(/);
+    assert.equal(g.diff[0].provisional, false);
+    assert.equal(g.diff[1].provisional, true);
+    assert.equal(g.hasData, true);
+});
+
+test('baseline-predates geometry renders neither ghost nor diff', () => {
+    const data = { bucket_ns: 1000, buckets: [{ t: 1000, cpu: 1 }] };
+    assert.deepEqual(buildCompareGeometry(data, data,
+        { offsetNs: -1000, baselinePredates: true }),
+        { ghost: [], diff: [], maxGhostAas: 0, hasData: false });
+});
 
 /* Same class-mode fixture as aas.test.mjs (parity tests feed both builders
  * the identical object). */
