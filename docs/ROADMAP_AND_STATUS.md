@@ -3002,7 +3002,7 @@ v3 owns transitions column 7 (`cpu_ns` varint, frozen in `golden/rev3`); an
 with the range reader gate and a `rev4/` golden fixture (the PR's v3/v4 redefinition is
 byte-incompatible both directions).
 
-### Track U — UI: the OEM loop + instrument (consolidated plan)  **[COMPLETE 2026-08-04 — U0 ✅ (#59), U1 ✅ (#60), U2a ✅ (#62), U2b ✅ (#64, gate GREEN), U2 ✅ (#66), U3 ✅ (#67). U4 compare mode DESIGNED (docs/COMPARE_MODE_DESIGN.md); otherwise only the parked list]**
+### Track U — UI: the OEM loop + instrument (consolidated plan)  **[COMPLETE 2026-08-09 — U0 ✅ (#59), U1 ✅ (#60), U2a ✅ (#62), U2b ✅ (#64, gate GREEN), U2 ✅ (#66), U3 ✅ (#67), U4 compare mode ✅ (#72). Track U shipped end to end; otherwise only the parked list]**
 
 **Goal:** the full ASH investigation loop — notice → localize (brush) → attribute
 (re-rank) → isolate (drill) → inspect → compare → share — with instrument-grade
@@ -3186,7 +3186,7 @@ the AAS pane is expected to move to a uPlot substrate behind a written gate
 
 **Phase U3 — B6 views on the chassis  ✅ [DONE — PR #67, 2026-08-04]**  *(subsumes REWORK B6; staged delegation — server → gate → UI → adversarial review, 3 blocking/5 high found+fixed with pins → supervisor probes; ships the per-execution 10046 waterfall, latency scatter, transition matrix + executions/execution_detail/exec_scatter commands, leader_pid in backends.jsonl, honest EXACT refusals end to end)*
 
-**Phase U4 — Compare mode  ⬜ [DESIGNED 2026-08-05 — docs/COMPARE_MODE_DESIGN.md; awaiting build approval]**
+**Phase U4 — Compare mode  ✅ [DONE — PR #72, 2026-08-09; docs/COMPARE_MODE_DESIGN.md]** *(build → 3-Opus adversarial review [8 findings, all fixed+pinned] → supervisor caught a 9th [gitignore `*-diff.png` collision on the ghost-diff cell name; renamed `compare-ghostdiff` + added a reserved-suffix guard] → gate. 340/340 node unit, 422/422 Playwright, 4 CI-generated compare baselines committed. D1–D7 shipped UI-only, zero server changes; the diff-lane per-window autoscale is a confirmed intentional qualitative lane. Deferred as designed: pinned fixed baselines v1.1, compare on EXACT-required views, server-side compare command v2.)*
 The last OEM capability (AWR-Compare-Periods class): baseline-as-OFFSET
 (compare survives live follow — "now vs yesterday, continuously"; one camera
 + one scalar, no second-camera sync), ghost-outline + per-class diff strip
