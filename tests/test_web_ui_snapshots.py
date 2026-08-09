@@ -124,7 +124,7 @@ GALLERY_STATIC_CELLS = [
     "gallery-uplot-aas-sampled",                # uPlot: sampled overlay rect
     "gallery-uplot-aas-mixed-escalation",       # uPlot: mixed + escalation band
     "gallery-uplot-aas-escalated-live-edge",    # uPlot: edge vline (drop-never-move)
-    "gallery-uplot-aas-compare-ghost-diff",     # U4: B total ghost + signed diff lane
+    "gallery-uplot-aas-compare-ghostdiff",      # U4: B total ghost + signed diff lane
     "gallery-fidelity-compare-mismatch",         # U4: exact-vs-sampled warning chip
     "gallery-fidelity-compare-predates",         # U4: quiet retention-edge note
     "gallery-timeline-dense-50pids",            # dense timeline (480px cap)
@@ -151,6 +151,11 @@ GALLERY_TICK_CELLS = [
 def _gallery_name(cell_id):
     """'gallery-aas-dense' -> baseline name 'gallery/aas-dense'."""
     return "gallery/" + cell_id[len("gallery-"):]
+
+
+assert all(not _gallery_name(cell).endswith(("-actual", "-diff"))
+           for cell in GALLERY_STATIC_CELLS), \
+    "gallery baseline names must not use gitignored -actual or -diff suffixes"
 
 MOCK_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mock_server.py")
 SNAP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web_snapshots")

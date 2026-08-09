@@ -417,5 +417,5 @@ export const uplotStates = {
     'mixed-escalation': states['mixed-escalation'],
     'escalated-live-edge': states['escalated-live-edge'],
     'live-ticks': states['live-ticks'],
-    'compare-ghost-diff': COMPARE_STATE,
+    'compare-ghostdiff': COMPARE_STATE,
 };
