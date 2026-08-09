@@ -26,7 +26,7 @@
 import { MANIFEST, FIXTURES } from './fixtures/manifest.mjs';
 import { buildAasOption } from '../lib/builders/aas.js';
 import {
-    buildUplotSpec, overlayGeometry, overlayHooks,
+    buildUplotSpec, overlayGeometry, overlayHooks, compareHooks, drawDiffStrip,
 } from '../lib/uplot-aas.js';
 import { buildTimelineOption } from '../lib/builders/timeline.js';
 import { buildHeatmapOption } from '../lib/builders/histogram.js';
@@ -41,11 +41,14 @@ import {
 } from '../lib/builders/concurrency.js';
 import {
     buildFidelityShading, buildEscalationAnnotation, buildUnavailablePanel,
-    buildMetricsPanel, buildEscalateControl,
+    buildMetricsPanel, buildEscalateControl, buildCompareFidelity,
 } from '../lib/builders/fidelity.js';
+import { compareFidelityHtml } from '../lib/panels.js';
 import { buildTableModel, mountTable } from '../lib/table.js';
+import { buildDeltaComparison } from '../lib/builders/compare.js';
 import {
     overviewConfig, eventsConfig, sessionsConfig, queriesConfig,
+    compareEventsConfig,
 } from '../lib/builders/table-configs.js';
 import { esc } from '../lib/format.js';
 
@@ -57,6 +60,7 @@ const TABLE_CONFIGS = {
     events: eventsConfig,
     sessions: sessionsConfig,
     queries: queriesConfig,
+    'compare-events': compareEventsConfig,
 };
 
 /* cellId -> setTick(n) for tick-replay cells (used by ⏮/⏭ and Playwright). */
@@ -176,6 +180,11 @@ function renderFidelity(body, foot, state) {
         hint.textContent = model.budgetText +
             ' · canEscalate=' + model.canEscalate +
             ' · canDeescalate=' + model.canDeescalate;
+    } else if (state.fn === 'compare') {
+        const model = buildCompareFidelity(...args);
+        const card = div('panel-card', body);
+        card.innerHTML = compareFidelityHtml(model);
+        factLine(foot, model.warning || model.note || 'matching evidence');
     } else {
         throw new Error('unknown fidelity fn: ' + state.fn);
     }
@@ -252,13 +261,30 @@ function mountUplotAas(host, data, opts) {
     if (!spec.hasData) return null;
     host.style.width = CHART_W + 'px';
     host.style.height = CHART_H + 'px';
+    const comparing = !!opts.compareData;
+    let plotHost = host;
+    let diff = null;
+    if (comparing) {
+        plotHost = div('compare-gallery-plot', host);
+        plotHost.style.width = CHART_W + 'px';
+        plotHost.style.height = (CHART_H - 54) + 'px';
+        diff = document.createElement('canvas');
+        diff.style.cssText = 'display:block;width:' + CHART_W + 'px;height:54px';
+        host.appendChild(diff);
+    }
     const o = spec.uplotOpts;
     o.width = CHART_W;
-    o.height = CHART_H;
-    o.hooks = overlayHooks((u) => overlayGeometry(data, opts,
+    o.height = comparing ? CHART_H - 54 : CHART_H;
+    const honesty = overlayHooks((u) => overlayGeometry(data, opts,
         { min: u.scales.x.min, max: u.scales.x.max }));
-    const u = new uPlot(o, spec.alignedData, host);
+    const ghost = compareHooks(() => spec.compare);
+    o.hooks = {
+        drawAxes: (honesty.drawAxes || []).concat(ghost.drawAxes || []),
+        draw: honesty.draw || [],
+    };
+    const u = new uPlot(o, spec.alignedData, plotHost);
     u.setScale('x', spec.xWindow);
+    if (diff) drawDiffStrip(diff, spec.compare, spec.xWindow);
     return { u, spec };
 }
 
@@ -401,9 +427,13 @@ function renderConcurrency(body, foot, state) {
 function renderTable(body, foot, state) {
     const cfg = TABLE_CONFIGS[state.config];
     if (!cfg) throw new Error('unknown table config: ' + state.config);
-    const model = buildTableModel(cfg, state.rows, state.sort || null);
+    const delta = state.compare
+        ? buildDeltaComparison(state.compare.kind, state.compare.a, state.compare.b)
+        : null;
+    const rows = delta ? delta.rows : state.rows;
+    const model = buildTableModel(cfg, rows, state.sort || null);
     const host = div('table-host', body);
-    mountTable(host, cfg, model, {});
+    mountTable(host, cfg, model, { truncation: delta && delta.truncation });
     factLine(foot, 'config: ' + state.config + ' · rows: ' + model.rows.length +
         (state.sort ? ' · sort: ' + state.sort.key +
             (state.sort.asc ? ' asc' : ' desc') : ''));
@@ -469,6 +499,12 @@ function renderCell(grid, entry) {
 
 export function main() {
     const grid = document.getElementById('grid');
+    // Keep every established cell at its historical document coordinate so
+    // adding a fixture cannot churn unrelated pixel baselines. Compare cells
+    // remain in the manifest/TOC under their owning builders, but render after
+    // the existing gallery corpus.
+    const displayEntries = MANIFEST.filter(e => !e.tags.includes('compare'))
+        .concat(MANIFEST.filter(e => e.tags.includes('compare')));
 
     // Sidebar index: one link per cell, grouped by builder.
     const toc = document.getElementById('toc');
@@ -487,7 +523,7 @@ export function main() {
         toc.appendChild(a);
     }
 
-    for (const entry of MANIFEST) renderCell(grid, entry);
+    for (const entry of displayEntries) renderCell(grid, entry);
 
     const counts = document.getElementById('counts');
     counts.textContent = MANIFEST.length + ' cells · ' +

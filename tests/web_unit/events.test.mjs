@@ -83,6 +83,17 @@ test('single row -> stable', () => {
     assert.equal(m.table.rows[0].row.name, 'Solo');
 });
 
+test('B-only compare failure falls back to the ordinary A events model', () => {
+    const a = { fidelity: 'exact', rows: [ev({ name: 'IO:A', total_ms: 250 })] };
+    const m = buildEventsModel({ compare: true, a, b: null,
+        baselineUnavailable: true }, null);
+    assert.equal(m.baselineUnavailable, true);
+    assert.equal(m.compare, undefined);
+    assert.deepEqual(m.table.rows.map(r => r.row.name), ['IO:A']);
+    assert.ok(m.table.headers.some(h => h.label === 'Wait Event'));
+    assert.ok(!m.table.headers.some(h => h.label === 'B'));
+});
+
 // %DB column is index 8 (name,count,total_ms,avg_us,p50,p95,p99,max,pct,aas).
 const PCT_COL = 8;
 

@@ -14,6 +14,51 @@
  */
 
 const FIFTEEN_MIN_NS = 900 * 1e9;
+export const DEFAULT_BASELINE_OFFSET_NS = -3600 * 1e9;
+
+/* Compare is one scalar beside the one camera: B is always A shifted by this
+ * negative nanosecond offset.  There is deliberately no B TimeRange/Camera;
+ * app.js mutates this object only through its single mutateFilters gate. */
+export class CompareState {
+    constructor() {
+        this.enabled = false;
+        this.offsetNs = DEFAULT_BASELINE_OFFSET_NS;
+    }
+
+    set(enabled, offsetNs) {
+        const off = normalizeBaselineOffset(offsetNs);
+        const nextEnabled = !!enabled && off != null;
+        const nextOffset = off == null ? this.offsetNs : off;
+        if (this.enabled === nextEnabled && this.offsetNs === nextOffset) return false;
+        this.enabled = nextEnabled;
+        this.offsetNs = nextOffset;
+        return true;
+    }
+
+    disable() {
+        if (!this.enabled) return false;
+        this.enabled = false;
+        return true;
+    }
+
+    snapshot() { return { enabled: this.enabled, offsetNs: this.offsetNs }; }
+}
+
+/* Offsets are signed decimal ns strings on the wire. v1 baselines are past
+ * windows only, so zero/positive values and values outside Number's exact
+ * integer domain are rejected instead of being rounded into another window. */
+export function normalizeBaselineOffset(value) {
+    const raw = typeof value === 'string' ? value : String(value);
+    if (!/^-\d+$/.test(raw)) return null;
+    try {
+        const n = BigInt(raw);
+        if (n >= 0n || n < BigInt(Number.MIN_SAFE_INTEGER)) return null;
+        const out = Number(n);
+        return Number.isSafeInteger(out) ? out : null;
+    } catch (e) {
+        return null;
+    }
+}
 
 /* Static server facts, set once on connect and refreshed on info ticks. */
 export class ServerInfo {
@@ -237,6 +282,11 @@ export function serializeHashState(s) {
         push('from', String(Math.round(s.fromNs)));
         push('to', String(Math.round(s.toNs)));
     }
+    const bOff = normalizeBaselineOffset(s.baselineOffsetNs);
+    if (s.compare && bOff != null) {
+        push('cmp', 1);
+        push('b_off', String(bOff));
+    }
     const f = s.filters || {};
     for (const k of Object.keys(f).sort()) {
         if (f[k] == null) continue;
@@ -268,8 +318,9 @@ export function parseHashState(hash) {
     if (!raw) return null;
     const s = { tab: null, live: false, spanSecs: null,
                 fromNs: null, toNs: null, filters: {}, sort: null,
-                execution: null };
+                execution: null, compare: false, baselineOffsetNs: null };
     const execution = {};
+    let compareRequested = false;
     let any = false;
     for (const part of raw.split('&')) {
         const eq = part.indexOf('=');
@@ -290,6 +341,12 @@ export function parseHashState(hash) {
                 s[k === 'from' ? 'fromNs' : 'toNs'] = n;
                 any = true;
             }
+        } else if (k === 'cmp') {
+            compareRequested = v === '1' || v === 'true';
+            any = true;
+        } else if (k === 'b_off') {
+            const off = normalizeBaselineOffset(v);
+            if (off != null) { s.baselineOffsetNs = off; any = true; }
         } else if (k.startsWith('f.') && k.length > 2) {
             const fk = k.slice(2);
             if (!HASH_FILTER_KEYS[fk]) continue;
@@ -334,6 +391,10 @@ export function parseHashState(hash) {
         s.execution = execution;
         any = true;
     }
+    // Compare needs BOTH allowlisted fields. A crafted cmp=1 without a valid
+    // past offset cannot smuggle a zero/future baseline into app state.
+    s.compare = compareRequested && s.baselineOffsetNs != null;
+    if (!s.compare) s.baselineOffsetNs = null;
     if (!any) return null;
     if (s.live) { s.fromNs = null; s.toNs = null; }         // live means NOW
     else if (!(s.fromNs != null && s.toNs != null && s.toNs > s.fromNs)) {

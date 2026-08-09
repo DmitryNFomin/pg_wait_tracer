@@ -113,6 +113,68 @@ h1 { font-size: 18px; font-weight: 600; color: #fff; }
 .live-btn:hover { background: #2a2a4a; color: #ccc; }
 .live-btn.active { background: #1a4a1a; border-color: #4a4; color: #4f4; }
 
+.compare-control-wrap { position: relative; display: inline-flex; gap: 3px; }
+.compare-btn, .compare-exit {
+  background: none;
+  border: 1px solid #555;
+  color: #aaa;
+  font-size: 12px;
+  padding: 4px 9px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.compare-btn:hover, .compare-exit:hover { background: #2a2a4a; color: #ddd; }
+.compare-btn.active { border-color: #9aa0aa; color: #eee; background: #29293f; }
+.compare-exit { padding: 4px 7px; color: #ff8a80; border-color: #704040; }
+.compare-picker {
+  position: absolute;
+  top: calc(100% + 5px);
+  right: 0;
+  width: 290px;
+  padding: 12px;
+  border: 1px solid #3a3a5a;
+  border-radius: 8px;
+  background: #1e1e3a;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+  z-index: 120;
+}
+.compare-presets { display: grid; gap: 5px; margin: 5px 0 12px; }
+.compare-presets button, .compare-custom button {
+  background: #252548; border: 1px solid #414164; color: #ccc;
+  border-radius: 3px; padding: 5px 8px; cursor: pointer;
+}
+.compare-presets button:hover, .compare-custom button:hover { background: #30305a; }
+.compare-custom { display: grid; grid-template-columns: 58px 1fr auto; gap: 5px; }
+.compare-custom input, .compare-custom select {
+  min-width: 0; padding: 4px; color: #ddd; background: #17172d;
+  border: 1px solid #414164; border-radius: 3px;
+}
+
+.compare-header {
+  min-height: 32px;
+  padding: 6px 20px;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  background: #19192f;
+  border-bottom: 1px solid #34344f;
+  font-size: 11px;
+}
+.compare-offset { color: #ddd; font-weight: 600; }
+.compare-evidence { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.compare-side { color: #888; display: inline-flex; gap: 4px; align-items: center; }
+.compare-evidence-chip {
+  padding: 1px 6px; border-radius: 8px; border: 1px solid #52606b; color: #bbb;
+}
+.compare-evidence-chip.sampled { border-style: dashed; border-color: rgba(255,193,7,.65); }
+.compare-evidence-chip.mixed { border-style: dashed; border-color: rgba(120,144,255,.65); }
+.compare-evidence-chip.none { color: #777; border-color: #444; }
+.compare-warning {
+  color: #ffd166; background: #312b18; border: 1px solid #65572a;
+  border-radius: 10px; padding: 2px 8px;
+}
+.compare-note { color: #777; font-style: italic; }
+
 .time-picker {
   position: absolute;
   top: 100%;
@@ -200,6 +262,30 @@ h1 { font-size: 18px; font-weight: 600; color: #fff; }
   height: 100%;
   min-height: 300px;
 }
+#aas-chart-container.compare-active .aas-uplot-host {
+  height: calc(100% - 54px);
+  min-height: 246px;
+}
+.aas-diff-strip {
+  display: block;
+  width: 100%;
+  height: 54px;
+  border-top: 1px solid #39394f;
+}
+.aas-compare-note {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  z-index: 3;
+  max-width: calc(100% - 80px);
+  padding: 3px 7px;
+  border: 1px solid rgba(100, 100, 125, .45);
+  border-radius: 3px;
+  background: rgba(25, 25, 47, .88);
+  font-size: 11px;
+  pointer-events: none;
+}
+.compare-baseline-unavailable { margin: 0 2px 7px; font-size: 11px; }
 #aas-chart-container .u-cursor-x {
   border-right: 1px dashed rgba(160, 160, 180, 0.55);
 }
@@ -449,6 +535,15 @@ tr.clickable:hover td { background: #2a3a6a; }
 .num { text-align: right; font-variant-numeric: tabular-nums; }
 .indent-1 td:first-child { padding-left: 28px; }
 .indent-2 td:first-child { padding-left: 48px; }
+.delta-value.grew { color: #7de89a; }
+.delta-value.shrank { color: #8e97a6; }
+.delta-status {
+  display: inline-block; min-width: 38px; text-align: center;
+  padding: 1px 5px; border-radius: 8px; font-size: 10px; text-transform: uppercase;
+}
+.delta-status.new { color: #7de89a; border: 1px solid #3d8050; }
+.delta-status.gone { color: #9ba3b0; border: 1px solid #505967; }
+.truncation-row:hover td { background: transparent; }
 
 /* Sticky columns for wide tables (queries tab) */
 .sticky-col {

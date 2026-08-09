@@ -138,4 +138,16 @@ export const states = {
             escalation_budget_unlimited: true, escalation_reason: 'none',
         }],
     },
+    'compare-mismatch': {
+        description: 'Compare header names both evidence classes and persistently warns when A exact is compared with sampled B.',
+        tags: ['FEEDBACK', 'SEMANTICS', 'fidelity', 'compare'],
+        fn: 'compare',
+        args: [{ fidelity: 'exact' }, { fidelity: 'sampled' }, {}],
+    },
+    'compare-predates': {
+        description: 'Expected compare edge: B is outside trace retention, shown as a quiet note rather than an error card.',
+        tags: ['FEEDBACK', 'SEMANTICS', 'compare'],
+        fn: 'compare',
+        args: [{ fidelity: 'exact' }, null, { baselinePredates: true }],
+    },
 };

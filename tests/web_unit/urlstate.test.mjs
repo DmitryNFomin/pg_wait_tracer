@@ -44,6 +44,33 @@ test('serialize: live mode carries span, NEVER from/to (live means NOW)', () => 
     assert.ok(!h.includes('from='), 'a live hash pins no window');
 });
 
+test('compare offset round-trips as an exact signed ns string in live mode', () => {
+    const h = serializeHashState({
+        tab: 'events', live: true, spanSecs: 300, filters: {}, sort: null,
+        compare: true, baselineOffsetNs: -604800000000000,
+    });
+    assert.equal(h, 'tab=events&live=1&span=300&cmp=1&b_off=-604800000000000');
+    const s = parseHashState('#' + h);
+    assert.equal(s.compare, true);
+    assert.equal(s.baselineOffsetNs, -604800000000000);
+    assert.equal(s.fromNs, null, 'live compare still re-anchors A to NOW');
+});
+
+test('compare codec rejects missing, future, fractional, overflow, and hostile offsets', () => {
+    for (const h of [
+        '#cmp=1', '#cmp=1&b_off=0', '#cmp=1&b_off=10',
+        '#cmp=1&b_off=-1.5', '#cmp=1&b_off=-9007199254740992',
+        '#cmp=1&b_off=-1e12', '#cmp=1&b_off=%2D1%26f.pid%3D9',
+    ]) {
+        const s = parseHashState(h);
+        assert.ok(s == null || s.compare === false, h);
+        if (s) assert.equal(s.baselineOffsetNs, null, h);
+    }
+    const offOnly = parseHashState('#tab=events&b_off=-3600000000000');
+    assert.equal(offOnly.compare, false);
+    assert.equal(offOnly.baselineOffsetNs, null);
+});
+
 test('serialize: canonical — filter key order is sorted, same state same string', () => {
     const a = serializeHashState({ tab: 't', live: true, spanSecs: 60,
         filters: { pid: 1, class: 'IO' }, sort: null });

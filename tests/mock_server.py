@@ -80,6 +80,46 @@ def _env_int(name, default):
 _TO_NS   = 1_774_000_000_000_000_000
 _FROM_NS = _TO_NS - 3600_000_000_000
 _BUCKET_NS = 60_000_000_000
+_COMPARE_MODE = os.environ.get("PGWT_MOCK_COMPARE", "0") not in ("0", "", "false")
+_INFO_TICKS = 0
+
+
+def _is_compare_baseline(msg):
+    """Test-only discriminator for U4's second use of the SAME commands.
+
+    The compare suite selects a 5-minute offset. Table B ends before the fixed
+    NOW; AAS B is a 3x strip, so distinguish it by its earlier strip centre.
+    Ordinary mocks never enter this path.
+    """
+    if not _COMPARE_MODE:
+        return False
+    req_from, req_to = msg.get("from"), msg.get("to")
+    if req_from is None or req_to is None:
+        return False
+    if msg.get("cmd") == "aas":
+        return (req_from + req_to) / 2 < _TO_NS - 10 * 60_000_000_000
+    return req_to < _TO_NS
+
+
+def _baseline_rows(rows, value_key):
+    """Deterministic B variants: real changes, one gone entity, one floor row."""
+    out = []
+    for source in rows:
+        row = dict(source)
+        if row.get("event_id") == 0:
+            row[value_key] = 4000
+        elif row.get("event_id") == 0x01000015:
+            row[value_key] = 1000
+        elif row.get("event_id") == 0x03000000:
+            continue                         # A-only => new
+        elif row.get("event_id") == 0x01000050:
+            row[value_key] = 250             # 50 ms => below 1% floor
+        out.append(row)
+    out.append({"name": "Client:gone_from_A", "event_id": 0x06000009,
+                "class": "Client", "count": 700, "total_ms": 700,
+                "avg_us": 1000, "p50_us": 1000, "p95_us": 1000,
+                "p99_us": 1000, "max_us": 1000, "pct": 5.6, "aas": 0.19})
+    return out
 
 def _make_aas_buckets():
     buckets = []
@@ -628,15 +668,16 @@ def handle_request(msg):
     resp = _handle_request_inner(cmd, req_id, msg)
     # Tag every view response with its window fidelity (A3). Done centrally so
     # the schema stays aligned with the real server across all views.
+    response_fidelity = "sampled" if _is_compare_baseline(msg) else _FID.fidelity
     if cmd in _FIDELITY_VIEWS and "fidelity" not in resp and "error" not in resp:
-        resp["fidelity"] = _FID.fidelity
-        if _FID.fidelity in ("sampled", "mixed"):
+        resp["fidelity"] = response_fidelity
+        if response_fidelity in ("sampled", "mixed"):
             resp["sample_period_ns"] = _FID.sample_period_ns
     # FID-3 (T1): over a sampled-only window the real server gates the
     # latency columns — samples carry no real durations, so avg/percentiles
     # are null and the UI renders "—". Mirror it so the web tests exercise
     # the same shape.
-    if cmd == "top_events" and _FID.fidelity == "sampled" and "rows" in resp:
+    if cmd == "top_events" and response_fidelity == "sampled" and "rows" in resp:
         gated = []
         for row in resp["rows"]:
             row = dict(row)
@@ -649,7 +690,12 @@ def handle_request(msg):
 
 def _handle_request_inner(cmd, req_id, msg):
     if cmd == "info":
-        return {"id": req_id, **_CANNED["info"]}
+        global _INFO_TICKS
+        resp = {"id": req_id, **_CANNED["info"]}
+        if _COMPARE_MODE:
+            resp["now_ns"] = _TO_NS + _INFO_TICKS * 30_000_000_000
+            _INFO_TICKS += 1
+        return resp
 
     if cmd == "aas":
         # Protocol-faithful: a window that does not intersect the canned data
@@ -668,11 +714,21 @@ def _handle_request_inner(cmd, req_id, msg):
             resp["series"] = series
             resp["buckets"] = buckets
         else:
-            resp["buckets"] = _AAS_BUCKETS
+            if _is_compare_baseline(msg):
+                resp["buckets"] = [dict(b, cpu=round(b["cpu"] * 0.55, 4),
+                    io=round(b["io"] * 1.35, 4), lock=round(b["lock"] * 0.4, 4))
+                    for b in _AAS_BUCKETS]
+            else:
+                resp["buckets"] = _AAS_BUCKETS
         return resp
 
     if cmd == "time_model":
-        return {"id": req_id, **_CANNED["time_model"]}
+        resp = {"id": req_id, **_CANNED["time_model"]}
+        if _is_compare_baseline(msg):
+            resp["db_time_ms"] = 10000
+            resp["rows"] = [dict(r, ms=round(r["ms"] * 0.8, 3))
+                            for r in _CANNED["time_model"]["rows"]]
+        return resp
 
     if cmd == "top_events":
         rows = _CANNED["top_events"]["rows"]
@@ -680,6 +736,8 @@ def _handle_request_inner(cmd, req_id, msg):
         if "class" in filters:
             cls = filters["class"]
             rows = [r for r in rows if r["class"].lower() == cls.lower()]
+        if _is_compare_baseline(msg):
+            rows = _baseline_rows(rows, "total_ms")
         return {"id": req_id,
                 "db_time_ms": _CANNED["top_events"]["db_time_ms"],
                 "rows": rows}

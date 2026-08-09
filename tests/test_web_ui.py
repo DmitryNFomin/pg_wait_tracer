@@ -2931,6 +2931,8 @@ def test_url_state_roundtrip(page):
 
 B5_PORT = MOCK_PORT + 10
 B5_URL = app_url(B5_PORT)
+COMPARE_PORT = MOCK_PORT + 20
+COMPARE_URL = app_url(COMPARE_PORT)
 
 
 def test_b5_sampled_shading(page):
@@ -3074,6 +3076,236 @@ def test_b5_metrics_panel(page):
         check("Budget" in txt, "Metrics panel shows budget remaining")
 
 
+# ── Track U Phase U4: compare mode ──────────────────────────────────────────
+
+def _enable_compare_5m(page, url=COMPARE_URL):
+    page.goto(url)
+    page.wait_for_selector("#status.connected", timeout=10000)
+    page.click("#compare-btn")
+    page.fill("#compare-custom-value", "5")
+    page.select_option("#compare-custom-unit", "60")
+    page.click("#compare-custom-apply")
+    page.wait_for_selector("#compare-header", state="visible")
+    page.wait_for_timeout(1000)
+
+
+def test_compare_delta_ranking(page):
+    """D2/D3: ghost+diff are present and events default to |Δ| ranking."""
+    print("--- Test U4.1: Compare geometry + delta ranking ---")
+    _enable_compare_5m(page)
+    geo = page.evaluate("window.__pgwt.aasDebug().compare")
+    check(geo and len(geo["ghost"]) > 0 and len(geo["diff"]) > 0,
+          "compare AAS paints B-total ghost geometry and signed diff buckets")
+    page.click(".tab[data-tab='events']")
+    page.wait_for_timeout(900)
+    headers = page.locator("#table-container th").all_text_contents()
+    check(all(label in headers for label in ["A", "B", "Δ ▼", "×"]),
+          f"delta table exposes A | B | Δ | × with Δ default ({headers})")
+    first = page.locator("#table-container tbody tr").first.text_content()
+    check("Lock:relation" in first and "new" in first.lower(),
+          f"largest |Δ| entity ranks first and is labeled new ('{first}')")
+    body = page.text_content("#table-container")
+    check("entities below the change floor" in body,
+          "delta table ends with the honest below-change-floor row")
+
+
+def test_compare_live_offset_follow(page):
+    """D1: A remains the only live camera; B advances by the identical delta."""
+    print("--- Test U4.2: Compare live offset follow ---")
+    _enable_compare_5m(page)
+    before = page.evaluate("window.__pgwt.compareSnapshot()")
+    check(page.evaluate("document.getElementById('live-btn').classList.contains('active')"),
+          "enabling compare does not pause live follow")
+    page.wait_for_timeout(5600)
+    after = page.evaluate("window.__pgwt.compareSnapshot()")
+    da = after["a"]["to"] - before["a"]["to"]
+    db = after["b"]["to"] - before["b"]["to"]
+    check(da > 0 and da == db, f"live tick moved A and derived B equally ({da} ns)")
+    check(after["b"]["to"] - after["a"]["to"] == after["offsetNs"],
+          "B remains exactly A + b_off after the live tick")
+
+
+def test_compare_fidelity_mismatch(page):
+    """D4: exact A vs sampled B renders deltas with a persistent warning."""
+    print("--- Test U4.3: Compare fidelity mismatch ---")
+    _enable_compare_5m(page)
+    text = page.text_content("#compare-header")
+    check("A Exact" in text and "B Sampled" in text,
+          f"compare header keeps both fidelity badges ('{text}')")
+    check("Δ compares exact against sampled estimates" in text,
+          "fidelity mismatch warning is persistent and explicit")
+    check(page.locator("#aas-chart-container canvas").count() > 0,
+          "fidelity mismatch flags but does not block rendering")
+
+
+def test_compare_url_roundtrip(page):
+    """D5: cmp/b_off survive F5 and compare exit is one traversable entry."""
+    print("--- Test U4.4: Compare URL reload + history ---")
+    _enable_compare_5m(page)
+    active_hash = page.evaluate("location.hash")
+    check("cmp=1" in active_hash and "b_off=-300000000000" in active_hash,
+          f"compare URL names the signed ns offset ('{active_hash}')")
+    page.reload()
+    page.wait_for_selector("#status.connected", timeout=10000)
+    page.wait_for_function("window.__pgwt.compareSnapshot().enabled")
+    restored = page.evaluate("window.__pgwt.compareSnapshot()")
+    check(restored["offsetNs"] == -300_000_000_000,
+          "compare state survives reload exactly")
+    page.click("#compare-exit")
+    page.wait_for_function("!window.__pgwt.compareSnapshot().enabled")
+    off_hash = page.evaluate("location.hash")
+    check("cmp=" not in off_hash and "b_off=" not in off_hash,
+          "single exit removes both compare URL keys")
+    page.evaluate("history.back()")
+    page.wait_for_function("window.__pgwt.compareSnapshot().enabled")
+    check(page.evaluate("location.hash") == active_hash,
+          "Back restores the compare entry")
+    page.evaluate("history.forward()")
+    page.wait_for_function("!window.__pgwt.compareSnapshot().enabled")
+    check(page.evaluate("location.hash") == off_hash,
+          "Forward restores the one-step compare exit")
+
+
+def test_compare_baseline_predates(page):
+    """D7: an out-of-retention B is an expected note with no ghost/diff."""
+    print("--- Test U4.5: Baseline predates trace ---")
+    page.goto(COMPARE_URL +
+              "#tab=overview&live=1&span=900&cmp=1&b_off=-86400000000000")
+    page.wait_for_selector("#status.connected", timeout=10000)
+    page.wait_for_function("window.__pgwt.compareSnapshot().enabled")
+    page.wait_for_timeout(700)
+    text = page.text_content("#compare-header")
+    check("baseline predates the trace" in text,
+          f"retention edge is a quiet compare note ('{text}')")
+    geo = page.evaluate("window.__pgwt.aasDebug().compare")
+    check(geo and len(geo["ghost"]) == 0 and len(geo["diff"]) == 0,
+          "predating baseline renders neither ghost nor diff")
+    check(page.locator("#aas-chart-container .pane-error").count() == 0,
+          "predating baseline is not an error card")
+
+
+def test_compare_superseded_baseline_is_silent(page):
+    """H3: a B strip invalidated by a newer compare refresh never paints P1."""
+    print("--- Test U4.6: Superseded B strip is silent ---")
+    page.goto(COMPARE_URL)
+    page.wait_for_selector("#status.connected", timeout=10000)
+    if page.evaluate("document.getElementById('live-btn').classList.contains('active')"):
+        page.click("#live-btn")
+        page.wait_for_timeout(200)
+
+    # Hold the first cache fetch after compare is enabled. Changing the offset
+    # invalidates its generation and starts a newer B; releasing this old fetch
+    # then deterministically produces ensure() -> {ok:false, stale:true}.
+    page.evaluate("""() => {
+        const cache = window.__pgwt.stripCache;
+        const original = cache.fetchStrip.bind(cache);
+        let held = false;
+        cache.fetchStrip = args => {
+            if (window.__pgwt.compare.enabled && !held) {
+                held = true;
+                window.__baselineHeld = true;
+                return new Promise((resolve, reject) => {
+                    window.__releaseHeldBaseline = () =>
+                        original(args).then(resolve, reject);
+                });
+            }
+            return original(args);
+        };
+    }""")
+    page.click("#compare-btn")
+    page.fill("#compare-custom-value", "5")
+    page.select_option("#compare-custom-unit", "60")
+    page.click("#compare-custom-apply")
+    page.wait_for_function("window.__baselineHeld === true", timeout=5000)
+
+    # A second offset owns the pane and invalidates the held B generation.
+    page.click("#compare-btn")
+    page.fill("#compare-custom-value", "10")
+    page.select_option("#compare-custom-unit", "60")
+    page.click("#compare-custom-apply")
+    page.wait_for_function("""() => {
+        const d = window.__pgwt.aasDebug();
+        return window.__pgwt.compare.offsetNs === -600000000000 &&
+            d && d.mounted && d.compare && d.compare.diff.length > 0;
+    }""", timeout=10000)
+    page.evaluate("window.__releaseHeldBaseline()")
+    page.wait_for_timeout(500)
+    check(page.locator("#aas-chart-container > .pane-error").count() == 0,
+          "superseded B result produced no active-pane error card")
+    check(page.evaluate("window.__pgwt.aasDebug().mounted"),
+          "newer compare refresh still owns the rendered AAS pane")
+
+
+def test_compare_baseline_failure_degrades_to_a(page):
+    """H3: genuine B command failures keep A visible in chart and all tables."""
+    print("--- Test U4.7: B-only command failure degrades to A ---")
+    page.goto(COMPARE_URL)
+    page.wait_for_selector("#status.connected", timeout=10000)
+    if page.evaluate("document.getElementById('live-btn').classList.contains('active')"):
+        page.click("#live-btn")
+        page.wait_for_timeout(200)
+
+    # Rewrite only requests whose time midpoint is closer to derived B than A.
+    # The mock answers the unknown command with a healthy-server error envelope.
+    page.evaluate("""() => {
+        const ws = window.__pgwt.transport.ws;
+        const send = ws.send.bind(ws);
+        ws.send = data => {
+            const msg = JSON.parse(data);
+            const s = window.__pgwt.compareSnapshot();
+            if (s.enabled && msg.from != null && msg.to != null &&
+                ['aas', 'time_model', 'top_events', 'top_queries'].includes(msg.cmd)) {
+                const mid = (msg.from + msg.to) / 2;
+                const amid = (s.a.from + s.a.to) / 2;
+                const bmid = (s.b.from + s.b.to) / 2;
+                if (Math.abs(mid - bmid) < Math.abs(mid - amid))
+                    msg.cmd += '_broken_baseline';
+            }
+            return send(JSON.stringify(msg));
+        };
+    }""")
+    page.click("#compare-btn")
+    page.fill("#compare-custom-value", "5")
+    page.select_option("#compare-custom-unit", "60")
+    page.click("#compare-custom-apply")
+    page.wait_for_selector("#aas-chart-container .aas-compare-note",
+                           state="visible", timeout=10000)
+    note = page.text_content("#aas-chart-container .aas-compare-note")
+    check("Baseline unavailable" in note,
+          f"AAS pane explains the B-only degradation ('{note}')")
+    check(page.evaluate("window.__pgwt.aasDebug().mounted"),
+          "AAS investigation window A remains rendered")
+    check(page.locator("#aas-chart-container > .pane-error").count() == 0,
+          "B-only AAS failure does not paint a P1 error card")
+
+    for tab, expected in (("overview", "DB Time"),
+                          ("events", "Wait Event"),
+                          ("queries", "Query ID")):
+        page.click(f".tab[data-tab='{tab}']")
+        page.wait_for_selector("#table-container .compare-baseline-unavailable",
+                               timeout=10000)
+        body = page.text_content("#table-container")
+        check(expected in body,
+              f"{tab} renders investigation window A after B failure")
+        check("Baseline unavailable" in body,
+              f"{tab} carries the quiet baseline-unavailable note")
+        check(page.locator("#table-container > .pane-error").count() == 0,
+              f"{tab} B-only failure does not paint a P1 error card")
+
+
+def test_compare_echarts_renderer_note(page):
+    """L1: rollback renderer remains available but never silently omits D2."""
+    print("--- Test U4.8: ECharts compare limitation is explicit ---")
+    _enable_compare_5m(page, COMPARE_URL + "&renderer=echarts")
+    check(page.evaluate("window.__pgwt.aasRenderer") == "echarts",
+          "test is exercising the ECharts rollback renderer")
+    note = page.text_content("#aas-chart-container .aas-compare-note")
+    check("Compare visuals require the uPlot renderer" in note,
+          f"ECharts compare omission is explicit ('{note}')")
+    check(page.locator("#aas-chart-container canvas").count() > 0,
+          "ECharts still renders investigation window A")
+
+
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
@@ -3199,6 +3431,35 @@ def main():
             finally:
                 set_failure_capture(page, guard)
                 stop_mock_server(b5_proc)
+
+            # U4 compare mock: the SAME commands return request-window-
+            # distinguishable B data, with B sampled and a clock that advances
+            # on live ticks. No production protocol/server surface is added.
+            compare_proc = start_mock_server(
+                extra_env={"PGWT_MOCK_COMPARE": "1"}, port=COMPARE_PORT)
+            try:
+                compare_ctx = browser.new_context(viewport={"width": 1280, "height": 900})
+                compare_ctx.add_init_script(UNHANDLED_REJECTION_HOOK)
+                compare_page = compare_ctx.new_page()
+                compare_guard = ConsoleErrorGuard(compare_page)
+                set_failure_capture(compare_page, compare_guard)
+                compare_tests = [
+                    test_compare_delta_ranking,
+                    test_compare_live_offset_follow,
+                    test_compare_fidelity_mismatch,
+                    test_compare_url_roundtrip,
+                    test_compare_baseline_predates,
+                    test_compare_superseded_baseline_is_silent,
+                    test_compare_baseline_failure_degrades_to_a,
+                    test_compare_echarts_renderer_note,
+                ]
+                for fn in compare_tests:
+                    fn(compare_page)
+                    assert_no_console_errors(compare_page, compare_guard, fn.__name__)
+                compare_ctx.close()
+            finally:
+                set_failure_capture(page, guard)
+                stop_mock_server(compare_proc)
 
             # Reconnection test (kills/restarts mock server) — connection
             # failures during the outage are expected, everything else fails.

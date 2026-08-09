@@ -4,7 +4,9 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { ServerInfo, TimeRange, FilterStack, FIFTEEN_MIN_NS } from '../../web/static/lib/state.js';
+import {
+    ServerInfo, TimeRange, FilterStack, CompareState, FIFTEEN_MIN_NS,
+} from '../../web/static/lib/state.js';
 import { Transport, CancelledError } from '../../web/static/lib/transport.js';
 
 // ── TimeRange ──────────────────────────────────────────────────────────────
@@ -52,6 +54,15 @@ test('zoomOut with empty history widens 2x clamped to trace bounds', () => {
     t.set(50, 150);
     t.zoomOut();              // would go -50..250, clamp low to 0
     assert.equal(t.from, 0);
+});
+
+test('compare state is one negative offset scalar and rejects future baselines', () => {
+    const c = new CompareState();
+    assert.equal(c.enabled, false);
+    assert.equal(c.set(true, '-86400000000000'), true);
+    assert.deepEqual(c.snapshot(), { enabled: true, offsetNs: -86400000000000 });
+    assert.equal(c.set(true, '1'), true);
+    assert.equal(c.enabled, false);
 });
 
 // ── FilterStack ────────────────────────────────────────────────────────────

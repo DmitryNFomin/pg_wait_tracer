@@ -36,6 +36,11 @@ export function buildTableModel(config, rows, sort) {
         const key = sort.key;
         rows.sort((a, b) => {
             const va = a[key], vb = b[key];
+            // Missing compare ratios (new/gone, or a real zero divisor) stay
+            // at the end in BOTH directions. They are not +/-Infinity.
+            if (va == null && vb != null) return 1;
+            if (vb == null && va != null) return -1;
+            if (va == null && vb == null) return 0;
             if (typeof va === 'number' && typeof vb === 'number')
                 return asc ? va - vb : vb - va;
             return asc ? String(va).localeCompare(String(vb))

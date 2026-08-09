@@ -34,6 +34,25 @@ export const MIN_RES_NS = 256;                   // float64 ulp at 2026 epochs
 export const DEFAULT_TARGET_BUCKETS = 300;
 const SKIRT_SPANS = 1;                           // 1 span each side => 3x strip
 
+/* D1 compare plumbing: derive B from A without creating a second camera.
+ * Offset is signed (past baselines are negative). These helpers preserve the
+ * quantized resolution/bucket count exactly, so A/B bucket boundaries remain
+ * comparable even for custom offsets that are not multiples of resNs. */
+export function shiftWindow(win, offsetNs) {
+    const from = win && (win.fromNs != null ? win.fromNs : win.from);
+    const to = win && (win.toNs != null ? win.toNs : win.to);
+    return { from: from + offsetNs, to: to + offsetNs };
+}
+
+export function shiftQuantized(q, offsetNs) {
+    return Object.assign({}, q, {
+        stripFrom: q.stripFrom + offsetNs,
+        stripTo: q.stripTo + offsetNs,
+        winFromNs: q.winFromNs + offsetNs,
+        winToNs: q.winToNs + offsetNs,
+    });
+}
+
 export class Camera {
     /* opts: { fromNs, toNs, mode:'follow'|'detached', minSpanNs, maxSpanNs }.
      * The initial window is normalized through the same span clamp as

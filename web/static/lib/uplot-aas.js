@@ -217,6 +217,99 @@ export function stackSeries(values, hidden) {
     return { stacked, bands, stackIdxs };
 }
 
+/* Normalize either AAS payload shape into WAIT_CLASSES order. Event-mode
+ * strips are folded back into their class hues: D2's diff lane is per class,
+ * even while A itself is drilled to event breakdown. */
+function classValues(data) {
+    const buckets = (data && data.buckets) || [];
+    if (data && data.breakdown === 'events' && Array.isArray(data.series)) {
+        return buckets.map(b => {
+            const out = WAIT_CLASSES.map(() => 0);
+            data.series.forEach((s, i) => {
+                const ci = classIndex(s && s.name);
+                if (ci >= 0) out[ci] += Number((b.aas || [])[i]) || 0;
+                else out[out.length - 1] += Number((b.aas || [])[i]) || 0;
+            });
+            return out;
+        });
+    }
+    return buckets.map(b => WAIT_CLASSES.map(c => Number(b[c.key]) || 0));
+}
+
+/* D2 compare geometry. B timestamps remain their real historical positions in
+ * the payload; shifting by -offset overlays them on A. Diff values integrate
+ * AAS over each A bucket, yielding AAS-seconds. An A bucket is emitted only
+ * when B fully covers its corresponding interval — partial strip boundaries
+ * render nothing rather than treating missing baseline time as zero. */
+export function buildCompareGeometry(dataA, dataB, opts) {
+    opts = opts || {};
+    if (opts.baselinePredates || !dataA || !dataB) {
+        return { ghost: [], diff: [], maxGhostAas: 0, hasData: false };
+    }
+    const offsetNs = Number(opts.offsetNs);
+    const aNs = Number(dataA.bucket_ns) || 0;
+    const bNs = Number(dataB.bucket_ns) || 0;
+    const aBuckets = dataA.buckets || [];
+    const bBuckets = dataB.buckets || [];
+    if (!Number.isFinite(offsetNs) || !(aNs > 0) || !(bNs > 0) ||
+        !aBuckets.length || !bBuckets.length) {
+        return { ghost: [], diff: [], maxGhostAas: 0, hasData: false };
+    }
+    const av = classValues(dataA);
+    const bv = classValues(dataB);
+    let maxGhostAas = 0;
+    const ghost = bBuckets.map((b, i) => {
+        const total = bv[i].reduce((sum, v) => sum + v, 0);
+        const shiftedNs = b.t - offsetNs;
+        if (!opts.win || (shiftedNs + bNs > opts.win.from && shiftedNs < opts.win.to)) {
+            maxGhostAas = Math.max(maxGhostAas, total);
+        }
+        return { x: nsToMs(shiftedNs), total };
+    });
+
+    const diff = [];
+    let bj = 0;
+    for (let ai = 0; ai < aBuckets.length; ai++) {
+        const a = aBuckets[ai];
+        const want0 = a.t + offsetNs;
+        const want1 = want0 + aNs;
+        while (bj < bBuckets.length && bBuckets[bj].t + bNs <= want0) bj++;
+        let j = bj;
+        let coveredNs = 0;
+        const bSeconds = WAIT_CLASSES.map(() => 0);
+        while (j < bBuckets.length && bBuckets[j].t < want1) {
+            const lo = Math.max(want0, bBuckets[j].t);
+            const hi = Math.min(want1, bBuckets[j].t + bNs);
+            const overlap = Math.max(0, hi - lo);
+            if (overlap > 0) {
+                coveredNs += overlap;
+                for (let ci = 0; ci < WAIT_CLASSES.length; ci++) {
+                    bSeconds[ci] += bv[j][ci] * overlap / 1e9;
+                }
+            }
+            j++;
+        }
+        // float64 epoch-ns subtraction can wobble by one ulp (256 ns).
+        if (coveredNs + 512 < aNs) continue;
+        const classes = WAIT_CLASSES.map((c, ci) => {
+            const delta = av[ai][ci] * aNs / 1e9 - bSeconds[ci];
+            return {
+                key: c.key,
+                label: c.label,
+                color: delta >= 0 ? c.color : withAlpha(c.color, 0.35),
+                deltaSeconds: delta,
+            };
+        }).filter(c => Math.abs(c.deltaSeconds) > 1e-12);
+        diff.push({
+            x0: nsToMs(a.t),
+            x1: nsToMs(a.t + aNs),
+            classes,
+            provisional: !!opts.provisional && ai === aBuckets.length - 1,
+        });
+    }
+    return { ghost, diff, maxGhostAas, hasData: ghost.length > 0 && diff.length > 0 };
+}
+
 /* data: aas response { buckets[], bucket_ns, max_aas, breakdown?, series?,
  *                      fidelity, sample_period_ns, fidelity_ranges? }
  * opts: {
@@ -266,7 +359,13 @@ export function buildUplotSpec(data, opts) {
     const alignedData = [xs].concat(stacked);
 
     const maxAas = (data && data.max_aas) || 0;
-    const yMax = policyYMax(maxAas, numCpus);
+    const compare = buildCompareGeometry(data, opts.compareData, {
+        offsetNs: opts.compareOffsetNs,
+        baselinePredates: opts.baselinePredates,
+        provisional: opts.compareProvisional,
+        win: opts.win,
+    });
+    const yMax = policyYMax(Math.max(maxAas, compare.maxGhostAas), numCpus);
 
     // Window / axis extents (ns) — the same derivation as buildAasOption:
     // win falls back to the bucket span (Node tests, degenerate callers);
@@ -377,6 +476,7 @@ export function buildUplotSpec(data, opts) {
         breakdown: (data && data.breakdown === 'events' && data.series)
             ? 'events' : 'classes',
         rawValues: values,
+        compare,
         overlays: overlayGeometry(data, opts, null),
         xWindow,
         yMax,
@@ -391,6 +491,163 @@ export function buildUplotSpec(data, opts) {
         axisRange: { from: axisFromNs, to: axisToNs },
         window: { from: win.from, to: win.to },
     };
+}
+
+/* D2 ghost draw hook: one neutral dashed TOTAL line, painted before A's area
+ * series. Geometry is already shifted onto A's x axis; this layer performs no
+ * comparison math. */
+export function drawCompareGhost(u, geo) {
+    const points = geo && geo.ghost;
+    if (!points || !points.length) return;
+    const ctx = u.ctx;
+    const { left, top, width, height } = u.bbox;
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(left, top, width, height);
+    ctx.clip();
+    ctx.strokeStyle = 'rgba(190,190,200,0.78)';
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([6, 4]);
+    ctx.beginPath();
+    let moved = false;
+    for (const p of points) {
+        const x = u.valToPos(p.x, 'x', true);
+        const y = u.valToPos(p.total, 'y', true);
+        if (!Number.isFinite(x) || !Number.isFinite(y)) {
+            moved = false;
+            continue;
+        }
+        if (!moved) { ctx.moveTo(x, y); moved = true; }
+        else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+    ctx.restore();
+}
+
+export function compareHooks(getGeo) {
+    return { drawAxes: [(u) => drawCompareGhost(u, getGeo(u))] };
+}
+
+/* Pure signed-lane geometry. uPlot reports bbox in device pixels while the
+ * lane canvas is laid out in CSS pixels, so normalize at this boundary. The
+ * label owns y=0..12; the signed drawing region beneath it is split exactly
+ * in half so equal positive/negative magnitudes get equal pixel heights. */
+export function diffStripLayout(cssW, cssH, plotBbox, dpr) {
+    cssW = Math.max(1, Number(cssW) || 1);
+    cssH = Math.max(1, Number(cssH) || 1);
+    dpr = Number(dpr) > 0 ? Number(dpr) : 1;
+    let plotLeft = 0;
+    let plotWidth = cssW;
+    if (plotBbox && Number(plotBbox.width) > 0) {
+        plotLeft = Math.max(0, Math.min(cssW, Number(plotBbox.left) / dpr));
+        plotWidth = Math.max(0, Math.min(cssW - plotLeft,
+            Number(plotBbox.width) / dpr));
+    }
+    const top = Math.min(13, Math.max(0, cssH - 2));
+    const bottom = Math.max(top, cssH - 2);
+    const zero = (top + bottom) / 2;
+    return {
+        plotLeft,
+        plotWidth,
+        plotRight: plotLeft + plotWidth,
+        zero,
+        halfHeight: Math.max(1, (bottom - top) / 2),
+        top,
+        bottom,
+    };
+}
+
+export function diffStripXPosition(x, scaleWindow, layout) {
+    const lo = scaleWindow && scaleWindow.min;
+    const hi = scaleWindow && scaleWindow.max;
+    if (!(hi > lo) || !layout) return NaN;
+    return layout.plotLeft + (x - lo) / (hi - lo) * layout.plotWidth;
+}
+
+export function diffStripVisibleMax(items, scaleWindow) {
+    const lo = scaleWindow && scaleWindow.min;
+    const hi = scaleWindow && scaleWindow.max;
+    if (!(hi > lo)) return 0;
+    let max = 0;
+    for (const b of (items || [])) {
+        if (!(b.x1 > lo && b.x0 < hi)) continue;
+        let pos = 0, neg = 0;
+        for (const c of b.classes) {
+            if (c.deltaSeconds >= 0) pos += c.deltaSeconds;
+            else neg -= c.deltaSeconds;
+        }
+        max = Math.max(max, pos, neg);
+    }
+    return max;
+}
+
+/* Thin painter for the separate signed lane below uPlot. Positive class
+ * contributions stack upward in their canonical hues; negative contributions
+ * stack downward with the dimmed colors already chosen by the pure builder. */
+export function drawDiffStrip(canvas, geo, scaleWindow, plotBbox) {
+    if (!canvas || !canvas.getContext) return;
+    const cssW = canvas.clientWidth || 1;
+    const cssH = canvas.clientHeight || 1;
+    const dpr = typeof devicePixelRatio === 'number' ? devicePixelRatio : 1;
+    const w = Math.max(1, Math.round(cssW * dpr));
+    const h = Math.max(1, Math.round(cssH * dpr));
+    if (canvas.width !== w) canvas.width = w;
+    if (canvas.height !== h) canvas.height = h;
+    const ctx = canvas.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, cssW, cssH);
+    ctx.fillStyle = '#17172d';
+    ctx.fillRect(0, 0, cssW, cssH);
+    ctx.font = '10px sans-serif';
+    ctx.fillStyle = '#777';
+    ctx.fillText('Δ AAS·s', 4, 10);
+    const layout = diffStripLayout(cssW, cssH, plotBbox, dpr);
+    const zero = layout.zero;
+    ctx.strokeStyle = '#555';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(layout.plotLeft, zero);
+    ctx.lineTo(layout.plotRight, zero);
+    ctx.stroke();
+    const items = (geo && geo.diff) || [];
+    const lo = scaleWindow && scaleWindow.min;
+    const hi = scaleWindow && scaleWindow.max;
+    if (!(hi > lo) || !items.length) return;
+    const visible = items.filter(b => b.x1 > lo && b.x0 < hi);
+    // Intentional qualitative lane: with no y labels, scale to the largest
+    // signed stack in the visible window so local shape changes stay legible
+    // while panning. This is not a cross-window magnitude ruler.
+    const max = diffStripVisibleMax(items, scaleWindow);
+    if (!(max > 0)) return;
+    const xPos = x => diffStripXPosition(x, scaleWindow, layout);
+    for (const b of visible) {
+        let x0 = Math.max(layout.plotLeft, xPos(b.x0));
+        let x1 = Math.min(layout.plotRight, xPos(b.x1));
+        if (!(x1 > x0)) continue;
+        x1 = Math.max(x0 + 1, x1 - 0.5);
+        let up = zero, down = zero;
+        ctx.globalAlpha = b.provisional ? 0.55 : 1;
+        for (const c of b.classes) {
+            ctx.fillStyle = c.color;
+            if (c.deltaSeconds >= 0) {
+                const dh = c.deltaSeconds / max * layout.halfHeight;
+                ctx.fillRect(x0, up - dh, x1 - x0, dh);
+                up -= dh;
+            } else {
+                const dh = -c.deltaSeconds / max * layout.halfHeight;
+                ctx.fillRect(x0, down, x1 - x0, dh);
+                down += dh;
+            }
+        }
+        if (b.provisional) {
+            ctx.globalAlpha = 1;
+            ctx.strokeStyle = '#aaa';
+            ctx.setLineDash([2, 2]);
+            ctx.strokeRect(x0 + 0.5, 13.5, Math.max(0, x1 - x0 - 1), cssH - 16);
+            ctx.setLineDash([]);
+        }
+    }
+    ctx.globalAlpha = 1;
 }
 
 /* Cumulative-sum hit test: which series' band is under (xMs, yAas)?

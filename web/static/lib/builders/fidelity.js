@@ -58,6 +58,35 @@ export function fidelityLabel(fid) {
     }
 }
 
+function evidencePhrase(fid) {
+    if (fid === 'sampled') return 'sampled estimates';
+    if (fid === 'mixed') return 'mixed estimates';
+    if (fid === 'none') return 'no data';
+    return 'exact';
+}
+
+/* D4/D7 compare-header evidence model. Unlike the ordinary per-pane badge,
+ * both A and B are named even when exact: the user must be able to audit the
+ * two evidence classes. A mismatch warns but never blocks delta rendering. */
+export function buildCompareFidelity(dataA, dataB, opts) {
+    opts = opts || {};
+    const a = fidelityOf(dataA);
+    const unavailable = !!(opts.baselinePredates || opts.baselineUnavailable);
+    const b = unavailable ? 'none' : fidelityOf(dataB);
+    return {
+        a: { fidelity: a, label: fidelityLabel(a) },
+        b: { fidelity: b, label: fidelityLabel(b) },
+        mismatch: a !== b && b !== 'none',
+        warning: a !== b && b !== 'none'
+            ? 'Δ compares ' + evidencePhrase(a) + ' against ' + evidencePhrase(b)
+            : null,
+        baselinePredates: !!opts.baselinePredates,
+        baselineUnavailable: !!opts.baselineUnavailable,
+        note: opts.baselinePredates ? 'baseline predates the trace'
+            : (opts.baselineUnavailable ? 'baseline unavailable' : null),
+    };
+}
+
 /* ── Fidelity shading model ──────────────────────────────────────────────────
  *
  * buildFidelityShading(data, win) → {

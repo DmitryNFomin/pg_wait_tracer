@@ -8,7 +8,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    isUnavailable, fidelityOf, fidelityLabel,
+    isUnavailable, fidelityOf, fidelityLabel, buildCompareFidelity,
     buildFidelityShading, bandsToMarkArea,
     buildEscalationAnnotation, buildUnavailablePanel,
     buildMetricsPanel, buildEscalateControl, buildEscalateResult,
@@ -40,6 +40,32 @@ test('fidelityLabel: human strings per token', () => {
     assert.match(fidelityLabel('sampled'), /Sampled/);
     assert.match(fidelityLabel('mixed'), /Mixed/);
     assert.equal(fidelityLabel('exact'), 'Exact');
+});
+
+test('compare fidelity mismatch is flagged, never blocked or silent', () => {
+    const m = buildCompareFidelity(
+        { fidelity: 'exact' }, { fidelity: 'sampled' }, {});
+    assert.equal(m.a.label, 'Exact');
+    assert.equal(m.b.label, 'Sampled (estimated)');
+    assert.equal(m.mismatch, true);
+    assert.equal(m.warning, 'Δ compares exact against sampled estimates');
+});
+
+test('compare baseline before retention is a quiet no-data note', () => {
+    const m = buildCompareFidelity({ fidelity: 'exact' }, null,
+        { baselinePredates: true });
+    assert.equal(m.b.fidelity, 'none');
+    assert.equal(m.mismatch, false);
+    assert.equal(m.note, 'baseline predates the trace');
+});
+
+test('compare baseline command failure is a quiet unavailable note', () => {
+    const m = buildCompareFidelity({ fidelity: 'sampled' }, null,
+        { baselineUnavailable: true });
+    assert.equal(m.a.fidelity, 'sampled');
+    assert.equal(m.b.fidelity, 'none');
+    assert.equal(m.mismatch, false);
+    assert.equal(m.note, 'baseline unavailable');
 });
 
 // ── fidelity shading ─────────────────────────────────────────────────────────

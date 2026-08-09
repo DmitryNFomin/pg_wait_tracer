@@ -17,7 +17,9 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { StripCache, stripKey } from '../../web/static/lib/stripcache.js';
+import {
+    StripCache, stripKey, fullyCoversStrip,
+} from '../../web/static/lib/stripcache.js';
 
 /* Controllable fetchStrip: records calls, exposes per-call resolve/reject. */
 function makeFetch() {
@@ -116,6 +118,27 @@ test('get serves the coarser overlapping strip while the refine is in flight', a
     const exact = cache.get(fine);
     assert.equal(exact.exact, true);
     assert.deepEqual(exact.payload, { tag: 'fine' });
+});
+
+test('small compare offset cannot reuse overlapping A skirt as baseline B', async () => {
+    const { cache, calls } = wired();
+    const a = mkQ(1024, 100_000, 200_000);
+    const b = mkQ(1024, 50_000, 150_000); // |offset| <= A window span
+    const pa = cache.ensure(a);
+    calls[0].resolve({ tag: 'A-skirt' });
+    await pa;
+
+    const overlap = cache.get(b);
+    assert.ok(overlap, 'A 3x skirt overlaps the shifted B request');
+    assert.equal(overlap.exact, false);
+    assert.equal(fullyCoversStrip(overlap, b), false,
+        'provisional compare must wait for B instead of fabricating A-vs-A');
+
+    const pb = cache.ensure(b);
+    calls[1].resolve({ tag: 'B-strip' });
+    await pb;
+    assert.equal(fullyCoversStrip(cache.get(b), b), true);
+    assert.deepEqual(cache.get(b).payload, { tag: 'B-strip' });
 });
 
 test('get returns null when nothing overlaps the window', async () => {

@@ -10,8 +10,15 @@
  */
 
 import { buildTableModel, buildTruncationRow } from '../lib/table.js';
-import { overviewConfig } from '../lib/builders/table-configs.js';
-import { buildPaneFidelity, paneFidelityBadgeHtml } from '../lib/panels.js';
+import { overviewConfig, compareOverviewConfig } from '../lib/builders/table-configs.js';
+import { buildDeltaComparison, defaultDeltaSort } from '../lib/builders/compare.js';
+import { shiftWindow } from '../lib/camera.js';
+import { settleBaseline } from '../lib/compare-request.js';
+import {
+    buildPaneFidelity, paneFidelityBadgeHtml,
+    buildComparePaneFidelity, compareFidelityHtml,
+    baselineUnavailableHtml,
+} from '../lib/panels.js';
 import { fmtMs, fmtAas } from '../lib/format.js';
 
 /* PURE: time_model response -> summary metrics array. Exported for testing. */
@@ -40,14 +47,62 @@ export function createOverviewView() {
         id: 'overview',
 
         async requests(ctx) {
-            return ctx.transport.request(ctx.channel('table'), 'time_model', {
+            const aParams = {
                 from: ctx.timeRange.from,
                 to: ctx.timeRange.to,
                 filters: ctx.filters.snapshot(),
-            });
+            };
+            const a = ctx.transport.request(ctx.channel('table.a'), 'time_model', aParams);
+            if (!ctx.compare || !ctx.compare.enabled) return a;
+            const bw = shiftWindow(aParams, ctx.compare.offsetNs);
+            const predates = bw.from < ctx.server.fromNs;
+            if (predates) {
+                return { compare: true, a: await a, b: null,
+                    baselinePredates: true, baselineUnavailable: false };
+            }
+            const b = settleBaseline(ctx.transport.request(ctx.channel('table.b'),
+                'time_model', Object.assign({}, aParams, bw)));
+            const [aData, bResult] = await Promise.all([a, b]);
+            return { compare: true, a: aData,
+                b: bResult.ok ? bResult.payload : null,
+                baselinePredates: false, baselineUnavailable: !bResult.ok };
         },
 
         build(data, ctx) {
+            if (data && data.compare && data.baselineUnavailable) {
+                const primary = data.a;
+                return {
+                    table: buildTableModel(overviewConfig, primary && primary.rows, null),
+                    summary: buildSummary(primary, ctx.server.numCpus),
+                    hasRows: !!(primary && primary.rows && primary.rows.length),
+                    paneFidelity: buildPaneFidelity(primary),
+                    truncation: buildTruncationRow(primary),
+                    baselineUnavailable: true,
+                };
+            }
+            if (data && data.compare) {
+                const delta = buildDeltaComparison('overview', data.a, data.b,
+                    { baselineUnavailable: data.baselinePredates });
+                const sort = defaultDeltaSort(ctx.getSort('overview'));
+                return {
+                    compare: true,
+                    table: buildTableModel(compareOverviewConfig, delta.rows, sort),
+                    summary: delta.baselineUnavailable ? [
+                        { label: 'DB Time A', value: fmtMs(delta.dbTimeA) },
+                    ] : [
+                        { label: 'DB Time A', value: fmtMs(delta.dbTimeA) },
+                        { label: 'DB Time B', value: fmtMs(delta.dbTimeB) },
+                        { label: 'Δ', value: (delta.dbTimeA >= delta.dbTimeB ? '+' : '−') +
+                            fmtMs(Math.abs(delta.dbTimeA - delta.dbTimeB)) },
+                    ],
+                    hasRows: delta.rows.length > 0 || !!delta.truncation,
+                    compareFidelity: buildComparePaneFidelity(data.a, data.b,
+                        { baselinePredates: data.baselinePredates }),
+                    truncation: delta.truncation,
+                    sort,
+                    baselinePredates: delta.baselineUnavailable,
+                };
+            }
             // Overview keeps its server-defined hierarchy: no client sort.
             const table = buildTableModel(overviewConfig, data && data.rows, null);
             const summary = buildSummary(data, ctx.server.numCpus);
@@ -67,19 +122,31 @@ export function createOverviewView() {
             if (summaryEl) summaryEl.innerHTML = summaryHtml(model.summary);
 
             if (!model.hasRows) {
-                el.innerHTML = paneFidelityBadgeHtml(model.paneFidelity) +
-                    '<div class="loading">No data for selected range</div>';
+                el.innerHTML = baselineUnavailableHtml(model.baselineUnavailable) +
+                    (model.compare
+                    ? compareFidelityHtml(model.compareFidelity)
+                    : paneFidelityBadgeHtml(model.paneFidelity)) +
+                    '<div class="loading">' + (model.baselinePredates
+                        ? 'Baseline unavailable for comparison'
+                        : 'No data for selected range') + '</div>';
                 return;
             }
-            ctx.mountTable(el, overviewConfig, model.table, {
+            const config = model.compare ? compareOverviewConfig : overviewConfig;
+            ctx.mountTable(el, config, model.table, {
+                sort: model.compare ? model.sort : null,
+                onSort: model.compare ? (key) => {
+                    ctx.toggleSort('overview', key); ctx.refresh();
+                } : null,
                 onRowClick: (row) => {
-                    const intent = overviewConfig.onClick(row);
+                    const intent = config.onClick(row);
                     if (intent) ctx.onDrill(intent);
                 },
                 truncation: model.truncation,
             });
             el.insertAdjacentHTML('afterbegin',
-                paneFidelityBadgeHtml(model.paneFidelity));
+                baselineUnavailableHtml(model.baselineUnavailable) +
+                (model.compare ? compareFidelityHtml(model.compareFidelity)
+                               : paneFidelityBadgeHtml(model.paneFidelity)));
         },
 
         enter() { /* no chart */ },

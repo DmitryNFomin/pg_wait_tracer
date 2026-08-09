@@ -28,6 +28,18 @@ export function stripKey(q) {
     return q.resNs + ':' + q.stripFrom + ':' + q.stripTo;
 }
 
+/* A comparison baseline may never come from a merely-overlapping strip: when
+ * A's 3x skirt overlaps shifted B, using that fallback fabricates A-vs-A.
+ * Exact is ideal; a same-or-finer strip that covers the entire requested B
+ * strip is equivalent and safe. */
+export function fullyCoversStrip(hit, quantized) {
+    if (!hit || !quantized) return false;
+    if (hit.exact) return true;
+    return Number(hit.resNs) <= Number(quantized.resNs) &&
+        Number(hit.stripFrom) <= Number(quantized.stripFrom) &&
+        Number(hit.stripTo) >= Number(quantized.stripTo);
+}
+
 export class StripCache {
     constructor(opts) {
         opts = opts || {};
