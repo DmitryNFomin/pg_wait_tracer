@@ -456,6 +456,71 @@ static void test_baseline_learn_through(void)
           b.baseline_aas);
 }
 
+/* ── Exploratory AAS-1 repro: one sampled dip defeats a sustained storm ── */
+static void test_cpu_storm_single_tick_dips_fail_to_fire(void)
+{
+    printf("--- exploratory AAS-1: isolated sampler dips reset storm sustain ---\n");
+
+    struct pgwt_anomaly a;
+    pgwt_anomaly_init(&a, true, 10);
+    a.aas_factor = 3.0;
+    a.aas_ticks  = 3;
+    uint64_t clk = TICK_NS;
+    warm_baseline(&a, 1.0, &clk);
+
+    /* Model a constrained runner at the real 10 Hz observe cadence. The
+     * underlying workload remains four active sessions, but an occasional
+     * sampler/gate miss reports the boundary value 3.0 for one tick. With a
+     * baseline near 1.0, 4.0 is over the 3x threshold while 3.0 is not (the
+     * rule uses strict >). Every isolated dip therefore resets the hard
+     * consecutive streak before its third tick. This is an exploratory
+     * characterization of the current bug: a later approved detector fix is
+     * expected to flip this stream from no-FIRE to FIRE and update the check. */
+    static const double storm_aas[] = {
+        4.0, 4.0, 3.0,
+        4.0, 4.0, 3.0,
+        4.0, 4.0, 3.0,
+        4.0, 4.0, 3.0,
+    };
+    int fires = 0;
+    int near = 0;
+    int max_streak = 0;
+    for (size_t i = 0; i < sizeof(storm_aas) / sizeof(storm_aas[0]); i++) {
+        double baseline = a.baseline_aas;
+        double threshold = a.aas_factor * baseline;
+        int warm = a.baseline_warmup >= a.warmup_needed;
+        int over = warm && storm_aas[i] >= 2.0
+                 && storm_aas[i] > threshold;
+        int streak_before = a.aas_over_streak;
+        struct pgwt_anomaly_decision d =
+            pgwt_anomaly_eval(&a, storm_aas[i], 0.0, clk);
+
+        printf("  obs t_ms=%llu aas=%.1f baseline=%.4f threshold=%.4f "
+               "warm=%d over=%d streak=%d->%d action=%d\n",
+               (unsigned long long)(i * TICK_NS / 1000000ULL),
+               storm_aas[i], baseline, threshold, warm, over,
+               streak_before, a.aas_over_streak, d.action);
+        if (d.action == PGWT_ANOMALY_FIRE)
+            fires++;
+        if (d.action == PGWT_ANOMALY_NEAR
+            && (d.near_mask & PGWT_NEAR_AAS_SUSTAIN))
+            near++;
+        if (a.aas_over_streak > max_streak)
+            max_streak = a.aas_over_streak;
+        clk += TICK_NS;
+    }
+
+    CHECK(fires == 0,
+          "exploratory repro: dip-interrupted storm currently must not FIRE "
+          "(got %d)", fires);
+    CHECK(near == 8,
+          "exploratory repro: both over observations in each run are NEAR "
+          "(got %d)", near);
+    CHECK(max_streak == 2 && a.aas_over_streak == 0,
+          "exploratory repro: hard resets cap streak at 2 (max=%d final=%d)",
+          max_streak, a.aas_over_streak);
+}
+
 /* ── Test 9: AAS + lock can fire together (combined fired_mask) ────────── */
 static void test_combined_fire(void)
 {
@@ -491,6 +556,7 @@ int main(void)
     test_cpu_storm_fires();
     test_lock_min_activity();
     test_baseline_learn_through();
+    test_cpu_storm_single_tick_dips_fail_to_fire();
     test_combined_fire();
 
     printf("\n%d/%d checks passed\n", tests_passed, tests_run);
