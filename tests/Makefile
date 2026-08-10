@@ -18,10 +18,11 @@ TESTS     = test_wait_event test_cmdline test_event_writer test_event_reader \
             test_golden_fixture \
             gen_test_traces gen_bench_traces test_concurrent_rw cross_validate \
             dump_markers
+CHECKS    = $(TESTS) test_build_dependencies.sh
 
 .PHONY: all clean check
 
-all: $(TESTS)
+all: $(CHECKS)
 
 # Run the full C unit suite. The list of tests lives in unit_tests.list —
 # the SINGLE source of truth shared by CI (ci.yml) and tests/run_all.sh

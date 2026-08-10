@@ -6,7 +6,8 @@
 # run_all.sh, test_concurrent_rw built but run nowhere).
 #
 # One binary name per line; '#' starts a comment. Every binary listed here
-# must be built by `make -C tests` (tests/Makefile TESTS).
+# must be built by `make -C tests` (tests/Makefile CHECKS).
+test_build_dependencies.sh
 test_wait_event
 test_cmdline
 test_bucket

@@ -12,6 +12,8 @@ INC_DIR    = include
 BUILD_DIR  = build
 TARGET     = pg_wait_tracer
 
+.DEFAULT_GOAL := all
+
 ARCH       := $(shell uname -m | sed 's/x86_64/x86/' | sed 's/aarch64/arm64/')
 
 # ---------------------------------------------------------------------------
@@ -116,6 +118,7 @@ USER_SRCS  = $(SRC_DIR)/pg_wait_tracer.c \
              $(SRC_DIR)/cJSON.c
 
 USER_OBJS  = $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/%.o,$(USER_SRCS))
+USER_DEPS  = $(USER_OBJS:.o=.d)
 
 # pgwt-server: lightweight replay server (no BPF dependencies)
 SERVER_SRCS = $(SRC_DIR)/server.c \
@@ -130,7 +133,16 @@ SERVER_SRCS = $(SRC_DIR)/server.c \
               $(SRC_DIR)/backend_meta.c \
               $(SRC_DIR)/cJSON.c
 SERVER_OBJS = $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/server_%.o,$(SERVER_SRCS))
+SERVER_DEPS = $(SERVER_OBJS:.o=.d)
 SERVER_LDFLAGS = -lz -llz4 -lm
+
+# Compiler-generated header dependencies are correctness-critical here: most
+# daemon translation units share struct pgwt_daemon across file boundaries.
+# A stale object built against an older daemon.h is an ABI mismatch even when
+# the final link succeeds. -MMD/-MP below writes these files beside each object;
+# the explicit Makefile prerequisite forces one migration rebuild for old trees
+# that do not have dependency files yet.
+-include $(USER_DEPS) $(SERVER_DEPS)
 
 .PHONY: all clean test-asan test-valgrind bench pgwt-client
 
@@ -209,11 +221,11 @@ $(INC_DIR)/pg_wait_tracer.skel.h: $(BUILD_DIR)/pg_wait_tracer.bpf.o
 	@$(BPFTOOL) gen skeleton $< > $@
 
 # Step 4: Compile userspace C (all depend on skeleton + shared header)
-$(BUILD_DIR)/%.o: $(SRC_DIR)/%.c $(INC_DIR)/pg_wait_tracer.skel.h \
+$(BUILD_DIR)/%.o: $(SRC_DIR)/%.c Makefile $(INC_DIR)/pg_wait_tracer.skel.h \
                   $(LIBBPF_DEP) \
                   $(SRC_DIR)/pg_wait_tracer.h | $(BUILD_DIR)
 	@echo "  CC       $@"
-	@$(CC) $(CFLAGS) -c $< -o $@
+	@$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
 
 # Step 5: Link
 $(TARGET): $(USER_OBJS)
@@ -222,9 +234,9 @@ $(TARGET): $(USER_OBJS)
 	@echo "  DONE     $@"
 
 # pgwt-server: compile WITHOUT skeleton dependency, with -DPGWT_SERVER
-$(BUILD_DIR)/server_%.o: $(SRC_DIR)/%.c $(SRC_DIR)/pg_wait_tracer.h | $(BUILD_DIR)
+$(BUILD_DIR)/server_%.o: $(SRC_DIR)/%.c Makefile $(SRC_DIR)/pg_wait_tracer.h | $(BUILD_DIR)
 	@echo "  CC       $@ (server)"
-	@$(CC) $(CFLAGS) -DPGWT_SERVER -c $< -o $@
+	@$(CC) $(CFLAGS) -DPGWT_SERVER -MMD -MP -c $< -o $@
 
 pgwt-server: $(SERVER_OBJS)
 	@echo "  LINK     $@"

@@ -189,6 +189,61 @@ static void test_build_batch_cpu_policy(void)
     CHECK(n == 1, "UNKNOWN type we==0 records when command open");
 }
 
+/* ── Test 2d: authoritative level gate repairs a missed short command ─── */
+
+static void test_authoritative_cmd_gate_cpu_policy(void)
+{
+    printf("--- authoritative command level: active CPU counted, idle CPU gated ---\n");
+
+    /* Model the sampled-tier gate input directly: the transition-edge
+     * state_map says closed, but the backend is executing a short command.
+     * debug_query_string is PostgreSQL's process-local level signal; a live
+     * query is represented by a non-NULL pointer. */
+    volatile char query[] = "SELECT 1";
+    volatile uint64_t debug_query_string =
+        (uint64_t)(uintptr_t)&query[0];
+    int cmd_open = 0;                    /* stale/missed boundary edge */
+    uint64_t query_id = 0;
+
+    pgwt_read_cmd_gate(getpid(),
+                       (uint64_t)(uintptr_t)&debug_query_string,
+                       0, 0, &cmd_open, &query_id);
+    CHECK(cmd_open == 1,
+          "live debug_query_string authoritatively opens a missed short command");
+
+    struct pgwt_sample_target target = {
+        .pid = getpid(),
+        .backend_type = PGWT_BT_CLIENT,
+        .cmd_open = cmd_open,
+    };
+    uint32_t on_cpu = 0;
+    struct pgwt_trace_event out[1];
+    uint64_t noncmd = 0;
+    int n = pgwt_sampler_build_batch(&target, &on_cpu, 1, 1, out,
+                                     NULL, &noncmd);
+    CHECK(n == 1 && out[0].new_event == 0,
+          "authoritatively active short-command CPU sample is counted");
+    CHECK(noncmd == 0,
+          "active CPU sample does not increment the non-command counter");
+
+    /* Binding over-count guard: once PostgreSQL clears the live-query level,
+     * the same ambiguous we==0 reading is between-command CPU and must stay
+     * excluded. This preserves the idle/ClientRead decision. */
+    debug_query_string = 0;
+    cmd_open = 1;                       /* stale open edge must be corrected */
+    pgwt_read_cmd_gate(getpid(),
+                       (uint64_t)(uintptr_t)&debug_query_string,
+                       0, 0, &cmd_open, &query_id);
+    CHECK(cmd_open == 0,
+          "NULL debug_query_string authoritatively closes an idle backend");
+    target.cmd_open = cmd_open;
+    noncmd = 0;
+    n = pgwt_sampler_build_batch(&target, &on_cpu, 1, 2, out,
+                                 NULL, &noncmd);
+    CHECK(n == 0 && noncmd == 1,
+          "between-command CPU remains excluded and counted as non-command");
+}
+
 /* ── Test 2b: build_batch drops + counts garbage readings (CAP-2/5) ───── */
 
 static void test_build_batch_garbage(void)
@@ -487,6 +542,7 @@ int main(void)
     test_build_batch();
     test_build_batch_garbage();
     test_build_batch_cpu_policy();
+    test_authoritative_cmd_gate_cpu_policy();
     test_fallback();
     test_child_read();
     test_local_addr_not_batched();
