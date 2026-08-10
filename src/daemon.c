@@ -405,6 +405,7 @@ int pgwt_daemon_init(struct pgwt_daemon *d)
     d->debug_max_loop_gap_ns = 0;
     d->debug_timer_settime_rc = 0;
     d->debug_timer_epoll_rc = 0;
+    d->debug_sampler_trace = getenv("PGWT_DEBUG_SAMPLER_TRACE") != NULL;
 
     /* CAP-12: enough fds for a full-size backend registry, before anything
      * starts opening watchpoints. */
@@ -559,6 +560,11 @@ int pgwt_daemon_init(struct pgwt_daemon *d)
         fprintf(stderr, "WARN: PGWT_DEBUG_DUMP_STATE — state, timer, and "
                 "main-loop liveness will be dumped to stderr (STATEDUMP lines; "
                 "DEBUG ONLY, never set in production)\n");
+    }
+    if (d->debug_sampler_trace) {
+        fprintf(stderr, "WARN: PGWT_DEBUG_SAMPLER_TRACE — per-observation "
+                "sampler decisions will be dumped to stderr "
+                "(STATEDUMP-SAMP lines; DEBUG ONLY, never set in production)\n");
     }
     if (!d->cpu_accounting) {
         /* No BTF → tp_btf/sched_switch can't load: don't try, and fall back

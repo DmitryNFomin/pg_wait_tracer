@@ -256,6 +256,11 @@ struct pgwt_daemon {
     int         debug_timer_settime_rc;   /* 0 or saved -errno */
     int         debug_timer_epoll_rc;     /* 0 or saved -errno */
 
+    /* PGWT_DEBUG_SAMPLER_TRACE per-observation AAS-1 diagnostic. Cached once
+     * per daemon lifecycle; when false the sampler takes no diagnostic clocks
+     * and emits no STATEDUMP-SAMP lines. */
+    bool        debug_sampler_trace;
+
     /* Placed at end of struct to survive field overflow corruption */
     char       *pg_binary_saved;        /* heap-allocated postgres binary path for USDT */
 };

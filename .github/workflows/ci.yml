@@ -26,11 +26,11 @@ on:
         type: boolean
         default: false
       iterations:
-        description: "Number of full ci_smoke.sh sequence runs"
+        description: "Number of iterations for manual confirmation/hunt jobs"
         type: string
         default: "25"
       pg:
-        description: "PostgreSQL major version for the mode-4 hunt"
+        description: "PostgreSQL major version for manual confirmation/hunt jobs"
         type: string
         default: "17"
 
@@ -320,6 +320,115 @@ jobs:
           path: |
             mode4-strike.log
             mode4-hunt-summary.txt
+          if-no-files-found: error
+
+  aas1-confirm:
+    name: aas1-confirm
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Initialize AAS-1 confirmation artifacts
+        run: |
+          printf '%s\n' 'confirmation did not start' > aas1-strike.log
+          printf '%s\n' 'confirmation did not start' > aas1-confirm-summary.txt
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang llvm libbpf-dev libelf-dev \
+            zlib1g-dev liblz4-dev linux-tools-common
+          # Same bpftool fallback as capture-smoke: the runner's HWE azure
+          # kernel may ship linux-tools without a bpftool binary.
+          if bpftool version >/dev/null 2>&1; then
+            BPFTOOL=$(command -v bpftool)
+          else
+            git clone --depth 1 --branch v7.5.0 --recurse-submodules \
+              https://github.com/libbpf/bpftool.git /tmp/bpftool
+            make -C /tmp/bpftool/src -j"$(nproc)"
+            BPFTOOL=/tmp/bpftool/src/bpftool
+          fi
+          "$BPFTOOL" version
+          echo "BPFTOOL=$BPFTOOL" >> "$GITHUB_ENV"
+          test -r /sys/kernel/btf/vmlinux
+
+      - name: Install PostgreSQL ${{ inputs.pg }} (PGDG apt)
+        env:
+          PG_MAJOR: ${{ inputs.pg }}
+        run: |
+          set -x
+          V="$PG_MAJOR"
+          sudo systemctl stop postgresql || true
+          sudo apt-get install -y postgresql-common
+          pg_lsclusters -h | awk '{print $1, $2}' | while read -r ver name; do
+            sudo pg_dropcluster --stop "$ver" "$name" || true
+          done
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+          if ! apt-cache show "postgresql-$V" >/dev/null 2>&1; then
+            echo "postgresql-$V not in the live PGDG repo — adding apt-archive"
+            echo "deb https://apt-archive.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+              | sudo tee /etc/apt/sources.list.d/pgdg-archive.list
+            sudo apt-get update
+          fi
+          sudo apt-get install -y "postgresql-$V" "postgresql-contrib-$V"
+
+      - name: Configure + start PostgreSQL ${{ inputs.pg }}
+        env:
+          PG_MAJOR: ${{ inputs.pg }}
+        run: |
+          set -ex
+          V="$PG_MAJOR"
+          if ! pg_lsclusters -h | awk -v v="$V" '$1 == v && $2 == "main"' | grep -q .; then
+            sudo pg_createcluster "$V" main
+          fi
+          sudo pg_conftool "$V" main set port 5432
+          sudo pg_conftool "$V" main set shared_preload_libraries pg_stat_statements
+          if [ "$V" -ge 14 ]; then
+            sudo pg_conftool "$V" main set compute_query_id on
+          fi
+          sudo sed -i -E 's/(peer|scram-sha-256|md5)$/trust/' \
+            "/etc/postgresql/$V/main/pg_hba.conf"
+          sudo pg_ctlcluster "$V" main start
+          psql -U postgres -d postgres -c "CREATE EXTENSION IF NOT EXISTS pg_stat_statements"
+          psql -U postgres -d postgres -tAc "SELECT version()"
+
+      - name: Build (BPF tracer + pgwt-server)
+        run: make
+
+      - name: Confirm AAS-1 sampler phase-locking
+        env:
+          AAS1_ITERATIONS: ${{ inputs.iterations }}
+          PG_MAJOR: ${{ inputs.pg }}
+        run: |
+          set -euo pipefail
+          taskset -c 0,1 bash -c 'while :; do :; done' &
+          BURNER_ONE=$!
+          taskset -c 0,1 bash -c 'while :; do :; done' &
+          BURNER_TWO=$!
+          cleanup_burners() {
+            kill "$BURNER_ONE" "$BURNER_TWO" 2>/dev/null || true
+            wait "$BURNER_ONE" "$BURNER_TWO" 2>/dev/null || true
+          }
+          trap cleanup_burners EXIT
+
+          sudo env \
+            "PATH=/usr/lib/postgresql/$PG_MAJOR/bin:$PATH" \
+            "BPFTOOL=$BPFTOOL" \
+            "GITHUB_STEP_SUMMARY=$GITHUB_STEP_SUMMARY" \
+            "PGWT_DEBUG_SAMPLER_TRACE=1" \
+            python3 .github/scripts/aas1_confirm.py \
+              --iterations "$AAS1_ITERATIONS" \
+              --pg-version "$PG_MAJOR"
+
+      - name: Upload AAS-1 confirmation artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: aas1-confirm-${{ inputs.pg }}-${{ github.run_attempt }}
+          path: |
+            aas1-strike.log
+            aas1-confirm-summary.txt
           if-no-files-found: error
 
   web-ui:

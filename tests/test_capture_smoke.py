@@ -1268,6 +1268,7 @@ def phase_cpu_storm_escalation(pm_pid):
     os.chmod(trace_dir, 0o755)
 
     storm = CpuStorm(3)
+    tracer_stderr = b""
     tracer = subprocess.Popen(
         [TRACER, "--mode", "tiered", "--pid", str(pm_pid),
          "-T", trace_dir, "--duration", "20", "--quiet",
@@ -1285,14 +1286,23 @@ def phase_cpu_storm_escalation(pm_pid):
             print(f"  (control socket: {e})")
         storm_active = sample_active_sessions(3.0, interval=0.5)
         storm_to = time.time_ns()
-        _, stderr = tracer.communicate(timeout=40)
-        err = stderr.decode('utf-8', errors='replace')
+        _, tracer_stderr = tracer.communicate(timeout=40)
+        err = tracer_stderr.decode('utf-8', errors='replace')
     except subprocess.TimeoutExpired:
         tracer.kill()
-        _, stderr = tracer.communicate()
-        err = stderr.decode('utf-8', errors='replace')
+        _, tracer_stderr = tracer.communicate()
+        err = tracer_stderr.decode('utf-8', errors='replace')
     finally:
         storm.stop()
+
+    # AAS-1 confirmation fallback: ci_smoke.sh runs this phase in a child
+    # process, so the driver cannot intercept Popen as it does for standalone
+    # attempts. Export this phase's raw tracer stderr only when the driver asks
+    # for it; normal smoke runs perform no extra file I/O.
+    aas1_stderr_path = os.environ.get("PGWT_AAS1_CAPTURE_STDERR")
+    if aas1_stderr_path:
+        with open(aas1_stderr_path, "wb") as aas1_stderr_file:
+            aas1_stderr_file.write(tracer_stderr)
 
     fires = metrics.get("anomaly_fires_total", 0)
     windows = metrics.get("escalation_windows_total", 0)
