@@ -74,19 +74,25 @@ static int read_target_own_pid(const struct pgwt_sample_target *t,
  * foreign-pid read would return the reader's copy (SMP-2). *cmd_open /
  * *query_id are left untouched on any read failure, so the caller keeps its
  * edge-maintained fallback — this path never fabricates. */
-void pgwt_read_cmd_gate(pid_t pid, uint64_t dqs_addr, uint64_t be_entry_addr,
-                        int st_query_id_off, int *cmd_open, uint64_t *query_id)
+/* Return 1 when debug_query_string was read successfully. qstr_nonnull is an
+ * optional diagnostic output; it never participates in the gate decision. */
+static int read_cmd_gate_level(pid_t pid, uint64_t dqs_addr,
+                               uint64_t be_entry_addr, int st_query_id_off,
+                               int *cmd_open, uint64_t *query_id,
+                               int *qstr_nonnull)
 {
     if (dqs_addr == 0)
-        return;   /* symbol unresolved — keep the edge-maintained fallback */
+        return 0;   /* symbol unresolved — keep the edge-maintained fallback */
 
     uint64_t dqs = 0;
     struct iovec ld = { &dqs, sizeof(dqs) };
     struct iovec rd = { (void *)(uintptr_t)dqs_addr, sizeof(dqs) };
     if (process_vm_readv(pid, &ld, 1, &rd, 1, 0) != (ssize_t)sizeof(dqs))
-        return;   /* read failed — do not disturb the fallback */
+        return 0;   /* read failed — do not disturb the fallback */
 
     int open_now = (dqs != 0) ? 1 : 0;
+    if (qstr_nonnull)
+        *qstr_nonnull = open_now;
     if (cmd_open)
         *cmd_open = open_now;
 
@@ -104,6 +110,14 @@ void pgwt_read_cmd_gate(pid_t pid, uint64_t dqs_addr, uint64_t be_entry_addr,
                 *query_id = qid;
         }
     }
+    return 1;
+}
+
+void pgwt_read_cmd_gate(pid_t pid, uint64_t dqs_addr, uint64_t be_entry_addr,
+                        int st_query_id_off, int *cmd_open, uint64_t *query_id)
+{
+    (void)read_cmd_gate_level(pid, dqs_addr, be_entry_addr,
+                              st_query_id_off, cmd_open, query_id, NULL);
 }
 
 int pgwt_sampler_read_targets(const struct pgwt_sample_target *targets, int n,
@@ -809,7 +823,9 @@ int pgwt_sampler_poll(struct pgwt_daemon *d)
      * the common steady state (edge already open, or not on CPU) does zero
      * extra reads. When ground truth says "in a command", also refresh the
      * query_id the edge-uprobe likewise missed. */
-    if (d->debug_query_string_addr) {
+    if (d->debug_query_string_addr && !d->debug_sampler_trace) {
+        /* Production path: preserve the existing gate/drop behavior and avoid
+         * all per-target diagnostic bookkeeping when tracing is disabled. */
         for (int i = 0; i < n; i++) {
             if (s->read_vals[i] != 0 || targets[i].cmd_open)
                 continue;   /* not on-CPU, or the edge already caught it */
@@ -827,8 +843,57 @@ int pgwt_sampler_poll(struct pgwt_daemon *d)
                 d->counters.cmd_gate_recovered_total++;
             }
         }
+    } else if (d->debug_sampler_trace) {
+        for (int i = 0; i < n; i++) {
+            int edge = targets[i].cmd_open ? 1 : 0;
+            int level_checked = 0;
+            int level_ok = 0;
+            int qstr_nonnull = 0;
+            bool gated_client = targets[i].backend_type == PGWT_BT_CLIENT
+                             || targets[i].backend_type == PGWT_BT_UNKNOWN;
+
+            if (d->debug_query_string_addr && s->read_vals[i] == 0
+                && !targets[i].cmd_open && gated_client) {
+                int cg = 0;
+                uint64_t qg = targets[i].query_id;
+                level_checked = 1;
+                level_ok = read_cmd_gate_level(
+                    targets[i].pid, d->debug_query_string_addr,
+                    d->my_be_entry_addr, d->st_query_id_offset,
+                    &cg, &qg, &qstr_nonnull);
+                if (cg) {
+                    targets[i].cmd_open = 1;
+                    targets[i].query_id = qg;
+                    d->counters.cmd_gate_recovered_total++;
+                }
+            }
+
+            if (gated_client) {
+                uint32_t we = s->read_vals[i];
+                bool active_observation = we == 0
+                    || (pgwt_classify_wei(we) != PGWT_WEI_GARBAGE
+                        && !pgwt_is_idle_event(we));
+                if (active_observation) {
+                    bool recordable = we == 0
+                        ? pgwt_cpu_sample_recordable(targets[i].backend_type,
+                                                     targets[i].cmd_open)
+                        : pgwt_classify_wei(we) != PGWT_WEI_GARBAGE;
+                    fprintf(stderr,
+                            "STATEDUMP-SAMP: t=%llu pid=%d we=0x%08x "
+                            "edge=%d level_checked=%d level_ok=%d "
+                            "qstr=%s final=%s\n",
+                            (unsigned long long)tick_ts, targets[i].pid, we,
+                            edge, level_checked, level_ok,
+                            qstr_nonnull ? "nonNULL" : "NULL",
+                            recordable ? "COUNT" : "DROP");
+                }
+            }
+        }
     }
 
+    uint64_t noncmd_before = 0;
+    if (d->debug_sampler_trace)
+        noncmd_before = d->counters.noncmd_cpu_samples_total;
     uint64_t invalid_before = d->counters.invalid_wait_reads_total;
     int count = pgwt_sampler_build_batch(targets, s->read_vals, n, tick_ts,
                                          s->samples,
@@ -853,7 +918,37 @@ int pgwt_sampler_poll(struct pgwt_daemon *d)
      * tiered mode they may AUTO-escalate to full fidelity. Evaluated even when
      * count == 0 (an all-idle / all-CPU tick is a legitimate low-AAS reading
      * that the rolling baseline must learn from). No-op outside tiered mode. */
+    double trace_aas = 0.0;
+    double trace_baseline = 0.0;
+    double trace_threshold = 0.0;
+    bool trace_over = false;
+    if (d->debug_sampler_trace) {
+        double lock_fraction = 0.0;
+        pgwt_anomaly_metrics_from_batch(s->samples, count, &trace_aas,
+                                        &lock_fraction);
+        trace_baseline = d->anomaly.baseline_aas;
+        trace_threshold = d->anomaly.aas_factor * trace_baseline;
+        bool baseline_warm = d->anomaly.baseline_warmup
+                          >= d->anomaly.warmup_needed;
+        trace_over = d->anomaly.enabled && baseline_warm
+                  && d->anomaly.aas_factor > 0.0
+                  && trace_aas >= 2.0 && trace_aas > trace_threshold;
+    }
+
     pgwt_anomaly_tick(d, s->samples, count);
+
+    if (d->debug_sampler_trace) {
+        fprintf(stderr,
+                "STATEDUMP-SAMP-TICK: t=%llu period_ns=%llu aas=%.3f "
+                "baseline=%.3f threshold=%.3f over=%d streak=%d "
+                "counted=%d dropped_noncmd=%llu\n",
+                (unsigned long long)tick_ts,
+                (unsigned long long)period_ns,
+                trace_aas, trace_baseline, trace_threshold,
+                trace_over ? 1 : 0, d->anomaly.aas_over_streak, count,
+                (unsigned long long)(d->counters.noncmd_cpu_samples_total
+                                     - noncmd_before));
+    }
 
     if (count == 0)
         return 0;
