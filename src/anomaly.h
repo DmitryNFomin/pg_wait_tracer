@@ -132,7 +132,7 @@ struct pgwt_anomaly {
     double sample_period_s;   /* NOMINAL 1/sample_rate_hz, never wall gap */
     double cpu_cusum;         /* O(1) accumulated saturation evidence */
     bool   cpu_armed;         /* one fire until trusted below-k recovery */
-    bool   cpu_coverage_gap;  /* reset evidence when complete coverage returns */
+    int    cpu_coverage_gap_ticks; /* blind ticks since a partial-read gap */
 
     /* ESC-7 baseline slow learn-through: after the AAS metric has been
      * continuously over the multiplicative threshold for learn_through_ticks,
@@ -185,6 +185,9 @@ struct pgwt_anomaly {
 #define PGWT_ANOMALY_DEF_CPU_CUSUM_K   0.80
 #define PGWT_ANOMALY_DEF_CPU_CUSUM_H   1.50
 #define PGWT_ANOMALY_DEF_CPU_CUSUM_CAP 1.25
+/* Brief partial-read flaps hold CPU evidence. A sustained blind interval can
+ * hide recovery, so discard pre-gap evidence after this many observations. */
+#define PGWT_ANOMALY_CPU_COVERAGE_GAP_RESET_TICKS 3
 /* Existing smoke/operational contract: this sentinel disables automatic AAS
  * anomaly behavior. Stage 3 also disables the CPU guard at this value. */
 #define PGWT_ANOMALY_DISABLE_AAS_FACTOR 1000000.0

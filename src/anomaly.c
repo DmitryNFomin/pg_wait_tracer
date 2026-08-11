@@ -140,14 +140,22 @@ pgwt_anomaly_eval_observation(struct pgwt_anomaly *a,
     bool cpu_fire = false;
     bool cpu_cusum_climbed = false;
 
-    /* A partial-read tick cannot establish whether demand recovered. Hold its
-     * evidence, but remember the gap so the first subsequent complete,
-     * capacity-known observation cannot fire from stale pre-gap state. */
-    if (!obs->cpu_coverage_ok)
-        a->cpu_coverage_gap = true;
-    else if (obs->cpu_capacity > 0.0 && a->cpu_coverage_gap) {
-        a->cpu_cusum = 0.0;
-        a->cpu_coverage_gap = false;
+    /* A partial-read tick cannot establish whether demand recovered. Brief
+     * gaps hold evidence so intermittent read failures do not erase a real
+     * incident. A sustained blind interval can hide genuine recovery, so it
+     * invalidates pre-gap evidence. Once a coverage gap starts, UNKNOWN
+     * capacity remains part of that blind interval until a trusted return. */
+    if (!obs->cpu_coverage_ok
+        || (a->cpu_coverage_gap_ticks > 0
+            && obs->cpu_capacity <= 0.0)) {
+        if (a->cpu_coverage_gap_ticks
+            < PGWT_ANOMALY_CPU_COVERAGE_GAP_RESET_TICKS)
+            a->cpu_coverage_gap_ticks++;
+        if (a->cpu_coverage_gap_ticks
+            >= PGWT_ANOMALY_CPU_COVERAGE_GAP_RESET_TICKS)
+            a->cpu_cusum = 0.0;
+    } else if (obs->cpu_capacity > 0.0) {
+        a->cpu_coverage_gap_ticks = 0;
     }
 
     /* A capacity discontinuity invalidates all evidence accumulated in the
@@ -186,8 +194,8 @@ pgwt_anomaly_eval_observation(struct pgwt_anomaly *a,
                     && a->cpu_cusum >= a->cpu_cusum_h;
         }
     }
-    /* LOW coverage and UNKNOWN capacity intentionally take neither branch:
-     * S is held unchanged and cannot fire from an untrusted observation. */
+    /* LOW coverage and UNKNOWN capacity never evaluate demand or fire from an
+     * untrusted observation. Brief gaps hold S; sustained gaps clear it above. */
     d.cpu_cusum = a->cpu_cusum;
 
     /* ── AAS-vs-baseline rule ──────────────────────────────────────────── */

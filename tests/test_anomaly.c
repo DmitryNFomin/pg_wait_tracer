@@ -901,10 +901,52 @@ static void test_cpu_cusum_floor_and_margin(void)
            floor_grants, affinity_grants, no_margin_grants);
 }
 
-/* ── AAS-1 Stage 3 fix: discard evidence across partial-read gaps ────── */
+/* ── CPU CUSUM regression: partial-read coverage flaps ──────────────── */
+static void test_cpu_cusum_coverage_flaps(void)
+{
+    printf("--- CPU CUSUM: brief coverage flaps retain evidence ---\n");
+
+    struct pgwt_anomaly flap;
+    pgwt_anomaly_init(&flap, true, 10);
+    isolate_cpu_rule(&flap);
+    uint64_t clk = TICK_NS;
+    int grants = 0;
+    double max_cusum = 0.0;
+    int fire_tick = 0;
+
+    /* A short-statement storm can miss one partial-read tick without the
+     * workload itself recovering. Model that as one LOW tick in every three;
+     * the two complete ticks remain saturated at the utilization cap. */
+    for (int t = 0; t < 61; t++) {
+        bool coverage_ok = t % 3 != 2;
+        struct pgwt_anomaly_decision d =
+            cpu_tick(&flap, 4.0, 4.0, 2.0,
+                     coverage_ok, false, false, &clk);
+        grants += d.action == PGWT_ANOMALY_FIRE;
+        if (d.action == PGWT_ANOMALY_FIRE && fire_tick == 0)
+            fire_tick = t + 1;
+        if (flap.cpu_cusum > max_cusum)
+            max_cusum = flap.cpu_cusum;
+    }
+
+    CHECK(grants == 1 && flap.cpu_saturation_fires_total == 1,
+          "coverage-flap storm expected one fire "
+          "(%d grants / %llu CPU fires)", grants,
+          (unsigned long long)flap.cpu_saturation_fires_total);
+    CHECK(fire_tick >= 49 && fire_tick <= 51,
+          "coverage-flap storm fire tick=%d expected about 50", fire_tick);
+    CHECK(max_cusum > 1.48 && max_cusum < 1.49,
+          "coverage-flap storm max pre-fire S=%.6f expected near h",
+          max_cusum);
+
+    printf("  flapping storm: fire=%.1fs grants=%d max_pre_fire_S=%.3f\n",
+           fire_tick / 10.0, grants, max_cusum);
+}
+
+/* ── AAS-1 Stage 3 fix: discard evidence across sustained blind gaps ── */
 static void test_cpu_cusum_coverage_return(void)
 {
-    printf("--- CPU CUSUM: coverage return resets stale evidence ---\n");
+    printf("--- CPU CUSUM: long coverage gap resets stale evidence ---\n");
 
     struct pgwt_anomaly idle_return;
     pgwt_anomaly_init(&idle_return, true, 10);
@@ -1194,6 +1236,7 @@ int main(void)
     test_cpu_cusum_gates();
     test_cpu_cusum_episode_latch();
     test_cpu_cusum_floor_and_margin();
+    test_cpu_cusum_coverage_flaps();
     test_cpu_cusum_coverage_return();
     test_cpu_cusum_near_flag();
     test_cpu_cusum_disable_contract();
