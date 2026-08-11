@@ -19,8 +19,8 @@
  *      CPU-class AAS divided by the postmaster's effective CPU capacity. The
  *      CUSUM advances by nominal sample time (never a delayed wall-clock gap),
  *      drains below its slack point, and fires at its evidence threshold.
- *      Config: --anomaly-cpu-min-aas/-margin, --anomaly-cpu-cusum-k/-h/-cap and
- *      --anomaly-cpu-cusum-disable.
+ *      Config: --anomaly-cpu-min-aas/-margin, --anomaly-cpu-cusum-k/-h/-cap,
+ *      --anomaly-cpu-coverage-gap-s and --anomaly-cpu-cusum-disable.
  *
  * Hysteresis + cooldown: once an auto-escalation fires, a minimum cooldown
  * (--anomaly-cooldown-s) must elapse before another auto-escalation can fire,
@@ -132,7 +132,9 @@ struct pgwt_anomaly {
     double sample_period_s;   /* NOMINAL 1/sample_rate_hz, never wall gap */
     double cpu_cusum;         /* O(1) accumulated saturation evidence */
     bool   cpu_armed;         /* one fire until trusted below-k recovery */
-    bool   cpu_coverage_gap;  /* reset evidence when complete coverage returns */
+    double cpu_coverage_gap_reset_s; /* configured blind-gap duration */
+    int    cpu_coverage_gap_reset_ticks; /* duration rounded up to ticks */
+    int    cpu_coverage_gap_ticks; /* consecutive LOW/UNKNOWN ticks */
 
     /* ESC-7 baseline slow learn-through: after the AAS metric has been
      * continuously over the multiplicative threshold for learn_through_ticks,
@@ -185,6 +187,11 @@ struct pgwt_anomaly {
 #define PGWT_ANOMALY_DEF_CPU_CUSUM_K   0.80
 #define PGWT_ANOMALY_DEF_CPU_CUSUM_H   1.50
 #define PGWT_ANOMALY_DEF_CPU_CUSUM_CAP 1.25
+/* Brief LOW-coverage or UNKNOWN-capacity flaps hold CPU evidence. Two seconds
+ * is comfortably beyond sub-second coverage flapping, but still discards
+ * evidence across a genuinely blind interval. The reset tick count is derived
+ * from this duration and the actual sample rate, never a fixed 10 Hz value. */
+#define PGWT_ANOMALY_DEF_CPU_COVERAGE_GAP_S 2.0
 /* Existing smoke/operational contract: this sentinel disables automatic AAS
  * anomaly behavior. Stage 3 also disables the CPU guard at this value. */
 #define PGWT_ANOMALY_DISABLE_AAS_FACTOR 1000000.0
@@ -197,6 +204,12 @@ struct pgwt_anomaly {
  * wall-clock horizon regardless of tick rate. */
 void pgwt_anomaly_init(struct pgwt_anomaly *a, bool enabled,
                        int sample_rate_hz);
+
+/* Configure how long LOW coverage or UNKNOWN CPU capacity may hold evidence.
+ * The duration is rounded up to nominal sample ticks so the reset never occurs
+ * before cpu_coverage_gap_s has elapsed. */
+void pgwt_anomaly_set_cpu_coverage_gap_s(struct pgwt_anomaly *a,
+                                         double cpu_coverage_gap_s);
 
 /* ── Pure rule evaluation (no BPF, no escalation, unit-testable) ────────── */
 

@@ -91,6 +91,8 @@ static void usage(const char *prog)
         "      --anomaly-cpu-cusum-k <K> CPU saturation slack/reference (default 0.80)\n"
         "      --anomaly-cpu-cusum-h <H> CPU saturation evidence threshold (default 1.50)\n"
         "      --anomaly-cpu-cusum-cap <U> Cap CPU demand/capacity ratio (default 1.25)\n"
+        "      --anomaly-cpu-coverage-gap-s <S> Blind duration before CPU evidence\n"
+        "                             resets (default 2.0s; derived at sample rate)\n"
         "      --anomaly-cpu-cusum-disable  Disable only the CPU saturation guard\n"
         "                             (--anomaly-aas-factor >= 1000000 also disables it)\n"
         "\n"
@@ -239,6 +241,7 @@ static enum pgwt_mode parse_mode(const char *s)
 #define OPT_ANOM_CPU_CUSUM_DISABLE 278
 #define OPT_ANOM_CPU_MIN_AAS 279
 #define OPT_ANOM_CPU_MARGIN 280
+#define OPT_ANOM_CPU_COVERAGE_GAP 281
 
 static struct option long_opts[] = {
     {"pid",        required_argument, NULL, 'p'},
@@ -279,6 +282,8 @@ static struct option long_opts[] = {
     {"anomaly-cpu-cusum-k", required_argument, NULL, OPT_ANOM_CPU_CUSUM_K},
     {"anomaly-cpu-cusum-h", required_argument, NULL, OPT_ANOM_CPU_CUSUM_H},
     {"anomaly-cpu-cusum-cap", required_argument, NULL, OPT_ANOM_CPU_CUSUM_CAP},
+    {"anomaly-cpu-coverage-gap-s", required_argument, NULL,
+     OPT_ANOM_CPU_COVERAGE_GAP},
     {"anomaly-cpu-cusum-disable", no_argument, NULL, OPT_ANOM_CPU_CUSUM_DISABLE},
     {"quiet",           no_argument,       NULL, 'q'},
     {"verbose",         no_argument,       NULL, 'v'},
@@ -318,6 +323,7 @@ int main(int argc, char **argv)
     d->anomaly_cpu_cusum_k   = -1.0;
     d->anomaly_cpu_cusum_h   = -1.0;
     d->anomaly_cpu_cusum_cap = -1.0;
+    d->anomaly_cpu_coverage_gap_s = -1.0;
 
     pid_t pm_pid = 0;
     const char *pgdata = NULL;
@@ -457,6 +463,20 @@ int main(int argc, char **argv)
                 return 1;
             }
             d->anomaly_cpu_cusum_cap = cap;
+            break;
+        }
+        case OPT_ANOM_CPU_COVERAGE_GAP: {
+            char *end = NULL;
+            errno = 0;
+            double seconds = strtod(optarg, &end);
+            if (errno || end == optarg || *end != '\0' ||
+                !isfinite(seconds) || seconds <= 0.0) {
+                fprintf(stderr, "FATAL: --anomaly-cpu-coverage-gap-s must "
+                        "be a finite value > 0 (got '%s')\n", optarg);
+                free(d);
+                return 1;
+            }
+            d->anomaly_cpu_coverage_gap_s = seconds;
             break;
         }
         case OPT_ANOM_CPU_CUSUM_DISABLE:

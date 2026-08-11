@@ -193,6 +193,7 @@ struct pgwt_daemon {
     double      anomaly_cpu_cusum_k;     /* --anomaly-cpu-cusum-k (<0 = default) */
     double      anomaly_cpu_cusum_h;     /* --anomaly-cpu-cusum-h (<0 = default) */
     double      anomaly_cpu_cusum_cap;   /* --anomaly-cpu-cusum-cap (<0 = default) */
+    double      anomaly_cpu_coverage_gap_s; /* --anomaly-cpu-coverage-gap-s */
     bool        anomaly_cpu_cusum_disabled; /* independent CPU-guard switch */
 
     /* AAS-1 Stage 2: target postmaster effective logical-core capacity.

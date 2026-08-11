@@ -512,6 +512,7 @@ Auto-escalation rules evaluated on the sampled stream. Ignored outside
 | `--anomaly-cpu-cusum-k <K>` | — | `0.80` | CPU-demand CUSUM slack/reference utilization |
 | `--anomaly-cpu-cusum-h <H>` | — | `1.50` | CPU-demand CUSUM fire threshold |
 | `--anomaly-cpu-cusum-cap <U>` | — | `1.25` | Cap `cpu_AAS / effective_capacity` per tick |
+| `--anomaly-cpu-coverage-gap-s <S>` | — | `2.0` | Consecutive blind duration before held CPU evidence is discarded; converted to ticks using `--sample-rate` |
 | `--anomaly-cpu-cusum-disable` | — | off | Disable only the CPU saturation guard |
 
 For compatibility with existing pure-sampled and manual-window deployments,

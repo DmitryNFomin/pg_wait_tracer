@@ -13,6 +13,7 @@
 #include "anomaly.h"
 #include "pg_wait_tracer.h"   /* WE_CLASS, PG_WAIT_LOCK, marker macros */
 
+#include <limits.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -91,6 +92,8 @@ void pgwt_anomaly_init(struct pgwt_anomaly *a, bool enabled,
      * the small-alpha regime. H = 60s * rate. Warm up over ~5s of ticks. */
     int hz = sample_rate_hz > 0 ? sample_rate_hz : 10;
     a->sample_period_s = 1.0 / (double)hz;
+    pgwt_anomaly_set_cpu_coverage_gap_s(
+        a, PGWT_ANOMALY_DEF_CPU_COVERAGE_GAP_S);
     double half_life_ticks = 60.0 * (double)hz;
     if (half_life_ticks < 1.0)
         half_life_ticks = 1.0;
@@ -105,6 +108,30 @@ void pgwt_anomaly_init(struct pgwt_anomaly *a, bool enabled,
         PGWT_ANOMALY_DEF_LEARN_THROUGH_MIN * 60 * hz;
     if (a->slow_release_div <= 0)
         a->slow_release_div = PGWT_ANOMALY_DEF_SLOW_RELEASE_DIV;
+}
+
+void pgwt_anomaly_set_cpu_coverage_gap_s(struct pgwt_anomaly *a,
+                                         double cpu_coverage_gap_s)
+{
+    if (!(cpu_coverage_gap_s > 0.0))
+        cpu_coverage_gap_s = PGWT_ANOMALY_DEF_CPU_COVERAGE_GAP_S;
+
+    double ticks = cpu_coverage_gap_s / a->sample_period_s;
+    int reset_ticks;
+    if (ticks >= (double)INT_MAX) {
+        reset_ticks = INT_MAX;
+    } else {
+        reset_ticks = (int)ticks;
+        /* Round up fractional ticks. Tolerate floating-point noise when a
+         * duration is already an exact multiple of the nominal period. */
+        if (ticks - (double)reset_ticks > 1e-9)
+            reset_ticks++;
+        if (reset_ticks < 1)
+            reset_ticks = 1;
+    }
+
+    a->cpu_coverage_gap_reset_s = cpu_coverage_gap_s;
+    a->cpu_coverage_gap_reset_ticks = reset_ticks;
 }
 
 struct pgwt_anomaly_decision
@@ -140,14 +167,20 @@ pgwt_anomaly_eval_observation(struct pgwt_anomaly *a,
     bool cpu_fire = false;
     bool cpu_cusum_climbed = false;
 
-    /* A partial-read tick cannot establish whether demand recovered. Hold its
-     * evidence, but remember the gap so the first subsequent complete,
-     * capacity-known observation cannot fire from stale pre-gap state. */
-    if (!obs->cpu_coverage_ok)
-        a->cpu_coverage_gap = true;
-    else if (obs->cpu_capacity > 0.0 && a->cpu_coverage_gap) {
-        a->cpu_cusum = 0.0;
-        a->cpu_coverage_gap = false;
+    /* LOW coverage or UNKNOWN capacity cannot establish whether demand
+     * recovered. Brief blind gaps hold evidence so intermittent failures do
+     * not erase a real incident. A sustained blind interval can hide genuine
+     * recovery, so it invalidates pre-gap evidence. Fresh UNKNOWN starts a
+     * gap independently; this core does not rely on capacity_changed edges. */
+    if (!obs->cpu_coverage_ok || obs->cpu_capacity <= 0.0) {
+        if (a->cpu_coverage_gap_ticks
+            < a->cpu_coverage_gap_reset_ticks)
+            a->cpu_coverage_gap_ticks++;
+        if (a->cpu_coverage_gap_ticks
+            >= a->cpu_coverage_gap_reset_ticks)
+            a->cpu_cusum = 0.0;
+    } else {
+        a->cpu_coverage_gap_ticks = 0;
     }
 
     /* A capacity discontinuity invalidates all evidence accumulated in the
@@ -186,8 +219,8 @@ pgwt_anomaly_eval_observation(struct pgwt_anomaly *a,
                     && a->cpu_cusum >= a->cpu_cusum_h;
         }
     }
-    /* LOW coverage and UNKNOWN capacity intentionally take neither branch:
-     * S is held unchanged and cannot fire from an untrusted observation. */
+    /* LOW coverage and UNKNOWN capacity never evaluate demand or fire from an
+     * untrusted observation. Brief gaps hold S; sustained gaps clear it above. */
     d.cpu_cusum = a->cpu_cusum;
 
     /* ── AAS-vs-baseline rule ──────────────────────────────────────────── */
