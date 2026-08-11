@@ -180,6 +180,9 @@ struct pgwt_daemon {
     /* Anomaly config (parsed flags; copied into anomaly state after init so
      * --anomaly-* overrides apply on top of the rate-derived defaults). */
     double      anomaly_aas_factor;      /* --anomaly-aas-factor (<=0 = default) */
+    double      anomaly_aas_abs_floor;   /* --anomaly-aas-abs-floor (<=0 = default) */
+    double      anomaly_aas_abs_delta;   /* --anomaly-aas-abs-delta (<=0 = default) */
+    double      anomaly_aas_secondary_factor; /* --anomaly-aas-secondary-factor */
     int         anomaly_aas_ticks;       /* --anomaly-aas-ticks (<=0 = default) */
     double      anomaly_lock_fraction;   /* --anomaly-lock-fraction (<0 = default) */
     double      anomaly_lock_min_aas;    /* --anomaly-lock-min-aas (<0 = default, ESC-4) */

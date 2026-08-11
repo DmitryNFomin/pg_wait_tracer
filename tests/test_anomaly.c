@@ -111,10 +111,13 @@ static void test_aas_sustained(void)
 /* ── Test 3: AAS within factor never fires ─────────────────────────────── */
 static void test_aas_no_fire(void)
 {
-    printf("--- AAS rule: under factor never fires ---\n");
+    printf("--- primary AAS rule: under factor never fires ---\n");
     struct pgwt_anomaly a;
     pgwt_anomaly_init(&a, true, 10);
     a.aas_factor = 3.0;
+    /* This pre-existing case isolates the primary rule. Under the new default
+     * secondary rule, 4 -> 8 is correctly considered a meaningful doubling. */
+    a.aas_secondary_factor = 0.0;
     a.aas_ticks  = 3;
     uint64_t clk = TICK_NS;
     warm_baseline(&a, 4.0, &clk);   /* baseline ~4 */
@@ -123,6 +126,134 @@ static void test_aas_no_fire(void)
     int fires = 0;
     feed(&a, 8.0, 0.0, 50, &clk, &fires);
     CHECK(fires == 0, "AAS under factor fired %d times", fires);
+}
+
+/* ── AAS-1: additive/secondary trigger and false-positive guards ───── */
+static void test_busy_baseline_secondary_fires(void)
+{
+    printf("--- AAS-1: busy baseline 2 -> 4 fires via secondary rule ---\n");
+    struct pgwt_anomaly a;
+    pgwt_anomaly_init(&a, true, 10);
+    a.aas_ticks = 3;
+    uint64_t clk = TICK_NS;
+    warm_baseline(&a, 2.0, &clk);
+
+    CHECK(a.aas_abs_floor == 2.0, "default abs floor %.2f expected 2.0",
+          a.aas_abs_floor);
+    CHECK(a.aas_abs_delta == 1.5, "default abs delta %.2f expected 1.5",
+          a.aas_abs_delta);
+    CHECK(a.aas_secondary_factor == 1.5,
+          "default secondary factor %.2f expected 1.5",
+          a.aas_secondary_factor);
+    CHECK(4.0 <= a.aas_factor * a.baseline_aas,
+          "regression pin must not clear primary threshold %.2f",
+          a.aas_factor * a.baseline_aas);
+
+    struct pgwt_anomaly_decision d =
+        feed(&a, 4.0, 0.0, a.aas_ticks, &clk, NULL);
+    CHECK(d.action == PGWT_ANOMALY_FIRE
+          && (d.fired_mask & PGWT_RULE_AAS),
+          "busy-baseline spike expected FIRE(aas), got action=%d mask=%u",
+          d.action, d.fired_mask);
+}
+
+static void test_idle_baseline_primary_still_fires(void)
+{
+    printf("--- AAS-1: idle baseline 1 -> 4 still fires via primary rule ---\n");
+    struct pgwt_anomaly a;
+    pgwt_anomaly_init(&a, true, 10);
+    a.aas_ticks = 3;
+    /* Isolate the unchanged strict-primary behavior. */
+    a.aas_secondary_factor = 0.0;
+    uint64_t clk = TICK_NS;
+    warm_baseline(&a, 1.0, &clk);
+
+    CHECK(4.0 > a.aas_factor * a.baseline_aas,
+          "idle-baseline spike must clear primary threshold %.2f",
+          a.aas_factor * a.baseline_aas);
+    struct pgwt_anomaly_decision d =
+        feed(&a, 4.0, 0.0, a.aas_ticks, &clk, NULL);
+    CHECK(d.action == PGWT_ANOMALY_FIRE
+          && (d.fired_mask & PGWT_RULE_AAS),
+          "idle-baseline spike expected FIRE(aas), got action=%d mask=%u",
+          d.action, d.fired_mask);
+}
+
+static void test_busy_baseline_jitter_does_not_fire(void)
+{
+    printf("--- AAS-1: busy-baseline jitter does not fire ---\n");
+    struct pgwt_anomaly a;
+    pgwt_anomaly_init(&a, true, 10);
+    uint64_t clk = TICK_NS;
+    warm_baseline(&a, 2.0, &clk);
+
+    const double jitter[] = {2.0, 2.3, 2.6, 2.2, 2.5, 2.1};
+    int fires = 0;
+    for (int i = 0; i < 120; i++) {
+        struct pgwt_anomaly_decision d =
+            pgwt_anomaly_eval(&a, jitter[i % 6], 0.0, clk);
+        clk += TICK_NS;
+        if (d.action == PGWT_ANOMALY_FIRE)
+            fires++;
+    }
+    CHECK(fires == 0, "busy-baseline jitter fired %d times", fires);
+    CHECK(a.aas_over_streak == 0,
+          "jitter left AAS over-streak at %d", a.aas_over_streak);
+}
+
+static void test_large_baseline_small_jump_does_not_fire(void)
+{
+    printf("--- AAS-1: large baseline 50 -> 55 does not fire ---\n");
+    struct pgwt_anomaly a;
+    pgwt_anomaly_init(&a, true, 10);
+    uint64_t clk = TICK_NS;
+    warm_baseline(&a, 50.0, &clk);
+
+    int fires = 0;
+    feed(&a, 55.0, 0.0, 120, &clk, &fires);
+    CHECK(fires == 0, "large-baseline small jump fired %d times", fires);
+    CHECK(a.aas_over_streak == 0,
+          "small relative jump left AAS over-streak at %d",
+          a.aas_over_streak);
+}
+
+static void test_large_baseline_real_spike_fires(void)
+{
+    printf("--- AAS-1: large baseline 50 -> 85 fires ---\n");
+    struct pgwt_anomaly a;
+    pgwt_anomaly_init(&a, true, 10);
+    a.aas_ticks = 3;
+    uint64_t clk = TICK_NS;
+    warm_baseline(&a, 50.0, &clk);
+
+    CHECK(85.0 <= a.aas_factor * a.baseline_aas,
+          "large spike regression must not clear primary threshold %.2f",
+          a.aas_factor * a.baseline_aas);
+    struct pgwt_anomaly_decision d =
+        feed(&a, 85.0, 0.0, a.aas_ticks, &clk, NULL);
+    CHECK(d.action == PGWT_ANOMALY_FIRE
+          && (d.fired_mask & PGWT_RULE_AAS),
+          "large-baseline real spike expected FIRE, got action=%d mask=%u",
+          d.action, d.fired_mask);
+}
+
+static void test_aas_factor_disable_contract(void)
+{
+    printf("--- AAS-1: million-factor disables both AAS paths ---\n");
+    struct pgwt_anomaly a;
+    pgwt_anomaly_init(&a, true, 10);
+    a.aas_factor = PGWT_ANOMALY_AAS_DISABLE_FACTOR;
+    uint64_t clk = TICK_NS;
+    warm_baseline(&a, 2.0, &clk);
+
+    int fires = 0;
+    struct pgwt_anomaly_decision d =
+        feed(&a, 4.0, 0.0, 20, &clk, &fires);
+    CHECK(fires == 0, "disabled AAS paths fired %d times", fires);
+    CHECK(d.action == PGWT_ANOMALY_NONE,
+          "disabled AAS paths produced action %d", d.action);
+    CHECK(a.aas_over_streak == 0,
+          "disabled AAS paths left over-streak at %d", a.aas_over_streak);
 }
 
 /* ── Test 4: lock-class fraction rule ──────────────────────────────────── */
@@ -483,6 +614,12 @@ int main(void)
     test_disabled();
     test_aas_sustained();
     test_aas_no_fire();
+    test_busy_baseline_secondary_fires();
+    test_idle_baseline_primary_still_fires();
+    test_busy_baseline_jitter_does_not_fire();
+    test_large_baseline_small_jump_does_not_fire();
+    test_large_baseline_real_spike_fires();
+    test_aas_factor_disable_contract();
     test_lock_fraction();
     test_cooldown();
     test_baseline_protected();

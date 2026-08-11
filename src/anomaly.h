@@ -9,9 +9,11 @@
  * tick's sample batch (no re-reading the trace):
  *
  *   1. AAS-vs-baseline — maintain a rolling baseline of AAS (active sessions,
- *      idle-excluded per pgwt_is_idle_event). Fire when
- *      `aas > k * rolling_baseline` is sustained for N consecutive ticks.
- *      Config: --anomaly-aas-factor k, --anomaly-aas-ticks N.
+ *      idle-excluded per pgwt_is_idle_event). Fire when either the primary
+ *      multiplicative threshold or the secondary absolute+relative threshold
+ *      is sustained for N consecutive ticks. Config: --anomaly-aas-factor,
+ *      --anomaly-aas-abs-floor, --anomaly-aas-abs-delta,
+ *      --anomaly-aas-secondary-factor, and --anomaly-aas-ticks.
  *   2. Lock-class fraction — fire when the Lock-class share of the tick's
  *      ACTIVE (non-idle) samples exceeds a threshold, sustained for N ticks.
  *      Config: --anomaly-lock-fraction.
@@ -83,7 +85,10 @@ struct pgwt_anomaly {
     bool   enabled;           /* armed only in --mode tiered */
 
     /* Config (thresholds). Conservative defaults; all overridable. */
-    double aas_factor;        /* fire when aas > factor * baseline */
+    double aas_factor;        /* primary: aas > factor * baseline */
+    double aas_abs_floor;     /* secondary: minimum meaningful absolute AAS */
+    double aas_abs_delta;     /* secondary: minimum AAS increase over baseline */
+    double aas_secondary_factor; /* secondary: relative floor vs baseline */
     int    aas_ticks;         /* consecutive ticks the AAS rule must hold */
     double lock_fraction;     /* fire when lock share > this */
     double lock_min_aas;      /* ESC-4: AND lock-class AAS >= this (min-activity floor) */
@@ -92,7 +97,7 @@ struct pgwt_anomaly {
     int    escalation_s;      /* duration requested per auto-escalation */
 
     /* ESC-7 baseline slow learn-through: after the AAS metric has been
-     * continuously over the multiplicative threshold for learn_through_ticks,
+     * continuously over either AAS threshold for learn_through_ticks,
      * the baseline resumes EWMA at 1/slow_release_div the normal rate, so a
      * sustained legitimate regime change is eventually adopted (the rule stops
      * re-firing forever) while a short incident (streak < learn_through_ticks)
@@ -129,8 +134,14 @@ struct pgwt_anomaly {
 };
 
 /* Default thresholds (conservative). */
-#define PGWT_ANOMALY_DEF_AAS_FACTOR   3.0
-#define PGWT_ANOMALY_DEF_AAS_TICKS    3
+#define PGWT_ANOMALY_DEF_AAS_FACTOR           3.0
+#define PGWT_ANOMALY_DEF_AAS_ABS_FLOOR        2.0
+#define PGWT_ANOMALY_DEF_AAS_ABS_DELTA        1.5
+#define PGWT_ANOMALY_DEF_AAS_SECONDARY_FACTOR 1.5
+#define PGWT_ANOMALY_DEF_AAS_TICKS            3
+/* Historical pure-sampling sentinel used by capture-smoke tests. At or above
+ * this value BOTH AAS paths are disabled; the independent lock rule remains. */
+#define PGWT_ANOMALY_AAS_DISABLE_FACTOR 1000000.0
 #define PGWT_ANOMALY_DEF_LOCK_FRAC    0.30
 #define PGWT_ANOMALY_DEF_LOCK_MIN_AAS 2.0   /* ESC-4: min lock-class AAS to fire */
 #define PGWT_ANOMALY_DEF_LOCK_TICKS   3

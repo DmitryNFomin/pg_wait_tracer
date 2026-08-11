@@ -73,6 +73,11 @@ static void usage(const char *prog)
         "\n"
         "Anomaly triggers (tiered mode — auto-escalate on the sampled stream):\n"
         "      --anomaly-aas-factor <K>   Fire when AAS > K*rolling_baseline (default 3.0)\n"
+        "                             K >= 1000000 disables both AAS trigger paths\n"
+        "      --anomaly-aas-abs-floor <A>  Secondary: require AAS >= A (default 2.0)\n"
+        "      --anomaly-aas-abs-delta <D>  Secondary: require AAS >= baseline+D (default 1.5)\n"
+        "      --anomaly-aas-secondary-factor <K>\n"
+        "                             Secondary: require AAS >= K*baseline (default 1.5)\n"
         "      --anomaly-aas-ticks <N>    ...sustained for N consecutive ticks (default 3)\n"
         "      --anomaly-lock-fraction <F>  Fire when Lock-class share of active\n"
         "                             samples > F (default 0.30), sustained N ticks\n"
@@ -219,6 +224,9 @@ static enum pgwt_mode parse_mode(const char *s)
 #define OPT_ANOM_WINDOW     271
 #define OPT_RETENTION_GB    272
 #define OPT_ANOM_LOCK_MIN_AAS 273
+#define OPT_ANOM_AAS_ABS_FLOOR 274
+#define OPT_ANOM_AAS_ABS_DELTA 275
+#define OPT_ANOM_AAS_SECONDARY_FACTOR 276
 
 static struct option long_opts[] = {
     {"pid",        required_argument, NULL, 'p'},
@@ -248,6 +256,10 @@ static struct option long_opts[] = {
     {"sample-rate",     required_argument, NULL, OPT_SAMPLE_RATE},
     {"escalation-budget", required_argument, NULL, OPT_ESC_BUDGET},
     {"anomaly-aas-factor",  required_argument, NULL, OPT_ANOM_AAS_FACTOR},
+    {"anomaly-aas-abs-floor", required_argument, NULL, OPT_ANOM_AAS_ABS_FLOOR},
+    {"anomaly-aas-abs-delta", required_argument, NULL, OPT_ANOM_AAS_ABS_DELTA},
+    {"anomaly-aas-secondary-factor", required_argument, NULL,
+                                      OPT_ANOM_AAS_SECONDARY_FACTOR},
     {"anomaly-aas-ticks",   required_argument, NULL, OPT_ANOM_AAS_TICKS},
     {"anomaly-lock-fraction", required_argument, NULL, OPT_ANOM_LOCK_FRAC},
     {"anomaly-lock-min-aas", required_argument, NULL, OPT_ANOM_LOCK_MIN_AAS},
@@ -282,6 +294,9 @@ int main(int argc, char **argv)
     /* Anomaly triggers (A5): negative sentinels = "use the built-in default"
      * (pgwt_anomaly_init derives them); only an explicit flag overrides. */
     d->anomaly_aas_factor    = -1.0;
+    d->anomaly_aas_abs_floor = -1.0;
+    d->anomaly_aas_abs_delta = -1.0;
+    d->anomaly_aas_secondary_factor = -1.0;
     d->anomaly_aas_ticks     = -1;
     d->anomaly_lock_fraction = -1.0;
     d->anomaly_lock_min_aas  = -1.0;
@@ -338,6 +353,11 @@ int main(int argc, char **argv)
                 d->escalation_budget_s = atoi(optarg);
             break;
         case OPT_ANOM_AAS_FACTOR: d->anomaly_aas_factor = atof(optarg); break;
+        case OPT_ANOM_AAS_ABS_FLOOR: d->anomaly_aas_abs_floor = atof(optarg); break;
+        case OPT_ANOM_AAS_ABS_DELTA: d->anomaly_aas_abs_delta = atof(optarg); break;
+        case OPT_ANOM_AAS_SECONDARY_FACTOR:
+            d->anomaly_aas_secondary_factor = atof(optarg);
+            break;
         case OPT_ANOM_AAS_TICKS:  d->anomaly_aas_ticks = atoi(optarg); break;
         case OPT_ANOM_LOCK_FRAC:  d->anomaly_lock_fraction = atof(optarg); break;
         case OPT_ANOM_LOCK_MIN_AAS: d->anomaly_lock_min_aas = atof(optarg); break;
@@ -433,6 +453,23 @@ int main(int argc, char **argv)
      * "unset, use default", so only reject out-of-range explicit values. */
     if (d->anomaly_aas_factor == 0.0) {
         fprintf(stderr, "FATAL: --anomaly-aas-factor must be > 0\n");
+        free(d);
+        return 1;
+    }
+    if (d->anomaly_aas_abs_floor == 0.0) {
+        fprintf(stderr, "FATAL: --anomaly-aas-abs-floor must be > 0\n");
+        free(d);
+        return 1;
+    }
+    if (d->anomaly_aas_abs_delta == 0.0) {
+        fprintf(stderr, "FATAL: --anomaly-aas-abs-delta must be > 0\n");
+        free(d);
+        return 1;
+    }
+    if (d->anomaly_aas_secondary_factor >= 0.0
+        && d->anomaly_aas_secondary_factor <= 1.0) {
+        fprintf(stderr,
+                "FATAL: --anomaly-aas-secondary-factor must be > 1\n");
         free(d);
         return 1;
     }

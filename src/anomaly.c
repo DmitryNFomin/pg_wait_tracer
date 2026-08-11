@@ -61,14 +61,17 @@ void pgwt_anomaly_init(struct pgwt_anomaly *a, bool enabled,
                        int sample_rate_hz)
 {
     memset(a, 0, sizeof(*a));
-    a->enabled       = enabled;
-    a->aas_factor    = PGWT_ANOMALY_DEF_AAS_FACTOR;
-    a->aas_ticks     = PGWT_ANOMALY_DEF_AAS_TICKS;
-    a->lock_fraction = PGWT_ANOMALY_DEF_LOCK_FRAC;
-    a->lock_min_aas  = PGWT_ANOMALY_DEF_LOCK_MIN_AAS;
-    a->lock_ticks    = PGWT_ANOMALY_DEF_LOCK_TICKS;
-    a->cooldown_ns   = (uint64_t)PGWT_ANOMALY_DEF_COOLDOWN_S * 1000000000ULL;
-    a->escalation_s  = PGWT_ANOMALY_DEF_ESCALATE_S;
+    a->enabled              = enabled;
+    a->aas_factor           = PGWT_ANOMALY_DEF_AAS_FACTOR;
+    a->aas_abs_floor        = PGWT_ANOMALY_DEF_AAS_ABS_FLOOR;
+    a->aas_abs_delta        = PGWT_ANOMALY_DEF_AAS_ABS_DELTA;
+    a->aas_secondary_factor = PGWT_ANOMALY_DEF_AAS_SECONDARY_FACTOR;
+    a->aas_ticks            = PGWT_ANOMALY_DEF_AAS_TICKS;
+    a->lock_fraction        = PGWT_ANOMALY_DEF_LOCK_FRAC;
+    a->lock_min_aas         = PGWT_ANOMALY_DEF_LOCK_MIN_AAS;
+    a->lock_ticks           = PGWT_ANOMALY_DEF_LOCK_TICKS;
+    a->cooldown_ns = (uint64_t)PGWT_ANOMALY_DEF_COOLDOWN_S * 1000000000ULL;
+    a->escalation_s         = PGWT_ANOMALY_DEF_ESCALATE_S;
     a->slow_release_div = PGWT_ANOMALY_DEF_SLOW_RELEASE_DIV;
 
     /* Baseline EWMA: pick alpha so the baseline has roughly a 60-second
@@ -109,12 +112,27 @@ pgwt_anomaly_eval(struct pgwt_anomaly *a, double aas, double lock_fraction,
     /* ── AAS-vs-baseline rule ──────────────────────────────────────────── */
     bool baseline_warm = a->baseline_warmup >= a->warmup_needed;
     bool aas_over = false;
-    if (baseline_warm && a->aas_factor > 0.0) {
+    bool aas_rule_enabled = a->aas_factor > 0.0
+                         && a->aas_factor < PGWT_ANOMALY_AAS_DISABLE_FACTOR;
+    if (baseline_warm && aas_rule_enabled) {
         double threshold = a->aas_factor * a->baseline_aas;
         /* Guard against a near-zero baseline: a tiny absolute AAS over a
          * 0-ish baseline is noise, not an incident. Require at least 2 active
          * sessions before the multiplicative rule can fire. */
-        aas_over = (aas >= 2.0) && (aas > threshold);
+        bool primary_over = (aas >= 2.0) && (aas > threshold);
+
+        /* The primary 3x rule misses a meaningful load increase when normal
+         * activity has already raised the baseline (for example 2 -> 4 AAS).
+         * Require all three secondary guards: meaningful absolute load, a
+         * substantial additive jump, and a relative increase that scales on
+         * busy systems. The shared streak below keeps this path sustained. */
+        bool secondary_over = a->aas_abs_floor > 0.0
+                           && a->aas_abs_delta > 0.0
+                           && a->aas_secondary_factor > 0.0
+                           && aas >= a->aas_abs_floor
+                           && aas >= a->baseline_aas + a->aas_abs_delta
+                           && aas >= a->aas_secondary_factor * a->baseline_aas;
+        aas_over = primary_over || secondary_over;
     }
     if (aas_over)
         a->aas_over_streak++;
@@ -142,7 +160,7 @@ pgwt_anomaly_eval(struct pgwt_anomaly *a, double aas, double lock_fraction,
     /* Only learn from NORMAL ticks: do not fold an anomalous AAS back into the
      * baseline (that would let a sustained incident silently raise the bar
      * until the rule stops firing). A tick is "normal" for baseline purposes
-     * when AAS is not currently over the multiplicative threshold. While
+     * when AAS is not currently over either AAS threshold. While
      * warming up we always learn (there is no baseline to protect yet). */
     if (!baseline_warm) {
         /* Simple running mean during warmup so the EWMA starts sane. */

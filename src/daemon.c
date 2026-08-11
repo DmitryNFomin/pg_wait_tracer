@@ -1031,6 +1031,13 @@ int pgwt_daemon_init(struct pgwt_daemon *d)
     if (d->anomaly.enabled) {
         if (d->anomaly_aas_factor > 0.0)
             d->anomaly.aas_factor = d->anomaly_aas_factor;
+        if (d->anomaly_aas_abs_floor > 0.0)
+            d->anomaly.aas_abs_floor = d->anomaly_aas_abs_floor;
+        if (d->anomaly_aas_abs_delta > 0.0)
+            d->anomaly.aas_abs_delta = d->anomaly_aas_abs_delta;
+        if (d->anomaly_aas_secondary_factor > 1.0)
+            d->anomaly.aas_secondary_factor =
+                d->anomaly_aas_secondary_factor;
         if (d->anomaly_aas_ticks > 0)
             d->anomaly.aas_ticks = d->anomaly_aas_ticks;
         if (d->anomaly_lock_fraction >= 0.0)
@@ -1044,10 +1051,13 @@ int pgwt_daemon_init(struct pgwt_daemon *d)
             d->anomaly.escalation_s = d->anomaly_window_s;
         if (d->verbose)
             fprintf(stderr,
-                    "INFO: anomaly triggers armed: aas>%.1f*baseline for %d "
-                    "ticks, lock_frac>%.2f for %d ticks, cooldown %llus, "
+                    "INFO: anomaly triggers armed: aas primary>%.1f*baseline; "
+                    "secondary>=%.1f, baseline+%.1f, and %.1f*baseline for %d "
+                    "ticks; lock_frac>%.2f for %d ticks, cooldown %llus, "
                     "window %ds\n",
-                    d->anomaly.aas_factor, d->anomaly.aas_ticks,
+                    d->anomaly.aas_factor, d->anomaly.aas_abs_floor,
+                    d->anomaly.aas_abs_delta,
+                    d->anomaly.aas_secondary_factor, d->anomaly.aas_ticks,
                     d->anomaly.lock_fraction, d->anomaly.lock_ticks,
                     (unsigned long long)(d->anomaly.cooldown_ns / 1000000000ULL),
                     d->anomaly.escalation_s);

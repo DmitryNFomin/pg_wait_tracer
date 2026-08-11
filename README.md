@@ -170,8 +170,13 @@ A full-fidelity window can be opened two ways:
 - **Manually** — the web UI's "Escalate" button, or the control socket
   (`{"cmd":"escalate","duration_s":N}`). `{"cmd":"deescalate"}` closes it early.
 - **Automatically** — anomaly rules evaluated on the sampled stream:
-  AAS exceeding a multiple of its rolling baseline (`--anomaly-aas-factor`,
-  default 3.0× sustained `--anomaly-aas-ticks` ticks, default 3), or the
+  AAS exceeding either its strict primary multiple of the rolling baseline
+  (`--anomaly-aas-factor`, default 3.0×) or all three secondary guards:
+  absolute AAS at least `--anomaly-aas-abs-floor` (default 2.0), an increase
+  of at least `--anomaly-aas-abs-delta` over baseline (default 1.5), and at
+  least `--anomaly-aas-secondary-factor` times baseline (default 1.5×). Both
+  paths must sustain `--anomaly-aas-ticks` ticks (default 3). Setting
+  `--anomaly-aas-factor` to 1000000 or higher disables both AAS paths. Or the
   Lock-class share of active samples exceeding `--anomaly-lock-fraction`
   (default 0.30) **and** the absolute Lock-class AAS exceeding
   `--anomaly-lock-min-aas` (default 2.0). The lock floor stops a single
@@ -487,7 +492,10 @@ Auto-escalation rules evaluated on the sampled stream. Ignored outside
 
 | Flag | Short | Default | Description |
 |------|-------|---------|-------------|
-| `--anomaly-aas-factor <K>` | — | `3.0` | Fire when AAS > K × rolling baseline |
+| `--anomaly-aas-factor <K>` | — | `3.0` | Primary: fire when AAS > K × rolling baseline; K ≥ 1000000 disables both AAS paths |
+| `--anomaly-aas-abs-floor <A>` | — | `2.0` | Secondary: require meaningful absolute AAS ≥ A |
+| `--anomaly-aas-abs-delta <D>` | — | `1.5` | Secondary: require AAS ≥ rolling baseline + D |
+| `--anomaly-aas-secondary-factor <K>` | — | `1.5` | Secondary: require AAS ≥ K × rolling baseline |
 | `--anomaly-aas-ticks <N>` | — | `3` | ...sustained for N consecutive ticks |
 | `--anomaly-lock-fraction <F>` | — | `0.30` | Fire when Lock-class share of active samples > F (sustained N ticks) |
 | `--anomaly-lock-min-aas <A>` | — | `2.0` | ...**and** absolute Lock-class AAS ≥ A (min-activity floor: a lone lock waiter can't escalate) |
