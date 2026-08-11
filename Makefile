@@ -91,6 +91,7 @@ LDFLAGS    = $(LIBBPF_LIB) -lelf -lz -llz4
 USER_SRCS  = $(SRC_DIR)/pg_wait_tracer.c \
              $(SRC_DIR)/daemon.c \
              $(SRC_DIR)/control.c \
+             $(SRC_DIR)/effective_cores.c \
              $(SRC_DIR)/provider_full.c \
              $(SRC_DIR)/provider_coop.c \
              $(SRC_DIR)/sampler.c \

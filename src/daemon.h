@@ -13,6 +13,7 @@
 #include "provider.h"
 #include "escalation.h"
 #include "anomaly.h"
+#include "effective_cores.h"
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -186,6 +187,13 @@ struct pgwt_daemon {
     int         anomaly_cooldown_s;      /* --anomaly-cooldown-s (<0 = default) */
     int         anomaly_window_s;        /* --anomaly-window-s: per-trigger
                                           * escalation duration (<=0 = default) */
+    double      anomaly_cpu_capacity;    /* --anomaly-cpu-capacity; 0 = discover */
+
+    /* AAS-1 Stage 2: target postmaster effective logical-core capacity.
+     * Refreshed once per display tick and exported through control metrics.
+     * No detector or escalation path consumes it until Stage 3. */
+    struct pgwt_effective_cores_resolver cpu_capacity_resolver;
+    struct pgwt_effective_cores_result effective_cores;
     /* T2: the pgstat_report_activity uprobe attached and the BackendState
      * layout is known — the command-open gate is live. When false, we==0
      * classification falls back to the pre-T2 behavior (all exact CPU counts

@@ -23,6 +23,7 @@ tests/test_trace_v2
 tests/test_sampler
 tests/test_anomaly
 tests/test_escalation_budget
+tests/test_effective_cores
 tests/test_coop
 tests/test_pg13_resolve
 tests/test_discovery_pie

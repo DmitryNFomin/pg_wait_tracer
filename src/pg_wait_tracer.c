@@ -8,6 +8,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <getopt.h>
+#include <errno.h>
+#include <math.h>
 #include <unistd.h>
 #include <signal.h>
 #include <time.h>
@@ -80,6 +82,8 @@ static void usage(const char *prog)
         "                             single backend's routine lock wait can't escalate\n"
         "      --anomaly-cooldown-s <S>   Min seconds between auto-escalations (default 120)\n"
         "      --anomaly-window-s <S>     Full-fidelity window length per auto-trigger (default 60)\n"
+        "      --anomaly-cpu-capacity <C> Override target effective logical CPU cores\n"
+        "                             (default: affinity/cgroup discovery)\n"
         "\n"
         "Performance tuning:\n"
         "      --lightweight          BPF accumulator only (no per-event ringbuf).\n"
@@ -219,6 +223,7 @@ static enum pgwt_mode parse_mode(const char *s)
 #define OPT_ANOM_WINDOW     271
 #define OPT_RETENTION_GB    272
 #define OPT_ANOM_LOCK_MIN_AAS 273
+#define OPT_ANOM_CPU_CAPACITY 274
 
 static struct option long_opts[] = {
     {"pid",        required_argument, NULL, 'p'},
@@ -253,6 +258,7 @@ static struct option long_opts[] = {
     {"anomaly-lock-min-aas", required_argument, NULL, OPT_ANOM_LOCK_MIN_AAS},
     {"anomaly-cooldown-s",  required_argument, NULL, OPT_ANOM_COOLDOWN},
     {"anomaly-window-s",    required_argument, NULL, OPT_ANOM_WINDOW},
+    {"anomaly-cpu-capacity", required_argument, NULL, OPT_ANOM_CPU_CAPACITY},
     {"quiet",           no_argument,       NULL, 'q'},
     {"verbose",         no_argument,       NULL, 'v'},
     {"help",            no_argument,       NULL, 'h'},
@@ -343,6 +349,20 @@ int main(int argc, char **argv)
         case OPT_ANOM_LOCK_MIN_AAS: d->anomaly_lock_min_aas = atof(optarg); break;
         case OPT_ANOM_COOLDOWN:   d->anomaly_cooldown_s = atoi(optarg); break;
         case OPT_ANOM_WINDOW:     d->anomaly_window_s = atoi(optarg); break;
+        case OPT_ANOM_CPU_CAPACITY: {
+            char *end = NULL;
+            errno = 0;
+            double cores = strtod(optarg, &end);
+            if (errno || end == optarg || *end != '\0' ||
+                !isfinite(cores) || cores <= 0.0) {
+                fprintf(stderr, "FATAL: --anomaly-cpu-capacity must be a "
+                        "finite value > 0 (got '%s')\n", optarg);
+                free(d);
+                return 1;
+            }
+            d->anomaly_cpu_capacity = cores;
+            break;
+        }
         case 'q': d->quiet = true; break;
         case 'v': d->verbose = true; break;
         case 'h': usage(argv[0]); free(d); return 0;

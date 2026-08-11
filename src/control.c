@@ -97,6 +97,14 @@ static cJSON *build_status(const struct pgwt_daemon *d)
     cJSON_AddStringToObject(root, "mode", mode);
     cJSON_AddNumberToObject(root, "uptime_s",
                             (double)(now_mono_ns() - d->start_ts) / 1e9);
+
+    /* AAS-1 Stage 2: target postmaster capacity, refreshed periodically.
+     * UNKNOWN is the explicit -1 sentinel; it is never replaced by a guess. */
+    cJSON_AddNumberToObject(root, "effective_cpu_capacity_cores",
+                            d->effective_cores.cores);
+    cJSON_AddStringToObject(root, "effective_cpu_capacity_source",
+                            pgwt_effective_cores_source_name(
+                                d->effective_cores.source));
     cJSON_AddNumberToObject(root, "backends", count_backends(d));
     cJSON_AddNumberToObject(root, "pg_pid", d->postmaster_pid);
     cJSON_AddStringToObject(root, "version", PGWT_BUILD_VERSION);
@@ -162,6 +170,14 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
     cJSON_AddBoolToObject(root, "ok", 1);
     cJSON_AddNumberToObject(root, "uptime_s",
                             (double)(now_mono_ns() - d->start_ts) / 1e9);
+
+    /* AAS-1 Stage 2: target postmaster capacity, refreshed periodically.
+     * UNKNOWN is the explicit -1 sentinel; it is never replaced by a guess. */
+    cJSON_AddNumberToObject(root, "effective_cpu_capacity_cores",
+                            d->effective_cores.cores);
+    cJSON_AddStringToObject(root, "effective_cpu_capacity_source",
+                            pgwt_effective_cores_source_name(
+                                d->effective_cores.source));
 
     /* Event path counters (incremented in event_stream.c / daemon.c) */
     cjson_add_uint64(root, "events_total", ctr->events_total);

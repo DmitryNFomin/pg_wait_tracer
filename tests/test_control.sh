@@ -91,6 +91,7 @@ jget() { python3 -c "import json,sys; print(json.load(sys.stdin)$1)"; }
 # check. Started bare, the daemon must come up in tiered mode with the
 # always-on sampler and NO watchpoints (tier=sampled) until an escalation.
 "$TRACER" --daemon --pid "$PM_PID" -i 1 -T "$TRACE_DIR" -v \
+    --anomaly-cpu-capacity 3.25 \
     >/dev/null 2>"$DAEMON_LOG" &
 TRACER_PID=$!
 
@@ -162,6 +163,9 @@ for k in ('events_total', 'events_per_sec', 'lifecycle_events_total',
     assert isinstance(r[k], (int, float)), k
 # T8: capability string mirrors status.
 assert r['cpu_accounting'] in ('measured', 'legacy'), r
+# AAS-1 Stage 2: the explicit capacity override wins and is observable.
+assert r['effective_cpu_capacity_cores'] == 3.25, r
+assert r['effective_cpu_capacity_source'] == 'override', r
 "
 check $? "metrics: all counters present and numeric"
 
