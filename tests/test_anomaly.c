@@ -63,15 +63,16 @@ static void warm_baseline(struct pgwt_anomaly *a, double level,
  * exactly one nominal 10 Hz tick. Wall-clock jumps are made explicitly by the
  * few tests that prove delayed callbacks do not add extra CPU evidence. */
 static struct pgwt_anomaly_decision
-cpu_tick(struct pgwt_anomaly *a, double aas, double cpu_aas, double capacity,
-         bool coverage_ok, bool capacity_changed, bool guard_blocked,
-         uint64_t *clock)
+cpu_tick_source(struct pgwt_anomaly *a, double aas, double cpu_aas,
+                double capacity, bool affinity_only, bool coverage_ok,
+                bool capacity_changed, bool guard_blocked, uint64_t *clock)
 {
     const struct pgwt_anomaly_observation obs = {
         .aas = aas,
         .lock_fraction = 0.0,
         .cpu_aas = cpu_aas,
         .cpu_capacity = capacity,
+        .cpu_capacity_affinity_only = affinity_only,
         .cpu_coverage_ok = coverage_ok,
         .cpu_capacity_changed = capacity_changed,
         .cpu_guard_blocked = guard_blocked,
@@ -80,6 +81,15 @@ cpu_tick(struct pgwt_anomaly *a, double aas, double cpu_aas, double capacity,
         pgwt_anomaly_eval_observation(a, &obs, *clock);
     *clock += TICK_NS;
     return d;
+}
+
+static struct pgwt_anomaly_decision
+cpu_tick(struct pgwt_anomaly *a, double aas, double cpu_aas, double capacity,
+         bool coverage_ok, bool capacity_changed, bool guard_blocked,
+         uint64_t *clock)
+{
+    return cpu_tick_source(a, aas, cpu_aas, capacity, false, coverage_ok,
+                           capacity_changed, guard_blocked, clock);
 }
 
 static void isolate_cpu_rule(struct pgwt_anomaly *a)
@@ -565,7 +575,8 @@ static void test_cpu_cusum_incidents(void)
         if (cpu >= 2 && (double)cpu > threshold)
             primary_crossed = true;
         struct pgwt_anomaly_decision d =
-            cpu_tick(&a, cpu, cpu, 4.0, true, false, false, &clk);
+            cpu_tick_source(&a, cpu, cpu, 4.0, true,
+                            true, false, false, &clk);
         if (d.action == PGWT_ANOMALY_FIRE) {
             fire_tick = t + 1;
             fire_mask = d.fired_mask;
@@ -583,6 +594,7 @@ static void test_cpu_cusum_incidents(void)
     CHECK(a.cpu_saturation_fires_total == 1,
           "C=4 cpu_saturation_fires_total=%llu expected 1",
           (unsigned long long)a.cpu_saturation_fires_total);
+    int c4_fire_tick = fire_tick;
 
     /* Same prelude and stream on C=2: ratio capping makes the expected
      * evidence rate ~0.445/s, so it should fire in roughly 3.4 seconds. */
@@ -596,7 +608,8 @@ static void test_cpu_cusum_incidents(void)
     for (int t = 0; t < 40; t++) {
         int cpu = jittery_storm_cpu(t);
         struct pgwt_anomaly_decision d =
-            cpu_tick(&b, cpu, cpu, 2.0, true, false, false, &clk);
+            cpu_tick_source(&b, cpu, cpu, 2.0, true,
+                            true, false, false, &clk);
         if (d.action == PGWT_ANOMALY_FIRE) {
             fire_tick = t + 1;
             CHECK(d.fired_mask & PGWT_RULE_CPU_SATURATION,
@@ -606,6 +619,7 @@ static void test_cpu_cusum_incidents(void)
     }
     CHECK(fire_tick >= 30 && fire_tick <= 40,
           "C=2 noisy storm fire tick=%d expected about 4s", fire_tick);
+    int c2_fire_tick = fire_tick;
 
     /* No baseline warmup: the baseline-independent guard still fires. */
     struct pgwt_anomaly c;
@@ -615,7 +629,8 @@ static void test_cpu_cusum_incidents(void)
     for (int t = 0; t < 90; t++) {
         int cpu = jittery_storm_cpu(t);
         struct pgwt_anomaly_decision d =
-            cpu_tick(&c, cpu, cpu, 4.0, true, false, false, &clk);
+            cpu_tick_source(&c, cpu, cpu, 4.0, true,
+                            true, false, false, &clk);
         if (d.action == PGWT_ANOMALY_FIRE) {
             fire_tick = t + 1;
             CHECK(d.fired_mask & PGWT_RULE_CPU_SATURATION,
@@ -636,7 +651,8 @@ static void test_cpu_cusum_incidents(void)
     for (int t = 0; t < 60 * 10; t++) {
         int cpu = jittery_storm_cpu(t);
         struct pgwt_anomaly_decision d =
-            cpu_tick(&wide, cpu, cpu, 16.0, true, false, false, &clk);
+            cpu_tick_source(&wide, cpu, cpu, 16.0, true,
+                            true, false, false, &clk);
         grants += d.action == PGWT_ANOMALY_FIRE;
     }
     CHECK(grants == 0 && wide.fires_total == 0,
@@ -657,6 +673,9 @@ static void test_cpu_cusum_incidents(void)
           "one cpu_aas=100 tick bypassed the utilization cap");
     CHECK(capped.cpu_cusum > 0.044 && capped.cpu_cusum < 0.046,
           "one capped tick produced S=%.6f expected 0.045", capped.cpu_cusum);
+
+    printf("  storm matrix: C=4 %.1fs, C=2 %.1fs, C=16 grants=%d\n",
+           c4_fire_tick / 10.0, c2_fire_tick / 10.0, grants);
 }
 
 /* ── AAS-1 Stage 3: evidence-quality and no-banking gates ────────────── */
@@ -759,6 +778,205 @@ static void test_cpu_cusum_gates(void)
           "cooldown banked/refired CPU evidence (S=%.6f fires=%llu)",
           cooldown.cpu_cusum,
           (unsigned long long)cooldown.cpu_saturation_fires_total);
+}
+
+/* ── AAS-1 Stage 3 fix: one grant per saturation episode ─────────────── */
+static void test_cpu_cusum_episode_latch(void)
+{
+    printf("--- CPU CUSUM: one fire per saturation episode ---\n");
+
+    struct pgwt_anomaly chronic;
+    pgwt_anomaly_init(&chronic, true, 10);
+    isolate_cpu_rule(&chronic);
+    uint64_t clk = TICK_NS;
+    int grants = 0;
+    for (int t = 0; t < 60 * 60 * 10; t++) {
+        struct pgwt_anomaly_decision d =
+            cpu_tick(&chronic, 4.0, 4.0, 4.0,
+                     true, false, false, &clk);
+        grants += d.action == PGWT_ANOMALY_FIRE;
+    }
+    CHECK(grants <= 1 && chronic.fires_total <= 1,
+          "chronic saturation consumed %d grants / %llu fires in one hour",
+          grants, (unsigned long long)chronic.fires_total);
+    CHECK(grants == 1 && !chronic.cpu_armed,
+          "chronic saturation expected one fire and disarmed state "
+          "(grants=%d armed=%d)", grants, chronic.cpu_armed);
+    CHECK(chronic.dropped_budget == 0,
+          "chronic saturation touched budget-drop accounting");
+
+    /* Neither a held partial-read observation nor UNKNOWN capacity proves
+     * recovery. A complete known u<k tick does, after which a new sustained
+     * saturation episode may fire once more. */
+    cpu_tick(&chronic, 0.0, 0.0, 4.0,
+             false, false, false, &clk);
+    CHECK(!chronic.cpu_armed, "low-coverage tick re-armed CPU episode");
+    cpu_tick(&chronic, 0.0, 0.0, -1.0,
+             true, false, false, &clk);
+    CHECK(!chronic.cpu_armed, "UNKNOWN-capacity tick re-armed CPU episode");
+    cpu_tick(&chronic, 3.0, 3.0, 4.0,
+             true, false, false, &clk);
+    CHECK(chronic.cpu_armed && chronic.cpu_cusum == 0.0,
+          "trusted below-k recovery did not re-arm drained CPU episode");
+
+    int second_episode_ticks = 0;
+    for (int t = 0; t < 100; t++) {
+        struct pgwt_anomaly_decision d =
+            cpu_tick(&chronic, 4.0, 4.0, 4.0,
+                     true, false, false, &clk);
+        if (d.action == PGWT_ANOMALY_FIRE) {
+            second_episode_ticks = t + 1;
+            break;
+        }
+    }
+    CHECK(second_episode_ticks > 0 && chronic.fires_total == 2,
+          "recover/resaturate did not produce exactly two episode fires "
+          "(tick=%d fires=%llu)", second_episode_ticks,
+          (unsigned long long)chronic.fires_total);
+
+    printf("  chronic busy: grants/hour=%d; recover/resaturate fires=%llu\n",
+           grants, (unsigned long long)chronic.fires_total);
+}
+
+/* ── AAS-1 Stage 3 fix: activity floor + affinity-only margin ────────── */
+static void test_cpu_cusum_floor_and_margin(void)
+{
+    printf("--- CPU CUSUM: absolute floor and affinity capacity margin ---\n");
+
+    /* Even a severe capacity underestimate cannot turn one CPU-active
+     * backend into an escalation: the absolute activity floor is mandatory. */
+    struct pgwt_anomaly floor;
+    pgwt_anomaly_init(&floor, true, 10);
+    isolate_cpu_rule(&floor);
+    CHECK(floor.cpu_min_aas == 2.0 && floor.cpu_margin == 0.02,
+          "CPU floor/margin defaults are %.3f/%.3f, expected 2.0/.02",
+          floor.cpu_min_aas, floor.cpu_margin);
+    uint64_t floor_clk = TICK_NS;
+    int floor_grants = 0;
+    for (int t = 0; t < 60 * 60 * 10; t++) {
+        struct pgwt_anomaly_decision d =
+            cpu_tick(&floor, 1.0, 1.0, 0.5,
+                     true, false, false, &floor_clk);
+        floor_grants += d.action == PGWT_ANOMALY_FIRE;
+    }
+    CHECK(floor_grants == 0 && floor.fires_total == 0,
+          "cpu_aas below floor fired on underestimated C "
+          "(%d grants / %llu fires)", floor_grants,
+          (unsigned long long)floor.fires_total);
+
+    /* Noisy integer demand has mean 3.24 on C=4 (u=.81): it eventually fires
+     * with the base k=.80, but affinity-only provenance adds the default .02
+     * margin and makes the same benign stream drain instead. */
+    struct pgwt_anomaly affinity;
+    struct pgwt_anomaly no_margin;
+    pgwt_anomaly_init(&affinity, true, 10);
+    pgwt_anomaly_init(&no_margin, true, 10);
+    isolate_cpu_rule(&affinity);
+    isolate_cpu_rule(&no_margin);
+    uint64_t affinity_clk = TICK_NS;
+    uint64_t no_margin_clk = TICK_NS;
+    int affinity_grants = 0;
+    int no_margin_grants = 0;
+    for (int t = 0; t < 60 * 60 * 10; t++) {
+        int q = (t * 37 + 11) % 100;
+        int cpu = q < 76 ? 3 : 4;
+        struct pgwt_anomaly_decision with =
+            cpu_tick_source(&affinity, cpu, cpu, 4.0, true,
+                            true, false, false, &affinity_clk);
+        struct pgwt_anomaly_decision without =
+            cpu_tick_source(&no_margin, cpu, cpu, 4.0, false,
+                            true, false, false, &no_margin_clk);
+        affinity_grants += with.action == PGWT_ANOMALY_FIRE;
+        no_margin_grants += without.action == PGWT_ANOMALY_FIRE;
+    }
+    CHECK(affinity_grants == 0 && affinity.fires_total == 0,
+          "affinity margin did not suppress benign u=.81 load "
+          "(%d grants / %llu fires)", affinity_grants,
+          (unsigned long long)affinity.fires_total);
+    CHECK(no_margin_grants > 0,
+          "margin pinning stream without affinity margin never fired");
+
+    printf("  underestimated floor grants=%d; affinity u=.81 grants=%d "
+           "(zero-margin control=%d)\n",
+           floor_grants, affinity_grants, no_margin_grants);
+}
+
+/* ── AAS-1 Stage 3 fix: discard evidence across partial-read gaps ────── */
+static void test_cpu_cusum_coverage_return(void)
+{
+    printf("--- CPU CUSUM: coverage return resets stale evidence ---\n");
+
+    struct pgwt_anomaly idle_return;
+    pgwt_anomaly_init(&idle_return, true, 10);
+    isolate_cpu_rule(&idle_return);
+    uint64_t clk = TICK_NS;
+    for (int t = 0; t < 33; t++)
+        cpu_tick(&idle_return, 5.0, 5.0, 4.0,
+                 true, false, false, &clk);
+    CHECK(idle_return.cpu_cusum > 1.48 && idle_return.cpu_cusum < 1.49,
+          "coverage-gap setup S=%.6f expected just below h",
+          idle_return.cpu_cusum);
+    for (int t = 0; t < 100; t++)
+        cpu_tick(&idle_return, 0.0, 0.0, 4.0,
+                 false, false, false, &clk);
+    struct pgwt_anomaly_decision idle =
+        cpu_tick(&idle_return, 0.0, 0.0, 4.0,
+                 true, false, false, &clk);
+    CHECK(idle.action != PGWT_ANOMALY_FIRE && idle_return.cpu_cusum == 0.0,
+          "idle coverage return fired stale evidence (action=%d S=%.6f)",
+          idle.action, idle_return.cpu_cusum);
+
+    struct pgwt_anomaly busy_return;
+    pgwt_anomaly_init(&busy_return, true, 10);
+    isolate_cpu_rule(&busy_return);
+    clk = TICK_NS;
+    for (int t = 0; t < 33; t++)
+        cpu_tick(&busy_return, 5.0, 5.0, 4.0,
+                 true, false, false, &clk);
+    for (int t = 0; t < 100; t++)
+        cpu_tick(&busy_return, 0.0, 0.0, 4.0,
+                 false, false, false, &clk);
+    struct pgwt_anomaly_decision busy =
+        cpu_tick(&busy_return, 5.0, 5.0, 4.0,
+                 true, false, false, &clk);
+    CHECK(busy.action != PGWT_ANOMALY_FIRE
+          && busy_return.cpu_cusum > 0.044
+          && busy_return.cpu_cusum < 0.046,
+          "busy coverage return retained stale S (action=%d S=%.6f)",
+          busy.action, busy_return.cpu_cusum);
+    int clean_ticks = 1;
+    while (busy.action != PGWT_ANOMALY_FIRE && clean_ticks < 100) {
+        busy = cpu_tick(&busy_return, 5.0, 5.0, 4.0,
+                        true, false, false, &clk);
+        clean_ticks++;
+    }
+    CHECK(busy.action == PGWT_ANOMALY_FIRE
+          && (busy.fired_mask & PGWT_RULE_CPU_SATURATION),
+          "continued saturation after coverage return did not fire "
+          "(ticks=%d action=%d)", clean_ticks, busy.action);
+
+    printf("  stale idle return grants=0; sustained return fire=%.1fs\n",
+           clean_ticks / 10.0);
+}
+
+/* ── AAS-1 Stage 3 fix: surface a climbing half-threshold CUSUM ──────── */
+static void test_cpu_cusum_near_flag(void)
+{
+    printf("--- CPU CUSUM: near flag while evidence climbs ---\n");
+    struct pgwt_anomaly a;
+    pgwt_anomaly_init(&a, true, 10);
+    isolate_cpu_rule(&a);
+    uint64_t clk = TICK_NS;
+    struct pgwt_anomaly_decision d = {0};
+    for (int t = 0; t < 17; t++)
+        d = cpu_tick(&a, 5.0, 5.0, 4.0,
+                     true, false, false, &clk);
+    CHECK(d.action == PGWT_ANOMALY_NEAR
+          && (d.near_mask & PGWT_NEAR_CPU_SUSTAIN),
+          "S=%.6f expected NEAR(cpu-sustain), action=%d mask=%u",
+          d.cpu_cusum, d.action, d.near_mask);
+    CHECK(!(d.fired_mask & PGWT_RULE_CPU_SATURATION),
+          "CPU near tick also reported a fire mask=%u", d.fired_mask);
 }
 
 /* ── AAS-1 Stage 3: explicit and legacy disable contracts ────────────── */
@@ -864,6 +1082,9 @@ static void run_quiet_hour(int scenario, const char *name)
     CHECK(a.dropped_budget == 0,
           "%s: %llu budget drops in one hour", name,
           (unsigned long long)a.dropped_budget);
+    printf("  normal[%s]: grants=%d fires=%llu drops=%llu\n",
+           name, grants, (unsigned long long)a.fires_total,
+           (unsigned long long)a.dropped_budget);
 }
 
 /* ── AAS-1 Stage 3: long false-positive matrix + boundaries ──────────── */
@@ -971,6 +1192,10 @@ int main(void)
     test_combined_fire();
     test_cpu_cusum_incidents();
     test_cpu_cusum_gates();
+    test_cpu_cusum_episode_latch();
+    test_cpu_cusum_floor_and_margin();
+    test_cpu_cusum_coverage_return();
+    test_cpu_cusum_near_flag();
     test_cpu_cusum_disable_contract();
     test_cpu_cusum_false_positive_matrix();
 

@@ -188,6 +188,8 @@ struct pgwt_daemon {
     int         anomaly_window_s;        /* --anomaly-window-s: per-trigger
                                           * escalation duration (<=0 = default) */
     double      anomaly_cpu_capacity;    /* --anomaly-cpu-capacity; 0 = discover */
+    double      anomaly_cpu_min_aas;     /* --anomaly-cpu-min-aas (<0 = default) */
+    double      anomaly_cpu_margin;      /* --anomaly-cpu-margin (<0 = default) */
     double      anomaly_cpu_cusum_k;     /* --anomaly-cpu-cusum-k (<0 = default) */
     double      anomaly_cpu_cusum_h;     /* --anomaly-cpu-cusum-h (<0 = default) */
     double      anomaly_cpu_cusum_cap;   /* --anomaly-cpu-cusum-cap (<0 = default) */

@@ -19,7 +19,7 @@
  *      CPU-class AAS divided by the postmaster's effective CPU capacity. The
  *      CUSUM advances by nominal sample time (never a delayed wall-clock gap),
  *      drains below its slack point, and fires at its evidence threshold.
- *      Config: --anomaly-cpu-cusum-k/-h/-cap and
+ *      Config: --anomaly-cpu-min-aas/-margin, --anomaly-cpu-cusum-k/-h/-cap and
  *      --anomaly-cpu-cusum-disable.
  *
  * Hysteresis + cooldown: once an auto-escalation fires, a minimum cooldown
@@ -69,6 +69,7 @@ enum pgwt_anomaly_near {
     PGWT_NEAR_LOCK_SUSTAIN = 1 << 1,/* lock-fraction over, sustain count not met */
     PGWT_NEAR_COOLDOWN    = 1 << 2, /* would fire but in cooldown */
     PGWT_NEAR_BASELINE    = 1 << 3, /* baseline not warm yet (no AAS rule) */
+    PGWT_NEAR_CPU_SUSTAIN = 1 << 4, /* CPU CUSUM >= half its fire threshold */
 };
 
 /* Which rule(s) triggered the fire (bitmask). Recorded for logs/diagnostics. */
@@ -89,6 +90,7 @@ struct pgwt_anomaly_observation {
     double lock_fraction;
     double cpu_aas;
     double cpu_capacity;
+    bool   cpu_capacity_affinity_only;
     bool   cpu_coverage_ok;
     bool   cpu_capacity_changed;
     bool   cpu_guard_blocked;
@@ -122,11 +124,15 @@ struct pgwt_anomaly {
      * configurable. The legacy operational disable convention
      * (aas_factor >= PGWT_ANOMALY_DISABLE_AAS_FACTOR) also disables it. */
     bool   cpu_cusum_enabled;
+    double cpu_min_aas;       /* absolute CPU AAS floor required to fire */
+    double cpu_margin;        /* extra slack for affinity-only capacity */
     double cpu_cusum_k;       /* utilization slack/reference point */
     double cpu_cusum_h;       /* evidence threshold in nominal seconds */
     double cpu_cusum_cap;     /* cap applied to cpu_aas / capacity */
     double sample_period_s;   /* NOMINAL 1/sample_rate_hz, never wall gap */
     double cpu_cusum;         /* O(1) accumulated saturation evidence */
+    bool   cpu_armed;         /* one fire until trusted below-k recovery */
+    bool   cpu_coverage_gap;  /* reset evidence when complete coverage returns */
 
     /* ESC-7 baseline slow learn-through: after the AAS metric has been
      * continuously over the multiplicative threshold for learn_through_ticks,
@@ -174,6 +180,8 @@ struct pgwt_anomaly {
 #define PGWT_ANOMALY_DEF_LOCK_TICKS   3
 #define PGWT_ANOMALY_DEF_COOLDOWN_S   120
 #define PGWT_ANOMALY_DEF_ESCALATE_S   60
+#define PGWT_ANOMALY_DEF_CPU_MIN_AAS    2.0
+#define PGWT_ANOMALY_DEF_CPU_MARGIN     0.02
 #define PGWT_ANOMALY_DEF_CPU_CUSUM_K   0.80
 #define PGWT_ANOMALY_DEF_CPU_CUSUM_H   1.50
 #define PGWT_ANOMALY_DEF_CPU_CUSUM_CAP 1.25

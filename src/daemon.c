@@ -1064,6 +1064,10 @@ int pgwt_daemon_init(struct pgwt_daemon *d)
                 (uint64_t)d->anomaly_cooldown_s * 1000000000ULL;
         if (d->anomaly_window_s > 0)
             d->anomaly.escalation_s = d->anomaly_window_s;
+        if (d->anomaly_cpu_min_aas > 0.0)
+            d->anomaly.cpu_min_aas = d->anomaly_cpu_min_aas;
+        if (d->anomaly_cpu_margin >= 0.0)
+            d->anomaly.cpu_margin = d->anomaly_cpu_margin;
         if (d->anomaly_cpu_cusum_k >= 0.0)
             d->anomaly.cpu_cusum_k = d->anomaly_cpu_cusum_k;
         if (d->anomaly_cpu_cusum_h > 0.0)
@@ -1076,7 +1080,8 @@ int pgwt_daemon_init(struct pgwt_daemon *d)
             fprintf(stderr,
                     "INFO: anomaly triggers armed: aas>%.1f*baseline for %d "
                     "ticks, lock_frac>%.2f for %d ticks, cooldown %llus, "
-                    "window %ds, cpu_cusum=%s(k=%.3f h=%.3f cap=%.3f)\n",
+                    "window %ds, cpu_cusum=%s(min_aas=%.3f margin=%.3f "
+                    "k=%.3f h=%.3f cap=%.3f)\n",
                     d->anomaly.aas_factor, d->anomaly.aas_ticks,
                     d->anomaly.lock_fraction, d->anomaly.lock_ticks,
                     (unsigned long long)(d->anomaly.cooldown_ns / 1000000000ULL),
@@ -1085,6 +1090,7 @@ int pgwt_daemon_init(struct pgwt_daemon *d)
                      && d->anomaly.aas_factor
                         < PGWT_ANOMALY_DISABLE_AAS_FACTOR)
                         ? "enabled" : "disabled",
+                    d->anomaly.cpu_min_aas, d->anomaly.cpu_margin,
                     d->anomaly.cpu_cusum_k, d->anomaly.cpu_cusum_h,
                     d->anomaly.cpu_cusum_cap);
     }

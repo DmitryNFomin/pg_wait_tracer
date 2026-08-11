@@ -83,7 +83,11 @@ static void usage(const char *prog)
         "      --anomaly-cooldown-s <S>   Min seconds between auto-escalations (default 120)\n"
         "      --anomaly-window-s <S>     Full-fidelity window length per auto-trigger (default 60)\n"
         "      --anomaly-cpu-capacity <C> Override target effective logical CPU cores\n"
-        "                             (default: affinity/cgroup discovery)\n"
+        "                             (default: affinity/cgroup discovery; use when\n"
+        "                             discovered capacity is known to be uncertain)\n"
+        "      --anomaly-cpu-min-aas <A> Absolute CPU AAS required to fire (default 2.0)\n"
+        "      --anomaly-cpu-margin <M>  Extra utilization slack for affinity-only\n"
+        "                             capacity (default 0.02; zero for quota/override)\n"
         "      --anomaly-cpu-cusum-k <K> CPU saturation slack/reference (default 0.80)\n"
         "      --anomaly-cpu-cusum-h <H> CPU saturation evidence threshold (default 1.50)\n"
         "      --anomaly-cpu-cusum-cap <U> Cap CPU demand/capacity ratio (default 1.25)\n"
@@ -233,6 +237,8 @@ static enum pgwt_mode parse_mode(const char *s)
 #define OPT_ANOM_CPU_CUSUM_H 276
 #define OPT_ANOM_CPU_CUSUM_CAP 277
 #define OPT_ANOM_CPU_CUSUM_DISABLE 278
+#define OPT_ANOM_CPU_MIN_AAS 279
+#define OPT_ANOM_CPU_MARGIN 280
 
 static struct option long_opts[] = {
     {"pid",        required_argument, NULL, 'p'},
@@ -268,6 +274,8 @@ static struct option long_opts[] = {
     {"anomaly-cooldown-s",  required_argument, NULL, OPT_ANOM_COOLDOWN},
     {"anomaly-window-s",    required_argument, NULL, OPT_ANOM_WINDOW},
     {"anomaly-cpu-capacity", required_argument, NULL, OPT_ANOM_CPU_CAPACITY},
+    {"anomaly-cpu-min-aas", required_argument, NULL, OPT_ANOM_CPU_MIN_AAS},
+    {"anomaly-cpu-margin", required_argument, NULL, OPT_ANOM_CPU_MARGIN},
     {"anomaly-cpu-cusum-k", required_argument, NULL, OPT_ANOM_CPU_CUSUM_K},
     {"anomaly-cpu-cusum-h", required_argument, NULL, OPT_ANOM_CPU_CUSUM_H},
     {"anomaly-cpu-cusum-cap", required_argument, NULL, OPT_ANOM_CPU_CUSUM_CAP},
@@ -305,6 +313,8 @@ int main(int argc, char **argv)
     d->anomaly_lock_fraction = -1.0;
     d->anomaly_lock_min_aas  = -1.0;
     d->anomaly_cooldown_s    = -1;
+    d->anomaly_cpu_min_aas   = -1.0;
+    d->anomaly_cpu_margin    = -1.0;
     d->anomaly_cpu_cusum_k   = -1.0;
     d->anomaly_cpu_cusum_h   = -1.0;
     d->anomaly_cpu_cusum_cap = -1.0;
@@ -377,6 +387,34 @@ int main(int argc, char **argv)
                 return 1;
             }
             d->anomaly_cpu_capacity = cores;
+            break;
+        }
+        case OPT_ANOM_CPU_MIN_AAS: {
+            char *end = NULL;
+            errno = 0;
+            double floor = strtod(optarg, &end);
+            if (errno || end == optarg || *end != '\0' ||
+                !isfinite(floor) || floor <= 0.0) {
+                fprintf(stderr, "FATAL: --anomaly-cpu-min-aas must be a "
+                        "finite value > 0 (got '%s')\n", optarg);
+                free(d);
+                return 1;
+            }
+            d->anomaly_cpu_min_aas = floor;
+            break;
+        }
+        case OPT_ANOM_CPU_MARGIN: {
+            char *end = NULL;
+            errno = 0;
+            double margin = strtod(optarg, &end);
+            if (errno || end == optarg || *end != '\0' ||
+                !isfinite(margin) || margin < 0.0) {
+                fprintf(stderr, "FATAL: --anomaly-cpu-margin must be a "
+                        "finite value >= 0 (got '%s')\n", optarg);
+                free(d);
+                return 1;
+            }
+            d->anomaly_cpu_margin = margin;
             break;
         }
         case OPT_ANOM_CPU_CUSUM_K: {

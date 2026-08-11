@@ -77,9 +77,12 @@ void pgwt_anomaly_init(struct pgwt_anomaly *a, bool enabled,
     a->cooldown_ns   = (uint64_t)PGWT_ANOMALY_DEF_COOLDOWN_S * 1000000000ULL;
     a->escalation_s  = PGWT_ANOMALY_DEF_ESCALATE_S;
     a->cpu_cusum_enabled = true;
+    a->cpu_min_aas   = PGWT_ANOMALY_DEF_CPU_MIN_AAS;
+    a->cpu_margin    = PGWT_ANOMALY_DEF_CPU_MARGIN;
     a->cpu_cusum_k   = PGWT_ANOMALY_DEF_CPU_CUSUM_K;
     a->cpu_cusum_h   = PGWT_ANOMALY_DEF_CPU_CUSUM_H;
     a->cpu_cusum_cap = PGWT_ANOMALY_DEF_CPU_CUSUM_CAP;
+    a->cpu_armed     = true;
     a->slow_release_div = PGWT_ANOMALY_DEF_SLOW_RELEASE_DIV;
 
     /* Baseline EWMA: pick alpha so the baseline has roughly a 60-second
@@ -135,6 +138,17 @@ pgwt_anomaly_eval_observation(struct pgwt_anomaly *a,
     bool cpu_rule_enabled = a->cpu_cusum_enabled
                          && a->aas_factor < PGWT_ANOMALY_DISABLE_AAS_FACTOR;
     bool cpu_fire = false;
+    bool cpu_cusum_climbed = false;
+
+    /* A partial-read tick cannot establish whether demand recovered. Hold its
+     * evidence, but remember the gap so the first subsequent complete,
+     * capacity-known observation cannot fire from stale pre-gap state. */
+    if (!obs->cpu_coverage_ok)
+        a->cpu_coverage_gap = true;
+    else if (obs->cpu_capacity > 0.0 && a->cpu_coverage_gap) {
+        a->cpu_cusum = 0.0;
+        a->cpu_coverage_gap = false;
+    }
 
     /* A capacity discontinuity invalidates all evidence accumulated in the
      * old units. An open escalation window or cooldown also clears evidence:
@@ -150,10 +164,27 @@ pgwt_anomaly_eval_observation(struct pgwt_anomaly *a,
             u = 0.0;
         if (u > a->cpu_cusum_cap)
             u = a->cpu_cusum_cap;
-        a->cpu_cusum += a->sample_period_s * (u - a->cpu_cusum_k);
-        if (a->cpu_cusum < 0.0)
+
+        /* A CPU fire closes the current saturation episode. Until a trusted
+         * below-slack tick proves recovery, keep S drained and do not re-arm;
+         * continuous saturation therefore consumes at most one grant. */
+        if (!a->cpu_armed) {
             a->cpu_cusum = 0.0;
-        cpu_fire = a->cpu_cusum >= a->cpu_cusum_h;
+            if (u < a->cpu_cusum_k)
+                a->cpu_armed = true;
+        } else {
+            double reference = a->cpu_cusum_k;
+            if (obs->cpu_capacity_affinity_only)
+                reference += a->cpu_margin;
+            double before = a->cpu_cusum;
+            a->cpu_cusum += a->sample_period_s * (u - reference);
+            if (a->cpu_cusum < 0.0)
+                a->cpu_cusum = 0.0;
+            cpu_cusum_climbed = a->cpu_cusum > before;
+            cpu_fire = a->cpu_armed
+                    && obs->cpu_aas >= a->cpu_min_aas
+                    && a->cpu_cusum >= a->cpu_cusum_h;
+        }
     }
     /* LOW coverage and UNKNOWN capacity intentionally take neither branch:
      * S is held unchanged and cannot fire from an untrusted observation. */
@@ -225,6 +256,10 @@ pgwt_anomaly_eval_observation(struct pgwt_anomaly *a,
             near |= PGWT_NEAR_AAS_SUSTAIN;
         if (lock_over && !lock_fire)
             near |= PGWT_NEAR_LOCK_SUSTAIN;
+        if (cpu_cusum_climbed && a->cpu_armed
+            && obs->cpu_aas >= a->cpu_min_aas
+            && a->cpu_cusum >= 0.5 * a->cpu_cusum_h)
+            near |= PGWT_NEAR_CPU_SUSTAIN;
         if (!baseline_warm && aas >= 2.0)
             near |= PGWT_NEAR_BASELINE;
         if (near) {
@@ -256,8 +291,10 @@ pgwt_anomaly_eval_observation(struct pgwt_anomaly *a,
     d.cpu_cusum = 0.0;
     a->last_fire_ns = now_ns;
     a->fires_total++;
-    if (fired & PGWT_RULE_CPU_SATURATION)
+    if (fired & PGWT_RULE_CPU_SATURATION) {
+        a->cpu_armed = false;
         a->cpu_saturation_fires_total++;
+    }
     return d;
 }
 
@@ -334,6 +371,8 @@ void pgwt_anomaly_tick(struct pgwt_daemon *d,
         .lock_fraction = lock_fraction,
         .cpu_aas = cpu_aas,
         .cpu_capacity = d->effective_cores.cores,
+        .cpu_capacity_affinity_only =
+            d->effective_cores.source == PGWT_EFFECTIVE_CORES_AFFINITY,
         .cpu_coverage_ok = coverage_ok,
         .cpu_capacity_changed = d->effective_cores.materially_changed,
         .cpu_guard_blocked = d->escalation.active,
@@ -369,13 +408,14 @@ void pgwt_anomaly_tick(struct pgwt_daemon *d,
                          (unsigned long long)a->near_since_log);
             fprintf(stderr,
                     "INFO: anomaly near-trigger: aas=%.1f baseline=%.2f "
-                    "lock_frac=%.2f cpu_aas=%.1f cpu_cusum=%.3f%s%s%s%s%s\n",
+                    "lock_frac=%.2f cpu_aas=%.1f cpu_cusum=%.3f%s%s%s%s%s%s\n",
                     dec.aas, dec.baseline, dec.lock_fraction,
                     dec.cpu_aas, dec.cpu_cusum,
                     (dec.near_mask & PGWT_NEAR_AAS_SUSTAIN) ? " [aas-sustain]" : "",
                     (dec.near_mask & PGWT_NEAR_LOCK_SUSTAIN) ? " [lock-sustain]" : "",
                     (dec.near_mask & PGWT_NEAR_COOLDOWN) ? " [cooldown]" : "",
                     (dec.near_mask & PGWT_NEAR_BASELINE) ? " [baseline-warmup]" : "",
+                    (dec.near_mask & PGWT_NEAR_CPU_SUSTAIN) ? " [cpu-sustain]" : "",
                     since);
             a->last_near_mask = dec.near_mask;
             a->last_near_log_ns = now;
