@@ -943,6 +943,106 @@ static void test_cpu_cusum_coverage_flaps(void)
            fire_tick / 10.0, grants, max_cusum);
 }
 
+/* ── CPU CUSUM regression: blind-gap reset boundaries + UNKNOWN ─────── */
+static void test_cpu_cusum_coverage_gap_boundaries(void)
+{
+    printf("--- CPU CUSUM: blind-gap boundaries and fresh UNKNOWN ---\n");
+
+    struct pgwt_anomaly rate;
+    pgwt_anomaly_init(&rate, true, 10);
+    CHECK(rate.cpu_coverage_gap_reset_s == 2.0
+          && rate.cpu_coverage_gap_reset_ticks == 20,
+          "default coverage gap is %.3fs/%d ticks, expected 2.0s/20",
+          rate.cpu_coverage_gap_reset_s,
+          rate.cpu_coverage_gap_reset_ticks);
+    pgwt_anomaly_init(&rate, true, 25);
+    CHECK(rate.cpu_coverage_gap_reset_ticks == 50,
+          "default 2.0s gap at 25Hz derived %d ticks, expected 50",
+          rate.cpu_coverage_gap_reset_ticks);
+    pgwt_anomaly_set_cpu_coverage_gap_s(&rate, 1.5);
+    CHECK(rate.cpu_coverage_gap_reset_ticks == 38,
+          "configured 1.5s gap at 25Hz derived %d ticks, expected ceil(37.5)",
+          rate.cpu_coverage_gap_reset_ticks);
+
+    /* Prime S one saturated tick below h: the next trusted saturated tick
+     * fires iff the pre-gap evidence was retained. */
+    struct pgwt_anomaly hold;
+    pgwt_anomaly_init(&hold, true, 10);
+    isolate_cpu_rule(&hold);
+    uint64_t clk = TICK_NS;
+    for (int t = 0; t < 33; t++)
+        cpu_tick(&hold, 5.0, 5.0, 4.0,
+                 true, false, false, &clk);
+    double held_s = hold.cpu_cusum;
+    int reset_ticks = hold.cpu_coverage_gap_reset_ticks;
+    for (int t = 0; t < reset_ticks - 1; t++)
+        cpu_tick(&hold, 0.0, 0.0, 4.0,
+                 false, false, false, &clk);
+    CHECK(hold.cpu_coverage_gap_ticks == reset_ticks - 1
+          && hold.cpu_cusum == held_s,
+          "RESET_TICKS-1 gap did not hold S "
+          "(gap=%d/%d S=%.6f->%.6f)",
+          hold.cpu_coverage_gap_ticks, reset_ticks, held_s, hold.cpu_cusum);
+    struct pgwt_anomaly_decision held_return =
+        cpu_tick(&hold, 5.0, 5.0, 4.0,
+                 true, false, false, &clk);
+    CHECK(held_return.action == PGWT_ANOMALY_FIRE
+          && (held_return.fired_mask & PGWT_RULE_CPU_SATURATION),
+          "RESET_TICKS-1 gap lost live incident evidence "
+          "(action=%d mask=%u)", held_return.action, held_return.fired_mask);
+
+    /* At the exact reset boundary, stale S is discarded. The trusted return
+     * contributes its own tick, but that tick alone cannot fire. */
+    struct pgwt_anomaly wipe;
+    pgwt_anomaly_init(&wipe, true, 10);
+    isolate_cpu_rule(&wipe);
+    clk = TICK_NS;
+    for (int t = 0; t < 33; t++)
+        cpu_tick(&wipe, 5.0, 5.0, 4.0,
+                 true, false, false, &clk);
+    reset_ticks = wipe.cpu_coverage_gap_reset_ticks;
+    for (int t = 0; t < reset_ticks; t++)
+        cpu_tick(&wipe, 0.0, 0.0, 4.0,
+                 false, false, false, &clk);
+    CHECK(wipe.cpu_coverage_gap_ticks == reset_ticks
+          && wipe.cpu_cusum == 0.0,
+          "RESET_TICKS gap did not wipe S (gap=%d/%d S=%.6f)",
+          wipe.cpu_coverage_gap_ticks, reset_ticks, wipe.cpu_cusum);
+    struct pgwt_anomaly_decision wiped_return =
+        cpu_tick(&wipe, 5.0, 5.0, 4.0,
+                 true, false, false, &clk);
+    CHECK(wiped_return.action != PGWT_ANOMALY_FIRE
+          && wipe.cpu_cusum > 0.044 && wipe.cpu_cusum < 0.046,
+          "RESET_TICKS gap stale-fired on trusted saturated return "
+          "(action=%d S=%.6f)", wiped_return.action, wipe.cpu_cusum);
+
+    /* Fresh UNKNOWN must bootstrap a blind gap without a preceding LOW tick
+     * or a capacity_changed edge, then reach the same exact reset boundary. */
+    struct pgwt_anomaly unknown;
+    pgwt_anomaly_init(&unknown, true, 10);
+    isolate_cpu_rule(&unknown);
+    clk = TICK_NS;
+    for (int t = 0; t < 33; t++)
+        cpu_tick(&unknown, 5.0, 5.0, 4.0,
+                 true, false, false, &clk);
+    reset_ticks = unknown.cpu_coverage_gap_reset_ticks;
+    for (int t = 0; t < reset_ticks; t++)
+        cpu_tick(&unknown, 0.0, 0.0, -1.0,
+                 true, false, false, &clk);
+    CHECK(unknown.cpu_coverage_gap_ticks == reset_ticks
+          && unknown.cpu_cusum == 0.0,
+          "fresh UNKNOWN did not independently wipe S "
+          "(gap=%d/%d S=%.6f)",
+          unknown.cpu_coverage_gap_ticks, reset_ticks, unknown.cpu_cusum);
+    struct pgwt_anomaly_decision unknown_return =
+        cpu_tick(&unknown, 5.0, 5.0, 4.0,
+                 true, false, false, &clk);
+    CHECK(unknown_return.action != PGWT_ANOMALY_FIRE
+          && unknown.cpu_cusum > 0.044 && unknown.cpu_cusum < 0.046,
+          "fresh UNKNOWN held stale S across trusted return "
+          "(action=%d S=%.6f)", unknown_return.action, unknown.cpu_cusum);
+}
+
 /* ── AAS-1 Stage 3 fix: discard evidence across sustained blind gaps ── */
 static void test_cpu_cusum_coverage_return(void)
 {
@@ -1237,6 +1337,7 @@ int main(void)
     test_cpu_cusum_episode_latch();
     test_cpu_cusum_floor_and_margin();
     test_cpu_cusum_coverage_flaps();
+    test_cpu_cusum_coverage_gap_boundaries();
     test_cpu_cusum_coverage_return();
     test_cpu_cusum_near_flag();
     test_cpu_cusum_disable_contract();

@@ -1074,6 +1074,9 @@ int pgwt_daemon_init(struct pgwt_daemon *d)
             d->anomaly.cpu_cusum_h = d->anomaly_cpu_cusum_h;
         if (d->anomaly_cpu_cusum_cap > 0.0)
             d->anomaly.cpu_cusum_cap = d->anomaly_cpu_cusum_cap;
+        if (d->anomaly_cpu_coverage_gap_s > 0.0)
+            pgwt_anomaly_set_cpu_coverage_gap_s(
+                &d->anomaly, d->anomaly_cpu_coverage_gap_s);
         if (d->anomaly_cpu_cusum_disabled)
             d->anomaly.cpu_cusum_enabled = false;
         if (d->verbose)
@@ -1081,7 +1084,7 @@ int pgwt_daemon_init(struct pgwt_daemon *d)
                     "INFO: anomaly triggers armed: aas>%.1f*baseline for %d "
                     "ticks, lock_frac>%.2f for %d ticks, cooldown %llus, "
                     "window %ds, cpu_cusum=%s(min_aas=%.3f margin=%.3f "
-                    "k=%.3f h=%.3f cap=%.3f)\n",
+                    "k=%.3f h=%.3f cap=%.3f coverage_gap=%.3fs/%d ticks)\n",
                     d->anomaly.aas_factor, d->anomaly.aas_ticks,
                     d->anomaly.lock_fraction, d->anomaly.lock_ticks,
                     (unsigned long long)(d->anomaly.cooldown_ns / 1000000000ULL),
@@ -1092,7 +1095,9 @@ int pgwt_daemon_init(struct pgwt_daemon *d)
                         ? "enabled" : "disabled",
                     d->anomaly.cpu_min_aas, d->anomaly.cpu_margin,
                     d->anomaly.cpu_cusum_k, d->anomaly.cpu_cusum_h,
-                    d->anomaly.cpu_cusum_cap);
+                    d->anomaly.cpu_cusum_cap,
+                    d->anomaly.cpu_coverage_gap_reset_s,
+                    d->anomaly.cpu_coverage_gap_reset_ticks);
     }
 
     /* Arm the active capture provider. For the full tier this is a no-op
