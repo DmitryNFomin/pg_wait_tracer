@@ -84,6 +84,11 @@ static void usage(const char *prog)
         "      --anomaly-window-s <S>     Full-fidelity window length per auto-trigger (default 60)\n"
         "      --anomaly-cpu-capacity <C> Override target effective logical CPU cores\n"
         "                             (default: affinity/cgroup discovery)\n"
+        "      --anomaly-cpu-cusum-k <K> CPU saturation slack/reference (default 0.80)\n"
+        "      --anomaly-cpu-cusum-h <H> CPU saturation evidence threshold (default 1.50)\n"
+        "      --anomaly-cpu-cusum-cap <U> Cap CPU demand/capacity ratio (default 1.25)\n"
+        "      --anomaly-cpu-cusum-disable  Disable only the CPU saturation guard\n"
+        "                             (--anomaly-aas-factor >= 1000000 also disables it)\n"
         "\n"
         "Performance tuning:\n"
         "      --lightweight          BPF accumulator only (no per-event ringbuf).\n"
@@ -224,6 +229,10 @@ static enum pgwt_mode parse_mode(const char *s)
 #define OPT_RETENTION_GB    272
 #define OPT_ANOM_LOCK_MIN_AAS 273
 #define OPT_ANOM_CPU_CAPACITY 274
+#define OPT_ANOM_CPU_CUSUM_K 275
+#define OPT_ANOM_CPU_CUSUM_H 276
+#define OPT_ANOM_CPU_CUSUM_CAP 277
+#define OPT_ANOM_CPU_CUSUM_DISABLE 278
 
 static struct option long_opts[] = {
     {"pid",        required_argument, NULL, 'p'},
@@ -259,6 +268,10 @@ static struct option long_opts[] = {
     {"anomaly-cooldown-s",  required_argument, NULL, OPT_ANOM_COOLDOWN},
     {"anomaly-window-s",    required_argument, NULL, OPT_ANOM_WINDOW},
     {"anomaly-cpu-capacity", required_argument, NULL, OPT_ANOM_CPU_CAPACITY},
+    {"anomaly-cpu-cusum-k", required_argument, NULL, OPT_ANOM_CPU_CUSUM_K},
+    {"anomaly-cpu-cusum-h", required_argument, NULL, OPT_ANOM_CPU_CUSUM_H},
+    {"anomaly-cpu-cusum-cap", required_argument, NULL, OPT_ANOM_CPU_CUSUM_CAP},
+    {"anomaly-cpu-cusum-disable", no_argument, NULL, OPT_ANOM_CPU_CUSUM_DISABLE},
     {"quiet",           no_argument,       NULL, 'q'},
     {"verbose",         no_argument,       NULL, 'v'},
     {"help",            no_argument,       NULL, 'h'},
@@ -292,6 +305,9 @@ int main(int argc, char **argv)
     d->anomaly_lock_fraction = -1.0;
     d->anomaly_lock_min_aas  = -1.0;
     d->anomaly_cooldown_s    = -1;
+    d->anomaly_cpu_cusum_k   = -1.0;
+    d->anomaly_cpu_cusum_h   = -1.0;
+    d->anomaly_cpu_cusum_cap = -1.0;
 
     pid_t pm_pid = 0;
     const char *pgdata = NULL;
@@ -363,6 +379,51 @@ int main(int argc, char **argv)
             d->anomaly_cpu_capacity = cores;
             break;
         }
+        case OPT_ANOM_CPU_CUSUM_K: {
+            char *end = NULL;
+            errno = 0;
+            double k = strtod(optarg, &end);
+            if (errno || end == optarg || *end != '\0' ||
+                !isfinite(k) || k < 0.0) {
+                fprintf(stderr, "FATAL: --anomaly-cpu-cusum-k must be a "
+                        "finite value >= 0 (got '%s')\n", optarg);
+                free(d);
+                return 1;
+            }
+            d->anomaly_cpu_cusum_k = k;
+            break;
+        }
+        case OPT_ANOM_CPU_CUSUM_H: {
+            char *end = NULL;
+            errno = 0;
+            double h = strtod(optarg, &end);
+            if (errno || end == optarg || *end != '\0' ||
+                !isfinite(h) || h <= 0.0) {
+                fprintf(stderr, "FATAL: --anomaly-cpu-cusum-h must be a "
+                        "finite value > 0 (got '%s')\n", optarg);
+                free(d);
+                return 1;
+            }
+            d->anomaly_cpu_cusum_h = h;
+            break;
+        }
+        case OPT_ANOM_CPU_CUSUM_CAP: {
+            char *end = NULL;
+            errno = 0;
+            double cap = strtod(optarg, &end);
+            if (errno || end == optarg || *end != '\0' ||
+                !isfinite(cap) || cap <= 0.0) {
+                fprintf(stderr, "FATAL: --anomaly-cpu-cusum-cap must be a "
+                        "finite value > 0 (got '%s')\n", optarg);
+                free(d);
+                return 1;
+            }
+            d->anomaly_cpu_cusum_cap = cap;
+            break;
+        }
+        case OPT_ANOM_CPU_CUSUM_DISABLE:
+            d->anomaly_cpu_cusum_disabled = true;
+            break;
         case 'q': d->quiet = true; break;
         case 'v': d->verbose = true; break;
         case 'h': usage(argv[0]); free(d); return 0;
@@ -469,6 +530,19 @@ int main(int argc, char **argv)
     if (d->anomaly_lock_min_aas == 0.0) {
         fprintf(stderr, "FATAL: --anomaly-lock-min-aas must be > 0 "
                 "(use --anomaly-lock-fraction alone to disable the floor)\n");
+        free(d);
+        return 1;
+    }
+    double cpu_cusum_k = d->anomaly_cpu_cusum_k >= 0.0
+                       ? d->anomaly_cpu_cusum_k
+                       : PGWT_ANOMALY_DEF_CPU_CUSUM_K;
+    double cpu_cusum_cap = d->anomaly_cpu_cusum_cap > 0.0
+                         ? d->anomaly_cpu_cusum_cap
+                         : PGWT_ANOMALY_DEF_CPU_CUSUM_CAP;
+    if (cpu_cusum_k >= cpu_cusum_cap) {
+        fprintf(stderr, "FATAL: --anomaly-cpu-cusum-k must be less than "
+                "--anomaly-cpu-cusum-cap (got k=%.6g cap=%.6g)\n",
+                cpu_cusum_k, cpu_cusum_cap);
         free(d);
         return 1;
     }

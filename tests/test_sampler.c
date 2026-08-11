@@ -342,10 +342,13 @@ static void test_read_validity_excludes_failures(void)
     CHECK(cpu_samples == 1,
           "exactly one CPU sample: failed reads add no CPU-class demand");
 
-    double aas = -1.0, lock_fraction = -1.0;
-    pgwt_anomaly_metrics_from_batch(out, n, &aas, &lock_fraction);
+    double aas = -1.0, lock_fraction = -1.0, cpu_aas = -1.0;
+    pgwt_anomaly_metrics_from_batch(out, n, &aas, &lock_fraction, &cpu_aas);
     CHECK(aas == 2.0,
           "AAS includes only valid CPU+wait targets (%.1f expected 2.0)", aas);
+    CHECK(cpu_aas == 1.0,
+          "CPU AAS includes only the valid CPU target (%.1f expected 1.0)",
+          cpu_aas);
 }
 
 /* ── Test 4: child process read (cross-pid, shared mapping) ───────────── */

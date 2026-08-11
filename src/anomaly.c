@@ -1,10 +1,11 @@
 /* anomaly.c — Anomaly-triggered escalation rules (Track A, D5 / Phase A5)
  *
- * See anomaly.h for the design. The pure rule core (pgwt_anomaly_eval and
- * pgwt_anomaly_metrics_from_batch) is free of BPF and the escalation engine so
- * the unit test (tests/test_anomaly.c) can drive it with scripted sample
- * streams. The daemon-side wrapper (pgwt_anomaly_tick) connects the FIRE
- * decision to A4's pgwt_escalate() and logs every near-trigger.
+ * See anomaly.h for the design. The pure rule core
+ * (pgwt_anomaly_eval_observation and pgwt_anomaly_metrics_from_batch) is free
+ * of BPF and the escalation engine so the unit test (tests/test_anomaly.c) can
+ * drive it with scripted sample streams. The daemon-side wrapper
+ * (pgwt_anomaly_tick) connects the FIRE decision to A4's pgwt_escalate() and
+ * logs every near-trigger.
  *
  * The pure core is compiled into both the daemon and (via -DPGWT_SERVER) the
  * unit test; the daemon wrapper is guarded out of the server build.
@@ -30,10 +31,12 @@ static bool sample_is_idle(uint32_t wei)
 
 void pgwt_anomaly_metrics_from_batch(const struct pgwt_trace_event *samples,
                                      int n, double *out_aas,
-                                     double *out_lock_fraction)
+                                     double *out_lock_fraction,
+                                     double *out_cpu_aas)
 {
     int active = 0;
     int locks = 0;
+    int cpu = 0;
     for (int i = 0; i < n; i++) {
         uint32_t we = samples[i].new_event;
         /* T2 (AAS-1): the decomposed model. we==0 records in the batch are
@@ -48,6 +51,8 @@ void pgwt_anomaly_metrics_from_batch(const struct pgwt_trace_event *samples,
         if (we != 0 && sample_is_idle(we))
             continue;   /* instrumented idle: not an active session */
         active++;
+        if (we == 0)
+            cpu++;
         if (WE_CLASS(we) == PG_WAIT_LOCK)
             locks++;
     }
@@ -55,6 +60,8 @@ void pgwt_anomaly_metrics_from_batch(const struct pgwt_trace_event *samples,
         *out_aas = (double)active;
     if (out_lock_fraction)
         *out_lock_fraction = active > 0 ? (double)locks / (double)active : 0.0;
+    if (out_cpu_aas)
+        *out_cpu_aas = (double)cpu;
 }
 
 void pgwt_anomaly_init(struct pgwt_anomaly *a, bool enabled,
@@ -69,6 +76,10 @@ void pgwt_anomaly_init(struct pgwt_anomaly *a, bool enabled,
     a->lock_ticks    = PGWT_ANOMALY_DEF_LOCK_TICKS;
     a->cooldown_ns   = (uint64_t)PGWT_ANOMALY_DEF_COOLDOWN_S * 1000000000ULL;
     a->escalation_s  = PGWT_ANOMALY_DEF_ESCALATE_S;
+    a->cpu_cusum_enabled = true;
+    a->cpu_cusum_k   = PGWT_ANOMALY_DEF_CPU_CUSUM_K;
+    a->cpu_cusum_h   = PGWT_ANOMALY_DEF_CPU_CUSUM_H;
+    a->cpu_cusum_cap = PGWT_ANOMALY_DEF_CPU_CUSUM_CAP;
     a->slow_release_div = PGWT_ANOMALY_DEF_SLOW_RELEASE_DIV;
 
     /* Baseline EWMA: pick alpha so the baseline has roughly a 60-second
@@ -76,6 +87,7 @@ void pgwt_anomaly_init(struct pgwt_anomaly *a, bool enabled,
      * of H ticks needs alpha = 1 - 2^(-1/H); approximate with alpha ~ 1/H for
      * the small-alpha regime. H = 60s * rate. Warm up over ~5s of ticks. */
     int hz = sample_rate_hz > 0 ? sample_rate_hz : 10;
+    a->sample_period_s = 1.0 / (double)hz;
     double half_life_ticks = 60.0 * (double)hz;
     if (half_life_ticks < 1.0)
         half_life_ticks = 1.0;
@@ -93,23 +105,65 @@ void pgwt_anomaly_init(struct pgwt_anomaly *a, bool enabled,
 }
 
 struct pgwt_anomaly_decision
-pgwt_anomaly_eval(struct pgwt_anomaly *a, double aas, double lock_fraction,
-                  uint64_t now_ns)
+pgwt_anomaly_eval_observation(struct pgwt_anomaly *a,
+                              const struct pgwt_anomaly_observation *obs,
+                              uint64_t now_ns)
 {
     struct pgwt_anomaly_decision d;
     memset(&d, 0, sizeof(d));
     d.action        = PGWT_ANOMALY_NONE;
-    d.aas           = aas;
-    d.lock_fraction = lock_fraction;
+    d.aas           = obs->aas;
+    d.lock_fraction = obs->lock_fraction;
+    d.cpu_aas       = obs->cpu_aas;
+    d.cpu_capacity  = obs->cpu_capacity;
+    d.cpu_cusum     = a->cpu_cusum;
     d.baseline      = a->baseline_aas;
 
     if (!a->enabled)
         return d;
 
+    double aas = obs->aas;
+    double lock_fraction = obs->lock_fraction;
+
+    /* Cooldown remains wall-clock based. CPU evidence does not: it uses the
+     * nominal sample period below, so one delayed sampler callback is still
+     * exactly one observation rather than several seconds of evidence. */
+    bool in_cooldown = a->last_fire_ns != 0
+                    && now_ns - a->last_fire_ns < a->cooldown_ns;
+
+    /* ── CPU-demand saturation CUSUM ───────────────────────────────────── */
+    bool cpu_rule_enabled = a->cpu_cusum_enabled
+                         && a->aas_factor < PGWT_ANOMALY_DISABLE_AAS_FACTOR;
+    bool cpu_fire = false;
+
+    /* A capacity discontinuity invalidates all evidence accumulated in the
+     * old units. An open escalation window or cooldown also clears evidence:
+     * this prevents a manual/other-rule window from banking an almost-fire
+     * that would immediately consume another budget grant when it closes. */
+    if (obs->cpu_capacity_changed || obs->cpu_guard_blocked || in_cooldown) {
+        a->cpu_cusum = 0.0;
+    } else if (!cpu_rule_enabled) {
+        a->cpu_cusum = 0.0;
+    } else if (obs->cpu_coverage_ok && obs->cpu_capacity > 0.0) {
+        double u = obs->cpu_aas / obs->cpu_capacity;
+        if (u < 0.0)
+            u = 0.0;
+        if (u > a->cpu_cusum_cap)
+            u = a->cpu_cusum_cap;
+        a->cpu_cusum += a->sample_period_s * (u - a->cpu_cusum_k);
+        if (a->cpu_cusum < 0.0)
+            a->cpu_cusum = 0.0;
+        cpu_fire = a->cpu_cusum >= a->cpu_cusum_h;
+    }
+    /* LOW coverage and UNKNOWN capacity intentionally take neither branch:
+     * S is held unchanged and cannot fire from an untrusted observation. */
+    d.cpu_cusum = a->cpu_cusum;
+
     /* ── AAS-vs-baseline rule ──────────────────────────────────────────── */
     bool baseline_warm = a->baseline_warmup >= a->warmup_needed;
     bool aas_over = false;
-    if (baseline_warm && a->aas_factor > 0.0) {
+    if (baseline_warm && a->aas_factor > 0.0
+        && a->aas_factor < PGWT_ANOMALY_DISABLE_AAS_FACTOR) {
         double threshold = a->aas_factor * a->baseline_aas;
         /* Guard against a near-zero baseline: a tiny absolute AAS over a
          * 0-ish baseline is noise, not an incident. Require at least 2 active
@@ -164,7 +218,7 @@ pgwt_anomaly_eval(struct pgwt_anomaly *a, double aas, double lock_fraction,
     d.baseline = a->baseline_aas;
 
     /* ── Decision ──────────────────────────────────────────────────────── */
-    if (!aas_fire && !lock_fire) {
+    if (!aas_fire && !lock_fire && !cpu_fire) {
         /* Surface a near-trigger if a metric crossed but did not sustain. */
         unsigned near = PGWT_NEAR_NONE;
         if (aas_over && !aas_fire)
@@ -183,9 +237,9 @@ pgwt_anomaly_eval(struct pgwt_anomaly *a, double aas, double lock_fraction,
 
     /* A rule wants to fire. Enforce cooldown (hysteresis against flapping). */
     unsigned fired = (aas_fire ? PGWT_RULE_AAS : 0)
-                   | (lock_fire ? PGWT_RULE_LOCK : 0);
-    if (a->last_fire_ns != 0 &&
-        now_ns - a->last_fire_ns < a->cooldown_ns) {
+                   | (lock_fire ? PGWT_RULE_LOCK : 0)
+                   | (cpu_fire ? PGWT_RULE_CPU_SATURATION : 0);
+    if (in_cooldown) {
         d.action = PGWT_ANOMALY_NEAR;
         d.near_mask = PGWT_NEAR_COOLDOWN;
         d.fired_mask = fired;   /* what WOULD have fired */
@@ -196,9 +250,28 @@ pgwt_anomaly_eval(struct pgwt_anomaly *a, double aas, double lock_fraction,
 
     d.action = PGWT_ANOMALY_FIRE;
     d.fired_mask = fired;
+    /* Never carry CPU evidence through any escalation, including a fire
+     * caused by another rule on the same tick. */
+    a->cpu_cusum = 0.0;
+    d.cpu_cusum = 0.0;
     a->last_fire_ns = now_ns;
     a->fires_total++;
+    if (fired & PGWT_RULE_CPU_SATURATION)
+        a->cpu_saturation_fires_total++;
     return d;
+}
+
+struct pgwt_anomaly_decision
+pgwt_anomaly_eval(struct pgwt_anomaly *a, double aas, double lock_fraction,
+                  uint64_t now_ns)
+{
+    const struct pgwt_anomaly_observation obs = {
+        .aas = aas,
+        .lock_fraction = lock_fraction,
+        .cpu_capacity = -1.0,
+        .cpu_coverage_ok = false,
+    };
+    return pgwt_anomaly_eval_observation(a, &obs, now_ns);
 }
 
 /* ── Daemon-side wrapper ──────────────────────────────────────────────── */
@@ -206,7 +279,9 @@ pgwt_anomaly_eval(struct pgwt_anomaly *a, double aas, double lock_fraction,
 #ifndef PGWT_SERVER
 
 #include "daemon.h"
+#include "effective_cores.h"
 #include "escalation.h"
+#include "sampler.h"
 
 #include <time.h>
 
@@ -224,6 +299,8 @@ static const char *rule_names(unsigned mask, char *buf, size_t len)
         snprintf(buf + strlen(buf), len - strlen(buf), "aas ");
     if (mask & PGWT_RULE_LOCK)
         snprintf(buf + strlen(buf), len - strlen(buf), "lock ");
+    if (mask & PGWT_RULE_CPU_SATURATION)
+        snprintf(buf + strlen(buf), len - strlen(buf), "cpu-saturation ");
     if (buf[0] == '\0')
         snprintf(buf, len, "(none)");
     return buf;
@@ -236,12 +313,35 @@ void pgwt_anomaly_tick(struct pgwt_daemon *d,
     if (!a->enabled)
         return;
 
-    double aas = 0.0, lock_fraction = 0.0;
-    pgwt_anomaly_metrics_from_batch(samples, n, &aas, &lock_fraction);
+    /* Stage 2 capacity is refreshed at the same cadence as CPU evidence.
+     * materially_changed is therefore consumed on the exact sampler tick that
+     * resets S, rather than being lost to the slower display timer. */
+    d->effective_cores = pgwt_effective_cores_refresh(
+        &d->cpu_capacity_resolver, d->postmaster_pid);
+
+    double aas = 0.0, lock_fraction = 0.0, cpu_aas = 0.0;
+    pgwt_anomaly_metrics_from_batch(samples, n, &aas, &lock_fraction,
+                                    &cpu_aas);
+
+    /* Complete read coverage is the conservative evidence boundary. Missing
+     * targets are omitted from the batch; holding S avoids treating that
+     * partial count as a trustworthy saturation observation. A legitimate
+     * empty registry (0 targets, 0 invalid) remains a valid zero-demand tick. */
+    bool coverage_ok = d->sampler == NULL
+                    || d->sampler->read_invalid_last == 0;
+    struct pgwt_anomaly_observation obs = {
+        .aas = aas,
+        .lock_fraction = lock_fraction,
+        .cpu_aas = cpu_aas,
+        .cpu_capacity = d->effective_cores.cores,
+        .cpu_coverage_ok = coverage_ok,
+        .cpu_capacity_changed = d->effective_cores.materially_changed,
+        .cpu_guard_blocked = d->escalation.active,
+    };
 
     uint64_t now = anomaly_mono_ns();
     struct pgwt_anomaly_decision dec =
-        pgwt_anomaly_eval(a, aas, lock_fraction, now);
+        pgwt_anomaly_eval_observation(a, &obs, now);
 
     char rb[32];
     switch (dec.action) {
@@ -269,8 +369,9 @@ void pgwt_anomaly_tick(struct pgwt_daemon *d,
                          (unsigned long long)a->near_since_log);
             fprintf(stderr,
                     "INFO: anomaly near-trigger: aas=%.1f baseline=%.2f "
-                    "lock_frac=%.2f%s%s%s%s%s\n",
+                    "lock_frac=%.2f cpu_aas=%.1f cpu_cusum=%.3f%s%s%s%s%s\n",
                     dec.aas, dec.baseline, dec.lock_fraction,
+                    dec.cpu_aas, dec.cpu_cusum,
                     (dec.near_mask & PGWT_NEAR_AAS_SUSTAIN) ? " [aas-sustain]" : "",
                     (dec.near_mask & PGWT_NEAR_LOCK_SUSTAIN) ? " [lock-sustain]" : "",
                     (dec.near_mask & PGWT_NEAR_COOLDOWN) ? " [cooldown]" : "",
@@ -289,13 +390,18 @@ void pgwt_anomaly_tick(struct pgwt_daemon *d,
         int granted = 0;
         const char *why = NULL;
         rule_names(dec.fired_mask, rb, sizeof(rb));
-        int rc = pgwt_escalate(d, a->escalation_s, PGWT_ESC_REASON_ANOMALY,
+        int reason = (dec.fired_mask & PGWT_RULE_CPU_SATURATION)
+                   ? PGWT_ESC_REASON_CPU_SATURATION
+                   : PGWT_ESC_REASON_ANOMALY;
+        int rc = pgwt_escalate(d, a->escalation_s, reason,
                                &granted, &why);
         if (rc == 0) {
             fprintf(stderr,
                     "INFO: anomaly AUTO-escalation: rule=%saas=%.1f "
-                    "baseline=%.2f lock_frac=%.2f -> full fidelity %ds\n",
-                    rb, dec.aas, dec.baseline, dec.lock_fraction, granted);
+                    "baseline=%.2f lock_frac=%.2f cpu_aas=%.1f "
+                    "capacity=%.3f -> full fidelity %ds\n",
+                    rb, dec.aas, dec.baseline, dec.lock_fraction,
+                    dec.cpu_aas, dec.cpu_capacity, granted);
         } else {
             /* Over budget: dropped SILENTLY (log only, no error to anyone) —
              * unlike a manual escalate which returns a denial to its caller. */

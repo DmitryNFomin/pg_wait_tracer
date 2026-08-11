@@ -188,10 +188,14 @@ struct pgwt_daemon {
     int         anomaly_window_s;        /* --anomaly-window-s: per-trigger
                                           * escalation duration (<=0 = default) */
     double      anomaly_cpu_capacity;    /* --anomaly-cpu-capacity; 0 = discover */
+    double      anomaly_cpu_cusum_k;     /* --anomaly-cpu-cusum-k (<0 = default) */
+    double      anomaly_cpu_cusum_h;     /* --anomaly-cpu-cusum-h (<0 = default) */
+    double      anomaly_cpu_cusum_cap;   /* --anomaly-cpu-cusum-cap (<0 = default) */
+    bool        anomaly_cpu_cusum_disabled; /* independent CPU-guard switch */
 
     /* AAS-1 Stage 2: target postmaster effective logical-core capacity.
-     * Refreshed once per display tick and exported through control metrics.
-     * No detector or escalation path consumes it until Stage 3. */
+     * Stage 3 refreshes it on every anomaly/sampler tick; modes without an
+     * armed anomaly engine retain the display-tick refresh for metrics. */
     struct pgwt_effective_cores_resolver cpu_capacity_resolver;
     struct pgwt_effective_cores_result effective_cores;
     /* T2: the pgstat_report_activity uprobe attached and the BackendState

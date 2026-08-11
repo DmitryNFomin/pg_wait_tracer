@@ -5,7 +5,7 @@
  * full-fidelity capture (via the A4 escalation engine) so the full data for
  * the incident is on disk without a human reacting in time.
  *
- * Two rules, both evaluated once per sampler tick on metrics derived from that
+ * Three rules, all evaluated once per sampler tick on metrics derived from that
  * tick's sample batch (no re-reading the trace):
  *
  *   1. AAS-vs-baseline — maintain a rolling baseline of AAS (active sessions,
@@ -15,16 +15,24 @@
  *   2. Lock-class fraction — fire when the Lock-class share of the tick's
  *      ACTIVE (non-idle) samples exceeds a threshold, sustained for N ticks.
  *      Config: --anomaly-lock-fraction.
+ *   3. CPU-demand saturation — a baseline-independent, one-sided CUSUM over
+ *      CPU-class AAS divided by the postmaster's effective CPU capacity. The
+ *      CUSUM advances by nominal sample time (never a delayed wall-clock gap),
+ *      drains below its slack point, and fires at its evidence threshold.
+ *      Config: --anomaly-cpu-cusum-k/-h/-cap and
+ *      --anomaly-cpu-cusum-disable.
  *
  * Hysteresis + cooldown: once an auto-escalation fires, a minimum cooldown
  * (--anomaly-cooldown-s) must elapse before another auto-escalation can fire,
- * so a flapping metric cannot burst-burn the budget. An anomaly while already
- * escalated EXTENDS the window (pgwt_escalate's extend path), it never stacks.
+ * so a flapping metric cannot burst-burn the budget. The existing AAS/lock
+ * rules may EXTEND an active window (pgwt_escalate's extend path), never stack
+ * one; the CPU rule does not accumulate while a window or cooldown is active.
  *
- * Budget: a firing rule calls pgwt_escalate(..., PGWT_ESC_REASON_ANOMALY,...).
- * The A4 engine enforces the rolling-hour budget; an over-budget anomaly
- * trigger is dropped SILENTLY (logged, no error to anyone) — unlike a manual
- * escalate, which returns a denial to its caller.
+ * Budget: a firing baseline/lock rule uses PGWT_ESC_REASON_ANOMALY; a firing
+ * CPU rule uses the distinct PGWT_ESC_REASON_CPU_SATURATION. Both call the
+ * same pgwt_escalate path. The A4 engine enforces the rolling-hour budget; an
+ * over-budget trigger is dropped SILENTLY (logged, no error to anyone) —
+ * unlike a manual escalate, which returns a denial to its caller.
  *
  * Observability: every NEAR-trigger (a metric crossed its threshold but the
  * sustained count was not yet met, or the fire was blocked by cooldown or
@@ -68,6 +76,22 @@ enum pgwt_anomaly_rule {
     PGWT_RULE_NONE = 0,
     PGWT_RULE_AAS  = 1 << 0,
     PGWT_RULE_LOCK = 1 << 1,
+    PGWT_RULE_CPU_SATURATION = 1 << 2,
+};
+
+/* Complete input for one pure rule evaluation. CPU evidence is deliberately
+ * explicit so tests can exercise coverage/capacity/window gates without a
+ * daemon. cpu_capacity <= 0 means UNKNOWN. cpu_guard_blocked is true while a
+ * full-fidelity escalation window is already active; the core additionally
+ * derives cooldown blocking from last_fire_ns. */
+struct pgwt_anomaly_observation {
+    double aas;
+    double lock_fraction;
+    double cpu_aas;
+    double cpu_capacity;
+    bool   cpu_coverage_ok;
+    bool   cpu_capacity_changed;
+    bool   cpu_guard_blocked;
 };
 
 struct pgwt_anomaly_decision {
@@ -77,6 +101,9 @@ struct pgwt_anomaly_decision {
     double   aas;           /* metrics evaluated this tick (for logging) */
     double   baseline;      /* current rolling baseline AAS */
     double   lock_fraction; /* lock-class share of active samples this tick */
+    double   cpu_aas;       /* CPU-class AAS (we==0, excluding io_worker) */
+    double   cpu_capacity;  /* effective cores, or UNKNOWN (<=0) */
+    double   cpu_cusum;     /* CPU CUSUM after this tick */
 };
 
 struct pgwt_anomaly {
@@ -90,6 +117,16 @@ struct pgwt_anomaly {
     int    lock_ticks;        /* consecutive ticks the lock rule must hold */
     uint64_t cooldown_ns;     /* min gap between auto-escalations */
     int    escalation_s;      /* duration requested per auto-escalation */
+
+    /* CPU-demand saturation CUSUM. cpu_cusum_enabled is independently
+     * configurable. The legacy operational disable convention
+     * (aas_factor >= PGWT_ANOMALY_DISABLE_AAS_FACTOR) also disables it. */
+    bool   cpu_cusum_enabled;
+    double cpu_cusum_k;       /* utilization slack/reference point */
+    double cpu_cusum_h;       /* evidence threshold in nominal seconds */
+    double cpu_cusum_cap;     /* cap applied to cpu_aas / capacity */
+    double sample_period_s;   /* NOMINAL 1/sample_rate_hz, never wall gap */
+    double cpu_cusum;         /* O(1) accumulated saturation evidence */
 
     /* ESC-7 baseline slow learn-through: after the AAS metric has been
      * continuously over the multiplicative threshold for learn_through_ticks,
@@ -123,6 +160,7 @@ struct pgwt_anomaly {
 
     /* Lifetime stats (control-socket metrics). */
     uint64_t fires_total;       /* auto-escalations actually requested */
+    uint64_t cpu_saturation_fires_total; /* CPU-rule FIRE decisions */
     uint64_t near_total;        /* near-triggers logged */
     uint64_t dropped_budget;    /* fires the budget silently dropped */
     uint64_t dropped_cooldown;  /* fires the cooldown suppressed */
@@ -136,6 +174,12 @@ struct pgwt_anomaly {
 #define PGWT_ANOMALY_DEF_LOCK_TICKS   3
 #define PGWT_ANOMALY_DEF_COOLDOWN_S   120
 #define PGWT_ANOMALY_DEF_ESCALATE_S   60
+#define PGWT_ANOMALY_DEF_CPU_CUSUM_K   0.80
+#define PGWT_ANOMALY_DEF_CPU_CUSUM_H   1.50
+#define PGWT_ANOMALY_DEF_CPU_CUSUM_CAP 1.25
+/* Existing smoke/operational contract: this sentinel disables automatic AAS
+ * anomaly behavior. Stage 3 also disables the CPU guard at this value. */
+#define PGWT_ANOMALY_DISABLE_AAS_FACTOR 1000000.0
 /* ESC-7 baseline slow learn-through (see struct comment). */
 #define PGWT_ANOMALY_DEF_LEARN_THROUGH_MIN 15  /* minutes continuously-over before learn-through */
 #define PGWT_ANOMALY_DEF_SLOW_RELEASE_DIV  10  /* learn at 1/10 the normal EWMA rate */
@@ -148,9 +192,9 @@ void pgwt_anomaly_init(struct pgwt_anomaly *a, bool enabled,
 
 /* ── Pure rule evaluation (no BPF, no escalation, unit-testable) ────────── */
 
-/* Evaluate the rules for one tick. `aas` is the number of active (non-idle)
- * samples this tick; `lock_fraction` is the Lock-class share of those active
- * samples (0 when there are none). `now_ns` is a monotonic timestamp.
+/* Evaluate the rules for one tick. `obs` carries total AAS, lock share, and
+ * the CPU guard's coverage/capacity inputs. `now_ns` is used only for the
+ * existing cooldown; CPU evidence always advances by sample_period_s.
  *
  * Mutates only *a (baseline EWMA, streak counters, cooldown clock on a FIRE,
  * lifetime stats). Returns the decision. It does NOT call pgwt_escalate — the
@@ -162,16 +206,24 @@ void pgwt_anomaly_init(struct pgwt_anomaly *a, bool enabled,
  * modeled here (the engine owns the budget) — the daemon wrapper observes a
  * silent budget denial and records dropped_budget. */
 struct pgwt_anomaly_decision
+pgwt_anomaly_eval_observation(struct pgwt_anomaly *a,
+                              const struct pgwt_anomaly_observation *obs,
+                              uint64_t now_ns);
+
+/* Compatibility entry point for the original AAS/lock-only core. CPU
+ * capacity is UNKNOWN, so this never advances the CPU guard. */
+struct pgwt_anomaly_decision
 pgwt_anomaly_eval(struct pgwt_anomaly *a, double aas, double lock_fraction,
                   uint64_t now_ns);
 
-/* Derive (aas, lock_fraction) from a tick's encoded sample batch. `samples`
- * is the build_batch output (idle/on-CPU handling already applied by the
- * sampler for on-CPU; idle waits like ClientRead are still present and are
- * excluded here). Pure — exposed for the unit test. */
+/* Derive (aas, lock_fraction, cpu_aas) from a tick's encoded sample batch.
+ * `samples` is the build_batch output (idle/on-CPU handling already applied
+ * by the sampler for on-CPU; idle waits like ClientRead are still present and
+ * are excluded here). Pure — exposed for the unit test. */
 void pgwt_anomaly_metrics_from_batch(const struct pgwt_trace_event *samples,
                                      int n, double *out_aas,
-                                     double *out_lock_fraction);
+                                     double *out_lock_fraction,
+                                     double *out_cpu_aas);
 
 /* ── Daemon-side wrapper (links the rules to the escalation engine) ─────── */
 

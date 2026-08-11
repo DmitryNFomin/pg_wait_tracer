@@ -31,6 +31,7 @@ static const char *reason_name(unsigned r)
     case PGWT_ESC_REASON_EXPIRED:  return "expired";
     case PGWT_ESC_REASON_REQUEST:  return "request";
     case PGWT_ESC_REASON_SHUTDOWN: return "shutdown";
+    case PGWT_ESC_REASON_CPU_SATURATION: return "cpu_saturation";
     default:                       return "unknown";
     }
 }
