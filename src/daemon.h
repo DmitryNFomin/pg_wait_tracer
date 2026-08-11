@@ -268,8 +268,28 @@ struct pgwt_daemon {
     uint64_t    debug_max_timer_expirations;
     uint64_t    debug_last_loop_ts_ns;
     uint64_t    debug_max_loop_gap_ns;
+    uint64_t    debug_event_callbacks_total;
+    uint64_t    debug_event_callback_ns_total;
+    uint64_t    debug_event_callback_max_ns;
+    uint64_t    debug_event_drain_yields;
     int         debug_timer_settime_rc;   /* 0 or saved -errno */
     int         debug_timer_epoll_rc;     /* 0 or saved -errno */
+
+    /* Deterministic event-drain stall reproducer. A nonzero delay is injected
+     * into only the first PGWT_TEST_EVENT_DELAY_COUNT trace callbacks, keeping
+     * the test fault bounded even if a producer never stops. Never enabled in
+     * production; parsed and announced once during daemon init. */
+    uint32_t    test_event_callback_delay_us;
+    uint32_t    test_event_callback_delays_left;
+    bool        test_no_event_drain_budget;
+
+    /* Per-main-loop consume budget. ring_buffer__consume() has no record
+     * limit, so the callback returns a private stop sentinel after this many
+     * fully processed records. Zero means an intentional unbounded drain
+     * (shutdown/finalization). Single-threaded: only the event callback reads
+     * these while consume is active. */
+    uint32_t    event_drain_callback_limit;
+    uint32_t    event_drain_callbacks_current;
 
     /* Placed at end of struct to survive field overflow corruption */
     char       *pg_binary_saved;        /* heap-allocated postgres binary path for USDT */

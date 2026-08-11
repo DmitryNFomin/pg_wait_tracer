@@ -28,6 +28,8 @@
 #include "pg_wait_tracer.skel.h"
 
 #define PGWT_DEBUG_BLOCK_NS (50ULL * 1000ULL * 1000ULL)
+#define PGWT_TEST_EVENT_DELAY_COUNT 1024U
+#define PGWT_EVENT_DRAIN_CALLBACK_BUDGET 64U
 
 uint64_t pgwt_debug_monotonic_ns(void)
 {
@@ -42,6 +44,58 @@ void pgwt_debug_block_report(const char *op, pid_t pid, uint64_t started_ns)
     if (ended_ns >= started_ns && ended_ns - started_ns > PGWT_DEBUG_BLOCK_NS)
         fprintf(stderr, "STATEDUMP-BLOCK: op=%s pid=%d dur_ms=%.3f\n",
                 op, pid, (double)(ended_ns - started_ns) / 1e6);
+}
+
+/* Attribute a slow event-ring consume to callback work versus libbpf's own
+ * drain loop. ring_buffer__consume() can repeatedly reload producer_pos and
+ * therefore has no finite work bound while a producer keeps refilling the
+ * ring. The callback counters make that case decisive: many individually
+ * short callbacks whose aggregate time fills the whole block are an
+ * unbounded drain, while one slow callback stage is reported by the finer
+ * probes in event_stream.c. */
+static bool consume_event_ring(struct pgwt_daemon *d, const char *op,
+                               bool bounded)
+{
+    uint64_t started_ns = d->debug_dump_state
+                        ? pgwt_debug_monotonic_ns() : 0;
+    uint64_t callbacks_before = d->debug_event_callbacks_total;
+    uint64_t callback_ns_before = d->debug_event_callback_ns_total;
+
+    d->event_drain_callbacks_current = 0;
+    d->event_drain_callback_limit =
+        bounded && !d->test_no_event_drain_budget
+        ? PGWT_EVENT_DRAIN_CALLBACK_BUDGET : 0;
+    int rc = ring_buffer__consume(d->event_rb);
+    bool yielded = d->event_drain_callback_limit != 0
+                && d->event_drain_callbacks_current
+                   >= d->event_drain_callback_limit
+                && rc < 0;
+    d->event_drain_callback_limit = 0;
+    if (yielded && d->debug_dump_state)
+        d->debug_event_drain_yields++;
+
+    if (!d->debug_dump_state)
+        return yielded;
+
+    uint64_t ended_ns = pgwt_debug_monotonic_ns();
+
+    if (ended_ns >= started_ns && ended_ns - started_ns > PGWT_DEBUG_BLOCK_NS) {
+        uint64_t callback_ns = d->debug_event_callback_ns_total
+                             - callback_ns_before;
+        uint64_t total_ns = ended_ns - started_ns;
+        uint64_t outside_ns = callback_ns < total_ns
+                            ? total_ns - callback_ns : 0;
+        fprintf(stderr,
+                "STATEDUMP-BLOCK: op=%s pid=0 dur_ms=%.3f callbacks=%llu "
+                "callback_ms=%.3f outside_callback_ms=%.3f "
+                "max_callback_ms=%.3f rc=%d\n",
+                op, (double)total_ns / 1e6,
+                (unsigned long long)(d->debug_event_callbacks_total
+                                     - callbacks_before),
+                (double)callback_ns / 1e6, (double)outside_ns / 1e6,
+                (double)d->debug_event_callback_max_ns / 1e6, rc);
+    }
+    return yielded;
 }
 
 /* Ring buffer callback for lifecycle events */
@@ -410,8 +464,52 @@ int pgwt_daemon_init(struct pgwt_daemon *d)
     d->debug_max_timer_expirations = 0;
     d->debug_last_loop_ts_ns = 0;
     d->debug_max_loop_gap_ns = 0;
+    d->debug_event_callbacks_total = 0;
+    d->debug_event_callback_ns_total = 0;
+    d->debug_event_callback_max_ns = 0;
+    d->debug_event_drain_yields = 0;
     d->debug_timer_settime_rc = 0;
     d->debug_timer_epoll_rc = 0;
+    d->test_event_callback_delay_us = 0;
+    d->test_event_callback_delays_left = 0;
+    d->test_no_event_drain_budget =
+        getenv("PGWT_TEST_NO_EVENT_DRAIN_BUDGET") != NULL;
+    d->event_drain_callback_limit = 0;
+    d->event_drain_callbacks_current = 0;
+    if (d->test_no_event_drain_budget)
+        fprintf(stderr,
+                "WARN: PGWT_TEST_NO_EVENT_DRAIN_BUDGET — event-ring consume "
+                "is unbounded (deterministic mode-4 negative; TEST ONLY)\n");
+
+    /* TEST HOOK: slow each of a bounded number of trace-event callbacks so a
+     * sustained wait-transition producer deterministically keeps libbpf's
+     * drain-until-empty loop non-empty. This reproduces the mode-4 main-loop
+     * starvation without relying on 2-vCPU scheduler luck. */
+    {
+        const char *delay_env = getenv("PGWT_TEST_EVENT_CALLBACK_DELAY_US");
+        if (delay_env) {
+            char *end = NULL;
+            unsigned long delay_us = strtoul(delay_env, &end, 10);
+            if (end != delay_env && *end == '\0' && delay_us > 0
+                && delay_us <= 100000UL) {
+                d->test_event_callback_delay_us = (uint32_t)delay_us;
+                d->test_event_callback_delays_left =
+                    PGWT_TEST_EVENT_DELAY_COUNT;
+                fprintf(stderr,
+                        "WARN: PGWT_TEST_EVENT_CALLBACK_DELAY_US=%u — delaying "
+                        "the first %u trace callbacks (deterministic "
+                        "event-ring drain stall; TEST ONLY)\n",
+                        d->test_event_callback_delay_us,
+                        PGWT_TEST_EVENT_DELAY_COUNT);
+            } else {
+                fprintf(stderr,
+                        "WARN: ignoring invalid "
+                        "PGWT_TEST_EVENT_CALLBACK_DELAY_US=%s "
+                        "(expected integer 1..100000)\n",
+                        delay_env);
+            }
+        }
+    }
 
     /* Resolve before the control socket becomes reachable, then refresh from
      * the display timer. A failed read is represented as UNKNOWN/-1; startup
@@ -1129,6 +1227,7 @@ int pgwt_daemon_run(struct pgwt_daemon *d)
     struct epoll_event events[8];
     int rb_fd = ring_buffer__epoll_fd(d->rb);
     int event_rb_fd = d->event_rb ? ring_buffer__epoll_fd(d->event_rb) : -1;
+    bool event_ring_backlog = false;
 
     uint64_t deadline = 0;
     if (d->duration > 0) {
@@ -1147,7 +1246,10 @@ int pgwt_daemon_run(struct pgwt_daemon *d)
         d->debug_last_loop_ts_ns = pgwt_debug_monotonic_ns();
 
     while (d->running) {
-        int timeout_ms = poll_ms;
+        /* A budget yield means records remain. Re-enter epoll without sleeping
+         * so ready timer/signal/control fds run before the next event batch;
+         * if none are ready, immediately continue draining the backlog. */
+        int timeout_ms = event_ring_backlog ? 0 : poll_ms;
         if (deadline > 0) {
             struct timespec ts;
             clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -1191,9 +1293,8 @@ int pgwt_daemon_run(struct pgwt_daemon *d)
                 ring_buffer__consume(d->rb);
                 pgwt_debug_block_end(d, "lifecycle_ring_consume", 0, started_ns);
             } else if (events[i].data.fd == event_rb_fd) {
-                started_ns = pgwt_debug_block_begin(d);
-                ring_buffer__consume(d->event_rb);
-                pgwt_debug_block_end(d, "event_ring_consume", 0, started_ns);
+                /* The common bounded drain below handles this readiness. Doing
+                 * it here as well would spend two callback budgets per pass. */
             } else if (events[i].data.fd == d->signal_fd) {
                 started_ns = pgwt_debug_block_begin(d);
                 handle_signal(d);
@@ -1212,9 +1313,8 @@ int pgwt_daemon_run(struct pgwt_daemon *d)
 
         /* Drain event ringbuf on every iteration (poll-based with NO_WAKEUP) */
         if (d->event_rb) {
-            started_ns = pgwt_debug_block_begin(d);
-            ring_buffer__consume(d->event_rb);
-            pgwt_debug_block_end(d, "event_ring_drain", 0, started_ns);
+            event_ring_backlog = consume_event_ring(
+                d, "event_ring_drain", true);
         }
 
         if (d->debug_dump_state) {
@@ -1229,9 +1329,7 @@ int pgwt_daemon_run(struct pgwt_daemon *d)
 
     /* Drain remaining events before cleanup */
     if (d->event_rb) {
-        uint64_t started_ns = pgwt_debug_block_begin(d);
-        ring_buffer__consume(d->event_rb);
-        pgwt_debug_block_end(d, "event_ring_final_drain", 0, started_ns);
+        consume_event_ring(d, "event_ring_final_drain", false);
     }
     uint64_t started_ns = pgwt_debug_block_begin(d);
     ring_buffer__consume(d->rb);
@@ -1287,6 +1385,9 @@ static void pgwt_debug_dump_state_map(struct pgwt_daemon *d)
             "loop_iterations=%llu timer_ticks=%llu completed_ticks=%d "
             "timer_expirations=%llu max_timer_expirations=%llu "
             "max_loop_gap_ms=%.3f last_loop_age_ms=%.3f "
+            "event_callbacks_total=%llu callback_ms_total=%.3f "
+            "max_callback_ms=%.3f event_drain_yields=%llu "
+            "test_delays_left=%u "
             "timer_settime_rc=%d timer_epoll_rc=%d "
             "state_reseeds_total=%llu invalid_wait_reads_total=%llu "
             "wp_attach_failures_total=%llu state_map_full_total=%llu "
@@ -1300,6 +1401,11 @@ static void pgwt_debug_dump_state_map(struct pgwt_daemon *d)
             (unsigned long long)d->debug_max_timer_expirations,
             (double)d->debug_max_loop_gap_ns / 1e6,
             last_loop_age_ms,
+            (unsigned long long)d->debug_event_callbacks_total,
+            (double)d->debug_event_callback_ns_total / 1e6,
+            (double)d->debug_event_callback_max_ns / 1e6,
+            (unsigned long long)d->debug_event_drain_yields,
+            d->test_event_callback_delays_left,
             d->debug_timer_settime_rc,
             d->debug_timer_epoll_rc,
             (unsigned long long)d->counters.state_reseeds_total,
