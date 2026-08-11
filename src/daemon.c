@@ -114,6 +114,12 @@ static void handle_timer(struct pgwt_daemon *d)
         }
     }
 
+    /* AAS-1 Stage 2: refresh target capacity for metrics and the future CPU
+     * guard. This state is deliberately not consumed by anomaly/escalation
+     * in this stage. */
+    d->effective_cores = pgwt_effective_cores_refresh(
+        &d->cpu_capacity_resolver, d->postmaster_pid);
+
     /* Print at the first non-PG-death point in the handler. In particular,
      * this is before recovery/sweep and every live-map read: a TIMER line with
      * no later SCAN line means the handler entered and stalled in that prefix;
@@ -405,6 +411,27 @@ int pgwt_daemon_init(struct pgwt_daemon *d)
     d->debug_max_loop_gap_ns = 0;
     d->debug_timer_settime_rc = 0;
     d->debug_timer_epoll_rc = 0;
+
+    /* Resolve before the control socket becomes reachable, then refresh from
+     * the display timer. A failed read is represented as UNKNOWN/-1; startup
+     * remains safe and never substitutes a guessed small capacity. */
+    struct pgwt_effective_cores_options capacity_options = {
+        .filesystem_root = "/",
+        .override_cores = d->anomaly_cpu_capacity,
+    };
+    pgwt_effective_cores_resolver_init(&d->cpu_capacity_resolver,
+                                       &capacity_options);
+    d->effective_cores = pgwt_effective_cores_refresh(
+        &d->cpu_capacity_resolver, d->postmaster_pid);
+    if (d->verbose) {
+        if (d->effective_cores.source == PGWT_EFFECTIVE_CORES_SOURCE_UNKNOWN)
+            fprintf(stderr, "WARN: target effective CPU capacity unknown\n");
+        else
+            fprintf(stderr, "INFO: target effective CPU capacity: %.6g "
+                    "logical cores (source=%s)\n", d->effective_cores.cores,
+                    pgwt_effective_cores_source_name(
+                        d->effective_cores.source));
+    }
 
     /* CAP-12: enough fds for a full-size backend registry, before anything
      * starts opening watchpoints. */
