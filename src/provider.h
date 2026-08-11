@@ -47,6 +47,10 @@ struct pgwt_metrics {
     uint64_t samples_total;       /* SAMPLES records written (sampled tier) */
     double   samples_per_sec;     /* recent sample rate */
     uint64_t sample_read_faults;  /* process_vm_readv partial/EFAULT fallbacks */
+    uint64_t sample_read_failures_total; /* targets with no successful read */
+    uint32_t sample_read_targets; /* targets attempted on the latest tick */
+    uint32_t sample_read_valid;   /* successful target reads on latest tick */
+    uint32_t sample_read_invalid; /* failed target reads on latest tick */
     uint64_t ringbuf_drops_total; /* event_ringbuf drops (full tier, BPF-side) */
 };
 

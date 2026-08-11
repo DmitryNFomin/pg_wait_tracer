@@ -19,6 +19,7 @@
  */
 #define _GNU_SOURCE
 #include "sampler.h"
+#include "anomaly.h"
 #include "pg_wait_tracer.h"
 
 #include <stdio.h>
@@ -59,13 +60,16 @@ static void test_self_read(void)
     };
 
     uint32_t vals[3] = { 0xdead, 0xdead, 0xdead };
+    uint8_t valid[3] = { 0, 0, 0 };
     uint64_t faults = 0;
-    int got = pgwt_sampler_read_targets(targets, 3, vals, &faults);
+    int got = pgwt_sampler_read_targets(targets, 3, vals, valid, &faults);
 
     CHECK(got == 3, "expected 3 reads, got %d", got);
     CHECK(vals[0] == v0, "vals[0]=0x%x expected 0x%x", vals[0], v0);
     CHECK(vals[1] == 0,  "vals[1]=0x%x expected 0", vals[1]);
     CHECK(vals[2] == v2, "vals[2]=0x%x expected 0x%x", vals[2], v2);
+    CHECK(valid[0] && valid[1] && valid[2],
+          "all three successful reads are marked valid");
     CHECK(faults == 0, "expected no fallback faults, got %llu",
           (unsigned long long)faults);
 }
@@ -91,12 +95,14 @@ static void test_build_batch(void)
         0,                       /* on CPU, no command — skipped + counted */
         WEI(PG_WAIT_LWLOCK, 0x07),
     };
+    uint8_t valid[3] = { 1, 1, 1 };
 
     struct pgwt_trace_event out[3];
     memset(out, 0xAA, sizeof(out));
     uint64_t ts = 0x123456789ABCULL;
     uint64_t noncmd = 0;
-    int n = pgwt_sampler_build_batch(targets, vals, 3, ts, out, NULL, &noncmd);
+    int n = pgwt_sampler_build_batch(targets, vals, valid, 3, ts, out,
+                                     NULL, &noncmd);
 
     CHECK(n == 2, "expected 2 records (1 non-command on-CPU skipped), got %d", n);
     CHECK(noncmd == 1, "expected 1 non-command CPU skip counted, got %llu",
@@ -143,10 +149,12 @@ static void test_build_batch_cpu_policy(void)
         { .pid = 6, .backend_type = PGWT_BT_PARALLEL_WORKER },
     };
     uint32_t vals[6] = { 0, 0, 0, 0, 0, 0 };
+    uint8_t valid[6] = { 1, 1, 1, 1, 1, 1 };
 
     struct pgwt_trace_event out[6];
     uint64_t noncmd = 0;
-    int n = pgwt_sampler_build_batch(targets, vals, 6, 7, out, NULL, &noncmd);
+    int n = pgwt_sampler_build_batch(targets, vals, valid, 6, 7, out,
+                                     NULL, &noncmd);
 
     CHECK(n == 5, "expected 5 CPU records (1 gated out), got %d", n);
     CHECK(noncmd == 1, "expected 1 gated skip, got %llu",
@@ -171,7 +179,8 @@ static void test_build_batch_cpu_policy(void)
     uint32_t wvals[6] = { WEI(PG_WAIT_IO, 1), WEI(PG_WAIT_IO, 1),
                           WEI(PG_WAIT_IO, 1), WEI(PG_WAIT_IO, 1),
                           WEI(PG_WAIT_IO, 1), WEI(PG_WAIT_IO, 1) };
-    n = pgwt_sampler_build_batch(targets, wvals, 6, 8, out, NULL, NULL);
+    n = pgwt_sampler_build_batch(targets, wvals, valid, 6, 8, out,
+                                 NULL, NULL);
     CHECK(n == 6, "all wait readings recorded, got %d", n);
     CHECK(out[4].flags == PGWT_EVENT_FLAG_IO_WORKER,
           "io_worker WAIT sample flagged IO_WORKER");
@@ -182,10 +191,13 @@ static void test_build_batch_cpu_policy(void)
     struct pgwt_sample_target unk = { .pid = 9,
                                       .backend_type = PGWT_BT_UNKNOWN };
     uint32_t zero = 0;
-    n = pgwt_sampler_build_batch(&unk, &zero, 1, 9, out, NULL, NULL);
+    uint8_t valid_one = 1;
+    n = pgwt_sampler_build_batch(&unk, &zero, &valid_one, 1, 9, out,
+                                 NULL, NULL);
     CHECK(n == 0, "UNKNOWN type we==0 is gated (command closed)");
     unk.cmd_open = 1;
-    n = pgwt_sampler_build_batch(&unk, &zero, 1, 9, out, NULL, NULL);
+    n = pgwt_sampler_build_batch(&unk, &zero, &valid_one, 1, 9, out,
+                                 NULL, NULL);
     CHECK(n == 1, "UNKNOWN type we==0 records when command open");
 }
 
@@ -205,10 +217,12 @@ static void test_build_batch_garbage(void)
         0xDEADBEEFu,              /* garbage class 0xDE — dropped + counted */
         0x7F000001u,              /* garbage class 0x7F — dropped + counted */
     };
+    uint8_t valid[3] = { 1, 1, 1 };
 
     struct pgwt_trace_event out[3];
     uint64_t invalid = 0;
-    int n = pgwt_sampler_build_batch(targets, vals, 3, 1, out, &invalid, NULL);
+    int n = pgwt_sampler_build_batch(targets, vals, valid, 3, 1, out,
+                                     &invalid, NULL);
 
     CHECK(n == 1, "expected 1 record (2 garbage dropped), got %d", n);
     CHECK(out[0].pid == 2001, "the valid record survived");
@@ -216,7 +230,7 @@ static void test_build_batch_garbage(void)
           (unsigned long long)invalid);
 
     /* NULL counter must not crash and must still drop garbage. */
-    n = pgwt_sampler_build_batch(targets, vals, 3, 1, out, NULL, NULL);
+    n = pgwt_sampler_build_batch(targets, vals, valid, 3, 1, out, NULL, NULL);
     CHECK(n == 1, "NULL invalid counter: still 1 record, got %d", n);
 }
 
@@ -243,14 +257,95 @@ static void test_fallback(void)
     };
 
     uint32_t vals[2] = { 0xdead, 0xdead };
+    uint8_t valid[2] = { 1, 1 };
     uint64_t faults = 0;
-    int got = pgwt_sampler_read_targets(targets, 2, vals, &faults);
+    int got = pgwt_sampler_read_targets(targets, 2, vals, valid, &faults);
 
     /* The good entry must be recovered via pread even though entry 0 faulted. */
     CHECK(vals[1] == good, "fallback vals[1]=0x%x expected 0x%x", vals[1], good);
+    CHECK(valid[0] == 0, "faulting entry is marked invalid");
+    CHECK(valid[1] == 1, "recovered entry is marked valid");
     CHECK(got >= 1, "expected at least the good entry recovered, got %d", got);
     CHECK(faults >= 1, "expected >=1 fallback fault recorded, got %llu",
           (unsigned long long)faults);
+}
+
+/* ── AAS-1 Stage 1: read validity, coverage, and classification ───────── */
+
+static void test_read_validity_excludes_failures(void)
+{
+    printf("--- AAS-1: failed reads cannot fabricate CPU samples ---\n");
+
+    volatile uint32_t cpu = 0;
+    volatile uint32_t wait = WEI(PG_WAIT_IO, 0x33);
+    void *bad = mmap(NULL, 4096, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS,
+                     -1, 0);
+    CHECK(bad != MAP_FAILED, "mmap PROT_NONE failed");
+    if (bad == MAP_FAILED)
+        return;
+    munmap(bad, 4096);
+
+    struct pgwt_sample_target targets[4] = {
+        /* Failed shared-batch read. If its invalid zero reaches build_batch,
+         * this command-open client is incorrectly fabricated as CPU. */
+        { .pid = getpid(), .wait_event_addr = (uint64_t)(uintptr_t)bad,
+          .query_id = 10, .is_shared = 1, .backend_type = PGWT_BT_CLIENT,
+          .cmd_open = 1 },
+        /* A real successful zero must remain a CPU sample. */
+        { .pid = getpid(), .wait_event_addr = (uint64_t)(uintptr_t)&cpu,
+          .query_id = 20, .is_shared = 1, .backend_type = PGWT_BT_CLIENT,
+          .cmd_open = 1 },
+        /* A successful wait must retain its normal classification. */
+        { .pid = getpid(), .wait_event_addr = (uint64_t)(uintptr_t)&wait,
+          .query_id = 30, .is_shared = 1, .backend_type = PGWT_BT_CLIENT },
+        /* No address on the per-pid path is independently invalid. */
+        { .pid = getpid(), .wait_event_addr = 0, .query_id = 40,
+          .is_shared = 0, .backend_type = PGWT_BT_CLIENT, .cmd_open = 1 },
+    };
+    uint32_t vals[4] = { 0xdead, 0xdead, 0xdead, 0xdead };
+    uint8_t valid[4] = { 1, 1, 1, 1 };
+    uint64_t faults = 0;
+
+    int got = pgwt_sampler_read_targets(targets, 4, vals, valid, &faults);
+    CHECK(got == 2, "mixed read got %d valid targets, expected 2", got);
+    CHECK(valid[0] == 0 && valid[1] == 1 && valid[2] == 1
+              && valid[3] == 0,
+          "validity bitmap distinguishes failures from successful zero/wait");
+    CHECK(vals[0] == 0 && vals[1] == 0 && vals[2] == wait && vals[3] == 0,
+          "failed reads stay zero but are distinguishable by validity");
+
+    struct pgwt_sampler sampler;
+    memset(&sampler, 0, sizeof(sampler));
+    pgwt_sampler_note_coverage(&sampler, 4, got);
+    CHECK(sampler.read_targets_last == 4, "coverage targets=4");
+    CHECK(sampler.read_valid_last == 2, "coverage valid=2");
+    CHECK(sampler.read_invalid_last == 2, "coverage invalid=2");
+    CHECK(sampler.read_failures_total == 2,
+          "cumulative read failures=2 after one mixed tick");
+
+    struct pgwt_trace_event out[4];
+    memset(out, 0xAA, sizeof(out));
+    int n = pgwt_sampler_build_batch(targets, vals, valid, 4, 99, out,
+                                     NULL, NULL);
+    CHECK(n == 2, "only 2 valid targets classified, got %d", n);
+    CHECK(out[0].pid == (uint32_t)getpid() && out[0].new_event == 0
+              && out[0].query_id == 20,
+          "successful zero remains a command-open CPU sample");
+    CHECK(out[1].pid == (uint32_t)getpid() && out[1].new_event == wait
+              && out[1].query_id == 30,
+          "successful wait remains classified and attributed");
+
+    int cpu_samples = 0;
+    for (int i = 0; i < n; i++)
+        if (out[i].new_event == 0)
+            cpu_samples++;
+    CHECK(cpu_samples == 1,
+          "exactly one CPU sample: failed reads add no CPU-class demand");
+
+    double aas = -1.0, lock_fraction = -1.0;
+    pgwt_anomaly_metrics_from_batch(out, n, &aas, &lock_fraction);
+    CHECK(aas == 2.0,
+          "AAS includes only valid CPU+wait targets (%.1f expected 2.0)", aas);
 }
 
 /* ── Test 4: child process read (cross-pid, shared mapping) ───────────── */
@@ -294,10 +389,12 @@ static void test_child_read(void)
         { .pid = child, .wait_event_addr = child_addr, .query_id = 7, .is_shared = 1 },
     };
     uint32_t vals[1] = { 0xdead };
+    uint8_t valid[1] = { 0 };
     uint64_t faults = 0;
-    int got = pgwt_sampler_read_targets(targets, 1, vals, &faults);
+    int got = pgwt_sampler_read_targets(targets, 1, vals, valid, &faults);
 
     CHECK(got == 1, "expected to read child value, got %d", got);
+    CHECK(valid[0] == 1, "successful child read marked valid");
     CHECK(vals[0] == WEI(PG_WAIT_IPC, 0x42),
           "child vals[0]=0x%x expected 0x%x", vals[0], WEI(PG_WAIT_IPC, 0x42));
 
@@ -358,9 +455,12 @@ static void test_local_addr_not_batched(void)
           .wait_event_addr = (uint64_t)(uintptr_t)&smp2_local_slot },
     };
     uint32_t vals[2] = { 0xdead, 0xdead };
-    int got = pgwt_sampler_read_targets(targets, 2, vals, NULL);
+    uint8_t valid[2] = { 0, 0 };
+    int got = pgwt_sampler_read_targets(targets, 2, vals, valid, NULL);
 
     CHECK(got == 2, "expected both targets read, got %d", got);
+    CHECK(valid[0] == 1 && valid[1] == 1,
+          "both shared and per-pid reads marked valid");
     CHECK(vals[0] == parent_val, "parent slot = 0x%x expected 0x%x",
           vals[0], parent_val);
     CHECK(vals[1] == child_val,
@@ -488,6 +588,7 @@ int main(void)
     test_build_batch_garbage();
     test_build_batch_cpu_policy();
     test_fallback();
+    test_read_validity_excludes_failures();
     test_child_read();
     test_local_addr_not_batched();
     test_health();

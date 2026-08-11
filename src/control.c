@@ -153,6 +153,10 @@ static cJSON *build_status(const struct pgwt_daemon *d)
 static cJSON *build_metrics(const struct pgwt_daemon *d)
 {
     const struct pgwt_counters *ctr = &d->counters;
+    struct pgwt_metrics pm;
+    memset(&pm, 0, sizeof(pm));
+    if (d->provider && d->provider->self_metrics)
+        d->provider->self_metrics((struct pgwt_daemon *)d, &pm);
 
     cJSON *root = cJSON_CreateObject();
     cJSON_AddBoolToObject(root, "ok", 1);
@@ -176,6 +180,19 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
     cJSON_AddNumberToObject(root, "samples_per_sec", ctr->samples_per_sec);
     cjson_add_uint64(root, "sample_read_faults_total",
                      ctr->sample_read_faults_total);
+    cjson_add_uint64(root, "sample_read_failures_total",
+                     pm.sample_read_failures_total);
+    cJSON_AddNumberToObject(root, "sample_read_targets",
+                            pm.sample_read_targets);
+    cJSON_AddNumberToObject(root, "sample_read_valid",
+                            pm.sample_read_valid);
+    cJSON_AddNumberToObject(root, "sample_read_invalid",
+                            pm.sample_read_invalid);
+    cJSON_AddNumberToObject(root, "sample_read_coverage_pct",
+                            pm.sample_read_targets > 0
+                                ? 100.0 * (double)pm.sample_read_valid
+                                  / (double)pm.sample_read_targets
+                                : 0.0);
     cjson_add_uint64(root, "sampler_ticks_missed_total",
                      ctr->sampler_ticks_missed_total);
 
@@ -230,10 +247,6 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
 
     /* Provider self-metrics. ringbuf_drops_total is the full tier's BPF-side
      * event_ringbuf drop count (A2 wired this; A0 deliberately omitted it). */
-    struct pgwt_metrics pm;
-    memset(&pm, 0, sizeof(pm));
-    if (d->provider && d->provider->self_metrics)
-        d->provider->self_metrics((struct pgwt_daemon *)d, &pm);
     cjson_add_uint64(root, "ringbuf_drops_total", pm.ringbuf_drops_total);
 
     /* Trace writer stats (0 when recording is disabled) */
