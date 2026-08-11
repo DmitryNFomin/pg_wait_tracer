@@ -91,7 +91,7 @@ struct pgwt_anomaly_observation {
     double cpu_aas;
     double cpu_capacity;
     bool   cpu_capacity_affinity_only;
-    bool   cpu_coverage_ok;
+    bool   cpu_coverage_ok; /* all sampler target reads succeeded this tick */
     bool   cpu_capacity_changed;
     bool   cpu_guard_blocked;
 };
@@ -134,7 +134,7 @@ struct pgwt_anomaly {
     bool   cpu_armed;         /* one fire until trusted below-k recovery */
     double cpu_coverage_gap_reset_s; /* configured blind-gap duration */
     int    cpu_coverage_gap_reset_ticks; /* duration rounded up to ticks */
-    int    cpu_coverage_gap_ticks; /* consecutive LOW/UNKNOWN ticks */
+    int    cpu_coverage_gap_ticks; /* consecutive blind LOW/UNKNOWN ticks */
 
     /* ESC-7 baseline slow learn-through: after the AAS metric has been
      * continuously over the multiplicative threshold for learn_through_ticks,
@@ -187,10 +187,12 @@ struct pgwt_anomaly {
 #define PGWT_ANOMALY_DEF_CPU_CUSUM_K   0.80
 #define PGWT_ANOMALY_DEF_CPU_CUSUM_H   1.50
 #define PGWT_ANOMALY_DEF_CPU_CUSUM_CAP 1.25
-/* Brief LOW-coverage or UNKNOWN-capacity flaps hold CPU evidence. Two seconds
- * is comfortably beyond sub-second coverage flapping, but still discards
- * evidence across a genuinely blind interval. The reset tick count is derived
- * from this duration and the actual sample rate, never a fixed 10 Hz value. */
+/* Brief blind under-reference or UNKNOWN-capacity flaps hold CPU evidence.
+ * Two seconds is comfortably beyond sub-second coverage flapping, but still
+ * discards evidence across a genuinely blind interval. Incomplete ticks with
+ * an observed saturation lower bound are informative, not gaps. The reset
+ * tick count is derived from this duration and the actual sample rate, never a
+ * fixed 10 Hz value. */
 #define PGWT_ANOMALY_DEF_CPU_COVERAGE_GAP_S 2.0
 /* Existing smoke/operational contract: this sentinel disables automatic AAS
  * anomaly behavior. Stage 3 also disables the CPU guard at this value. */
@@ -205,9 +207,9 @@ struct pgwt_anomaly {
 void pgwt_anomaly_init(struct pgwt_anomaly *a, bool enabled,
                        int sample_rate_hz);
 
-/* Configure how long LOW coverage or UNKNOWN CPU capacity may hold evidence.
- * The duration is rounded up to nominal sample ticks so the reset never occurs
- * before cpu_coverage_gap_s has elapsed. */
+/* Configure how long blind incomplete coverage or UNKNOWN CPU capacity may
+ * hold evidence. The duration is rounded up to nominal sample ticks so the
+ * reset never occurs before cpu_coverage_gap_s has elapsed. */
 void pgwt_anomaly_set_cpu_coverage_gap_s(struct pgwt_anomaly *a,
                                          double cpu_coverage_gap_s);
 

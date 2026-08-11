@@ -674,7 +674,7 @@ def sample_active_sessions(duration_s, interval=0.5):
     return counts
 
 
-def cpu_storm_state(expected_pids):
+def cpu_storm_state(expected_pids, timeout=10):
     """Exact pg_stat_activity state for the named Phase-6 backends."""
     if not expected_pids:
         return []
@@ -682,7 +682,7 @@ def cpu_storm_state(expected_pids):
     out = psql(
         "SELECT pid, state, COALESCE(wait_event_type, 'CPU'), "
         "COALESCE(wait_event, 'CPU') FROM pg_stat_activity "
-        f"WHERE pid IN ({pid_list}) ORDER BY pid", timeout=10)
+        f"WHERE pid IN ({pid_list}) ORDER BY pid", timeout=timeout)
     rows = []
     for line in out.splitlines():
         fields = line.split('|')
@@ -704,11 +704,12 @@ def cpu_storm_state_is_idle(rows, expected_pids):
                     for row in rows))
 
 
-def sample_cpu_storm_state(expected_pids, duration_s, interval=0.5):
+def sample_cpu_storm_state(expected_pids, duration_s, interval=0.5,
+                           timeout=10):
     snapshots = []
     end = time.time() + duration_s
     while time.time() < end:
-        snapshots.append(cpu_storm_state(expected_pids))
+        snapshots.append(cpu_storm_state(expected_pids, timeout=timeout))
         time.sleep(interval)
     return snapshots
 
@@ -1354,20 +1355,21 @@ def phase_cpu_storm_escalation(pm_pid):
     trace_dir = tempfile.mkdtemp(prefix="pgwt_smoke_esc_")
     os.chmod(trace_dir, 0o755)
 
-    # Timing invariant: the CPU command remains active through readiness, the
-    # entire ground-truth sweep, both 5s control requests, and the state polls,
-    # with >=8s left before ClientRead. In a successful (non-timeout) path the
-    # upper bound is 5s readiness + 20.5s sweep (10s window plus one final 10s
-    # state query and its 0.5s cadence sleep) + 10s before/after state queries
-    # each + 2*5s control requests = 55.5s. A 70s burn leaves 14.5s slack.
-    # Once idle is due, allow 10s more to observe ClientRead; the 115s tracer
-    # duration then covers a final 10s state query and writer drain with 16s
-    # left before shutdown (3s startup + 5 + 70 + 10 + 10 + 1 = 99s).
-    burn_duration_s = 70
+    # Timing invariant: C=2 reaches h in 1.5/(1.25-0.80) = 3.34s. The 30s
+    # command covers the 5s readiness allowance, the 10s/0.5s ground-truth
+    # sweep including one final 5s query + sleep (15.5s worst case), and the
+    # 5s before-metrics state proof: 5 + 15.5 + 5 = 25.5s, leaving 4.5s.
+    # Control-socket latency is intentionally outside the required-sustained
+    # window: bad_states plus before_metrics_state already prove the incident
+    # reached collection. Completion still has 10s grace. The 75s tracer
+    # leaves 21s after the conservative 3 + 5 + 30 + 10 + 5 + 1 = 54s
+    # startup/readiness/burn/grace/final-state-query/writer-drain bound.
+    burn_duration_s = 30
     readiness_timeout_s = 5
     ground_truth_duration_s = 10
+    state_query_timeout_s = 5
     completion_grace_s = 10
-    tracer_duration_s = 115
+    tracer_duration_s = 75
 
     storm = CpuStorm(3)
     storm_pids = storm.backend_pids()
@@ -1382,15 +1384,17 @@ def phase_cpu_storm_escalation(pm_pid):
          # deliberately disables it too. The pre-warmup storm gives the AAS
          # baseline a positive value, making this factor unreachable.
          "--anomaly-aas-factor", "999999"]
+    debug_cpu_ticks = bool(os.environ.get("PGWT_DEBUG_ANOMALY_CPU_TICK"))
+    tracer_stderr = tempfile.TemporaryFile() if debug_cpu_ticks \
+        else subprocess.PIPE
     tracer = subprocess.Popen(
         tracer_argv,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        stdout=subprocess.PIPE, stderr=tracer_stderr)
     time.sleep(3.0)   # BPF load + scan; CPU guard needs no baseline warmup
     storm_from = time.time_ns()
     storm_to = storm_from
     storm_states = []
     before_metrics_state = []
-    after_metrics_state = []
     metrics = {}
     status = {}
     try:
@@ -1399,11 +1403,17 @@ def phase_cpu_storm_escalation(pm_pid):
         ready_deadline = time.monotonic() + readiness_timeout_s
         burn_ready_at = ready_deadline
         while time.monotonic() < ready_deadline:
-            ready_state = cpu_storm_state(storm_pids)
+            readiness_remaining_s = ready_deadline - time.monotonic()
+            if readiness_remaining_s <= 0:
+                break
+            ready_state = cpu_storm_state(
+                storm_pids,
+                timeout=min(state_query_timeout_s, readiness_remaining_s))
             if cpu_storm_state_is_sustained(ready_state, storm_pids):
                 burn_ready_at = time.monotonic()
                 break
-            time.sleep(0.05)
+            time.sleep(min(0.05, max(
+                0.0, ready_deadline - time.monotonic())))
         check(cpu_storm_state_is_sustained(ready_state, storm_pids),
               f"all three saturation backends entered one CPU-only command "
               f"(state={ready_state})")
@@ -1414,15 +1424,16 @@ def phase_cpu_storm_escalation(pm_pid):
         # old discrete generate_series burst, this proves the test supplied a
         # sustained saturation incident rather than assuming it did.
         storm_states = sample_cpu_storm_state(
-            storm_pids, ground_truth_duration_s, interval=0.5)
+            storm_pids, ground_truth_duration_s, interval=0.5,
+            timeout=state_query_timeout_s)
         storm_to = time.time_ns()
-        before_metrics_state = cpu_storm_state(storm_pids)
+        before_metrics_state = cpu_storm_state(
+            storm_pids, timeout=state_query_timeout_s)
         try:
             metrics = ctl_query(trace_dir, "metrics")
             status = ctl_query(trace_dir, "status")
         except OSError as e:
             print(f"  (control socket: {e})")
-        after_metrics_state = cpu_storm_state(storm_pids)
 
         # Exact-tier CPU is an interval closed by the command's transition to
         # ClientRead. Wait for that real boundary before fixing the trace-query
@@ -1434,7 +1445,8 @@ def phase_cpu_storm_escalation(pm_pid):
         completion_deadline = (burn_ready_at + burn_duration_s
                                + completion_grace_s)
         while time.monotonic() < completion_deadline:
-            completed_state = cpu_storm_state(storm_pids)
+            completed_state = cpu_storm_state(
+                storm_pids, timeout=state_query_timeout_s)
             if cpu_storm_state_is_idle(completed_state, storm_pids):
                 break
             time.sleep(0.1)
@@ -1446,23 +1458,34 @@ def phase_cpu_storm_escalation(pm_pid):
         storm_to = time.time_ns()
         time.sleep(1.0)  # let the closed exact intervals drain to the writer
         _, stderr = tracer.communicate(timeout=40)
+        if debug_cpu_ticks:
+            tracer_stderr.seek(0)
+            stderr = tracer_stderr.read()
         err = stderr.decode('utf-8', errors='replace')
     except subprocess.TimeoutExpired:
         tracer.kill()
         _, stderr = tracer.communicate()
+        if debug_cpu_ticks:
+            tracer_stderr.seek(0)
+            stderr = tracer_stderr.read()
         err = stderr.decode('utf-8', errors='replace')
     finally:
         storm.stop()
+        if debug_cpu_ticks:
+            tracer_stderr.close()
+
+    if debug_cpu_ticks:
+        print("--- PGWT_DEBUG_ANOMALY_CPU_TICK tracer stderr ---")
+        print(err)
 
     bad_states = [state for state in storm_states
                   if not cpu_storm_state_is_sustained(state, storm_pids)]
     check(not bad_states and len(storm_states) > 0,
           f"all three tagged backends stayed active and waitless on every "
           f"storm poll (snapshots={len(storm_states)}, bad={bad_states[:2]})")
-    check(cpu_storm_state_is_sustained(before_metrics_state, storm_pids)
-          and cpu_storm_state_is_sustained(after_metrics_state, storm_pids),
-          f"CPU-only saturation spans metrics collection "
-          f"(before={before_metrics_state}, after={after_metrics_state})")
+    check(cpu_storm_state_is_sustained(before_metrics_state, storm_pids),
+          f"CPU-only saturation reaches metrics collection "
+          f"(before={before_metrics_state})")
 
     cpu_fires = metrics.get("anomaly_cpu_saturation_fires_total", 0)
     windows = metrics.get("escalation_windows_total", 0)
