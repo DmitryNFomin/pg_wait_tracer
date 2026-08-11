@@ -44,6 +44,7 @@ import argparse
 import json
 import os
 import re
+import secrets
 import subprocess
 import sys
 import tempfile
@@ -593,7 +594,11 @@ class CpuStorm:
     """
 
     def __init__(self, n):
-        self.application_prefix = f"pgwt_cpu_storm_{os.getpid()}_"
+        # The process PID is shared by Phase 5 and Phase 6. Add a per-instance
+        # nonce so even overlapping cleanup cannot make one phase discover the
+        # other's sessions.
+        self.application_prefix = (
+            f"pgwt_cpu_storm_{os.getpid()}_{secrets.token_hex(8)}_")
         self.application_names = [f"{self.application_prefix}{i}"
                                   for i in range(n)]
         self.sessions = [subprocess.Popen(
@@ -605,9 +610,12 @@ class CpuStorm:
         time.sleep(1.5)   # connected (and, pre-attach, scanned)
 
     def backend_pids(self):
+        quoted_names = [name.replace("'", "''")
+                        for name in self.application_names]
+        application_names = ",".join(f"'{name}'" for name in quoted_names)
         rows = psql(
             "SELECT pid FROM pg_stat_activity "
-            f"WHERE application_name LIKE '{self.application_prefix}%' "
+            f"WHERE application_name IN ({application_names}) "
             "ORDER BY application_name")
         return [int(row) for row in rows.splitlines()
                 if re.fullmatch(r'\d+', row)]
@@ -1346,13 +1354,28 @@ def phase_cpu_storm_escalation(pm_pid):
     trace_dir = tempfile.mkdtemp(prefix="pgwt_smoke_esc_")
     os.chmod(trace_dir, 0o755)
 
+    # Timing invariant: the CPU command remains active through readiness, the
+    # entire ground-truth sweep, both 5s control requests, and the state polls,
+    # with >=8s left before ClientRead. In a successful (non-timeout) path the
+    # upper bound is 5s readiness + 20.5s sweep (10s window plus one final 10s
+    # state query and its 0.5s cadence sleep) + 10s before/after state queries
+    # each + 2*5s control requests = 55.5s. A 70s burn leaves 14.5s slack.
+    # Once idle is due, allow 10s more to observe ClientRead; the 115s tracer
+    # duration then covers a final 10s state query and writer drain with 16s
+    # left before shutdown (3s startup + 5 + 70 + 10 + 10 + 1 = 99s).
+    burn_duration_s = 70
+    readiness_timeout_s = 5
+    ground_truth_duration_s = 10
+    completion_grace_s = 10
+    tracer_duration_s = 115
+
     storm = CpuStorm(3)
     storm_pids = storm.backend_pids()
     check(len(storm_pids) == 3,
           f"saturation workload has exactly three tagged backends "
           f"(pids={storm_pids})")
     tracer_argv = [TRACER, "--mode", "tiered", "--pid", str(pm_pid),
-         "-T", trace_dir, "--duration", "22", "--quiet",
+         "-T", trace_dir, "--duration", str(tracer_duration_s), "--quiet",
          "--interval", "5", "--sample-rate", "60",
          "--anomaly-cpu-capacity", "2",
          # Isolate the CPU rule without crossing the >=1e6 legacy switch that
@@ -1371,12 +1394,14 @@ def phase_cpu_storm_escalation(pm_pid):
     metrics = {}
     status = {}
     try:
-        storm.fire_continuous(duration_s=15)
+        storm.fire_continuous(duration_s=burn_duration_s)
         ready_state = []
-        ready_deadline = time.time() + 2.0
-        while time.time() < ready_deadline:
+        ready_deadline = time.monotonic() + readiness_timeout_s
+        burn_ready_at = ready_deadline
+        while time.monotonic() < ready_deadline:
             ready_state = cpu_storm_state(storm_pids)
             if cpu_storm_state_is_sustained(ready_state, storm_pids):
+                burn_ready_at = time.monotonic()
                 break
             time.sleep(0.05)
         check(cpu_storm_state_is_sustained(ready_state, storm_pids),
@@ -1389,7 +1414,7 @@ def phase_cpu_storm_escalation(pm_pid):
         # old discrete generate_series burst, this proves the test supplied a
         # sustained saturation incident rather than assuming it did.
         storm_states = sample_cpu_storm_state(
-            storm_pids, 10.0, interval=0.5)
+            storm_pids, ground_truth_duration_s, interval=0.5)
         storm_to = time.time_ns()
         before_metrics_state = cpu_storm_state(storm_pids)
         try:
@@ -1402,10 +1427,13 @@ def phase_cpu_storm_escalation(pm_pid):
         # Exact-tier CPU is an interval closed by the command's transition to
         # ClientRead. Wait for that real boundary before fixing the trace-query
         # end time; otherwise the one long CPU interval is still open/on-CPU
-        # and cannot yet exist in the persisted trace.
+        # and cannot yet exist in the persisted trace. All commands were active
+        # at burn_ready_at, so they must finish by burn_ready_at + burn duration;
+        # the completion gate gives that latest expected finish another 10s.
         completed_state = []
-        completion_deadline = time.time() + 7.0
-        while time.time() < completion_deadline:
+        completion_deadline = (burn_ready_at + burn_duration_s
+                               + completion_grace_s)
+        while time.monotonic() < completion_deadline:
             completed_state = cpu_storm_state(storm_pids)
             if cpu_storm_state_is_idle(completed_state, storm_pids):
                 break
@@ -1413,8 +1441,10 @@ def phase_cpu_storm_escalation(pm_pid):
         check(cpu_storm_state_is_idle(completed_state, storm_pids),
               f"all three CPU commands closed into ClientRead before the "
               f"trace query (state={completed_state})")
-        time.sleep(1.0)  # let the closed exact intervals drain to the writer
+        # End the AAS window at the observed active->ClientRead boundary. The
+        # following writer-drain delay must not dilute the last of 8 buckets.
         storm_to = time.time_ns()
+        time.sleep(1.0)  # let the closed exact intervals drain to the writer
         _, stderr = tracer.communicate(timeout=40)
         err = stderr.decode('utf-8', errors='replace')
     except subprocess.TimeoutExpired:
@@ -1461,7 +1491,7 @@ def phase_cpu_storm_escalation(pm_pid):
     # sampled buckets read ~0.0 while exact buckets read ~3 — a hard step.
     resp = server_query(trace_dir, "aas",
                         extra={"from": storm_from + 500_000_000,
-                               "to": storm_to - 500_000_000,
+                               "to": storm_to,
                                "buckets": 8})
     buckets = resp.get("buckets", [])
     check(len(buckets) >= 3, f"aas buckets across the tier switch "
