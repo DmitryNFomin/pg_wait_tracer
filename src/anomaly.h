@@ -9,9 +9,12 @@
  * tick's sample batch (no re-reading the trace):
  *
  *   1. AAS-vs-baseline — maintain a rolling baseline of AAS (active sessions,
- *      idle-excluded per pgwt_is_idle_event). Fire when
- *      `aas > k * rolling_baseline` is sustained for N consecutive ticks.
- *      Config: --anomaly-aas-factor k, --anomaly-aas-ticks N.
+ *      idle-excluded per pgwt_is_idle_event). The unchanged primary path fires
+ *      when `aas > k * rolling_baseline` is sustained for N consecutive ticks.
+ *      In parallel, a variance-aware path fires when AAS stays sufficiently
+ *      far above a mature, winsorized baseline for its own longer sustain.
+ *      Config: --anomaly-aas-factor, --anomaly-aas-ticks, and the
+ *      --anomaly-dev-* / --anomaly-mad-* flags.
  *   2. Lock-class fraction — fire when the Lock-class share of the tick's
  *      ACTIVE (non-idle) samples exceeds a threshold, sustained for N ticks.
  *      Config: --anomaly-lock-fraction.
@@ -61,6 +64,7 @@ enum pgwt_anomaly_near {
     PGWT_NEAR_LOCK_SUSTAIN = 1 << 1,/* lock-fraction over, sustain count not met */
     PGWT_NEAR_COOLDOWN    = 1 << 2, /* would fire but in cooldown */
     PGWT_NEAR_BASELINE    = 1 << 3, /* baseline not warm yet (no AAS rule) */
+    PGWT_NEAR_DEV_SUSTAIN = 1 << 4, /* robust deviation over, sustain not met */
 };
 
 /* Which rule(s) triggered the fire (bitmask). Recorded for logs/diagnostics. */
@@ -76,6 +80,7 @@ struct pgwt_anomaly_decision {
     unsigned fired_mask;    /* enum pgwt_anomaly_rule (when action == FIRE) */
     double   aas;           /* metrics evaluated this tick (for logging) */
     double   baseline;      /* current rolling baseline AAS */
+    double   mad;           /* winsorized EWMA mean absolute deviation */
     double   lock_fraction; /* lock-class share of active samples this tick */
 };
 
@@ -85,31 +90,44 @@ struct pgwt_anomaly {
     /* Config (thresholds). Conservative defaults; all overridable. */
     double aas_factor;        /* fire when aas > factor * baseline */
     int    aas_ticks;         /* consecutive ticks the AAS rule must hold */
+    double dev_k;             /* deviation: baseline + K * robust scale; 0=off */
+    double mad_floor_abs;     /* minimum absolute robust scale */
+    double mad_floor_frac;    /* minimum robust scale as fraction of baseline */
+    double dev_aas_floor;     /* minimum meaningful absolute AAS */
+    int    dev_ticks;         /* dedicated deviation sustain */
+    int    dev_maturity_ticks;/* observations before deviation path arms */
     double lock_fraction;     /* fire when lock share > this */
     double lock_min_aas;      /* ESC-4: AND lock-class AAS >= this (min-activity floor) */
     int    lock_ticks;        /* consecutive ticks the lock rule must hold */
     uint64_t cooldown_ns;     /* min gap between auto-escalations */
     int    escalation_s;      /* duration requested per auto-escalation */
 
-    /* ESC-7 baseline slow learn-through: after the AAS metric has been
-     * continuously over the multiplicative threshold for learn_through_ticks,
-     * the baseline resumes EWMA at 1/slow_release_div the normal rate, so a
-     * sustained legitimate regime change is eventually adopted (the rule stops
-     * re-firing forever) while a short incident (streak < learn_through_ticks)
-     * still cannot raise the bar. */
+    /* ESC-7 slow learn-through. With robust deviation independently disabled,
+     * this retains the shipped behavior exactly: a primary anomaly freezes the
+     * baseline until learn_through_ticks, then resumes at 1/slow_release_div.
+     * With robust deviation enabled, the baseline already learns bounded
+     * residuals; reaching this horizon applies the same slow-release divisor
+     * so a continuously high primary regime never learns faster at the gate. */
     int    learn_through_ticks; /* consecutive over-ticks before learn-through */
     int    slow_release_div;    /* EWMA rate divisor while learning through */
 
-    /* Rolling-baseline (EWMA) state for the AAS rule. The baseline tracks the
-     * NORMAL load; it is NOT updated while a metric is anomalous (so a long
-     * incident does not poison the baseline and silence the rule). */
+    /* Rolling robust state for the AAS rule. With the deviation path enabled,
+     * the baseline and MAD learn every tick through a bounded (winsorized)
+     * residual. This absorbs recurring normal structure without allowing one
+     * incident tick to move either estimate arbitrarily. With deviation off,
+     * the legacy normal-only / ESC-7 slow-learn baseline behavior is retained. */
     double  baseline_aas;     /* exponentially-weighted moving average */
+    double  mad_aas;          /* EWMA of winsorized |aas - baseline| */
     double  baseline_alpha;   /* EWMA smoothing factor (per tick) */
     int     baseline_warmup;  /* ticks observed before baseline is trustworthy */
     int     warmup_needed;    /* ticks of normal data required to warm up */
+    int     ticks_observed;   /* enabled evaluations, for deviation maturity */
+    int     mad_warmup;       /* running-mean observations during warmup */
 
     /* Hysteresis: consecutive-over-threshold counters. */
-    int     aas_over_streak;
+    int     aas_over_streak;  /* either primary or deviation path is over */
+    int     primary_over_streak;
+    int     dev_over_streak;
     int     lock_over_streak;
 
     /* Cooldown: monotonic ns of the last auto-escalation (0 = never). */
@@ -129,8 +147,18 @@ struct pgwt_anomaly {
 };
 
 /* Default thresholds (conservative). */
-#define PGWT_ANOMALY_DEF_AAS_FACTOR   3.0
-#define PGWT_ANOMALY_DEF_AAS_TICKS    3
+#define PGWT_ANOMALY_DEF_AAS_FACTOR       3.0
+#define PGWT_ANOMALY_DEF_AAS_TICKS        3
+#define PGWT_ANOMALY_DEF_DEV_K            3.6
+#define PGWT_ANOMALY_DEF_MAD_FLOOR_ABS    0.5
+#define PGWT_ANOMALY_DEF_MAD_FLOOR_FRAC   0.15
+#define PGWT_ANOMALY_DEF_DEV_AAS_FLOOR    2.0
+#define PGWT_ANOMALY_DEF_DEV_TICKS        30
+#define PGWT_ANOMALY_DEF_DEV_MATURITY_S   60
+#define PGWT_ANOMALY_MAD_WINSOR_K         3.0
+/* Historical pure-sampling sentinel used by capture-smoke tests. At or above
+ * this value the WHOLE AAS rule is disabled, including robust deviation. */
+#define PGWT_ANOMALY_AAS_DISABLE_FACTOR   1000000.0
 #define PGWT_ANOMALY_DEF_LOCK_FRAC    0.30
 #define PGWT_ANOMALY_DEF_LOCK_MIN_AAS 2.0   /* ESC-4: min lock-class AAS to fire */
 #define PGWT_ANOMALY_DEF_LOCK_TICKS   3

@@ -181,6 +181,12 @@ struct pgwt_daemon {
      * --anomaly-* overrides apply on top of the rate-derived defaults). */
     double      anomaly_aas_factor;      /* --anomaly-aas-factor (<=0 = default) */
     int         anomaly_aas_ticks;       /* --anomaly-aas-ticks (<=0 = default) */
+    double      anomaly_dev_k;           /* --anomaly-dev-k (<0 = default; 0 = off) */
+    double      anomaly_mad_floor_abs;   /* --anomaly-mad-floor-abs (<0 = default) */
+    double      anomaly_mad_floor_frac;  /* --anomaly-mad-floor-frac (<0 = default) */
+    double      anomaly_dev_aas_floor;   /* --anomaly-dev-aas-floor (<0 = default) */
+    int         anomaly_dev_ticks;       /* --anomaly-dev-ticks (<=0 = default) */
+    int         anomaly_dev_maturity_s;  /* --anomaly-dev-maturity-s (<0 = default) */
     double      anomaly_lock_fraction;   /* --anomaly-lock-fraction (<0 = default) */
     double      anomaly_lock_min_aas;    /* --anomaly-lock-min-aas (<0 = default, ESC-4) */
     int         anomaly_cooldown_s;      /* --anomaly-cooldown-s (<0 = default) */

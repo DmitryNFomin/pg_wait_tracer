@@ -2,7 +2,8 @@
  *
  * Drives the PURE rule core (pgwt_anomaly_eval / pgwt_anomaly_metrics_from_batch)
  * with scripted sample-stream inputs and asserts fire / no-fire across:
- *   - AAS-vs-baseline (factor, sustained N ticks, baseline warmup)
+ *   - AAS-vs-baseline (factor plus robust deviation, dedicated sustains,
+ *     maturity, winsorized baseline/MAD learning)
  *   - lock-class fraction (threshold, sustained N ticks)
  *   - hysteresis / cooldown (a flapping metric cannot re-fire inside cooldown)
  *   - budget-blocked-silent (modeled at the daemon layer — here we assert the
@@ -14,6 +15,8 @@
  */
 #define _GNU_SOURCE
 #include "anomaly.h"
+#include "escalation.h"
+#include "escalation_budget.h"
 #include "pg_wait_tracer.h"
 
 #include <stdio.h>
@@ -79,6 +82,7 @@ static void test_aas_sustained(void)
     struct pgwt_anomaly a;
     pgwt_anomaly_init(&a, true, 10);
     a.aas_factor = 3.0;
+    a.dev_k      = 0.0;  /* isolate the unchanged multiplicative path */
     a.aas_ticks  = 3;
     uint64_t clk = TICK_NS;
 
@@ -115,6 +119,7 @@ static void test_aas_no_fire(void)
     struct pgwt_anomaly a;
     pgwt_anomaly_init(&a, true, 10);
     a.aas_factor = 3.0;
+    a.dev_k      = 0.0;  /* this case predates and isolates robust deviation */
     a.aas_ticks  = 3;
     uint64_t clk = TICK_NS;
     warm_baseline(&a, 4.0, &clk);   /* baseline ~4 */
@@ -208,6 +213,7 @@ static void test_baseline_protected(void)
     struct pgwt_anomaly a;
     pgwt_anomaly_init(&a, true, 10);
     a.aas_factor = 3.0;
+    a.dev_k      = 0.0;  /* pin the legacy ESC-7 baseline contract */
     a.aas_ticks  = 3;
     uint64_t clk = TICK_NS;
     warm_baseline(&a, 2.0, &clk);
@@ -331,6 +337,7 @@ static void test_cpu_storm_fires(void)
     struct pgwt_anomaly b;
     pgwt_anomaly_init(&b, true, 10);
     b.aas_factor = 3.0;
+    b.dev_k      = 0.0;  /* isolate the primary path for the exclusion check */
     b.aas_ticks  = 3;
     clk = TICK_NS;
     warm_baseline(&b, 1.0, &clk);
@@ -417,6 +424,7 @@ static void test_baseline_learn_through(void)
     struct pgwt_anomaly a;
     pgwt_anomaly_init(&a, true, 10);
     a.aas_factor = 3.0;
+    a.dev_k      = 0.0;  /* pin the legacy ESC-7 baseline contract */
     a.aas_ticks  = 3;
     /* Shrink the horizon so the test is fast but still >> the incident. */
     a.learn_through_ticks = 2000;   /* 200 s at 10 Hz */
@@ -433,6 +441,7 @@ static void test_baseline_learn_through(void)
     struct pgwt_anomaly b;
     pgwt_anomaly_init(&b, true, 10);
     b.aas_factor = 3.0;
+    b.dev_k      = 0.0;  /* pin the legacy ESC-7 baseline contract */
     b.aas_ticks  = 3;
     b.learn_through_ticks = 2000;
     b.slow_release_div    = 10;
@@ -478,6 +487,311 @@ static void test_combined_fire(void)
           "combined fired_mask=%u expected both AAS+LOCK", d.fired_mask);
 }
 
+/* ── AAS-1 Option C deterministic scenario suite ─────────────────────── */
+#define SEC_NS       1000000000ULL
+#define SEC_TICKS    10
+#define MIN_TICKS    (60 * SEC_TICKS)
+#define HOUR_NS      (3600ULL * SEC_NS)
+#define ESC_WINDOW_NS (60ULL * SEC_NS)
+#define ESC_BUDGET_NS (300ULL * SEC_NS)
+
+enum aas1_scenario {
+    AAS1_S1_STORM = 0,
+    AAS1_S2_BURSTY,
+    AAS1_S3_OLTP,
+    AAS1_S4_BIG,
+    AAS1_S5_MODERATE,
+    AAS1_S6_POST_WARMUP,
+    AAS1_S7_IDLE_STORM,
+    AAS1_S8_RECURRING,
+};
+
+struct aas1_budget {
+    struct pgwt_escalation e;
+    bool active;
+    uint64_t deadline_ns;
+    int granted;
+    int dropped;
+};
+
+struct aas1_result {
+    int fires;
+    int granted;
+    int dropped;
+    int first_fire_tick;
+    int last_fire_tick;
+    int scored_ticks;
+    double pre_baseline;
+    double final_baseline;
+    double final_mad;
+};
+
+static void aas1_budget_init(struct aas1_budget *b)
+{
+    memset(b, 0, sizeof(*b));
+    b->e.enabled = true;
+    b->e.budget_ns = ESC_BUDGET_NS;
+    b->e.rolling_window_ns = HOUR_NS;
+}
+
+static void aas1_budget_close_due(struct aas1_budget *b, uint64_t now_ns)
+{
+    if (b->active && now_ns >= b->deadline_ns) {
+        pgwt_esc_ledger_close(&b->e, b->deadline_ns);
+        b->active = false;
+        b->deadline_ns = 0;
+    }
+}
+
+static void aas1_budget_request(struct aas1_budget *b, uint64_t now_ns)
+{
+    uint64_t grant_ns = 0;
+    const char *why = NULL;
+    int rc = pgwt_esc_budget_decide(&b->e, now_ns, ESC_WINDOW_NS,
+                                    &grant_ns, &why);
+    (void)why;
+    if (rc != 0 || grant_ns == 0) {
+        b->dropped++;
+        return;
+    }
+
+    b->granted++;
+    uint64_t new_deadline = now_ns + grant_ns;
+    if (b->active) {
+        if (new_deadline > b->deadline_ns)
+            b->deadline_ns = new_deadline;
+    } else {
+        pgwt_esc_ledger_open(&b->e, now_ns);
+        b->active = true;
+        b->deadline_ns = new_deadline;
+    }
+}
+
+static double aas1_sample(enum aas1_scenario scenario, int tick,
+                          int prelude_ticks)
+{
+    bool prelude = tick < prelude_ticks;
+    int body_tick = tick - prelude_ticks;
+
+    switch (scenario) {
+    case AAS1_S1_STORM:
+        return prelude ? 2.0 : 4.0;
+    case AAS1_S2_BURSTY:
+        /* 50 s at 1.5, then a normal 10 s burst at 3.5, every minute. */
+        return !prelude && body_tick % MIN_TICKS >= 50 * SEC_TICKS
+             ? 3.5 : 1.5;
+    case AAS1_S3_OLTP:
+        /* Normal 30 s / 30 s 10 <-> 15 swing after stable history. */
+        return !prelude && body_tick % MIN_TICKS >= 30 * SEC_TICKS
+             ? 15.0 : 10.0;
+    case AAS1_S4_BIG:
+        return prelude ? 10.0 : 31.0;
+    case AAS1_S5_MODERATE:
+        return prelude ? 5.0 : 9.0;
+    case AAS1_S6_POST_WARMUP:
+        return prelude ? 0.5 : 2.0;
+    case AAS1_S7_IDLE_STORM:
+        return prelude ? 1.0 : 4.0;
+    case AAS1_S8_RECURRING:
+        return prelude ? 1.0
+             : (body_tick % MIN_TICKS >= 30 * SEC_TICKS ? 3.8 : 3.2);
+    }
+    return 0.0;
+}
+
+static struct aas1_result aas1_run(enum aas1_scenario scenario)
+{
+    int prelude_ticks = scenario == AAS1_S6_POST_WARMUP
+                      ? 5 * SEC_TICKS : 5 * MIN_TICKS;
+    int scored_ticks;
+    switch (scenario) {
+    case AAS1_S2_BURSTY:
+    case AAS1_S3_OLTP:
+        scored_ticks = 60 * MIN_TICKS;
+        break;
+    case AAS1_S6_POST_WARMUP:
+        scored_ticks = 120 * SEC_TICKS;
+        break;
+    case AAS1_S8_RECURRING:
+        scored_ticks = 120 * MIN_TICKS;
+        break;
+    default:
+        scored_ticks = 10 * SEC_TICKS;
+        break;
+    }
+
+    struct pgwt_anomaly a;
+    pgwt_anomaly_init(&a, true, 10);
+    a.lock_fraction = 0.0;  /* scenario suite isolates the AAS paths */
+
+    struct aas1_budget budget;
+    aas1_budget_init(&budget);
+    struct aas1_result r;
+    memset(&r, 0, sizeof(r));
+    r.first_fire_tick = -1;
+    r.last_fire_tick = -1;
+    r.scored_ticks = scored_ticks;
+
+    int total_ticks = prelude_ticks + scored_ticks;
+    for (int tick = 0; tick < total_ticks; tick++) {
+        uint64_t now_ns = (uint64_t)(tick + 1) * TICK_NS;
+        aas1_budget_close_due(&budget, now_ns);
+        if (tick == prelude_ticks)
+            r.pre_baseline = a.baseline_aas;
+        double aas = aas1_sample(scenario, tick, prelude_ticks);
+        struct pgwt_anomaly_decision d =
+            pgwt_anomaly_eval(&a, aas, 0.0, now_ns);
+        if (tick >= prelude_ticks && d.action == PGWT_ANOMALY_FIRE) {
+            int relative_tick = tick - prelude_ticks;
+            if (r.first_fire_tick < 0)
+                r.first_fire_tick = relative_tick;
+            r.last_fire_tick = relative_tick;
+            r.fires++;
+            aas1_budget_request(&budget, now_ns);
+        }
+    }
+
+    r.granted = budget.granted;
+    r.dropped = budget.dropped;
+    r.final_baseline = a.baseline_aas;
+    r.final_mad = a.mad_aas;
+    return r;
+}
+
+static void test_aas1_option_c_scenarios(void)
+{
+    printf("--- AAS-1 Option C: deterministic scenario matrix ---\n");
+
+    struct aas1_result s1 = aas1_run(AAS1_S1_STORM);
+    CHECK(4.0 < PGWT_ANOMALY_DEF_AAS_FACTOR * s1.pre_baseline,
+          "S1 proof setup must stay below primary threshold %.3f",
+          PGWT_ANOMALY_DEF_AAS_FACTOR * s1.pre_baseline);
+    CHECK(s1.first_fire_tick >= 28 && s1.first_fire_tick <= 31,
+          "S1 robust deviation expected near tick 30, got %d",
+          s1.first_fire_tick);
+
+    struct aas1_result s5 = aas1_run(AAS1_S5_MODERATE);
+    CHECK(9.0 < PGWT_ANOMALY_DEF_AAS_FACTOR * s5.pre_baseline,
+          "S5 setup must stay below primary threshold %.3f",
+          PGWT_ANOMALY_DEF_AAS_FACTOR * s5.pre_baseline);
+    CHECK(s5.first_fire_tick >= 28 && s5.first_fire_tick <= 31,
+          "S5 moderate incident expected near tick 30, got %d",
+          s5.first_fire_tick);
+
+    struct aas1_result s7 = aas1_run(AAS1_S7_IDLE_STORM);
+    CHECK(s7.first_fire_tick == 2,
+          "S7 primary idle->storm expected tick 3, got index %d",
+          s7.first_fire_tick);
+
+    struct aas1_result s4 = aas1_run(AAS1_S4_BIG);
+    CHECK(s4.first_fire_tick == 2,
+          "S4 big incident expected primary fire on tick 3, got index %d",
+          s4.first_fire_tick);
+
+    struct aas1_result s2 = aas1_run(AAS1_S2_BURSTY);
+    printf("  S2 initial false grants=%d, dropped=%d, last_fire=%.1fs\n",
+           s2.granted, s2.dropped,
+           s2.last_fire_tick >= 0 ? (double)s2.last_fire_tick / 10.0 : -1.0);
+    CHECK(s2.granted <= 2, "S2 granted %d windows (accepted maximum 2)",
+          s2.granted);
+    CHECK(s2.dropped == 0, "S2 drained budget: %d dropped", s2.dropped);
+    CHECK(s2.last_fire_tick < s2.scored_ticks - 30 * MIN_TICKS,
+          "S2 did not become quiet after MAD learned (last tick %d)",
+          s2.last_fire_tick);
+    CHECK(s2.final_mad > 0.5 && s2.final_mad < 1.0,
+          "S2 MAD %.3f did not learn bounded recurring variability",
+          s2.final_mad);
+
+    struct aas1_result s3 = aas1_run(AAS1_S3_OLTP);
+    CHECK(s3.fires == 0, "S3 OLTP 10<->15 swing fired %d times", s3.fires);
+
+    struct aas1_result s6 = aas1_run(AAS1_S6_POST_WARMUP);
+    CHECK(s6.fires == 0,
+          "S6 post-warmup 0.5->2.0 transition fired %d times", s6.fires);
+
+    struct aas1_result s8 = aas1_run(AAS1_S8_RECURRING);
+    CHECK(s8.fires == 1 && s8.granted == 1 && s8.dropped == 0,
+          "S8 expected one initial fire/grant and no drops, got %d/%d/%d",
+          s8.fires, s8.granted, s8.dropped);
+    CHECK(s8.last_fire_tick < s8.scored_ticks - 30 * MIN_TICKS,
+          "S8 recurring load not absorbed (last fire tick %d)",
+          s8.last_fire_tick);
+    CHECK(s8.final_baseline > 3.0 && s8.final_baseline < 4.0,
+          "S8 final baseline %.3f expected absorbed 3.0..4.0",
+          s8.final_baseline);
+}
+
+static void test_aas1_controls_and_bounded_estimators(void)
+{
+    printf("--- AAS-1 Option C: controls and bounded estimators ---\n");
+    struct pgwt_anomaly a;
+    pgwt_anomaly_init(&a, true, 10);
+    CHECK(a.dev_k == 3.6 && a.mad_floor_abs == 0.5
+          && a.mad_floor_frac == 0.15 && a.dev_aas_floor == 2.0
+          && a.dev_ticks == 30 && a.dev_maturity_ticks == 600,
+          "unexpected Option C defaults K=%.2f floors=%.2f/%.2f AAS=%.2f "
+          "ticks=%d maturity=%d", a.dev_k, a.mad_floor_abs,
+          a.mad_floor_frac, a.dev_aas_floor, a.dev_ticks,
+          a.dev_maturity_ticks);
+
+    uint64_t clk = TICK_NS;
+    feed(&a, 2.0, 0.0, 5 * MIN_TICKS, &clk, NULL);
+    a.aas_factor = PGWT_ANOMALY_AAS_DISABLE_FACTOR;
+    int fires = 0;
+    feed(&a, 4.0, 0.0, 100, &clk, &fires);
+    CHECK(fires == 0 && a.aas_over_streak == 0 && a.dev_over_streak == 0,
+          "million-factor whole-AAS disable failed: fires=%d streaks=%d/%d",
+          fires, a.aas_over_streak, a.dev_over_streak);
+
+    struct pgwt_anomaly b;
+    pgwt_anomaly_init(&b, true, 10);
+    b.dev_k = 0.0;  /* documented independent deviation off-switch */
+    clk = TICK_NS;
+    warm_baseline(&b, 1.0, &clk);
+    struct pgwt_anomaly_decision d = feed(&b, 4.0, 0.0, 3, &clk, NULL);
+    CHECK(d.action == PGWT_ANOMALY_FIRE
+          && (d.fired_mask & PGWT_RULE_AAS),
+          "deviation off-switch suppressed primary (action=%d mask=%u)",
+          d.action, d.fired_mask);
+    CHECK(b.dev_over_streak == 0,
+          "deviation off-switch left dev streak %d", b.dev_over_streak);
+
+    /* The deviation maturity gate must never delay the primary idle->storm
+     * path used by AAS-1 confirmation: after only the 5 s baseline warmup, a
+     * true zero baseline still fires on the third 4-AAS tick. */
+    struct pgwt_anomaly early;
+    pgwt_anomaly_init(&early, true, 10);
+    clk = TICK_NS;
+    warm_baseline(&early, 0.0, &clk);
+    d = feed(&early, 4.0, 0.0, 3, &clk, NULL);
+    CHECK(early.ticks_observed < early.dev_maturity_ticks
+          && d.action == PGWT_ANOMALY_FIRE,
+          "deviation maturity delayed primary idle->storm (ticks=%d action=%d)",
+          early.ticks_observed, d.action);
+
+    struct pgwt_anomaly immature;
+    pgwt_anomaly_init(&immature, true, 10);
+    clk = TICK_NS;
+    warm_baseline(&immature, 2.0, &clk);
+    fires = 0;
+    feed(&immature, 4.0, 0.0, 30, &clk, &fires);
+    CHECK(immature.ticks_observed < immature.dev_maturity_ticks && fires == 0,
+          "deviation armed before maturity (ticks=%d fires=%d)",
+          immature.ticks_observed, fires);
+
+    struct pgwt_anomaly c;
+    pgwt_anomaly_init(&c, true, 10);
+    clk = TICK_NS;
+    feed(&c, 2.0, 0.0, 5 * MIN_TICKS, &clk, NULL);
+    double base0 = c.baseline_aas;
+    feed(&c, 4.0, 0.0, 10 * SEC_TICKS, &clk, NULL);
+    CHECK(c.baseline_aas >= base0 && c.baseline_aas < base0 + 0.5,
+          "10s incident moved baseline out of bounds %.3f -> %.3f",
+          base0, c.baseline_aas);
+    CHECK(c.mad_aas >= 0.0 && c.mad_aas < 0.5,
+          "10s incident moved MAD out of bounds: %.3f", c.mad_aas);
+}
+
 int main(void)
 {
     test_disabled();
@@ -492,6 +806,8 @@ int main(void)
     test_lock_min_activity();
     test_baseline_learn_through();
     test_combined_fire();
+    test_aas1_option_c_scenarios();
+    test_aas1_controls_and_bounded_estimators();
 
     printf("\n%d/%d checks passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;

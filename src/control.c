@@ -269,6 +269,8 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
                      d->anomaly.dropped_cooldown);
     cJSON_AddNumberToObject(root, "anomaly_baseline_aas",
                             d->anomaly.baseline_aas);
+    cJSON_AddNumberToObject(root, "anomaly_mad_aas",
+                            d->anomaly.mad_aas);
 
     return root;
 }

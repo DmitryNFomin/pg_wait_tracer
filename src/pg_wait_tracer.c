@@ -11,6 +11,7 @@
 #include <unistd.h>
 #include <signal.h>
 #include <time.h>
+#include <limits.h>
 
 static void usage(const char *prog)
 {
@@ -72,8 +73,16 @@ static void usage(const char *prog)
         "                             {\"cmd\":\"escalate\",\"duration_s\":N}.\n"
         "\n"
         "Anomaly triggers (tiered mode — auto-escalate on the sampled stream):\n"
-        "      --anomaly-aas-factor <K>   Fire when AAS > K*rolling_baseline (default 3.0)\n"
+        "      --anomaly-aas-factor <K>   Fire when AAS > K*rolling_baseline (default 3.0;\n"
+        "                             >=1000000 disables all AAS triggers)\n"
         "      --anomaly-aas-ticks <N>    ...sustained for N consecutive ticks (default 3)\n"
+        "      --anomaly-dev-k <K>        Also fire above baseline + K*robust_deviation\n"
+        "                             (default 3.6; 0 disables deviation only)\n"
+        "      --anomaly-mad-floor-abs <A>  Robust-deviation absolute floor (default 0.5)\n"
+        "      --anomaly-mad-floor-frac <F> ...and baseline fraction floor (default 0.15)\n"
+        "      --anomaly-dev-aas-floor <A>  Minimum AAS for deviation path (default 2.0)\n"
+        "      --anomaly-dev-ticks <N>    Deviation sustain ticks (default 30)\n"
+        "      --anomaly-dev-maturity-s <S>  Seconds before deviation arms (default 60)\n"
         "      --anomaly-lock-fraction <F>  Fire when Lock-class share of active\n"
         "                             samples > F (default 0.30), sustained N ticks\n"
         "      --anomaly-lock-min-aas <A>  ...AND lock-class AAS >= A (default 2.0), so a\n"
@@ -219,6 +228,12 @@ static enum pgwt_mode parse_mode(const char *s)
 #define OPT_ANOM_WINDOW     271
 #define OPT_RETENTION_GB    272
 #define OPT_ANOM_LOCK_MIN_AAS 273
+#define OPT_ANOM_DEV_K        274
+#define OPT_ANOM_MAD_FLOOR_ABS 275
+#define OPT_ANOM_MAD_FLOOR_FRAC 276
+#define OPT_ANOM_DEV_AAS_FLOOR 277
+#define OPT_ANOM_DEV_TICKS    278
+#define OPT_ANOM_DEV_MATURITY 279
 
 static struct option long_opts[] = {
     {"pid",        required_argument, NULL, 'p'},
@@ -249,6 +264,12 @@ static struct option long_opts[] = {
     {"escalation-budget", required_argument, NULL, OPT_ESC_BUDGET},
     {"anomaly-aas-factor",  required_argument, NULL, OPT_ANOM_AAS_FACTOR},
     {"anomaly-aas-ticks",   required_argument, NULL, OPT_ANOM_AAS_TICKS},
+    {"anomaly-dev-k",       required_argument, NULL, OPT_ANOM_DEV_K},
+    {"anomaly-mad-floor-abs", required_argument, NULL, OPT_ANOM_MAD_FLOOR_ABS},
+    {"anomaly-mad-floor-frac", required_argument, NULL, OPT_ANOM_MAD_FLOOR_FRAC},
+    {"anomaly-dev-aas-floor", required_argument, NULL, OPT_ANOM_DEV_AAS_FLOOR},
+    {"anomaly-dev-ticks",   required_argument, NULL, OPT_ANOM_DEV_TICKS},
+    {"anomaly-dev-maturity-s", required_argument, NULL, OPT_ANOM_DEV_MATURITY},
     {"anomaly-lock-fraction", required_argument, NULL, OPT_ANOM_LOCK_FRAC},
     {"anomaly-lock-min-aas", required_argument, NULL, OPT_ANOM_LOCK_MIN_AAS},
     {"anomaly-cooldown-s",  required_argument, NULL, OPT_ANOM_COOLDOWN},
@@ -283,6 +304,12 @@ int main(int argc, char **argv)
      * (pgwt_anomaly_init derives them); only an explicit flag overrides. */
     d->anomaly_aas_factor    = -1.0;
     d->anomaly_aas_ticks     = -1;
+    d->anomaly_dev_k         = -1.0;
+    d->anomaly_mad_floor_abs = -1.0;
+    d->anomaly_mad_floor_frac = -1.0;
+    d->anomaly_dev_aas_floor = -1.0;
+    d->anomaly_dev_ticks     = -1;
+    d->anomaly_dev_maturity_s = -1;
     d->anomaly_lock_fraction = -1.0;
     d->anomaly_lock_min_aas  = -1.0;
     d->anomaly_cooldown_s    = -1;
@@ -339,6 +366,12 @@ int main(int argc, char **argv)
             break;
         case OPT_ANOM_AAS_FACTOR: d->anomaly_aas_factor = atof(optarg); break;
         case OPT_ANOM_AAS_TICKS:  d->anomaly_aas_ticks = atoi(optarg); break;
+        case OPT_ANOM_DEV_K:      d->anomaly_dev_k = atof(optarg); break;
+        case OPT_ANOM_MAD_FLOOR_ABS: d->anomaly_mad_floor_abs = atof(optarg); break;
+        case OPT_ANOM_MAD_FLOOR_FRAC: d->anomaly_mad_floor_frac = atof(optarg); break;
+        case OPT_ANOM_DEV_AAS_FLOOR: d->anomaly_dev_aas_floor = atof(optarg); break;
+        case OPT_ANOM_DEV_TICKS:  d->anomaly_dev_ticks = atoi(optarg); break;
+        case OPT_ANOM_DEV_MATURITY: d->anomaly_dev_maturity_s = atoi(optarg); break;
         case OPT_ANOM_LOCK_FRAC:  d->anomaly_lock_fraction = atof(optarg); break;
         case OPT_ANOM_LOCK_MIN_AAS: d->anomaly_lock_min_aas = atof(optarg); break;
         case OPT_ANOM_COOLDOWN:   d->anomaly_cooldown_s = atoi(optarg); break;
@@ -438,6 +471,60 @@ int main(int argc, char **argv)
     }
     if (d->anomaly_aas_ticks == 0) {
         fprintf(stderr, "FATAL: --anomaly-aas-ticks must be >= 1\n");
+        free(d);
+        return 1;
+    }
+    if (d->anomaly_dev_k < 0.0 && d->anomaly_dev_k != -1.0) {
+        fprintf(stderr, "FATAL: --anomaly-dev-k must be >= 0 (0 disables it)\n");
+        free(d);
+        return 1;
+    }
+    if (d->anomaly_mad_floor_abs < 0.0
+        && d->anomaly_mad_floor_abs != -1.0) {
+        fprintf(stderr, "FATAL: --anomaly-mad-floor-abs must be >= 0\n");
+        free(d);
+        return 1;
+    }
+    if (d->anomaly_mad_floor_frac < 0.0
+        && d->anomaly_mad_floor_frac != -1.0) {
+        fprintf(stderr, "FATAL: --anomaly-mad-floor-frac must be >= 0\n");
+        free(d);
+        return 1;
+    }
+    if (d->anomaly_dev_aas_floor == 0.0
+        || (d->anomaly_dev_aas_floor < 0.0
+            && d->anomaly_dev_aas_floor != -1.0)) {
+        fprintf(stderr, "FATAL: --anomaly-dev-aas-floor must be > 0\n");
+        free(d);
+        return 1;
+    }
+    if (d->anomaly_dev_ticks == 0) {
+        fprintf(stderr, "FATAL: --anomaly-dev-ticks must be >= 1\n");
+        free(d);
+        return 1;
+    }
+    if (d->anomaly_dev_maturity_s < -1) {
+        fprintf(stderr, "FATAL: --anomaly-dev-maturity-s must be >= 0\n");
+        free(d);
+        return 1;
+    }
+    if (d->anomaly_dev_maturity_s >
+        INT_MAX / d->sample_rate_hz) {
+        fprintf(stderr, "FATAL: --anomaly-dev-maturity-s is too large\n");
+        free(d);
+        return 1;
+    }
+    double effective_dev_k = d->anomaly_dev_k >= 0.0
+                           ? d->anomaly_dev_k : PGWT_ANOMALY_DEF_DEV_K;
+    double effective_mad_abs = d->anomaly_mad_floor_abs >= 0.0
+                             ? d->anomaly_mad_floor_abs
+                             : PGWT_ANOMALY_DEF_MAD_FLOOR_ABS;
+    double effective_mad_frac = d->anomaly_mad_floor_frac >= 0.0
+                              ? d->anomaly_mad_floor_frac
+                              : PGWT_ANOMALY_DEF_MAD_FLOOR_FRAC;
+    if (effective_dev_k > 0.0
+        && effective_mad_abs == 0.0 && effective_mad_frac == 0.0) {
+        fprintf(stderr, "FATAL: robust deviation needs a nonzero MAD floor\n");
         free(d);
         return 1;
     }

@@ -93,11 +93,10 @@ test_trace_v2: test_trace_v2.c $(BUILD)/server_event_writer.o \
 test_sampler: test_sampler.c ../src/sampler.c
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^
 
-# test_anomaly: anomaly rule engine (AAS-vs-baseline, lock-fraction,
-# hysteresis/cooldown, baseline protection, metrics derivation). Compiles
-# anomaly.c with -DPGWT_SERVER so only the pure rule core is built — no
-# skeleton, no escalation engine, runnable in CI's server-only jobs.
-test_anomaly: test_anomaly.c ../src/anomaly.c
+# test_anomaly: anomaly rule engine (AAS-vs-baseline, robust deviation,
+# lock-fraction, hysteresis/cooldown, budget boundary, metrics derivation).
+# Both cores are BPF-free and runnable in CI's server-only jobs.
+test_anomaly: test_anomaly.c ../src/anomaly.c ../src/escalation_budget.c
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^
 
 # test_escalation_budget: pure rolling-hour budget core (ESC-1/5/6). Compiles

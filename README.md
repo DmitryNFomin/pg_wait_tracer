@@ -171,7 +171,12 @@ A full-fidelity window can be opened two ways:
   (`{"cmd":"escalate","duration_s":N}`). `{"cmd":"deescalate"}` closes it early.
 - **Automatically** — anomaly rules evaluated on the sampled stream:
   AAS exceeding a multiple of its rolling baseline (`--anomaly-aas-factor`,
-  default 3.0× sustained `--anomaly-aas-ticks` ticks, default 3), or the
+  default 3.0× sustained `--anomaly-aas-ticks` ticks, default 3), **or** a
+  mature variance-aware deviation rule: AAS above both 2.0 and
+  `baseline + 3.6 × max(MAD, max(0.5, 0.15 × baseline))` for 30 ticks. Here
+  MAD is an EWMA mean absolute deviation whose per-tick input is winsorized.
+  The deviation path waits 60 seconds before arming, so its baseline and MAD
+  have learned normal startup variation. The third independent rule is the
   Lock-class share of active samples exceeding `--anomaly-lock-fraction`
   (default 0.30) **and** the absolute Lock-class AAS exceeding
   `--anomaly-lock-min-aas` (default 2.0). The lock floor stops a single
@@ -179,12 +184,15 @@ A full-fidelity window can be opened two ways:
   from burning a whole window on OLTP noise; a genuine lock convoy still fires.
   A cooldown (`--anomaly-cooldown-s`, default 120) prevents flapping.
 
-The rolling AAS baseline is **frozen while a metric is anomalous** so a
-sustained incident cannot silently raise the bar and silence the rule. To keep
-a *legitimate* load regime change from re-firing forever, the baseline resumes
-learning — at 1/10 the normal EWMA rate — only after the metric has stayed
-continuously over the threshold for **15 minutes** (the "slow learn-through"):
-short incidents never move the bar, a real new normal is eventually adopted.
+With robust deviation enabled (the default), the AAS baseline and MAD learn on
+every tick, but each residual is clipped to three current robust scales first.
+This bounds a short incident's influence while allowing recurring normal
+patterns to be absorbed. A primary regime that remains over threshold for 15
+minutes is restricted to the existing 1/10-rate ESC-7 slow release. Setting
+`--anomaly-dev-k 0` independently disables robust deviation and restores the
+legacy primary-only baseline freeze/slow-learn behavior. The historical
+`--anomaly-aas-factor 1000000` sentinel disables the **whole AAS rule**—both
+primary and deviation—while leaving the lock rule independent.
 
 Every window is bounded: per-window length is set by the request (or
 `--anomaly-window-s`, default 60, for auto-triggers), and total escalation time
@@ -248,7 +256,7 @@ direct connection.
   `escalation_budget_remaining_s`, `escalation_windows_total`,
   `escalation_denied_total`
 - `anomaly_fires_total`, `anomaly_near_total`, `anomaly_dropped_budget_total`,
-  `anomaly_dropped_cooldown_total`, `anomaly_baseline_aas`
+  `anomaly_dropped_cooldown_total`, `anomaly_baseline_aas`, `anomaly_mad_aas`
 
 ## Operating Modes
 
@@ -489,6 +497,12 @@ Auto-escalation rules evaluated on the sampled stream. Ignored outside
 |------|-------|---------|-------------|
 | `--anomaly-aas-factor <K>` | — | `3.0` | Fire when AAS > K × rolling baseline |
 | `--anomaly-aas-ticks <N>` | — | `3` | ...sustained for N consecutive ticks |
+| `--anomaly-dev-k <K>` | — | `3.6` | In parallel, fire when AAS > baseline + K × robust scale; `0` disables only this deviation path |
+| `--anomaly-mad-floor-abs <A>` | — | `0.5` | Absolute floor under the EWMA mean absolute deviation |
+| `--anomaly-mad-floor-frac <F>` | — | `0.15` | Baseline-scaled floor under the deviation (`F × baseline`) |
+| `--anomaly-dev-aas-floor <A>` | — | `2.0` | Minimum meaningful absolute load for the deviation path |
+| `--anomaly-dev-ticks <N>` | — | `30` | Dedicated consecutive-tick sustain for deviation (about 3 seconds at 10 Hz) |
+| `--anomaly-dev-maturity-s <S>` | — | `60` | Warmup before the deviation path arms; baseline/MAD still learn during it |
 | `--anomaly-lock-fraction <F>` | — | `0.30` | Fire when Lock-class share of active samples > F (sustained N ticks) |
 | `--anomaly-lock-min-aas <A>` | — | `2.0` | ...**and** absolute Lock-class AAS ≥ A (min-activity floor: a lone lock waiter can't escalate) |
 | `--anomaly-cooldown-s <S>` | — | `120` | Minimum seconds between auto-escalations |

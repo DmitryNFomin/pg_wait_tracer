@@ -1033,6 +1033,19 @@ int pgwt_daemon_init(struct pgwt_daemon *d)
             d->anomaly.aas_factor = d->anomaly_aas_factor;
         if (d->anomaly_aas_ticks > 0)
             d->anomaly.aas_ticks = d->anomaly_aas_ticks;
+        if (d->anomaly_dev_k >= 0.0)
+            d->anomaly.dev_k = d->anomaly_dev_k;
+        if (d->anomaly_mad_floor_abs >= 0.0)
+            d->anomaly.mad_floor_abs = d->anomaly_mad_floor_abs;
+        if (d->anomaly_mad_floor_frac >= 0.0)
+            d->anomaly.mad_floor_frac = d->anomaly_mad_floor_frac;
+        if (d->anomaly_dev_aas_floor > 0.0)
+            d->anomaly.dev_aas_floor = d->anomaly_dev_aas_floor;
+        if (d->anomaly_dev_ticks > 0)
+            d->anomaly.dev_ticks = d->anomaly_dev_ticks;
+        if (d->anomaly_dev_maturity_s >= 0)
+            d->anomaly.dev_maturity_ticks =
+                d->anomaly_dev_maturity_s * d->sample_rate_hz;
         if (d->anomaly_lock_fraction >= 0.0)
             d->anomaly.lock_fraction = d->anomaly_lock_fraction;
         if (d->anomaly_lock_min_aas >= 0.0)
@@ -1045,9 +1058,15 @@ int pgwt_daemon_init(struct pgwt_daemon *d)
         if (d->verbose)
             fprintf(stderr,
                     "INFO: anomaly triggers armed: aas>%.1f*baseline for %d "
-                    "ticks, lock_frac>%.2f for %d ticks, cooldown %llus, "
-                    "window %ds\n",
+                    "ticks; deviation K=%.2f, MAD floors %.2f/%.2f*baseline, "
+                    "AAS floor %.2f for %d ticks after %.1fs; "
+                    "lock_frac>%.2f for %d ticks, cooldown %llus, window %ds\n",
                     d->anomaly.aas_factor, d->anomaly.aas_ticks,
+                    d->anomaly.dev_k, d->anomaly.mad_floor_abs,
+                    d->anomaly.mad_floor_frac, d->anomaly.dev_aas_floor,
+                    d->anomaly.dev_ticks,
+                    (double)d->anomaly.dev_maturity_ticks /
+                        (double)d->sample_rate_hz,
                     d->anomaly.lock_fraction, d->anomaly.lock_ticks,
                     (unsigned long long)(d->anomaly.cooldown_ns / 1000000000ULL),
                     d->anomaly.escalation_s);

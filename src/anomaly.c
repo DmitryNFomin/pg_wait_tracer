@@ -28,6 +28,21 @@ static bool sample_is_idle(uint32_t wei)
         || wei == WEI(PG_WAIT_CLIENT, 0);           /* Client:ClientRead */
 }
 
+static double max_double(double x, double y)
+{
+    return x > y ? x : y;
+}
+
+static double min_double(double x, double y)
+{
+    return x < y ? x : y;
+}
+
+static double abs_double(double x)
+{
+    return x < 0.0 ? -x : x;
+}
+
 void pgwt_anomaly_metrics_from_batch(const struct pgwt_trace_event *samples,
                                      int n, double *out_aas,
                                      double *out_lock_fraction)
@@ -64,6 +79,11 @@ void pgwt_anomaly_init(struct pgwt_anomaly *a, bool enabled,
     a->enabled       = enabled;
     a->aas_factor    = PGWT_ANOMALY_DEF_AAS_FACTOR;
     a->aas_ticks     = PGWT_ANOMALY_DEF_AAS_TICKS;
+    a->dev_k         = PGWT_ANOMALY_DEF_DEV_K;
+    a->mad_floor_abs = PGWT_ANOMALY_DEF_MAD_FLOOR_ABS;
+    a->mad_floor_frac = PGWT_ANOMALY_DEF_MAD_FLOOR_FRAC;
+    a->dev_aas_floor = PGWT_ANOMALY_DEF_DEV_AAS_FLOOR;
+    a->dev_ticks     = PGWT_ANOMALY_DEF_DEV_TICKS;
     a->lock_fraction = PGWT_ANOMALY_DEF_LOCK_FRAC;
     a->lock_min_aas  = PGWT_ANOMALY_DEF_LOCK_MIN_AAS;
     a->lock_ticks    = PGWT_ANOMALY_DEF_LOCK_TICKS;
@@ -83,6 +103,8 @@ void pgwt_anomaly_init(struct pgwt_anomaly *a, bool enabled,
     a->warmup_needed   = 5 * hz;        /* ~5 seconds of normal data */
     a->baseline_aas    = 0.0;
     a->baseline_warmup = 0;
+    a->mad_aas         = 0.0;
+    a->dev_maturity_ticks = PGWT_ANOMALY_DEF_DEV_MATURITY_S * hz;
 
     /* ESC-7: continuously-over duration before the baseline starts learning
      * through a sustained regime change (in ticks at this rate). */
@@ -102,25 +124,69 @@ pgwt_anomaly_eval(struct pgwt_anomaly *a, double aas, double lock_fraction,
     d.aas           = aas;
     d.lock_fraction = lock_fraction;
     d.baseline      = a->baseline_aas;
+    d.mad           = a->mad_aas;
 
     if (!a->enabled)
         return d;
 
+    if (a->ticks_observed < INT32_MAX)
+        a->ticks_observed++;
+
     /* ── AAS-vs-baseline rule ──────────────────────────────────────────── */
     bool baseline_warm = a->baseline_warmup >= a->warmup_needed;
-    bool aas_over = false;
-    if (baseline_warm && a->aas_factor > 0.0) {
+    bool aas_rule_enabled = a->aas_factor > 0.0
+                         && a->aas_factor < PGWT_ANOMALY_AAS_DISABLE_FACTOR;
+    bool dev_rule_enabled = aas_rule_enabled
+                         && a->dev_k > 0.0
+                         && a->dev_ticks > 0
+                         && a->dev_aas_floor > 0.0;
+    bool dev_mature = a->dev_maturity_ticks <= 0
+                   || a->ticks_observed >= a->dev_maturity_ticks;
+    bool primary_over = false;
+    bool deviation_over = false;
+    if (baseline_warm && aas_rule_enabled) {
         double threshold = a->aas_factor * a->baseline_aas;
         /* Guard against a near-zero baseline: a tiny absolute AAS over a
          * 0-ish baseline is noise, not an incident. Require at least 2 active
-         * sessions before the multiplicative rule can fire. */
-        aas_over = (aas >= 2.0) && (aas > threshold);
+         * sessions before the multiplicative rule can fire. During the robust
+         * estimator's startup only, also require its baseline to have reached
+         * the point where the primary threshold itself is at least that floor.
+         * This rejects the S6 post-lull 0.5 -> 2.0 transition without delaying
+         * a classic idle/zero -> 4.0 primary fire: load above the absolute
+         * floor always keeps the shipped fast path. */
+        bool primary_ready = !dev_rule_enabled || dev_mature
+                          || aas > 2.0
+                          || a->baseline_aas >= 2.0 / a->aas_factor;
+        primary_over = primary_ready && (aas >= 2.0) && (aas > threshold);
+
+        if (dev_rule_enabled && dev_mature) {
+            double mad_floor = max_double(a->mad_floor_abs,
+                                           a->mad_floor_frac * a->baseline_aas);
+            double scale = max_double(a->mad_aas, mad_floor);
+            deviation_over = aas >= a->dev_aas_floor
+                          && aas > a->baseline_aas + a->dev_k * scale;
+        }
     }
+
+    bool aas_over = primary_over || deviation_over;
     if (aas_over)
         a->aas_over_streak++;
     else
         a->aas_over_streak = 0;
-    bool aas_fire = aas_over && (a->aas_over_streak >= a->aas_ticks);
+    if (primary_over)
+        a->primary_over_streak++;
+    else
+        a->primary_over_streak = 0;
+    if (deviation_over)
+        a->dev_over_streak++;
+    else
+        a->dev_over_streak = 0;
+
+    bool primary_fire = primary_over
+                     && a->primary_over_streak >= a->aas_ticks;
+    bool deviation_fire = deviation_over
+                       && a->dev_over_streak >= a->dev_ticks;
+    bool aas_fire = primary_fire || deviation_fire;
 
     /* ── Lock-class fraction rule (ESC-4: with a min-activity floor) ────── */
     /* Fraction alone fires on a single backend's routine 300 ms row-lock wait
@@ -139,36 +205,59 @@ pgwt_anomaly_eval(struct pgwt_anomaly *a, double aas, double lock_fraction,
     bool lock_fire = lock_over && (a->lock_over_streak >= a->lock_ticks);
 
     /* ── Baseline maintenance ──────────────────────────────────────────── */
-    /* Only learn from NORMAL ticks: do not fold an anomalous AAS back into the
-     * baseline (that would let a sustained incident silently raise the bar
-     * until the rule stops firing). A tick is "normal" for baseline purposes
-     * when AAS is not currently over the multiplicative threshold. While
-     * warming up we always learn (there is no baseline to protect yet). */
+    /* Warmup uses running means. Afterwards the robust path learns baseline
+     * and MAD every tick, but clips each residual to three current robust
+     * scales before folding it in. A single incident therefore has bounded
+     * influence while recurring structure is eventually absorbed. */
     if (!baseline_warm) {
-        /* Simple running mean during warmup so the EWMA starts sane. */
         a->baseline_warmup++;
         double w = (double)a->baseline_warmup;
         a->baseline_aas += (aas - a->baseline_aas) / w;
-    } else if (!aas_over) {
+        double dev = abs_double(aas - a->baseline_aas);
+        a->mad_warmup++;
+        double mw = (double)a->mad_warmup;
+        a->mad_aas += (dev - a->mad_aas) / mw;
+    } else if (dev_rule_enabled) {
+        double mad_floor = max_double(a->mad_floor_abs,
+                                       a->mad_floor_frac * a->baseline_aas);
+        double scale = max_double(a->mad_aas, mad_floor);
+        double residual = aas - a->baseline_aas;
+        double cap = PGWT_ANOMALY_MAD_WINSOR_K * scale;
+        double clipped = max_double(-cap, min_double(residual, cap));
+        double alpha = a->baseline_alpha;
+
+        /* Retain ESC-7's deliberately slow release after a continuously high
+         * primary regime. The robust path already bounds every earlier tick;
+         * crossing the legacy learn-through horizon must not speed it up. */
+        if (primary_over && a->learn_through_ticks > 0
+            && a->primary_over_streak >= a->learn_through_ticks) {
+            int div = a->slow_release_div > 0 ? a->slow_release_div : 1;
+            alpha /= (double)div;
+        }
+        a->baseline_aas += alpha * clipped;
+        double abs_clipped = min_double(abs_double(residual), cap);
+        a->mad_aas += a->baseline_alpha * (abs_clipped - a->mad_aas);
+    } else if (!primary_over) {
+        /* Independent deviation off-switch restores the shipped primary
+         * baseline semantics exactly. */
         a->baseline_aas += a->baseline_alpha * (aas - a->baseline_aas);
     } else if (a->learn_through_ticks > 0
-               && a->aas_over_streak >= a->learn_through_ticks) {
-        /* ESC-7: the metric has been continuously over for the sustained-over
-         * horizon — treat it as a legitimate regime change and learn through
-         * at a reduced rate so the rule stops re-firing forever, without
-         * letting a short incident (streak below the horizon) move the bar. */
+               && a->primary_over_streak >= a->learn_through_ticks) {
         int div = a->slow_release_div > 0 ? a->slow_release_div : 1;
         a->baseline_aas += (a->baseline_alpha / (double)div)
                          * (aas - a->baseline_aas);
     }
     d.baseline = a->baseline_aas;
+    d.mad = a->mad_aas;
 
     /* ── Decision ──────────────────────────────────────────────────────── */
     if (!aas_fire && !lock_fire) {
         /* Surface a near-trigger if a metric crossed but did not sustain. */
         unsigned near = PGWT_NEAR_NONE;
-        if (aas_over && !aas_fire)
+        if (primary_over && !primary_fire)
             near |= PGWT_NEAR_AAS_SUSTAIN;
+        if (deviation_over && !deviation_fire)
+            near |= PGWT_NEAR_DEV_SUSTAIN;
         if (lock_over && !lock_fire)
             near |= PGWT_NEAR_LOCK_SUSTAIN;
         if (!baseline_warm && aas >= 2.0)
@@ -269,9 +358,10 @@ void pgwt_anomaly_tick(struct pgwt_daemon *d,
                          (unsigned long long)a->near_since_log);
             fprintf(stderr,
                     "INFO: anomaly near-trigger: aas=%.1f baseline=%.2f "
-                    "lock_frac=%.2f%s%s%s%s%s\n",
-                    dec.aas, dec.baseline, dec.lock_fraction,
+                    "mad=%.2f lock_frac=%.2f%s%s%s%s%s%s\n",
+                    dec.aas, dec.baseline, dec.mad, dec.lock_fraction,
                     (dec.near_mask & PGWT_NEAR_AAS_SUSTAIN) ? " [aas-sustain]" : "",
+                    (dec.near_mask & PGWT_NEAR_DEV_SUSTAIN) ? " [dev-sustain]" : "",
                     (dec.near_mask & PGWT_NEAR_LOCK_SUSTAIN) ? " [lock-sustain]" : "",
                     (dec.near_mask & PGWT_NEAR_COOLDOWN) ? " [cooldown]" : "",
                     (dec.near_mask & PGWT_NEAR_BASELINE) ? " [baseline-warmup]" : "",
@@ -294,8 +384,9 @@ void pgwt_anomaly_tick(struct pgwt_daemon *d,
         if (rc == 0) {
             fprintf(stderr,
                     "INFO: anomaly AUTO-escalation: rule=%saas=%.1f "
-                    "baseline=%.2f lock_frac=%.2f -> full fidelity %ds\n",
-                    rb, dec.aas, dec.baseline, dec.lock_fraction, granted);
+                    "baseline=%.2f mad=%.2f lock_frac=%.2f -> full fidelity %ds\n",
+                    rb, dec.aas, dec.baseline, dec.mad,
+                    dec.lock_fraction, granted);
         } else {
             /* Over budget: dropped SILENTLY (log only, no error to anyone) —
              * unlike a manual escalate which returns a denial to its caller. */
