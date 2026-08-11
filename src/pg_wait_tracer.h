@@ -202,6 +202,7 @@ enum pgwt_escalation_reason {
     PGWT_ESC_REASON_REQUEST  = 3,  /* explicit deescalate request (close) */
     PGWT_ESC_REASON_SHUTDOWN = 4,  /* daemon stopping (close) */
     PGWT_ESC_REASON_BUDGET   = 5,  /* rolling-hour budget reached (mid-window close, ESC-1) */
+    PGWT_ESC_REASON_CPU_SATURATION = 6, /* CPU-demand CUSUM trigger (AAS-1 Stage 3) */
 };
 
 /* ── Query Text Event (lifecycle ringbuf) ─────────────────── */

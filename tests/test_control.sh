@@ -155,6 +155,8 @@ for k in ('events_total', 'events_per_sec', 'lifecycle_events_total',
           'state_map_full_total', 'seen_query_ids_full_total',
           'invalid_wait_reads_total', 'sampler_ticks_missed_total',
           'state_reseeds_total',
+          # AAS-1 Stage 3 CPU-saturation rule counter/state.
+          'anomaly_cpu_saturation_fires_total', 'anomaly_cpu_cusum',
           # T8 measured-CPU counters (§5.6). Present + numeric here; the exact
           # magnitudes are proven by the pure-CPU straddle acceptance test.
           'cpu_ns_total', 'offcpu_ns_total', 'cpu_clamped_total',
@@ -166,6 +168,7 @@ assert r['cpu_accounting'] in ('measured', 'legacy'), r
 # AAS-1 Stage 2: the explicit capacity override wins and is observable.
 assert r['effective_cpu_capacity_cores'] == 3.25, r
 assert r['effective_cpu_capacity_source'] == 'override', r
+assert r['anomaly_cpu_cusum_enabled'] is True, r
 "
 check $? "metrics: all counters present and numeric"
 

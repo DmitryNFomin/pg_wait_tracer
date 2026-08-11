@@ -114,11 +114,12 @@ static void handle_timer(struct pgwt_daemon *d)
         }
     }
 
-    /* AAS-1 Stage 2: refresh target capacity for metrics and the future CPU
-     * guard. This state is deliberately not consumed by anomaly/escalation
-     * in this stage. */
-    d->effective_cores = pgwt_effective_cores_refresh(
-        &d->cpu_capacity_resolver, d->postmaster_pid);
+    /* Stage 3 refreshes capacity at sampler cadence when the anomaly engine
+     * is armed, so the CUSUM consumes every material-change signal. Other
+     * modes retain Stage 2's display-cadence refresh for observability. */
+    if (!d->anomaly.enabled)
+        d->effective_cores = pgwt_effective_cores_refresh(
+            &d->cpu_capacity_resolver, d->postmaster_pid);
 
     /* Print at the first non-PG-death point in the handler. In particular,
      * this is before recovery/sweep and every live-map read: a TIMER line with
@@ -1063,15 +1064,35 @@ int pgwt_daemon_init(struct pgwt_daemon *d)
                 (uint64_t)d->anomaly_cooldown_s * 1000000000ULL;
         if (d->anomaly_window_s > 0)
             d->anomaly.escalation_s = d->anomaly_window_s;
+        if (d->anomaly_cpu_min_aas > 0.0)
+            d->anomaly.cpu_min_aas = d->anomaly_cpu_min_aas;
+        if (d->anomaly_cpu_margin >= 0.0)
+            d->anomaly.cpu_margin = d->anomaly_cpu_margin;
+        if (d->anomaly_cpu_cusum_k >= 0.0)
+            d->anomaly.cpu_cusum_k = d->anomaly_cpu_cusum_k;
+        if (d->anomaly_cpu_cusum_h > 0.0)
+            d->anomaly.cpu_cusum_h = d->anomaly_cpu_cusum_h;
+        if (d->anomaly_cpu_cusum_cap > 0.0)
+            d->anomaly.cpu_cusum_cap = d->anomaly_cpu_cusum_cap;
+        if (d->anomaly_cpu_cusum_disabled)
+            d->anomaly.cpu_cusum_enabled = false;
         if (d->verbose)
             fprintf(stderr,
                     "INFO: anomaly triggers armed: aas>%.1f*baseline for %d "
                     "ticks, lock_frac>%.2f for %d ticks, cooldown %llus, "
-                    "window %ds\n",
+                    "window %ds, cpu_cusum=%s(min_aas=%.3f margin=%.3f "
+                    "k=%.3f h=%.3f cap=%.3f)\n",
                     d->anomaly.aas_factor, d->anomaly.aas_ticks,
                     d->anomaly.lock_fraction, d->anomaly.lock_ticks,
                     (unsigned long long)(d->anomaly.cooldown_ns / 1000000000ULL),
-                    d->anomaly.escalation_s);
+                    d->anomaly.escalation_s,
+                    (d->anomaly.cpu_cusum_enabled
+                     && d->anomaly.aas_factor
+                        < PGWT_ANOMALY_DISABLE_AAS_FACTOR)
+                        ? "enabled" : "disabled",
+                    d->anomaly.cpu_min_aas, d->anomaly.cpu_margin,
+                    d->anomaly.cpu_cusum_k, d->anomaly.cpu_cusum_h,
+                    d->anomaly.cpu_cusum_cap);
     }
 
     /* Arm the active capture provider. For the full tier this is a no-op

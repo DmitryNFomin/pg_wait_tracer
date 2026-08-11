@@ -1188,13 +1188,15 @@ def phase_stale_seed_sweep(pm_pid):
 
 
 def phase_sampled_aas_truth(pm_pid):
-    """T2 (AAS-1) definition-of-done: sampled AAS — now CPU-inclusive —
-    must match pg_stat_activity 1s-sampling ground truth. A CPU-bound
+    """T2 (AAS-1) CPU-observability contract, independent of escalation
+    policy: sampled AAS — now CPU-inclusive — must match pg_stat_activity
+    ground truth. A CPU-bound
     storm (3 hogs) + a pg_sleep session; pre-T2 the sampler skipped all
     we==0 and reported AAS ~ 0.0x for exactly this shape (study Q4:
     -98%%). Anomaly escalation is disabled (huge factor) so the window is
-    PURE sampled tier."""
-    print("--- Phase 5: sampled CPU-inclusive AAS vs pg_stat_activity ---")
+    PURE sampled tier. The legacy huge-factor switch also disables the CPU
+    saturation guard, so this phase cannot pass because of escalation."""
+    print("--- Phase 5: CPU observability in pure sampled AAS ---")
     trace_dir = tempfile.mkdtemp(prefix="pgwt_smoke_aas_")
     os.chmod(trace_dir, 0o755)
 
@@ -1259,32 +1261,40 @@ def phase_sampled_aas_truth(pm_pid):
 
 
 def phase_cpu_storm_escalation(pm_pid):
-    """T2 definition-of-done: a SELECT-storm CPU incident raises sampled
-    AAS enough to trigger anomaly escalation (the engine was blind to CPU
-    before — AAS-1), and the AAS chart shows no step artifact across the
-    sampled->exact tier switch."""
-    print("--- Phase 6: CPU storm triggers escalation; no AAS step ---")
+    """AAS-1 Stage 3 saturation-policy contract. The target capacity is an
+    explicit C=2 override, so three CPU-demand sessions are deterministically
+    saturating regardless of runner size. Assert the distinct CPU CUSUM rule,
+    full-tier transition, and continuity across the sampled->exact switch."""
+    print("--- Phase 6: CPU saturation CUSUM escalation; no AAS step ---")
     trace_dir = tempfile.mkdtemp(prefix="pgwt_smoke_esc_")
     os.chmod(trace_dir, 0o755)
 
     storm = CpuStorm(3)
     tracer = subprocess.Popen(
         [TRACER, "--mode", "tiered", "--pid", str(pm_pid),
-         "-T", trace_dir, "--duration", "20", "--quiet",
-         "--interval", "5"],
+         "-T", trace_dir, "--duration", "22", "--quiet",
+         "--interval", "5", "--anomaly-cpu-capacity", "2",
+         # Isolate the CPU rule without crossing the >=1e6 legacy switch that
+         # deliberately disables it too. The pre-warmup storm gives the AAS
+         # baseline a positive value, making this factor unreachable.
+         "--anomaly-aas-factor", "999999"],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    time.sleep(7.0)   # BPF load + scan + anomaly baseline warmup (~5 s idle)
+    time.sleep(3.0)   # BPF load + scan; CPU guard needs no baseline warmup
     try:
         storm_from = time.time_ns()
-        storm.fire()
-        time.sleep(5.0)
+        storm.fire(reps=800)
+        # Keep 3 demand sessions active for >=10s. C=2 reaches h after roughly
+        # 3.3s at capped demand; querying after the full observation interval
+        # avoids any host-speed/tick-phase timing assumption.
+        storm_active = sample_active_sessions(10.0, interval=0.5)
+        storm_to = time.time_ns()
         metrics = {}
+        status = {}
         try:
             metrics = ctl_query(trace_dir, "metrics")
+            status = ctl_query(trace_dir, "status")
         except OSError as e:
             print(f"  (control socket: {e})")
-        storm_active = sample_active_sessions(3.0, interval=0.5)
-        storm_to = time.time_ns()
         _, stderr = tracer.communicate(timeout=40)
         err = stderr.decode('utf-8', errors='replace')
     except subprocess.TimeoutExpired:
@@ -1294,23 +1304,35 @@ def phase_cpu_storm_escalation(pm_pid):
     finally:
         storm.stop()
 
-    fires = metrics.get("anomaly_fires_total", 0)
+    cpu_fires = metrics.get("anomaly_cpu_saturation_fires_total", 0)
     windows = metrics.get("escalation_windows_total", 0)
-    check(fires >= 1 and windows >= 1,
-          f"CPU storm triggered anomaly escalation "
-          f"(anomaly_fires_total={fires}, escalation_windows_total={windows}, "
-          f"tier={metrics.get('tier')!r}) [AAS-1: engine no longer CPU-blind]"
-          + ("" if fires >= 1 else f" (tracer stderr tail: {err[-300:]!r})"))
+    check(metrics.get("effective_cpu_capacity_cores") == 2 and
+          metrics.get("effective_cpu_capacity_source") == "override",
+          f"saturation test reports C=2 override "
+          f"(capacity={metrics.get('effective_cpu_capacity_cores')!r}, "
+          f"source={metrics.get('effective_cpu_capacity_source')!r})")
+    check(cpu_fires >= 1 and windows >= 1,
+          f"CPU saturation rule opened a full-fidelity window "
+          f"(cpu_fires={cpu_fires}, escalation_windows_total={windows}, "
+          f"tier={metrics.get('tier')!r})"
+          + ("" if cpu_fires >= 1 else
+             f" (tracer stderr tail: {err[-300:]!r})"))
+    check(status.get("tier") == "escalated" and
+          status.get("escalation_reason") == "cpu_saturation",
+          f"CPU-rule window is full tier with distinct reason "
+          f"(tier={status.get('tier')!r}, "
+          f"reason={status.get('escalation_reason')!r})")
+    check("rule=cpu-saturation" in err,
+          "CPU saturation fire is distinct in the daemon log")
 
     # No step artifact: every interior 1s bucket across the tier switch
-    # must show the storm. The anomaly fires ~0.3-1 s into the storm, so
-    # starting the window at +0.7 s puts the sampled->exact switch INSIDE
-    # the asserted range. Pre-T2, sampled buckets read ~0.0 while exact
-    # (escalated) buckets read ~3 — a hard step.
+    # must show the storm. With C=2 the CUSUM switch occurs during this >=10s
+    # window, without relying on a sub-second firing assumption. Pre-T2,
+    # sampled buckets read ~0.0 while exact buckets read ~3 — a hard step.
     resp = server_query(trace_dir, "aas",
-                        extra={"from": storm_from + 700_000_000,
-                               "to": storm_to - 1_000_000_000,
-                               "buckets": 7})
+                        extra={"from": storm_from + 500_000_000,
+                               "to": storm_to - 500_000_000,
+                               "buckets": 8})
     buckets = resp.get("buckets", [])
     check(len(buckets) >= 3, f"aas buckets across the tier switch "
           f"(got {len(buckets)}, fidelity={resp.get('fidelity')!r})")

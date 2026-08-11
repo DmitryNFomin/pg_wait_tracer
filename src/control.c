@@ -49,6 +49,7 @@ static const char *esc_reason_str(int reason)
     case PGWT_ESC_REASON_REQUEST:  return "request";
     case PGWT_ESC_REASON_SHUTDOWN: return "shutdown";
     case PGWT_ESC_REASON_BUDGET:   return "budget";
+    case PGWT_ESC_REASON_CPU_SATURATION: return "cpu_saturation";
     default:                       return "unknown";
     }
 }
@@ -291,6 +292,8 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
 
     /* Anomaly-trigger accounting (A5). 0 when not in tiered mode. */
     cjson_add_uint64(root, "anomaly_fires_total", d->anomaly.fires_total);
+    cjson_add_uint64(root, "anomaly_cpu_saturation_fires_total",
+                     d->anomaly.cpu_saturation_fires_total);
     cjson_add_uint64(root, "anomaly_near_total", d->anomaly.near_total);
     cjson_add_uint64(root, "anomaly_dropped_budget_total",
                      d->anomaly.dropped_budget);
@@ -298,6 +301,13 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
                      d->anomaly.dropped_cooldown);
     cJSON_AddNumberToObject(root, "anomaly_baseline_aas",
                             d->anomaly.baseline_aas);
+    cJSON_AddBoolToObject(root, "anomaly_cpu_cusum_enabled",
+                          d->anomaly.enabled
+                          && d->anomaly.cpu_cusum_enabled
+                          && d->anomaly.aas_factor
+                             < PGWT_ANOMALY_DISABLE_AAS_FACTOR);
+    cJSON_AddNumberToObject(root, "anomaly_cpu_cusum",
+                            d->anomaly.cpu_cusum);
 
     return root;
 }

@@ -177,6 +177,19 @@ A full-fidelity window can be opened two ways:
   `--anomaly-lock-min-aas` (default 2.0). The lock floor stops a single
   backend's routine row-lock wait — a lock-fraction of 1.0 over an AAS of 1 —
   from burning a whole window on OLTP noise; a genuine lock convoy still fires.
+  Independently, a CPU-demand CUSUM detects sustained demand near the target
+  postmaster's effective CPU capacity:
+  `S=max(0,S+dt*(min(cpu_AAS/C,cap)-(k+margin)))` fires at `S>=h` only when
+  `cpu_AAS>=cpu_min_aas` (defaults `k=0.80`, affinity-only `margin=0.02`,
+  `cpu_min_aas=2.0`, `h=1.50`, `cap=1.25`). Quota and explicit override
+  capacities use zero margin. `dt` is the nominal sample period, so a delayed
+  tick cannot fabricate evidence. Failed read coverage and unknown capacity
+  never advance it; a material capacity change or return from a partial-read
+  gap resets it. Each continuous saturation episode fires once, then re-arms
+  only after a complete, capacity-known tick falls below `k`. CPU fires have
+  the distinct `cpu_saturation` escalation reason and use the same window,
+  cooldown, and budget path. If discovered capacity is known to be uncertain,
+  set the deployment's known value with `--anomaly-cpu-capacity`.
   A cooldown (`--anomaly-cooldown-s`, default 120) prevents flapping.
 
 The rolling AAS baseline is **frozen while a metric is anomalous** so a
@@ -493,6 +506,17 @@ Auto-escalation rules evaluated on the sampled stream. Ignored outside
 | `--anomaly-lock-min-aas <A>` | — | `2.0` | ...**and** absolute Lock-class AAS ≥ A (min-activity floor: a lone lock waiter can't escalate) |
 | `--anomaly-cooldown-s <S>` | — | `120` | Minimum seconds between auto-escalations |
 | `--anomaly-window-s <S>` | — | `60` | Full-fidelity window length per auto-trigger |
+| `--anomaly-cpu-capacity <C>` | — | discovered | Override target effective logical CPU capacity; use when discovery is known to misrepresent backend capacity |
+| `--anomaly-cpu-min-aas <A>` | — | `2.0` | Absolute CPU-class AAS required for a CPU CUSUM fire |
+| `--anomaly-cpu-margin <M>` | — | `0.02` | Extra utilization slack for affinity-only capacity; quota and override capacity use zero margin |
+| `--anomaly-cpu-cusum-k <K>` | — | `0.80` | CPU-demand CUSUM slack/reference utilization |
+| `--anomaly-cpu-cusum-h <H>` | — | `1.50` | CPU-demand CUSUM fire threshold |
+| `--anomaly-cpu-cusum-cap <U>` | — | `1.25` | Cap `cpu_AAS / effective_capacity` per tick |
+| `--anomaly-cpu-cusum-disable` | — | off | Disable only the CPU saturation guard |
+
+For compatibility with existing pure-sampled and manual-window deployments,
+`--anomaly-aas-factor 1000000` (or larger) disables both the multiplicative AAS
+rule and the CPU saturation guard. The lock rule retains its own configuration.
 
 ### Performance Tuning
 

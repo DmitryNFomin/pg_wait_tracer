@@ -95,9 +95,10 @@ test_sampler: test_sampler.c ../src/sampler.c ../src/anomaly.c
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^
 
 # test_anomaly: anomaly rule engine (AAS-vs-baseline, lock-fraction,
-# hysteresis/cooldown, baseline protection, metrics derivation). Compiles
-# anomaly.c with -DPGWT_SERVER so only the pure rule core is built — no
-# skeleton, no escalation engine, runnable in CI's server-only jobs.
+# CPU-demand CUSUM, hysteresis/cooldown, baseline protection, metrics
+# derivation). Compiles anomaly.c with -DPGWT_SERVER so only the pure rule core
+# is built — no skeleton, no escalation engine, runnable in CI's server-only
+# jobs.
 test_anomaly: test_anomaly.c ../src/anomaly.c
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^
 
