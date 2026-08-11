@@ -90,6 +90,7 @@ struct pgwt_sampler {
 
     /* Scratch buffers sized for MAX_BACKENDS, allocated once. */
     uint32_t     *read_vals;     /* MAX_BACKENDS — wait_event_info per target */
+    uint8_t      *read_valid;    /* MAX_BACKENDS — 1 only after a successful read */
     struct pgwt_trace_event *samples; /* MAX_BACKENDS — encoded batch */
 
     /* Batched pid->query_id join scratch (SMP-4). qid_cap entries. */
@@ -100,8 +101,16 @@ struct pgwt_sampler {
 
     struct pgwt_sampler_health health;   /* SMP-1 */
 
+    /* Per-tick read coverage. Stage 3 consumes this to decide whether a tick
+     * has enough sampler coverage to advance its detector; this stage only
+     * produces and exposes it. */
+    uint32_t read_targets_last;
+    uint32_t read_valid_last;
+    uint32_t read_invalid_last;
+
     uint64_t samples_total;       /* cumulative SAMPLES records written */
     uint64_t read_faults_total;   /* per-pid pread fallbacks taken */
+    uint64_t read_failures_total; /* targets with no successful read */
 };
 
 /* Provider hooks (see provider.h). Exposed for the vtable in sampler.c. */
@@ -116,13 +125,15 @@ void pgwt_sampler_metrics(struct pgwt_daemon *d, struct pgwt_metrics *m);
  * is_shared are read in one batched process_vm_readv() sweep (per-pid pread
  * fallback for entries that fault); all other targets are read individually
  * via pread(/proc/<pid>/mem) — NEVER through another pid (SMP-2). Writes
- * results into out_vals[i] (0 left in place for entries that could not be
- * read). read_faults (may be NULL) is incremented once per pread fallback
- * taken in the batched sweep. Returns the number of entries successfully
- * read; errno is left at the last failing syscall's value when the return
- * is short. */
+ * results into out_vals[i] and sets out_valid[i] to 1 only when that target
+ * was read successfully. A successful value of 0 is therefore distinct from
+ * an unread target, whose value remains 0 and validity remains 0. read_faults
+ * (may be NULL) is incremented once per pread fallback taken in the batched
+ * sweep. Returns the number of entries successfully read; errno is left at
+ * the last failing syscall's value when the return is short. */
 int pgwt_sampler_read_targets(const struct pgwt_sample_target *targets, int n,
-                              uint32_t *out_vals, uint64_t *read_faults);
+                              uint32_t *out_vals, uint8_t *out_valid,
+                              uint64_t *read_faults);
 
 /* Build the SAMPLES batch from targets + their freshly-read values.
  *
@@ -143,15 +154,22 @@ int pgwt_sampler_read_targets(const struct pgwt_sample_target *targets, int n,
  * — the anomaly engine and the live accumulator consume them (io_worker
  * records must not enter AAS/DB Time).
  *
- * A value with an INVALID class byte (CAP-2/5: garbage from a wrong offset)
- * is skipped and counted in *invalid_reads (may be NULL) — garbage must
- * never be recorded as data. `tick_ts` is the sample timestamp stamped on
- * every record. Returns the number of sample records written into out. */
+ * A target whose valid[i] is 0 is skipped before any CPU/wait classification.
+ * A valid value with an INVALID class byte (CAP-2/5: garbage from a wrong
+ * offset) is skipped and counted in *invalid_reads (may be NULL) — garbage
+ * must never be recorded as data. `tick_ts` is the sample timestamp stamped
+ * on every record. Returns the number of sample records written into out. */
 int pgwt_sampler_build_batch(const struct pgwt_sample_target *targets,
-                             const uint32_t *vals, int n, uint64_t tick_ts,
+                             const uint32_t *vals, const uint8_t *valid,
+                             int n, uint64_t tick_ts,
                              struct pgwt_trace_event *out,
                              uint64_t *invalid_reads,
                              uint64_t *noncmd_cpu_skipped);
+
+/* Record one tick's target-level read coverage. Counts are clamped to a
+ * coherent 0 <= valid <= targets range; each invalid target contributes once
+ * to read_failures_total. Pure and exposed for the sampler unit harness. */
+void pgwt_sampler_note_coverage(struct pgwt_sampler *s, int targets, int valid);
 
 /* T2: category flag (PGWT_EVENT_FLAG_*) for a backend type, and the we==0
  * recording policy. Pure helpers shared by the sampler and the server-side

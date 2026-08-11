@@ -90,7 +90,7 @@ test_trace_v2: test_trace_v2.c $(BUILD)/server_event_writer.o \
 # test_sampler: sampler core (process_vm_readv read + batch encode + per-pid
 # fallback). Compiles sampler.c with -DPGWT_SERVER so only the BPF-free core
 # is built — no skeleton, no bpftool, runnable in CI's server-only jobs.
-test_sampler: test_sampler.c ../src/sampler.c
+test_sampler: test_sampler.c ../src/sampler.c ../src/anomaly.c
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^
 
 # test_anomaly: anomaly rule engine (AAS-vs-baseline, lock-fraction,

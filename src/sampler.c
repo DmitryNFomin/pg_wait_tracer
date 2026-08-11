@@ -31,6 +31,10 @@
 static int read_target_own_pid(const struct pgwt_sample_target *t,
                                uint32_t *val)
 {
+    if (t->pid <= 0 || t->wait_event_addr == 0) {
+        errno = EINVAL;
+        return 0;
+    }
     char path[64];
     snprintf(path, sizeof(path), "/proc/%d/mem", t->pid);
     int fd = open(path, O_RDONLY | O_CLOEXEC);
@@ -107,10 +111,14 @@ void pgwt_read_cmd_gate(pid_t pid, uint64_t dqs_addr, uint64_t be_entry_addr,
 }
 
 int pgwt_sampler_read_targets(const struct pgwt_sample_target *targets, int n,
-                              uint32_t *out_vals, uint64_t *read_faults)
+                              uint32_t *out_vals, uint8_t *out_valid,
+                              uint64_t *read_faults)
 {
-    if (n <= 0)
+    if (n <= 0 || !targets || !out_vals || !out_valid)
         return 0;
+
+    memset(out_vals, 0, (size_t)n * sizeof(*out_vals));
+    memset(out_valid, 0, (size_t)n * sizeof(*out_valid));
 
     struct iovec *liov = calloc(n, sizeof(*liov));
     struct iovec *riov = calloc(n, sizeof(*riov));
@@ -125,7 +133,6 @@ int pgwt_sampler_read_targets(const struct pgwt_sample_target *targets, int n,
     int got = 0;
     int nb = 0;   /* number of batchable (shared-memory) targets */
     for (int i = 0; i < n; i++) {
-        out_vals[i] = 0;
         /* SMP-2: only targets whose address is verified to live in a
          * MAP_SHARED mapping may be read through another pid. A private
          * address mapped at the same VA in every child reads SUCCESSFULLY
@@ -154,6 +161,8 @@ int pgwt_sampler_read_targets(const struct pgwt_sample_target *targets, int n,
         ssize_t r = process_vm_readv(reader_pid, liov + base, rem,
                                      riov + base, rem, 0);
         int done = (r > 0) ? (int)(r / sizeof(uint32_t)) : 0;
+        for (int j = 0; j < done; j++)
+            out_valid[idx[base + j]] = 1;
         got  += done;
         base += done;
         if (base >= nb)
@@ -164,6 +173,7 @@ int pgwt_sampler_read_targets(const struct pgwt_sample_target *targets, int n,
         uint32_t val = 0;
         if (read_target_own_pid(&targets[idx[base]], &val)) {
             out_vals[idx[base]] = val;
+            out_valid[idx[base]] = 1;
             got++;
         }
         if (read_faults)
@@ -178,6 +188,7 @@ int pgwt_sampler_read_targets(const struct pgwt_sample_target *targets, int n,
         uint32_t val = 0;
         if (read_target_own_pid(&targets[i], &val)) {
             out_vals[i] = val;
+            out_valid[i] = 1;
             got++;
         }
     }
@@ -230,13 +241,20 @@ int pgwt_cpu_sample_recordable(enum pgwt_backend_type bt, int cmd_open)
 }
 
 int pgwt_sampler_build_batch(const struct pgwt_sample_target *targets,
-                             const uint32_t *vals, int n, uint64_t tick_ts,
+                             const uint32_t *vals, const uint8_t *valid,
+                             int n, uint64_t tick_ts,
                              struct pgwt_trace_event *out,
                              uint64_t *invalid_reads,
                              uint64_t *noncmd_cpu_skipped)
 {
     int count = 0;
     for (int i = 0; i < n; i++) {
+        /* A failed read leaves vals[i] == 0, but that is not an on-CPU
+         * observation. Exclude it before the we==0 policy or any other
+         * classification so read failures cannot fabricate active demand. */
+        if (!valid || !valid[i])
+            continue;
+
         uint32_t we = vals[i];
 
         /* event 0 == on CPU. T2 (AAS-1): a session on CPU IS an active
@@ -274,6 +292,23 @@ int pgwt_sampler_build_batch(const struct pgwt_sample_target *targets,
         e->query_id     = targets[i].query_id;
     }
     return count;
+}
+
+void pgwt_sampler_note_coverage(struct pgwt_sampler *s, int targets, int valid)
+{
+    if (!s)
+        return;
+    if (targets < 0)
+        targets = 0;
+    if (valid < 0)
+        valid = 0;
+    if (valid > targets)
+        valid = targets;
+
+    s->read_targets_last = (uint32_t)targets;
+    s->read_valid_last = (uint32_t)valid;
+    s->read_invalid_last = (uint32_t)(targets - valid);
+    s->read_failures_total += s->read_invalid_last;
 }
 
 uint64_t pgwt_sampler_effective_period(uint64_t nominal_ns,
@@ -514,11 +549,14 @@ int pgwt_sampler_start(struct pgwt_daemon *d)
     }
 
     s->read_vals = calloc(MAX_BACKENDS, sizeof(*s->read_vals));
+    s->read_valid = calloc(MAX_BACKENDS, sizeof(*s->read_valid));
     s->samples   = calloc(MAX_BACKENDS, sizeof(*s->samples));
     s->qid_keys  = calloc(s->qid_cap, sizeof(*s->qid_keys));
     s->qid_vals  = calloc(s->qid_cap, sizeof(*s->qid_vals));
-    if (!s->read_vals || !s->samples || !s->qid_keys || !s->qid_vals) {
+    if (!s->read_vals || !s->read_valid || !s->samples || !s->qid_keys
+        || !s->qid_vals) {
         free(s->read_vals);
+        free(s->read_valid);
         free(s->samples);
         free(s->qid_keys);
         free(s->qid_vals);
@@ -540,6 +578,7 @@ int pgwt_sampler_stop(struct pgwt_daemon *d)
     if (!s)
         return 0;
     free(s->read_vals);
+    free(s->read_valid);
     free(s->samples);
     free(s->qid_keys);
     free(s->qid_vals);
@@ -750,14 +789,18 @@ int pgwt_sampler_poll(struct pgwt_daemon *d)
         }
         n++;
     }
-    if (n == 0)
+    if (n == 0) {
+        pgwt_sampler_note_coverage(s, 0, 0);
         return 0;
+    }
 
     uint64_t faults_before = s->read_faults_total;
     errno = 0;
     int got = pgwt_sampler_read_targets(targets, n, s->read_vals,
+                                        s->read_valid,
                                         &s->read_faults_total);
     int read_errno = errno;
+    pgwt_sampler_note_coverage(s, n, got);
     d->counters.sample_read_faults_total +=
         (s->read_faults_total - faults_before);
 
@@ -790,7 +833,8 @@ int pgwt_sampler_poll(struct pgwt_daemon *d)
      * is not an instrumented idle wait (IoWorkerMain) — i.e. on-CPU or a
      * real wait like IO:DataFileRead. */
     for (int i = 0; i < n; i++) {
-        if (targets[i].backend_type != PGWT_BT_IO_WORKER)
+        if (!s->read_valid[i]
+            || targets[i].backend_type != PGWT_BT_IO_WORKER)
             continue;
         d->counters.io_worker_samples_total++;
         uint32_t we = s->read_vals[i];
@@ -811,7 +855,8 @@ int pgwt_sampler_poll(struct pgwt_daemon *d)
      * query_id the edge-uprobe likewise missed. */
     if (d->debug_query_string_addr) {
         for (int i = 0; i < n; i++) {
-            if (s->read_vals[i] != 0 || targets[i].cmd_open)
+            if (!s->read_valid[i] || s->read_vals[i] != 0
+                || targets[i].cmd_open)
                 continue;   /* not on-CPU, or the edge already caught it */
             if (targets[i].backend_type != PGWT_BT_CLIENT
                 && targets[i].backend_type != PGWT_BT_UNKNOWN)
@@ -830,8 +875,8 @@ int pgwt_sampler_poll(struct pgwt_daemon *d)
     }
 
     uint64_t invalid_before = d->counters.invalid_wait_reads_total;
-    int count = pgwt_sampler_build_batch(targets, s->read_vals, n, tick_ts,
-                                         s->samples,
+    int count = pgwt_sampler_build_batch(targets, s->read_vals, s->read_valid,
+                                         n, tick_ts, s->samples,
                                          &d->counters.invalid_wait_reads_total,
                                          &d->counters.noncmd_cpu_samples_total);
     if (d->counters.invalid_wait_reads_total != invalid_before
@@ -872,6 +917,10 @@ void pgwt_sampler_metrics(struct pgwt_daemon *d, struct pgwt_metrics *m)
     if (d->sampler) {
         m->samples_total      = d->sampler->samples_total;
         m->sample_read_faults = d->sampler->read_faults_total;
+        m->sample_read_failures_total = d->sampler->read_failures_total;
+        m->sample_read_targets = d->sampler->read_targets_last;
+        m->sample_read_valid = d->sampler->read_valid_last;
+        m->sample_read_invalid = d->sampler->read_invalid_last;
     }
 }
 
