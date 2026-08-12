@@ -804,6 +804,20 @@ int pgwt_sampler_poll(struct pgwt_daemon *d)
     d->counters.sample_read_faults_total +=
         (s->read_faults_total - faults_before);
 
+    /* Debug-only evidence for the anomaly CPU-coverage gate. Keep each failed
+     * target attributable: aggregate coverage alone cannot distinguish a
+     * missed storm backend from an unrelated background process disappearing
+     * during the registry/read race. */
+    if (getenv("PGWT_DEBUG_ANOMALY_CPU_TICK")) {
+        for (int i = 0; i < n; i++) {
+            if (!s->read_valid[i])
+                fprintf(stderr,
+                        "ANOMALY-CPU-INVALID: pid=%d backend_type=%s\n",
+                        targets[i].pid,
+                        pgwt_backend_type_name(targets[i].backend_type));
+        }
+    }
+
     /* SMP-1: a tick where NOTHING could be read looks exactly like an idle
      * database in the data — it must be loud out-of-band. */
     switch (pgwt_sampler_health_note(&s->health, n, got, read_errno, tick_ts)) {

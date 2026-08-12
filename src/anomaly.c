@@ -15,6 +15,7 @@
 
 #include <limits.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* ── Pure rule core (no BPF, no escalation) ───────────────────────────── */
@@ -167,12 +168,30 @@ pgwt_anomaly_eval_observation(struct pgwt_anomaly *a,
     bool cpu_fire = false;
     bool cpu_cusum_climbed = false;
 
-    /* LOW coverage or UNKNOWN capacity cannot establish whether demand
-     * recovered. Brief blind gaps hold evidence so intermittent failures do
-     * not erase a real incident. A sustained blind interval can hide genuine
-     * recovery, so it invalidates pre-gap evidence. Fresh UNKNOWN starts a
-     * gap independently; this core does not rely on capacity_changed edges. */
-    if (!obs->cpu_coverage_ok || obs->cpu_capacity <= 0.0) {
+    double u = 0.0;
+    double reference = a->cpu_cusum_k;
+    bool capacity_known = obs->cpu_capacity > 0.0;
+    if (obs->cpu_capacity_affinity_only)
+        reference += a->cpu_margin;
+    if (capacity_known) {
+        u = obs->cpu_aas / obs->cpu_capacity;
+        if (u < 0.0)
+            u = 0.0;
+        if (u > a->cpu_cusum_cap)
+            u = a->cpu_cusum_cap;
+    }
+
+    /* Missing targets bias cpu_aas downward. An incomplete tick whose
+     * observed u still reaches the reference is therefore a conservative,
+     * trusted saturation lower bound: true demand can only be higher. It is
+     * informative and resets the blind-gap counter. An incomplete tick below
+     * reference cannot prove low demand, so it holds S and advances the #80
+     * blind-gap reset. UNKNOWN capacity is independently blind. */
+    bool saturation_lower_bound = capacity_known && u >= reference;
+    bool blind_observation = !capacity_known
+                          || (!obs->cpu_coverage_ok
+                              && !saturation_lower_bound);
+    if (blind_observation) {
         if (a->cpu_coverage_gap_ticks
             < a->cpu_coverage_gap_reset_ticks)
             a->cpu_coverage_gap_ticks++;
@@ -191,24 +210,16 @@ pgwt_anomaly_eval_observation(struct pgwt_anomaly *a,
         a->cpu_cusum = 0.0;
     } else if (!cpu_rule_enabled) {
         a->cpu_cusum = 0.0;
-    } else if (obs->cpu_coverage_ok && obs->cpu_capacity > 0.0) {
-        double u = obs->cpu_aas / obs->cpu_capacity;
-        if (u < 0.0)
-            u = 0.0;
-        if (u > a->cpu_cusum_cap)
-            u = a->cpu_cusum_cap;
-
+    } else if (capacity_known
+               && (obs->cpu_coverage_ok || saturation_lower_bound)) {
         /* A CPU fire closes the current saturation episode. Until a trusted
          * below-slack tick proves recovery, keep S drained and do not re-arm;
          * continuous saturation therefore consumes at most one grant. */
         if (!a->cpu_armed) {
             a->cpu_cusum = 0.0;
-            if (u < a->cpu_cusum_k)
+            if (obs->cpu_coverage_ok && u < a->cpu_cusum_k)
                 a->cpu_armed = true;
         } else {
-            double reference = a->cpu_cusum_k;
-            if (obs->cpu_capacity_affinity_only)
-                reference += a->cpu_margin;
             double before = a->cpu_cusum;
             a->cpu_cusum += a->sample_period_s * (u - reference);
             if (a->cpu_cusum < 0.0)
@@ -216,11 +227,12 @@ pgwt_anomaly_eval_observation(struct pgwt_anomaly *a,
             cpu_cusum_climbed = a->cpu_cusum > before;
             cpu_fire = a->cpu_armed
                     && obs->cpu_aas >= a->cpu_min_aas
+                    && saturation_lower_bound
                     && a->cpu_cusum >= a->cpu_cusum_h;
         }
     }
-    /* LOW coverage and UNKNOWN capacity never evaluate demand or fire from an
-     * untrusted observation. Brief gaps hold S; sustained gaps clear it above. */
+    /* Only incomplete under-reference or UNKNOWN observations are blind.
+     * Brief blind gaps hold S; sustained gaps clear it above. */
     d.cpu_cusum = a->cpu_cusum;
 
     /* ── AAS-vs-baseline rule ──────────────────────────────────────────── */
@@ -393,10 +405,12 @@ void pgwt_anomaly_tick(struct pgwt_daemon *d,
     pgwt_anomaly_metrics_from_batch(samples, n, &aas, &lock_fraction,
                                     &cpu_aas);
 
-    /* Complete read coverage is the conservative evidence boundary. Missing
-     * targets are omitted from the batch; holding S avoids treating that
-     * partial count as a trustworthy saturation observation. A legitimate
-     * empty registry (0 targets, 0 invalid) remains a valid zero-demand tick. */
+    /* Missing targets are omitted from the batch, so cpu_aas is a lower bound
+     * under incomplete coverage. The pure core uses this completeness bit
+     * asymmetrically: an observed saturated lower bound remains informative;
+     * an under-reference partial count is blind and cannot drain S. A
+     * legitimate empty registry (0 targets, 0 invalid) is complete zero
+     * demand. */
     bool coverage_ok = d->sampler == NULL
                     || d->sampler->read_invalid_last == 0;
     struct pgwt_anomaly_observation obs = {
@@ -414,6 +428,32 @@ void pgwt_anomaly_tick(struct pgwt_daemon *d,
     uint64_t now = anomaly_mono_ns();
     struct pgwt_anomaly_decision dec =
         pgwt_anomaly_eval_observation(a, &obs, now);
+
+    if (getenv("PGWT_DEBUG_ANOMALY_CPU_TICK")) {
+        uint32_t read_targets = d->sampler
+                              ? d->sampler->read_targets_last : 0;
+        uint32_t read_valid = d->sampler
+                            ? d->sampler->read_valid_last : 0;
+        uint32_t read_invalid = d->sampler
+                              ? d->sampler->read_invalid_last : 0;
+        double u = obs.cpu_capacity > 0.0
+                 ? obs.cpu_aas / obs.cpu_capacity : -1.0;
+        if (u > a->cpu_cusum_cap)
+            u = a->cpu_cusum_cap;
+        double reference = a->cpu_cusum_k;
+        if (obs.cpu_capacity_affinity_only)
+            reference += a->cpu_margin;
+        fprintf(stderr,
+                "ANOMALY-CPU-TICK: coverage_ok=%d read_invalid_last=%u "
+                "read_targets=%u read_valid=%u cpu_capacity=%.3f "
+                "capacity_changed=%d guard_blocked=%d cpu_armed=%d "
+                "cpu_aas=%.3f u=%.3f reference=%.3f cpu_cusum=%.6f "
+                "cpu_coverage_gap_ticks=%d\n",
+                coverage_ok, read_invalid, read_targets, read_valid,
+                obs.cpu_capacity, obs.cpu_capacity_changed,
+                obs.cpu_guard_blocked, a->cpu_armed, obs.cpu_aas, u,
+                reference, a->cpu_cusum, a->cpu_coverage_gap_ticks);
+    }
 
     char rb[32];
     switch (dec.action) {

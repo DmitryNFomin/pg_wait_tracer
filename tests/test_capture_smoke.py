@@ -44,6 +44,7 @@ import argparse
 import json
 import os
 import re
+import secrets
 import subprocess
 import sys
 import tempfile
@@ -585,23 +586,66 @@ def phase_fork_after_attach(pm_pid, mode):
 
 
 class CpuStorm:
-    """N psql sessions each executing a long run of SHORT CPU-bound
-    statements (~30-100 ms each, fully cached): pg_stat_activity shows
-    them state='active' nearly continuously, and the real command
-    boundaries exercise the T2 command-open gate exactly like production
-    OLTP (one long DO block would hide the gate)."""
+    """N tagged psql sessions for the sampled-CPU live tests.
+
+    fire() deliberately exercises command boundaries for the command-gate
+    coverage phase. fire_continuous() is the saturation-policy stimulus: one
+    bounded, non-spilling command that stays on CPU for the whole window.
+    """
 
     def __init__(self, n):
+        # The process PID is shared by Phase 5 and Phase 6. Add a per-instance
+        # nonce so even overlapping cleanup cannot make one phase discover the
+        # other's sessions.
+        self.application_prefix = (
+            f"pgwt_cpu_storm_{os.getpid()}_{secrets.token_hex(8)}_")
+        self.application_names = [f"{self.application_prefix}{i}"
+                                  for i in range(n)]
         self.sessions = [subprocess.Popen(
             ["psql", "-U", "postgres", "-d", "postgres"],
             stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL, text=True) for _ in range(n)]
+            stderr=subprocess.DEVNULL, text=True,
+            env={**os.environ, "PGAPPNAME": app_name})
+            for app_name in self.application_names]
         time.sleep(1.5)   # connected (and, pre-attach, scanned)
+
+    def backend_pids(self):
+        quoted_names = [name.replace("'", "''")
+                        for name in self.application_names]
+        application_names = ",".join(f"'{name}'" for name in quoted_names)
+        rows = psql(
+            "SELECT pid FROM pg_stat_activity "
+            f"WHERE application_name IN ({application_names}) "
+            "ORDER BY application_name")
+        return [int(row) for row in rows.splitlines()
+                if re.fullmatch(r'\d+', row)]
 
     def fire(self, reps=400):
         stmt = "SELECT count(*) FROM generate_series(1,300000);\n"
         for s in self.sessions:
             s.stdin.write(stmt * reps)
+            s.stdin.flush()
+
+    def fire_continuous(self, duration_s=15):
+        """One CPU-only command per backend for a fixed wall-clock window."""
+        duration_s = int(duration_s)
+        if duration_s <= 0:
+            raise ValueError("duration_s must be positive")
+        stmt = (
+            "DO $pgwt_cpu$\n"
+            "DECLARE\n"
+            f"  stop_at timestamptz := clock_timestamp() + "
+            f"interval '{duration_s} seconds';\n"
+            "  x bigint := 0;\n"
+            "BEGIN\n"
+            "  WHILE clock_timestamp() < stop_at LOOP\n"
+            "    x := (x + 1) % 1000003;\n"
+            "  END LOOP;\n"
+            "  PERFORM x;\n"
+            "END\n"
+            "$pgwt_cpu$;\n")
+        for s in self.sessions:
+            s.stdin.write(stmt)
             s.stdin.flush()
 
     def stop(self):
@@ -628,6 +672,46 @@ def sample_active_sessions(duration_s, interval=0.5):
             counts.append(int(out))
         time.sleep(interval)
     return counts
+
+
+def cpu_storm_state(expected_pids, timeout=10):
+    """Exact pg_stat_activity state for the named Phase-6 backends."""
+    if not expected_pids:
+        return []
+    pid_list = ",".join(str(pid) for pid in expected_pids)
+    out = psql(
+        "SELECT pid, state, COALESCE(wait_event_type, 'CPU'), "
+        "COALESCE(wait_event, 'CPU') FROM pg_stat_activity "
+        f"WHERE pid IN ({pid_list}) ORDER BY pid", timeout=timeout)
+    rows = []
+    for line in out.splitlines():
+        fields = line.split('|')
+        if len(fields) == 4 and re.fullmatch(r'\d+', fields[0]):
+            rows.append((int(fields[0]), fields[1], fields[2], fields[3]))
+    return rows
+
+
+def cpu_storm_state_is_sustained(rows, expected_pids):
+    return ({row[0] for row in rows} == set(expected_pids)
+            and len(rows) == len(expected_pids)
+            and all(row[1:] == ('active', 'CPU', 'CPU') for row in rows))
+
+
+def cpu_storm_state_is_idle(rows, expected_pids):
+    return ({row[0] for row in rows} == set(expected_pids)
+            and len(rows) == len(expected_pids)
+            and all(row[1:] == ('idle', 'Client', 'ClientRead')
+                    for row in rows))
+
+
+def sample_cpu_storm_state(expected_pids, duration_s, interval=0.5,
+                           timeout=10):
+    snapshots = []
+    end = time.time() + duration_s
+    while time.time() < end:
+        snapshots.append(cpu_storm_state(expected_pids, timeout=timeout))
+        time.sleep(interval)
+    return snapshots
 
 
 def aas_bucket_total(bucket):
@@ -1271,40 +1355,137 @@ def phase_cpu_storm_escalation(pm_pid):
     trace_dir = tempfile.mkdtemp(prefix="pgwt_smoke_esc_")
     os.chmod(trace_dir, 0o755)
 
+    # Timing invariant: C=2 reaches h in 1.5/(1.25-0.80) = 3.34s. The 30s
+    # command covers the 5s readiness allowance, the 10s/0.5s ground-truth
+    # sweep including one final 5s query + sleep (15.5s worst case), and the
+    # 5s before-metrics state proof: 5 + 15.5 + 5 = 25.5s, leaving 4.5s.
+    # Control-socket latency is intentionally outside the required-sustained
+    # window: bad_states plus before_metrics_state already prove the incident
+    # reached collection. Completion still has 10s grace. The 75s tracer
+    # leaves 21s after the conservative 3 + 5 + 30 + 10 + 5 + 1 = 54s
+    # startup/readiness/burn/grace/final-state-query/writer-drain bound.
+    burn_duration_s = 30
+    readiness_timeout_s = 5
+    ground_truth_duration_s = 10
+    state_query_timeout_s = 5
+    completion_grace_s = 10
+    tracer_duration_s = 75
+
     storm = CpuStorm(3)
-    tracer = subprocess.Popen(
-        [TRACER, "--mode", "tiered", "--pid", str(pm_pid),
-         "-T", trace_dir, "--duration", "22", "--quiet",
-         "--interval", "5", "--anomaly-cpu-capacity", "2",
+    storm_pids = storm.backend_pids()
+    check(len(storm_pids) == 3,
+          f"saturation workload has exactly three tagged backends "
+          f"(pids={storm_pids})")
+    tracer_argv = [TRACER, "--mode", "tiered", "--pid", str(pm_pid),
+         "-T", trace_dir, "--duration", str(tracer_duration_s), "--quiet",
+         "--interval", "5", "--sample-rate", "60",
+         "--anomaly-cpu-capacity", "2",
          # Isolate the CPU rule without crossing the >=1e6 legacy switch that
          # deliberately disables it too. The pre-warmup storm gives the AAS
          # baseline a positive value, making this factor unreachable.
-         "--anomaly-aas-factor", "999999"],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+         "--anomaly-aas-factor", "999999"]
+    debug_cpu_ticks = bool(os.environ.get("PGWT_DEBUG_ANOMALY_CPU_TICK"))
+    tracer_stderr = tempfile.TemporaryFile() if debug_cpu_ticks \
+        else subprocess.PIPE
+    tracer = subprocess.Popen(
+        tracer_argv,
+        stdout=subprocess.PIPE, stderr=tracer_stderr)
     time.sleep(3.0)   # BPF load + scan; CPU guard needs no baseline warmup
+    storm_from = time.time_ns()
+    storm_to = storm_from
+    storm_states = []
+    before_metrics_state = []
+    metrics = {}
+    status = {}
     try:
+        storm.fire_continuous(duration_s=burn_duration_s)
+        ready_state = []
+        ready_deadline = time.monotonic() + readiness_timeout_s
+        burn_ready_at = ready_deadline
+        while time.monotonic() < ready_deadline:
+            readiness_remaining_s = ready_deadline - time.monotonic()
+            if readiness_remaining_s <= 0:
+                break
+            ready_state = cpu_storm_state(
+                storm_pids,
+                timeout=min(state_query_timeout_s, readiness_remaining_s))
+            if cpu_storm_state_is_sustained(ready_state, storm_pids):
+                burn_ready_at = time.monotonic()
+                break
+            time.sleep(min(0.05, max(
+                0.0, ready_deadline - time.monotonic())))
+        check(cpu_storm_state_is_sustained(ready_state, storm_pids),
+              f"all three saturation backends entered one CPU-only command "
+              f"(state={ready_state})")
+
         storm_from = time.time_ns()
-        storm.fire(reps=800)
-        # Keep 3 demand sessions active for >=10s. C=2 reaches h after roughly
-        # 3.3s at capped demand; querying after the full observation interval
-        # avoids any host-speed/tick-phase timing assumption.
-        storm_active = sample_active_sessions(10.0, interval=0.5)
+        # C=2 reaches h after roughly 3.3s at capped demand. Every ground-truth
+        # snapshot must see all three exact PIDs active and waitless: unlike the
+        # old discrete generate_series burst, this proves the test supplied a
+        # sustained saturation incident rather than assuming it did.
+        storm_states = sample_cpu_storm_state(
+            storm_pids, ground_truth_duration_s, interval=0.5,
+            timeout=state_query_timeout_s)
         storm_to = time.time_ns()
-        metrics = {}
-        status = {}
+        before_metrics_state = cpu_storm_state(
+            storm_pids, timeout=state_query_timeout_s)
         try:
             metrics = ctl_query(trace_dir, "metrics")
             status = ctl_query(trace_dir, "status")
         except OSError as e:
             print(f"  (control socket: {e})")
+
+        # Exact-tier CPU is an interval closed by the command's transition to
+        # ClientRead. Wait for that real boundary before fixing the trace-query
+        # end time; otherwise the one long CPU interval is still open/on-CPU
+        # and cannot yet exist in the persisted trace. All commands were active
+        # at burn_ready_at, so they must finish by burn_ready_at + burn duration;
+        # the completion gate gives that latest expected finish another 10s.
+        completed_state = []
+        completion_deadline = (burn_ready_at + burn_duration_s
+                               + completion_grace_s)
+        while time.monotonic() < completion_deadline:
+            completed_state = cpu_storm_state(
+                storm_pids, timeout=state_query_timeout_s)
+            if cpu_storm_state_is_idle(completed_state, storm_pids):
+                break
+            time.sleep(0.1)
+        check(cpu_storm_state_is_idle(completed_state, storm_pids),
+              f"all three CPU commands closed into ClientRead before the "
+              f"trace query (state={completed_state})")
+        # End the AAS window at the observed active->ClientRead boundary. The
+        # following writer-drain delay must not dilute the last of 8 buckets.
+        storm_to = time.time_ns()
+        time.sleep(1.0)  # let the closed exact intervals drain to the writer
         _, stderr = tracer.communicate(timeout=40)
+        if debug_cpu_ticks:
+            tracer_stderr.seek(0)
+            stderr = tracer_stderr.read()
         err = stderr.decode('utf-8', errors='replace')
     except subprocess.TimeoutExpired:
         tracer.kill()
         _, stderr = tracer.communicate()
+        if debug_cpu_ticks:
+            tracer_stderr.seek(0)
+            stderr = tracer_stderr.read()
         err = stderr.decode('utf-8', errors='replace')
     finally:
         storm.stop()
+        if debug_cpu_ticks:
+            tracer_stderr.close()
+
+    if debug_cpu_ticks:
+        print("--- PGWT_DEBUG_ANOMALY_CPU_TICK tracer stderr ---")
+        print(err)
+
+    bad_states = [state for state in storm_states
+                  if not cpu_storm_state_is_sustained(state, storm_pids)]
+    check(not bad_states and len(storm_states) > 0,
+          f"all three tagged backends stayed active and waitless on every "
+          f"storm poll (snapshots={len(storm_states)}, bad={bad_states[:2]})")
+    check(cpu_storm_state_is_sustained(before_metrics_state, storm_pids),
+          f"CPU-only saturation reaches metrics collection "
+          f"(before={before_metrics_state})")
 
     cpu_fires = metrics.get("anomaly_cpu_saturation_fires_total", 0)
     windows = metrics.get("escalation_windows_total", 0)
@@ -1333,7 +1514,7 @@ def phase_cpu_storm_escalation(pm_pid):
     # sampled buckets read ~0.0 while exact buckets read ~3 — a hard step.
     resp = server_query(trace_dir, "aas",
                         extra={"from": storm_from + 500_000_000,
-                               "to": storm_to - 500_000_000,
+                               "to": storm_to,
                                "buckets": 8})
     buckets = resp.get("buckets", [])
     check(len(buckets) >= 3, f"aas buckets across the tier switch "
@@ -1341,11 +1522,11 @@ def phase_cpu_storm_escalation(pm_pid):
     if buckets:
         totals = [aas_bucket_total(b) for b in buckets]
         lo = min(totals)
-        truth = (sum(storm_active) / len(storm_active)) if storm_active else 3.0
+        truth = min((len(state) for state in storm_states), default=0)
         check(lo >= 1.2,
               f"no AAS step artifact at the tier switch: min bucket = "
               f"{lo:.2f}, buckets = {[f'{t:.1f}' for t in totals]}, "
-              f"psa during storm = {truth:.1f}")
+              f"minimum tagged pg_stat_activity count = {truth}")
 
     subprocess.run(["rm", "-rf", trace_dir])
 
