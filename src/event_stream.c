@@ -14,6 +14,7 @@
 
 #include <string.h>
 #include <time.h>
+#include <errno.h>
 
 /* duration_to_bucket() moved to map_reader.c as pgwt_duration_to_bucket() */
 
@@ -55,21 +56,48 @@ int pgwt_handle_trace_event(void *ctx, void *data, size_t data_sz)
     struct pgwt_daemon *d = ctx;
     struct pgwt_trace_event *evt = data;
     struct pgwt_accumulator *acc = d->event_accum;
+    uint64_t callback_started_ns = pgwt_debug_block_begin(d);
+    uint64_t stage_started_ns;
 
     (void)data_sz;
 
     d->counters.events_total++;
+    if (d->debug_dump_state)
+        d->debug_event_callbacks_total++;
+
+    if (d->test_event_callback_delay_us
+        && d->test_event_callback_delays_left > 0) {
+        d->test_event_callback_delays_left--;
+        struct timespec requested = {
+            .tv_sec = d->test_event_callback_delay_us / 1000000U,
+            .tv_nsec = (long)(d->test_event_callback_delay_us % 1000000U)
+                     * 1000L,
+        };
+        stage_started_ns = pgwt_debug_block_begin(d);
+        while (nanosleep(&requested, &requested) != 0 && errno == EINTR)
+            ;
+        pgwt_debug_block_end(d, "event_callback_test_delay", evt->pid,
+                             stage_started_ns);
+    }
 
     /* Write to trace file if recording is enabled (including markers) */
-    if (d->event_writer)
+    if (d->event_writer) {
+        stage_started_ns = pgwt_debug_block_begin(d);
         pgwt_writer_push_event(d->event_writer, evt);
+        pgwt_debug_block_end(d, "event_callback_trace_writer", evt->pid,
+                             stage_started_ns);
+    }
 
     /* Write to summary file if recording is enabled. Markers pass through
      * here too, but the summary writer's accum_event filters them (FID-4):
      * they must land in the trace (variants / lifecycle / escalation
      * coverage need them) while never entering wait accounting. */
-    if (d->summary_writer)
+    if (d->summary_writer) {
+        stage_started_ns = pgwt_debug_block_begin(d);
         pgwt_summary_push_event(d->summary_writer, evt);
+        pgwt_debug_block_end(d, "event_callback_summary_writer", evt->pid,
+                             stage_started_ns);
+    }
 
     uint32_t we = evt->old_event;
     uint64_t dur = evt->duration_ns;
@@ -79,14 +107,18 @@ int pgwt_handle_trace_event(void *ctx, void *data, size_t data_sz)
 
     /* Skip accumulation for marker events (duration=0, not real waits) */
     if (PGWT_IS_MARKER(we))
-        return 0;
+        goto done;
 
     /* T8: fold the measured CPU of this closed interval into the lifetime
      * counters (observability + the wait-gap self-check). Display-time CPU
      * accounting is unchanged — this only reads evt->cpu_ns. */
+    stage_started_ns = pgwt_debug_block_begin(d);
     pgwt_counters_add_cpu(d, we, dur, evt->cpu_ns);
+    pgwt_debug_block_end(d, "event_callback_cpu_counters", evt->pid,
+                         stage_started_ns);
 
     /* Per-PID accumulation */
+    stage_started_ns = pgwt_debug_block_begin(d);
     struct pgwt_pid_accum *pa = pgwt_get_or_create_pid(acc, evt->pid);
 
     /* T2 live classification (decomposed AAS, docs/AAS_SEMANTICS_DECISION.md).
@@ -133,8 +165,11 @@ int pgwt_handle_trace_event(void *ctx, void *data, size_t data_sz)
                 pa->db_time_ns += dur;
         }
     }
+    pgwt_debug_block_end(d, "event_callback_pid_accumulator", evt->pid,
+                         stage_started_ns);
 
     /* System-wide accumulation */
+    stage_started_ns = pgwt_debug_block_begin(d);
     struct pgwt_event_stats *se = pgwt_get_or_create_system_event(acc, we);
     if (se) {
         se->count++;
@@ -145,15 +180,21 @@ int pgwt_handle_trace_event(void *ctx, void *data, size_t data_sz)
         if (bucket < HISTOGRAM_BUCKETS)
             se->histogram[bucket]++;
     }
+    pgwt_debug_block_end(d, "event_callback_system_accumulator", evt->pid,
+                         stage_started_ns);
 
     /* Time model by class. io_worker time is excluded from DB Time; a
      * non-command CPU interval lands in the idle (Activity) bucket. */
+    stage_started_ns = pgwt_debug_block_begin(d);
     if (!io_worker)
         pgwt_update_time_model(&acc->tm,
                                noncmd_cpu ? WEI(PG_WAIT_ACTIVITY, 0) : we,
                                dur);
+    pgwt_debug_block_end(d, "event_callback_time_model", evt->pid,
+                         stage_started_ns);
 
     /* Query events */
+    stage_started_ns = pgwt_debug_block_begin(d);
     if (evt->query_id != 0 && !io_worker) {
         struct pgwt_query_event_stats *qe =
             pgwt_get_or_create_query_event(acc, evt->query_id, we);
@@ -165,6 +206,24 @@ int pgwt_handle_trace_event(void *ctx, void *data, size_t data_sz)
         }
     }
 
+    pgwt_debug_block_end(d, "event_callback_query_accumulator", evt->pid,
+                         stage_started_ns);
+
+done:
+    if (callback_started_ns) {
+        uint64_t callback_ended_ns = pgwt_debug_monotonic_ns();
+        uint64_t callback_ns = callback_ended_ns >= callback_started_ns
+                             ? callback_ended_ns - callback_started_ns : 0;
+        d->debug_event_callback_ns_total += callback_ns;
+        if (callback_ns > d->debug_event_callback_max_ns)
+            d->debug_event_callback_max_ns = callback_ns;
+        pgwt_debug_block_report("event_callback_total", evt->pid,
+                                callback_started_ns);
+    }
+    d->event_drain_callbacks_current++;
+    if (d->event_drain_callback_limit
+        && d->event_drain_callbacks_current >= d->event_drain_callback_limit)
+        return -EAGAIN;  /* record is fully processed; ask libbpf to yield */
     return 0;
 }
 

@@ -1353,6 +1353,27 @@ to a CHANGELOG entry).
   early skip taken by every entry). Third-generation instrumentation queued:
   STATEDUMP-TIMER (per-tick gate decision) + STATEDUMP-SCAN (iteration and
   skip-path counters).
+  **RESOLVED 2026-08-11 — FOURTH mode was an unbounded event-ring drain.**
+  The main-loop liveness trap caught the whole 13.78s capture inside
+  `event_ring_drain` (`loop_iterations=1`, `timer_ticks=0`; the hog's state
+  remained healthy/countable and its terminal trace flush was correct).
+  Finer callback-stage timing plus the bounded
+  `PGWT_TEST_EVENT_CALLBACK_DELAY_US` fault pinned the leaf: bundled libbpf
+  1.4.7's `ring_buffer__consume()` reloads `producer_pos` until an iteration
+  sees no new data, so a sustained producer can keep one consume call alive
+  indefinitely. The forced pre-fix run processed 164601 callbacks in one
+  20.686s drain; aggregate callback time was 20.673s, no callback exceeded
+  21.5ms, no writer/summary/accumulator leaf exceeded the 50ms strike line,
+  `timer_ticks=0`, live CPU*=0, while /proc measured 18.38s and the terminal
+  trace carried 21.30s. The fix caps each main-loop drain at 64 fully-processed
+  records by using the documented negative-callback stop path; a yielded
+  backlog re-enters epoll with timeout 0, so timer/signal/control fds run
+  between batches without adding a 10ms sleep or dropping the consumed record.
+  Shutdown's final correctness drain stays exhaustive. Deterministic positive
+  and negative coverage lives in `phase_event_ring_drain_budget`: fixed run
+  `timer_ticks=3`, CPU*=7059ms, `/proc=18.40s`, trace=21.32s; test-only
+  `PGWT_TEST_NO_EVENT_DRAIN_BUDGET` restores the pre-fix direction on demand
+  (`timer_ticks=0`, CPU*=0, `/proc=18.39s`, trace=21.30s).
 
 - **Multi-window %DB: windowed-delta drift of measured-CPU vs wall.** The
   multi-window `--view` (Last 1s / Last 3s) differences two cumulative ring

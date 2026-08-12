@@ -958,6 +958,186 @@ def phase_pure_cpu_straddle(pm_pid, mode):
     subprocess.run(["rm", "-rf", trace_dir])
 
 
+def run_event_ring_stall_capture(pm_pid, extra_env):
+    """Run the mode-4 forced-stall workload and return all three witnesses.
+
+    One waitless DO backend supplies the straddling CPU interval. Eight
+    backends emit pg_sleep transitions faster than a deliberately slowed
+    event callback can consume them. On an unbounded libbpf consume, the ring
+    never becomes empty while those producers run, so the display timer cannot
+    run. The delay hook is capped in the daemon; the SQL producers and both
+    subprocess timeouts are bounded here as well.
+    """
+    trace_dir = tempfile.mkdtemp(prefix="pgwt_smoke_event_drain_")
+    os.chmod(trace_dir, 0o755)
+
+    hog = subprocess.Popen(
+        ["psql", "-U", "postgres", "-d", "postgres"],
+        stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL, text=True)
+    hog.stdin.write(
+        "DO $$ DECLARE x bigint := 0; BEGIN "
+        "FOR o IN 1..100000 LOOP "
+        "FOR i IN 1..1000000 LOOP x := x + i; END LOOP; x := 0; "
+        "END LOOP; END $$;\n")
+    hog.stdin.flush()
+    time.sleep(2.5)
+
+    # Eight finite producers remove dependence on per-backend scheduling and
+    # pg_sleep granularity; together they comfortably outrun the hook's
+    # 50-callback/s consumer for the whole negative capture.
+    floods = []
+    for _ in range(8):
+        flood = subprocess.Popen(
+            ["psql", "-U", "postgres", "-d", "postgres"],
+            stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, text=True)
+        flood.stdin.write(
+            "SELECT pg_sleep(0.001) FROM generate_series(1, 20000);\n")
+        flood.stdin.flush()
+        floods.append(flood)
+    time.sleep(0.3)
+
+    argv = [TRACER, "--mode", "full", "--pid", str(pm_pid),
+            "-T", trace_dir, "--duration", "8", "--interval", "2",
+            "--view", "time_model"]
+    env = {**os.environ, "PGWT_DEBUG_DUMP_STATE": "1",
+           "PGWT_TEST_EVENT_CALLBACK_DELAY_US": "20000", **extra_env}
+    tracer = subprocess.Popen(argv, stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, env=env)
+    hog_pid = None
+    oncpu_before = oncpu_after = None
+    win_from = time.time_ns()
+    try:
+        time.sleep(3.0)
+        hog_pid = find_active_do_backend()
+        producer_pids = psql(
+            "SELECT string_agg(pid::text, ',' ORDER BY pid) "
+            "FROM pg_stat_activity WHERE state='active' "
+            "AND query LIKE 'SELECT pg_sleep(0.001)%'")
+        print(f"    forced producer pids={producer_pids!r}; "
+              f"psql_statuses={[proc.poll() for proc in floods]}")
+        oncpu_before = proc_oncpu_ns(hog_pid) if hog_pid else None
+        stdout, stderr = tracer.communicate(timeout=50)
+        oncpu_after = proc_oncpu_ns(hog_pid) if hog_pid else None
+    except subprocess.TimeoutExpired:
+        tracer.kill()
+        stdout, stderr = tracer.communicate()
+        oncpu_after = proc_oncpu_ns(hog_pid) if hog_pid else None
+    finally:
+        for proc in (*floods, hog):
+            try:
+                proc.stdin.write("\\q\n")
+                proc.stdin.flush()
+            except (BrokenPipeError, ValueError):
+                pass
+            proc.terminate()
+        cleanup_stale_backends()
+
+    out = STRIP_ANSI.sub('', stdout.decode('utf-8', errors='replace'))
+    err = stderr.decode('utf-8', errors='replace')
+    proc_ms = ((oncpu_after - oncpu_before) / 1e6
+               if oncpu_before is not None and oncpu_after is not None
+               and oncpu_after > oncpu_before else 0.0)
+    hog_trace_ms = 0.0
+    if hog_pid:
+        win_to = time.time_ns() + 3_000_000_000
+        aresp = server_query(trace_dir, "aas",
+                             extra={"from": win_from, "to": win_to,
+                                    "buckets": 12,
+                                    "filters": {"pid": hog_pid}})
+        buckets = aresp.get("buckets", [])
+        cpu_mean = (sum(b.get("cpu", 0.0) for b in buckets) / len(buckets)
+                    if buckets else 0.0)
+        hog_trace_ms = cpu_mean * (win_to - win_from) / 1e9 * 1000.0
+
+    subprocess.run(["rm", "-rf", trace_dir])
+    return out, err, hog_pid, proc_ms, hog_trace_ms
+
+
+def phase_event_ring_drain_budget(pm_pid):
+    """Mode-4 deterministic regression: a busy event ring must yield to ticks.
+
+    PGWT_TEST_EVENT_CALLBACK_DELAY_US makes a sustained transition producer
+    outrun the trace callback. libbpf 1.4.7's ring_buffer__consume() reloads
+    producer_pos until no new record arrived, so without the daemon-side work
+    budget this single drain spans the capture: timer_ticks=0, live CPU*=0,
+    while the terminal flush and /proc both show the waitless hog's CPU.
+    """
+    print("--- Phase: event-ring drain budget DETERMINISTIC "
+          "(slow callback + sustained producer) ---")
+    out, err, hog_pid, proc_ms, hog_trace_ms = run_event_ring_stall_capture(
+        pm_pid, {})
+
+    for line in err.splitlines():
+        if (line.startswith("STATEDUMP-BLOCK:")
+                or line.startswith("STATEDUMP-META:")
+                or (line.startswith("STATEDUMP:")
+                    and hog_pid is not None and f"pid={hog_pid} " in line)
+                or "PGWT_TEST_EVENT_CALLBACK_DELAY_US" in line):
+            print(f"    {line}")
+
+    check("PGWT_TEST_EVENT_CALLBACK_DELAY_US=20000" in err,
+          "bounded slow-callback hook active")
+    check(re.search(r"STATEDUMP-BLOCK: op=event_ring_(?:consume|drain).*"
+                    r"callbacks=[1-9][0-9]*", err) is not None,
+          f"slow drain reports callback count and attribution "
+          f"(stderr tail {err[-300:]!r})")
+    timer_match = re.search(r"STATEDUMP-META: .*timer_ticks=(\d+)", err)
+    timer_ticks = int(timer_match.group(1)) if timer_match else 0
+    yield_match = re.search(r"STATEDUMP-META: .*event_drain_yields=(\d+)",
+                            err)
+    drain_yields = int(yield_match.group(1)) if yield_match else 0
+    check(drain_yields > 0,
+          f"event drain hit its callback budget and yielded "
+          f"(yields={drain_yields})")
+    check(timer_ticks > 0,
+          f"display timer kept running during the forced drain "
+          f"(timer_ticks={timer_ticks})")
+    live_cpu = parse_time_model(out).get('CPU*', 0.0)
+    check(live_cpu > 500.0,
+          f"forced-drain straddler stays visible live: CPU*={live_cpu:.0f}ms")
+    check(hog_pid is not None and proc_ms > 500.0,
+          f"/proc confirms the waitless hog burned CPU "
+          f"(pid={hog_pid}, delta={proc_ms:.0f}ms)")
+    check(hog_trace_ms > 500.0,
+          f"terminal trace flush preserves the hog CPU "
+          f"(pid={hog_pid}, trace={hog_trace_ms:.0f}ms)")
+
+    # Negative: same bounded fault and producer, but explicitly restore the
+    # pre-fix unbounded libbpf call. It must recreate all three mode-4
+    # witnesses on demand: no display tick/live CPU, positive /proc CPU, and a
+    # correct terminal trace flush. This is intentionally test-only; the loud
+    # hook warning prevents accidental production use.
+    neg_out, neg_err, neg_hog_pid, neg_proc_ms, neg_trace_ms = \
+        run_event_ring_stall_capture(
+            pm_pid, {"PGWT_TEST_NO_EVENT_DRAIN_BUDGET": "1"})
+    for line in neg_err.splitlines():
+        if (line.startswith("STATEDUMP-BLOCK:")
+                or line.startswith("STATEDUMP-META:")
+                or "PGWT_TEST_NO_EVENT_DRAIN_BUDGET" in line):
+            print(f"    NEGATIVE {line}")
+    check("PGWT_TEST_NO_EVENT_DRAIN_BUDGET" in neg_err,
+          "negative restored the pre-fix unbounded consume")
+    neg_timer_match = re.search(
+        r"STATEDUMP-META: .*timer_ticks=(\d+)", neg_err)
+    neg_timer_ticks = (int(neg_timer_match.group(1))
+                       if neg_timer_match else -1)
+    check(neg_timer_ticks == 0,
+          f"unbounded negative starves the display timer "
+          f"(timer_ticks={neg_timer_ticks})")
+    neg_live_cpu = parse_time_model(neg_out).get('CPU*', 0.0)
+    check(neg_live_cpu == 0.0,
+          f"unbounded negative reproduces live CPU*=0 "
+          f"(CPU*={neg_live_cpu:.0f}ms)")
+    check(neg_hog_pid is not None and neg_proc_ms > 500.0,
+          f"negative /proc witness remains positive "
+          f"(pid={neg_hog_pid}, delta={neg_proc_ms:.0f}ms)")
+    check(neg_trace_ms > 500.0,
+          f"negative terminal trace remains correct "
+          f"(pid={neg_hog_pid}, trace={neg_trace_ms:.0f}ms)")
+
+
 def phase_straddle_recovery(pm_pid, mode):
     """DETERMINISTIC regression for the initial-scan straddle race
     (pgwt_recover_unattached_backends, docs/ROADMAP_AND_STATUS.md). phase_pure_cpu_
@@ -1625,6 +1805,8 @@ def main():
                              'need hardware watchpoints to actually fire and '
                              'precise multi-core scheduling (validated on the '
                              'T0 hosted runner + live EL8/EL9 boxes).')
+    parser.add_argument('--event-drain-only', action='store_true',
+                        help='run only the deterministic mode-4 event-drain phase')
     args = parser.parse_args()
 
     if os.geteuid() != 0:
@@ -1657,6 +1839,13 @@ def main():
 
     cleanup_stale_backends()
 
+    if args.event_drain_only:
+        if args.mode != 'full':
+            parser.error('--event-drain-only requires --mode full')
+        phase_event_ring_drain_budget(pm_pid)
+        print(f"\n{tests_passed}/{tests_run} checks passed")
+        sys.exit(0 if tests_failed == 0 else 1)
+
     core = args.capture_core
     phase_live_system_event(pm_pid, args.mode, core=core)
     phase_live_query_event(pm_pid, args.mode, core=core)
@@ -1688,6 +1877,7 @@ def main():
         # sampled/tiered the straddler is found by the sampler's lazy discovery
         # (covered by phase_pure_cpu_straddle above), not this recovery.
         if args.mode == 'full':
+            phase_event_ring_drain_budget(pm_pid)
             phase_straddle_recovery(pm_pid, args.mode)
             # Deterministic regression for the live-view CPU*=0 straddle flake:
             # a pg_sleep→loop straddler with sched_switch forced inert reads
