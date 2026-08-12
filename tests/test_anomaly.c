@@ -691,11 +691,12 @@ static void test_cpu_cusum_gates(void)
         cpu_tick(&a, 5.0, 5.0, 4.0, true, false, false, &clk);
     double before = a.cpu_cusum;
     struct pgwt_anomaly_decision low_coverage =
-        cpu_tick(&a, 100.0, 100.0, 4.0, false, false, false, &clk);
+        cpu_tick(&a, 0.0, 0.0, 4.0, false, false, false, &clk);
     CHECK(low_coverage.action != PGWT_ANOMALY_FIRE,
-          "low-coverage tick fired the CPU guard");
+          "incomplete under-reference tick fired the CPU guard");
     CHECK(a.cpu_cusum == before,
-          "low-coverage tick changed S %.6f -> %.6f", before, a.cpu_cusum);
+          "incomplete under-reference tick changed S %.6f -> %.6f",
+          before, a.cpu_cusum);
 
     /* UNKNOWN is a stable disabled state, even under impossible demand. */
     struct pgwt_anomaly unknown;
@@ -915,8 +916,9 @@ static void test_cpu_cusum_coverage_flaps(void)
     int fire_tick = 0;
 
     /* A short-statement storm can miss one partial-read tick without the
-     * workload itself recovering. Model that as one LOW tick in every three;
-     * the two complete ticks remain saturated at the utilization cap. */
+     * workload itself recovering. Every tick's observed demand still reaches
+     * the utilization cap, so complete and partial ticks are equally strong
+     * conservative saturation evidence. */
     for (int t = 0; t < 61; t++) {
         bool coverage_ok = t % 3 != 2;
         struct pgwt_anomaly_decision d =
@@ -933,14 +935,107 @@ static void test_cpu_cusum_coverage_flaps(void)
           "coverage-flap storm expected one fire "
           "(%d grants / %llu CPU fires)", grants,
           (unsigned long long)flap.cpu_saturation_fires_total);
-    CHECK(fire_tick >= 49 && fire_tick <= 51,
-          "coverage-flap storm fire tick=%d expected about 50", fire_tick);
+    CHECK(fire_tick >= 33 && fire_tick <= 35,
+          "coverage-flap storm fire tick=%d expected about 34", fire_tick);
     CHECK(max_cusum > 1.48 && max_cusum < 1.49,
           "coverage-flap storm max pre-fire S=%.6f expected near h",
           max_cusum);
 
     printf("  flapping storm: fire=%.1fs grants=%d max_pre_fire_S=%.3f\n",
            fire_tick / 10.0, grants, max_cusum);
+}
+
+/* ── CPU CUSUM regression: partial coverage is saturation-monotone ───── */
+static void test_cpu_cusum_incomplete_saturation_monotone(void)
+{
+    printf("--- CPU CUSUM: incomplete saturation stays informative ---\n");
+
+    /* Missing reads can only lower observed CPU demand. Even with incomplete
+     * coverage on every tick, observed u>=reference is therefore a trusted
+     * saturation lower bound and must reach h. The old global coverage gate
+     * held S at zero forever on this stream. */
+    struct pgwt_anomaly saturated;
+    pgwt_anomaly_init(&saturated, true, 10);
+    isolate_cpu_rule(&saturated);
+    uint64_t clk = TICK_NS;
+    int grants = 0;
+    int fire_tick = 0;
+    for (int t = 0; t < 40; t++) {
+        struct pgwt_anomaly_decision d =
+            cpu_tick(&saturated, 3.0, 3.0, 2.0,
+                     false, false, false, &clk);
+        if (d.action == PGWT_ANOMALY_FIRE) {
+            grants++;
+            if (fire_tick == 0)
+                fire_tick = t + 1;
+        }
+    }
+    CHECK(grants == 1 && saturated.cpu_saturation_fires_total == 1,
+          "incomplete saturated stream expected one fire "
+          "(%d grants / %llu CPU fires)", grants,
+          (unsigned long long)saturated.cpu_saturation_fires_total);
+    CHECK(fire_tick >= 33 && fire_tick <= 35,
+          "incomplete saturated stream fire tick=%d expected about 34",
+          fire_tick);
+    CHECK(saturated.cpu_coverage_gap_ticks == 0,
+          "informative incomplete saturation advanced blind gap (%d)",
+          saturated.cpu_coverage_gap_ticks);
+
+    /* The asymmetric half: an incomplete tick below reference may be an
+     * undercount, so it must HOLD rather than falsely drain accumulated S. */
+    struct pgwt_anomaly hold;
+    pgwt_anomaly_init(&hold, true, 10);
+    isolate_cpu_rule(&hold);
+    clk = TICK_NS;
+    for (int t = 0; t < 10; t++)
+        cpu_tick(&hold, 3.0, 3.0, 2.0,
+                 true, false, false, &clk);
+    double held_s = hold.cpu_cusum;
+    cpu_tick(&hold, 0.0, 0.0, 2.0,
+             false, false, false, &clk);
+    CHECK(hold.cpu_cusum == held_s && hold.cpu_coverage_gap_ticks == 1,
+          "incomplete undercount drained S or missed blind gap "
+          "(S=%.6f->%.6f gap=%d)",
+          held_s, hold.cpu_cusum, hold.cpu_coverage_gap_ticks);
+
+    /* #80 remains exact: a sustained fully blind interval still invalidates
+     * pre-gap evidence at the configured reset boundary. */
+    for (int t = 1; t < hold.cpu_coverage_gap_reset_ticks; t++)
+        cpu_tick(&hold, 0.0, 0.0, 2.0,
+                 false, false, false, &clk);
+    CHECK(hold.cpu_coverage_gap_ticks == hold.cpu_coverage_gap_reset_ticks
+          && hold.cpu_cusum == 0.0,
+          "sustained incomplete undercount did not wipe S "
+          "(gap=%d/%d S=%.6f)",
+          hold.cpu_coverage_gap_ticks,
+          hold.cpu_coverage_gap_reset_ticks, hold.cpu_cusum);
+
+    /* Banking S above h behind a high absolute floor must not permit a later
+     * below-reference tick to stale-fire merely because that tick meets the
+     * floor. Every fire needs observed saturation on its own firing tick. */
+    struct pgwt_anomaly firing_tick;
+    pgwt_anomaly_init(&firing_tick, true, 10);
+    isolate_cpu_rule(&firing_tick);
+    firing_tick.cpu_min_aas = 100.0;
+    clk = TICK_NS;
+    for (int t = 0; t < 35; t++)
+        cpu_tick(&firing_tick, 5.0, 5.0, 4.0,
+                 true, false, false, &clk);
+    CHECK(firing_tick.cpu_cusum > firing_tick.cpu_cusum_h,
+          "firing-tick setup did not bank S above h (S=%.6f h=%.6f)",
+          firing_tick.cpu_cusum, firing_tick.cpu_cusum_h);
+    firing_tick.cpu_min_aas = 2.0;
+    struct pgwt_anomaly_decision low =
+        cpu_tick(&firing_tick, 2.0, 2.0, 4.0,
+                 true, false, false, &clk);
+    CHECK(low.action != PGWT_ANOMALY_FIRE
+          && firing_tick.cpu_cusum > firing_tick.cpu_cusum_h,
+          "below-reference firing tick stale-fired banked S "
+          "(action=%d S=%.6f h=%.6f)",
+          low.action, firing_tick.cpu_cusum, firing_tick.cpu_cusum_h);
+
+    printf("  incomplete saturation fire=%.1fs; blind reset=%d ticks\n",
+           fire_tick / 10.0, hold.cpu_coverage_gap_reset_ticks);
 }
 
 /* ── CPU CUSUM regression: blind-gap reset boundaries + UNKNOWN ─────── */
@@ -1337,6 +1432,7 @@ int main(void)
     test_cpu_cusum_episode_latch();
     test_cpu_cusum_floor_and_margin();
     test_cpu_cusum_coverage_flaps();
+    test_cpu_cusum_incomplete_saturation_monotone();
     test_cpu_cusum_coverage_gap_boundaries();
     test_cpu_cusum_coverage_return();
     test_cpu_cusum_near_flag();
