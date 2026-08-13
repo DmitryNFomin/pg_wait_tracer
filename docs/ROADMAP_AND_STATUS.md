@@ -64,9 +64,39 @@
 
 ### 🔲 Left (not built)
 
+> **⚠️ OPEN CONCERN — sampled-tier overhead (CRITICAL, under investigation 2026-08-13).**
+> A pgbench run on PG17 (scale 50, 8c/4t) measured the always-on SAMPLED tier at
+> **≈−30% TPS read-only / −23% read-write vs no tracer** — far from the headline
+> "≈0% (TPS within noise)". Hot-path perf localized the cost to synchronous
+> per-query uprobes in the PostgreSQL BACKEND (suppressing them restored baseline).
+> Overhead is a core product guarantee, so this is a NO-GO-class issue. Under
+> active investigation: characterize overhead-vs-TPS (high-throughput-specific, or
+> bad at normal OLTP too?), bisect WHEN/what introduced the per-query uprobe cost
+> (was "≈0%" ever accurate, or a later regression?), and assess the fix
+> (async / sample / eliminate the per-query probes). Findings + verdict to follow;
+> the "≈0%" claims elsewhere in this doc are pending that reconciliation.
+
 **Real feature gaps (defined, never built):**
 - **PostgreSQL 14 / 15 / 16** — only PG13 shipped; README says "14-16 not yet".
-- **Plan-id capture** (`st_plan_id`, PG18+) — in three docs, never implemented.
+- **Query trace-context / OpenTelemetry export** (from PR #33, in review) — W3C
+  `traceparent` extraction linking a client app-request to its DB execution, a
+  native OTel/Jaeger JSON exporter, and a span model over the shipped U3
+  per-execution waterfall. DB-safe (daemon-side only, no PG overhead). Review
+  (2026-08-13) found fixable correctness bugs — exporter wait-class decode,
+  in-progress-export crash, `traceparent` bounds/W3C validation,
+  mock/`protocol-drift` sync; merge after the author's fixes.
+- **Plan-node algebra / plan-attributed tracing** (from PR #34; subsumes the old
+  `st_plan_id` plan-id-capture item) — waits attributed to plan operators
+  (`active_node_id`), live plan operator-tree capture, a hierarchical plan-node
+  waterfall + Jaeger flamegraph. DECLINED as-is (2026-08-13) pending a REDESIGN:
+  the current impl is inert (plan capture unwired), NodeTag tables are wrong on 5
+  of 6 majors, per-`query_id` plan identity is invalid, the foreign-memory walker
+  is unsafe (unbounded recursion on cyclic pointers), and it adds an O(n²)
+  `top_queries` server regression; the intended per-tuple `Exec*` uprobe approach
+  measured/estimated **150–322× per-query overhead**. Redesign constraints:
+  out-of-band per-EXECUTION capture (not per-tuple probes, not per-`query_id`
+  identity), offsets derived/verified against live structs per major, a
+  bounded/cycle-safe walk, and NEVER active in the always-on sampled tier.
 - **B6 analysis-view UIs** — per-execution waterfall, latency scatter, transition
   matrix; plus deferred UI for concurrency/burst markers and lock-chain /
   interference (the compute **endpoints** exist; only the UI is missing). Now
