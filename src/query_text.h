@@ -70,7 +70,16 @@ void pgwt_qt_check(struct pgwt_query_text_capture *qt,
 void pgwt_qt_store(struct pgwt_query_text_capture *qt,
                    uint64_t query_id, const char *text, pid_t pid);
 
+/* Parse W3C traceparent from SQL comment text (F-C1).
+ * Extracts 32-hex trace_id and 16-hex parent_span_id.
+ * Accepts both unquoted (traceparent=00-...) and quoted (traceparent='00-...') formats.
+ * Returns 1 if a valid traceparent was found and parsed, 0 otherwise. */
+int pgwt_parse_traceparent(const char *text,
+                           char *trace_id, size_t trace_id_sz,
+                           char *parent_span_id, size_t parent_span_id_sz);
+
 /* Close the JSONL file. */
 void pgwt_qt_close(struct pgwt_query_text_capture *qt);
 
 #endif /* PGWT_QUERY_TEXT_H */
+

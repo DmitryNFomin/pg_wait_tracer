@@ -1,0 +1,5 @@
+{
+  "name": "pg-wait-tracer-static",
+  "private": true,
+  "type": "module"
+}

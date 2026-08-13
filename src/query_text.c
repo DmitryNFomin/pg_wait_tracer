@@ -6,6 +6,8 @@
 #include "pg_wait_tracer.h"
 
 #include <string.h>
+#include <strings.h>
+#include <ctype.h>
 #include <stdlib.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -223,6 +225,73 @@ static void qt_load_existing(struct pgwt_query_text_capture *qt,
                 qt->cap_logged ? " — id table full" : "");
 }
 
+/* ── W3C traceparent parsing (F-C1) ──────────────────────── */
+
+int pgwt_parse_traceparent(const char *text,
+                           char *trace_id, size_t trace_id_sz,
+                           char *parent_span_id, size_t parent_span_id_sz)
+{
+    if (trace_id_sz > 0) trace_id[0] = '\0';
+    if (parent_span_id_sz > 0) parent_span_id[0] = '\0';
+    if (!text || text[0] == '\0') return 0;
+
+    /* Bound rescan cost: inspect at most 4096 characters */
+    size_t text_len = strlen(text);
+    if (text_len > 4096) text_len = 4096;
+
+    for (size_t i = 0; i + 55 <= text_len; i++) {
+        if (strncasecmp(&text[i], "traceparent", 11) != 0)
+            continue;
+
+        const char *tp = &text[i] + 11;
+        /* Skip separator characters: spaces, tabs, colons, equals, single/double quotes */
+        while (*tp == ' ' || *tp == '\t' || *tp == ':' || *tp == '=' || *tp == '\'' || *tp == '"')
+            tp++;
+
+        /* Verify remaining length is enough for W3C traceparent (53 chars: 2+1+32+1+16) */
+        if ((size_t)(tp - text) + 53 > text_len)
+            break;
+
+        /* Version: 2 hex digits followed by '-' */
+        if (!isxdigit((unsigned char)tp[0]) || !isxdigit((unsigned char)tp[1]) || tp[2] != '-')
+            continue;
+
+        /* Trace ID: 32 hex digits, followed by '-', cannot be all zeros */
+        const char *tid_start = tp + 3;
+        int valid = 1;
+        int all_zero_tid = 1;
+        for (int k = 0; k < 32; k++) {
+            if (!isxdigit((unsigned char)tid_start[k])) { valid = 0; break; }
+            if (tid_start[k] != '0') all_zero_tid = 0;
+        }
+        if (!valid || all_zero_tid || tid_start[32] != '-')
+            continue;
+
+        /* Parent Span ID: 16 hex digits, cannot be all zeros */
+        const char *pid_start = tid_start + 33;
+        int all_zero_pid = 1;
+        for (int k = 0; k < 16; k++) {
+            if (!isxdigit((unsigned char)pid_start[k])) { valid = 0; break; }
+            if (pid_start[k] != '0') all_zero_pid = 0;
+        }
+        if (!valid || all_zero_pid)
+            continue;
+
+        if (trace_id_sz > 32) {
+            for (int k = 0; k < 32; k++)
+                trace_id[k] = (char)tolower((unsigned char)tid_start[k]);
+            trace_id[32] = '\0';
+        }
+        if (parent_span_id_sz > 16) {
+            for (int k = 0; k < 16; k++)
+                parent_span_id[k] = (char)tolower((unsigned char)pid_start[k]);
+            parent_span_id[16] = '\0';
+        }
+        return 1;
+    }
+    return 0;
+}
+
 /* ── Public API ──────────────────────────────────────────── */
 
 int pgwt_qt_init(struct pgwt_query_text_capture *qt,
@@ -300,12 +369,21 @@ void pgwt_qt_check(struct pgwt_query_text_capture *qt,
         wall_ns = (uint64_t)wall.tv_sec * 1000000000ULL + wall.tv_nsec;
     }
 
+    char trace_id[36] = {0};
+    char parent_span_id[20] = {0};
+    pgwt_parse_traceparent(qt->read_buf, trace_id, sizeof(trace_id), parent_span_id, sizeof(parent_span_id));
+
     /* Write JSONL line: {"q":"<query_id>","t":"<text>","ts":<wall_ns>}
      * query_id as string to preserve full int64 precision (JSON numbers
      * are doubles with only 53 bits). Signed — can be negative. */
     fprintf(qt->fp, "{\"q\":\"%lld\",\"t\":", (long long)(int64_t)query_id);
     write_json_string(qt->fp, qt->read_buf, len);
-    fprintf(qt->fp, ",\"ts\":%llu}\n", (unsigned long long)wall_ns);
+    fprintf(qt->fp, ",\"ts\":%llu", (unsigned long long)wall_ns);
+    if (trace_id[0] != '\0') {
+        fprintf(qt->fp, ",\"trace_id\":\"%s\",\"parent_span_id\":\"%s\"",
+                trace_id, parent_span_id);
+    }
+    fprintf(qt->fp, "}\n");
     fflush(qt->fp);
 
     if (qt->verbose)
@@ -336,10 +414,19 @@ void pgwt_qt_store(struct pgwt_query_text_capture *qt,
     clock_gettime(CLOCK_REALTIME, &wall);
     uint64_t wall_ns = (uint64_t)wall.tv_sec * 1000000000ULL + wall.tv_nsec;
 
+    char trace_id[36] = {0};
+    char parent_span_id[20] = {0};
+    pgwt_parse_traceparent(text, trace_id, sizeof(trace_id), parent_span_id, sizeof(parent_span_id));
+
     /* Write JSONL line */
     fprintf(qt->fp, "{\"q\":\"%lld\",\"t\":", (long long)(int64_t)query_id);
     write_json_string(qt->fp, text, len);
-    fprintf(qt->fp, ",\"ts\":%llu}\n", (unsigned long long)wall_ns);
+    fprintf(qt->fp, ",\"ts\":%llu", (unsigned long long)wall_ns);
+    if (trace_id[0] != '\0') {
+        fprintf(qt->fp, ",\"trace_id\":\"%s\",\"parent_span_id\":\"%s\"",
+                trace_id, parent_span_id);
+    }
+    fprintf(qt->fp, "}\n");
     fflush(qt->fp);
 
     if (qt->verbose)
