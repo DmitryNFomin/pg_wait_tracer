@@ -215,9 +215,117 @@ static void test_permissions(void)
     free(qt);
 }
 
+static void test_traceparent_parsing(void)
+{
+    printf("--- F-C1: W3C traceparent comment parsing ---\n");
+    char tid[36] = {0};
+    char psid[20] = {0};
+
+    /* Standard unquoted */
+    const char *q1 = "/*traceparent=00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01*/ SELECT 1";
+    CHECK(pgwt_parse_traceparent(q1, tid, sizeof(tid), psid, sizeof(psid)) == 1, "unquoted traceparent");
+    CHECK(strcmp(tid, "4bf92f3577b34da6a3ce929d0e0e4736") == 0, "tid match (got %s)", tid);
+    CHECK(strcmp(psid, "00f067aa0ba902b7") == 0, "psid match (got %s)", psid);
+
+    /* Single quoted (SQLCommenter standard) */
+    const char *q2 = "/*traceparent='00-60b6417fa7216a6552a4be6058e5ec9b-325b138ff40c1d29-01'*/ SELECT 2";
+    CHECK(pgwt_parse_traceparent(q2, tid, sizeof(tid), psid, sizeof(psid)) == 1, "single-quoted traceparent");
+    CHECK(strcmp(tid, "60b6417fa7216a6552a4be6058e5ec9b") == 0, "tid match (got %s)", tid);
+    CHECK(strcmp(psid, "325b138ff40c1d29") == 0, "psid match (got %s)", psid);
+
+    /* Double quoted */
+    const char *q3 = "/*traceparent=\"00-a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4-1234567890abcdef-00\"*/ SELECT 3";
+    CHECK(pgwt_parse_traceparent(q3, tid, sizeof(tid), psid, sizeof(psid)) == 1, "double-quoted traceparent");
+    CHECK(strcmp(tid, "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4") == 0, "tid match (got %s)", tid);
+    CHECK(strcmp(psid, "1234567890abcdef") == 0, "psid match (got %s)", psid);
+
+    /* Colon separator with spaces */
+    const char *q4 = "/* traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01 */ SELECT 4";
+    CHECK(pgwt_parse_traceparent(q4, tid, sizeof(tid), psid, sizeof(psid)) == 1, "colon traceparent");
+    CHECK(strcmp(tid, "4bf92f3577b34da6a3ce929d0e0e4736") == 0, "tid match (got %s)", tid);
+    CHECK(strcmp(psid, "00f067aa0ba902b7") == 0, "psid match (got %s)", psid);
+
+    /* Mixed SQLCommenter tags */
+    const char *q5 = "/*action='list',controller='orders',traceparent='00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01'*/ SELECT 5";
+    CHECK(pgwt_parse_traceparent(q5, tid, sizeof(tid), psid, sizeof(psid)) == 1, "mixed tags traceparent");
+    CHECK(strcmp(tid, "4bf92f3577b34da6a3ce929d0e0e4736") == 0, "tid match (got %s)", tid);
+    CHECK(strcmp(psid, "00f067aa0ba902b7") == 0, "psid match (got %s)", psid);
+
+    /* Invalid: all-zero trace ID (W3C violation) */
+    const char *q6 = "/*traceparent='00-00000000000000000000000000000000-00f067aa0ba902b7-01'*/ SELECT 6";
+    CHECK(pgwt_parse_traceparent(q6, tid, sizeof(tid), psid, sizeof(psid)) == 0, "reject all-zero tid");
+
+    /* Invalid: all-zero span ID (W3C violation) */
+    const char *q7 = "/*traceparent='00-4bf92f3577b34da6a3ce929d0e0e4736-0000000000000000-01'*/ SELECT 7";
+    CHECK(pgwt_parse_traceparent(q7, tid, sizeof(tid), psid, sizeof(psid)) == 0, "reject all-zero span id");
+
+    /* Invalid: non-hex characters */
+    const char *q8 = "/*traceparent='00-4bf92f3577b34da6a3ce929d0e0e473g-00f067aa0ba902b7-01'*/ SELECT 8";
+    CHECK(pgwt_parse_traceparent(q8, tid, sizeof(tid), psid, sizeof(psid)) == 0, "reject non-hex");
+
+    /* Invalid: truncated */
+    const char *q9 = "/*traceparent='00-4bf92f3577b34da6a3ce929d0e0e4736-00f0'*/ SELECT 9";
+    CHECK(pgwt_parse_traceparent(q9, tid, sizeof(tid), psid, sizeof(psid)) == 0, "reject truncated");
+
+    /* Uppercase hex normalization */
+    const char *q11 = "/*traceparent='00-4BF92F3577B34DA6A3CE929D0E0E4736-00F067AA0BA902B7-01'*/ SELECT 11";
+    CHECK(pgwt_parse_traceparent(q11, tid, sizeof(tid), psid, sizeof(psid)) == 1, "uppercase hex traceparent");
+    CHECK(strcmp(tid, "4bf92f3577b34da6a3ce929d0e0e4736") == 0, "tid normalized lowercase (got %s)", tid);
+    CHECK(strcmp(psid, "00f067aa0ba902b7") == 0, "psid normalized lowercase (got %s)", psid);
+
+    /* Multi-line SQL comment with formatting */
+    const char *q12 = "/*\n * application: backend\n * traceparent='00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00'\n */ SELECT 12";
+    CHECK(pgwt_parse_traceparent(q12, tid, sizeof(tid), psid, sizeof(psid)) == 1, "multiline comment traceparent");
+    CHECK(strcmp(tid, "4bf92f3577b34da6a3ce929d0e0e4736") == 0, "tid match (got %s)", tid);
+    CHECK(strcmp(psid, "00f067aa0ba902b7") == 0, "psid match (got %s)", psid);
+
+    /* Trace flag 02 */
+    const char *q13 = "/*traceparent='00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-02'*/ SELECT 13";
+    CHECK(pgwt_parse_traceparent(q13, tid, sizeof(tid), psid, sizeof(psid)) == 1, "flag 02 traceparent");
+
+    /* Plain query without traceparent */
+    const char *q10 = "SELECT 10";
+    CHECK(pgwt_parse_traceparent(q10, tid, sizeof(tid), psid, sizeof(psid)) == 0, "plain query no traceparent");
+}
+
+static void test_traceparent_jsonl_output(void)
+{
+    printf("--- F-C1: traceparent serialization in query_texts.jsonl ---\n");
+    rm_rf(TEST_DIR);
+    mkdir(TEST_DIR, 0755);
+
+    struct pgwt_query_text_capture *qt = calloc(1, sizeof(*qt));
+    CHECK(pgwt_qt_init(qt, TEST_DIR, 0, 0, (gid_t)-1) == 0, "init for traceparent jsonl");
+
+    const char *q_with_trace = "/*traceparent='00-60b6417fa7216a6552a4be6058e5ec9b-325b138ff40c1d29-01'*/ SELECT * FROM users";
+    const char *q_no_trace = "SELECT count(*) FROM orders";
+
+    pgwt_qt_store(qt, 501, q_with_trace, 0);
+    pgwt_qt_store(qt, 502, q_no_trace, 0);
+    pgwt_qt_close(qt);
+    free(qt);
+
+    FILE *f = fopen(jsonl_path(), "r");
+    CHECK(f != NULL, "opened query_texts.jsonl");
+    char line1[1024] = {0};
+    char line2[1024] = {0};
+    CHECK(fgets(line1, sizeof(line1), f) != NULL, "read line 1");
+    CHECK(fgets(line2, sizeof(line2), f) != NULL, "read line 2");
+    fclose(f);
+
+    CHECK(strstr(line1, "\"trace_id\":\"60b6417fa7216a6552a4be6058e5ec9b\"") != NULL,
+          "line 1 contains trace_id");
+    CHECK(strstr(line1, "\"parent_span_id\":\"325b138ff40c1d29\"") != NULL,
+          "line 1 contains parent_span_id");
+    CHECK(strstr(line2, "trace_id") == NULL,
+          "line 2 has no trace_id");
+}
+
 int main(void)
 {
-    printf("=== test_query_text (T5: DUR-4/10) ===\n");
+    printf("=== test_query_text (T5: DUR-4/10 + F-C1: traceparent) ===\n");
+    test_traceparent_parsing();
+    test_traceparent_jsonl_output();
     test_append_and_dedup();
     test_torn_line_tolerated();
     test_compaction();
@@ -227,3 +335,4 @@ int main(void)
     printf("\n%d/%d tests passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;
 }
+

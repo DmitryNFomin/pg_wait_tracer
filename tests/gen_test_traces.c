@@ -57,6 +57,7 @@
 #include "event_writer.h"
 #include "summary_writer.h"
 #include "pg_wait_tracer.h"
+#include "query_text.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -81,6 +82,30 @@ struct test_backend {
 struct test_query {
     uint64_t id;
     char     text[256];
+    char     trace_id[36];
+    char     parent_span_id[20];
+};
+
+struct test_plan_node {
+    uint32_t id;
+    uint32_t tag;
+    char     type[32];
+    char     rel[64];
+    char     alias[32];
+    char     filter[128];
+    char     label[256];
+    int      workers;
+    uint32_t left_id;
+    uint32_t right_id;
+    bool     has_left;
+    bool     has_right;
+};
+
+struct test_plan_tree {
+    uint64_t               query_id;
+    uint32_t               pid;
+    int                    num_nodes;
+    struct test_plan_node  nodes[64];
 };
 
 struct scenario {
@@ -105,6 +130,9 @@ struct scenario {
 
     struct test_query queries[MAX_QUERIES];
     int num_queries;
+
+    struct test_plan_tree plan_trees[16];
+    int num_plan_trees;
 };
 
 /* ── Minimal JSON parser (good enough for test scenarios) ─── */
@@ -212,8 +240,76 @@ static int parse_queries(const char *arr, struct scenario *sc)
         const char *v;
         if ((v = find_key(p, "id"))) { q->id = strtoull(v, NULL, 10); }
         if ((v = find_key(p, "text"))) { parse_string(&v, q->text, sizeof(q->text)); }
+        if ((v = find_key(p, "trace_id")) && v < end) { parse_string(&v, q->trace_id, sizeof(q->trace_id)); }
+        if ((v = find_key(p, "parent_span_id")) && v < end) { parse_string(&v, q->parent_span_id, sizeof(q->parent_span_id)); }
 
         sc->num_queries++;
+        p = end + 1;
+    }
+    return 0;
+}
+
+static int parse_plan_trees(const char *arr, struct scenario *sc)
+{
+    const char *p = skip_ws(arr);
+    if (*p != '[') return -1;
+    p++;
+
+    while (*p && sc->num_plan_trees < 16) {
+        p = skip_ws(p);
+        if (*p == ']') break;
+        if (*p == ',') { p++; continue; }
+        if (*p != '{') break;
+
+        const char *end = find_matching(p, '{', '}');
+        if (!end) break;
+
+        struct test_plan_tree *pt = &sc->plan_trees[sc->num_plan_trees];
+        memset(pt, 0, sizeof(*pt));
+
+        const char *v;
+        if ((v = find_key(p, "query_id")) && v < end) pt->query_id = strtoull(v, NULL, 10);
+        if ((v = find_key(p, "pid")) && v < end) pt->pid = (uint32_t)strtoull(v, NULL, 10);
+
+        const char *narr = find_key(p, "nodes");
+        if (narr && narr < end) {
+            const char *np = skip_ws(narr);
+            if (*np == '[') {
+                np++;
+                while (*np && pt->num_nodes < 64) {
+                    np = skip_ws(np);
+                    if (*np == ']') break;
+                    if (*np == ',') { np++; continue; }
+                    if (*np != '{') break;
+                    const char *nend = find_matching(np, '{', '}');
+                    if (!nend) break;
+
+                    struct test_plan_node *node = &pt->nodes[pt->num_nodes];
+                    memset(node, 0, sizeof(*node));
+                    const char *nv;
+                    if ((nv = find_key(np, "id")) && nv < nend) node->id = (uint32_t)strtoull(nv, NULL, 10);
+                    if ((nv = find_key(np, "tag")) && nv < nend) node->tag = (uint32_t)strtoull(nv, NULL, 10);
+                    if ((nv = find_key(np, "type")) && nv < nend) parse_string(&nv, node->type, sizeof(node->type));
+                    if ((nv = find_key(np, "rel")) && nv < nend) parse_string(&nv, node->rel, sizeof(node->rel));
+                    if ((nv = find_key(np, "alias")) && nv < nend) parse_string(&nv, node->alias, sizeof(node->alias));
+                    if ((nv = find_key(np, "filter")) && nv < nend) parse_string(&nv, node->filter, sizeof(node->filter));
+                    if ((nv = find_key(np, "label")) && nv < nend) parse_string(&nv, node->label, sizeof(node->label));
+                    if ((nv = find_key(np, "workers")) && nv < nend) node->workers = (int)strtol(nv, NULL, 10);
+                    if ((nv = find_key(np, "left_id")) && nv < nend) {
+                        node->left_id = (uint32_t)strtoull(nv, NULL, 10);
+                        node->has_left = true;
+                    }
+                    if ((nv = find_key(np, "right_id")) && nv < nend) {
+                        node->right_id = (uint32_t)strtoull(nv, NULL, 10);
+                        node->has_right = true;
+                    }
+                    pt->num_nodes++;
+                    np = nend + 1;
+                }
+            }
+        }
+
+        sc->num_plan_trees++;
         p = end + 1;
     }
     return 0;
@@ -298,6 +394,8 @@ static int parse_scenario(const char *json, struct scenario *sc)
         parse_backends(v, sc);
     if ((v = find_key(json, "queries")))
         parse_queries(v, sc);
+    if ((v = find_key(json, "plan_trees")))
+        parse_plan_trees(v, sc);
     if ((v = find_key(json, "events")))
         parse_events(v, sc);
     if ((v = find_key(json, "sample_period_ns")))
@@ -362,9 +460,52 @@ static int write_query_texts(const char *dir, struct scenario *sc)
 
     for (int i = 0; i < sc->num_queries; i++) {
         struct test_query *q = &sc->queries[i];
-        fprintf(f, "{\"q\":%llu,\"t\":\"%s\",\"ts\":%llu}\n",
+        if (q->trace_id[0] == '\0') {
+            pgwt_parse_traceparent(q->text, q->trace_id, sizeof(q->trace_id),
+                                   q->parent_span_id, sizeof(q->parent_span_id));
+        }
+        fprintf(f, "{\"q\":%llu,\"t\":\"%s\",\"ts\":%llu",
                 (unsigned long long)q->id, q->text,
                 (unsigned long long)1000000000ULL);
+        if (q->trace_id[0] != '\0') {
+            fprintf(f, ",\"trace_id\":\"%s\",\"parent_span_id\":\"%s\"",
+                    q->trace_id, q->parent_span_id);
+        }
+        fprintf(f, "}\n");
+    }
+
+    fclose(f);
+    return 0;
+}
+
+static int write_plan_trees(const char *dir, struct scenario *sc)
+{
+    if (sc->num_plan_trees <= 0) return 0;
+    char path[512];
+    snprintf(path, sizeof(path), "%s/plan_trees.jsonl", dir);
+    FILE *f = fopen(path, "w");
+    if (!f) { perror(path); return -1; }
+
+    for (int i = 0; i < sc->num_plan_trees; i++) {
+        struct test_plan_tree *pt = &sc->plan_trees[i];
+        fprintf(f, "{\"q\":\"%llu\",\"pid\":%u,\"ts\":%llu,\"nodes\":[",
+                (unsigned long long)pt->query_id, pt->pid,
+                (unsigned long long)1000000000ULL);
+        for (int j = 0; j < pt->num_nodes; j++) {
+            struct test_plan_node *n = &pt->nodes[j];
+            if (j > 0) fprintf(f, ",");
+            fprintf(f, "{\"id\":%u,\"tag\":%u", n->id, n->tag);
+            if (n->type[0]) fprintf(f, ",\"type\":\"%s\"", n->type);
+            if (n->rel[0]) fprintf(f, ",\"rel\":\"%s\"", n->rel);
+            if (n->alias[0]) fprintf(f, ",\"alias\":\"%s\"", n->alias);
+            if (n->filter[0]) fprintf(f, ",\"filter\":\"%s\"", n->filter);
+            if (n->label[0]) fprintf(f, ",\"label\":\"%s\"", n->label);
+            if (n->workers > 0) fprintf(f, ",\"workers\":%d", n->workers);
+            if (n->has_left) fprintf(f, ",\"left_id\":%u", n->left_id);
+            if (n->has_right) fprintf(f, ",\"right_id\":%u", n->right_id);
+            fprintf(f, "}");
+        }
+        fprintf(f, "]}\n");
     }
 
     fclose(f);
@@ -650,6 +791,7 @@ int main(int argc, char **argv)
     int rc = 0;
     if (write_backends_jsonl(outdir, sc) != 0) rc = 1;
     if (write_query_texts(outdir, sc) != 0) rc = 1;
+    if (write_plan_trees(outdir, sc) != 0) rc = 1;
     if (write_traces(outdir, sc, wall_offset_ns) != 0) rc = 1;
 
     /* Patch file headers so mono_to_wall = wall_offset (default 0: wall

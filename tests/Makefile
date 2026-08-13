@@ -15,7 +15,7 @@ TESTS     = test_wait_event test_cmdline test_event_writer test_event_reader \
             test_effective_cores \
             test_coop test_bucket \
             test_pg13_resolve test_discovery_pie test_discovery_nopie \
-            test_replay_fidelity test_durability test_query_text \
+            test_replay_fidelity test_durability test_query_text test_plan_tree \
             test_golden_fixture \
             gen_test_traces gen_bench_traces test_concurrent_rw cross_validate \
             dump_markers
@@ -155,6 +155,11 @@ test_durability: test_durability.c $(BUILD)/server_event_writer.o \
 test_query_text: test_query_text.c ../src/query_text.c
 	$(CC) $(CFLAGS) -o $@ $^
 
+# test_plan_tree: F-C4 — plan_trees.jsonl append + dedup + multi-version NodeTag
+# resolution (PG13-18) + permissions. Compiles plan_tree.c directly (BPF-free).
+test_plan_tree: test_plan_tree.c ../src/plan_tree.c
+	$(CC) $(CFLAGS) -o $@ $^
+
 # test_golden_fixture: T7/TST-10 — decode the COMMITTED golden trace bytes
 # (tests/fixtures/golden/rev<N>/) and checksum the event stream, pinning
 # on-disk format compatibility across future changes. Server build (no BPF
@@ -166,7 +171,9 @@ test_golden_fixture: test_golden_fixture.c $(BUILD)/server_event_reader.o \
 
 # Server-build objects for gen_test_traces
 SERVER_OBJS = $(BUILD)/server_event_writer.o $(BUILD)/server_summary_writer.o \
-              $(BUILD)/server_wait_event.o $(BUILD)/server_spawn.o $(BUILD)/server_cJSON.o
+              $(BUILD)/server_wait_event.o $(BUILD)/server_spawn.o \
+              $(BUILD)/server_query_text.o $(BUILD)/server_plan_tree.o \
+              $(BUILD)/server_cJSON.o
 
 gen_test_traces: gen_test_traces.c $(SERVER_OBJS)
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -llz4

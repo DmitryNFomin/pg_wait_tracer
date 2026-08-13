@@ -203,6 +203,10 @@ export function createWaterfallView() {
             detailOpts = { executionStart: model.selected.start_ns,
                 executionEnd: model.detailEnd };
             const lines = [];
+            if (model.detail && model.detail.trace_id) {
+                lines.push('W3C Trace: ' + model.detail.trace_id +
+                    (model.detail.parent_span_id ? ' (Parent: ' + model.detail.parent_span_id + ')' : ''));
+            }
             if (model.waterfall.truncated && model.waterfall.total_count != null) {
                 lines.push('Showing ' + model.waterfall.kept_count + ' of ' +
                     model.waterfall.total_count + ' execution events.');

@@ -106,7 +106,9 @@ static void emit_json(cJSON *root)
 
 struct qt_entry {
     uint64_t query_id;
-    char    *text;        /* heap-allocated SQL text */
+    char    *text;            /* heap-allocated SQL text */
+    char     trace_id[36];     /* W3C 32-hex trace ID if present */
+    char     parent_span_id[20]; /* W3C 16-hex parent span ID if present */
 };
 
 /* ── Backend metadata map ─────────────────────────────────── */
@@ -117,6 +119,31 @@ struct bm_entry {
     char     type[32];
     char     user[64];
     char     db[64];
+};
+
+/* ── Plan tree map ────────────────────────────────────────── */
+
+struct server_plan_node {
+    uint32_t id;
+    uint32_t tag;
+    char     type[32];
+    char     rel[64];
+    char     alias[32];
+    char     filter[128];
+    char     label[256];
+    int      workers;
+    uint32_t left_id;
+    uint32_t right_id;
+    bool     has_left;
+    bool     has_right;
+};
+
+struct pt_entry {
+    uint64_t                 query_id;
+    uint32_t                 pid;
+    uint64_t                 ts;
+    int                      num_nodes;
+    struct server_plan_node *nodes;
 };
 
 /* ── Server state ─────────────────────────────────────────── */
@@ -253,6 +280,11 @@ struct pgwt_server {
     int  bm_capacity;
     int  bm_count;
 
+    /* Plan tree map: query_id → nodes list (dynamic, power-of-2 sized) */
+    struct pt_entry *pt_map;
+    int  pt_capacity;
+    int  pt_count;
+
     /* T2: pid → category-flag table (sorted by pid), derived from bm_map.
      * Feeds pgwt_tag_events so every raw compute path can apply the
      * decomposed-AAS model (io_worker exclusion, categories). */
@@ -379,7 +411,8 @@ static uint64_t qt_hash64(uint64_t x)
 }
 
 static void qt_map_insert(struct pgwt_server *srv, uint64_t query_id,
-                           const char *text)
+                           const char *text, const char *trace_id,
+                           const char *parent_span_id)
 {
     if (!srv->qt_map) return;
     int mask = srv->qt_capacity - 1;
@@ -389,6 +422,10 @@ static void qt_map_insert(struct pgwt_server *srv, uint64_t query_id,
         if (e->query_id == 0) {
             e->query_id = query_id;
             e->text = strdup(text);
+            if (trace_id && trace_id[0])
+                snprintf(e->trace_id, sizeof(e->trace_id), "%s", trace_id);
+            if (parent_span_id && parent_span_id[0])
+                snprintf(e->parent_span_id, sizeof(e->parent_span_id), "%s", parent_span_id);
             srv->qt_count++;
             return;
         }
@@ -411,7 +448,7 @@ static void qt_map_clear(struct pgwt_server *srv)
     srv->qt_count = 0;
 }
 
-static const char *qt_map_lookup(const struct pgwt_server *srv, uint64_t query_id)
+static const struct qt_entry *qt_map_lookup_entry(const struct pgwt_server *srv, uint64_t query_id)
 {
     if (query_id == 0 || !srv->qt_map)
         return NULL;
@@ -420,12 +457,18 @@ static const char *qt_map_lookup(const struct pgwt_server *srv, uint64_t query_i
     for (int i = 0; i < srv->qt_capacity; i++) {
         const struct qt_entry *e = &srv->qt_map[idx];
         if (e->query_id == query_id)
-            return e->text;
+            return e;
         if (e->query_id == 0)
             return NULL;
         idx = (idx + 1) & mask;
     }
     return NULL;
+}
+
+static const char *qt_map_lookup(const struct pgwt_server *srv, uint64_t query_id)
+{
+    const struct qt_entry *e = qt_map_lookup_entry(srv, query_id);
+    return e ? e->text : NULL;
 }
 
 /* Load query_texts.jsonl from trace dir into the hash map.
@@ -455,6 +498,8 @@ static void server_load_query_texts(struct pgwt_server *srv)
 
         cJSON *q = cJSON_GetObjectItem(root, "q");
         cJSON *t = cJSON_GetObjectItem(root, "t");
+        cJSON *tid = cJSON_GetObjectItem(root, "trace_id");
+        cJSON *psid = cJSON_GetObjectItem(root, "parent_span_id");
 
         uint64_t qid = 0;
         if (cJSON_IsString(q) && q->valuestring)
@@ -466,7 +511,9 @@ static void server_load_query_texts(struct pgwt_server *srv)
             continue;
         }
 
-        qt_map_insert(srv, qid, t->valuestring);
+        qt_map_insert(srv, qid, t->valuestring,
+                      tid && cJSON_IsString(tid) ? tid->valuestring : "",
+                      psid && cJSON_IsString(psid) ? psid->valuestring : "");
         cJSON_Delete(root);
     }
 
@@ -599,6 +646,169 @@ static void server_load_backends(struct pgwt_server *srv)
     if (srv->bm_count > 0)
         fprintf(stderr, "pgwt-server: loaded %d backend metadata entries\n",
                 srv->bm_count);
+}
+
+/* ── Plan tree map operations ─────────────────────────────── */
+
+static void pt_map_clear(struct pgwt_server *srv)
+{
+    if (srv->pt_map) {
+        for (int i = 0; i < srv->pt_capacity; i++) {
+            if (srv->pt_map[i].nodes) {
+                free(srv->pt_map[i].nodes);
+                srv->pt_map[i].nodes = NULL;
+            }
+        }
+        free(srv->pt_map);
+        srv->pt_map = NULL;
+    }
+    srv->pt_capacity = 0;
+    srv->pt_count = 0;
+}
+
+static void pt_map_insert(struct pgwt_server *srv, uint64_t query_id,
+                          uint32_t pid, uint64_t ts,
+                          const struct server_plan_node *nodes, int num_nodes)
+{
+    if (!srv->pt_map || srv->pt_capacity <= 0 || query_id == 0) return;
+    int mask = srv->pt_capacity - 1;
+    uint32_t idx = (uint32_t)(qt_hash64(query_id) & mask);
+    for (int i = 0; i < srv->pt_capacity; i++) {
+        struct pt_entry *e = &srv->pt_map[idx];
+        if (e->query_id == 0 || e->query_id == query_id) {
+            if (e->query_id == query_id && e->nodes) {
+                free(e->nodes);
+                e->nodes = NULL;
+            } else if (e->query_id == 0) {
+                srv->pt_count++;
+            }
+            e->query_id = query_id;
+            e->pid = pid;
+            e->ts = ts;
+            e->num_nodes = num_nodes;
+            if (num_nodes > 0 && nodes) {
+                e->nodes = calloc(num_nodes, sizeof(struct server_plan_node));
+                if (e->nodes) {
+                    memcpy(e->nodes, nodes, num_nodes * sizeof(struct server_plan_node));
+                }
+            }
+            return;
+        }
+        idx = (idx + 1) & mask;
+    }
+}
+
+static const struct pt_entry *pt_map_lookup(const struct pgwt_server *srv, uint64_t query_id)
+{
+    if (query_id == 0 || !srv->pt_map || srv->pt_capacity <= 0)
+        return NULL;
+    int mask = srv->pt_capacity - 1;
+    uint32_t idx = (uint32_t)(qt_hash64(query_id) & mask);
+    for (int i = 0; i < srv->pt_capacity; i++) {
+        const struct pt_entry *e = &srv->pt_map[idx];
+        if (e->query_id == query_id)
+            return e;
+        if (e->query_id == 0)
+            return NULL;
+        idx = (idx + 1) & mask;
+    }
+    return NULL;
+}
+
+static void server_load_plan_trees(struct pgwt_server *srv)
+{
+    char path[600];
+    snprintf(path, sizeof(path), "%s/plan_trees.jsonl", srv->trace_dir);
+
+    int lines = count_lines(path);
+    srv->pt_capacity = next_pow2(lines * 2);
+    srv->pt_map = calloc(srv->pt_capacity, sizeof(struct pt_entry));
+    if (!srv->pt_map) { srv->pt_capacity = 0; return; }
+
+    FILE *fp = fopen(path, "r");
+    if (!fp) return;
+
+    char *line = NULL;
+    size_t line_cap = 0;
+    ssize_t line_len;
+
+    while ((line_len = getline(&line, &line_cap, fp)) > 0) {
+        cJSON *root = cJSON_Parse(line);
+        if (!root) continue;
+
+        cJSON *q = cJSON_GetObjectItem(root, "q");
+        cJSON *pid_item = cJSON_GetObjectItem(root, "pid");
+        cJSON *ts_item = cJSON_GetObjectItem(root, "ts");
+        cJSON *nodes_arr = cJSON_GetObjectItem(root, "nodes");
+
+        uint64_t qid = 0;
+        if (cJSON_IsString(q) && q->valuestring)
+            qid = strtoull(q->valuestring, NULL, 10);
+        else if (cJSON_IsNumber(q))
+            qid = (uint64_t)q->valuedouble;
+
+        if (qid == 0 || !cJSON_IsArray(nodes_arr)) {
+            cJSON_Delete(root);
+            continue;
+        }
+
+        uint32_t pid = cJSON_IsNumber(pid_item) ? (uint32_t)pid_item->valuedouble : 0;
+        uint64_t ts = cJSON_IsNumber(ts_item) ? (uint64_t)ts_item->valuedouble : 0;
+
+        int num_nodes = cJSON_GetArraySize(nodes_arr);
+        struct server_plan_node *nodes = NULL;
+        if (num_nodes > 0) {
+            nodes = calloc(num_nodes, sizeof(struct server_plan_node));
+            if (nodes) {
+                for (int i = 0; i < num_nodes; i++) {
+                    cJSON *n = cJSON_GetArrayItem(nodes_arr, i);
+                    if (!n) continue;
+                    cJSON *id = cJSON_GetObjectItem(n, "id");
+                    cJSON *tag = cJSON_GetObjectItem(n, "tag");
+                    cJSON *type = cJSON_GetObjectItem(n, "type");
+                    cJSON *rel = cJSON_GetObjectItem(n, "rel");
+                    cJSON *alias = cJSON_GetObjectItem(n, "alias");
+                    cJSON *filter = cJSON_GetObjectItem(n, "filter");
+                    cJSON *label = cJSON_GetObjectItem(n, "label");
+                    cJSON *workers = cJSON_GetObjectItem(n, "workers");
+                    cJSON *left = cJSON_GetObjectItem(n, "left_id");
+                    cJSON *right = cJSON_GetObjectItem(n, "right_id");
+
+                    if (id && cJSON_IsNumber(id)) nodes[i].id = (uint32_t)id->valuedouble;
+                    if (tag && cJSON_IsNumber(tag)) nodes[i].tag = (uint32_t)tag->valuedouble;
+                    if (type && cJSON_IsString(type) && type->valuestring)
+                        snprintf(nodes[i].type, sizeof(nodes[i].type), "%s", type->valuestring);
+                    if (rel && cJSON_IsString(rel) && rel->valuestring)
+                        snprintf(nodes[i].rel, sizeof(nodes[i].rel), "%s", rel->valuestring);
+                    if (alias && cJSON_IsString(alias) && alias->valuestring)
+                        snprintf(nodes[i].alias, sizeof(nodes[i].alias), "%s", alias->valuestring);
+                    if (filter && cJSON_IsString(filter) && filter->valuestring)
+                        snprintf(nodes[i].filter, sizeof(nodes[i].filter), "%s", filter->valuestring);
+                    if (label && cJSON_IsString(label) && label->valuestring)
+                        snprintf(nodes[i].label, sizeof(nodes[i].label), "%s", label->valuestring);
+                    if (workers && cJSON_IsNumber(workers))
+                        nodes[i].workers = (int)workers->valuedouble;
+                    if (left && cJSON_IsNumber(left)) {
+                        nodes[i].left_id = (uint32_t)left->valuedouble;
+                        nodes[i].has_left = true;
+                    }
+                    if (right && cJSON_IsNumber(right)) {
+                        nodes[i].right_id = (uint32_t)right->valuedouble;
+                        nodes[i].has_right = true;
+                    }
+                }
+            }
+        }
+
+        pt_map_insert(srv, qid, pid, ts, nodes, num_nodes);
+        if (nodes) free(nodes);
+        cJSON_Delete(root);
+    }
+
+    free(line);
+    fclose(fp);
+    if (srv->pt_count > 0)
+        fprintf(stderr, "pgwt-server: loaded %d plan trees\n", srv->pt_count);
 }
 
 /* Map a backends.jsonl type string to its T2 category flag (mirrors
@@ -1630,6 +1840,7 @@ static void server_destroy(struct pgwt_server *srv)
     srv->cov_count = 0;
     gens_free(srv);
     qt_map_clear(srv);
+    pt_map_clear(srv);
     free(srv->bm_map);
     srv->bm_map = NULL;
     free(srv->pid_cats);
@@ -1673,6 +1884,7 @@ static int server_init(struct pgwt_server *srv, const char *trace_dir)
 
     server_load_query_texts(srv);
     server_load_backends(srv);
+    server_load_plan_trees(srv);
     server_build_pid_cats(srv);
 
     return 0;
@@ -1799,6 +2011,8 @@ static void handle_info(struct pgwt_server *srv, struct pgwt_request *req)
      * as it discovers backends/queries). These files are small — fast. */
     qt_map_clear(srv);
     server_load_query_texts(srv);
+    pt_map_clear(srv);
+    server_load_plan_trees(srv);
     free(srv->bm_map);
     srv->bm_map = NULL;
     srv->bm_capacity = 0;
@@ -2287,10 +2501,16 @@ static void handle_top_queries(struct pgwt_server *srv, struct pgwt_request *req
             }
         }
 
-        /* Add query text if available */
-        const char *qt = qt_map_lookup(srv, res.rows[i].query_id);
-        if (qt)
-            cJSON_AddStringToObject(r, "text", qt);
+        /* Add query text and trace context if available */
+        const struct qt_entry *qe = qt_map_lookup_entry(srv, res.rows[i].query_id);
+        if (qe) {
+            if (qe->text)
+                cJSON_AddStringToObject(r, "text", qe->text);
+            if (qe->trace_id[0])
+                cJSON_AddStringToObject(r, "trace_id", qe->trace_id);
+            if (qe->parent_span_id[0])
+                cJSON_AddStringToObject(r, "parent_span_id", qe->parent_span_id);
+        }
 
         /* Per-class time breakdown */
         cJSON *classes = cJSON_AddArrayToObject(r, "classes");
@@ -2812,6 +3032,14 @@ static void handle_executions(struct pgwt_server *srv,
     cJSON *root = cJSON_CreateObject();
     cJSON_AddNumberToObject(root, "id", (double)req->id);
     add_fidelity(root, &linfo);
+    if (req->filter.query_id) {
+        const struct qt_entry *qe = qt_map_lookup_entry(srv, req->filter.query_id);
+        if (qe) {
+            if (qe->text) cJSON_AddStringToObject(root, "query_text", qe->text);
+            if (qe->trace_id[0]) cJSON_AddStringToObject(root, "trace_id", qe->trace_id);
+            if (qe->parent_span_id[0]) cJSON_AddStringToObject(root, "parent_span_id", qe->parent_span_id);
+        }
+    }
     cJSON *rows = cJSON_AddArrayToObject(root, "rows");
     for (int i = 0; i < returned; i++)
         serialize_execution_row(rows, &res.rows[i]);
@@ -2972,6 +3200,12 @@ static void handle_execution_detail(struct pgwt_server *srv,
     cJSON_AddNumberToObject(root, "id", (double)req->id);
     add_fidelity(root, &window_info);
     cjson_add_query_id_string(root, "query_id", detail.query_id);
+    const struct qt_entry *qe = qt_map_lookup_entry(srv, detail.query_id);
+    if (qe) {
+        if (qe->text) cJSON_AddStringToObject(root, "query_text", qe->text);
+        if (qe->trace_id[0]) cJSON_AddStringToObject(root, "trace_id", qe->trace_id);
+        if (qe->parent_span_id[0]) cJSON_AddStringToObject(root, "parent_span_id", qe->parent_span_id);
+    }
     cJSON_AddItemToObject(root, "leader",
                           serialize_exec_lane(&detail.leader,
                                               detail.query_id, 1));
@@ -2985,6 +3219,25 @@ static void handle_execution_detail(struct pgwt_server *srv,
         cjson_add_uint64_string(plan, "end_ns", detail.plan_end_ns);
     } else {
         cJSON_AddNullToObject(root, "plan");
+    }
+    const struct pt_entry *pte = pt_map_lookup(srv, detail.query_id);
+    if (pte && pte->num_nodes > 0 && pte->nodes) {
+        cJSON *pt_arr = cJSON_AddArrayToObject(root, "plan_tree");
+        for (int i = 0; i < pte->num_nodes; i++) {
+            const struct server_plan_node *n = &pte->nodes[i];
+            cJSON *obj = cJSON_CreateObject();
+            cJSON_AddNumberToObject(obj, "id", n->id);
+            cJSON_AddNumberToObject(obj, "tag", n->tag);
+            if (n->type[0]) cJSON_AddStringToObject(obj, "type", n->type);
+            if (n->rel[0]) cJSON_AddStringToObject(obj, "rel", n->rel);
+            if (n->alias[0]) cJSON_AddStringToObject(obj, "alias", n->alias);
+            if (n->filter[0]) cJSON_AddStringToObject(obj, "filter", n->filter);
+            if (n->label[0]) cJSON_AddStringToObject(obj, "label", n->label);
+            if (n->workers > 0) cJSON_AddNumberToObject(obj, "workers", n->workers);
+            if (n->has_left) cJSON_AddNumberToObject(obj, "left_id", n->left_id);
+            if (n->has_right) cJSON_AddNumberToObject(obj, "right_id", n->right_id);
+            cJSON_AddItemToArray(pt_arr, obj);
+        }
     }
     cJSON_AddNumberToObject(root, "total_count", detail.total_events);
     cJSON_AddNumberToObject(root, "kept_count", detail.kept_events);
