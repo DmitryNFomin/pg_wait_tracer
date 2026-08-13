@@ -57,6 +57,7 @@
 #include "event_writer.h"
 #include "summary_writer.h"
 #include "pg_wait_tracer.h"
+#include "query_text.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -81,6 +82,8 @@ struct test_backend {
 struct test_query {
     uint64_t id;
     char     text[256];
+    char     trace_id[36];
+    char     parent_span_id[20];
 };
 
 struct scenario {
@@ -212,6 +215,8 @@ static int parse_queries(const char *arr, struct scenario *sc)
         const char *v;
         if ((v = find_key(p, "id"))) { q->id = strtoull(v, NULL, 10); }
         if ((v = find_key(p, "text"))) { parse_string(&v, q->text, sizeof(q->text)); }
+        if ((v = find_key(p, "trace_id")) && v < end) { parse_string(&v, q->trace_id, sizeof(q->trace_id)); }
+        if ((v = find_key(p, "parent_span_id")) && v < end) { parse_string(&v, q->parent_span_id, sizeof(q->parent_span_id)); }
 
         sc->num_queries++;
         p = end + 1;
@@ -362,9 +367,18 @@ static int write_query_texts(const char *dir, struct scenario *sc)
 
     for (int i = 0; i < sc->num_queries; i++) {
         struct test_query *q = &sc->queries[i];
-        fprintf(f, "{\"q\":%llu,\"t\":\"%s\",\"ts\":%llu}\n",
+        if (q->trace_id[0] == '\0') {
+            pgwt_parse_traceparent(q->text, q->trace_id, sizeof(q->trace_id),
+                                   q->parent_span_id, sizeof(q->parent_span_id));
+        }
+        fprintf(f, "{\"q\":%llu,\"t\":\"%s\",\"ts\":%llu",
                 (unsigned long long)q->id, q->text,
                 (unsigned long long)1000000000ULL);
+        if (q->trace_id[0] != '\0') {
+            fprintf(f, ",\"trace_id\":\"%s\",\"parent_span_id\":\"%s\"",
+                    q->trace_id, q->parent_span_id);
+        }
+        fprintf(f, "}\n");
     }
 
     fclose(f);

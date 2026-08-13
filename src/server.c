@@ -107,6 +107,8 @@ static void emit_json(cJSON *root)
 struct qt_entry {
     uint64_t query_id;
     char    *text;        /* heap-allocated SQL text */
+    char     trace_id[36];
+    char     parent_span_id[20];
 };
 
 /* ── Backend metadata map ─────────────────────────────────── */
@@ -379,7 +381,8 @@ static uint64_t qt_hash64(uint64_t x)
 }
 
 static void qt_map_insert(struct pgwt_server *srv, uint64_t query_id,
-                           const char *text)
+                           const char *text, const char *trace_id,
+                           const char *parent_span_id)
 {
     if (!srv->qt_map) return;
     int mask = srv->qt_capacity - 1;
@@ -389,6 +392,10 @@ static void qt_map_insert(struct pgwt_server *srv, uint64_t query_id,
         if (e->query_id == 0) {
             e->query_id = query_id;
             e->text = strdup(text);
+            if (trace_id && trace_id[0])
+                snprintf(e->trace_id, sizeof(e->trace_id), "%s", trace_id);
+            if (parent_span_id && parent_span_id[0])
+                snprintf(e->parent_span_id, sizeof(e->parent_span_id), "%s", parent_span_id);
             srv->qt_count++;
             return;
         }
@@ -411,7 +418,7 @@ static void qt_map_clear(struct pgwt_server *srv)
     srv->qt_count = 0;
 }
 
-static const char *qt_map_lookup(const struct pgwt_server *srv, uint64_t query_id)
+static const struct qt_entry *qt_map_lookup_entry(const struct pgwt_server *srv, uint64_t query_id)
 {
     if (query_id == 0 || !srv->qt_map)
         return NULL;
@@ -420,12 +427,18 @@ static const char *qt_map_lookup(const struct pgwt_server *srv, uint64_t query_i
     for (int i = 0; i < srv->qt_capacity; i++) {
         const struct qt_entry *e = &srv->qt_map[idx];
         if (e->query_id == query_id)
-            return e->text;
+            return e;
         if (e->query_id == 0)
             return NULL;
         idx = (idx + 1) & mask;
     }
     return NULL;
+}
+
+static const char *qt_map_lookup(const struct pgwt_server *srv, uint64_t query_id)
+{
+    const struct qt_entry *e = qt_map_lookup_entry(srv, query_id);
+    return e ? e->text : NULL;
 }
 
 /* Load query_texts.jsonl from trace dir into the hash map.
@@ -455,6 +468,8 @@ static void server_load_query_texts(struct pgwt_server *srv)
 
         cJSON *q = cJSON_GetObjectItem(root, "q");
         cJSON *t = cJSON_GetObjectItem(root, "t");
+        cJSON *tid = cJSON_GetObjectItem(root, "trace_id");
+        cJSON *psid = cJSON_GetObjectItem(root, "parent_span_id");
 
         uint64_t qid = 0;
         if (cJSON_IsString(q) && q->valuestring)
@@ -466,7 +481,10 @@ static void server_load_query_texts(struct pgwt_server *srv)
             continue;
         }
 
-        qt_map_insert(srv, qid, t->valuestring);
+        const char *trace_id = cJSON_IsString(tid) ? tid->valuestring : "";
+        const char *parent_span_id = cJSON_IsString(psid) ? psid->valuestring : "";
+
+        qt_map_insert(srv, qid, t->valuestring, trace_id, parent_span_id);
         cJSON_Delete(root);
     }
 
@@ -2287,10 +2305,16 @@ static void handle_top_queries(struct pgwt_server *srv, struct pgwt_request *req
             }
         }
 
-        /* Add query text if available */
-        const char *qt = qt_map_lookup(srv, res.rows[i].query_id);
-        if (qt)
-            cJSON_AddStringToObject(r, "text", qt);
+        /* Add query text and trace context if available */
+        const struct qt_entry *qe = qt_map_lookup_entry(srv, res.rows[i].query_id);
+        if (qe) {
+            if (qe->text)
+                cJSON_AddStringToObject(r, "text", qe->text);
+            if (qe->trace_id[0])
+                cJSON_AddStringToObject(r, "trace_id", qe->trace_id);
+            if (qe->parent_span_id[0])
+                cJSON_AddStringToObject(r, "parent_span_id", qe->parent_span_id);
+        }
 
         /* Per-class time breakdown */
         cJSON *classes = cJSON_AddArrayToObject(r, "classes");
@@ -2812,6 +2836,14 @@ static void handle_executions(struct pgwt_server *srv,
     cJSON *root = cJSON_CreateObject();
     cJSON_AddNumberToObject(root, "id", (double)req->id);
     add_fidelity(root, &linfo);
+    if (req->filter.query_id) {
+        const struct qt_entry *qe = qt_map_lookup_entry(srv, req->filter.query_id);
+        if (qe) {
+            if (qe->text) cJSON_AddStringToObject(root, "query_text", qe->text);
+            if (qe->trace_id[0]) cJSON_AddStringToObject(root, "trace_id", qe->trace_id);
+            if (qe->parent_span_id[0]) cJSON_AddStringToObject(root, "parent_span_id", qe->parent_span_id);
+        }
+    }
     cJSON *rows = cJSON_AddArrayToObject(root, "rows");
     for (int i = 0; i < returned; i++)
         serialize_execution_row(rows, &res.rows[i]);
@@ -2972,6 +3004,12 @@ static void handle_execution_detail(struct pgwt_server *srv,
     cJSON_AddNumberToObject(root, "id", (double)req->id);
     add_fidelity(root, &window_info);
     cjson_add_query_id_string(root, "query_id", detail.query_id);
+    const struct qt_entry *qe = qt_map_lookup_entry(srv, detail.query_id);
+    if (qe) {
+        if (qe->text) cJSON_AddStringToObject(root, "query_text", qe->text);
+        if (qe->trace_id[0]) cJSON_AddStringToObject(root, "trace_id", qe->trace_id);
+        if (qe->parent_span_id[0]) cJSON_AddStringToObject(root, "parent_span_id", qe->parent_span_id);
+    }
     cJSON_AddItemToObject(root, "leader",
                           serialize_exec_lane(&detail.leader,
                                               detail.query_id, 1));

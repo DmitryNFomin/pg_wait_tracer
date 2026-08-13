@@ -166,7 +166,8 @@ test_golden_fixture: test_golden_fixture.c $(BUILD)/server_event_reader.o \
 
 # Server-build objects for gen_test_traces
 SERVER_OBJS = $(BUILD)/server_event_writer.o $(BUILD)/server_summary_writer.o \
-              $(BUILD)/server_wait_event.o $(BUILD)/server_spawn.o $(BUILD)/server_cJSON.o
+              $(BUILD)/server_wait_event.o $(BUILD)/server_spawn.o \
+              $(BUILD)/server_query_text.o $(BUILD)/server_cJSON.o
 
 gen_test_traces: gen_test_traces.c $(SERVER_OBJS)
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -llz4

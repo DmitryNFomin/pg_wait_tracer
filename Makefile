@@ -129,6 +129,7 @@ SERVER_SRCS = $(SRC_DIR)/server.c \
               $(SRC_DIR)/spawn.c \
               $(SRC_DIR)/cmdline.c \
               $(SRC_DIR)/backend_meta.c \
+              $(SRC_DIR)/query_text.c \
               $(SRC_DIR)/cJSON.c
 SERVER_OBJS = $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/server_%.o,$(SERVER_SRCS))
 SERVER_LDFLAGS = -lz -llz4 -lm
