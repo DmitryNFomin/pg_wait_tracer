@@ -21,6 +21,7 @@ test_coop
 test_concurrent_rw
 test_durability
 test_query_text
+test_plan_tree
 test_golden_fixture
 test_pg13_resolve
 test_discovery_pie

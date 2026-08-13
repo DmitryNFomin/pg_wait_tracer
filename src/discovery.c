@@ -475,6 +475,33 @@ int pgwt_detect_pg13_query_offsets(int pg_major,
     }
 }
 
+int pgwt_detect_plan_tree_offsets(int pg_major,
+                                  struct pgwt_plan_tree_offsets *out)
+{
+    if (!out)
+        return 0;
+    memset(out, 0, sizeof(*out));
+
+    if (pg_major < 13 || pg_major > 18)
+        return 0;
+
+    out->plan_type          = 0;    /* offsetof(Node, type) */
+    out->plan_plannodeid    = 40;   /* offsetof(Plan, plan_node_id) */
+    out->plan_lefttree      = 64;   /* offsetof(Plan, lefttree) */
+    out->plan_righttree     = 72;   /* offsetof(Plan, righttree) */
+    out->plan_sizeof        = 104;  /* sizeof(Plan) */
+    out->gather_num_workers = 104;  /* offsetof(Gather, num_workers) */
+
+    /* PlannedStmt.planTree is offset 32 on PG13-17; on PG18 planId (uint64)
+     * was inserted after queryId, shifting planTree to offset 40. */
+    if (pg_major >= 18)
+        out->plannedstmt_plantree = 40;
+    else
+        out->plannedstmt_plantree = 32;
+
+    return 1;
+}
+
 int pgwt_detect_pgss_loaded(pid_t postmaster_pid)
 {
     char path[64];

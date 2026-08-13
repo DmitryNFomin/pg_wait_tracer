@@ -60,6 +60,28 @@ def lifecycle_scenario():
             {"id": 100, "text": "SELECT parallel_work()"},
             {"id": 200, "text": "SELECT still_running()"},
         ],
+        "plan_trees": [
+            {
+                "query_id": 100,
+                "pid": 1000,
+                "nodes": [
+                    {
+                        "id": 0,
+                        "tag": 364,
+                        "type": "Gather",
+                        "workers": 2,
+                        "left_id": 1,
+                    },
+                    {
+                        "id": 1,
+                        "tag": 335,
+                        "type": "Seq Scan",
+                        "rel": "orders",
+                        "label": "Seq Scan on orders",
+                    },
+                ],
+            }
+        ],
         "events": events,
     }
 
@@ -163,6 +185,12 @@ def test_lifecycle_and_detail(t):
                        "detail carries the plan start before execution")
             t.check_eq(plan.get("end_ns"), str(BASE - 3 * MS),
                        "detail plan end is a string")
+            pt = detail.get("plan_tree")
+            t.check(isinstance(pt, list) and len(pt) == 2,
+                    "plan_tree array is attached to execution_detail")
+            t.check_eq(pt[0].get("type"), "Gather", "plan node 0 type is Gather")
+            t.check_eq(pt[0].get("workers"), 2, "plan node 0 has 2 workers")
+            t.check_eq(pt[1].get("rel"), "orders", "plan node 1 rel is orders")
             t.check(detail.get("truncated") is False and
                     detail.get("kept_count") == detail.get("total_count"),
                     "detail reports honest aggregate event retention")

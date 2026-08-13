@@ -91,6 +91,22 @@ struct pgwt_pg13_query_offsets {
 int pgwt_detect_pg13_query_offsets(int pg_major,
                                    struct pgwt_pg13_query_offsets *out);
 
+/* Plan-tree capture offsets (PlannedStmt -> Plan tree walking).
+ * Plan.plan_node_id @ 40, lefttree @ 64, righttree @ 72, sizeof(Plan) = 104.
+ * PlannedStmt.planTree: 32 on PG13-17, 40 on PG18 (due to planId field). */
+struct pgwt_plan_tree_offsets {
+    int plan_type;              /* offsetof(Node, type) = 0 */
+    int plan_plannodeid;        /* offsetof(Plan, plan_node_id) = 40 */
+    int plan_lefttree;          /* offsetof(Plan, lefttree) = 64 */
+    int plan_righttree;         /* offsetof(Plan, righttree) = 72 */
+    int plan_sizeof;            /* sizeof(Plan) = 104 */
+    int plannedstmt_plantree;   /* PG13-17: 32, PG18: 40 */
+    int gather_num_workers;     /* offsetof(Gather, num_workers) = 104 */
+};
+
+int pgwt_detect_plan_tree_offsets(int pg_major,
+                                  struct pgwt_plan_tree_offsets *out);
+
 /* Detect whether pg_stat_statements is loaded into the running postmaster.
  * Scans /proc/<postmaster_pid>/maps for pg_stat_statements.so — no DB
  * connection or auth needed, works regardless of port. Returns 1 if loaded,
