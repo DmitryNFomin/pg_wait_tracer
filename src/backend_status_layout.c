@@ -1121,6 +1121,7 @@ int pgwt_pgbs_derive_sampled_attr(
     out->state = snapshot->state;
     out->cmd_open = snapshot->state == (uint32_t)layout->state_running ||
                     snapshot->state == (uint32_t)layout->state_fastpath;
+    /* Idle is query-less by design: drilldowns assign it to SESSION, not the finished query. */
     out->query_id = out->cmd_open ? snapshot->query_id : 0;
     return 0;
 }

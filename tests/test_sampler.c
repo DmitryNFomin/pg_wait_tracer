@@ -606,14 +606,54 @@ static void test_sampled_attr_source_gate(void)
           target.query_id == 222 && target.cmd_open == 1,
           "validated coherent read selects the at-tick source");
 
-    /* Seed stale values before a failed validated-layout read.  DROP must
-     * clear both fields instead of falling back to the shadow map. */
+    /* Seed stale values before a failed validated-layout read.  A CLIENT must
+     * fail closed instead of falling back to the shadow map. */
+    target.backend_type = PGWT_BT_CLIENT;
     target.query_id = UINT64_MAX;
     target.cmd_open = 1;
     CHECK(pgwt_sampler_select_attr(1, 0, &tick, &uprobe, &target) ==
               PGWT_SAMPLED_ATTR_DROP &&
           target.query_id == 0 && target.cmd_open == 0,
-          "incoherent tick drops and zeroes attribution; no stale fallback");
+          "incoherent CLIENT tick drops and zeroes attribution");
+
+    target.backend_type = PGWT_BT_UNKNOWN;
+    target.query_id = UINT64_MAX;
+    target.cmd_open = 1;
+    CHECK(pgwt_sampler_select_attr(1, 0, &tick, &uprobe, &target) ==
+              PGWT_SAMPLED_ATTR_DROP &&
+          target.query_id == 0 && target.cmd_open == 0,
+          "incoherent UNKNOWN tick remains command-gated and drops");
+
+    /* An io_worker has no meaningful query attribution and its CPU admission
+     * is cmd_open-independent.  Preserve the observation without consulting
+     * the stale uprobe shadow; the poll loop therefore keeps it covered. */
+    target.backend_type = PGWT_BT_IO_WORKER;
+    target.query_id = UINT64_MAX;
+    target.cmd_open = 1;
+    enum pgwt_sampled_attr_source source = pgwt_sampler_select_attr(
+        1, 0, &tick, &uprobe, &target);
+    CHECK(source == PGWT_SAMPLED_ATTR_UNATTRIBUTED &&
+          target.query_id == 0 && target.cmd_open == 0,
+          "incoherent io_worker tick records without attribution");
+
+    uint32_t we = 0;
+    uint8_t valid = source != PGWT_SAMPLED_ATTR_DROP;
+    struct pgwt_trace_event sample = {0};
+    CHECK(pgwt_sampler_build_batch(&target, &we, &valid, 1, 123,
+                                   &sample, NULL, NULL) == 1 &&
+          sample.query_id == 0 &&
+          sample.flags == PGWT_EVENT_FLAG_IO_WORKER &&
+          sample.new_event == 0,
+          "failed-attribution io_worker CPU observation is admitted");
+
+    struct pgwt_sampler coverage = {0};
+    pgwt_sampler_note_coverage(&coverage, 1, valid);
+    CHECK(coverage.read_valid_last == 1 && coverage.read_invalid_last == 0,
+          "recorded io_worker remains covered after an incoherent tick read");
+
+    pgwt_sampler_note_coverage(&coverage, 2, 0);
+    CHECK(coverage.read_valid_last == 0 && coverage.read_invalid_last == 2,
+          "dropped CLIENT/UNKNOWN targets leave coverage incomplete");
 
     CHECK(pgwt_sampled_attr_compare(&uprobe, &uprobe) == 0,
           "identical sources agree");

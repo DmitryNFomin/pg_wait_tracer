@@ -258,8 +258,15 @@ enum pgwt_sampled_attr_source pgwt_sampler_select_attr(
         }
         return PGWT_SAMPLED_ATTR_UPROBE;
     }
-    if (!tick_read_ok || !tick)
-        return PGWT_SAMPLED_ATTR_DROP;
+    if (!tick_read_ok || !tick) {
+        /* Only command-gated CLIENT/UNKNOWN targets must fail closed: stale
+         * cmd_open could admit false CPU.  Query-less types remain recordable
+         * without attribution, preserving their wait/CPU coverage. */
+        if (target->backend_type == PGWT_BT_CLIENT ||
+            target->backend_type == PGWT_BT_UNKNOWN)
+            return PGWT_SAMPLED_ATTR_DROP;
+        return PGWT_SAMPLED_ATTR_UNATTRIBUTED;
+    }
 
     target->query_id = tick->query_id;
     target->cmd_open = tick->cmd_open;

@@ -71,6 +71,7 @@ struct pgwt_sampled_attr_value {
 enum pgwt_sampled_attr_source {
     PGWT_SAMPLED_ATTR_UPROBE = 0,
     PGWT_SAMPLED_ATTR_TICK,
+    PGWT_SAMPLED_ATTR_UNATTRIBUTED,
     PGWT_SAMPLED_ATTR_DROP,
 };
 
