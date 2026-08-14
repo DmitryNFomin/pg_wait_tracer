@@ -154,6 +154,7 @@ struct pgwt_daemon {
     /* Stage 1 shadow descriptor.  Existing st_*_offset fields above remain
      * the only offsets consumed by the sampler/BPF paths until Stage 2. */
     struct PgBackendStatusLayout backend_status_layout;
+    struct pgwt_pgbs_exclusion_set pgbs_validation_exclusions;
 
     /* PG13 query attribution (Route B1 via pg_stat_statements). PG13 has no
      * in-core query_id; when pgss is loaded its post_parse_analyze hook

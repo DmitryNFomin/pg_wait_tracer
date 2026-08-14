@@ -130,9 +130,28 @@ struct pgwt_pgbs_warmup_evidence {
     unsigned state_matches;
     unsigned activity_matches;
     unsigned query_matches;
+    bool state_seen;
+    bool state_varied;
+    uint32_t first_state;
     bool query_id_seen;
     bool query_id_varied;
     uint64_t first_query_id;
+};
+
+/* Validation clients run before capture enrollment starts.  Keep their
+ * PostgreSQL server-process identities out of both the startup scan and the
+ * later fork/init paths.  start_time is field 22 of /proc/<pid>/stat, so a
+ * recycled numeric PID does not exclude an unrelated future backend. */
+#define PGWT_PGBS_MAX_EXCLUDED_PIDS 256
+
+struct pgwt_pgbs_excluded_pid {
+    pid_t pid;
+    uint64_t start_time;
+};
+
+struct pgwt_pgbs_exclusion_set {
+    struct pgwt_pgbs_excluded_pid entries[PGWT_PGBS_MAX_EXCLUDED_PIDS];
+    unsigned count;
 };
 
 enum pgwt_pgbs_arch pgwt_pgbs_arch_from_name(const char *name);
@@ -164,23 +183,33 @@ int pgwt_pgbs_discover(const char *pg_binary, int pg_major,
 int pgwt_pgbs_validate_snapshot(struct PgBackendStatusLayout *layout,
                                 const struct pgwt_pgbs_snapshot *snapshot,
                                 const struct pgwt_pgbs_expected *expected);
-int pgwt_pgbs_validate_runtime(struct PgBackendStatusLayout *layout,
-                               pid_t postmaster_pid,
-                               uint64_t my_be_entry_addr,
-                               const char *pg_binary); /* -2: session not retired */
+void pgwt_pgbs_validate_runtime(struct PgBackendStatusLayout *layout,
+                                pid_t postmaster_pid,
+                                uint64_t my_be_entry_addr,
+                                const char *pg_binary,
+                                struct pgwt_pgbs_exclusion_set *exclusions);
+int pgwt_pgbs_pid_start_time(pid_t pid, uint64_t *start_time);
+bool pgwt_pgbs_pid_is_original(pid_t pid, uint64_t start_time);
+int pgwt_pgbs_exclusion_add(struct pgwt_pgbs_exclusion_set *set, pid_t pid);
+bool pgwt_pgbs_exclusion_contains(const struct pgwt_pgbs_exclusion_set *set,
+                                  pid_t pid);
 /* Auth-free fallback used only when the controlled backend could not be
  * created.  It compares a coherent memory snapshot with the already-running
  * activity/query uprobes; callers repeat it during a bounded warmup. */
 int pgwt_pgbs_validate_uprobe_shadow(struct PgBackendStatusLayout *layout,
                                      pid_t backend_pid,
                                      uint64_t my_be_entry_addr,
+                                     uint64_t debug_query_string_addr,
                                      bool cmd_open,
                                      bool query_id_available,
-                                     uint64_t query_id);
+                                     uint64_t query_id,
+                                     uint32_t *observed_state);
 
 void pgwt_pgbs_warmup_note(struct pgwt_pgbs_warmup_evidence *evidence,
                            const struct PgBackendStatusLayout *candidate,
                            bool state_active,
+                           bool state_value_available,
+                           uint32_t state_value,
                            bool query_id_available,
                            uint64_t query_id);
 bool pgwt_pgbs_warmup_complete(

@@ -108,6 +108,10 @@ static int handle_lifecycle_event(void *ctx, void *data, size_t data_sz)
 
     d->counters.lifecycle_events_total++;
 
+    if (pgwt_pgbs_exclusion_contains(&d->pgbs_validation_exclusions,
+                                     ev->pid))
+        return 0;
+
     const char *op = "lifecycle_unknown";
     uint64_t started_ns = pgwt_debug_block_begin(d);
     switch (ev->type) {
@@ -445,11 +449,12 @@ static void bump_rlimit_nofile(struct pgwt_daemon *d)
 /* If local authentication prevented the preferred controlled-backend check,
  * use the probes that are already attached as an independent shadow source.
  * This is bounded startup-only observation: the descriptor is still not read
- * by either capture tier.  Three coherent positive-active matches tolerate
- * races without blessing idle-state coincidence; PG14+ query-id validation
- * additionally requires nonzero values and observed variation.  Full mode
- * skips this delayed fallback so its watchpoint capture window cannot be
- * extended; Stage 2's prospective consumers are sampled/tiered only. */
+ * by either capture tier.  Three activity-marker matches plus observed state
+ * variation tolerate races without blessing readable-pointer or constant-
+ * state coincidences; PG14+ query-id validation additionally requires
+ * nonzero values and observed variation.  Full mode skips this delayed
+ * fallback so its watchpoint capture window cannot be extended; Stage 2's
+ * prospective consumers are sampled/tiered only. */
 static void pgwt_layout_uprobe_shadow_warmup(struct pgwt_daemon *d)
 {
     if (d->backend_status_layout.validation != PGWT_PGBS_VALIDATION_DEGRADED ||
@@ -472,7 +477,13 @@ static void pgwt_layout_uprobe_shadow_warmup(struct pgwt_daemon *d)
          round++) {
         for (int i = 0; i < d->backends.count; i++) {
             const struct pgwt_backend *be = &d->backends.entries[i];
-            if (!be->is_alive)
+            /* PgBackendStatus/MyBEEntry describes client activity.  Auxiliary
+             * processes cannot provide the independent activity/query marker
+             * evidence this fallback requires; scanning their shared maps is
+             * both fruitless and capable of turning a one-second warmup into
+             * a long startup delay on a large shared-memory instance. */
+            if (!be->is_alive || !be->meta_parsed ||
+                be->meta.backend_type != PGWT_BT_CLIENT)
                 continue;
             uint32_t key = (uint32_t)be->pid;
             struct pgwt_pid_state state;
@@ -483,16 +494,20 @@ static void pgwt_layout_uprobe_shadow_warmup(struct pgwt_daemon *d)
                 d->backend_status_layout;
             bool qid_available = d->pg_major_version >= 14 &&
                                  state.last_query_id != 0;
+            uint32_t observed_state = UINT32_MAX;
             (void)pgwt_pgbs_validate_uprobe_shadow(
                 &candidate, be->pid, d->my_be_entry_addr,
+                d->debug_query_string_addr,
                 state.cmd_open != 0,
                 qid_available,
-                state.last_query_id);
+                state.last_query_id, &observed_state);
             if (!candidate.validated_pid)
                 continue;
             best = candidate;
             pgwt_pgbs_warmup_note(&evidence, &candidate,
-                                  state.cmd_open != 0, qid_available,
+                                  state.cmd_open != 0,
+                                  observed_state != UINT32_MAX,
+                                  observed_state, qid_available,
                                   state.last_query_id);
         }
         if (!pgwt_pgbs_warmup_complete(&evidence, d->pg_major_version))
@@ -505,15 +520,19 @@ static void pgwt_layout_uprobe_shadow_warmup(struct pgwt_daemon *d)
             snprintf(d->backend_status_layout.detail,
                      sizeof(d->backend_status_layout.detail),
                      "bounded uprobe shadow: observations=%u state=%u/3 "
+                     "state_varied=%s "
                      "activity=%u/3 query=n/a",
                      evidence.observations, evidence.state_matches,
+                     evidence.state_varied ? "yes" : "no",
                      evidence.activity_matches);
         else
             snprintf(d->backend_status_layout.detail,
                      sizeof(d->backend_status_layout.detail),
                      "bounded uprobe shadow: observations=%u state=%u/3 "
-                     "activity=%u/3 query=%u/3 varied=%s",
+                     "state_varied=%s "
+                     "activity=%u/3 query=%u/3 query_varied=%s",
                      evidence.observations, evidence.state_matches,
+                     evidence.state_varied ? "yes" : "no",
                      evidence.activity_matches, evidence.query_matches,
                      evidence.query_id_varied ? "yes" : "no");
         unsigned fallback_after =

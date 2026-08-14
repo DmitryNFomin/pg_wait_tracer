@@ -4,7 +4,9 @@
 
 #include <stdio.h>
 #include <stdint.h>
+#include <signal.h>
 #include <string.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 static int run = 0, ok = 0;
@@ -368,7 +370,8 @@ static void test_warmup_aggregation(void)
 
     struct pgwt_pgbs_warmup_evidence evidence = {0};
     for (int i = 0; i < 3; i++)
-        pgwt_pgbs_warmup_note(&evidence, &candidate, false, true, 0);
+        pgwt_pgbs_warmup_note(&evidence, &candidate, false, true, 0,
+                              true, 0);
     CHECK(evidence.observations == 3 && evidence.state_matches == 0 &&
           evidence.query_matches == 0 &&
           !pgwt_pgbs_warmup_complete(&evidence, 17),
@@ -376,26 +379,99 @@ static void test_warmup_aggregation(void)
 
     memset(&evidence, 0, sizeof(evidence));
     for (int i = 0; i < 3; i++)
-        pgwt_pgbs_warmup_note(&evidence, &candidate, true, true, 111);
+        pgwt_pgbs_warmup_note(&evidence, &candidate, true, true, 2,
+                              true, 111);
     struct PgBackendStatusLayout result = base;
     pgwt_pgbs_warmup_apply(&result, &evidence);
     CHECK(evidence.state_matches == 3 && evidence.query_matches == 3 &&
-          !evidence.query_id_varied &&
-          result.st_state.validation == PGWT_PGBS_FIELD_VALIDATED &&
+          !evidence.state_varied && !evidence.query_id_varied &&
+          result.st_state.validation == PGWT_PGBS_FIELD_INVALID &&
           result.st_query_id.validation == PGWT_PGBS_FIELD_INVALID &&
-          result.fallback_mask == PGWT_PGBS_FALLBACK_QUERY_ID,
-          "three identical nonzero query IDs still need variation");
+          result.fallback_mask == (PGWT_PGBS_FALLBACK_STATE |
+                                   PGWT_PGBS_FALLBACK_QUERY_ID),
+          "constant running state and identical query ID remain untrusted");
 
     memset(&evidence, 0, sizeof(evidence));
     const uint64_t qids[] = {111, 222, 111};
+    pgwt_pgbs_warmup_note(&evidence, &candidate, false, true, 0,
+                          false, 0);
     for (size_t i = 0; i < sizeof(qids) / sizeof(qids[0]); i++)
-        pgwt_pgbs_warmup_note(&evidence, &candidate, true, true, qids[i]);
+        pgwt_pgbs_warmup_note(&evidence, &candidate, true, true, 2,
+                              true, qids[i]);
     result = base;
     pgwt_pgbs_warmup_apply(&result, &evidence);
-    CHECK(pgwt_pgbs_warmup_complete(&evidence, 17) &&
+    CHECK(evidence.state_varied &&
+          pgwt_pgbs_warmup_complete(&evidence, 17) &&
           result.validation == PGWT_PGBS_VALIDATION_VALIDATED &&
           result.fallback_mask == 0,
-          "three positive matches with varying nonzero IDs validate warmup");
+          "state transition plus three marker/query matches validate warmup");
+
+    memset(&evidence, 0, sizeof(evidence));
+    struct PgBackendStatusLayout markerless = candidate;
+    markerless.st_activity_raw.validation = PGWT_PGBS_FIELD_INVALID;
+    pgwt_pgbs_warmup_note(&evidence, &markerless, false, true, 0,
+                          false, 0);
+    for (size_t i = 0; i < sizeof(qids) / sizeof(qids[0]); i++)
+        pgwt_pgbs_warmup_note(&evidence, &markerless, true, true, 2,
+                              true, qids[i]);
+    result = base;
+    pgwt_pgbs_warmup_apply(&result, &evidence);
+    CHECK(evidence.state_varied && evidence.activity_matches == 0 &&
+          result.st_activity_raw.validation == PGWT_PGBS_FIELD_INVALID &&
+          result.fallback_mask == PGWT_PGBS_FALLBACK_ACTIVITY_RAW,
+          "warmup never blesses activity without content-marker matches");
+}
+
+static void test_fail_safe_and_pid_exclusion(void)
+{
+    printf("--- fail-safe policy, PID exclusion and retirement identity ---\n");
+    struct PgBackendStatusLayout layout;
+    CHECK(pgwt_pgbs_hard_table_lookup(17, PGWT_PGBS_ARCH_X86_64, 8,
+                                      PGWT_PGBS_ABI_SYSV_LP64, &layout) == 0,
+          "fail-safe fixture row");
+    struct pgwt_pgbs_exclusion_set exclusions = {0};
+    pid_t unknown_identity = (pid_t)2147483647;
+    CHECK(pgwt_pgbs_exclusion_add(&exclusions, unknown_identity) == 0 &&
+          pgwt_pgbs_exclusion_contains(&exclusions, unknown_identity),
+          "missing /proc identity remains conservatively excluded");
+    struct pgwt_pgbs_exclusion_set full = {
+        .count = PGWT_PGBS_MAX_EXCLUDED_PIDS,
+    };
+    CHECK(pgwt_pgbs_exclusion_add(&full, unknown_identity) != 0,
+          "full exclusion set refuses an unrecorded validation PID");
+    bool capture_proceeded = false;
+    pgwt_pgbs_validate_runtime(&layout, 0, 0, NULL, &exclusions);
+    capture_proceeded = true;
+    CHECK(capture_proceeded &&
+          layout.validation == PGWT_PGBS_VALIDATION_DEGRADED &&
+          layout.fallback_mask == (PGWT_PGBS_FALLBACK_STATE |
+                                   PGWT_PGBS_FALLBACK_ACTIVITY_RAW |
+                                   PGWT_PGBS_FALLBACK_QUERY_ID),
+          "validation failure degrades layout and has no capture-abort result");
+
+    pid_t child = fork();
+    CHECK(child >= 0, "retirement fixture fork");
+    if (child == 0) {
+        for (;;)
+            pause();
+    }
+    if (child > 0) {
+        uint64_t start_time = 0;
+        CHECK(pgwt_pgbs_pid_start_time(child, &start_time) == 0 &&
+              start_time != 0,
+              "reads /proc start time for backend identity");
+        CHECK(pgwt_pgbs_exclusion_add(&exclusions, child) == 0 &&
+              pgwt_pgbs_exclusion_contains(&exclusions, child),
+              "live validation PID is excluded from capture enrollment");
+        CHECK(pgwt_pgbs_pid_is_original(child, start_time) &&
+              !pgwt_pgbs_pid_is_original(child, start_time + 1),
+              "retirement predicate distinguishes a recycled PID identity");
+        kill(child, SIGTERM);
+        (void)waitpid(child, NULL, 0);
+        CHECK(!pgwt_pgbs_pid_is_original(child, start_time) &&
+              !pgwt_pgbs_exclusion_contains(&exclusions, child),
+              "retired validation identity no longer excludes a future PID");
+    }
 }
 
 int main(void)
@@ -405,6 +481,7 @@ int main(void)
     test_hard_table();
     test_validation();
     test_warmup_aggregation();
+    test_fail_safe_and_pid_exclusion();
     printf("\n%d/%d tests passed\n", ok, run);
     return ok == run ? 0 : 1;
 }

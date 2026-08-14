@@ -1067,15 +1067,9 @@ int pgwt_discover(struct pgwt_daemon *d)
      * Stage 2 change. */
     (void)pgwt_pgbs_discover(binary, d->pg_major_version,
                              &d->backend_status_layout);
-    int layout_validation = pgwt_pgbs_validate_runtime(
-        &d->backend_status_layout, pm_pid, d->my_be_entry_addr, binary);
-    if (layout_validation == -2) {
-        fprintf(stderr,
-                "FATAL: PgBackendStatus validation session did not retire; "
-                "capture will not start (%s)\n",
-                d->backend_status_layout.detail);
-        return -1;
-    }
+    pgwt_pgbs_validate_runtime(&d->backend_status_layout, pm_pid,
+                               d->my_be_entry_addr, binary,
+                               &d->pgbs_validation_exclusions);
     d->counters.pgbackend_layout_fallbacks_total +=
         pgwt_pgbs_fallback_count(&d->backend_status_layout);
     pgwt_pgbs_log(&d->backend_status_layout);

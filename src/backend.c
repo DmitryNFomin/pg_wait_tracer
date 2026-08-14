@@ -372,6 +372,14 @@ int pgwt_scan_existing_backends(struct pgwt_daemon *d)
         if (ppid != d->postmaster_pid)
             continue;
 
+        if (pgwt_pgbs_exclusion_contains(&d->pgbs_validation_exclusions,
+                                         pid)) {
+            if (d->verbose)
+                fprintf(stderr, "INFO: excluding PgBackendStatus validation "
+                        "PID %d from startup capture enrollment\n", pid);
+            continue;
+        }
+
         /* TEST HOOK: skip a straddling in-command backend (see top of fn) so
          * pgwt_recover_unattached_backends must attach it later. */
         if (skip_straddle && d->debug_query_string_addr) {
@@ -580,6 +588,10 @@ int pgwt_recover_unattached_backends(struct pgwt_daemon *d)
         if (sscanf(last_paren + 1, " %c %d", &state, &ppid) != 2)
             continue;
         if (ppid != d->postmaster_pid)
+            continue;
+
+        if (pgwt_pgbs_exclusion_contains(&d->pgbs_validation_exclusions,
+                                         pid))
             continue;
 
         /* Resolvable AND initialized (PGPROC in shm)? Attach directly — the
@@ -819,6 +831,14 @@ int pgwt_confirm_wait_offset(struct pgwt_daemon *d)
 
 int pgwt_handle_fork(struct pgwt_daemon *d, pid_t child_pid)
 {
+    if (pgwt_pgbs_exclusion_contains(&d->pgbs_validation_exclusions,
+                                     child_pid)) {
+        if (d->verbose)
+            fprintf(stderr, "INFO: excluding PgBackendStatus validation "
+                    "PID %d from fork capture enrollment\n", child_pid);
+        return 0;
+    }
+
     /* Check for duplicate */
     if (pgwt_find_backend(&d->backends, child_pid))
         return 0;
@@ -897,6 +917,9 @@ int pgwt_handle_fork(struct pgwt_daemon *d, pid_t child_pid)
 
 int pgwt_handle_init(struct pgwt_daemon *d, pid_t pid, uint64_t addr)
 {
+    if (pgwt_pgbs_exclusion_contains(&d->pgbs_validation_exclusions, pid))
+        return 0;
+
     struct pgwt_backend *be = pgwt_find_backend(&d->backends, pid);
     if (!be) {
         /* Unknown PID — might have been forked before daemon started */

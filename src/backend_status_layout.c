@@ -1062,8 +1062,7 @@ static int candidate_ok(int fd, uint64_t base,
          snapshot->databaseid != expected->databaseid) ||
         (expected->userid && snapshot->userid != expected->userid) ||
         snapshot->state > (uint32_t)layout->state_max ||
-        !snapshot->activity_readable ||
-        (activity_marker && !snapshot->activity_marker_matched))
+        !snapshot->activity_readable)
         return 0;
     if (expected->state_shadow_available) {
         bool active = snapshot->state == (uint32_t)layout->state_running ||
@@ -1202,13 +1201,13 @@ static int spawn_psql(const char *psql, const char *user,
     snprintf(port_str, sizeof(port_str), "%d", port);
     char *argv_with_socket[] = {
         "runuser", "-u", (char *)user, "--", (char *)psql,
-        "-X", "-Atq", "-v", "ON_ERROR_STOP=1",
+        "-X", "-Atq", "-w", "-v", "ON_ERROR_STOP=1",
         "-h", (char *)socket_dir, "-p", port_str,
         "-d", "postgres", "-c", (char *)sql, NULL,
     };
     char *argv_default_socket[] = {
         "runuser", "-u", (char *)user, "--", (char *)psql,
-        "-X", "-Atq", "-v", "ON_ERROR_STOP=1",
+        "-X", "-Atq", "-w", "-v", "ON_ERROR_STOP=1",
         "-p", port_str, "-d", "postgres", "-c", (char *)sql, NULL,
     };
     return pgwt_proc_open(proc, socket_dir[0] ? argv_with_socket
@@ -1225,13 +1224,13 @@ static int spawn_psql_session(const char *psql, const char *user,
              "dbname=postgres application_name=%s", appname);
     char *argv_with_socket[] = {
         "runuser", "-u", (char *)user, "--", (char *)psql,
-        "-X", "-Atq", "-v", "ON_ERROR_STOP=1",
+        "-X", "-Atq", "-w",
         "-h", (char *)socket_dir, "-p", port_str,
         "-d", dbspec, NULL,
     };
     char *argv_default_socket[] = {
         "runuser", "-u", (char *)user, "--", (char *)psql,
-        "-X", "-Atq", "-v", "ON_ERROR_STOP=1",
+        "-X", "-Atq", "-w",
         "-p", port_str, "-d", dbspec, NULL,
     };
     return pgwt_proc_open_rw(proc, socket_dir[0] ? argv_with_socket
@@ -1246,12 +1245,163 @@ static int send_psql(struct pgwt_proc *proc, const char *sql)
     return 0;
 }
 
-static int wait_for_pid_exit(pid_t pid)
+/* Read child output without an unbounded stdio wait.  stop_at_newline is used
+ * to learn a long-lived controlled session's server PID; otherwise the helper
+ * drains through EOF.  On timeout, stop the client so its PostgreSQL socket is
+ * closed and validation can degrade without delaying capture indefinitely. */
+static ssize_t read_proc_output_bounded(struct pgwt_proc *proc,
+                                        char *buf, size_t size,
+                                        int timeout_ms,
+                                        bool stop_at_newline)
+{
+    if (!proc || !proc->out || !buf || size < 2)
+        return -1;
+    int fd = fileno(proc->out);
+    size_t used = 0;
+    int remaining = timeout_ms;
+    while (used + 1 < size && remaining > 0) {
+        int slice = remaining > 100 ? 100 : remaining;
+        struct pollfd pfd = { .fd = fd, .events = POLLIN | POLLHUP };
+        int rc = poll(&pfd, 1, slice);
+        if (rc < 0) {
+            if (errno == EINTR)
+                continue;
+            break;
+        }
+        remaining -= slice;
+        if (rc == 0)
+            continue;
+        size_t want = stop_at_newline ? 1 : size - used - 1;
+        ssize_t n = read(fd, buf + used, want);
+        if (n == 0) {
+            buf[used] = '\0';
+            return (ssize_t)used;
+        }
+        if (n < 0) {
+            if (errno == EINTR || errno == EAGAIN)
+                continue;
+            break;
+        }
+        used += (size_t)n;
+        if (stop_at_newline && buf[used - 1] == '\n') {
+            buf[used] = '\0';
+            return (ssize_t)used;
+        }
+    }
+    buf[used] = '\0';
+    if (proc->pid > 0)
+        (void)kill(proc->pid, SIGTERM);
+    return -1;
+}
+
+int pgwt_pgbs_pid_start_time(pid_t pid, uint64_t *start_time)
+{
+    if (pid <= 0 || !start_time)
+        return -1;
+
+    char path[64], line[4096];
+    snprintf(path, sizeof(path), "/proc/%d/stat", pid);
+    FILE *fp = fopen(path, "r");
+    if (!fp)
+        return -1;
+    bool got = fgets(line, sizeof(line), fp) != NULL;
+    fclose(fp);
+    if (!got)
+        return -1;
+
+    /* comm (field 2) may contain spaces and parentheses.  Field 3 starts
+     * after the final ')'; walk tokens through field 22 (starttime). */
+    char *cursor = strrchr(line, ')');
+    if (!cursor)
+        return -1;
+    cursor++;
+    for (int field = 3; field <= 22; field++) {
+        while (*cursor && isspace((unsigned char)*cursor))
+            cursor++;
+        if (!*cursor)
+            return -1;
+        char *end = cursor;
+        while (*end && !isspace((unsigned char)*end))
+            end++;
+        if (field == 22) {
+            errno = 0;
+            char saved = *end;
+            *end = '\0';
+            char *number_end = NULL;
+            unsigned long long value = strtoull(cursor, &number_end, 10);
+            bool valid = !errno && number_end != cursor &&
+                         *number_end == '\0' && value != 0;
+            *end = saved;
+            if (!valid)
+                return -1;
+            *start_time = (uint64_t)value;
+            return 0;
+        }
+        cursor = end;
+    }
+    return -1;
+}
+
+bool pgwt_pgbs_pid_is_original(pid_t pid, uint64_t start_time)
+{
+    if (pid <= 0 || start_time == 0)
+        return false;
+    uint64_t current = 0;
+    return pgwt_pgbs_pid_start_time(pid, &current) == 0 &&
+           current == start_time;
+}
+
+int pgwt_pgbs_exclusion_add(struct pgwt_pgbs_exclusion_set *set, pid_t pid)
+{
+    if (!set || pid <= 0)
+        return -1;
+    uint64_t start_time = 0;
+    (void)pgwt_pgbs_pid_start_time(pid, &start_time);
+    for (unsigned i = 0; i < set->count; i++) {
+        if (set->entries[i].pid == pid &&
+            set->entries[i].start_time == start_time)
+            return 0;
+    }
+    if (set->count >= PGWT_PGBS_MAX_EXCLUDED_PIDS)
+        return -1;
+    set->entries[set->count++] = (struct pgwt_pgbs_excluded_pid) {
+        .pid = pid,
+        .start_time = start_time,
+    };
+    return 0;
+}
+
+bool pgwt_pgbs_exclusion_contains(const struct pgwt_pgbs_exclusion_set *set,
+                                  pid_t pid)
+{
+    if (!set || pid <= 0)
+        return false;
+    uint64_t current = 0;
+    int have_current = pgwt_pgbs_pid_start_time(pid, &current) == 0;
+    for (unsigned i = 0; i < set->count; i++) {
+        const struct pgwt_pgbs_excluded_pid *entry = &set->entries[i];
+        if (entry->pid != pid)
+            continue;
+        /* Failure to capture an identity is rare under the root daemon; keep
+         * that numeric PID conservatively excluded.  Otherwise a recycled
+         * PID is unrelated and must be eligible for capture. */
+        if (entry->start_time == 0 ||
+            (have_current && entry->start_time == current))
+            return true;
+    }
+    return false;
+}
+
+static int wait_for_pid_retirement(pid_t pid, uint64_t start_time)
 {
     if (pid <= 0)
         return -1;
+    if (start_time == 0) {
+        uint64_t current = 0;
+        return pgwt_pgbs_pid_start_time(pid, &current) != 0 ? 0 : -1;
+    }
     for (int attempt = 0; attempt < 100; attempt++) {
-        if (kill(pid, 0) != 0 && errno == ESRCH)
+        if (!pgwt_pgbs_pid_is_original(pid, start_time))
             return 0;
         usleep(50000);
     }
@@ -1262,32 +1412,45 @@ static int observe_controlled_backend(const char *psql, const char *user,
                                       const char *socket_dir, int port,
                                       const char *appname, int pg_major,
                                       bool want_active,
-                                      struct pgwt_pgbs_expected *expected)
+                                      struct pgwt_pgbs_expected *expected,
+                                      struct pgwt_pgbs_exclusion_set *exclusions)
 {
     char sql[1024];
     if (pg_major >= 14)
         snprintf(sql, sizeof(sql),
                  "WITH target AS (SELECT pid,datid,usesysid,query_id,state "
                  "FROM pg_stat_activity WHERE application_name='%s' "
-                 "AND state='%s' ORDER BY backend_start DESC LIMIT 1) "
-                 "SELECT 'target',pid::text,datid::text,usesysid::text,"
+                 "AND state='%s' ORDER BY backend_start DESC LIMIT 1), "
+                 "rows AS (SELECT 0 AS ord,'observer' AS kind,"
+                 "pg_backend_pid()::text AS pid,'0' AS datid,'0' AS usesysid,"
+                 "'0' AS query_id,'0' AS active UNION ALL SELECT 1,'target',"
+                 "pid::text,datid::text,usesysid::text,"
                  "COALESCE(query_id,0)::text,"
-                 "CASE WHEN state='active' THEN '1' ELSE '0' END FROM target "
-                 "UNION ALL SELECT 'observer',pg_backend_pid()::text,"
-                 "'0','0','0','0'",
+                 "CASE WHEN state='active' THEN '1' ELSE '0' END FROM target) "
+                 "SELECT kind,pid,datid,usesysid,query_id,active "
+                 "FROM rows ORDER BY ord",
                  appname, want_active ? "active" : "idle");
     else
         snprintf(sql, sizeof(sql),
                  "WITH target AS (SELECT pid,datid,usesysid,state "
                  "FROM pg_stat_activity WHERE application_name='%s' "
-                 "AND state='%s' ORDER BY backend_start DESC LIMIT 1) "
-                 "SELECT 'target',pid::text,datid::text,usesysid::text,'0',"
-                 "CASE WHEN state='active' THEN '1' ELSE '0' END FROM target "
-                 "UNION ALL SELECT 'observer',pg_backend_pid()::text,"
-                 "'0','0','0','0'",
+                 "AND state='%s' ORDER BY backend_start DESC LIMIT 1), "
+                 "rows AS (SELECT 0 AS ord,'observer' AS kind,"
+                 "pg_backend_pid()::text AS pid,'0' AS datid,'0' AS usesysid,"
+                 "'0' AS query_id,'0' AS active UNION ALL SELECT 1,'target',"
+                 "pid::text,datid::text,usesysid::text,'0',"
+                 "CASE WHEN state='active' THEN '1' ELSE '0' END FROM target) "
+                 "SELECT kind,pid,datid,usesysid,query_id,active "
+                 "FROM rows ORDER BY ord",
                  appname, want_active ? "active" : "idle");
 
     for (int attempt = 0; attempt < 20; attempt++) {
+        /* Never create a backend whose identity cannot be retained.  A full
+         * set is a degradable validation condition, not permission to let an
+         * observer become capture-eligible. */
+        if (!exclusions ||
+            exclusions->count >= PGWT_PGBS_MAX_EXCLUDED_PIDS)
+            return -1;
         struct pgwt_proc observer;
         if (spawn_psql(psql, user, socket_dir, port, sql, &observer) != 0)
             return -1;
@@ -1295,19 +1458,53 @@ static int observe_controlled_backend(const char *psql, const char *user,
         uint32_t databaseid = 0, userid = 0;
         long long query_id = 0;
         int active = -1;
-        char line[256];
-        while (fgets(line, sizeof(line), observer.out)) {
+        int observer_excluded = -1;
+        uint64_t observer_start_time = 0;
+        char observer_line[128], output[1024];
+        ssize_t observer_line_len = read_proc_output_bounded(
+            &observer, observer_line, sizeof(observer_line), 3000, true);
+        if (observer_line_len >= 0 &&
+            sscanf(observer_line, "observer|%d", &observer_pid) == 1 &&
+            observer_pid > 0) {
+            (void)pgwt_pgbs_pid_start_time(observer_pid,
+                                            &observer_start_time);
+            /* Even when /proc identity capture fails, retain a conservative
+             * numeric-PID exclusion.  exclusion_contains() deliberately
+             * keeps such entries excluded for the tracer lifetime. */
+            observer_excluded = pgwt_pgbs_exclusion_add(exclusions,
+                                                        observer_pid);
+        }
+        ssize_t output_len = observer_line_len >= 0
+            ? read_proc_output_bounded(&observer, output, sizeof(output),
+                                       3000, false)
+            : -1;
+        char *save = NULL;
+        for (char *line = output_len >= 0
+                 ? strtok_r(output, "\r\n", &save) : NULL;
+             line; line = strtok_r(NULL, "\r\n", &save)) {
             if (sscanf(line, "target|%d|%u|%u|%lld|%d",
                        &target_pid, &databaseid, &userid,
                        &query_id, &active) == 5)
                 continue;
-            (void)sscanf(line, "observer|%d", &observer_pid);
+        }
+        if (observer_pid > 0 && observer_excluded != 0) {
+            (void)kill(observer.pid, SIGTERM);
+            (void)pgwt_proc_close(&observer);
+            return -1;
+        }
+        if (target_pid > 0 &&
+            pgwt_pgbs_exclusion_add(exclusions, target_pid) != 0) {
+            (void)kill(observer.pid, SIGTERM);
+            (void)pgwt_proc_close(&observer);
+            return -1;
         }
         int status = pgwt_proc_close(&observer);
-        if (observer_pid > 0 && wait_for_pid_exit(observer_pid) != 0)
-            return -2;
+        if (observer_pid <= 0 || observer_start_time == 0 ||
+            wait_for_pid_retirement(observer_pid, observer_start_time) != 0)
+            return -1;
         bool qid_ok = pg_major < 14 || !want_active || query_id != 0;
-        if (status == 0 && target_pid > 0 && databaseid > 0 && userid > 0 &&
+        if (output_len >= 0 && status == 0 && target_pid > 0 &&
+            databaseid > 0 && userid > 0 &&
             active == (want_active ? 1 : 0) && qid_ok) {
             memset(expected, 0, sizeof(*expected));
             expected->pid = target_pid;
@@ -1369,15 +1566,21 @@ static void degrade_unvalidated(struct PgBackendStatusLayout *layout,
     set_detail(layout, "%s", reason);
 }
 
-int pgwt_pgbs_validate_runtime(struct PgBackendStatusLayout *layout,
-                               pid_t postmaster_pid,
-                               uint64_t my_be_entry_addr,
-                               const char *pg_binary)
+void pgwt_pgbs_validate_runtime(struct PgBackendStatusLayout *layout,
+                                pid_t postmaster_pid,
+                                uint64_t my_be_entry_addr,
+                                const char *pg_binary,
+                                struct pgwt_pgbs_exclusion_set *exclusions)
 {
     if (!layout || layout->source == PGWT_PGBS_SOURCE_NONE) {
         if (layout)
             degrade_unvalidated(layout, "no discovered layout to validate");
-        return -1;
+        return;
+    }
+    if (getenv("PGWT_TEST_PGBS_VALIDATION_FAIL")) {
+        degrade_unvalidated(layout,
+                            "forced validation failure (test hook); capture unaffected");
+        return;
     }
     int port;
     char socket_dir[512], user[128];
@@ -1386,14 +1589,14 @@ int pgwt_pgbs_validate_runtime(struct PgBackendStatusLayout *layout,
                               sizeof(socket_dir), user, sizeof(user)) != 0) {
         degrade_unvalidated(layout,
                             "controlled-backend connection metadata unavailable");
-        return -1;
+        return;
     }
     char psql[512];
     snprintf(psql, sizeof(psql), "%s", pg_binary);
     char *slash = strrchr(psql, '/');
     if (!slash) {
         degrade_unvalidated(layout, "postgres binary has no bindir");
-        return -1;
+        return;
     }
     snprintf(slash + 1, (size_t)(psql + sizeof(psql) - slash - 1), "psql");
 
@@ -1406,17 +1609,44 @@ int pgwt_pgbs_validate_runtime(struct PgBackendStatusLayout *layout,
              getpid());
     snprintf(second_marker, sizeof(second_marker), "pgwt-layout-active-b-%d",
              getpid());
+    if (!exclusions ||
+        exclusions->count >= PGWT_PGBS_MAX_EXCLUDED_PIDS) {
+        degrade_unvalidated(layout,
+                            "validation PID exclusion set has no capacity");
+        return;
+    }
     struct pgwt_proc controlled;
     if (spawn_psql_session(psql, user, socket_dir, port, appname,
                            &controlled) != 0) {
         degrade_unvalidated(layout, "could not start controlled backend");
-        return -1;
+        return;
     }
 
     char command[256];
-    int observed = 0;
+    const char *validation_step = "controlled PID handshake";
+    int observed = send_psql(
+        &controlled, "SELECT 'controlled',pg_backend_pid();");
+    pid_t controlled_pid = 0;
+    uint64_t controlled_start_time = 0;
+    char controlled_line[128];
+    if (observed == 0 &&
+        read_proc_output_bounded(&controlled, controlled_line,
+                                 sizeof(controlled_line), 3000, true) >= 0 &&
+        sscanf(controlled_line, "controlled|%d", &controlled_pid) == 1 &&
+        controlled_pid > 0) {
+        (void)pgwt_pgbs_pid_start_time(controlled_pid,
+                                        &controlled_start_time);
+        int excluded = pgwt_pgbs_exclusion_add(exclusions, controlled_pid);
+        if (controlled_start_time == 0 || excluded != 0)
+            observed = -1;
+    } else {
+        observed = -1;
+    }
     if (layout->major >= 14)
-        observed = send_psql(&controlled, "SET compute_query_id=on;");
+        if (observed == 0)
+            observed = send_psql(&controlled, "SET compute_query_id=on;");
+    if (observed == 0)
+        validation_step = "idle marker command";
     snprintf(command, sizeof(command), "SELECT 1 /* %s */;", idle_marker);
     if (observed == 0)
         observed = send_psql(&controlled, command);
@@ -1431,11 +1661,14 @@ int pgwt_pgbs_validate_runtime(struct PgBackendStatusLayout *layout,
     memset(&second_snapshot, 0, sizeof(second_snapshot));
     uint64_t idle_base = 0, first_base = 0, second_base = 0;
 
-    if (observed == 0)
+    if (observed == 0) {
+        validation_step = "idle observation";
         observed = observe_controlled_backend(
             psql, user, socket_dir, port, appname, layout->major, false,
-            &idle_expected);
+            &idle_expected, exclusions);
+    }
     if (observed == 0) {
+        validation_step = "idle activity-marker snapshot";
         idle_expected.activity_marker_required = true;
         idle_base = resolve_controlled_snapshot(
             idle_expected.pid, 0, my_be_entry_addr, layout, &idle_expected,
@@ -1445,19 +1678,36 @@ int pgwt_pgbs_validate_runtime(struct PgBackendStatusLayout *layout,
     }
 
     snprintf(command, sizeof(command),
-             "SELECT pg_sleep(0.25) /* %s */;", first_marker);
-    if (observed == 0)
+             "SELECT pg_sleep(2) /* %s */;", first_marker);
+    if (observed == 0) {
+        validation_step = "first active command";
         observed = send_psql(&controlled, command);
-    if (observed == 0)
+    }
+    if (observed == 0) {
+        validation_step = "first active observation";
         observed = observe_controlled_backend(
             psql, user, socket_dir, port, appname, layout->major, true,
-            &first_expected);
+            &first_expected, exclusions);
+    }
     if (observed == 0) {
+        validation_step = "first active activity-marker snapshot";
         first_expected.activity_marker_required = true;
         first_base = resolve_controlled_snapshot(
             first_expected.pid, idle_base, my_be_entry_addr, layout,
             &first_expected, first_marker, &first_snapshot);
         if (!first_base)
+            observed = -1;
+    }
+    /* The active command is a bounded observation window, not a startup
+     * delay.  Once the observer and coherent snapshot have both landed,
+     * cancel only our identity-checked validation backend.  With psql's
+     * default ON_ERROR_STOP=off the session returns to idle and remains
+     * usable for the independently shaped second query. */
+    if (observed == 0) {
+        validation_step = "first active cancellation";
+        if (!pgwt_pgbs_pid_is_original(controlled_pid,
+                                       controlled_start_time) ||
+            kill(controlled_pid, SIGINT) != 0)
             observed = -1;
     }
 
@@ -1466,20 +1716,27 @@ int pgwt_pgbs_validate_runtime(struct PgBackendStatusLayout *layout,
      * commands and gives st_state an observed active->idle boundary. */
     struct pgwt_pgbs_expected between_expected;
     memset(&between_expected, 0, sizeof(between_expected));
-    if (observed == 0)
+    if (observed == 0) {
+        validation_step = "between-command idle observation";
         observed = observe_controlled_backend(
             psql, user, socket_dir, port, appname, layout->major, false,
-            &between_expected);
+            &between_expected, exclusions);
+    }
 
     snprintf(command, sizeof(command),
-             "SELECT 1 FROM pg_sleep(0.25) /* %s */;", second_marker);
-    if (observed == 0)
+             "SELECT 1 FROM pg_sleep(2) /* %s */;", second_marker);
+    if (observed == 0) {
+        validation_step = "second active command";
         observed = send_psql(&controlled, command);
-    if (observed == 0)
+    }
+    if (observed == 0) {
+        validation_step = "second active observation";
         observed = observe_controlled_backend(
             psql, user, socket_dir, port, appname, layout->major, true,
-            &second_expected);
+            &second_expected, exclusions);
+    }
     if (observed == 0) {
+        validation_step = "second active activity-marker snapshot";
         second_expected.activity_marker_required = true;
         second_base = resolve_controlled_snapshot(
             second_expected.pid, idle_base, my_be_entry_addr, layout,
@@ -1487,8 +1744,14 @@ int pgwt_pgbs_validate_runtime(struct PgBackendStatusLayout *layout,
         if (!second_base)
             observed = -1;
     }
+    if (observed == 0) {
+        validation_step = "second active cancellation";
+        if (!pgwt_pgbs_pid_is_original(controlled_pid,
+                                       controlled_start_time) ||
+            kill(controlled_pid, SIGINT) != 0)
+            observed = -1;
+    }
 
-    pid_t controlled_pid = idle_expected.pid;
     /* Finish the final statement, then deliver EOF and drain psql's small
      * result stream before reaping it.  Closing stdout first would give psql
      * SIGPIPE after the validation had already succeeded. */
@@ -1496,12 +1759,14 @@ int pgwt_pgbs_validate_runtime(struct PgBackendStatusLayout *layout,
         fclose(controlled.in);
         controlled.in = NULL;
     }
-    char discard[256];
-    while (fgets(discard, sizeof(discard), controlled.out))
-        ;
+    char discard[512];
+    if (read_proc_output_bounded(&controlled, discard, sizeof(discard),
+                                 3000, false) < 0)
+        observed = -1;
     int controlled_status = pgwt_proc_close(&controlled);
     bool retired = controlled_pid > 0 &&
-                   wait_for_pid_exit(controlled_pid) == 0;
+                   wait_for_pid_retirement(controlled_pid,
+                                           controlled_start_time) == 0;
     if (!retired) {
         char reason[192];
         snprintf(reason, sizeof(reason),
@@ -1509,17 +1774,16 @@ int pgwt_pgbs_validate_runtime(struct PgBackendStatusLayout *layout,
                  "(pid=%d observation=%d client_status=%d)",
                  controlled_pid, observed, controlled_status);
         degrade_unvalidated(layout, reason);
-        return -2;
-    }
-    if (observed == -2) {
-        degrade_unvalidated(layout,
-                            "validation observer did not retire before capture");
-        return -2;
+        return;
     }
     if (observed != 0 || controlled_status != 0) {
-        degrade_unvalidated(layout,
-                            "controlled backend/auth unavailable; no offset accepted");
-        return -1;
+        char reason[192];
+        snprintf(reason, sizeof(reason),
+                 "controlled validation unavailable at %s "
+                 "(observation=%d client_status=%d); no offset accepted",
+                 validation_step, observed, controlled_status);
+        degrade_unvalidated(layout, reason);
+        return;
     }
 
     bool same_backend = idle_expected.pid == first_expected.pid &&
@@ -1532,8 +1796,8 @@ int pgwt_pgbs_validate_runtime(struct PgBackendStatusLayout *layout,
     struct PgBackendStatusLayout first_result = *layout;
     (void)pgwt_pgbs_validate_snapshot(&first_result, &first_snapshot,
                                       &first_expected);
-    int rc = pgwt_pgbs_validate_snapshot(layout, &second_snapshot,
-                                         &second_expected);
+    (void)pgwt_pgbs_validate_snapshot(layout, &second_snapshot,
+                                      &second_expected);
 
     bool idle_state = has_read(&idle_snapshot, PGWT_PGBS_READ_STATE) &&
         idle_snapshot.state <= (uint32_t)layout->state_max &&
@@ -1545,7 +1809,6 @@ int pgwt_pgbs_validate_runtime(struct PgBackendStatusLayout *layout,
     if (!active_transition) {
         layout->st_state.validation = PGWT_PGBS_FIELD_INVALID;
         layout->fallback_mask |= PGWT_PGBS_FALLBACK_STATE;
-        rc = -1;
     }
 
     bool query_varied = layout->major < 14 ||
@@ -1558,7 +1821,6 @@ int pgwt_pgbs_validate_runtime(struct PgBackendStatusLayout *layout,
     if (!query_varied && layout->major >= 14) {
         layout->st_query_id.validation = PGWT_PGBS_FIELD_INVALID;
         layout->fallback_mask |= PGWT_PGBS_FALLBACK_QUERY_ID;
-        rc = -1;
     }
     layout->validation = layout->fallback_mask
         ? PGWT_PGBS_VALIDATION_DEGRADED
@@ -1580,22 +1842,27 @@ int pgwt_pgbs_validate_runtime(struct PgBackendStatusLayout *layout,
                    layout->major < 14 ? "n/a" :
                        (query_varied ? "yes" : "no"));
     }
-    return rc;
+    return;
 }
 
 int pgwt_pgbs_validate_uprobe_shadow(struct PgBackendStatusLayout *layout,
                                      pid_t backend_pid,
                                      uint64_t my_be_entry_addr,
+                                     uint64_t debug_query_string_addr,
                                      bool cmd_open,
                                      bool query_id_available,
-                                     uint64_t query_id)
+                                     uint64_t query_id,
+                                     uint32_t *observed_state)
 {
+    if (observed_state)
+        *observed_state = UINT32_MAX;
     if (!layout || layout->source == PGWT_PGBS_SOURCE_NONE || backend_pid <= 0)
         return -1;
     struct pgwt_pgbs_expected expected = {
         .pid = backend_pid,
         .state_shadow_available = true,
         .state_active = cmd_open,
+        .activity_marker_required = true,
         .query_id_available = layout->major >= 14 && query_id_available &&
                               query_id != 0,
         .query_id = query_id,
@@ -1603,28 +1870,48 @@ int pgwt_pgbs_validate_uprobe_shadow(struct PgBackendStatusLayout *layout,
     struct pgwt_pgbs_snapshot snapshot;
     memset(&snapshot, 0, sizeof(snapshot));
     uint64_t base = 0;
+    char activity_marker[256] = "";
+    const char *marker = NULL;
     int mem_fd = open_mem(backend_pid);
     if (mem_fd >= 0) {
+        if (cmd_open && debug_query_string_addr) {
+            uint64_t query_string = 0;
+            if (pread_exact(mem_fd, &query_string, sizeof(query_string),
+                            debug_query_string_addr) >= 0 && query_string) {
+                ssize_t n = pread(mem_fd, activity_marker,
+                                  sizeof(activity_marker) - 1,
+                                  (off_t)query_string);
+                if (n > 0) {
+                    activity_marker[n] = '\0';
+                    if (activity_marker[0])
+                        marker = activity_marker;
+                }
+            }
+        }
         if (my_be_entry_addr)
             if (pread_exact(mem_fd, &base, sizeof(base),
                             my_be_entry_addr) < 0)
                 base = 0;
-        if (base && !candidate_ok(mem_fd, base, layout, &expected, NULL,
+        if (base && !candidate_ok(mem_fd, base, layout, &expected, marker,
                                   &snapshot))
             base = 0;
         close(mem_fd);
     }
     if (!base)
-        base = scan_shared_for_entry(backend_pid, layout, &expected, NULL,
+        base = scan_shared_for_entry(backend_pid, layout, &expected, marker,
                                      &snapshot);
     if (!base)
         return -1;
+    if (observed_state)
+        *observed_state = snapshot.state;
     return pgwt_pgbs_validate_snapshot(layout, &snapshot, &expected);
 }
 
 void pgwt_pgbs_warmup_note(struct pgwt_pgbs_warmup_evidence *evidence,
                            const struct PgBackendStatusLayout *candidate,
                            bool state_active,
+                           bool state_value_available,
+                           uint32_t state_value,
                            bool query_id_available,
                            uint64_t query_id)
 {
@@ -1634,6 +1921,20 @@ void pgwt_pgbs_warmup_note(struct pgwt_pgbs_warmup_evidence *evidence,
     if (state_active && candidate->st_state.validation ==
                         PGWT_PGBS_FIELD_VALIDATED)
         evidence->state_matches++;
+    if (state_value_available &&
+        state_value <= (uint32_t)candidate->state_max) {
+        bool value_active =
+            state_value == (uint32_t)candidate->state_running ||
+            state_value == (uint32_t)candidate->state_fastpath;
+        if (value_active == state_active) {
+            if (!evidence->state_seen) {
+                evidence->state_seen = true;
+                evidence->first_state = state_value;
+            } else if (state_value != evidence->first_state) {
+                evidence->state_varied = true;
+            }
+        }
+    }
     if (candidate->st_activity_raw.validation == PGWT_PGBS_FIELD_VALIDATED)
         evidence->activity_matches++;
     if (query_id_available && query_id != 0 &&
@@ -1652,7 +1953,7 @@ bool pgwt_pgbs_warmup_complete(
     const struct pgwt_pgbs_warmup_evidence *evidence, int pg_major)
 {
     if (!evidence || evidence->state_matches < 3 ||
-        evidence->activity_matches < 3)
+        !evidence->state_varied || evidence->activity_matches < 3)
         return false;
     return pg_major < 14 ||
            (evidence->query_matches >= 3 && evidence->query_id_varied);
@@ -1663,7 +1964,7 @@ void pgwt_pgbs_warmup_apply(struct PgBackendStatusLayout *layout,
 {
     if (!layout || !evidence)
         return;
-    bool state_ok = evidence->state_matches >= 3;
+    bool state_ok = evidence->state_matches >= 3 && evidence->state_varied;
     bool activity_ok = evidence->activity_matches >= 3;
     bool query_ok = layout->major < 14 ||
         (evidence->query_matches >= 3 && evidence->query_id_varied);
