@@ -902,23 +902,24 @@ int pgwt_pgbs_validate_snapshot(struct PgBackendStatusLayout *layout,
     layout->st_userid.validation = user_ok
         ? PGWT_PGBS_FIELD_VALIDATED : PGWT_PGBS_FIELD_INVALID;
 
+    bool state_active = snapshot->state == (uint32_t)layout->state_running ||
+                        snapshot->state == (uint32_t)layout->state_fastpath;
+    /* Idle agreement is not evidence for a field offset: most nearby padding
+     * and unrelated enum fields also look like a valid non-running state.
+     * Only an independently observed active backend can validate st_state. */
     bool state_ok = identity_ok && has_read(snapshot, PGWT_PGBS_READ_STATE) &&
                     snapshot->state <= (uint32_t)layout->state_max &&
-                    (!expected->require_running ||
-                     snapshot->state == (uint32_t)layout->state_running ||
-                     snapshot->state == (uint32_t)layout->state_fastpath);
-    if (state_ok && expected->state_shadow_available) {
-        bool active = snapshot->state == (uint32_t)layout->state_running ||
-                      snapshot->state == (uint32_t)layout->state_fastpath;
-        state_ok = active == expected->state_active;
-    }
+                    expected->state_shadow_available &&
+                    expected->state_active && state_active;
     layout->st_state.validation = state_ok
         ? PGWT_PGBS_FIELD_VALIDATED : PGWT_PGBS_FIELD_INVALID;
 
     bool activity_ok = identity_ok &&
                        has_read(snapshot, PGWT_PGBS_READ_ACTIVITY) &&
                        snapshot->activity_raw != 0 &&
-                       snapshot->activity_readable;
+                       snapshot->activity_readable &&
+                       (!expected->activity_marker_required ||
+                        snapshot->activity_marker_matched);
     layout->st_activity_raw.validation = activity_ok
         ? PGWT_PGBS_FIELD_VALIDATED : PGWT_PGBS_FIELD_INVALID;
 
@@ -927,6 +928,7 @@ int pgwt_pgbs_validate_snapshot(struct PgBackendStatusLayout *layout,
         query_ok = identity_ok && layout->st_query_id.present &&
                    has_read(snapshot, PGWT_PGBS_READ_QUERY_ID) &&
                    expected->query_id_available &&
+                   expected->query_id != 0 && snapshot->query_id != 0 &&
                    snapshot->query_id == expected->query_id;
         layout->st_query_id.validation = query_ok
             ? PGWT_PGBS_FIELD_VALIDATED : PGWT_PGBS_FIELD_INVALID;
@@ -1052,6 +1054,8 @@ static int candidate_ok(int fd, uint64_t base,
     if (read_snapshot_fd(fd, base, layout, snapshot,
                          activity, sizeof(activity)) != 0)
         return 0;
+    snapshot->activity_marker_matched =
+        activity_marker && strstr(activity, activity_marker) != NULL;
     if (snapshot->procpid != (uint32_t)expected->pid ||
         snapshot->databaseid == 0 || snapshot->userid == 0 ||
         (expected->databaseid &&
@@ -1059,7 +1063,7 @@ static int candidate_ok(int fd, uint64_t base,
         (expected->userid && snapshot->userid != expected->userid) ||
         snapshot->state > (uint32_t)layout->state_max ||
         !snapshot->activity_readable ||
-        (activity_marker && !strstr(activity, activity_marker)))
+        (activity_marker && !snapshot->activity_marker_matched))
         return 0;
     if (expected->state_shadow_available) {
         bool active = snapshot->state == (uint32_t)layout->state_running ||
@@ -1211,57 +1215,140 @@ static int spawn_psql(const char *psql, const char *user,
                                               : argv_default_socket);
 }
 
+static int spawn_psql_session(const char *psql, const char *user,
+                              const char *socket_dir, int port,
+                              const char *appname, struct pgwt_proc *proc)
+{
+    char port_str[16], dbspec[192];
+    snprintf(port_str, sizeof(port_str), "%d", port);
+    snprintf(dbspec, sizeof(dbspec),
+             "dbname=postgres application_name=%s", appname);
+    char *argv_with_socket[] = {
+        "runuser", "-u", (char *)user, "--", (char *)psql,
+        "-X", "-Atq", "-v", "ON_ERROR_STOP=1",
+        "-h", (char *)socket_dir, "-p", port_str,
+        "-d", dbspec, NULL,
+    };
+    char *argv_default_socket[] = {
+        "runuser", "-u", (char *)user, "--", (char *)psql,
+        "-X", "-Atq", "-v", "ON_ERROR_STOP=1",
+        "-p", port_str, "-d", dbspec, NULL,
+    };
+    return pgwt_proc_open_rw(proc, socket_dir[0] ? argv_with_socket
+                                                 : argv_default_socket);
+}
+
+static int send_psql(struct pgwt_proc *proc, const char *sql)
+{
+    if (!proc || !proc->in || fputs(sql, proc->in) == EOF ||
+        fputc('\n', proc->in) == EOF || fflush(proc->in) != 0)
+        return -1;
+    return 0;
+}
+
+static int wait_for_pid_exit(pid_t pid)
+{
+    if (pid <= 0)
+        return -1;
+    for (int attempt = 0; attempt < 100; attempt++) {
+        if (kill(pid, 0) != 0 && errno == ESRCH)
+            return 0;
+        usleep(50000);
+    }
+    return -1;
+}
+
 static int observe_controlled_backend(const char *psql, const char *user,
                                       const char *socket_dir, int port,
                                       const char *appname, int pg_major,
+                                      bool want_active,
                                       struct pgwt_pgbs_expected *expected)
 {
-    char sql[768];
+    char sql[1024];
     if (pg_major >= 14)
         snprintf(sql, sizeof(sql),
-                 "SELECT pid,datid,usesysid,COALESCE(query_id,0)::text "
+                 "WITH target AS (SELECT pid,datid,usesysid,query_id,state "
                  "FROM pg_stat_activity WHERE application_name='%s' "
-                 "AND state='active' ORDER BY backend_start DESC LIMIT 1",
-                 appname);
+                 "AND state='%s' ORDER BY backend_start DESC LIMIT 1) "
+                 "SELECT 'target',pid::text,datid::text,usesysid::text,"
+                 "COALESCE(query_id,0)::text,"
+                 "CASE WHEN state='active' THEN '1' ELSE '0' END FROM target "
+                 "UNION ALL SELECT 'observer',pg_backend_pid()::text,"
+                 "'0','0','0','0'",
+                 appname, want_active ? "active" : "idle");
     else
         snprintf(sql, sizeof(sql),
-                 "SELECT pid,datid,usesysid FROM pg_stat_activity "
-                 "WHERE application_name='%s' AND state='active' "
-                 "ORDER BY backend_start DESC LIMIT 1", appname);
+                 "WITH target AS (SELECT pid,datid,usesysid,state "
+                 "FROM pg_stat_activity WHERE application_name='%s' "
+                 "AND state='%s' ORDER BY backend_start DESC LIMIT 1) "
+                 "SELECT 'target',pid::text,datid::text,usesysid::text,'0',"
+                 "CASE WHEN state='active' THEN '1' ELSE '0' END FROM target "
+                 "UNION ALL SELECT 'observer',pg_backend_pid()::text,"
+                 "'0','0','0','0'",
+                 appname, want_active ? "active" : "idle");
 
-    for (int attempt = 0; attempt < 12; attempt++) {
+    for (int attempt = 0; attempt < 20; attempt++) {
         struct pgwt_proc observer;
         if (spawn_psql(psql, user, socket_dir, port, sql, &observer) != 0)
             return -1;
-        char line[256] = "";
-        bool got = fgets(line, sizeof(line), observer.out) != NULL;
+        pid_t target_pid = 0, observer_pid = 0;
+        uint32_t databaseid = 0, userid = 0;
+        long long query_id = 0;
+        int active = -1;
+        char line[256];
+        while (fgets(line, sizeof(line), observer.out)) {
+            if (sscanf(line, "target|%d|%u|%u|%lld|%d",
+                       &target_pid, &databaseid, &userid,
+                       &query_id, &active) == 5)
+                continue;
+            (void)sscanf(line, "observer|%d", &observer_pid);
+        }
         int status = pgwt_proc_close(&observer);
-        if (got && status == 0) {
-            char *save = NULL;
-            char *pid_s = strtok_r(line, "|\r\n", &save);
-            char *db_s = strtok_r(NULL, "|\r\n", &save);
-            char *user_s = strtok_r(NULL, "|\r\n", &save);
-            char *qid_s = pg_major >= 14
-                ? strtok_r(NULL, "|\r\n", &save) : NULL;
-            if (pid_s && db_s && user_s) {
-                expected->pid = (pid_t)strtol(pid_s, NULL, 10);
-                expected->databaseid = (uint32_t)strtoul(db_s, NULL, 10);
-                expected->userid = (uint32_t)strtoul(user_s, NULL, 10);
-                expected->require_running = true;
-                expected->state_shadow_available = true;
-                expected->state_active = true;
-                if (pg_major >= 14 && qid_s) {
-                    expected->query_id = (uint64_t)strtoll(qid_s, NULL, 10);
-                    expected->query_id_available = true;
-                }
-                if (expected->pid > 0 && expected->databaseid > 0 &&
-                    expected->userid > 0)
-                    return 0;
-            }
+        if (observer_pid > 0 && wait_for_pid_exit(observer_pid) != 0)
+            return -2;
+        bool qid_ok = pg_major < 14 || !want_active || query_id != 0;
+        if (status == 0 && target_pid > 0 && databaseid > 0 && userid > 0 &&
+            active == (want_active ? 1 : 0) && qid_ok) {
+            memset(expected, 0, sizeof(*expected));
+            expected->pid = target_pid;
+            expected->databaseid = databaseid;
+            expected->userid = userid;
+            expected->require_running = want_active;
+            expected->state_shadow_available = true;
+            expected->state_active = want_active;
+            expected->query_id = (uint64_t)query_id;
+            expected->query_id_available = pg_major >= 14 && query_id != 0;
+            return 0;
         }
         usleep(50000);
     }
     return -1;
+}
+
+static uint64_t resolve_controlled_snapshot(
+    pid_t pid, uint64_t preferred_base, uint64_t my_be_entry_addr,
+    const struct PgBackendStatusLayout *layout,
+    const struct pgwt_pgbs_expected *expected, const char *activity_marker,
+    struct pgwt_pgbs_snapshot *snapshot)
+{
+    uint64_t base = preferred_base;
+    int mem_fd = open_mem(pid);
+    if (mem_fd >= 0) {
+        if (!base && my_be_entry_addr &&
+            pread_exact(mem_fd, &base, sizeof(base), my_be_entry_addr) < 0)
+            base = 0;
+        /* A readable nonzero MyBEEntry pointer is still only a candidate.
+         * Zero it on any incoherent/content mismatch so the unique shared
+         * mapping scan remains reachable. */
+        if (base && !candidate_ok(mem_fd, base, layout, expected,
+                                  activity_marker, snapshot))
+            base = 0;
+        close(mem_fd);
+    }
+    if (!base)
+        base = scan_shared_for_entry(pid, layout, expected, activity_marker,
+                                     snapshot);
+    return base;
 }
 
 static void degrade_unvalidated(struct PgBackendStatusLayout *layout,
@@ -1310,59 +1397,190 @@ int pgwt_pgbs_validate_runtime(struct PgBackendStatusLayout *layout,
     }
     snprintf(slash + 1, (size_t)(psql + sizeof(psql) - slash - 1), "psql");
 
-    char appname[96], controlled_sql[256];
-    snprintf(appname, sizeof(appname), "pgwt-layout-validation-%d",
-             postmaster_pid);
-    snprintf(controlled_sql, sizeof(controlled_sql),
-             "SET application_name='%s'; SELECT pg_sleep(5)", appname);
+    char appname[96], idle_marker[96], first_marker[96], second_marker[96];
+    snprintf(appname, sizeof(appname), "pgwt-layout-validation-%d-%d",
+             postmaster_pid, getpid());
+    snprintf(idle_marker, sizeof(idle_marker), "pgwt-layout-idle-%d",
+             getpid());
+    snprintf(first_marker, sizeof(first_marker), "pgwt-layout-active-a-%d",
+             getpid());
+    snprintf(second_marker, sizeof(second_marker), "pgwt-layout-active-b-%d",
+             getpid());
     struct pgwt_proc controlled;
-    if (spawn_psql(psql, user, socket_dir, port, controlled_sql,
-                   &controlled) != 0) {
+    if (spawn_psql_session(psql, user, socket_dir, port, appname,
+                           &controlled) != 0) {
         degrade_unvalidated(layout, "could not start controlled backend");
         return -1;
     }
 
-    struct pgwt_pgbs_expected expected;
-    memset(&expected, 0, sizeof(expected));
-    int observed = observe_controlled_backend(psql, user, socket_dir, port,
-                                              appname, layout->major,
-                                              &expected);
-    struct pgwt_pgbs_snapshot snapshot;
-    memset(&snapshot, 0, sizeof(snapshot));
-    uint64_t base = 0;
+    char command[256];
+    int observed = 0;
+    if (layout->major >= 14)
+        observed = send_psql(&controlled, "SET compute_query_id=on;");
+    snprintf(command, sizeof(command), "SELECT 1 /* %s */;", idle_marker);
+    if (observed == 0)
+        observed = send_psql(&controlled, command);
+
+    struct pgwt_pgbs_expected idle_expected, first_expected, second_expected;
+    memset(&idle_expected, 0, sizeof(idle_expected));
+    memset(&first_expected, 0, sizeof(first_expected));
+    memset(&second_expected, 0, sizeof(second_expected));
+    struct pgwt_pgbs_snapshot idle_snapshot, first_snapshot, second_snapshot;
+    memset(&idle_snapshot, 0, sizeof(idle_snapshot));
+    memset(&first_snapshot, 0, sizeof(first_snapshot));
+    memset(&second_snapshot, 0, sizeof(second_snapshot));
+    uint64_t idle_base = 0, first_base = 0, second_base = 0;
+
+    if (observed == 0)
+        observed = observe_controlled_backend(
+            psql, user, socket_dir, port, appname, layout->major, false,
+            &idle_expected);
     if (observed == 0) {
-        int mem_fd = open_mem(expected.pid);
-        if (mem_fd >= 0) {
-            if (my_be_entry_addr)
-                (void)pread_exact(mem_fd, &base, sizeof(base),
-                                  my_be_entry_addr);
-            if (base)
-                (void)read_snapshot_fd(mem_fd, base, layout, &snapshot,
-                                       (char[512]){0}, 512);
-            close(mem_fd);
-        }
-        if (!base)
-            base = scan_shared_for_entry(expected.pid, layout, &expected,
-                                         "pg_sleep",
-                                         &snapshot);
+        idle_expected.activity_marker_required = true;
+        idle_base = resolve_controlled_snapshot(
+            idle_expected.pid, 0, my_be_entry_addr, layout, &idle_expected,
+            idle_marker, &idle_snapshot);
+        if (!idle_base)
+            observed = -1;
     }
 
-    /* Terminate the short validation client.  If runuser does not forward the
-     * signal, pg_sleep bounds the reap to five seconds. */
-    kill(controlled.pid, SIGTERM);
-    (void)pgwt_proc_close(&controlled);
+    snprintf(command, sizeof(command),
+             "SELECT pg_sleep(0.25) /* %s */;", first_marker);
+    if (observed == 0)
+        observed = send_psql(&controlled, command);
+    if (observed == 0)
+        observed = observe_controlled_backend(
+            psql, user, socket_dir, port, appname, layout->major, true,
+            &first_expected);
+    if (observed == 0) {
+        first_expected.activity_marker_required = true;
+        first_base = resolve_controlled_snapshot(
+            first_expected.pid, idle_base, my_be_entry_addr, layout,
+            &first_expected, first_marker, &first_snapshot);
+        if (!first_base)
+            observed = -1;
+    }
 
-    if (observed != 0) {
+    /* Wait for the same backend to become idle before issuing the second,
+     * structurally distinct statement.  This prevents psql from queueing both
+     * commands and gives st_state an observed active->idle boundary. */
+    struct pgwt_pgbs_expected between_expected;
+    memset(&between_expected, 0, sizeof(between_expected));
+    if (observed == 0)
+        observed = observe_controlled_backend(
+            psql, user, socket_dir, port, appname, layout->major, false,
+            &between_expected);
+
+    snprintf(command, sizeof(command),
+             "SELECT 1 FROM pg_sleep(0.25) /* %s */;", second_marker);
+    if (observed == 0)
+        observed = send_psql(&controlled, command);
+    if (observed == 0)
+        observed = observe_controlled_backend(
+            psql, user, socket_dir, port, appname, layout->major, true,
+            &second_expected);
+    if (observed == 0) {
+        second_expected.activity_marker_required = true;
+        second_base = resolve_controlled_snapshot(
+            second_expected.pid, idle_base, my_be_entry_addr, layout,
+            &second_expected, second_marker, &second_snapshot);
+        if (!second_base)
+            observed = -1;
+    }
+
+    pid_t controlled_pid = idle_expected.pid;
+    /* Finish the final statement, then deliver EOF and drain psql's small
+     * result stream before reaping it.  Closing stdout first would give psql
+     * SIGPIPE after the validation had already succeeded. */
+    if (controlled.in) {
+        fclose(controlled.in);
+        controlled.in = NULL;
+    }
+    char discard[256];
+    while (fgets(discard, sizeof(discard), controlled.out))
+        ;
+    int controlled_status = pgwt_proc_close(&controlled);
+    bool retired = controlled_pid > 0 &&
+                   wait_for_pid_exit(controlled_pid) == 0;
+    if (!retired) {
+        char reason[192];
+        snprintf(reason, sizeof(reason),
+                 "controlled validation backend did not retire before capture "
+                 "(pid=%d observation=%d client_status=%d)",
+                 controlled_pid, observed, controlled_status);
+        degrade_unvalidated(layout, reason);
+        return -2;
+    }
+    if (observed == -2) {
+        degrade_unvalidated(layout,
+                            "validation observer did not retire before capture");
+        return -2;
+    }
+    if (observed != 0 || controlled_status != 0) {
         degrade_unvalidated(layout,
                             "controlled backend/auth unavailable; no offset accepted");
         return -1;
     }
-    if (!base) {
-        degrade_unvalidated(layout,
-                            "controlled backend entry was not uniquely resolved");
-        return -1;
+
+    bool same_backend = idle_expected.pid == first_expected.pid &&
+                        idle_expected.pid == between_expected.pid &&
+                        idle_expected.pid == second_expected.pid &&
+                        idle_expected.databaseid == first_expected.databaseid &&
+                        idle_expected.databaseid == second_expected.databaseid &&
+                        idle_expected.userid == first_expected.userid &&
+                        idle_expected.userid == second_expected.userid;
+    struct PgBackendStatusLayout first_result = *layout;
+    (void)pgwt_pgbs_validate_snapshot(&first_result, &first_snapshot,
+                                      &first_expected);
+    int rc = pgwt_pgbs_validate_snapshot(layout, &second_snapshot,
+                                         &second_expected);
+
+    bool idle_state = has_read(&idle_snapshot, PGWT_PGBS_READ_STATE) &&
+        idle_snapshot.state <= (uint32_t)layout->state_max &&
+        idle_snapshot.state != (uint32_t)layout->state_running &&
+        idle_snapshot.state != (uint32_t)layout->state_fastpath;
+    bool active_transition = same_backend && idle_state &&
+        first_result.st_state.validation == PGWT_PGBS_FIELD_VALIDATED &&
+        idle_snapshot.state != first_snapshot.state;
+    if (!active_transition) {
+        layout->st_state.validation = PGWT_PGBS_FIELD_INVALID;
+        layout->fallback_mask |= PGWT_PGBS_FALLBACK_STATE;
+        rc = -1;
     }
-    return pgwt_pgbs_validate_snapshot(layout, &snapshot, &expected);
+
+    bool query_varied = layout->major < 14 ||
+        (same_backend && first_expected.query_id_available &&
+         second_expected.query_id_available &&
+         first_expected.query_id != 0 && second_expected.query_id != 0 &&
+         first_expected.query_id != second_expected.query_id &&
+         first_result.st_query_id.validation == PGWT_PGBS_FIELD_VALIDATED &&
+         layout->st_query_id.validation == PGWT_PGBS_FIELD_VALIDATED);
+    if (!query_varied && layout->major >= 14) {
+        layout->st_query_id.validation = PGWT_PGBS_FIELD_INVALID;
+        layout->fallback_mask |= PGWT_PGBS_FALLBACK_QUERY_ID;
+        rc = -1;
+    }
+    layout->validation = layout->fallback_mask
+        ? PGWT_PGBS_VALIDATION_DEGRADED
+        : PGWT_PGBS_VALIDATION_VALIDATED;
+    if (layout->validation == PGWT_PGBS_VALIDATION_VALIDATED) {
+        if (layout->major < 14)
+            set_detail(layout,
+                       "controlled backend retired before capture; idle/active state and activity markers validated; query ID ABSENT");
+        else
+            set_detail(layout,
+                       "controlled backend retired before capture; idle/active state, activity markers and varying query IDs validated");
+    } else {
+        set_detail(layout,
+                   "controlled sequence failed: same_backend=%s state_transition=%s activity_marker=%s query_varied=%s",
+                   same_backend ? "yes" : "no",
+                   active_transition ? "yes" : "no",
+                   layout->st_activity_raw.validation ==
+                       PGWT_PGBS_FIELD_VALIDATED ? "yes" : "no",
+                   layout->major < 14 ? "n/a" :
+                       (query_varied ? "yes" : "no"));
+    }
+    return rc;
 }
 
 int pgwt_pgbs_validate_uprobe_shadow(struct PgBackendStatusLayout *layout,
@@ -1378,7 +1596,8 @@ int pgwt_pgbs_validate_uprobe_shadow(struct PgBackendStatusLayout *layout,
         .pid = backend_pid,
         .state_shadow_available = true,
         .state_active = cmd_open,
-        .query_id_available = layout->major >= 14 && query_id_available,
+        .query_id_available = layout->major >= 14 && query_id_available &&
+                              query_id != 0,
         .query_id = query_id,
     };
     struct pgwt_pgbs_snapshot snapshot;
@@ -1387,10 +1606,12 @@ int pgwt_pgbs_validate_uprobe_shadow(struct PgBackendStatusLayout *layout,
     int mem_fd = open_mem(backend_pid);
     if (mem_fd >= 0) {
         if (my_be_entry_addr)
-            (void)pread_exact(mem_fd, &base, sizeof(base), my_be_entry_addr);
-        if (base)
-            (void)read_snapshot_fd(mem_fd, base, layout, &snapshot,
-                                   (char[512]){0}, 512);
+            if (pread_exact(mem_fd, &base, sizeof(base),
+                            my_be_entry_addr) < 0)
+                base = 0;
+        if (base && !candidate_ok(mem_fd, base, layout, &expected, NULL,
+                                  &snapshot))
+            base = 0;
         close(mem_fd);
     }
     if (!base)
@@ -1399,6 +1620,74 @@ int pgwt_pgbs_validate_uprobe_shadow(struct PgBackendStatusLayout *layout,
     if (!base)
         return -1;
     return pgwt_pgbs_validate_snapshot(layout, &snapshot, &expected);
+}
+
+void pgwt_pgbs_warmup_note(struct pgwt_pgbs_warmup_evidence *evidence,
+                           const struct PgBackendStatusLayout *candidate,
+                           bool state_active,
+                           bool query_id_available,
+                           uint64_t query_id)
+{
+    if (!evidence || !candidate || !candidate->validated_pid)
+        return;
+    evidence->observations++;
+    if (state_active && candidate->st_state.validation ==
+                        PGWT_PGBS_FIELD_VALIDATED)
+        evidence->state_matches++;
+    if (candidate->st_activity_raw.validation == PGWT_PGBS_FIELD_VALIDATED)
+        evidence->activity_matches++;
+    if (query_id_available && query_id != 0 &&
+        candidate->st_query_id.validation == PGWT_PGBS_FIELD_VALIDATED) {
+        evidence->query_matches++;
+        if (!evidence->query_id_seen) {
+            evidence->query_id_seen = true;
+            evidence->first_query_id = query_id;
+        } else if (query_id != evidence->first_query_id) {
+            evidence->query_id_varied = true;
+        }
+    }
+}
+
+bool pgwt_pgbs_warmup_complete(
+    const struct pgwt_pgbs_warmup_evidence *evidence, int pg_major)
+{
+    if (!evidence || evidence->state_matches < 3 ||
+        evidence->activity_matches < 3)
+        return false;
+    return pg_major < 14 ||
+           (evidence->query_matches >= 3 && evidence->query_id_varied);
+}
+
+void pgwt_pgbs_warmup_apply(struct PgBackendStatusLayout *layout,
+                            const struct pgwt_pgbs_warmup_evidence *evidence)
+{
+    if (!layout || !evidence)
+        return;
+    bool state_ok = evidence->state_matches >= 3;
+    bool activity_ok = evidence->activity_matches >= 3;
+    bool query_ok = layout->major < 14 ||
+        (evidence->query_matches >= 3 && evidence->query_id_varied);
+
+    layout->st_state.validation = state_ok
+        ? PGWT_PGBS_FIELD_VALIDATED : PGWT_PGBS_FIELD_INVALID;
+    layout->st_activity_raw.validation = activity_ok
+        ? PGWT_PGBS_FIELD_VALIDATED : PGWT_PGBS_FIELD_INVALID;
+    if (layout->major >= 14)
+        layout->st_query_id.validation = query_ok
+            ? PGWT_PGBS_FIELD_VALIDATED : PGWT_PGBS_FIELD_INVALID;
+    else
+        layout->st_query_id.validation = PGWT_PGBS_FIELD_ABSENT;
+
+    layout->fallback_mask = 0;
+    if (!state_ok)
+        layout->fallback_mask |= PGWT_PGBS_FALLBACK_STATE;
+    if (!activity_ok)
+        layout->fallback_mask |= PGWT_PGBS_FALLBACK_ACTIVITY_RAW;
+    if (!query_ok)
+        layout->fallback_mask |= PGWT_PGBS_FALLBACK_QUERY_ID;
+    layout->validation = layout->fallback_mask
+        ? PGWT_PGBS_VALIDATION_DEGRADED
+        : PGWT_PGBS_VALIDATION_VALIDATED;
 }
 
 /* ── Reporting ────────────────────────────────────────────── */

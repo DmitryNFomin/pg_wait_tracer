@@ -255,6 +255,7 @@ static struct pgwt_pgbs_snapshot good_snapshot(void)
                      PGWT_PGBS_READ_STATE | PGWT_PGBS_READ_ACTIVITY |
                      PGWT_PGBS_READ_QUERY_ID,
         .activity_readable = true,
+        .activity_marker_matched = true,
     };
 }
 
@@ -268,7 +269,8 @@ static void test_validation(void)
     struct pgwt_pgbs_expected expected = {
         .pid = 4242, .databaseid = 16384, .userid = 10,
         .require_running = true, .state_shadow_available = true,
-        .state_active = true, .query_id_available = true,
+        .state_active = true, .activity_marker_required = true,
+        .query_id_available = true,
         .query_id = 0xf123456789abcdefULL,
     };
     struct pgwt_pgbs_snapshot snapshot = good_snapshot();
@@ -307,10 +309,39 @@ static void test_validation(void)
 
     layout = base;
     snapshot = good_snapshot();
+    snapshot.query_id = 0;
+    expected.query_id = 0;
+    CHECK(pgwt_pgbs_validate_snapshot(&layout, &snapshot, &expected) != 0 &&
+          layout.st_query_id.validation == PGWT_PGBS_FIELD_INVALID &&
+          layout.fallback_mask == PGWT_PGBS_FALLBACK_QUERY_ID,
+          "coincidental query-id 0==0 never validates a field offset");
+    expected.query_id = 0xf123456789abcdefULL;
+
+    layout = base;
+    snapshot = good_snapshot();
+    snapshot.state = 0;
+    expected.require_running = false;
+    expected.state_active = false;
+    CHECK(pgwt_pgbs_validate_snapshot(&layout, &snapshot, &expected) != 0 &&
+          layout.st_state.validation == PGWT_PGBS_FIELD_INVALID &&
+          layout.fallback_mask == PGWT_PGBS_FALLBACK_STATE,
+          "idle-only state agreement never validates a field offset");
+    expected.require_running = true;
+    expected.state_active = true;
+
+    layout = base;
+    snapshot = good_snapshot();
     snapshot.activity_readable = false;
     CHECK(pgwt_pgbs_validate_snapshot(&layout, &snapshot, &expected) != 0 &&
           layout.fallback_mask == PGWT_PGBS_FALLBACK_ACTIVITY_RAW,
           "unreadable activity pointer degrades independently");
+
+    layout = base;
+    snapshot = good_snapshot();
+    snapshot.activity_marker_matched = false;
+    CHECK(pgwt_pgbs_validate_snapshot(&layout, &snapshot, &expected) != 0 &&
+          layout.fallback_mask == PGWT_PGBS_FALLBACK_ACTIVITY_RAW,
+          "readable pointer without the controlled marker is rejected");
 
     layout = base;
     layout.st_query_id.present = false;
@@ -322,12 +353,58 @@ static void test_validation(void)
           "missing field records fallback and never invents an offset");
 }
 
+static void test_warmup_aggregation(void)
+{
+    printf("--- bounded warmup coincidence resistance ---\n");
+    struct PgBackendStatusLayout base;
+    CHECK(pgwt_pgbs_hard_table_lookup(17, PGWT_PGBS_ARCH_X86_64, 8,
+                                      PGWT_PGBS_ABI_SYSV_LP64, &base) == 0,
+          "warmup fixture row");
+    struct PgBackendStatusLayout candidate = base;
+    candidate.validated_pid = 4242;
+    candidate.st_state.validation = PGWT_PGBS_FIELD_VALIDATED;
+    candidate.st_activity_raw.validation = PGWT_PGBS_FIELD_VALIDATED;
+    candidate.st_query_id.validation = PGWT_PGBS_FIELD_VALIDATED;
+
+    struct pgwt_pgbs_warmup_evidence evidence = {0};
+    for (int i = 0; i < 3; i++)
+        pgwt_pgbs_warmup_note(&evidence, &candidate, false, true, 0);
+    CHECK(evidence.observations == 3 && evidence.state_matches == 0 &&
+          evidence.query_matches == 0 &&
+          !pgwt_pgbs_warmup_complete(&evidence, 17),
+          "three idle/zero coincidences do not satisfy warmup");
+
+    memset(&evidence, 0, sizeof(evidence));
+    for (int i = 0; i < 3; i++)
+        pgwt_pgbs_warmup_note(&evidence, &candidate, true, true, 111);
+    struct PgBackendStatusLayout result = base;
+    pgwt_pgbs_warmup_apply(&result, &evidence);
+    CHECK(evidence.state_matches == 3 && evidence.query_matches == 3 &&
+          !evidence.query_id_varied &&
+          result.st_state.validation == PGWT_PGBS_FIELD_VALIDATED &&
+          result.st_query_id.validation == PGWT_PGBS_FIELD_INVALID &&
+          result.fallback_mask == PGWT_PGBS_FALLBACK_QUERY_ID,
+          "three identical nonzero query IDs still need variation");
+
+    memset(&evidence, 0, sizeof(evidence));
+    const uint64_t qids[] = {111, 222, 111};
+    for (size_t i = 0; i < sizeof(qids) / sizeof(qids[0]); i++)
+        pgwt_pgbs_warmup_note(&evidence, &candidate, true, true, qids[i]);
+    result = base;
+    pgwt_pgbs_warmup_apply(&result, &evidence);
+    CHECK(pgwt_pgbs_warmup_complete(&evidence, 17) &&
+          result.validation == PGWT_PGBS_VALIDATION_VALIDATED &&
+          result.fallback_mask == 0,
+          "three positive matches with varying nonzero IDs validate warmup");
+}
+
 int main(void)
 {
     printf("=== test_backend_status_layout ===\n");
     test_dwarf();
     test_hard_table();
     test_validation();
+    test_warmup_aggregation();
     printf("\n%d/%d tests passed\n", ok, run);
     return ok == run ? 0 : 1;
 }

@@ -107,6 +107,7 @@ struct pgwt_pgbs_snapshot {
     uint64_t query_id;
     uint32_t read_mask;
     bool activity_readable;
+    bool activity_marker_matched;
 };
 
 struct pgwt_pgbs_expected {
@@ -116,8 +117,22 @@ struct pgwt_pgbs_expected {
     bool require_running;
     bool state_shadow_available;
     bool state_active;
+    bool activity_marker_required;
     bool query_id_available;
     uint64_t query_id;
+};
+
+/* Pure aggregation state for the auth-free bounded warmup.  A field needs
+ * three independent positive matches; state matches are active-only, and a
+ * PG14+ query-id proof additionally needs two distinct nonzero IDs. */
+struct pgwt_pgbs_warmup_evidence {
+    unsigned observations;
+    unsigned state_matches;
+    unsigned activity_matches;
+    unsigned query_matches;
+    bool query_id_seen;
+    bool query_id_varied;
+    uint64_t first_query_id;
 };
 
 enum pgwt_pgbs_arch pgwt_pgbs_arch_from_name(const char *name);
@@ -152,7 +167,7 @@ int pgwt_pgbs_validate_snapshot(struct PgBackendStatusLayout *layout,
 int pgwt_pgbs_validate_runtime(struct PgBackendStatusLayout *layout,
                                pid_t postmaster_pid,
                                uint64_t my_be_entry_addr,
-                               const char *pg_binary);
+                               const char *pg_binary); /* -2: session not retired */
 /* Auth-free fallback used only when the controlled backend could not be
  * created.  It compares a coherent memory snapshot with the already-running
  * activity/query uprobes; callers repeat it during a bounded warmup. */
@@ -162,6 +177,16 @@ int pgwt_pgbs_validate_uprobe_shadow(struct PgBackendStatusLayout *layout,
                                      bool cmd_open,
                                      bool query_id_available,
                                      uint64_t query_id);
+
+void pgwt_pgbs_warmup_note(struct pgwt_pgbs_warmup_evidence *evidence,
+                           const struct PgBackendStatusLayout *candidate,
+                           bool state_active,
+                           bool query_id_available,
+                           uint64_t query_id);
+bool pgwt_pgbs_warmup_complete(
+    const struct pgwt_pgbs_warmup_evidence *evidence, int pg_major);
+void pgwt_pgbs_warmup_apply(struct PgBackendStatusLayout *layout,
+                            const struct pgwt_pgbs_warmup_evidence *evidence);
 
 unsigned pgwt_pgbs_fallback_count(const struct PgBackendStatusLayout *layout);
 void pgwt_pgbs_log(const struct PgBackendStatusLayout *layout);
