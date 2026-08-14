@@ -584,6 +584,67 @@ static void test_qid_index(void)
     CHECK(pgwt_qid_index_lookup(e, 0, 100) == 0, "empty index -> 0");
 }
 
+static void test_sampled_attr_source_gate(void)
+{
+    printf("--- Stage 2 sampled-attribution source gate + shadow compare ---\n");
+    struct pgwt_sampled_attr_value uprobe = {
+        .query_id = 111, .cmd_open = 1,
+    };
+    struct pgwt_sampled_attr_value tick = {
+        .query_id = 222, .cmd_open = 1,
+    };
+    struct pgwt_sample_target target = {
+        .query_id = UINT64_MAX, .cmd_open = 1,
+    };
+
+    CHECK(pgwt_sampler_select_attr(0, 1, &tick, &uprobe, &target) ==
+              PGWT_SAMPLED_ATTR_UPROBE &&
+          target.query_id == 111 && target.cmd_open == 1,
+          "degraded/PG13 gate preserves the existing uprobe source");
+    CHECK(pgwt_sampler_select_attr(1, 1, &tick, &uprobe, &target) ==
+              PGWT_SAMPLED_ATTR_TICK &&
+          target.query_id == 222 && target.cmd_open == 1,
+          "validated coherent read selects the at-tick source");
+
+    /* Seed stale values before a failed validated-layout read.  DROP must
+     * clear both fields instead of falling back to the shadow map. */
+    target.query_id = UINT64_MAX;
+    target.cmd_open = 1;
+    CHECK(pgwt_sampler_select_attr(1, 0, &tick, &uprobe, &target) ==
+              PGWT_SAMPLED_ATTR_DROP &&
+          target.query_id == 0 && target.cmd_open == 0,
+          "incoherent tick drops and zeroes attribution; no stale fallback");
+
+    CHECK(pgwt_sampled_attr_compare(&uprobe, &uprobe) == 0,
+          "identical sources agree");
+    unsigned mismatch = pgwt_sampled_attr_compare(&tick, &uprobe);
+    CHECK(mismatch == PGWT_SAMPLED_ATTR_MISMATCH_QUERY_ID,
+          "query-id-only mismatch is split by field");
+    tick.cmd_open = 0;
+    mismatch = pgwt_sampled_attr_compare(&tick, &uprobe);
+    CHECK((mismatch & PGWT_SAMPLED_ATTR_MISMATCH_CMD_OPEN) &&
+          (mismatch & PGWT_SAMPLED_ATTR_MISMATCH_QUERY_ID),
+          "tuple mismatch reports both fields");
+
+    tick.query_id = 0xaaaa;
+    tick.cmd_open = 0;
+    uprobe.query_id = 0xbbbb; /* retained last query while idle */
+    uprobe.cmd_open = 0;
+    CHECK(pgwt_sampled_attr_compare(&tick, &uprobe) == 0,
+          "idle sources compare effective query-id zero, not retained ids");
+    CHECK(!pgwt_sampled_attr_active_query_mismatch(&tick, &uprobe),
+          "idle backend is excluded from the active query-id proof");
+
+    tick.query_id = uprobe.query_id;
+    tick.cmd_open = 1;
+    uprobe.cmd_open = 0;
+    CHECK(!pgwt_sampled_attr_active_query_mismatch(&tick, &uprobe),
+          "equal raw active query ids pass despite a gate-boundary straddle");
+    uprobe.query_id++;
+    CHECK(pgwt_sampled_attr_active_query_mismatch(&tick, &uprobe),
+          "active st_query_id disagreement fails the load-bearing proof");
+}
+
 int main(void)
 {
     test_self_read();
@@ -597,6 +658,7 @@ int main(void)
     test_health();
     test_effective_period();
     test_qid_index();
+    test_sampled_attr_source_gate();
 
     printf("\n%d/%d checks passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;

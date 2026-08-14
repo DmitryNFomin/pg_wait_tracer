@@ -536,6 +536,13 @@ class DaemonState:
             "samples_total": 540000,
             "samples_per_sec": 60.0,
             "sample_read_faults_total": 0,
+            "sampled_attr_tick_read_failures_total": 0,
+            "sampled_attr_shadow_total": 0,
+            "sampled_attr_shadow_mismatch_total": 0,
+            "sampled_attr_shadow_active_total": 0,
+            "sampled_attr_shadow_active_mismatch_total": 0,
+            "sampled_attr_shadow_cmd_open_mismatch_total": 0,
+            "sampled_attr_shadow_query_id_mismatch_total": 0,
             # Capture hardening counters (T4): non-zero = loudly-logged
             # degradation (CAP-1/2/5/6, SMP-1/3).
             "sampler_ticks_missed_total": 0,

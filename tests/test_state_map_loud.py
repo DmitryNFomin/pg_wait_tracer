@@ -165,6 +165,13 @@ def main():
         # mirrors them; protocol drift between the two is caught here).
         for key in ("state_map_full_total", "seen_query_ids_full_total",
                     "invalid_wait_reads_total", "sampler_ticks_missed_total",
+                    "sampled_attr_tick_read_failures_total",
+                    "sampled_attr_shadow_total",
+                    "sampled_attr_shadow_mismatch_total",
+                    "sampled_attr_shadow_active_total",
+                    "sampled_attr_shadow_active_mismatch_total",
+                    "sampled_attr_shadow_cmd_open_mismatch_total",
+                    "sampled_attr_shadow_query_id_mismatch_total",
                     "sampler_healthy"):
             check(metrics is not None and key in metrics,
                   f"metrics carries '{key}'")

@@ -84,10 +84,16 @@
 > <0.5% goal). PG13 (no in-core query_id, gate measured ~15–23%) uses
 > `st_activity_raw` + a synthetic normalized-text grouping key; sampled query TEXT
 > becomes pgss-normalized (accepted). **Progress:** stage 1 (offset discovery +
-> fail-safe validation) **merged (#83)**; stages 2–5 (at-tick reader/gate swap →
-> tiered attach lifecycle → PG13 text path → permanent sampled-overhead A/B gate)
-> in progress. The "≈0%" claims elsewhere in this doc are **stale** pending those
-> stages — see this note.
+> fail-safe validation) **merged (#83)**; stage 2 (at-tick reader + authoritative
+> gate swap) is implemented; stages 3–5 (tiered attach lifecycle → PG13 text
+> path → permanent sampled-overhead A/B gate) remain. Stage 2 deliberately
+> defines idle attribution as `query_id=0`:
+> `cmd_open` is true only for `STATE_RUNNING`/`STATE_FASTPATH`, and only an open
+> command exposes `st_query_id`. This differs from the old state-map path's
+> retained last query id for an idle backend; idle `Client:ClientRead` samples
+> are excluded from AAS/DB Time and are no longer assigned to a completed query.
+> The "≈0%" claims elsewhere in this doc are **stale** pending those stages — see
+> this note.
 
 **Real feature gaps (defined, never built):**
 - **PostgreSQL 14 / 15 / 16** — only PG13 shipped; README says "14-16 not yet".

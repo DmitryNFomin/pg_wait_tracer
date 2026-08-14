@@ -240,6 +240,60 @@ int pgwt_cpu_sample_recordable(enum pgwt_backend_type bt, int cmd_open)
     }
 }
 
+enum pgwt_sampled_attr_source pgwt_sampler_select_attr(
+    int tick_source_enabled, int tick_read_ok,
+    const struct pgwt_sampled_attr_value *tick,
+    const struct pgwt_sampled_attr_value *uprobe,
+    struct pgwt_sample_target *target)
+{
+    if (!target)
+        return PGWT_SAMPLED_ATTR_DROP;
+
+    target->query_id = 0;
+    target->cmd_open = 0;
+    if (!tick_source_enabled) {
+        if (uprobe) {
+            target->query_id = uprobe->query_id;
+            target->cmd_open = uprobe->cmd_open;
+        }
+        return PGWT_SAMPLED_ATTR_UPROBE;
+    }
+    if (!tick_read_ok || !tick)
+        return PGWT_SAMPLED_ATTR_DROP;
+
+    target->query_id = tick->query_id;
+    target->cmd_open = tick->cmd_open;
+    return PGWT_SAMPLED_ATTR_TICK;
+}
+
+unsigned pgwt_sampled_attr_compare(
+    const struct pgwt_sampled_attr_value *tick,
+    const struct pgwt_sampled_attr_value *uprobe)
+{
+    if (!tick || !uprobe)
+        return PGWT_SAMPLED_ATTR_MISMATCH_CMD_OPEN |
+               PGWT_SAMPLED_ATTR_MISMATCH_QUERY_ID;
+    unsigned mismatch = 0;
+    if (!!tick->cmd_open != !!uprobe->cmd_open)
+        mismatch |= PGWT_SAMPLED_ATTR_MISMATCH_CMD_OPEN;
+    /* Compare EFFECTIVE attribution.  PgBackendStatus and the state map both
+     * retain the last query id after a command closes; sampled attribution
+     * deliberately exposes neither one while idle. */
+    uint64_t tick_query_id = tick->cmd_open ? tick->query_id : 0;
+    uint64_t uprobe_query_id = uprobe->cmd_open ? uprobe->query_id : 0;
+    if (tick_query_id != uprobe_query_id)
+        mismatch |= PGWT_SAMPLED_ATTR_MISMATCH_QUERY_ID;
+    return mismatch;
+}
+
+int pgwt_sampled_attr_active_query_mismatch(
+    const struct pgwt_sampled_attr_value *tick,
+    const struct pgwt_sampled_attr_value *uprobe)
+{
+    return tick && uprobe && tick->cmd_open &&
+           tick->query_id != uprobe->query_id;
+}
+
 int pgwt_sampler_build_batch(const struct pgwt_sample_target *targets,
                              const uint32_t *vals, const uint8_t *valid,
                              int n, uint64_t tick_ts,
@@ -713,13 +767,21 @@ int pgwt_sampler_poll(struct pgwt_daemon *d)
     s->last_tick_ns = tick_ts;
 
     /* SMP-4: one batched state_map dump per tick for the query_id join.
-     * Falls back to per-pid lookups on kernels without batch support. */
+     * Falls back to per-pid lookups on kernels without batch support.  Stage
+     * 2 keeps this source live as a shadow after PgBackendStatus becomes
+     * authoritative; the uprobes intentionally remain attached until Stage
+     * 3. */
     struct pgwt_qid_entry qidx_buf[MAX_BACKENDS];
     int qidx_n = dump_qid_index(d, s, qidx_buf);
 
+    const bool tick_source_enabled =
+        pgwt_pgbs_sampled_attr_enabled(&d->backend_status_layout);
+
     /* Reuse a stack target array sized to the live count; MAX_BACKENDS cap. */
     static struct pgwt_sample_target targets[MAX_BACKENDS];
+    static uint8_t attr_valid[MAX_BACKENDS];
     int n = 0;
+    int attr_errno = 0;
     for (int i = 0; i < d->backends.count && n < MAX_BACKENDS; i++) {
         struct pgwt_backend *be = &d->backends.entries[i];
         if (!be->is_alive || be->pid <= 0)
@@ -775,18 +837,95 @@ int pgwt_sampler_poll(struct pgwt_daemon *d)
         targets[n].is_shared       = be->wp_addr_shared;
         targets[n].backend_type    = be->meta_parsed ? be->meta.backend_type
                                                      : PGWT_BT_UNKNOWN;
+        /* The syslogger is not a PostgreSQL backend: it has no MyBEEntry or
+         * PgBackendStatus slot, and its on-CPU samples are already excluded
+         * by policy.  Keep its irrelevant zero attribution on the legacy
+         * source instead of manufacturing a permanent coverage hole. */
+        const bool target_tick_enabled = tick_source_enabled &&
+            targets[n].backend_type != PGWT_BT_LOGGER;
+        struct pgwt_sampled_attr_value uprobe_attr = {0};
         if (qidx_n >= 0) {
             const struct pgwt_qid_entry *qe =
                 pgwt_qid_index_get(qidx_buf, qidx_n, (uint32_t)be->pid);
-            targets[n].query_id = qe ? qe->query_id : 0;
-            targets[n].cmd_open = qe ? qe->cmd_open : 0;
+            if (qe) {
+                uprobe_attr.query_id = qe->query_id;
+                uprobe_attr.cmd_open = qe->cmd_open;
+            }
         } else {
-            uint64_t qid = 0;
-            int cmd_open = 0;
-            lookup_pid_state(d, be->pid, &qid, &cmd_open);
-            targets[n].query_id = qid;
-            targets[n].cmd_open = cmd_open;
+            lookup_pid_state(d, be->pid, &uprobe_attr.query_id,
+                             &uprobe_attr.cmd_open);
         }
+
+        struct pgwt_pgbs_sampled_attr tick_raw;
+        struct pgwt_sampled_attr_value tick_attr = {0};
+        int tick_ok = 0;
+        if (target_tick_enabled) {
+            errno = 0;
+            tick_ok = pgwt_pgbs_read_sampled_attr(
+                be->pid, d->my_be_entry_addr, &d->backend_status_layout,
+                &tick_raw) == 0;
+            if (tick_ok) {
+                tick_attr.query_id = tick_raw.query_id;
+                tick_attr.cmd_open = tick_raw.cmd_open;
+                unsigned mismatch = pgwt_sampled_attr_compare(&tick_attr,
+                                                               &uprobe_attr);
+                d->counters.sampled_attr_shadow_total++;
+                if (tick_attr.cmd_open)
+                    d->counters.sampled_attr_shadow_active_total++;
+                if (pgwt_sampled_attr_active_query_mismatch(&tick_attr,
+                                                             &uprobe_attr))
+                    d->counters
+                        .sampled_attr_shadow_active_mismatch_total++;
+                if (mismatch) {
+                    d->counters.sampled_attr_shadow_mismatch_total++;
+                    if (mismatch & PGWT_SAMPLED_ATTR_MISMATCH_CMD_OPEN)
+                        d->counters
+                            .sampled_attr_shadow_cmd_open_mismatch_total++;
+                    if (mismatch & PGWT_SAMPLED_ATTR_MISMATCH_QUERY_ID)
+                        d->counters
+                            .sampled_attr_shadow_query_id_mismatch_total++;
+                    if (getenv("PGWT_DEBUG_SAMPLED_ATTR_SHADOW"))
+                        fprintf(stderr,
+                                "SAMPLED-ATTR-SHADOW-MISMATCH: pid=%d "
+                                "active=%d fields=%s%s "
+                                "uprobe=(last_query_id=0x%llx,cmd_open=%d,"
+                                "effective_query_id=0x%llx) "
+                                "tick=(st_query_id=0x%llx,cmd_open=%d,"
+                                "state=%u,effective_query_id=0x%llx)\n",
+                                be->pid,
+                                tick_attr.cmd_open,
+                                mismatch &
+                                    PGWT_SAMPLED_ATTR_MISMATCH_CMD_OPEN
+                                    ? "cmd_open" : "",
+                                mismatch &
+                                    PGWT_SAMPLED_ATTR_MISMATCH_QUERY_ID
+                                    ? (mismatch &
+                                       PGWT_SAMPLED_ATTR_MISMATCH_CMD_OPEN
+                                       ? ",query_id" : "query_id") : "",
+                                (unsigned long long)uprobe_attr.query_id,
+                                uprobe_attr.cmd_open,
+                                (unsigned long long)(uprobe_attr.cmd_open
+                                    ? uprobe_attr.query_id : 0),
+                                (unsigned long long)tick_attr.query_id,
+                                tick_attr.cmd_open, tick_raw.state,
+                                (unsigned long long)(tick_attr.cmd_open
+                                    ? tick_attr.query_id : 0));
+                }
+            } else {
+                d->counters.sampled_attr_tick_read_failures_total++;
+                if (!attr_errno)
+                    attr_errno = errno ? errno : EAGAIN;
+                if (getenv("PGWT_DEBUG_SAMPLED_ATTR_SHADOW"))
+                    fprintf(stderr,
+                            "SAMPLED-ATTR-TICK-INVALID: pid=%d error=%s\n",
+                            be->pid, strerror(errno ? errno : EAGAIN));
+            }
+        }
+
+        enum pgwt_sampled_attr_source source = pgwt_sampler_select_attr(
+            target_tick_enabled, tick_ok,
+            &tick_attr, &uprobe_attr, &targets[n]);
+        attr_valid[n] = source != PGWT_SAMPLED_ATTR_DROP;
         n++;
     }
     if (n == 0) {
@@ -800,9 +939,22 @@ int pgwt_sampler_poll(struct pgwt_daemon *d)
                                         s->read_valid,
                                         &s->read_faults_total);
     int read_errno = errno;
-    pgwt_sampler_note_coverage(s, n, got);
     d->counters.sample_read_faults_total +=
         (s->read_faults_total - faults_before);
+
+    /* A validated-layout tick read is part of the target observation.  If it
+     * failed, invalidate the target even when wait_event_info succeeded: the
+     * batch must neither reuse stale command state nor admit a CPU sample.
+     * The existing anomaly coverage path then sees the same incomplete tick. */
+    for (int i = 0; i < n; i++) {
+        if (!attr_valid[i] && s->read_valid[i]) {
+            s->read_valid[i] = 0;
+            got--;
+        }
+    }
+    if (got == 0 && attr_errno)
+        read_errno = attr_errno;
+    pgwt_sampler_note_coverage(s, n, got);
 
     /* Debug-only evidence for the anomaly CPU-coverage gate. Keep each failed
      * target attributable: aggregate coverage alone cannot distinguish a
@@ -867,7 +1019,7 @@ int pgwt_sampler_poll(struct pgwt_daemon *d)
      * the common steady state (edge already open, or not on CPU) does zero
      * extra reads. When ground truth says "in a command", also refresh the
      * query_id the edge-uprobe likewise missed. */
-    if (d->debug_query_string_addr) {
+    if (!tick_source_enabled && d->debug_query_string_addr) {
         for (int i = 0; i < n; i++) {
             if (!s->read_valid[i] || s->read_vals[i] != 0
                 || targets[i].cmd_open)

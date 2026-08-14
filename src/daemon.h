@@ -43,6 +43,15 @@ struct pgwt_counters {
     uint64_t sample_read_faults_total; /* process_vm_readv partial/EFAULT fallbacks */
     uint64_t pgbackend_layout_fallbacks_total; /* fields rejected by Stage 1
                                                  * layout validation */
+    uint64_t sampled_attr_tick_read_failures_total; /* validated-layout
+                                                      * coherent reads dropped */
+    uint64_t sampled_attr_shadow_total; /* coherent tick/map pairs compared */
+    uint64_t sampled_attr_shadow_mismatch_total; /* effective tuples differing */
+    uint64_t sampled_attr_shadow_active_total; /* at-tick cmd_open comparisons */
+    uint64_t sampled_attr_shadow_active_mismatch_total; /* active st_query_id !=
+                                                          * raw last_query_id */
+    uint64_t sampled_attr_shadow_cmd_open_mismatch_total;
+    uint64_t sampled_attr_shadow_query_id_mismatch_total;
 
     /* Capture hardening (T4). All of these mean "something the operator
      * must know about is happening" — each is paired with a loud log. */

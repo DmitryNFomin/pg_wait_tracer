@@ -118,6 +118,11 @@ static cJSON *build_status(const struct pgwt_daemon *d)
     cJSON_AddNumberToObject(root, "pgbackend_layout_fallback_fields",
                             pgwt_pgbs_fallback_count(
                                 &d->backend_status_layout));
+    cJSON_AddStringToObject(root, "sampled_attr_source",
+                            pgwt_pgbs_sampled_attr_enabled(
+                                &d->backend_status_layout)
+                                ? "pgbackend_status"
+                                : "uprobe_state_map");
 
     /* Current capture tier and escalation state (A4). "tier" is what is being
      * captured right now: in tiered mode it flips between "sampled" (always-on
@@ -208,6 +213,20 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
                      ctr->sample_read_faults_total);
     cjson_add_uint64(root, "pgbackend_layout_fallbacks_total",
                      ctr->pgbackend_layout_fallbacks_total);
+    cjson_add_uint64(root, "sampled_attr_tick_read_failures_total",
+                     ctr->sampled_attr_tick_read_failures_total);
+    cjson_add_uint64(root, "sampled_attr_shadow_total",
+                     ctr->sampled_attr_shadow_total);
+    cjson_add_uint64(root, "sampled_attr_shadow_mismatch_total",
+                     ctr->sampled_attr_shadow_mismatch_total);
+    cjson_add_uint64(root, "sampled_attr_shadow_active_total",
+                     ctr->sampled_attr_shadow_active_total);
+    cjson_add_uint64(root, "sampled_attr_shadow_active_mismatch_total",
+                     ctr->sampled_attr_shadow_active_mismatch_total);
+    cjson_add_uint64(root, "sampled_attr_shadow_cmd_open_mismatch_total",
+                     ctr->sampled_attr_shadow_cmd_open_mismatch_total);
+    cjson_add_uint64(root, "sampled_attr_shadow_query_id_mismatch_total",
+                     ctr->sampled_attr_shadow_query_id_mismatch_total);
     cjson_add_uint64(root, "sample_read_failures_total",
                      pm.sample_read_failures_total);
     cJSON_AddNumberToObject(root, "sample_read_targets",
