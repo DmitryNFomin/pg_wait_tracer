@@ -14,6 +14,7 @@
 #include "escalation.h"
 #include "anomaly.h"
 #include "effective_cores.h"
+#include "backend_status_layout.h"
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -40,6 +41,8 @@ struct pgwt_counters {
     uint64_t prev_samples_total;       /* samples_total at previous timer tick */
     double   samples_per_sec;          /* recent sample rate, refreshed each tick */
     uint64_t sample_read_faults_total; /* process_vm_readv partial/EFAULT fallbacks */
+    uint64_t pgbackend_layout_fallbacks_total; /* fields rejected by Stage 1
+                                                 * layout validation */
 
     /* Capture hardening (T4). All of these mean "something the operator
      * must know about is happening" — each is paired with a loud log. */
@@ -148,6 +151,10 @@ struct pgwt_daemon {
     int         pg_major_version;   /* 14, 15, 16, 17, or 18 */
     int         st_query_id_offset; /* 0 = not available */
     int         st_activity_offset; /* st_activity_raw in PgBackendStatus, 0 = N/A */
+    /* Stage 1 shadow descriptor.  Existing st_*_offset fields above remain
+     * the only offsets consumed by the sampler/BPF paths until Stage 2. */
+    struct PgBackendStatusLayout backend_status_layout;
+    struct pgwt_pgbs_exclusion_set pgbs_validation_exclusions;
 
     /* PG13 query attribution (Route B1 via pg_stat_statements). PG13 has no
      * in-core query_id; when pgss is loaded its post_parse_analyze hook

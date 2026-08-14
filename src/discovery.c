@@ -1061,6 +1061,20 @@ int pgwt_discover(struct pgwt_daemon *d)
                 (unsigned long)d->my_be_entry_addr);
     }
 
+    /* Stage 1: discover and validate the complete PgBackendStatus layout in
+     * shadow mode.  Do not copy any of these offsets into the legacy fields
+     * below: those remain the sampler/BPF inputs until the separately-gated
+     * Stage 2 change. */
+    (void)pgwt_pgbs_discover(binary, d->pg_major_version,
+                             &d->backend_status_layout);
+    d->pgbs_validation_exclusions.count = 0;
+    pgwt_pgbs_validate_runtime(&d->backend_status_layout, pm_pid,
+                               d->my_be_entry_addr, binary,
+                               &d->pgbs_validation_exclusions);
+    d->counters.pgbackend_layout_fallbacks_total +=
+        pgwt_pgbs_fallback_count(&d->backend_status_layout);
+    pgwt_pgbs_log(&d->backend_status_layout);
+
     /* Detect st_query_id offset (PG14+ in-core query_id path) */
     d->st_query_id_offset = pgwt_detect_query_id_offset(binary, d->pg_major_version);
 

@@ -23,9 +23,11 @@
  * against toolchain defaults silently overriding the -pie/-no-pie flags).
  */
 #include "discovery.h"
+#include "daemon.h"
 
 #include <stdio.h>
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 #include <libgen.h>
@@ -41,6 +43,11 @@ static int run = 0, ok = 0;
 /* A global with external linkage in .data: the self-resolution target.
  * volatile + non-zero init keep it present and unmergeable. */
 volatile uint32_t pgwt_test_fixture_symbol = 0xC0FFEE42u;
+
+/* pgwt_discover() resolves these globals from a PG17+ postmaster.  They make
+ * this test binary a sufficient discovery fixture without a live database. */
+uint32_t *my_wait_event_info;
+void *MyBEEntry;
 
 /* Locate tests/fixtures/ relative to this binary (cwd-independent). */
 static void fixture_path(char *out, size_t outsz, const char *name)
@@ -72,8 +79,44 @@ static int elf_type(const char *path)
     return eh.e_type;
 }
 
-int main(void)
+static void test_validation_exclusions_reset_per_discovery_cycle(void)
 {
+    struct pgwt_daemon *d = calloc(1, sizeof(*d));
+    pid_t reused_pid = (pid_t)2147483647;
+
+    CHECK(d != NULL, "allocate discovery fixture");
+    if (!d)
+        return;
+    CHECK(pgwt_pgbs_exclusion_add(&d->pgbs_validation_exclusions,
+                                  reused_pid) == 0 &&
+          d->pgbs_validation_exclusions.count == 1 &&
+          d->pgbs_validation_exclusions.entries[0].start_time == 0 &&
+          pgwt_pgbs_exclusion_contains(&d->pgbs_validation_exclusions,
+                                       reused_pid),
+          "prior discovery cycle retains a conservative numeric-PID exclusion");
+
+    d->postmaster_pid = getpid();
+    CHECK(setenv("PGWT_TEST_PGBS_VALIDATION_FAIL", "1", 1) == 0,
+          "set forced validation failure hook");
+    int rc = pgwt_discover(d);
+    CHECK(unsetenv("PGWT_TEST_PGBS_VALIDATION_FAIL") == 0,
+          "clear forced validation failure hook");
+
+    CHECK(rc == 0 && d->pgbs_validation_exclusions.count == 0 &&
+          !pgwt_pgbs_exclusion_contains(&d->pgbs_validation_exclusions,
+                                        reused_pid),
+          "new discovery cycle clears stale numeric-PID exclusions before validation");
+    free(d->pg_binary_saved);
+    free(d);
+}
+
+int main(int argc, char **argv)
+{
+    if (argc == 2 && strcmp(argv[1], "--version") == 0) {
+        puts("postgres (PostgreSQL) 17.0");
+        return 0;
+    }
+
     printf("=== test_discovery (%s build) ===\n",
            PGWT_TEST_EXPECT_PIE ? "PIE" : "non-PIE");
 
@@ -251,6 +294,9 @@ int main(void)
             fclose(ef);
         }
     }
+
+    /* A daemon re-enters pgwt_discover() after each PostgreSQL restart. */
+    test_validation_exclusions_reset_per_discovery_cycle();
 
     printf("\n%d/%d tests passed\n", ok, run);
     return (ok == run) ? 0 : 1;

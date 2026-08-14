@@ -293,6 +293,12 @@ static struct option long_opts[] = {
 
 int main(int argc, char **argv)
 {
+    /* Validation uses pipes to best-effort psql clients.  Authentication or
+     * connection failure may close a client before the next command write;
+     * that is a degradable validation result, never authority to SIGPIPE the
+     * capture process. */
+    (void)signal(SIGPIPE, SIG_IGN);
+
     /* Heap-allocate: pgwt_daemon is ~27 MB due to accumulator arrays */
     struct pgwt_daemon *d = calloc(1, sizeof(*d));
     if (!d) {

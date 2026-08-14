@@ -17,6 +17,7 @@ test_sampler
 test_anomaly
 test_escalation_budget
 test_effective_cores
+test_backend_status_layout
 test_coop
 test_concurrent_rw
 test_durability

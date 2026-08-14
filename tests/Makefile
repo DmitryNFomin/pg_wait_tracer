@@ -14,6 +14,7 @@ TESTS     = test_wait_event test_cmdline test_event_writer test_event_reader \
             test_trace_v2 test_sampler test_anomaly test_escalation_budget \
             test_effective_cores \
             test_coop test_bucket \
+            test_backend_status_layout \
             test_pg13_resolve test_discovery_pie test_discovery_nopie \
             test_replay_fidelity test_durability test_query_text \
             test_golden_fixture \
@@ -47,7 +48,7 @@ test_event_writer: test_event_writer.c $(BUILD)/event_writer.o
 
 test_event_reader: test_event_reader.c $(BUILD)/event_reader.o $(BUILD)/event_writer.o \
                    $(BUILD)/map_reader.o $(BUILD)/wait_event.o $(BUILD)/spawn.o $(BUILD)/cJSON.o \
-                   $(BUILD)/discovery.o
+                   $(BUILD)/discovery.o $(BUILD)/backend_status_layout.o
 	$(CC) $(CFLAGS) -o $@ $^ -llz4 $(LIBBPF_LIB) -lelf -lz
 
 test_bucket: test_bucket.c
@@ -58,6 +59,7 @@ test_bucket: test_bucket.c
 # under test are BPF-free; discovery.c only needs libelf). Runs anywhere — no
 # live PostgreSQL, no BPF skeleton.
 test_pg13_resolve: test_pg13_resolve.c ../src/discovery.c ../src/spawn.c \
+                   ../src/backend_status_layout.c \
                    $(BUILD)/wait_event.o $(BUILD)/cJSON.o
 	$(CC) $(CFLAGS) -o $@ $^ -lelf -lz
 
@@ -73,6 +75,7 @@ test_pg13_resolve: test_pg13_resolve.c ../src/discovery.c ../src/spawn.c \
 # default to non-PIE on EL toolchains (R_X86_64_32S relocations), which fails
 # the `-pie` link. Building them here inherits this target's -fPIE/-fno-pie.
 DISCOVERY_TEST_DEPS = test_discovery.c ../src/discovery.c ../src/spawn.c \
+                      ../src/backend_status_layout.c \
                       ../src/wait_event.c ../src/cJSON.c
 
 test_discovery_pie: $(DISCOVERY_TEST_DEPS)
@@ -113,6 +116,13 @@ test_escalation_budget: test_escalation_budget.c ../src/escalation_budget.c
 # target committed fixtures and affinity is injected; it never inspects or
 # modifies the host's cgroup configuration.
 test_effective_cores: test_effective_cores.c ../src/effective_cores.c
+	$(CC) $(CFLAGS) -o $@ $^
+
+# Stage 1 PgBackendStatus discovery is BPF-free.  The test feeds synthetic
+# readelf streams into the strict parser and exercises both architecture
+# tables plus the pure coherency/degrade validator.
+test_backend_status_layout: test_backend_status_layout.c \
+                            ../src/backend_status_layout.c ../src/spawn.c
 	$(CC) $(CFLAGS) -o $@ $^
 
 # test_coop: cooperative provider stub (A6 interface freeze) — registers,
@@ -176,7 +186,7 @@ gen_bench_traces: gen_bench_traces.c $(SERVER_OBJS)
 
 test_concurrent_rw: test_concurrent_rw.c $(BUILD)/event_reader.o $(BUILD)/event_writer.o \
                     $(BUILD)/map_reader.o $(BUILD)/wait_event.o $(BUILD)/spawn.o $(BUILD)/cJSON.o \
-                    $(BUILD)/discovery.o
+                    $(BUILD)/discovery.o $(BUILD)/backend_status_layout.o
 	$(CC) $(CFLAGS) -o $@ $^ -llz4 $(LIBBPF_LIB) -lelf -lz
 
 # cross_validate: A4 sampled-vs-exact comparison tool. Server build
