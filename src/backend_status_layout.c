@@ -1,8 +1,8 @@
-/* backend_status_layout.c -- strict PgBackendStatus layout discovery.
+/* backend_status_layout.c -- strict PgBackendStatus layout discovery and
+ * coherent sampled-attribution reads.
  *
- * This is Stage 1 shadow machinery.  Nothing in the BPF program, sampler or
- * query attribution path reads this descriptor.  A candidate layout is useful
- * only after both structural checks and a live coherent read accept it. */
+ * A candidate layout becomes authoritative for PG14+ sampled attribution only
+ * after both structural checks and a live coherent read accept it. */
 #define _GNU_SOURCE
 #include "backend_status_layout.h"
 #include "spawn.h"
@@ -986,6 +986,7 @@ static int read_field_value(int fd, uint64_t base,
 
 static int read_snapshot_fd(int fd, uint64_t base,
                             const struct PgBackendStatusLayout *layout,
+                            uint32_t wanted_mask,
                             struct pgwt_pgbs_snapshot *snapshot,
                             char *activity, size_t activity_sz)
 {
@@ -1008,12 +1009,18 @@ static int read_snapshot_fd(int fd, uint64_t base,
                 snapshot->read_mask |= (bit_); \
             } \
         } while (0)
-        READ_VALUE(st_procpid, procpid, PGWT_PGBS_READ_PROCPID);
-        READ_VALUE(st_databaseid, databaseid, PGWT_PGBS_READ_DATABASEID);
-        READ_VALUE(st_userid, userid, PGWT_PGBS_READ_USERID);
-        READ_VALUE(st_state, state, PGWT_PGBS_READ_STATE);
-        READ_VALUE(st_activity_raw, activity_raw, PGWT_PGBS_READ_ACTIVITY);
-        if (layout->st_query_id.present)
+        if (wanted_mask & PGWT_PGBS_READ_PROCPID)
+            READ_VALUE(st_procpid, procpid, PGWT_PGBS_READ_PROCPID);
+        if (wanted_mask & PGWT_PGBS_READ_DATABASEID)
+            READ_VALUE(st_databaseid, databaseid, PGWT_PGBS_READ_DATABASEID);
+        if (wanted_mask & PGWT_PGBS_READ_USERID)
+            READ_VALUE(st_userid, userid, PGWT_PGBS_READ_USERID);
+        if (wanted_mask & PGWT_PGBS_READ_STATE)
+            READ_VALUE(st_state, state, PGWT_PGBS_READ_STATE);
+        if (wanted_mask & PGWT_PGBS_READ_ACTIVITY)
+            READ_VALUE(st_activity_raw, activity_raw, PGWT_PGBS_READ_ACTIVITY);
+        if ((wanted_mask & PGWT_PGBS_READ_QUERY_ID) &&
+            layout->st_query_id.present)
             READ_VALUE(st_query_id, query_id, PGWT_PGBS_READ_QUERY_ID);
 #undef READ_VALUE
 
@@ -1024,7 +1031,8 @@ static int read_snapshot_fd(int fd, uint64_t base,
             (snapshot->changecount_after & 1u))
             continue;
 
-        if (snapshot->activity_raw && activity && activity_sz) {
+        if ((wanted_mask & PGWT_PGBS_READ_ACTIVITY) &&
+            snapshot->activity_raw && activity && activity_sz) {
             ssize_t n = pread(fd, activity, activity_sz - 1,
                               (off_t)snapshot->activity_raw);
             if (n > 0) {
@@ -1051,7 +1059,7 @@ static int candidate_ok(int fd, uint64_t base,
                         struct pgwt_pgbs_snapshot *snapshot)
 {
     char activity[512];
-    if (read_snapshot_fd(fd, base, layout, snapshot,
+    if (read_snapshot_fd(fd, base, layout, UINT32_MAX, snapshot,
                          activity, sizeof(activity)) != 0)
         return 0;
     snapshot->activity_marker_matched =
@@ -1071,6 +1079,84 @@ static int candidate_ok(int fd, uint64_t base,
             return 0;
     }
     return 1;
+}
+
+/* ── Sampled-tier coherent attribution (Stage 2) ──────────── */
+
+bool pgwt_pgbs_sampled_attr_enabled(
+    const struct PgBackendStatusLayout *layout)
+{
+    return layout && layout->major >= 14 &&
+           layout->validation == PGWT_PGBS_VALIDATION_VALIDATED &&
+           layout->st_changecount.validation == PGWT_PGBS_FIELD_VALIDATED &&
+           layout->st_procpid.validation == PGWT_PGBS_FIELD_VALIDATED &&
+           layout->st_state.validation == PGWT_PGBS_FIELD_VALIDATED &&
+           layout->st_query_id.validation == PGWT_PGBS_FIELD_VALIDATED &&
+           layout->st_query_id.present;
+}
+
+int pgwt_pgbs_derive_sampled_attr(
+    const struct PgBackendStatusLayout *layout,
+    const struct pgwt_pgbs_snapshot *snapshot, pid_t expected_pid,
+    struct pgwt_pgbs_sampled_attr *out)
+{
+    if (!out)
+        return -1;
+    memset(out, 0, sizeof(*out));
+    if (!pgwt_pgbs_sampled_attr_enabled(layout) || !snapshot ||
+        expected_pid <= 0)
+        return -1;
+
+    const uint32_t required = PGWT_PGBS_READ_CHANGECOUNT |
+                              PGWT_PGBS_READ_PROCPID |
+                              PGWT_PGBS_READ_STATE |
+                              PGWT_PGBS_READ_QUERY_ID;
+    if ((snapshot->read_mask & required) != required ||
+        snapshot->changecount_before != snapshot->changecount_after ||
+        (snapshot->changecount_after & 1u) != 0 ||
+        snapshot->procpid != (uint32_t)expected_pid ||
+        snapshot->state > (uint32_t)layout->state_max)
+        return -1;
+
+    out->state = snapshot->state;
+    out->cmd_open = snapshot->state == (uint32_t)layout->state_running ||
+                    snapshot->state == (uint32_t)layout->state_fastpath;
+    /* Idle is query-less by design: drilldowns assign it to SESSION, not the finished query. */
+    out->query_id = out->cmd_open ? snapshot->query_id : 0;
+    return 0;
+}
+
+int pgwt_pgbs_read_sampled_attr(
+    pid_t backend_pid, uint64_t my_be_entry_addr,
+    const struct PgBackendStatusLayout *layout,
+    struct pgwt_pgbs_sampled_attr *out)
+{
+    if (!out)
+        return -1;
+    memset(out, 0, sizeof(*out));
+    if (!pgwt_pgbs_sampled_attr_enabled(layout) || backend_pid <= 0 ||
+        my_be_entry_addr == 0)
+        return -1;
+
+    int mem_fd = open_mem(backend_pid);
+    if (mem_fd < 0)
+        return -1;
+
+    uint64_t base = 0;
+    int rc = -1;
+    if (pread_exact(mem_fd, &base, sizeof(base), my_be_entry_addr) >= 0 &&
+        base != 0) {
+        struct pgwt_pgbs_snapshot snapshot;
+        const uint32_t wanted = PGWT_PGBS_READ_PROCPID |
+                                PGWT_PGBS_READ_STATE |
+                                PGWT_PGBS_READ_QUERY_ID;
+        if (read_snapshot_fd(mem_fd, base, layout, wanted, &snapshot,
+                             NULL, 0) == 0)
+            rc = pgwt_pgbs_derive_sampled_attr(layout, &snapshot,
+                                               backend_pid, out);
+    }
+    close(mem_fd);
+    return rc;
 }
 
 static uint64_t scan_shared_for_entry(pid_t pid,
@@ -2070,7 +2156,12 @@ void pgwt_pgbs_log(const struct PgBackendStatusLayout *layout)
         fprintf(stderr, " (fallback_fields=%u; no offset guessed)\n",
                 pgwt_pgbs_fallback_count(layout));
     }
-    fprintf(stderr,
-            "INFO: PgBackendStatus layout is shadow-only (Stage 1); "
-            "sampler and uprobe paths are unchanged\n");
+    if (pgwt_pgbs_sampled_attr_enabled(layout))
+        fprintf(stderr,
+                "INFO: PgBackendStatus st_state/st_query_id are authoritative "
+                "for sampled attribution; idle query_id is normalized to 0\n");
+    else
+        fprintf(stderr,
+                "INFO: sampled attribution remains on the uprobe state-map "
+                "fallback\n");
 }

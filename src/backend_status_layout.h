@@ -1,7 +1,4 @@
-/* backend_status_layout.h -- PgBackendStatus discovery and validation.
- *
- * Stage 1 is deliberately observational: this descriptor is discovered,
- * validated and reported, but no sampler or BPF path consumes it yet. */
+/* backend_status_layout.h -- PgBackendStatus discovery and validation. */
 #ifndef PGWT_BACKEND_STATUS_LAYOUT_H
 #define PGWT_BACKEND_STATUS_LAYOUT_H
 
@@ -110,6 +107,15 @@ struct pgwt_pgbs_snapshot {
     bool activity_marker_matched;
 };
 
+/* The PG14+ sampled-tier fields derived from one coherent PgBackendStatus
+ * snapshot.  state is retained for shadow diagnostics; query_id is already
+ * normalized to zero outside RUNNING/FASTPATH. */
+struct pgwt_pgbs_sampled_attr {
+    uint64_t query_id;
+    uint32_t state;
+    bool cmd_open;
+};
+
 struct pgwt_pgbs_expected {
     pid_t pid;
     uint32_t databaseid; /* 0 means plausibility check only */
@@ -183,6 +189,23 @@ int pgwt_pgbs_discover(const char *pg_binary, int pg_major,
 int pgwt_pgbs_validate_snapshot(struct PgBackendStatusLayout *layout,
                                 const struct pgwt_pgbs_snapshot *snapshot,
                                 const struct pgwt_pgbs_expected *expected);
+
+/* Stage 2 sampled attribution.  The path is available only for PG14+ after
+ * whole-layout validation and per-field validation of every field used by
+ * the coherent read.  The pure derivation helper and live reader both zero
+ * `out` before validation, so an incoherent/short/identity-mismatched read can
+ * never return command state from a prior tick. */
+bool pgwt_pgbs_sampled_attr_enabled(
+    const struct PgBackendStatusLayout *layout);
+int pgwt_pgbs_derive_sampled_attr(
+    const struct PgBackendStatusLayout *layout,
+    const struct pgwt_pgbs_snapshot *snapshot, pid_t expected_pid,
+    struct pgwt_pgbs_sampled_attr *out);
+int pgwt_pgbs_read_sampled_attr(
+    pid_t backend_pid, uint64_t my_be_entry_addr,
+    const struct PgBackendStatusLayout *layout,
+    struct pgwt_pgbs_sampled_attr *out);
+
 void pgwt_pgbs_validate_runtime(struct PgBackendStatusLayout *layout,
                                 pid_t postmaster_pid,
                                 uint64_t my_be_entry_addr,

@@ -132,6 +132,7 @@ assert isinstance(r['uptime_s'], (int, float)) and r['uptime_s'] >= 0, r
 assert isinstance(r['backends'], int) and r['backends'] >= 0, r
 assert r['pg_pid'] == $PM_PID, r
 assert isinstance(r['version'], str) and r['version'], r
+assert r['sampled_attr_source'] in ('pgbackend_status', 'uprobe_state_map'), r
 # T4/SMP-1: sampler health must be present and healthy on a working box
 assert r['sampler_healthy'] is True, r
 assert r['sampler_unhealthy_reason'] == '', r
@@ -155,6 +156,14 @@ for k in ('events_total', 'events_per_sec', 'lifecycle_events_total',
           'state_map_full_total', 'seen_query_ids_full_total',
           'invalid_wait_reads_total', 'sampler_ticks_missed_total',
           'state_reseeds_total',
+          # Stage 2 sampled-attribution source/shadow observability.
+          'sampled_attr_tick_read_failures_total',
+          'sampled_attr_shadow_total',
+          'sampled_attr_shadow_mismatch_total',
+          'sampled_attr_shadow_active_total',
+          'sampled_attr_shadow_active_mismatch_total',
+          'sampled_attr_shadow_cmd_open_mismatch_total',
+          'sampled_attr_shadow_query_id_mismatch_total',
           # AAS-1 Stage 3 CPU-saturation rule counter/state.
           'anomaly_cpu_saturation_fires_total', 'anomaly_cpu_cusum',
           # T8 measured-CPU counters (§5.6). Present + numeric here; the exact

@@ -61,6 +61,25 @@ struct pgwt_sample_target {
     int      cmd_open;
 };
 
+/* The two sampled-attribution sources use the same normalized shape.  The
+ * tick source supplies query_id=0 while its command gate is closed. */
+struct pgwt_sampled_attr_value {
+    uint64_t query_id;
+    int cmd_open;
+};
+
+enum pgwt_sampled_attr_source {
+    PGWT_SAMPLED_ATTR_UPROBE = 0,
+    PGWT_SAMPLED_ATTR_TICK,
+    PGWT_SAMPLED_ATTR_UNATTRIBUTED,
+    PGWT_SAMPLED_ATTR_DROP,
+};
+
+enum pgwt_sampled_attr_mismatch {
+    PGWT_SAMPLED_ATTR_MISMATCH_CMD_OPEN = 1u << 0,
+    PGWT_SAMPLED_ATTR_MISMATCH_QUERY_ID = 1u << 1,
+};
+
 /* Sampler read-health tracking (SMP-1). Pure state machine (unit-testable):
  * a tick where n_targets > 0 but NOTHING could be read is a failure tick.
  * The first failure logs immediately; persistent failure re-logs
@@ -176,6 +195,31 @@ void pgwt_sampler_note_coverage(struct pgwt_sampler *s, int targets, int valid);
  * category tagging. */
 uint32_t pgwt_backend_type_flag(enum pgwt_backend_type bt);
 int      pgwt_cpu_sample_recordable(enum pgwt_backend_type bt, int cmd_open);
+
+/* Stage 2 source gate.  A degraded/disabled layout selects the existing
+ * uprobe value.  A validated layout selects the coherent tick value, and a
+ * failed tick read selects DROP with zeroed outputs — never the previous
+ * tick or the uprobe shadow. */
+enum pgwt_sampled_attr_source pgwt_sampler_select_attr(
+    int tick_source_enabled, int tick_read_ok,
+    const struct pgwt_sampled_attr_value *tick,
+    const struct pgwt_sampled_attr_value *uprobe,
+    struct pgwt_sample_target *target);
+
+/* Compare one coherent at-tick value with its uprobe-map shadow after each
+ * source applies cmd_open ? query_id : 0.  Retained idle query ids therefore
+ * agree at zero instead of producing false shadow mismatches. */
+unsigned pgwt_sampled_attr_compare(
+    const struct pgwt_sampled_attr_value *tick,
+    const struct pgwt_sampled_attr_value *uprobe);
+
+/* Load-bearing shadow proof: only an at-tick active backend participates,
+ * and its st_query_id is compared with the state map's raw last_query_id.
+ * cmd_open boundary disagreement remains visible in the total tuple counters
+ * but does not turn equal active query ids into false active mismatches. */
+int pgwt_sampled_attr_active_query_mismatch(
+    const struct pgwt_sampled_attr_value *tick,
+    const struct pgwt_sampled_attr_value *uprobe);
 
 /* T2 (EL9 fix): read a backend's OWN authoritative command state, bypassing
  * the transition-edge state_map. The on_report_activity/on_report_query_id

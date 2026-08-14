@@ -1,4 +1,4 @@
-/* test_backend_status_layout.c -- Stage 1 layout discovery/validation tests. */
+/* test_backend_status_layout.c -- PgBackendStatus discovery/runtime tests. */
 #define _GNU_SOURCE
 #include "backend_status_layout.h"
 
@@ -355,6 +355,120 @@ static void test_validation(void)
           "missing field records fallback and never invents an offset");
 }
 
+static void validate_sampled_fields(struct PgBackendStatusLayout *layout)
+{
+    layout->validation = PGWT_PGBS_VALIDATION_VALIDATED;
+    layout->st_changecount.validation = PGWT_PGBS_FIELD_VALIDATED;
+    layout->st_procpid.validation = PGWT_PGBS_FIELD_VALIDATED;
+    layout->st_state.validation = PGWT_PGBS_FIELD_VALIDATED;
+    layout->st_query_id.validation = PGWT_PGBS_FIELD_VALIDATED;
+}
+
+static void test_sampled_attr(void)
+{
+    printf("--- Stage 2 coherent sampled attribution ---\n");
+    struct PgBackendStatusLayout layout;
+    CHECK(pgwt_pgbs_hard_table_lookup(18, PGWT_PGBS_ARCH_X86_64, 8,
+                                      PGWT_PGBS_ABI_SYSV_LP64,
+                                      &layout) == 0,
+          "PG18 sampled-attribution fixture row");
+    validate_sampled_fields(&layout);
+    CHECK(pgwt_pgbs_sampled_attr_enabled(&layout),
+          "validated PG18 layout enables at-tick source");
+
+    struct pgwt_pgbs_snapshot snapshot = {
+        .changecount_before = 12,
+        .changecount_after = 12,
+        .procpid = (uint32_t)getpid(),
+        .state = 3,                 /* PG18 STATE_RUNNING */
+        .query_id = 0xf123456789abcdefULL,
+        .read_mask = PGWT_PGBS_READ_CHANGECOUNT |
+                     PGWT_PGBS_READ_PROCPID |
+                     PGWT_PGBS_READ_STATE |
+                     PGWT_PGBS_READ_QUERY_ID,
+    };
+    struct pgwt_pgbs_sampled_attr attr = {0};
+    CHECK(pgwt_pgbs_derive_sampled_attr(&layout, &snapshot, getpid(),
+                                        &attr) == 0 &&
+          attr.cmd_open && attr.state == 3 &&
+          attr.query_id == snapshot.query_id,
+          "PG18 RUNNING=3 admits CPU and preserves signed query-id bits");
+
+    snapshot.state = 5;             /* PG18 STATE_FASTPATH */
+    CHECK(pgwt_pgbs_derive_sampled_attr(&layout, &snapshot, getpid(),
+                                        &attr) == 0 &&
+          attr.cmd_open && attr.state == 5 &&
+          attr.query_id == snapshot.query_id,
+          "PG18 FASTPATH=5 is command-open");
+
+    snapshot.state = 1;             /* any validated idle state */
+    CHECK(pgwt_pgbs_derive_sampled_attr(&layout, &snapshot, getpid(),
+                                        &attr) == 0 &&
+          !attr.cmd_open && attr.query_id == 0,
+          "idle state closes admission and normalizes query-id to zero");
+
+    /* A failed derivation starts by clearing the destination.  Seed it with
+     * stale command state to prove an incoherent tick cannot reuse it. */
+    attr.cmd_open = true;
+    attr.query_id = UINT64_MAX;
+    snapshot.state = 3;
+    snapshot.changecount_after = 14;
+    CHECK(pgwt_pgbs_derive_sampled_attr(&layout, &snapshot, getpid(),
+                                        &attr) != 0 &&
+          !attr.cmd_open && attr.query_id == 0,
+          "incoherent read drops state instead of reusing the prior tick");
+    snapshot.changecount_after = snapshot.changecount_before;
+
+    attr.cmd_open = true;
+    attr.query_id = UINT64_MAX;
+    snapshot.procpid++;
+    CHECK(pgwt_pgbs_derive_sampled_attr(&layout, &snapshot, getpid(),
+                                        &attr) != 0 &&
+          !attr.cmd_open && attr.query_id == 0,
+          "PID identity mismatch drops state");
+    snapshot.procpid = (uint32_t)getpid();
+
+    /* Exercise the live /proc/<pid>/mem wrapper against a synthetic
+     * PgBackendStatus row in this process. */
+    uint8_t row[440];
+    memset(row, 0, sizeof(row));
+    uint32_t changecount = 20;
+    uint32_t pid = (uint32_t)getpid();
+    uint32_t state = 5;
+    uint64_t query_id = 0x7123456789abcdefULL;
+    memcpy(row + layout.st_changecount.offset, &changecount,
+           sizeof(changecount));
+    memcpy(row + layout.st_procpid.offset, &pid, sizeof(pid));
+    memcpy(row + layout.st_state.offset, &state, sizeof(state));
+    memcpy(row + layout.st_query_id.offset, &query_id, sizeof(query_id));
+    uint64_t my_be_entry = (uint64_t)(uintptr_t)row;
+    CHECK(pgwt_pgbs_read_sampled_attr(getpid(),
+                                      (uint64_t)(uintptr_t)&my_be_entry,
+                                      &layout, &attr) == 0 &&
+          attr.cmd_open && attr.state == 5 && attr.query_id == query_id,
+          "live reader dereferences MyBEEntry and reuses coherent helper");
+
+    layout.validation = PGWT_PGBS_VALIDATION_DEGRADED;
+    CHECK(!pgwt_pgbs_sampled_attr_enabled(&layout),
+          "degraded layout keeps the uprobe-map fallback");
+    layout.validation = PGWT_PGBS_VALIDATION_VALIDATED;
+    layout.st_state.validation = PGWT_PGBS_FIELD_INVALID;
+    CHECK(!pgwt_pgbs_sampled_attr_enabled(&layout),
+          "invalid st_state field keeps the uprobe-map fallback");
+    layout.st_state.validation = PGWT_PGBS_FIELD_VALIDATED;
+    layout.st_query_id.validation = PGWT_PGBS_FIELD_INVALID;
+    CHECK(!pgwt_pgbs_sampled_attr_enabled(&layout),
+          "invalid st_query_id field keeps the uprobe-map fallback");
+
+    CHECK(pgwt_pgbs_hard_table_lookup(13, PGWT_PGBS_ARCH_X86_64, 8,
+                                      PGWT_PGBS_ABI_SYSV_LP64,
+                                      &layout) == 0,
+          "PG13 fallback fixture row");
+    layout.validation = PGWT_PGBS_VALIDATION_VALIDATED;
+    CHECK(!pgwt_pgbs_sampled_attr_enabled(&layout),
+          "PG13 remains unchanged on the uprobe/activity-text route");
+}
+
 static void test_warmup_aggregation(void)
 {
     printf("--- bounded warmup coincidence resistance ---\n");
@@ -480,6 +594,7 @@ int main(void)
     test_dwarf();
     test_hard_table();
     test_validation();
+    test_sampled_attr();
     test_warmup_aggregation();
     test_fail_safe_and_pid_exclusion();
     printf("\n%d/%d tests passed\n", ok, run);
