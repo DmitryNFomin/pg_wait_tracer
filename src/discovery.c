@@ -1067,6 +1067,7 @@ int pgwt_discover(struct pgwt_daemon *d)
      * Stage 2 change. */
     (void)pgwt_pgbs_discover(binary, d->pg_major_version,
                              &d->backend_status_layout);
+    d->pgbs_validation_exclusions.count = 0;
     pgwt_pgbs_validate_runtime(&d->backend_status_layout, pm_pid,
                                d->my_be_entry_addr, binary,
                                &d->pgbs_validation_exclusions);
