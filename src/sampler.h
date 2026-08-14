@@ -8,11 +8,11 @@
  * PostgreSQL executes zero extra instructions.
  *
  * Addresses come from the backend registry (pid -> resolved wait_event_info
- * address, the same field the watchpoint tier resolves). query_id per sample
- * is joined from the BPF state_map (the on_report_query_id uprobe maintains
- * pid->query_id) — never read from PG memory in the sample path. The join is
- * one batched map dump per tick (BPF_MAP_LOOKUP_BATCH) with a per-pid
- * lookup fallback on kernels without batch support (SMP-4).
+ * address, the same field the watchpoint tier resolves). On a validated
+ * PG14-18 layout, query_id and command state come from the same coherent
+ * PgBackendStatus read at the tick. PG13/degraded layouts join the pinned
+ * uprobe edge map with one batched map dump per tick and a per-pid fallback
+ * on kernels without BPF_MAP_LOOKUP_BATCH (SMP-4).
  *
  * Batching soundness (SMP-2): PG's main shm is an inherited MAP_SHARED
  * anonymous mmap — same VA in every backend AND the same pages, so reading
@@ -113,8 +113,8 @@ struct pgwt_sampler {
     struct pgwt_trace_event *samples; /* MAX_BACKENDS — encoded batch */
 
     /* Batched pid->query_id join scratch (SMP-4). qid_cap entries. */
-    uint32_t *qid_keys;           /* state_map key dump */
-    struct pgwt_pid_state *qid_vals; /* state_map value dump */
+    uint32_t *qid_keys;           /* exact_attr_map key dump */
+    struct pgwt_exact_attr *qid_vals; /* generation-tagged uprobe edges */
     int       qid_cap;
     int       qid_batch_supported; /* -1 unknown, 0 no (per-pid fallback), 1 yes */
 

@@ -15,6 +15,7 @@
 #include "anomaly.h"
 #include "effective_cores.h"
 #include "backend_status_layout.h"
+#include "exact_probe.h"
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -193,6 +194,7 @@ struct pgwt_daemon {
     const struct pgwt_capture_provider *provider; /* active provider vtable */
     struct pgwt_sampler *sampler;        /* sampled-tier state, NULL if unused */
     struct pgwt_escalation escalation;   /* tiered escalation engine (D5/A4) */
+    struct pgwt_exact_probe_bundle exact_probes; /* Stage 3 exact-only links */
     struct pgwt_anomaly anomaly;         /* anomaly-trigger rules engine (D5/A5) */
     /* Anomaly config (parsed flags; copied into anomaly state after init so
      * --anomaly-* overrides apply on top of the rate-derived defaults). */
@@ -230,6 +232,7 @@ struct pgwt_daemon {
      * can read the same accumulator. The startup probe sets both (and reports
      * the tier loudly + in control-socket status). */
     bool        cpu_accounting;
+    bool        exact_cpu_active;       /* sched_switch hot body armed */
     bool        schedstat_ok;
     uint32_t    lightweight_mode;        /* 1 = BPF accumulator only (no ringbuf) */
     uint32_t    skip_query_id;          /* 1 = skip query_id reads in BPF */
@@ -345,7 +348,7 @@ static inline bool pgwt_mode_uses_watchpoints(const struct pgwt_daemon *d)
     if (d->mode == PGWT_MODE_SAMPLED)
         return false;
     if (d->mode == PGWT_MODE_TIERED)
-        return d->escalation.active;
+        return d->escalation.active && d->escalation.admitting;
     if (d->mode == PGWT_MODE_COOP)
         return false;   /* A6: capture comes from the extension, not watchpoints
                            (and the stub refuses activation in this build) */

@@ -167,19 +167,18 @@ run_section "capture smoke: --mode tiered (live view + trace file)" \
     python3 "$SCRIPT_DIR/test_capture_smoke.py" --mode tiered --pid "$PM_PID" \
         $([[ $CORE -eq 1 ]] && echo --capture-core)
 
-# ── T2 item 0: the uprobes must actually FIRE (bpftool run_cnt). ──
-# Guards the PIE dead-offset class (study defect 1): attach "succeeds",
-# the probe never runs, attribution is silently zero. PG13 exercises the
-# standard_ExecutorStart route; every version exercises the T2
-# command-open gate probe (pgstat_report_activity). This is a portable,
-# watchpoint-independent capture check — runs in --core too.
-run_section "uprobes fire on this binary layout (T2, run_cnt > 0)" \
+# ── Stage 3: tiered query/activity probes are escalation-only. ──
+# Validated PG14-18 must have zero sampled firings, attach both links atomically
+# for repeated exact generations, and detach without stale preseeds. PG13 or a
+# degraded layout retains the legacy pinned pair. This also covers a mid-query
+# straddler, backend fork/exit during a window, and partial-attach rollback.
+run_section "tiered exact-probe lifecycle (Stage 3)" \
     python3 "$SCRIPT_DIR/test_uprobe_fired.py" --pid "$PM_PID" \
         ${PG_VERSION:+--pg-version "$PG_VERSION"}
 
 if [[ $CORE -eq 1 ]]; then
     # Container matrix: the daemon attaches, records real attributed events
-    # live + to disk (asserted above), and its uprobes fire on this distro's
+    # live + to disk (asserted above), and its exact-probe lifecycle works on
     # binary layout. The watchpoint-fidelity / precise-scheduling sections are
     # skipped LOUDLY — they are gated on the T0 hosted runner and the live
     # EL8/EL9 boxes.
@@ -190,7 +189,7 @@ if [[ $CORE -eq 1 ]]; then
     summary "multi-core scheduling, which a nested privileged container does"
     summary "not provide (the probe can OPEN a breakpoint that never traps)."
     summary "The core capture proof above — build, BPF attach, real attributed"
-    summary "events live + on disk, uprobes firing — is the portable gate; the"
+    summary "events live + on disk, exact-probe lifecycle — is the portable gate; the"
     summary "watchpoint sections run on the T0 hosted runner + live EL8/EL9"
     summary "boxes (run_all.sh --require-live)."
 else

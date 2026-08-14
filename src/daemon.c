@@ -783,6 +783,11 @@ int pgwt_daemon_init(struct pgwt_daemon *d)
      * schedstat-less kernels is deferred; see the PR notes.) */
     d->cpu_accounting = (access("/sys/kernel/btf/vmlinux", R_OK) == 0);
     d->skel->rodata->cpu_accounting = d->cpu_accounting;
+    /* Exact scheduler accounting is hot only in full/exact windows. The
+     * tracepoint link remains attached for race-free escalation, while this
+     * BSS gate makes sampled operation return before any state-map lookup. */
+    d->exact_cpu_active = d->mode == PGWT_MODE_FULL;
+    d->skel->bss->exact_cpu_active = d->exact_cpu_active;
     /* TEST HOOK: see pg_wait_tracer.bpf.c test_no_sched_oncpu. Forces the
      * live CPU*=0 straddle repro deterministically by suppressing the
      * sched_switch on_cpu_ts open. Test-only; loud so it can never be missed. */
@@ -851,144 +856,35 @@ int pgwt_daemon_init(struct pgwt_daemon *d)
         goto fail;
     }
 
-    /* Attach query lifecycle probes (only in full trace mode) */
-    if (!d->lightweight_mode && !d->skip_usdt && d->pg_binary_saved) {
+    /* Stage 3: query/activity uprobes are one atomic, generation-tagged exact
+     * bundle. Validated PG14-18 sampled/tiered starts with no per-query links;
+     * PG13/degraded pins the legacy attribution pair; full pins the bundle. */
+    if (pgwt_exact_probe_startup(d) != 0)
+        goto fail;
+
+    /* Plan/execute USDT probes remain full-mode-only, as before Stage 3.
+     * They are not part of the two-link per-query bundle: EL8 kernels without
+     * USDT semaphore refcounting have always run exact wait/query capture with
+     * these optional phase markers unavailable. */
+    if (d->mode == PGWT_MODE_FULL && !d->lightweight_mode &&
+        !d->skip_usdt && d->pg_binary_saved) {
         const char *bin = d->pg_binary_saved;
-
-        /* Query-id capture uprobe. Must be active before USDT probes fire so
-         * EXEC_START always has a correct query_id. Two variants:
-         *   PG14+ : pgstat_report_query_id (arg = query_id), bypassing shmem.
-         *   PG13  : no in-core query_id / no pgstat_report_query_id. Instead,
-         *           with pg_stat_statements loaded (use_pg13_query_attr),
-         *           uprobe standard_ExecutorStart(QueryDesc*) and walk
-         *           queryDesc->plannedstmt->queryId. Feeds the SAME state_map
-         *           slot, so the sampler + watchpoint pipelines are unchanged.
-         *
-         *           We probe standard_ExecutorStart, NOT the public
-         *           ExecutorStart wrapper. With pg_stat_statements loaded,
-         *           ExecutorStart_hook is set, so the ExecutorStart wrapper is
-         *           a tiny trampoline that tail-jumps (jmp *hook) into the
-         *           hook chain; an entry uprobe placed on that trampoline does
-         *           not fire reliably (the tail-jump never returns through the
-         *           wrapper body). standard_ExecutorStart is the real function
-         *           and is always reached at the bottom of the hook chain
-         *           (pgss's hook calls it), by which point pgss has already
-         *           populated PlannedStmt.queryId. Same arg0 (QueryDesc*). */
-        if (d->use_pg13_query_attr) {
-            uint64_t es_va = pgwt_find_symbol_offset(bin, "standard_ExecutorStart");
-            /* vaddr -> uprobe FILE offset via the ELF program headers. The
-             * old `va - 0x400000` non-PIE heuristic attached the probe to a
-             * dead byte on PIE builds — attach "succeeded", the probe never
-             * fired, query attribution was silently zero (study defect 1). */
-            uint64_t es_off = pgwt_vaddr_to_file_offset(bin, es_va);
-            if (es_va && !es_off)
-                fprintf(stderr, "WARN: cannot translate standard_ExecutorStart "
-                        "VA 0x%lx to a file offset in %s (PG13 query "
-                        "attribution disabled)\n", (unsigned long)es_va, bin);
-            if (es_off) {
-                LIBBPF_OPTS(bpf_uprobe_opts, uprobe_opts, .retprobe = false);
-                d->skel->links.on_executor_start =
-                    bpf_program__attach_uprobe_opts(d->skel->progs.on_executor_start,
-                                                    -1, bin, es_off, &uprobe_opts);
-                if (d->verbose)
-                    fprintf(stderr, "INFO: standard_ExecutorStart at offset 0x%lx "
-                            "(PG13 query attribution via pg_stat_statements)\n",
-                            (unsigned long)es_off);
-                if (!d->skel->links.on_executor_start)
-                    fprintf(stderr, "WARN: could not attach standard_ExecutorStart "
-                            "uprobe (PG13 query attribution disabled)\n");
-            } else {
-                fprintf(stderr, "WARN: symbol 'standard_ExecutorStart' not found "
-                        "(PG13 query attribution disabled)\n");
-            }
-        } else {
-            uint64_t qid_func_va = pgwt_find_symbol_offset(bin, "pgstat_report_query_id");
-            uint64_t qid_func_off = pgwt_vaddr_to_file_offset(bin, qid_func_va);
-            if (qid_func_va && !qid_func_off)
-                fprintf(stderr, "WARN: cannot translate pgstat_report_query_id "
-                        "VA 0x%lx to a file offset in %s (query attribution "
-                        "disabled)\n", (unsigned long)qid_func_va, bin);
-            if (qid_func_off) {
-                LIBBPF_OPTS(bpf_uprobe_opts, uprobe_opts, .retprobe = false);
-                d->skel->links.on_report_query_id =
-                    bpf_program__attach_uprobe_opts(d->skel->progs.on_report_query_id,
-                                                    -1, bin, qid_func_off, &uprobe_opts);
-                if (d->verbose)
-                    fprintf(stderr, "INFO: pgstat_report_query_id at offset 0x%lx\n",
-                            (unsigned long)qid_func_off);
-            }
-        }
-
-        /* Command-open gate uprobe (T2): pgstat_report_activity(state, ...)
-         * maintains cmd_open in the state_map — the pg_stat_activity
-         * state='active' window the sampler gates client on-CPU samples on,
-         * and (while watchpoints are live) the CMD_START/CMD_END markers the
-         * exact tier's we==0 classification uses. Attached in every
-         * non-lightweight mode, like the query_id uprobe. Failure is loud:
-         * without the gate, client CPU is not sampled — the CPU half of AAS
-         * silently disappears for client backends otherwise. */
-        {
-            uint64_t act_va = pgwt_find_symbol_offset(bin, "pgstat_report_activity");
-            uint64_t act_off = pgwt_vaddr_to_file_offset(bin, act_va);
-            if (act_off && d->skel->rodata->bs_state_running != 0) {
-                LIBBPF_OPTS(bpf_uprobe_opts, act_opts, .retprobe = false);
-                d->skel->links.on_report_activity =
-                    bpf_program__attach_uprobe_opts(d->skel->progs.on_report_activity,
-                                                    -1, bin, act_off, &act_opts);
-                if (d->verbose && d->skel->links.on_report_activity)
-                    fprintf(stderr, "INFO: pgstat_report_activity at offset 0x%lx "
-                            "(command-open gate)\n", (unsigned long)act_off);
-            }
-            d->cmd_gate_active = (d->skel->links.on_report_activity != NULL);
-            if (!d->skel->links.on_report_activity)
-                fprintf(stderr,
-                        "WARN: command-open gate unavailable (%s) — on-CPU "
-                        "samples for CLIENT backends will NOT be recorded; "
-                        "sampled AAS under-counts CPU-bound client activity. "
-                        "Background/parallel-worker CPU is unaffected.\n",
-                        act_va == 0
-                            ? "symbol 'pgstat_report_activity' not found"
-                            : (act_off == 0
-                                   ? "cannot translate VA to file offset"
-                                   : (d->skel->rodata->bs_state_running == 0
-                                          ? "unknown BackendState layout for this PG version"
-                                          : "uprobe attach failed")));
-        }
-
-        /* USDT marker probes write into event_ringbuf, which only the FULL
-         * tier consumes. In sampled mode they would be pure overhead with no
-         * reader, so attach them only when watchpoints are in use. The
-         * query_id uprobe above stays in every mode — the sampler joins
-         * pid->query_id from the state_map it maintains. */
-        if (pgwt_mode_uses_watchpoints(d)) {
-            d->skel->links.on_exec_start =
-                bpf_program__attach_usdt(d->skel->progs.on_exec_start,
-                                         -1, bin,
-                                         "postgresql", "query__execute__start", NULL);
-            d->skel->links.on_exec_done =
-                bpf_program__attach_usdt(d->skel->progs.on_exec_done,
-                                         -1, bin,
-                                         "postgresql", "query__execute__done", NULL);
-            d->skel->links.on_plan_start =
-                bpf_program__attach_usdt(d->skel->progs.on_plan_start,
-                                         -1, bin,
-                                         "postgresql", "query__plan__start", NULL);
-            d->skel->links.on_plan_done =
-                bpf_program__attach_usdt(d->skel->progs.on_plan_done,
-                                         -1, bin,
-                                         "postgresql", "query__plan__done", NULL);
-
-            bool qid_attached = d->use_pg13_query_attr
-                ? (d->skel->links.on_executor_start != NULL)
-                : (d->skel->links.on_report_query_id != NULL);
-            if (d->skel->links.on_exec_start && d->skel->links.on_exec_done
-                && qid_attached)
-                fprintf(stderr, "INFO: attached USDT + query_id uprobe\n");
-            else
-                fprintf(stderr, "WARN: could not attach query probes (lifecycle tracking disabled)\n");
-        } else if (d->skel->links.on_report_query_id || d->skel->links.on_executor_start) {
-            fprintf(stderr, "INFO: attached query_id uprobe (sampled mode)\n");
-        }
+        d->skel->links.on_exec_start = bpf_program__attach_usdt(
+            d->skel->progs.on_exec_start, -1, bin,
+            "postgresql", "query__execute__start", NULL);
+        d->skel->links.on_exec_done = bpf_program__attach_usdt(
+            d->skel->progs.on_exec_done, -1, bin,
+            "postgresql", "query__execute__done", NULL);
+        d->skel->links.on_plan_start = bpf_program__attach_usdt(
+            d->skel->progs.on_plan_start, -1, bin,
+            "postgresql", "query__plan__start", NULL);
+        d->skel->links.on_plan_done = bpf_program__attach_usdt(
+            d->skel->progs.on_plan_done, -1, bin,
+            "postgresql", "query__plan__done", NULL);
+        if (!d->skel->links.on_exec_start || !d->skel->links.on_exec_done ||
+            !d->skel->links.on_plan_start || !d->skel->links.on_plan_done)
+            fprintf(stderr, "WARN: optional full-mode plan/exec USDT phase "
+                    "markers unavailable\n");
     }
 
     /* Set up lifecycle ring buffer consumer */
@@ -1127,6 +1023,10 @@ int pgwt_daemon_init(struct pgwt_daemon *d)
     /* Auth-free second validation route.  Normally the controlled backend in
      * discovery.c has already validated the descriptor and this is a no-op. */
     pgwt_layout_uprobe_shadow_warmup(d);
+    /* The auth-free fallback may have promoted a degraded PG14-18 layout.
+     * Its temporary shadow probes have served their only purpose; enforce the
+     * same zero-trap sampled policy as startup validation. */
+    pgwt_exact_probe_reconcile_sampled(d);
 
     /* Straddle-race recovery at startup. The one-shot scan above can miss a
      * pre-existing backend (its /proc read raced) or leave it in bootstrap
@@ -1631,6 +1531,10 @@ void pgwt_daemon_cleanup(struct pgwt_daemon *d)
 
     pgwt_ring_free(&d->ring);
     pgwt_close_all_backends(&d->backends);
+
+    /* Exact links are owned by the Stage 3 bundle, not by skeleton teardown:
+     * destroy them once and null the generated skeleton slots first. */
+    pgwt_exact_probe_cleanup(d);
 
     if (d->event_rb) {
         ring_buffer__free(d->event_rb);

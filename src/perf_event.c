@@ -94,6 +94,17 @@ int pgwt_watchpoint_enable(int perf_fd)
     return 0;
 }
 
+int pgwt_watchpoint_disable(int perf_fd)
+{
+    if (perf_fd < 0)
+        return 0;
+    if (ioctl(perf_fd, PERF_EVENT_IOC_DISABLE, 0) != 0) {
+        fprintf(stderr, "ioctl DISABLE: %s\n", strerror(errno));
+        return -1;
+    }
+    return 0;
+}
+
 void pgwt_close_watchpoint(int perf_fd)
 {
     if (perf_fd >= 0)

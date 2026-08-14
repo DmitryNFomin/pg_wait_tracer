@@ -16,6 +16,7 @@ test_trace_v2
 test_sampler
 test_anomaly
 test_escalation_budget
+test_exact_probe
 test_effective_cores
 test_backend_status_layout
 test_coop

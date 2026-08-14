@@ -1,6 +1,8 @@
 # pg_wait_tracer
 # Requires: clang, llvm-strip, bpftool, libbpf-dev, libelf-dev, zlib1g-dev, liblz4-dev
 
+.DEFAULT_GOAL := all
+
 CLANG      ?= clang
 LLVM_STRIP ?= llvm-strip
 BPFTOOL    ?= bpftool
@@ -86,6 +88,7 @@ CFLAGS     = -g -O2 -Wall -Wextra -Wno-unused-parameter \
              -DPGWT_BUILD_VERSION='"$(PGWT_BUILD_VERSION)"' \
              $(LIBBPF_INC) \
              -I$(INC_DIR) -I$(SRC_DIR)
+DEPFLAGS   = -MMD -MP
 LDFLAGS    = $(LIBBPF_LIB) -lelf -lz -llz4
 
 USER_SRCS  = $(SRC_DIR)/pg_wait_tracer.c \
@@ -95,6 +98,7 @@ USER_SRCS  = $(SRC_DIR)/pg_wait_tracer.c \
              $(SRC_DIR)/provider_full.c \
              $(SRC_DIR)/provider_coop.c \
              $(SRC_DIR)/sampler.c \
+             $(SRC_DIR)/exact_probe.c \
              $(SRC_DIR)/escalation.c \
              $(SRC_DIR)/escalation_budget.c \
              $(SRC_DIR)/anomaly.c \
@@ -133,6 +137,11 @@ SERVER_SRCS = $(SRC_DIR)/server.c \
               $(SRC_DIR)/cJSON.c
 SERVER_OBJS = $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/server_%.o,$(SERVER_SRCS))
 SERVER_LDFLAGS = -lz -llz4 -lm
+
+# Keep incremental builds ABI-safe when a transitive header changes. Stage 3
+# adds exact-probe ownership to struct pgwt_daemon, which is embedded across
+# several translation units and therefore must never be rebuilt partially.
+-include $(USER_OBJS:.o=.d) $(SERVER_OBJS:.o=.d)
 
 .PHONY: all clean test-asan test-valgrind bench pgwt-client
 
@@ -215,7 +224,7 @@ $(BUILD_DIR)/%.o: $(SRC_DIR)/%.c $(INC_DIR)/pg_wait_tracer.skel.h \
                   $(LIBBPF_DEP) \
                   $(SRC_DIR)/pg_wait_tracer.h | $(BUILD_DIR)
 	@echo "  CC       $@"
-	@$(CC) $(CFLAGS) -c $< -o $@
+	@$(CC) $(CFLAGS) $(DEPFLAGS) -c $< -o $@
 
 # Step 5: Link
 $(TARGET): $(USER_OBJS)
@@ -226,7 +235,7 @@ $(TARGET): $(USER_OBJS)
 # pgwt-server: compile WITHOUT skeleton dependency, with -DPGWT_SERVER
 $(BUILD_DIR)/server_%.o: $(SRC_DIR)/%.c $(SRC_DIR)/pg_wait_tracer.h | $(BUILD_DIR)
 	@echo "  CC       $@ (server)"
-	@$(CC) $(CFLAGS) -DPGWT_SERVER -c $< -o $@
+	@$(CC) $(CFLAGS) $(DEPFLAGS) -DPGWT_SERVER -c $< -o $@
 
 pgwt-server: $(SERVER_OBJS)
 	@echo "  LINK     $@"

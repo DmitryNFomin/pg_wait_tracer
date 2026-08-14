@@ -309,6 +309,14 @@ int pgwt_attach_backend_watchpoint(struct pgwt_daemon *d,
 
     if (be->attach_ts == 0)
         be->attach_ts = now_ns();
+
+    /* A backend initialized after an exact generation began did not exist in
+     * the all-backend snapshot. Seed it now before its watchpoint is armed.
+     * Post-boundary query/activity edges already captured by the BPF fork
+     * enrollment win over this separate seed during resolution. */
+    if (d->exact_probes.core.generation != 0)
+        pgwt_exact_seed_backend(d, be->pid,
+                                d->exact_probes.core.generation, false);
     started_ns = pgwt_debug_block_begin(d);
     preseed_state_map(d, be->pid, be->wp_addr, be->attach_ts, false);
     pgwt_debug_block_end(d, "watchpoint_preseed", be->pid, started_ns);
@@ -463,9 +471,9 @@ int pgwt_scan_existing_backends(struct pgwt_daemon *d)
         be->wp_addr = ptr;
 
         /* Sampled mode: register the backend (address + metadata) but arm
-         * NO watchpoint. The sampler reads wp_addr directly each tick. Seed
-         * a state_map entry so the query_id uprobe can populate it (nothing
-         * else creates state_map entries in sampled mode). */
+         * NO watchpoint. The sampler reads wp_addr directly each tick. Keep a
+         * state_map entry for the PG13/degraded uprobe fallback and for a
+         * future exact generation's watchpoint enrollment. */
         if (!pgwt_mode_uses_watchpoints(d)) {
             be->attach_ts = now_ns();
             if (pgwt_parse_cmdline(pid, &be->meta) == 0)
@@ -1016,9 +1024,13 @@ int pgwt_handle_exit(struct pgwt_daemon *d, pid_t pid)
 
     /* Delete BPF map entries for this PID */
     int state_fd = bpf_map__fd(d->skel->maps.state_map);
+    int attr_fd = bpf_map__fd(d->skel->maps.exact_attr_map);
+    int seed_fd = bpf_map__fd(d->skel->maps.exact_seed_map);
     uint32_t key = pid;
     started_ns = pgwt_debug_block_begin(d);
     bpf_map_delete_elem(state_fd, &key);
+    bpf_map_delete_elem(attr_fd, &key);
+    bpf_map_delete_elem(seed_fd, &key);
     pgwt_debug_block_end(d, "backend_state_delete", pid, started_ns);
 
     be->is_alive = false;
