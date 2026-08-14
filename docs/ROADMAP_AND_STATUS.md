@@ -64,17 +64,30 @@
 
 ### 🔲 Left (not built)
 
-> **⚠️ OPEN CONCERN — sampled-tier overhead (CRITICAL, under investigation 2026-08-13).**
-> A pgbench run on PG17 (scale 50, 8c/4t) measured the always-on SAMPLED tier at
-> **≈−30% TPS read-only / −23% read-write vs no tracer** — far from the headline
-> "≈0% (TPS within noise)". Hot-path perf localized the cost to synchronous
-> per-query uprobes in the PostgreSQL BACKEND (suppressing them restored baseline).
-> Overhead is a core product guarantee, so this is a NO-GO-class issue. Under
-> active investigation: characterize overhead-vs-TPS (high-throughput-specific, or
-> bad at normal OLTP too?), bisect WHEN/what introduced the per-query uprobe cost
-> (was "≈0%" ever accurate, or a later regression?), and assess the fix
-> (async / sample / eliminate the per-query probes). Findings + verdict to follow;
-> the "≈0%" claims elsewhere in this doc are pending that reconciliation.
+> **⚠️ CRITICAL — sampled-tier overhead is REAL (~20–30%); root-caused; staged fix underway (investigation done 2026-08-13; fix stage 1 merged #83).**
+> The documented "sampled tier ≈0% / TPS within noise" is **FALSE** for the
+> always-on sampled tier. Measured on the box (pgbench, PG13/17/18): the sampled
+> tier costs **−18% to −30% TPS** plus a per-statement latency tax that crosses
+> **+10% by ~500 TPS read-write** — present even at 1 client, so it is a FIXED
+> per-transaction cost, not a benchmark/high-throughput artifact.
+> **Root cause:** the always-on sampled path attaches two per-query uprobes
+> (`pgstat_report_query_id`, `pgstat_report_activity`) that fire **5/tx (RO) to
+> 33/tx (RW) at ~7.5 µs/trap** in the PostgreSQL BACKEND — the `int3`/single-step
+> trap machinery itself, not the eBPF body (~0.17 µs). Present **since v0.10**,
+> MASKED during the original measurement by a PIE file-offset bug that silently
+> stopped the probe from firing; the "daemon CPU 0.6%" figure was correct but
+> measured only the tracer PROCESS and missed the kernel trap time charged to the
+> PostgreSQL backends (the overhead test forces `--mode full` and never A/B-tested
+> sampled). **Fix (fail-safe, staged):** read `st_query_id`/`st_state` at each 10 Hz
+> tick from `PgBackendStatus` (external reads, no traps) and scope the uprobes to
+> full/escalation windows only. Measured achievable: **<1%** (near the original
+> <0.5% goal). PG13 (no in-core query_id, gate measured ~15–23%) uses
+> `st_activity_raw` + a synthetic normalized-text grouping key; sampled query TEXT
+> becomes pgss-normalized (accepted). **Progress:** stage 1 (offset discovery +
+> fail-safe validation) **merged (#83)**; stages 2–5 (at-tick reader/gate swap →
+> tiered attach lifecycle → PG13 text path → permanent sampled-overhead A/B gate)
+> in progress. The "≈0%" claims elsewhere in this doc are **stale** pending those
+> stages — see this note.
 
 **Real feature gaps (defined, never built):**
 - **PostgreSQL 14 / 15 / 16** — only PG13 shipped; README says "14-16 not yet".
@@ -140,7 +153,7 @@ Its **core (Tracks A0–A6, B1–B5, E1–E3) shipped in v0.10** (master c027d3c
 **Completion summary facts (must not be lost):**
 - Core rework complete = tiered capture (A0–A6) + UI restructure/testability/fidelity UI (B1–B5) + Track E live-suite cleanup, all merged and verified end-to-end. **CI green** (build-and-unit, web-ui incl. chaos+soak, snapshots, protocol-drift) **and a full live `run_all.sh`** on the test box = **46 passed / 0 failed / 1 skipped** (the skip = web-UI snapshot job, which the CI snapshots job covers authoritatively).
 - **Still open in the plan (NOT done in the rework):** B6 (new analysis views), Track C (Rocky 8 / RHEL 8), Track D (older PostgreSQL 14–16). Marked future work; their sections remained the design for them. (Track C later shipped v0.11 by a different mechanism than C1–C3 describe; Track D shipped PG13 in v0.12.)
-- **Default capture mode became `tiered`** — always-on sampled tier + bounded/budgeted on-demand + anomaly-triggered escalation to full watchpoints. **Proven results:** sampled tier ≈ **0% impact on PostgreSQL** (daemon CPU 0.6% @10 Hz; pgbench TPS within noise) vs the full watchpoint tier's **29–30%** (documented range). **Cross-validation: 0.9pp** worst-case event-share disagreement between sampled and exact over the same window @10 Hz, 5/5 top-5 overlap.
+- **Default capture mode became `tiered`** — always-on sampled tier + bounded/budgeted on-demand + anomaly-triggered escalation to full watchpoints. **Proven results:** sampled tier ≈ **0% impact on PostgreSQL** (daemon CPU 0.6% @10 Hz; pgbench TPS within noise) **[⚠️ STALE — this is WRONG; see the CRITICAL sampled-tier-overhead note in the Executive Summary: the sampled tier actually costs ~20–30% TPS from two per-query uprobes; the "daemon CPU 0.6%" figure measured only the tracer process and missed the backend trap time, and the original ≈0% was masked by a PIE bug. Staged fix underway (stage 1 merged #83).]** vs the full watchpoint tier's **29–30%** (documented range). **Cross-validation: 0.9pp** worst-case event-share disagreement between sampled and exact over the same window @10 Hz, 5/5 top-5 overlap.
 - **Merged PRs (authoritative phase→PR map):** #6 B1 · #7 A0 · #8 Lock-naming fix · #9 Track E · #10 ClientRead idle-but-visible · #11 B2 · #12 A1 · #13 A2 · #14 B3p1 · #15 A3 · #16 B3p2 · #17 A4 · #18 B3p3 · #19 A5 · #20 A6 · #21 B5 · #22 B4 · #23 default→tiered.
 - **Bugs found & fixed along the way:** Lock-class subtype mislabel on PG17+ (relation→advisory, real product bug — #8); the ClientRead idle/visible semantics decision (#10); pre-existing flaky live-test thresholds (test_overhead 15%-gate vs documented 6–30%; test_client_wait load-dependent DB-Time threshold) corrected during #23 validation.
 - **Deferred (not rework-blocking):** cooperative provider **IMPLEMENTATION** (extension track — A6 only froze the interface); historical-escalation annotations + mixed-fidelity sub-range shading in the UI (small server additions); idle-ClientRead %DB cosmetic (later fixed v0.11 / PR #25).
