@@ -442,6 +442,111 @@ static void bump_rlimit_nofile(struct pgwt_daemon *d)
             MAX_BACKENDS);
 }
 
+/* If local authentication prevented the preferred controlled-backend check,
+ * use the probes that are already attached as an independent shadow source.
+ * This is bounded startup-only observation: the descriptor is still not read
+ * by either capture tier.  Three coherent matches tolerate query/state races
+ * while refusing to bless a layout from a single coincidental value.  Full
+ * mode skips this delayed fallback so its watchpoint capture window cannot be
+ * extended; Stage 2's prospective consumers are sampled/tiered only. */
+static void pgwt_layout_uprobe_shadow_warmup(struct pgwt_daemon *d)
+{
+    if (d->backend_status_layout.validation != PGWT_PGBS_VALIDATION_DEGRADED ||
+        d->backend_status_layout.source == PGWT_PGBS_SOURCE_NONE ||
+        !d->cmd_gate_active || pgwt_mode_uses_watchpoints(d))
+        return;
+
+    bool query_shadow_available = d->pg_major_version < 14 ||
+        d->skel->links.on_report_query_id != NULL;
+    if (!query_shadow_available)
+        return;
+
+    int state_fd = bpf_map__fd(d->skel->maps.state_map);
+    unsigned observations = 0, state_matches = 0, activity_matches = 0;
+    unsigned query_matches = d->pg_major_version < 14 ? 3 : 0;
+    struct PgBackendStatusLayout best = d->backend_status_layout;
+    for (int round = 0; round < 10 &&
+         (state_matches < 3 || activity_matches < 3 || query_matches < 3);
+         round++) {
+        for (int i = 0; i < d->backends.count; i++) {
+            const struct pgwt_backend *be = &d->backends.entries[i];
+            if (!be->is_alive)
+                continue;
+            uint32_t key = (uint32_t)be->pid;
+            struct pgwt_pid_state state;
+            if (bpf_map_lookup_elem(state_fd, &key, &state) != 0)
+                continue;
+
+            struct PgBackendStatusLayout candidate =
+                d->backend_status_layout;
+            (void)pgwt_pgbs_validate_uprobe_shadow(
+                &candidate, be->pid, d->my_be_entry_addr,
+                state.cmd_open != 0,
+                d->pg_major_version >= 14,
+                state.last_query_id);
+            if (!candidate.validated_pid)
+                continue;
+            best = candidate;
+            observations++;
+            if (state_matches < 3 &&
+                candidate.st_state.validation == PGWT_PGBS_FIELD_VALIDATED)
+                state_matches++;
+            if (activity_matches < 3 &&
+                candidate.st_activity_raw.validation ==
+                PGWT_PGBS_FIELD_VALIDATED)
+                activity_matches++;
+            if (query_matches < 3 && d->pg_major_version >= 14 &&
+                candidate.st_query_id.validation == PGWT_PGBS_FIELD_VALIDATED)
+                query_matches++;
+        }
+        if (state_matches < 3 || activity_matches < 3 || query_matches < 3)
+            usleep(100000);
+    }
+    if (observations) {
+        best.st_state.validation = state_matches >= 3
+            ? PGWT_PGBS_FIELD_VALIDATED : PGWT_PGBS_FIELD_INVALID;
+        best.st_activity_raw.validation = activity_matches >= 3
+            ? PGWT_PGBS_FIELD_VALIDATED : PGWT_PGBS_FIELD_INVALID;
+        if (d->pg_major_version >= 14)
+            best.st_query_id.validation = query_matches >= 3
+                ? PGWT_PGBS_FIELD_VALIDATED : PGWT_PGBS_FIELD_INVALID;
+        best.fallback_mask = 0;
+        if (state_matches < 3)
+            best.fallback_mask |= PGWT_PGBS_FALLBACK_STATE;
+        if (activity_matches < 3)
+            best.fallback_mask |= PGWT_PGBS_FALLBACK_ACTIVITY_RAW;
+        if (d->pg_major_version >= 14 && query_matches < 3)
+            best.fallback_mask |= PGWT_PGBS_FALLBACK_QUERY_ID;
+        best.validation = best.fallback_mask
+            ? PGWT_PGBS_VALIDATION_DEGRADED
+            : PGWT_PGBS_VALIDATION_VALIDATED;
+        d->backend_status_layout = best;
+        if (d->pg_major_version < 14)
+            snprintf(d->backend_status_layout.detail,
+                     sizeof(d->backend_status_layout.detail),
+                     "bounded uprobe shadow: observations=%u state=%u/3 "
+                     "activity=%u/3 query=n/a",
+                     observations, state_matches, activity_matches);
+        else
+            snprintf(d->backend_status_layout.detail,
+                     sizeof(d->backend_status_layout.detail),
+                     "bounded uprobe shadow: observations=%u state=%u/3 "
+                     "activity=%u/3 query=%u/3",
+                     observations, state_matches, activity_matches,
+                     query_matches);
+        fprintf(stderr,
+                "INFO: PgBackendStatus bounded uprobe shadow validation "
+                "completed after controlled-backend validation was "
+                "unavailable\n");
+        pgwt_pgbs_log(&d->backend_status_layout);
+    } else {
+        fprintf(stderr,
+                "WARN: PgBackendStatus bounded uprobe shadow validation did "
+                "not reach 3 coherent matches — existing per-field "
+                "fallbacks remain active\n");
+    }
+}
+
 static void handle_signal(struct pgwt_daemon *d)
 {
     struct signalfd_siginfo si;
@@ -1009,6 +1114,10 @@ int pgwt_daemon_init(struct pgwt_daemon *d)
      * it would trace garbage (or nothing) labeled as real. */
     if (pgwt_confirm_wait_offset(d) != 0)
         goto fail;
+
+    /* Auth-free second validation route.  Normally the controlled backend in
+     * discovery.c has already validated the descriptor and this is a no-op. */
+    pgwt_layout_uprobe_shadow_warmup(d);
 
     /* Straddle-race recovery at startup. The one-shot scan above can miss a
      * pre-existing backend (its /proc read raced) or leave it in bootstrap

@@ -109,6 +109,15 @@ static cJSON *build_status(const struct pgwt_daemon *d)
     cJSON_AddNumberToObject(root, "backends", count_backends(d));
     cJSON_AddNumberToObject(root, "pg_pid", d->postmaster_pid);
     cJSON_AddStringToObject(root, "version", PGWT_BUILD_VERSION);
+    cJSON_AddStringToObject(root, "pgbackend_layout_source",
+                            pgwt_pgbs_source_name(
+                                d->backend_status_layout.source));
+    cJSON_AddStringToObject(root, "pgbackend_layout_validation",
+                            pgwt_pgbs_validation_name(
+                                d->backend_status_layout.validation));
+    cJSON_AddNumberToObject(root, "pgbackend_layout_fallback_fields",
+                            pgwt_pgbs_fallback_count(
+                                &d->backend_status_layout));
 
     /* Current capture tier and escalation state (A4). "tier" is what is being
      * captured right now: in tiered mode it flips between "sampled" (always-on
@@ -197,6 +206,8 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
     cJSON_AddNumberToObject(root, "samples_per_sec", ctr->samples_per_sec);
     cjson_add_uint64(root, "sample_read_faults_total",
                      ctr->sample_read_faults_total);
+    cjson_add_uint64(root, "pgbackend_layout_fallbacks_total",
+                     ctr->pgbackend_layout_fallbacks_total);
     cjson_add_uint64(root, "sample_read_failures_total",
                      pm.sample_read_failures_total);
     cJSON_AddNumberToObject(root, "sample_read_targets",
