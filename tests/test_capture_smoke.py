@@ -276,6 +276,32 @@ def server_query(trace_dir, cmd, extra=None):
     return resp
 
 
+QUERY_TEXT_SOURCE_PRIORITY = {"pgss": 1, "synthetic": 2, "full": 3}
+
+
+def query_text_key(obj):
+    """Canonical context key shared by top_queries and query_texts.jsonl."""
+    try:
+        return (int(obj.get("d", obj.get("databaseid", 0))),
+                int(obj.get("u", obj.get("userid", 0))),
+                int(str(obj.get("q", obj.get("query_id", "0"))), 10))
+    except (TypeError, ValueError):
+        return None
+
+
+def winning_query_text_sources(records):
+    """Return the highest-priority persisted text source for each context."""
+    winners = {}
+    for record in records:
+        key = query_text_key(record)
+        source = record.get("s")
+        priority = QUERY_TEXT_SOURCE_PRIORITY.get(source, 0)
+        if key and key[2] and record.get("t") and priority > \
+                QUERY_TEXT_SOURCE_PRIORITY.get(winners.get(key), 0):
+            winners[key] = source
+    return winners
+
+
 def parse_time_model(output):
     """Parse the tracer's live time_model text output → {row_name: ms}. The
     last occurrence of each row wins (later display snapshots overwrite
@@ -519,10 +545,6 @@ def phase_trace_file(pm_pid, mode, pg_major, core=False):
             check(len(text_rows) > 0,
                   f"PG13 synthetic groups carry normalized activity text "
                   f"(text rows={len(text_rows)})")
-            synth_rows = [r for r in text_rows
-                          if r.get("attribution_quality") == "pg13-synth-v1"]
-            check(len(synth_rows) == len(text_rows),
-                  "PG13 sampled rows expose pg13-synth-v1 attribution quality")
             sidecar_path = os.path.join(trace_dir, "query_texts.jsonl")
             sidecar = []
             try:
@@ -530,6 +552,24 @@ def phase_trace_file(pm_pid, mode, pg_major, core=False):
                     sidecar = [json.loads(line) for line in qtf if line.strip()]
             except (OSError, json.JSONDecodeError):
                 sidecar = []
+            # Tiered mode may escalate and append FULL/raw text for real PG13
+            # query IDs. Only the winning synthetic source carries synth quality.
+            winning_sources = winning_query_text_sources(sidecar)
+            sampled_rows = [
+                row for row in text_rows
+                if winning_sources.get(query_text_key(row)) == "synthetic"
+            ]
+            tagged_sampled_rows = [
+                row for row in sampled_rows
+                if row.get("attribution_quality") == "pg13-synth-v1"
+            ]
+            check(len(sampled_rows) > 0 and
+                  len(tagged_sampled_rows) == len(sampled_rows),
+                  f"every PG13 synthetic-source text row exposes "
+                  f"pg13-synth-v1 attribution quality "
+                  f"(synthetic={len(sampled_rows)}, "
+                  f"tagged={len(tagged_sampled_rows)}, "
+                  f"other-source={len(text_rows) - len(sampled_rows)})")
             synth_records = [
                 rec for rec in sidecar
                 if rec.get("s") == "synthetic" and
