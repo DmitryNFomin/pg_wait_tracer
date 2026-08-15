@@ -167,12 +167,12 @@ run_section "capture smoke: --mode tiered (live view + trace file)" \
     python3 "$SCRIPT_DIR/test_capture_smoke.py" --mode tiered --pid "$PM_PID" \
         $([[ $CORE -eq 1 ]] && echo --capture-core)
 
-# ── Stage 3: tiered query/activity probes are escalation-only. ──
-# Validated PG14-18 must have zero sampled firings, attach both links atomically
-# for repeated exact generations, and detach without stale preseeds. PG13 or a
-# degraded layout retains the legacy pinned pair. This also covers a mid-query
-# straddler, backend fork/exit during a window, and partial-attach rollback.
-run_section "tiered exact-probe lifecycle (Stage 3)" \
+# ── Stages 3/4: tiered query/activity probes are escalation-only. ──
+# Validated PG13-18 must have zero sampled firings, attach both links atomically
+# for repeated exact generations, and detach without stale preseeds. A degraded
+# layout retains the legacy pinned pair. This also covers a mid-query straddler,
+# backend fork/exit during a window, and partial-attach rollback.
+run_section "tiered exact-probe lifecycle (Stages 3/4)" \
     python3 "$SCRIPT_DIR/test_uprobe_fired.py" --pid "$PM_PID" \
         ${PG_VERSION:+--pg-version "$PG_VERSION"}
 

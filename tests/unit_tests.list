@@ -5,8 +5,8 @@
 # exactly that drift (test_event_writer/test_event_reader missing from
 # run_all.sh, test_concurrent_rw built but run nowhere).
 #
-# One binary name per line; '#' starts a comment. Every binary listed here
-# must be built by `make -C tests` (tests/Makefile TESTS).
+# One C binary or Python test per line; '#' starts a comment. C binaries must
+# be built by `make -C tests` (tests/Makefile TESTS).
 test_wait_event
 test_cmdline
 test_bucket
@@ -19,6 +19,8 @@ test_escalation_budget
 test_exact_probe
 test_effective_cores
 test_backend_status_layout
+test_synthetic_query
+test_pgss_resolver
 test_coop
 test_concurrent_rw
 test_durability
@@ -28,3 +30,4 @@ test_pg13_resolve
 test_discovery_pie
 test_discovery_nopie
 test_replay_fidelity
+test_data_query_text_context.py

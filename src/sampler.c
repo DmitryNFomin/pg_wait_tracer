@@ -471,6 +471,8 @@ bool pgwt_exact_attr_shadow_comparable(const struct pgwt_exact_attr *edge,
 #include "discovery.h"
 #include "map_reader.h"
 #include "wait_event.h"
+#include "synthetic_query.h"
+#include "pgss_resolver.h"
 
 #include <time.h>
 #include <bpf/libbpf.h>
@@ -802,8 +804,8 @@ int pgwt_sampler_poll(struct pgwt_daemon *d)
                             &exact_cfg_key, &exact_cfg) == 0;
 
     /* SMP-4: dump the legacy edge source only when those links are actually
-     * attached (PG13/degraded baseline, or a live exact window). Validated
-     * PG14-18 sampled operation performs no pointless map dump and has no
+     * attached (degraded baseline, or a live exact window). Validated PG13-18
+     * sampled operation performs no pointless map dump and has no
      * shadow traps: Stage 2's coherent tick source is authoritative. */
     struct pgwt_qid_entry qidx_buf[MAX_BACKENDS];
     int qidx_n = attr_edges_attached
@@ -844,7 +846,7 @@ int pgwt_sampler_poll(struct pgwt_daemon *d)
             if (addr != 0 && addr != be->wp_addr) {
                 be->wp_addr = addr;
                 be->wp_addr_shared = -1;
-                /* Seed state for the PG13/degraded attribution fallback and
+                /* Seed state for the degraded attribution fallback and
                  * future exact watchpoint enrollment (idempotent). */
                 seed_state_entry(d, be->pid, be->wp_addr);
             }
@@ -871,12 +873,25 @@ int pgwt_sampler_poll(struct pgwt_daemon *d)
         targets[n].is_shared       = be->wp_addr_shared;
         targets[n].backend_type    = be->meta_parsed ? be->meta.backend_type
                                                      : PGWT_BT_UNKNOWN;
+        targets[n].databaseid = be->databaseid;
+        targets[n].userid = be->userid;
+        targets[n].query_quality = PGWT_QUERY_QUALITY_NONE;
         /* The syslogger is not a PostgreSQL backend: it has no MyBEEntry or
          * PgBackendStatus slot, and its on-CPU samples are already excluded
          * by policy.  Keep its irrelevant zero attribution on the legacy
          * source instead of manufacturing a permanent coverage hole. */
+        const bool activity_tick_source = pgwt_pgbs_sampled_activity_enabled(
+            &d->backend_status_layout);
+        /* PG13 activity is a foreground-query source. Auxiliary processes do
+         * not have useful activity rows; repeatedly scanning shared memory
+         * for a row that cannot exist would stall the high-rate sampler. */
+        const bool activity_target =
+            targets[n].backend_type == PGWT_BT_CLIENT ||
+            targets[n].backend_type == PGWT_BT_UNKNOWN ||
+            targets[n].backend_type == PGWT_BT_PARALLEL_WORKER;
         const bool target_tick_enabled = tick_source_enabled &&
-            targets[n].backend_type != PGWT_BT_LOGGER;
+            targets[n].backend_type != PGWT_BT_LOGGER &&
+            (!activity_tick_source || activity_target);
         struct pgwt_sampled_attr_value uprobe_attr = {0};
         bool uprobe_shadow_valid = false;
         if (qidx_n >= 0) {
@@ -898,13 +913,84 @@ int pgwt_sampler_poll(struct pgwt_daemon *d)
         int tick_ok = 0;
         if (target_tick_enabled) {
             errno = 0;
-            tick_ok = pgwt_pgbs_read_sampled_attr(
-                be->pid, d->my_be_entry_addr, &d->backend_status_layout,
-                &tick_raw) == 0;
+            if (pgwt_pgbs_sampled_activity_enabled(
+                    &d->backend_status_layout)) {
+                /* PG13 does not export MyBEEntry. Resolve its shared status
+                 * row once, then keep the 10 Hz path to one coherent read.
+                 * Failed new-backend resolution is backed off so connection
+                 * churn cannot trigger an array scan on every tick. */
+                uint64_t resolve_now = mono_ns();
+                if (be->pgbs_addr == 0 &&
+                    resolve_now >= be->pgbs_resolve_retry_ns) {
+                    be->pgbs_addr = pgwt_pgbs_resolve_entry(
+                        be->pid, &d->backend_status_layout);
+                    if (be->pgbs_addr) {
+                        be->pgbs_resolve_attempts = 0;
+                        be->pgbs_resolve_retry_ns = 0;
+                    } else {
+                        unsigned shift = be->pgbs_resolve_attempts < 5
+                            ? be->pgbs_resolve_attempts++ : 5;
+                        be->pgbs_resolve_retry_ns = resolve_now +
+                            (UINT64_C(100000000) << shift);
+                    }
+                }
+                tick_ok = be->pgbs_addr != 0 &&
+                    pgwt_pgbs_read_sampled_attr_at(
+                        be->pid, be->pgbs_addr,
+                        &d->backend_status_layout, &tick_raw) == 0;
+            } else {
+                tick_ok = pgwt_pgbs_read_sampled_attr(
+                    be->pid, d->my_be_entry_addr,
+                    &d->backend_status_layout, &tick_raw) == 0;
+            }
             if (tick_ok) {
                 tick_attr.query_id = tick_raw.query_id;
                 tick_attr.cmd_open = tick_raw.cmd_open;
-                if (attr_shadow_pair_attached && uprobe_shadow_valid) {
+                targets[n].databaseid = tick_raw.databaseid;
+                targets[n].userid = tick_raw.userid;
+                if (be->databaseid != tick_raw.databaseid ||
+                    be->userid != tick_raw.userid)
+                    pgwt_bm_observe_context(d->backend_meta, be,
+                                            tick_raw.databaseid,
+                                            tick_raw.userid);
+                if (pgwt_pgbs_sampled_activity_enabled(
+                        &d->backend_status_layout) && tick_raw.cmd_open) {
+                    char normalized[PGWT_PG13_SYNTH_TEXT_MAX];
+                    uint64_t synthetic = 0;
+                    if (!tick_raw.activity_truncated &&
+                        pgwt_pg13_synthetic_query(
+                            tick_raw.databaseid, tick_raw.userid,
+                            tick_raw.activity, normalized,
+                            sizeof(normalized), &synthetic) == 0) {
+                        tick_attr.query_id = synthetic;
+                        targets[n].query_quality =
+                            PGWT_QUERY_QUALITY_PG13_SYNTH;
+                        if (d->query_text_capture) {
+                            struct pgwt_query_text_key key = {
+                                .databaseid = tick_raw.databaseid,
+                                .userid = tick_raw.userid,
+                                .query_id = synthetic,
+                            };
+                            pgwt_qt_store_synthetic(d->query_text_capture,
+                                                    &key, normalized);
+                        }
+                    } else {
+                        tick_attr.query_id = 0;
+                    }
+                } else if (tick_raw.query_id != 0) {
+                    targets[n].query_quality = PGWT_QUERY_QUALITY_REAL;
+                    if (d->pgss_resolver) {
+                        struct pgwt_query_text_key key = {
+                            .databaseid = tick_raw.databaseid,
+                            .userid = tick_raw.userid,
+                            .query_id = tick_raw.query_id,
+                        };
+                        pgwt_pgss_resolver_queue(d->pgss_resolver, &key);
+                    }
+                }
+                if (pgwt_pgbs_sampled_query_id_enabled(
+                        &d->backend_status_layout) &&
+                    attr_shadow_pair_attached && uprobe_shadow_valid) {
                     unsigned mismatch = pgwt_sampled_attr_compare(
                         &tick_attr, &uprobe_attr);
                     d->counters.sampled_attr_shadow_total++;

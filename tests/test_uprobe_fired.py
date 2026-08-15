@@ -1,20 +1,19 @@
 #!/usr/bin/env python3
-"""Stage 3 exact-probe lifecycle integration test.
+"""Stages 3/4 exact-probe lifecycle integration test.
 
 The old version of this test required the query-id and activity uprobes to
 fire continuously in tiered mode. Stage 3 intentionally reverses that policy
-on validated PG14-18 layouts: sampled attribution comes from the coherent
-PgBackendStatus read, so both per-query uprobes must be detached and their
-firing counters must stay exactly zero until an exact window begins.
+on validated layouts: PG14-18 sample the coherent PgBackendStatus query id,
+while PG13 samples normalized activity text. Both per-query uprobes must be
+detached and their firing counters must stay exactly zero until exact capture.
 
 This test proves both sides of the contract:
 
-  * validated PG14-18: detached/zero in sampled operation, atomically attached
+  * validated PG13-18: detached/zero in sampled operation, atomically attached
     during each exact generation, and detached again after de-escalation;
   * a degraded layout promoted during startup warmup may have historical fire
     counts, but reconciliation detaches both probes before sampled operation;
-  * PG13 or a degraded layout: the legacy attribution pair remains pinned and
-    continues firing before and after exact windows;
+  * degraded layouts retain the legacy pinned pair fail-safe;
   * commands already running at escalation and backends that fork/exit during
     the window do not break generation seeding or lifecycle cleanup;
   * repeated windows do not leak links or preseeds;
@@ -149,8 +148,8 @@ def run_cycles(pm_pid, pg_major):
         check(workload(), "baseline query workload completed")
         baseline = ctl(trace_dir, {"cmd": "status"})
         validation = baseline.get("pgbackend_layout_validation")
-        validated_pg14plus = pg_major >= 14 and validation == "validated"
-        expected_mask = 0 if validated_pg14plus else ATTR_MASK
+        validated_tick_layout = pg_major >= 13 and validation == "validated"
+        expected_mask = 0 if validated_tick_layout else ATTR_MASK
 
         check(baseline.get("exact_probe_attached_mask") == expected_mask,
               f"baseline exact-probe policy is mask {expected_mask} "
@@ -160,7 +159,7 @@ def run_cycles(pm_pid, pg_major):
         check(baseline.get("exact_cpu_active") is False,
               "sampled baseline bypasses exact sched_switch accounting")
         qfires, afires = exact_counts(baseline)
-        if validated_pg14plus:
+        if validated_tick_layout:
             if promotion_path:
                 check((qfires, afires) == ready_counts,
                       "degraded-to-validated promotion fully reconciles "
@@ -169,13 +168,13 @@ def run_cycles(pm_pid, pg_major):
             else:
                 check(ready_counts == (0, 0) and
                       (qfires, afires) == (0, 0),
-                      "validated-from-start sampled baseline has ZERO "
+                      "validated sampled baseline has ZERO "
                       "query/activity uprobe firings")
             check(baseline.get("sampled_attr_source") == "pgbackend_status",
                   "validated sampled attribution remains on PgBackendStatus")
         else:
             check(qfires > 0 and afires > 0,
-                  f"PG13/degraded fallback uprobes still fire "
+                  f"degraded fallback uprobes still fire "
                   f"(query={qfires}, activity={afires})")
 
         seen_generations = set()
@@ -236,17 +235,17 @@ def run_cycles(pm_pid, pg_major):
                   f"cycle {cycle}: post-window sampled workload completed")
             time.sleep(0.15)
             after_work = exact_counts(ctl(trace_dir, {"cmd": "status"}))
-            if validated_pg14plus:
+            if validated_tick_layout:
                 check(after_work == after_detach,
                       f"cycle {cycle}: detached probes do not fire in sampled "
                       f"operation ({after_work})")
             else:
                 check(after_work[0] > after_detach[0] and
                       after_work[1] > after_detach[1],
-                      f"cycle {cycle}: PG13/degraded pinned probes keep firing")
+                      f"cycle {cycle}: degraded pinned probes keep firing")
             previous = after_work
 
-        return validated_pg14plus, stderr, True
+        return validated_tick_layout, stderr, True
     finally:
         stderr = stop_tracer(proc, trace_dir)
 
@@ -298,7 +297,7 @@ def main():
         print("ERROR: cannot find postmaster")
         sys.exit(1)
 
-    print(f"=== test_uprobe_fired Stage 3 lifecycle (postmaster {pm_pid}, "
+    print(f"=== test_uprobe_fired Stages 3/4 lifecycle (postmaster {pm_pid}, "
           f"PG{args.pg_version or 'auto'}) ===")
     validated, _, completed = run_cycles(pm_pid, args.pg_version)
     if completed and validated:

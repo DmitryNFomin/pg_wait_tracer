@@ -1,76 +1,97 @@
-/* query_text.h — SQL query text capture from PgBackendStatus.st_activity_raw
- *
- * When the daemon sees a new query_id in the event stream, it reads the
- * backend's st_activity_raw from shared memory via /proc/<pid>/mem and
- * writes the {query_id, text} pair to query_texts.jsonl in the trace dir.
- *
- * st_activity_raw is a char* pointer in PgBackendStatus (PG18+).
- * Read sequence: MyBEEntry → PgBackendStatus* → st_activity_raw ptr → string.
- */
+/* query_text.h -- source- and context-aware SQL text sidecar. */
 #ifndef PGWT_QUERY_TEXT_H
 #define PGWT_QUERY_TEXT_H
 
-#include <stdint.h>
+#include <pthread.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <sys/types.h>
 
-/* Hash table size for seen query_ids (must be power of 2) */
 #define QT_HT_SIZE 4096
-
-/* Max length of captured query text (matches PG's max track_activity_query_size) */
 #define QT_MAX_TEXT (1024 * 1024)
-
-/* DUR-4: query_texts.jsonl is compacted (deduplicated in place, atomically)
- * at startup only when it exceeds this size. Overridable for tests via the
- * PGWT_QT_COMPACT_BYTES environment variable. */
 #define QT_COMPACT_THRESHOLD (32 * 1024 * 1024)
 
-struct pgwt_query_text_capture {
-    char          trace_dir[256];
-    FILE         *fp;                    /* query_texts.jsonl file handle */
-
-    /* Seen set: open-addressing hash table of query_ids */
-    uint64_t      seen[QT_HT_SIZE];
-    int           num_seen;
-    bool          cap_logged;            /* DUR-10: seen-table-full logged once */
-
-    /* Addresses for reading st_activity_raw */
-    uint64_t      my_be_entry_addr;     /* MyBEEntry symbol VA */
-    int           st_activity_offset;   /* offset of st_activity_raw in PgBackendStatus */
-
-    gid_t         trace_gid;             /* group for the file, (gid_t)-1 = none */
-
-    char         *read_buf;              /* reusable read buffer (QT_MAX_TEXT bytes) */
-
-    bool          enabled;
-    bool          verbose;
+struct pgwt_query_text_key {
+    uint32_t databaseid;
+    uint32_t userid;
+    uint64_t query_id;
 };
 
-/* Initialize query text capture. Returns 0 on success.
- * DUR-4: query_texts.jsonl is opened in APPEND mode and existing entries are
- * loaded into the seen set (dedup-on-load) — retained trace files reference
- * these query_ids across daemon restarts, so the file must never be
- * truncated. trace_gid mirrors the trace files' group/permissions (DUR-10);
- * pass (gid_t)-1 for none. */
+enum pgwt_query_text_source {
+    PGWT_QT_SOURCE_NONE = 0,
+    PGWT_QT_SOURCE_PGSS = 1,       /* sampled, normalized */
+    PGWT_QT_SOURCE_SYNTHETIC = 2,  /* PG13 sampled normalized activity */
+    PGWT_QT_SOURCE_FULL = 3,       /* exact/full raw first-seen */
+};
+
+struct pgwt_query_text_seen {
+    struct pgwt_query_text_key key;
+    enum pgwt_query_text_source source;
+    bool used;
+};
+
+struct pgwt_query_text_capture {
+    char trace_dir[256];
+    FILE *fp;
+    /* Synthetic attribution quality is durable independently of sampled
+     * text admission. This dynamically-sized set deduplicates a separate
+     * source sidecar, so QT_HT_SIZE saturation cannot erase the quality bit. */
+    FILE *quality_fp;
+    struct pgwt_query_text_seen *quality_seen;
+    size_t quality_capacity;
+    size_t quality_count;
+    bool quality_write_failed_logged;
+    /* Raw and sampled admission are deliberately separate. A burst of pgss
+     * resolutions can never consume the FULL/raw first-seen capacity. */
+    struct pgwt_query_text_seen seen[QT_HT_SIZE]; /* FULL/raw only */
+    struct pgwt_query_text_seen sampled_seen[QT_HT_SIZE];
+    int num_seen;          /* FULL/raw first-seen contexts only */
+    int num_sampled_seen;
+    bool cap_logged;
+    bool sampled_cap_logged;
+    uint64_t my_be_entry_addr;
+    int st_activity_offset;
+    gid_t trace_gid;
+    char *read_buf;
+    bool enabled;
+    bool verbose;
+    pthread_mutex_t lock; /* pgss worker and exact lifecycle consumer */
+    bool lock_initialized;
+};
+
+const char *pgwt_qt_source_name(enum pgwt_query_text_source source);
+
 int pgwt_qt_init(struct pgwt_query_text_capture *qt,
                  const char *trace_dir,
                  uint64_t my_be_entry_addr,
                  int st_activity_offset,
                  gid_t trace_gid);
 
-/* Check if query_id is new; if so, capture st_activity_raw from the backend.
- * Called from the event stream handler for each trace event with query_id != 0.
- * wall_ns is wall-clock timestamp for the JSONL record. */
+/* General source-aware store. A higher-priority source for the same
+ * (databaseid,userid,query_id) appends a replacement record; lower-priority
+ * sampled text can therefore never consume the raw first-seen slot. */
+int pgwt_qt_store_text(struct pgwt_query_text_capture *qt,
+                       const struct pgwt_query_text_key *key,
+                       enum pgwt_query_text_source source,
+                       const char *text, pid_t pid);
+
+void pgwt_qt_store_full(struct pgwt_query_text_capture *qt,
+                        const struct pgwt_query_text_key *key,
+                        const char *text, pid_t pid);
+void pgwt_qt_store_pgss(struct pgwt_query_text_capture *qt,
+                        const struct pgwt_query_text_key *key,
+                        const char *text);
+void pgwt_qt_store_synthetic(struct pgwt_query_text_capture *qt,
+                             const struct pgwt_query_text_key *key,
+                             const char *text);
+
+/* Compatibility wrappers: legacy records have context (0,0) and are full/raw. */
 void pgwt_qt_check(struct pgwt_query_text_capture *qt,
                    pid_t pid, uint64_t query_id, uint64_t wall_ns);
-
-/* Store query text directly (captured by BPF from debug_query_string).
- * No /proc/pid/mem read needed — text is already available. */
 void pgwt_qt_store(struct pgwt_query_text_capture *qt,
                    uint64_t query_id, const char *text, pid_t pid);
 
-/* Close the JSONL file. */
 void pgwt_qt_close(struct pgwt_query_text_capture *qt);
 
-#endif /* PGWT_QUERY_TEXT_H */
+#endif

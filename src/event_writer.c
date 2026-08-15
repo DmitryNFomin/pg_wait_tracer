@@ -609,8 +609,8 @@ int pgwt_writer_init(struct pgwt_event_writer *w, const char *trace_dir,
      * daemon left behind — never truncate it. */
     recover_current_trace(w);
 
-    /* Allocate scratch buffers. Per-event worst case (v3): ts≤10 + pid4 +
-     * old4 + new4 + dur≤10 + qid8 + cpu_ns≤10 = 50 bytes; 56 leaves margin. */
+    /* Allocate scratch buffers. Per-event worst case (v3): ts<=10 + pid4 +
+     * old4 + new4 + dur<=10 + qid8 + cpu_ns<=10 = 50 bytes. */
     w->encode_buf_size = PGWT_BLOCK_EVENTS * 56;
     w->encode_buf = malloc(w->encode_buf_size);
 

@@ -907,10 +907,21 @@ and cumulative columns.
 Wait events grouped by PostgreSQL query ID. Shows which queries cause which
 waits. Requires `compute_query_id = on` (or `auto`) in `postgresql.conf`.
 
-> **PG13:** there is no in-core query_id, so query attribution requires
-> **`pg_stat_statements`** in `shared_preload_libraries` (its hook populates the
-> query id pg_wait_tracer reads). Without it, query views report unavailable —
-> wait capture itself is unaffected. PG17/18 use the native query_id directly.
+> **PG13:** the sampled tier has no in-core numeric query ID. It strips comments
+> and literal constants from `pg_stat_activity` text and emits a versioned
+> (`pg13-synth-v1`) database/user-scoped synthetic grouping key. That key is not
+> a `pg_stat_statements.queryid` and cannot be joined to pgss. During full or
+> escalated capture, statements that start after probe attachment use the real
+> pgss-populated numeric ID; an already-running straddler keeps its synthetic
+> key and exposes `attribution_quality: "pg13-synth-v1"` from the durable
+> sourced text sidecar until the next statement edge. PG14–18 sample the native
+> numeric ID.
+>
+> Sampled PG14–18 text is resolved asynchronously from the extension's actual
+> schema via `pg_stat_statements(showtext => true)`. It is normalized and may be
+> absent when the extension is unavailable, permission-restricted, evicted, or
+> has not recorded the statement yet. Exact/full raw first-seen text takes
+> precedence if both sources exist.
 
 Three modes are available depending on flags:
 
@@ -926,7 +937,8 @@ for identifying which queries contribute most to wait time.
    1234567890123456     Lock:Transaction                145         892.3     6153.8    892100.5    3.6%
 ```
 
-Cross-reference `query_id` with `pg_stat_statements`:
+Cross-reference a native or exact numeric `query_id` with
+`pg_stat_statements` (not a PG13 `pg13-synth-v1` key):
 ```sql
 SELECT query FROM pg_stat_statements WHERE queryid = 5678234567890123;
 ```
@@ -1024,12 +1036,13 @@ the durability guarantees — lives in
   rotation.
 - **Compression ratio**: typical ~36x (36 bytes/event raw, ~1 byte compressed).
 
-> **PII note:** with recording enabled, `query_texts.jsonl` stores the raw
-> running SQL (inline literals included, unlike the normalized
-> `pg_stat_statements` text), and `backends.jsonl` stores usernames,
-> database names and client addresses. The files get the trace files'
-> `0640` / `--trace-group` permissions; there is no redaction option.
-> Treat the trace directory as sensitive.
+> **PII note:** with recording enabled, `query_texts.jsonl` can store raw SQL
+> from full/exact capture (inline literals included) as well as normalized
+> pg_stat_statements/PG13-synthetic text. `query_sources.jsonl` records PG13
+> synthetic keys, and `backends.jsonl` stores usernames, database names and
+> client addresses. The files get the trace files' `0640` / `--trace-group`
+> permissions; there is no redaction option. Treat the trace directory as
+> sensitive.
 
 ## Wait Event Classes
 

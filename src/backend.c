@@ -472,7 +472,7 @@ int pgwt_scan_existing_backends(struct pgwt_daemon *d)
 
         /* Sampled mode: register the backend (address + metadata) but arm
          * NO watchpoint. The sampler reads wp_addr directly each tick. Keep a
-         * state_map entry for the PG13/degraded uprobe fallback and for a
+         * state_map entry for a degraded uprobe fallback and for a
          * future exact generation's watchpoint enrollment. */
         if (!pgwt_mode_uses_watchpoints(d)) {
             be->attach_ts = now_ns();

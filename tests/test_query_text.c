@@ -42,16 +42,27 @@ static const char *jsonl_path(void)
     return p;
 }
 
-static int count_lines(void)
+static const char *sources_path(void)
 {
-    FILE *f = fopen(jsonl_path(), "r");
+    static char p[300];
+    snprintf(p, sizeof(p), "%s/query_sources.jsonl", TEST_DIR);
+    return p;
+}
+
+static int count_file_lines(const char *path)
+{
+    FILE *f = fopen(path, "r");
     if (!f) return -1;
     int n = 0, c;
     while ((c = fgetc(f)) != EOF)
-        if (c == '\n')
-            n++;
+        if (c == '\n') n++;
     fclose(f);
     return n;
+}
+
+static int count_lines(void)
+{
+    return count_file_lines(jsonl_path());
 }
 
 static void test_append_and_dedup(void)
@@ -215,6 +226,86 @@ static void test_permissions(void)
     free(qt);
 }
 
+static void test_source_precedence_and_context(void)
+{
+    printf("--- Stage 4: source precedence + context keys ---\n");
+    rm_rf(TEST_DIR);
+    mkdir(TEST_DIR, 0755);
+    struct pgwt_query_text_capture *qt = calloc(1, sizeof(*qt));
+    CHECK(pgwt_qt_init(qt, TEST_DIR, 0, 0, (gid_t)-1) == 0, "init");
+    struct pgwt_query_text_key a = {
+        .databaseid = 5, .userid = 10, .query_id = 123,
+    };
+    struct pgwt_query_text_key b = {
+        .databaseid = 6, .userid = 10, .query_id = 123,
+    };
+    pgwt_qt_store_pgss(qt, &a, "select $1");
+    pgwt_qt_store_full(qt, &a, "SELECT 42", 999);
+    pgwt_qt_store_pgss(qt, &a, "select $2");
+    pgwt_qt_store_pgss(qt, &b, "select $1 from other_db");
+    CHECK(count_lines() == 3,
+          "raw upgrade appends, lower sampled source cannot overwrite, and "
+          "same qid in another context is distinct (got %d)", count_lines());
+    CHECK(qt->num_seen == 1 && qt->num_sampled_seen == 2,
+          "raw and sampled contexts use separate admission tables "
+          "(raw=%d sampled=%d)", qt->num_seen, qt->num_sampled_seen);
+    pgwt_qt_close(qt);
+
+    memset(qt, 0, sizeof(*qt));
+    CHECK(pgwt_qt_init(qt, TEST_DIR, 0, 0, (gid_t)-1) == 0,
+          "source-aware restart load");
+    int before = count_lines();
+    pgwt_qt_store_pgss(qt, &a, "must not replace raw");
+    CHECK(count_lines() == before,
+          "full/raw precedence survives restart");
+    pgwt_qt_close(qt);
+    free(qt);
+}
+
+static void test_sampled_capacity_cannot_block_raw(void)
+{
+    printf("--- Stage 4: sampled capacity reserves raw first-seen slots ---\n");
+    rm_rf(TEST_DIR);
+    mkdir(TEST_DIR, 0755);
+    struct pgwt_query_text_capture *qt = calloc(1, sizeof(*qt));
+    CHECK(pgwt_qt_init(qt, TEST_DIR, 0, 0, (gid_t)-1) == 0, "init");
+    char text[64];
+    for (uint64_t i = 1; i <= QT_HT_SIZE; i++) {
+        struct pgwt_query_text_key key = {
+            .databaseid = 10, .userid = 20, .query_id = i,
+        };
+        snprintf(text, sizeof(text), "select $1 /* %llu */",
+                 (unsigned long long)i);
+        pgwt_qt_store_pgss(qt, &key, text);
+    }
+    struct pgwt_query_text_key raw = {
+        .databaseid = 99, .userid = 77, .query_id = 9000001,
+    };
+    CHECK(qt->num_sampled_seen == QT_HT_SIZE,
+          "sampled table reaches its independent cap");
+    CHECK(pgwt_qt_store_text(qt, &raw, PGWT_QT_SOURCE_FULL,
+                             "SELECT 42", 1234) == 0 && qt->num_seen == 1,
+          "FULL/raw capture succeeds after sampled table saturation");
+    struct pgwt_query_text_key synth = {
+        .databaseid = 99, .userid = 77, .query_id = 9000002,
+    };
+    pgwt_qt_store_synthetic(qt, &synth, "SELECT ?");
+    CHECK(qt->num_sampled_seen == QT_HT_SIZE &&
+          qt->quality_count == 1 && count_file_lines(sources_path()) == 1,
+          "synthetic quality persists after sampled text admission saturates");
+    pgwt_qt_close(qt);
+
+    memset(qt, 0, sizeof(*qt));
+    CHECK(pgwt_qt_init(qt, TEST_DIR, 0, 0, (gid_t)-1) == 0 &&
+          qt->quality_count == 1,
+          "synthetic quality dedup reloads independently of text admission");
+    pgwt_qt_store_synthetic(qt, &synth, "SELECT ?");
+    CHECK(count_file_lines(sources_path()) == 1,
+          "reloaded synthetic quality is not duplicated");
+    pgwt_qt_close(qt);
+    free(qt);
+}
+
 int main(void)
 {
     printf("=== test_query_text (T5: DUR-4/10) ===\n");
@@ -223,6 +314,8 @@ int main(void)
     test_compaction();
     test_cap_logged();
     test_permissions();
+    test_source_precedence_and_context();
+    test_sampled_capacity_cannot_block_raw();
     rm_rf(TEST_DIR);
     printf("\n%d/%d tests passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;

@@ -59,6 +59,8 @@ struct PgBackendStatusLayout {
     enum pgwt_pgbs_abi abi;
     uint8_t pointer_width;
     uint32_t struct_size;
+    uint32_t activity_buffer_size; /* validated track_activity_query_size */
+    uint64_t status_anchor; /* validated row in the shared status array */
 
     struct pgwt_pgbs_field st_changecount;
     struct pgwt_pgbs_field st_procpid;
@@ -104,16 +106,23 @@ struct pgwt_pgbs_snapshot {
     uint64_t query_id;
     uint32_t read_mask;
     bool activity_readable;
+    bool activity_truncated;
     bool activity_marker_matched;
 };
 
-/* The PG14+ sampled-tier fields derived from one coherent PgBackendStatus
- * snapshot.  state is retained for shadow diagnostics; query_id is already
- * normalized to zero outside RUNNING/FASTPATH. */
+#define PGWT_PGBS_ACTIVITY_MAX 4096
+
+/* Sampled-tier fields derived from one coherent PgBackendStatus snapshot.
+ * PG14+ fills query_id directly. PG13 instead fills activity so the sampler
+ * can normalize/hash it into a versioned synthetic grouping key. */
 struct pgwt_pgbs_sampled_attr {
     uint64_t query_id;
+    uint32_t databaseid;
+    uint32_t userid;
     uint32_t state;
     bool cmd_open;
+    bool activity_truncated;
+    char activity[PGWT_PGBS_ACTIVITY_MAX];
 };
 
 struct pgwt_pgbs_expected {
@@ -190,21 +199,34 @@ int pgwt_pgbs_validate_snapshot(struct PgBackendStatusLayout *layout,
                                 const struct pgwt_pgbs_snapshot *snapshot,
                                 const struct pgwt_pgbs_expected *expected);
 
-/* Stage 2 sampled attribution.  The path is available only for PG14+ after
- * whole-layout validation and per-field validation of every field used by
- * the coherent read.  The pure derivation helper and live reader both zero
- * `out` before validation, so an incoherent/short/identity-mismatched read can
- * never return command state from a prior tick. */
+/* Stage 2/4 sampled attribution. PG14+ uses st_query_id; validated PG13 uses
+ * st_activity_raw. Both paths include db/user context and fail closed on an
+ * incoherent/short/identity-mismatched read. */
 bool pgwt_pgbs_sampled_attr_enabled(
+    const struct PgBackendStatusLayout *layout);
+bool pgwt_pgbs_sampled_query_id_enabled(
+    const struct PgBackendStatusLayout *layout);
+bool pgwt_pgbs_sampled_activity_enabled(
     const struct PgBackendStatusLayout *layout);
 int pgwt_pgbs_derive_sampled_attr(
     const struct PgBackendStatusLayout *layout,
     const struct pgwt_pgbs_snapshot *snapshot, pid_t expected_pid,
     struct pgwt_pgbs_sampled_attr *out);
+int pgwt_pgbs_derive_sampled_activity(
+    const struct PgBackendStatusLayout *layout,
+    const struct pgwt_pgbs_snapshot *snapshot, pid_t expected_pid,
+    const char *activity, bool activity_truncated,
+    struct pgwt_pgbs_sampled_attr *out);
 int pgwt_pgbs_read_sampled_attr(
     pid_t backend_pid, uint64_t my_be_entry_addr,
     const struct PgBackendStatusLayout *layout,
     struct pgwt_pgbs_sampled_attr *out);
+int pgwt_pgbs_read_sampled_attr_at(
+    pid_t backend_pid, uint64_t backend_status_addr,
+    const struct PgBackendStatusLayout *layout,
+    struct pgwt_pgbs_sampled_attr *out);
+uint64_t pgwt_pgbs_resolve_entry(
+    pid_t backend_pid, const struct PgBackendStatusLayout *layout);
 
 void pgwt_pgbs_validate_runtime(struct PgBackendStatusLayout *layout,
                                 pid_t postmaster_pid,

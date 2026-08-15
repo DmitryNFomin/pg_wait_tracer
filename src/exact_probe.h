@@ -96,6 +96,7 @@ unsigned pgwt_exact_seed_count(struct pgwt_daemon *d, uint64_t generation);
 
 int pgwt_exact_resolve_attr(struct pgwt_daemon *d, pid_t pid,
                             uint64_t *query_id, uint16_t *cmd_open,
+                            uint16_t *query_quality,
                             uint16_t *phase_flags,
                             uint64_t *plan_start_ts,
                             uint64_t *exec_start_ts);

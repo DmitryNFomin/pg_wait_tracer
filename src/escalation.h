@@ -21,8 +21,8 @@
  * overlap at read time.
  *
  * Fork/exit tracepoints keep the registry current in every tier. On validated
- * PG14-18 the query/activity bundle is detached while sampled and is owned by
- * the exact generation; PG13/degraded attribution links remain pinned. A
+ * PG13-18 the query/activity bundle is detached while sampled and is owned by
+ * the exact generation; only degraded attribution links remain pinned. A
  * backend forked mid-escalation is generation-seeded before its watchpoint is
  * armed via the normal fork->bootstrap->init path.
  */

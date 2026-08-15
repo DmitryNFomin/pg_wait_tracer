@@ -64,7 +64,8 @@
 
 ### 🔲 Left (not built)
 
-> **⚠️ CRITICAL — sampled-tier overhead was REAL (~20–30%); root-caused; staged fix underway (investigation done 2026-08-13; stages 1–3 implemented).**
+> **✅ Sampled-tier overhead root cause fixed (investigation 2026-08-13;
+> stages 1–4 implemented).**
 > The documented "sampled tier ≈0% / TPS within noise" is **FALSE** for the
 > always-on sampled tier. Measured on the box (pgbench, PG13/17/18): the sampled
 > tier costs **−18% to −30% TPS** plus a per-statement latency tax that crosses
@@ -80,11 +81,16 @@
 > PostgreSQL backends (the overhead test forces `--mode full` and never A/B-tested
 > sampled). **Fix (fail-safe, staged):** read `st_query_id`/`st_state` at each 10 Hz
 > tick from `PgBackendStatus` (external reads, no traps) and scope the uprobes to
-> full/escalation windows only. Stage 3 now measures **<1%** on validated PG17
-> and PG18 (near the original <0.5% goal). PG13 (no in-core query_id, gate
-> measured ~15–23%) uses
-> `st_activity_raw` + a synthetic normalized-text grouping key; sampled query TEXT
-> becomes pgss-normalized (accepted). **Progress:** stage 1 (offset discovery +
+> full/escalation windows only. Stage 3 measured **<1%** on validated PG17 and
+> PG18. Stage 4 gives PG13 (which has no in-core query id) a coherent
+> `st_activity_raw` path: comments and literal constants are stripped,
+> whitespace is canonicalized, and the result is hashed with database/user
+> context under the explicit `pg13-synth-v1` domain. The key is not a pgss
+> numeric ID. Empty, truncated, unreadable, or disabled activity remains
+> unattributed. Startup validation also retains an anchor in the shared status
+> array, so a new backend is resolved by a bounded fixed-stride row scan with
+> retry backoff instead of a repeated whole-shared-memory scan. **Progress:**
+> stage 1 (offset discovery +
 > fail-safe validation) **merged (#83)**; stage 2 (at-tick reader + authoritative
 > gate swap) is implemented; **stage 3 is implemented and remotely validated**:
 > validated PG14–18 starts sampled with both query/activity links detached,
@@ -92,9 +98,20 @@
 > coherently preseeds straddling commands, and detaches/clears the generation
 > after drain and interval closure. The always-loaded `sched_switch` program's
 > exact state-map work is gated by the same tier transition, so sampled mode
-> returns before its two system-wide lookups. PG13/degraded layouts retain their
-> pinned attribution probes unchanged. Stages 4–5 (PG13 text path → permanent
-> sampled-overhead A/B gate) remain. Stage 2 deliberately
+> returns before its two system-wide lookups. Stage 4 extends that lifecycle to
+> validated PG13; only a degraded layout retains the pinned attribution pair.
+> A PG13 command already running at escalation is seeded with its synthetic key
+> and quality flag; the next post-attach `ExecutorStart` edge replaces it with
+> the real pgss ID. Stage 4 also restores PG14–18 sampled text asynchronously:
+> the 10 Hz sampler only queues `(databaseid,userid,query_id)`, while a worker
+> resolves the sampled database OID, discovers that database's extension
+> schema, batches `pg_stat_statements(true)` lookups,
+> and retries statements that may not appear until completion. Absence,
+> permission limits, eviction, disabled IDs, and retry exhaustion are ordinary
+> text-unavailable outcomes. Sidecar precedence is context-aware and
+> `full/raw > PG13 synthetic > pgss normalized`, so sampled text never consumes
+> the exact first-seen slot. Stage 5 (permanent sampled-overhead A/B CI gate)
+> remains. Stage 2 deliberately
 > defines idle attribution as `query_id=0`:
 > `cmd_open` is true only for `STATE_RUNNING`/`STATE_FASTPATH`, and only an open
 > command exposes `st_query_id`. This differs from the old state-map path's
@@ -107,8 +124,9 @@
 > RO 0.263%, PG18 RW 0.884%**. Every sampled run reported query/activity uprobe
 > firing counts **0/0** and attached mask 0. Negative overhead is benchmark
 > noise, not a claimed speedup. PG13's pinned fallback probes were separately
-> confirmed still firing. The "≈0%" claims elsewhere in this doc remain stale
-> until the permanent Stage 5 A/B gate lands; this is the current evidence.
+> confirmed still firing before Stage 4. Stage 4's PG13 and reconfirmation
+> measurements are recorded with its implementation PR. A permanent Stage 5
+> A/B CI gate still remains.
 
 **Real feature gaps (defined, never built):**
 - **PostgreSQL 14 / 15 / 16** — only PG13 shipped; README says "14-16 not yet".
@@ -315,7 +333,7 @@ Current state before the track: PG 17/18 full; on 14–16 the tracer starts but 
 **Phase D3 — PG 13 (FEASIBILITY VERIFIED — GO, 2026-06-19)  [DONE v0.12]** (PRs #27, #28, #31; plus #30). *Evidence:* `src/wait_event_pg13.inc`; `src/discovery.c` (offset 684, QueryDesc/PlannedStmt offsets); `src/bpf/pg_wait_tracer.bpf.c` Program 10 uprobe on `standard_ExecutorStart` (`pg13_query_attr` gate). Validated on a real **PostgreSQL 13.23** (Rocky 8.10 box, port 5433) by direct probe. PG13 gets full wait-event analysis (both tiers) **plus query attribution** via pg_stat_statements. Three pieces:
 - **(a) Wait capture — the prerequisite (= Phase D1).** PG13 has no `my_wait_event_info` global and writes `MyProc->wait_event_info` directly, so it needs the D1 MyProc-resolution path. Proven live: `offsetof(PGPROC, wait_event_info)=684` on 13.23, reading `*(MyProc)+684` from `/proc/<pid>/mem` matched `pg_stat_activity` (Lock=0x03000000, Timeout:PgSleep=0x09000001). PG13 postgres is **non-PIE** on EL8, so the #24 non-PIE load-base fix applies. `MyProc` resolves from `.dynsym`.
 - **(b) PG13 wait-event name tables (= Phase D2, extended to 13).** `pg_wait_events` is PG17+ only; PG13's table is generated from its headers.
-- **(c) Query attribution — Route B1 (pg_stat_statements-based).** PG13 has no in-core query_id, BUT when pgss is loaded its `post_parse_analyze` hook populates the core `PlannedStmt.queryId` field (exists in PG13). Proven populated and **matching `pg_stat_statements.queryid`** (via an `ActivePortal` outside-read and via gdb at `ExecutorStart` entry — queryId already set when ExecutorStart fires). **Design:** uprobe **`standard_ExecutorStart`** (chosen over the public `ExecutorStart`: with pgss loaded `ExecutorStart_hook` is set, so `ExecutorStart` is a trampoline tail-jumping into the hook chain and an entry uprobe on it does not fire — `standard_ExecutorStart` is the real body), arg0 = `QueryDesc*` → `+8` (plannedstmt) → `+8` (queryId, uint64) → store in `state_map` (the EXISTING attribution pipeline). One uprobe per query (NOT per event); serves BOTH tiers (A2 sampler reads the cached id at 10 Hz; full-tier watchpoint reads it per event). Offsets on 13.23: `QueryDesc.plannedstmt=8`, `PlannedStmt.queryId=8`, `PortalData.queryDesc=136` (and `QueryDesc.sourceText=16`). The BPF uprobe validates the walked queryId against pgss at runtime. **pgss is required for PG13 query attribution** — if not loaded, query views report "unavailable (requires pg_stat_statements)" (the A3 unavailable pattern). Decision: the text-fingerprint alternative ("Route A") is NOT pursued. **Coverage gap:** utility statements (CHECKPOINT/VACUUM/DDL) go through `ProcessUtility`, not `ExecutorStart`, so the ExecutorStart uprobe won't attribute them — same gap as other PG versions; an optional `ProcessUtility` uprobe can close it later.
+- **(c) Query attribution — Route B1 (pg_stat_statements-based).** PG13 has no in-core query_id, BUT when pgss is loaded its `post_parse_analyze` hook populates the core `PlannedStmt.queryId` field (exists in PG13). Proven populated and **matching `pg_stat_statements.queryid`** (via an `ActivePortal` outside-read and via gdb at `ExecutorStart` entry — queryId already set when ExecutorStart fires). **Original design:** uprobe **`standard_ExecutorStart`** (chosen over the public `ExecutorStart`: with pgss loaded `ExecutorStart_hook` is set, so `ExecutorStart` is a trampoline tail-jumping into the hook chain and an entry uprobe on it does not fire — `standard_ExecutorStart` is the real body), arg0 = `QueryDesc*` → `+8` (plannedstmt) → `+8` (queryId, uint64) → store in `state_map`. Offsets on 13.23: `QueryDesc.plannedstmt=8`, `PlannedStmt.queryId=8`, `PortalData.queryDesc=136` (and `QueryDesc.sourceText=16`). **Stage 4 supersedes the sampled half of this design:** validated PG13 now derives `pg13-synth-v1` groups from coherent activity reads with zero sampled uprobe traps; `standard_ExecutorStart` remains the real-ID source for full capture and exact escalation. pgss is therefore required for PG13 **exact numeric** attribution, not for sampled synthetic grouping. **Coverage gap:** utility statements (CHECKPOINT/VACUUM/DDL) go through `ProcessUtility`, not `ExecutorStart`, so exact numeric attribution still has the same gap; an optional `ProcessUtility` uprobe can close it later.
 - **Offset-resolution constraint:** **no PG13 debuginfo exists anywhere** (purged after PG13's Nov-2025 EOL; the binary is stripped). So PG13 (and any EOL version) offsets MUST be derived from `postgresql*-devel` **headers** at build time (compile an `offsetof()` probe) or hardcoded from header-derived values — never from a debuginfo package. Symbols (`MyProc`, `ExecutorStart`, `ActivePortal`) come from `.dynsym`, which survives stripping. Symbol VAs are build-specific → resolve at runtime from the target binary, don't hardcode.
 - Note: PG13 is EOL (2025-11); the D1 prerequisite also unlocks PG14–16, which get **native** query_id (no pgss) via the existing `st_query_id` path — so PG14–16 are higher-value for the same core work. *(Also in v0.12: PR #30 — sampled mode feeds the live accumulator so `--view` shows captured waits in default tiered mode, a field-reported gap; PR #29 — README/INSTALL reframed around tiered capture, escalation, control socket, corrected OS+PG matrix.)*
 

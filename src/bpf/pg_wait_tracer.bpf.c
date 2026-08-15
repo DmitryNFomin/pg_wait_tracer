@@ -81,6 +81,7 @@ volatile const u32 bs_state_fastpath = 0;
  * pgstat_report_query_id uprobe is used instead). Offsets are header-derived
  * (postgresql13-devel). */
 volatile const u32 pg13_query_attr = 0;          /* 1 = std_ExecutorStart path active */
+volatile const u32 pg13_synthetic_attr = 0;      /* 1 = PG13 activity-text seed path */
 volatile const u32 pg13_qd_plannedstmt_off = 0;  /* offsetof(QueryDesc, plannedstmt) */
 volatile const u32 pg13_ps_queryid_off = 0;      /* offsetof(PlannedStmt, queryId) */
 volatile const u32 pg13_qd_sourcetext_off = 0;   /* offsetof(QueryDesc, sourceText) */
@@ -151,14 +152,19 @@ struct {
     __uint(max_entries, 64 * 1024 * 1024);  /* 64MB */
 } event_ringbuf SEC(".maps");
 
-/* Dedup map for query text capture: tracks which query_ids we've already
- * captured text for. Key = query_id (u64), Value = 1. Only used by
- * on_report_query_id uprobe. Small map — typical workloads have <1000
- * unique queries. */
+/* Raw first-seen dedup includes the backend identity. A backend's database
+ * and user are immutable, so (pid,qid) prevents one context from suppressing
+ * another; userspace performs the final (db,user,qid) dedup. LRU eviction is
+ * safe because a repeat only produces metadata that userspace drops. */
+struct pgwt_seen_query_key {
+    u32 pid;
+    u32 reserved;
+    u64 query_id;
+};
 struct {
-    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
     __uint(max_entries, 4096);
-    __type(key, u64);
+    __type(key, struct pgwt_seen_query_key);
     __type(value, u8);
 } seen_query_ids SEC(".maps");
 
@@ -261,7 +267,7 @@ static __always_inline struct pgwt_exact_config *exact_config(void)
     return bpf_map_lookup_elem(&exact_config_map, &zero);
 }
 
-/* Generation zero is the permanent PG13/degraded sampled fallback. A nonzero
+/* Generation zero is the permanent degraded-layout sampled fallback. A nonzero
  * exact generation can be quiesced before its links are detached, giving
  * userspace a finite ring-buffer boundary while preserving the edge+seed state
  * needed to close intervals at the exact window end. */
@@ -272,19 +278,23 @@ static __always_inline bool exact_admission_open(void)
 }
 
 /* Resolve current exact attribution without ever copying a seed over an edge.
- * Generation 0 is the permanent PG13/degraded fallback: the continuously
+ * Generation 0 is the permanent degraded-layout fallback: the continuously
  * attached edge map is authoritative. For a nonzero exact generation, start
  * from its coherent seed and override each field independently only with an
  * edge from the same generation stamped at/after the attach boundary. */
 static __always_inline void resolve_exact_attr(u32 pid, u64 *query_id,
-                                               u16 *cmd_open)
+                                               u16 *cmd_open,
+                                               u16 *query_quality)
 {
     struct pgwt_exact_attr *edge =
         bpf_map_lookup_elem(&exact_attr_map, &pid);
     struct pgwt_exact_config *cfg = exact_config();
     struct pgwt_exact_seed *seed =
         bpf_map_lookup_elem(&exact_seed_map, &pid);
-    pgwt_exact_merge_attr(cfg, edge, seed, query_id, cmd_open);
+    u32 packed = 0;
+    pgwt_exact_merge_attr(cfg, edge, seed, query_id, &packed);
+    *cmd_open = (u16)(packed & 0xffff);
+    *query_quality = (u16)(packed >> 16);
 }
 
 static __always_inline void note_query_edge(u32 pid, u64 query_id, u64 now)
@@ -297,12 +307,16 @@ static __always_inline void note_query_edge(u32 pid, u64 query_id, u64 now)
         edge->query_generation = generation;
         edge->query_edge_ts = now;
         edge->query_id = query_id;
+        edge->query_quality = query_id ? PGWT_QUERY_QUALITY_REAL
+                                       : PGWT_QUERY_QUALITY_NONE;
         return;
     }
     struct pgwt_exact_attr initial = {
         .query_generation = generation,
         .query_edge_ts = now,
         .query_id = query_id,
+        .query_quality = query_id ? PGWT_QUERY_QUALITY_REAL
+                                  : PGWT_QUERY_QUALITY_NONE,
     };
     bpf_map_update_elem(&exact_attr_map, &pid, &initial, BPF_ANY);
 }
@@ -528,7 +542,8 @@ int on_watchpoint(struct bpf_perf_event_data *ctx)
         } else {
             u64 query_id = 0;
             u16 cmd_open = 0;
-            resolve_exact_attr(pid, &query_id, &cmd_open);
+            u16 query_quality = 0;
+            resolve_exact_attr(pid, &query_id, &cmd_open, &query_quality);
             /* Full trace: attribution comes from the generation-aware merge
              * of BPF edges and the separate coherent window-start seed. */
             struct pgwt_trace_event evt = {
@@ -536,7 +551,9 @@ int on_watchpoint(struct bpf_perf_event_data *ctx)
                 .pid = pid,
                 .old_event = st->last_event,
                 .new_event = new_event,
-                .flags = cmd_open ? PGWT_EVENT_FLAG_CMD_OPEN : 0,
+                .flags = (cmd_open ? PGWT_EVENT_FLAG_CMD_OPEN : 0) |
+                    (query_quality == PGWT_QUERY_QUALITY_PG13_SYNTH
+                     ? PGWT_EVENT_FLAG_QUERY_SYNTH : 0),
                 .duration_ns = duration,
                 .query_id = query_id,
                 .cpu_ns = cpu_delta,
@@ -698,14 +715,17 @@ int on_exit(struct trace_event_raw_sched_process_template *ctx)
         } else {
             u64 query_id = 0;
             u16 cmd_open = 0;
-            resolve_exact_attr(pid, &query_id, &cmd_open);
+            u16 query_quality = 0;
+            resolve_exact_attr(pid, &query_id, &cmd_open, &query_quality);
             /* Emit final trace event (exit sentinel) */
             struct pgwt_trace_event evt = {
                 .timestamp_ns = now,
                 .pid = pid,
                 .old_event = st->last_event,
                 .new_event = PGWT_EVENT_EXIT,
-                .flags = cmd_open ? PGWT_EVENT_FLAG_CMD_OPEN : 0,
+                .flags = (cmd_open ? PGWT_EVENT_FLAG_CMD_OPEN : 0) |
+                    (query_quality == PGWT_QUERY_QUALITY_PG13_SYNTH
+                     ? PGWT_EVENT_FLAG_QUERY_SYNTH : 0),
                 .duration_ns = duration,
                 .query_id = query_id,
                 .cpu_ns = cpu_delta,
@@ -743,9 +763,10 @@ static __always_inline void emit_marker(u32 marker)
 
     u64 qid = 0;
     u16 cmd_open = 0;
+    u16 query_quality = 0;
     if (!bpf_map_lookup_elem(&state_map, &pid))
         return;
-    resolve_exact_attr(pid, &qid, &cmd_open);
+    resolve_exact_attr(pid, &qid, &cmd_open, &query_quality);
     note_phase_edge(pid, marker, now);
     if (!exact_admission_open())
         return;
@@ -755,6 +776,8 @@ static __always_inline void emit_marker(u32 marker)
         .pid = pid,
         .old_event = marker,
         .new_event = marker,
+        .flags = query_quality == PGWT_QUERY_QUALITY_PG13_SYNTH
+               ? PGWT_EVENT_FLAG_QUERY_SYNTH : 0,
         .duration_ns = 0,
         .query_id = qid,
     };
@@ -828,7 +851,11 @@ int on_report_query_id(struct pt_regs *ctx)
     if (lightweight_mode || skip_query_id || !debug_query_string_addr)
         return 0;
 
-    if (bpf_map_lookup_elem(&seen_query_ids, &query_id))
+    struct pgwt_seen_query_key seen_key = {
+        .pid = pid,
+        .query_id = query_id,
+    };
+    if (bpf_map_lookup_elem(&seen_query_ids, &seen_key))
         return 0;  /* already captured text for this query_id */
 
     /* Read the debug_query_string pointer, then the string */
@@ -840,19 +867,24 @@ int on_report_query_id(struct pt_regs *ctx)
 
     struct pgwt_query_text_event *evt;
     evt = bpf_ringbuf_reserve(&lifecycle_rb, sizeof(*evt), 0);
-    if (evt) {
-        evt->type = PGWT_LIFECYCLE_QUERY_TEXT;
-        evt->pid = pid;
-        evt->query_id = query_id;
-        bpf_probe_read_user_str(evt->text, sizeof(evt->text), (void *)str_ptr);
-        bpf_ringbuf_submit(evt, 0);
+    if (!evt)
+        return 0; /* leave unseen: a later execution retries raw capture */
+    evt->type = PGWT_LIFECYCLE_QUERY_TEXT;
+    evt->pid = pid;
+    evt->query_id = query_id;
+    long text_len = bpf_probe_read_user_str(evt->text, sizeof(evt->text),
+                                            (void *)str_ptr);
+    if (text_len <= 1) {
+        bpf_ringbuf_discard(evt, 0);
+        return 0; /* unreadable/empty is not a successful first-seen */
     }
+    bpf_ringbuf_submit(evt, 0);
 
     /* Mark as seen. CAP-6: when the map is full the insert fails and text
      * for NEW query_ids is never captured again — count it (the daemon
      * logs once and surfaces seen_query_ids_full_total). */
     u8 one = 1;
-    if (bpf_map_update_elem(&seen_query_ids, &query_id, &one, BPF_ANY))
+    if (bpf_map_update_elem(&seen_query_ids, &seen_key, &one, BPF_ANY))
         count_map_fail(PGWT_BPF_FAIL_SEEN_QIDS);
 
     return 0;
@@ -876,7 +908,7 @@ int on_report_query_id(struct pt_regs *ctx)
  *
  * The uprobe only UPDATES existing state_map entries (like the query-id
  * uprobes); entries are seeded by the scan/fork/preseed paths. Stage 3 keeps
- * it attached only for full/exact windows or the PG13/degraded fallback. */
+ * it attached only for full/exact windows or a degraded fallback. */
 
 SEC("uprobe")
 int on_report_activity(struct pt_regs *ctx)
@@ -897,29 +929,42 @@ int on_report_activity(struct pt_regs *ctx)
              ? 1 : 0;
     u64 old_query_id = 0;
     u16 old_open = 0;
-    resolve_exact_attr(pid, &old_query_id, &old_open);
+    u16 old_quality = 0;
+    resolve_exact_attr(pid, &old_query_id, &old_open, &old_quality);
     u64 now = bpf_ktime_get_ns();
     note_cmd_edge(pid, open, now);
     st->cmd_open = open;
     if (old_open == open)
         return 0;   /* stamp the generation, but no boundary crossed */
 
+    /* PG13 has no core reset-to-zero query-id edge. A straddler seed must not
+     * leak into the next statement: clear it before a new command marker and
+     * after the old command's terminal marker. ExecutorStart will publish the
+     * real ID later for statements that have one. */
+    if ((pg13_synthetic_attr || pg13_query_attr) && open)
+        note_query_edge(pid, 0, now);
+
     if (!lightweight_mode && st->wp_live) {
         u64 query_id = 0;
         u16 current_open = 0;
-        resolve_exact_attr(pid, &query_id, &current_open);
+        u16 query_quality = 0;
+        resolve_exact_attr(pid, &query_id, &current_open, &query_quality);
         u32 marker = open ? PGWT_MARKER_CMD_START : PGWT_MARKER_CMD_END;
         struct pgwt_trace_event evt = {
             .timestamp_ns = now,
             .pid = pid,
             .old_event = marker,
             .new_event = marker,
+            .flags = query_quality == PGWT_QUERY_QUALITY_PG13_SYNTH
+                   ? PGWT_EVENT_FLAG_QUERY_SYNTH : 0,
             .duration_ns = 0,
             .query_id = query_id,
         };
         if (exact_admission_open())
             emit_event(&evt);
     }
+    if ((pg13_synthetic_attr || pg13_query_attr) && !open)
+        note_query_edge(pid, 0, now);
     return 0;
 }
 
@@ -984,7 +1029,11 @@ int on_executor_start(struct pt_regs *ctx)
     if (lightweight_mode || skip_query_id || !pg13_qd_sourcetext_off)
         return 0;
 
-    if (bpf_map_lookup_elem(&seen_query_ids, &query_id))
+    struct pgwt_seen_query_key seen_key = {
+        .pid = pid,
+        .query_id = query_id,
+    };
+    if (bpf_map_lookup_elem(&seen_query_ids, &seen_key))
         return 0;  /* already captured text for this query_id */
 
     u64 src_ptr = 0;
@@ -995,16 +1044,21 @@ int on_executor_start(struct pt_regs *ctx)
 
     struct pgwt_query_text_event *evt;
     evt = bpf_ringbuf_reserve(&lifecycle_rb, sizeof(*evt), 0);
-    if (evt) {
-        evt->type = PGWT_LIFECYCLE_QUERY_TEXT;
-        evt->pid = pid;
-        evt->query_id = query_id;
-        bpf_probe_read_user_str(evt->text, sizeof(evt->text), (void *)src_ptr);
-        bpf_ringbuf_submit(evt, 0);
+    if (!evt)
+        return 0; /* leave unseen: a later execution retries raw capture */
+    evt->type = PGWT_LIFECYCLE_QUERY_TEXT;
+    evt->pid = pid;
+    evt->query_id = query_id;
+    long text_len = bpf_probe_read_user_str(evt->text, sizeof(evt->text),
+                                            (void *)src_ptr);
+    if (text_len <= 1) {
+        bpf_ringbuf_discard(evt, 0);
+        return 0;
     }
+    bpf_ringbuf_submit(evt, 0);
 
     u8 one = 1;
-    if (bpf_map_update_elem(&seen_query_ids, &query_id, &one, BPF_ANY))
+    if (bpf_map_update_elem(&seen_query_ids, &seen_key, &one, BPF_ANY))
         count_map_fail(PGWT_BPF_FAIL_SEEN_QIDS);
 
     return 0;

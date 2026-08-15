@@ -26,6 +26,11 @@ struct pgwt_backend {
      * fork path parses lazily (the process title is only set after init). */
     bool     meta_parsed;
     struct pgwt_metadata meta;
+    uint32_t databaseid;      /* PgBackendStatus context, 0 until observed */
+    uint32_t userid;
+    uint64_t pgbs_addr;        /* PG13 cached shared PgBackendStatus row */
+    uint64_t pgbs_resolve_retry_ns;
+    uint8_t  pgbs_resolve_attempts;
 };
 
 struct pgwt_backend_table {
