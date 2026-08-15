@@ -194,6 +194,7 @@ struct pgwt_pgss_resolver {
     pthread_cond_t cond;
     bool stop;
     bool started;
+    uint64_t next_batch_at_ms;
     struct resolver_entry entries[PGWT_PGSS_QUEUE_SIZE];
     struct pgwt_daemon *daemon;
     struct pgwt_query_text_capture *query_text;
@@ -383,6 +384,59 @@ static void retry_entries(struct pgwt_pgss_resolver *r, const int *indices,
     pthread_mutex_unlock(&r->mutex);
 }
 
+/* Caller holds r->mutex. Persisted text is terminal even if it arrived after
+ * enqueue; no resolver SQL is issued for that key. */
+static size_t select_batch_locked(struct pgwt_pgss_resolver *r, uint64_t now,
+                                  int *indices,
+                                  struct pgwt_query_text_key *keys,
+                                  uint64_t *next_due)
+{
+    size_t count = 0;
+    uint32_t batch_databaseid = 0;
+    *next_due = UINT64_MAX;
+    for (int i = 0; i < PGWT_PGSS_QUEUE_SIZE; i++) {
+        struct resolver_entry *e = &r->entries[i];
+        if (e->state != ENTRY_PENDING) continue;
+        if (pgwt_qt_has_text(r->query_text, &e->key)) {
+            e->state = ENTRY_DONE;
+            counter_add(&r->daemon->counters.sampled_text_pending,
+                        UINT64_MAX);
+            continue;
+        }
+        uint64_t due = e->retry_at_ms;
+        if (due < r->next_batch_at_ms) due = r->next_batch_at_ms;
+        if (due > now) {
+            if (due < *next_due) *next_due = due;
+            continue;
+        }
+        if (batch_databaseid && e->key.databaseid != batch_databaseid)
+            continue;
+        if (count < PGWT_PGSS_BATCH_MAX) {
+            batch_databaseid = e->key.databaseid;
+            indices[count] = i;
+            keys[count++] = e->key;
+        }
+    }
+    if (count)
+        r->next_batch_at_ms = now + PGWT_PGSS_BATCH_INTERVAL_MS;
+    return count;
+}
+
+static size_t filter_persisted(struct pgwt_pgss_resolver *r, int *indices,
+                               struct pgwt_query_text_key *keys, size_t count)
+{
+    size_t kept = 0;
+    for (size_t i = 0; i < count; i++) {
+        if (pgwt_qt_has_text(r->query_text, &keys[i])) {
+            finish_entry(r, indices[i], NULL);
+            continue;
+        }
+        indices[kept] = indices[i];
+        keys[kept++] = keys[i];
+    }
+    return kept;
+}
+
 static void *resolver_main(void *arg)
 {
     struct pgwt_pgss_resolver *r = arg;
@@ -394,25 +448,7 @@ static void *resolver_main(void *arg)
         pthread_mutex_lock(&r->mutex);
         while (!r->stop) {
             uint64_t now = now_ms();
-            count = 0;
-            next_due = UINT64_MAX;
-            uint32_t batch_databaseid = 0;
-            for (int i = 0; i < PGWT_PGSS_QUEUE_SIZE; i++) {
-                struct resolver_entry *e = &r->entries[i];
-                if (e->state != ENTRY_PENDING) continue;
-                if (e->retry_at_ms <= now) {
-                    if (batch_databaseid &&
-                        e->key.databaseid != batch_databaseid)
-                        continue;
-                    if (count < PGWT_PGSS_BATCH_MAX) {
-                        batch_databaseid = e->key.databaseid;
-                        indices[count] = i;
-                        keys[count++] = e->key;
-                    }
-                } else if (e->retry_at_ms < next_due) {
-                    next_due = e->retry_at_ms;
-                }
-            }
+            count = select_batch_locked(r, now, indices, keys, &next_due);
             if (count) break;
             if (next_due == UINT64_MAX) {
                 pthread_cond_wait(&r->cond, &r->mutex);
@@ -432,6 +468,9 @@ static void *resolver_main(void *arg)
         bool stopping = r->stop;
         pthread_mutex_unlock(&r->mutex);
         if (stopping) break;
+
+        count = filter_persisted(r, indices, keys, count);
+        if (!count) continue;
 
         char database[128], schema[128];
         int database_result = resolve_database(
@@ -462,7 +501,10 @@ static void *resolver_main(void *arg)
             continue;
         }
 
-        char sql[16384], output[QT_MAX_TEXT];
+        count = filter_persisted(r, indices, keys, count);
+        if (!count) continue;
+
+        char sql[65536], output[QT_MAX_TEXT];
         bool found[PGWT_PGSS_BATCH_MAX] = {0};
         int sql_ok = pgwt_pgss_build_lookup_sql(sql, sizeof(sql), schema,
                                                  keys, count) == 0 &&
@@ -483,7 +525,8 @@ static void *resolver_main(void *arg)
                     if (resolver_key_equal(&keys[i], &got_key)) {
                         found[i] = true;
                         if (parsed > 0) {
-                            pgwt_qt_store_pgss(r->query_text, &got_key, text);
+                            pgwt_qt_store_pgss_deferred(r->query_text,
+                                                        &got_key, text);
                             finish_entry(
                                 r, indices[i], &r->daemon->counters
                                                     .sampled_text_resolved_total);
@@ -496,6 +539,7 @@ static void *resolver_main(void *arg)
                     }
                 }
             }
+            pgwt_qt_flush(r->query_text);
         }
         int missing_indices[PGWT_PGSS_BATCH_MAX];
         size_t missing_count = 0;
@@ -543,7 +587,13 @@ void pgwt_pgss_resolver_queue(struct pgwt_pgss_resolver *r,
 {
     if (!r || !key || !key->databaseid || !key->userid || !key->query_id)
         return;
+    if (pgwt_qt_has_text(r->query_text, key))
+        return;
     pthread_mutex_lock(&r->mutex);
+    if (pgwt_qt_has_text(r->query_text, key)) {
+        pthread_mutex_unlock(&r->mutex);
+        return;
+    }
     uint64_t now = now_ms();
     uint32_t idx = (uint32_t)(resolver_hash(key) & (PGWT_PGSS_QUEUE_SIZE - 1));
     int reclaim = -1;
@@ -641,6 +691,18 @@ int pgwt_pgss_test_cooldown(struct pgwt_pgss_resolver *r,
     }
     pthread_mutex_unlock(&r->mutex);
     return -1;
+}
+
+size_t pgwt_pgss_test_claim_batch(struct pgwt_pgss_resolver *r,
+                                  uint64_t now, uint64_t *next_due)
+{
+    if (!r || !next_due) return 0;
+    int indices[PGWT_PGSS_BATCH_MAX];
+    struct pgwt_query_text_key keys[PGWT_PGSS_BATCH_MAX];
+    pthread_mutex_lock(&r->mutex);
+    size_t count = select_batch_locked(r, now, indices, keys, next_due);
+    pthread_mutex_unlock(&r->mutex);
+    return count;
 }
 #endif
 

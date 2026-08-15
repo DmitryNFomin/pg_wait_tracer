@@ -11,7 +11,7 @@ int pgwt_bm_init(struct pgwt_backend_meta_writer *bm, const char *trace_dir)
 
     char path[512];
     snprintf(path, sizeof(path), "%s/backends.jsonl", trace_dir);
-    bm->fp = fopen(path, "a");
+    bm->fp = fopen(path, "ae");
     if (!bm->fp) {
         perror("fopen backends.jsonl");
         return -1;

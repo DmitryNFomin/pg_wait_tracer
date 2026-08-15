@@ -955,13 +955,27 @@ int pgwt_sampler_poll(struct pgwt_daemon *d)
                                             tick_raw.userid);
                 if (pgwt_pgbs_sampled_activity_enabled(
                         &d->backend_status_layout) && tick_raw.cmd_open) {
-                    char normalized[PGWT_PG13_SYNTH_TEXT_MAX];
+                    const char *normalized = NULL;
                     uint64_t synthetic = 0;
-                    if (!tick_raw.activity_truncated &&
-                        pgwt_pg13_synthetic_query(
-                            tick_raw.databaseid, tick_raw.userid,
-                            tick_raw.activity, normalized,
-                            sizeof(normalized), &synthetic) == 0) {
+                    char normalized_fallback[PGWT_PG13_SYNTH_TEXT_MAX];
+                    int synth_rc = -1;
+                    if (!tick_raw.activity_truncated) {
+                        if (be->pg13_synthetic_cache) {
+                            synth_rc = pgwt_pg13_synthetic_cached(
+                                be->pg13_synthetic_cache,
+                                tick_raw.databaseid, tick_raw.userid,
+                                tick_raw.activity, &normalized, &synthetic,
+                                NULL);
+                        } else if (pgwt_pg13_synthetic_query(
+                                       tick_raw.databaseid, tick_raw.userid,
+                                       tick_raw.activity, normalized_fallback,
+                                       sizeof(normalized_fallback),
+                                       &synthetic) == 0) {
+                            normalized = normalized_fallback;
+                            synth_rc = 0;
+                        }
+                    }
+                    if (synth_rc == 0) {
                         tick_attr.query_id = synthetic;
                         targets[n].query_quality =
                             PGWT_QUERY_QUALITY_PG13_SYNTH;

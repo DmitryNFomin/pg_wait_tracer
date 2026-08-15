@@ -8,12 +8,13 @@
 #include <stdint.h>
 #include <sys/types.h>
 
-#define PGWT_PGSS_BATCH_MAX 32
+#define PGWT_PGSS_BATCH_MAX 256
 #define PGWT_PGSS_MAX_RETRIES 6
 #define PGWT_PGSS_TEXT_CHARS 2048
 #define PGWT_PGSS_TEXT_BYTES (PGWT_PGSS_TEXT_CHARS * 4 + 1)
 #define PGWT_PGSS_QUEUE_PROBES 64
 #define PGWT_PGSS_REQUEUE_COOLDOWN_MS 30000
+#define PGWT_PGSS_BATCH_INTERVAL_MS 10000
 
 enum pgwt_pgss_discovery_result {
     PGWT_PGSS_DISCOVERY_SCHEMA = 0,
@@ -59,6 +60,8 @@ struct pgwt_pgss_resolver *pgwt_pgss_test_create(
 int pgwt_pgss_test_cooldown(struct pgwt_pgss_resolver *resolver,
                             const struct pgwt_query_text_key *key,
                             bool immediately_due);
+size_t pgwt_pgss_test_claim_batch(struct pgwt_pgss_resolver *resolver,
+                                  uint64_t now, uint64_t *next_due);
 #endif
 #endif
 

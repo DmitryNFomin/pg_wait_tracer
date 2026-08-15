@@ -321,3 +321,40 @@ int pgwt_pg13_synthetic_query(uint32_t databaseid, uint32_t userid,
     *key = pgwt_pg13_synthetic_key(databaseid, userid, normalized);
     return *key ? 0 : -1;
 }
+
+int pgwt_pg13_synthetic_cached(struct pgwt_pg13_synthetic_cache *cache,
+                               uint32_t databaseid, uint32_t userid,
+                               const char *activity,
+                               const char **normalized, uint64_t *key,
+                               bool *cache_hit)
+{
+    if (normalized) *normalized = NULL;
+    if (key) *key = 0;
+    if (cache_hit) *cache_hit = false;
+    if (!cache || !databaseid || !userid || !activity || !activity[0] ||
+        !normalized || !key)
+        return -1;
+    if (cache->valid && cache->databaseid == databaseid &&
+        cache->userid == userid && strcmp(cache->activity, activity) == 0) {
+        *normalized = cache->normalized;
+        *key = cache->query_id;
+        if (cache_hit) *cache_hit = true;
+        return 0;
+    }
+    uint64_t fresh = 0;
+    if (pgwt_pg13_synthetic_query(databaseid, userid, activity,
+                                  cache->normalized,
+                                  sizeof(cache->normalized), &fresh) != 0)
+        return -1;
+    size_t len = strnlen(activity, sizeof(cache->activity));
+    if (!len || len >= sizeof(cache->activity))
+        return -1;
+    memcpy(cache->activity, activity, len + 1);
+    cache->databaseid = databaseid;
+    cache->userid = userid;
+    cache->query_id = fresh;
+    cache->valid = true;
+    *normalized = cache->normalized;
+    *key = fresh;
+    return 0;
+}

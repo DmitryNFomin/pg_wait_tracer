@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 static int run, passed;
 #define CHECK(c, msg) do { run++; if (c) passed++; else printf("  FAIL: %s\n", msg); } while (0)
@@ -71,7 +72,21 @@ int main(void)
 
 #ifdef PGWT_TEST
     struct pgwt_daemon *daemon = calloc(1, sizeof(*daemon));
+    const char *qt_dir = "/tmp/pgwt_pgss_resolver_test";
+    (void)system("rm -rf /tmp/pgwt_pgss_resolver_test");
+    mkdir(qt_dir, 0755);
     struct pgwt_query_text_capture qt = {0};
+    CHECK(pgwt_qt_init(&qt, qt_dir, 0, 0, (gid_t)-1) == 0,
+          "query-text fixture initializes");
+    struct pgwt_query_text_key persisted = {
+        .databaseid = 5, .userid = 10, .query_id = 9001,
+    };
+    pgwt_qt_store_pgss(&qt, &persisted, "select $1");
+    pgwt_qt_close(&qt);
+    memset(&qt, 0, sizeof(qt));
+    CHECK(pgwt_qt_init(&qt, qt_dir, 0, 0, (gid_t)-1) == 0 &&
+          pgwt_qt_has_text(&qt, &persisted),
+          "persisted text reload publishes lock-free presence");
     struct pgwt_pgss_resolver *resolver =
         pgwt_pgss_test_create(daemon, &qt);
     CHECK(resolver != NULL, "async queue test fixture initializes");
@@ -81,11 +96,20 @@ int main(void)
     struct pgwt_query_text_key qb = {
         .databaseid = 6, .userid = 10, .query_id = 1234,
     };
+    pgwt_pgss_resolver_queue(resolver, &persisted);
+    CHECK(daemon->counters.sampled_text_pending == 0,
+          "restart-persisted key is rejected before resolver enqueue");
     pgwt_pgss_resolver_queue(resolver, &qa);
     pgwt_pgss_resolver_queue(resolver, &qa);
     pgwt_pgss_resolver_queue(resolver, &qb);
     CHECK(daemon->counters.sampled_text_pending == 2,
           "enqueue is context-keyed and duplicate sightings are nonblocking dedup");
+    uint64_t next_due = 0;
+    CHECK(pgwt_pgss_test_claim_batch(resolver, 10000, &next_due) == 1,
+          "first due resolver batch is admitted");
+    CHECK(pgwt_pgss_test_claim_batch(resolver, 10001, &next_due) == 0 &&
+          next_due == 10000 + PGWT_PGSS_BATCH_INTERVAL_MS,
+          "successful drain gates the next batch at the minimum interval");
     CHECK(pgwt_pgss_test_cooldown(resolver, &qa, false) == 0,
           "retry-exhausted key enters cooldown");
     pgwt_pgss_resolver_queue(resolver, &qa);
@@ -97,6 +121,20 @@ int main(void)
     CHECK(daemon->counters.sampled_text_pending == 1,
           "later sampled sighting requeues an exhausted long statement");
     pgwt_pgss_resolver_stop(resolver);
+
+    memset(&daemon->counters, 0, sizeof(daemon->counters));
+    resolver = pgwt_pgss_test_create(daemon, &qt);
+    struct pgwt_query_text_key raced = {
+        .databaseid = 5, .userid = 10, .query_id = 9002,
+    };
+    pgwt_pgss_resolver_queue(resolver, &raced);
+    pgwt_qt_store_pgss(&qt, &raced, "select $1 + $2");
+    CHECK(pgwt_pgss_test_claim_batch(resolver, 20000, &next_due) == 0 &&
+          daemon->counters.sampled_text_pending == 0,
+          "resolution gate drops text persisted after enqueue without SQL");
+    pgwt_pgss_resolver_stop(resolver);
+    pgwt_qt_close(&qt);
+    (void)system("rm -rf /tmp/pgwt_pgss_resolver_test");
     free(daemon);
 #endif
 

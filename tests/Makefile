@@ -181,7 +181,7 @@ test_durability: test_durability.c $(BUILD)/server_event_writer.o \
 # bounded compaction + cap logging + permissions. Compiles query_text.c
 # directly (BPF-free).
 test_query_text: test_query_text.c ../src/query_text.c
-	$(CC) $(CFLAGS) -o $@ $^ ../src/synthetic_query.c -pthread
+	$(CC) $(CFLAGS) -DPGWT_TEST -o $@ $^ ../src/synthetic_query.c -pthread
 
 # test_golden_fixture: T7/TST-10 — decode the COMMITTED golden trace bytes
 # (tests/fixtures/golden/rev<N>/) and checksum the event stream, pinning

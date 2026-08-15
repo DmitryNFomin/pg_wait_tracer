@@ -4,6 +4,7 @@
 
 #include "pg_wait_tracer.h"
 #include "cmdline.h"
+#include "synthetic_query.h"
 
 #include <sys/types.h>
 #include <stdint.h>
@@ -31,6 +32,7 @@ struct pgwt_backend {
     uint64_t pgbs_addr;        /* PG13 cached shared PgBackendStatus row */
     uint64_t pgbs_resolve_retry_ns;
     uint8_t  pgbs_resolve_attempts;
+    struct pgwt_pg13_synthetic_cache *pg13_synthetic_cache;
 };
 
 struct pgwt_backend_table {

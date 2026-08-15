@@ -370,10 +370,10 @@ static int open_trace_file(struct pgwt_event_writer *w, uint64_t first_mono_ns)
     /* DUR-1: NEVER truncate an existing current.trace ("wbx", not "wb").
      * Init already recovered any leftover file; if one (re)appeared since —
      * e.g. lazy first-open long after init — recover it now and retry. */
-    w->fp = fopen(w->current_path, "wbx");
+    w->fp = fopen(w->current_path, "wbxe");
     if (!w->fp && errno == EEXIST) {
         recover_current_trace(w);
-        w->fp = fopen(w->current_path, "wbx");
+        w->fp = fopen(w->current_path, "wbxe");
     }
     if (!w->fp) {
         fprintf(stderr, "WARN: cannot create %s: %s\n",

@@ -9,6 +9,15 @@
 #define PGWT_PG13_SYNTH_VERSION "pg13-synth-v1"
 #define PGWT_PG13_SYNTH_TEXT_MAX 4096
 
+struct pgwt_pg13_synthetic_cache {
+    uint32_t databaseid;
+    uint32_t userid;
+    uint64_t query_id;
+    bool valid;
+    char activity[PGWT_PG13_SYNTH_TEXT_MAX];
+    char normalized[PGWT_PG13_SYNTH_TEXT_MAX];
+};
+
 /* Normalize one complete PostgreSQL activity string.  Comments are removed,
  * whitespace is collapsed, and literal constants are replaced with '?'.
  * Returns the normalized byte length, or 0 when the input is unusable. */
@@ -25,5 +34,13 @@ uint64_t pgwt_pg13_synthetic_key(uint32_t databaseid, uint32_t userid,
 int pgwt_pg13_synthetic_query(uint32_t databaseid, uint32_t userid,
                               const char *activity, char *normalized,
                               size_t normalized_size, uint64_t *key);
+
+/* Exact per-backend reuse: unchanged raw activity avoids repeat
+ * normalization/hash work on the 10 Hz sampler path. */
+int pgwt_pg13_synthetic_cached(struct pgwt_pg13_synthetic_cache *cache,
+                               uint32_t databaseid, uint32_t userid,
+                               const char *activity,
+                               const char **normalized, uint64_t *key,
+                               bool *cache_hit);
 
 #endif

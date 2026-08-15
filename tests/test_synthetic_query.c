@@ -57,6 +57,25 @@ int main(void)
           "leading/trailing-dot numerics normalize without consuming dot-dot");
     CHECK(pgwt_pg13_synthetic_query(0, 10, "SELECT 1", b, sizeof(b), &kb) != 0,
           "missing context stays unattributed");
+    struct pgwt_pg13_synthetic_cache cache = {0};
+    const char *cached_text = NULL;
+    bool hit = false;
+    CHECK(pgwt_pg13_synthetic_cached(&cache, 5, 10, "SELECT 42",
+                                     &cached_text, &kb, &hit) == 0 && !hit &&
+          strcmp(cached_text, "SELECT ?") == 0,
+          "first activity sighting populates the exact sampler cache");
+    CHECK(pgwt_pg13_synthetic_cached(&cache, 5, 10, "SELECT 42",
+                                     &cached_text, &ka, &hit) == 0 && hit &&
+          ka == kb,
+          "unchanged activity reuses normalized text and key");
+    CHECK(pgwt_pg13_synthetic_cached(&cache, 5, 10, "SELECT 43",
+                                     &cached_text, &ka, &hit) == 0 && !hit &&
+          ka == kb,
+          "changed literal is normalized again but retains stable grouping");
+    CHECK(pgwt_pg13_synthetic_cached(&cache, 6, 10, "SELECT 43",
+                                     &cached_text, &ka, &hit) == 0 && !hit &&
+          ka != kb,
+          "context change invalidates the per-backend cache");
     printf("%d/%d tests passed\n", passed, run);
     return passed == run ? 0 : 1;
 }

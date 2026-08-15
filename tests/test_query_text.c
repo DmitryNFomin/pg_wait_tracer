@@ -290,6 +290,7 @@ static void test_sampled_capacity_cannot_block_raw(void)
         .databaseid = 99, .userid = 77, .query_id = 9000002,
     };
     pgwt_qt_store_synthetic(qt, &synth, "SELECT ?");
+    pgwt_qt_test_drain_synthetic(qt);
     CHECK(qt->num_sampled_seen == QT_HT_SIZE &&
           qt->quality_count == 1 && count_file_lines(sources_path()) == 1,
           "synthetic quality persists after sampled text admission saturates");
@@ -300,8 +301,51 @@ static void test_sampled_capacity_cannot_block_raw(void)
           qt->quality_count == 1,
           "synthetic quality dedup reloads independently of text admission");
     pgwt_qt_store_synthetic(qt, &synth, "SELECT ?");
+    pgwt_qt_test_drain_synthetic(qt);
     CHECK(count_file_lines(sources_path()) == 1,
           "reloaded synthetic quality is not duplicated");
+    pgwt_qt_close(qt);
+    free(qt);
+}
+
+static void test_synthetic_async_and_quality_bound(void)
+{
+    printf("--- Stage 4: PG13 persistence is async and bounded ---\n");
+    rm_rf(TEST_DIR);
+    mkdir(TEST_DIR, 0755);
+    struct pgwt_query_text_capture *qt = calloc(1, sizeof(*qt));
+    CHECK(pgwt_qt_init(qt, TEST_DIR, 0, 0, (gid_t)-1) == 0, "init");
+
+    struct pgwt_query_text_key first = {
+        .databaseid = 5, .userid = 10, .query_id = 1,
+    };
+    pgwt_qt_test_pause_synthetic(qt, true);
+    pgwt_qt_store_synthetic(qt, &first, "SELECT ?");
+    CHECK(count_lines() == 0 && count_file_lines(sources_path()) == 0 &&
+          qt->num_sampled_seen == 0 && qt->quality_count == 0,
+          "sampler call only enqueues; worker owns file I/O and quality work");
+    pgwt_qt_test_pause_synthetic(qt, false);
+    pgwt_qt_test_drain_synthetic(qt);
+    CHECK(count_lines() == 1 && count_file_lines(sources_path()) == 1 &&
+          pgwt_qt_has_text(qt, &first),
+          "worker persists synthetic text and publishes lock-free presence");
+
+    for (uint64_t id = 2; id <= QT_QUALITY_SIZE * 3; id++) {
+        struct pgwt_query_text_key key = {
+            .databaseid = 5, .userid = 10, .query_id = id,
+        };
+        pgwt_qt_store_synthetic(qt, &key, "SELECT ?");
+        if ((id & 127) == 0)
+            pgwt_qt_test_drain_synthetic(qt);
+    }
+    pgwt_qt_test_drain_synthetic(qt);
+    struct stat st = {0};
+    CHECK(qt->quality_capacity == QT_QUALITY_SIZE &&
+          qt->quality_count == QT_QUALITY_SIZE,
+          "quality_seen stays at its fixed cap and evicts");
+    CHECK(stat(sources_path(), &st) == 0 &&
+          st.st_size <= QT_QUALITY_MAX_BYTES,
+          "query_sources sidecar is compacted within its byte bound");
     pgwt_qt_close(qt);
     free(qt);
 }
@@ -316,6 +360,7 @@ int main(void)
     test_permissions();
     test_source_precedence_and_context();
     test_sampled_capacity_cannot_block_raw();
+    test_synthetic_async_and_quality_bound();
     rm_rf(TEST_DIR);
     printf("\n%d/%d tests passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;
