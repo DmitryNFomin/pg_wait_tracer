@@ -64,7 +64,7 @@
 
 ### 🔲 Left (not built)
 
-> **⚠️ CRITICAL — sampled-tier overhead is REAL (~20–30%); root-caused; staged fix underway (investigation done 2026-08-13; fix stage 1 merged #83).**
+> **⚠️ CRITICAL — sampled-tier overhead was REAL (~20–30%); root-caused; staged fix underway (investigation done 2026-08-13; stages 1–3 implemented).**
 > The documented "sampled tier ≈0% / TPS within noise" is **FALSE** for the
 > always-on sampled tier. Measured on the box (pgbench, PG13/17/18): the sampled
 > tier costs **−18% to −30% TPS** plus a per-statement latency tax that crosses
@@ -80,20 +80,35 @@
 > PostgreSQL backends (the overhead test forces `--mode full` and never A/B-tested
 > sampled). **Fix (fail-safe, staged):** read `st_query_id`/`st_state` at each 10 Hz
 > tick from `PgBackendStatus` (external reads, no traps) and scope the uprobes to
-> full/escalation windows only. Measured achievable: **<1%** (near the original
-> <0.5% goal). PG13 (no in-core query_id, gate measured ~15–23%) uses
+> full/escalation windows only. Stage 3 now measures **<1%** on validated PG17
+> and PG18 (near the original <0.5% goal). PG13 (no in-core query_id, gate
+> measured ~15–23%) uses
 > `st_activity_raw` + a synthetic normalized-text grouping key; sampled query TEXT
 > becomes pgss-normalized (accepted). **Progress:** stage 1 (offset discovery +
 > fail-safe validation) **merged (#83)**; stage 2 (at-tick reader + authoritative
-> gate swap) is implemented; stages 3–5 (tiered attach lifecycle → PG13 text
-> path → permanent sampled-overhead A/B gate) remain. Stage 2 deliberately
+> gate swap) is implemented; **stage 3 is implemented and remotely validated**:
+> validated PG14–18 starts sampled with both query/activity links detached,
+> attaches them as one rollback-safe generation bundle before an exact window,
+> coherently preseeds straddling commands, and detaches/clears the generation
+> after drain and interval closure. The always-loaded `sched_switch` program's
+> exact state-map work is gated by the same tier transition, so sampled mode
+> returns before its two system-wide lookups. PG13/degraded layouts retain their
+> pinned attribution probes unchanged. Stages 4–5 (PG13 text path → permanent
+> sampled-overhead A/B gate) remain. Stage 2 deliberately
 > defines idle attribution as `query_id=0`:
 > `cmd_open` is true only for `STATE_RUNNING`/`STATE_FASTPATH`, and only an open
 > command exposes `st_query_id`. This differs from the old state-map path's
 > retained last query id for an idle backend; idle `Client:ClientRead` samples
 > are excluded from AAS/DB Time and are no longer assigned to a completed query.
-> The "≈0%" claims elsewhere in this doc are **stale** pending those stages — see
-> this note.
+>
+> **Stage 3 payoff (Rocky 8.10 box, 2026-08-14):** five paired 30-second
+> no-tracer/sampled runs per cell, alternating order, pgbench scale 10, 4 clients
+> / 4 jobs. Aggregate TPS overhead was **PG17 RO −0.437%, PG17 RW 0.447%, PG18
+> RO 0.263%, PG18 RW 0.884%**. Every sampled run reported query/activity uprobe
+> firing counts **0/0** and attached mask 0. Negative overhead is benchmark
+> noise, not a claimed speedup. PG13's pinned fallback probes were separately
+> confirmed still firing. The "≈0%" claims elsewhere in this doc remain stale
+> until the permanent Stage 5 A/B gate lands; this is the current evidence.
 
 **Real feature gaps (defined, never built):**
 - **PostgreSQL 14 / 15 / 16** — only PG13 shipped; README says "14-16 not yet".

@@ -48,6 +48,13 @@ volatile const u64 debug_query_string_addr = 0; /* VA of debug_query_string glob
  * load even where the field is absent, so this is a belt-and-suspenders gate. */
 volatile const bool cpu_accounting = 0;
 
+/* The sched_switch link stays loaded so escalation never has a tracepoint
+ * attach race, but its hot body is exact-tier-only. Userspace flips this BSS
+ * byte before exact preseed/watchpoint arm and clears it after watchpoint
+ * disarm. Sampled operation therefore pays one predictable branch, not two
+ * state-map lookups on every system context switch. */
+volatile bool exact_cpu_active = false;
+
 /* TEST HOOK (PGWT_TEST_NO_SCHED_ONCPU): deterministically reproduce the
  * live-view CPU*=0 straddle flake. When 1, on_sched_switch does NOT open
  * on_cpu_ts for the incoming task, so a backend's on-CPU stretch is opened
@@ -98,6 +105,39 @@ struct {
     __type(key, u32);
     __type(value, struct pgwt_pid_state);
 } state_map SEC(".maps");
+
+/* Stage 3 exact attribution is split by writer ownership. exact_attr_map is
+ * BPF-only edge state; exact_seed_map is userspace-only coherent window-start
+ * state. exact_config selects the generation and attach boundary used to merge
+ * them. This prevents a userspace snapshot from overwriting a newer uprobe
+ * edge, including on a command that changes while escalation is attaching. */
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, MAX_BACKENDS);
+    __type(key, u32);
+    __type(value, struct pgwt_exact_attr);
+} exact_attr_map SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, MAX_BACKENDS);
+    __type(key, u32);
+    __type(value, struct pgwt_exact_seed);
+} exact_seed_map SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, u32);
+    __type(value, struct pgwt_exact_config);
+} exact_config_map SEC(".maps");
+
+struct {
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+    __uint(max_entries, PGWT_UPROBE_FIRE_MAX);
+    __type(key, u32);
+    __type(value, u64);
+} uprobe_fire_counts SEC(".maps");
 
 /* Ring buffer for lifecycle events — pollable via epoll */
 struct {
@@ -208,6 +248,121 @@ static __always_inline u64 resolve_be_entry(void)
     return be_entry;
 }
 
+static __always_inline void count_uprobe_fire(u32 slot)
+{
+    u64 *count = bpf_map_lookup_elem(&uprobe_fire_counts, &slot);
+    if (count)
+        (*count)++;
+}
+
+static __always_inline struct pgwt_exact_config *exact_config(void)
+{
+    u32 zero = 0;
+    return bpf_map_lookup_elem(&exact_config_map, &zero);
+}
+
+/* Generation zero is the permanent PG13/degraded sampled fallback. A nonzero
+ * exact generation can be quiesced before its links are detached, giving
+ * userspace a finite ring-buffer boundary while preserving the edge+seed state
+ * needed to close intervals at the exact window end. */
+static __always_inline bool exact_admission_open(void)
+{
+    struct pgwt_exact_config *cfg = exact_config();
+    return !cfg || cfg->generation == 0 || cfg->admitting;
+}
+
+/* Resolve current exact attribution without ever copying a seed over an edge.
+ * Generation 0 is the permanent PG13/degraded fallback: the continuously
+ * attached edge map is authoritative. For a nonzero exact generation, start
+ * from its coherent seed and override each field independently only with an
+ * edge from the same generation stamped at/after the attach boundary. */
+static __always_inline void resolve_exact_attr(u32 pid, u64 *query_id,
+                                               u16 *cmd_open)
+{
+    struct pgwt_exact_attr *edge =
+        bpf_map_lookup_elem(&exact_attr_map, &pid);
+    struct pgwt_exact_config *cfg = exact_config();
+    struct pgwt_exact_seed *seed =
+        bpf_map_lookup_elem(&exact_seed_map, &pid);
+    pgwt_exact_merge_attr(cfg, edge, seed, query_id, cmd_open);
+}
+
+static __always_inline void note_query_edge(u32 pid, u64 query_id, u64 now)
+{
+    struct pgwt_exact_config *cfg = exact_config();
+    u64 generation = cfg ? cfg->generation : 0;
+    struct pgwt_exact_attr *edge =
+        bpf_map_lookup_elem(&exact_attr_map, &pid);
+    if (edge) {
+        edge->query_generation = generation;
+        edge->query_edge_ts = now;
+        edge->query_id = query_id;
+        return;
+    }
+    struct pgwt_exact_attr initial = {
+        .query_generation = generation,
+        .query_edge_ts = now,
+        .query_id = query_id,
+    };
+    bpf_map_update_elem(&exact_attr_map, &pid, &initial, BPF_ANY);
+}
+
+static __always_inline void note_cmd_edge(u32 pid, u16 cmd_open, u64 now)
+{
+    struct pgwt_exact_config *cfg = exact_config();
+    u64 generation = cfg ? cfg->generation : 0;
+    struct pgwt_exact_attr *edge =
+        bpf_map_lookup_elem(&exact_attr_map, &pid);
+    if (edge) {
+        edge->cmd_generation = generation;
+        edge->cmd_edge_ts = now;
+        edge->cmd_open = cmd_open;
+        return;
+    }
+    struct pgwt_exact_attr initial = {
+        .cmd_generation = generation,
+        .cmd_edge_ts = now,
+        .cmd_open = cmd_open,
+    };
+    bpf_map_update_elem(&exact_attr_map, &pid, &initial, BPF_ANY);
+}
+
+static __always_inline void note_phase_edge(u32 pid, u32 marker, u64 now)
+{
+    struct pgwt_exact_config *cfg = exact_config();
+    u64 generation = cfg ? cfg->generation : 0;
+    struct pgwt_exact_attr *edge =
+        bpf_map_lookup_elem(&exact_attr_map, &pid);
+    if (!edge) {
+        struct pgwt_exact_attr initial = {
+            .phase_generation = generation,
+        };
+        bpf_map_update_elem(&exact_attr_map, &pid, &initial, BPF_ANY);
+        edge = bpf_map_lookup_elem(&exact_attr_map, &pid);
+        if (!edge)
+            return;
+    }
+    if (edge->phase_generation != generation) {
+        edge->phase_generation = generation;
+        edge->phase_flags = 0;
+        edge->plan_start_ts = 0;
+        edge->exec_start_ts = 0;
+    }
+    if (marker == PGWT_MARKER_PLAN_START) {
+        edge->phase_flags |= PGWT_EXACT_PHASE_PLAN;
+        edge->plan_start_ts = now;
+    } else if (marker == PGWT_MARKER_PLAN_END) {
+        edge->phase_flags &= ~PGWT_EXACT_PHASE_PLAN;
+        edge->plan_start_ts = 0;
+    } else if (marker == PGWT_MARKER_EXEC_START) {
+        edge->phase_flags |= PGWT_EXACT_PHASE_EXEC;
+        edge->exec_start_ts = now;
+    } else if (marker == PGWT_MARKER_EXEC_END) {
+        edge->phase_flags &= ~PGWT_EXACT_PHASE_EXEC;
+        edge->exec_start_ts = 0;
+    }
+}
+
 /* Read wait_event_info directly from PGPROC address (1 probe_read).
  * Used when we have the cached address from state_map. */
 static __always_inline u32 read_wait_event_direct(u64 addr)
@@ -259,12 +414,13 @@ static __always_inline u64 read_task_cpu_ns_for(struct pgwt_pid_state *st, u64 n
  * Untracked pids miss both lookups and return in ~tens of ns (the overhead
  * measured within noise at 110-126k switches/s, docs/S3 §7). A given pid is
  * on at most one CPU, so its entry is touched by one CPU at a time — no
- * atomics needed. Attached only when the full tier arms cpu_accounting. */
+ * atomics needed. The link stays loaded, but the body is armed only for full
+ * mode or an exact tiered window. */
 SEC("tp_btf/sched_switch")
 int BPF_PROG(on_sched_switch, bool preempt,
              struct task_struct *prev, struct task_struct *next)
 {
-    if (!cpu_accounting)
+    if (!cpu_accounting || !exact_cpu_active)
         return 0;
     /* TEST HOOK: with sched_switch inert, on_cpu_ts is established ONLY by the
      * seed (current_wei==0, also forced to 0 under this hook — see backend.c)
@@ -277,13 +433,13 @@ int BPF_PROG(on_sched_switch, bool preempt,
 
     u32 ppid = BPF_CORE_READ(prev, pid);
     struct pgwt_pid_state *ps = bpf_map_lookup_elem(&state_map, &ppid);
+    u32 npid = BPF_CORE_READ(next, pid);
+    struct pgwt_pid_state *ns = bpf_map_lookup_elem(&state_map, &npid);
     if (ps && ps->on_cpu_ts && now >= ps->on_cpu_ts) {
         ps->cpu_ns_total += now - ps->on_cpu_ts;
         ps->on_cpu_ts = 0;
     }
 
-    u32 npid = BPF_CORE_READ(next, pid);
-    struct pgwt_pid_state *ns = bpf_map_lookup_elem(&state_map, &npid);
     if (ns)
         ns->on_cpu_ts = now;
     return 0;
@@ -309,6 +465,8 @@ static __always_inline void accum_add(u32 event, u64 duration)
 SEC("perf_event")
 int on_watchpoint(struct bpf_perf_event_data *ctx)
 {
+    if (!exact_admission_open())
+        return 0;
     u32 pid = bpf_get_current_pid_tgid() >> 32;
 
     struct pgwt_pid_state *st = bpf_map_lookup_elem(&state_map, &pid);
@@ -323,6 +481,8 @@ int on_watchpoint(struct bpf_perf_event_data *ctx)
          * fabricated interval. */
         if (!st->wp_live) {
             u64 seed_now = bpf_ktime_get_ns();
+            if (!exact_admission_open())
+                return 0;
             st->last_event = new_event;
             st->last_ts = seed_now;
             /* S3: snapshot the exact on-CPU ns as this interval's base. This
@@ -349,6 +509,8 @@ int on_watchpoint(struct bpf_perf_event_data *ctx)
             return 0;
 
         u64 now = bpf_ktime_get_ns();
+        if (!exact_admission_open())
+            return 0;
         u64 duration = now - st->last_ts;
 
         /* S3: exact on-CPU ns at this fire; the CPU consumed since the last
@@ -357,26 +519,26 @@ int on_watchpoint(struct bpf_perf_event_data *ctx)
         u64 cpu_now = read_task_cpu_ns_for(st, now);
         u64 cpu_delta = (cpu_now && st->last_cpu_ns && cpu_now >= st->last_cpu_ns)
                         ? cpu_now - st->last_cpu_ns : 0;
+        if (!exact_admission_open())
+            return 0;
 
         if (lightweight_mode) {
             /* Lightweight: accumulate in BPF map, no ringbuf */
             accum_add(st->last_event, duration);
         } else {
-            /* Full trace: emit to ringbuf.
-             * query_id comes from state_map cache, set by EXEC_START
-             * marker (not read from shared memory here — avoids race
-             * where st_query_id and st_activity are out of sync).
-             * flags carries the command-open gate at emission so the LIVE
-             * accumulator can classify we==0 intervals; the trace encoding
-             * has no flags column (offline consumers use CMD markers). */
+            u64 query_id = 0;
+            u16 cmd_open = 0;
+            resolve_exact_attr(pid, &query_id, &cmd_open);
+            /* Full trace: attribution comes from the generation-aware merge
+             * of BPF edges and the separate coherent window-start seed. */
             struct pgwt_trace_event evt = {
                 .timestamp_ns = now,
                 .pid = pid,
                 .old_event = st->last_event,
                 .new_event = new_event,
-                .flags = st->cmd_open ? PGWT_EVENT_FLAG_CMD_OPEN : 0,
+                .flags = cmd_open ? PGWT_EVENT_FLAG_CMD_OPEN : 0,
                 .duration_ns = duration,
-                .query_id = st->last_query_id,
+                .query_id = query_id,
                 .cpu_ns = cpu_delta,
             };
             emit_event(&evt);
@@ -403,14 +565,6 @@ int on_watchpoint(struct bpf_perf_event_data *ctx)
         if (st->on_cpu_ts == 0)
             st->on_cpu_ts = now;
 
-        /* Clear query_id when entering Client:ClientRead or any idle event.
-         * At this point no query is running — the backend is waiting for
-         * the next command. Without this, Client:ClientRead time between
-         * statements gets attributed to the previous query. */
-        if (new_event == PG_WAIT_CLIENT_READ ||
-            WE_CLASS(new_event) == PG_WAIT_ACTIVITY) {
-            st->last_query_id = 0;
-        }
     } else {
         /* First event for this PID — initialize via double-deref,
          * cache the resolved address for future fast-path reads */
@@ -434,6 +588,8 @@ int on_watchpoint(struct bpf_perf_event_data *ctx)
             .cpu_ns_total = 0,
             .last_cpu_ns = 0,
         };
+        if (!exact_admission_open())
+            return 0;
         /* CAP-1: a failed insert (map full) means this backend will never
          * record a single event — count it so the daemon can scream. */
         if (bpf_map_update_elem(&state_map, &pid, &new_st, BPF_ANY))
@@ -483,6 +639,15 @@ int on_fork(struct trace_event_raw_sched_process_fork *ctx)
     if (parent != target_postmaster_pid)
         return 0;
 
+    /* Enroll the child in the attribution maps before userspace receives the
+     * fork event. During an exact window this closes the fork->registry race:
+     * query/activity edges from a fast child can already be generation-tagged
+     * while its wait address and watchpoint are still being resolved. */
+    struct pgwt_pid_state child_seed = {};
+    if (bpf_map_update_elem(&state_map, &child, &child_seed, BPF_NOEXIST) &&
+        bpf_map_lookup_elem(&state_map, &child) == NULL)
+        count_map_fail(PGWT_BPF_FAIL_STATE_MAP);
+
     struct pgwt_lifecycle_event *ev;
     ev = bpf_ringbuf_reserve(&lifecycle_rb, sizeof(*ev), 0);
     if (ev) {
@@ -517,7 +682,7 @@ int on_exit(struct trace_event_raw_sched_process_template *ctx)
      * defect 2: every pgbench disconnect back-filled ~120 s of phantom CPU
      * into the trace. The sampled tier's data is the SAMPLES stream; there
      * is no exact interval to close. */
-    if (st->wp_live) {
+    if (st->wp_live && exact_admission_open()) {
         u64 duration = now - st->last_ts;
 
         /* S3: close the last interval with the exact on-CPU delta — a command
@@ -531,18 +696,22 @@ int on_exit(struct trace_event_raw_sched_process_template *ctx)
         if (lightweight_mode) {
             accum_add(st->last_event, duration);
         } else {
+            u64 query_id = 0;
+            u16 cmd_open = 0;
+            resolve_exact_attr(pid, &query_id, &cmd_open);
             /* Emit final trace event (exit sentinel) */
             struct pgwt_trace_event evt = {
                 .timestamp_ns = now,
                 .pid = pid,
                 .old_event = st->last_event,
                 .new_event = PGWT_EVENT_EXIT,
-                .flags = st->cmd_open ? PGWT_EVENT_FLAG_CMD_OPEN : 0,
+                .flags = cmd_open ? PGWT_EVENT_FLAG_CMD_OPEN : 0,
                 .duration_ns = duration,
-                .query_id = st->last_query_id,
+                .query_id = query_id,
                 .cpu_ns = cpu_delta,
             };
-            emit_event(&evt);
+            if (exact_admission_open())
+                emit_event(&evt);
         }
     }
 
@@ -566,23 +735,20 @@ int on_exit(struct trace_event_raw_sched_process_template *ctx)
 
 static __always_inline void emit_marker(u32 marker)
 {
-    if (lightweight_mode)
+    if (lightweight_mode || !exact_admission_open())
         return;
 
     u32 pid = bpf_get_current_pid_tgid() >> 32;
     u64 now = bpf_ktime_get_ns();
 
-    struct pgwt_pid_state *st = bpf_map_lookup_elem(&state_map, &pid);
     u64 qid = 0;
-
-    if (st) {
-        /* All markers use the current query_id from the uprobe.
-         * Don't clear on EXEC_END — events after EXEC_END (like WALSync
-         * during COMMIT) are still part of that query's execution.
-         * The uprobe on pgstat_report_query_id overwrites last_query_id
-         * when the next statement starts. */
-        qid = st->last_query_id;
-    }
+    u16 cmd_open = 0;
+    if (!bpf_map_lookup_elem(&state_map, &pid))
+        return;
+    resolve_exact_attr(pid, &qid, &cmd_open);
+    note_phase_edge(pid, marker, now);
+    if (!exact_admission_open())
+        return;
 
     struct pgwt_trace_event evt = {
         .timestamp_ns = now,
@@ -631,23 +797,29 @@ int BPF_USDT(on_plan_done)
 SEC("uprobe")
 int on_report_query_id(struct pt_regs *ctx)
 {
+    count_uprobe_fire(PGWT_UPROBE_FIRE_QUERY);
+    if (!exact_admission_open())
+        return 0;
     u64 query_id = PT_REGS_PARM1(ctx);
+    u32 pid = bpf_get_current_pid_tgid() >> 32;
+    struct pgwt_pid_state *st = bpf_map_lookup_elem(&state_map, &pid);
+    if (st) {
+        u64 now = bpf_ktime_get_ns();
+        note_query_edge(pid, query_id, now);
+        /* Retained only for state-map diagnostics/backward compatibility;
+         * exact consumers resolve from edge+seed maps. */
+        st->last_query_id = query_id;
+    }
 
     /* PostgreSQL calls pgstat_report_query_id(0) after each statement
      * to reset the query_id. We must honor it — otherwise events between
      * statements (like Client:ClientRead) get attributed to the previous
      * query, inflating its Client wait time. */
     if (query_id == 0) {
-        u32 pid = bpf_get_current_pid_tgid() >> 32;
-        struct pgwt_pid_state *st = bpf_map_lookup_elem(&state_map, &pid);
-        if (st) st->last_query_id = 0;
         return 0;
     }
-
-    u32 pid = bpf_get_current_pid_tgid() >> 32;
-    struct pgwt_pid_state *st = bpf_map_lookup_elem(&state_map, &pid);
-    if (st)
-        st->last_query_id = query_id;
+    if (!exact_admission_open())
+        return 0;
 
     /* Capture query text on first occurrence of this query_id.
      * Reads debug_query_string (global in postgres, always set before
@@ -703,12 +875,15 @@ int on_report_query_id(struct pt_regs *ctx)
  * same way — no step artifact at tier switches.
  *
  * The uprobe only UPDATES existing state_map entries (like the query-id
- * uprobes); entries are seeded by the scan/fork/preseed paths. Attached in
- * every non-lightweight mode. */
+ * uprobes); entries are seeded by the scan/fork/preseed paths. Stage 3 keeps
+ * it attached only for full/exact windows or the PG13/degraded fallback. */
 
 SEC("uprobe")
 int on_report_activity(struct pt_regs *ctx)
 {
+    count_uprobe_fire(PGWT_UPROBE_FIRE_ACTIVITY);
+    if (!exact_admission_open())
+        return 0;
     if (!bs_state_running)
         return 0;   /* gate unavailable for this PG version */
 
@@ -720,21 +895,30 @@ int on_report_activity(struct pt_regs *ctx)
 
     u16 open = (state == bs_state_running || state == bs_state_fastpath)
              ? 1 : 0;
-    if (st->cmd_open == open)
-        return 0;   /* no boundary crossed (e.g. RUNNING -> RUNNING) */
+    u64 old_query_id = 0;
+    u16 old_open = 0;
+    resolve_exact_attr(pid, &old_query_id, &old_open);
+    u64 now = bpf_ktime_get_ns();
+    note_cmd_edge(pid, open, now);
     st->cmd_open = open;
+    if (old_open == open)
+        return 0;   /* stamp the generation, but no boundary crossed */
 
     if (!lightweight_mode && st->wp_live) {
+        u64 query_id = 0;
+        u16 current_open = 0;
+        resolve_exact_attr(pid, &query_id, &current_open);
         u32 marker = open ? PGWT_MARKER_CMD_START : PGWT_MARKER_CMD_END;
         struct pgwt_trace_event evt = {
-            .timestamp_ns = bpf_ktime_get_ns(),
+            .timestamp_ns = now,
             .pid = pid,
             .old_event = marker,
             .new_event = marker,
             .duration_ns = 0,
-            .query_id = st->last_query_id,
+            .query_id = query_id,
         };
-        emit_event(&evt);
+        if (exact_admission_open())
+            emit_event(&evt);
     }
     return 0;
 }
@@ -761,6 +945,9 @@ int on_executor_start(struct pt_regs *ctx)
 {
     if (!pg13_query_attr)
         return 0;
+    count_uprobe_fire(PGWT_UPROBE_FIRE_QUERY);
+    if (!exact_admission_open())
+        return 0;
 
     u64 query_desc = PT_REGS_PARM1(ctx);
     if (!query_desc)
@@ -784,8 +971,12 @@ int on_executor_start(struct pt_regs *ctx)
 
     u32 pid = bpf_get_current_pid_tgid() >> 32;
     struct pgwt_pid_state *st = bpf_map_lookup_elem(&state_map, &pid);
-    if (st)
+    if (st) {
+        note_query_edge(pid, query_id, bpf_ktime_get_ns());
         st->last_query_id = query_id;
+    }
+    if (!exact_admission_open())
+        return 0;
 
     /* Capture query text on first occurrence of this query_id, from
      * queryDesc->sourceText. Emitted via lifecycle_rb (metadata, not trace

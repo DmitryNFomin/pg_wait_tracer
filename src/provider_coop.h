@@ -49,8 +49,8 @@
  *     `handle_event` → src/event_writer.c `pgwt_writer_*`). Backend identity
  *     (pid → query_id, session metadata) comes from the SHARED registry
  *     (src/backend.c), which the daemon keeps populated via the fork/exit
- *     tracepoints + query_id uprobe in every mode — the coop provider does
- *     NOT maintain its own backend table.
+ *     tracepoints and the active tier's attribution source — the coop provider
+ *     does NOT maintain its own backend table.
  *
  *  4. THE VTABLE. Implement all four entry points (src/provider.h):
  *       - start(d):  arm cooperative capture (open the shm ring / register

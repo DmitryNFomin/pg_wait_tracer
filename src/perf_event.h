@@ -21,6 +21,11 @@ int pgwt_open_watchpoint_disabled(pid_t pid, uint64_t addr, int bpf_prog_fd);
  * Returns 0 on success, -1 on error (errno set). */
 int pgwt_watchpoint_enable(int perf_fd);
 
+/* Disable without closing. De-escalation first disables every watchpoint,
+ * establishing a finite event boundary, then drains and flushes before the
+ * fds are finally detached. */
+int pgwt_watchpoint_disable(int perf_fd);
+
 /* Close a watchpoint fd (auto-detaches the hardware breakpoint). */
 void pgwt_close_watchpoint(int perf_fd);
 

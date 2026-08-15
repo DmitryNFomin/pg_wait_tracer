@@ -130,6 +130,19 @@ static cJSON *build_status(const struct pgwt_daemon *d)
      * it mirrors the fixed provider fidelity. */
     cJSON_AddStringToObject(root, "tier", daemon_tier_str(d));
     cJSON_AddBoolToObject(root, "escalation_supported", d->escalation.enabled);
+    cjson_add_uint64(root, "exact_probe_generation",
+                     d->escalation.generation);
+    cJSON_AddNumberToObject(root, "exact_probe_attached_mask",
+                            d->exact_probes.core.attached_mask);
+    cJSON_AddBoolToObject(root, "exact_probe_warmup_reconciled",
+                          d->exact_probes.sampled_warmup_reconciled);
+    cJSON_AddBoolToObject(root, "exact_cpu_active", d->exact_cpu_active);
+    cjson_add_uint64(root, "exact_query_uprobe_fires_total",
+                     pgwt_exact_uprobe_fire_count(
+                         (struct pgwt_daemon *)d, PGWT_UPROBE_FIRE_QUERY));
+    cjson_add_uint64(root, "exact_activity_uprobe_fires_total",
+                     pgwt_exact_uprobe_fire_count(
+                         (struct pgwt_daemon *)d, PGWT_UPROBE_FIRE_ACTIVITY));
     cJSON_AddNumberToObject(root, "escalation_seconds_remaining",
                             pgwt_escalation_remaining_s(d));
     cJSON_AddNumberToObject(root, "escalation_budget_remaining_s",
@@ -227,6 +240,22 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
                      ctr->sampled_attr_shadow_cmd_open_mismatch_total);
     cjson_add_uint64(root, "sampled_attr_shadow_query_id_mismatch_total",
                      ctr->sampled_attr_shadow_query_id_mismatch_total);
+    cjson_add_uint64(root, "exact_query_uprobe_fires_total",
+                     pgwt_exact_uprobe_fire_count(
+                         (struct pgwt_daemon *)d, PGWT_UPROBE_FIRE_QUERY));
+    cjson_add_uint64(root, "exact_activity_uprobe_fires_total",
+                     pgwt_exact_uprobe_fire_count(
+                         (struct pgwt_daemon *)d, PGWT_UPROBE_FIRE_ACTIVITY));
+    cJSON_AddNumberToObject(root, "exact_probe_attached_mask",
+                            d->exact_probes.core.attached_mask);
+    cJSON_AddBoolToObject(root, "exact_probe_warmup_reconciled",
+                          d->exact_probes.sampled_warmup_reconciled);
+    cJSON_AddBoolToObject(root, "exact_cpu_active", d->exact_cpu_active);
+    cjson_add_uint64(root, "exact_probe_generation",
+                     d->escalation.generation);
+    cJSON_AddNumberToObject(root, "exact_preseed_entries",
+                            pgwt_exact_seed_count((struct pgwt_daemon *)d,
+                                                  d->escalation.generation));
     cjson_add_uint64(root, "sample_read_failures_total",
                      pm.sample_read_failures_total);
     cJSON_AddNumberToObject(root, "sample_read_targets",

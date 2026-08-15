@@ -5,12 +5,10 @@
  * demand (manually via the control socket in A4; on anomaly in A5). This
  * module owns the escalation lifecycle:
  *
- *   - escalate(): attach watchpoints across the existing backend registry
- *     (addresses already resolved by the sampler), pre-seed the BPF state_map
- *     so in-progress waits aren't lost, start consuming event_ringbuf, and
- *     write a START marker into the trace. Skeleton + ringbuf are already
- *     loaded at daemon start, so this only runs the attach loop (~3
- *     syscalls/backend).
+ *   - escalate(): begin a generation, atomically attach the exact query and
+ *     activity probe bundle, coherently preseed command/query state, synthesize
+ *     command starts for straddlers, arm watchpoints across the existing
+ *     backend registry, and publish a START marker last.
  *   - bounded windows: every escalation carries a hard deadline (timerfd on
  *     the daemon epoll loop); on expiry watchpoints are detached even if the
  *     requester vanished.
@@ -22,11 +20,11 @@
  * risk gaps if escalation crashes); A3's exact-wins merge de-dupes the
  * overlap at read time.
  *
- * Only the FULL tier's watchpoints are toggled here; backend discovery
- * (fork/exit tracepoints + query_id uprobe) stays active in every tier so the
- * registry is always current — backends forked mid-escalation get watchpoints
- * via the normal fork->bootstrap->init path while escalated, and are simply
- * registered (no watchpoint) while de-escalated.
+ * Fork/exit tracepoints keep the registry current in every tier. On validated
+ * PG14-18 the query/activity bundle is detached while sampled and is owned by
+ * the exact generation; PG13/degraded attribution links remain pinned. A
+ * backend forked mid-escalation is generation-seeded before its watchpoint is
+ * armed via the normal fork->bootstrap->init path.
  */
 #ifndef PGWT_ESCALATION_H
 #define PGWT_ESCALATION_H
@@ -49,6 +47,11 @@ struct pgwt_esc_segment {
 struct pgwt_escalation {
     bool      enabled;            /* true only in --mode tiered */
     bool      active;             /* currently escalated (watchpoints armed) */
+    bool      admitting;          /* new backends may join the exact window */
+
+    uint64_t  generation;         /* current exact generation (0 = none) */
+    uint64_t  next_generation;    /* monotonically increasing, never reused */
+    uint64_t  attach_boundary_ns; /* generation boundary before link attach */
 
     int       timer_fd;          /* deadline timerfd on the daemon epoll; -1 */
     uint64_t  window_deadline_ns; /* monotonic deadline of the active window */

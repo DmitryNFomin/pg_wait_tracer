@@ -16,8 +16,8 @@ typedef uint64_t u64;
 /* Build version: the Makefile injects `git describe --tags --always --dirty`
  * as -DPGWT_BUILD_VERSION="..." so every binary reports exactly the commit it
  * was built from. The fallback covers direct compiles (unit tests build some
- * src/*.c without the top-level Makefile) — a shipped binary is always built
- * by make and never reports it. */
+ * individual source files without the top-level Makefile) — a shipped binary
+ * is always built by make and never reports it. */
 #ifndef PGWT_BUILD_VERSION
 #define PGWT_BUILD_VERSION   "unknown"
 #endif
@@ -84,6 +84,75 @@ struct pgwt_pid_state {
      * CPU between suppressed fires would be lost). 0 = feature off. */
     u64 last_cpu_ns;
 };
+
+/* Stage 3 tiered exact-probe state. Probe edges and escalation preseeds live
+ * in separate maps deliberately: userspace writes only pgwt_exact_seed, while
+ * BPF writes only pgwt_exact_attr. A probe edge stamped after the generation
+ * boundary therefore cannot be overwritten by a slower coherent snapshot. */
+struct pgwt_exact_config {
+    u64 generation;
+    u64 attach_boundary_ns;
+    u32 admitting;
+    u32 reserved;
+};
+
+struct pgwt_exact_seed {
+    u64 generation;
+    u64 snapshot_ts;
+    u64 query_id;
+    u16 cmd_open;
+    u16 reserved16;
+    u32 reserved32;
+};
+
+#define PGWT_EXACT_PHASE_PLAN  (1U << 0)
+#define PGWT_EXACT_PHASE_EXEC  (1U << 1)
+
+struct pgwt_exact_attr {
+    u64 query_generation;
+    u64 query_edge_ts;
+    u64 query_id;
+    u64 cmd_generation;
+    u64 cmd_edge_ts;
+    u64 phase_generation;
+    u64 plan_start_ts;
+    u64 exec_start_ts;
+    u16 cmd_open;
+    u16 phase_flags;
+    u32 reserved;
+};
+
+/* Shared userspace/BPF merge rule. The coherent seed supplies the generation
+ * boundary state; each BPF-owned field overrides it only when that field has
+ * a same-generation edge stamped at or after attach. Generation zero is the
+ * continuously attached PG13/degraded fallback and reads edges directly. */
+static inline void pgwt_exact_merge_attr(const struct pgwt_exact_config *cfg,
+                                         const struct pgwt_exact_attr *edge,
+                                         const struct pgwt_exact_seed *seed,
+                                         u64 *query_id, u16 *cmd_open)
+{
+    *query_id = 0;
+    *cmd_open = 0;
+    if (!cfg || cfg->generation == 0) {
+        if (edge) {
+            *query_id = edge->query_id;
+            *cmd_open = edge->cmd_open;
+        }
+        return;
+    }
+    if (seed && seed->generation == cfg->generation) {
+        *query_id = seed->query_id;
+        *cmd_open = seed->cmd_open;
+    }
+    if (!edge)
+        return;
+    if (edge->query_generation == cfg->generation &&
+        edge->query_edge_ts >= cfg->attach_boundary_ns)
+        *query_id = edge->query_id;
+    if (edge->cmd_generation == cfg->generation &&
+        edge->cmd_edge_ts >= cfg->attach_boundary_ns)
+        *cmd_open = edge->cmd_open;
+}
 
 /* ── Lifecycle Events (ring buffer) ───────────────────────── */
 
@@ -273,6 +342,14 @@ static inline int pgwt_classify_wei(uint32_t wei)
 #define PGWT_BPF_FAIL_STATE_MAP  0  /* state_map insert failed (map full) */
 #define PGWT_BPF_FAIL_SEEN_QIDS  1  /* seen_query_ids insert failed (full) */
 #define PGWT_BPF_FAIL_MAX        2
+
+/* Per-query trap counters. These are the Stage 3 overhead acceptance signal:
+ * both stay exactly zero in de-escalated sampled mode on a validated PG14-18
+ * layout, and advance only while the exact bundle is attached (or permanently
+ * on PG13/degraded fallback layouts). */
+#define PGWT_UPROBE_FIRE_QUERY     0
+#define PGWT_UPROBE_FIRE_ACTIVITY  1
+#define PGWT_UPROBE_FIRE_MAX       2
 
 /* ── BPF Accumulator (lightweight mode — no ringbuf) ───── */
 #define ACCUM_MAP_MAX_ENTRIES 1024

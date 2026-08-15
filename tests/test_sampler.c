@@ -582,6 +582,22 @@ static void test_qid_index(void)
     CHECK(pgwt_qid_index_lookup(e, 5, 300) == 33, "lookup middle");
     CHECK(pgwt_qid_index_lookup(e, 5, 301) == 0, "missing pid -> 0");
     CHECK(pgwt_qid_index_lookup(e, 0, 100) == 0, "empty index -> 0");
+
+    struct pgwt_exact_attr edge = {
+        .query_generation = 8,
+        .cmd_generation = 8,
+        .query_id = 123,
+        .cmd_open = 1,
+    };
+    CHECK(pgwt_exact_attr_shadow_comparable(&edge, 8),
+          "same-generation query/activity tuple is shadow-comparable");
+    edge.query_generation = 7;
+    CHECK(!pgwt_exact_attr_shadow_comparable(&edge, 8),
+          "stale query edge is excluded from shadow comparison");
+    edge.query_generation = 8;
+    edge.cmd_generation = 7;
+    CHECK(!pgwt_exact_attr_shadow_comparable(&edge, 8),
+          "stale activity edge is excluded from shadow comparison");
 }
 
 static void test_sampled_attr_source_gate(void)

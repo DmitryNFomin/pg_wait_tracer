@@ -1,10 +1,10 @@
 /* escalation.c — Tiered-mode escalation engine (Track A, D5)
  *
- * See escalation.h for the design. The engine flips the FULL tier's
- * watchpoints on (escalate) and off (deescalate) under a bounded, budgeted
- * window. The sampler is never stopped — it runs through the window so a
- * crash mid-escalation can't open a gap; A3's exact-wins merge removes the
- * overlap at read time.
+ * See escalation.h for the design. The engine owns the FULL tier's bounded,
+ * budgeted window: an atomic query/activity probe bundle plus watchpoints are
+ * attached on escalation and quiesced/detached on de-escalation. The sampler
+ * is never stopped — it runs through the window so a crash mid-escalation
+ * cannot open a gap; A3's exact-wins merge removes overlap at read time.
  */
 #include "escalation.h"
 #include "escalation_budget.h"
@@ -35,25 +35,52 @@ static uint64_t mono_ns(void)
     return (uint64_t)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
 }
 
+static void set_exact_cpu_active(struct pgwt_daemon *d, bool active)
+{
+    d->exact_cpu_active = active;
+    if (d->skel && d->skel->bss)
+        d->skel->bss->exact_cpu_active = active;
+}
+
 /* Write an escalation window marker into the trace (and summary). pid = 0 so
  * no analysis confuses it with a backend; duration_ns = 0 (markers carry no
  * wait time — exactly like the query markers), and the window length + reason
  * are packed into query_id. Skipped from wait accumulation by PGWT_IS_MARKER,
  * so it never distorts the views. */
-static void write_marker(struct pgwt_daemon *d, uint32_t marker_type,
-                         uint64_t window_ns, int reason)
+static void write_marker_at(struct pgwt_daemon *d, uint32_t marker_type,
+                            uint64_t timestamp_ns, uint64_t window_ns,
+                            int reason)
 {
     if (!d->event_writer)
         return;
     uint64_t window_s = window_ns / 1000000000ULL;
     struct pgwt_trace_event ev = {
-        .timestamp_ns = mono_ns(),
+        .timestamp_ns = timestamp_ns,
         .pid          = 0,
         .old_event    = marker_type,
         .new_event    = marker_type,
         .flags        = 0,
         .duration_ns  = 0,
         .query_id     = PGWT_ESC_PACK(window_s, reason),
+    };
+    pgwt_writer_push_event(d->event_writer, &ev);
+    if (d->summary_writer)
+        pgwt_summary_push_event(d->summary_writer, &ev);
+}
+
+static void write_pid_marker_at(struct pgwt_daemon *d, pid_t pid,
+                                uint32_t marker_type, uint64_t timestamp_ns,
+                                uint64_t query_id)
+{
+    if (!d->event_writer)
+        return;
+    struct pgwt_trace_event ev = {
+        .timestamp_ns = timestamp_ns,
+        .pid = (uint32_t)pid,
+        .old_event = marker_type,
+        .new_event = marker_type,
+        .duration_ns = 0,
+        .query_id = query_id,
     };
     pgwt_writer_push_event(d->event_writer, &ev);
     if (d->summary_writer)
@@ -115,13 +142,24 @@ static int attach_all(struct pgwt_daemon *d)
     return n;
 }
 
+/* Stop every producer first, but retain the fds until the ring is drained and
+ * all open intervals are closed at one common boundary. */
+static void disarm_all(struct pgwt_daemon *d)
+{
+    for (int i = 0; i < d->backends.count; i++) {
+        struct pgwt_backend *be = &d->backends.entries[i];
+        if (be->wp_fd >= 0)
+            pgwt_watchpoint_disable(be->wp_fd);
+        if (be->bootstrap_fd >= 0)
+            pgwt_watchpoint_disable(be->bootstrap_fd);
+    }
+}
+
 /* Detach all watchpoints (real + bootstrap) and RESET each backend's BPF
- * state_map entry to a query-id-only seed (last_event = 0, wait_event_addr
- * preserved). This clears the watchpoint-maintained open interval so the
- * de-escalated sampler reads no stale interval, while KEEPING the entry alive
- * so the query_id uprobe (which only updates existing entries) and the
- * sampler's pid->query_id join keep working after the window. The registry
- * entries themselves survive — the sampler keeps reading wp_addr. */
+ * state_map entry to a non-live seed (last_event = 0, wait_event_addr
+ * preserved). This clears the watchpoint-maintained open interval while
+ * keeping the entry ready for PG13/degraded fallback edges and the next exact
+ * generation. The registry entries survive for sampled PgBackendStatus reads. */
 static void detach_all(struct pgwt_daemon *d)
 {
     int state_fd = d->skel ? bpf_map__fd(d->skel->maps.state_map) : -1;
@@ -208,14 +246,18 @@ static void flush_open_intervals(struct pgwt_daemon *d, uint64_t now)
                 exact += now - st.on_cpu_ts;
             cpu_ns = (exact >= st.last_cpu_ns) ? exact - st.last_cpu_ns : 0;
         }
+        uint64_t query_id = 0;
+        uint16_t cmd_open = 0;
+        pgwt_exact_resolve_attr(d, be->pid, &query_id, &cmd_open,
+                                NULL, NULL, NULL);
         struct pgwt_trace_event ev = {
             .timestamp_ns = now,
             .pid          = (uint32_t)be->pid,
             .old_event    = we,     /* the interval that was open ends here */
             .new_event    = we,
-            .flags        = st.cmd_open ? PGWT_EVENT_FLAG_CMD_OPEN : 0,
+            .flags        = cmd_open ? PGWT_EVENT_FLAG_CMD_OPEN : 0,
             .duration_ns  = now - st.last_ts,
-            .query_id     = st.last_query_id,
+            .query_id     = query_id,
             .cpu_ns       = cpu_ns,
         };
         pgwt_writer_push_event(d->event_writer, &ev);
@@ -240,6 +282,55 @@ static void flush_open_intervals(struct pgwt_daemon *d, uint64_t now)
 void pgwt_flush_open_intervals(struct pgwt_daemon *d)
 {
     flush_open_intervals(d, mono_ns());
+}
+
+/* A command already open when the bundle attached has no uprobe START edge in
+ * this generation. Publish exactly one synthetic command boundary at the
+ * generation boundary using the coherent seed's real in-flight query id. Plan
+ * and execution phases deliberately get no synthetic starts: if they began
+ * before attach, their start is unknown/pre-window. */
+static void synthesize_command_starts(struct pgwt_daemon *d, uint64_t boundary)
+{
+    for (int i = 0; i < d->backends.count; i++) {
+        struct pgwt_backend *be = &d->backends.entries[i];
+        if (!be->is_alive || be->pid <= 0)
+            continue;
+        uint64_t qid = 0;
+        uint16_t cmd_open = 0;
+        if (pgwt_exact_resolve_attr(d, be->pid, &qid, &cmd_open,
+                                    NULL, NULL, NULL) == 0 && cmd_open)
+            write_pid_marker_at(d, be->pid, PGWT_MARKER_CMD_START,
+                                boundary, qid);
+    }
+}
+
+/* Close the command window and only those plan/exec phases whose real START
+ * edge belongs to this generation. A pre-attach phase may produce a real END
+ * edge, but is never given an invented START or synthetic duration. */
+static void synthesize_terminal_markers(struct pgwt_daemon *d,
+                                        uint64_t boundary)
+{
+    for (int i = 0; i < d->backends.count; i++) {
+        struct pgwt_backend *be = &d->backends.entries[i];
+        if (!be->is_alive || be->pid <= 0)
+            continue;
+        uint64_t qid = 0, plan_start = 0, exec_start = 0;
+        uint16_t cmd_open = 0, phases = 0;
+        if (pgwt_exact_resolve_attr(d, be->pid, &qid, &cmd_open, &phases,
+                                    &plan_start, &exec_start) != 0)
+            continue;
+        if (cmd_open)
+            write_pid_marker_at(d, be->pid, PGWT_MARKER_CMD_END,
+                                boundary, qid);
+        if ((phases & PGWT_EXACT_PHASE_PLAN) &&
+            plan_start >= d->escalation.attach_boundary_ns)
+            write_pid_marker_at(d, be->pid, PGWT_MARKER_PLAN_END,
+                                boundary, qid);
+        if ((phases & PGWT_EXACT_PHASE_EXEC) &&
+            exec_start >= d->escalation.attach_boundary_ns)
+            write_pid_marker_at(d, be->pid, PGWT_MARKER_EXEC_END,
+                                boundary, qid);
+    }
 }
 
 /* ── Public API ───────────────────────────────────────────────────────── */
@@ -350,24 +441,59 @@ int pgwt_escalate(struct pgwt_daemon *d, int duration_s, int reason,
         return 0;
     }
 
-    /* Fresh escalation: attach watchpoints across the registry, open a
-     * ledger segment, arm the (budget-clamped) deadline, and mark the trace. */
+    /* Fresh escalation, fail-closed ordering: generation boundary -> every
+     * exact link (atomic rollback) -> coherent per-backend seed -> synthetic
+     * straddling command START -> watchpoints -> publish the exact window. */
+    uint64_t generation = ++e->next_generation;
+    if (generation == 0)
+        generation = ++e->next_generation; /* 0 is baseline/inactive */
+    uint64_t boundary = mono_ns();
+    e->generation = generation;
+    e->attach_boundary_ns = boundary;
+    if (pgwt_exact_probe_acquire(d, generation, boundary) != 0) {
+        e->generation = 0;
+        e->attach_boundary_ns = 0;
+        e->denied_total++;
+        if (why)
+            *why = "exact probe bundle attach failed; escalation rolled back";
+        return -1;
+    }
+    /* Exact CPU accounting must be live before coherent preseed and before a
+     * backend can arm its watchpoint. The link is permanent; this BSS gate is
+     * the tier transition and avoids sampled state-map lookups per switch. */
+    set_exact_cpu_active(d, true);
+    if (pgwt_exact_seed_all(d, generation) != 0) {
+        set_exact_cpu_active(d, false);
+        pgwt_exact_probe_release(d);
+        pgwt_exact_seed_clear(d, generation);
+        e->generation = 0;
+        e->attach_boundary_ns = 0;
+        e->denied_total++;
+        if (why)
+            *why = "coherent exact preseed failed; escalation rolled back";
+        return -1;
+    }
+    synthesize_command_starts(d, boundary);
     int n = attach_all(d);
     e->active = true;
-    e->window_start_ns = now;
+    e->admitting = true;
+    e->window_start_ns = boundary;
     e->window_reason = reason;
     e->windows_total++;
 
-    pgwt_esc_ledger_open(e, now);   /* ESC-5: never opens an unbilled window */
+    pgwt_esc_ledger_open(e, boundary); /* ESC-5: no unbilled exact window */
 
-    arm_deadline(e, now + grant_ns);
-    write_marker(d, PGWT_MARKER_ESCALATE_START, grant_ns, reason);
+    arm_deadline(e, boundary + grant_ns);
+    /* Publish last, timestamped at the boundary so attach/preseed straddlers
+     * are inside exact-wins coverage. */
+    write_marker_at(d, PGWT_MARKER_ESCALATE_START, boundary, grant_ns, reason);
 
     int granted = (int)((grant_ns + 999999999ULL) / 1000000000ULL);
     if (d->verbose)
         fprintf(stderr,
                 "INFO: escalated to full fidelity for %ds (reason %d, "
-                "%d watchpoints attached)\n", granted, reason, n);
+                "%d watchpoints attached, generation %llu)\n", granted,
+                reason, n, (unsigned long long)generation);
 
     if (granted_s)
         *granted_s = granted;
@@ -380,9 +506,18 @@ void pgwt_deescalate(struct pgwt_daemon *d, int reason)
     if (!e->active)
         return;
 
+    /* Stop admitting new backends, disable every watchpoint, then close BPF
+     * exact admission while the bundle remains attached. The config gate is
+     * re-checked immediately before probe publication, so the following drain
+     * has a finite producer boundary even though link release happens later. */
+    e->admitting = false;
+    disarm_all(d);
+    if (pgwt_exact_probe_quiesce(d) != 0)
+        fprintf(stderr, "WARN: could not quiesce exact probe generation %llu\n",
+                (unsigned long long)e->generation);
     uint64_t now = mono_ns();
 
-    /* Drain any final transitions captured before tearing down. */
+    /* Drain every transition captured before the boundary. */
     if (d->event_rb)
         ring_buffer__consume(d->event_rb);
 
@@ -392,6 +527,14 @@ void pgwt_deescalate(struct pgwt_daemon *d, int reason)
      * portion), not dropped into an end-of-window hole. */
     flush_open_intervals(d, now);
 
+    /* Keep sched_switch accounting live until every open interval has read
+     * its final CPU accumulator value at the de-escalation boundary. */
+    set_exact_cpu_active(d, false);
+
+    /* Close command and post-attach phase windows at that same boundary. */
+    synthesize_terminal_markers(d, now);
+
+    /* Detach the disabled watchpoints only after drain + interval closure. */
     detach_all(d);
     e->active = false;
 
@@ -404,7 +547,16 @@ void pgwt_deescalate(struct pgwt_daemon *d, int reason)
         timerfd_settime(e->timer_fd, 0, &its, NULL);
 
     uint64_t elapsed = now - e->window_start_ns;
-    write_marker(d, PGWT_MARKER_ESCALATE_END, elapsed, reason);
+
+    /* The last exact consumer releases transient links; pinned PG13/degraded
+     * attribution links survive. Clear the generation seed after detach. */
+    uint64_t generation = e->generation;
+    pgwt_exact_probe_release(d);
+    pgwt_exact_seed_clear(d, generation);
+    e->generation = 0;
+    e->attach_boundary_ns = 0;
+
+    write_marker_at(d, PGWT_MARKER_ESCALATE_END, now, elapsed, reason);
 
     if (d->verbose)
         fprintf(stderr,
