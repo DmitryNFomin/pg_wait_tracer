@@ -2532,8 +2532,8 @@ static void handle_top_queries(struct pgwt_server *srv, struct pgwt_request *req
         else if (have_context == 0)
             qt_entry = qt_map_lookup_entry(srv, 0, 0,
                                            res.rows[i].query_id);
-        if (qt_entry && qt_entry->text)
-            cJSON_AddStringToObject(r, "text", qt_entry->text);
+        cJSON_AddStringToObject(r, "text",
+                                qt_entry && qt_entry->text ? qt_entry->text : "");
         bool synthetic_quality = qt_entry && qt_entry->source_priority == 2;
         for (int e = 0; !synthetic_quality && all_events && e < ecount; e++)
             if (all_events[e].query_id == res.rows[i].query_id &&

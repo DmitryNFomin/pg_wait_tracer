@@ -80,17 +80,17 @@ def main():
             first = srv.query("top_queries")
             t.check(row_by_qid(first, 100).get("text") == "select $1",
                     "same-context pgss text resolves")
-            t.check("text" not in row_by_qid(first, 200),
+            t.check(row_by_qid(first, 200).get("text") == "",
                     "known-context miss never falls back to another context")
             synth = row_by_qid(first, 300)
             t.check(synth.get("text") == "SELECT ?" and
                     synth.get("attribution_quality") == "pg13-synth-v1",
                     "synthetic source/quality is observable")
-            t.check("text" not in row_by_qid(first, 400),
+            t.check(row_by_qid(first, 400).get("text") == "",
                     "unknown contributor makes a mixed row unaddressable")
-            t.check("text" not in row_by_qid(first, 500),
+            t.check(row_by_qid(first, 500).get("text") == "",
                     "missing live backend context leaves text unavailable")
-            t.check("text" not in row_by_qid(first, 600),
+            t.check(row_by_qid(first, 600).get("text") == "",
                     "conflicting reused-PID contexts fail closed")
             variants = srv.query("variants")
             variant_rows = variants.get("exec", {}).get("variants", [])
@@ -129,7 +129,7 @@ def main():
             t.check(row_by_qid(second, 500).get("text") == "select $1",
                     "long-lived server reloads backend context with query text")
             source_only = row_by_qid(second, 501)
-            t.check("text" not in source_only and
+            t.check(source_only.get("text") == "" and
                     source_only.get("attribution_quality") == "pg13-synth-v1",
                     "source-only sidecar preserves durable synthetic quality")
     finally:
