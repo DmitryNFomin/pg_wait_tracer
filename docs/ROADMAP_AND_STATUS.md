@@ -110,8 +110,11 @@
 > permission limits, eviction, disabled IDs, and retry exhaustion are ordinary
 > text-unavailable outcomes. Sidecar precedence is context-aware and
 > `full/raw > PG13 synthetic > pgss normalized`, so sampled text never consumes
-> the exact first-seen slot. Stage 5 (permanent sampled-overhead A/B CI gate)
-> remains. Stage 2 deliberately
+> the exact first-seen slot. Stage 5 is implemented as the permanent paired
+> sampled/no-tracer CI gate, with standard RO/RW plus a mandatory 256-shape
+> workload, a noise-derived 15% catastrophic-regression boundary, adaptive
+> 14-pair confirmation, and timing-independent probe/resolver/PG13 guards; see
+> `docs/SAMPLED_OVERHEAD_GATE.md`. Stage 2 deliberately
 > defines idle attribution as `query_id=0`:
 > `cmd_open` is true only for `STATE_RUNNING`/`STATE_FASTPATH`, and only an open
 > command exposes `st_query_id`. This differs from the old state-map path's
@@ -125,8 +128,9 @@
 > firing counts **0/0** and attached mask 0. Negative overhead is benchmark
 > noise, not a claimed speedup. PG13's pinned fallback probes were separately
 > confirmed still firing before Stage 4. Stage 4's PG13 and reconfirmation
-> measurements are recorded with its implementation PR. A permanent Stage 5
-> A/B CI gate still remains.
+> measurements are recorded with its implementation PR. Stage 5's permanent
+> A/B CI gate and 2026-08-15 noise characterization are recorded in
+> `docs/SAMPLED_OVERHEAD_GATE.md`.
 
 **Real feature gaps (defined, never built):**
 - **PostgreSQL 14 / 15 / 16** — only PG13 shipped; README says "14-16 not yet".

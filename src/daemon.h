@@ -62,6 +62,8 @@ struct pgwt_counters {
     uint64_t sampled_text_evicted_total;
     uint64_t sampled_text_error_total;
     uint64_t sampled_text_retry_exhausted_total;
+    /* Actual pg_stat_statements(true) lookup scans. */
+    uint64_t sampled_text_pgss_scans_total;
 
     /* Capture hardening (T4). All of these mean "something the operator
      * must know about is happening" — each is paired with a loud log. */

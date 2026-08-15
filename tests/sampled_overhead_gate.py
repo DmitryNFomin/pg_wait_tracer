@@ -14,7 +14,6 @@ Use --characterize to report data without applying the timing threshold.
 """
 
 import argparse
-import contextlib
 import fcntl
 import json
 import math
@@ -161,7 +160,13 @@ def workload_argv(args, workload, scripts):
 
 
 def reset_pgss(args):
-    psql(args, "SELECT pg_stat_statements_reset()", database=args.database)
+    # Three-argument form is available on every supported PG13+ version and
+    # scopes the reset to this invocation's database.  A zero-argument reset
+    # would erase statistics for unrelated databases on a shared box.
+    psql(args, "SELECT pg_stat_statements_reset("
+          "0, (SELECT oid FROM pg_database "
+          "WHERE datname = current_database()), 0)",
+          database=args.database)
 
 
 def run_pgbench(args, workload, scripts, duration, *, warmup=False):
@@ -217,6 +222,8 @@ def measured_run(args, workload, scripts, sampled):
         return tps, metrics, shapes
     finally:
         stderr = stop_tracer(proc, trace_dir)
+        if metrics is not None:
+            metrics["tracer_stderr_tail"] = stderr[-4000:]
         if proc is not None and proc.returncode not in (0, -15):
             raise GateError(f"tracer failed ({proc.returncode}): {stderr[-2000:]}")
 
@@ -256,6 +263,19 @@ def structural_errors(args, workload, metrics, shapes):
     validation = metrics.get("pgbackend_layout_validation")
     if validation != "validated":
         errors.append(f"layout is {validation!r}, expected 'validated'")
+    if int(metrics.get("pg_pid", -1)) != args.pid:
+        errors.append(f"tracer reports postmaster {metrics.get('pg_pid')}, "
+                      f"expected {args.pid}")
+    if metrics.get("mode") != "sampled" or metrics.get("tier") != "sampled":
+        errors.append(f"tracer is not pure sampled mode/tier: "
+                      f"{metrics.get('mode')}/{metrics.get('tier')}")
+    if metrics.get("sampler_healthy") is not True:
+        errors.append("sampled provider reports unhealthy reads")
+    if metrics.get("sampled_attr_source") != "pgbackend_status":
+        errors.append(f"sampled attribution source is "
+                      f"{metrics.get('sampled_attr_source')!r}")
+    if int(metrics.get("samples_total", 0)) <= 0:
+        errors.append("sampled provider produced zero samples")
     qfires = int(metrics.get("exact_query_uprobe_fires_total", -1))
     afires = int(metrics.get("exact_activity_uprobe_fires_total", -1))
     mask = int(metrics.get("exact_probe_attached_mask", -1))
@@ -266,14 +286,58 @@ def structural_errors(args, workload, metrics, shapes):
         if shapes < args.min_distinct_shapes:
             errors.append(f"only {shapes} distinct query shapes; "
                           f"need >= {args.min_distinct_shapes}")
-        if "sampled_text_pgss_scans_total" in metrics:
+        required = ("sampled_text_pgss_scans_total",
+                    "sampled_text_resolved_total")
+        missing = [name for name in required if name not in metrics]
+        if missing:
+            errors.append(f"missing mandatory resolver metrics: {missing}")
+        else:
             scans = int(metrics["sampled_text_pgss_scans_total"])
+            resolved = int(metrics["sampled_text_resolved_total"])
             uptime = float(metrics.get("uptime_s", 0))
             allowed = math.ceil(uptime * args.max_pgss_scans_per_sec) + 1
+            if scans <= 0 or resolved <= 0:
+                errors.append(f"pgss resolver was not exercised: "
+                              f"scans={scans} resolved={resolved}")
             if scans > allowed:
                 errors.append(f"pgss scan rate unbounded: {scans} scans in "
                               f"{uptime:.2f}s (allowed {allowed})")
+    stderr = metrics.get("tracer_stderr_tail", "")
+    hooks = {
+        "PGWT_TEST_SAMPLED_UPROBES": "restoring always-on sampled attribution traps",
+        "PGWT_TEST_PGSS_UNTHROTTLED": "restoring pre-throttle 32-key pgss scans",
+    }
+    enabled = {item.partition("=")[0] for item in args.tracer_env}
+    for name, marker in hooks.items():
+        if name in enabled and marker not in stderr:
+            errors.append(f"injected hook {name} did not report activation")
     return errors
+
+
+def run_pair(args, workload, scripts, rep):
+    order = (False, True) if rep % 2 else (True, False)
+    values = {}
+    sampled_metrics = None
+    shapes = 0
+    for sampled in order:
+        tps, metrics, observed_shapes = measured_run(
+            args, workload, scripts, sampled)
+        values[sampled] = tps
+        if sampled:
+            sampled_metrics = metrics
+            shapes = observed_shapes
+    overhead = 100.0 * (1.0 - values[True] / values[False])
+    pair = {
+        "pair": rep,
+        "order": "AB" if order[0] is False else "BA",
+        "baseline_tps": values[False],
+        "sampled_tps": values[True],
+        "overhead_pct": overhead,
+        "distinct_shapes": shapes,
+        "metrics": sampled_metrics,
+    }
+    errors = structural_errors(args, workload, sampled_metrics, shapes)
+    return pair, errors
 
 
 def setup_database(args):
@@ -295,9 +359,10 @@ def setup_database(args):
     exists = psql(args, "SELECT 1 FROM pg_database WHERE datname = "
                   + "'" + args.database.replace("'", "''") + "'")
     if exists:
-        psql(args, f"DROP DATABASE {quote_ident(args.database)} WITH (FORCE)",
-             tuples=False)
+        raise GateError(f"refusing to replace pre-existing database "
+                        f"{args.database!r}")
     psql(args, f"CREATE DATABASE {quote_ident(args.database)}", tuples=False)
+    args.database_created = True
     psql(args, "CREATE EXTENSION pg_stat_statements", database=args.database,
          tuples=False)
     run([args.pgbench, "-i", "-q", "-s", str(args.scale), "-h", args.host,
@@ -307,9 +372,8 @@ def setup_database(args):
 
 
 def drop_database(args):
-    with contextlib.suppress(Exception):
-        psql(args, f"DROP DATABASE {quote_ident(args.database)} WITH (FORCE)",
-             tuples=False)
+    psql(args, f"DROP DATABASE {quote_ident(args.database)} WITH (FORCE)",
+         tuples=False)
 
 
 def main():
@@ -319,19 +383,25 @@ def main():
     parser.add_argument("--port", type=int, default=5432)
     parser.add_argument("--host", default="/var/run/postgresql")
     parser.add_argument("--user", default="postgres")
-    parser.add_argument("--database", default="pgwt_sampled_overhead_gate")
+    parser.add_argument("--database",
+                        help="new dedicated database name (default: run-unique)")
     parser.add_argument("--psql", default="psql")
     parser.add_argument("--pgbench", default="pgbench")
     parser.add_argument("--reps", type=int, default=7)
+    parser.add_argument("--confirm-reps", type=int, default=7,
+                        help="extra pairs after a candidate hard failure")
     parser.add_argument("--duration", type=int, default=10)
     parser.add_argument("--warmup", type=int, default=2)
     parser.add_argument("--clients", type=int, default=4)
     parser.add_argument("--jobs", type=int, default=4)
     parser.add_argument("--scale", type=int, default=10)
     parser.add_argument("--high-cardinality-shapes", type=int, default=256)
-    parser.add_argument("--min-distinct-shapes", type=int, default=128)
-    parser.add_argument("--max-overhead-pct", type=float, default=15.0)
-    parser.add_argument("--warn-overhead-pct", type=float, default=8.0)
+    parser.add_argument("--min-distinct-shapes", type=int, default=0,
+                        help="required observed shapes (default: 90%% of corpus)")
+    parser.add_argument("--max-overhead-pct", type=float, default=15.0,
+                        help="hard-fail paired-median TPS loss")
+    parser.add_argument("--warn-overhead-pct", type=float, default=10.0,
+                        help="nonblocking paired-median warning band")
     parser.add_argument("--max-pgss-scans-per-sec", type=float, default=1.0)
     parser.add_argument("--workloads", nargs="+", choices=DEFAULT_WORKLOADS,
                         default=list(DEFAULT_WORKLOADS))
@@ -341,12 +411,25 @@ def main():
     parser.add_argument("--tracer-env", action="append", default=[])
     args = parser.parse_args()
 
+    if args.database is None:
+        args.database = f"pgwt_sampled_overhead_{args.pid}_{os.getpid()}"
+    args.database_created = False
+    if args.min_distinct_shapes == 0:
+        args.min_distinct_shapes = math.ceil(
+            args.high_cardinality_shapes * 0.9)
+
     if os.geteuid() != 0:
         raise GateError("must run as root")
     if not TRACER.is_file() or not os.access(TRACER, os.X_OK):
         raise GateError(f"build first: {TRACER} is not executable")
-    if args.reps < 3 or args.duration < 1 or args.warmup < 0:
-        raise GateError("need >=3 reps, positive duration, nonnegative warmup")
+    if (args.reps < 3 or args.confirm_reps < 0 or args.duration < 1 or
+            args.warmup < 0):
+        raise GateError("need >=3 reps, nonnegative confirmation/warmup, "
+                        "and positive duration")
+    if (args.warn_overhead_pct >= args.max_overhead_pct or
+            args.max_pgss_scans_per_sec <= 0):
+        raise GateError("warning threshold must be below the hard threshold "
+                        "and the pgss scan-rate limit must be positive")
 
     lock_path = f"/tmp/pgwt_sampled_overhead_gate_{args.port}.lock"
     with open(lock_path, "w", encoding="utf-8") as lock:
@@ -358,63 +441,90 @@ def main():
         workdir = Path(tempfile.mkdtemp(prefix="pgwt_overhead_workload_"))
         scripts = high_cardinality_scripts(
             workdir, args.high_cardinality_shapes)
-        report = {"config": vars(args), "workloads": {},
-                  "structural_failures": []}
+        report = {"config": dict(vars(args)), "workloads": {},
+                  "structural_failures": [], "timing_failures": [],
+                  "timing_warnings": []}
         failed = False
         try:
             version = setup_database(args)
             report["postgres_major"] = version
             print(f"sampled-overhead: PG{version} port={args.port} "
-                  f"pairs={args.reps} duration={args.duration}s "
+                  f"pairs={args.reps}+{args.confirm_reps}-on-fail "
+                  f"duration={args.duration}s "
                   f"clients/jobs={args.clients}/{args.jobs}")
             for workload in args.workloads:
                 pairs = []
                 for rep in range(1, args.reps + 1):
-                    order = (False, True) if rep % 2 else (True, False)
-                    values = {}
-                    rep_metrics = None
-                    shapes = 0
-                    for sampled in order:
-                        tps, metrics, observed_shapes = measured_run(
-                            args, workload, scripts, sampled)
-                        values[sampled] = tps
-                        if sampled:
-                            rep_metrics = metrics
-                            shapes = observed_shapes
-                    overhead = 100.0 * (1.0 - values[True] / values[False])
-                    structural = structural_errors(
-                        args, workload, rep_metrics, shapes)
+                    pair, structural = run_pair(
+                        args, workload, scripts, rep)
                     report["structural_failures"] += [
                         f"{workload} pair {rep}: {error}" for error in structural]
                     failed |= bool(structural)
-                    pairs.append({
-                        "pair": rep,
-                        "order": "AB" if order[0] is False else "BA",
-                        "baseline_tps": values[False],
-                        "sampled_tps": values[True],
-                        "overhead_pct": overhead,
-                        "distinct_shapes": shapes,
-                        "metrics": rep_metrics,
-                    })
+                    pairs.append(pair)
                     print(f"  {workload:16s} pair={rep} "
-                          f"order={pairs[-1]['order']} overhead={overhead:+.2f}%")
-                stats = summarize([pair["overhead_pct"] for pair in pairs])
-                report["workloads"][workload] = {"pairs": pairs, **stats}
+                          f"order={pair['order']} "
+                          f"overhead={pair['overhead_pct']:+.2f}%")
+                primary_stats = summarize(
+                    [pair["overhead_pct"] for pair in pairs])
+                confirmation_triggered = (
+                    not args.characterize and args.confirm_reps > 0 and
+                    primary_stats["median_pct"] >= args.max_overhead_pct)
+                if confirmation_triggered:
+                    print(f"  {workload:16s} candidate hard failure "
+                          f"({primary_stats['median_pct']:+.2f}%); "
+                          f"running {args.confirm_reps} confirmation pairs")
+                    first = args.reps + 1
+                    for rep in range(first, first + args.confirm_reps):
+                        pair, structural = run_pair(
+                            args, workload, scripts, rep)
+                        report["structural_failures"] += [
+                            f"{workload} pair {rep}: {error}"
+                            for error in structural]
+                        failed |= bool(structural)
+                        pairs.append(pair)
+                        print(f"  {workload:16s} pair={rep} "
+                              f"order={pair['order']} "
+                              f"overhead={pair['overhead_pct']:+.2f}%")
+                stats = summarize(
+                    [pair["overhead_pct"] for pair in pairs])
+                report["workloads"][workload] = {
+                    "pairs": pairs,
+                    "primary_reps": args.reps,
+                    "confirmation_reps_run": len(pairs) - args.reps,
+                    "confirmation_triggered": confirmation_triggered,
+                    "primary_stats": primary_stats,
+                    **stats,
+                }
                 verdict = "PASS"
                 if stats["median_pct"] >= args.max_overhead_pct:
                     verdict = "FAIL"
+                    report["timing_failures"].append(
+                        f"{workload}: median {stats['median_pct']:.2f}% >= "
+                        f"{args.max_overhead_pct:.2f}%")
                     if not args.characterize:
                         failed = True
                 elif stats["median_pct"] >= args.warn_overhead_pct:
                     verdict = "WARN"
+                    report["timing_warnings"].append(
+                        f"{workload}: median {stats['median_pct']:.2f}% >= "
+                        f"{args.warn_overhead_pct:.2f}%")
                 print(f"  {workload:16s} median={stats['median_pct']:+.2f}% "
                       f"IQR={stats['iqr_pct']:.2f}pp "
                       f"range=[{stats['min_pct']:+.2f},{stats['max_pct']:+.2f}] "
                       f"{verdict if not args.characterize else 'CHARACTERIZE'}")
         finally:
-            if not args.keep_database:
-                drop_database(args)
-            shutil.rmtree(workdir, ignore_errors=True)
+            active_error = sys.exc_info()[0] is not None
+            try:
+                if args.database_created and not args.keep_database:
+                    drop_database(args)
+            except Exception as cleanup_error:
+                if active_error:
+                    print(f"sampled-overhead: cleanup also failed: "
+                          f"{cleanup_error}", file=sys.stderr)
+                else:
+                    raise
+            finally:
+                shutil.rmtree(workdir, ignore_errors=True)
 
         report["verdict"] = "fail" if failed else "pass"
         if args.output_json:
@@ -423,6 +533,10 @@ def main():
                 encoding="utf-8")
         for error in report["structural_failures"]:
             print(f"  STRUCTURAL FAIL: {error}")
+        for warning in report["timing_warnings"]:
+            print(f"  TIMING WARN: {warning}")
+            if os.environ.get("GITHUB_ACTIONS"):
+                print(f"::warning title=Sampled overhead::{warning}")
         if failed:
             print("sampled-overhead: FAIL")
             return 1

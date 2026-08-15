@@ -80,12 +80,17 @@ static void test_policy(void)
     degraded13.validation = PGWT_PGBS_VALIDATION_DEGRADED;
     struct PgBackendStatusLayout missing_anchor13 = valid13;
     missing_anchor13.status_anchor = 0;
-    CHECK(pgwt_exact_probe_startup_mask(PGWT_MODE_SAMPLED, 17, &valid,
-                                       false, false) == 0,
-          "validated PG17 sampled has zero exact links");
-    CHECK(pgwt_exact_probe_startup_mask(PGWT_MODE_TIERED, 17, &valid,
-                                       false, false) == 0,
-          "validated PG17 tiered baseline has zero exact links");
+    for (int major = 14; major <= 18; major++) {
+        struct PgBackendStatusLayout version_valid = validated_layout(major);
+        CHECK(pgwt_exact_probe_startup_mask(
+                  PGWT_MODE_SAMPLED, major, &version_valid,
+                  false, false) == 0,
+              "validated PG14-18 sampled has zero exact links");
+        CHECK(pgwt_exact_probe_startup_mask(
+                  PGWT_MODE_TIERED, major, &version_valid,
+                  false, false) == 0,
+              "validated PG14-18 tiered baseline has zero exact links");
+    }
     CHECK(pgwt_exact_probe_startup_mask(PGWT_MODE_SAMPLED, 17, &degraded,
                                        false, false) ==
               PGWT_EXACT_PROBE_ATTR_MASK,
@@ -93,6 +98,9 @@ static void test_policy(void)
     CHECK(pgwt_exact_probe_startup_mask(PGWT_MODE_TIERED, 13, &valid13,
                                        false, false) == 0,
           "validated PG13 activity-text path has zero sampled exact links");
+    CHECK(pgwt_exact_probe_startup_mask(PGWT_MODE_SAMPLED, 13, &valid13,
+                                       false, false) == 0,
+          "validated PG13 sampled path has zero exact links");
     CHECK(pgwt_exact_probe_startup_mask(PGWT_MODE_TIERED, 13, &degraded13,
                                        false, false) ==
               PGWT_EXACT_PROBE_ATTR_MASK,

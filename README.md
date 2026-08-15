@@ -1226,6 +1226,10 @@ sudo tests/run_all.sh --pg-version 18
 | **Web UI** | `test_web_ui.py` | Python + playwright + websockets | 108 checks: tabs, tables, sorting, drill-down, breadcrumbs, Sankey transitions, concurrency overlay, auto-refresh, reconnection |
 | **Performance** | `bench_server.py` + `gen_bench_traces` | `pgwt-server` | Compute throughput: 10.8M events/sec on 10M event trace |
 
+The blocking sampled-overhead A/B gate, its shared-runner noise data, and the
+dedicated-box precision profile are documented in
+[`docs/SAMPLED_OVERHEAD_GATE.md`](docs/SAMPLED_OVERHEAD_GATE.md).
+
 ### Running individual layers
 
 ```bash

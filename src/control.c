@@ -258,6 +258,9 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
     cjson_add_uint64(root, "sampled_text_retry_exhausted_total",
                      __atomic_load_n(&ctr->sampled_text_retry_exhausted_total,
                                      __ATOMIC_RELAXED));
+    cjson_add_uint64(root, "sampled_text_pgss_scans_total",
+                     __atomic_load_n(&ctr->sampled_text_pgss_scans_total,
+                                     __ATOMIC_RELAXED));
     cjson_add_uint64(root, "exact_query_uprobe_fires_total",
                      pgwt_exact_uprobe_fire_count(
                          (struct pgwt_daemon *)d, PGWT_UPROBE_FIRE_QUERY));

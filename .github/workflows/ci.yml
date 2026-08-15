@@ -105,10 +105,10 @@ jobs:
 
   sampled-overhead:
     # Stage 5: timing on a shared runner is deliberately coarse.  The paired
-    # median catches the historical 20-30% trap/scan regressions; deterministic
-    # lifecycle/resolver tests retain the sub-1% implementation invariants.
-    # During threshold characterization this reports but does not timing-fail.
-    name: sampled-overhead (PG 17, characterize)
+    # median catches the historical 20-30% trap/scan regressions. A candidate
+    # hard failure gets seven more pairs so the final 14 are AB/BA-balanced.
+    # Deterministic lifecycle/resolver tests retain implementation invariants.
+    name: sampled-overhead (PG 17)
     runs-on: ubuntu-latest
     timeout-minutes: 35
     steps:
@@ -166,21 +166,32 @@ jobs:
       - name: Build tracer
         run: make
 
-      - name: Characterize paired sampled overhead
+      - name: Run sampled-overhead structural unit gates
+        run: |
+          make -C tests test_exact_probe test_pgss_resolver test_query_text
+          tests/test_exact_probe
+          tests/test_pgss_resolver
+          tests/test_query_text
+
+      - name: Gate paired sampled overhead
         run: |
           PM_PID=$(sudo head -1 /var/lib/postgresql/17/main/postmaster.pid)
           sudo env "PATH=/usr/lib/postgresql/17/bin:$PATH" \
             "BPFTOOL=$BPFTOOL" \
             python3 tests/sampled_overhead_gate.py \
               --pid "$PM_PID" --pg-version 17 --port 5432 \
-              --reps 7 --duration 10 --warmup 2 --characterize \
+              --reps 7 --confirm-reps 7 --duration 10 --warmup 2 \
+              --clients 4 --jobs 4 --scale 10 \
+              --high-cardinality-shapes 256 --min-distinct-shapes 231 \
+              --warn-overhead-pct 10 --max-overhead-pct 15 \
+              --max-pgss-scans-per-sec 1 \
               --output-json sampled-overhead.json
 
-      - name: Upload characterization data
+      - name: Upload sampled-overhead data
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: sampled-overhead-characterization
+          name: sampled-overhead
           path: sampled-overhead.json
           if-no-files-found: warn
 
