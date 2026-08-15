@@ -67,7 +67,9 @@ int main(void)
               PGWT_PGSS_MISS_EVICTED,
           "missing rows retry before terminal eviction/exhaustion");
     CHECK(PGWT_PGSS_REQUEUE_COOLDOWN_MS > 0 &&
-          PGWT_PGSS_QUEUE_PROBES < 4096,
+          PGWT_PGSS_QUEUE_PROBES >= PGWT_PGSS_BATCH_MAX &&
+          PGWT_PGSS_QUEUE_PROBES < QT_HT_SIZE &&
+          PGWT_PGSS_SCAN_MIN_INTERVAL_MS < PGWT_PGSS_BATCH_INTERVAL_MS,
           "exhausted keys are eligible for later completion retry and enqueue work is bounded");
 
 #ifdef PGWT_TEST
@@ -108,8 +110,8 @@ int main(void)
     CHECK(pgwt_pgss_test_claim_batch(resolver, 10000, &next_due) == 1,
           "first due resolver batch is admitted");
     CHECK(pgwt_pgss_test_claim_batch(resolver, 10001, &next_due) == 0 &&
-          next_due == 10000 + PGWT_PGSS_BATCH_INTERVAL_MS,
-          "successful drain gates the next batch at the minimum interval");
+          next_due == 10000 + PGWT_PGSS_SCAN_MIN_INTERVAL_MS,
+          "sparse drain uses the scan-frequency floor, not the full interval");
     CHECK(pgwt_pgss_test_cooldown(resolver, &qa, false) == 0,
           "retry-exhausted key enters cooldown");
     pgwt_pgss_resolver_queue(resolver, &qa);
@@ -120,6 +122,74 @@ int main(void)
     pgwt_pgss_resolver_queue(resolver, &qb);
     CHECK(daemon->counters.sampled_text_pending == 1,
           "later sampled sighting requeues an exhausted long statement");
+    pgwt_pgss_resolver_stop(resolver);
+
+    memset(&daemon->counters, 0, sizeof(daemon->counters));
+    resolver = pgwt_pgss_test_create(daemon, &qt);
+    for (uint64_t qid = 1; qid <= 300; qid++) {
+        struct pgwt_query_text_key key = {
+            .databaseid = 100, .userid = 10, .query_id = 100000 + qid,
+        };
+        pgwt_pgss_resolver_queue(resolver, &key);
+    }
+    for (uint32_t databaseid = 200; databaseid <= 300; databaseid += 100) {
+        for (uint64_t qid = 1; qid <= 2; qid++) {
+            struct pgwt_query_text_key key = {
+                .databaseid = databaseid, .userid = 10,
+                .query_id = 200000 + databaseid + qid,
+            };
+            pgwt_pgss_resolver_queue(resolver, &key);
+        }
+    }
+    uint32_t batch_databaseid = 0;
+    CHECK(pgwt_pgss_test_take_batch(resolver, 30000, &next_due,
+                                    &batch_databaseid) ==
+              PGWT_PGSS_BATCH_MAX && batch_databaseid == 100,
+          "first tenant takes one full 256-key batch");
+    CHECK(pgwt_pgss_test_claim_batch(resolver, 39999, &next_due) == 0 &&
+          next_due == 30000 + PGWT_PGSS_BATCH_INTERVAL_MS,
+          "full batch retains the ten-second SRF scan bound");
+    CHECK(pgwt_pgss_test_take_batch(resolver, 40000, &next_due,
+                                    &batch_databaseid) == 2 &&
+          batch_databaseid == 200,
+          "round robin serves a sparse second database before backlog repeats");
+    CHECK(pgwt_pgss_test_claim_batch(resolver, 40001, &next_due) == 0 &&
+          next_due == 40000 + PGWT_PGSS_SCAN_MIN_INTERVAL_MS,
+          "sparse database does not burn a full ten-second window");
+    CHECK(pgwt_pgss_test_take_batch(resolver, 41000, &next_due,
+                                    &batch_databaseid) == 2 &&
+          batch_databaseid == 300,
+          "round robin reaches every due database without slot-order starvation");
+    CHECK(pgwt_pgss_test_take_batch(resolver, 42000, &next_due,
+                                    &batch_databaseid) == 44 &&
+          batch_databaseid == 100 &&
+          daemon->counters.sampled_text_pending == 0,
+          "large tenant backlog resumes and drains after the fair round");
+    pgwt_pgss_resolver_stop(resolver);
+
+    memset(&daemon->counters, 0, sizeof(daemon->counters));
+    resolver = pgwt_pgss_test_create(daemon, &qt);
+    struct pgwt_query_text_key colliders[PGWT_PGSS_QUEUE_PROBES + 1];
+    size_t ncolliders = 0;
+    uint32_t collision_slot = 0;
+    for (uint64_t qid = 1;
+         qid <= (uint64_t)QT_HT_SIZE * (PGWT_PGSS_QUEUE_PROBES + 1) * 4 &&
+         ncolliders < PGWT_PGSS_QUEUE_PROBES + 1; qid++) {
+        struct pgwt_query_text_key key = {
+            .databaseid = 777, .userid = 888, .query_id = qid,
+        };
+        uint32_t slot = pgwt_pgss_test_hash_slot(&key);
+        if (ncolliders == 0) collision_slot = slot;
+        if (slot == collision_slot)
+            colliders[ncolliders++] = key;
+    }
+    CHECK(ncolliders == PGWT_PGSS_QUEUE_PROBES + 1,
+          "collision fixture covers one slot beyond the fast probe window");
+    for (size_t i = 0; i < ncolliders; i++)
+        pgwt_pgss_resolver_queue(resolver, &colliders[i]);
+    CHECK(daemon->counters.sampled_text_pending == ncolliders &&
+          daemon->counters.sampled_text_error_total == 0,
+          "pressure fallback finds distant free slots without false queue-full drops");
     pgwt_pgss_resolver_stop(resolver);
 
     memset(&daemon->counters, 0, sizeof(daemon->counters));

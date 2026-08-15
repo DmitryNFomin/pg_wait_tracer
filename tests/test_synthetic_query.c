@@ -1,6 +1,7 @@
 #include "synthetic_query.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static int run, passed;
@@ -76,6 +77,31 @@ int main(void)
                                      &cached_text, &ka, &hit) == 0 && !hit &&
           ka != kb,
           "context change invalidates the per-backend cache");
+    CHECK(pgwt_pg13_synthetic_cached(&cache, 6, 10,
+                                     "SELECT $$unterminated",
+                                     &cached_text, &ka, &hit) != 0 &&
+          !cache.valid,
+          "failed re-normalization invalidates the old cache entry");
+    CHECK(pgwt_pg13_synthetic_cached(&cache, 6, 10, "SELECT 43",
+                                     &cached_text, &ka, &hit) == 0 && !hit &&
+          strcmp(cached_text, "SELECT ?") == 0,
+          "post-failure lookup re-normalizes instead of returning stale text");
+
+    size_t long_len = PGWT_PG13_SYNTH_TEXT_MAX + 16;
+    char *long_activity = malloc(long_len + 1);
+    CHECK(long_activity != NULL, "long-activity fixture allocates");
+    if (long_activity) {
+        long_activity[0] = '/';
+        long_activity[1] = '*';
+        memset(long_activity + 2, 'x', long_len - 12);
+        memcpy(long_activity + long_len - 10, "*/SELECT 1", 10);
+        long_activity[long_len] = '\0';
+        CHECK(pgwt_pg13_synthetic_cached(&cache, 6, 10, long_activity,
+                                         &cached_text, &ka, &hit) != 0 &&
+              !cache.valid,
+              "raw-activity length guard also invalidates the old cache entry");
+        free(long_activity);
+    }
     printf("%d/%d tests passed\n", passed, run);
     return passed == run ? 0 : 1;
 }

@@ -65,6 +65,19 @@ static int count_lines(void)
     return count_file_lines(jsonl_path());
 }
 
+static int quality_contains(const struct pgwt_query_text_capture *qt,
+                            const struct pgwt_query_text_key *key)
+{
+    for (size_t i = 0; i < qt->quality_capacity; i++) {
+        const struct pgwt_query_text_seen *entry = &qt->quality_seen[i];
+        if (entry->used && entry->key.query_id == key->query_id &&
+            entry->key.databaseid == key->databaseid &&
+            entry->key.userid == key->userid)
+            return 1;
+    }
+    return 0;
+}
+
 static void test_append_and_dedup(void)
 {
     printf("--- DUR-4: append-open + dedup-on-load ---\n");
@@ -350,6 +363,67 @@ static void test_synthetic_async_and_quality_bound(void)
     free(qt);
 }
 
+static void test_quality_survives_compaction_restart(void)
+{
+    printf("--- Stage 4: synthetic quality survives compaction + restart ---\n");
+    rm_rf(TEST_DIR);
+    mkdir(TEST_DIR, 0755);
+    struct pgwt_query_text_capture *qt = calloc(1, sizeof(*qt));
+    CHECK(QT_QUALITY_SIZE >= QT_HT_SIZE,
+          "quality capacity covers the sampled-text table");
+    CHECK(pgwt_qt_init(qt, TEST_DIR, 0, 0, (gid_t)-1) == 0, "init");
+
+    const size_t distinct = QT_HT_SIZE / 2;
+    struct pgwt_query_text_key first = {
+        .databaseid = 55, .userid = 66, .query_id = 500001,
+    };
+    struct pgwt_query_text_key last = first;
+    for (size_t i = 1; i <= distinct; i++) {
+        struct pgwt_query_text_key key = {
+            .databaseid = 55, .userid = 66, .query_id = 500000 + i,
+        };
+        last = key;
+        pgwt_qt_store_synthetic(qt, &key, "SELECT ?");
+        if ((i & 127) == 0)
+            pgwt_qt_test_drain_synthetic(qt);
+    }
+    pgwt_qt_test_drain_synthetic(qt);
+    pgwt_qt_close(qt);
+
+    /* Inflate only with duplicates so startup compaction must rewrite the
+     * complete retained set; the old 1024-entry table dropped early keys. */
+    struct stat st = {0};
+    CHECK(stat(sources_path(), &st) == 0, "quality sidecar exists");
+    FILE *f = fopen(sources_path(), "a");
+    CHECK(f != NULL, "quality sidecar opens for compaction fixture");
+    size_t padded = (size_t)st.st_size;
+    while (f && padded <= QT_QUALITY_MAX_BYTES + 4096) {
+        int n = fprintf(f,
+            "{\"q\":\"500001\",\"d\":55,\"u\":66,"
+            "\"s\":\"synthetic\",\"v\":\"pg13-synth-v1\"}\n");
+        if (n <= 0) break;
+        padded += (size_t)n;
+    }
+    if (f) fclose(f);
+
+    memset(qt, 0, sizeof(*qt));
+    CHECK(pgwt_qt_init(qt, TEST_DIR, 0, 0, (gid_t)-1) == 0,
+          "restart compacts oversized quality sidecar");
+    CHECK(qt->quality_count == distinct &&
+          quality_contains(qt, &first) && quality_contains(qt, &last),
+          "more than 1024 durable synthetic-quality bits survive compaction");
+    CHECK(count_file_lines(sources_path()) == (int)distinct,
+          "compaction rewrites every retained quality key");
+    pgwt_qt_close(qt);
+
+    memset(qt, 0, sizeof(*qt));
+    CHECK(pgwt_qt_init(qt, TEST_DIR, 0, 0, (gid_t)-1) == 0 &&
+          quality_contains(qt, &first) && quality_contains(qt, &last),
+          "compacted quality set survives a second restart");
+    pgwt_qt_close(qt);
+    free(qt);
+}
+
 int main(void)
 {
     printf("=== test_query_text (T5: DUR-4/10) ===\n");
@@ -360,6 +434,7 @@ int main(void)
     test_permissions();
     test_source_precedence_and_context();
     test_sampled_capacity_cannot_block_raw();
+    test_quality_survives_compaction_restart();
     test_synthetic_async_and_quality_bound();
     rm_rf(TEST_DIR);
     printf("\n%d/%d tests passed\n", tests_passed, tests_run);

@@ -195,6 +195,7 @@ struct pgwt_pgss_resolver {
     bool stop;
     bool started;
     uint64_t next_batch_at_ms;
+    uint32_t last_batch_databaseid;
     struct resolver_entry entries[PGWT_PGSS_QUEUE_SIZE];
     struct pgwt_daemon *daemon;
     struct pgwt_query_text_capture *query_text;
@@ -392,8 +393,13 @@ static size_t select_batch_locked(struct pgwt_pgss_resolver *r, uint64_t now,
                                   uint64_t *next_due)
 {
     size_t count = 0;
-    uint32_t batch_databaseid = 0;
+    uint32_t first_databaseid = 0;
+    uint32_t next_databaseid = 0;
     *next_due = UINT64_MAX;
+
+    /* Choose by database OID, not queue slot: advance monotonically past the
+     * last serviced database and wrap. Every due database is therefore served
+     * once per round even when one tenant occupies most low-numbered slots. */
     for (int i = 0; i < PGWT_PGSS_QUEUE_SIZE; i++) {
         struct resolver_entry *e = &r->entries[i];
         if (e->state != ENTRY_PENDING) continue;
@@ -409,16 +415,40 @@ static size_t select_batch_locked(struct pgwt_pgss_resolver *r, uint64_t now,
             if (due < *next_due) *next_due = due;
             continue;
         }
-        if (batch_databaseid && e->key.databaseid != batch_databaseid)
-            continue;
-        if (count < PGWT_PGSS_BATCH_MAX) {
-            batch_databaseid = e->key.databaseid;
-            indices[count] = i;
-            keys[count++] = e->key;
-        }
+        uint32_t databaseid = e->key.databaseid;
+        if (!first_databaseid || databaseid < first_databaseid)
+            first_databaseid = databaseid;
+        if (databaseid > r->last_batch_databaseid &&
+            (!next_databaseid || databaseid < next_databaseid))
+            next_databaseid = databaseid;
     }
-    if (count)
-        r->next_batch_at_ms = now + PGWT_PGSS_BATCH_INTERVAL_MS;
+
+    uint32_t batch_databaseid = next_databaseid ? next_databaseid
+                                                 : first_databaseid;
+    if (!batch_databaseid)
+        return 0;
+    for (int i = 0; i < PGWT_PGSS_QUEUE_SIZE &&
+                    count < PGWT_PGSS_BATCH_MAX; i++) {
+        struct resolver_entry *e = &r->entries[i];
+        if (e->state != ENTRY_PENDING ||
+            e->key.databaseid != batch_databaseid ||
+            e->retry_at_ms > now)
+            continue;
+        indices[count] = i;
+        keys[count++] = e->key;
+    }
+    if (count) {
+        /* Charge the 10 s scan budget in proportion to keys amortized by this
+         * SRF call. Sparse databases no longer burn a full window, while the
+         * floor keeps the expensive showtext scan at or below one per second. */
+        uint64_t delay = (PGWT_PGSS_BATCH_INTERVAL_MS * count +
+                          PGWT_PGSS_BATCH_MAX - 1) /
+                         PGWT_PGSS_BATCH_MAX;
+        if (delay < PGWT_PGSS_SCAN_MIN_INTERVAL_MS)
+            delay = PGWT_PGSS_SCAN_MIN_INTERVAL_MS;
+        r->next_batch_at_ms = now + delay;
+        r->last_batch_databaseid = batch_databaseid;
+    }
     return count;
 }
 
@@ -597,7 +627,10 @@ void pgwt_pgss_resolver_queue(struct pgwt_pgss_resolver *r,
     uint64_t now = now_ms();
     uint32_t idx = (uint32_t)(resolver_hash(key) & (PGWT_PGSS_QUEUE_SIZE - 1));
     int reclaim = -1;
-    for (int i = 0; i < PGWT_PGSS_QUEUE_PROBES; i++) {
+    /* The first PGWT_PGSS_QUEUE_PROBES slots are the normal fast path. Under
+     * throttle-induced PENDING pressure, continue through the bounded table so
+     * a distant empty/reclaimable slot (or duplicate) is not reported as full. */
+    for (int i = 0; i < PGWT_PGSS_QUEUE_SIZE; i++) {
         struct resolver_entry *e = &r->entries[idx];
         if (e->state != ENTRY_EMPTY && resolver_key_equal(&e->key, key)) {
             if (e->state == ENTRY_COOLDOWN && now >= e->retry_at_ms) {
@@ -703,6 +736,31 @@ size_t pgwt_pgss_test_claim_batch(struct pgwt_pgss_resolver *r,
     size_t count = select_batch_locked(r, now, indices, keys, next_due);
     pthread_mutex_unlock(&r->mutex);
     return count;
+}
+
+size_t pgwt_pgss_test_take_batch(struct pgwt_pgss_resolver *r,
+                                 uint64_t now, uint64_t *next_due,
+                                 uint32_t *databaseid)
+{
+    if (databaseid) *databaseid = 0;
+    if (!r || !next_due) return 0;
+    int indices[PGWT_PGSS_BATCH_MAX];
+    struct pgwt_query_text_key keys[PGWT_PGSS_BATCH_MAX];
+    pthread_mutex_lock(&r->mutex);
+    size_t count = select_batch_locked(r, now, indices, keys, next_due);
+    if (count && databaseid) *databaseid = keys[0].databaseid;
+    for (size_t i = 0; i < count; i++) {
+        r->entries[indices[i]].state = ENTRY_DONE;
+        counter_add(&r->daemon->counters.sampled_text_pending, UINT64_MAX);
+    }
+    pthread_mutex_unlock(&r->mutex);
+    return count;
+}
+
+uint32_t pgwt_pgss_test_hash_slot(const struct pgwt_query_text_key *key)
+{
+    return key ? (uint32_t)(resolver_hash(key) &
+                            (PGWT_PGSS_QUEUE_SIZE - 1)) : 0;
 }
 #endif
 

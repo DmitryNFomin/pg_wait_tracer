@@ -13,8 +13,8 @@
 #define QT_MAX_TEXT (1024 * 1024)
 #define QT_COMPACT_THRESHOLD (32 * 1024 * 1024)
 #define QT_TEXT_INDEX_SIZE (QT_HT_SIZE * 4)
-#define QT_QUALITY_SIZE 1024
-#define QT_QUALITY_MAX_BYTES (128 * 1024)
+#define QT_QUALITY_SIZE QT_HT_SIZE
+#define QT_QUALITY_MAX_BYTES (512 * 1024)
 #define QT_SYNTH_QUEUE_SIZE 256
 
 struct pgwt_query_text_key {

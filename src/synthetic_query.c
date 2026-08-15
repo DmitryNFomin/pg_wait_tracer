@@ -344,11 +344,15 @@ int pgwt_pg13_synthetic_cached(struct pgwt_pg13_synthetic_cache *cache,
     uint64_t fresh = 0;
     if (pgwt_pg13_synthetic_query(databaseid, userid, activity,
                                   cache->normalized,
-                                  sizeof(cache->normalized), &fresh) != 0)
+                                  sizeof(cache->normalized), &fresh) != 0) {
+        cache->valid = false;
         return -1;
+    }
     size_t len = strnlen(activity, sizeof(cache->activity));
-    if (!len || len >= sizeof(cache->activity))
+    if (!len || len >= sizeof(cache->activity)) {
+        cache->valid = false;
         return -1;
+    }
     memcpy(cache->activity, activity, len + 1);
     cache->databaseid = databaseid;
     cache->userid = userid;
