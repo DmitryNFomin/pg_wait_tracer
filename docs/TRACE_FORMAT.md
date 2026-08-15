@@ -19,7 +19,8 @@ A trace directory (`--trace-dir`) contains:
 | `YYYY-MM-DD_HH[.N].trace.lz4` | rotation/recovery | finished hourly archives |
 | `current.summary` / `.meta` | summary writer | live per-second summary file |
 | `YYYY-MM-DD_HH[.N].summary.lz4` | rotation/recovery | finished summary archives |
-| `query_texts.jsonl` | query-text capture | query_id → SQL text sidecar |
+| `query_texts.jsonl` | query-text capture | context + query grouping key → sourced SQL text sidecar |
+| `query_sources.jsonl` | PG13 sampler | context + grouping key → durable synthetic-attribution quality |
 | `backends.jsonl` | backend-meta writer | pid → type/user/db sidecar |
 | `wait_event_names.json` | daemon | event-id → name tables (PG17+) |
 | `*.corrupt.<unixtime>` | recovery | preserved unreadable leftovers |
@@ -141,6 +142,9 @@ duration 0. Escalation markers use pid 0 and pack reason/duration into
 query_id (`PGWT_ESC_PACK`). They are structural — every consumer must
 exclude them from wait aggregation (`pgwt_filter_matches` is the
 chokepoint); only variants/lifecycle stats and coverage read them.
+PG13 command markers synthesized from an at-escalation activity snapshot carry
+the in-memory `QUERY_SYNTH` quality bit. Durable/offline consumers recover the
+same `pg13-synth-v1` quality from the context/source-aware query-text sidecar.
 
 **Flush records (v3, T8).** At de-escalation and at daemon shutdown the
 open exact interval of each still-attached backend is closed with a final
@@ -299,25 +303,32 @@ naming, and retention are identical to trace files with the
 
 ## query_texts.jsonl (and PII — DUR-10)
 
-One JSON object per line: `{"q":"<query_id as signed decimal string>",
-"t":"<SQL text>","ts":<wall ns>}`. The file is append-only across daemon
-restarts; at startup the daemon loads existing ids into its dedup table
-(bounded: 4096 ids — when the table fills, a WARN is logged once and text
-for further NEW ids is not captured until restart) and compacts the file
-in place (atomic tmp+rename, first line per id wins) only when it exceeds
-32 MB (`PGWT_QT_COMPACT_BYTES` overrides for tests). Retained trace files
-reference these query_ids, so the file must never be truncated while
-traces that mention its ids exist.
+One JSON object per line: `{"q":"<signed decimal grouping key>","d":<db oid>,
+"u":<user oid>,"s":"pgss|synthetic|full","t":"<SQL text>","ts":<wall ns>}`.
+PG13 synthetic records also carry `"v":"pg13-synth-v1"`. Legacy records
+without context/source load as `(0,0)` full/raw entries. The key is
+`(d,u,q)`, not qid alone. Source priority is `full > synthetic > pgss`: a later
+exact/full raw first-seen record appends a replacement and always supersedes a
+sampled normalized record for the same context. A qid-only reader returns text
+only when every context has identical winning text.
 
-**PII warning:** the text is the RAW running SQL captured from backend
-memory — with literal values, not normalized like `pg_stat_statements`.
-Bind parameters of prepared statements are not included, but inline
-literals (names, emails, amounts…) are. The file is created with the same
-group/permissions as the trace files (0640, `--trace-group`). There is no
-redaction option yet; if raw SQL must not persist on disk, disable
-recording or restrict the trace directory. The same applies to trace files
-themselves to a lesser degree (query_ids only) and to `backends.jsonl`
-(usernames, database names, client addresses).
+`query_sources.jsonl` independently records each PG13 synthetic
+`(d,u,q,"pg13-synth-v1")` key. Its dynamically grown dedup table is not subject
+to the sampled text table's 4096-key admission cap, so offline readers retain
+the attribution-quality flag even when normalized text is unavailable.
+
+The file is append-only across daemon restarts. At startup the daemon restores
+the context/source precedence table (bounded: 4096 keys; overflow is logged)
+and compacts only above 32 MB (`PGWT_QT_COMPACT_BYTES` overrides for tests),
+preserving source upgrades. Retained traces reference these keys, so the file
+must not be truncated while matching traces exist.
+
+**PII warning:** `full` text is RAW running SQL and may contain inline literal
+values. `pgss` and `synthetic` text is normalized; the latter deliberately
+replaces literal constants, but neither should be treated as an authorization
+or redaction boundary. Files use trace permissions (0640, `--trace-group`).
+There is no redaction option; restrict the trace directory when SQL text must
+not be exposed. Trace keys and `backends.jsonl` metadata are also sensitive.
 
 ## Versioning
 

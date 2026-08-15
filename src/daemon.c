@@ -132,8 +132,47 @@ static int handle_lifecycle_event(void *ctx, void *data, size_t data_sz)
         /* Query text captured by BPF from debug_query_string */
         struct pgwt_query_text_event *qte = data;
         if (d->query_text_capture && qte->query_id != 0) {
-            pgwt_qt_store(d->query_text_capture, qte->query_id,
-                          qte->text, qte->pid);
+            struct pgwt_query_text_key key = {.query_id = qte->query_id};
+            struct pgwt_pgbs_sampled_attr attr;
+            struct pgwt_backend *be = pgwt_find_backend(
+                &d->backends, qte->pid);
+            /* The sampler normally cached this immutable backend context
+             * already. Use it before attempting a fresh coherent read so a
+             * query-end race cannot demote raw text to legacy (0,0). */
+            if (be) {
+                key.databaseid = be->databaseid;
+                key.userid = be->userid;
+            }
+            int attr_rc;
+            if (pgwt_pgbs_sampled_activity_enabled(
+                    &d->backend_status_layout)) {
+                if (be && be->pgbs_addr == 0)
+                    be->pgbs_addr = pgwt_pgbs_resolve_entry(
+                        qte->pid, &d->backend_status_layout);
+                attr_rc = be && be->pgbs_addr != 0
+                    ? pgwt_pgbs_read_sampled_attr_at(
+                        qte->pid, be->pgbs_addr,
+                        &d->backend_status_layout, &attr)
+                    : -1;
+            } else {
+                attr_rc = pgwt_pgbs_read_sampled_attr(
+                    qte->pid, d->my_be_entry_addr,
+                    &d->backend_status_layout, &attr);
+            }
+            if (attr_rc == 0) {
+                key.databaseid = attr.databaseid;
+                key.userid = attr.userid;
+                if (be) {
+                    be->databaseid = attr.databaseid;
+                    be->userid = attr.userid;
+                    if (d->backend_meta && be->meta_parsed)
+                        pgwt_bm_write_context(d->backend_meta, be->pid,
+                                              &be->meta, be->databaseid,
+                                              be->userid);
+                }
+            }
+            pgwt_qt_store_full(d->query_text_capture, &key,
+                               qte->text, qte->pid);
         }
         break;
     }
@@ -316,9 +355,9 @@ static void handle_timer(struct pgwt_daemon *d)
         pgwt_debug_block_end(d, "summary_writer_maintenance", 0, started_ns);
     }
 
-    /* CAP-6: the BPF seen_query_ids dedup map (4096 entries) never ages;
-     * once full, query TEXT for new query_ids is silently never captured
-     * again. Log it once; seen_query_ids_full_total keeps counting. */
+    /* Raw first-seen dedup is an LRU (pid,qid) map. Inserts should remain
+     * possible under churn; any failure still means a raw metadata record was
+     * lost and must be loud. */
     started_ns = pgwt_debug_block_begin(d);
     uint64_t seen_qids_failures = d->seen_qids_full_logged ? 0
         : pgwt_read_bpf_fail_counter(d, PGWT_BPF_FAIL_SEEN_QIDS);
@@ -326,10 +365,10 @@ static void handle_timer(struct pgwt_daemon *d)
     if (!d->seen_qids_full_logged && seen_qids_failures > 0) {
         d->seen_qids_full_logged = true;
         fprintf(stderr,
-                "WARN: BPF seen_query_ids map is FULL (4096 unique query_ids)"
-                " — query TEXT for new query_ids will no longer be captured "
-                "(ids and waits are unaffected). Restart the daemon to reset;"
-                " seen_query_ids_full_total counts the misses.\n");
+                "WARN: BPF raw first-seen dedup insert failed — query TEXT "
+                "for this (backend,query_id) occurrence was not emitted "
+                "(ids and waits are unaffected); "
+                "seen_query_ids_full_total counts the misses.\n");
     }
 
     /* Refresh recent event/sample rates for control-socket metrics */
@@ -724,6 +763,8 @@ int pgwt_daemon_init(struct pgwt_daemon *d)
      * QueryDesc->plannedstmt->queryId into the state_map. Enabled only when
      * pg_stat_statements is loaded (use_pg13_query_attr). */
     d->skel->rodata->pg13_query_attr = d->use_pg13_query_attr ? 1 : 0;
+    d->skel->rodata->pg13_synthetic_attr =
+        pgwt_pgbs_sampled_activity_enabled(&d->backend_status_layout) ? 1 : 0;
     d->skel->rodata->pg13_qd_plannedstmt_off = (uint32_t)d->pg13_qd_plannedstmt_off;
     d->skel->rodata->pg13_ps_queryid_off = (uint32_t)d->pg13_ps_queryid_off;
     d->skel->rodata->pg13_qd_sourcetext_off = (uint32_t)d->pg13_qd_sourcetext_off;
@@ -856,9 +897,9 @@ int pgwt_daemon_init(struct pgwt_daemon *d)
         goto fail;
     }
 
-    /* Stage 3: query/activity uprobes form an atomic, generation-tagged bundle
-     * for escalation. Startup remains best-effort: validated PG14-18 sampled/
-     * tiered starts with no per-query links; PG13/degraded and full pin each
+    /* Stages 3/4: query/activity uprobes form an atomic, generation-tagged
+     * bundle for escalation. Validated PG13-18 sampled/tiered starts with no
+     * per-query links; degraded layouts and full mode pin each
      * available legacy attribution probe without making wait capture depend
      * on an optional symbol or attach capability. */
     if (pgwt_exact_probe_startup(d) != 0)
@@ -970,21 +1011,42 @@ int pgwt_daemon_init(struct pgwt_daemon *d)
         }
         d->summary_writer->verbose = d->verbose;
 
-        /* Init query text capture (requires st_activity_raw offset + MyBEEntry) */
-        if (d->st_activity_offset > 0 && d->my_be_entry_addr != 0) {
-            d->query_text_capture = calloc(1, sizeof(*d->query_text_capture));
-            if (d->query_text_capture) {
-                if (pgwt_qt_init(d->query_text_capture, d->trace_dir,
-                                  d->my_be_entry_addr,
-                                  d->st_activity_offset,
-                                  d->event_writer->trace_gid) != 0) {
-                    free(d->query_text_capture);
-                    d->query_text_capture = NULL;
-                } else {
-                    d->query_text_capture->verbose = d->verbose;
-                    if (d->verbose)
-                        fprintf(stderr, "INFO: query text capture enabled\n");
-                }
+        /* The sidecar is also the context/source-aware sink for sampled PG13
+         * synthetic and PG14+ pgss text. It must exist even when the legacy
+         * debug_query_string activity reader is unavailable. */
+        d->query_text_capture = calloc(1, sizeof(*d->query_text_capture));
+        if (d->query_text_capture) {
+            uint32_t activity_offset = d->st_activity_offset > 0
+                ? (uint32_t)d->st_activity_offset
+                : d->backend_status_layout.st_activity_raw.offset;
+            if (pgwt_qt_init(d->query_text_capture, d->trace_dir,
+                              d->my_be_entry_addr, activity_offset,
+                              d->event_writer->trace_gid) != 0) {
+                free(d->query_text_capture);
+                d->query_text_capture = NULL;
+            } else {
+                d->query_text_capture->verbose = d->verbose;
+                if (d->verbose)
+                    fprintf(stderr, "INFO: query text capture enabled\n");
+            }
+        }
+
+        /* PG14+ sampled query ids no longer pass through a text-capturing
+         * uprobe. Resolve their pgss-normalized text on a dedicated worker;
+         * starting the worker performs no SQL on this event-loop thread. */
+        if (d->query_text_capture && d->pg_major_version >= 14 &&
+            d->pg_major_version <= 18 && d->pg_binary_saved) {
+            if (pgwt_pgss_resolver_start(&d->pgss_resolver, d,
+                                         d->query_text_capture,
+                                         d->pg_binary_saved,
+                                         d->postmaster_pid) != 0) {
+                d->pgss_resolver = NULL;
+                if (d->verbose)
+                    fprintf(stderr, "INFO: sampled pgss query text is "
+                            "unavailable (async resolver did not start)\n");
+            } else if (d->verbose) {
+                fprintf(stderr, "INFO: sampled pgss query-text resolver "
+                        "started asynchronously\n");
             }
         }
 
@@ -1025,7 +1087,7 @@ int pgwt_daemon_init(struct pgwt_daemon *d)
     /* Auth-free second validation route.  Normally the controlled backend in
      * discovery.c has already validated the descriptor and this is a no-op. */
     pgwt_layout_uprobe_shadow_warmup(d);
-    /* The auth-free fallback may have promoted a degraded PG14-18 layout.
+    /* The auth-free fallback may have promoted a degraded PG13-18 layout.
      * Its temporary shadow probes have served their only purpose; enforce the
      * same zero-trap sampled policy as startup validation. */
     pgwt_exact_probe_reconcile_sampled(d);
@@ -1509,6 +1571,10 @@ void pgwt_daemon_cleanup(struct pgwt_daemon *d)
         pgwt_bm_close(d->backend_meta);
         free(d->backend_meta);
         d->backend_meta = NULL;
+    }
+    if (d->pgss_resolver) {
+        pgwt_pgss_resolver_stop(d->pgss_resolver);
+        d->pgss_resolver = NULL;
     }
     if (d->query_text_capture) {
         if (d->query_text_capture->verbose)

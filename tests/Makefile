@@ -16,6 +16,8 @@ TESTS     = test_wait_event test_cmdline test_event_writer test_event_reader \
             test_effective_cores \
             test_coop test_bucket \
             test_backend_status_layout \
+            test_synthetic_query \
+            test_pgss_resolver \
             test_pg13_resolve test_discovery_pie test_discovery_nopie \
             test_replay_fidelity test_durability test_query_text \
             test_golden_fixture \
@@ -34,7 +36,10 @@ check: all
 	while read -r t; do \
 	    case "$$t" in ''|\#*) continue ;; esac; \
 	    echo "=== $$t ==="; \
-	    ./$$t || { echo "FAILED: $$t"; fail=1; }; \
+	    case "$$t" in \
+	        *.py) python3 "$$t" ;; \
+	        *) ./"$$t" ;; \
+	    esac || { echo "FAILED: $$t"; fail=1; }; \
 	done < unit_tests.list; \
 	exit $$fail
 
@@ -114,7 +119,8 @@ test_escalation_budget: test_escalation_budget.c ../src/escalation_budget.c
 	$(CC) $(CFLAGS) -o $@ $^
 
 test_exact_probe: test_exact_probe.c ../src/exact_probe.c \
-                  ../src/backend_status_layout.c ../src/spawn.c
+                  ../src/backend_status_layout.c ../src/spawn.c \
+                  ../src/cmdline.c ../src/backend_meta.c ../src/cJSON.c
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^
 
 # test_effective_cores: AAS-1 Stage 2 capacity resolver. All proc/cgroup reads
@@ -129,6 +135,13 @@ test_effective_cores: test_effective_cores.c ../src/effective_cores.c
 test_backend_status_layout: test_backend_status_layout.c \
                             ../src/backend_status_layout.c ../src/spawn.c
 	$(CC) $(CFLAGS) -o $@ $^
+
+test_synthetic_query: test_synthetic_query.c ../src/synthetic_query.c
+	$(CC) $(CFLAGS) -o $@ $^
+
+test_pgss_resolver: test_pgss_resolver.c ../src/pgss_resolver.c \
+                    ../src/query_text.c ../src/synthetic_query.c ../src/spawn.c
+	$(CC) $(CFLAGS) -DPGWT_TEST -o $@ $^ -pthread
 
 # test_coop: cooperative provider stub (A6 interface freeze) — registers,
 # advertises EXACT fidelity, start() returns the clean "not available" status.
@@ -168,7 +181,7 @@ test_durability: test_durability.c $(BUILD)/server_event_writer.o \
 # bounded compaction + cap logging + permissions. Compiles query_text.c
 # directly (BPF-free).
 test_query_text: test_query_text.c ../src/query_text.c
-	$(CC) $(CFLAGS) -o $@ $^
+	$(CC) $(CFLAGS) -DPGWT_TEST -o $@ $^ ../src/synthetic_query.c -pthread
 
 # test_golden_fixture: T7/TST-10 — decode the COMMITTED golden trace bytes
 # (tests/fixtures/golden/rev<N>/) and checksum the event stream, pinning

@@ -70,7 +70,7 @@ static void write_marker_at(struct pgwt_daemon *d, uint32_t marker_type,
 
 static void write_pid_marker_at(struct pgwt_daemon *d, pid_t pid,
                                 uint32_t marker_type, uint64_t timestamp_ns,
-                                uint64_t query_id)
+                                uint64_t query_id, uint16_t query_quality)
 {
     if (!d->event_writer)
         return;
@@ -79,6 +79,8 @@ static void write_pid_marker_at(struct pgwt_daemon *d, pid_t pid,
         .pid = (uint32_t)pid,
         .old_event = marker_type,
         .new_event = marker_type,
+        .flags = query_quality == PGWT_QUERY_QUALITY_PG13_SYNTH
+               ? PGWT_EVENT_FLAG_QUERY_SYNTH : 0,
         .duration_ns = 0,
         .query_id = query_id,
     };
@@ -158,7 +160,7 @@ static void disarm_all(struct pgwt_daemon *d)
 /* Detach all watchpoints (real + bootstrap) and RESET each backend's BPF
  * state_map entry to a non-live seed (last_event = 0, wait_event_addr
  * preserved). This clears the watchpoint-maintained open interval while
- * keeping the entry ready for PG13/degraded fallback edges and the next exact
+ * keeping the entry ready for degraded fallback edges and the next exact
  * generation. The registry entries survive for sampled PgBackendStatus reads. */
 static void detach_all(struct pgwt_daemon *d)
 {
@@ -247,15 +249,17 @@ static void flush_open_intervals(struct pgwt_daemon *d, uint64_t now)
             cpu_ns = (exact >= st.last_cpu_ns) ? exact - st.last_cpu_ns : 0;
         }
         uint64_t query_id = 0;
-        uint16_t cmd_open = 0;
+        uint16_t cmd_open = 0, quality = PGWT_QUERY_QUALITY_NONE;
         pgwt_exact_resolve_attr(d, be->pid, &query_id, &cmd_open,
-                                NULL, NULL, NULL);
+                                &quality, NULL, NULL, NULL);
         struct pgwt_trace_event ev = {
             .timestamp_ns = now,
             .pid          = (uint32_t)be->pid,
             .old_event    = we,     /* the interval that was open ends here */
             .new_event    = we,
-            .flags        = cmd_open ? PGWT_EVENT_FLAG_CMD_OPEN : 0,
+            .flags        = (cmd_open ? PGWT_EVENT_FLAG_CMD_OPEN : 0) |
+                (quality == PGWT_QUERY_QUALITY_PG13_SYNTH
+                    ? PGWT_EVENT_FLAG_QUERY_SYNTH : 0),
             .duration_ns  = now - st.last_ts,
             .query_id     = query_id,
             .cpu_ns       = cpu_ns,
@@ -296,11 +300,11 @@ static void synthesize_command_starts(struct pgwt_daemon *d, uint64_t boundary)
         if (!be->is_alive || be->pid <= 0)
             continue;
         uint64_t qid = 0;
-        uint16_t cmd_open = 0;
+        uint16_t cmd_open = 0, quality = PGWT_QUERY_QUALITY_NONE;
         if (pgwt_exact_resolve_attr(d, be->pid, &qid, &cmd_open,
-                                    NULL, NULL, NULL) == 0 && cmd_open)
+                                    &quality, NULL, NULL, NULL) == 0 && cmd_open)
             write_pid_marker_at(d, be->pid, PGWT_MARKER_CMD_START,
-                                boundary, qid);
+                                boundary, qid, quality);
     }
 }
 
@@ -316,20 +320,21 @@ static void synthesize_terminal_markers(struct pgwt_daemon *d,
             continue;
         uint64_t qid = 0, plan_start = 0, exec_start = 0;
         uint16_t cmd_open = 0, phases = 0;
-        if (pgwt_exact_resolve_attr(d, be->pid, &qid, &cmd_open, &phases,
-                                    &plan_start, &exec_start) != 0)
+        uint16_t quality = PGWT_QUERY_QUALITY_NONE;
+        if (pgwt_exact_resolve_attr(d, be->pid, &qid, &cmd_open, &quality,
+                                    &phases, &plan_start, &exec_start) != 0)
             continue;
         if (cmd_open)
             write_pid_marker_at(d, be->pid, PGWT_MARKER_CMD_END,
-                                boundary, qid);
+                                boundary, qid, quality);
         if ((phases & PGWT_EXACT_PHASE_PLAN) &&
             plan_start >= d->escalation.attach_boundary_ns)
             write_pid_marker_at(d, be->pid, PGWT_MARKER_PLAN_END,
-                                boundary, qid);
+                                boundary, qid, quality);
         if ((phases & PGWT_EXACT_PHASE_EXEC) &&
             exec_start >= d->escalation.attach_boundary_ns)
             write_pid_marker_at(d, be->pid, PGWT_MARKER_EXEC_END,
-                                boundary, qid);
+                                boundary, qid, quality);
     }
 }
 
@@ -548,7 +553,7 @@ void pgwt_deescalate(struct pgwt_daemon *d, int reason)
 
     uint64_t elapsed = now - e->window_start_ns;
 
-    /* The last exact consumer releases transient links; pinned PG13/degraded
+    /* The last exact consumer releases transient links; pinned degraded
      * attribution links survive. Clear the generation seed after detach. */
     uint64_t generation = e->generation;
     pgwt_exact_probe_release(d);

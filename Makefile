@@ -89,7 +89,7 @@ CFLAGS     = -g -O2 -Wall -Wextra -Wno-unused-parameter \
              $(LIBBPF_INC) \
              -I$(INC_DIR) -I$(SRC_DIR)
 DEPFLAGS   = -MMD -MP
-LDFLAGS    = $(LIBBPF_LIB) -lelf -lz -llz4
+LDFLAGS    = $(LIBBPF_LIB) -lelf -lz -llz4 -pthread
 
 USER_SRCS  = $(SRC_DIR)/pg_wait_tracer.c \
              $(SRC_DIR)/daemon.c \
@@ -105,6 +105,7 @@ USER_SRCS  = $(SRC_DIR)/pg_wait_tracer.c \
              $(SRC_DIR)/backend.c \
              $(SRC_DIR)/discovery.c \
              $(SRC_DIR)/backend_status_layout.c \
+             $(SRC_DIR)/synthetic_query.c \
              $(SRC_DIR)/map_reader.c \
              $(SRC_DIR)/event_stream.c \
              $(SRC_DIR)/output.c \
@@ -118,6 +119,7 @@ USER_SRCS  = $(SRC_DIR)/pg_wait_tracer.c \
              $(SRC_DIR)/replay.c \
              $(SRC_DIR)/summary_writer.c \
              $(SRC_DIR)/query_text.c \
+             $(SRC_DIR)/pgss_resolver.c \
              $(SRC_DIR)/backend_meta.c \
              $(SRC_DIR)/cJSON.c
 

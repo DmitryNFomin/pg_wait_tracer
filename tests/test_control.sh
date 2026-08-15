@@ -164,6 +164,10 @@ for k in ('events_total', 'events_per_sec', 'lifecycle_events_total',
           'sampled_attr_shadow_active_mismatch_total',
           'sampled_attr_shadow_cmd_open_mismatch_total',
           'sampled_attr_shadow_query_id_mismatch_total',
+          'sampled_text_pending', 'sampled_text_resolved_total',
+          'sampled_text_absent_total', 'sampled_text_evicted_total',
+          'sampled_text_error_total',
+          'sampled_text_retry_exhausted_total',
           # AAS-1 Stage 3 CPU-saturation rule counter/state.
           'anomaly_cpu_saturation_fires_total', 'anomaly_cpu_cusum',
           # T8 measured-CPU counters (§5.6). Present + numeric here; the exact

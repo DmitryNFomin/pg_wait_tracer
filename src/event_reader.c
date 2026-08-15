@@ -385,7 +385,8 @@ int pgwt_reader_decode_block_info(struct pgwt_event_reader *r, int block_idx,
             out[i].cpu_ns = PGWT_CPU_NS_UNKNOWN;
     }
 
-    /* Clear flags (transition records carry no per-record flag) */
+    /* Clear flags (transition records carry no per-record flag). Synthetic
+     * attribution quality is durable in the sourced query-text sidecar. */
     for (int i = 0; i < count; i++)
         out[i].flags = 0;
 

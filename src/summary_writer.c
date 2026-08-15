@@ -566,10 +566,10 @@ static int open_summary_file(struct pgwt_summary_writer *w)
 
     /* DUR-1: never truncate an existing current.summary ("wbx"); recover
      * and retry if one (re)appeared after init. */
-    w->fp = fopen(w->current_path, "wbx");
+    w->fp = fopen(w->current_path, "wbxe");
     if (!w->fp && errno == EEXIST) {
         recover_current_summary(w);
-        w->fp = fopen(w->current_path, "wbx");
+        w->fp = fopen(w->current_path, "wbxe");
     }
     if (!w->fp) {
         fprintf(stderr, "WARN: cannot create %s: %s\n",

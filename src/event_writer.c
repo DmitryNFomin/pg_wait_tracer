@@ -370,10 +370,10 @@ static int open_trace_file(struct pgwt_event_writer *w, uint64_t first_mono_ns)
     /* DUR-1: NEVER truncate an existing current.trace ("wbx", not "wb").
      * Init already recovered any leftover file; if one (re)appeared since —
      * e.g. lazy first-open long after init — recover it now and retry. */
-    w->fp = fopen(w->current_path, "wbx");
+    w->fp = fopen(w->current_path, "wbxe");
     if (!w->fp && errno == EEXIST) {
         recover_current_trace(w);
-        w->fp = fopen(w->current_path, "wbx");
+        w->fp = fopen(w->current_path, "wbxe");
     }
     if (!w->fp) {
         fprintf(stderr, "WARN: cannot create %s: %s\n",
@@ -609,8 +609,8 @@ int pgwt_writer_init(struct pgwt_event_writer *w, const char *trace_dir,
      * daemon left behind — never truncate it. */
     recover_current_trace(w);
 
-    /* Allocate scratch buffers. Per-event worst case (v3): ts≤10 + pid4 +
-     * old4 + new4 + dur≤10 + qid8 + cpu_ns≤10 = 50 bytes; 56 leaves margin. */
+    /* Allocate scratch buffers. Per-event worst case (v3): ts<=10 + pid4 +
+     * old4 + new4 + dur<=10 + qid8 + cpu_ns<=10 = 50 bytes. */
     w->encode_buf_size = PGWT_BLOCK_EVENTS * 56;
     w->encode_buf = malloc(w->encode_buf_size);
 

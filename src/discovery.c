@@ -1078,7 +1078,9 @@ int pgwt_discover(struct pgwt_daemon *d)
     /* Detect st_query_id offset (PG14+ in-core query_id path) */
     d->st_query_id_offset = pgwt_detect_query_id_offset(binary, d->pg_major_version);
 
-    /* PG13 query attribution — Route B1 (pg_stat_statements-based).
+    /* PG13 exact numeric attribution — Route B1 (pgss-based). Sampled and
+     * tiered baselines no longer depend on it when the validated coherent
+     * activity-text route is available.
      * PG13 has no in-core query_id (st_query_id was added in PG14), so the
      * detection above returns 0. Instead, if pg_stat_statements is loaded its
      * post_parse_analyze hook populates PlannedStmt.queryId; we uprobe
@@ -1102,7 +1104,10 @@ int pgwt_discover(struct pgwt_daemon *d)
                         "PlannedStmt.queryId=%d, QueryDesc.sourceText=%d)\n",
                         d->pg13_qd_plannedstmt_off, d->pg13_ps_queryid_off,
                         d->pg13_qd_sourcetext_off);
-        } else if (d->view == PGWT_VIEW_QUERY_EVENT) {
+        } else if (d->view == PGWT_VIEW_QUERY_EVENT &&
+                   (d->mode == PGWT_MODE_FULL ||
+                    !pgwt_pgbs_sampled_activity_enabled(
+                        &d->backend_status_layout))) {
             if (!have_off)
                 fprintf(stderr,
                         "FATAL: query_event unavailable on PG13 — no known "
@@ -1116,8 +1121,9 @@ int pgwt_discover(struct pgwt_daemon *d)
             return -1;
         } else if (d->verbose) {
             fprintf(stderr,
-                    "INFO: PG13 query attribution unavailable (requires "
-                    "pg_stat_statements%s) — query views disabled\n",
+                    "INFO: PG13 exact numeric attribution unavailable "
+                    "(requires pg_stat_statements%s); sampled query views "
+                    "use pg13-synth-v1 activity grouping\n",
                     have_off ? "; not loaded" : "; unknown offsets");
         }
     }

@@ -85,6 +85,12 @@ struct pgwt_pid_state {
     u64 last_cpu_ns;
 };
 
+enum pgwt_query_attribution_quality {
+    PGWT_QUERY_QUALITY_NONE = 0,
+    PGWT_QUERY_QUALITY_REAL = 1,
+    PGWT_QUERY_QUALITY_PG13_SYNTH = 2,
+};
+
 /* Stage 3 tiered exact-probe state. Probe edges and escalation preseeds live
  * in separate maps deliberately: userspace writes only pgwt_exact_seed, while
  * BPF writes only pgwt_exact_attr. A probe edge stamped after the generation
@@ -101,7 +107,7 @@ struct pgwt_exact_seed {
     u64 snapshot_ts;
     u64 query_id;
     u16 cmd_open;
-    u16 reserved16;
+    u16 query_quality;
     u32 reserved32;
 };
 
@@ -119,39 +125,50 @@ struct pgwt_exact_attr {
     u64 exec_start_ts;
     u16 cmd_open;
     u16 phase_flags;
-    u32 reserved;
+    u16 query_quality;
+    u16 reserved16;
 };
 
 /* Shared userspace/BPF merge rule. The coherent seed supplies the generation
  * boundary state; each BPF-owned field overrides it only when that field has
  * a same-generation edge stamped at or after attach. Generation zero is the
- * continuously attached PG13/degraded fallback and reads edges directly. */
+ * degraded-layout fallback and reads its pinned edges directly. */
 static inline void pgwt_exact_merge_attr(const struct pgwt_exact_config *cfg,
                                          const struct pgwt_exact_attr *edge,
                                          const struct pgwt_exact_seed *seed,
-                                         u64 *query_id, u16 *cmd_open)
+                                         u64 *query_id, u32 *cmd_quality)
 {
     *query_id = 0;
-    *cmd_open = 0;
+    u16 cmd_open = 0;
+    u16 query_quality = PGWT_QUERY_QUALITY_NONE;
     if (!cfg || cfg->generation == 0) {
         if (edge) {
             *query_id = edge->query_id;
-            *cmd_open = edge->cmd_open;
+            cmd_open = edge->cmd_open;
+            query_quality = edge->query_quality;
         }
+        *cmd_quality = (u32)cmd_open | ((u32)query_quality << 16);
         return;
     }
     if (seed && seed->generation == cfg->generation) {
         *query_id = seed->query_id;
-        *cmd_open = seed->cmd_open;
+        cmd_open = seed->cmd_open;
+        query_quality = seed->query_quality;
     }
-    if (!edge)
+    if (!edge) {
+        *cmd_quality = (u32)cmd_open | ((u32)query_quality << 16);
         return;
+    }
     if (edge->query_generation == cfg->generation &&
         edge->query_edge_ts >= cfg->attach_boundary_ns)
+    {
         *query_id = edge->query_id;
+        query_quality = edge->query_quality;
+    }
     if (edge->cmd_generation == cfg->generation &&
         edge->cmd_edge_ts >= cfg->attach_boundary_ns)
-        *cmd_open = edge->cmd_open;
+        cmd_open = edge->cmd_open;
+    *cmd_quality = (u32)cmd_open | ((u32)query_quality << 16);
 }
 
 /* ── Lifecycle Events (ring buffer) ───────────────────────── */
@@ -195,7 +212,7 @@ struct pgwt_trace_event {
 #define PGWT_CPU_NS_UNKNOWN  0xFFFFFFFFFFFFFFFFULL
 
 /* flags bits — NEVER persisted to the trace file (neither block layout
- * encodes a flags column). Two producers annotate in memory:
+ * encodes a flags column). Producers annotate in memory:
  *
  *   - the trace reader sets SAMPLE on records decoded from a SAMPLES block:
  *     a point observation (new_event = sampled event; old_event = 0;
@@ -215,6 +232,7 @@ struct pgwt_trace_event {
 #define PGWT_EVENT_FLAG_BACKGROUND 0x10U  /* pid is another aux process */
 #define PGWT_EVENT_FLAG_PLAN       0x20U  /* inside a PLAN marker window */
 #define PGWT_EVENT_FLAG_EXEC       0x40U  /* inside an EXEC marker window */
+#define PGWT_EVENT_FLAG_QUERY_SYNTH 0x80U /* PG13 escalation straddler seed */
 
 #define PGWT_EVENT_EXIT  0xFFFFFFFFU  /* sentinel new_event for process exit */
 
@@ -343,10 +361,10 @@ static inline int pgwt_classify_wei(uint32_t wei)
 #define PGWT_BPF_FAIL_SEEN_QIDS  1  /* seen_query_ids insert failed (full) */
 #define PGWT_BPF_FAIL_MAX        2
 
-/* Per-query trap counters. These are the Stage 3 overhead acceptance signal:
- * both stay exactly zero in de-escalated sampled mode on a validated PG14-18
- * layout, and advance only while the exact bundle is attached (or permanently
- * on PG13/degraded fallback layouts). */
+/* Per-query trap counters. These are the Stages 3/4 overhead acceptance
+ * signal: both stay exactly zero in de-escalated sampled mode on a validated
+ * PG13-18 layout, and advance only while the exact bundle is attached (or
+ * permanently on degraded fallback layouts). */
 #define PGWT_UPROBE_FIRE_QUERY     0
 #define PGWT_UPROBE_FIRE_ACTIVITY  1
 #define PGWT_UPROBE_FIRE_MAX       2

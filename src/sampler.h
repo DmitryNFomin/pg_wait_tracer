@@ -8,11 +8,10 @@
  * PostgreSQL executes zero extra instructions.
  *
  * Addresses come from the backend registry (pid -> resolved wait_event_info
- * address, the same field the watchpoint tier resolves). On a validated
- * PG14-18 layout, query_id and command state come from the same coherent
- * PgBackendStatus read at the tick. PG13/degraded layouts join the pinned
- * uprobe edge map with one batched map dump per tick and a per-pid fallback
- * on kernels without BPF_MAP_LOOKUP_BATCH (SMP-4).
+ * address, the same field the watchpoint tier resolves). A validated PG14-18
+ * layout reads query_id and command state coherently at the tick. Validated
+ * PG13 reads state plus activity and derives a context-keyed synthetic group.
+ * Only degraded layouts join the pinned uprobe edge map (SMP-4).
  *
  * Batching soundness (SMP-2): PG's main shm is an inherited MAP_SHARED
  * anonymous mmap — same VA in every backend AND the same pages, so reading
@@ -51,6 +50,9 @@ struct pgwt_sample_target {
     pid_t    pid;
     uint64_t wait_event_addr; /* PGPROC->wait_event_info address */
     uint64_t query_id;        /* joined from the registry/state_map */
+    uint32_t databaseid;
+    uint32_t userid;
+    uint8_t  query_quality;
     int      is_shared;       /* 1 = addr verified in a MAP_SHARED mapping
                                * (batchable); anything else = per-pid read
                                * only (SMP-2) */

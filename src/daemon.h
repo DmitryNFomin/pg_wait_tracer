@@ -16,6 +16,7 @@
 #include "effective_cores.h"
 #include "backend_status_layout.h"
 #include "exact_probe.h"
+#include "pgss_resolver.h"
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -53,6 +54,14 @@ struct pgwt_counters {
                                                           * raw last_query_id */
     uint64_t sampled_attr_shadow_cmd_open_mismatch_total;
     uint64_t sampled_attr_shadow_query_id_mismatch_total;
+    /* Stage 4 sampled query-text resolver. pending is a live gauge; the rest
+     * are lifetime outcomes. Updated atomically by the async pgss worker. */
+    uint64_t sampled_text_pending;
+    uint64_t sampled_text_resolved_total;
+    uint64_t sampled_text_absent_total;
+    uint64_t sampled_text_evicted_total;
+    uint64_t sampled_text_error_total;
+    uint64_t sampled_text_retry_exhausted_total;
 
     /* Capture hardening (T4). All of these mean "something the operator
      * must know about is happening" — each is paired with a loud log. */
@@ -248,6 +257,7 @@ struct pgwt_daemon {
     struct pgwt_event_writer *event_writer;     /* NULL if disabled */
     struct pgwt_summary_writer *summary_writer; /* NULL if disabled */
     struct pgwt_query_text_capture *query_text_capture; /* NULL if disabled */
+    struct pgwt_pgss_resolver *pgss_resolver;            /* PG14+ async text */
     struct pgwt_backend_meta_writer *backend_meta;       /* NULL if disabled */
 
     /* Time windows */

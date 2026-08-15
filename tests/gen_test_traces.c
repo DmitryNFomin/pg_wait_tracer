@@ -73,6 +73,8 @@
 struct test_backend {
     uint32_t pid;
     uint32_t leader_pid;
+    uint32_t databaseid;
+    uint32_t userid;
     char     type[32];
     char     user[64];
     char     db[64];
@@ -80,6 +82,9 @@ struct test_backend {
 
 struct test_query {
     uint64_t id;
+    uint32_t databaseid;
+    uint32_t userid;
+    char     source[16];
     char     text[256];
 };
 
@@ -181,6 +186,10 @@ static int parse_backends(const char *arr, struct scenario *sc)
         if ((v = find_key(p, "leader_pid")) && v < end) {
             b->leader_pid = (uint32_t)strtoull(v, NULL, 10);
         }
+        if ((v = find_key(p, "databaseid")) && v < end)
+            b->databaseid = (uint32_t)strtoull(v, NULL, 10);
+        if ((v = find_key(p, "userid")) && v < end)
+            b->userid = (uint32_t)strtoull(v, NULL, 10);
         if ((v = find_key(p, "type"))) { parse_string(&v, b->type, sizeof(b->type)); }
         if ((v = find_key(p, "user"))) { parse_string(&v, b->user, sizeof(b->user)); }
         if ((v = find_key(p, "db")))   { parse_string(&v, b->db, sizeof(b->db)); }
@@ -212,6 +221,12 @@ static int parse_queries(const char *arr, struct scenario *sc)
         const char *v;
         if ((v = find_key(p, "id"))) { q->id = strtoull(v, NULL, 10); }
         if ((v = find_key(p, "text"))) { parse_string(&v, q->text, sizeof(q->text)); }
+        if ((v = find_key(p, "databaseid")) && v < end)
+            q->databaseid = (uint32_t)strtoull(v, NULL, 10);
+        if ((v = find_key(p, "userid")) && v < end)
+            q->userid = (uint32_t)strtoull(v, NULL, 10);
+        if ((v = find_key(p, "source")) && v < end)
+            parse_string(&v, q->source, sizeof(q->source));
 
         sc->num_queries++;
         p = end + 1;
@@ -244,6 +259,8 @@ static int parse_events(const char *arr, struct scenario *sc)
         if ((v = find_key(p, "old")))  ev->old_event = (uint32_t)strtoull(v, NULL, 10);
         if ((v = find_key(p, "new")))  ev->new_event = (uint32_t)strtoull(v, NULL, 10);
         if ((v = find_key(p, "qid")))  ev->query_id = strtoull(v, NULL, 10);
+        if ((v = find_key(p, "flags")) && v < end)
+            ev->flags = (uint16_t)strtoull(v, NULL, 10);
         /* T8: measured on-CPU ns for the interval (only meaningful with
          * top-level "cpu_measured":1). Absent → 0; for we==0 CPU gaps that
          * makes CPU*=0/OffCPU*=full, so a measured scenario should set it. */
@@ -346,6 +363,10 @@ static int write_backends_jsonl(const char *dir, struct scenario *sc)
         }
         if (b->leader_pid > 0)
             fprintf(f, ",\"leader_pid\":%u", b->leader_pid);
+        if (b->databaseid > 0)
+            fprintf(f, ",\"dbid\":%u", b->databaseid);
+        if (b->userid > 0)
+            fprintf(f, ",\"userid\":%u", b->userid);
         fprintf(f, "}\n");
     }
 
@@ -362,8 +383,12 @@ static int write_query_texts(const char *dir, struct scenario *sc)
 
     for (int i = 0; i < sc->num_queries; i++) {
         struct test_query *q = &sc->queries[i];
-        fprintf(f, "{\"q\":%llu,\"t\":\"%s\",\"ts\":%llu}\n",
-                (unsigned long long)q->id, q->text,
+        fprintf(f, "{\"q\":\"%lld\"",
+                (long long)(int64_t)q->id);
+        if (q->databaseid > 0) fprintf(f, ",\"d\":%u", q->databaseid);
+        if (q->userid > 0) fprintf(f, ",\"u\":%u", q->userid);
+        if (q->source[0]) fprintf(f, ",\"s\":\"%s\"", q->source);
+        fprintf(f, ",\"t\":\"%s\",\"ts\":%llu}\n", q->text,
                 (unsigned long long)1000000000ULL);
     }
 

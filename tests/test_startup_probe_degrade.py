@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
-"""PG13/no-pgss startup exact-probe degradation regression.
+"""PG13/no-pgss sampled-synthetic and exact-probe degradation regression.
 
 Run against a PostgreSQL 13 postmaster whose shared_preload_libraries does not
-contain pg_stat_statements.  Both tiered and full mode must drop the unavailable
-pgstat_report_query_id startup probe, reach the control socket, and show a real
-PgSleep wait in the default Time Model view.  A third full-mode run forces the
-remaining activity-link attach to fail and proves that startup attach errors
-also degrade to wait-only capture instead of aborting the daemon.
+contain pg_stat_statements. Tiered mode must use its validated synthetic path
+with no sampled attribution probes. Full mode drops the unavailable numeric
+query probe but keeps wait capture; a forced activity-link failure also remains
+wait-only instead of aborting the daemon.
 
 Usage: sudo PGPORT=55413 python3 tests/test_startup_probe_degrade.py \
            --pid POSTMASTER_PID --port 55413
@@ -107,7 +106,8 @@ def run_case(pm_pid, port, mode, fail_activity=False):
         check(ready, f"{label}: daemon reaches the control socket")
         if ready:
             status = ctl(trace_dir, {"cmd": "status"})
-            expected_mask = 0 if fail_activity else ACTIVITY_MASK
+            expected_mask = (0 if mode == "tiered" or fail_activity
+                             else ACTIVITY_MASK)
             check(status.get("exact_probe_attached_mask") == expected_mask,
                   f"{label}: unavailable startup probes are dropped "
                   f"(mask={expected_mask})")
@@ -133,9 +133,13 @@ def run_case(pm_pid, port, mode, fail_activity=False):
     err = stderr.decode("utf-8", errors="replace")
     check(tracer.returncode == 0,
           f"{label}: daemon exits normally (rc={tracer.returncode})")
-    check("startup exact query-id probe unavailable" in err and
-          "query attribution unavailable" in err,
-          f"{label}: missing PG13 query-id symbol is warned explicitly")
+    if mode == "full":
+        check("startup exact query-id probe unavailable" in err and
+              "query attribution unavailable" in err,
+              f"{label}: missing PG13 exact query-id source is warned explicitly")
+    else:
+        check("sampled exact probes detached" in err,
+              f"{label}: validated synthetic sampled route detaches probes")
     if fail_activity:
         check("forcing exact-link attach failure" in err and
               "startup exact activity probe unavailable" in err,

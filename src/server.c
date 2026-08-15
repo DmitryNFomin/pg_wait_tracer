@@ -106,6 +106,9 @@ static void emit_json(cJSON *root)
 
 struct qt_entry {
     uint64_t query_id;
+    uint32_t databaseid;
+    uint32_t userid;
+    uint8_t  source_priority;
     char    *text;        /* heap-allocated SQL text */
 };
 
@@ -114,6 +117,9 @@ struct qt_entry {
 struct bm_entry {
     uint32_t pid;
     uint32_t leader_pid;
+    uint32_t databaseid;
+    uint32_t userid;
+    uint8_t  context_ambiguous;
     char     type[32];
     char     user[64];
     char     db[64];
@@ -247,11 +253,17 @@ struct pgwt_server {
     struct qt_entry *qt_map;
     int  qt_capacity;
     int  qt_count;
+    struct timespec qt_mtime;
+    off_t qt_size;
+    struct timespec qs_mtime;
+    off_t qs_size;
 
     /* Backend metadata map: pid → type/user/db (dynamic, power-of-2 sized) */
     struct bm_entry *bm_map;
     int  bm_capacity;
     int  bm_count;
+    struct timespec bm_mtime;
+    off_t bm_size;
 
     /* T2: pid → category-flag table (sorted by pid), derived from bm_map.
      * Feeds pgwt_tag_events so every raw compute path can apply the
@@ -378,22 +390,45 @@ static uint64_t qt_hash64(uint64_t x)
     return x;
 }
 
-static void qt_map_insert(struct pgwt_server *srv, uint64_t query_id,
-                           const char *text)
+static uint64_t qt_key_hash(uint64_t query_id, uint32_t databaseid,
+                            uint32_t userid)
+{
+    return qt_hash64(query_id ^ ((uint64_t)databaseid << 32) ^ userid);
+}
+
+static void qt_map_insert(struct pgwt_server *srv, uint32_t databaseid,
+                          uint32_t userid, uint64_t query_id,
+                          unsigned source_priority, const char *text)
 {
     if (!srv->qt_map) return;
     int mask = srv->qt_capacity - 1;
-    uint32_t idx = (uint32_t)(qt_hash64(query_id) & mask);
+    uint32_t idx = (uint32_t)(qt_key_hash(query_id, databaseid, userid) & mask);
     for (int i = 0; i < srv->qt_capacity; i++) {
         struct qt_entry *e = &srv->qt_map[idx];
         if (e->query_id == 0) {
             e->query_id = query_id;
-            e->text = strdup(text);
+            e->databaseid = databaseid;
+            e->userid = userid;
+            e->source_priority = (uint8_t)source_priority;
+            e->text = text ? strdup(text) : NULL;
             srv->qt_count++;
             return;
         }
-        if (e->query_id == query_id)
-            return;  /* already present */
+        if (e->query_id == query_id && e->databaseid == databaseid &&
+            e->userid == userid) {
+            if (source_priority > e->source_priority) {
+                char *replacement = text ? strdup(text) : NULL;
+                if (!text || replacement) {
+                    free(e->text);
+                    e->text = replacement;
+                    e->source_priority = (uint8_t)source_priority;
+                }
+            } else if (source_priority == e->source_priority &&
+                       !e->text && text) {
+                e->text = strdup(text);
+            }
+            return;
+        }
         idx = (idx + 1) & mask;
     }
 }
@@ -411,21 +446,85 @@ static void qt_map_clear(struct pgwt_server *srv)
     srv->qt_count = 0;
 }
 
-static const char *qt_map_lookup(const struct pgwt_server *srv, uint64_t query_id)
+static const struct qt_entry *qt_map_lookup_entry(
+    const struct pgwt_server *srv, uint32_t databaseid, uint32_t userid,
+    uint64_t query_id)
 {
     if (query_id == 0 || !srv->qt_map)
         return NULL;
     int mask = srv->qt_capacity - 1;
-    uint32_t idx = (uint32_t)(qt_hash64(query_id) & mask);
+    uint32_t idx = (uint32_t)(qt_key_hash(query_id, databaseid, userid) & mask);
     for (int i = 0; i < srv->qt_capacity; i++) {
         const struct qt_entry *e = &srv->qt_map[idx];
-        if (e->query_id == query_id)
-            return e->text;
+        if (e->query_id == query_id && e->databaseid == databaseid &&
+            e->userid == userid)
+            return e;
         if (e->query_id == 0)
             return NULL;
         idx = (idx + 1) & mask;
     }
     return NULL;
+}
+
+/* Some views (notably variants) aggregate without db/user context. Preserve
+ * their preview only when qid is itself safe: the winning entry for every
+ * context must have byte-identical text. qt_map already contains only the
+ * highest-priority source for each (db,user,qid). */
+static const struct qt_entry *qt_map_lookup_unambiguous_qid(
+    const struct pgwt_server *srv, uint64_t query_id)
+{
+    const struct qt_entry *winner = NULL;
+    if (!query_id || !srv->qt_map)
+        return NULL;
+    for (int i = 0; i < srv->qt_capacity; i++) {
+        const struct qt_entry *e = &srv->qt_map[i];
+        if (e->query_id != query_id || !e->text)
+            continue;
+        if (!winner)
+            winner = e;
+        else if (strcmp(winner->text, e->text) != 0)
+            return NULL;
+    }
+    return winner;
+}
+
+static void server_load_query_sources(struct pgwt_server *srv)
+{
+    char path[600];
+    snprintf(path, sizeof(path), "%s/query_sources.jsonl", srv->trace_dir);
+    /* Snapshot before reading. If an append races EOF, the next request sees
+     * a newer signature and reloads instead of permanently missing it. */
+    struct stat initial;
+    bool have_initial = stat(path, &initial) == 0;
+    FILE *fp = fopen(path, "r");
+    if (fp) {
+        char *line = NULL;
+        size_t cap = 0;
+        while (getline(&line, &cap, fp) > 0) {
+            cJSON *root = cJSON_Parse(line);
+            if (!root) continue;
+            cJSON *q = cJSON_GetObjectItem(root, "q");
+            cJSON *d = cJSON_GetObjectItem(root, "d");
+            cJSON *u = cJSON_GetObjectItem(root, "u");
+            cJSON *s = cJSON_GetObjectItem(root, "s");
+            uint64_t qid = 0;
+            if (cJSON_IsString(q) && q->valuestring)
+                qid = (uint64_t)strtoll(q->valuestring, NULL, 10);
+            if (qid && cJSON_IsString(s) && s->valuestring &&
+                strcmp(s->valuestring, "synthetic") == 0)
+                qt_map_insert(srv,
+                    cJSON_IsNumber(d) ? (uint32_t)d->valuedouble : 0,
+                    cJSON_IsNumber(u) ? (uint32_t)u->valuedouble : 0,
+                    qid, 2, NULL);
+            cJSON_Delete(root);
+        }
+        free(line);
+        fclose(fp);
+    }
+    if (have_initial) {
+        srv->qs_mtime = initial.st_mtim;
+        srv->qs_size = initial.st_size;
+    }
 }
 
 /* Load query_texts.jsonl from trace dir into the hash map.
@@ -434,16 +533,23 @@ static void server_load_query_texts(struct pgwt_server *srv)
 {
     char path[600];
     snprintf(path, sizeof(path), "%s/query_texts.jsonl", srv->trace_dir);
+    char source_path[600];
+    snprintf(source_path, sizeof(source_path), "%s/query_sources.jsonl",
+             srv->trace_dir);
+    struct stat initial;
+    bool have_initial = stat(path, &initial) == 0;
 
     /* Size the hash map to fit the file */
-    int lines = count_lines(path);
+    int lines = count_lines(path) + count_lines(source_path);
     srv->qt_capacity = next_pow2(lines * 2);
     srv->qt_map = calloc(srv->qt_capacity, sizeof(struct qt_entry));
     if (!srv->qt_map) { srv->qt_capacity = 0; return; }
 
     FILE *fp = fopen(path, "r");
-    if (!fp)
+    if (!fp) {
+        server_load_query_sources(srv);
         return;
+    }
 
     char *line = NULL;
     size_t line_cap = 0;
@@ -455,6 +561,9 @@ static void server_load_query_texts(struct pgwt_server *srv)
 
         cJSON *q = cJSON_GetObjectItem(root, "q");
         cJSON *t = cJSON_GetObjectItem(root, "t");
+        cJSON *d = cJSON_GetObjectItem(root, "d");
+        cJSON *u = cJSON_GetObjectItem(root, "u");
+        cJSON *s = cJSON_GetObjectItem(root, "s");
 
         uint64_t qid = 0;
         if (cJSON_IsString(q) && q->valuestring)
@@ -466,21 +575,63 @@ static void server_load_query_texts(struct pgwt_server *srv)
             continue;
         }
 
-        qt_map_insert(srv, qid, t->valuestring);
+        uint32_t databaseid = cJSON_IsNumber(d) ? (uint32_t)d->valuedouble : 0;
+        uint32_t userid = cJSON_IsNumber(u) ? (uint32_t)u->valuedouble : 0;
+        unsigned priority = 3; /* legacy entries are full/raw */
+        if (cJSON_IsString(s) && s->valuestring) {
+            if (strcmp(s->valuestring, "pgss") == 0) priority = 1;
+            else if (strcmp(s->valuestring, "synthetic") == 0) priority = 2;
+            else if (strcmp(s->valuestring, "full") != 0) priority = 0;
+        }
+        if (priority)
+            qt_map_insert(srv, databaseid, userid, qid, priority,
+                          t->valuestring);
         cJSON_Delete(root);
     }
 
     free(line);
     fclose(fp);
+    if (have_initial) {
+        srv->qt_mtime = initial.st_mtim;
+        srv->qt_size = initial.st_size;
+    }
+    server_load_query_sources(srv);
     if (srv->qt_count > 0)
         fprintf(stderr, "pgwt-server: loaded %d query texts\n", srv->qt_count);
+}
+
+/* The resolver appends after server startup. Direct protocol clients are not
+ * required to send `info` between data requests, so refresh on sidecar
+ * mtime/size changes before serving a text-bearing view. */
+static void server_refresh_query_texts(struct pgwt_server *srv)
+{
+    char path[600];
+    snprintf(path, sizeof(path), "%s/query_texts.jsonl", srv->trace_dir);
+    struct stat st;
+    bool changed = false;
+    if (stat(path, &st) == 0 &&
+        (st.st_size != srv->qt_size ||
+         st.st_mtim.tv_sec != srv->qt_mtime.tv_sec ||
+         st.st_mtim.tv_nsec != srv->qt_mtime.tv_nsec))
+        changed = true;
+    snprintf(path, sizeof(path), "%s/query_sources.jsonl", srv->trace_dir);
+    if (stat(path, &st) == 0 &&
+        (st.st_size != srv->qs_size ||
+         st.st_mtim.tv_sec != srv->qs_mtime.tv_sec ||
+         st.st_mtim.tv_nsec != srv->qs_mtime.tv_nsec))
+        changed = true;
+    if (!changed)
+        return;
+    qt_map_clear(srv);
+    server_load_query_texts(srv);
 }
 
 /* ── Backend metadata map ─────────────────────────────────── */
 
 static void bm_map_insert(struct pgwt_server *srv, uint32_t pid,
                           uint32_t leader_pid, const char *type,
-                          const char *user, const char *db)
+                          const char *user, const char *db,
+                          uint32_t databaseid, uint32_t userid)
 {
     if (!srv->bm_map) return;
     int mask = srv->bm_capacity - 1;
@@ -490,6 +641,8 @@ static void bm_map_insert(struct pgwt_server *srv, uint32_t pid,
         if (e->pid == 0) {
             e->pid = pid;
             e->leader_pid = leader_pid;
+            e->databaseid = databaseid;
+            e->userid = userid;
             snprintf(e->type, sizeof(e->type), "%s", type);
             snprintf(e->user, sizeof(e->user), "%s", user ? user : "");
             snprintf(e->db, sizeof(e->db), "%s", db ? db : "");
@@ -499,6 +652,13 @@ static void bm_map_insert(struct pgwt_server *srv, uint32_t pid,
         if (e->pid == pid) {
             /* Update with latest info */
             if (leader_pid != 0) e->leader_pid = leader_pid;
+            if (databaseid && userid && e->databaseid && e->userid &&
+                (databaseid != e->databaseid || userid != e->userid))
+                e->context_ambiguous = 1;
+            if (!e->context_ambiguous) {
+                if (databaseid != 0) e->databaseid = databaseid;
+                if (userid != 0) e->userid = userid;
+            }
             snprintf(e->type, sizeof(e->type), "%s", type);
             if (user && user[0]) snprintf(e->user, sizeof(e->user), "%s", user);
             if (db && db[0]) snprintf(e->db, sizeof(e->db), "%s", db);
@@ -521,6 +681,40 @@ static const struct bm_entry *bm_map_lookup(const struct pgwt_server *srv,
         idx = (idx + 1) & mask;
     }
     return NULL;
+}
+
+/* Resolve the context represented by a qid row. top_queries aggregates by qid
+ * for on-disk compatibility, so a row is context-addressable only when every
+ * contributing PID has metadata and agrees. Missing metadata is ambiguous:
+ * accepting the one known contributor could expose its text on a mixed row. */
+static int query_context_for_events(const struct pgwt_server *srv,
+                                    const struct pgwt_trace_event *events,
+                                    int count, uint64_t query_id,
+                                    uint32_t *databaseid, uint32_t *userid)
+{
+    *databaseid = 0;
+    *userid = 0;
+    bool found = false;
+    for (int i = 0; events && i < count; i++) {
+        if (events[i].query_id != query_id)
+            continue;
+        const struct bm_entry *bm = bm_map_lookup(srv, events[i].pid);
+        if (!bm || bm->context_ambiguous || !bm->databaseid || !bm->userid) {
+            *databaseid = 0;
+            *userid = 0;
+            return -1;
+        }
+        if (!found) {
+            *databaseid = bm->databaseid;
+            *userid = bm->userid;
+            found = true;
+        } else if (*databaseid != bm->databaseid || *userid != bm->userid) {
+            *databaseid = 0;
+            *userid = 0;
+            return -1;
+        }
+    }
+    return found ? 1 : 0;
 }
 
 static int cmp_backend_link_pid(const void *a, const void *b)
@@ -560,6 +754,9 @@ static void server_load_backends(struct pgwt_server *srv)
 {
     char path[600];
     snprintf(path, sizeof(path), "%s/backends.jsonl", srv->trace_dir);
+    /* Pre-read signature closes the EOF/stat race for append-only metadata. */
+    struct stat initial;
+    bool have_initial = stat(path, &initial) == 0;
 
     /* Size the hash map to fit the file */
     int lines = count_lines(path);
@@ -584,18 +781,29 @@ static void server_load_backends(struct pgwt_server *srv)
         cJSON *user_item = cJSON_GetObjectItem(root, "user");
         cJSON *db_item   = cJSON_GetObjectItem(root, "db");
         cJSON *leader_item = cJSON_GetObjectItem(root, "leader_pid");
+        cJSON *dbid_item = cJSON_GetObjectItem(root, "dbid");
+        cJSON *userid_item = cJSON_GetObjectItem(root, "userid");
 
         const char *type = cJSON_IsString(type_item) ? type_item->valuestring : "unknown";
         const char *user = cJSON_IsString(user_item) ? user_item->valuestring : "";
         const char *db   = cJSON_IsString(db_item)   ? db_item->valuestring   : "";
         uint32_t leader_pid = cJSON_IsNumber(leader_item)
                             ? (uint32_t)leader_item->valuedouble : 0;
+        uint32_t databaseid = cJSON_IsNumber(dbid_item)
+                            ? (uint32_t)dbid_item->valuedouble : 0;
+        uint32_t userid = cJSON_IsNumber(userid_item)
+                       ? (uint32_t)userid_item->valuedouble : 0;
 
-        bm_map_insert(srv, pid, leader_pid, type, user, db);
+        bm_map_insert(srv, pid, leader_pid, type, user, db,
+                      databaseid, userid);
         cJSON_Delete(root);
     }
 
     fclose(fp);
+    if (have_initial) {
+        srv->bm_mtime = initial.st_mtim;
+        srv->bm_size = initial.st_size;
+    }
     if (srv->bm_count > 0)
         fprintf(stderr, "pgwt-server: loaded %d backend metadata entries\n",
                 srv->bm_count);
@@ -643,6 +851,28 @@ static void server_build_pid_cats(struct pgwt_server *srv)
     }
     qsort(srv->pid_cats, (size_t)n, sizeof(*srv->pid_cats), pid_cat_cmp);
     srv->n_pid_cats = n;
+}
+
+/* Backend context is appended independently of query text. Refresh it on the
+ * same request so a long-lived server can address a newly resolved sidecar
+ * entry without requiring an intervening `info` request. */
+static void server_refresh_backends(struct pgwt_server *srv)
+{
+    char path[600];
+    snprintf(path, sizeof(path), "%s/backends.jsonl", srv->trace_dir);
+    struct stat st;
+    if (stat(path, &st) != 0)
+        return;
+    if (st.st_size == srv->bm_size &&
+        st.st_mtim.tv_sec == srv->bm_mtime.tv_sec &&
+        st.st_mtim.tv_nsec == srv->bm_mtime.tv_nsec)
+        return;
+    free(srv->bm_map);
+    srv->bm_map = NULL;
+    srv->bm_capacity = 0;
+    srv->bm_count = 0;
+    server_load_backends(srv);
+    server_build_pid_cats(srv);
 }
 
 /* ── Event caching + on-demand loading ────────────────────── */
@@ -2130,6 +2360,8 @@ static void handle_top_sessions(struct pgwt_server *srv, struct pgwt_request *re
 
 static void handle_top_queries(struct pgwt_server *srv, struct pgwt_request *req)
 {
+    server_refresh_query_texts(srv);
+    server_refresh_backends(srv);
     uint64_t from = req->from_ns ? req->from_ns : srv->earliest_wall_ns;
     uint64_t to   = req->to_ns   ? req->to_ns   : srv->latest_wall_ns;
     double wall_ms = (double)(to - from) / 1e6;
@@ -2288,9 +2520,32 @@ static void handle_top_queries(struct pgwt_server *srv, struct pgwt_request *req
         }
 
         /* Add query text if available */
-        const char *qt = qt_map_lookup(srv, res.rows[i].query_id);
-        if (qt)
-            cJSON_AddStringToObject(r, "text", qt);
+        uint32_t query_databaseid = 0, query_userid = 0;
+        int have_context = query_context_for_events(
+            srv, all_events, ecount, res.rows[i].query_id,
+            &query_databaseid, &query_userid);
+        const struct qt_entry *qt_entry = NULL;
+        if (have_context > 0)
+            qt_entry = qt_map_lookup_entry(srv, query_databaseid,
+                                           query_userid,
+                                           res.rows[i].query_id);
+        else if (have_context == 0)
+            qt_entry = qt_map_lookup_entry(srv, 0, 0,
+                                           res.rows[i].query_id);
+        cJSON_AddStringToObject(r, "text",
+                                qt_entry && qt_entry->text ? qt_entry->text : "");
+        bool synthetic_quality = qt_entry && qt_entry->source_priority == 2;
+        for (int e = 0; !synthetic_quality && all_events && e < ecount; e++)
+            if (all_events[e].query_id == res.rows[i].query_id &&
+                (all_events[e].flags & PGWT_EVENT_FLAG_QUERY_SYNTH))
+                synthetic_quality = true;
+        if (synthetic_quality)
+            cJSON_AddStringToObject(r, "attribution_quality",
+                                    "pg13-synth-v1");
+        if (have_context > 0) {
+            cJSON_AddNumberToObject(r, "databaseid", query_databaseid);
+            cJSON_AddNumberToObject(r, "userid", query_userid);
+        }
 
         /* Per-class time breakdown */
         cJSON *classes = cJSON_AddArrayToObject(r, "classes");
@@ -3494,8 +3749,10 @@ static cJSON *serialize_variants(struct pgwt_server *srv,
         }
 
         if (v->top_query_id) {
-            const char *qt = qt_map_lookup(srv, v->top_query_id);
-            if (qt) cJSON_AddStringToObject(vj, "query_text", qt);
+            const struct qt_entry *qt = qt_map_lookup_unambiguous_qid(
+                srv, v->top_query_id);
+            if (qt)
+                cJSON_AddStringToObject(vj, "query_text", qt->text);
         }
 
         cJSON_AddItemToArray(arr, vj);
@@ -3505,6 +3762,8 @@ static cJSON *serialize_variants(struct pgwt_server *srv,
 
 static void handle_variants(struct pgwt_server *srv, struct pgwt_request *req)
 {
+    server_refresh_query_texts(srv);
+    server_refresh_backends(srv);
     int count;
     struct pgwt_load_info linfo = {0};
     struct pgwt_trace_event *events =

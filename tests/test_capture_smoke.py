@@ -10,8 +10,8 @@ job) closes that hole.
 Deterministic workload, asserted with bounded values:
   1. pg_sleep(3)              -> Timeout:PgSleep, total within tolerance
   2. blocked LOCK TABLE pair  -> Lock:relation wait, bounded duration
-  3. short pgbench run        -> query_event view shows query_ids that
-                                 cross-check against pg_stat_statements
+  3. short pgbench run        -> query_event shows PG14+ pgss query ids or
+                                 PG13 versioned synthetic text groups
 
 Wait events are asserted in BOTH:
   - the live view output (--view system_event / query_event), and
@@ -23,17 +23,16 @@ Regression coverage (referenced by PR number, per the Trust Milestone):
   - PR #30: in sampled/tiered mode the sampler must feed the live
     accumulator — the tiered live-view assertions here are empty if that
     regresses.
-  - PR #31: the query-attribution uprobe must actually fire (on PG13 it
-    must probe standard_ExecutorStart) — the query-attribution assertions
-    here go empty if it regresses. The assertion cross-checks captured
-    query_ids against pg_stat_statements.queryid, so junk/phantom ids
-    (e.g. marker leakage, FID-4) cannot satisfy it.
+  - PR #31: full/exact query attribution must capture real query ids. In
+    sampled mode, Stage 4 deliberately detaches that uprobe: PG14+ reads the
+    in-core id and resolves text lazily through pgss; PG13 reads activity and
+    produces a context-keyed synthetic group.
   - PR #24 (load base) would make this whole test capture zero events on
     non-PIE layouts; the unit-level guard is tests/test_discovery*.
 
 Environment requirements (ci.yml configures both; fail loudly otherwise):
-  - pg_stat_statements in shared_preload_libraries (PG13: required for
-    query attribution at all; PG14+: activates compute_query_id=auto).
+  - pg_stat_statements in shared_preload_libraries (required for PG13 exact
+    numeric ids and PG14+ sampled text; PG14+ also needs query ids enabled).
   - pgbench + psql for the workload, connecting as "postgres" via local
     trust auth.
 
@@ -277,6 +276,32 @@ def server_query(trace_dir, cmd, extra=None):
     return resp
 
 
+QUERY_TEXT_SOURCE_PRIORITY = {"pgss": 1, "synthetic": 2, "full": 3}
+
+
+def query_text_key(obj):
+    """Canonical context key shared by top_queries and query_texts.jsonl."""
+    try:
+        return (int(obj.get("d", obj.get("databaseid", 0))),
+                int(obj.get("u", obj.get("userid", 0))),
+                int(str(obj.get("q", obj.get("query_id", "0"))), 10))
+    except (TypeError, ValueError):
+        return None
+
+
+def winning_query_text_sources(records):
+    """Return the highest-priority persisted text source for each context."""
+    winners = {}
+    for record in records:
+        key = query_text_key(record)
+        source = record.get("s")
+        priority = QUERY_TEXT_SOURCE_PRIORITY.get(source, 0)
+        if key and key[2] and record.get("t") and priority > \
+                QUERY_TEXT_SOURCE_PRIORITY.get(winners.get(key), 0):
+            winners[key] = source
+    return winners
+
+
 def parse_time_model(output):
     """Parse the tracer's live time_model text output → {row_name: ms}. The
     last occurrence of each row wins (later display snapshots overwrite
@@ -407,7 +432,7 @@ def phase_live_system_event(pm_pid, mode, core=False):
     assert_wait_events(events, f"live/{mode}", core=core)
 
 
-def phase_live_query_event(pm_pid, mode, core=False):
+def phase_live_query_event(pm_pid, mode, pg_major, core=False):
     """PR #31 regression: the query-attribution path works end to end —
     query_event view ids must intersect pg_stat_statements.queryid."""
     print(f"--- Phase 2: query attribution (query_event, --mode {mode}) ---")
@@ -446,7 +471,11 @@ def phase_live_query_event(pm_pid, mode, core=False):
     check(len(truth) > 0,
           f"pg_stat_statements recorded the pgbench queries ({len(truth)} ids)")
     matched = view_ids & truth
-    if core:
+    if pg_major == 13 and mode == "tiered":
+        check(len(view_ids) > 0,
+              f"PG13 sampled query_event has synthetic grouping keys "
+              f"(view={len(view_ids)}; intentionally not joined to pgss ids)")
+    elif core:
         check(not view_ids or len(matched) > 0,
               f"[core] query_event view ids, if any, cross-check against "
               f"pg_stat_statements — no phantoms (view={len(view_ids)}, "
@@ -458,7 +487,7 @@ def phase_live_query_event(pm_pid, mode, core=False):
               f"[PR #31 regression]")
 
 
-def phase_trace_file(pm_pid, mode, core=False):
+def phase_trace_file(pm_pid, mode, pg_major, core=False):
     print(f"--- Phase 3: written trace file (pgwt-server read, --mode {mode}) ---")
     trace_dir = tempfile.mkdtemp(prefix=f"pgwt_smoke_{mode}_")
     os.chmod(trace_dir, 0o755)
@@ -508,7 +537,57 @@ def phase_trace_file(pm_pid, mode, core=False):
                 trace_ids.add(qid & 0xFFFFFFFFFFFFFFFF)
         truth = pgss_query_ids()
         matched = trace_ids & truth
-        if core:
+        text_rows = [r for r in qresp.get("rows", []) if r.get("text")]
+        if pg_major == 13 and mode == "tiered":
+            check(len(trace_ids) > 0,
+                  f"PG13 trace carries synthetic query grouping keys "
+                  f"(trace={len(trace_ids)}; intentionally not pgss ids)")
+            check(len(text_rows) > 0,
+                  f"PG13 synthetic groups carry normalized activity text "
+                  f"(text rows={len(text_rows)})")
+            sidecar_path = os.path.join(trace_dir, "query_texts.jsonl")
+            sidecar = []
+            try:
+                with open(sidecar_path, encoding="utf-8") as qtf:
+                    sidecar = [json.loads(line) for line in qtf if line.strip()]
+            except (OSError, json.JSONDecodeError):
+                sidecar = []
+            # Tiered mode may escalate and append FULL/raw text for real PG13
+            # query IDs. Only the winning synthetic source carries synth quality.
+            winning_sources = winning_query_text_sources(sidecar)
+            sampled_rows = [
+                row for row in text_rows
+                if winning_sources.get(query_text_key(row)) == "synthetic"
+            ]
+            tagged_sampled_rows = [
+                row for row in sampled_rows
+                if row.get("attribution_quality") == "pg13-synth-v1"
+            ]
+            check(len(sampled_rows) > 0 and
+                  len(tagged_sampled_rows) == len(sampled_rows),
+                  f"every PG13 synthetic-source text row exposes "
+                  f"pg13-synth-v1 attribution quality "
+                  f"(synthetic={len(sampled_rows)}, "
+                  f"tagged={len(tagged_sampled_rows)}, "
+                  f"other-source={len(text_rows) - len(sampled_rows)})")
+            synth_records = [
+                rec for rec in sidecar
+                if rec.get("s") == "synthetic" and
+                   rec.get("v") == "pg13-synth-v1" and
+                   int(rec.get("d", 0)) > 0 and int(rec.get("u", 0)) > 0
+            ]
+            check(len(synth_records) > 0,
+                  "PG13 sidecar pins synthetic source/version and db/user context")
+            normalized_ok = any("?" in rec.get("t", "")
+                                for rec in synth_records) and all(
+                "/*" not in rec.get("t", "") and
+                "--" not in rec.get("t", "") and
+                not re.search(r"'(?:''|[^'])*'|\b\d+(?:\.\d+)?\b",
+                              rec.get("t", ""))
+                for rec in synth_records)
+            check(normalized_ok,
+                  "PG13 sampled text strips comments and literal constants")
+        elif core:
             # --core (nested container): live and trace query-id capture are both
             # best-effort under sampled, PG13 header-offset attribution. Presence
             # is therefore not gated for either, but each keeps the phantom-id
@@ -523,6 +602,10 @@ def phase_trace_file(pm_pid, mode, core=False):
                   f"trace file query attribution cross-checks against "
                   f"pg_stat_statements (trace={len(trace_ids)}, pgss={len(truth)}, "
                   f"matched={len(matched)}) [PR #31 regression]")
+            if mode == "tiered" and pg_major >= 14:
+                check(len(text_rows) > 0,
+                      f"PG{pg_major} sampled query text resolved lazily from "
+                      f"pg_stat_statements (text rows={len(text_rows)})")
     finally:
         wl.stop()
         subprocess.run(["rm", "-rf", trace_dir])
@@ -1822,7 +1905,16 @@ def main():
         print("ERROR: cannot find PostgreSQL postmaster PID")
         sys.exit(1)
 
-    print(f"=== test_capture_smoke --mode {args.mode} (postmaster PID {pm_pid}) ===")
+    version_output = subprocess.check_output(
+        [f"/proc/{pm_pid}/exe", "--version"], text=True)
+    version_match = re.search(r"PostgreSQL\)?\s+(\d+)", version_output)
+    if not version_match:
+        print(f"ERROR: cannot identify PostgreSQL major from {version_output!r}")
+        sys.exit(1)
+    pg_major = int(version_match.group(1))
+
+    print(f"=== test_capture_smoke --mode {args.mode} (postmaster PID {pm_pid}, "
+          f"PG{pg_major}) ===")
 
     # Environment gate: query-attribution assertions need query_ids to be
     # computed at all. Fail LOUDLY rather than skipping (this test exists
@@ -1848,8 +1940,8 @@ def main():
 
     core = args.capture_core
     phase_live_system_event(pm_pid, args.mode, core=core)
-    phase_live_query_event(pm_pid, args.mode, core=core)
-    phase_trace_file(pm_pid, args.mode, core=core)
+    phase_live_query_event(pm_pid, args.mode, pg_major, core=core)
+    phase_trace_file(pm_pid, args.mode, pg_major, core=core)
 
     if core:
         # The remaining phases need hardware watchpoints to actually FIRE

@@ -4,6 +4,7 @@
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
+#include "synthetic_query.h"
 
 static int attach_missing(struct pgwt_exact_probe_core *core, uint32_t mask,
                           const struct pgwt_exact_probe_ops *ops, void *ctx,
@@ -46,9 +47,9 @@ uint32_t pgwt_exact_probe_startup_mask(
         return 0;
     if (mode == PGWT_MODE_FULL)
         return PGWT_EXACT_PROBE_ALL_MASK;
-    bool validated_pg14plus = pg_major >= 14 &&
+    bool validated_tick_source = pg_major >= 13 &&
         pgwt_pgbs_sampled_attr_enabled(layout);
-    return validated_pg14plus ? 0 : PGWT_EXACT_PROBE_ATTR_MASK;
+    return validated_tick_source ? 0 : PGWT_EXACT_PROBE_ATTR_MASK;
 }
 
 int pgwt_exact_probe_core_pin(struct pgwt_exact_probe_core *core,
@@ -352,7 +353,7 @@ int pgwt_exact_probe_startup(struct pgwt_daemon *d)
         fprintf(stderr, "INFO: full exact probe bundle attached from startup\n");
     else if (!dropped && mask == PGWT_EXACT_PROBE_ATTR_MASK)
         fprintf(stderr, "INFO: sampled exact attribution probes pinned "
-                "(PG13/degraded layout fallback)\n");
+                "(degraded layout fallback)\n");
     else if (pinned)
         fprintf(stderr, "INFO: startup exact probes degraded: attached "
                 "mask=0x%x requested=0x%x\n", pinned, mask);
@@ -428,12 +429,14 @@ static int get_config(struct pgwt_daemon *d, struct pgwt_exact_config *cfg)
 
 int pgwt_exact_resolve_attr(struct pgwt_daemon *d, pid_t pid,
                             uint64_t *query_id, uint16_t *cmd_open,
+                            uint16_t *query_quality,
                             uint16_t *phase_flags,
                             uint64_t *plan_start_ts,
                             uint64_t *exec_start_ts)
 {
     if (query_id) *query_id = 0;
     if (cmd_open) *cmd_open = 0;
+    if (query_quality) *query_quality = PGWT_QUERY_QUALITY_NONE;
     if (phase_flags) *phase_flags = 0;
     if (plan_start_ts) *plan_start_ts = 0;
     if (exec_start_ts) *exec_start_ts = 0;
@@ -451,10 +454,15 @@ int pgwt_exact_resolve_attr(struct pgwt_daemon *d, pid_t pid,
 
     uint64_t qid = 0;
     uint16_t open = 0;
+    uint16_t quality = 0;
+    uint32_t packed = 0;
     pgwt_exact_merge_attr(&cfg, have_edge ? &edge : NULL,
-                          have_seed ? &seed : NULL, &qid, &open);
+                          have_seed ? &seed : NULL, &qid, &packed);
+    open = (uint16_t)(packed & 0xffff);
+    quality = (uint16_t)(packed >> 16);
     if (query_id) *query_id = qid;
     if (cmd_open) *cmd_open = open;
+    if (query_quality) *query_quality = quality;
     if (have_edge && edge.phase_generation == cfg.generation) {
         if (phase_flags) *phase_flags = edge.phase_flags;
         if (plan_start_ts) *plan_start_ts = edge.plan_start_ts;
@@ -470,21 +478,66 @@ int pgwt_exact_seed_backend(struct pgwt_daemon *d, pid_t pid,
         return -1;
     uint64_t qid = 0;
     uint16_t open = 0;
+    uint16_t quality = PGWT_QUERY_QUALITY_NONE;
     bool coherent = false;
-    if (pgwt_pgbs_sampled_attr_enabled(&d->backend_status_layout)) {
+    bool activity_source = pgwt_pgbs_sampled_activity_enabled(
+        &d->backend_status_layout);
+    bool sampled_attr_enabled = pgwt_pgbs_sampled_attr_enabled(
+        &d->backend_status_layout);
+    if (sampled_attr_enabled && activity_source && !require_coherent) {
+        /* PG13 auxiliary processes have no query activity to seed. */
+        coherent = true;
+    } else if (sampled_attr_enabled) {
         struct pgwt_pgbs_sampled_attr attr;
-        if (pgwt_pgbs_read_sampled_attr(pid, d->my_be_entry_addr,
-                                        &d->backend_status_layout,
-                                        &attr) == 0) {
+        struct pgwt_backend *be = pgwt_find_backend(&d->backends, pid);
+        int attr_rc;
+        if (activity_source) {
+            if (be && be->pgbs_addr == 0)
+                be->pgbs_addr = pgwt_pgbs_resolve_entry(
+                    pid, &d->backend_status_layout);
+            attr_rc = be && be->pgbs_addr != 0
+                ? pgwt_pgbs_read_sampled_attr_at(
+                    pid, be->pgbs_addr, &d->backend_status_layout, &attr)
+                : -1;
+        } else {
+            attr_rc = pgwt_pgbs_read_sampled_attr(
+                pid, d->my_be_entry_addr, &d->backend_status_layout, &attr);
+        }
+        if (attr_rc == 0) {
+            if (be)
+                pgwt_bm_observe_context(d->backend_meta, be,
+                                        attr.databaseid, attr.userid);
             qid = attr.query_id;
             open = attr.cmd_open;
+            if (pgwt_pgbs_sampled_activity_enabled(
+                    &d->backend_status_layout) && attr.cmd_open) {
+                char normalized[PGWT_PG13_SYNTH_TEXT_MAX];
+                if (pgwt_pg13_synthetic_query(
+                        attr.databaseid, attr.userid, attr.activity,
+                        normalized, sizeof(normalized), &qid) == 0) {
+                    quality = PGWT_QUERY_QUALITY_PG13_SYNTH;
+                    if (d->query_text_capture) {
+                        struct pgwt_query_text_key text_key = {
+                            .databaseid = attr.databaseid,
+                            .userid = attr.userid,
+                            .query_id = qid,
+                        };
+                        pgwt_qt_store_synthetic(d->query_text_capture,
+                                                &text_key, normalized);
+                    }
+                } else {
+                    qid = 0;
+                }
+            } else if (qid) {
+                quality = PGWT_QUERY_QUALITY_REAL;
+            }
             coherent = true;
         }
     } else {
         /* The config already names the new generation, so the merge correctly
          * rejects the pinned fallback's generation-0 edge. Read that BPF-owned
          * edge directly as the legacy pre-window state, then stamp it into the
-         * new generation's separate seed. This preserves a PG13/degraded
+         * new generation's separate seed. This preserves a degraded-layout
          * command that was already running when escalation began. */
         uint32_t key = (uint32_t)pid;
         struct pgwt_exact_attr fallback = {0};
@@ -493,6 +546,8 @@ int pgwt_exact_seed_backend(struct pgwt_daemon *d, pid_t pid,
                 &key, &fallback) == 0) {
             qid = fallback.query_id;
             open = fallback.cmd_open;
+            quality = qid ? PGWT_QUERY_QUALITY_REAL
+                          : PGWT_QUERY_QUALITY_NONE;
         }
         int gate = open;
         pgwt_read_cmd_gate(pid, d->debug_query_string_addr,
@@ -515,7 +570,10 @@ int pgwt_exact_seed_backend(struct pgwt_daemon *d, pid_t pid,
               edge.query_edge_ts >= cfg.attach_boundary_ns) ||
              (edge.cmd_generation == generation &&
               edge.cmd_edge_ts >= cfg.attach_boundary_ns))) {
-            pgwt_exact_resolve_attr(d, pid, &qid, &open, NULL, NULL, NULL);
+            pgwt_exact_resolve_attr(d, pid, &qid, &open, NULL,
+                                    NULL, NULL, NULL);
+            quality = qid ? PGWT_QUERY_QUALITY_REAL
+                          : PGWT_QUERY_QUALITY_NONE;
             coherent = true;
         }
     }
@@ -528,6 +586,7 @@ int pgwt_exact_seed_backend(struct pgwt_daemon *d, pid_t pid,
         .snapshot_ts = mono_ns(),
         .query_id = qid,
         .cmd_open = open,
+        .query_quality = quality,
     };
     return bpf_map_update_elem(bpf_map__fd(d->skel->maps.exact_seed_map),
                                &key, &seed, BPF_ANY);
@@ -539,6 +598,12 @@ int pgwt_exact_seed_all(struct pgwt_daemon *d, uint64_t generation)
         struct pgwt_backend *be = &d->backends.entries[i];
         if (!be->is_alive || be->pid <= 0)
             continue;
+        /* Sampled forks are registered before PostgreSQL rewrites argv, and
+         * escalation may arrive before the next sampler tick classifies one.
+         * Retry now so an auxiliary child (notably PG13's logger) is not
+         * mistaken for an attribution-bearing unknown backend. */
+        if (!be->meta_parsed && pgwt_parse_cmdline(be->pid, &be->meta) == 0)
+            be->meta_parsed = true;
         bool needs_attr = !be->meta_parsed ||
             be->meta.backend_type == PGWT_BT_CLIENT ||
             be->meta.backend_type == PGWT_BT_PARALLEL_WORKER;

@@ -134,6 +134,9 @@ def test_raw_path(t):
             va = srv.query("variants")
             t.check_eq(va.get("exec", {}).get("total"), 1,
                        "variants still sees the exec span (1 execution)")
+            variant = va.get("exec", {}).get("variants", [{}])[0]
+            t.check_eq(variant.get("query_text"), "SELECT io()",
+                       "variants retains an unambiguous qid-only text preview")
             qr = srv.query("top_queries")
             qrow = next((r for r in qr["rows"]
                          if r["query_id"] == "100"), {})

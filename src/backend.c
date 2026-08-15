@@ -39,17 +39,22 @@ struct pgwt_backend *pgwt_find_backend(struct pgwt_backend_table *bt, pid_t pid)
     return NULL;
 }
 
-static struct pgwt_backend *alloc_backend(struct pgwt_backend_table *bt, pid_t pid)
+static struct pgwt_backend *alloc_backend(struct pgwt_backend_table *bt,
+                                          pid_t pid, bool pg13)
 {
     /* Reuse dead slot */
     for (int i = 0; i < bt->count; i++) {
         if (!bt->entries[i].is_alive && bt->entries[i].pid == 0) {
+            free(bt->entries[i].pg13_synthetic_cache);
             memset(&bt->entries[i], 0, sizeof(bt->entries[i]));
             bt->entries[i].wp_fd = -1;
             bt->entries[i].bootstrap_fd = -1;
             bt->entries[i].wp_addr_shared = -1;
             bt->entries[i].pid = pid;
             bt->entries[i].is_alive = true;
+            if (pg13)
+                bt->entries[i].pg13_synthetic_cache =
+                    calloc(1, sizeof(*bt->entries[i].pg13_synthetic_cache));
             return &bt->entries[i];
         }
     }
@@ -66,6 +71,9 @@ static struct pgwt_backend *alloc_backend(struct pgwt_backend_table *bt, pid_t p
     be->wp_addr_shared = -1;
     be->pid = pid;
     be->is_alive = true;
+    if (pg13)
+        be->pg13_synthetic_cache =
+            calloc(1, sizeof(*be->pg13_synthetic_cache));
     return be;
 }
 
@@ -465,14 +473,15 @@ int pgwt_scan_existing_backends(struct pgwt_daemon *d)
         }
 
         /* Already initialized — record the address. */
-        struct pgwt_backend *be = alloc_backend(&d->backends, pid);
+        struct pgwt_backend *be = alloc_backend(&d->backends, pid,
+                                                d->pg_major_version == 13);
         if (!be) continue;
 
         be->wp_addr = ptr;
 
         /* Sampled mode: register the backend (address + metadata) but arm
          * NO watchpoint. The sampler reads wp_addr directly each tick. Keep a
-         * state_map entry for the PG13/degraded uprobe fallback and for a
+         * state_map entry for a degraded uprobe fallback and for a
          * future exact generation's watchpoint enrollment. */
         if (!pgwt_mode_uses_watchpoints(d)) {
             be->attach_ts = now_ns();
@@ -851,7 +860,8 @@ int pgwt_handle_fork(struct pgwt_daemon *d, pid_t child_pid)
     if (pgwt_find_backend(&d->backends, child_pid))
         return 0;
 
-    struct pgwt_backend *be = alloc_backend(&d->backends, child_pid);
+    struct pgwt_backend *be = alloc_backend(&d->backends, child_pid,
+                                            d->pg_major_version == 13);
     if (!be) return -1;
 
     /* Sampled mode: no bootstrap watchpoint. Register the backend now; the
@@ -931,7 +941,7 @@ int pgwt_handle_init(struct pgwt_daemon *d, pid_t pid, uint64_t addr)
     struct pgwt_backend *be = pgwt_find_backend(&d->backends, pid);
     if (!be) {
         /* Unknown PID — might have been forked before daemon started */
-        be = alloc_backend(&d->backends, pid);
+        be = alloc_backend(&d->backends, pid, d->pg_major_version == 13);
         if (!be) return -1;
     }
 
@@ -1040,6 +1050,8 @@ int pgwt_handle_exit(struct pgwt_daemon *d, pid_t pid)
                 pid, pgwt_backend_type_name(be->meta.backend_type));
 
     /* Reset PID so the slot can be reused by alloc_backend() */
+    free(be->pg13_synthetic_cache);
+    be->pg13_synthetic_cache = NULL;
     be->pid = 0;
     return 0;
 }
@@ -1051,5 +1063,7 @@ void pgwt_close_all_backends(struct pgwt_backend_table *bt)
         bt->entries[i].wp_fd = -1;
         pgwt_close_watchpoint(bt->entries[i].bootstrap_fd);
         bt->entries[i].bootstrap_fd = -1;
+        free(bt->entries[i].pg13_synthetic_cache);
+        bt->entries[i].pg13_synthetic_cache = NULL;
     }
 }

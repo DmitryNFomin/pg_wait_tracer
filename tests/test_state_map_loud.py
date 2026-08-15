@@ -172,6 +172,10 @@ def main():
                     "sampled_attr_shadow_active_mismatch_total",
                     "sampled_attr_shadow_cmd_open_mismatch_total",
                     "sampled_attr_shadow_query_id_mismatch_total",
+                    "sampled_text_pending", "sampled_text_resolved_total",
+                    "sampled_text_absent_total", "sampled_text_evicted_total",
+                    "sampled_text_error_total",
+                    "sampled_text_retry_exhausted_total",
                     "sampler_healthy"):
             check(metrics is not None and key in metrics,
                   f"metrics carries '{key}'")

@@ -240,6 +240,24 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
                      ctr->sampled_attr_shadow_cmd_open_mismatch_total);
     cjson_add_uint64(root, "sampled_attr_shadow_query_id_mismatch_total",
                      ctr->sampled_attr_shadow_query_id_mismatch_total);
+    cjson_add_uint64(root, "sampled_text_pending",
+                     __atomic_load_n(&ctr->sampled_text_pending,
+                                     __ATOMIC_RELAXED));
+    cjson_add_uint64(root, "sampled_text_resolved_total",
+                     __atomic_load_n(&ctr->sampled_text_resolved_total,
+                                     __ATOMIC_RELAXED));
+    cjson_add_uint64(root, "sampled_text_absent_total",
+                     __atomic_load_n(&ctr->sampled_text_absent_total,
+                                     __ATOMIC_RELAXED));
+    cjson_add_uint64(root, "sampled_text_evicted_total",
+                     __atomic_load_n(&ctr->sampled_text_evicted_total,
+                                     __ATOMIC_RELAXED));
+    cjson_add_uint64(root, "sampled_text_error_total",
+                     __atomic_load_n(&ctr->sampled_text_error_total,
+                                     __ATOMIC_RELAXED));
+    cjson_add_uint64(root, "sampled_text_retry_exhausted_total",
+                     __atomic_load_n(&ctr->sampled_text_retry_exhausted_total,
+                                     __ATOMIC_RELAXED));
     cjson_add_uint64(root, "exact_query_uprobe_fires_total",
                      pgwt_exact_uprobe_fire_count(
                          (struct pgwt_daemon *)d, PGWT_UPROBE_FIRE_QUERY));
@@ -275,8 +293,9 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
     /* Capture hardening (T4): any non-zero here is a loudly-logged problem.
      * state_map_full_total = BPF-side insert failures + userspace
      * preseed/seed failures (each one is a backend recording nothing or
-     * losing query attribution — CAP-1). seen_query_ids_full_total = query
-     * text capture lost for new ids (CAP-6). invalid_wait_reads_total =
+     * losing query attribution — CAP-1). seen_query_ids_full_total = FULL/raw
+     * first-seen metadata insert failures only; sampled resolver activity does
+     * not touch it. invalid_wait_reads_total =
      * garbage class-byte readings dropped (wrong offset backstop, CAP-2/5).
      * state_reseeds_total = frozen-stale entries reseeded by the per-tick
      * sweep (seed→arm race repair, one INFO line each). */

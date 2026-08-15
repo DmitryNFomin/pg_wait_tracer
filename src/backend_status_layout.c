@@ -990,12 +990,11 @@ static int read_snapshot_fd(int fd, uint64_t base,
                             struct pgwt_pgbs_snapshot *snapshot,
                             char *activity, size_t activity_sz)
 {
-    memset(snapshot, 0, sizeof(*snapshot));
-    if (activity && activity_sz)
-        activity[0] = '\0';
     for (int attempt = 0; attempt < 32; attempt++) {
+        memset(snapshot, 0, sizeof(*snapshot));
+        if (activity && activity_sz)
+            activity[0] = '\0';
         uint64_t value;
-        snapshot->read_mask = 0;
         if (read_field_value(fd, base, &layout->st_changecount, &value) != 0)
             return -1;
         snapshot->changecount_before = (uint32_t)value;
@@ -1024,22 +1023,33 @@ static int read_snapshot_fd(int fd, uint64_t base,
             READ_VALUE(st_query_id, query_id, PGWT_PGBS_READ_QUERY_ID);
 #undef READ_VALUE
 
+        /* The pointed-to activity buffer is protected by the same change
+         * counter. Copy it before the second counter read; otherwise a query
+         * boundary between those operations could pair a new string with an
+         * old state/context snapshot. */
+        if ((wanted_mask & PGWT_PGBS_READ_ACTIVITY) &&
+            snapshot->activity_raw && activity && activity_sz) {
+            size_t want = activity_sz - 1;
+            if (layout->activity_buffer_size > 0 &&
+                want > layout->activity_buffer_size)
+                want = layout->activity_buffer_size;
+            ssize_t n = pread(fd, activity, want,
+                              (off_t)snapshot->activity_raw);
+            if (n > 0) {
+                activity[n] = '\0';
+                snapshot->activity_readable = true;
+                size_t len = strnlen(activity, (size_t)n);
+                snapshot->activity_truncated = len == (size_t)n ||
+                    (layout->activity_buffer_size > 0 &&
+                     len + 1 >= layout->activity_buffer_size);
+            }
+        }
         if (read_field_value(fd, base, &layout->st_changecount, &value) != 0)
             return -1;
         snapshot->changecount_after = (uint32_t)value;
         if (snapshot->changecount_before != snapshot->changecount_after ||
             (snapshot->changecount_after & 1u))
             continue;
-
-        if ((wanted_mask & PGWT_PGBS_READ_ACTIVITY) &&
-            snapshot->activity_raw && activity && activity_sz) {
-            ssize_t n = pread(fd, activity, activity_sz - 1,
-                              (off_t)snapshot->activity_raw);
-            if (n > 0) {
-                activity[n] = '\0';
-                snapshot->activity_readable = true;
-            }
-        }
         return 0;
     }
     return -1;
@@ -1083,16 +1093,40 @@ static int candidate_ok(int fd, uint64_t base,
 
 /* ── Sampled-tier coherent attribution (Stage 2) ──────────── */
 
-bool pgwt_pgbs_sampled_attr_enabled(
+static bool sampled_common_enabled(
     const struct PgBackendStatusLayout *layout)
 {
-    return layout && layout->major >= 14 &&
+    return layout && layout->major >= 13 && layout->major <= 18 &&
            layout->validation == PGWT_PGBS_VALIDATION_VALIDATED &&
            layout->st_changecount.validation == PGWT_PGBS_FIELD_VALIDATED &&
            layout->st_procpid.validation == PGWT_PGBS_FIELD_VALIDATED &&
-           layout->st_state.validation == PGWT_PGBS_FIELD_VALIDATED &&
+           layout->st_databaseid.validation == PGWT_PGBS_FIELD_VALIDATED &&
+           layout->st_userid.validation == PGWT_PGBS_FIELD_VALIDATED &&
+           layout->st_state.validation == PGWT_PGBS_FIELD_VALIDATED;
+}
+
+bool pgwt_pgbs_sampled_query_id_enabled(
+    const struct PgBackendStatusLayout *layout)
+{
+    return sampled_common_enabled(layout) && layout->major >= 14 &&
            layout->st_query_id.validation == PGWT_PGBS_FIELD_VALIDATED &&
            layout->st_query_id.present;
+}
+
+bool pgwt_pgbs_sampled_activity_enabled(
+    const struct PgBackendStatusLayout *layout)
+{
+    return sampled_common_enabled(layout) && layout->major == 13 &&
+           layout->st_activity_raw.validation == PGWT_PGBS_FIELD_VALIDATED &&
+           layout->st_activity_raw.present && layout->activity_buffer_size >= 2 &&
+           layout->status_anchor != 0;
+}
+
+bool pgwt_pgbs_sampled_attr_enabled(
+    const struct PgBackendStatusLayout *layout)
+{
+    return pgwt_pgbs_sampled_query_id_enabled(layout) ||
+           pgwt_pgbs_sampled_activity_enabled(layout);
 }
 
 int pgwt_pgbs_derive_sampled_attr(
@@ -1103,21 +1137,26 @@ int pgwt_pgbs_derive_sampled_attr(
     if (!out)
         return -1;
     memset(out, 0, sizeof(*out));
-    if (!pgwt_pgbs_sampled_attr_enabled(layout) || !snapshot ||
+    if (!pgwt_pgbs_sampled_query_id_enabled(layout) || !snapshot ||
         expected_pid <= 0)
         return -1;
 
     const uint32_t required = PGWT_PGBS_READ_CHANGECOUNT |
                               PGWT_PGBS_READ_PROCPID |
+                              PGWT_PGBS_READ_DATABASEID |
+                              PGWT_PGBS_READ_USERID |
                               PGWT_PGBS_READ_STATE |
                               PGWT_PGBS_READ_QUERY_ID;
     if ((snapshot->read_mask & required) != required ||
         snapshot->changecount_before != snapshot->changecount_after ||
         (snapshot->changecount_after & 1u) != 0 ||
         snapshot->procpid != (uint32_t)expected_pid ||
+        snapshot->databaseid == 0 || snapshot->userid == 0 ||
         snapshot->state > (uint32_t)layout->state_max)
         return -1;
 
+    out->databaseid = snapshot->databaseid;
+    out->userid = snapshot->userid;
     out->state = snapshot->state;
     out->cmd_open = snapshot->state == (uint32_t)layout->state_running ||
                     snapshot->state == (uint32_t)layout->state_fastpath;
@@ -1126,36 +1165,116 @@ int pgwt_pgbs_derive_sampled_attr(
     return 0;
 }
 
-int pgwt_pgbs_read_sampled_attr(
-    pid_t backend_pid, uint64_t my_be_entry_addr,
+int pgwt_pgbs_derive_sampled_activity(
     const struct PgBackendStatusLayout *layout,
+    const struct pgwt_pgbs_snapshot *snapshot, pid_t expected_pid,
+    const char *activity, bool activity_truncated,
     struct pgwt_pgbs_sampled_attr *out)
 {
     if (!out)
         return -1;
     memset(out, 0, sizeof(*out));
+    if (!pgwt_pgbs_sampled_activity_enabled(layout) || !snapshot ||
+        expected_pid <= 0)
+        return -1;
+    const uint32_t required = PGWT_PGBS_READ_CHANGECOUNT |
+                              PGWT_PGBS_READ_PROCPID |
+                              PGWT_PGBS_READ_DATABASEID |
+                              PGWT_PGBS_READ_USERID |
+                              PGWT_PGBS_READ_STATE |
+                              PGWT_PGBS_READ_ACTIVITY;
+    if ((snapshot->read_mask & required) != required ||
+        snapshot->changecount_before != snapshot->changecount_after ||
+        (snapshot->changecount_after & 1u) != 0 ||
+        snapshot->procpid != (uint32_t)expected_pid ||
+        snapshot->databaseid == 0 || snapshot->userid == 0 ||
+        snapshot->state > (uint32_t)layout->state_max)
+        return -1;
+
+    out->databaseid = snapshot->databaseid;
+    out->userid = snapshot->userid;
+    out->state = snapshot->state;
+    out->cmd_open = snapshot->state == (uint32_t)layout->state_running ||
+                    snapshot->state == (uint32_t)layout->state_fastpath;
+    if (!out->cmd_open)
+        return 0;
+    if (!snapshot->activity_readable || activity_truncated || !activity ||
+        !activity[0]) {
+        out->activity_truncated = activity_truncated;
+        return 0; /* coherent command state, deliberately unattributed */
+    }
+    size_t len = strnlen(activity, sizeof(out->activity));
+    if (len == 0 || len >= sizeof(out->activity))
+        return -1;
+    memcpy(out->activity, activity, len + 1);
+    return 0;
+}
+
+static int read_sampled_attr_at_fd(
+    int mem_fd, pid_t backend_pid, uint64_t base,
+    const struct PgBackendStatusLayout *layout,
+    struct pgwt_pgbs_sampled_attr *out)
+{
+    int rc = -1;
+    if (base != 0) {
+        struct pgwt_pgbs_snapshot snapshot;
+        uint32_t wanted = PGWT_PGBS_READ_PROCPID |
+                          PGWT_PGBS_READ_DATABASEID |
+                          PGWT_PGBS_READ_USERID |
+                          PGWT_PGBS_READ_STATE;
+        if (pgwt_pgbs_sampled_query_id_enabled(layout)) {
+            wanted |= PGWT_PGBS_READ_QUERY_ID;
+            if (read_snapshot_fd(mem_fd, base, layout, wanted, &snapshot,
+                                 NULL, 0) == 0)
+                rc = pgwt_pgbs_derive_sampled_attr(layout, &snapshot,
+                                                   backend_pid, out);
+        } else {
+            char activity[PGWT_PGBS_ACTIVITY_MAX + 1];
+            wanted |= PGWT_PGBS_READ_ACTIVITY;
+            if (read_snapshot_fd(mem_fd, base, layout, wanted, &snapshot,
+                                 activity, sizeof(activity)) == 0) {
+                rc = pgwt_pgbs_derive_sampled_activity(
+                    layout, &snapshot, backend_pid, activity,
+                    snapshot.activity_truncated, out);
+            }
+        }
+    }
+    return rc;
+}
+
+int pgwt_pgbs_read_sampled_attr_at(
+    pid_t backend_pid, uint64_t backend_status_addr,
+    const struct PgBackendStatusLayout *layout,
+    struct pgwt_pgbs_sampled_attr *out)
+{
+    if (!out) return -1;
+    memset(out, 0, sizeof(*out));
     if (!pgwt_pgbs_sampled_attr_enabled(layout) || backend_pid <= 0 ||
-        my_be_entry_addr == 0)
-        return -1;
+        !backend_status_addr) return -1;
+    int fd = open_mem(backend_pid);
+    if (fd < 0) return -1;
+    int rc = read_sampled_attr_at_fd(fd, backend_pid, backend_status_addr,
+                                     layout, out);
+    close(fd);
+    return rc;
+}
 
-    int mem_fd = open_mem(backend_pid);
-    if (mem_fd < 0)
-        return -1;
-
+int pgwt_pgbs_read_sampled_attr(
+    pid_t backend_pid, uint64_t my_be_entry_addr,
+    const struct PgBackendStatusLayout *layout,
+    struct pgwt_pgbs_sampled_attr *out)
+{
+    if (!out) return -1;
+    memset(out, 0, sizeof(*out));
+    if (!pgwt_pgbs_sampled_attr_enabled(layout) || backend_pid <= 0 ||
+        my_be_entry_addr == 0) return -1;
+    int fd = open_mem(backend_pid);
+    if (fd < 0) return -1;
     uint64_t base = 0;
     int rc = -1;
-    if (pread_exact(mem_fd, &base, sizeof(base), my_be_entry_addr) >= 0 &&
-        base != 0) {
-        struct pgwt_pgbs_snapshot snapshot;
-        const uint32_t wanted = PGWT_PGBS_READ_PROCPID |
-                                PGWT_PGBS_READ_STATE |
-                                PGWT_PGBS_READ_QUERY_ID;
-        if (read_snapshot_fd(mem_fd, base, layout, wanted, &snapshot,
-                             NULL, 0) == 0)
-            rc = pgwt_pgbs_derive_sampled_attr(layout, &snapshot,
-                                               backend_pid, out);
-    }
-    close(mem_fd);
+    if (pread_exact(fd, &base, sizeof(base), my_be_entry_addr) >= 0 && base)
+        rc = read_sampled_attr_at_fd(fd, backend_pid, base, layout, out);
+    close(fd);
     return rc;
 }
 
@@ -1224,6 +1343,76 @@ static uint64_t scan_shared_for_entry(pid_t pid,
     close(mem_fd);
     fclose(maps);
     return matches == 1 ? found : 0;
+}
+
+uint64_t pgwt_pgbs_resolve_entry(
+    pid_t backend_pid, const struct PgBackendStatusLayout *layout)
+{
+    if (!layout || backend_pid <= 0 ||
+        !pgwt_pgbs_sampled_activity_enabled(layout))
+        return 0;
+
+    /* Runtime PG13 resolution stays close to the row proved by startup
+     * validation. PgBackendStatus rows form one shared, fixed-stride array;
+     * scanning that mapping by struct stride is bounded and avoids the old
+     * 512 MiB byte scan on the sampler thread for every new connection. */
+    uint64_t map_start = 0, map_end = 0;
+    char maps_path[64], line[1024];
+    snprintf(maps_path, sizeof(maps_path), "/proc/%d/maps", backend_pid);
+    FILE *maps = fopen(maps_path, "r");
+    if (!maps)
+        return 0;
+    while (fgets(line, sizeof(line), maps)) {
+        unsigned long long start, end;
+        char perms[5] = "";
+        if (sscanf(line, "%llx-%llx %4s", &start, &end, perms) == 3 &&
+            layout->status_anchor >= start && layout->status_anchor < end &&
+            perms[0] == 'r' && perms[3] == 's') {
+            map_start = start;
+            map_end = end;
+            break;
+        }
+    }
+    fclose(maps);
+    if (!map_start || !map_end || !layout->struct_size)
+        return 0;
+
+    int mem_fd = open_mem(backend_pid);
+    if (mem_fd < 0)
+        return 0;
+    struct pgwt_pgbs_expected expected = {.pid = backend_pid};
+    struct pgwt_pgbs_snapshot snapshot;
+    uint64_t found = 0;
+    const uint64_t max_rows = 16384;
+    for (uint64_t distance = 0; distance <= max_rows && !found; distance++) {
+        for (int direction = distance == 0 ? 0 : -1;
+             direction <= 1; direction += 2) {
+            uint64_t delta = distance * layout->struct_size;
+            uint64_t base;
+            if (direction < 0) {
+                if (delta > layout->status_anchor - map_start)
+                    continue;
+                base = layout->status_anchor - delta;
+            } else {
+                if (delta > map_end - layout->status_anchor)
+                    continue;
+                base = layout->status_anchor + delta;
+            }
+            if (base < map_start || base + layout->struct_size > map_end)
+                continue;
+            uint64_t procpid = 0;
+            if (read_field_value(mem_fd, base, &layout->st_procpid,
+                                 &procpid) == 0 &&
+                procpid == (uint32_t)backend_pid &&
+                candidate_ok(mem_fd, base, layout, &expected, NULL,
+                             &snapshot)) {
+                found = base;
+                break;
+            }
+        }
+    }
+    close(mem_fd);
+    return found;
 }
 
 static int postmaster_connection(pid_t postmaster_pid, int *port,
@@ -1711,15 +1900,20 @@ void pgwt_pgbs_validate_runtime(struct PgBackendStatusLayout *layout,
     char command[256];
     const char *validation_step = "controlled PID handshake";
     int observed = send_psql(
-        &controlled, "SELECT 'controlled',pg_backend_pid();");
+        &controlled, "SELECT 'controlled',pg_backend_pid(),"
+                     "pg_size_bytes(current_setting('track_activity_query_size'));");
     pid_t controlled_pid = 0;
     uint64_t controlled_start_time = 0;
+    unsigned long long activity_buffer_size = 0;
     char controlled_line[128];
     if (observed == 0 &&
         read_proc_output_bounded(&controlled, controlled_line,
                                  sizeof(controlled_line), 3000, true) >= 0 &&
-        sscanf(controlled_line, "controlled|%d", &controlled_pid) == 1 &&
-        controlled_pid > 0) {
+        sscanf(controlled_line, "controlled|%d|%llu", &controlled_pid,
+               &activity_buffer_size) == 2 &&
+        controlled_pid > 0 && activity_buffer_size >= 2 &&
+        activity_buffer_size <= UINT32_MAX) {
+        layout->activity_buffer_size = (uint32_t)activity_buffer_size;
         (void)pgwt_pgbs_pid_start_time(controlled_pid,
                                         &controlled_start_time);
         int excluded = pgwt_pgbs_exclusion_add(exclusions, controlled_pid);
@@ -1912,10 +2106,11 @@ void pgwt_pgbs_validate_runtime(struct PgBackendStatusLayout *layout,
         ? PGWT_PGBS_VALIDATION_DEGRADED
         : PGWT_PGBS_VALIDATION_VALIDATED;
     if (layout->validation == PGWT_PGBS_VALIDATION_VALIDATED) {
-        if (layout->major < 14)
+        if (layout->major < 14) {
+            layout->status_anchor = idle_base;
             set_detail(layout,
                        "controlled backend retired before capture; idle/active state and activity markers validated; query ID ABSENT");
-        else
+        } else
             set_detail(layout,
                        "controlled backend retired before capture; idle/active state, activity markers and varying query IDs validated");
     } else {
@@ -1990,7 +2185,10 @@ int pgwt_pgbs_validate_uprobe_shadow(struct PgBackendStatusLayout *layout,
         return -1;
     if (observed_state)
         *observed_state = snapshot.state;
-    return pgwt_pgbs_validate_snapshot(layout, &snapshot, &expected);
+    int rc = pgwt_pgbs_validate_snapshot(layout, &snapshot, &expected);
+    if (rc == 0 && layout->major == 13)
+        layout->status_anchor = base;
+    return rc;
 }
 
 void pgwt_pgbs_warmup_note(struct pgwt_pgbs_warmup_evidence *evidence,
@@ -2117,11 +2315,12 @@ void pgwt_pgbs_log(const struct PgBackendStatusLayout *layout)
         return;
     fprintf(stderr,
             "INFO: PgBackendStatus layout PG%d source=%s arch=%s ptr=%u "
-            "abi=%s size=%u validation=%s pid=%d enums=RUNNING:%d,"
+            "abi=%s size=%u activity_buf=%u validation=%s pid=%d enums=RUNNING:%d,"
             "FASTPATH:%d,max:%d\n",
             layout->major, pgwt_pgbs_source_name(layout->source),
             pgwt_pgbs_arch_name(layout->arch), layout->pointer_width,
             pgwt_pgbs_abi_name(layout->abi), layout->struct_size,
+            layout->activity_buffer_size,
             pgwt_pgbs_validation_name(layout->validation),
             layout->validated_pid, layout->state_running,
             layout->state_fastpath, layout->state_max);
@@ -2156,10 +2355,16 @@ void pgwt_pgbs_log(const struct PgBackendStatusLayout *layout)
         fprintf(stderr, " (fallback_fields=%u; no offset guessed)\n",
                 pgwt_pgbs_fallback_count(layout));
     }
-    if (pgwt_pgbs_sampled_attr_enabled(layout))
+    if (pgwt_pgbs_sampled_query_id_enabled(layout))
         fprintf(stderr,
-                "INFO: PgBackendStatus st_state/st_query_id are authoritative "
-                "for sampled attribution; idle query_id is normalized to 0\n");
+                "INFO: PgBackendStatus st_state/st_query_id plus db/user "
+                "context are authoritative for sampled attribution; idle "
+                "query_id is normalized to 0\n");
+    else if (pgwt_pgbs_sampled_activity_enabled(layout))
+        fprintf(stderr,
+                "INFO: PgBackendStatus st_state/st_activity_raw plus db/user "
+                "context are authoritative for PG13 sampled synthetic "
+                "attribution; empty/truncated activity is unattributed\n");
     else
         fprintf(stderr,
                 "INFO: sampled attribution remains on the uprobe state-map "

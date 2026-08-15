@@ -360,8 +360,11 @@ static void validate_sampled_fields(struct PgBackendStatusLayout *layout)
     layout->validation = PGWT_PGBS_VALIDATION_VALIDATED;
     layout->st_changecount.validation = PGWT_PGBS_FIELD_VALIDATED;
     layout->st_procpid.validation = PGWT_PGBS_FIELD_VALIDATED;
+    layout->st_databaseid.validation = PGWT_PGBS_FIELD_VALIDATED;
+    layout->st_userid.validation = PGWT_PGBS_FIELD_VALIDATED;
     layout->st_state.validation = PGWT_PGBS_FIELD_VALIDATED;
     layout->st_query_id.validation = PGWT_PGBS_FIELD_VALIDATED;
+    layout->st_activity_raw.validation = PGWT_PGBS_FIELD_VALIDATED;
 }
 
 static void test_sampled_attr(void)
@@ -380,17 +383,22 @@ static void test_sampled_attr(void)
         .changecount_before = 12,
         .changecount_after = 12,
         .procpid = (uint32_t)getpid(),
+        .databaseid = 16384,
+        .userid = 10,
         .state = 3,                 /* PG18 STATE_RUNNING */
         .query_id = 0xf123456789abcdefULL,
         .read_mask = PGWT_PGBS_READ_CHANGECOUNT |
                      PGWT_PGBS_READ_PROCPID |
+                     PGWT_PGBS_READ_DATABASEID |
+                     PGWT_PGBS_READ_USERID |
                      PGWT_PGBS_READ_STATE |
                      PGWT_PGBS_READ_QUERY_ID,
     };
     struct pgwt_pgbs_sampled_attr attr = {0};
     CHECK(pgwt_pgbs_derive_sampled_attr(&layout, &snapshot, getpid(),
                                         &attr) == 0 &&
-          attr.cmd_open && attr.state == 3 &&
+          attr.cmd_open && attr.state == 3 && attr.databaseid == 16384 &&
+          attr.userid == 10 &&
           attr.query_id == snapshot.query_id,
           "PG18 RUNNING=3 admits CPU and preserves signed query-id bits");
 
@@ -434,11 +442,16 @@ static void test_sampled_attr(void)
     memset(row, 0, sizeof(row));
     uint32_t changecount = 20;
     uint32_t pid = (uint32_t)getpid();
+    uint32_t databaseid = 16384;
+    uint32_t userid = 10;
     uint32_t state = 5;
     uint64_t query_id = 0x7123456789abcdefULL;
     memcpy(row + layout.st_changecount.offset, &changecount,
            sizeof(changecount));
     memcpy(row + layout.st_procpid.offset, &pid, sizeof(pid));
+    memcpy(row + layout.st_databaseid.offset, &databaseid,
+           sizeof(databaseid));
+    memcpy(row + layout.st_userid.offset, &userid, sizeof(userid));
     memcpy(row + layout.st_state.offset, &state, sizeof(state));
     memcpy(row + layout.st_query_id.offset, &query_id, sizeof(query_id));
     uint64_t my_be_entry = (uint64_t)(uintptr_t)row;
@@ -464,9 +477,74 @@ static void test_sampled_attr(void)
                                       PGWT_PGBS_ABI_SYSV_LP64,
                                       &layout) == 0,
           "PG13 fallback fixture row");
-    layout.validation = PGWT_PGBS_VALIDATION_VALIDATED;
-    CHECK(!pgwt_pgbs_sampled_attr_enabled(&layout),
-          "PG13 remains unchanged on the uprobe/activity-text route");
+    validate_sampled_fields(&layout);
+    layout.st_query_id.validation = PGWT_PGBS_FIELD_ABSENT;
+    CHECK(!pgwt_pgbs_sampled_activity_enabled(&layout),
+          "PG13 without a validated activity capacity keeps fail-safe probes");
+    layout.activity_buffer_size = 64;
+    layout.status_anchor = (uint64_t)(uintptr_t)row;
+    CHECK(pgwt_pgbs_sampled_attr_enabled(&layout) &&
+          pgwt_pgbs_sampled_activity_enabled(&layout),
+          "validated PG13 enables the activity-text at-tick route");
+
+    snapshot = good_snapshot();
+    snapshot.procpid = (uint32_t)getpid();
+    snapshot.state = 2;
+    snapshot.query_id = 0;
+    CHECK(pgwt_pgbs_derive_sampled_activity(
+              &layout, &snapshot, getpid(), "SELECT 42", false, &attr) == 0 &&
+          attr.cmd_open && attr.query_id == 0 &&
+          strcmp(attr.activity, "SELECT 42") == 0 &&
+          attr.databaseid == 16384 && attr.userid == 10,
+          "PG13 coherent activity/context is returned while RUNNING");
+    CHECK(pgwt_pgbs_derive_sampled_activity(
+              &layout, &snapshot, getpid(), "SELECT 42", true, &attr) == 0 &&
+          attr.cmd_open && attr.activity[0] == '\0' &&
+          attr.activity_truncated,
+          "PG13 truncated activity keeps the command but leaves it unattributed");
+    CHECK(pgwt_pgbs_derive_sampled_activity(
+              &layout, &snapshot, getpid(), "", false, &attr) == 0 &&
+          attr.cmd_open && attr.activity[0] == '\0',
+          "PG13 empty activity is coherently unattributed");
+    snapshot.activity_readable = false;
+    CHECK(pgwt_pgbs_derive_sampled_activity(
+              &layout, &snapshot, getpid(), "SELECT 42", false, &attr) == 0 &&
+          attr.cmd_open && attr.activity[0] == '\0',
+          "PG13 unreadable activity is coherently unattributed");
+    snapshot.activity_readable = true;
+    snapshot.state = (uint32_t)layout.state_max;
+    CHECK(pgwt_pgbs_derive_sampled_activity(
+              &layout, &snapshot, getpid(), "SELECT 42", false, &attr) == 0 &&
+          !attr.cmd_open && attr.activity[0] == '\0',
+          "PG13 disabled state is command-closed and unattributed");
+    snapshot.state = 2;
+
+    memset(row, 0, sizeof(row));
+    changecount = 24;
+    state = 2;
+    char activity[64] = "SELECT 99";
+    layout.activity_buffer_size = sizeof(activity);
+    uint64_t activity_ptr = (uint64_t)(uintptr_t)activity;
+    memcpy(row + layout.st_changecount.offset, &changecount,
+           sizeof(changecount));
+    memcpy(row + layout.st_procpid.offset, &pid, sizeof(pid));
+    memcpy(row + layout.st_databaseid.offset, &databaseid,
+           sizeof(databaseid));
+    memcpy(row + layout.st_userid.offset, &userid, sizeof(userid));
+    memcpy(row + layout.st_state.offset, &state, sizeof(state));
+    memcpy(row + layout.st_activity_raw.offset, &activity_ptr,
+           sizeof(activity_ptr));
+    my_be_entry = (uint64_t)(uintptr_t)row;
+    CHECK(pgwt_pgbs_read_sampled_attr(getpid(),
+                                      (uint64_t)(uintptr_t)&my_be_entry,
+                                      &layout, &attr) == 0 &&
+          attr.cmd_open && strcmp(attr.activity, "SELECT 99") == 0,
+          "PG13 live reader coherently dereferences st_activity_raw");
+    memset(activity, '7', sizeof(activity));
+    CHECK(pgwt_pgbs_read_sampled_attr_at(
+              getpid(), (uint64_t)(uintptr_t)row, &layout, &attr) == 0 &&
+          attr.cmd_open && attr.activity_truncated && !attr.activity[0],
+          "PG13 direct-row reader rejects capacity-truncated activity");
 }
 
 static void test_warmup_aggregation(void)
