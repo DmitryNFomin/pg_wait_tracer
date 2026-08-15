@@ -1,8 +1,9 @@
 # CI safety net (Phase B1 of docs/ROADMAP_AND_STATUS.md)
 #
-# Three jobs:
+# Core jobs:
 #   build-and-unit  — full build (BPF tracer + pgwt-server), C unit tests,
 #                     Python synthetic-data correctness tests
+#   sampled-overhead — paired sampled/no-tracer catastrophic-regression gate
 #   web-ui          — Playwright suite against tests/mock_server.py; any
 #                     browser console error fails the test that caused it
 #   protocol-drift  — same JSON-line commands against the real pgwt-server
@@ -101,6 +102,87 @@ jobs:
         env:
           PGWT_BRIDGE_TEST_REQUIRE: "1"
         run: cd web && go test -race ./...
+
+  sampled-overhead:
+    # Stage 5: timing on a shared runner is deliberately coarse.  The paired
+    # median catches the historical 20-30% trap/scan regressions; deterministic
+    # lifecycle/resolver tests retain the sub-1% implementation invariants.
+    # During threshold characterization this reports but does not timing-fail.
+    name: sampled-overhead (PG 17, characterize)
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Record runner capacity
+        run: |
+          nproc
+          grep -m1 'model name' /proc/cpuinfo || true
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang llvm libbpf-dev libelf-dev \
+            zlib1g-dev liblz4-dev linux-tools-common
+          if bpftool version >/dev/null 2>&1; then
+            BPFTOOL=$(command -v bpftool)
+          else
+            git clone --depth 1 --branch v7.5.0 --recurse-submodules \
+              https://github.com/libbpf/bpftool.git /tmp/bpftool
+            make -C /tmp/bpftool/src -j"$(nproc)"
+            BPFTOOL=/tmp/bpftool/src/bpftool
+          fi
+          "$BPFTOOL" version
+          echo "BPFTOOL=$BPFTOOL" >> "$GITHUB_ENV"
+          test -r /sys/kernel/btf/vmlinux
+
+      - name: Install PostgreSQL 17 (PGDG apt)
+        run: |
+          set -x
+          sudo systemctl stop postgresql || true
+          sudo apt-get install -y postgresql-common
+          pg_lsclusters -h | awk '{print $1, $2}' | while read -r ver name; do
+            sudo pg_dropcluster --stop "$ver" "$name" || true
+          done
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+          sudo apt-get install -y postgresql-17 postgresql-contrib-17
+
+      - name: Configure PostgreSQL 17
+        run: |
+          set -ex
+          if ! pg_lsclusters -h | awk '$1 == 17 && $2 == "main"' | grep -q .; then
+            sudo pg_createcluster 17 main
+          fi
+          sudo pg_conftool 17 main set port 5432
+          sudo pg_conftool 17 main set shared_preload_libraries pg_stat_statements
+          sudo pg_conftool 17 main set compute_query_id on
+          sudo sed -i -E 's/(peer|scram-sha-256|md5)$/trust/' \
+            /etc/postgresql/17/main/pg_hba.conf
+          sudo pg_ctlcluster 17 main start
+          psql -U postgres -d postgres -c \
+            "CREATE EXTENSION IF NOT EXISTS pg_stat_statements"
+          psql -U postgres -d postgres -tAc "SELECT version()"
+
+      - name: Build tracer
+        run: make
+
+      - name: Characterize paired sampled overhead
+        run: |
+          PM_PID=$(head -1 /var/lib/postgresql/17/main/postmaster.pid)
+          sudo env "PATH=/usr/lib/postgresql/17/bin:$PATH" \
+            "BPFTOOL=$BPFTOOL" \
+            python3 tests/sampled_overhead_gate.py \
+              --pid "$PM_PID" --pg-version 17 --port 5432 \
+              --reps 7 --duration 10 --warmup 2 --characterize \
+              --output-json sampled-overhead.json
+
+      - name: Upload characterization data
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sampled-overhead-characterization
+          path: sampled-overhead.json
+          if-no-files-found: warn
 
   capture-smoke:
     # Phase T0 (Trust Milestone, TST-1/2): run the REAL capture path against
