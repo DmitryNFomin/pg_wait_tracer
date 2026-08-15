@@ -107,10 +107,12 @@ jobs:
     # Stage 5: timing on a shared runner is deliberately coarse.  The paired
     # median catches the historical 20-30% trap/scan regressions. A candidate
     # hard failure gets seven more pairs so the final 14 are AB/BA-balanced.
+    # The fixed budget is 21 primary plus at most 21 confirmation pairs; the
+    # 60-minute timeout leaves headroom above a conservative 40-minute budget.
     # Deterministic lifecycle/resolver tests retain implementation invariants.
     name: sampled-overhead (PG 17)
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 

@@ -3,7 +3,13 @@
 This is the permanent Stage 5 guard for the sampled tier. It is intentionally
 two-layered: noisy timing catches catastrophic performance changes, while live
 and synthetic structural assertions catch their mechanisms without depending
-on timing.
+on timing. The timing threshold bounds catastrophic regressions at or above
+15%, and the counters structurally cover the two known exact-uprobe and
+`pg_stat_statements` scan mechanisms. It does **not** bound a novel sub-15%
+overhead source that routes through neither counter.
+
+The A/B timing gate covers `--mode sampled`. Tiered-baseline timing is not gated
+here; the C structural test does cover its zero-exact-link invariant.
 
 ## Root cause and test gap
 
@@ -36,6 +42,15 @@ pairs moved by as much as 3.74pp and one individual RO pair exceeded 15%.
 Consequently a seven-pair candidate failure is never accepted as final: the
 gate adds seven pairs and hard-fails only if the combined, exactly AB/BA-balanced
 14-pair median remains at or above 15%. Normal PRs pay only for seven pairs.
+Seven is odd, so the primary phase intentionally has four AB and three BA pairs;
+the extra AB is the safe-direction bias, and confirmation supplies three AB plus
+four BA pairs to make the final fourteen exactly balanced.
+
+The CI job has a fixed maximum of 42 pairs: 21 primary pairs (seven for each of
+three workloads) plus at most 21 confirmation pairs. The measured happy path is
+about 20 minutes. Conservatively doubling that whole duration gives a 40-minute
+worst-case budget even though setup is not repeated, so the job timeout is 60
+minutes rather than 35.
 
 The allocated hosted runner had four vCPUs, so no claim is made about a 2-vCPU
 runner. Shared-runner noise is already too large for a credible sub-1% blocking
@@ -61,14 +76,18 @@ test even at four vCPUs.
   `pg_stat_statements_reset` to its run-owned database; and force-drops only
   that unique database.
 
-Every sampled timing run also requires a validated layout, the requested
+Every sampled timing pair strictly requires a validated layout, the requested
 postmaster PID, pure sampled mode/tier, a healthy `pgbackend_status` sampler,
-positive samples, and zero attached/fired exact query/activity uprobes. The
-high-cardinality run additionally requires actual resolver scans and resolved
-keys, and bounds actual `pg_stat_statements(true)` scans to at most one per
-second plus one edge allowance. Synthetic tests pin zero sampled probe links
-for validated PG13–18, scheduler throttling/fairness, and PG13 persistence in
-the async worker rather than the sampler tick.
+positive samples, and zero attached/fired exact query/activity uprobes. Every
+high-cardinality pair also strictly bounds actual
+`pg_stat_statements(true)` scans to at most one per second plus one edge
+allowance. These deterministic checks remain per-pair failures. The
+load-dependent liveness checks (enough distinct shapes, at least one actual
+scan, and at least one resolved key) are aggregated across the workload: each
+must be observed in at least one pair, so an asynchronously starved pair cannot
+false-fail an otherwise exercised run. Synthetic tests pin zero sampled probe
+links for validated PG13–18, scheduler throttling/fairness, and PG13 persistence
+in the async worker rather than the sampler tick.
 
 ## Reproduction
 
@@ -85,6 +104,9 @@ sudo env PATH=/usr/pgsql-17/bin:$PATH \
     --high-cardinality-shapes 256 --min-distinct-shapes 231 \
     --characterize --output-json sampled-overhead-box.json
 ```
+
+`--characterize` suppresses only the timing threshold and its confirmation
+phase. All structural invariants still hard-fail.
 
 `PGWT_TEST_SAMPLED_UPROBES=1` and `PGWT_TEST_PGSS_UNTHROTTLED=1` are loud,
 test-only fault-injection hooks used to prove both the timing and structural

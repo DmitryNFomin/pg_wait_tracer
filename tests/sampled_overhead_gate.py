@@ -2,15 +2,20 @@
 """Paired A/B regression gate for the always-on sampled capture tier.
 
 This is intentionally a coarse catastrophic-regression gate, not a claim that
-shared-runner timing can prove the sampled tier's sub-1% overhead target.  Each
+shared-runner timing can prove the sampled tier's sub-1% overhead target.  It
+bounds losses at or above the timing threshold and structurally guards the two
+known exact-uprobe and pg_stat_statements scan mechanisms; it does not bound a
+novel sub-threshold overhead source that routes through neither counter.  Each
 pair runs no-tracer and sampled measurements back-to-back, alternates AB/BA
 order, and gates on the median paired TPS loss.  Standard read-only and
 read-write pgbench are joined by a mandatory many-query-shape workload because
-ordinary pgbench cannot expose pg_stat_statements resolver scan storms.
+ordinary pgbench cannot expose pg_stat_statements resolver scan storms.  The
+timing comparison covers --mode sampled, not the tiered baseline.
 
 Run as root against a dedicated PostgreSQL port/postmaster.  The script creates
 and removes one dedicated database and never restarts or reconfigures PostgreSQL.
-Use --characterize to report data without applying the timing threshold.
+Use --characterize to suppress only timing threshold failures; structural
+invariants remain hard failures.
 """
 
 import argparse
@@ -283,9 +288,6 @@ def structural_errors(args, workload, metrics, shapes):
         errors.append(f"sampled exact probes fired/attached: "
                       f"query={qfires} activity={afires} mask={mask}")
     if workload == "high-cardinality":
-        if shapes < args.min_distinct_shapes:
-            errors.append(f"only {shapes} distinct query shapes; "
-                          f"need >= {args.min_distinct_shapes}")
         required = ("sampled_text_pgss_scans_total",
                     "sampled_text_resolved_total")
         missing = [name for name in required if name not in metrics]
@@ -296,9 +298,6 @@ def structural_errors(args, workload, metrics, shapes):
             resolved = int(metrics["sampled_text_resolved_total"])
             uptime = float(metrics.get("uptime_s", 0))
             allowed = math.ceil(uptime * args.max_pgss_scans_per_sec) + 1
-            if scans <= 0 or resolved <= 0:
-                errors.append(f"pgss resolver was not exercised: "
-                              f"scans={scans} resolved={resolved}")
             if scans > allowed:
                 errors.append(f"pgss scan rate unbounded: {scans} scans in "
                               f"{uptime:.2f}s (allowed {allowed})")
@@ -312,6 +311,40 @@ def structural_errors(args, workload, metrics, shapes):
         if name in enabled and marker not in stderr:
             errors.append(f"injected hook {name} did not report activation")
     return errors
+
+
+def aggregate_liveness_errors(args, workload, pairs):
+    """Require load-dependent resolver exercise somewhere in the workload."""
+    if workload != "high-cardinality":
+        return {}, []
+
+    shapes = [int(pair.get("distinct_shapes", 0)) for pair in pairs]
+    scans = []
+    resolved = []
+    for pair in pairs:
+        metrics = pair.get("metrics") or {}
+        scans.append(int(metrics.get("sampled_text_pgss_scans_total", 0)))
+        resolved.append(int(metrics.get("sampled_text_resolved_total", 0)))
+
+    summary = {
+        "pairs": len(pairs),
+        "max_distinct_shapes": max(shapes, default=0),
+        "total_pgss_scans": sum(scans),
+        "total_resolved": sum(resolved),
+    }
+    errors = []
+    if summary["max_distinct_shapes"] < args.min_distinct_shapes:
+        errors.append(
+            f"no pair observed enough distinct query shapes: max "
+            f"{summary['max_distinct_shapes']}, need >= "
+            f"{args.min_distinct_shapes}")
+    if summary["total_pgss_scans"] <= 0:
+        errors.append(f"pgss resolver performed zero scans across "
+                      f"{len(pairs)} pairs")
+    if summary["total_resolved"] <= 0:
+        errors.append(f"pgss resolver resolved zero keys across "
+                      f"{len(pairs)} pairs")
+    return summary, errors
 
 
 def run_pair(args, workload, scripts, rep):
@@ -405,7 +438,9 @@ def main():
     parser.add_argument("--max-pgss-scans-per-sec", type=float, default=1.0)
     parser.add_argument("--workloads", nargs="+", choices=DEFAULT_WORKLOADS,
                         default=list(DEFAULT_WORKLOADS))
-    parser.add_argument("--characterize", action="store_true")
+    parser.add_argument(
+        "--characterize", action="store_true",
+        help="suppress timing failures only; structural invariants still fail")
     parser.add_argument("--keep-database", action="store_true")
     parser.add_argument("--output-json")
     parser.add_argument("--tracer-env", action="append", default=[])
@@ -487,12 +522,19 @@ def main():
                               f"overhead={pair['overhead_pct']:+.2f}%")
                 stats = summarize(
                     [pair["overhead_pct"] for pair in pairs])
+                aggregate_liveness, liveness_errors = \
+                    aggregate_liveness_errors(args, workload, pairs)
+                report["structural_failures"] += [
+                    f"{workload} aggregate: {error}"
+                    for error in liveness_errors]
+                failed |= bool(liveness_errors)
                 report["workloads"][workload] = {
                     "pairs": pairs,
                     "primary_reps": args.reps,
                     "confirmation_reps_run": len(pairs) - args.reps,
                     "confirmation_triggered": confirmation_triggered,
                     "primary_stats": primary_stats,
+                    "aggregate_liveness": aggregate_liveness,
                     **stats,
                 }
                 verdict = "PASS"
