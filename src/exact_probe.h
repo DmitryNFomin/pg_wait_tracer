@@ -49,6 +49,7 @@ struct pgwt_exact_probe_bundle {
     struct pgwt_exact_probe_core core;
     uint64_t query_offset;
     uint64_t activity_offset;
+    bool sampled_warmup_reconciled;
 };
 
 uint32_t pgwt_exact_probe_startup_mask(
@@ -60,6 +61,9 @@ int pgwt_exact_probe_core_pin(struct pgwt_exact_probe_core *core,
                               uint32_t mask, uint64_t generation,
                               const struct pgwt_exact_probe_ops *ops,
                               void *ctx);
+uint32_t pgwt_exact_probe_core_pin_best_effort(
+    struct pgwt_exact_probe_core *core, uint32_t mask, uint64_t generation,
+    const struct pgwt_exact_probe_ops *ops, void *ctx);
 int pgwt_exact_probe_core_acquire(struct pgwt_exact_probe_core *core,
                                   uint32_t mask, uint64_t generation,
                                   const struct pgwt_exact_probe_ops *ops,

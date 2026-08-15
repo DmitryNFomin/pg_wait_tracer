@@ -65,6 +65,33 @@ int pgwt_exact_probe_core_pin(struct pgwt_exact_probe_core *core,
     return 0;
 }
 
+uint32_t pgwt_exact_probe_core_pin_best_effort(
+    struct pgwt_exact_probe_core *core, uint32_t mask, uint64_t generation,
+    const struct pgwt_exact_probe_ops *ops, void *ctx)
+{
+    if (!core || !ops || !ops->attach || !ops->detach)
+        return 0;
+
+    uint32_t pinned = core->pinned_mask & mask;
+    for (int i = 0; i < PGWT_EXACT_PROBE_COUNT; i++) {
+        uint32_t bit = PGWT_EXACT_PROBE_BIT(i);
+        if (!(mask & bit) || (pinned & bit))
+            continue;
+
+        /* A one-bit attach cannot roll back another startup probe.  Exact
+         * generation acquisition deliberately continues to use the atomic
+         * multi-bit attach_missing() path below. */
+        uint32_t new_mask = 0;
+        if (attach_missing(core, bit, ops, ctx, &new_mask) != 0)
+            continue;
+        core->pinned_mask |= bit;
+        pinned |= bit;
+    }
+    if (generation && pinned)
+        core->generation = generation;
+    return pinned;
+}
+
 int pgwt_exact_probe_core_acquire(struct pgwt_exact_probe_core *core,
                                   uint32_t mask, uint64_t generation,
                                   const struct pgwt_exact_probe_ops *ops,
@@ -203,23 +230,29 @@ static void *attach_link(void *ctx, enum pgwt_exact_probe_index index)
             uint64_t va = pgwt_find_symbol_offset(bin, symbol);
             d->exact_probes.query_offset = pgwt_vaddr_to_file_offset(bin, va);
         }
-        if (!d->exact_probes.query_offset)
+        if (!d->exact_probes.query_offset) {
+            errno = ENOENT;
             break;
+        }
         link = bpf_program__attach_uprobe_opts(
             d->use_pg13_query_attr ? d->skel->progs.on_executor_start
                                    : d->skel->progs.on_report_query_id,
             -1, bin, d->exact_probes.query_offset, &opts);
         break;
     case PGWT_EXACT_PROBE_ACTIVITY:
-        if (!d->skel->rodata->bs_state_running)
+        if (!d->skel->rodata->bs_state_running) {
+            errno = ENOTSUP;
             break;
+        }
         if (!d->exact_probes.activity_offset) {
             uint64_t va = pgwt_find_symbol_offset(bin,
                                                    "pgstat_report_activity");
             d->exact_probes.activity_offset = pgwt_vaddr_to_file_offset(bin, va);
         }
-        if (!d->exact_probes.activity_offset)
+        if (!d->exact_probes.activity_offset) {
+            errno = ENOENT;
             break;
+        }
         link = bpf_program__attach_uprobe_opts(
             d->skel->progs.on_report_activity, -1, bin,
             d->exact_probes.activity_offset, &opts);
@@ -277,12 +310,34 @@ int pgwt_exact_probe_startup(struct pgwt_daemon *d)
     uint64_t generation = d->mode == PGWT_MODE_FULL ? 1 : 0;
     if (set_config(d, generation, generation ? mono_ns() : 0, true) != 0)
         return -1;
-    if (mask && pgwt_exact_probe_core_pin(&d->exact_probes.core, mask,
-                                          generation, &live_ops, d) != 0) {
-        fprintf(stderr, "FATAL: exact probe bundle startup attach failed at "
-                "link boundary (%s)\n", strerror(errno));
-        set_config(d, 0, 0, true);
-        return -1;
+
+    /* Startup is a capability boundary, not an exact-window transaction.
+     * Master treated these attribution links as optional: missing symbols or
+     * attach restrictions reduced attribution while wait capture continued.
+     * Keep that contract here.  Escalation still uses the atomic acquire path
+     * below and denies a partially instrumented exact generation. */
+    uint32_t pinned = pgwt_exact_probe_core_pin_best_effort(
+        &d->exact_probes.core, mask, generation, &live_ops, d);
+    uint32_t dropped = mask & ~pinned;
+    for (int i = 0; i < PGWT_EXACT_PROBE_COUNT; i++) {
+        uint32_t bit = PGWT_EXACT_PROBE_BIT(i);
+        if (!(dropped & bit))
+            continue;
+        if (i == PGWT_EXACT_PROBE_QUERY_ID) {
+            const char *symbol = d->use_pg13_query_attr
+                               ? "standard_ExecutorStart"
+                               : "pgstat_report_query_id";
+            fprintf(stderr,
+                    "WARN: startup exact query-id probe unavailable "
+                    "(could not resolve or attach %s); dropping it -- "
+                    "query attribution unavailable, continuing wait-only "
+                    "capture\n", symbol);
+        } else {
+            fprintf(stderr,
+                    "WARN: startup exact activity probe unavailable "
+                    "(could not resolve or attach pgstat_report_activity); "
+                    "dropping it and continuing wait capture\n");
+        }
     }
     d->cmd_gate_active = pgwt_pgbs_sampled_attr_enabled(
         &d->backend_status_layout) ||
@@ -292,11 +347,15 @@ int pgwt_exact_probe_startup(struct pgwt_daemon *d)
                          &d->backend_status_layout))
         fprintf(stderr, "INFO: sampled exact probes detached: validated "
                 "PgBackendStatus attribution is authoritative\n");
-    else if (d->mode == PGWT_MODE_FULL && mask == PGWT_EXACT_PROBE_ALL_MASK)
+    else if (!dropped && d->mode == PGWT_MODE_FULL &&
+             mask == PGWT_EXACT_PROBE_ALL_MASK)
         fprintf(stderr, "INFO: full exact probe bundle attached from startup\n");
-    else if (mask == PGWT_EXACT_PROBE_ATTR_MASK)
+    else if (!dropped && mask == PGWT_EXACT_PROBE_ATTR_MASK)
         fprintf(stderr, "INFO: sampled exact attribution probes pinned "
                 "(PG13/degraded layout fallback)\n");
+    else if (pinned)
+        fprintf(stderr, "INFO: startup exact probes degraded: attached "
+                "mask=0x%x requested=0x%x\n", pinned, mask);
     return 0;
 }
 
@@ -309,9 +368,11 @@ void pgwt_exact_probe_reconcile_sampled(struct pgwt_daemon *d)
     pgwt_exact_probe_core_unpin(&d->exact_probes.core,
                                 PGWT_EXACT_PROBE_ATTR_MASK, &live_ops, d);
     d->cmd_gate_active = true;
-    if (before != d->exact_probes.core.attached_mask)
+    if (before != d->exact_probes.core.attached_mask) {
+        d->exact_probes.sampled_warmup_reconciled = true;
         fprintf(stderr, "INFO: detached validation-warmup attribution probes; "
                 "coherent PgBackendStatus source is now authoritative\n");
+    }
 }
 
 int pgwt_exact_probe_acquire(struct pgwt_daemon *d, uint64_t generation,

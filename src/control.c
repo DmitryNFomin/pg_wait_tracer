@@ -134,6 +134,8 @@ static cJSON *build_status(const struct pgwt_daemon *d)
                      d->escalation.generation);
     cJSON_AddNumberToObject(root, "exact_probe_attached_mask",
                             d->exact_probes.core.attached_mask);
+    cJSON_AddBoolToObject(root, "exact_probe_warmup_reconciled",
+                          d->exact_probes.sampled_warmup_reconciled);
     cJSON_AddBoolToObject(root, "exact_cpu_active", d->exact_cpu_active);
     cjson_add_uint64(root, "exact_query_uprobe_fires_total",
                      pgwt_exact_uprobe_fire_count(
@@ -246,6 +248,8 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
                          (struct pgwt_daemon *)d, PGWT_UPROBE_FIRE_ACTIVITY));
     cJSON_AddNumberToObject(root, "exact_probe_attached_mask",
                             d->exact_probes.core.attached_mask);
+    cJSON_AddBoolToObject(root, "exact_probe_warmup_reconciled",
+                          d->exact_probes.sampled_warmup_reconciled);
     cJSON_AddBoolToObject(root, "exact_cpu_active", d->exact_cpu_active);
     cjson_add_uint64(root, "exact_probe_generation",
                      d->escalation.generation);

@@ -512,7 +512,6 @@ void pgwt_deescalate(struct pgwt_daemon *d, int reason)
      * has a finite producer boundary even though link release happens later. */
     e->admitting = false;
     disarm_all(d);
-    set_exact_cpu_active(d, false);
     if (pgwt_exact_probe_quiesce(d) != 0)
         fprintf(stderr, "WARN: could not quiesce exact probe generation %llu\n",
                 (unsigned long long)e->generation);
@@ -527,6 +526,10 @@ void pgwt_deescalate(struct pgwt_daemon *d, int reason)
      * wait spanning the window boundary is recorded exactly once (its exact
      * portion), not dropped into an end-of-window hole. */
     flush_open_intervals(d, now);
+
+    /* Keep sched_switch accounting live until every open interval has read
+     * its final CPU accumulator value at the de-escalation boundary. */
+    set_exact_cpu_active(d, false);
 
     /* Close command and post-attach phase windows at that same boundary. */
     synthesize_terminal_markers(d, now);

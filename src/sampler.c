@@ -454,6 +454,13 @@ uint64_t pgwt_qid_index_lookup(const struct pgwt_qid_entry *entries, int n,
     return e ? e->query_id : 0;
 }
 
+bool pgwt_exact_attr_shadow_comparable(const struct pgwt_exact_attr *edge,
+                                       uint64_t generation)
+{
+    return edge && edge->query_generation == generation &&
+           edge->cmd_generation == generation;
+}
+
 /* ── Daemon-side provider hooks (need the BPF skeleton) ───────────────── */
 
 #ifndef PGWT_SERVER
@@ -480,22 +487,26 @@ static uint64_t mono_ns(void)
 /* Read pid -> {query_id, cmd_open} from the BPF exact_attr_map, maintained by
  * the on_report_query_id / on_report_activity uprobes. Per-pid fallback for
  * kernels without BPF_MAP_LOOKUP_BATCH (SMP-4). */
-static void lookup_pid_state(struct pgwt_daemon *d, pid_t pid,
+static bool lookup_pid_state(struct pgwt_daemon *d, pid_t pid,
+                             uint64_t generation, bool generation_valid,
                              uint64_t *qid, int *cmd_open)
 {
     *qid = 0;
     *cmd_open = 0;
     if (!d->skel)
-        return;
+        return false;
     int fd = bpf_map__fd(d->skel->maps.exact_attr_map);
     if (fd < 0)
-        return;
+        return false;
     uint32_t key = (uint32_t)pid;
     struct pgwt_exact_attr st;
     if (bpf_map_lookup_elem(fd, &key, &st) == 0) {
         *qid = st.query_id;
         *cmd_open = st.cmd_open;
+        return generation_valid &&
+               pgwt_exact_attr_shadow_comparable(&st, generation);
     }
+    return false;
 }
 
 /* SMP-4: dump the whole exact_attr_map in a few BPF_MAP_LOOKUP_BATCH
@@ -504,7 +515,8 @@ static void lookup_pid_state(struct pgwt_daemon *d, pid_t pid,
  * 1000 backends × 10 Hz). Returns the number of index entries, or -1 when
  * batch lookup is unsupported (caller falls back to per-pid lookups). */
 static int dump_qid_index(struct pgwt_daemon *d, struct pgwt_sampler *s,
-                          struct pgwt_qid_entry *out)
+                          struct pgwt_qid_entry *out, uint64_t generation,
+                          bool generation_valid)
 {
     if (!d->skel || s->qid_batch_supported == 0)
         return -1;
@@ -546,6 +558,8 @@ static int dump_qid_index(struct pgwt_daemon *d, struct pgwt_sampler *s,
         out[i].pid = s->qid_keys[i];
         out[i].query_id = s->qid_vals[i].query_id;
         out[i].cmd_open = s->qid_vals[i].cmd_open;
+        out[i].shadow_valid = generation_valid &&
+            pgwt_exact_attr_shadow_comparable(&s->qid_vals[i], generation);
     }
     pgwt_qid_index_sort(out, total);
     return total;
@@ -775,16 +789,27 @@ int pgwt_sampler_poll(struct pgwt_daemon *d)
 
     const bool tick_source_enabled =
         pgwt_pgbs_sampled_attr_enabled(&d->backend_status_layout);
-    const bool attr_edges_attached =
-        (d->exact_probes.core.attached_mask & PGWT_EXACT_PROBE_ATTR_MASK) ==
-        PGWT_EXACT_PROBE_ATTR_MASK;
+    uint32_t attr_edge_mask = d->exact_probes.core.attached_mask &
+                              PGWT_EXACT_PROBE_ATTR_MASK;
+    const bool attr_edges_attached = attr_edge_mask != 0;
+    const bool attr_shadow_pair_attached =
+        attr_edge_mask == PGWT_EXACT_PROBE_ATTR_MASK;
+
+    struct pgwt_exact_config exact_cfg = {0};
+    uint32_t exact_cfg_key = 0;
+    bool exact_cfg_valid = attr_edges_attached &&
+        bpf_map_lookup_elem(bpf_map__fd(d->skel->maps.exact_config_map),
+                            &exact_cfg_key, &exact_cfg) == 0;
 
     /* SMP-4: dump the legacy edge source only when those links are actually
      * attached (PG13/degraded baseline, or a live exact window). Validated
      * PG14-18 sampled operation performs no pointless map dump and has no
      * shadow traps: Stage 2's coherent tick source is authoritative. */
     struct pgwt_qid_entry qidx_buf[MAX_BACKENDS];
-    int qidx_n = attr_edges_attached ? dump_qid_index(d, s, qidx_buf) : 0;
+    int qidx_n = attr_edges_attached
+        ? dump_qid_index(d, s, qidx_buf, exact_cfg.generation,
+                         exact_cfg_valid)
+        : 0;
 
     /* Reuse a stack target array sized to the live count; MAX_BACKENDS cap. */
     static struct pgwt_sample_target targets[MAX_BACKENDS];
@@ -853,16 +878,19 @@ int pgwt_sampler_poll(struct pgwt_daemon *d)
         const bool target_tick_enabled = tick_source_enabled &&
             targets[n].backend_type != PGWT_BT_LOGGER;
         struct pgwt_sampled_attr_value uprobe_attr = {0};
+        bool uprobe_shadow_valid = false;
         if (qidx_n >= 0) {
             const struct pgwt_qid_entry *qe =
                 pgwt_qid_index_get(qidx_buf, qidx_n, (uint32_t)be->pid);
             if (qe) {
                 uprobe_attr.query_id = qe->query_id;
                 uprobe_attr.cmd_open = qe->cmd_open;
+                uprobe_shadow_valid = qe->shadow_valid;
             }
         } else {
-            lookup_pid_state(d, be->pid, &uprobe_attr.query_id,
-                             &uprobe_attr.cmd_open);
+            uprobe_shadow_valid = lookup_pid_state(
+                d, be->pid, exact_cfg.generation, exact_cfg_valid,
+                &uprobe_attr.query_id, &uprobe_attr.cmd_open);
         }
 
         struct pgwt_pgbs_sampled_attr tick_raw;
@@ -876,7 +904,7 @@ int pgwt_sampler_poll(struct pgwt_daemon *d)
             if (tick_ok) {
                 tick_attr.query_id = tick_raw.query_id;
                 tick_attr.cmd_open = tick_raw.cmd_open;
-                if (attr_edges_attached) {
+                if (attr_shadow_pair_attached && uprobe_shadow_valid) {
                     unsigned mismatch = pgwt_sampled_attr_compare(
                         &tick_attr, &uprobe_attr);
                     d->counters.sampled_attr_shadow_total++;

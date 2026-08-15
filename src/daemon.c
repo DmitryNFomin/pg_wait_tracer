@@ -856,9 +856,11 @@ int pgwt_daemon_init(struct pgwt_daemon *d)
         goto fail;
     }
 
-    /* Stage 3: query/activity uprobes are one atomic, generation-tagged exact
-     * bundle. Validated PG14-18 sampled/tiered starts with no per-query links;
-     * PG13/degraded pins the legacy attribution pair; full pins the bundle. */
+    /* Stage 3: query/activity uprobes form an atomic, generation-tagged bundle
+     * for escalation. Startup remains best-effort: validated PG14-18 sampled/
+     * tiered starts with no per-query links; PG13/degraded and full pin each
+     * available legacy attribution probe without making wait capture depend
+     * on an optional symbol or attach capability. */
     if (pgwt_exact_probe_startup(d) != 0)
         goto fail;
 

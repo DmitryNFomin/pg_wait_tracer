@@ -105,6 +105,29 @@ static void test_idempotent_pin_and_partial_rollback(void)
     pgwt_exact_probe_core_cleanup(&core, &ops, &f);
 }
 
+static void test_best_effort_startup_keeps_available_probe(void)
+{
+    struct pgwt_exact_probe_core core = {0};
+    struct fake_ops f = {.fail_at = PGWT_EXACT_PROBE_QUERY_ID};
+    uint32_t pinned = pgwt_exact_probe_core_pin_best_effort(
+        &core, PGWT_EXACT_PROBE_ALL_MASK, 1, &ops, &f);
+
+    CHECK(pinned == PGWT_EXACT_PROBE_BIT(PGWT_EXACT_PROBE_ACTIVITY) &&
+          core.attached_mask == pinned && core.pinned_mask == pinned,
+          "startup drops a failed probe but keeps the available probe");
+    CHECK(f.attach_calls[PGWT_EXACT_PROBE_QUERY_ID] == 1 &&
+          f.attach_calls[PGWT_EXACT_PROBE_ACTIVITY] == 1 &&
+          f.detach_count == 0,
+          "best-effort startup attempts each probe without bundle rollback");
+
+    CHECK(pgwt_exact_probe_core_acquire(&core,
+                                        PGWT_EXACT_PROBE_ALL_MASK, 2,
+                                        &ops, &f) != 0 &&
+          core.consumers == 0 && core.attached_mask == pinned,
+          "exact-window acquire remains strict after degraded startup");
+    pgwt_exact_probe_core_cleanup(&core, &ops, &f);
+}
+
 static void test_empty_rollback_and_refcount(void)
 {
     struct pgwt_exact_probe_core core = {0};
@@ -189,6 +212,7 @@ int main(void)
 {
     test_policy();
     test_idempotent_pin_and_partial_rollback();
+    test_best_effort_startup_keeps_available_probe();
     test_empty_rollback_and_refcount();
     test_generation_merge();
     printf("%d/%d checks passed\n", passed, total);

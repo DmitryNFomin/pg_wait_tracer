@@ -11,6 +11,8 @@ This test proves both sides of the contract:
 
   * validated PG14-18: detached/zero in sampled operation, atomically attached
     during each exact generation, and detached again after de-escalation;
+  * a degraded layout promoted during startup warmup may have historical fire
+    counts, but reconciliation detaches both probes before sampled operation;
   * PG13 or a degraded layout: the legacy attribution pair remains pinned and
     continues firing before and after exact windows;
   * commands already running at escalation and backends that fork/exit during
@@ -140,6 +142,10 @@ def run_cycles(pm_pid, pg_major):
         if not ready:
             return False, "", False
 
+        ready_status = ctl(trace_dir, {"cmd": "status"})
+        ready_counts = exact_counts(ready_status)
+        promotion_path = bool(
+            ready_status.get("exact_probe_warmup_reconciled", False))
         check(workload(), "baseline query workload completed")
         baseline = ctl(trace_dir, {"cmd": "status"})
         validation = baseline.get("pgbackend_layout_validation")
@@ -155,9 +161,16 @@ def run_cycles(pm_pid, pg_major):
               "sampled baseline bypasses exact sched_switch accounting")
         qfires, afires = exact_counts(baseline)
         if validated_pg14plus:
-            check((qfires, afires) == (0, 0),
-                  "validated sampled baseline has ZERO query/activity "
-                  "uprobe firings")
+            if promotion_path:
+                check((qfires, afires) == ready_counts,
+                      "degraded-to-validated promotion fully reconciles "
+                      "probes before sampled workload "
+                      f"({ready_counts} -> {(qfires, afires)})")
+            else:
+                check(ready_counts == (0, 0) and
+                      (qfires, afires) == (0, 0),
+                      "validated-from-start sampled baseline has ZERO "
+                      "query/activity uprobe firings")
             check(baseline.get("sampled_attr_source") == "pgbackend_status",
                   "validated sampled attribution remains on PgBackendStatus")
         else:

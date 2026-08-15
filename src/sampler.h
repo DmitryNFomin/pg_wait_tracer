@@ -33,6 +33,8 @@
 #define PGWT_SAMPLER_H
 
 #include "pg_wait_tracer.h"
+
+#include <stdbool.h>
 #include "cmdline.h"   /* enum pgwt_backend_type — drives the we==0 policy */
 
 #include <stdint.h>
@@ -256,7 +258,10 @@ struct pgwt_qid_entry {
     uint32_t pid;
     uint64_t query_id;
     int      cmd_open;    /* command-open gate from the state_map (T2) */
+    bool     shadow_valid; /* both tuple edges match exact generation */
 };
+bool pgwt_exact_attr_shadow_comparable(const struct pgwt_exact_attr *edge,
+                                       uint64_t generation);
 void     pgwt_qid_index_sort(struct pgwt_qid_entry *entries, int n);
 uint64_t pgwt_qid_index_lookup(const struct pgwt_qid_entry *entries, int n,
                                uint32_t pid);
