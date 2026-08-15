@@ -305,7 +305,7 @@ def structural_errors(args, workload, metrics, shapes):
     stderr = metrics.get("tracer_stderr_tail", "")
     hooks = {
         "PGWT_TEST_SAMPLED_UPROBES": "restoring always-on sampled attribution traps",
-        "PGWT_TEST_PGSS_UNTHROTTLED": "restoring pre-throttle 32-key pgss scans",
+        "PGWT_TEST_PGSS_UNTHROTTLED": "restoring pre-throttle 32-key pgss scan storm",
     }
     enabled = {item.partition("=")[0] for item in args.tracer_env}
     for name, marker in hooks.items():

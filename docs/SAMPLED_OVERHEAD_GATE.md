@@ -88,4 +88,7 @@ sudo env PATH=/usr/pgsql-17/bin:$PATH \
 
 `PGWT_TEST_SAMPLED_UPROBES=1` and `PGWT_TEST_PGSS_UNTHROTTLED=1` are loud,
 test-only fault-injection hooks used to prove both the timing and structural
-halves of the gate go red. They are not production options.
+halves of the gate go red. The latter drives the pre-fix 32-key unthrottled
+resolver and synchronous persistence with five real pgss scans per admitted
+batch, reproducing the historical scan-storm intensity without synthetic
+sleeps. They are not production options.

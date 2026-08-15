@@ -547,9 +547,13 @@ static void *resolver_main(void *arg)
         int sql_ok = pgwt_pgss_build_lookup_sql(sql, sizeof(sql), schema,
                                                 keys, count) == 0;
         if (sql_ok) {
-            counter_add(&r->daemon->counters.sampled_text_pgss_scans_total,
-                        1);
-            sql_ok = run_sql(r, database, sql, output, sizeof(output)) == 0;
+            int scans = r->test_unthrottled ? 5 : 1;
+            for (int i = 0; i < scans && sql_ok; i++) {
+                counter_add(
+                    &r->daemon->counters.sampled_text_pgss_scans_total, 1);
+                sql_ok = run_sql(r, database, sql, output,
+                                 sizeof(output)) == 0;
+            }
         }
         if (!sql_ok)
             counter_add(&r->daemon->counters.sampled_text_error_total, count);
@@ -567,8 +571,12 @@ static void *resolver_main(void *arg)
                     if (resolver_key_equal(&keys[i], &got_key)) {
                         found[i] = true;
                         if (parsed > 0) {
-                            pgwt_qt_store_pgss_deferred(r->query_text,
-                                                        &got_key, text);
+                            if (r->test_unthrottled)
+                                pgwt_qt_store_pgss(r->query_text,
+                                                   &got_key, text);
+                            else
+                                pgwt_qt_store_pgss_deferred(r->query_text,
+                                                            &got_key, text);
                             finish_entry(
                                 r, indices[i], &r->daemon->counters
                                                     .sampled_text_resolved_total);
@@ -581,7 +589,8 @@ static void *resolver_main(void *arg)
                     }
                 }
             }
-            pgwt_qt_flush(r->query_text);
+            if (!r->test_unthrottled)
+                pgwt_qt_flush(r->query_text);
         }
         int missing_indices[PGWT_PGSS_BATCH_MAX];
         size_t missing_count = 0;
@@ -610,7 +619,8 @@ int pgwt_pgss_resolver_start(struct pgwt_pgss_resolver **out,
     r->test_unthrottled = getenv("PGWT_TEST_PGSS_UNTHROTTLED") != NULL;
     if (r->test_unthrottled)
         fprintf(stderr, "WARN: PGWT_TEST_PGSS_UNTHROTTLED -- restoring "
-                "pre-throttle 32-key pgss scans (TEST ONLY)\n");
+                "pre-throttle 32-key pgss scan storm (5 scans/batch) and "
+                "synchronous persistence (TEST ONLY)\n");
     if (connection_info(r, postgres_binary) != 0 ||
         pthread_mutex_init(&r->mutex, NULL) != 0 ||
         pthread_cond_init(&r->cond, NULL) != 0) {
