@@ -174,6 +174,7 @@ enum pgwt_pgss_miss_action pgwt_pgss_miss_action(unsigned attempts)
 #include <unistd.h>
 
 #define PGWT_PGSS_QUEUE_SIZE QT_HT_SIZE
+#define PGWT_PGSS_PRETHROTTLE_BATCH_MAX 32
 
 enum entry_state {
     ENTRY_EMPTY = 0,
@@ -194,6 +195,7 @@ struct pgwt_pgss_resolver {
     pthread_cond_t cond;
     bool stop;
     bool started;
+    bool test_unthrottled;
     uint64_t next_batch_at_ms;
     uint32_t last_batch_databaseid;
     struct resolver_entry entries[PGWT_PGSS_QUEUE_SIZE];
@@ -427,8 +429,10 @@ static size_t select_batch_locked(struct pgwt_pgss_resolver *r, uint64_t now,
                                                  : first_databaseid;
     if (!batch_databaseid)
         return 0;
-    for (int i = 0; i < PGWT_PGSS_QUEUE_SIZE &&
-                    count < PGWT_PGSS_BATCH_MAX; i++) {
+    size_t batch_max = r->test_unthrottled
+                     ? PGWT_PGSS_PRETHROTTLE_BATCH_MAX
+                     : PGWT_PGSS_BATCH_MAX;
+    for (int i = 0; i < PGWT_PGSS_QUEUE_SIZE && count < batch_max; i++) {
         struct resolver_entry *e = &r->entries[i];
         if (e->state != ENTRY_PENDING ||
             e->key.databaseid != batch_databaseid ||
@@ -441,12 +445,16 @@ static size_t select_batch_locked(struct pgwt_pgss_resolver *r, uint64_t now,
         /* Charge the 10 s scan budget in proportion to keys amortized by this
          * SRF call. Sparse databases no longer burn a full window, while the
          * floor keeps the expensive showtext scan at or below one per second. */
-        uint64_t delay = (PGWT_PGSS_BATCH_INTERVAL_MS * count +
-                          PGWT_PGSS_BATCH_MAX - 1) /
-                         PGWT_PGSS_BATCH_MAX;
-        if (delay < PGWT_PGSS_SCAN_MIN_INTERVAL_MS)
-            delay = PGWT_PGSS_SCAN_MIN_INTERVAL_MS;
-        r->next_batch_at_ms = now + delay;
+        if (r->test_unthrottled) {
+            r->next_batch_at_ms = now;
+        } else {
+            uint64_t delay = (PGWT_PGSS_BATCH_INTERVAL_MS * count +
+                              PGWT_PGSS_BATCH_MAX - 1) /
+                             PGWT_PGSS_BATCH_MAX;
+            if (delay < PGWT_PGSS_SCAN_MIN_INTERVAL_MS)
+                delay = PGWT_PGSS_SCAN_MIN_INTERVAL_MS;
+            r->next_batch_at_ms = now + delay;
+        }
         r->last_batch_databaseid = batch_databaseid;
     }
     return count;
@@ -537,8 +545,16 @@ static void *resolver_main(void *arg)
         char sql[65536], output[QT_MAX_TEXT];
         bool found[PGWT_PGSS_BATCH_MAX] = {0};
         int sql_ok = pgwt_pgss_build_lookup_sql(sql, sizeof(sql), schema,
-                                                 keys, count) == 0 &&
-                     run_sql(r, database, sql, output, sizeof(output)) == 0;
+                                                keys, count) == 0;
+        if (sql_ok) {
+            int scans = r->test_unthrottled ? 5 : 1;
+            for (int i = 0; i < scans && sql_ok; i++) {
+                counter_add(
+                    &r->daemon->counters.sampled_text_pgss_scans_total, 1);
+                sql_ok = run_sql(r, database, sql, output,
+                                 sizeof(output)) == 0;
+            }
+        }
         if (!sql_ok)
             counter_add(&r->daemon->counters.sampled_text_error_total, count);
         if (sql_ok) {
@@ -555,8 +571,12 @@ static void *resolver_main(void *arg)
                     if (resolver_key_equal(&keys[i], &got_key)) {
                         found[i] = true;
                         if (parsed > 0) {
-                            pgwt_qt_store_pgss_deferred(r->query_text,
-                                                        &got_key, text);
+                            if (r->test_unthrottled)
+                                pgwt_qt_store_pgss(r->query_text,
+                                                   &got_key, text);
+                            else
+                                pgwt_qt_store_pgss_deferred(r->query_text,
+                                                            &got_key, text);
                             finish_entry(
                                 r, indices[i], &r->daemon->counters
                                                     .sampled_text_resolved_total);
@@ -569,7 +589,8 @@ static void *resolver_main(void *arg)
                     }
                 }
             }
-            pgwt_qt_flush(r->query_text);
+            if (!r->test_unthrottled)
+                pgwt_qt_flush(r->query_text);
         }
         int missing_indices[PGWT_PGSS_BATCH_MAX];
         size_t missing_count = 0;
@@ -595,6 +616,11 @@ int pgwt_pgss_resolver_start(struct pgwt_pgss_resolver **out,
     r->daemon = daemon;
     r->query_text = query_text;
     r->postmaster_pid = postmaster_pid;
+    r->test_unthrottled = getenv("PGWT_TEST_PGSS_UNTHROTTLED") != NULL;
+    if (r->test_unthrottled)
+        fprintf(stderr, "WARN: PGWT_TEST_PGSS_UNTHROTTLED -- restoring "
+                "pre-throttle 32-key pgss scan storm (5 scans/batch) and "
+                "synchronous persistence (TEST ONLY)\n");
     if (connection_info(r, postgres_binary) != 0 ||
         pthread_mutex_init(&r->mutex, NULL) != 0 ||
         pthread_cond_init(&r->cond, NULL) != 0) {

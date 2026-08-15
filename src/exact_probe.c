@@ -308,6 +308,14 @@ int pgwt_exact_probe_startup(struct pgwt_daemon *d)
     uint32_t mask = pgwt_exact_probe_startup_mask(
         d->mode, d->pg_major_version, &d->backend_status_layout,
         d->lightweight_mode != 0, d->skip_usdt != 0);
+    bool test_sampled_uprobes =
+        getenv("PGWT_TEST_SAMPLED_UPROBES") != NULL &&
+        (d->mode == PGWT_MODE_SAMPLED || d->mode == PGWT_MODE_TIERED);
+    if (test_sampled_uprobes) {
+        mask |= PGWT_EXACT_PROBE_ATTR_MASK;
+        fprintf(stderr, "WARN: PGWT_TEST_SAMPLED_UPROBES -- restoring "
+                "always-on sampled attribution traps (TEST ONLY)\n");
+    }
     uint64_t generation = d->mode == PGWT_MODE_FULL ? 1 : 0;
     if (set_config(d, generation, generation ? mono_ns() : 0, true) != 0)
         return -1;
@@ -364,6 +372,8 @@ void pgwt_exact_probe_reconcile_sampled(struct pgwt_daemon *d)
 {
     if ((d->mode != PGWT_MODE_SAMPLED && d->mode != PGWT_MODE_TIERED) ||
         !pgwt_pgbs_sampled_attr_enabled(&d->backend_status_layout))
+        return;
+    if (getenv("PGWT_TEST_SAMPLED_UPROBES"))
         return;
     uint32_t before = d->exact_probes.core.attached_mask;
     pgwt_exact_probe_core_unpin(&d->exact_probes.core,
