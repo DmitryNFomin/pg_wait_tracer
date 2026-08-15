@@ -168,7 +168,7 @@ jobs:
 
       - name: Characterize paired sampled overhead
         run: |
-          PM_PID=$(head -1 /var/lib/postgresql/17/main/postmaster.pid)
+          PM_PID=$(sudo head -1 /var/lib/postgresql/17/main/postmaster.pid)
           sudo env "PATH=/usr/lib/postgresql/17/bin:$PATH" \
             "BPFTOOL=$BPFTOOL" \
             python3 tests/sampled_overhead_gate.py \
