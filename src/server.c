@@ -154,9 +154,10 @@ struct bm_entry {
  *      coverage.
  *
  * Boundary rule (FID-6): a sample represents the interval
- * (ts − period, ts]. It is dropped iff its MIDPOINT (ts − period/2) falls
- * inside a covered span (inclusive); worst-case error per window edge is
- * period/2, zero-mean.
+ * (ts − period, ts]. Exact spans are subtracted from that interval. Fully
+ * covered samples disappear; boundary-straddling samples retain only their
+ * uncovered pieces. This matters when SMP-3 weights a delayed tick by several
+ * seconds of measured elapsed time rather than one nominal sample period.
  *
  * Clock domain (FID-7): all coverage comparison happens in the MONOTONIC
  * domain. Files written by one daemon run share the monotonic clock; their
@@ -188,6 +189,7 @@ struct pgwt_file_cov {
     uint64_t mono_first, mono_last;
     int      has_samples, has_transitions;
     uint64_t sample_period_ns;
+    uint64_t max_sample_period_ns; /* SMP-3 lookahead, not reported cadence */
     int      blocks_scanned;       /* header-scan watermark (incremental) */
     struct pgwt_span *s_spans; int n_s, cap_s;   /* SAMPLES block spans */
     struct pgwt_span *t_spans; int n_t, cap_t;   /* TRANSITIONS block spans */
@@ -1039,7 +1041,9 @@ static int load_max_events(void)
 
 /* Read events from a trace file for a MONO time range — on demand, no
  * caching. Opens file, seeks to the right blocks via block index, decodes
- * only the blocks that overlap [from_mono, to_mono]. Appends events at
+ * only the blocks that overlap [from_mono, sample_to_mono]. Non-samples use
+ * the nominal `to_mono`; the wider endpoint admits only delayed samples whose
+ * intervals may overlap the requested right edge. Appends events at
  * *total (growing as needed) with timestamps left MONOTONIC. SAMPLES
  * records are normalized to interval shape (old_event = sampled event,
  * duration_ns = sample_period_ns) so the duration-based estimators apply
@@ -1049,6 +1053,7 @@ static int load_max_events(void)
  * stops when *total reaches load_max_events(). */
 static void load_file_range_mono(const char *path,
                                  uint64_t from_mono, uint64_t to_mono,
+                                 uint64_t sample_to_mono,
                                  uint32_t pid, int markers_only,
                                  struct pgwt_trace_event **events,
                                  int *total, int *cap, int *overloaded)
@@ -1062,18 +1067,20 @@ static void load_file_range_mono(const char *path,
     int max_events = load_max_events();
 
     for (int b = first_block; b < reader.num_blocks; b++) {
-        if (reader.block_index[b].timestamp_ns > to_mono)
+        if (reader.block_index[b].timestamp_ns > sample_to_mono)
             break;
 
         struct pgwt_block_info bi;
         int n = pgwt_reader_decode_block_info(&reader, b, block_buf,
                                               PGWT_BLOCK_EVENTS, &bi);
         if (n < 0) continue;
+        bool sample_block = bi.block_type == PGWT_BLOCK_SAMPLES;
+        uint64_t block_to = sample_block ? sample_to_mono : to_mono;
 
         for (int i = 0; i < n; i++) {
             uint64_t ts_mono = block_buf[i].timestamp_ns;
             if (ts_mono < from_mono) continue;
-            if (ts_mono > to_mono) break;
+            if (ts_mono > block_to) break;
             if (pid != 0 && block_buf[i].pid != pid)
                 continue;
             if (markers_only && !PGWT_IS_MARKER(block_buf[i].old_event))
@@ -1235,12 +1242,17 @@ static void cov_scan_file(struct pgwt_server *srv, struct pgwt_file_cov *fc)
             fc->mono_last = bi.last_timestamp_ns;
         if (bi.block_type == PGWT_BLOCK_SAMPLES) {
             fc->has_samples = 1;
+            /* SMP-3 delayed ticks carry their measured inter-tick elapsed
+             * time. Retain the maximum for request lookahead even when later
+             * nominal-period blocks follow the stalled block. */
             if (bi.sample_period_ns)
                 fc->sample_period_ns = bi.sample_period_ns;
+            if (bi.sample_period_ns > fc->max_sample_period_ns)
+                fc->max_sample_period_ns = bi.sample_period_ns;
             /* Merge adjacent sample spans (gap up to 2 periods) */
             span_list_add(&fc->s_spans, &fc->n_s, &fc->cap_s,
                           bi.first_timestamp_ns, bi.last_timestamp_ns,
-                          fc->sample_period_ns * 2);
+                          bi.sample_period_ns * 2);
         } else {
             fc->has_transitions = 1;
             span_list_add(&fc->t_spans, &fc->n_t, &fc->cap_t,
@@ -1552,6 +1564,122 @@ static int spans_contain(const struct pgwt_span *s, int n, uint64_t mono_ns)
     return lo < n && mono_ns >= s[lo].start_ns && mono_ns <= s[lo].end_ns;
 }
 
+/* First normalized span whose end is strictly after `mono_ns`. */
+static int spans_first_ending_after(const struct pgwt_span *s, int n,
+                                    uint64_t mono_ns)
+{
+    int lo = 0, hi = n;
+    while (lo < hi) {
+        int mid = (lo + hi) / 2;
+        if (s[mid].end_ns <= mono_ns)
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
+    return lo;
+}
+
+/* Append one event to the fidelity-merged result. Sample clipping can turn
+ * one delayed, measured-elapsed sample into two uncovered fragments, so the
+ * merge cannot safely compact the input array in place. */
+static int merge_append_event(struct pgwt_trace_event **events, int *count,
+                              int *capacity, int max_events,
+                              const struct pgwt_trace_event *event,
+                              int64_t wall_offset)
+{
+    if (*count >= max_events)
+        return -1;
+    if (*count >= *capacity) {
+        int next = *capacity < max_events / 2
+                 ? *capacity * 2 : max_events;
+        if (next <= *capacity)
+            return -1;
+        struct pgwt_trace_event *grown =
+            realloc(*events, (size_t)next * sizeof(**events));
+        if (!grown)
+            return -1;
+        *events = grown;
+        *capacity = next;
+    }
+    (*events)[*count] = *event;
+    (*events)[*count].timestamp_ns = (uint64_t)
+        ((int64_t)event->timestamp_ns + wall_offset);
+    (*count)++;
+    return 0;
+}
+
+static int merge_append_sample_part(
+    struct pgwt_trace_event **events, int *count, int *capacity,
+    int max_events, const struct pgwt_trace_event *sample,
+    uint64_t part_start, uint64_t part_end,
+    uint64_t range_start, uint64_t range_end,
+    int64_t wall_offset, bool *contributed)
+{
+    uint64_t clipped_start = part_start > range_start
+                           ? part_start : range_start;
+    uint64_t clipped_end = part_end < range_end ? part_end : range_end;
+    if (clipped_end <= clipped_start)
+        return 0;
+
+    struct pgwt_trace_event part = *sample;
+    part.timestamp_ns = clipped_end;
+    part.duration_ns = clipped_end - clipped_start;
+    if (*contributed)
+        part.flags |= PGWT_EVENT_FLAG_SAMPLE_CONT;
+    else
+        part.flags &= ~PGWT_EVENT_FLAG_SAMPLE_CONT;
+    if (merge_append_event(events, count, capacity, max_events, &part,
+                           wall_offset) != 0)
+        return -1;
+    *contributed = true;
+    return 0;
+}
+
+/* Clipping can move a delayed sample fragment before records that preceded
+ * its physical block. Restore timestamp order without disturbing marker tie
+ * order: lifecycle and timeline consumers rely on both properties. */
+static int stable_sort_events(struct pgwt_trace_event *events, int count)
+{
+    if (count < 2)
+        return 0;
+    struct pgwt_trace_event *tmp =
+        malloc((size_t)count * sizeof(*tmp));
+    if (!tmp)
+        return -1;
+
+    struct pgwt_trace_event *src = events;
+    struct pgwt_trace_event *dst = tmp;
+    for (size_t width = 1; width < (size_t)count; width *= 2) {
+        for (size_t base = 0; base < (size_t)count; base += 2 * width) {
+            size_t left = base;
+            size_t mid = base + width < (size_t)count
+                       ? base + width : (size_t)count;
+            size_t right = mid;
+            size_t end = base + 2 * width < (size_t)count
+                       ? base + 2 * width : (size_t)count;
+            size_t out = base;
+            while (left < mid && right < end) {
+                /* Left wins ties: stable marker/event ordering. */
+                if (src[left].timestamp_ns <= src[right].timestamp_ns)
+                    dst[out++] = src[left++];
+                else
+                    dst[out++] = src[right++];
+            }
+            while (left < mid) dst[out++] = src[left++];
+            while (right < end) dst[out++] = src[right++];
+        }
+        struct pgwt_trace_event *swap = src;
+        src = dst;
+        dst = swap;
+        if (width > (size_t)count / 2)
+            break;
+    }
+    if (src != events)
+        memcpy(events, src, (size_t)count * sizeof(*events));
+    free(tmp);
+    return 0;
+}
+
 static const struct pgwt_gen_cov *gen_cov_get(const struct pgwt_server *srv,
                                               int gen)
 {
@@ -1641,13 +1769,14 @@ static struct pgwt_wfid window_fidelity(struct pgwt_server *srv,
  * Returns malloc'd array. Caller must free(). Sets *out_count.
  *
  * Fidelity (trace format v2, D3 + T1): SAMPLES records are normalized so
- * the duration-based estimators apply ASH math. The exact-wins merge drops
- * any sample whose interval midpoint falls inside the exact coverage
- * (escalation-marker windows — see the coverage block comment above), so a
- * sampler running through a full-fidelity window does not double-count —
- * including across long waits whose single transition lands only at
- * wait-end (FID-1), and across files whose wall offsets disagree (FID-7:
- * the merge runs in the monotonic domain per clock generation).
+ * the duration-based estimators apply ASH math. The exact-wins merge subtracts
+ * exact coverage (escalation-marker windows) from each sample interval, so a
+ * sampler running through a full-fidelity window does not double-count. A
+ * delayed tick can carry seconds of measured elapsed weight (SMP-3): clipping
+ * preserves the portions outside the exact window instead of dropping or
+ * retaining the whole interval based on its midpoint. The merge remains in
+ * the monotonic domain per clock generation, so per-file wall offsets cannot
+ * shift coverage against samples (FID-7).
  * When `info` is non-NULL it is filled with what actually contributed
  * (has_transitions / has_samples / sample_period_ns).
  *
@@ -1686,7 +1815,11 @@ server_load_events_fi_mode(struct pgwt_server *srv,
 
     /* Per-segment bookkeeping: each file contributes one contiguous run of
      * events; merge + wall conversion need its generation and offset. */
-    struct load_seg { int start, count, gen; int64_t off; };
+    struct load_seg {
+        int start, count, gen;
+        int64_t off;
+        uint64_t from_m, to_m;
+    };
     struct load_seg segs[256];
     int n_segs = 0;
     uint64_t sample_period_ns = 0;
@@ -1704,8 +1837,13 @@ server_load_events_fi_mode(struct pgwt_server *srv,
                         ? (uint64_t)((int64_t)from_wall_ns - fc->canon_offset)
                         : 0;
         uint64_t to_m = (uint64_t)((int64_t)to_wall_ns - fc->canon_offset);
+        uint64_t sample_to_m = to_m;
+        if (!markers_only && fc->max_sample_period_ns) {
+            sample_to_m = UINT64_MAX - to_m < fc->max_sample_period_ns
+                        ? UINT64_MAX : to_m + fc->max_sample_period_ns;
+        }
 
-        if (fc->mono_first > to_m || fc->mono_last < from_m)
+        if (fc->mono_first > sample_to_m || fc->mono_last < from_m)
             continue;
 
         if (fc->sample_period_ns)
@@ -1714,20 +1852,27 @@ server_load_events_fi_mode(struct pgwt_server *srv,
         int seg_start = total;
 
         if (fc->is_current) {
-            /* On-demand: read only blocks in [from, to] */
-            load_file_range_mono(fc->path, from_m, to_m, pid, markers_only,
+            /* Read through one maximum measured sample period beyond `to` so
+             * a delayed observation whose interval overlaps the right edge is
+             * available for clipping. Non-samples are rejected below. */
+            load_file_range_mono(fc->path, from_m, to_m, sample_to_m,
+                                 pid, markers_only,
                                  &events, &total, &cap, &overloaded);
         } else {
             struct file_cache_entry *ce = get_cached_immutable(srv, fc->path);
             if (!ce || !ce->events) {
                 /* Cache miss (file too large or alloc failed) */
-                load_file_range_mono(fc->path, from_m, to_m, pid, markers_only,
+                load_file_range_mono(fc->path, from_m, to_m, sample_to_m,
+                                     pid, markers_only,
                                      &events, &total, &cap, &overloaded);
             } else {
                 for (int i = 0; i < ce->count; i++) {
                     uint64_t ts = ce->events[i].timestamp_ns;
                     if (ts < from_m) continue;
-                    if (ts > to_m) break;
+                    if (ts > sample_to_m) break;
+                    if (!(ce->events[i].flags & PGWT_EVENT_FLAG_SAMPLE) &&
+                        ts > to_m)
+                        continue;
                     if (pid != 0 && ce->events[i].pid != pid)
                         continue;
                     if (markers_only && !PGWT_IS_MARKER(ce->events[i].old_event))
@@ -1754,27 +1899,86 @@ server_load_events_fi_mode(struct pgwt_server *srv,
             segs[n_segs].count = total - seg_start;
             segs[n_segs].gen = fc->gen;
             segs[n_segs].off = fc->canon_offset;
+            segs[n_segs].from_m = from_m;
+            segs[n_segs].to_m = to_m;
             n_segs++;
         }
     }
 
     /* Exact-wins merge (mono, per generation) + wall re-anchoring, then
-     * derive what actually contributed for the fidelity indicator. */
+     * derive what actually contributed for the fidelity indicator. Use a
+     * separate output because subtracting exact spans can split one delayed
+     * sample into multiple uncovered fragments. */
     int has_transitions = 0, has_samples = 0;
+    int merged_cap = total > 0 ? total : 16;
+    if (merged_cap > max_events)
+        merged_cap = max_events;
+    struct pgwt_trace_event *merged =
+        malloc((size_t)merged_cap * sizeof(*merged));
+    if (!merged) {
+        free(events);
+        *out_count = 0;
+        return NULL;
+    }
     int kept = 0;
-    for (int s = 0; s < n_segs; s++) {
+    for (int s = 0; s < n_segs && !overloaded; s++) {
         const struct pgwt_gen_cov *gc = gen_cov_get(srv, segs[s].gen);
-        for (int i = segs[s].start; i < segs[s].start + segs[s].count; i++) {
+        for (int i = segs[s].start;
+             i < segs[s].start + segs[s].count && !overloaded; i++) {
             if (events[i].flags & PGWT_EVENT_FLAG_SAMPLE) {
-                /* Boundary rule (FID-6): drop iff the sample's interval
-                 * midpoint lies inside exact coverage. */
-                uint64_t mid = events[i].timestamp_ns
-                             - events[i].duration_ns / 2;
-                if (gc && gc->n_exact > 0 &&
-                    spans_contain(gc->exact, gc->n_exact, mid))
-                    continue;   /* exact data is authoritative here */
-                has_samples = 1;
+                uint64_t end = events[i].timestamp_ns;
+                uint64_t start = end >= events[i].duration_ns
+                               ? end - events[i].duration_ns : 0;
+                uint64_t cursor = start;
+                bool contributed = false;
+
+                /* Emit every positive-length portion outside normalized exact
+                 * coverage. Keeping the observation on each piece preserves
+                 * SMP-3's measured elapsed weight without double-counting any
+                 * overlap against exact transitions. */
+                if (gc && gc->n_exact > 0) {
+                    int first = spans_first_ending_after(
+                        gc->exact, gc->n_exact, cursor);
+                    for (int j = first;
+                         j < gc->n_exact && cursor < end; j++) {
+                        uint64_t exact_start = gc->exact[j].start_ns;
+                        uint64_t exact_end = gc->exact[j].end_ns;
+                        if (exact_start >= end)
+                            break;
+                        if (exact_start > cursor) {
+                            uint64_t part_end = exact_start < end
+                                              ? exact_start : end;
+                            if (merge_append_sample_part(
+                                    &merged, &kept, &merged_cap, max_events,
+                                    &events[i], cursor, part_end,
+                                    segs[s].from_m, segs[s].to_m,
+                                    segs[s].off, &contributed) != 0) {
+                                overloaded = 1;
+                                break;
+                            }
+                        }
+                        if (exact_end > cursor)
+                            cursor = exact_end < end ? exact_end : end;
+                    }
+                }
+                if (!overloaded && cursor < end) {
+                    if (merge_append_sample_part(
+                            &merged, &kept, &merged_cap, max_events,
+                            &events[i], cursor, end,
+                            segs[s].from_m, segs[s].to_m,
+                            segs[s].off, &contributed) != 0) {
+                        overloaded = 1;
+                    }
+                }
+                if (contributed)
+                    has_samples = 1;
             } else {
+                /* The loader's right lookahead is only for overlapping sample
+                 * intervals; preserve the prior endpoint selection for exact
+                 * records and structural markers. */
+                if (events[i].timestamp_ns < segs[s].from_m ||
+                    events[i].timestamp_ns > segs[s].to_m)
+                    continue;
                 /* T2 backstop (study defect 2): an EXIT record whose closing
                  * interval lies OUTSIDE exact coverage in a generation that
                  * has sampled coverage is a phantom — pre-fix daemons
@@ -1793,14 +1997,26 @@ server_load_events_fi_mode(struct pgwt_server *srv,
                         continue;   /* phantom exit interval */
                 }
                 has_transitions = 1;
+                if (merge_append_event(&merged, &kept, &merged_cap,
+                                       max_events, &events[i],
+                                       segs[s].off) != 0)
+                    overloaded = 1;
             }
-            events[kept] = events[i];
-            events[kept].timestamp_ns = (uint64_t)
-                ((int64_t)events[kept].timestamp_ns + segs[s].off);
-            kept++;
         }
     }
+    free(events);
+    events = merged;
     total = kept;
+
+    bool ordered = true;
+    for (int i = 1; i < total; i++) {
+        if (events[i - 1].timestamp_ns > events[i].timestamp_ns) {
+            ordered = false;
+            break;
+        }
+    }
+    if (!overloaded && !ordered && stable_sort_events(events, total) != 0)
+        overloaded = 1;
 
     /* T2: annotate the merged window with categories (pid types from
      * backends.jsonl) and the PLAN/EXEC/CMD marker windows; classify exact
@@ -4059,16 +4275,22 @@ static void dump_summary(struct pgwt_server *srv)
 
     /* Count sample vs transition records so a sampled-mode trace is visible
      * at a glance (A2 evidence: SAMPLES blocks landed). */
-    int n_samples = 0;
-    for (int i = 0; i < count; i++)
-        if (events[i].flags & PGWT_EVENT_FLAG_SAMPLE)
-            n_samples++;
+    int n_samples = 0, n_transitions = 0;
+    for (int i = 0; i < count; i++) {
+        if (events[i].flags & PGWT_EVENT_FLAG_SAMPLE) {
+            if (!(events[i].flags & PGWT_EVENT_FLAG_SAMPLE_CONT))
+                n_samples++;
+        } else {
+            n_transitions++;
+        }
+    }
 
     enum pgwt_fidelity fid = load_fidelity(&linfo);
 
     printf("════════════════════════════════════════════════════════════════════════════════\n");
     printf("pgwt-server — Summary    Events: %d (%d transitions, %d samples)    Duration: %.1fs\n",
-           count, count - n_samples, n_samples, wall_ms / 1000.0);
+           n_transitions + n_samples, n_transitions, n_samples,
+           wall_ms / 1000.0);
     printf("Fidelity: %s", pgwt_fidelity_str(fid));
     if (linfo.has_samples && linfo.sample_period_ns)
         printf("    Sample period: %.1f ms (%.0f Hz)",

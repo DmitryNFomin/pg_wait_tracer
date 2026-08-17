@@ -414,7 +414,7 @@ static cJSON *build_escalate(struct pgwt_daemon *d, cJSON *req)
     int granted = 0;
     const char *why = NULL;
     if (pgwt_escalate(d, duration_s, PGWT_ESC_REASON_MANUAL,
-                      &granted, &why) != 0) {
+                      &granted, &why, NULL) != 0) {
         cJSON_AddBoolToObject(root, "ok", 0);
         cJSON_AddStringToObject(root, "error",
                                 why ? why : "escalation denied");

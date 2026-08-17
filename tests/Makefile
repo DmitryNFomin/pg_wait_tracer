@@ -10,7 +10,7 @@ BUILD     = ../build
 # Rocky 8 / RHEL 8 where the bundled static libbpf is used instead.
 LIBBPF_LIB ?= -lbpf
 
-TESTS     = test_wait_event test_cmdline test_event_writer test_event_reader \
+TESTS     = test_wait_event test_cmdline test_spawn test_event_writer test_event_reader \
             test_trace_v2 test_sampler test_anomaly test_escalation_budget \
             test_exact_probe \
             test_effective_cores \
@@ -47,6 +47,9 @@ test_wait_event: test_wait_event.c $(BUILD)/wait_event.o $(BUILD)/spawn.o $(BUIL
 	$(CC) $(CFLAGS) -o $@ $^
 
 test_cmdline: test_cmdline.c $(BUILD)/cmdline.o
+	$(CC) $(CFLAGS) -o $@ $^
+
+test_spawn: test_spawn.c ../src/spawn.c
 	$(CC) $(CFLAGS) -o $@ $^
 
 test_event_writer: test_event_writer.c $(BUILD)/event_writer.o

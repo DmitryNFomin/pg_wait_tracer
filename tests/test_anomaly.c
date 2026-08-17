@@ -839,6 +839,108 @@ static void test_cpu_cusum_episode_latch(void)
            grants, (unsigned long long)chronic.fires_total);
 }
 
+/* A FIRE is only an attempt until the escalation engine opens the exact
+ * window.  A transient attach/preseed rollback must not consume the entire
+ * saturation episode, but the retry must still earn a fresh CUSUM horizon. */
+static void test_cpu_setup_failure_retry(void)
+{
+    printf("--- CPU CUSUM: transient setup failure retries safely ---\n");
+
+    struct pgwt_anomaly a;
+    pgwt_anomaly_init(&a, true, 10);
+    isolate_cpu_rule(&a);
+    uint64_t clk = TICK_NS;
+    struct pgwt_anomaly_decision d = {0};
+
+    for (int t = 0; t < 100 && d.action != PGWT_ANOMALY_FIRE; t++)
+        d = cpu_tick(&a, 4.0, 4.0, 4.0,
+                     true, false, false, &clk);
+    CHECK(d.action == PGWT_ANOMALY_FIRE && !a.cpu_armed,
+          "initial saturation did not fire and latch");
+
+    bool retry = pgwt_anomaly_retry_after_setup_failure(
+        &a, d.fired_mask, clk);
+    CHECK(retry && a.cpu_armed && a.cpu_cusum == 0.0 &&
+          a.last_fire_ns == 0 && a.cpu_setup_retries == 1,
+          "setup rollback did not reset CPU evidence/cooldown");
+
+    d = cpu_tick(&a, 4.0, 4.0, 4.0,
+                 true, false, false, &clk);
+    CHECK(d.action != PGWT_ANOMALY_FIRE,
+          "setup rollback retried without a fresh evidence horizon");
+
+    int retry_tick = 0;
+    for (int t = 1; t < 200; t++) {
+        d = cpu_tick(&a, 4.0, 4.0, 4.0,
+                     true, false, false, &clk);
+        if (d.action == PGWT_ANOMALY_FIRE) {
+            retry_tick = t + 1;
+            break;
+        }
+    }
+    CHECK(retry_tick > 1 && a.fires_total == 2 && !a.cpu_armed,
+          "fresh saturation did not produce one bounded retry "
+          "(tick=%d fires=%llu armed=%d)", retry_tick,
+          (unsigned long long)a.fires_total, a.cpu_armed);
+
+    pgwt_anomaly_escalation_succeeded(&a);
+    CHECK(a.cpu_setup_retries == 0 && a.cpu_setup_retry_after_ns == 0,
+          "successful escalation did not clear retry bookkeeping");
+
+    int extra_fires = 0;
+    for (int t = 0; t < 100; t++) {
+        d = cpu_tick(&a, 4.0, 4.0, 4.0,
+                     true, false, false, &clk);
+        extra_fires += d.action == PGWT_ANOMALY_FIRE;
+    }
+    CHECK(extra_fires == 0,
+          "successful retry did not latch the saturation episode");
+}
+
+static void test_cpu_setup_failure_retry_cap(void)
+{
+    printf("--- CPU CUSUM: setup retry is capped per episode ---\n");
+
+    struct pgwt_anomaly a;
+    pgwt_anomaly_init(&a, true, 10);
+    isolate_cpu_rule(&a);
+    a.cooldown_ns = 0;
+    uint64_t clk = TICK_NS;
+    struct pgwt_anomaly_decision d = {0};
+
+    for (unsigned attempt = 0;
+         attempt <= PGWT_ANOMALY_CPU_SETUP_MAX_RETRIES; attempt++) {
+        d.action = PGWT_ANOMALY_NONE;
+        for (int t = 0; t < 200 && d.action != PGWT_ANOMALY_FIRE; t++)
+            d = cpu_tick(&a, 4.0, 4.0, 4.0,
+                         true, false, false, &clk);
+        CHECK(d.action == PGWT_ANOMALY_FIRE,
+              "setup attempt %u never earned fresh evidence", attempt + 1);
+        bool will_retry = pgwt_anomaly_retry_after_setup_failure(
+            &a, d.fired_mask, clk);
+        CHECK(will_retry ==
+              (attempt < PGWT_ANOMALY_CPU_SETUP_MAX_RETRIES),
+              "setup attempt %u retry decision=%d", attempt + 1,
+              will_retry);
+    }
+
+    int extra_fires = 0;
+    for (int t = 0; t < 200; t++) {
+        d = cpu_tick(&a, 4.0, 4.0, 4.0,
+                     true, false, false, &clk);
+        extra_fires += d.action == PGWT_ANOMALY_FIRE;
+    }
+    CHECK(extra_fires == 0 && !a.cpu_armed &&
+          a.cpu_setup_retries == PGWT_ANOMALY_CPU_SETUP_MAX_RETRIES,
+          "retry cap did not latch failed episode (extra=%d retries=%u)",
+          extra_fires, a.cpu_setup_retries);
+
+    cpu_tick(&a, 0.0, 0.0, 4.0,
+             true, false, false, &clk);
+    CHECK(a.cpu_armed && a.cpu_setup_retries == 0,
+          "trusted recovery did not reset the capped retry episode");
+}
+
 /* ── AAS-1 Stage 3 fix: activity floor + affinity-only margin ────────── */
 static void test_cpu_cusum_floor_and_margin(void)
 {
@@ -1430,6 +1532,8 @@ int main(void)
     test_cpu_cusum_incidents();
     test_cpu_cusum_gates();
     test_cpu_cusum_episode_latch();
+    test_cpu_setup_failure_retry();
+    test_cpu_setup_failure_retry_cap();
     test_cpu_cusum_floor_and_margin();
     test_cpu_cusum_coverage_flaps();
     test_cpu_cusum_incomplete_saturation_monotone();

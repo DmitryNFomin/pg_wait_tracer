@@ -233,6 +233,7 @@ struct pgwt_trace_event {
 #define PGWT_EVENT_FLAG_PLAN       0x20U  /* inside a PLAN marker window */
 #define PGWT_EVENT_FLAG_EXEC       0x40U  /* inside an EXEC marker window */
 #define PGWT_EVENT_FLAG_QUERY_SYNTH 0x80U /* PG13 escalation straddler seed */
+#define PGWT_EVENT_FLAG_SAMPLE_CONT 0x100U /* reader-only split continuation */
 
 #define PGWT_EVENT_EXIT  0xFFFFFFFFU  /* sentinel new_event for process exit */
 

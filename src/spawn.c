@@ -3,10 +3,13 @@
 #include "spawn.h"
 
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <signal.h>
+#include <time.h>
 #include <sys/wait.h>
 
 static int proc_open(struct pgwt_proc *p, char *const argv[], bool writable)
@@ -37,6 +40,21 @@ static int proc_open(struct pgwt_proc *p, char *const argv[], bool writable)
     }
 
     if (pid == 0) {
+        /* The daemon blocks shutdown signals before creating threads so its
+         * signalfd owns graceful shutdown.  A fork/exec helper must not carry
+         * that process-internal policy into runuser/psql/readelf children:
+         * exec preserves the signal mask (and ignored dispositions). */
+        sigset_t shutdown_signals;
+        struct sigaction default_action = { .sa_handler = SIG_DFL };
+        sigemptyset(&shutdown_signals);
+        sigaddset(&shutdown_signals, SIGINT);
+        sigaddset(&shutdown_signals, SIGTERM);
+        sigemptyset(&default_action.sa_mask);
+        if (sigaction(SIGINT, &default_action, NULL) != 0 ||
+            sigaction(SIGTERM, &default_action, NULL) != 0 ||
+            sigprocmask(SIG_UNBLOCK, &shutdown_signals, NULL) != 0)
+            _exit(127);
+
         /* Child: stdout -> pipe and stderr -> /dev/null.  The read-only
          * variant also maps stdin to /dev/null; the bidirectional variant
          * maps it to the parent's input pipe.  dup2 clears O_CLOEXEC on the
@@ -95,7 +113,7 @@ int pgwt_proc_open_rw(struct pgwt_proc *p, char *const argv[])
     return proc_open(p, argv, true);
 }
 
-int pgwt_proc_close(struct pgwt_proc *p)
+static int close_pipes(struct pgwt_proc *p)
 {
     if (!p->out)
         return -1;
@@ -105,6 +123,13 @@ int pgwt_proc_close(struct pgwt_proc *p)
     }
     fclose(p->out);
     p->out = NULL;
+    return 0;
+}
+
+int pgwt_proc_close(struct pgwt_proc *p)
+{
+    if (close_pipes(p) != 0)
+        return -1;
 
     int status = 0;
     pid_t r;
@@ -113,4 +138,45 @@ int pgwt_proc_close(struct pgwt_proc *p)
     } while (r < 0 && errno == EINTR);
     p->pid = -1;
     return (r < 0) ? -1 : status;
+}
+
+int pgwt_proc_close_bounded(struct pgwt_proc *p, int timeout_ms)
+{
+    if (close_pipes(p) != 0)
+        return -1;
+
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    uint64_t deadline_ms = (uint64_t)ts.tv_sec * 1000 +
+                           (uint64_t)ts.tv_nsec / 1000000 +
+                           (timeout_ms > 0 ? (uint64_t)timeout_ms : 0);
+    int status = 0;
+    for (;;) {
+        pid_t r = waitpid(p->pid, &status, WNOHANG);
+        if (r == p->pid) {
+            p->pid = -1;
+            return status;
+        }
+        if (r < 0 && errno != EINTR) {
+            p->pid = -1;
+            return -1;
+        }
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        uint64_t now_ms = (uint64_t)ts.tv_sec * 1000 +
+                          (uint64_t)ts.tv_nsec / 1000000;
+        if (now_ms >= deadline_ms)
+            break;
+        usleep(10000);
+    }
+
+    /* This is the exact fork child, not a caller-supplied/system PID. Reap it
+     * after SIGKILL so an overloaded helper cannot make daemon startup wait
+     * forever or leave a zombie. */
+    (void)kill(p->pid, SIGKILL);
+    pid_t r;
+    do {
+        r = waitpid(p->pid, &status, 0);
+    } while (r < 0 && errno == EINTR);
+    p->pid = -1;
+    return -1;
 }

@@ -161,6 +161,10 @@ pgwt_anomaly_eval_observation(struct pgwt_anomaly *a,
      * exactly one observation rather than several seconds of evidence. */
     bool in_cooldown = a->last_fire_ns != 0
                     && now_ns - a->last_fire_ns < a->cooldown_ns;
+    bool in_setup_retry_backoff = a->cpu_setup_retry_after_ns != 0
+                              && now_ns < a->cpu_setup_retry_after_ns;
+    if (a->cpu_setup_retry_after_ns != 0 && !in_setup_retry_backoff)
+        a->cpu_setup_retry_after_ns = 0;
 
     /* ── CPU-demand saturation CUSUM ───────────────────────────────────── */
     bool cpu_rule_enabled = a->cpu_cusum_enabled
@@ -188,6 +192,15 @@ pgwt_anomaly_eval_observation(struct pgwt_anomaly *a,
      * reference cannot prove low demand, so it holds S and advances the #80
      * blind-gap reset. UNKNOWN capacity is independently blind. */
     bool saturation_lower_bound = capacity_known && u >= reference;
+    bool trusted_below_reference = capacity_known && obs->cpu_coverage_ok
+                                && u < a->cpu_cusum_k;
+    if (trusted_below_reference) {
+        /* A real recovery ends the setup-retry episode even when a transient
+         * failure had already re-armed CPU during its backoff. */
+        a->cpu_armed = true;
+        a->cpu_setup_retries = 0;
+        a->cpu_setup_retry_after_ns = 0;
+    }
     bool blind_observation = !capacity_known
                           || (!obs->cpu_coverage_ok
                               && !saturation_lower_bound);
@@ -206,7 +219,8 @@ pgwt_anomaly_eval_observation(struct pgwt_anomaly *a,
      * old units. An open escalation window or cooldown also clears evidence:
      * this prevents a manual/other-rule window from banking an almost-fire
      * that would immediately consume another budget grant when it closes. */
-    if (obs->cpu_capacity_changed || obs->cpu_guard_blocked || in_cooldown) {
+    if (obs->cpu_capacity_changed || obs->cpu_guard_blocked || in_cooldown ||
+        in_setup_retry_backoff) {
         a->cpu_cusum = 0.0;
     } else if (!cpu_rule_enabled) {
         a->cpu_cusum = 0.0;
@@ -217,8 +231,9 @@ pgwt_anomaly_eval_observation(struct pgwt_anomaly *a,
          * continuous saturation therefore consumes at most one grant. */
         if (!a->cpu_armed) {
             a->cpu_cusum = 0.0;
-            if (obs->cpu_coverage_ok && u < a->cpu_cusum_k)
+            if (obs->cpu_coverage_ok && u < a->cpu_cusum_k) {
                 a->cpu_armed = true;
+            }
         } else {
             double before = a->cpu_cusum;
             a->cpu_cusum += a->sample_period_s * (u - reference);
@@ -246,7 +261,9 @@ pgwt_anomaly_eval_observation(struct pgwt_anomaly *a,
          * sessions before the multiplicative rule can fire. */
         aas_over = (aas >= 2.0) && (aas > threshold);
     }
-    if (aas_over)
+    if (in_setup_retry_backoff)
+        a->aas_over_streak = 0;
+    else if (aas_over)
         a->aas_over_streak++;
     else
         a->aas_over_streak = 0;
@@ -262,7 +279,9 @@ pgwt_anomaly_eval_observation(struct pgwt_anomaly *a,
     bool lock_over = (a->lock_fraction > 0.0)
                   && (lock_fraction > a->lock_fraction)
                   && (lock_aas >= a->lock_min_aas);
-    if (lock_over)
+    if (in_setup_retry_backoff)
+        a->lock_over_streak = 0;
+    else if (lock_over)
         a->lock_over_streak++;
     else
         a->lock_over_streak = 0;
@@ -354,6 +373,40 @@ pgwt_anomaly_eval(struct pgwt_anomaly *a, double aas, double lock_fraction,
         .cpu_coverage_ok = false,
     };
     return pgwt_anomaly_eval_observation(a, &obs, now_ns);
+}
+
+bool pgwt_anomaly_retry_after_setup_failure(struct pgwt_anomaly *a,
+                                             unsigned fired_mask,
+                                             uint64_t now_ns)
+{
+    if (!(fired_mask & PGWT_RULE_CPU_SATURATION) ||
+        a->cpu_setup_retries >= PGWT_ANOMALY_CPU_SETUP_MAX_RETRIES)
+        return false;
+
+    /* The engine never opened a window, so charging cooldown or permanently
+     * consuming the CPU episode would lose a real incident.  Restart each
+     * firing rule's evidence after a bounded backoff instead of retrying on
+     * the very next tick.  The retry cap prevents a permanent attach failure
+     * from hammering exact setup for the lifetime of a saturated episode. */
+    a->cpu_setup_retries++;
+    a->cpu_setup_retry_after_ns = now_ns +
+        (uint64_t)PGWT_ANOMALY_CPU_SETUP_RETRY_S * 1000000000ULL;
+    a->last_fire_ns = 0;
+    if (fired_mask & PGWT_RULE_AAS)
+        a->aas_over_streak = 0;
+    if (fired_mask & PGWT_RULE_LOCK)
+        a->lock_over_streak = 0;
+    if (fired_mask & PGWT_RULE_CPU_SATURATION) {
+        a->cpu_armed = true;
+        a->cpu_cusum = 0.0;
+    }
+    return true;
+}
+
+void pgwt_anomaly_escalation_succeeded(struct pgwt_anomaly *a)
+{
+    a->cpu_setup_retries = 0;
+    a->cpu_setup_retry_after_ns = 0;
 }
 
 /* ── Daemon-side wrapper ──────────────────────────────────────────────── */
@@ -502,28 +555,59 @@ void pgwt_anomaly_tick(struct pgwt_daemon *d,
     case PGWT_ANOMALY_FIRE: {
         int granted = 0;
         const char *why = NULL;
+        enum pgwt_escalate_failure failure = PGWT_ESC_FAIL_NONE;
         rule_names(dec.fired_mask, rb, sizeof(rb));
         int reason = (dec.fired_mask & PGWT_RULE_CPU_SATURATION)
                    ? PGWT_ESC_REASON_CPU_SATURATION
                    : PGWT_ESC_REASON_ANOMALY;
         int rc = pgwt_escalate(d, a->escalation_s, reason,
-                               &granted, &why);
+                               &granted, &why, &failure);
         if (rc == 0) {
+            pgwt_anomaly_escalation_succeeded(a);
             fprintf(stderr,
                     "INFO: anomaly AUTO-escalation: rule=%saas=%.1f "
                     "baseline=%.2f lock_frac=%.2f cpu_aas=%.1f "
                     "capacity=%.3f -> full fidelity %ds\n",
                     rb, dec.aas, dec.baseline, dec.lock_fraction,
                     dec.cpu_aas, dec.cpu_capacity, granted);
-        } else {
+        } else if (failure == PGWT_ESC_FAIL_BUDGET) {
             /* Over budget: dropped SILENTLY (log only, no error to anyone) —
              * unlike a manual escalate which returns a denial to its caller. */
             a->dropped_budget++;
+            pgwt_anomaly_escalation_succeeded(a);
             fprintf(stderr,
                     "INFO: anomaly trigger DROPPED (budget): rule=%saas=%.1f "
                     "lock_frac=%.2f (%s)\n",
                     rb, dec.aas, dec.lock_fraction,
                     why ? why : "budget exhausted");
+        } else if (failure == PGWT_ESC_FAIL_EXACT_ATTACH ||
+                   failure == PGWT_ESC_FAIL_EXACT_PRESEED) {
+            bool retry = pgwt_anomaly_retry_after_setup_failure(
+                a, dec.fired_mask, now);
+            if (retry) {
+                fprintf(stderr,
+                        "WARN: anomaly escalation setup failed; retry %u/%u "
+                        "after backoff and fresh evidence: rule=%saas=%.1f "
+                        "lock_frac=%.2f (%s)\n",
+                        a->cpu_setup_retries,
+                        PGWT_ANOMALY_CPU_SETUP_MAX_RETRIES,
+                        rb, dec.aas, dec.lock_fraction,
+                        why ? why : "escalation denied");
+            } else {
+                fprintf(stderr,
+                        "WARN: anomaly escalation setup failed; retry limit "
+                        "reached for this episode: rule=%saas=%.1f "
+                        "lock_frac=%.2f (%s)\n",
+                        rb, dec.aas, dec.lock_fraction,
+                        why ? why : "escalation denied");
+            }
+        } else {
+            pgwt_anomaly_escalation_succeeded(a);
+            fprintf(stderr,
+                    "WARN: anomaly escalation rejected: rule=%saas=%.1f "
+                    "lock_frac=%.2f (%s)\n",
+                    rb, dec.aas, dec.lock_fraction,
+                    why ? why : "invalid escalation request");
         }
         break;
     }

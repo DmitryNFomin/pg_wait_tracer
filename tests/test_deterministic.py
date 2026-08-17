@@ -2,13 +2,13 @@
 """test_deterministic.py — Deterministic accuracy tests with controlled backends.
 
 Tests:
-  1. pg_sleep exact count: N × pg_sleep(1) in a loop → count=N, total≈N*1000ms
+  1. pg_sleep exact count: N × pg_sleep(2) in a loop → count=N, total≈N*2000ms
   2. Lock wait duration: Session B blocks on Lock:relation for a measured time
 
 The key technique: keep the backend ALIVE past the timer tick so BPF map
 entries are not deleted by handle_exit().
 
-Requires: root, running PostgreSQL 18.
+Requires: root, running supported PostgreSQL (PG13/17/18 in capture-smoke).
 Usage: sudo python3 tests/test_deterministic.py [--pid POSTMASTER_PID]
 """
 import subprocess
@@ -17,6 +17,10 @@ import os
 import re
 import time
 import argparse
+import json
+import shutil
+import socket
+import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from testutil import find_postmaster
@@ -48,6 +52,51 @@ def psql(sql, timeout=10):
         capture_output=True, text=True, timeout=timeout
     )
     return result.stdout.strip()
+
+
+def wait_for_control_socket(proc, trace_dir, timeout=30):
+    path = os.path.join(trace_dir, "pgwt.sock")
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if os.path.exists(path):
+            remaining = deadline - time.monotonic()
+            client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            client.settimeout(min(5, max(0.1, remaining)))
+            try:
+                client.connect(path)
+                client.sendall(b'{"cmd":"status"}\n')
+                data = b""
+                while b"\n" not in data:
+                    chunk = client.recv(65536)
+                    if not chunk:
+                        break
+                    data += chunk
+                if json.loads(data.splitlines()[0]).get("ok") is True:
+                    return True
+            except (OSError, ValueError, json.JSONDecodeError, IndexError):
+                pass
+            finally:
+                client.close()
+        if proc.poll() is not None:
+            return False
+        time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+    return False
+
+
+def wait_for_application_backend(application_name, timeout=30):
+    quoted = application_name.replace("'", "''")
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            out = psql(
+                "SELECT pid FROM pg_stat_activity "
+                f"WHERE application_name = '{quoted}'", timeout=10)
+        except subprocess.TimeoutExpired:
+            out = ""
+        if re.fullmatch(r'\d+', out or ''):
+            return int(out)
+        time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+    return None
 
 
 def cleanup_stale_backends():
@@ -96,67 +145,89 @@ def parse_system_events(output):
 def test_pg_sleep_exact_count(pm_pid):
     """Execute N × pg_sleep(2) in a loop. Verify exact count and total duration.
 
-    Start DO block BEFORE the tracer so the initial scan finds the backend
-    already in PgSleep.  This avoids the race window in fork detection →
-    watchpoint setup that causes flakiness under suite load.
-
-    Using SLEEP_EACH_S=2 gives the tracer 1.5s after startup before the
-    first PgSleep→CPU transition fires — enough time for BPF load and
-    watchpoint setup even under load.
+    Start an idle tagged backend BEFORE the tracer so initial discovery and
+    watchpoint setup cover it, but do not start the five measured sleeps until
+    the post-attach control socket exists.  The old fixed 0.5s head start left
+    only 1.5s before the first PgSleep→CPU transition; a cold/CPU-starved BPF
+    load could miss that transition and report an otherwise-exact count of 4.
 
     Timeline:
-      t=0    start psql: DO block (5×pg_sleep(2)) + pg_sleep(60)
-      t=0.5  start tracer (interval=14, duration=18)
-      t=0.5  initial scan finds backend in PgSleep, sets watchpoint
-      t=2    first PgSleep→CPU transition fires watchpoint (1.5s margin)
+      t=0    start persistent tagged psql; backend is idle/ClientRead
+      t≈0    start tracer (interval=14, duration=35)
+      ready  control socket proves scan/attach completed; send 5×pg_sleep(2)
+      ready+2 first PgSleep→CPU transition fires watchpoint
       ...    each pg_sleep transition fires watchpoint
-      t=10   DO block done, pg_sleep(60) keeps backend alive
-      t=14.5 timer tick → PgSleep count=5, total≈9500ms
-      t=18.5 tracer exits, kill psql
+      ready+10 DO block done; interactive psql stays alive in ClientRead
+      tick   system_event reports exactly five closed PgSleep intervals
     """
     print("--- Test 1: pg_sleep Exact Count ---")
 
     N = 5
     SLEEP_EACH_S = 2
 
-    # Start deterministic workload BEFORE tracer:
-    #   -c "DO block" executes 5×pg_sleep(1) → ~5s of Timeout:PgSleep
-    #   -c "pg_sleep(60)" keeps the backend alive past the timer tick
+    # Keep one backend alive across discovery, the measured transitions, and
+    # the display tick. Tag it so readiness cannot observe an unrelated suite
+    # backend.
     sql = (f"DO $$ BEGIN "
            f"FOR i IN 1..{N} LOOP PERFORM pg_sleep({SLEEP_EACH_S}); END LOOP; "
            f"END $$")
+    application_name = (
+        f"pgwt_deterministic_sleep_{os.getpid()}_{time.time_ns()}")
     psql_proc = subprocess.Popen(
-        ["psql", "-U", "postgres", "-d", "postgres",
-         "-c", sql,
-         "-c", "SELECT pg_sleep(60)"],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        ["psql", "-U", "postgres", "-d", "postgres"],
+        stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL, text=True,
+        env={**os.environ, "PGAPPNAME": application_name}
     )
 
-    time.sleep(0.5)  # let backend enter first pg_sleep
-
-    # Start tracer — initial scan finds backend in PgSleep
-    tracer = subprocess.Popen(
-        [TRACER, "--mode", "full", "--pid", str(pm_pid),
-         "--interval", "14", "--duration", "18",
-         "--view", "system_event"],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE
-    )
-
-    # Wait for tracer to finish
+    trace_dir = None
+    tracer = None
+    stdout = stderr = b""
     try:
-        stdout, stderr = tracer.communicate(timeout=30)
-    except subprocess.TimeoutExpired:
-        tracer.kill()
-        stdout, _ = tracer.communicate()
+        backend_pid = wait_for_application_backend(application_name, timeout=30)
+        check(backend_pid is not None,
+              f"tagged PgSleep backend exists before tracer attach "
+              f"(pid={backend_pid})")
+
+        trace_dir = tempfile.mkdtemp(prefix="pgwt_deterministic_count_")
+        os.chmod(trace_dir, 0o755)
+        tracer = subprocess.Popen(
+            [TRACER, "--mode", "full", "--pid", str(pm_pid),
+             "-T", trace_dir, "--interval", "14", "--duration", "35",
+             "--view", "system_event"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
+
+        tracer_ready = wait_for_control_socket(tracer, trace_dir, timeout=30)
+        check(tracer_ready,
+              "exact-count tracer reached the post-attach startup boundary")
+        if tracer_ready and backend_pid is not None:
+            try:
+                psql_proc.stdin.write(sql + ";\n")
+                psql_proc.stdin.flush()
+            except (BrokenPipeError, OSError):
+                check(False, "tagged PgSleep backend accepted the workload")
+
+        try:
+            stdout, stderr = tracer.communicate(timeout=70)
+        except subprocess.TimeoutExpired:
+            tracer.kill()
+            stdout, stderr = tracer.communicate()
+    finally:
+        if tracer is not None and tracer.poll() is None:
+            tracer.kill()
+            stdout, stderr = tracer.communicate()
+        if psql_proc.poll() is None:
+            psql_proc.terminate()
+            try:
+                psql_proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                psql_proc.kill()
+                psql_proc.wait(timeout=5)
+        if trace_dir is not None:
+            shutil.rmtree(trace_dir, ignore_errors=True)
 
     output = STRIP_ANSI.sub('', stdout.decode('utf-8', errors='replace'))
-
-    # Cleanup
-    psql_proc.terminate()
-    try:
-        psql_proc.wait(timeout=5)
-    except subprocess.TimeoutExpired:
-        psql_proc.kill()
 
     # Parse
     events = parse_system_events(output)
@@ -168,19 +239,22 @@ def test_pg_sleep_exact_count(pm_pid):
     if not pg_sleep_ev:
         return
 
-    ev = pg_sleep_ev[0]
+    # Duration 35 produces more than one snapshot. Use the latest completed
+    # accumulator so a delayed backend transition before the first tick cannot
+    # turn an in-progress fifth sleep into another instantaneous false failure.
+    ev = pg_sleep_ev[-1]
 
     # All 5 PgSleep→CPU transitions should fire the watchpoint
     check(ev['count'] == N,
           f"count = {ev['count']} (expected exactly {N})")
 
-    # Total ≈ 9500ms (10000ms minus ~0.5s before attachment)
-    # Use generous tolerance: 7000-12000ms
+    # All five waits start after attachment, so total is ≈10000ms. Keep the
+    # existing ±3000ms product-accuracy bound.
     check(7000 <= ev['total_ms'] <= 12000,
           f"total = {ev['total_ms']:.1f}ms "
           f"(expected {N * SLEEP_EACH_S * 1000}ms ±3000ms)")
 
-    # Avg should be close to 2s (first sleep is shorter due to partial capture)
+    # Avg should be close to 2s; every sleep begins after attachment.
     check(ev['avg_us'] > 1000000,
           f"avg = {ev['avg_us']:.0f}us (expected ≈ {SLEEP_EACH_S * 1e6:.0f}us)")
 

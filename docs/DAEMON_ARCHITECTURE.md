@@ -89,7 +89,7 @@ struct pgwt_trace_event {
 // Event output ringbuf
 struct {
     __uint(type, BPF_MAP_TYPE_RINGBUF);
-    __uint(max_entries, 64 * 1024 * 1024);  // 64MB buffer
+    __uint(max_entries, 64 * 1024 * 1024);  // 64 MiB buffer
 } event_ringbuf SEC(".maps");
 
 SEC("perf_event")
@@ -124,6 +124,16 @@ int on_watchpoint(struct pt_regs *ctx) {
     return 0;
 }
 ```
+
+**Full-tier NMI limitation:** hardware-watchpoint perf-event programs can run
+in NMI context. The kernel's shared BPF ring uses a spinlock for reservation,
+so a reservation can fail in NMI context even when the ring has free space;
+increasing `max_entries` does not remove that contention failure. Every such
+loss is exposed as `ringbuf_drops_total`. Consumers that require a provably
+lossless event-ring interval must check that the counter did not advance;
+other capture health counters cover failures outside this ring. High-rate
+multi-CPU capture can report a non-zero counter even with ample ring capacity.
+See the kernel's [BPF ring-buffer design](https://docs.kernel.org/bpf/ringbuf.html#design-and-implementation).
 
 **Removed from BPF:** All `wait_stats` and `query_wait_stats` map updates (count++,
 total_ns+=, min/max, histogram). This simplifies the BPF program and reduces

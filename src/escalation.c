@@ -407,15 +407,21 @@ static void arm_deadline(struct pgwt_escalation *e, uint64_t deadline_ns)
 }
 
 int pgwt_escalate(struct pgwt_daemon *d, int duration_s, int reason,
-                  int *granted_s, const char **why)
+                  int *granted_s, const char **why,
+                  enum pgwt_escalate_failure *failure)
 {
     struct pgwt_escalation *e = &d->escalation;
 
+    if (failure)
+        *failure = PGWT_ESC_FAIL_NONE;
+
     if (!e->enabled) {
+        if (failure) *failure = PGWT_ESC_FAIL_INVALID;
         if (why) *why = "escalation requires --mode tiered";
         return -1;
     }
     if (duration_s <= 0) {
+        if (failure) *failure = PGWT_ESC_FAIL_INVALID;
         if (why) *why = "duration_s must be positive";
         return -1;
     }
@@ -430,6 +436,7 @@ int pgwt_escalate(struct pgwt_daemon *d, int duration_s, int reason,
      * matter how many times it is extended (the extend-every-second attack). */
     uint64_t grant_ns = want_ns;
     if (pgwt_esc_budget_decide(e, now, want_ns, &grant_ns, why) != 0) {
+        if (failure) *failure = PGWT_ESC_FAIL_BUDGET;
         e->denied_total++;
         return -1;
     }
@@ -459,6 +466,7 @@ int pgwt_escalate(struct pgwt_daemon *d, int duration_s, int reason,
         e->generation = 0;
         e->attach_boundary_ns = 0;
         e->denied_total++;
+        if (failure) *failure = PGWT_ESC_FAIL_EXACT_ATTACH;
         if (why)
             *why = "exact probe bundle attach failed; escalation rolled back";
         return -1;
@@ -474,6 +482,7 @@ int pgwt_escalate(struct pgwt_daemon *d, int duration_s, int reason,
         e->generation = 0;
         e->attach_boundary_ns = 0;
         e->denied_total++;
+        if (failure) *failure = PGWT_ESC_FAIL_EXACT_PRESEED;
         if (why)
             *why = "coherent exact preseed failed; escalation rolled back";
         return -1;

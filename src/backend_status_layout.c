@@ -12,6 +12,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <inttypes.h>
+#include <limits.h>
 #include <poll.h>
 #include <pwd.h>
 #include <signal.h>
@@ -20,7 +21,19 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/utsname.h>
+#include <time.h>
 #include <unistd.h>
+
+/* The hosted-runner reproducer measured process scheduling gaps of about 20s.
+ * Runtime validation crosses four controlled state boundaries, so give the
+ * whole sequence one 90s deadline (four observed gaps plus bounded headroom),
+ * not a fresh timeout per step. Active SQL outlives that deadline and is
+ * cancelled immediately once its exact state and coherent snapshot are seen;
+ * 120s is a safety cap, never an unconditional startup delay. Cleanup gets a
+ * separate three-gap deadline so a failed validator cannot leak a backend. */
+#define PGWT_PGBS_VALIDATION_TIMEOUT_MS 90000
+#define PGWT_PGBS_CLEANUP_TIMEOUT_MS    60000
+#define PGWT_PGBS_ACTIVE_WINDOW_S         120
 
 /* ── Names and native key ─────────────────────────────────── */
 
@@ -1569,6 +1582,22 @@ static ssize_t read_proc_output_bounded(struct pgwt_proc *proc,
     return -1;
 }
 
+static uint64_t monotonic_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
+}
+
+static int deadline_remaining_ms(uint64_t deadline_ms)
+{
+    uint64_t now_ms = monotonic_ms();
+    if (now_ms >= deadline_ms)
+        return 0;
+    uint64_t remaining = deadline_ms - now_ms;
+    return remaining > INT_MAX ? INT_MAX : (int)remaining;
+}
+
 int pgwt_pgbs_pid_start_time(pid_t pid, uint64_t *start_time)
 {
     if (pid <= 0 || !start_time)
@@ -1667,7 +1696,8 @@ bool pgwt_pgbs_exclusion_contains(const struct pgwt_pgbs_exclusion_set *set,
     return false;
 }
 
-static int wait_for_pid_retirement(pid_t pid, uint64_t start_time)
+static int wait_for_pid_retirement(pid_t pid, uint64_t start_time,
+                                   uint64_t deadline_ms)
 {
     if (pid <= 0)
         return -1;
@@ -1675,7 +1705,7 @@ static int wait_for_pid_retirement(pid_t pid, uint64_t start_time)
         uint64_t current = 0;
         return pgwt_pgbs_pid_start_time(pid, &current) != 0 ? 0 : -1;
     }
-    for (int attempt = 0; attempt < 100; attempt++) {
+    while (monotonic_ms() < deadline_ms) {
         if (!pgwt_pgbs_pid_is_original(pid, start_time))
             return 0;
         usleep(50000);
@@ -1683,12 +1713,26 @@ static int wait_for_pid_retirement(pid_t pid, uint64_t start_time)
     return -1;
 }
 
+/* Identity-safe failure cleanup for a validation/observer backend. A PID that
+ * has already retired or been reused is success and is never signalled. */
+static int terminate_backend_and_wait(pid_t pid, uint64_t start_time,
+                                      uint64_t cleanup_deadline_ms)
+{
+    if (!pgwt_pgbs_pid_is_original(pid, start_time))
+        return 0;
+    if (kill(pid, SIGTERM) != 0 && errno != ESRCH)
+        return -1;
+    return wait_for_pid_retirement(pid, start_time, cleanup_deadline_ms);
+}
+
 static int observe_controlled_backend(const char *psql, const char *user,
                                       const char *socket_dir, int port,
                                       const char *appname, int pg_major,
                                       bool want_active,
                                       struct pgwt_pgbs_expected *expected,
-                                      struct pgwt_pgbs_exclusion_set *exclusions)
+                                      struct pgwt_pgbs_exclusion_set *exclusions,
+                                      uint64_t deadline_ms,
+                                      uint64_t cleanup_deadline_ms)
 {
     char sql[1024];
     if (pg_major >= 14)
@@ -1719,7 +1763,7 @@ static int observe_controlled_backend(const char *psql, const char *user,
                  "FROM rows ORDER BY ord",
                  appname, want_active ? "active" : "idle");
 
-    for (int attempt = 0; attempt < 20; attempt++) {
+    while (monotonic_ms() < deadline_ms) {
         /* Never create a backend whose identity cannot be retained.  A full
          * set is a degradable validation condition, not permission to let an
          * observer become capture-eligible. */
@@ -1736,8 +1780,10 @@ static int observe_controlled_backend(const char *psql, const char *user,
         int observer_excluded = -1;
         uint64_t observer_start_time = 0;
         char observer_line[128], output[1024];
+        int remaining_ms = deadline_remaining_ms(deadline_ms);
         ssize_t observer_line_len = read_proc_output_bounded(
-            &observer, observer_line, sizeof(observer_line), 3000, true);
+            &observer, observer_line, sizeof(observer_line), remaining_ms,
+            true);
         if (observer_line_len >= 0 &&
             sscanf(observer_line, "observer|%d", &observer_pid) == 1 &&
             observer_pid > 0) {
@@ -1749,9 +1795,10 @@ static int observe_controlled_backend(const char *psql, const char *user,
             observer_excluded = pgwt_pgbs_exclusion_add(exclusions,
                                                         observer_pid);
         }
-        ssize_t output_len = observer_line_len >= 0
+        remaining_ms = deadline_remaining_ms(deadline_ms);
+        ssize_t output_len = observer_line_len >= 0 && remaining_ms > 0
             ? read_proc_output_bounded(&observer, output, sizeof(output),
-                                       3000, false)
+                                       remaining_ms, false)
             : -1;
         char *save = NULL;
         for (char *line = output_len >= 0
@@ -1762,21 +1809,29 @@ static int observe_controlled_backend(const char *psql, const char *user,
                        &query_id, &active) == 5)
                 continue;
         }
-        if (observer_pid > 0 && observer_excluded != 0) {
+        bool exclusion_failed = observer_pid > 0 && observer_excluded != 0;
+        if (!exclusion_failed && target_pid > 0 &&
+            pgwt_pgbs_exclusion_add(exclusions, target_pid) != 0)
+            exclusion_failed = true;
+        if (exclusion_failed)
             (void)kill(observer.pid, SIGTERM);
-            (void)pgwt_proc_close(&observer);
+        int close_timeout_ms = deadline_remaining_ms(
+            exclusion_failed ? cleanup_deadline_ms : deadline_ms);
+        int status = pgwt_proc_close_bounded(&observer, close_timeout_ms);
+        if (exclusion_failed) {
+            if (observer_pid > 0 && observer_start_time > 0)
+                (void)terminate_backend_and_wait(
+                    observer_pid, observer_start_time, cleanup_deadline_ms);
             return -1;
         }
-        if (target_pid > 0 &&
-            pgwt_pgbs_exclusion_add(exclusions, target_pid) != 0) {
-            (void)kill(observer.pid, SIGTERM);
-            (void)pgwt_proc_close(&observer);
-            return -1;
-        }
-        int status = pgwt_proc_close(&observer);
         if (observer_pid <= 0 || observer_start_time == 0 ||
-            wait_for_pid_retirement(observer_pid, observer_start_time) != 0)
+            wait_for_pid_retirement(observer_pid, observer_start_time,
+                                    deadline_ms) != 0) {
+            if (observer_pid > 0 && observer_start_time > 0)
+                (void)terminate_backend_and_wait(
+                    observer_pid, observer_start_time, cleanup_deadline_ms);
             return -1;
+        }
         bool qid_ok = pg_major < 14 || !want_active || query_id != 0;
         if (output_len >= 0 && status == 0 && target_pid > 0 &&
             databaseid > 0 && userid > 0 &&
@@ -1896,6 +1951,11 @@ void pgwt_pgbs_validate_runtime(struct PgBackendStatusLayout *layout,
         degrade_unvalidated(layout, "could not start controlled backend");
         return;
     }
+    uint64_t validation_deadline_ms =
+        monotonic_ms() + PGWT_PGBS_VALIDATION_TIMEOUT_MS;
+    uint64_t cleanup_deadline_ms = validation_deadline_ms +
+                                   PGWT_PGBS_CLEANUP_TIMEOUT_MS;
+    bool controlled_command_pending = false;
 
     char command[256];
     const char *validation_step = "controlled PID handshake";
@@ -1906,9 +1966,11 @@ void pgwt_pgbs_validate_runtime(struct PgBackendStatusLayout *layout,
     uint64_t controlled_start_time = 0;
     unsigned long long activity_buffer_size = 0;
     char controlled_line[128];
+    int remaining_ms = deadline_remaining_ms(validation_deadline_ms);
     if (observed == 0 &&
         read_proc_output_bounded(&controlled, controlled_line,
-                                 sizeof(controlled_line), 3000, true) >= 0 &&
+                                 sizeof(controlled_line),
+                                 remaining_ms, true) >= 0 &&
         sscanf(controlled_line, "controlled|%d|%llu", &controlled_pid,
                &activity_buffer_size) == 2 &&
         controlled_pid > 0 && activity_buffer_size >= 2 &&
@@ -1927,9 +1989,30 @@ void pgwt_pgbs_validate_runtime(struct PgBackendStatusLayout *layout,
             observed = send_psql(&controlled, "SET compute_query_id=on;");
     if (observed == 0)
         validation_step = "idle marker command";
-    snprintf(command, sizeof(command), "SELECT 1 /* %s */;", idle_marker);
-    if (observed == 0)
+    snprintf(command, sizeof(command),
+             "SELECT 'idle-ready' /* %s */;", idle_marker);
+    if (observed == 0) {
         observed = send_psql(&controlled, command);
+        controlled_command_pending = observed == 0;
+    }
+    /* Completion barrier: an idle observer before this output could be the
+     * backend's pre-command state. Consuming the unique result proves the
+     * marker ran; the following bounded observer must see the post-command
+     * idle state whose retained activity text contains idle_marker. */
+    if (observed == 0) {
+        validation_step = "idle marker completion";
+        remaining_ms = deadline_remaining_ms(validation_deadline_ms);
+        char idle_ready_line[64];
+        if (remaining_ms <= 0 ||
+            read_proc_output_bounded(&controlled, idle_ready_line,
+                                     sizeof(idle_ready_line), remaining_ms,
+                                     true) < 0 ||
+            strncmp(idle_ready_line, "idle-ready", 10) != 0) {
+            observed = -1;
+        } else {
+            controlled_command_pending = false;
+        }
+    }
 
     struct pgwt_pgbs_expected idle_expected, first_expected, second_expected;
     memset(&idle_expected, 0, sizeof(idle_expected));
@@ -1945,7 +2028,8 @@ void pgwt_pgbs_validate_runtime(struct PgBackendStatusLayout *layout,
         validation_step = "idle observation";
         observed = observe_controlled_backend(
             psql, user, socket_dir, port, appname, layout->major, false,
-            &idle_expected, exclusions);
+            &idle_expected, exclusions, validation_deadline_ms,
+            cleanup_deadline_ms);
     }
     if (observed == 0) {
         validation_step = "idle activity-marker snapshot";
@@ -1958,16 +2042,19 @@ void pgwt_pgbs_validate_runtime(struct PgBackendStatusLayout *layout,
     }
 
     snprintf(command, sizeof(command),
-             "SELECT pg_sleep(2) /* %s */;", first_marker);
+             "SELECT pg_sleep(%d) /* %s */;",
+             PGWT_PGBS_ACTIVE_WINDOW_S, first_marker);
     if (observed == 0) {
         validation_step = "first active command";
         observed = send_psql(&controlled, command);
+        controlled_command_pending = observed == 0;
     }
     if (observed == 0) {
         validation_step = "first active observation";
         observed = observe_controlled_backend(
             psql, user, socket_dir, port, appname, layout->major, true,
-            &first_expected, exclusions);
+            &first_expected, exclusions, validation_deadline_ms,
+            cleanup_deadline_ms);
     }
     if (observed == 0) {
         validation_step = "first active activity-marker snapshot";
@@ -1989,6 +2076,8 @@ void pgwt_pgbs_validate_runtime(struct PgBackendStatusLayout *layout,
                                        controlled_start_time) ||
             kill(controlled_pid, SIGINT) != 0)
             observed = -1;
+        else
+            controlled_command_pending = false;
     }
 
     /* Wait for the same backend to become idle before issuing the second,
@@ -2000,20 +2089,24 @@ void pgwt_pgbs_validate_runtime(struct PgBackendStatusLayout *layout,
         validation_step = "between-command idle observation";
         observed = observe_controlled_backend(
             psql, user, socket_dir, port, appname, layout->major, false,
-            &between_expected, exclusions);
+            &between_expected, exclusions, validation_deadline_ms,
+            cleanup_deadline_ms);
     }
 
     snprintf(command, sizeof(command),
-             "SELECT 1 FROM pg_sleep(2) /* %s */;", second_marker);
+             "SELECT 1 FROM pg_sleep(%d) /* %s */;",
+             PGWT_PGBS_ACTIVE_WINDOW_S, second_marker);
     if (observed == 0) {
         validation_step = "second active command";
         observed = send_psql(&controlled, command);
+        controlled_command_pending = observed == 0;
     }
     if (observed == 0) {
         validation_step = "second active observation";
         observed = observe_controlled_backend(
             psql, user, socket_dir, port, appname, layout->major, true,
-            &second_expected, exclusions);
+            &second_expected, exclusions, validation_deadline_ms,
+            cleanup_deadline_ms);
     }
     if (observed == 0) {
         validation_step = "second active activity-marker snapshot";
@@ -2030,23 +2123,44 @@ void pgwt_pgbs_validate_runtime(struct PgBackendStatusLayout *layout,
                                        controlled_start_time) ||
             kill(controlled_pid, SIGINT) != 0)
             observed = -1;
+        else
+            controlled_command_pending = false;
     }
 
     /* Finish the final statement, then deliver EOF and drain psql's small
      * result stream before reaping it.  Closing stdout first would give psql
      * SIGPIPE after the validation had already succeeded. */
+    if (controlled_command_pending) {
+        if (!pgwt_pgbs_pid_is_original(controlled_pid,
+                                       controlled_start_time) ||
+            kill(controlled_pid, SIGINT) != 0)
+            observed = -1;
+        controlled_command_pending = false;
+    }
     if (controlled.in) {
         fclose(controlled.in);
         controlled.in = NULL;
     }
     char discard[512];
-    if (read_proc_output_bounded(&controlled, discard, sizeof(discard),
-                                 3000, false) < 0)
+    remaining_ms = deadline_remaining_ms(
+        observed == 0 ? validation_deadline_ms : cleanup_deadline_ms);
+    if (remaining_ms <= 0) {
         observed = -1;
-    int controlled_status = pgwt_proc_close(&controlled);
+        remaining_ms = deadline_remaining_ms(cleanup_deadline_ms);
+    }
+    if (read_proc_output_bounded(&controlled, discard, sizeof(discard),
+                                 remaining_ms, false) < 0)
+        observed = -1;
+    int controlled_status = pgwt_proc_close_bounded(
+        &controlled, deadline_remaining_ms(cleanup_deadline_ms));
     bool retired = controlled_pid > 0 &&
                    wait_for_pid_retirement(controlled_pid,
-                                           controlled_start_time) == 0;
+                       controlled_start_time,
+                       cleanup_deadline_ms) == 0;
+    if (!retired && controlled_pid > 0 && controlled_start_time > 0)
+        retired = terminate_backend_and_wait(controlled_pid,
+                                             controlled_start_time,
+                                             cleanup_deadline_ms) == 0;
     if (!retired) {
         char reason[192];
         snprintf(reason, sizeof(reason),
