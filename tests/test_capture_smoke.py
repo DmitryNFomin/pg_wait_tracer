@@ -603,10 +603,9 @@ def phase_live_system_event(pm_pid, mode, core=False):
     # A fixed 2.5s launch delay raced a cold BPF load on overloaded runners:
     # the workload could mostly finish before capture was ready.  The startup
     # control socket is created only after discovery/attach, so wait for that
-    # real boundary instead. The 180s hard cap covers one 90s global
-    # validation budget, its separately bounded failure cleanup, and BPF
-    # startup; a stuck tracer still
-    # fails at a finite boundary.
+    # real boundary instead. The 180s hard cap covers the observed loaded
+    # startup even though controlled observations now receive independent
+    # budgets; the product retains a separate finite outer bound.
     tracer_ready = wait_for_control_socket(tracer, trace_dir, timeout_s=180)
     check(tracer_ready,
           f"live/{mode}: tracer reached the post-attach startup boundary")

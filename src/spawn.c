@@ -12,6 +12,8 @@
 #include <time.h>
 #include <sys/wait.h>
 
+#define PGWT_PROC_KILL_REAP_TIMEOUT_MS 500
+
 static int proc_open(struct pgwt_proc *p, char *const argv[], bool writable)
 {
     p->out = NULL;
@@ -169,14 +171,26 @@ int pgwt_proc_close_bounded(struct pgwt_proc *p, int timeout_ms)
         usleep(10000);
     }
 
-    /* This is the exact fork child, not a caller-supplied/system PID. Reap it
-     * after SIGKILL so an overloaded helper cannot make daemon startup wait
-     * forever or leave a zombie. */
+    /* This is the exact fork child, not a caller-supplied/system PID. Give a
+     * normal SIGKILL reap a short opportunity, but do not turn bounded close
+     * back into an unbounded wait when the helper is stuck in uninterruptible
+     * sleep. The process remains owned by init/subreaper after daemon exit. */
     (void)kill(p->pid, SIGKILL);
-    pid_t r;
-    do {
-        r = waitpid(p->pid, &status, 0);
-    } while (r < 0 && errno == EINTR);
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    deadline_ms = (uint64_t)ts.tv_sec * 1000 +
+                  (uint64_t)ts.tv_nsec / 1000000 +
+                  PGWT_PROC_KILL_REAP_TIMEOUT_MS;
+    for (;;) {
+        pid_t r = waitpid(p->pid, &status, WNOHANG);
+        if (r == p->pid || (r < 0 && errno != EINTR))
+            break;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        uint64_t now_ms = (uint64_t)ts.tv_sec * 1000 +
+                          (uint64_t)ts.tv_nsec / 1000000;
+        if (now_ms >= deadline_ms)
+            break;
+        usleep(10000);
+    }
     p->pid = -1;
     return -1;
 }

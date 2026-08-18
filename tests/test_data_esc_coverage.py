@@ -236,10 +236,14 @@ def test_delayed_tick_clipping(t):
         }
         trace_dir = generate_traces(scenario)
         try:
-            with ServerHarness(trace_dir) as srv:
+            env = ({"PGWT_LOAD_MAX_EVENTS": "4"}
+                   if edge == "both" else None)
+            with ServerHarness(trace_dir, env=env) as srv:
                 query_from = w0 - 3 * S
                 query_to = w1 + 3 * S
                 tm = srv.query("time_model", from_=query_from, to_=query_to)
+                t.check("error" not in tm,
+                        f"{edge}-straddling merge fits raw-event bound")
                 t.check_eq(tm.get("fidelity"), "mixed",
                            f"{edge}-straddling delayed tick stays mixed")
                 t.check_approx(lock_ms(tm), expected_lock_ns / 1e6, 0.001,
@@ -316,6 +320,21 @@ def test_delayed_tick_clipping(t):
                                        "sample weight to 1s")
                         t.check_eq(lock.get("count"), 1,
                                    f"{side} request slice counts one sample")
+
+            if edge == "both":
+                for failpoint in ("merge_grow", "sort"):
+                    with ServerHarness(
+                            trace_dir,
+                            env={"PGWT_LOAD_MAX_EVENTS": "4",
+                                 "PGWT_TEST_LOAD_ALLOC_FAIL": failpoint}) as srv:
+                        failed = srv.query(
+                            "time_model", from_=w0 - 3 * S, to_=w1 + 3 * S)
+                        t.check_eq(
+                            failed.get("code"), "allocation_failed",
+                            f"{failpoint} OOM is not mislabeled window-too-large")
+                        t.check("max_events" not in failed and
+                                "rows" not in failed,
+                                f"{failpoint} OOM returns no bound or partial data")
         finally:
             cleanup_traces(trace_dir)
 

@@ -681,20 +681,12 @@ int main(int argc, char **argv)
         }
     }
 
-    /* First discovery */
-    if (pgwt_discover(d) != 0) {
-        if (!pgdata && pm_pid == 0)
-            fprintf(stderr, "\nUse --pid <PID> or --pgdata <DIR>\n");
-        free(d);
-        return 1;
-    }
-    /* pg_binary_saved is set by pgwt_discover via strdup (heap-allocated) */
-
-    /* Block shutdown signals before pgwt_daemon_init() can create worker
-     * threads. Every thread must inherit the blocked mask so SIGINT/SIGTERM
-     * are consumed by the main loop's signalfd and run normal finalization.
-     * Daemon mode used to do this here while single-shot mode waited until
-     * late init, after the asynchronous pgss resolver had already started. */
+    /* Block shutdown signals before first discovery. Runtime layout
+     * validation can run controlled PostgreSQL backends for an extended
+     * bounded interval; leaving SIGTERM asynchronous here could kill the
+     * tracer before their identity-safe cleanup. The helper spawn path
+     * restores child masks, and every later worker thread inherits this mask,
+     * preserving the resolver/signalfd ordering invariant. */
     sigset_t shutdown_mask;
     sigemptyset(&shutdown_mask);
     sigaddset(&shutdown_mask, SIGINT);
@@ -704,6 +696,15 @@ int main(int argc, char **argv)
         free(d);
         return 1;
     }
+
+    /* First discovery */
+    if (pgwt_discover(d) != 0) {
+        if (!pgdata && pm_pid == 0)
+            fprintf(stderr, "\nUse --pid <PID> or --pgdata <DIR>\n");
+        free(d);
+        return 1;
+    }
+    /* pg_binary_saved is set by pgwt_discover via strdup (heap-allocated) */
 
     /* ── Daemon mode: supervision loop ─────────────────────── */
     if (daemon_mode) {

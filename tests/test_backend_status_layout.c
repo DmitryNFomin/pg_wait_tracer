@@ -623,6 +623,15 @@ static void test_fail_safe_and_pid_exclusion(void)
           "fail-safe fixture row");
     struct pgwt_pgbs_exclusion_set exclusions = {0};
     pid_t unknown_identity = (pid_t)2147483647;
+    struct pgwt_pgbs_exclusion_set live_only = {0};
+    uint64_t missing_start_time = 1;
+    bool already_retired = false;
+    CHECK(pgwt_pgbs_exclusion_add_live(
+              &live_only, unknown_identity, &missing_start_time,
+              &already_retired) == 0 &&
+          already_retired && missing_start_time == 0 &&
+          live_only.count == 0,
+          "dead observer identity race leaves no permanent PID exclusion");
     CHECK(pgwt_pgbs_exclusion_add(&exclusions, unknown_identity) == 0 &&
           pgwt_pgbs_exclusion_contains(&exclusions, unknown_identity),
           "missing /proc identity remains conservatively excluded");

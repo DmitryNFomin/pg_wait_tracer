@@ -236,6 +236,11 @@ void pgwt_pgbs_validate_runtime(struct PgBackendStatusLayout *layout,
 int pgwt_pgbs_pid_start_time(pid_t pid, uint64_t *start_time);
 bool pgwt_pgbs_pid_is_original(pid_t pid, uint64_t start_time);
 int pgwt_pgbs_exclusion_add(struct pgwt_pgbs_exclusion_set *set, pid_t pid);
+/* Add a short-lived helper only while it is still live. If /proc identity
+ * capture loses the exit race, already_retired is true and no entry is kept. */
+int pgwt_pgbs_exclusion_add_live(struct pgwt_pgbs_exclusion_set *set,
+                                 pid_t pid, uint64_t *start_time,
+                                 bool *already_retired);
 bool pgwt_pgbs_exclusion_contains(const struct pgwt_pgbs_exclusion_set *set,
                                   pid_t pid);
 /* Auth-free fallback used only when the controlled backend could not be

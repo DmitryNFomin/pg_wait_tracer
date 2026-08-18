@@ -132,8 +132,9 @@ struct pgwt_anomaly {
     double sample_period_s;   /* NOMINAL 1/sample_rate_hz, never wall gap */
     double cpu_cusum;         /* O(1) accumulated saturation evidence */
     bool   cpu_armed;         /* one successful fire/retry cap until recovery */
-    unsigned cpu_setup_retries; /* transient exact-setup retries this episode */
-    uint64_t cpu_setup_retry_after_ns; /* backoff gate before fresh evidence */
+    unsigned setup_retries; /* transient exact-setup retries this episode */
+    uint64_t setup_retry_after_ns; /* backoff gate before fresh evidence */
+    unsigned setup_retry_rules; /* firing rules that define this episode */
     double cpu_coverage_gap_reset_s; /* configured blind-gap duration */
     int    cpu_coverage_gap_reset_ticks; /* duration rounded up to ticks */
     int    cpu_coverage_gap_ticks; /* consecutive blind LOW/UNKNOWN ticks */
@@ -189,8 +190,8 @@ struct pgwt_anomaly {
 #define PGWT_ANOMALY_DEF_CPU_CUSUM_K   0.80
 #define PGWT_ANOMALY_DEF_CPU_CUSUM_H   1.50
 #define PGWT_ANOMALY_DEF_CPU_CUSUM_CAP 1.25
-#define PGWT_ANOMALY_CPU_SETUP_MAX_RETRIES 3
-#define PGWT_ANOMALY_CPU_SETUP_RETRY_S 3
+#define PGWT_ANOMALY_SETUP_MAX_RETRIES 3
+#define PGWT_ANOMALY_SETUP_RETRY_S 3
 /* Brief blind under-reference or UNKNOWN-capacity flaps hold CPU evidence.
  * Two seconds is comfortably beyond sub-second coverage flapping, but still
  * discards evidence across a genuinely blind interval. Incomplete ticks with
@@ -243,13 +244,21 @@ struct pgwt_anomaly_decision
 pgwt_anomaly_eval(struct pgwt_anomaly *a, double aas, double lock_fraction,
                   uint64_t now_ns);
 
+enum pgwt_anomaly_setup_retry_result {
+    PGWT_ANOMALY_SETUP_RETRY_NOT_APPLICABLE = 0,
+    PGWT_ANOMALY_SETUP_RETRY_SCHEDULED,
+    PGWT_ANOMALY_SETUP_RETRY_LIMIT_REACHED,
+};
+
 /* Roll back the episode/cooldown latch after the escalation engine rejects a
- * CPU FIRE for a transient exact-mode setup failure.  Rule streaks and CPU
- * CUSUM restart after a bounded backoff, so each capped retry requires a full
- * fresh evidence horizon. Returns true when a retry was armed. */
-bool pgwt_anomaly_retry_after_setup_failure(struct pgwt_anomaly *a,
-                                             unsigned fired_mask,
-                                             uint64_t now_ns);
+ * FIRE for a transient exact-mode setup failure. Every firing rule restarts
+ * its evidence after a bounded backoff, so each capped retry requires a full
+ * fresh evidence horizon. The result distinguishes a real exhausted episode
+ * from a call that did not contain any retryable firing rule. */
+enum pgwt_anomaly_setup_retry_result
+pgwt_anomaly_retry_after_setup_failure(struct pgwt_anomaly *a,
+                                       unsigned fired_mask,
+                                       uint64_t now_ns);
 
 /* Clear retry bookkeeping after the escalation engine opens a window. */
 void pgwt_anomaly_escalation_succeeded(struct pgwt_anomaly *a);
