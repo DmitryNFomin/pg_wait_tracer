@@ -9,6 +9,7 @@
 # be built by `make -C tests` (tests/Makefile TESTS).
 test_wait_event
 test_cmdline
+test_spawn
 test_bucket
 test_event_writer
 test_event_reader

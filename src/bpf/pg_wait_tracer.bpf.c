@@ -180,8 +180,9 @@ struct {
 } accum_map SEC(".maps");
 
 /* event_ringbuf drop counter (A2). Single per-CPU u64 bumped when a
- * bpf_ringbuf_output() into event_ringbuf fails (ring full). PERCPU so the
- * hot path stays atomic-free; the daemon sums across CPUs and surfaces it as
+ * bpf_ringbuf_output() into event_ringbuf fails (capacity or reservation
+ * contention, including NMI context). PERCPU so the hot path stays
+ * atomic-free; the daemon sums across CPUs and surfaces it as
  * ringbuf_drops_total on the control socket. */
 struct {
     __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
@@ -211,7 +212,9 @@ static __always_inline void count_map_fail(u32 slot)
 }
 
 /* Emit a trace event to event_ringbuf, counting drops on failure.
- * bpf_ringbuf_output() returns 0 on success, negative when the ring is full. */
+ * bpf_ringbuf_output() returns 0 on success, negative when reservation/output
+ * fails; an NMI-context reservation can lose spinlock contention even while
+ * the ring has free capacity. */
 static __always_inline void emit_event(const struct pgwt_trace_event *evt)
 {
     long rc = bpf_ringbuf_output(&event_ringbuf, (void *)evt, sizeof(*evt),

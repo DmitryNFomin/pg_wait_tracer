@@ -839,6 +839,178 @@ static void test_cpu_cusum_episode_latch(void)
            grants, (unsigned long long)chronic.fires_total);
 }
 
+/* A FIRE is only an attempt until the escalation engine opens the exact
+ * window.  A transient attach/preseed rollback must not consume the entire
+ * saturation episode, but the retry must still earn a fresh CUSUM horizon. */
+static void test_cpu_setup_failure_retry(void)
+{
+    printf("--- CPU CUSUM: transient setup failure retries safely ---\n");
+
+    struct pgwt_anomaly a;
+    pgwt_anomaly_init(&a, true, 10);
+    isolate_cpu_rule(&a);
+    uint64_t clk = TICK_NS;
+    struct pgwt_anomaly_decision d = {0};
+
+    for (int t = 0; t < 100 && d.action != PGWT_ANOMALY_FIRE; t++)
+        d = cpu_tick(&a, 4.0, 4.0, 4.0,
+                     true, false, false, &clk);
+    CHECK(d.action == PGWT_ANOMALY_FIRE && !a.cpu_armed,
+          "initial saturation did not fire and latch");
+
+    enum pgwt_anomaly_setup_retry_result retry =
+        pgwt_anomaly_retry_after_setup_failure(
+        &a, d.fired_mask, clk);
+    CHECK(retry == PGWT_ANOMALY_SETUP_RETRY_SCHEDULED &&
+          a.cpu_armed && a.cpu_cusum == 0.0 &&
+          a.last_fire_ns == 0 && a.setup_retries == 1,
+          "setup rollback did not reset CPU evidence/cooldown");
+
+    d = cpu_tick(&a, 4.0, 4.0, 4.0,
+                 true, false, false, &clk);
+    CHECK(d.action != PGWT_ANOMALY_FIRE,
+          "setup rollback retried without a fresh evidence horizon");
+
+    int retry_tick = 0;
+    for (int t = 1; t < 200; t++) {
+        d = cpu_tick(&a, 4.0, 4.0, 4.0,
+                     true, false, false, &clk);
+        if (d.action == PGWT_ANOMALY_FIRE) {
+            retry_tick = t + 1;
+            break;
+        }
+    }
+    CHECK(retry_tick > 1 && a.fires_total == 2 && !a.cpu_armed,
+          "fresh saturation did not produce one bounded retry "
+          "(tick=%d fires=%llu armed=%d)", retry_tick,
+          (unsigned long long)a.fires_total, a.cpu_armed);
+
+    pgwt_anomaly_escalation_succeeded(&a);
+    CHECK(a.setup_retries == 0 && a.setup_retry_after_ns == 0,
+          "successful escalation did not clear retry bookkeeping");
+
+    int extra_fires = 0;
+    for (int t = 0; t < 100; t++) {
+        d = cpu_tick(&a, 4.0, 4.0, 4.0,
+                     true, false, false, &clk);
+        extra_fires += d.action == PGWT_ANOMALY_FIRE;
+    }
+    CHECK(extra_fires == 0,
+          "successful retry did not latch the saturation episode");
+}
+
+static void test_cpu_setup_failure_retry_cap(void)
+{
+    printf("--- CPU CUSUM: setup retry is capped per episode ---\n");
+
+    struct pgwt_anomaly a;
+    pgwt_anomaly_init(&a, true, 10);
+    isolate_cpu_rule(&a);
+    a.cooldown_ns = 0;
+    uint64_t clk = TICK_NS;
+    struct pgwt_anomaly_decision d = {0};
+
+    for (unsigned attempt = 0;
+         attempt <= PGWT_ANOMALY_SETUP_MAX_RETRIES; attempt++) {
+        d.action = PGWT_ANOMALY_NONE;
+        for (int t = 0; t < 200 && d.action != PGWT_ANOMALY_FIRE; t++)
+            d = cpu_tick(&a, 4.0, 4.0, 4.0,
+                         true, false, false, &clk);
+        CHECK(d.action == PGWT_ANOMALY_FIRE,
+              "setup attempt %u never earned fresh evidence", attempt + 1);
+        enum pgwt_anomaly_setup_retry_result retry =
+            pgwt_anomaly_retry_after_setup_failure(
+            &a, d.fired_mask, clk);
+        enum pgwt_anomaly_setup_retry_result expected =
+            attempt < PGWT_ANOMALY_SETUP_MAX_RETRIES
+            ? PGWT_ANOMALY_SETUP_RETRY_SCHEDULED
+            : PGWT_ANOMALY_SETUP_RETRY_LIMIT_REACHED;
+        CHECK(retry == expected,
+              "setup attempt %u retry decision=%d", attempt + 1, retry);
+    }
+
+    int extra_fires = 0;
+    for (int t = 0; t < 200; t++) {
+        d = cpu_tick(&a, 4.0, 4.0, 4.0,
+                     true, false, false, &clk);
+        extra_fires += d.action == PGWT_ANOMALY_FIRE;
+    }
+    CHECK(extra_fires == 0 && !a.cpu_armed &&
+          a.setup_retries == PGWT_ANOMALY_SETUP_MAX_RETRIES,
+          "retry cap did not latch failed episode (extra=%d retries=%u)",
+          extra_fires, a.setup_retries);
+
+    cpu_tick(&a, 0.0, 0.0, 4.0,
+             true, false, false, &clk);
+    CHECK(a.cpu_armed && a.setup_retries == 0,
+          "trusted recovery did not reset the capped retry episode");
+}
+
+static void test_non_cpu_setup_failure_retry(void)
+{
+    printf("--- AAS/lock: transient setup failure retries safely ---\n");
+
+    struct pgwt_anomaly aas;
+    pgwt_anomaly_init(&aas, true, 10);
+    aas.cpu_cusum_enabled = false;
+    aas.lock_fraction = 0.0;
+    aas.aas_ticks = 2;
+    uint64_t clk = TICK_NS;
+    warm_baseline(&aas, 2.0, &clk);
+    struct pgwt_anomaly_decision d =
+        feed(&aas, 10.0, 0.0, 2, &clk, NULL);
+    CHECK(d.action == PGWT_ANOMALY_FIRE &&
+          d.fired_mask == PGWT_RULE_AAS,
+          "pure AAS incident did not fire alone");
+    enum pgwt_anomaly_setup_retry_result retry =
+        pgwt_anomaly_retry_after_setup_failure(&aas, d.fired_mask, clk);
+    CHECK(retry == PGWT_ANOMALY_SETUP_RETRY_SCHEDULED &&
+          aas.setup_retries == 1 && aas.setup_retry_after_ns > clk &&
+          aas.aas_over_streak == 0 && aas.last_fire_ns == 0,
+          "pure AAS setup failure was not scheduled for bounded retry");
+    d = pgwt_anomaly_eval(&aas, 10.0, 0.0, clk);
+    CHECK(d.action != PGWT_ANOMALY_FIRE && aas.aas_over_streak == 0,
+          "pure AAS retried during setup backoff");
+    clk = aas.setup_retry_after_ns;
+    d = feed(&aas, 10.0, 0.0, 2, &clk, NULL);
+    CHECK(d.action == PGWT_ANOMALY_FIRE &&
+          d.fired_mask == PGWT_RULE_AAS,
+          "pure AAS retry did not require and earn fresh evidence");
+
+    struct pgwt_anomaly lock;
+    pgwt_anomaly_init(&lock, true, 10);
+    lock.cpu_cusum_enabled = false;
+    lock.aas_factor = 0.0;
+    lock.lock_ticks = 2;
+    clk = TICK_NS;
+    warm_baseline(&lock, 2.0, &clk);
+    d = feed(&lock, 5.0, 0.9, 2, &clk, NULL);
+    CHECK(d.action == PGWT_ANOMALY_FIRE &&
+          d.fired_mask == PGWT_RULE_LOCK,
+          "pure lock incident did not fire alone");
+    retry = pgwt_anomaly_retry_after_setup_failure(
+        &lock, d.fired_mask, clk);
+    CHECK(retry == PGWT_ANOMALY_SETUP_RETRY_SCHEDULED &&
+          lock.setup_retries == 1 && lock.setup_retry_after_ns > clk &&
+          lock.lock_over_streak == 0 && lock.last_fire_ns == 0,
+          "pure lock setup failure was not scheduled for bounded retry");
+    d = pgwt_anomaly_eval(&lock, 5.0, 0.9, clk);
+    CHECK(d.action != PGWT_ANOMALY_FIRE && lock.lock_over_streak == 0,
+          "pure lock retried during setup backoff");
+    clk = lock.setup_retry_after_ns;
+    d = feed(&lock, 5.0, 0.9, 2, &clk, NULL);
+    CHECK(d.action == PGWT_ANOMALY_FIRE &&
+          d.fired_mask == PGWT_RULE_LOCK,
+          "pure lock retry did not require and earn fresh evidence");
+
+    uint64_t last_fire = lock.last_fire_ns;
+    retry = pgwt_anomaly_retry_after_setup_failure(
+        &lock, PGWT_RULE_NONE, clk);
+    CHECK(retry == PGWT_ANOMALY_SETUP_RETRY_NOT_APPLICABLE &&
+          lock.last_fire_ns == last_fire,
+          "no-rule setup outcome was mislabeled as retry-limit exhaustion");
+}
+
 /* ── AAS-1 Stage 3 fix: activity floor + affinity-only margin ────────── */
 static void test_cpu_cusum_floor_and_margin(void)
 {
@@ -1430,6 +1602,9 @@ int main(void)
     test_cpu_cusum_incidents();
     test_cpu_cusum_gates();
     test_cpu_cusum_episode_latch();
+    test_cpu_setup_failure_retry();
+    test_cpu_setup_failure_retry_cap();
+    test_non_cpu_setup_failure_retry();
     test_cpu_cusum_floor_and_margin();
     test_cpu_cusum_coverage_flaps();
     test_cpu_cusum_incomplete_saturation_monotone();

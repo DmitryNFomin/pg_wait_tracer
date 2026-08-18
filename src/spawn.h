@@ -42,4 +42,9 @@ int pgwt_proc_open_rw(struct pgwt_proc *p, char *const argv[]);
  * callers that close early must ignore the status, as with pclose). */
 int pgwt_proc_close(struct pgwt_proc *p);
 
+/* Deadline-bounded close for startup validation helpers. Closes the pipes,
+ * polls waitpid for timeout_ms, then SIGKILLs and reaps an overrun child.
+ * Returns the raw wait status on a natural exit, or -1 after forced cleanup. */
+int pgwt_proc_close_bounded(struct pgwt_proc *p, int timeout_ms);
+
 #endif /* PGWT_SPAWN_H */

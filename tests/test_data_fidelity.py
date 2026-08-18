@@ -186,9 +186,9 @@ def build_mixed():
 
     SAMPLES (10 Hz) of Lock:relation run continuously over
     [BASE+1.0s .. BASE+4.0s] (31 samples). Boundary rule (FID-6): a sample
-    represents (ts − period, ts] and is dropped iff its MIDPOINT
-    (ts − period/2) lies inside the covered span. Surviving samples each
-    add 100ms of Lock. No double counting in the overlap.
+    represents (ts − period, ts], and coverage is subtracted from that
+    interval. These grid-aligned samples are therefore wholly kept or dropped;
+    each survivor adds 100ms of Lock. No double counting in the overlap.
     """
     one_s = 1_000_000_000
     trans_start = BASE_TS + one_s
@@ -213,10 +213,11 @@ def build_mixed():
         ts += PERIOD
     samples.sort(key=lambda s: s["ts"])
 
-    # Midpoint rule: dropped iff (ts - PERIOD/2) in [first_ts, last_ts].
-    in_range = sum(1 for s in samples
-                   if trans_start <= s["ts"] - PERIOD // 2 <= trans_end)
-    out_range = len(samples) - in_range
+    # Grid-aligned samples wholly after exact coverage survive, as does the
+    # sample ending exactly at the window start (its interval precedes exact
+    # coverage and the trace's default range begins earlier).
+    out_range = sum(1 for s in samples
+                    if s["ts"] == trans_start or s["ts"] > trans_end)
 
     return ({
         "backends": [

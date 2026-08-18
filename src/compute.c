@@ -947,7 +947,11 @@ void pgwt_compute_top_events(const struct pgwt_trace_event *events, int count,
             ht[h].event_id = ev->old_event;
             num_entries++;
         }
-        ht[h].count++;
+        /* Exact-window subtraction can split one delayed sampled observation
+         * into multiple timeline fragments. Preserve its duration pieces but
+         * count the physical observation once. */
+        if (!(ev->flags & PGWT_EVENT_FLAG_SAMPLE_CONT) || ht[h].count == 0)
+            ht[h].count++;
         ht[h].total_ns += ev->duration_ns;
         /* Latency stats from exact records only (FID-3). */
         if (!(ev->flags & PGWT_EVENT_FLAG_SAMPLE)) {
@@ -1158,7 +1162,9 @@ void pgwt_compute_top_queries(const struct pgwt_trace_event *events, int count,
             ht[h].query_id = ev->query_id;
             num_entries++;
         }
-        ht[h].count++;
+        /* Split sample continuations conserve time, not observation count. */
+        if (!(ev->flags & PGWT_EVENT_FLAG_SAMPLE_CONT) || ht[h].count == 0)
+            ht[h].count++;
         ht[h].total_ns += ev->duration_ns;
         ht[h].class_ns[pgwt_wait_class_index(ev->old_event)] += ev->duration_ns;
 
@@ -2224,6 +2230,11 @@ void pgwt_compute_transitions(const struct pgwt_trace_event *events, int count,
 
     for (int i = 0; i < count; i++) {
         const struct pgwt_trace_event *ev = &events[i];
+        /* Exact-required view: normalized sample points are not state
+         * transitions. In a mixed window they remain available to sampled
+         * views only. */
+        if (ev->flags & PGWT_EVENT_FLAG_SAMPLE)
+            continue;
         if (!pgwt_filter_matches(f, ev))
             continue;
         /* Visibility filter: Client:ClientRead transitions stay in the graph. */
@@ -2318,6 +2329,10 @@ void pgwt_compute_fingerprints(const struct pgwt_trace_event *events, int count,
 
     for (int i = 0; i < count; i++) {
         const struct pgwt_trace_event *ev = &events[i];
+        /* Fingerprints describe exact transition structure; sampled records
+         * (including clipped continuations) must not fabricate self-edges. */
+        if (ev->flags & PGWT_EVENT_FLAG_SAMPLE)
+            continue;
         if (!pgwt_filter_matches(f, ev))
             continue;
         if (pgwt_is_idle_event(ev->old_event))

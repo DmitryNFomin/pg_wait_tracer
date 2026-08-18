@@ -17,9 +17,10 @@ daemon already writes:
     the last TRANSITIONS-block timestamp actually committed — never beyond.
   * END with no START (window opened before this file / older file deleted):
     coverage starts at the file's first block timestamp.
-  * boundary rule (FID-6): a sample represents (ts − period, ts]; it is
-    dropped iff its interval MIDPOINT (ts − period/2) falls inside a covered
-    span (inclusive). Worst-case error per window edge ≤ period/2.
+  * boundary rule (FID-6): a sample represents (ts − period, ts]; exact
+    coverage is subtracted from that interval. Fully covered samples vanish;
+    boundary-straddling samples retain only their uncovered weight. This is
+    exact even when a delayed SMP-3 tick carries seconds of elapsed time.
   * files with transitions and no SAMPLES blocks (--mode full) are covered
     whole-file; files with samples+transitions but no markers anywhere fall
     back to per-block spans (legacy traces).
@@ -71,14 +72,16 @@ def sample_range(pid, start_ts, end_ts, event, qid=0):
     return out
 
 
+def uncovered_sample_ns(sample, spans, period=PERIOD):
+    """Sample weight left after subtracting normalized exact spans."""
+    start = sample["ts"] - period
+    end = sample["ts"]
+    covered = sum(max(0, min(end, e) - max(start, s)) for s, e in spans)
+    return max(0, period - covered)
+
+
 def dropped_by_rule(samples, spans):
-    """Apply the documented boundary rule: drop iff midpoint in any span."""
-    n = 0
-    for smp in samples:
-        mid = smp["ts"] - PERIOD // 2
-        if any(s <= mid <= e for (s, e) in spans):
-            n += 1
-    return n
+    return sum(uncovered_sample_ns(smp, spans) == 0 for smp in samples)
 
 
 def lock_ms(resp):
@@ -144,7 +147,7 @@ def test_long_wait_window(t):
 # ── 2. FID-6: boundary rule at window edges ───────────────────────────
 
 def test_boundary_rule(t):
-    print("\n### 2. FID-6: sample-interval midpoint rule at window edges ###")
+    print("\n### 2. FID-6: exact sample clipping at window edges ###")
     w0 = BASE + 10 * S
     w1 = w0 + 10 * S
 
@@ -163,9 +166,8 @@ def test_boundary_rule(t):
     n_kept = len(samples) - n_dropped
     expected_lock_ms = n_kept * (PERIOD / 1e6)
 
-    # Sanity of the rule itself: a sample AT w0 has midpoint w0 - period/2,
-    # outside the window → kept; a sample at w0+period has midpoint inside →
-    # dropped; a sample at w1+period has midpoint w1+period/2 → kept.
+    # A sample AT w0 lies wholly before the window; the first whole interval
+    # inside is dropped; the first interval after w1 is kept.
     t.check(dropped_by_rule([sample_at(1, w0, 0)], [(w0, w1)]) == 0,
             "rule: sample exactly at window start is kept (mass before w0)")
     t.check(dropped_by_rule([sample_at(1, w0 + PERIOD, 0)], [(w0, w1)]) == 1,
@@ -188,10 +190,196 @@ def test_boundary_rule(t):
             tm = srv.query("time_model")
             t.check_approx(lock_ms(tm), expected_lock_ms, 0.001,
                            f"Lock = {expected_lock_ms:.0f}ms "
-                           f"({n_kept} samples kept by the midpoint rule)")
+                           f"({n_kept} samples kept after exact clipping)")
             rows = {r["name"]: r for r in tm["rows"]}
             t.check_approx(rows.get("IO", {}).get("ms", -1), 500.0, 0.001,
                            "exact IO interval inside the window = 500ms")
+    finally:
+        cleanup_traces(trace_dir)
+
+
+def test_delayed_tick_clipping(t):
+    print("\n### 2b. SMP-3 delayed tick is clipped, not wholly dropped ###")
+    w0 = BASE + 30 * S
+    w1 = w0 + 4 * S
+    # Every observation has its midpoint inside exact coverage, so the old
+    # all-or-nothing rule dropped its entire elapsed weight. Exercise either
+    # boundary and one tick spanning the whole exact window (two output
+    # fragments).
+    cases = [
+        ("start", w0 + 3 * S, 5 * S),
+        ("end", w1 + 2 * S, 5 * S),
+        ("both", w1 + 2 * S, 8 * S),
+    ]
+    for edge, tick, delayed_period in cases:
+        # Same PID as the exact interval exercises chronological merge order,
+        # not just additive totals from unrelated sessions.
+        sample = sample_at(1000, tick, LOCK_RELATION, 200)
+        expected_lock_ns = uncovered_sample_ns(
+            sample, [(w0, w1)], delayed_period)
+        scenario = {
+            "backends": [
+                {"pid": 1000, "type": "client", "user": "u", "db": "d"},
+                {"pid": 1001, "type": "client", "user": "u", "db": "d"},
+            ],
+            "queries": [{"id": 100, "text": "Q1"},
+                        {"id": 200, "text": "Q2"}],
+            "events": [
+                esc_marker(w0, MARKER_ESC_START, 4, 0),
+                {"pid": 1000, "ts": w1, "dur": 4 * S,
+                 "old": IO_DATA_FILE_READ, "new": CPU, "qid": 100},
+                esc_marker(w1, MARKER_ESC_END, 4, 2),
+            ],
+            "sample_period_ns": delayed_period,
+            "samples": [sample],
+            "interleave": 1,
+        }
+        trace_dir = generate_traces(scenario)
+        try:
+            env = ({"PGWT_LOAD_MAX_EVENTS": "4"}
+                   if edge == "both" else None)
+            with ServerHarness(trace_dir, env=env) as srv:
+                query_from = w0 - 3 * S
+                query_to = w1 + 3 * S
+                tm = srv.query("time_model", from_=query_from, to_=query_to)
+                t.check("error" not in tm,
+                        f"{edge}-straddling merge fits raw-event bound")
+                t.check_eq(tm.get("fidelity"), "mixed",
+                           f"{edge}-straddling delayed tick stays mixed")
+                t.check_approx(lock_ms(tm), expected_lock_ns / 1e6, 0.001,
+                               f"{edge}-straddling delayed tick keeps exactly "
+                               f"{expected_lock_ns / 1e6:.0f}ms uncovered")
+                rows = {r["name"]: r for r in tm["rows"]}
+                t.check_approx(rows.get("IO", {}).get("ms", -1),
+                               4000.0, 0.001,
+                               f"{edge}-straddling exact interval remains 4s")
+
+                top_events = srv.query(
+                    "top_events", from_=query_from, to_=query_to)
+                event_rows = {r["name"]: r
+                              for r in top_events.get("rows", [])}
+                t.check_eq(event_rows.get("Lock:relation", {}).get("count"),
+                           1, f"{edge}-straddling tick counts one observation")
+
+                if edge == "both":
+                    top_queries = srv.query(
+                        "top_queries", from_=query_from, to_=query_to)
+                    query_rows = {r["query_id"]: r
+                                  for r in top_queries.get("rows", [])}
+                    t.check_eq(query_rows.get("200", {}).get("count"), 1,
+                               "two fragments count as one query observation")
+                    t.check_approx(
+                        query_rows.get("200", {}).get("total_ms", -1),
+                        expected_lock_ns / 1e6, 0.001,
+                        "two fragments conserve query sampled weight")
+
+                    transitions = srv.query(
+                        "transitions", from_=query_from, to_=query_to)
+                    t.check_eq(transitions.get("total"), 1,
+                               "mixed transition view ignores sample fragments")
+                    fingerprints = srv.query(
+                        "fingerprints", from_=query_from, to_=query_to)
+                    fp_rows = {r["query_id"]: r
+                               for r in fingerprints.get("rows", [])}
+                    t.check_eq(sorted(fp_rows), [100],
+                               "mixed fingerprints exclude sampled query")
+                    t.check_eq(fp_rows.get(100, {}).get("transitions"), 1,
+                               "mixed fingerprint counts only exact edge")
+
+                    timeline = srv.query(
+                        "session_timeline", from_=query_from, to_=query_to)
+                    visible = timeline.get("events", [])
+                    t.check_eq(len(visible), 3,
+                               "same-PID split timeline has three ordered bars")
+                    if len(visible) == 3:
+                        expected = [
+                            (w0 - 2 * S, 2 * S, LOCK_RELATION),
+                            (w0, 4 * S, IO_DATA_FILE_READ),
+                            (w1, 2 * S, LOCK_RELATION),
+                        ]
+                        actual = [(e["s"], e["d"], e["e"])
+                                  for e in visible]
+                        t.check_eq(actual, expected,
+                                   "split fragments retain chronological order")
+
+                    # The left slice clips a pre-window fragment at `from`;
+                    # the right slice requires loading a delayed sample whose
+                    # physical timestamp is AFTER `to`.
+                    for side, narrow_from, narrow_to in [
+                        ("left", w0 - S, w0 + S),
+                        ("right", w1, w1 + S),
+                    ]:
+                        narrow = srv.query(
+                            "top_events", from_=narrow_from, to_=narrow_to)
+                        narrow_rows = {r["name"]: r
+                                       for r in narrow.get("rows", [])}
+                        lock = narrow_rows.get("Lock:relation", {})
+                        t.check_approx(lock.get("total_ms", -1), 1000.0,
+                                       0.001,
+                                       f"{side} request slice clips delayed "
+                                       "sample weight to 1s")
+                        t.check_eq(lock.get("count"), 1,
+                                   f"{side} request slice counts one sample")
+
+            if edge == "both":
+                for failpoint in ("merge_grow", "sort"):
+                    with ServerHarness(
+                            trace_dir,
+                            env={"PGWT_LOAD_MAX_EVENTS": "4",
+                                 "PGWT_TEST_LOAD_ALLOC_FAIL": failpoint}) as srv:
+                        failed = srv.query(
+                            "time_model", from_=w0 - 3 * S, to_=w1 + 3 * S)
+                        t.check_eq(
+                            failed.get("code"), "allocation_failed",
+                            f"{failpoint} OOM is not mislabeled window-too-large")
+                        t.check("max_events" not in failed and
+                                "rows" not in failed,
+                                f"{failpoint} OOM returns no bound or partial data")
+        finally:
+            cleanup_traces(trace_dir)
+
+
+def test_lookahead_respects_load_bound(t):
+    print("\n### 2c. delayed-sample lookahead excludes exact records ###")
+    w0 = BASE + 50 * S
+    w1 = w0 + 4 * S
+    events = [
+        esc_marker(w0, MARKER_ESC_START, 4, 0),
+        {"pid": 1000, "ts": w1, "dur": 4 * S,
+         "old": IO_DATA_FILE_READ, "new": CPU, "qid": 100},
+        esc_marker(w1, MARKER_ESC_END, 4, 2),
+    ]
+    # These records fall outside the tiny request but inside its 8s sample
+    # lookahead. They must be rejected before PGWT_LOAD_MAX_EVENTS accounting.
+    for i in range(10):
+        events.append({
+            "pid": 1000,
+            "ts": w1 + 2 * S + i * 100_000_000,
+            "dur": 50_000_000,
+            "old": IO_DATA_FILE_READ,
+            "new": CPU,
+            "qid": 100,
+        })
+    scenario = {
+        "backends": [{"pid": 1000, "type": "client", "user": "u", "db": "d"}],
+        "queries": [{"id": 100, "text": "Q1"},
+                    {"id": 200, "text": "Q2"}],
+        "events": events,
+        "sample_period_ns": 8 * S,
+        "samples": [sample_at(1000, w1 + 2 * S, LOCK_RELATION, 200)],
+        "interleave": 1,
+    }
+    trace_dir = generate_traces(scenario)
+    try:
+        with ServerHarness(
+                trace_dir, env={"PGWT_LOAD_MAX_EVENTS": "5"}) as srv:
+            resp = srv.query("top_events", from_=w1, to_=w1 + S)
+            t.check("error" not in resp,
+                    "lookahead-only exact records do not false-refuse range")
+            rows = {r["name"]: r for r in resp.get("rows", [])}
+            t.check_approx(rows.get("Lock:relation", {}).get("total_ms", -1),
+                           1000.0, 0.001,
+                           "lookahead still loads and clips overlapping sample")
     finally:
         cleanup_traces(trace_dir)
 
@@ -318,10 +506,10 @@ def test_cross_file_offsets(t):
              sample_range(1001, m1 + PERIOD, m1 + 5 * S, LOCK_RELATION, 200))
     smp_b.sort(key=lambda s: s["ts"])
 
-    # Ground truth in the MONO domain: every lock sample whose midpoint is in
-    # [m0, m1] is covered by the window — regardless of which file it is in
-    # and regardless of the files' disagreeing wall offsets. File A's
-    # unclosed portion is closed by file B's END marker (same clock domain).
+    # Ground truth in the MONO domain: lock-sample weight inside [m0, m1] is
+    # covered by the window — regardless of its file or that file's wall
+    # offset. File A's unclosed portion is closed by file B's END marker (same
+    # clock domain). Grid alignment makes each sample wholly kept or dropped.
     all_samples = smp_a + smp_b
     n_dropped = dropped_by_rule(all_samples, [(m0, m1)])
     n_kept = len(all_samples) - n_dropped
@@ -358,9 +546,13 @@ def test_cross_file_offsets(t):
             ev = srv.query("top_events",
                            from_=m1 + PERIOD // 2, to_=m1 + 6 * S)
             evrows = {r["name"]: r for r in ev["rows"]}
+            # The first post-window sample represents [m1,m1+PERIOD]; this
+            # request starts halfway through it, so only half its weight is in
+            # range. The remaining tail samples contribute their full period.
             tail = [s for s in smp_b if s["ts"] > m1]
+            expected_tail_ms = (len(tail) - 0.5) * (PERIOD / 1e6)
             t.check_approx(evrows.get("Lock:relation", {}).get("total_ms", -1),
-                           len(tail) * (PERIOD / 1e6), 0.05,
+                           expected_tail_ms, 0.001,
                            "post-window slice sees only the sampled tail "
                            "(consistent re-anchored wall mapping)")
     finally:
@@ -372,6 +564,8 @@ def main():
     print(f"=== {t.name} ===")
     test_long_wait_window(t)
     test_boundary_rule(t)
+    test_delayed_tick_clipping(t)
+    test_lookahead_respects_load_bound(t)
     test_crash_mid_window(t)
     test_multiple_windows(t)
     test_cross_file_offsets(t)

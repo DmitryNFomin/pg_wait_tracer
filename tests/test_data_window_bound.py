@@ -87,6 +87,15 @@ def main():
             resp = srv.query("time_model")
             t.check("error" not in resp,
                     "default bound loads the full window")
+
+        with ServerHarness(
+                trace_dir,
+                env={"PGWT_TEST_LOAD_ALLOC_FAIL": "merge_initial"}) as srv:
+            resp = srv.query("time_model")
+            t.check_eq(resp.get("code"), "allocation_failed",
+                       "merge malloc failure has a distinct error code")
+            t.check("max_events" not in resp and "rows" not in resp,
+                    "allocation failure is neither a range refusal nor partial data")
     finally:
         cleanup_traces(trace_dir)
 

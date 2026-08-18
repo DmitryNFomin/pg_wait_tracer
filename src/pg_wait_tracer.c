@@ -681,6 +681,22 @@ int main(int argc, char **argv)
         }
     }
 
+    /* Block shutdown signals before first discovery. Runtime layout
+     * validation can run controlled PostgreSQL backends for an extended
+     * bounded interval; leaving SIGTERM asynchronous here could kill the
+     * tracer before their identity-safe cleanup. The helper spawn path
+     * restores child masks, and every later worker thread inherits this mask,
+     * preserving the resolver/signalfd ordering invariant. */
+    sigset_t shutdown_mask;
+    sigemptyset(&shutdown_mask);
+    sigaddset(&shutdown_mask, SIGINT);
+    sigaddset(&shutdown_mask, SIGTERM);
+    if (sigprocmask(SIG_BLOCK, &shutdown_mask, NULL) != 0) {
+        perror("sigprocmask");
+        free(d);
+        return 1;
+    }
+
     /* First discovery */
     if (pgwt_discover(d) != 0) {
         if (!pgdata && pm_pid == 0)
@@ -693,14 +709,6 @@ int main(int argc, char **argv)
     /* ── Daemon mode: supervision loop ─────────────────────── */
     if (daemon_mode) {
         int rc = 0;
-
-        /* Block signals for sigtimedwait in wait phase.
-         * pgwt_daemon_init() will also call sigprocmask (idempotent). */
-        sigset_t mask;
-        sigemptyset(&mask);
-        sigaddset(&mask, SIGINT);
-        sigaddset(&mask, SIGTERM);
-        sigprocmask(SIG_BLOCK, &mask, NULL);
 
         for (;;) {
             if (pgwt_daemon_init(d) != 0) {
@@ -719,7 +727,7 @@ int main(int argc, char **argv)
             bool found = false;
             while (!found) {
                 struct timespec ts = { .tv_sec = 5 };
-                int sig = sigtimedwait(&mask, NULL, &ts);
+                int sig = sigtimedwait(&shutdown_mask, NULL, &ts);
                 if (sig > 0) {
                     fprintf(stderr, "\npg_wait_tracer: shutting down\n");
                     goto done;

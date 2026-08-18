@@ -34,6 +34,17 @@
 
 struct pgwt_daemon;
 
+/* Why an escalation request failed.  Automatic callers use this to
+ * distinguish a durable budget denial from a transient exact-mode setup
+ * failure that should be retried after collecting fresh anomaly evidence. */
+enum pgwt_escalate_failure {
+    PGWT_ESC_FAIL_NONE = 0,
+    PGWT_ESC_FAIL_INVALID,
+    PGWT_ESC_FAIL_BUDGET,
+    PGWT_ESC_FAIL_EXACT_ATTACH,
+    PGWT_ESC_FAIL_EXACT_PRESEED,
+};
+
 /* Rolling-hour budget ledger. Each closed window appends one segment; the
  * accounting drops segments older than the window when computing consumed
  * seconds, giving a true rolling-hour figure without a per-second ring. */
@@ -88,9 +99,11 @@ void pgwt_escalation_cleanup(struct pgwt_daemon *d);
  * is escalated; returns 0. On denial returns -1 and *why (if non-NULL) points
  * to a static reason string. If already escalated the deadline is EXTENDED to
  * max(current, now+duration) when budget allows. Budget is enforced for every
- * caller (manual and anomaly). */
+ * caller (manual and anomaly).  When failure is non-NULL it is set to a
+ * machine-readable reason; why remains the operator-facing detail. */
 int pgwt_escalate(struct pgwt_daemon *d, int duration_s, int reason,
-                  int *granted_s, const char **why);
+                  int *granted_s, const char **why,
+                  enum pgwt_escalate_failure *failure);
 
 /* Detach now (idempotent). reason is recorded in the END marker. */
 void pgwt_deescalate(struct pgwt_daemon *d, int reason);

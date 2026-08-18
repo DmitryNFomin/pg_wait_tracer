@@ -210,10 +210,22 @@ static void *attach_link(void *ctx, enum pgwt_exact_probe_index index)
     const char *bin = d->pg_binary_saved;
     struct bpf_link *link = NULL;
     const char *fail = getenv("PGWT_TEST_EXACT_PROBE_FAIL_AT");
-    if (fail && atoi(fail) == (int)index) {
+    const char *escalation_fail =
+        getenv("PGWT_TEST_EXACT_PROBE_ESCALATION_FAIL_AT");
+    bool force_startup_or_exact = fail && atoi(fail) == (int)index;
+    /* The escalation-only variant exercises atomic acquisition rollback
+     * without corrupting startup capability discovery.  Keep the original
+     * unscoped hook for the independent startup-degradation regression test. */
+    bool force_escalation = escalation_fail &&
+        atoi(escalation_fail) == (int)index &&
+        d->escalation.generation != 0;
+    if (force_startup_or_exact || force_escalation) {
         errno = EIO;
-        fprintf(stderr, "WARN: PGWT_TEST_EXACT_PROBE_FAIL_AT=%d -- forcing "
-                "exact-link attach failure (TEST ONLY)\n", index);
+        fprintf(stderr, "WARN: %s=%d -- forcing exact-link attach failure "
+                "(TEST ONLY)\n",
+                force_startup_or_exact ? "PGWT_TEST_EXACT_PROBE_FAIL_AT" :
+                "PGWT_TEST_EXACT_PROBE_ESCALATION_FAIL_AT",
+                index);
         return NULL;
     }
     if (!bin) {
@@ -604,6 +616,18 @@ int pgwt_exact_seed_backend(struct pgwt_daemon *d, pid_t pid,
 
 int pgwt_exact_seed_all(struct pgwt_daemon *d, uint64_t generation)
 {
+    /* Deterministic integration hook for anomaly retry coverage: fail exactly
+     * one coherent preseed in this process, after link acquisition but before
+     * publishing any generation seed. */
+    static bool test_preseed_failed_once;
+    if (!test_preseed_failed_once &&
+        getenv("PGWT_TEST_EXACT_PRESEED_FAIL_ONCE")) {
+        test_preseed_failed_once = true;
+        fprintf(stderr, "WARN: PGWT_TEST_EXACT_PRESEED_FAIL_ONCE -- forcing "
+                "one coherent preseed rollback (TEST ONLY)\n");
+        return -1;
+    }
+
     for (int i = 0; i < d->backends.count; i++) {
         struct pgwt_backend *be = &d->backends.entries[i];
         if (!be->is_alive || be->pid <= 0)
