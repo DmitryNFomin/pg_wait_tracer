@@ -57,5 +57,11 @@ web/web
 # Cross-compiled Go binaries
 pgwt-darwin-amd64
 pgwt-darwin-arm64
-.claude/
+# Claude Code: settings/agents/skills/hooks are tracked; personal overrides are not
+.claude/settings.local.json
+.claude/*.local.*
+# make check stamp (scripts/check.sh) and local run outputs
+.pgwt-check.stamp
+tests/results/ui_gallery/
+tests/results/box-check-*.log
 tests/results/web_ui_failures/

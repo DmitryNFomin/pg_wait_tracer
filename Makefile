@@ -258,3 +258,20 @@ pgwt-client:
 clean:
 	rm -rf $(BUILD_DIR) $(TARGET) pgwt-server
 	rm -f $(INC_DIR)/vmlinux.h $(INC_DIR)/pg_wait_tracer.skel.h
+
+# ---------------------------------------------------------------------------
+# Developer loop (CLAUDE.md). None of these need the BPF build.
+#   check       deterministic tier on this machine (node/go/python/Playwright)
+#   check-fast  node + go + py_compile only (seconds)
+#   box-check   live tier on an x86 Linux box: OS=ubuntu|el8|el9 PG=<major>
+#   ui-gallery  before/after screenshot sheet -> tests/results/ui_gallery/
+# ---------------------------------------------------------------------------
+.PHONY: check check-fast box-check ui-gallery
+check:
+	@scripts/check.sh
+check-fast:
+	@scripts/check.sh --fast
+box-check:
+	@OS=$(OS) PG=$(PG) scripts/box-check.sh
+ui-gallery:
+	@tests/ui_gallery.sh $(BASE)
