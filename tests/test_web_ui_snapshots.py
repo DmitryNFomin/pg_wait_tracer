@@ -158,7 +158,10 @@ assert all(not _gallery_name(cell).endswith(("-actual", "-diff"))
     "gallery baseline names must not use gitignored -actual or -diff suffixes"
 
 MOCK_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mock_server.py")
-SNAP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web_snapshots")
+# PGWT_SNAP_DIR: alternate output root (tests/ui_gallery.sh renders before/after
+# sets into scratch dirs). Never point CI at it — baselines stay in-tree.
+SNAP_DIR = os.environ.get("PGWT_SNAP_DIR") or os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "web_snapshots")
 
 VIEWPORT = {"width": 1280, "height": 800}
 DEVICE_SCALE = 1
