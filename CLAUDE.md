@@ -27,6 +27,31 @@ A PR is ready when ALL of these are true and the evidence is in the PR body:
    think about.
 Use `/pr-ready` to run this sequence.
 
+## Who does what (main session → subagents)
+
+The interactive session is the **main agent**: it plans, splits, spawns, and
+judges. It writes no feature code itself for anything bigger than a one-liner.
+
+- **Models** are pinned in `.claude/agents/*.md`: `implementer` = Opus
+  (spawn with `model: fable` for anything under `src/` — BPF, capture,
+  discovery, backend layout), `reviewer` = Fable/high effort, `ui-reviewer` =
+  Opus. `Explore`/triage work: Sonnet or Haiku. Everything else inherits the
+  session model.
+- **Splitting**: one roadmap item = one issue = one branch = one implementer.
+  Split only along an independent seam (disjoint files AND disjoint tests);
+  never split a shared file; at most **2 tasks in flight**. Anything over ~a
+  day of work goes to a `Plan` agent first; its steps run sequentially unless
+  the plan shows them independent.
+- **Spawning**: always `isolation: "worktree"`. The prompt is a contract:
+  issue text, acceptance criteria, required `make` targets, "stop and report,
+  do not open the PR".
+- **Review chain**: (1) scripts — `make check`/`box-check`/`ui-gallery`
+  produce files the implementer cannot argue with; (2) a fresh `reviewer`
+  (+ `ui-reviewer` when `web/` changed) reads code + evidence and writes the
+  PR body; blockers go back to the implementer via SendMessage; (3) the main
+  agent reads the reviewer's report, not the diff, and decides ready / back /
+  ask the owner. Only "Design questions for the owner" reach the human.
+
 ## Rules
 
 - Branch `agent/<slug>`; one task per branch; work in an isolated git worktree
