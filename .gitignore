@@ -65,3 +65,4 @@ pgwt-darwin-arm64
 tests/results/ui_gallery/
 tests/results/box-check-*.log
 tests/results/web_ui_failures/
+tests/results/ui_live/

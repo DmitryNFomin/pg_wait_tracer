@@ -364,6 +364,12 @@ LIVE_TESTS=(
     "test_anomaly_live|bash|test_anomaly_live.sh"
     # T4/CAP-1: a full BPF state_map must be loud (metrics + ERROR log)
     "test_state_map_loud|python3|test_state_map_loud.py"
+    # issue #93: live UI smoke — walks all 11 tabs against a REAL daemon +
+    # Go bridge (not mock_server.py). Needs Playwright + Chromium on the box
+    # (tests/provision-runner.sh); prints its own PASS/FAIL summary line and
+    # writes tests/results/ui_live/summary.json (phase 2: scripts/box-check.sh
+    # rsyncs that directory back to the Mac).
+    "test_ui_live_smoke|bash|ui_live_smoke.sh"
 )
 
 # Step 4: integration + live-correctness tests (root + running PG)

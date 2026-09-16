@@ -9,16 +9,17 @@ backend, Go WebSocket bridge, ECharts/uPlot web UI). Plan and status:
 | Command | Runs where | What | When |
 |---|---|---|---|
 | `make check` (`check-fast` = seconds) | this Mac | Node builder tests, Go bridge, py_compile, Playwright UI + chaos suites vs `tests/mock_server.py` | before every push — the push guard enforces it |
-| `make box-check [OS=el8\|el9\|ubuntu] [PG=13\|16\|17\|18]` | x86 Linux box over ssh (`$PGWT_BOX`, `$PGWT_BOX_EL8`…) | Linux build, C units, synthetic-data tests, protocol drift, real-PG capture (`tests/run_all.sh --require-live`) | before every PR; `OS=el8` when touching kernel/libbpf/layout code |
+| `make box-check [OS=el8\|el9\|ubuntu] [PG=13\|16\|17\|18]` | x86 Linux box over ssh (`$PGWT_BOX`, `$PGWT_BOX_EL8`…) | Linux build, C units, synthetic-data tests, protocol drift, real-PG capture (`tests/run_all.sh --require-live`, incl. the live-UI-smoke walk — `tests/ui_live_smoke.sh` / `tests/results/ui_live/summary.json`) | before every PR; `OS=el8` when touching kernel/libbpf/layout code |
 | `make ui-gallery [BASE=ref]` | this Mac | before/after screenshots of every UI snapshot cell → `tests/results/ui_gallery/index.html` + `summary.json` | before every PR that touches `web/` |
 
-Logs: `tests/results/box-check-*.log`, `tests/results/ui_gallery/`.
+Logs: `tests/results/box-check-*.log`, `tests/results/ui_gallery/`, `tests/results/ui_live/summary.json`.
 
 ## Definition of done
 
 A PR is ready when ALL of these are true and the evidence is in the PR body:
 1. `make check` passed (full, not `--fast`) on the final tree.
-2. `make box-check` passed — paste the run_all summary (last ~20 lines).
+2. `make box-check` passed — paste the run_all summary (last ~20 lines), which
+   includes the live-UI-smoke one-line verdict (`tests/results/ui_live/summary.json`).
 3. If `web/` changed: `make ui-gallery` ran; the `summary.json` counts and every
    `changed`/`added`/`removed` cell are listed with a one-line justification each.
 4. A fresh **reviewer** agent (`.claude/agents/reviewer.md`; `ui-reviewer.md`
