@@ -185,6 +185,45 @@ def pgbench_pgss_query_ids():
     return ids
 
 
+def pgss_all_rows():
+    """Every pg_stat_statements row currently visible, keyed by query id (as
+    unsigned 64-bit) -> (calls, left(query, 60)). NO calls floor — this is
+    diagnostic-only, used to explain phantom-id guard failures (issue #92):
+    a single-call statement (e.g. the Phase 3 controlled waiter/holder) is a
+    legitimate id that pgss_query_ids()'s calls>=3 floor would hide."""
+    out = psql(
+        "SELECT queryid, calls, left(query, 60) FROM pg_stat_statements "
+        "WHERE queryid IS NOT NULL")
+    rows = {}
+    for line in out.split('\n'):
+        if not line.strip():
+            continue
+        parts = line.split('|', 2)
+        if len(parts) != 3:
+            continue
+        qid_s, calls_s, text = (p.strip() for p in parts)
+        if not re.fullmatch(r'-?\d+', qid_s) or not calls_s.isdigit():
+            continue
+        qid = int(qid_s) & 0xFFFFFFFFFFFFFFFF
+        rows[qid] = (int(calls_s), text)
+    return rows
+
+
+def describe_unmatched_ids(ids):
+    """Diagnostic for a phantom-id guard failure: for each id present in the
+    trace/view but not matched against the truth set, show what pg_stat_
+    statements knows about it, if anything, with NO calls floor."""
+    rows = pgss_all_rows()
+    parts = []
+    for qid in sorted(ids):
+        if qid in rows:
+            calls, text = rows[qid]
+            parts.append(f"{qid}(pgss calls={calls} query={text!r})")
+        else:
+            parts.append(f"{qid}(absent from pgss)")
+    return ", ".join(parts) if parts else "none"
+
+
 # ── deterministic workload ─────────────────────────────────────────
 
 class Workload:
@@ -719,10 +758,14 @@ def phase_live_query_event(pm_pid, mode, pg_major, core=False):
               f"(view={len(view_ids)}; intentionally not joined to pgss ids)"
               + ("" if view_ids else f" (stderr tail: {err[-300:]!r})"))
     elif core:
-        check(not view_ids or len(matched) > 0,
+        view_ok = not view_ids or len(matched) > 0
+        unmatched = view_ids - matched
+        check(view_ok,
               f"[core] query_event view ids, if any, cross-check against "
               f"pg_stat_statements — no phantoms (view={len(view_ids)}, "
-              f"pgss={len(truth)}, matched={len(matched)})")
+              f"pgss={len(truth)}, matched={len(matched)})"
+              + ("" if view_ok else
+                 f" unmatched: {describe_unmatched_ids(unmatched)}"))
     else:
         check(len(matched) > 0,
               f"query_event view ids cross-check against pg_stat_statements "
@@ -1183,10 +1226,14 @@ def phase_trace_file(pm_pid, mode, pg_major, core=False):
             # is therefore not gated for either, but each keeps the phantom-id
             # guard: any id that DOES appear must be real (matched). The hosted
             # runner + live boxes remain strict through the non-core assertions.
-            check(not trace_ids or len(matched) > 0,
+            trace_ok = not trace_ids or len(matched) > 0
+            unmatched = trace_ids - matched
+            check(trace_ok,
                   f"[core] trace query ids, if any, cross-check against "
                   f"pg_stat_statements — no phantoms (trace={len(trace_ids)}, "
-                  f"pgss={len(truth)}, matched={len(matched)})")
+                  f"pgss={len(truth)}, matched={len(matched)})"
+                  + ("" if trace_ok else
+                     f" unmatched: {describe_unmatched_ids(unmatched)}"))
         else:
             check(len(matched) > 0,
                   f"trace file query attribution cross-checks against "
