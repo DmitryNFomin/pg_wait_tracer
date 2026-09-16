@@ -42,8 +42,16 @@ log="tests/results/box-check-$OS-$ts.log"
 
 echo "box-check: $target  OS=$OS PG=${PG:-all}  -> $remote_dir  (log: $log)"
 ssh -o BatchMode=yes "$target" "mkdir -p '$remote_dir'" || exit 1
+# The binary excludes are anchored to the repo root (leading /): an
+# unanchored 'pg_wait_tracer*' also matches src/pg_wait_tracer.c,
+# src/pg_wait_tracer.h and src/bpf/pg_wait_tracer.bpf.c (rsync excludes
+# without a '/' match at any depth), which silently dropped the daemon's
+# own source from every box-check rsync and made the remote build fail
+# with "No rule to make target 'build/pg_wait_tracer.o'".
 rsync -az --delete \
-    --exclude .git --exclude build --exclude 'pgwt-server*' --exclude 'pg_wait_tracer*' \
+    --exclude .git --exclude /build \
+    --exclude '/pgwt-server' --exclude '/pgwt-server-asan' \
+    --exclude '/pg_wait_tracer' --exclude '/pg_wait_tracer-asan' \
     --exclude 'tests/results' --exclude 'web/pgwt' --exclude '__pycache__' \
     --exclude '.pgwt-check.stamp' \
     ./ "$target:$remote_dir/" || exit 1

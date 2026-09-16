@@ -2,7 +2,8 @@
 # hetzner-vm.sh — Create/delete Hetzner test VMs for pg_wait_tracer
 #
 # Usage:
-#   tests/hetzner-vm.sh create [--type cpx42] [--cloud-init FILE]
+#   tests/hetzner-vm.sh create [--type cpx42] [--image rocky-9] [--name NAME] \
+#                               [--location LOC] [--cloud-init FILE]
 #   tests/hetzner-vm.sh delete <SERVER_ID>
 #   tests/hetzner-vm.sh ssh <IP>
 #   tests/hetzner-vm.sh list
@@ -11,6 +12,11 @@
 #
 # The script auto-detects the local SSH key in Hetzner by matching
 # the MD5 fingerprint of ~/.ssh/id_ed25519.pub (or id_rsa.pub).
+#
+# Locations are EU-only (fsn1/nbg1/hel1): US (ash) and Singapore (sin) cost
+# roughly 3x for the same server type and are never tried automatically.
+# --location overrides the whole list with a single explicit location (still
+# must be a Hetzner location that offers the requested --type).
 
 set -euo pipefail
 
@@ -18,7 +24,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 DEFAULT_CLOUD_INIT="$SCRIPT_DIR/cloud-init-rocky9-pg18.yaml"
 DEFAULT_TYPE="cpx42"    # 8 CPU / 16 GB
 DEFAULT_IMAGE="rocky-9"
-LOCATIONS="nbg1 fsn1 hel1 sin ash"   # try in order
+DEFAULT_NAME="pg-wait-tracer-test"
+LOCATIONS="fsn1 nbg1 hel1"   # EU only, try in order
 
 API="https://api.hetzner.cloud/v1"
 
@@ -64,20 +71,31 @@ find_ssh_key_id() {
 cmd_create() {
     local server_type="$DEFAULT_TYPE"
     local cloud_init="$DEFAULT_CLOUD_INIT"
+    local image="$DEFAULT_IMAGE"
+    local name="$DEFAULT_NAME"
+    local location=""
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --type)       server_type="$2"; shift 2 ;;
             --cloud-init) cloud_init="$2"; shift 2 ;;
+            --image)      image="$2"; shift 2 ;;
+            --name)       name="$2"; shift 2 ;;
+            --location)   location="$2"; shift 2 ;;
             *) die "Unknown option: $1" ;;
         esac
     done
 
     [[ -f "$cloud_init" ]] || die "Cloud-init file not found: $cloud_init"
 
+    local locations_to_try="$LOCATIONS"
+    [[ -n "$location" ]] && locations_to_try="$location"
+
     echo "=== Creating Hetzner VM ===" >&2
+    echo "  Name:       $name" >&2
     echo "  Type:       $server_type" >&2
-    echo "  Image:      $DEFAULT_IMAGE" >&2
+    echo "  Image:      $image" >&2
+    echo "  Locations:  $locations_to_try" >&2
     echo "  Cloud-init: $cloud_init" >&2
 
     local ssh_key_id
@@ -89,13 +107,13 @@ cmd_create() {
 
     # Try locations in order until one works
     local result=""
-    for loc in $LOCATIONS; do
+    for loc in $locations_to_try; do
         echo "  Trying location: $loc ..." >&2
         result=$(jq -n \
             --arg ud "$userdata" \
-            --arg name "pg-wait-tracer-test" \
+            --arg name "$name" \
             --arg st "$server_type" \
-            --arg img "$DEFAULT_IMAGE" \
+            --arg img "$image" \
             --arg loc "$loc" \
             --argjson key "$ssh_key_id" \
             '{name:$name, server_type:$st, image:$img, location:$loc, ssh_keys:[$key], user_data:$ud}' \
@@ -200,7 +218,8 @@ case "${1:-help}" in
     *)
         echo "Usage: $0 {create|delete|ssh|list}" >&2
         echo "" >&2
-        echo "  create [--type cpx42] [--cloud-init FILE]" >&2
+        echo "  create [--type cpx42] [--image rocky-9] [--name NAME]" >&2
+        echo "         [--location fsn1|nbg1|hel1] [--cloud-init FILE]" >&2
         echo "  delete <SERVER_ID>" >&2
         echo "  ssh <IP> [command...]" >&2
         echo "  list" >&2
