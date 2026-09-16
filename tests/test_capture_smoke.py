@@ -187,10 +187,13 @@ def pgbench_pgss_query_ids():
 
 def pgss_all_rows():
     """Every pg_stat_statements row currently visible, keyed by query id (as
-    unsigned 64-bit) -> (calls, left(query, 60)). NO calls floor — this is
-    diagnostic-only, used to explain phantom-id guard failures (issue #92):
-    a single-call statement (e.g. the Phase 3 controlled waiter/holder) is a
-    legitimate id that pgss_query_ids()'s calls>=3 floor would hide."""
+    unsigned 64-bit) -> (calls, left(query, 60)). NO calls floor. Backs both
+    the phantom-id guard truth set (pgss_phantom_truth_ids()) and this
+    module's diagnostic messages (issue #92): a real, single-call statement
+    (e.g. the tracer's own backend_status_layout validation probe, or the
+    Phase 3 controlled waiter/holder) is a legitimate id that
+    pgss_query_ids()'s calls>=3 floor would otherwise hide, making the
+    phantom guard misfire on it."""
     out = psql(
         "SELECT queryid, calls, left(query, 60) FROM pg_stat_statements "
         "WHERE queryid IS NOT NULL")
@@ -207,6 +210,17 @@ def pgss_all_rows():
         qid = int(qid_s) & 0xFFFFFFFFFFFFFFFF
         rows[qid] = (int(calls_s), text)
     return rows
+
+
+def pgss_phantom_truth_ids():
+    """The ground truth for phantom-id guards ONLY (issue #92): every query
+    id pg_stat_statements has ever recorded, with NO calls floor. A real id
+    backed by a single-call statement must not be misclassified as a
+    phantom just because it hasn't reached pgss_query_ids()'s calls>=3
+    floor — that floor stays in place for the presence assertions (a
+    phantom-id guard only cares whether an id is real, never how often it
+    ran)."""
+    return set(pgss_all_rows().keys())
 
 
 def describe_unmatched_ids(ids):
@@ -758,14 +772,19 @@ def phase_live_query_event(pm_pid, mode, pg_major, core=False):
               f"(view={len(view_ids)}; intentionally not joined to pgss ids)"
               + ("" if view_ids else f" (stderr tail: {err[-300:]!r})"))
     elif core:
-        view_ok = not view_ids or len(matched) > 0
-        unmatched = view_ids - matched
+        # Phantom-id guard only: does the id exist at all in pgss, no calls
+        # floor (issue #92 — a real single-call id, e.g. the tracer's own
+        # layout-validation probe, is not a phantom).
+        phantom_truth = pgss_phantom_truth_ids()
+        view_matched = view_ids & phantom_truth
+        view_ok = not view_ids or len(view_matched) > 0
         check(view_ok,
               f"[core] query_event view ids, if any, cross-check against "
               f"pg_stat_statements — no phantoms (view={len(view_ids)}, "
-              f"pgss={len(truth)}, matched={len(matched)})"
+              f"pgss={len(phantom_truth)}, matched={len(view_matched)})"
               + ("" if view_ok else
-                 f" unmatched: {describe_unmatched_ids(unmatched)}"))
+                 f" unmatched: "
+                 f"{describe_unmatched_ids(view_ids - view_matched)}"))
     else:
         check(len(matched) > 0,
               f"query_event view ids cross-check against pg_stat_statements "
@@ -1226,14 +1245,20 @@ def phase_trace_file(pm_pid, mode, pg_major, core=False):
             # is therefore not gated for either, but each keeps the phantom-id
             # guard: any id that DOES appear must be real (matched). The hosted
             # runner + live boxes remain strict through the non-core assertions.
-            trace_ok = not trace_ids or len(matched) > 0
-            unmatched = trace_ids - matched
+            # Phantom-id guard only: does the id exist at all in pgss, no
+            # calls floor (issue #92 — a real single-call id, e.g. the
+            # tracer's own layout-validation probe or the Phase 3 controlled
+            # waiter/holder, is not a phantom).
+            phantom_truth = pgss_phantom_truth_ids()
+            trace_matched = trace_ids & phantom_truth
+            trace_ok = not trace_ids or len(trace_matched) > 0
             check(trace_ok,
                   f"[core] trace query ids, if any, cross-check against "
                   f"pg_stat_statements — no phantoms (trace={len(trace_ids)}, "
-                  f"pgss={len(truth)}, matched={len(matched)})"
+                  f"pgss={len(phantom_truth)}, matched={len(trace_matched)})"
                   + ("" if trace_ok else
-                     f" unmatched: {describe_unmatched_ids(unmatched)}"))
+                     f" unmatched: "
+                     f"{describe_unmatched_ids(trace_ids - trace_matched)}"))
         else:
             check(len(matched) > 0,
                   f"trace file query attribution cross-checks against "
