@@ -226,8 +226,14 @@ def pgss_phantom_truth_ids():
 def describe_unmatched_ids(ids):
     """Diagnostic for a phantom-id guard failure: for each id present in the
     trace/view but not matched against the truth set, show what pg_stat_
-    statements knows about it, if anything, with NO calls floor."""
-    rows = pgss_all_rows()
+    statements knows about it, if anything, with NO calls floor. Best-effort:
+    this runs while building a FAIL message, so a stalled psql() here must
+    not turn a clean FAIL line into an uncaught traceback that aborts the
+    remaining assertions."""
+    try:
+        rows = pgss_all_rows()
+    except subprocess.TimeoutExpired:
+        return "(pgss lookup failed)"
     parts = []
     for qid in sorted(ids):
         if qid in rows:
@@ -1180,10 +1186,6 @@ def phase_trace_file(pm_pid, mode, pg_major, core=False):
                 continue
             if qid != 0:
                 trace_ids.add(qid & 0xFFFFFFFFFFFFFFFF)
-        truth = (pgbench_truth
-                 if mode == "tiered" and pg_major >= 14 and not core
-                 else pgss_query_ids())
-        matched = trace_ids & truth
         text_rows = [r for r in qresp.get("rows", []) if r.get("text")]
         if pg_major == 13 and mode == "tiered":
             check(len(trace_ids) > 0,
@@ -1260,6 +1262,13 @@ def phase_trace_file(pm_pid, mode, pg_major, core=False):
                      f" unmatched: "
                      f"{describe_unmatched_ids(trace_ids - trace_matched)}"))
         else:
+            # Presence assertion only (never a core path here — see elif
+            # core above): keeps pgss_query_ids()'s calls>=3 floor, unlike
+            # the phantom-id guards above.
+            truth = (pgbench_truth
+                     if mode == "tiered" and pg_major >= 14
+                     else pgss_query_ids())
+            matched = trace_ids & truth
             check(len(matched) > 0,
                   f"trace file query attribution cross-checks against "
                   f"pg_stat_statements (trace={len(trace_ids)}, pgss={len(truth)}, "
