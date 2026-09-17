@@ -109,6 +109,17 @@ log() { echo "[provision-runner] $*"; }
 
 export DEBIAN_FRONTEND=noninteractive
 
+# The lock file must be writable by the gate-box GitHub Actions runner's
+# unprivileged 'runner' user too (ci.yml's gate-box jobs each wrap their own
+# build/test steps in this same flock, section 6 below) -- create it 0666
+# up front so a non-root `flock 9` doesn't fail with "Permission denied"
+# against a file this script (or scripts/box-check.sh) previously created
+# 0644 as root. Real bug found running ci.yml against this box for the
+# first time: `exec 9>/tmp/pgwt-box-check.lock` as the unprivileged runner
+# user failed outright on the root-owned, 0644 file.
+touch /tmp/pgwt-box-check.lock
+chmod 0666 /tmp/pgwt-box-check.lock
+
 # Same lock make box-check (scripts/box-check.sh) uses: the cluster restarts
 # below must not race with an in-flight box-check's live tests. Bounded wait
 # (not a bare `flock 9`, which blocks forever): a nested/concurrent call

@@ -127,15 +127,35 @@ jobs:
     #
     # docs/DEV_LOOP_PLAN.md step 1: moved to the persistent gate box (real
     # hardware, no noisy-neighbour hypervisor) instead of ubuntu-latest.
-    # concurrency below serialises this against capture-smoke (same box, one
-    # job at a time) and against another CI run's own sampled-overhead —
-    # timing runs must never overlap. Guarded against fork PRs (e): a fork's
-    # code must never execute on our infra.
+    #
+    # concurrency group is per-JOB-IDENTITY ("gate-box-sampled-overhead"),
+    # not a single literal "gate-box" shared with capture-smoke's 4 matrix
+    # cells. Real bug found running this for the first time: GitHub Actions'
+    # documented concurrency behavior is "any PREVIOUSLY PENDING job in the
+    # group is canceled" (not queued/retained) whenever a NEW job joins the
+    # same group while one member is already in-progress — with one literal
+    # "gate-box" group shared by 5 jobs (this one + 4 capture-smoke cells)
+    # that all become eligible at once, only the LAST one to queue survives;
+    # the other 3-4 are cancelled outright with zero duration, never running
+    # at all (observed: capture-smoke PG13/16/18 cancelled instantly,
+    # sampled-overhead and capture-smoke PG17 the only survivors). A
+    # per-job-identity group instead protects each job against a
+    # *duplicate* instance of ITSELF from a second, concurrent CI run (the
+    # actual "never overlap" this plan step asks for) without cancelling its
+    # siblings within the same run. True same-box overlap between different
+    # jobs (this vs. capture-smoke) is additionally impossible because the
+    # gate box's GitHub Actions runner service takes one job at a time by
+    # default (tests/provision-runner.sh does not pass --ephemeral or any
+    # multi-job flag), and every build/test step below additionally holds
+    # /tmp/pgwt-box-check.lock (also serialising against an agent's ad hoc
+    # `make box-check` over ssh, which concurrency groups can't see at all).
+    # Guarded against fork PRs (e): a fork's code must never execute on our
+    # infra.
     name: sampled-overhead (PG 17)
     runs-on: [self-hosted, gate-box]
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     concurrency:
-      group: gate-box
+      group: gate-box-sampled-overhead
       cancel-in-progress: false
     timeout-minutes: 60
     steps:
@@ -300,16 +320,31 @@ jobs:
     # Track D lands, flip the cell to the full assertions.
     # docs/DEV_LOOP_PLAN.md step 1: moved to the persistent gate box instead
     # of ubuntu-latest — real hardware + real kernel for the capture path
-    # every field escape to date lived in. concurrency below serialises this
-    # against sampled-overhead (same box, one job at a time) and against
-    # another CI run's own capture-smoke matrix cells — timing-sensitive
-    # capture must never share the box with a concurrent run. Guarded
-    # against fork PRs (e): a fork's code must never execute on our infra.
+    # every field escape to date lived in.
+    #
+    # concurrency group is per-JOB-IDENTITY, one per matrix cell
+    # ("gate-box-capture-smoke-<pg>"), not a single literal "gate-box"
+    # shared with sampled-overhead and the other 3 cells — see
+    # sampled-overhead's own comment above for the real bug this avoids
+    # (GitHub cancels a group's previously-PENDING job outright, without
+    # running it, the moment a new job joins the same group; sharing one
+    # group across this job's own 4 matrix cells plus sampled-overhead
+    # left only 1 of the 5 actually running, the other ~3-4 cancelled with
+    # zero duration). Each cell's group instead only protects it against a
+    # duplicate instance of ITSELF from a second, concurrent CI run,
+    # which is what "timing runs never overlap" actually needs — genuine
+    # same-box overlap between different jobs (capture-smoke vs.
+    # sampled-overhead, or between cells) is separately impossible because
+    # the gate box's runner takes one job at a time by default, and every
+    # build/test step below additionally holds /tmp/pgwt-box-check.lock
+    # (also covering an agent's ad hoc `make box-check` over ssh, which no
+    # concurrency group can see). Guarded against fork PRs (e): a fork's
+    # code must never execute on our infra.
     name: capture-smoke (PG ${{ matrix.pg }})
     runs-on: [self-hosted, gate-box]
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     concurrency:
-      group: gate-box
+      group: gate-box-capture-smoke-${{ matrix.pg }}
       cancel-in-progress: false
     strategy:
       fail-fast: false
