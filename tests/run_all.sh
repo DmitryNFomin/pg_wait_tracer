@@ -269,7 +269,12 @@ LIVE_TESTS=(
     "test_client_wait|python3|test_client_wait.py"
     "test_cpu_time|python3|test_cpu_time.py"
     "test_lwlock|python3|test_lwlock.py"
-    "test_query_event|python3|test_query_event.py"
+    # compute_query_id is a PG14+ GUC (tests/provision-runner.sh only sets it
+    # for 14+); test_query_event asserts on it directly and errors out on
+    # PG13 (empirically reproducible). PG13 query attribution itself stays
+    # covered separately by test_capture_smoke's PG13 branch (synthetic
+    # grouping keys, no compute_query_id dependency).
+    "test_query_event|python3|test_query_event.py|14"
     "test_cross_pg_wait_sampling|python3|test_cross_pg_wait_sampling.py"
     "test_event_classes|python3|test_event_classes.py"
     "test_multi_window|python3|test_multi_window.py"
