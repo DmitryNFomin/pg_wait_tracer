@@ -57,13 +57,21 @@ rsync -az --delete \
     ./ "$target:$remote_dir/" || exit 1
 
 pgarg=""; [[ -n "$PG" ]] && pgarg="--pg-version $PG"
+# Preflight (runs on the box, inside the same flock, before `make`): a
+# kernel change without re-provisioning left bpftool's dispatcher unable to
+# find a matching linux-tools package ("bpftool not found for kernel
+# 6.8.0-139") -- the vmlinux.h generation step then died with an opaque
+# Makefile error. Fail loud and self-explaining here instead.
+preflight="if ! bpftool version >/dev/null 2>&1"
+preflight="$preflight || { [ \"$OS\" = ubuntu ] && ! dpkg -s \"linux-tools-\$(uname -r)\" >/dev/null 2>&1; }"
+preflight="$preflight; then echo \"gate box needs re-provisioning after a kernel change: run tests/provision-runner.sh ubuntu on the box\"; exit 2; fi;"
 # shellcheck disable=SC2029
 # make pgwt-client: builds web/pgwt (the Go bridge) -- `make` alone (the
 # `all` target) only builds the daemon + pgwt-server. Not needed until
 # issue #93's live-UI-smoke test (tests/ui_live_smoke.sh checks for
 # web/pgwt and fails loudly if it is missing, same as the other binaries).
 ssh -o BatchMode=yes "$target" \
-    "cd '$remote_dir' && flock /tmp/pgwt-box-check.lock bash -c 'make -j\$(nproc) && make -C tests && make pgwt-client && sudo tests/run_all.sh --require-live $pgarg'" \
+    "cd '$remote_dir' && flock /tmp/pgwt-box-check.lock bash -c '$preflight make -j\$(nproc) && make -C tests && make pgwt-client && sudo tests/run_all.sh --require-live $pgarg'" \
     2>&1 | tee "$log"
 rc=${PIPESTATUS[0]}
 

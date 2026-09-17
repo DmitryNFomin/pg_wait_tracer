@@ -24,12 +24,21 @@
 # box for every run.
 #
 # Idempotent: every step is guarded so a second run is a fast no-op modulo
-# apt/PGDG metadata refresh.
+# apt/PGDG metadata refresh. MUST be re-run after any kernel change (a
+# reboot onto a new kernel, an apt/unattended upgrade that pulls one in,
+# etc.): bpftool's package (and its BTF-dependent vmlinux.h generation
+# step) is tied to the exact running `uname -r`, and a stale
+# linux-tools-<old-kernel> package makes `make` fail with an opaque
+# "bpftool not found for kernel <new>" error -- scripts/box-check.sh's own
+# preflight check now catches this and tells you to come back here.
 #
 # -e: fail loudly. A failed apt-get/pg_createcluster/pg_conftool/CREATE
 # EXTENSION/pgbench step must stop the script, not let it print
-# "provisioning complete" over a half-provisioned box. The few genuinely
-# optional commands below already have their own explicit `||` fallback.
+# "provisioning complete" over a half-provisioned box. Every command below
+# that is allowed to fail (an optional/best-effort step, or one whose
+# failure this script itself handles) has its own explicit `|| true` or
+# `||` fallback guard -- see the Playwright/Chromium/Go and ssh
+# self-trust blocks below.
 #
 # Takes the same lock scripts/box-check.sh uses (see the flock block below):
 # every run unconditionally restarts all four clusters (pg_ctlcluster ...

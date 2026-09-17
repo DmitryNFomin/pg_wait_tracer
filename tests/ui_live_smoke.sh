@@ -118,26 +118,28 @@ fi
 echo "ui_live_smoke: postmaster PID $PM_PID"
 
 # PGPORT: derive it from the RESOLVED PM_PID's own binary path (same
-# readlink/grep run_all.sh itself uses to derive PG_VERSION), not just from
-# an explicit --pg-version -- run_all.sh's LIVE_TESTS only forwards --pid,
-# so a `make box-check` run (no --pg-version passed here at all) still needs
-# a working PGPORT: without it, Debian's pg_wrapper refuses with "No
-# existing cluster is suitable as a default target" (verified on the gate
-# box) and every pgbench/psql call below fails immediately. An explicit
-# --pg-version (or a caller-exported PGPORT) always wins over the derived
-# value. PG_PORT_BASE matches run_all.sh's own convention/override
-# (PGWT_PG_PORT_BASE, default 5400; tests/provision-runner.sh).
+# readlink/grep run_all.sh itself uses to derive PG_VERSION), always -- NEVER
+# trust an ambient/inherited PGPORT (found the hard way running this exact
+# script: the gate box sets PGPORT=5418 in /etc/environment, which every ssh
+# session inherits; that silently overrode an explicit `--pg-version 13` and
+# ran the whole walk against PG18's cluster while tracing PG13's postmaster,
+# an 11/11 false failure -- precisely the "stale PGPORT silently traces one
+# cluster while the load runs against another" bug run_all.sh's own PGPORT
+# rework, commit 863f086, already fixed there for the same reason). Explicit
+# override is PGWT_PGPORT (not PGPORT), matching run_all.sh's own
+# PGWT_PGPORT/PGWT_PG_PORT_BASE convention (tests/provision-runner.sh).
 PG_PORT_BASE="${PGWT_PG_PORT_BASE:-5400}"
 if [[ -z "$PG_MAJOR" ]]; then
     PG_MAJOR=$(readlink "/proc/$PM_PID/exe" 2>/dev/null | grep -oP 'postgresql/\K\d+(?=/)' || true)
 fi
-if [[ -n "${PGPORT:-}" ]]; then
-    echo "ui_live_smoke: PGPORT=$PGPORT (inherited from the environment)"
+if [[ -n "${PGWT_PGPORT:-}" ]]; then
+    export PGPORT="$PGWT_PGPORT"
+    echo "ui_live_smoke: PGPORT=$PGPORT (caller override via PGWT_PGPORT)"
 elif [[ -n "$PG_MAJOR" ]]; then
     export PGPORT=$((PG_PORT_BASE + PG_MAJOR))
     echo "ui_live_smoke: PG major $PG_MAJOR -> PGPORT=$PGPORT (derived: PGWT_PG_PORT_BASE=$PG_PORT_BASE + PG$PG_MAJOR)"
 else
-    echo "ERROR: could not derive PG major from PID $PM_PID and no PGPORT set"
+    echo "ERROR: could not derive PG major from PID $PM_PID and no PGWT_PGPORT set"
     exit 1
 fi
 
