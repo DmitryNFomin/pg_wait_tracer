@@ -74,6 +74,30 @@ flock 9
 log "lock acquired"
 
 # ---------------------------------------------------------------------------
+# 0. Disable unattended OS upgrades. A CI gate box must NEVER change kernel
+#    or libc -- or bounce a running service -- out from under a live test:
+#    Ubuntu's unattended-upgrades fired mid `make box-check` run, installed
+#    a new kernel, and needrestart auto-restarted all four PostgreSQL
+#    clusters, producing empty captures (2026-09-17). Runs FIRST, before any
+#    apt-get call, so a freshly rebooted box has the smallest possible
+#    window where the stock timers could fire again. Idempotent: `disable`/
+#    `mask` are no-ops on an already-masked unit; the needrestart conf.d
+#    snippet is (re)written every run, not appended.
+# ---------------------------------------------------------------------------
+log "disabling + masking unattended-upgrade timers/service"
+systemctl disable --now apt-daily.timer apt-daily-upgrade.timer unattended-upgrades.service
+systemctl mask apt-daily.timer apt-daily-upgrade.timer unattended-upgrades.service
+
+log "setting needrestart to list-only mode (never auto-restart services)"
+mkdir -p /etc/needrestart/conf.d
+cat > /etc/needrestart/conf.d/99-pgwt-gate-box.conf <<'EOF'
+# pg_wait_tracer gate box: list-only, never auto-restart services.
+# needrestart auto-restarting PostgreSQL mid-capture (after an
+# unattended-upgrades kernel bump) produced empty test traces (2026-09-17).
+$nrconf{restart} = 'l';
+EOF
+
+# ---------------------------------------------------------------------------
 # 1. Build dependencies for the daemon + pgwt-server (ci.yml "Install build
 #    dependencies"), plus rsync/git/python3/procps for box-check + run_all.sh.
 # ---------------------------------------------------------------------------
