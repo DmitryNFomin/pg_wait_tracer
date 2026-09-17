@@ -81,10 +81,17 @@ log() { echo "[provision-runner] $*"; }
 export DEBIAN_FRONTEND=noninteractive
 
 # Same lock make box-check (scripts/box-check.sh) uses: the cluster restarts
-# below must not race with an in-flight box-check's live tests.
-log "waiting for /tmp/pgwt-box-check.lock"
+# below must not race with an in-flight box-check's live tests. Bounded wait
+# (not a bare `flock 9`, which blocks forever): a nested/concurrent call
+# fails loudly with a clear message instead of hanging silently until
+# whatever holds the lock finishes (a full box-check run can itself take
+# several minutes per PG version).
+log "waiting for /tmp/pgwt-box-check.lock (up to 600s)"
 exec 9>/tmp/pgwt-box-check.lock
-flock 9
+if ! flock -w 600 9; then
+    echo "FATAL: could not acquire /tmp/pgwt-box-check.lock within 600s -- another box-check or provisioning run holds it" >&2
+    exit 1
+fi
 log "lock acquired"
 
 # ---------------------------------------------------------------------------
