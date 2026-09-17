@@ -79,12 +79,11 @@
 #
 # --pg-version N: on a multi-cluster box (the gate box runs PG 13/16/17/18
 # at once, one postgres process each) this picks the postmaster via
-# testutil.sh's find_postmaster --pg-version AND exports PGPORT=5400+N so
-# every psql/pgbench call below (Debian's pg_wrapper reads PGPORT, and it
-# survives sudo) targets that exact cluster instead of whichever "postgres"
-# pgrep happens to see first. Not currently passed down by run_all.sh's
-# LIVE_TESTS (which only forwards --pid) -- pass it directly when running
-# this script by hand on a multi-cluster box.
+# testutil.sh's find_postmaster --pg-version. PGPORT (Debian's pg_wrapper
+# reads it, and it survives sudo) is derived either way, from whichever
+# postmaster PID is actually resolved (--pid, --pg-version, or the bare
+# find_postmaster fallback) -- so this also works correctly when run_all.sh's
+# LIVE_TESTS invokes this script with only --pid, e.g. via `make box-check`.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -105,11 +104,6 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-if [[ -n "$PG_MAJOR" ]]; then
-    export PGPORT=$((5400 + PG_MAJOR))
-    echo "ui_live_smoke: PG major $PG_MAJOR -> PGPORT=$PGPORT"
-fi
-
 if [[ -z "$PM_PID" ]]; then
     if [[ -n "$PG_MAJOR" ]]; then
         PM_PID=$(find_postmaster --pg-version "$PG_MAJOR")
@@ -122,6 +116,26 @@ if [[ -z "$PM_PID" ]]; then
     exit 1
 fi
 echo "ui_live_smoke: postmaster PID $PM_PID"
+
+# PGPORT: derive it from the RESOLVED PM_PID's own binary path (same
+# readlink/grep run_all.sh itself uses to derive PG_VERSION), not just from
+# an explicit --pg-version -- run_all.sh's LIVE_TESTS only forwards --pid,
+# so a `make box-check` run (no --pg-version passed here at all) still needs
+# a working PGPORT: without it, Debian's pg_wrapper refuses with "No
+# existing cluster is suitable as a default target" (verified on the gate
+# box) and every pgbench/psql call below fails immediately. An explicit
+# --pg-version (or a caller-exported PGPORT) always wins over the derived
+# value.
+if [[ -z "$PG_MAJOR" ]]; then
+    PG_MAJOR=$(readlink "/proc/$PM_PID/exe" 2>/dev/null | grep -oP 'postgresql/\K\d+(?=/)' || true)
+fi
+if [[ -n "$PG_MAJOR" ]]; then
+    export PGPORT="${PGPORT:-$((5400 + PG_MAJOR))}"
+    echo "ui_live_smoke: PG major $PG_MAJOR -> PGPORT=$PGPORT"
+elif [[ -z "${PGPORT:-}" ]]; then
+    echo "ERROR: could not derive PG major from PID $PM_PID and no PGPORT set"
+    exit 1
+fi
 
 for bin in "$TRACER" "$SERVER" "$BRIDGE"; do
     if [[ ! -x "$bin" ]]; then
