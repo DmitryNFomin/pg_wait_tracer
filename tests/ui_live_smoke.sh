@@ -117,29 +117,43 @@ if [[ -z "$PM_PID" ]]; then
 fi
 echo "ui_live_smoke: postmaster PID $PM_PID"
 
-# PGPORT: derive it from the RESOLVED PM_PID's own binary path (same
-# readlink/grep run_all.sh itself uses to derive PG_VERSION), always -- NEVER
-# trust an ambient/inherited PGPORT (found the hard way running this exact
-# script: the gate box sets PGPORT=5418 in /etc/environment, which every ssh
-# session inherits; that silently overrode an explicit `--pg-version 13` and
-# ran the whole walk against PG18's cluster while tracing PG13's postmaster,
-# an 11/11 false failure -- precisely the "stale PGPORT silently traces one
-# cluster while the load runs against another" bug run_all.sh's own PGPORT
-# rework, commit 863f086, already fixed there for the same reason). Explicit
-# override is PGWT_PGPORT (not PGPORT), matching run_all.sh's own
-# PGWT_PGPORT/PGWT_PG_PORT_BASE convention (tests/provision-runner.sh).
+# PGPORT: three tiers, mirroring run_all.sh's own derivation (commit
+# 863f086) exactly, for the same reason it exists there -- NEVER trust an
+# ambient/inherited PGPORT (found the hard way running this exact script:
+# the gate box sets PGPORT=5418 in /etc/environment, which every ssh session
+# inherits; that silently overrode an explicit `--pg-version 13` and ran the
+# whole walk against PG18's cluster while tracing PG13's postmaster, an
+# 11/11 false failure -- precisely the "stale PGPORT silently traces one
+# cluster while the load runs against another" bug).
+#   1. PGWT_PGPORT: explicit caller override, always wins.
+#   2. Line 4 of the RESOLVED PM_PID's own postmaster.pid, via
+#      /proc/$PM_PID/cwd (postmaster's CWD is its data directory) --
+#      authoritative for any layout, including a stock single-cluster host
+#      on 5432 or an RPM layout (/usr/pgsql-<N>/bin/postgres), not just this
+#      box's 54<major> convention.
+#   3. PGWT_PG_PORT_BASE + PG_MAJOR (derived from the exe path if not given
+#      via --pg-version), only if postmaster.pid can't be read.
 PG_PORT_BASE="${PGWT_PG_PORT_BASE:-5400}"
 if [[ -z "$PG_MAJOR" ]]; then
     PG_MAJOR=$(readlink "/proc/$PM_PID/exe" 2>/dev/null | grep -oP 'postgresql/\K\d+(?=/)' || true)
 fi
+PID_PORT=""
+PM_CWD=$(readlink "/proc/$PM_PID/cwd" 2>/dev/null || true)
+if [[ -n "$PM_CWD" && -f "$PM_CWD/postmaster.pid" ]]; then
+    PID_PORT=$(sed -n '4p' "$PM_CWD/postmaster.pid" 2>/dev/null || true)
+    [[ "$PID_PORT" =~ ^[0-9]+$ ]] || PID_PORT=""
+fi
 if [[ -n "${PGWT_PGPORT:-}" ]]; then
     export PGPORT="$PGWT_PGPORT"
     echo "ui_live_smoke: PGPORT=$PGPORT (caller override via PGWT_PGPORT)"
+elif [[ -n "$PID_PORT" ]]; then
+    export PGPORT="$PID_PORT"
+    echo "ui_live_smoke: PGPORT=$PGPORT (read from postmaster.pid for PID $PM_PID)"
 elif [[ -n "$PG_MAJOR" ]]; then
     export PGPORT=$((PG_PORT_BASE + PG_MAJOR))
-    echo "ui_live_smoke: PG major $PG_MAJOR -> PGPORT=$PGPORT (derived: PGWT_PG_PORT_BASE=$PG_PORT_BASE + PG$PG_MAJOR)"
+    echo "ui_live_smoke: PG major $PG_MAJOR -> PGPORT=$PGPORT (derived: PGWT_PG_PORT_BASE=$PG_PORT_BASE + PG$PG_MAJOR, postmaster.pid unreadable)"
 else
-    echo "ERROR: could not derive PG major from PID $PM_PID and no PGWT_PGPORT set"
+    echo "ERROR: could not derive PGPORT for PID $PM_PID (postmaster.pid unreadable, no PG major, no PGWT_PGPORT set)"
     exit 1
 fi
 

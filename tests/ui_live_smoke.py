@@ -551,6 +551,7 @@ def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
 
         legend_ticks = []
         blink_ratios = []
+        blink_pair_offsets_ms = []
         render_ok, render_detail = False, "never checked"
         for i in range(1, ticks + 1):
             if not _wait_for_tick(page, i, TICK_TIMEOUT_S):
@@ -608,6 +609,13 @@ def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
             now_ms = page.evaluate("Date.now()")
             if target_ms > now_ms:
                 page.wait_for_timeout(target_ms - now_ms)
+                now_ms = page.evaluate("Date.now()")
+            # issue #93 review item 3: record the ACHIEVED offset (not just
+            # the target) -- preceding work (the blind-window check,
+            # _poll_render_check's retries) can still push the real capture
+            # past 1200ms under load, silently moving the measurement window
+            # the "anchored to the tick" fix above was meant to stabilise.
+            blink_pair_offsets_ms.append(now_ms - tick_ts_ms)
 
             frame_a = _safe_panel_screenshot(page, tab_id)
             page.wait_for_timeout(120)  # same data window, before the next tick
@@ -660,7 +668,8 @@ def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
             artifacts={}, blink_threshold=blink_threshold,
             pgwt_console_errors=pgwt_errors,
             leak_before_settle_s=leak_before_settle_s,
-            leak_after_settle_s=leak_after_settle_s)
+            leak_after_settle_s=leak_after_settle_s,
+            blink_pair_offsets_ms=blink_pair_offsets_ms)
     except SmokeFailure as e:
         print(f"  FAIL [{tab_id}]: {e}", file=sys.stderr)
         result = lib.build_failed_tab_result(tab_id, str(e),

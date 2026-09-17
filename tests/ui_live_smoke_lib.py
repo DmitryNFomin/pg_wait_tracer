@@ -70,8 +70,14 @@ KNOWN_FAILING_TABS = {
     # animation:false) either. Stays listed until a run with the
     # tick-anchored settle is investigated either way.
     "timeline": 100,
-    # #101: the executions query takes > 60s to answer under sustained
-    # --mode full capture load.
+    # #101: TWO DIFFERENT symptoms observed under this name so far -- the
+    # executions query taking > 60s to answer under sustained --mode full
+    # capture load (panel never renders within the timeout), AND a run
+    # where tick 1 reported "no echarts instance" (the panel's own chart
+    # never mounted at all, a different failure shape). Recorded as one
+    # tracking issue for now, but this is a re-diagnose target, not a
+    # permanently-excused one: whoever picks up #101 needs to establish
+    # whether these are one root cause or two before calling it fixed.
     "waterfall": 101,
 }
 
@@ -222,7 +228,8 @@ def build_tab_result(tab_id, rendered_ok, rendered_detail, ticks_observed,
                       leak_before, leak_after, artifacts,
                       blink_threshold=BLINK_THRESHOLD,
                       pgwt_console_errors=(),
-                      leak_before_settle_s=None, leak_after_settle_s=None):
+                      leak_before_settle_s=None, leak_after_settle_s=None,
+                      blink_pair_offsets_ms=()):
     """Assembles one tab's verdict. Pure: every input is already-collected
     data, no page access.
 
@@ -238,7 +245,15 @@ def build_tab_result(tab_id, rendered_ok, rendered_detail, ticks_observed,
     leak_before_settle_s/leak_after_settle_s: how long the leak probe took to
     settle (issue #93 fail-safe/correctness review item 6) -- a 25s response
     is itself a latency regression worth a trace even though it does not, by
-    itself, fail no_leak."""
+    itself, fail no_leak.
+
+    blink_pair_offsets_ms: per-tick `now_ms - tick_ts_ms` when frame_a of the
+    blink pair was actually captured (issue #93 review item 3) -- the 1200ms
+    settle is anchored to the tick's own timestamp, but preceding work (the
+    blind-window check, _poll_render_check's retry loop) can still push the
+    actual capture past the 1200ms target under load. Recorded, not
+    enforced: makes any future overrun of the anchor visible in
+    summary.json instead of silent."""
     clean_ok = len(console_errors) == 0
     blink_ok = no_blink_ok(blink_ratio, blink_threshold)
     leak_ok = leak_probe_ok(leak_before) and leak_probe_ok(leak_after)
@@ -254,7 +269,8 @@ def build_tab_result(tab_id, rendered_ok, rendered_detail, ticks_observed,
         "clean": {"ok": clean_ok, "console_errors": list(console_errors)[:10],
                   "pgwt_errors": list(pgwt_console_errors)[:10]},
         "no_blink": {"ok": blink_ok, "ratio": blink_ratio,
-                     "threshold": blink_threshold},
+                     "threshold": blink_threshold,
+                     "pair_offsets_ms": list(blink_pair_offsets_ms)},
         "color_stability": {"ok": color_ok, "violations": color_violations},
         "no_leak": {"ok": leak_ok, "before": leak_before, "after": leak_after,
                     "settle_s": {"before": leak_before_settle_s,
@@ -280,7 +296,8 @@ def build_failed_tab_result(tab_id, reason, ticks_observed=0, artifacts=None,
         "rendered": {"ok": False, "detail": reason},
         "clean": {"ok": None, "console_errors": [],
                   "pgwt_errors": list(pgwt_console_errors)[:10]},
-        "no_blink": {"ok": None, "ratio": None, "threshold": BLINK_THRESHOLD},
+        "no_blink": {"ok": None, "ratio": None, "threshold": BLINK_THRESHOLD,
+                     "pair_offsets_ms": []},
         "color_stability": {"ok": None, "violations": []},
         "no_leak": {"ok": None, "before": None, "after": None,
                     "settle_s": {"before": None, "after": None}},

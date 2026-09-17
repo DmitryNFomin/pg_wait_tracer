@@ -301,6 +301,39 @@ def test_build_tab_result_records_leak_settle_duration():
           f"leak-probe settle durations are recorded per tab ({r['no_leak']['settle_s']})")
 
 
+def test_build_tab_result_records_blink_pair_offsets():
+    # issue #93 review item 3: the achieved blink-pair capture offset
+    # (now_ms - tick_ts_ms) per tick must be visible in summary.json, so a
+    # future overrun of the 1200ms tick-anchored settle is not silent.
+    r = lib.build_tab_result(
+        "timeline", True, "ok:8", ticks_observed=6, console_errors=[],
+        blink_ratio=0.0, color_violations=[],
+        leak_before={"charts": 1, "uplots": 1, "pending": 0},
+        leak_after={"charts": 1, "uplots": 1, "pending": 0},
+        artifacts={}, blink_pair_offsets_ms=[1201, 1198, 1350, 1199, 1205, 1200])
+    check(r["no_blink"]["pair_offsets_ms"] == [1201, 1198, 1350, 1199, 1205, 1200],
+          f"per-tick achieved blink-pair offsets recorded ({r['no_blink']['pair_offsets_ms']})")
+    check(r["ok"] is True,
+          "an occasional overrun (1350ms here) is visible, not itself a failure")
+
+
+def test_build_tab_result_blink_pair_offsets_default_empty():
+    r = lib.build_tab_result(
+        "overview", True, "ok:8", ticks_observed=6, console_errors=[],
+        blink_ratio=0.0, color_violations=[],
+        leak_before={"charts": 1, "uplots": 1, "pending": 0},
+        leak_after={"charts": 1, "uplots": 1, "pending": 0},
+        artifacts={})
+    check(r["no_blink"]["pair_offsets_ms"] == [],
+          "blink_pair_offsets_ms defaults to an empty list, not missing/None")
+
+
+def test_build_failed_tab_result_pair_offsets_empty():
+    r = lib.build_failed_tab_result("waterfall", "panel did not render within 60s")
+    check(r["no_blink"]["pair_offsets_ms"] == [],
+          "a tab that never reached the tick loop has no offsets to report")
+
+
 def test_build_failed_tab_result_records_pgwt_errors():
     r = lib.build_failed_tab_result(
         "waterfall", "panel did not render within 60s",

@@ -103,11 +103,15 @@ log "lock acquired"
 #    apt-get call, so a freshly rebooted box has the smallest possible
 #    window where the stock timers could fire again. Idempotent: `disable`/
 #    `mask` are no-ops on an already-masked unit; the needrestart conf.d
-#    snippet is (re)written every run, not appended.
+#    snippet is (re)written every run, not appended. `|| true` on both: under
+#    `set -e`, a second run (units already masked) or an image that never
+#    shipped unattended-upgrades.service at all makes systemctl exit
+#    non-zero, which would otherwise abort provisioning at step one --
+#    exactly the idempotence this comment promises.
 # ---------------------------------------------------------------------------
 log "disabling + masking unattended-upgrade timers/service"
-systemctl disable --now apt-daily.timer apt-daily-upgrade.timer unattended-upgrades.service
-systemctl mask apt-daily.timer apt-daily-upgrade.timer unattended-upgrades.service
+systemctl disable --now apt-daily.timer apt-daily-upgrade.timer unattended-upgrades.service || true
+systemctl mask apt-daily.timer apt-daily-upgrade.timer unattended-upgrades.service || true
 
 log "setting needrestart to list-only mode (never auto-restart services)"
 mkdir -p /etc/needrestart/conf.d
@@ -312,7 +316,11 @@ touch "$HOME/.ssh/known_hosts"
 for h in localhost 127.0.0.1; do
     if ! ssh-keygen -F "$h" -f "$HOME/.ssh/known_hosts" >/dev/null 2>&1; then
         log "adding $h to known_hosts"
-        ssh-keyscan -H "$h" >> "$HOME/.ssh/known_hosts" 2>/dev/null
+        # || true: the BatchMode ssh check right below this loop is the real
+        # guard -- if ssh-keyscan hiccups (e.g. sshd not answering yet) and
+        # leaves known_hosts short, that check fails loudly with its own
+        # FATAL message instead of this line aborting provisioning under -e.
+        ssh-keyscan -H "$h" >> "$HOME/.ssh/known_hosts" 2>/dev/null || true
     fi
 done
 chmod 600 "$HOME/.ssh/known_hosts"
