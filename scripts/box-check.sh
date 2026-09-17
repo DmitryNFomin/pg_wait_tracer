@@ -58,8 +58,12 @@ rsync -az --delete \
 
 pgarg=""; [[ -n "$PG" ]] && pgarg="--pg-version $PG"
 # shellcheck disable=SC2029
+# make pgwt-client: builds web/pgwt (the Go bridge) -- `make` alone (the
+# `all` target) only builds the daemon + pgwt-server. Not needed until
+# issue #93's live-UI-smoke test (tests/ui_live_smoke.sh checks for
+# web/pgwt and fails loudly if it is missing, same as the other binaries).
 ssh -o BatchMode=yes "$target" \
-    "cd '$remote_dir' && flock /tmp/pgwt-box-check.lock bash -c 'make -j\$(nproc) && make -C tests && sudo tests/run_all.sh --require-live $pgarg'" \
+    "cd '$remote_dir' && flock /tmp/pgwt-box-check.lock bash -c 'make -j\$(nproc) && make -C tests && make pgwt-client && sudo tests/run_all.sh --require-live $pgarg'" \
     2>&1 | tee "$log"
 rc=${PIPESTATUS[0]}
 
