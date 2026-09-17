@@ -499,6 +499,10 @@ def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
             # on every live-tick setOption(), and catching that mid-transition
             # is measuring the WRONG window, not a real per-tick instability.
             # 1200ms is comfortably past ECharts' default animationDuration.
+            # Filed as issue #102 (animation:false for these builders, a
+            # separate web/static/views/*.js change); once it lands this
+            # settle can shrink back down to ~tick latency (a couple hundred
+            # ms) instead of covering a whole animated transition.
             page.wait_for_timeout(1200)
 
             frame_a = _safe_panel_screenshot(page, tab_id)
@@ -616,7 +620,8 @@ def main():
                                      args.ticks, args.first_data_timeout,
                                      args.blink_threshold)
                     results.append(result)
-                    status = "PASS" if result["ok"] else "FAIL"
+                    kf_line = lib.known_failing_report_line(tab_id, result["ok"])
+                    status = kf_line if kf_line else ("PASS" if result["ok"] else "FAIL")
                     print(f"  {status} [{tab_id}] "
                           f"ticks={result['ticks_observed']} "
                           f"rendered={result['rendered']}")
@@ -635,11 +640,17 @@ def main():
     print("════════════════════════════════════════")
     for tab_id in lib.TABS:
         r = summary["tabs"].get(tab_id)
-        print(f"  {'PASS' if r and r['ok'] else 'FAIL':4s} {tab_id}")
+        kf_line = lib.known_failing_report_line(tab_id, r["ok"]) if r else None
+        label = kf_line if kf_line else ("PASS" if r and r["ok"] else "FAIL")
+        print(f"  {label} {tab_id}")
     print(f"  summary: {summary_path}")
     print(f"  overall: {'PASS' if summary['ok'] else 'FAIL'}"
           + (f" (failed: {', '.join(summary['failed_tabs'])})"
-             if summary["failed_tabs"] else ""))
+             if summary["failed_tabs"] else "")
+          + (f" (known-failing: {', '.join(summary['known_failing_tabs'])})"
+             if summary["known_failing_tabs"] else "")
+          + (f" (xpass: {', '.join(summary['xpass_tabs'])})"
+             if summary["xpass_tabs"] else ""))
 
     return 0 if summary["ok"] else 1
 

@@ -282,6 +282,97 @@ def test_build_failed_tab_result():
           "a failed-to-check tab fails the overall summary too")
 
 
+def test_known_failing_tabs_pinned():
+    # Owner-filed tracking issues (#100 Timeline, #101 Waterfall) -- pinned
+    # exactly so nothing else quietly gets added to this dict.
+    check(lib.KNOWN_FAILING_TABS == {"timeline": 100, "waterfall": 101},
+          f"KNOWN_FAILING_TABS is exactly {{'timeline': 100, 'waterfall': 101}} "
+          f"(got {lib.KNOWN_FAILING_TABS})")
+
+
+def test_known_failing_issue():
+    check(lib.known_failing_issue("timeline") == 100, "timeline -> issue #100")
+    check(lib.known_failing_issue("waterfall") == 101, "waterfall -> issue #101")
+    check(lib.known_failing_issue("overview") is None,
+          "an unlisted tab has no known-failing issue")
+
+
+def test_known_failing_report_line():
+    check(lib.known_failing_report_line("overview", False) is None,
+          "an unlisted tab never gets a known-failing report line")
+    fail_line = lib.known_failing_report_line("timeline", False)
+    check(fail_line == "KNOWN-FAILING (issue #100)",
+          f"a listed tab's real failure reports KNOWN-FAILING ({fail_line!r})")
+    pass_line = lib.known_failing_report_line("waterfall", True)
+    check(pass_line == "UNEXPECTED PASS (issue #101) -- intermittent or fixed; check the issue",
+          f"a listed tab's real pass reports UNEXPECTED PASS ({pass_line!r})")
+
+
+def test_build_tab_result_known_failing_does_not_fail_summary():
+    # Timeline (#100) actually failing (raw ok=False): excused from the
+    # overall verdict, but the raw failure and the known_failing flag are
+    # both visible in the tab's own record.
+    r = lib.build_tab_result(
+        "timeline", True, "ok:1", 6, [], 0.05, [],  # 5% blink -> raw fail
+        {"charts": 1, "uplots": 1, "pending": 0},
+        {"charts": 1, "uplots": 1, "pending": 0}, {})
+    check(r["ok"] is False, "the raw per-tab result still says what really happened")
+    check(r["known_failing"] is True and r["xpass"] is False,
+          f"a real failure on a listed tab is known_failing, not xpass ({r})")
+    s = lib.build_summary([r])
+    check(s["ok"] is True and s["failed_tabs"] == [] and
+          s["known_failing_tabs"] == ["timeline"],
+          f"a known-failing tab's real failure does not fail the summary ({s})")
+
+
+def test_build_tab_result_xpass_does_not_fail_summary_either():
+    # Waterfall (#101) happening to pass this run: reported as xpass, not
+    # silently absorbed, but STILL does not fail the run (unlike
+    # run_all.sh's test-level KNOWN_FAILING, where an unexpected pass IS a
+    # failure -- a single real-daemon run passing isn't proof an
+    # intermittent bug is fixed).
+    r = lib.build_tab_result(
+        "waterfall", True, "ok:1", 6, [], 0.0, [],
+        {"charts": 1, "uplots": 1, "pending": 0},
+        {"charts": 1, "uplots": 1, "pending": 0}, {})
+    check(r["ok"] is True and r["xpass"] is True and r["known_failing"] is False,
+          f"a real pass on a listed tab is xpass, not known_failing ({r})")
+    s = lib.build_summary([r])
+    check(s["ok"] is True and s["xpass_tabs"] == ["waterfall"],
+          f"an xpass tab does not fail the summary either ({s})")
+
+
+def test_build_failed_tab_result_known_failing():
+    # The actual issue #101 shape: waterfall's executions query exceeds the
+    # 60s no-data budget, going through build_failed_tab_result, not
+    # build_tab_result.
+    r = lib.build_failed_tab_result(
+        "waterfall", "panel did not render ('#waterfall-chart canvas') within 60s")
+    check(r["known_failing"] is True and r["ok"] is False,
+          f"a could-not-check known-failing tab is still known_failing ({r})")
+    s = lib.build_summary([r])
+    check(s["ok"] is True, "a known-failing could-not-check tab does not fail the summary")
+
+
+def test_known_failing_does_not_affect_unlisted_tabs():
+    r = lib.build_tab_result(
+        "overview", True, "ok:1", 6, [], 0.0, [],
+        {"charts": 1, "uplots": 1, "pending": 0},
+        {"charts": 1, "uplots": 1, "pending": 0}, {})
+    check(r["known_failing"] is False and r["xpass"] is False,
+          "an unlisted tab always has known_failing=False, xpass=False")
+
+
+def test_build_summary_mixed_known_failing_and_real_failure():
+    # A KNOWN_FAILING tab failing must not mask a genuine, unlisted failure.
+    known = lib.build_failed_tab_result("timeline", "blink 4.46%")
+    real_fail = lib.build_failed_tab_result("overview", "no rows")
+    s = lib.build_summary([known, real_fail])
+    check(s["ok"] is False and s["failed_tabs"] == ["overview"] and
+          s["known_failing_tabs"] == ["timeline"],
+          f"a real failure still fails the summary alongside an excused one ({s})")
+
+
 def test_write_summary_roundtrip():
     import json
     with tempfile.TemporaryDirectory() as d:
@@ -325,6 +416,14 @@ TESTS = [
     test_build_summary_ok_requires_every_tab,
     test_build_summary_empty_is_not_ok,
     test_build_failed_tab_result,
+    test_known_failing_tabs_pinned,
+    test_known_failing_issue,
+    test_known_failing_report_line,
+    test_build_tab_result_known_failing_does_not_fail_summary,
+    test_build_tab_result_xpass_does_not_fail_summary_either,
+    test_build_failed_tab_result_known_failing,
+    test_known_failing_does_not_affect_unlisted_tabs,
+    test_build_summary_mixed_known_failing_and_real_failure,
     test_write_summary_roundtrip,
 ]
 

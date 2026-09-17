@@ -42,6 +42,11 @@
 # bar for them specifically. Full mode is what makes today's evidence run
 # actually exercise all 11 tabs with real data.
 #
+# RATIFIED (2026-09-17, lead): --mode full stays -- this test's job is to
+# exercise every panel, and full is the only mode that feeds them all. The
+# tiered+escalation USDT question above is being raised with the owner
+# separately as its own decision, independent of this test.
+#
 # Requirements (gate box, tests/provision-runner.sh):
 #   - root, a running PostgreSQL with pg_stat_statements preloaded.
 #   - Playwright + Chromium installed for the box's python3 (same package

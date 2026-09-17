@@ -47,6 +47,26 @@ FIRST_DATA_TIMEOUT_S = 60
 # passed by tests/ui_live_smoke.sh.
 BLINK_THRESHOLD = 0.001  # 0.1%
 
+# KNOWN_FAILING_TABS: tab name -> tracking issue number. ONLY for a tab that
+# reproduces a real, filed product bug (issue #100, #101) -- never for timing
+# or runner noise; a noisy tab is investigated, never silenced here (see also
+# CLAUDE.md's Rules / tests/run_all.sh's KNOWN_FAILING, the same mechanism).
+#
+# A listed tab still runs every check and keeps its artifacts. Unlike
+# run_all.sh's KNOWN_FAILING (where an UNEXPECTED PASS counts as a failure,
+# because a deterministic test passing once is real evidence the bug is
+# fixed), a single real-daemon run passing is NOT strong evidence an
+# intermittent product bug is gone -- so here neither a failure nor an
+# unexpected pass fails the overall run; both are reported loudly
+# (`known_failing`/`xpass` on the tab, `KNOWN-FAILING (issue #N)` /
+# `UNEXPECTED PASS (issue #N) -- intermittent or fixed; check the issue` in
+# the driver's output) so a human decides when to delist a tab, not a single
+# green run.
+KNOWN_FAILING_TABS = {
+    "timeline": 100,   # #100: no_blink ratio 4.46% (missing animation:false, #102)
+    "waterfall": 101,  # #101: executions query > 60s under sustained full-mode load
+}
+
 
 def png_bytes_to_array(data):
     """Decode in-memory PNG bytes (e.g. Playwright's page.screenshot()
@@ -145,6 +165,39 @@ def render_check_ok(result):
     return False, f"unexpected render-check result: {result!r}"
 
 
+def known_failing_issue(tab_id):
+    """The tracking issue number if tab_id is listed in KNOWN_FAILING_TABS,
+    else None."""
+    return KNOWN_FAILING_TABS.get(tab_id)
+
+
+def known_failing_report_line(tab_id, raw_ok):
+    """The KNOWN-FAILING / UNEXPECTED PASS line for a listed tab, given its
+    RAW (unadjusted) pass/fail; None if tab_id is not listed. raw_ok=False
+    (the expected case) -> "KNOWN-FAILING (issue #N)"; raw_ok=True (the run
+    happened not to reproduce it) -> the UNEXPECTED PASS line -- printed
+    loudly either way, per KNOWN_FAILING_TABS's doc comment, but never
+    fails the run by itself (see _apply_known_failing)."""
+    issue = known_failing_issue(tab_id)
+    if issue is None:
+        return None
+    if raw_ok:
+        return f"UNEXPECTED PASS (issue #{issue}) -- intermittent or fixed; check the issue"
+    return f"KNOWN-FAILING (issue #{issue})"
+
+
+def _apply_known_failing(result):
+    """Tags a tab result dict with known_failing/xpass per KNOWN_FAILING_TABS.
+    `ok` is left as the RAW (real) pass/fail -- summary.json always tells the
+    truth about what actually happened; build_summary is what excuses a
+    listed tab's raw failure (or unexpected pass) from the OVERALL verdict."""
+    issue = known_failing_issue(result["tab"])
+    raw_ok = result["ok"]
+    result["known_failing"] = bool(issue is not None and not raw_ok)
+    result["xpass"] = bool(issue is not None and raw_ok)
+    return result
+
+
 def build_tab_result(tab_id, rendered_ok, rendered_detail, ticks_observed,
                       console_errors, blink_ratio, color_violations,
                       leak_before, leak_after, artifacts,
@@ -158,7 +211,7 @@ def build_tab_result(tab_id, rendered_ok, rendered_detail, ticks_observed,
     ticks_ok = ticks_observed >= MIN_TICKS
     ok = (rendered_ok and clean_ok and blink_ok and leak_ok and color_ok and
           ticks_ok)
-    return {
+    result = {
         "tab": tab_id,
         "ok": ok,
         "ticks_observed": ticks_observed,
@@ -170,6 +223,7 @@ def build_tab_result(tab_id, rendered_ok, rendered_detail, ticks_observed,
         "no_leak": {"ok": leak_ok, "before": leak_before, "after": leak_after},
         "artifacts": artifacts,
     }
+    return _apply_known_failing(result)
 
 
 def build_failed_tab_result(tab_id, reason, ticks_observed=0, artifacts=None):
@@ -177,8 +231,9 @@ def build_failed_tab_result(tab_id, reason, ticks_observed=0, artifacts=None):
     checks (e.g. the 60s no-data fail-safe fired, or navigation raised).
     Kept separate from build_tab_result so a genuine "checked and failed"
     result is never confused with "could not even check" -- both fail the
-    tab (and the run), but the JSON says which happened."""
-    return {
+    tab (and, unless known-failing-listed, the run), but the JSON says which
+    happened."""
+    result = {
         "tab": tab_id,
         "ok": False,
         "ticks_observed": ticks_observed,
@@ -190,15 +245,26 @@ def build_failed_tab_result(tab_id, reason, ticks_observed=0, artifacts=None):
         "no_leak": {"ok": None, "before": None, "after": None},
         "artifacts": artifacts or {},
     }
+    return _apply_known_failing(result)
 
 
 def build_summary(tab_results):
-    """Assembles the top-level tests/results/ui_live/summary.json payload."""
-    ok = len(tab_results) > 0 and all(t["ok"] for t in tab_results)
+    """Assembles the top-level tests/results/ui_live/summary.json payload.
+    `ok` reflects only unlisted tabs (or listed tabs that happened to pass):
+    a KNOWN_FAILING_TABS tab's raw failure -- or unexpected pass -- never
+    flips the overall verdict; `tabs[*].known_failing`/`xpass` (and the
+    driver's printed KNOWN-FAILING/UNEXPECTED PASS lines) are how that stays
+    visible instead of silent."""
+    excused = [t["tab"] for t in tab_results if t.get("known_failing")]
+    failed_tabs = [t["tab"] for t in tab_results
+                   if not t["ok"] and not t.get("known_failing")]
+    ok = len(tab_results) > 0 and len(failed_tabs) == 0
     return {
         "ok": ok,
         "tabs": {t["tab"]: t for t in tab_results},
-        "failed_tabs": [t["tab"] for t in tab_results if not t["ok"]],
+        "failed_tabs": failed_tabs,
+        "known_failing_tabs": excused,
+        "xpass_tabs": [t["tab"] for t in tab_results if t.get("xpass")],
     }
 
 
