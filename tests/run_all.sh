@@ -55,6 +55,38 @@ passed=0
 failed=0
 skipped=0
 excluded=0
+known_failing=0
+
+# KNOWN_FAILING: test name -> tracking issue number. ONLY for a test that
+# reproduces a real, filed product bug (e.g. #97, #98) — never for timing or
+# runner noise; a noisy test gets moved to a different tier or investigated,
+# it is never silenced here (see also CLAUDE.md's Rules).
+#
+# A listed test still runs in full, every time. If it fails, that is
+# expected: printed loudly as "KNOWN-FAILING (issue #N)" and counted in its
+# own known_failing bucket, not as a failure, so the gate stays green for
+# unrelated PRs without hiding the bug. If it PASSES, that is unexpected:
+# printed as "UNEXPECTED PASS (issue #N) — remove from KNOWN_FAILING" and
+# counted as a FAILURE — so a fixed bug cannot rot in this list forever.
+KNOWN_FAILING=(
+    "test_multi_window|97"
+    "test_daemon_server|98"
+)
+
+# known_failing_issue NAME — prints the tracking issue number and returns 0
+# if NAME is listed in KNOWN_FAILING, else returns 1 with no output.
+known_failing_issue() {
+    local target="$1"
+    local entry name issue
+    for entry in "${KNOWN_FAILING[@]}"; do
+        IFS='|' read -r name issue <<< "$entry"
+        if [[ "$name" == "$target" ]]; then
+            echo "$issue"
+            return 0
+        fi
+    done
+    return 1
+}
 
 run_test() {
     local name="$1"
@@ -63,7 +95,16 @@ run_test() {
     echo "════════════════════════════════════════"
     echo "  $name"
     echo "════════════════════════════════════════"
-    if "$@"; then
+    local issue
+    if issue=$(known_failing_issue "$name"); then
+        if "$@"; then
+            echo "  UNEXPECTED PASS (issue #$issue) — remove from KNOWN_FAILING"
+            failed=$((failed + 1))
+        else
+            echo "  KNOWN-FAILING (issue #$issue)"
+            known_failing=$((known_failing + 1))
+        fi
+    elif "$@"; then
         passed=$((passed + 1))
     else
         failed=$((failed + 1))
@@ -328,9 +369,9 @@ echo ""
 echo "════════════════════════════════════════"
 echo "  SUMMARY"
 echo "════════════════════════════════════════"
-total=$((passed + failed + skipped + excluded))
-executed=$((passed + failed))
-echo "  Executed: $executed (passed $passed, failed $failed), skipped $skipped, excluded $excluded, total $total"
+total=$((passed + failed + skipped + excluded + known_failing))
+executed=$((passed + failed + known_failing))
+echo "  Executed: $executed (passed $passed, failed $failed, known-failing $known_failing), skipped $skipped, excluded $excluded, total $total"
 if [[ $REQUIRE_LIVE -eq 1 ]]; then
     echo "  Mode:     --require-live (live-section skips counted as failures)"
 fi
