@@ -124,19 +124,52 @@ jobs:
     # The fixed budget is 21 primary plus at most 21 confirmation pairs; the
     # 60-minute timeout leaves headroom above a conservative 40-minute budget.
     # Deterministic lifecycle/resolver tests retain implementation invariants.
+    #
+    # docs/DEV_LOOP_PLAN.md step 1: moved to the persistent gate box (real
+    # hardware, no noisy-neighbour hypervisor) instead of ubuntu-latest.
+    # concurrency below serialises this against capture-smoke (same box, one
+    # job at a time) and against another CI run's own sampled-overhead —
+    # timing runs must never overlap. Guarded against fork PRs (e): a fork's
+    # code must never execute on our infra.
     name: sampled-overhead (PG 17)
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, gate-box]
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    concurrency:
+      group: gate-box
+      cancel-in-progress: false
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+
+      - name: Record start time (for wall-time measurement)
+        id: start_time
+        run: echo "epoch=$(date +%s)" >> "$GITHUB_OUTPUT"
 
       - name: Record runner capacity
         run: |
           nproc
           grep -m1 'model name' /proc/cpuinfo || true
 
-      - name: Install build dependencies
+      # tests/provision-runner.sh writes this marker once the gate box has
+      # build deps + bpftool + PostgreSQL 13/16/17/18 already installed and
+      # running on ports 5413/5416/5417/5418 — skip reinstalling/reconfiguring
+      # PostgreSQL and reuse that cluster directly. Any self-hosted,gate-box
+      # runner WITHOUT the marker (not expected today — one runner exists)
+      # falls back to the original hosted-runner install-from-scratch path.
+      - name: Detect pre-provisioned gate box
+        id: gate_box
         run: |
+          if [ -f /etc/pgwt-gate-box ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install build dependencies
+        if: steps.gate_box.outputs.present != 'true'
+        run: |
+          exec 9>/tmp/pgwt-box-check.lock
+          flock 9
           sudo apt-get update
           sudo apt-get install -y clang llvm libbpf-dev libelf-dev \
             zlib1g-dev liblz4-dev linux-tools-common
@@ -153,7 +186,10 @@ jobs:
           test -r /sys/kernel/btf/vmlinux
 
       - name: Install PostgreSQL 17 (PGDG apt)
+        if: steps.gate_box.outputs.present != 'true'
         run: |
+          exec 9>/tmp/pgwt-box-check.lock
+          flock 9
           set -x
           sudo systemctl stop postgresql || true
           sudo apt-get install -y postgresql-common
@@ -164,7 +200,10 @@ jobs:
           sudo apt-get install -y postgresql-17 postgresql-contrib-17
 
       - name: Configure PostgreSQL 17
+        if: steps.gate_box.outputs.present != 'true'
         run: |
+          exec 9>/tmp/pgwt-box-check.lock
+          flock 9
           set -ex
           if ! pg_lsclusters -h | awk '$1 == 17 && $2 == "main"' | grep -q .; then
             sudo pg_createcluster 17 main
@@ -178,12 +217,28 @@ jobs:
           psql -U postgres -d postgres -c \
             "CREATE EXTENSION IF NOT EXISTS pg_stat_statements"
           psql -U postgres -d postgres -tAc "SELECT version()"
+          echo "SO_PGPORT=5432" >> "$GITHUB_ENV"
+
+      # Gate box already has PG17 on port 5417 (provision-runner.sh); no
+      # install/config step ran above, so resolve BPFTOOL and the port here.
+      - name: Resolve gate-box PostgreSQL port + bpftool
+        if: steps.gate_box.outputs.present == 'true'
+        run: |
+          command -v bpftool >/dev/null || { echo "FATAL: bpftool not on PATH on the gate box" >&2; exit 1; }
+          echo "BPFTOOL=$(command -v bpftool)" >> "$GITHUB_ENV"
+          echo "SO_PGPORT=5417" >> "$GITHUB_ENV"
+          psql -U postgres -h /var/run/postgresql -p 5417 -d postgres -tAc "SELECT version()"
 
       - name: Build tracer
-        run: make
+        run: |
+          exec 9>/tmp/pgwt-box-check.lock
+          flock 9
+          make
 
       - name: Run sampled-overhead structural unit gates
         run: |
+          exec 9>/tmp/pgwt-box-check.lock
+          flock 9
           make -C tests test_exact_probe test_pgss_resolver test_query_text
           tests/test_exact_probe
           tests/test_pgss_resolver
@@ -191,11 +246,13 @@ jobs:
 
       - name: Gate paired sampled overhead
         run: |
+          exec 9>/tmp/pgwt-box-check.lock
+          flock 9
           PM_PID=$(sudo head -1 /var/lib/postgresql/17/main/postmaster.pid)
           sudo env "PATH=/usr/lib/postgresql/17/bin:$PATH" \
             "BPFTOOL=$BPFTOOL" \
             python3 tests/sampled_overhead_gate.py \
-              --pid "$PM_PID" --pg-version 17 --port 5432 \
+              --pid "$PM_PID" --pg-version 17 --port "$SO_PGPORT" \
               --reps 7 --confirm-reps 7 --duration 10 --warmup 2 \
               --clients 4 --jobs 4 --scale 10 \
               --high-cardinality-shapes 256 --min-distinct-shapes 231 \
@@ -210,6 +267,17 @@ jobs:
           name: sampled-overhead
           path: sampled-overhead.json
           if-no-files-found: warn
+
+      # Not a gate — informational only (e): reports wall time against the
+      # dev-loop plan's 15-minute target; never fails the job.
+      - name: Report sampled-overhead wall time
+        if: always()
+        run: |
+          END=$(date +%s)
+          START=${{ steps.start_time.outputs.epoch }}
+          DUR=$((END - START))
+          echo "sampled-overhead job wall time: ${DUR}s ($((DUR / 60))m $((DUR % 60))s) — plan target: under 900s (15m)" \
+            | tee -a "$GITHUB_STEP_SUMMARY"
 
   capture-smoke:
     # Phase T0 (Trust Milestone, TST-1/2): run the REAL capture path against
@@ -230,8 +298,19 @@ jobs:
     # fail-safe contract instead — the tracer must REFUSE loudly, never
     # trace garbage (verified empirically: it exits with a FATAL). When
     # Track D lands, flip the cell to the full assertions.
+    # docs/DEV_LOOP_PLAN.md step 1: moved to the persistent gate box instead
+    # of ubuntu-latest — real hardware + real kernel for the capture path
+    # every field escape to date lived in. concurrency below serialises this
+    # against sampled-overhead (same box, one job at a time) and against
+    # another CI run's own capture-smoke matrix cells — timing-sensitive
+    # capture must never share the box with a concurrent run. Guarded
+    # against fork PRs (e): a fork's code must never execute on our infra.
     name: capture-smoke (PG ${{ matrix.pg }})
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, gate-box]
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    concurrency:
+      group: gate-box
+      cancel-in-progress: false
     strategy:
       fail-fast: false
       matrix:
@@ -239,8 +318,27 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install build dependencies
+      # tests/provision-runner.sh writes this marker once the gate box has
+      # build deps + bpftool + PostgreSQL 13/16/17/18 already installed and
+      # running on ports 5413/5416/5417/5418 — skip reinstalling/
+      # reconfiguring PostgreSQL and reuse that cluster directly. Any
+      # self-hosted,gate-box runner WITHOUT the marker (not expected today —
+      # one runner exists) falls back to the original hosted-runner
+      # install-from-scratch path.
+      - name: Detect pre-provisioned gate box
+        id: gate_box
         run: |
+          if [ -f /etc/pgwt-gate-box ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install build dependencies
+        if: steps.gate_box.outputs.present != 'true'
+        run: |
+          exec 9>/tmp/pgwt-box-check.lock
+          flock 9
           sudo apt-get update
           sudo apt-get install -y clang llvm libbpf-dev libelf-dev \
             zlib1g-dev liblz4-dev linux-tools-common
@@ -259,7 +357,10 @@ jobs:
           test -r /sys/kernel/btf/vmlinux
 
       - name: Install PostgreSQL ${{ matrix.pg }} (PGDG apt)
+        if: steps.gate_box.outputs.present != 'true'
         run: |
+          exec 9>/tmp/pgwt-box-check.lock
+          flock 9
           set -x
           V=${{ matrix.pg }}
           # Stop and drop any preinstalled clusters so ours owns port 5432.
@@ -280,7 +381,10 @@ jobs:
           sudo apt-get install -y "postgresql-$V" "postgresql-contrib-$V"
 
       - name: Configure + start PostgreSQL ${{ matrix.pg }}
+        if: steps.gate_box.outputs.present != 'true'
         run: |
+          exec 9>/tmp/pgwt-box-check.lock
+          flock 9
           set -ex
           V=${{ matrix.pg }}
           # The postgresql-$V package auto-creates cluster "main" unless one
@@ -303,21 +407,44 @@ jobs:
           sudo pg_ctlcluster "$V" main start
           psql -U postgres -d postgres -c "CREATE EXTENSION IF NOT EXISTS pg_stat_statements"
           psql -U postgres -d postgres -tAc "SELECT version()"
+          echo "CS_PGPORT=5432" >> "$GITHUB_ENV"
+
+      # Gate box already has PG${{ matrix.pg }} on port 54${{ matrix.pg }}
+      # (tests/provision-runner.sh); no install/config step ran above, so
+      # resolve BPFTOOL and the port here instead.
+      - name: Resolve gate-box PostgreSQL port + bpftool
+        if: steps.gate_box.outputs.present == 'true'
+        run: |
+          V=${{ matrix.pg }}
+          command -v bpftool >/dev/null || { echo "FATAL: bpftool not on PATH on the gate box" >&2; exit 1; }
+          echo "BPFTOOL=$(command -v bpftool)" >> "$GITHUB_ENV"
+          echo "CS_PGPORT=54${V}" >> "$GITHUB_ENV"
+          psql -U postgres -h /var/run/postgresql -p "54${V}" -d postgres -tAc "SELECT version()"
 
       - name: Build (BPF tracer + pgwt-server)
-        run: make
+        run: |
+          exec 9>/tmp/pgwt-box-check.lock
+          flock 9
+          make
 
       - name: Run capture smoke (tiered hard; full if watchpoints available)
         run: |
+          exec 9>/tmp/pgwt-box-check.lock
+          flock 9
           V=${{ matrix.pg }}
           # PG16 = unsupported version: assert the loud-refusal contract.
           FLAGS=""
           [ "$V" = "16" ] && FLAGS="--expect-unsupported"
-          # sudo strips the environment: pass PATH (psql/pgbench) and
-          # GITHUB_STEP_SUMMARY (the loud watchpoint-skip note) through.
-          # BPFTOOL: the uprobe run_cnt assertion (T2) needs a working
-          # bpftool inside the sudo environment.
+          # sudo strips the environment: pass PATH (psql/pgbench), PGPORT
+          # (the workload side — psql/pgbench in test_capture_smoke.py
+          # connect with no explicit -p, so on the gate box's multi-cluster
+          # layout this must be set explicitly or they'd hit Debian's
+          # pg_wrapper default/ambient cluster instead of the one this cell
+          # is tracing), and GITHUB_STEP_SUMMARY (the loud watchpoint-skip
+          # note). BPFTOOL: the uprobe run_cnt assertion (T2) needs a
+          # working bpftool inside the sudo environment.
           sudo env "PATH=/usr/lib/postgresql/$V/bin:$PATH" \
+            "PGPORT=$CS_PGPORT" \
             "GITHUB_STEP_SUMMARY=$GITHUB_STEP_SUMMARY" \
             "BPFTOOL=$BPFTOOL" \
             tests/ci_smoke.sh --pg-version "$V" $FLAGS

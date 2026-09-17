@@ -6,6 +6,13 @@
 #   tests/provision-runner.sh el8    # stub — step 4 of docs/DEV_LOOP_PLAN.md
 #   tests/provision-runner.sh el9    # stub — step 4 of docs/DEV_LOOP_PLAN.md
 #
+#   tests/provision-runner.sh ubuntu --runner-token TOKEN
+#     Also installs + registers the persistent GitHub Actions self-hosted
+#     runner ("GitHub Actions runner" block near the bottom of this script).
+#     TOKEN can also be given via PGWT_RUNNER_TOKEN instead of the flag (mint
+#     it right before calling this script — see that block's own comment for
+#     the exact command; never echo/log/commit it).
+#
 # ubuntu installs everything `make box-check` needs for the LIVE tier
 # (tests/run_all.sh --require-live): build deps for the daemon + pgwt-server
 # (same recipe as .github/workflows/ci.yml / nightly.yml — the known-good
@@ -47,8 +54,30 @@
 set -euo pipefail
 
 OS="${1:-}"
+shift || true
+
+# --runner-token / PGWT_RUNNER_TOKEN: optional, only consumed by the "GitHub
+# Actions runner" block near the bottom of this script (OS=ubuntu only).
+RUNNER_TOKEN="${PGWT_RUNNER_TOKEN:-}"
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --runner-token)
+            RUNNER_TOKEN="${2:-}"
+            shift 2
+            ;;
+        --runner-token=*)
+            RUNNER_TOKEN="${1#*=}"
+            shift
+            ;;
+        *)
+            echo "Unknown argument: $1" >&2
+            exit 2
+            ;;
+    esac
+done
+
 if [[ -z "$OS" ]]; then
-    echo "Usage: $0 <ubuntu|el8|el9>" >&2
+    echo "Usage: $0 <ubuntu|el8|el9> [--runner-token TOKEN]" >&2
     exit 2
 fi
 
@@ -352,6 +381,120 @@ if ssh -o BatchMode=yes -o ConnectTimeout=5 root@localhost true; then
 else
     echo "FATAL: ssh -o BatchMode=yes root@localhost failed after setup" >&2
     exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# 6. Marker file: /etc/pgwt-gate-box. Presence (not content) tells
+#    .github/workflows/ci.yml's gate-box jobs that they are running on this
+#    already-provisioned, persistent box (build deps + bpftool + PostgreSQL
+#    13/16/17/18 on ports 5413/5416/5417/5418 already present), so they can
+#    skip their apt/PGDG/PG-install steps and use the existing cluster
+#    directly (PGPORT=54<major>) instead of reinstalling on every run.
+#    Written unconditionally at the end of a successful ubuntu provisioning
+#    run, independent of whether this particular invocation also registered
+#    a runner (section 7) — a box can be (re)provisioned without touching an
+#    already-registered runner.
+# ---------------------------------------------------------------------------
+log "writing /etc/pgwt-gate-box marker"
+cat > /etc/pgwt-gate-box <<EOF
+# Written by tests/provision-runner.sh. Marks this host as pg_wait_tracer's
+# persistent gate box (docs/DEV_LOOP_PLAN.md step 1): fully provisioned with
+# build deps, bpftool, and PostgreSQL 13/16/17/18 on ports
+# 5413/5416/5417/5418. .github/workflows/ci.yml checks only for this file's
+# presence, not its content.
+provisioned_at=$(date -u +%FT%TZ)
+os=ubuntu
+EOF
+
+# ---------------------------------------------------------------------------
+# 7. GitHub Actions self-hosted runner — only when a registration token was
+#    given (--runner-token TOKEN or PGWT_RUNNER_TOKEN). Mint the token
+#    immediately before calling this script, and only pass it via this flag
+#    or env var — never echo it, never write it to a file in the repo, never
+#    put it in a commit:
+#      gh api -X POST repos/<owner>/<repo>/actions/runners/registration-token \
+#        --jq .token
+#    (it expires in ~1 hour).
+#
+#    - dedicated, unprivileged 'runner' system user with passwordless sudo
+#      (the gate-box CI jobs run `sudo tests/ci_smoke.sh` /
+#      `sudo tests/run_all.sh`, the same as an agent's `make box-check`).
+#    - PERSISTENT: no --ephemeral. This is the one gate box, registered once
+#      and reused by every job — not a throwaway VM (that is step 4's
+#      ephemeral-VM runner, a separate, --ephemeral registration).
+#    - labels self-hosted,linux,x64,gate-box ; name pgwt-gate.
+#    - one job at a time: config.sh's default (no extra flag needed) — the
+#      box is shared with agents running `make box-check`, and every timing
+#      test step already serialises on /tmp/pgwt-box-check.lock, but a
+#      second concurrent *job* would still contend for the same CPU/PG
+#      clusters outside that lock's reach.
+#    - idempotent: with no token, this whole block is skipped and an
+#      existing install/registration/service is left completely alone; with
+#      a token, the binaries are (re)installed if missing, but config.sh
+#      (the actual GitHub registration) only runs if this box has never
+#      registered before (no .runner file) — re-running config.sh against an
+#      already-registered runner fails loudly asking to remove it first, so
+#      re-registering is a deliberate, separate step, not something a bare
+#      re-run of this script does.
+# ---------------------------------------------------------------------------
+if [[ "$OS" == "ubuntu" && -n "$RUNNER_TOKEN" ]]; then
+    RUNNER_HOME=/opt/actions-runner
+    RUNNER_VERSION=2.337.0
+    RUNNER_TARBALL="actions-runner-linux-x64-${RUNNER_VERSION}.tar.gz"
+    # Pinned SHA256 of the release asset (from GitHub's release API "digest"
+    # field for actions/runner v2.337.0), verified before extraction.
+    RUNNER_SHA256="70920811a4f8ad4328818682bca5c6469c1c942fab52448868071d0063816613"
+    RUNNER_REPO_URL="https://github.com/DmitryNFomin/pg_wait_tracer"
+
+    log "=== GitHub Actions runner (pgwt-gate) ==="
+
+    if ! id runner >/dev/null 2>&1; then
+        log "creating dedicated 'runner' system user"
+        useradd --system --create-home --home-dir "$RUNNER_HOME" --shell /bin/bash runner
+    fi
+    mkdir -p "$RUNNER_HOME"
+    chown runner:runner "$RUNNER_HOME"
+
+    cat > /etc/sudoers.d/90-runner <<'EOF'
+runner ALL=(ALL) NOPASSWD:ALL
+EOF
+    chmod 0440 /etc/sudoers.d/90-runner
+    visudo -cf /etc/sudoers.d/90-runner
+
+    if [[ ! -x "$RUNNER_HOME/config.sh" ]]; then
+        log "installing actions-runner $RUNNER_VERSION binaries"
+        curl -fsSL -o "/tmp/$RUNNER_TARBALL" \
+            "https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}/${RUNNER_TARBALL}"
+        echo "$RUNNER_SHA256  /tmp/$RUNNER_TARBALL" | sha256sum -c -
+        sudo -u runner tar xzf "/tmp/$RUNNER_TARBALL" -C "$RUNNER_HOME"
+        rm -f "/tmp/$RUNNER_TARBALL"
+        "$RUNNER_HOME/bin/installdependencies.sh"
+    else
+        log "actions-runner binaries already installed"
+    fi
+
+    if [[ -f "$RUNNER_HOME/.runner" ]]; then
+        log "runner already registered — leaving registration alone (remove $RUNNER_HOME/.runner and re-run with a fresh token to re-register)"
+    else
+        log "registering runner 'pgwt-gate' with GitHub (labels: self-hosted,linux,x64,gate-box)"
+        sudo -u runner "$RUNNER_HOME/config.sh" \
+            --unattended \
+            --url "$RUNNER_REPO_URL" \
+            --token "$RUNNER_TOKEN" \
+            --name pgwt-gate \
+            --labels self-hosted,linux,x64,gate-box \
+            --work _work
+    fi
+
+    if systemctl list-unit-files 'actions.runner.*.service' --no-legend 2>/dev/null | grep -q .; then
+        log "runner systemd service already installed — leaving it running"
+    else
+        log "installing + starting the runner systemd service"
+        (cd "$RUNNER_HOME" && ./svc.sh install runner && ./svc.sh start)
+    fi
+    systemctl --no-pager status 'actions.runner.*.service' 2>/dev/null || true
+else
+    log "no --runner-token / PGWT_RUNNER_TOKEN given — skipping GitHub Actions runner install/registration"
 fi
 
 log "provisioning complete (ubuntu)"
