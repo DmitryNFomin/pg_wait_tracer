@@ -227,20 +227,14 @@ provisioning gaps):**
    otherwise-identical box-check runs — different assertions each time
    (`--help does not print Usage`; `--window histogram missing 'Last 1s'
    column`; later, `active view missing 'Active Sessions' header`), never
-   reproducing on an immediate manual re-run. All are argv-parsing/
-   `--view`/`--window`-output checks that should be instant and
-   PG-independent. The first two were attributed to a second agent building
-   outside the box-check lock at the time (confirmed by `ps`); the most
-   recent occurrence's `ps` check, taken right after that run finished,
-   showed the shared `flock` had serialized correctly (no other box-check
-   ran concurrently with `test_cli`'s section), so contention could not be
-   confirmed as the cause that time — nor ruled out (a process bypassing
-   the lock entirely leaves no trace after the fact). Filed as
-   **issue #110**: cause unknown. Deliberately **not** added to
-   `KNOWN_FAILING` — that table is only for a reproduced, understood, filed
-   product bug (see item 19); #110 is neither reproduced on demand nor
-   understood, so listing it would risk masking a real regression behind a
-   shrug. Not hardened, not touched, not rerun to hide a miss.
+   reproducing on an immediate manual re-run. **Resolved as issue #110**:
+   every check used `echo "$output" | grep -q PATTERN` under `set -o
+   pipefail` — `grep -q` exits on its first match and can SIGPIPE `echo`
+   mid-write, so `pipefail` fails the `if` even though `grep` already found
+   the string; reproduced directly (thousands of replayed iterations against
+   real captured output) and fixed everywhere the idiom appeared in
+   `tests/` by switching to `[[ == * ]]` / `[[ =~ ]]`. Never a product bug,
+   so `test_cli.sh` was never added to `KNOWN_FAILING`.
 
 8. **New finding**, found while re-verifying `PG=13` after item 4's floors
    landed: `--pid`/`find_postmaster` in `tests/run_all.sh` only choose which
@@ -411,10 +405,9 @@ the same read as the 2026-09-16 run, just with tighter IQRs this time.
    PG13-only small-margin conservation miss) and remove each from
    `KNOWN_FAILING` once fixed — all three look like real measurement
    questions, not test bugs, and need someone who knows the sampler/
-   exact-probe internals. Also investigate #110 (`test_cli`'s recurring,
-   non-reproducing single-assertion misses, cause unknown) enough to either
-   file it as a product bug (and list it) or characterize it as noise and
-   move it off the gate box's serial path.
+   exact-probe internals. #110 (`test_cli`'s recurring, non-reproducing
+   single-assertion misses) is resolved: SIGPIPE-under-pipefail in
+   `echo | grep -q` checks, fixed across `tests/`, not a product bug.
 
 **Acceptance (original, still open for the CI-split part):** three
 consecutive green master runs with the gate jobs on the box; `sampled-overhead`

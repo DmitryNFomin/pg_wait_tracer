@@ -322,7 +322,8 @@ check $? "control proxy rejects missing request object"
 
 # ── pgwt-server --dump status block ───────────────────────────
 DUMP=$("$SERVER" --dump "$TRACE_DIR" 2>/dev/null | head -3)
-echo "$DUMP" | grep -q "Daemon: running.*mode: tiered.*uptime"
+DUMP_RE='Daemon: running.*mode: tiered.*uptime'
+[[ "$DUMP" =~ $DUMP_RE ]]
 check $? "--dump prints daemon status block"
 
 # ── clean shutdown ────────────────────────────────────────────

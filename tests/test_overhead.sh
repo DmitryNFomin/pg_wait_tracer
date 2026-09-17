@@ -90,7 +90,7 @@ PG_BIN_DIR=$(dirname "$PG_EXE")
 PSQL="$PG_BIN_DIR/psql"
 if [[ -x "$PSQL" ]]; then
     WS_LOADED=$("$PSQL" -U postgres -d postgres -tAc "SHOW shared_preload_libraries" 2>/dev/null || echo "")
-    if echo "$WS_LOADED" | grep -q "pg_wait_sampling"; then
+    if [[ "$WS_LOADED" == *"pg_wait_sampling"* ]]; then
         echo "WARNING:      pg_wait_sampling is loaded — this adds its own overhead!"
         echo "              Consider: ALTER SYSTEM SET shared_preload_libraries TO '';"
         echo "              and restart PostgreSQL for clean measurements."
@@ -99,8 +99,10 @@ fi
 
 # Check for other tracers (perf, strace, bpftrace)
 OTHER_TRACERS=""
-pgrep -a perf 2>/dev/null | grep -q "record\|stat" && OTHER_TRACERS+="perf "
-pgrep -a strace 2>/dev/null | grep -q "$PM_PID" && OTHER_TRACERS+="strace "
+PERF_PROCS=$(pgrep -a perf 2>/dev/null || true)
+[[ "$PERF_PROCS" =~ record|stat ]] && OTHER_TRACERS+="perf "
+STRACE_PROCS=$(pgrep -a strace 2>/dev/null || true)
+[[ "$STRACE_PROCS" == *"$PM_PID"* ]] && OTHER_TRACERS+="strace "
 pgrep -a bpftrace 2>/dev/null && OTHER_TRACERS+="bpftrace "
 if [[ -n "$OTHER_TRACERS" ]]; then
     echo "WARNING:      Other tracers detected: $OTHER_TRACERS"

@@ -212,10 +212,10 @@ kill -TERM "$TRACER_PID"; wait "$TRACER_PID" 2>/dev/null; TRACER_PID=""
 if [[ -x "$DUMP" ]]; then
     MARKERS=$("$DUMP" "$TRACE_DIR" 2>/dev/null)
     echo "$MARKERS" | sed 's/^/    /'
-    echo "$MARKERS" | grep -q "START reason=anomaly"
+    [[ "$MARKERS" == *"START reason=anomaly"* ]]
     check $? "trace records a START reason=anomaly escalation marker"
     # The manual escalate is NOT used here, so no manual marker should appear.
-    if echo "$MARKERS" | grep -q "reason=manual"; then
+    if [[ "$MARKERS" == *"reason=manual"* ]]; then
         check 1 "anomaly window distinct from manual (unexpected manual marker)"
     else
         check 0 "anomaly window distinct from manual (no manual markers present)"
