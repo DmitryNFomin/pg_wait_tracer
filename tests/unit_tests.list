@@ -33,3 +33,4 @@ test_discovery_nopie
 test_replay_fidelity
 test_sampled_overhead_gate.py
 test_data_query_text_context.py
+test_ui_live_smoke_lib.py

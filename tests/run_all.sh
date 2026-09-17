@@ -19,6 +19,14 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 source "$SCRIPT_DIR/testutil.sh"
 
+# issue #93: this run's marker (its own start timestamp), exported so
+# tests/ui_live_smoke.py can stamp tests/results/ui_live/run.id with it.
+# tests/results is excluded from box-check.sh's up-rsync, so the box keeps
+# the LAST run's ui_live/ between invocations -- without this, a smoke that
+# died before ever reaching the walk would have this script re-emit the
+# previous (unrelated) run's PASS/FAIL verdict as if it were this run's.
+export PGWT_RUN_MARKER="$(date +%s)"
+
 PM_PID=""
 PG_VERSION=""
 PG_VERSION_EXPLICIT=0
@@ -364,6 +372,12 @@ LIVE_TESTS=(
     "test_anomaly_live|bash|test_anomaly_live.sh"
     # T4/CAP-1: a full BPF state_map must be loud (metrics + ERROR log)
     "test_state_map_loud|python3|test_state_map_loud.py"
+    # issue #93: live UI smoke — walks all 11 tabs against a REAL daemon +
+    # Go bridge (not mock_server.py). Needs Playwright + Chromium on the box
+    # (tests/provision-runner.sh); prints its own PASS/FAIL summary line and
+    # writes tests/results/ui_live/summary.json (phase 2: scripts/box-check.sh
+    # rsyncs that directory back to the Mac).
+    "test_ui_live_smoke|bash|ui_live_smoke.sh"
 )
 
 # Step 4: integration + live-correctness tests (root + running PG)
@@ -405,23 +419,29 @@ else
     skip_test "web_unit (node --test)" "node not installed"
 fi
 
-# Step 5: Web UI tests (needs playwright + websockets, no root needed)
-# Locally a missing dependency is a skip; in CI ($CI set) it is a FAILURE —
-# the UI suite silently not running is how regressions slip through.
-# test_web_ui_chaos runs the same UI against mock_server.py in CHAOS mode
-# (latency jitter / out-of-order / late responses) — its race-exposing tests
-# are classified gating vs xfail internally, so it stays CI-green either way.
-if python3 -c "import playwright, websockets" 2>/dev/null; then
+# Step 5: Web UI tests (needs playwright + websockets, no root needed).
+# OFF by default (PGWT_RUN_WEB_UI=1 opts in): this duplicates `make check`'s
+# own Playwright suite (the Mac) and ci.yml's dedicated web-ui job, and since
+# the gate box now has Playwright+Chromium (tests/provision-runner.sh, issue
+# #93), leaving it on by default promoted this into every `make box-check`
+# run — a real Chromium walk the shared box does not need to also carry.
+# No separate "$CI" hard-fail branch here (unlike Steps elsewhere in this
+# file): run_all.sh is a box-check/manual-box script, never invoked by any
+# GitHub Actions workflow directly (ci.yml's web-ui job runs test_web_ui.py
+# itself), so $CI is never actually set for this script -- that branch was
+# unreachable dead code. test_web_ui_chaos runs the same UI against
+# mock_server.py in CHAOS mode (latency jitter / out-of-order / late
+# responses) — its race-exposing tests are classified gating vs xfail
+# internally, so it stays green either way once opted in.
+if [[ "${PGWT_RUN_WEB_UI:-}" != "1" ]]; then
+    skip_test "test_web_ui" "opt-in: set PGWT_RUN_WEB_UI=1 (make check + ci.yml's web-ui job already cover this)"
+    skip_test "test_web_ui_chaos" "opt-in: set PGWT_RUN_WEB_UI=1 (make check + ci.yml's web-ui job already cover this)"
+elif python3 -c "import playwright, websockets" 2>/dev/null; then
     run_test "test_web_ui" python3 "$SCRIPT_DIR/test_web_ui.py"
     run_test "test_web_ui_chaos" python3 "$SCRIPT_DIR/test_web_ui_chaos.py"
-elif [[ -n "${CI:-}" ]]; then
-    run_test "test_web_ui" bash -c \
-        'echo "ERROR: playwright/websockets not installed — required in CI"; exit 1'
-    run_test "test_web_ui_chaos" bash -c \
-        'echo "ERROR: playwright/websockets not installed — required in CI"; exit 1'
 else
-    skip_test "test_web_ui" "playwright or websockets not installed"
-    skip_test "test_web_ui_chaos" "playwright or websockets not installed"
+    skip_test "test_web_ui" "opted in via PGWT_RUN_WEB_UI=1 but playwright or websockets not installed"
+    skip_test "test_web_ui_chaos" "opted in via PGWT_RUN_WEB_UI=1 but playwright or websockets not installed"
 fi
 
 # Visual-regression snapshots (Phase B4). Needs playwright + Pillow + numpy AND
@@ -439,6 +459,50 @@ elif python3 -c "import playwright, websockets, PIL, numpy" 2>/dev/null \
 else
     skip_test "test_web_ui_snapshots" "snapshot deps or baselines not present (CI snapshots job is authoritative)"
 fi
+
+# issue #93: re-emit the live-UI-smoke's own one-line verdict here too, not
+# just buried in its own (possibly thousands-of-lines) run_test block above —
+# CLAUDE.md's definition of done says `make box-check`'s summary (the last
+# ~25 lines an agent pastes into a PR) shows this; without it, a reviewer
+# reading only the tail never sees per-tab known-failing/xpass status.
+#
+# Gated on tests/results/ui_live/run.id == $PGWT_RUN_MARKER: box-check.sh's
+# up-rsync excludes tests/results, so the box keeps the LAST run's ui_live/
+# between invocations -- without this check, a smoke that died before ever
+# reaching the walk (e.g. the daemon/bridge never came up) would silently
+# re-emit a PREVIOUS, unrelated run's PASS here, right next to THIS run's
+# `failed 1` for the very same test.
+ui_live_dir="$SCRIPT_DIR/results/ui_live"
+python3 - "$ui_live_dir/summary.json" "$ui_live_dir/run.id" "$PGWT_RUN_MARKER" <<'PYEOF'
+import json
+import sys
+
+summary_path, run_id_path, expected_marker = sys.argv[1], sys.argv[2], sys.argv[3]
+
+try:
+    actual_marker = open(run_id_path).read().strip()
+except OSError:
+    actual_marker = None
+
+if actual_marker != expected_marker:
+    print("  Live UI smoke: NOT RUN in this invocation")
+    sys.exit(0)
+
+try:
+    s = json.load(open(summary_path))
+except Exception as e:
+    print(f"  Live UI smoke: could not read summary.json ({e})")
+    sys.exit(0)
+
+line = "  Live UI smoke: overall=" + ("PASS" if s.get("ok") else "FAIL")
+if s.get("failed_tabs"):
+    line += " (failed: " + ", ".join(s["failed_tabs"]) + ")"
+if s.get("known_failing_tabs"):
+    line += " (known-failing: " + ", ".join(s["known_failing_tabs"]) + ")"
+if s.get("xpass_tabs"):
+    line += " (xpass: " + ", ".join(s["xpass_tabs"]) + ")"
+print(line)
+PYEOF
 
 # Summary
 echo ""

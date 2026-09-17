@@ -9,22 +9,36 @@
 # ubuntu installs everything `make box-check` needs for the LIVE tier
 # (tests/run_all.sh --require-live): build deps for the daemon + pgwt-server
 # (same recipe as .github/workflows/ci.yml / nightly.yml — the known-good
-# apt + bpftool-fallback steps), the PGDG repo, and PostgreSQL 13/16/17/18,
-# one cluster each, on ports 5413/5416/5417/5418 (pg_stat_statements
-# preloaded, compute_query_id on for 14+). It deliberately does NOT install
-# node/Playwright/Pillow/numpy: those back the Deterministic tier, which
-# `make check` already runs natively on the Mac (see CLAUDE.md's test-tier
-# table) — tests/run_all.sh degrades those sections to a plain (non-live)
-# skip when the interpreter/browser deps are absent and $CI is unset, so
-# --require-live still passes cleanly without them.
+# apt + bpftool-fallback steps), the PGDG repo, PostgreSQL 13/16/17/18 (one
+# cluster each, on ports 5413/5416/5417/5418, pg_stat_statements preloaded,
+# compute_query_id on for 14+), Go (to build web/pgwt), and Playwright +
+# Chromium + Pillow + numpy for root's python3 (issue #93's live UI smoke,
+# tests/ui_live_smoke.sh, is a LIVE-tier test and needs a real browser on
+# the box). It deliberately does NOT install node: nothing in the LIVE tier
+# needs it (the Node builder-unit tests are Deterministic-tier, Mac-only —
+# see CLAUDE.md's test-tier table); tests/run_all.sh's Step 5 (the
+# Playwright UI suite against mock_server.py, redundant with `make check`
+# and ci.yml's own web-ui job) additionally stays opt-in
+# (PGWT_RUN_WEB_UI=1) even though the deps are now present, so a plain
+# `make box-check` does not also carry a full Chromium walk on the shared
+# box for every run.
 #
 # Idempotent: every step is guarded so a second run is a fast no-op modulo
-# apt/PGDG metadata refresh.
+# apt/PGDG metadata refresh. MUST be re-run after any kernel change (a
+# reboot onto a new kernel, an apt/unattended upgrade that pulls one in,
+# etc.): bpftool's package (and its BTF-dependent vmlinux.h generation
+# step) is tied to the exact running `uname -r`, and a stale
+# linux-tools-<old-kernel> package makes `make` fail with an opaque
+# "bpftool not found for kernel <new>" error -- scripts/box-check.sh's own
+# preflight check now catches this and tells you to come back here.
 #
 # -e: fail loudly. A failed apt-get/pg_createcluster/pg_conftool/CREATE
 # EXTENSION/pgbench step must stop the script, not let it print
-# "provisioning complete" over a half-provisioned box. The few genuinely
-# optional commands below already have their own explicit `||` fallback.
+# "provisioning complete" over a half-provisioned box. Every command below
+# that is allowed to fail (an optional/best-effort step, or one whose
+# failure this script itself handles) has its own explicit `|| true` or
+# `||` fallback guard -- see the Playwright/Chromium/Go and ssh
+# self-trust blocks below.
 #
 # Takes the same lock scripts/box-check.sh uses (see the flock block below):
 # every run unconditionally restarts all four clusters (pg_ctlcluster ...
@@ -67,11 +81,46 @@ log() { echo "[provision-runner] $*"; }
 export DEBIAN_FRONTEND=noninteractive
 
 # Same lock make box-check (scripts/box-check.sh) uses: the cluster restarts
-# below must not race with an in-flight box-check's live tests.
-log "waiting for /tmp/pgwt-box-check.lock"
+# below must not race with an in-flight box-check's live tests. Bounded wait
+# (not a bare `flock 9`, which blocks forever): a nested/concurrent call
+# fails loudly with a clear message instead of hanging silently until
+# whatever holds the lock finishes (a full box-check run can itself take
+# several minutes per PG version).
+log "waiting for /tmp/pgwt-box-check.lock (up to 600s)"
 exec 9>/tmp/pgwt-box-check.lock
-flock 9
+if ! flock -w 600 9; then
+    echo "FATAL: could not acquire /tmp/pgwt-box-check.lock within 600s -- another box-check or provisioning run holds it" >&2
+    exit 1
+fi
 log "lock acquired"
+
+# ---------------------------------------------------------------------------
+# 0. Disable unattended OS upgrades. A CI gate box must NEVER change kernel
+#    or libc -- or bounce a running service -- out from under a live test:
+#    Ubuntu's unattended-upgrades fired mid `make box-check` run, installed
+#    a new kernel, and needrestart auto-restarted all four PostgreSQL
+#    clusters, producing empty captures (2026-09-17). Runs FIRST, before any
+#    apt-get call, so a freshly rebooted box has the smallest possible
+#    window where the stock timers could fire again. Idempotent: `disable`/
+#    `mask` are no-ops on an already-masked unit; the needrestart conf.d
+#    snippet is (re)written every run, not appended. `|| true` on both: under
+#    `set -e`, a second run (units already masked) or an image that never
+#    shipped unattended-upgrades.service at all makes systemctl exit
+#    non-zero, which would otherwise abort provisioning at step one --
+#    exactly the idempotence this comment promises.
+# ---------------------------------------------------------------------------
+log "disabling + masking unattended-upgrade timers/service"
+systemctl disable --now apt-daily.timer apt-daily-upgrade.timer unattended-upgrades.service || true
+systemctl mask apt-daily.timer apt-daily-upgrade.timer unattended-upgrades.service || true
+
+log "setting needrestart to list-only mode (never auto-restart services)"
+mkdir -p /etc/needrestart/conf.d
+cat > /etc/needrestart/conf.d/99-pgwt-gate-box.conf <<'EOF'
+# pg_wait_tracer gate box: list-only, never auto-restart services.
+# needrestart auto-restarting PostgreSQL mid-capture (after an
+# unattended-upgrades kernel bump) produced empty test traces (2026-09-17).
+$nrconf{restart} = 'l';
+EOF
 
 # ---------------------------------------------------------------------------
 # 1. Build dependencies for the daemon + pgwt-server (ci.yml "Install build
@@ -126,10 +175,29 @@ test -r /sys/kernel/btf/vmlinux || {
 # ---------------------------------------------------------------------------
 # 3. PGDG apt repo.
 # ---------------------------------------------------------------------------
-if [[ ! -f /etc/apt/sources.list.d/pgdg.list ]]; then
+# The installed apt.postgresql.org.sh (Ubuntu 24.04 / Debian's postgresql-
+# common) writes the deb822-format /etc/apt/sources.list.d/pgdg.sources, not
+# the legacy pgdg.list it actively deletes -- checking for pgdg.list here
+# (found while proving idempotence this round) always missed, so this
+# "idempotent" step actually re-ran the script's apt-get update + repo
+# rewrite on EVERY provisioning run rather than skipping when already done.
+# Harmless in effect, but not what the comment/idempotence design claimed.
+if [[ ! -f /etc/apt/sources.list.d/pgdg.sources ]]; then
     log "adding PGDG apt repo"
     apt-get install -y -qq postgresql-common >/dev/null
-    yes | /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y >/dev/null
+    # `-y` already makes the upstream script non-interactive; `yes` feeding
+    # its stdin is belt-and-suspenders, but under pipefail (added this
+    # round) that pipe's `yes` side gets a real SIGPIPE (rc 141) the moment
+    # the script stops reading stdin, which made pipefail fail this whole
+    # line even though the script itself succeeded. `|| true` swallows
+    # that, then the actual result is checked explicitly below, same
+    # idempotent-verification style as every other step in this script --
+    # a genuine failure (repo file never appears) is still caught, loudly.
+    yes | /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y >/dev/null || true
+    [[ -f /etc/apt/sources.list.d/pgdg.sources ]] || {
+        echo "FATAL: PGDG apt repo setup did not produce /etc/apt/sources.list.d/pgdg.sources" >&2
+        exit 1
+    }
 else
     log "PGDG apt repo already present"
 fi
@@ -210,5 +278,80 @@ done
 
 log "clusters:"
 pg_lsclusters
+
+# ---------------------------------------------------------------------------
+# 5. issue #93 (live UI smoke): Go (to build web/pgwt, the LIVE tier's ONLY
+#    consumer of the Go bridge -- the Deterministic tier's `make check` runs
+#    web/'s `go vet`/`go test` on the Mac, but nothing on this box needed an
+#    actual `web/pgwt` binary until this test), Playwright + Chromium for
+#    root's python3, and a self-trust ssh loop so the Go bridge can `ssh
+#    root@localhost pgwt-server ...` exactly like a real deployment
+#    (web/bridge.go's NewSSHBridge runs ssh with -o BatchMode=yes, which
+#    REFUSES rather than prompts on an unknown host key or missing key auth
+#    -- both must already be in place before tests/ui_live_smoke.sh runs).
+# ---------------------------------------------------------------------------
+if ! command -v go >/dev/null 2>&1; then
+    log "installing Go (golang-go, needs go.mod's 1.21+)"
+    apt-get install -y -qq golang-go >/dev/null
+fi
+log "go: $(go version)"
+
+log "installing python3-pip"
+apt-get install -y -qq python3-pip >/dev/null
+
+log "installing Playwright + websockets + Pillow + numpy for root's python3"
+# --break-system-packages: Ubuntu 24.04's python3 is PEP-668
+# externally-managed; root installing system-wide for its own test runs
+# (never --user -- LIVE_TESTS run under sudo, i.e. as root) is the
+# equivalent of the Mac setup's `pip install --user` for a single-user box.
+# pillow + numpy: tests/ui_live_smoke_lib.py decodes/diffs the tick
+# screenshots with them (same pair CLAUDE.md's Mac "Local setup" lists).
+python3 -m pip install --break-system-packages -q \
+    playwright==1.60.0 websockets pillow numpy
+
+log "installing Chromium + its OS dependencies"
+# --with-deps: also apt-get installs the shared libraries (fonts, libnss,
+# etc.) headless Chromium needs, which a minimal server image lacks.
+python3 -m playwright install --with-deps chromium >/dev/null
+
+log "setting up root's localhost ssh self-trust loop"
+SSH_KEY="$HOME/.ssh/id_ed25519"
+# mkdir BEFORE ssh-keygen: on a freshly rebooted/never-provisioned box
+# ~/.ssh does not exist yet, and ssh-keygen -f into a missing parent
+# directory fails outright.
+mkdir -p "$HOME/.ssh"
+chmod 700 "$HOME/.ssh"
+if [[ ! -f "$SSH_KEY" ]]; then
+    log "generating root's ssh keypair"
+    ssh-keygen -t ed25519 -N '' -f "$SSH_KEY" -C "pgwt-gate-box-self" >/dev/null
+fi
+touch "$HOME/.ssh/authorized_keys"
+if ! grep -qxF "$(cat "${SSH_KEY}.pub")" "$HOME/.ssh/authorized_keys" 2>/dev/null; then
+    log "adding root's own pubkey to authorized_keys"
+    cat "${SSH_KEY}.pub" >> "$HOME/.ssh/authorized_keys"
+fi
+chmod 600 "$HOME/.ssh/authorized_keys"
+touch "$HOME/.ssh/known_hosts"
+for h in localhost 127.0.0.1; do
+    if ! ssh-keygen -F "$h" -f "$HOME/.ssh/known_hosts" >/dev/null 2>&1; then
+        log "adding $h to known_hosts"
+        # || true: the BatchMode ssh check right below this loop is the real
+        # guard -- if ssh-keyscan hiccups (e.g. sshd not answering yet) and
+        # leaves known_hosts short, that check fails loudly with its own
+        # FATAL message instead of this line aborting provisioning under -e.
+        ssh-keyscan -H "$h" >> "$HOME/.ssh/known_hosts" 2>/dev/null || true
+    fi
+done
+chmod 600 "$HOME/.ssh/known_hosts"
+
+# Prove the loop actually works now, loudly, rather than have
+# tests/ui_live_smoke.sh fail later with an opaque "bridge never answered
+# /session".
+if ssh -o BatchMode=yes -o ConnectTimeout=5 root@localhost true; then
+    log "root@localhost ssh self-trust loop OK"
+else
+    echo "FATAL: ssh -o BatchMode=yes root@localhost failed after setup" >&2
+    exit 1
+fi
 
 log "provisioning complete (ubuntu)"

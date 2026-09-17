@@ -70,6 +70,20 @@ jobs:
       - name: Build C unit tests
         run: make -C tests
 
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python test dependencies (pillow, numpy)
+        # tests/test_ui_live_smoke_lib.py (in unit_tests.list, issue #93)
+        # decodes/diffs PNGs with these; nothing else in this job's
+        # unit_tests.list entries needs them. setup-python (not the runner's
+        # bare system python3) -- ubuntu-latest (24.04) is PEP-668
+        # externally-managed, so a bare `pip install` against the system
+        # interpreter aborts outright; the other two pip-using jobs in this
+        # file already use actions/setup-python for the same reason.
+        run: python3 -m pip install pillow numpy
+
       - name: Run C unit tests
         # The test list lives in tests/unit_tests.list — the single source of
         # truth shared with tests/run_all.sh (TST-3: the two hand-maintained

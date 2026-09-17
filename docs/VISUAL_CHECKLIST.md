@@ -41,6 +41,18 @@ index-keyed legend Set soloing the wrong series after a drill (P2); yMax
 breathing and bucket phase shimmer (P7); heatmap global recolor per tick (P8);
 DFG dragged positions discarded (P5); dropdown clobbered mid-selection (P8).
 
+**No-blink threshold (issue #93, `tests/ui_live_smoke.py`):** against a real
+daemon, two screenshots of the SAME panel taken ~120ms apart inside one data
+window (no tick in between) are allowed to differ by **< 0.1% of pixels**,
+never wider. The only legitimate source of that diff is antialiasing of the
+live cursor / axis-pointer machinery on the panel's own chart — verified
+empirically: against `tests/mock_server.py` (fully static canned data, no
+live cursor) the ratio is exactly `0.0` on every tab; a genuine re-render,
+teardown, or data change produces ratios two to three orders of magnitude
+larger. The check is scoped to the tab's own panel element, not the full
+viewport — the persistent AAS pane (shown on every tab) draws that live
+cursor too, and its shimmer is not every OTHER panel's budget to absorb.
+
 ## CONTINUITY
 
 **Tick N → N+1 is a smooth update, never a teardown.** No flash to blank, no
