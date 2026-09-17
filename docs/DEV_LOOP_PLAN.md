@@ -135,7 +135,7 @@ keep only deterministic jobs. Stops the hardening tax immediately.
   - Neither run hit issue #110 (`test_cli`'s unlisted, cause-unknown
     single-assertion misses — item 7 below); it has recurred on other runs
     during this task and may recur again — it is not fixed, just absent
-    from these two specific runs.
+    from these two specific runs. (resolved — see item 7)
   - `failed 0` on both is real, current, and reproducible — not a claim
     made once and left stale: it is the direct result of the fixes listed
     below (particularly items 4/12/18/19), verified as the very last step
