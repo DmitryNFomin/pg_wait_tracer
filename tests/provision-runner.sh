@@ -211,4 +211,72 @@ done
 log "clusters:"
 pg_lsclusters
 
+# ---------------------------------------------------------------------------
+# 5. issue #93 (live UI smoke): Go (to build web/pgwt, the LIVE tier's ONLY
+#    consumer of the Go bridge -- the Deterministic tier's `make check` runs
+#    web/'s `go vet`/`go test` on the Mac, but nothing on this box needed an
+#    actual `web/pgwt` binary until this test), Playwright + Chromium for
+#    root's python3, and a self-trust ssh loop so the Go bridge can `ssh
+#    root@localhost pgwt-server ...` exactly like a real deployment
+#    (web/bridge.go's NewSSHBridge runs ssh with -o BatchMode=yes, which
+#    REFUSES rather than prompts on an unknown host key or missing key auth
+#    -- both must already be in place before tests/ui_live_smoke.sh runs).
+# ---------------------------------------------------------------------------
+if ! command -v go >/dev/null 2>&1; then
+    log "installing Go (golang-go, needs go.mod's 1.21+)"
+    apt-get install -y -qq golang-go >/dev/null
+fi
+log "go: $(go version)"
+
+log "installing python3-pip"
+apt-get install -y -qq python3-pip >/dev/null
+
+log "installing Playwright + websockets + Pillow + numpy for root's python3"
+# --break-system-packages: Ubuntu 24.04's python3 is PEP-668
+# externally-managed; root installing system-wide for its own test runs
+# (never --user -- LIVE_TESTS run under sudo, i.e. as root) is the
+# equivalent of the Mac setup's `pip install --user` for a single-user box.
+# pillow + numpy: tests/ui_live_smoke_lib.py decodes/diffs the tick
+# screenshots with them (same pair CLAUDE.md's Mac "Local setup" lists).
+python3 -m pip install --break-system-packages -q \
+    playwright==1.60.0 websockets pillow numpy
+
+log "installing Chromium + its OS dependencies"
+# --with-deps: also apt-get installs the shared libraries (fonts, libnss,
+# etc.) headless Chromium needs, which a minimal server image lacks.
+python3 -m playwright install --with-deps chromium >/dev/null
+
+log "setting up root's localhost ssh self-trust loop"
+SSH_KEY="$HOME/.ssh/id_ed25519"
+if [[ ! -f "$SSH_KEY" ]]; then
+    log "generating root's ssh keypair"
+    ssh-keygen -t ed25519 -N '' -f "$SSH_KEY" -C "pgwt-gate-box-self" >/dev/null
+fi
+mkdir -p "$HOME/.ssh"
+chmod 700 "$HOME/.ssh"
+touch "$HOME/.ssh/authorized_keys"
+if ! grep -qxF "$(cat "${SSH_KEY}.pub")" "$HOME/.ssh/authorized_keys" 2>/dev/null; then
+    log "adding root's own pubkey to authorized_keys"
+    cat "${SSH_KEY}.pub" >> "$HOME/.ssh/authorized_keys"
+fi
+chmod 600 "$HOME/.ssh/authorized_keys"
+touch "$HOME/.ssh/known_hosts"
+for h in localhost 127.0.0.1; do
+    if ! ssh-keygen -F "$h" -f "$HOME/.ssh/known_hosts" >/dev/null 2>&1; then
+        log "adding $h to known_hosts"
+        ssh-keyscan -H "$h" >> "$HOME/.ssh/known_hosts" 2>/dev/null
+    fi
+done
+chmod 600 "$HOME/.ssh/known_hosts"
+
+# Prove the loop actually works now, loudly, rather than have
+# tests/ui_live_smoke.sh fail later with an opaque "bridge never answered
+# /session".
+if ssh -o BatchMode=yes -o ConnectTimeout=5 root@localhost true; then
+    log "root@localhost ssh self-trust loop OK"
+else
+    echo "FATAL: ssh -o BatchMode=yes root@localhost failed after setup" >&2
+    exit 1
+fi
+
 log "provisioning complete (ubuntu)"

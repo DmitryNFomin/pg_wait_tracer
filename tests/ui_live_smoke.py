@@ -387,6 +387,44 @@ def _wait_for_tick(page, target_count, timeout_s):
         return False
 
 
+def _poll_render_check(page, tab_id, timeout_s=2.0, interval_ms=150):
+    """Evaluates PANEL_CHECKS[tab_id], retrying briefly on failure. A tick's
+    re-render (ECharts dispose+init when the underlying data identity
+    changes -- e.g. Waterfall's "latest execution" rotating under continuous
+    real load, observed against a real daemon) can take a moment after the
+    tick's WS response lands before the chart instance exists again. Bounded
+    exactly like Playwright's own wait_for_selector: a check STILL failing
+    after this budget is a real failure, reported as such, never swallowed."""
+    deadline = time.monotonic() + timeout_s
+    while True:
+        raw = page.evaluate(PANEL_CHECKS[tab_id])
+        ok, detail = lib.render_check_ok(raw)
+        if ok or time.monotonic() >= deadline:
+            return ok, detail
+        page.wait_for_timeout(interval_ms)
+
+
+def _settled_leak_probe(page, timeout_s=TICK_TIMEOUT_S, interval_ms=200):
+    """Poll LEAK_PROBE_JS until `pending` settles to 0 or the budget runs
+    out. A single-instant read can catch a request that is normally
+    in-flight for a moment (a real server under real load, vs. the
+    zero-latency mock) and wrongly call it a leak -- test_web_ui_chaos.py's
+    test_soak_random_navigation re-probes the SAME probe after a settle
+    window for exactly this reason; this is the same idiom, not a widened
+    tolerance (a request stuck pending for the whole budget still fails).
+    Budget matches TICK_TIMEOUT_S: measured on the gate box, a `transitions`/
+    `exec_scatter`/`top_queries` query over several minutes of --mode full
+    capture (every event, not sampled) can legitimately take a few seconds
+    to answer -- the same real-server-latency reasoning that sized
+    TICK_TIMEOUT_S already, not a separate ad hoc allowance."""
+    deadline = time.monotonic() + timeout_s
+    probe = page.evaluate(LEAK_PROBE_JS)
+    while probe.get("pending", 0) != 0 and time.monotonic() < deadline:
+        page.wait_for_timeout(interval_ms)
+        probe = page.evaluate(LEAK_PROBE_JS)
+    return probe
+
+
 # ── one tab's walk ───────────────────────────────────────────────────────────
 
 def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
@@ -422,7 +460,7 @@ def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
         page.evaluate(TICK_HOOK_JS)
         _navigate_to_tab(page, tab_id, first_data_timeout)
 
-        leak_before = page.evaluate(LEAK_PROBE_JS)
+        leak_before = _settled_leak_probe(page)
 
         legend_ticks = []
         blink_ratios = []
@@ -432,8 +470,7 @@ def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
                 raise SmokeFailure(
                     f"tick {i}/{ticks} did not arrive within {TICK_TIMEOUT_S}s")
 
-            raw = page.evaluate(PANEL_CHECKS[tab_id])
-            render_ok, render_detail = lib.render_check_ok(raw)
+            render_ok, render_detail = _poll_render_check(page, tab_id)
             if not render_ok:
                 raise SmokeFailure(f"tick {i}: {render_detail}")
 
@@ -444,8 +481,10 @@ def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
             frame_a = panel.screenshot()
             page.wait_for_timeout(120)  # same data window, before the next tick
             frame_b = panel.screenshot()
-            ratio = lib.frame_diff_ratio(
+            ratio, blink_note = lib.blink_check(
                 lib.png_bytes_to_array(frame_a), lib.png_bytes_to_array(frame_b))
+            if blink_note:
+                print(f"  note [{tab_id}] tick {i}: {blink_note}")
             blink_ratios.append(ratio)
 
             tick_path = os.path.join(tab_dir, f"tick-{i}.png")
@@ -459,7 +498,7 @@ def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
 
             console_errors.extend(guard.drain())
 
-        leak_after = page.evaluate(LEAK_PROBE_JS)
+        leak_after = _settled_leak_probe(page)
         color_violations = (lib.color_stability_violations(legend_ticks)
                             if legend_ticks else [])
         worst_blink = max(blink_ratios) if blink_ratios else None

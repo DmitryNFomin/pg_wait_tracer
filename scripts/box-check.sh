@@ -63,6 +63,18 @@ ssh -o BatchMode=yes "$target" \
     2>&1 | tee "$log"
 rc=${PIPESTATUS[0]}
 
+# issue #93: pull the live-UI-smoke artifacts back regardless of rc — a
+# failing run's frames/video are exactly what a reviewer needs (a `-n` skip
+# vs. FAIL, and which tab/tick broke). Unconditional so this never masks
+# run_all.sh's own exit code; a missing remote dir (test skipped before
+# producing anything) is reported, not fatal.
+mkdir -p tests/results/ui_live
+if rsync -az --delete "$target:$remote_dir/tests/results/ui_live/" tests/results/ui_live/ 2>/dev/null; then
+    echo "box-check: tests/results/ui_live/ synced back from $target"
+else
+    echo "box-check: no tests/results/ui_live/ on $target (test_ui_live_smoke skipped or produced no artifacts)"
+fi
+
 echo
 echo "box-check ($OS, PG=${PG:-all}) exit=$rc — summary:"
 tail -n 25 "$log" | sed 's/^/  /'

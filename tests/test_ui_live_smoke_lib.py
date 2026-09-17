@@ -81,6 +81,28 @@ def test_frame_diff_ratio_shape_mismatch():
         check(True, "shape mismatch raises ValueError")
 
 
+def test_blink_check_matching_shapes():
+    a = np.zeros((10, 10, 3), dtype=np.uint8)
+    b = a.copy()
+    b[0, 0] = 255
+    ratio, note = lib.blink_check(a, b)
+    check(abs(ratio - 0.01) < 1e-9 and note is None,
+          f"blink_check on matching shapes behaves like frame_diff_ratio ({ratio}, {note})")
+
+
+def test_blink_check_resized_panel_is_maximal_not_a_crash():
+    # A real bug found against a real daemon: a table still growing rows
+    # between two "steady state" screenshots resizes the panel element.
+    # This must be reported as the worst possible blink ratio, never raise.
+    a = np.zeros((10, 10, 3), dtype=np.uint8)
+    b = np.zeros((12, 10, 3), dtype=np.uint8)
+    ratio, note = lib.blink_check(a, b)
+    check(ratio == 1.0 and note is not None and "resized" in note,
+          f"a panel resize is reported as ratio=1.0 with an explanatory note ({ratio}, {note!r})")
+    check(not lib.no_blink_ok(ratio),
+          "a resized-panel ratio of 1.0 always fails the no_blink threshold")
+
+
 def test_compare_png_files_roundtrip():
     with tempfile.TemporaryDirectory() as d:
         a = np.zeros((20, 20, 3), dtype=np.uint8)
@@ -281,6 +303,8 @@ TESTS = [
     test_frame_diff_ratio_below_threshold,
     test_frame_diff_ratio_above_threshold,
     test_frame_diff_ratio_shape_mismatch,
+    test_blink_check_matching_shapes,
+    test_blink_check_resized_panel_is_maximal_not_a_crash,
     test_compare_png_files_roundtrip,
     test_png_bytes_to_array_roundtrip,
     test_blink_threshold_is_pinned_at_0_1_pct,

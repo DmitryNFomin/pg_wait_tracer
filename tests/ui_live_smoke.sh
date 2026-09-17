@@ -12,18 +12,35 @@
 #      class, fired repeatedly instead of once) so Lock:relation and
 #      Timeout:PgSleep keep showing up in every live tick, not just the
 #      first one.
-#   2. pg_wait_tracer --daemon --mode tiered on a fresh temp trace dir.
-#   3. ONE escalation via the control socket (unlimited daemon budget, a
-#      window as long as the whole run) so the exact-tier panels
-#      (Transitions, Waterfall, Scatter, Matrix) have data for the entire
-#      walk, not just its first minute.
-#   4. The Go bridge (web/pgwt) against root@localhost, pointed at the
+#   2. pg_wait_tracer --daemon --mode full on a fresh temp trace dir.
+#   3. The Go bridge (web/pgwt) against root@localhost, pointed at the
 #      daemon's trace dir.
-#   5. tests/ui_live_smoke.py --url against the bridge's local URL.
-#   6. Reverse-order teardown, propagating ui_live_smoke.py's exit code
+#   4. tests/ui_live_smoke.py --url against the bridge's local URL.
+#   5. Reverse-order teardown, propagating ui_live_smoke.py's exit code
 #      (verified: `exit N` inside a function whose EXIT trap's last command
 #      fails/succeeds still leaves the process exit code at N — bash keeps
 #      the code from the `exit` call that triggered the trap).
+#
+# DEVIATION from the issue's stated design ("Daemon in --mode tiered; trigger
+# one escalation ... so the exact-tier panels (Transitions, Waterfall,
+# Scatter, Matrix) have data"): measured on the gate box (2026-09-16),
+# src/daemon.c gates the query__execute__start/done and query__plan__*
+# USDT probes on `d->mode == PGWT_MODE_FULL` UNCONDITIONALLY -- an escalated
+# window under --mode tiered never attaches them (the gate is checked once
+# at daemon startup, not per-window). Executions/Waterfall/Scatter need
+# those markers (src/server.c handle_executions pairs EXEC_START/EXEC_END);
+# under tiered+escalate they showed "No executions for selected range" for
+# the whole run, confirmed by reading src/daemon.c's own comment ("Plan/
+# execute USDT probes remain full-mode-only, as before Stage 3"). Transitions
+# and Matrix do NOT need these (they read the plain wait-event stream) and
+# rendered correctly under tiered+escalate. --mode full has no escalation
+# concept (always full fidelity; pgwt_escalate() would return "escalation
+# requires --mode tiered"), so step 3's control-socket escalate is REMOVED,
+# not merely skipped. Flagged as a Design question for the owner: whether to
+# formally change the issue's design decision, or accept "no exact-tier data,
+# ever" as the correct tiered-mode UI state for these two tabs and lower the
+# bar for them specifically. Full mode is what makes today's evidence run
+# actually exercise all 11 tabs with real data.
 #
 # Requirements (gate box, tests/provision-runner.sh):
 #   - root, a running PostgreSQL with pg_stat_statements preloaded.
@@ -41,7 +58,28 @@
 # This script cannot be run on the Mac (no root, no PG, no BPF, no Linux) —
 # it is exercised by `bash -n` only until it runs on the box in phase 2.
 #
-# Usage: sudo tests/ui_live_smoke.sh [--pid POSTMASTER_PID]
+# LOCK DISCIPLINE (the gate box is shared): every CPU-using step this script
+# runs -- make, Chromium/Playwright, ffmpeg video muxing, pgbench, the
+# daemon -- MUST run inside `flock /tmp/pgwt-box-check.lock ...` on the box,
+# exactly like scripts/box-check.sh's own `sudo tests/run_all.sh` call. This
+# script does not grab the lock itself (run_all.sh's caller does, once, for
+# the whole live section); a one-off manual invocation on the box (as in
+# this file's own header example) MUST be wrapped the same way, e.g.:
+#   flock /tmp/pgwt-box-check.lock sudo tests/ui_live_smoke.sh --pg-version 17
+# A concurrent unlocked run caused transient test_cli misses for another
+# agent sharing this box (2026-09-17) -- never run this, or any manual
+# daemon/pgbench/bridge session, outside the lock.
+#
+# Usage: sudo tests/ui_live_smoke.sh [--pid POSTMASTER_PID] [--pg-version N]
+#
+# --pg-version N: on a multi-cluster box (the gate box runs PG 13/16/17/18
+# at once, one postgres process each) this picks the postmaster via
+# testutil.sh's find_postmaster --pg-version AND exports PGPORT=5400+N so
+# every psql/pgbench call below (Debian's pg_wrapper reads PGPORT, and it
+# survives sudo) targets that exact cluster instead of whichever "postgres"
+# pgrep happens to see first. Not currently passed down by run_all.sh's
+# LIVE_TESTS (which only forwards --pid) -- pass it directly when running
+# this script by hand on a multi-cluster box.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -53,15 +91,26 @@ SERVER="$PROJECT_DIR/pgwt-server"
 BRIDGE="$PROJECT_DIR/web/pgwt"
 
 PM_PID=""
+PG_MAJOR=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --pid) PM_PID="$2"; shift 2 ;;
-        *) echo "Usage: $0 [--pid POSTMASTER_PID]"; exit 1 ;;
+        --pg-version) PG_MAJOR="$2"; shift 2 ;;
+        *) echo "Usage: $0 [--pid POSTMASTER_PID] [--pg-version N]"; exit 1 ;;
     esac
 done
 
+if [[ -n "$PG_MAJOR" ]]; then
+    export PGPORT=$((5400 + PG_MAJOR))
+    echo "ui_live_smoke: PG major $PG_MAJOR -> PGPORT=$PGPORT"
+fi
+
 if [[ -z "$PM_PID" ]]; then
-    PM_PID=$(find_postmaster)
+    if [[ -n "$PG_MAJOR" ]]; then
+        PM_PID=$(find_postmaster --pg-version "$PG_MAJOR")
+    else
+        PM_PID=$(find_postmaster)
+    fi
 fi
 if [[ -z "$PM_PID" ]]; then
     echo "ERROR: cannot find postmaster PID"
@@ -76,10 +125,14 @@ for bin in "$TRACER" "$SERVER" "$BRIDGE"; do
     fi
 done
 
-# 10 min: generous over the observed Mac --mock walk (~3-4 min for all 11
-# tabs at 6 ticks each; the box adds real network/render latency). Override
-# for local iteration only -- never lower this in a gating run.
-DURATION_S="${PGWT_UI_LIVE_DURATION_S:-600}"
+# 30 min: measured on the gate box (2026-09-16/17), the real walk (real
+# network + a real --mode full daemon, vs. the Mac --mock walk's ~3-4 min)
+# took ~20-25 min end to end -- pgbench and the lock/sleep workload must
+# outlast the WHOLE walk, not just its first minute, or the last few tabs
+# (Waterfall, Scatter, Matrix) see a live window with no recent activity at
+# all and legitimately render empty. Override for local iteration only --
+# never lower this in a gating run.
+DURATION_S="${PGWT_UI_LIVE_DURATION_S:-1800}"
 PORT="${PGWT_UI_LIVE_PORT:-8384}"
 
 TRACE_DIR=$(mktemp -d /tmp/pgwt_ui_live_XXXXXX)
@@ -134,25 +187,6 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Send one JSON line to the control socket, print the one-line response.
-# Same idiom as tests/test_escalation.sh's ctl().
-ctl() {
-    python3 - "$SOCK" "$1" <<'PYEOF'
-import socket, sys
-s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-s.settimeout(5)
-s.connect(sys.argv[1])
-s.sendall((sys.argv[2] + "\n").encode())
-buf = b""
-while b"\n" not in buf:
-    chunk = s.recv(4096)
-    if not chunk:
-        break
-    buf += chunk
-sys.stdout.write(buf.decode().split("\n")[0])
-PYEOF
-}
-
 # GET a URL, exit 0 iff it answers 200. Python (not curl) to avoid adding a
 # new external-tool dependency on top of what the rest of the suite needs.
 url_ready() {
@@ -171,8 +205,17 @@ PYEOF
 echo "ui_live_smoke: initializing pgbench schema"
 pgbench -U postgres -d postgres -i -s 1 >>"$PGBENCH_LOG" 2>&1
 
-echo "ui_live_smoke: starting pgbench (4 clients, ${DURATION_S}s)"
-pgbench -U postgres -d postgres -c 4 -T "$DURATION_S" \
+echo "ui_live_smoke: starting pgbench (4 clients, ${DURATION_S}s, throttled)"
+# --rate: measured on the gate box, an UNTHROTTLED 4-client pgbench against
+# --mode full (every event captured, not sampled) for the full DURATION_S
+# grows the executions dataset large enough that Waterfall's "latest
+# execution" query stopped answering within the issue's 60s no-data budget
+# by the time the walk reached it (~15-20 min in). 25 tx/s keeps Lock/
+# Timeout/CPU/IO wait classes and a growing executions list genuinely
+# present (the issue's actual requirement) without the volume a smoke test
+# has no need to generate. Also lighter on shared box CPU -- see the lock-
+# discipline note above the file.
+pgbench -U postgres -d postgres -c 4 -T "$DURATION_S" --rate=25 \
     >>"$PGBENCH_LOG" 2>&1 &
 PGBENCH_PID=$!
 
@@ -222,15 +265,15 @@ finally:
 PYEOF
 WORKLOAD_PID=$!
 
-# ── 2. Daemon (tiered, unlimited escalation budget) ─────────────────────────
+# ── 2. Daemon (--mode full: see the DEVIATION note above) ───────────────────
 # --daemon: long-running (reconnect on PG restart), no --count/--duration
 # bound -- the UI walk's own length decides how long we need it, not a fixed
 # capture budget (test_escalation.sh's short-lived --duration daemon is the
-# wrong shape here). unlimited budget: a single long escalation below must
-# never be denied by a budget mismatch with DURATION_S.
-echo "ui_live_smoke: starting daemon (--mode tiered, trace dir $TRACE_DIR)"
+# wrong shape here). --mode full is always full-fidelity from the first
+# tick -- no escalate call, no budget, no warm-up window needed.
+echo "ui_live_smoke: starting daemon (--mode full, trace dir $TRACE_DIR)"
 "$TRACER" --daemon --pid "$PM_PID" -i 1 -T "$TRACE_DIR" \
-    --mode tiered --sample-rate 50 --escalation-budget unlimited -v \
+    --mode full -v \
     >/dev/null 2>"$DAEMON_LOG" &
 TRACER_PID=$!
 
@@ -250,15 +293,7 @@ if [[ ! -S "$SOCK" ]]; then
 fi
 echo "ui_live_smoke: control socket ready"
 
-# ── 3. One escalation, spanning the whole run ───────────────────────────────
-ESC=$(ctl "{\"cmd\":\"escalate\",\"duration_s\":$DURATION_S,\"reason\":\"ui_live_smoke\"}")
-echo "ui_live_smoke: escalate response: $ESC"
-if ! echo "$ESC" | python3 -c "import json,sys; sys.exit(0 if json.load(sys.stdin).get('ok') else 1)"; then
-    echo "ERROR: escalation was not granted"
-    exit 1
-fi
-
-# ── 4. Go bridge ─────────────────────────────────────────────────────────────
+# ── 3. Go bridge ─────────────────────────────────────────────────────────────
 echo "ui_live_smoke: starting Go bridge on :$PORT against root@localhost"
 "$BRIDGE" --port "$PORT" --trace-dir "$TRACE_DIR" --server-path "$SERVER" \
     root@localhost >"$BRIDGE_LOG" 2>&1 &
@@ -283,7 +318,7 @@ if ! url_ready "${BASE_URL}session"; then
 fi
 echo "ui_live_smoke: bridge ready at $BASE_URL"
 
-# ── 5. The walk ───────────────────────────────────────────────────────────────
+# ── 4. The walk ───────────────────────────────────────────────────────────────
 python3 "$SCRIPT_DIR/ui_live_smoke.py" --url "$BASE_URL"
 SMOKE_RC=$?
 

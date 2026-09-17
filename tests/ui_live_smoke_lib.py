@@ -73,6 +73,21 @@ def frame_diff_ratio(frame_a, frame_b):
     return float(np.count_nonzero(diff)) / diff.size
 
 
+def blink_check(frame_a, frame_b):
+    """frame_diff_ratio(), except a PANEL RESIZE between the two frames
+    (e.g. a table still growing rows a few hundred ms after its first row
+    appeared -- observed for real against a real daemon under real load;
+    tests/mock_server.py's fixed row counts never exercise this) is treated
+    as the worst possible instability (ratio 1.0) instead of raising --
+    the panel visibly changing shape mid-"steady state" IS a no_blink
+    failure, never a crash that drops the rest of the tab's ticks.
+
+    Returns (ratio, note); note is None when the shapes matched."""
+    if frame_a.shape != frame_b.shape:
+        return 1.0, f"panel resized between frames: {frame_a.shape} -> {frame_b.shape}"
+    return frame_diff_ratio(frame_a, frame_b), None
+
+
 def compare_png_files(path_a, path_b):
     """frame_diff_ratio() for two PNGs already on disk."""
     return frame_diff_ratio(load_png_array(path_a), load_png_array(path_b))
