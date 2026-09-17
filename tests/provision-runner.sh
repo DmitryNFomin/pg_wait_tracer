@@ -175,10 +175,29 @@ test -r /sys/kernel/btf/vmlinux || {
 # ---------------------------------------------------------------------------
 # 3. PGDG apt repo.
 # ---------------------------------------------------------------------------
-if [[ ! -f /etc/apt/sources.list.d/pgdg.list ]]; then
+# The installed apt.postgresql.org.sh (Ubuntu 24.04 / Debian's postgresql-
+# common) writes the deb822-format /etc/apt/sources.list.d/pgdg.sources, not
+# the legacy pgdg.list it actively deletes -- checking for pgdg.list here
+# (found while proving idempotence this round) always missed, so this
+# "idempotent" step actually re-ran the script's apt-get update + repo
+# rewrite on EVERY provisioning run rather than skipping when already done.
+# Harmless in effect, but not what the comment/idempotence design claimed.
+if [[ ! -f /etc/apt/sources.list.d/pgdg.sources ]]; then
     log "adding PGDG apt repo"
     apt-get install -y -qq postgresql-common >/dev/null
-    yes | /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y >/dev/null
+    # `-y` already makes the upstream script non-interactive; `yes` feeding
+    # its stdin is belt-and-suspenders, but under pipefail (added this
+    # round) that pipe's `yes` side gets a real SIGPIPE (rc 141) the moment
+    # the script stops reading stdin, which made pipefail fail this whole
+    # line even though the script itself succeeded. `|| true` swallows
+    # that, then the actual result is checked explicitly below, same
+    # idempotent-verification style as every other step in this script --
+    # a genuine failure (repo file never appears) is still caught, loudly.
+    yes | /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y >/dev/null || true
+    [[ -f /etc/apt/sources.list.d/pgdg.sources ]] || {
+        echo "FATAL: PGDG apt repo setup did not produce /etc/apt/sources.list.d/pgdg.sources" >&2
+        exit 1
+    }
 else
     log "PGDG apt repo already present"
 fi
