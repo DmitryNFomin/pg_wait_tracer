@@ -159,6 +159,17 @@ jobs:
       cancel-in-progress: false
     timeout-minutes: 60
     steps:
+      # Real bug found running this against the box for the first time: this
+      # is a PERSISTENT runner (not ephemeral) reusing the same
+      # $GITHUB_WORKSPACE across jobs, and every test step below runs test
+      # code under `sudo` (root) — a prior job's sudo-run python3 leaves
+      # root-owned tests/__pycache__/*.pyc behind. The unprivileged 'runner'
+      # user that owns the workspace can't unlink those, so actions/checkout
+      # (which starts by cleaning the workspace) fails outright with EACCES
+      # before this job does anything of its own. Reclaim ownership first.
+      - name: Reclaim workspace ownership (previous job may have left root-owned files)
+        run: sudo chown -R "$(id -un):$(id -gn)" "$GITHUB_WORKSPACE" 2>/dev/null || true
+
       - uses: actions/checkout@v4
 
       - name: Record start time (for wall-time measurement)
@@ -294,10 +305,15 @@ jobs:
         if: always()
         run: |
           END=$(date +%s)
-          START=${{ steps.start_time.outputs.epoch }}
-          DUR=$((END - START))
-          echo "sampled-overhead job wall time: ${DUR}s ($((DUR / 60))m $((DUR % 60))s) — plan target: under 900s (15m)" \
-            | tee -a "$GITHUB_STEP_SUMMARY"
+          START="${{ steps.start_time.outputs.epoch }}"
+          if [ -z "$START" ]; then
+            echo "sampled-overhead job wall time: unknown (an earlier step failed before start time was recorded)" \
+              | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            DUR=$((END - START))
+            echo "sampled-overhead job wall time: ${DUR}s ($((DUR / 60))m $((DUR % 60))s) — plan target: under 900s (15m)" \
+              | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
 
   capture-smoke:
     # Phase T0 (Trust Milestone, TST-1/2): run the REAL capture path against
@@ -351,6 +367,17 @@ jobs:
       matrix:
         pg: [13, 16, 17, 18]
     steps:
+      # Real bug found running this against the box for the first time: this
+      # is a PERSISTENT runner (not ephemeral) reusing the same
+      # $GITHUB_WORKSPACE across jobs, and every test step below runs test
+      # code under `sudo` (root) — a prior job's sudo-run python3 leaves
+      # root-owned tests/__pycache__/*.pyc behind. The unprivileged 'runner'
+      # user that owns the workspace can't unlink those, so actions/checkout
+      # (which starts by cleaning the workspace) fails outright with EACCES
+      # before this job does anything of its own. Reclaim ownership first.
+      - name: Reclaim workspace ownership (previous job may have left root-owned files)
+        run: sudo chown -R "$(id -un):$(id -gn)" "$GITHUB_WORKSPACE" 2>/dev/null || true
+
       - uses: actions/checkout@v4
 
       # tests/provision-runner.sh writes this marker once the gate box has
