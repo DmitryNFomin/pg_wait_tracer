@@ -6,6 +6,15 @@
 # the gate for capture-behavior phases (Trust Milestone standing rule): an
 # all-skip run used to exit 0 (TST-4), which is how "green" runs happened on
 # boxes where nothing live actually executed. Use it on the real test box.
+#
+# PGPORT: derived automatically from the resolved PG major (explicit
+# --pg-version, or the highest version auto-detected) using the multi-PG
+# gate box's port convention, cluster N -> port PGWT_PG_PORT_BASE+N
+# (base defaults to 5400, so PG13 -> 5413, PG18 -> 5418; see
+# tests/provision-runner.sh). This makes the run self-sufficient — it no
+# longer depends on the caller's/box's ambient PGPORT, which used to be
+# left over from whichever cluster a previous run last targeted. Set
+# PGWT_PGPORT to override the derived value explicitly.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -49,6 +58,28 @@ fi
 # find_postmaster does.
 if [[ -z "$PG_VERSION" && -n "$PM_PID" ]]; then
     PG_VERSION=$(readlink "/proc/$PM_PID/exe" 2>/dev/null | grep -oP 'postgresql/\K\d+(?=/)' || true)
+fi
+
+# PGPORT: --pid/find_postmaster above only pick which postmaster gets
+# *traced*. The workload side (pgbench/psql invoked with no explicit -p by
+# the tests below) instead routes through Debian's pg_wrapper via this env
+# var alone, so a stale PGPORT left over from a previous run silently
+# traces one cluster while the load runs against another — found on the
+# gate box: a PG13 run traced PG13 correctly but every capture came back
+# CPU*-only/empty because the workload was hitting whatever cluster
+# PGPORT happened to point at (see docs/DEV_LOOP_PLAN.md step 1). Make this
+# self-sufficient instead of relying on the caller's shell environment:
+# derive PGPORT from the resolved PG_VERSION and the provisioning
+# convention (tests/provision-runner.sh: cluster N -> port
+# PGWT_PG_PORT_BASE+N, default base 5400, so PG13 -> 5413, PG18 -> 5418).
+# PGWT_PGPORT lets a caller override this explicitly when needed.
+PG_PORT_BASE="${PGWT_PG_PORT_BASE:-5400}"
+if [[ -n "${PGWT_PGPORT:-}" ]]; then
+    export PGPORT="$PGWT_PGPORT"
+    echo "PGPORT=$PGPORT (caller override via PGWT_PGPORT)"
+elif [[ -n "$PG_VERSION" ]]; then
+    export PGPORT=$((PG_PORT_BASE + PG_VERSION))
+    echo "PGPORT=$PGPORT (derived: PGWT_PG_PORT_BASE=$PG_PORT_BASE + PG$PG_VERSION)"
 fi
 
 passed=0

@@ -108,11 +108,11 @@ keep only deterministic jobs. Stops the hardening tax immediately.
   for the `sudo` target session, independent of `env_reset`). So
   `tests/run_all.sh`'s and the live tests' plain `psql`/`pgbench` calls (no
   explicit `-p`) already target the right cluster once `/etc/environment`
-  sets `PGPORT=54<major>` on the box — no code changes needed for this part
-  of the step-1 plan's "select the PG cluster by port" idea. The box's
-  default is `PGPORT=5418` (matches `run_all.sh`'s own highest-version
-  auto-detect when no `--pg-version` is given); switch it for other versions
-  until step 4's ephemeral-VM `--pg-version`-aware plumbing lands.
+  sets `PGPORT=54<major>` on the box — relying on the caller/box's ambient
+  `/etc/environment` for this turned out to be a real gap (item 8 below);
+  `tests/run_all.sh` now derives and exports `PGPORT` itself from the
+  resolved PG major, so this is self-sufficient rather than something an
+  operator has to remember to set by hand.
 - `make box-check` (default, PG=all) and `make box-check PG=13` both ran to
   completion against the real box; 8/8 PostgreSQL versions×ports verified
   with `psql -c 'select version()'`. Both were iterated on and most gaps
@@ -205,11 +205,40 @@ provisioning gaps):**
    the non-reproducibility — flagged as box-contention noise, not a code
    bug.
 
+8. **New finding**, found while re-verifying `PG=13` after item 4's floors
+   landed: `--pid`/`find_postmaster` in `tests/run_all.sh` only choose which
+   postmaster gets *traced* — the workload side (`pgbench`/`psql`, invoked
+   with no explicit `-p` by the live tests) instead routes through Debian's
+   `pg_wrapper` via the ambient `PGPORT` alone. A `PG=13` run traced PG13
+   correctly but every capture came back `CPU*`-only/empty, because
+   `/etc/environment`'s `PGPORT` still pointed at PG18 from a previous run —
+   the tracer and the workload were silently targeting two different
+   clusters. **Fixed**: `run_all.sh` now derives and exports `PGPORT` itself
+   for the whole run from the resolved PG major and the provisioning port
+   convention (`PGWT_PG_PORT_BASE` + major, default base 5400, so PG13 ->
+   5413, PG18 -> 5418; `PGWT_PGPORT` overrides explicitly), printed in the
+   run header — no longer dependent on the box's ambient environment.
+9. **New finding, not fixed here**: Ubuntu's `unattended-upgrades` fired
+   automatically mid-`box-check` on this box (2026-09-17, ~06:50 UTC),
+   upgrading `libc6` and other core packages, installing a new kernel, and
+   — via `needrestart` — bouncing all four PostgreSQL clusters plus core
+   system services (`rsyslog`, `systemd-networkd/resolved/journald`)
+   without warning. This left the box in a `reboot-required` state (new
+   kernel installed, old kernel still running) and produced cascading,
+   misleading test failures (empty captures) unrelated to any code or test
+   change. A persistent, shared gate box must not run unattended background
+   package upgrades — `unattended-upgrades` needs to be disabled in
+   provisioning. That provisioning change is being made separately (the
+   `ui-live-smoke`/#93 branch owns `tests/provision-runner.sh`), not here.
+
 None of the still-open items (5, 6, 7) were modified or hardened, per
 CLAUDE.md. Items 1–4 were fixed because they were real, reproducible,
 provisioning-independent bugs in the test harness itself that the task's
 "fix provisioning until it passes" step made it possible to actually
-exercise for the first time.
+exercise for the first time. Item 8 is the same category, found one layer
+deeper once item 4 was in place. Item 9 is a box/provisioning-level finding,
+not a test-harness bug — flagged for the owner and the branch that owns
+provisioning.
 
 **Noise characterization (2026-09-16, cx33 shared vCPU, PG 17, port 5417,
 9 pairs, `--characterize`, same methodology as
