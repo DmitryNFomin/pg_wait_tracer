@@ -50,7 +50,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ui_live_smoke_lib as lib
 
 try:
-    from playwright.sync_api import sync_playwright, TimeoutError as PWTimeoutError
+    from playwright.sync_api import (sync_playwright, TimeoutError as PWTimeoutError,
+                                     Error as PWError)
 except ImportError:
     print("ERROR: pip install playwright && playwright install chromium",
           file=sys.stderr)
@@ -387,6 +388,22 @@ def _wait_for_tick(page, target_count, timeout_s):
         return False
 
 
+def _safe_panel_screenshot(page, tab_id):
+    """Re-queries the panel element fresh and screenshots it, returning None
+    (never raising) if the element is missing or gets detached from the DOM
+    mid-call -- observed for real (Waterfall/Matrix/Scatter re-mounting their
+    host div when the underlying execution/transition identity rotates under
+    continuous real load); the caller treats None as maximal instability,
+    not a skip."""
+    panel = page.query_selector(_PANEL_ELEMENT_SELECTOR[tab_id])
+    if panel is None:
+        return None
+    try:
+        return panel.screenshot()
+    except PWError:
+        return None
+
+
 def _poll_render_check(page, tab_id, timeout_s=2.0, interval_ms=150):
     """Evaluates PANEL_CHECKS[tab_id], retrying briefly on failure. A tick's
     re-render (ECharts dispose+init when the underlying data identity
@@ -474,23 +491,31 @@ def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
             if not render_ok:
                 raise SmokeFailure(f"tick {i}: {render_detail}")
 
-            panel = page.query_selector(_PANEL_ELEMENT_SELECTOR[tab_id])
-            if panel is None:
-                raise SmokeFailure(
-                    f"tick {i}: panel element {_PANEL_ELEMENT_SELECTOR[tab_id]!r} vanished")
-            frame_a = panel.screenshot()
+            frame_a = _safe_panel_screenshot(page, tab_id)
             page.wait_for_timeout(120)  # same data window, before the next tick
-            frame_b = panel.screenshot()
-            ratio, blink_note = lib.blink_check(
-                lib.png_bytes_to_array(frame_a), lib.png_bytes_to_array(frame_b))
+            frame_b = _safe_panel_screenshot(page, tab_id)
+            if frame_a is None or frame_b is None:
+                # A real find (heavy real load, not the mock): the panel's
+                # host DOM node itself can be torn down and rebuilt (not
+                # merely resized -- see blink_check's shape-mismatch case)
+                # between two "steady state" frames, e.g. Waterfall/Matrix
+                # re-mounting when the underlying execution/transition
+                # identity rotates under continuous pgbench traffic. That
+                # IS instability -- report the worst possible ratio, never
+                # crash on Playwright's "Element is not attached" error.
+                ratio, blink_note = 1.0, "panel element detached from the DOM between frames"
+            else:
+                ratio, blink_note = lib.blink_check(
+                    lib.png_bytes_to_array(frame_a), lib.png_bytes_to_array(frame_b))
             if blink_note:
                 print(f"  note [{tab_id}] tick {i}: {blink_note}")
             blink_ratios.append(ratio)
 
-            tick_path = os.path.join(tab_dir, f"tick-{i}.png")
-            with open(tick_path, "wb") as f:
-                f.write(frame_a)
-            tick_paths.append(tick_path)
+            if frame_a is not None:
+                tick_path = os.path.join(tab_dir, f"tick-{i}.png")
+                with open(tick_path, "wb") as f:
+                    f.write(frame_a)
+                tick_paths.append(tick_path)
 
             legend = page.evaluate(LEGEND_COLORS_JS)
             if legend:
