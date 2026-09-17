@@ -481,16 +481,35 @@ the same read as the 2026-09-16 run, just with tighter IQRs this time.
   the gate-box jobs run `sudo tests/ci_smoke.sh` / `sudo
   tests/sampled_overhead_gate.py`, same as an agent's `make box-check`).
   Mitigations, since this is meaningfully more privileged than a typical
-  hosted runner: (1) the fork-PR guard on every self-hosted job
-  (`if: github.event_name != 'pull_request' || ... head.repo.full_name ==
-  github.repository`) — no fork's code, and so no unreviewed PR, ever runs
-  on this runner; (2) this repository requires owner/maintainer approval
-  for a first-time contributor's workflow run regardless (GitHub's default
-  for public repos — outside collaborators cannot get a workflow to
-  execute unapproved); (3) the box holds only ephemeral PG test clusters
-  (13/16/17/18, pgbench-seeded, no production or customer data) and the
-  runner's own registration — there is nothing on it worth exfiltrating
-  beyond re-provisioning cost.
+  hosted runner: (1) fork PRs never reach the self-hosted runner at all —
+  `runs-on` itself resolves to `ubuntu-latest` for a `pull_request` event
+  whose head repo isn't this one, so the `self-hosted`/`gate-box` labels
+  are never even requested for that job instance (see "Fork PRs" below —
+  the job still runs, on hosted, but only to fail loudly); (2) this
+  repository's actual setting (owner-configured 2026-09-17) is **require
+  approval for all outside collaborators**, not GitHub's weaker
+  first-time-contributor default — every outside collaborator's workflow
+  run needs a maintainer's explicit approval before anything executes,
+  every time, not just their first PR; (3) the box holds only ephemeral PG
+  test clusters (13/16/17/18, pgbench-seeded, no production or customer
+  data) and the runner's own registration — there is nothing on it worth
+  exfiltrating beyond re-provisioning cost.
+- **Fork PRs — reviewer round 2, implemented option (c)**: the earlier
+  job-level `if:` skip (guard (e) above) had a real hole — GitHub scores a
+  *skipped* required check as passing, so a fork PR could merge with zero
+  capture/overhead coverage. Fixed: the five gate jobs (`sampled-overhead`,
+  `capture-smoke` ×4) always run; `runs-on` is a dynamic expression that
+  picks `ubuntu-latest` for a fork PR and `[self-hosted, gate-box]`
+  otherwise, and each job's first step is `if:`-gated to fire ONLY for a
+  fork PR, printing "gate checks run only from a branch in this
+  repository; a maintainer must push this PR's head to agent/<slug> and
+  re-run" and exiting 1 — so the required check is red, not
+  green-by-omission, until a maintainer re-hosts it. Every other step is
+  skipped once that one fails (default GitHub Actions behavior for a
+  failed step with no `continue-on-error`). Each job's `concurrency.group`
+  also forks to a PR-numbered group for that path specifically so a fork
+  PR's instant, doomed-to-fail run can never join (and thus cancel, per
+  the earlier finding) a real, already-pending gate-box run's group.
 - **Rebased onto master** (2026-09-18) after PR #111 (gate box) and PR #112
   (live UI smoke: Go/Playwright/Chromium provisioning, unattended-upgrades
   disable, `flock -w 600`, `actions/setup-python` in `build-and-unit`, and
@@ -546,6 +565,29 @@ the same read as the 2026-09-16 run, just with tighter IQRs this time.
   certain" ask fits safely in this correction. Left on hosted, with this
   evidence recorded so a dedicated follow-up can move it without
   re-deriving the case for it.
+- **Reviewer round 2 (fail-safe findings, all closed on the branch)**: (1)
+  the fallback install path's `pg_dropcluster`-everything is destructive on
+  any self-hosted runner that merely lacks the `/etc/pgwt-gate-box` marker,
+  not just a genuinely fresh hosted one — both gate jobs now refuse loudly
+  (`runner.environment != 'github-hosted'` and marker missing → FATAL)
+  instead of assuming "no marker" means "safe to wipe"; (2) every
+  `exec 9>...; flock 9` became a bounded `flock -w 900 9` (15 min) with a
+  loud FATAL on timeout instead of blocking forever, `capture-smoke` gained
+  `timeout-minutes: 30` (previously unset — only `sampled-overhead` had
+  one), and the two `Resolve gate-box PostgreSQL port + bpftool` probe
+  steps (previously unlocked) now hold the lock too, since
+  `provision-runner.sh` restarts clusters inside it; (3) both gate jobs
+  self-heal a root-created `0644` lock file
+  (`[ -w /tmp/pgwt-box-check.lock ] || sudo sh -c 'touch ... && chmod
+  0666 ...'`) as an early step, and `scripts/box-check.sh`'s remote command
+  does the same before its own `flock`; (4) `provision-runner.sh` now
+  writes the sudoers drop-in to a temp file, `visudo -cf`s it, then
+  `install`s it (never validates-in-place against the live file), starts
+  the runner service if the unit exists but is inactive instead of
+  logging "leaving it running" unconditionally, and notes that the
+  registration token is briefly visible via `/proc/*/cmdline` during
+  `config.sh` (GitHub's own documented invocation; the token is
+  single-use, ~1h).
 
 **Remaining work:**
 1. Move `snapshots` to the gate box — Chromium is now provisioned there
@@ -573,12 +615,15 @@ the same read as the 2026-09-16 run, just with tighter IQRs this time.
    file it as a product bug (and list it) or characterize it as noise and
    move it off the gate box's serial path.
 
-**Acceptance:** three consecutive green master runs with the gate jobs on
-the box — **met** (see run ids above); `sampled-overhead` wall time under
-15 min — **met** for the gate's own execution (~8m48s), though the naive
-job-level stopwatch can read much higher under concurrent box load (see
-above; not a regression, a measurement-methodology note for whoever reads
-that step's output next).
+**Acceptance:** met on the branch via four `workflow_dispatch` runs with the
+gate jobs on the box (see run ids above) — not master runs; the master-run
+half of "three consecutive green master runs" completes on merge, once this
+branch's PR lands and a push to master triggers `ci.yml` for real.
+`sampled-overhead` wall time under 15 min — **met** for the gate's own
+execution (~8m48s–9m31s across the runs), though the naive job-level
+stopwatch can read much higher under concurrent box load (see above; not a
+regression, a measurement-methodology note for whoever reads that step's
+output next).
 
 ---
 

@@ -20,6 +20,10 @@ A PR is ready when ALL of these are true and the evidence is in the PR body:
 1. `make check` passed (full, not `--fast`) on the final tree.
 2. `make box-check` passed — paste the run_all summary (last ~20 lines), which
    includes the live-UI-smoke one-line verdict (`tests/results/ui_live/summary.json`).
+   Carve-out: a branch touching only CI infrastructure (no `src/` change, no
+   test-assertion change) may substitute real `gh workflow run` evidence on
+   the gate box for `make box-check` — state that substitution explicitly in
+   the PR body.
 3. If `web/` changed: `make ui-gallery` ran; the `summary.json` counts and every
    `changed`/`added`/`removed` cell are listed with a one-line justification each.
 4. A fresh **reviewer** agent (`.claude/agents/reviewer.md`; `ui-reviewer.md`

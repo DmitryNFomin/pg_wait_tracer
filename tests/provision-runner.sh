@@ -467,11 +467,18 @@ if [[ "$OS" == "ubuntu" && -n "$RUNNER_TOKEN" ]]; then
     mkdir -p "$RUNNER_HOME"
     chown runner:runner "$RUNNER_HOME"
 
-    cat > /etc/sudoers.d/90-runner <<'EOF'
+    # Write-validate-install rather than write-then-validate-in-place: a
+    # syntax error must never leave a broken (or half-written, if the
+    # script died between `cat` and `visudo -cf`) file live in
+    # /etc/sudoers.d -- validate a private temp copy first, only `install`
+    # it once visudo has approved it.
+    SUDOERS_TMP=$(mktemp)
+    cat > "$SUDOERS_TMP" <<'EOF'
 runner ALL=(ALL) NOPASSWD:ALL
 EOF
-    chmod 0440 /etc/sudoers.d/90-runner
-    visudo -cf /etc/sudoers.d/90-runner
+    visudo -cf "$SUDOERS_TMP"
+    install -m 0440 -o root -g root "$SUDOERS_TMP" /etc/sudoers.d/90-runner
+    rm -f "$SUDOERS_TMP"
 
     if [[ ! -x "$RUNNER_HOME/config.sh" ]]; then
         log "installing actions-runner $RUNNER_VERSION binaries"
@@ -489,6 +496,14 @@ EOF
         log "runner already registered — leaving registration alone (remove $RUNNER_HOME/.runner and re-run with a fresh token to re-register)"
     else
         log "registering runner 'pgwt-gate' with GitHub (labels: self-hosted,linux,x64,gate-box)"
+        # Note: GitHub's documented config.sh invocation takes --token on
+        # the command line, so the registration token is briefly visible to
+        # anyone who can read /proc/*/cmdline on this box while config.sh
+        # runs (root and the 'runner' user itself, given the NOPASSWD sudo
+        # above). This is GitHub's own documented mechanism, not something
+        # this script can avoid; the token is single-use and expires in
+        # ~1h (minted just before this script is invoked — see the comment
+        # at the top of this block).
         sudo -u runner "$RUNNER_HOME/config.sh" \
             --unattended \
             --url "$RUNNER_REPO_URL" \
@@ -498,8 +513,14 @@ EOF
             --work _work
     fi
 
-    if systemctl list-unit-files 'actions.runner.*.service' --no-legend 2>/dev/null | grep -q .; then
-        log "runner systemd service already installed — leaving it running"
+    RUNNER_UNIT=$(systemctl list-unit-files 'actions.runner.*.service' --no-legend 2>/dev/null | awk '{print $1}' | head -1)
+    if [[ -n "$RUNNER_UNIT" ]]; then
+        if systemctl is-active --quiet "$RUNNER_UNIT"; then
+            log "runner systemd service ($RUNNER_UNIT) already installed and active"
+        else
+            log "runner systemd service ($RUNNER_UNIT) installed but inactive — starting it"
+            systemctl start "$RUNNER_UNIT"
+        fi
     else
         log "installing + starting the runner systemd service"
         (cd "$RUNNER_HOME" && ./svc.sh install runner && ./svc.sh start)

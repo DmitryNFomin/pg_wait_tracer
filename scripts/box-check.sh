@@ -93,12 +93,19 @@ sudo_env=""
 preflight="if ! bpftool version >/dev/null 2>&1 || [ ! -r /sys/kernel/btf/vmlinux ]"
 preflight="$preflight; then echo \"gate box needs re-provisioning after a kernel change: run tests/provision-runner.sh ubuntu on the box\"; exit 2; fi;"
 # shellcheck disable=SC2029
+# Lock file self-heal (reviewer round 2): a root-created 0644
+# /tmp/pgwt-box-check.lock (e.g. from a bare `provision-runner.sh` run
+# before its own chmod fix, or a fresh /tmp after a reboot) wedges any
+# non-root caller's `flock`/`exec 9>` against it -- including ci.yml's
+# gate-box jobs, which run as the unprivileged 'runner' user. box-check.sh
+# itself runs as the box's ssh user (root by convention), so this heals it
+# for everyone rather than relying on provision-runner.sh having run first.
 # make pgwt-client: builds web/pgwt (the Go bridge) -- `make` alone (the
 # `all` target) only builds the daemon + pgwt-server. Not needed until
 # issue #93's live-UI-smoke test (tests/ui_live_smoke.sh checks for
 # web/pgwt and fails loudly if it is missing, same as the other binaries).
 ssh -o BatchMode=yes "$target" \
-    "cd '$remote_dir' && flock /tmp/pgwt-box-check.lock bash -c '$preflight make -j\$(nproc) && make -C tests && make pgwt-client && sudo env$sudo_env tests/run_all.sh --require-live $pgarg'" \
+    "cd '$remote_dir' && ([ -w /tmp/pgwt-box-check.lock ] || sudo sh -c 'touch /tmp/pgwt-box-check.lock && chmod 0666 /tmp/pgwt-box-check.lock') && flock /tmp/pgwt-box-check.lock bash -c '$preflight make -j\$(nproc) && make -C tests && make pgwt-client && sudo env$sudo_env tests/run_all.sh --require-live $pgarg'" \
     2>&1 | tee "$log"
 rc=${PIPESTATUS[0]}
 
