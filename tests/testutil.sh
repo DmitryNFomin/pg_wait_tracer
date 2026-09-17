@@ -8,6 +8,26 @@
 #   find_postmaster                   # highest PG version available
 #   find_postmaster --pg-version 16   # specific PG version
 
+# postmaster_version PID
+# Resolves PID's PostgreSQL major version. Tries the Debian/Ubuntu PGDG
+# layout's binary path first (/usr/lib/postgresql/<N>/bin/postgres); falls
+# back to `postgres --version` so non-Debian layouts (RPM: /usr/pgsql-<N>/
+# bin/postgres, or anything else non-standard) still resolve. Outputs the
+# version to stdout. Returns 1 (no output) if it can't be determined.
+postmaster_version() {
+    local pid="$1"
+    local exe
+    exe=$(readlink "/proc/$pid/exe" 2>/dev/null) || return 1
+    local ver
+    ver=$(echo "$exe" | grep -oP 'postgresql/\K\d+(?=/)')
+    if [[ -z "$ver" ]]; then
+        ver=$("$exe" --version 2>/dev/null | grep -oP 'PostgreSQL\)?\s+\K\d+')
+    fi
+    [[ -z "$ver" ]] && return 1
+    echo "$ver"
+    return 0
+}
+
 # find_postmaster [--pg-version N]
 # Finds the postmaster PID. Returns 0 on success, 1 on failure.
 # Outputs the PID to stdout.
@@ -31,17 +51,8 @@ find_postmaster() {
         parent_comm=$(cat /proc/$ppid/comm 2>/dev/null)
         [[ "$parent_comm" == "postgres" ]] && continue
 
-        # Get version from exe path: /usr/lib/postgresql/18/bin/postgres
-        local exe
-        exe=$(readlink /proc/$pid/exe 2>/dev/null) || continue
         local ver
-        ver=$(echo "$exe" | grep -oP 'postgresql/\K\d+(?=/)')
-
-        # Fallback: run postgres --version
-        if [[ -z "$ver" ]]; then
-            ver=$("$exe" --version 2>/dev/null | grep -oP 'PostgreSQL\)?\s+\K\d+')
-        fi
-        [[ -z "$ver" ]] && continue
+        ver=$(postmaster_version "$pid") || continue
 
         if [[ -n "$target_version" ]]; then
             if [[ "$ver" == "$target_version" ]]; then

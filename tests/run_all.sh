@@ -7,14 +7,12 @@
 # all-skip run used to exit 0 (TST-4), which is how "green" runs happened on
 # boxes where nothing live actually executed. Use it on the real test box.
 #
-# PGPORT: derived automatically from the resolved PG major (explicit
-# --pg-version, or the highest version auto-detected) using the multi-PG
-# gate box's port convention, cluster N -> port PGWT_PG_PORT_BASE+N
-# (base defaults to 5400, so PG13 -> 5413, PG18 -> 5418; see
-# tests/provision-runner.sh). This makes the run self-sufficient — it no
-# longer depends on the caller's/box's ambient PGPORT, which used to be
-# left over from whichever cluster a previous run last targeted. Set
-# PGWT_PGPORT to override the derived value explicitly.
+# PGPORT: derived automatically from the resolved postmaster's own
+# postmaster.pid (falling back to the multi-PG gate box's port convention,
+# cluster N -> port PGWT_PG_PORT_BASE+N, only if that can't be read). This
+# makes the run self-sufficient — it no longer depends on the caller's/box's
+# ambient PGPORT, which used to be left over from whichever cluster a
+# previous run last targeted. Set PGWT_PGPORT to override explicitly.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -23,11 +21,12 @@ source "$SCRIPT_DIR/testutil.sh"
 
 PM_PID=""
 PG_VERSION=""
+PG_VERSION_EXPLICIT=0
 REQUIRE_LIVE=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --pid) PM_PID="$2"; shift 2 ;;
-        --pg-version) PG_VERSION="$2"; shift 2 ;;
+        --pg-version) PG_VERSION="$2"; PG_VERSION_EXPLICIT=1; shift 2 ;;
         --require-live) REQUIRE_LIVE=1; shift ;;
         *) echo "Usage: $0 [--pid POSTMASTER_PID] [--pg-version N] [--require-live]"; exit 1 ;;
     esac
@@ -41,9 +40,18 @@ if [[ -z "$PM_PID" ]] && pgrep -x postgres > /dev/null 2>&1; then
         PM_PID=$(find_postmaster)
     fi
     if [[ -n "$PM_PID" ]]; then
-        local_ver=$(readlink /proc/$PM_PID/exe 2>/dev/null | grep -oP 'postgresql/\K\d+(?=/)' || true)
+        local_ver=$(postmaster_version "$PM_PID" || true)
         echo "Auto-detected postmaster PID $PM_PID (PostgreSQL ${local_ver:-unknown})"
     fi
+fi
+
+# A caller-requested --pg-version that matched no running postmaster must
+# refuse loudly, not silently fall through with PID_ARG empty (that used to
+# make every live test skip instead of failing the run the caller actually
+# asked for).
+if [[ "$PG_VERSION_EXPLICIT" -eq 1 && -z "$PM_PID" ]]; then
+    echo "ERROR: --pg-version $PG_VERSION requested but no running PostgreSQL $PG_VERSION postmaster was found" >&2
+    exit 1
 fi
 
 PID_ARG=""
@@ -54,10 +62,11 @@ fi
 # PG_VERSION drives LIVE_TESTS' per-test minimum-version gating (Step 4)
 # below. --pg-version already sets it; an explicit --pid or a bare
 # auto-detect (no --pg-version) both leave it unset, so derive it from the
-# resolved postmaster's binary path the same way testutil.sh's
-# find_postmaster does.
+# resolved postmaster's binary path via the same testutil.sh helper
+# find_postmaster uses (handles non-Debian layouts too, e.g. RPM's
+# /usr/pgsql-<N>/bin/postgres, via its `postgres --version` fallback).
 if [[ -z "$PG_VERSION" && -n "$PM_PID" ]]; then
-    PG_VERSION=$(readlink "/proc/$PM_PID/exe" 2>/dev/null | grep -oP 'postgresql/\K\d+(?=/)' || true)
+    PG_VERSION=$(postmaster_version "$PM_PID" || true)
 fi
 
 # PGPORT: --pid/find_postmaster above only pick which postmaster gets
@@ -67,19 +76,32 @@ fi
 # traces one cluster while the load runs against another — found on the
 # gate box: a PG13 run traced PG13 correctly but every capture came back
 # CPU*-only/empty because the workload was hitting whatever cluster
-# PGPORT happened to point at (see docs/DEV_LOOP_PLAN.md step 1). Make this
-# self-sufficient instead of relying on the caller's shell environment:
-# derive PGPORT from the resolved PG_VERSION and the provisioning
-# convention (tests/provision-runner.sh: cluster N -> port
-# PGWT_PG_PORT_BASE+N, default base 5400, so PG13 -> 5413, PG18 -> 5418).
-# PGWT_PGPORT lets a caller override this explicitly when needed.
+# PGPORT happened to point at (see docs/DEV_LOOP_PLAN.md step 1). Read the
+# port directly from the resolved postmaster's own postmaster.pid (line 4)
+# via its /proc/$PM_PID/cwd (postmaster's CWD is its data directory) — this
+# is authoritative and works for any layout, including a stock
+# single-cluster host on 5432, not just this box's 54<major> convention.
+# Fall back to that convention only if postmaster.pid can't be read.
+# PGWT_PGPORT lets a caller override either explicitly.
+PID_PORT=""
+if [[ -n "$PM_PID" ]]; then
+    PM_CWD=$(readlink "/proc/$PM_PID/cwd" 2>/dev/null || true)
+    if [[ -n "$PM_CWD" && -f "$PM_CWD/postmaster.pid" ]]; then
+        PID_PORT=$(sed -n '4p' "$PM_CWD/postmaster.pid" 2>/dev/null || true)
+        [[ "$PID_PORT" =~ ^[0-9]+$ ]] || PID_PORT=""
+    fi
+fi
+
 PG_PORT_BASE="${PGWT_PG_PORT_BASE:-5400}"
 if [[ -n "${PGWT_PGPORT:-}" ]]; then
     export PGPORT="$PGWT_PGPORT"
     echo "PGPORT=$PGPORT (caller override via PGWT_PGPORT)"
+elif [[ -n "$PID_PORT" ]]; then
+    export PGPORT="$PID_PORT"
+    echo "PGPORT=$PGPORT (read from postmaster.pid for PID $PM_PID)"
 elif [[ -n "$PG_VERSION" ]]; then
     export PGPORT=$((PG_PORT_BASE + PG_VERSION))
-    echo "PGPORT=$PGPORT (derived: PGWT_PG_PORT_BASE=$PG_PORT_BASE + PG$PG_VERSION)"
+    echo "PGPORT=$PGPORT (derived: PGWT_PG_PORT_BASE=$PG_PORT_BASE + PG$PG_VERSION, postmaster.pid unreadable)"
 fi
 
 passed=0
@@ -102,7 +124,10 @@ xpass=0
 # check the issue". Both are counted in the known_failing bucket; passes are
 # additionally counted as `xpass` so the summary line (e.g.
 # "known-failing 2 (1 xpass)") tells a reviewer to go re-check the issue
-# rather than assume the list is stale from the exit code alone.
+# rather than assume the list is stale from the exit code alone. A listed
+# test that could not even run (exit 126/127: not executable, or the file
+# is missing) is a broken test, not the tracked bug — that always counts as
+# a real failure regardless of KNOWN_FAILING membership.
 KNOWN_FAILING=(
     "test_multi_window|97"
     "test_daemon_server|98"
@@ -131,9 +156,18 @@ run_test() {
     echo "════════════════════════════════════════"
     echo "  $name"
     echo "════════════════════════════════════════"
+    local rc=0
+    "$@" || rc=$?
     local issue
     if issue=$(known_failing_issue "$name"); then
-        if "$@"; then
+        # A listed test that could not even run (126: found but not
+        # executable, 127: command/file not found) is not the known product
+        # bug being tracked — it's a broken test, and must fail the gate
+        # like any other test, not disappear into known_failing.
+        if [[ "$rc" -eq 126 || "$rc" -eq 127 ]]; then
+            echo "  FAILED TO RUN (exit $rc) — not the tracked bug (issue #$issue), counts as a real failure"
+            failed=$((failed + 1))
+        elif [[ "$rc" -eq 0 ]]; then
             echo "  UNEXPECTED PASS (issue #$issue) — intermittent or fixed; check the issue"
             known_failing=$((known_failing + 1))
             xpass=$((xpass + 1))
@@ -141,7 +175,7 @@ run_test() {
             echo "  KNOWN-FAILING (issue #$issue)"
             known_failing=$((known_failing + 1))
         fi
-    elif "$@"; then
+    elif [[ "$rc" -eq 0 ]]; then
         passed=$((passed + 1))
     else
         failed=$((failed + 1))

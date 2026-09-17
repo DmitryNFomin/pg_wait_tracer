@@ -21,7 +21,6 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-DEFAULT_CLOUD_INIT="$SCRIPT_DIR/cloud-init-rocky9-pg18.yaml"
 DEFAULT_TYPE="cpx42"    # 8 CPU / 16 GB
 DEFAULT_IMAGE="rocky-9"
 DEFAULT_NAME="pg-wait-tracer-test"
@@ -70,7 +69,8 @@ find_ssh_key_id() {
 
 cmd_create() {
     local server_type="$DEFAULT_TYPE"
-    local cloud_init="$DEFAULT_CLOUD_INIT"
+    local cloud_init=""
+    local cloud_init_explicit=0
     local image="$DEFAULT_IMAGE"
     local name="$DEFAULT_NAME"
     local location=""
@@ -78,13 +78,24 @@ cmd_create() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
             --type)       server_type="$2"; shift 2 ;;
-            --cloud-init) cloud_init="$2"; shift 2 ;;
+            --cloud-init) cloud_init="$2"; cloud_init_explicit=1; shift 2 ;;
             --image)      image="$2"; shift 2 ;;
             --name)       name="$2"; shift 2 ;;
             --location)   location="$2"; shift 2 ;;
             *) die "Unknown option: $1" ;;
         esac
     done
+
+    if [[ "$cloud_init_explicit" -eq 0 ]]; then
+        # Each recipe's user-data is OS-specific (package manager, cloud-init
+        # modules) — --image ubuntu-24.04 without an explicit --cloud-init
+        # must not silently boot it with the Rocky recipe (or vice versa).
+        case "$image" in
+            ubuntu*) cloud_init="$SCRIPT_DIR/cloud-init-ubuntu-minimal.yaml" ;;
+            rocky*)  cloud_init="$SCRIPT_DIR/cloud-init-rocky9-pg18.yaml" ;;
+            *) die "No default cloud-init for image '$image' — pass --cloud-init explicitly" ;;
+        esac
+    fi
 
     [[ -f "$cloud_init" ]] || die "Cloud-init file not found: $cloud_init"
 

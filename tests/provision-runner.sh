@@ -20,7 +20,17 @@
 #
 # Idempotent: every step is guarded so a second run is a fast no-op modulo
 # apt/PGDG metadata refresh.
-set -uo pipefail
+#
+# -e: fail loudly. A failed apt-get/pg_createcluster/pg_conftool/CREATE
+# EXTENSION/pgbench step must stop the script, not let it print
+# "provisioning complete" over a half-provisioned box. The few genuinely
+# optional commands below already have their own explicit `||` fallback.
+#
+# Takes the same lock scripts/box-check.sh uses (see the flock block below):
+# every run unconditionally restarts all four clusters (pg_ctlcluster ...
+# restart), which would otherwise race with an in-flight box-check's live
+# tests from another agent's invocation.
+set -euo pipefail
 
 OS="${1:-}"
 if [[ -z "$OS" ]]; then
@@ -55,6 +65,13 @@ esac
 log() { echo "[provision-runner] $*"; }
 
 export DEBIAN_FRONTEND=noninteractive
+
+# Same lock make box-check (scripts/box-check.sh) uses: the cluster restarts
+# below must not race with an in-flight box-check's live tests.
+log "waiting for /tmp/pgwt-box-check.lock"
+exec 9>/tmp/pgwt-box-check.lock
+flock 9
+log "lock acquired"
 
 # ---------------------------------------------------------------------------
 # 1. Build dependencies for the daemon + pgwt-server (ci.yml "Install build
@@ -153,7 +170,7 @@ for V in 13 16 17 18; do
         pg_conftool "$V" main set compute_query_id on
     fi
     # Trust local auth: tests connect as "psql -U postgres" from root.
-    sed -i -E 's/(peer|scram-sha-256|md5)$/trust/' \
+    sed -i -E 's/(ident|peer|scram-sha-256|md5)$/trust/' \
         "/etc/postgresql/$V/main/pg_hba.conf"
 
     # (Re)start so port/preload/hba changes take effect. pg_ctlcluster start
