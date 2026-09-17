@@ -111,7 +111,8 @@ export DEBIAN_FRONTEND=noninteractive
 
 # The lock file must be writable by the gate-box GitHub Actions runner's
 # unprivileged 'runner' user too (ci.yml's gate-box jobs each wrap their own
-# build/test steps in this same flock, section 6 below) -- create it 0666
+# build/test steps in this same flock; the runner is registered by section 7
+# below) -- create it 0666
 # up front so a non-root `flock 9` doesn't fail with "Permission denied"
 # against a file this script (or scripts/box-check.sh) previously created
 # 0644 as root. Real bug found running ci.yml against this box for the
