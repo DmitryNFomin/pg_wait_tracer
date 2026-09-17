@@ -125,14 +125,18 @@ echo "ui_live_smoke: postmaster PID $PM_PID"
 # existing cluster is suitable as a default target" (verified on the gate
 # box) and every pgbench/psql call below fails immediately. An explicit
 # --pg-version (or a caller-exported PGPORT) always wins over the derived
-# value.
+# value. PG_PORT_BASE matches run_all.sh's own convention/override
+# (PGWT_PG_PORT_BASE, default 5400; tests/provision-runner.sh).
+PG_PORT_BASE="${PGWT_PG_PORT_BASE:-5400}"
 if [[ -z "$PG_MAJOR" ]]; then
     PG_MAJOR=$(readlink "/proc/$PM_PID/exe" 2>/dev/null | grep -oP 'postgresql/\K\d+(?=/)' || true)
 fi
-if [[ -n "$PG_MAJOR" ]]; then
-    export PGPORT="${PGPORT:-$((5400 + PG_MAJOR))}"
-    echo "ui_live_smoke: PG major $PG_MAJOR -> PGPORT=$PGPORT"
-elif [[ -z "${PGPORT:-}" ]]; then
+if [[ -n "${PGPORT:-}" ]]; then
+    echo "ui_live_smoke: PGPORT=$PGPORT (inherited from the environment)"
+elif [[ -n "$PG_MAJOR" ]]; then
+    export PGPORT=$((PG_PORT_BASE + PG_MAJOR))
+    echo "ui_live_smoke: PG major $PG_MAJOR -> PGPORT=$PGPORT (derived: PGWT_PG_PORT_BASE=$PG_PORT_BASE + PG$PG_MAJOR)"
+else
     echo "ERROR: could not derive PG major from PID $PM_PID and no PGPORT set"
     exit 1
 fi
@@ -167,14 +171,15 @@ WORKLOAD_PID=""
 PGBENCH_PID=""
 SMOKE_RC=1
 
-# Bounded wait: TERM, then poll for exit, then KILL if it outlives the
+# Bounded wait: signal, then poll for exit, then KILL if it outlives the
 # budget. Mirrors test_capture_smoke.py's terminate_and_wait (TERM + timeout
-# + KILL) -- `wait` has no native timeout in bash.
+# + KILL) -- `wait` has no native timeout in bash. sig defaults to TERM;
+# the bridge needs INT specifically (see cleanup()).
 stop_pid() {
-    local pid="$1" budget_s="${2:-10}"
+    local pid="$1" budget_s="${2:-10}" sig="${3:-TERM}"
     [[ -z "$pid" ]] && return 0
     kill -0 "$pid" 2>/dev/null || return 0
-    kill -TERM "$pid" 2>/dev/null
+    kill "-$sig" "$pid" 2>/dev/null
     local steps=$((budget_s * 2))
     local n=0
     while kill -0 "$pid" 2>/dev/null && [[ $n -lt $steps ]]; do
@@ -189,11 +194,16 @@ stop_pid() {
 }
 
 cleanup() {
-    # Reverse start order.
+    # Reverse start order. The bridge gets SIGINT specifically: web/main.go
+    # only handles os.Interrupt (SIGINT), not SIGTERM -- a plain TERM would
+    # kill the bridge process without it ever calling bridge.Close(), which
+    # is what tears down its ssh/pgwt-server child. An orphaned pgwt-server
+    # inherits the flock fd and blocks every later box-check (review item 4).
     stop_pid "$WORKLOAD_PID" 10
     stop_pid "$PGBENCH_PID" 10
-    stop_pid "$BRIDGE_PID" 10
+    stop_pid "$BRIDGE_PID" 10 INT
     stop_pid "$TRACER_PID" 15
+
     echo "ui_live_smoke: daemon log tail:"
     tail -n 40 "$DAEMON_LOG" 2>/dev/null | sed 's/^/  /'
     echo "ui_live_smoke: bridge log tail:"
@@ -201,10 +211,37 @@ cleanup() {
     echo "ui_live_smoke: workload log tail:"
     tail -n 20 "$WORKLOAD_LOG" 2>/dev/null | sed 's/^/  /'
     tail -n 20 "$PGBENCH_LOG" 2>/dev/null | sed 's/^/  /'
+
+    # Verify nothing from THIS run survived teardown (review item 4): pgrep
+    # on the trace dir's unique mktemp path -- it appears in the daemon's
+    # own argv AND (via ssh's argv on localhost) the bridge's pgwt-server
+    # child's -- plus the PIDs stop_pid was tracking directly. A leaked
+    # child here blocks every later box-check by holding the flock fd open.
+    sleep 1
+    local leftover=""
+    leftover="$(pgrep -f "$TRACE_DIR" 2>/dev/null || true)"
+    local pid
+    for pid in "$PGBENCH_PID" "$WORKLOAD_PID" "$BRIDGE_PID" "$TRACER_PID"; do
+        if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+            leftover="$leftover"$'\n'"$pid"
+        fi
+    done
+    leftover="$(echo "$leftover" | sed '/^$/d')"
+
     rm -rf "$TRACE_DIR"
     rm -f "$DAEMON_LOG" "$BRIDGE_LOG" "$WORKLOAD_LOG" "$PGBENCH_LOG"
+
+    if [[ -n "$leftover" ]]; then
+        echo "ERROR: processes from this run survived teardown (would block every later box-check via the flock fd):"
+        echo "$leftover" | while read -r p; do
+            [[ -n "$p" ]] && ps -o pid,ppid,cmd -p "$p" 2>/dev/null
+        done
+        exit 1
+    fi
 }
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # GET a URL, exit 0 iff it answers 200. Python (not curl) to avoid adding a
 # new external-tool dependency on top of what the rest of the suite needs.
@@ -221,8 +258,25 @@ PYEOF
 
 # ── 1. Controlled load ───────────────────────────────────────────────────────
 
-echo "ui_live_smoke: initializing pgbench schema"
-pgbench -U postgres -d postgres -i -s 1 >>"$PGBENCH_LOG" 2>&1
+# Reuse the box's PROVISIONED pgbench tables (tests/provision-runner.sh:
+# scale 10) -- do NOT `pgbench -i` here. `-i` drops and recreates every
+# pgbench table: it silently destroyed the box's scale-10 dataset for every
+# later test in the run, AND changed overhead_trend.csv's baseline
+# out from under it (review item 1). Fail loudly instead of silently
+# reinitialising if provisioning did not run.
+echo "ui_live_smoke: checking for provisioned pgbench tables"
+PGBENCH_ROWS=$(psql -U postgres -d postgres -tAc \
+    "SELECT count(*) FROM pgbench_accounts" 2>>"$PGBENCH_LOG")
+if [[ -z "$PGBENCH_ROWS" || "$PGBENCH_ROWS" -lt 1 ]]; then
+    echo "ERROR: pgbench_accounts is missing/empty on PGPORT=$PGPORT --" \
+         "tests/provision-runner.sh should have initialized it. Refusing to" \
+         "silently 'pgbench -i' here (would destroy the box's provisioned" \
+         "scale-10 dataset and change overhead_trend.csv's baseline for" \
+         "every other test)."
+    tail -n 20 "$PGBENCH_LOG"
+    exit 1
+fi
+echo "ui_live_smoke: pgbench_accounts has $PGBENCH_ROWS rows (provisioned) -- reusing"
 
 echo "ui_live_smoke: starting pgbench (4 clients, ${DURATION_S}s, throttled)"
 # --rate: measured on the gate box, an UNTHROTTLED 4-client pgbench against
@@ -237,6 +291,12 @@ echo "ui_live_smoke: starting pgbench (4 clients, ${DURATION_S}s, throttled)"
 pgbench -U postgres -d postgres -c 4 -T "$DURATION_S" --rate=25 \
     >>"$PGBENCH_LOG" 2>&1 &
 PGBENCH_PID=$!
+sleep 1
+if ! kill -0 "$PGBENCH_PID" 2>/dev/null; then
+    echo "ERROR: pgbench exited immediately after starting:"
+    tail -n 20 "$PGBENCH_LOG"
+    exit 1
+fi
 
 # Lock/Timeout: reuse tests/test_capture_smoke.py's Workload class (the same
 # holder/waiter/sleeper psql sessions that test already proves out) but LOOP
@@ -283,6 +343,12 @@ finally:
     wl.stop()
 PYEOF
 WORKLOAD_PID=$!
+sleep 2   # Workload.open_sessions() itself sleeps ~1.5s before its first check
+if ! kill -0 "$WORKLOAD_PID" 2>/dev/null; then
+    echo "ERROR: lock/sleep workload exited immediately after starting:"
+    tail -n 40 "$WORKLOAD_LOG"
+    exit 1
+fi
 
 # ── 2. Daemon (--mode full: see the DEVIATION note above) ───────────────────
 # --daemon: long-running (reconnect on PG restart), no --count/--duration
@@ -338,7 +404,8 @@ fi
 echo "ui_live_smoke: bridge ready at $BASE_URL"
 
 # ── 4. The walk ───────────────────────────────────────────────────────────────
-python3 "$SCRIPT_DIR/ui_live_smoke.py" --url "$BASE_URL"
+python3 "$SCRIPT_DIR/ui_live_smoke.py" --url "$BASE_URL" \
+    --pgbench-pid "$PGBENCH_PID" --workload-pid "$WORKLOAD_PID"
 SMOKE_RC=$?
 
 exit "$SMOKE_RC"

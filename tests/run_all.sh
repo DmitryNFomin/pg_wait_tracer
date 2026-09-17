@@ -411,13 +411,22 @@ else
     skip_test "web_unit (node --test)" "node not installed"
 fi
 
-# Step 5: Web UI tests (needs playwright + websockets, no root needed)
-# Locally a missing dependency is a skip; in CI ($CI set) it is a FAILURE —
-# the UI suite silently not running is how regressions slip through.
-# test_web_ui_chaos runs the same UI against mock_server.py in CHAOS mode
-# (latency jitter / out-of-order / late responses) — its race-exposing tests
-# are classified gating vs xfail internally, so it stays CI-green either way.
-if python3 -c "import playwright, websockets" 2>/dev/null; then
+# Step 5: Web UI tests (needs playwright + websockets, no root needed).
+# OFF by default (PGWT_RUN_WEB_UI=1 opts in): this duplicates `make check`'s
+# own Playwright suite (the Mac) and ci.yml's dedicated web-ui job, and since
+# the gate box now has Playwright+Chromium (tests/provision-runner.sh, issue
+# #93), leaving it on by default promoted this into every `make box-check`
+# run — a real Chromium walk the shared box does not need to also carry.
+# Locally (opted in) a missing dependency is a skip; in CI ($CI set) it is a
+# FAILURE — the UI suite silently not running is how regressions slip
+# through. test_web_ui_chaos runs the same UI against mock_server.py in
+# CHAOS mode (latency jitter / out-of-order / late responses) — its
+# race-exposing tests are classified gating vs xfail internally, so it stays
+# CI-green either way.
+if [[ "${PGWT_RUN_WEB_UI:-}" != "1" ]]; then
+    skip_test "test_web_ui" "opt-in: set PGWT_RUN_WEB_UI=1 (make check + ci.yml's web-ui job already cover this)"
+    skip_test "test_web_ui_chaos" "opt-in: set PGWT_RUN_WEB_UI=1 (make check + ci.yml's web-ui job already cover this)"
+elif python3 -c "import playwright, websockets" 2>/dev/null; then
     run_test "test_web_ui" python3 "$SCRIPT_DIR/test_web_ui.py"
     run_test "test_web_ui_chaos" python3 "$SCRIPT_DIR/test_web_ui_chaos.py"
 elif [[ -n "${CI:-}" ]]; then
@@ -444,6 +453,34 @@ elif python3 -c "import playwright, websockets, PIL, numpy" 2>/dev/null \
     run_test "test_web_ui_snapshots" python3 "$SCRIPT_DIR/test_web_ui_snapshots.py"
 else
     skip_test "test_web_ui_snapshots" "snapshot deps or baselines not present (CI snapshots job is authoritative)"
+fi
+
+# issue #93: re-emit the live-UI-smoke's own one-line verdict here too, not
+# just buried in its own (possibly thousands-of-lines) run_test block above —
+# CLAUDE.md's definition of done says `make box-check`'s summary (the last
+# ~25 lines an agent pastes into a PR) shows this; without it, a reviewer
+# reading only the tail never sees per-tab known-failing/xpass status.
+ui_live_summary="$SCRIPT_DIR/results/ui_live/summary.json"
+if [[ -f "$ui_live_summary" ]]; then
+    python3 - "$ui_live_summary" <<'PYEOF'
+import json
+import sys
+
+try:
+    s = json.load(open(sys.argv[1]))
+except Exception as e:
+    print(f"  Live UI smoke: could not read summary.json ({e})")
+    sys.exit(0)
+
+line = "  Live UI smoke: overall=" + ("PASS" if s.get("ok") else "FAIL")
+if s.get("failed_tabs"):
+    line += " (failed: " + ", ".join(s["failed_tabs"]) + ")"
+if s.get("known_failing_tabs"):
+    line += " (known-failing: " + ", ".join(s["known_failing_tabs"]) + ")"
+if s.get("xpass_tabs"):
+    line += " (xpass: " + ", ".join(s["xpass_tabs"]) + ")"
+print(line)
+PYEOF
 fi
 
 # Summary

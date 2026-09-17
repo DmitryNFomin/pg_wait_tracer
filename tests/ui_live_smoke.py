@@ -19,17 +19,36 @@ Transitions, Concurrency, Waterfall, Scatter, Matrix), live mode on
   1. rendered    -- panel-specific non-empty check (chart has data / table
                      has rows / graph has nodes; see PANEL_CHECKS).
   2. clean       -- zero console errors / page errors / unhandled rejections
-                     for the whole tab visit.
-  3. no_blink    -- two frames captured back-to-back inside the same data
-                     window differ by < ui_live_smoke_lib.BLINK_THRESHOLD
+                     for the whole tab visit ('[pgwt]'-prefixed console
+                     errors, the app's OWN failure reporting, never fail
+                     this by themselves but are recorded and printed, never
+                     silently dropped).
+  3. no_blink    -- a frame ~100ms after each tick is asserted non-blank
+                     (a CONTINUITY teardown-to-blank flash must not pass);
+                     two frames captured back-to-back inside the same data
+                     window (after the render-check retry + animation
+                     settle) differ by < ui_live_smoke_lib.BLINK_THRESHOLD
                      (0.1%) of pixels; the AAS legend keeps each event name's
                      colour stable across ticks.
   4. no_leak     -- chart/uplot/pending-request counts (the chaos suite's
                      probe, test_web_ui_chaos.py's _LEAK_PROBE) are stable
-                     across the visit.
+                     across the visit; how long the probe took to settle is
+                     recorded too (a slow settle is a latency regression
+                     worth a trace even when it does not fail the check).
+
+Five of these tabs (Transitions/Concurrency/Waterfall/Scatter/Matrix)
+pause live mode on entry or on any drill (app.js), and the driver resumes
+it via #live-btn (see _navigate_to_tab) -- deliberately: the walk grades
+the state a real user reaches by pressing Live on one of these "heavy"
+views, which the app permits and therefore must render as well as any
+other live state.
 
 Fail-safe: if the UI shows no data within FIRST_DATA_TIMEOUT_S (60s), the tab
-FAILS loudly -- never a skip (mirrors run_all.sh --require-live).
+FAILS loudly -- never a skip (mirrors run_all.sh --require-live). Same for
+the controlled workload (pgbench + the lock/sleep sessions,
+tests/ui_live_smoke.sh): if --pgbench-pid/--workload-pid are given and either
+process is gone at a tab boundary, the whole run FAILS loudly rather than
+grading the remaining tabs against an idle system.
 
 Artifacts: tests/results/ui_live/<tab>/tick-N.png, one .webm per tab,
 tests/results/ui_live/summary.json.
@@ -433,13 +452,42 @@ def _settled_leak_probe(page, timeout_s=TICK_TIMEOUT_S, interval_ms=200):
     `exec_scatter`/`top_queries` query over several minutes of --mode full
     capture (every event, not sampled) can legitimately take a few seconds
     to answer -- the same real-server-latency reasoning that sized
-    TICK_TIMEOUT_S already, not a separate ad hoc allowance."""
-    deadline = time.monotonic() + timeout_s
+    TICK_TIMEOUT_S already, not a separate ad hoc allowance.
+
+    Returns (probe, elapsed_s): the elapsed time is recorded in summary.json
+    (issue #93 review item 6) even when it does not, by itself, fail
+    no_leak -- a probe that took most of the budget to settle is a latency
+    regression worth a trace."""
+    start = time.monotonic()
+    deadline = start + timeout_s
     probe = page.evaluate(LEAK_PROBE_JS)
     while probe.get("pending", 0) != 0 and time.monotonic() < deadline:
         page.wait_for_timeout(interval_ms)
         probe = page.evaluate(LEAK_PROBE_JS)
-    return probe
+    return probe, time.monotonic() - start
+
+
+def _assert_workload_alive(pgbench_pid, workload_pid, where):
+    """FAILS LOUDLY (raises SystemExit) if either the pgbench or the lock/
+    sleep workload process is gone. Called at each tab boundary (issue #93
+    review item 2): a controlled-load process that died partway through the
+    walk would leave the REMAINING tabs grading an idle system -- rendered/
+    no_blink/no_leak could all still trivially "pass" against stale, frozen
+    data, which is exactly the false confidence this whole test exists to
+    prevent. None for either pid means the caller did not wire this check up
+    (e.g. --mock, or a manual --url run) -- skipped, not failed."""
+    for label, pid in (("pgbench", pgbench_pid), ("lock/sleep workload", workload_pid)):
+        if pid is None:
+            continue
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            print(f"FATAL: {label} (pid {pid}) is no longer running ({where}) -- "
+                  f"refusing to grade the remaining tabs against an idle system",
+                  file=sys.stderr)
+            sys.exit(1)
+        except PermissionError:
+            pass  # exists, just not signalable by us -- treat as alive
 
 
 # ── one tab's walk ───────────────────────────────────────────────────────────
@@ -456,6 +504,7 @@ def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
     page = context.new_page()
     guard = ConsoleErrorGuard(page)
     console_errors = []
+    pgwt_errors = []
     tick_paths = []
     video_path = None
     try:
@@ -477,7 +526,7 @@ def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
         page.evaluate(TICK_HOOK_JS)
         _navigate_to_tab(page, tab_id, first_data_timeout)
 
-        leak_before = _settled_leak_probe(page)
+        leak_before, leak_before_settle_s = _settled_leak_probe(page)
 
         legend_ticks = []
         blink_ratios = []
@@ -486,6 +535,24 @@ def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
             if not _wait_for_tick(page, i, TICK_TIMEOUT_S):
                 raise SmokeFailure(
                     f"tick {i}/{ticks} did not arrive within {TICK_TIMEOUT_S}s")
+
+            # Blind-window check (issue #93 review item 5): between the tick
+            # landing and the render-check retry + animation settle below,
+            # NOTHING is sampled -- a teardown-to-blank flash right after the
+            # tick (a CONTINUITY violation) would go completely unnoticed by
+            # the later, already-resettled blink pair. Grab one frame ~100ms
+            # after the tick and assert the panel is not blank. Widens
+            # nothing: this is an ADDITIONAL check, not a relaxed one.
+            page.wait_for_timeout(100)
+            blind_frame = _safe_panel_screenshot(page, tab_id)
+            if blind_frame is None:
+                raise SmokeFailure(
+                    f"tick {i}: panel element gone ~100ms after the tick "
+                    "(CONTINUITY teardown-to-blank)")
+            if lib.is_blank_frame(lib.png_bytes_to_array(blind_frame)):
+                raise SmokeFailure(
+                    f"tick {i}: panel went blank ~100ms after the tick "
+                    "(CONTINUITY teardown-to-blank)")
 
             render_ok, render_detail = _poll_render_check(page, tab_id)
             if not render_ok:
@@ -535,27 +602,38 @@ def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
             if legend:
                 legend_ticks.append(legend)
 
-            console_errors.extend(guard.drain())
+            for e in guard.drain():
+                if _is_pgwt_error(e):
+                    # The app's own failure reporting -- never fails the tab
+                    # by itself, but must be visible, not dropped silently
+                    # (issue #93 review item 3).
+                    print(f"  note [{tab_id}] tick {i}: {e}")
+                    pgwt_errors.append(e)
+                else:
+                    console_errors.append(e)
 
-        leak_after = _settled_leak_probe(page)
+        leak_after, leak_after_settle_s = _settled_leak_probe(page)
         color_violations = (lib.color_stability_violations(legend_ticks)
                             if legend_ticks else [])
         worst_blink = max(blink_ratios) if blink_ratios else None
-        unexpected_errors = [e for e in console_errors if not _is_pgwt_error(e)]
 
         result = lib.build_tab_result(
-            tab_id, render_ok, render_detail, ticks, unexpected_errors,
+            tab_id, render_ok, render_detail, len(tick_paths), console_errors,
             worst_blink, color_violations, leak_before, leak_after,
-            artifacts={}, blink_threshold=blink_threshold)
+            artifacts={}, blink_threshold=blink_threshold,
+            pgwt_console_errors=pgwt_errors,
+            leak_before_settle_s=leak_before_settle_s,
+            leak_after_settle_s=leak_after_settle_s)
     except SmokeFailure as e:
         print(f"  FAIL [{tab_id}]: {e}", file=sys.stderr)
         result = lib.build_failed_tab_result(tab_id, str(e),
-                                             ticks_observed=len(tick_paths))
+                                             ticks_observed=len(tick_paths),
+                                             pgwt_console_errors=pgwt_errors)
     except Exception:
         traceback.print_exc()
         result = lib.build_failed_tab_result(
             tab_id, "unhandled exception (see stderr traceback)",
-            ticks_observed=len(tick_paths))
+            ticks_observed=len(tick_paths), pgwt_console_errors=pgwt_errors)
     finally:
         video = page.video
         context.close()
@@ -596,6 +674,14 @@ def main():
                     "(issue #93 phase-1 validation step). Gating runs "
                     "(tests/ui_live_smoke.sh) never pass this -- the default "
                     f"is the issue's stated 0.1% ({lib.BLINK_THRESHOLD}).")
+    ap.add_argument("--pgbench-pid", type=int, default=None,
+                    help="PID of the background pgbench process (from "
+                    "tests/ui_live_smoke.sh); checked alive at every tab "
+                    "boundary, FAILS LOUDLY if it is gone (review item 2)")
+    ap.add_argument("--workload-pid", type=int, default=None,
+                    help="PID of the looping lock/sleep workload process "
+                    "(from tests/ui_live_smoke.sh); same liveness check as "
+                    "--pgbench-pid")
     args = ap.parse_args()
 
     if bool(args.url) == bool(args.mock):
@@ -608,7 +694,12 @@ def main():
     else:
         url = args.url
 
-    os.makedirs(args.out_dir, exist_ok=True)
+    # Every artifact under out_dir must belong to THIS run -- delete and
+    # recreate it fresh before any tab runs, so a stale tick-N.png from an
+    # earlier invocation (mock, real, or a previous box-check) can never
+    # survive into this run's summary.json (issue #93 ui-reviewer finding).
+    lib.reset_output_dir(args.out_dir)
+    _assert_workload_alive(args.pgbench_pid, args.workload_pid, "before the walk")
     results = []
     try:
         with sync_playwright() as p:
@@ -620,6 +711,8 @@ def main():
                                      args.ticks, args.first_data_timeout,
                                      args.blink_threshold)
                     results.append(result)
+                    _assert_workload_alive(args.pgbench_pid, args.workload_pid,
+                                           f"after tab {tab_id!r}")
                     kf_line = lib.known_failing_report_line(tab_id, result["ok"])
                     status = kf_line if kf_line else ("PASS" if result["ok"] else "FAIL")
                     print(f"  {status} [{tab_id}] "

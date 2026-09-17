@@ -103,6 +103,32 @@ def test_blink_check_resized_panel_is_maximal_not_a_crash():
           "a resized-panel ratio of 1.0 always fails the no_blink threshold")
 
 
+def test_is_blank_frame_solid_colour():
+    solid = np.full((20, 20, 3), 30, dtype=np.uint8)  # e.g. the dark theme bg
+    check(lib.is_blank_frame(solid),
+          "a perfectly solid-colour frame is blank")
+
+
+def test_is_blank_frame_real_content():
+    rng = np.zeros((20, 20, 3), dtype=np.uint8)
+    # A few "content" pixels (text/grid/chart-line stand-in) is enough to
+    # push real variance well above the blank threshold.
+    rng[2:18, 2:4] = 200
+    rng[5, :] = 255
+    check(not lib.is_blank_frame(rng),
+          "a frame with real content (not just background) is not blank")
+
+
+def test_is_blank_frame_near_solid_antialiasing_noise_still_blank():
+    # +/-1 antialiasing jitter on an otherwise flat background must not
+    # trip the blank check -- it is not "real content".
+    frame = np.full((20, 20, 3), 30, dtype=np.uint8)
+    frame[0, 0] = 31
+    frame[1, 1] = 29
+    check(lib.is_blank_frame(frame),
+          "tiny antialiasing-level noise on a flat background still reads as blank")
+
+
 def test_compare_png_files_roundtrip():
     with tempfile.TemporaryDirectory() as d:
         a = np.zeros((20, 20, 3), dtype=np.uint8)
@@ -247,6 +273,41 @@ def test_build_tab_result_flags_insufficient_ticks():
           "fewer than MIN_TICKS ticks observed fails the tab (never silently short)")
 
 
+def test_build_tab_result_records_pgwt_errors_without_failing():
+    # '[pgwt]'-prefixed console errors are the app's OWN failure reporting --
+    # they must be visible in summary.json, but never fail the tab by
+    # themselves (issue #93 fail-safe/correctness review item 3).
+    r = lib.build_tab_result(
+        "overview", True, "ok:8", ticks_observed=6, console_errors=[],
+        blink_ratio=0.0, color_violations=[],
+        leak_before={"charts": 1, "uplots": 1, "pending": 0},
+        leak_after={"charts": 1, "uplots": 1, "pending": 0},
+        artifacts={}, pgwt_console_errors=["console: [pgwt] view build failed: x"])
+    check(r["ok"] is True and r["clean"]["ok"] is True,
+          f"a [pgwt] error alone does not fail the tab ({r['clean']})")
+    check(r["clean"]["pgwt_errors"] == ["console: [pgwt] view build failed: x"],
+          f"the [pgwt] error is recorded, not dropped ({r['clean']['pgwt_errors']})")
+
+
+def test_build_tab_result_records_leak_settle_duration():
+    r = lib.build_tab_result(
+        "overview", True, "ok:8", ticks_observed=6, console_errors=[],
+        blink_ratio=0.0, color_violations=[],
+        leak_before={"charts": 1, "uplots": 1, "pending": 0},
+        leak_after={"charts": 1, "uplots": 1, "pending": 0},
+        artifacts={}, leak_before_settle_s=0.4, leak_after_settle_s=25.3)
+    check(r["no_leak"]["settle_s"] == {"before": 0.4, "after": 25.3},
+          f"leak-probe settle durations are recorded per tab ({r['no_leak']['settle_s']})")
+
+
+def test_build_failed_tab_result_records_pgwt_errors():
+    r = lib.build_failed_tab_result(
+        "waterfall", "panel did not render within 60s",
+        pgwt_console_errors=["console: [pgwt] escalate failed"])
+    check(r["clean"]["pgwt_errors"] == ["console: [pgwt] escalate failed"],
+          f"a could-not-check tab still records any [pgwt] errors seen ({r['clean']})")
+
+
 def test_build_summary_ok_requires_every_tab():
     good = lib.build_tab_result(
         "overview", True, "ok:1", 6, [], 0.0, [],
@@ -327,10 +388,10 @@ def test_build_tab_result_known_failing_does_not_fail_summary():
 
 def test_build_tab_result_xpass_does_not_fail_summary_either():
     # Waterfall (#101) happening to pass this run: reported as xpass, not
-    # silently absorbed, but STILL does not fail the run (unlike
-    # run_all.sh's test-level KNOWN_FAILING, where an unexpected pass IS a
-    # failure -- a single real-daemon run passing isn't proof an
-    # intermittent bug is fixed).
+    # silently absorbed, but does not fail the run -- same semantics
+    # run_all.sh's own KNOWN_FAILING now uses too (an unexpected pass is
+    # reported, never a gate failure by itself; a single real-daemon run
+    # passing isn't proof an intermittent bug is fixed).
     r = lib.build_tab_result(
         "waterfall", True, "ok:1", 6, [], 0.0, [],
         {"charts": 1, "uplots": 1, "pending": 0},
@@ -373,6 +434,36 @@ def test_build_summary_mixed_known_failing_and_real_failure():
           f"a real failure still fails the summary alongside an excused one ({s})")
 
 
+def test_reset_output_dir_removes_stale_artifacts():
+    # The ui-reviewer blocker this pins: a stale tick-1.png from an earlier
+    # run must never survive into a later run's output directory.
+    with tempfile.TemporaryDirectory() as d:
+        out_dir = os.path.join(d, "ui_live")
+        stale_tab_dir = os.path.join(out_dir, "waterfall")
+        os.makedirs(stale_tab_dir)
+        stale_file = os.path.join(stale_tab_dir, "tick-1.png")
+        with open(stale_file, "wb") as f:
+            f.write(b"stale")
+        check(os.path.exists(stale_file), "stale artifact exists before reset (setup)")
+
+        lib.reset_output_dir(out_dir)
+
+        check(os.path.isdir(out_dir), "reset_output_dir leaves the directory present")
+        check(not os.path.exists(stale_file),
+              "a stale artifact from an earlier run does not survive reset_output_dir")
+        check(os.listdir(out_dir) == [],
+              f"the directory is empty right after reset (got {os.listdir(out_dir)})")
+
+
+def test_reset_output_dir_first_call_no_preexisting_dir():
+    # Also works when out_dir does not exist yet (first-ever run).
+    with tempfile.TemporaryDirectory() as d:
+        out_dir = os.path.join(d, "never_existed", "ui_live")
+        lib.reset_output_dir(out_dir)
+        check(os.path.isdir(out_dir),
+              "reset_output_dir creates the directory when it did not exist")
+
+
 def test_write_summary_roundtrip():
     import json
     with tempfile.TemporaryDirectory() as d:
@@ -396,6 +487,9 @@ TESTS = [
     test_frame_diff_ratio_shape_mismatch,
     test_blink_check_matching_shapes,
     test_blink_check_resized_panel_is_maximal_not_a_crash,
+    test_is_blank_frame_solid_colour,
+    test_is_blank_frame_real_content,
+    test_is_blank_frame_near_solid_antialiasing_noise_still_blank,
     test_compare_png_files_roundtrip,
     test_png_bytes_to_array_roundtrip,
     test_blink_threshold_is_pinned_at_0_1_pct,
@@ -413,6 +507,9 @@ TESTS = [
     test_build_tab_result_all_green,
     test_build_tab_result_flags_blink,
     test_build_tab_result_flags_insufficient_ticks,
+    test_build_tab_result_records_pgwt_errors_without_failing,
+    test_build_tab_result_records_leak_settle_duration,
+    test_build_failed_tab_result_records_pgwt_errors,
     test_build_summary_ok_requires_every_tab,
     test_build_summary_empty_is_not_ok,
     test_build_failed_tab_result,

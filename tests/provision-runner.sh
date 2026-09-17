@@ -9,14 +9,19 @@
 # ubuntu installs everything `make box-check` needs for the LIVE tier
 # (tests/run_all.sh --require-live): build deps for the daemon + pgwt-server
 # (same recipe as .github/workflows/ci.yml / nightly.yml — the known-good
-# apt + bpftool-fallback steps), the PGDG repo, and PostgreSQL 13/16/17/18,
-# one cluster each, on ports 5413/5416/5417/5418 (pg_stat_statements
-# preloaded, compute_query_id on for 14+). It deliberately does NOT install
-# node/Playwright/Pillow/numpy: those back the Deterministic tier, which
-# `make check` already runs natively on the Mac (see CLAUDE.md's test-tier
-# table) — tests/run_all.sh degrades those sections to a plain (non-live)
-# skip when the interpreter/browser deps are absent and $CI is unset, so
-# --require-live still passes cleanly without them.
+# apt + bpftool-fallback steps), the PGDG repo, PostgreSQL 13/16/17/18 (one
+# cluster each, on ports 5413/5416/5417/5418, pg_stat_statements preloaded,
+# compute_query_id on for 14+), Go (to build web/pgwt), and Playwright +
+# Chromium + Pillow + numpy for root's python3 (issue #93's live UI smoke,
+# tests/ui_live_smoke.sh, is a LIVE-tier test and needs a real browser on
+# the box). It deliberately does NOT install node: nothing in the LIVE tier
+# needs it (the Node builder-unit tests are Deterministic-tier, Mac-only —
+# see CLAUDE.md's test-tier table); tests/run_all.sh's Step 5 (the
+# Playwright UI suite against mock_server.py, redundant with `make check`
+# and ci.yml's own web-ui job) additionally stays opt-in
+# (PGWT_RUN_WEB_UI=1) even though the deps are now present, so a plain
+# `make box-check` does not also carry a full Chromium walk on the shared
+# box for every run.
 #
 # Idempotent: every step is guarded so a second run is a fast no-op modulo
 # apt/PGDG metadata refresh.
@@ -272,12 +277,15 @@ python3 -m playwright install --with-deps chromium >/dev/null
 
 log "setting up root's localhost ssh self-trust loop"
 SSH_KEY="$HOME/.ssh/id_ed25519"
+# mkdir BEFORE ssh-keygen: on a freshly rebooted/never-provisioned box
+# ~/.ssh does not exist yet, and ssh-keygen -f into a missing parent
+# directory fails outright.
+mkdir -p "$HOME/.ssh"
+chmod 700 "$HOME/.ssh"
 if [[ ! -f "$SSH_KEY" ]]; then
     log "generating root's ssh keypair"
     ssh-keygen -t ed25519 -N '' -f "$SSH_KEY" -C "pgwt-gate-box-self" >/dev/null
 fi
-mkdir -p "$HOME/.ssh"
-chmod 700 "$HOME/.ssh"
 touch "$HOME/.ssh/authorized_keys"
 if ! grep -qxF "$(cat "${SSH_KEY}.pub")" "$HOME/.ssh/authorized_keys" 2>/dev/null; then
     log "adding root's own pubkey to authorized_keys"

@@ -13,6 +13,7 @@ optionally decoding a PNG already on disk (load_png_array / compare_png_files)
 import io
 import json
 import os
+import shutil
 
 import numpy as np
 from PIL import Image
@@ -50,21 +51,23 @@ BLINK_THRESHOLD = 0.001  # 0.1%
 # KNOWN_FAILING_TABS: tab name -> tracking issue number. ONLY for a tab that
 # reproduces a real, filed product bug (issue #100, #101) -- never for timing
 # or runner noise; a noisy tab is investigated, never silenced here (see also
-# CLAUDE.md's Rules / tests/run_all.sh's KNOWN_FAILING, the same mechanism).
-#
-# A listed tab still runs every check and keeps its artifacts. Unlike
-# run_all.sh's KNOWN_FAILING (where an UNEXPECTED PASS counts as a failure,
-# because a deterministic test passing once is real evidence the bug is
-# fixed), a single real-daemon run passing is NOT strong evidence an
-# intermittent product bug is gone -- so here neither a failure nor an
-# unexpected pass fails the overall run; both are reported loudly
-# (`known_failing`/`xpass` on the tab, `KNOWN-FAILING (issue #N)` /
-# `UNEXPECTED PASS (issue #N) -- intermittent or fixed; check the issue` in
-# the driver's output) so a human decides when to delist a tab, not a single
-# green run.
+# CLAUDE.md's Rules / tests/run_all.sh's KNOWN_FAILING -- the same mechanism,
+# and now the same semantics too: neither a real failure nor an unexpected
+# pass fails the gate. A listed tab still runs every check and keeps its
+# artifacts; both outcomes are reported loudly (`known_failing`/`xpass` on
+# the tab, `KNOWN-FAILING (issue #N)` / `UNEXPECTED PASS (issue #N) --
+# intermittent or fixed; check the issue` in the driver's output) so a human
+# decides when to delist a tab, not a single run's outcome either way.
 KNOWN_FAILING_TABS = {
-    "timeline": 100,   # #100: no_blink ratio 4.46% (missing animation:false, #102)
-    "waterfall": 101,  # #101: executions query > 60s under sustained full-mode load
+    # #100: no_blink ratio 4.46% in one run. Cause is UNPROVEN -- do not
+    # assume it is #102 (missing animation:false): new data on #100 points
+    # at a window-pan re-layout landing ~1.3s after the tick, which would
+    # land AFTER tests/ui_live_smoke.py's 1200ms settle and still get caught
+    # by the two-frame blink pair. Investigate before closing either way.
+    "timeline": 100,
+    # #101: the executions query takes > 60s to answer under sustained
+    # --mode full capture load.
+    "waterfall": 101,
 }
 
 
@@ -106,6 +109,17 @@ def blink_check(frame_a, frame_b):
     if frame_a.shape != frame_b.shape:
         return 1.0, f"panel resized between frames: {frame_a.shape} -> {frame_b.shape}"
     return frame_diff_ratio(frame_a, frame_b), None
+
+
+def is_blank_frame(frame, std_threshold=1.0):
+    """True if frame is (near-)solid-colour -- a CONTINUITY teardown-to-blank
+    flash, not real rendered content. Real content (text, grid lines, chart
+    series, table rows) has per-pixel variance far above a flat background
+    repaint; std_threshold (0..255 terms, computed over the whole array) is
+    deliberately tiny -- this is a "did the panel go completely blank" check,
+    not a content-richness heuristic, so it never second-guesses a
+    genuinely sparse-but-real panel."""
+    return float(np.std(frame)) < std_threshold
 
 
 def compare_png_files(path_a, path_b):
@@ -201,9 +215,25 @@ def _apply_known_failing(result):
 def build_tab_result(tab_id, rendered_ok, rendered_detail, ticks_observed,
                       console_errors, blink_ratio, color_violations,
                       leak_before, leak_after, artifacts,
-                      blink_threshold=BLINK_THRESHOLD):
+                      blink_threshold=BLINK_THRESHOLD,
+                      pgwt_console_errors=(),
+                      leak_before_settle_s=None, leak_after_settle_s=None):
     """Assembles one tab's verdict. Pure: every input is already-collected
-    data, no page access."""
+    data, no page access.
+
+    ticks_observed must be the count of frames ACTUALLY captured (a tick can
+    land without a usable screenshot -- e.g. a DOM-detach race -- so this is
+    not simply "how many ticks did we wait for").
+
+    pgwt_console_errors: '[pgwt]'-prefixed console.error calls (the app's OWN
+    failure reporting) drained during the visit. These never fail the tab
+    (clean_ok is computed from console_errors only, the UNEXPECTED ones) but
+    must still be visible in summary.json, not silently dropped.
+
+    leak_before_settle_s/leak_after_settle_s: how long the leak probe took to
+    settle (issue #93 fail-safe/correctness review item 6) -- a 25s response
+    is itself a latency regression worth a trace even though it does not, by
+    itself, fail no_leak."""
     clean_ok = len(console_errors) == 0
     blink_ok = no_blink_ok(blink_ratio, blink_threshold)
     leak_ok = leak_probe_ok(leak_before) and leak_probe_ok(leak_after)
@@ -216,17 +246,21 @@ def build_tab_result(tab_id, rendered_ok, rendered_detail, ticks_observed,
         "ok": ok,
         "ticks_observed": ticks_observed,
         "rendered": {"ok": rendered_ok, "detail": rendered_detail},
-        "clean": {"ok": clean_ok, "console_errors": list(console_errors)[:10]},
+        "clean": {"ok": clean_ok, "console_errors": list(console_errors)[:10],
+                  "pgwt_errors": list(pgwt_console_errors)[:10]},
         "no_blink": {"ok": blink_ok, "ratio": blink_ratio,
                      "threshold": blink_threshold},
         "color_stability": {"ok": color_ok, "violations": color_violations},
-        "no_leak": {"ok": leak_ok, "before": leak_before, "after": leak_after},
+        "no_leak": {"ok": leak_ok, "before": leak_before, "after": leak_after,
+                    "settle_s": {"before": leak_before_settle_s,
+                                 "after": leak_after_settle_s}},
         "artifacts": artifacts,
     }
     return _apply_known_failing(result)
 
 
-def build_failed_tab_result(tab_id, reason, ticks_observed=0, artifacts=None):
+def build_failed_tab_result(tab_id, reason, ticks_observed=0, artifacts=None,
+                            pgwt_console_errors=()):
     """A tab result for a tab that never got far enough to evaluate the four
     checks (e.g. the 60s no-data fail-safe fired, or navigation raised).
     Kept separate from build_tab_result so a genuine "checked and failed"
@@ -239,10 +273,12 @@ def build_failed_tab_result(tab_id, reason, ticks_observed=0, artifacts=None):
         "ticks_observed": ticks_observed,
         "error": reason,
         "rendered": {"ok": False, "detail": reason},
-        "clean": {"ok": None, "console_errors": []},
+        "clean": {"ok": None, "console_errors": [],
+                  "pgwt_errors": list(pgwt_console_errors)[:10]},
         "no_blink": {"ok": None, "ratio": None, "threshold": BLINK_THRESHOLD},
         "color_stability": {"ok": None, "violations": []},
-        "no_leak": {"ok": None, "before": None, "after": None},
+        "no_leak": {"ok": None, "before": None, "after": None,
+                    "settle_s": {"before": None, "after": None}},
         "artifacts": artifacts or {},
     }
     return _apply_known_failing(result)
@@ -266,6 +302,24 @@ def build_summary(tab_results):
         "known_failing_tabs": excused,
         "xpass_tabs": [t["tab"] for t in tab_results if t.get("xpass")],
     }
+
+
+def reset_output_dir(path):
+    """Deletes path (if present) and recreates it empty.
+
+    Found via a ui-reviewer blocker: tests/results/ui_live/waterfall/
+    tick-1..3.png survived from an EARLIER run (2h-old mtimes) into a later
+    run whose waterfall tab failed to render at all (0 frames written) --
+    summary.json correctly said frames: [], but the stale PNGs on disk made
+    the tab look rendered to a reviewer who just opens the frame. Every
+    artifact under the output dir must belong to the run that just produced
+    summary.json, never a leftover from a previous invocation (mock, real,
+    or a stale rsync copy) -- so the driver calls this ONCE, before any tab
+    runs, instead of each tab's os.makedirs(..., exist_ok=True) trusting an
+    already-populated directory."""
+    if os.path.isdir(path):
+        shutil.rmtree(path)
+    os.makedirs(path, exist_ok=True)
 
 
 def write_summary(path, tab_results):

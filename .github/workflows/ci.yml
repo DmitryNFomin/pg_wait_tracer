@@ -70,6 +70,12 @@ jobs:
       - name: Build C unit tests
         run: make -C tests
 
+      - name: Install Python test dependencies (pillow, numpy)
+        # tests/test_ui_live_smoke_lib.py (in unit_tests.list, issue #93)
+        # decodes/diffs PNGs with these; nothing else in this job's
+        # unit_tests.list entries needs them.
+        run: python3 -m pip install pillow numpy
+
       - name: Run C unit tests
         # The test list lives in tests/unit_tests.list — the single source of
         # truth shared with tests/run_all.sh (TST-3: the two hand-maintained
