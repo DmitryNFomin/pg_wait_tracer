@@ -51,15 +51,36 @@ else
     failed=$((failed + 1))
 fi
 
-# No args with auto-discovery: runs OK if PG is up, so use --count 1 to limit
+# No args with auto-discovery: runs OK if exactly one PostgreSQL instance is
+# up, so use --count 1 to limit. With more than one concurrent instance (a
+# gate box runs one cluster per PG major on its own port) auto-discovery is
+# ambiguous and the daemon correctly refuses rather than guessing at a
+# target — that loud refusal is the other half of this contract, so either
+# outcome is accepted, but a refusal must carry the expected message.
 if [[ -n "$PM_PID" ]]; then
-    timeout 10 "$TRACER" --count 1 --interval 1 > /dev/null 2>&1
+    output=$(timeout 10 "$TRACER" --count 1 --interval 1 2>&1 >/dev/null)
     rc=$?
     if [[ $rc -eq 0 || $rc -eq 124 ]]; then
         echo "  PASS: no args (auto-discover) runs successfully"
         passed=$((passed + 1))
+    elif echo "$output" | grep -q "Multiple PostgreSQL instances found"; then
+        echo "  PASS: no args refuses loudly with multiple PostgreSQL instances up"
+        passed=$((passed + 1))
     else
-        echo "  FAIL: no args (auto-discover) returned exit code $rc"
+        echo "  FAIL: no args (auto-discover) returned exit code $rc: $output"
+        failed=$((failed + 1))
+    fi
+
+    # Same as above but with an explicit target: must always succeed
+    # regardless of how many other PostgreSQL instances are running
+    # concurrently.
+    timeout 10 "$TRACER" --pid "$PM_PID" --count 1 --interval 1 > /dev/null 2>&1
+    rc=$?
+    if [[ $rc -eq 0 || $rc -eq 124 ]]; then
+        echo "  PASS: --pid <explicit target> runs successfully"
+        passed=$((passed + 1))
+    else
+        echo "  FAIL: --pid <explicit target> returned exit code $rc"
         failed=$((failed + 1))
     fi
 fi

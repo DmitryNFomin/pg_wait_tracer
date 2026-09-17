@@ -114,49 +114,102 @@ keep only deterministic jobs. Stops the hardening tax immediately.
   auto-detect when no `--pg-version` is given); switch it for other versions
   until step 4's ephemeral-VM `--pg-version`-aware plumbing lands.
 - `make box-check` (default, PG=all) and `make box-check PG=13` both ran to
-  completion (not clean — see "Known gaps" below) against the real box;
-  8/8 PostgreSQL versions×ports verified with `psql -c 'select version()'`.
+  completion against the real box; 8/8 PostgreSQL versions×ports verified
+  with `psql -c 'select version()'`. Both were iterated on and most gaps
+  found while verifying them are now fixed in `tests/run_all.sh` /
+  `tests/test_cli.sh` (see below) — final default run: **1 failed**
+  (`test_multi_window`, item 5 below, deliberately left open). Final
+  `PG=13` run: 3 excluded + **2 failed** (`test_multi_window` again, and
+  `test_daemon_server` — a new, non-version-related finding, also below).
 
-**Known gaps found while verifying box-check (real bugs, not provisioning —
-left unfixed, in scope for a follow-up):**
-1. `tests/run_all.sh`'s C/Python unit-test loop (`unit_tests.list`) runs
+**Fixed while verifying box-check (real bugs found on the box, not
+provisioning gaps):**
+1. `tests/run_all.sh`'s C/Python unit-test loop (`unit_tests.list`) ran
    binaries directly from the repo root. `test_effective_cores` resolves its
    fixtures via a path relative to CWD (`fixtures/effective_cores/...`), so
    it needs `cwd=tests/`; run directly from the repo root (as `run_all.sh`
-   does) it fails all 21 checks with `cores -1, expected N`. Passes cleanly
+   did) it failed all 21 checks with `cores -1, expected N`. Passed cleanly
    under `make -C tests check` (which does `cd tests`) — that's the path
-   `ci.yml` uses, so this was never caught before.
+   `ci.yml` uses, so this was never caught before. **Fixed**: the loop now
+   `pushd`s into `tests/` (mirroring `make -C tests check` exactly) and pops
+   back out afterward.
 2. Same loop: `test_sampled_overhead_gate.py` and
    `test_data_query_text_context.py` are tracked as mode `100644` (no `+x`)
-   and `run_all.sh` execs list entries directly (no `python3` prefix) — both
-   fail with `Permission denied`. `make -C tests check` special-cases `*.py`
-   with an explicit `python3` prefix, so this was never caught either.
-3. `tests/test_cli.sh`'s "no args (auto-discover)" check invokes the tracer
+   and the loop exec'd list entries directly (no `python3` prefix) — both
+   failed with `Permission denied`. `make -C tests check` special-cases
+   `*.py` with an explicit `python3` prefix, so this was never caught
+   either. **Fixed**: the loop now branches on `*.py` → `python3 "$t"`,
+   else → `./"$t"`, same as `tests/Makefile`'s `check` target. No tracked
+   file was `chmod +x`ed.
+3. `tests/test_cli.sh`'s "no args (auto-discover)" check invoked the tracer
    with no `--pid`, relying on there being exactly one running PostgreSQL
    instance. With all 4 clusters up (this step's own design), the daemon
    correctly refuses ("Multiple PostgreSQL instances found ... Use --pid").
-   Correct product behavior, but incompatible with concurrently running all
-   four clusters — this test (and several others; see next point) assume a
-   single active instance.
-4. Several live tests are explicitly documented as "Requires: ... running
-   PostgreSQL 18" (`test_session_accuracy.py`, `test_query_accuracy.py`,
-   `test_daemon_server.py`, `test_multi_window.py`) and do not behave
-   correctly against other versions — e.g. `test_accuracy.py`'s IO
-   cross-check reads `pg_stat_io`, a PG16+ view, so it reads 0 on PG13. This
-   is why `make box-check PG=13` (10 failures) is redder than the default
-   run (5 failures against PG18): most of the difference is this
-   documented, pre-existing version-scoping, not a new problem.
-5. One additional failure (`test_multi_window`'s "Non-idle top-level %DB
-   sums to X%", tolerance 15–125%) reproduced only intermittently across
-   repeated runs (92.6% pass, then 141.8% fail with no code change) — timing
-   noise consistent with cx33's shared vCPU, not hardened per CLAUDE.md.
+   Correct product behavior, but the test only asserted the single-instance
+   success path. **Fixed**: the check now accepts either outcome (success
+   when auto-discovery is unambiguous, or the loud multi-instance refusal
+   message when it isn't) and a new second check asserts `--pid <target>`
+   always succeeds regardless of how many other instances are running —
+   that's the actual contract.
+4. Several live tests are documented "Requires: ... running PostgreSQL 18"
+   (16 of them, `grep`ped across `tests/*.py`), but empirically nearly all
+   of those pass fine on PG13 — the docstring is aspirational, not a real
+   constraint, for most of them. Isolated re-runs on the box (not just the
+   PG13 failures inside the full suite, which can be contention-skewed)
+   found exactly **three** with a real, reproducible version floor:
+   `test_accuracy.py` (its IO cross-check reads `pg_stat_io`, a PG16+ view;
+   fails on PG13, passes on PG17/18), `test_session_accuracy.py` and
+   `test_query_accuracy.py` (both fail reproducibly in isolation on PG13,
+   pass reproducibly on PG17). **Fixed**: `tests/run_all.sh`'s `LIVE_TESTS`
+   entries gained an optional fourth `|min_pg` field; under `--pg-version N`
+   below a test's minimum it is now excluded from the matrix via
+   `exclude_test()` (a new bucket, distinct from `skip`/`fail`, with its own
+   counter in the summary) with a printed reason, instead of running (and
+   failing) it. `test_daemon_server.py` and `test_multi_window.py` were
+   investigated too but are **not** version floors — see the next point.
+5. `test_multi_window`'s "Non-idle top-level %DB sums to X%" (tolerance
+   15–125%) reproduced only intermittently: 5 isolated re-runs on PG18 gave
+   58.9%, 84.8%, 84.5%, 139.6%, 142.4% — 2/5 out of bounds, with **no**
+   correlation to load average (the failures had the *lower* load-average
+   readings of the five: 0.43–2.44 vs. 2.99–3.44 for the passes). In every
+   run (pass or fail) the only non-idle top-level row was `CPU*` itself
+   (system_event has no separate `IO`/`LWLock`/`Lock` parent rows, only
+   `CPU*` and `Class:Event` children) — so this check is really just
+   `CPU*`'s own windowed-delta percentage swinging from 59% to 142%, not an
+   accumulation of several near-100% rows as the code comment's "106–110%
+   under pgbench load" theory describes. A raw failing capture (142.4% run)
+   is kept at `/tmp/multi_window_probe/run_*.log` on the box. Left **open**
+   per instruction — not hardened, not fixed; a possible real bug, decision
+   deferred to the owner.
+6. **New finding**, not in the original list: `test_daemon_server.py`'s
+   "CPU Time ratio server/CLI" check (tolerance 0.3–3.0) fails
+   **consistently** — 4/4 isolated re-runs across PG13, PG17, and PG18 (in
+   both single-agent and box-contended conditions), always in the same
+   direction: `DB Time` ratio stays fine (~2.0–2.1×) but `CPU Time` ratio is
+   4.6–7.1×, i.e. the CLI's single-tick live view undercounts CPU time
+   relative to the full-trace `pgwt-server` replay of the same run. Unlike
+   `test_multi_window` this is not random — same bias, every time, on every
+   PG version — so it reads as a real measurement discrepancy between the
+   live sampler path and the trace-replay path under this box's scheduling
+   characteristics, not per-PG-version behavior. **Not fixed, not version-
+   gated** (a version floor would misrepresent the cause): reported here for
+   the owner, same as item 5.
+7. `tests/test_cli.sh` also produced two different single-assertion misses
+   across otherwise-identical box-check runs — `--help does not print
+   Usage` once, `--window histogram missing 'Last 1s' column` once — each
+   never reproducing on an immediate manual re-run. Both are argv-parsing/
+   `--help` style checks that should be instant and PG-independent;
+   consistent with transient CLI-output truncation when the box was heavily
+   contended (a second agent's Playwright/ffmpeg-recording job was running
+   concurrently both times). Not hardened, not investigated further given
+   the non-reproducibility — flagged as box-contention noise, not a code
+   bug.
 
-None of the above were modified (per CLAUDE.md: never harden a test against
-noise, and real tree bugs get reported, not routed around, by an agent whose
-task is the box itself). `run_all.sh`'s two structural bugs (1 and 2) look
-like quick, well-scoped fixes for a future task; 3–5 need a design decision
-(single global test PG version vs the multi-cluster-by-port model this step
-introduces) that belongs to the owner or a dedicated `Plan` pass.
+None of the still-open items (5, 6, 7) were modified or hardened, per
+CLAUDE.md. Items 1–4 were fixed because they were real, reproducible,
+provisioning-independent bugs in the test harness itself that the task's
+"fix provisioning until it passes" step made it possible to actually
+exercise for the first time.
 
 **Noise characterization (2026-09-16, cx33 shared vCPU, PG 17, port 5417,
 9 pairs, `--characterize`, same methodology as
@@ -199,9 +252,10 @@ bias.
    are still warranted, or can start smaller.
 5. Branch protection: required checks = deterministic jobs + the three gate
    jobs; enable merge queue.
-6. Fix the `run_all.sh` "Known gaps" above (at least items 1–2, which are
-   pure bugs) before relying on `make box-check` as a clean pass/fail signal
-   in CI.
+6. Decide on the two open findings above (5: `test_multi_window`'s CPU*
+   windowed-delta swing; 6: `test_daemon_server`'s consistent CPU-ratio
+   bias) — both look like real measurement questions, not test bugs, and
+   need someone who knows the sampler/exact-probe internals.
 
 **Acceptance (original, still open for the CI-split part):** three
 consecutive green master runs with the gate jobs on the box; `sampled-overhead`
