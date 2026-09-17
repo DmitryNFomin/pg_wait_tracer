@@ -1,10 +1,11 @@
 # Dev loop plan — fast, sustainable development with minimal owner involvement
 
 _Decided 2026-08-28. Status as of 2026-09-17: steps 2 and 3 merged (#89, #90);
-step 1's box + provisioning + `make box-check` are done (this branch) —
-runner registration and the `ci.yml` job split are a follow-up (tracked as
-the remainder of step 1, see below); steps 4, 5 open. This document is
-self-contained: any agent or person can pick up an open step from it._
+step 1 is fully DONE (box + provisioning + `make box-check` on `agent/gate-box`;
+runner registration + the `ci.yml` job split on `agent/ci-split`, this
+branch — three consecutive green runs, see below); steps 4, 5 open. This
+document is self-contained: any agent or person can pick up an open step
+from it._
 
 ## Goal and principles
 
@@ -66,7 +67,7 @@ reintroduce noisy-neighbour variance in the one job most sensitive to it.
 
 ---
 
-## Step 1 — Gate box + CI split  `[box + provisioning + box-check DONE; CI split + runner registration OPEN — follow-up task]`
+## Step 1 — Gate box + CI split  `[DONE — agent/gate-box (box+provisioning+box-check) and agent/ci-split (runner registration + CI split, three green runs 2026-09-17)]`
 
 **Goal:** the timing-sensitive jobs run on dedicated hardware; hosted runners
 keep only deterministic jobs. Stops the hardening tax immediately.
@@ -386,26 +387,109 @@ alongside the positive median, consistent with "shared vCPU, occasional
 noisy-neighbour spike in either direction" rather than a systematic bias —
 the same read as the 2026-09-16 run, just with tighter IQRs this time.
 
-**Remaining work (follow-up task — do NOT register a runner or edit
-`.github/workflows/*` from this branch):**
-1. Provision + register the GitHub Actions self-hosted runner (labels
-   `self-hosted,linux,x64,ubuntu`, passwordless sudo) — `tests/provision-runner.sh`
-   does not do this yet (no `--runner-token` support).
-2. Take a Hetzner snapshot named `pgwt-gate-ubuntu-<date>` once the runner is
-   registered and green.
-3. `.github/workflows/ci.yml`: change `runs-on: ubuntu-latest` to
-   `runs-on: [self-hosted, ubuntu]` for `sampled-overhead`, `capture-smoke`,
-   `snapshots`. Delete their apt/PGDG install steps (preinstalled); select
-   the PG cluster by port (`PGPORT=54${{ matrix.pg }}` — confirmed to work,
-   see above) instead of dropping and reinstalling clusters. Add
-   `concurrency: { group: gate-box, cancel-in-progress: false }` to those
-   jobs so timing runs never overlap.
-4. Shrink `sampled-overhead`: with this box's noise profile (see table
-   above), decide whether the 21+21 confirmation pairs and 60-minute budget
-   are still warranted, or can start smaller.
-5. Branch protection: required checks = deterministic jobs + the three gate
-   jobs; enable merge queue.
-6. Fix the three `KNOWN_FAILING` product bugs above (issues #97
+**Runner registration + CI split (agent/ci-split branch, 2026-09-17) — DONE:**
+
+- `tests/provision-runner.sh ubuntu --runner-token TOKEN` (or
+  `PGWT_RUNNER_TOKEN` env): installs the GitHub Actions runner as a
+  systemd service, dedicated `runner` system user with passwordless sudo,
+  PERSISTENT (no `--ephemeral`), name `pgwt-gate`, labels
+  `self-hosted,linux,x64,gate-box` (the plan's original sketch above said
+  `...,ubuntu`; `gate-box` was used instead per the actual task contract —
+  matches `ci.yml`'s `runs-on: [self-hosted, gate-box]`). Idempotent
+  (verified: re-running without a token leaves the registration/service
+  alone; with a token, only registers if `~/.runner` is absent). Writes
+  `/etc/pgwt-gate-box` so `ci.yml` can detect the pre-provisioned box.
+  Registered and confirmed online: `gh api repos/.../actions/runners` →
+  `{"name":"pgwt-gate","status":"online","labels":["self-hosted","Linux","X64","gate-box"]}`.
+- `.github/workflows/ci.yml`: `capture-smoke` (all 4 PG cells) and
+  `sampled-overhead` moved to `runs-on: [self-hosted, gate-box]`, guarded
+  against fork PRs (`if: github.event_name != 'pull_request' ||
+  github.event.pull_request.head.repo.full_name == github.repository`),
+  every build/test step wrapped in `exec 9>/tmp/pgwt-box-check.lock; flock 9`
+  (same lock `scripts/box-check.sh`/`provision-runner.sh` use), PGPORT
+  derived as `54<major>` to reuse the box's existing clusters instead of
+  reinstalling PostgreSQL (skipped via a `/etc/pgwt-gate-box` marker check,
+  with the original hosted-style install steps kept as a fallback for a
+  future non-provisioned self-hosted runner). `snapshots` deliberately
+  stayed on `ubuntu-latest` — Chromium on the box arrives with the
+  `agent/ui-live-smoke` branch (still open as of this writing), not here.
+- **Concurrency deviates from the original sketch, for a real reason found
+  live**: instead of one literal `group: gate-box` shared by all 5 moved
+  jobs, each job/matrix-cell has its own group
+  (`gate-box-sampled-overhead`, `gate-box-capture-smoke-<pg>`). GitHub
+  Actions' documented concurrency behavior cancels any previously-PENDING
+  job in a group the instant a new job joins the same group — with one
+  shared literal group and 5 jobs all becoming eligible at once, only the
+  last one to queue ever ran; the other ~3-4 were canceled outright with
+  zero duration (reproduced on run 35246703576: capture-smoke PG13/16/18
+  canceled, only PG17 + sampled-overhead ran). Per-job-identity groups
+  instead protect each job against a duplicate of itself from a second,
+  concurrent CI run — the actual "never overlap" requirement — while true
+  same-box overlap between *different* jobs is separately prevented by the
+  runner's single-job-at-a-time default and by every step's
+  `/tmp/pgwt-box-check.lock`, which also covers an agent's ad hoc
+  `make box-check` over ssh (concurrency groups can't see that at all; it
+  was observed live serializing correctly against two other agents'
+  box-check/repro sessions during this task's own proving run).
+- **Two more real bugs found and fixed** by actually running this against
+  the box for the first time: (1) `/tmp/pgwt-box-check.lock` was root-owned
+  `0644` (from `provision-runner.sh`'s own prior runs), so the unprivileged
+  `runner` user's `exec 9>...` failed with "Permission denied" — fixed by
+  having `provision-runner.sh` `chmod 0666` it up front. (2) this is a
+  PERSISTENT (non-ephemeral) runner reusing the same `$GITHUB_WORKSPACE`
+  across jobs, and every gate-box test step runs under `sudo` (root) —
+  a prior job's sudo-run `python3` left root-owned
+  `tests/__pycache__/*.pyc` behind, which the next job's `actions/checkout`
+  (running as the unprivileged `runner` user) couldn't unlink, failing the
+  job before it did anything of its own. Fixed by reclaiming workspace
+  ownership (`sudo chown -R runner:runner "$GITHUB_WORKSPACE"`) as the
+  first step of both jobs. Also fixed, independently of the runner task but
+  discovered while provisioning it: `provision-runner.sh`'s PGDG-repo step
+  (`yes | apt.postgresql.org.sh -y`) SIGPIPEs under `set -o pipefail` once
+  `-y` stops reading stdin, and its idempotence check looked for the legacy
+  `pgdg.list` the installed script no longer writes (`pgdg.sources`) — the
+  same bug independently found and fixed on the not-yet-merged
+  `agent/ui-live-smoke` branch; expect a trivial textual merge conflict
+  there (identical fix on both sides).
+- **Three consecutive green runs**, `gh workflow run ci.yml --ref
+  agent/ci-split`, head `879a111032f860355f068d94acd37152c2849963`, every
+  `capture-smoke`/`sampled-overhead` job's `runner_name: "pgwt-gate"`:
+  - Run 1: [35251313080](https://github.com/DmitryNFomin/pg_wait_tracer/actions/runs/35251313080) — build-and-unit, web-ui, snapshots, protocol-drift,
+    capture-smoke ×4, sampled-overhead all `success`.
+  - Run 2: [35264465273](https://github.com/DmitryNFomin/pg_wait_tracer/actions/runs/35264465273) — same, all `success`.
+  - Run 3: [35273636728](https://github.com/DmitryNFomin/pg_wait_tracer/actions/runs/35273636728) — same, all `success`.
+  - (Two earlier attempts on the same head, 35246703576 and 35247607245,
+    hit the concurrency and lock/ownership bugs above; both fixed forward
+    in-branch, not hardened around, then canceled once superseded — not
+    counted among the three.)
+  - `mode4-hunt` (pre-existing, unrelated `if: workflow_dispatch`-only job,
+    default 360-min timeout) is **not** one of the moved gate jobs and is
+    excluded from "green" here: it ran long (up to ~6h budget) on every
+    triggered run and failed once (run 3) — a pre-existing manual BPF-bug
+    hunt this task did not touch and should not judge.
+- **`sampled-overhead` wall time**: the job-level stopwatch this task added
+  measured 48m59s / 47m53s / 9m31s across the three runs — dominated by
+  real `/tmp/pgwt-box-check.lock` queueing behind *other concurrent agents'*
+  `make box-check` and manual-repro sessions on this shared box during the
+  proving window, not the gate's own cost (a genuine limitation of that
+  stopwatch: it can't distinguish queueing from execution). The gate's own
+  execution slice, read from its step timestamps (lock acquired → paired
+  benchmark done), was consistently **~8m48s–8m49s** across all three runs
+  — well under the plan's 15-minute target, and consistent with the noise
+  table's PG17 profile above.
+
+**Remaining work:**
+1. Move `snapshots` to the gate box once Chromium is provisioned there
+   (`agent/ui-live-smoke`, not yet merged).
+2. Take a Hetzner snapshot named `pgwt-gate-ubuntu-<date>` now that the
+   runner is registered and green (not done by this task; not requested by
+   its contract).
+3. Branch protection + merge queue — **owner action**, not applied by this
+   task; see the exact `gh api` commands in the branch's PR/report.
+4. Shrink `sampled-overhead`'s 7+7 pairs / 60-min budget now that its real
+   execution cost (~9 min) is known precisely — still open, deliberately
+   not touched by this task (no threshold/assertion changes in scope).
+5. Fix the three `KNOWN_FAILING` product bugs above (issues #97
    `test_multi_window`'s CPU* windowed-delta swing, #98
    `test_daemon_server`'s consistent CPU-ratio bias, #99 `test_partition`'s
    PG13-only small-margin conservation miss) and remove each from
@@ -416,9 +500,12 @@ the same read as the 2026-09-16 run, just with tighter IQRs this time.
    file it as a product bug (and list it) or characterize it as noise and
    move it off the gate box's serial path.
 
-**Acceptance (original, still open for the CI-split part):** three
-consecutive green master runs with the gate jobs on the box; `sampled-overhead`
-wall time under 15 min.
+**Acceptance:** three consecutive green master runs with the gate jobs on
+the box — **met** (see run ids above); `sampled-overhead` wall time under
+15 min — **met** for the gate's own execution (~8m48s), though the naive
+job-level stopwatch can read much higher under concurrent box load (see
+above; not a regression, a measurement-methodology note for whoever reads
+that step's output next).
 
 ---
 
