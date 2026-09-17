@@ -1,0 +1,13 @@
+#cloud-config
+# Minimal cloud-init for a persistent Ubuntu 24.04 gate box (tests/hetzner-vm.sh
+# create --type cx33 --image ubuntu-24.04 --cloud-init tests/cloud-init-ubuntu-minimal.yaml).
+#
+# Deliberately does NOT install PostgreSQL/build deps/a runner here: that is
+# tests/provision-runner.sh's job, run over ssh after boot, so provisioning
+# stays idempotent and re-runnable without recreating the VM. This file only
+# makes sure the box is ready for that first ssh + rsync.
+
+package_update: true
+
+runcmd:
+  - apt-get install -y rsync
