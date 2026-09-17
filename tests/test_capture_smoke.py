@@ -185,6 +185,65 @@ def pgbench_pgss_query_ids():
     return ids
 
 
+def pgss_all_rows():
+    """Every pg_stat_statements row currently visible, keyed by query id (as
+    unsigned 64-bit) -> (calls, left(query, 60)). NO calls floor. Backs both
+    the phantom-id guard truth set (pgss_phantom_truth_ids()) and this
+    module's diagnostic messages (issue #92): a real, single-call statement
+    (e.g. the tracer's own backend_status_layout validation probe, or the
+    Phase 3 controlled waiter/holder) is a legitimate id that
+    pgss_query_ids()'s calls>=3 floor would otherwise hide, making the
+    phantom guard misfire on it."""
+    out = psql(
+        "SELECT queryid, calls, left(query, 60) FROM pg_stat_statements "
+        "WHERE queryid IS NOT NULL")
+    rows = {}
+    for line in out.split('\n'):
+        if not line.strip():
+            continue
+        parts = line.split('|', 2)
+        if len(parts) != 3:
+            continue
+        qid_s, calls_s, text = (p.strip() for p in parts)
+        if not re.fullmatch(r'-?\d+', qid_s) or not calls_s.isdigit():
+            continue
+        qid = int(qid_s) & 0xFFFFFFFFFFFFFFFF
+        rows[qid] = (int(calls_s), text)
+    return rows
+
+
+def pgss_phantom_truth_ids():
+    """The ground truth for phantom-id guards ONLY (issue #92): every query
+    id pg_stat_statements has ever recorded, with NO calls floor. A real id
+    backed by a single-call statement must not be misclassified as a
+    phantom just because it hasn't reached pgss_query_ids()'s calls>=3
+    floor — that floor stays in place for the presence assertions (a
+    phantom-id guard only cares whether an id is real, never how often it
+    ran)."""
+    return set(pgss_all_rows().keys())
+
+
+def describe_unmatched_ids(ids):
+    """Diagnostic for a phantom-id guard failure: for each id present in the
+    trace/view but not matched against the truth set, show what pg_stat_
+    statements knows about it, if anything, with NO calls floor. Best-effort:
+    this runs while building a FAIL message, so a stalled psql() here must
+    not turn a clean FAIL line into an uncaught traceback that aborts the
+    remaining assertions."""
+    try:
+        rows = pgss_all_rows()
+    except subprocess.TimeoutExpired:
+        return "(pgss lookup failed)"
+    parts = []
+    for qid in sorted(ids):
+        if qid in rows:
+            calls, text = rows[qid]
+            parts.append(f"{qid}(pgss calls={calls} query={text!r})")
+        else:
+            parts.append(f"{qid}(absent from pgss)")
+    return ", ".join(parts) if parts else "none"
+
+
 # ── deterministic workload ─────────────────────────────────────────
 
 class Workload:
@@ -719,10 +778,19 @@ def phase_live_query_event(pm_pid, mode, pg_major, core=False):
               f"(view={len(view_ids)}; intentionally not joined to pgss ids)"
               + ("" if view_ids else f" (stderr tail: {err[-300:]!r})"))
     elif core:
-        check(not view_ids or len(matched) > 0,
+        # Phantom-id guard only: does the id exist at all in pgss, no calls
+        # floor (issue #92 — a real single-call id, e.g. the tracer's own
+        # layout-validation probe, is not a phantom).
+        phantom_truth = pgss_phantom_truth_ids()
+        view_matched = view_ids & phantom_truth
+        view_ok = not view_ids or len(view_matched) > 0
+        check(view_ok,
               f"[core] query_event view ids, if any, cross-check against "
               f"pg_stat_statements — no phantoms (view={len(view_ids)}, "
-              f"pgss={len(truth)}, matched={len(matched)})")
+              f"pgss={len(phantom_truth)}, matched={len(view_matched)})"
+              + ("" if view_ok else
+                 f" unmatched: "
+                 f"{describe_unmatched_ids(view_ids - view_matched)}"))
     else:
         check(len(matched) > 0,
               f"query_event view ids cross-check against pg_stat_statements "
@@ -1118,10 +1186,6 @@ def phase_trace_file(pm_pid, mode, pg_major, core=False):
                 continue
             if qid != 0:
                 trace_ids.add(qid & 0xFFFFFFFFFFFFFFFF)
-        truth = (pgbench_truth
-                 if mode == "tiered" and pg_major >= 14 and not core
-                 else pgss_query_ids())
-        matched = trace_ids & truth
         text_rows = [r for r in qresp.get("rows", []) if r.get("text")]
         if pg_major == 13 and mode == "tiered":
             check(len(trace_ids) > 0,
@@ -1183,11 +1247,28 @@ def phase_trace_file(pm_pid, mode, pg_major, core=False):
             # is therefore not gated for either, but each keeps the phantom-id
             # guard: any id that DOES appear must be real (matched). The hosted
             # runner + live boxes remain strict through the non-core assertions.
-            check(not trace_ids or len(matched) > 0,
+            # Phantom-id guard only: does the id exist at all in pgss, no
+            # calls floor (issue #92 — a real single-call id, e.g. the
+            # tracer's own layout-validation probe or the Phase 3 controlled
+            # waiter/holder, is not a phantom).
+            phantom_truth = pgss_phantom_truth_ids()
+            trace_matched = trace_ids & phantom_truth
+            trace_ok = not trace_ids or len(trace_matched) > 0
+            check(trace_ok,
                   f"[core] trace query ids, if any, cross-check against "
                   f"pg_stat_statements — no phantoms (trace={len(trace_ids)}, "
-                  f"pgss={len(truth)}, matched={len(matched)})")
+                  f"pgss={len(phantom_truth)}, matched={len(trace_matched)})"
+                  + ("" if trace_ok else
+                     f" unmatched: "
+                     f"{describe_unmatched_ids(trace_ids - trace_matched)}"))
         else:
+            # Presence assertion only (never a core path here — see elif
+            # core above): keeps pgss_query_ids()'s calls>=3 floor, unlike
+            # the phantom-id guards above.
+            truth = (pgbench_truth
+                     if mode == "tiered" and pg_major >= 14
+                     else pgss_query_ids())
+            matched = trace_ids & truth
             check(len(matched) > 0,
                   f"trace file query attribution cross-checks against "
                   f"pg_stat_statements (trace={len(trace_ids)}, pgss={len(truth)}, "
