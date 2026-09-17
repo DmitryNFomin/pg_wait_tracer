@@ -19,6 +19,14 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 source "$SCRIPT_DIR/testutil.sh"
 
+# issue #93: this run's marker (its own start timestamp), exported so
+# tests/ui_live_smoke.py can stamp tests/results/ui_live/run.id with it.
+# tests/results is excluded from box-check.sh's up-rsync, so the box keeps
+# the LAST run's ui_live/ between invocations -- without this, a smoke that
+# died before ever reaching the walk would have this script re-emit the
+# previous (unrelated) run's PASS/FAIL verdict as if it were this run's.
+export PGWT_RUN_MARKER="$(date +%s)"
+
 PM_PID=""
 PG_VERSION=""
 PG_VERSION_EXPLICIT=0
@@ -417,26 +425,23 @@ fi
 # the gate box now has Playwright+Chromium (tests/provision-runner.sh, issue
 # #93), leaving it on by default promoted this into every `make box-check`
 # run — a real Chromium walk the shared box does not need to also carry.
-# Locally (opted in) a missing dependency is a skip; in CI ($CI set) it is a
-# FAILURE — the UI suite silently not running is how regressions slip
-# through. test_web_ui_chaos runs the same UI against mock_server.py in
-# CHAOS mode (latency jitter / out-of-order / late responses) — its
-# race-exposing tests are classified gating vs xfail internally, so it stays
-# CI-green either way.
+# No separate "$CI" hard-fail branch here (unlike Steps elsewhere in this
+# file): run_all.sh is a box-check/manual-box script, never invoked by any
+# GitHub Actions workflow directly (ci.yml's web-ui job runs test_web_ui.py
+# itself), so $CI is never actually set for this script -- that branch was
+# unreachable dead code. test_web_ui_chaos runs the same UI against
+# mock_server.py in CHAOS mode (latency jitter / out-of-order / late
+# responses) — its race-exposing tests are classified gating vs xfail
+# internally, so it stays green either way once opted in.
 if [[ "${PGWT_RUN_WEB_UI:-}" != "1" ]]; then
     skip_test "test_web_ui" "opt-in: set PGWT_RUN_WEB_UI=1 (make check + ci.yml's web-ui job already cover this)"
     skip_test "test_web_ui_chaos" "opt-in: set PGWT_RUN_WEB_UI=1 (make check + ci.yml's web-ui job already cover this)"
 elif python3 -c "import playwright, websockets" 2>/dev/null; then
     run_test "test_web_ui" python3 "$SCRIPT_DIR/test_web_ui.py"
     run_test "test_web_ui_chaos" python3 "$SCRIPT_DIR/test_web_ui_chaos.py"
-elif [[ -n "${CI:-}" ]]; then
-    run_test "test_web_ui" bash -c \
-        'echo "ERROR: playwright/websockets not installed — required in CI"; exit 1'
-    run_test "test_web_ui_chaos" bash -c \
-        'echo "ERROR: playwright/websockets not installed — required in CI"; exit 1'
 else
-    skip_test "test_web_ui" "playwright or websockets not installed"
-    skip_test "test_web_ui_chaos" "playwright or websockets not installed"
+    skip_test "test_web_ui" "opted in via PGWT_RUN_WEB_UI=1 but playwright or websockets not installed"
+    skip_test "test_web_ui_chaos" "opted in via PGWT_RUN_WEB_UI=1 but playwright or websockets not installed"
 fi
 
 # Visual-regression snapshots (Phase B4). Needs playwright + Pillow + numpy AND
@@ -460,14 +465,31 @@ fi
 # CLAUDE.md's definition of done says `make box-check`'s summary (the last
 # ~25 lines an agent pastes into a PR) shows this; without it, a reviewer
 # reading only the tail never sees per-tab known-failing/xpass status.
-ui_live_summary="$SCRIPT_DIR/results/ui_live/summary.json"
-if [[ -f "$ui_live_summary" ]]; then
-    python3 - "$ui_live_summary" <<'PYEOF'
+#
+# Gated on tests/results/ui_live/run.id == $PGWT_RUN_MARKER: box-check.sh's
+# up-rsync excludes tests/results, so the box keeps the LAST run's ui_live/
+# between invocations -- without this check, a smoke that died before ever
+# reaching the walk (e.g. the daemon/bridge never came up) would silently
+# re-emit a PREVIOUS, unrelated run's PASS here, right next to THIS run's
+# `failed 1` for the very same test.
+ui_live_dir="$SCRIPT_DIR/results/ui_live"
+python3 - "$ui_live_dir/summary.json" "$ui_live_dir/run.id" "$PGWT_RUN_MARKER" <<'PYEOF'
 import json
 import sys
 
+summary_path, run_id_path, expected_marker = sys.argv[1], sys.argv[2], sys.argv[3]
+
 try:
-    s = json.load(open(sys.argv[1]))
+    actual_marker = open(run_id_path).read().strip()
+except OSError:
+    actual_marker = None
+
+if actual_marker != expected_marker:
+    print("  Live UI smoke: NOT RUN in this invocation")
+    sys.exit(0)
+
+try:
+    s = json.load(open(summary_path))
 except Exception as e:
     print(f"  Live UI smoke: could not read summary.json ({e})")
     sys.exit(0)
@@ -481,7 +503,6 @@ if s.get("xpass_tabs"):
     line += " (xpass: " + ", ".join(s["xpass_tabs"]) + ")"
 print(line)
 PYEOF
-fi
 
 # Summary
 echo ""

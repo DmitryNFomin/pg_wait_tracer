@@ -6,6 +6,7 @@ part of `make check`.
 
 Usage: python3 tests/test_ui_live_smoke_lib.py
 """
+import inspect
 import io
 import os
 import sys
@@ -479,58 +480,29 @@ def test_write_summary_roundtrip():
               "write_summary() writes exactly what build_summary() returned")
 
 
-TESTS = [
-    test_frame_diff_ratio_identical,
-    test_frame_diff_ratio_partial,
-    test_frame_diff_ratio_below_threshold,
-    test_frame_diff_ratio_above_threshold,
-    test_frame_diff_ratio_shape_mismatch,
-    test_blink_check_matching_shapes,
-    test_blink_check_resized_panel_is_maximal_not_a_crash,
-    test_is_blank_frame_solid_colour,
-    test_is_blank_frame_real_content,
-    test_is_blank_frame_near_solid_antialiasing_noise_still_blank,
-    test_compare_png_files_roundtrip,
-    test_png_bytes_to_array_roundtrip,
-    test_blink_threshold_is_pinned_at_0_1_pct,
-    test_color_stability_stable,
-    test_color_stability_violation_detected,
-    test_color_stability_reappearance_after_rerank,
-    test_leak_probe_ok_settled,
-    test_leak_probe_ok_table_tab,
-    test_leak_probe_detects_chart_leak,
-    test_leak_probe_detects_pending_leak,
-    test_render_check_ok_string_success,
-    test_render_check_ok_string_failure,
-    test_render_check_ok_dict,
-    test_render_check_ok_unexpected,
-    test_build_tab_result_all_green,
-    test_build_tab_result_flags_blink,
-    test_build_tab_result_flags_insufficient_ticks,
-    test_build_tab_result_records_pgwt_errors_without_failing,
-    test_build_tab_result_records_leak_settle_duration,
-    test_build_failed_tab_result_records_pgwt_errors,
-    test_build_summary_ok_requires_every_tab,
-    test_build_summary_empty_is_not_ok,
-    test_build_failed_tab_result,
-    test_known_failing_tabs_pinned,
-    test_known_failing_issue,
-    test_known_failing_report_line,
-    test_build_tab_result_known_failing_does_not_fail_summary,
-    test_build_tab_result_xpass_does_not_fail_summary_either,
-    test_build_failed_tab_result_known_failing,
-    test_known_failing_does_not_affect_unlisted_tabs,
-    test_build_summary_mixed_known_failing_and_real_failure,
-    test_write_summary_roundtrip,
-]
+def _discover_tests():
+    """Every callable named test_* defined at module level, in declaration
+    order (by source line). Replaces a hand-maintained TESTS list (issue #93
+    review: two tests were defined but never added to it, so they silently
+    never ran) -- this whole class of drift cannot recur since a new
+    test_* function is picked up automatically."""
+    found = [obj for name, obj in list(globals().items())
+             if name.startswith("test_") and inspect.isfunction(obj)]
+    found.sort(key=lambda fn: inspect.getsourcelines(fn)[1])
+    return found
+
+
+TESTS = _discover_tests()
 
 
 def main():
+    print(f"discovered {len(TESTS)} test functions")
     for t in TESTS:
         print(f"--- {t.__name__} ---")
         t()
     print()
-    print(f"Ran {tests_run}, passed {tests_passed}, failed {tests_failed}")
+    print(f"Ran {tests_run}, passed {tests_passed}, failed {tests_failed} "
+          f"({len(TESTS)} test functions discovered)")
     return 0 if tests_failed == 0 else 1
 
 

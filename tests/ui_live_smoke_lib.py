@@ -59,11 +59,16 @@ BLINK_THRESHOLD = 0.001  # 0.1%
 # intermittent or fixed; check the issue` in the driver's output) so a human
 # decides when to delist a tab, not a single run's outcome either way.
 KNOWN_FAILING_TABS = {
-    # #100: no_blink ratio 4.46% in one run. Cause is UNPROVEN -- do not
-    # assume it is #102 (missing animation:false): new data on #100 points
-    # at a window-pan re-layout landing ~1.3s after the tick, which would
-    # land AFTER tests/ui_live_smoke.py's 1200ms settle and still get caught
-    # by the two-frame blink pair. Investigate before closing either way.
+    # #100: no_blink ratio 4.46% in one run, but an UNPROVEN xpass in
+    # another -- do not read the xpass as "fixed". The xpass run itself was
+    # confounded: tests/ui_live_smoke.py's blind-window check (added the
+    # same round) pushed the blink pair from ~1.3s to ~1.6s after the tick
+    # (a flat 1200ms sleep from wherever the code happened to be, not
+    # anchored to the tick's own timestamp -- fixed after this was found),
+    # so a pass under the drifted timing proves nothing about whichever
+    # window the original failure landed in. Do not assume #102 (missing
+    # animation:false) either. Stays listed until a run with the
+    # tick-anchored settle is investigated either way.
     "timeline": 100,
     # #101: the executions query takes > 60s to answer under sustained
     # --mode full capture load.

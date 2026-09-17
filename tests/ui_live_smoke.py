@@ -78,6 +78,11 @@ except ImportError:
 
 RESULTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                            "results", "ui_live")
+# --mock's own default out-dir, deliberately NOT RESULTS_DIR: a developer
+# running `--mock` on their own Mac after pulling real box evidence via
+# `make box-check` must never have reset_output_dir() wipe that evidence.
+MOCK_RESULTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                "results", "ui_live_mock")
 MOCK_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                            "mock_server.py")
 MOCK_PORT = int(os.environ.get("PGWT_UI_LIVE_MOCK_PORT", "18830"))
@@ -467,27 +472,43 @@ def _settled_leak_probe(page, timeout_s=TICK_TIMEOUT_S, interval_ms=200):
     return probe, time.monotonic() - start
 
 
+def _pid_is_live(pid):
+    """True if pid exists and is not a zombie. os.kill(pid, 0) alone is not
+    enough (issue #93 review nit): it succeeds for a zombie too -- the PID
+    stays reserved until the parent reaps it, so a dead-but-unreaped pgbench/
+    workload process would pass as "alive" and the walk would keep grading
+    an idle system. /proc/<pid>/stat's state field (immediately after the
+    LAST ')' -- the command name itself can contain parens) is 'Z' for a
+    zombie; anything else, or an unreadable/missing /proc entry meaning the
+    process is fully gone, is handled by the caller."""
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            content = f.read()
+    except OSError:
+        return False
+    fields_after_comm = content.rsplit(")", 1)[-1].split()
+    state = fields_after_comm[0] if fields_after_comm else ""
+    return state != "Z"
+
+
 def _assert_workload_alive(pgbench_pid, workload_pid, where):
     """FAILS LOUDLY (raises SystemExit) if either the pgbench or the lock/
-    sleep workload process is gone. Called at each tab boundary (issue #93
-    review item 2): a controlled-load process that died partway through the
-    walk would leave the REMAINING tabs grading an idle system -- rendered/
-    no_blink/no_leak could all still trivially "pass" against stale, frozen
-    data, which is exactly the false confidence this whole test exists to
-    prevent. None for either pid means the caller did not wire this check up
-    (e.g. --mock, or a manual --url run) -- skipped, not failed."""
+    sleep workload process is gone (or a zombie -- see _pid_is_live). Called
+    at each tab boundary (issue #93 review item 2): a controlled-load
+    process that died partway through the walk would leave the REMAINING
+    tabs grading an idle system -- rendered/no_blink/no_leak could all still
+    trivially "pass" against stale, frozen data, which is exactly the false
+    confidence this whole test exists to prevent. None for either pid means
+    the caller did not wire this check up (e.g. --mock, or a manual --url
+    run) -- skipped, not failed."""
     for label, pid in (("pgbench", pgbench_pid), ("lock/sleep workload", workload_pid)):
         if pid is None:
             continue
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
+        if not _pid_is_live(pid):
             print(f"FATAL: {label} (pid {pid}) is no longer running ({where}) -- "
                   f"refusing to grade the remaining tabs against an idle system",
                   file=sys.stderr)
             sys.exit(1)
-        except PermissionError:
-            pass  # exists, just not signalable by us -- treat as alive
 
 
 # ── one tab's walk ───────────────────────────────────────────────────────────
@@ -535,6 +556,8 @@ def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
             if not _wait_for_tick(page, i, TICK_TIMEOUT_S):
                 raise SmokeFailure(
                     f"tick {i}/{ticks} did not arrive within {TICK_TIMEOUT_S}s")
+            tick_ts_ms = page.evaluate(
+                "window.__uiLiveTicks[window.__uiLiveTicks.length - 1]")
 
             # Blind-window check (issue #93 review item 5): between the tick
             # landing and the render-check retry + animation settle below,
@@ -570,7 +593,21 @@ def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
             # separate web/static/views/*.js change); once it lands this
             # settle can shrink back down to ~tick latency (a couple hundred
             # ms) instead of covering a whole animated transition.
-            page.wait_for_timeout(1200)
+            #
+            # Anchored to the TICK's own timestamp, not a flat sleep from
+            # wherever this line happens to run: the blind-window check
+            # above (screenshot + PNG decode) and _poll_render_check's retry
+            # loop both take variable time, and a flat `wait_for_timeout
+            # (1200)` here silently drifted the blink pair from ~1.3s to
+            # ~1.6s after the tick once the blind-window check was added
+            # (issue #93 review) -- moving it off whatever interval a
+            # builder's own re-render/re-layout lands in. Sleeping only the
+            # REMAINDER to tick_ts_ms+1200 keeps the measurement window
+            # stable regardless of preceding work.
+            target_ms = tick_ts_ms + 1200
+            now_ms = page.evaluate("Date.now()")
+            if target_ms > now_ms:
+                page.wait_for_timeout(target_ms - now_ms)
 
             frame_a = _safe_panel_screenshot(page, tab_id)
             page.wait_for_timeout(120)  # same data window, before the next tick
@@ -660,8 +697,10 @@ def main():
                     "(phase 2: the real Go bridge)")
     ap.add_argument("--mock", action="store_true",
                     help="start tests/mock_server.py and walk against it")
-    ap.add_argument("--out-dir", default=RESULTS_DIR,
-                    help=f"artifact directory (default {RESULTS_DIR})")
+    ap.add_argument("--out-dir", default=None,
+                    help=f"artifact directory (default {RESULTS_DIR} for "
+                    f"--url, {MOCK_RESULTS_DIR} for --mock -- kept separate "
+                    "so a local --mock run can never wipe real box evidence)")
     ap.add_argument("--ticks", type=int, default=lib.MIN_TICKS,
                     help=f"live ticks to observe per tab (default {lib.MIN_TICKS}; "
                     "the issue requires >= 6 -- never lower this in a gating run)")
@@ -694,11 +733,27 @@ def main():
     else:
         url = args.url
 
+    out_dir = args.out_dir or (MOCK_RESULTS_DIR if args.mock else RESULTS_DIR)
+
     # Every artifact under out_dir must belong to THIS run -- delete and
     # recreate it fresh before any tab runs, so a stale tick-N.png from an
     # earlier invocation (mock, real, or a previous box-check) can never
     # survive into this run's summary.json (issue #93 ui-reviewer finding).
-    lib.reset_output_dir(args.out_dir)
+    lib.reset_output_dir(out_dir)
+
+    # This run's marker (issue #93 review item 3): tests/run_all.sh exports
+    # PGWT_RUN_MARKER (its own start timestamp) and re-emits this run's
+    # verdict only if run.id matches it -- tests/results is excluded from
+    # box-check.sh's up-rsync, so the box otherwise keeps the LAST run's
+    # ui_live/ between invocations, and a smoke that died before the walk
+    # would have run_all.sh print a stale, unrelated PASS/FAIL as if it were
+    # this run's. Written IMMEDIATELY after reset_output_dir so it survives
+    # even a failure on the very first tab. Falls back to the wall clock for
+    # --mock/manual runs, which have no run_all.sh marker to match.
+    run_marker = os.environ.get("PGWT_RUN_MARKER", str(int(time.time())))
+    with open(os.path.join(out_dir, "run.id"), "w") as f:
+        f.write(run_marker)
+
     _assert_workload_alive(args.pgbench_pid, args.workload_pid, "before the walk")
     results = []
     try:
@@ -707,7 +762,7 @@ def main():
             try:
                 for tab_id in lib.TABS:
                     print(f"=== {tab_id} ===")
-                    result = run_tab(browser, tab_id, url, args.out_dir,
+                    result = run_tab(browser, tab_id, url, out_dir,
                                      args.ticks, args.first_data_timeout,
                                      args.blink_threshold)
                     results.append(result)
@@ -724,7 +779,7 @@ def main():
         if mock_proc is not None:
             stop_mock_server(mock_proc)
 
-    summary_path = os.path.join(args.out_dir, "summary.json")
+    summary_path = os.path.join(out_dir, "summary.json")
     summary = lib.write_summary(summary_path, results)
 
     print()
