@@ -507,7 +507,15 @@ the same read as the 2026-09-16 run, just with tighter IQRs this time.
   master's addition) — completed successfully end to end (all 4 PG
   clusters, Go, Playwright+Chromium, ssh self-trust loop, marker file),
   confirming idempotence and leaving the existing `pgwt-gate` registration
-  untouched (`no --runner-token / PGWT_RUNNER_TOKEN given — skipping`).
+  untouched (`no --runner-token / PGWT_RUNNER_TOKEN given — skipping`). A
+  fourth `gh workflow run ci.yml --ref agent/ci-split` on the rebased head
+  (`1ba766a7bf232121b18a9122848109a0dceb0a16`) confirmed everything still
+  green post-rebase: [35281341819](https://github.com/DmitryNFomin/pg_wait_tracer/actions/runs/35281341819)
+  — build-and-unit, web-ui, snapshots (still hosted), protocol-drift,
+  capture-smoke ×4, sampled-overhead all `success`, every moved job's
+  `runner_name: "pgwt-gate"`; `sampled-overhead` wall time 569s (9m29s,
+  minimal box contention this run) — under the 15-min target without
+  needing the queueing-vs-execution caveat this time.
 - **`snapshots` evaluated, deliberately left on `ubuntu-latest`**: now that
   master provisions Chromium on the box, ran `tests/test_web_ui_snapshots.py`
   for real on the box (pinned playwright==1.60.0, same as `ci.yml`) against
