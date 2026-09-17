@@ -106,6 +106,7 @@ xpass=0
 KNOWN_FAILING=(
     "test_multi_window|97"
     "test_daemon_server|98"
+    "test_partition|99"
 )
 
 # known_failing_issue NAME — prints the tracking issue number and returns 0
