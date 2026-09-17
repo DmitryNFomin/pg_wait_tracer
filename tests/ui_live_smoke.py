@@ -491,6 +491,16 @@ def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
             if not render_ok:
                 raise SmokeFailure(f"tick {i}: {render_detail}")
 
+            # Settle past ECharts' default ~1000ms setOption() transition
+            # before measuring "the same data window": AAS explicitly turned
+            # this off (docs/VISUAL_CHECKLIST.md's U0 CONTINUITY fix,
+            # "no replayed draw-in on refresh"), but several other builders
+            # (observed: Concurrency/Timeline/Scatter/Matrix) still animate
+            # on every live-tick setOption(), and catching that mid-transition
+            # is measuring the WRONG window, not a real per-tick instability.
+            # 1200ms is comfortably past ECharts' default animationDuration.
+            page.wait_for_timeout(1200)
+
             frame_a = _safe_panel_screenshot(page, tab_id)
             page.wait_for_timeout(120)  # same data window, before the next tick
             frame_b = _safe_panel_screenshot(page, tab_id)
