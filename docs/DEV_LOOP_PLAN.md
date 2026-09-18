@@ -587,7 +587,17 @@ the same read as the 2026-09-16 run, just with tighter IQRs this time.
   logging "leaving it running" unconditionally, and notes that the
   registration token is briefly visible via `/proc/*/cmdline` during
   `config.sh` (GitHub's own documented invocation; the token is
-  single-use, ~1h).
+  single-use, ~1h). Verified with `actionlint` (zero issues on `ci.yml`,
+  shellcheck included) and a fifth `gh workflow run ci.yml --ref
+  agent/ci-split` on head `a44b5eac3fd63a14fcfe0ba24df44bf3ca9416fc`:
+  [35287974684](https://github.com/DmitryNFomin/pg_wait_tracer/actions/runs/35287974684)
+  — all required jobs `success` (build-and-unit, web-ui, snapshots,
+  protocol-drift, capture-smoke ×4, sampled-overhead), every moved job's
+  `runner_name: "pgwt-gate"`, and the new `Refuse fork PR` / `Refuse
+  destructive re-install` steps both correctly `skipped` (not applicable,
+  not run) on every capture-smoke cell — confirmed directly from each
+  job's step list, not just its overall conclusion. `sampled-overhead`
+  wall time 567s (9m27s).
 
 **Remaining work:**
 1. Move `snapshots` to the gate box — Chromium is now provisioned there
@@ -615,7 +625,7 @@ the same read as the 2026-09-16 run, just with tighter IQRs this time.
    file it as a product bug (and list it) or characterize it as noise and
    move it off the gate box's serial path.
 
-**Acceptance:** met on the branch via four `workflow_dispatch` runs with the
+**Acceptance:** met on the branch via five `workflow_dispatch` runs with the
 gate jobs on the box (see run ids above) — not master runs; the master-run
 half of "three consecutive green master runs" completes on merge, once this
 branch's PR lands and a push to master triggers `ci.yml` for real.
