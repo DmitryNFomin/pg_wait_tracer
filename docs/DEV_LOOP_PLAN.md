@@ -592,6 +592,25 @@ the same read as the 2026-09-16 run, just with tighter IQRs this time.
   not run) on every capture-smoke cell — confirmed directly from each
   job's step list, not just its overall conclusion. `sampled-overhead`
   wall time 567s (9m27s).
+- **`concurrency:` blocks removed from `capture-smoke` and `sampled-overhead`
+  (issue #126, agent/ci-no-concurrency-groups, 2026-09-18)**: the
+  per-job-identity groups added above to stop 5 jobs from cancelling each
+  other within one run reproduced the same class of bug one level up —
+  GitHub keeps at most one PENDING job per group, so when a second CI run
+  (a second PR, or a re-run) joined the same group, the OLDER run's
+  still-queued job was cancelled outright instead of waiting its turn.
+  Observed on PR #124 run 35354092704: `capture-smoke (PG 18)` cancelled
+  after 71 min of queueing. The groups were never load-bearing for
+  correctness — the gate box's runner takes one job at a time by default
+  and every build/test step already holds `/tmp/pgwt-box-check.lock`
+  (bounded 120-min wait, per the previous entry), which queues rather than
+  cancels and also covers an agent's ad hoc `make box-check` over ssh that
+  no concurrency group could ever see. Both jobs' fork-PR path (hosted
+  runner, no self-hosted label touched) never needed a group either.
+  Verified with `actionlint` (zero issues) and two overlapping
+  `gh workflow run ci.yml --ref agent/ci-no-concurrency-groups` dispatches;
+  see the PR body / issue #126 for the run ids and the non-overlap
+  evidence from each job's `startedAt`/`completedAt`.
 
 **Remaining work:**
 1. Move `snapshots` to the gate box — Chromium is now provisioned there

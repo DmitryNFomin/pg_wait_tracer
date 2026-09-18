@@ -128,27 +128,25 @@ jobs:
     # docs/DEV_LOOP_PLAN.md step 1: moved to the persistent gate box (real
     # hardware, no noisy-neighbour hypervisor) instead of ubuntu-latest.
     #
-    # concurrency group is per-JOB-IDENTITY ("gate-box-sampled-overhead"),
-    # not a single literal "gate-box" shared with capture-smoke's 4 matrix
-    # cells. Real bug found running this for the first time: GitHub Actions'
-    # documented concurrency behavior is "any PREVIOUSLY PENDING job in the
-    # group is canceled" (not queued/retained) whenever a NEW job joins the
-    # same group while one member is already in-progress — with one literal
-    # "gate-box" group shared by 5 jobs (this one + 4 capture-smoke cells)
-    # that all become eligible at once, only the LAST one to queue survives;
-    # the other 3-4 are cancelled outright with zero duration, never running
-    # at all (observed: capture-smoke PG13/16/18 cancelled instantly,
-    # sampled-overhead and capture-smoke PG17 the only survivors). A
-    # per-job-identity group instead protects each job against a
-    # *duplicate* instance of ITSELF from a second, concurrent CI run (the
-    # actual "never overlap" this plan step asks for) without cancelling its
-    # siblings within the same run. True same-box overlap between different
-    # jobs (this vs. capture-smoke) is additionally impossible because the
-    # gate box's GitHub Actions runner service takes one job at a time by
-    # default (tests/provision-runner.sh does not pass --ephemeral or any
+    # No `concurrency:` block (issue #126; removed 2026-09-18 — previously
+    # had a per-job-identity group here, added to fix a real bug: a single
+    # literal "gate-box" group shared by all 5 moved jobs cancelled 3-4 of
+    # them outright with zero duration the instant they all became eligible
+    # at once, since GitHub cancels a group's previously-PENDING job the
+    # moment a new job joins the same group. A per-job-identity group fixed
+    # that, but introduced a different instance of the SAME bug one level
+    # up: when two CI runs (e.g. two PRs) both queue this job, GitHub
+    # cancels the OLDER run's still-pending job the moment the newer run's
+    # job joins the identical group — observed on PR #124 run 35354092704,
+    # `capture-smoke (PG 18)` cancelled after 71 min of queueing instead of
+    # eventually running. No group is needed for correctness: the gate
+    # box's runner takes one job at a time by default
+    # (tests/provision-runner.sh does not pass --ephemeral or any
     # multi-job flag), and every build/test step below additionally holds
     # /tmp/pgwt-box-check.lock (also serialising against an agent's ad hoc
-    # `make box-check` over ssh, which concurrency groups can't see at all).
+    # `make box-check` over ssh, which no concurrency group could ever see
+    # anyway) — that lock, not a concurrency group, is what actually
+    # prevents same-box overlap, and it queues rather than cancels.
     # Fork PRs (reviewer round 2, option c): a job-level `if:` that SKIPS the
     # job for a fork PR is the wrong shape — GitHub scores a skipped required
     # check as passing, so a fork PR would be mergeable with zero capture/
@@ -157,16 +155,10 @@ jobs:
     # the gate box is unreachable for fork code even for job scheduling) and
     # the first step below is the ONLY step that executes there — it fails
     # loudly, so the required check is red, not green-by-omission, until a
-    # maintainer re-hosts the PR's head as `agent/<slug>` and re-runs.
-    # `concurrency.group` similarly forks off its own PR-numbered group for
-    # that path so a fork PR joining the group can never cancel a real,
-    # already-pending gate-box run (the exact bug the per-job-identity groups
-    # above were introduced to avoid).
+    # maintainer re-hosts the PR's head as `agent/<slug>` and re-runs. It
+    # runs on a hosted runner, so it needs no group either.
     name: sampled-overhead (PG 17)
     runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted","gate-box"]') }}
-    concurrency:
-      group: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && format('gate-box-sampled-overhead-fork-pr-{0}', github.event.pull_request.number) || 'gate-box-sampled-overhead' }}
-      cancel-in-progress: false
     # timeout-minutes: the gate itself takes ~9 min on the box; the rest is
     # the bounded wait (120 min) for /tmp/pgwt-box-check.lock, which agents'
     # `make box-check` runs hold for 45-80 min each. Queueing is the design.
@@ -391,23 +383,23 @@ jobs:
     # of ubuntu-latest — real hardware + real kernel for the capture path
     # every field escape to date lived in.
     #
-    # concurrency group is per-JOB-IDENTITY, one per matrix cell
-    # ("gate-box-capture-smoke-<pg>"), not a single literal "gate-box"
-    # shared with sampled-overhead and the other 3 cells — see
-    # sampled-overhead's own comment above for the real bug this avoids
-    # (GitHub cancels a group's previously-PENDING job outright, without
-    # running it, the moment a new job joins the same group; sharing one
-    # group across this job's own 4 matrix cells plus sampled-overhead
-    # left only 1 of the 5 actually running, the other ~3-4 cancelled with
-    # zero duration). Each cell's group instead only protects it against a
-    # duplicate instance of ITSELF from a second, concurrent CI run,
-    # which is what "timing runs never overlap" actually needs — genuine
-    # same-box overlap between different jobs (capture-smoke vs.
-    # sampled-overhead, or between cells) is separately impossible because
-    # the gate box's runner takes one job at a time by default, and every
-    # build/test step below additionally holds /tmp/pgwt-box-check.lock
-    # (also covering an agent's ad hoc `make box-check` over ssh, which no
-    # concurrency group can see).
+    # No `concurrency:` block (issue #126; removed 2026-09-18) — see
+    # sampled-overhead's own comment above for the full history: a
+    # per-job-identity group here originally fixed a real bug (one literal
+    # "gate-box" group shared across this job's 4 matrix cells plus
+    # sampled-overhead cancelled 3-4 of them outright with zero duration
+    # the instant all 5 became eligible at once), but the per-cell group
+    # it was replaced with reproduced the SAME class of bug one level up:
+    # when two CI runs both queue the same cell, GitHub cancels the OLDER
+    # run's still-pending job the moment the newer run's job joins the
+    # identical group — observed on PR #124 run 35354092704,
+    # `capture-smoke (PG 18)` cancelled after 71 min of queueing instead of
+    # eventually running. No group is needed: the gate box's runner takes
+    # one job at a time by default, and every build/test step below
+    # additionally holds /tmp/pgwt-box-check.lock (also covering an
+    # agent's ad hoc `make box-check` over ssh, which no concurrency group
+    # could ever see anyway) — that lock is what actually serialises
+    # same-box access, and it queues rather than cancels.
     #
     # Fork PRs (reviewer round 2, option c): a job-level `if:` that SKIPS the
     # job for a fork PR is the wrong shape — GitHub scores a skipped required
@@ -417,11 +409,8 @@ jobs:
     # the gate box is unreachable for fork code even for job scheduling) and
     # the first step below is the ONLY step that executes there — it fails
     # loudly, so the required check is red, not green-by-omission, until a
-    # maintainer re-hosts the PR's head as `agent/<slug>` and re-runs.
-    # `concurrency.group` similarly forks off its own PR-numbered group for
-    # that path so a fork PR joining the group can never cancel a real,
-    # already-pending gate-box run (the exact bug the per-job-identity groups
-    # above were introduced to avoid).
+    # maintainer re-hosts the PR's head as `agent/<slug>` and re-runs. It
+    # runs on a hosted runner, so it needs no group either.
     #
     # timeout-minutes: observed per-cell durations (uncontended) were
     # 6-13 min including full-mode assertions; 180 covers that plus the
@@ -430,9 +419,6 @@ jobs:
     # them is the design (a 15-min bound turned master red on 2026-09-18).
     name: capture-smoke (PG ${{ matrix.pg }})
     runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted","gate-box"]') }}
-    concurrency:
-      group: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && format('gate-box-capture-smoke-{0}-fork-pr-{1}', matrix.pg, github.event.pull_request.number) || format('gate-box-capture-smoke-{0}', matrix.pg) }}
-      cancel-in-progress: false
     timeout-minutes: 180
     strategy:
       fail-fast: false
