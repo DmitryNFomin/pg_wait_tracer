@@ -124,19 +124,129 @@ jobs:
     # The fixed budget is 21 primary plus at most 21 confirmation pairs; the
     # 60-minute timeout leaves headroom above a conservative 40-minute budget.
     # Deterministic lifecycle/resolver tests retain implementation invariants.
+    #
+    # docs/DEV_LOOP_PLAN.md step 1: moved to the persistent gate box (real
+    # hardware, no noisy-neighbour hypervisor) instead of ubuntu-latest.
+    #
+    # concurrency group is per-JOB-IDENTITY ("gate-box-sampled-overhead"),
+    # not a single literal "gate-box" shared with capture-smoke's 4 matrix
+    # cells. Real bug found running this for the first time: GitHub Actions'
+    # documented concurrency behavior is "any PREVIOUSLY PENDING job in the
+    # group is canceled" (not queued/retained) whenever a NEW job joins the
+    # same group while one member is already in-progress — with one literal
+    # "gate-box" group shared by 5 jobs (this one + 4 capture-smoke cells)
+    # that all become eligible at once, only the LAST one to queue survives;
+    # the other 3-4 are cancelled outright with zero duration, never running
+    # at all (observed: capture-smoke PG13/16/18 cancelled instantly,
+    # sampled-overhead and capture-smoke PG17 the only survivors). A
+    # per-job-identity group instead protects each job against a
+    # *duplicate* instance of ITSELF from a second, concurrent CI run (the
+    # actual "never overlap" this plan step asks for) without cancelling its
+    # siblings within the same run. True same-box overlap between different
+    # jobs (this vs. capture-smoke) is additionally impossible because the
+    # gate box's GitHub Actions runner service takes one job at a time by
+    # default (tests/provision-runner.sh does not pass --ephemeral or any
+    # multi-job flag), and every build/test step below additionally holds
+    # /tmp/pgwt-box-check.lock (also serialising against an agent's ad hoc
+    # `make box-check` over ssh, which concurrency groups can't see at all).
+    # Fork PRs (reviewer round 2, option c): a job-level `if:` that SKIPS the
+    # job for a fork PR is the wrong shape — GitHub scores a skipped required
+    # check as passing, so a fork PR would be mergeable with zero capture/
+    # overhead coverage. Instead the job always runs; `runs-on` itself picks
+    # `ubuntu-latest` for a fork PR (never touches the self-hosted label, so
+    # the gate box is unreachable for fork code even for job scheduling) and
+    # the first step below is the ONLY step that executes there — it fails
+    # loudly, so the required check is red, not green-by-omission, until a
+    # maintainer re-hosts the PR's head as `agent/<slug>` and re-runs.
+    # `concurrency.group` similarly forks off its own PR-numbered group for
+    # that path so a fork PR joining the group can never cancel a real,
+    # already-pending gate-box run (the exact bug the per-job-identity groups
+    # above were introduced to avoid).
     name: sampled-overhead (PG 17)
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted","gate-box"]') }}
+    concurrency:
+      group: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && format('gate-box-sampled-overhead-fork-pr-{0}', github.event.pull_request.number) || 'gate-box-sampled-overhead' }}
+      cancel-in-progress: false
     timeout-minutes: 60
     steps:
+      # The ONLY step that runs for a fork PR (on ubuntu-latest, per
+      # runs-on above): fails on purpose so the required check is red, not
+      # skipped-therefore-green. Skipped entirely (a no-op) for every other
+      # trigger.
+      - name: Refuse fork PR (gate checks need a maintainer to re-host)
+        if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+        run: |
+          echo "gate checks run only from a branch in this repository; a maintainer must push this PR's head to agent/<slug> and re-run" >&2
+          exit 1
+
+      # Real bug found running this against the box for the first time: this
+      # is a PERSISTENT runner (not ephemeral) reusing the same
+      # $GITHUB_WORKSPACE across jobs, and every test step below runs test
+      # code under `sudo` (root) — a prior job's sudo-run python3 leaves
+      # root-owned tests/__pycache__/*.pyc behind. The unprivileged 'runner'
+      # user that owns the workspace can't unlink those, so actions/checkout
+      # (which starts by cleaning the workspace) fails outright with EACCES
+      # before this job does anything of its own. Reclaim ownership first.
+      - name: Reclaim workspace ownership (previous job may have left root-owned files)
+        run: sudo chown -R "$(id -un):$(id -gn)" "$GITHUB_WORKSPACE" 2>/dev/null || true
+
+      # Self-heal: a root-created 0644 lock file (e.g. from provision-runner.sh
+      # before its own chmod fix, or a fresh /tmp after a reboot) wedges every
+      # gate-box step's `exec 9>...` for the unprivileged 'runner' user.
+      - name: Ensure gate-box lock file is writable
+        run: |
+          [ -w /tmp/pgwt-box-check.lock ] || sudo sh -c 'touch /tmp/pgwt-box-check.lock && chmod 0666 /tmp/pgwt-box-check.lock'
+
       - uses: actions/checkout@v4
+
+      - name: Record start time (for wall-time measurement)
+        id: start_time
+        run: echo "epoch=$(date +%s)" >> "$GITHUB_OUTPUT"
 
       - name: Record runner capacity
         run: |
           nproc
           grep -m1 'model name' /proc/cpuinfo || true
 
-      - name: Install build dependencies
+      # tests/provision-runner.sh writes this marker once the gate box has
+      # build deps + bpftool + PostgreSQL 13/16/17/18 already installed and
+      # running on ports 5413/5416/5417/5418 — skip reinstalling/reconfiguring
+      # PostgreSQL and reuse that cluster directly. Any self-hosted,gate-box
+      # runner WITHOUT the marker falls back to the hosted-style install path
+      # below UNLESS it's actually self-hosted (see the refusal step next),
+      # in which case that path is destructive and must never run.
+      - name: Detect pre-provisioned gate box
+        id: gate_box
         run: |
+          if [ -f /etc/pgwt-gate-box ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Reviewer finding: the fallback install path below runs
+      # `pg_dropcluster` on every existing cluster before reinstalling on
+      # port 5432 — correct for a genuinely fresh `ubuntu-latest` runner,
+      # destructive on any self-hosted runner that merely lacks the marker
+      # (a mis-labelled future ephemeral runner, or this box before its
+      # first provisioning run). `runner.environment` (`github-hosted` /
+      # `self-hosted`) is the authoritative signal, unlike `RUNNER_NAME`
+      # (set identically either way, so not a discriminator on its own).
+      # The hosted-style path stays reachable only for an actual hosted
+      # runner — which `runs-on: [self-hosted, gate-box]` no longer offers
+      # this job anyway, so today it is also unreachable there; this refusal
+      # is the enforced, not just structural, guarantee.
+      - name: Refuse destructive re-install on an unprovisioned self-hosted runner
+        if: steps.gate_box.outputs.present != 'true' && runner.environment != 'github-hosted'
+        run: |
+          echo "FATAL: gate-box marker missing; run tests/provision-runner.sh ubuntu" >&2
+          exit 1
+
+      - name: Install build dependencies
+        if: steps.gate_box.outputs.present != 'true'
+        run: |
+          exec 9>/tmp/pgwt-box-check.lock
+          flock -w 900 9 || { echo "FATAL: /tmp/pgwt-box-check.lock held >15 min" >&2; exit 1; }
           sudo apt-get update
           sudo apt-get install -y clang llvm libbpf-dev libelf-dev \
             zlib1g-dev liblz4-dev linux-tools-common
@@ -153,7 +263,10 @@ jobs:
           test -r /sys/kernel/btf/vmlinux
 
       - name: Install PostgreSQL 17 (PGDG apt)
+        if: steps.gate_box.outputs.present != 'true'
         run: |
+          exec 9>/tmp/pgwt-box-check.lock
+          flock -w 900 9 || { echo "FATAL: /tmp/pgwt-box-check.lock held >15 min" >&2; exit 1; }
           set -x
           sudo systemctl stop postgresql || true
           sudo apt-get install -y postgresql-common
@@ -164,7 +277,10 @@ jobs:
           sudo apt-get install -y postgresql-17 postgresql-contrib-17
 
       - name: Configure PostgreSQL 17
+        if: steps.gate_box.outputs.present != 'true'
         run: |
+          exec 9>/tmp/pgwt-box-check.lock
+          flock -w 900 9 || { echo "FATAL: /tmp/pgwt-box-check.lock held >15 min" >&2; exit 1; }
           set -ex
           if ! pg_lsclusters -h | awk '$1 == 17 && $2 == "main"' | grep -q .; then
             sudo pg_createcluster 17 main
@@ -178,12 +294,32 @@ jobs:
           psql -U postgres -d postgres -c \
             "CREATE EXTENSION IF NOT EXISTS pg_stat_statements"
           psql -U postgres -d postgres -tAc "SELECT version()"
+          echo "SO_PGPORT=5432" >> "$GITHUB_ENV"
+
+      # Gate box already has PG17 on port 5417 (provision-runner.sh); no
+      # install/config step ran above, so resolve BPFTOOL and the port here.
+      # Locked: provision-runner.sh restarts clusters inside this same lock,
+      # so probing psql without it could hit a cluster mid-restart.
+      - name: Resolve gate-box PostgreSQL port + bpftool
+        if: steps.gate_box.outputs.present == 'true'
+        run: |
+          exec 9>/tmp/pgwt-box-check.lock
+          flock -w 900 9 || { echo "FATAL: /tmp/pgwt-box-check.lock held >15 min" >&2; exit 1; }
+          command -v bpftool >/dev/null || { echo "FATAL: bpftool not on PATH on the gate box" >&2; exit 1; }
+          echo "BPFTOOL=$(command -v bpftool)" >> "$GITHUB_ENV"
+          echo "SO_PGPORT=5417" >> "$GITHUB_ENV"
+          psql -U postgres -h /var/run/postgresql -p 5417 -d postgres -tAc "SELECT version()"
 
       - name: Build tracer
-        run: make
+        run: |
+          exec 9>/tmp/pgwt-box-check.lock
+          flock -w 900 9 || { echo "FATAL: /tmp/pgwt-box-check.lock held >15 min" >&2; exit 1; }
+          make
 
       - name: Run sampled-overhead structural unit gates
         run: |
+          exec 9>/tmp/pgwt-box-check.lock
+          flock -w 900 9 || { echo "FATAL: /tmp/pgwt-box-check.lock held >15 min" >&2; exit 1; }
           make -C tests test_exact_probe test_pgss_resolver test_query_text
           tests/test_exact_probe
           tests/test_pgss_resolver
@@ -191,11 +327,13 @@ jobs:
 
       - name: Gate paired sampled overhead
         run: |
+          exec 9>/tmp/pgwt-box-check.lock
+          flock -w 900 9 || { echo "FATAL: /tmp/pgwt-box-check.lock held >15 min" >&2; exit 1; }
           PM_PID=$(sudo head -1 /var/lib/postgresql/17/main/postmaster.pid)
           sudo env "PATH=/usr/lib/postgresql/17/bin:$PATH" \
             "BPFTOOL=$BPFTOOL" \
             python3 tests/sampled_overhead_gate.py \
-              --pid "$PM_PID" --pg-version 17 --port 5432 \
+              --pid "$PM_PID" --pg-version 17 --port "$SO_PGPORT" \
               --reps 7 --confirm-reps 7 --duration 10 --warmup 2 \
               --clients 4 --jobs 4 --scale 10 \
               --high-cardinality-shapes 256 --min-distinct-shapes 231 \
@@ -210,6 +348,22 @@ jobs:
           name: sampled-overhead
           path: sampled-overhead.json
           if-no-files-found: warn
+
+      # Not a gate — informational only (e): reports wall time against the
+      # dev-loop plan's 15-minute target; never fails the job.
+      - name: Report sampled-overhead wall time
+        if: always()
+        run: |
+          END=$(date +%s)
+          START="${{ steps.start_time.outputs.epoch }}"
+          if [ -z "$START" ]; then
+            echo "sampled-overhead job wall time: unknown (an earlier step failed before start time was recorded)" \
+              | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            DUR=$((END - START))
+            echo "sampled-overhead job wall time: ${DUR}s ($((DUR / 60))m $((DUR % 60))s) — plan target: under 900s (15m)" \
+              | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
 
   capture-smoke:
     # Phase T0 (Trust Milestone, TST-1/2): run the REAL capture path against
@@ -230,17 +384,127 @@ jobs:
     # fail-safe contract instead — the tracer must REFUSE loudly, never
     # trace garbage (verified empirically: it exits with a FATAL). When
     # Track D lands, flip the cell to the full assertions.
+    # docs/DEV_LOOP_PLAN.md step 1: moved to the persistent gate box instead
+    # of ubuntu-latest — real hardware + real kernel for the capture path
+    # every field escape to date lived in.
+    #
+    # concurrency group is per-JOB-IDENTITY, one per matrix cell
+    # ("gate-box-capture-smoke-<pg>"), not a single literal "gate-box"
+    # shared with sampled-overhead and the other 3 cells — see
+    # sampled-overhead's own comment above for the real bug this avoids
+    # (GitHub cancels a group's previously-PENDING job outright, without
+    # running it, the moment a new job joins the same group; sharing one
+    # group across this job's own 4 matrix cells plus sampled-overhead
+    # left only 1 of the 5 actually running, the other ~3-4 cancelled with
+    # zero duration). Each cell's group instead only protects it against a
+    # duplicate instance of ITSELF from a second, concurrent CI run,
+    # which is what "timing runs never overlap" actually needs — genuine
+    # same-box overlap between different jobs (capture-smoke vs.
+    # sampled-overhead, or between cells) is separately impossible because
+    # the gate box's runner takes one job at a time by default, and every
+    # build/test step below additionally holds /tmp/pgwt-box-check.lock
+    # (also covering an agent's ad hoc `make box-check` over ssh, which no
+    # concurrency group can see).
+    #
+    # Fork PRs (reviewer round 2, option c): a job-level `if:` that SKIPS the
+    # job for a fork PR is the wrong shape — GitHub scores a skipped required
+    # check as passing, so a fork PR would be mergeable with zero capture
+    # coverage. Instead the job always runs; `runs-on` itself picks
+    # `ubuntu-latest` for a fork PR (never touches the self-hosted label, so
+    # the gate box is unreachable for fork code even for job scheduling) and
+    # the first step below is the ONLY step that executes there — it fails
+    # loudly, so the required check is red, not green-by-omission, until a
+    # maintainer re-hosts the PR's head as `agent/<slug>` and re-runs.
+    # `concurrency.group` similarly forks off its own PR-numbered group for
+    # that path so a fork PR joining the group can never cancel a real,
+    # already-pending gate-box run (the exact bug the per-job-identity groups
+    # above were introduced to avoid).
+    #
+    # timeout-minutes: observed per-cell durations (uncontended) were
+    # 6-13 min including full-mode assertions; 30 covers that plus the
+    # bounded lock wait (15 min) below with margin, without masking a truly
+    # stuck run behind the job-level 360-min default.
     name: capture-smoke (PG ${{ matrix.pg }})
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted","gate-box"]') }}
+    concurrency:
+      group: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && format('gate-box-capture-smoke-{0}-fork-pr-{1}', matrix.pg, github.event.pull_request.number) || format('gate-box-capture-smoke-{0}', matrix.pg) }}
+      cancel-in-progress: false
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
         pg: [13, 16, 17, 18]
     steps:
+      # The ONLY step that runs for a fork PR (on ubuntu-latest, per
+      # runs-on above): fails on purpose so the required check is red, not
+      # skipped-therefore-green. Skipped entirely (a no-op) for every other
+      # trigger.
+      - name: Refuse fork PR (gate checks need a maintainer to re-host)
+        if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+        run: |
+          echo "gate checks run only from a branch in this repository; a maintainer must push this PR's head to agent/<slug> and re-run" >&2
+          exit 1
+
+      # Real bug found running this against the box for the first time: this
+      # is a PERSISTENT runner (not ephemeral) reusing the same
+      # $GITHUB_WORKSPACE across jobs, and every test step below runs test
+      # code under `sudo` (root) — a prior job's sudo-run python3 leaves
+      # root-owned tests/__pycache__/*.pyc behind. The unprivileged 'runner'
+      # user that owns the workspace can't unlink those, so actions/checkout
+      # (which starts by cleaning the workspace) fails outright with EACCES
+      # before this job does anything of its own. Reclaim ownership first.
+      - name: Reclaim workspace ownership (previous job may have left root-owned files)
+        run: sudo chown -R "$(id -un):$(id -gn)" "$GITHUB_WORKSPACE" 2>/dev/null || true
+
+      # Self-heal: a root-created 0644 lock file (e.g. from provision-runner.sh
+      # before its own chmod fix, or a fresh /tmp after a reboot) wedges every
+      # gate-box step's `exec 9>...` for the unprivileged 'runner' user.
+      - name: Ensure gate-box lock file is writable
+        run: |
+          [ -w /tmp/pgwt-box-check.lock ] || sudo sh -c 'touch /tmp/pgwt-box-check.lock && chmod 0666 /tmp/pgwt-box-check.lock'
+
       - uses: actions/checkout@v4
 
-      - name: Install build dependencies
+      # tests/provision-runner.sh writes this marker once the gate box has
+      # build deps + bpftool + PostgreSQL 13/16/17/18 already installed and
+      # running on ports 5413/5416/5417/5418 — skip reinstalling/
+      # reconfiguring PostgreSQL and reuse that cluster directly. Any
+      # self-hosted,gate-box runner WITHOUT the marker falls back to the
+      # hosted-style install path below UNLESS it's actually self-hosted
+      # (see the refusal step next), in which case that path is destructive
+      # and must never run.
+      - name: Detect pre-provisioned gate box
+        id: gate_box
         run: |
+          if [ -f /etc/pgwt-gate-box ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Reviewer finding: the fallback install path below runs
+      # `pg_dropcluster` on every existing cluster before reinstalling on
+      # port 5432 — correct for a genuinely fresh `ubuntu-latest` runner,
+      # destructive on any self-hosted runner that merely lacks the marker
+      # (a mis-labelled future ephemeral runner, or this box before its
+      # first provisioning run). `runner.environment` (`github-hosted` /
+      # `self-hosted`) is the authoritative signal, unlike `RUNNER_NAME`
+      # (set identically either way, so not a discriminator on its own).
+      # The hosted-style path stays reachable only for an actual hosted
+      # runner — which `runs-on: [self-hosted, gate-box]` no longer offers
+      # this job anyway, so today it is also unreachable there; this refusal
+      # is the enforced, not just structural, guarantee.
+      - name: Refuse destructive re-install on an unprovisioned self-hosted runner
+        if: steps.gate_box.outputs.present != 'true' && runner.environment != 'github-hosted'
+        run: |
+          echo "FATAL: gate-box marker missing; run tests/provision-runner.sh ubuntu" >&2
+          exit 1
+
+      - name: Install build dependencies
+        if: steps.gate_box.outputs.present != 'true'
+        run: |
+          exec 9>/tmp/pgwt-box-check.lock
+          flock -w 900 9 || { echo "FATAL: /tmp/pgwt-box-check.lock held >15 min" >&2; exit 1; }
           sudo apt-get update
           sudo apt-get install -y clang llvm libbpf-dev libelf-dev \
             zlib1g-dev liblz4-dev linux-tools-common
@@ -259,7 +523,10 @@ jobs:
           test -r /sys/kernel/btf/vmlinux
 
       - name: Install PostgreSQL ${{ matrix.pg }} (PGDG apt)
+        if: steps.gate_box.outputs.present != 'true'
         run: |
+          exec 9>/tmp/pgwt-box-check.lock
+          flock -w 900 9 || { echo "FATAL: /tmp/pgwt-box-check.lock held >15 min" >&2; exit 1; }
           set -x
           V=${{ matrix.pg }}
           # Stop and drop any preinstalled clusters so ours owns port 5432.
@@ -280,7 +547,10 @@ jobs:
           sudo apt-get install -y "postgresql-$V" "postgresql-contrib-$V"
 
       - name: Configure + start PostgreSQL ${{ matrix.pg }}
+        if: steps.gate_box.outputs.present != 'true'
         run: |
+          exec 9>/tmp/pgwt-box-check.lock
+          flock -w 900 9 || { echo "FATAL: /tmp/pgwt-box-check.lock held >15 min" >&2; exit 1; }
           set -ex
           V=${{ matrix.pg }}
           # The postgresql-$V package auto-creates cluster "main" unless one
@@ -303,21 +573,48 @@ jobs:
           sudo pg_ctlcluster "$V" main start
           psql -U postgres -d postgres -c "CREATE EXTENSION IF NOT EXISTS pg_stat_statements"
           psql -U postgres -d postgres -tAc "SELECT version()"
+          echo "CS_PGPORT=5432" >> "$GITHUB_ENV"
+
+      # Gate box already has PG${{ matrix.pg }} on port 54${{ matrix.pg }}
+      # (tests/provision-runner.sh); no install/config step ran above, so
+      # resolve BPFTOOL and the port here instead. Locked: provision-runner.sh
+      # restarts clusters inside this same lock, so probing psql without it
+      # could hit a cluster mid-restart.
+      - name: Resolve gate-box PostgreSQL port + bpftool
+        if: steps.gate_box.outputs.present == 'true'
+        run: |
+          exec 9>/tmp/pgwt-box-check.lock
+          flock -w 900 9 || { echo "FATAL: /tmp/pgwt-box-check.lock held >15 min" >&2; exit 1; }
+          V=${{ matrix.pg }}
+          command -v bpftool >/dev/null || { echo "FATAL: bpftool not on PATH on the gate box" >&2; exit 1; }
+          echo "BPFTOOL=$(command -v bpftool)" >> "$GITHUB_ENV"
+          echo "CS_PGPORT=54${V}" >> "$GITHUB_ENV"
+          psql -U postgres -h /var/run/postgresql -p "54${V}" -d postgres -tAc "SELECT version()"
 
       - name: Build (BPF tracer + pgwt-server)
-        run: make
+        run: |
+          exec 9>/tmp/pgwt-box-check.lock
+          flock -w 900 9 || { echo "FATAL: /tmp/pgwt-box-check.lock held >15 min" >&2; exit 1; }
+          make
 
       - name: Run capture smoke (tiered hard; full if watchpoints available)
         run: |
+          exec 9>/tmp/pgwt-box-check.lock
+          flock -w 900 9 || { echo "FATAL: /tmp/pgwt-box-check.lock held >15 min" >&2; exit 1; }
           V=${{ matrix.pg }}
           # PG16 = unsupported version: assert the loud-refusal contract.
           FLAGS=""
           [ "$V" = "16" ] && FLAGS="--expect-unsupported"
-          # sudo strips the environment: pass PATH (psql/pgbench) and
-          # GITHUB_STEP_SUMMARY (the loud watchpoint-skip note) through.
-          # BPFTOOL: the uprobe run_cnt assertion (T2) needs a working
-          # bpftool inside the sudo environment.
+          # sudo strips the environment: pass PATH (psql/pgbench), PGPORT
+          # (the workload side — psql/pgbench in test_capture_smoke.py
+          # connect with no explicit -p, so on the gate box's multi-cluster
+          # layout this must be set explicitly or they'd hit Debian's
+          # pg_wrapper default/ambient cluster instead of the one this cell
+          # is tracing), and GITHUB_STEP_SUMMARY (the loud watchpoint-skip
+          # note). BPFTOOL: the uprobe run_cnt assertion (T2) needs a
+          # working bpftool inside the sudo environment.
           sudo env "PATH=/usr/lib/postgresql/$V/bin:$PATH" \
+            "PGPORT=$CS_PGPORT" \
             "GITHUB_STEP_SUMMARY=$GITHUB_STEP_SUMMARY" \
             "BPFTOOL=$BPFTOOL" \
             tests/ci_smoke.sh --pg-version "$V" $FLAGS
