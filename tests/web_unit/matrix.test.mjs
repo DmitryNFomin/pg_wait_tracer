@@ -115,3 +115,13 @@ test('empty matrix is explicit and animation is disabled for data', () => {
     assert.equal(buildMatrixOption({ nodes: [], links: [] }).option, null);
     assert.equal(buildMatrixOption(payload()).option.animation, false);
 });
+
+/* #102 (CONTINUITY): the live view feeds this option to setOption(_, true) on
+ * every 5 s tick, so the option root must disable animation exactly the way
+ * lib/builders/aas.js does — otherwise each tick replays ECharts' default
+ * transition (a "replayed draw-in on refresh"). Own named case so the pin
+ * cannot disappear with a rename of whatever other test it rides along in. */
+test('option root disables animation (U0/#102: no replayed draw-in on refresh)', () => {
+    assert.equal(buildMatrixOption(payload(), { limit: 20 }).option.animation, false);
+    assert.equal(buildMatrixOption(payload(23), { limit: 99 }).option.animation, false);
+});

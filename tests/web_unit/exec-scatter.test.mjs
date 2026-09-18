@@ -87,3 +87,20 @@ test('time axis pads both edges so first/last symbols are not half-clipped', () 
     ]});
     assert.deepEqual(m.option.xAxis.boundaryGap, ['3%', '3%']);
 });
+
+/* #102 (CONTINUITY): the live view feeds this option to setOption(_, true) on
+ * every 5 s tick, so the option root must disable animation exactly the way
+ * lib/builders/aas.js does — otherwise each tick replays ECharts' default
+ * transition (a "replayed draw-in on refresh"). Own named case so the pin
+ * cannot disappear with a rename of whatever other test it rides along in. */
+test('option root disables animation (U0/#102: no replayed draw-in on refresh)', () => {
+    const one = buildExecScatterOption({ points: [
+        { t: T, duration_ms: 1, pid: 1, query_id: '1' },
+    ]});
+    assert.equal(one.option.animation, false);
+    const many = buildExecScatterOption({ points: [
+        { t: T, duration_ms: 1, pid: 1, query_id: '1' },
+        { t: '1719792001123456789', duration_ms: 2, pid: 2, query_id: '2' },
+    ], total_count: 2, kept_count: 2, downsampled: false });
+    assert.equal(many.option.animation, false);
+});
