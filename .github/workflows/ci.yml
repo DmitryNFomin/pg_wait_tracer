@@ -167,7 +167,10 @@ jobs:
     concurrency:
       group: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && format('gate-box-sampled-overhead-fork-pr-{0}', github.event.pull_request.number) || 'gate-box-sampled-overhead' }}
       cancel-in-progress: false
-    timeout-minutes: 60
+    # timeout-minutes: the gate itself takes ~9 min on the box; the rest is
+    # the bounded wait (120 min) for /tmp/pgwt-box-check.lock, which agents'
+    # `make box-check` runs hold for 45-80 min each. Queueing is the design.
+    timeout-minutes: 180
     steps:
       # The ONLY step that runs for a fork PR (on ubuntu-latest, per
       # runs-on above): fails on purpose so the required check is red, not
@@ -246,7 +249,7 @@ jobs:
         if: steps.gate_box.outputs.present != 'true'
         run: |
           exec 9>/tmp/pgwt-box-check.lock
-          flock -w 900 9 || { echo "FATAL: /tmp/pgwt-box-check.lock held >15 min" >&2; exit 1; }
+          flock -w 7200 9 || { echo "FATAL: /tmp/pgwt-box-check.lock held >120 min" >&2; exit 1; }
           sudo apt-get update
           sudo apt-get install -y clang llvm libbpf-dev libelf-dev \
             zlib1g-dev liblz4-dev linux-tools-common
@@ -266,7 +269,7 @@ jobs:
         if: steps.gate_box.outputs.present != 'true'
         run: |
           exec 9>/tmp/pgwt-box-check.lock
-          flock -w 900 9 || { echo "FATAL: /tmp/pgwt-box-check.lock held >15 min" >&2; exit 1; }
+          flock -w 7200 9 || { echo "FATAL: /tmp/pgwt-box-check.lock held >120 min" >&2; exit 1; }
           set -x
           sudo systemctl stop postgresql || true
           sudo apt-get install -y postgresql-common
@@ -280,7 +283,7 @@ jobs:
         if: steps.gate_box.outputs.present != 'true'
         run: |
           exec 9>/tmp/pgwt-box-check.lock
-          flock -w 900 9 || { echo "FATAL: /tmp/pgwt-box-check.lock held >15 min" >&2; exit 1; }
+          flock -w 7200 9 || { echo "FATAL: /tmp/pgwt-box-check.lock held >120 min" >&2; exit 1; }
           set -ex
           if ! pg_lsclusters -h | awk '$1 == 17 && $2 == "main"' | grep -q .; then
             sudo pg_createcluster 17 main
@@ -304,7 +307,7 @@ jobs:
         if: steps.gate_box.outputs.present == 'true'
         run: |
           exec 9>/tmp/pgwt-box-check.lock
-          flock -w 900 9 || { echo "FATAL: /tmp/pgwt-box-check.lock held >15 min" >&2; exit 1; }
+          flock -w 7200 9 || { echo "FATAL: /tmp/pgwt-box-check.lock held >120 min" >&2; exit 1; }
           command -v bpftool >/dev/null || { echo "FATAL: bpftool not on PATH on the gate box" >&2; exit 1; }
           echo "BPFTOOL=$(command -v bpftool)" >> "$GITHUB_ENV"
           echo "SO_PGPORT=5417" >> "$GITHUB_ENV"
@@ -313,13 +316,13 @@ jobs:
       - name: Build tracer
         run: |
           exec 9>/tmp/pgwt-box-check.lock
-          flock -w 900 9 || { echo "FATAL: /tmp/pgwt-box-check.lock held >15 min" >&2; exit 1; }
+          flock -w 7200 9 || { echo "FATAL: /tmp/pgwt-box-check.lock held >120 min" >&2; exit 1; }
           make
 
       - name: Run sampled-overhead structural unit gates
         run: |
           exec 9>/tmp/pgwt-box-check.lock
-          flock -w 900 9 || { echo "FATAL: /tmp/pgwt-box-check.lock held >15 min" >&2; exit 1; }
+          flock -w 7200 9 || { echo "FATAL: /tmp/pgwt-box-check.lock held >120 min" >&2; exit 1; }
           make -C tests test_exact_probe test_pgss_resolver test_query_text
           tests/test_exact_probe
           tests/test_pgss_resolver
@@ -328,7 +331,7 @@ jobs:
       - name: Gate paired sampled overhead
         run: |
           exec 9>/tmp/pgwt-box-check.lock
-          flock -w 900 9 || { echo "FATAL: /tmp/pgwt-box-check.lock held >15 min" >&2; exit 1; }
+          flock -w 7200 9 || { echo "FATAL: /tmp/pgwt-box-check.lock held >120 min" >&2; exit 1; }
           PM_PID=$(sudo head -1 /var/lib/postgresql/17/main/postmaster.pid)
           sudo env "PATH=/usr/lib/postgresql/17/bin:$PATH" \
             "BPFTOOL=$BPFTOOL" \
@@ -421,15 +424,16 @@ jobs:
     # above were introduced to avoid).
     #
     # timeout-minutes: observed per-cell durations (uncontended) were
-    # 6-13 min including full-mode assertions; 30 covers that plus the
-    # bounded lock wait (15 min) below with margin, without masking a truly
-    # stuck run behind the job-level 360-min default.
+    # 6-13 min including full-mode assertions; 180 covers that plus the
+    # bounded lock wait (120 min) below, since agents' `make box-check` runs
+    # hold /tmp/pgwt-box-check.lock for 45-80 min each and queueing behind
+    # them is the design (a 15-min bound turned master red on 2026-09-18).
     name: capture-smoke (PG ${{ matrix.pg }})
     runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted","gate-box"]') }}
     concurrency:
       group: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && format('gate-box-capture-smoke-{0}-fork-pr-{1}', matrix.pg, github.event.pull_request.number) || format('gate-box-capture-smoke-{0}', matrix.pg) }}
       cancel-in-progress: false
-    timeout-minutes: 30
+    timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
@@ -504,7 +508,7 @@ jobs:
         if: steps.gate_box.outputs.present != 'true'
         run: |
           exec 9>/tmp/pgwt-box-check.lock
-          flock -w 900 9 || { echo "FATAL: /tmp/pgwt-box-check.lock held >15 min" >&2; exit 1; }
+          flock -w 7200 9 || { echo "FATAL: /tmp/pgwt-box-check.lock held >120 min" >&2; exit 1; }
           sudo apt-get update
           sudo apt-get install -y clang llvm libbpf-dev libelf-dev \
             zlib1g-dev liblz4-dev linux-tools-common
@@ -526,7 +530,7 @@ jobs:
         if: steps.gate_box.outputs.present != 'true'
         run: |
           exec 9>/tmp/pgwt-box-check.lock
-          flock -w 900 9 || { echo "FATAL: /tmp/pgwt-box-check.lock held >15 min" >&2; exit 1; }
+          flock -w 7200 9 || { echo "FATAL: /tmp/pgwt-box-check.lock held >120 min" >&2; exit 1; }
           set -x
           V=${{ matrix.pg }}
           # Stop and drop any preinstalled clusters so ours owns port 5432.
@@ -550,7 +554,7 @@ jobs:
         if: steps.gate_box.outputs.present != 'true'
         run: |
           exec 9>/tmp/pgwt-box-check.lock
-          flock -w 900 9 || { echo "FATAL: /tmp/pgwt-box-check.lock held >15 min" >&2; exit 1; }
+          flock -w 7200 9 || { echo "FATAL: /tmp/pgwt-box-check.lock held >120 min" >&2; exit 1; }
           set -ex
           V=${{ matrix.pg }}
           # The postgresql-$V package auto-creates cluster "main" unless one
@@ -584,7 +588,7 @@ jobs:
         if: steps.gate_box.outputs.present == 'true'
         run: |
           exec 9>/tmp/pgwt-box-check.lock
-          flock -w 900 9 || { echo "FATAL: /tmp/pgwt-box-check.lock held >15 min" >&2; exit 1; }
+          flock -w 7200 9 || { echo "FATAL: /tmp/pgwt-box-check.lock held >120 min" >&2; exit 1; }
           V=${{ matrix.pg }}
           command -v bpftool >/dev/null || { echo "FATAL: bpftool not on PATH on the gate box" >&2; exit 1; }
           echo "BPFTOOL=$(command -v bpftool)" >> "$GITHUB_ENV"
@@ -594,13 +598,13 @@ jobs:
       - name: Build (BPF tracer + pgwt-server)
         run: |
           exec 9>/tmp/pgwt-box-check.lock
-          flock -w 900 9 || { echo "FATAL: /tmp/pgwt-box-check.lock held >15 min" >&2; exit 1; }
+          flock -w 7200 9 || { echo "FATAL: /tmp/pgwt-box-check.lock held >120 min" >&2; exit 1; }
           make
 
       - name: Run capture smoke (tiered hard; full if watchpoints available)
         run: |
           exec 9>/tmp/pgwt-box-check.lock
-          flock -w 900 9 || { echo "FATAL: /tmp/pgwt-box-check.lock held >15 min" >&2; exit 1; }
+          flock -w 7200 9 || { echo "FATAL: /tmp/pgwt-box-check.lock held >120 min" >&2; exit 1; }
           V=${{ matrix.pg }}
           # PG16 = unsupported version: assert the loud-refusal contract.
           FLAGS=""
