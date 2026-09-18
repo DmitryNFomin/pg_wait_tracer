@@ -582,6 +582,8 @@ class DaemonState:
             "offcpu_ns_total": 12_000_000_000,
             "cpu_clamped_total": 0,
             "wait_gap_cpu_ns_total": 3_000_000,
+            # #97 multi-window fail-safe: windowed-delta fields clamped at 0.
+            "ring_delta_clamps_total": 0,
             "io_worker_samples_total": 18000,
             "io_worker_busy_total": 4000,
             "noncmd_cpu_samples_total": 120000,
