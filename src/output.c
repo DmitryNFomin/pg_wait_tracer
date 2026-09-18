@@ -42,6 +42,31 @@ static void format_window_label(int secs, char *buf, size_t bufsz)
         snprintf(buf, bufsz, "Last %ds", secs);
 }
 
+/* Windowed delta for window w, with the #97 fail-safe accounted: a delta
+ * field that went DOWN (an open stretch closed under a different label —
+ * the command gate is read at emission, #98) is clamped to 0 by
+ * pgwt_ring_delta; count it (metrics ring_delta_clamps_total) and say so
+ * once at debug level, so the clamp is never silent. Returns 1 when the
+ * window has enough history. */
+static int window_delta(struct pgwt_daemon *d, int w, struct pgwt_snapshot *out)
+{
+    int ticks = d->windows[w] / d->interval;
+    if (pgwt_ring_delta(&d->ring, ticks, out) != 0)
+        return 0;
+    if (out->clamped_fields) {
+        static int logged = 0;
+        d->counters.ring_delta_clamps_total += out->clamped_fields;
+        if (d->debug_dump_state && !logged) {
+            logged = 1;
+            fprintf(stderr, "DEBUG: multi-window delta (Last %ds) clamped %u "
+                    "field(s) at 0 — an open stretch closed under a "
+                    "different label (see metrics ring_delta_clamps_total)\n",
+                    d->windows[w], out->clamped_fields);
+        }
+    }
+    return 1;
+}
+
 static uint64_t find_snap_event_ns(const struct pgwt_snapshot *snap,
                                    uint32_t we)
 {
@@ -112,10 +137,8 @@ static void print_time_model_multi(struct pgwt_daemon *d)
     struct pgwt_snapshot deltas[PGWT_MAX_WINDOWS];
     int valid[PGWT_MAX_WINDOWS] = {0};
 
-    for (int w = 0; w < nw; w++) {
-        int ticks = d->windows[w] / d->interval;
-        valid[w] = (pgwt_ring_delta(&d->ring, ticks, &deltas[w]) == 0);
-    }
+    for (int w = 0; w < nw; w++)
+        valid[w] = window_delta(d, w, &deltas[w]);
 
     if (!valid[0]) {
         printf("  (waiting for data)\n\n");
@@ -398,10 +421,8 @@ static void print_system_event_multi(struct pgwt_daemon *d)
     struct pgwt_snapshot deltas[PGWT_MAX_WINDOWS];
     int valid[PGWT_MAX_WINDOWS] = {0};
 
-    for (int w = 0; w < nw; w++) {
-        int ticks = d->windows[w] / d->interval;
-        valid[w] = (pgwt_ring_delta(&d->ring, ticks, &deltas[w]) == 0);
-    }
+    for (int w = 0; w < nw; w++)
+        valid[w] = window_delta(d, w, &deltas[w]);
 
     for (int w = 0; w < nw; w++) {
         /* Section header: ---- Last 5s ---- */
@@ -642,10 +663,8 @@ static void print_histogram_multi(struct pgwt_daemon *d)
     struct pgwt_snapshot deltas[PGWT_MAX_WINDOWS];
     int valid[PGWT_MAX_WINDOWS] = {0};
 
-    for (int w = 0; w < nw; w++) {
-        int ticks = d->windows[w] / d->interval;
-        valid[w] = (pgwt_ring_delta(&d->ring, ticks, &deltas[w]) == 0);
-    }
+    for (int w = 0; w < nw; w++)
+        valid[w] = window_delta(d, w, &deltas[w]);
 
     /* Find matching event in each delta */
     struct pgwt_snap_event *targets[PGWT_MAX_WINDOWS] = {NULL};
@@ -804,10 +823,8 @@ static void print_query_event_multi(struct pgwt_daemon *d)
     int mode_b = (d->event_filter && d->event_filter[0]);
     int mode_c = (d->query_id_filter != 0);
 
-    for (int w = 0; w < nw; w++) {
-        int ticks = d->windows[w] / d->interval;
-        valid[w] = (pgwt_ring_delta(&d->ring, ticks, &deltas[w]) == 0);
-    }
+    for (int w = 0; w < nw; w++)
+        valid[w] = window_delta(d, w, &deltas[w]);
 
     for (int w = 0; w < nw; w++) {
         char label[16];

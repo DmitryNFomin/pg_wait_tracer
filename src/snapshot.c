@@ -29,6 +29,8 @@ void pgwt_ring_push(struct pgwt_ring *ring, const struct pgwt_accumulator *acc)
 {
     struct pgwt_snapshot *snap = &ring->slots[ring->head % ring->capacity];
 
+    snap->clamped_fields = 0;   /* only a delta carries clamps */
+
     /* Time model: copy as-is */
     snap->tm = acc->tm;
 
@@ -104,10 +106,19 @@ find_snap_query_event(const struct pgwt_snapshot *snap,
  * emission — the command-open gate is read at the boundary, see issue #97
  * / #98), the field it had been added to goes DOWN. An unsigned wrap here
  * would print ~1.8e10 s in the view; saturate to 0 instead — the time is
- * not lost, it is in the row the closed record was filed under. */
-static inline uint64_t sat_sub(uint64_t curr, uint64_t prev)
+ * not lost, it is in the row the closed record was filed under. Every
+ * clamp is counted in *clamped (→ snapshot.clamped_fields → the daemon's
+ * ring_delta_clamps_total metric), so the fail-safe is never silent. What
+ * it does NOT repair: the other fields of the same window still carry the
+ * reclassified stretch's wall (DB Time went down by it), so a WAIT row can
+ * still read > 100% of that window's DB Time — bounded by that one stretch,
+ * root cause #98 (the gate is read at emission). */
+static inline uint64_t sat_sub(uint64_t curr, uint64_t prev, uint32_t *clamped)
 {
-    return curr >= prev ? curr - prev : 0;
+    if (curr >= prev)
+        return curr - prev;
+    (*clamped)++;
+    return 0;
 }
 
 int pgwt_ring_delta(const struct pgwt_ring *ring, int ticks_ago,
@@ -121,18 +132,20 @@ int pgwt_ring_delta(const struct pgwt_ring *ring, int ticks_ago,
     const struct pgwt_snapshot *prev =
         &ring->slots[(ring->head - 1 - ticks_ago) % ring->capacity];
 
+    out->clamped_fields = 0;
+
     /* Time model: field-by-field subtraction */
-    out->tm.db_time_ns        = sat_sub(curr->tm.db_time_ns,        prev->tm.db_time_ns);
-    out->tm.cpu_time_ns       = sat_sub(curr->tm.cpu_time_ns,       prev->tm.cpu_time_ns);
-    out->tm.io_time_ns        = sat_sub(curr->tm.io_time_ns,        prev->tm.io_time_ns);
-    out->tm.lwlock_time_ns    = sat_sub(curr->tm.lwlock_time_ns,    prev->tm.lwlock_time_ns);
-    out->tm.lock_time_ns      = sat_sub(curr->tm.lock_time_ns,      prev->tm.lock_time_ns);
-    out->tm.bufferpin_time_ns = sat_sub(curr->tm.bufferpin_time_ns, prev->tm.bufferpin_time_ns);
-    out->tm.client_time_ns    = sat_sub(curr->tm.client_time_ns,    prev->tm.client_time_ns);
-    out->tm.ipc_time_ns       = sat_sub(curr->tm.ipc_time_ns,       prev->tm.ipc_time_ns);
-    out->tm.timeout_time_ns   = sat_sub(curr->tm.timeout_time_ns,   prev->tm.timeout_time_ns);
-    out->tm.extension_time_ns = sat_sub(curr->tm.extension_time_ns, prev->tm.extension_time_ns);
-    out->tm.activity_time_ns  = sat_sub(curr->tm.activity_time_ns,  prev->tm.activity_time_ns);
+    out->tm.db_time_ns        = sat_sub(curr->tm.db_time_ns,        prev->tm.db_time_ns, &out->clamped_fields);
+    out->tm.cpu_time_ns       = sat_sub(curr->tm.cpu_time_ns,       prev->tm.cpu_time_ns, &out->clamped_fields);
+    out->tm.io_time_ns        = sat_sub(curr->tm.io_time_ns,        prev->tm.io_time_ns, &out->clamped_fields);
+    out->tm.lwlock_time_ns    = sat_sub(curr->tm.lwlock_time_ns,    prev->tm.lwlock_time_ns, &out->clamped_fields);
+    out->tm.lock_time_ns      = sat_sub(curr->tm.lock_time_ns,      prev->tm.lock_time_ns, &out->clamped_fields);
+    out->tm.bufferpin_time_ns = sat_sub(curr->tm.bufferpin_time_ns, prev->tm.bufferpin_time_ns, &out->clamped_fields);
+    out->tm.client_time_ns    = sat_sub(curr->tm.client_time_ns,    prev->tm.client_time_ns, &out->clamped_fields);
+    out->tm.ipc_time_ns       = sat_sub(curr->tm.ipc_time_ns,       prev->tm.ipc_time_ns, &out->clamped_fields);
+    out->tm.timeout_time_ns   = sat_sub(curr->tm.timeout_time_ns,   prev->tm.timeout_time_ns, &out->clamped_fields);
+    out->tm.extension_time_ns = sat_sub(curr->tm.extension_time_ns, prev->tm.extension_time_ns, &out->clamped_fields);
+    out->tm.activity_time_ns  = sat_sub(curr->tm.activity_time_ns,  prev->tm.activity_time_ns, &out->clamped_fields);
 
     /* System events: for each event in curr, subtract prev if found */
     int ne = 0;
@@ -145,10 +158,10 @@ int pgwt_ring_delta(const struct pgwt_ring *ring, int ticks_ago,
         dst->wait_event = ce->wait_event;
 
         if (pe) {
-            dst->count = sat_sub(ce->count, pe->count);
-            dst->total_ns = sat_sub(ce->total_ns, pe->total_ns);
+            dst->count = sat_sub(ce->count, pe->count, &out->clamped_fields);
+            dst->total_ns = sat_sub(ce->total_ns, pe->total_ns, &out->clamped_fields);
             for (int b = 0; b < HISTOGRAM_BUCKETS; b++)
-                dst->histogram[b] = sat_sub(ce->histogram[b], pe->histogram[b]);
+                dst->histogram[b] = sat_sub(ce->histogram[b], pe->histogram[b], &out->clamped_fields);
         } else {
             /* New event since prev snapshot */
             dst->count = ce->count;
@@ -170,8 +183,8 @@ int pgwt_ring_delta(const struct pgwt_ring *ring, int ticks_ago,
         dst->wait_event = cq->wait_event;
 
         if (pq) {
-            dst->count = sat_sub(cq->count, pq->count);
-            dst->total_ns = sat_sub(cq->total_ns, pq->total_ns);
+            dst->count = sat_sub(cq->count, pq->count, &out->clamped_fields);
+            dst->total_ns = sat_sub(cq->total_ns, pq->total_ns, &out->clamped_fields);
         } else {
             dst->count = cq->count;
             dst->total_ns = cq->total_ns;

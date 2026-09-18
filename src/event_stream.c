@@ -10,7 +10,6 @@
 #include "query_text.h"
 #include "map_reader.h"
 #include "wait_event.h"
-#include "sampler.h"   /* pgwt_backend_type_flag (T2 category mapping) */
 
 #include <string.h>
 #include <time.h>

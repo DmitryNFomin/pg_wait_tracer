@@ -1140,7 +1140,11 @@ shipped):
 - **T8_PLAN §5.7 also-in-this-phase:** the **`test_multi_window` %DB summation
   fix** (a confirmed *test* bug from EL9: it summed parent classes AND their
   children — `Timeout` + `Timeout:PgSleep`, … → 120-130%; the fix sums top-level
-  rows only — those without `:` in the name, plus CPU* and Off-CPU*). Do **not**
+  rows only — those without `:` in the name, plus CPU* and Off-CPU*). *Historical:*
+  that ':'-free rule is right for the `time_model` view (Test 3) but was later
+  applied to `system_event` too, where every row is a leaf and it left `CPU*`
+  alone in the sum — reversed by #97 (see the "Multi-window %DB > 100% — FIXED"
+  entry below). Do **not**
   touch the cross-validate Hz-matrix flakiness in code — it is box-load noise on
   the 2-vCPU validation box; the close-out runs use a resized box.
 
@@ -1478,7 +1482,14 @@ to a CHANGELOG entry).
   `pgwt_accum_add_interval` with one classification
   (`pgwt_live_effective_event` → `PGWT_WEI_NONCMD_CPU`, the server's synthetic
   id), and `pgwt_ring_delta` saturates instead of wrapping when an open stretch
-  closes under a different label. Unit: `tests/test_live_accum`. Still open, same
+  closes under a different label — every clamp is counted
+  (`metrics.ring_delta_clamps_total`, logged once under `PGWT_DEBUG_DUMP_STATE`).
+  **Exact residual the clamp does not repair:** in the window where an open
+  in-command stretch closes gate-clear, DB Time drops by that stretch's wall
+  while the other rows keep theirs, so a WAIT row can still read > 100% of that
+  window's DB Time (unit case: 3 s wait over a 1 s window = 300%), bounded by that
+  one stretch; a non-zero `ring_delta_clamps_total` is the tell. Unit:
+  `tests/test_live_accum`. Still open, same
   family (#98): the live gate is read AT EMISSION, so a waitless statement's
   whole on-CPU run (ending at the next ClientRead, gate already closed) is
   "non-command" live while the server's majority rule counts it — ~83% of

@@ -21,7 +21,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
-#include <math.h>
 
 static int tests_run = 0;
 static int tests_passed = 0;
@@ -146,13 +145,14 @@ static void test_closed_noncmd_cpu_row(void)
     uint64_t cpu_row = sys_row(acc, 0);
     uint64_t noncmd_row = sys_row(acc, PGWT_WEI_NONCMD_CPU);
 
-    /* What the pre-fix path filed under CPU*: EVERY we==0 record (3 + 1 ms)
-     * against a DB Time of 1 + 1 ms — the >100% the view printed. Kept as
-     * the documented reproduction of the wrong quantity. */
-    uint64_t prefix_cpu_row = MS(3) + MS(1);
-    CHECK(pct_db(prefix_cpu_row, db) > 100.0,
-          "pre-fix quantity reproduces the bug: %.1f%% of DB Time",
-          pct_db(prefix_cpu_row, db));
+    /* The inputs are chosen so that the SUM of all we==0 records (3 + 1 ms)
+     * exceeds DB Time (1 + 1 ms): a CPU* row that carried every we==0
+     * record regardless of the gate would print > 100% here. This pins the
+     * shape of the input, not a comparison against another build. */
+    uint64_t all_we0 = MS(3) + MS(1);
+    CHECK(pct_db(all_we0, db) > 100.0,
+          "inputs: Σ we==0 records = %.1f%% of DB Time (> 100, the #97 shape)",
+          pct_db(all_we0, db));
 
     CHECK(db == MS(2), "DB Time = in-command CPU + WAL wait = 2 ms (got %llu ns)",
           (unsigned long long)db);
@@ -371,6 +371,48 @@ static void test_ring_delta(void)
     for (int i = 0; i < d->num_events; i++)
         CHECK(d->events[i].total_ns < (1ULL << 62) && d->events[i].count < (1ULL << 62),
               "no wrapped counter in the delta (event 0x%x)", d->events[i].wait_event);
+    /* The fail-safe is not silent: every clamped field is counted (the
+     * daemon folds it into metrics ring_delta_clamps_total). Here: tm.db,
+     * tm.cpu, CPU* row count + total_ns = 4. */
+    CHECK(d->clamped_fields == 4, "clamped_fields = %u (expected 4)",
+          d->clamped_fields);
+
+    /* Tick 4-5, the MIXED window (what the clamp does NOT repair): pid 3
+     * has an open in-command run of 2 s (1.5 s on-CPU) in snapshot A; in
+     * snapshot B it has closed gate-clear (NonCommandCpu, 2.5 s) while pid
+     * 1 added a 3 s WAL wait. DB Time still goes UP over the window (by
+     * 3 s - 2 s = 1 s > 0, so it is not clamped), but the IO row's 3 s is
+     * measured against it: 300% of the window's DB Time. This residual is
+     * bounded by the reclassified stretch's wall (2 s here) and is #98's
+     * (gate read at emission) — the roadmap entry states it. */
+    memcpy(view, closed, sizeof(*view));
+    struct pgwt_live_interval open3 = {
+        .pid = 3, .we = 0, .wall_ns = MS(2000), .cpu_ns = MS(1500),
+        .cmd_gate_active = true, .cmd_open = true, .closed = false,
+    };
+    pgwt_accum_add_interval(view, &open3);
+    pgwt_ring_push(&ring, view);                       /* snapshot A */
+    struct pgwt_live_interval c8 = closed_fg(1, IO_WALSYNC, MS(3000), 1, 0);
+    struct pgwt_live_interval c9 = closed_fg(3, 0, MS(2500), 0, 0);   /* gate-clear */
+    pgwt_accum_add_interval(closed, &c8);
+    pgwt_accum_add_interval(closed, &c9);
+    memcpy(view, closed, sizeof(*view));
+    pgwt_ring_push(&ring, view);                       /* snapshot B */
+    CHECK(pgwt_ring_delta(&ring, 1, d) == 0, "mixed-window delta");
+    CHECK(d->tm.db_time_ns == MS(3000) - MS(2000),
+          "window DB Time = wait added - reclassified wall = %llu ns (> 0, not clamped)",
+          (unsigned long long)d->tm.db_time_ns);
+    CHECK(snap_row(d, IO_WALSYNC) == MS(3000), "IO row delta = the 3 s wait");
+    double pio = pct_db(snap_row(d, IO_WALSYNC), d->tm.db_time_ns);
+    CHECK(pio > 100.0 && pio == 300.0,   /* exact: 100 * 3e9 / 1e9 */
+          "residual: a WAIT row can still read > 100%% of the window (%.0f%%), "
+          "bounded by the reclassified stretch", pio);
+    CHECK(d->tm.cpu_time_ns == 0 && snap_row(d, 0) == 0,
+          "CPU delta clamped at 0 for the reclassified run");
+    CHECK(d->clamped_fields == 3, "clamped_fields = %u (tm.cpu, CPU* count, CPU* total)",
+          d->clamped_fields);
+    CHECK(snap_row(d, PGWT_WEI_NONCMD_CPU) == MS(2500),
+          "…the run is whole under NonCommandCpu");
 
     free(d);
     free(view);

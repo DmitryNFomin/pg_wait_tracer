@@ -128,7 +128,8 @@ keep only deterministic jobs. Stops the hardening tax immediately.
     (#97 `test_multi_window`, #98 `test_daemon_server`, #99
     `test_partition`) happened to pass unexpectedly (`xpass`) in this
     particular run — intermittency, not evidence the bugs are fixed; see
-    items 5/6/18 below.
+    items 5/6/18 below. (#97 has since been fixed and removed from
+    `KNOWN_FAILING` — see item 5.)
   - `PG=13`: `tests/results/box-check-ubuntu-20260917-144432.log` —
     `Executed: 71 (passed 68, failed 0, known-failing 3 (1 xpass)),
     skipped 2, excluded 4, total 77`. #97 and #98 failed as expected here;
@@ -203,11 +204,17 @@ provisioning gaps):**
    accumulation of several near-100% rows as the code comment's "106–110%
    under pgbench load" theory describes. A raw failing capture (142.4% run)
    is kept at `/tmp/multi_window_probe/run_*.log` on the box. Not hardened,
-   not fixed — a possible real bug, filed as **issue #97**, being fixed
-   separately in `src/`. Until then, listed in `run_all.sh`'s
-   `KNOWN_FAILING` (see item 19): the test always runs, in full, every
-   time; neither an expected failure nor an unexpected pass ("intermittent
-   or fixed") fails the gate.
+   not fixed here — a possible real bug, filed as **issue #97** and listed in
+   `run_all.sh`'s `KNOWN_FAILING` (see item 19) meanwhile.
+   **Since fixed (branch `agent/multi-window-db-pct`):** the live
+   closed-record path filed a client backend's non-command `we==0` record
+   under the `CPU*` row while DB Time excluded it (measured: `CPU*` row
+   ~10.3 s vs time-model CPU ~1.7 s per 5 s window); both live paths now
+   share one classification (`pgwt_accum_add_interval`), the check sums
+   all non-idle rows of `system_event` (every row there is a leaf; the
+   `':'`-free rule had left `CPU*` alone in the sum), and the test is a
+   normal PASS — removed from `KNOWN_FAILING`. Details:
+   `docs/ROADMAP_AND_STATUS.md` "Multi-window %DB > 100% — FIXED".
 6. **New finding**, not in the original list: `test_daemon_server.py`'s
    "CPU Time ratio server/CLI" check (tolerance 0.3–3.0) fails
    **consistently** — 4/4 isolated re-runs across PG13, PG17, and PG18 (in
@@ -329,11 +336,13 @@ provisioning gaps):**
     `0.1602%` / `99.84%`), the box otherwise idle both times. Not noise —
     same test, same direction, same small margin, twice. Filed as
     **issue #99**, being fixed separately in `src/`. Listed in
-    `KNOWN_FAILING` (item 19) alongside #97/#98.
+    `KNOWN_FAILING` (item 19) alongside #98 (#97 was listed too until its
+    fix landed — item 5).
 19. Added a `KNOWN_FAILING` table to `tests/run_all.sh`: test name ->
     tracking issue number, for a test that reproduces a real, filed
-    product bug being fixed in `src/` (currently #97/#98/#99 — items 5, 6,
-    18) — never for timing or runner noise, which gets moved or
+    product bug being fixed in `src/` (currently #98/#99 — items 6 and 18;
+    #97, item 5, has been fixed and removed) — never for timing or runner
+    noise, which gets moved or
     investigated instead (see item 7/#110, deliberately unlisted). A
     listed test still runs in full every time; neither outcome fails the
     gate: an expected failure prints loudly as `KNOWN-FAILING (issue #N)`,
@@ -608,10 +617,12 @@ the same read as the 2026-09-16 run, just with tighter IQRs this time.
 4. Shrink `sampled-overhead`'s 7+7 pairs / 60-min budget now that its real
    execution cost (~9 min) is known precisely — still open, deliberately
    not touched by this task (no threshold/assertion changes in scope).
-5. Fix the three `KNOWN_FAILING` product bugs above (issues #97
-   `test_multi_window`'s CPU* windowed-delta swing, #98
+5. Fix the `KNOWN_FAILING` product bugs above (#98
    `test_daemon_server`'s consistent CPU-ratio bias, #99 `test_partition`'s
-   PG13-only small-margin conservation miss) and remove each from
+   PG13-only small-margin conservation miss; #97 `test_multi_window`'s CPU*
+   windowed-delta swing is DONE — non-command CPU was filed under the `CPU*`
+   row, branch `agent/multi-window-db-pct`, and it is out of the list) and
+   remove each from
    `KNOWN_FAILING` once fixed — all three look like real measurement
    questions, not test bugs, and need someone who knows the sampler/
    exact-probe internals. #110 (`test_cli`'s recurring, non-reproducing

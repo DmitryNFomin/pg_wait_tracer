@@ -89,6 +89,14 @@ struct pgwt_counters {
     uint64_t cpu_clamped_ns_total;
     uint64_t wait_gap_cpu_ns_total;
 
+    /* Multi-window view fail-safe (issue #97, src/snapshot.c sat_sub):
+     * number of windowed-delta fields that went DOWN across the window (an
+     * open stretch closed under a different label) and were clamped to 0
+     * instead of wrapping. Non-zero means the affected window's other rows
+     * can read > 100% of DB Time by that stretch's wall (cause: #98, the
+     * command gate is read at emission). Exported as ring_delta_clamps_total. */
+    uint64_t ring_delta_clamps_total;
+
     /* T2 decomposed-AAS observability (docs/AAS_SEMANTICS_DECISION.md). */
     uint64_t noncmd_cpu_samples_total; /* client we==0 readings outside a command (not recorded) */
     uint64_t cmd_gate_recovered_total; /* on-CPU client samples the edge-gate missed, recovered

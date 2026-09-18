@@ -27,6 +27,11 @@ struct pgwt_snap_query_event {
 
 /* One point-in-time snapshot of cumulative state */
 struct pgwt_snapshot {
+    /* Set by pgwt_ring_delta only: number of fields whose "cumulative"
+     * counter went DOWN across the window and were clamped to 0 instead of
+     * wrapping (see sat_sub in snapshot.c). 0 for a pushed snapshot. The
+     * daemon folds it into counters.ring_delta_clamps_total (metrics). */
+    uint32_t clamped_fields;
     struct pgwt_time_model tm;
     int num_events;
     struct pgwt_snap_event events[MAX_SNAP_EVENTS];
