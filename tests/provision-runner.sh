@@ -227,7 +227,8 @@ for V in 13 16 17 18; do
         log "postgresql-$V already installed"
     fi
 
-    if ! pg_lsclusters -h | awk -v v="$V" '$1 == v && $2 == "main"' | grep -q .; then
+    CLUSTER_LINE=$(pg_lsclusters -h | awk -v v="$V" '$1 == v && $2 == "main"' || true)
+    if [[ -z "$CLUSTER_LINE" ]]; then
         log "creating cluster $V/main"
         pg_createcluster "$V" main
     fi
@@ -245,7 +246,8 @@ for V in 13 16 17 18; do
     # on an already-running cluster is a no-op with the OLD config, so
     # restart unconditionally — cheap, and this script is not on any hot
     # path.
-    if pg_lsclusters -h | awk -v v="$V" '$1 == v && $2 == "main" && $4 == "online"' | grep -q .; then
+    CLUSTER_ONLINE=$(pg_lsclusters -h | awk -v v="$V" '$1 == v && $2 == "main" && $4 == "online"' || true)
+    if [[ -n "$CLUSTER_ONLINE" ]]; then
         pg_ctlcluster "$V" main restart
     else
         pg_ctlcluster "$V" main start

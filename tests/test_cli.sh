@@ -32,7 +32,7 @@ check_exit() {
         echo "  PASS: $desc"
         passed=$((passed + 1))
     else
-        echo "  FAIL: $desc (expected exit $expected, got $actual)"
+        echo "  FAIL: $desc (expected exit $expected, rc=$actual)"
         failed=$((failed + 1))
     fi
 }
@@ -43,11 +43,12 @@ check_exit 0 $? "--help exits 0"
 
 # --help output contains Usage
 output=$("$TRACER" --help 2>&1)
-if echo "$output" | grep -q "Usage"; then
+rc=$?
+if [[ "$output" == *"Usage"* ]]; then
     echo "  PASS: --help prints Usage"
     passed=$((passed + 1))
 else
-    echo "  FAIL: --help does not print Usage"
+    echo "  FAIL: --help does not print Usage (rc=$rc)"
     failed=$((failed + 1))
 fi
 
@@ -63,11 +64,11 @@ if [[ -n "$PM_PID" ]]; then
     if [[ $rc -eq 0 || $rc -eq 124 ]]; then
         echo "  PASS: no args (auto-discover) runs successfully"
         passed=$((passed + 1))
-    elif echo "$output" | grep -q "Multiple PostgreSQL instances found"; then
+    elif [[ "$output" == *"Multiple PostgreSQL instances found"* ]]; then
         echo "  PASS: no args refuses loudly with multiple PostgreSQL instances up"
         passed=$((passed + 1))
     else
-        echo "  FAIL: no args (auto-discover) returned exit code $rc: $output"
+        echo "  FAIL: no args (auto-discover) rc=$rc: $output"
         failed=$((failed + 1))
     fi
 
@@ -80,7 +81,7 @@ if [[ -n "$PM_PID" ]]; then
         echo "  PASS: --pid <explicit target> runs successfully"
         passed=$((passed + 1))
     else
-        echo "  FAIL: --pid <explicit target> returned exit code $rc"
+        echo "  FAIL: --pid <explicit target> rc=$rc"
         failed=$((failed + 1))
     fi
 fi
@@ -122,7 +123,7 @@ if [[ -n "$PM_PID" ]]; then
         echo "  PASS: valid args run successfully"
         passed=$((passed + 1))
     else
-        echo "  FAIL: valid args returned exit code $rc"
+        echo "  FAIL: valid args rc=$rc"
         failed=$((failed + 1))
     fi
 
@@ -137,7 +138,7 @@ if [[ -n "$PM_PID" ]]; then
             echo "  PASS: --view $view works"
             passed=$((passed + 1))
         else
-            echo "  FAIL: --view $view returned exit code $rc"
+            echo "  FAIL: --view $view rc=$rc"
             failed=$((failed + 1))
         fi
     done
@@ -154,94 +155,98 @@ if [[ -n "$PM_PID" ]]; then
         echo "  PASS: --window with valid args works"
         passed=$((passed + 1))
     else
-        echo "  FAIL: --window with valid args returned exit code $rc"
+        echo "  FAIL: --window with valid args rc=$rc"
         failed=$((failed + 1))
     fi
 
     # --window time_model output contains multi-window column headers
     output=$(timeout 15 "$TRACER" --mode full --pid "$PM_PID" --window 1s,3s \
-        --interval 1 --count 4 2>/dev/null || true)
-    if echo "$output" | grep -q "Last 1s"; then
+        --interval 1 --count 4 2>/dev/null)
+    rc=$?
+    if [[ "$output" == *"Last 1s"* ]]; then
         echo "  PASS: --window time_model output contains window headers"
         passed=$((passed + 1))
     else
-        echo "  FAIL: --window time_model output missing 'Last 1s' header"
+        echo "  FAIL: --window time_model output missing 'Last 1s' header (rc=$rc)"
         failed=$((failed + 1))
     fi
-    if echo "$output" | grep -q "% DB"; then
+    if [[ "$output" == *"% DB"* ]]; then
         echo "  PASS: --window time_model output contains '% DB' header"
         passed=$((passed + 1))
     else
-        echo "  FAIL: --window time_model output missing '% DB' header"
+        echo "  FAIL: --window time_model output missing '% DB' header (rc=$rc)"
         failed=$((failed + 1))
     fi
 
     # --window system_event output contains section headers
     output=$(timeout 15 "$TRACER" --mode full --pid "$PM_PID" --view system_event \
-        --window 1s,3s --interval 1 --count 4 2>/dev/null || true)
-    if echo "$output" | grep -q "Last 1s"; then
+        --window 1s,3s --interval 1 --count 4 2>/dev/null)
+    rc=$?
+    if [[ "$output" == *"Last 1s"* ]]; then
         echo "  PASS: --window system_event contains 'Last 1s' section"
         passed=$((passed + 1))
     else
-        echo "  FAIL: --window system_event missing 'Last 1s' section"
+        echo "  FAIL: --window system_event missing 'Last 1s' section (rc=$rc)"
         failed=$((failed + 1))
     fi
-    if echo "$output" | grep -q "Last 3s"; then
+    if [[ "$output" == *"Last 3s"* ]]; then
         echo "  PASS: --window system_event contains 'Last 3s' section"
         passed=$((passed + 1))
     else
-        echo "  FAIL: --window system_event missing 'Last 3s' section"
+        echo "  FAIL: --window system_event missing 'Last 3s' section (rc=$rc)"
         failed=$((failed + 1))
     fi
-    if echo "$output" | grep -q "Wait Event"; then
+    if [[ "$output" == *"Wait Event"* ]]; then
         echo "  PASS: --window system_event contains column headers"
         passed=$((passed + 1))
     else
-        echo "  FAIL: --window system_event missing column headers"
+        echo "  FAIL: --window system_event missing column headers (rc=$rc)"
         failed=$((failed + 1))
     fi
 
     # --window histogram output contains side-by-side columns
     output=$(timeout 15 "$TRACER" --mode full --pid "$PM_PID" --view histogram \
         --event Client:ClientRead --window 1s,3s --interval 1 --count 4 \
-        2>/dev/null || true)
-    if echo "$output" | grep -q "Last 1s"; then
+        2>/dev/null)
+    rc=$?
+    if [[ "$output" == *"Last 1s"* ]]; then
         echo "  PASS: --window histogram contains 'Last 1s' column"
         passed=$((passed + 1))
     else
-        echo "  FAIL: --window histogram missing 'Last 1s' column"
+        echo "  FAIL: --window histogram missing 'Last 1s' column (rc=$rc)"
         failed=$((failed + 1))
     fi
-    if echo "$output" | grep -q "Bucket(us)"; then
+    if [[ "$output" == *"Bucket(us)"* ]]; then
         echo "  PASS: --window histogram contains 'Bucket(us)' column"
         passed=$((passed + 1))
     else
-        echo "  FAIL: --window histogram missing 'Bucket(us)' column"
+        echo "  FAIL: --window histogram missing 'Bucket(us)' column (rc=$rc)"
         failed=$((failed + 1))
     fi
 
     # active view output contains correct header and column names
     output=$(timeout 15 "$TRACER" --mode full --pid "$PM_PID" --view active \
-        --interval 1 --count 2 2>/dev/null || true)
-    if echo "$output" | grep -q "Active Sessions"; then
+        --interval 1 --count 2 2>/dev/null)
+    rc=$?
+    if [[ "$output" == *"Active Sessions"* ]]; then
         echo "  PASS: active view has 'Active Sessions' header"
         passed=$((passed + 1))
     else
-        echo "  FAIL: active view missing 'Active Sessions' header"
+        echo "  FAIL: active view missing 'Active Sessions' header (rc=$rc)"
         failed=$((failed + 1))
     fi
-    if echo "$output" | grep -q "Backend Type"; then
+    if [[ "$output" == *"Backend Type"* ]]; then
         echo "  PASS: active view has 'Backend Type' column"
         passed=$((passed + 1))
     else
-        echo "  FAIL: active view missing 'Backend Type' column"
+        echo "  FAIL: active view missing 'Backend Type' column (rc=$rc)"
         failed=$((failed + 1))
     fi
-    if echo "$output" | grep -q "Uptime"; then
+    if [[ "$output" == *"Uptime"* ]]; then
         echo "  PASS: active view has 'Uptime' in header"
         passed=$((passed + 1))
     else
-        echo "  FAIL: active view missing 'Uptime' in header"
+        echo "  FAIL: active view missing 'Uptime' in header (rc=$rc)"
         failed=$((failed + 1))
     fi
 
@@ -253,29 +258,31 @@ if [[ -n "$PM_PID" ]]; then
         echo "  PASS: --view active --sort db_time works"
         passed=$((passed + 1))
     else
-        echo "  FAIL: --view active --sort db_time returned exit code $rc"
+        echo "  FAIL: --view active --sort db_time rc=$rc"
         failed=$((failed + 1))
     fi
 
     # query_event Mode B header (no workload — just verify header text)
     output=$(timeout 15 "$TRACER" --mode full --pid "$PM_PID" --view query_event \
-        --event Client:ClientRead --interval 1 --count 2 2>/dev/null || true)
-    if echo "$output" | grep -q "Top Queries for Client:ClientRead"; then
+        --event Client:ClientRead --interval 1 --count 2 2>/dev/null)
+    rc=$?
+    if [[ "$output" == *"Top Queries for Client:ClientRead"* ]]; then
         echo "  PASS: query_event Mode B has correct header"
         passed=$((passed + 1))
     else
-        echo "  FAIL: query_event Mode B missing header"
+        echo "  FAIL: query_event Mode B missing header (rc=$rc)"
         failed=$((failed + 1))
     fi
 
     # query_event Mode C header (no workload — just verify header text)
     output=$(timeout 15 "$TRACER" --mode full --pid "$PM_PID" --view query_event \
-        --query-id 12345 --interval 1 --count 2 2>/dev/null || true)
-    if echo "$output" | grep -q "Wait Profile for query_id 12345"; then
+        --query-id 12345 --interval 1 --count 2 2>/dev/null)
+    rc=$?
+    if [[ "$output" == *"Wait Profile for query_id 12345"* ]]; then
         echo "  PASS: query_event Mode C has correct header"
         passed=$((passed + 1))
     else
-        echo "  FAIL: query_event Mode C missing header"
+        echo "  FAIL: query_event Mode C missing header (rc=$rc)"
         failed=$((failed + 1))
     fi
 else

@@ -98,7 +98,7 @@ for RATE in $RATES; do
     # Compare
     OUT=$("$XVAL" "$TRACE_DIR" --tolerance "$TOLERANCE")
     echo "$OUT" | sed 's/^/  /'
-    if echo "$OUT" | grep -q "RESULT: PASS"; then
+    if [[ "$OUT" == *"RESULT: PASS"* ]]; then
         rate_result[$RATE]="PASS"
         [[ -z "$best_rate" ]] && best_rate="$RATE"
     else
