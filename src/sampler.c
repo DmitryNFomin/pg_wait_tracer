@@ -199,26 +199,7 @@ int pgwt_sampler_read_targets(const struct pgwt_sample_target *targets, int n,
     return got;
 }
 
-/* T2 category flag for a backend type (docs/AAS_SEMANTICS_DECISION.md).
- * Foreground (client, parallel worker) carries no flag; autovacuum workers
- * are maintenance; io_workers are their own excluded-from-AAS class; every
- * other aux process is background. UNKNOWN is treated as foreground/client
- * (conservative: its CPU stays command-gated, its waits count as before). */
-uint32_t pgwt_backend_type_flag(enum pgwt_backend_type bt)
-{
-    switch (bt) {
-    case PGWT_BT_CLIENT:
-    case PGWT_BT_PARALLEL_WORKER:
-    case PGWT_BT_UNKNOWN:
-        return 0;                              /* foreground */
-    case PGWT_BT_AUTOVAC_WORKER:
-        return PGWT_EVENT_FLAG_MAINT;          /* maintenance */
-    case PGWT_BT_IO_WORKER:
-        return PGWT_EVENT_FLAG_IO_WORKER;      /* excluded from AAS/DB Time */
-    default:
-        return PGWT_EVENT_FLAG_BACKGROUND;     /* checkpointer, bgwriter, … */
-    }
-}
+/* pgwt_backend_type_flag (T2 category flag) is header-inline in sampler.h. */
 
 /* T2 on-CPU (we==0) recording policy. Client backends (and UNKNOWN, which
  * cannot prove otherwise) record CPU only inside a command — the

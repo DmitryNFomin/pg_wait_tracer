@@ -96,6 +96,20 @@ find_snap_query_event(const struct pgwt_snapshot *snap,
     return NULL;
 }
 
+/* Windowed delta of a cumulative counter. The accumulator is cumulative
+ * EXCEPT for the open [last_ts, now) stretch that pgwt_read_state_map adds
+ * to every snapshot at display time: when that stretch closes under a
+ * different classification than the snapshot assumed (a client backend's
+ * on-CPU run that ends outside its command becomes non-command/idle at
+ * emission — the command-open gate is read at the boundary, see issue #97
+ * / #98), the field it had been added to goes DOWN. An unsigned wrap here
+ * would print ~1.8e10 s in the view; saturate to 0 instead — the time is
+ * not lost, it is in the row the closed record was filed under. */
+static inline uint64_t sat_sub(uint64_t curr, uint64_t prev)
+{
+    return curr >= prev ? curr - prev : 0;
+}
+
 int pgwt_ring_delta(const struct pgwt_ring *ring, int ticks_ago,
                     struct pgwt_snapshot *out)
 {
@@ -108,17 +122,17 @@ int pgwt_ring_delta(const struct pgwt_ring *ring, int ticks_ago,
         &ring->slots[(ring->head - 1 - ticks_ago) % ring->capacity];
 
     /* Time model: field-by-field subtraction */
-    out->tm.db_time_ns        = curr->tm.db_time_ns        - prev->tm.db_time_ns;
-    out->tm.cpu_time_ns       = curr->tm.cpu_time_ns       - prev->tm.cpu_time_ns;
-    out->tm.io_time_ns        = curr->tm.io_time_ns        - prev->tm.io_time_ns;
-    out->tm.lwlock_time_ns    = curr->tm.lwlock_time_ns    - prev->tm.lwlock_time_ns;
-    out->tm.lock_time_ns      = curr->tm.lock_time_ns      - prev->tm.lock_time_ns;
-    out->tm.bufferpin_time_ns = curr->tm.bufferpin_time_ns - prev->tm.bufferpin_time_ns;
-    out->tm.client_time_ns    = curr->tm.client_time_ns    - prev->tm.client_time_ns;
-    out->tm.ipc_time_ns       = curr->tm.ipc_time_ns       - prev->tm.ipc_time_ns;
-    out->tm.timeout_time_ns   = curr->tm.timeout_time_ns   - prev->tm.timeout_time_ns;
-    out->tm.extension_time_ns = curr->tm.extension_time_ns - prev->tm.extension_time_ns;
-    out->tm.activity_time_ns  = curr->tm.activity_time_ns  - prev->tm.activity_time_ns;
+    out->tm.db_time_ns        = sat_sub(curr->tm.db_time_ns,        prev->tm.db_time_ns);
+    out->tm.cpu_time_ns       = sat_sub(curr->tm.cpu_time_ns,       prev->tm.cpu_time_ns);
+    out->tm.io_time_ns        = sat_sub(curr->tm.io_time_ns,        prev->tm.io_time_ns);
+    out->tm.lwlock_time_ns    = sat_sub(curr->tm.lwlock_time_ns,    prev->tm.lwlock_time_ns);
+    out->tm.lock_time_ns      = sat_sub(curr->tm.lock_time_ns,      prev->tm.lock_time_ns);
+    out->tm.bufferpin_time_ns = sat_sub(curr->tm.bufferpin_time_ns, prev->tm.bufferpin_time_ns);
+    out->tm.client_time_ns    = sat_sub(curr->tm.client_time_ns,    prev->tm.client_time_ns);
+    out->tm.ipc_time_ns       = sat_sub(curr->tm.ipc_time_ns,       prev->tm.ipc_time_ns);
+    out->tm.timeout_time_ns   = sat_sub(curr->tm.timeout_time_ns,   prev->tm.timeout_time_ns);
+    out->tm.extension_time_ns = sat_sub(curr->tm.extension_time_ns, prev->tm.extension_time_ns);
+    out->tm.activity_time_ns  = sat_sub(curr->tm.activity_time_ns,  prev->tm.activity_time_ns);
 
     /* System events: for each event in curr, subtract prev if found */
     int ne = 0;
@@ -131,10 +145,10 @@ int pgwt_ring_delta(const struct pgwt_ring *ring, int ticks_ago,
         dst->wait_event = ce->wait_event;
 
         if (pe) {
-            dst->count = ce->count - pe->count;
-            dst->total_ns = ce->total_ns - pe->total_ns;
+            dst->count = sat_sub(ce->count, pe->count);
+            dst->total_ns = sat_sub(ce->total_ns, pe->total_ns);
             for (int b = 0; b < HISTOGRAM_BUCKETS; b++)
-                dst->histogram[b] = ce->histogram[b] - pe->histogram[b];
+                dst->histogram[b] = sat_sub(ce->histogram[b], pe->histogram[b]);
         } else {
             /* New event since prev snapshot */
             dst->count = ce->count;
@@ -156,8 +170,8 @@ int pgwt_ring_delta(const struct pgwt_ring *ring, int ticks_ago,
         dst->wait_event = cq->wait_event;
 
         if (pq) {
-            dst->count = cq->count - pq->count;
-            dst->total_ns = cq->total_ns - pq->total_ns;
+            dst->count = sat_sub(cq->count, pq->count);
+            dst->total_ns = sat_sub(cq->total_ns, pq->total_ns);
         } else {
             dst->count = cq->count;
             dst->total_ns = cq->total_ns;

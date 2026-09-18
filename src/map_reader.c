@@ -18,6 +18,7 @@
 #ifndef PGWT_SERVER
 #include "daemon.h"
 #include "discovery.h"   /* pgwt_read_sched_cpu_ns (T8 live measured CPU) */
+#include "sampler.h"     /* pgwt_backend_type_flag (header-inline) */
 #include <bpf/libbpf.h>
 #include <bpf/bpf.h>
 #include "pg_wait_tracer.skel.h"
@@ -142,6 +143,85 @@ void pgwt_update_time_model(struct pgwt_time_model *tm, uint32_t event,
     }
 }
 
+uint32_t pgwt_live_effective_event(uint32_t we, uint32_t cat_flag,
+                                   bool cmd_gate_active, bool cmd_open)
+{
+    if (we == 0 && cat_flag == 0 && cmd_gate_active && !cmd_open)
+        return PGWT_WEI_NONCMD_CPU;
+    return we;
+}
+
+static void add_event_stats(struct pgwt_event_stats *es, uint64_t stat_ns,
+                            bool histogram)
+{
+    es->count++;
+    es->total_ns += stat_ns;
+    if (stat_ns < es->min_ns) es->min_ns = stat_ns;
+    if (stat_ns > es->max_ns) es->max_ns = stat_ns;
+    if (histogram) {
+        uint32_t bucket = pgwt_duration_to_bucket(stat_ns);
+        if (bucket < HISTOGRAM_BUCKETS)
+            es->histogram[bucket]++;
+    }
+}
+
+void pgwt_accum_add_interval(struct pgwt_accumulator *acc,
+                             const struct pgwt_live_interval *iv)
+{
+    uint32_t we = pgwt_live_effective_event(iv->we, iv->cat_flag,
+                                            iv->cmd_gate_active, iv->cmd_open);
+    bool io_worker = (iv->cat_flag & PGWT_EVENT_FLAG_IO_WORKER) != 0;
+    bool idle = pgwt_is_idle_event(we);
+    /* Row value: the CPU* row carries the interval's on-CPU ns; every wait
+     * and idle row (incl. non-command CPU) carries wall. */
+    uint64_t stat_ns = (we == 0) ? iv->cpu_ns : iv->wall_ns;
+
+    /* Per-PID accumulation */
+    struct pgwt_pid_accum *pa = pgwt_get_or_create_pid(acc, iv->pid);
+    if (pa) {
+        struct pgwt_event_stats *es = pgwt_get_or_create_event(pa, we);
+        if (es)
+            add_event_stats(es, stat_ns, iv->closed);
+        if (!io_worker) {
+            if (we == 0) {
+                pa->cpu_time_ns += stat_ns;
+                pa->db_time_ns  += iv->wall_ns;   /* DB Time = wall */
+            } else if (!idle) {
+                pa->wait_time_ns += iv->wall_ns;
+                pa->db_time_ns   += iv->wall_ns;
+            }
+        }
+    }
+
+    /* System-wide accumulation */
+    struct pgwt_event_stats *se = pgwt_get_or_create_system_event(acc, we);
+    if (se)
+        add_event_stats(se, stat_ns, iv->closed);
+
+    /* Time model by class. On-CPU splits into the CPU ns and the wall gap
+     * (both inside DB Time; the difference is the off-CPU remainder). */
+    if (!io_worker) {
+        if (we == 0) {
+            acc->tm.cpu_time_ns += stat_ns;
+            acc->tm.db_time_ns  += iv->wall_ns;
+        } else {
+            pgwt_update_time_model(&acc->tm, we, iv->wall_ns);
+        }
+    }
+
+    /* Query-level accumulation (no histogram) */
+    if (iv->query_id != 0 && !io_worker) {
+        struct pgwt_query_event_stats *qe =
+            pgwt_get_or_create_query_event(acc, iv->query_id, we);
+        if (qe) {
+            qe->count++;
+            qe->total_ns += stat_ns;
+            if (stat_ns < qe->min_ns) qe->min_ns = stat_ns;
+            if (stat_ns > qe->max_ns) qe->max_ns = stat_ns;
+        }
+    }
+}
+
 uint32_t pgwt_duration_to_bucket(uint64_t ns)
 {
     uint64_t us = ns / 1000;
@@ -164,6 +244,28 @@ uint32_t pgwt_duration_to_bucket(uint64_t ns)
 }
 
 #ifndef PGWT_SERVER
+uint32_t pgwt_live_pid_cat_flag(struct pgwt_daemon *d,
+                                struct pgwt_accumulator *acc, uint32_t pid)
+{
+    struct pgwt_pid_accum *pa = pgwt_get_or_create_pid(acc, pid);
+    if (pa && pa->cat_flag_plus1 != 0)
+        return pa->cat_flag_plus1 - 1;
+    /* Registry scan (the pgwt_find_backend lookup, inline so map_reader.o
+     * keeps no backend.o dependency for the BPF-free unit tests). */
+    uint32_t f = 0;
+    for (int i = 0; i < d->backends.count; i++) {
+        const struct pgwt_backend *be = &d->backends.entries[i];
+        if (be->pid == (pid_t)pid) {
+            f = be->meta_parsed
+              ? pgwt_backend_type_flag(be->meta.backend_type) : 0;
+            break;
+        }
+    }
+    if (pa)
+        pa->cat_flag_plus1 = f + 1;
+    return f;
+}
+
 void pgwt_read_state_map(struct pgwt_daemon *d)
 {
     int state_fd = bpf_map__fd(d->skel->maps.state_map);
@@ -306,59 +408,26 @@ void pgwt_read_state_map(struct pgwt_daemon *d)
                                 (unsigned long long)cpu_open);
                 }
 
-                /* Per-PID accumulation */
-                struct pgwt_pid_accum *pa = pgwt_get_or_create_pid(&d->accum, snext);
-                if (pa) {
-                    /* CPU pseudo-event stats reflect measured CPU; waits use
-                     * wall (they carry no CPU). */
-                    uint64_t stat_ns = (we == 0) ? cpu_open : open_ns;
-                    struct pgwt_event_stats *es = pgwt_get_or_create_event(pa, we);
-                    if (es) {
-                        es->count += 1;
-                        es->total_ns += stat_ns;
-                        if (stat_ns < es->min_ns) es->min_ns = stat_ns;
-                        if (stat_ns > es->max_ns) es->max_ns = stat_ns;
-                    }
-                    if (we == 0) {
-                        pa->cpu_time_ns += cpu_open;
-                    } else if (!pgwt_is_idle_event(we)) {
-                        pa->wait_time_ns += open_ns;
-                    }
-                    if (!pgwt_is_idle_event(we))
-                        pa->db_time_ns += open_ns;   /* DB Time = wall gap */
-                }
-
-                /* System-wide accumulation */
-                struct pgwt_event_stats *se = pgwt_get_or_create_system_event(&d->accum, we);
-                if (se) {
-                    uint64_t stat_ns = (we == 0) ? cpu_open : open_ns;
-                    se->count += 1;
-                    se->total_ns += stat_ns;
-                    if (stat_ns < se->min_ns) se->min_ns = stat_ns;
-                    if (stat_ns > se->max_ns) se->max_ns = stat_ns;
-                }
-
-                /* Time model by class: on-CPU splits into measured CPU + the
-                 * off-CPU remainder (both inside DB Time). */
-                if (we == 0) {
-                    d->accum.tm.cpu_time_ns += cpu_open;
-                    d->accum.tm.db_time_ns += open_ns;
-                } else {
-                    pgwt_update_time_model(&d->accum.tm, we, open_ns);
-                }
-
-                /* Query-level open interval */
-                if (sval.last_query_id != 0) {
-                    uint64_t stat_ns = (we == 0) ? cpu_open : open_ns;
-                    struct pgwt_query_event_stats *qe =
-                        pgwt_get_or_create_query_event(&d->accum, sval.last_query_id, we);
-                    if (qe) {
-                        qe->count += 1;
-                        qe->total_ns += stat_ns;
-                        if (stat_ns < qe->min_ns) qe->min_ns = stat_ns;
-                        if (stat_ns > qe->max_ns) qe->max_ns = stat_ns;
-                    }
-                }
+                /* Fold the open stretch through the SAME function and
+                 * classification as the closed record it will become
+                 * (issue #97): a client backend's on-CPU stretch outside a
+                 * command (state_map cmd_open, maintained by the
+                 * on_report_activity uprobe and the seed) is idle
+                 * non-command time, not CPU* / DB Time; io_worker time stays
+                 * out of the time model. The CPU* row carries the MEASURED
+                 * on-CPU ns of the stretch, DB Time its wall. */
+                struct pgwt_live_interval iv = {
+                    .pid             = snext,
+                    .we              = we,
+                    .wall_ns         = open_ns,
+                    .cpu_ns          = cpu_open,
+                    .query_id        = sval.last_query_id,
+                    .cat_flag        = pgwt_live_pid_cat_flag(d, &d->accum, snext),
+                    .cmd_gate_active = d->cmd_gate_active,
+                    .cmd_open        = sval.cmd_open != 0,
+                    .closed          = false,
+                };
+                pgwt_accum_add_interval(&d->accum, &iv);
             }
         } else if (dbg_scan) {
             lookup_failed++;

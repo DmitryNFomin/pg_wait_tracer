@@ -137,7 +137,6 @@ xpass=0
 # is missing) is a broken test, not the tracked bug — that always counts as
 # a real failure regardless of KNOWN_FAILING membership.
 KNOWN_FAILING=(
-    "test_multi_window|97"
     "test_daemon_server|98"
     "test_partition|99"
 )

@@ -481,40 +481,29 @@ def test_system_event_data(pm_pid):
     # Idle-but-visible events (Client:ClientRead) are listed (they have time)
     # but render "—" for %DB, not a number — counting them would overshoot the
     # column past 100%. Sum must be ~100% across the NON-IDLE rows.
-    # Sum only TOP-LEVEL class rows (CPU*, Off-CPU*, Timeout, IO, LWLock, …) —
-    # a child row (Timeout:PgSleep, IO:WalSync) is a drill-down of its parent's
-    # %DB, so summing both double-counts (that overshoot to ~150% is a test
-    # bug, not a tracer bug: DB Time == CPU* + Σ class parents holds — the
-    # reconstruction check above passes).
-    # Sum only TOP-LEVEL class rows (a child like Timeout:PgSleep drills down
-    # its parent's %DB — summing both double-counts). Per a SINGLE snapshot the
-    # visible parents (CPU* + wait classes) sum to ≤100%, the remainder being
-    # Off-CPU* (measured runqueue residual). This is the MULTI-WINDOW view,
-    # which differences two cumulative ring snapshots: CPU* carries MEASURED
-    # on-CPU ns while DB Time carries WALL, so across a window edge where CPU
-    # intervals close the two cumulative curves drift and the visible-parent sum
-    # can sit a few % over 100% (observed ~106% under pgbench load; largest when
-    # Off-CPU* ≈ 0, i.e. compute-bound). It is a windowed-delta display artifact,
-    # NOT a conservation error — the exact identity CPU* + Off-CPU* + Σwaits ==
-    # DB Time is asserted by test_data_offcpu_identity and live by
-    # test_daemon_server, and by Test 3 above (Σ top-level rows == DB Time, 0%
-    # error). Tracked in docs/ROADMAP_AND_STATUS.md. Observed 106-110% under pgbench
-    # load and it varies with sched_switch timing (so the bound must survive the
-    # EL8/EL9/Ubuntu matrix); ≤125% absorbs that while still failing hard on the
-    # real thing this guards — accidentally summing child rows too, which is
-    # ~150%+ (Timeout:PgSleep atop Timeout, IO:* atop IO, …). A tighter net is
-    # not possible here: the same delta drift can push a single class (CPU*,
-    # measured vs wall) a few % over 100%, so any per-row bound near 100% flakes.
-    # Lower bound is loose too: the visible parents are 100% MINUS Off-CPU*,
-    # and Off-CPU* (measured runqueue residual) can be MOST of DB Time under
-    # oversubscription (observed 44.7% parents on a 4-vCPU EL8 box under suite
-    # load — the rest was off-CPU). The floor only catches a degenerate
-    # all-zero/broken view; exact conservation is Test 3 above.
-    non_idle = [e for e in events
-                if not e['pct_is_dash'] and ':' not in e['name']]
+    #
+    # Every row of the system_event view is a LEAF wait event (CPU* plus
+    # "Class:Event" rows); unlike the time_model view (Test 3) it has no class
+    # parent rows, so the rows are disjoint and Σ non-idle rows == DB Time
+    # minus the off-CPU remainder of the open on-CPU stretches (the CPU* row
+    # carries measured on-CPU ns, DB Time wall) plus the io_worker waits (kept
+    # visible in the rows, excluded from DB Time by the T2 category contract —
+    # ~1% under pgbench on PG18 io_method=worker). Issue #97: this check used
+    # to sum only ':'-free rows, i.e. the CPU* row ALONE, and read 128–142%
+    # because the live closed-record path filed non-command CPU under CPU*
+    # while DB Time excluded it; with that fixed the CPU* row alone is the
+    # in-command share (~13-17% under pgbench on the gate box — the live gate
+    # is read at emission, #98), so the row selection here is the identity the
+    # comment always described, not a single row.
+    # Off-CPU* (measured runqueue residual) can be MOST of DB Time under
+    # oversubscription (observed 44.7% visible on a 4-vCPU EL8 box under suite
+    # load — the rest was off-CPU), hence the loose floor; ≤125% still fails
+    # hard on double counting (a parent row atop its children would be ~150%+).
+    # Exact conservation is Test 3 above.
+    non_idle = [e for e in events if not e['pct_is_dash']]
     pct_sum = sum(e['pct'] for e in non_idle)
     check(15 < pct_sum <= 125,
-          f"Non-idle top-level %DB sums to {pct_sum:.1f}% "
+          f"Non-idle %DB sums to {pct_sum:.1f}% "
           f"(15-125%; = 100% - Off-CPU* per snapshot ± windowed-delta noise)")
 
     # Idle-but-visible events must render "—" (not a number) for %DB.
