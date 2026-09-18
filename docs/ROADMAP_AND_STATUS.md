@@ -163,7 +163,9 @@
 - **CLI `--format json` / `csv`** — dropped; JSON ships via the web protocol.
 
 **Measured-CPU follow-ons (the canonical FUTURE_WORK list, post-v0.13):**
-- Multi-window `%DB` drift (cosmetic — visible parents sum 106–110% under load).
+- ~~Multi-window `%DB` drift (cosmetic — visible parents sum 106–110% under load).~~
+  Fixed (#97): it was non-command CPU in the `CPU*` row, not drift — see the
+  detailed entry below.
 - Live view: account the *open* interval of a repeated **wait** (`has_closed_data`
   guard, now CPU-only, still suppresses ongoing waits).
 - Within-wait **on-CPU-spin vs off-CPU-blocked** split (keeps the label).
@@ -1138,7 +1140,11 @@ shipped):
 - **T8_PLAN §5.7 also-in-this-phase:** the **`test_multi_window` %DB summation
   fix** (a confirmed *test* bug from EL9: it summed parent classes AND their
   children — `Timeout` + `Timeout:PgSleep`, … → 120-130%; the fix sums top-level
-  rows only — those without `:` in the name, plus CPU* and Off-CPU*). Do **not**
+  rows only — those without `:` in the name, plus CPU* and Off-CPU*). *Historical:*
+  that ':'-free rule is right for the `time_model` view (Test 3) but was later
+  applied to `system_event` too, where every row is a leaf and it left `CPU*`
+  alone in the sum — reversed by #97 (see the "Multi-window %DB > 100% — FIXED"
+  entry below). Do **not**
   touch the cross-validate Hz-matrix flakiness in code — it is box-load noise on
   the 2-vCPU validation box; the close-out runs use a resized box.
 
@@ -1462,23 +1468,35 @@ to a CHANGELOG entry).
   `PGWT_TEST_NO_EVENT_DRAIN_BUDGET` restores the pre-fix direction on demand
   (`timer_ticks=0`, CPU*=0, `/proc=18.39s`, trace=21.30s).
 
-- **Multi-window %DB: windowed-delta drift of measured-CPU vs wall.** The
-  multi-window `--view` (Last 1s / Last 3s) differences two cumulative ring
-  snapshots; CPU* carries MEASURED on-CPU ns while DB Time carries WALL. Per single
-  snapshot the visible parents sum to ≤100% (Off-CPU* is the non-negative
-  remainder), but across a window edge where CPU intervals **close**, the
-  closed-interval accounting uses wall (`event_stream.c → evt->duration_ns`) while
-  the open interval uses measured (`map_reader.c cpu_open`), so the two cumulative
-  curves drift and the delta's visible-parent %DB sum can sit a few % over 100%
-  (**observed 106–110% under pgbench**, varying with sched_switch timing; worst when
-  Off-CPU* ≈ 0). **Cosmetic** — the authoritative conservation holds exactly
-  (`test_data_offcpu_identity`, `test_daemon_server`, `test_multi_window` Test 3).
-  Amplified (not caused) by the `map_reader` open-on-CPU fix (which correctly
-  restored fork-caught backends' CPU magnitude). **Proper fix:** clamp CPU* to its
-  wall share per window in the delta, or render Off-CPU* as an explicit parent so
-  the column sums to 100% by construction. Related: the LIVE display accounts a
-  CLOSED on-CPU segment at WALL, not measured (measured `cpu_ns` is folded only into
-  lifetime counters) — reconcile both when picked up.
+- **Multi-window %DB > 100% — FIXED (issue #97).** The 106–110% "drift" (and the
+  128–142% the gate box showed) was NOT the measured-vs-wall difference between
+  the open stretch (`map_reader.c cpu_open`) and the closed record
+  (`event_stream.c → evt->duration_ns`): measured on the PG18 gate box, that
+  residual (DB − CPU − Σwaits) is ≤ 0.4 ms per 5 s window. The cause was the
+  live closed-record path filing a client backend's **non-command** we==0 record
+  (command gate closed at emission) under the `CPU*` row (wait_event 0) while
+  routing its time to the idle Activity bucket — so the `CPU*` row carried
+  ~10.3 s per 5 s window against a time-model CPU of ~1.7 s, and crossed 100% of
+  DB Time whenever the WAL waits shrank (5.6 s vs 10.8 s on the failing runs:
+  lower load, higher %). Both live paths now fold through
+  `pgwt_accum_add_interval` with one classification
+  (`pgwt_live_effective_event` → `PGWT_WEI_NONCMD_CPU`, the server's synthetic
+  id), and `pgwt_ring_delta` saturates instead of wrapping when an open stretch
+  closes under a different label — every clamp is counted
+  (`metrics.ring_delta_clamps_total`, logged once under `PGWT_DEBUG_DUMP_STATE`).
+  **Exact residual the clamp does not repair:** in the window where an open
+  in-command stretch closes gate-clear, DB Time drops by that stretch's wall
+  while the other rows keep theirs, so a WAIT row can still read > 100% of that
+  window's DB Time (unit case: 3 s wait over a 1 s window = 300%), bounded by that
+  one stretch; a non-zero `ring_delta_clamps_total` is the tell. Unit:
+  `tests/test_live_accum`. Still open, same
+  family (#98): the live gate is read AT EMISSION, so a waitless statement's
+  whole on-CPU run (ending at the next ClientRead, gate already closed) is
+  "non-command" live while the server's majority rule counts it — ~83% of
+  pgbench's CPU on the box, i.e. the server/CLI CPU ratio of ~6x. And the LIVE
+  display still accounts a CLOSED on-CPU segment at WALL (measured `cpu_ns` is
+  folded only into lifetime counters) — reconcile with the open stretch (measured)
+  when #98 is picked up.
 
 - **Live view: account the OPEN interval of a repeated WAIT.** `pgwt_read_state_map`
   (`src/map_reader.c`) still skips a backend's current OPEN interval when `d->accum`

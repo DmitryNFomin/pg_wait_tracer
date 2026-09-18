@@ -335,6 +335,10 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
     cjson_add_uint64(root, "offcpu_ns_total", ctr->offcpu_ns_total);
     cjson_add_uint64(root, "cpu_clamped_total", ctr->cpu_clamped_ns_total);
     cjson_add_uint64(root, "wait_gap_cpu_ns_total", ctr->wait_gap_cpu_ns_total);
+    /* #97 multi-window fail-safe: windowed-delta fields clamped at 0 instead
+     * of wrapping (an open stretch closed under a different label). */
+    cjson_add_uint64(root, "ring_delta_clamps_total",
+                     ctr->ring_delta_clamps_total);
 
     cjson_add_uint64(root, "io_worker_samples_total",
                      ctr->io_worker_samples_total);

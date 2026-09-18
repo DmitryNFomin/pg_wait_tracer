@@ -173,7 +173,9 @@ for k in ('events_total', 'events_per_sec', 'lifecycle_events_total',
           # T8 measured-CPU counters (§5.6). Present + numeric here; the exact
           # magnitudes are proven by the pure-CPU straddle acceptance test.
           'cpu_ns_total', 'offcpu_ns_total', 'cpu_clamped_total',
-          'wait_gap_cpu_ns_total'):
+          'wait_gap_cpu_ns_total',
+          # #97 multi-window fail-safe (windowed-delta clamps).
+          'ring_delta_clamps_total'):
     assert k in r, 'missing ' + k
     assert isinstance(r[k], (int, float)), k
 # T8: capability string mirrors status.

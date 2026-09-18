@@ -10,7 +10,6 @@
 #include "query_text.h"
 #include "map_reader.h"
 #include "wait_event.h"
-#include "sampler.h"   /* pgwt_backend_type_flag (T2 category mapping) */
 
 #include <string.h>
 #include <time.h>
@@ -117,96 +116,37 @@ int pgwt_handle_trace_event(void *ctx, void *data, size_t data_sz)
     pgwt_debug_block_end(d, "event_callback_cpu_counters", evt->pid,
                          stage_started_ns);
 
-    /* Per-PID accumulation */
+    /* Accumulate (per-pid, system, time model, query) through the ONE
+     * live-interval function shared with the open-interval scan
+     * (map_reader.c pgwt_accum_add_interval, issue #97): the closed record
+     * and the open stretch it later closes must classify identically, or
+     * the multi-window delta of the two ring snapshots shows a quantity no
+     * snapshot ever had. T2 classification (decomposed AAS,
+     * docs/AAS_SEMANTICS_DECISION.md): the pid's category is resolved ONCE
+     * against the registry and cached in the accumulator (the hot path must
+     * not linear-scan 1024 entries per event); io_worker time never enters
+     * DB Time/AAS; a client backend's we==0 interval outside a command (BPF
+     * stamps the gate in flags) is post/between-command time — idle, not
+     * CPU — and is filed under PGWT_WEI_NONCMD_CPU in EVERY accumulator (it
+     * used to sit in the CPU* row while its time went to Activity, so the
+     * CPU* row could exceed DB Time). */
     stage_started_ns = pgwt_debug_block_begin(d);
-    struct pgwt_pid_accum *pa = pgwt_get_or_create_pid(acc, evt->pid);
-
-    /* T2 live classification (decomposed AAS, docs/AAS_SEMANTICS_DECISION.md).
-     * Resolve the pid's category ONCE against the registry and cache it in
-     * the accumulator (the hot path must not linear-scan 1024 entries per
-     * event). io_worker time never enters DB Time/AAS; a client backend's
-     * we==0 interval outside a command (BPF stamps the gate in flags) is
-     * post/between-command time — idle, not CPU. Both stay VISIBLE in the
-     * per-event stats; only the load accounting differs. */
-    int io_worker = 0;
-    int noncmd_cpu = 0;
-    if (pa) {
-        if (pa->cat_flag_plus1 == 0) {
-            struct pgwt_backend *be = pgwt_find_backend(&d->backends, evt->pid);
-            uint32_t f = (be && be->meta_parsed)
-                       ? pgwt_backend_type_flag(be->meta.backend_type) : 0;
-            pa->cat_flag_plus1 = f + 1;
-        }
-        uint32_t cat = pa->cat_flag_plus1 - 1;
-        io_worker = (cat == PGWT_EVENT_FLAG_IO_WORKER);
-        noncmd_cpu = (we == 0 && cat == 0 && d->cmd_gate_active
-                      && !(evt->flags & PGWT_EVENT_FLAG_CMD_OPEN));
-    }
-
-    if (pa) {
-        struct pgwt_event_stats *es = pgwt_get_or_create_event(pa, we);
-        if (es) {
-            es->count++;
-            es->total_ns += dur;
-            if (dur < es->min_ns) es->min_ns = dur;
-            if (dur > es->max_ns) es->max_ns = dur;
-            uint32_t bucket = pgwt_duration_to_bucket(dur);
-            if (bucket < HISTOGRAM_BUCKETS)
-                es->histogram[bucket]++;
-        }
-
-        if (!io_worker && !noncmd_cpu) {
-            if (we == 0) {
-                pa->cpu_time_ns += dur;
-            } else if (!pgwt_is_idle_event(we)) {
-                pa->wait_time_ns += dur;
-            }
-            if (we == 0 || !pgwt_is_idle_event(we))
-                pa->db_time_ns += dur;
-        }
-    }
-    pgwt_debug_block_end(d, "event_callback_pid_accumulator", evt->pid,
-                         stage_started_ns);
-
-    /* System-wide accumulation */
-    stage_started_ns = pgwt_debug_block_begin(d);
-    struct pgwt_event_stats *se = pgwt_get_or_create_system_event(acc, we);
-    if (se) {
-        se->count++;
-        se->total_ns += dur;
-        if (dur < se->min_ns) se->min_ns = dur;
-        if (dur > se->max_ns) se->max_ns = dur;
-        uint32_t bucket = pgwt_duration_to_bucket(dur);
-        if (bucket < HISTOGRAM_BUCKETS)
-            se->histogram[bucket]++;
-    }
-    pgwt_debug_block_end(d, "event_callback_system_accumulator", evt->pid,
-                         stage_started_ns);
-
-    /* Time model by class. io_worker time is excluded from DB Time; a
-     * non-command CPU interval lands in the idle (Activity) bucket. */
-    stage_started_ns = pgwt_debug_block_begin(d);
-    if (!io_worker)
-        pgwt_update_time_model(&acc->tm,
-                               noncmd_cpu ? WEI(PG_WAIT_ACTIVITY, 0) : we,
-                               dur);
-    pgwt_debug_block_end(d, "event_callback_time_model", evt->pid,
-                         stage_started_ns);
-
-    /* Query events */
-    stage_started_ns = pgwt_debug_block_begin(d);
-    if (evt->query_id != 0 && !io_worker) {
-        struct pgwt_query_event_stats *qe =
-            pgwt_get_or_create_query_event(acc, evt->query_id, we);
-        if (qe) {
-            qe->count++;
-            qe->total_ns += dur;
-            if (dur < qe->min_ns) qe->min_ns = dur;
-            if (dur > qe->max_ns) qe->max_ns = dur;
-        }
-    }
-
-    pgwt_debug_block_end(d, "event_callback_query_accumulator", evt->pid,
+    struct pgwt_live_interval iv = {
+        .pid             = evt->pid,
+        .we              = we,
+        .wall_ns         = dur,
+        .cpu_ns          = dur,      /* live display accounts a closed on-CPU
+                                      * segment at wall (measured cpu_ns is
+                                      * folded into the lifetime counters
+                                      * above); see ROADMAP "Multi-window %DB" */
+        .query_id        = evt->query_id,
+        .cat_flag        = pgwt_live_pid_cat_flag(d, acc, evt->pid),
+        .cmd_gate_active = d->cmd_gate_active,
+        .cmd_open        = (evt->flags & PGWT_EVENT_FLAG_CMD_OPEN) != 0,
+        .closed          = true,
+    };
+    pgwt_accum_add_interval(acc, &iv);
+    pgwt_debug_block_end(d, "event_callback_accumulate", evt->pid,
                          stage_started_ns);
 
 done:
@@ -241,6 +181,7 @@ void pgwt_accum_copy_used(struct pgwt_accumulator *dst,
 
         dp->pid = sp->pid;
         dp->active = sp->active;
+        dp->cat_flag_plus1 = sp->cat_flag_plus1;   /* the open scan reuses it */
         dp->num_events = sp->num_events;
         dp->db_time_ns = sp->db_time_ns;
         dp->cpu_time_ns = sp->cpu_time_ns;

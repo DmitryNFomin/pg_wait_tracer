@@ -195,9 +195,29 @@ int pgwt_sampler_build_batch(const struct pgwt_sample_target *targets,
 void pgwt_sampler_note_coverage(struct pgwt_sampler *s, int targets, int valid);
 
 /* T2: category flag (PGWT_EVENT_FLAG_*) for a backend type, and the we==0
- * recording policy. Pure helpers shared by the sampler and the server-side
- * category tagging. */
-uint32_t pgwt_backend_type_flag(enum pgwt_backend_type bt);
+ * recording policy. Pure helpers shared by the sampler, the server-side
+ * category tagging and the live accumulators (map_reader.c — header-inline
+ * so the BPF-free unit tests that link map_reader.o need no sampler.o). */
+/* Category flag for a backend type (docs/AAS_SEMANTICS_DECISION.md).
+ * Foreground (client, parallel worker) carries no flag; autovacuum workers
+ * are maintenance; io_workers are their own excluded-from-AAS class; every
+ * other aux process is background. UNKNOWN is treated as foreground/client
+ * (conservative: its CPU stays command-gated, its waits count as before). */
+static inline uint32_t pgwt_backend_type_flag(enum pgwt_backend_type bt)
+{
+    switch (bt) {
+    case PGWT_BT_CLIENT:
+    case PGWT_BT_PARALLEL_WORKER:
+    case PGWT_BT_UNKNOWN:
+        return 0;                              /* foreground */
+    case PGWT_BT_AUTOVAC_WORKER:
+        return PGWT_EVENT_FLAG_MAINT;          /* maintenance */
+    case PGWT_BT_IO_WORKER:
+        return PGWT_EVENT_FLAG_IO_WORKER;      /* excluded from AAS/DB Time */
+    default:
+        return PGWT_EVENT_FLAG_BACKGROUND;     /* checkpointer, bgwriter, … */
+    }
+}
 int      pgwt_cpu_sample_recordable(enum pgwt_backend_type bt, int cmd_open);
 
 /* Stage 2 source gate.  A degraded/disabled layout selects the existing

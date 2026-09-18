@@ -20,7 +20,7 @@ TESTS     = test_wait_event test_cmdline test_spawn test_event_writer test_event
             test_pgss_resolver \
             test_pg13_resolve test_discovery_pie test_discovery_nopie \
             test_replay_fidelity test_durability test_query_text \
-            test_golden_fixture \
+            test_golden_fixture test_live_accum \
             gen_test_traces gen_bench_traces test_concurrent_rw cross_validate \
             dump_markers
 
@@ -62,6 +62,15 @@ test_event_reader: test_event_reader.c $(BUILD)/event_reader.o $(BUILD)/event_wr
 
 test_bucket: test_bucket.c
 	$(CC) $(CFLAGS) -o $@ $^
+
+# test_live_accum: issue #97 — live-view interval accounting shared by the
+# closed-record path and the open state_map scan, plus the saturating ring
+# delta behind the multi-window view. Compiles map_reader.c with
+# -DPGWT_SERVER (the BPF-free accumulator core) and snapshot.c directly;
+# wait_event.o only for the idle/hidden classification. Runs anywhere.
+test_live_accum: test_live_accum.c ../src/map_reader.c ../src/snapshot.c \
+                 $(BUILD)/wait_event.o $(BUILD)/spawn.o $(BUILD)/cJSON.o
+	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^
 
 # test_pg13_resolve: PG13 MyProc-path offset table + the runtime "refuse on
 # garbage offset" validation guard. Compiles discovery.c directly (the helpers
