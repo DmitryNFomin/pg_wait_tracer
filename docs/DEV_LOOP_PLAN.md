@@ -611,6 +611,17 @@ the same read as the 2026-09-16 run, just with tighter IQRs this time.
   `gh workflow run ci.yml --ref agent/ci-no-concurrency-groups` dispatches;
   see the PR body / issue #126 for the run ids and the non-overlap
   evidence from each job's `startedAt`/`completedAt`.
+- **Operational rule for `gh run cancel` on the gate box (added while
+  proving the #126 fix, after two unrelated runs — master run 35370614086
+  and a PR #127 run — had all five gate-box jobs cancelled simultaneously
+  by someone else's `gh run cancel`)**: `gh run cancel <id>` cancels the
+  WHOLE run, every job in it, not a single job — there is no per-job
+  cancel. Never cancel a run you did not dispatch yourself. For a run you
+  did dispatch, cancel it only after ALL of its gate jobs (not just the
+  ones you personally care about) have concluded; prefer letting
+  `mode4-hunt` finish or time out on its own over cancelling it. Queueing
+  behind other master/PR runs on the shared box is the design, not a
+  problem to route around by cancelling.
 
 **Remaining work:**
 1. Move `snapshots` to the gate box — Chromium is now provisioned there
