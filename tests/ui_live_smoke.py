@@ -167,6 +167,12 @@ PANEL_CHECKS = {
         if (!s0.data || s0.data.length === 0) return {ok:false, detail:'no data'};
         return {ok:true, detail: s0.data.length + ' cells'};
     }""",
+    # The series length alone cannot say WHICH render path drew the tab: above
+    # ~2 spans per painted pixel the timeline draws class-share SEGMENTS (one
+    # or more per pixel column) instead of one rect per wait (#106), and
+    # "N spans" reads identically either way. The banner the user sees carries
+    # the density sentence, so report it — box evidence then states which path
+    # the live data took, and the item count is labelled for what it is.
     "timeline": """() => {
         const el = document.getElementById('timeline-chart');
         if (!el) return {ok:false, detail:'no container'};
@@ -176,7 +182,14 @@ PANEL_CHECKS = {
         if (!s0) return {ok:false, detail:'no series'};
         if (s0.type !== 'custom') return {ok:false, detail:'not custom: ' + s0.type};
         if (!s0.data || s0.data.length === 0) return {ok:false, detail:'no spans'};
-        return {ok:true, detail: s0.data.length + ' spans'};
+        const b = document.getElementById('timeline-banner');
+        const note = b ? b.textContent.trim() : '';
+        // "aggregated at " is the load-bearing substring of the density
+        // banner (lib/builders/timeline.js timelineBannerNote says so).
+        const aggregated = note.indexOf('aggregated at ') >= 0;
+        return {ok:true, detail: s0.data.length +
+            (aggregated ? ' segments' : ' spans') +
+            (note ? ' | ' + note : '')};
     }""",
     "transitions": """() => {
         const el = document.getElementById('dfg-container');

@@ -48,6 +48,28 @@ function dense50Pids() {
     return { truncated: true, total_count: 1200, pids, events };
 }
 
+/* The #106 shape, from the live UI smoke: ONE PID row carrying 3036 spans over
+ * a 60 s window — ~57 % Timeout, ~43 % CPU. Drawn per span they fused into a
+ * solid block that alpha-composited to rgb(181,199,48), a yellow-green in no
+ * palette; bucketed per pixel column they are a stack of the two real class
+ * colors, with the density banner saying so. Pure integer arithmetic only
+ * (see base.mjs). */
+function denseOneRow() {
+    const events = [];
+    const n = 3036;
+    for (let i = 0; i < n; i++) {
+        // 4 of every 7 spans are Timeout (57.1 %), 3 are CPU (42.9 %).
+        const cls = (i % 7) < 4 ? CLASS_EVENTS[6] : CLASS_EVENTS[0];
+        // ~19.7 ms apart with a deterministic 0–6 ms wobble, so columns carry
+        // uneven counts instead of a perfect comb.
+        const s = BASE_NS + i * 19_762_845 + ((i * 7919) % 6_000_000);
+        const d = 4_000_000 + ((i * 104_729) % 26_000_000);   // 4–30 ms
+        events.push({ s, d, p: 9001, n: cls.n, e: cls.e, c: cls.c,
+            q: '3886912043147135675' });
+    }
+    return { truncated: true, total_count: 9812, pids: [9001], events };
+}
+
 export const states = {
     'empty': {
         description: 'No events — the view paints its placeholder; hasData must be false.',
@@ -70,6 +92,14 @@ export const states = {
         tags: ['OCCLUSION', 'FEEDBACK'],
         data: dense50Pids(),
         opts: WIN5,
+    },
+    'dense-one-row': {
+        description: '3036 spans on ONE PID row over 60 s (#106): above 2 spans per painted px the builder buckets per pixel column into class-share stacks — every fill a real palette color, with the banner stating the density and what zooming restores. Drawn per span these fused into one block whose composited pixels named no class.',
+        tags: ['OCCLUSION', 'SEMANTICS', 'FEEDBACK'],
+        data: denseOneRow(),
+        // No width here: the gallery renderer passes the cell's real canvas
+        // width, because the aggregation buckets into PIXEL columns.
+        opts: { from: BASE_NS, to: BASE_NS + 60 * SEC_NS },
     },
     'pre-window-start': {
         description: 'Long waits that began BEFORE the window: drawn bars clamp to the left edge (P6), tooltips keep the raw start.',
