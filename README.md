@@ -1294,6 +1294,14 @@ python3 tests/test_web_ui.py
 
 The mock server starts automatically on port 18799 (HTTP) and 18800 (WS), then
 shuts down. Override the isolated port pair with `PGWT_TEST_PORT=18975`.
+`tests/test_web_ui_chaos.py` and `tests/test_web_ui_snapshots.py` are
+similarly overridable with `PGWT_CHAOS_PORT` (default 18811) and
+`PGWT_SNAP_PORT` (default 18840; its sampled-fidelity mock runs at
+`PGWT_SNAP_PORT + 10`). `make check` doesn't rely on any of these fixed
+defaults: it allocates one free port base per run (`tests/free_ports.py`) and
+exports all three at fixed offsets from it, so two `make check` runs in
+different worktrees on the same Mac never race for a port — look for the
+`port base: N (span 60 — ...)` line in its output.
 
 Pure web builders run without a browser:
 

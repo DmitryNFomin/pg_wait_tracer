@@ -33,10 +33,39 @@ run bash -c 'cd web && go vet ./... && go test ./...'
 step "python: compile every test module"
 run python3 -m py_compile tests/*.py
 
+step "python: free_ports self-test"
+run python3 tests/test_free_ports.py
+
 if [[ $FAST -eq 0 ]]; then
     if ! python3 -c 'import playwright' 2>/dev/null; then
         echo "playwright missing — see CLAUDE.md 'Local setup'"; exit 2
     fi
+
+    # ── Port allocation (so two `make check` runs on this Mac don't collide) ─
+    # One free base per run, laid out at FIXED OFFSETS below so every mock
+    # server this run spawns gets a run-private port; no lock (that would
+    # serialize two ~4-minute runs), see tests/free_ports.py. Allocated here,
+    # immediately before the mocks bind, to keep the probe-to-bind window as
+    # short as possible. A developer running one suite by hand (no env vars
+    # set) keeps today's fixed-default ports. Safe across worktrees; NOT safe
+    # for two `make check` runs in the SAME checkout at once (those still
+    # race on .pgwt-check.stamp and tests/results/).
+    #
+    #   PORT MAP (relative to PGWT_PORT_BASE):
+    #     PGWT_TEST_PORT  = base+0   test_web_ui.py:       HTTP +0/WS +1, B5 +10/+11, compare +20/+21
+    #     PGWT_CHAOS_PORT = base+30  test_web_ui_chaos.py: HTTP +30/WS +31
+    #     PGWT_SNAP_PORT  = base+40  reserved for when check.sh runs the
+    #                                snapshot suite (test_web_ui_snapshots.py
+    #                                isn't invoked here yet): HTTP +40/WS +41,
+    #                                sampled +50/+51
+    PORT_SPAN=60
+    PGWT_PORT_BASE=$(python3 tests/free_ports.py "$PORT_SPAN") || { echo "free_ports: could not allocate $PORT_SPAN free ports"; exit 2; }
+    [[ $PGWT_PORT_BASE =~ ^[0-9]+$ ]] || { echo "free_ports: non-numeric base '$PGWT_PORT_BASE'"; exit 2; }
+    export PGWT_TEST_PORT=$PGWT_PORT_BASE
+    export PGWT_CHAOS_PORT=$((PGWT_PORT_BASE + 30))
+    export PGWT_SNAP_PORT=$((PGWT_PORT_BASE + 40))
+    echo "port base: $PGWT_PORT_BASE (span $PORT_SPAN — TEST=+0 CHAOS=+30 SNAP=+40)"
+
     step "web UI suite vs mock_server.py (Playwright)"
     run python3 tests/test_web_ui.py
     step "web UI chaos suite (latency jitter / reconnects)"

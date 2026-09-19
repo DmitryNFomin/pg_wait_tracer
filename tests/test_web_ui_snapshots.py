@@ -82,8 +82,11 @@ except ImportError:
 # ── Config ────────────────────────────────────────────────────────────────────
 
 # A separate port from test_web_ui.py so the two suites can run back to back
-# without colliding (test_web_ui uses 18799/+1 and B5 on +10).
-MOCK_PORT = int(os.environ.get("PGWT_SNAP_PORT", "18820"))
+# without colliding. test_web_ui.py uses 18799 (main HTTP)/18800 (WS),
+# 18809/18810 (B5, +10), 18819/18820 (compare, +20) -- 18840 (this suite's
+# default) plus its own +10 sampled pair (18850/18851) sits clear of all of
+# those.
+MOCK_PORT = int(os.environ.get("PGWT_SNAP_PORT", "18840"))
 
 
 def app_url(http_port):
@@ -258,7 +261,9 @@ def start_mock_server(extra_env=None, port=None):
         if proc.poll() is None:
             proc.kill()
         out, err = proc.communicate()
-        print(f"mock_server failed to start:\n{out.decode()}\n{err.decode()}")
+        print(f"mock_server failed to start on port {http_port} "
+              f"(WS {http_port + 1}) — port busy, or the mock crashed:\n"
+              f"{out.decode()}\n{err.decode()}")
         sys.exit(1)
     return proc
 
