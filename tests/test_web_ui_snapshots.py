@@ -128,6 +128,7 @@ GALLERY_STATIC_CELLS = [
     "gallery-fidelity-compare-mismatch",         # U4: exact-vs-sampled warning chip
     "gallery-fidelity-compare-predates",         # U4: quiet retention-edge note
     "gallery-timeline-dense-50pids",            # dense timeline (480px cap)
+    "gallery-timeline-dense-one-row",           # #106 per-pixel class stacks
     "gallery-timeline-single-point",            # degenerate timeline
     "gallery-histogram-dense",                  # dense heatmap
     "gallery-concurrency-dense-bursts",         # overlay chart + burst tables

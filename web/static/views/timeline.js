@@ -38,11 +38,47 @@
  * Behavior otherwise identical to the old legacy adapter in app.js:
  *   - No pid/query filter → "Select a session (PID) or query" prompt.
  *   - Empty result → "No events for selected session/range".
- *   - Truncated result → a yellow "Showing N of M events" banner above the chart.
+ *   - Truncated and/or dense (#106) result → ONE yellow banner line above the
+ *     chart (model.bannerNote), stating both facts and what zooming restores.
+ *     The only thing this glue adds for the density path is measuring the
+ *     host's px width (hostWidth) — the bucketing, the colors and the banner
+ *     TEXT are all in the pure builder.
  */
 
 import { buildTimelineOption } from '../lib/builders/timeline.js';
 import { attachSelection } from '../lib/selection.js';
+import { esc } from '../lib/format.js';
+
+/* The chart host's own horizontal padding, from the shell markup below. The
+ * CANVAS is that much narrower than the host box: zrender sizes itself as
+ * clientWidth minus horizontal padding. Counting it would hand the builder 40
+ * pixel columns the chart does not have, and every column would land
+ * off-pixel. */
+const HOST_PADDING_X = 40;   // #timeline-chart: padding 10px 20px
+
+/* Content width of an element in px, or 0 when it is not laid out (or there is
+ * no DOM at all). */
+function contentWidth(el) {
+    if (!el || !el.clientWidth) return 0;
+    const cs = typeof window !== 'undefined' && window.getComputedStyle
+        ? window.getComputedStyle(el) : null;
+    const pad = cs ? (parseFloat(cs.paddingLeft) || 0) + (parseFloat(cs.paddingRight) || 0) : 0;
+    return Math.max(el.clientWidth - pad, 0);
+}
+
+/* Canvas width the builder should bucket into: the chart host's content width
+ * once the shell exists. Before first paint the host does not exist yet, so
+ * the container stands in — MINUS the padding the host will have inside it,
+ * or the first tick would bucket into 40 phantom columns and the second would
+ * silently re-bucket. Returns 0 when nothing is measurable (the builder then
+ * falls back to TIMELINE_DEFAULT_WIDTH). */
+function hostWidth() {
+    if (typeof document === 'undefined') return 0;
+    const host = contentWidth(document.getElementById('timeline-chart'));
+    if (host) return host;
+    const box = contentWidth(document.getElementById('table-container'));
+    return box ? Math.max(box - HOST_PADDING_X, 0) : 0;
+}
 
 export function createTimelineView() {
     let chart = null;       // ECharts instance — owned here, nowhere else
@@ -79,7 +115,15 @@ export function createTimelineView() {
 
         build(data, ctx) {
             if (data && data.prompt) return { prompt: true };
-            return buildTimelineOption(data, { from: ctx.timeRange.from, to: ctx.timeRange.to });
+            return buildTimelineOption(data, {
+                from: ctx.timeRange.from, to: ctx.timeRange.to,
+                // #106: the builder buckets dense spans per PIXEL COLUMN, so it
+                // needs the host's px width. Measuring it is the only thing this
+                // glue adds — the persistent shell (P5) means the host is
+                // already laid out on every refresh after the first; the builder
+                // falls back to TIMELINE_DEFAULT_WIDTH when it is not.
+                width: hostWidth(),
+            });
         },
 
         mount(el, model, ctx) {
@@ -100,11 +144,16 @@ export function createTimelineView() {
             }
 
             ensureShell(el);
-            document.getElementById('timeline-banner').innerHTML = model.truncated
+            // FEEDBACK: truncation (the server dropped events) and density
+            // aggregation (#106 — the chart is showing pixel columns, not
+            // individual waits) are different facts, but two yellow lines over
+            // one chart read as two problems. The builder folds them into ONE
+            // sentence with one number format and one zoom instruction; this
+            // slot just paints it, in the same yellow chrome as before.
+            document.getElementById('timeline-banner').innerHTML = model.bannerNote
                 ? '<div style="padding:8px 20px;font-size:12px;color:#ffd700;' +
-                  'background:#3d3200;border-bottom:1px solid #555">Showing ' +
-                  model.count + ' of ' + model.total_count +
-                  ' events. Drag to zoom in for more detail.</div>'
+                  'background:#3d3200;border-bottom:1px solid #555">' +
+                  esc(model.bannerNote) + '</div>'
                 : '';
 
             const host = document.getElementById('timeline-chart');

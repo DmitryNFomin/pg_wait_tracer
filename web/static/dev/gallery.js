@@ -349,13 +349,33 @@ function renderUplotAasTicks(body, foot, state, cell) {
 }
 
 function renderTimeline(body, foot, state) {
-    const m = buildTimelineOption(state.data, state.opts);
+    // #106: the builder buckets dense spans per PIXEL COLUMN, so it must be
+    // told the width it will actually be drawn at — CHART_W, the cell's own
+    // canvas width, not the builder's blind TIMELINE_DEFAULT_WIDTH. Feeding it
+    // the default would bucket a 620 px cell into 1080 columns and re-fuse the
+    // very block the cell exists to show.
+    const m = buildTimelineOption(state.data, { ...state.opts, width: CHART_W });
     if (!m.hasData) { emptyCard(body, 'No timeline events in window'); return; }
+    // The banner is the view's, not the option's — but it carries the FEEDBACK
+    // half of the density fix, so the cell has to show it or the reviewer is
+    // grading half the change.
+    if (m.bannerNote) {
+        const b = div('', body);
+        // Same chrome the view paints it in (views/timeline.js), inline so the
+        // gallery stylesheet stays untouched.
+        b.style.cssText = 'padding:8px 10px;font-size:12px;color:#ffd700;' +
+            'background:#3d3200;border-bottom:1px solid #555;width:' +
+            CHART_W + 'px;box-sizing:border-box';
+        b.textContent = m.bannerNote;
+    }
     // The view sizes its container from chartHeight; the gallery caps the
     // canvas and scrolls the cell so 50-PID cells stay screenshot-sized.
     makeChart(div('chart', body), m.option, Math.min(m.chartHeight, 480));
     factLine(foot, 'bars: ' + m.count + ' of ' + (m.total_count || m.count) +
-        ' · truncated: ' + m.truncated + ' · chartHeight: ' + m.chartHeight);
+        ' · truncated: ' + m.truncated + ' · chartHeight: ' + m.chartHeight +
+        ' · aggregated: ' + m.aggregated +
+        (m.aggregated ? ' (' + m.spansPerPx + '/px, ' + m.columns + ' columns, ' +
+            m.segmentCount + ' draw items)' : ''));
 }
 
 function renderHistogram(body, foot, state) {
