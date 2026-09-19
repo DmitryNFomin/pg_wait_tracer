@@ -314,14 +314,15 @@ for V in 13 16 17 18; do
     # assumption; that hazard is now fixed at its source (the test uses its
     # own scratch database), but this check also repairs an already-shrunk
     # box on the next provisioning run instead of requiring a manual fix.
-    EXPECTED_ROWS=1000000
+    SCALE=10
+    EXPECTED_ROWS=$((SCALE * 100000))
     ROWS=$(sudo -u postgres psql -p "$PORT" -tAc \
         "SELECT count(*) FROM pgbench_accounts" 2>/dev/null || echo 0)
     if [[ "${ROWS:-0}" -lt "$EXPECTED_ROWS" ]]; then
         log "pgbench tables missing/at a smaller scale on port $PORT" \
             "(found ${ROWS:-0} rows, want $EXPECTED_ROWS) --" \
-            "(re)initializing at scale 10"
-        sudo -u postgres pgbench -p "$PORT" -i -s 10 -q postgres >/dev/null
+            "(re)initializing at scale $SCALE"
+        sudo -u postgres pgbench -p "$PORT" -i -s "$SCALE" -q postgres >/dev/null
     else
         log "pgbench tables already present on port $PORT ($ROWS rows)"
     fi

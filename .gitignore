@@ -64,6 +64,7 @@ pgwt-darwin-arm64
 .pgwt-check.stamp
 tests/results/ui_gallery/
 tests/results/box-check-*.log
+tests/results/ci-smoke-*.log
 tests/results/web_ui_failures/
 tests/results/ui_live/
 tests/results/ui_live_mock/
