@@ -2606,27 +2606,34 @@ static void handle_top_events(struct pgwt_server *srv, struct pgwt_request *req)
          * over sampled data they would be fabrications (p95 ≈ sample
          * period), so sampled-only rows carry null and render as "—"
          * (FID-3). count/total_ms stay valid via ASH math. */
-        if (res.rows[i].exact_count > 0) {
+        if (res.rows[i].exact_count > 0)
             cJSON_AddNumberToObject(r, "avg_us", res.rows[i].avg_us);
+        else
+            cJSON_AddNullToObject(r, "avg_us");
+        /* The distribution columns need a HISTOGRAM behind them, which the
+         * per-query summary records do not carry (#103 review): a row can
+         * have a real count/total/avg and still have no p50/p95/p99/max.
+         * Emitting them from an empty histogram printed ">= 16.4ms" beside
+         * Max 0us on every query-drilled Events row. */
+        if (res.rows[i].exact_count > 0 && res.rows[i].has_latency_dist) {
             cJSON_AddNumberToObject(r, "p50_us", res.rows[i].p50_us);
             cJSON_AddNumberToObject(r, "p95_us", res.rows[i].p95_us);
             cJSON_AddNumberToObject(r, "p99_us", res.rows[i].p99_us);
             cJSON_AddNumberToObject(r, "max_us", res.rows[i].max_us);
             /* #103: the percentile fell in the latency histogram's
-             * open-ended top bucket, so p*_us is a LOWER BOUND (>16.384 ms)
+             * open-ended top bucket, so p*_us is a LOWER BOUND (>= 16.384 ms)
              * and the UI renders ">= 16.4ms". The client cannot infer this:
              * bucket 14 (8.2..16.4 ms) reports the same 16384. */
             cJSON_AddBoolToObject(r, "p50_overflow", res.rows[i].p50_overflow);
             cJSON_AddBoolToObject(r, "p95_overflow", res.rows[i].p95_overflow);
             cJSON_AddBoolToObject(r, "p99_overflow", res.rows[i].p99_overflow);
         } else {
-            cJSON_AddNullToObject(r, "avg_us");
             cJSON_AddNullToObject(r, "p50_us");
             cJSON_AddNullToObject(r, "p95_us");
             cJSON_AddNullToObject(r, "p99_us");
             cJSON_AddNullToObject(r, "max_us");
-            /* Gated row: no percentile at all, hence no overflow. The keys
-             * stay present so every row carries the same shape. */
+            /* No distribution => no percentile => no overflow. The keys stay
+             * present so every row carries the same shape. */
             cJSON_AddBoolToObject(r, "p50_overflow", 0);
             cJSON_AddBoolToObject(r, "p95_overflow", 0);
             cJSON_AddBoolToObject(r, "p99_overflow", 0);

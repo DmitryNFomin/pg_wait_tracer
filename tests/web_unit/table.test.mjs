@@ -307,9 +307,10 @@ test('#103 overflow percentile renders ">=", never an exact-looking number', () 
         const html = m.rows[0].cells[ci].html;
         // The rendered text is the bound, never the bare number.
         assert.equal(cellText(html), '\u226516.4ms', `col ${ci}: ${html}`);
-        // The disclosure is in words, not just the drill affordance.
-        assert.ok(/title="[^"]*at least 16\.4ms[^"]*"/.test(html), html);
-        assert.ok(/title="[^"]*See Max[^"]*"/.test(html), html);
+        // The disclosure is in words, not just the drill affordance: it
+        // leads with the fact and points at the column that has the tail.
+        assert.ok(/title="At least 16\.4ms\./.test(html), html);
+        assert.ok(/title="[^"]*see Max for the real tail[^"]*"/.test(html), html);
     }
     // Max is the exact tail and stays exact.
     assert.ok(m.rows[0].cells[MAX_COL].html.includes('2.6s'),
@@ -357,7 +358,12 @@ test('#103 a NON-drillable overflow cell (CPU*) still discloses the bound', () =
     assert.ok(!cell.cls.includes('drillable'), cell.cls);
     assert.ok(!cell.html.includes('cell-drill'), cell.html);
     assert.ok(cell.html.includes('\u226516.4ms'), cell.html);
-    assert.ok(/title="[^"]*at least 16\.4ms[^"]*"/.test(cell.html), cell.html);
+    assert.ok(/title="At least 16\.4ms\./.test(cell.html), cell.html);
+    // ...and it carries the quieter .pctl-overflow affordance (style.css),
+    // not the drill's inline underline, so the bound still reads as
+    // inspectable on a row that cannot be drilled.
+    assert.ok(cell.html.includes('class="pctl-overflow"'), cell.html);
+    assert.ok(!cell.html.includes('border-bottom'), cell.html);
 });
 
 test('#103 a null percentile ignores an overflow flag and stays "—"', () => {

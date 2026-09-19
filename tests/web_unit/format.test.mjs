@@ -8,7 +8,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    nsToDatetimeLocalUTC, datetimeLocalUTCToNs, fmtTime, versionSkew,
+    nsToDatetimeLocalUTC, datetimeLocalUTCToNs, fmtTime, versionSkew, esc,
 } from '../../web/static/lib/format.js';
 
 // 2026-03-15 12:34:56 UTC
@@ -64,4 +64,23 @@ test('versionSkew warns when the server predates the handshake (null fields)', (
     const s = versionSkew('v0.13', 1, null, null);
     assert.equal(s.level, 'warn');
     assert.match(s.detail, /predates/);
+});
+
+// ── esc() also escapes quotes: its output lands in title="..." attributes ──
+
+test('esc escapes the five HTML-significant characters, quotes included', () => {
+    assert.equal(esc('a & b < c > d'), 'a &amp; b &lt; c &gt; d');
+    assert.equal(esc('say "hi"'), 'say &quot;hi&quot;');
+    assert.equal(esc("it's"), 'it&#39;s');
+});
+
+test('esc output cannot break out of a title attribute', () => {
+    // A hostile wait-event / SQL string reaching a tooltip: with a bare " the
+    // attribute would close early and the rest would parse as markup.
+    const hostile = '" onmouseover="alert(1)" x="';
+    const html = '<span title="' + esc(hostile) + '">v</span>';
+    assert.ok(!html.includes('onmouseover="'), html);
+    // Exactly one attribute value: the opening quote, the escaped payload,
+    // the closing quote.
+    assert.equal(html.match(/"/g).length, 2, html);
 });

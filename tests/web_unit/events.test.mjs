@@ -226,7 +226,7 @@ test('#103 overflow percentiles reach the assembled model as ">=" bounds', () =>
     for (const ci of [4, 5, 6]) {
         const html = m.table.rows[0].cells[ci].html;
         assert.ok(html.includes('\u226516.4ms'), `col ${ci}: ${html}`);
-        assert.ok(/title="[^"]*at least 16\.4ms[^"]*"/.test(html), html);
+        assert.ok(/title="At least 16\.4ms\./.test(html), html);
     }
     // Avg and Max are exact numbers and keep saying so.
     assert.ok(m.table.rows[0].cells[3].html.includes('1.8s'),

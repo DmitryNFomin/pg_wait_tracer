@@ -65,8 +65,8 @@ function histogramIntent(key) {
  * cell is drillable (same predicate as histogramIntent).
  *
  * SEMANTICS (issue #103): the server derives P50/P95/P99 from a 16-bucket
- * latency histogram whose LAST bucket is open-ended (everything above
- * 16.384 ms). A percentile that lands there is a LOWER BOUND, not a value —
+ * latency histogram whose LAST bucket is open-ended (every wait of
+ * 16.384 ms or more). A percentile that lands there is a LOWER BOUND, not a value —
  * printing it bare produced rows reading "Avg 1.8s / P50=P95=P99=16.4ms",
  * a mean 100x above the stated P99. Such a cell renders ">=16.4ms" and says
  * why in its tooltip; the exact tail lives in Max. The flag is data-driven
@@ -80,8 +80,8 @@ function histogramIntent(key) {
  * order them against a number the user cannot see. Max is the column that
  * ranks the true tail. */
 const pctlOverflowNote = (bound) =>
-    'Beyond the histogram\'s top (open-ended) bucket: all we know is that this ' +
-    'percentile is at least ' + bound + ' — the true value is higher. See Max.';
+    'At least ' + bound + '. The latency histogram\'s top bucket is ' +
+    'open-ended, so the true value is higher — see Max for the real tail.';
 
 function pctlCell(key) {
     const intent = histogramIntent(key);
@@ -95,10 +95,13 @@ function pctlCell(key) {
             ? pctlOverflowNote(fmtUs(r[key])) + (drillable
                 ? ' Click to see its latency distribution.' : '')
             : 'View the latency distribution of ' + r.name;
+        /* Drillable cells keep the inline drill affordance; a bound on a
+         * non-drillable row gets the quieter .pctl-overflow underline
+         * (style.css, mirrored in dev/gallery.html) so it still reads as
+         * inspectable rather than as flat text. */
         return '<span class="' + (drillable ? 'cell-drill' : 'pctl-overflow') +
-               '" style="' + (drillable ? 'border-bottom:1px dotted #778'
-                                        : 'cursor:help') +
-               '" title="' + esc(title) + '">' + v + '</span>';
+               '"' + (drillable ? ' style="border-bottom:1px dotted #778"' : '') +
+               ' title="' + esc(title) + '">' + v + '</span>';
     };
 }
 
