@@ -51,6 +51,79 @@ def build_scenario():
     }
 
 
+def build_overflow_scenario():
+    """#103: percentiles that land in the histogram's OPEN-ENDED top bucket.
+
+    The latency histogram's last bucket holds everything above 16384 us, so a
+    percentile there is only a lower bound. The server must say so per
+    percentile — it cannot be inferred downstream, because bucket 14
+    (8192..16383 us) reports the same 16384 as the open-ended bucket 15.
+
+      Lock:relation     5 x 100 ms   -> every percentile in the top bucket
+      LWLock:WALWrite   5 x 16383 us -> bucket 14: SAME 16384, NOT overflow
+      IO:DataFileRead  10 x 1 ms     -> ordinary bucket, nowhere near the top
+    """
+    events = []
+    ts = BASE_TS
+
+    for _ in range(5):
+        ts += 100_000_000
+        events.append({"pid": 1000, "ts": ts, "dur": 100_000_000,
+                       "old": LOCK_RELATION, "new": CPU, "qid": 100})
+
+    for _ in range(5):
+        ts += 16_383_000
+        events.append({"pid": 1000, "ts": ts, "dur": 16_383_000,
+                       "old": LWLOCK_WAL_WRITE, "new": CPU, "qid": 100})
+
+    for _ in range(10):
+        ts += 1_000_000
+        events.append({"pid": 1000, "ts": ts, "dur": 1_000_000,
+                       "old": IO_DATA_FILE_READ, "new": CPU, "qid": 100})
+
+    return {
+        "backends": [{"pid": 1000, "type": "client", "user": "test", "db": "testdb"}],
+        "queries": [{"id": 100, "text": "SELECT 1"}],
+        "events": events,
+    }
+
+
+def check_percentile_overflow(t):
+    """top_events flags percentiles that saturated the top bucket (#103)."""
+    trace_dir = generate_traces(build_overflow_scenario())
+    try:
+        with ServerHarness(trace_dir) as srv:
+            rows = {r["name"]: r for r in srv.query("top_events").get("rows", [])}
+
+            print("--- #103 overflow flags ---")
+            lock = rows.get("Lock:relation", {})
+            t.check_approx(lock.get("max_us", -1), 100000.0, 0.01,
+                           "Lock max = 100ms (well past the top bucket)")
+            for pctl in ("p50", "p95", "p99"):
+                t.check_approx(lock.get(pctl + "_us", -1), 16384.0, 0.01,
+                               f"Lock {pctl} = 16384us (top-bucket edge)")
+                t.check_eq(lock.get(pctl + "_overflow"), True,
+                           f"Lock {pctl}_overflow = true")
+
+            # The ambiguity the flag exists for: identical 16384 us value,
+            # but these waits are INSIDE the histogram (bucket 14).
+            lw = rows.get("LWLock:WALWrite", {})
+            t.check_approx(lw.get("max_us", -1), 16383.0, 0.01,
+                           "LWLock max = 16383us (last in-range bucket)")
+            for pctl in ("p50", "p95", "p99"):
+                t.check_approx(lw.get(pctl + "_us", -1), 16384.0, 0.01,
+                               f"LWLock {pctl} = 16384us (same number...)")
+                t.check_eq(lw.get(pctl + "_overflow"), False,
+                           f"LWLock {pctl}_overflow = false (...different meaning)")
+
+            io = rows.get("IO:DataFileRead", {})
+            for pctl in ("p50", "p95", "p99"):
+                t.check_eq(io.get(pctl + "_overflow"), False,
+                           f"IO:Read {pctl}_overflow = false")
+    finally:
+        cleanup_traces(trace_dir)
+
+
 def main():
     t = TestRunner("test_data_events")
     print(f"=== {t.name} ===")
@@ -104,6 +177,8 @@ def main():
 
     finally:
         cleanup_traces(trace_dir)
+
+    check_percentile_overflow(t)
 
     sys.exit(0 if t.summary() else 1)
 

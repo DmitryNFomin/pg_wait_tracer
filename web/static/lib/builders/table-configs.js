@@ -62,15 +62,43 @@ function histogramIntent(key) {
 }
 
 /* Percentile cell: the value, wrapped in a visible drill affordance when the
- * cell is drillable (same predicate as histogramIntent). */
+ * cell is drillable (same predicate as histogramIntent).
+ *
+ * SEMANTICS (issue #103): the server derives P50/P95/P99 from a 16-bucket
+ * latency histogram whose LAST bucket is open-ended (everything above
+ * 16.384 ms). A percentile that lands there is a LOWER BOUND, not a value —
+ * printing it bare produced rows reading "Avg 1.8s / P50=P95=P99=16.4ms",
+ * a mean 100x above the stated P99. Such a cell renders ">=16.4ms" and says
+ * why in its tooltip; the exact tail lives in Max. The flag is data-driven
+ * (`<pctl>_overflow` per row, src/server.c handle_top_events) because it
+ * cannot be inferred here: bucket 14 (8.2..16.4 ms) reports the same 16384
+ * as the open-ended bucket 15.
+ *
+ * The number itself is unchanged, so the column still SORTS on the bound
+ * (row.p95_us stays 16384): the sort key must mean what the cell shows, and
+ * ranking every overflow row at +inf would both tie them arbitrarily and
+ * order them against a number the user cannot see. Max is the column that
+ * ranks the true tail. */
+const pctlOverflowNote = (bound) =>
+    'Beyond the histogram\'s top (open-ended) bucket: all we know is that this ' +
+    'percentile is at least ' + bound + ' — the true value is higher. See Max.';
+
 function pctlCell(key) {
     const intent = histogramIntent(key);
+    const overflowKey = key.replace(/_us$/, '_overflow');
     return (r) => {
-        const v = fmtUs(r[key]);
-        if (!intent(r)) return v;
-        return '<span class="cell-drill" style="border-bottom:1px dotted #778"' +
-               ' title="' + esc('View the latency distribution of ' + r.name) +
-               '">' + v + '</span>';
+        const overflow = r[key] != null && r[overflowKey] === true;
+        const v = (overflow ? '≥' : '') + fmtUs(r[key]);
+        const drillable = !!intent(r);
+        if (!drillable && !overflow) return v;
+        const title = overflow
+            ? pctlOverflowNote(fmtUs(r[key])) + (drillable
+                ? ' Click to see its latency distribution.' : '')
+            : 'View the latency distribution of ' + r.name;
+        return '<span class="' + (drillable ? 'cell-drill' : 'pctl-overflow') +
+               '" style="' + (drillable ? 'border-bottom:1px dotted #778'
+                                        : 'cursor:help') +
+               '" title="' + esc(title) + '">' + v + '</span>';
     };
 }
 

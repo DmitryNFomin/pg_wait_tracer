@@ -882,22 +882,39 @@ struct top_event_accum {
 
 /* Reuses EVENT_HT_SIZE/EVENT_HT_MASK defined above */
 
-/* Histogram bucket upper boundaries in microseconds */
+/* Histogram bucket upper boundaries in microseconds. The LAST bucket is
+ * open-ended: it holds every duration above 16384 us, so its entry repeats
+ * the previous edge — that number is a FLOOR, not an upper bound. */
 static const uint64_t hist_upper_us[HISTOGRAM_BUCKETS] = {
     1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 16384
 };
 
+/* Percentile from the latency histogram.
+ *
+ * `overflow` (issue #103) reports whether the percentile landed in the
+ * open-ended top bucket. There the returned number is only the bucket's
+ * lower edge (16.384 ms) and the true percentile can be arbitrarily larger —
+ * exactly the case that printed "P50 = P95 = P99 = 16.4 ms" next to an
+ * Avg of 1.8 s. It cannot be derived client-side: bucket 14 (8192..16384 us)
+ * and bucket 15 (>16384 us) both yield 16384, so the flag must come from
+ * the side that knows which bucket was hit. */
 static double hist_percentile(const uint64_t hist[HISTOGRAM_BUCKETS],
-                              uint64_t total, double pct)
+                              uint64_t total, double pct, int *overflow)
 {
+    if (overflow) *overflow = 0;
     if (total == 0) return 0;
     uint64_t threshold = (uint64_t)((double)total * pct);
     uint64_t cumulative = 0;
     for (int b = 0; b < HISTOGRAM_BUCKETS; b++) {
         cumulative += hist[b];
-        if (cumulative >= threshold)
+        if (cumulative >= threshold) {
+            if (overflow) *overflow = (b == HISTOGRAM_BUCKETS - 1);
             return (double)hist_upper_us[b];
+        }
     }
+    /* Unreachable while the histogram accounts for `total`; if it ever does
+     * not, the answer is the open-ended bucket and must say so. */
+    if (overflow) *overflow = 1;
     return (double)hist_upper_us[HISTOGRAM_BUCKETS - 1];
 }
 
@@ -984,9 +1001,12 @@ void pgwt_compute_top_events(const struct pgwt_trace_event *events, int count,
                      ? (double)ht[i].exact_total_ns / (double)ht[i].exact_count / 1000.0
                      : 0;
         r->max_us   = (double)ht[i].max_ns / 1000.0;
-        r->p50_us   = hist_percentile(ht[i].hist, ht[i].exact_count, 0.50);
-        r->p95_us   = hist_percentile(ht[i].hist, ht[i].exact_count, 0.95);
-        r->p99_us   = hist_percentile(ht[i].hist, ht[i].exact_count, 0.99);
+        r->p50_us   = hist_percentile(ht[i].hist, ht[i].exact_count, 0.50,
+                                      &r->p50_overflow);
+        r->p95_us   = hist_percentile(ht[i].hist, ht[i].exact_count, 0.95,
+                                      &r->p95_overflow);
+        r->p99_us   = hist_percentile(ht[i].hist, ht[i].exact_count, 0.99,
+                                      &r->p99_overflow);
         /* Idle-but-visible events have time but no meaningful share of DB
          * Time; flag their %DB with a sentinel so it renders as "—". */
         if (pgwt_is_idle_event(ht[i].event_id))
@@ -1829,9 +1849,12 @@ void pgwt_compute_top_events_from_summaries(
         row->avg_us   = ctx.ht[i].exact_count > 0
                        ? (double)ctx.ht[i].exact_total_ns / (double)ctx.ht[i].exact_count / 1000.0 : 0;
         row->max_us   = (double)ctx.ht[i].max_ns / 1000.0;
-        row->p50_us   = hist_percentile(ctx.ht[i].hist, ctx.ht[i].exact_count, 0.50);
-        row->p95_us   = hist_percentile(ctx.ht[i].hist, ctx.ht[i].exact_count, 0.95);
-        row->p99_us   = hist_percentile(ctx.ht[i].hist, ctx.ht[i].exact_count, 0.99);
+        row->p50_us   = hist_percentile(ctx.ht[i].hist, ctx.ht[i].exact_count,
+                                        0.50, &row->p50_overflow);
+        row->p95_us   = hist_percentile(ctx.ht[i].hist, ctx.ht[i].exact_count,
+                                        0.95, &row->p95_overflow);
+        row->p99_us   = hist_percentile(ctx.ht[i].hist, ctx.ht[i].exact_count,
+                                        0.99, &row->p99_overflow);
         /* Idle-but-visible events have time but no meaningful share of DB
          * Time; flag their %DB with a sentinel so it renders as "—". */
         if (pgwt_is_idle_event(ctx.ht[i].event_id))

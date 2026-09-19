@@ -2612,12 +2612,24 @@ static void handle_top_events(struct pgwt_server *srv, struct pgwt_request *req)
             cJSON_AddNumberToObject(r, "p95_us", res.rows[i].p95_us);
             cJSON_AddNumberToObject(r, "p99_us", res.rows[i].p99_us);
             cJSON_AddNumberToObject(r, "max_us", res.rows[i].max_us);
+            /* #103: the percentile fell in the latency histogram's
+             * open-ended top bucket, so p*_us is a LOWER BOUND (>16.384 ms)
+             * and the UI renders ">= 16.4ms". The client cannot infer this:
+             * bucket 14 (8.2..16.4 ms) reports the same 16384. */
+            cJSON_AddBoolToObject(r, "p50_overflow", res.rows[i].p50_overflow);
+            cJSON_AddBoolToObject(r, "p95_overflow", res.rows[i].p95_overflow);
+            cJSON_AddBoolToObject(r, "p99_overflow", res.rows[i].p99_overflow);
         } else {
             cJSON_AddNullToObject(r, "avg_us");
             cJSON_AddNullToObject(r, "p50_us");
             cJSON_AddNullToObject(r, "p95_us");
             cJSON_AddNullToObject(r, "p99_us");
             cJSON_AddNullToObject(r, "max_us");
+            /* Gated row: no percentile at all, hence no overflow. The keys
+             * stay present so every row carries the same shape. */
+            cJSON_AddBoolToObject(r, "p50_overflow", 0);
+            cJSON_AddBoolToObject(r, "p95_overflow", 0);
+            cJSON_AddBoolToObject(r, "p99_overflow", 0);
         }
         /* Idle-but-visible events (Client:ClientRead) have no meaningful
          * share of DB Time; emit null so the client renders "—". */

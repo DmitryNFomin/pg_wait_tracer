@@ -288,6 +288,109 @@ test('CPU* (event_id 0) percentile cells are not drillable (not a wait event)', 
     }
 });
 
+// ── #103: percentiles that land in the open-ended top histogram bucket ─────
+//
+// The server derives P50/P95/P99 from a 16-bucket latency histogram whose top
+// bucket holds everything above 16.384 ms; a percentile there is a LOWER
+// BOUND. Real capture printed "Lock:relation Avg 1.8s / Max 2.6s /
+// P50=P95=P99=16.4ms" — a mean 100x above the stated P99.
+
+/* The cell's visible text, with markup (and its title attribute) stripped. */
+const cellText = (html) => html.replace(/<[^>]*>/g, '');
+
+test('#103 overflow percentile renders ">=", never an exact-looking number', () => {
+    const m = buildTableModel(eventsConfig, [evRow({
+        p50_us: 16384, p95_us: 16384, p99_us: 16384, max_us: 2600000,
+        p50_overflow: true, p95_overflow: true, p99_overflow: true,
+    })], null);
+    for (const ci of [P50_COL, P95_COL, P99_COL]) {
+        const html = m.rows[0].cells[ci].html;
+        // The rendered text is the bound, never the bare number.
+        assert.equal(cellText(html), '\u226516.4ms', `col ${ci}: ${html}`);
+        // The disclosure is in words, not just the drill affordance.
+        assert.ok(/title="[^"]*at least 16\.4ms[^"]*"/.test(html), html);
+        assert.ok(/title="[^"]*See Max[^"]*"/.test(html), html);
+    }
+    // Max is the exact tail and stays exact.
+    assert.ok(m.rows[0].cells[MAX_COL].html.includes('2.6s'),
+        m.rows[0].cells[MAX_COL].html);
+});
+
+test('#103 a normal-bucket percentile is unchanged (no ">=", same tooltip)', () => {
+    const m = buildTableModel(eventsConfig, [evRow({
+        p50_us: 8, p95_us: 40, p99_us: 8192,
+        p50_overflow: false, p95_overflow: false, p99_overflow: false,
+    })], null);
+    const p99 = m.rows[0].cells[P99_COL].html;
+    assert.equal(cellText(p99), '8.2ms', p99);
+    assert.ok(p99.includes('View the latency distribution of'), p99);
+    assert.equal(cellText(m.rows[0].cells[P50_COL].html), '8\u00b5s',
+        m.rows[0].cells[P50_COL].html);
+});
+
+test('#103 rows with no overflow flags at all behave exactly as before', () => {
+    // Old server / compare-baseline rows: absent key is not an overflow.
+    const m = buildTableModel(eventsConfig, [evRow({ p95_us: 16384 })], null);
+    const html = m.rows[0].cells[P95_COL].html;
+    assert.ok(html.includes('16.4ms') && !html.includes('\u2265'), html);
+});
+
+test('#103 an overflow cell keeps its drill affordance and pivot intent', () => {
+    const m = buildTableModel(eventsConfig,
+        [evRow({ p95_us: 16384, p95_overflow: true })], null);
+    const cell = m.rows[0].cells[P95_COL];
+    assert.ok(cell.cls.includes('drillable'), cell.cls);
+    assert.ok(cell.html.includes('cell-drill'), cell.html);
+    assert.deepEqual(cell.intent, {
+        pivot: 'histogram-event', filterKey: 'event_id',
+        filterValue: 0x01000015, label: 'IO:DataFileRead',
+    });
+    assert.ok(/title="[^"]*latency distribution[^"]*"/.test(cell.html), cell.html);
+});
+
+test('#103 a NON-drillable overflow cell (CPU*) still discloses the bound', () => {
+    const m = buildTableModel(eventsConfig, [evRow({
+        name: 'CPU*', event_id: 0, p99_us: 16384, p99_overflow: true,
+    })], null);
+    const cell = m.rows[0].cells[P99_COL];
+    assert.equal(cell.intent, null);
+    assert.ok(!cell.cls.includes('drillable'), cell.cls);
+    assert.ok(!cell.html.includes('cell-drill'), cell.html);
+    assert.ok(cell.html.includes('\u226516.4ms'), cell.html);
+    assert.ok(/title="[^"]*at least 16\.4ms[^"]*"/.test(cell.html), cell.html);
+});
+
+test('#103 a null percentile ignores an overflow flag and stays "—"', () => {
+    const m = buildTableModel(eventsConfig,
+        [evRow({ p95_us: null, p95_overflow: true })], null);
+    const html = m.rows[0].cells[P95_COL].html;
+    assert.ok(html.includes('\u2014'), html);
+    assert.ok(!html.includes('\u2265'), html);
+});
+
+test('#103 sort treats ">=16.4ms" as 16.4ms (the shown bound), not +Infinity', () => {
+    // Both rows report the same P95 number; only one of them is an overflow.
+    // Sorting on p95_us must therefore leave their relative order alone — a
+    // +Infinity reading would hoist the overflow row above an equal, visible
+    // 16.4ms. The true tail is ranked by Max, which differs here.
+    const rows = [
+        evRow({ name: 'IO:DataFileRead', event_id: 0x01000015,
+                p95_us: 16384, max_us: 16000 }),
+        evRow({ name: 'Lock:relation', event_id: 0x03000000,
+                p95_us: 16384, p95_overflow: true, max_us: 2600000 }),
+    ];
+    const desc = buildTableModel(eventsConfig, rows, { key: 'p95_us', asc: false });
+    assert.deepEqual(desc.rows.map(r => r.row.name),
+        ['IO:DataFileRead', 'Lock:relation']);
+    const asc = buildTableModel(eventsConfig, rows, { key: 'p95_us', asc: true });
+    assert.deepEqual(asc.rows.map(r => r.row.name),
+        ['IO:DataFileRead', 'Lock:relation']);
+    // Max still ranks the real tail.
+    const byMax = buildTableModel(eventsConfig, rows, { key: 'max_us', asc: false });
+    assert.deepEqual(byMax.rows.map(r => r.row.name),
+        ['Lock:relation', 'IO:DataFileRead']);
+});
+
 // ── U2 (U1-review F4): eventColor identity tints in the pctBar sites ────────
 
 test('events %DB bar uses the event identity tint, not the flat class hue', () => {

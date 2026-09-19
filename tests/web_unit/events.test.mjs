@@ -213,6 +213,28 @@ test('server-flagged truncation reaches the events model', () => {
         { omitted: 38, text: '… 38 more below threshold' });
 });
 
+test('#103 overflow percentiles reach the assembled model as ">=" bounds', () => {
+    // The shape the live capture produced: a Lock row whose every percentile
+    // saturated the histogram's open-ended top bucket while Avg/Max are
+    // seconds. Columns 4..6 are P50/P95/P99, 7 is Max.
+    const m = buildEventsModel({ rows: [
+        ev({ name: 'Lock:relation', event_id: 0x03000000, count: 900,
+             total_ms: 1600, avg_us: 1800000, max_us: 2600000,
+             p50_us: 16384, p95_us: 16384, p99_us: 16384,
+             p50_overflow: true, p95_overflow: true, p99_overflow: true }),
+    ] }, null);
+    for (const ci of [4, 5, 6]) {
+        const html = m.table.rows[0].cells[ci].html;
+        assert.ok(html.includes('\u226516.4ms'), `col ${ci}: ${html}`);
+        assert.ok(/title="[^"]*at least 16\.4ms[^"]*"/.test(html), html);
+    }
+    // Avg and Max are exact numbers and keep saying so.
+    assert.ok(m.table.rows[0].cells[3].html.includes('1.8s'),
+        m.table.rows[0].cells[3].html);
+    assert.ok(m.table.rows[0].cells[7].html.includes('2.6s'),
+        m.table.rows[0].cells[7].html);
+});
+
 test('percentile cells in the assembled model carry the histogram pivot intent', () => {
     const m = buildEventsModel({ rows: [
         ev({ name: 'IO:DataFileRead', event_id: 0x01000015,

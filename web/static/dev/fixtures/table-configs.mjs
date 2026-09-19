@@ -133,4 +133,48 @@ export const states = {
             ] },
         },
     },
+    /* Deliberately LAST in this file (issue #122): #grid is a wrapping
+     * flexbox, so inserting a cell re-wraps its row and re-rasterizes every
+     * row-mate baseline after it. Appended here it spares
+     * gallery/table-configs-queries-hostile-sql (5 changed cells -> 4 when
+     * this state moved from mid-file to the end); the four that remain are
+     * the compare cells the gallery renders last. */
+    'events-overflow-pctl': {
+        description: 'Events table where percentiles saturate the latency histogram\'s OPEN-ENDED top bucket (#103): Avg/Max are seconds, so P50/P95/P99 must read ">=16.4ms" bounds (tooltip: "at least ... see Max"), never exact values. The last row is fully inside the histogram and is unchanged; CPU* overflows but is not drillable (no histogram pivot for event_id 0).',
+        tags: ['SEMANTICS', 'FEEDBACK'],
+        config: 'events',
+        sort: { key: 'total_ms', asc: false },
+        rows: [
+            // The shape found by the live UI smoke (PG17, --mode full):
+            // every percentile pinned at the top bucket next to a 1.8 s mean.
+            { name: 'Lock:relation', event_id: 0x03000000, class: 'Lock',
+              count: 900, total_ms: 1620, avg_us: 1800000, p50_us: 16384,
+              p95_us: 16384, p99_us: 16384, max_us: 2600000,
+              p50_overflow: true, p95_overflow: true, p99_overflow: true,
+              pct: 35.8, aas: 0.45 },
+            { name: 'Timeout:CheckpointWriteDelay', event_id: 0x09000000,
+              class: 'Timeout', count: 1200, total_ms: 1202, avg_us: 100200,
+              p50_us: 16384, p95_us: 16384, p99_us: 16384, max_us: 105400,
+              p50_overflow: true, p95_overflow: true, p99_overflow: true,
+              pct: 26.6, aas: 0.33 },
+            // Partial: only the tail leaves the histogram — P50/P95 stay exact.
+            { name: 'IO:DataFileRead', event_id: 0x01000015, class: 'IO',
+              count: 85000, total_ms: 900, avg_us: 24.7, p50_us: 15,
+              p95_us: 8192, p99_us: 16384, max_us: 42000,
+              p50_overflow: false, p95_overflow: false, p99_overflow: true,
+              pct: 19.9, aas: 0.25 },
+            // CPU* overflows too: discloses the bound, but no histogram drill.
+            { name: 'CPU*', event_id: 0, class: 'CPU',
+              count: 250000, total_ms: 500, avg_us: 19.2, p50_us: 12,
+              p95_us: 45, p99_us: 16384, max_us: 90000,
+              p50_overflow: false, p95_overflow: false, p99_overflow: true,
+              pct: 11.1, aas: 0.14 },
+            // Entirely inside the histogram: rendering unchanged by #103.
+            { name: 'LWLock:WALWrite', event_id: 0x04000008, class: 'LWLock',
+              count: 30000, total_ms: 300, avg_us: 40.0, p50_us: 25,
+              p95_us: 100, p99_us: 400, max_us: 8000,
+              p50_overflow: false, p95_overflow: false, p99_overflow: false,
+              pct: 6.6, aas: 0.08 },
+        ],
+    },
 };

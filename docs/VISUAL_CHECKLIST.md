@@ -123,12 +123,17 @@ as intensity); `gallery-aas-dense-events` and `gallery-aas-unicode-names`
 (a 5 µs and a 5 ms wait both render ≥1 px — the floor must not make µs read as
 ms); `gallery-transitions-variants-html` and
 `gallery-table-configs-queries-hostile-sql` (stacked segment widths: min-width
-clamps silently renormalize proportions, and sub-1% segments must not lie).
+clamps silently renormalize proportions, and sub-1% segments must not lie);
+`gallery-table-configs-events-overflow-pctl` (a percentile that landed in the
+latency histogram's OPEN-ENDED top bucket is a bound, not a value: it must read
+`≥16.4ms` and say why in its tooltip, while rows inside the histogram are
+untouched — printing it bare put `P50=P95=P99=16.4ms` next to an Avg of 1.8 s).
 
 **Historical instances:** rainbow heatmap ramp reusing class hues as intensity
 (P8); EVENT_PALETTE hues colliding with class meanings (P2); "Other"
 conflating skipped-known with genuinely-other; 1 px floor equalizing µs ≡ ms;
-min-width renormalization breaking proportion=value (P11).
+min-width renormalization breaking proportion=value (P11); overflow-bucket
+percentiles printed as exact values in the events table (#103).
 
 ## HIERARCHY
 
