@@ -306,11 +306,21 @@ for V in 13 16 17 18; do
     # test_cross_validate.py) document "Requires: ... pgbench initialized"
     # but do not initialize it themselves — the same convention the old
     # tests/cloud-init-rocky9-pg18.yaml used (`pgbench -i -s 10 postgres`).
-    # Idempotent: only initializes when pgbench_accounts is missing/empty.
+    # Idempotent: only (re)initializes when pgbench_accounts is missing,
+    # empty, or below scale-10's 1,000,000-row expectation. Issue #129: a
+    # test that ran `pgbench -i -s 1` directly against this box's "postgres"
+    # database silently shrank the dataset to scale 1 on every CI run,
+    # breaking test_query_event.py Test 2's large-table (138 MB) scan
+    # assumption; that hazard is now fixed at its source (the test uses its
+    # own scratch database), but this check also repairs an already-shrunk
+    # box on the next provisioning run instead of requiring a manual fix.
+    EXPECTED_ROWS=1000000
     ROWS=$(sudo -u postgres psql -p "$PORT" -tAc \
         "SELECT count(*) FROM pgbench_accounts" 2>/dev/null || echo 0)
-    if [[ "${ROWS:-0}" -lt 1 ]]; then
-        log "initializing pgbench tables (scale 10) on port $PORT"
+    if [[ "${ROWS:-0}" -lt "$EXPECTED_ROWS" ]]; then
+        log "pgbench tables missing/at a smaller scale on port $PORT" \
+            "(found ${ROWS:-0} rows, want $EXPECTED_ROWS) --" \
+            "(re)initializing at scale 10"
         sudo -u postgres pgbench -p "$PORT" -i -s 10 -q postgres >/dev/null
     else
         log "pgbench tables already present on port $PORT ($ROWS rows)"

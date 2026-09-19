@@ -104,9 +104,10 @@ def wait_for_tagged_active_backend(application_name, timeout_s=30):
 
 
 def wait_for_tagged_backend_count(application_name, predicate, timeout_s=30,
-                                  active_only=False):
+                                  active_only=False, dbname="postgres"):
     """Wait for a valid pg_stat_activity count; SQL errors never mean zero."""
     quoted = application_name.replace("'", "''")
+    quoted_db = dbname.replace("'", "''")
     deadline = time.monotonic() + timeout_s
     while True:
         remaining = deadline - time.monotonic()
@@ -116,7 +117,7 @@ def wait_for_tagged_backend_count(application_name, predicate, timeout_s=30,
             output = psql(
                 "SELECT count(*) FROM pg_stat_activity "
                 f"WHERE application_name = '{quoted}' "
-                "AND datname = 'postgres'" +
+                f"AND datname = '{quoted_db}'" +
                 (" AND state = 'active'" if active_only else ""),
                 timeout=min(10, max(1, remaining)))
         except subprocess.TimeoutExpired:
@@ -708,13 +709,22 @@ def phase_live_system_event(pm_pid, mode, core=False):
     assert_wait_events(events, f"live/{mode}", core=core)
 
 
-def phase_live_query_event(pm_pid, mode, pg_major, core=False):
+def phase_live_query_event(pm_pid, mode, pg_major, smoke_db, core=False):
     """PR #31 regression: the query-attribution path works end to end —
-    query_event view ids must intersect pg_stat_statements.queryid."""
+    query_event view ids must intersect pg_stat_statements.queryid.
+
+    Issue #129: `pgbench -i` unconditionally drops and recreates every
+    pgbench table. Run it against a private scratch database (created by
+    the caller, dropped after phase_trace_file finishes) instead of
+    "postgres" -- the persistent gate box's "postgres" database carries
+    the scale-10 dataset tests/provision-runner.sh seeds once, which
+    test_query_event.py's large-table assertions depend on. pg_stat_
+    statements is cluster-wide, so pgss_query_ids() below still finds
+    these queries while connected (via psql()) to "postgres"."""
     print(f"--- Phase 2: query attribution (query_event, --mode {mode}) ---")
 
     pgb_init = subprocess.run(
-        ["pgbench", "-U", "postgres", "-d", "postgres", "-i", "-s", "1"],
+        ["pgbench", "-U", "postgres", "-d", smoke_db, "-i", "-s", "1"],
         capture_output=True, text=True)
     check(pgb_init.returncode == 0,
           "pgbench -i succeeded" if pgb_init.returncode == 0 else
@@ -727,7 +737,7 @@ def phase_live_query_event(pm_pid, mode, pg_major, core=False):
     pgbench_env = os.environ.copy()
     pgbench_env["PGAPPNAME"] = pgbench_tag
     pgbench = subprocess.Popen(
-        ["pgbench", "-U", "postgres", "-d", "postgres", "-c", "4",
+        ["pgbench", "-U", "postgres", "-d", smoke_db, "-c", "4",
          # Safety cap exceeds the 180s startup + 40s output deadlines; the
          # process is explicitly stopped as soon as query output is proven.
          "-T", "300"],
@@ -735,7 +745,7 @@ def phase_live_query_event(pm_pid, mode, pg_major, core=False):
         env=pgbench_env)
     pgbench_ready = wait_for_tagged_backend_count(
         pgbench_tag, lambda count: count >= 4, timeout_s=30,
-        active_only=True)
+        active_only=True, dbname=smoke_db)
     check(pgbench_ready is not None,
           "query-attribution workload is active before tracer attach")
 
@@ -798,7 +808,7 @@ def phase_live_query_event(pm_pid, mode, pg_major, core=False):
               f"[PR #31 regression]")
 
 
-def phase_trace_file(pm_pid, mode, pg_major, core=False):
+def phase_trace_file(pm_pid, mode, pg_major, smoke_db, core=False):
     print(f"--- Phase 3: written trace file (pgwt-server read, --mode {mode}) ---")
     trace_dir = tempfile.mkdtemp(prefix=f"pgwt_smoke_{mode}_")
     os.chmod(trace_dir, 0o755)
@@ -936,7 +946,7 @@ def phase_trace_file(pm_pid, mode, pg_major, core=False):
         pgbench_env = os.environ.copy()
         pgbench_env["PGAPPNAME"] = pgbench_tag
         pgbench = subprocess.Popen(
-            ["pgbench", "-U", "postgres", "-d", "postgres", "-c", "2",
+            ["pgbench", "-U", "postgres", "-d", smoke_db, "-c", "2",
              # Safety cap exceeds every bounded startup/progress/text poll;
              # the process is explicitly stopped after pgbench-specific
              # persisted text is proven.
@@ -945,7 +955,7 @@ def phase_trace_file(pm_pid, mode, pg_major, core=False):
             env=pgbench_env)
         pgbench_ready = wait_for_tagged_backend_count(
             pgbench_tag, lambda count: count >= 2, timeout_s=30,
-            active_only=True)
+            active_only=True, dbname=smoke_db)
         check(pgbench_ready is not None,
               ("PG13 sampled-text" if pg13_sampled_text else "trace query") +
               " workload is active before tracer attach")
@@ -1042,7 +1052,8 @@ def phase_trace_file(pm_pid, mode, pg_major, core=False):
         # controlled-wait interval.
         terminate_and_wait(pgbench)
         query_workload_stopped = wait_for_tagged_backend_count(
-            pgbench_tag, lambda count: count == 0, timeout_s=30)
+            pgbench_tag, lambda count: count == 0, timeout_s=30,
+            dbname=smoke_db)
         check(query_workload_stopped is not None,
               f"trace/{mode}: query producers stopped after capture proof")
         if pg13_sampled_text:
@@ -2939,8 +2950,34 @@ def main():
 
     core = args.capture_core
     phase_live_system_event(pm_pid, args.mode, core=core)
-    phase_live_query_event(pm_pid, args.mode, pg_major, core=core)
-    phase_trace_file(pm_pid, args.mode, pg_major, core=core)
+
+    # Issue #129: phases 2/3's pgbench workload owns a private scratch
+    # database for the whole run instead of running `pgbench -i` against
+    # "postgres" -- on the persistent gate box "postgres" carries the
+    # scale-10 dataset tests/provision-runner.sh seeds once (which
+    # test_query_event.py's large-table assertions depend on), and `-i`
+    # unconditionally drops and recreates every pgbench table. Dropped
+    # below even if a phase raises.
+    smoke_db = f"pgwt_smoke_{os.getpid()}"
+    create_result = subprocess.run(
+        ["createdb", "-U", "postgres", smoke_db],
+        capture_output=True, text=True)
+    check(create_result.returncode == 0,
+          f"scratch database {smoke_db} created for the pgbench workload "
+          "(issue #129)" if create_result.returncode == 0 else
+          f"scratch database {smoke_db} created "
+          f"({create_result.stderr[-200:]})")
+    try:
+        phase_live_query_event(pm_pid, args.mode, pg_major, smoke_db,
+                                core=core)
+        phase_trace_file(pm_pid, args.mode, pg_major, smoke_db, core=core)
+    finally:
+        drop_result = subprocess.run(
+            ["dropdb", "-U", "postgres", "--if-exists", "--force", smoke_db],
+            capture_output=True, text=True)
+        if drop_result.returncode != 0:
+            print(f"WARNING: could not drop scratch database {smoke_db}: "
+                  f"{drop_result.stderr.strip()}")
 
     if core:
         # The remaining phases need hardware watchpoints to actually FIRE
