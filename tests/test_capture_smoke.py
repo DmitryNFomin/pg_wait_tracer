@@ -344,6 +344,31 @@ class Workload:
         check(waiters != "" and int(waiters) >= 1,
               f"workload: waiter blocked on {self.LOCK_TABLE} (waiters={waiters!r})")
 
+    def open_extra_session(self, role, sql):
+        """Open one more session and immediately send it one SQL statement.
+
+        query_event Mode B (--event filter) groups rows by query_id, so a
+        single controlled backend only ever produces one row. Callers that
+        need several deterministic query_id rows for the same event (e.g.
+        query_event Mode B tests wanting >= 3 entries, not just >= 1) open a
+        couple of these with structurally distinct SQL — pg's query-id
+        jumbling normalizes literals but not query shape (target list,
+        clauses, function calls), so each gets its own id. Originally added
+        to block extra sessions on the held lock alongside `waiter`, but
+        issue #113's investigation found Lock:relation waits do not
+        currently correlate to a query_id in query_event at all (confirmed
+        on the gate box: system_event and the general query_event view both
+        show the lock wait, but no row for it, keyed or not, appears once
+        query_event is filtered or grouped by query_id — a separate,
+        unfixed gap, not this method's concern). The reliable use is extra
+        `SELECT pg_sleep(n), ...`-shaped sessions alongside `sleeper`,
+        which DO correlate. The caller is responsible for terminating the
+        returned Popen."""
+        sess = self._session(role)
+        sess.stdin.write(sql.rstrip().rstrip(';') + ";\n")
+        sess.stdin.flush()
+        return sess
+
     def release(self):
         """Commit the holder -> the waiter's lock wait ends (and gets a
         transition record in full mode)."""

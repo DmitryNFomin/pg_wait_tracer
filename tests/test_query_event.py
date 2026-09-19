@@ -22,6 +22,7 @@ import argparse
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from testutil import find_postmaster
+import test_capture_smoke
 
 TRACER = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                       "pg_wait_tracer")
@@ -292,36 +293,66 @@ def parse_mode_c_events(output):
 
 
 def test_mode_b(pm_pid):
-    """Verify --event filter shows only matching events with % Event column."""
+    """Verify --event filter shows only matching events with % Event column.
+
+    Uses the capture-smoke Workload's sleeper instead of a pgbench workload
+    filtered on IO:DataFileRead (issue #113): on a loaded gate box,
+    pgbench's scale-10 data is fully cached, so DataFileRead is rare to
+    absent in a short window even though attribution itself works (isolated
+    reruns parse events fine) — a workload-density problem, not a product
+    bug. A pg_sleep() is deterministic every run regardless of cache state
+    or box load; unlike Lock:relation (confirmed on the gate box during
+    #113's investigation to not currently correlate to a query_id in
+    query_event at all — a separate, unfixed gap), Timeout:PgSleep does.
+    Two extra sessions running structurally distinct pg_sleep-shaped SQL
+    (the query-id jumbler normalizes literals but not query shape) give
+    >= 3 distinct query_id rows, not just >= 1.
+    """
     print("--- Test 3: Mode B (--event filter) ---")
 
-    pgbench = subprocess.Popen(
-        ["pgbench", "-U", "postgres", "-d", "postgres",
-         "-c", "4", "-T", "15"],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-    )
-
-    time.sleep(3)
+    # Route the shared Workload's own precondition checks (e.g. "holder
+    # acquired the lock") into this file's counters, so a broken workload
+    # precondition fails this test's exit code too.
+    test_capture_smoke.check = check
+    wl = test_capture_smoke.Workload()
+    wl.open_sessions()
 
     tracer = subprocess.Popen(
         [TRACER, "--mode", "full", "--pid", str(pm_pid),
          "--interval", "8", "--duration", "12",
-         "--view", "query_event", "--event", "IO:DataFileRead"],
+         "--view", "query_event", "--event", "Timeout:PgSleep"],
         stdout=subprocess.PIPE, stderr=subprocess.PIPE
     )
 
-    try:
-        stdout, stderr = tracer.communicate(timeout=25)
-    except subprocess.TimeoutExpired:
-        tracer.kill()
-        stdout, _ = tracer.communicate()
+    time.sleep(2)  # let tracer attach
 
-    pgbench.wait()
+    extra_sleepers = []
+    try:
+        wl.fire(sleep_s=3)
+        extra_sleepers = [
+            wl.open_extra_session("sleeper2", "SELECT pg_sleep(2), 1"),
+            wl.open_extra_session("sleeper3", "SELECT 1, pg_sleep(2)"),
+        ]
+        wl.release()
+
+        try:
+            stdout, stderr = tracer.communicate(timeout=25)
+        except subprocess.TimeoutExpired:
+            tracer.kill()
+            stdout, _ = tracer.communicate()
+    finally:
+        for p in extra_sleepers:
+            p.terminate()
+            try:
+                p.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                p.kill()
+        wl.stop()
 
     output = STRIP_ANSI.sub('', stdout.decode('utf-8', errors='replace'))
 
     # Header should mention the event
-    check("Top Queries for IO:DataFileRead" in output,
+    check("Top Queries for Timeout:PgSleep" in output,
           "Mode B header contains event name")
 
     # % Event column present
