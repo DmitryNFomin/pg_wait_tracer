@@ -278,6 +278,7 @@ class Workload:
         self.sleeper = None
         self.holder = None
         self.waiter = None
+        self.extra_sessions = []
         self.tag_base = f"pgwt_wl_{secrets.token_hex(8)}"
         self.backend_pids = {}
 
@@ -344,6 +345,33 @@ class Workload:
         check(waiters != "" and int(waiters) >= 1,
               f"workload: waiter blocked on {self.LOCK_TABLE} (waiters={waiters!r})")
 
+    def open_extra_session(self, role, sql):
+        """Open one more session and immediately send it one SQL statement.
+
+        query_event Mode B (--event filter) groups rows by query_id, so a
+        single controlled backend only ever produces one row. Callers that
+        need several deterministic query_id rows for the same event (e.g.
+        query_event Mode B tests wanting >= 3 entries, not just >= 1) open a
+        couple of these with structurally distinct SQL — pg's query-id
+        jumbling normalizes literals but not query shape (target list,
+        clauses, function calls), so each gets its own id. Originally added
+        to block extra sessions on the held lock alongside `waiter`, but
+        issue #113's investigation found Lock:relation waits do not
+        currently correlate to a query_id in query_event at all (confirmed
+        on the gate box: system_event and the general query_event view both
+        show the lock wait, but no row for it, keyed or not, appears once
+        query_event is filtered or grouped by query_id — a separate,
+        unfixed gap, not this method's concern). The reliable use is extra
+        `SELECT pg_sleep(n), ...`-shaped sessions alongside `sleeper`,
+        which DO correlate. The caller is responsible for terminating the
+        returned Popen. Tracked on the instance and reaped by stop(), so a
+        caller that forgets to terminate one explicitly cannot leak it."""
+        sess = self._session(role)
+        sess.stdin.write(sql.rstrip().rstrip(';') + ";\n")
+        sess.stdin.flush()
+        self.extra_sessions.append(sess)
+        return sess
+
     def release(self):
         """Commit the holder -> the waiter's lock wait ends (and gets a
         transition record in full mode)."""
@@ -352,7 +380,7 @@ class Workload:
         time.sleep(0.5)
 
     def stop(self):
-        for p in (self.sleeper, self.holder, self.waiter):
+        for p in (self.sleeper, self.holder, self.waiter, *self.extra_sessions):
             if p is None:
                 continue
             p.terminate()
@@ -361,10 +389,16 @@ class Workload:
             except subprocess.TimeoutExpired:
                 p.kill()
         self.sleeper = self.holder = self.waiter = None
+        self.extra_sessions = []
         try:
+            # application_name (not query text) so this reaps sleeper,
+            # holder, waiter AND any open_extra_session() backends alike --
+            # a stray idle-in-transaction holder still granting
+            # AccessExclusiveLock on LOCK_TABLE wedges every subsequent
+            # Workload user's open_sessions() (CREATE TABLE blocks forever).
             psql("SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
                  "WHERE pid != pg_backend_pid() AND datname = 'postgres' "
-                 f"AND query LIKE '%{self.LOCK_TABLE}%'")
+                 f"AND application_name LIKE '{self.tag_base}%'")
             time.sleep(1)
             psql(f"DROP TABLE IF EXISTS {self.LOCK_TABLE}")
         except subprocess.TimeoutExpired:

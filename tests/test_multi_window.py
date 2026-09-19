@@ -26,6 +26,7 @@ import argparse
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from testutil import find_postmaster
+import test_capture_smoke
 
 TRACER = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                       "pg_wait_tracer")
@@ -634,25 +635,94 @@ def parse_mode_b_section(text):
 
 
 def test_query_event_mode_b(pm_pid):
-    """Verify multi-window query_event --event filter shows % Event."""
+    """Verify multi-window query_event --event filter shows % Event.
+
+    Uses the capture-smoke Workload's sleeper instead of a pgbench workload
+    filtered on IO:DataFileRead (issue #113): on a loaded gate box,
+    pgbench's scale-10 data is fully cached, so DataFileRead is rare to
+    absent in a short window — a workload-density problem, not a product
+    bug (isolated reruns parse events fine). A pg_sleep() is deterministic
+    every run regardless of cache state or box load; unlike Lock:relation
+    (confirmed on the gate box during #113's investigation to not currently
+    correlate to a query_id in query_event at all — a separate, unfixed
+    gap), Timeout:PgSleep does.
+
+    The parser below (matching Mode A/C's multi-window tests) only accepts
+    the LAST printed tick, so a wait needs to still be fresh (within the
+    trailing 1s/3s window) at whatever moment the tracer happens to print
+    its last tick — pgbench satisfies that for Mode A/C by generating
+    events continuously. A single one-shot pg_sleep(N) does not: it
+    completes once, at a moment this test does not control precisely
+    enough (attach + startup timing varies), and can age out of the
+    trailing window before the last tick prints (seen directly: 0 entries
+    on an otherwise-clean gate-box run). `pg_sleep(1) FROM
+    generate_series(...)` instead re-fires a short wait roughly once a
+    second for the whole capture, the same "keep the well full" trick, so
+    whichever tick ends up last, something completed within the last
+    second. Structurally distinct target lists (the query-id jumbler
+    normalizes literals but not query shape) give 3 distinct query_id rows
+    within the "Last 3s" window specifically -- asserted as >= 3 there, not
+    just >= 1. (The "Last 1s" window is not used for that assertion: 1s
+    phase alignment across three independently-cadenced sleepers makes 3
+    rows likely but not guaranteed, whereas any 3s slice is long enough to
+    have caught all three at least once.)
+    """
     print("--- Test 8: query_event Mode B multi-window ---")
 
-    pgbench = subprocess.Popen(
-        ["pgbench", "-U", "postgres", "-d", "postgres",
-         "-c", "4", "-T", "25"],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-    )
+    # Route the shared Workload's own precondition checks (e.g. "holder
+    # acquired the lock") into this file's counters, so a broken workload
+    # precondition fails this test's exit code too.
+    test_capture_smoke.check = check
+    wl = test_capture_smoke.Workload()
+    tracer = None
+    extra_sleepers = []
+    try:
+        wl.open_sessions()
 
-    time.sleep(3)
+        tracer = subprocess.Popen(
+            [TRACER, "--mode", "full", "--pid", str(pm_pid),
+             "--interval", "1", "--window", "1s,3s", "--count", "10",
+             "--view", "query_event", "--event", "Timeout:PgSleep"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
 
-    output = run_tracer(pm_pid, interval=1, count=5, windows="1s,3s",
-                        view="query_event",
-                        extra_args=["--event", "IO:DataFileRead"])
+        time.sleep(2)  # let tracer attach
 
-    pgbench.wait()
+        wl.sleeper.stdin.write(
+            "SELECT pg_sleep(1) FROM generate_series(1,15) g;\n")
+        wl.sleeper.stdin.flush()
+        extra_sleepers.append(wl.open_extra_session(
+            "sleeper2",
+            "SELECT pg_sleep(1), 1 FROM generate_series(1,15) g"))
+        extra_sleepers.append(wl.open_extra_session(
+            "sleeper3",
+            "SELECT 1, pg_sleep(1) FROM generate_series(1,15) g"))
+        wl.release()
+
+        try:
+            stdout, stderr = tracer.communicate(timeout=1 * 10 + 20)
+        except subprocess.TimeoutExpired:
+            tracer.kill()
+            stdout, _ = tracer.communicate()
+    finally:
+        if tracer is not None and tracer.poll() is None:
+            tracer.terminate()
+            try:
+                tracer.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                tracer.kill()
+        for p in extra_sleepers:
+            p.terminate()
+            try:
+                p.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                p.kill()
+        wl.stop()
+
+    output = STRIP_ANSI.sub('', stdout.decode('utf-8', errors='replace'))
 
     # Header mentions the event
-    check("Top Queries for IO:DataFileRead" in output,
+    check("Top Queries for Timeout:PgSleep" in output,
           "query_event Mode B multi-window has correct header")
 
     # Section headers present
@@ -677,16 +747,15 @@ def test_query_event_mode_b(pm_pid):
             break
 
     if last_data_tick:
-        # Get first section with data
-        sections = re.split(r'^---- Last \d+[smh] -+$', last_data_tick,
-                            flags=re.MULTILINE)
-        events = []
-        for section in sections:
-            events = parse_mode_b_section(section)
-            if events:
-                break
+        # The "Last 3s" section specifically, not the first non-empty one:
+        # with three independently-cadenced ~1s sleepers, phase alignment
+        # means a 1s slice might catch only 1-2 of them, but any 3s slice
+        # is long enough to have caught all three at least once.
+        m = re.search(r'^---- Last 3s -+$(.*?)(?=^---- Last |\Z)',
+                      last_data_tick, flags=re.MULTILINE | re.DOTALL)
+        events = parse_mode_b_section(m.group(1)) if m else []
 
-        check(len(events) > 0,
+        check(len(events) >= 3,
               f"query_event Mode B parsed {len(events)} entries")
 
         if events:
@@ -735,45 +804,75 @@ def parse_mode_c_section(text):
 
 
 def test_query_event_mode_c(pm_pid):
-    """Verify multi-window query_event --query-id filter shows % Query."""
+    """Verify multi-window query_event --query-id filter shows % Query.
+
+    Uses the capture-smoke Workload's sleeper instead of a pgbench workload
+    (issue #113): pgbench round-robins several statement shapes, and the
+    single top-total_exec_time query_id it picks is not guaranteed to still
+    be executing (let alone completing a fresh wait) in whatever moment the
+    tracer's last tick happens to print -- the same "last tick must have
+    fresh data" gap Test 8's Mode B fix addresses. Fired here as many
+    short, discrete `SELECT pg_sleep(1);` statements (not pgbench's natural
+    mix, and not one single long-running statement, since
+    pg_stat_statements only aggregates a statement's stats once it
+    completes -- a query_id needs to be resolvable within a couple of
+    seconds, not after one giant statement finally finishes): each
+    normalizes to the same query_id, and a fresh one completes roughly once
+    a second for the whole capture, so whichever tick ends up last, one
+    completed within the last second. It also gives a CPU* row for free
+    (parse/plan overhead per statement), the other thing this test checks.
+    """
     print("--- Test 9: query_event Mode C multi-window ---")
 
     psql("CREATE EXTENSION IF NOT EXISTS pg_stat_statements")
     psql("SELECT pg_stat_statements_reset()")
 
-    pgbench = subprocess.Popen(
-        ["pgbench", "-U", "postgres", "-d", "postgres",
-         "-c", "4", "-T", "25"],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-    )
-
-    time.sleep(8)
-
-    # Get a known query_id from pg_stat_statements
-    qid_raw = psql(
-        "SELECT queryid FROM pg_stat_statements "
-        "WHERE dbid = (SELECT oid FROM pg_database WHERE datname = 'postgres') "
-        "AND queryid IS NOT NULL AND queryid != 0 "
-        "ORDER BY total_exec_time DESC LIMIT 1"
-    )
-
+    test_capture_smoke.check = check
+    wl = test_capture_smoke.Workload()
     query_id = None
-    if qid_raw.strip():
-        try:
-            query_id = int(qid_raw.strip())
-        except ValueError:
-            pass
+    output = ""
+    try:
+        wl.open_sessions()
 
-    if not query_id:
-        pgbench.wait()
-        check(False, "Could not find query_id in pg_stat_statements")
-        return
+        # Queue many discrete pg_sleep(1) statements up front; psql executes
+        # them one at a time as each completes, so this session stays busy
+        # producing a fresh completed wait roughly every second for ~30s --
+        # comfortably longer than run_tracer's ~5-10s actual capture below.
+        NUM_SLEEPS = 30
+        wl.sleeper.stdin.write("SELECT pg_sleep(1);\n" * NUM_SLEEPS)
+        wl.sleeper.stdin.flush()
 
-    output = run_tracer(pm_pid, interval=1, count=5, windows="1s,3s",
-                        view="query_event",
-                        extra_args=["--query-id", str(query_id)])
+        # pg_stat_statements only has a row for this query_id once the
+        # first occurrence completes (~1s in); poll a bounded setup
+        # deadline for it to appear rather than assume a fixed delay.
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            qid_raw = psql(
+                "SELECT queryid FROM pg_stat_statements "
+                "WHERE dbid = (SELECT oid FROM pg_database "
+                "              WHERE datname = 'postgres') "
+                "AND query = 'SELECT pg_sleep($1)' "
+                "AND queryid IS NOT NULL AND queryid != 0 "
+                "ORDER BY calls DESC LIMIT 1"
+            )
+            if qid_raw.strip():
+                try:
+                    query_id = int(qid_raw.strip())
+                    break
+                except ValueError:
+                    pass
+            time.sleep(0.5)
 
-    pgbench.wait()
+        if not query_id:
+            check(False, "Could not find query_id in pg_stat_statements")
+            return
+
+        output = run_tracer(pm_pid, interval=1, count=5, windows="1s,3s",
+                            view="query_event",
+                            extra_args=["--query-id", str(query_id)])
+        wl.release()
+    finally:
+        wl.stop()
 
     # Header mentions the query_id
     check(f"Wait Profile for query_id {query_id}" in output,
@@ -821,10 +920,18 @@ def test_query_event_mode_c(pm_pid):
             has_cpu = any(e['name'] == 'CPU*' for e in events)
             check(has_cpu,
                   "query_event Mode C includes CPU* event")
+
+            # The workload is engineered specifically to produce this wait;
+            # a regression that lost wait attribution while keeping CPU*
+            # would otherwise pass silently.
+            has_pgsleep = any(e['name'] == 'Timeout:PgSleep' for e in events)
+            check(has_pgsleep,
+                  "query_event Mode C includes Timeout:PgSleep event")
     else:
         check(False, "query_event Mode C: no tick with data found")
         check(False, "query_event Mode C: cannot check % Query sum")
         check(False, "query_event Mode C: cannot check CPU*")
+        check(False, "query_event Mode C: cannot check Timeout:PgSleep")
 
 
 # ── Test 10: histogram multi-window ──────────────────────────
