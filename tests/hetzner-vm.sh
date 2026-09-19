@@ -3,10 +3,21 @@
 #
 # Usage:
 #   tests/hetzner-vm.sh create [--type cpx42] [--image rocky-9] [--name NAME] \
-#                               [--location LOC] [--cloud-init FILE]
+#                               [--location LOC] [--cloud-init FILE] \
+#                               [--image-snapshot latest] [--labels k=v,k2=v2]
 #   tests/hetzner-vm.sh delete <SERVER_ID>
 #   tests/hetzner-vm.sh ssh <IP>
 #   tests/hetzner-vm.sh list
+#
+# --image-snapshot latest: resolve --image to the newest Hetzner image
+# labelled `pgwt=gate-snapshot` (issue #141's ephemeral-VM snapshot, built by
+# the lead under the box lock from a fully-provisioned gate box) instead of a
+# named public image. A bare numeric/string value is used as the image
+# id/name verbatim (only "latest" triggers the label lookup).
+#
+# --labels k=v,k2=v2: attached to the created server (e.g.
+# `pgwt=ephemeral,created=<epoch>,owner=<hostname>` — scripts/box-check.sh's
+# EPHEMERAL=1 path and tests/hetzner-sweep.sh key off these).
 #
 # Requires: HCLOUD_TOKEN env var, jq, curl, ssh-keygen
 #
@@ -74,30 +85,64 @@ cmd_create() {
     local image="$DEFAULT_IMAGE"
     local name="$DEFAULT_NAME"
     local location=""
+    local image_snapshot=""
+    local labels_arg=""
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
-            --type)       server_type="$2"; shift 2 ;;
-            --cloud-init) cloud_init="$2"; cloud_init_explicit=1; shift 2 ;;
-            --image)      image="$2"; shift 2 ;;
-            --name)       name="$2"; shift 2 ;;
-            --location)   location="$2"; shift 2 ;;
+            --type)           server_type="$2"; shift 2 ;;
+            --cloud-init)     cloud_init="$2"; cloud_init_explicit=1; shift 2 ;;
+            --image)          image="$2"; shift 2 ;;
+            --image-snapshot) image_snapshot="$2"; shift 2 ;;
+            --name)           name="$2"; shift 2 ;;
+            --location)       location="$2"; shift 2 ;;
+            --labels)         labels_arg="$2"; shift 2 ;;
             *) die "Unknown option: $1" ;;
         esac
     done
 
+    if [[ -n "$image_snapshot" ]]; then
+        if [[ "$image_snapshot" == "latest" ]]; then
+            echo "  Resolving --image-snapshot latest (label pgwt=gate-snapshot) ..." >&2
+            image=$(curl -s "$API/images?type=snapshot&label_selector=pgwt%3Dgate-snapshot&sort=created:desc&per_page=1" \
+                -H "Authorization: Bearer $HCLOUD_TOKEN" \
+                | jq -r '.images[0].id // empty')
+            [[ -n "$image" ]] || die "no image found with label pgwt=gate-snapshot"
+            echo "  Resolved image id: $image" >&2
+        else
+            image="$image_snapshot"
+        fi
+    fi
+
     if [[ "$cloud_init_explicit" -eq 0 ]]; then
-        # Each recipe's user-data is OS-specific (package manager, cloud-init
-        # modules) — --image ubuntu-24.04 without an explicit --cloud-init
-        # must not silently boot it with the Rocky recipe (or vice versa).
-        case "$image" in
-            ubuntu*) cloud_init="$SCRIPT_DIR/cloud-init-ubuntu-minimal.yaml" ;;
-            rocky*)  cloud_init="$SCRIPT_DIR/cloud-init-rocky9-pg18.yaml" ;;
-            *) die "No default cloud-init for image '$image' — pass --cloud-init explicitly" ;;
-        esac
+        if [[ -n "$image_snapshot" ]]; then
+            # Snapshots taken under this project are always of the Ubuntu
+            # gate box (the only OS provisioned so far — see
+            # tests/provision-runner.sh); the resolved image is a numeric
+            # id/description, not a name starting with "ubuntu"/"rocky", so
+            # it cannot go through the name-sniffing case below.
+            cloud_init="$SCRIPT_DIR/cloud-init-ubuntu-minimal.yaml"
+        else
+            # Each recipe's user-data is OS-specific (package manager,
+            # cloud-init modules) — --image ubuntu-24.04 without an explicit
+            # --cloud-init must not silently boot it with the Rocky recipe
+            # (or vice versa).
+            case "$image" in
+                ubuntu*) cloud_init="$SCRIPT_DIR/cloud-init-ubuntu-minimal.yaml" ;;
+                rocky*)  cloud_init="$SCRIPT_DIR/cloud-init-rocky9-pg18.yaml" ;;
+                *) die "No default cloud-init for image '$image' — pass --cloud-init explicitly" ;;
+            esac
+        fi
     fi
 
     [[ -f "$cloud_init" ]] || die "Cloud-init file not found: $cloud_init"
+
+    local labels_json="{}"
+    if [[ -n "$labels_arg" ]]; then
+        labels_json=$(echo "$labels_arg" | tr ',' '\n' \
+            | jq -R 'split("=") | {(.[0]): (.[1] // "")}' | jq -s 'add // {}') \
+            || die "could not parse --labels '$labels_arg' (want k=v,k2=v2)"
+    fi
 
     local locations_to_try="$LOCATIONS"
     [[ -n "$location" ]] && locations_to_try="$location"
@@ -127,7 +172,8 @@ cmd_create() {
             --arg img "$image" \
             --arg loc "$loc" \
             --argjson key "$ssh_key_id" \
-            '{name:$name, server_type:$st, image:$img, location:$loc, ssh_keys:[$key], user_data:$ud}' \
+            --argjson labels "$labels_json" \
+            '{name:$name, server_type:$st, image:$img, location:$loc, ssh_keys:[$key], user_data:$ud, labels:$labels}' \
             | curl -s -X POST "$API/servers" \
                 -H "Authorization: Bearer $HCLOUD_TOKEN" \
                 -H "Content-Type: application/json" \
@@ -152,8 +198,17 @@ cmd_create() {
     echo "  Server ID: $server_id" >&2
     echo "  Server IP: $server_ip" >&2
 
-    # Clean known_hosts for this IP
-    ssh-keygen -R "$server_ip" 2>/dev/null || true
+    # Clean known_hosts for this IP. Real bug found running this live
+    # (issue #141): ssh-keygen -R prints its own informational messages
+    # ("# Host ... found: line N", "known_hosts updated. Original contents
+    # retained as ...") to STDOUT, not stderr -- `2>/dev/null` alone did
+    # not stop them from leaking into a caller's `$(tests/hetzner-vm.sh
+    # create ...)` capture, corrupting the final machine-readable
+    # "$server_id $server_ip" line downstream parsers rely on. Silence
+    # both streams; the "|| true" already covers a first-ever IP with no
+    # existing known_hosts entry, which is the common, expected case, not
+    # an error worth surfacing either way.
+    ssh-keygen -R "$server_ip" >/dev/null 2>&1 || true
 
     # Wait for SSH to become available
     echo "" >&2
@@ -215,7 +270,7 @@ cmd_ssh() {
 cmd_list() {
     curl -s "$API/servers" \
         -H "Authorization: Bearer $HCLOUD_TOKEN" \
-        | jq -r '.servers[] | "\(.id)\t\(.name)\t\(.public_net.ipv4.ip)\t\(.status)\t\(.server_type.name)"'
+        | jq -r '.servers[] | "\(.id)\t\(.name)\t\(.public_net.ipv4.ip)\t\(.status)\t\(.server_type.name)\t\(.labels | to_entries | map("\(.key)=\(.value)") | join(","))"'
 }
 
 # --- Main ---
@@ -231,6 +286,7 @@ case "${1:-help}" in
         echo "" >&2
         echo "  create [--type cpx42] [--image rocky-9] [--name NAME]" >&2
         echo "         [--location fsn1|nbg1|hel1] [--cloud-init FILE]" >&2
+        echo "         [--image-snapshot latest] [--labels k=v,k2=v2]" >&2
         echo "  delete <SERVER_ID>" >&2
         echo "  ssh <IP> [command...]" >&2
         echo "  list" >&2

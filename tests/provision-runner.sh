@@ -386,15 +386,29 @@ if ! grep -qxF "$(cat "${SSH_KEY}.pub")" "$HOME/.ssh/authorized_keys" 2>/dev/nul
 fi
 chmod 600 "$HOME/.ssh/authorized_keys"
 touch "$HOME/.ssh/known_hosts"
+# issue #141 (ephemeral VMs from a gate-box snapshot): a real failure found
+# running this against a fresh VM booted from the pgwt=gate-snapshot image
+# -- the snapshot's disk carries the ORIGINAL gate box's known_hosts entry
+# for localhost/127.0.0.1, but cloud-init on the new instance (a different
+# Hetzner server id) regenerates sshd's own host keys on first boot
+# (ssh_deletekeys, the standard "don't reuse the imaged host's keys"
+# behaviour), so that inherited known_hosts entry no longer matches this
+# VM's actual, freshly-generated host key. The old "add only if entirely
+# missing" check below left that STALE, now-mismatched entry in place, and
+# `ssh -o BatchMode=yes` then refuses to connect ("REMOTE HOST
+# IDENTIFICATION HAS CHANGED"), failing this whole (otherwise idempotent,
+# fast no-op) re-provisioning run. A persistent, never-reimaged box's host
+# key never changes, so unconditionally purging + rescanning here is a
+# harmless few extra milliseconds there, and the actual fix for a
+# snapshot-booted VM.
 for h in localhost 127.0.0.1; do
-    if ! ssh-keygen -F "$h" -f "$HOME/.ssh/known_hosts" >/dev/null 2>&1; then
-        log "adding $h to known_hosts"
-        # || true: the BatchMode ssh check right below this loop is the real
-        # guard -- if ssh-keyscan hiccups (e.g. sshd not answering yet) and
-        # leaves known_hosts short, that check fails loudly with its own
-        # FATAL message instead of this line aborting provisioning under -e.
-        ssh-keyscan -H "$h" >> "$HOME/.ssh/known_hosts" 2>/dev/null || true
-    fi
+    ssh-keygen -R "$h" -f "$HOME/.ssh/known_hosts" >/dev/null 2>&1 || true
+    log "(re)scanning $h into known_hosts"
+    # || true: the BatchMode ssh check right below this loop is the real
+    # guard -- if ssh-keyscan hiccups (e.g. sshd not answering yet) and
+    # leaves known_hosts short, that check fails loudly with its own
+    # FATAL message instead of this line aborting provisioning under -e.
+    ssh-keyscan -H "$h" >> "$HOME/.ssh/known_hosts" 2>/dev/null || true
 done
 chmod 600 "$HOME/.ssh/known_hosts"
 

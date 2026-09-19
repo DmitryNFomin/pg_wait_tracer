@@ -261,17 +261,25 @@ clean:
 
 # ---------------------------------------------------------------------------
 # Developer loop (CLAUDE.md). None of these need the BPF build.
-#   check       deterministic tier on this machine (node/go/python/Playwright)
-#   check-fast  node + go + py_compile only (seconds)
-#   box-check   live tier on an x86 Linux box: OS=ubuntu|el8|el9 PG=<major>
-#   ui-gallery  before/after screenshot sheet -> tests/results/ui_gallery/
+#   check          deterministic tier on this machine (node/go/python/Playwright)
+#   check-fast     node + go + py_compile only (seconds)
+#   box-check      live tier on an x86 Linux box: OS=ubuntu|el8|el9 PG=<major>
+#                  EPHEMERAL=1: throwaway Hetzner VM from the gate-box
+#                  snapshot, created/run/rsynced/deleted for this one run
+#                  (issue #141) — KEEP=1 leaves it up and prints the delete
+#                  command instead of deleting it.
+#   hetzner-sweep  delete stale (>6h) pgwt=ephemeral Hetzner VMs; runs
+#                  automatically at the start of every box-check too
+#   ui-gallery     before/after screenshot sheet -> tests/results/ui_gallery/
 # ---------------------------------------------------------------------------
-.PHONY: check check-fast box-check ui-gallery
+.PHONY: check check-fast box-check hetzner-sweep ui-gallery
 check:
 	@scripts/check.sh
 check-fast:
 	@scripts/check.sh --fast
 box-check:
-	@OS=$(OS) PG=$(PG) scripts/box-check.sh
+	@OS=$(OS) PG=$(PG) EPHEMERAL=$(EPHEMERAL) KEEP=$(KEEP) scripts/box-check.sh
+hetzner-sweep:
+	@tests/hetzner-sweep.sh $(if $(MAX_AGE_HOURS),--max-age-hours $(MAX_AGE_HOURS),)
 ui-gallery:
 	@tests/ui_gallery.sh $(BASE)
