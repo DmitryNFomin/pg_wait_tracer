@@ -71,8 +71,12 @@ except ImportError:
           file=sys.stderr)
     sys.exit(0)
 
-# Reuse a distinct port so this can run alongside test_web_ui.py.
-MOCK_PORT = int(os.environ.get("PGWT_TEST_PORT", "18811"))
+# A distinct env var (and default) from test_web_ui.py's PGWT_TEST_PORT so
+# scripts/check.sh can hand both suites run-private, non-overlapping ports
+# from ONE allocated base (see the PORT MAP in scripts/check.sh); unset, this
+# keeps today's fixed default so this suite still runs alongside
+# test_web_ui.py by hand.
+MOCK_PORT = int(os.environ.get("PGWT_CHAOS_PORT", "18811"))
 MOCK_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mock_server.py")
 
 
@@ -235,7 +239,9 @@ def start_mock_server():
         if proc.poll() is None:
             proc.kill()
         out, err = proc.communicate()
-        print(f"mock_server failed to start:\n{out.decode()}\n{err.decode()}")
+        print(f"mock_server failed to start on port {MOCK_PORT} "
+              f"(WS {MOCK_PORT + 1}) — port busy, or the mock crashed:\n"
+              f"{out.decode()}\n{err.decode()}")
         sys.exit(1)
     return proc
 

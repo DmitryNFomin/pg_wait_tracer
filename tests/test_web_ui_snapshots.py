@@ -258,7 +258,9 @@ def start_mock_server(extra_env=None, port=None):
         if proc.poll() is None:
             proc.kill()
         out, err = proc.communicate()
-        print(f"mock_server failed to start:\n{out.decode()}\n{err.decode()}")
+        print(f"mock_server failed to start on port {http_port} "
+              f"(WS {http_port + 1}) — port busy, or the mock crashed:\n"
+              f"{out.decode()}\n{err.decode()}")
         sys.exit(1)
     return proc
 
