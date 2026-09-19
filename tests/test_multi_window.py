@@ -796,37 +796,63 @@ def parse_mode_c_section(text):
 
 
 def test_query_event_mode_c(pm_pid):
-    """Verify multi-window query_event --query-id filter shows % Query."""
+    """Verify multi-window query_event --query-id filter shows % Query.
+
+    Uses the capture-smoke Workload's sleeper instead of a pgbench workload
+    (issue #113): pgbench round-robins several statement shapes, and the
+    single top-total_exec_time query_id it picks is not guaranteed to still
+    be executing (let alone completing a fresh wait) in whatever moment the
+    tracer's last tick happens to print -- the same "last tick must have
+    fresh data" gap Test 8's Mode B fix addresses. Fired here as many
+    short, discrete `SELECT pg_sleep(1);` statements (not pgbench's natural
+    mix, and not one single long-running statement, since
+    pg_stat_statements only aggregates a statement's stats once it
+    completes -- a query_id needs to be resolvable within a couple of
+    seconds, not after one giant statement finally finishes): each
+    normalizes to the same query_id, and a fresh one completes roughly once
+    a second for the whole capture, so whichever tick ends up last, one
+    completed within the last second. It also gives a CPU* row for free
+    (parse/plan overhead per statement), the other thing this test checks.
+    """
     print("--- Test 9: query_event Mode C multi-window ---")
 
     psql("CREATE EXTENSION IF NOT EXISTS pg_stat_statements")
     psql("SELECT pg_stat_statements_reset()")
 
-    pgbench = subprocess.Popen(
-        ["pgbench", "-U", "postgres", "-d", "postgres",
-         "-c", "4", "-T", "25"],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-    )
+    test_capture_smoke.check = check
+    wl = test_capture_smoke.Workload()
+    wl.open_sessions()
 
-    time.sleep(8)
+    # Queue many discrete pg_sleep(1) statements up front; psql executes them
+    # one at a time as each completes, so this session stays busy producing
+    # a fresh completed wait roughly every second for ~30s -- comfortably
+    # longer than run_tracer's ~5-10s actual capture below.
+    NUM_SLEEPS = 30
+    wl.sleeper.stdin.write("SELECT pg_sleep(1);\n" * NUM_SLEEPS)
+    wl.sleeper.stdin.flush()
 
-    # Get a known query_id from pg_stat_statements
-    qid_raw = psql(
-        "SELECT queryid FROM pg_stat_statements "
-        "WHERE dbid = (SELECT oid FROM pg_database WHERE datname = 'postgres') "
-        "AND queryid IS NOT NULL AND queryid != 0 "
-        "ORDER BY total_exec_time DESC LIMIT 1"
-    )
-
+    # pg_stat_statements only has a row for this query_id once the first
+    # occurrence completes (~1s in); poll a bounded setup deadline for it
+    # to appear rather than assume a fixed delay.
     query_id = None
-    if qid_raw.strip():
-        try:
-            query_id = int(qid_raw.strip())
-        except ValueError:
-            pass
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        qid_raw = psql(
+            "SELECT queryid FROM pg_stat_statements "
+            "WHERE query = 'SELECT pg_sleep($1)' "
+            "AND queryid IS NOT NULL LIMIT 1"
+        )
+        if qid_raw.strip():
+            try:
+                query_id = int(qid_raw.strip())
+                break
+            except ValueError:
+                pass
+        time.sleep(0.5)
 
     if not query_id:
-        pgbench.wait()
+        wl.release()
+        wl.stop()
         check(False, "Could not find query_id in pg_stat_statements")
         return
 
@@ -834,7 +860,8 @@ def test_query_event_mode_c(pm_pid):
                         view="query_event",
                         extra_args=["--query-id", str(query_id)])
 
-    pgbench.wait()
+    wl.release()
+    wl.stop()
 
     # Header mentions the query_id
     check(f"Wait Profile for query_id {query_id}" in output,
