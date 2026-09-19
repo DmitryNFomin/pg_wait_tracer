@@ -108,9 +108,15 @@ jobs:
           # subprocess.run(capture_output=) (3.7+) the smoke tests use. Install
           # python3.11 and make python3 resolve to it (EL9 ships 3.9 — fine —
           # but the symlink is harmless there too).
-          dnf install -y python3.11
+          dnf install -y python3.11 python3.11-pip
           ln -sf "$(command -v python3.11)" /usr/local/bin/python3
           python3 --version
+          # pillow + numpy: tests/test_ui_live_smoke_lib.py (unit_tests.list,
+          # issue #112) decodes/diffs PNGs with them; ci.yml's build-and-unit
+          # job gets these via actions/setup-python + pip, but this container
+          # has no such step, so `make -C tests check` was failing loudly with
+          # ModuleNotFoundError on numpy (issue #139).
+          python3.11 -m pip install pillow numpy
           # PGDG repo.
           dnf install -y "https://download.postgresql.org/pub/repos/yum/reporpms/EL-$EL-x86_64/pgdg-redhat-repo-latest.noarch.rpm"
           # The EL AppStream 'postgresql' module masks the PGDG postgresqlNN
@@ -159,7 +165,7 @@ jobs:
           export DEBIAN_FRONTEND=noninteractive
           V=${{ matrix.pg }}
           apt-get update
-          apt-get install -y gcc clang llvm make git python3 sudo curl gnupg \
+          apt-get install -y gcc clang llvm make git python3 python3-pip sudo curl gnupg \
             lsb-release ca-certificates procps \
             libbpf-dev libelf-dev zlib1g-dev liblz4-dev linux-tools-common \
             postgresql-common
@@ -171,6 +177,11 @@ jobs:
             make -C /tmp/bpftool/src -j"$(nproc)"
             echo "BPFTOOL=/tmp/bpftool/src/bpftool" >> "$GITHUB_ENV"
           fi
+          # pillow + numpy: tests/test_ui_live_smoke_lib.py (unit_tests.list,
+          # issue #112) decodes/diffs PNGs with them (issue #139).
+          # --break-system-packages: Ubuntu 24.04's python3 is PEP-668
+          # externally-managed; same reason tests/provision-runner.sh uses it.
+          python3 -m pip install --break-system-packages pillow numpy
           # PGDG apt.
           yes | /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y || true
           if ! apt-cache show "postgresql-$V" >/dev/null 2>&1; then
