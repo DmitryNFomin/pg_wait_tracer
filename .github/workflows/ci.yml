@@ -34,6 +34,10 @@ on:
         description: "PostgreSQL major version for the mode-4 hunt"
         type: string
         default: "17"
+      mode4_hunt:
+        description: "Run the 360-minute mode-4 BPF hunt on a hosted runner"
+        type: boolean
+        default: false
 
 jobs:
   build-and-unit:
@@ -609,9 +613,13 @@ jobs:
             "BPFTOOL=$BPFTOOL" \
             tests/ci_smoke.sh --pg-version "$V" $FLAGS
 
+  # Opt-in only: a plain `workflow_dispatch` (the kind agents use to prove a
+  # branch on the gate box) does NOT launch this job — it also requires the
+  # `mode4_hunt` boolean input to be set (issue #117; before this, every
+  # manual dispatch fired the 360-minute hunt on a hosted runner unasked).
   mode4-hunt:
     name: mode4-hunt
-    if: ${{ github.event_name == 'workflow_dispatch' }}
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.mode4_hunt }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

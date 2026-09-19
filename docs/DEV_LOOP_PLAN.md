@@ -628,9 +628,11 @@ the same read as the 2026-09-16 run, just with tighter IQRs this time.
   cancel. Never cancel a run you did not dispatch yourself. For a run you
   did dispatch, cancel it only after ALL of its gate jobs (not just the
   ones you personally care about) have concluded; prefer letting
-  `mode4-hunt` finish or time out on its own over cancelling it. Queueing
-  behind other master/PR runs on the shared box is the design, not a
-  problem to route around by cancelling.
+  `mode4-hunt` finish or time out on its own over cancelling it (this
+  applies only when the `mode4_hunt` input was explicitly set — since
+  issue #117, a plain `workflow_dispatch` no longer launches it at all).
+  Queueing behind other master/PR runs on the shared box is the design,
+  not a problem to route around by cancelling.
 
 **Remaining work:**
 1. Move `snapshots` to the gate box — Chromium is now provisioned there
