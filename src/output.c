@@ -123,8 +123,14 @@ void pgwt_print_header(struct pgwt_daemon *d)
     } else {
         fprintf(stderr, "pg_wait_tracer v0.1 — postmaster PID %d\n",
                 d->postmaster_pid);
-        fprintf(stderr, "Tracing %d backends | %ds interval | Ctrl-C to stop\n\n",
+        fprintf(stderr, "Tracing %d backends | %ds interval | Ctrl-C to stop\n",
                 count_active_backends(d), d->interval);
+        /* #98: say how the live CPU* row is classified. "ungated" means the
+         * command gate is unavailable (no pgstat_report_activity probe /
+         * unknown BackendState layout) and every client on-CPU interval
+         * counts as CPU* — the server's rule for marker-less traces, stated
+         * here rather than guessed silently. */
+        fprintf(stderr, "Live CPU* gate: %s\n\n", pgwt_live_cpu_gate_name(d));
     }
 }
 

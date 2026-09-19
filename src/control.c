@@ -183,6 +183,10 @@ static cJSON *build_status(const struct pgwt_daemon *d)
      * runqueue/throttle time) and cpu_ns carries the UNKNOWN sentinel. */
     cJSON_AddStringToObject(root, "cpu_accounting",
                             d->cpu_accounting ? "measured" : "legacy");
+    /* #98: how the live view classifies a client backend's on-CPU
+     * intervals — "markers" (CMD_START/CMD_END sweep, the server's majority
+     * rule) or "ungated" (gate unavailable: all client we==0 is CPU*). */
+    cJSON_AddStringToObject(root, "live_cpu_gate", pgwt_live_cpu_gate_name(d));
     return root;
 }
 
@@ -339,6 +343,17 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
      * of wrapping (an open stretch closed under a different label). */
     cjson_add_uint64(root, "ring_delta_clamps_total",
                      ctr->ring_delta_clamps_total);
+    /* #98 live command gate: how the live CPU* classification was decided.
+     * live_cpu_gate mirrors status; the counters are the non-marker share
+     * (unmarked pids / full accumulator), so a scrape alone tells whether
+     * the live CPU* row is marker-classified or falling back. */
+    cJSON_AddStringToObject(root, "live_cpu_gate", pgwt_live_cpu_gate_name(d));
+    cjson_add_uint64(root, "live_cmd_markers_total",
+                     ctr->live_cmd_markers_total);
+    cjson_add_uint64(root, "live_cpu_unmarked_ns_total",
+                     ctr->live_cpu_unmarked_ns_total);
+    cjson_add_uint64(root, "live_cpu_gate_fallback_total",
+                     ctr->live_cpu_gate_fallback_total);
 
     cjson_add_uint64(root, "io_worker_samples_total",
                      ctr->io_worker_samples_total);

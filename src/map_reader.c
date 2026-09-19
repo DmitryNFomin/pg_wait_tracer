@@ -151,6 +151,97 @@ uint32_t pgwt_live_effective_event(uint32_t we, uint32_t cat_flag,
     return we;
 }
 
+/* ── Marker-driven command gate (issue #98) ──────────────────────────────
+ * The per-pid sweep is the live twin of compute.c pgwt_tag_events: same
+ * state (open flag, anchor, banked ns), same per-marker and per-record
+ * steps, same majority rule. Keep the two in lock-step — the unit test
+ * (tests/test_live_accum.c) runs one stream through both and diffs. */
+
+void pgwt_live_cmd_gate_marker(struct pgwt_live_cmd_gate *g, uint32_t marker,
+                               uint64_t ts_ns)
+{
+    switch (marker) {
+    case PGWT_MARKER_CMD_START:
+        g->seen = 1;
+        if (!g->open) {
+            g->open = 1;
+            g->anchor_ns = ts_ns;
+        }
+        break;
+    case PGWT_MARKER_CMD_END:
+        g->seen = 1;
+        if (g->open) {
+            if (ts_ns > g->anchor_ns)
+                g->banked_ns += ts_ns - g->anchor_ns;
+            g->open = 0;
+        }
+        break;
+    default:
+        break;   /* plan/exec/escalation markers: not a command boundary */
+    }
+}
+
+/* Command-open ns of [t0, t1): banked closed runs + the open run clipped. */
+static uint64_t cmd_gate_open_ns(const struct pgwt_live_cmd_gate *g,
+                                 uint64_t t0_ns, uint64_t t1_ns)
+{
+    uint64_t open_ns = g->banked_ns;
+    if (g->open) {
+        uint64_t a = g->anchor_ns > t0_ns ? g->anchor_ns : t0_ns;
+        if (t1_ns > a)
+            open_ns += t1_ns - a;
+    }
+    return open_ns;
+}
+
+uint64_t pgwt_live_cmd_gate_take(struct pgwt_live_cmd_gate *g,
+                                 uint64_t t0_ns, uint64_t t1_ns)
+{
+    if (!g->seen)
+        return 0;
+    uint64_t open_ns = cmd_gate_open_ns(g, t0_ns, t1_ns);
+    g->banked_ns = 0;
+    if (g->open)
+        g->anchor_ns = t1_ns;
+    return open_ns;
+}
+
+uint64_t pgwt_live_cmd_gate_peek(const struct pgwt_live_cmd_gate *g,
+                                 uint64_t t0_ns, uint64_t now_ns)
+{
+    if (!g->seen)
+        return 0;
+    uint64_t open_ns = cmd_gate_open_ns(g, t0_ns, now_ns);
+    uint64_t wall = now_ns > t0_ns ? now_ns - t0_ns : 0;
+    return open_ns < wall ? open_ns : wall;
+}
+
+bool pgwt_live_cmd_majority(uint64_t open_ns, uint64_t wall_ns, bool open_now)
+{
+    if (wall_ns == 0)
+        return open_now;
+    return open_ns * 2 >= wall_ns;
+}
+
+bool pgwt_live_cmd_gate_classify(struct pgwt_live_cmd_gate *g, bool consume,
+                                 uint64_t t0_ns, uint64_t t1_ns,
+                                 bool fallback_open, bool *in_cmd)
+{
+    if (!g) {
+        *in_cmd = fallback_open;
+        return false;
+    }
+    if (!g->seen) {
+        *in_cmd = true;      /* the server's seen_cmd rule: CPU stays CPU */
+        return false;
+    }
+    uint64_t wall = t1_ns > t0_ns ? t1_ns - t0_ns : 0;
+    uint64_t open_ns = consume ? pgwt_live_cmd_gate_take(g, t0_ns, t1_ns)
+                               : pgwt_live_cmd_gate_peek(g, t0_ns, t1_ns);
+    *in_cmd = pgwt_live_cmd_majority(open_ns, wall, g->open != 0);
+    return true;
+}
+
 static void add_event_stats(struct pgwt_event_stats *es, uint64_t stat_ns,
                             bool histogram)
 {
@@ -176,8 +267,10 @@ void pgwt_accum_add_interval(struct pgwt_accumulator *acc,
      * and idle row (incl. non-command CPU) carries wall. */
     uint64_t stat_ns = (we == 0) ? iv->cpu_ns : iv->wall_ns;
 
-    /* Per-PID accumulation */
-    struct pgwt_pid_accum *pa = pgwt_get_or_create_pid(acc, iv->pid);
+    /* Per-PID accumulation (the caller may pass the entry it already
+     * resolved for the category/gate lookups — one pid lookup per event). */
+    struct pgwt_pid_accum *pa = iv->pa ? iv->pa
+                                       : pgwt_get_or_create_pid(acc, iv->pid);
     if (pa) {
         struct pgwt_event_stats *es = pgwt_get_or_create_event(pa, we);
         if (es)
@@ -245,25 +338,45 @@ uint32_t pgwt_duration_to_bucket(uint64_t ns)
 
 #ifndef PGWT_SERVER
 uint32_t pgwt_live_pid_cat_flag(struct pgwt_daemon *d,
-                                struct pgwt_accumulator *acc, uint32_t pid)
+                                struct pgwt_pid_accum *pa, uint32_t pid)
 {
-    struct pgwt_pid_accum *pa = pgwt_get_or_create_pid(acc, pid);
     if (pa && pa->cat_flag_plus1 != 0)
         return pa->cat_flag_plus1 - 1;
+    /* Unresolved (no registry entry yet, or its metadata not parsed yet):
+     * foreground for now, rescanned at most once per display tick. */
+    if (pa && pa->cat_scan_tick == d->tick + 1)
+        return 0;
+    if (pa)
+        pa->cat_scan_tick = d->tick + 1;
     /* Registry scan (the pgwt_find_backend lookup, inline so map_reader.o
      * keeps no backend.o dependency for the BPF-free unit tests). */
     uint32_t f = 0;
+    bool resolved = false;
     for (int i = 0; i < d->backends.count; i++) {
         const struct pgwt_backend *be = &d->backends.entries[i];
         if (be->pid == (pid_t)pid) {
-            f = be->meta_parsed
-              ? pgwt_backend_type_flag(be->meta.backend_type) : 0;
+            if (be->meta_parsed) {
+                f = pgwt_backend_type_flag(be->meta.backend_type);
+                resolved = true;
+            }
             break;
         }
     }
-    if (pa)
-        pa->cat_flag_plus1 = f + 1;
+    if (pa && resolved)
+        pa->cat_flag_plus1 = f + 1;   /* cache only a resolved category */
     return f;
+}
+
+const char *pgwt_live_cpu_gate_name(const struct pgwt_daemon *d)
+{
+    if (d->lightweight_mode)
+        return "n/a (lightweight: BPF accumulator only)";
+    if (!pgwt_mode_uses_watchpoints(d))
+        return "n/a (sampled tier: sampler gate)";
+    return d->cmd_gate_active
+         ? "markers (CMD_START/CMD_END sweep, majority rule)"
+         : "ungated (command gate unavailable: every client on-CPU "
+           "interval counts as CPU*)";
 }
 
 void pgwt_read_state_map(struct pgwt_daemon *d)
@@ -411,21 +524,32 @@ void pgwt_read_state_map(struct pgwt_daemon *d)
                 /* Fold the open stretch through the SAME function and
                  * classification as the closed record it will become
                  * (issue #97): a client backend's on-CPU stretch outside a
-                 * command (state_map cmd_open, maintained by the
-                 * on_report_activity uprobe and the seed) is idle
-                 * non-command time, not CPU* / DB Time; io_worker time stays
-                 * out of the time model. The CPU* row carries the MEASURED
-                 * on-CPU ns of the stretch, DB Time its wall. */
+                 * command is idle non-command time, not CPU* / DB Time;
+                 * io_worker time stays out of the time model. The CPU* row
+                 * carries the MEASURED on-CPU ns of the stretch, DB Time its
+                 * wall. In-command is the marker majority rule over
+                 * [last_ts, now) (#98) — peeked from the pid's gate as the
+                 * closed-record sweep left it (copied into d->accum by
+                 * pgwt_accum_copy_used), NOT state_map's instantaneous
+                 * cmd_open: at the ClientRead that ends a waitless
+                 * statement the gate is already clear while the whole run
+                 * was in-command. An unmarked pid / full accumulator falls
+                 * back like the closed path (in-command / emission gate). */
+                bool in_cmd = false;
+                pgwt_live_cmd_gate_classify(pa_cur ? &pa_cur->cmd_gate : NULL,
+                                            false, sval.last_ts, now,
+                                            sval.cmd_open != 0, &in_cmd);
                 struct pgwt_live_interval iv = {
                     .pid             = snext,
                     .we              = we,
                     .wall_ns         = open_ns,
                     .cpu_ns          = cpu_open,
                     .query_id        = sval.last_query_id,
-                    .cat_flag        = pgwt_live_pid_cat_flag(d, &d->accum, snext),
+                    .cat_flag        = pgwt_live_pid_cat_flag(d, pa_cur, snext),
                     .cmd_gate_active = d->cmd_gate_active,
-                    .cmd_open        = sval.cmd_open != 0,
+                    .cmd_open        = in_cmd,
                     .closed          = false,
+                    .pa              = pa_cur,
                 };
                 pgwt_accum_add_interval(&d->accum, &iv);
             }

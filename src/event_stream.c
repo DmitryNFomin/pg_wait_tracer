@@ -104,9 +104,21 @@ int pgwt_handle_trace_event(void *ctx, void *data, size_t data_sz)
     /* Query text is now captured by BPF uprobe (debug_query_string)
      * and delivered via lifecycle_rb, not from /proc/pid/mem here. */
 
-    /* Skip accumulation for marker events (duration=0, not real waits) */
-    if (PGWT_IS_MARKER(we))
+    /* Markers carry no wait duration. The CMD_START/CMD_END pair (the
+     * on_report_activity uprobe's gate flips, in this pid's stream order)
+     * drives the live command gate (#98) — the same sweep the server runs
+     * in pgwt_tag_events — and is otherwise skipped like every marker. */
+    if (PGWT_IS_MARKER(we)) {
+        if (we == PGWT_MARKER_CMD_START || we == PGWT_MARKER_CMD_END) {
+            struct pgwt_pid_accum *mpa = pgwt_get_or_create_pid(acc, evt->pid);
+            if (mpa) {
+                pgwt_live_cmd_gate_marker(&mpa->cmd_gate, we,
+                                          evt->timestamp_ns);
+                d->counters.live_cmd_markers_total++;
+            }
+        }
         goto done;
+    }
 
     /* T8: fold the measured CPU of this closed interval into the lifetime
      * counters (observability + the wait-gap self-check). Display-time CPU
@@ -122,15 +134,36 @@ int pgwt_handle_trace_event(void *ctx, void *data, size_t data_sz)
      * and the open stretch it later closes must classify identically, or
      * the multi-window delta of the two ring snapshots shows a quantity no
      * snapshot ever had. T2 classification (decomposed AAS,
-     * docs/AAS_SEMANTICS_DECISION.md): the pid's category is resolved ONCE
+     * docs/AAS_SEMANTICS_DECISION.md): the pid's category is resolved
      * against the registry and cached in the accumulator (the hot path must
      * not linear-scan 1024 entries per event); io_worker time never enters
-     * DB Time/AAS; a client backend's we==0 interval outside a command (BPF
-     * stamps the gate in flags) is post/between-command time — idle, not
-     * CPU — and is filed under PGWT_WEI_NONCMD_CPU in EVERY accumulator (it
-     * used to sit in the CPU* row while its time went to Activity, so the
-     * CPU* row could exceed DB Time). */
+     * DB Time/AAS; a client backend's we==0 interval outside a command is
+     * post/between-command time — idle, not CPU — and is filed under
+     * PGWT_WEI_NONCMD_CPU in EVERY accumulator (it used to sit in the CPU*
+     * row while its time went to Activity, so the CPU* row could exceed DB
+     * Time). "Outside a command" is the marker majority rule over the
+     * record's own [t1 - dur, t1) (#98), consumed from the pid's gate —
+     * NOT the gate value BPF stamped at emission (PGWT_EVENT_FLAG_CMD_OPEN):
+     * PostgreSQL reports STATE_IDLE before the post-command ClientRead
+     * begins, so at emission a waitless statement's whole on-CPU run looked
+     * non-command and ~83% of pgbench's CPU vanished from live DB Time. The
+     * emission flag remains only the fallback for a full accumulator. */
     stage_started_ns = pgwt_debug_block_begin(d);
+    struct pgwt_pid_accum *pa = pgwt_get_or_create_pid(acc, evt->pid);
+    uint32_t cat_flag = pgwt_live_pid_cat_flag(d, pa, evt->pid);
+    uint64_t t1 = evt->timestamp_ns;
+    uint64_t t0 = t1 >= dur ? t1 - dur : 0;
+    bool in_cmd = false;
+    bool by_markers = pgwt_live_cmd_gate_classify(
+        pa ? &pa->cmd_gate : NULL, true, t0, t1,
+        (evt->flags & PGWT_EVENT_FLAG_CMD_OPEN) != 0, &in_cmd);
+    if (!by_markers && we == 0 && cat_flag == 0 && d->cmd_gate_active) {
+        /* Not decided by markers: say so (metrics), never silently. */
+        if (pa)
+            d->counters.live_cpu_unmarked_ns_total += dur;
+        else
+            d->counters.live_cpu_gate_fallback_total++;
+    }
     struct pgwt_live_interval iv = {
         .pid             = evt->pid,
         .we              = we,
@@ -140,10 +173,11 @@ int pgwt_handle_trace_event(void *ctx, void *data, size_t data_sz)
                                       * folded into the lifetime counters
                                       * above); see ROADMAP "Multi-window %DB" */
         .query_id        = evt->query_id,
-        .cat_flag        = pgwt_live_pid_cat_flag(d, acc, evt->pid),
+        .cat_flag        = cat_flag,
         .cmd_gate_active = d->cmd_gate_active,
-        .cmd_open        = (evt->flags & PGWT_EVENT_FLAG_CMD_OPEN) != 0,
+        .cmd_open        = in_cmd,
         .closed          = true,
+        .pa              = pa,
     };
     pgwt_accum_add_interval(acc, &iv);
     pgwt_debug_block_end(d, "event_callback_accumulate", evt->pid,
@@ -182,6 +216,8 @@ void pgwt_accum_copy_used(struct pgwt_accumulator *dst,
         dp->pid = sp->pid;
         dp->active = sp->active;
         dp->cat_flag_plus1 = sp->cat_flag_plus1;   /* the open scan reuses it */
+        dp->cat_scan_tick = sp->cat_scan_tick;
+        dp->cmd_gate = sp->cmd_gate;               /* #98: the open scan peeks it */
         dp->num_events = sp->num_events;
         dp->db_time_ns = sp->db_time_ns;
         dp->cpu_time_ns = sp->cpu_time_ns;

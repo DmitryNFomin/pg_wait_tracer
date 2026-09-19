@@ -1,21 +1,30 @@
-/* test_live_accum.c — live-view interval accounting (issue #97).
+/* test_live_accum.c — live-view interval accounting (issues #97, #98).
  *
- * The multi-window system_event view showed CPU* at 128-142% of DB Time
- * (tests/test_multi_window.py "Non-idle top-level %DB", PG18 gate box). Root
- * cause: the closed-record path filed a client backend's NON-COMMAND on-CPU
- * record (we==0, command gate closed at emission) under the CPU* row while
- * routing its time to the idle Activity bucket — so the CPU* row grew by
- * time DB Time never contained. Both live paths (closed record and open
+ * #97: the multi-window system_event view showed CPU* at 128-142% of DB
+ * Time (tests/test_multi_window.py "Non-idle top-level %DB", PG18 gate box).
+ * Root cause: the closed-record path filed a client backend's NON-COMMAND
+ * on-CPU record (we==0, command gate closed at emission) under the CPU* row
+ * while routing its time to the idle Activity bucket — so the CPU* row grew
+ * by time DB Time never contained. Both live paths (closed record and open
  * state_map stretch) now fold through pgwt_accum_add_interval with ONE
  * classification (pgwt_live_effective_event), and the ring delta saturates
  * instead of wrapping when an open stretch closes under a different label.
  *
- * Pure: links map_reader.c (-DPGWT_SERVER, BPF-free core) + snapshot.c.
- * No daemon, no PostgreSQL, no root. */
+ * #98: "in-command" itself was the gate value at EMISSION, which is always
+ * clear when a waitless statement's run closes (STATE_IDLE precedes the
+ * ClientRead) — the server/CLI CPU ratio of 4.6-7.1x. The live paths now
+ * sweep the CMD_START/CMD_END markers with the server's majority rule
+ * (tests 5-8; test 8 diffs the live sweep against compute.c
+ * pgwt_tag_events on one generated stream).
+ *
+ * Pure: links map_reader.c (-DPGWT_SERVER, BPF-free core) + snapshot.c +
+ * compute.c. No daemon, no PostgreSQL, no root. */
 #include "map_reader.h"
 #include "snapshot.h"
 #include "wait_event.h"
 #include "pg_wait_tracer.h"
+#include "compute.h"
+#include "summary_reader.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -383,8 +392,11 @@ static void test_ring_delta(void)
      * 1 added a 3 s WAL wait. DB Time still goes UP over the window (by
      * 3 s - 2 s = 1 s > 0, so it is not clamped), but the IO row's 3 s is
      * measured against it: 300% of the window's DB Time. This residual is
-     * bounded by the reclassified stretch's wall (2 s here) and is #98's
-     * (gate read at emission) — the roadmap entry states it. */
+     * bounded by the reclassified stretch's wall (2 s here). Since #98 a
+     * stretch is classified by the marker majority rule at the tick AND at
+     * its close, so this reclassification is the rare majority flip of a
+     * still-growing stretch (test 6 shows the common case no longer flips);
+     * the clamp and its metric stay as the fail-safe. */
     memcpy(view, closed, sizeof(*view));
     struct pgwt_live_interval open3 = {
         .pid = 3, .we = 0, .wall_ns = MS(2000), .cpu_ns = MS(1500),
@@ -420,12 +432,430 @@ static void test_ring_delta(void)
     pgwt_ring_free(&ring);
 }
 
+/* ═══ Issue #98: the marker-driven command gate ═══════════════════════════
+ *
+ * The live gate used to be the value BPF read AT EMISSION of the closing
+ * record. PostgreSQL reports STATE_IDLE (CMD_END) before the post-command
+ * ClientRead begins, so the record that closes a waitless statement's
+ * whole on-CPU run always carried a CLEAR gate — the run was filed as
+ * non-command, and only CPU preceding an in-command wait counted (~83% of
+ * pgbench's CPU dropped live; the 4.6-7.1x server/CLI CPU ratio). The live
+ * paths now sweep the CMD_START/CMD_END markers and apply the server's
+ * majority rule (compute.c pgwt_tag_events). */
+
+/* A per-pid live stream driver: markers feed the gate, records are
+ * classified (consumed) and folded through pgwt_accum_add_interval exactly
+ * as event_stream.c does. `emit_flag` is what BPF stamped at emission — the
+ * OLD rule, kept only to show the shape of the input. */
+struct stream {
+    struct pgwt_accumulator *acc;
+    struct pgwt_pid_accum *pa;
+    uint32_t pid;
+    uint64_t we0_total;          /* Σ wall of every we==0 record */
+    uint64_t we0_emit_open;      /* … of which stamped CMD_OPEN at emission */
+    int      records;
+};
+
+static void stream_init(struct stream *s, struct pgwt_accumulator *acc,
+                        uint32_t pid)
+{
+    memset(s, 0, sizeof(*s));
+    s->acc = acc;
+    s->pid = pid;
+    s->pa = pgwt_get_or_create_pid(acc, pid);
+}
+
+static void stream_marker(struct stream *s, uint32_t marker, uint64_t ts)
+{
+    pgwt_live_cmd_gate_marker(&s->pa->cmd_gate, marker, ts);
+}
+
+/* Closed record [t0, t1) of `we`; emit_open = the emission-time gate. */
+static bool stream_record(struct stream *s, uint32_t we, uint64_t t0,
+                          uint64_t t1, int emit_open, uint64_t qid)
+{
+    bool in_cmd = false;
+    pgwt_live_cmd_gate_classify(&s->pa->cmd_gate, true, t0, t1,
+                                emit_open != 0, &in_cmd);
+    struct pgwt_live_interval iv = {
+        .pid = s->pid, .we = we, .wall_ns = t1 - t0, .cpu_ns = t1 - t0,
+        .query_id = qid, .cat_flag = 0,
+        .cmd_gate_active = true, .cmd_open = in_cmd, .closed = true,
+        .pa = s->pa,
+    };
+    pgwt_accum_add_interval(s->acc, &iv);
+    s->records++;
+    if (we == 0) {
+        s->we0_total += t1 - t0;
+        if (emit_open)
+            s->we0_emit_open += t1 - t0;
+    }
+    return in_cmd;
+}
+
+#define US(x) ((uint64_t)(x) * 1000ULL)
+
+/* ── 5. The #98 reproduction: pgbench-shaped stream WITH its markers ──── */
+static void test_cmd_gate_waitless_statement(void)
+{
+    printf("--- #98: marker-driven gate, waitless / waiting / trailing statements ---\n");
+    struct pgwt_accumulator *acc = calloc(1, sizeof(*acc));
+    pgwt_accum_init(acc);
+    struct stream s;
+    stream_init(&s, acc, 100);
+
+    /* Idle read. */
+    stream_record(&s, PG_WAIT_CLIENT_READ, MS(0), MS(10), 0, 0);
+
+    /* (a) A WAITLESS statement: the query message ends ClientRead at 10 ms,
+     * STATE_RUNNING (CMD_START) at 10.2, the whole UPDATE runs on CPU,
+     * STATE_IDLE (CMD_END) at 13.9, and the next ClientRead begins at 14 —
+     * which is when the we==0 record [10, 14) is emitted, gate ALREADY
+     * CLEAR. 3.7 of its 4 ms overlap the command: in-command. */
+    stream_marker(&s, PGWT_MARKER_CMD_START, MS(10) + US(200));
+    stream_marker(&s, PGWT_MARKER_CMD_END,   MS(13) + US(900));
+    bool a = stream_record(&s, 0, MS(10), MS(14), 0, 0xA);
+    CHECK(a, "(a) waitless statement's whole on-CPU run is in-command");
+    stream_record(&s, PG_WAIT_CLIENT_READ, MS(14), MS(20), 0, 0);
+
+    /* (b) A statement WITH a wait: CPU [20, 21) is closed by the WALSync
+     * wait (gate open at emission — the only CPU the old rule counted),
+     * the wait [21, 22), then the commit's trailing CPU [22, 22.5) closed
+     * by the next ClientRead after CMD_END at 22.4: 0.4 of 0.5 ms
+     * in-command. */
+    stream_marker(&s, PGWT_MARKER_CMD_START, MS(20) + US(100));
+    bool b1 = stream_record(&s, 0, MS(20), MS(21), 1, 0xB);
+    bool b2 = stream_record(&s, IO_WALSYNC, MS(21), MS(22), 1, 0xB);
+    stream_marker(&s, PGWT_MARKER_CMD_END, MS(22) + US(400));
+    bool b3 = stream_record(&s, 0, MS(22), MS(22) + US(500), 0, 0xB);
+    CHECK(b1 && b2 && b3, "(b) CPU before the wait, the wait, and the trailing "
+          "CPU are all in-command (%d %d %d)", b1, b2, b3);
+    stream_record(&s, PG_WAIT_CLIENT_READ, MS(22) + US(500), MS(30), 0, 0);
+
+    /* (c) A short command followed by a long post-command on-CPU run:
+     * CMD_START 30.1, CMD_END 31, ClientRead at 34 → 0.9 of 4 ms overlap:
+     * the majority rule says NON-command — same verdict as the server. */
+    stream_marker(&s, PGWT_MARKER_CMD_START, MS(30) + US(100));
+    stream_marker(&s, PGWT_MARKER_CMD_END,   MS(31));
+    bool c = stream_record(&s, 0, MS(30), MS(34), 0, 0xC);
+    CHECK(!c, "(c) a run mostly after its command is non-command (majority)");
+    stream_record(&s, PG_WAIT_CLIENT_READ, MS(34), MS(40), 0, 0);
+
+    /* The input's shape — the OLD (emission-time) rule would have kept only
+     * the 1 ms of CPU that preceded the in-command wait: the #98 ratio. */
+    CHECK(s.we0_emit_open == MS(1) && s.we0_total == MS(9) + US(500),
+          "input shape: %.1f ms of %.1f ms we==0 was stamped CMD_OPEN at "
+          "emission (the old rule's CPU*)",
+          s.we0_emit_open / 1e6, s.we0_total / 1e6);
+
+    uint64_t cpu_row = sys_row(acc, 0);
+    uint64_t noncmd_row = sys_row(acc, PGWT_WEI_NONCMD_CPU);
+    CHECK(cpu_row == MS(4) + MS(1) + US(500),
+          "CPU* row = 4 + 1 + 0.5 ms in-command CPU (got %.2f ms)", cpu_row / 1e6);
+    CHECK(noncmd_row == MS(4),
+          "NonCommandCpu row = the 4 ms post-command run (got %.2f ms)",
+          noncmd_row / 1e6);
+    CHECK(acc->tm.cpu_time_ns == cpu_row, "time-model CPU == CPU* row");
+    CHECK(acc->tm.db_time_ns == cpu_row + MS(1),
+          "DB Time = CPU* + WAL wait = %.2f ms", acc->tm.db_time_ns / 1e6);
+    CHECK(acc->tm.activity_time_ns == MS(10) + MS(6) + (MS(7) + US(500)) +
+                                      MS(6) + MS(4),
+          "Activity = ClientReads + non-command CPU (got %.2f ms)",
+          acc->tm.activity_time_ns / 1e6);
+    CHECK(sys_nonidle_sum(acc) == acc->tm.db_time_ns,
+          "Σ non-idle rows == DB Time");
+    /* Per-query rows: the waitless statement's CPU lands on ITS query. */
+    uint64_t qa = 0, qc_noncmd = 0;
+    for (int i = 0; i < acc->num_query_events; i++) {
+        if (acc->query_events[i].query_id == 0xA && acc->query_events[i].wait_event == 0)
+            qa = acc->query_events[i].total_ns;
+        if (acc->query_events[i].query_id == 0xC &&
+            acc->query_events[i].wait_event == PGWT_WEI_NONCMD_CPU)
+            qc_noncmd = acc->query_events[i].total_ns;
+    }
+    CHECK(qa == MS(4), "query A's row carries its 4 ms CPU (got %.2f ms)", qa / 1e6);
+    CHECK(qc_noncmd == MS(4), "query C's post-command run is its NonCommandCpu row");
+    free(acc);
+}
+
+/* ── 6. Straddling command at the window edge: the OPEN stretch ────────── */
+static void test_cmd_gate_open_stretch(void)
+{
+    printf("--- #98: open stretch peeks the gate; its close consumes it ---\n");
+    struct pgwt_ring ring;
+    CHECK(pgwt_ring_init(&ring, 4) == 0, "ring init");
+    struct pgwt_accumulator *closed = calloc(1, sizeof(*closed));
+    struct pgwt_accumulator *view = calloc(1, sizeof(*view));
+    pgwt_accum_init(closed);
+    struct stream s;
+    stream_init(&s, closed, 7);
+
+    /* ClientRead ends at 40 ms; CMD_START at 40.1; the statement is still
+     * on CPU at the tick (now = 45 ms). state_map: last_ts = 40, we = 0,
+     * cmd_open = 1. */
+    stream_record(&s, PG_WAIT_CLIENT_READ, MS(0), MS(40), 0, 0);
+    stream_marker(&s, PGWT_MARKER_CMD_START, MS(40) + US(100));
+    struct pgwt_live_cmd_gate before = s.pa->cmd_gate;
+
+    /* Tick A: copy (as pgwt_accum_copy_used does) and add the open stretch
+     * through the same classify (peek). */
+    memcpy(view, closed, sizeof(*view));
+    struct pgwt_pid_accum *vpa = pgwt_find_pid_accum(view, 7);
+    CHECK(vpa != NULL, "view copy carries the pid entry (and its gate)");
+    bool in_cmd = false;
+    bool by_markers = pgwt_live_cmd_gate_classify(&vpa->cmd_gate, false,
+                                                  MS(40), MS(45), false, &in_cmd);
+    CHECK(by_markers && in_cmd, "open stretch [40, 45) is in-command by markers "
+          "(state_map's instantaneous gate is not consulted)");
+    CHECK(memcmp(&vpa->cmd_gate, &before, sizeof(before)) == 0,
+          "peek does not advance the sweep");
+    struct pgwt_live_interval open1 = {
+        .pid = 7, .we = 0, .wall_ns = MS(5), .cpu_ns = MS(4) + US(800),
+        .query_id = 0x7, .cmd_gate_active = true, .cmd_open = in_cmd,
+        .closed = false, .pa = vpa,
+    };
+    pgwt_accum_add_interval(view, &open1);
+    CHECK(view->tm.cpu_time_ns == MS(4) + US(800) && view->tm.db_time_ns == MS(5),
+          "tick A: CPU* = measured 4.8 ms, DB Time = wall 5 ms");
+    pgwt_ring_push(&ring, view);
+
+    /* The command ends at 46 (CMD_END), the ClientRead begins at 46.2: the
+     * record [40, 46.2) is emitted gate-clear. Consumed: 5.9 of 6.2 ms
+     * in-command → CPU*, the same label the open stretch had. */
+    stream_marker(&s, PGWT_MARKER_CMD_END, MS(46));
+    bool closed_in_cmd = stream_record(&s, 0, MS(40), MS(46) + US(200), 0, 0x7);
+    CHECK(closed_in_cmd, "the closing record is in-command too");
+    CHECK(s.pa->cmd_gate.banked_ns == 0 && !s.pa->cmd_gate.open,
+          "consume banks the closed run and resets");
+
+    /* Tick B: no open stretch (pid is in ClientRead now; a wait, so the
+     * has_closed_data guard applies) — snapshot the closed accumulator. */
+    memcpy(view, closed, sizeof(*view));
+    pgwt_ring_push(&ring, view);
+    struct pgwt_snapshot *d = calloc(1, sizeof(*d));
+    CHECK(pgwt_ring_delta(&ring, 1, d) == 0, "delta A→B");
+    CHECK(d->clamped_fields == 0,
+          "no clamp: the stretch closed under the SAME label it was shown "
+          "under (clamped_fields = %u)", d->clamped_fields);
+    CHECK(d->tm.db_time_ns == MS(6) + US(200) - MS(5),
+          "window DB Time = the closed wall beyond the open stretch (%.2f ms)",
+          d->tm.db_time_ns / 1e6);
+    CHECK(snap_row(d, PGWT_WEI_NONCMD_CPU) == 0,
+          "nothing moved to NonCommandCpu across the window");
+
+    /* A straddling stretch that the gate CLOSED mid-way, still open at the
+     * tick: CMD_START 50.1, CMD_END 51, on CPU since 50, now = 56 → 0.9 of
+     * 6 ms: non-command at the tick — and at its close (same rule). */
+    stream_record(&s, PG_WAIT_CLIENT_READ, MS(46) + US(200), MS(50), 0, 0);
+    stream_marker(&s, PGWT_MARKER_CMD_START, MS(50) + US(100));
+    stream_marker(&s, PGWT_MARKER_CMD_END,   MS(51));
+    in_cmd = true;
+    pgwt_live_cmd_gate_classify(&s.pa->cmd_gate, false, MS(50), MS(56), true, &in_cmd);
+    CHECK(!in_cmd, "open post-command run: non-command at the tick");
+    CHECK(!stream_record(&s, 0, MS(50), MS(57), 0, 0x8),
+          "…and non-command when it closes (no reclassification)");
+
+    free(d);
+    free(view);
+    free(closed);
+    pgwt_ring_free(&ring);
+}
+
+/* ── 7. Marker-less fallback: explicit, never a silent guess ───────────── */
+static void test_cmd_gate_fallback(void)
+{
+    printf("--- #98: unmarked pid / no state / gate inactive ---\n");
+    struct pgwt_live_cmd_gate g = {0};
+    bool in_cmd = false;
+
+    /* Unmarked pid (no CMD marker ever seen): the server's seen_cmd rule —
+     * CPU stays CPU; the caller counts live_cpu_unmarked_ns_total. */
+    CHECK(!pgwt_live_cmd_gate_classify(&g, true, MS(0), MS(5), false, &in_cmd)
+          && in_cmd, "unmarked pid: not decided by markers, in-command");
+    CHECK(g.anchor_ns == 0 && g.banked_ns == 0 && !g.seen,
+          "…and the sweep stays untouched until the first marker");
+    /* First marker is a CMD_END (attached mid-command): nothing to bank,
+     * but from here on the pid is marked and post-command CPU is idle. */
+    pgwt_live_cmd_gate_marker(&g, PGWT_MARKER_CMD_END, MS(5) + US(500));
+    CHECK(g.seen && !g.open && g.banked_ns == 0, "CMD_END first: seen, nothing banked");
+    CHECK(pgwt_live_cmd_gate_classify(&g, true, MS(5), MS(9), true, &in_cmd)
+          && !in_cmd, "after it, a we==0 record is non-command even though "
+          "the emission flag said open");
+    /* Plan/exec/escalation markers never touch the gate. */
+    pgwt_live_cmd_gate_marker(&g, PGWT_MARKER_EXEC_START, MS(9));
+    pgwt_live_cmd_gate_marker(&g, PGWT_MARKER_ESCALATE_START, MS(9));
+    CHECK(!g.open && g.banked_ns == 0, "non-command markers are ignored");
+    /* Duplicate CMD_START (a lost CMD_END) keeps the first anchor; a
+     * CMD_END without an open window banks nothing. */
+    pgwt_live_cmd_gate_marker(&g, PGWT_MARKER_CMD_START, MS(10));
+    pgwt_live_cmd_gate_marker(&g, PGWT_MARKER_CMD_START, MS(12));
+    CHECK(g.open && g.anchor_ns == MS(10), "duplicate CMD_START keeps the anchor");
+    pgwt_live_cmd_gate_marker(&g, PGWT_MARKER_CMD_END, MS(13));
+    pgwt_live_cmd_gate_marker(&g, PGWT_MARKER_CMD_END, MS(14));
+    CHECK(!g.open && g.banked_ns == MS(3), "duplicate CMD_END banks once (3 ms)");
+
+    /* No per-pid state at all (accumulator full): the emission-time gate
+     * is the explicit fallback (counted as live_cpu_gate_fallback_total). */
+    CHECK(!pgwt_live_cmd_gate_classify(NULL, true, MS(0), MS(1), true, &in_cmd)
+          && in_cmd, "no state: falls back to the emission flag (open)");
+    CHECK(!pgwt_live_cmd_gate_classify(NULL, true, MS(0), MS(1), false, &in_cmd)
+          && !in_cmd, "no state: falls back to the emission flag (clear)");
+
+    /* Majority rule corner cases, identical to pgwt_tag_events. */
+    CHECK(pgwt_live_cmd_majority(MS(2), MS(4), false), "exactly half: in-command");
+    CHECK(!pgwt_live_cmd_majority(MS(2) - 1, MS(4), true), "just under half: not");
+    CHECK(pgwt_live_cmd_majority(0, 0, true) && !pgwt_live_cmd_majority(0, 0, false),
+          "zero-length interval takes the instantaneous gate");
+
+    /* Gate inactive on the daemon: the classification is bypassed entirely
+     * (pgwt_live_effective_event keeps we==0 as CPU*) — the header/status
+     * says "ungated". */
+    CHECK(pgwt_live_effective_event(0, 0, false, false) == 0,
+          "gate inactive: we==0 stays CPU* regardless of the sweep");
+
+    /* Open-stretch peek clips to the stretch's wall when banked time
+     * predates it (state_map's last_ts ahead of the last drained record). */
+    struct pgwt_live_cmd_gate lag = { .seen = 1, .open = 0, .banked_ns = MS(9) };
+    CHECK(pgwt_live_cmd_gate_peek(&lag, MS(100), MS(103)) == MS(3),
+          "peek clips banked time to the stretch wall");
+}
+
+/* ── 8. Cross-check: the live sweep == the server's pgwt_tag_events ────── */
+
+/* compute.c's only foreign symbol (summary streaming) — unused here. */
+int pgwt_visit_summaries(const char *trace_dir, uint64_t from_wall_ns,
+                         uint64_t to_wall_ns, pgwt_summary_visitor visitor,
+                         void *ctx)
+{
+    (void)trace_dir; (void)from_wall_ns; (void)to_wall_ns; (void)visitor; (void)ctx;
+    return -1;
+}
+
+static uint32_t lcg_state = 0x9E3779B9u;
+static uint32_t lcg(uint32_t n)   /* deterministic pseudo-random in [0, n) */
+{
+    lcg_state = lcg_state * 1664525u + 1013904223u;
+    return (lcg_state >> 8) % n;
+}
+
+static void test_cross_check_tag_events(void)
+{
+    printf("--- #98: live sweep vs compute.c pgwt_tag_events on one stream ---\n");
+    enum { NPIDS = 3, MAXEV = 6000 };
+    struct pgwt_trace_event *ev = calloc(MAXEV, sizeof(*ev));
+    int n = 0;
+    uint64_t t[NPIDS] = { US(0), US(300), US(700) };   /* per-pid clocks */
+    int mid_cmd[NPIDS] = { 0, 0, 0 };                   /* pid 2 attaches mid-command */
+    mid_cmd[2] = 1;
+
+    /* Generate interleaved per-pid streams of pgbench-like statements:
+     * ClientRead → [CMD_START] → CPU (→ wait → CPU)* → [CMD_END] → ClientRead,
+     * with random phase offsets so commands start after the run begins and
+     * end before/after it ends, plus lost markers and back-to-back
+     * commands. Each pid's records are time-ordered; pids interleave. */
+    while (n < MAXEV - 16) {
+        int p = lcg(NPIDS);
+        uint32_t pid = 100 + p;
+        #define EMIT(_we, _dur, _flags) do { \
+            ev[n++] = (struct pgwt_trace_event){ .timestamp_ns = t[p], .pid = pid, \
+                .old_event = (_we), .new_event = 0, .flags = (_flags), \
+                .duration_ns = (_dur), .cpu_ns = (_dur) }; } while (0)
+        #define MARK(_m) do { \
+            ev[n++] = (struct pgwt_trace_event){ .timestamp_ns = t[p], .pid = pid, \
+                .old_event = (_m), .new_event = (_m), .duration_ns = 0 }; } while (0)
+
+        if (!mid_cmd[p]) {
+            t[p] += US(50 + lcg(2000));  EMIT(PG_WAIT_CLIENT_READ, US(50 + lcg(2000)) , 0);
+            /* command opens a little after the on-CPU run began */
+            uint64_t run_start = t[p];
+            t[p] += US(lcg(40));
+            if (lcg(10) != 0) MARK(PGWT_MARKER_CMD_START);   /* 10%: lost START */
+            (void)run_start;
+        }
+        mid_cmd[p] = 0;
+        int waits = lcg(3);              /* 0-2 mid-command waits */
+        for (int w = 0; w < waits; w++) {
+            t[p] += US(20 + lcg(500));   EMIT(0, US(20 + lcg(500)), PGWT_EVENT_FLAG_CMD_OPEN);
+            t[p] += US(10 + lcg(300));   EMIT(IO_WALSYNC, US(10 + lcg(300)), PGWT_EVENT_FLAG_CMD_OPEN);
+        }
+        /* trailing CPU: the command ends somewhere inside it */
+        uint64_t cpu_start = t[p];
+        uint64_t cpu_len = US(20 + lcg(3000));
+        uint64_t end_off = lcg(4) == 0 ? cpu_len * 3 / 4 : cpu_len - US(lcg(20));
+        if (end_off > cpu_len) end_off = cpu_len;
+        t[p] = cpu_start + end_off;
+        if (lcg(12) != 0) MARK(PGWT_MARKER_CMD_END);        /* 8%: lost END */
+        t[p] = cpu_start + cpu_len;
+        EMIT(0, cpu_len, 0);   /* closes at the next ClientRead: gate clear */
+        if (lcg(6) == 0)       /* back-to-back command without a ClientRead */
+            mid_cmd[p] = 1;
+        #undef EMIT
+        #undef MARK
+    }
+
+    /* Sort by timestamp (stable for equal stamps: insertion order) so the
+     * array is the merged, time-ordered stream the server tags. */
+    for (int i = 1; i < n; i++) {
+        struct pgwt_trace_event x = ev[i];
+        int j = i - 1;
+        while (j >= 0 && ev[j].timestamp_ns > x.timestamp_ns) { ev[j + 1] = ev[j]; j--; }
+        ev[j + 1] = x;
+    }
+
+    /* Server side. */
+    struct pgwt_trace_event *srv = calloc(n, sizeof(*srv));
+    memcpy(srv, ev, n * sizeof(*ev));
+    pgwt_tag_events(srv, n, NULL, 0);
+
+    /* Live side: the same stream through the sweep, record by record. */
+    struct pgwt_live_cmd_gate gates[NPIDS];
+    memset(gates, 0, sizeof(gates));
+    int records = 0, disagreements = 0, noncmd_live = 0, unmarked = 0;
+    for (int i = 0; i < n; i++) {
+        struct pgwt_live_cmd_gate *g = &gates[ev[i].pid - 100];
+        if (PGWT_IS_MARKER(ev[i].old_event)) {
+            pgwt_live_cmd_gate_marker(g, ev[i].old_event, ev[i].timestamp_ns);
+            continue;
+        }
+        uint64_t t1 = ev[i].timestamp_ns, t0 = t1 - ev[i].duration_ns;
+        bool in_cmd = false;
+        bool by_markers = pgwt_live_cmd_gate_classify(g, true, t0, t1,
+            (ev[i].flags & PGWT_EVENT_FLAG_CMD_OPEN) != 0, &in_cmd);
+        uint32_t live_we = pgwt_live_effective_event(ev[i].old_event, 0, true, in_cmd);
+        records++;
+        if (!by_markers) unmarked++;
+        if (live_we == PGWT_WEI_NONCMD_CPU) noncmd_live++;
+        if (live_we != srv[i].old_event) {
+            if (disagreements < 5)
+                printf("  disagree #%d: pid %u we=0x%x [%llu,%llu) server=0x%x live=0x%x\n",
+                       i, ev[i].pid, ev[i].old_event,
+                       (unsigned long long)t0, (unsigned long long)t1,
+                       srv[i].old_event, live_we);
+            disagreements++;
+        }
+    }
+    CHECK(records > 2000, "generated %d records (%d events)", records, n);
+    CHECK(noncmd_live > 50 && noncmd_live < records / 2,
+          "the stream exercises both verdicts (%d non-command records)", noncmd_live);
+    CHECK(unmarked > 0, "…and the unmarked prefix of the mid-command pid (%d records)",
+          unmarked);
+    CHECK(disagreements == 0,
+          "live classification == pgwt_tag_events on every record (%d disagreements)",
+          disagreements);
+    free(srv);
+    free(ev);
+}
+
 int main(void)
 {
     test_effective_event();
     test_closed_noncmd_cpu_row();
     test_open_interval();
     test_ring_delta();
+    test_cmd_gate_waitless_statement();
+    test_cmd_gate_open_stretch();
+    test_cmd_gate_fallback();
+    test_cross_check_tag_events();
     printf("\n%d/%d checks passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;
 }

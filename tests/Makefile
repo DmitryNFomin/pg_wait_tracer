@@ -63,12 +63,16 @@ test_event_reader: test_event_reader.c $(BUILD)/event_reader.o $(BUILD)/event_wr
 test_bucket: test_bucket.c
 	$(CC) $(CFLAGS) -o $@ $^
 
-# test_live_accum: issue #97 — live-view interval accounting shared by the
-# closed-record path and the open state_map scan, plus the saturating ring
-# delta behind the multi-window view. Compiles map_reader.c with
-# -DPGWT_SERVER (the BPF-free accumulator core) and snapshot.c directly;
+# test_live_accum: issues #97/#98 — live-view interval accounting shared by
+# the closed-record path and the open state_map scan, the marker-driven
+# command gate, and the saturating ring delta behind the multi-window view.
+# Compiles map_reader.c with -DPGWT_SERVER (the BPF-free accumulator core)
+# and snapshot.c directly; compute.c for the pgwt_tag_events cross-check
+# (#98: the live rule must match the server's majority rule on the same
+# stream — the test stubs its only foreign symbol, pgwt_visit_summaries);
 # wait_event.o only for the idle/hidden classification. Runs anywhere.
 test_live_accum: test_live_accum.c ../src/map_reader.c ../src/snapshot.c \
+                 ../src/compute.c \
                  $(BUILD)/wait_event.o $(BUILD)/spawn.o $(BUILD)/cJSON.o
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^
 

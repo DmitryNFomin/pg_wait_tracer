@@ -93,9 +93,24 @@ struct pgwt_counters {
      * number of windowed-delta fields that went DOWN across the window (an
      * open stretch closed under a different label) and were clamped to 0
      * instead of wrapping. Non-zero means the affected window's other rows
-     * can read > 100% of DB Time by that stretch's wall (cause: #98, the
-     * command gate is read at emission). Exported as ring_delta_clamps_total. */
+     * can read > 100% of DB Time by that stretch's wall (an open stretch's
+     * majority flipped as it grew, or its category resolved late). Exported
+     * as ring_delta_clamps_total. */
     uint64_t ring_delta_clamps_total;
+
+    /* Live command-gate observability (issue #98, map_reader.h
+     * pgwt_live_cmd_gate_*). The live CPU* classification is marker-driven;
+     * these say how much of it was NOT decided by markers — never silent:
+     *  - live_cmd_markers_total:      CMD_START/CMD_END markers swept live
+     *  - live_cpu_unmarked_ns_total:  wall ns of client we==0 closed records
+     *                                 filed as CPU* because their pid had no
+     *                                 marker yet (the server's seen_cmd rule)
+     *  - live_cpu_gate_fallback_total: closed records classified by the
+     *                                 emission-time gate because the per-pid
+     *                                 accumulator was full (no sweep state) */
+    uint64_t live_cmd_markers_total;
+    uint64_t live_cpu_unmarked_ns_total;
+    uint64_t live_cpu_gate_fallback_total;
 
     /* T2 decomposed-AAS observability (docs/AAS_SEMANTICS_DECISION.md). */
     uint64_t noncmd_cpu_samples_total; /* client we==0 readings outside a command (not recorded) */
