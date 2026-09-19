@@ -56,8 +56,12 @@ def test_find_free_base_returns_free_span():
 
 def test_find_free_base_avoids_a_busy_port():
     # Occupy one port inside the candidate range and confirm find_free_base
-    # never returns a base whose span would include it.
-    lo, hi = 21000, 21100
+    # never returns a base whose span would include it. Use a range well
+    # outside free_ports.py's own default [LO, HI) allocation window (and
+    # below macOS's ephemeral port range, 49152+) so this fixture's bind
+    # can never collide with find_free_base()'s own default-range probing
+    # elsewhere in this file, nor with an OS-assigned ephemeral port.
+    lo, hi = 41000, 41100
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.bind(("127.0.0.1", lo + 5))
     s.listen(1)
@@ -79,6 +83,40 @@ def test_find_free_base_rejects_span_too_large_for_range():
     check(threw, "find_free_base() raises ValueError when span >= (hi - lo)")
 
 
+def test_find_free_base_rejects_non_positive_span():
+    for bad_span in (0, -1):
+        threw = False
+        try:
+            fp.find_free_base(bad_span, lo=100, hi=200)
+        except ValueError:
+            threw = True
+        check(threw, f"find_free_base(span={bad_span}) raises ValueError")
+
+
+def test_find_free_base_raises_after_exhausting_tries():
+    # hi - lo == span + 1, so randrange(lo, hi - span) can only ever return
+    # `lo` -- occupy that one candidate base and every try must fail the
+    # same way, so this deterministically exercises the "no lock, no
+    # infinite retry" RuntimeError path check.sh's fail-loud step depends on.
+    lo = 41200
+    span = 2
+    hi = lo + span + 1
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(("127.0.0.1", lo))
+    s.listen(1)
+    try:
+        threw = False
+        try:
+            fp.find_free_base(span, lo=lo, hi=hi, tries=3)
+        except RuntimeError:
+            threw = True
+        check(threw,
+              "find_free_base() raises RuntimeError once tries are exhausted "
+              "against a busy-only range")
+    finally:
+        s.close()
+
+
 def test_cli_prints_an_integer_in_range():
     import subprocess
     script = os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -94,6 +132,8 @@ def main():
     test_find_free_base_returns_free_span()
     test_find_free_base_avoids_a_busy_port()
     test_find_free_base_rejects_span_too_large_for_range()
+    test_find_free_base_rejects_non_positive_span()
+    test_find_free_base_raises_after_exhausting_tries()
     test_cli_prints_an_integer_in_range()
 
     print(f"\n{tests_passed}/{tests_run} passed")
