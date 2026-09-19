@@ -24,6 +24,17 @@ run()  { if ! "$@"; then echo "FAIL: $*"; fail=1; fi; }
 need() { command -v "$1" >/dev/null || { echo "missing: $1 — see CLAUDE.md 'Local setup'"; exit 2; }; }
 need node; need go; need python3
 
+# Resolve the interpreter up front (same as tests/ui_gallery.sh) so a pyenv
+# pin mismatch is reported clearly instead of the UI suite silently skipping
+# below (see issue #118). --fast doesn't need Playwright at all.
+py=$(python3 -c 'import sys; print(sys.executable)')
+if [[ $FAST -eq 0 ]] && ! "$py" -c 'import playwright' 2>/dev/null; then
+    echo "playwright missing in $py — pin the interpreter with playwright" \
+         "(.python-version / PYENV_VERSION) or install:" \
+         "$py -m pip install --user playwright==1.60.0 && $py -m playwright install chromium"
+    exit 2
+fi
+
 step "web builder unit tests (node)"
 run node --test 'tests/web_unit/*.test.mjs'
 
@@ -37,10 +48,6 @@ step "python: free_ports self-test"
 run python3 tests/test_free_ports.py
 
 if [[ $FAST -eq 0 ]]; then
-    if ! python3 -c 'import playwright' 2>/dev/null; then
-        echo "playwright missing — see CLAUDE.md 'Local setup'"; exit 2
-    fi
-
     # ── Port allocation (so two `make check` runs on this Mac don't collide) ─
     # One free base per run, laid out at FIXED OFFSETS below so every mock
     # server this run spawns gets a run-private port; no lock (that would

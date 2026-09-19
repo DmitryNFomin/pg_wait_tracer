@@ -94,6 +94,8 @@ python3 -m playwright install chromium
 export PGWT_BOX=root@<gate-box-ip>        # optional: PGWT_BOX_EL8, PGWT_BOX_EL9
 ```
 
+`.python-version` (the pyenv pin with Playwright) is untracked (`.git/info/exclude`), so a new worktree only gets it via pyenv's global default or an explicit `PYENV_VERSION`, never by checking it out.
+
 ## Layout
 
 - `src/` daemon + BPF (`src/bpf/`), `src/server.c` = `pgwt-server`
