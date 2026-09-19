@@ -306,7 +306,9 @@ def test_mode_b(pm_pid):
     query_event at all — a separate, unfixed gap), Timeout:PgSleep does.
     Two extra sessions running structurally distinct pg_sleep-shaped SQL
     (the query-id jumbler normalizes literals but not query shape) give
-    >= 3 distinct query_id rows, not just >= 1.
+    exactly 3 distinct query_id rows in this single, fixed 8s window (not
+    just >= 1 -- asserted as >= 3, since that's the strictness the workload
+    actually guarantees).
     """
     print("--- Test 3: Mode B (--event filter) ---")
 
@@ -315,24 +317,25 @@ def test_mode_b(pm_pid):
     # precondition fails this test's exit code too.
     test_capture_smoke.check = check
     wl = test_capture_smoke.Workload()
-    wl.open_sessions()
-
-    tracer = subprocess.Popen(
-        [TRACER, "--mode", "full", "--pid", str(pm_pid),
-         "--interval", "8", "--duration", "12",
-         "--view", "query_event", "--event", "Timeout:PgSleep"],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE
-    )
-
-    time.sleep(2)  # let tracer attach
-
+    tracer = None
     extra_sleepers = []
     try:
+        wl.open_sessions()
+
+        tracer = subprocess.Popen(
+            [TRACER, "--mode", "full", "--pid", str(pm_pid),
+             "--interval", "8", "--duration", "12",
+             "--view", "query_event", "--event", "Timeout:PgSleep"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
+
+        time.sleep(2)  # let tracer attach
+
         wl.fire(sleep_s=3)
-        extra_sleepers = [
-            wl.open_extra_session("sleeper2", "SELECT pg_sleep(2), 1"),
-            wl.open_extra_session("sleeper3", "SELECT 1, pg_sleep(2)"),
-        ]
+        extra_sleepers.append(
+            wl.open_extra_session("sleeper2", "SELECT pg_sleep(2), 1"))
+        extra_sleepers.append(
+            wl.open_extra_session("sleeper3", "SELECT 1, pg_sleep(2)"))
         wl.release()
 
         try:
@@ -341,6 +344,12 @@ def test_mode_b(pm_pid):
             tracer.kill()
             stdout, _ = tracer.communicate()
     finally:
+        if tracer is not None and tracer.poll() is None:
+            tracer.terminate()
+            try:
+                tracer.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                tracer.kill()
         for p in extra_sleepers:
             p.terminate()
             try:
@@ -359,9 +368,10 @@ def test_mode_b(pm_pid):
     check("% Event" in output,
           "Mode B output contains '% Event' column")
 
-    # Parse and validate
+    # Parse and validate -- 3 distinct query_ids (sleeper + 2 extras) is
+    # exactly what this fixed single window guarantees, not just >= 1.
     events = parse_mode_b_events(output)
-    check(len(events) > 0,
+    check(len(events) >= 3,
           f"Mode B parsed {len(events)} entries")
 
     if events:

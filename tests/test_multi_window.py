@@ -660,8 +660,12 @@ def test_query_event_mode_b(pm_pid):
     second for the whole capture, the same "keep the well full" trick, so
     whichever tick ends up last, something completed within the last
     second. Structurally distinct target lists (the query-id jumbler
-    normalizes literals but not query shape) give >= 3 distinct query_id
-    rows, not just >= 1.
+    normalizes literals but not query shape) give 3 distinct query_id rows
+    within the "Last 3s" window specifically -- asserted as >= 3 there, not
+    just >= 1. (The "Last 1s" window is not used for that assertion: 1s
+    phase alignment across three independently-cadenced sleepers makes 3
+    rows likely but not guaranteed, whereas any 3s slice is long enough to
+    have caught all three at least once.)
     """
     print("--- Test 8: query_event Mode B multi-window ---")
 
@@ -670,30 +674,30 @@ def test_query_event_mode_b(pm_pid):
     # precondition fails this test's exit code too.
     test_capture_smoke.check = check
     wl = test_capture_smoke.Workload()
-    wl.open_sessions()
-
-    tracer = subprocess.Popen(
-        [TRACER, "--mode", "full", "--pid", str(pm_pid),
-         "--interval", "1", "--window", "1s,3s", "--count", "10",
-         "--view", "query_event", "--event", "Timeout:PgSleep"],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE
-    )
-
+    tracer = None
     extra_sleepers = []
     try:
+        wl.open_sessions()
+
+        tracer = subprocess.Popen(
+            [TRACER, "--mode", "full", "--pid", str(pm_pid),
+             "--interval", "1", "--window", "1s,3s", "--count", "10",
+             "--view", "query_event", "--event", "Timeout:PgSleep"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        )
+
         time.sleep(2)  # let tracer attach
 
         wl.sleeper.stdin.write(
             "SELECT pg_sleep(1) FROM generate_series(1,15) g;\n")
         wl.sleeper.stdin.flush()
-        extra_sleepers = [
-            wl.open_extra_session(
-                "sleeper2",
-                "SELECT pg_sleep(1), 1 FROM generate_series(1,15) g"),
-            wl.open_extra_session(
-                "sleeper3",
-                "SELECT 1, pg_sleep(1) FROM generate_series(1,15) g"),
-        ]
+        extra_sleepers.append(wl.open_extra_session(
+            "sleeper2",
+            "SELECT pg_sleep(1), 1 FROM generate_series(1,15) g"))
+        extra_sleepers.append(wl.open_extra_session(
+            "sleeper3",
+            "SELECT 1, pg_sleep(1) FROM generate_series(1,15) g"))
+        wl.release()
 
         try:
             stdout, stderr = tracer.communicate(timeout=1 * 10 + 20)
@@ -701,13 +705,18 @@ def test_query_event_mode_b(pm_pid):
             tracer.kill()
             stdout, _ = tracer.communicate()
     finally:
+        if tracer is not None and tracer.poll() is None:
+            tracer.terminate()
+            try:
+                tracer.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                tracer.kill()
         for p in extra_sleepers:
             p.terminate()
             try:
                 p.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 p.kill()
-        wl.release()
         wl.stop()
 
     output = STRIP_ANSI.sub('', stdout.decode('utf-8', errors='replace'))
@@ -738,16 +747,15 @@ def test_query_event_mode_b(pm_pid):
             break
 
     if last_data_tick:
-        # Get first section with data
-        sections = re.split(r'^---- Last \d+[smh] -+$', last_data_tick,
-                            flags=re.MULTILINE)
-        events = []
-        for section in sections:
-            events = parse_mode_b_section(section)
-            if events:
-                break
+        # The "Last 3s" section specifically, not the first non-empty one:
+        # with three independently-cadenced ~1s sleepers, phase alignment
+        # means a 1s slice might catch only 1-2 of them, but any 3s slice
+        # is long enough to have caught all three at least once.
+        m = re.search(r'^---- Last 3s -+$(.*?)(?=^---- Last |\Z)',
+                      last_data_tick, flags=re.MULTILINE | re.DOTALL)
+        events = parse_mode_b_section(m.group(1)) if m else []
 
-        check(len(events) > 0,
+        check(len(events) >= 3,
               f"query_event Mode B parsed {len(events)} entries")
 
         if events:
@@ -821,47 +829,50 @@ def test_query_event_mode_c(pm_pid):
 
     test_capture_smoke.check = check
     wl = test_capture_smoke.Workload()
-    wl.open_sessions()
-
-    # Queue many discrete pg_sleep(1) statements up front; psql executes them
-    # one at a time as each completes, so this session stays busy producing
-    # a fresh completed wait roughly every second for ~30s -- comfortably
-    # longer than run_tracer's ~5-10s actual capture below.
-    NUM_SLEEPS = 30
-    wl.sleeper.stdin.write("SELECT pg_sleep(1);\n" * NUM_SLEEPS)
-    wl.sleeper.stdin.flush()
-
-    # pg_stat_statements only has a row for this query_id once the first
-    # occurrence completes (~1s in); poll a bounded setup deadline for it
-    # to appear rather than assume a fixed delay.
     query_id = None
-    deadline = time.monotonic() + 10
-    while time.monotonic() < deadline:
-        qid_raw = psql(
-            "SELECT queryid FROM pg_stat_statements "
-            "WHERE query = 'SELECT pg_sleep($1)' "
-            "AND queryid IS NOT NULL LIMIT 1"
-        )
-        if qid_raw.strip():
-            try:
-                query_id = int(qid_raw.strip())
-                break
-            except ValueError:
-                pass
-        time.sleep(0.5)
+    output = ""
+    try:
+        wl.open_sessions()
 
-    if not query_id:
+        # Queue many discrete pg_sleep(1) statements up front; psql executes
+        # them one at a time as each completes, so this session stays busy
+        # producing a fresh completed wait roughly every second for ~30s --
+        # comfortably longer than run_tracer's ~5-10s actual capture below.
+        NUM_SLEEPS = 30
+        wl.sleeper.stdin.write("SELECT pg_sleep(1);\n" * NUM_SLEEPS)
+        wl.sleeper.stdin.flush()
+
+        # pg_stat_statements only has a row for this query_id once the
+        # first occurrence completes (~1s in); poll a bounded setup
+        # deadline for it to appear rather than assume a fixed delay.
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            qid_raw = psql(
+                "SELECT queryid FROM pg_stat_statements "
+                "WHERE dbid = (SELECT oid FROM pg_database "
+                "              WHERE datname = 'postgres') "
+                "AND query = 'SELECT pg_sleep($1)' "
+                "AND queryid IS NOT NULL AND queryid != 0 "
+                "ORDER BY calls DESC LIMIT 1"
+            )
+            if qid_raw.strip():
+                try:
+                    query_id = int(qid_raw.strip())
+                    break
+                except ValueError:
+                    pass
+            time.sleep(0.5)
+
+        if not query_id:
+            check(False, "Could not find query_id in pg_stat_statements")
+            return
+
+        output = run_tracer(pm_pid, interval=1, count=5, windows="1s,3s",
+                            view="query_event",
+                            extra_args=["--query-id", str(query_id)])
         wl.release()
+    finally:
         wl.stop()
-        check(False, "Could not find query_id in pg_stat_statements")
-        return
-
-    output = run_tracer(pm_pid, interval=1, count=5, windows="1s,3s",
-                        view="query_event",
-                        extra_args=["--query-id", str(query_id)])
-
-    wl.release()
-    wl.stop()
 
     # Header mentions the query_id
     check(f"Wait Profile for query_id {query_id}" in output,
@@ -909,10 +920,18 @@ def test_query_event_mode_c(pm_pid):
             has_cpu = any(e['name'] == 'CPU*' for e in events)
             check(has_cpu,
                   "query_event Mode C includes CPU* event")
+
+            # The workload is engineered specifically to produce this wait;
+            # a regression that lost wait attribution while keeping CPU*
+            # would otherwise pass silently.
+            has_pgsleep = any(e['name'] == 'Timeout:PgSleep' for e in events)
+            check(has_pgsleep,
+                  "query_event Mode C includes Timeout:PgSleep event")
     else:
         check(False, "query_event Mode C: no tick with data found")
         check(False, "query_event Mode C: cannot check % Query sum")
         check(False, "query_event Mode C: cannot check CPU*")
+        check(False, "query_event Mode C: cannot check Timeout:PgSleep")
 
 
 # ── Test 10: histogram multi-window ──────────────────────────

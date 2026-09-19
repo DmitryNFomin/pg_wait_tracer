@@ -278,6 +278,7 @@ class Workload:
         self.sleeper = None
         self.holder = None
         self.waiter = None
+        self.extra_sessions = []
         self.tag_base = f"pgwt_wl_{secrets.token_hex(8)}"
         self.backend_pids = {}
 
@@ -363,10 +364,12 @@ class Workload:
         unfixed gap, not this method's concern). The reliable use is extra
         `SELECT pg_sleep(n), ...`-shaped sessions alongside `sleeper`,
         which DO correlate. The caller is responsible for terminating the
-        returned Popen."""
+        returned Popen. Tracked on the instance and reaped by stop(), so a
+        caller that forgets to terminate one explicitly cannot leak it."""
         sess = self._session(role)
         sess.stdin.write(sql.rstrip().rstrip(';') + ";\n")
         sess.stdin.flush()
+        self.extra_sessions.append(sess)
         return sess
 
     def release(self):
@@ -377,7 +380,7 @@ class Workload:
         time.sleep(0.5)
 
     def stop(self):
-        for p in (self.sleeper, self.holder, self.waiter):
+        for p in (self.sleeper, self.holder, self.waiter, *self.extra_sessions):
             if p is None:
                 continue
             p.terminate()
@@ -386,10 +389,16 @@ class Workload:
             except subprocess.TimeoutExpired:
                 p.kill()
         self.sleeper = self.holder = self.waiter = None
+        self.extra_sessions = []
         try:
+            # application_name (not query text) so this reaps sleeper,
+            # holder, waiter AND any open_extra_session() backends alike --
+            # a stray idle-in-transaction holder still granting
+            # AccessExclusiveLock on LOCK_TABLE wedges every subsequent
+            # Workload user's open_sessions() (CREATE TABLE blocks forever).
             psql("SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
                  "WHERE pid != pg_backend_pid() AND datname = 'postgres' "
-                 f"AND query LIKE '%{self.LOCK_TABLE}%'")
+                 f"AND application_name LIKE '{self.tag_base}%'")
             time.sleep(1)
             psql(f"DROP TABLE IF EXISTS {self.LOCK_TABLE}")
         except subprocess.TimeoutExpired:
