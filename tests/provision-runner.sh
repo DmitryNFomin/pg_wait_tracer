@@ -402,13 +402,22 @@ touch "$HOME/.ssh/known_hosts"
 # harmless few extra milliseconds there, and the actual fix for a
 # snapshot-booted VM.
 for h in localhost 127.0.0.1; do
-    ssh-keygen -R "$h" -f "$HOME/.ssh/known_hosts" >/dev/null 2>&1 || true
-    log "(re)scanning $h into known_hosts"
-    # || true: the BatchMode ssh check right below this loop is the real
-    # guard -- if ssh-keyscan hiccups (e.g. sshd not answering yet) and
-    # leaves known_hosts short, that check fails loudly with its own
-    # FATAL message instead of this line aborting provisioning under -e.
-    ssh-keyscan -H "$h" >> "$HOME/.ssh/known_hosts" 2>/dev/null || true
+    # Scan into a temp file FIRST and only remove+replace the existing
+    # known_hosts entry (via ssh-keygen -R) once the scan actually produced
+    # something. Scanning straight into known_hosts after an unconditional
+    # -R (the previous version) would, on a hiccup (sshd not answering
+    # yet), leave known_hosts with NO entry at all for $h -- strictly worse
+    # than the stale-but-present entry it started with. The BatchMode ssh
+    # check right below this loop is still the real guard either way.
+    tmp_scan=$(mktemp)
+    if ssh-keyscan -H "$h" >"$tmp_scan" 2>/dev/null && [[ -s "$tmp_scan" ]]; then
+        ssh-keygen -R "$h" -f "$HOME/.ssh/known_hosts" >/dev/null 2>&1 || true
+        cat "$tmp_scan" >> "$HOME/.ssh/known_hosts"
+        log "(re)scanned $h into known_hosts"
+    else
+        log "WARNING: ssh-keyscan $h produced nothing -- leaving any existing known_hosts entry for $h untouched"
+    fi
+    rm -f "$tmp_scan"
 done
 chmod 600 "$HOME/.ssh/known_hosts"
 

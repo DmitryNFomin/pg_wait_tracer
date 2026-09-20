@@ -280,6 +280,6 @@ check-fast:
 box-check:
 	@OS=$(OS) PG=$(PG) EPHEMERAL=$(EPHEMERAL) KEEP=$(KEEP) scripts/box-check.sh
 hetzner-sweep:
-	@tests/hetzner-sweep.sh $(if $(MAX_AGE_HOURS),--max-age-hours $(MAX_AGE_HOURS),)
+	@tests/hetzner-sweep.sh $(if $(MAX_AGE_HOURS),--max-age-hours $(MAX_AGE_HOURS),) $(if $(DRY_RUN),--dry-run,)
 ui-gallery:
 	@tests/ui_gallery.sh $(BASE)

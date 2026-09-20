@@ -256,9 +256,20 @@ cmd_delete() {
     local server_id="${1:?Usage: $0 delete <SERVER_ID>}"
 
     echo "Deleting server $server_id ..." >&2
-    curl -s -X DELETE "$API/servers/$server_id" \
-        -H "Authorization: Bearer $HCLOUD_TOKEN" \
-        | jq -r '.action.status // "done"'
+    # Real bug found on review: `jq -r '.action.status // "done"'` printed
+    # "done" even on an API ERROR response (bad token, server locked, id
+    # already gone) -- an error body has no .action key at all, so the //
+    # fallback silently lied. Check .error.message FIRST and fail loudly +
+    # non-zero; only fall through to the success path when there is none.
+    local result err
+    result=$(curl -s -X DELETE "$API/servers/$server_id" \
+        -H "Authorization: Bearer $HCLOUD_TOKEN")
+    err=$(echo "$result" | jq -r '.error.message // empty')
+    if [[ -n "$err" ]]; then
+        echo "FATAL: delete $server_id failed: $err" >&2
+        exit 1
+    fi
+    echo "$result" | jq -r '.action.status // "done"'
 }
 
 cmd_ssh() {

@@ -12,7 +12,10 @@
 #                                   deleted (issue #141). No PGWT_BOX needed.
 #   make box-check EPHEMERAL=1 KEEP=1   # leave the VM up for debugging;
 #                                   prints the exact delete command instead
-#                                   of deleting it.
+#                                   of deleting it. tests/hetzner-sweep.sh
+#                                   will still delete it ~6h later unless
+#                                   you raise MAX_AGE_HOURS or delete it
+#                                   yourself first.
 #
 # Env:
 #   PGWT_BOX          ssh target for the default (Ubuntu) box, e.g. root@1.2.3.4
@@ -32,15 +35,37 @@
 #                     print the delete command instead.
 #
 # Ephemeral-VM deletion guarantee (issue #141 — "a throwaway VM must never
-# be forgotten"): (1) a trap on EXIT/INT/TERM runs the same cleanup function
-# regardless of how the script ends; (2) after DELETE, a separate Hetzner
-# API GET confirms the server id is actually gone (404) before this script
-# reports success — the DELETE call's own 2xx response is never trusted
-# alone; (3) `tests/hetzner-sweep.sh` (label pgwt=ephemeral, age > 6h) runs
-# at the start of EVERY box-check invocation, ephemeral or not, so a VM
-# leaked by an earlier interrupted run (e.g. `kill -9`, which no trap can
-# catch) is still reaped on the next call, and is also available on demand
-# as `make hetzner-sweep`.
+# be forgotten"):
+#   1. `trap ephemeral_cleanup EXIT` plus DEDICATED `trap '...; exit N' INT
+#      TERM HUP` handlers (registered before the network call that creates
+#      the VM) all run the same cleanup. Signal-specific, not a bare `trap
+#      ephemeral_cleanup EXIT INT TERM`: bash does NOT terminate a
+#      non-interactive script on an already-trapped signal by itself — once
+#      you `trap` INT/TERM, resuming (or not) after the handler is the
+#      script's own job, and a handler that doesn't call `exit` just lets
+#      the script keep running from wherever it was interrupted (a second
+#      Ctrl-C would then be a no-op, guarded by `$cleanup_done`). HUP is
+#      trapped too: a closed terminal / dropped ssh session delivers SIGHUP
+#      to this script with no EXIT trap guaranteed to fire otherwise.
+#   2. Orphan-window guard: `$server_id` is only assigned after `create`
+#      returns, which can be 1-11 minutes after the VM actually exists
+#      server-side (SSH + cloud-init wait loops). A signal or failure in
+#      that window used to leave `ephemeral_cleanup` with nothing to act on
+#      (`$server_id` still empty) — an orphan by construction, and observed
+#      live while building this. Fixed: when `$server_id` is empty but
+#      `$server_name` is set, cleanup looks the server up by NAME via the
+#      Hetzner API before giving up.
+#   3. After DELETE, a separate Hetzner API GET confirms the server id is
+#      actually gone (404) before this script reports success — the DELETE
+#      call's own response is never trusted alone. Both failure paths here
+#      (token unreadable; the 404 poll times out) now `exit 1` from inside
+#      the trap — loud AND non-zero, not just a log line under an exit-0
+#      script.
+#   4. `tests/hetzner-sweep.sh` (label pgwt=ephemeral, age > 6h) runs at the
+#      start of EVERY box-check invocation, ephemeral or not, so a VM
+#      leaked despite all of the above (e.g. `kill -9`, which no trap can
+#      ever catch) is still reaped on the next call, and is also available
+#      on demand as `make hetzner-sweep`.
 #
 # Each run gets its own remote directory named after the local branch, and a
 # box-wide flock serialises concurrent runs (timing tests must not overlap;
@@ -57,51 +82,73 @@ PG="${PG:-}"
 EPHEMERAL="${EPHEMERAL:-0}"
 KEEP="${KEEP:-0}"
 
-# ---------------------------------------------------------------------------
-# Sweep first, always — best-effort, never fatal to this run. Catches a VM
-# an earlier run leaked (crash, `kill -9`, laptop sleep mid-run: nothing a
-# trap in THIS invocation could ever see).
-# ---------------------------------------------------------------------------
-tests/hetzner-sweep.sh || echo "box-check: hetzner-sweep.sh reported a problem (non-fatal, continuing)" >&2
-
 ts=$(date +%Y%m%d-%H%M%S)
 mkdir -p tests/results
+if [[ "$EPHEMERAL" == "1" ]]; then
+    log="tests/results/box-check-ephemeral-$OS-$ts.log"
+else
+    log="tests/results/box-check-$OS-$ts.log"
+fi
+: > "$log"
 
 hcloud_token() {
     command -v security >/dev/null 2>&1 || return 1
     security find-generic-password -s hcloud -a claude_token -w 2>/dev/null
 }
 
+# Sweep first, always — best-effort, never fatal to this run, but now part
+# of THIS run's own log (previously ran before $log existed and its output
+# went nowhere but the terminal). Catches a VM an earlier run leaked (crash,
+# `kill -9`, laptop sleep mid-run: nothing a trap in THIS invocation could
+# ever see).
+if ! tests/hetzner-sweep.sh 2>&1 | tee -a "$log"; then
+    echo "box-check: hetzner-sweep.sh reported a problem (non-fatal, continuing)" | tee -a "$log" >&2
+fi
+
 server_id=""
 server_ip=""
 server_name=""
 cleanup_done=0
 
-# Registered via `trap ... EXIT INT TERM` below the moment a VM exists, so
-# it runs no matter how this script ends (normal exit, an error under
-# `set -e`-style `exit`, or the user hitting Ctrl-C). Idempotent
-# ($cleanup_done) since EXIT fires again after an INT/TERM handler's own
-# `exit`.
+# See the deletion-guarantee comment block at the top of this file for the
+# design. Registered (both this EXIT trap and the INT/TERM/HUP ones below)
+# before the network call that creates the VM.
 ephemeral_cleanup() {
     [[ "$cleanup_done" -eq 1 ]] && return
     cleanup_done=1
+
+    local token
+    token="$(hcloud_token || true)"
+
+    # Orphan-window guard (see top-of-file comment, point 2): $server_id is
+    # only set after `create` returns; if we were interrupted or died
+    # before that, look the server up by the name we already committed to
+    # before starting the create call.
+    if [[ -z "$server_id" && -n "$server_name" && -n "$token" ]]; then
+        echo "box-check: server_id not yet known at cleanup time -- looking up '$server_name' by name (orphan-window guard)" | tee -a "$log"
+        server_id=$(curl -s "https://api.hetzner.cloud/v1/servers?name=$server_name" \
+            -H "Authorization: Bearer $token" | jq -r '.servers[0].id // empty' 2>/dev/null)
+        [[ -n "$server_id" ]] && echo "box-check: found $server_name as id=$server_id by name lookup" | tee -a "$log"
+    fi
+    # Genuinely nothing to clean up: either no VM was ever attempted, or the
+    # name lookup (with a working token) found nothing.
     [[ -z "$server_id" ]] && return
 
     if [[ "$KEEP" == "1" ]]; then
         echo "box-check: EPHEMERAL=1 KEEP=1 — leaving $server_name (id=$server_id, ip=$server_ip) up." | tee -a "$log"
-        echo "box-check: delete it yourself when done:" | tee -a "$log"
+        echo "box-check: tests/hetzner-sweep.sh (make hetzner-sweep, cutoff ${MAX_AGE_HOURS:-6}h by default) WILL delete this VM on its own in a few hours unless you raise MAX_AGE_HOURS/--max-age-hours or delete it yourself first:" | tee -a "$log"
         echo "  HCLOUD_TOKEN=\"\$(security find-generic-password -s hcloud -a claude_token -w)\" tests/hetzner-vm.sh delete $server_id" | tee -a "$log"
         return
     fi
 
     echo "box-check: deleting ephemeral server $server_name (id=$server_id) ..." | tee -a "$log"
-    local token
-    token="$(hcloud_token || true)"
     if [[ -z "$token" ]]; then
         echo "box-check: FATAL could not read the Hetzner token from the Keychain to delete $server_id -- DELETE IT MANUALLY NOW: tests/hetzner-vm.sh delete $server_id" | tee -a "$log" >&2
-        return
+        exit 1
     fi
-    HCLOUD_TOKEN="$token" tests/hetzner-vm.sh delete "$server_id" >>"$log" 2>&1
+    local del_rc=0
+    HCLOUD_TOKEN="$token" tests/hetzner-vm.sh delete "$server_id" >>"$log" 2>&1 || del_rc=$?
+    [[ $del_rc -ne 0 ]] && echo "box-check: tests/hetzner-vm.sh delete reported an error (rc=$del_rc) -- polling the API to find out the real state" | tee -a "$log" >&2
 
     # Never trust the DELETE call's own response alone: poll the Hetzner API
     # directly for the server id until it 404s (deleted) or we give up.
@@ -119,13 +166,12 @@ ephemeral_cleanup() {
         echo "box-check: confirmed via Hetzner API: server $server_id ($server_name) is gone" | tee -a "$log"
     else
         echo "box-check: FATAL could not confirm server $server_id ($server_name) is deleted (last HTTP $code) -- CHECK MANUALLY: tests/hetzner-vm.sh list" | tee -a "$log" >&2
+        exit 1
     fi
 }
 
 if [[ "$EPHEMERAL" == "1" ]]; then
     [[ "$OS" == "ubuntu" ]] || { echo "EPHEMERAL=1 only supports OS=ubuntu (the only OS with a pgwt=gate-snapshot image so far)" >&2; exit 2; }
-    log="tests/results/box-check-ephemeral-$OS-$ts.log"
-    : > "$log"
 
     token="$(hcloud_token || true)"
     [[ -n "$token" ]] || { echo "no Hetzner token in the Keychain: security add-generic-password -s hcloud -a claude_token -w <token>" >&2; exit 2; }
@@ -148,7 +194,15 @@ if [[ "$EPHEMERAL" == "1" ]]; then
     labels="pgwt=ephemeral,created=$created_epoch,owner=$owner"
 
     echo "box-check: EPHEMERAL=1 — creating $server_name from the pgwt=gate-snapshot image (labels: $labels)" | tee -a "$log"
-    trap ephemeral_cleanup EXIT INT TERM
+    # Registered here, BEFORE the create() call below, which can block for
+    # 1-11 minutes (ssh + cloud-init wait loops) while the VM already
+    # exists server-side -- exactly the orphan window point 2 in the
+    # top-of-file comment guards against. See that comment for why
+    # INT/TERM/HUP each need their own explicit `exit`.
+    trap ephemeral_cleanup EXIT
+    trap 'ephemeral_cleanup; exit 130' INT
+    trap 'ephemeral_cleanup; exit 143' TERM
+    trap 'ephemeral_cleanup; exit 129' HUP
 
     create_out=$(HCLOUD_TOKEN="$token" tests/hetzner-vm.sh create \
         --type cx33 --image-snapshot latest --name "$server_name" --labels "$labels" \
@@ -190,7 +244,6 @@ if [[ "$EPHEMERAL" == "1" ]]; then
         exit 1
     fi
 else
-    log="tests/results/box-check-$OS-$ts.log"
     case "$OS" in
         ubuntu) target="${PGWT_BOX_UBUNTU:-${PGWT_BOX:-}}" ;;
         el8)    target="${PGWT_BOX_EL8:-}" ;;

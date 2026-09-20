@@ -87,9 +87,21 @@ while IFS=$'\t' read -r id name pgwt_label created_label; do
         if [[ "$age" -ge "$max_age" ]]; then
             echo "hetzner-sweep: deleting stale ephemeral server $name (id=$id, age=$((age / 3600))h, cutoff=${MAX_AGE_HOURS}h)"
             if [[ "$DRY_RUN" -eq 0 ]]; then
-                curl -s -X DELETE "$API/servers/$id" -H "Authorization: Bearer $token" >/dev/null
+                # Real bug found on review (same class as hetzner-vm.sh's
+                # cmd_delete): discarding the DELETE response entirely
+                # meant a failed delete (bad/expired token, server locked,
+                # already-gone id) was silently counted as deleted. Check
+                # .error.message and only count it on an actual success.
+                del_result=$(curl -s -X DELETE "$API/servers/$id" -H "Authorization: Bearer $token")
+                del_err=$(echo "$del_result" | jq -r '.error.message // empty')
+                if [[ -n "$del_err" ]]; then
+                    echo "hetzner-sweep: FAILED to delete $name (id=$id): $del_err" >&2
+                else
+                    deleted=$((deleted + 1))
+                fi
+            else
+                deleted=$((deleted + 1))
             fi
-            deleted=$((deleted + 1))
         fi
     elif [[ "$name" == pgwt-dev-* ]]; then
         echo "hetzner-sweep: WARNING unlabelled dev server $name (id=$id) — no pgwt=ephemeral label, not auto-deleted, check manually"
