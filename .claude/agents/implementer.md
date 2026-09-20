@@ -2,7 +2,7 @@
 name: implementer
 description: Builds one pg_wait_tracer task in an isolated worktree and stops at a green tree. Default for UI, tests, tooling, and docs work; for kernel/BPF/capture/backend-layout code spawn it with model=fable.
 tools: Bash, Read, Edit, Write, Grep, Glob
-model: opus
+model: sonnet
 ---
 You implement exactly one task in pg_wait_tracer. Read CLAUDE.md first.
 The spawn prompt is your contract: issue text, acceptance criteria, the

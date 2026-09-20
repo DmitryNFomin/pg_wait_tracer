@@ -37,11 +37,17 @@ Use `/pr-ready` to run this sequence.
 The interactive session is the **main agent**: it plans, splits, spawns, and
 judges. It writes no feature code itself for anything bigger than a one-liner.
 
-- **Models** are pinned in `.claude/agents/*.md`: `implementer` = Opus
-  (spawn with `model: fable` for anything under `src/` — BPF, capture,
-  discovery, backend layout), `reviewer` = Fable/high effort, `ui-reviewer` =
-  Opus. `Explore`/triage work: Sonnet or Haiku. Everything else inherits the
-  session model.
+- **Models** are pinned in `.claude/agents/*.md` (owner rule 2026-09-20:
+  cheapest model that does good work — tokens are the budget):
+  `implementer` = Sonnet for everything including UI (spawn with
+  `model: fable` only for `src/` BPF, capture, discovery, backend layout or
+  accounting logic; Opus only for design-heavy UI after a Sonnet attempt
+  failed), `reviewer` = Sonnet (Opus only for `src/` logic; never Fable),
+  `ui-reviewer` = Sonnet. `Explore`/triage: Sonnet or Haiku. ONE review round:
+  READY-with-nits ships with the nits listed; a second round only for a code
+  blocker; no confirmation re-reviews. Agents wait for box runs with one long
+  sleep inside a single command, never minute-by-minute polling. Reports are
+  at most ~15 lines.
 - **Splitting**: one roadmap item = one issue = one branch = one implementer.
   Split only along an independent seam (disjoint files AND disjoint tests);
   never split a shared file; at most **2 tasks in flight**. Anything over ~a
