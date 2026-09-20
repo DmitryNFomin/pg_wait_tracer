@@ -536,9 +536,16 @@ void pgwt_read_state_map(struct pgwt_daemon *d)
                  * was in-command. An unmarked pid / full accumulator falls
                  * back like the closed path (in-command / emission gate). */
                 bool in_cmd = false;
-                pgwt_live_cmd_gate_classify(pa_cur ? &pa_cur->cmd_gate : NULL,
-                                            false, sval.last_ts, now,
-                                            sval.cmd_open != 0, &in_cmd);
+                bool by_markers = pgwt_live_cmd_gate_classify(
+                    pa_cur ? &pa_cur->cmd_gate : NULL, false,
+                    sval.last_ts, now, sval.cmd_open != 0, &in_cmd);
+                /* Never silent: a full accumulator (no per-pid sweep state)
+                 * fell back to the emission-time gate — count it like the
+                 * closed path does. (An unmarked pid is counted there only,
+                 * on its closed records; the open stretch would re-count the
+                 * same wall every tick.) */
+                if (!by_markers && !pa_cur && we == 0 && d->cmd_gate_active)
+                    d->counters.live_cpu_gate_fallback_total++;
                 struct pgwt_live_interval iv = {
                     .pid             = snext,
                     .we              = we,
