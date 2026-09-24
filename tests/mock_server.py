@@ -553,6 +553,10 @@ class DaemonState:
             # T8 (§5.4): measured-CPU capability. "measured" = schedstat present
             # (exact tier reads se.sum_exec_runtime); "legacy" = gap-inference.
             "cpu_accounting": "measured",
+            # #98: how the live view classifies client on-CPU intervals —
+            # "markers (...)" (CMD_START/CMD_END sweep, majority rule) or
+            # "ungated (...)" (command gate unavailable: all we==0 is CPU*).
+            "live_cpu_gate": "markers (CMD_START/CMD_END sweep, majority rule)",
         }
 
     def metrics(self):
@@ -615,6 +619,12 @@ class DaemonState:
             "wait_gap_cpu_ns_total": 3_000_000,
             # #97 multi-window fail-safe: windowed-delta fields clamped at 0.
             "ring_delta_clamps_total": 0,
+            # #98 live command gate: mirrors status; the counters are the
+            # non-marker share of the live CPU* classification.
+            "live_cpu_gate": "markers (CMD_START/CMD_END sweep, majority rule)",
+            "live_cmd_markers_total": 369252,
+            "live_cpu_unmarked_ns_total": 376926,
+            "live_cpu_gate_fallback_total": 0,
             "io_worker_samples_total": 18000,
             "io_worker_busy_total": 4000,
             "noncmd_cpu_samples_total": 120000,

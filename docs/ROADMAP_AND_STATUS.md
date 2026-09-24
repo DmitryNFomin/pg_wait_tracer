@@ -1489,14 +1489,43 @@ to a CHANGELOG entry).
   while the other rows keep theirs, so a WAIT row can still read > 100% of that
   window's DB Time (unit case: 3 s wait over a 1 s window = 300%), bounded by that
   one stretch; a non-zero `ring_delta_clamps_total` is the tell. Unit:
-  `tests/test_live_accum`. Still open, same
-  family (#98): the live gate is read AT EMISSION, so a waitless statement's
-  whole on-CPU run (ending at the next ClientRead, gate already closed) is
-  "non-command" live while the server's majority rule counts it — ~83% of
-  pgbench's CPU on the box, i.e. the server/CLI CPU ratio of ~6x. And the LIVE
-  display still accounts a CLOSED on-CPU segment at WALL (measured `cpu_ns` is
-  folded only into lifetime counters) — reconcile with the open stretch (measured)
-  when #98 is picked up.
+  `tests/test_live_accum`.
+
+- **Live CPU\* classified by the command gate AT EMISSION — FIXED (issue #98).**
+  `test_daemon_server` "CPU Time ratio server/CLI" read 4.6–7.1x. The live
+  paths took "in-command" from the gate value BPF stamped on the CLOSING record
+  (`PGWT_EVENT_FLAG_CMD_OPEN`, `src/bpf/pg_wait_tracer.bpf.c` `on_watchpoint`
+  → `resolve_exact_attr`), but PostgreSQL calls `pgstat_report_activity(IDLE)`
+  (`on_report_activity` clears `cmd_open`, emits CMD_END) BEFORE the
+  post-command ClientRead begins — so the record that closes a waitless
+  statement's whole on-CPU run always carried a clear gate and the run was
+  filed under NonCommandCpu; only CPU preceding an in-command wait (pgbench:
+  the commit's WAL wait) counted. Probe on the PG18 gate box (temporary
+  instrumentation, 20 s under 4 pgbench clients, 261,043 client we==0
+  records): 40.70 s of client on-CPU wall, of which 6.56 s was stamped
+  CMD_OPEN at emission vs 37.83 s in-command by the marker sweep — 31.57 s
+  (77.6 %) was emitted gate-clear yet lay inside a command; the per-pid stream
+  sample shows every statement as CMD_START → PLAN/EXEC → CMD_END → the we==0
+  record closing at ClientRead with the flag clear. Standalone
+  `test_daemon_server` CPU ratio: 5.40x / 4.83x on master → 0.99, 0.99, 0.99,
+  0.98, 0.99 (PG18) after. Fix: both live paths
+  (`event_stream.c` closed record, `map_reader.c` open stretch) now sweep the
+  pid's CMD_START/CMD_END markers (`pgwt_live_cmd_gate_*`, the live twin of
+  `compute.c pgwt_tag_events`: same state, same per-record step, same
+  majority rule — `tests/test_live_accum` test 8 diffs the two on one generated
+  stream) and the open stretch peeks the same sweep instead of state_map's
+  instantaneous `cmd_open`. Marker-less pids keep we==0 as CPU\* exactly like
+  the server's `seen_cmd` rule, stated (header "Live CPU\* gate", status
+  `live_cpu_gate`, metrics `live_cmd_markers_total` /
+  `live_cpu_unmarked_ns_total` / `live_cpu_gate_fallback_total`). Same-area
+  nits from the #97 review taken: one pid lookup per event (`pa` passed
+  through), category cached only once resolved (rescan throttled per tick).
+  **Still open:** the LIVE display accounts a CLOSED on-CPU segment at WALL
+  (measured `cpu_ns` is folded only into the lifetime counters) while the open
+  stretch is measured — reconciling needs an explicit Off-CPU\* row in the live
+  time_model views (test_multi_window Test 3 asserts Σ top-level rows == DB
+  Time). And `sampler.c`'s tiered-mode accumulation is still a third copy of
+  the fold (bypasses `pgwt_accum_add_interval`).
 
 - **Live view: account the OPEN interval of a repeated WAIT.** `pgwt_read_state_map`
   (`src/map_reader.c`) still skips a backend's current OPEN interval when `d->accum`

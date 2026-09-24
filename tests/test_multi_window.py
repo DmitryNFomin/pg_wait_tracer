@@ -493,9 +493,11 @@ def test_system_event_data(pm_pid):
     # to sum only ':'-free rows, i.e. the CPU* row ALONE, and read 128–142%
     # because the live closed-record path filed non-command CPU under CPU*
     # while DB Time excluded it; with that fixed the CPU* row alone is the
-    # in-command share (~13-17% under pgbench on the gate box — the live gate
-    # is read at emission, #98), so the row selection here is the identity the
-    # comment always described, not a single row.
+    # in-command share (it read ~13-17% under pgbench while the live gate was
+    # taken at emission — #98, since fixed: the marker majority rule now
+    # counts a waitless statement's whole run, so the CPU* row is the bulk
+    # of DB Time under pgbench), so the row selection here is the identity
+    # the comment always described, not a single row.
     # Off-CPU* (measured runqueue residual) can be MOST of DB Time under
     # oversubscription (observed 44.7% visible on a 4-vCPU EL8 box under suite
     # load — the rest was off-CPU), hence the loose floor; ≤125% still fails

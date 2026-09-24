@@ -138,6 +138,8 @@ assert r['sampler_healthy'] is True, r
 assert r['sampler_unhealthy_reason'] == '', r
 # T8 (§5.4): measured-CPU capability must be reported, never silent.
 assert r['cpu_accounting'] in ('measured', 'legacy'), r
+# #98: how the live CPU* row is classified — markers / ungated / n-a.
+assert r['live_cpu_gate'].split(' ')[0] in ('markers', 'ungated', 'n/a'), r
 "
 check $? "default mode is tiered, tier=sampled (no watchpoints until escalation)"
 
@@ -175,11 +177,17 @@ for k in ('events_total', 'events_per_sec', 'lifecycle_events_total',
           'cpu_ns_total', 'offcpu_ns_total', 'cpu_clamped_total',
           'wait_gap_cpu_ns_total',
           # #97 multi-window fail-safe (windowed-delta clamps).
-          'ring_delta_clamps_total'):
+          'ring_delta_clamps_total',
+          # #98 live command gate: the non-marker share of the live CPU*
+          # classification (unmarked pids / full accumulator fallback).
+          'live_cmd_markers_total', 'live_cpu_unmarked_ns_total',
+          'live_cpu_gate_fallback_total'):
     assert k in r, 'missing ' + k
     assert isinstance(r[k], (int, float)), k
 # T8: capability string mirrors status.
 assert r['cpu_accounting'] in ('measured', 'legacy'), r
+# #98: live gate string mirrors status.
+assert r['live_cpu_gate'].split(' ')[0] in ('markers', 'ungated', 'n/a'), r
 # AAS-1 Stage 2: the explicit capacity override wins and is observable.
 assert r['effective_cpu_capacity_cores'] == 3.25, r
 assert r['effective_cpu_capacity_source'] == 'override', r

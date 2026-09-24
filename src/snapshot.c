@@ -101,18 +101,18 @@ find_snap_query_event(const struct pgwt_snapshot *snap,
 /* Windowed delta of a cumulative counter. The accumulator is cumulative
  * EXCEPT for the open [last_ts, now) stretch that pgwt_read_state_map adds
  * to every snapshot at display time: when that stretch closes under a
- * different classification than the snapshot assumed (a client backend's
- * on-CPU run that ends outside its command becomes non-command/idle at
- * emission — the command-open gate is read at the boundary, see issue #97
- * / #98), the field it had been added to goes DOWN. An unsigned wrap here
- * would print ~1.8e10 s in the view; saturate to 0 instead — the time is
- * not lost, it is in the row the closed record was filed under. Every
- * clamp is counted in *clamped (→ snapshot.clamped_fields → the daemon's
- * ring_delta_clamps_total metric), so the fail-safe is never silent. What
- * it does NOT repair: the other fields of the same window still carry the
- * reclassified stretch's wall (DB Time went down by it), so a WAIT row can
- * still read > 100% of that window's DB Time — bounded by that one stretch,
- * root cause #98 (the gate is read at emission). */
+ * different classification than the snapshot assumed (issue #97; since #98
+ * the in-command decision is the marker majority rule, so this is now the
+ * rare case of a stretch whose majority flips as it grows, or whose
+ * category resolves late), the field it had been added to goes DOWN. An
+ * unsigned wrap here would print ~1.8e10 s in the view; saturate to 0
+ * instead — the time is not lost, it is in the row the closed record was
+ * filed under. Every clamp is counted in *clamped (→
+ * snapshot.clamped_fields → the daemon's ring_delta_clamps_total metric),
+ * so the fail-safe is never silent. What it does NOT repair: the other
+ * fields of the same window still carry the reclassified stretch's wall
+ * (DB Time went down by it), so a WAIT row can still read > 100% of that
+ * window's DB Time — bounded by that one stretch. */
 static inline uint64_t sat_sub(uint64_t curr, uint64_t prev, uint32_t *clamped)
 {
     if (curr >= prev)
