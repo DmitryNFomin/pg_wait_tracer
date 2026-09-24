@@ -5,7 +5,7 @@ import { isUnavailable } from '../lib/builders/fidelity.js';
 import { mountUnavailablePanel } from '../lib/panels.js';
 
 export function createMatrixView() {
-    let chart = null, ctxRef = null;
+    let chart = null, ctxRef = null, prevLabels = null;
     function disposeChart() { if (chart) { chart.dispose(); chart = null; } }
     return {
         id: 'matrix', pausesLive: true,
@@ -18,7 +18,13 @@ export function createMatrixView() {
         },
         build(data) {
             if (isUnavailable(data)) return { unavailable: data };
-            return buildMatrixOption(data, { limit: 20 });
+            // Row/column order is held across ticks (STABILITY, #104): pass
+            // last tick's label order back in so unchanged events don't
+            // reshuffle; a fresh mount (leave() clears prevLabels) starts
+            // from rank order again.
+            const model = buildMatrixOption(data, { limit: 20, prevLabels });
+            if (model.hasData) prevLabels = model.labels;
+            return model;
         },
         mount(el, model, ctx) {
             ctxRef = ctx;
@@ -50,7 +56,7 @@ export function createMatrixView() {
             chart.setOption(model.option, true);
         },
         enter(ctx) { ctxRef = ctx; },
-        leave() { disposeChart(); },
+        leave() { disposeChart(); prevLabels = null; },
         resize() { if (chart) chart.resize(); },
     };
 }
