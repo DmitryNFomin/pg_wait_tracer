@@ -10,9 +10,14 @@ backend, Go WebSocket bridge, ECharts/uPlot web UI). Plan and status:
 |---|---|---|---|
 | `make check` (`check-fast` = seconds) | this Mac | Node builder tests, Go bridge, py_compile, Playwright UI + chaos suites vs `tests/mock_server.py` | before every push — the push guard enforces it |
 | `make box-check [OS=el8\|el9\|ubuntu] [PG=13\|16\|17\|18]` | x86 Linux box over ssh (`$PGWT_BOX`, `$PGWT_BOX_EL8`…) | Linux build, C units, synthetic-data tests, protocol drift, real-PG capture (`tests/run_all.sh --require-live`, incl. the live-UI-smoke walk — `tests/ui_live_smoke.sh` / `tests/results/ui_live/summary.json`) | before every PR; `OS=el8` when touching kernel/libbpf/layout code |
+| `make box-check EPHEMERAL=1 [PG=…] [KEEP=1]` | throwaway Hetzner VM created from the `pgwt=gate-snapshot` image, always deleted at the end (`KEEP=1` leaves it up and prints the delete command) | the same live tier as above, on a private one-run VM — no `$PGWT_BOX`, no flock contention with other agents | agents' inner iteration loop (issue #141) — ephemeral for iteration, the persistent box for the final pre-PR run |
 | `make ui-gallery [BASE=ref]` | this Mac | before/after screenshots of every UI snapshot cell → `tests/results/ui_gallery/index.html` + `summary.json` | before every PR that touches `web/` |
 
-Logs: `tests/results/box-check-*.log`, `tests/results/ui_gallery/`, `tests/results/ui_live/summary.json`.
+Logs: `tests/results/box-check-*.log` (`box-check-ephemeral-*.log` for `EPHEMERAL=1`), `tests/results/ui_gallery/`, `tests/results/ui_live/summary.json`.
+
+`make hetzner-sweep` deletes any `pgwt=ephemeral`-labelled Hetzner VM older than
+6h (also runs automatically at the start of every `box-check`); the
+persistent gate box (`pgwt-gate`) is never touched by it.
 
 ## Definition of done
 

@@ -708,7 +708,7 @@ commit PNGs` dance disappears.
 
 ---
 
-## Step 4 — Ephemeral VMs + real OS matrix  `[OPEN]`
+## Step 4 — Ephemeral VMs + real OS matrix  `[PARTIALLY DONE — item 4 (agents' inner loop) landed 2026-09-19, issue #141; items 1-3/5 (nightly OS matrix, EL8/EL9 snapshots) still OPEN]`
 
 **Goal:** EL8 (kernel 4.18) and EL9 (5.14) are tested on their real kernels
 nightly and on demand, on throwaway VMs; agents can verify kernel/libbpf/
@@ -745,10 +745,34 @@ runner tokens.
    for watchpoints. Delete the container-based matrix (it never tested the
    kernels it claimed to). Optional cell: `cax11` arm64 Rocky 9 to make the
    README's aarch64 claim true.
-4. `scripts/box-check.sh`: when `OS=<x>` is set and `PGWT_BOX_<X>` is unset
-   but `HCLOUD_TOKEN` is, create a VM from the snapshot, run, and delete it
-   (`--keep` to leave it up for debugging). Same path serves "one VM per
-   agent" when the gate box is busy.
+4. `[DONE 2026-09-19, issue #141, OS=ubuntu only]` `scripts/box-check.sh`
+   `EPHEMERAL=1`: creates `pgwt-dev-<nonce>` (cx33, EU, labels
+   `pgwt=ephemeral,created=<epoch>,owner=<hostname>`) from the newest
+   Hetzner image labelled `pgwt=gate-snapshot` (`tests/hetzner-vm.sh
+   create --image-snapshot latest`, a snapshot of the already-provisioned
+   persistent gate box, taken by the lead under the box lock — not the
+   from-scratch `tests/build-snapshots.sh` step 2 above, which is still
+   open and would be needed for an EL8/EL9 snapshot), waits for ssh, runs
+   `tests/provision-runner.sh ubuntu` once (fast no-op path: refreshes
+   bpftool for whatever kernel this VM actually booted and heals the
+   pgbench dataset if the snapshot's was ever shrunk), runs exactly what
+   box-check runs today against `root@<ip>`, rsyncs results back to
+   `tests/results/box-check-ephemeral-*.log`, then ALWAYS deletes the VM
+   (trap on EXIT/INT/TERM + a post-DELETE Hetzner API GET confirming 404,
+   not just the DELETE call's own response) — `KEEP=1` leaves it up and
+   prints the exact delete command instead. `tests/hetzner-sweep.sh`
+   (`make hetzner-sweep`, also run automatically at the start of every
+   box-check) deletes any `pgwt=ephemeral` VM older than 6h as a second,
+   independent line of defense (real example hit while proving this out:
+   a VM survived a mid-run bug and needed the sweeper as the backstop it
+   is designed to be). Owner decision 2026-09-19: **ephemeral for
+   iteration, persistent box for the final pre-PR run** — EPHEMERAL=1 is
+   not a substitute for the "Definition of done" `make box-check` in
+   CLAUDE.md. Not yet done: `OS=el8`/`el9` (no snapshot exists for either
+   — needs item 2's `tests/build-snapshots.sh` first) and "one VM per
+   agent when the gate box is busy" for the persistent-box path (today
+   that's just `EPHEMERAL=1` itself, a full substitute, not a queue-relief
+   mechanism for `$PGWT_BOX`).
 5. On-demand label: a `needs-el8` / `needs-el9` PR label triggers the same
    matrix for that PR (`pull_request: types: [labeled]`).
 
