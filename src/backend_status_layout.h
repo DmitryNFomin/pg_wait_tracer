@@ -116,7 +116,13 @@ struct pgwt_pgbs_snapshot {
  * PG14+ fills query_id directly. PG13 instead fills activity so the sampler
  * can normalize/hash it into a versioned synthetic grouping key. */
 struct pgwt_pgbs_sampled_attr {
-    uint64_t query_id;
+    uint64_t query_id;        /* effective: st_query_id while in a command, else 0 */
+    uint64_t last_query_id;   /* raw st_query_id (#128): PostgreSQL clears it at
+                               * STATE_RUNNING and sets it after parse analysis,
+                               * so while idle it is the id of the statement that
+                               * just finished (or 0) — the sampled tier's only
+                               * way to attribute a parse-phase wait of a
+                               * statement that ended within one sample period */
     uint32_t databaseid;
     uint32_t userid;
     uint32_t state;

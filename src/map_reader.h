@@ -3,6 +3,7 @@
 #define PGWT_MAP_READER_H
 
 #include "pg_wait_tracer.h"
+#include "query_attr.h"
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -44,6 +45,7 @@ struct pgwt_pid_accum {
     uint32_t cat_flag_plus1;
     int      cat_scan_tick;
     struct pgwt_live_cmd_gate cmd_gate;   /* issue #98, see above */
+    struct pgwt_qattr_pid qattr;          /* issue #128: deferred query attribution */
     int      num_events;
     uint64_t db_time_ns;      /* total non-idle time */
     uint64_t cpu_time_ns;     /* event=0 time */
@@ -93,9 +95,18 @@ struct pgwt_accumulator {
     struct pgwt_event_stats system_events[4096];
     int num_system_events;
 
-    /* Query-level event aggregation */
+    /* Query-level event aggregation. query_id 0 rows are the UNATTRIBUTED
+     * bucket (issue #128, query_attr.h): foreground non-idle time whose
+     * command never reported an id — shown as "unattributed", never
+     * dropped. */
     struct pgwt_query_event_stats query_events[MAX_QUERY_EVENTS];
     int num_query_events;
+
+    /* #128 observability (control socket: live_query_*). Lifetime totals
+     * in the closed-record accumulator; copied to the display copy. */
+    uint64_t qattr_backfilled_ns;     /* attributed by rule 1/2 after the fact */
+    uint64_t qattr_unattributed_ns;   /* filed under the unattributed bucket */
+    uint64_t qattr_pending_overflow;  /* pending lists that spilled early */
 };
 
 /* Forward */
@@ -244,9 +255,48 @@ struct pgwt_live_interval {
 /* Fold one interval into per-pid, system, query and time-model accumulators.
  * Both live paths call this; the classification is pgwt_live_effective_event.
  * io_worker intervals stay visible in the per-pid/system rows but never enter
- * DB Time / the time model / per-pid load (compute.h category contract). */
+ * DB Time / the time model / per-pid load (compute.h category contract).
+ * The query-level step is pgwt_live_qattr_record (issue #128). */
 void pgwt_accum_add_interval(struct pgwt_accumulator *acc,
                              const struct pgwt_live_interval *iv);
+
+/* ── Deferred per-query attribution (issue #128, query_attr.h) ──────────
+ *
+ * The query-level step of every live consumer (closed records, the open
+ * state_map stretch, sampled-tier samples):
+ *   query_id != 0      → its row; a closed record also observes the id for
+ *                        the pid (rule 1 for what is pending, cmd_qid for
+ *                        rule 2);
+ *   query_id == 0, background/maintenance/io_worker → nothing (query-less
+ *                        by construction, as before);
+ *   query_id == 0, foreground idle → a command boundary (keeps cmd_qid);
+ *   query_id == 0, foreground non-idle, defer → pending on the pid until
+ *                        its next observe/boundary;
+ *   …not deferrable (the open stretch at tick time, no per-pid state) →
+ *                        cmd_qid now if the command already reported one,
+ *                        else no query row yet (NOT unattributed: the id
+ *                        is not known yet, and its closing record will
+ *                        carry it — see pgwt_live_qattr_record).
+ * `stat_ns` is the row value (CPU ns for we==0, wall otherwise). */
+void pgwt_live_qattr_record(struct pgwt_accumulator *acc,
+                            struct pgwt_pid_accum *pa, uint64_t query_id,
+                            uint32_t we, uint64_t stat_ns, uint32_t cat_flag,
+                            bool defer);
+
+/* A marker in the pid's stream: CMD_START is a new-command boundary; any
+ * other marker carrying a nonzero id observes it (plan/exec markers are
+ * emitted after parse analysis reported the id, so they resolve a
+ * parse-phase wait even when no later record does); CMD_END without an id
+ * is a boundary that keeps cmd_qid. Escalation markers (pid 0, packed
+ * query_id) must not be passed. */
+void pgwt_live_qattr_marker(struct pgwt_accumulator *acc,
+                            struct pgwt_pid_accum *pa, uint32_t marker,
+                            uint64_t query_id);
+
+/* Sampled tier: a sample taken outside any command (cmd_open == 0) is the
+ * pid's new-command boundary (no markers exist there). */
+void pgwt_live_qattr_between_commands(struct pgwt_accumulator *acc,
+                                      struct pgwt_pid_accum *pa);
 
 /* Log2 histogram bucket for a duration in nanoseconds. */
 uint32_t pgwt_duration_to_bucket(uint64_t ns);

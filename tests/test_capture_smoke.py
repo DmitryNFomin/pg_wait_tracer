@@ -422,7 +422,13 @@ class Workload:
         self.holder.stdin.flush()
         time.sleep(0.5)
 
-    def stop(self):
+    def stop(self, keep_table=False):
+        """keep_table: leave LOCK_TABLE in place so the NEXT Workload reuses
+        the same relation OID — pg_stat_statements jumbles relation OIDs
+        into the query id (PG13's pgss certainly does), so a dropped and
+        recreated table gives the waiter statement a NEW query id. A caller
+        that captured that id from one Workload and needs it to still hold
+        for the next (Phase 1b's Mode C drill) keeps the table."""
         for p in (self.sleeper, self.holder, self.waiter, *self.extra_sessions):
             if p is None:
                 continue
@@ -443,7 +449,8 @@ class Workload:
                  "WHERE pid != pg_backend_pid() AND datname = 'postgres' "
                  f"AND application_name LIKE '{self.tag_base}%'")
             time.sleep(1)
-            psql(f"DROP TABLE IF EXISTS {self.LOCK_TABLE}")
+            if not keep_table:
+                psql(f"DROP TABLE IF EXISTS {self.LOCK_TABLE}")
         except subprocess.TimeoutExpired:
             pass
 
@@ -783,6 +790,171 @@ def phase_live_system_event(pm_pid, mode, core=False):
     # tolerance (no sampler+exact double-count during escalation). core mode
     # relaxes the pg_sleep magnitude floor where watchpoints don't fire.
     assert_wait_events(events, f"live/{mode}", core=core)
+
+
+def parse_query_event_rows(output):
+    """query_event Mode A rows -> [{'qid': int|None, 'name', 'count',
+    'total_ms'}]. qid None = the explicit "unattributed" bucket (issue #128)."""
+    rows = []
+    for line in output.split('\n'):
+        m = re.match(r'^(-?\d+|unattributed)\s+(\S+(?::\S+)?)\s+(\d+)\s+'
+                     r'([\d.]+)\s', line.strip())
+        if m:
+            qid = (None if m.group(1) == 'unattributed'
+                   else int(m.group(1)) & 0xFFFFFFFFFFFFFFFF)
+            rows.append({'qid': qid, 'name': m.group(2),
+                         'count': int(m.group(3)),
+                         'total_ms': float(m.group(4))})
+    return rows
+
+
+def pgss_query_id_for(pattern):
+    """pg_stat_statements queryid (unsigned 64-bit) of the most-called
+    statement whose text contains `pattern`, or None."""
+    out = psql("SELECT queryid FROM pg_stat_statements "
+               f"WHERE query LIKE '%{pattern}%' "
+               "AND query NOT LIKE '%pg_stat_statements%' "
+               "AND queryid IS NOT NULL ORDER BY calls DESC LIMIT 1")
+    out = (out or "").strip()
+    return int(out) & 0xFFFFFFFFFFFFFFFF if re.fullmatch(r'-?\d+', out) else None
+
+
+def phase_live_query_attribution(pm_pid, mode, pg_major, core=False):
+    """Issue #128: the controlled waiter's Lock:relation wait must be
+    attributed to ITS statement's query_id — in query_event Mode A (no
+    filter) and in the Mode C drill (--query-id). The relation lock is
+    taken during parse analysis, BEFORE pgstat_report_query_id, so the wait
+    closes with query_id 0; the daemon now resolves it against the id the
+    command reports afterwards (src/query_attr.h). A wait whose command
+    never reports an id lands in the explicit "unattributed" row — visible,
+    never dropped.
+
+    The sampled tier can only attribute a wait if a LATER sample of the same
+    command carries the id; a statement that finishes within one sample
+    period after the lock is granted has none, so the exact tier (full
+    mode, or an escalation window in tiered mode) is what makes the strict
+    assertion hold. core mode (container, no firing watchpoints) is
+    sampled-only and only asserts the never-dropped guarantee."""
+    print(f"--- Phase 1b: query attribution of the lock wait (query_event, "
+          f"--mode {mode}) ---")
+    lock_floor = 100 if core else 4000
+
+    def lock_rows(rows):
+        return [r for r in rows if r['name'] == 'Lock:relation'
+                and r['total_ms'] >= lock_floor]
+
+    # Mode A ------------------------------------------------------------
+    # pg_stat_statements jumbles the relation OID into the query id, and
+    # every Workload so far dropped and recreated LOCK_TABLE: reset pgss so
+    # the lookup below sees exactly THIS incarnation's statement (Phase 2
+    # resets again for its own workload), and keep the table through Mode C
+    # so the id captured here is the one the drill filters on.
+    psql("SELECT pg_stat_statements_reset()")
+    wl = Workload()
+    wl.open_sessions()
+    trace_dir = tempfile.mkdtemp(prefix="pgwt_smoke_qattr_")
+    os.chmod(trace_dir, 0o755)
+    tracer_stdout = tempfile.TemporaryFile()
+    tracer_stderr = tempfile.TemporaryFile()
+    tracer = subprocess.Popen(
+        [TRACER, "--mode", mode, "--pid", str(pm_pid), "-T", trace_dir,
+         "--interval", "12", "--duration", "60", "--view", "query_event"],
+        stdout=tracer_stdout, stderr=tracer_stderr)
+    try:
+        check(wait_for_control_socket(tracer, trace_dir, timeout_s=180),
+              f"qattr/{mode}: tracer reached the post-attach startup boundary")
+        wl.fire(sleep_s=3)
+        time.sleep(6.5)
+        wl.release()
+        wait_for_observation(
+            tracer,
+            lambda: len(lock_rows(parse_query_event_rows(
+                temp_output_text(tracer_stdout)))) > 0,
+            30)
+    finally:
+        terminate_and_wait(tracer)
+        wl.stop(keep_table=True)   # Mode C reuses the relation (same id)
+    out = STRIP_ANSI.sub('', temp_output_text(tracer_stdout))
+    err = temp_output_text(tracer_stderr)
+    tracer_stdout.close()
+    tracer_stderr.close()
+    subprocess.run(["rm", "-rf", trace_dir])
+
+    rows = lock_rows(parse_query_event_rows(out))
+    attributed = [r for r in rows if r['qid'] is not None]
+    unattributed = [r for r in rows if r['qid'] is None]
+    truth = pgss_query_id_for("FROM _smoke_lock_wait")
+    synthetic_keys = pg_major == 13 and mode == "tiered"
+    desc = (f"attributed={[(r['qid'], r['total_ms']) for r in attributed]} "
+            f"unattributed={[r['total_ms'] for r in unattributed]} "
+            f"pgss={truth}")
+    check(len(rows) > 0,
+          f"qattr/{mode} Mode A: the waiter's Lock:relation (>= {lock_floor}ms) "
+          f"is in query_event at all — never dropped ({desc})"
+          + ("" if rows else f" (stderr tail: {err[-300:]!r})"))
+    if core:
+        print(f"  INFO: qattr/{mode} [core] sampled-only: {desc}")
+    elif synthetic_keys:
+        check(len(attributed) > 0,
+              f"qattr/{mode} Mode A: PG13 sampled lock wait is keyed by a "
+              f"synthetic query id ({desc})")
+    else:
+        check(truth is not None,
+              f"qattr/{mode}: pg_stat_statements knows the waiter statement "
+              f"(id={truth})")
+        check(any(r['qid'] == truth for r in attributed),
+              f"qattr/{mode} Mode A: Lock:relation is attributed to the "
+              f"waiter statement's query_id ({desc}) [issue #128]")
+
+    # Mode C (the drill) -------------------------------------------------
+    if core or synthetic_keys or truth is None:
+        print(f"  INFO: qattr/{mode}: Mode C drill skipped "
+              f"(core={core}, synthetic_keys={synthetic_keys}, truth={truth})")
+        psql(f"DROP TABLE IF EXISTS {Workload.LOCK_TABLE}")
+        return
+    wl = Workload()
+    wl.open_sessions()
+    trace_dir = tempfile.mkdtemp(prefix="pgwt_smoke_qattr_c_")
+    os.chmod(trace_dir, 0o755)
+    tracer_stdout = tempfile.TemporaryFile()
+    tracer_stderr = tempfile.TemporaryFile()
+    signed_truth = truth - (1 << 64) if truth >= (1 << 63) else truth
+    tracer = subprocess.Popen(
+        [TRACER, "--mode", mode, "--pid", str(pm_pid), "-T", trace_dir,
+         "--interval", "12", "--duration", "60", "--view", "query_event",
+         "--query-id", str(signed_truth)],
+        stdout=tracer_stdout, stderr=tracer_stderr)
+    try:
+        check(wait_for_control_socket(tracer, trace_dir, timeout_s=180),
+              f"qattr/{mode} Mode C: tracer reached the post-attach startup "
+              f"boundary")
+        wl.fire(sleep_s=3)
+        time.sleep(6.5)
+        wl.release()
+        wait_for_observation(
+            tracer,
+            lambda: max((e['total_ms'] for e in parse_system_events(
+                temp_output_text(tracer_stdout))
+                if e['name'] == 'Lock:relation'), default=0) >= lock_floor,
+            30)
+    finally:
+        terminate_and_wait(tracer)
+        wl.stop()
+    out = STRIP_ANSI.sub('', temp_output_text(tracer_stdout))
+    err = temp_output_text(tracer_stderr)
+    tracer_stdout.close()
+    tracer_stderr.close()
+    subprocess.run(["rm", "-rf", trace_dir])
+    profile = parse_system_events(out)
+    lock_ms = max((e['total_ms'] for e in profile
+                   if e['name'] == 'Lock:relation'), default=0)
+    check(lock_ms >= lock_floor,
+          f"qattr/{mode} Mode C (--query-id {signed_truth}): the drill shows "
+          f"Lock:relation = {lock_ms:.0f}ms (expect >= {lock_floor}) "
+          f"[issue #128]"
+          + ("" if lock_ms >= lock_floor else
+             f" (rows: {[(e['name'], e['total_ms']) for e in profile]}, "
+             f"stderr tail: {err[-300:]!r})"))
 
 
 def phase_live_query_event(pm_pid, mode, pg_major, smoke_db, core=False):
@@ -1274,6 +1446,46 @@ def phase_trace_file(pm_pid, mode, pg_major, smoke_db, core=False):
             if qid != 0:
                 trace_ids.add(qid & 0xFFFFFFFFFFFFFFFF)
         text_rows = [r for r in qresp.get("rows", []) if r.get("text")]
+
+        # Issue #128: the server's query drill (top_events filtered by the
+        # waiter statement's query_id) must show its Lock:relation wait —
+        # the record closed with query_id 0 (parse-phase lock, before
+        # pgstat_report_query_id) and pgwt_tag_events back-fills it from
+        # the id the command reported afterwards. top_queries reports what
+        # no command claimed as unattributed_ms instead of dropping it.
+        check(isinstance(qresp.get("unattributed_ms"), (int, float)),
+              f"trace/{mode}: top_queries reports unattributed_ms "
+              f"({qresp.get('unattributed_ms')!r})")
+        waiter_truth = pgss_query_id_for("FROM _smoke_lock_wait")
+        if not core and not (pg_major == 13 and mode == "tiered") \
+                and waiter_truth is not None:
+            # The filter takes the signed-string form the rows carry
+            # (server.c parse_filters: strtoll; a raw uint64 > 2^63 as a
+            # JSON number would lose precision in the double).
+            signed_waiter = (waiter_truth - (1 << 64)
+                             if waiter_truth >= (1 << 63) else waiter_truth)
+            drill = server_query(
+                trace_dir, "top_events",
+                extra={"filters": {"query_id": str(signed_waiter)}})
+            drill_lock_ms = sum(
+                float(r.get("total_ms", 0.0)) for r in drill.get("rows", [])
+                if r.get("name") == "Lock:relation")
+            check(drill_lock_ms >= 4000,
+                  f"trace/{mode}: query drill for the waiter statement "
+                  f"(query_id={waiter_truth}) shows Lock:relation = "
+                  f"{drill_lock_ms:.0f}ms (expect >= 4000) [issue #128]"
+                  + ("" if drill_lock_ms >= 4000 else
+                     f" (drill rows: "
+                     f"{[(r.get('name'), r.get('total_ms')) for r in drill.get('rows', [])]}, "
+                     f"unattributed_ms={qresp.get('unattributed_ms')})"))
+            waiter_row = [r for r in qresp.get("rows", [])
+                          if int(str(r.get("query_id", "0")), 10)
+                          & 0xFFFFFFFFFFFFFFFF == waiter_truth]
+            check(len(waiter_row) == 1 and
+                  float(waiter_row[0].get("total_ms", 0.0)) >= 4000,
+                  f"trace/{mode}: top_queries row for the waiter statement "
+                  f"carries its lock time "
+                  f"({[(r.get('total_ms'), r.get('top_wait')) for r in waiter_row]})")
         if pg_major == 13 and mode == "tiered":
             check(len(trace_ids) > 0,
                   f"PG13 trace carries synthetic query grouping keys "
@@ -3046,6 +3258,8 @@ def main():
 
     core = args.capture_core
     phase_live_system_event(pm_pid, args.mode, core=core)
+    # Issue #128: the lock wait must be attributed to its statement's id.
+    phase_live_query_attribution(pm_pid, args.mode, pg_major, core=core)
 
     # Issue #129: phases 2/3's pgbench workload owns a private scratch
     # database for the whole run instead of running `pgbench -i` against

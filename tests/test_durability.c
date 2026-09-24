@@ -783,6 +783,103 @@ static void test_summary_recovery(void)
     free(w2);
 }
 
+/* ── #128: the summary writer's per-pid attribution table ───── */
+
+static int qattr_occupied(const struct pgwt_summary_writer *w)
+{
+    int n = 0;
+    for (int i = 0; i < SUMMARY_QATTR_SLOTS; i++)
+        if (w->qattr[i].pid != 0)
+            n++;
+    return n;
+}
+
+/* A foreground non-idle record with no id: deferred on the pid (allocates
+ * its slot). `exit` marks it as the backend's closing record. */
+static void qattr_push(struct pgwt_summary_writer *w, uint64_t ts,
+                       uint32_t pid, int exit)
+{
+    struct pgwt_trace_event ev =
+        mk_event(ts, pid, WEI(PG_WAIT_LOCK, 0), 1000000, 0);
+    if (exit)
+        ev.new_event = PGWT_EVENT_EXIT;
+    pgwt_summary_push_event(w, &ev);
+}
+
+static void test_summary_qattr_reclaim(void)
+{
+    printf("--- #128: per-pid attribution slots are reclaimed on exit, "
+           "bounded when the table is full ---\n");
+    const char *dir = BASE_DIR "/qattr";
+    rm_rf(dir);
+    mkdir(BASE_DIR, 0755);
+    mkdir(dir, 0755);
+
+    struct pgwt_summary_writer *w = calloc(1, sizeof(*w));
+    CHECK(pgwt_summary_writer_init(w, dir, 24, NULL) == 0, "init");
+    CHECK(w->qattr != NULL, "attribution table allocated");
+    uint64_t ts = 2000000000000ULL;
+
+    /* Normal path: a pid takes a slot on its first deferred record and
+     * gives it back on its exit record; the unresolved time is counted. */
+    qattr_push(w, ts += 1000000, 5000, 0);
+    CHECK(qattr_occupied(w) == 1, "first deferred record allocates the slot");
+    qattr_push(w, ts += 1000000, 5000, 1);
+    CHECK(qattr_occupied(w) == 0, "exit record frees the slot (got %d)",
+          qattr_occupied(w));
+    CHECK(w->qattr_unattributed_ns_total == 2000000,
+          "the exiting pid's unresolved 2 ms is counted (%llu ns)",
+          (unsigned long long)w->qattr_unattributed_ns_total);
+    CHECK(w->qattr_table_full_total == 0, "table never full so far");
+
+    /* Fill every slot with live pids, then one more: counted, not silent. */
+    for (uint32_t p = 1; p <= SUMMARY_QATTR_SLOTS; p++)
+        qattr_push(w, ts += 1000000, 10000 + p, 0);
+    CHECK(qattr_occupied(w) == SUMMARY_QATTR_SLOTS,
+          "%d distinct pids fill the table (got %d)", SUMMARY_QATTR_SLOTS,
+          qattr_occupied(w));
+    qattr_push(w, ts += 1000000, 99999, 0);
+    CHECK(w->qattr_table_full_total == 1 &&
+          qattr_occupied(w) == SUMMARY_QATTR_SLOTS,
+          "the %dth pid is refused and counted (full=%llu)",
+          SUMMARY_QATTR_SLOTS + 1,
+          (unsigned long long)w->qattr_table_full_total);
+
+    /* The reviewer's hang: an exit on a FULL table has no empty slot to stop
+     * the backward shift. Must return, free exactly one slot, duplicate
+     * nothing. */
+    qattr_push(w, ts += 1000000, 10000 + 1, 1);
+    CHECK(qattr_occupied(w) == SUMMARY_QATTR_SLOTS - 1,
+          "exit on a full table frees exactly one slot (got %d)",
+          qattr_occupied(w));
+    int dup = 0;
+    for (int i = 0; i < SUMMARY_QATTR_SLOTS; i++)
+        for (int j = i + 1; j < SUMMARY_QATTR_SLOTS; j++)
+            if (w->qattr[i].pid && w->qattr[i].pid == w->qattr[j].pid)
+                dup++;
+    CHECK(dup == 0, "no pid is duplicated by the shift (%d duplicates)", dup);
+
+    /* Every remaining pid must still be found by its probe chain: each
+     * exit reclaims ITS entry (a broken chain would allocate a fresh slot
+     * for the exit record and leave the old entry behind). */
+    uint64_t full_before = w->qattr_table_full_total;
+    for (uint32_t p = 2; p <= SUMMARY_QATTR_SLOTS; p++)
+        qattr_push(w, ts += 1000000, 10000 + p, 1);
+    CHECK(qattr_occupied(w) == 0,
+          "every other pid's exit found and freed its own slot (%d left)",
+          qattr_occupied(w));
+    CHECK(w->qattr_table_full_total == full_before,
+          "…without the table ever reading full again");
+    /* And the freed table is usable: the refused pid gets a slot now. */
+    qattr_push(w, ts += 1000000, 99999, 0);
+    CHECK(qattr_occupied(w) == 1 && w->qattr_table_full_total == full_before,
+          "a new pid takes a reclaimed slot");
+
+    pgwt_summary_destroy(w);
+    free(w);
+    rm_rf(dir);
+}
+
 /* ── main ─────────────────────────────────────────────────── */
 
 int main(void)
@@ -801,6 +898,7 @@ int main(void)
     test_meta_sanity_caps();
     test_size_cap_retention();
     test_summary_recovery();
+    test_summary_qattr_reclaim();
 
     rm_rf(BASE_DIR);
     printf("\n%d/%d tests passed\n", tests_passed, tests_run);

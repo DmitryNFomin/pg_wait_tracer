@@ -125,6 +125,32 @@ static void test_build_batch(void)
           out[1].new_event, vals[2]);
     CHECK(out[1].query_id == 333, "query_id=%llu expected 333",
           (unsigned long long)out[1].query_id);
+
+    /* #128: an IDLE sample carries the finished statement's raw st_query_id
+     * (last_query_id); a non-idle sample without an effective id does not
+     * (0 during parse analysis, resolved later by query_attr.h). */
+    struct pgwt_sample_target idle_targets[3] = {
+        { .pid = 2001, .wait_event_addr = 0x1000, .query_id = 0,
+          .last_query_id = 555, .backend_type = PGWT_BT_CLIENT, .cmd_open = 0 },
+        { .pid = 2002, .wait_event_addr = 0x2000, .query_id = 0,
+          .last_query_id = 666, .backend_type = PGWT_BT_CLIENT, .cmd_open = 1 },
+        { .pid = 2003, .wait_event_addr = 0x3000, .query_id = 777,
+          .last_query_id = 888, .backend_type = PGWT_BT_CLIENT, .cmd_open = 1 },
+    };
+    uint32_t idle_vals[3] = {
+        PG_WAIT_CLIENT_READ,      /* idle: takes last_query_id */
+        WEI(PG_WAIT_LOCK, 0x00),  /* parse-phase lock wait: stays 0 */
+        PG_WAIT_CLIENT_READ,      /* effective id present: kept */
+    };
+    n = pgwt_sampler_build_batch(idle_targets, idle_vals, valid, 3, ts, out,
+                                 NULL, &noncmd);
+    CHECK(n == 3, "3 idle-attribution records, got %d", n);
+    CHECK(out[0].query_id == 555, "idle sample carries last_query_id (got %llu)",
+          (unsigned long long)out[0].query_id);
+    CHECK(out[1].query_id == 0, "in-command wait without an id stays 0 (got %llu)",
+          (unsigned long long)out[1].query_id);
+    CHECK(out[2].query_id == 777, "an effective id is never overridden (got %llu)",
+          (unsigned long long)out[2].query_id);
 }
 
 /* ── Test 2c: the T2 on-CPU policy (docs/AAS_SEMANTICS_DECISION.md) ────── */
@@ -661,6 +687,40 @@ static void test_sampled_attr_source_gate(void)
           sample.flags == PGWT_EVENT_FLAG_IO_WORKER &&
           sample.new_event == 0,
           "failed-attribution io_worker CPU observation is admitted");
+
+    /* #128 stale-slot path: targets[] is a static array reused every tick.
+     * A slot whose previous occupant was a client in statement 999 is now
+     * a PARALLEL_WORKER whose PgBackendStatus read failed: it stays
+     * recordable (UNATTRIBUTED), and its IDLE sample must NOT carry 999 —
+     * the live resolver would take that as an id report and back-fill the
+     * worker's pending waits to a foreign query. */
+    tick.last_query_id = 777;
+    target.backend_type = PGWT_BT_PARALLEL_WORKER;
+    target.query_id = UINT64_MAX;
+    target.cmd_open = 1;
+    target.last_query_id = 999;                 /* previous occupant's */
+    source = pgwt_sampler_select_attr(1, 0, &tick, &uprobe, &target);
+    CHECK(source == PGWT_SAMPLED_ATTR_UNATTRIBUTED && target.last_query_id == 0,
+          "failed tick read zeroes last_query_id (stale slot, got %llu)",
+          (unsigned long long)target.last_query_id);
+    we = PG_WAIT_CLIENT_READ;
+    valid = 1;
+    CHECK(pgwt_sampler_build_batch(&target, &we, &valid, 1, 124,
+                                   &sample, NULL, NULL) == 1 &&
+          sample.query_id == 0,
+          "…so its idle sample carries no foreign id (got %llu)",
+          (unsigned long long)sample.query_id);
+    /* A coherent tick read is the only source of last_query_id. */
+    target.last_query_id = 999;
+    CHECK(pgwt_sampler_select_attr(1, 1, &tick, &uprobe, &target) ==
+              PGWT_SAMPLED_ATTR_TICK && target.last_query_id == 777,
+          "coherent tick read sets last_query_id from the tick (got %llu)",
+          (unsigned long long)target.last_query_id);
+    target.last_query_id = 999;
+    CHECK(pgwt_sampler_select_attr(0, 1, &tick, &uprobe, &target) ==
+              PGWT_SAMPLED_ATTR_UPROBE && target.last_query_id == 0,
+          "uprobe-shadow source never supplies last_query_id (got %llu)",
+          (unsigned long long)target.last_query_id);
 
     struct pgwt_sampler coverage = {0};
     pgwt_sampler_note_coverage(&coverage, 1, valid);

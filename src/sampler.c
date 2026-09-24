@@ -230,8 +230,16 @@ enum pgwt_sampled_attr_source pgwt_sampler_select_attr(
     if (!target)
         return PGWT_SAMPLED_ATTR_DROP;
 
+    /* Every attribution field of the (static, reused) target slot is
+     * rewritten here, on every path: a slot's previous occupant must never
+     * leak into this tick. last_query_id (#128) comes from the coherent
+     * at-tick read ONLY — on a failed read a still-recordable target
+     * (io_worker, parallel worker, background) would otherwise carry a
+     * foreign id on its idle sample, and the live resolver would back-fill
+     * that pid's pending waits to an unrelated query. */
     target->query_id = 0;
     target->cmd_open = 0;
+    target->last_query_id = 0;
     if (!tick_source_enabled) {
         if (uprobe) {
             target->query_id = uprobe->query_id;
@@ -251,6 +259,7 @@ enum pgwt_sampled_attr_source pgwt_sampler_select_attr(
 
     target->query_id = tick->query_id;
     target->cmd_open = tick->cmd_open;
+    target->last_query_id = tick->last_query_id;
     return PGWT_SAMPLED_ATTR_TICK;
 }
 
@@ -331,7 +340,19 @@ int pgwt_sampler_build_batch(const struct pgwt_sample_target *targets,
          * backends.jsonl). The SAMPLE flag itself is set by the reader. */
         e->flags        = pgwt_backend_type_flag(targets[i].backend_type);
         e->duration_ns  = 0;       /* samples carry no duration */
+        /* #128: an IDLE sample carries the id of the statement that just
+         * finished (raw st_query_id; 0 while a command runs without one),
+         * exactly as the exact tier's post-command ClientRead record does on
+         * PG14+. Idle time itself stays out of every per-query total (idle
+         * rows are excluded there); what the id resolves is the command's
+         * parse-phase waits that were sampled with query_id 0. In-command
+         * attribution is unchanged. */
         e->query_id     = targets[i].query_id;
+        /* (pgwt_is_idle_event's rule, inline: this BPF-free core links
+         * without wait_event.c.) */
+        if (e->query_id == 0 && (WE_CLASS(we) == PG_WAIT_ACTIVITY ||
+                                 we == PG_WAIT_CLIENT_READ))
+            e->query_id = targets[i].last_query_id;
     }
     return count;
 }
@@ -735,17 +756,22 @@ static void pgwt_sampler_accumulate(struct pgwt_daemon *d,
         if (!io_worker)
             pgwt_update_time_model(&acc->tm, we, dur);
 
-        /* Query attribution (io_workers are structurally query-less) */
-        if (samples[i].query_id != 0 && !io_worker) {
-            struct pgwt_query_event_stats *qe =
-                pgwt_get_or_create_query_event(acc, samples[i].query_id, we);
-            if (qe) {
-                qe->count++;
-                qe->total_ns += dur;
-                if (dur < qe->min_ns) qe->min_ns = dur;
-                if (dur > qe->max_ns) qe->max_ns = dur;
-            }
-        }
+        /* Query attribution (io_workers are structurally query-less).
+         * #128: a foreground sample taken before the statement reported its
+         * id (parse-phase lock wait) is deferred on the pid until a later
+         * sample carries the id; an idle sample is the between-commands
+         * boundary (the sampled tier has no CMD markers). Same rule the
+         * server applies to SAMPLE records in pgwt_tag_events. */
+        uint32_t cat_flag = samples[i].flags &
+            (PGWT_EVENT_FLAG_IO_WORKER | PGWT_EVENT_FLAG_MAINT |
+             PGWT_EVENT_FLAG_BACKGROUND);
+        pgwt_live_qattr_record(acc, pa, samples[i].query_id, we, dur,
+                               cat_flag, true);
+        /* An idle sample is between commands: whatever it resolved (its
+         * query_id is the finished statement's, see build_batch), the next
+         * command must not inherit it. */
+        if (pa && cat_flag == 0 && pgwt_is_idle_event(we))
+            pgwt_live_qattr_between_commands(acc, pa);
     }
 }
 
@@ -857,6 +883,7 @@ int pgwt_sampler_poll(struct pgwt_daemon *d)
         targets[n].databaseid = be->databaseid;
         targets[n].userid = be->userid;
         targets[n].query_quality = PGWT_QUERY_QUALITY_NONE;
+        targets[n].last_query_id = 0;   /* rewritten by select_attr below */
         /* The syslogger is not a PostgreSQL backend: it has no MyBEEntry or
          * PgBackendStatus slot, and its on-CPU samples are already excluded
          * by policy.  Keep its irrelevant zero attribution on the legacy
@@ -927,6 +954,7 @@ int pgwt_sampler_poll(struct pgwt_daemon *d)
             if (tick_ok) {
                 tick_attr.query_id = tick_raw.query_id;
                 tick_attr.cmd_open = tick_raw.cmd_open;
+                tick_attr.last_query_id = tick_raw.last_query_id;   /* #128 */
                 targets[n].databaseid = tick_raw.databaseid;
                 targets[n].userid = tick_raw.userid;
                 if (be->databaseid != tick_raw.databaseid ||

@@ -2550,6 +2550,30 @@ Three `query_event` view modes:
   that query's total time ("this query spends 58.2% on CPU, 31.5% on DataFileRead").
 - `query_event` also supports the 3 time windows when `--window` is set (Last 5s / 1m / 5m
   sections).
+- **Attribution rule (issue #128, `src/query_attr.h`):** a record's query_id is the id
+  BPF resolved when the interval CLOSED, and PostgreSQL reports a statement's id only
+  after parse analysis — where relation locks are taken. A parse-phase `Lock:relation`
+  wait therefore closed with query_id 0 and was silently dropped from every per-query
+  view. Every consumer (live closed records, the sampled live path, the summary writer,
+  `pgwt_tag_events` for the server's raw path) now attributes such an interval to the
+  id its command reports afterwards (else the last id reported earlier in the command),
+  and what no command ever claims lands in an explicit **`unattributed`** row of the
+  live view / the `unattributed_ms` field of `top_queries` (raw path). A backend's exit
+  record resolves whatever is still pending for it. Metrics:
+  `live_query_backfilled_ns_total`, `live_query_unattributed_ns_total`,
+  `live_query_pending_overflow_total`, `summary_query_attr_table_full_total`,
+  `summary_query_unattributed_ns_total`. Sampled tier: an idle sample carries the raw
+  `st_query_id` (the statement that just finished; cleared by PostgreSQL at
+  STATE_RUNNING), so a parse-phase wait of a statement that finished within one sample
+  period resolves at the next idle sample. **Residuals:** (1) the summary fast path
+  (`top_queries` for ranges >= 120 s) carries late-reported ids in its rows (the writer
+  runs the same deferral) but has no unattributed bucket — that time stays in the
+  event/session/class rows only, the response says `unattributed_available: false`,
+  and the daemon counts it in `summary_query_unattributed_ns_total`; (2) the sampled
+  tier's `last_query_id` comes from the coherent PgBackendStatus tick read only — with
+  the uprobe-shadow fallback (layout unvalidated) sampled attribution stays
+  emission-time; (3) Mode C (`--query-id`) cannot drill the `unattributed` bucket
+  (query_id 0 is "no filter"); it is a Mode A/B row only.
 - *Evidence:* CLI flags `-e/--event`, `-Q/--query-id` (pg_wait_tracer.c ~232–234); web
   `views/queries.js` with the event↔query drill pivots
   (`{class:'events', event_id:'queries', pid:'timeline', query_id:'events'}` in app.js).

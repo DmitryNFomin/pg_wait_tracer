@@ -354,6 +354,23 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
                      ctr->live_cpu_unmarked_ns_total);
     cjson_add_uint64(root, "live_cpu_gate_fallback_total",
                      ctr->live_cpu_gate_fallback_total);
+    /* #128 deferred per-query attribution (query_attr.h): how much live
+     * foreground time was attributed to an id reported AFTER the interval
+     * closed (a parse-phase lock wait), how much landed in the explicit
+     * "unattributed" bucket, and how often a pid's pending list spilled. */
+    cjson_add_uint64(root, "live_query_backfilled_ns_total",
+                     d->event_accum ? d->event_accum->qattr_backfilled_ns : 0);
+    cjson_add_uint64(root, "live_query_unattributed_ns_total",
+                     d->event_accum ? d->event_accum->qattr_unattributed_ns : 0);
+    cjson_add_uint64(root, "live_query_pending_overflow_total",
+                     d->event_accum ? d->event_accum->qattr_pending_overflow : 0);
+    /* …and the summary writer's twin: records that kept their emission-time
+     * id because its per-pid table was full, and deferred time no command
+     * claimed (the summary has no unattributed bucket). */
+    cjson_add_uint64(root, "summary_query_attr_table_full_total",
+                     d->summary_writer ? d->summary_writer->qattr_table_full_total : 0);
+    cjson_add_uint64(root, "summary_query_unattributed_ns_total",
+                     d->summary_writer ? d->summary_writer->qattr_unattributed_ns_total : 0);
 
     cjson_add_uint64(root, "io_worker_samples_total",
                      ctr->io_worker_samples_total);
