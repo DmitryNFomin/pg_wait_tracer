@@ -118,7 +118,10 @@ def _baseline_rows(rows, value_key):
     out.append({"name": "Client:gone_from_A", "event_id": 0x06000009,
                 "class": "Client", "count": 700, "total_ms": 700,
                 "avg_us": 1000, "p50_us": 1000, "p95_us": 1000,
-                "p99_us": 1000, "max_us": 1000, "pct": 5.6, "aas": 0.19})
+                "p99_us": 1000, "max_us": 1000,
+                "p50_overflow": False, "p95_overflow": False,
+                "p99_overflow": False,
+         "pct": 5.6, "aas": 0.19})
     return out
 
 def _make_aas_buckets():
@@ -249,30 +252,58 @@ _CANNED["top_events"] = {
     "rows": [
         {"name": "CPU*",             "event_id": 0,          "class": "CPU",
          "count": 250000, "total_ms": 4800, "avg_us": 19.2, "p50_us": 12,
-         "p95_us": 45, "p99_us": 120, "max_us": 5000, "pct": 38.4, "aas": 1.33},
+         "p95_us": 45, "p99_us": 120, "max_us": 5000,
+         "p50_overflow": False, "p95_overflow": False, "p99_overflow": False,
+         "pct": 38.4, "aas": 1.33},
         {"name": "IO:DataFileRead",  "event_id": 0x01000015, "class": "IO",
          "count": 85000, "total_ms": 2100, "avg_us": 24.7, "p50_us": 15,
-         "p95_us": 80, "p99_us": 250, "max_us": 12000, "pct": 16.8, "aas": 0.58},
+         "p95_us": 80, "p99_us": 250, "max_us": 12000,
+         "p50_overflow": False, "p95_overflow": False, "p99_overflow": False,
+         "pct": 16.8, "aas": 0.58},
         {"name": "Lock:relation",    "event_id": 0x03000000, "class": "Lock",
          "count": 12000, "total_ms": 1500, "avg_us": 125.0, "p50_us": 50,
-         "p95_us": 500, "p99_us": 2000, "max_us": 50000, "pct": 12.0, "aas": 0.42},
+         "p95_us": 500, "p99_us": 2000, "max_us": 50000,
+         "p50_overflow": False, "p95_overflow": False, "p99_overflow": False,
+         "pct": 12.0, "aas": 0.42},
         {"name": "LWLock:WALWrite",  "event_id": 0x04000008, "class": "LWLock",
          "count": 30000, "total_ms": 1200, "avg_us": 40.0, "p50_us": 25,
-         "p95_us": 100, "p99_us": 400, "max_us": 8000, "pct": 9.6, "aas": 0.33},
+         "p95_us": 100, "p99_us": 400, "max_us": 8000,
+         "p50_overflow": False, "p95_overflow": False, "p99_overflow": False,
+         "pct": 9.6, "aas": 0.33},
         {"name": "Timeout:PgSleep",  "event_id": 0x09000002, "class": "Timeout",
          "count": 500, "total_ms": 1000, "avg_us": 2000000, "p50_us": 2000000,
-         "p95_us": 2000000, "p99_us": 2000000, "max_us": 2001000, "pct": 8.0, "aas": 0.28},
+         "p95_us": 2000000, "p99_us": 2000000, "max_us": 2001000,
+         "p50_overflow": False, "p95_overflow": False, "p99_overflow": False,
+         "pct": 8.0, "aas": 0.28},
         {"name": "IO:WalSync",       "event_id": 0x0100004e, "class": "IO",
          "count": 15000, "total_ms": 800, "avg_us": 53.3, "p50_us": 30,
-         "p95_us": 150, "p99_us": 500, "max_us": 10000, "pct": 6.4, "aas": 0.22},
+         "p95_us": 150, "p99_us": 500, "max_us": 10000,
+         "p50_overflow": False, "p95_overflow": False, "p99_overflow": False,
+         "pct": 6.4, "aas": 0.22},
         {"name": "Extension:Extension", "event_id": 0x0a000000, "class": "Extension",
          "count": 800, "total_ms": 800, "avg_us": 1000000, "p50_us": 1000000,
-         "p95_us": 1000000, "p99_us": 1000000, "max_us": 1001000, "pct": 6.4, "aas": 0.22},
+         "p95_us": 1000000, "p99_us": 1000000, "max_us": 1001000,
+         "p50_overflow": False, "p95_overflow": False, "p99_overflow": False,
+         "pct": 6.4, "aas": 0.22},
         {"name": "IO:WalWrite",      "event_id": 0x01000050, "class": "IO",
          "count": 10000, "total_ms": 300, "avg_us": 30.0, "p50_us": 20,
-         "p95_us": 80, "p99_us": 200, "max_us": 5000, "pct": 2.4, "aas": 0.08},
+         "p95_us": 80, "p99_us": 200, "max_us": 5000,
+         "p50_overflow": False, "p95_overflow": False, "p99_overflow": False,
+         "pct": 2.4, "aas": 0.08},
     ],
 }
+# NOTE on the #103 percentile-overflow flags:
+# The real server sets "<pctl>_overflow" when a percentile landed in the
+# latency histogram's open-ended top bucket, and the UI then renders ">=16.4ms"
+# instead of an exact-looking number (web/static/lib/builders/table-configs.js
+# pctlCell). Every canned row here carries the keys (protocol shape — gated by
+# tests/test_protocol_drift.py) with the value False, for the same reason the
+# idle row below is absent: the visual-snapshot baseline table_events.png is
+# keyed to this exact rendered text, and flipping a flag would change it
+# without testing anything the Node builder unit test
+# (tests/web_unit/table.test.mjs) and the gallery fixture state
+# 'events-overflow-pctl' do not already cover deterministically.
+#
 # NOTE on the idle-but-visible %DB shape:
 # The real server emits pct=null for idle-but-visible events (Client:ClientRead)
 # in top_events — %DB is "share of DB Time" and idle time is not part of DB
@@ -698,6 +729,10 @@ def handle_request(msg):
             row = dict(row)
             for col in ("avg_us", "p50_us", "p95_us", "p99_us", "max_us"):
                 row[col] = None
+            # #103: no percentile at all => no overflow, same as the real
+            # server's gated branch (src/server.c handle_top_events).
+            for col in ("p50_overflow", "p95_overflow", "p99_overflow"):
+                row[col] = False
             gated.append(row)
         resp["rows"] = gated
     return resp

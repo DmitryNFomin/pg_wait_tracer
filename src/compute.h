@@ -272,10 +272,24 @@ struct pgwt_event_row {
      * as null / "—"); count and total_ms stay valid via ASH math. */
     uint64_t exact_count;
     double   avg_us;
+    /* 0 when the row has counts/total (hence a real avg) but NO latency
+     * distribution behind them: the per-query summary records carry no
+     * histogram and no max. max_us and p50/p95/p99_us are then meaningless
+     * and the server emits null for all four (#103 review) — never a
+     * percentile answered from an empty histogram. */
+    int      has_latency_dist;
     double   max_us;
     double   p50_us;
     double   p95_us;
     double   p99_us;
+    /* Set when the percentile landed in the histogram's OPEN-ENDED top
+     * bucket (>16.384 ms): the p*_us value is then only a lower bound and
+     * the UI must render it as ">= 16.4ms", never as an exact number
+     * (issue #103 — P50=P95=P99=16.4ms printed next to Avg 1.8s). Not
+     * derivable client-side: buckets 14 and 15 share the same edge. */
+    int      p50_overflow;
+    int      p95_overflow;
+    int      p99_overflow;
     double   pct_db;
     double   aas;
 };

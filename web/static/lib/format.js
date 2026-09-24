@@ -229,8 +229,16 @@ export function fmtUs(us) {
     return us.toFixed(0) + 'µs';
 }
 
+/* HTML-escape. Quotes are escaped too: esc() output lands in ATTRIBUTES as
+ * often as in text (title="..." on the percentile bounds and the drill
+ * affordances, and every hostile-name tooltip), where a bare " would close
+ * the attribute early and let the rest of a wait-event / SQL string be
+ * parsed as markup. In text position &quot; / &#39; still render as " and ',
+ * so visible output is unchanged. */
 export function esc(s) {
-    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;')
+                    .replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+                    .replace(/'/g, '&#39;');
 }
 
 // -- datetime-local <-> ns, pinned to UTC (UI-11) ------------------------------

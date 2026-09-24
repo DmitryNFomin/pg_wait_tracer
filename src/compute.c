@@ -882,22 +882,63 @@ struct top_event_accum {
 
 /* Reuses EVENT_HT_SIZE/EVENT_HT_MASK defined above */
 
-/* Histogram bucket upper boundaries in microseconds */
+/* Histogram bucket upper boundaries in microseconds. The LAST bucket is
+ * open-ended: it holds every duration of 16384 us or more (see
+ * compute_duration_to_bucket: `if (us < 16384) return 14; return 15;`), so
+ * its entry repeats the previous edge — that number is a FLOOR, not an
+ * upper bound. */
 static const uint64_t hist_upper_us[HISTOGRAM_BUCKETS] = {
     1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384, 16384
 };
 
-static double hist_percentile(const uint64_t hist[HISTOGRAM_BUCKETS],
-                              uint64_t total, double pct)
+/* Sum of a latency histogram's buckets — the population the percentiles are
+ * over. ZERO means there is no latency distribution to report at all (the
+ * per-query summary records carry counts and totals but no histogram and no
+ * max), and the caller must then gate p50/p95/p99 AND max to null rather
+ * than let a percentile be computed against an empty histogram. */
+static uint64_t hist_population(const uint64_t hist[HISTOGRAM_BUCKETS])
 {
-    if (total == 0) return 0;
-    uint64_t threshold = (uint64_t)((double)total * pct);
+    uint64_t total = 0;
+    for (int b = 0; b < HISTOGRAM_BUCKETS; b++)
+        total += hist[b];
+    return total;
+}
+
+/* Percentile from the latency histogram. `total` MUST be hist_population()
+ * of the same histogram (never a count from another source) and must be > 0.
+ *
+ * Nearest-rank: the value at rank ceil(total * pct), never rank 0. With the
+ * old floor() threshold a single observation asked for rank 0, which the
+ * first bucket satisfied vacuously — one 100 ms wait reported P50 = 1 us.
+ *
+ * `overflow` (issue #103) reports whether the percentile landed in the
+ * open-ended top bucket. There the returned number is only the bucket's
+ * lower edge (16.384 ms) and the true percentile can be arbitrarily larger —
+ * exactly the case that printed "P50 = P95 = P99 = 16.4 ms" next to an
+ * Avg of 1.8 s. It cannot be derived client-side: bucket 14 (8192..16383 us)
+ * and bucket 15 (>= 16384 us) both yield 16384, so the flag must come from
+ * the side that knows which bucket was hit. */
+static double hist_percentile(const uint64_t hist[HISTOGRAM_BUCKETS],
+                              uint64_t total, double pct, int *overflow)
+{
+    if (overflow) *overflow = 0;
+    if (total == 0) return 0;          /* caller must have gated this */
+    double rank = (double)total * pct;
+    uint64_t threshold = (uint64_t)rank;
+    if ((double)threshold < rank) threshold++;   /* ceil */
+    if (threshold == 0) threshold = 1;           /* nearest-rank is 1-based */
     uint64_t cumulative = 0;
     for (int b = 0; b < HISTOGRAM_BUCKETS; b++) {
         cumulative += hist[b];
-        if (cumulative >= threshold)
+        if (cumulative >= threshold) {
+            if (overflow) *overflow = (b == HISTOGRAM_BUCKETS - 1);
             return (double)hist_upper_us[b];
+        }
     }
+    /* Unreachable: threshold <= total == sum(hist), so some bucket always
+     * satisfies it. Returning the top edge here would be a fabricated
+     * bound, so it reports the last bucket it actually walked. */
+    if (overflow) *overflow = (hist[HISTOGRAM_BUCKETS - 1] > 0);
     return (double)hist_upper_us[HISTOGRAM_BUCKETS - 1];
 }
 
@@ -983,10 +1024,20 @@ void pgwt_compute_top_events(const struct pgwt_trace_event *events, int count,
         r->avg_us   = ht[i].exact_count > 0
                      ? (double)ht[i].exact_total_ns / (double)ht[i].exact_count / 1000.0
                      : 0;
+        /* Percentiles come from the histogram's own population, never from
+         * a count accumulated elsewhere; an empty histogram means there is
+         * no distribution and no max to report (see hist_population). */
+        uint64_t hpop = hist_population(ht[i].hist);
+        r->has_latency_dist = hpop > 0;
         r->max_us   = (double)ht[i].max_ns / 1000.0;
-        r->p50_us   = hist_percentile(ht[i].hist, ht[i].exact_count, 0.50);
-        r->p95_us   = hist_percentile(ht[i].hist, ht[i].exact_count, 0.95);
-        r->p99_us   = hist_percentile(ht[i].hist, ht[i].exact_count, 0.99);
+        if (hpop > 0) {
+            r->p50_us = hist_percentile(ht[i].hist, hpop, 0.50,
+                                        &r->p50_overflow);
+            r->p95_us = hist_percentile(ht[i].hist, hpop, 0.95,
+                                        &r->p95_overflow);
+            r->p99_us = hist_percentile(ht[i].hist, hpop, 0.99,
+                                        &r->p99_overflow);
+        }
         /* Idle-but-visible events have time but no meaningful share of DB
          * Time; flag their %DB with a sentinel so it renders as "—". */
         if (pgwt_is_idle_event(ht[i].event_id))
@@ -1828,10 +1879,23 @@ void pgwt_compute_top_events_from_summaries(
         row->exact_count = ctx.ht[i].exact_count;
         row->avg_us   = ctx.ht[i].exact_count > 0
                        ? (double)ctx.ht[i].exact_total_ns / (double)ctx.ht[i].exact_count / 1000.0 : 0;
+        /* The per-QUERY summary records (struct pgwt_summary_query_event)
+         * carry count and total_ns only — no histogram, no max. Such a row
+         * has a real count/total/avg but NO latency distribution: gate
+         * p50/p95/p99 and max to null rather than answer a percentile from
+         * an all-zero histogram, which used to produce ">= 16.4ms" next to
+         * Max 0us on every query-drilled Events row (#103 review). */
+        uint64_t hpop = hist_population(ctx.ht[i].hist);
+        row->has_latency_dist = hpop > 0;
         row->max_us   = (double)ctx.ht[i].max_ns / 1000.0;
-        row->p50_us   = hist_percentile(ctx.ht[i].hist, ctx.ht[i].exact_count, 0.50);
-        row->p95_us   = hist_percentile(ctx.ht[i].hist, ctx.ht[i].exact_count, 0.95);
-        row->p99_us   = hist_percentile(ctx.ht[i].hist, ctx.ht[i].exact_count, 0.99);
+        if (hpop > 0) {
+            row->p50_us = hist_percentile(ctx.ht[i].hist, hpop, 0.50,
+                                          &row->p50_overflow);
+            row->p95_us = hist_percentile(ctx.ht[i].hist, hpop, 0.95,
+                                          &row->p95_overflow);
+            row->p99_us = hist_percentile(ctx.ht[i].hist, hpop, 0.99,
+                                          &row->p99_overflow);
+        }
         /* Idle-but-visible events have time but no meaningful share of DB
          * Time; flag their %DB with a sentinel so it renders as "—". */
         if (pgwt_is_idle_event(ctx.ht[i].event_id))

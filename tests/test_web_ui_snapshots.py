@@ -139,6 +139,7 @@ GALLERY_STATIC_CELLS = [
     "gallery-exec-scatter-dense-downsampled",   # log latency modes + count note
     "gallery-matrix-dense-top20",               # log-piecewise cells + top-N
     "gallery-table-configs-queries-hostile-sql",  # hostile SQL + event tints
+    "gallery-table-configs-events-overflow-pctl",  # #103 ">=" overflow bounds
     "gallery-table-configs-compare-delta",        # U4: new/gone + change-floor row
 ]
 # The recorded live-replay cells, captured at ONE fixed tick each (stepped

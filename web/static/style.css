@@ -588,6 +588,18 @@ tr:hover td.sticky-col-1 { background: #2a2a5a; }
   vertical-align: middle;
 }
 
+/* #103: a percentile that landed in the latency histogram's OPEN-ENDED top
+   bucket renders as a ">=16.4ms" bound. On drillable cells the drill
+   affordance (inline 1px dotted #778, lib/builders/table-configs.js) already
+   invites a click; a bound on a NON-drillable row (CPU*) would otherwise be
+   flat text, so it carries its own dimmer dotted underline — discoverable,
+   but visibly quieter than the drill. Mirrored in dev/gallery.html's shared
+   table chrome so the fixture cells render like the app. */
+.pctl-overflow {
+  border-bottom: 1px dotted #55606e;
+  cursor: help;
+}
+
 /* Percentage bar */
 .pct-bar {
   position: relative;
