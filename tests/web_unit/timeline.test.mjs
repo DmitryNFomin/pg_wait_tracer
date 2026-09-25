@@ -269,18 +269,28 @@ test('the dense-column guard implies the span floor at the current constants', (
 test('a span that starts after the window is clipped, not folded into the last px', () => {
     // The per-span path hands such a rect an x past the plot and clip:true
     // drops it; counting it here would tint the last column and inflate the
-    // density. A span that ENDED before the window still paints at the left
-    // edge, exactly as the per-span path draws it.
+    // density.
     const from = 1000, to = 2000;
     const bars = [
         [3000, 2000, 0, 'Lock:relation', 2, '', 500, 3000],   // starts after `to`
-        [1000, 500, 0, 'CPU*', 0, '', 500, 500],              // ended before `from`
     ];
     const agg = aggregateTimelineColumns(bars, 1, 10, from, to);
-    assert.equal(agg.segments.length, 1, 'only the left-edge wait paints');
-    assert.equal(agg.segments[0][3], 0, 'and it is the CPU one');
-    assert.equal(agg.segments[0][0], from, 'in the first column');
-    assert.equal(agg.columnSpanTotal, 1, 'the clipped span is not counted');
+    assert.equal(agg.segments.length, 0, 'the out-of-window wait does not paint');
+    assert.equal(agg.columnSpanTotal, 0, 'the clipped span is not counted');
+});
+
+/* #121 (defensive): buildTimelineOption never hands aggregateTimelineColumns
+ * an inverted bar (it drops such waits before aggregation runs — see the
+ * buildTimelineOption-level tests below), but the function must not paint a
+ * phantom left-edge segment if one arrives anyway. */
+test('an inverted (end < start) bar is dropped, not painted at the left edge', () => {
+    const from = 1000, to = 2000;
+    const bars = [
+        [1000, 500, 0, 'CPU*', 0, '', 500, 500],   // ended before `from`, still inverted
+    ];
+    const agg = aggregateTimelineColumns(bars, 1, 10, from, to);
+    assert.equal(agg.segments.length, 0, 'an inverted bar never paints');
+    assert.equal(agg.columnSpanTotal, 0);
 });
 
 test('a single column is never aggregated, however deep: identity beats density', () => {
@@ -296,12 +306,12 @@ test('a single column is never aggregated, however deep: identity beats density'
     }
 });
 
-/* Regression (found by tests/test_web_ui.py's timeline-bar-positions case):
- * waits that ended BEFORE the window all clamp to the same edge pixel (P6),
- * so they read as N spans/px even though the chart holds N waits in total.
- * Aggregating those would have replaced a legible 8-bar chart — and its
- * per-wait tooltips, which are what that whole state is for — with one
- * summarised pixel. */
+/* Regression (found by tests/test_web_ui.py's timeline-bar-positions case;
+ * fixed as #121): waits that ended BEFORE the window used to clamp to the
+ * same left-edge pixel as an inverted (start>end) interval and fake density
+ * as N spans/px even though the chart held N waits in total. They are now
+ * dropped entirely — nothing to draw, nothing to aggregate, no phantom
+ * left-edge stack. */
 test('waits clamped to the window edge do not fake density on a small chart', () => {
     const from = 2_000_000_000, to = 2_900_000_000;
     const events = [];
@@ -313,9 +323,82 @@ test('waits clamped to the window edge do not fake density on a small chart', ()
         { truncated: false, total_count: 8, pids: [1001], events },
         { from, to, width: 1240 });
     assert.equal(m.aggregated, false);
-    assert.equal(m.option.series[0].data.length, 8);
-    // Per-span tuples: the raw duration still rides at [6] for the tooltip.
-    assert.equal(m.option.series[0].data[0][6], 50_000_000);
+    assert.equal(m.option.series[0].data.length, 0,
+        'all 8 waits ended before the window and are dropped');
+    // The chart still reports it received 8 events from the server (that is a
+    // separate fact from how many are drawn), and still has a PID row.
+    assert.equal(m.count, 8);
+    assert.deepEqual(m.option.yAxis.data, ['PID 1001']);
+});
+
+// ── #121: waits with no overlap with the view window ────────────────────────
+//
+// buildTimelineOption clamps the drawn interval to [from, to]. Naively
+// clamping a wait the window never touched (max(s,from), min(s+d,to)) yields
+// start>end — an inverted interval that used to render as a phantom rect
+// pinned to whichever edge is nearer. Such waits are now excluded from the
+// drawn set outright; a wait that only partially overlaps is clamped so its
+// drawn geometry always satisfies start<=end.
+
+test('#121: a wait fully before the window is dropped, not drawn at the left edge', () => {
+    const from = 1000, to = 2000;
+    const d = { truncated: false, total_count: 1, pids: [1001],
+        events: [{ s: 100, d: 50, p: 1001, n: 'CPU*', c: 0, q: '42' }] };  // ends at 150, well before `from`
+    const { option } = buildTimelineOption(d, { from, to });
+    assert.deepEqual(option.series[0].data, [], 'nothing drawn for a wait outside the window');
+});
+
+test('#121: a wait fully after the window is dropped too', () => {
+    const from = 1000, to = 2000;
+    const d = { truncated: false, total_count: 1, pids: [1001],
+        events: [{ s: 5000, d: 50, p: 1001, n: 'CPU*', c: 0, q: '42' }] };
+    const { option } = buildTimelineOption(d, { from, to });
+    assert.deepEqual(option.series[0].data, []);
+});
+
+test('#121: a wait straddling the window start is clamped with start<=end', () => {
+    const from = 1000, to = 2000;
+    const d = { truncated: false, total_count: 1, pids: [1001],
+        // starts before `from`, ends inside the window
+        events: [{ s: 900, d: 200, p: 1001, n: 'Lock:relation', c: 2, q: '7' }] };
+    const { option } = buildTimelineOption(d, { from, to });
+    const bar = option.series[0].data[0];
+    assert.equal(bar[0], from, 'drawn start clamped to the window');
+    assert.equal(bar[1], 1100, 'end = raw s + d, inside the window');
+    assert.ok(bar[0] <= bar[1], 'start<=end');
+    assert.equal(bar[7], 900, 'raw start preserved for the tooltip');
+});
+
+test('#121: a wait fully inside the window is unchanged', () => {
+    const from = 0, to = 1000;
+    const d = { truncated: false, total_count: 1, pids: [1001],
+        events: [{ s: 100, d: 50, p: 1001, n: 'CPU*', c: 0, q: '42' }] };
+    const { option } = buildTimelineOption(d, { from, to });
+    const bar = option.series[0].data[0];
+    assert.equal(bar[0], 100);
+    assert.equal(bar[1], 150);
+});
+
+test('#121: no drawn interval ever has start>end, across a mix of positions', () => {
+    const from = 1_000_000, to = 2_000_000;
+    const events = [
+        { s: 0, d: 100, p: 1, n: 'a', c: 0, q: '' },              // fully before
+        { s: 999_900, d: 300, p: 1, n: 'b', c: 0, q: '' },        // straddles start
+        { s: 1_500_000, d: 100, p: 1, n: 'c', c: 0, q: '' },      // fully inside
+        { s: 1_999_950, d: 200, p: 1, n: 'd', c: 0, q: '' },      // straddles end
+        { s: 3_000_000, d: 50, p: 1, n: 'e', c: 0, q: '' },       // fully after
+        { s: to, d: 10, p: 1, n: 'f', c: 0, q: '' },              // starts exactly at `to`
+        { s: from - 10, d: 10, p: 1, n: 'g', c: 0, q: '' },       // ends exactly at `from`
+    ];
+    const d = { truncated: false, total_count: events.length, pids: [1], events };
+    const { option } = buildTimelineOption(d, { from, to });
+    for (const bar of option.series[0].data) {
+        assert.ok(bar[0] <= bar[1], 'start<=end for ' + JSON.stringify(bar));
+    }
+    // Exactly the 3 overlapping waits (straddle-start, inside, straddle-end)
+    // survive; the two edge-exact ones (touch a boundary with zero overlap)
+    // and the two fully-outside ones are dropped.
+    assert.equal(option.series[0].data.length, 3);
 });
 
 test('density is per PAINTED pixel: a burst in a sixth of the window aggregates', () => {
