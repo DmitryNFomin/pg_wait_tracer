@@ -234,6 +234,13 @@ struct pgwt_trace_event {
 #define PGWT_EVENT_FLAG_EXEC       0x40U  /* inside an EXEC marker window */
 #define PGWT_EVENT_FLAG_QUERY_SYNTH 0x80U /* PG13 escalation straddler seed */
 #define PGWT_EVENT_FLAG_SAMPLE_CONT 0x100U /* reader-only split continuation */
+/* Issue #128 (compute.c pgwt_tag_events, query_attr.h): the record closed
+ * with query_id 0 and was attributed to the id its command reported
+ * before/after it (BACKFILL), or its command never reported one
+ * (UNATTRIB: foreground non-idle time top_queries counts as
+ * unattributed_ms instead of dropping). */
+#define PGWT_EVENT_FLAG_QUERY_BACKFILL 0x200U
+#define PGWT_EVENT_FLAG_QUERY_UNATTRIB 0x400U
 
 #define PGWT_EVENT_EXIT  0xFFFFFFFFU  /* sentinel new_event for process exit */
 

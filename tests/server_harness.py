@@ -11,9 +11,11 @@ Usage:
 """
 import json
 import os
+import select
 import subprocess
 import sys
 import tempfile
+import time
 import shutil
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -72,11 +74,21 @@ class ServerHarness:
             self.proc.wait(timeout=5)
             self.proc = None
 
-    def query(self, cmd, **kwargs):
+    def query(self, cmd, timeout=None, **kwargs):
         """Send a command and return parsed JSON response.
 
         Args:
             cmd: Command name (time_model, top_events, etc.)
+            timeout: seconds to wait for pgwt-server's response before
+                     raising TimeoutError (default None = block forever,
+                     the original behavior every other caller relies on).
+                     A caller measuring pgwt-server's OWN latency as part
+                     of what it is testing (tests/demo_rehearsal.py's
+                     Waterfall executions-query check, issue #157) MUST
+                     pass one: without it, a hang in pgwt-server -- which
+                     is literally the symptom that check exists to catch
+                     -- hangs this readline() forever instead of the
+                     caller ever seeing a timing failure.
             **kwargs: Optional fields — filters, from_ns (as 'from_'), to_ns (as 'to_'),
                       num_buckets (as 'buckets'), detail.
         """
@@ -107,6 +119,15 @@ class ServerHarness:
         line = json.dumps(req) + "\n"
         self.proc.stdin.write(line)
         self.proc.stdin.flush()
+
+        start = time.monotonic()
+        if timeout is not None:
+            ready, _, _ = select.select([self.proc.stdout], [], [], timeout)
+            if not ready:
+                elapsed = time.monotonic() - start
+                raise TimeoutError(
+                    f"pgwt-server did not answer '{cmd}' (id={req['id']}) "
+                    f"within {timeout}s (waited {elapsed:.1f}s)")
 
         resp_line = self.proc.stdout.readline()
         if not resp_line:

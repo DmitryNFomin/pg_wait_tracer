@@ -11,8 +11,12 @@
  *
  * Stable surface for tooling (the gallery-cell snapshot suite):
  *   - cell DOM id = gallery-<builder>-<state> (manifest cellId)
- *   - <body data-gallery-ready="1"> once every cell has rendered
- *   - tick-replay cells: data-tick="<n>" on the cell, and
+ *   - <body data-gallery-ready="1"> once every cell created during the
+ *     initial render pass has fired its REAL completion signal (issue #155
+ *     — see the "render-settle tracking" section below; this is NOT just
+ *     "every renderCell() call returned", which races the chart paint)
+ *   - tick-replay cells: data-tick="<n>" AND data-settled="1" on the cell
+ *     once that tick's re-render has actually completed, and
  *     window.__gallery.setTick('<cellId>', n) for deterministic stepping
  *   - window.__gallery.manifest = the manifest entries
  *
@@ -51,6 +55,7 @@ import {
     compareEventsConfig,
 } from '../lib/builders/table-configs.js';
 import { esc } from '../lib/format.js';
+import { createRenderTracker, createReadyGate } from './render-settle.mjs';
 
 const CHART_W = 620;
 const CHART_H = 280;
@@ -66,6 +71,61 @@ const TABLE_CONFIGS = {
 /* cellId -> setTick(n) for tick-replay cells (used by ⏮/⏭ and Playwright). */
 const tickHooks = {};
 
+/* ── Render-settle tracking (issue #155) ─────────────────────────────────────
+ * animation:false only removes SERIES transitions — the zrender/echarts paint
+ * itself is still scheduled on requestAnimationFrame (see
+ * echarts.min.js's Animation/`refresh()` scheduler), so the synchronous
+ * setOption() call returns well before the canvas is actually painted.
+ * Screenshotting right after the synchronous render loop therefore races
+ * that paint, and the result depends on runner load — the same commit
+ * rendered pixels that differed by up to 3.2% run to run. uPlot draws
+ * synchronously (no rAF in its bundle) but is wired the same way for one
+ * uniform signal and because a future uPlot version is not obligated to
+ * stay synchronous.
+ *
+ * The bookkeeping (createRenderTracker/createReadyGate) is a pure module
+ * (./render-settle.mjs, unit-tested in tests/web_unit/render-settle.test.mjs)
+ * with no DOM/chart references; this section is only the DOM glue: it flips
+ * cell.dataset.settled and document.body.dataset.galleryReady when the pure
+ * gate says a render actually began/resolved. Tick-replay re-renders reuse
+ * the same per-cell tracker (begin() again before each setOption/remount) so
+ * data-settled tracks the LATEST requested tick, independent of the
+ * one-time gallery-ready flag (which never un-readies once true). */
+const readyGate = createReadyGate();
+const settleTrackers = new WeakMap();
+
+/* `el` is any node inside the cell (the chart/plot host div). */
+function trackerFor(el) {
+    const cell = el.classList.contains('cell') ? el : el.closest('.cell');
+    if (!cell) return null;
+    let t = settleTrackers.get(cell);
+    if (!t) {
+        const tracker = createRenderTracker();
+        t = {
+            begin() {
+                cell.dataset.settled = '0';
+                if (tracker.begin()) readyGate.addPending();
+            },
+            settle() {
+                if (!tracker.settle()) return; // stray/superseded completion
+                cell.dataset.settled = '1';
+                readyGate.resolvePending();
+                if (readyGate.isReady) document.body.dataset.galleryReady = '1';
+            },
+        };
+        settleTrackers.set(cell, t);
+    }
+    return t;
+}
+
+/* Marks a NEW render in flight against `el`'s owning cell, for callers that
+ * re-render an already-tracked chart directly (tick replay) without going
+ * back through makeChart/mountUplotAas. */
+function beginRenderFor(el) {
+    const t = trackerFor(el);
+    if (t) t.begin();
+}
+
 function div(cls, parent) {
     const el = document.createElement('div');
     if (cls) el.className = cls;
@@ -80,7 +140,26 @@ function makeChart(host, option, height) {
         renderer: 'canvas', devicePixelRatio: 1,
         width: CHART_W, height,
     });
-    chart.setOption(option, true);
+    // Register the completion listener BEFORE begin()/setOption so a
+    // same-tick synchronous 'finished' (unlikely, but not guaranteed absent)
+    // can never fire before we start counting it as pending.
+    const tracker = trackerFor(host);
+    if (tracker) {
+        chart.on('finished', () => tracker.settle());
+        tracker.begin();
+    }
+    try {
+        chart.setOption(option, true);
+    } catch (e) {
+        // A builder/option bug throwing here must red-card ONLY this cell
+        // (renderCell's own try/catch does that) — it must NOT leave this
+        // cell's render permanently pending, or data-gallery-ready (and
+        // every OTHER cell's capture) hangs on the 15s timeout behind one
+        // broken cell. settle() is idempotent against a later 'finished'
+        // that might still fire for a partially-applied option.
+        if (tracker) tracker.settle();
+        throw e;
+    }
     return chart;
 }
 
@@ -217,6 +296,7 @@ function renderAasTicks(body, foot, state, cell) {
         const m = buildAasOption(ticks[tick].data, ticks[tick].opts);
         // The app's exact live-refresh path (views/active.js): full-option
         // setOption with notMerge — identity defects show as tick-N flashes.
+        beginRenderFor(host);
         chart.setOption(m.option, true);
         cell.dataset.tick = String(tick);
         label.textContent = 'tick ' + (tick + 1) + '/' + ticks.length;
@@ -278,13 +358,22 @@ function mountUplotAas(host, data, opts) {
     const honesty = overlayHooks((u) => overlayGeometry(data, opts,
         { min: u.scales.x.min, max: u.scales.x.max }));
     const ghost = compareHooks(() => spec.compare);
+    // uPlot draws synchronously (no rAF in its bundle), so this settle()
+    // is redundant with the plain begin()/settle() bracket below in
+    // practice — but it registers the REAL completion signal ('draw' fires
+    // after every uPlot paint, including the setScale()-triggered redraw
+    // below) rather than "the constructor returned", so a future async
+    // uPlot cannot silently reintroduce this class of race.
+    const tracker = trackerFor(host);
     o.hooks = {
         drawAxes: (honesty.drawAxes || []).concat(ghost.drawAxes || []),
-        draw: honesty.draw || [],
+        draw: (honesty.draw || []).concat(tracker ? [() => tracker.settle()] : []),
     };
+    if (tracker) tracker.begin();
     const u = new uPlot(o, spec.alignedData, plotHost);
     u.setScale('x', spec.xWindow);
     if (diff) drawDiffStrip(diff, spec.compare, spec.xWindow);
+    if (tracker) tracker.settle();
     return { u, spec };
 }
 
@@ -556,5 +645,12 @@ export function main() {
             tickHooks[cellId](n);
         },
     };
-    document.body.dataset.galleryReady = '1';
+    // Every renderCell() call above has returned (the DOM/setOption calls
+    // are synchronous), but the charts' own paint is not — see the
+    // render-settle tracking block above. Flip data-gallery-ready only once
+    // every one of them has actually fired its completion event; if none are
+    // pending (e.g. an all-panel/table page with no charts) this fires
+    // immediately.
+    readyGate.markLoopDone();
+    if (readyGate.isReady) document.body.dataset.galleryReady = '1';
 }

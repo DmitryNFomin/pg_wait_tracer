@@ -181,7 +181,17 @@ for k in ('events_total', 'events_per_sec', 'lifecycle_events_total',
           # #98 live command gate: the non-marker share of the live CPU*
           # classification (unmarked pids / full accumulator fallback).
           'live_cmd_markers_total', 'live_cpu_unmarked_ns_total',
-          'live_cpu_gate_fallback_total'):
+          'live_cpu_gate_fallback_total',
+          # #128 deferred per-query attribution: late-attributed ns,
+          # unattributed-bucket ns, pending-list spills.
+          'live_query_backfilled_ns_total',
+          'live_query_unattributed_ns_total',
+          'live_query_pending_overflow_total',
+          'summary_query_attr_table_full_total',
+          'summary_query_unattributed_ns_total',
+          # #128 follow-up: sampled idle readings that contradict the same
+          # tick's cmd_open (never a command boundary).
+          'sampled_idle_in_command_total'):
     assert k in r, 'missing ' + k
     assert isinstance(r[k], (int, float)), k
 # T8: capability string mirrors status.

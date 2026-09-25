@@ -354,6 +354,13 @@ _CANNED["top_sessions"] = {
 
 _CANNED["top_queries"] = {
     "db_time_ms": 12500,
+    # Issue #128: foreground non-idle time no command claimed (reported, not
+    # dropped) and row time attributed to an id reported after the interval
+    # closed (a parse-phase lock wait).
+    "unattributed_available": True,   # false on the summary fast path
+    "unattributed_ms": 310.5,
+    "unattributed_count": 4,
+    "backfilled_ms": 4003.4,
     "rows": [
         {"query_id": "3886912043147135675", "text": "UPDATE pgbench_accounts SET abalance = abalance + $1 WHERE aid = $2",
          "total_ms": 4200, "pct": 33.6, "count": 45000, "avg_us": 93.3,

@@ -89,6 +89,9 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 source "$SCRIPT_DIR/testutil.sh"
+# stop_pid / url_ready / derive_pgport / check_pgbench_provisioned: shared
+# with tests/demo_rehearsal.sh (issue #157) -- see live_daemon_lib.sh.
+source "$SCRIPT_DIR/live_daemon_lib.sh"
 
 TRACER="$PROJECT_DIR/pg_wait_tracer"
 SERVER="$PROJECT_DIR/pgwt-server"
@@ -124,38 +127,10 @@ echo "ui_live_smoke: postmaster PID $PM_PID"
 # inherits; that silently overrode an explicit `--pg-version 13` and ran the
 # whole walk against PG18's cluster while tracing PG13's postmaster, an
 # 11/11 false failure -- precisely the "stale PGPORT silently traces one
-# cluster while the load runs against another" bug).
-#   1. PGWT_PGPORT: explicit caller override, always wins.
-#   2. Line 4 of the RESOLVED PM_PID's own postmaster.pid, via
-#      /proc/$PM_PID/cwd (postmaster's CWD is its data directory) --
-#      authoritative for any layout, including a stock single-cluster host
-#      on 5432 or an RPM layout (/usr/pgsql-<N>/bin/postgres), not just this
-#      box's 54<major> convention.
-#   3. PGWT_PG_PORT_BASE + PG_MAJOR (derived from the exe path if not given
-#      via --pg-version), only if postmaster.pid can't be read.
-PG_PORT_BASE="${PGWT_PG_PORT_BASE:-5400}"
-if [[ -z "$PG_MAJOR" ]]; then
-    PG_MAJOR=$(readlink "/proc/$PM_PID/exe" 2>/dev/null | grep -oP 'postgresql/\K\d+(?=/)' || true)
-fi
-PID_PORT=""
-PM_CWD=$(readlink "/proc/$PM_PID/cwd" 2>/dev/null || true)
-if [[ -n "$PM_CWD" && -f "$PM_CWD/postmaster.pid" ]]; then
-    PID_PORT=$(sed -n '4p' "$PM_CWD/postmaster.pid" 2>/dev/null || true)
-    [[ "$PID_PORT" =~ ^[0-9]+$ ]] || PID_PORT=""
-fi
-if [[ -n "${PGWT_PGPORT:-}" ]]; then
-    export PGPORT="$PGWT_PGPORT"
-    echo "ui_live_smoke: PGPORT=$PGPORT (caller override via PGWT_PGPORT)"
-elif [[ -n "$PID_PORT" ]]; then
-    export PGPORT="$PID_PORT"
-    echo "ui_live_smoke: PGPORT=$PGPORT (read from postmaster.pid for PID $PM_PID)"
-elif [[ -n "$PG_MAJOR" ]]; then
-    export PGPORT=$((PG_PORT_BASE + PG_MAJOR))
-    echo "ui_live_smoke: PG major $PG_MAJOR -> PGPORT=$PGPORT (derived: PGWT_PG_PORT_BASE=$PG_PORT_BASE + PG$PG_MAJOR, postmaster.pid unreadable)"
-else
-    echo "ERROR: could not derive PGPORT for PID $PM_PID (postmaster.pid unreadable, no PG major, no PGWT_PGPORT set)"
-    exit 1
-fi
+# cluster while the load runs against another" bug). Factored into
+# live_daemon_lib.sh's derive_pgport (issue #157) -- see its doc comment for
+# the exact three tiers.
+derive_pgport "$PM_PID" "$PG_MAJOR" "ui_live_smoke"
 
 for bin in "$TRACER" "$SERVER" "$BRIDGE"; do
     if [[ ! -x "$bin" ]]; then
@@ -187,28 +162,8 @@ WORKLOAD_PID=""
 PGBENCH_PID=""
 SMOKE_RC=1
 
-# Bounded wait: signal, then poll for exit, then KILL if it outlives the
-# budget. Mirrors test_capture_smoke.py's terminate_and_wait (TERM + timeout
-# + KILL) -- `wait` has no native timeout in bash. sig defaults to TERM;
-# the bridge needs INT specifically (see cleanup()).
-stop_pid() {
-    local pid="$1" budget_s="${2:-10}" sig="${3:-TERM}"
-    [[ -z "$pid" ]] && return 0
-    kill -0 "$pid" 2>/dev/null || return 0
-    kill "-$sig" "$pid" 2>/dev/null
-    local steps=$((budget_s * 2))
-    local n=0
-    while kill -0 "$pid" 2>/dev/null && [[ $n -lt $steps ]]; do
-        sleep 0.5
-        n=$((n + 1))
-    done
-    if kill -0 "$pid" 2>/dev/null; then
-        kill -KILL "$pid" 2>/dev/null
-    fi
-    wait "$pid" 2>/dev/null
-    return 0
-}
-
+# stop_pid: bounded wait (signal, poll, KILL) -- live_daemon_lib.sh. The
+# bridge gets SIGINT specifically (see cleanup()).
 cleanup() {
     # Reverse start order. The bridge gets SIGINT specifically: web/main.go
     # only handles os.Interrupt (SIGINT), not SIGTERM -- a plain TERM would
@@ -259,40 +214,14 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-# GET a URL, exit 0 iff it answers 200. Python (not curl) to avoid adding a
-# new external-tool dependency on top of what the rest of the suite needs.
-url_ready() {
-    python3 - "$1" <<'PYEOF'
-import sys, urllib.request
-try:
-    with urllib.request.urlopen(sys.argv[1], timeout=2) as r:
-        sys.exit(0 if r.status == 200 else 1)
-except Exception:
-    sys.exit(1)
-PYEOF
-}
+# url_ready: GET a URL, exit 0 iff it answers 200 -- live_daemon_lib.sh.
 
 # ── 1. Controlled load ───────────────────────────────────────────────────────
 
 # Reuse the box's PROVISIONED pgbench tables (tests/provision-runner.sh:
-# scale 10) -- do NOT `pgbench -i` here. `-i` drops and recreates every
-# pgbench table: it silently destroyed the box's scale-10 dataset for every
-# later test in the run, AND changed overhead_trend.csv's baseline
-# out from under it (review item 1). Fail loudly instead of silently
-# reinitialising if provisioning did not run.
-echo "ui_live_smoke: checking for provisioned pgbench tables"
-PGBENCH_ROWS=$(psql -U postgres -d postgres -tAc \
-    "SELECT count(*) FROM pgbench_accounts" 2>>"$PGBENCH_LOG")
-if [[ -z "$PGBENCH_ROWS" || "$PGBENCH_ROWS" -lt 1 ]]; then
-    echo "ERROR: pgbench_accounts is missing/empty on PGPORT=$PGPORT --" \
-         "tests/provision-runner.sh should have initialized it. Refusing to" \
-         "silently 'pgbench -i' here (would destroy the box's provisioned" \
-         "scale-10 dataset and change overhead_trend.csv's baseline for" \
-         "every other test)."
-    tail -n 20 "$PGBENCH_LOG"
-    exit 1
-fi
-echo "ui_live_smoke: pgbench_accounts has $PGBENCH_ROWS rows (provisioned) -- reusing"
+# scale 10) -- do NOT `pgbench -i` here (check_pgbench_provisioned,
+# live_daemon_lib.sh; see its doc comment for why).
+check_pgbench_provisioned "ui_live_smoke" "$PGBENCH_LOG"
 
 echo "ui_live_smoke: starting pgbench (4 clients, ${DURATION_S}s, throttled)"
 # --rate: measured on the gate box, an UNTHROTTLED 4-client pgbench against
@@ -314,50 +243,10 @@ if ! kill -0 "$PGBENCH_PID" 2>/dev/null; then
     exit 1
 fi
 
-# Lock/Timeout: reuse tests/test_capture_smoke.py's Workload class (the same
-# holder/waiter/sleeper psql sessions that test already proves out) but LOOP
-# fire()/release() for the whole run instead of firing once, so Lock:relation
-# and Timeout:PgSleep keep appearing in every live tick.
+# Lock/Timeout: tests/live_loop_workload.py (issue #157: factored out so
+# tests/demo_rehearsal.sh can run the identical loop for a longer window).
 echo "ui_live_smoke: starting looping lock/sleep workload"
-python3 - "$SCRIPT_DIR" "$DURATION_S" >>"$WORKLOAD_LOG" 2>&1 <<'PYEOF' &
-import signal
-import sys
-import time
-
-sys.path.insert(0, sys.argv[1])
-from test_capture_smoke import Workload
-
-duration_s = float(sys.argv[2])
-stop = {"flag": False}
-
-
-def _stop(signum, frame):
-    stop["flag"] = True
-
-
-signal.signal(signal.SIGTERM, _stop)
-
-wl = Workload()
-wl.open_sessions()
-deadline = time.monotonic() + duration_s
-try:
-    while not stop["flag"] and time.monotonic() < deadline:
-        # Workload.release() COMMITs the holder, permanently dropping the
-        # lock it took in open_sessions() -- a second fire() without
-        # re-acquiring it would have the waiter sail through with no
-        # Lock:relation wait at all. Re-issue the same BEGIN/LOCK
-        # open_sessions() used, then fire()/release() as normal.
-        wl.holder.stdin.write(
-            f"BEGIN; LOCK TABLE {wl.LOCK_TABLE} IN ACCESS EXCLUSIVE MODE;\n")
-        wl.holder.stdin.flush()
-        time.sleep(0.5)   # let the re-lock land before the waiter tries
-        wl.fire(sleep_s=3)
-        time.sleep(2)
-        wl.release()
-        time.sleep(1)
-finally:
-    wl.stop()
-PYEOF
+python3 "$SCRIPT_DIR/live_loop_workload.py" "$DURATION_S" >>"$WORKLOAD_LOG" 2>&1 &
 WORKLOAD_PID=$!
 sleep 2   # Workload.open_sessions() itself sleeps ~1.5s before its first check
 if ! kill -0 "$WORKLOAD_PID" 2>/dev/null; then
