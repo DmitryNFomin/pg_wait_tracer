@@ -559,9 +559,14 @@ def snap_gallery_suite(page):
 
     print("--- Snapshots: fixture gallery (U1 tight-threshold cells) ---")
     page.goto(GALLERY_URL)
-    # gallery.js sets data-gallery-ready="1" after every cell has rendered.
+    # gallery.js sets data-gallery-ready="1" only once every chart/uPlot mount
+    # created during the initial render pass has fired its REAL completion
+    # event (echarts 'finished' / uPlot 'draw', see render-settle.mjs) --
+    # #155. No further fixed-duration settle wait: that was the bug (the
+    # capture racing the async paint), not a font/animation timing issue —
+    # animate:false was already set on every builder before this fix and did
+    # not make the gate deterministic on its own.
     page.wait_for_selector("body[data-gallery-ready='1']", timeout=15000)
-    page.wait_for_timeout(500)  # font/canvas settle (charts animate: false)
 
     for cell_id in GALLERY_STATIC_CELLS:
         snapshot(page, _gallery_name(cell_id), f"#{cell_id}",
@@ -585,7 +590,14 @@ def snap_gallery_suite(page):
             continue
         for _ in range(step):
             step_btn.click()
-        page.wait_for_selector(f"#{cell}[data-tick='{step}']", timeout=5000)
+        # data-tick flips synchronously on click; data-settled flips back to
+        # "1" only once the chart's REAL completion event (echarts
+        # 'finished' / uPlot 'draw', see gallery.js) fires for THIS tick —
+        # #155: without it the capture can race the chart paint the same way
+        # the initial data-gallery-ready wait below does. A timeout here
+        # raises (loud failure), never falls through to a screenshot.
+        page.wait_for_selector(
+            f"#{cell}[data-tick='{step}'][data-settled='1']", timeout=5000)
         snapshot(page, tick_name, f"#{cell}",
                  pixel_threshold=GALLERY_PIXEL_THRESHOLD,
                  max_diff_ratio=GALLERY_MAX_DIFF_RATIO)
