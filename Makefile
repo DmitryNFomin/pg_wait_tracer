@@ -271,8 +271,12 @@ clean:
 #   hetzner-sweep  delete stale (>6h) pgwt=ephemeral Hetzner VMs; runs
 #                  automatically at the start of every box-check too
 #   ui-gallery     before/after screenshot sheet -> tests/results/ui_gallery/
+#   demo-rehearsal issue #157: a single long (DURATION_MIN=, default 35)
+#                  real-PG capture under pgbench load, walked repeatedly,
+#                  on its own throwaway Hetzner VM (never the gate box,
+#                  never gating CI) -> tests/results/demo_rehearsal/
 # ---------------------------------------------------------------------------
-.PHONY: check check-fast box-check hetzner-sweep ui-gallery
+.PHONY: check check-fast box-check hetzner-sweep ui-gallery demo-rehearsal
 check:
 	@scripts/check.sh
 check-fast:
@@ -283,3 +287,5 @@ hetzner-sweep:
 	@tests/hetzner-sweep.sh $(if $(MAX_AGE_HOURS),--max-age-hours $(MAX_AGE_HOURS),) $(if $(DRY_RUN),--dry-run,)
 ui-gallery:
 	@tests/ui_gallery.sh $(BASE)
+demo-rehearsal:
+	@DURATION_MIN=$(DURATION_MIN) KEEP=$(KEEP) scripts/demo-rehearsal.sh
