@@ -75,9 +75,19 @@ judges. It writes no feature code itself for anything bigger than a one-liner.
   report answers the question. Counterweight so quality does not slip: a
   finding that touches signal handling, loops, accounting or the fail-safe rule
   goes back to the implementer whatever label the reviewer gave it.
+- **Reports to the owner are FIVE LINES at most** (owner rule 2026-09-25):
+  merged / in flight / blocked / needs you. Long form only when the owner has
+  to decide something, or when a finding changes the plan. No bug narratives —
+  the issue tracker holds the detail, and a link is enough.
 - **Splitting**: one roadmap item = one issue = one branch = one implementer.
   Split only along an independent seam (disjoint files AND disjoint tests);
-  never split a shared file; at most **2 tasks in flight**. Anything over ~a
+  never split a shared file; at most **2 tasks in flight**. Before spawning,
+  list the files the task will touch and compare them against every in-flight
+  branch — an overlap is refused up front, not discovered at merge (2026-09-25:
+  two branches both edited `tests/test_durability.c`, git merged them silently
+  and the build broke). **At most ONE branch touching `web/` at a time**: UI
+  branches collide on snapshot baselines and `tests/web_snapshots/VERSION` by
+  construction, and each collision costs a manual merge plus a regeneration. Anything over ~a
   day of work goes to a `Plan` agent first; its steps run sequentially unless
   the plan shows them independent.
 - **Spawning**: always `isolation: "worktree"`. The prompt is a contract:
