@@ -53,6 +53,19 @@ judges. It writes no feature code itself for anything bigger than a one-liner.
   blocker; no confirmation re-reviews. Agents wait for box runs with one long
   sleep inside a single command, never minute-by-minute polling. Reports are
   at most ~15 lines.
+- **Main session model** (owner rule 2026-09-25): the orchestrator runs on
+  **Opus** (`/model`), never Fable — it reads 15-line reports, decides
+  ready/back, merges and spawns; every one of its turns re-reads the whole
+  context, so the orchestrator's model is the largest single token cost.
+  Fable is reserved for the FIRST implementation pass of `src/` BPF /
+  capture / discovery / backend-layout / accounting work; follow-up debugging
+  or fix rounds on that same branch go to Opus with a precise brief (failure
+  line, hypotheses, repro command). The orchestrator minimises its own turns:
+  it acts only on agent reports and on PRs that went green, never on
+  "still running" notifications or mid-flight status checks, and it never
+  reads a diff itself when a reviewer's report answers the question.
+  A finding that touches signal handling, loops, accounting or the fail-safe
+  rule goes back to the implementer whatever label the reviewer gave it.
 - **Splitting**: one roadmap item = one issue = one branch = one implementer.
   Split only along an independent seam (disjoint files AND disjoint tests);
   never split a shared file; at most **2 tasks in flight**. Anything over ~a
