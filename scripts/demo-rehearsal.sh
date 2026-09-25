@@ -71,7 +71,41 @@ labels="pgwt=ephemeral,created=$created_epoch,owner=$owner,task=demo-rehearsal"
 
 server_id=""
 server_ip=""
+target=""
+remote_dir=""
+demo_rehearsal_start_epoch=""
 cleanup_done=0
+synced_back=0
+
+# Best-effort rsync of tests/results/demo_rehearsal/ back from the VM.
+# Factored out and called from BOTH the normal end-of-run flow AND the
+# INT/TERM/HUP handlers (before ephemeral_cleanup deletes the VM) -- a run
+# killed mid-window (found the hard way: this Mac's own background-task
+# scheduler killed a live run for being low on system memory, twice, while
+# testing this harness) used to lose EVERY partial pass's frames/summary
+# the instant the VM was deleted, even though they already existed on disk
+# on the VM. Never fatal, never blocks cleanup: $target/$remote_dir may
+# still be unset (killed before the VM was even reachable), and a killed rsync
+# itself must not stop ephemeral_cleanup from deleting the VM.
+sync_results_back() {
+    [[ "$synced_back" -eq 1 ]] && return
+    synced_back=1
+    [[ -z "$target" || -z "$remote_dir" ]] && return
+    mkdir -p tests/results/demo_rehearsal
+    if rsync -az --delete -e "ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10" \
+            "$target:$remote_dir/tests/results/demo_rehearsal/" tests/results/demo_rehearsal/ \
+            2>>"$log"; then
+        local run_id
+        run_id="$(cat tests/results/demo_rehearsal/run.id 2>/dev/null || true)"
+        if [[ -n "$run_id" && "$run_id" =~ ^[0-9]+$ && -n "$demo_rehearsal_start_epoch" && "$run_id" -ge "$demo_rehearsal_start_epoch" ]]; then
+            echo "demo-rehearsal: tests/results/demo_rehearsal/ synced back from $target (run.id=$run_id, this invocation)" | tee -a "$log"
+        else
+            echo "demo-rehearsal: tests/results/demo_rehearsal/ synced back from $target BUT run.id=${run_id:-<missing>} predates this invocation (started ${demo_rehearsal_start_epoch:-?}) -- STALE evidence, the rehearsal likely did not complete this time" | tee -a "$log"
+        fi
+    else
+        echo "demo-rehearsal: could not sync tests/results/demo_rehearsal/ back from $target (VM may already be unreachable)" | tee -a "$log"
+    fi
+}
 
 # See the top-of-file comment: same guarantee shape as
 # scripts/box-check.sh's ephemeral_cleanup (issue #141).
@@ -126,9 +160,9 @@ ephemeral_cleanup() {
 
 echo "demo-rehearsal: creating $server_name from the pgwt=gate-snapshot image (labels: $labels)" | tee -a "$log"
 trap ephemeral_cleanup EXIT
-trap 'ephemeral_cleanup; exit 130' INT
-trap 'ephemeral_cleanup; exit 143' TERM
-trap 'ephemeral_cleanup; exit 129' HUP
+trap 'sync_results_back; ephemeral_cleanup; exit 130' INT
+trap 'sync_results_back; ephemeral_cleanup; exit 143' TERM
+trap 'sync_results_back; ephemeral_cleanup; exit 129' HUP
 
 create_out=$(HCLOUD_TOKEN="$token" tests/hetzner-vm.sh create \
     --type cx33 --image-snapshot latest --name "$server_name" --labels "$labels" \
@@ -180,17 +214,7 @@ ssh -o BatchMode=yes -o StrictHostKeyChecking=no "$target" \
     2>&1 | tee -a "$log"
 rc=${PIPESTATUS[0]}
 
-mkdir -p tests/results/demo_rehearsal
-if rsync -az --delete -e "ssh -o StrictHostKeyChecking=no" "$target:$remote_dir/tests/results/demo_rehearsal/" tests/results/demo_rehearsal/ 2>/dev/null; then
-    run_id="$(cat tests/results/demo_rehearsal/run.id 2>/dev/null || true)"
-    if [[ -n "$run_id" && "$run_id" =~ ^[0-9]+$ && "$run_id" -ge "$demo_rehearsal_start_epoch" ]]; then
-        echo "demo-rehearsal: tests/results/demo_rehearsal/ synced back from $target (run.id=$run_id, this invocation)"
-    else
-        echo "demo-rehearsal: tests/results/demo_rehearsal/ synced back from $target BUT run.id=${run_id:-<missing>} predates this invocation (started $demo_rehearsal_start_epoch) -- STALE evidence, the rehearsal likely did not complete this time"
-    fi
-else
-    echo "demo-rehearsal: no tests/results/demo_rehearsal/ on $target (the rehearsal was skipped or produced no artifacts)"
-fi
+sync_results_back
 
 echo
 echo "demo-rehearsal (DURATION_MIN=$DURATION_MIN) exit=$rc -- summary:"
