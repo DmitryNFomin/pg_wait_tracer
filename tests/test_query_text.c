@@ -16,6 +16,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <signal.h>
 
 static int tests_run = 0;
 static int tests_passed = 0;
@@ -26,13 +27,49 @@ static int tests_passed = 0;
     else { printf("  FAIL(%d): " fmt "\n", __LINE__, ##__VA_ARGS__); } \
 } while (0)
 
-#define TEST_DIR "/tmp/pgwt_query_text_test"
+/* issue #125: a fixed /tmp path collides across runs on a shared box — a
+ * leftover from one run can be read by a later, unrelated run. TEST_DIR is
+ * a per-process mkdtemp() directory instead, so no two runs can ever see
+ * the same path. */
+static char g_test_dir[300];
+#define TEST_DIR g_test_dir
 
 static void rm_rf(const char *dir)
 {
     char cmd[300];
     snprintf(cmd, sizeof(cmd), "rm -rf %s", dir);
     if (system(cmd) != 0) { /* ignore */ }
+}
+
+/* Best-effort cleanup on any exit path, including a CHECK-failure return
+ * and a caught signal — never leaves state behind for the next run. Cannot
+ * catch SIGKILL, but the directory name is unique per run, so a run that
+ * dies ungracefully only orphans its own uniquely-named directory. */
+static void cleanup_test_dir(void)
+{
+    if (g_test_dir[0])
+        rm_rf(g_test_dir);
+}
+
+static void cleanup_and_reraise(int sig)
+{
+    cleanup_test_dir();
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+
+static void setup_test_dir(void)
+{
+    snprintf(g_test_dir, sizeof(g_test_dir),
+              "/tmp/pgwt_query_text_test.XXXXXX");
+    if (!mkdtemp(g_test_dir)) {
+        perror("mkdtemp");
+        exit(1);
+    }
+    atexit(cleanup_test_dir);
+    signal(SIGINT, cleanup_and_reraise);
+    signal(SIGTERM, cleanup_and_reraise);
+    signal(SIGHUP, cleanup_and_reraise);
 }
 
 static const char *jsonl_path(void)
@@ -427,6 +464,7 @@ static void test_quality_survives_compaction_restart(void)
 int main(void)
 {
     printf("=== test_query_text (T5: DUR-4/10) ===\n");
+    setup_test_dir();
     test_append_and_dedup();
     test_torn_line_tolerated();
     test_compaction();
@@ -436,7 +474,8 @@ int main(void)
     test_sampled_capacity_cannot_block_raw();
     test_quality_survives_compaction_restart();
     test_synthetic_async_and_quality_bound();
-    rm_rf(TEST_DIR);
+    /* cleanup_test_dir() runs via atexit(), including on the failure
+     * return below — no explicit rm_rf needed here. */
     printf("\n%d/%d tests passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;
 }
