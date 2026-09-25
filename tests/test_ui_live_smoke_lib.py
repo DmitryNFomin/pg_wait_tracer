@@ -104,6 +104,70 @@ def test_blink_check_resized_panel_is_maximal_not_a_crash():
           "a resized-panel ratio of 1.0 always fails the no_blink threshold")
 
 
+# ── sweep_consecutive_diff_ratios / build_sweep_tick_record (issue #119) ────
+
+def test_sweep_consecutive_diff_ratios_all_identical():
+    frame = np.zeros((10, 10, 3), dtype=np.uint8)
+    frames = [frame, frame.copy(), frame.copy(), frame.copy(), frame.copy()]
+    pairs = lib.sweep_consecutive_diff_ratios(frames)
+    check(len(pairs) == 4, f"5 frames -> 4 consecutive pairs (got {len(pairs)})")
+    check(all(ratio == 0.0 and note is None for ratio, note in pairs),
+          f"identical frames throughout the sweep -> every pair ratio 0.0 ({pairs})")
+
+
+def test_sweep_consecutive_diff_ratios_detects_a_relayout_mid_sweep():
+    a = np.zeros((10, 10, 3), dtype=np.uint8)
+    b = a.copy()
+    b[0, 0:5] = 255  # a real change between the 2nd and 3rd sweep frame
+    frames = [a, a.copy(), a.copy(), b, b.copy()]
+    pairs = lib.sweep_consecutive_diff_ratios(frames)
+    ratios = [r for r, _ in pairs]
+    check(ratios == [0.0, 0.0, 0.05, 0.0],
+          f"a re-layout landing between two sweep offsets shows up exactly there ({ratios})")
+
+
+def test_sweep_consecutive_diff_ratios_missing_frame_is_maximal_not_a_crash():
+    a = np.zeros((10, 10, 3), dtype=np.uint8)
+    frames = [a, None, a.copy()]
+    pairs = lib.sweep_consecutive_diff_ratios(frames)
+    check(len(pairs) == 2, "a missing frame does not raise or drop a pair")
+    check(pairs[0] == (1.0, "frame missing from the sweep"),
+          f"the pair touching the missing frame is ratio=1.0 with a note ({pairs[0]})")
+    check(pairs[1] == (1.0, "frame missing from the sweep"),
+          f"BOTH pairs touching a missing frame are flagged, not just one ({pairs[1]})")
+
+
+def test_sweep_consecutive_diff_ratios_shape_mismatch_is_maximal():
+    a = np.zeros((10, 10, 3), dtype=np.uint8)
+    b = np.zeros((12, 10, 3), dtype=np.uint8)  # a panel resize mid-sweep
+    pairs = lib.sweep_consecutive_diff_ratios([a, b])
+    check(pairs[0][0] == 1.0 and "resized" in pairs[0][1],
+          f"a panel resize mid-sweep is reported as ratio=1.0 with a note ({pairs[0]})")
+
+
+def test_sweep_offsets_pinned():
+    # CLAUDE.md: never widen/narrow what the issue specifies without saying so.
+    check(lib.SWEEP_OFFSETS_MS == (200, 500, 1000, 1500, 2000),
+          f"SWEEP_OFFSETS_MS matches issue #119's stated offsets exactly "
+          f"(got {lib.SWEEP_OFFSETS_MS})")
+
+
+def test_build_sweep_tick_record_shape():
+    a = np.zeros((10, 10, 3), dtype=np.uint8)
+    frames = [a, a.copy(), a.copy(), a.copy(), None]
+    achieved = [201, 503, 998, 1501, 2010]
+    rec = lib.build_sweep_tick_record(achieved, frames)
+    check(rec["target_offsets_ms"] == [200, 500, 1000, 1500, 2000],
+          f"target offsets carried through unchanged ({rec['target_offsets_ms']})")
+    check(rec["achieved_offsets_ms"] == achieved,
+          f"achieved offsets carried through unchanged ({rec['achieved_offsets_ms']})")
+    check(len(rec["ratios"]) == 4, f"4 ratios for 5 frames ({rec['ratios']})")
+    check(rec["ratios"][:3] == [0.0, 0.0, 0.0],
+          f"identical frames give ratio 0.0 ({rec['ratios']})")
+    check(rec["notes"] == ["frame missing from the sweep"],
+          f"only the pair touching the missing 5th frame gets a note ({rec['notes']})")
+
+
 def test_is_blank_frame_solid_colour():
     solid = np.full((20, 20, 3), 30, dtype=np.uint8)  # e.g. the dark theme bg
     check(lib.is_blank_frame(solid),
@@ -332,6 +396,41 @@ def test_build_failed_tab_result_pair_offsets_empty():
     r = lib.build_failed_tab_result("waterfall", "panel did not render within 60s")
     check(r["no_blink"]["pair_offsets_ms"] == [],
           "a tab that never reached the tick loop has no offsets to report")
+
+
+def test_build_tab_result_records_blink_sweep():
+    a = np.zeros((10, 10, 3), dtype=np.uint8)
+    tick_rec = lib.build_sweep_tick_record(
+        [201, 503, 998, 1501, 2010], [a, a.copy(), a.copy(), a.copy(), a.copy()])
+    r = lib.build_tab_result(
+        "timeline", True, "ok:8", ticks_observed=6, console_errors=[],
+        blink_ratio=0.0, color_violations=[],
+        leak_before={"charts": 1, "uplots": 1, "pending": 0},
+        leak_after={"charts": 1, "uplots": 1, "pending": 0},
+        artifacts={}, blink_sweep_ticks=[tick_rec])
+    check(r["blink_sweep"]["offsets_ms"] == [200, 500, 1000, 1500, 2000],
+          f"blink_sweep records the nominal target offsets ({r['blink_sweep']})")
+    check(r["blink_sweep"]["ticks"] == [tick_rec],
+          f"blink_sweep records one entry per tick, unmodified ({r['blink_sweep']})")
+    check(r["ok"] is True,
+          "the sweep never affects the gating verdict (only the anchored pair does)")
+
+
+def test_build_tab_result_blink_sweep_default_empty():
+    r = lib.build_tab_result(
+        "overview", True, "ok:8", ticks_observed=6, console_errors=[],
+        blink_ratio=0.0, color_violations=[],
+        leak_before={"charts": 1, "uplots": 1, "pending": 0},
+        leak_after={"charts": 1, "uplots": 1, "pending": 0},
+        artifacts={})
+    check(r["blink_sweep"] == {"offsets_ms": [200, 500, 1000, 1500, 2000], "ticks": []},
+          f"blink_sweep_ticks defaults to an empty tick list, not missing ({r['blink_sweep']})")
+
+
+def test_build_failed_tab_result_blink_sweep_empty():
+    r = lib.build_failed_tab_result("waterfall", "panel did not render within 60s")
+    check(r["blink_sweep"] == {"offsets_ms": [200, 500, 1000, 1500, 2000], "ticks": []},
+          f"a could-not-check tab still reports the sweep schema, with no ticks ({r['blink_sweep']})")
 
 
 def test_build_failed_tab_result_records_pgwt_errors():

@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
     MATRIX_COLORS, buildMatrixOption, matrixCellIntent, matrixTooltipFormatter,
+    matrixLegendBucketMax,
 } from '../../web/static/lib/builders/matrix.js';
 import { eventColor } from '../../web/static/lib/format.js';
 
@@ -39,7 +40,7 @@ test('visualMap is piecewise over log1p(count) and uses one hue ramp', () => {
     const m = buildMatrixOption(payload());
     assert.equal(m.option.visualMap.type, 'piecewise');
     assert.equal(m.option.visualMap.dimension, 2);
-    assert.equal(m.option.visualMap.max, Math.log1p(m.rawMax));
+    assert.equal(m.option.visualMap.max, Math.log1p(m.bucketMax));
     assert.deepEqual(m.option.visualMap.inRange.color, MATRIX_COLORS);
     assert.equal(m.option.visualMap.formatter(Math.log1p(4)), '4');
     assert.equal(m.option.visualMap.formatter(Math.log1p(4), Math.log1p(9)), '4–9');
@@ -114,4 +115,80 @@ test('empty matrix is explicit and animation is disabled for data', () => {
     assert.equal(buildMatrixOption({ nodes: [], links: [] }).hasData, false);
     assert.equal(buildMatrixOption({ nodes: [], links: [] }).option, null);
     assert.equal(buildMatrixOption(payload()).option.animation, false);
+});
+
+test('row/column order is stable across ticks even when scores reshuffle (#104)', () => {
+    const nodes = [
+        { name: 'Timeout:VacuumDelay', class: 'Timeout', event_id: 1 },
+        { name: 'LWLock:BufferContent', class: 'LWLock', event_id: 2 },
+        { name: 'CPU*', class: 'CPU', event_id: 0 },
+    ];
+    const tick1 = {
+        total: 100, nodes,
+        links: [
+            { source: 'CPU*', target: 'Timeout:VacuumDelay', value: 50, duration_ms: 1 },
+            { source: 'CPU*', target: 'LWLock:BufferContent', value: 40, duration_ms: 1 },
+        ],
+    };
+    // Tick 2: no user action, but the two events' incident-link scores swap
+    // rank (the real defect's shape — see docs/VISUAL_CHECKLIST.md STABILITY).
+    const tick2 = {
+        total: 100, nodes,
+        links: [
+            { source: 'CPU*', target: 'Timeout:VacuumDelay', value: 40, duration_ms: 1 },
+            { source: 'CPU*', target: 'LWLock:BufferContent', value: 50, duration_ms: 1 },
+        ],
+    };
+    const m1 = buildMatrixOption(tick1, { limit: 20 });
+    // Without prevLabels, rank order alone WOULD reorder the two rows —
+    // confirms the fixture actually exercises the reshuffle.
+    const mNaive = buildMatrixOption(tick2, { limit: 20 });
+    assert.notDeepEqual(mNaive.labels, m1.labels);
+    // With prevLabels (what the view now always passes), order is held.
+    const m2 = buildMatrixOption(tick2, { limit: 20, prevLabels: m1.labels });
+    assert.deepEqual(m2.labels, m1.labels);
+});
+
+test('a newly-entering event is appended, not inserted, holding old positions', () => {
+    const p1 = payload(3);
+    const m1 = buildMatrixOption(p1, { limit: 3 });
+    const p2 = payload(4); // adds a 4th event with the highest score
+    const m2 = buildMatrixOption(p2, { limit: 4, prevLabels: m1.labels });
+    assert.deepEqual(m2.labels.slice(0, m1.labels.length), m1.labels);
+    assert.equal(m2.labels.length, 4);
+});
+
+test('legend bucket max is quantized to a fixed log grid and stable for a modest range change', () => {
+    assert.equal(matrixLegendBucketMax(4), 5);
+    assert.equal(matrixLegendBucketMax(53971), 100000);
+    assert.equal(matrixLegendBucketMax(57811), 100000); // same grid point as 53,971
+    assert.equal(matrixLegendBucketMax(600000), 1000000); // real order-of-magnitude jump
+
+    // The issue's own real-data numbers: rawMax drifted 53,971 -> 57,811
+    // between ticks (~7% sampling jitter) and the OLD code re-quantized the
+    // legend from top-bucket "6,105-53,971" to "6,450-57,811" for it.
+    const nodesFixed = [
+        { name: 'CPU*', class: 'CPU', event_id: 0 },
+        { name: 'IO:DataFileRead', class: 'IO', event_id: 1 },
+    ];
+    const linkAt = (value) => ({ total: value, nodes: nodesFixed,
+        links: [{ source: 'CPU*', target: 'IO:DataFileRead', value, duration_ms: 1 }] });
+    const mA = buildMatrixOption(linkAt(53971), { limit: 20 });
+    const mB = buildMatrixOption(linkAt(57811), { limit: 20 });
+    assert.equal(mA.bucketMax, mB.bucketMax);
+    assert.equal(mA.option.visualMap.max, mB.option.visualMap.max);
+});
+
+test('axis names are positioned clear of tick labels, not at the clipped default end', () => {
+    const m = buildMatrixOption(payload());
+    assert.equal(m.option.xAxis.name, 'Source event');
+    assert.equal(m.option.xAxis.nameLocation, 'middle');
+    assert.ok(m.option.xAxis.nameGap > 0);
+    assert.equal(m.option.yAxis.name, 'Target event');
+    assert.equal(m.option.yAxis.nameLocation, 'middle');
+    assert.ok(m.option.yAxis.nameGap > 0);
+    // The y-axis name gap must clear the reserved left label column (grid.left)
+    // so it renders as its own strip, never over the first x tick label.
+    assert.ok(m.option.yAxis.nameGap < m.option.grid.left,
+        'yAxis name must stay inside the left grid margin, not spill onto the plot');
 });

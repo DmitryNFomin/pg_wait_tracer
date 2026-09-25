@@ -26,10 +26,13 @@ Transitions, Concurrency, Waterfall, Scatter, Matrix), live mode on
   3. no_blink    -- a frame ~100ms after each tick is asserted non-blank
                      (a CONTINUITY teardown-to-blank flash must not pass);
                      two frames captured back-to-back inside the same data
-                     window (after the render-check retry + animation
-                     settle) differ by < ui_live_smoke_lib.BLINK_THRESHOLD
-                     (0.1%) of pixels; the AAS legend keeps each event name's
-                     colour stable across ticks.
+                     window (after the render-check retry + a tick-anchored
+                     settle, BLINK_PAIR_ANCHOR_MS) differ by <
+                     ui_live_smoke_lib.BLINK_THRESHOLD (0.1%) of pixels; an
+                     offset sweep (issue #119, SWEEP_OFFSETS_MS) records
+                     extra frames around that settle for reporting only; the
+                     AAS legend keeps each event name's colour stable across
+                     ticks.
   4. no_leak     -- chart/uplot/pending-request counts (the chaos suite's
                      probe, test_web_ui_chaos.py's _LEAK_PROBE) are stable
                      across the visit; how long the probe took to settle is
@@ -286,6 +289,41 @@ _PANEL_ELEMENT_SELECTOR = {
 
 TICK_TIMEOUT_S = 30  # generous multiple of the 5s tick cadence
 
+# The gating blink pair's settle offset (tick-anchored ms). Named so the
+# offset sweep (issue #119, ui_live_smoke_lib.SWEEP_OFFSETS_MS) can split
+# around it without a second magic number -- see run_tab's sweep capture.
+#
+# Reduced from 1200 to 500 (issue #119 item 3) on real gate-box evidence,
+# TWO full --mode full walks on the ephemeral box (2026-09-25):
+#
+#   run.id 1790308106 (this constant still 1200 that run, sweep only
+#   reporting): the offset sweep's four consecutive-pair diff ratios
+#   (200->500->1000->1500->2000ms) were EXACTLY 0.0 for every tick on every
+#   tab that reached its tick loop (9 of 11 -- Waterfall/#101 never got a
+#   tick, Matrix/#142 failed mid-walk) -- 54 ticks x 4 pairs = 216
+#   comparisons, all zero, including every +0.5s-onward pair issue #119
+#   item 3's criterion asks about.
+#
+#   run.id 1790312398 (this constant already reduced to 500, confirming
+#   run): gating stayed green (blink ratio 0.0, pair_offsets_ms ~500-520)
+#   on every tab that produced one, AND the sweep caught a REAL early
+#   transition this time -- Transitions showed a nonzero 200->500ms pair
+#   (up to 4.79%) on 4 of 6 ticks, but its 500->1000/1000->1500/1500->2000
+#   pairs were still exactly 0.0 every time, i.e. whatever moves on
+#   Transitions settles by 500ms. That is direct evidence the sweep's own
+#   200ms floor would NOT have been safe as the anchor -- 500 is the
+#   smallest value both runs' data support. (Matrix/#142, Scatter/#142 --
+#   newly on this run -- and Waterfall/#101 again produced no tick data;
+#   unrelated to this constant -- #142 is the pre-existing "panel element
+#   gone ~100ms after the tick" intermittent, filed before issue #119 and
+#   out of this issue's scope, not a tab this change made newly red.)
+#
+# 500 keeps a margin above the 100ms blind-window check and ties the
+# constant directly to the "+0.5s" the decision criterion was written
+# against. Watch future box-check runs' blink ratios/pair_offsets for any
+# regression before assuming this is the final word.
+BLINK_PAIR_ANCHOR_MS = 500
+
 
 class SmokeFailure(Exception):
     """A tab could not even be checked (fail loudly, never skip)."""
@@ -443,6 +481,23 @@ def _safe_panel_screenshot(page, tab_id):
         return None
 
 
+def _capture_at_offset(page, tab_id, tick_ts_ms, offset_ms):
+    """Sleeps only the remainder to tick_ts_ms+offset_ms (never a flat sleep
+    from wherever this is called -- same tick-anchoring rationale as the
+    gating blink pair below) and screenshots the panel. Returns (raw_png_or_
+    None, achieved_offset_ms) -- the achieved offset can exceed offset_ms if
+    prior work already ran past the target, exactly like blink_pair_offsets_
+    ms below; used both by the offset sweep (issue #119) and the gating
+    pair itself."""
+    target_ms = tick_ts_ms + offset_ms
+    now_ms = page.evaluate("Date.now()")
+    if target_ms > now_ms:
+        page.wait_for_timeout(target_ms - now_ms)
+        now_ms = page.evaluate("Date.now()")
+    frame = _safe_panel_screenshot(page, tab_id)
+    return frame, now_ms - tick_ts_ms
+
+
 def _poll_render_check(page, tab_id, timeout_s=2.0, interval_ms=150):
     """Evaluates PANEL_CHECKS[tab_id], retrying briefly on failure. A tick's
     re-render (ECharts dispose+init when the underlying data identity
@@ -567,6 +622,7 @@ def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
         legend_ticks = []
         blink_ratios = []
         blink_pair_offsets_ms = []
+        blink_sweep_ticks = []
         render_ok, render_detail = False, "never checked"
         for i in range(1, ticks + 1):
             if not _wait_for_tick(page, i, TICK_TIMEOUT_S):
@@ -576,7 +632,7 @@ def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
                 "window.__uiLiveTicks[window.__uiLiveTicks.length - 1]")
 
             # Blind-window check (issue #93 review item 5): between the tick
-            # landing and the render-check retry + animation settle below,
+            # landing and the render-check retry + gating settle below,
             # NOTHING is sampled -- a teardown-to-blank flash right after the
             # tick (a CONTINUITY violation) would go completely unnoticed by
             # the later, already-resettled blink pair. Grab one frame ~100ms
@@ -597,42 +653,54 @@ def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
             if not render_ok:
                 raise SmokeFailure(f"tick {i}: {render_detail}")
 
-            # Settle past ECharts' default ~1000ms setOption() transition
-            # before measuring "the same data window": AAS explicitly turned
-            # this off (docs/VISUAL_CHECKLIST.md's U0 CONTINUITY fix,
-            # "no replayed draw-in on refresh"), but several other builders
-            # (observed: Concurrency/Timeline/Scatter/Matrix) still animate
-            # on every live-tick setOption(), and catching that mid-transition
-            # is measuring the WRONG window, not a real per-tick instability.
-            # 1200ms is comfortably past ECharts' default animationDuration.
-            # Filed as issue #102 (animation:false for these builders, a
-            # separate web/static/views/*.js change); once it lands this
-            # settle can shrink back down to ~tick latency (a couple hundred
-            # ms) instead of covering a whole animated transition.
+            # Offset sweep (issue #119 item 2), EARLY half: extra frames at
+            # every ui_live_smoke_lib.SWEEP_OFFSETS_MS offset below the
+            # gating pair's own anchor (BLINK_PAIR_ANCHOR_MS), captured here
+            # so they land BEFORE it chronologically. Reporting only --
+            # summary.json's blink_sweep, never a second pass/fail check.
+            sweep_offsets = list(lib.SWEEP_OFFSETS_MS)
+            early_offsets = [o for o in sweep_offsets if o < BLINK_PAIR_ANCHOR_MS]
+            late_offsets = [o for o in sweep_offsets if o >= BLINK_PAIR_ANCHOR_MS]
+            sweep_raw_frames = []
+            sweep_achieved_ms = []
+            for offset in early_offsets:
+                frame, achieved = _capture_at_offset(page, tab_id, tick_ts_ms, offset)
+                sweep_raw_frames.append(frame)
+                sweep_achieved_ms.append(achieved)
+
+            # Settle before measuring "the same data window" for the GATING
+            # blink pair. NOT about animation: issue #102 (missing
+            # animation:false on Concurrency/Timeline/Scatter/Matrix) is
+            # CLOSED -- disproved at runtime, all four builders already had
+            # animation:false at the option root (see
+            # ui_live_smoke_lib.KNOWN_FAILING_TABS's #100 comment). The
+            # settle that predates that finding (originally 1200ms) was
+            # written to dodge a transition that turned out not to exist;
+            # see BLINK_PAIR_ANCHOR_MS's own comment above for the real
+            # gate-box sweep data (issue #119 item 3) that justifies its
+            # current value.
             #
             # Anchored to the TICK's own timestamp, not a flat sleep from
             # wherever this line happens to run: the blind-window check
-            # above (screenshot + PNG decode) and _poll_render_check's retry
-            # loop both take variable time, and a flat `wait_for_timeout
-            # (1200)` here silently drifted the blink pair from ~1.3s to
-            # ~1.6s after the tick once the blind-window check was added
-            # (issue #93 review) -- moving it off whatever interval a
-            # builder's own re-render/re-layout lands in. Sleeping only the
-            # REMAINDER to tick_ts_ms+1200 keeps the measurement window
-            # stable regardless of preceding work.
-            target_ms = tick_ts_ms + 1200
-            now_ms = page.evaluate("Date.now()")
-            if target_ms > now_ms:
-                page.wait_for_timeout(target_ms - now_ms)
-                now_ms = page.evaluate("Date.now()")
+            # above (screenshot + PNG decode), _poll_render_check's retry
+            # loop, and now the early sweep captures all take variable time,
+            # and a flat `wait_for_timeout(N)` here would silently drift the
+            # blink pair later after the tick (exactly what happened when
+            # the blind-window check was added, issue #93 review, before
+            # this anchoring existed) -- moving it off whatever interval a
+            # builder's own re-render/re-layout lands in. _capture_at_offset
+            # sleeps only the REMAINDER to tick_ts_ms+BLINK_PAIR_ANCHOR_MS,
+            # keeping the measurement window stable regardless of preceding
+            # work.
+            frame_a, achieved_a_ms = _capture_at_offset(
+                page, tab_id, tick_ts_ms, BLINK_PAIR_ANCHOR_MS)
             # issue #93 review item 3: record the ACHIEVED offset (not just
-            # the target) -- preceding work (the blind-window check,
-            # _poll_render_check's retries) can still push the real capture
-            # past 1200ms under load, silently moving the measurement window
-            # the "anchored to the tick" fix above was meant to stabilise.
-            blink_pair_offsets_ms.append(now_ms - tick_ts_ms)
+            # the target) -- preceding work can still push the real capture
+            # past BLINK_PAIR_ANCHOR_MS under load, silently moving the
+            # measurement window the "anchored to the tick" fix above was
+            # meant to stabilise.
+            blink_pair_offsets_ms.append(achieved_a_ms)
 
-            frame_a = _safe_panel_screenshot(page, tab_id)
             page.wait_for_timeout(120)  # same data window, before the next tick
             frame_b = _safe_panel_screenshot(page, tab_id)
             if frame_a is None or frame_b is None:
@@ -657,6 +725,29 @@ def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
                 with open(tick_path, "wb") as f:
                     f.write(frame_a)
                 tick_paths.append(tick_path)
+
+            # Offset sweep (issue #119 item 2), LATE half: the remaining
+            # offsets at or past the anchor, captured now, after the gating
+            # pair, so they stay in chronological (and SWEEP_OFFSETS_MS)
+            # order. A sweep offset that lands EXACTLY on the anchor (true
+            # whenever BLINK_PAIR_ANCHOR_MS is itself one of
+            # SWEEP_OFFSETS_MS's values, as it is now) reuses frame_a
+            # instead of a second screenshot a few hundred ms later than
+            # intended -- capturing "again" there would just land near
+            # frame_b's window, not a genuinely separate offset sample.
+            for offset in late_offsets:
+                if offset == BLINK_PAIR_ANCHOR_MS:
+                    sweep_raw_frames.append(frame_a)
+                    sweep_achieved_ms.append(achieved_a_ms)
+                    continue
+                frame, achieved = _capture_at_offset(page, tab_id, tick_ts_ms, offset)
+                sweep_raw_frames.append(frame)
+                sweep_achieved_ms.append(achieved)
+            sweep_arrays = [lib.png_bytes_to_array(f) if f is not None else None
+                            for f in sweep_raw_frames]
+            blink_sweep_ticks.append(
+                lib.build_sweep_tick_record(sweep_achieved_ms, sweep_arrays,
+                                            target_offsets_ms=sweep_offsets))
 
             legend = page.evaluate(LEGEND_COLORS_JS)
             if legend:
@@ -684,7 +775,8 @@ def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
             pgwt_console_errors=pgwt_errors,
             leak_before_settle_s=leak_before_settle_s,
             leak_after_settle_s=leak_after_settle_s,
-            blink_pair_offsets_ms=blink_pair_offsets_ms)
+            blink_pair_offsets_ms=blink_pair_offsets_ms,
+            blink_sweep_ticks=blink_sweep_ticks)
     except SmokeFailure as e:
         print(f"  FAIL [{tab_id}]: {e}", file=sys.stderr)
         result = lib.build_failed_tab_result(tab_id, str(e),
