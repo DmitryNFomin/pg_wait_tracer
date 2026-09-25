@@ -585,7 +585,14 @@ def snap_gallery_suite(page):
             continue
         for _ in range(step):
             step_btn.click()
-        page.wait_for_selector(f"#{cell}[data-tick='{step}']", timeout=5000)
+        # data-tick flips synchronously on click; data-settled flips back to
+        # "1" only once the chart's REAL completion event (echarts
+        # 'finished' / uPlot 'draw', see gallery.js) fires for THIS tick —
+        # #155: without it the capture can race the chart paint the same way
+        # the initial data-gallery-ready wait below does. A timeout here
+        # raises (loud failure), never falls through to a screenshot.
+        page.wait_for_selector(
+            f"#{cell}[data-tick='{step}'][data-settled='1']", timeout=5000)
         snapshot(page, tick_name, f"#{cell}",
                  pixel_threshold=GALLERY_PIXEL_THRESHOLD,
                  max_diff_ratio=GALLERY_MAX_DIFF_RATIO)
