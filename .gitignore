@@ -68,3 +68,5 @@ tests/results/ci-smoke-*.log
 tests/results/web_ui_failures/
 tests/results/ui_live/
 tests/results/ui_live_mock/
+tests/results/demo-rehearsal-*.log
+tests/results/demo_rehearsal/
