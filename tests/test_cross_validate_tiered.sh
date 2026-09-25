@@ -58,8 +58,25 @@ sys.stdout.write(buf.decode().split("\n")[0])
 PYEOF
 }
 
-# Ensure pgbench schema exists
-pgbench -U postgres -d postgres -i -s 10 >/dev/null 2>&1 || true
+# Issue #133: this used to run `pgbench -i -s 10` unconditionally on every
+# invocation to "ensure the schema exists" -- harmless only because 10
+# happened to equal tests/provision-runner.sh's provisioned scale; the
+# moment that scale grows, this would silently shrink the shared dataset on
+# every run_all, and even at a matching scale `-i` unconditionally drops and
+# recreates every pgbench table (stats, bloat, cache state) out from under
+# every other test. This test only needs pgbench's normal read/write
+# workload against SOME populated pgbench schema -- the row count doesn't
+# matter to sampled-vs-exact cross-validation -- so it reads the provisioned
+# dataset read-only instead of ever re-initializing it.
+ROWS=$(psql -U postgres -d postgres -tAc \
+    "SELECT count(*) FROM pgbench_accounts" 2>/dev/null || echo 0)
+if [[ "${ROWS:-0}" -lt 1 ]]; then
+    echo "ERROR: pgbench_accounts is missing/empty in the shared 'postgres' database."
+    echo "       Issue #133: this test reads the provisioned dataset read-only and"
+    echo "       never re-initializes it. Run tests/provision-runner.sh (or"
+    echo "       'pgbench -i -s 10 -d postgres') to seed it first."
+    exit 1
+fi
 
 best_rate=""
 declare -A rate_result
