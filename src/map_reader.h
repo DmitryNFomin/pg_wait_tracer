@@ -298,6 +298,36 @@ void pgwt_live_qattr_marker(struct pgwt_accumulator *acc,
 void pgwt_live_qattr_between_commands(struct pgwt_accumulator *acc,
                                       struct pgwt_pid_accum *pa);
 
+/* The sampled tier's whole per-sample query-attribution step: record the
+ * sample, and close the pid's command on an idle sample — but ONLY when
+ * the tick's PgBackendStatus read agrees that no command is open.
+ *
+ * Why the extra condition (the #128 follow-up defect). A sample is TWO
+ * reads at two instants: sampler.c reads every target's PgBackendStatus
+ * (state, st_query_id → cmd_open/query_id/last_query_id) in the target
+ * loop, and PGPROC->wait_event_info for the whole batch AFTERWARDS. When a
+ * backend's blocked statement finishes between the two, the pair that
+ * reaches this function is (cmd_open = 1, query_id = 0) from the status
+ * read and an IDLE wait event from the later read — an instant that never
+ * existed. Treating it as "the command ended" flushed the pid's pending
+ * parse-phase waits (the whole Lock:relation wait) into the unattributed
+ * bucket a sample before the idle sample carrying the finished statement's
+ * id would have back-filled them: query_event showed the lock wait under
+ * no query at all, and the --query-id drill showed nothing (CI 36081315066,
+ * PG18 capture smoke, ~1 run in N — the race window is the read skew over
+ * the sample period). The same pair also occurs coherently — a backend
+ * that IS inside a command while waiting on the client (COPY FROM STDIN,
+ * extended protocol) — and it is not a command boundary there either; the
+ * wait event alone never closes a command.
+ *
+ * Returns true when the sample was such an in-command idle reading (the
+ * caller counts it: sampled_idle_in_command_total).
+ * `cmd_open` is the at-tick status reading, `cat_flag` the category bits. */
+bool pgwt_live_qattr_sample(struct pgwt_accumulator *acc,
+                            struct pgwt_pid_accum *pa, uint64_t query_id,
+                            uint32_t we, uint64_t stat_ns, uint32_t cat_flag,
+                            bool cmd_open);
+
 /* Log2 histogram bucket for a duration in nanoseconds. */
 uint32_t pgwt_duration_to_bucket(uint64_t ns);
 

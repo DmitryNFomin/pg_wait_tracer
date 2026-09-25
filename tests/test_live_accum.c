@@ -1248,12 +1248,24 @@ static void test_cross_check_query_attr(void)
  * raw st_query_id, which PostgreSQL clears at STATE_RUNNING and sets after
  * parse analysis). Live rule (sampler.c pgwt_sampler_accumulate) and the
  * server's tag pass must agree. */
+/* The daemon's own per-sample step (sampler.c calls exactly this), so these
+ * cases pin the shipped rule rather than a copy of it. cmd_open is the
+ * at-tick PgBackendStatus reading the sampler carries in the sample's
+ * PGWT_EVENT_FLAG_CMD_OPEN; returns true for an idle reading that
+ * contradicts it. */
+static bool sample_live_cmd(struct pgwt_accumulator *acc,
+                            struct pgwt_pid_accum *pa, uint64_t qid,
+                            uint32_t we, uint64_t period, bool cmd_open)
+{
+    return pgwt_live_qattr_sample(acc, pa, qid, we, period, 0, cmd_open);
+}
+
+/* Coherent sample: a backend reading an idle wait event is between commands,
+ * one reading anything else is inside one. */
 static void sample_live(struct pgwt_accumulator *acc, struct pgwt_pid_accum *pa,
                         uint64_t qid, uint32_t we, uint64_t period)
 {
-    pgwt_live_qattr_record(acc, pa, qid, we, period, 0, true);
-    if (pgwt_is_idle_event(we))
-        pgwt_live_qattr_between_commands(acc, pa);
+    sample_live_cmd(acc, pa, qid, we, period, !pgwt_is_idle_event(we));
 }
 
 static void test_query_attr_sampled(void)
@@ -1318,6 +1330,74 @@ static void test_query_attr_sampled(void)
     free(lacc);
 }
 
+/* ── 12. Sampled tier: an idle reading that contradicts cmd_open ──────────
+ * A sample is two reads at two instants (status first, wait_event_info for
+ * the whole batch after). When the blocked statement finishes in between,
+ * the sample that reaches the accumulator is (cmd_open = 1, query_id = 0)
+ * with an IDLE wait event. Closing the command on it flushed the pid's
+ * pending parse-phase waits into the unattributed bucket ONE sample before
+ * the idle sample carrying the finished statement's id would have
+ * back-filled them — the live query_event lost the lock wait's query and
+ * the --query-id drill showed nothing at all (CI 36081315066, PG18 capture
+ * smoke, intermittent). The same pair is also a legitimate steady state: a
+ * backend inside a command waiting on the client (COPY FROM STDIN). Neither
+ * closes a command. */
+static void test_query_attr_sampled_idle_skew(void)
+{
+    printf("--- #128: an in-command idle sample never closes the command ---\n");
+    const uint64_t P = MS(100), Q = 0x61, C = 0x62;
+
+    struct pgwt_accumulator *acc = calloc(1, sizeof(*acc));
+    pgwt_accum_init(acc);
+    struct pgwt_pid_accum *pa = pgwt_get_or_create_pid(acc, 9);
+    int skewed = 0;
+
+    /* The capture-smoke waiter: idle, then the parse-phase lock wait, then
+     * the skewed reading, then the coherent idle sample carrying Q. */
+    sample_live_cmd(acc, pa, 0, PG_WAIT_CLIENT_READ, P, false);
+    for (int i = 0; i < 3; i++)
+        sample_live_cmd(acc, pa, 0, LOCK_RELATION, P, true);
+    skewed += sample_live_cmd(acc, pa, 0, PG_WAIT_CLIENT_READ, P, true);
+    CHECK(skewed == 1 && qrow(acc, 0, LOCK_RELATION) == 0,
+          "the skewed idle sample is counted, and strands nothing in the "
+          "unattributed bucket (%.0f ms there)",
+          qrow(acc, 0, LOCK_RELATION) / 1e6);
+    skewed += sample_live_cmd(acc, pa, Q, PG_WAIT_CLIENT_READ, P, false);
+    CHECK(qrow(acc, Q, LOCK_RELATION) == 3 * P && skewed == 1,
+          "the whole lock wait still back-fills to Q on the coherent idle "
+          "sample (%.0f ms)", qrow(acc, Q, LOCK_RELATION) / 1e6);
+    CHECK(acc->qattr_backfilled_ns == 3 * P && acc->qattr_unattributed_ns == 0,
+          "live metrics: backfilled %.0f ms, unattributed %.0f ms",
+          acc->qattr_backfilled_ns / 1e6, acc->qattr_unattributed_ns / 1e6);
+
+    /* COPY FROM STDIN: ClientRead inside a command that DID report C. The
+     * id still observes (rule 1), the command stays open, and the wait that
+     * follows it belongs to C by rule 2 — not to the unattributed bucket. */
+    struct pgwt_pid_accum *pb = pgwt_get_or_create_pid(acc, 10);
+    sample_live_cmd(acc, pb, 0, LOCK_RELATION, P, true);
+    skewed += sample_live_cmd(acc, pb, C, PG_WAIT_CLIENT_READ, P, true);
+    sample_live_cmd(acc, pb, 0, LOCK_RELATION, P, true);
+    CHECK(skewed == 2 && qrow(acc, C, LOCK_RELATION) == P,
+          "an in-command client wait observes its id without closing the "
+          "command (%.0f ms under C)", qrow(acc, C, LOCK_RELATION) / 1e6);
+    sample_live_cmd(acc, pb, 0, PG_WAIT_CLIENT_READ, P, false);
+    CHECK(qrow(acc, C, LOCK_RELATION) == 2 * P && qrow(acc, 0, LOCK_RELATION) == 0,
+          "the trailing wait resolves to C at the coherent boundary (rule 2), "
+          "nothing unattributed (%.0f ms under C)",
+          qrow(acc, C, LOCK_RELATION) / 1e6);
+
+    /* And rule 3 is untouched: a command that never reports an id still
+     * lands in the unattributed bucket at its coherent boundary. */
+    struct pgwt_pid_accum *pc = pgwt_get_or_create_pid(acc, 11);
+    sample_live_cmd(acc, pc, 0, LOCK_RELATION, P, true);
+    sample_live_cmd(acc, pc, 0, PG_WAIT_CLIENT_READ, P, false);
+    CHECK(qrow(acc, 0, LOCK_RELATION) == P &&
+          acc->qattr_unattributed_ns == P,
+          "a no-id command's wait is still unattributed, never dropped "
+          "(%.0f ms)", qrow(acc, 0, LOCK_RELATION) / 1e6);
+    free(acc);
+}
+
 int main(void)
 {
     test_effective_event();
@@ -1331,6 +1411,7 @@ int main(void)
     test_query_attr_lock_before_report();
     test_cross_check_query_attr();
     test_query_attr_sampled();
+    test_query_attr_sampled_idle_skew();
     printf("\n%d/%d checks passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;
 }

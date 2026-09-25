@@ -54,6 +54,11 @@ struct pgwt_counters {
                                                           * raw last_query_id */
     uint64_t sampled_attr_shadow_cmd_open_mismatch_total;
     uint64_t sampled_attr_shadow_query_id_mismatch_total;
+    uint64_t sampled_idle_in_command_total; /* #128: samples whose idle wait
+                                             * event contradicts the tick's
+                                             * cmd_open (read skew, or a
+                                             * client wait inside a command)
+                                             * — never a command boundary */
     /* Stage 4 sampled query-text resolver. pending is a live gauge; the rest
      * are lifetime outcomes. Updated atomically by the async pgss worker. */
     uint64_t sampled_text_pending;

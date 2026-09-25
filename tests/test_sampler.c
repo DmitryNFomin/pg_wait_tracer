@@ -188,7 +188,14 @@ static void test_build_batch_cpu_policy(void)
 
     CHECK(out[0].pid == 1 && out[0].new_event == 0,
           "in-command client CPU sample recorded as event 0");
-    CHECK(out[0].flags == 0, "client CPU sample is foreground (no flag)");
+    /* Foreground (no category flag) + the at-tick cmd_open reading, which
+     * the live query attribution needs to tell a coherent idle sample from
+     * one whose wait event contradicts the status read (#128 follow-up,
+     * map_reader.h pgwt_live_qattr_sample). In-memory only: the SAMPLES
+     * block carries no flags column. */
+    CHECK(out[0].flags == PGWT_EVENT_FLAG_CMD_OPEN,
+          "client CPU sample is foreground and carries cmd_open (got 0x%x)",
+          out[0].flags);
     CHECK(out[0].query_id == 42, "CPU sample keeps its query_id");
 
     CHECK(out[1].pid == 3 && out[1].flags == PGWT_EVENT_FLAG_BACKGROUND,
@@ -212,6 +219,9 @@ static void test_build_batch_cpu_policy(void)
           "io_worker WAIT sample flagged IO_WORKER");
     CHECK(out[1].flags == 0,
           "client WAIT sample recorded even with command closed");
+    CHECK(out[0].flags == PGWT_EVENT_FLAG_CMD_OPEN,
+          "client WAIT sample inside a command carries cmd_open (got 0x%x)",
+          out[0].flags);
 
     /* UNKNOWN type is conservative: gated like a client. */
     struct pgwt_sample_target unk = { .pid = 9,

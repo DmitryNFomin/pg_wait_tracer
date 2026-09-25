@@ -364,6 +364,13 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
                      d->event_accum ? d->event_accum->qattr_unattributed_ns : 0);
     cjson_add_uint64(root, "live_query_pending_overflow_total",
                      d->event_accum ? d->event_accum->qattr_pending_overflow : 0);
+    /* …and the sampled tier's incoherent pairs: an idle wait event read for
+     * a backend the same tick's status read found inside a command. Those
+     * samples do NOT close the command (they would strand a parse-phase
+     * wait in the unattributed bucket); a nonzero count is the read skew,
+     * or client waits inside a command (COPY FROM STDIN). */
+    cjson_add_uint64(root, "sampled_idle_in_command_total",
+                     ctr->sampled_idle_in_command_total);
     /* …and the summary writer's twin: records that kept their emission-time
      * id because its per-pid table was full, and deferred time no command
      * claimed (the summary has no unattributed bucket). */

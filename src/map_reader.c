@@ -399,6 +399,38 @@ void pgwt_live_qattr_between_commands(struct pgwt_accumulator *acc,
         pgwt_qattr_boundary(&pa->qattr, true, qattr_emit, acc);
 }
 
+bool pgwt_live_qattr_sample(struct pgwt_accumulator *acc,
+                            struct pgwt_pid_accum *pa, uint64_t query_id,
+                            uint32_t we, uint64_t stat_ns, uint32_t cat_flag,
+                            bool cmd_open)
+{
+    const bool foreground = (cat_flag == 0);
+    const bool idle = pgwt_is_idle_event(we) != 0;
+
+    /* An idle wait event read for a backend the status read found INSIDE a
+     * command is not evidence that the command ended (see map_reader.h):
+     * skewed reads and COPY/extended-protocol client waits look the same
+     * here, and neither closes a command. The sample keeps its per-pid and
+     * system rows (the caller already folded those); only the boundary is
+     * withheld, so the pid's pending parse-phase waits survive to the
+     * coherent idle sample that carries the finished statement's id. */
+    if (foreground && idle && cmd_open) {
+        if (query_id != 0)   /* the id itself still observes (rule 1) */
+            pgwt_live_qattr_record(acc, pa, query_id, we, stat_ns, cat_flag,
+                                   true);
+        return true;
+    }
+
+    pgwt_live_qattr_record(acc, pa, query_id, we, stat_ns, cat_flag, true);
+    /* A coherent idle sample is the between-commands boundary (the sampled
+     * tier has no CMD markers): whatever it resolved (its query_id is the
+     * finished statement's, sampler.c build_batch), the next command must
+     * not inherit it. */
+    if (pa && foreground && idle)
+        pgwt_live_qattr_between_commands(acc, pa);
+    return false;
+}
+
 uint32_t pgwt_duration_to_bucket(uint64_t ns)
 {
     uint64_t us = ns / 1000;

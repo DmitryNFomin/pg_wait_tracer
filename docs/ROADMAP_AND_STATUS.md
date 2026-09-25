@@ -2574,6 +2574,20 @@ Three `query_event` view modes:
   the uprobe-shadow fallback (layout unvalidated) sampled attribution stays
   emission-time; (3) Mode C (`--query-id`) cannot drill the `unattributed` bucket
   (query_id 0 is "no filter"); it is a Mode A/B row only.
+  **Follow-up defect (CI 36081315066, PG18 tiered capture smoke, intermittent):** a
+  sampled "sample" is TWO reads at two instants — the status read (cmd_open,
+  st_query_id) in the target loop and `PGPROC->wait_event_info` for the whole batch
+  afterwards. A statement that finishes between them yields (cmd_open=1, query_id=0)
+  with an IDLE wait event; taking that as the command boundary flushed the pid's whole
+  pending parse-phase `Lock:relation` wait into the `unattributed` bucket one sample
+  before the idle sample carrying the finished statement's id would have back-filled
+  it (Mode A showed the wait under no query, the Mode C drill showed nothing at all).
+  The sampled tier now closes a command only on a COHERENT idle sample — the wait
+  event alone never does, which is also right for a backend legitimately waiting on
+  the client inside a command (COPY FROM STDIN) — and counts the contradicting
+  readings in `sampled_idle_in_command_total`. The offline pass has no cmd_open column
+  in the SAMPLES layout, so a skewed sample still lands in the unattributed bucket
+  there: visible and counted, never dropped.
 - *Evidence:* CLI flags `-e/--event`, `-Q/--query-id` (pg_wait_tracer.c ~232–234); web
   `views/queries.js` with the event↔query drill pivots
   (`{class:'events', event_id:'queries', pid:'timeline', query_id:'events'}` in app.js).

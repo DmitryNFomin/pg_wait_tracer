@@ -337,8 +337,14 @@ int pgwt_sampler_build_batch(const struct pgwt_sample_target *targets,
         e->new_event    = we;      /* the sampled wait event (0 = CPU) */
         /* In-memory category tag (never persisted — the SAMPLES layout has
          * no flags column; offline consumers re-derive the category from
-         * backends.jsonl). The SAMPLE flag itself is set by the reader. */
+         * backends.jsonl). The SAMPLE flag itself is set by the reader.
+         * CMD_OPEN carries the at-tick status reading to the live query
+         * attribution, which must not close a command on an idle wait
+         * event the status read contradicts (map_reader.h
+         * pgwt_live_qattr_sample). */
         e->flags        = pgwt_backend_type_flag(targets[i].backend_type);
+        if (targets[i].cmd_open)
+            e->flags |= PGWT_EVENT_FLAG_CMD_OPEN;
         e->duration_ns  = 0;       /* samples carry no duration */
         /* #128: an IDLE sample carries the id of the statement that just
          * finished (raw st_query_id; 0 while a command runs without one),
@@ -759,19 +765,18 @@ static void pgwt_sampler_accumulate(struct pgwt_daemon *d,
         /* Query attribution (io_workers are structurally query-less).
          * #128: a foreground sample taken before the statement reported its
          * id (parse-phase lock wait) is deferred on the pid until a later
-         * sample carries the id; an idle sample is the between-commands
-         * boundary (the sampled tier has no CMD markers). Same rule the
-         * server applies to SAMPLE records in pgwt_tag_events. */
+         * sample carries the id; a COHERENT idle sample (the status read
+         * agrees no command is open) is the between-commands boundary — the
+         * sampled tier has no CMD markers, and its two reads are taken at
+         * different instants (map_reader.h pgwt_live_qattr_sample). */
         uint32_t cat_flag = samples[i].flags &
             (PGWT_EVENT_FLAG_IO_WORKER | PGWT_EVENT_FLAG_MAINT |
              PGWT_EVENT_FLAG_BACKGROUND);
-        pgwt_live_qattr_record(acc, pa, samples[i].query_id, we, dur,
-                               cat_flag, true);
-        /* An idle sample is between commands: whatever it resolved (its
-         * query_id is the finished statement's, see build_batch), the next
-         * command must not inherit it. */
-        if (pa && cat_flag == 0 && pgwt_is_idle_event(we))
-            pgwt_live_qattr_between_commands(acc, pa);
+        if (pgwt_live_qattr_sample(acc, pa, samples[i].query_id, we, dur,
+                                   cat_flag,
+                                   (samples[i].flags &
+                                    PGWT_EVENT_FLAG_CMD_OPEN) != 0))
+            d->counters.sampled_idle_in_command_total++;
     }
 }
 
