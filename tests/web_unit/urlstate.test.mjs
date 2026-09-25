@@ -71,6 +71,31 @@ test('compare codec rejects missing, future, fractional, overflow, and hostile o
     assert.equal(offOnly.baselineOffsetNs, null);
 });
 
+// Issue #107: transitions' "hide idle waits" toggle — default ON, so only
+// the non-default (off) state rides the hash; every other tab's hash (and
+// every fixture above that omits dfgHideIdle) must stay byte-identical.
+test('dfg_idle: default (true/absent) never appears in the hash', () => {
+    const h1 = serializeHashState({ tab: 'transitions', live: true, spanSecs: 60,
+        filters: {}, sort: null, dfgHideIdle: true });
+    assert.ok(!h1.includes('dfg_idle'), h1);
+    const h2 = serializeHashState({ tab: 'transitions', live: true, spanSecs: 60,
+        filters: {}, sort: null, dfgHideIdle: null });
+    assert.ok(!h2.includes('dfg_idle'), h2);
+});
+
+test('dfg_idle: off round-trips through serialize + parse', () => {
+    const h = serializeHashState({ tab: 'transitions', live: true, spanSecs: 60,
+        filters: {}, sort: null, dfgHideIdle: false });
+    assert.equal(h, 'tab=transitions&live=1&span=60&dfg_idle=0');
+    const s = parseHashState('#' + h);
+    assert.equal(s.dfgHideIdle, false);
+});
+
+test('dfg_idle: absent from the hash parses as null (view default stands)', () => {
+    const s = parseHashState('#tab=transitions&live=1&span=60');
+    assert.equal(s.dfgHideIdle, null);
+});
+
 test('serialize: canonical — filter key order is sorted, same state same string', () => {
     const a = serializeHashState({ tab: 't', live: true, spanSecs: 60,
         filters: { pid: 1, class: 'IO' }, sort: null });

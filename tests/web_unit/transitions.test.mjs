@@ -9,6 +9,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
     buildTransitionsOption, transitionsContext, buildVariantsHtml,
+    isIdleTransitionNode,
 } from '../../web/static/lib/builders/transitions.js';
 import { applyDragOffset } from '../../web/static/views/transitions.js';
 import { eventColor } from '../../web/static/lib/format.js';
@@ -194,4 +195,100 @@ test('variants HTML: exec + plan sections, percentages and step labels', () => {
 test('variants HTML: empty / missing -> empty string', () => {
     assert.equal(buildVariantsHtml(null, esc), '');
     assert.equal(buildVariantsHtml({ exec: { variants: [] } }, esc), '');
+});
+
+// ── issue #107: idle-loop dominance on a real OLTP workload ────────────────
+
+test('isIdleTransitionNode: matches Client:ClientRead only — mirrors src '
+    + 'pgwt_is_idle_event() as far as it can reach this payload (Activity '
+    + 'class is already hidden server-side)', () => {
+    assert.equal(isIdleTransitionNode('Client:ClientRead'), true);
+    assert.equal(isIdleTransitionNode('Client:ClientWrite'), false);
+    assert.equal(isIdleTransitionNode('CPU*'), false);
+    assert.equal(isIdleTransitionNode('Lock:relation'), false);
+});
+
+/* Fixture shaped from the real box-check EPHEMERAL capture that reproduces
+ * issue #107: a pgbench + lock-contention + IO workload where the
+ * Client:ClientRead<->CPU* loop's TRANSITION COUNT dwarfs every other edge
+ * (every wait cycle passes through it), while Lock:relation/Timeout/IO
+ * transitions are rare by comparison though they are the entire point of the
+ * tab. This is case (b)/(c) from the diagnosis: the server computes and
+ * emits every edge; the client's default 20%-of-max-count threshold is what
+ * discards them (ranked against the dominant idle loop, they are sub-1%). */
+function realOltpShapedData() {
+    return {
+        total: 97541,
+        nodes: [
+            { name: 'CPU*', total_ms: 10000, class: 'CPU', event_id: 0 },
+            { name: 'Client:ClientRead', total_ms: 915300, class: 'Client', event_id: 0x06000000 },
+            { name: 'Lock:relation', total_ms: 28700, class: 'Lock', event_id: 0x03000001 },
+            { name: 'Timeout:PgSleep', total_ms: 68000, class: 'Timeout', event_id: 0x0b000001 },
+            { name: 'IO:DataFileRead', total_ms: 5200, class: 'IO', event_id: 0x0a000015 },
+        ],
+        links: [
+            { source: 'Client:ClientRead', target: 'CPU*', value: 48000, duration_ms: 915300 },
+            { source: 'CPU*', target: 'Client:ClientRead', value: 47950, duration_ms: 910000 },
+            { source: 'CPU*', target: 'Lock:relation',     value: 600,   duration_ms: 28700 },
+            { source: 'Lock:relation', target: 'CPU*',     value: 595,   duration_ms: 27000 },
+            { source: 'CPU*', target: 'Timeout:PgSleep',   value: 300,   duration_ms: 68000 },
+            { source: 'Timeout:PgSleep', target: 'CPU*',   value: 298,   duration_ms: 66000 },
+            { source: 'CPU*', target: 'IO:DataFileRead',   value: 200,   duration_ms: 5200 },
+            { source: 'IO:DataFileRead', target: 'CPU*',   value: 198,   duration_ms: 5000 },
+        ],
+    };
+}
+
+test('#107 BEFORE (hideIdle=false, the old default): the idle loop dominates '
+    + 'the threshold ranking and every analytically interesting edge is '
+    + 'dropped — this test would have failed before the fix (the whole '
+    + 'builder defaulted this way)', () => {
+    const real = realOltpShapedData();
+    const before = buildTransitionsOption(real, 20, { width: 800, height: 550 }, null, false);
+    assert.equal(before.option.series[0].links.length, 2,
+        'only the ClientRead<->CPU* loop clears 20% of its own dominant count');
+    const names = before.option.series[0].data.map(n => n.name);
+    assert.ok(!names.includes('Lock:relation'));
+    assert.ok(!names.includes('Timeout:PgSleep'));
+    assert.ok(!names.includes('IO:DataFileRead'));
+});
+
+test('#107 AFTER (hideIdle=true, the new default): the idle loop is removed '
+    + 'from the ranking pool BEFORE the threshold is computed, so Lock/'
+    + 'Timeout/IO edges rank against each other and survive', () => {
+    const real = realOltpShapedData();
+    const after = buildTransitionsOption(real, 20, { width: 800, height: 550 }, null, true);
+    assert.equal(after.hiddenIdleLinks, 2);
+    assert.equal(after.hiddenIdleValue, 48000 + 47950);
+    const names = after.option.series[0].data.map(n => n.name);
+    assert.ok(names.includes('Lock:relation'), 'Lock:relation survives once ranked against real edges');
+    assert.ok(names.includes('Timeout:PgSleep'));
+    assert.ok(names.includes('IO:DataFileRead'));
+    assert.ok(!names.includes('Client:ClientRead'), 'the idle node itself is gone, not merely de-emphasized');
+    assert.equal(after.option.series[0].links.length, 6);
+});
+
+test('hideIdle on idle-only data: visibleCount 0 but hiddenIdleLinks/-Value '
+    + 'say WHY (FEEDBACK — distinct from a genuinely empty window)', () => {
+    const idleOnly = {
+        total: 100,
+        nodes: [
+            { name: 'CPU*', total_ms: 10, class: 'CPU' },
+            { name: 'Client:ClientRead', total_ms: 90, class: 'Client' },
+        ],
+        links: [
+            { source: 'Client:ClientRead', target: 'CPU*', value: 50, duration_ms: 90 },
+            { source: 'CPU*', target: 'Client:ClientRead', value: 50, duration_ms: 85 },
+        ],
+    };
+    const hidden = buildTransitionsOption(idleOnly, 20, { width: 400, height: 300 }, null, true);
+    assert.equal(hidden.option, null);
+    assert.equal(hidden.visibleCount, 0);
+    assert.equal(hidden.hiddenIdleLinks, 2);
+    assert.equal(hidden.hiddenIdleValue, 100);
+    // Omitting hideIdle (undefined, falsy) keeps the old unfiltered behavior.
+    const shown = buildTransitionsOption(idleOnly, 20, { width: 400, height: 300 });
+    assert.equal(shown.visibleCount, 2);
+    assert.equal(shown.hiddenIdleLinks, 0);
+    assert.equal(shown.hiddenIdleValue, 0);
 });

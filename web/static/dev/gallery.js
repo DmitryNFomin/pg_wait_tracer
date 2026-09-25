@@ -512,15 +512,19 @@ function renderTransitions(body, foot, state) {
         return;
     }
     const m = buildTransitionsOption(state.data, state.opts.threshold,
-        state.opts.dims);
+        state.opts.dims, null, state.opts.hideIdle);
     if (!m.option) {
-        emptyCard(body, 'No transitions above threshold');
+        emptyCard(body, m.hiddenIdleLinks > 0
+            ? 'No non-idle transitions above threshold (' + m.hiddenIdleLinks + ' idle edges hidden)'
+            : 'No transitions above threshold');
         factLine(foot, 'visibleCount: 0');
         return;
     }
     makeChart(div('chart', body), m.option, state.opts.dims.height);
     factLine(foot, 'visibleCount: ' + m.visibleCount +
-        ' · threshold: ' + state.opts.threshold + '%');
+        ' · threshold: ' + state.opts.threshold + '%' +
+        (state.opts.hideIdle ? ' · hideIdle: on (' + m.hiddenIdleLinks +
+            ' idle edges / ' + m.hiddenIdleValue.toLocaleString() + ' transitions hidden)' : ''));
 }
 
 function renderConcurrency(body, foot, state) {
