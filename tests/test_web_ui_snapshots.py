@@ -559,9 +559,14 @@ def snap_gallery_suite(page):
 
     print("--- Snapshots: fixture gallery (U1 tight-threshold cells) ---")
     page.goto(GALLERY_URL)
-    # gallery.js sets data-gallery-ready="1" after every cell has rendered.
+    # gallery.js sets data-gallery-ready="1" only once every chart/uPlot mount
+    # created during the initial render pass has fired its REAL completion
+    # event (echarts 'finished' / uPlot 'draw', see render-settle.mjs) --
+    # #155. No further fixed-duration settle wait: that was the bug (the
+    # capture racing the async paint), not a font/animation timing issue —
+    # animate:false was already set on every builder before this fix and did
+    # not make the gate deterministic on its own.
     page.wait_for_selector("body[data-gallery-ready='1']", timeout=15000)
-    page.wait_for_timeout(500)  # font/canvas settle (charts animate: false)
 
     for cell_id in GALLERY_STATIC_CELLS:
         snapshot(page, _gallery_name(cell_id), f"#{cell_id}",

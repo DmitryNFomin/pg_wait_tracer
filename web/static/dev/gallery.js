@@ -148,7 +148,18 @@ function makeChart(host, option, height) {
         chart.on('finished', () => tracker.settle());
         tracker.begin();
     }
-    chart.setOption(option, true);
+    try {
+        chart.setOption(option, true);
+    } catch (e) {
+        // A builder/option bug throwing here must red-card ONLY this cell
+        // (renderCell's own try/catch does that) — it must NOT leave this
+        // cell's render permanently pending, or data-gallery-ready (and
+        // every OTHER cell's capture) hangs on the 15s timeout behind one
+        // broken cell. settle() is idempotent against a later 'finished'
+        // that might still fire for a partially-applied option.
+        if (tracker) tracker.settle();
+        throw e;
+    }
     return chart;
 }
 

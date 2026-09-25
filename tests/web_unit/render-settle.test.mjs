@@ -109,3 +109,36 @@ test('createReadyGate: multiple charts must ALL settle before ready', () => {
     g.resolvePending();
     assert.equal(g.isReady, true, '3 of 3 settled');
 });
+
+test('createReadyGate: a render that throws must still settle, or the gate hangs forever', () => {
+    // Pins the contract gallery.js's makeChart() must honor (a real bug
+    // caught in review, blast-radius regression): begin() a pending unit,
+    // then the actual render call throws (a builder/option bug) BEFORE its
+    // real completion event could ever fire. If the catch block does not
+    // also settle(), this ONE broken cell's pending unit never resolves,
+    // so isReady NEVER goes true and stalls the capture of EVERY OTHER
+    // cell on the page behind a timeout -- not just red-cards itself.
+    const g = createReadyGate();
+    const t = createRenderTracker();
+
+    function renderOneCell(shouldThrow) {
+        if (t.begin()) g.addPending();
+        try {
+            if (shouldThrow) throw new Error('builder threw');
+        } catch (e) {
+            if (t.settle()) g.resolvePending();
+            throw e;
+        }
+    }
+
+    assert.throws(() => renderOneCell(true), /builder threw/);
+    g.markLoopDone();
+    assert.equal(g.isReady, true,
+        'a crashed cell settles its pending unit -- the gate must still open');
+    assert.equal(g.pendingCount, 0);
+
+    // A later 'finished' that still fires for the aborted render (async
+    // completion racing the throw) must be a harmless no-op, not a second
+    // resolve against an already-empty gate.
+    assert.equal(t.settle(), false, 'already settled by the catch path');
+});
