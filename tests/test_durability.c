@@ -65,27 +65,23 @@ static void rm_rf(const char *dir)
 
 static const char *subdir(const char *name)
 {
-    static char buf[300];
+    static char buf[600];
     snprintf(buf, sizeof(buf), "%s/%s", g_base_dir, name);
     return buf;
 }
 
-/* Best-effort cleanup on any exit path, including a CHECK-failure return
- * and a caught signal — never leaves state behind for the next run to trip
- * over. Cannot catch SIGKILL, but that is fine: the directory name is
- * unique per run, so a run that dies ungracefully simply orphans its own
- * uniquely-named directory rather than poisoning anyone else's. */
+/* Best-effort cleanup on normal exit (including a CHECK-failure return),
+ * registered via atexit() only — no signal handlers. rm_rf() calls
+ * snprintf()/system(), neither async-signal-safe, so running it from a
+ * signal handler risks a deadlock (e.g. mid-malloc); not installing one is
+ * strictly safer here since uniqueness alone already guarantees isolation:
+ * a run killed by SIGKILL/SIGTERM/etc. only ever orphans its own
+ * uniquely-named directory, it can never collide with or be read by a
+ * later run. */
 static void cleanup_base_dir(void)
 {
     if (g_base_dir[0])
         rm_rf(g_base_dir);
-}
-
-static void cleanup_and_reraise(int sig)
-{
-    cleanup_base_dir();
-    signal(sig, SIG_DFL);
-    raise(sig);
 }
 
 static void setup_base_dir(void)
@@ -97,9 +93,6 @@ static void setup_base_dir(void)
         exit(1);
     }
     atexit(cleanup_base_dir);
-    signal(SIGINT, cleanup_and_reraise);
-    signal(SIGTERM, cleanup_and_reraise);
-    signal(SIGHUP, cleanup_and_reraise);
 }
 
 static char *path_of(const char *dir, const char *name)
@@ -231,6 +224,10 @@ static void test_recover_after_sigkill(void)
     const char *dir = subdir("kill9");
     rm_rf(dir);
 
+    /* Every path out of the child MUST be _exit(), never a normal return
+     * into the parent's main() — a fall-through would re-run the parent's
+     * atexit-registered cleanup_base_dir() concurrently with the parent
+     * (double rm_rf / use-after-cleanup of the shared g_base_dir). */
     pid_t child = fork();
     if (child == 0) {
         struct pgwt_event_writer *w = calloc(1, sizeof(*w));
@@ -245,6 +242,7 @@ static void test_recover_after_sigkill(void)
             ts += 10;
         }
         for (;;) pause();
+        _exit(0);   /* unreachable: defensive in case the loop above ever changes */
     }
     CHECK(child > 0, "fork");
 

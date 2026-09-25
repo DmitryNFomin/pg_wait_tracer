@@ -16,7 +16,6 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/stat.h>
-#include <signal.h>
 
 static int tests_run = 0;
 static int tests_passed = 0;
@@ -36,26 +35,23 @@ static char g_test_dir[300];
 
 static void rm_rf(const char *dir)
 {
-    char cmd[300];
+    char cmd[600];
     snprintf(cmd, sizeof(cmd), "rm -rf %s", dir);
     if (system(cmd) != 0) { /* ignore */ }
 }
 
-/* Best-effort cleanup on any exit path, including a CHECK-failure return
- * and a caught signal — never leaves state behind for the next run. Cannot
- * catch SIGKILL, but the directory name is unique per run, so a run that
- * dies ungracefully only orphans its own uniquely-named directory. */
+/* Best-effort cleanup on normal exit (including a CHECK-failure return),
+ * registered via atexit() only — no signal handlers. rm_rf() calls
+ * snprintf()/system(), neither async-signal-safe, so running it from a
+ * signal handler risks a deadlock (e.g. mid-malloc); not installing one is
+ * strictly safer here since uniqueness alone already guarantees isolation:
+ * a run killed by SIGKILL/SIGTERM/etc. only ever orphans its own
+ * uniquely-named directory, it can never collide with or be read by a
+ * later run. */
 static void cleanup_test_dir(void)
 {
     if (g_test_dir[0])
         rm_rf(g_test_dir);
-}
-
-static void cleanup_and_reraise(int sig)
-{
-    cleanup_test_dir();
-    signal(sig, SIG_DFL);
-    raise(sig);
 }
 
 static void setup_test_dir(void)
@@ -67,21 +63,18 @@ static void setup_test_dir(void)
         exit(1);
     }
     atexit(cleanup_test_dir);
-    signal(SIGINT, cleanup_and_reraise);
-    signal(SIGTERM, cleanup_and_reraise);
-    signal(SIGHUP, cleanup_and_reraise);
 }
 
 static const char *jsonl_path(void)
 {
-    static char p[300];
+    static char p[600];
     snprintf(p, sizeof(p), "%s/query_texts.jsonl", TEST_DIR);
     return p;
 }
 
 static const char *sources_path(void)
 {
-    static char p[300];
+    static char p[600];
     snprintf(p, sizeof(p), "%s/query_sources.jsonl", TEST_DIR);
     return p;
 }
