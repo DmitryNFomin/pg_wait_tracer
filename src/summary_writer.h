@@ -12,6 +12,7 @@
 #define PGWT_SUMMARY_WRITER_H
 
 #include "pg_wait_tracer.h"
+#include "query_attr.h"
 
 /* Import class index definitions from compute.h without pulling full header */
 #ifndef PGWT_NUM_CLASSES
@@ -118,6 +119,12 @@ struct pgwt_summary_block_header {
 
 /* ── Writer state ─────────────────────────────────────────── */
 
+#define SUMMARY_QATTR_SLOTS 1024
+struct pgwt_summary_qattr_slot {
+    uint32_t pid;                 /* 0 = empty */
+    struct pgwt_qattr_pid q;
+};
+
 struct pgwt_summary_writer {
     /* Configuration */
     char          trace_dir[256];
@@ -153,6 +160,17 @@ struct pgwt_summary_writer {
     /* Stats */
     uint64_t      total_records_written;
     uint64_t      total_bytes_written;
+
+    /* #128 deferred per-query attribution (query_attr.h), per pid; heap
+     * (SUMMARY_QATTR_SLOTS entries, open addressing, reclaimed on backend
+     * exit), NULL = disabled. The two counters are exported by the control
+     * socket (summary_query_attr_table_full_total,
+     * summary_query_unattributed_ns_total): records that kept their
+     * emission-time id because the table was full, and deferred time no
+     * command claimed (the summary has no unattributed bucket). */
+    struct pgwt_summary_qattr_slot *qattr;
+    uint64_t      qattr_table_full_total;
+    uint64_t      qattr_unattributed_ns_total;
 };
 
 /* ── Public API ───────────────────────────────────────────── */

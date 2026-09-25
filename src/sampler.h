@@ -50,6 +50,12 @@ struct pgwt_sample_target {
     pid_t    pid;
     uint64_t wait_event_addr; /* PGPROC->wait_event_info address */
     uint64_t query_id;        /* joined from the registry/state_map */
+    uint64_t last_query_id;   /* #128: raw PgBackendStatus.st_query_id at the
+                               * tick (tick source only; 0 otherwise). An IDLE
+                               * sample carries it as its query_id — the id of
+                               * the statement that just finished — so a
+                               * parse-phase wait sampled with query_id 0 can be
+                               * attributed after the fact (query_attr.h). */
     uint32_t databaseid;
     uint32_t userid;
     uint8_t  query_quality;
@@ -70,6 +76,7 @@ struct pgwt_sample_target {
 struct pgwt_sampled_attr_value {
     uint64_t query_id;
     int cmd_open;
+    uint64_t last_query_id;   /* #128: raw st_query_id (tick source only) */
 };
 
 enum pgwt_sampled_attr_source {

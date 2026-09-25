@@ -109,13 +109,21 @@ int pgwt_handle_trace_event(void *ctx, void *data, size_t data_sz)
      * drives the live command gate (#98) — the same sweep the server runs
      * in pgwt_tag_events — and is otherwise skipped like every marker. */
     if (PGWT_IS_MARKER(we)) {
-        if (we == PGWT_MARKER_CMD_START || we == PGWT_MARKER_CMD_END) {
+        /* Escalation markers are pid-less (query_id packs the reason):
+         * no per-pid state. Every other marker drives the pid's deferred
+         * query attribution (#128): plan/exec markers carry the id parse
+         * analysis just reported, resolving a lock wait that closed with
+         * query_id 0 before it. */
+        if (we != PGWT_MARKER_ESCALATE_START &&
+            we != PGWT_MARKER_ESCALATE_END) {
             struct pgwt_pid_accum *mpa = pgwt_get_or_create_pid(acc, evt->pid);
-            if (mpa) {
+            if (mpa && (we == PGWT_MARKER_CMD_START ||
+                        we == PGWT_MARKER_CMD_END)) {
                 pgwt_live_cmd_gate_marker(&mpa->cmd_gate, we,
                                           evt->timestamp_ns);
                 d->counters.live_cmd_markers_total++;
             }
+            pgwt_live_qattr_marker(acc, mpa, we, evt->query_id);
         }
         goto done;
     }
@@ -180,6 +188,12 @@ int pgwt_handle_trace_event(void *ctx, void *data, size_t data_sz)
         .pa              = pa,
     };
     pgwt_accum_add_interval(acc, &iv);
+    /* #128: the record that closes an exiting backend (new_event = EXIT) is
+     * its last — whatever is still pending resolves now (rule 2, else the
+     * unattributed bucket) instead of sitting in the per-pid entry forever
+     * and vanishing from every per-query row. */
+    if (evt->new_event == PGWT_EVENT_EXIT)
+        pgwt_live_qattr_between_commands(acc, pa);
     pgwt_debug_block_end(d, "event_callback_accumulate", evt->pid,
                          stage_started_ns);
 
@@ -218,6 +232,7 @@ void pgwt_accum_copy_used(struct pgwt_accumulator *dst,
         dp->cat_flag_plus1 = sp->cat_flag_plus1;   /* the open scan reuses it */
         dp->cat_scan_tick = sp->cat_scan_tick;
         dp->cmd_gate = sp->cmd_gate;               /* #98: the open scan peeks it */
+        dp->qattr = sp->qattr;                     /* #128: the open scan resolves against cmd_qid */
         dp->num_events = sp->num_events;
         dp->db_time_ns = sp->db_time_ns;
         dp->cpu_time_ns = sp->cpu_time_ns;
@@ -237,4 +252,7 @@ void pgwt_accum_copy_used(struct pgwt_accumulator *dst,
     dst->num_query_events = src->num_query_events;
     memcpy(dst->query_events, src->query_events,
            src->num_query_events * sizeof(struct pgwt_query_event_stats));
+    dst->qattr_backfilled_ns = src->qattr_backfilled_ns;
+    dst->qattr_unattributed_ns = src->qattr_unattributed_ns;
+    dst->qattr_pending_overflow = src->qattr_pending_overflow;
 }

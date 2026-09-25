@@ -799,6 +799,17 @@ void pgwt_print_histogram(struct pgwt_daemon *d)
 
 /* ── Query Event View ────────────────────────────────────── */
 
+/* query_id column: the id, or "unattributed" for the query_id 0 bucket
+ * (issue #128: foreground non-idle time whose command never reported an
+ * id — shown, never dropped). */
+static const char *pgwt_query_id_label(uint64_t query_id, char *buf, size_t sz)
+{
+    if (query_id == 0)
+        return "unattributed";
+    snprintf(buf, sz, "%ld", (long)(int64_t)query_id);
+    return buf;
+}
+
 /* qsort comparator: sort query events by total_ns descending */
 static int cmp_query_event_total(const void *a, const void *b)
 {
@@ -923,6 +934,7 @@ static void print_query_event_multi(struct pgwt_daemon *d)
         }
 
         int shown = 0;
+        char qid_buf[24];
         for (int i = 0; i < deltas[w].num_query_events && shown < 30; i++) {
             struct pgwt_snap_query_event *qe = &deltas[w].query_events[i];
             if (qe->count == 0) continue;
@@ -946,16 +958,16 @@ static void print_query_event_multi(struct pgwt_daemon *d)
                        denom_ns ? 100.0 * qe->total_ns / denom_ns : 0,
                        db ? 100.0 * qe->total_ns / db : 0);
             } else if (mode_b) {
-                printf("  %20ld %12lu %14.1f %10.1f %8.1f%% %8.1f%%\n",
-                       (int64_t)qe->query_id,
+                printf("  %20s %12lu %14.1f %10.1f %8.1f%% %8.1f%%\n",
+                       pgwt_query_id_label(qe->query_id, qid_buf, sizeof(qid_buf)),
                        (unsigned long)qe->count,
                        ns_to_ms(qe->total_ns),
                        avg_us,
                        denom_ns ? 100.0 * qe->total_ns / denom_ns : 0,
                        db ? 100.0 * qe->total_ns / db : 0);
             } else {
-                printf("  %20ld %-26s %12lu %14.1f %10.1f %8.1f%%\n",
-                       (int64_t)qe->query_id,
+                printf("  %20s %-26s %12lu %14.1f %10.1f %8.1f%%\n",
+                       pgwt_query_id_label(qe->query_id, qid_buf, sizeof(qid_buf)),
                        name,
                        (unsigned long)qe->count,
                        ns_to_ms(qe->total_ns),
@@ -1048,6 +1060,7 @@ void pgwt_print_query_event(struct pgwt_daemon *d)
     }
 
     int shown = 0;
+    char qid_buf[24];
     for (int i = 0; i < n && shown < 30; i++) {
         if (sorted[i].count == 0) continue;
         if (pgwt_is_idle_event(sorted[i].wait_event)) continue;
@@ -1072,8 +1085,8 @@ void pgwt_print_query_event(struct pgwt_daemon *d)
                    denom_ns ? 100.0 * sorted[i].total_ns / denom_ns : 0,
                    db ? 100.0 * sorted[i].total_ns / db : 0);
         } else if (mode_b) {
-            printf("  %20ld %12lu %14.1f %10.1f %12.1f %8.1f%% %8.1f%%\n",
-                   (int64_t)sorted[i].query_id,
+            printf("  %20s %12lu %14.1f %10.1f %12.1f %8.1f%% %8.1f%%\n",
+                   pgwt_query_id_label(sorted[i].query_id, qid_buf, sizeof(qid_buf)),
                    (unsigned long)sorted[i].count,
                    ns_to_ms(sorted[i].total_ns),
                    avg_us,
@@ -1081,8 +1094,8 @@ void pgwt_print_query_event(struct pgwt_daemon *d)
                    denom_ns ? 100.0 * sorted[i].total_ns / denom_ns : 0,
                    db ? 100.0 * sorted[i].total_ns / db : 0);
         } else {
-            printf("  %20ld %-26s %12lu %14.1f %10.1f %12.1f %8.1f%%\n",
-                   (int64_t)sorted[i].query_id,
+            printf("  %20s %-26s %12lu %14.1f %10.1f %12.1f %8.1f%%\n",
+                   pgwt_query_id_label(sorted[i].query_id, qid_buf, sizeof(qid_buf)),
                    name,
                    (unsigned long)sorted[i].count,
                    ns_to_ms(sorted[i].total_ns),
