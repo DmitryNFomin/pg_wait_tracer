@@ -40,6 +40,79 @@ on:
         default: false
 
 jobs:
+  changed_files:
+    # Drives how much of the self-hosted gate-box capture matrix runs below.
+    # Real numbers that motivated this: 8 open PRs produced ~20 CI runs, each
+    # pinning 5 jobs to [self-hosted, gate-box] (capture-smoke PG 13/16/17/18
+    # + sampled-overhead) at ~10-15 min/cell serial — hours of queue — while
+    # 4 of those 8 PRs touched no src/ and no src/bpf/ at all (docs, a test
+    # harness, a dev-gallery timing fix, a UI builder).
+    #
+    # src/ (including src/bpf/) is the ONLY thing that can change capture,
+    # accounting, discovery or the daemon, so it always gets the FULL matrix
+    # — this job only ever narrows the tier, never widens what src/ triggers.
+    # A non-pull_request/push trigger (workflow_dispatch, etc.) has no clean
+    # two-commit diff to classify, so it defaults to "run everything" — the
+    # safe direction is to over-cover, never under-cover.
+    name: changed-files
+    runs-on: ubuntu-latest
+    outputs:
+      src_changed: ${{ steps.filter.outputs.src_changed }}
+      docs_only: ${{ steps.filter.outputs.docs_only }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Classify the change (src/ vs web+tests+tooling vs docs-only)
+        id: filter
+        run: |
+          set -euo pipefail
+          EVENT="${{ github.event_name }}"
+          FILES=""
+          if [ "$EVENT" = "pull_request" ]; then
+            BASE="${{ github.event.pull_request.base.sha }}"
+            HEAD="${{ github.event.pull_request.head.sha }}"
+            FILES=$(git diff --name-only "$BASE"..."$HEAD")
+          elif [ "$EVENT" = "push" ]; then
+            BEFORE="${{ github.event.before }}"
+            AFTER="${{ github.sha }}"
+            if [ -n "$BEFORE" ] && [ "$BEFORE" != "0000000000000000000000000000000000000000" ] \
+               && git cat-file -e "$BEFORE" 2>/dev/null; then
+              FILES=$(git diff --name-only "$BEFORE" "$AFTER")
+            fi
+          fi
+
+          {
+            echo "event=$EVENT"
+            echo "changed files:"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ -z "$FILES" ]; then
+            echo "(none detected, or not a push/pull_request event) -- treating as full change" >> "$GITHUB_STEP_SUMMARY"
+            echo "src_changed=true" >> "$GITHUB_OUTPUT"
+            echo "docs_only=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          while IFS= read -r f; do echo "  $f"; done <<< "$FILES" >> "$GITHUB_STEP_SUMMARY"
+
+          if echo "$FILES" | grep -qE '^src/'; then
+            SRC=true
+          else
+            SRC=false
+          fi
+
+          # docs-only: every changed file is under docs/ or ends in .md
+          if echo "$FILES" | grep -qvE '^docs/|\.md$'; then
+            DOCS_ONLY=false
+          else
+            DOCS_ONLY=true
+          fi
+
+          echo "src_changed=$SRC" >> "$GITHUB_OUTPUT"
+          echo "docs_only=$DOCS_ONLY" >> "$GITHUB_OUTPUT"
+          echo "src_changed=$SRC docs_only=$DOCS_ONLY" >> "$GITHUB_STEP_SUMMARY"
+
   build-and-unit:
     name: build-and-unit
     runs-on: ubuntu-latest
@@ -162,6 +235,7 @@ jobs:
     # maintainer re-hosts the PR's head as `agent/<slug>` and re-runs. It
     # runs on a hosted runner, so it needs no group either.
     name: sampled-overhead (PG 17)
+    needs: changed_files
     runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted","gate-box"]') }}
     # timeout-minutes: the gate itself takes ~9 min on the box; the rest is
     # the bounded wait (120 min) for /tmp/pgwt-box-check.lock, which agents'
@@ -178,6 +252,29 @@ jobs:
           echo "gate checks run only from a branch in this repository; a maintainer must push this PR's head to agent/<slug> and re-run" >&2
           exit 1
 
+      # Path-filter gate (changed-files job): sampled-overhead only ever
+      # measures overhead of the capture path itself, so it is only needed
+      # when src/ (or src/bpf/) changed — never for web/tests/tooling-only
+      # or docs-only changes. This step RUNS (never a job-level `if:`, which
+      # would report as GitHub's "skipped" conclusion) and every step below
+      # is individually gated on its output, so the check always completes
+      # with an explicit pass/fail, keeping the required-status-checks
+      # contract intact (9 named checks; see branch protection).
+      - name: Determine whether sampled-overhead is needed
+        id: needed_filter
+        run: |
+          if [ "${{ needs.changed_files.outputs.src_changed }}" = "true" ]; then
+            NEEDED=true
+          else
+            NEEDED=false
+          fi
+          echo "needed=$NEEDED" >> "$GITHUB_OUTPUT"
+          if [ "$NEEDED" = "true" ]; then
+            echo "sampled-overhead: running (src_changed=${{ needs.changed_files.outputs.src_changed }})" | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            echo "sampled-overhead: SKIPPED -- no src/ change this run; reports success to satisfy the required check" | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+
       # Real bug found running this against the box for the first time: this
       # is a PERSISTENT runner (not ephemeral) reusing the same
       # $GITHUB_WORKSPACE across jobs, and every test step below runs test
@@ -187,22 +284,27 @@ jobs:
       # (which starts by cleaning the workspace) fails outright with EACCES
       # before this job does anything of its own. Reclaim ownership first.
       - name: Reclaim workspace ownership (previous job may have left root-owned files)
+        if: steps.needed_filter.outputs.needed == 'true'
         run: sudo chown -R "$(id -un):$(id -gn)" "$GITHUB_WORKSPACE" 2>/dev/null || true
 
       # Self-heal: a root-created 0644 lock file (e.g. from provision-runner.sh
       # before its own chmod fix, or a fresh /tmp after a reboot) wedges every
       # gate-box step's `exec 9>...` for the unprivileged 'runner' user.
       - name: Ensure gate-box lock file is writable
+        if: steps.needed_filter.outputs.needed == 'true'
         run: |
           [ -w /tmp/pgwt-box-check.lock ] || sudo sh -c 'touch /tmp/pgwt-box-check.lock && chmod 0666 /tmp/pgwt-box-check.lock'
 
       - uses: actions/checkout@v4
+        if: steps.needed_filter.outputs.needed == 'true'
 
       - name: Record start time (for wall-time measurement)
+        if: steps.needed_filter.outputs.needed == 'true'
         id: start_time
         run: echo "epoch=$(date +%s)" >> "$GITHUB_OUTPUT"
 
       - name: Record runner capacity
+        if: steps.needed_filter.outputs.needed == 'true'
         run: |
           nproc
           grep -m1 'model name' /proc/cpuinfo || true
@@ -215,6 +317,7 @@ jobs:
       # below UNLESS it's actually self-hosted (see the refusal step next),
       # in which case that path is destructive and must never run.
       - name: Detect pre-provisioned gate box
+        if: steps.needed_filter.outputs.needed == 'true'
         id: gate_box
         run: |
           if [ -f /etc/pgwt-gate-box ]; then
@@ -236,13 +339,13 @@ jobs:
       # this job anyway, so today it is also unreachable there; this refusal
       # is the enforced, not just structural, guarantee.
       - name: Refuse destructive re-install on an unprovisioned self-hosted runner
-        if: steps.gate_box.outputs.present != 'true' && runner.environment != 'github-hosted'
+        if: steps.needed_filter.outputs.needed == 'true' && steps.gate_box.outputs.present != 'true' && runner.environment != 'github-hosted'
         run: |
           echo "FATAL: gate-box marker missing; run tests/provision-runner.sh ubuntu" >&2
           exit 1
 
       - name: Install build dependencies
-        if: steps.gate_box.outputs.present != 'true'
+        if: steps.needed_filter.outputs.needed == 'true' && steps.gate_box.outputs.present != 'true'
         run: |
           exec 9>/tmp/pgwt-box-check.lock
           flock -w 7200 9 || { echo "FATAL: /tmp/pgwt-box-check.lock held >120 min" >&2; exit 1; }
@@ -262,7 +365,7 @@ jobs:
           test -r /sys/kernel/btf/vmlinux
 
       - name: Install PostgreSQL 17 (PGDG apt)
-        if: steps.gate_box.outputs.present != 'true'
+        if: steps.needed_filter.outputs.needed == 'true' && steps.gate_box.outputs.present != 'true'
         run: |
           exec 9>/tmp/pgwt-box-check.lock
           flock -w 7200 9 || { echo "FATAL: /tmp/pgwt-box-check.lock held >120 min" >&2; exit 1; }
@@ -276,7 +379,7 @@ jobs:
           sudo apt-get install -y postgresql-17 postgresql-contrib-17
 
       - name: Configure PostgreSQL 17
-        if: steps.gate_box.outputs.present != 'true'
+        if: steps.needed_filter.outputs.needed == 'true' && steps.gate_box.outputs.present != 'true'
         run: |
           exec 9>/tmp/pgwt-box-check.lock
           flock -w 7200 9 || { echo "FATAL: /tmp/pgwt-box-check.lock held >120 min" >&2; exit 1; }
@@ -300,7 +403,7 @@ jobs:
       # Locked: provision-runner.sh restarts clusters inside this same lock,
       # so probing psql without it could hit a cluster mid-restart.
       - name: Resolve gate-box PostgreSQL port + bpftool
-        if: steps.gate_box.outputs.present == 'true'
+        if: steps.needed_filter.outputs.needed == 'true' && steps.gate_box.outputs.present == 'true'
         run: |
           exec 9>/tmp/pgwt-box-check.lock
           flock -w 7200 9 || { echo "FATAL: /tmp/pgwt-box-check.lock held >120 min" >&2; exit 1; }
@@ -310,12 +413,14 @@ jobs:
           psql -U postgres -h /var/run/postgresql -p 5417 -d postgres -tAc "SELECT version()"
 
       - name: Build tracer
+        if: steps.needed_filter.outputs.needed == 'true'
         run: |
           exec 9>/tmp/pgwt-box-check.lock
           flock -w 7200 9 || { echo "FATAL: /tmp/pgwt-box-check.lock held >120 min" >&2; exit 1; }
           make
 
       - name: Run sampled-overhead structural unit gates
+        if: steps.needed_filter.outputs.needed == 'true'
         run: |
           exec 9>/tmp/pgwt-box-check.lock
           flock -w 7200 9 || { echo "FATAL: /tmp/pgwt-box-check.lock held >120 min" >&2; exit 1; }
@@ -325,6 +430,7 @@ jobs:
           tests/test_query_text
 
       - name: Gate paired sampled overhead
+        if: steps.needed_filter.outputs.needed == 'true'
         run: |
           exec 9>/tmp/pgwt-box-check.lock
           flock -w 7200 9 || { echo "FATAL: /tmp/pgwt-box-check.lock held >120 min" >&2; exit 1; }
@@ -341,7 +447,7 @@ jobs:
               --output-json sampled-overhead.json
 
       - name: Upload sampled-overhead data
-        if: always()
+        if: always() && steps.needed_filter.outputs.needed == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: sampled-overhead
@@ -422,6 +528,7 @@ jobs:
     # hold /tmp/pgwt-box-check.lock for 45-80 min each and queueing behind
     # them is the design (a 15-min bound turned master red on 2026-09-18).
     name: capture-smoke (PG ${{ matrix.pg }})
+    needs: changed_files
     runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted","gate-box"]') }}
     timeout-minutes: 180
     strategy:
@@ -439,6 +546,35 @@ jobs:
           echo "gate checks run only from a branch in this repository; a maintainer must push this PR's head to agent/<slug> and re-run" >&2
           exit 1
 
+      # Path-filter gate (changed-files job): src/ (or src/bpf/) changed ->
+      # this matrix cell always runs (the full matrix, never reduced). No
+      # src/ change but web/, tests/ or tooling did -> only the PG 18 cell
+      # runs (newest supported version; live-UI-smoke + real-PG capture
+      # still need to prove themselves once). Docs-only -> no cell runs.
+      # This step RUNS (never a job-level `if:`, which reports as GitHub's
+      # "skipped" conclusion) and every step below is individually gated on
+      # its output, so the check always completes with an explicit
+      # pass/fail, keeping the required-status-checks contract intact (9
+      # named checks, one per matrix value; see branch protection).
+      - name: Determine whether this capture cell is needed
+        id: needed_filter
+        run: |
+          SRC="${{ needs.changed_files.outputs.src_changed }}"
+          DOCS_ONLY="${{ needs.changed_files.outputs.docs_only }}"
+          if [ "$SRC" = "true" ]; then
+            NEEDED=true
+          elif [ "$DOCS_ONLY" = "false" ] && [ "${{ matrix.pg }}" = "18" ]; then
+            NEEDED=true
+          else
+            NEEDED=false
+          fi
+          echo "needed=$NEEDED" >> "$GITHUB_OUTPUT"
+          if [ "$NEEDED" = "true" ]; then
+            echo "capture-smoke (PG ${{ matrix.pg }}): running (src_changed=$SRC docs_only=$DOCS_ONLY)" | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            echo "capture-smoke (PG ${{ matrix.pg }}): SKIPPED -- no src/ change, and either docs-only or not the PG 18 reduced-tier cell (src_changed=$SRC docs_only=$DOCS_ONLY); reports success to satisfy the required check" | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+
       # Real bug found running this against the box for the first time: this
       # is a PERSISTENT runner (not ephemeral) reusing the same
       # $GITHUB_WORKSPACE across jobs, and every test step below runs test
@@ -448,16 +584,19 @@ jobs:
       # (which starts by cleaning the workspace) fails outright with EACCES
       # before this job does anything of its own. Reclaim ownership first.
       - name: Reclaim workspace ownership (previous job may have left root-owned files)
+        if: steps.needed_filter.outputs.needed == 'true'
         run: sudo chown -R "$(id -un):$(id -gn)" "$GITHUB_WORKSPACE" 2>/dev/null || true
 
       # Self-heal: a root-created 0644 lock file (e.g. from provision-runner.sh
       # before its own chmod fix, or a fresh /tmp after a reboot) wedges every
       # gate-box step's `exec 9>...` for the unprivileged 'runner' user.
       - name: Ensure gate-box lock file is writable
+        if: steps.needed_filter.outputs.needed == 'true'
         run: |
           [ -w /tmp/pgwt-box-check.lock ] || sudo sh -c 'touch /tmp/pgwt-box-check.lock && chmod 0666 /tmp/pgwt-box-check.lock'
 
       - uses: actions/checkout@v4
+        if: steps.needed_filter.outputs.needed == 'true'
 
       # tests/provision-runner.sh writes this marker once the gate box has
       # build deps + bpftool + PostgreSQL 13/16/17/18 already installed and
@@ -468,6 +607,7 @@ jobs:
       # (see the refusal step next), in which case that path is destructive
       # and must never run.
       - name: Detect pre-provisioned gate box
+        if: steps.needed_filter.outputs.needed == 'true'
         id: gate_box
         run: |
           if [ -f /etc/pgwt-gate-box ]; then
@@ -489,13 +629,13 @@ jobs:
       # this job anyway, so today it is also unreachable there; this refusal
       # is the enforced, not just structural, guarantee.
       - name: Refuse destructive re-install on an unprovisioned self-hosted runner
-        if: steps.gate_box.outputs.present != 'true' && runner.environment != 'github-hosted'
+        if: steps.needed_filter.outputs.needed == 'true' && steps.gate_box.outputs.present != 'true' && runner.environment != 'github-hosted'
         run: |
           echo "FATAL: gate-box marker missing; run tests/provision-runner.sh ubuntu" >&2
           exit 1
 
       - name: Install build dependencies
-        if: steps.gate_box.outputs.present != 'true'
+        if: steps.needed_filter.outputs.needed == 'true' && steps.gate_box.outputs.present != 'true'
         run: |
           exec 9>/tmp/pgwt-box-check.lock
           flock -w 7200 9 || { echo "FATAL: /tmp/pgwt-box-check.lock held >120 min" >&2; exit 1; }
@@ -517,7 +657,7 @@ jobs:
           test -r /sys/kernel/btf/vmlinux
 
       - name: Install PostgreSQL ${{ matrix.pg }} (PGDG apt)
-        if: steps.gate_box.outputs.present != 'true'
+        if: steps.needed_filter.outputs.needed == 'true' && steps.gate_box.outputs.present != 'true'
         run: |
           exec 9>/tmp/pgwt-box-check.lock
           flock -w 7200 9 || { echo "FATAL: /tmp/pgwt-box-check.lock held >120 min" >&2; exit 1; }
@@ -541,7 +681,7 @@ jobs:
           sudo apt-get install -y "postgresql-$V" "postgresql-contrib-$V"
 
       - name: Configure + start PostgreSQL ${{ matrix.pg }}
-        if: steps.gate_box.outputs.present != 'true'
+        if: steps.needed_filter.outputs.needed == 'true' && steps.gate_box.outputs.present != 'true'
         run: |
           exec 9>/tmp/pgwt-box-check.lock
           flock -w 7200 9 || { echo "FATAL: /tmp/pgwt-box-check.lock held >120 min" >&2; exit 1; }
@@ -575,7 +715,7 @@ jobs:
       # restarts clusters inside this same lock, so probing psql without it
       # could hit a cluster mid-restart.
       - name: Resolve gate-box PostgreSQL port + bpftool
-        if: steps.gate_box.outputs.present == 'true'
+        if: steps.needed_filter.outputs.needed == 'true' && steps.gate_box.outputs.present == 'true'
         run: |
           exec 9>/tmp/pgwt-box-check.lock
           flock -w 7200 9 || { echo "FATAL: /tmp/pgwt-box-check.lock held >120 min" >&2; exit 1; }
@@ -586,12 +726,14 @@ jobs:
           psql -U postgres -h /var/run/postgresql -p "54${V}" -d postgres -tAc "SELECT version()"
 
       - name: Build (BPF tracer + pgwt-server)
+        if: steps.needed_filter.outputs.needed == 'true'
         run: |
           exec 9>/tmp/pgwt-box-check.lock
           flock -w 7200 9 || { echo "FATAL: /tmp/pgwt-box-check.lock held >120 min" >&2; exit 1; }
           make
 
       - name: Run capture smoke (tiered hard; full if watchpoints available)
+        if: steps.needed_filter.outputs.needed == 'true'
         run: |
           exec 9>/tmp/pgwt-box-check.lock
           flock -w 7200 9 || { echo "FATAL: /tmp/pgwt-box-check.lock held >120 min" >&2; exit 1; }
