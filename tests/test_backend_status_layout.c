@@ -414,6 +414,9 @@ static void test_sampled_attr(void)
                                         &attr) == 0 &&
           !attr.cmd_open && attr.query_id == 0,
           "idle state closes admission and normalizes query-id to zero");
+    CHECK(attr.last_query_id == snapshot.query_id,
+          "#128: the raw st_query_id (the finished statement's) is still "
+          "exposed as last_query_id while idle");
 
     /* A failed derivation starts by clearing the destination.  Seed it with
      * stale command state to prove an incoherent tick cannot reuse it. */

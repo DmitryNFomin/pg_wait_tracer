@@ -184,6 +184,12 @@ struct tag_pid_state {
     uint8_t  cmd_open, seen_cmd;
     uint64_t cmd_anchor;   /* start of the current open run / last record end */
     uint64_t banked_ns;    /* closed command-open ns since the last record */
+    /* #128 query attribution (query_attr.h rules, mirrored here for the
+     * whole-array case): the last id reported since the command opened
+     * (forward pass, rule 2) and the first id reported later in the same
+     * command (backward pass, rule 1). */
+    uint64_t cmd_qid;
+    uint64_t next_qid;
 };
 
 static uint32_t pid_cat_lookup(const struct pgwt_pid_cat *cats, int n,
@@ -223,6 +229,10 @@ void pgwt_tag_events(struct pgwt_trace_event *events, int count,
     struct tag_pid_state *ht = calloc(TAG_HT_SIZE, sizeof(*ht));
     if (!ht)
         return;   /* untagged: everything foreground, CPU stays CPU */
+    /* #128: per-record cmd_qid at the record's time (rule 2 fallback for
+     * the backward pass). NULL on allocation failure → no back-fill, the
+     * records keep their emission-time id exactly as before. */
+    uint64_t *fwd = count > 0 ? calloc((size_t)count, sizeof(*fwd)) : NULL;
 
     for (int i = 0; i < count; i++) {
         struct pgwt_trace_event *ev = &events[i];
@@ -233,6 +243,16 @@ void pgwt_tag_events(struct pgwt_trace_event *events, int count,
         /* Markers drive the per-pid windows and are otherwise left alone. */
         if (PGWT_IS_MARKER(ev->old_event)) {
             uint64_t ts = ev->timestamp_ns;
+            /* #128 forward pass: a marker carrying an id observes it for
+             * the command; CMD_START forgets the previous command's id
+             * (the id BPF resolved AT CMD_START is the previous
+             * statement's). Escalation markers pack a reason, not an id. */
+            if (ev->old_event == PGWT_MARKER_CMD_START)
+                st->cmd_qid = 0;
+            else if (ev->old_event != PGWT_MARKER_ESCALATE_START &&
+                     ev->old_event != PGWT_MARKER_ESCALATE_END &&
+                     ev->query_id != 0)
+                st->cmd_qid = ev->query_id;
             switch (ev->old_event) {
             case PGWT_MARKER_PLAN_START: st->plan_open = 1; break;
             case PGWT_MARKER_PLAN_END:   st->plan_open = 0; break;
@@ -268,6 +288,24 @@ void pgwt_tag_events(struct pgwt_trace_event *events, int count,
             st->cat_resolved = 1;
         }
         ev->flags |= st->cat_flag;
+
+        /* #128 forward pass (query_attr.h rule 2): remember the command's
+         * last reported id at this record; a record carrying one reports
+         * it. An idle SAMPLE is the sampled tier's between-commands
+         * boundary (no markers there): it carries the finished statement's
+         * id (sampler.c build_batch) for the backward pass, but the next
+         * command must not inherit it. */
+        if (fwd)
+            fwd[i] = st->cmd_qid;
+        if ((ev->flags & PGWT_EVENT_FLAG_SAMPLE) &&
+            pgwt_is_idle_event(ev->new_event ? ev->new_event : ev->old_event))
+            st->cmd_qid = 0;
+        else if (ev->query_id != 0)
+            st->cmd_qid = ev->query_id;
+        /* The record closing an exiting backend is its last: nothing after
+         * it (a reused pid number) belongs to this command. */
+        if (ev->new_event == PGWT_EVENT_EXIT)
+            st->cmd_qid = 0;
 
         if (ev->flags & PGWT_EVENT_FLAG_SAMPLE) {
             /* Sampled tier: no plan/exec markers exist. Cheap phase
@@ -315,6 +353,61 @@ void pgwt_tag_events(struct pgwt_trace_event *events, int count,
                 ev->old_event = PGWT_WEI_NONCMD_CPU;
         }
     }
+
+    /* #128 backward pass (query_attr.h): a foreground non-idle record that
+     * closed with query_id 0 takes the first id reported LATER in the same
+     * command (rule 1 — the parse-phase lock wait closes before
+     * pgstat_report_query_id; the plan/exec markers and the run that
+     * follows carry the id), else the last id reported earlier in the
+     * command (rule 2, fwd[]), else it is UNATTRIBUTED — flagged so
+     * top_queries counts it instead of dropping it. Boundaries mirror the
+     * live consumers: CMD_START (and an idle sample) end the command in
+     * both directions; CMD_END and an idle exact record end rule 1 only. */
+    if (fwd) {
+        for (int i = count - 1; i >= 0; i--) {
+            struct pgwt_trace_event *ev = &events[i];
+            struct tag_pid_state *st = tag_pid_get(ht, ev->pid);
+            if (!st)
+                continue;
+            if (PGWT_IS_MARKER(ev->old_event)) {
+                if (ev->old_event == PGWT_MARKER_ESCALATE_START ||
+                    ev->old_event == PGWT_MARKER_ESCALATE_END)
+                    continue;
+                if (ev->old_event == PGWT_MARKER_CMD_START)
+                    st->next_qid = 0;
+                else if (ev->query_id != 0)
+                    st->next_qid = ev->query_id;
+                else if (ev->old_event == PGWT_MARKER_CMD_END)
+                    st->next_qid = 0;
+                continue;
+            }
+            uint32_t we = (ev->flags & PGWT_EVENT_FLAG_SAMPLE) && ev->new_event
+                        ? ev->new_event : ev->old_event;
+            /* Walking backwards, an exiting backend's closing record is
+             * the first of its pid we meet: anything already in next_qid
+             * came from a later reuse of the pid number. */
+            if (ev->new_event == PGWT_EVENT_EXIT)
+                st->next_qid = 0;
+            if (ev->query_id != 0) {
+                st->next_qid = ev->query_id;
+                continue;
+            }
+            if (pgwt_is_idle_event(we)) {
+                st->next_qid = 0;
+                continue;
+            }
+            if (st->cat_flag != 0)
+                continue;   /* background / maintenance / io_worker: query-less */
+            uint64_t q = st->next_qid ? st->next_qid : fwd[i];
+            if (q != 0) {
+                ev->query_id = q;
+                ev->flags |= PGWT_EVENT_FLAG_QUERY_BACKFILL;
+            } else {
+                ev->flags |= PGWT_EVENT_FLAG_QUERY_UNATTRIB;
+            }
+        }
+    }
+    free(fwd);
     free(ht);
 }
 
@@ -1193,6 +1286,8 @@ void pgwt_compute_top_queries(const struct pgwt_trace_event *events, int count,
     struct query_accum *ht = calloc(QUERY_HT_SIZE, sizeof(*ht));
     int num_entries = 0;
     uint64_t db_time_ns = 0;
+    uint64_t unattributed_ns = 0, backfilled_ns = 0;
+    uint64_t unattributed_count = 0;
 
     for (int i = 0; i < count; i++) {
         const struct pgwt_trace_event *ev = &events[i];
@@ -1200,8 +1295,17 @@ void pgwt_compute_top_queries(const struct pgwt_trace_event *events, int count,
             continue;
         if (ev->flags & PGWT_EVENT_FLAG_IO_WORKER)
             continue;   /* T2: io_workers are structurally query-less */
-        if (ev->query_id == 0)
+        if (ev->query_id == 0) {
+            /* #128: foreground non-idle time whose command never reported
+             * an id is reported, not dropped. */
+            if (ev->flags & PGWT_EVENT_FLAG_QUERY_UNATTRIB) {
+                unattributed_ns += ev->duration_ns;
+                unattributed_count++;
+            }
             continue;
+        }
+        if (ev->flags & PGWT_EVENT_FLAG_QUERY_BACKFILL)
+            backfilled_ns += ev->duration_ns;
 
         db_time_ns += ev->duration_ns;
 
@@ -1314,6 +1418,9 @@ void pgwt_compute_top_queries(const struct pgwt_trace_event *events, int count,
     out->rows       = rows;
     out->num_rows   = nr;
     out->db_time_ms = db_time_ms;
+    out->unattributed_ms    = (double)unattributed_ns / 1e6;
+    out->unattributed_count = unattributed_count;
+    out->backfilled_ms      = (double)backfilled_ns / 1e6;
 }
 
 /* ── Heatmap (latency distribution over time) ─────────────── */

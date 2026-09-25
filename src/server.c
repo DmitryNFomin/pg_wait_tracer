@@ -2974,6 +2974,18 @@ static void handle_top_queries(struct pgwt_server *srv, struct pgwt_request *req
     }
 
     cJSON_AddNumberToObject(root, "db_time_ms", res.db_time_ms);
+    /* #128: never silent — foreground time no query claimed, and how much
+     * row time was attributed to an id reported after the interval closed.
+     * Only the raw-event path measures these: the per-second summaries
+     * attribute at write time (the daemon's summary writer runs the same
+     * deferral, so their rows DO carry late-reported ids) but have no
+     * unattributed bucket, so the fast path cannot report what it dropped
+     * — unattributed_available says which case this response is. */
+    cJSON_AddBoolToObject(root, "unattributed_available", !from_summaries);
+    cJSON_AddNumberToObject(root, "unattributed_ms", res.unattributed_ms);
+    cJSON_AddNumberToObject(root, "unattributed_count",
+                            (double)res.unattributed_count);
+    cJSON_AddNumberToObject(root, "backfilled_ms", res.backfilled_ms);
     emit_json(root);
 
     if (qlc) {

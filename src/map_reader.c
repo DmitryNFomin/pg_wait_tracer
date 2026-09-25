@@ -302,17 +302,133 @@ void pgwt_accum_add_interval(struct pgwt_accumulator *acc,
         }
     }
 
-    /* Query-level accumulation (no histogram) */
-    if (iv->query_id != 0 && !io_worker) {
-        struct pgwt_query_event_stats *qe =
-            pgwt_get_or_create_query_event(acc, iv->query_id, we);
-        if (qe) {
-            qe->count++;
-            qe->total_ns += stat_ns;
-            if (stat_ns < qe->min_ns) qe->min_ns = stat_ns;
-            if (stat_ns > qe->max_ns) qe->max_ns = stat_ns;
-        }
+    /* Query-level accumulation (no histogram; issue #128: a closed record
+     * without an id is deferred until the pid reports one). */
+    pgwt_live_qattr_record(acc, pa, iv->query_id, we, stat_ns, iv->cat_flag,
+                           iv->closed);
+}
+
+/* ── Deferred per-query attribution (issue #128) ───────────────────────── */
+
+static void qattr_add_row(struct pgwt_accumulator *acc, uint64_t query_id,
+                          uint32_t we, uint64_t count, uint64_t total_ns,
+                          uint64_t min_ns, uint64_t max_ns)
+{
+    struct pgwt_query_event_stats *qe =
+        pgwt_get_or_create_query_event(acc, query_id, we);
+    if (!qe)
+        return;
+    qe->count += count;
+    qe->total_ns += total_ns;
+    if (min_ns < qe->min_ns) qe->min_ns = min_ns;
+    if (max_ns > qe->max_ns) qe->max_ns = max_ns;
+}
+
+/* pgwt_qattr_emit_fn for the live accumulators. */
+static void qattr_emit(void *ctx, uint64_t query_id, uint32_t we,
+                       const struct pgwt_qattr_pending *p, bool backfilled)
+{
+    struct pgwt_accumulator *acc = ctx;
+    qattr_add_row(acc, query_id, we, p->count, p->total_ns, p->min_ns,
+                  p->max_ns);
+    if (backfilled)
+        acc->qattr_backfilled_ns += p->total_ns;
+    else
+        acc->qattr_unattributed_ns += p->total_ns;
+}
+
+void pgwt_live_qattr_record(struct pgwt_accumulator *acc,
+                            struct pgwt_pid_accum *pa, uint64_t query_id,
+                            uint32_t we, uint64_t stat_ns, uint32_t cat_flag,
+                            bool defer)
+{
+    if (cat_flag & PGWT_EVENT_FLAG_IO_WORKER)
+        return;   /* structurally query-less (T2) */
+    if (query_id != 0) {
+        if (pa && defer)
+            pgwt_qattr_observe(&pa->qattr, query_id, qattr_emit, acc);
+        qattr_add_row(acc, query_id, we, 1, stat_ns, stat_ns, stat_ns);
+        return;
     }
+    if (cat_flag != 0)
+        return;   /* background / maintenance: never attributed (as before) */
+    if (pgwt_is_idle_event(we)) {
+        if (pa && defer)
+            pgwt_qattr_boundary(&pa->qattr, false, qattr_emit, acc);
+        return;
+    }
+    if (pa && defer) {
+        if (pgwt_qattr_defer(&pa->qattr, we, stat_ns, qattr_emit, acc))
+            acc->qattr_pending_overflow++;
+        return;
+    }
+    /* Cannot wait (the open stretch at tick time, or no per-pid state):
+     * the command's known id if it has one (rule 2), else NOT the
+     * unattributed bucket — the id is merely not known YET, and showing
+     * the stretch under a label its closing record will change would fire
+     * the multi-window clamp (#97) on every parse-phase wait. The system
+     * and per-pid rows carry it meanwhile; the closed record lands in the
+     * right row. */
+    uint64_t q = pa ? pgwt_qattr_resolve_now(&pa->qattr) : 0;
+    if (q != 0)
+        qattr_add_row(acc, q, we, 1, stat_ns, stat_ns, stat_ns);
+}
+
+void pgwt_live_qattr_marker(struct pgwt_accumulator *acc,
+                            struct pgwt_pid_accum *pa, uint32_t marker,
+                            uint64_t query_id)
+{
+    if (!pa)
+        return;
+    if (marker == PGWT_MARKER_CMD_START) {
+        /* The id BPF resolved at CMD_START is the PREVIOUS statement's
+         * (PostgreSQL clears st_query_id inside the very call this marker
+         * fires on): never observe it. */
+        pgwt_qattr_boundary(&pa->qattr, true, qattr_emit, acc);
+    } else if (query_id != 0) {
+        pgwt_qattr_observe(&pa->qattr, query_id, qattr_emit, acc);
+    } else if (marker == PGWT_MARKER_CMD_END) {
+        pgwt_qattr_boundary(&pa->qattr, false, qattr_emit, acc);
+    }
+}
+
+void pgwt_live_qattr_between_commands(struct pgwt_accumulator *acc,
+                                      struct pgwt_pid_accum *pa)
+{
+    if (pa)
+        pgwt_qattr_boundary(&pa->qattr, true, qattr_emit, acc);
+}
+
+bool pgwt_live_qattr_sample(struct pgwt_accumulator *acc,
+                            struct pgwt_pid_accum *pa, uint64_t query_id,
+                            uint32_t we, uint64_t stat_ns, uint32_t cat_flag,
+                            bool cmd_open)
+{
+    const bool foreground = (cat_flag == 0);
+    const bool idle = pgwt_is_idle_event(we) != 0;
+
+    /* An idle wait event read for a backend the status read found INSIDE a
+     * command is not evidence that the command ended (see map_reader.h):
+     * skewed reads and COPY/extended-protocol client waits look the same
+     * here, and neither closes a command. The sample keeps its per-pid and
+     * system rows (the caller already folded those); only the boundary is
+     * withheld, so the pid's pending parse-phase waits survive to the
+     * coherent idle sample that carries the finished statement's id. */
+    if (foreground && idle && cmd_open) {
+        if (query_id != 0)   /* the id itself still observes (rule 1) */
+            pgwt_live_qattr_record(acc, pa, query_id, we, stat_ns, cat_flag,
+                                   true);
+        return true;
+    }
+
+    pgwt_live_qattr_record(acc, pa, query_id, we, stat_ns, cat_flag, true);
+    /* A coherent idle sample is the between-commands boundary (the sampled
+     * tier has no CMD markers): whatever it resolved (its query_id is the
+     * finished statement's, sampler.c build_batch), the next command must
+     * not inherit it. */
+    if (pa && foreground && idle)
+        pgwt_live_qattr_between_commands(acc, pa);
+    return false;
 }
 
 uint32_t pgwt_duration_to_bucket(uint64_t ns)

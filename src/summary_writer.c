@@ -151,9 +151,50 @@ static struct pgwt_summary_query *find_or_insert_query(
     return NULL;
 }
 
-/* Accumulate a single trace event into the per-second snapshot. */
+/* Per-query part of the accumulation: `count` intervals of `old_ev`
+ * totalling `total_ns` (longest `max_ns`) attributed to `query_id`. Called
+ * once per record with count 1, and from the #128 resolver with a deferred
+ * aggregate once the pid's command reported its id. */
+static void accum_query_add(struct pgwt_summary_accum *acc, uint64_t query_id,
+                            uint32_t old_ev, uint64_t count,
+                            uint64_t total_ns, uint64_t max_ns)
+{
+    struct pgwt_summary_query *sq = find_or_insert_query(acc, query_id);
+    if (!sq)
+        return;
+    int cls = summary_wait_class_index(old_ev);
+    sq->count += count;
+    sq->total_ns += total_ns;
+    /* Per-class breakdown */
+    if (cls >= 0 && cls < PGWT_NUM_CLASSES)
+        sq->class_ns[cls] += total_ns;
+    /* Per-event top-8 tracking */
+    if (old_ev != 0) {
+        int found = -1;
+        for (int j = 0; j < sq->num_top_events; j++) {
+            if (sq->top_events[j].event_id == old_ev) { found = j; break; }
+        }
+        if (found >= 0) {
+            sq->top_events[found].count += count;
+            sq->top_events[found].total_ns += total_ns;
+        } else if (sq->num_top_events < SUMMARY_QUERY_TOP_EVENTS) {
+            sq->top_events[sq->num_top_events].event_id = old_ev;
+            sq->top_events[sq->num_top_events].count = count;
+            sq->top_events[sq->num_top_events].total_ns = total_ns;
+            sq->num_top_events++;
+        }
+    }
+    if (old_ev != 0 && max_ns > sq->top_wait_ns) {
+        sq->top_wait_id = old_ev;
+        sq->top_wait_ns = max_ns;
+    }
+}
+
+/* Accumulate a single trace event into the per-second snapshot. `query_id`
+ * is the id its per-query part is filed under (0 = none / deferred). */
 static void accum_event(struct pgwt_summary_accum *acc,
-                         const struct pgwt_trace_event *evt)
+                         const struct pgwt_trace_event *evt,
+                         uint64_t query_id)
 {
     uint32_t old_ev = evt->old_event;
     uint64_t dur = evt->duration_ns;
@@ -202,34 +243,123 @@ static void accum_event(struct pgwt_summary_accum *acc,
     }
 
     /* Per-query stats */
-    struct pgwt_summary_query *sq = find_or_insert_query(acc, evt->query_id);
-    if (sq) {
-        sq->count++;
-        sq->total_ns += dur;
-        /* Per-class breakdown */
-        if (cls >= 0 && cls < PGWT_NUM_CLASSES)
-            sq->class_ns[cls] += dur;
-        /* Per-event top-8 tracking */
-        if (old_ev != 0) {
-            int found = -1;
-            for (int j = 0; j < sq->num_top_events; j++) {
-                if (sq->top_events[j].event_id == old_ev) { found = j; break; }
-            }
-            if (found >= 0) {
-                sq->top_events[found].count++;
-                sq->top_events[found].total_ns += dur;
-            } else if (sq->num_top_events < SUMMARY_QUERY_TOP_EVENTS) {
-                sq->top_events[sq->num_top_events].event_id = old_ev;
-                sq->top_events[sq->num_top_events].count = 1;
-                sq->top_events[sq->num_top_events].total_ns = dur;
-                sq->num_top_events++;
-            }
+    accum_query_add(acc, query_id, old_ev, 1, dur, dur);
+}
+
+/* ── #128: deferred per-query attribution (query_attr.h) ──────────────────
+ * The summary keys per-query stats by the id BPF resolved when the interval
+ * closed, so a parse-phase Lock:relation wait (closed before
+ * pgstat_report_query_id) was filed under query_id 0 = dropped. Same rule
+ * as the live accumulators and pgwt_tag_events: hold the record's
+ * per-query part on its pid until the command reports an id (or ends).
+ * Resolved aggregates land in the accumulator current at resolution time
+ * (at most the wait-to-report delay later — µs for the lock case). */
+
+static struct pgwt_summary_qattr_slot *qattr_slot(struct pgwt_summary_writer *w,
+                                                  uint32_t pid)
+{
+    if (!w->qattr || pid == 0)
+        return NULL;
+    uint32_t idx = hash32(pid) & (SUMMARY_QATTR_SLOTS - 1);
+    for (int i = 0; i < SUMMARY_QATTR_SLOTS; i++) {
+        struct pgwt_summary_qattr_slot *s = &w->qattr[idx];
+        if (s->pid == pid)
+            return s;
+        if (s->pid == 0) {
+            s->pid = pid;
+            memset(&s->q, 0, sizeof(s->q));
+            return s;
         }
-        if (old_ev != 0 && dur > sq->top_wait_ns) {
-            sq->top_wait_id = old_ev;
-            sq->top_wait_ns = dur;
+        idx = (idx + 1) & (SUMMARY_QATTR_SLOTS - 1);
+    }
+    /* Table full: this record keeps its emission-time id. Never silent —
+     * exported as summary_query_attr_table_full_total. */
+    w->qattr_table_full_total++;
+    return NULL;
+}
+
+/* Reclaim a pid's slot on backend exit (linear probing: backward-shift
+ * deletion keeps every other pid's probe chain intact), so the table holds
+ * LIVE backends only and connection churn cannot exhaust it. */
+static void qattr_slot_free(struct pgwt_summary_writer *w,
+                            struct pgwt_summary_qattr_slot *s)
+{
+    uint32_t mask = SUMMARY_QATTR_SLOTS - 1;
+    uint32_t hole = (uint32_t)(s - w->qattr);
+    uint32_t i = hole;
+    /* Bounded: a table with NO empty slot (1024 live pids, or slots whose
+     * exits were never seen) has no natural stop — one full lap visits every
+     * other entry exactly once (each is moved at most once, so none is
+     * duplicated), then the last hole is cleared. */
+    for (uint32_t step = 0; step < SUMMARY_QATTR_SLOTS - 1; step++) {
+        i = (i + 1) & mask;
+        struct pgwt_summary_qattr_slot *c = &w->qattr[i];
+        if (c->pid == 0)
+            break;
+        uint32_t home = hash32(c->pid) & mask;
+        /* c may move into the hole iff its home is not in (hole, i]. */
+        bool between = hole <= i ? (home > hole && home <= i)
+                                 : (home > hole || home <= i);
+        if (!between) {
+            w->qattr[hole] = *c;
+            hole = i;
         }
     }
+    memset(&w->qattr[hole], 0, sizeof(w->qattr[hole]));
+}
+
+static void summary_qattr_emit(void *ctx, uint64_t query_id, uint32_t we,
+                               const struct pgwt_qattr_pending *p,
+                               bool backfilled)
+{
+    struct pgwt_summary_writer *w = ctx;
+    (void)backfilled;
+    if (query_id == 0) {
+        /* The summary's per-query table has no unattributed bucket (the
+         * server's fast path reports unattributed_available: false); the
+         * time stays in the event/session/class rows. Counted here so it
+         * is never silent (summary_query_unattributed_ns_total). */
+        w->qattr_unattributed_ns_total += p->total_ns;
+        return;
+    }
+    if (!w->accum_active)
+        return;
+    accum_query_add(&w->accum, query_id, we, p->count, p->total_ns, p->max_ns);
+}
+
+/* Returns the id to file evt's per-query part under NOW (0 = none, or
+ * deferred on the pid). A record whose new_event is PGWT_EVENT_EXIT closes
+ * the pid: pending resolves by rule 2/3 and the slot is reclaimed. */
+static uint64_t summary_qattr_step(struct pgwt_summary_writer *w,
+                                   const struct pgwt_trace_event *evt)
+{
+    uint32_t we = evt->old_event;
+    uint64_t qid = 0;
+    if (we == PGWT_MARKER_ESCALATE_START || we == PGWT_MARKER_ESCALATE_END)
+        return evt->query_id;
+    struct pgwt_summary_qattr_slot *s = qattr_slot(w, evt->pid);
+    if (!s)
+        return evt->query_id;
+    if (PGWT_IS_MARKER(we)) {
+        if (we == PGWT_MARKER_CMD_START)
+            pgwt_qattr_boundary(&s->q, true, summary_qattr_emit, w);
+        else if (evt->query_id != 0)
+            pgwt_qattr_observe(&s->q, evt->query_id, summary_qattr_emit, w);
+        else if (we == PGWT_MARKER_CMD_END)
+            pgwt_qattr_boundary(&s->q, false, summary_qattr_emit, w);
+    } else if (evt->query_id != 0) {
+        pgwt_qattr_observe(&s->q, evt->query_id, summary_qattr_emit, w);
+        qid = evt->query_id;
+    } else if (pgwt_is_idle_event(we)) {
+        pgwt_qattr_boundary(&s->q, false, summary_qattr_emit, w);
+    } else {
+        pgwt_qattr_defer(&s->q, we, evt->duration_ns, summary_qattr_emit, w);
+    }
+    if (evt->new_event == PGWT_EVENT_EXIT) {
+        pgwt_qattr_boundary(&s->q, true, summary_qattr_emit, w);
+        qattr_slot_free(w, s);
+    }
+    return qid;
 }
 
 /* ── Serialization ────────────────────────────────────────── */
@@ -752,6 +882,10 @@ int pgwt_summary_writer_init(struct pgwt_summary_writer *w,
         return -1;
     }
 
+    /* #128 deferred per-query attribution state (heap: the writer may live
+     * on a caller's stack). NULL is non-fatal: emission-time ids as before. */
+    w->qattr = calloc(SUMMARY_QATTR_SLOTS, sizeof(*w->qattr));
+
     return 0;
 }
 
@@ -785,7 +919,10 @@ int pgwt_summary_push_event(struct pgwt_summary_writer *w,
         w->accum_active = true;
     }
 
-    accum_event(&w->accum, evt);
+    /* #128: the per-query part may be deferred until the pid's command
+     * reports its id (see summary_qattr_step). */
+    uint64_t qid = w->qattr ? summary_qattr_step(w, evt) : evt->query_id;
+    accum_event(&w->accum, evt, qid);
     return 0;
 }
 
@@ -919,4 +1056,6 @@ void pgwt_summary_destroy(struct pgwt_summary_writer *w)
     w->compress_buf = NULL;
     free(w->block_index);
     w->block_index = NULL;
+    free(w->qattr);
+    w->qattr = NULL;
 }

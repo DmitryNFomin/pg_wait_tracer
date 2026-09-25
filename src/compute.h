@@ -84,7 +84,12 @@ struct pgwt_pid_cat {
  *     legacy traces and background processes keep all we==0 as CPU;
  *   - samples: foreground samples with a query_id are tagged FLAG_EXEC
  *     (the cheap sampled-tier phase attribution; plan/exec sub-windows
- *     need the exact tier's markers).
+ *     need the exact tier's markers);
+ *   - #128 (query_attr.h): a foreground non-idle record that closed with
+ *     query_id 0 is re-attributed to the id its command reported later
+ *     (or earlier) — FLAG_QUERY_BACKFILL — else FLAG_QUERY_UNATTRIB, so
+ *     top_queries reports it as unattributed_ms instead of dropping it.
+ *     The live consumers apply the same rule record by record.
  * cats may be NULL/empty (no metadata: everything is foreground). */
 void pgwt_tag_events(struct pgwt_trace_event *events, int count,
                      const struct pgwt_pid_cat *cats, int n_cats);
@@ -345,6 +350,15 @@ struct pgwt_queries_result {
     struct pgwt_query_row *rows;   /* malloc'd, caller frees */
     int    num_rows;
     double db_time_ms;
+    /* #128: foreground non-idle time whose command never reported an id —
+     * reported here instead of being dropped — and how much row time was
+     * attributed to an id reported after the interval closed
+     * (PGWT_EVENT_FLAG_QUERY_BACKFILL). Raw path only: the summary fast
+     * path leaves both 0 (its per-query table has no unattributed bucket;
+     * the server marks the response unattributed_available: false). */
+    double   unattributed_ms;
+    uint64_t unattributed_count;
+    double   backfilled_ms;
 };
 
 void pgwt_compute_top_queries(const struct pgwt_trace_event *events, int count,
