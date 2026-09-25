@@ -42,20 +42,52 @@ Use `/pr-ready` to run this sequence.
 The interactive session is the **main agent**: it plans, splits, spawns, and
 judges. It writes no feature code itself for anything bigger than a one-liner.
 
-- **Models** are pinned in `.claude/agents/*.md` (owner rule 2026-09-20:
-  cheapest model that does good work — tokens are the budget):
-  `implementer` = Sonnet for everything including UI (spawn with
-  `model: fable` only for `src/` BPF, capture, discovery, backend layout or
-  accounting logic; Opus only for design-heavy UI after a Sonnet attempt
-  failed), `reviewer` = Sonnet (Opus only for `src/` logic; never Fable),
-  `ui-reviewer` = Sonnet. `Explore`/triage: Sonnet or Haiku. ONE review round:
-  READY-with-nits ships with the nits listed; a second round only for a code
-  blocker; no confirmation re-reviews. Agents wait for box runs with one long
-  sleep inside a single command, never minute-by-minute polling. Reports are
-  at most ~15 lines.
+- **Models** are pinned in `.claude/agents/*.md`, overridden at spawn time
+  (owner rules 2026-09-20 and 2026-09-25: cheapest model that does good work,
+  and **spend on review, economise on implementation** — a blocker caught in
+  review costs one message, one that reaches CI costs an hour of serialised
+  gate-box time):
+  `implementer` = **Sonnet** for UI, tests, tooling and docs; **Opus** for
+  anything under `src/` (BPF, capture, discovery, backend layout, accounting)
+  and for design-heavy UI after a Sonnet attempt failed.
+  `reviewer` = **Sonnet** (high effort), **Opus for `src/` logic** — that
+  review is where silent-wrong-answer bugs get caught, so it is never
+  downgraded. `ui-reviewer` = Sonnet. `Explore`/triage: Sonnet or Haiku.
+  ONE review round: READY-with-nits ships with the nits listed; a second round
+  only for a code blocker; no confirmation re-reviews. Agents wait for box runs
+  with one long sleep inside a single command, never minute-by-minute polling.
+  Reports are at most ~15 lines.
+- **Fable is not used** (owner rule 2026-09-25). Evidence: as the `src/`
+  implementer on #128 it needed two blocker rounds, still failed CI, cost more
+  than every Sonnet agent of that night combined, and died mid-task on its own
+  usage limit; the main session running on Fable cost more than all subagents
+  together. It remains available only as an explicit escalation for a `src/`
+  problem an Opus implementer has already failed a round on. The account is
+  currently **out of Fable tokens**, so such a task is **PARKED and reported to
+  the owner**, never silently retried or quietly downgraded. Parked list:
+  memory `fable-parked-tasks` (empty = nothing is waiting on a Fable reset).
+- **Main session model**: the orchestrator runs on **Opus** (`/model`), never
+  Fable — it reads 15-line reports, decides ready/back, merges and spawns, and
+  every one of its turns re-reads the whole context, so its model is the
+  largest single token cost. It minimises its own turns: it acts only on agent
+  reports and on PRs that went green, never on "still running" notifications or
+  mid-flight status checks, and it never reads a diff itself when a reviewer's
+  report answers the question. Counterweight so quality does not slip: a
+  finding that touches signal handling, loops, accounting or the fail-safe rule
+  goes back to the implementer whatever label the reviewer gave it.
+- **Reports to the owner are FIVE LINES at most** (owner rule 2026-09-25):
+  merged / in flight / blocked / needs you. Long form only when the owner has
+  to decide something, or when a finding changes the plan. No bug narratives —
+  the issue tracker holds the detail, and a link is enough.
 - **Splitting**: one roadmap item = one issue = one branch = one implementer.
   Split only along an independent seam (disjoint files AND disjoint tests);
-  never split a shared file; at most **2 tasks in flight**. Anything over ~a
+  never split a shared file; at most **2 tasks in flight**. Before spawning,
+  list the files the task will touch and compare them against every in-flight
+  branch — an overlap is refused up front, not discovered at merge (2026-09-25:
+  two branches both edited `tests/test_durability.c`, git merged them silently
+  and the build broke). **At most ONE branch touching `web/` at a time**: UI
+  branches collide on snapshot baselines and `tests/web_snapshots/VERSION` by
+  construction, and each collision costs a manual merge plus a regeneration. Anything over ~a
   day of work goes to a `Plan` agent first; its steps run sequentially unless
   the plan shows them independent.
 - **Spawning**: always `isolation: "worktree"`. The prompt is a contract:
@@ -72,6 +104,18 @@ judges. It writes no feature code itself for anything bigger than a one-liner.
 
 - Branch `agent/<slug>`; one task per branch; work in an isolated git worktree
   (`EnterWorktree`). Two agents in one checkout collided once — never again.
+  An implementer's worktree **stays until its PR is open**: the reviewer reads
+  `tests/results/` evidence out of it, and removing it also makes the agent
+  unresumable (2026-09-25: deleting one early lost #119's box logs and
+  orphaned a VM).
+- A reviewer **does not re-run** `make box-check` / `make ui-gallery` when the
+  branch's evidence exists and is newer than the last code commit. Re-run only
+  when it is missing, stale, or the log contradicts what the implementer
+  claimed — and say in the PR body which applied.
+- **One throwaway VM per agent, reused across rounds** (`KEEP=1`), deleted by
+  that agent when it finishes, with the delete output pasted in its report.
+  Never one VM per iteration; never leave one running for the 6h sweep to
+  collect.
 - Never harden a test against runner noise (retries, wider tolerances,
   confirmation loops). If it is red only on shared runners, say so in the PR;
   it belongs on the dedicated gate box.
