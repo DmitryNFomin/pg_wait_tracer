@@ -46,7 +46,13 @@ static int tests_passed = 0;
     else { printf("  FAIL(%d): " fmt "\n", __LINE__, ##__VA_ARGS__); } \
 } while (0)
 
-#define BASE_DIR "/tmp/pgwt_durability_test"
+/* issue #125: a fixed /tmp path collides across runs on a shared box — a
+ * kill -9 subtest can leave half-written state that a later run (of this
+ * binary or another test entirely) then reads. BASE_DIR is a per-process
+ * mkdtemp() directory instead, so no two runs — however one of them ended —
+ * can ever see the same path. */
+static char g_base_dir[300];
+#define BASE_DIR g_base_dir
 
 /* ── helpers ────────────────────────────────────────────── */
 
@@ -55,6 +61,38 @@ static void rm_rf(const char *dir)
     char cmd[600];
     snprintf(cmd, sizeof(cmd), "rm -rf %s", dir);
     if (system(cmd) != 0) { /* ignore */ }
+}
+
+static const char *subdir(const char *name)
+{
+    static char buf[600];
+    snprintf(buf, sizeof(buf), "%s/%s", g_base_dir, name);
+    return buf;
+}
+
+/* Best-effort cleanup on normal exit (including a CHECK-failure return),
+ * registered via atexit() only — no signal handlers. rm_rf() calls
+ * snprintf()/system(), neither async-signal-safe, so running it from a
+ * signal handler risks a deadlock (e.g. mid-malloc); not installing one is
+ * strictly safer here since uniqueness alone already guarantees isolation:
+ * a run killed by SIGKILL/SIGTERM/etc. only ever orphans its own
+ * uniquely-named directory, it can never collide with or be read by a
+ * later run. */
+static void cleanup_base_dir(void)
+{
+    if (g_base_dir[0])
+        rm_rf(g_base_dir);
+}
+
+static void setup_base_dir(void)
+{
+    snprintf(g_base_dir, sizeof(g_base_dir),
+              "/tmp/pgwt_durability_test.XXXXXX");
+    if (!mkdtemp(g_base_dir)) {
+        perror("mkdtemp");
+        exit(1);
+    }
+    atexit(cleanup_base_dir);
 }
 
 static char *path_of(const char *dir, const char *name)
@@ -183,9 +221,13 @@ static long count_events_in_file(const char *path, int *num_blocks)
 static void test_recover_after_sigkill(void)
 {
     printf("--- DUR-1: kill -9 post-flush, restart recovers ---\n");
-    const char *dir = BASE_DIR "/kill9";
+    const char *dir = subdir("kill9");
     rm_rf(dir);
 
+    /* Every path out of the child MUST be _exit(), never a normal return
+     * into the parent's main() — a fall-through would re-run the parent's
+     * atexit-registered cleanup_base_dir() concurrently with the parent
+     * (double rm_rf / use-after-cleanup of the shared g_base_dir). */
     pid_t child = fork();
     if (child == 0) {
         struct pgwt_event_writer *w = calloc(1, sizeof(*w));
@@ -200,6 +242,7 @@ static void test_recover_after_sigkill(void)
             ts += 10;
         }
         for (;;) pause();
+        _exit(0);   /* unreachable: defensive in case the loop above ever changes */
     }
     CHECK(child > 0, "fork");
 
@@ -244,7 +287,7 @@ static void test_recover_after_sigkill(void)
 static void test_recover_torn_tail(void)
 {
     printf("--- DUR-1: torn tail (kill mid-block-write) ---\n");
-    const char *dir = BASE_DIR "/torn";
+    const char *dir = subdir("torn");
     rm_rf(dir);
 
     struct pgwt_event_writer *w = calloc(1, sizeof(*w));
@@ -299,7 +342,7 @@ static void test_recover_torn_tail(void)
 static void test_restart_twice_same_hour(void)
 {
     printf("--- DUR-1/2: two restarts in one hour keep both archives ---\n");
-    const char *dir = BASE_DIR "/twice";
+    const char *dir = subdir("twice");
     rm_rf(dir);
 
     for (int round = 0; round < 2; round++) {
@@ -339,7 +382,7 @@ static void test_restart_twice_same_hour(void)
 static void test_recover_degenerate_files(void)
 {
     printf("--- DUR-1: degenerate current.trace forms ---\n");
-    const char *dir = BASE_DIR "/degen";
+    const char *dir = subdir("degen");
     rm_rf(dir);
     mkdir(BASE_DIR, 0755);
     mkdir(dir, 0755);
@@ -370,7 +413,7 @@ static void test_recover_degenerate_files(void)
 static void test_rotation_collision(void)
 {
     printf("--- DUR-2: rotation onto an existing archive name ---\n");
-    const char *dir = BASE_DIR "/rotcol";
+    const char *dir = subdir("rotcol");
     rm_rf(dir);
 
     struct pgwt_event_writer *w = calloc(1, sizeof(*w));
@@ -440,7 +483,7 @@ static void push_sample_tick(struct pgwt_event_writer *w, uint64_t ts,
 static void test_sample_batching(void)
 {
     printf("--- DUR-8: ~1 s SAMPLES batching ---\n");
-    const char *dir = BASE_DIR "/batch";
+    const char *dir = subdir("batch");
     rm_rf(dir);
 
     struct pgwt_event_writer *w = calloc(1, sizeof(*w));
@@ -494,7 +537,7 @@ static void test_sample_batching(void)
 static void test_sample_period_jump_cuts_block(void)
 {
     printf("--- DUR-8: SMP-3 stall tick gets its own block ---\n");
-    const char *dir = BASE_DIR "/stall";
+    const char *dir = subdir("stall");
     rm_rf(dir);
 
     struct pgwt_event_writer *w = calloc(1, sizeof(*w));
@@ -541,7 +584,7 @@ static void test_sample_period_jump_cuts_block(void)
 static void test_interleaved_index_sorted(void)
 {
     printf("--- DUR-8: interleaved transitions+samples keep index sorted ---\n");
-    const char *dir = BASE_DIR "/interleave";
+    const char *dir = subdir("interleave");
     rm_rf(dir);
 
     struct pgwt_event_writer *w = calloc(1, sizeof(*w));
@@ -582,7 +625,7 @@ static void test_interleaved_index_sorted(void)
 static void test_meta_sanity_caps(void)
 {
     printf("--- DUR-7: corrupt meta and block headers ---\n");
-    const char *dir = BASE_DIR "/meta";
+    const char *dir = subdir("meta");
     rm_rf(dir);
 
     struct pgwt_event_writer *w = calloc(1, sizeof(*w));
@@ -664,7 +707,7 @@ static void write_fake_archive(const char *dir, const char *name, int kb)
 static void test_size_cap_retention(void)
 {
     printf("--- DUR-3: --retention-gb size cap ---\n");
-    const char *dir = BASE_DIR "/sizecap";
+    const char *dir = subdir("sizecap");
     rm_rf(dir);
     mkdir(BASE_DIR, 0755);
     mkdir(dir, 0755);
@@ -738,7 +781,7 @@ static void test_size_cap_retention(void)
 static void test_summary_recovery(void)
 {
     printf("--- DUR-1: current.summary recovery ---\n");
-    const char *dir = BASE_DIR "/summary";
+    const char *dir = subdir("summary");
     rm_rf(dir);
     mkdir(BASE_DIR, 0755);
     mkdir(dir, 0755);
@@ -885,7 +928,7 @@ static void test_summary_qattr_reclaim(void)
 int main(void)
 {
     printf("=== test_durability (T5: DUR-1/2/3/7/8) ===\n");
-    mkdir(BASE_DIR, 0755);
+    setup_base_dir();
 
     test_recover_after_sigkill();
     test_recover_torn_tail();
@@ -900,7 +943,8 @@ int main(void)
     test_summary_recovery();
     test_summary_qattr_reclaim();
 
-    rm_rf(BASE_DIR);
+    /* cleanup_base_dir() runs via atexit(), including on the failure
+     * return below — no explicit rm_rf needed here. */
     printf("\n%d/%d tests passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;
 }

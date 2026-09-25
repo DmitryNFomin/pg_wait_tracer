@@ -181,11 +181,22 @@ fi
 
 # ── Main benchmark loop ───────────────────────────────────────────
 
-# Check if pgbench tables exist; if not, initialize at scale 100
+# Issue #133: this used to run `pgbench -i -s 100` when pgbench_accounts was
+# missing/undersized, permanently GROWING (or, on an empty box, seeding at a
+# scale that never matches) the shared dataset tests/provision-runner.sh
+# provisions once at scale 10 -- `-i` unconditionally drops and recreates
+# every pgbench table, changing cache behaviour and timing for every later
+# test on the box, including this gate's own baseline. The overhead
+# benchmark doesn't depend on any particular scale (baseline and tracer runs
+# both read/write the same tables), so it now reads the provisioned dataset
+# read-only and never re-initializes it.
 SCALE=$(psql -U postgres -d postgres -tAc "SELECT count(*)/100000 FROM pgbench_accounts" 2>/dev/null || echo "0")
 if [[ "$SCALE" -lt 1 ]]; then
-    echo "Initializing pgbench tables (scale 100)..."
-    pgbench -U postgres -d postgres -i -s 100 -q 2>&1 | tail -1
+    echo "ERROR: pgbench_accounts is missing/empty in the shared 'postgres' database."
+    echo "       Issue #133: this test reads the provisioned dataset read-only and"
+    echo "       never re-initializes it. Run tests/provision-runner.sh (or"
+    echo "       'pgbench -i -s 10 -d postgres') to seed it first."
+    exit 1
 else
     echo "pgbench tables found (scale $SCALE)"
 fi
