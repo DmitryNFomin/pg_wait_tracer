@@ -642,3 +642,4 @@ void pgwt_anomaly_tick(struct pgwt_daemon *d,
 }
 
 #endif /* !PGWT_SERVER */
+/* trivial comment: CI evidence-gathering commit, scenario (b) full-matrix check -- reverted, not for merge */
