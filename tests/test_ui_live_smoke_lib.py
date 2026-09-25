@@ -477,16 +477,21 @@ def test_build_failed_tab_result():
 
 
 def test_known_failing_tabs_pinned():
-    # Owner-filed tracking issues (#100 Timeline, #101 Waterfall) -- pinned
-    # exactly so nothing else quietly gets added to this dict.
-    check(lib.KNOWN_FAILING_TABS == {"timeline": 100, "waterfall": 101},
-          f"KNOWN_FAILING_TABS is exactly {{'timeline': 100, 'waterfall': 101}} "
+    # Owner-filed tracking issues -- pinned exactly so nothing else quietly
+    # gets added to this dict, and so DELISTING one stays a deliberate edit
+    # here too. #101 (Waterfall) was delisted once its single root cause was
+    # found and fixed: the tab defaulted to the newest execution, which on a
+    # real capture has no events, no workers and no plan, so the panel never
+    # mounted a chart (web/static/lib/builders/waterfall.js).
+    check(lib.KNOWN_FAILING_TABS == {"timeline": 100},
+          f"KNOWN_FAILING_TABS is exactly {{'timeline': 100}} "
           f"(got {lib.KNOWN_FAILING_TABS})")
 
 
 def test_known_failing_issue():
     check(lib.known_failing_issue("timeline") == 100, "timeline -> issue #100")
-    check(lib.known_failing_issue("waterfall") == 101, "waterfall -> issue #101")
+    check(lib.known_failing_issue("waterfall") is None,
+          "waterfall is delisted (#101 fixed) and has no known-failing issue")
     check(lib.known_failing_issue("overview") is None,
           "an unlisted tab has no known-failing issue")
 
@@ -497,8 +502,8 @@ def test_known_failing_report_line():
     fail_line = lib.known_failing_report_line("timeline", False)
     check(fail_line == "KNOWN-FAILING (issue #100)",
           f"a listed tab's real failure reports KNOWN-FAILING ({fail_line!r})")
-    pass_line = lib.known_failing_report_line("waterfall", True)
-    check(pass_line == "UNEXPECTED PASS (issue #101) -- intermittent or fixed; check the issue",
+    pass_line = lib.known_failing_report_line("timeline", True)
+    check(pass_line == "UNEXPECTED PASS (issue #100) -- intermittent or fixed; check the issue",
           f"a listed tab's real pass reports UNEXPECTED PASS ({pass_line!r})")
 
 
@@ -520,32 +525,45 @@ def test_build_tab_result_known_failing_does_not_fail_summary():
 
 
 def test_build_tab_result_xpass_does_not_fail_summary_either():
-    # Waterfall (#101) happening to pass this run: reported as xpass, not
-    # silently absorbed, but does not fail the run -- same semantics
-    # run_all.sh's own KNOWN_FAILING now uses too (an unexpected pass is
-    # reported, never a gate failure by itself; a single real-daemon run
-    # passing isn't proof an intermittent bug is fixed).
+    # A listed tab (#100 Timeline) happening to pass this run: reported as
+    # xpass, not silently absorbed, but does not fail the run -- same
+    # semantics run_all.sh's own KNOWN_FAILING now uses too (an unexpected
+    # pass is reported, never a gate failure by itself; a single real-daemon
+    # run passing isn't proof an intermittent bug is fixed).
     r = lib.build_tab_result(
-        "waterfall", True, "ok:1", 6, [], 0.0, [],
+        "timeline", True, "ok:1", 6, [], 0.0, [],
         {"charts": 1, "uplots": 1, "pending": 0},
         {"charts": 1, "uplots": 1, "pending": 0}, {})
     check(r["ok"] is True and r["xpass"] is True and r["known_failing"] is False,
           f"a real pass on a listed tab is xpass, not known_failing ({r})")
     s = lib.build_summary([r])
-    check(s["ok"] is True and s["xpass_tabs"] == ["waterfall"],
+    check(s["ok"] is True and s["xpass_tabs"] == ["timeline"],
           f"an xpass tab does not fail the summary either ({s})")
 
 
 def test_build_failed_tab_result_known_failing():
-    # The actual issue #101 shape: waterfall's executions query exceeds the
-    # 60s no-data budget, going through build_failed_tab_result, not
-    # build_tab_result.
+    # A listed tab that could not be checked at all goes through
+    # build_failed_tab_result, not build_tab_result, and must still be
+    # excused by its issue number.
     r = lib.build_failed_tab_result(
-        "waterfall", "panel did not render ('#waterfall-chart canvas') within 60s")
+        "timeline", "panel did not render ('#timeline-chart canvas') within 60s")
     check(r["known_failing"] is True and r["ok"] is False,
           f"a could-not-check known-failing tab is still known_failing ({r})")
     s = lib.build_summary([r])
     check(s["ok"] is True, "a known-failing could-not-check tab does not fail the summary")
+
+
+def test_delisted_waterfall_failure_is_a_real_failure():
+    # issue #101 regression guard: the waterfall tab is no longer excused, so
+    # its old failure shape must fail the run outright. A return of the
+    # empty-panel bug cannot slip through as "known failing" again.
+    r = lib.build_failed_tab_result(
+        "waterfall", "panel did not render ('#waterfall-chart canvas') within 60s")
+    check(r["known_failing"] is False and r["ok"] is False,
+          f"a waterfall render failure is a real failure again ({r})")
+    s = lib.build_summary([r])
+    check(s["ok"] is False and s["failed_tabs"] == ["waterfall"],
+          f"a waterfall render failure fails the summary ({s})")
 
 
 def test_known_failing_does_not_affect_unlisted_tabs():
