@@ -3432,3 +3432,5 @@ cross-linked from the relevant Parts above:
 - `DAEMON_ARCHITECTURE.md` — daemon runtime architecture reference.
 - `CHANGELOG.md`, `RELEASING.md`, `README.md`, `INSTALL.md` — release history,
   release checklist, user docs.
+
+<!-- evidence-only: CI filter scenario (c) docs-only skip check, not for merge -->
