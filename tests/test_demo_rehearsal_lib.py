@@ -179,6 +179,54 @@ def test_conservation_empty_window_ok():
     check(ok, f"an empty/idle window (db_time_ms<=0) trivially conserves ({detail})")
 
 
+# ── build_time_model_check ────────────────────────────────────────────────
+
+def test_time_model_check_recent_raw_path_ok():
+    result = lib.build_time_model_check(
+        recent_ok=True, recent_detail="recent detail", recent_used_raw_path=True,
+        full_ok=True, full_detail="full detail", full_used_raw_path=False)
+    check(result["ok"], "recent window conserves AND used the raw path -> ok")
+    check(result["recent_window"]["compute_path"] == "raw",
+          "recent_window records compute_path='raw'")
+    check(result["full_window"]["compute_path"] == "summary",
+          "full_window records compute_path='summary' (the expected/normal case)")
+    check("does not gate" in result["full_window"]["note"],
+          "full_window's note says it does not gate `ok`")
+
+
+def test_time_model_check_full_window_failure_does_not_gate():
+    # The whole point of the fix: a full-window (summary-path) "failure"
+    # must NOT fail the overall check -- it is structurally incapable of
+    # being a real signal, per the note above.
+    result = lib.build_time_model_check(
+        recent_ok=True, recent_detail="ok", recent_used_raw_path=True,
+        full_ok=False, full_detail="full-window mismatch", full_used_raw_path=False)
+    check(result["ok"],
+          "a full-window conservation 'failure' alone does not fail the check")
+
+
+def test_time_model_check_recent_conservation_failure_fails():
+    result = lib.build_time_model_check(
+        recent_ok=False, recent_detail="30% gap", recent_used_raw_path=True,
+        full_ok=True, full_detail="ok", full_used_raw_path=False)
+    check(not result["ok"],
+          "a real conservation gap on the recent/raw-path window fails the check")
+
+
+def test_time_model_check_recent_not_raw_path_fails_loudly():
+    # If the short window somehow did NOT get the raw path (e.g. server.c's
+    # should_use_summaries threshold changes under us), the check must fail
+    # rather than silently trust what could be an equally vacuous result.
+    result = lib.build_time_model_check(
+        recent_ok=True, recent_detail="looks fine", recent_used_raw_path=False,
+        full_ok=True, full_detail="ok", full_used_raw_path=False)
+    check(not result["ok"],
+          "recent window NOT using the raw path fails the check even though "
+          "its own conservation math reported ok=True")
+    check(result["recent_window"]["compute_path"] == "summary",
+          "the compute_path actually observed is reported, not assumed")
+
+
 # ── waterfall_latency_ok ──────────────────────────────────────────────────
 
 def test_waterfall_latency_under_threshold():

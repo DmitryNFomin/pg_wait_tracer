@@ -82,6 +82,14 @@ def _run_passes(browser, url, out_dir, ticks, passes, first_data_timeout,
             print(f"demo_rehearsal: sleeping {remaining:.0f}s to reach the "
                   f"'{name}' pass's target offset ({target_offset_s:.0f}s)")
             time.sleep(remaining)
+        # Reviewer finding (round 1): _assert_workload_alive used to fire
+        # only after each TAB completed, not right after this multi-minute
+        # sleep -- the first tab of a pass could be graded against a
+        # workload that had already died during the sleep, minutes
+        # earlier. Check immediately on waking, before walking anything.
+        live_smoke._assert_workload_alive(
+            pgbench_pid, workload_pid,
+            f"after sleeping to pass {name!r}'s target offset")
         actual_offset = time.monotonic() - t0
         print(f"\n=== pass {name} (target {target_offset_s:.0f}s, "
               f"actual {actual_offset:.0f}s) ===")
@@ -115,22 +123,74 @@ def _run_passes(browser, url, out_dir, ticks, passes, first_data_timeout,
     return pass_results
 
 
-def _time_model_check(srv, from_ns, to_ns):
-    tm = srv.query("time_model", from_=from_ns, to_=to_ns)
-    rows = tm.get("rows", [])
-    db_time_ms = tm.get("db_time_ms", 0.0)
+def _error_or_none(resp, label):
+    """None if resp carries no pgwt-server-side error field; else a detail
+    string. Reviewer finding (round 1): a reject_overload/invalid-request
+    error response (`{"error":..., "code":..., "hint":...}`) has no
+    `rows`/`db_time_ms`/`total_count` at all -- reading those with a
+    silent `.get(..., default)` made a genuine server-side refusal look
+    exactly like an empty/idle window or a suspiciously-fast empty query,
+    both of which read as PASS. Callers must check this BEFORE trusting
+    any other field in resp."""
+    if isinstance(resp, dict) and "error" in resp:
+        return (f"{label} returned an error: {resp.get('error')} "
+                f"(code={resp.get('code')}, hint={resp.get('hint')})")
+    return None
+
+
+def _query_time_model(srv, from_ns, to_ns, label):
+    """One time_model query + its conservation verdict. Returns
+    (ok, detail, used_raw_path, fidelity) -- used_raw_path is OBSERVED
+    from the response (the `categories` key is only ever emitted by the
+    raw/non-summary handler, src/server.c handle_time_model), never
+    assumed from the requested window size alone (see
+    demo_rehearsal_lib.RECENT_WINDOW_S's comment)."""
+    tm = srv.query("time_model", from_=from_ns, to_=to_ns,
+                   timeout=drlib.TIME_MODEL_QUERY_TIMEOUT_S)
+    err = _error_or_none(tm, label)
+    if err is not None:
+        return False, err, False, None
+    rows = tm.get("rows")
+    db_time_ms = tm.get("db_time_ms")
+    if rows is None or db_time_ms is None:
+        return (False, f"{label}: response missing rows/db_time_ms: {tm}",
+                False, tm.get("fidelity"))
     ok, detail = drlib.time_model_conservation(rows, db_time_ms)
-    print(f"demo_rehearsal: time_model_conserves: {'PASS' if ok else 'FAIL'} "
-          f"-- {detail} (fidelity={tm.get('fidelity')})")
-    return {"ok": ok, "detail": detail, "db_time_ms": db_time_ms,
-            "fidelity": tm.get("fidelity"), "num_rows": len(rows)}
+    return ok, detail, "categories" in tm, tm.get("fidelity")
+
+
+def _time_model_check(srv, from_ns, to_ns):
+    full_ok, full_detail, full_raw, full_fid = _query_time_model(
+        srv, from_ns, to_ns, "time_model (full window)")
+    recent_from_ns = max(from_ns,
+                         to_ns - int(drlib.RECENT_WINDOW_S * 1_000_000_000))
+    recent_ok, recent_detail, recent_raw, recent_fid = _query_time_model(
+        srv, recent_from_ns, to_ns, "time_model (recent window)")
+    result = drlib.build_time_model_check(
+        recent_ok, recent_detail, recent_raw, full_ok, full_detail, full_raw)
+    print(f"demo_rehearsal: time_model_conserves: "
+          f"{'PASS' if result['ok'] else 'FAIL'}")
+    print(f"    recent ({drlib.RECENT_WINDOW_S:.0f}s, "
+          f"path={'raw' if recent_raw else 'summary'}, "
+          f"fidelity={recent_fid}) [GATES ok]: {recent_detail}")
+    print(f"    full window (path={'raw' if full_raw else 'summary'}, "
+          f"fidelity={full_fid}, informational only): {full_detail}")
+    return result
 
 
 def _waterfall_latency_check(srv, from_ns, to_ns):
     win_from = max(from_ns, to_ns - WATERFALL_LIVE_WINDOW_S * 1_000_000_000)
     start = time.monotonic()
-    resp = srv.query("executions", from_=win_from, to_=to_ns, limit=100)
+    resp = srv.query("executions", from_=win_from, to_=to_ns, limit=100,
+                     timeout=drlib.EXECUTIONS_QUERY_TIMEOUT_S)
     elapsed = time.monotonic() - start
+    err = _error_or_none(resp, "executions")
+    if err is not None:
+        print(f"demo_rehearsal: waterfall_query_latency: FAIL -- {err} "
+              f"(answered after {elapsed:.2f}s)")
+        return {"ok": False, "elapsed_s": elapsed,
+                "threshold_s": drlib.WATERFALL_QUERY_THRESHOLD_S,
+                "window_s": WATERFALL_LIVE_WINDOW_S, "error": err}
     ok = drlib.waterfall_latency_ok(elapsed)
     print(f"demo_rehearsal: waterfall_query_latency: {'PASS' if ok else 'FAIL'} "
           f"-- {elapsed:.2f}s (threshold {drlib.WATERFALL_QUERY_THRESHOLD_S}s), "

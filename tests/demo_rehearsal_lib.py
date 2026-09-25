@@ -42,19 +42,62 @@ WATERFALL_QUERY_THRESHOLD_S = 10.0
 #
 # docs/ROADMAP_AND_STATUS.md's T8 design: "CPU* + Off-CPU* + Sigma wait[c]
 # = DB Time" holds BY CONSTRUCTION on the raw (per-event) compute path
-# (Off-CPU* is defined as the residual that makes it hold exactly). This
-# harness's capture window is always >= 120s (see server.c
-# should_use_summaries), so pgwt-server answers time_model from
-# PRE-AGGREGATED per-window summaries instead -- a different code path
-# (pgwt_compute_time_model_from_summaries) that is not proven to preserve
-# the same identity. 1% of db_time_ms is the tolerance: generous enough to
-# absorb floating-point/ms-rounding noise across many summed summary
-# windows, but far tighter than any real missing component would produce
-# under this harness's sustained pgbench + lock/sleep contention (a
-# genuinely dropped Off-CPU*/wait class is a double-digit-percent gap, not
-# a rounding error) -- so a real conservation bug fails loudly instead of
-# being absorbed by the tolerance.
+# (Off-CPU* is defined as the residual that makes it hold exactly). 1% of
+# db_time_ms is the tolerance: generous enough to absorb floating-point/
+# ms-rounding noise, but far tighter than any real missing component would
+# produce (a genuinely dropped wait class is a double-digit-percent gap,
+# not a rounding error).
 TIME_MODEL_TOLERANCE_PCT = 1.0
+
+# ── Time-model conservation: WHICH compute path, and why it matters ──────
+#
+# Reviewer finding (2026-09-25, round 1): querying time_model over the
+# WHOLE capture window is a VACUOUS check on every real run. This harness's
+# capture window is always >= 120s, so server.c's should_use_summaries()
+# always routes a whole-window query to pgwt_compute_time_model_from_
+# summaries (compute.c) instead of the raw per-event path. In that
+# function's tm_summary_visitor, EVERY class contribution is added to
+# ctx->db_time_ns and to its own class row IN THE SAME STATEMENT
+# (`ctx->classes[c].total_ns += cls_ns; ctx->db_time_ns += cls_ns;`) --
+# so "class rows sum == db_time_ms" holds by construction, and no
+# Off-CPU* row is ever emitted on this path. If upstream data were
+# silently dropped before reaching the summary, BOTH sides would shrink
+# identically and this assertion would still read PASS. It cannot go red
+# for the bug class it exists to catch.
+#
+# Fix: ALSO query a short trailing window narrower than the 120s
+# threshold, which forces pgwt_compute_time_model (the raw/exact path).
+# That path sources db_time_ns independently (summed once per event, in
+# the main accumulation loop, before any class attribution) and computes
+# Off-CPU* as a residual (`db_time_ns - CPU* - Sigma waits`, clamped at 0)
+# -- an over-attribution bug drives that residual negative and gets
+# clamped, which DOES produce a detectable gap; the whole-window/summary
+# path has no such residual or clamp step at all. The recent-window
+# result is what gates this check's `ok`; the whole-window number is kept
+# only as a labeled, non-gating diagnostic (still worth seeing, e.g. to
+# spot a raw-vs-summary DISAGREEMENT, just never trusted alone).
+#
+# Must be strictly less than server.c's 120s should_use_summaries()
+# threshold -- this is deliberately checked at runtime (demo_rehearsal.py
+# asserts the response's `categories` key, raw-path-only, is actually
+# present) rather than merely assumed, so a future change to that
+# threshold fails this check loudly instead of silently going vacuous
+# again.
+RECENT_WINDOW_S = 60.0
+
+# ── pgwt-server query timeouts ────────────────────────────────────────────
+#
+# Reviewer finding (round 1): tests/server_harness.py's query() blocked on
+# stdout.readline() forever. A pgwt-server hang answering `executions` is
+# LITERALLY the symptom the Waterfall-latency check exists to measure
+# (issue #101) -- without a timeout, that exact failure mode hangs the
+# whole rehearsal instead of producing a timing FAIL. Both budgets are
+# generous multiples of WATERFALL_QUERY_THRESHOLD_S so a slow-but-answered
+# query is always measured and graded on ITS OWN number, never mistaken
+# for a hang; they exist only to bound the harness's own patience, not to
+# replace the pass/fail threshold above.
+EXECUTIONS_QUERY_TIMEOUT_S = 120.0
+TIME_MODEL_QUERY_TIMEOUT_S = 60.0
 
 
 def schedule_passes(duration_s, pass_budget_s, warmup_s=60.0,
@@ -183,6 +226,44 @@ def time_model_conservation(rows, db_time_ms,
     detail = (f"db_time_ms={db_time_ms:.1f} class_rows_sum_ms={class_ms:.1f} "
               f"gap={gap_ms:.1f}ms ({gap_pct:.2f}%, tolerance {tolerance_pct}%)")
     return ok, detail
+
+
+def build_time_model_check(recent_ok, recent_detail, recent_used_raw_path,
+                           full_ok, full_detail, full_used_raw_path):
+    """Combines demo_rehearsal.py's two time_model queries (see
+    RECENT_WINDOW_S's comment above for why there are two). recent_* is
+    the short trailing window that forces the raw/exact compute path --
+    the ONLY one with real detection power, and the only one that gates
+    `ok`. full_* is the whole-capture-window query, kept purely as a
+    labeled, non-gating diagnostic (it is answered by the summary path on
+    every real run and cannot fail for the bug class this check exists to
+    catch).
+
+    recent_used_raw_path/full_used_raw_path: whether demo_rehearsal.py
+    actually OBSERVED the raw path in that response (the presence of the
+    `categories` key, which only the raw/non-summary handler emits) --
+    not merely assumed from the window size. If the recent window did NOT
+    get the raw path, the check fails loudly instead of silently trusting
+    a result that may be just as vacuous as the whole-window one."""
+    ok = bool(recent_ok and recent_used_raw_path)
+    return {
+        "ok": ok,
+        "recent_window": {
+            "ok": recent_ok, "detail": recent_detail,
+            "compute_path": "raw" if recent_used_raw_path else "summary",
+            "window_s": RECENT_WINDOW_S,
+        },
+        "full_window": {
+            "ok": full_ok, "detail": full_detail,
+            "compute_path": "raw" if full_used_raw_path else "summary",
+            "note": ("informational only -- does not gate `ok`; the "
+                     "summary compute path (src/compute.c "
+                     "tm_summary_visitor) adds the same value to "
+                     "db_time_ns and its class row in the same "
+                     "statement, so this assertion holds by construction "
+                     "and cannot detect a real conservation bug"),
+        },
+    }
 
 
 def waterfall_latency_ok(elapsed_s, threshold_s=WATERFALL_QUERY_THRESHOLD_S):
