@@ -31,10 +31,35 @@ export function matrixCellIntent(tuple, labels) {
         filterValue: targetId, label: targetName };
 }
 
+/* Legend buckets are quantized to a fixed 1-2-5-10 log grid,
+ * never to the raw per-tick max. A tick's rawMax snaps UP to the nearest
+ * grid point at or above it; ticks whose rawMax stays under the same grid
+ * point (ordinary sampling jitter, e.g. 53,971 -> 57,811 both round up to
+ * 100,000) keep byte-identical visualMap pieces, so cells never change
+ * shade without a change in meaning (STABILITY, #104 / P8 "heatmap global
+ * recolor per tick"). Only a rawMax that crosses into the next grid point
+ * (a real order-of-magnitude change in transition volume) moves the legend. */
+export function matrixLegendBucketMax(x) {
+    if (!(x > 1)) return 1;
+    const exp = Math.floor(Math.log10(x));
+    const base = Math.pow(10, exp);
+    for (const step of [1, 2, 5, 10]) {
+        if (x <= step * base) return step * base;
+    }
+    return 10 * base;
+}
+
 /* `limit` is clamped to 1..20. Events are ranked by total incident link
- * count (source + target), with a lexical tie-break for deterministic output.
- * Color maps log1p(count) through a piecewise single-hue ramp; class identity
- * appears only in axis-label text colors. */
+ * count (source + target), with a lexical tie-break for deterministic output
+ * — this ranking decides which events make the top-N, tick to tick. Display
+ * ORDER is a separate, stickier concern (STABILITY, #104): with no
+ * `opts.prevLabels`, order is the rank order (first build / explicit
+ * re-sort). With `opts.prevLabels` (the `labels` this builder returned last
+ * tick), already-shown events keep their previous relative position; only
+ * events newly entering the top-N are appended, in rank order, at the end —
+ * so two events already on screen never swap rows/columns just because their
+ * scores nudged past each other. Color maps log1p(count) through a piecewise
+ * single-hue ramp; class identity appears only in axis-label text colors. */
 export function buildMatrixOption(data, opts) {
     opts = opts || {};
     const links = (data && data.links) || [];
@@ -52,8 +77,18 @@ export function buildMatrixOption(data, opts) {
     }
     const allNames = Object.keys(scores).sort((a, b) =>
         scores[b] - scores[a] || a.localeCompare(b));
-    const labels = allNames.slice(0, limit);
-    const hiddenCount = Math.max(0, allNames.length - labels.length);
+    const topNames = allNames.slice(0, limit);
+    const hiddenCount = Math.max(0, allNames.length - topNames.length);
+    let labels;
+    if (Array.isArray(opts.prevLabels) && opts.prevLabels.length) {
+        const topSet = new Set(topNames);
+        const kept = opts.prevLabels.filter(name => topSet.has(name));
+        const keptSet = new Set(kept);
+        const added = topNames.filter(name => !keptSet.has(name));
+        labels = kept.concat(added);
+    } else {
+        labels = topNames;
+    }
     const index = {};
     labels.forEach((name, i) => { index[name] = i; });
 
@@ -74,6 +109,7 @@ export function buildMatrixOption(data, opts) {
     const cells = Object.values(byCell).map(c =>
         [c.x, c.y, Math.log1p(c.count), c.count, c.duration, c.targetId]);
     const rawMax = cells.length ? Math.max(...cells.map(c => c[3])) : 1;
+    const bucketMax = matrixLegendBucketMax(rawMax);
     const labelColors = {};
     labels.forEach(name => {
         const n = nodes[name] || {};
@@ -109,22 +145,32 @@ export function buildMatrixOption(data, opts) {
             textStyle: { color: '#e0e0e0', fontSize: 12 },
             formatter: (p) => matrixTooltipFormatter(labels, p),
         },
-        grid: { left: 170, right: 40, top: 22, bottom: 150 },
+        /* Axis names sit clear of tick labels at 1280px: the x-axis name is
+         * centered ('middle') below the rotated tick labels instead of at
+         * the axis end (which clipped "Source event" to "Sour" against the
+         * panel's right edge); the y-axis name is a vertical strip to the
+         * LEFT of the tick-label column (nameGap pushes it past the
+         * longest label) instead of at the axis end (which, with
+         * `inverse: true`, landed at the origin and overstruck the first
+         * x tick label "CPU*"). */
+        grid: { left: 205, right: 40, top: 22, bottom: 150 },
         xAxis: {
-            type: 'category', name: 'Source event', data: labels,
+            type: 'category', name: 'Source event', nameLocation: 'middle',
+            nameGap: 95, nameTextStyle: { color: '#888' }, data: labels,
             axisLabel: { interval: 0, rotate: 48, fontSize: 10,
                 color: (v) => labelColors[v] || '#aaa' },
             axisLine: { lineStyle: { color: '#333' } }, splitArea: { show: false },
         },
         yAxis: {
-            type: 'category', name: 'Target event', data: labels,
-            inverse: true,
+            type: 'category', name: 'Target event', nameLocation: 'middle',
+            nameGap: 190, nameRotate: 90, nameTextStyle: { color: '#888' },
+            data: labels, inverse: true,
             axisLabel: { interval: 0, fontSize: 10,
                 color: (v) => labelColors[v] || '#aaa' },
             axisLine: { lineStyle: { color: '#333' } }, splitArea: { show: false },
         },
         visualMap: {
-            type: 'piecewise', min: 0, max: Math.log1p(rawMax), splitNumber: 5,
+            type: 'piecewise', min: 0, max: Math.log1p(bucketMax), splitNumber: 5,
             dimension: 2, orient: 'horizontal', left: 'center', bottom: 4,
             textStyle: { color: '#888', fontSize: 10 },
             formatter: (min, max) => {
@@ -142,7 +188,7 @@ export function buildMatrixOption(data, opts) {
         }],
     };
     return { option, hasData: cells.length > 0, labels, labelColors,
-        hiddenCount, visibleCount: labels.length, notes, cells, rawMax,
+        hiddenCount, visibleCount: labels.length, notes, cells, rawMax, bucketMax,
         shownVolume, hiddenVolume, totalVolume,
         serverTruncated: !!(data && data.truncated) };
 }
