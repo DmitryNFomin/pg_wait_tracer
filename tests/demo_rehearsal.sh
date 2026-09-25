@@ -228,7 +228,7 @@ echo "demo_rehearsal: bridge ready at $BASE_URL"
 # end-of-capture pgwt-server queries tests/demo_rehearsal.py issues
 # directly against $TRACE_DIR) -- teardown only happens in cleanup() above,
 # after this returns, same ordering as tests/ui_live_smoke.sh.
-python3 "$SCRIPT_DIR/demo_rehearsal.py" --url "$BASE_URL" \
+python3 -u "$SCRIPT_DIR/demo_rehearsal.py" --url "$BASE_URL" \
     --trace-dir "$TRACE_DIR" --daemon-log "$DAEMON_LOG" \
     --duration-min "$DURATION_MIN" \
     --pgbench-pid "$PGBENCH_PID" --workload-pid "$WORKLOAD_PID"
