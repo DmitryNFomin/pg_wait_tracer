@@ -853,7 +853,7 @@ static void test_summary_qattr_reclaim(void)
 {
     printf("--- #128: per-pid attribution slots are reclaimed on exit, "
            "bounded when the table is full ---\n");
-    const char *dir = BASE_DIR "/qattr";
+    const char *dir = subdir("qattr");
     rm_rf(dir);
     mkdir(BASE_DIR, 0755);
     mkdir(dir, 0755);
