@@ -48,6 +48,17 @@ FIRST_DATA_TIMEOUT_S = 60
 # passed by tests/ui_live_smoke.sh.
 BLINK_THRESHOLD = 0.001  # 0.1%
 
+# Offset sweep (issue #119): tick-anchored offsets, in ms after each tick's
+# own timestamp, at which the driver grabs an EXTRA frame purely for
+# reporting -- never gating. Lets a re-layout/re-render show up at whichever
+# window it actually lands in (timeline's blink, #100, was never measured
+# this early: the gating pair alone only ever sampled ~1.2-1.3s after the
+# tick, and drifted to 1.8-3.0s on half the ticks when the render-check
+# retry loop ate the budget). The gating check itself stays exactly what it
+# was -- one pair at the anchored settle offset, BLINK_THRESHOLD -- this is
+# additional data, not a wider or narrower pass/fail rule.
+SWEEP_OFFSETS_MS = (200, 500, 1000, 1500, 2000)
+
 # KNOWN_FAILING_TABS: tab name -> tracking issue number. ONLY for a tab that
 # reproduces a real, filed product bug (issue #100, #101) -- never for timing
 # or runner noise; a noisy tab is investigated, never silenced here (see also
@@ -66,9 +77,15 @@ KNOWN_FAILING_TABS = {
     # (a flat 1200ms sleep from wherever the code happened to be, not
     # anchored to the tick's own timestamp -- fixed after this was found),
     # so a pass under the drifted timing proves nothing about whichever
-    # window the original failure landed in. Do not assume #102 (missing
-    # animation:false) either. Stays listed until a run with the
-    # tick-anchored settle is investigated either way.
+    # window the original failure landed in. #102 (missing animation:false)
+    # is CLOSED, not merely unproven: disproved at runtime -- all four
+    # builders (concurrency/timeline/exec-scatter/matrix) already had
+    # animation:false at the option root, confirmed by reading the actual
+    # ECharts option on every non-empty gallery cell. The missing-animation
+    # hypothesis for #100 is ruled out; whatever causes timeline's blink is
+    # something else. Stays listed until a run with the tick-anchored
+    # settle (and now the offset sweep, issue #119) is investigated either
+    # way.
     "timeline": 100,
     # #101: TWO DIFFERENT symptoms observed under this name so far -- the
     # executions query taking > 60s to answer under sustained --mode full
@@ -120,6 +137,53 @@ def blink_check(frame_a, frame_b):
     if frame_a.shape != frame_b.shape:
         return 1.0, f"panel resized between frames: {frame_a.shape} -> {frame_b.shape}"
     return frame_diff_ratio(frame_a, frame_b), None
+
+
+def sweep_consecutive_diff_ratios(frames):
+    """Reporting-only companion to blink_check() for the offset sweep (issue
+    #119): frames is a list of (H, W, 3) uint8 arrays, or None where a
+    capture failed (e.g. the panel element was gone at that offset), one per
+    SWEEP_OFFSETS_MS entry in order.
+
+    Returns a list of (ratio, note) pairs, one per CONSECUTIVE pair -- i.e.
+    len(frames) - 1 entries -- using blink_check's own semantics (a shape
+    mismatch is the worst possible ratio with a note, never a raised
+    exception) plus the same treatment for a missing frame, so a re-layout
+    or a torn-down panel anywhere in the sweep is visible in summary.json
+    instead of crashing the tick.
+
+    Never read by build_tab_result's `ok` computation -- the gating check
+    stays exactly the one pair at the anchored settle offset it always was;
+    this is additional data for deciding the settle (issue #119 item 3), not
+    a second pass/fail rule."""
+    ratios = []
+    for a, b in zip(frames, frames[1:]):
+        if a is None or b is None:
+            ratios.append((1.0, "frame missing from the sweep"))
+            continue
+        ratios.append(blink_check(a, b))
+    return ratios
+
+
+def build_sweep_tick_record(achieved_offsets_ms, frames,
+                             target_offsets_ms=SWEEP_OFFSETS_MS):
+    """One tick's offset-sweep record for summary.json (issue #119 item 2).
+
+    achieved_offsets_ms: `now_ms - tick_ts_ms` actually measured at each
+    capture, same idea as blink_pair_offsets_ms -- the target is tick-
+    anchored but preceding work can still push the real capture later.
+    frames: the decoded arrays (or None) captured at those offsets, same
+    order, fed straight to sweep_consecutive_diff_ratios().
+
+    Pure: no page access. Kept here (not inline in ui_live_smoke.py) so the
+    achieved-offsets-in, ratios-out shape has its own unit test."""
+    pairs = sweep_consecutive_diff_ratios(frames)
+    return {
+        "target_offsets_ms": list(target_offsets_ms),
+        "achieved_offsets_ms": list(achieved_offsets_ms),
+        "ratios": [ratio for ratio, _note in pairs],
+        "notes": [note for _ratio, note in pairs if note],
+    }
 
 
 def is_blank_frame(frame, std_threshold=1.0):
@@ -229,7 +293,7 @@ def build_tab_result(tab_id, rendered_ok, rendered_detail, ticks_observed,
                       blink_threshold=BLINK_THRESHOLD,
                       pgwt_console_errors=(),
                       leak_before_settle_s=None, leak_after_settle_s=None,
-                      blink_pair_offsets_ms=()):
+                      blink_pair_offsets_ms=(), blink_sweep_ticks=()):
     """Assembles one tab's verdict. Pure: every input is already-collected
     data, no page access.
 
@@ -248,12 +312,17 @@ def build_tab_result(tab_id, rendered_ok, rendered_detail, ticks_observed,
     itself, fail no_leak.
 
     blink_pair_offsets_ms: per-tick `now_ms - tick_ts_ms` when frame_a of the
-    blink pair was actually captured (issue #93 review item 3) -- the 1200ms
-    settle is anchored to the tick's own timestamp, but preceding work (the
-    blind-window check, _poll_render_check's retry loop) can still push the
-    actual capture past the 1200ms target under load. Recorded, not
-    enforced: makes any future overrun of the anchor visible in
-    summary.json instead of silent."""
+    blink pair was actually captured (issue #93 review item 3) -- the settle
+    (ui_live_smoke.py's BLINK_PAIR_ANCHOR_MS) is anchored to the tick's own
+    timestamp, but preceding work (the blind-window check,
+    _poll_render_check's retry loop) can still push the actual capture past
+    the target under load. Recorded, not enforced: makes any future overrun
+    of the anchor visible in summary.json instead of silent.
+
+    blink_sweep_ticks: one build_sweep_tick_record() dict per tick (issue
+    #119 item 2) -- reporting only, never read below to compute `ok`; the
+    gating check stays the one pair at the anchored settle offset it always
+    was."""
     clean_ok = len(console_errors) == 0
     blink_ok = no_blink_ok(blink_ratio, blink_threshold)
     leak_ok = leak_probe_ok(leak_before) and leak_probe_ok(leak_after)
@@ -271,6 +340,8 @@ def build_tab_result(tab_id, rendered_ok, rendered_detail, ticks_observed,
         "no_blink": {"ok": blink_ok, "ratio": blink_ratio,
                      "threshold": blink_threshold,
                      "pair_offsets_ms": list(blink_pair_offsets_ms)},
+        "blink_sweep": {"offsets_ms": list(SWEEP_OFFSETS_MS),
+                        "ticks": list(blink_sweep_ticks)},
         "color_stability": {"ok": color_ok, "violations": color_violations},
         "no_leak": {"ok": leak_ok, "before": leak_before, "after": leak_after,
                     "settle_s": {"before": leak_before_settle_s,
@@ -298,6 +369,7 @@ def build_failed_tab_result(tab_id, reason, ticks_observed=0, artifacts=None,
                   "pgwt_errors": list(pgwt_console_errors)[:10]},
         "no_blink": {"ok": None, "ratio": None, "threshold": BLINK_THRESHOLD,
                      "pair_offsets_ms": []},
+        "blink_sweep": {"offsets_ms": list(SWEEP_OFFSETS_MS), "ticks": []},
         "color_stability": {"ok": None, "violations": []},
         "no_leak": {"ok": None, "before": None, "after": None,
                     "settle_s": {"before": None, "after": None}},
