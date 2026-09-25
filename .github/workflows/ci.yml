@@ -51,9 +51,10 @@ jobs:
     # src/ (including src/bpf/) is the ONLY thing that can change capture,
     # accounting, discovery or the daemon, so it always gets the FULL matrix
     # — this job only ever narrows the tier, never widens what src/ triggers.
-    # A non-pull_request/push trigger (workflow_dispatch, etc.) has no clean
-    # two-commit diff to classify, so it defaults to "run everything" — the
-    # safe direction is to over-cover, never under-cover.
+    # workflow_dispatch (agents' pre-PR gate-box evidence) diffs against its
+    # merge-base with the default branch, same shape as a PR. Any other
+    # trigger has no clean diff to classify and defaults to "run everything"
+    # — the safe direction is to over-cover, never under-cover.
     name: changed-files
     runs-on: ubuntu-latest
     outputs:
@@ -81,6 +82,18 @@ jobs:
                && git cat-file -e "$BEFORE" 2>/dev/null; then
               FILES=$(git diff --name-only "$BEFORE" "$AFTER")
             fi
+          elif [ "$EVENT" = "workflow_dispatch" ]; then
+            # A manual dispatch against a branch (the carve-out's "gh
+            # workflow run evidence on the gate box" -- agents proving a
+            # branch before a PR exists to attach to). fetch-depth: 0 above
+            # fetches every branch's history, so the default branch's ref is
+            # available locally; diff this ref against their merge base,
+            # same shape as the pull_request branch above.
+            DEFAULT_BRANCH="${{ github.event.repository.default_branch }}"
+            if git rev-parse --verify "origin/$DEFAULT_BRANCH" >/dev/null 2>&1; then
+              MERGE_BASE=$(git merge-base HEAD "origin/$DEFAULT_BRANCH")
+              FILES=$(git diff --name-only "$MERGE_BASE" HEAD)
+            fi
           fi
 
           {
@@ -89,7 +102,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
           if [ -z "$FILES" ]; then
-            echo "(none detected, or not a push/pull_request event) -- treating as full change" >> "$GITHUB_STEP_SUMMARY"
+            echo "(no changed files detected for this trigger) -- treating as full change" >> "$GITHUB_STEP_SUMMARY"
             echo "src_changed=true" >> "$GITHUB_OUTPUT"
             echo "docs_only=false" >> "$GITHUB_OUTPUT"
             exit 0
