@@ -98,7 +98,12 @@ export function createHistogramView() {
             return;
         }
         lastData = data;
-        const model = buildHeatmapOption(data, { maxCount: stickyMax(data) });
+        // #105: ctx.server.fromNs is the server's earliest captured timestamp
+        // (same field events.js/overview.js/active.js use for "predates the
+        // trace") — buckets before it are marked "not captured" rather than
+        // reading as a measured, captured zero.
+        const captureFromNs = ctxRef && ctxRef.server ? ctxRef.server.fromNs : null;
+        const model = buildHeatmapOption(data, { maxCount: stickyMax(data), captureFromNs });
         if (!model.hasData) {
             if (chart) { chart.dispose(); chart = null; }
             host.innerHTML = '<div class="loading">No data for selected event/range</div>';
@@ -238,12 +243,16 @@ export function createHistogramView() {
             return { events, heatmap: hm };
         },
 
-        build(data) {
+        build(data, ctx) {
             // PURE pre-compute; mount applies it (the DOM selectors still drive
             // a possible re-fetch, but the initial paint is from this model).
+            // renderHeatmap() (mount + every refresh) rebuilds the option itself
+            // (it needs the sticky visualMap max) — `heatmap` here mirrors it
+            // for consistency but is not what actually gets painted.
+            const captureFromNs = ctx && ctx.server ? ctx.server.fromNs : null;
             return {
                 selectors: buildSelectorModel(data.events, fmtCount),
-                heatmap: buildHeatmapOption(data.heatmap),
+                heatmap: buildHeatmapOption(data.heatmap, { captureFromNs }),
                 raw: data.heatmap,
             };
         },

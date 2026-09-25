@@ -11,6 +11,22 @@ import {
     buildConcurrencyOption, buildConcurrencyTables,
 } from '../../web/static/lib/builders/concurrency.js';
 
+function fivePeaks() {
+    // bucket_ns 1000, t = 1000..5000 — a clean 5-bucket window for the
+    // captureFromNs boundary math.
+    return {
+        bucket_ns: 1_000,
+        peaks: [
+            { t: 1000, t_ms: 1, max: 3, event: 'A' },
+            { t: 2000, t_ms: 2, max: 4, event: 'B' },
+            { t: 3000, t_ms: 3, max: 5, event: 'C' },
+            { t: 4000, t_ms: 4, max: 2, event: 'D' },
+            { t: 5000, t_ms: 5, max: 1, event: 'E' },
+        ],
+        bursts: [],
+    };
+}
+
 function data() {
     return {
         // bucket_ns matches the peak t spacing (peak t values are bucket
@@ -132,4 +148,82 @@ test('tables HTML: no bursts -> explicit "No burst events" line', () => {
     const m = buildConcurrencyOption({ ...data(), bursts: [] });
     const html = buildConcurrencyTables(m);
     assert.ok(html.includes('No burst events detected'));
+});
+
+/* #105: y-axis title geometry. Default nameLocation clipped the leading "S"
+ * of "Simultaneous Sessions" off the canvas at 1280px (the name text is
+ * anchored past the axis start under the default 'end' location). middle +
+ * a rotated strip inside grid.left is the same fix shape as the matrix axis
+ * names (PR #147) — pinned here so the margin can never regress under it. */
+test('y-axis title uses nameLocation middle with a gap that fits inside grid.left', () => {
+    const { option } = buildConcurrencyOption(fivePeaks());
+    assert.equal(option.yAxis.name, 'Simultaneous Sessions');
+    assert.equal(option.yAxis.nameLocation, 'middle');
+    assert.ok(option.yAxis.nameGap > 0);
+    assert.ok(option.yAxis.nameGap < option.grid.left,
+        'yAxis name must stay inside the left grid margin, not spill onto the plot');
+});
+
+/* #105: a bucket that starts before capture began is EXCLUDED (null), never
+ * painted as a measured "0 sessions" — the old `p.max || 0` fallback drew a
+ * solid zero line across 12 real minutes that were never captured. */
+test('captureFromNs: buckets before it are null in the series, not 0', () => {
+    const d = fivePeaks();
+    // Buckets at t=1000,2000 (< 2500) are pre-capture; t=3000.. are real.
+    const { option, notCapturedCount } = buildConcurrencyOption(d, { captureFromNs: 2500 });
+    assert.equal(notCapturedCount, 2);
+    assert.deepEqual(option.series[0].data, [null, null, 5, 2, 1]);
+});
+
+test('captureFromNs omitted or before the window start -> no exclusion, no markArea', () => {
+    const d = fivePeaks();
+    const bare = buildConcurrencyOption(d);
+    assert.equal(bare.notCapturedCount, 0);
+    assert.equal(bare.option.series[0].markArea, undefined);
+    assert.deepEqual(bare.option.series[0].data, [3, 4, 5, 2, 1]);
+
+    const before = buildConcurrencyOption(d, { captureFromNs: 0 });
+    assert.equal(before.notCapturedCount, 0);
+    assert.equal(before.option.series[0].markArea, undefined);
+});
+
+test('captureFromNs: markArea covers exactly the not-captured buckets and is labeled', () => {
+    const d = fivePeaks();
+    const { option } = buildConcurrencyOption(d, { captureFromNs: 3500 });
+    // t=1000,2000,3000 < 3500 -> 3 not-captured buckets, indices 0..2.
+    const area = option.series[0].markArea;
+    assert.ok(area, 'markArea must be present when a pre-capture span exists');
+    assert.equal(area.data[0][0].xAxis, 0);
+    assert.equal(area.data[0][1].xAxis, 2);
+    assert.equal(area.label.formatter, 'Not captured');
+});
+
+test('captureFromNs: tooltip reads "Not yet captured" for a pre-capture bucket, never a peak value', () => {
+    const d = fivePeaks();
+    const { option } = buildConcurrencyOption(d, { captureFromNs: 2500 });
+    const tip0 = option.tooltip.formatter([{ dataIndex: 0, axisValue: 1000, value: null }]);
+    assert.ok(tip0.includes('Not yet captured'));
+    assert.ok(!tip0.includes('Peak:'));
+    const tip2 = option.tooltip.formatter([{ dataIndex: 2, axisValue: 3000, value: 5 }]);
+    assert.ok(tip2.includes('Peak: <b>5 sessions</b>'));
+});
+
+test('captureFromNs: whole window predates capture -> every bucket null, still hasData (no crash)', () => {
+    const d = fivePeaks();
+    const { option, hasData, notCapturedCount } =
+        buildConcurrencyOption(d, { captureFromNs: 9999 });
+    assert.equal(hasData, true);
+    assert.equal(notCapturedCount, 5);
+    assert.deepEqual(option.series[0].data, [null, null, null, null, null]);
+});
+
+/* #105: a not-captured bucket can never be a "Top Peak Moment" — the chart
+ * excludes it from the line, so the table below it must agree, or the two
+ * halves of the same view contradict each other. */
+test('captureFromNs: a pre-capture bucket is excluded from topPeaks even if its raw max > 1', () => {
+    const d = fivePeaks(); // maxes: 3,4,5,2,1 — index 1 (max=4) would normally top the list
+    const { topPeaks } = buildConcurrencyOption(d, { captureFromNs: 2500 }); // excludes idx 0,1
+    assert.ok(topPeaks.every(p => p.t >= 3000));
+    assert.equal(topPeaks[0].max, 5);          // idx 2, the largest CAPTURED peak
+    assert.equal(topPeaks.some(p => p.max === 4), false);
 });

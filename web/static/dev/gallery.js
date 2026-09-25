@@ -468,9 +468,13 @@ function renderTimeline(body, foot, state) {
 }
 
 function renderHistogram(body, foot, state) {
-    const m = buildHeatmapOption(state.data);
+    const m = buildHeatmapOption(state.data, state.opts);
     if (!m.hasData) { emptyCard(body, 'No data for selected event/range'); return; }
     makeChart(div('chart', body), m.option, 340);
+    // #105: not-captured count deliberately NOT appended here — a longer
+    // fact line wraps to a 2nd line, growing the cell's height and reflowing
+    // every cell after it in the shared flexbox grid (#122). It is already
+    // visible on-chart via the "Not captured" markArea label.
     factLine(foot, 'cells: ' + state.data.cells.length +
         ' · max_count: ' + state.data.max_count);
 }
@@ -524,13 +528,14 @@ function renderTransitions(body, foot, state) {
 }
 
 function renderConcurrency(body, foot, state) {
-    const m = buildConcurrencyOption(state.data);
+    const m = buildConcurrencyOption(state.data, state.opts);
     if (!m.hasData) { emptyCard(body, 'No concurrency data'); return; }
     makeChart(div('chart', body), m.option, CHART_H);
     // The tables under the chart are part of the same builder surface.
     div('conc-tables', body).innerHTML = buildConcurrencyTables(m);
     factLine(foot, 'peaks: ' + state.data.peaks.length +
-        ' · bursts: ' + m.bursts.length);
+        ' · bursts: ' + m.bursts.length +
+        (m.notCapturedCount ? ' · not captured: ' + m.notCapturedCount + ' buckets' : ''));
 }
 
 function renderTable(body, foot, state) {
