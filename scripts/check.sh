@@ -35,6 +35,12 @@ if [[ $FAST -eq 0 ]] && ! "$py" -c 'import playwright' 2>/dev/null; then
     exit 2
 fi
 
+step "snapshot-history guard self-test"
+run tests/test_check_snapshot_history.sh
+
+step "snapshot-history guard (this branch vs origin/master)"
+run scripts/check-snapshot-history.sh
+
 step "web builder unit tests (node)"
 run node --test 'tests/web_unit/*.test.mjs'
 
