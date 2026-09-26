@@ -219,3 +219,35 @@ chromium-version=148.0.7778.96
 # copies straight from the 36136702565 artifact
 # (aas-live-ticks-tick4.png c01bd39c1466..b0e2e,
 # uplot-aas-live-ticks-tick4.png 11c0ce473ac8..c06); no local PNG committed.
+
+# 2026-09-26 (#159, cross-session drift): the `snapshots` job now runs inside
+# the pinned container mcr.microsoft.com/playwright:v1.60.0-noble (ci.yml)
+# instead of bare ubuntu-latest + `playwright install --with-deps chromium`.
+# ROOT CAUSE, found by pixel-diffing PR #152's failing run (36202307855)
+# against the committed baselines region by region: every differing row in
+# all three over-tolerance cells (gallery/aas-live-ticks-tick4,
+# gallery/uplot-aas-live-ticks-tick4, gallery/table-configs-compare-delta)
+# was TEXT — the gallery caption, the tick-bar label, or a table row — never
+# a chart canvas, axis, color or value. web/static/style.css names only
+# macOS/Windows font families ('SF Mono', 'Segoe UI', ...) plus a bare
+# generic ('monospace'/'sans-serif'), so every glyph is rendered with
+# whatever font fontconfig resolves the generic alias to — and `--with-deps`
+# populated that from LIVE ubuntu-latest apt mirrors at job time, which can
+# differ day to day even though playwright/chromium are pinned. That matches
+# #155's proof that two runs in the SAME session (same ephemeral apt state)
+# are byte-identical, while #159 found up to 98% of the tolerance budget
+# drifting BETWEEN sessions on exactly the text-heaviest cells.
+#
+# Fix verified with the required two-session proof: `--update-snapshots`
+# dispatched on this branch's head at 00:09:02Z (run 36203743187) and again
+# at 01:17:20Z (run 36207915979) — a 68-minute gap, each run pulling the
+# container image fresh (confirmed in the job log: a `docker pull` each
+# time, digest sha256:9bd26ad9...6b948 both times) — produced BYTE-IDENTICAL
+# PNGs for all 44 baselines (sha256 match). 39 of the 44 baselines' bytes
+# also differ from the PRE-fix (apt-based) baselines, as expected for any
+# font-stack change; the 5 untouched are the gallery cells with no on-canvas
+# text. The committed bytes here are sha256-verified copies straight from
+# the 36203743187 artifact; no local PNG committed.
+#
+# #159 regen environment:
+# playwright==1.60.0 (pip) inside mcr.microsoft.com/playwright:v1.60.0-noble
