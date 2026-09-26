@@ -330,11 +330,23 @@ chromium-version=148.0.7778.96
 # #159 regen environment:
 # playwright==1.60.0 (pip) inside mcr.microsoft.com/playwright:v1.60.0-noble
 #
-# Merge note (#159 x #101): waterfall_execution.png is kept at #101's
-# (1280x473, ubuntu-latest / apt-based) bytes, not re-pinned to the container
-# in this merge — #101's mock_server.py fixture change landed after the
-# #159 regen above, so the container-regenerated file would show the old,
-# now-wrong table row count. This is the one baseline of the 44 NOT proven
-# byte-identical under the pinned container; a follow-up
-# update_snapshots=true dispatch should re-pin it the next time this file is
-# touched.
+# Merge note (#159 x #101): waterfall_execution.png was first kept at #101's
+# (1280x473, ubuntu-latest / apt-based) bytes when merging master into the
+# #159 branch, since #101's mock_server.py fixture change landed after the
+# #159 regen above and the container-regenerated file would have shown the
+# old, now-wrong table row count. That made it the one baseline of the 44
+# NOT proven byte-identical under the pinned container.
+#
+# Follow-up (same merge, completing the #159 set): regenerated
+# waterfall_execution.png ONLY (1280x473 -> 1280x479) via workflow_dispatch
+# update_snapshots=true on agent/snapshot-session-drift (run 36234353054),
+# sha256 verified against the downloaded artifact (83f6b7fd...c67c60e)
+# before committing. Pixel-diffed against the pre-regen (#101, apt-based)
+# file first: the chart region (bars, axis ticks, colors) is byte-identical
+# to the old file at a uniform +6px vertical offset (diff sum 0 at that
+# shift); the table rows show the usual monospace line-height drift
+# accumulating from 0px at the header to +6px by the chart, matching every
+# other #159 cell's documented mechanism. No chart geometry, series color,
+# or plotted value changed — the size bump is font metrics only. This
+# baseline is now, like the other 43, sha256-verified from a container-run
+# artifact; no local PNG committed.
