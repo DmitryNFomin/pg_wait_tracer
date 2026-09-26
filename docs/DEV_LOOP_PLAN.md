@@ -671,6 +671,34 @@ stopwatch can read much higher under concurrent box load (see above; not a
 regression, a measurement-methodology note for whoever reads that step's
 output next).
 
+**Second gate box (`agent/second-gate-box`, 2026-09-26) — DONE:** measured
+occupancy of ~88% on the single gate box (jobs waiting roughly 8x their own
+runtime) motivated a sibling box. Created **pgwt-gate-2**: Hetzner cx33,
+same image/location as `pgwt-gate` (ubuntu-24.04, fsn1), provisioned
+identically via `tests/provision-runner.sh ubuntu --runner-token ... \
+--runner-name pgwt-gate-2` (new `--runner-name` flag — GitHub runner names
+are unique per repo, so a second box can't reuse "pgwt-gate"), registered
+with the exact same `self-hosted,linux,x64,gate-box` labels `ci.yml`
+targets — no workflow change needed; GitHub schedules jobs across whichever
+labelled runners are online and idle. `tests/hetzner-sweep.sh`'s hard-coded
+protected-name guard is now `PROTECTED_NAMES=("pgwt-gate" "pgwt-gate-2")`
+(was a single name), with `tests/test_hetzner_sweep.sh` cases proving
+`pgwt-gate-2` survives a zero cutoff and `--force-all`. Found and fixed a
+real first-time-registration bug in `provision-runner.sh` along the way:
+`systemctl list-unit-files` exits 1 (not 0-with-empty-output) when no
+runner service unit exists yet, which under `set -e`/`pipefail` aborted the
+script right after a successful `config.sh` registration, leaving the
+runner registered but never started. Verified live: both runners
+`online` via `gh api .../actions/runners`; two `workflow_dispatch` CI runs
+against this branch landed real `capture-smoke` cells on `pgwt-gate-2`
+(`runner_name: "pgwt-gate-2"`, all `SUCCESS`) while a concurrent,
+unrelated PR's `capture-smoke (PG 18)` ran at the same time on `pgwt-gate`
+— the two-runner pool absorbing real concurrent load exactly as intended.
+Also matched `tests/hetzner-vm.sh`'s `DEFAULT_TYPE` (cpx42 -> cx33) to the
+gate box's processor class for ephemeral/ad hoc VMs — see the PR body for
+the `test_cross_validate_tiered` cpx42-vs-cx33-vs-gate-box comparison this
+motivated (issue #115).
+
 ---
 
 ## Step 2 — Agents self-verify  `[DONE — PR #89]`

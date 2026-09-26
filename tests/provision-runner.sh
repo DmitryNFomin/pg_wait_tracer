@@ -574,7 +574,19 @@ EOF
             --work _work
     fi
 
-    RUNNER_UNIT=$(systemctl list-unit-files 'actions.runner.*.service' --no-legend 2>/dev/null | awk '{print $1}' | head -1)
+    # `|| true`: under set -e/pipefail, `systemctl list-unit-files` exits 1
+    # (not 0-with-empty-output) when NOTHING matches the glob -- exactly the
+    # first-ever registration on a fresh box, before the service has been
+    # installed at all. Without this guard, that exit code propagates
+    # through the pipeline (pipefail: the pipeline's status is the last
+    # non-zero among all stages, even one that isn't rightmost) into this
+    # command substitution and aborts the whole script right after a
+    # successful `config.sh` registration -- reproduced provisioning
+    # pgwt-gate-2 from scratch: registration succeeded but the script died
+    # here, leaving a registered-but-not-running runner (never appears
+    # online to GitHub) with no indication beyond a bare "exited with
+    # code 1".
+    RUNNER_UNIT=$(systemctl list-unit-files 'actions.runner.*.service' --no-legend 2>/dev/null | awk '{print $1}' | head -1) || true
     if [[ -n "$RUNNER_UNIT" ]]; then
         if systemctl is-active --quiet "$RUNNER_UNIT"; then
             log "runner systemd service ($RUNNER_UNIT) already installed and active"
