@@ -267,7 +267,13 @@ clean:
 #                  EPHEMERAL=1: throwaway Hetzner VM from the gate-box
 #                  snapshot, created/run/rsynced/deleted for this one run
 #                  (issue #141) — KEEP=1 leaves it up and prints the delete
-#                  command instead of deleting it.
+#                  command instead of deleting it. FANOUT=1 (needs
+#                  EPHEMERAL=1, OS=ubuntu): one throwaway VM PER requested
+#                  PostgreSQL major (PG=13,16,17,18, default all four), run
+#                  in parallel instead of one after another — roughly the
+#                  slowest single version instead of the sum of all of
+#                  them; combined summary + per-version logs under
+#                  tests/results/, see scripts/box-check.sh's header.
 #   hetzner-sweep  delete stale (>6h, MAX_AGE_HOURS= to override) pgwt=ephemeral
 #                  Hetzner VMs; runs automatically at the start of every
 #                  box-check too. MAX_AGE_HOURS below 1h is REFUSED (issue
@@ -287,7 +293,7 @@ check:
 check-fast:
 	@scripts/check.sh --fast
 box-check:
-	@OS=$(OS) PG=$(PG) EPHEMERAL=$(EPHEMERAL) KEEP=$(KEEP) scripts/box-check.sh
+	@OS=$(OS) PG=$(PG) EPHEMERAL=$(EPHEMERAL) KEEP=$(KEEP) FANOUT=$(FANOUT) scripts/box-check.sh
 hetzner-sweep:
 	@tests/hetzner-sweep.sh $(if $(MAX_AGE_HOURS),--max-age-hours $(MAX_AGE_HOURS),) $(if $(DRY_RUN),--dry-run,) $(if $(FORCE_ALL),--force-all,)
 ui-gallery:

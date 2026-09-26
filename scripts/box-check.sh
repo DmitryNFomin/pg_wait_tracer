@@ -16,6 +16,65 @@
 #                                   will still delete it ~6h later unless
 #                                   you raise MAX_AGE_HOURS or delete it
 #                                   yourself first.
+#   make box-check EPHEMERAL=1 FANOUT=1 [PG=13,16,17,18]
+#                                   one throwaway VM PER REQUESTED PostgreSQL
+#                                   major (default: the same 13/16/17/18 set
+#                                   tests/provision-runner.sh and ci.yml's
+#                                   capture-smoke matrix already use; PG=13
+#                                   or PG=13,17 fans out over a subset),
+#                                   created from the same pgwt=gate-snapshot
+#                                   image and run IN PARALLEL instead of one
+#                                   after another on a single machine —
+#                                   roughly the slowest single version
+#                                   instead of the sum of all of them. Same
+#                                   `tests/run_all.sh --require-live` per
+#                                   machine, same assertions, nothing skipped.
+#                                   Every machine's own log lands under
+#                                   tests/results/ (box-check-ephemeral-<os>-
+#                                   pg<N>-<ts>.log); a combined summary
+#                                   (tests/results/box-check-fanout-<os>-
+#                                   <ts>.log) names each version's PASS/FAIL
+#                                   plus a tail of its own log, so a failure
+#                                   is attributable at a glance. Fails the
+#                                   whole run (non-zero exit) if ANY machine
+#                                   fails. Requires EPHEMERAL=1 and OS=ubuntu
+#                                   (same restriction EPHEMERAL=1 alone has —
+#                                   there is only one OS with a snapshot
+#                                   image). The persistent box stays the
+#                                   authoritative target for the final
+#                                   pre-PR run (see CLAUDE.md); fanout is for
+#                                   the inner iteration loop, on arbitrary
+#                                   cloud neighbours whose timing noise has
+#                                   not been cross-validated against the
+#                                   gate box the way the persistent box's
+#                                   thresholds were calibrated.
+#
+#   Leak-proofing in FANOUT mode (same guarantee as the single-VM path
+#   above, extended to N machines — see the deletion-guarantee comment block
+#   further down for the single-machine mechanics this builds on):
+#     - each per-version machine is its own run_one() invocation, backgrounded
+#       into its own subshell, with its OWN EXIT/INT/TERM/HUP traps and its
+#       own server_id/server_name — the exact same trap logic the single-VM
+#       path already uses, just N independent copies instead of one, each in
+#       its own process, so one machine's cleanup can never be skipped by
+#       another's success or failure.
+#     - the fanout ORCHESTRATOR (this process) additionally traps INT/TERM/
+#       HUP itself: on any of them it forwards the same signal to every
+#       still-running worker PID and waits for their own traps to finish
+#       deleting their own machines before the orchestrator itself exits —
+#       so `kill <box-check pid>` (not just `kill -9`) cleans up every
+#       machine, not only the one whose worker happened to catch the signal
+#       first.
+#     - what CANNOT be trapped: `kill -9` (SIGKILL) of the orchestrator, or
+#       of the whole process group at once, is exactly as untrappable here
+#       as it is for a single machine — no shell trap can run first. The
+#       fallback is the same one the single-VM path already documents: every
+#       fanout machine carries the identical `pgwt=ephemeral,created=<epoch>,
+#       owner=<owner>` labels tests/hetzner-sweep.sh keys off (plus a
+#       `fanout=<ts>` label for attribution), so a machine orphaned by an
+#       untrappable kill is still reaped by the sweep this script already
+#       runs at the start of every invocation, or on demand via
+#       `make hetzner-sweep`.
 #
 # Env:
 #   PGWT_BOX          ssh target for the default (Ubuntu) box, e.g. root@1.2.3.4
@@ -77,14 +136,28 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
+# shellcheck source=box-check-fanout-lib.sh
+source "$(dirname "$0")/box-check-fanout-lib.sh"
+
 OS="${OS:-ubuntu}"
 PG="${PG:-}"
 EPHEMERAL="${EPHEMERAL:-0}"
 KEEP="${KEEP:-0}"
+FANOUT="${FANOUT:-0}"
+
+if [[ "$FANOUT" == "1" ]]; then
+    [[ "$EPHEMERAL" == "1" ]] || { echo "FANOUT=1 requires EPHEMERAL=1 (fanout only makes sense across throwaway per-version machines from the gate snapshot, not the persistent \$PGWT_BOX)" >&2; exit 2; }
+    [[ "$OS" == "ubuntu" ]] || { echo "FANOUT=1 only supports OS=ubuntu (the only OS with a pgwt=gate-snapshot image so far — same restriction EPHEMERAL=1 alone already has)" >&2; exit 2; }
+fi
 
 ts=$(date +%Y%m%d-%H%M%S)
 mkdir -p tests/results
-if [[ "$EPHEMERAL" == "1" ]]; then
+if [[ "$FANOUT" == "1" ]]; then
+    # The ONE combined-summary log (issue requirement: "one combined summary
+    # at the end"). Each per-version worker gets its own separate log below
+    # (box-check-ephemeral-$OS-pg<N>-$ts.log) — never this one.
+    log="tests/results/box-check-fanout-$OS-$ts.log"
+elif [[ "$EPHEMERAL" == "1" ]]; then
     log="tests/results/box-check-ephemeral-$OS-$ts.log"
 else
     log="tests/results/box-check-$OS-$ts.log"
@@ -100,15 +173,37 @@ hcloud_token() {
 # of THIS run's own log (previously ran before $log existed and its output
 # went nowhere but the terminal). Catches a VM an earlier run leaked (crash,
 # `kill -9`, laptop sleep mid-run: nothing a trap in THIS invocation could
-# ever see).
+# ever see). Run exactly ONCE per invocation (including FANOUT=1, which
+# would otherwise race N copies of the sweep against the Hetzner API at
+# once for no benefit — one sweep already catches everything stale
+# regardless of how many machines THIS run is about to create).
 if ! tests/hetzner-sweep.sh 2>&1 | tee -a "$log"; then
     echo "box-check: hetzner-sweep.sh reported a problem (non-fatal, continuing)" | tee -a "$log" >&2
 fi
 
-server_id=""
-server_ip=""
-server_name=""
-cleanup_done=0
+# run_one PG LOG UI_LIVE_DIR [EXTRA_LABEL]
+# The entire single-machine live-tier run: (for EPHEMERAL=1) create one VM,
+# provision it, or (otherwise) resolve $PGWT_BOX*; rsync the tree; run
+# tests/run_all.sh --require-live; sync back live-UI-smoke artifacts; print
+# a summary; delete the VM (EPHEMERAL=1) unless KEEP=1. This is exactly the
+# single-run body box-check.sh has always had — the FANOUT=1 dispatch below
+# is what's new: it calls this same function once per requested PostgreSQL
+# major, each invocation backgrounded into its own subshell with its own
+# server_id/server_name/trap state (see the FANOUT design comment at the
+# top of this file), so N calls never share or clobber each other's VM
+# lifecycle. The non-FANOUT dispatch below calls it exactly once, in the
+# foreground, unchanged from every box-check.sh invocation before FANOUT=1
+# existed.
+run_one() {
+    local PG="$1"
+    local log="$2"
+    local ui_live_dir="${3:-tests/results/ui_live}"
+    local extra_label="${4:-}"
+
+    local server_id=""
+    local server_ip=""
+    local server_name=""
+    local cleanup_done=0
 
 # See the deletion-guarantee comment block at the top of this file for the
 # design. Registered (both this EXIT trap and the INT/TERM/HUP ones below)
@@ -178,6 +273,15 @@ if [[ "$EPHEMERAL" == "1" ]]; then
 
     nonce="$(date +%s)-$RANDOM"
     server_name="pgwt-dev-$nonce"
+    # FANOUT=1 runs N of these concurrently, one per PostgreSQL major — tag
+    # the name with the version so `tests/hetzner-vm.sh list` and the
+    # Hetzner console are attributable at a glance, not just N identical
+    # "pgwt-dev-<nonce>" rows. Gated on $extra_label (only the FANOUT=1
+    # dispatch below ever sets it) rather than on $PG alone, so a plain
+    # `EPHEMERAL=1 PG=13` single-machine run keeps its exact pre-FANOUT
+    # server name — the default (non-FANOUT) behaviour must not change
+    # just because a caller happened to also pass PG=.
+    [[ -n "$extra_label" ]] && server_name="pgwt-dev-$nonce-pg$PG"
     # Real bug found running this live: piping hostname's output straight
     # into `tr -c ... '-'` also converts hostname's own trailing newline
     # (not in the allow-set) into a literal trailing '-', which the outer
@@ -192,6 +296,12 @@ if [[ "$EPHEMERAL" == "1" ]]; then
     [[ -n "$owner" ]] || owner="mac"
     created_epoch=$(date +%s)
     labels="pgwt=ephemeral,created=$created_epoch,owner=$owner"
+    # FANOUT=1's own attribution label (e.g. "fanout=20260926-140501") —
+    # groups every machine one fanout invocation created, visible via
+    # `tests/hetzner-vm.sh list`. Purely additive: tests/hetzner-sweep.sh
+    # only ever keys off pgwt= and created=, so this changes nothing about
+    # sweep behaviour, only what a human sees when listing machines.
+    [[ -n "$extra_label" ]] && labels="$labels,$extra_label"
 
     echo "box-check: EPHEMERAL=1 — creating $server_name from the pgwt=gate-snapshot image (labels: $labels)" | tee -a "$log"
     # Registered here, BEFORE the create() call below, which can block for
@@ -348,19 +458,112 @@ rc=${PIPESTATUS[0]}
 # marker run_all.sh's own re-emit gates on (review item 3): a stale ui_live/
 # left over from a previous box-check must never be reported as if it were
 # this run's evidence.
-mkdir -p tests/results/ui_live
-if rsync -az --delete -e "$rsync_e" "$target:$remote_dir/tests/results/ui_live/" tests/results/ui_live/ 2>/dev/null; then
-    run_id="$(cat tests/results/ui_live/run.id 2>/dev/null || true)"
+#
+# $ui_live_dir defaults to tests/results/ui_live (unchanged for every
+# pre-FANOUT invocation); FANOUT=1 passes a per-version directory
+# (tests/results/ui_live-pg<N>) instead — N concurrent machines syncing into
+# the SAME tests/results/ui_live/ at once would race and clobber each
+# other's frames/video/summary.json.
+mkdir -p "$ui_live_dir"
+if rsync -az --delete -e "$rsync_e" "$target:$remote_dir/tests/results/ui_live/" "$ui_live_dir/" 2>/dev/null; then
+    run_id="$(cat "$ui_live_dir/run.id" 2>/dev/null || true)"
     if [[ -n "$run_id" && "$run_id" =~ ^[0-9]+$ && "$run_id" -ge "$box_check_start_epoch" ]]; then
-        echo "box-check: tests/results/ui_live/ synced back from $target (run.id=$run_id, this invocation)"
+        echo "box-check: $ui_live_dir/ synced back from $target (run.id=$run_id, this invocation)" | tee -a "$log"
     else
-        echo "box-check: tests/results/ui_live/ synced back from $target BUT run.id=${run_id:-<missing>} predates this invocation (started $box_check_start_epoch) -- STALE evidence from a previous run, the smoke likely did not complete this time"
+        echo "box-check: $ui_live_dir/ synced back from $target BUT run.id=${run_id:-<missing>} predates this invocation (started $box_check_start_epoch) -- STALE evidence from a previous run, the smoke likely did not complete this time" | tee -a "$log"
     fi
 else
-    echo "box-check: no tests/results/ui_live/ on $target (test_ui_live_smoke skipped or produced no artifacts)"
+    echo "box-check: no tests/results/ui_live/ on $target (test_ui_live_smoke skipped or produced no artifacts)" | tee -a "$log"
 fi
 
 echo
 echo "box-check ($OS, PG=${PG:-all}, EPHEMERAL=$EPHEMERAL) exit=$rc — summary:"
 tail -n 25 "$log" | sed 's/^/  /'
 exit "$rc"
+}
+
+if [[ "$FANOUT" != "1" ]]; then
+    # Unchanged from every box-check.sh invocation before FANOUT=1 existed:
+    # one call, in the foreground, this process's own exit code IS run_one's.
+    run_one "$PG" "$log" "tests/results/ui_live" ""
+fi
+
+# ── FANOUT=1: one machine per requested PostgreSQL major, in parallel ──────
+read -r -a fanout_versions <<<"$(fanout_parse_versions "$PG")"
+echo "box-check: FANOUT=1 — fanning out over PG ${fanout_versions[*]} (one machine each, from the pgwt=gate-snapshot image)" | tee -a "$log"
+
+fanout_run_label="fanout=$ts"
+fanout_pids=()
+fanout_logs=()
+fanout_done=0
+
+# Forward a signal sent to THIS process (the orchestrator) to every
+# still-running worker and wait for their own EXIT traps (each worker has
+# its own, identical to the single-machine path — see run_one's header
+# comment) to finish deleting their own machine before this process itself
+# exits. What this can NEVER catch is SIGKILL of this process (or of the
+# whole process group at once) -- see the FANOUT design comment at the top
+# of this file for why that is fundamental, not a gap in this trap, and
+# what the fallback is (the pgwt=ephemeral + created= labels every fanout
+# worker already carries, reaped by tests/hetzner-sweep.sh).
+#
+# Registered BEFORE the launch loop below (same orphan-window reasoning as
+# run_one's own single-machine trap registration, "before the network call
+# that creates the VM"): $fanout_pids is read at SIGNAL-DELIVERY time, not
+# at trap-registration time, so registering early and appending to the
+# array as each worker launches is safe — a signal that arrives mid-launch
+# still forwards to every worker started so far.
+fanout_forward_and_wait() {
+    local sig="$1"
+    [[ "$fanout_done" -eq 1 ]] && return
+    fanout_done=1
+    echo "box-check: FANOUT — received $sig, forwarding to ${#fanout_pids[@]} worker(s) and waiting for each one's own cleanup ..." | tee -a "$log"
+    kill -"$sig" "${fanout_pids[@]}" 2>/dev/null
+    wait "${fanout_pids[@]}" 2>/dev/null
+    echo "box-check: FANOUT — every worker has exited after $sig; each one's own EXIT trap has run (its machine is deleted, or KEEP=1 logged the delete command)." | tee -a "$log"
+}
+trap 'fanout_forward_and_wait INT;  exit 130' INT
+trap 'fanout_forward_and_wait TERM; exit 143' TERM
+trap 'fanout_forward_and_wait HUP;  exit 129' HUP
+
+for v in "${fanout_versions[@]}"; do
+    wlog="tests/results/box-check-ephemeral-$OS-pg$v-$ts.log"
+    : > "$wlog"
+    uidir="tests/results/ui_live-pg$v"
+    echo "box-check: FANOUT — launching PG$v worker (log: $wlog)" | tee -a "$log"
+    run_one "$v" "$wlog" "$uidir" "$fanout_run_label" &
+    fanout_pids+=("$!")
+    fanout_logs+=("$wlog")
+done
+
+fanout_rcs=()
+i=0
+for pid in "${fanout_pids[@]}"; do
+    wait "$pid"
+    fanout_rcs+=("$?")
+    i=$((i + 1))
+done
+fanout_done=1
+
+overall=$(fanout_overall_result "${fanout_rcs[@]}")
+overall_rc=$?
+
+{
+    echo
+    echo "box-check FANOUT ($OS, PG ${fanout_versions[*]}) overall=$overall"
+    i=0
+    for v in "${fanout_versions[@]}"; do
+        echo "  $(fanout_status_line "$v" "${fanout_rcs[$i]}")  log=${fanout_logs[$i]}"
+        i=$((i + 1))
+    done
+    echo
+    echo "per-version log tails (full logs at the paths above):"
+    i=0
+    for v in "${fanout_versions[@]}"; do
+        echo "--- PG$v (${fanout_logs[$i]}) ---"
+        tail -n 15 "${fanout_logs[$i]}" | sed 's/^/    /'
+        i=$((i + 1))
+    done
+} | tee -a "$log"
+
+exit "$overall_rc"
