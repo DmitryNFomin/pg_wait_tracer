@@ -376,3 +376,19 @@ chromium-version=148.0.7778.96
 # #121 regen environment: the CI snapshots job (ubuntu-latest) at the pins
 # already recorded at the top of this file — no local PNG was committed.
 
+# 2026-09-26 (#121 x #159 merge, re-pin under the container): merging master
+# (which carries #159's container-pinned rendering environment, entry above)
+# into this branch re-rendered ONLY session_timeline.png — this branch's own
+# changed cell — via workflow_dispatch update_snapshots=true on
+# agent/timeline-inverted-intervals (run 36240330467), sha256
+# 13d4577f6989d132392f54e096937fb86e3d7392608df718190c7caf778f3372. The
+# result is BYTE-IDENTICAL to the #121 entry's own baseline above (same
+# sha256), i.e. this cell has no on-canvas text sensitive to #159's font
+# fix, so the pinned container reproduces the exact same pixels as the
+# pre-pin CI run. Diffed against master's current (pre-#121) baseline: 11664
+# of 248000 px changed (ratio 0.0470), matching the #121 entry's own
+# documented ratio exactly — confirms the only difference from master is the
+# #121 interval-dropping fix, nothing new moved. All 43 other cells in the
+# artifact were left untouched (master's container-pinned bytes already in
+# the merge).
+
