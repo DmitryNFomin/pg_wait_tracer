@@ -148,11 +148,21 @@ done
 # keys" behaviour) that mismatch shows up as every one of this script's
 # eleven tabs failing at once with an opaque "WebSocket never reached
 # #status.connected" many minutes into the run -- easy to mistake for a
-# product regression. tests/provision-runner.sh already (re)scans the
-# current key on every provisioning run, so this should never fire in
-# practice; this check exists purely to turn a real recurrence into ONE
-# immediate, named failure instead of eleven confusing ones, and to fail in
-# under a second rather than after the workload/daemon/bridge startup below.
+# product regression. tests/hetzner-vm.sh/tests/provision-runner.sh already
+# (re)scan the current key at VM-creation/provisioning time, so this should
+# never fire in practice; this check exists purely to turn a real recurrence
+# into ONE immediate, named failure instead of eleven confusing ones, and to
+# fail in under a second rather than after the workload/daemon/bridge
+# startup below.
+#
+# Review finding: an earlier version of this check attributed ANY ssh
+# failure here to issue #174 -- a genuinely dead sshd, a missing
+# authorized_keys, or a network hiccup would get the same confident
+# "NOT a UI/bridge regression" misdiagnosis printed over the real error.
+# Only claim the known-hosts cause when ssh's own output actually says so
+# (its two documented strings for this exact failure); otherwise report the
+# raw failure without attributing a cause -- a check that confidently names
+# the wrong cause is worse than one that just fails.
 echo "ui_live_smoke: checking root@localhost/127.0.0.1 ssh host-key trust (issue #174)"
 ssh_hostkey_err=""
 for h in localhost 127.0.0.1; do
@@ -163,13 +173,21 @@ $ssh_out"
     fi
 done
 if [[ -n "$ssh_hostkey_err" ]]; then
-    echo "ERROR: ssh -o BatchMode=yes root@localhost failed -- this is issue #174" \
-         "(a stale ~/.ssh/known_hosts entry for the loopback host key, typically" \
-         "after a fresh boot regenerated it), NOT a UI/bridge regression." >&2
-    echo "  Fix: ssh-keygen -R localhost -f ~/.ssh/known_hosts;" \
-         "ssh-keygen -R 127.0.0.1 -f ~/.ssh/known_hosts;" \
-         "ssh-keyscan -H localhost 127.0.0.1 >> ~/.ssh/known_hosts" >&2
-    echo "  Or re-run: tests/provision-runner.sh ubuntu (its self-trust step redoes exactly this)." >&2
+    if grep -qE 'Host key verification failed|REMOTE HOST IDENTIFICATION HAS CHANGED' <<<"$ssh_hostkey_err"; then
+        echo "ERROR: ssh -o BatchMode=yes root@localhost failed -- this is issue #174" \
+             "(a stale ~/.ssh/known_hosts entry for the loopback host key, typically" \
+             "after a fresh boot regenerated it), NOT a UI/bridge regression." >&2
+        echo "  Fix: ssh-keygen -R localhost -f ~/.ssh/known_hosts;" \
+             "ssh-keygen -R 127.0.0.1 -f ~/.ssh/known_hosts;" \
+             "ssh-keyscan -H localhost 127.0.0.1 >> ~/.ssh/known_hosts" >&2
+        echo "  Or re-run: tests/provision-runner.sh ubuntu (its self-trust step redoes exactly this)." >&2
+    else
+        echo "ERROR: ssh -o BatchMode=yes root@localhost/127.0.0.1 failed before starting" \
+             "the bridge -- cause unknown, does NOT match issue #174's known-hosts" \
+             "signature (no 'Host key verification failed' / 'REMOTE HOST IDENTIFICATION" \
+             "HAS CHANGED' in ssh's output below). Check sshd, authorized_keys, and" \
+             "network reachability on this box." >&2
+    fi
     echo "$ssh_hostkey_err" >&2
     exit 1
 fi
