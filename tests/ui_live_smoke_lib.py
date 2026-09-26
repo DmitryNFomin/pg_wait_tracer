@@ -87,15 +87,19 @@ KNOWN_FAILING_TABS = {
     # settle (and now the offset sweep, issue #119) is investigated either
     # way.
     "timeline": 100,
-    # #101: TWO DIFFERENT symptoms observed under this name so far -- the
-    # executions query taking > 60s to answer under sustained --mode full
-    # capture load (panel never renders within the timeout), AND a run
-    # where tick 1 reported "no echarts instance" (the panel's own chart
-    # never mounted at all, a different failure shape). Recorded as one
-    # tracking issue for now, but this is a re-diagnose target, not a
-    # permanently-excused one: whoever picks up #101 needs to establish
-    # whether these are one root cause or two before calling it fixed.
-    "waterfall": 101,
+    # #101 (waterfall) is DELISTED. Both symptoms filed under it -- "no
+    # echarts instance" and "#waterfall-chart canvas never appeared within
+    # 60s" -- were ONE root cause, and it was never the executions query.
+    # Measured on a real --mode full capture (gate box, PG18, pgbench 4
+    # clients --rate=25): executions answers in 63 ms over 49,964
+    # executions, but the tab defaulted to rows[0] -- the NEWEST execution,
+    # which was undrawable (no events, no workers, no plan) in 40 of 40
+    # simulated live ticks. Its execution_detail is {leader:{events:[]},
+    # workers:[], plan:null}, buildWaterfallOption returns hasData:false,
+    # and the view mounts no chart, so both the per-tick check and the
+    # ready-selector wait fail. The default selection now picks the newest
+    # execution that actually has a waterfall (~45-52 of the 100 returned
+    # rows qualified at every one of those ticks).
 }
 
 
