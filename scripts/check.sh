@@ -3,7 +3,9 @@
 # Linux, no PostgreSQL, no root. This is what `make check` runs and what the
 # push guard (scripts/hooks/push-guard.sh) requires before `git push`.
 #
-#   make check        full local tier (~4 min: adds the Playwright UI suite)
+#   make check        full local tier (~2 min: the Playwright UI groups, the
+#                      chaos suite, node and go all run concurrently — see
+#                      scripts/check_parallel.sh)
 #   make check-fast   node + go + python compile only (seconds)
 #
 # Everything that needs the Linux build (C units, synthetic-data tests against
@@ -41,11 +43,18 @@ run tests/test_check_snapshot_history.sh
 step "snapshot-history guard (this branch vs origin/master)"
 run scripts/check-snapshot-history.sh
 
-step "web builder unit tests (node)"
-run node --test 'tests/web_unit/*.test.mjs'
+step "parallel-check runner self-test (synthetic jobs)"
+run tests/test_check_parallel.sh
 
-step "go bridge (skips server-backed cases without a Linux pgwt-server)"
-run bash -c 'cd web && go vet ./... && go test ./...'
+if [[ $FAST -eq 1 ]]; then
+    # Full mode runs node + go concurrently with the UI suites (below,
+    # scripts/check_parallel.sh) instead of serially here.
+    step "web builder unit tests (node)"
+    run node --test 'tests/web_unit/*.test.mjs'
+
+    step "go bridge (skips server-backed cases without a Linux pgwt-server)"
+    run bash -c 'cd web && go vet ./... && go test ./...'
+fi
 
 step "python: compile every test module"
 run python3 -m py_compile tests/*.py
@@ -67,8 +76,13 @@ if [[ $FAST -eq 0 ]]; then
     # for two `make check` runs in the SAME checkout at once (those still
     # race on .pgwt-check.stamp and tests/results/).
     #
-    #   PORT MAP (relative to PGWT_PORT_BASE):
-    #     PGWT_TEST_PORT  = base+0   test_web_ui.py:       HTTP +0/WS +1, B5 +10/+11, compare +20/+21
+    #   PORT MAP (relative to PGWT_PORT_BASE) — every group below reads these
+    #   from ONE allocation, so running them concurrently (check_parallel.sh)
+    #   is collision-free by construction, no lock needed:
+    #     PGWT_TEST_PORT  = base+0   test_web_ui.py --group main:      HTTP +0/WS +1
+    #                                --group b5:                      HTTP +10/WS +11
+    #                                --group compare:                 HTTP +20/WS +21
+    #                                --group reconnect:                HTTP +25/WS +26
     #     PGWT_CHAOS_PORT = base+30  test_web_ui_chaos.py: HTTP +30/WS +31
     #     PGWT_SNAP_PORT  = base+40  reserved for when check.sh runs the
     #                                snapshot suite (test_web_ui_snapshots.py
@@ -82,10 +96,8 @@ if [[ $FAST -eq 0 ]]; then
     export PGWT_SNAP_PORT=$((PGWT_PORT_BASE + 40))
     echo "port base: $PGWT_PORT_BASE (span $PORT_SPAN — TEST=+0 CHAOS=+30 SNAP=+40)"
 
-    step "web UI suite vs mock_server.py (Playwright)"
-    run python3 tests/test_web_ui.py
-    step "web UI chaos suite (latency jitter / reconnects)"
-    run python3 tests/test_web_ui_chaos.py
+    step "parallel: node + go + UI groups (main/b5/compare/reconnect) + chaos"
+    run scripts/check_parallel.sh
 fi
 
 if [[ $fail -ne 0 ]]; then

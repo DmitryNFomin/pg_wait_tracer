@@ -1224,11 +1224,18 @@ def test_uplot_gestures(page):
           f"N-CPUs overlay line present under the gestured camera (hlines={kinds})")
 
 
-def test_reconnection(page, mock_proc):
-    """16. WebSocket reconnects after disconnect."""
-    print("--- Test 16: Reconnection ---")
+def test_reconnection(page, mock_proc, port=None):
+    """16. WebSocket reconnects after disconnect.
 
-    page.goto(MOCK_URL)
+    port: HTTP port of the mock to reconnect against (defaults to MOCK_PORT,
+    the shared "all groups" run; the standalone `reconnect` group passes
+    RECONNECT_PORT so it doesn't collide with a concurrently-running main
+    group on MOCK_PORT).
+    """
+    print("--- Test 16: Reconnection ---")
+    port = port or MOCK_PORT
+
+    page.goto(app_url(port))
     page.wait_for_selector("#status.connected", timeout=10000)
 
     # Kill and restart mock server
@@ -1242,7 +1249,7 @@ def test_reconnection(page, mock_proc):
           f"Status shows reconnecting after disconnect: '{status}'")
 
     # Restart server
-    new_proc = start_mock_server()
+    new_proc = start_mock_server(port=port)
     page.wait_for_timeout(5000)  # Wait for reconnect (2s backoff)
 
     # Should reconnect
@@ -2957,6 +2964,12 @@ B5_PORT = MOCK_PORT + 10
 B5_URL = app_url(B5_PORT)
 COMPARE_PORT = MOCK_PORT + 20
 COMPARE_URL = app_url(COMPARE_PORT)
+# The reconnection group gets its own port (distinct from MOCK_PORT) so it
+# can run as an independent process, concurrently with the main group, when
+# invoked with `--group reconnect` (see scripts/check.sh and the PORT MAP
+# comment there: main=+0 B5=+10 compare=+20 reconnect=+25 chaos=+30).
+RECONNECT_PORT = MOCK_PORT + 25
+RECONNECT_URL = app_url(RECONNECT_PORT)
 
 
 def test_b5_sampled_shading(page):
@@ -3332,10 +3345,109 @@ def test_compare_echarts_renderer_note(page):
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 
-def main():
-    print("=== test_web_ui ===")
+# ── Group test lists (issue: parallel `make check`) ─────────────────────────
+# The four groups below (main, b5, compare, reconnect) each run against their
+# own mock server + own browser context/page + own port offset (see the PORT
+# MAP comment in scripts/check.sh), so they can run either sequentially in
+# one process (default: `python3 tests/test_web_ui.py`, unchanged for CI /
+# box-check's tests/run_all.sh) or as four separate concurrent processes
+# (`python3 tests/test_web_ui.py --group <name>`, used by scripts/check.sh).
+# Test ORDER WITHIN a group is untouched either way — only whole groups run
+# in parallel, never individual tests (state may carry across tests in the
+# same group).
+MAIN_TESTS = [
+    test_page_load,
+    test_tabs,
+    test_summary_bar,
+    test_overview_table,
+    test_events_table,
+    test_column_sorting,
+    test_drill_down,
+    test_breadcrumb_navigation,
+    test_sessions_table,
+    test_queries_table,
+    test_histogram_tab,
+    test_timeline_tab,
+    test_transitions_tab,
+    test_time_picker,
+    test_zoom_out,
+    test_auto_refresh,
+    test_chart_rendering,
+    test_concurrency_tab,
+    test_legend_hover_survives_tick,
+    # Track U Phase U2b: uPlot default renderer
+    test_uplot_legend,
+    test_uplot_gestures,
+    test_session_drill_to_timeline,
+    test_query_drill,
+    # Sprint 5.3: Exact data display tests
+    test_exact_summary_values,
+    test_exact_event_values,
+    test_exact_session_values,
+    test_exact_query_values,
+    test_timeline_bar_positions,
+    # Sprint 5.4: Regression tests
+    test_no_double_refresh,
+    test_filter_persists_across_tabs,
+    # Trust Milestone T6: transport trust
+    test_degraded_transport,
+    test_custom_range_utc_and_aas_empty_state,
+    test_reconnect_idempotent_no_leak,
+    # Track U Phase U0: error visibility (P1)
+    test_command_error_card,
+    # Track U Phase U2: the OEM investigation loop (P3/P8/P9)
+    test_aas_click_drill,
+    test_burst_row_zoom,
+    test_timeline_drag_zoom,
+    test_heatmap_cell_drill,
+    test_dfg_node_drill,
+    test_percentile_cell_pivot,
+    test_filter_bar_chips_and_badges,
+    test_histogram_dropdown_writethrough,
+    test_histogram_clear_invalidates_strip,
+    test_aas_slow_double_click,
+    test_hash_sort_clear,
+    test_rapid_hash_traversal,
+    test_url_state_roundtrip,
+    # U3 Stage 2: the three B6 analysis views.
+    test_waterfall_view,
+    test_query_to_waterfall_pivot,
+    test_scatter_view,
+    test_matrix_view,
+    test_b6_deep_links,
+]
 
-    # Start mock server
+B5_TESTS = [
+    test_b5_sampled_shading,
+    test_b5_unavailable_panel,
+    test_b5_escalate_flow,
+    test_b5_metrics_panel,
+]
+
+COMPARE_TESTS = [
+    test_compare_delta_ranking,
+    test_compare_live_offset_follow,
+    test_compare_fidelity_mismatch,
+    test_compare_url_roundtrip,
+    test_compare_baseline_predates,
+    test_compare_superseded_baseline_is_silent,
+    test_compare_baseline_failure_degrades_to_a,
+    test_compare_echarts_renderer_note,
+]
+
+
+def _run_test_list(page, guard, tests):
+    for fn in tests:
+        fn(page)
+        assert_no_console_errors(
+            page, guard, fn.__name__,
+            expect_pgwt=getattr(fn, "expect_pgwt", False))
+
+
+def run_all_groups():
+    """Default (no --group): all four groups sequentially, one shared
+    browser, exactly as before this issue — unchanged for CI / box-check
+    (tests/run_all.sh) and anyone invoking this file directly."""
     mock_proc = start_mock_server()
 
     try:
@@ -3357,72 +3469,7 @@ def main():
             # Every test is followed by a console-error assertion: any
             # console error / pageerror / unhandled rejection produced
             # while it ran fails that test.
-            tests = [
-                test_page_load,
-                test_tabs,
-                test_summary_bar,
-                test_overview_table,
-                test_events_table,
-                test_column_sorting,
-                test_drill_down,
-                test_breadcrumb_navigation,
-                test_sessions_table,
-                test_queries_table,
-                test_histogram_tab,
-                test_timeline_tab,
-                test_transitions_tab,
-                test_time_picker,
-                test_zoom_out,
-                test_auto_refresh,
-                test_chart_rendering,
-                test_concurrency_tab,
-                test_legend_hover_survives_tick,
-                # Track U Phase U2b: uPlot default renderer
-                test_uplot_legend,
-                test_uplot_gestures,
-                test_session_drill_to_timeline,
-                test_query_drill,
-                # Sprint 5.3: Exact data display tests
-                test_exact_summary_values,
-                test_exact_event_values,
-                test_exact_session_values,
-                test_exact_query_values,
-                test_timeline_bar_positions,
-                # Sprint 5.4: Regression tests
-                test_no_double_refresh,
-                test_filter_persists_across_tabs,
-                # Trust Milestone T6: transport trust
-                test_degraded_transport,
-                test_custom_range_utc_and_aas_empty_state,
-                test_reconnect_idempotent_no_leak,
-                # Track U Phase U0: error visibility (P1)
-                test_command_error_card,
-                # Track U Phase U2: the OEM investigation loop (P3/P8/P9)
-                test_aas_click_drill,
-                test_burst_row_zoom,
-                test_timeline_drag_zoom,
-                test_heatmap_cell_drill,
-                test_dfg_node_drill,
-                test_percentile_cell_pivot,
-                test_filter_bar_chips_and_badges,
-                test_histogram_dropdown_writethrough,
-                test_histogram_clear_invalidates_strip,
-                test_aas_slow_double_click,
-                test_hash_sort_clear,
-                test_rapid_hash_traversal,
-                test_url_state_roundtrip,
-                # U3 Stage 2: the three B6 analysis views.
-                test_waterfall_view,
-                test_query_to_waterfall_pivot,
-                test_scatter_view,
-                test_matrix_view,
-                test_b6_deep_links,
-            ]
-            for fn in tests:
-                fn(page)
-                assert_no_console_errors(
-                    page, guard, fn.__name__,
-                    expect_pgwt=getattr(fn, "expect_pgwt", False))
+            _run_test_list(page, guard, MAIN_TESTS)
 
             # ── Phase B5: fidelity-aware UI ───────────────────────────────────
             # A second mock in sampled fidelity with the daemon control command
@@ -3442,15 +3489,7 @@ def main():
                 b5_page = b5_ctx.new_page()
                 b5_guard = ConsoleErrorGuard(b5_page)
                 set_failure_capture(b5_page, b5_guard)
-                b5_tests = [
-                    test_b5_sampled_shading,
-                    test_b5_unavailable_panel,
-                    test_b5_escalate_flow,
-                    test_b5_metrics_panel,
-                ]
-                for fn in b5_tests:
-                    fn(b5_page)
-                    assert_no_console_errors(b5_page, b5_guard, fn.__name__)
+                _run_test_list(b5_page, b5_guard, B5_TESTS)
                 b5_ctx.close()
             finally:
                 set_failure_capture(page, guard)
@@ -3467,19 +3506,7 @@ def main():
                 compare_page = compare_ctx.new_page()
                 compare_guard = ConsoleErrorGuard(compare_page)
                 set_failure_capture(compare_page, compare_guard)
-                compare_tests = [
-                    test_compare_delta_ranking,
-                    test_compare_live_offset_follow,
-                    test_compare_fidelity_mismatch,
-                    test_compare_url_roundtrip,
-                    test_compare_baseline_predates,
-                    test_compare_superseded_baseline_is_silent,
-                    test_compare_baseline_failure_degrades_to_a,
-                    test_compare_echarts_renderer_note,
-                ]
-                for fn in compare_tests:
-                    fn(compare_page)
-                    assert_no_console_errors(compare_page, compare_guard, fn.__name__)
+                _run_test_list(compare_page, compare_guard, COMPARE_TESTS)
                 compare_ctx.close()
             finally:
                 set_failure_capture(page, guard)
@@ -3496,6 +3523,112 @@ def main():
             browser.close()
     finally:
         stop_mock_server(mock_proc)
+
+
+def run_main_group():
+    """Standalone `main` group: own mock (MOCK_PORT) + own browser."""
+    mock_proc = start_mock_server()
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            context = browser.new_context(viewport={"width": 1280, "height": 900})
+            context.add_init_script(UNHANDLED_REJECTION_HOOK)
+            page = context.new_page()
+            guard = ConsoleErrorGuard(page)
+            set_failure_capture(page, guard)
+            _run_test_list(page, guard, MAIN_TESTS)
+            browser.close()
+    finally:
+        stop_mock_server(mock_proc)
+
+
+def run_b5_group():
+    """Standalone `b5` group: own mock (B5_PORT, sampled fidelity + daemon
+    control) + own browser."""
+    b5_proc = start_mock_server(
+        extra_env={"PGWT_MOCK_FIDELITY": "sampled",
+                   "PGWT_MOCK_DAEMON": "1",
+                   "PGWT_MOCK_TIER": "sampled",
+                   "PGWT_MOCK_BUDGET_S": "300"},
+        port=B5_PORT)
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            b5_ctx = browser.new_context(viewport={"width": 1280, "height": 900})
+            b5_ctx.add_init_script(UNHANDLED_REJECTION_HOOK)
+            b5_page = b5_ctx.new_page()
+            b5_guard = ConsoleErrorGuard(b5_page)
+            set_failure_capture(b5_page, b5_guard)
+            _run_test_list(b5_page, b5_guard, B5_TESTS)
+            browser.close()
+    finally:
+        stop_mock_server(b5_proc)
+
+
+def run_compare_group():
+    """Standalone `compare` group: own mock (COMPARE_PORT) + own browser."""
+    compare_proc = start_mock_server(
+        extra_env={"PGWT_MOCK_COMPARE": "1"}, port=COMPARE_PORT)
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            compare_ctx = browser.new_context(viewport={"width": 1280, "height": 900})
+            compare_ctx.add_init_script(UNHANDLED_REJECTION_HOOK)
+            compare_page = compare_ctx.new_page()
+            compare_guard = ConsoleErrorGuard(compare_page)
+            set_failure_capture(compare_page, compare_guard)
+            _run_test_list(compare_page, compare_guard, COMPARE_TESTS)
+            browser.close()
+    finally:
+        stop_mock_server(compare_proc)
+
+
+def run_reconnect_group():
+    """Standalone `reconnect` group: own mock (RECONNECT_PORT, restarted
+    mid-test) + own browser — distinct port from the main group so both can
+    run at once."""
+    mock_proc = start_mock_server(port=RECONNECT_PORT)
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            context = browser.new_context(viewport={"width": 1280, "height": 900})
+            context.add_init_script(UNHANDLED_REJECTION_HOOK)
+            page = context.new_page()
+            guard = ConsoleErrorGuard(page)
+            set_failure_capture(page, guard)
+            mock_proc = test_reconnection(page, mock_proc, port=RECONNECT_PORT)
+            assert_no_console_errors(
+                page, guard, "test_reconnection",
+                allow=("WebSocket", "disconnected", "not connected",
+                       "Failed to load resource", "net::ERR"))
+            browser.close()
+    finally:
+        stop_mock_server(mock_proc)
+
+
+GROUPS = {
+    "main": run_main_group,
+    "b5": run_b5_group,
+    "compare": run_compare_group,
+    "reconnect": run_reconnect_group,
+}
+
+
+def main():
+    argv = sys.argv[1:]
+    if argv[:1] == ["--group"]:
+        argv = argv[1:]
+    group = argv[0] if argv else "all"
+    if group != "all" and group not in GROUPS:
+        print(f"usage: {sys.argv[0]} [--group] [{'|'.join(GROUPS)}]",
+              file=sys.stderr)
+        sys.exit(2)
+
+    print(f"=== test_web_ui ({group}) ===")
+    if group == "all":
+        run_all_groups()
+    else:
+        GROUPS[group]()
 
     print(f"\n{tests_passed}/{tests_run} tests passed")
     sys.exit(0 if tests_failed == 0 else 1)
