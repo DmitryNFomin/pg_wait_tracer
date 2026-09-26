@@ -16,20 +16,41 @@
 
 import { fmtTime, fmtTimeMs, esc } from '../format.js';
 
+/* #105: a bucket that starts before capture began has no real sample — the
+ * old code fell through to `p.max || 0` and painted a solid "0 sessions"
+ * line across it, indistinguishable from a bucket that WAS captured and
+ * genuinely idle (FEEDBACK: idle-but-captured != no data). Subtle, not loud:
+ * a quiet gray wash + dashed edge, distinct from the fidelity/escalation
+ * bands (those mean "captured but estimated"; this means "not captured at
+ * all"). */
+export const NOT_CAPTURED_BAND_COLOR = 'rgba(136, 136, 136, 0.10)';
+export const NOT_CAPTURED_BORDER = 'rgba(136, 136, 136, 0.45)';
+
 /* data: concurrency response { peaks[], bursts[], bucket_ns }
- * Returns { option, hasData, topPeaks, bursts, bucketNs }. The HTML tables are
- * left to the view's mount (cheap string templating); the row models here are
- * the pure data the templates iterate. */
-export function buildConcurrencyOption(data) {
+ * opts.captureFromNs (optional): the server's earliest captured timestamp
+ * (ctx.server.fromNs — "earliest ts in the trace"). Buckets that START
+ * before it are EXCLUDED from the plotted series (null, not 0 — ECharts
+ * leaves a gap rather than drawing through it) and covered by a labeled
+ * "Not captured" markArea, so the pre-capture span never reads as measured
+ * idle time.
+ * Returns { option, hasData, topPeaks, bursts, bucketNs, notCapturedCount }.
+ * The HTML tables are left to the view's mount (cheap string templating);
+ * the row models here are the pure data the templates iterate. */
+export function buildConcurrencyOption(data, opts) {
+    opts = opts || {};
     if (!data || !data.peaks || data.peaks.length === 0) {
-        return { option: null, hasData: false, topPeaks: [], bursts: [], bucketNs: 0 };
+        return { option: null, hasData: false, topPeaks: [], bursts: [], bucketNs: 0,
+            notCapturedCount: 0 };
     }
     const bns = data.bucket_ns || 0;
     const times = data.peaks.map(p => p.t);
-    const peakData = data.peaks.map(p => p.max || 0);
+    const captureFromNs = Number.isFinite(opts.captureFromNs) ? opts.captureFromNs : null;
+    const notCapturedCount = captureFromNs != null
+        ? times.filter(t => t < captureFromNs).length : 0;
+    const peakData = data.peaks.map((p, i) => i < notCapturedCount ? null : (p.max || 0));
     const peakEvents = data.peaks.map(p => p.event || '');
 
-    const burstPoints = (data.bursts || []).map(b => {
+    const burstsWithBucket = (data.bursts || []).map(b => {
         // Containing bucket by arithmetic (P6): peak t values are bucket
         // STARTS, so the old findIndex(p.t >= ts) was off-by-one for in-range
         // bursts (bucket AFTER the containing one) and returned -1 for any
@@ -37,14 +58,21 @@ export function buildConcurrencyOption(data) {
         const idx = bns > 0
             ? Math.floor((b.timestamp_ns - data.peaks[0].t) / bns) : 0;
         const at = Math.min(Math.max(idx, 0), data.peaks.length - 1);
-        return {
-            coord: [at, peakData[at] || b.sessions],
-            value: b.sessions, symbol: 'triangle',
-            symbolSize: Math.min(10 + b.sessions * 2, 30),
-            itemStyle: { color: '#f44' },
-            label: { show: true, formatter: b.sessions + '', color: '#fff', fontSize: 10 },
-        };
+        return { b, at };
     });
+    // #105: a burst can only ever come from a CAPTURED bucket — a burst needs
+    // real events, so one algebraically landing in the not-captured prefix
+    // would be a self-contradiction (a marker sitting inside the "Not
+    // captured" band, or a Burst Events row for a moment the chart says has
+    // no data). Drop it from BOTH the markPoint and the table below.
+    const capturedBursts = burstsWithBucket.filter(({ at }) => at >= notCapturedCount);
+    const burstPoints = capturedBursts.map(({ b, at }) => ({
+        coord: [at, peakData[at] || b.sessions],
+        value: b.sessions, symbol: 'triangle',
+        symbolSize: Math.min(10 + b.sessions * 2, 30),
+        itemStyle: { color: '#f44' },
+        label: { show: true, formatter: b.sessions + '', color: '#fff', fontSize: 10 },
+    }));
 
     const option = {
         animation: false,
@@ -59,19 +87,27 @@ export function buildConcurrencyOption(data) {
             formatter: (params) => {
                 if (!params.length) return '';
                 const idx = params[0].dataIndex;
+                const time = fmtTime(params[0].axisValue, bns);
+                if (idx < notCapturedCount) return time + '<br/>Not yet captured';
                 const ev = peakEvents[idx] || 'none';
-                return fmtTime(params[0].axisValue, bns) + '<br/>' +
+                return time + '<br/>' +
                     'Peak: <b>' + params[0].value + ' sessions</b><br/>Event: ' + esc(ev);
             },
         },
-        grid: { left: 50, right: 20, top: 50, bottom: 40 },
+        // #105: nameLocation 'middle' + a wider left margin (the matrix fix,
+        // PR #147) — the default 'end' location anchored the name text so it
+        // extended PAST the canvas left edge at 1280px, clipping the leading
+        // "S" of "Simultaneous". A vertical strip inside grid.left never
+        // collides with the tick-label column.
+        grid: { left: 66, right: 20, top: 50, bottom: 40 },
         xAxis: {
             type: 'category', data: times,
             axisLabel: { color: '#888', fontSize: 10, formatter: (v) => fmtTime(v, bns) },
             axisLine: { lineStyle: { color: '#333' } },
         },
         yAxis: {
-            type: 'value', name: 'Simultaneous Sessions',
+            type: 'value', name: 'Simultaneous Sessions', nameLocation: 'middle',
+            nameGap: 44, nameRotate: 90,
             nameTextStyle: { color: '#888', fontSize: 11 }, min: 0,
             axisLabel: { color: '#888' }, splitLine: { lineStyle: { color: '#2a2a4a' } },
         },
@@ -81,13 +117,28 @@ export function buildConcurrencyOption(data) {
             lineStyle: { color: '#f8a', width: 2 }, itemStyle: { color: '#f8a' },
             symbol: 'none',
             markPoint: burstPoints.length > 0 ? { data: burstPoints } : undefined,
+            markArea: notCapturedCount > 0 ? {
+                silent: true,
+                label: { show: true, position: 'insideTop', color: '#999',
+                    fontSize: 10, formatter: 'Not captured' },
+                data: [[
+                    { xAxis: 0, itemStyle: { color: NOT_CAPTURED_BAND_COLOR,
+                        borderColor: NOT_CAPTURED_BORDER, borderWidth: 1,
+                        borderType: 'dashed' } },
+                    { xAxis: notCapturedCount - 1 },
+                ]],
+            } : undefined,
         }],
     };
 
-    const topPeaks = data.peaks.filter(p => p.max > 1)
+    // #105: a not-captured bucket can never be a "top peak" — excluding it
+    // from the line but leaving it eligible for this table would have the
+    // chart and the table disagree about whether that moment was measured.
+    const topPeaks = data.peaks.filter((p, i) => i >= notCapturedCount && p.max > 1)
         .sort((a, b) => b.max - a.max).slice(0, 10);
 
-    return { option, hasData: true, topPeaks, bursts: data.bursts || [], bucketNs: bns };
+    return { option, hasData: true, topPeaks,
+        bursts: capturedBursts.map(({ b }) => b), bucketNs: bns, notCapturedCount };
 }
 
 /* P3 wire 2: the row's zoom-intent attributes. Bursts are 4+ sessions inside

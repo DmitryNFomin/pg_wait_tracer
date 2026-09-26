@@ -63,8 +63,11 @@ export const states = {
         },
     },
     'dense-bursts': {
-        description: '300 buckets with bursts early, mid-storm and in the FINAL bucket — the last one clamped to bucket 0 before U0 (P6).',
-        tags: ['ALIGNMENT', 'OCCLUSION'],
+        description: '300 buckets with bursts early/mid/final (P6); first 10 buckets predate capture (#105), a labeled band.',
+        tags: ['ALIGNMENT', 'OCCLUSION', 'FEEDBACK'],
+        // #105: captureFromNs sits before the first burst (bucket 30) — the
+        // masked prefix never collides with a real (captured) burst marker.
+        opts: { captureFromNs: BASE_NS + 10 * B12 },
         data: denseData(),
     },
     'burst-final-bucket': {
@@ -84,8 +87,11 @@ export const states = {
         },
     },
     'one-huge-peak': {
-        description: 'One 400-session peak over a 1–3 floor: y-axis squashes every normal bucket flat.',
-        tags: ['HIERARCHY'],
+        description: 'One 400-session peak over a 1–3 floor (y-axis squashes every normal bucket flat) ' +
+            'PLUS the first quarter of the window predates capture (#105): a labeled gray band, ' +
+            'not a painted "0 sessions" line.',
+        tags: ['HIERARCHY', 'FEEDBACK'],
+        opts: { captureFromNs: BASE_NS + 15 * B12 },
         data: {
             bucket_ns: B12,
             peaks: (() => {

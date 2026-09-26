@@ -137,3 +137,48 @@ test('selector model: empty input -> empty model, no crash', () => {
     assert.deepEqual(m.allEvents, []);
     assert.deepEqual(m.eventsByClass, {});
 });
+
+/* #105: the legend used to be `type: 'continuous'` — a bare gradient bar with
+ * no numbers (Matrix's piecewise legend, on the same screen, always shows
+ * numeric bucket ranges). Piecewise buckets always draw their own label. */
+test('visualMap legend is piecewise with numeric bucket labels (#105)', () => {
+    const { option } = buildHeatmapOption(heatmap());
+    assert.equal(option.visualMap.type, 'piecewise');
+    assert.ok(option.visualMap.splitNumber > 0);
+    assert.equal(option.visualMap.formatter(Math.log1p(4)), '4');
+    assert.equal(option.visualMap.formatter(Math.log1p(4), Math.log1p(9)), '4–9');
+});
+
+/* #105: buckets before capture began must never look like captured, empty
+ * (zero-event) time — the server already omits their cells (sparse grid),
+ * but a bare blank region is ambiguous. A labeled markArea on a dedicated
+ * silent series makes "not captured" explicit. */
+test('captureFromNs: buckets before it are counted and get a labeled markArea', () => {
+    const h = heatmap(); // times: [1000, 2000, 3000], bucket_ns 1e9
+    const bare = buildHeatmapOption(h);
+    assert.equal(bare.notCapturedCount, 0);
+    assert.equal(bare.option.series.length, 1);
+    assert.equal(bare.option.series[0].type, 'heatmap');
+
+    const m = buildHeatmapOption(h, { captureFromNs: 2500 });
+    assert.equal(m.notCapturedCount, 2);              // t=1000, 2000 < 2500
+    assert.equal(m.option.series.length, 2);
+    // series[0].type === 'heatmap' is load-bearing (tests/ui_live_smoke.py,
+    // tests/test_web_ui.py both assert it directly) — the annotation series
+    // rides LAST, dataless, and carries the markArea; the heatmap series
+    // (and its cell data) keeps its index and is otherwise untouched.
+    assert.equal(m.option.series[0].type, 'heatmap');
+    assert.deepEqual(m.option.series[0].data, bare.option.series[0].data);
+    const anno = m.option.series[1];
+    assert.equal(anno.type, 'line');
+    assert.deepEqual(anno.data, []);
+    assert.equal(anno.markArea.data[0][0].xAxis, 0);
+    assert.equal(anno.markArea.data[0][1].xAxis, 1);
+    assert.equal(anno.markArea.label.formatter, 'Not captured');
+});
+
+test('captureFromNs before every bucket -> no exclusion, no annotation series', () => {
+    const m = buildHeatmapOption(heatmap(), { captureFromNs: 0 });
+    assert.equal(m.notCapturedCount, 0);
+    assert.equal(m.option.series.length, 1);
+});

@@ -964,15 +964,22 @@ def _handle_request_inner(cmd, req_id, msg):
         ]}
 
     if cmd == "concurrency":
+        # #105: anchored at _FROM_NS (like _CANNED["heatmap"]'s times[]) — an
+        # unrelated hardcoded epoch here used to predate _FROM_NS entirely,
+        # so the client's new "buckets before capture began" check (which
+        # compares against info.from_ns = _FROM_NS) marked every bucket
+        # not-captured and blanked the whole live Concurrency tab.
         nb = msg.get("num_buckets", 60)
-        peaks = [{"t": 1711936000000000000 + i * 60000000000,
-                  "t_ms": (1711936000000000000 + i * 60000000000) // 1000000,
+        peaks = [{"t": _FROM_NS + i * 60000000000,
+                  "t_ms": (_FROM_NS + i * 60000000000) // 1000000,
                   "max": 3 + (i % 5), "event": "LWLock:BufferMapping"} for i in range(nb)]
         bursts = [
-            {"timestamp_ns": 1711936180000000000, "timestamp_ms": 1711936180000,
+            {"timestamp_ns": _FROM_NS + 180000000000,
+             "timestamp_ms": (_FROM_NS + 180000000000) // 1000000,
              "event": "LWLock:BufferMapping", "sessions": 8,
              "pids": [1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008]},
-            {"timestamp_ns": 1711936300000000000, "timestamp_ms": 1711936300000,
+            {"timestamp_ns": _FROM_NS + 300000000000,
+             "timestamp_ms": (_FROM_NS + 300000000000) // 1000000,
              "event": "IO:DataFileRead", "sessions": 5,
              "pids": [1001, 1003, 1005, 1007, 1009]},
         ]
