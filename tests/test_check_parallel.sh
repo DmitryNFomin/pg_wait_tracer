@@ -109,6 +109,104 @@ lines=$(wc -l < "$tracker")
 check $([[ "$lines" -eq 6 ]]; echo $?) "cap=1: all 3 jobs' start+end markers were written (6 lines)"
 check $serialized "cap=1: every job's start is immediately followed by its OWN end (no interleaving)"
 
+# ── 5. The live-log hint is printed before jobs run (review: with all output
+#      buffered until the end, a hang looks identical to normal progress —
+#      say where to look while it's still running). ─────────────────────────
+JOB_NAMES=(a b)
+JOB_CMDS=("echo hi-a" "echo hi-b")
+CAP=2
+RESULTS_DIR="$WORK/hint"
+out=$(run_parallel_jobs)
+contains "$out" "tail -f $WORK/hint"; check $? "hint: prints the results dir with a tail -f follow hint"
+
+# ── 6-10. Bypass suite (spirit of #183): a gate that cannot see its own job
+#      list must refuse, never approve. Each of these is a way a suite could
+#      "never start" yet never be reported as failed either (invisible, not
+#      even CRASHED) — or deadlock forever. Every case must exit non-zero,
+#      print nothing claiming PASS, and (where applicable) create no results. ─
+
+# 6. Empty job list.
+JOB_NAMES=()
+JOB_CMDS=()
+CAP=3
+RESULTS_DIR="$WORK/empty"
+out=$(run_parallel_jobs 2>&1); ec=$?
+check $([[ $ec -ne 0 ]]; echo $?) "bypass: empty JOB_NAMES refuses (non-zero)"
+contains "$out" "PASS"; check $([[ $? -ne 0 ]]; echo $?) "bypass: empty JOB_NAMES never claims a PASS"
+
+# 7. JOB_NAMES/JOB_CMDS length mismatch — a dropped command would otherwise
+#    just be skipped by the `for i in "${!JOB_NAMES[@]}"` loop: it never runs
+#    and is never in the report, so the run could still say PASS.
+JOB_NAMES=(a b)
+JOB_CMDS=("echo hi-a" "echo hi-b" "echo hi-c")
+CAP=3
+RESULTS_DIR="$WORK/mismatch"
+out=$(run_parallel_jobs 2>&1); ec=$?
+check $([[ $ec -ne 0 ]]; echo $?) "bypass: JOB_NAMES/JOB_CMDS length mismatch refuses"
+contains "$out" "PARALLEL CHECK: PASS"; check $([[ $? -ne 0 ]]; echo $?) "bypass: mismatch never claims PARALLEL CHECK: PASS"
+[[ -d "$WORK/mismatch" ]]; check $([[ $? -ne 0 ]]; echo $?) "bypass: mismatch never even creates RESULTS_DIR (refused up front)"
+
+# 8. An empty command string: `bash -c ""` exits 0, which would otherwise be
+#    reported as SUITE PASSED without checking anything.
+JOB_NAMES=(a empty_cmd)
+JOB_CMDS=("echo hi-a" "")
+CAP=3
+RESULTS_DIR="$WORK/emptycmd"
+out=$(run_parallel_jobs 2>&1); ec=$?
+check $([[ $ec -ne 0 ]]; echo $?) "bypass: an empty command string refuses"
+contains "$out" "SUITE PASSED: empty_cmd"; check $([[ $? -ne 0 ]]; echo $?) "bypass: the empty-command job is never reported PASSED"
+
+# 9. CAP=0 would deadlock (the semaphore starts with zero slots, so the very
+#    first `read -u 8` blocks forever) — refuse instead of hanging `make
+#    check`. Run in a fresh `bash -c` under `timeout` so a regression that
+#    reintroduces the deadlock fails this test instead of hanging it forever.
+out=$(timeout 5 bash -c "source '$REPO_ROOT/scripts/lib/parallel_runner.sh'; JOB_NAMES=(a); JOB_CMDS=('echo hi-a'); CAP=0; RESULTS_DIR='$WORK/cap0'; run_parallel_jobs" 2>&1); ec=$?
+check $([[ $ec -eq 1 ]]; echo $?) "bypass: CAP=0 refuses immediately (not: times out deadlocked)"
+
+# 10. A non-integer CAP (e.g. an unset/mistyped env var) — same refusal path.
+JOB_NAMES=(a)
+JOB_CMDS=("echo hi-a")
+CAP="not-a-number"
+RESULTS_DIR="$WORK/capnan"
+out=$(run_parallel_jobs 2>&1); ec=$?
+check $([[ $ec -ne 0 ]]; echo $?) "bypass: a non-integer CAP refuses"
+
+# 11. mkfifo failing (e.g. a TMPDIR that doesn't support FIFOs) must refuse
+#     loudly, not fall through to `exec 8<>` silently opening a plain file —
+#     which would make the semaphore stop blocking (every job launches at
+#     once) with no diagnostic at all. Shadow the external `mkfifo` command
+#     with a function of the same name: bash resolves that before PATH.
+JOB_NAMES=(a)
+JOB_CMDS=("echo hi-a")
+CAP=1
+RESULTS_DIR="$WORK/mkfifofail"
+mkfifo() { return 1; }
+out=$(run_parallel_jobs 2>&1); ec=$?
+unset -f mkfifo
+check $([[ $ec -ne 0 ]]; echo $?) "bypass: a failing mkfifo refuses instead of degrading silently"
+contains "$out" "mkfifo failed"; check $? "bypass: the mkfifo failure names itself in the refusal message"
+
+# ── 12. Two sequential calls with DIFFERENT RESULTS_DIR values (the pattern
+#      scripts/check_parallel.sh now uses: a Phase 1 pool, then a solo Phase 2
+#      for the one contention-sensitive suite) must not let the second call's
+#      `rm -rf "$RESULTS_DIR"` clobber the first call's logs. ───────────────
+JOB_NAMES=(p1a p1b)
+JOB_CMDS=("echo phase1-a" "echo phase1-b")
+CAP=2
+RESULTS_DIR="$WORK/phase1"
+run_parallel_jobs >/dev/null 2>&1
+
+JOB_NAMES=(p2)
+JOB_CMDS=("echo phase2")
+CAP=1
+RESULTS_DIR="$WORK/phase2"
+run_parallel_jobs >/dev/null 2>&1
+
+[[ -f "$WORK/phase1/p1a.log" && -f "$WORK/phase1/p1b.log" ]]
+check $? "two-phase: phase 1's logs survive a later call with a different RESULTS_DIR"
+[[ -f "$WORK/phase2/p2.log" ]]
+check $? "two-phase: phase 2's own log exists too"
+
 echo
 echo "$passed/$((passed + failed)) passed"
 exit $((failed > 0 ? 1 : 0))
