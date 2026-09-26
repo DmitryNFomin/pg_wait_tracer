@@ -56,6 +56,7 @@ import {
 } from '../lib/builders/table-configs.js';
 import { esc } from '../lib/format.js';
 import { createRenderTracker, createReadyGate } from './render-settle.mjs';
+import { quantizeCellHeight } from './cell-footprint.mjs';
 
 const CHART_W = 620;
 const CHART_H = 280;
@@ -94,6 +95,19 @@ const tickHooks = {};
 const readyGate = createReadyGate();
 const settleTrackers = new WeakMap();
 
+/* #122: pin `cell`'s own height to an integer CSS px once its content has
+ * settled — the quantization POLICY (round up, why, unit-tested) lives in
+ * the pure ./cell-footprint.mjs; this is only the DOM glue, same split as
+ * the render-settle tracking above. Clearing the inline height before
+ * measuring re-derives the TRUE natural height each time (needed for
+ * tick-replay cells, whose content can resize between ticks).
+ */
+function snapCellFootprint(cell) {
+    cell.style.height = '';
+    const h = cell.getBoundingClientRect().height;
+    cell.style.height = quantizeCellHeight(h) + 'px';
+}
+
 /* `el` is any node inside the cell (the chart/plot host div). */
 function trackerFor(el) {
     const cell = el.classList.contains('cell') ? el : el.closest('.cell');
@@ -108,6 +122,7 @@ function trackerFor(el) {
             },
             settle() {
                 if (!tracker.settle()) return; // stray/superseded completion
+                snapCellFootprint(cell);
                 cell.dataset.settled = '1';
                 readyGate.resolvePending();
                 if (readyGate.isReady) document.body.dataset.galleryReady = '1';
@@ -604,6 +619,10 @@ function renderCell(grid, entry) {
         err.textContent = 'RENDER FAILED: ' + e.message;
         cell.classList.add('failed');
     }
+    // #122: chart cells get re-pinned on their async 'finished'/draw settle
+    // (see trackerFor), but a plain HTML cell (table/panel, no chart) never
+    // fires one — its content is already final here, synchronously.
+    snapCellFootprint(cell);
 }
 
 export function main() {
