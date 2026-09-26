@@ -3,8 +3,9 @@
 # Linux, no PostgreSQL, no root. This is what `make check` runs and what the
 # push guard (scripts/hooks/push-guard.sh) requires before `git push`.
 #
-#   make check        full local tier (~2 min: the Playwright UI groups, the
-#                      chaos suite, node and go all run concurrently — see
+#   make check        full local tier (~3 min on this Mac, down from ~4.5 min
+#                      serial: the Playwright UI groups, the chaos suite,
+#                      node and go all run concurrently — see
 #                      scripts/check_parallel.sh)
 #   make check-fast   node + go + python compile only (seconds)
 #

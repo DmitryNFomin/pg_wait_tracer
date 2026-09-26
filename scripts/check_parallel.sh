@@ -13,10 +13,12 @@
 # Concurrency is capped (PGWT_CHECK_PARALLEL_CAP, default 7 = uncapped: all
 # jobs at once). 5 of the 7 jobs launch a headless Chromium; CLAUDE.md warns
 # this Mac is memory-constrained and has OOM-killed long runs before, so this
-# was measured, not assumed: all 7 jobs running at once peaked at ~2.6GB RSS
-# summed across every chromium/node/python3/go process on this machine (32GB
-# total) — comfortable, so the default is uncapped. Override to a lower
-# number (e.g. PGWT_CHECK_PARALLEL_CAP=4) on a smaller machine.
+# was measured, not assumed: 5 consecutive full `make check` runs with all 7
+# jobs at once (issue: parallel `make check`) peaked at 2.87-2.96GB RSS summed
+# over the whole check.sh process tree (every chromium/node/python3/go
+# descendant, sampled once/second) on a 32GB Mac — comfortable, so the
+# default is uncapped. Override to a lower number (e.g.
+# PGWT_CHECK_PARALLEL_CAP=4) on a smaller machine.
 #
 # Ordering WITHIN a job's own test list is untouched: this only parallelizes
 # whole, already-isolated suites/groups against each other. The aggregation
