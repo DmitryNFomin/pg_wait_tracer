@@ -86,12 +86,18 @@ judges. It writes no feature code itself for anything bigger than a one-liner.
   the issue tracker holds the detail, and a link is enough.
 - **Splitting**: one roadmap item = one issue = one branch = one implementer.
   Split only along an independent seam (disjoint files AND disjoint tests);
-  never split a shared file; at most **2 tasks in flight**. Before spawning,
-  list the files the task will touch and compare them against every in-flight
-  branch — an overlap is refused up front, not discovered at merge (2026-09-25:
-  two branches both edited `tests/test_durability.c`, git merged them silently
-  and the build broke). **At most ONE branch touching `web/` at a time**: UI
-  branches collide on snapshot baselines and `tests/web_snapshots/VERSION` by
+  never split a shared file; at most **three tasks actively implementing**
+  (an agent idling while CI, `box-check`, or a review round runs does not
+  count against the three — only agents actually writing/running code do).
+  This is safe because `make check` on this Mac is now serialized machine-wide
+  by `scripts/check-lock.sh` (the `check:` Makefile target): a third agent
+  queues for the lock instead of piling a third concurrent Playwright/chaos
+  run onto the same laptop. Before spawning, list the files the task will
+  touch and compare them against every in-flight branch — an overlap is
+  refused up front, not discovered at merge (2026-09-25: two branches both
+  edited `tests/test_durability.c`, git merged them silently and the build
+  broke). **At most ONE branch touching `web/` at a time**: UI branches
+  collide on snapshot baselines and `tests/web_snapshots/VERSION` by
   construction, and each collision costs a manual merge plus a regeneration. Anything over ~a
   day of work goes to a `Plan` agent first; its steps run sequentially unless
   the plan shows them independent.
