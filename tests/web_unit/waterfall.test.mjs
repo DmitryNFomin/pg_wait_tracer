@@ -2,7 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
     PLAN_COLOR, buildExecutionsModel, buildWaterfallOption,
-    buildWaterfallReadout, waterfallRenderItem, waterfallTooltipFormatter,
+    buildWaterfallReadout, executionHasDetail, pickDefaultExecution,
+    waterfallRenderItem, waterfallTooltipFormatter,
 } from '../../web/static/lib/builders/waterfall.js';
 import { eventColor, fmtTimeNs } from '../../web/static/lib/format.js';
 
@@ -130,4 +131,76 @@ test('empty detail stays empty without invented count', () => {
     assert.equal(m.hasData, false);
     assert.equal(m.option, null);
     assert.equal(m.total_count, 0);
+});
+
+/* ── issue #101: which execution the panel opens on ─────────────────────────
+ *
+ * Rows and the empty detail below are verbatim shapes from a real --mode full
+ * capture on the gate box (pgbench 4 clients, --rate=25, PG18): the newest
+ * execution is a microsecond-scale statement with no events, no workers and
+ * no plan, and its execution_detail comes back with an empty leader lane.
+ * Defaulting to rows[0] left the waterfall with nothing to draw, so the view
+ * mounted no ECharts instance at all — the live-UI smoke's "no echarts
+ * instance" / "#waterfall-chart canvas never appeared" failure.
+ */
+const LIVE_ROWS = [
+    // newest: 4.1 us, nothing recorded inside it
+    { pid: 7241, query_id: '6097083398544187049',
+      start_ns: '1790342322836263503', end_ns: '1790342322836267630',
+      duration_ms: 0.004127, plan_ms: null, n_events: 0, n_workers: 0,
+      in_progress: false, started_before_window: false },
+    { pid: 7244, query_id: '6097083398544187049',
+      start_ns: '1790342321473531618', end_ns: '1790342321473541937',
+      duration_ms: 0.010319, plan_ms: null, n_events: 0, n_workers: 0,
+      in_progress: false, started_before_window: false },
+    // first row that actually has a waterfall
+    { pid: 7240, query_id: '3886912043147135675',
+      start_ns: '1790342321423302579', end_ns: '1790342321423342733',
+      duration_ms: 0.040154, plan_ms: 0.012, n_events: 2, n_workers: 0,
+      in_progress: false, started_before_window: false },
+];
+
+const EMPTY_DETAIL = {
+    query_id: '6097083398544187049',
+    leader: { pid: 7241, query_id: '6097083398544187049', events: [],
+              total_count: 0, truncated: false },
+    workers: [], plan: null,
+    total_count: 0, kept_count: 0, truncated: false,
+};
+
+test('an execution with no events, workers or plan has no waterfall to draw', () => {
+    assert.equal(executionHasDetail(LIVE_ROWS[0]), false);
+    assert.equal(executionHasDetail(LIVE_ROWS[2]), true);
+    assert.equal(executionHasDetail(null), false);
+    // and that is exactly what the builder says about its detail payload
+    const m = buildWaterfallOption(EMPTY_DETAIL, {
+        executionStart: LIVE_ROWS[0].start_ns,
+        executionEnd: LIVE_ROWS[0].end_ns,
+    });
+    assert.equal(m.hasData, false);
+    assert.equal(m.option, null);
+});
+
+test('default selection skips the newest empty executions to one with data', () => {
+    const chosen = pickDefaultExecution(LIVE_ROWS);
+    assert.equal(chosen, LIVE_ROWS[2]);
+    assert.equal(executionHasDetail(chosen), true);
+});
+
+test('default selection prefers events, then workers, then a plan phase', () => {
+    const planOnly = { pid: 1, n_events: 0, n_workers: 0, plan_ms: 1.5 };
+    const workerOnly = { pid: 2, n_events: 0, n_workers: 2, plan_ms: null };
+    const withEvents = { pid: 3, n_events: 4, n_workers: 0, plan_ms: null };
+    const bare = { pid: 4, n_events: 0, n_workers: 0, plan_ms: null };
+    assert.equal(pickDefaultExecution([bare, planOnly, workerOnly, withEvents]),
+                 withEvents);
+    assert.equal(pickDefaultExecution([bare, planOnly, workerOnly]), workerOnly);
+    assert.equal(pickDefaultExecution([bare, planOnly]), planOnly);
+});
+
+test('default selection falls back to the newest row when nothing is drawable', () => {
+    const rows = [LIVE_ROWS[0], LIVE_ROWS[1]];
+    assert.equal(pickDefaultExecution(rows), rows[0]);
+    assert.equal(pickDefaultExecution([]), null);
+    assert.equal(pickDefaultExecution(null), null);
 });

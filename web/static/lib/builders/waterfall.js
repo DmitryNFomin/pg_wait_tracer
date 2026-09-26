@@ -64,6 +64,49 @@ export function buildExecutionsModel(data, selected) {
     };
 }
 
+function count(v) {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : 0;
+}
+
+/* Does this execution row have a waterfall to draw?
+ *
+ * buildWaterfallOption() only produces a chart when execution_detail comes
+ * back with at least one bar: a leader wait event, a parallel-worker event,
+ * or the plan phase. The executions row already reports all three
+ * (n_events / n_workers / plan_ms), so the selector can tell before asking.
+ */
+export function executionHasDetail(row) {
+    if (!row) return false;
+    return count(row.n_events) > 0 || count(row.n_workers) > 0 ||
+        row.plan_ms != null;
+}
+
+/* Which execution the waterfall opens on when the user has not picked one.
+ *
+ * NOT simply rows[0]. Measured on a real `--mode full` capture (issue #101,
+ * 40 simulated live ticks over a 3-minute pgbench trace): the newest
+ * execution was drawable in 0 of 40 ticks. At pgbench rates most executions
+ * are microsecond-scale statements that never change wait state, so the
+ * newest row's execution_detail answers {leader:{events:[]}, workers:[],
+ * plan:null} — buildWaterfallOption returns hasData:false, the view mounts
+ * no ECharts instance, and the panel sits on "No execution events captured"
+ * forever. About half of the 100 returned rows WERE drawable in every one of
+ * those ticks, with the first drawable row at index 1-3.
+ *
+ * So: the newest execution that actually has something to show, preferring
+ * one with real wait events over a worker-only or plan-only row. When
+ * nothing in the page qualifies we still return the newest row — the empty
+ * state is then the honest answer, not a hidden failure.
+ */
+export function pickDefaultExecution(rows) {
+    if (!rows || !rows.length) return null;
+    return rows.find(r => count(r.n_events) > 0) ||
+        rows.find(r => count(r.n_workers) > 0) ||
+        rows.find(r => r.plan_ms != null) ||
+        rows[0];
+}
+
 export function waterfallRenderItem(params, api) {
     const start = api.coord([api.value(0), api.value(2)]);
     const end = api.coord([api.value(1), api.value(2)]);
