@@ -56,3 +56,35 @@ agent/transitions-real-workload (run 36241695209):
   (git diff against its merge-base confirms it); the other 42 baselines in
   the artifact were left at master's container-pinned bytes already in
   the merge.
+
+2026-09-26 (#107 x #122 merge, re-regenerate the two new gallery cells
+under isolated capture): merging master's #122 gallery-cell-isolation fix
+(see history/2026-09-26-122-gallery-cell-isolation.md, PR #179) produced
+no binary conflict on this branch's two ADDED cells (git has no prior
+version of them to conflict with), so they stayed at this branch's
+pre-#122 bytes after the merge — but the real `snapshots` CI run on the
+merged commit (run 36267887359) then FAILED the gate on exactly those two
+cells: gallery/transitions-idle-loop-dominant (0.0097 > 0.002, 3703/382850
+px) and gallery/transitions-idle-loop-hidden (0.0094 > 0.002, 3490/372450
+px). Both cells' bytes had been captured by the OLD, pre-isolation
+mechanism (cropped out of the shared, every-fixture gallery page) at
+regen time, before #122's per-cell isolated-page capture existed; every
+OTHER cell in the same failing run passed at an exact 0.0000, confirming
+this is specifically the capture-mechanism change, not fixture drift.
+Regenerated both via workflow_dispatch update_snapshots=true on this
+branch, now merged with master (run 36268854503), sha256-verified against
+the downloaded artifact before committing:
+  gallery/transitions-idle-loop-dominant.png (sha256
+  e70ae534...9f42313d3): diffs 0.97% against the pre-merge bytes above
+  (3703/382850 px), localized to a bottom band of the cell (bbox y=534-588
+  of 589 total rows) — not a whole-image shift or any change to the DFG
+  content itself.
+  gallery/transitions-idle-loop-hidden.png (sha256 7f5f4667...bbdd63068bf2):
+  diffs 0.94% (3490/372450 px), same bottom-band localization (bbox
+  y=534-572 of 573 total rows).
+Both localized-to-the-bottom-edge diffs match the isolated-capture
+mechanism's own documented effects (auto-scroll-into-view landing and
+absolute-page-Y raster hinting, both edge-of-cell effects) rather than any
+new, unexplained geometry or DFG-node/edge change. transitions_dfg.png,
+transition_matrix.png (this branch's other two, pre-existing cells) are
+untouched by #122 and keep the bytes from the entry above.
