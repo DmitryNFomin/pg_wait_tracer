@@ -190,8 +190,14 @@ gh workflow run CI --ref <your-branch> -f update_snapshots=true
 gh run watch                              # wait for the snapshots job
 gh run download <run-id> -n snapshot-baselines -D tests/web_snapshots/
 git add tests/web_snapshots/*.png
+$EDITOR tests/web_snapshots/history/$(date +%F)-<issue>-<slug>.md   # see VERSION RULE 3
+git add tests/web_snapshots/history/*.md
 git commit -m "B4: update visual-snapshot baselines (<why>)"
 ```
+
+Add the history entry and the PNG(s) in the SAME commit —
+`scripts/check-snapshot-history.sh` (`make check`) checks each commit
+individually and refuses a commit that changes a baseline PNG without one.
 
 Then the normal `snapshots` job (compare mode) on the PR validates them.
 
