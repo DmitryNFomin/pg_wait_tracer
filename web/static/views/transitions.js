@@ -48,6 +48,13 @@ export function createTransitionsView() {
     let dataRef = null;    // current transitions payload (slider/resize re-render)
     let ctxRef = null;     // last ctx (slider rAF + click pivot need it)
     let threshold = DEFAULT_THRESHOLD;  // survives refreshes AND tab switches
+    // Issue #107 / owner decision 2026-09-17 "option B": default ON — hide
+    // Client:ClientRead edges so the volume-ranking threshold above ranks
+    // Lock/IO/Timeout edges against each other, not against the idle loop.
+    // Bookmarkable like `sort` (getHideIdle/setHideIdle below, read/written
+    // via the URL hash in app.js — capability-detected, same pattern as
+    // getSelection/selectExecution).
+    let hideIdle = true;
     let dragPos = {};      // nodeName -> {x,y}: user-dragged overrides (P5)
     let builtPos = {};     // nodeName -> {x,y} as last BUILT (drag detection)
     let down = null;       // pending node mousedown {name, x, y} (drag capture)
@@ -165,16 +172,36 @@ export function createTransitionsView() {
         });
     }
 
+    /* FEEDBACK (docs/VISUAL_CHECKLIST.md): the total label must say WHY the
+     * graph is smaller than the server's raw total when idle waits are
+     * hidden — a silently-shrunk graph and a genuinely quiet window must not
+     * read the same. */
+    function updateTotalLabel(hiddenIdleValue) {
+        const el = document.getElementById('dfg-total');
+        if (!el || !dataRef) return;
+        const total = Number(dataRef.total) || 0;
+        let text = total.toLocaleString() + ' transitions';
+        if (hideIdle && hiddenIdleValue > 0) {
+            text += ' (' + Number(hiddenIdleValue).toLocaleString() + ' idle hidden)';
+        }
+        el.textContent = text;
+    }
+
     function renderDFG(threshold_) {
         const host = document.getElementById('dfg-container');
         if (!host || !dataRef) return;
         captureDragPositions();   // P5: read back BEFORE re-layout
-        const { option, visibleCount } =
-            buildTransitionsOption(dataRef, threshold_, dfgDims(), dragPos);
+        const { option, visibleCount, hiddenIdleLinks, hiddenIdleValue } =
+            buildTransitionsOption(dataRef, threshold_, dfgDims(), dragPos, hideIdle);
+        updateTotalLabel(hiddenIdleValue);
         if (visibleCount === 0) {
             disposeChart();
-            host.innerHTML =
-                '<p style="color:#666;padding:40px;text-align:center">No transitions above threshold</p>';
+            host.innerHTML = hiddenIdleLinks > 0
+                ? '<p style="color:#666;padding:40px;text-align:center">No non-idle transitions above ' +
+                    'threshold (' + hiddenIdleLinks.toLocaleString() + ' idle transition edge' +
+                    (hiddenIdleLinks === 1 ? '' : 's') +
+                    ' hidden — turn off "Hide idle waits" to see them)</p>'
+                : '<p style="color:#666;padding:40px;text-align:center">No transitions above threshold</p>';
             return;
         }
         if (!chart) {
@@ -200,6 +227,10 @@ export function createTransitionsView() {
                     threshold + '" style="width:200px;accent-color:#4fc3f7">' +
                 '<span id="dfg-slider-val" style="color:#888;font-size:12px">' +
                     threshold + '%</span>' +
+                '<label style="color:#888;font-size:12px;display:flex;align-items:center;' +
+                    'gap:4px;margin-left:12px;cursor:pointer">' +
+                    '<input type="checkbox" id="dfg-hide-idle"' + (hideIdle ? ' checked' : '') + '>' +
+                    'Hide idle waits</label>' +
                 '<span id="dfg-total" style="color:#666;font-size:11px;margin-left:8px"></span>' +
             '</div>' +
             '<div id="dfg-container" style="width:100%;height:550px;background:#1a1a2e"></div>' +
@@ -215,21 +246,42 @@ export function createTransitionsView() {
             sliderVal.textContent = slider.value + '%';
             scheduleRender(false);
         });
+
+        const hideIdleCb = document.getElementById('dfg-hide-idle');
+        hideIdleCb.addEventListener('change', () => {
+            hideIdle = hideIdleCb.checked;
+            scheduleRender(false);
+            // Bookmarkable like sort/execution (P9) — a non-default value
+            // (off) round-trips through the URL hash.
+            if (ctxRef && typeof ctxRef.updateHash === 'function') ctxRef.updateHash();
+        });
     }
 
     return {
         id: 'transitions',
 
         async requests(ctx) {
+            // Issue #107: the wire field the server reads is "buckets"
+            // (server.c parse_request: cJSON_GetObjectItem(root, "buckets"))
+            // — every OTHER view (concurrency/matrix/active/histogram) sends
+            // it under that name. This view alone sent "num_buckets", which
+            // the server silently ignores, so req->num_buckets stayed 0 and
+            // handle_transitions fell back to its OWN default (50 rows) no
+            // matter what the view asked for — the intended 200-row request
+            // (and hideIdle's need for real headroom above the idle loop's 2
+            // edges) never reached the server. Real-capture evidence (box-
+            // check EPHEMERAL, pgbench+lock+IO workload): 66 distinct
+            // transition pairs existed; only 50 were ever returned before
+            // this fix, silently (truncated:true, unlogged by the UI).
             const data = await ctx.transport.request(ctx.channel('table'), 'transitions', {
                 from: ctx.timeRange.from, to: ctx.timeRange.to,
-                filters: ctx.filters.snapshot(), num_buckets: 200,
+                filters: ctx.filters.snapshot(), buckets: 200,
             });
             let variants = null;
             try {
                 variants = await ctx.transport.request(ctx.channel('variants'), 'variants', {
                     from: ctx.timeRange.from, to: ctx.timeRange.to,
-                    filters: ctx.filters.snapshot(), num_buckets: 20,
+                    filters: ctx.filters.snapshot(), buckets: 20,
                 });
             } catch (e) { /* variants optional */ }
             return { transitions: data, variants };
@@ -266,13 +318,23 @@ export function createTransitionsView() {
             dataRef = model.transitions;
 
             ensureShell(el);
-            document.getElementById('dfg-total').textContent =
-                Number(model.total).toLocaleString() + ' transitions';
-            renderDFG(threshold);
+            renderDFG(threshold);   // sets #dfg-total too (idle-hidden count included)
             document.getElementById('dfg-variants').innerHTML = model.variantsHtml || '';
         },
 
         enter(ctx) { ctxRef = ctx; /* chart created lazily in renderDFG */ },
+
+        // Bookmarkable state (P9, issue #107) — app.js reads/writes this via
+        // capability detection, same pattern as getSelection/selectExecution.
+        getHideIdle() { return hideIdle; },
+        setHideIdle(v) {
+            const next = !!v;
+            if (next === hideIdle) return;
+            hideIdle = next;
+            const cb = document.getElementById('dfg-hide-idle');
+            if (cb) cb.checked = hideIdle;
+            if (dataRef) scheduleRender(false);
+        },
 
         leave() {
             if (rafId != null && typeof cancelAnimationFrame === 'function') {

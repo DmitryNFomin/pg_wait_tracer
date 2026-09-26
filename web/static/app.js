@@ -173,6 +173,11 @@ function currentHashState() {
     const activeView = tab && vm ? vm.views[tab] : null;
     const execution = activeView && typeof activeView.getSelection === 'function'
         ? activeView.getSelection() : null;
+    // Issue #107: transitions' "hide idle waits" toggle, capability-detected
+    // like getSelection — null on every other tab, so it never pollutes
+    // their hash.
+    const dfgHideIdle = activeView && typeof activeView.getHideIdle === 'function'
+        ? activeView.getHideIdle() : null;
     return {
         tab,
         live: autoRefreshOn,
@@ -184,6 +189,7 @@ function currentHashState() {
         execution,
         compare: compare.enabled,
         baselineOffsetNs: compare.offsetNs,
+        dfgHideIdle,
     };
 }
 
@@ -220,6 +226,13 @@ async function applyHashOnce(s) {
     if (s.execution && vm.views[tab] &&
         typeof vm.views[tab].selectExecution === 'function') {
         vm.views[tab].selectExecution(s.execution);
+    }
+    // Issue #107: restore the transitions "hide idle waits" toggle before the
+    // refresh()/mount() below reads it (null = hash said nothing -> the
+    // view's own default-on stands).
+    if (s.dfgHideIdle != null && vm.views[tab] &&
+        typeof vm.views[tab].setHideIdle === 'function') {
+        vm.views[tab].setHideIdle(s.dfgHideIdle);
     }
     updateBreadcrumb();
     if (s.live) {
@@ -310,6 +323,13 @@ function makeCtx() {
         // header-sort click (re-runs requests/build/mount under a fresh epoch).
         getSort, toggleSort,
         refresh: () => vm.refresh(),
+        // P9 (issue #107): a generic sync point for view-owned bookmarkable
+        // state (getX/setX capability-detected in currentHashState/
+        // applyHashOnce, same pattern as getSelection/selectExecution) — the
+        // view mutates its own closure state, then calls this so the URL
+        // reflects it. REPLACE, not PUSH: a filter/toggle flip is a passive
+        // view preference, not an investigation step browser-back should undo.
+        updateHash: () => updateHash(false),
         // Daemon control plane (B5): views read the latest escalation status to
         // render the AAS annotation + the unavailable/escalate panels, and can
         // re-poll it after an escalate/deescalate action.

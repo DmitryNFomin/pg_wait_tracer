@@ -78,6 +78,38 @@ function denseDfg() {
 
 const DENSE = denseDfg();
 
+/* Idle-loop-dominant DFG (issue #107): shaped from the real box-check
+ * EPHEMERAL capture that filed the issue — a pgbench + lock-contention + IO
+ * workload where the Client:ClientRead<->CPU* loop's TRANSITION COUNT
+ * dwarfs every other edge (every wait cycle passes through it), while
+ * Lock:relation/Timeout:PgSleep/IO:DataFileRead transitions are rare by
+ * comparison though they are the entire point of the tab. node total_ms
+ * mirror the issue's own reported numbers (ClientRead 915.3s, CPU* 10.0s,
+ * Lock:relation 28.7%/Timeout 68% of DB time on that capture). */
+function idleDominantDfg() {
+    const nodes = [
+        { name: 'CPU*',              total_ms: 10000,  class: 'CPU' },
+        { name: 'Client:ClientRead', total_ms: 915300, class: 'Client' },
+        { name: 'Lock:relation',     total_ms: 28700,  class: 'Lock' },
+        { name: 'Timeout:PgSleep',   total_ms: 68000,  class: 'Timeout' },
+        { name: 'IO:DataFileRead',   total_ms: 5200,   class: 'IO' },
+    ];
+    const links = [
+        { source: 'Client:ClientRead', target: 'CPU*', value: 48000, duration_ms: 915300 },
+        { source: 'CPU*', target: 'Client:ClientRead', value: 47950, duration_ms: 910000 },
+        { source: 'CPU*', target: 'Lock:relation',     value: 600,   duration_ms: 28700 },
+        { source: 'Lock:relation', target: 'CPU*',     value: 595,   duration_ms: 27000 },
+        { source: 'CPU*', target: 'Timeout:PgSleep',   value: 300,   duration_ms: 68000 },
+        { source: 'Timeout:PgSleep', target: 'CPU*',   value: 298,   duration_ms: 66000 },
+        { source: 'CPU*', target: 'IO:DataFileRead',   value: 200,   duration_ms: 5200 },
+        { source: 'IO:DataFileRead', target: 'CPU*',   value: 198,   duration_ms: 5000 },
+    ];
+    let total = 0;
+    for (const l of links) total += l.value;
+    return { total, nodes, links };
+}
+const IDLE_DOMINANT = idleDominantDfg();
+
 /* Mirrors tests/mock_server.py's canned variants payload, plus a hostile
  * query_text (it lands in a title attribute — same escape class as UI-6). */
 const VARIANTS = {
@@ -155,6 +187,18 @@ export const states = {
         tags: ['HIERARCHY'],
         data: DENSE,
         opts: { threshold: 25, dims: DIMS },
+    },
+    'idle-loop-dominant': {
+        description: 'Issue #107, hideIdle OFF (the pre-fix default): the real-OLTP-shaped ClientRead<->CPU* loop dominates edge COUNT at the default 20% threshold, so Lock:relation/Timeout:PgSleep/IO:DataFileRead all drop below it — exactly the bug report ("only the ClientRead<->CPU* loop").',
+        tags: ['HIERARCHY', 'SEMANTICS'],
+        data: IDLE_DOMINANT,
+        opts: { threshold: 20, dims: DIMS, hideIdle: false },
+    },
+    'idle-loop-hidden': {
+        description: 'Issue #107 fix, hideIdle ON (the new default): the idle loop is removed from the ranking pool BEFORE the threshold runs, so Lock:relation/Timeout:PgSleep/IO:DataFileRead all clear it and render.',
+        tags: ['HIERARCHY', 'FEEDBACK'],
+        data: IDLE_DOMINANT,
+        opts: { threshold: 20, dims: DIMS, hideIdle: true },
     },
     'hostile-names': {
         description: 'Node names carrying <script>/quote payloads and unicode — labels and tooltips must render inert (UI-6).',

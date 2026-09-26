@@ -937,18 +937,32 @@ def _handle_request_inner(cmd, req_id, msg):
     if cmd == "transitions":
         # event_id mirrors server.c's DFG node JSON (U2 / P3 wire 5: node
         # click pivots on the event; 0 = the CPU* pseudo-node).
+        #
+        # Issue #107: Client:ClientRead is the dominant edge by COUNT (900/560
+        # vs 100/80/30 for everything else) — real-OLTP shaped, same ratio as
+        # the box-check EPHEMERAL capture that filed the issue. This is what
+        # makes the default (hideIdle=true) observable end-to-end against
+        # this mock: WITHOUT hideIdle, the default 20% threshold (=180, 20%
+        # of the 900 max) leaves only the ClientRead<->CPU* loop (the bug);
+        # WITH hideIdle (the shipped default), the pool ranks the 3 remaining
+        # edges against their own max (100), all 3 clear 20% (=20), and
+        # IO:DataFileRead/LWLock:WALInsert render — exercised by
+        # test_dfg_node_drill's click-through on IO:DataFileRead. total/
+        # link_count/total_link_count/truncated and the 5-link value SUM
+        # (1670) are unchanged — test_matrix_view's "1,670 of 1,800" / "5 of
+        # 8" note text depends only on those, not on which nodes carry them.
         return {"id": req_id, "total": 1800, "link_count": 5,
                 "total_link_count": 8, "truncated": True, "nodes": [
             {"name": "CPU*", "total_ms": 4800, "class": "CPU", "event_id": 0},
+            {"name": "Client:ClientRead", "total_ms": 9153, "class": "Client", "event_id": 0x06000000},
             {"name": "IO:DataFileRead", "total_ms": 2100, "class": "IO", "event_id": 0x01000015},
             {"name": "LWLock:WALInsert", "total_ms": 900, "class": "LWLock", "event_id": 0x04000007},
-            {"name": "IO:WalSync", "total_ms": 800, "class": "IO", "event_id": 0x0100004e},
         ], "links": [
-            {"source": "CPU*", "target": "IO:DataFileRead", "value": 500, "duration_ms": 2500.0},
-            {"source": "IO:DataFileRead", "target": "CPU*", "value": 480, "duration_ms": 1920.0},
-            {"source": "CPU*", "target": "LWLock:WALInsert", "value": 300, "duration_ms": 900.0},
-            {"source": "LWLock:WALInsert", "target": "CPU*", "value": 290, "duration_ms": 870.0},
-            {"source": "CPU*", "target": "IO:WalSync", "value": 100, "duration_ms": 3200.0},
+            {"source": "Client:ClientRead", "target": "CPU*", "value": 900, "duration_ms": 9000.0},
+            {"source": "CPU*", "target": "Client:ClientRead", "value": 560, "duration_ms": 5000.0},
+            {"source": "CPU*", "target": "IO:DataFileRead", "value": 100, "duration_ms": 500.0},
+            {"source": "IO:DataFileRead", "target": "CPU*", "value": 80, "duration_ms": 320.0},
+            {"source": "CPU*", "target": "LWLock:WALInsert", "value": 30, "duration_ms": 90.0},
         ]}
 
     if cmd == "lock_chains":

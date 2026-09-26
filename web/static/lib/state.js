@@ -305,6 +305,10 @@ export function serializeHashState(s) {
         if (execution.query_id != null)
             push('exec.query', String(execution.query_id));
     }
+    // Issue #107: the transitions "hide idle waits" toggle is default ON —
+    // only the non-default (off) state needs to ride the hash, keeping every
+    // other tab's hash (and every existing test fixture) untouched.
+    if (s.dfgHideIdle === false) push('dfg_idle', 0);
     return parts.join('&');
 }
 
@@ -318,7 +322,8 @@ export function parseHashState(hash) {
     if (!raw) return null;
     const s = { tab: null, live: false, spanSecs: null,
                 fromNs: null, toNs: null, filters: {}, sort: null,
-                execution: null, compare: false, baselineOffsetNs: null };
+                execution: null, compare: false, baselineOffsetNs: null,
+                dfgHideIdle: null };
     const execution = {};
     let compareRequested = false;
     let any = false;
@@ -383,6 +388,9 @@ export function parseHashState(hash) {
             }
         } else if (k === 'exec.query' && /^-?\d+$/.test(v)) {
             execution.query_id = v;
+        } else if (k === 'dfg_idle') {
+            s.dfgHideIdle = (v === '1' || v === 'true');
+            any = true;
         }
     }
     if (execution.pid && execution.start_ns) {
