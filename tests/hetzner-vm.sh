@@ -255,6 +255,48 @@ cmd_create() {
         echo "  WARNING: cloud-init did not complete in 5 minutes" >&2
     fi
 
+    # issue #174: refresh root's own known_hosts entries for localhost/
+    # 127.0.0.1 on the NEW VM itself, at creation time. A pgwt=gate-snapshot
+    # image bakes in the snapshotted host's known_hosts (from when IT was
+    # provisioned) *and* its ssh_host_*_key files, but cloud-init treats
+    # every server id as a new instance and regenerates fresh host keys on
+    # boot ("ssh_deletekeys" -- the standard "don't reuse the imaged host's
+    # keys" behaviour) -- done here, not baked into the image, and only
+    # after the cloud-init wait above has confirmed "done" so the key is
+    # already in its final state. web/bridge.go's NewSSHBridge later runs
+    # `ssh -o BatchMode=yes root@localhost`, which REFUSES (no prompt) the
+    # moment that entry is stale, and every one of tests/ui_live_smoke.sh's
+    # eleven tabs fails at once with an opaque "WebSocket never reached
+    # #status.connected" -- looking exactly like a product regression.
+    # Done unconditionally here (not only in tests/provision-runner.sh,
+    # which only runs on the scripts/box-check.sh EPHEMERAL=1 path): a bare
+    # `tests/hetzner-vm.sh create` used to poke at a VM interactively (no
+    # box-check, no provisioning step) must also get a working loopback
+    # self-trust without a manual `ssh-keygen -R` + `ssh-keyscan` step.
+    # provision-runner.sh's own copy of this loop still runs too (harmless,
+    # idempotent, and it also fixes a persistent gate box that was never
+    # snapshotted) -- this is deliberate double coverage, not a
+    # replacement.
+    echo "  Refreshing root's own localhost/127.0.0.1 known_hosts (issue #174) ..." >&2
+    if ! ssh -o StrictHostKeyChecking=no -o ConnectTimeout=5 -o BatchMode=yes \
+        root@"$server_ip" '
+            set -e
+            mkdir -p ~/.ssh
+            chmod 700 ~/.ssh
+            touch ~/.ssh/known_hosts
+            for h in localhost 127.0.0.1; do
+                tmp_scan=$(mktemp)
+                if ssh-keyscan -H "$h" >"$tmp_scan" 2>/dev/null && [ -s "$tmp_scan" ]; then
+                    ssh-keygen -R "$h" -f ~/.ssh/known_hosts >/dev/null 2>&1 || true
+                    cat "$tmp_scan" >> ~/.ssh/known_hosts
+                fi
+                rm -f "$tmp_scan"
+            done
+            chmod 600 ~/.ssh/known_hosts
+        ' >/dev/null 2>&1; then
+        echo "  WARNING: known_hosts refresh for localhost/127.0.0.1 failed -- if this VM's self-ssh matters, re-run: ssh-keygen -R localhost -R 127.0.0.1 && ssh-keyscan -H localhost 127.0.0.1 >> ~/.ssh/known_hosts on the box, or tests/provision-runner.sh ubuntu" >&2
+    fi
+
     # Output machine-readable result (for scripts)
     echo "$server_id $server_ip"
 }
