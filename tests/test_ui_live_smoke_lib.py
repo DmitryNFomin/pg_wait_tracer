@@ -6,6 +6,7 @@ part of `make check`.
 
 Usage: python3 tests/test_ui_live_smoke_lib.py
 """
+import base64
 import inspect
 import io
 import os
@@ -215,6 +216,89 @@ def test_png_bytes_to_array_roundtrip():
     decoded = lib.png_bytes_to_array(buf.getvalue())
     check(np.array_equal(decoded, arr),
           "png_bytes_to_array decodes in-memory PNG bytes losslessly")
+
+
+def _array_to_data_url(arr):
+    """Mirrors a browser's canvas.toDataURL('image/png') for a test-built
+    array -- ui_live_smoke.py's _ATOMIC_PANEL_SNAPSHOT_JS produces the real
+    thing from a live <canvas>; this is the same encoding, built here so the
+    verdict logic can be exercised without a browser."""
+    buf = io.BytesIO()
+    Image.fromarray(arr).save(buf, format="PNG")
+    return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+def test_data_url_to_array_roundtrip():
+    arr = np.zeros((8, 8, 3), dtype=np.uint8)
+    arr[3, 3] = [9, 99, 199]
+    decoded = lib.data_url_to_array(_array_to_data_url(arr))
+    check(np.array_equal(decoded, arr),
+          "data_url_to_array decodes a canvas.toDataURL()-shaped string losslessly")
+
+
+def test_data_url_to_array_rejects_non_png_data_url():
+    threw = False
+    try:
+        lib.data_url_to_array("not a data url")
+    except ValueError:
+        threw = True
+    check(threw, "data_url_to_array raises ValueError on a malformed data URL")
+
+
+# ── blind_window_ok (issue #142) ─────────────────────────────────────────────
+
+def test_blind_window_ok_element_gone():
+    ok, reason = lib.blind_window_ok({"present": False})
+    check(not ok and reason == "panel element gone",
+          f"an absent panel element fails with the expected reason (got {ok!r}, {reason!r})")
+
+
+def test_blind_window_ok_canvas_with_real_content_passes():
+    frame = np.zeros((20, 20, 3), dtype=np.uint8)
+    frame[5, :] = 255  # stand-in for a rendered chart line
+    snapshot = {"present": True, "canvas": True, "dataURL": _array_to_data_url(frame)}
+    ok, reason = lib.blind_window_ok(snapshot)
+    check(ok, f"a canvas with real painted content passes (reason={reason!r})")
+
+
+def test_blind_window_ok_catches_an_injected_blank_canvas():
+    # issue #142 acceptance: prove the check still goes RED on a genuine
+    # blank -- a canvas painted a single solid colour, exactly what a
+    # sustained (not merely atomically-torn) teardown-to-blank would produce.
+    blank = np.full((20, 20, 3), 30, dtype=np.uint8)
+    snapshot = {"present": True, "canvas": True, "dataURL": _array_to_data_url(blank)}
+    ok, reason = lib.blind_window_ok(snapshot)
+    check(not ok and reason == "panel went blank",
+          f"a solid-colour canvas still fails the check (got {ok!r}, {reason!r})")
+
+
+def test_blind_window_ok_table_tab_with_rows_passes():
+    ok, reason = lib.blind_window_ok(
+        {"present": True, "canvas": False, "hasContent": True})
+    check(ok, f"a table panel with content passes (reason={reason!r})")
+
+
+def test_blind_window_ok_table_tab_empty_fails():
+    ok, reason = lib.blind_window_ok(
+        {"present": True, "canvas": False, "hasContent": False})
+    check(not ok and reason == "panel has no content",
+          f"an empty table panel fails with the expected reason (got {ok!r}, {reason!r})")
+
+
+def test_blind_window_ok_never_races_a_stale_screenshot_handle():
+    # The bug this whole mechanism replaces (issue #142): the OLD check used
+    # two separate CDP round trips (query_selector, then a later .screenshot()
+    # call) and treated ANY exception from the second call as "gone", even
+    # though the element demonstrably existed a moment earlier. The new
+    # atomic snapshot has no such second call to race -- a present, painted
+    # canvas is read in the SAME evaluate() as the presence check, so there
+    # is no representable "present but its content is unknown/stale" shape
+    # for blind_window_ok to misjudge.
+    frame = np.full((20, 20, 3), 200, dtype=np.uint8)
+    frame[0:2, 0:2] = 0
+    snapshot = {"present": True, "canvas": True, "dataURL": _array_to_data_url(frame)}
+    ok, _reason = lib.blind_window_ok(snapshot)
+    check(ok, "a present, painted canvas is never misjudged as gone/blank")
 
 
 def test_blink_threshold_is_pinned_at_0_1_pct():
