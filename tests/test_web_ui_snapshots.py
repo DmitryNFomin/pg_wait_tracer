@@ -347,6 +347,22 @@ def snapshot(page, name, selector, pixel_threshold=PIXEL_THRESHOLD,
         return
 
     _mask_volatile(page)
+    # #122 follow-up: pin the scroll position ourselves, at an INTEGER offset,
+    # before capturing. el.screenshot() auto-scrolls a not-fully-visible
+    # element into view first, and that built-in scroll can land on a
+    # FRACTIONAL scrollTop (e.g. a 'center'-ish alignment computing
+    # (viewportHeight - elementHeight) / 2, which is a .5px remainder for
+    # any odd-height element against our 800px-even viewport) — a purely
+    # viewport-relative effect that survives cell heights already being
+    # pinned to a whole document-relative pixel (gallery.js
+    # snapCellFootprint), and one that differs between two otherwise
+    # byte-identical pages whenever a manifest change shifts what else is
+    # on screen. scrollIntoView({block:'start'}) instead sets
+    # scrollTop = the element's own (integer) document Y, or — near the
+    # bottom of a long page — clamps to (integer) scrollHeight - viewportHeight;
+    # either way the element is already fully visible by the time
+    # el.screenshot() runs its own check, so its auto-scroll is a no-op.
+    page.evaluate("(el) => el.scrollIntoView({block: 'start', inline: 'nearest'})", el)
     # Hover-neutral capture: selector screenshots scroll each later gallery
     # cell under the pointer position left by the prior capture. If that point
     # lands on an ECharts canvas, emphasis dims sibling series and makes the
@@ -549,27 +565,49 @@ def snap_gallery_suite(page):
 
     The gallery is fully static (ES modules over HTTP; no WebSocket), served by
     the exact mock's static root.
+
+    #122 follow-up: each cell is captured from its OWN isolated page load
+    (?isolate=<cellId>, see gallery.js's main()), not cropped out of the
+    shared, every-fixture page. Pinning each cell's own height closed the
+    DOCUMENT-position coupling (issue #122), but a residual — a handful of
+    pixels off by 1 value, text/canvas content painted at a different
+    absolute page Y rasterizing a hair differently even though the position
+    is still whole-pixel, a browser tile/hinting effect rather than a CSS
+    one — survived that fix (found chasing #122 to full closure: inserting
+    one fixture elsewhere still left ~3 gallery cells not byte-identical,
+    though already within the gate's own tolerance). Isolating the capture
+    page means every cell is always painted at the SAME small Y regardless
+    of the rest of the manifest, closing the coupling completely rather than
+    chasing each new symptom of it — and is cheap: 28 small static page
+    loads against a local mock, not a real network.
     """
     tick_names = {cell: f"{_gallery_name(cell)}-tick{step}"
                   for cell, step in GALLERY_TICK_CELLS}
     wanted = ([_gallery_name(c) for c in GALLERY_STATIC_CELLS] +
               list(tick_names.values()))
     if not any(selected(n) for n in wanted):
-        return  # --only filter selects no gallery cell; skip the page load
+        return  # --only filter selects no gallery cell; skip the page loads
 
     print("--- Snapshots: fixture gallery (U1 tight-threshold cells) ---")
-    page.goto(GALLERY_URL)
-    # gallery.js sets data-gallery-ready="1" only once every chart/uPlot mount
-    # created during the initial render pass has fired its REAL completion
-    # event (echarts 'finished' / uPlot 'draw', see render-settle.mjs) --
-    # #155. No further fixed-duration settle wait: that was the bug (the
-    # capture racing the async paint), not a font/animation timing issue —
-    # animate:false was already set on every builder before this fix and did
-    # not make the gate deterministic on its own.
-    page.wait_for_selector("body[data-gallery-ready='1']", timeout=15000)
+
+    def load_isolated(cell_id):
+        page.goto(f"{GALLERY_URL}?isolate={cell_id}")
+        # gallery.js sets data-gallery-ready="1" only once every chart/uPlot
+        # mount created during the initial render pass has fired its REAL
+        # completion event (echarts 'finished' / uPlot 'draw', see
+        # render-settle.mjs) -- #155. No further fixed-duration settle wait:
+        # that was the bug (the capture racing the async paint), not a
+        # font/animation timing issue — animate:false was already set on
+        # every builder before this fix and did not make the gate
+        # deterministic on its own.
+        page.wait_for_selector("body[data-gallery-ready='1']", timeout=15000)
 
     for cell_id in GALLERY_STATIC_CELLS:
-        snapshot(page, _gallery_name(cell_id), f"#{cell_id}",
+        name = _gallery_name(cell_id)
+        if not selected(name):
+            continue
+        load_isolated(cell_id)
+        snapshot(page, name, f"#{cell_id}",
                  pixel_threshold=GALLERY_PIXEL_THRESHOLD,
                  max_diff_ratio=GALLERY_MAX_DIFF_RATIO)
 
@@ -581,6 +619,7 @@ def snap_gallery_suite(page):
         tick_name = tick_names[cell]
         if not selected(tick_name):
             continue
+        load_isolated(cell)
         step_btn = page.query_selector(
             f"#{cell} .tick-bar button:nth-of-type(3)")
         if step_btn is None:

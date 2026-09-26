@@ -625,14 +625,40 @@ function renderCell(grid, entry) {
     snapCellFootprint(cell);
 }
 
+/* #122 follow-up: ?isolate=<cellId> (see main()) renders ONLY that one
+ * cell — used exclusively by the snapshot suite, never by a human browsing
+ * the gallery. Pinning every cell's own height (snapCellFootprint) closed
+ * the DOCUMENT-position coupling, but text/canvas content painted deep into
+ * a long page can still rasterize a handful of pixels differently purely
+ * from being at a DIFFERENT absolute (if still whole-pixel) page Y — a
+ * browser tile/text-hinting effect, not a CSS bug, and the same class of
+ * coupling #122 is about: a cell's rendered bytes must depend on nothing
+ * but its own content. Isolating the capture page means every cell is
+ * always painted at the SAME small Y (the top of an otherwise empty grid)
+ * regardless of what else the manifest contains, closing that loophole
+ * completely instead of chasing each new symptom of it. Pure (no DOM), so
+ * it's unit-tested directly (tests/web_unit/gallery-isolate.test.mjs)
+ * without needing a browser. Returns an EMPTY array for an isolateId that
+ * matches nothing (a typo'd cellId), never silently falling back to
+ * "show everything" — a bad ?isolate= value should render a visibly empty
+ * page, not defeat the isolation it asked for. */
+export function selectDisplayEntries(orderedEntries, isolateId) {
+    return isolateId
+        ? orderedEntries.filter(e => e.cellId === isolateId)
+        : orderedEntries;
+}
+
 export function main() {
     const grid = document.getElementById('grid');
     // Keep every established cell at its historical document coordinate so
     // adding a fixture cannot churn unrelated pixel baselines. Compare cells
     // remain in the manifest/TOC under their owning builders, but render after
     // the existing gallery corpus.
-    const displayEntries = MANIFEST.filter(e => !e.tags.includes('compare'))
+    const orderedEntries = MANIFEST.filter(e => !e.tags.includes('compare'))
         .concat(MANIFEST.filter(e => e.tags.includes('compare')));
+
+    const isolateId = new URLSearchParams(location.search).get('isolate');
+    const displayEntries = selectDisplayEntries(orderedEntries, isolateId);
 
     // Sidebar index: one link per cell, grouped by builder.
     const toc = document.getElementById('toc');
