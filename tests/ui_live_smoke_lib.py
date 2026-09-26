@@ -10,6 +10,7 @@ Nothing in this module touches a browser, a socket, or the filesystem beyond
 optionally decoding a PNG already on disk (load_png_array / compare_png_files)
 -- everything else is plain data in, plain data out.
 """
+import base64
 import io
 import json
 import os
@@ -87,15 +88,19 @@ KNOWN_FAILING_TABS = {
     # settle (and now the offset sweep, issue #119) is investigated either
     # way.
     "timeline": 100,
-    # #101: TWO DIFFERENT symptoms observed under this name so far -- the
-    # executions query taking > 60s to answer under sustained --mode full
-    # capture load (panel never renders within the timeout), AND a run
-    # where tick 1 reported "no echarts instance" (the panel's own chart
-    # never mounted at all, a different failure shape). Recorded as one
-    # tracking issue for now, but this is a re-diagnose target, not a
-    # permanently-excused one: whoever picks up #101 needs to establish
-    # whether these are one root cause or two before calling it fixed.
-    "waterfall": 101,
+    # #101 (waterfall) is DELISTED. Both symptoms filed under it -- "no
+    # echarts instance" and "#waterfall-chart canvas never appeared within
+    # 60s" -- were ONE root cause, and it was never the executions query.
+    # Measured on a real --mode full capture (gate box, PG18, pgbench 4
+    # clients --rate=25): executions answers in 63 ms over 49,964
+    # executions, but the tab defaulted to rows[0] -- the NEWEST execution,
+    # which was undrawable (no events, no workers, no plan) in 40 of 40
+    # simulated live ticks. Its execution_detail is {leader:{events:[]},
+    # workers:[], plan:null}, buildWaterfallOption returns hasData:false,
+    # and the view mounts no chart, so both the per-tick check and the
+    # ready-selector wait fail. The default selection now picks the newest
+    # execution that actually has a waterfall (~45-52 of the 100 returned
+    # rows qualified at every one of those ticks).
 }
 
 
@@ -110,6 +115,18 @@ def load_png_array(path):
     """Decode a PNG file to an (H, W, 3) uint8 RGB array."""
     with open(path, "rb") as f:
         return png_bytes_to_array(f.read())
+
+
+def data_url_to_array(data_url):
+    """Decode a `canvas.toDataURL('image/png')` string (issue #142's
+    ui_live_smoke.py _ATOMIC_PANEL_SNAPSHOT_JS) to an (H, W, 3) uint8 RGB
+    array, reusing png_bytes_to_array. Raises ValueError on anything that
+    isn't a 'data:image/png;base64,...' URL -- never silently returns a
+    placeholder for a malformed capture."""
+    prefix = "data:image/png;base64,"
+    if not data_url.startswith(prefix):
+        raise ValueError(f"not a PNG data URL: {data_url[:32]!r}...")
+    return png_bytes_to_array(base64.b64decode(data_url[len(prefix):]))
 
 
 def frame_diff_ratio(frame_a, frame_b):
@@ -200,6 +217,31 @@ def is_blank_frame(frame, std_threshold=1.0):
 def compare_png_files(path_a, path_b):
     """frame_diff_ratio() for two PNGs already on disk."""
     return frame_diff_ratio(load_png_array(path_a), load_png_array(path_b))
+
+
+def blind_window_ok(snapshot, blank_std_threshold=1.0):
+    """issue #142: verdict for ui_live_smoke.py's blind-window CONTINUITY
+    check, from ui_live_smoke.py's _ATOMIC_PANEL_SNAPSHOT_JS single-
+    page.evaluate() result (a plain dict, no Playwright object) -- kept pure/
+    testable here, same idiom as every other verdict function in this module.
+
+    snapshot shapes (see _ATOMIC_PANEL_SNAPSHOT_JS):
+      {"present": False}                                      -- element gone
+      {"present": True, "canvas": True, "dataURL": "data:..."} -- chart tabs
+      {"present": True, "canvas": False, "hasContent": bool}   -- table tabs
+
+    Returns (ok: bool, reason: str); reason is only meaningful when
+    ok is False (fed straight into the SmokeFailure message)."""
+    if not snapshot.get("present"):
+        return False, "panel element gone"
+    if snapshot.get("canvas"):
+        frame = data_url_to_array(snapshot["dataURL"])
+        if is_blank_frame(frame, std_threshold=blank_std_threshold):
+            return False, "panel went blank"
+        return True, ""
+    if not snapshot.get("hasContent"):
+        return False, "panel has no content"
+    return True, ""
 
 
 def no_blink_ok(ratio, threshold=BLINK_THRESHOLD):

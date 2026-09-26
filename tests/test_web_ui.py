@@ -2215,18 +2215,40 @@ def test_waterfall_view(page):
     page.wait_for_timeout(700)
 
     rows = page.query_selector_all("#executions-table tbody tr.clickable")
-    check(len(rows) == 2, f"execution selector rendered 2 latest-first rows ({len(rows)})")
+    check(len(rows) == 3, f"execution selector rendered 3 latest-first rows ({len(rows)})")
+    # issue #101: rows[0] (PID 1004) is the newest execution and has nothing
+    # to draw -- no events, no workers, no plan, exactly what a real --mode
+    # full capture hands the tab. Opening on it left the panel with no
+    # ECharts instance at all; the default must skip to the newest execution
+    # that actually has a waterfall.
     selected = page.query_selector("#executions-table tr.selected-execution")
     check(selected is not None and "1002" in selected.text_content(),
-          "latest execution is selected initially")
+          f"default selection skipped the empty newest execution ('{(selected.text_content() if selected else None)}')")
     lane_count = page.evaluate("""() => {
         const c = echarts.getInstanceByDom(document.getElementById('waterfall-chart'));
         return c.getOption().yAxis[0].data.length;
     }""")
     check(lane_count == 1, f"latest execution detail has one leader lane ({lane_count})")
 
-    rows[1].click()
-    page.wait_for_timeout(1000)
+    # Explicitly picking the empty execution must still say so honestly --
+    # the fix changes the DEFAULT, it does not hide an empty execution.
+    # Re-query each time: every selection re-mounts the table, so a handle
+    # taken before the click is detached by the time the next one is needed.
+    def click_execution_row(idx):
+        page.query_selector_all("#executions-table tbody tr.clickable")[idx].click()
+        page.wait_for_timeout(1000)
+
+    click_execution_row(0)
+    empty_state = page.evaluate("""() => {
+        const el = document.getElementById('waterfall-chart');
+        return {text: el.textContent.trim(),
+                chart: !!echarts.getInstanceByDom(el)};
+    }""")
+    check(empty_state["chart"] is False
+          and "No execution events captured" in empty_state["text"],
+          f"explicitly selected empty execution states it honestly ({empty_state})")
+
+    click_execution_row(2)
     selected = page.query_selector("#executions-table tr.selected-execution")
     check(selected is not None and "1000" in selected.text_content(),
           "row click selected the older execution")

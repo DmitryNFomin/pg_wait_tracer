@@ -850,6 +850,18 @@ def _handle_request_inner(cmd, req_id, msg):
         qid = str(filters.get("query_id", "100"))
         rows = [
             # Latest first, like server.c handle_executions.
+            # issue #101: on a real --mode full capture the NEWEST execution
+            # is routinely a microsecond-scale statement that never changed
+            # wait state -- no events, no workers, no plan, so its
+            # execution_detail below is empty and there is no waterfall to
+            # draw. Measured on the gate box: rows[0] was undrawable in 40 of
+            # 40 simulated live ticks. The fixture carries that shape so the
+            # UI suite exercises the real default-selection path.
+            {"pid": 1004, "query_id": qid,
+             "start_ns": "10000200000000", "end_ns": None,
+             "duration_ms": None, "plan_ms": None,
+             "n_events": 0, "n_workers": 0, "in_progress": True,
+             "started_before_window": False},
             {"pid": 1002, "query_id": qid,
              "start_ns": "10000100000000", "end_ns": "10000180000000",
              "duration_ms": 80.0, "plan_ms": None,
@@ -871,6 +883,15 @@ def _handle_request_inner(cmd, req_id, msg):
         pid = filters.get("pid", 1000)
         qid = str(filters.get("query_id", "100"))
         start = str(msg.get("start_ns", "10000000000000"))
+        if pid == 1004:
+            # The newest execution's empty detail (issue #101) -- verbatim
+            # shape of a real pgwt-server answer for a statement with no
+            # recorded wait transitions.
+            return {"id": req_id, "query_id": qid,
+                    "leader": {"pid": pid, "query_id": qid, "events": [],
+                               "total_count": 0, "truncated": False},
+                    "workers": [], "plan": None,
+                    "total_count": 0, "kept_count": 0, "truncated": False}
         if pid == 1002:
             events = [
                 {"we": 0x0100004e, "name": "IO:WalSync",

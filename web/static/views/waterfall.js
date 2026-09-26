@@ -3,7 +3,7 @@
 
 import {
     buildExecutionsModel, buildWaterfallOption, buildWaterfallReadout,
-    executionsConfig,
+    executionsConfig, pickDefaultExecution,
 } from '../lib/builders/waterfall.js';
 import { isUnavailable } from '../lib/builders/fidelity.js';
 import { mountUnavailablePanel } from '../lib/panels.js';
@@ -41,7 +41,10 @@ export function createWaterfallView() {
             const stillThere = rows.find(r => sameExecution(r, selected));
             if (stillThere) { selected = stillThere; return selected; }
         }
-        selected = rows[0] || null;
+        /* Not rows[0]: the newest execution on a real workload usually has
+         * no events, no workers and no plan, and an empty detail leaves the
+         * panel with no chart at all (issue #101). */
+        selected = pickDefaultExecution(rows);
         return selected;
     }
 

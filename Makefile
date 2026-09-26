@@ -268,8 +268,13 @@ clean:
 #                  snapshot, created/run/rsynced/deleted for this one run
 #                  (issue #141) — KEEP=1 leaves it up and prints the delete
 #                  command instead of deleting it.
-#   hetzner-sweep  delete stale (>6h) pgwt=ephemeral Hetzner VMs; runs
-#                  automatically at the start of every box-check too
+#   hetzner-sweep  delete stale (>6h, MAX_AGE_HOURS= to override) pgwt=ephemeral
+#                  Hetzner VMs; runs automatically at the start of every
+#                  box-check too. MAX_AGE_HOURS below 1h is REFUSED (issue
+#                  #162) unless FORCE_ALL=1 is also passed. To remove YOUR
+#                  OWN VM use `tests/hetzner-vm.sh delete <id>`, not this —
+#                  a sweep cutoff is a janitor for stale VMs, not a way to
+#                  delete one specific machine.
 #   ui-gallery     before/after screenshot sheet -> tests/results/ui_gallery/
 #   demo-rehearsal issue #157: a single long (DURATION_MIN=, default 35)
 #                  real-PG capture under pgbench load, walked repeatedly,
@@ -284,7 +289,7 @@ check-fast:
 box-check:
 	@OS=$(OS) PG=$(PG) EPHEMERAL=$(EPHEMERAL) KEEP=$(KEEP) scripts/box-check.sh
 hetzner-sweep:
-	@tests/hetzner-sweep.sh $(if $(MAX_AGE_HOURS),--max-age-hours $(MAX_AGE_HOURS),) $(if $(DRY_RUN),--dry-run,)
+	@tests/hetzner-sweep.sh $(if $(MAX_AGE_HOURS),--max-age-hours $(MAX_AGE_HOURS),) $(if $(DRY_RUN),--dry-run,) $(if $(FORCE_ALL),--force-all,)
 ui-gallery:
 	@tests/ui_gallery.sh $(BASE)
 demo-rehearsal:
