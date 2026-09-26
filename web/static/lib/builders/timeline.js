@@ -49,9 +49,13 @@ export const TIMELINE_AGG_SPANS_PER_PX = 2;
 export const TIMELINE_AGG_MIN_DENSE_COLS = 16;
 
 /* Density may not fire on a row below this many spans at all: a handful of
- * waits that ended before the window clamp (P6) to the same edge pixel and
- * read as N spans/px, yet trading that chart's per-wait identity (this wait,
- * this duration, this query) for one summarised pixel is a bad deal. */
+ * legible waits sharing one busy pixel column can already exceed
+ * TIMELINE_AGG_SPANS_PER_PX, yet trading that chart's per-wait identity (this
+ * wait, this duration, this query) for one summarised pixel is a bad deal
+ * until the row is genuinely dense. (Before #121, waits that ended before the
+ * window clamped to the same left-edge pixel and could fake this density —
+ * such waits are now dropped by the builder before aggregation ever sees
+ * them, see buildTimelineOption.) */
 export const TIMELINE_AGG_MIN_SPANS = 32;
 
 /* Fallback host width (px) when the view cannot measure one (first paint,
@@ -166,9 +170,13 @@ export function aggregateTimelineColumns(bars, rows, cols, from, to) {
         // A wait that STARTS after the window never paints: the per-span path
         // hands the rect an x past the plot and clip:true drops it. Counting
         // it here would both tint the last column and inflate the density.
-        // (A wait that ENDED before the window does paint, clamped to the left
-        // edge — so it stays in, exactly as the per-span path draws it.)
         if (b[0] > to) continue;
+        // Defensive (#121): the builder drops any wait with no overlap with
+        // the window before it ever reaches here, so an inverted bar
+        // (end < start — the P6 shape of a wait that ended before `from`)
+        // should never arrive. If one does anyway, it describes nothing real
+        // on the timeline and must not be counted or painted.
+        if (b[1] < b[0]) continue;
         const row = b[2] >= 0 && b[2] < rows ? b[2] : 0;
         if (byRow[row]) byRow[row].push(b); else byRow[row] = [b];
     }
@@ -371,13 +379,25 @@ export function buildTimelineOption(data, opts) {
     // start_ns = timestamp - duration with NO clamp to from_ns, so long waits
     // routinely start before the window and the bars bled left across the PID
     // axis labels. The raw start rides along at [7] for the tooltip.
+    //
+    // A wait with NO overlap with the window at all — it ended before `from`,
+    // or started at/after `to` — is dropped rather than clamped (#121): naive
+    // clamping (start=max(s,from), end=min(rawEnd,to)) on such a wait yields
+    // start > end, an inverted interval that renders as a phantom zero/negative
+    // -width rect pinned to whichever edge is nearer. There is nothing true to
+    // draw for a wait the window never touched, so it is excluded from the
+    // drawn set entirely — never emitted as start>end.
     const from = opts.from, to = opts.to;
-    const barData = events.map(ev => {
+    const barData = [];
+    for (let i = 0; i < events.length; i++) {
+        const ev = events[i];
         const rawEnd = ev.s + ev.d;
+        if (from != null && rawEnd <= from) continue;   // ended before the window
+        if (to != null && ev.s >= to) continue;          // starts at/after the window
         const s = from != null ? Math.max(ev.s, from) : ev.s;
         const e = to != null ? Math.min(rawEnd, to) : rawEnd;
-        return [s, e, pidIndexMap[ev.p] || 0, ev.n, ev.c, ev.q, ev.d, ev.s];
-    });
+        barData.push([s, e, pidIndexMap[ev.p] || 0, ev.n, ev.c, ev.q, ev.d, ev.s]);
+    }
 
     // Density decision (#106). Measured on the bucketing itself, as spans per
     // PAINTED pixel column of the busiest ROW — never events/plotWidth:

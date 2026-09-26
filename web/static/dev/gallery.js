@@ -56,6 +56,7 @@ import {
 } from '../lib/builders/table-configs.js';
 import { esc } from '../lib/format.js';
 import { createRenderTracker, createReadyGate } from './render-settle.mjs';
+import { quantizeCellHeight } from './cell-footprint.mjs';
 
 const CHART_W = 620;
 const CHART_H = 280;
@@ -94,6 +95,19 @@ const tickHooks = {};
 const readyGate = createReadyGate();
 const settleTrackers = new WeakMap();
 
+/* #122: pin `cell`'s own height to an integer CSS px once its content has
+ * settled — the quantization POLICY (round up, why, unit-tested) lives in
+ * the pure ./cell-footprint.mjs; this is only the DOM glue, same split as
+ * the render-settle tracking above. Clearing the inline height before
+ * measuring re-derives the TRUE natural height each time (needed for
+ * tick-replay cells, whose content can resize between ticks).
+ */
+function snapCellFootprint(cell) {
+    cell.style.height = '';
+    const h = cell.getBoundingClientRect().height;
+    cell.style.height = quantizeCellHeight(h) + 'px';
+}
+
 /* `el` is any node inside the cell (the chart/plot host div). */
 function trackerFor(el) {
     const cell = el.classList.contains('cell') ? el : el.closest('.cell');
@@ -108,6 +122,7 @@ function trackerFor(el) {
             },
             settle() {
                 if (!tracker.settle()) return; // stray/superseded completion
+                snapCellFootprint(cell);
                 cell.dataset.settled = '1';
                 readyGate.resolvePending();
                 if (readyGate.isReady) document.body.dataset.galleryReady = '1';
@@ -608,6 +623,33 @@ function renderCell(grid, entry) {
         err.textContent = 'RENDER FAILED: ' + e.message;
         cell.classList.add('failed');
     }
+    // #122: chart cells get re-pinned on their async 'finished'/draw settle
+    // (see trackerFor), but a plain HTML cell (table/panel, no chart) never
+    // fires one — its content is already final here, synchronously.
+    snapCellFootprint(cell);
+}
+
+/* #122 follow-up: ?isolate=<cellId> (see main()) renders ONLY that one
+ * cell — used exclusively by the snapshot suite, never by a human browsing
+ * the gallery. Pinning every cell's own height (snapCellFootprint) closed
+ * the DOCUMENT-position coupling, but text/canvas content painted deep into
+ * a long page can still rasterize a handful of pixels differently purely
+ * from being at a DIFFERENT absolute (if still whole-pixel) page Y — a
+ * browser tile/text-hinting effect, not a CSS bug, and the same class of
+ * coupling #122 is about: a cell's rendered bytes must depend on nothing
+ * but its own content. Isolating the capture page means every cell is
+ * always painted at the SAME small Y (the top of an otherwise empty grid)
+ * regardless of what else the manifest contains, closing that loophole
+ * completely instead of chasing each new symptom of it. Pure (no DOM), so
+ * it's unit-tested directly (tests/web_unit/gallery-isolate.test.mjs)
+ * without needing a browser. Returns an EMPTY array for an isolateId that
+ * matches nothing (a typo'd cellId), never silently falling back to
+ * "show everything" — a bad ?isolate= value should render a visibly empty
+ * page, not defeat the isolation it asked for. */
+export function selectDisplayEntries(orderedEntries, isolateId) {
+    return isolateId
+        ? orderedEntries.filter(e => e.cellId === isolateId)
+        : orderedEntries;
 }
 
 export function main() {
@@ -616,8 +658,11 @@ export function main() {
     // adding a fixture cannot churn unrelated pixel baselines. Compare cells
     // remain in the manifest/TOC under their owning builders, but render after
     // the existing gallery corpus.
-    const displayEntries = MANIFEST.filter(e => !e.tags.includes('compare'))
+    const orderedEntries = MANIFEST.filter(e => !e.tags.includes('compare'))
         .concat(MANIFEST.filter(e => e.tags.includes('compare')));
+
+    const isolateId = new URLSearchParams(location.search).get('isolate');
+    const displayEntries = selectDisplayEntries(orderedEntries, isolateId);
 
     // Sidebar index: one link per cell, grouped by builder.
     const toc = document.getElementById('toc');

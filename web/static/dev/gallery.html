@@ -53,7 +53,13 @@
   .how code { color: #888; }
 
   main { flex: 1; min-width: 0; padding: 14px; }
-  #grid { display: flex; flex-wrap: wrap; gap: 14px; }
+  /* #122: align-items defaults to 'stretch', which would size every cell in
+     a flex line to the tallest one in it — real height coupling the moment
+     two cells ever share a row (e.g. a wide window fitting 2 columns).
+     flex-start keeps each cell's cross-axis size purely its own; the
+     remaining (sub-pixel, single-column-at-test-viewport) coupling is fixed
+     in gallery.js by pinning each settled cell to an integer-px height. */
+  #grid { display: flex; flex-wrap: wrap; gap: 14px; align-items: flex-start; }
 
   .cell {
     background: #1a1a2e; border: 1px solid #2a2a4a; border-radius: 6px;
