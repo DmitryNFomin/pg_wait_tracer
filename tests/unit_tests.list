@@ -36,3 +36,4 @@ test_sampled_overhead_gate.py
 test_data_query_text_context.py
 test_ui_live_smoke_lib.py
 test_demo_rehearsal_lib.py
+test_hetzner_sweep.sh

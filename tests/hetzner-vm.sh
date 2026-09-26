@@ -9,6 +9,13 @@
 #   tests/hetzner-vm.sh ssh <IP>
 #   tests/hetzner-vm.sh list
 #
+# delete <SERVER_ID>: THE documented way for an agent to remove its own VM
+# (issue #162 — never `MAX_AGE_HOURS=0 make hetzner-sweep`, which matches
+# every pgwt=ephemeral VM regardless of owner). Confirms via a separate
+# Hetzner API GET that the server id actually 404s before returning
+# (never trusts the DELETE response alone) — same pattern
+# scripts/box-check.sh's own EPHEMERAL=1 cleanup already uses.
+#
 # --image-snapshot latest: resolve --image to the newest Hetzner image
 # labelled `pgwt=gate-snapshot` (issue #141's ephemeral-VM snapshot, built by
 # the lead under the box lock from a fully-provisioned gate box) instead of a
@@ -311,7 +318,27 @@ cmd_delete() {
         echo "FATAL: delete $server_id failed: $err" >&2
         exit 1
     fi
-    echo "$result" | jq -r '.action.status // "done"'
+
+    # issue #162: this is the documented, only way for an agent to remove
+    # its OWN machine (by id, never via a sweep cutoff). Never trust the
+    # DELETE call's own response alone -- same pattern scripts/box-check.sh
+    # already uses for its EPHEMERAL=1 cleanup -- poll the API directly for
+    # the server id until it 404s (gone) or we give up and say so loudly.
+    local gone=0 code=""
+    for _ in $(seq 1 20); do
+        code=$(curl -s -o /dev/null -w '%{http_code}' "$API/servers/$server_id" \
+            -H "Authorization: Bearer $HCLOUD_TOKEN")
+        if [[ "$code" == "404" ]]; then
+            gone=1
+            break
+        fi
+        sleep 2
+    done
+    if [[ "$gone" -ne 1 ]]; then
+        echo "FATAL: could not confirm server $server_id is deleted (last HTTP $code) -- CHECK MANUALLY: tests/hetzner-vm.sh list" >&2
+        exit 1
+    fi
+    echo "confirmed deleted: $server_id"
 }
 
 cmd_ssh() {
