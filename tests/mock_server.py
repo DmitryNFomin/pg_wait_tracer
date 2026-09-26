@@ -80,6 +80,18 @@ def _env_int(name, default):
 _TO_NS   = 1_774_000_000_000_000_000
 _FROM_NS = _TO_NS - 3600_000_000_000
 _BUCKET_NS = 60_000_000_000
+
+# Anchor for the canned session_timeline events (below): the client's default
+# live window is the last 900s ending at `now_ns` (== _TO_NS here, see
+# _CANNED["info"]) — NOT the full [_FROM_NS, _TO_NS] hour. Anchoring these at
+# _FROM_NS put every one of them ~55-58 min in the past, entirely before that
+# 900s window; buildTimelineOption now correctly DROPS a wait with no overlap
+# with the window (#121) rather than clamping it to an inverted, left-edge-
+# pinned interval, so an _FROM_NS-anchored set would render zero bars. This
+# anchor instead lands the first wait's raw start 20s before the live
+# window's `from` (still exercising the P6 left-edge clamp on a STRADDLING
+# wait — see test_timeline_bar_positions) with the rest fully inside it.
+_TIMELINE_BASE_NS = _TO_NS - 1_020_000_000_000
 _COMPARE_MODE = os.environ.get("PGWT_MOCK_COMPARE", "0") not in ("0", "", "false")
 _INFO_TICKS = 0
 
@@ -455,21 +467,21 @@ _CANNED["session_timeline"] = {
     "total_count": 8,
     "pids": [1001, 1002],
     "events": [
-        {"s": _FROM_NS + 100_000_000_000, "d": 50_000_000_000, "p": 1001,
+        {"s": _TIMELINE_BASE_NS + 100_000_000_000, "d": 50_000_000_000, "p": 1001,
          "n": "CPU*", "e": 0, "c": 0, "q": "3886912043147135675"},
-        {"s": _FROM_NS + 150_000_000_000, "d": 30_000_000_000, "p": 1001,
+        {"s": _TIMELINE_BASE_NS + 150_000_000_000, "d": 30_000_000_000, "p": 1001,
          "n": "IO:DataFileRead", "e": 0x01000015, "c": 1, "q": "3886912043147135675"},
-        {"s": _FROM_NS + 180_000_000_000, "d": 20_000_000_000, "p": 1001,
+        {"s": _TIMELINE_BASE_NS + 180_000_000_000, "d": 20_000_000_000, "p": 1001,
          "n": "Lock:relation", "e": 0x03000000, "c": 2, "q": "3886912043147135675"},
-        {"s": _FROM_NS + 200_000_000_000, "d": 40_000_000_000, "p": 1001,
+        {"s": _TIMELINE_BASE_NS + 200_000_000_000, "d": 40_000_000_000, "p": 1001,
          "n": "CPU*", "e": 0, "c": 0, "q": "3886912043147135675"},
-        {"s": _FROM_NS + 100_000_000_000, "d": 80_000_000_000, "p": 1002,
+        {"s": _TIMELINE_BASE_NS + 100_000_000_000, "d": 80_000_000_000, "p": 1002,
          "n": "Lock:relation", "e": 0x03000000, "c": 2, "q": "5371305355164922084"},
-        {"s": _FROM_NS + 180_000_000_000, "d": 25_000_000_000, "p": 1002,
+        {"s": _TIMELINE_BASE_NS + 180_000_000_000, "d": 25_000_000_000, "p": 1002,
          "n": "CPU*", "e": 0, "c": 0, "q": "5371305355164922084"},
-        {"s": _FROM_NS + 205_000_000_000, "d": 35_000_000_000, "p": 1002,
+        {"s": _TIMELINE_BASE_NS + 205_000_000_000, "d": 35_000_000_000, "p": 1002,
          "n": "IO:DataFileRead", "e": 0x01000015, "c": 1, "q": "5371305355164922084"},
-        {"s": _FROM_NS + 240_000_000_000, "d": 15_000_000_000, "p": 1002,
+        {"s": _TIMELINE_BASE_NS + 240_000_000_000, "d": 15_000_000_000, "p": 1002,
          "n": "LWLock:WALWrite", "e": 0x04000008, "c": 3, "q": "5371305355164922084"},
     ],
 }
