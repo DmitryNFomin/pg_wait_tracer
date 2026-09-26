@@ -20,12 +20,18 @@ function times(n) {
 }
 
 /* Full 60×16 grid: a latency ridge that drifts upward over time (the
- * distribution-shift question this EXACT-tier view exists to answer). */
-function denseData() {
+ * distribution-shift question this EXACT-tier view exists to answer).
+ * precaptureBuckets (#105): the first N time buckets get NO cells at all —
+ * mirrors the real server (src/server.c handle_heatmap emits sparse,
+ * non-zero-only cells), i.e. exactly what a window starting before capture
+ * began looks like on the wire. 0 = unchanged (every existing caller). */
+function denseData(precaptureBuckets) {
+    precaptureBuckets = precaptureBuckets || 0;
     const cells = [];
     let maxCount = 0;
     let total = 0;
     for (let i = 0; i < 60; i++) {
+        if (i < precaptureBuckets) continue;
         const ridge = 3 + (((i / 10) | 0) % 4);   // band 3 → 6 and back
         for (let j = 0; j < 16; j++) {
             const count = Math.max(0, 4000 - Math.abs(j - ridge) * 900
@@ -71,9 +77,10 @@ export const states = {
             times: times(1), labels: LAT_LABELS, cells: [[0, 4, 42]] },
     },
     'dense': {
-        description: 'Full 60×16 grid with a latency ridge drifting bands 3→6 over the hour.',
-        tags: ['SEMANTICS', 'OCCLUSION'],
-        data: denseData(),
+        description: '60×16 ridge grid; first quarter predates capture (#105) — a labeled band, not blank-as-idle.',
+        tags: ['SEMANTICS', 'OCCLUSION', 'FEEDBACK'],
+        opts: { captureFromNs: BASE_NS + 15 * MIN_NS },
+        data: denseData(15),
     },
     'one-hot-cell': {
         description: 'One 50 000-count cell over a ≤16 floor: heavy-tail worst case for the linear rainbow ramp (P8).',

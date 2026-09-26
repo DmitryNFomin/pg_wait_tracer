@@ -67,11 +67,16 @@ export function createConcurrencyView() {
             });
         },
 
-        build(data) {
+        build(data, ctx) {
             // EXACT-required (A3): a sampled-only window yields the structured
             // "unavailable" marker — surfaced as an explicit escalate panel.
             if (isUnavailable(data)) return { unavailable: data };
-            return buildConcurrencyOption(data);
+            // #105: ctx.server.fromNs is the server's earliest captured
+            // timestamp (same field events.js/overview.js/active.js already
+            // use for "predates the trace") — buckets before it are marked
+            // "not captured", never painted as a measured zero.
+            const captureFromNs = ctx && ctx.server ? ctx.server.fromNs : null;
+            return buildConcurrencyOption(data, { captureFromNs });
         },
 
         mount(el, model, ctx) {
