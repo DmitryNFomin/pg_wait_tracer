@@ -50,7 +50,7 @@ export function buildConcurrencyOption(data, opts) {
     const peakData = data.peaks.map((p, i) => i < notCapturedCount ? null : (p.max || 0));
     const peakEvents = data.peaks.map(p => p.event || '');
 
-    const burstPoints = (data.bursts || []).map(b => {
+    const burstsWithBucket = (data.bursts || []).map(b => {
         // Containing bucket by arithmetic (P6): peak t values are bucket
         // STARTS, so the old findIndex(p.t >= ts) was off-by-one for in-range
         // bursts (bucket AFTER the containing one) and returned -1 for any
@@ -58,14 +58,21 @@ export function buildConcurrencyOption(data, opts) {
         const idx = bns > 0
             ? Math.floor((b.timestamp_ns - data.peaks[0].t) / bns) : 0;
         const at = Math.min(Math.max(idx, 0), data.peaks.length - 1);
-        return {
-            coord: [at, peakData[at] || b.sessions],
-            value: b.sessions, symbol: 'triangle',
-            symbolSize: Math.min(10 + b.sessions * 2, 30),
-            itemStyle: { color: '#f44' },
-            label: { show: true, formatter: b.sessions + '', color: '#fff', fontSize: 10 },
-        };
+        return { b, at };
     });
+    // #105: a burst can only ever come from a CAPTURED bucket — a burst needs
+    // real events, so one algebraically landing in the not-captured prefix
+    // would be a self-contradiction (a marker sitting inside the "Not
+    // captured" band, or a Burst Events row for a moment the chart says has
+    // no data). Drop it from BOTH the markPoint and the table below.
+    const capturedBursts = burstsWithBucket.filter(({ at }) => at >= notCapturedCount);
+    const burstPoints = capturedBursts.map(({ b, at }) => ({
+        coord: [at, peakData[at] || b.sessions],
+        value: b.sessions, symbol: 'triangle',
+        symbolSize: Math.min(10 + b.sessions * 2, 30),
+        itemStyle: { color: '#f44' },
+        label: { show: true, formatter: b.sessions + '', color: '#fff', fontSize: 10 },
+    }));
 
     const option = {
         animation: false,
@@ -130,8 +137,8 @@ export function buildConcurrencyOption(data, opts) {
     const topPeaks = data.peaks.filter((p, i) => i >= notCapturedCount && p.max > 1)
         .sort((a, b) => b.max - a.max).slice(0, 10);
 
-    return { option, hasData: true, topPeaks, bursts: data.bursts || [], bucketNs: bns,
-        notCapturedCount };
+    return { option, hasData: true, topPeaks,
+        bursts: capturedBursts.map(({ b }) => b), bucketNs: bns, notCapturedCount };
 }
 
 /* P3 wire 2: the row's zoom-intent attributes. Bursts are 4+ sessions inside

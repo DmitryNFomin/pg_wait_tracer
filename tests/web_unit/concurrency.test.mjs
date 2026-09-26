@@ -227,3 +227,39 @@ test('captureFromNs: a pre-capture bucket is excluded from topPeaks even if its 
     assert.equal(topPeaks[0].max, 5);          // idx 2, the largest CAPTURED peak
     assert.equal(topPeaks.some(p => p.max === 4), false);
 });
+
+/* #105 (review follow-up): a burst can only ever originate from a CAPTURED
+ * bucket — one whose containing bucket lands in the not-captured prefix is a
+ * self-contradiction (`peakData[at] || b.sessions` used to paint a value
+ * straight into the "Not captured" band). It must be dropped from BOTH the
+ * chart's markPoint and the Burst Events table, the same way topPeaks
+ * excludes pre-capture entries. */
+test('captureFromNs: a burst in the not-captured prefix is dropped from markPoint and the bursts table; a captured one survives', () => {
+    const d = fivePeaks();
+    d.bursts = [
+        // t=1500 -> bucket 0 (t=1000..2000): pre-capture under captureFromNs=2500.
+        { timestamp_ns: 1500, timestamp_ms: 1, event: 'A', sessions: 4, pids: [1, 2, 3, 4] },
+        // t=3500 -> bucket 2 (t=3000..4000): captured.
+        { timestamp_ns: 3500, timestamp_ms: 3, event: 'C', sessions: 6, pids: [1, 2, 3, 4, 5, 6] },
+    ];
+    const { option, bursts, notCapturedCount } =
+        buildConcurrencyOption(d, { captureFromNs: 2500 });
+    assert.equal(notCapturedCount, 2);
+    // markPoint: only the captured burst (sessions=6) survives.
+    const mp = option.series[0].markPoint.data;
+    assert.equal(mp.length, 1);
+    assert.equal(mp[0].value, 6);
+    assert.equal(mp[0].coord[0], 2);
+    // Burst Events table model: same exclusion.
+    assert.equal(bursts.length, 1);
+    assert.equal(bursts[0].sessions, 6);
+});
+
+test('captureFromNs: every burst pre-capture -> markPoint omitted entirely, bursts table empty', () => {
+    const d = fivePeaks();
+    d.bursts = [{ timestamp_ns: 1500, timestamp_ms: 1, event: 'A', sessions: 4,
+        pids: [1, 2, 3, 4] }];
+    const { option, bursts } = buildConcurrencyOption(d, { captureFromNs: 2500 });
+    assert.equal(option.series[0].markPoint, undefined);
+    assert.deepEqual(bursts, []);
+});
