@@ -98,3 +98,36 @@ agent/concurrency-histogram-polish (run 36241234904):
   confirms no other cell was ever touched by this branch's commits); the
   other 38 baselines in the artifact were left at master's container-
   pinned bytes already in the merge.
+
+2026-09-26 (#105 x #122 merge, re-regenerate under gallery cell isolation):
+merging master's #122 gallery-cell-isolation fix (see
+history/2026-09-26-122-gallery-cell-isolation.md) reintroduced a binary
+conflict on the three gallery cells this branch had previously regenerated
+against the OLD, coupled capture (gallery/concurrency-dense-bursts.png,
+gallery/fidelity-compare-mismatch.png, gallery/histogram-dense.png) —
+master's #122 side was taken for all three at merge time (its isolated
+capture is now the authoritative baseline), then this branch's own two
+real content cells were regenerated on top of it via workflow_dispatch
+update_snapshots=true on agent/concurrency-histogram-polish (run
+36264098649), sha256-verified against the downloaded snapshot-baselines
+artifact before committing:
+  gallery/concurrency-dense-bursts.png (sha256 c40b2ddf...d22fe12d):
+  diffs 9.21% against master's post-#122 baseline (35979/390650 px,
+  bbox spans nearly the whole cell, (12,7)-(620,589)).
+  gallery/histogram-dense.png (sha256 ace965d5...c41bd202f): diffs 24.45%
+  against master's post-#122 baseline (69463/284050 px, bbox (11,7)-
+  (591,423)). Both ratios and whole-plot-area bounding boxes match this
+  entry's own documented cause (the y-axis nameLocation move reflows the
+  grid height and the piecewise visualMap requantizes every heatmap
+  cell's colour) — not any new, unexplained geometry or colour shift.
+  gallery/fidelity-compare-mismatch.png came back byte-identical (sha256
+  3877686d...7ff366480) to master's post-#122 baseline: the earlier
+  1.51%/0.0434 diffs recorded above were solely #122's now-fixed cross-
+  cell coupling (this cell's caption row shifting because a SIBLING cell
+  grew from this branch's captureFromNs change) — with isolation removing
+  that coupling, this branch has no real effect on this cell at all, so no
+  update was needed or made.
+concurrency_chart.png, concurrency_burst_table.png and histogram_heatmap.png
+(the three top-level, non-gallery panes) are untouched by #122 (isolation
+only affects gallery/ cell capture) and keep this branch's own bytes from
+the entry above.
