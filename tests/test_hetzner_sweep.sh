@@ -54,9 +54,11 @@ jq -n --argjson young_created "$((now - young_age))" \
       --argjson old_created "$((now - old_age))" '
 {
   servers: [
-    {id: 1001, name: "pgwt-dev-young", labels: {pgwt: "ephemeral", created: ($young_created | tostring)}},
-    {id: 1002, name: "pgwt-dev-old",   labels: {pgwt: "ephemeral", created: ($old_created | tostring)}},
-    {id: 1003, name: "pgwt-gate",      labels: {}}
+    {id: 1001, name: "pgwt-dev-young",   labels: {pgwt: "ephemeral", created: ($young_created | tostring)}},
+    {id: 1002, name: "pgwt-dev-old",     labels: {pgwt: "ephemeral", created: ($old_created | tostring)}},
+    {id: 1003, name: "pgwt-gate",        labels: {}},
+    {id: 1004, name: "pgwt-dev-missing", labels: {pgwt: "ephemeral"}},
+    {id: 1005, name: "pgwt-dev-garbage", labels: {pgwt: "ephemeral", created: "2026-09-26T00:00:00Z"}}
   ]
 }' > "$servers_file"
 
@@ -87,6 +89,24 @@ check_contains "$out" "deleting stale ephemeral server pgwt-dev-old" \
 check_not_contains "$out" "pgwt-gate" \
     "pgwt-gate (unlabelled, hard-coded protected name) never appears as a candidate"
 
+# ── Case 4b/4c: unknown age (missing/unparseable created=) is protected ──
+# Review round 2 (issue #162): the first version of this guard scored an
+# unparseable created= label as "infinitely old" (age = max_age + 1), which
+# bypassed the protected-age floor and got the machine deleted on an
+# ORDINARY sweep -- no --force-all, no low cutoff needed. Reproduced with
+# exactly this shape: --dry-run --servers-file under a plain
+# --max-age-hours 6. Unknown age must never be scored as old; it is
+# skipped and warned about, like an unlabelled pgwt-dev-* server.
+out_plain=$("$SWEEP" --dry-run --servers-file "$servers_file" --max-age-hours 6 2>&1)
+check_not_contains "$out_plain" "deleting stale ephemeral server pgwt-dev-missing" \
+    "a pgwt=ephemeral server with NO created= label is never deleted under a plain 6h sweep"
+check_contains "$out_plain" "pgwt-dev-missing" \
+    "the missing-label machine is at least mentioned (not silently vanished)"
+check_not_contains "$out_plain" "deleting stale ephemeral server pgwt-dev-garbage" \
+    "a pgwt=ephemeral server with an UNPARSEABLE created= label is never deleted under a plain 6h sweep"
+check_contains "$out_plain" "pgwt-dev-garbage" \
+    "the garbage-label machine is at least mentioned (not silently vanished)"
+
 # ── Case 5: --force-all with cutoff 0 does delete (the old one) ─────────
 out=$("$SWEEP" --dry-run --servers-file "$servers_file" --max-age-hours 0 --force-all 2>&1)
 rc=$?
@@ -103,6 +123,22 @@ check_contains "$out" "pgwt-dev-young" \
     "the 30s-old machine is at least mentioned (not silently vanished)"
 check_contains "$out" "protected-age floor" \
     "the 30s-old machine is explicitly reported as protected, not silently skipped"
+
+# Unknown-age machines are never deleted either, even under --force-all with
+# cutoff 0 -- unknown age is not "old", so lowering the age bar changes
+# nothing about it.
+check_not_contains "$out" "deleting stale ephemeral server pgwt-dev-missing" \
+    "--force-all with cutoff 0 still never deletes the missing-label machine"
+check_not_contains "$out" "deleting stale ephemeral server pgwt-dev-garbage" \
+    "--force-all with cutoff 0 still never deletes the garbage-label machine"
+
+# ── Case 6: --servers-file without --dry-run is refused outright ────────
+out=$("$SWEEP" --servers-file "$servers_file" --max-age-hours 6 2>&1)
+rc=$?
+check "$([[ $rc -ne 0 ]] && echo true || echo false)" \
+    "--servers-file without --dry-run exits non-zero (refused, never reaches the live-API/token path)"
+check_not_contains "$out" "^hetzner-sweep: done" \
+    "--servers-file without --dry-run never reaches the summary line (nothing evaluated)"
 
 echo
 echo "test_hetzner_sweep: $tests_passed/$tests_run passed"

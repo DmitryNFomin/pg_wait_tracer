@@ -18,9 +18,11 @@ Logs: `tests/results/box-check-*.log` (`box-check-ephemeral-*.log` for `EPHEMERA
 `make hetzner-sweep` deletes any `pgwt=ephemeral`-labelled Hetzner VM older than
 6h (also runs automatically at the start of every `box-check`); the
 persistent gate box (`pgwt-gate`) is never touched by it. A cutoff below 1h is
-refused (`FORCE_ALL=1` to override) and a VM younger than a few minutes is
-never swept regardless of cutoff (issue #162) — to remove your own VM, delete
-it by id (`tests/hetzner-vm.sh delete <id>`), never via the sweep's cutoff.
+refused (`FORCE_ALL=1` to override) and a VM younger than a few minutes, or
+whose age can't be determined at all (missing/unparseable `created=` label —
+unknown age is never treated as "infinitely old"), is never swept regardless
+of cutoff (issue #162) — to remove your own VM, delete it by id
+(`tests/hetzner-vm.sh delete <id>`), never via the sweep's cutoff.
 
 ## Definition of done
 
@@ -125,9 +127,9 @@ judges. It writes no feature code itself for anything bigger than a one-liner.
   `pgwt=ephemeral` VM regardless of owner, including another agent's
   in-flight box-check (issue #162); `tests/hetzner-sweep.sh` now refuses a
   cutoff below 1h outright (`--force-all` to override deliberately) and
-  never deletes a VM younger than a few minutes even then, but the sweep is
-  a janitor for *stale* VMs, never the tool for removing one specific
-  machine.
+  never deletes a VM younger than a few minutes, or one whose age can't be
+  determined at all, even then — but the sweep is a janitor for *stale* VMs,
+  never the tool for removing one specific machine.
 - Never harden a test against runner noise (retries, wider tolerances,
   confirmation loops). If it is red only on shared runners, say so in the PR;
   it belongs on the dedicated gate box.

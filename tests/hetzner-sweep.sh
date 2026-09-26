@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # hetzner-sweep.sh — issue #141's deletion guarantee, second half: delete
 # any Hetzner server labelled `pgwt=ephemeral` whose `created=<epoch>` label
-# is older than the max age, and warn (never auto-delete) about any
-# `pgwt-dev-*` server that is missing the `pgwt=ephemeral` label (a manual
-# creation this sweeper cannot safely judge).
+# parses AND is older than the max age; warn (never auto-delete) about any
+# `pgwt=ephemeral` server whose `created=` label is missing/unparseable
+# (unknown age), and any `pgwt-dev-*` server that is missing the
+# `pgwt=ephemeral` label entirely (a manual creation this sweeper cannot
+# safely judge).
 #
 #   tests/hetzner-sweep.sh                  # sweep, 6h cutoff
 #   tests/hetzner-sweep.sh --max-age-hours 1
@@ -36,7 +38,15 @@
 #      guard (1-11 minutes between a VM existing server-side and this
 #      script's own bookkeeping catching up) — a machine created seconds or
 #      a few minutes ago by a concurrent agent is safe by construction, no
-#      matter what cutoff (even 0, even --force-all) is passed.
+#      matter what cutoff (even 0, even --force-all) is passed. This
+#      requires knowing the age: a `pgwt=ephemeral` server whose `created=`
+#      label is MISSING or fails to parse as an epoch integer has UNKNOWN
+#      age, and unknown age is treated as "possibly seconds old", never as
+#      "infinitely old" — a first review of this fix found exactly that
+#      inversion (unparseable age was scored older than any real cutoff, so
+#      it bypassed this very guard on the very next ordinary sweep). Such a
+#      server is skipped and warned about, the same posture as an
+#      unlabelled `pgwt-dev-*` server below — never auto-deleted.
 #
 # Testing without the API: --servers-file FILE feeds a synthetic
 # `GET /servers` JSON body instead of calling Hetzner (see
@@ -82,6 +92,15 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ "$MAX_AGE_HOURS" =~ ^[0-9]+$ ]] || { echo "hetzner-sweep: --max-age-hours must be a non-negative integer, got '$MAX_AGE_HOURS'" >&2; exit 2; }
+
+# --servers-file is a test-only hook (tests/test_hetzner_sweep.sh): refuse it
+# outright without --dry-run rather than relying on the live-API code path
+# (an empty token / no curl call at all) to incidentally save us — a typo'd
+# invocation must never delete anything through a synthetic list.
+if [[ -n "$SERVERS_FILE" && "$DRY_RUN" -ne 1 ]]; then
+    echo "hetzner-sweep: --servers-file requires --dry-run (it is a test-only hook; it must never drive a real delete)" >&2
+    exit 2
+fi
 
 hcloud_token() {
     command -v security >/dev/null 2>&1 || return 1
@@ -157,17 +176,23 @@ while IFS=$'\t' read -r id name pgwt_label created_label; do
     fi
 
     if [[ "$pgwt_label" == "ephemeral" ]]; then
-        if [[ "$created_label" =~ ^[0-9]+$ ]]; then
-            age=$((now - created_label))
-        else
-            # No/garbage created= label on a pgwt=ephemeral server: treat as
-            # infinitely old rather than silently skipping it forever.
-            age=$((max_age + 1))
+        if ! [[ "$created_label" =~ ^[0-9]+$ ]]; then
+            # issue #162 (review round 2): a missing/unparseable created=
+            # label means UNKNOWN age. Unknown must never be scored as
+            # "infinitely old" (that inversion is exactly how the previous
+            # version of this guard bypassed itself on a plain, ordinary
+            # sweep) -- it is treated the same as an unlabelled pgwt-dev-*
+            # server: skipped and warned about, never auto-deleted.
+            echo "hetzner-sweep: WARNING $name (id=$id) has a missing/unparseable created= label ('$created_label') — unknown age, never auto-deleted, check manually"
+            warned=$((warned + 1))
+            continue
         fi
+
+        age=$((now - created_label))
 
         # issue #162 guard 2: independent of cutoff/--force-all, never touch
         # a server younger than the protected-age floor.
-        if [[ "$age" -ge 0 && "$age" -lt "$MIN_PROTECTED_AGE_SECONDS" ]]; then
+        if [[ "$age" -lt "$MIN_PROTECTED_AGE_SECONDS" ]]; then
             echo "hetzner-sweep: skipping $name (id=$id, age=${age}s) — younger than the ${MIN_PROTECTED_AGE_SECONDS}s protected-age floor (issue #162), never swept regardless of cutoff"
             continue
         fi
