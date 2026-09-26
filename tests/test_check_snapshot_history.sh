@@ -106,6 +106,66 @@ git -C "$repo" add tests/web_snapshots/table_queries.png tests/web_snapshots/his
 git -C "$repo" commit -q -m "regen table_queries (#201)"
 expect_exit 0 "$repo" "a committed regen+history pair on a feature branch passes"
 
+# Case 7 (RED, blocker-1 regression): a SECOND commit on the same feature
+# branch regenerates a DIFFERENT baseline with no history entry. A
+# whole-range "did ANY history file change anywhere in base..HEAD" check
+# would wrongly pass here because commit 1 (#201, above) already added a
+# history file elsewhere in the range; the guard must fail on THIS commit's
+# own unaccounted PNG and must name it.
+echo "fake-png-bytes-undocumented" > "$repo/tests/web_snapshots/table_events.png"
+git -C "$repo" add tests/web_snapshots/table_events.png
+git -C "$repo" commit -q -m "regen table_events, NO history entry (bug repro)"
+out=$("$GUARD" "$repo" 2>&1); rc=$?
+if [[ "$rc" == "1" ]]; then
+    report true "a 2nd commit's undocumented PNG is refused even though an earlier commit in the range has a history entry (exit 1)"
+else
+    report false "2nd undocumented commit refused (wanted exit 1, got $rc; output: $out)"
+fi
+if grep -q "table_events.png" <<<"$out"; then
+    report true "failure names the actually-unaccounted PNG (table_events.png)"
+else
+    report false "failure names the actually-unaccounted PNG (table_events.png); output: $out"
+fi
+if grep -q "table_queries.png" <<<"$out"; then
+    report false "failure must not also blame the already-documented commit's PNG (table_queries.png); output: $out"
+else
+    report true "failure does not blame the already-documented commit's PNG (table_queries.png)"
+fi
+
+# Case 8 (GREEN): add the missing history entry in the SAME commit (amend)
+# -> passes again, proving the fix path.
+echo "2026-09-26 (#202 demo): table_events.png regenerated for the test (fix)." \
+    > "$repo/tests/web_snapshots/history/2026-09-26-202-demo.md"
+git -C "$repo" add tests/web_snapshots/history/2026-09-26-202-demo.md
+git -C "$repo" commit -q --amend -m "regen table_events, WITH history entry (#202)"
+expect_exit 0 "$repo" "amending the same commit to add the missing history entry fixes it"
+
+# Case 9 (RED, blocker-2 regression): no comparable base exists at all (no
+# origin remote, no local 'master' branch) -- must fail closed with a clear
+# "no comparable base" message, never silently diff HEAD against itself and
+# report OK (which would make an already-committed undocumented regen on
+# this very branch invisible, exactly the shallow/single-branch-clone shape
+# CI or an unusual checkout can take).
+orphan="$tmpdir/orphan"
+mkdir -p "$orphan/tests/web_snapshots/history"
+git -C "$orphan" init -q -b trunk
+git -C "$orphan" config user.email test@example.com
+git -C "$orphan" config user.name "Test"
+echo "fake-png-bytes" > "$orphan/tests/web_snapshots/only.png"
+git -C "$orphan" add -A
+git -C "$orphan" commit -q -m "only commit, no history entry, no master/origin"
+out=$("$GUARD" "$orphan" 2>&1); rc=$?
+if [[ "$rc" == "1" ]]; then
+    report true "no resolvable base fails closed (exit 1)"
+else
+    report false "no resolvable base fails closed (wanted exit 1, got $rc; output: $out)"
+fi
+if grep -qi "no comparable base" <<<"$out"; then
+    report true "no-base failure says so explicitly (\"no comparable base\")"
+else
+    report false "no-base failure says so explicitly; output: $out"
+fi
+
 echo
 echo "$tests_passed/$tests_run passed"
 [[ $tests_failed -eq 0 ]]
