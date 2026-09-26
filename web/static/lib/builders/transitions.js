@@ -17,12 +17,50 @@
  *   - nodes carry eventId/className (server-emitted event_id — P3 wire 5)
  *   - edges filtered by `threshold`% of the max edge count; self-loops curve more
  *   - layout 'none', roam + draggable, arrow edge symbol
+ *   - `hideIdle` (issue #107, owner decision 2026-09-17 "option B"): idle-wait
+ *     edges/nodes are dropped BEFORE the threshold ranking, not after. On a
+ *     real OLTP workload the Client:ClientRead<->CPU* loop's edge COUNT
+ *     dwarfs every analytically interesting transition (Lock/IO/Timeout) —
+ *     ranking against it left every other edge below the 20%-of-max
+ *     threshold, rendering sub-pixel. Kept as pure volume ranking (the
+ *     owner's option B, not option A's reclassification) — just ranked
+ *     against the remaining edges once the idle loop is out of the pool.
  */
 
 import { eventColor, esc as escHtml } from '../format.js';
 
+/* Idle/client wait nodes, as far as they can reach this payload. Mirrors
+ * pgwt_is_idle_event() (src/wait_event.c): Activity-class waits are already
+ * excluded server-side from the DFG's node/link JSON (pgwt_is_hidden_event),
+ * so Client:ClientRead is the only idle node this builder ever sees. */
+const IDLE_NODE_NAMES = new Set(['Client:ClientRead']);
+
+export function isIdleTransitionNode(name) {
+    return IDLE_NODE_NAMES.has(name);
+}
+
+/* Drop every link touching an idle node. Returns the survivors plus how much
+ * was hidden (link count + summed transition count) so the view can say so
+ * instead of silently shrinking the graph. */
+function filterIdleLinks(links, hideIdle) {
+    if (!hideIdle) return { links, hiddenLinks: 0, hiddenValue: 0 };
+    let hiddenLinks = 0, hiddenValue = 0;
+    const kept = links.filter(l => {
+        if (isIdleTransitionNode(l.source) || isIdleTransitionNode(l.target)) {
+            hiddenLinks++;
+            hiddenValue += l.value || 0;
+            return false;
+        }
+        return true;
+    });
+    return { links: kept, hiddenLinks, hiddenValue };
+}
+
 /* Build the layout-independent pieces: the maximum edge count and a name->node
- * lookup. Cheap, exported so the slider re-render can reuse it. */
+ * lookup. Cheap, exported so the slider re-render can reuse it. Operates on
+ * whatever `links` data carries — callers that want idle edges excluded from
+ * the max/threshold ranking pass pre-filtered data (buildTransitionsOption
+ * does, via filterIdleLinks, before this runs). */
 export function transitionsContext(data) {
     const links = (data && data.links) || [];
     const nodes = (data && data.nodes) || [];
@@ -39,21 +77,27 @@ export function transitionsContext(data) {
  * `posOverrides` (optional) = { nodeName: { x, y } } — user-dragged positions
  * the view read back from the live instance (P5); they beat the grid layout
  * so a refresh/re-layout never snaps a hand-placed node back.
- * Returns { option, visibleCount }. visibleCount is the number of laid-out
- * nodes (0 => "no transitions above threshold"). */
-export function buildTransitionsOption(data, threshold, dims, posOverrides) {
+ * `hideIdle` (optional, default false — the view defaults it ON at the call
+ * site): drop Client:ClientRead edges/nodes and rank threshold/sizing against
+ * the remaining edges only (issue #107).
+ * Returns { option, visibleCount, hiddenIdleLinks, hiddenIdleValue }.
+ * visibleCount is the number of laid-out nodes (0 => nothing above
+ * threshold — hiddenIdleLinks/-Value say whether idle edges are why). */
+export function buildTransitionsOption(data, threshold, dims, posOverrides, hideIdle) {
     dims = dims || {};
     const cW = dims.width || 800, cH = dims.height || 550;
-    const links = (data && data.links) || [];
+    const rawLinks = (data && data.links) || [];
     const total = (data && data.total) || 0;
-    const { maxEdgeCount, nodeMap } = transitionsContext(data);
+    const { links, hiddenLinks: hiddenIdleLinks, hiddenValue: hiddenIdleValue } =
+        filterIdleLinks(rawLinks, hideIdle);
+    const { maxEdgeCount, nodeMap } = transitionsContext({ ...(data || {}), links });
 
     const minCount = maxEdgeCount * threshold / 100;
     const visibleLinks = links.filter(l => l.value >= minCount);
     const visibleNodes = new Set();
     visibleLinks.forEach(l => { visibleNodes.add(l.source); visibleNodes.add(l.target); });
     if (visibleNodes.size === 0) {
-        return { option: null, visibleCount: 0 };
+        return { option: null, visibleCount: 0, hiddenIdleLinks, hiddenIdleValue };
     }
 
     const maxNodeMs = Math.max(...[...visibleNodes].map(n => (nodeMap[n]?.total_ms || 1)));
@@ -139,7 +183,7 @@ export function buildTransitionsOption(data, threshold, dims, posOverrides) {
             lineStyle: { curveness: 0.3 },
         }],
     };
-    return { option, visibleCount: ecNodes.length };
+    return { option, visibleCount: ecNodes.length, hiddenIdleLinks, hiddenIdleValue };
 }
 
 /* PURE: a variants response section ("exec" or "plan") -> HTML string. Byte-

@@ -138,6 +138,8 @@ GALLERY_STATIC_CELLS = [
     "gallery-waterfall-dense-plan-3lanes",      # leader/workers + plan band
     "gallery-exec-scatter-dense-downsampled",   # log latency modes + count note
     "gallery-matrix-dense-top20",               # log-piecewise cells + top-N
+    "gallery-transitions-idle-loop-dominant",   # #107: hideIdle OFF — the pre-fix bug
+    "gallery-transitions-idle-loop-hidden",     # #107: hideIdle ON — the shipped default
     "gallery-table-configs-queries-hostile-sql",  # hostile SQL + event tints
     "gallery-table-configs-events-overflow-pctl",  # #103 ">=" overflow bounds
     "gallery-table-configs-compare-delta",        # U4: new/gone + change-floor row

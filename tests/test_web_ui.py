@@ -634,8 +634,28 @@ def test_transitions_tab(page):
 
     page.goto(MOCK_URL)
     page.wait_for_selector("#status.connected", timeout=10000)
+    # Issue #107: this view sent "num_buckets" (the server's parser only
+    # reads "buckets" — server.c cJSON_GetObjectItem(root, "buckets")), so
+    # its 200-row request was always silently ignored server-side, capped at
+    # the server's own default (50). Same regression class the matrix view's
+    # test already guards (test_matrix_view, same "transitions" cmd) —
+    # transitions.js itself had no equivalent guard until now.
+    page.evaluate("""() => {
+        window.__transitionsMsgLog = [];
+        const ws = window.__pgwt.transport.ws, send = ws.send.bind(ws);
+        ws.send = data => { window.__transitionsMsgLog.push(JSON.parse(data)); return send(data); };
+    }""")
     page.click(".tab[data-tab='transitions']")
     page.wait_for_timeout(3000)
+
+    trans_req = next((m for m in page.evaluate("window.__transitionsMsgLog")
+                      if m.get("cmd") == "transitions"), {})
+    check(trans_req.get("buckets") == 200 and "num_buckets" not in trans_req,
+          f"transitions view requests the real server's buckets parameter ({trans_req})")
+    variants_req = next((m for m in page.evaluate("window.__transitionsMsgLog")
+                        if m.get("cmd") == "variants"), {})
+    check(variants_req.get("buckets") == 20 and "num_buckets" not in variants_req,
+          f"variants request also uses buckets, not num_buckets ({variants_req})")
 
     active = page.query_selector(".tab.active")
     check(active and active.text_content() == "Transitions",
