@@ -139,6 +139,42 @@ for bin in "$TRACER" "$SERVER" "$BRIDGE"; do
     fi
 done
 
+# issue #174: web/bridge.go's NewSSHBridge runs `ssh -o BatchMode=yes root@
+# localhost ...` with no StrictHostKeyChecking override, so it silently
+# refuses (no prompt, BatchMode) the moment root's known_hosts entry for
+# localhost/127.0.0.1 doesn't match the box's actual current host key. On a
+# freshly booted VM (a cloud-init image regenerates its host keys per
+# instance -- "ssh_deletekeys", the standard "don't reuse the imaged host's
+# keys" behaviour) that mismatch shows up as every one of this script's
+# eleven tabs failing at once with an opaque "WebSocket never reached
+# #status.connected" many minutes into the run -- easy to mistake for a
+# product regression. tests/provision-runner.sh already (re)scans the
+# current key on every provisioning run, so this should never fire in
+# practice; this check exists purely to turn a real recurrence into ONE
+# immediate, named failure instead of eleven confusing ones, and to fail in
+# under a second rather than after the workload/daemon/bridge startup below.
+echo "ui_live_smoke: checking root@localhost/127.0.0.1 ssh host-key trust (issue #174)"
+ssh_hostkey_err=""
+for h in localhost 127.0.0.1; do
+    if ! ssh_out=$(ssh -o BatchMode=yes -o ConnectTimeout=5 "root@$h" true 2>&1); then
+        ssh_hostkey_err="$ssh_hostkey_err
+--- ssh -o BatchMode=yes root@$h true ---
+$ssh_out"
+    fi
+done
+if [[ -n "$ssh_hostkey_err" ]]; then
+    echo "ERROR: ssh -o BatchMode=yes root@localhost failed -- this is issue #174" \
+         "(a stale ~/.ssh/known_hosts entry for the loopback host key, typically" \
+         "after a fresh boot regenerated it), NOT a UI/bridge regression." >&2
+    echo "  Fix: ssh-keygen -R localhost -f ~/.ssh/known_hosts;" \
+         "ssh-keygen -R 127.0.0.1 -f ~/.ssh/known_hosts;" \
+         "ssh-keyscan -H localhost 127.0.0.1 >> ~/.ssh/known_hosts" >&2
+    echo "  Or re-run: tests/provision-runner.sh ubuntu (its self-trust step redoes exactly this)." >&2
+    echo "$ssh_hostkey_err" >&2
+    exit 1
+fi
+echo "ui_live_smoke: ssh host-key trust OK"
+
 # 30 min: measured on the gate box (2026-09-16/17), the real walk (real
 # network + a real --mode full daemon, vs. the Mac --mock walk's ~3-4 min)
 # took ~20-25 min end to end -- pgbench and the lock/sleep workload must
