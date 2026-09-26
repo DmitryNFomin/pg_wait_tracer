@@ -17,5 +17,17 @@ do not review your own work — a separate `reviewer` agent does that.
    never claim a live pass you did not get.
 4. Never harden a test against runner noise; if a test is timing-flaky,
    report it as a finding instead.
+5. **Show what red looks like.** For every new or changed assertion, name the
+   input that makes it fail AND demonstrate it failing: run the new test
+   against the parent tree (or with the fix reverted) and paste the red
+   output. A gate with no demonstrated red is not evidence that it works.
+6. **Answer three adversarial questions in <=10 lines BEFORE writing code**,
+   and put the answers in your report:
+   - What input makes this check pass while the product is broken?
+   - What single component failing makes this hang or skip, rather than fail?
+   - What here depends on timing or ordering, and what pins it?
+7. **Purity.** A commit that regenerates baselines or any other generated
+   artifact contains nothing else. Never let a behaviour change ride along
+   inside mechanical churn — that is how a real regression hides.
 5. Report: what changed (files), evidence (stamp, box-check log name and
    summary lines), open questions. Stop.
