@@ -22,6 +22,27 @@ export function createExecScatterView() {
         if (chart) { chart.dispose(); chart = null; }
     }
 
+    /* #171: build the banner + chart + readout shell ONCE (the histogram/
+     * concurrency/timeline ensureShell pattern); refreshes only setOption on
+     * the persisted instance. The old el.innerHTML + echarts.init on EVERY
+     * mount tore the chart down and rebuilt it every live tick regardless of
+     * whether the data actually changed -- the whole panel flashed even
+     * against an unchanged frame (issue #171's blink-ratio-1.0 findings).
+     * Rebuilt lazily whenever another render (unavailable/no-data) replaced
+     * the container's content -- a GENUINE identity change. */
+    function ensureShell(el) {
+        if (document.getElementById('scatter-chart')) return;
+        disposeChart();   // shell is being rebuilt -- any old chart DOM is gone
+        el.innerHTML =
+            '<div class="scatter-shell">' +
+            ' <div class="waterfall-banner">Plain drag zooms time; a 2D box also constrains latency. ' +
+            'Double-click zooms out.</div>' +
+            ' <div id="scatter-notes" class="chart-notes"></div>' +
+            ' <div id="scatter-chart"></div>' +
+            ' <div id="scatter-readout" class="chart-readout"></div>' +
+            '</div>';
+    }
+
     return {
         id: 'scatter', pausesLive: true,
 
@@ -41,53 +62,49 @@ export function createExecScatterView() {
         mount(el, model, ctx) {
             ctxRef = ctx; modelRef = model;
             if (ctx.summaryEl) ctx.summaryEl.innerHTML = '';
-            disposeChart();
             if (model.unavailable) {
+                disposeChart();
                 mountUnavailablePanel(el, model.unavailable, ctx);
                 return;
             }
             if (!model.hasData) {
+                disposeChart();
                 el.innerHTML = '<div class="scatter-shell"><div class="chart-notes">' +
                     model.notes.join(' · ') + '</div>' +
                     '<div class="loading">No completed, positive-duration executions for selected range</div></div>';
                 return;
             }
-            el.innerHTML =
-                '<div class="scatter-shell">' +
-                ' <div class="waterfall-banner">Plain drag zooms time; a 2D box also constrains latency. ' +
-                'Double-click zooms out.</div>' +
-                ' <div id="scatter-notes" class="chart-notes"></div>' +
-                ' <div id="scatter-chart"></div>' +
-                ' <div id="scatter-readout" class="chart-readout"></div>' +
-                '</div>';
+            ensureShell(el);
             document.getElementById('scatter-notes').textContent = model.notes.join(' · ');
             document.getElementById('scatter-readout').textContent = yReadout;
             const host = document.getElementById('scatter-chart');
-            chart = ctx.echarts.init(host, 'dark');
-            chart.on('click', (p) => {
-                if (!p || p.componentType !== 'series' || !p.data) return;
-                const intent = scatterExecutionIntent(p.data);
-                if (intent) ctxRef.onDrill(intent);
-            });
-            detachSelection = attachBoxSelection(host, chart, {
-                onSelect: (box) => {
-                    const constrained = box.hasYRange &&
-                        meaningfulScatterYRange(box.yFrom, box.yTo,
-                        modelRef.yMin, modelRef.yMax);
-                    yWindow = constrained ? { min: box.yFrom, max: box.yTo } : null;
-                    yReadout = constrained
-                        ? 'Selected latency context: ' + yText(box.yFrom, box.yTo) +
-                          ' (time and latency ranges applied)' : '';
-                    const readout = document.getElementById('scatter-readout');
-                    if (readout) readout.textContent = yReadout;
-                    ctxRef.onZoom(Math.round(box.from * 1e6), Math.round(box.to * 1e6));
-                },
-            });
-            host.addEventListener('dblclick', (e) => {
-                e.preventDefault();
-                yWindow = null; yReadout = '';
-                if (ctxRef.onZoomOut) ctxRef.onZoomOut();
-            });
+            if (!chart) {
+                chart = ctx.echarts.init(host, 'dark');
+                chart.on('click', (p) => {
+                    if (!p || p.componentType !== 'series' || !p.data) return;
+                    const intent = scatterExecutionIntent(p.data);
+                    if (intent) ctxRef.onDrill(intent);
+                });
+                detachSelection = attachBoxSelection(host, chart, {
+                    onSelect: (box) => {
+                        const constrained = box.hasYRange &&
+                            meaningfulScatterYRange(box.yFrom, box.yTo,
+                            modelRef.yMin, modelRef.yMax);
+                        yWindow = constrained ? { min: box.yFrom, max: box.yTo } : null;
+                        yReadout = constrained
+                            ? 'Selected latency context: ' + yText(box.yFrom, box.yTo) +
+                              ' (time and latency ranges applied)' : '';
+                        const readout = document.getElementById('scatter-readout');
+                        if (readout) readout.textContent = yReadout;
+                        ctxRef.onZoom(Math.round(box.from * 1e6), Math.round(box.to * 1e6));
+                    },
+                });
+                host.addEventListener('dblclick', (e) => {
+                    e.preventDefault();
+                    yWindow = null; yReadout = '';
+                    if (ctxRef.onZoomOut) ctxRef.onZoomOut();
+                });
+            }
             if (yWindow) {
                 model.option.yAxis.min = yWindow.min;
                 model.option.yAxis.max = yWindow.max;

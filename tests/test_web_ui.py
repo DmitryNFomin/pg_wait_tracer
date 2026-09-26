@@ -2491,6 +2491,76 @@ def test_matrix_view(page):
           f"matrix cell drilled the TARGET event id ({filters})")
 
 
+def test_chart_views_update_in_place_on_tick(page):
+    """#171: scatter/matrix/waterfall must update their EXISTING ECharts
+    instance on a live tick, not tear the panel's host div down and rebuild
+    it -- that per-tick teardown was the demo-blocking flash the live smoke
+    walk measured as a blink ratio of 1.0 (the whole panel differing between
+    two frames of the SAME data).
+
+    Pins BOTH directions, per the issue's own bypass-suite ask ("what makes a
+    LEGITIMATE rebuild still happen?"):
+      1. the SAME canvas survives an unrelated live tick (no needless
+         teardown against unchanged mock data);
+      2. a genuine identity change -- leaving the tab and coming back --
+         still tears down and recreates a fresh canvas, so the fix is not a
+         "never rebuild" regression that would leave a stale chart behind.
+
+    Uses the same ws.send wire-tap idiom as ui_live_smoke.py's TICK_HOOK_JS /
+    test_legend_hover_survives_tick's tick wait: the 'aas' command is sent on
+    every 5s auto-refresh cycle regardless of which tab is active, so it is a
+    reliable, non-arbitrary tick marker (not a flat sleep guessed at the
+    cadence)."""
+    print("--- Test #171: chart views update in place (not rebuilt) on a tick ---")
+    page.goto(MOCK_URL)
+    page.wait_for_selector("#status.connected", timeout=10000)
+    page.evaluate("""() => {
+        window.__tickCount = 0;
+        const ws = window.__pgwt.transport.ws;
+        const send = ws.send.bind(ws);
+        ws.send = data => {
+            try {
+                const msg = JSON.parse(data);
+                if (msg && msg.cmd === 'aas') window.__tickCount++;
+            } catch (e) {}
+            return send(data);
+        };
+    }""")
+
+    for tab, selector in (("scatter", "#scatter-chart canvas"),
+                          ("matrix", "#matrix-chart canvas"),
+                          ("waterfall", "#waterfall-chart canvas")):
+        page.click(f".tab[data-tab='{tab}']")
+        page.wait_for_selector(selector, timeout=5000)
+        # scatter/matrix/waterfall all pause auto-refresh on entry (P4) --
+        # resume it explicitly, exactly like the live-smoke harness's
+        # _navigate_to_tab does, to reproduce the tick the demo rehearsal
+        # actually failed against.
+        if not page.evaluate(
+                "document.getElementById('live-btn').classList.contains('active')"):
+            page.click("#live-btn")
+        handle = page.query_selector(selector)
+        check(handle is not None, f"{tab} chart canvas present before a tick")
+
+        before = page.evaluate("window.__tickCount")
+        page.wait_for_function(
+            "window.__tickCount > " + str(before), timeout=15000)
+        page.wait_for_timeout(500)   # let that tick's requests()/mount() finish
+        check(handle.evaluate("el => el.isConnected"),
+              f"{tab}'s chart canvas survives a live tick unchanged "
+              "(no rebuild-on-tick flash)")
+
+        # Genuine identity change: switching tabs away and back must still
+        # produce a NEW canvas.
+        page.click(".tab[data-tab='overview']")
+        page.wait_for_timeout(200)
+        page.click(f".tab[data-tab='{tab}']")
+        page.wait_for_selector(selector, timeout=5000)
+        check(not handle.evaluate("el => el.isConnected"),
+              f"{tab} rebuilds a fresh canvas on a genuine identity change "
+              "(tab re-entry)")
+
+
 def test_b6_deep_links(page):
     """Each new tab is hash-addressable; waterfall hydrates query_id before
     its initial executions request."""
@@ -3416,6 +3486,7 @@ def main():
                 test_query_to_waterfall_pivot,
                 test_scatter_view,
                 test_matrix_view,
+                test_chart_views_update_in_place_on_tick,
                 test_b6_deep_links,
             ]
             for fn in tests:

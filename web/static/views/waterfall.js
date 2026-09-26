@@ -24,10 +24,42 @@ export function createWaterfallView() {
     let detailRef = null;
     let detailOpts = null;
     let currentWindow = null;
+    // #171: the drag-select listener below is attached ONCE against the
+    // persisted chart instance, so it must read the CURRENT axisOrigin
+    // through this ref rather than close over the `model` local from
+    // whichever renderDetail() call happened to create it -- a later tick's
+    // model would otherwise silently zoom against a stale origin.
+    let axisOriginRef = null;
 
     function disposeChart() {
         if (detachSelection) { detachSelection(); detachSelection = null; }
         if (chart) { chart.dispose(); chart = null; }
+    }
+
+    /* #171: build the executions-list + waterfall-pane shell ONCE (the
+     * histogram/concurrency/timeline ensureShell pattern); refreshes only
+     * refill the table and feed the persisted chart instance (renderDetail
+     * already does that part -- see its own `if (!chart)` guard). The old
+     * el.innerHTML on EVERY mount tore the whole panel down and rebuilt it
+     * every live tick even when the selected execution had not changed --
+     * the whole panel flashed against unchanged data (issue #171). Rebuilt
+     * lazily whenever an unavailable mount replaced the container's content
+     * -- a GENUINE identity change. */
+    function ensureShell(el) {
+        if (document.getElementById('executions-table')) return;
+        disposeChart();   // shell is being rebuilt -- any old chart DOM is gone
+        el.innerHTML =
+            '<section class="execution-list">' +
+            ' <div class="view-title">Executions <span>latest first</span></div>' +
+            ' <div id="executions-table"></div>' +
+            '</section>' +
+            '<section class="waterfall-pane">' +
+            ' <div class="waterfall-banner"><span>Plain drag zooms this loaded execution; ' +
+            'double-click restores it.</span><span id="waterfall-zoom-state"></span></div>' +
+            ' <div id="waterfall-truncation"></div>' +
+            ' <div id="waterfall-chart"></div>' +
+            ' <div id="waterfall-readout" class="chart-readout">Click a bar to inspect it.</div>' +
+            '</section>';
     }
 
     function chooseExecution(rows) {
@@ -84,15 +116,17 @@ export function createWaterfallView() {
             return;
         }
         currentWindow = { from: model.windowFrom, to: model.windowTo };
+        axisOriginRef = model.axisOrigin;
         host.style.height = model.chartHeight + 'px';
         if (!chart) {
+            host.innerHTML = '';   // clear a leftover "no events"/"select an execution" placeholder
             chart = ctxRef.echarts.init(host, 'dark');
             chart.on('click', (p) => {
                 if (p && p.componentType === 'series' && p.data) setReadout(p.data);
             });
             detachSelection = attachSelection(host, chart, {
                 onSelect: (range) => {
-                    const origin = BigInt(model.axisOrigin);
+                    const origin = BigInt(axisOriginRef);
                     renderDetail(String(origin + BigInt(Math.round(range.from))),
                                  String(origin + BigInt(Math.round(range.to))));
                 },
@@ -166,31 +200,23 @@ export function createWaterfallView() {
 
         mount(el, model, ctx) {
             ctxRef = ctx;
-            disposeChart();
             detailRef = null; detailOpts = null; currentWindow = null;
             if (ctx.summaryEl) ctx.summaryEl.innerHTML = '';
             if (model.unavailable) {
+                disposeChart();
                 mountUnavailablePanel(el, model.unavailable, ctx);
                 return;
             }
-            el.innerHTML =
-                '<section class="execution-list">' +
-                ' <div class="view-title">Executions <span>latest first</span></div>' +
-                ' <div id="executions-table"></div>' +
-                '</section>' +
-                '<section class="waterfall-pane">' +
-                ' <div class="waterfall-banner"><span>Plain drag zooms this loaded execution; ' +
-                'double-click restores it.</span><span id="waterfall-zoom-state"></span></div>' +
-                ' <div id="waterfall-truncation"></div>' +
-                ' <div id="waterfall-chart"></div>' +
-                ' <div id="waterfall-readout" class="chart-readout">Click a bar to inspect it.</div>' +
-                '</section>';
+            ensureShell(el);
             const tableHost = document.getElementById('executions-table');
+            const pane = document.querySelector('.waterfall-pane');
             if (!model.table.hasRows) {
+                disposeChart();
                 tableHost.innerHTML = '<div class="loading">No executions for selected range</div>';
-                document.querySelector('.waterfall-pane').style.display = 'none';
+                pane.style.display = 'none';
                 return;
             }
+            pane.style.display = '';
             ctx.mountTable(tableHost, executionsConfig, model.table.table, {
                 onRowClick: (row) => ctx.onDrill(Object.assign({
                     pivot: 'waterfall-execution',
@@ -198,6 +224,7 @@ export function createWaterfallView() {
                 truncation: model.table.truncation,
             });
             if (!model.detail || !model.waterfall) {
+                disposeChart();
                 document.getElementById('waterfall-chart').innerHTML =
                     '<div class="loading">Select an execution</div>';
                 return;
@@ -229,6 +256,7 @@ export function createWaterfallView() {
         enter(ctx) { ctxRef = ctx; },
         leave() {
             disposeChart(); detailRef = null; currentWindow = null;
+            axisOriginRef = null;
             pendingSelection = null; selected = null;
         },
         resize() { if (chart) chart.resize(); },
