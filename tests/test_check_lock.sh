@@ -1,9 +1,21 @@
 #!/usr/bin/env bash
-# test_check_lock.sh -- bypass suite for scripts/check-lock.sh, the
-# machine-wide mutual exclusion around `make check` (issue: raising the
-# in-flight-agent limit to three on one Mac). Per the implementer contract's
-# bypass-suite clause: a test per way this mechanism can fail open or fail
-# wrong.
+# test_check_lock.sh -- bypass suite for scripts/check-lock.sh (+
+# scripts/check-lock.py), the machine-wide mutual exclusion around
+# `make check` (issue: raising the in-flight-agent limit to three on one
+# Mac). Per the implementer contract's bypass-suite clause: a test per way
+# this mechanism can fail open or fail wrong.
+#
+# History: a first version judged staleness in userspace (recorded pid +
+# `ps` start-time fingerprint) and reclaimed a dead holder's lock by
+# `mv`-ing a challenger's claim over it, then reading the result back. A
+# concurrency review reproduced double-holds (case "N" below, run against
+# that version, red 3/20 -- see git log for the exact numbers) because
+# rename-then-read-back is two syscalls, not one atomic operation. The
+# fix replaces that with a real kernel lock (flock(2) via Python's
+# `fcntl.flock`, see scripts/check-lock.py's docstring) -- there is no
+# userspace staleness judgment left to get wrong, so the old "reused pid"
+# and "kill(pid,0) permission error" failure modes are gone by
+# construction, not patched over.
 #
 # Every case below runs against a throwaway lock file under `mktemp -d`
 # (removed on exit) via PGWT_CHECK_LOCK_FILE -- never the real
@@ -47,22 +59,56 @@ report() {
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
 
-run_locked() {
-    # run_locked LOCKFILE cmd... -- convenience wrapper, cd'd to repo root
-    # so a relative-path invocation from any cwd still finds check-lock.sh.
-    (cd "$REPO_ROOT" && PGWT_CHECK_LOCK_FILE="$1" "${@:2}")
+# race_once LOCKFILE LOGFILE N_WAITERS -- launches N_WAITERS concurrent
+# check-lock.sh runs against LOCKFILE, each appending a start/end pair
+# (with nanosecond timestamps) to LOGFILE, then reports via stdout
+# "OK" or "OVERLAP" (whether any two critical sections' [start,end]
+# intervals overlapped).
+race_once() {
+    local lockfile="$1" logfile="$2" n="$3"
+    : > "$logfile"
+    local pids=()
+    local w
+    for ((w = 1; w <= n; w++)); do
+        (cd "$REPO_ROOT" && PGWT_CHECK_LOCK_FILE="$lockfile" PGWT_CHECK_LOCK_POLL=1 "$LOCK_BIN" \
+            bash -c "echo start:$w:\$(date +%s%N) >> '$logfile'; sleep 0.15; echo end:$w:\$(date +%s%N) >> '$logfile'") \
+            > /dev/null 2>&1 &
+        pids+=($!)
+    done
+    wait "${pids[@]}" 2>/dev/null
+    python3 - "$logfile" <<'PYEOF'
+import sys
+events = []
+for line in open(sys.argv[1]):
+    line = line.strip()
+    if not line:
+        continue
+    kind, w, ts = line.split(":")
+    events.append((int(ts), 0 if kind == "end" else 1, kind, w))
+# ends sort before starts at the same timestamp so a zero-width gap is
+# never mistaken for an overlap.
+events.sort()
+active = set()
+overlap = False
+for _, _, kind, w in events:
+    if kind == "start":
+        if active:
+            overlap = True
+        active.add(w)
+    else:
+        active.discard(w)
+print("OVERLAP" if overlap else "OK")
+PYEOF
 }
 
 # ---------------------------------------------------------------------------
-# 0. Baseline: uncontended acquire runs the command, propagates its exit
-#    code, and leaves no lock file behind afterwards.
+# 0. Baseline: uncontended acquire runs the command and propagates its
+#    exit code.
 # ---------------------------------------------------------------------------
 lf="$tmpdir/case0.lock"
 out=$(cd "$REPO_ROOT" && PGWT_CHECK_LOCK_FILE="$lf" "$LOCK_BIN" echo "hello"); rc=$?
 [[ "$out" == "hello" && $rc -eq 0 ]] && ok=true || ok=false
 report "$ok" "uncontended acquire runs the wrapped command and returns its exit code"
-[[ ! -e "$lf" ]] && ok=true || ok=false
-report "$ok" "lock file is removed after a normal run"
 
 (cd "$REPO_ROOT" && PGWT_CHECK_LOCK_FILE="$tmpdir/case0b.lock" "$LOCK_BIN" bash -c 'exit 7')
 rc=$?
@@ -70,35 +116,13 @@ rc=$?
 report "$ok" "wrapped command's own exit code is propagated (got $rc, want 7)"
 
 # ---------------------------------------------------------------------------
-# 1. BYPASS: two starts racing for the lock at the same instant. A lock
-#    that occasionally lets both through is worse than none. Two processes
-#    launched back-to-back with no stagger must still be fully serialized:
-#    the second one's "start" marker must never appear before the first
-#    one's "end" marker.
+# 1. BYPASS: two starts racing for the lock at the same instant, against a
+#    lock file that does not exist yet (the "nobody has ever held this"
+#    path). Must still be fully serialized.
 # ---------------------------------------------------------------------------
-lf="$tmpdir/case1.lock"
-racelog="$tmpdir/case1.race.log"
-: > "$racelog"
-export racelog
-(cd "$REPO_ROOT" && PGWT_CHECK_LOCK_FILE="$lf" "$LOCK_BIN" \
-    bash -c '{ echo "start:A"; sleep 1; echo "end:A"; } >> "$racelog"') &
-r1=$!
-(cd "$REPO_ROOT" && PGWT_CHECK_LOCK_FILE="$lf" "$LOCK_BIN" \
-    bash -c '{ echo "start:B"; sleep 1; echo "end:B"; } >> "$racelog"') &
-r2=$!
-wait "$r1" "$r2"
-mapfile -t lines < "$racelog"
-if [[ "${#lines[@]}" -eq 4 ]] \
-    && [[ "${lines[0]}" == start:* ]] \
-    && [[ "${lines[1]}" == "end:${lines[0]#start:}" ]] \
-    && [[ "${lines[2]}" == start:* ]] \
-    && [[ "${lines[2]}" != "${lines[0]}" ]] \
-    && [[ "${lines[3]}" == "end:${lines[2]#start:}" ]]; then
-    ok=true
-else
-    ok=false
-fi
-report "$ok" "two racing starts are fully serialized, never interleaved (log: ${lines[*]:-<empty>})"
+result=$(race_once "$tmpdir/case1.lock" "$tmpdir/case1.race.log" 2)
+[[ "$result" == "OK" ]] && ok=true || ok=false
+report "$ok" "two fresh-file racing starts are fully serialized (result: $result)"
 
 # ---------------------------------------------------------------------------
 # 2. BYPASS: a crash (SIGKILL, e.g. this machine's memory manager) must not
@@ -109,9 +133,13 @@ lf="$tmpdir/case2.lock"
 PGWT_CHECK_LOCK_FILE="$lf" PGWT_CHECK_LOCK_POLL=1 PGWT_CHECK_LOCK_NOTIFY=1 \
     "$LOCK_BIN" sleep 60 &
 holder=$!
-for _ in $(seq 1 50); do [[ -f "$lf" ]] && break; sleep 0.1; done
-[[ -f "$lf" ]] && ok=true || ok=false
-report "$ok" "holder acquired the lock before being killed"
+# There is no lock FILE-existence signal anymore (the file is created
+# empty up front and flock'd in place) -- wait for the holder's pid to
+# actually be running instead.
+for _ in $(seq 1 50); do kill -0 "$holder" 2>/dev/null && break; sleep 0.1; done
+kill -0 "$holder" 2>/dev/null && ok=true || ok=false
+report "$ok" "holder process is running before being killed"
+sleep 0.3  # give it a moment to actually reach the flock'd section
 kill -9 "$holder" 2>/dev/null
 wait "$holder" 2>/dev/null
 waiter_out=$(timeout 15 env PGWT_CHECK_LOCK_FILE="$lf" PGWT_CHECK_LOCK_POLL=1 \
@@ -121,30 +149,36 @@ waiter_rc=$?
 report "$ok" "a waiter acquires cleanly after the holder is SIGKILLed (rc=$waiter_rc out='$waiter_out')"
 
 # ---------------------------------------------------------------------------
-# 3. BYPASS: the holder's pid gets reused by an unrelated (still live!)
-#    process. kill(pid, 0) alone -- what shlock itself uses, and its own
-#    man page lists as a bug -- would see "alive" and wedge forever.
-#    Staleness must be judged by pid identity (a start-time fingerprint),
-#    not just liveness.
+# 3. BYPASS (the reviewer-reproduced blocker): SEVERAL concurrent waiters
+#    against ONE fabricated lock file with garbage/stale-looking content
+#    (an old design's "dead holder" record) but -- critically -- no
+#    process actually holding the OS-level flock on it. This is exactly
+#    the shape of the double-hold bug: repeat across many iterations and
+#    assert NO iteration ever has two overlapping critical sections.
+#    Against the fixed (flock-based) check-lock.py this must be 0/N.
 # ---------------------------------------------------------------------------
-lf="$tmpdir/case3.lock"
-cat > "$lf" <<EOF
-pid=$$
+n_waiters=8
+n_iters=15
+overlaps=0
+for ((iter = 1; iter <= n_iters; iter++)); do
+    lf="$tmpdir/case3.iter$iter.lock"
+    # Garbage content mimicking an old-format "dead holder" record. It
+    # must be completely irrelevant to correctness now: nobody has an
+    # actual flock on this fd, so every waiter is equally free to take it.
+    cat > "$lf" <<'EOF'
+pid=999999
 fingerprint=Wed Jan  1 00:00:00 2020
 host=nowhere
 user=nobody
-label=fabricated-stale-holder (simulates a reused pid)
+label=fabricated-stale-holder (garbage content, no live flock)
 cmd=fake
 acquired_at=1
-nonce=fake-nonce
 EOF
-# $$ (this test script) is unquestionably alive, so a naive "kill -0 only"
-# check would treat this lock as held forever.
-out=$(timeout 15 env PGWT_CHECK_LOCK_FILE="$lf" PGWT_CHECK_LOCK_POLL=1 \
-    "$LOCK_BIN" echo "reclaimed despite live pid")
-rc=$?
-[[ $rc -eq 0 && "$out" == "reclaimed despite live pid" ]] && ok=true || ok=false
-report "$ok" "a live pid with a mismatched fingerprint (reused pid) is treated as stale, not wedged (rc=$rc out='$out')"
+    result=$(race_once "$lf" "$tmpdir/case3.iter$iter.race.log" "$n_waiters")
+    [[ "$result" == "OVERLAP" ]] && overlaps=$((overlaps + 1))
+done
+[[ $overlaps -eq 0 ]] && ok=true || ok=false
+report "$ok" "$n_waiters concurrent waiters x $n_iters iterations against a fabricated stale lock: $overlaps/$n_iters had an overlapping critical section (want 0)"
 
 # ---------------------------------------------------------------------------
 # 4. BYPASS: the lock directory is unwritable. Must fail LOUDLY and never
@@ -167,66 +201,62 @@ chmod 755 "$noperm"
 
 # ---------------------------------------------------------------------------
 # 5. BYPASS: an interrupted waiter (Ctrl-C, i.e. SIGINT to the whole
-#    foreground process group) must leave no debris -- and the real
-#    holder's lock must be untouched, and a later fresh acquire must still
-#    work.
+#    foreground process group) must leave no debris, must never have run
+#    its wrapped command, and a later fresh acquire must still work.
 # ---------------------------------------------------------------------------
 lf="$tmpdir/case5.lock"
 PGWT_CHECK_LOCK_FILE="$lf" PGWT_CHECK_LOCK_POLL=1 PGWT_CHECK_LOCK_NOTIFY=1 \
     "$LOCK_BIN" sleep 6 > /dev/null 2>&1 &
 holder=$!
-for _ in $(seq 1 50); do [[ -f "$lf" ]] && break; sleep 0.1; done
+for _ in $(seq 1 50); do kill -0 "$holder" 2>/dev/null && break; sleep 0.1; done
+sleep 0.3
 waiter_marker="$tmpdir/case5.waiter.ran"
 rm -f "$waiter_marker"
 PGWT_CHECK_LOCK_FILE="$lf" PGWT_CHECK_LOCK_POLL=1 PGWT_CHECK_LOCK_NOTIFY=1 \
     "$LOCK_BIN" touch "$waiter_marker" > /dev/null 2>&1 &
 waiter=$!
-for _ in $(seq 1 50); do
-    ls "${lf}.claim."* >/dev/null 2>&1 && break
-    sleep 0.1
-done
-claim_before=$(ls "${lf}".claim.* 2>/dev/null | wc -l | tr -d ' ')
-[[ "$claim_before" -ge 1 ]] && ok=true || ok=false
-report "$ok" "waiter created its claim file while waiting (found $claim_before)"
+sleep 1
 kill -INT -- -"$waiter" 2>/dev/null
 wait "$waiter" 2>/dev/null
 waiter_rc=$?
-claim_after=$(ls "${lf}".claim.* 2>/dev/null | wc -l | tr -d ' ')
-[[ "$claim_after" -eq 0 ]] && ok=true || ok=false
-report "$ok" "interrupted waiter leaves no claim-file debris (found $claim_after after SIGINT, rc=$waiter_rc)"
-[[ -f "$lf" ]] && ok=true || ok=false
-report "$ok" "the real holder's lock file is untouched by the interrupted waiter"
 [[ ! -e "$waiter_marker" ]] && ok=true || ok=false
-report "$ok" "the interrupted waiter never ran its wrapped command"
+report "$ok" "the interrupted waiter never ran its wrapped command (rc=$waiter_rc)"
+[[ $waiter_rc -ge 128 ]] && ok=true || ok=false
+report "$ok" "interrupted waiter's exit code reflects the signal (rc=$waiter_rc, want >=128)"
+sidecars=$(ls "${lf}".* 2>/dev/null | wc -l | tr -d ' ')
+[[ "$sidecars" -eq 0 ]] && ok=true || ok=false
+report "$ok" "interrupted waiter leaves no sidecar/claim debris next to the lock file (found $sidecars)"
 wait "$holder" 2>/dev/null
-[[ ! -e "$lf" ]] && ok=true || ok=false
-report "$ok" "the real holder still released cleanly after the unrelated waiter was interrupted"
+holder_rc=$?
+[[ $holder_rc -eq 0 ]] && ok=true || ok=false
+report "$ok" "the real holder still completed and released cleanly despite the unrelated interrupted waiter (rc=$holder_rc)"
 fresh_out=$(timeout 10 env PGWT_CHECK_LOCK_FILE="$lf" "$LOCK_BIN" echo "fresh acquire ok")
 fresh_rc=$?
 [[ $fresh_rc -eq 0 && "$fresh_out" == "fresh acquire ok" ]] && ok=true || ok=false
 report "$ok" "a fresh acquire after the interrupted-waiter episode still works (rc=$fresh_rc out='$fresh_out')"
 
 # ---------------------------------------------------------------------------
-# 6. BYPASS: the lock tool itself (here: `ln`, the primitive this locking
-#    scheme is built on) is missing from PATH on this platform. Must fail
-#    loudly, never silently run the wrapped command unlocked.
+# 6. BYPASS: the lock tool itself (python3, since macOS has no flock(1) and
+#    the real locking primitive is flock(2) via `fcntl.flock`) is missing
+#    from PATH. Must fail loudly, never silently run the wrapped command
+#    unlocked.
 # ---------------------------------------------------------------------------
 minpath="$tmpdir/minpath"
 mkdir -p "$minpath"
-for t in bash sed rm cat date mv kill ps hostname id; do
+for t in bash sed cat; do
     p="$(command -v "$t" 2>/dev/null)" && ln -s "$p" "$minpath/$t"
 done
-# Deliberately omit `ln` from minpath.
+# Deliberately omit python3 from minpath.
 marker6="$tmpdir/case6.marker"
 rm -f "$marker6"
-err6=$(PATH="$minpath" PGWT_CHECK_LOCK_FILE="$tmpdir/case6.lock" bash "$LOCK_BIN" touch "$marker6" 2>&1)
+err6=$(PATH="$minpath" bash "$LOCK_BIN" touch "$marker6" 2>&1)
 rc6=$?
 [[ $rc6 -ne 0 ]] && ok=true || ok=false
-report "$ok" "missing lock tool (ln): check-lock.sh exits non-zero (rc=$rc6)"
+report "$ok" "missing lock tool (python3): check-lock.sh exits non-zero (rc=$rc6)"
 [[ ! -e "$marker6" ]] && ok=true || ok=false
-report "$ok" "missing lock tool (ln): the wrapped command never ran (fail closed, not silently unlocked)"
+report "$ok" "missing lock tool (python3): the wrapped command never ran (fail closed, not silently unlocked)"
 [[ "$err6" == *"missing required tool"* ]] && ok=true || ok=false
-report "$ok" "missing lock tool (ln): error names the missing tool (output: $err6)"
+report "$ok" "missing lock tool (python3): error names the missing tool (output: $err6)"
 
 # ---------------------------------------------------------------------------
 # 7. Human escape hatch: PGWT_SKIP_CHECK_LOCK=1 bypasses locking entirely
