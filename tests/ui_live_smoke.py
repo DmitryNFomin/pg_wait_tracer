@@ -471,7 +471,21 @@ def _safe_panel_screenshot(page, tab_id):
     mid-call -- observed for real (Waterfall/Matrix/Scatter re-mounting their
     host div when the underlying execution/transition identity rotates under
     continuous real load); the caller treats None as maximal instability,
-    not a skip."""
+    not a skip.
+
+    query_selector() + .screenshot() is TWO separate CDP round trips: every
+    chart-tab view rebuilds its host div via el.innerHTML on EVERY refresh
+    (not just on a data-identity change -- see web/static/views/exec-scatter.js
+    mount() / matrix.js mount()), synchronously and atomically from the page's
+    own single JS thread's point of view. If that rebuild happens to run in
+    the gap between this function's two round trips, the handle this function
+    already holds goes stale and .screenshot() throws -- a real, if narrow,
+    Playwright-side race against a legitimate, instantaneous DOM swap, not
+    evidence the panel was ever actually absent/blank. Fine for THIS
+    function's own callers (the gating blink pair, offset sweep -- issue #119
+    -- which already treat a None result as "maximal instability", never a
+    crash, exactly because of this). NOT safe for a single-sample hard
+    pass/fail check -- see _atomic_panel_snapshot below, used for that."""
     panel = page.query_selector(_PANEL_ELEMENT_SELECTOR[tab_id])
     if panel is None:
         return None
@@ -479,6 +493,36 @@ def _safe_panel_screenshot(page, tab_id):
         return panel.screenshot()
     except PWError:
         return None
+
+
+# issue #142: single atomic page.evaluate() -- query the selector AND read its
+# content in the SAME synchronous JS turn, so there is no gap for a page-side
+# view's own (synchronous, atomic) el.innerHTML rebuild to straddle, unlike
+# _safe_panel_screenshot's two separate CDP round trips (query_selector, then
+# a LATER .screenshot() call). Reads the chart's own <canvas> pixels via
+# toDataURL() when present (same JS thread, no separate screenshot API call);
+# falls back to a DOM-content check for table tabs, whose panel selector
+# (#table-container) is the ViewManager's own stable containerEl and is never
+# replaced by a view's mount() (only its children are -- see app.js
+# `vm.setContainer(tableEl)`, called once, never re-targeted per view).
+_ATOMIC_PANEL_SNAPSHOT_JS = """(sel) => {
+    const el = document.querySelector(sel);
+    if (!el) return {present: false};
+    const canvas = el.querySelector('canvas');
+    if (canvas) {
+        return {present: true, canvas: true, dataURL: canvas.toDataURL('image/png')};
+    }
+    return {present: true, canvas: false,
+            hasContent: el.children.length > 0 || el.textContent.trim().length > 0};
+}"""
+
+
+def _atomic_panel_snapshot(page, tab_id):
+    """Single-round-trip, race-free read of the panel's current state -- see
+    _ATOMIC_PANEL_SNAPSHOT_JS. Returns the JS snapshot dict; ui_live_smoke_lib.
+    blind_window_ok() turns it into a pass/fail verdict (kept pure/testable
+    there, same idiom as every other verdict function in this module)."""
+    return page.evaluate(_ATOMIC_PANEL_SNAPSHOT_JS, _PANEL_ELEMENT_SELECTOR[tab_id])
 
 
 def _capture_at_offset(page, tab_id, tick_ts_ms, offset_ms):
@@ -635,18 +679,30 @@ def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
             # landing and the render-check retry + gating settle below,
             # NOTHING is sampled -- a teardown-to-blank flash right after the
             # tick (a CONTINUITY violation) would go completely unnoticed by
-            # the later, already-resettled blink pair. Grab one frame ~100ms
-            # after the tick and assert the panel is not blank. Widens
-            # nothing: this is an ADDITIONAL check, not a relaxed one.
+            # the later, already-resettled blink pair. Grab one atomic
+            # snapshot ~100ms after the tick and assert the panel is not
+            # blank. Widens nothing: this is an ADDITIONAL check, not a
+            # relaxed one.
+            #
+            # issue #142: this used to be _safe_panel_screenshot() (two
+            # separate CDP round trips: query_selector, then a LATER
+            # .screenshot() call), which intermittently reported scatter/
+            # matrix as "gone" -- not because the panel was ever actually
+            # absent or blank, but because chart-tab views rebuild their host
+            # div via el.innerHTML on EVERY refresh (synchronously, so no
+            # externally-observable in-between state exists -- see
+            # _safe_panel_screenshot's own updated docstring), and that
+            # rebuild occasionally landed in the gap between the two round
+            # trips, staling the handle this function already held.
+            # _atomic_panel_snapshot reads the panel in a SINGLE
+            # page.evaluate() call, closing that gap by construction: the
+            # panel is observed at a moment the product actually holds a
+            # single, atomic DOM/paint state, never a torn one.
             page.wait_for_timeout(100)
-            blind_frame = _safe_panel_screenshot(page, tab_id)
-            if blind_frame is None:
+            ok, reason = lib.blind_window_ok(_atomic_panel_snapshot(page, tab_id))
+            if not ok:
                 raise SmokeFailure(
-                    f"tick {i}: panel element gone ~100ms after the tick "
-                    "(CONTINUITY teardown-to-blank)")
-            if lib.is_blank_frame(lib.png_bytes_to_array(blind_frame)):
-                raise SmokeFailure(
-                    f"tick {i}: panel went blank ~100ms after the tick "
+                    f"tick {i}: {reason} ~100ms after the tick "
                     "(CONTINUITY teardown-to-blank)")
 
             render_ok, render_detail = _poll_render_check(page, tab_id)
