@@ -1,9 +1,15 @@
 #115 RECONCILIATION — one machine, one harness, both prior methods scored
 simultaneously, 3 repeats per configuration.
 
-Machine    Hetzner cx33 (4 vCPU), pgwt=gate-snapshot image, id 167614640,
-           Ubuntu 24.04, kernel.sched_schedstats=1, PG 18.6 port 5418,
-           pgbench scale 10 (TPC-B), master @ 96f522e.
+  THIS FILE HOLDS THE RE-VERIFIED NUMBERS (fixed tools, VM id 167631563).
+  The first pass, run with the pre-fix tools on VM id 167614640, is kept
+  verbatim in v1_prefix_tools/ so the two can be compared. Section 0 below
+  says exactly what the two tooling bugs did and did not touch. Both VMs
+  were deleted by id ("confirmed deleted").
+
+Machine    Hetzner cx33 (4 vCPU), pgwt=gate-snapshot image, Ubuntu 24.04,
+           kernel.sched_schedstats=1, PG 18.6 port 5418, pgbench scale 10
+           (TPC-B), master @ 96f522e.
 Window     the escalation window only, trimmed 3 s at each end and clamped to
            every observer's own coverage, so all five observers span exactly
            the same wall interval. sat = 8 clients, unsat = 2 clients, 39 s.
@@ -11,9 +17,11 @@ Observers  exact tier (xp_gate S/A/B/C) | our sampled tier | pg_stat_activity
            at ~49 Hz (four classifier variants) | /proc schedstat counter
            deltas | sched_switch/sched_wakeup tracepoints incl. the directly
            measured sampler scheduling bias.
-Harness    recon_capture.sh (bias_capture.sh + an escalation-window stamp and
-           a longer kernel sampler), recon_analyze.sh, pgsa_variants.py,
-           recon_summary.py, sched2.bt.tmpl.  Per-run output in sat*.txt /
+Tools      xp_gate.c and kernel_cpu_arbiter.py taken from the FIXED copies on
+           agent/pgws-bias-measurement @ f876e16
+           (tests/results/issue115_pgws/).
+Harness    recon_capture.sh, recon_analyze.sh, pgsa_variants.py,
+           recon_summary.py, sched2.bt.tmpl. Per-run output in sat*.txt /
            unsat*.txt, the full parsed table in SUMMARY.txt.
 
 NOTE on the arbiter harness as committed: tests/results/issue115_arbiter/
@@ -23,61 +31,112 @@ on-CPU = run-queue = off-CPU = 0.000 s. sched2.bt.tmpl here restores the
 template (__TRACK__ / __SOBS__ / __SAMPLER__).
 
 ================================================================================
-1. THE RECONCILED NUMBERS  (mean [min..max] over 3 repeats)
+0. THE TWO TOOLING BUGS, AND WHAT THEY TOUCHED HERE
+================================================================================
+
+BUG 1 — xp_gate `--exclude-pid` was capped at 16 and silently ignored the rest.
+  Exposed: only the M2 ("strict backend set") exact-tier rows, which are the
+  only place this run passes a long exclude list. NOT exposed: the analysis
+  window (derived with no excludes), the M1 exact rows (one exclude), every
+  pg_stat_activity figure (pgsa_variants.py filters with a Python set), and
+  every kernel/schedstat/tracepoint figure (`--pids`, not `--exclude-pid`).
+  Of the six first-pass runs, only sat1 exceeded the cap: 33 excludes passed,
+  17 silently ignored. The other five passed 1-7.
+  MEASURED SIZE: the re-run scores every capture twice with the fixed binary,
+  once with the full list and once with the list truncated to 16 (`CAP16`
+  rows in sat*.txt / unsat*.txt), which reproduces the bug exactly on the
+  same data. The difference is 0.00 pp on exact S, exact C and the sampled
+  tier in all six runs, i.e. below the 0.1 pp print resolution. The pids that
+  fell off the list are short-lived helper backends that carry no command
+  markers and essentially no events.
+
+BUG 2 — bpftrace reprints every populated map at exit, so END histograms were
+  being concatenated and their counts doubled.
+  NOT USED HERE. The fix lives in kernel_cpu_arbiter.py's `delays`
+  subcommand, which does not exist in the version the first pass ran and
+  which this harness never calls. This run's kernel figures come from
+  `report` (/proc/<pid>/schedstat counter deltas), `sched` and `sampbias`,
+  which read per-dump cumulative counters bracketing the window, not
+  histograms; the only histogram in sched2.bt is @sdelay, which is printed
+  for the record and never parsed. Independent confirmation that nothing was
+  doubling: the tracepoint on-CPU total and the /proc schedstat on-CPU total
+  agree to ~1 % in both passes (sat 115.65 s vs 114.41 s here; 116.93 s vs
+  115.69 s in the first pass) — a doubled histogram would show as ~2x.
+
+VERDICT: neither bug moved a reported figure. Section 1 differs from the
+first pass by at most ~1.5 pp on the saturated rows, which is
+machine-to-machine variation between two cx33 instances (the CAP16 control
+above shows the exclude cap contributed 0.00 pp of it), and every
+conclusion in section 3 is unchanged.
+
+================================================================================
+1. THE RECONCILED NUMBERS  (mean [min..max] over 3 repeats, fixed tools)
 ================================================================================
 
 quantity                                     saturated        unsaturated
 --------------------------------------------------------------------------
-tps                                   2604 [2526..2747]    1215 [1200..1238]
-commands/s (all backends)            16890 [16762..17032]  7665 [7501..7751]
-run-queue delay / (on-CPU+run-queue)          48.5 %              0.6 %
+tps                                   2665 [2577..2743]    1218 [1215..1225]
+commands/s (all backends)            17313 [16990..17737]  7768 [7676..7845]
+run-queue delay / (on-CPU+run-queue)          48.3 %              0.7 %
 
 CPU share of non-idle, IN-COMMAND definition (what the tiers report)
-  exact S  (stream, majority)  -- SHIPS  46.93 [46.70..47.20]  65.83 [65.60..66.30]
-  exact A  (sorted, majority)          46.93 [46.70..47.20]  65.83 [65.60..66.30]
-  exact B  (sorted, proportional)      47.33 [47.00..47.70]  62.10 [61.80..62.70]
-  exact C  (2-pass, proportional)      47.33 [47.00..47.70]  62.10 [61.80..62.70]
-  our sampled tier                     44.33 [43.50..45.10]  56.30 [55.80..56.60]
-  pg_stat_activity V1 (conventional)   38.63 [37.71..39.11]  60.29 [58.39..61.29]
-  pg_stat_activity V3 (V1 + torn rows) 39.13 [38.28..39.56]  61.43 [59.74..62.37]
+  exact S  (stream, majority)  -- SHIPS  45.83 [45.80..45.90]  65.90 [65.20..66.80]
+  exact A  (sorted, majority)          45.83 [45.80..45.90]  65.90 [65.20..66.80]
+  exact B  (sorted, proportional)      46.27 [46.20..46.30]  62.17 [61.30..63.20]
+  exact C  (2-pass, proportional)      46.27 [46.20..46.30]  62.17 [61.30..63.20]
+  our sampled tier                     42.80 [42.40..43.10]  57.20 [56.00..59.60]
+  pg_stat_activity V1 (conventional)   37.90 [37.07..38.51]  60.32 [59.95..60.66]
+  pg_stat_activity V3 (V1 + torn rows) 38.46 [37.67..38.96]  61.57 [60.82..62.33]
 
 CPU share of non-idle, WHOLE-BACKEND definition (in- and out-of-command)
-  exact tier C + cpu-outside-command   61.42 [61.09..61.78]  67.12 [66.88..67.59]
+  exact tier C + cpu-outside-command   60.38 [60.27..60.52]  67.16 [66.43..68.06]
   pg_stat_activity V2 (V1 + the
-    non-active/no-wait-event rows)     56.31 [55.36..56.91]  66.05 [64.58..67.20]
-  pg_stat_activity V4 (V2 + torn)      56.57 [55.65..57.16]  66.89 [65.56..67.98]
-  KERNEL schedstat f1+f2 vs our wait   67.14 [66.82..67.44]  71.29 [71.06..71.68]
-  KERNEL schedstat f1 only vs our wait 51.27 [51.00..51.64]  71.16 [70.94..71.53]
+    non-active/no-wait-event rows)     55.58 [55.24..55.77]  66.29 [65.55..66.91]
+  pg_stat_activity V4 (V2 + torn)      55.87 [55.55..56.04]  67.19 [66.19..68.10]
+  KERNEL schedstat f1+f2 vs our wait   66.26 [66.17..66.40]  71.32 [70.68..72.14]
+  KERNEL schedstat f1 only vs our wait 50.37 [50.24..50.56]  71.18 [70.56..71.97]
 
 backend-seconds over the window
-  schedstat f1 on-CPU                 115.69 [115.20..116.45] 51.41 [51.26..51.63]
-  schedstat f2 run-queue              108.96 [107.93..109.56]  0.32 [0.28..0.37]
-  sched_switch on-CPU (cross-check)   116.93 [116.44..117.68] 50.64 [50.51..50.82]
-  sched_switch run-queue (cross-check)107.79 [106.77..108.41]  1.48 [1.45..1.51]
-  exact-tier wait                     109.96 [109.03..110.88] 20.84 [20.55..21.00]
-  exact-tier CPU outside a command     76.18 [75.66..76.81]    8.41 [8.31..8.49]
+  schedstat f1 on-CPU                 114.41 [114.11..114.83] 51.73 [51.29..52.39]
+  schedstat f2 run-queue              107.01 [106.95..107.05]  0.35 [0.28..0.44]
+  sched_switch on-CPU (cross-check)   115.65 [115.38..116.07] 50.99 [50.52..51.70]
+  sched_switch run-queue (cross-check)105.89 [105.83..105.92]  1.51 [1.46..1.58]
+  exact-tier wait                     112.73 [112.30..113.04] 20.94 [20.40..21.40]
+  exact-tier CPU outside a command     74.80 [74.44..75.25]    8.44 [8.41..8.46]
 
 components
-  straddle rule (exact S - exact C)    -0.40 [-0.50..-0.30]   3.73 [3.60..3.80]
-  sampler bias, pp of wall on-or-runq  -4.75 [-5.15..-4.41]  -0.69 [-0.81..-0.57]
-  sampler bias, pp of the CPU share    -6.71 [-7.23..-6.27]  -0.82 [-0.96..-0.69]
-  torn rows, % of all sampled rows      0.52 [0.46..0.59]     1.95 [1.72..2.21]
-  torn rows, % of ACTIVE sampled rows   0.81 [0.72..0.91]     2.86 [2.52..3.25]
-  non-active + no-wait-event, % of rows 25.90 [25.43..26.38] 11.26 [10.27..12.01]
-  classifier choice V2 - V1            17.68 [17.56..17.83]   5.76 [5.19..6.19]
-  backend set: strict - loose (exact)    0.20 [0.00..0.50]    0.00 [0.00..0.00]
-  backend set: strict - loose (pgsa)     0.00                 0.00
+  straddle rule (exact S - exact C)    -0.43 [-0.50..-0.30]   3.73 [3.60..3.90]
+  sampler bias, pp of wall on-or-runq  -4.58 [-5.02..-4.18]  -1.58 [-1.83..-1.25]
+  sampler bias, pp of the CPU share    -6.45 [-7.11..-5.88]  -1.91 [-2.17..-1.52]
+  torn rows, % of all sampled rows      0.58 [0.47..0.64]     2.17 [1.48..2.94]
+  torn rows, % of ACTIVE sampled rows   0.89 [0.73..0.99]     3.17 [2.17..4.24]
+  non-active + no-wait-event, % of rows 25.53 [25.19..25.88] 11.75 [10.83..12.52]
+  classifier choice V2 - V1            17.68 [17.26..18.17]   5.97 [5.60..6.25]
+  backend set: strict - loose (exact)    0.17 [0.00..0.50]    0.07 [0.00..0.10]
+  backend set: strict - loose (pgsa)    -0.00                 0.00
+  BUG-1 CONTROL: exclude list capped
+    at 16 minus full list, exact S      0.00 [0.00..0.00]     0.00 [0.00..0.00]
+    at 16 minus full list, exact C      0.00 [0.00..0.00]     0.00 [0.00..0.00]
+    at 16 minus full list, sampled      0.00 [0.00..0.00]     0.00 [0.00..0.00]
+
+FIRST PASS (pre-fix tools, other VM) for comparison — full table in
+v1_prefix_tools/SUMMARY.txt:
+  exact S          46.93 / 65.83      exact C      47.33 / 62.10
+  sampled tier     44.33 / 56.30      pgsa V1      38.63 / 60.29
+  pgsa V2          56.31 / 66.05      kernel f1+f2 67.14 / 71.29
+  straddle         -0.40 / +3.73      bias(share)  -6.71 / -0.82
+  torn %all         0.52 / 1.95       V2-V1        17.68 / 5.76
 
 ================================================================================
 2. ADDITIVE DECOMPOSITION of the shipping estimator against the reference
 ================================================================================
 
   exact S - pg_stat_activity V1        saturated       unsaturated
-    total gap                          +8.30 pp         +5.54 pp
-      straddle rule (ours)             -0.40            +3.73
-      torn rows in the reference       +0.50            +1.14
-      sampler scheduling bias          +6.71            +0.82
-      unexplained                      +1.49            -0.15
+    total gap                          +7.93 pp         +5.58 pp
+      straddle rule (ours)             -0.43            +3.73
+      torn rows in the reference       +0.56            +1.25
+      sampler scheduling bias          +6.45            +1.91
+      unexplained                      +1.35            -1.31
 
 ================================================================================
 3. WHICH METHODOLOGICAL CHOICE EXPLAINS EACH PRIOR DISAGREEMENT
@@ -85,71 +144,74 @@ components
 
 (a) Unsaturated control, 0.2 pp (inv-1) vs 5.3 pp (inv-2)
     WHICH EXACT-TIER VARIANT WAS QUOTED, plus run-to-run spread.
-      exact S - V1 = 5.54 pp [4.31..7.21]   <- inv-2's 5.3 pp
-      exact C - V1 = 1.81 pp [0.51..3.41]   <- inv-1's 0.2 pp
+      exact S - V1 = 5.58 pp [5.25..6.14]   <- inv-2's 5.3 pp
+      exact C - V1 = 1.85 pp [1.35..2.54]   <- inv-1's 0.2 pp
     The two figures differ by exactly the straddle correction (3.73 pp
     unsaturated). Neither investigation was wrong; inv-1 quoted the
-    straddle-corrected estimator and inv-2 the one that ships. The remaining
-    spread is run-to-run: 3 pp peak-to-peak on a 39 s window.
-    Ruled out as causes, measured: the backend set (0.00 pp), the
-    denominator/sample weighting (oracle_share.py reproduces V1 exactly),
-    and the sampler's own scheduling bias (-0.82 pp unsaturated).
+    straddle-corrected estimator and inv-2 the one that ships. inv-1's 0.2 pp
+    is nonetheless optimistic: the corrected estimator still sits 1.9 pp
+    above the reference here, of which 1.25 pp is the reference's torn rows.
+    Ruled out as causes, measured: the backend set (0.07 pp on the exact
+    side, 0.00 pp on the reference side), the denominator/sample weighting
+    (oracle_share.py reproduces V1 exactly), and the exclude-list cap
+    (0.00 pp).
 
 (b) Straddle rule, 3.4 pp saturated (inv-1) vs 0.9 sat / 3.7 unsat (inv-2)
     INV-2 IS RIGHT; INV-1 IS WRONG HERE, including on the sign.
-      measured: -0.40 pp saturated, +3.73 pp unsaturated.
+      measured: -0.43 pp saturated, +3.73 pp unsaturated
+      (first pass, other machine, other tools: -0.40 / +3.73 — identical)
     Unsaturated reproduces inv-2's 3.7 pp exactly. Saturated the correction
     is not merely small, it goes the other way: proportional overlap credits
     slightly MORE CPU than the majority rule. Sorting alone changes nothing
-    (exact A == exact S in all six runs), so the "single-pass banked/anchor
-    sweep" is not a second error. inv-1's 3.4 pp came from its earlier
-    partial reimplementation (46.2 -> 42.8 %), not from a sorted proportional
-    recompute, and it carried that figure into the decomposition where it
-    absorbed 3.4 pp that in fact belongs to the sampler bias.
+    (exact A == exact S in all twelve runs across both passes), so the
+    "single-pass banked/anchor sweep" is not a second error. inv-1's 3.4 pp
+    came from its earlier partial reimplementation (46.2 -> 42.8 %), not from
+    a sorted proportional recompute, and it carried that figure into the
+    decomposition where it absorbed error that belongs to the sampler bias.
     The straddle rule's size tracks commands per backend-second, which is why
-    the low-concurrency case is the WORSE one: 3832 cmd/backend/s unsaturated
-    vs 2111 saturated.
+    the low-concurrency case is the WORSE one: 3884 cmd/backend/s unsaturated
+    vs 2164 saturated.
 
 (c) Sampler bias, 6.4 pp (inv-1) vs 3.7 pp (inv-2)
     SAME MEASUREMENT, DIFFERENT UNITS. inv-2 measured it directly as pp of
     wall-clock "on a processor or runnable" and reported -3.41 pp; we
-    measure -4.75 pp [-5.15..-4.41] the same way. Divided by the sampler's
-    own non-idle fraction (70.8 %) that is -6.71 pp [-7.23..-6.27] of the CPU
+    measure -4.58 pp [-5.02..-4.18] the same way. Divided by the sampler's
+    own non-idle fraction (71.1 %) that is -6.45 pp [-7.11..-5.88] of the CPU
     share of non-idle, which is the unit inv-1's decomposition used and where
     it wrote 6.4 pp. inv-2's "revised down to about 3.7 pp of non-idle" is a
     unit error: its own number, converted, is ~4.8-5.0 pp of non-idle, and on
-    this machine it is 6.7. Independent check: the exact-vs-reference gap
-    grows by 6.9 pp from unsaturated to saturated (1.81 -> 8.70), which is
+    this machine it is 6.5. Independent check: the exact-vs-reference gap
+    grows by 6.5 pp from unsaturated to saturated (1.85 -> 8.36), which is
     the sampler bias and nothing else.
 
 (d) Torn reads, 3.4 % (inv-1) vs 0.47 % saturated (inv-2)
     DENOMINATOR AND REGIME. Torn = state='active' AND wait_event='ClientRead'.
-      as % of ALL sampled rows:    0.52 % saturated, 1.95 % unsaturated
-      as % of ACTIVE sampled rows: 0.81 % saturated, 2.86 % unsaturated
-    inv-2's 0.47 % is % of all rows saturated (we get 0.52 %). inv-1's 3.4 %
-    is the % of active rows in a low-concurrency window (we get 2.86 %).
+      as % of ALL sampled rows:    0.58 % saturated, 2.17 % unsaturated
+      as % of ACTIVE sampled rows: 0.89 % saturated, 3.17 % unsaturated
+    inv-2's 0.47 % is % of all rows saturated (we get 0.58 %). inv-1's 3.4 %
+    is the % of active rows in a low-concurrency window (we get 3.17 %).
     Both are right about their own quantity. The effect on the answer is
-    small either way: correcting it moves the reference 0.50 pp saturated,
-    1.14 pp unsaturated.
+    small either way: correcting it moves the reference 0.56 pp saturated,
+    1.25 pp unsaturated.
 
 (e) The 23 % "non-active with no wait event" hole
     REAL AND THE BIGGEST SINGLE NUMBER IN THE TABLE, BUT IT LARGELY CANCELS.
-    25.9 % of rows saturated, 11.3 % unsaturated. Counting them as CPU moves
-    the reference by +17.7 pp saturated (38.6 -> 56.3). But that is the
+    25.5 % of rows saturated, 11.8 % unsaturated. Counting them as CPU moves
+    the reference by +17.7 pp saturated (37.9 -> 55.6). But that is the
     backend on a processor BETWEEN commands, and the exact tier discards the
-    same time (76.2 s of CPU outside a command, saturated). Applied
-    consistently to both sides the gap only narrows from 8.70 to 5.11 pp.
+    same time (74.8 s of CPU outside a command, saturated). Applied
+    consistently to both sides the gap only narrows from 8.36 to 4.80 pp.
     It is a definitional hole in any "CPU share" built from pg_stat_activity,
     not the explanation of the exact-vs-sampled disagreement.
 
 ================================================================================
 4. WHAT THE KERNEL SAYS
 ================================================================================
-Saturated the backends spent 115.7 s executing and 109.0 s runnable-but-queued
-against 110.0 s of PostgreSQL-reported wait. Run-queue delay carries no wait
-event, so on the whole-backend definition the kernel's answer is 67.1 %. The
-exact tier says 61.4 %, pg_stat_activity V2 says 56.3 %, V1 says 38.6 %.
-Unsaturated: kernel 71.3 %, exact 67.1 %, V2 66.1 %, V1 60.3 %.
+Saturated the backends spent 114.4 s executing and 107.0 s runnable-but-queued
+against 112.7 s of PostgreSQL-reported wait. Run-queue delay carries no wait
+event, so on the whole-backend definition the kernel's answer is 66.3 %. The
+exact tier says 60.4 %, pg_stat_activity V2 says 55.6 %, V1 says 37.9 %.
+Unsaturated: kernel 71.3 %, exact 67.2 %, V2 66.3 %, V1 60.3 %.
 The exact tier is the closest of our instruments to kernel-observed execution
-in every configuration and both regimes. #115's original conclusion stays
-inverted, now with a spread rather than a single run behind it.
+in every configuration and both regimes, on both machines and with both
+versions of the tooling. #115's original conclusion stays inverted.

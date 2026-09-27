@@ -29,15 +29,19 @@ for f in sorted(glob.glob(os.path.join(d, "*.txt"))):
         m = pat["tps"].search(line)
         if m and "tps" not in runs[lbl]:
             add(lbl, "tps", float(m.group(1)))
+        if line.startswith("CAP16 "):
+            line = line[6:]
         if line.startswith("--- M2 exact side"):
             sec = "M2"
+        elif line.startswith("--- M2cap16"):
+            sec = "CAP16"
         elif line.startswith("--- M1 exact side"):
             sec = "M1"
         elif line.startswith("--- reference"):
             sec = "ref"
         elif line.startswith("--- kernel"):
             sec = "kern"
-        if sec in ("M1", "M2"):
+        if sec in ("M1", "M2", "CAP16"):
             m = re.match(r"^SAMPLED .*cpu=([\d.]+)s nonidle=([\d.]+)s\s+share=([\d.]+)%", line)
             if m:
                 add(lbl, f"{sec}_sampled_share", float(m.group(3)))
@@ -84,7 +88,7 @@ for f in sorted(glob.glob(os.path.join(d, "*.txt"))):
         m = re.match(r"\s+off-CPU .*=\s+([\d.]+) s", line)
         if m:
             add(lbl, "sched_off_s", float(m.group(1)))
-        m = re.match(r"\s+SCHEDULING BIAS = (-?[\d.]+) pp", line)
+        m = re.match(r"\s+SCHEDULING BIAS(?:\[\w+\])? = (-?[\d.]+) pp", line)
         if m:
             add(lbl, "sched_bias_pp", float(m.group(1)))
         m = re.match(r"\s+by time\s+= ([\d.]+)%", line)
@@ -108,6 +112,13 @@ for lbl, r in runs.items():
         r["classifier_V2_minus_V1_pp"] = r["pgsa_M2strict_V2_share"] - r["pgsa_M2strict_V1_share"]
     if "M2_exactS_share" in r and "M1_exactS_share" in r:
         r["backendset_M2_minus_M1_pp"] = r["M2_exactS_share"] - r["M1_exactS_share"]
+    # the pre-fix --exclude-pid cap of 16, emulated on the same capture
+    if "M2_exactS_share" in r and "CAP16_exactS_share" in r:
+        r["cap16_bug_exactS_pp"] = r["CAP16_exactS_share"] - r["M2_exactS_share"]
+    if "M2_exactC_share" in r and "CAP16_exactC_share" in r:
+        r["cap16_bug_exactC_pp"] = r["CAP16_exactC_share"] - r["M2_exactC_share"]
+    if "M2_sampled_share" in r and "CAP16_sampled_share" in r:
+        r["cap16_bug_sampled_pp"] = r["CAP16_sampled_share"] - r["M2_sampled_share"]
     if "pgsa_M2strict_V1_share" in r and "pgsa_M1all_V1_share" in r:
         r["pgsa_backendset_pp"] = r["pgsa_M2strict_V1_share"] - r["pgsa_M1all_V1_share"]
     if "kern_exec_s" in r and "kern_delay_s" in r and "M2_wait_s" in r:
@@ -147,6 +158,7 @@ order = ["win_s", "tps", "cmds_per_s",
          "straddle_pp", "S_minus_pgsaV1_pp", "C_minus_pgsaV1_pp", "C_minus_pgsaV2_pp",
          "classifier_V2_minus_V1_pp",
          "backendset_M2_minus_M1_pp", "pgsa_backendset_pp",
+         "cap16_bug_exactS_pp", "cap16_bug_exactC_pp", "cap16_bug_sampled_pp",
          "onrq_by_time_pct", "onrq_by_sampler_pct", "sched_bias_pp",
          "sched_bias_pp_in_share_units",
          "torn_pct_of_all_rows", "torn_pct_of_active_rows",

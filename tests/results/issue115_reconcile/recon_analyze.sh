@@ -65,6 +65,8 @@ echo "  tps: $(grep -i 'tps = ' "$R/pgbench.log" | head -1)"
 echo ""
 echo "--- M2 exact side (strict pgbench-backend set) ---"
 /root/arb/xp_gate "$R/trace" --client-only "${EX[@]}" --win-from "$WF" --win-to "$WT" | grep -E '^(SAMPLED|EXACT|CMD-OPEN|INTERVALS|MARKERS|PIDS)'
+echo "--- M2cap16 exact side (same list TRUNCATED to 16: emulates the pre-fix --exclude-pid cap) ---"
+/root/arb/xp_gate "$R/trace" --client-only "${EX[@]:0:32}" --win-from "$WF" --win-to "$WT" | grep -E '^(SAMPLED|EXACT|CMD-OPEN)' | sed 's/^/CAP16 /'
 echo "--- M1 exact side (--client-only, sampler excluded only) ---"
 /root/arb/xp_gate "$R/trace" --client-only --exclude-pid "$SP" --win-from "$WF" --win-to "$WT" | grep -E '^(SAMPLED|EXACT|CMD-OPEN|INTERVALS|MARKERS|PIDS)'
 echo ""
