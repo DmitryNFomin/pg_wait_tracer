@@ -68,10 +68,22 @@ checked first and independently:
   Both are already on the wire (`src/server.c`, documented at
   `src/compute.h`). These are the direct over-attribution detectors; the
   identity is a rounding check.
-- Off-CPU\* ≤ 10% of DB Time on a box where clients ≤ cores. Derived from the
-  run-queue share measured on 2026-09-27 (4.92 pp, one machine) doubled for
-  headroom. Replace with a comparison against the "CPU (waiting for a core)"
-  band integral once that plumbing exists.
+- Off-CPU\* ≤ 10% of DB Time on a box where clients ≤ cores. **Provisional and
+  weakly sourced**: it doubles a run-queue share of 4.92 pp measured once, on
+  one machine, on 2026-09-27 — and that measurement's artifact is not in this
+  repository (it lives on the unmerged `agent/observer-bias-study` branch), so
+  nobody can currently check it. Treat the number as a placeholder that must be
+  replaced either by the committed artifact or by a comparison against the
+  "CPU (waiting for a core)" band integral once that plumbing exists. A bound
+  no reader can verify is exactly what #200 is about.
+
+**Which counters:** `wait_gap_cpu_ms` and `cpu_clamped_ms` above are the
+**time_model response** fields (`src/compute.c` → `src/server.c`, in the same
+response the rehearsal already queries). They are NOT the daemon-level
+`wait_gap_cpu_ns_total` / `cpu_clamped_total` counters in the metrics blob,
+which are structurally always 0 whenever `cpu_ns == PGWT_CPU_NS_UNKNOWN` (the
+sampled and legacy paths) and are therefore not a health signal there. Do not
+substitute one family for the other.
 
 ### 4. The walk
 
@@ -80,7 +92,12 @@ checked first and independently:
   actually fixed". There is no per-tab exemption and no "accepted visible
   defect" path. A tab listed in `KNOWN_FAILING_TABS` fails the rehearsal.
 - The blink gate green on every tab, with measured fraction ≥ 0.5 on every tab
-  — an unmeasured tab is not a passing tab.
+  — an unmeasured tab is not a passing tab. **Dependency**: "measured fraction"
+  does not exist on `master`; it is `MIN_MEASURED_FRACTION` on the unmerged
+  `agent/blink-anchor-mount-seq` branch, which also replaces the blink gate
+  with the mount-anchored offset sweep. Until that branch lands, this criterion
+  cannot be evaluated at all, and a rehearsal run before it is not a counted
+  attempt.
 - Per-tab time to first paint within a stated bound. A six-second spinner
   passes "no console errors" and "not blank" while being exactly what an
   audience notices.
@@ -119,6 +136,39 @@ This is a deliberate, time-boxed substitute for the failure-signature work
 reads green, including an infrastructure failure). Two rehearsals of human eyes
 is an acceptable substitute twice; it is not acceptable indefinitely, and the
 signature work is scheduled immediately after the demo.
+
+## What the harness actually implements today
+
+The doc is the contract; the harness is what enforces it, and right now the two
+are far apart. **Until this table is all "yes", `demo_rehearsal.sh` exiting 0
+does NOT mean this document was satisfied** — it means a small fraction of it
+was checked. Reading an exit code as the whole contract is precisely the
+failure this file exists to prevent, so it is written down here rather than
+left to be discovered.
+
+| Criterion | Implemented? |
+|---|---|
+| §1 exit code + JSON verdict | yes |
+| §1 run.id asserted against staleness | no — `run.id` is written (`demo_rehearsal.py:257`) but never checked |
+| §2 samples > 0, DB Time > 0 | no |
+| §2 `Lock:relation` + `Timeout:PgSleep` present | no |
+| §2 AAS ≥ 0.5 on the recent window | no |
+| §2 all 11 tabs reached, daemon alive throughout | partial (daemon-log ERROR/FATAL scan only) |
+| §3 conservation identity | yes, but ONCE at the end — not the 5-minute cadence |
+| §3 `wait_gap_cpu_ms` / `cpu_clamped_ms` ≤ 0.1% | no |
+| §3 Off-CPU\* ≤ 10% | no |
+| §4 zero known-failing tabs | yes (`build_demo_summary` uses raw `ok`, ignoring the exemption) |
+| §4 blink measured fraction ≥ 0.5 | no — blocked on `agent/blink-anchor-mount-seq` |
+| §4 time to first paint, pinned viewport | no |
+| §5 cross-tab agreement, freshness | no |
+| §6 lost-event counters, overhead envelope | no |
+| §7 no test exited 126/127 | no |
+| §8 known-failing lines read by hand | manual by construction |
+
+Also confirmed present and wrong: `time_model_conservation()` returns pass
+outright when `db_time_ms <= 0`, so a rehearsal that captured nothing scores
+clean today. That work is in flight on `agent/rehearsal-bypass-suite`, where
+each criterion ships with a case proving it can go red.
 
 ## The sequence, and what stops it from being rolled
 
