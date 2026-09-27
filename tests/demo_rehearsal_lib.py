@@ -268,35 +268,57 @@ def time_model_conservation(rows, db_time_ms,
 # being dropped -- src/compute.c defines Off-CPU* as the residual
 # `max(0, DB_Time - CPU* - Sigma waits)` (compute.c ~line 564), so time
 # that a bug fails to attribute to its own class flows straight into
-# Off-CPU* and the identity still closes inside 1%. What IS visible: CPU
-# time that leaked into the WRONG bucket (over-attribution). src/compute.c
-# already computes two self-check fields for exactly this (compute.h
-# pgwt_tm_result, T8 5.6) and src/server.c puts them on the wire for every
-# time_model response at zero extra query cost:
-#   wait_gap_cpu_ms -- CPU measured DURING a wait-labeled gap. A sleeping
-#     task burns no CPU, so this should be ~=0.
-#   cpu_clamped_ms  -- CPU that had to be clamped (exceeded a gap's own
-#     wall time, or the Off-CPU* residual went negative and got clamped
-#     back to 0) -- nonzero means the accounting already found and papered
-#     over an inconsistency.
-# 0.1% of db_time_ms is far tighter than the 1% identity tolerance above:
-# these are C-computed SELF-checks meant to be exactly (or almost exactly)
-# zero on a healthy trace, not a rounding-noise budget.
+# Off-CPU* and the identity still closes inside 1%.
+#
+# CORRECTED 2026-09-27 (owner, second round): `wait_gap_cpu_ms` as a
+# fraction of DB Time is NOT an over-attribution detector, and an earlier
+# version of this file wrongly made it one at <=0.1%. The BPF measures
+# exact on-CPU between the wait-start and wait-end writes, which spans the
+# syscall's own on-CPU work, so an IO wait is LEGITIMATELY CPU-bearing -- a
+# pwrite to page cache is nearly all on-CPU under a wait label.
+# src/compute.h's "should be ~=0, a sleeping task burns no CPU" is a false
+# premise for IO classes. Two live self-test runs measured 0.376-0.392%
+# (~4k IO waits in ~40s carrying ~257ms, ~60us/event -- inside the
+# syscall-overhead envelope), and that is EXPECTED on a correct
+# implementation, not a defect. The a-priori bound the mechanism actually
+# supports (Sigma IO-class-wait-ms + N_wait * ~10us) is honest but far too
+# loose to gate on (~1.2s for that run); baselining the DB-Time fraction
+# instead would be illegitimate -- it is a property of the workload's IO
+# mix, not of the implementation, so it cannot separate a defect from a
+# change of mix. DROPPED. The real over-attribution signature -- a
+# Timeout:PgSleep or Lock:relation event (pure sleeps) carrying cpu_ns on
+# the order of a millisecond, a stale wait label or an unclosed
+# on_cpu_ts -- needs PER-CLASS wait CPU, which is not on the wire in the
+# time_model response today (only the aggregate `wait_gap_cpu_ms` across
+# ALL wait classes is). Not implemented here -- see this task's report for
+# the gap; do not invent a proxy from the aggregate.
+#
+# `cpu_clamped_ms` is kept: nonzero means the accounting already found an
+# inconsistency (CPU exceeded a gap's own wall time, or the Off-CPU*
+# residual went negative and got clamped back to 0) and papered over it.
+# Its scope is narrower than its name suggests: src/compute.c's wait
+# branch (~line 810) never clamps `cpu_ns > dur` -- only the CPU-class
+# branch does -- so `cpu_clamped_ms == 0` vouches for CPU-class gaps only,
+# NEVER for wait events. 0.1% of db_time_ms is far tighter than the 1%
+# identity tolerance above: it is a C-computed self-check meant to be
+# exactly (or almost exactly) zero on a healthy trace, not a rounding-
+# noise budget.
 OVER_ATTRIBUTION_TOLERANCE_PCT = 0.1
 
 
-def time_model_over_attribution_ok(wait_gap_cpu_ms, cpu_clamped_ms, db_time_ms,
-                                   tolerance_pct=OVER_ATTRIBUTION_TOLERANCE_PCT):
-    """Both self-check fields (see OVER_ATTRIBUTION_TOLERANCE_PCT's comment)
-    must be within tolerance_pct percent of db_time_ms. Caller must have
-    already cleared the MIN_DB_TIME_MS floor -- db_time_ms<=0 here raises
-    ZeroDivisionError deliberately (never silently trusted)."""
-    wait_gap_pct = abs(wait_gap_cpu_ms) / db_time_ms * 100.0
+def cpu_clamped_ok(cpu_clamped_ms, db_time_ms,
+                   tolerance_pct=OVER_ATTRIBUTION_TOLERANCE_PCT):
+    """cpu_clamped_ms must be within tolerance_pct percent of db_time_ms.
+    Caller must have already cleared the MIN_DB_TIME_MS floor -- db_time_ms
+    <=0 here raises ZeroDivisionError deliberately (never silently
+    trusted). See OVER_ATTRIBUTION_TOLERANCE_PCT's comment for this
+    check's narrow scope (CPU-class gaps only, never wait events)."""
     clamped_pct = abs(cpu_clamped_ms) / db_time_ms * 100.0
-    ok = wait_gap_pct <= tolerance_pct and clamped_pct <= tolerance_pct
-    detail = (f"wait_gap_cpu_ms={wait_gap_cpu_ms:.2f} ({wait_gap_pct:.3f}%), "
-              f"cpu_clamped_ms={cpu_clamped_ms:.2f} ({clamped_pct:.3f}%), "
-              f"tolerance {tolerance_pct}% each")
+    ok = clamped_pct <= tolerance_pct
+    detail = (f"cpu_clamped_ms={cpu_clamped_ms:.2f} ({clamped_pct:.3f}%), "
+              f"tolerance {tolerance_pct}% (CPU-class gaps only -- see "
+              "this check's own comment for why it cannot vouch for "
+              "wait-event over-attribution)")
     return ok, detail
 
 
@@ -332,43 +354,51 @@ def time_model_offcpu_cap_ok(offcpu_ms, db_time_ms, has_measured_cpu,
     return ok, detail
 
 
-def evaluate_time_model_window(rows, db_time_ms, wait_gap_cpu_ms, cpu_clamped_ms,
+def evaluate_time_model_window(rows, db_time_ms, cpu_clamped_ms,
                                offcpu_ms, has_measured_cpu, used_raw_path,
                                aas=None, check_workload_signature=False,
                                check_aas_floor=False):
     """The full per-window gate for one time_model response: the identity
     conservation check (with its own nonzero-DB-Time floor), the raw/exact
-    compute path requirement, both over-attribution self-checks, the
-    Off-CPU* cap, and (when requested) the criteria-doc #2 floors -- the
-    workload's own signature events present with real time, and a
-    non-vacuous AAS reading. ALL requested checks must hold, checked in
-    that order (raw floors before any ratio/equality, per CLAUDE.md/issue
-    #157's bypass-suite requirement). Used both for the repeated in-capture
-    samples (gating -- see conservation_sample_interval_s, which also
-    requests the two extra floors) and for the one-off whole-capture-window
-    diagnostic (never gating -- see RECENT_WINDOW_S's comment; the caller
-    leaves check_workload_signature/check_aas_floor False there since a
-    35-45 min whole-window AAS average is not "the 60s recent window" the
-    criteria doc's floor is stated against)."""
+    compute path requirement, the cpu_clamped_ms self-check (CPU-class
+    gaps only -- see its own comment), the Off-CPU* cap, and (when
+    requested) the criteria-doc #2 floors -- the workload's own signature
+    events present with real time, and a non-vacuous AAS reading. ALL
+    requested checks must hold, checked in that order (raw floors before
+    any ratio/equality, per CLAUDE.md/issue #157's bypass-suite
+    requirement). Used both for the repeated in-capture samples (gating --
+    see conservation_sample_interval_s, which also requests the two extra
+    floors) and for the one-off whole-capture-window diagnostic (never
+    gating -- see RECENT_WINDOW_S's comment; the caller leaves
+    check_workload_signature/check_aas_floor False there since a 35-45 min
+    whole-window AAS average is not "the 60s recent window" the criteria
+    doc's floor is stated against).
+
+    NOTE (owner correction, 2026-09-27): this used to also gate on
+    `wait_gap_cpu_ms <= 0.1% of db_time_ms` -- dropped entirely, see
+    OVER_ATTRIBUTION_TOLERANCE_PCT's comment for why that was not a valid
+    over-attribution detector at all (IO waits are legitimately CPU-
+    bearing). The real per-class signature this check should use instead
+    is not on the wire and is NOT implemented here (see this task's
+    report)."""
     cons_ok, cons_detail = time_model_conservation(rows, db_time_ms)
     if db_time_ms >= MIN_DB_TIME_MS:
-        over_ok, over_detail = time_model_over_attribution_ok(
-            wait_gap_cpu_ms, cpu_clamped_ms, db_time_ms)
+        clamped_ok, clamped_detail = cpu_clamped_ok(cpu_clamped_ms, db_time_ms)
         off_ok, off_detail = time_model_offcpu_cap_ok(
             offcpu_ms, db_time_ms, has_measured_cpu)
     else:
-        over_ok, over_detail = False, (
-            "db_time_ms below the nonzero-DB-Time floor -- over-attribution "
+        clamped_ok, clamped_detail = False, (
+            "db_time_ms below the nonzero-DB-Time floor -- cpu_clamped_ms "
             "check skipped, not vacuously ok")
         off_ok, off_detail = False, (
             "db_time_ms below the nonzero-DB-Time floor -- Off-CPU* cap "
             "check skipped, not vacuously ok")
-    ok = bool(cons_ok and used_raw_path and over_ok and off_ok)
+    ok = bool(cons_ok and used_raw_path and clamped_ok and off_ok)
     result = {
         "ok": ok,
         "compute_path": "raw" if used_raw_path else "summary",
         "conservation": {"ok": cons_ok, "detail": cons_detail},
-        "over_attribution": {"ok": over_ok, "detail": over_detail},
+        "cpu_clamped": {"ok": clamped_ok, "detail": clamped_detail},
         "offcpu_cap": {"ok": off_ok, "detail": off_detail},
     }
     if check_workload_signature:
@@ -555,6 +585,54 @@ def freshness_ok(now_ns, to_ns, tick_s=FRESHNESS_TICK_S,
     bound_s = tick_s * max_ticks
     ok = age_s <= bound_s
     detail = f"age={age_s:.1f}s (bound {bound_s:.0f}s = {max_ticks} ticks x {tick_s:.0f}s)"
+    return ok, detail
+
+
+# ── Daemon integrity (criteria doc §6) ────────────────────────────────────
+#
+# "The daemon was alive" (daemon_log_clean, _assert_daemon_alive) is not
+# "the daemon captured everything". These three counters are already in
+# the daemon's own metrics blob (src/control.c, the "metrics" control
+# command), reachable through pgwt-server's control proxy
+# (`{"cmd":"control","request":{"cmd":"metrics"}}`, src/server.c
+# handle_control) -- the SAME mechanism web/static/lib/control.js's
+# controlMetrics() already uses from the UI, so no new src/ instrumentation
+# is needed here.
+DAEMON_INTEGRITY_COUNTERS = ("ringbuf_drops_total", "state_map_full_total",
+                             "seen_query_ids_full_total")
+
+
+def daemon_integrity_ok(metrics):
+    """All three of DAEMON_INTEGRITY_COUNTERS must be exactly 0.
+    ringbuf_drops_total is the full tier's BPF-side event_ringbuf drop
+    count -- trace events are what DB Time is built from, so a nonzero
+    value here means data conservation was already violated upstream of
+    every other check in this file. state_map_full_total /
+    seen_query_ids_full_total are BPF/userspace insert-failure counters
+    (a backend recording nothing, or losing query attribution).
+
+    A missing or non-numeric counter FAILS (a gate that cannot see the
+    count must refuse), same as capture_has_events_ok's own contract.
+
+    KNOWN BLIND SPOT, stated rather than implied (criteria doc §6): a lost
+    LIFECYCLE event is silent -- lifecycle_rb reserve failures increment no
+    counter, so the symptom is a backend simply absent from the capture,
+    never a nonzero counter here. A clean result means "no TRACE events
+    were dropped", NEVER "nothing was missed" -- closing that blind spot
+    needs src/ work, out of scope for this branch."""
+    if not isinstance(metrics, dict):
+        return False, f"metrics response is not a dict: {metrics!r}"
+    bad = []
+    parts = []
+    for name in DAEMON_INTEGRITY_COUNTERS:
+        v = metrics.get(name)
+        parts.append(f"{name}={v!r}")
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or v != 0:
+            bad.append(f"{name}={v!r}")
+    ok = len(bad) == 0
+    detail = ", ".join(parts)
+    if bad:
+        detail += f" -- NONZERO or missing: {', '.join(bad)}"
     return ok, detail
 
 

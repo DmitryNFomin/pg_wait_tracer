@@ -200,28 +200,31 @@ def test_conservation_just_above_floor_is_evaluated_normally():
     check(ok, f"db_time_ms clearing the floor is evaluated by the normal ratio ({detail})")
 
 
-# ── time_model_over_attribution_ok / time_model_offcpu_cap_ok ────────────
+# ── cpu_clamped_ok / time_model_offcpu_cap_ok ─────────────────────────────
+#
+# time_model_over_attribution_ok (wait_gap_cpu_ms as a fraction of DB Time)
+# was REMOVED (owner correction, 2026-09-27): IO waits are legitimately
+# CPU-bearing (the BPF measures on-CPU across the whole wait-start/wait-end
+# span, which includes the syscall's own on-CPU work), so that was never a
+# valid over-attribution detector -- see cpu_clamped_ok's module-level
+# comment in demo_rehearsal_lib.py for the full correction. Only
+# cpu_clamped_ok remains, with its narrower (CPU-class-gaps-only) scope.
 
-def test_over_attribution_clean_trace_ok():
-    ok, detail = lib.time_model_over_attribution_ok(
-        wait_gap_cpu_ms=0.05, cpu_clamped_ms=0.0, db_time_ms=10000.0)
-    check(ok, f"negligible wait_gap_cpu_ms/cpu_clamped_ms pass ({detail})")
-
-
-def test_over_attribution_wait_gap_cpu_fails():
-    # BYPASS-SUITE CASE: CPU measured during a wait-labeled gap (should be
-    # ~0) at 5% of db_time_ms -- an over-attribution the identity-sum check
-    # alone cannot see (the identity sums whichever bucket the CPU landed
-    # in, so it always closes).
-    ok, detail = lib.time_model_over_attribution_ok(
-        wait_gap_cpu_ms=500.0, cpu_clamped_ms=0.0, db_time_ms=10000.0)
-    check(not ok, f"wait_gap_cpu_ms at 5% of db_time_ms fails ({detail})")
+def test_cpu_clamped_ok_negligible():
+    ok, detail = lib.cpu_clamped_ok(cpu_clamped_ms=0.05, db_time_ms=10000.0)
+    check(ok, f"negligible cpu_clamped_ms passes ({detail})")
 
 
-def test_over_attribution_cpu_clamped_fails():
-    ok, detail = lib.time_model_over_attribution_ok(
-        wait_gap_cpu_ms=0.0, cpu_clamped_ms=50.0, db_time_ms=10000.0)
+def test_cpu_clamped_fails_over_tolerance():
+    ok, detail = lib.cpu_clamped_ok(cpu_clamped_ms=50.0, db_time_ms=10000.0)
     check(not ok, f"cpu_clamped_ms at 0.5% of db_time_ms fails the 0.1% bound ({detail})")
+
+
+def test_cpu_clamped_ok_states_its_narrow_scope():
+    ok, detail = lib.cpu_clamped_ok(cpu_clamped_ms=0.0, db_time_ms=10000.0)
+    check(ok, f"zero cpu_clamped_ms passes ({detail})")
+    check("wait" in detail.lower(),
+          f"detail states the check's narrow scope (CPU-class gaps only) ({detail})")
 
 
 def test_offcpu_cap_ok_under_cap():
@@ -258,7 +261,7 @@ def test_evaluate_window_clean_trace_ok():
         {"name": "CPU (waiting for a core)", "ms": 400.0, "indent": 1},
     ]
     result = lib.evaluate_time_model_window(
-        rows, db_time_ms=10000.0, wait_gap_cpu_ms=1.0, cpu_clamped_ms=0.0,
+        rows, db_time_ms=10000.0, cpu_clamped_ms=0.0,
         offcpu_ms=400.0, has_measured_cpu=True, used_raw_path=True)
     check(result["ok"], f"a clean, fully-attributed trace passes every sub-check ({result})")
 
@@ -275,7 +278,7 @@ def test_evaluate_window_dropped_wait_class_caught_by_offcpu_cap():
         {"name": "CPU (waiting for a core)", "ms": 4000.0, "indent": 1},
     ]
     result = lib.evaluate_time_model_window(
-        rows, db_time_ms=10000.0, wait_gap_cpu_ms=0.0, cpu_clamped_ms=0.0,
+        rows, db_time_ms=10000.0, cpu_clamped_ms=0.0,
         offcpu_ms=4000.0, has_measured_cpu=True, used_raw_path=True)
     check(result["conservation"]["ok"],
           f"the identity alone still closes exactly for this dropped-class case ({result})")
@@ -287,7 +290,7 @@ def test_evaluate_window_dropped_wait_class_caught_by_offcpu_cap():
 def test_evaluate_window_not_raw_path_fails_loudly():
     rows = [{"name": "CPU*", "ms": 1000.0, "indent": 1}]
     result = lib.evaluate_time_model_window(
-        rows, db_time_ms=1000.0, wait_gap_cpu_ms=0.0, cpu_clamped_ms=0.0,
+        rows, db_time_ms=1000.0, cpu_clamped_ms=0.0,
         offcpu_ms=0.0, has_measured_cpu=False, used_raw_path=False)
     check(not result["ok"],
           "summary compute path fails the window even though the identity closes")
@@ -296,11 +299,11 @@ def test_evaluate_window_not_raw_path_fails_loudly():
 
 def test_evaluate_window_zero_db_time_fails_every_subcheck():
     result = lib.evaluate_time_model_window(
-        [], db_time_ms=0.0, wait_gap_cpu_ms=0.0, cpu_clamped_ms=0.0,
+        [], db_time_ms=0.0, cpu_clamped_ms=0.0,
         offcpu_ms=0.0, has_measured_cpu=False, used_raw_path=True)
     check(not result["ok"], f"a zero-DB-Time window fails the combined gate ({result})")
-    check(not result["over_attribution"]["ok"],
-          "over_attribution is not vacuously ok below the DB-Time floor")
+    check(not result["cpu_clamped"]["ok"],
+          "cpu_clamped is not vacuously ok below the DB-Time floor")
     check(not result["offcpu_cap"]["ok"],
           "offcpu_cap is not vacuously ok below the DB-Time floor")
 
@@ -419,7 +422,7 @@ def test_evaluate_window_workload_signature_and_aas_when_requested():
         {"name": "Timeout:PgSleep", "ms": 500.0, "indent": 2},
     ]
     result = lib.evaluate_time_model_window(
-        rows, db_time_ms=10000.0, wait_gap_cpu_ms=1.0, cpu_clamped_ms=0.0,
+        rows, db_time_ms=10000.0, cpu_clamped_ms=0.0,
         offcpu_ms=400.0, has_measured_cpu=True, used_raw_path=True,
         aas=1.5, check_workload_signature=True, check_aas_floor=True)
     check(result["ok"], f"a clean sample with real workload signature and healthy AAS passes ({result})")
@@ -436,7 +439,7 @@ def test_evaluate_window_missing_workload_signature_fails_when_requested():
         {"name": "CPU (waiting for a core)", "ms": 400.0, "indent": 1},
     ]
     result = lib.evaluate_time_model_window(
-        rows, db_time_ms=10000.0, wait_gap_cpu_ms=1.0, cpu_clamped_ms=0.0,
+        rows, db_time_ms=10000.0, cpu_clamped_ms=0.0,
         offcpu_ms=400.0, has_measured_cpu=True, used_raw_path=True,
         aas=1.5, check_workload_signature=True, check_aas_floor=True)
     check(not result["ok"], f"missing workload signature fails the window ({result})")
@@ -449,7 +452,7 @@ def test_evaluate_window_skips_extra_floors_by_default():
     # default really is "off", not silently on.
     rows = [{"name": "CPU (running)", "ms": 1000.0, "indent": 1}]
     result = lib.evaluate_time_model_window(
-        rows, db_time_ms=1000.0, wait_gap_cpu_ms=0.0, cpu_clamped_ms=0.0,
+        rows, db_time_ms=1000.0, cpu_clamped_ms=0.0,
         offcpu_ms=0.0, has_measured_cpu=False, used_raw_path=True)
     check("workload_signature" not in result, "workload_signature absent when not requested")
     check("aas_floor" not in result, "aas_floor absent when not requested")
@@ -531,6 +534,55 @@ def test_build_demo_summary_expected_tabs_none_skips_the_check():
     pass_results = [{"pass": "early", "tabs": {"overview": _tab_result(True)}}]
     summary = lib.build_demo_summary(pass_results, {"c": {"ok": True}})
     check(summary["ok"], "expected_tabs_per_pass=None does not gate on tab count")
+
+
+# ── daemon_integrity_ok (criteria doc §6) ─────────────────────────────────
+
+def test_daemon_integrity_all_zero_ok():
+    metrics = {"ringbuf_drops_total": 0, "state_map_full_total": 0,
+              "seen_query_ids_full_total": 0, "some_other_field": 123}
+    ok, detail = lib.daemon_integrity_ok(metrics)
+    check(ok, f"all three counters at zero passes ({detail})")
+
+
+def test_daemon_integrity_ringbuf_drops_fails():
+    # BYPASS-SUITE CASE: trace events were dropped -- DB Time is built from
+    # trace events, so this is upstream of every other check in this file.
+    metrics = {"ringbuf_drops_total": 5, "state_map_full_total": 0,
+              "seen_query_ids_full_total": 0}
+    ok, detail = lib.daemon_integrity_ok(metrics)
+    check(not ok, f"nonzero ringbuf_drops_total fails ({detail})")
+    check("ringbuf_drops_total" in detail, f"detail names the offending counter ({detail})")
+
+
+def test_daemon_integrity_state_map_full_fails():
+    metrics = {"ringbuf_drops_total": 0, "state_map_full_total": 2,
+              "seen_query_ids_full_total": 0}
+    ok, detail = lib.daemon_integrity_ok(metrics)
+    check(not ok, f"nonzero state_map_full_total fails ({detail})")
+
+
+def test_daemon_integrity_seen_query_ids_full_fails():
+    metrics = {"ringbuf_drops_total": 0, "state_map_full_total": 0,
+              "seen_query_ids_full_total": 1}
+    ok, detail = lib.daemon_integrity_ok(metrics)
+    check(not ok, f"nonzero seen_query_ids_full_total fails ({detail})")
+
+
+def test_daemon_integrity_missing_counter_fails():
+    # BYPASS-SUITE CASE: an empty/truncated metrics response -- a gate that
+    # cannot see the count must refuse, not assume it is fine.
+    metrics = {"ringbuf_drops_total": 0}
+    ok, detail = lib.daemon_integrity_ok(metrics)
+    check(not ok, f"a missing counter fails rather than being treated as zero ({detail})")
+
+
+def test_daemon_integrity_non_dict_response_fails():
+    # BYPASS-SUITE CASE: the control/metrics query itself failed (e.g.
+    # {"error": "daemon not running"}) and the caller passed the whole
+    # error response through.
+    ok, detail = lib.daemon_integrity_ok(None)
+    check(not ok, f"a non-dict metrics response fails outright ({detail})")
 
 
 # ── capture_has_events_ok ─────────────────────────────────────────────────

@@ -163,8 +163,8 @@ def _query_time_model_window(srv, from_ns, to_ns, label, gate_on_raw_path,
                              check_criteria_floors=False):
     """One time_model query, evaluated through
     demo_rehearsal_lib.evaluate_time_model_window (identity conservation +
-    raw-path check [only when gate_on_raw_path] + both over-attribution
-    self-checks + the Off-CPU* cap + [when check_criteria_floors] the
+    raw-path check [only when gate_on_raw_path] + the cpu_clamped_ms
+    self-check + the Off-CPU* cap + [when check_criteria_floors] the
     criteria-doc #2 workload-signature and AAS floors). Returns that dict,
     or an ok=False stand-in on a server-side error / a malformed response --
     a gate that cannot see the fields it needs must refuse, never assume
@@ -181,7 +181,6 @@ def _query_time_model_window(srv, from_ns, to_ns, label, gate_on_raw_path,
     used_raw_path = "categories" in tm
     result = drlib.evaluate_time_model_window(
         rows, db_time_ms,
-        wait_gap_cpu_ms=tm.get("wait_gap_cpu_ms", 0.0),
         cpu_clamped_ms=tm.get("cpu_clamped_ms", 0.0),
         offcpu_ms=tm.get("offcpu_ms", 0.0),
         has_measured_cpu=tm.get("has_measured_cpu", False),
@@ -450,6 +449,32 @@ def main():
         print(f"demo_rehearsal: capture_freshness: "
               f"{'PASS' if fresh_ok else 'FAIL'} -- {fresh_detail}")
         extra_checks["capture_freshness"] = {"ok": fresh_ok, "detail": fresh_detail}
+
+        # Daemon integrity (criteria doc §6): the same control-socket
+        # "metrics" command the UI already calls (web/static/lib/control.js
+        # controlMetrics()), proxied through pgwt-server -- no new src/
+        # instrumentation needed. Queried while the daemon is still up
+        # (teardown happens in tests/demo_rehearsal.sh's cleanup(), after
+        # this script returns).
+        metrics_resp = srv.query("control", request={"cmd": "metrics"},
+                                 timeout=drlib.TIME_MODEL_QUERY_TIMEOUT_S)
+        metrics_err = _error_or_none(metrics_resp, "control metrics")
+        if metrics_err is not None:
+            integrity_ok, integrity_detail = False, metrics_err
+        else:
+            integrity_ok, integrity_detail = drlib.daemon_integrity_ok(
+                metrics_resp.get("response"))
+        print(f"demo_rehearsal: daemon_integrity: "
+              f"{'PASS' if integrity_ok else 'FAIL'} -- {integrity_detail}")
+        extra_checks["daemon_integrity"] = {
+            "ok": integrity_ok, "detail": integrity_detail,
+            "note": ("ringbuf_drops_total/state_map_full_total/"
+                    "seen_query_ids_full_total == 0 -- a lost LIFECYCLE "
+                    "event is silent (no counter increments), so this "
+                    "means no TRACE events were dropped, never that "
+                    "nothing was missed; see docs/DEMO_REHEARSAL_CRITERIA.md "
+                    "section 6"),
+        }
 
     extra_checks["daemon_log_clean"] = _daemon_log_check(args.daemon_log)
 
