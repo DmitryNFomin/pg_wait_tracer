@@ -11,6 +11,7 @@ test_wait_event
 test_cmdline
 test_spawn
 test_bucket
+test_cmd_gate
 test_event_writer
 test_event_reader
 test_trace_v2

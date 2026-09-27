@@ -3,6 +3,7 @@
 #define PGWT_MAP_READER_H
 
 #include "pg_wait_tracer.h"
+#include "cmd_gate.h"
 #include "query_attr.h"
 
 #include <stdint.h>
@@ -18,17 +19,12 @@ struct pgwt_event_stats {
     uint64_t histogram[HISTOGRAM_BUCKETS];
 };
 
-/* Per-pid command-window sweep state for the LIVE paths (issue #98) — the
- * live twin of compute.c pgwt_tag_events' tag_pid_state. Driven by the
- * CMD_START/CMD_END markers the on_report_activity uprobe emits into the
- * same per-pid event stream; consumed by every closed record and peeked by
- * the open state_map stretch at tick time. */
-struct pgwt_live_cmd_gate {
-    uint8_t  seen;        /* a CMD marker was seen for this pid (else: unmarked) */
-    uint8_t  open;        /* inside a command window at the sweep point */
-    uint64_t anchor_ns;   /* start of the current open run, or the last record end */
-    uint64_t banked_ns;   /* closed command-open ns since the last record */
-};
+/* The per-pid command-window sweep (issues #98 / #115) lives in
+ * src/cmd_gate.h — struct pgwt_cmd_gate, one rule shared by the live paths
+ * and tests/cross_validate.c. Driven by the CMD_START/CMD_END markers the
+ * on_report_activity uprobe emits into the same per-pid event stream;
+ * consumed by every closed record and peeked by the open state_map stretch
+ * at tick time. */
 
 /* Per-PID accumulator */
 struct pgwt_pid_accum {
@@ -44,7 +40,7 @@ struct pgwt_pid_accum {
      * throttles the rescan to once per tick. */
     uint32_t cat_flag_plus1;
     int      cat_scan_tick;
-    struct pgwt_live_cmd_gate cmd_gate;   /* issue #98, see above */
+    struct pgwt_cmd_gate cmd_gate;        /* issues #98/#115, cmd_gate.h */
     struct pgwt_qattr_pid qattr;          /* issue #128: deferred query attribution */
     int      num_events;
     uint64_t db_time_ns;      /* total non-idle time */
@@ -129,7 +125,7 @@ uint32_t pgwt_live_pid_cat_flag(struct pgwt_daemon *d,
 
 /* How the LIVE view decides whether a client backend's on-CPU interval is
  * in-command (issue #98) — for the startup header and control-socket
- * status: "markers" (CMD_START/CMD_END sweep, majority rule) or "ungated"
+ * status: "markers" (CMD_START/CMD_END sweep, proportional split) or "ungated"
  * (command gate unavailable: every client we==0 counts as CPU*). */
 const char *pgwt_live_cpu_gate_name(const struct pgwt_daemon *d);
 
@@ -186,9 +182,13 @@ void pgwt_update_time_model(struct pgwt_time_model *tm, uint32_t event,
  * clear — read at emission, the entire run looked like non-command CPU
  * (~83% of pgbench's CPU dropped from live DB Time on the gate box: the
  * 4.6-7.1x server/CLI CPU ratio). Both live paths now sweep the pid's
- * CMD_START/CMD_END markers (pgwt_live_cmd_gate_*) and apply the server's
- * majority rule — in-command iff at least half of the interval's wall
- * overlaps a command window (compute.c pgwt_tag_events, same arithmetic).
+ * CMD_START/CMD_END markers (src/cmd_gate.h) and credit the interval
+ * PROPORTIONALLY: one that straddles a boundary contributes the wall it
+ * really spent inside the command to CPU* and the remainder to
+ * PGWT_WEI_NONCMD_CPU, as two rows (#115 — the old all-or-nothing majority
+ * rule mis-credited the trailing straddler of every statement, worth
+ * +3.7 pp of the CPU share at low concurrency; compute.c pgwt_tag_events
+ * still collapses the same overlap to the majority verdict).
  * A pid with no marker yet, or a daemon whose gate is inactive, keeps
  * we==0 as CPU* exactly like the server's seen_cmd rule — reported, never
  * silent (header + status live_cpu_gate, metrics live_cmd_markers_total /
@@ -196,42 +196,8 @@ void pgwt_update_time_model(struct pgwt_time_model *tm, uint32_t event,
 uint32_t pgwt_live_effective_event(uint32_t we, uint32_t cat_flag,
                                    bool cmd_gate_active, bool cmd_open);
 
-/* Marker sweep: feed a CMD_START/CMD_END marker (timestamp = the boundary
- * instant) into the pid's gate. Other markers are ignored. */
-void pgwt_live_cmd_gate_marker(struct pgwt_live_cmd_gate *g, uint32_t marker,
-                               uint64_t ts_ns);
-
-/* Command-open ns inside the closed record [t0, t1) — the banked closed
- * runs since the previous record plus the currently-open run clipped to the
- * interval — and ADVANCE the sweep to t1 (records of one pid are contiguous
- * in an exact span, so banked time since the previous record belongs to
- * this one). Mirrors pgwt_tag_events' per-record step; 0 for an unmarked
- * pid. */
-uint64_t pgwt_live_cmd_gate_take(struct pgwt_live_cmd_gate *g,
-                                 uint64_t t0_ns, uint64_t t1_ns);
-
-/* Same quantity for the OPEN stretch [t0, now) at tick time WITHOUT
- * advancing (its closing record consumes it later), clipped to the
- * stretch's wall: state_map's last_ts can run ahead of the last drained
- * record, so banked time may predate t0. */
-uint64_t pgwt_live_cmd_gate_peek(const struct pgwt_live_cmd_gate *g,
-                                 uint64_t t0_ns, uint64_t now_ns);
-
-/* The server's majority rule (pgwt_tag_events): a zero-length interval
- * takes the instantaneous gate; otherwise in-command iff at least half of
- * the wall overlaps a command window. */
-bool pgwt_live_cmd_majority(uint64_t open_ns, uint64_t wall_ns,
-                            bool open_now);
-
-/* Resolve an interval's in-command flag from the pid's gate `g` (NULL = no
- * per-pid state: accumulator full). `consume` = closed record (advance the
- * sweep), else the open stretch (peek). Returns true when the pid's markers
- * decided it; false when it fell back — to in-command for an unmarked pid
- * (the server's seen_cmd rule) or to `fallback_open` (the emission-time
- * gate) when g is NULL. */
-bool pgwt_live_cmd_gate_classify(struct pgwt_live_cmd_gate *g, bool consume,
-                                 uint64_t t0_ns, uint64_t t1_ns,
-                                 bool fallback_open, bool *in_cmd);
+/* The sweep itself (pgwt_cmd_gate_marker / _take / _peek / _split) is
+ * src/cmd_gate.h — header-only and shared with tests/cross_validate.c. */
 
 /* One live interval to fold into an accumulator. Pure: no daemon, no BPF. */
 struct pgwt_live_interval {
@@ -247,7 +213,10 @@ struct pgwt_live_interval {
     uint32_t cat_flag;        /* pid category: 0 foreground, or one of
                                * PGWT_EVENT_FLAG_{IO_WORKER,MAINT,BACKGROUND} */
     bool     cmd_gate_active; /* the command-open gate is maintained */
-    bool     cmd_open;        /* in-command by the marker majority rule (#98) */
+    bool     cmd_open;        /* in-command per cmd_gate.h (#98/#115): the
+                               * single-row verdict; a straddling we==0
+                               * interval is folded twice instead, see
+                               * pgwt_accum_add_split */
     bool     closed;          /* closed record: also feeds the histograms */
     struct pgwt_pid_accum *pa; /* pre-resolved per-pid entry (NULL = look up) */
 };
@@ -259,6 +228,16 @@ struct pgwt_live_interval {
  * The query-level step is pgwt_live_qattr_record (issue #128). */
 void pgwt_accum_add_interval(struct pgwt_accumulator *acc,
                              const struct pgwt_live_interval *iv);
+
+/* Fold one interval through the command gate (#115). A foreground we==0
+ * interval that STRADDLES a command boundary folds TWICE — its in-command
+ * wall as CPU*, the remainder as PGWT_WEI_NONCMD_CPU — with iv->cpu_ns
+ * apportioned between the two; the interval's wall is conserved exactly.
+ * Every other interval folds once, with cmd_open taken from the split.
+ * Both live paths call this instead of pgwt_accum_add_interval directly. */
+void pgwt_accum_add_split(struct pgwt_accumulator *acc,
+                          const struct pgwt_live_interval *iv,
+                          const struct pgwt_cmd_split *split);
 
 /* ── Deferred per-query attribution (issue #128, query_attr.h) ──────────
  *

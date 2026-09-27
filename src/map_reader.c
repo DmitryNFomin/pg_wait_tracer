@@ -151,96 +151,13 @@ uint32_t pgwt_live_effective_event(uint32_t we, uint32_t cat_flag,
     return we;
 }
 
-/* ── Marker-driven command gate (issue #98) ──────────────────────────────
- * The per-pid sweep is the live twin of compute.c pgwt_tag_events: same
- * state (open flag, anchor, banked ns), same per-marker and per-record
- * steps, same majority rule. Keep the two in lock-step — the unit test
- * (tests/test_live_accum.c) runs one stream through both and diffs. */
-
-void pgwt_live_cmd_gate_marker(struct pgwt_live_cmd_gate *g, uint32_t marker,
-                               uint64_t ts_ns)
-{
-    switch (marker) {
-    case PGWT_MARKER_CMD_START:
-        g->seen = 1;
-        if (!g->open) {
-            g->open = 1;
-            g->anchor_ns = ts_ns;
-        }
-        break;
-    case PGWT_MARKER_CMD_END:
-        g->seen = 1;
-        if (g->open) {
-            if (ts_ns > g->anchor_ns)
-                g->banked_ns += ts_ns - g->anchor_ns;
-            g->open = 0;
-        }
-        break;
-    default:
-        break;   /* plan/exec/escalation markers: not a command boundary */
-    }
-}
-
-/* Command-open ns of [t0, t1): banked closed runs + the open run clipped. */
-static uint64_t cmd_gate_open_ns(const struct pgwt_live_cmd_gate *g,
-                                 uint64_t t0_ns, uint64_t t1_ns)
-{
-    uint64_t open_ns = g->banked_ns;
-    if (g->open) {
-        uint64_t a = g->anchor_ns > t0_ns ? g->anchor_ns : t0_ns;
-        if (t1_ns > a)
-            open_ns += t1_ns - a;
-    }
-    return open_ns;
-}
-
-uint64_t pgwt_live_cmd_gate_take(struct pgwt_live_cmd_gate *g,
-                                 uint64_t t0_ns, uint64_t t1_ns)
-{
-    if (!g->seen)
-        return 0;
-    uint64_t open_ns = cmd_gate_open_ns(g, t0_ns, t1_ns);
-    g->banked_ns = 0;
-    if (g->open)
-        g->anchor_ns = t1_ns;
-    return open_ns;
-}
-
-uint64_t pgwt_live_cmd_gate_peek(const struct pgwt_live_cmd_gate *g,
-                                 uint64_t t0_ns, uint64_t now_ns)
-{
-    if (!g->seen)
-        return 0;
-    uint64_t open_ns = cmd_gate_open_ns(g, t0_ns, now_ns);
-    uint64_t wall = now_ns > t0_ns ? now_ns - t0_ns : 0;
-    return open_ns < wall ? open_ns : wall;
-}
-
-bool pgwt_live_cmd_majority(uint64_t open_ns, uint64_t wall_ns, bool open_now)
-{
-    if (wall_ns == 0)
-        return open_now;
-    return open_ns * 2 >= wall_ns;
-}
-
-bool pgwt_live_cmd_gate_classify(struct pgwt_live_cmd_gate *g, bool consume,
-                                 uint64_t t0_ns, uint64_t t1_ns,
-                                 bool fallback_open, bool *in_cmd)
-{
-    if (!g) {
-        *in_cmd = fallback_open;
-        return false;
-    }
-    if (!g->seen) {
-        *in_cmd = true;      /* the server's seen_cmd rule: CPU stays CPU */
-        return false;
-    }
-    uint64_t wall = t1_ns > t0_ns ? t1_ns - t0_ns : 0;
-    uint64_t open_ns = consume ? pgwt_live_cmd_gate_take(g, t0_ns, t1_ns)
-                               : pgwt_live_cmd_gate_peek(g, t0_ns, t1_ns);
-    *in_cmd = pgwt_live_cmd_majority(open_ns, wall, g->open != 0);
-    return true;
-}
+/* ── Marker-driven command gate (issues #98 / #115) ─────────────────────
+ * The sweep and the proportional split rule live in src/cmd_gate.h, shared
+ * verbatim with tests/cross_validate.c. compute.c pgwt_tag_events keeps its
+ * own copy of the same sweep and still collapses it to the majority verdict
+ * (it annotates a fixed array, so one record cannot become two there):
+ * tests/test_live_accum.c runs one stream through both and diffs the
+ * overlap, so the two cannot drift. */
 
 static void add_event_stats(struct pgwt_event_stats *es, uint64_t stat_ns,
                             bool histogram)
@@ -306,6 +223,35 @@ void pgwt_accum_add_interval(struct pgwt_accumulator *acc,
      * without an id is deferred until the pid reports one). */
     pgwt_live_qattr_record(acc, pa, iv->query_id, we, stat_ns, iv->cat_flag,
                            iv->closed);
+}
+
+void pgwt_accum_add_split(struct pgwt_accumulator *acc,
+                          const struct pgwt_live_interval *iv,
+                          const struct pgwt_cmd_split *split)
+{
+    struct pgwt_live_interval part = *iv;
+    /* Only a FOREGROUND we==0 interval changes row when it crosses a
+     * boundary (pgwt_live_effective_event); everything else folds once.
+     * `split` is computed over the record's own [t1 - dur, t1), but the
+     * interval's wall is the authority here — clip so the two halves add
+     * up to it exactly and no wall is invented or lost. */
+    uint64_t in_ns = split->in_ns < iv->wall_ns ? split->in_ns : iv->wall_ns;
+    bool straddles = iv->we == 0 && iv->cat_flag == 0 && iv->cmd_gate_active &&
+                     split->gated && in_ns > 0 && in_ns < iv->wall_ns;
+    if (!straddles) {
+        part.cmd_open = split->in_cmd;
+        pgwt_accum_add_interval(acc, &part);
+        return;
+    }
+    uint64_t in_cpu = pgwt_cmd_scale(iv->cpu_ns, in_ns, iv->wall_ns);
+    part.wall_ns  = in_ns;
+    part.cpu_ns   = in_cpu;
+    part.cmd_open = true;
+    pgwt_accum_add_interval(acc, &part);
+    part.wall_ns  = iv->wall_ns - in_ns;
+    part.cpu_ns   = iv->cpu_ns > in_cpu ? iv->cpu_ns - in_cpu : 0;
+    part.cmd_open = false;
+    pgwt_accum_add_interval(acc, &part);
 }
 
 /* ── Deferred per-query attribution (issue #128) ───────────────────────── */
@@ -490,7 +436,7 @@ const char *pgwt_live_cpu_gate_name(const struct pgwt_daemon *d)
     if (!pgwt_mode_uses_watchpoints(d))
         return "n/a (sampled tier: sampler gate)";
     return d->cmd_gate_active
-         ? "markers (CMD_START/CMD_END sweep, majority rule)"
+         ? "markers (CMD_START/CMD_END sweep, proportional split)"
          : "ungated (command gate unavailable: every client on-CPU "
            "interval counts as CPU*)";
 }
@@ -643,7 +589,7 @@ void pgwt_read_state_map(struct pgwt_daemon *d)
                  * command is idle non-command time, not CPU* / DB Time;
                  * io_worker time stays out of the time model. The CPU* row
                  * carries the MEASURED on-CPU ns of the stretch, DB Time its
-                 * wall. In-command is the marker majority rule over
+                 * wall. In-command is the marker overlap over
                  * [last_ts, now) (#98) — peeked from the pid's gate as the
                  * closed-record sweep left it (copied into d->accum by
                  * pgwt_accum_copy_used), NOT state_map's instantaneous
@@ -651,10 +597,10 @@ void pgwt_read_state_map(struct pgwt_daemon *d)
                  * statement the gate is already clear while the whole run
                  * was in-command. An unmarked pid / full accumulator falls
                  * back like the closed path (in-command / emission gate). */
-                bool in_cmd = false;
-                bool by_markers = pgwt_live_cmd_gate_classify(
+                struct pgwt_cmd_split csplit = pgwt_cmd_gate_split(
                     pa_cur ? &pa_cur->cmd_gate : NULL, false,
-                    sval.last_ts, now, sval.cmd_open != 0, &in_cmd);
+                    sval.last_ts, now, sval.cmd_open != 0);
+                bool by_markers = csplit.gated;
                 /* Never silent: a full accumulator (no per-pid sweep state)
                  * fell back to the emission-time gate — count it like the
                  * closed path does. (An unmarked pid is counted there only,
@@ -670,11 +616,11 @@ void pgwt_read_state_map(struct pgwt_daemon *d)
                     .query_id        = sval.last_query_id,
                     .cat_flag        = pgwt_live_pid_cat_flag(d, pa_cur, snext),
                     .cmd_gate_active = d->cmd_gate_active,
-                    .cmd_open        = in_cmd,
+                    .cmd_open        = csplit.in_cmd,
                     .closed          = false,
                     .pa              = pa_cur,
                 };
-                pgwt_accum_add_interval(&d->accum, &iv);
+                pgwt_accum_add_split(&d->accum, &iv, &csplit);
             }
         } else if (dbg_scan) {
             lookup_failed++;

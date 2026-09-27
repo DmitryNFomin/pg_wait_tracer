@@ -14,7 +14,7 @@ TESTS     = test_wait_event test_cmdline test_spawn test_event_writer test_event
             test_trace_v2 test_sampler test_anomaly test_escalation_budget \
             test_exact_probe \
             test_effective_cores \
-            test_coop test_bucket \
+            test_coop test_bucket test_cmd_gate \
             test_backend_status_layout \
             test_synthetic_query \
             test_pgss_resolver \
@@ -61,6 +61,12 @@ test_event_reader: test_event_reader.c $(BUILD)/event_reader.o $(BUILD)/event_wr
 	$(CC) $(CFLAGS) -o $@ $^ -llz4 $(LIBBPF_LIB) -lelf -lz
 
 test_bucket: test_bucket.c
+	$(CC) $(CFLAGS) -o $@ $^
+
+# test_cmd_gate: issue #115 — the bypass suite for src/cmd_gate.h, the ONE
+# command-window split rule shared by the live paths and cross_validate.
+# Header-only and pure: nothing to link.
+test_cmd_gate: test_cmd_gate.c
 	$(CC) $(CFLAGS) -o $@ $^
 
 # test_live_accum: issues #97/#98 — live-view interval accounting shared by

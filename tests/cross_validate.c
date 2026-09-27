@@ -17,6 +17,7 @@
  *
  * Usage: cross_validate <trace_dir> [--tolerance PCT] [--min-share PCT]
  */
+#include "cmd_gate.h"
 #include "event_reader.h"
 #include "event_writer.h"
 #include "wait_event.h"
@@ -46,48 +47,27 @@ static struct evt_acc *acc_find(struct evt_acc *t, uint32_t id)
     return &t[h];
 }
 
-/* ── T2: exact-tier command gate (mirror of pgwt_tag_events) ──────────
+/* ── T2/#115: exact-tier command gate ────────────────────────────────
  * The sampled tier records client we==0 only while a command is open, so
  * the exact side must classify its we==0 intervals the same way or the
  * comparison (and AAS across tier switches) would diverge by construction
- * on chatty workloads. Per-pid sweep over the CMD_START/CMD_END markers;
- * majority rule per interval. Pids with no CMD markers keep all we==0 as
- * CPU (background processes / legacy traces). */
+ * on chatty workloads. The sweep and the PROPORTIONAL split rule are
+ * src/cmd_gate.h, shared verbatim with the live paths — this file used to
+ * carry its own copy with an all-or-nothing majority verdict (and an
+ * unguarded `banked += ts - anchor` that underflowed on an out-of-order
+ * CMD_END). A we==0 interval now contributes only the wall it really spent
+ * inside a command. Pids with no CMD markers keep all we==0 as CPU
+ * (background processes / legacy traces). */
 #define CMD_HT 1024
-struct cmd_state {
-    uint32_t pid;       /* 0 = empty */
-    int      seen_cmd, cmd_open;
-    uint64_t anchor, banked;
-};
 
-static struct cmd_state *cmd_get(struct cmd_state *ht, uint32_t pid)
+static struct pgwt_cmd_gate *cmd_get(struct pgwt_cmd_gate *ht, uint32_t pid,
+                                     uint32_t *pids)
 {
     uint32_t h = (pid * 2654435761u) % CMD_HT;
-    while (ht[h].pid && ht[h].pid != pid)
+    while (pids[h] && pids[h] != pid)
         h = (h + 1) % CMD_HT;
-    if (!ht[h].pid) ht[h].pid = pid;
+    if (!pids[h]) pids[h] = pid;
     return &ht[h];
-}
-
-/* Returns 1 if the we==0 interval ending at t1 (mono) is majority
- * in-command; also consumes the banked open time. */
-static int cmd_interval_open(struct cmd_state *st, uint64_t t1, uint64_t dur)
-{
-    if (!st->seen_cmd)
-        return 1;   /* no gate info: legacy behavior (CPU) */
-    uint64_t t0 = t1 > dur ? t1 - dur : 0;
-    uint64_t open_ns = st->banked;
-    if (st->cmd_open) {
-        uint64_t a = st->anchor > t0 ? st->anchor : t0;
-        if (t1 > a)
-            open_ns += t1 - a;
-    }
-    st->banked = 0;
-    if (st->cmd_open)
-        st->anchor = t1;
-    if (dur == 0)
-        return st->cmd_open;
-    return open_ns * 2 >= dur;
 }
 
 int main(int argc, char **argv)
@@ -165,8 +145,9 @@ int main(int argc, char **argv)
      * sample counts if its timestamp falls inside. */
     struct evt_acc *table = calloc(MAX_DISTINCT, sizeof(*table));
     struct pgwt_trace_event *evs = malloc(MAX_EVENTS * sizeof(*evs));
-    struct cmd_state *cmd_ht = calloc(CMD_HT, sizeof(*cmd_ht));
-    if (!table || !evs || !cmd_ht) { perror("malloc"); return 1; }
+    struct pgwt_cmd_gate *cmd_ht = calloc(CMD_HT, sizeof(*cmd_ht));
+    uint32_t *cmd_pids = calloc(CMD_HT, sizeof(*cmd_pids));
+    if (!table || !evs || !cmd_ht || !cmd_pids) { perror("malloc"); return 1; }
 
     double total_sampled_ns = 0, total_exact_ns = 0;
     int n_samples = 0;
@@ -206,32 +187,35 @@ int main(int argc, char **argv)
                     uint32_t ev = e->old_event;
                     /* CMD markers drive the exact-tier command gate. */
                     if (ev == PGWT_MARKER_CMD_START || ev == PGWT_MARKER_CMD_END) {
-                        struct cmd_state *st = cmd_get(cmd_ht, e->pid);
-                        st->seen_cmd = 1;
-                        if (ev == PGWT_MARKER_CMD_START && !st->cmd_open) {
-                            st->cmd_open = 1;
-                            st->anchor = e->timestamp_ns;
-                        } else if (ev == PGWT_MARKER_CMD_END && st->cmd_open) {
-                            st->banked += e->timestamp_ns - st->anchor;
-                            st->cmd_open = 0;
-                        }
+                        pgwt_cmd_gate_marker(cmd_get(cmd_ht, e->pid, cmd_pids),
+                                             ev, e->timestamp_ns);
                         continue;
                     }
                     if (PGWT_IS_MARKER(ev))
                         continue;
                     /* Every exact interval consumes the pid's banked
                      * command-open time (the sweep is per-interval);
-                     * the verdict matters only for we==0. */
-                    int in_cmd = cmd_interval_open(cmd_get(cmd_ht, e->pid),
-                                                   e->timestamp_ns,
-                                                   e->duration_ns);
+                     * the split matters only for we==0. */
+                    uint64_t iv_t1 = e->timestamp_ns;
+                    uint64_t iv_t0 = iv_t1 > e->duration_ns
+                                   ? iv_t1 - e->duration_ns : 0;
+                    struct pgwt_cmd_split csp = pgwt_cmd_gate_split(
+                        cmd_get(cmd_ht, e->pid, cmd_pids), true,
+                        iv_t0, iv_t1, true);
                     if (pgwt_is_idle_event(ev))
                         continue;
-                    /* T2: exact we==0 intervals count as CPU only when
-                     * majority in-command — the same definition the
-                     * sampled side captured with. */
-                    if (ev == 0 && !in_cmd)
-                        continue;
+                    /* #115: an exact we==0 interval contributes the FRACTION
+                     * of itself that overlapped a command window — the same
+                     * definition the sampled side captured with, without the
+                     * all-or-nothing majority rule's per-boundary bias. */
+                    double cmd_frac = 1.0;
+                    if (ev == 0) {
+                        uint64_t wall = csp.in_ns + csp.out_ns;
+                        cmd_frac = wall ? (double)csp.in_ns / (double)wall
+                                        : (csp.in_cmd ? 1.0 : 0.0);
+                        if (cmd_frac <= 0.0)
+                            continue;
+                    }
                     /* T8 self-check: fold measured cpu_ns of WAIT intervals
                      * (the ≈0 quantity). Uses full interval values — an edge
                      * interval partially outside the window barely perturbs a
@@ -251,7 +235,7 @@ int main(int argc, char **argv)
                     uint64_t ce = end   < win_to   ? end   : win_to;
                     if (ce <= cs)
                         continue;
-                    double contrib = (double)(ce - cs);
+                    double contrib = (double)(ce - cs) * cmd_frac;
                     acc_find(table, ev)->exact_ns += contrib;
                     total_exact_ns += contrib;
                 }
@@ -355,5 +339,6 @@ int main(int argc, char **argv)
     free(table);
     free(evs);
     free(cmd_ht);
+    free(cmd_pids);
     return ok ? 0 : 1;
 }

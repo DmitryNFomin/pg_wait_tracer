@@ -119,7 +119,7 @@ int pgwt_handle_trace_event(void *ctx, void *data, size_t data_sz)
             struct pgwt_pid_accum *mpa = pgwt_get_or_create_pid(acc, evt->pid);
             if (mpa && (we == PGWT_MARKER_CMD_START ||
                         we == PGWT_MARKER_CMD_END)) {
-                pgwt_live_cmd_gate_marker(&mpa->cmd_gate, we,
+                pgwt_cmd_gate_marker(&mpa->cmd_gate, we,
                                           evt->timestamp_ns);
                 d->counters.live_cmd_markers_total++;
             }
@@ -149,22 +149,25 @@ int pgwt_handle_trace_event(void *ctx, void *data, size_t data_sz)
      * post/between-command time — idle, not CPU — and is filed under
      * PGWT_WEI_NONCMD_CPU in EVERY accumulator (it used to sit in the CPU*
      * row while its time went to Activity, so the CPU* row could exceed DB
-     * Time). "Outside a command" is the marker majority rule over the
+     * Time). "Outside a command" is the marker overlap over the
      * record's own [t1 - dur, t1) (#98), consumed from the pid's gate —
      * NOT the gate value BPF stamped at emission (PGWT_EVENT_FLAG_CMD_OPEN):
      * PostgreSQL reports STATE_IDLE before the post-command ClientRead
      * begins, so at emission a waitless statement's whole on-CPU run looked
      * non-command and ~83% of pgbench's CPU vanished from live DB Time. The
-     * emission flag remains only the fallback for a full accumulator. */
+     * emission flag remains only the fallback for a full accumulator.
+     * #115: a record that STRADDLES the boundary is folded twice —
+     * its in-command wall as CPU*, the remainder as NonCommandCpu —
+     * instead of being credited whole by a majority rule. */
     stage_started_ns = pgwt_debug_block_begin(d);
     struct pgwt_pid_accum *pa = pgwt_get_or_create_pid(acc, evt->pid);
     uint32_t cat_flag = pgwt_live_pid_cat_flag(d, pa, evt->pid);
     uint64_t t1 = evt->timestamp_ns;
     uint64_t t0 = t1 >= dur ? t1 - dur : 0;
-    bool in_cmd = false;
-    bool by_markers = pgwt_live_cmd_gate_classify(
+    struct pgwt_cmd_split csplit = pgwt_cmd_gate_split(
         pa ? &pa->cmd_gate : NULL, true, t0, t1,
-        (evt->flags & PGWT_EVENT_FLAG_CMD_OPEN) != 0, &in_cmd);
+        (evt->flags & PGWT_EVENT_FLAG_CMD_OPEN) != 0);
+    bool by_markers = csplit.gated;
     if (!by_markers && we == 0 && cat_flag == 0 && d->cmd_gate_active) {
         /* Not decided by markers: say so (metrics), never silently. */
         if (pa)
@@ -183,11 +186,11 @@ int pgwt_handle_trace_event(void *ctx, void *data, size_t data_sz)
         .query_id        = evt->query_id,
         .cat_flag        = cat_flag,
         .cmd_gate_active = d->cmd_gate_active,
-        .cmd_open        = in_cmd,
+        .cmd_open        = csplit.in_cmd,
         .closed          = true,
         .pa              = pa,
     };
-    pgwt_accum_add_interval(acc, &iv);
+    pgwt_accum_add_split(acc, &iv, &csplit);
     /* #128: the record that closes an exiting backend (new_event = EXIT) is
      * its last — whatever is still pending resolves now (rule 2, else the
      * unattributed bucket) instead of sitting in the per-pid entry forever

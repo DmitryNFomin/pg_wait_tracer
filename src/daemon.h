@@ -103,8 +103,8 @@ struct pgwt_counters {
      * as ring_delta_clamps_total. */
     uint64_t ring_delta_clamps_total;
 
-    /* Live command-gate observability (issue #98, map_reader.h
-     * pgwt_live_cmd_gate_*). The live CPU* classification is marker-driven;
+    /* Live command-gate observability (issues #98/#115, src/cmd_gate.h).
+     * The live CPU* classification is marker-driven;
      * these say how much of it was NOT decided by markers — never silent:
      *  - live_cmd_markers_total:      CMD_START/CMD_END markers swept live
      *  - live_cpu_unmarked_ns_total:  wall ns of client we==0 closed records
