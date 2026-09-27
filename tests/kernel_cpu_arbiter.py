@@ -250,8 +250,13 @@ def parse_bt(path, mono_ns, wall_ns):
                 continue
             try:
                 key, val = line.rsplit(":", 1)
-                name, pid = key[1:].split("[", 1)
-                out[name][int(pid.rstrip("]"))].append((t, int(val)))
+                key = key[1:]
+                if "[" in key:
+                    name, pid = key.split("[", 1)
+                    pid = int(pid.rstrip("]"))
+                else:
+                    name, pid = key, 0   # scalar map, e.g. "@sn: 1234"
+                out[name][pid].append((t, int(val)))
             except ValueError:
                 continue
     return out
@@ -317,6 +322,73 @@ def cmd_sched(args):
     return 0
 
 
+def cmd_sampbias(args):
+    """Is the pg_stat_activity sampler scheduled preferentially when few
+    backends are queued? Compares the TIME-weighted distribution of "backends
+    on a processor or runnable" against the distribution seen at the instants
+    the sampler was actually switched in. Equal means no scheduling bias; a
+    lower sampler mean means the sampler systematically under-observes the
+    very state it is being used to measure."""
+    wf, wt = args.__dict__["from"], args.to
+    win = (wt - wf) / 1e9
+    pids = [int(x) for x in args.pids.split(",") if x.strip()]
+    maps = parse_bt(args.bt, args.mono_ns, args.wall_ns)
+    sn = delta(maps["sn"].get(0, []), wf, wt)
+    if not sn:
+        print("SAMPBIAS: the sampler was never switched in during the window")
+        return 1
+    print(f"SAMPBIAS  backends={len(pids)}  window={win:.3f}s  "
+          f"sampler switch-ins in window={sn:.0f} "
+          f"({sn/win:.1f}/s)")
+    print(f"  {'pid':>7} {'by time %':>10} {'as sampler saw it %':>21} {'delta pp':>9}")
+    et = es = 0.0
+    for p in pids:
+        on = delta(maps["on"].get(p, []), wf, wt) or 0.0
+        rq = delta(maps["rq"].get(p, []), wf, wt) or 0.0
+        ft = 100.0 * (on + rq) / 1e9 / win
+        fs = 100.0 * (delta(maps["sobs"].get(p, []), wf, wt) or 0.0) / sn
+        et += ft
+        es += fs
+        print(f"  {p:>7} {ft:>9.1f}% {fs:>20.1f}% {fs-ft:>+8.2f}")
+    n = len(pids)
+    et /= n
+    es /= n
+    print(f"  mean fraction of backends on a processor OR runnable:")
+    print(f"    by time                 = {et:.2f}%")
+    print(f"    at sampler switch-ins   = {es:.2f}%")
+    if es < et - 0.5:
+        verdict = "sampler UNDER-observes the on-cpu-or-runnable state"
+    elif es > et + 0.5:
+        verdict = "sampler OVER-observes it"
+    else:
+        verdict = "no material bias"
+    print(f"  SCHEDULING BIAS = {es-et:+.2f} pp ({verdict})")
+    return 0
+
+
+def cmd_torn(args):
+    """Rows where pg_stat_activity reported an active backend that was also
+    waiting on ClientRead: state and wait_event come from different places in
+    the backend's status entry, so the pair can be torn."""
+    tot = torn = idle_nowait = 0
+    with open(args.oracle) as f:
+        for row in csv.reader(f):
+            if len(row) < 6:
+                continue
+            ts, state, we = int(row[1]), row[3], row[5]
+            if ts < args.__dict__["from"] or ts >= args.to:
+                continue
+            tot += 1
+            if state == "active" and we == "ClientRead":
+                torn += 1
+            if state != "active" and we == "":
+                idle_nowait += 1
+    print(f"TORN rows={tot}  active+ClientRead={torn} ({100.0*torn/tot if tot else 0:.2f}%)"
+          f"  non-active+no-wait-event={idle_nowait} "
+          f"({100.0*idle_nowait/tot if tot else 0:.2f}%)")
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -344,6 +416,19 @@ def main():
                    help="CLOCK_MONOTONIC reading taken with --wall-ns")
     b.add_argument("--wall-ns", type=int, required=True)
     b.set_defaults(fn=cmd_sched)
+    sb = sub.add_parser("sampbias")
+    sb.add_argument("--bt", required=True)
+    sb.add_argument("--from", dest="from", type=int, required=True)
+    sb.add_argument("--to", type=int, required=True)
+    sb.add_argument("--pids", required=True)
+    sb.add_argument("--mono-ns", type=int, required=True)
+    sb.add_argument("--wall-ns", type=int, required=True)
+    sb.set_defaults(fn=cmd_sampbias)
+    tn = sub.add_parser("torn")
+    tn.add_argument("--oracle", required=True)
+    tn.add_argument("--from", dest="from", type=int, required=True)
+    tn.add_argument("--to", type=int, required=True)
+    tn.set_defaults(fn=cmd_torn)
     a = ap.parse_args()
     sys.exit(a.fn(a))
 
