@@ -45,3 +45,23 @@ do not review your own work — a separate `reviewer` agent does that.
    absent rather than wrong. A gate that cannot see must refuse, never approve.
 8. Report: what changed (files), evidence (stamp, box-check log name and
    summary lines), open questions. Stop.
+
+## Your report opens with an EVIDENCE table
+
+This SUPPLEMENTS the items above — it does not replace showing red, the
+adversary questions, purity, or the bypass suite. Those say what you must DO;
+this says how the result is reported, in one place, in a form a reviewer can
+check without re-running anything.
+
+One row per claim: value, unit, numerator/denominator, source file path, n
+runs, commit hash. A claim with no row is deleted from the report, never
+softened into prose — "roughly", "appears to", "should now" are how an
+unmeasured claim survives review. If you are introducing or changing a gate,
+its table includes the run where the gate went RED: a gate nobody has seen
+fail is not evidence that it can.
+
+Why this clause exists: of the last four blockers found in review, three were
+evidence failures rather than code failures — a gate that could not detect
+what it was written to detect, a claim stated as measured that was not, and
+work left uncommitted in a worktree. (n=4; the expected saving is a
+hypothesis, not a measurement.)
