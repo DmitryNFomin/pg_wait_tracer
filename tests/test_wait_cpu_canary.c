@@ -39,20 +39,44 @@ static void zero(struct wcc_stats *by_class)
     memset(by_class, 0, sizeof(struct wcc_stats) * PGWT_NUM_CLASSES);
 }
 
-/* ── 1. Which classes the canary is allowed to flag ─────────────────── */
-static void test_pure_sleep_classes(void)
+/* No per-event rows: the shape of a trace with no Lock/Timeout events. */
+static int verdict_no_events(const struct wcc_stats *by_class,
+                             uint64_t total, uint64_t measured)
 {
-    printf("--- pure-sleep classes ---\n");
-    CHECK(wcc_is_pure_sleep_class(PGWT_CLASS_LOCK), "Lock is a pure sleep");
-    CHECK(wcc_is_pure_sleep_class(PGWT_CLASS_TIMEOUT),
-          "Timeout is a pure sleep");
-    /* The one the coordinator warned about: IO legitimately carries the
-     * syscall's own on-CPU work and must NEVER be flagged. */
+    return wcc_verdict(by_class, NULL, 0, total, measured);
+}
+
+/* ── 1. What the canary is allowed to flag on cpu/dur ───────────────── */
+static void test_pure_sleep_selection(void)
+{
+    printf("--- what may be flagged on cpu/dur ---\n");
+    /* The two structurally CPU-free events: nothing runs immediately
+     * before them, nothing runs inside them. Measured at EXACTLY 0.0000%
+     * over 99.5 s of sleeping on the gate-snapshot VM. */
+    CHECK(wcc_is_pure_sleep_event(WEI(PG_WAIT_TIMEOUT, 2)),
+          "Timeout:PgSleep is flaggable");
+    CHECK(wcc_is_pure_sleep_event(WEI(PG_WAIT_LOCK, 0)),
+          "Lock:relation is flaggable");
+    /* The false positive the measurement caught: same class as
+     * Lock:relation, 4.35% on a HEALTHY capture, because pgbench enters it
+     * straight off an UPDATE's CPU and se.sum_exec_runtime is
+     * tick-quantised (the documented T8 leak). Flagging the CLASS would
+     * fail every healthy run. */
+    CHECK(!wcc_is_pure_sleep_event(WEI(PG_WAIT_LOCK, 5)),
+          "Lock:transactionid is NOT flagged — the T8 tick leak puts the "
+          "preceding CPU burst in it (4.35%% measured on a healthy capture)");
+    CHECK(!wcc_is_pure_sleep_event(WEI(PG_WAIT_TIMEOUT, 6)),
+          "Timeout:SpinDelay is NOT flagged — it is literally a CPU spin");
+    /* IO legitimately carries the syscall's own on-CPU work. */
+    CHECK(!wcc_is_pure_sleep_event(WEI(PG_WAIT_IO, 7)),
+          "an IO event is never flagged on cpu/dur");
+    /* The class predicate still selects which classes get a per-event
+     * breakdown in the report — it just no longer decides the verdict. */
+    CHECK(wcc_is_pure_sleep_class(PGWT_CLASS_LOCK) &&
+          wcc_is_pure_sleep_class(PGWT_CLASS_TIMEOUT),
+          "Lock and Timeout are broken out per event in the report");
     CHECK(!wcc_is_pure_sleep_class(PGWT_CLASS_IO),
-          "IO is NOT flagged — it legitimately carries CPU");
-    CHECK(!wcc_is_pure_sleep_class(PGWT_CLASS_LWLOCK),
-          "LWLock is not flagged (it spins before blocking)");
-    CHECK(!wcc_is_pure_sleep_class(PGWT_CLASS_CPU), "CPU is not a wait");
+          "IO is not broken out");
 }
 
 /* ── 2. The signature it exists to catch ────────────────────────────── */
@@ -61,56 +85,86 @@ static void test_detects_sleep_cpu(void)
     printf("--- detection: CPU inside a pure sleep ---\n");
     struct wcc_stats by_class[PGWT_NUM_CLASSES];
 
-    /* A healthy pg_sleep: 10 x 1 s of Timeout, ~20 us of wakeup work each.
-     * 0.002% — two orders under the 0.1% limit. */
-    zero(by_class);
-    for (int i = 0; i < 10; i++)
-        wcc_add(&by_class[PGWT_CLASS_TIMEOUT], MS(1000), US(20));
-    CHECK(wcc_flags(&by_class[PGWT_CLASS_TIMEOUT], PGWT_CLASS_TIMEOUT) == 0,
-          "20 us of wakeup work per 1 s sleep is clean (%.4f%%)",
-          wcc_ratio_pct(&by_class[PGWT_CLASS_TIMEOUT]));
-    CHECK(wcc_verdict(by_class, 10, 10) == WCC_CLEAN, "…verdict CLEAN");
+    struct wcc_event_row ev[4];
 
-    /* The signature: ONE event carrying 3 ms of CPU inside a sleep. The
-     * class ratio stays tiny (0.03%), so the per-event limit is what has to
-     * catch it — a ratio-only canary would miss this. */
+    /* A healthy pg_sleep: 10 x 1 s, ~20 us of wakeup work each. 0.002% —
+     * two orders under the 0.1% limit. */
     zero(by_class);
+    memset(ev, 0, sizeof(ev));
+    ev[0].we = WEI(PG_WAIT_TIMEOUT, 2);
+    for (int i = 0; i < 10; i++) {
+        wcc_add(&by_class[PGWT_CLASS_TIMEOUT], MS(1000), US(20));
+        wcc_add(&ev[0].s, MS(1000), US(20));
+    }
+    CHECK(wcc_flags(&ev[0].s, 1) == 0,
+          "20 us of wakeup work per 1 s pg_sleep is clean (%.4f%%)",
+          wcc_ratio_pct(&ev[0].s));
+    CHECK(wcc_verdict(by_class, ev, 1, 10, 10) == WCC_CLEAN,
+          "…verdict CLEAN");
+
+    /* The signature: ONE pg_sleep event carrying 3 ms of CPU. Its own ratio
+     * stays tiny (0.03%), so the per-event limit is what has to catch it —
+     * a ratio-only canary would miss this. */
+    memset(ev, 0, sizeof(ev));
+    ev[0].we = WEI(PG_WAIT_TIMEOUT, 2);
     for (int i = 0; i < 9; i++)
-        wcc_add(&by_class[PGWT_CLASS_TIMEOUT], MS(1000), US(20));
-    wcc_add(&by_class[PGWT_CLASS_TIMEOUT], MS(1000), MS(3));
-    CHECK(wcc_ratio_pct(&by_class[PGWT_CLASS_TIMEOUT]) < WCC_RATIO_LIMIT_PCT,
-          "…the class ratio alone stays under the limit (%.4f%%)",
-          wcc_ratio_pct(&by_class[PGWT_CLASS_TIMEOUT]));
-    CHECK(wcc_flags(&by_class[PGWT_CLASS_TIMEOUT], PGWT_CLASS_TIMEOUT)
-          == WCC_FLAG_EVENT,
+        wcc_add(&ev[0].s, MS(1000), US(20));
+    wcc_add(&ev[0].s, MS(1000), MS(3));
+    CHECK(wcc_ratio_pct(&ev[0].s) < WCC_RATIO_LIMIT_PCT,
+          "…the ratio alone stays under the limit (%.4f%%)",
+          wcc_ratio_pct(&ev[0].s));
+    CHECK(wcc_flags(&ev[0].s, 1) == WCC_FLAG_EVENT,
           "…but the 3 ms single event is flagged (flags=%d)",
-          wcc_flags(&by_class[PGWT_CLASS_TIMEOUT], PGWT_CLASS_TIMEOUT));
-    CHECK(wcc_verdict(by_class, 10, 10) == WCC_DEFECT, "…verdict DEFECT");
+          wcc_flags(&ev[0].s, 1));
+    CHECK(wcc_verdict(by_class, ev, 1, 10, 10) == WCC_DEFECT,
+          "…verdict DEFECT");
 
-    /* Sustained low-level leakage: every event under 1 ms, but 1% of the
-     * wait is on-CPU. The per-event limit misses it; the ratio catches it. */
+    /* Sustained low-level leakage on Lock:relation: every event under 1 ms,
+     * but 1% of the wait on-CPU. The per-event limit misses it; the ratio
+     * catches it. */
     zero(by_class);
+    memset(ev, 0, sizeof(ev));
+    ev[0].we = WEI(PG_WAIT_LOCK, 0);
     for (int i = 0; i < 100; i++)
-        wcc_add(&by_class[PGWT_CLASS_LOCK], MS(50), US(500));
-    CHECK(by_class[PGWT_CLASS_LOCK].max_cpu_ns < WCC_EVENT_LIMIT_NS,
+        wcc_add(&ev[0].s, MS(50), US(500));
+    CHECK(ev[0].s.max_cpu_ns < WCC_EVENT_LIMIT_NS,
           "…no single event reaches 1 ms (max %llu ns)",
-          (unsigned long long)by_class[PGWT_CLASS_LOCK].max_cpu_ns);
-    CHECK(wcc_flags(&by_class[PGWT_CLASS_LOCK], PGWT_CLASS_LOCK)
-          == WCC_FLAG_RATIO,
-          "…the 1.0%% class ratio is flagged (%.4f%%)",
-          wcc_ratio_pct(&by_class[PGWT_CLASS_LOCK]));
-    CHECK(wcc_verdict(by_class, 100, 100) == WCC_DEFECT, "…verdict DEFECT");
+          (unsigned long long)ev[0].s.max_cpu_ns);
+    CHECK(wcc_flags(&ev[0].s, 1) == WCC_FLAG_RATIO,
+          "…the 1.0%% ratio is flagged (%.4f%%)", wcc_ratio_pct(&ev[0].s));
+    CHECK(wcc_verdict(by_class, ev, 1, 100, 100) == WCC_DEFECT,
+          "…verdict DEFECT");
 
-    /* IO with the SAME shape must stay clean — the false-positive the
-     * coordinator called out: a pwrite into page cache is nearly all
-     * on-CPU under an IO label. */
+    /* The measured false positive: Lock:transactionid with the SAME 4.35%
+     * shape a healthy gate-box capture produced. It is in a broken-out
+     * class but is not a flaggable EVENT, so it must not fail the run —
+     * while Lock:relation beside it, with the same numbers, must. */
+    zero(by_class);
+    memset(ev, 0, sizeof(ev));
+    ev[0].we = WEI(PG_WAIT_LOCK, 5);            /* transactionid */
+    for (int i = 0; i < 3407; i++)
+        wcc_add(&ev[0].s, US(1064), US(46));
+    CHECK(wcc_ratio_pct(&ev[0].s) > WCC_RATIO_LIMIT_PCT,
+          "…transactionid really is over the ratio limit (%.4f%%)",
+          wcc_ratio_pct(&ev[0].s));
+    CHECK(wcc_verdict(by_class, ev, 1, 3407, 3407) == WCC_CLEAN,
+          "…yet the run is CLEAN: the T8 leak is not a defect");
+    ev[1].we = WEI(PG_WAIT_LOCK, 0);            /* relation, same numbers */
+    for (int i = 0; i < 3407; i++)
+        wcc_add(&ev[1].s, US(1064), US(46));
+    CHECK(wcc_verdict(by_class, ev, 2, 6814, 6814) == WCC_DEFECT,
+          "…and the identical numbers under Lock:relation DO fail");
+
+    /* IO with an extreme ratio must stay clean — a pwrite into page cache
+     * is nearly all on-CPU under an IO label. */
     zero(by_class);
     for (int i = 0; i < 100; i++)
         wcc_add(&by_class[PGWT_CLASS_IO], MS(50), MS(45));
-    CHECK(wcc_flags(&by_class[PGWT_CLASS_IO], PGWT_CLASS_IO) == 0,
+    CHECK(wcc_flags(&by_class[PGWT_CLASS_IO], 0) == 0,
           "90%% cpu/dur under an IO label is clean, not a defect (%.1f%%)",
           wcc_ratio_pct(&by_class[PGWT_CLASS_IO]));
-    CHECK(wcc_verdict(by_class, 100, 100) == WCC_CLEAN, "…verdict CLEAN");
+    CHECK(verdict_no_events(by_class, 100, 100) == WCC_CLEAN,
+          "…verdict CLEAN");
 }
 
 /* ── 3. cpu_ns > duration_ns: impossible in any class ───────────────── */
@@ -130,16 +184,15 @@ static void test_cpu_over_duration(void)
     CHECK(by_class[PGWT_CLASS_IO].max_excess_ns == MS(2),
           "…excess recorded as 2 ms (got %llu)",
           (unsigned long long)by_class[PGWT_CLASS_IO].max_excess_ns);
-    CHECK(wcc_flags(&by_class[PGWT_CLASS_IO], PGWT_CLASS_IO)
-          == WCC_FLAG_OVER_DUR,
+    CHECK(wcc_flags(&by_class[PGWT_CLASS_IO], 0) == WCC_FLAG_OVER_DUR,
           "…and flagged even though IO is exempt from the sleep limits");
-    CHECK(wcc_verdict(by_class, 1, 1) == WCC_DEFECT, "…verdict DEFECT");
+    CHECK(verdict_no_events(by_class, 1, 1) == WCC_DEFECT, "…verdict DEFECT");
 
     /* Exactly equal is legal: a task can be on-CPU for the whole interval. */
     zero(by_class);
     wcc_add(&by_class[PGWT_CLASS_IO], MS(10), MS(10));
     CHECK(by_class[PGWT_CLASS_IO].n_cpu_gt_dur == 0 &&
-          wcc_flags(&by_class[PGWT_CLASS_IO], PGWT_CLASS_IO) == 0,
+          wcc_flags(&by_class[PGWT_CLASS_IO], 0) == 0,
           "cpu_ns == duration_ns is legal, not a defect");
 }
 
@@ -152,7 +205,7 @@ static void test_cannot_see_refuses(void)
     /* (a) Empty input. Every ratio is 0.0%, every max is 0 — the shape of a
      * perfectly clean run. It must NOT be reported as clean. */
     zero(by_class);
-    CHECK(wcc_verdict(by_class, 0, 0) == WCC_CANNOT_SEE,
+    CHECK(verdict_no_events(by_class, 0, 0) == WCC_CANNOT_SEE,
           "no events at all -> CANNOT CHECK, not CLEAN");
 
     /* (b) Events, but nothing measured (v2 trace, sampled tier, no BTF).
@@ -172,9 +225,9 @@ static void test_cannot_see_refuses(void)
           "…UNKNOWN is never folded in as a cpu_ns of 0 (sum %llu, max %llu)",
           (unsigned long long)by_class[PGWT_CLASS_TIMEOUT].sum_cpu_ns,
           (unsigned long long)by_class[PGWT_CLASS_TIMEOUT].max_cpu_ns);
-    CHECK(wcc_flags(&by_class[PGWT_CLASS_TIMEOUT], PGWT_CLASS_TIMEOUT) == 0,
-          "…an all-unmeasured class is not flagged (there is no evidence)");
-    CHECK(wcc_verdict(by_class, 50, 0) == WCC_CANNOT_SEE,
+    CHECK(wcc_flags(&by_class[PGWT_CLASS_TIMEOUT], 1) == 0,
+          "…an all-unmeasured row is not flagged (there is no evidence)");
+    CHECK(verdict_no_events(by_class, 50, 0) == WCC_CANNOT_SEE,
           "…and the RUN refuses: 50 events, 0 measured -> CANNOT CHECK");
 
     /* (c) The flagged classes are absent rather than clean, while other
@@ -187,17 +240,20 @@ static void test_cannot_see_refuses(void)
     CHECK(by_class[PGWT_CLASS_TIMEOUT].n_events == 0 &&
           by_class[PGWT_CLASS_LOCK].n_events == 0,
           "…no pure-sleep events present");
-    CHECK(wcc_verdict(by_class, 20, 20) == WCC_CLEAN,
+    CHECK(verdict_no_events(by_class, 20, 20) == WCC_CLEAN,
           "…verdict CLEAN on the measured IO evidence");
 
     /* (d) A single measured event among many unmeasured ones is enough to
      * see with — and enough to fail on. Blindness is about having NO
      * evidence, not about having little. */
     zero(by_class);
+    struct wcc_event_row one[1];
+    memset(one, 0, sizeof(one));
+    one[0].we = WEI(PG_WAIT_LOCK, 0);          /* Lock:relation */
     for (int i = 0; i < 99; i++)
-        wcc_add(&by_class[PGWT_CLASS_LOCK], MS(100), PGWT_CPU_NS_UNKNOWN);
-    wcc_add(&by_class[PGWT_CLASS_LOCK], MS(100), MS(4));
-    CHECK(wcc_verdict(by_class, 100, 1) == WCC_DEFECT,
+        wcc_add(&one[0].s, MS(100), PGWT_CPU_NS_UNKNOWN);
+    wcc_add(&one[0].s, MS(100), MS(4));
+    CHECK(wcc_verdict(by_class, one, 1, 100, 1) == WCC_DEFECT,
           "1 measured event out of 100 still fails on a 4 ms sleep-CPU");
 
     /* (e) The verdict must scan EVERY class, not just the first or the
@@ -205,7 +261,7 @@ static void test_cannot_see_refuses(void)
     zero(by_class);
     wcc_add(&by_class[PGWT_CLASS_CPU], MS(10), MS(9));
     wcc_add(&by_class[PGWT_CLASS_UNKNOWN], MS(3), MS(7));
-    CHECK(wcc_verdict(by_class, 2, 2) == WCC_DEFECT,
+    CHECK(verdict_no_events(by_class, 2, 2) == WCC_DEFECT,
           "a defect in the LAST class index is still found");
 
     /* (f) Degenerate arithmetic: a zero-duration interval must not divide
@@ -214,13 +270,13 @@ static void test_cannot_see_refuses(void)
     wcc_add(&by_class[PGWT_CLASS_TIMEOUT], 0, 0);
     CHECK(wcc_ratio_pct(&by_class[PGWT_CLASS_TIMEOUT]) == 0.0,
           "a zero-duration interval gives a 0%% ratio, not a NaN");
-    CHECK(wcc_flags(&by_class[PGWT_CLASS_TIMEOUT], PGWT_CLASS_TIMEOUT) == 0,
+    CHECK(wcc_flags(&by_class[PGWT_CLASS_TIMEOUT], 1) == 0,
           "…and is not flagged");
 }
 
 int main(void)
 {
-    test_pure_sleep_classes();
+    test_pure_sleep_selection();
     test_detects_sleep_cpu();
     test_cpu_over_duration();
     test_cannot_see_refuses();
