@@ -103,6 +103,21 @@ KNOWN_FAILING_TABS = {
     # something else. Stays listed until a run with the tick-anchored
     # settle (and now the offset sweep, issue #119) is investigated either
     # way.
+    #
+    # Review round 4 tested the WINDOW-ADVANCE-REPAINT hypothesis directly:
+    # the issue's own 2026-09-17 08:12 diff mask shows axis labels advancing
+    # and gridlines shifting, suggesting the original ~4.5% was the tick's
+    # own legitimate window-pan repaint (timeline.js's xAxis sits at the
+    # bottom of the grid), caught mid-flight by the OLD 1200ms-after-tick
+    # anchor, not a bug. NOT confirmed by a live persistent-box run with the
+    # new pre-mount-vs-sweep-first instrument (ui_live_smoke.py's
+    # pre_mount_diagnostic, timeline only): diff_pixel_frac was 0.0 on all
+    # 6 ticks (run.id 1790542465) -- no window-advance repaint was observed
+    # at all in that run, let alone one matching the axis-label/gridline
+    # signature. The window-pan explanation for #100 is UNPROVEN by this
+    # test, not confirmed -- stays listed. No product change has fixed this
+    # either: timeline.js's last change is bdf07ed (#106); #171/11fdf0b
+    # touched only exec-scatter, matrix and waterfall.
     "timeline": 100,
     # #101 (waterfall) is DELISTED. Both symptoms filed under it -- "no
     # echarts instance" and "#waterfall-chart canvas never appeared within
