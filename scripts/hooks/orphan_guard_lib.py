@@ -72,14 +72,28 @@ _ALLOWED_BG_JOB_RE = re.compile(
     r"\s*$"
 )
 
-_LOOP_KEYWORDS = ("until", "while", "do", "done")
+# A command is split into "clauses" on the operators that separate one
+# shell command from the next (;, &&, ||, |, newline). Real loop syntax
+# always OPENS with `until`, `while`, or `for X in` as the first token of
+# some clause (`cmd1 && until COND; do ...; done`) -- unlike a bare word
+# search, this does not fire on "until"/"while"/"do"/"done" merely
+# appearing inside a quoted string argument, e.g. a commit message
+# (`git commit -m "done: fix bug"`) or a status line
+# (`echo "waiting while build runs"`), both wrongly refused by the
+# previous whole-command word search (see test_orphan_guard.sh's
+# "false-refusal" cases). The naive split does not understand quoting, so
+# it can still fragment a clause that itself contains a quoted `;`/`|` --
+# harmless here, since fragmenting only ever ADDS candidate clause starts,
+# it never hides a real "until"/"while"/"for ... in" opener.
+_CLAUSE_SPLIT_RE = re.compile(r"\|\||&&|;|\n|\|")
+_LOOP_OPEN_RE = re.compile(r"[\s({]*(?:until|while)\b")
+_FOR_IN_OPEN_RE = re.compile(r"[\s({]*for\s+\S+\s+in\b")
 
 
 def _looks_like_loop(cmd):
-    if any(_has_word(k, cmd) for k in _LOOP_KEYWORDS):
-        return True
-    if re.search(r"\bfor\b\s+\S+\s+in\b", cmd):
-        return True
+    for clause in _CLAUSE_SPLIT_RE.split(cmd):
+        if _LOOP_OPEN_RE.match(clause) or _FOR_IN_OPEN_RE.match(clause):
+            return True
     # a "bare repeated sleep" without an explicit loop keyword, e.g.
     # `sleep 30; sleep 30 &`
     sleep_count = len(re.findall(r"(?<![\w./-])sleep(?![\w-])", cmd))

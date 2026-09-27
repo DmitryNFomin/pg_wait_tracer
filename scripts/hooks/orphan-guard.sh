@@ -13,8 +13,10 @@
 #   - allow (exit 0, no output),
 #   - allow + tag the command for the reaper (exit 0, JSON on stdout with
 #     hookSpecificOutput.updatedInput.command prefixed with an
-#     `export PGWT_OWNER=<session_id>` + a self-registration line so
-#     orphan-reap.sh can find and kill it later), or
+#     `export PGWT_OWNER=<session_id>` + a self-registration line
+#     (pid TAB "ps -o lstart=,comm= -p <pid>" output) so orphan-reap.sh
+#     can find it later AND verify it is still the same process (not a
+#     pid the OS recycled onto something unrelated) before killing it, or
 #   - refuse (exit 2, reason on stderr — the documented "blocking error"
 #     path, same convention as scripts/hooks/push-guard.sh).
 #
@@ -60,7 +62,12 @@ case "$kind" in
         pids_dir="${PGWT_ORPHAN_GUARD_DIR:-$root/.claude/orphan-guard/pids}"
         mkdir -p "$pids_dir" 2>/dev/null || true
         pids_file="$pids_dir/$sid.pids"
-        marker="export PGWT_OWNER=\"$sid\"; printf '%s\\n' \"\$\$\" >> \"$pids_file\" 2>/dev/null; "
+        # Record pid + start-time + command name (`ps -o lstart=,comm=`),
+        # not just the pid: a pid alone is not an identity, it is recycled
+        # by the OS within a single long session (git/node/python fork
+        # constantly). The reaper re-queries the same signature before
+        # killing and refuses to act on a mismatch -- see orphan-reap.sh.
+        marker="export PGWT_OWNER=\"$sid\"; pgwt_sig=\$(ps -o lstart=,comm= -p \$\$ 2>/dev/null); printf '%s\\t%s\\n' \"\$\$\" \"\$pgwt_sig\" >> \"$pids_file\" 2>/dev/null; "
         updated="$marker$cmd"
         out=$(python3 -c '
 import json, sys

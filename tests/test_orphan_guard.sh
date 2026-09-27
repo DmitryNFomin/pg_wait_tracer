@@ -90,6 +90,13 @@ assert_refuse "only stdout redirected, stderr open" s1 'some_cmd >log &' 0 'must
 assert_refuse "only stderr redirected, stdout open" s1 'some_cmd 2>log &' 0 'must redirect BOTH stdout'
 
 echo
+echo "=== loop detection must key on shell syntax, not English words inside a quoted argument (review false-refusal finding) ==="
+assert_allow "commit message containing the word 'done' is not a loop" s1 'git commit -m "done: fix bug" >log 2>&1 &' 0
+assert_allow "status message containing the word 'while' is not a loop" s1 'echo "waiting while build runs" >log 2>&1 &' 0
+assert_allow "commit message containing 'for ... in' text is not a loop" s1 'git commit -m "fixed the for loop in worker.py" >log 2>&1 &' 0
+assert_refuse "a real while-loop is still refused even though it also contains the word done" s1 'while ! grep -q done log; do sleep 30; done' 1 'poll loop'
+
+echo
 echo "=== ssh leaving a remote background job ==="
 assert_refuse "ssh remote command backgrounds itself" s1 'ssh root@gatebox "make box-check EPHEMERAL=1 >log 2>&1 &"' 0 'ssh command backgrounds a job'
 assert_allow "plain ssh, no remote backgrounding" s1 'ssh root@gatebox "make check"' 0
@@ -156,17 +163,20 @@ rm -rf "$minimal_path"
 report "$ok" "python3 (dependency) missing from PATH (exit 127 path): refused rather than silently allowed (exit $rc)"
 
 echo
-echo "=== orphan-reap.sh: kills a live registered pid, prunes dead/garbage entries ==="
+echo "=== orphan-reap.sh: kills a live registered pid (matching signature), prunes dead/garbage entries ==="
 tmp_pids_dir="$(mktemp -d)"
 
 # Spawn a real background process (plain job control -- same idiom as
-# tests/test_check_lock.sh's own holder process) and register it, a dead
-# pid, and a garbage line all in the same registry file.
+# tests/test_check_lock.sh's own holder process) and register it the same
+# way orphan-guard.sh's marker would: pid TAB "ps -o lstart=,comm=" for
+# that pid, taken while it is still running -- plus a dead pid and a
+# garbage line in the same registry file.
 sleep 30 >/dev/null 2>&1 &
 live_pid=$!
+live_sig=$(ps -o lstart=,comm= -p "$live_pid" 2>/dev/null)
 pids_file="$tmp_pids_dir/reap-test.pids"
 {
-    echo "$live_pid"
+    printf '%s\t%s\n' "$live_pid" "$live_sig"
     echo "999999999"   # a pid that (almost certainly) does not exist
     echo "not-a-pid"    # garbage line
 } > "$pids_file"
@@ -183,11 +193,56 @@ report "$ok" "reaper hook exits 0 (side-effecting cleanup, not a decision gate)"
 still_alive=1
 kill -0 "$live_pid" 2>/dev/null && still_alive=0
 [[ $still_alive -eq 1 ]] && ok=true || ok=false
-report "$ok" "reaper actually killed the live registered process (pid $live_pid)"
+report "$ok" "reaper actually killed the live registered process with a matching signature (pid $live_pid)"
 
 [[ -f "$pids_file" ]] && ok=false || ok=true
 report "$ok" "registry file pruned after reap (must not accumulate like the 563 task-record files)"
 
+rm -rf "$tmp_pids_dir"
+
+echo
+echo "=== orphan-reap.sh: a RECYCLED pid (registry entry stale, pid now belongs to an unrelated live process) must be refused, never killed ==="
+tmp_pids_dir="$(mktemp -d)"
+
+# Process A is what got registered (its signature is what ends up in the
+# file). It exits on its own -- long before Stop fires -- exactly like a
+# `make box-check` job that finished 30 minutes into a multi-hour session.
+sleep 30 >/dev/null 2>&1 &
+old_pid=$!
+old_sig=$(ps -o lstart=,comm= -p "$old_pid" 2>/dev/null)
+kill -9 "$old_pid" 2>/dev/null
+wait "$old_pid" 2>/dev/null
+
+# Process B is unrelated and alive -- standing in for whatever the OS
+# later handed a recycled/coincident pid to (a git/node/python fork, or in
+# this deterministic test, simply a second process). The registry entry
+# below combines a REAL, currently-alive pid (B's) with process A's OLD
+# signature -- the exact shape of the bug: an alive pid whose recorded
+# identity no longer matches what is actually running there. Deliberately
+# a DIFFERENT command (`yes`, not `sleep`) so the mismatch is guaranteed
+# regardless of `ps -o lstart=` only having one-second resolution -- two
+# `sleep` processes started in the same wall-clock second would otherwise
+# share an identical signature and this test would not prove anything.
+yes >/dev/null 2>&1 &
+new_pid=$!
+pids_file="$tmp_pids_dir/recycled-test.pids"
+printf '%s\t%s\n' "$new_pid" "$old_sig" > "$pids_file"
+
+kill -0 "$new_pid" 2>/dev/null && ok=true || ok=false
+report "$ok" "setup: the unrelated live process is running before reap, registry holds a stale (mismatched) signature for its pid"
+
+reap_out=$(python3 -c 'import json; print(json.dumps({"session_id":"recycled-test"}))' | PGWT_ORPHAN_GUARD_DIR="$tmp_pids_dir" bash "$REAP")
+report "true" "$reap_out" 2>/dev/null
+
+still_alive=0
+kill -0 "$new_pid" 2>/dev/null || still_alive=1
+[[ $still_alive -eq 0 ]] && ok=true || ok=false
+report "$ok" "reaper did NOT kill the unrelated live process despite its pid being in the registry (signature mismatch)"
+
+[[ -f "$pids_file" ]] && ok=false || ok=true
+report "$ok" "the stale entry is still dropped from the registry (mismatch is not re-tried forever)"
+
+{ kill -9 "$new_pid" 2>/dev/null; wait "$new_pid" 2>/dev/null; } 2>/dev/null || true   # test cleanup, not part of the assertion
 rm -rf "$tmp_pids_dir"
 
 echo

@@ -163,6 +163,36 @@ judges. It writes no feature code itself for anything bigger than a one-liner.
   `make check` itself queues for a machine-wide lock so concurrent agents on
   this Mac serialize instead of colliding (`scripts/check-lock.sh`) —
   `PGWT_SKIP_CHECK_LOCK=1` bypasses it and is for humans only, same rule.
+- **`scripts/hooks/orphan-guard.sh`** (PreToolUse on Bash) refuses commands
+  that create a background shell able to outlive the agent that started it —
+  the mechanism behind background shells the owner found still listed as
+  running 13h/23h later, and eleven detached watcher scripts that polled for
+  up to a day. It refuses: `nohup`/`setsid`/`disown` anywhere in the command;
+  a manual `&` background job unless BOTH stdout and stderr are redirected in
+  the same command (`cmd >log 2>&1 &` is fine, `cmd &` is not); an `ssh`
+  command that backgrounds a job on the remote side even with no local
+  trailing `&`; and any backgrounded shell — manual `&` or the Bash tool's
+  own `run_in_background: true` — shaped like a poll loop (`until`/`while`/
+  `for`, or a repeated `sleep`), regardless of what it polls. `run_in_background`
+  is further restricted to `make check`, `make check-fast`, `make box-check`,
+  and `make ui-gallery` (optionally with an env prefix and a trailing
+  redirect/`| tee`) — anything else needs one blocking foreground wait
+  inside your own command, or report back and let the lead re-invoke you
+  rather than leaving a background job running. **Fails closed**: if
+  `scripts/hooks/orphan_guard_lib.py` is missing, corrupt, or python3 itself
+  is unavailable, every Bash call is refused (exit 2) rather than silently
+  allowed through — only the Bash tool is gated, so Read/Write/Edit still
+  work to fix the hook, and a human's own terminal is unaffected either way.
+  `scripts/hooks/orphan-reap.sh` (Stop + SubagentStop) kills whatever is
+  still alive from an allowed background job when the (sub)agent stops,
+  verifying a start-time+command-name signature before killing so a pid the
+  OS recycled onto an unrelated process is never touched. Known limitation:
+  the PreToolUse guard blocks the loop-shaped orphans (the actual 22h/11h/10h
+  specimens) at creation regardless of whether Stop ever fires, but it is
+  unproven whether Stop/SubagentStop fire on an ABRUPT termination (an agent
+  dying on its own usage limit) rather than only a cooperative stop — if not,
+  a legitimately long-running allowed job whose agent dies abruptly is not
+  reaped by this mechanism. Bypass suite: `tests/test_orphan_guard.sh`.
 
 ## Local setup (one-time)
 

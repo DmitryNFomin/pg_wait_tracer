@@ -8,9 +8,22 @@
 #
 # Marker mechanism: orphan-guard.sh (the PreToolUse hook) tags every
 # *backgrounded* command it allows by prefixing it with
-#   export PGWT_OWNER="<session_id>"; printf '%s\n' "$$" >> <pids_file>
-# before it runs. This hook reads that same <pids_file> and kills whatever
-# in it is still alive.
+#   export PGWT_OWNER="<session_id>";
+#   pgwt_sig=$(ps -o lstart=,comm= -p $$); printf '%s\t%s\n' "$$" "$pgwt_sig" >> <pids_file>
+# before it runs. This hook reads that same <pids_file> and, for each
+# entry, re-queries the SAME `ps -o lstart=,comm=` for that pid and only
+# kills it if the signature still matches.
+#
+# This identity check exists because a bare pid is not an identity: a
+# session backgrounds a long job (pid 4321, recorded), the job finishes on
+# its own well before the agent stops, 4321 stays in the registry (it is
+# only pruned wholesale at Stop), the agent keeps forking git/node/python
+# for hours, the OS recycles 4321 onto one of those, and Stop fires -- a
+# bare "is this pid alive" check would then kill an unrelated live
+# process. Start-time + command name together are extremely unlikely to
+# collide for an OS-recycled pid within one session's lifetime, and a
+# mismatch (or the pid simply being gone) means the entry is dropped
+# WITHOUT being killed -- silence, not a kill, is the safe default here.
 #
 # Documented-mechanism gap (see CLAUDE.md implementer contract, "report the
 # gap instead of faking it"): the obvious design -- scan every process's
@@ -55,26 +68,37 @@ pids_file="$pids_dir/$sid.pids"
 [[ -f "$pids_file" ]] || exit 0
 
 killed=0
-while IFS= read -r pid; do
+skipped_mismatch=0
+while IFS=$'\t' read -r pid recorded_sig; do
     [[ -z "$pid" ]] && continue
     if ! [[ "$pid" =~ ^[0-9]+$ ]]; then
         continue   # drop garbage lines, never treat them as a pid to kill
     fi
-    if kill -0 "$pid" 2>/dev/null; then
-        kill "$pid" 2>/dev/null && killed=$((killed + 1))
-        # Best-effort escalation, one shot -- not a wait/verify loop (kill(2)
-        # is asynchronous: a pid can still answer kill -0 for a moment after
-        # SIGKILL while it is a not-yet-reaped zombie, so re-checking
-        # liveness immediately here would misreport a successful kill as
-        # "still running". We do not poll for the real exit; one TERM + one
-        # KILL is the entire attempt, matching the no-retry-loop rule.)
-        kill -9 "$pid" 2>/dev/null || true
+    if ! kill -0 "$pid" 2>/dev/null; then
+        continue   # already gone -- nothing to verify or kill
     fi
-    # Every pid we looked at (dead-already, killed, or garbage) is dropped
-    # from the file: this is a one-shot marker, not a monitor, so it must
-    # not become another accumulating task-record pile.
+    current_sig=$(ps -o lstart=,comm= -p "$pid" 2>/dev/null)
+    if [[ -z "$recorded_sig" || "$current_sig" != "$recorded_sig" ]]; then
+        # No recorded signature (older/foreign entry) or the pid answers
+        # kill -0 but is no longer the SAME process we registered -- the OS
+        # recycled it onto something unrelated. Refuse to kill; drop the
+        # stale entry and move on. A miss here must never become a kill.
+        skipped_mismatch=$((skipped_mismatch + 1))
+        continue
+    fi
+    kill "$pid" 2>/dev/null && killed=$((killed + 1))
+    # Best-effort escalation, one shot -- not a wait/verify loop (kill(2)
+    # is asynchronous: a pid can still answer kill -0 for a moment after
+    # SIGKILL while it is a not-yet-reaped zombie, so re-checking liveness
+    # immediately here would misreport a successful kill as "still
+    # running". We do not poll for the real exit; one TERM + one KILL is
+    # the entire attempt, matching the no-retry-loop rule.
+    kill -9 "$pid" 2>/dev/null || true
+    # Every pid we looked at (dead-already, killed, mismatched, or garbage)
+    # is dropped from the file: this is a one-shot marker, not a monitor,
+    # so it must not become another accumulating task-record pile.
 done < "$pids_file"
 
 rm -f "$pids_file"
-echo "orphan-reap: session $sid — attempted kill on $killed live process(es)"
+echo "orphan-reap: session $sid — killed $killed live process(es), skipped $skipped_mismatch (pid alive but signature mismatch -- not ours to kill)"
 exit 0
