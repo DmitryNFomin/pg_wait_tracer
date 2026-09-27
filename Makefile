@@ -285,9 +285,16 @@ clean:
 #   demo-rehearsal issue #157: a single long (DURATION_MIN=, default 35)
 #                  real-PG capture under pgbench load, walked repeatedly,
 #                  on its own throwaway Hetzner VM (never the gate box,
-#                  never gating CI) -> tests/results/demo_rehearsal/
+#                  never gating CI) -> tests/results/demo_rehearsal/. issue
+#                  #176: the capture runs DETACHED on the VM, not from this
+#                  Mac -- a killed launcher does not lose the run or leak
+#                  the machine, see demo-rehearsal-collect below.
+#   demo-rehearsal-collect  issue #176: finish a demo-rehearsal run whose
+#                  launcher was killed before it could collect results and
+#                  delete the VM -- reattaches via
+#                  tests/results/.demo-rehearsal-state.sh.
 # ---------------------------------------------------------------------------
-.PHONY: check check-fast box-check hetzner-sweep ui-gallery demo-rehearsal
+.PHONY: check check-fast box-check hetzner-sweep ui-gallery demo-rehearsal demo-rehearsal-collect
 check:
 	@bash tests/test_check_lock.sh
 	@scripts/check-lock.sh scripts/check.sh
@@ -301,3 +308,5 @@ ui-gallery:
 	@tests/ui_gallery.sh $(BASE)
 demo-rehearsal:
 	@DURATION_MIN=$(DURATION_MIN) KEEP=$(KEEP) scripts/demo-rehearsal.sh
+demo-rehearsal-collect:
+	@KEEP=$(KEEP) scripts/demo-rehearsal.sh --collect
