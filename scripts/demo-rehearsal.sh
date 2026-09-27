@@ -182,6 +182,25 @@ ephemeral_cleanup() {
     fi
     [[ -z "$server_id" ]] && return
 
+    # Never delete on "unreachable" -- deletion is for a CONFIRMED died,
+    # not-started or finished state only. `remote_state` already retries
+    # several times with a backoff before returning "unreachable" (see its
+    # own comment), so by the time we get here it isn't a single blip --
+    # but we still do not know the real state, and the two possible
+    # mistakes are not symmetric: a leaked VM costs cents and is visible
+    # (this message, plus hetzner-sweep.sh's 6h cutoff); deleting a
+    # finished 35-45 minute rehearsal's results is not recoverable. This
+    # overrides KEEP entirely -- unreachable is kept regardless of KEEP.
+    if [[ "${last_state:-}" == "unreachable" ]]; then
+        echo "demo-rehearsal: remote state could not be determined (unreachable after $REMOTE_STATE_PROBE_ATTEMPTS retries) -- REFUSING to delete $server_name (id=$server_id, ip=$server_ip). A network blip must not destroy a possibly-completed rehearsal. Leaving it up; confirm its real state, then delete it yourself:" | tee -a "$log" >&2
+        echo "  HCLOUD_TOKEN=\"\$(security find-generic-password -s hcloud -a claude_token -w)\" tests/hetzner-vm.sh delete $server_id" | tee -a "$log" >&2
+        # $STATE_FILE is deliberately left in place too, same reasoning as
+        # the KEEP=1 case below: it is what lets a later
+        # 'make demo-rehearsal-collect' find this VM again and try the
+        # probe once more instead of a fresh launch creating a second one.
+        return
+    fi
+
     if [[ "$KEEP" == "1" ]]; then
         echo "demo-rehearsal: KEEP=1 -- leaving $server_name (id=$server_id, ip=$server_ip) up." | tee -a "$log"
         echo "demo-rehearsal: tests/hetzner-sweep.sh (make hetzner-sweep, cutoff ${MAX_AGE_HOURS:-6}h by default) WILL delete this VM on its own in a few hours unless you raise MAX_AGE_HOURS/--max-age-hours or delete it yourself first:" | tee -a "$log"
@@ -258,6 +277,28 @@ if [[ "$MODE" == "launch" ]]; then
     echo "demo-rehearsal: created $server_name id=$server_id ip=$server_ip" | tee -a "$log"
 
     target="root@$server_ip"
+    remote_dir="pgwt-demo-rehearsal"
+    demo_rehearsal_start_epoch=$(date +%s)
+
+    # Write the state-file guard NOW -- right after the VM exists, before
+    # provisioning or rsync get a chance to fail. Narrow bug found in
+    # review: the guard used to only get written after the detached
+    # capture had already started, so a provisioning/rsync failure with
+    # KEEP=1 left NO state file at all -- the exact same "next launch
+    # can't see the kept VM, creates a second one" shape as the earlier
+    # KEEP=1-cleanup bug, just on an earlier path. All the fields below
+    # are already final at this point (remote_dir is a fixed literal,
+    # demo_rehearsal_start_epoch is fixed now and reused unchanged as the
+    # PGWT_RUN_MARKER below), so there is nothing to re-write later.
+    cat > "$STATE_FILE" <<EOF
+SERVER_ID=$server_id
+SERVER_IP=$server_ip
+REMOTE_DIR=$remote_dir
+START_EPOCH=$demo_rehearsal_start_epoch
+DURATION_MIN=$DURATION_MIN
+LOG=$log
+EOF
+    echo "demo-rehearsal: state saved to $STATE_FILE (before provisioning) -- a killed launcher, or a provisioning/rsync failure, still leaves a guard so a next launch refuses to create a second VM" | tee -a "$log"
 
     echo "demo-rehearsal: staging repo + running tests/provision-runner.sh ubuntu on $target" | tee -a "$log"
     ssh -o BatchMode=yes -o StrictHostKeyChecking=no "$target" "mkdir -p pgwt-provision" 2>>"$log"
@@ -269,7 +310,6 @@ if [[ "$MODE" == "launch" ]]; then
         exit 1
     fi
 
-    remote_dir="pgwt-demo-rehearsal"
     echo "demo-rehearsal: $target  DURATION_MIN=$DURATION_MIN  -> $remote_dir  (log: $log)"
     ssh -o BatchMode=yes -o StrictHostKeyChecking=no "$target" "mkdir -p '$remote_dir'" || exit 1
     rsync -az --delete -e "ssh -o StrictHostKeyChecking=no" \
@@ -279,8 +319,6 @@ if [[ "$MODE" == "launch" ]]; then
         --exclude 'tests/results' --exclude 'web/pgwt' --exclude '__pycache__' \
         --exclude '.pgwt-check.stamp' \
         ./ "$target:$remote_dir/" || exit 1
-
-    demo_rehearsal_start_epoch=$(date +%s)
 
     # ── Kick off the capture DETACHED (issue #176) ──────────────────────
     # nohup + `setsid -w`: setsid makes the child its own session leader
@@ -311,39 +349,46 @@ if [[ "$MODE" == "launch" ]]; then
         exit 1
     fi
     echo "demo-rehearsal: detached capture running on $target (pid recorded remotely at $remote_dir/rehearsal.pid)" | tee -a "$log"
-
-    # Persist enough to reattach after this process dies for ANY reason,
-    # including SIGKILL (which cannot be trapped -- this file, written
-    # before the long wait below, is the actual fix, not the traps above).
-    cat > "$STATE_FILE" <<EOF
-SERVER_ID=$server_id
-SERVER_IP=$server_ip
-REMOTE_DIR=$remote_dir
-START_EPOCH=$demo_rehearsal_start_epoch
-DURATION_MIN=$DURATION_MIN
-LOG=$log
-EOF
-    echo "demo-rehearsal: state saved to $STATE_FILE -- a killed launcher can be resumed with 'make demo-rehearsal-collect'" | tee -a "$log"
+    # $STATE_FILE was already written above, before provisioning -- nothing
+    # in it changed since (see the comment there), so there is no second
+    # write here. A killed launcher, from this point on, can be resumed
+    # with 'make demo-rehearsal-collect'.
 fi
 
 # ── Poll for the completion marker with ONE long sleep, not a loop ──────
 # (issue #176). wait-budget is relative to demo_rehearsal_start_epoch, so a
 # --collect invoked any time after a kill sleeps only the REMAINING budget,
 # never the full window again.
+# REMOTE_STATE_PROBE_ATTEMPTS / _BACKOFF_S: a single ssh call used to be
+# enough to declare a completed 35-45 minute rehearsal "unreachable" --
+# one dropped packet, a restarted sshd, a transient "connection refused"
+# (exactly the ssh exit 255 seen on the gate box) was indistinguishable
+# from a genuinely dead VM, and decide-outcome + ephemeral_cleanup then
+# DELETED the machine along with results that could never be recreated.
+# A blip costs a few seconds; losing 35+ minutes of capture is not
+# recoverable -- so "unreachable" is only allowed to mean anything after
+# several attempts, spread out, have all failed the same way.
+REMOTE_STATE_PROBE_ATTEMPTS="${REMOTE_STATE_PROBE_ATTEMPTS:-5}"
+REMOTE_STATE_PROBE_BACKOFF_S="${REMOTE_STATE_PROBE_BACKOFF_S:-10}"
+
 remote_state() {
-    local out
-    out=$(ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=10 "$target" \
-        "cd '$remote_dir' 2>/dev/null || { echo 'STATE=unreachable RC=-'; exit 0; }; \
-         if [[ -f rehearsal.done ]]; then rc=\$(cat rehearsal.rc 2>/dev/null || echo -); echo \"STATE=finished RC=\$rc\"; \
-         elif [[ -f rehearsal.pid ]] && kill -0 \$(cat rehearsal.pid 2>/dev/null) 2>/dev/null; then echo 'STATE=running RC=-'; \
-         elif [[ -f rehearsal.pid ]]; then echo 'STATE=died RC=-'; \
-         else echo 'STATE=not-started RC=-'; fi" 2>>"$log")
-    local ssh_rc=$?
-    if [[ $ssh_rc -ne 0 || -z "$out" ]]; then
-        echo "STATE=unreachable RC=-"
-        return
-    fi
-    tail -n1 <<<"$out"
+    local out ssh_rc attempt
+    for ((attempt = 1; attempt <= REMOTE_STATE_PROBE_ATTEMPTS; attempt++)); do
+        out=$(ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=10 "$target" \
+            "cd '$remote_dir' 2>/dev/null || { echo 'STATE=unreachable RC=-'; exit 0; }; \
+             if [[ -f rehearsal.done ]]; then rc=\$(cat rehearsal.rc 2>/dev/null || echo -); echo \"STATE=finished RC=\$rc\"; \
+             elif [[ -f rehearsal.pid ]] && kill -0 \$(cat rehearsal.pid 2>/dev/null) 2>/dev/null; then echo 'STATE=running RC=-'; \
+             elif [[ -f rehearsal.pid ]]; then echo 'STATE=died RC=-'; \
+             else echo 'STATE=not-started RC=-'; fi" 2>>"$log")
+        ssh_rc=$?
+        if [[ $ssh_rc -eq 0 && -n "$out" ]]; then
+            tail -n1 <<<"$out"
+            return
+        fi
+        echo "demo-rehearsal: remote-state probe attempt $attempt/$REMOTE_STATE_PROBE_ATTEMPTS failed (ssh_rc=$ssh_rc) -- not yet calling this unreachable" | tee -a "$log" >&2
+        [[ $attempt -lt $REMOTE_STATE_PROBE_ATTEMPTS ]] && sleep "$REMOTE_STATE_PROBE_BACKOFF_S"
+    done
+    echo "STATE=unreachable RC=-"
 }
 
 check_and_finish() {
