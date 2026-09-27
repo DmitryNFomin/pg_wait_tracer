@@ -196,6 +196,20 @@ void pgwt_update_time_model(struct pgwt_time_model *tm, uint32_t event,
 uint64_t pgwt_live_closed_cpu_ns(uint64_t dur_ns, uint64_t cpu_ns,
                                  bool cpu_accounting);
 
+/* Age of the still-open [last_ts, now) stretch, guarded.
+ *
+ * pgwt_read_state_map() reads CLOCK_MONOTONIC ONCE and then iterates
+ * state_map, while BPF keeps stamping last_ts during that iteration — so a
+ * backend that transitions mid-scan has last_ts AHEAD of `now` and the bare
+ * `now - sval.last_ts` underflows to ~1.8e19 ns (584 years). Measured on a
+ * cx33 gate-snapshot VM: 3 of 18 state_map ticks idle (max 146 us into the
+ * future) and 7 of 18 under an 8-hog CPU load (max 3132 us) — it scales
+ * with how long the scan takes. The wrapped value went into the Active
+ * Sessions view's current_wait_ns verbatim, and into DB Time and one class
+ * row as a mod-2^64 nudge of -delta. A stretch whose start has not been
+ * observed to be in the past yet has no measurable age: 0. */
+uint64_t pgwt_live_open_ns(uint64_t now_ns, uint64_t last_ts_ns);
+
 /* ── Live-view interval accounting (issues #97, #98) ─────────────────────
  *
  * The live accumulators are fed from TWO paths that must classify an

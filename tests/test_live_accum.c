@@ -344,6 +344,34 @@ static void test_closed_cpu_ns_rule(void)
     CHECK(pgwt_live_closed_cpu_ns(0, MS(5), true) == 0,
           "a zero-length gap contributes 0");
 
+    /* The open stretch's AGE, guarded (#202). pgwt_read_state_map() reads
+     * CLOCK_MONOTONIC once and then iterates state_map while BPF keeps
+     * stamping last_ts, so a backend that transitions mid-scan has last_ts
+     * AHEAD of `now`. Measured on a cx33 gate-snapshot VM: 3 of 18 ticks
+     * idle (max 146 us ahead) and 7 of 18 under an 8-hog load (max 3132 us
+     * ahead) — it scales with how long the scan takes. escalation.c's
+     * flush already refuses that case (`if (now <= st.last_ts) continue`);
+     * the state_map scan subtracted anyway. */
+    CHECK(pgwt_live_open_ns(1000, 400) == 600, "a normal age subtracts");
+    CHECK(pgwt_live_open_ns(1000, 1000) == 0, "same instant -> 0");
+    CHECK(pgwt_live_open_ns(1000, 1146) == 0,
+          "last_ts 146 ns in the FUTURE -> 0, not %llu",
+          (unsigned long long)pgwt_live_open_ns(1000, 1146));
+    /* The exact observed shape: last_ts 3132 us ahead. Unguarded this is
+     * 1.8446744073709518e19 ns = 584 years, which went into the Active
+     * Sessions view's current_wait_ns verbatim and, mod 2^64, took 3.1 ms
+     * off DB Time and off one class row in the same tick. */
+    {
+        uint64_t now = 1000000000000ULL;          /* 1000 s of uptime */
+        uint64_t last = now + 3132500ULL;         /* 3132.5 us ahead */
+        CHECK(pgwt_live_open_ns(now, last) == 0,
+              "the measured 3132.5 us skew yields 0, not %llu ns",
+              (unsigned long long)pgwt_live_open_ns(now, last));
+        CHECK((now - last) > (1ULL << 63),
+              "…and the unguarded subtraction really does wrap (%llu ns)",
+              (unsigned long long)(now - last));
+    }
+
     /* And the accumulator's own half of the contract: on-CPU wall splits
      * into CPU* + Off-CPU*, so the three fields conserve. */
     struct pgwt_accumulator *acc = calloc(1, sizeof(*acc));

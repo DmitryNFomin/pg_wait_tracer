@@ -152,6 +152,12 @@ uint64_t pgwt_live_closed_cpu_ns(uint64_t dur_ns, uint64_t cpu_ns,
     return cpu_ns < dur_ns ? cpu_ns : dur_ns;   /* clamp skew to the gap */
 }
 
+/* #202 — see the contract on map_reader.h pgwt_live_open_ns(). */
+uint64_t pgwt_live_open_ns(uint64_t now_ns, uint64_t last_ts_ns)
+{
+    return now_ns > last_ts_ns ? now_ns - last_ts_ns : 0;
+}
+
 uint32_t pgwt_live_effective_event(uint32_t we, uint32_t cat_flag,
                                    bool cmd_gate_active, bool cmd_open)
 {
@@ -561,7 +567,12 @@ void pgwt_read_state_map(struct pgwt_daemon *d)
                 next_rc = bpf_map_get_next_key(state_fd, &skey, &snext);
                 continue;
             }
-            uint64_t open_ns = now - sval.last_ts;
+            /* #202: `now` was read once, before this scan started; BPF goes
+             * on stamping last_ts while we iterate, so a backend that
+             * transitions mid-scan has last_ts AHEAD of now and the bare
+             * subtraction underflows to ~584 years (measured up to 3.1 ms
+             * of skew under load). pgwt_live_open_ns() floors it at 0. */
+            uint64_t open_ns = pgwt_live_open_ns(now, sval.last_ts);
             uint32_t we = sval.last_event;
 
             if (dbg_scan) {
@@ -735,7 +746,7 @@ void pgwt_read_state_map(struct pgwt_daemon *d)
             registry_pids++;
             if (pid_found) {
                 found++;
-                open_ns = now - direct_sval.last_ts;
+                open_ns = pgwt_live_open_ns(now, direct_sval.last_ts);
                 if (direct_sval.last_event != 0)
                     direct_we_nonzero++;
                 else if (open_ns == 0)

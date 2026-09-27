@@ -117,8 +117,13 @@ def test_partition(pm_pid):
     WAIT_CLASSES = {'IO', 'LWLock', 'Lock', 'Client', 'IPC',
                     'BufferPin', 'Timeout', 'Extension'}
     wait_sum = sum(model.get(c, 0) for c in WAIT_CLASSES)
+    # Off-CPU* (issue #202) is CPU*'s measured sibling — the wall of the
+    # on-CPU intervals the backend was not actually on a CPU for — and a
+    # first-class component of DB Time, so it belongs in the partition.
+    # 0 on the legacy/sampled tiers, where CPU* carries the whole gap.
+    offcpu = model.get('Off-CPU*', 0)
 
-    reconstructed = cpu_time + wait_sum
+    reconstructed = cpu_time + offcpu + wait_sum
 
     check(db_time > 1000,
           f"DB Time = {db_time:.0f}ms (expected > 1000ms for {CLIENTS} clients)")
@@ -128,7 +133,8 @@ def test_partition(pm_pid):
         error_pct = abs(reconstructed - db_time) / db_time * 100
         check(error_pct < 0.1,
               f"Partition error = {error_pct:.4f}% "
-              f"(CPU={cpu_time:.0f} + Waits={wait_sum:.0f} = {reconstructed:.0f} "
+              f"(CPU={cpu_time:.0f} + OffCPU={offcpu:.0f} + "
+              f"Waits={wait_sum:.0f} = {reconstructed:.0f} "
               f"vs DB Time={db_time:.0f})")
 
     # Percentages should sum to ~100%
