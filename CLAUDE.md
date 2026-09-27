@@ -63,15 +63,19 @@ judges. It writes no feature code itself for anything bigger than a one-liner.
   only for a code blocker; no confirmation re-reviews. Agents wait for box runs
   with one long sleep inside a single command, never minute-by-minute polling.
   Reports are at most ~15 lines.
-- **Fable is not used** (owner rule 2026-09-25). Evidence: as the `src/`
-  implementer on #128 it needed two blocker rounds, still failed CI, cost more
-  than every Sonnet agent of that night combined, and died mid-task on its own
-  usage limit; the main session running on Fable cost more than all subagents
-  together. It remains available only as an explicit escalation for a `src/`
-  problem an Opus implementer has already failed a round on. The account is
-  currently **out of Fable tokens**, so such a task is **PARKED and reported to
-  the owner**, never silently retried or quietly downgraded. Parked list:
-  memory `fable-parked-tasks` (empty = nothing is waiting on a Fable reset).
+- **Fable**: not an implementer, but it **is the standing adviser** (see the
+  Adviser bullet below), and that is its normal, expected use. As an
+  *implementer* it stays unused (owner rule 2026-09-25): on #128 it needed two
+  blocker rounds, still failed CI, cost more than every Sonnet agent of that
+  night combined, and died mid-task on its own usage limit; the main session
+  running on Fable cost more than all subagents together. It remains available
+  as an explicit escalation for a `src/` problem an Opus implementer has
+  already failed a round on. When such a task is judged not worth the
+  escalation it is **parked and reported to the owner**, never silently
+  retried or quietly downgraded — parked list: memory `fable-parked-tasks`.
+  Fable's budget was exhausted on 2026-09-25 and had **reset by 2026-09-27**,
+  since when it has been in continuous use as the adviser; check before
+  repeating "out of Fable tokens".
 - **Main session model**: the orchestrator runs on **Opus** (`/model`), never
   Fable — it reads 15-line reports, decides ready/back, merges and spawns, and
   every one of its turns re-reads the whole context, so its model is the
