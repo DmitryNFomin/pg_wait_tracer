@@ -48,6 +48,11 @@ do not review your own work — a separate `reviewer` agent does that.
 
 ## Your report opens with an EVIDENCE table
 
+This SUPPLEMENTS the items above — it does not replace showing red, the
+adversary questions, purity, or the bypass suite. Those say what you must DO;
+this says how the result is reported, in one place, in a form a reviewer can
+check without re-running anything.
+
 One row per claim: value, unit, numerator/denominator, source file path, n
 runs, commit hash. A claim with no row is deleted from the report, never
 softened into prose — "roughly", "appears to", "should now" are how an

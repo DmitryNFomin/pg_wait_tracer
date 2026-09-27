@@ -10,7 +10,7 @@ backend, Go WebSocket bridge, ECharts/uPlot web UI). Plan and status:
 |---|---|---|---|
 | `make check` (`check-fast` = seconds) | this Mac | Node builder tests, Go bridge, py_compile, Playwright UI + chaos suites vs `tests/mock_server.py` | before every push — the push guard enforces it |
 | `make box-check [OS=el8\|el9\|ubuntu] [PG=13\|16\|17\|18]` | x86 Linux box over ssh (`$PGWT_BOX`, `$PGWT_BOX_EL8`…) | Linux build, C units, synthetic-data tests, protocol drift, real-PG capture (`tests/run_all.sh --require-live`, incl. the live-UI-smoke walk — `tests/ui_live_smoke.sh` / `tests/results/ui_live/summary.json`) | before every PR; `OS=el8` when touching kernel/libbpf/layout code |
-| `make box-check EPHEMERAL=1 [PG=…] [KEEP=1]` | throwaway Hetzner VM created from the `pgwt=gate-snapshot` image, always deleted at the end (`KEEP=1` leaves it up and prints the delete command) | the same live tier as above, on a private one-run VM — no `$PGWT_BOX`, no flock contention with other agents | **every agent run, including the final pre-PR one** — the throwaway VM is the same machine class as the gate box (since 103b1a0), so it is the same evidence. The two persistent boxes are reserved for CI's self-hosted jobs: an agent running there queues behind CI on the same `flock`, which is most of the 29–117 min CI spread. Use `$PGWT_BOX` only when a run needs the persistent box's own state |
+| `make box-check EPHEMERAL=1 [PG=…] [KEEP=1]` | throwaway Hetzner VM created from the `pgwt=gate-snapshot` image, always deleted at the end (`KEEP=1` leaves it up and prints the delete command) | the same live tier as above, on a private one-run VM — no `$PGWT_BOX`, no flock contention with other agents | **every agent run on Ubuntu, including the final pre-PR one** — the throwaway VM is the same Hetzner machine class as the gate box (103b1a0 matched cpx42→cx33), so for the Ubuntu tier it is the same evidence. The two persistent boxes are reserved for CI's self-hosted jobs: an agent running there queues behind CI on the same `flock`, which is most of the 29–117 min CI spread (n=9 runs). **`EPHEMERAL=1` supports `OS=ubuntu` only** — `scripts/box-check.sh` refuses anything else, because no `pgwt=gate-snapshot` image exists for el8/el9. So kernel/libbpf/layout work still runs `OS=el8` against `$PGWT_BOX_EL8`: 103b1a0 matched the machine class, never the kernel, and el8 is exactly the tier where that difference is the point |
 | `make ui-gallery [BASE=ref]` | this Mac | before/after screenshots of every UI snapshot cell → `tests/results/ui_gallery/index.html` + `summary.json` | before every PR that touches `web/` |
 
 Logs: `tests/results/box-check-*.log` (`box-check-ephemeral-*.log` for `EPHEMERAL=1`), `tests/results/ui_gallery/`, `tests/results/ui_live/summary.json`.
@@ -29,8 +29,13 @@ of cutoff (issue #162) — to remove your own VM, delete it by id
 
 A PR is ready when ALL of these are true and the evidence is in the PR body:
 0. **Start `box-check` FIRST and run `make check` while it is running.** They
-   use different machines and are independent; running them in series costs
-   ~22 minutes per PR for nothing.
+   use different machines and are independent (the check's flock is local to
+   this Mac, the box run holds its own remote flock, and `box-check.sh`
+   excludes `.pgwt-check.stamp` from its rsync), so running them in series
+   adds the check's whole wall time to every PR for nothing. Measured
+   2026-09-27 on this Mac under concurrent agent load: 6, 9 and 7 minutes
+   (n=3, median 7) — `scripts/check.sh`'s "~4 min" header describes an
+   unloaded run.
 1. `make check` passed (full, not `--fast`) on the final tree.
 2. `make box-check` passed — paste the run_all summary (last ~20 lines), which
    includes the live-UI-smoke one-line verdict (`tests/results/ui_live/summary.json`).
@@ -99,8 +104,10 @@ judges. It writes no feature code itself for anything bigger than a one-liner.
   run onto the same laptop. But the lock is a CPU cap, not a queue that costs
   nothing: three agents in GATE phase are 3 x 22 min on this Mac, which
   exceeds the 40-min box run, so the Mac becomes the critical path. The honest
-  cap is **at most two agents in gate phase at once** — three is fine while at
-  most two of them need the full `make check` (an `src/` agent spends hours
+  cap is **at most two agents in GATE PHASE at once** (gate phase = waiting on
+  or running `make check`; distinct from the three-actively-implementing
+  count above, which counts agents writing code) — three implementing is fine
+  while at most two of them need the full `make check` (an `src/` agent spends hours
   implementing and runs one check, so it barely touches the lock). Before spawning, list the files the task will
   touch and compare them against every in-flight branch — an overlap is
   refused up front, not discovered at merge (2026-09-25: two branches both
