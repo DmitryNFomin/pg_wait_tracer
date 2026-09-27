@@ -1,0 +1,312 @@
+#115 FOLLOW-UP — does pg_wait_sampling carry the scheduler-induced sampling
+bias we measured in our own sampled tier?
+
+Short answer: YES, the mechanism is confirmed and directly observed, but it is
+smaller than ours — and pg_wait_sampling's CPU number is wrong for a second,
+larger, unrelated reason that has nothing to do with scheduling.
+
+Machine    Hetzner cx33 (4 vCPU), pgwt=gate-snapshot image, server id
+           167627570, Ubuntu 24.04, kernel 6.8.0-139 (EEVDF),
+           kernel.sched_schedstats=1, PG 18.6 port 5418, pgbench scale 10
+           (TPC-B), pg_wait_tracer @ agent/pgws-bias-measurement.
+Subject    pg_wait_sampling built from source at postgrespro/pg_wait_sampling
+           adc5607 (post-v1.1.9 master, the branch that supports PG 18), all
+           GUCs at their defaults: profile_period = 10 ms, profile_pid = on,
+           profile_queries = top, sample_cpu = on.
+Window     the escalation window only, trimmed 3 s at each end and clamped to
+           every observer's own coverage: 39.00 s in every run. sat = 8
+           clients, unsat = 2 clients, 3 repeats each, interleaved.
+Observers  SIX over the identical window and the identical eight pgbench
+           backends: our exact tier (xp_gate S/A/B/C) | our sampled tier |
+           pg_stat_activity at ~48.6 Hz from a separate backend (classifier
+           variants V1..V4) | pg_wait_sampling's profile | /proc schedstat
+           counter deltas | sched_switch/sched_wakeup tracepoints, which also
+           record the run-queue state at the instants BOTH in-database
+           samplers were actually switched in.
+Harness    pgws_capture.sh, pgws_analyze.sh, pgws_run.sh, pgws_ctl.sh,
+           pgws_share.py, pgws_summary.py, sched3.bt.tmpl (+ the arbiter
+           tools kernel_cpu_arbiter.py, pgsa_variants.py, xp_gate.c carried
+           over from issue115_arbiter / issue115_reconcile). Per-run output
+           in sat*.txt / unsat*.txt, the parsed table in SUMMARY.txt, the
+           period controls in CTL_SUMMARY.txt and pgwsctl/*.txt.
+
+================================================================================
+0. HOW pg_wait_sampling ACTUALLY SAMPLES  (read before concluding)
+================================================================================
+
+collector.c: one background worker loops on
+WaitLatch(&MyProc->procLatch, ..., time_to_sleep, PG_WAIT_EXTENSION), and on
+each wakeup, if the profile period has elapsed, calls probe_waits(), which
+takes ProcArrayLock LW_SHARED and walks ProcGlobal->allProcs[] reading each
+PGPROC's wait_event_info. It is therefore exactly the shape the claim
+describes: a task that must be scheduled before it can observe.
+
+Three things about it are genuinely different from polling pg_stat_activity,
+and all three are to its credit:
+
+ a. It reads ONE field, PGPROC->wait_event_info, straight out of shared
+    memory. pg_stat_activity's `state` and `wait_event` come from different
+    structures, which is what makes a row torn; pg_wait_sampling has nothing
+    to tear. Measured torn rows in the pg_stat_activity reference over the
+    same windows: 0.71 % saturated, 2.31 % unsaturated. For pg_wait_sampling
+    the corresponding number is structurally zero.
+ b. Its period is self-correcting: time_to_sleep is computed from elapsed
+    time, not from a fixed sleep after variable work. Measured effective
+    probe rate: 100.00 Hz in every one of the six runs, saturated and not,
+    against the pg_stat_activity poller's nominal 50 Hz that actually
+    delivered 48.6 Hz. The "we deliberately skip some samplings" path in
+    collector.c never fired at this load.
+ c. Its probe is cheap: one uint32 read per backend. Measured on-CPU burst
+    per probe, 8 backends: mean 42 us, p50 in [32,64) us, saturated and
+    unsaturated alike. It is almost never preempted mid-walk, so the eight
+    per-backend reads that share one timestamp really are near-simultaneous.
+    (With hundreds of backends the walk would be longer and this would stop
+    being true.)
+
+And one thing that is a real, structural limitation:
+
+ d. It has no `state`. With sample_cpu = on (the default) every backend whose
+    wait_event_info is 0 is counted as CPU, whether it is executing a
+    statement or sitting between pgstat_report_activity(idle) and the next
+    ClientRead doing protocol work. Its CPU share is therefore a
+    WHOLE-BACKEND number, structurally the same quantity pgsa_variants.py
+    calls V2 — not the in-command number our tiers and the conventional
+    pg_stat_activity classifier (V1) report. Comparing it against V1 or
+    against our tiers' own share would be comparing two different
+    definitions; every table below puts it against the whole-backend
+    versions of the exact tier and of the kernel.
+
+================================================================================
+1. THE THREE-WAY COMPARISON  (mean [min..max] over 3 repeats, 39.00 s each)
+================================================================================
+
+All on the WHOLE-BACKEND definition, so all three answer the same question.
+
+  observer                                saturated (8)      unsaturated (2)
+  ---------------------------------------------------------------------------
+  kernel: on-CPU + run-queue vs our wait  67.99 [67.69..68.32]  71.98 [71.92..72.06]
+  our exact tier (C) + CPU outside cmd    62.27 [61.96..62.60]  67.85 [67.79..67.96]
+  pg_wait_sampling profile                59.79 [59.74..59.82]  66.52 [65.84..67.70]
+  pg_stat_activity V2 (same definition)   58.06 [57.81..58.31]  66.84 [66.57..67.07]
+
+  pg_wait_sampling - exact tier              -2.48 pp             -1.33 pp
+  pg_wait_sampling - kernel                  -8.19 pp             -5.46 pp
+  pg_wait_sampling - pg_stat_activity V2     +1.73 pp             -0.32 pp
+
+For context, the in-command definition (not comparable to the above):
+  exact S (ships)  47.43 / 66.57 | exact C 48.03 / 62.83 |
+  our sampled tier 45.03 / 55.47 | pg_stat_activity V1 40.18 / 60.87
+
+Load: 2628 [2519..2723] tps saturated, 1201 [1184..1228] unsaturated;
+run-queue delay is 48.5 % of on-or-runnable time saturated, 2.9 % unsaturated.
+
+================================================================================
+2. THE MECHANISM, MEASURED DIRECTLY  (not inferred from the symptom)
+================================================================================
+
+The collector background worker was identified as a child of the postmaster
+(`pg_wait_sampling collector`) and put through exactly the instrument used on
+our own samplers: sched:sched_wakeup and sched:sched_switch, comparing the
+fraction of backends on-CPU-or-runnable measured BY TIME against the same
+fraction measured AT THE INSTANTS the observer was switched in.
+
+"pgws_probe" counts only the switch-ins that follow a wakeup — the top of the
+collector's loop, which is where probe_waits() runs. Self-check that this is
+the right set of instants: wakeup-triggered switch-ins were 109.5/s saturated
+and 102.1/s unsaturated, against the 100.0 Hz effective probe rate the profile
+itself reports (the surplus is this harness's own 2 Hz profile reads, each of
+which wakes the collector out of band, plus a few latch wakeups).
+
+  quantity                                saturated (8)      unsaturated (2)
+  ---------------------------------------------------------------------------
+  backends on-CPU-or-runnable, by time    73.00 [72.67..73.36]  67.35 [67.33..67.36]
+  ... at the pgws collector's probes      70.33 [70.13..70.70]  65.33 [64.21..66.55]
+  ... at the pg_stat_activity poller's    68.73 [68.07..69.20]  66.03 [65.15..67.05]
+
+  BIAS, pp of WALL on-or-runnable
+    pg_wait_sampling collector              -2.67 [-2.81..-2.53]  -2.02 [-3.12..-0.79]
+    pg_stat_activity poller                 -4.27 [-4.60..-3.77]  -1.32 [-2.18..-0.30]
+  THE SAME BIAS, pp of the CPU SHARE
+    pg_wait_sampling collector              -2.96 [-3.11..-2.81]  -2.55 [-3.93..-0.99]
+    pg_stat_activity poller                 -6.13 [-6.57..-5.44]  -1.61 [-2.63..-0.36]
+
+(pp of wall is converted to pp of the share by dividing by that observer's own
+non-idle fraction of wall — 90.1 % for pg_wait_sampling, 69.6 % for the
+pg_stat_activity poller saturated. They are different denominators because
+pg_wait_sampling keeps the out-of-command CPU rows its classifier cannot
+exclude. Confusing these two units is what made #115's earlier "6.4 vs 3.7 pp"
+look like a disagreement.)
+
+The visible cause, the same one we found for our own sampler — the observer's
+own wakeup-to-running delay:
+
+  observer wakeup -> running delay        saturated          unsaturated
+  ---------------------------------------------------------------------------
+  pg_wait_sampling collector   mean        145 us              16 us
+                               p50 bucket  [16,32) us          [8,16) us
+                               p90 bucket  [256,512) us        [16,32) us
+  pg_stat_activity poller      mean        303 us              15 us
+                               p50 bucket  [128,256) us        [8,16) us
+                               p90 bucket  [512,1K) us         [8,16) us
+
+Saturated, the collector waits for a processor 0.65 s over the 39 s window
+against the 0.21 s it spends running — it spends three times longer wanting a
+processor than using one, which IS the mechanism, made visible.
+
+WHY ITS BIAS IS SMALLER THAN THE POLLER'S. The displacement of an observer's
+sample instants is set by how long it has to wait for a processor, and that
+wait is set by how much work it does per sample. The collector does one uint32
+read per backend (42 us per probe) and gets on a processor in 16-32 us at the
+median; the pg_stat_activity poller clears its snapshot, walks every backend's
+status entry and inserts eight rows (about twice the CPU per sample) and waits
+128-256 us at the median. Roughly half the delay, roughly half the bias:
+-2.67 pp against -4.27 pp of wall. The bias is not a property of "being a
+sampler" in the abstract — it scales with the sampler's own service demand.
+That also predicts pg_wait_sampling's advantage shrinks as the backend count
+grows and the ProcArray walk gets longer, which this run (8 backends) cannot
+show.
+
+================================================================================
+3. WHAT IS NOT SCHEDULER BIAS
+================================================================================
+
+The -8.19 pp gap to the kernel saturated is NOT all sampling bias. Decomposed:
+
+  pg_wait_sampling - kernel                          -8.19 pp
+    of which measured scheduler bias (share units)   -2.96 pp
+    of which our exact tier is also below the kernel -5.72 pp
+
+That -5.72 pp is the exact tier's own distance from the kernel over the same
+window and is a definitional matter recorded in #115's reconciliation (the
+kernel counts run-queue delay of processes that PostgreSQL is not calling
+"in a wait", and the tiers discard out-of-command CPU differently); it is not
+pg_wait_sampling's fault. Against the exact tier, which is the closest
+instrument #115 has to ground truth, pg_wait_sampling is -2.48 pp saturated —
+consistent, within the spread, with the -2.96 pp of directly measured
+scheduling bias alone. The scheduling bias accounts for essentially the whole
+of pg_wait_sampling's error against the exact tier.
+
+================================================================================
+4. ITS OWN OVERHEAD  (it perturbs the system it measures, but very little)
+================================================================================
+
+  quantity (39.00 s window, 8 backends)     saturated       unsaturated
+  ---------------------------------------------------------------------------
+  collector on-CPU, schedstat f1            0.21 s          0.21 s
+    as a share of ONE processor             0.54 %          0.54 %
+    as a share of this 4-vCPU box           0.13 %          0.13 %
+  collector run-queue delay, schedstat f2   0.65 s          0.03 s
+  on-CPU per probe (sched_switch)           42 us mean      41 us mean
+  LWLock:ProcArray seen by the backends     0.06 % of       0.03 % of
+    (upper bound: not all of it is pgws)      non-idle        non-idle
+
+For scale, over the same windows: the pg_stat_activity poller used 1.02 % of
+one processor (twice as much), and our own pg_wait_tracer daemon in escalated
+tiered mode used 1.75 s = 4.5 % of one processor, eight times the collector.
+pg_wait_sampling is the cheapest of the three observers in this comparison.
+
+Two honest caveats on the figures above. (1) The collector's on-CPU time
+includes serving this harness's 2 Hz reads of pg_wait_sampling_profile, each
+of which serialises the whole profile hash through a shm_mq; those are 2 of
+its ~102 activations per second but much longer than an ordinary probe (the
+p90 burst tail), so 0.54 % is an UPPER bound on stock overhead. (2) A
+throughput A/B with the extension off was not attempted: run-to-run tps spread
+here is about 8 % (2519..2723), an order of magnitude larger than a 0.13 %
+CPU cost could move, so such a test could not have resolved it either way. The
+direct kernel-side measurement is the stronger evidence and is what is quoted.
+
+================================================================================
+5. CONTROLS: does the sampling PERIOD explain any of it?
+================================================================================
+
+Two objections had to be ruled out by measurement rather than by argument:
+(a) "its bias is smaller only because it samples at 100 Hz against the
+poller's 49 Hz", and (b) "at exactly 100.00 Hz a strictly periodic sampler
+could be aliasing against a quasi-periodic workload". Only
+pg_wait_sampling.profile_period was changed (PGC_SIGHUP, no restart, nothing
+else different), 2 repeats per cell, same window and workload as above.
+
+  run         nominal  effective   pgws bias   pgsa bias   pgws CPU   collector
+                rate      rate     pp of wall  pp of wall   share     on-CPU
+  --------------------------------------------------------------------------
+  satp201      50 Hz     50.0 Hz     -2.21       -4.67      60.20 %    0.33 %
+  satp202      50 Hz     50.0 Hz     -2.80       -3.57      59.52 %    0.38 %
+  (main, sat) 100 Hz    100.0 Hz     -2.67 mean  -4.27 mean 59.79 %    0.52 %
+  satp011    1000 Hz    828.2 Hz     -1.60       -3.83      59.73 %    2.61 %
+  satp012    1000 Hz    820.1 Hz     -1.58       -3.75      59.97 %    2.73 %
+  unsatp201    50 Hz     50.0 Hz     -1.14       -2.04      66.79 %    0.33 %
+  unsatp202    50 Hz     50.0 Hz     -1.04       -1.48      66.65 %    0.35 %
+  (main,unsat)100 Hz    100.0 Hz     -2.02 mean  -1.32 mean 66.52 %    0.49 %
+  unsatp011  1000 Hz    900.5 Hz     -1.69       -2.43      68.33 %    2.86 %
+  unsatp012  1000 Hz    902.4 Hz     -2.00       -0.54      67.48 %    2.85 %
+
+(a) RULED OUT. Across a 20x range of sampling rate the collector's saturated
+bias stays between -1.6 and -2.8 pp while the pg_stat_activity poller, at a
+rate the collector also ran at, stays between -3.6 and -4.7 pp. At the SAME
+50 Hz the collector is biased -2.2/-2.8 and the poller -4.7/-3.6. Rate is not
+the difference; the observer's own service demand is, exactly as section 2
+says.
+
+(b) RULED OUT as the explanation of the unsaturated residual. If a 10 ms
+period aliasing against a ~1.67 ms transaction cycle were responsible, moving
+to 1 ms or 20 ms would move it. It does not: unsaturated the collector reads
+-1.0, -1.1 (20 ms), -0.8..-3.1 (10 ms), -1.7, -2.0 (1 ms).
+
+WHAT THE UNSATURATED RESIDUAL IS, THEN: open. Unsaturated, BOTH in-database
+samplers show a small persistent negative bias — collector -1.0 to -3.1 pp,
+poller -0.5 to -2.4 pp — in a regime where the run queue holds only 2.9-3.1 %
+of on-or-runnable time and both observers reach a processor in 8-16 us. It
+therefore cannot be run-queue displacement, and it is not period aliasing.
+Its size is comparable to the run-to-run spread and is a few times the
+estimator's own sampling error (about 0.5 pp at 2 backends), so this
+experiment does not resolve it. It is recorded as open rather than explained,
+and it is worth noting that #115's reconciliation measured -0.69 pp for the
+poller unsaturated where this run measures -1.32 pp: same order, different
+machine-hour.
+
+A SECOND, SEPARATE LOAD-CORRELATED EFFECT, found by these controls: at
+profile_period = 1 ms the collector cannot keep its own schedule, and it
+misses MORE when the machine is busier — 828/820 Hz saturated against
+900/902 Hz unsaturated, both against a nominal 1000 Hz. That is collector.c's
+"we deliberately skip some samplings ... if processor is working overtime"
+path firing, confirmed independently by the tracepoints (834 wakeups/s
+saturated, 901/s unsaturated) and by the profile's own row counts. At the
+default 10 ms and at 20 ms it holds exactly 100.00 and 50.0 Hz in every run,
+so the default is safe at this scale — but the delivered rate is not
+guaranteed under load, and the samples it drops are by construction the ones
+from the busiest moments.
+
+Overhead also scales as expected with rate: 0.33 % of one processor at 50 Hz,
+0.52 % at 100 Hz, 2.7 % at 1000 Hz (8 backends).
+
+================================================================================
+6. VERDICT
+================================================================================
+
+1. CONFIRMED, mechanism and all. pg_wait_sampling's collector is displaced by
+   the scheduler in exactly the way our own sampled tier is: saturated, the
+   backends are on-CPU-or-runnable 73.00 % of wall but only 70.33 % of wall
+   at the instants the collector actually probed. -2.67 pp of wall, which is
+   -2.96 pp of the CPU share it reports. The cause is visible in its own
+   scheduling: 16-32 us to reach a processor unsaturated, 256-512 us at the
+   90th percentile saturated, and 0.65 s spent waiting for a processor
+   against 0.21 s spent running.
+2. ITS BIAS IS ABOUT HALF OURS, and the reason is measurable, not
+   architectural luck: a probe costs it 42 us of CPU against roughly twice
+   that for a pg_stat_activity poller, so it waits half as long for a
+   processor and its instants are displaced half as far. Rate is ruled out as
+   the explanation. The advantage should shrink as the ProcArray walk gets
+   longer with backend count, which 8 backends cannot show.
+3. IT IS FAIRER THAN A pg_stat_activity POLLER IN TWO MORE WAYS: it cannot
+   produce a torn row (one field, one read), and it holds its nominal rate
+   exactly at 10-20 ms periods where a sleep-based poller drifts.
+4. BUT ITS BIGGEST ERROR IS NOT SCHEDULING. Having no `state` column, it
+   counts every not-waiting backend as CPU, including out-of-command protocol
+   work. That makes its number a whole-backend one; read as an in-command CPU
+   share it would be ~20 pp too high saturated. Compared correctly, it lands
+   59.79 % against our exact tier's 62.27 % and the kernel's 67.99 %.
+5. FOR US: nothing here changes #115's conclusions. It adds a second,
+   independent in-database sampler that carries the same bias in the same
+   direction, which strengthens the finding that
+   tests/test_cross_validate_tiered.sh grading exact against sampled under
+   saturation measures scheduler bias rather than tracer accuracy.

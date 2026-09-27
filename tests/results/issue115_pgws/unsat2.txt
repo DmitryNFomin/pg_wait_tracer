@@ -1,0 +1,89 @@
+######## unsat2 ########
+WINDOW [1790506500041296261,1790506539041296261) secs=39.0 pgbench_backends=2: 8898,8899
+  pgsa sampler pid=8965  pgws collector pid=3254  pgws snapshotter pid=8966
+  pgws settings: pg_wait_sampling.history_period=100000 pg_wait_sampling.history_size=5000 pg_wait_sampling.profile_period=10 pg_wait_sampling.profile_pid=on pg_wait_sampling.profile_queries=top pg_wait_sampling.sample_cpu=on 
+  tps: tps = 1189.665924 (without initial connection time)
+
+--- exact + sampled tier (strict pgbench-backend set) ---
+PIDS total=12 with_cmd_markers=2 overlapping_intervals=0 client_only=1
+CMD-OPEN total = 54.678 s over 294694 commands (mean 185.5 us)   wait inside cmd = 20.337 s   cpu outside cmd = 8.457 s
+INTERVALS cpu=413449 (mean 103.5 us) wait=119161 (mean 170.7 us) straddling=359350 (8.457 s outside)
+MARKERS start=339515 end=339515 dup_start(missing END)=0 orphan_end(missing START)=0 pids_unclosed_at_end=0
+SAMPLED                        cpu=24.097s nonidle=43.807s  share=55.0%  total=63.856s active_frac=68.6% noncmd_cpu=0.000s
+EXACT S (stream, majority)     cpu=40.434s wait=20.337s  share=66.5%
+EXACT A (sorted, majority)     cpu=40.434s wait=20.337s  share=66.5%
+EXACT B (sorted, proportional) cpu=34.341s wait=20.337s  share=62.8%
+EXACT C (2-pass, proportional) cpu=34.341s wait=20.337s  share=62.8%
+
+--- reference: pg_stat_activity (V1 in-command, V2 whole-backend) ---
+PGSA_IN pgsa       iters=1922 (49.3 Hz) rows=3844 backends=2.00 win=39.000s act_cpu=1517 act_wait=989 torn=125(3.25%) nonactive_nowait=497(12.93%) idle_clientread=713 idle_activity=0 act_activity=0 nonactive_wait=3
+PGSA_V1 pgsa       share=60.53%  cpu_s=   30.78 nonidle_s=   50.85 cpu_n=1517 nonidle_n=2506
+PGSA_V2 pgsa       share=67.07%  cpu_s=   40.87 nonidle_s=   60.93 cpu_n=2014 nonidle_n=3003
+PGSA_V3 pgsa       share=62.41%  cpu_s=   33.32 nonidle_s=   53.39 cpu_n=1642 nonidle_n=2631
+PGSA_V4 pgsa       share=68.38%  cpu_s=   43.40 nonidle_s=   63.47 cpu_n=2139 nonidle_n=3128
+    pgsa       CPU                         60.53%     30.78s
+    pgsa       IO:WalSync                  32.20%     16.38s
+    pgsa       LWLock:WALWrite              3.79%      1.93s
+    pgsa       Lock:transactionid           1.60%      0.81s
+    pgsa       IO:WalWrite                  1.08%      0.55s
+    pgsa       IO:DataFileRead              0.64%      0.32s
+    pgsa       IO:DataFileWrite             0.12%      0.06s
+    pgsa       IO:DataFileExtend            0.04%      0.02s
+
+--- reference: pg_wait_sampling profile ---
+PGWS_IN pgws       snaps=140 span=38.739s (analysis window 39.000s, misalign 0.261s) backends=2 probes=3874 eff_rate=100.0Hz cpu_n=4009 wait_n=2063 idle_clientread_n=1676
+PGWS    pgws       share=66.02%  cpu_s=   40.09 nonidle_s=   60.72 cpu_n=4009 nonidle_n=6072
+    pgws       CPU                         66.02%     40.09s
+    pgws       IO:WalSync                  27.90%     16.94s
+    pgws       IDLE:ClientRead             27.60%     16.76s
+    pgws       LWLock:WALWrite              3.51%      2.13s
+    pgws       Lock:transactionid           1.09%      0.66s
+    pgws       IO:WalWrite                  1.00%      0.61s
+    pgws       IO:DataFileRead              0.33%      0.20s
+    pgws       LWLock:ProcArray             0.10%      0.06s
+    pgws       IO:DataFileWrite             0.03%      0.02s
+    pgws       IO:DataFileExtend            0.02%      0.01s
+
+--- kernel arbiter ---
+KERNEL window=39.000s pids=2 (not spanning the window, excluded: none)
+  schedstat f1 sum_exec_runtime (on a processor)   =   51.774 s
+  schedstat f2 run_delay        (runnable, queued) =    0.421 s
+  f1+f2  (on a processor OR wanting one)           =   52.194 s
+SCHEDTRACE window=39.000s backends=2 wall=78.000 backend-s
+  on-CPU  (executing)                =   50.937 s
+  run-queue delay (runnable, queued) =    1.605 s
+  off-CPU (blocked / sleeping)       =   25.196 s
+  ... of which EXECUTING on a cpu    =    0.000 s (0.0% -- on-CPU time PostgreSQL reports as the IO:WalSync wait)
+
+--- scheduling bias, the SAME instrument on both in-database samplers ---
+SAMPBIAS[pgsa]  backends=2  window=39.000s  sampler switch-ins in window=1940 (49.8/s)  observer on-CPU=0.395s (1.01% of one processor)
+      pid  by time %   as sampler saw it %  delta pp
+    by time                 = 67.36%
+    at sampler switch-ins   = 65.88%
+  SCHEDULING BIAS[pgsa] = -1.48 pp (sampler UNDER-observes the on-cpu-or-runnable state)
+SAMPBIAS[pgws_all]  backends=2  window=39.000s  sampler switch-ins in window=3994 (102.4/s)  observer on-CPU=0.197s (0.50% of one processor)
+      pid  by time %   as sampler saw it %  delta pp
+    by time                 = 67.36%
+    at sampler switch-ins   = 65.06%
+  SCHEDULING BIAS[pgws_all] = -2.30 pp (sampler UNDER-observes the on-cpu-or-runnable state)
+SAMPBIAS[pgws_probe]  backends=2  window=39.000s  sampler switch-ins in window=3984 (102.2/s)  observer on-CPU=0.197s (0.50% of one processor)
+      pid  by time %   as sampler saw it %  delta pp
+    by time                 = 67.36%
+    at sampler switch-ins   = 65.22%
+  SCHEDULING BIAS[pgws_probe] = -2.15 pp (sampler UNDER-observes the on-cpu-or-runnable state)
+
+--- collector scheduling detail ---
+CBURST_US n=9289 mean=41.9us p50=[32,64) p90=[32,64)
+CDELAY_US n=9273 mean=18.4us p50=[8,16) p90=[16,32)
+SDELAY_US n=3437 mean=16.5us p50=[8,16) p90=[16,32)
+COLLECTOR wakeups=3985 (102.2/s)  switch-ins=3994 (102.4/s)  wakeup-triggered switch-ins=3984 (102.2/s)
+COLLECTOR on-CPU=0.197s = 0.50% of one processor
+PGSA_SAMPLER on-CPU=0.395s = 1.01% of one processor  switch-ins=1940 (49.8/s)
+
+--- pg_wait_sampling collector overhead, kernel side ---
+KERNEL window=39.000s pids=1 (not spanning the window, excluded: none)
+  schedstat f1 sum_exec_runtime (on a processor)   =    0.217 s
+  schedstat f2 run_delay        (runnable, queued) =    0.036 s
+
+TORN rows=3844  active+ClientRead=125 (3.25%)  non-active+no-wait-event=497 (12.93%)
+
