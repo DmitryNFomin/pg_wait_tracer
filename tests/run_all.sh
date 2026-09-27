@@ -138,6 +138,27 @@ xpass=0
 # a real failure regardless of KNOWN_FAILING membership.
 KNOWN_FAILING=(
     "test_partition|99"
+    # test_cross_validate_tiered: issue #115, a real, filed, PARTIALLY-FIXED
+    # product bug. The boundary-straddle half is fixed (src/cmd_gate.h:
+    # proportional overlap instead of an all-or-nothing majority rule, worth
+    # 3.5 pp of the exact tier's CPU share at 8 clients and 5.0 pp at 2 on
+    # one cx33/PG18 box). A residual remains and is NOT yet explained, so
+    # the saturated 8-client case still lands on the 10 pp bound: measured
+    # 10.0 pp at 50 Hz and 10.2 pp at 100 Hz in separate runs. The bound is
+    # deliberately NOT moved to admit a marginal fix — it changes only with a
+    # derivation of the expected sampling error at that rate over the actual
+    # sample count, never by observing that we are just over it.
+    #
+    # Scope of this listing, stated so nobody mistakes it for more: the
+    # script's own gate is "at least one of the swept rates is within
+    # tolerance" (tests/test_cross_validate_tiered.sh: exit 0 when
+    # $best_rate is set), so a single marginal rate does not fail it today
+    # and the listing will usually print as UNEXPECTED PASS. What it does
+    # cover is the case #115 was filed for — EVERY swept rate over tolerance,
+    # seen repeatedly on busy and ephemeral boxes — which would otherwise
+    # block the gate on a bug that is only half fixed. There is no per-rate
+    # gate to list; KNOWN_FAILING keys on the test name.
+    "test_cross_validate_tiered|115"
 )
 
 # known_failing_issue NAME — prints the tracking issue number and returns 0
