@@ -185,7 +185,11 @@ def test_daemon_server(pm_pid):
         for row in tm_resp['rows']:
             if row['name'] == 'DB Time':
                 srv_db_time = row['ms']
-            elif row['name'] == 'CPU*':
+            # #187: has_measured_cpu splits this row into "CPU (running)"
+            # (real v3 cpu_ns, as a real live capture always has); the
+            # legacy/no-split name "CPU*" is kept for completeness (some
+            # captures may lack measured cpu_ns).
+            elif row['name'] in ('CPU*', 'CPU (running)'):
                 srv_cpu_time = row['ms']
 
     # Query top_events from pgwt-server
@@ -227,11 +231,13 @@ def test_daemon_server(pm_pid):
                         'BufferPin', 'Timeout', 'Extension'}
         wait_sum = sum(row['ms'] for row in tm_resp['rows']
                       if row['name'] in WAIT_CLASSES)
-        # DB Time = CPU* + Off-CPU* + Σ wait classes (S3: Off-CPU* is the
-        # measured runqueue/unaccounted remainder of the on-CPU gaps, a
-        # first-class component of DB Time — must be in the partition).
+        # DB Time = CPU (running) + CPU (waiting for a core) + Σ wait classes
+        # (S3/#187: the "waiting for a core" row is the measured runqueue/
+        # unaccounted remainder of the on-CPU gaps, a first-class component
+        # of DB Time — must be in the partition). Both the pre-#187 name
+        # ("Off-CPU*") and the current one are accepted.
         off_cpu = sum(row['ms'] for row in tm_resp['rows']
-                      if row['name'] == 'Off-CPU*')
+                      if row['name'] in ('Off-CPU*', 'CPU (waiting for a core)'))
         reconstructed = srv_cpu_time + wait_sum + off_cpu
         if srv_db_time > 0:
             error_pct = abs(reconstructed - srv_db_time) / srv_db_time * 100
