@@ -1,0 +1,104 @@
+/* sched.bt — exact per-task scheduler accounting from the kernel's own
+ * tracepoints, for issue #115's CPU arbiter. Nanosecond event accounting,
+ * not counter sampling.
+ *
+ *   @on[pid]   ns actually executing on a processor
+ *              (sched_switch in -> sched_switch out)
+ *   @rq[pid]   ns runnable with no processor: both "woken, not yet run"
+ *              (sched_wakeup -> switch in) and "involuntarily preempted"
+ *              (switch out while still runnable -> switch in)
+ *   @off[pid]  ns blocked / sleeping: switch out in a non-runnable state
+ *              until the wakeup. This is what a wait event should cover.
+ *   on + rq + off == wall clock per task, which is the identity the
+ *   four-way comparison is checked against.
+ *
+ *   @syncw[pid] ns of wall inside fsync/fdatasync/sync_file_range
+ *   @synco[pid] ns EXECUTING inside those calls
+ * The sync pair exists because PostgreSQL reports IO:WalSync for the whole
+ * fsync, while ext4 does journal/writeback work in the CALLER's context --
+ * on-CPU time that the kernel credits to the backend but PostgreSQL calls a
+ * wait. That overlap is the one term that can reconcile pg_stat_activity
+ * with the kernel, so it is measured rather than argued about.
+ *
+ * Every 200 ms the cumulative maps are dumped after a TS line, so the
+ * analysis can difference them at the trace window's own boundaries.
+ * Counters exclude the slice in progress at dump time (bounded by one
+ * scheduling slice per pid per boundary).
+ *
+ * No comm/pid filter on purpose: a string compare per sched_switch costs
+ * more than carrying every task, and the pid set is applied afterwards.
+ */
+tracepoint:sched:sched_switch
+{
+    $prev = args.prev_pid;
+    $next = args.next_pid;
+
+    if (@oncpu_ts[$prev] != 0) {
+        @on[$prev] += nsecs - @oncpu_ts[$prev];
+        delete(@oncpu_ts[$prev]);
+    }
+    /* 0 = TASK_RUNNING; 256 = TASK_REPORT_MAX, the "preempted while still
+     * runnable" marker from __trace_sched_switch_state. Either way the task
+     * still wants a processor -> run-queue delay, not a wait. */
+    if (args.prev_state == 0 || args.prev_state == 256) {
+        @rq_ts[$prev] = nsecs;
+    } else {
+        @off_ts[$prev] = nsecs;
+    }
+
+    @oncpu_ts[$next] = nsecs;
+    if (@rq_ts[$next] != 0) {
+        @rq[$next] += nsecs - @rq_ts[$next];
+        delete(@rq_ts[$next]);
+    }
+}
+
+tracepoint:sched:sched_wakeup,
+tracepoint:sched:sched_wakeup_new
+{
+    $p = args.pid;
+    if (@off_ts[$p] != 0) {
+        @off[$p] += nsecs - @off_ts[$p];
+        delete(@off_ts[$p]);
+    }
+    @rq_ts[$p] = nsecs;
+}
+
+tracepoint:syscalls:sys_enter_fsync,
+tracepoint:syscalls:sys_enter_fdatasync,
+tracepoint:syscalls:sys_enter_sync_file_range
+{
+    @sw_ts[pid] = nsecs;
+    /* on-CPU accumulator INCLUDING the slice in progress (we are running) */
+    @so_ts[pid] = @on[pid] + (nsecs - @oncpu_ts[pid]);
+}
+
+tracepoint:syscalls:sys_exit_fsync,
+tracepoint:syscalls:sys_exit_fdatasync,
+tracepoint:syscalls:sys_exit_sync_file_range
+/@sw_ts[pid] != 0/
+{
+    @syncw[pid] += nsecs - @sw_ts[pid];
+    @synco[pid] += (@on[pid] + (nsecs - @oncpu_ts[pid])) - @so_ts[pid];
+    delete(@sw_ts[pid]);
+    delete(@so_ts[pid]);
+}
+
+interval:ms:200
+{
+    printf("TS %llu\n", nsecs);
+    print(@on);
+    print(@rq);
+    print(@off);
+    print(@syncw);
+    print(@synco);
+}
+
+END
+{
+    clear(@oncpu_ts);
+    clear(@rq_ts);
+    clear(@off_ts);
+    clear(@sw_ts);
+    clear(@so_ts);
+}
