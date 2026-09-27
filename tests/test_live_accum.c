@@ -52,6 +52,14 @@ static uint64_t sys_row(const struct pgwt_accumulator *acc, uint32_t we)
     return 0;
 }
 
+static uint64_t sys_min(const struct pgwt_accumulator *acc, uint32_t we)
+{
+    for (int i = 0; i < acc->num_system_events; i++)
+        if (acc->system_events[i].wait_event == we)
+            return acc->system_events[i].min_ns;
+    return 0;
+}
+
 static uint64_t sys_count(const struct pgwt_accumulator *acc, uint32_t we)
 {
     for (int i = 0; i < acc->num_system_events; i++)
@@ -588,6 +596,20 @@ static void test_cmd_gate_waitless_statement(void)
     CHECK(cpu_row + noncmd_row == s.we0_total,
           "#115: the split conserves every we==0 nanosecond (%.2f + %.2f == "
           "%.2f ms)", cpu_row / 1e6, noncmd_row / 1e6, s.we0_total / 1e6);
+    /* #115 event COUNTS (map_reader.h pgwt_accum_add_split): each fold is
+     * one entry in its row, so all four we==0 records straddle here and
+     * each contributes to both rows — 3+1 before the fix. Per row the
+     * figures stay mutually consistent: count is the number of fragments,
+     * min the shortest of them. */
+    CHECK(sys_count(acc, 0) == 4 && sys_count(acc, PGWT_WEI_NONCMD_CPU) == 4,
+          "each straddling record is one entry in BOTH rows (CPU* %llu, "
+          "NonCommandCpu %llu)", (unsigned long long)sys_count(acc, 0),
+          (unsigned long long)sys_count(acc, PGWT_WEI_NONCMD_CPU));
+    CHECK(sys_min(acc, 0) == US(400) &&
+          sys_min(acc, PGWT_WEI_NONCMD_CPU) == US(100),
+          "…and each row's minimum is its own shortest fragment (CPU* "
+          "%.2f ms, NonCommandCpu %.2f ms)", sys_min(acc, 0) / 1e6,
+          sys_min(acc, PGWT_WEI_NONCMD_CPU) / 1e6);
     CHECK(acc->tm.cpu_time_ns == cpu_row, "time-model CPU == CPU* row");
     CHECK(acc->tm.db_time_ns == cpu_row + MS(1),
           "DB Time = CPU* + WAL wait = %.2f ms", acc->tm.db_time_ns / 1e6);
@@ -1109,9 +1131,18 @@ static void test_query_attr_lock_before_report(void)
 }
 
 /* ── 10. Cross-check: live deferral == pgwt_tag_events back-fill ───────── */
-static void test_cross_check_query_attr(void)
+/* `jitter` places CMD_START/CMD_END a microsecond or two INSIDE the record
+ * that spans them instead of exactly on a record boundary, so the stream
+ * contains #115 straddles. Per-(qid, we) equality cannot hold then — the
+ * live side splits a straddler across the CPU* and NonCommandCpu rows while
+ * compute.c must put all of it in one — so the jittered pass checks the two
+ * invariants that DO hold: every wait row still matches exactly (that is
+ * what #128 is about, and the gate does not touch it), and the two sides
+ * account for the same total we==0 wall. */
+static void test_cross_check_query_attr(int jitter)
 {
-    printf("--- #128: live deferral vs compute.c back-fill on one stream ---\n");
+    printf("--- #128: live deferral vs compute.c back-fill on one stream "
+           "(%s) ---\n", jitter ? "markers inside records" : "markers on boundaries");
     enum { NPIDS = 4, MAXEV = 8000 };
     struct pgwt_trace_event *ev = calloc(MAXEV, sizeof(*ev));
     int n = 0;
@@ -1139,10 +1170,11 @@ static void test_cross_check_query_attr(void)
             ev[n++] = (struct pgwt_trace_event){ .timestamp_ns = t[p], .pid = pid, \
                 .old_event = (_we), .duration_ns = (_dur), .cpu_ns = (_dur), \
                 .query_id = (_qid) }; } while (0)
-        #define MARK(_m, _qid) do { \
-            ev[n++] = (struct pgwt_trace_event){ .timestamp_ns = t[p], .pid = pid, \
+        #define MARK_AT(_m, _qid, _ts) do { \
+            ev[n++] = (struct pgwt_trace_event){ .timestamp_ns = (_ts), .pid = pid, \
                 .old_event = (_m), .new_event = (_m), .duration_ns = 0, \
                 .query_id = (_qid) }; } while (0)
+        #define MARK(_m, _qid) MARK_AT(_m, _qid, t[p])
         /* STEP advances the pid clock by exactly the interval it then emits,
          * so the pid's records TILE its timeline the way a real exact span
          * does (measured on a live trace: covered == span, zero overlaps).
@@ -1154,8 +1186,11 @@ static void test_cross_check_query_attr(void)
         #define STEP(_we, _durexpr, _qid) do { \
             uint64_t _d = (_durexpr); t[p] += _d; EMIT(_we, _d, _qid); } while (0)
         STEP(PG_WAIT_CLIENT_READ, US(100 + lcg(3000)), 0);
-        /* CMD_START carries the previous statement's id sometimes (stale). */
-        MARK(PGWT_MARKER_CMD_START, lcg(2) ? 0x1000 + lcg(6) : 0);
+        /* CMD_START carries the previous statement's id sometimes (stale).
+         * Under jitter it lands 1-9 us INTO the run that follows (always
+         * >= 10 us), so that run straddles the boundary. */
+        MARK_AT(PGWT_MARKER_CMD_START, lcg(2) ? 0x1000 + lcg(6) : 0,
+                t[p] + (jitter ? US(1 + lcg(9)) : 0));
         uint64_t open_at = t[p];
         int waits = 1 + lcg(3);
         for (int w = 0; w < waits; w++) {
@@ -1170,12 +1205,17 @@ static void test_cross_check_query_attr(void)
         if (lcg(2)) STEP(IO_WALSYNC, US(5 + lcg(300)), id_now);
         if (shape != 1) { MARK(PGWT_MARKER_EXEC_END, id_now); }
         uint64_t cmd_end_qid = shape == 2 ? 0 : id_now;   /* PG13: edge reset before CMD_END */
-        if (lcg(10) != 0) MARK(PGWT_MARKER_CMD_END, cmd_end_qid);
+        /* Under jitter CMD_END lands 1-4 us into the trailing run (always
+         * >= 5 us), so that run straddles it too — the shape #115 is about. */
+        if (lcg(10) != 0)
+            MARK_AT(PGWT_MARKER_CMD_END, cmd_end_qid,
+                    t[p] + (jitter ? US(1 + lcg(4)) : 0));
         (void)open_at;
         STEP(0, US(5 + lcg(100)), cmd_end_qid);   /* trailing run */
         #undef STEP
         #undef EMIT
         #undef MARK
+        #undef MARK_AT
     }
     /* Every pid ends the way a real one does: killed mid-statement (the
      * closing record's new_event = EXIT, pending still open), then its pid
@@ -1280,6 +1320,11 @@ static void test_cross_check_query_attr(void)
         const struct pgwt_query_event_stats *l = &lacc->query_events[i];
         if (pgwt_is_idle_event(l->wait_event) || l->wait_event == PGWT_WEI_NONCMD_CPU)
             continue;
+        /* Under jitter a straddling we==0 record is two live rows against
+         * the server's one, so the CPU* row cannot match record for record;
+         * the wait rows still must, and the we==0 TOTAL is checked below. */
+        if (jitter && l->wait_event == 0)
+            continue;
         rows++;
         live_total += l->total_ns;
         uint64_t s = qrow(sacc, l->query_id, l->wait_event);
@@ -1292,27 +1337,105 @@ static void test_cross_check_query_attr(void)
         }
     }
     CHECK(rows > 12, "%d (qid, event) rows compared (%d events)", rows, n);
-    CHECK(mismatches == 0, "live rows == server rows (%d mismatches)", mismatches);
-    CHECK(lacc->qattr_backfilled_ns == srv_backfilled,
-          "backfilled metric agrees (live %.1f ms, server %.1f ms)",
-          lacc->qattr_backfilled_ns / 1e6, srv_backfilled / 1e6);
-    CHECK(lacc->qattr_unattributed_ns == srv_unattributed,
-          "unattributed metric agrees (live %.1f ms, server %.1f ms)",
-          lacc->qattr_unattributed_ns / 1e6, srv_unattributed / 1e6);
+    CHECK(mismatches == 0, "live %s rows == server rows (%d mismatches)",
+          jitter ? "wait" : "", mismatches);
+
+    /* #115 conservation across the gate, the invariant that survives
+     * straddles: the two sides account for the same total we==0 wall, live
+     * across its CPU* + NonCommandCpu rows, the server across the one row
+     * its majority verdict picked. This is what re-admits idle-row cover to
+     * this guard now that a record can produce two rows.
+     *
+     * Jittered pass only, and the reason is a PRE-#115 asymmetry, not this
+     * change: a record wholly outside a command with no id is idle with
+     * nothing to attribute, so the live side files no query row for it at
+     * all while the server keeps a (0, NonCommandCpu) one. Under jitter
+     * almost every trailing run straddles instead, and a split tail always
+     * gets its row, so the two sides line up. */
+    uint64_t live_we0 = 0, srv_we0 = 0;
+    for (int i = 0; i < lacc->num_query_events; i++)
+        if (lacc->query_events[i].wait_event == 0 ||
+            lacc->query_events[i].wait_event == PGWT_WEI_NONCMD_CPU)
+            live_we0 += lacc->query_events[i].total_ns;
+    for (int i = 0; i < n; i++)
+        if (!PGWT_IS_MARKER(srv[i].old_event) &&
+            (srv[i].old_event == 0 || srv[i].old_event == PGWT_WEI_NONCMD_CPU))
+            srv_we0 += srv[i].duration_ns;
+    if (jitter)
+        CHECK(live_we0 == srv_we0,
+              "Σ we==0 wall over the query rows matches the server's (live "
+              "%.1f, server %.1f ms)", live_we0 / 1e6, srv_we0 / 1e6);
+
+    if (!jitter) {
+        /* Without straddles the gate is not a variable, so the two sides
+         * must agree on the attribution METRICS too, record for record. */
+        CHECK(lacc->qattr_backfilled_ns == srv_backfilled,
+              "backfilled metric agrees (live %.1f ms, server %.1f ms)",
+              lacc->qattr_backfilled_ns / 1e6, srv_backfilled / 1e6);
+        CHECK(lacc->qattr_unattributed_ns == srv_unattributed,
+              "unattributed metric agrees (live %.1f ms, server %.1f ms)",
+              lacc->qattr_unattributed_ns / 1e6, srv_unattributed / 1e6);
+        /* Conservation: every non-idle foreground ns is in exactly one row. */
+        uint64_t srv_rows = 0;
+        for (int i = 0; i < sacc->num_query_events; i++)
+            if (!pgwt_is_idle_event(sacc->query_events[i].wait_event))
+                srv_rows += sacc->query_events[i].total_ns;
+        CHECK(srv_rows == srv_total && live_total == srv_total,
+              "Σ query rows == Σ non-idle records (server rows %.1f, live %.1f, "
+              "records %.1f ms)", srv_rows / 1e6, live_total / 1e6, srv_total / 1e6);
+    }
     CHECK(srv_backfilled > 0 && srv_unattributed > 0,
           "the stream exercises both outcomes (backfilled %.1f ms, unattributed %.1f ms)",
           srv_backfilled / 1e6, srv_unattributed / 1e6);
-    /* Conservation: every non-idle foreground ns is in exactly one row. */
-    uint64_t srv_rows = 0;
-    for (int i = 0; i < sacc->num_query_events; i++)
-        if (!pgwt_is_idle_event(sacc->query_events[i].wait_event))
-            srv_rows += sacc->query_events[i].total_ns;
-    CHECK(srv_rows == srv_total && live_total == srv_total,
-          "Σ query rows == Σ non-idle records (server rows %.1f, live %.1f, records %.1f ms)",
-          srv_rows / 1e6, live_total / 1e6, srv_total / 1e6);
     CHECK(lacc->qattr_pending_overflow == 0, "no pending overflow on this stream");
 
     free(lacc); free(sacc); free(srv); free(ev);
+}
+
+/* ── #115: an out-of-order CMD_END must not wrap the server's banked_ns ──
+ * src/server.c skips the stable sort when a window is OVERLOADED and tags
+ * it anyway, so pgwt_tag_events can see a CMD_END stamped before the
+ * CMD_START that opened the run. Unguarded, `banked_ns += ts - cmd_anchor`
+ * wraps to ~1.8e19 ns and every later we==0 interval of that pid passes the
+ * majority test, so all its post-command CPU is reported as CPU* for the
+ * rest of the window — silently, in exactly the overloaded case a user is
+ * already suspicious of. The randomized cross-check above cannot reach this:
+ * neither generator emits an out-of-order marker. */
+static void test_tag_events_out_of_order_cmd_end(void)
+{
+    printf("--- #115: out-of-order CMD_END does not wrap banked_ns ---\n");
+    struct pgwt_trace_event ev[4];
+    memset(ev, 0, sizeof ev);
+    int n = 0;
+    #define MK(_m, _ts) ev[n++] = (struct pgwt_trace_event){ \
+        .timestamp_ns = (_ts), .pid = 77, .old_event = (_m), .new_event = (_m) }
+    #define RC(_ts, _dur) ev[n++] = (struct pgwt_trace_event){ \
+        .timestamp_ns = (_ts), .pid = 77, .old_event = 0, \
+        .duration_ns = (_dur), .cpu_ns = (_dur) }
+    MK(PGWT_MARKER_CMD_START, MS(50));
+    MK(PGWT_MARKER_CMD_END,   MS(40));   /* before its own anchor */
+    RC(MS(60), MS(10));                  /* wholly after the command closed */
+    RC(MS(70), MS(10));
+    #undef MK
+    #undef RC
+    pgwt_tag_events(ev, n, NULL, 0);
+    CHECK(ev[2].old_event == PGWT_WEI_NONCMD_CPU &&
+          ev[3].old_event == PGWT_WEI_NONCMD_CPU,
+          "post-command CPU stays NonCommandCpu (got 0x%x, 0x%x)",
+          ev[2].old_event, ev[3].old_event);
+    CHECK(!(ev[2].flags & PGWT_EVENT_FLAG_CMD_OPEN) &&
+          !(ev[3].flags & PGWT_EVENT_FLAG_CMD_OPEN),
+          "…and neither is flagged in-command");
+
+    /* The shared rule (cmd_gate.h) guards it independently; both must say
+     * the same thing on the same stream. */
+    struct pgwt_cmd_gate g = { 0 };
+    pgwt_cmd_gate_marker(&g, PGWT_MARKER_CMD_START, MS(50));
+    pgwt_cmd_gate_marker(&g, PGWT_MARKER_CMD_END, MS(40));
+    struct pgwt_cmd_split a = pgwt_cmd_gate_split(&g, true, MS(50), MS(60), false);
+    struct pgwt_cmd_split b = pgwt_cmd_gate_split(&g, true, MS(60), MS(70), false);
+    CHECK(a.in_ns == 0 && b.in_ns == 0 && !a.in_cmd && !b.in_cmd,
+          "cmd_gate.h agrees: nothing in-command after an out-of-order END");
 }
 
 /* ── 11. Sampled tier: the idle sample carries the finished statement's id ─
@@ -1484,7 +1607,9 @@ int main(void)
     test_cmd_gate_fallback();
     test_cross_check_tag_events();
     test_query_attr_lock_before_report();
-    test_cross_check_query_attr();
+    test_tag_events_out_of_order_cmd_end();
+    test_cross_check_query_attr(0);
+    test_cross_check_query_attr(1);
     test_query_attr_sampled();
     test_query_attr_sampled_idle_skew();
     printf("\n%d/%d checks passed\n", tests_passed, tests_run);

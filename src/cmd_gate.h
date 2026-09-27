@@ -48,9 +48,21 @@
  * src/compute.c pgwt_tag_events keeps its own copy of this sweep and still
  * applies the MAJORITY verdict (pgwt_cmd_split_majority) — it annotates a
  * fixed event array in place, so one record cannot become two there; going
- * proportional on the server's raw path is tracked separately. Until then
- * the two agree on the overlap and differ only in the verdict, which
- * tests/test_live_accum.c's cross-check pins.
+ * proportional on the server's raw path is tracked separately.
+ *
+ * WHAT THE CROSS-CHECK PINS, EXACTLY. tests/test_live_accum.c runs one
+ * generated stream through both and diffs it. That stream is ORDERED (a
+ * pid's records tile its timeline, markers never arrive out of order) and
+ * NON-DEGENERATE (every interval is at least 5 us), so what the diff pins
+ * is the OVERLAP arithmetic and the majority verdict on such a stream. It
+ * does NOT pin the two copies against each other on an out-of-order marker
+ * or an empty interval, and they are NOT identical there:
+ *   - out-of-order CMD_END: both guard it now, but independently
+ *     (compute.c's guard has its own regression test, since the cross-check
+ *     stream cannot reach it);
+ *   - empty interval: both consume the pid's banked time and credit it
+ *     nowhere. Neither generator reaches that branch either, so the
+ *     behaviour is pinned directly in tests/test_cmd_gate.c instead.
  */
 #ifndef PGWT_CMD_GATE_H
 #define PGWT_CMD_GATE_H
@@ -125,14 +137,15 @@ static inline uint64_t pgwt_cmd_gate_raw_ns(const struct pgwt_cmd_gate *g,
  * ADVANCE the sweep to t1 (a pid's exact records tile contiguously, so
  * banked time since the previous record belongs to this one).
  *
- * KNOWN SHARED LIMITATION, pinned by tests/test_cmd_gate.c: a DEGENERATE
- * record — zero-length, or one whose duration runs past its own timestamp
- * so [t0, t1) is empty — still consumes the pid's banked command time and
- * credits it nowhere, because it has no wall to put it in. Not consuming
- * would be better, but this state machine is byte-for-byte the one in
- * compute.c pgwt_tag_events and tests/test_live_accum.c diffs the two on
- * one stream; changing it here alone would split them. It moves with
- * compute.c when the server path goes proportional. */
+ * KNOWN LIMITATION, pinned directly by tests/test_cmd_gate.c because no
+ * generated stream reaches it: a DEGENERATE record — zero-length, or one
+ * whose duration runs past its own timestamp so [t0, t1) is empty — still
+ * consumes the pid's banked command time and credits it nowhere, because
+ * it has no wall to put it in. Not consuming would be better. compute.c
+ * pgwt_tag_events does the same thing today, and changing one side alone
+ * would make the live and server paths disagree on a case the cross-check
+ * cannot see, so both move together when the server path goes
+ * proportional. */
 static inline uint64_t pgwt_cmd_gate_take(struct pgwt_cmd_gate *g,
                                           uint64_t t0_ns, uint64_t t1_ns)
 {

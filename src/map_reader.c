@@ -155,9 +155,15 @@ uint32_t pgwt_live_effective_event(uint32_t we, uint32_t cat_flag,
  * The sweep and the proportional split rule live in src/cmd_gate.h, shared
  * verbatim with tests/cross_validate.c. compute.c pgwt_tag_events keeps its
  * own copy of the same sweep and still collapses it to the majority verdict
- * (it annotates a fixed array, so one record cannot become two there):
- * tests/test_live_accum.c runs one stream through both and diffs the
- * overlap, so the two cannot drift. */
+ * (it annotates a fixed array, so one record cannot become two there).
+ * tests/test_live_accum.c diffs the two on one generated stream, which
+ * pins the overlap arithmetic and the majority verdict on an ORDERED,
+ * non-degenerate stream — and nothing outside that: see cmd_gate.h for the
+ * two cases the diff cannot reach and where each is pinned instead. */
+
+static void qattr_add_row(struct pgwt_accumulator *acc, uint64_t query_id,
+                          uint32_t we, uint64_t count, uint64_t total_ns,
+                          uint64_t min_ns, uint64_t max_ns);
 
 static void add_event_stats(struct pgwt_event_stats *es, uint64_t stat_ns,
                             bool histogram)
@@ -226,10 +232,18 @@ void pgwt_accum_add_interval(struct pgwt_accumulator *acc,
      * marker (pgwt_live_qattr_marker), so letting the synthetic
      * NonCommandCpu row flush the pid's pending attribution again would
      * resolve a deferred wait against the wrong statement. It still gets
-     * its own query row when the record carries an id. */
-    if (!(iv->split_tail && iv->query_id == 0))
-        pgwt_live_qattr_record(acc, pa, iv->query_id, we, stat_ns,
-                               iv->cat_flag, iv->closed);
+     * its own (hidden, idle) query row — with no id it is the explicit
+     * unattributed bucket, exactly where the server files the same
+     * nanoseconds — so no we==0 time goes missing from the query rows. The
+     * attribution METRICS stay out of it: nothing was deferred or
+     * back-filled here. */
+    if (iv->split_tail) {
+        if (!io_worker)
+            qattr_add_row(acc, iv->query_id, we, 1, stat_ns, stat_ns, stat_ns);
+        return;
+    }
+    pgwt_live_qattr_record(acc, pa, iv->query_id, we, stat_ns,
+                           iv->cat_flag, iv->closed);
 }
 
 void pgwt_accum_add_split(struct pgwt_accumulator *acc,

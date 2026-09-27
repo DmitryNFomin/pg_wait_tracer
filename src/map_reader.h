@@ -238,7 +238,24 @@ void pgwt_accum_add_interval(struct pgwt_accumulator *acc,
  * wall as CPU*, the remainder as PGWT_WEI_NONCMD_CPU — with iv->cpu_ns
  * apportioned between the two; the interval's wall is conserved exactly.
  * Every other interval folds once, with cmd_open taken from the split.
- * Both live paths call this instead of pgwt_accum_add_interval directly. */
+ * Both live paths call this instead of pgwt_accum_add_interval directly.
+ *
+ * WHAT THIS DOES TO THE EVENT COUNTS, deliberately and pinned by
+ * tests/test_live_accum.c. Each fold is one entry in its row: a straddling
+ * record adds a CPU* entry AND a NonCommandCpu entry where it used to add
+ * one, so Σ row counts now exceeds the record count by the number of
+ * straddles. Per row the figures stay mutually consistent — count is the
+ * number of FRAGMENTS in that row, total_ns their sum, avg/min/max/the
+ * duration histogram describe those fragments — which is why the CPU* row's
+ * minimum and average shrink: its intervals really are the in-command
+ * fragments now, not whole gaps. The server's row for the same record stays
+ * at one entry (compute.c cannot split a record), so live and server counts
+ * differ on straddling records while that is true.
+ *
+ * The alternative — count the record once and let the other half add time
+ * only — was rejected: a row whose count is 0 is skipped outright by every
+ * renderer (output.c `if (ev->count == 0) continue;`), so a NonCommandCpu
+ * row built purely from tails would have vanished together with its time. */
 void pgwt_accum_add_split(struct pgwt_accumulator *acc,
                           const struct pgwt_live_interval *iv,
                           const struct pgwt_cmd_split *split);

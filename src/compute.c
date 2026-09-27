@@ -268,7 +268,16 @@ void pgwt_tag_events(struct pgwt_trace_event *events, int count,
             case PGWT_MARKER_CMD_END:
                 st->seen_cmd = 1;
                 if (st->cmd_open) {
-                    st->banked_ns += ts - st->cmd_anchor;
+                    /* #115: an OUT-OF-ORDER CMD_END (stamped before the open
+                     * run's anchor) must bank nothing rather than wrap the
+                     * counter to ~1.8e19 ns, which would then satisfy the
+                     * majority test for every later interval of this pid and
+                     * report all its post-command CPU as CPU* for the rest of
+                     * the window. Reachable: server.c skips the stable sort
+                     * when a window is overloaded and tags it anyway. Same
+                     * guard as cmd_gate.h pgwt_cmd_gate_marker. */
+                    if (ts > st->cmd_anchor)
+                        st->banked_ns += ts - st->cmd_anchor;
                     st->cmd_open = 0;
                 }
                 /* A command closing also closes any stale plan/exec window
