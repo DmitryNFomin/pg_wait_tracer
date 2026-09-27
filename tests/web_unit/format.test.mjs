@@ -9,6 +9,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
     nsToDatetimeLocalUTC, datetimeLocalUTCToNs, fmtTime, versionSkew, esc,
+    classFilterName,
 } from '../../web/static/lib/format.js';
 
 // 2026-03-15 12:34:56 UTC
@@ -83,4 +84,32 @@ test('esc output cannot break out of a title attribute', () => {
     // Exactly one attribute value: the opening quote, the escaped payload,
     // the closing quote.
     assert.equal(html.match(/"/g).length, 2, html);
+});
+
+// ── classFilterName (#187): display label -> server class_name identity ────
+//
+// Regression: before this existed, both the AAS band click and the Time
+// Model row click sent the raw display label straight through as the
+// class_name filter value. That was harmless while every label matched its
+// class 1:1 — until 'cpu' grew the "(running)" suffix, at which point
+// clicking the CPU band/row sent class_name="CPU (running)" and
+// pgwt-server's strcasecmp(class_name) matched zero rows.
+
+test('classFilterName strips "(running)" and the legacy "*" down to the bare class', () => {
+    assert.equal(classFilterName('CPU (running)'), 'CPU');
+    assert.equal(classFilterName('CPU*'), 'CPU');
+    assert.equal(classFilterName('IO'), 'IO');
+    assert.equal(classFilterName('LWLock'), 'LWLock');
+});
+
+test('classFilterName returns null for "CPU (waiting for a core)" — never drillable', () => {
+    // A computed residual, not a wait_event class: there is no server-side
+    // class_name for it and no Events-table rows could ever back a filter on
+    // it. null must mean "do not drill", never "fall back to the label".
+    assert.equal(classFilterName('CPU (waiting for a core)'), null);
+});
+
+test('classFilterName(null/undefined) is null, never a crash', () => {
+    assert.equal(classFilterName(null), null);
+    assert.equal(classFilterName(undefined), null);
 });

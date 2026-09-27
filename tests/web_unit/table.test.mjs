@@ -45,6 +45,32 @@ test('overview onClick: indent-1 -> class drill intent, strips asterisk', () => 
     assert.equal(overviewConfig.onClick({ indent: 2, name: 'IO:WalSync' }), null);
 });
 
+// #187 regression: the "CPU (running)" row must drill class=CPU (the bare
+// server identity), not the raw display label — and the "CPU (waiting for a
+// core)" row (a computed residual, no server-side class_name) must never
+// drill at all, nor render as 'clickable' (no click there could ever do
+// anything).
+test('overview onClick: "CPU (running)" strips to class=CPU; "CPU (waiting for a core)" never drills', () => {
+    assert.deepEqual(
+        overviewConfig.onClick({ indent: 1, name: 'CPU (running)' }),
+        { filterKey: 'class', filterValue: 'CPU', label: 'CPU' });
+    assert.equal(
+        overviewConfig.onClick({ indent: 1, name: 'CPU (waiting for a core)' }),
+        null);
+});
+
+test('overview: "CPU (waiting for a core)" row is indent-1 but NOT clickable', () => {
+    const rows = [
+        { indent: 0, name: 'DB Time', ms: 12760, pct: 100, aas: 3.54 },
+        { indent: 1, name: 'CPU (running)', ms: 4800, pct: 37.6, aas: 1.33 },
+        { indent: 1, name: 'CPU (waiting for a core)', ms: 260, pct: 2.0, aas: 0.07 },
+    ];
+    const model = buildTableModel(overviewConfig, rows, null);
+    assert.ok(model.rows[1].cls.includes('clickable'), 'CPU (running) is clickable');
+    assert.ok(!model.rows[2].cls.includes('clickable'),
+        'CPU (waiting for a core) is not clickable (no server class_name)');
+});
+
 test('events: descending sort by count', () => {
     const rows = [
         { name: 'A', event_id: 1, count: 10, total_ms: 1, avg_us: 1, p50_us: 1,

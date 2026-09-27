@@ -36,7 +36,9 @@ import {
 import {
     buildAasOption, AAS_ANNOTATION_SERIES,
 } from '../../web/static/lib/builders/aas.js';
-import { WAIT_CLASSES, eventColor, fmtTime } from '../../web/static/lib/format.js';
+import {
+    WAIT_CLASSES, AAS_CLASS_ORDER, eventColor, fmtTime,
+} from '../../web/static/lib/format.js';
 import {
     SAMPLED_BAND_COLOR, SAMPLED_BORDER, MIXED_BAND_COLOR, MIXED_BORDER,
     ESC_MANUAL_BORDER, ESC_ANOMALY_BORDER, ESC_MANUAL_COLOR, ESC_ANOMALY_COLOR,
@@ -185,20 +187,23 @@ test('stackSeries: hidden series pass through raw, keep their slot', () => {
 test('class mode: alignedData is [xsMs, cum per wait class] in identity order', () => {
     const data = { bucket_ns: 1, max_aas: 2.0, buckets: classBuckets(3) };
     const spec = buildUplotSpec(data, { numCpus: 4 });
-    assert.equal(spec.alignedData.length, 1 + WAIT_CLASSES.length);
+    assert.equal(spec.alignedData.length, 1 + AAS_CLASS_ORDER.length);
     // ns -> ms exactly once at the spec boundary: t=1000..1002 ns.
     assert.deepEqual(spec.alignedData[0], [0.001, 0.001001, 0.001002]);
-    // Cumulative stack: cpu 1.0, +io 0.5, +lock 0.1, +lwlock 0.2, rest +0.
+    // AAS_CLASS_ORDER (#187), not WAIT_CLASSES: cpu, offcpu, io, lock,
+    // lwlock, ... — classBuckets has no 'offcpu' key (defaults to 0), so
+    // cumulative: cpu 1.0, +offcpu 0, +io 0.5, +lock 0.1, +lwlock 0.2, rest +0.
     approx(spec.alignedData[1][0], 1.0);
-    approx(spec.alignedData[2][0], 1.5);
-    approx(spec.alignedData[3][0], 1.6);
-    approx(spec.alignedData[4][0], 1.8);
-    approx(spec.alignedData[11][0], 1.8);     // top of stack = total
-    assert.deepEqual(spec.seriesNames, WAIT_CLASSES.map(c => c.label));
-    assert.deepEqual(spec.seriesColors, WAIT_CLASSES.map(c => c.color));
+    approx(spec.alignedData[2][0], 1.0);
+    approx(spec.alignedData[3][0], 1.5);
+    approx(spec.alignedData[4][0], 1.6);
+    approx(spec.alignedData[5][0], 1.8);
+    approx(spec.alignedData[12][0], 1.8);     // top of stack = total
+    assert.deepEqual(spec.seriesNames, AAS_CLASS_ORDER.map(c => c.label));
+    assert.deepEqual(spec.seriesColors, AAS_CLASS_ORDER.map(c => c.color));
     assert.deepEqual(spec.stackIdxs,
-        WAIT_CLASSES.map((_, i) => i + 1));
-    assert.equal(spec.bands.length, WAIT_CLASSES.length - 1);
+        AAS_CLASS_ORDER.map((_, i) => i + 1));
+    assert.equal(spec.bands.length, AAS_CLASS_ORDER.length - 1);
     spec.bands.forEach((b, k) =>
         assert.deepEqual(b, { series: [k + 2, k + 1] }));
 });

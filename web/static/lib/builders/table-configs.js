@@ -16,7 +16,7 @@
  */
 
 import {
-    WAIT_CLASSES, classColor, eventColor,
+    WAIT_CLASSES, classColor, classFilterName, eventColor,
     fmtMs, fmtUs, fmtCount, fmtPct, fmtAas, esc,
 } from '../format.js';
 import { dot, pctBar, stackedBar, eventStackedBar } from '../table.js';
@@ -126,13 +126,25 @@ export const overviewConfig = {
     ],
     rowClass: (r) => {
         let c = '';
-        if (r.indent === 1) c += ' indent-1 clickable';
+        // #187: "CPU (waiting for a core)" is indent 1 like every other
+        // class row, but onClick below never drills it (no server-side
+        // class_name, no Events-table rows) — 'clickable' would paint a
+        // cursor/hover affordance for a click that always does nothing.
+        if (r.indent === 1) {
+            c += ' indent-1';
+            if (classFilterName(r.name) != null) c += ' clickable';
+        }
         if (r.indent === 2) c += ' indent-2';
         return c;
     },
     onClick: (r) => {
         if (r.indent !== 1) return null;
-        const cls = r.name.replace('*', '');
+        // #187: classFilterName strips the "*"/"(running)" display
+        // qualifiers down to the server's class_name identity, and returns
+        // null for "CPU (waiting for a core)" — a computed residual with no
+        // server-side class_name and no Events-table rows to show.
+        const cls = classFilterName(r.name);
+        if (cls == null) return null;
         return { filterKey: 'class', filterValue: cls, label: cls };
     },
 };
@@ -172,7 +184,10 @@ export const sessionsConfig = {
         { key: 'user', label: 'User', format: (r) => esc(r.user || '') },
         { key: 'db', label: 'Database', format: (r) => esc(r.db || '') },
         { key: 'db_time_ms', label: 'DB Time', cls: 'num', format: (r) => fmtMs(r.db_time_ms) },
-        { key: 'cpu_pct', label: 'CPU%', cls: 'num', format: (r) => pctBar(r.cpu_pct, 'rgb(80,250,123)') },
+        // #187: was a hardcoded literal that silently went stale when the
+        // owner recoloured 'cpu' (dark green for "running"); classColor('cpu')
+        // stays in sync with WAIT_CLASSES by construction.
+        { key: 'cpu_pct', label: 'CPU%', cls: 'num', format: (r) => pctBar(r.cpu_pct, classColor('cpu') || 'rgb(28,120,62)') },
         { key: 'wait_pct', label: 'Wait%', cls: 'num', format: (r) => {
             const color = classColor(r.top_wait) || '#F44336';
             return pctBar(r.wait_pct, color);

@@ -896,8 +896,18 @@ void pgwt_compute_time_model(const struct pgwt_trace_event *events, int count,
                 break;
             }
         }
+        /* T8 revision (#187 two-band split): the CPU *group* keeps its
+         * historical meaning (running + waiting for a processor — see
+         * docs/AAS_SEMANTICS_DECISION.md), rendered as two rows where the
+         * exact tier can measure the split. Where it cannot (has_measured_cpu
+         * unset — legacy full-gap inference, no sibling row below), the row
+         * stays "CPU*": the asterisk's footnote now carries BOTH caveats
+         * (uninstrumented code paths, and "this window cannot separate
+         * running from waiting"), so a single un-split row is never
+         * mislabeled as "running only". */
         if (strcasecmp(classes[c].name, "cpu") == 0)
-            snprintf(rows[nr].name, sizeof(rows[nr].name), "CPU*");
+            snprintf(rows[nr].name, sizeof(rows[nr].name), "%s",
+                     has_measured_cpu ? "CPU (running)" : "CPU*");
         else
             snprintf(rows[nr].name, sizeof(rows[nr].name), "%.31s", display);
         rows[nr].time_ms     = cls_ms;
@@ -906,13 +916,15 @@ void pgwt_compute_time_model(const struct pgwt_trace_event *events, int count,
         rows[nr].indent      = 1;
         nr++;
 
-        /* T8: Off-CPU* is a sibling of CPU* (the measured off-CPU/runqueue-
-         * unaccounted remainder of on-CPU gaps). Emitted only where measured
-         * cpu_ns existed (v3 exact data) — sampled/v2 windows show CPU* alone
-         * (Off-CPU is unavailable, not zero). It is part of DB Time. */
+        /* T8: "CPU (waiting for a core)" is a sibling of "CPU (running)" (the
+         * measured off-CPU/runqueue-unaccounted remainder of on-CPU gaps).
+         * Emitted only where measured cpu_ns existed (v3 exact data) —
+         * sampled/v2 windows show the combined "CPU*" row alone (waiting time
+         * is unavailable to split out, not zero). It is part of DB Time. */
         if (strcasecmp(classes[c].name, "cpu") == 0 && has_measured_cpu) {
             double off_ms = offcpu_ns / 1e6;
-            snprintf(rows[nr].name, sizeof(rows[nr].name), "Off-CPU*");
+            snprintf(rows[nr].name, sizeof(rows[nr].name),
+                     "CPU (waiting for a core)");
             rows[nr].time_ms     = off_ms;
             rows[nr].pct_db_time = db_time_ms > 0 ? off_ms / db_time_ms * 100.0 : 0;
             rows[nr].aas         = wall_ms > 0 ? off_ms / wall_ms : 0;

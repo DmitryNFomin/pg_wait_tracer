@@ -26,7 +26,12 @@
 import { BASE_NS, SEC_NS, MIN_NS, r4, tri } from './base.mjs';
 
 const CLASS_KEYS = ['cpu', 'io', 'lock', 'lwlock', 'ipc', 'client', 'timeout',
-    'bufferpin', 'activity', 'extension', 'unknown'];
+    'bufferpin', 'activity', 'extension', 'unknown',
+    // #187: the measured off-CPU/waiting-for-a-core sibling of 'cpu' — a
+    // stacked sibling key, not one of the 11 wire-format wait classes (see
+    // format.js's WAIT_CLASSES comment). Included here so bucketTotal/
+    // maxTotal count it exactly like the real server does.
+    'offcpu'];
 
 function classBucket(t, values) {
     const b = { t };
@@ -104,6 +109,32 @@ function oneHugeValueData() {
 function sampledData() {
     const d = denseData();
     return { ...d, fidelity: 'sampled', sample_period_ns: 100_000_000 };
+}
+
+/* #187: the CPU GROUP keeps its historical meaning (running + waiting for a
+ * processor); where the exact tier can measure the split it renders as two
+ * adjacent bands. Buckets 0-29 carry a real cpu/offcpu split (~35% waiting);
+ * buckets 30-59 mimic a mid-window tier switch to the combined-only value
+ * (offcpu 0, cpu absorbing the whole group total) — the SAME group total
+ * before and after the switch, which is the conservation property #187
+ * exists to guarantee (no visible step at the switch). */
+function cpuSplitData() {
+    const buckets = [];
+    for (let i = 0; i < 60; i++) {
+        const exact = i < 30;
+        const cpuGroupTotal = r4(1.6 + 0.5 * tri(i, 13));
+        const off = exact ? r4(cpuGroupTotal * 0.35) : 0;
+        buckets.push(classBucket(BASE_NS + i * B60, {
+            cpu: r4(cpuGroupTotal - off),
+            offcpu: off,
+            io: r4(0.5 + 0.3 * tri(i + 4, 9)),
+            lock: r4(0.15 + 0.1 * tri(i + 8, 15)),
+            lwlock: 0.2,
+            timeout: 0.1,
+            extension: 0.2,
+        }));
+    }
+    return { bucket_ns: B60, max_aas: maxTotal(buckets), buckets };
 }
 
 function mixedEscalationData() {
@@ -366,6 +397,12 @@ export const states = {
         tags: ['FEEDBACK', 'SEMANTICS', 'fidelity'],
         data: sampledData(),
         opts: { numCpus: 8, win: WIN_DENSE },
+    },
+    'cpu-running-waiting': {
+        description: '#187: the CPU group splits into adjacent "running"/"waiting for a core" bands where the exact tier measures it (buckets 0-29); a mid-window tier switch to the combined-only value (buckets 30-59) keeps the SAME group total — no silent step.',
+        tags: ['SEMANTICS', 'HIERARCHY', 'fidelity'],
+        data: cpuSplitData(),
+        opts: { numCpus: 4, win: { from: BASE_NS, to: BASE_NS + 60 * B60 } },
     },
     'mixed-escalation': {
         description: 'Mixed window (sampled sub-ranges shaded) with an observed anomaly-escalation band + edge line.',

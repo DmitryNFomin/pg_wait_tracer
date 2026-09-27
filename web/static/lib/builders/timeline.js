@@ -137,7 +137,13 @@ export function timelineTooltipFormatter(params) {
 // paints its whole extent instead of only its start pixel.
 
 const NCLASS = WAIT_CLASSES.length;
-const UNKNOWN_CLASS = NCLASS - 1;   // WAIT_CLASSES[10] = "Unknown"
+// Found-and-fixed while wiring the CPU/offcpu split (#187): 'unknown' used to
+// be found by "last array slot", which broke the instant format.js appended
+// 'offcpu' AFTER it (WAIT_CLASSES stays wire-format-index-pinned there — see
+// format.js). classIdx values from the server span data are always one of
+// the 11 real wait_event classes (0-10); 'offcpu' (index 11) never appears as
+// a per-span classIdx, so this lookup-by-key is the only correct fallback.
+const UNKNOWN_CLASS = WAIT_CLASSES.findIndex(c => c.key === 'unknown');
 
 /* Aggregate clamped bar tuples into per-row, per-pixel-column class stacks.
  *

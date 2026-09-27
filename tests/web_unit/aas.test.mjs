@@ -9,8 +9,11 @@ import assert from 'node:assert/strict';
 import {
     buildAasOption, aasTooltip, AAS_ANNOTATION_SERIES,
 } from '../../web/static/lib/builders/aas.js';
-import { WAIT_CLASSES, eventColor } from '../../web/static/lib/format.js';
+import { WAIT_CLASSES, AAS_CLASS_ORDER, eventColor } from '../../web/static/lib/format.js';
 
+/* No 'offcpu' key on purpose (bypass-suite case: the key absent entirely —
+ * see 'offcpu absent/zero never breaks the stack sum' below). The AAS_CLASS_
+ * ORDER-driven builder must default it to 0, not throw or drop other series. */
 function classBuckets(n) {
     const out = [];
     for (let i = 0; i < n; i++) {
@@ -49,16 +52,54 @@ test('class mode: one series per wait class, x=tMs y=aas', () => {
     const data = { bucket_ns: 1, max_aas: 2.0, buckets: classBuckets(3) };
     const { option, seriesNames, seriesColors } = buildAasOption(data, { numCpus: 4 });
 
-    assert.equal(dataSeries(option).length, WAIT_CLASSES.length);
-    assert.deepEqual(seriesNames, WAIT_CLASSES.map(c => c.label));
-    assert.deepEqual(seriesColors, WAIT_CLASSES.map(c => c.color));
+    // AAS_CLASS_ORDER, not WAIT_CLASSES (#187): 'offcpu' stacks right after
+    // 'cpu' here, but stays LAST in WAIT_CLASSES (the wire-format-index-
+    // pinned array timeline.js/table.js index into) — see format.js.
+    assert.equal(dataSeries(option).length, AAS_CLASS_ORDER.length);
+    assert.deepEqual(seriesNames, AAS_CLASS_ORDER.map(c => c.label));
+    assert.deepEqual(seriesColors, AAS_CLASS_ORDER.map(c => c.color));
 
-    const cpu = option.series.find(s => s.name === 'CPU');
+    const cpu = option.series.find(s => s.name === 'CPU (running)');
     // t = 1000..1002 ns -> 0.001..0.001002 ms (ns / 1e6, the ONE conversion).
     assert.deepEqual(cpu.data, [[0.001, 1], [0.001001, 1], [0.001002, 1]]);
     // Stacked area
     assert.equal(cpu.stack, 'aas');
     assert.ok(cpu.areaStyle);
+});
+
+/* Bypass-suite (#187 spawn contract): the offcpu key absent entirely (this
+ * fixture's classBuckets never sets it) must fall back to 0, not throw and
+ * not drop the series — the stack sum still equals the sum of every OTHER
+ * present class, i.e. omission never silently changes the total. */
+test('offcpu key absent: defaults to a real zero-valued series, never dropped', () => {
+    const data = { bucket_ns: 1, max_aas: 2.0, buckets: classBuckets(2) };
+    const { option } = buildAasOption(data, { numCpus: 4 });
+    const off = option.series.find(s => s.name === 'CPU (waiting for a core)');
+    assert.ok(off, 'offcpu series is present even though the payload omits the key');
+    assert.deepEqual(off.data.map(p => p[1]), [0, 0]);
+});
+
+/* Bypass-suite: an explicit offcpu of 0 (every sampled-tier bucket today,
+ * T8/server.c) behaves identically to the key being absent — same series,
+ * same zero — so a tier switch mid-window (some buckets carry a real offcpu,
+ * others carry an explicit 0) never produces a visible step in the stack. */
+test('offcpu explicit zero and a tier switch mid-window both conserve the stack total', () => {
+    const buckets = [
+        { t: 1000, cpu: 1.0, offcpu: 0, io: 0.5 },          // sampled-style: explicit 0
+        { t: 1001, cpu: 1.0, io: 0.5 },                     // key absent entirely
+        { t: 1002, cpu: 0.6, offcpu: 0.4, io: 0.5 },        // exact tier: real split
+    ];
+    const data = { bucket_ns: 1, max_aas: 2.0, buckets };
+    const { option } = buildAasOption(data, { numCpus: 4 });
+    const byName = {};
+    dataSeries(option).forEach(s => { byName[s.name] = s.data; });
+    const total = (i) => (byName['CPU (running)'][i][1] +
+        byName['CPU (waiting for a core)'][i][1] + byName['IO'][i][1]);
+    // Every bucket's CPU-group + IO total is 1.5, whichever way this bucket
+    // spelled "no measurable off-cpu time" — the group total never steps.
+    assert.equal(total(0), 1.5);
+    assert.equal(total(1), 1.5);
+    assert.equal(total(2), 1.5);
 });
 
 /* FLIPPED in U2 (review P7): this used to pin yMax = max(maxAas*1.2,
@@ -227,7 +268,7 @@ test('x axis falls back to first..last bucket timestamp (ms) without a window', 
 test('aas values rounded to 4 decimals', () => {
     const data = { bucket_ns: 1, max_aas: 1, buckets: [
         { t: 1, cpu: 0.123456789 }] };
-    const cpu = buildAasOption(data, { numCpus: 1 }).option.series.find(s => s.name === 'CPU');
+    const cpu = buildAasOption(data, { numCpus: 1 }).option.series.find(s => s.name === 'CPU (running)');
     assert.equal(cpu.data[0][1], 0.1235);
 });
 
@@ -486,6 +527,23 @@ test('tooltip totals visible series and orders top-of-stack first', () => {
     // IO is later in params (top of stack) -> appears first after reverse
     assert.ok(html.indexOf('IO') < html.indexOf('CPU'));
     assert.ok(!html.includes('Idle'));
+});
+
+/* #187: the CPU-split footnote appears only when "CPU (waiting for a core)"
+ * actually rendered a nonzero band this bucket — a waits-only or sampled
+ * tooltip (no offcpu present/visible) stays exactly as before. */
+test('tooltip explains the CPU split only when the waiting-for-a-core band is present', () => {
+    const withSplit = aasTooltip([
+        { seriesName: 'CPU (running)', value: [1000, 0.6], color: '#1' },
+        { seriesName: 'CPU (waiting for a core)', value: [1000, 0.4], color: '#2' },
+    ], 1000000000);
+    assert.match(withSplit, /running and waiting for a core/);
+
+    const withoutSplit = aasTooltip([
+        { seriesName: 'CPU (running)', value: [1000, 1.0], color: '#1' },
+        { seriesName: 'IO', value: [1000, 0.5], color: '#2' },
+    ], 1000000000);
+    assert.doesNotMatch(withoutSplit, /running and waiting for a core/);
 });
 
 // U2a review F1: formatters alone don't pin tick POSITIONS — ECharts time-scale

@@ -10,18 +10,19 @@
 
 export const states = {
     'overview': {
-        description: 'The time-model table: indents, class dots, pct bars, the Idle row at pct 0.',
+        description: 'The time-model table: indents, class dots, pct bars, the Idle row at pct 0. #187: DB Time now includes the "CPU (waiting for a core)" row (mirrors tests/mock_server.py).',
         tags: ['HIERARCHY'],
         config: 'overview',
         sort: null,   // overview keeps server order
         rows: [
-            { indent: 0, name: 'DB Time',  ms: 12500, pct: 100.0, aas: 3.47 },
-            { indent: 1, name: 'CPU*',     ms: 4800,  pct: 38.4,  aas: 1.33 },
-            { indent: 1, name: 'IO',       ms: 3200,  pct: 25.6,  aas: 0.89 },
-            { indent: 2, name: 'IO:DataFileRead', ms: 2100, pct: 16.8, aas: 0.58 },
-            { indent: 2, name: 'IO:WalSync',      ms: 800,  pct: 6.4,  aas: 0.22 },
-            { indent: 1, name: 'Lock',     ms: 1500,  pct: 12.0,  aas: 0.42 },
-            { indent: 1, name: 'LWLock',   ms: 1200,  pct: 9.6,   aas: 0.33 },
+            { indent: 0, name: 'DB Time',  ms: 12760, pct: 100.0, aas: 3.54 },
+            { indent: 1, name: 'CPU (running)', ms: 4800, pct: 37.6, aas: 1.33 },
+            { indent: 1, name: 'CPU (waiting for a core)', ms: 260, pct: 2.0, aas: 0.07 },
+            { indent: 1, name: 'IO',       ms: 3200,  pct: 25.1,  aas: 0.89 },
+            { indent: 2, name: 'IO:DataFileRead', ms: 2100, pct: 16.5, aas: 0.58 },
+            { indent: 2, name: 'IO:WalSync',      ms: 800,  pct: 6.3,  aas: 0.22 },
+            { indent: 1, name: 'Lock',     ms: 1500,  pct: 11.8,  aas: 0.42 },
+            { indent: 1, name: 'LWLock',   ms: 1200,  pct: 9.4,   aas: 0.33 },
             { indent: 0, name: 'Idle',     ms: 45000, pct: 0,     aas: 0.0 },
         ],
     },

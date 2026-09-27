@@ -64,7 +64,7 @@ import {
     SAMPLED_BAND_COLOR, MIXED_BAND_COLOR, SAMPLED_BORDER, MIXED_BORDER,
 } from '../lib/builders/fidelity.js';
 import { attachSelection } from '../lib/selection.js';
-import { esc, fmtDuration, fmtTime } from '../lib/format.js';
+import { esc, fmtDuration, fmtTime, classFilterName } from '../lib/format.js';
 
 const NS_PER_MS = 1e6;
 
@@ -215,8 +215,15 @@ export function createActiveView() {
                 filterKey: 'event_id', filterValue: id, label: hit.seriesName,
             });
         }
+        // #187: filterValue is the server's class_name identity
+        // (classFilterName), NOT the raw display label — 'offcpu' ("CPU
+        // (waiting for a core)") has no server-side class_name at all (a
+        // computed residual, not a wait_event class) and null means "not
+        // drillable", never "fall back to the label".
+        const filterName = classFilterName(hit.seriesName);
+        if (filterName == null) return null;
         return () => ctx.onDrill({
-            filterKey: 'class', filterValue: hit.seriesName,
+            filterKey: 'class', filterValue: filterName,
             label: hit.seriesName,
         });
     }

@@ -7,8 +7,37 @@
 
 // -- Wait class colors (Oracle ASH / RDS PI inspired) -------------------------
 
+// The CPU *group* keeps its historical meaning — running plus waiting for a
+// processor (the Oracle ASH / RDS Performance Insights convention, and what a
+// database engineer assumes "CPU" means) — see docs/AAS_SEMANTICS_DECISION.md.
+// Where we can measure the split (the exact tier), it renders as two bands:
+// 'cpu' (running) and 'offcpu' (ready but waiting for a core). 'offcpu' is
+// appended at the END of this array, NOT spliced in next to 'cpu': array
+// POSITION here doubles as the wire-format class index (PGWT_NUM_CLASSES=11,
+// src/compute.h) that web/static/lib/builders/timeline.js and lib/table.js's
+// stackedBar() index into directly (WAIT_CLASSES[classIdx]) — 'offcpu' is not
+// one of those 11 real wait_event classes (it is a residual computed
+// server-side, never a per-span wait_event_info value), so inserting it
+// anywhere but the end would silently relabel every class after it. The AAS
+// stacked-area builders (aas.js, uplot-aas.js) that DO want 'offcpu' drawn
+// adjacent to 'cpu' use AAS_CLASS_ORDER below instead of this array's order.
+// Owner's colour decision (#187 review): dark green for the ordinary state
+// ("CPU (running)") and an acid/electric green for the state worth noticing
+// ("CPU (waiting for a core)" — queued for a processor). Both sit in the
+// same ~113-142° green hue family (29° apart — a clearly related pair, not
+// a hue-only distinction) but 0.31 apart in HSL lightness (0.29 vs 0.60) so
+// the boundary reads even to someone with reduced green discrimination who
+// relies on lightness alone, not just hue — the WCAG relative-luminance
+// contrast between the two swatches themselves is ~4.0:1. Checked against
+// every other WAIT_CLASSES hue: the nearest neighbor is 'bufferpin' (171°),
+// 29° from the dark green and 59° from the electric one — no collision.
+// Against the app's dark theme background (#1a1a2e, style.css): the dark
+// green's own contrast ratio (~3.1:1) matches 'io' (3.5:1, the previous
+// lowest in the palette) so it stays visible rather than vanishing into the
+// background; the electric green's ratio (~12.2:1) is among the highest in
+// the palette, by design — it is the one meant to jump out.
 export const WAIT_CLASSES = [
-    { key: 'cpu',       label: 'CPU',       color: 'rgb(80,250,123)' },
+    { key: 'cpu',       label: 'CPU (running)', color: 'rgb(28,120,62)' },
     { key: 'io',        label: 'IO',        color: 'rgb(30,100,255)' },
     { key: 'lock',      label: 'Lock',      color: 'rgb(255,85,85)' },
     { key: 'lwlock',    label: 'LWLock',    color: 'rgb(255,121,198)' },
@@ -19,6 +48,7 @@ export const WAIT_CLASSES = [
     { key: 'activity',  label: 'Activity',  color: 'rgb(150,100,255)' },
     { key: 'extension', label: 'Extension', color: 'rgb(190,150,255)' },
     { key: 'unknown',   label: 'Unknown',   color: 'rgb(180,180,180)' },
+    { key: 'offcpu',    label: 'CPU (waiting for a core)', color: 'rgb(79,250,56)' },
 ];
 
 export const CLASS_COLOR_MAP = {};
@@ -26,6 +56,19 @@ WAIT_CLASSES.forEach(c => {
     CLASS_COLOR_MAP[c.label.toLowerCase()] = c.color;
     CLASS_COLOR_MAP[c.key] = c.color;
 });
+
+// Stacking/legend order for the AAS stacked-area charts ONLY (aas.js,
+// uplot-aas.js): 'offcpu' immediately follows 'cpu' so the two bands paint as
+// one adjacent group, unlike WAIT_CLASSES' wire-format-pinned order above
+// (where 'offcpu' must stay last). Every other consumer (timeline.js,
+// table.js) keeps using WAIT_CLASSES directly.
+export const AAS_CLASS_ORDER = (() => {
+    const byKey = {};
+    WAIT_CLASSES.forEach(c => { byKey[c.key] = c; });
+    return ['cpu', 'offcpu', 'io', 'lock', 'lwlock', 'ipc', 'client',
+            'timeout', 'bufferpin', 'activity', 'extension', 'unknown']
+        .map(k => byKey[k]);
+})();
 
 export function classColor(name) {
     if (!name) return null;
@@ -54,6 +97,27 @@ export function classIndex(name) {
             return i;
     }
     return -1;
+}
+
+/* #187: the server-side `class_name` filter identity for a class DISPLAY
+ * LABEL — decoupled from the label on purpose. pgwt-server matches a click-
+ * drill's class_name via strcasecmp against pgwt_class_names ("cpu", "io",
+ * ...); it has never heard of a parenthetical qualifier. Before this
+ * existed, both the AAS band click (views/active.js) and the Time Model
+ * table row click (table-configs.js) sent the raw display label straight
+ * through as the filter value, which was harmless while every label matched
+ * its class 1:1 — until 'cpu' grew the "(running)" suffix here, at which
+ * point a class-mode drill on CPU silently matched zero rows (found live in
+ * this feature's own `make check` run, not by inspection).
+ *
+ * Returns null for 'offcpu' ("CPU (waiting for a core)"): it is a computed
+ * residual, not a wait_event class the server can filter by, and there is no
+ * Events-table row that could ever back it — callers must treat null as
+ * "not drillable", never fall back to sending the raw label. */
+export function classFilterName(label) {
+    if (label == null) return null;
+    if (label === 'CPU (waiting for a core)') return null;
+    return String(label).replace(/\s*\(running\)$/, '').replace('*', '');
 }
 
 // -- Event color service (U1, review P2) --------------------------------------

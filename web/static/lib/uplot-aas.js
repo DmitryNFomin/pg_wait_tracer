@@ -81,7 +81,9 @@
  * geometry, exercised by the Playwright/snapshot suites.
  */
 
-import { WAIT_CLASSES, classIndex, eventColor, fmtTime } from './format.js';
+import {
+    WAIT_CLASSES, AAS_CLASS_ORDER, classIndex, eventColor, fmtTime,
+} from './format.js';
 import {
     buildFidelityShading, buildEscalationAnnotation, fidelityOf, fidelityLabel,
     SAMPLED_BAND_COLOR, MIXED_BAND_COLOR, SAMPLED_BORDER, MIXED_BORDER,
@@ -174,11 +176,14 @@ function identitySeries(data) {
                 buckets.map(b => +(b.aas[o.idx] || 0).toFixed(4))),
         };
     }
+    // AAS_CLASS_ORDER (#187), not WAIT_CLASSES: 'offcpu' stacks right after
+    // 'cpu' so the CPU group reads as one area split in two — see format.js
+    // and the parity comment on buildAasOption's class-mode branch.
     return {
-        names: WAIT_CLASSES.map(wc => wc.label),
-        colors: WAIT_CLASSES.map(c => c.color),
-        ids: WAIT_CLASSES.map(() => null),   // class drills go by name
-        values: WAIT_CLASSES.map(wc =>
+        names: AAS_CLASS_ORDER.map(wc => wc.label),
+        colors: AAS_CLASS_ORDER.map(c => c.color),
+        ids: AAS_CLASS_ORDER.map(() => null),   // class drills go by name
+        values: AAS_CLASS_ORDER.map(wc =>
             buckets.map(b => +(b[wc.key] || 0).toFixed(4))),
     };
 }

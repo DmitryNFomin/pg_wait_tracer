@@ -1102,6 +1102,33 @@ A healthy OLTP workload typically shows CPU% between 30-70%. Below 30% means
 the system is wait-bound. Above 80% on a saturated system means CPU is the
 bottleneck.
 
+### CPU: running vs waiting for a core
+
+The CPU **group** keeps the meaning above — running plus waiting for a
+processor — because that is what Oracle ASH and AWS/RDS Performance Insights
+mean by "CPU", and what a database engineer assumes. Where the exact tier
+can measure the difference, the web UI's AAS chart and Time Model table split
+that group into two adjacent bands/rows:
+
+- **CPU (running)** — actually on a processor (the classic `CPU*` quantity).
+- **CPU (waiting for a core)** — ready to run but sitting in the kernel run
+  queue for one. This time carries no wait event (PostgreSQL has none for
+  "runnable, not running"), so by the definition above it is CPU, not an
+  unaccounted gap.
+
+`CPU (running) + CPU (waiting for a core) + Σ every other wait class == DB
+Time`, exactly, in the exact tier. A **sampled** window cannot observe the
+run queue at all, so it shows the combined group as a single `CPU*` row/band
+— the group total is identical either way, so switching tiers mid-window
+never produces a visible step in the total, only in how finely it is split.
+
+The `*`/asterisk on an un-split CPU row carries two caveats, not one:
+PostgreSQL does not instrument every code path (some genuine CPU time has no
+wait event and no other explanation), and — separately — a sampled window
+cannot separate "running" from "waiting for a core" even where the exact
+tier could. Neither caveat means the number is wrong; both mean it is a
+coarser measurement than the split rows give you.
+
 ## Interpreting Results
 
 ### High IO%

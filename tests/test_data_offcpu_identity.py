@@ -15,6 +15,10 @@ switch). Asserts:
      free-core sequence (Models A/B wrongly report >0), and the true runqueue
      time for a deliberately-preempted CPU-bound backend.
   4. The identity CPU* + Off-CPU* + Σ waits == DB Time holds exactly.
+
+(#187: the time_model rows are now named "CPU (running)" / "CPU (waiting for
+a core)" — this docstring keeps the shorthand CPU*/Off-CPU* for the
+underlying quantities; the JSON keys stay 'cpu'/'offcpu' unchanged.)
 """
 import os
 import sys
@@ -88,31 +92,38 @@ def main():
             # LWLock 35; IO = 10 (seq) + 10 (hog's new is IO but that's a
             # different event's OLD... hog's OLD is CPU) → IO stays 10;
             # Off-CPU* = 0 (seq) + 4 (hog) = 4. Identity → 63.4.
+            # #187: has_measured_cpu splits the row into "CPU (running)" and
+            # "CPU (waiting for a core)" (the JSON keys stay 'cpu'/'offcpu' —
+            # only these display names changed).
             db     = ms("DB Time")
-            cpu    = ms("CPU*")
-            offcpu = ms("Off-CPU*")
+            cpu    = ms("CPU (running)")
+            offcpu = ms("CPU (waiting for a core)")
             lwlock = ms("LWLock")
             io     = ms("IO")
 
-            print(f"--- DB={db} CPU*={cpu} Off-CPU*={offcpu} LWLock={lwlock} IO={io} ---")
+            print(f"--- DB={db} CPU(running)={cpu} CPU(waiting)={offcpu} "
+                  f"LWLock={lwlock} IO={io} ---")
             t.check_approx(db, 63.4, 0.01, "DB Time = 63.4ms")
-            # CPU* = query CPU (we==0 on-CPU) ONLY: 4.8+0+3 (seq) + 6 (hog).
+            # CPU (running) = query CPU (we==0 on-CPU) ONLY: 4.8+0+3 (seq) + 6 (hog).
             # The 0.6ms of on-CPU during the two LWLock intervals is LWLock SPIN
             # — it stays attributed to LWLock (the label is the diagnostic), not
-            # folded into an anonymous CPU* bucket.
+            # folded into the anonymous running-CPU bucket.
             t.check_approx(cpu, 13.8, 0.01,
-                           "CPU* = 13.8ms (query CPU only; LWLock spin stays in LWLock)")
+                           "CPU (running) = 13.8ms (query CPU only; LWLock spin stays in LWLock)")
             # Wait classes keep their FULL wall time (incl. the on-CPU spin):
             t.check_approx(lwlock, 35.0, 0.01, "LWLock = 35.0ms (full time, keeps label)")
             t.check_approx(io, 10.0, 0.01, "IO = 10.0ms")
-            # Off-CPU* = residual runqueue of the we==0 gaps: 0 for the free-core
-            # sequence + 4.6 from the preempted hog (10 wall - 6 on-CPU) and the
-            # sequence's own we==0 off-CPU (18.4 gap wall - 13.8 on-CPU = 4.6).
+            # CPU (waiting for a core) = residual runqueue of the we==0 gaps: 0
+            # for the free-core sequence + 4.6 from the preempted hog (10 wall -
+            # 6 on-CPU) and the sequence's own we==0 off-CPU (18.4 gap wall -
+            # 13.8 on-CPU = 4.6).
             t.check_approx(offcpu, 4.6, 0.02,
-                           "Off-CPU* = 4.6ms (residual runqueue of the we==0 gaps)")
-            # The conservation identity:
+                           "CPU (waiting for a core) = 4.6ms (residual runqueue of the we==0 gaps)")
+            # The conservation identity (#187's core claim):
+            # CPU (running) + CPU (waiting for a core) + Σ waits == DB Time.
             t.check_approx(cpu + offcpu + lwlock + io, 63.4, 0.02,
-                           "IDENTITY CPU* + Off-CPU* + Σwaits == DB Time")
+                           "IDENTITY CPU (running) + CPU (waiting for a core) + "
+                           "Σwaits == DB Time")
     finally:
         cleanup_traces(trace_dir)
     sys.exit(0 if t.summary() else 1)
