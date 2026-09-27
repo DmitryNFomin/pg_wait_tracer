@@ -244,13 +244,14 @@ _CANNED["time_model"] = {
     "offcpu_ms": 260,
     "wait_gap_cpu_ms": 0.003,
     "cpu_clamped_ms": 0.0,
-    # #115 Part 2: the "operating system" CPU reference — cpu_ms plus every
+    # #115 Part 2: NOT an operating-system figure (see src/compute.h) — the
+    # total measured on-CPU ns regardless of label: cpu_ms plus every
     # wait's/idle interval's own measured on-CPU ns (see src/compute.c
-    # pgwt_compute_time_model). has_os_cpu_ref gates it exactly like
+    # pgwt_compute_time_model). has_on_cpu_total gates it exactly like
     # has_measured_cpu gates Off-CPU* above; the real server always emits
     # both keys on time_model, so the mock must too (protocol drift).
-    "has_os_cpu_ref": True,
-    "os_cpu_ms": 5063.003,
+    "has_on_cpu_total": True,
+    "on_cpu_total_ms": 5063.003,
     "rows": [
         {"indent": 0, "name": "DB Time",  "ms": 12500, "pct": 100.0, "aas": 3.47},
         {"indent": 1, "name": "CPU*",     "ms": 4800,  "pct": 38.4,  "aas": 1.33},

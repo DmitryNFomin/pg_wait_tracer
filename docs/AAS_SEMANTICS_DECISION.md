@@ -121,6 +121,15 @@ reconciliation — the split moves with workload structure, not the total):**
 | on-CPU execution while idle is set (the protocol tail after a socket read returns, before the next wait/idle transition) | ~6% |
 | unexplained | ~0% |
 
+The "on-CPU execution while idle is set" row is issue #194: it is the one
+component that is genuinely ours and fixable, by *crediting* that CPU to
+CPU\* instead of to idle. This addendum's "On-CPU (measured)" value takes a
+different, additive approach — summing it as a side quantity without moving
+it out of idle or into CPU\*/DB Time — so the two must not double-count: if
+#194 lands and moves this nanosecond count into `cpu_measured_ns`, the
+`on_cpu_total_ms` formula (`src/compute.c`) must drop its separate
+idle-on-CPU term or it will count those nanoseconds twice.
+
 Two-thirds of the gap is run-queue delay (queued for a processor, not yet
 running), split roughly evenly between "queued while a real wait is set"
 and "queued while idle is set" — both invisible to a per-process CPU
@@ -133,19 +142,24 @@ convention.
 **What pg_wait_tracer's own numbers are comparable with.** CPU\* alone is
 comparable to *no* single figure `top` reports — it is a strictly narrower
 quantity by design. The daemon surfaces one further figure that narrows the
-gap without changing the convention: `os_cpu_ms` (`src/compute.c`
-`pgwt_compute_time_model`, "OS CPU (ref)" in the web UI's overview panel) is
-CPU\* plus every wait's and every idle interval's own measured on-CPU
-nanoseconds (the two "on-CPU execution while X is set" rows above) — the
-most complete on-CPU figure obtainable from what the daemon already
-measures per interval, without adding a new instrument. It is comparable to
-a kernel on-CPU-only figure (e.g. `utime+stime`), and it still reads *below*
-a run-queue-aware figure (`top`'s notion of "busy", Oracle/AWS ASH's `ON
-CPU`, or the kernel-timeline join above), because pg_wait_tracer has no
-scheduler-tracepoint instrumentation and therefore cannot see run-queue
-delay at all — the two-thirds of the gap above stays permanently
-unaccounted for on our side until that instrument exists. The UI withholds
-`os_cpu_ms` outright (rather than showing an under-counted number) for any
+gap slightly without changing the convention: `on_cpu_total_ms`
+(`src/compute.c` `pgwt_compute_time_model`, **"On-CPU (measured)"** in the
+web UI's overview panel — deliberately not named after the operating system,
+for the reason below) is CPU\* plus every wait's and every idle interval's
+own measured on-CPU nanoseconds (the two "on-CPU execution while X is set"
+rows above) — the most complete on-CPU figure obtainable from what the
+daemon already measures per interval, without adding a new instrument. It is
+comparable to a kernel on-CPU-only figure (e.g. `utime+stime`), and it still
+reads *well below* a run-queue-aware figure (`top`'s notion of "busy",
+Oracle/AWS ASH's `ON CPU`, or the kernel-timeline join above): run-queue
+delay is roughly two-thirds of the gap measured above, pg_wait_tracer has no
+scheduler-tracepoint instrumentation and therefore cannot see it at all, and
+"On-CPU (measured)" recovers none of it — closing only the smaller,
+already-on-a-processor third of the gap. That two-thirds stays permanently
+unaccounted for on our side until that instrument exists, which is why the
+value is named for what it measures rather than for the comparison it
+cannot survive. The UI withholds
+`on_cpu_total_ms` outright (rather than showing an under-counted number) for any
 window where even one wait/idle interval's on-CPU contribution is not
 actually measured — a sampled-tier window, a `.trace` v2 file, or a tier
 switch partway through the window.

@@ -2541,13 +2541,14 @@ static void handle_time_model(struct pgwt_server *srv, struct pgwt_request *req)
     cJSON_AddNumberToObject(root, "wait_gap_cpu_ms", tm.wait_gap_cpu_ms);
     cJSON_AddNumberToObject(root, "cpu_clamped_ms", tm.cpu_clamped_ms);
 
-    /* #115 Part 2: the "operating system" CPU reference (see compute.h for
-     * the full derivation). has_os_cpu_ref gates it exactly like the other
+    /* #115 Part 2: on_cpu_total_ms — measured on-CPU time regardless of
+     * label. NOT an operating-system figure (see compute.h for the full
+     * derivation and why). has_on_cpu_total gates it exactly like the other
      * T8 fields above — the client must check the flag, never infer presence
-     * from os_cpu_ms being nonzero (a legitimately-idle window has both the
-     * flag true and the value 0). */
-    cJSON_AddBoolToObject(root, "has_os_cpu_ref", tm.has_os_cpu_ref);
-    cJSON_AddNumberToObject(root, "os_cpu_ms", tm.os_cpu_ms);
+     * from on_cpu_total_ms being nonzero (a legitimately-idle window has both
+     * the flag true and the value 0). */
+    cJSON_AddBoolToObject(root, "has_on_cpu_total", tm.has_on_cpu_total);
+    cJSON_AddNumberToObject(root, "on_cpu_total_ms", tm.on_cpu_total_ms);
 
     /* T2 (additive): category decomposition + io_worker utilization. Raw
      * path only — summaries carry no category data. cat "io_worker" ms is

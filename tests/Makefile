@@ -76,8 +76,9 @@ test_live_accum: test_live_accum.c ../src/map_reader.c ../src/snapshot.c \
                  $(BUILD)/wait_event.o $(BUILD)/spawn.o $(BUILD)/cJSON.o
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^
 
-# test_os_cpu_ref: issue #115 Part 2 — the "operating system" CPU reference
-# (pgwt_tm_result.os_cpu_ms/has_os_cpu_ref) in pgwt_compute_time_model.
+# test_os_cpu_ref: issue #115 Part 2 — the "On-CPU (measured)" value, NOT an
+# operating-system figure (pgwt_tm_result.on_cpu_total_ms/has_on_cpu_total)
+# in pgwt_compute_time_model.
 # Compiles compute.c directly (-DPGWT_SERVER); wait_event.o only for the
 # idle/class classification helpers. Same pgwt_visit_summaries stub pattern
 # as test_live_accum (compute.c's only foreign symbol, unused by the

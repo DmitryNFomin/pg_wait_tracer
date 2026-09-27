@@ -21,19 +21,31 @@ import {
 } from '../lib/panels.js';
 import { fmtMs, fmtAas, esc } from '../lib/format.js';
 
-/* #115 Part 2: the "operating system" CPU reference — a labelled secondary
- * value, deliberately NOT a row in the time-model table or a band on the AAS
- * chart, so it can never be mistaken for another slice of the decomposition
- * (it overlaps CPU*, Off-CPU* and every wait class's measured spin/tail; it
- * does not sit beside them). Server derivation: src/compute.c
- * pgwt_compute_time_model (os_cpu_ms/has_os_cpu_ref) — see its comment for
- * the exact sum and why it still reads below a true kernel figure. */
-export const OS_CPU_REF_TOOLTIP =
+/* #115 Part 2: a labelled secondary value, deliberately NOT a row in the
+ * time-model table or a band on the AAS chart, so it can never be mistaken
+ * for another slice of the decomposition (it overlaps CPU*, Off-CPU* and
+ * every wait class's measured spin/tail; it does not sit beside them).
+ *
+ * Named "On-CPU (measured)", NOT "OS CPU" — it is deliberately NOT labelled
+ * as an operating-system figure. By the kernel-timeline decomposition on
+ * issue #115, run-queue delay (queued for a processor, not yet running) is
+ * the large majority of the gap to a true OS/kernel figure (4.92 of 6.03
+ * points measured), and pg_wait_tracer has no scheduler-tracepoint capture
+ * at all — so this value cannot and does not close that gap; it would be
+ * dishonest to imply otherwise by naming it after the OS. What it IS: every
+ * measured on-CPU nanosecond pg_wait_tracer already has, summed regardless
+ * of which wait/idle label carried it — the same shape as a kernel
+ * ON-CPU-ONLY figure (e.g. utime+stime), not a run-queue-aware one.
+ *
+ * Server derivation: src/compute.c pgwt_compute_time_model
+ * (on_cpu_total_ms/has_on_cpu_total) — see its comment for the exact sum. */
+export const ON_CPU_MEASURED_TOOLTIP =
     'Measured on-CPU time summed across the WHOLE window, regardless of ' +
-    'which PostgreSQL wait (or idle) event was set at the time — ' +
-    'closer to what the operating system shows than CPU* alone. Still ' +
-    'below it: this excludes time queued for a processor, which ' +
-    'pg_wait_tracer does not measure. See README § Time model.';
+    'which PostgreSQL wait (or idle) event was set at the time. This is ' +
+    'still not what the operating system reports: it excludes time queued ' +
+    'for a processor (run-queue delay), which pg_wait_tracer does not ' +
+    'measure, so an operating-system figure for the same window reads ' +
+    'higher still. See README § Time model.';
 
 /* PURE: time_model response -> summary metrics array. Exported for testing. */
 export function buildSummary(data, numCpus) {
@@ -46,13 +58,13 @@ export function buildSummary(data, numCpus) {
     out.push({ label: 'AAS', value: fmtAas(dbRow.aas) });
     if (idleRow) out.push({ label: 'Idle', value: fmtMs(idleRow.ms) });
     out.push({ label: 'CPUs', value: String(numCpus) });
-    /* Gated on the FLAG, never on os_cpu_ms being nonzero: a legitimately
+    /* Gated on the FLAG, never on on_cpu_total_ms being nonzero: a legitimately
      * idle window measures a real 0 (flag true, value 0) and must still
      * show it, while an unmeasured/mixed-tier window must stay absent even
-     * though os_cpu_ms holds SOME (untrustworthy) number server-side. */
-    if (data.has_os_cpu_ref === true) {
-        out.push({ label: 'OS CPU (ref)', value: fmtMs(data.os_cpu_ms),
-                   title: OS_CPU_REF_TOOLTIP });
+     * though on_cpu_total_ms holds SOME (untrustworthy) number server-side. */
+    if (data.has_on_cpu_total === true) {
+        out.push({ label: 'On-CPU (measured)', value: fmtMs(data.on_cpu_total_ms),
+                   title: ON_CPU_MEASURED_TOOLTIP });
     }
     return out;
 }

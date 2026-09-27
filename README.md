@@ -637,6 +637,13 @@ split moves with workload structure, the shape is illustrative):
 | already on a processor, while idle is set (the protocol tail right after a socket read returns) | ~6% |
 | unexplained | ~0% |
 
+(The last row above is issue #194 — the one genuinely-ours, fixable part of
+this gap. It proposes *crediting* that time to CPU\* instead of to idle; the
+"On-CPU (measured)" value below takes the more conservative additive
+approach instead — summed as a side quantity, not moved between rows — so
+the two must not double-count once #194 lands; see
+`docs/AAS_SEMANTICS_DECISION.md`.)
+
 Two-thirds of the gap is run-queue delay — queued, not yet running —
 against which any per-process CPU sampler (including `top`, and including
 pg_wait_tracer's own sampled tier) is structurally biased low: the
@@ -649,18 +656,20 @@ named absence, not silently approximated as zero.
 **What our own numbers are comparable with.** CPU\* is strictly narrower
 than anything `top` reports, by design — there is no operating-system
 figure it should be expected to match. The one further figure
-pg_wait_tracer surfaces, **"OS CPU (ref)"** in the web UI's overview panel
-(`os_cpu_ms` from `src/compute.c`), is CPU\* plus the measured on-CPU
-nanoseconds of every wait and idle interval — the two "already on a
+pg_wait_tracer surfaces, **"On-CPU (measured)"** in the web UI's overview
+panel (`on_cpu_total_ms` from `src/compute.c`), is CPU\* plus the measured
+on-CPU nanoseconds of every wait and idle interval — the two "already on a
 processor" rows above. That is the most complete on-CPU figure obtainable
 from what the daemon already measures, without adding a new instrument. It
-is comparable to a kernel on-CPU-only figure (e.g. `utime+stime`) — closer
-to `top` than CPU\* alone, but still below it, since it still excludes the
-two-thirds run-queue share. The UI withholds it entirely, rather than
-showing an under-counted number, for any window where even one wait/idle
-interval's on-CPU contribution genuinely was not measured (a sampled-tier
-window, a `.trace` v2 file, or a tier switch partway through the window).
-See `docs/AAS_SEMANTICS_DECISION.md` for the full derivation.
+is comparable to a kernel on-CPU-only figure (e.g. `utime+stime`) — it is
+**not** called an operating-system figure, deliberately: run-queue delay is
+roughly two-thirds of the gap above, this value recovers none of it, and a
+name borrowed from the OS would promise a match it cannot deliver. The UI
+withholds it entirely, rather than showing an under-counted number, for any
+window where even one wait/idle interval's on-CPU contribution genuinely
+was not measured (a sampled-tier window, a `.trace` v2 file, or a tier
+switch partway through the window). See `docs/AAS_SEMANTICS_DECISION.md`
+for the full derivation.
 
 #### Multi-window mode
 

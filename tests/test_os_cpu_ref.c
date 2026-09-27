@@ -1,11 +1,15 @@
-/* test_os_cpu_ref.c — issue #115 Part 2: the "operating system" CPU
- * reference (pgwt_tm_result.os_cpu_ms / has_os_cpu_ref).
+/* test_os_cpu_ref.c — issue #115 Part 2: the "On-CPU (measured)" value
+ * (pgwt_tm_result.on_cpu_total_ms / has_on_cpu_total). NOT an
+ * operating-system figure, deliberately — see src/compute.h's struct
+ * comment: run-queue delay is the large majority of the gap to a true OS
+ * figure and pg_wait_tracer cannot see it, so this value is named and
+ * documented as what it actually is.
  *
- * os_cpu_ms sums measured cpu_ns across the WHOLE window regardless of
+ * on_cpu_total_ms sums measured cpu_ns across the WHOLE window regardless of
  * which PostgreSQL wait/idle event was set (CPU* + on-CPU-while-waiting +
  * on-CPU-while-idle) — the most complete on-CPU figure available WITHOUT a
- * new measurement (compute.c pgwt_compute_time_model). has_os_cpu_ref must
- * be false (reference WITHHELD) whenever any wait/idle interval's on-CPU
+ * new measurement (compute.c pgwt_compute_time_model). has_on_cpu_total must
+ * be false (value WITHHELD) whenever any wait/idle interval's on-CPU
  * contribution is genuinely unknown, rather than silently treating it as
  * zero — this file is the bypass suite for that gate: a pure sampled/v2
  * window, and a tier switch mid-window, must both come back false rather
@@ -74,18 +78,18 @@ static void test_full_coverage(void)
     struct pgwt_tm_result tm;
     pgwt_compute_time_model(evs, 3, &f, 350.0, &tm);
 
-    CHECK(tm.has_os_cpu_ref, "full coverage: reference must be present");
-    CHECK(tm.os_cpu_ms > 92.9 && tm.os_cpu_ms < 93.1,
-          "os_cpu_ms = 90+2+1 = 93, got %.3f", tm.os_cpu_ms);
+    CHECK(tm.has_on_cpu_total, "full coverage: reference must be present");
+    CHECK(tm.on_cpu_total_ms > 92.9 && tm.on_cpu_total_ms < 93.1,
+          "on_cpu_total_ms = 90+2+1 = 93, got %.3f", tm.on_cpu_total_ms);
     free(tm.rows);
 }
 
 /* 2. Bypass case A — pure sampled/v2 window: every cpu_ns is UNKNOWN. The
  * existing has_measured_cpu gate already covers this, but this test pins
- * that the NEW os_cpu_ref field inherits it rather than defaulting to some
+ * that the NEW has_on_cpu_total flag inherits it rather than defaulting to some
  * other, wrongly-permissive rule. RED without the has_measured_cpu &&
- * check: os_cpu_ms would still be a real (if inference-based) number and a
- * naive "os_cpu_ms > 0 => show it" client-side rule would render it. */
+ * check: on_cpu_total_ms would still be a real (if inference-based) number and a
+ * naive "on_cpu_total_ms > 0 => show it" client-side rule would render it. */
 static void test_bypass_sampled_no_measurement(void)
 {
     struct pgwt_trace_event evs[2] = {
@@ -96,7 +100,7 @@ static void test_bypass_sampled_no_measurement(void)
     struct pgwt_tm_result tm;
     pgwt_compute_time_model(evs, 2, &f, 150.0, &tm);
 
-    CHECK(!tm.has_os_cpu_ref,
+    CHECK(!tm.has_on_cpu_total,
           "sampled/v2 window (no cpu_ns anywhere): reference must be absent");
     free(tm.rows);
 }
@@ -105,8 +109,8 @@ static void test_bypass_sampled_no_measurement(void)
  * interval are measured (exact tier), but a SECOND wait interval closed
  * before escalation finished and carries PGWT_CPU_NS_UNKNOWN. This interval
  * has nonzero wall time, so its on-CPU contribution is truly unknown — not
- * zero. Demonstrated red: without the os_ref_gap tracking, has_measured_cpu
- * alone would be true (the OTHER events are measured) and os_cpu_ms would
+ * zero. Demonstrated red: without the on_cpu_gap tracking, has_measured_cpu
+ * alone would be true (the OTHER events are measured) and on_cpu_total_ms would
  * silently omit the unknown interval's spin as if it were exactly 0. */
 static void test_bypass_tier_switch_mid_window(void)
 {
@@ -119,14 +123,14 @@ static void test_bypass_tier_switch_mid_window(void)
     struct pgwt_tm_result tm;
     pgwt_compute_time_model(evs, 3, &f, 150.0, &tm);
 
-    CHECK(!tm.has_os_cpu_ref,
+    CHECK(!tm.has_on_cpu_total,
           "tier switch mid-window (one wait interval unmeasured): "
           "reference must be withheld, not silently low");
     free(tm.rows);
 }
 
 /* 3b. Same bypass, but the unmeasured gap is on an IDLE-labeled interval
- * instead of a wait interval — the idle branch has its own os_ref_gap set
+ * instead of a wait interval — the idle branch has its own on_cpu_gap set
  * site and needs its own red demonstration. */
 static void test_bypass_tier_switch_idle_unknown(void)
 {
@@ -139,7 +143,7 @@ static void test_bypass_tier_switch_idle_unknown(void)
     struct pgwt_tm_result tm;
     pgwt_compute_time_model(evs, 3, &f, 150.0, &tm);
 
-    CHECK(!tm.has_os_cpu_ref,
+    CHECK(!tm.has_on_cpu_total,
           "tier switch mid-window (idle interval unmeasured): "
           "reference must be withheld");
     free(tm.rows);
@@ -147,9 +151,9 @@ static void test_bypass_tier_switch_idle_unknown(void)
 
 /* 4. Zero-that-means-measured, not zero-that-means-absent: an all-idle
  * window where every idle interval genuinely measured 0 on-CPU ns (a truly
- * idle backend). has_os_cpu_ref must be TRUE (it is measured — the flag is
- * what distinguishes this from case 2/3, not the value) with os_cpu_ms == 0.
- * A consumer that inferred "absent" from os_cpu_ms === 0 would wrongly hide
+ * idle backend). has_on_cpu_total must be TRUE (it is measured — the flag is
+ * what distinguishes this from case 2/3, not the value) with on_cpu_total_ms == 0.
+ * A consumer that inferred "absent" from on_cpu_total_ms === 0 would wrongly hide
  * a legitimate, trustworthy zero. */
 static void test_legitimate_zero_is_not_absent(void)
 {
@@ -160,9 +164,9 @@ static void test_legitimate_zero_is_not_absent(void)
     struct pgwt_tm_result tm;
     pgwt_compute_time_model(evs, 1, &f, 500.0, &tm);
 
-    CHECK(tm.has_os_cpu_ref,
+    CHECK(tm.has_on_cpu_total,
           "all-idle window with a MEASURED (zero) cpu_ns: reference present");
-    CHECK(tm.os_cpu_ms == 0.0, "os_cpu_ms is a real 0, got %.3f", tm.os_cpu_ms);
+    CHECK(tm.on_cpu_total_ms == 0.0, "on_cpu_total_ms is a real 0, got %.3f", tm.on_cpu_total_ms);
     free(tm.rows);
 }
 
@@ -174,7 +178,7 @@ static void test_empty_window_absent(void)
     struct pgwt_tm_result tm;
     pgwt_compute_time_model(NULL, 0, &f, 1000.0, &tm);
 
-    CHECK(!tm.has_os_cpu_ref, "empty window: reference must be absent");
+    CHECK(!tm.has_on_cpu_total, "empty window: reference must be absent");
     free(tm.rows);
 }
 
