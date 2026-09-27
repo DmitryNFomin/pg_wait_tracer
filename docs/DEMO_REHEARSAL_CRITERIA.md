@@ -61,13 +61,38 @@ checked first and independently:
   residual `max(0, DB − CPU* − Σwaits)` (`src/compute.c`), so a wait class we
   fail to attribute is absorbed into Off-CPU\* and the identity still closes.
   Only over-attribution can move the gap. Therefore also require:
-  - `wait_gap_cpu_ms` ≤ 0.1% of DB Time — CPU measured during wait-labelled
-    gaps, which should be ≈0;
-  - `cpu_clamped_ms` ≤ 0.1% of DB Time — CPU that had to be clamped away.
+  - **Per-class wait CPU, not a DB-Time fraction.** `Timeout:PgSleep` and
+    `Lock:relation` are pure sleeps: a correct implementation records
+    essentially no on-CPU time inside them (cpu/dur well under 0.01%,
+    bounded by at most a few deadlock-timeout wakeups). **A PgSleep or
+    Lock event carrying cpu_ns on the order of a millisecond is the
+    over-attribution signature** — a stale wait label, or an `on_cpu_ts`
+    that was never closed. That is the check; the per-class figure is the
+    discriminating quantity.
+  - `cpu_clamped_ms` ≈ 0. Note its limit: the wait branch never clamps
+    `cpu_ns > dur` (`src/compute.c:810`), so `cpu_clamped_ms = 0` vouches
+    for CPU gaps only, never for wait events.
 
-  Both are already on the wire (`src/server.c`, documented at
-  `src/compute.h`). These are the direct over-attribution detectors; the
-  identity is a rounding check.
+**Corrected 2026-09-27 — `wait_gap_cpu_ms` as a fraction of DB Time is NOT an
+over-attribution detector, and an earlier version of this file wrongly made it
+one at ≤ 0.1%.** Two live runs measured 0.376–0.392%, and that is expected on a
+correct implementation: the BPF measures exact on-CPU between the wait-start and
+wait-end writes, which spans the syscall's own on-CPU work, so an IO wait is
+legitimately CPU-bearing — a `pwrite` to page cache is nearly all on-CPU under a
+wait label. `src/compute.h`'s "≈0, a sleeping task burns no CPU" is a false
+premise for IO classes. In that run: ~4k IO waits in ~40 s carrying 257 ms, i.e.
+about 60 µs per event, inside the syscall-overhead envelope. The a-priori bound
+the mechanism supports is `wait_gap_cpu_ms ≤ Σ IO-class wait ms + N_wait × c`
+with c ≈ 10 µs of entry/exit and watchpoint-handler cost — honest but far too
+loose to gate on (~1.2 s for that run). Baselining the DB-Time fraction instead
+would be illegitimate: it is a property of the workload's IO mix, not of the
+implementation, so it cannot separate a defect from a change of mix.
+
+  Per-class wait CPU is not currently on the wire. Settle it offline, once, over
+  any full-mode gate-box trace — per-event `cpu_ns` is in `pgwt_trace_event` and
+  `tests/cross_validate.c` already reads it — and record the maximum `cpu_ns`
+  seen on a `Timeout:PgSleep` event as the evidence.
+
 - Off-CPU\* ≤ 10% of DB Time on a box where clients ≤ cores. **Provisional and
   weakly sourced**: it doubles a run-queue share of 4.92 pp measured once, on
   one machine, on 2026-09-27 — and that measurement's artifact is not in this
@@ -115,8 +140,20 @@ substitute one family for the other.
 
 ### 6. Daemon integrity
 
-- Ring-buffer and lost-event counters are 0. "The daemon was alive" is not
-  "the daemon captured everything".
+- `ringbuf_drops_total` = 0 — this is the lost-trace-event counter, and trace
+  events are what DB Time is built from. Also `state_map_full_total` = 0 and
+  `seen_query_ids_full_total` = 0 (`src/control.c`). All three are already in
+  the metrics blob, reachable through pgwt-server's control proxy, which the UI
+  itself already calls — no new instrumentation is needed, contrary to an
+  earlier assessment that grepped the wrong files.
+- **Known blind spot, stated rather than implied:** a lost *lifecycle* event is
+  silent. `lifecycle_rb` reserve failures increment nothing (`src/bpf/…` guards
+  the write with `if (ev)` and no counter), and the symptom is a backend simply
+  absent from the capture — under-attribution, which §3 already establishes the
+  conservation identity cannot see either. So a clean run means "no trace events
+  were dropped", never "nothing was missed". Closing this needs `src/` work and
+  is scheduled after the demo.
+- "The daemon was alive" is not "the daemon captured everything".
 - Overhead within the envelope recorded in `tests/results/overhead_trend.csv`.
 
 ### 7. Nothing failed to execute
