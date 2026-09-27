@@ -131,7 +131,7 @@ report "$ok" "two fresh-file racing starts are fully serialized (result: $result
 # ---------------------------------------------------------------------------
 lf="$tmpdir/case2.lock"
 PGWT_CHECK_LOCK_FILE="$lf" PGWT_CHECK_LOCK_POLL=1 PGWT_CHECK_LOCK_NOTIFY=1 \
-    "$LOCK_BIN" sleep 60 &
+    "$LOCK_BIN" sleep 60 >/dev/null 2>&1 &
 holder=$!
 # There is no lock FILE-existence signal anymore (the file is created
 # empty up front and flock'd in place) -- wait for the holder's pid to
