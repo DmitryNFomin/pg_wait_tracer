@@ -197,7 +197,7 @@ log "installing build + runtime dependencies"
 apt-get install -y -qq \
     clang llvm libbpf-dev libelf-dev zlib1g-dev liblz4-dev \
     linux-tools-common gcc make git \
-    rsync python3 procps findutils diffutils util-linux \
+    rsync python3 procps findutils diffutils util-linux jq \
     sudo curl gnupg lsb-release ca-certificates \
     postgresql-common >/dev/null
 
