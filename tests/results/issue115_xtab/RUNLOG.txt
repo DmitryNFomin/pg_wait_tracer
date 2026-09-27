@@ -1,0 +1,168 @@
+=== capture satdump1 clients=8 esc=45 nodump=0 ===
+bpftrace stderr lost/dropped lines: 0
+sched lines: 4678505  K lines: 4669397  oracle rows: 26791
+tps: tps = 1507.294976 (without initial connection time)
+XTAB_OK /root/arb/xtab/satdump1
+HEADLINE_AGG satdump1 exactWB=62.64% kernel_f1f2=69.98% gap=7.34 pp (E=169.045s K=235.039s W=100.831s f1=94.781s f2=140.258s)
+  HEADLINE  exact=62.64%  kernel=69.99%  gap=7.36 pp
+=== capture satnodump1 clients=8 esc=45 nodump=1 ===
+bpftrace stderr lost/dropped lines: 0
+sched lines: 9108  K lines: 0  oracle rows: 26909
+tps: tps = 1657.556231 (without initial connection time)
+XTAB_OK /root/arb/xtab/satnodump1
+HEADLINE_AGG satnodump1 exactWB=62.46% kernel_f1f2=68.53% gap=6.07 pp (E=175.168s K=229.262s W=105.295s f1=113.288s f2=115.974s)
+=== capture unsatdump1 clients=2 esc=45 nodump=0 ===
+bpftrace stderr lost/dropped lines: 0
+sched lines: 1696202  K lines: 1693646  oracle rows: 6898
+tps: tps = 802.253940 (without initial connection time)
+XTAB_OK /root/arb/xtab/unsatdump1
+HEADLINE_AGG unsatdump1 exactWB=71.08% kernel_f1f2=75.48% gap=4.40 pp (E=45.261s K=56.680s W=18.416s f1=54.890s f2=1.790s)
+  HEADLINE  exact=71.08%  kernel=75.58%  gap=4.50 pp
+=== capture unsatnodump1 clients=2 esc=45 nodump=1 ===
+bpftrace stderr lost/dropped lines: 0
+sched lines: 2556  K lines: 0  oracle rows: 6896
+tps: tps = 873.730547 (without initial connection time)
+XTAB_OK /root/arb/xtab/unsatnodump1
+HEADLINE_AGG unsatnodump1 exactWB=72.01% kernel_f1f2=75.51% gap=3.50 pp (E=45.969s K=55.107s W=17.868s f1=54.744s f2=0.363s)
+=== capture satdump2 clients=8 esc=45 nodump=0 ===
+bpftrace stderr lost/dropped lines: 0
+sched lines: 4826204  K lines: 4817096  oracle rows: 26877
+tps: tps = 1550.189032 (without initial connection time)
+XTAB_OK /root/arb/xtab/satdump2
+HEADLINE_AGG satdump2 exactWB=60.86% kernel_f1f2=68.33% gap=7.47 pp (E=164.786s K=228.670s W=105.994s f1=94.422s f2=134.248s)
+  HEADLINE  exact=60.86%  kernel=68.35%  gap=7.49 pp
+=== capture satnodump2 clients=8 esc=45 nodump=1 ===
+bpftrace stderr lost/dropped lines: 0
+sched lines: 9108  K lines: 0  oracle rows: 26993
+tps: tps = 1953.538428 (without initial connection time)
+XTAB_OK /root/arb/xtab/satnodump2
+HEADLINE_AGG satnodump2 exactWB=63.08% kernel_f1f2=69.10% gap=6.02 pp (E=176.720s K=231.294s W=103.426s f1=116.044s f2=115.250s)
+=== capture unsatdump2 clients=2 esc=45 nodump=0 ===
+bpftrace stderr lost/dropped lines: 0
+sched lines: 1717523  K lines: 1714967  oracle rows: 6897
+tps: tps = 827.531220 (without initial connection time)
+XTAB_OK /root/arb/xtab/unsatdump2
+HEADLINE_AGG unsatdump2 exactWB=69.26% kernel_f1f2=73.59% gap=4.33 pp (E=45.274s K=56.004s W=20.097s f1=54.347s f2=1.657s)
+  HEADLINE  exact=69.26%  kernel=73.71%  gap=4.45 pp
+=== capture unsatnodump2 clients=2 esc=45 nodump=1 ===
+bpftrace stderr lost/dropped lines: 0
+sched lines: 2556  K lines: 0  oracle rows: 6897
+tps: tps = 823.794198 (without initial connection time)
+XTAB_OK /root/arb/xtab/unsatnodump2
+HEADLINE_AGG unsatnodump2 exactWB=69.18% kernel_f1f2=72.98% gap=3.81 pp (E=44.330s K=53.356s W=19.751s f1=52.986s f2=0.370s)
+=== capture satdump3 clients=8 esc=45 nodump=0 ===
+bpftrace stderr lost/dropped lines: 0
+sched lines: 4760208  K lines: 4751100  oracle rows: 26830
+tps: tps = 1482.157747 (without initial connection time)
+XTAB_OK /root/arb/xtab/satdump3
+HEADLINE_AGG satdump3 exactWB=61.83% kernel_f1f2=69.09% gap=7.26 pp (E=167.589s K=231.242s W=103.446s f1=95.561s f2=135.681s)
+  HEADLINE  exact=61.83%  kernel=69.11%  gap=7.28 pp
+=== capture satnodump3 clients=8 esc=45 nodump=1 ===
+bpftrace stderr lost/dropped lines: 0
+sched lines: 9108  K lines: 0  oracle rows: 26938
+tps: tps = 1763.046341 (without initial connection time)
+XTAB_OK /root/arb/xtab/satnodump3
+HEADLINE_AGG satnodump3 exactWB=63.50% kernel_f1f2=69.41% gap=5.92 pp (E=178.063s K=232.329s W=102.371s f1=116.082s f2=116.247s)
+=== capture unsatdump3 clients=2 esc=45 nodump=0 ===
+bpftrace stderr lost/dropped lines: 0
+sched lines: 1714814  K lines: 1712258  oracle rows: 6894
+tps: tps = 813.015141 (without initial connection time)
+XTAB_OK /root/arb/xtab/unsatdump3
+HEADLINE_AGG unsatdump3 exactWB=70.22% kernel_f1f2=74.41% gap=4.20 pp (E=45.698s K=56.372s W=19.384s f1=54.883s f2=1.489s)
+  HEADLINE  exact=70.22%  kernel=74.50%  gap=4.29 pp
+=== capture unsatnodump3 clients=2 esc=45 nodump=1 ===
+bpftrace stderr lost/dropped lines: 0
+sched lines: 2556  K lines: 0  oracle rows: 6892
+tps: tps = 841.844952 (without initial connection time)
+XTAB_OK /root/arb/xtab/unsatnodump3
+HEADLINE_AGG unsatnodump3 exactWB=69.61% kernel_f1f2=73.37% gap=3.76 pp (E=44.568s K=53.599s W=19.456s f1=53.204s f2=0.395s)
+ALL DONE
+=== capture sathalf1 clients=8 esc=45 nodump=0 trackn=4 ===
+bpftrace stderr lost/dropped lines: 0
+sched lines: 3313636  K lines: 3308909  oracle rows: 26856
+tps: tps = 1532.456888 (without initial connection time)
+XTAB_OK /root/arb/xtab/sathalf1
+HEADLINE_AGG sathalf1 exactWB=63.74% kernel_f1f2=70.31% gap=6.58 pp (E=87.386s K=117.765s W=49.719s f1=50.253s f2=67.512s)
+  HEADLINE  exact=63.74%  kernel=70.33%  gap=6.59 pp
+=== capture unsathalf1 clients=2 esc=45 nodump=0 trackn=1 ===
+bpftrace stderr lost/dropped lines: 0
+sched lines: 840494  K lines: 839030  oracle rows: 6886
+tps: tps = 812.070104 (without initial connection time)
+XTAB_OK /root/arb/xtab/unsathalf1
+HEADLINE_AGG unsathalf1 exactWB=69.33% kernel_f1f2=74.12% gap=4.79 pp (E=22.004s K=27.878s W=9.732s f1=26.892s f2=0.986s)
+  HEADLINE  exact=69.33%  kernel=74.22%  gap=4.89 pp
+=== capture sathalf2 clients=8 esc=45 nodump=0 trackn=4 ===
+bpftrace stderr lost/dropped lines: 0
+sched lines: 3359672  K lines: 3354932  oracle rows: 26881
+tps: tps = 1597.116662 (without initial connection time)
+XTAB_OK /root/arb/xtab/sathalf2
+HEADLINE_AGG sathalf2 exactWB=63.58% kernel_f1f2=70.25% gap=6.67 pp (E=87.128s K=117.860s W=49.903s f1=49.471s f2=68.389s)
+  HEADLINE  exact=63.58%  kernel=70.27%  gap=6.69 pp
+=== capture unsathalf2 clients=2 esc=45 nodump=0 trackn=1 ===
+bpftrace stderr lost/dropped lines: 0
+sched lines: 609209  K lines: 607745  oracle rows: 6886
+tps: tps = 557.746925 (without initial connection time)
+XTAB_OK /root/arb/xtab/unsathalf2
+HEADLINE_AGG unsathalf2 exactWB=24.53% kernel_f1f2=29.80% gap=5.28 pp (E=8.732s K=11.408s W=26.872s f1=10.974s f2=0.434s)
+  HEADLINE  exact=24.52%  kernel=29.90%  gap=5.38 pp
+=== capture sathalf3 clients=8 esc=45 nodump=0 trackn=4 ===
+bpftrace stderr lost/dropped lines: 0
+sched lines: 3101468  K lines: 3096728  oracle rows: 26784
+tps: tps = 1433.387562 (without initial connection time)
+XTAB_OK /root/arb/xtab/sathalf3
+HEADLINE_AGG sathalf3 exactWB=63.39% kernel_f1f2=70.06% gap=6.67 pp (E=87.022s K=117.609s W=50.265s f1=49.308s f2=68.301s)
+  HEADLINE  exact=63.39%  kernel=70.07%  gap=6.68 pp
+=== capture unsathalf3 clients=2 esc=45 nodump=0 trackn=1 ===
+bpftrace stderr lost/dropped lines: 0
+sched lines: 872234  K lines: 870770  oracle rows: 6894
+tps: tps = 823.927081 (without initial connection time)
+XTAB_OK /root/arb/xtab/unsathalf3
+HEADLINE_AGG unsathalf3 exactWB=69.42% kernel_f1f2=74.29% gap=4.87 pp (E=21.941s K=27.932s W=9.666s f1=26.817s f2=1.115s)
+    rq   joined=    2.041s  aggregate=    2.021s  +1.03%   <-- MISMATCH >1%
+  HEADLINE  exact=69.42%  kernel=74.38%  gap=4.96 pp
+ALL DONE
+=== capture satquarter1 clients=8 esc=45 nodump=0 trackn=2 ===
+bpftrace stderr lost/dropped lines: 0
+sched lines: 2607665  K lines: 2605109  oracle rows: 26915
+tps: tps = 1706.938112 (without initial connection time)
+XTAB_OK /root/arb/xtab/satquarter1
+HEADLINE_AGG satquarter1 exactWB=67.50% kernel_f1f2=73.39% gap=5.90 pp (E=39.428s K=52.373s W=18.988s f1=21.465s f2=30.908s)
+  HEADLINE  exact=67.50%  kernel=73.40%  gap=5.90 pp
+=== capture unsatquarter1 clients=2 esc=45 nodump=0 trackn=1 ===
+bpftrace stderr lost/dropped lines: 0
+sched lines: 805237  K lines: 803773  oracle rows: 6894
+tps: tps = 792.975218 (without initial connection time)
+XTAB_OK /root/arb/xtab/unsatquarter1
+HEADLINE_AGG unsatquarter1 exactWB=70.14% kernel_f1f2=74.41% gap=4.27 pp (E=22.756s K=28.164s W=9.688s f1=27.577s f2=0.587s)
+    rq   joined=    1.521s  aggregate=    1.506s  +1.00%   <-- MISMATCH >1%
+  HEADLINE  exact=70.14%  kernel=74.50%  gap=4.36 pp
+=== capture satquarter2 clients=8 esc=45 nodump=0 trackn=2 ===
+bpftrace stderr lost/dropped lines: 0
+sched lines: 2657417  K lines: 2654861  oracle rows: 26862
+tps: tps = 1622.469030 (without initial connection time)
+XTAB_OK /root/arb/xtab/satquarter2
+HEADLINE_AGG satquarter2 exactWB=66.60% kernel_f1f2=72.72% gap=6.11 pp (E=45.532s K=60.854s W=22.832s f1=25.208s f2=35.646s)
+  HEADLINE  exact=66.60%  kernel=72.72%  gap=6.12 pp
+=== capture unsatquarter2 clients=2 esc=45 nodump=0 trackn=1 ===
+bpftrace stderr lost/dropped lines: 0
+sched lines: 836626  K lines: 835162  oracle rows: 6896
+tps: tps = 815.558991 (without initial connection time)
+XTAB_OK /root/arb/xtab/unsatquarter2
+HEADLINE_AGG unsatquarter2 exactWB=70.44% kernel_f1f2=74.69% gap=4.25 pp (E=22.884s K=28.334s W=9.603s f1=27.636s f2=0.698s)
+  HEADLINE  exact=70.44%  kernel=74.80%  gap=4.36 pp
+=== capture satquarter3 clients=8 esc=45 nodump=0 trackn=2 ===
+bpftrace stderr lost/dropped lines: 0
+sched lines: 2708937  K lines: 2706381  oracle rows: 26933
+tps: tps = 1701.636662 (without initial connection time)
+XTAB_OK /root/arb/xtab/satquarter3
+HEADLINE_AGG satquarter3 exactWB=66.94% kernel_f1f2=73.01% gap=6.07 pp (E=45.670s K=61.026s W=22.558s f1=25.310s f2=35.716s)
+  HEADLINE  exact=66.94%  kernel=73.02%  gap=6.08 pp
+=== capture unsatquarter3 clients=2 esc=45 nodump=0 trackn=1 ===
+bpftrace stderr lost/dropped lines: 0
+sched lines: 821128  K lines: 819664  oracle rows: 6896
+tps: tps = 799.415727 (without initial connection time)
+XTAB_OK /root/arb/xtab/unsatquarter3
+HEADLINE_AGG unsatquarter3 exactWB=69.96% kernel_f1f2=74.36% gap=4.40 pp (E=22.694s K=28.255s W=9.745s f1=27.533s f2=0.722s)
+    rq   joined=    1.648s  aggregate=    1.628s  +1.21%   <-- MISMATCH >1%
+  HEADLINE  exact=69.96%  kernel=74.48%  gap=4.52 pp
+ALL DONE

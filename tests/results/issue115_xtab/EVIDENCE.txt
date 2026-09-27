@@ -1,0 +1,1188 @@
+
+@@@@@@@@ satdump1.txt @@@@@@@@
+######## satdump1 ########
+WINDOW [1790521616415932991,1790521655415932991) secs=39.0 pgbench_backends=8: 4874,4875,4876,4877,4878,4879,4880,4881
+  pgsa sampler pid=4890   excludes: 76 args
+  tps: tps = 1507.294976 (without initial connection time)
+
+--- exact + sampled tier (strict pgbench-backend set) ---
+PIDS total=17 with_cmd_markers=8 overlapping_intervals=0 client_only=1
+IDLE raw wall = 42.124 s (of which inside a command: 0.000 s)
+CMD-OPEN total = 186.436 s over 359671 commands (mean 518.4 us)   wait inside cmd = 100.831 s   cpu outside cmd = 83.440 s
+INTERVALS cpu=283893 (mean 595.5 us) wait=172172 (mean 585.6 us) straddling=203148 (83.438 s outside)
+CPU(we==0) wall = 169.045 s   measured cpu_ns = 86.553 s
+MARKERS start=580084 end=580083 dup_start(missing END)=2 orphan_end(missing START)=1 pids_unclosed_at_end=0
+SAMPLED                        cpu=74.814s nonidle=182.830s  share=40.9%  total=224.942s active_frac=81.3% noncmd_cpu=0.000s
+EXACT S (stream, majority)     cpu=76.014s wait=100.831s  share=43.0%
+EXACT A (sorted, majority)     cpu=76.014s wait=100.831s  share=43.0%
+EXACT B (sorted, proportional) cpu=85.605s wait=100.831s  share=45.9%
+EXACT C (2-pass, proportional) cpu=85.605s wait=100.831s  share=45.9%
+
+--- kernel arbiter (schedstat counters, independent of the tracepoints) ---
+KERNEL window=39.000s pids=8 (not spanning the window, excluded: none)
+  schedstat f1 sum_exec_runtime (on a processor)   =   94.781 s
+  schedstat f2 run_delay        (runnable, queued) =  140.258 s
+  f1+f2  (on a processor OR wanting one)           =  235.039 s
+
+--- reference: pg_stat_activity ---
+PGSA_IN pgsa       iters=1864 (47.8 Hz) rows=14912 backends=8.00 win=39.000s act_cpu=3258 act_wait=5184 torn=101(0.68%) nonactive_nowait=4156(27.87%) idle_clientread=2173 idle_activity=0 act_activity=0 nonactive_wait=40
+PGSA_V1 pgsa       share=38.59%  cpu_s=   68.17 nonidle_s=  176.63 cpu_n=3258 nonidle_n=8442
+PGSA_V2 pgsa       share=58.85%  cpu_s=  155.12 nonidle_s=  263.58 cpu_n=7414 nonidle_n=12598
+
+--- headline from the aggregates only (schedstat; no tracepoint dump) ---
+HEADLINE_AGG satdump1 exactWB=62.64% kernel_f1f2=69.98% gap=7.34 pp (E=169.045s K=235.039s W=100.831s f1=94.781s f2=140.258s)
+
+--- the cross-tab and the equation ---
+XTAB satdump1 window=[1790521616415932991,1790521655415932991) secs=39.000 backends=8
+  pid sets: requested=[4874, 4875, 4876, 4877, 4878, 4879, 4880, 4881]
+            exact-tier dump=[4874, 4875, 4876, 4877, 4878, 4879, 4880, 4881]  kernel dump=[4874, 4875, 4876, 4877, 4878, 4879, 4880, 4881]
+  cross-tab total = 312.000 backend-s (exact wall = 312.000; residual +0.000000s)
+  DUMP-vs-AGGREGATE (bpftrace's own maps; a lost-event check)
+    on   joined=   96.573s  aggregate=   96.599s  -0.03%
+    rq   joined=  138.641s  aggregate=  138.599s  +0.03%
+    off  joined=   76.786s  aggregate=   76.664s  +0.16%
+    unk  joined=    0.000s  (0.000% of wall: no kernel transition before the window)
+
+  backend-seconds, kernel state (rows) x exact-tier class (cols)
+             CPU/cmd   CPU/out  WAIT/cmd  WAIT/out      IDLE       GAP     total
+    on        70.152    16.366     6.951     0.000     3.103     0.000    96.573
+    rq        15.449    67.074    26.392     0.000    29.727     0.000   138.641
+    off        0.004     0.000    67.488     0.000     9.294     0.000    76.786
+    unk        0.000     0.000     0.000     0.000     0.000     0.000     0.000
+    total     85.605    83.440   100.831     0.000    42.124     0.000   312.000
+
+  EQUATION  (W = wait inside a command = 100.831 s, the shared denominator term)
+    term                                                       sec   share%    d pp  kind
+    exact tier numerator E = cpu_in_cmd + cpu_out_cmd      169.045    62.64    0.00
+      + run-queue delay with a wait event still set         26.392    65.97    3.33  definitional
+      + on a processor with a wait event still set           6.951    66.75    0.78  definitional
+      + run-queue delay with an IDLE wait event set         29.727    69.72    2.97  definitional
+      + on a processor with an IDLE wait event set           3.103    70.00    0.28  under-capture
+      + on-or-runnable in a timeline gap (no interval)       0.000    70.00    0.00  under-capture
+      - off-CPU (blocked) while we call it CPU              -0.004    69.99   -0.00  over-capture
+      +- kernel state unknown before first transition        0.000    69.99    0.00  unexplained
+    = kernel numerator K = on + rq                         235.214    69.99    7.36
+    closure residual: K - (E + terms) = +0.000000 s
+  HEADLINE  exact=62.64%  kernel=69.99%  gap=7.36 pp
+
+  CROSS-CHECK the tracer's own per-interval cpu_ns against the kernel dump
+    on-CPU inside WAIT intervals: kernel 6.951s   tracer cpu_ns 7.069s
+    on-CPU inside CPU  intervals: kernel 86.519s   tracer cpu_ns 86.553s
+  SIZES  out_of_command_cpu=83.440s (already inside E; without it the exact share would be 45.92%, gap 24.08 pp)
+         wait_outside_command=0.000s  idle_wall=42.124s  gap_wall=0.000s
+         blocked-but-called-CPU (wait our tier did not reconstruct) = 0.004s = 0.00% of the wait it should have seen
+  KERNEL on=96.573s rq=138.641s off=76.786s
+
+--- instrument overhead ---
+  bt_pid=4903  schedstat f1 sum_exec_runtime (on a processor) = 18.496 s  schedstat f2 run_delay (runnable, queued) = 5.815 s 
+  daemon_pid=4920  schedstat f1 sum_exec_runtime (on a processor) = 2.650 s  schedstat f2 run_delay (runnable, queued) = 0.825 s 
+
+
+@@@@@@@@ satdump2.txt @@@@@@@@
+######## satdump2 ########
+WINDOW [1790522068035135828,1790522107035135828) secs=39.0 pgbench_backends=8: 6471,6472,6473,6474,6475,6476,6477,6478
+  pgsa sampler pid=6487   excludes: 10 args
+  tps: tps = 1550.189032 (without initial connection time)
+
+--- exact + sampled tier (strict pgbench-backend set) ---
+PIDS total=17 with_cmd_markers=8 overlapping_intervals=0 client_only=1
+IDLE raw wall = 41.220 s (of which inside a command: 0.000 s)
+CMD-OPEN total = 189.966 s over 366348 commands (mean 518.5 us)   wait inside cmd = 105.994 s   cpu outside cmd = 80.815 s
+INTERVALS cpu=293868 (mean 560.7 us) wait=176367 (mean 601.0 us) straddling=210912 (80.813 s outside)
+CPU(we==0) wall = 164.786 s   measured cpu_ns = 86.142 s
+MARKERS start=583191 end=583188 dup_start(missing END)=4 orphan_end(missing START)=1 pids_unclosed_at_end=0
+SAMPLED                        cpu=74.534s nonidle=184.124s  share=40.5%  total=227.489s active_frac=80.9% noncmd_cpu=0.000s
+EXACT S (stream, majority)     cpu=75.090s wait=105.994s  share=41.5%
+EXACT A (sorted, majority)     cpu=75.090s wait=105.994s  share=41.5%
+EXACT B (sorted, proportional) cpu=83.971s wait=105.994s  share=44.2%
+EXACT C (2-pass, proportional) cpu=83.971s wait=105.994s  share=44.2%
+
+--- kernel arbiter (schedstat counters, independent of the tracepoints) ---
+KERNEL window=39.000s pids=8 (not spanning the window, excluded: none)
+  schedstat f1 sum_exec_runtime (on a processor)   =   94.422 s
+  schedstat f2 run_delay        (runnable, queued) =  134.248 s
+  f1+f2  (on a processor OR wanting one)           =  228.669 s
+
+--- reference: pg_stat_activity ---
+PGSA_IN pgsa       iters=1871 (48.0 Hz) rows=14968 backends=8.00 win=39.000s act_cpu=3154 act_wait=5472 torn=114(0.76%) nonactive_nowait=4113(27.48%) idle_clientread=2069 idle_activity=0 act_activity=0 nonactive_wait=46
+PGSA_V1 pgsa       share=36.56%  cpu_s=   65.74 nonidle_s=  179.80 cpu_n=3154 nonidle_n=8626
+PGSA_V2 pgsa       share=57.05%  cpu_s=  151.48 nonidle_s=  265.54 cpu_n=7267 nonidle_n=12739
+
+--- headline from the aggregates only (schedstat; no tracepoint dump) ---
+HEADLINE_AGG satdump2 exactWB=60.86% kernel_f1f2=68.33% gap=7.47 pp (E=164.786s K=228.670s W=105.994s f1=94.422s f2=134.248s)
+
+--- the cross-tab and the equation ---
+XTAB satdump2 window=[1790522068035135828,1790522107035135828) secs=39.000 backends=8
+  pid sets: requested=[6471, 6472, 6473, 6474, 6475, 6476, 6477, 6478]
+            exact-tier dump=[6471, 6472, 6473, 6474, 6475, 6476, 6477, 6478]  kernel dump=[6471, 6472, 6473, 6474, 6475, 6476, 6477, 6478]
+  cross-tab total = 312.000 backend-s (exact wall = 312.000; residual +0.000000s)
+  DUMP-vs-AGGREGATE (bpftrace's own maps; a lost-event check)
+    on   joined=   96.148s  aggregate=   96.158s  -0.01%
+    rq   joined=  132.714s  aggregate=  132.654s  +0.05%
+    off  joined=   83.138s  aggregate=   82.995s  +0.17%
+    unk  joined=    0.000s  (0.000% of wall: no kernel transition before the window)
+
+  backend-seconds, kernel state (rows) x exact-tier class (cols)
+             CPU/cmd   CPU/out  WAIT/cmd  WAIT/out      IDLE       GAP     total
+    on        69.648    16.475     6.818     0.000     3.207     0.000    96.148
+    rq        14.323    64.340    25.173     0.000    28.879     0.000   132.714
+    off        0.000     0.000    74.003     0.000     9.134     0.000    83.138
+    unk        0.000     0.000     0.000     0.000     0.000     0.000     0.000
+    total     83.971    80.815   105.994     0.000    41.220     0.000   312.000
+
+  EQUATION  (W = wait inside a command = 105.994 s, the shared denominator term)
+    term                                                       sec   share%    d pp  kind
+    exact tier numerator E = cpu_in_cmd + cpu_out_cmd      164.786    60.86    0.00
+      + run-queue delay with a wait event still set         25.173    64.19    3.33  definitional
+      + on a processor with a wait event still set           6.818    64.99    0.81  definitional
+      + run-queue delay with an IDLE wait event set         28.879    68.04    3.05  definitional
+      + on a processor with an IDLE wait event set           3.207    68.35    0.31  under-capture
+      + on-or-runnable in a timeline gap (no interval)       0.000    68.35    0.00  under-capture
+      - off-CPU (blocked) while we call it CPU              -0.000    68.35   -0.00  over-capture
+      +- kernel state unknown before first transition        0.000    68.35    0.00  unexplained
+    = kernel numerator K = on + rq                         228.862    68.35    7.49
+    closure residual: K - (E + terms) = -0.000000 s
+  HEADLINE  exact=60.86%  kernel=68.35%  gap=7.49 pp
+
+  CROSS-CHECK the tracer's own per-interval cpu_ns against the kernel dump
+    on-CPU inside WAIT intervals: kernel 6.818s   tracer cpu_ns 6.931s
+    on-CPU inside CPU  intervals: kernel 86.123s   tracer cpu_ns 86.142s
+  SIZES  out_of_command_cpu=80.815s (already inside E; without it the exact share would be 44.20%, gap 24.14 pp)
+         wait_outside_command=0.000s  idle_wall=41.220s  gap_wall=0.000s
+         blocked-but-called-CPU (wait our tier did not reconstruct) = 0.000s = 0.00% of the wait it should have seen
+  KERNEL on=96.148s rq=132.714s off=83.138s
+
+--- instrument overhead ---
+  bt_pid=6500  schedstat f1 sum_exec_runtime (on a processor) = 18.559 s  schedstat f2 run_delay (runnable, queued) = 6.223 s 
+  daemon_pid=6517  schedstat f1 sum_exec_runtime (on a processor) = 2.534 s  schedstat f2 run_delay (runnable, queued) = 0.780 s 
+
+
+@@@@@@@@ satdump3.txt @@@@@@@@
+######## satdump3 ########
+WINDOW [1790522518219581215,1790522557219581215) secs=39.0 pgbench_backends=8: 7888,7889,7890,7891,7892,7893,7894,7895
+  pgsa sampler pid=7904   excludes: 8 args
+  tps: tps = 1482.157747 (without initial connection time)
+
+--- exact + sampled tier (strict pgbench-backend set) ---
+PIDS total=18 with_cmd_markers=8 overlapping_intervals=0 client_only=1
+IDLE raw wall = 40.964 s (of which inside a command: 0.000 s)
+CMD-OPEN total = 189.246 s over 365864 commands (mean 517.3 us)   wait inside cmd = 103.446 s   cpu outside cmd = 81.789 s
+INTERVALS cpu=294138 (mean 569.8 us) wait=177659 (mean 582.3 us) straddling=210162 (81.787 s outside)
+CPU(we==0) wall = 167.590 s   measured cpu_ns = 87.464 s
+MARKERS start=690543 end=690543 dup_start(missing END)=1 orphan_end(missing START)=1 pids_unclosed_at_end=0
+SAMPLED                        cpu=75.942s nonidle=184.851s  share=41.1%  total=227.535s active_frac=81.2% noncmd_cpu=0.000s
+EXACT S (stream, majority)     cpu=77.250s wait=103.446s  share=42.8%
+EXACT A (sorted, majority)     cpu=77.250s wait=103.446s  share=42.8%
+EXACT B (sorted, proportional) cpu=85.800s wait=103.446s  share=45.3%
+EXACT C (2-pass, proportional) cpu=85.800s wait=103.446s  share=45.3%
+
+--- kernel arbiter (schedstat counters, independent of the tracepoints) ---
+KERNEL window=39.000s pids=8 (not spanning the window, excluded: none)
+  schedstat f1 sum_exec_runtime (on a processor)   =   95.561 s
+  schedstat f2 run_delay        (runnable, queued) =  135.681 s
+  f1+f2  (on a processor OR wanting one)           =  231.242 s
+
+--- reference: pg_stat_activity ---
+PGSA_IN pgsa       iters=1867 (47.9 Hz) rows=14936 backends=8.00 win=39.000s act_cpu=3163 act_wait=5339 torn=130(0.87%) nonactive_nowait=4227(28.30%) idle_clientread=2035 idle_activity=0 act_activity=0 nonactive_wait=42
+PGSA_V1 pgsa       share=37.20%  cpu_s=   66.07 nonidle_s=  177.60 cpu_n=3163 nonidle_n=8502
+PGSA_V2 pgsa       share=58.06%  cpu_s=  154.37 nonidle_s=  265.90 cpu_n=7390 nonidle_n=12729
+
+--- headline from the aggregates only (schedstat; no tracepoint dump) ---
+HEADLINE_AGG satdump3 exactWB=61.83% kernel_f1f2=69.09% gap=7.26 pp (E=167.589s K=231.242s W=103.446s f1=95.561s f2=135.681s)
+
+--- the cross-tab and the equation ---
+XTAB satdump3 window=[1790522518219581215,1790522557219581215) secs=39.000 backends=8
+  pid sets: requested=[7888, 7889, 7890, 7891, 7892, 7893, 7894, 7895]
+            exact-tier dump=[7888, 7889, 7890, 7891, 7892, 7893, 7894, 7895]  kernel dump=[7888, 7889, 7890, 7891, 7892, 7893, 7894, 7895]
+  cross-tab total = 312.000 backend-s (exact wall = 312.000; residual +0.000000s)
+  DUMP-vs-AGGREGATE (bpftrace's own maps; a lost-event check)
+    on   joined=   97.398s  aggregate=   97.398s  -0.00%
+    rq   joined=  134.048s  aggregate=  134.014s  +0.03%
+    off  joined=   80.554s  aggregate=   80.408s  +0.18%
+    unk  joined=    0.000s  (0.000% of wall: no kernel transition before the window)
+
+  backend-seconds, kernel state (rows) x exact-tier class (cols)
+             CPU/cmd   CPU/out  WAIT/cmd  WAIT/out      IDLE       GAP     total
+    on        70.702    16.714     6.808     0.000     3.174     0.000    97.398
+    rq        15.098    65.076    25.262     0.000    28.613     0.000   134.048
+    off        0.000     0.000    71.377     0.000     9.177     0.000    80.554
+    unk        0.000     0.000     0.000     0.000     0.000     0.000     0.000
+    total     85.800    81.789   103.446     0.000    40.964     0.000   312.000
+
+  EQUATION  (W = wait inside a command = 103.446 s, the shared denominator term)
+    term                                                       sec   share%    d pp  kind
+    exact tier numerator E = cpu_in_cmd + cpu_out_cmd      167.590    61.83    0.00
+      + run-queue delay with a wait event still set         25.262    65.09    3.25  definitional
+      + on a processor with a wait event still set           6.808    65.87    0.78  definitional
+      + run-queue delay with an IDLE wait event set         28.613    68.82    2.94  definitional
+      + on a processor with an IDLE wait event set           3.174    69.11    0.30  under-capture
+      + on-or-runnable in a timeline gap (no interval)       0.000    69.11    0.00  under-capture
+      - off-CPU (blocked) while we call it CPU               0.000    69.11    0.00  over-capture
+      +- kernel state unknown before first transition        0.000    69.11    0.00  unexplained
+    = kernel numerator K = on + rq                         231.446    69.11    7.28
+    closure residual: K - (E + terms) = -0.000000 s
+  HEADLINE  exact=61.83%  kernel=69.11%  gap=7.28 pp
+
+  CROSS-CHECK the tracer's own per-interval cpu_ns against the kernel dump
+    on-CPU inside WAIT intervals: kernel 6.808s   tracer cpu_ns 6.934s
+    on-CPU inside CPU  intervals: kernel 87.416s   tracer cpu_ns 87.464s
+  SIZES  out_of_command_cpu=81.789s (already inside E; without it the exact share would be 45.34%, gap 23.77 pp)
+         wait_outside_command=0.000s  idle_wall=40.964s  gap_wall=0.000s
+         blocked-but-called-CPU (wait our tier did not reconstruct) = -0.000s = -0.00% of the wait it should have seen
+  KERNEL on=97.398s rq=134.048s off=80.554s
+
+--- instrument overhead ---
+  bt_pid=7922  schedstat f1 sum_exec_runtime (on a processor) = 19.368 s  schedstat f2 run_delay (runnable, queued) = 5.508 s 
+  daemon_pid=7939  schedstat f1 sum_exec_runtime (on a processor) = 2.548 s  schedstat f2 run_delay (runnable, queued) = 0.808 s 
+
+
+@@@@@@@@ sathalf1.txt @@@@@@@@
+######## sathalf1 ########
+WINDOW [1790523162401177447,1790523201401177447) secs=39.0 pgbench_backends=4: 9819,9820,9821,9822
+  pgsa sampler pid=9882   excludes: 12 args
+  tps: tps = 1532.456888 (without initial connection time)
+
+--- exact + sampled tier (strict pgbench-backend set) ---
+PIDS total=13 with_cmd_markers=4 overlapping_intervals=0 client_only=1
+IDLE raw wall = 18.895 s (of which inside a command: 0.000 s)
+CMD-OPEN total = 93.899 s over 183398 commands (mean 512.0 us)   wait inside cmd = 49.719 s   cpu outside cmd = 43.206 s
+INTERVALS cpu=146985 (mean 594.5 us) wait=88590 (mean 561.2 us) straddling=105133 (43.205 s outside)
+CPU(we==0) wall = 87.386 s   measured cpu_ns = 45.849 s
+MARKERS start=329190 end=329190 dup_start(missing END)=0 orphan_end(missing START)=0 pids_unclosed_at_end=0
+SAMPLED                        cpu=38.034s nonidle=91.004s  share=41.8%  total=111.077s active_frac=81.9% noncmd_cpu=0.000s
+EXACT S (stream, majority)     cpu=39.573s wait=49.719s  share=44.3%
+EXACT A (sorted, majority)     cpu=39.573s wait=49.719s  share=44.3%
+EXACT B (sorted, proportional) cpu=44.180s wait=49.719s  share=47.1%
+EXACT C (2-pass, proportional) cpu=44.180s wait=49.719s  share=47.1%
+
+--- kernel arbiter (schedstat counters, independent of the tracepoints) ---
+KERNEL window=39.000s pids=4 (not spanning the window, excluded: none)
+  schedstat f1 sum_exec_runtime (on a processor)   =   50.253 s
+  schedstat f2 run_delay        (runnable, queued) =   67.512 s
+  f1+f2  (on a processor OR wanting one)           =  117.765 s
+
+--- reference: pg_stat_activity ---
+PGSA_IN pgsa       iters=1871 (48.0 Hz) rows=7484 backends=4.00 win=39.000s act_cpu=1669 act_wait=2539 torn=54(0.72%) nonactive_nowait=2205(29.46%) idle_clientread=994 idle_activity=0 act_activity=0 nonactive_wait=23
+PGSA_V1 pgsa       share=39.66%  cpu_s=   34.79 nonidle_s=   87.71 cpu_n=1669 nonidle_n=4208
+PGSA_V2 pgsa       share=60.41%  cpu_s=   80.75 nonidle_s=  133.68 cpu_n=3874 nonidle_n=6413
+
+--- headline from the aggregates only (schedstat; no tracepoint dump) ---
+HEADLINE_AGG sathalf1 exactWB=63.74% kernel_f1f2=70.31% gap=6.58 pp (E=87.386s K=117.765s W=49.719s f1=50.253s f2=67.512s)
+
+--- the cross-tab and the equation ---
+XTAB sathalf1 window=[1790523162401177447,1790523201401177447) secs=39.000 backends=4
+  pid sets: requested=[9819, 9820, 9821, 9822]
+            exact-tier dump=[9819, 9820, 9821, 9822]  kernel dump=[9819, 9820, 9821, 9822]
+  cross-tab total = 156.000 backend-s (exact wall = 156.000; residual +0.000000s)
+  DUMP-vs-AGGREGATE (bpftrace's own maps; a lost-event check)
+    on   joined=   51.518s  aggregate=   51.618s  -0.19%
+    rq   joined=   66.319s  aggregate=   66.241s  +0.12%
+    off  joined=   38.163s  aggregate=   38.083s  +0.21%
+    unk  joined=    0.000s  (0.000% of wall: no kernel transition before the window)
+
+  backend-seconds, kernel state (rows) x exact-tier class (cols)
+             CPU/cmd   CPU/out  WAIT/cmd  WAIT/out      IDLE       GAP     total
+    on        36.272     9.632     3.713     0.000     1.900     0.000    51.518
+    rq         7.908    33.573    11.881     0.000    12.956     0.000    66.319
+    off        0.000     0.000    34.124     0.000     4.039     0.000    38.163
+    unk        0.000     0.000     0.000     0.000     0.000     0.000     0.000
+    total     44.180    43.206    49.719     0.000    18.895     0.000   156.000
+
+  EQUATION  (W = wait inside a command = 49.719 s, the shared denominator term)
+    term                                                       sec   share%    d pp  kind
+    exact tier numerator E = cpu_in_cmd + cpu_out_cmd       87.386    63.74    0.00
+      + run-queue delay with a wait event still set         11.881    66.63    2.89  definitional
+      + on a processor with a wait event still set           3.713    67.44    0.81  definitional
+      + run-queue delay with an IDLE wait event set         12.956    69.99    2.55  definitional
+      + on a processor with an IDLE wait event set           1.900    70.33    0.34  under-capture
+      + on-or-runnable in a timeline gap (no interval)       0.000    70.33    0.00  under-capture
+      - off-CPU (blocked) while we call it CPU               0.000    70.33    0.00  over-capture
+      +- kernel state unknown before first transition        0.000    70.33    0.00  unexplained
+    = kernel numerator K = on + rq                         117.837    70.33    6.59
+    closure residual: K - (E + terms) = +0.000000 s
+  HEADLINE  exact=63.74%  kernel=70.33%  gap=6.59 pp
+
+  CROSS-CHECK the tracer's own per-interval cpu_ns against the kernel dump
+    on-CPU inside WAIT intervals: kernel 3.713s   tracer cpu_ns 3.724s
+    on-CPU inside CPU  intervals: kernel 45.904s   tracer cpu_ns 45.849s
+  SIZES  out_of_command_cpu=43.206s (already inside E; without it the exact share would be 47.05%, gap 23.28 pp)
+         wait_outside_command=0.000s  idle_wall=18.895s  gap_wall=0.000s
+         blocked-but-called-CPU (wait our tier did not reconstruct) = -0.000s = -0.00% of the wait it should have seen
+  KERNEL on=51.518s rq=66.319s off=38.163s
+
+--- instrument overhead ---
+  bt_pid=9903  schedstat f1 sum_exec_runtime (on a processor) = 16.083 s  schedstat f2 run_delay (runnable, queued) = 7.136 s 
+  daemon_pid=9920  schedstat f1 sum_exec_runtime (on a processor) = 2.584 s  schedstat f2 run_delay (runnable, queued) = 0.694 s 
+
+
+@@@@@@@@ sathalf2.txt @@@@@@@@
+######## sathalf2 ########
+WINDOW [1790523387245315694,1790523426245315694) secs=39.0 pgbench_backends=4: 10617,10618,10619,10620
+  pgsa sampler pid=10635   excludes: 18 args
+  tps: tps = 1597.116662 (without initial connection time)
+
+--- exact + sampled tier (strict pgbench-backend set) ---
+PIDS total=13 with_cmd_markers=4 overlapping_intervals=0 client_only=1
+IDLE raw wall = 18.969 s (of which inside a command: 0.000 s)
+CMD-OPEN total = 93.439 s over 182698 commands (mean 511.4 us)   wait inside cmd = 49.903 s   cpu outside cmd = 43.592 s
+INTERVALS cpu=146719 (mean 593.8 us) wait=89091 (mean 560.1 us) straddling=104448 (43.591 s outside)
+CPU(we==0) wall = 87.128 s   measured cpu_ns = 45.144 s
+MARKERS start=269795 end=269794 dup_start(missing END)=2 orphan_end(missing START)=1 pids_unclosed_at_end=0
+SAMPLED                        cpu=38.868s nonidle=90.004s  share=43.2%  total=109.698s active_frac=82.0% noncmd_cpu=0.000s
+EXACT S (stream, majority)     cpu=38.074s wait=49.903s  share=43.3%
+EXACT A (sorted, majority)     cpu=38.074s wait=49.903s  share=43.3%
+EXACT B (sorted, proportional) cpu=43.535s wait=49.903s  share=46.6%
+EXACT C (2-pass, proportional) cpu=43.536s wait=49.903s  share=46.6%
+
+--- kernel arbiter (schedstat counters, independent of the tracepoints) ---
+KERNEL window=39.000s pids=4 (not spanning the window, excluded: none)
+  schedstat f1 sum_exec_runtime (on a processor)   =   49.471 s
+  schedstat f2 run_delay        (runnable, queued) =   68.389 s
+  f1+f2  (on a processor OR wanting one)           =  117.860 s
+
+--- reference: pg_stat_activity ---
+PGSA_IN pgsa       iters=1870 (47.9 Hz) rows=7480 backends=4.00 win=39.000s act_cpu=1617 act_wait=2594 torn=53(0.71%) nonactive_nowait=2192(29.30%) idle_clientread=985 idle_activity=0 act_activity=0 nonactive_wait=39
+PGSA_V1 pgsa       share=38.40%  cpu_s=   33.72 nonidle_s=   87.82 cpu_n=1617 nonidle_n=4211
+PGSA_V2 pgsa       share=59.49%  cpu_s=   79.44 nonidle_s=  133.54 cpu_n=3809 nonidle_n=6403
+
+--- headline from the aggregates only (schedstat; no tracepoint dump) ---
+HEADLINE_AGG sathalf2 exactWB=63.58% kernel_f1f2=70.25% gap=6.67 pp (E=87.128s K=117.860s W=49.903s f1=49.471s f2=68.389s)
+
+--- the cross-tab and the equation ---
+XTAB sathalf2 window=[1790523387245315694,1790523426245315694) secs=39.000 backends=4
+  pid sets: requested=[10617, 10618, 10619, 10620]
+            exact-tier dump=[10617, 10618, 10619, 10620]  kernel dump=[10617, 10618, 10619, 10620]
+  cross-tab total = 156.000 backend-s (exact wall = 156.000; residual +0.000000s)
+  DUMP-vs-AGGREGATE (bpftrace's own maps; a lost-event check)
+    on   joined=   50.699s  aggregate=   50.790s  -0.18%
+    rq   joined=   67.242s  aggregate=   67.162s  +0.12%
+    off  joined=   38.059s  aggregate=   37.983s  +0.20%
+    unk  joined=    0.000s  (0.000% of wall: no kernel transition before the window)
+
+  backend-seconds, kernel state (rows) x exact-tier class (cols)
+             CPU/cmd   CPU/out  WAIT/cmd  WAIT/out      IDLE       GAP     total
+    on        35.636     9.567     3.642     0.000     1.855     0.000    50.699
+    rq         7.900    34.026    12.122     0.000    13.195     0.000    67.242
+    off        0.000     0.000    34.139     0.000     3.920     0.000    38.059
+    unk        0.000     0.000     0.000     0.000     0.000     0.000     0.000
+    total     43.536    43.592    49.903     0.000    18.969     0.000   156.000
+
+  EQUATION  (W = wait inside a command = 49.903 s, the shared denominator term)
+    term                                                       sec   share%    d pp  kind
+    exact tier numerator E = cpu_in_cmd + cpu_out_cmd       87.128    63.58    0.00
+      + run-queue delay with a wait event still set         12.122    66.54    2.96  definitional
+      + on a processor with a wait event still set           3.642    67.34    0.80  definitional
+      + run-queue delay with an IDLE wait event set         13.195    69.94    2.60  definitional
+      + on a processor with an IDLE wait event set           1.855    70.27    0.33  under-capture
+      + on-or-runnable in a timeline gap (no interval)       0.000    70.27    0.00  under-capture
+      - off-CPU (blocked) while we call it CPU               0.000    70.27    0.00  over-capture
+      +- kernel state unknown before first transition        0.000    70.27    0.00  unexplained
+    = kernel numerator K = on + rq                         117.941    70.27    6.69
+    closure residual: K - (E + terms) = -0.000000 s
+  HEADLINE  exact=63.58%  kernel=70.27%  gap=6.69 pp
+
+  CROSS-CHECK the tracer's own per-interval cpu_ns against the kernel dump
+    on-CPU inside WAIT intervals: kernel 3.642s   tracer cpu_ns 3.654s
+    on-CPU inside CPU  intervals: kernel 45.203s   tracer cpu_ns 45.144s
+  SIZES  out_of_command_cpu=43.592s (already inside E; without it the exact share would be 46.59%, gap 23.68 pp)
+         wait_outside_command=0.000s  idle_wall=18.969s  gap_wall=0.000s
+         blocked-but-called-CPU (wait our tier did not reconstruct) = -0.000s = -0.00% of the wait it should have seen
+  KERNEL on=50.699s rq=67.242s off=38.059s
+
+--- instrument overhead ---
+  bt_pid=10656  schedstat f1 sum_exec_runtime (on a processor) = 16.028 s  schedstat f2 run_delay (runnable, queued) = 6.795 s 
+  daemon_pid=10673  schedstat f1 sum_exec_runtime (on a processor) = 2.597 s  schedstat f2 run_delay (runnable, queued) = 0.697 s 
+
+
+@@@@@@@@ sathalf3.txt @@@@@@@@
+######## sathalf3 ########
+WINDOW [1790523611032423513,1790523650032423513) secs=39.0 pgbench_backends=4: 11341,11342,11343,11344
+  pgsa sampler pid=11366   excludes: 12 args
+  tps: tps = 1433.387562 (without initial connection time)
+
+--- exact + sampled tier (strict pgbench-backend set) ---
+PIDS total=13 with_cmd_markers=4 overlapping_intervals=0 client_only=1
+IDLE raw wall = 18.713 s (of which inside a command: 0.000 s)
+CMD-OPEN total = 93.427 s over 174867 commands (mean 534.3 us)   wait inside cmd = 50.265 s   cpu outside cmd = 43.860 s
+INTERVALS cpu=138854 (mean 626.7 us) wait=84527 (mean 594.7 us) straddling=99097 (43.859 s outside)
+CPU(we==0) wall = 87.022 s   measured cpu_ns = 45.022 s
+MARKERS start=310687 end=310686 dup_start(missing END)=2 orphan_end(missing START)=1 pids_unclosed_at_end=0
+SAMPLED                        cpu=36.698s nonidle=90.848s  share=40.4%  total=109.292s active_frac=83.1% noncmd_cpu=0.000s
+EXACT S (stream, majority)     cpu=37.599s wait=50.265s  share=42.8%
+EXACT A (sorted, majority)     cpu=37.599s wait=50.265s  share=42.8%
+EXACT B (sorted, proportional) cpu=43.161s wait=50.265s  share=46.2%
+EXACT C (2-pass, proportional) cpu=43.162s wait=50.265s  share=46.2%
+
+--- kernel arbiter (schedstat counters, independent of the tracepoints) ---
+KERNEL window=39.000s pids=4 (not spanning the window, excluded: none)
+  schedstat f1 sum_exec_runtime (on a processor)   =   49.308 s
+  schedstat f2 run_delay        (runnable, queued) =   68.301 s
+  f1+f2  (on a processor OR wanting one)           =  117.609 s
+
+--- reference: pg_stat_activity ---
+PGSA_IN pgsa       iters=1868 (47.9 Hz) rows=7472 backends=4.00 win=39.000s act_cpu=1574 act_wait=2597 torn=27(0.36%) nonactive_nowait=2287(30.61%) idle_clientread=970 idle_activity=0 act_activity=0 nonactive_wait=17
+PGSA_V1 pgsa       share=37.74%  cpu_s=   32.86 nonidle_s=   87.08 cpu_n=1574 nonidle_n=4171
+PGSA_V2 pgsa       share=59.79%  cpu_s=   80.61 nonidle_s=  134.83 cpu_n=3861 nonidle_n=6458
+
+--- headline from the aggregates only (schedstat; no tracepoint dump) ---
+HEADLINE_AGG sathalf3 exactWB=63.39% kernel_f1f2=70.06% gap=6.67 pp (E=87.022s K=117.609s W=50.265s f1=49.308s f2=68.301s)
+
+--- the cross-tab and the equation ---
+XTAB sathalf3 window=[1790523611032423513,1790523650032423513) secs=39.000 backends=4
+  pid sets: requested=[11341, 11342, 11343, 11344]
+            exact-tier dump=[11341, 11342, 11343, 11344]  kernel dump=[11341, 11342, 11343, 11344]
+  cross-tab total = 156.000 backend-s (exact wall = 156.000; residual +0.000000s)
+  DUMP-vs-AGGREGATE (bpftrace's own maps; a lost-event check)
+    on   joined=   50.484s  aggregate=   50.561s  -0.15%
+    rq   joined=   67.166s  aggregate=   67.110s  +0.08%
+    off  joined=   38.350s  aggregate=   38.258s  +0.24%
+    unk  joined=    0.000s  (0.000% of wall: no kernel transition before the window)
+
+  backend-seconds, kernel state (rows) x exact-tier class (cols)
+             CPU/cmd   CPU/out  WAIT/cmd  WAIT/out      IDLE       GAP     total
+    on        35.520     9.550     3.614     0.000     1.799     0.000    50.484
+    rq         7.641    34.310    12.177     0.000    13.038     0.000    67.166
+    off        0.000     0.000    34.474     0.000     3.876     0.000    38.350
+    unk        0.000     0.000     0.000     0.000     0.000     0.000     0.000
+    total     43.162    43.860    50.265     0.000    18.713     0.000   156.000
+
+  EQUATION  (W = wait inside a command = 50.265 s, the shared denominator term)
+    term                                                       sec   share%    d pp  kind
+    exact tier numerator E = cpu_in_cmd + cpu_out_cmd       87.022    63.39    0.00
+      + run-queue delay with a wait event still set         12.177    66.37    2.98  definitional
+      + on a processor with a wait event still set           3.614    67.16    0.79  definitional
+      + run-queue delay with an IDLE wait event set         13.038    69.74    2.58  definitional
+      + on a processor with an IDLE wait event set           1.799    70.07    0.32  under-capture
+      + on-or-runnable in a timeline gap (no interval)       0.000    70.07    0.00  under-capture
+      - off-CPU (blocked) while we call it CPU               0.000    70.07    0.00  over-capture
+      +- kernel state unknown before first transition        0.000    70.07    0.00  unexplained
+    = kernel numerator K = on + rq                         117.650    70.07    6.68
+    closure residual: K - (E + terms) = +0.000000 s
+  HEADLINE  exact=63.39%  kernel=70.07%  gap=6.68 pp
+
+  CROSS-CHECK the tracer's own per-interval cpu_ns against the kernel dump
+    on-CPU inside WAIT intervals: kernel 3.614s   tracer cpu_ns 3.629s
+    on-CPU inside CPU  intervals: kernel 45.071s   tracer cpu_ns 45.022s
+  SIZES  out_of_command_cpu=43.860s (already inside E; without it the exact share would be 46.20%, gap 23.87 pp)
+         wait_outside_command=0.000s  idle_wall=18.713s  gap_wall=0.000s
+         blocked-but-called-CPU (wait our tier did not reconstruct) = -0.000s = -0.00% of the wait it should have seen
+  KERNEL on=50.484s rq=67.166s off=38.350s
+
+--- instrument overhead ---
+  bt_pid=11391  schedstat f1 sum_exec_runtime (on a processor) = 15.900 s  schedstat f2 run_delay (runnable, queued) = 5.970 s 
+  daemon_pid=11408  schedstat f1 sum_exec_runtime (on a processor) = 2.626 s  schedstat f2 run_delay (runnable, queued) = 0.675 s 
+
+
+@@@@@@@@ satnodump1.txt @@@@@@@@
+######## satnodump1 ########
+WINDOW [1790521742320617483,1790521781320617483) secs=39.0 pgbench_backends=8: 5451,5452,5453,5454,5455,5456,5457,5458
+  pgsa sampler pid=5467   excludes: 10 args
+  tps: tps = 1657.556231 (without initial connection time)
+
+--- exact + sampled tier (strict pgbench-backend set) ---
+PIDS total=18 with_cmd_markers=8 overlapping_intervals=0 client_only=1
+IDLE raw wall = 31.537 s (of which inside a command: 0.000 s)
+CMD-OPEN total = 201.943 s over 435194 commands (mean 464.0 us)   wait inside cmd = 105.295 s   cpu outside cmd = 78.520 s
+INTERVALS cpu=335732 (mean 521.7 us) wait=213022 (mean 494.3 us) straddling=233440 (78.518 s outside)
+CPU(we==0) wall = 175.168 s   measured cpu_ns = 103.754 s
+MARKERS start=812477 end=812481 dup_start(missing END)=0 orphan_end(missing START)=4 pids_unclosed_at_end=0
+SAMPLED                        cpu=87.908s nonidle=198.118s  share=44.4%  total=231.023s active_frac=85.8% noncmd_cpu=0.000s
+EXACT S (stream, majority)     cpu=92.183s wait=105.295s  share=46.7%
+EXACT A (sorted, majority)     cpu=92.183s wait=105.295s  share=46.7%
+EXACT B (sorted, proportional) cpu=96.648s wait=105.295s  share=47.9%
+EXACT C (2-pass, proportional) cpu=96.648s wait=105.295s  share=47.9%
+
+--- kernel arbiter (schedstat counters, independent of the tracepoints) ---
+KERNEL window=39.000s pids=8 (not spanning the window, excluded: none)
+  schedstat f1 sum_exec_runtime (on a processor)   =  113.288 s
+  schedstat f2 run_delay        (runnable, queued) =  115.974 s
+  f1+f2  (on a processor OR wanting one)           =  229.262 s
+
+--- reference: pg_stat_activity ---
+PGSA_IN pgsa       iters=1873 (48.0 Hz) rows=14984 backends=8.00 win=39.000s act_cpu=3676 act_wait=5546 torn=98(0.65%) nonactive_nowait=4004(26.72%) idle_clientread=1638 idle_activity=0 act_activity=0 nonactive_wait=22
+PGSA_V1 pgsa       share=39.86%  cpu_s=   76.54 nonidle_s=  192.02 cpu_n=3676 nonidle_n=9222
+PGSA_V2 pgsa       share=58.07%  cpu_s=  159.91 nonidle_s=  275.39 cpu_n=7680 nonidle_n=13226
+
+--- headline from the aggregates only (schedstat; no tracepoint dump) ---
+HEADLINE_AGG satnodump1 exactWB=62.46% kernel_f1f2=68.53% gap=6.07 pp (E=175.168s K=229.262s W=105.295s f1=113.288s f2=115.974s)
+
+--- no per-transition dump in this run (NODUMP=1 control) ---
+
+--- instrument overhead ---
+  bt_pid=5480  schedstat f1 sum_exec_runtime (on a processor) = 0.168 s  schedstat f2 run_delay (runnable, queued) = 0.032 s 
+  daemon_pid=5497  schedstat f1 sum_exec_runtime (on a processor) = 2.791 s  schedstat f2 run_delay (runnable, queued) = 0.588 s 
+
+
+@@@@@@@@ satnodump2.txt @@@@@@@@
+######## satnodump2 ########
+WINDOW [1790522193934336107,1790522232934336107) secs=39.0 pgbench_backends=8: 6830,6831,6832,6833,6834,6835,6836,6837
+  pgsa sampler pid=6848   excludes: 12 args
+  tps: tps = 1953.538428 (without initial connection time)
+
+--- exact + sampled tier (strict pgbench-backend set) ---
+PIDS total=17 with_cmd_markers=8 overlapping_intervals=0 client_only=1
+IDLE raw wall = 31.854 s (of which inside a command: 0.000 s)
+CMD-OPEN total = 201.650 s over 469185 commands (mean 429.8 us)   wait inside cmd = 103.426 s   cpu outside cmd = 78.496 s
+INTERVALS cpu=368078 (mean 480.1 us) wait=232959 (mean 444.0 us) straddling=254846 (78.494 s outside)
+CPU(we==0) wall = 176.720 s   measured cpu_ns = 106.462 s
+MARKERS start=691321 end=691323 dup_start(missing END)=1 orphan_end(missing START)=3 pids_unclosed_at_end=0
+SAMPLED                        cpu=86.530s nonidle=194.926s  share=44.4%  total=230.230s active_frac=84.7% noncmd_cpu=0.000s
+EXACT S (stream, majority)     cpu=94.268s wait=103.426s  share=47.7%
+EXACT A (sorted, majority)     cpu=94.268s wait=103.426s  share=47.7%
+EXACT B (sorted, proportional) cpu=98.223s wait=103.426s  share=48.7%
+EXACT C (2-pass, proportional) cpu=98.224s wait=103.426s  share=48.7%
+
+--- kernel arbiter (schedstat counters, independent of the tracepoints) ---
+KERNEL window=39.000s pids=8 (not spanning the window, excluded: none)
+  schedstat f1 sum_exec_runtime (on a processor)   =  116.044 s
+  schedstat f2 run_delay        (runnable, queued) =  115.250 s
+  f1+f2  (on a processor OR wanting one)           =  231.293 s
+
+--- reference: pg_stat_activity ---
+PGSA_IN pgsa       iters=1878 (48.2 Hz) rows=15024 backends=8.00 win=39.000s act_cpu=3743 act_wait=5406 torn=96(0.64%) nonactive_nowait=4054(26.98%) idle_clientread=1702 idle_activity=0 act_activity=0 nonactive_wait=23
+PGSA_V1 pgsa       share=40.91%  cpu_s=   77.73 nonidle_s=  190.00 cpu_n=3743 nonidle_n=9149
+PGSA_V2 pgsa       share=59.05%  cpu_s=  161.92 nonidle_s=  274.18 cpu_n=7797 nonidle_n=13203
+
+--- headline from the aggregates only (schedstat; no tracepoint dump) ---
+HEADLINE_AGG satnodump2 exactWB=63.08% kernel_f1f2=69.10% gap=6.02 pp (E=176.720s K=231.294s W=103.426s f1=116.044s f2=115.250s)
+
+--- no per-transition dump in this run (NODUMP=1 control) ---
+
+--- instrument overhead ---
+  bt_pid=6861  schedstat f1 sum_exec_runtime (on a processor) = 0.160 s  schedstat f2 run_delay (runnable, queued) = 0.024 s 
+  daemon_pid=6878  schedstat f1 sum_exec_runtime (on a processor) = 2.597 s  schedstat f2 run_delay (runnable, queued) = 0.501 s 
+
+
+@@@@@@@@ satnodump3.txt @@@@@@@@
+######## satnodump3 ########
+WINDOW [1790522644462419187,1790522683462419187) secs=39.0 pgbench_backends=8: 8238,8239,8240,8241,8242,8243,8244,8245
+  pgsa sampler pid=8255   excludes: 10 args
+  tps: tps = 1763.046341 (without initial connection time)
+
+--- exact + sampled tier (strict pgbench-backend set) ---
+PIDS total=17 with_cmd_markers=8 overlapping_intervals=0 client_only=1
+IDLE raw wall = 31.566 s (of which inside a command: 0.000 s)
+CMD-OPEN total = 200.639 s over 466223 commands (mean 430.3 us)   wait inside cmd = 102.371 s   cpu outside cmd = 79.795 s
+INTERVALS cpu=362465 (mean 491.3 us) wait=231907 (mean 441.4 us) straddling=249772 (79.794 s outside)
+CPU(we==0) wall = 178.063 s   measured cpu_ns = 106.468 s
+MARKERS start=863879 end=863876 dup_start(missing END)=3 orphan_end(missing START)=0 pids_unclosed_at_end=0
+SAMPLED                        cpu=89.298s nonidle=197.508s  share=45.2%  total=231.182s active_frac=85.4% noncmd_cpu=0.000s
+EXACT S (stream, majority)     cpu=93.382s wait=102.371s  share=47.7%
+EXACT A (sorted, majority)     cpu=93.382s wait=102.371s  share=47.7%
+EXACT B (sorted, proportional) cpu=98.269s wait=102.371s  share=49.0%
+EXACT C (2-pass, proportional) cpu=98.268s wait=102.371s  share=49.0%
+
+--- kernel arbiter (schedstat counters, independent of the tracepoints) ---
+KERNEL window=39.000s pids=8 (not spanning the window, excluded: none)
+  schedstat f1 sum_exec_runtime (on a processor)   =  116.082 s
+  schedstat f2 run_delay        (runnable, queued) =  116.247 s
+  f1+f2  (on a processor OR wanting one)           =  232.329 s
+
+--- reference: pg_stat_activity ---
+PGSA_IN pgsa       iters=1877 (48.1 Hz) rows=15016 backends=8.00 win=39.000s act_cpu=3699 act_wait=5419 torn=105(0.70%) nonactive_nowait=4150(27.64%) idle_clientread=1618 idle_activity=0 act_activity=0 nonactive_wait=25
+PGSA_V1 pgsa       share=40.57%  cpu_s=   76.86 nonidle_s=  189.45 cpu_n=3699 nonidle_n=9118
+PGSA_V2 pgsa       share=59.16%  cpu_s=  163.09 nonidle_s=  275.68 cpu_n=7849 nonidle_n=13268
+
+--- headline from the aggregates only (schedstat; no tracepoint dump) ---
+HEADLINE_AGG satnodump3 exactWB=63.50% kernel_f1f2=69.41% gap=5.92 pp (E=178.063s K=232.329s W=102.371s f1=116.082s f2=116.247s)
+
+--- no per-transition dump in this run (NODUMP=1 control) ---
+
+--- instrument overhead ---
+  bt_pid=8272  schedstat f1 sum_exec_runtime (on a processor) = 0.151 s  schedstat f2 run_delay (runnable, queued) = 0.023 s 
+  daemon_pid=8291  schedstat f1 sum_exec_runtime (on a processor) = 2.614 s  schedstat f2 run_delay (runnable, queued) = 0.517 s 
+
+
+@@@@@@@@ satquarter1.txt @@@@@@@@
+######## satquarter1 ########
+WINDOW [1790523963707566604,1790523996894072156) secs=33.186505552 pgbench_backends=2: 12368,12369
+  pgsa sampler pid=12386   excludes: 16 args
+  tps: tps = 1706.938112 (without initial connection time)
+
+--- exact + sampled tier (strict pgbench-backend set) ---
+PIDS total=11 with_cmd_markers=2 overlapping_intervals=0 client_only=1
+IDLE raw wall = 7.945 s (of which inside a command: 0.000 s)
+CMD-OPEN total = 36.779 s over 70438 commands (mean 522.2 us)   wait inside cmd = 18.988 s   cpu outside cmd = 21.648 s
+INTERVALS cpu=56102 (mean 702.8 us) wait=34190 (mean 555.4 us) straddling=39983 (21.648 s outside)
+CPU(we==0) wall = 39.428 s   measured cpu_ns = 19.660 s
+MARKERS start=120544 end=120542 dup_start(missing END)=2 orphan_end(missing START)=0 pids_unclosed_at_end=0
+SAMPLED                        cpu=15.355s nonidle=34.836s  share=44.1%  total=43.597s active_frac=79.9% noncmd_cpu=0.000s
+EXACT S (stream, majority)     cpu=14.374s wait=18.988s  share=43.1%
+EXACT A (sorted, majority)     cpu=14.374s wait=18.988s  share=43.1%
+EXACT B (sorted, proportional) cpu=17.785s wait=18.988s  share=48.4%
+EXACT C (2-pass, proportional) cpu=17.780s wait=18.988s  share=48.4%
+
+--- kernel arbiter (schedstat counters, independent of the tracepoints) ---
+KERNEL window=33.187s pids=2 (not spanning the window, excluded: none)
+  schedstat f1 sum_exec_runtime (on a processor)   =   21.465 s
+  schedstat f2 run_delay        (runnable, queued) =   30.908 s
+  f1+f2  (on a processor OR wanting one)           =   52.374 s
+
+--- reference: pg_stat_activity ---
+PGSA_IN pgsa       iters=1591 (47.9 Hz) rows=3182 backends=2.00 win=33.187s act_cpu=659 act_wait=991 torn=21(0.66%) nonactive_nowait=1121(35.23%) idle_clientread=378 idle_activity=0 act_activity=0 nonactive_wait=12
+PGSA_V1 pgsa       share=39.94%  cpu_s=   13.75 nonidle_s=   34.42 cpu_n=659 nonidle_n=1650
+PGSA_V2 pgsa       share=64.24%  cpu_s=   37.13 nonidle_s=   57.80 cpu_n=1780 nonidle_n=2771
+
+--- headline from the aggregates only (schedstat; no tracepoint dump) ---
+HEADLINE_AGG satquarter1 exactWB=67.50% kernel_f1f2=73.39% gap=5.90 pp (E=39.428s K=52.373s W=18.988s f1=21.465s f2=30.908s)
+
+--- the cross-tab and the equation ---
+XTAB satquarter1 window=[1790523963707566604,1790523996894072156) secs=33.187 backends=2
+  pid sets: requested=[12368, 12369]
+            exact-tier dump=[12368, 12369]  kernel dump=[12368, 12369]
+  cross-tab total = 66.373 backend-s (exact wall = 66.373; residual +0.000000s)
+  DUMP-vs-AGGREGATE (bpftrace's own maps; a lost-event check)
+    on   joined=   22.202s  aggregate=   22.275s  -0.33%
+    rq   joined=   30.183s  aggregate=   30.119s  +0.22%
+    off  joined=   13.987s  aggregate=   13.958s  +0.21%
+    unk  joined=    0.000s  (0.000% of wall: no kernel transition before the window)
+
+  backend-seconds, kernel state (rows) x exact-tier class (cols)
+             CPU/cmd   CPU/out  WAIT/cmd  WAIT/out      IDLE       GAP     total
+    on        14.642     5.089     1.493     0.000     0.974     0.004    22.202
+    rq         3.135    16.559     4.943     0.000     5.541     0.005    30.183
+    off        0.003     0.000    12.551     0.000     1.430     0.003    13.987
+    unk        0.000     0.000     0.000     0.000     0.000     0.000     0.000
+    total     17.780    21.648    18.988     0.000     7.945     0.012    66.373
+
+  EQUATION  (W = wait inside a command = 18.988 s, the shared denominator term)
+    term                                                       sec   share%    d pp  kind
+    exact tier numerator E = cpu_in_cmd + cpu_out_cmd       39.428    67.50    0.00
+      + run-queue delay with a wait event still set          4.943    70.03    2.54  definitional
+      + on a processor with a wait event still set           1.493    70.72    0.69  definitional
+      + run-queue delay with an IDLE wait event set          5.541    73.03    2.30  definitional
+      + on a processor with an IDLE wait event set           0.974    73.39    0.37  under-capture
+      + on-or-runnable in a timeline gap (no interval)       0.009    73.40    0.00  under-capture
+      - off-CPU (blocked) while we call it CPU              -0.003    73.40   -0.00  over-capture
+      +- kernel state unknown before first transition        0.000    73.40    0.00  unexplained
+    = kernel numerator K = on + rq                          52.386    73.40    5.90
+    closure residual: K - (E + terms) = +0.000000 s
+  HEADLINE  exact=67.50%  kernel=73.40%  gap=5.90 pp
+
+  CROSS-CHECK the tracer's own per-interval cpu_ns against the kernel dump
+    on-CPU inside WAIT intervals: kernel 1.493s   tracer cpu_ns 1.491s
+    on-CPU inside CPU  intervals: kernel 19.731s   tracer cpu_ns 19.660s
+  SIZES  out_of_command_cpu=21.648s (already inside E; without it the exact share would be 48.36%, gap 25.04 pp)
+         wait_outside_command=0.000s  idle_wall=7.945s  gap_wall=0.012s
+         blocked-but-called-CPU (wait our tier did not reconstruct) = 0.003s = 0.02% of the wait it should have seen
+  KERNEL on=22.202s rq=30.183s off=13.987s
+
+--- instrument overhead ---
+  bt_pid=12407  schedstat f1 sum_exec_runtime (on a processor) = 11.837 s  schedstat f2 run_delay (runnable, queued) = 4.965 s 
+  daemon_pid=12424  schedstat f1 sum_exec_runtime (on a processor) = 2.156 s  schedstat f2 run_delay (runnable, queued) = 0.523 s 
+
+
+@@@@@@@@ satquarter2.txt @@@@@@@@
+######## satquarter2 ########
+WINDOW [1790524177417144130,1790524216417144130) secs=39.0 pgbench_backends=2: 13145,13146
+  pgsa sampler pid=13164   excludes: 22 args
+  tps: tps = 1622.469030 (without initial connection time)
+
+--- exact + sampled tier (strict pgbench-backend set) ---
+PIDS total=11 with_cmd_markers=2 overlapping_intervals=0 client_only=1
+IDLE raw wall = 9.636 s (of which inside a command: 0.000 s)
+CMD-OPEN total = 43.249 s over 85566 commands (mean 505.4 us)   wait inside cmd = 22.832 s   cpu outside cmd = 25.115 s
+INTERVALS cpu=68553 (mean 664.2 us) wait=41496 (mean 550.2 us) straddling=49044 (25.115 s outside)
+CPU(we==0) wall = 45.532 s   measured cpu_ns = 22.951 s
+MARKERS start=139912 end=139912 dup_start(missing END)=0 orphan_end(missing START)=0 pids_unclosed_at_end=0
+SAMPLED                        cpu=17.528s nonidle=41.186s  share=42.6%  total=51.273s active_frac=80.3% noncmd_cpu=0.000s
+EXACT S (stream, majority)     cpu=16.418s wait=22.832s  share=41.8%
+EXACT A (sorted, majority)     cpu=16.418s wait=22.832s  share=41.8%
+EXACT B (sorted, proportional) cpu=20.416s wait=22.832s  share=47.2%
+EXACT C (2-pass, proportional) cpu=20.417s wait=22.832s  share=47.2%
+
+--- kernel arbiter (schedstat counters, independent of the tracepoints) ---
+KERNEL window=39.000s pids=2 (not spanning the window, excluded: none)
+  schedstat f1 sum_exec_runtime (on a processor)   =   25.208 s
+  schedstat f2 run_delay        (runnable, queued) =   35.646 s
+  f1+f2  (on a processor OR wanting one)           =   60.854 s
+
+--- reference: pg_stat_activity ---
+PGSA_IN pgsa       iters=1874 (48.1 Hz) rows=3748 backends=2.00 win=39.000s act_cpu=765 act_wait=1179 torn=27(0.72%) nonactive_nowait=1270(33.88%) idle_clientread=496 idle_activity=0 act_activity=0 nonactive_wait=11
+PGSA_V1 pgsa       share=39.35%  cpu_s=   15.92 nonidle_s=   40.46 cpu_n=765 nonidle_n=1944
+PGSA_V2 pgsa       share=63.32%  cpu_s=   42.35 nonidle_s=   66.89 cpu_n=2035 nonidle_n=3214
+
+--- headline from the aggregates only (schedstat; no tracepoint dump) ---
+HEADLINE_AGG satquarter2 exactWB=66.60% kernel_f1f2=72.72% gap=6.11 pp (E=45.532s K=60.854s W=22.832s f1=25.208s f2=35.646s)
+
+--- the cross-tab and the equation ---
+XTAB satquarter2 window=[1790524177417144130,1790524216417144130) secs=39.000 backends=2
+  pid sets: requested=[13145, 13146]
+            exact-tier dump=[13145, 13146]  kernel dump=[13145, 13146]
+  cross-tab total = 78.000 backend-s (exact wall = 78.000; residual +0.000000s)
+  DUMP-vs-AGGREGATE (bpftrace's own maps; a lost-event check)
+    on   joined=   26.070s  aggregate=   26.149s  -0.30%
+    rq   joined=   34.802s  aggregate=   34.745s  +0.16%
+    off  joined=   17.129s  aggregate=   17.086s  +0.25%
+    unk  joined=    0.000s  (0.000% of wall: no kernel transition before the window)
+
+  backend-seconds, kernel state (rows) x exact-tier class (cols)
+             CPU/cmd   CPU/out  WAIT/cmd  WAIT/out      IDLE       GAP     total
+    on        16.933     6.084     1.831     0.000     1.221     0.000    26.070
+    rq         3.483    19.031     5.648     0.000     6.640     0.000    34.802
+    off        0.000     0.000    15.354     0.000     1.775     0.000    17.129
+    unk        0.000     0.000     0.000     0.000     0.000     0.000     0.000
+    total     20.417    25.115    22.832     0.000     9.636     0.000    78.000
+
+  EQUATION  (W = wait inside a command = 22.832 s, the shared denominator term)
+    term                                                       sec   share%    d pp  kind
+    exact tier numerator E = cpu_in_cmd + cpu_out_cmd       45.532    66.60    0.00
+      + run-queue delay with a wait event still set          5.648    69.15    2.55  definitional
+      + on a processor with a wait event still set           1.831    69.90    0.74  definitional
+      + run-queue delay with an IDLE wait event set          6.640    72.32    2.42  definitional
+      + on a processor with an IDLE wait event set           1.221    72.72    0.40  under-capture
+      + on-or-runnable in a timeline gap (no interval)       0.000    72.72    0.00  under-capture
+      - off-CPU (blocked) while we call it CPU               0.000    72.72    0.00  over-capture
+      +- kernel state unknown before first transition        0.000    72.72    0.00  unexplained
+    = kernel numerator K = on + rq                          60.871    72.72    6.12
+    closure residual: K - (E + terms) = -0.000000 s
+  HEADLINE  exact=66.60%  kernel=72.72%  gap=6.12 pp
+
+  CROSS-CHECK the tracer's own per-interval cpu_ns against the kernel dump
+    on-CPU inside WAIT intervals: kernel 1.831s   tracer cpu_ns 1.829s
+    on-CPU inside CPU  intervals: kernel 23.018s   tracer cpu_ns 22.951s
+  SIZES  out_of_command_cpu=25.115s (already inside E; without it the exact share would be 47.21%, gap 25.51 pp)
+         wait_outside_command=0.000s  idle_wall=9.636s  gap_wall=0.000s
+         blocked-but-called-CPU (wait our tier did not reconstruct) = -0.000s = -0.00% of the wait it should have seen
+  KERNEL on=26.070s rq=34.802s off=17.129s
+
+--- instrument overhead ---
+  bt_pid=13185  schedstat f1 sum_exec_runtime (on a processor) = 13.979 s  schedstat f2 run_delay (runnable, queued) = 5.909 s 
+  daemon_pid=13202  schedstat f1 sum_exec_runtime (on a processor) = 2.573 s  schedstat f2 run_delay (runnable, queued) = 0.619 s 
+
+
+@@@@@@@@ satquarter3.txt @@@@@@@@
+######## satquarter3 ########
+WINDOW [1790524397649681473,1790524436649681473) secs=39.0 pgbench_backends=2: 13848,13849
+  pgsa sampler pid=13865   excludes: 22 args
+  tps: tps = 1701.636662 (without initial connection time)
+
+--- exact + sampled tier (strict pgbench-backend set) ---
+PIDS total=11 with_cmd_markers=2 overlapping_intervals=0 client_only=1
+IDLE raw wall = 9.772 s (of which inside a command: 0.000 s)
+CMD-OPEN total = 42.882 s over 87438 commands (mean 490.4 us)   wait inside cmd = 22.558 s   cpu outside cmd = 25.346 s
+INTERVALS cpu=70090 (mean 651.6 us) wait=42274 (mean 533.6 us) straddling=50204 (25.346 s outside)
+CPU(we==0) wall = 45.670 s   measured cpu_ns = 23.040 s
+MARKERS start=140674 end=140675 dup_start(missing END)=0 orphan_end(missing START)=1 pids_unclosed_at_end=0
+SAMPLED                        cpu=17.478s nonidle=41.278s  share=42.3%  total=51.430s active_frac=80.3% noncmd_cpu=0.000s
+EXACT S (stream, majority)     cpu=16.039s wait=22.558s  share=41.6%
+EXACT A (sorted, majority)     cpu=16.039s wait=22.558s  share=41.6%
+EXACT B (sorted, proportional) cpu=20.323s wait=22.558s  share=47.4%
+EXACT C (2-pass, proportional) cpu=20.324s wait=22.558s  share=47.4%
+
+--- kernel arbiter (schedstat counters, independent of the tracepoints) ---
+KERNEL window=39.000s pids=2 (not spanning the window, excluded: none)
+  schedstat f1 sum_exec_runtime (on a processor)   =   25.310 s
+  schedstat f2 run_delay        (runnable, queued) =   35.716 s
+  f1+f2  (on a processor OR wanting one)           =   61.026 s
+
+--- reference: pg_stat_activity ---
+PGSA_IN pgsa       iters=1874 (48.1 Hz) rows=3748 backends=2.00 win=39.000s act_cpu=744 act_wait=1161 torn=21(0.56%) nonactive_nowait=1298(34.63%) idle_clientread=511 idle_activity=0 act_activity=0 nonactive_wait=13
+PGSA_V1 pgsa       share=39.06%  cpu_s=   15.48 nonidle_s=   39.65 cpu_n=744 nonidle_n=1905
+PGSA_V2 pgsa       share=63.75%  cpu_s=   42.50 nonidle_s=   66.66 cpu_n=2042 nonidle_n=3203
+
+--- headline from the aggregates only (schedstat; no tracepoint dump) ---
+HEADLINE_AGG satquarter3 exactWB=66.94% kernel_f1f2=73.01% gap=6.07 pp (E=45.670s K=61.026s W=22.558s f1=25.310s f2=35.716s)
+
+--- the cross-tab and the equation ---
+XTAB satquarter3 window=[1790524397649681473,1790524436649681473) secs=39.000 backends=2
+  pid sets: requested=[13848, 13849]
+            exact-tier dump=[13848, 13849]  kernel dump=[13848, 13849]
+  cross-tab total = 78.000 backend-s (exact wall = 78.000; residual +0.000000s)
+  DUMP-vs-AGGREGATE (bpftrace's own maps; a lost-event check)
+    on   joined=   26.173s  aggregate=   26.257s  -0.32%
+    rq   joined=   34.884s  aggregate=   34.834s  +0.14%
+    off  joined=   16.943s  aggregate=   16.890s  +0.31%
+    unk  joined=    0.000s  (0.000% of wall: no kernel transition before the window)
+
+  backend-seconds, kernel state (rows) x exact-tier class (cols)
+             CPU/cmd   CPU/out  WAIT/cmd  WAIT/out      IDLE       GAP     total
+    on        16.973     6.141     1.795     0.000     1.264     0.000    26.173
+    rq         3.351    19.205     5.593     0.000     6.735     0.000    34.884
+    off        0.000     0.000    15.171     0.000     1.772     0.000    16.943
+    unk        0.000     0.000     0.000     0.000     0.000     0.000     0.000
+    total     20.324    25.346    22.558     0.000     9.772     0.000    78.000
+
+  EQUATION  (W = wait inside a command = 22.558 s, the shared denominator term)
+    term                                                       sec   share%    d pp  kind
+    exact tier numerator E = cpu_in_cmd + cpu_out_cmd       45.670    66.94    0.00
+      + run-queue delay with a wait event still set          5.593    69.44    2.50  definitional
+      + on a processor with a wait event still set           1.795    70.17    0.73  definitional
+      + run-queue delay with an IDLE wait event set          6.735    72.61    2.44  definitional
+      + on a processor with an IDLE wait event set           1.264    73.02    0.41  under-capture
+      + on-or-runnable in a timeline gap (no interval)       0.000    73.02    0.00  under-capture
+      - off-CPU (blocked) while we call it CPU               0.000    73.02    0.00  over-capture
+      +- kernel state unknown before first transition        0.000    73.02    0.00  unexplained
+    = kernel numerator K = on + rq                          61.057    73.02    6.08
+    closure residual: K - (E + terms) = -0.000000 s
+  HEADLINE  exact=66.94%  kernel=73.02%  gap=6.08 pp
+
+  CROSS-CHECK the tracer's own per-interval cpu_ns against the kernel dump
+    on-CPU inside WAIT intervals: kernel 1.795s   tracer cpu_ns 1.793s
+    on-CPU inside CPU  intervals: kernel 23.114s   tracer cpu_ns 23.040s
+  SIZES  out_of_command_cpu=25.346s (already inside E; without it the exact share would be 47.39%, gap 25.63 pp)
+         wait_outside_command=0.000s  idle_wall=9.772s  gap_wall=0.000s
+         blocked-but-called-CPU (wait our tier did not reconstruct) = -0.000s = -0.00% of the wait it should have seen
+  KERNEL on=26.173s rq=34.884s off=16.943s
+
+--- instrument overhead ---
+  bt_pid=13890  schedstat f1 sum_exec_runtime (on a processor) = 14.069 s  schedstat f2 run_delay (runnable, queued) = 6.134 s 
+  daemon_pid=13907  schedstat f1 sum_exec_runtime (on a processor) = 2.508 s  schedstat f2 run_delay (runnable, queued) = 0.605 s 
+
+
+@@@@@@@@ unsatdump1.txt @@@@@@@@
+######## unsatdump1 ########
+WINDOW [1790521850857859776,1790521889857859776) secs=39.0 pgbench_backends=2: 5811,5812
+  pgsa sampler pid=5821   excludes: 8 args
+  tps: tps = 802.253940 (without initial connection time)
+
+--- exact + sampled tier (strict pgbench-backend set) ---
+PIDS total=11 with_cmd_markers=2 overlapping_intervals=0 client_only=1
+IDLE raw wall = 14.323 s (of which inside a command: 0.000 s)
+CMD-OPEN total = 54.609 s over 200766 commands (mean 272.0 us)   wait inside cmd = 18.416 s   cpu outside cmd = 9.068 s
+INTERVALS cpu=275623 (mean 164.2 us) wait=77979 (mean 236.2 us) straddling=241024 (9.068 s outside)
+CPU(we==0) wall = 45.261 s   measured cpu_ns = 45.086 s
+MARKERS start=231014 end=231014 dup_start(missing END)=0 orphan_end(missing START)=0 pids_unclosed_at_end=0
+SAMPLED                        cpu=24.379s nonidle=42.325s  share=57.6%  total=64.271s active_frac=65.9% noncmd_cpu=0.000s
+EXACT S (stream, majority)     cpu=43.177s wait=18.416s  share=70.1%
+EXACT A (sorted, majority)     cpu=43.177s wait=18.416s  share=70.1%
+EXACT B (sorted, proportional) cpu=36.193s wait=18.416s  share=66.3%
+EXACT C (2-pass, proportional) cpu=36.193s wait=18.416s  share=66.3%
+
+--- kernel arbiter (schedstat counters, independent of the tracepoints) ---
+KERNEL window=39.000s pids=2 (not spanning the window, excluded: none)
+  schedstat f1 sum_exec_runtime (on a processor)   =   54.890 s
+  schedstat f2 run_delay        (runnable, queued) =    1.790 s
+  f1+f2  (on a processor OR wanting one)           =   56.679 s
+
+--- reference: pg_stat_activity ---
+PGSA_IN pgsa       iters=1914 (49.1 Hz) rows=3828 backends=2.00 win=39.000s act_cpu=1498 act_wait=913 torn=66(1.72%) nonactive_nowait=471(12.30%) idle_clientread=879 idle_activity=0 act_activity=0 nonactive_wait=1
+PGSA_V1 pgsa       share=62.13%  cpu_s=   30.52 nonidle_s=   49.13 cpu_n=1498 nonidle_n=2411
+PGSA_V2 pgsa       share=68.32%  cpu_s=   40.12 nonidle_s=   58.72 cpu_n=1969 nonidle_n=2882
+
+--- headline from the aggregates only (schedstat; no tracepoint dump) ---
+HEADLINE_AGG unsatdump1 exactWB=71.08% kernel_f1f2=75.48% gap=4.40 pp (E=45.261s K=56.680s W=18.416s f1=54.890s f2=1.790s)
+
+--- the cross-tab and the equation ---
+XTAB unsatdump1 window=[1790521850857859776,1790521889857859776) secs=39.000 backends=2
+  pid sets: requested=[5811, 5812]
+            exact-tier dump=[5811, 5812]  kernel dump=[5811, 5812]
+  cross-tab total = 78.000 backend-s (exact wall = 78.000; residual +0.000000s)
+  DUMP-vs-AGGREGATE (bpftrace's own maps; a lost-event check)
+    on   joined=   53.420s  aggregate=   53.409s  +0.02%
+    rq   joined=    3.576s  aggregate=    3.552s  +0.68%
+    off  joined=   21.004s  aggregate=   20.830s  +0.83%
+    unk  joined=    0.000s  (0.000% of wall: no kernel transition before the window)
+
+  backend-seconds, kernel state (rows) x exact-tier class (cols)
+             CPU/cmd   CPU/out  WAIT/cmd  WAIT/out      IDLE       GAP     total
+    on        36.144     8.913     3.575     0.000     4.788     0.000    53.420
+    rq         0.049     0.155     1.222     0.000     2.150     0.000     3.576
+    off        0.000     0.000    13.620     0.000     7.384     0.000    21.004
+    unk        0.000     0.000     0.000     0.000     0.000     0.000     0.000
+    total     36.193     9.068    18.416     0.000    14.323     0.000    78.000
+
+  EQUATION  (W = wait inside a command = 18.416 s, the shared denominator term)
+    term                                                       sec   share%    d pp  kind
+    exact tier numerator E = cpu_in_cmd + cpu_out_cmd       45.261    71.08    0.00
+      + run-queue delay with a wait event still set          1.222    71.62    0.54  definitional
+      + on a processor with a wait event still set           3.575    73.10    1.48  definitional
+      + run-queue delay with an IDLE wait event set          2.150    73.92    0.82  definitional
+      + on a processor with an IDLE wait event set           4.788    75.58    1.66  under-capture
+      + on-or-runnable in a timeline gap (no interval)       0.000    75.58    0.00  under-capture
+      - off-CPU (blocked) while we call it CPU               0.000    75.58    0.00  over-capture
+      +- kernel state unknown before first transition        0.000    75.58    0.00  unexplained
+    = kernel numerator K = on + rq                          56.996    75.58    4.50
+    closure residual: K - (E + terms) = -0.000000 s
+  HEADLINE  exact=71.08%  kernel=75.58%  gap=4.50 pp
+
+  CROSS-CHECK the tracer's own per-interval cpu_ns against the kernel dump
+    on-CPU inside WAIT intervals: kernel 3.575s   tracer cpu_ns 3.598s
+    on-CPU inside CPU  intervals: kernel 45.057s   tracer cpu_ns 45.086s
+  SIZES  out_of_command_cpu=9.068s (already inside E; without it the exact share would be 66.28%, gap 9.30 pp)
+         wait_outside_command=0.000s  idle_wall=14.323s  gap_wall=0.000s
+         blocked-but-called-CPU (wait our tier did not reconstruct) = -0.000s = -0.00% of the wait it should have seen
+  KERNEL on=53.420s rq=3.576s off=21.004s
+
+--- instrument overhead ---
+  bt_pid=5834  schedstat f1 sum_exec_runtime (on a processor) = 9.869 s  schedstat f2 run_delay (runnable, queued) = 0.967 s 
+  daemon_pid=5851  schedstat f1 sum_exec_runtime (on a processor) = 2.171 s  schedstat f2 run_delay (runnable, queued) = 0.093 s 
+
+
+@@@@@@@@ unsatdump2.txt @@@@@@@@
+######## unsatdump2 ########
+WINDOW [1790522301844147387,1790522340844147387) secs=39.0 pgbench_backends=2: 7241,7242
+  pgsa sampler pid=7252   excludes: 4 args
+  tps: tps = 827.531220 (without initial connection time)
+
+--- exact + sampled tier (strict pgbench-backend set) ---
+PIDS total=11 with_cmd_markers=2 overlapping_intervals=0 client_only=1
+IDLE raw wall = 12.630 s (of which inside a command: 0.000 s)
+CMD-OPEN total = 55.879 s over 197922 commands (mean 282.3 us)   wait inside cmd = 20.097 s   cpu outside cmd = 9.491 s
+INTERVALS cpu=266012 (mean 170.2 us) wait=76835 (mean 261.6 us) straddling=231560 (9.490 s outside)
+CPU(we==0) wall = 45.273 s   measured cpu_ns = 44.797 s
+MARKERS start=229358 end=229358 dup_start(missing END)=0 orphan_end(missing START)=0 pids_unclosed_at_end=0
+SAMPLED                        cpu=28.735s nonidle=50.267s  share=57.2%  total=62.973s active_frac=79.8% noncmd_cpu=0.000s
+EXACT S (stream, majority)     cpu=42.916s wait=20.097s  share=68.1%
+EXACT A (sorted, majority)     cpu=42.916s wait=20.097s  share=68.1%
+EXACT B (sorted, proportional) cpu=35.783s wait=20.097s  share=64.0%
+EXACT C (2-pass, proportional) cpu=35.783s wait=20.097s  share=64.0%
+
+--- kernel arbiter (schedstat counters, independent of the tracepoints) ---
+KERNEL window=39.000s pids=2 (not spanning the window, excluded: none)
+  schedstat f1 sum_exec_runtime (on a processor)   =   54.347 s
+  schedstat f2 run_delay        (runnable, queued) =    1.657 s
+  f1+f2  (on a processor OR wanting one)           =   56.005 s
+
+--- reference: pg_stat_activity ---
+PGSA_IN pgsa       iters=1913 (49.1 Hz) rows=3826 backends=2.00 win=39.000s act_cpu=1559 act_wait=1004 torn=98(2.56%) nonactive_nowait=601(15.71%) idle_clientread=562 idle_activity=0 act_activity=0 nonactive_wait=2
+PGSA_V1 pgsa       share=60.83%  cpu_s=   31.78 nonidle_s=   52.25 cpu_n=1559 nonidle_n=2563
+PGSA_V2 pgsa       share=68.27%  cpu_s=   44.04 nonidle_s=   64.50 cpu_n=2160 nonidle_n=3164
+
+--- headline from the aggregates only (schedstat; no tracepoint dump) ---
+HEADLINE_AGG unsatdump2 exactWB=69.26% kernel_f1f2=73.59% gap=4.33 pp (E=45.274s K=56.004s W=20.097s f1=54.347s f2=1.657s)
+
+--- the cross-tab and the equation ---
+XTAB unsatdump2 window=[1790522301844147387,1790522340844147387) secs=39.000 backends=2
+  pid sets: requested=[7241, 7242]
+            exact-tier dump=[7241, 7242]  kernel dump=[7241, 7242]
+  cross-tab total = 78.000 backend-s (exact wall = 78.000; residual +0.000000s)
+  DUMP-vs-AGGREGATE (bpftrace's own maps; a lost-event check)
+    on   joined=   52.973s  aggregate=   52.951s  +0.04%
+    rq   joined=    3.370s  aggregate=    3.346s  +0.73%
+    off  joined=   21.657s  aggregate=   21.507s  +0.70%
+    unk  joined=    0.000s  (0.000% of wall: no kernel transition before the window)
+
+  backend-seconds, kernel state (rows) x exact-tier class (cols)
+             CPU/cmd   CPU/out  WAIT/cmd  WAIT/out      IDLE       GAP     total
+    on        35.716     9.057     3.486     0.000     4.714     0.000    52.973
+    rq         0.066     0.434     1.257     0.000     1.613     0.000     3.370
+    off        0.001     0.000    15.353     0.000     6.303     0.000    21.657
+    unk        0.000     0.000     0.000     0.000     0.000     0.000     0.000
+    total     35.783     9.491    20.097     0.000    12.630     0.000    78.000
+
+  EQUATION  (W = wait inside a command = 20.097 s, the shared denominator term)
+    term                                                       sec   share%    d pp  kind
+    exact tier numerator E = cpu_in_cmd + cpu_out_cmd       45.273    69.26    0.00
+      + run-queue delay with a wait event still set          1.257    69.84    0.58  definitional
+      + on a processor with a wait event still set           3.486    71.34    1.50  definitional
+      + run-queue delay with an IDLE wait event set          1.613    71.98    0.64  definitional
+      + on a processor with an IDLE wait event set           4.714    73.71    1.73  under-capture
+      + on-or-runnable in a timeline gap (no interval)       0.000    73.71    0.00  under-capture
+      - off-CPU (blocked) while we call it CPU              -0.001    73.71   -0.00  over-capture
+      +- kernel state unknown before first transition        0.000    73.71    0.00  unexplained
+    = kernel numerator K = on + rq                          56.343    73.71    4.45
+    closure residual: K - (E + terms) = -0.000000 s
+  HEADLINE  exact=69.26%  kernel=73.71%  gap=4.45 pp
+
+  CROSS-CHECK the tracer's own per-interval cpu_ns against the kernel dump
+    on-CPU inside WAIT intervals: kernel 3.486s   tracer cpu_ns 3.509s
+    on-CPU inside CPU  intervals: kernel 44.773s   tracer cpu_ns 44.797s
+  SIZES  out_of_command_cpu=9.491s (already inside E; without it the exact share would be 64.04%, gap 9.67 pp)
+         wait_outside_command=0.000s  idle_wall=12.630s  gap_wall=0.000s
+         blocked-but-called-CPU (wait our tier did not reconstruct) = 0.001s = 0.00% of the wait it should have seen
+  KERNEL on=52.973s rq=3.370s off=21.657s
+
+--- instrument overhead ---
+  bt_pid=7269  schedstat f1 sum_exec_runtime (on a processor) = 9.697 s  schedstat f2 run_delay (runnable, queued) = 1.105 s 
+  daemon_pid=7286  schedstat f1 sum_exec_runtime (on a processor) = 2.180 s  schedstat f2 run_delay (runnable, queued) = 0.104 s 
+
+
+@@@@@@@@ unsatdump3.txt @@@@@@@@
+######## unsatdump3 ########
+WINDOW [1790522753443488910,1790522792443488910) secs=39.0 pgbench_backends=2: 8603,8604
+  pgsa sampler pid=8613   excludes: 4 args
+  tps: tps = 813.015141 (without initial connection time)
+
+--- exact + sampled tier (strict pgbench-backend set) ---
+PIDS total=11 with_cmd_markers=2 overlapping_intervals=0 client_only=1
+IDLE raw wall = 12.918 s (of which inside a command: 0.000 s)
+CMD-OPEN total = 55.793 s over 196453 commands (mean 284.0 us)   wait inside cmd = 19.384 s   cpu outside cmd = 9.289 s
+INTERVALS cpu=264513 (mean 172.8 us) wait=76545 (mean 253.2 us) straddling=230161 (9.288 s outside)
+CPU(we==0) wall = 45.698 s   measured cpu_ns = 45.270 s
+MARKERS start=227586 end=227585 dup_start(missing END)=1 orphan_end(missing START)=0 pids_unclosed_at_end=0
+SAMPLED                        cpu=29.694s nonidle=48.650s  share=61.0%  total=62.529s active_frac=77.8% noncmd_cpu=0.000s
+EXACT S (stream, majority)     cpu=43.507s wait=19.384s  share=69.2%
+EXACT A (sorted, majority)     cpu=43.507s wait=19.384s  share=69.2%
+EXACT B (sorted, proportional) cpu=36.409s wait=19.384s  share=65.3%
+EXACT C (2-pass, proportional) cpu=36.409s wait=19.384s  share=65.3%
+
+--- kernel arbiter (schedstat counters, independent of the tracepoints) ---
+KERNEL window=39.000s pids=2 (not spanning the window, excluded: none)
+  schedstat f1 sum_exec_runtime (on a processor)   =   54.883 s
+  schedstat f2 run_delay        (runnable, queued) =    1.489 s
+  f1+f2  (on a processor OR wanting one)           =   56.372 s
+
+--- reference: pg_stat_activity ---
+PGSA_IN pgsa       iters=1914 (49.1 Hz) rows=3828 backends=2.00 win=39.000s act_cpu=1660 act_wait=935 torn=97(2.53%) nonactive_nowait=581(15.18%) idle_clientread=551 idle_activity=0 act_activity=0 nonactive_wait=4
+PGSA_V1 pgsa       share=63.97%  cpu_s=   33.82 nonidle_s=   52.88 cpu_n=1660 nonidle_n=2595
+PGSA_V2 pgsa       share=70.56%  cpu_s=   45.66 nonidle_s=   64.71 cpu_n=2241 nonidle_n=3176
+
+--- headline from the aggregates only (schedstat; no tracepoint dump) ---
+HEADLINE_AGG unsatdump3 exactWB=70.22% kernel_f1f2=74.41% gap=4.20 pp (E=45.698s K=56.372s W=19.384s f1=54.883s f2=1.489s)
+
+--- the cross-tab and the equation ---
+XTAB unsatdump3 window=[1790522753443488910,1790522792443488910) secs=39.000 backends=2
+  pid sets: requested=[8603, 8604]
+            exact-tier dump=[8603, 8604]  kernel dump=[8603, 8604]
+  cross-tab total = 78.000 backend-s (exact wall = 78.000; residual +0.000000s)
+  DUMP-vs-AGGREGATE (bpftrace's own maps; a lost-event check)
+    on   joined=   53.416s  aggregate=   53.414s  +0.00%
+    rq   joined=    3.227s  aggregate=    3.203s  +0.76%
+    off  joined=   21.357s  aggregate=   21.188s  +0.80%
+    unk  joined=    0.000s  (0.000% of wall: no kernel transition before the window)
+
+  backend-seconds, kernel state (rows) x exact-tier class (cols)
+             CPU/cmd   CPU/out  WAIT/cmd  WAIT/out      IDLE       GAP     total
+    on        36.358     8.890     3.505     0.000     4.663     0.000    53.416
+    rq         0.052     0.399     1.194     0.000     1.582     0.000     3.227
+    off        0.000     0.000    14.684     0.000     6.673     0.000    21.357
+    unk        0.000     0.000     0.000     0.000     0.000     0.000     0.000
+    total     36.409     9.289    19.384     0.000    12.918     0.000    78.000
+
+  EQUATION  (W = wait inside a command = 19.384 s, the shared denominator term)
+    term                                                       sec   share%    d pp  kind
+    exact tier numerator E = cpu_in_cmd + cpu_out_cmd       45.698    70.22    0.00
+      + run-queue delay with a wait event still set          1.194    70.75    0.54  definitional
+      + on a processor with a wait event still set           3.505    72.22    1.47  definitional
+      + run-queue delay with an IDLE wait event set          1.582    72.84    0.62  definitional
+      + on a processor with an IDLE wait event set           4.663    74.50    1.67  under-capture
+      + on-or-runnable in a timeline gap (no interval)       0.000    74.50    0.00  under-capture
+      - off-CPU (blocked) while we call it CPU               0.000    74.50    0.00  over-capture
+      +- kernel state unknown before first transition        0.000    74.50    0.00  unexplained
+    = kernel numerator K = on + rq                          56.643    74.50    4.29
+    closure residual: K - (E + terms) = +0.000000 s
+  HEADLINE  exact=70.22%  kernel=74.50%  gap=4.29 pp
+
+  CROSS-CHECK the tracer's own per-interval cpu_ns against the kernel dump
+    on-CPU inside WAIT intervals: kernel 3.505s   tracer cpu_ns 3.527s
+    on-CPU inside CPU  intervals: kernel 45.247s   tracer cpu_ns 45.270s
+  SIZES  out_of_command_cpu=9.289s (already inside E; without it the exact share would be 65.26%, gap 9.25 pp)
+         wait_outside_command=0.000s  idle_wall=12.918s  gap_wall=0.000s
+         blocked-but-called-CPU (wait our tier did not reconstruct) = -0.000s = -0.00% of the wait it should have seen
+  KERNEL on=53.416s rq=3.227s off=21.357s
+
+--- instrument overhead ---
+  bt_pid=8626  schedstat f1 sum_exec_runtime (on a processor) = 9.798 s  schedstat f2 run_delay (runnable, queued) = 0.914 s 
+  daemon_pid=8643  schedstat f1 sum_exec_runtime (on a processor) = 2.144 s  schedstat f2 run_delay (runnable, queued) = 0.110 s 
+
+
+@@@@@@@@ unsatnodump1.txt @@@@@@@@
+######## unsatnodump1 ########
+WINDOW [1790521963595619866,1790522002595619866) secs=39.0 pgbench_backends=2: 6134,6135
+  pgsa sampler pid=6146   excludes: 8 args
+  tps: tps = 873.730547 (without initial connection time)
+
+--- exact + sampled tier (strict pgbench-backend set) ---
+PIDS total=11 with_cmd_markers=2 overlapping_intervals=0 client_only=1
+IDLE raw wall = 14.163 s (of which inside a command: 0.000 s)
+CMD-OPEN total = 55.061 s over 204375 commands (mean 269.4 us)   wait inside cmd = 17.868 s   cpu outside cmd = 8.777 s
+INTERVALS cpu=283411 (mean 162.2 us) wait=79103 (mean 225.9 us) straddling=248026 (8.776 s outside)
+CPU(we==0) wall = 45.969 s   measured cpu_ns = 45.965 s
+MARKERS start=236892 end=236893 dup_start(missing END)=0 orphan_end(missing START)=1 pids_unclosed_at_end=0
+SAMPLED                        cpu=26.699s nonidle=43.423s  share=61.5%  total=64.411s active_frac=67.4% noncmd_cpu=0.000s
+EXACT S (stream, majority)     cpu=44.071s wait=17.868s  share=71.2%
+EXACT A (sorted, majority)     cpu=44.071s wait=17.868s  share=71.2%
+EXACT B (sorted, proportional) cpu=37.192s wait=17.868s  share=67.5%
+EXACT C (2-pass, proportional) cpu=37.192s wait=17.868s  share=67.5%
+
+--- kernel arbiter (schedstat counters, independent of the tracepoints) ---
+KERNEL window=39.000s pids=2 (not spanning the window, excluded: none)
+  schedstat f1 sum_exec_runtime (on a processor)   =   54.744 s
+  schedstat f2 run_delay        (runnable, queued) =    0.363 s
+  f1+f2  (on a processor OR wanting one)           =   55.107 s
+
+--- reference: pg_stat_activity ---
+PGSA_IN pgsa       iters=1914 (49.1 Hz) rows=3828 backends=2.00 win=39.000s act_cpu=1606 act_wait=875 torn=71(1.85%) nonactive_nowait=409(10.68%) idle_clientread=866 idle_activity=0 act_activity=0 nonactive_wait=1
+PGSA_V1 pgsa       share=64.73%  cpu_s=   32.72 nonidle_s=   50.55 cpu_n=1606 nonidle_n=2481
+PGSA_V2 pgsa       share=69.72%  cpu_s=   41.06 nonidle_s=   58.89 cpu_n=2015 nonidle_n=2890
+
+--- headline from the aggregates only (schedstat; no tracepoint dump) ---
+HEADLINE_AGG unsatnodump1 exactWB=72.01% kernel_f1f2=75.51% gap=3.50 pp (E=45.969s K=55.107s W=17.868s f1=54.744s f2=0.363s)
+
+--- no per-transition dump in this run (NODUMP=1 control) ---
+
+--- instrument overhead ---
+  bt_pid=6159  schedstat f1 sum_exec_runtime (on a processor) = 0.158 s  schedstat f2 run_delay (runnable, queued) = 0.002 s 
+  daemon_pid=6176  schedstat f1 sum_exec_runtime (on a processor) = 2.220 s  schedstat f2 run_delay (runnable, queued) = 0.033 s 
+
+
+@@@@@@@@ unsatnodump2.txt @@@@@@@@
+######## unsatnodump2 ########
+WINDOW [1790522414140484920,1790522453140484920) secs=39.0 pgbench_backends=2: 7567,7568
+  pgsa sampler pid=7580   excludes: 4 args
+  tps: tps = 823.794198 (without initial connection time)
+
+--- exact + sampled tier (strict pgbench-backend set) ---
+PIDS total=10 with_cmd_markers=2 overlapping_intervals=0 client_only=1
+IDLE raw wall = 13.920 s (of which inside a command: 0.000 s)
+CMD-OPEN total = 55.232 s over 200464 commands (mean 275.5 us)   wait inside cmd = 19.751 s   cpu outside cmd = 8.848 s
+INTERVALS cpu=278561 (mean 159.1 us) wait=78202 (mean 252.6 us) straddling=243373 (8.847 s outside)
+CPU(we==0) wall = 44.329 s   measured cpu_ns = 44.323 s
+MARKERS start=231524 end=231525 dup_start(missing END)=0 orphan_end(missing START)=1 pids_unclosed_at_end=0
+SAMPLED                        cpu=25.784s nonidle=44.503s  share=57.9%  total=64.069s active_frac=69.5% noncmd_cpu=0.000s
+EXACT S (stream, majority)     cpu=42.397s wait=19.751s  share=68.2%
+EXACT A (sorted, majority)     cpu=42.397s wait=19.751s  share=68.2%
+EXACT B (sorted, proportional) cpu=35.482s wait=19.751s  share=64.2%
+EXACT C (2-pass, proportional) cpu=35.482s wait=19.751s  share=64.2%
+
+--- kernel arbiter (schedstat counters, independent of the tracepoints) ---
+KERNEL window=39.000s pids=2 (not spanning the window, excluded: none)
+  schedstat f1 sum_exec_runtime (on a processor)   =   52.986 s
+  schedstat f2 run_delay        (runnable, queued) =    0.370 s
+  f1+f2  (on a processor OR wanting one)           =   53.356 s
+
+--- reference: pg_stat_activity ---
+PGSA_IN pgsa       iters=1912 (49.0 Hz) rows=3824 backends=2.00 win=39.000s act_cpu=1478 act_wait=976 torn=94(2.46%) nonactive_nowait=489(12.79%) idle_clientread=786 idle_activity=0 act_activity=0 nonactive_wait=1
+PGSA_V1 pgsa       share=60.23%  cpu_s=   30.15 nonidle_s=   50.06 cpu_n=1478 nonidle_n=2454
+PGSA_V2 pgsa       share=66.84%  cpu_s=   40.12 nonidle_s=   60.03 cpu_n=1967 nonidle_n=2943
+
+--- headline from the aggregates only (schedstat; no tracepoint dump) ---
+HEADLINE_AGG unsatnodump2 exactWB=69.18% kernel_f1f2=72.98% gap=3.81 pp (E=44.330s K=53.356s W=19.751s f1=52.986s f2=0.370s)
+
+--- no per-transition dump in this run (NODUMP=1 control) ---
+
+--- instrument overhead ---
+  bt_pid=7593  schedstat f1 sum_exec_runtime (on a processor) = 0.171 s  schedstat f2 run_delay (runnable, queued) = 0.004 s 
+  daemon_pid=7610  schedstat f1 sum_exec_runtime (on a processor) = 2.465 s  schedstat f2 run_delay (runnable, queued) = 0.027 s 
+
+
+@@@@@@@@ unsatnodump3.txt @@@@@@@@
+######## unsatnodump3 ########
+WINDOW [1790522865856514397,1790522904856514397) secs=39.0 pgbench_backends=2: 8982,8983
+  pgsa sampler pid=8992   excludes: 2 args
+  tps: tps = 841.844952 (without initial connection time)
+
+--- exact + sampled tier (strict pgbench-backend set) ---
+PIDS total=11 with_cmd_markers=2 overlapping_intervals=0 client_only=1
+IDLE raw wall = 13.976 s (of which inside a command: 0.000 s)
+CMD-OPEN total = 55.160 s over 200077 commands (mean 275.7 us)   wait inside cmd = 19.456 s   cpu outside cmd = 8.865 s
+INTERVALS cpu=278128 (mean 160.2 us) wait=78146 (mean 249.0 us) straddling=242929 (8.864 s outside)
+CPU(we==0) wall = 44.568 s   measured cpu_ns = 44.562 s
+MARKERS start=230515 end=230515 dup_start(missing END)=0 orphan_end(missing START)=0 pids_unclosed_at_end=0
+SAMPLED                        cpu=25.386s nonidle=44.388s  share=57.2%  total=63.630s active_frac=69.8% noncmd_cpu=0.000s
+EXACT S (stream, majority)     cpu=42.537s wait=19.456s  share=68.6%
+EXACT A (sorted, majority)     cpu=42.537s wait=19.456s  share=68.6%
+EXACT B (sorted, proportional) cpu=35.703s wait=19.456s  share=64.7%
+EXACT C (2-pass, proportional) cpu=35.703s wait=19.456s  share=64.7%
+
+--- kernel arbiter (schedstat counters, independent of the tracepoints) ---
+KERNEL window=39.000s pids=2 (not spanning the window, excluded: none)
+  schedstat f1 sum_exec_runtime (on a processor)   =   53.204 s
+  schedstat f2 run_delay        (runnable, queued) =    0.395 s
+  f1+f2  (on a processor OR wanting one)           =   53.599 s
+
+--- reference: pg_stat_activity ---
+PGSA_IN pgsa       iters=1912 (49.0 Hz) rows=3824 backends=2.00 win=39.000s act_cpu=1480 act_wait=917 torn=127(3.32%) nonactive_nowait=514(13.44%) idle_clientread=777 idle_activity=0 act_activity=0 nonactive_wait=9
+PGSA_V1 pgsa       share=61.74%  cpu_s=   30.19 nonidle_s=   48.89 cpu_n=1480 nonidle_n=2397
+PGSA_V2 pgsa       share=68.50%  cpu_s=   40.67 nonidle_s=   59.38 cpu_n=1994 nonidle_n=2911
+
+--- headline from the aggregates only (schedstat; no tracepoint dump) ---
+HEADLINE_AGG unsatnodump3 exactWB=69.61% kernel_f1f2=73.37% gap=3.76 pp (E=44.568s K=53.599s W=19.456s f1=53.204s f2=0.395s)
+
+--- no per-transition dump in this run (NODUMP=1 control) ---
+
+--- instrument overhead ---
+  bt_pid=9005  schedstat f1 sum_exec_runtime (on a processor) = 0.173 s  schedstat f2 run_delay (runnable, queued) = 0.002 s 
+  daemon_pid=9022  schedstat f1 sum_exec_runtime (on a processor) = 2.427 s  schedstat f2 run_delay (runnable, queued) = 0.029 s 
+
