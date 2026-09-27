@@ -111,6 +111,15 @@ judges. It writes no feature code itself for anything bigger than a one-liner.
   PR body; blockers go back to the implementer via SendMessage; (3) the main
   agent reads the reviewer's report, not the diff, and decides ready / back /
   ask the owner. Only "Design questions for the owner" reach the human.
+- **Adviser** (owner rule 2026-09-27): `.claude/agents/adviser.md`, model
+  Fable, one standing conversation for the whole session (resume it with
+  SendMessage, never respawn). The retro found the lead's own output is the
+  only artifact with no fresh reviewer — every wrong statement that reached
+  the owner started there. So: the main agent consults the adviser on every
+  found issue, plan and numeric claim BEFORE acting on it and BEFORE
+  reporting it to the owner. The adviser reviews reasoning, not code, and
+  never edits, commits or creates cloud resources. Its verdict is advice,
+  not authority: the lead may overrule it, but then says so in the report.
 
 ## Rules
 
