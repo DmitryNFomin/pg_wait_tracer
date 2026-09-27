@@ -87,38 +87,49 @@ MIN_MEASURED_FRACTION = 0.5
 # intermittent or fixed; check the issue` in the driver's output) so a human
 # decides when to delist a tab, not a single run's outcome either way.
 KNOWN_FAILING_TABS = {
-    # #100: no_blink ratio 4.46% in one run, but an UNPROVEN xpass in
-    # another -- do not read the xpass as "fixed". The xpass run itself was
-    # confounded: tests/ui_live_smoke.py's blind-window check (added the
-    # same round) pushed the blink pair from ~1.3s to ~1.6s after the tick
-    # (a flat 1200ms sleep from wherever the code happened to be, not
-    # anchored to the tick's own timestamp -- fixed after this was found),
-    # so a pass under the drifted timing proves nothing about whichever
-    # window the original failure landed in. #102 (missing animation:false)
-    # is CLOSED, not merely unproven: disproved at runtime -- all four
-    # builders (concurrency/timeline/exec-scatter/matrix) already had
-    # animation:false at the option root, confirmed by reading the actual
-    # ECharts option on every non-empty gallery cell. The missing-animation
-    # hypothesis for #100 is ruled out; whatever causes timeline's blink is
-    # something else. Stays listed until a run with the tick-anchored
-    # settle (and now the offset sweep, issue #119) is investigated either
-    # way.
+    # #100 (timeline) is DELISTED (review round 5). The issue's literal
+    # claim is that a redraw with UNCHANGED DATA moves ~4.5% of pixels.
     #
-    # Review round 4 tested the WINDOW-ADVANCE-REPAINT hypothesis directly:
-    # the issue's own 2026-09-17 08:12 diff mask shows axis labels advancing
-    # and gridlines shifting, suggesting the original ~4.5% was the tick's
-    # own legitimate window-pan repaint (timeline.js's xAxis sits at the
-    # bottom of the grid), caught mid-flight by the OLD 1200ms-after-tick
-    # anchor, not a bug. NOT confirmed by a live persistent-box run with the
-    # new pre-mount-vs-sweep-first instrument (ui_live_smoke.py's
-    # pre_mount_diagnostic, timeline only): diff_pixel_frac was 0.0 on all
-    # 6 ticks (run.id 1790542465) -- no window-advance repaint was observed
-    # at all in that run, let alone one matching the axis-label/gridline
-    # signature. The window-pan explanation for #100 is UNPROVEN by this
-    # test, not confirmed -- stays listed. No product change has fixed this
-    # either: timeline.js's last change is bdf07ed (#106); #171/11fdf0b
-    # touched only exec-scatter, matrix and waterfall.
-    "timeline": 100,
+    # Round 4 first tried to test this with a NEW instrument
+    # (ui_live_smoke.py's pre_mount_diagnostic: diff the panel immediately
+    # before this tick's own mount against the sweep's first frame after
+    # it) on a live persistent-box run (root@2.28.45.47, run.id
+    # 1790542465). It read diff_pixel_frac 0.0 on all 6 ticks -- WRONGLY
+    # read as "no window-advance repaint occurred". It was invalid: the
+    # probe captured its "pre-mount" frame with no proof it fired before
+    # the tick's own mount (timeline's mount can land ~150ms after the
+    # tick), so a null reading from it is not evidence of anything. That
+    # probe has since been fixed (see its own docstring) to report NOT
+    # MEASURED rather than a misleading 0.0 when it cannot establish it
+    # fired first.
+    #
+    # The actual evidence, from the SAME run's saved per-tick frames
+    # (tests/results/ui_live/timeline/tick-*.png), diffing consecutive
+    # ticks against each other instead:
+    #   tick1->2, 2->3, 3->4: EXACTLY 0.00% each -- four consecutive
+    #     UNCHANGED-DATA redraws, zero pixels moved. Directly refutes the
+    #     issue's literal claim.
+    #   tick4->5: 1.22%, tick5->6: 1.26%, both concentrated in cols
+    #     134-1219 / rows 30-165 -- the axis-label/gridline band. The DATA
+    #     (the displayed window) genuinely changed there; this is not a
+    #     same-window blink.
+    # The original 4.46% has a named mechanism, not just an alternative
+    # explanation: the OLD fixed-delay pair sampled ~1.2s after the tick,
+    # while timeline's own mount ran 0.6-1.8s late under load -- a mount
+    # landing inside that pair's ~120ms window paints the tick's
+    # ALREADY-ADVANCED window and gets scored as a same-window blink. And
+    # the issue's own 2026-09-17 08:12 diff mask already showed this,
+    # independent of any later run: axis labels moving 04:58:18 ->
+    # 04:58:29 IS the data changing, refuting "unchanged data" from the
+    # original artifact itself. No product change ever fixed this either:
+    # timeline.js's last change is bdf07ed (#106); #171/11fdf0b touched
+    # only exec-scatter, matrix and waterfall.
+    #
+    # Residual, tracked separately (a freshness defect, not a stability
+    # one, and out of this issue's scope): the same run shows timeline's
+    # window sitting still for ticks 1-4 (~20s) before advancing 5s per
+    # tick from tick 5 on.
+    #
     # #101 (waterfall) is DELISTED. Both symptoms filed under it -- "no
     # echarts instance" and "#waterfall-chart canvas never appeared within
     # 60s" -- were ONE root cause, and it was never the executions query.
@@ -235,6 +246,58 @@ def frame_diff_signature(frame_a, frame_b, edge_band_frac=0.15):
         "columns_touched_frac": float(np.count_nonzero(columns_touched)) / columns_touched.size,
         "note": None,
     }
+
+
+_PRE_MOUNT_NOT_MEASURED = {
+    "diff_pixel_frac": None, "bottom_band_pixel_frac": None,
+    "rest_pixel_frac": None, "columns_touched_frac": None,
+}
+
+
+def pre_mount_diagnostic_verdict(pre_mount_frame, sweep_first_frame,
+                                  pre_mount_seq_after, mount_seq):
+    """issue #100 (review round 4, corrected round 5), TIMELINE ONLY:
+    verdict for one tick's pre-mount-vs-sweep-first diagnostic (see
+    tests/ui_live_smoke.py's capture site for the full rationale).
+
+    pre_mount_frame/sweep_first_frame: (H, W, 3) uint8 arrays or None (a
+    capture failure).
+    pre_mount_seq_after: the ViewManager mount seq read IMMEDIATELY AFTER
+    the pre-mount screenshot was taken (None if no mount has ever been
+    observed on this page yet -- trivially precedes any mount that will
+    ever land, since none exists yet).
+    mount_seq: this tick's own mount seq (web/static/lib/view-manager.js's
+    lastMount.seq, once _wait_for_mount_at_or_after has returned it).
+
+    Round 4's mistake: it captured "the panel right after the tick" and
+    trusted it as "before this tick's mount" on the strength of "nothing
+    repaints containerEl between mounts" (true, but says nothing about
+    whether OUR OWN capture -- a real round trip, real wall-clock time --
+    finishes before the NEXT mount, which is a live race against timeline's
+    own mount latency, ~150ms in one run). It asserted precedence instead
+    of proving it. Round 5, on a real run: it read diff_pixel_frac 0.0 on
+    two ticks that a plain consecutive-frame diff of the SAME run's own
+    saved PNGs showed genuinely repainted -- the "before" frame had
+    actually been taken after.
+
+    The fix: only trust the capture as "before" if pre_mount_seq_after is
+    STILL strictly behind mount_seq -- i.e. no new mount had landed, by the
+    time we finished capturing, that could have painted the content we
+    just captured. Otherwise this tick is NOT MEASURED, never a fabricated
+    0.0 (the same discipline as the gating sweep's own not-measured case:
+    an instrument that cannot see cannot approve).
+
+    Returns the same shape as frame_diff_signature (every numeric field
+    None + an explanatory note when precedence can't be established, or
+    when either frame is simply missing), so the caller never has to
+    special-case "not measured" vs "frame missing" vs a real signature."""
+    if not (pre_mount_seq_after is None or pre_mount_seq_after < mount_seq):
+        return {**_PRE_MOUNT_NOT_MEASURED,
+                "note": (f"pre-mount capture did not precede this tick's mount "
+                         f"(seq {pre_mount_seq_after!r} >= {mount_seq!r}) -- not measured")}
+    if pre_mount_frame is None or sweep_first_frame is None:
+        return {**_PRE_MOUNT_NOT_MEASURED, "note": "pre-mount or sweep-first frame missing"}
+    return frame_diff_signature(pre_mount_frame, sweep_first_frame)
 
 
 def sweep_consecutive_diff_ratios(frames):
@@ -533,11 +596,15 @@ def build_tab_result(tab_id, rendered_ok, rendered_detail, ticks_observed,
     that tab for having no ticks at all, so this never becomes a second,
     contradictory reason a legitimately-untested result looks wrong.
 
-    pre_mount_diagnostics (issue #100, review round 4): timeline-tab-only,
-    one {"tick", "diff_pixel_frac", "bottom_band_pixel_frac",
-    "rest_pixel_frac", "columns_touched_frac", "note"} entry per tick
-    (frame_diff_signature's own return shape, plus "tick") -- reporting
-    only, never read here to compute `ok`. Empty for every other tab."""
+    pre_mount_diagnostics (issue #100, review round 4, corrected round 5):
+    timeline-tab-only, one {"tick", "diff_pixel_frac",
+    "bottom_band_pixel_frac", "rest_pixel_frac", "columns_touched_frac",
+    "note"} entry per tick (pre_mount_diagnostic_verdict's own return
+    shape, plus "tick") -- reporting only, never read here to compute
+    `ok`. Every numeric field is None with an explanatory note when the
+    capture could not prove it preceded the tick's own mount (see
+    pre_mount_diagnostic_verdict) -- never a fabricated 0.0. Empty for
+    every other tab."""
     clean_ok = len(console_errors) == 0
     blink_ok = no_blink_ok(blink_ratio, blink_threshold)
     leak_ok = leak_probe_ok(leak_before) and leak_probe_ok(leak_after)

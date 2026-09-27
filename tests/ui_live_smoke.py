@@ -777,22 +777,44 @@ def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
             tick_ts_ms = page.evaluate(
                 "window.__uiLiveTicks[window.__uiLiveTicks.length - 1]")
 
-            # issue #100 (review round 4), TIMELINE ONLY: capture the panel
-            # exactly as the PREVIOUS tick's mount left it, before this
-            # tick's own mount can touch it. Nothing repaints containerEl
-            # between mounts (ViewManager's own contract -- only mount()
-            # ever touches it), so this is safe to grab as soon as the tick
-            # is detected, with no race against the upcoming mount. Diffed
-            # below against the sweep's own first frame (mount+200ms) to
+            # issue #100 (review round 4, corrected round 5), TIMELINE
+            # ONLY: try to capture the panel as the PREVIOUS tick's mount
+            # left it, before THIS tick's own mount can touch it, then diff
+            # it below against the sweep's own first frame (mount+200ms) to
             # test #100's premise (the reported ~4.5% "unchanged-data"
             # redraw was actually the tick's own legitimate window-advance
             # repaint -- axis labels/gridlines, timeline.js's xAxis sits at
             # the bottom of the grid -- caught mid-flight by the OLD
-            # 1200ms-anchor instrument) with a NEW, honest instrument
-            # instead of re-running the artifact-producing one. Never
-            # gates: reporting-only, read by nothing in build_tab_result.
-            pre_mount_frame = (_safe_panel_screenshot(page, tab_id)
-                               if tab_id == "timeline" else None)
+            # 1200ms-anchor instrument). Never gates: reporting-only, read
+            # by nothing in build_tab_result.
+            #
+            # Round 4's mistake: it assumed "nothing repaints containerEl
+            # between mounts" (true, ViewManager's own contract) meant this
+            # capture was safe to trust unconditionally. It does not -- that
+            # invariant says nothing about whether OUR OWN capture (a real
+            # round trip: page.evaluate + a screenshot + PNG decode, real
+            # wall-clock time) finishes BEFORE the next mount, which is
+            # timeline's own live race (its mount can land ~150ms after the
+            # tick, sometimes faster than this capture completes). Asserted,
+            # never proven -- and on a real run it was proven WRONG twice
+            # (ticks 5-6, review round 5): a genuine window-advance repaint
+            # happened on both, confirmed by diffing the run's own saved
+            # per-tick frames, while this probe read 0.0 on the exact same
+            # ticks, because its "before" frame was actually taken AFTER.
+            #
+            # Fixed the same way the gating sweep already brackets its own
+            # capture: read the mount seq immediately AFTER this screenshot;
+            # only trust the frame as "before" if that seq is STILL behind
+            # THIS tick's eventual mount once it lands (checked further
+            # down, once `mount` is known, via
+            # lib.pre_mount_diagnostic_verdict). None (no mount observed at
+            # all yet) trivially precedes any mount that will ever land.
+            pre_mount_frame = None
+            pre_mount_seq_after = None
+            if tab_id == "timeline":
+                pre_mount_frame = _safe_panel_screenshot(page, tab_id)
+                m_after = _view_mount(page)
+                pre_mount_seq_after = m_after["seq"] if m_after is not None else None
 
             # Blind-window check (issue #93 review item 5): between the tick
             # landing and the render-check retry + gating settle below,
@@ -870,18 +892,17 @@ def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
             sweep_arrays = [lib.png_bytes_to_array(f) if f is not None else None
                             for f in sweep_raw_frames]
 
-            # issue #100 (review round 4): pre-mount vs sweep's own first
-            # frame, timeline only -- see the capture site above.
+            # issue #100 (review round 4, corrected round 5): pre-mount vs
+            # sweep's own first frame, timeline only -- see the capture site
+            # above for what precedes and why, and
+            # lib.pre_mount_diagnostic_verdict's own docstring for the
+            # precedence check itself.
             if tab_id == "timeline":
                 pre_mount_arr = (lib.png_bytes_to_array(pre_mount_frame)
                                  if pre_mount_frame is not None else None)
                 sweep_first_arr = sweep_arrays[0] if sweep_arrays else None
-                if pre_mount_arr is not None and sweep_first_arr is not None:
-                    sig = lib.frame_diff_signature(pre_mount_arr, sweep_first_arr)
-                else:
-                    sig = {"diff_pixel_frac": None, "bottom_band_pixel_frac": None,
-                           "rest_pixel_frac": None, "columns_touched_frac": None,
-                           "note": "pre-mount or sweep-first frame missing"}
+                sig = lib.pre_mount_diagnostic_verdict(
+                    pre_mount_arr, sweep_first_arr, pre_mount_seq_after, mount["seq"])
                 pre_mount_diagnostics.append({"tick": i, **sig})
 
             ratio, blink_note = lib.blink_sweep_gate_verdict(

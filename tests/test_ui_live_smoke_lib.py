@@ -12,12 +12,31 @@ import io
 import os
 import sys
 import tempfile
+from contextlib import contextmanager
 
 import numpy as np
 from PIL import Image
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ui_live_smoke_lib as lib
+
+
+@contextmanager
+def known_failing_tabs_override(fake):
+    """Temporarily replaces lib.KNOWN_FAILING_TABS so the known-failing
+    MECHANISM (known_failing_issue/known_failing_report_line/
+    _apply_known_failing/build_summary's exemption) has its own test
+    coverage independent of which real tabs happen to be listed right now.
+    Both #101 and #100 (review round 5) were delisted; a test that keeps
+    reaching into the REAL dict for an example entry breaks every time the
+    dict legitimately changes, which is exactly the kind of coupling that
+    made this delisting round more churn than it needed to be."""
+    original = lib.KNOWN_FAILING_TABS
+    lib.KNOWN_FAILING_TABS = fake
+    try:
+        yield
+    finally:
+        lib.KNOWN_FAILING_TABS = original
 
 tests_run = 0
 tests_passed = 0
@@ -157,6 +176,63 @@ def test_frame_diff_signature_shape_mismatch_never_raises():
           f"a shape mismatch is reported via note, never a raised exception ({sig})")
     check(sig["diff_pixel_frac"] is None and sig["bottom_band_pixel_frac"] is None,
           f"every numeric field is None on a shape mismatch -- never a fabricated 0.0 ({sig})")
+
+
+# ── pre_mount_diagnostic_verdict (issue #100, review round 5) ──────────────
+#
+# Round 4's bug, reproduced here: it asserted the pre-mount capture
+# preceded the tick's own mount instead of proving it, and a real run
+# proved that assumption false on two ticks (5, 6) -- this probe read
+# diff_pixel_frac 0.0 on both while a plain consecutive-frame diff of the
+# SAME run's own saved PNGs showed a genuine ~1.2% window-advance repaint.
+# These tests pin the fix: the verdict must refuse to report a real
+# signature unless precedence is actually established.
+
+def test_pre_mount_diagnostic_verdict_precedence_established_computes_signature():
+    a = np.zeros((20, 20, 3), dtype=np.uint8)
+    b = a.copy()
+    b[15:, :] = 255  # a real change in the bottom band
+    sig = lib.pre_mount_diagnostic_verdict(a, b, pre_mount_seq_after=4, mount_seq=5)
+    check(sig["note"] is None and sig["diff_pixel_frac"] is not None,
+          f"seq_after(4) < mount_seq(5) -- precedence established, a real signature is computed ({sig})")
+
+
+def test_pre_mount_diagnostic_verdict_no_mount_observed_yet_precedes():
+    a = np.zeros((20, 20, 3), dtype=np.uint8)
+    sig = lib.pre_mount_diagnostic_verdict(a, a.copy(), pre_mount_seq_after=None, mount_seq=1)
+    check(sig["note"] is None and sig["diff_pixel_frac"] == 0.0,
+          f"no mount observed anywhere yet trivially precedes the first one ({sig})")
+
+
+def test_pre_mount_diagnostic_verdict_reproduces_the_round_4_bug_and_is_now_caught():
+    # The exact shape of the round-4 failure: the "pre-mount" screenshot
+    # was actually taken AFTER this tick's own mount already landed
+    # (pre_mount_seq_after == mount_seq, the tick's mount already fired by
+    # the time of the after-read) -- must now be NOT MEASURED, never a
+    # fabricated 0.0, even though the two frames handed in are pixel-
+    # identical (the case round 4's code would have silently accepted).
+    a = np.zeros((20, 20, 3), dtype=np.uint8)
+    sig = lib.pre_mount_diagnostic_verdict(a, a.copy(), pre_mount_seq_after=5, mount_seq=5)
+    check(sig["diff_pixel_frac"] is None,
+          f"seq_after(5) >= mount_seq(5) -- precedence NOT established, no signature computed ({sig})")
+    check(sig["note"] is not None and "did not precede" in sig["note"],
+          f"...with an explanatory note ({sig!r})")
+
+
+def test_pre_mount_diagnostic_verdict_seq_after_ahead_of_mount_is_also_not_measured():
+    # A later mount than the one we're testing against already happened by
+    # the after-read -- even further past precedence than the exact-match
+    # case above, must also be NOT MEASURED.
+    a = np.zeros((20, 20, 3), dtype=np.uint8)
+    sig = lib.pre_mount_diagnostic_verdict(a, a.copy(), pre_mount_seq_after=9, mount_seq=5)
+    check(sig["diff_pixel_frac"] is None,
+          f"seq_after(9) > mount_seq(5) -- also not measured ({sig})")
+
+
+def test_pre_mount_diagnostic_verdict_missing_frame_is_not_measured_not_a_crash():
+    sig = lib.pre_mount_diagnostic_verdict(None, None, pre_mount_seq_after=1, mount_seq=5)
+    check(sig["diff_pixel_frac"] is None and sig["note"] is not None,
+          f"a missing frame is not measured, never a crash ({sig})")
 
 
 # ── sweep_consecutive_diff_ratios / build_sweep_tick_record (issue #119) ────
@@ -940,81 +1016,94 @@ def test_known_failing_tabs_pinned():
     # here too. #101 (Waterfall) was delisted once its single root cause was
     # found and fixed: the tab defaulted to the newest execution, which on a
     # real capture has no events, no workers and no plan, so the panel never
-    # mounted a chart (web/static/lib/builders/waterfall.js).
-    check(lib.KNOWN_FAILING_TABS == {"timeline": 100},
-          f"KNOWN_FAILING_TABS is exactly {{'timeline': 100}} "
-          f"(got {lib.KNOWN_FAILING_TABS})")
+    # mounted a chart (web/static/lib/builders/waterfall.js). #100
+    # (Timeline, review round 5) was delisted once its own literal claim --
+    # a redraw with UNCHANGED DATA moves ~4.5% of pixels -- was refuted by a
+    # real live run's own consecutive-tick frames (four straight
+    # unchanged-data redraws at exactly 0.00%) with a named mechanism for
+    # the original number (see KNOWN_FAILING_TABS's own comment). Empty is
+    # the correct, deliberate value here, not an oversight.
+    check(lib.KNOWN_FAILING_TABS == {},
+          f"KNOWN_FAILING_TABS is exactly {{}} (got {lib.KNOWN_FAILING_TABS})")
 
 
 def test_known_failing_issue():
-    check(lib.known_failing_issue("timeline") == 100, "timeline -> issue #100")
-    check(lib.known_failing_issue("waterfall") is None,
-          "waterfall is delisted (#101 fixed) and has no known-failing issue")
-    check(lib.known_failing_issue("overview") is None,
-          "an unlisted tab has no known-failing issue")
+    with known_failing_tabs_override({"faketab": 999}):
+        check(lib.known_failing_issue("faketab") == 999, "a listed tab -> its issue number")
+        check(lib.known_failing_issue("waterfall") is None,
+              "waterfall is delisted (#101 fixed) and has no known-failing issue")
+        check(lib.known_failing_issue("timeline") is None,
+              "timeline is delisted (#100, review round 5) and has no known-failing issue")
+        check(lib.known_failing_issue("overview") is None,
+              "an unlisted tab has no known-failing issue")
 
 
 def test_known_failing_report_line():
-    check(lib.known_failing_report_line("overview", False) is None,
-          "an unlisted tab never gets a known-failing report line")
-    fail_line = lib.known_failing_report_line("timeline", False)
-    check(fail_line == "KNOWN-FAILING (issue #100)",
-          f"a listed tab's real failure reports KNOWN-FAILING ({fail_line!r})")
-    pass_line = lib.known_failing_report_line("timeline", True)
-    check(pass_line == "UNEXPECTED PASS (issue #100) -- intermittent or fixed; check the issue",
-          f"a listed tab's real pass reports UNEXPECTED PASS ({pass_line!r})")
+    with known_failing_tabs_override({"faketab": 999}):
+        check(lib.known_failing_report_line("overview", False) is None,
+              "an unlisted tab never gets a known-failing report line")
+        fail_line = lib.known_failing_report_line("faketab", False)
+        check(fail_line == "KNOWN-FAILING (issue #999)",
+              f"a listed tab's real failure reports KNOWN-FAILING ({fail_line!r})")
+        pass_line = lib.known_failing_report_line("faketab", True)
+        check(pass_line == "UNEXPECTED PASS (issue #999) -- intermittent or fixed; check the issue",
+              f"a listed tab's real pass reports UNEXPECTED PASS ({pass_line!r})")
 
 
 def test_build_tab_result_known_failing_does_not_fail_summary():
-    # Timeline (#100) actually failing (raw ok=False): excused from the
+    # A listed tab actually failing (raw ok=False): excused from the
     # overall verdict, but the raw failure and the known_failing flag are
     # both visible in the tab's own record.
-    r = lib.build_tab_result(
-        "timeline", True, "ok:1", 6, [], 0.05, [],  # 5% blink -> raw fail
-        {"charts": 1, "uplots": 1, "pending": 0},
-        {"charts": 1, "uplots": 1, "pending": 0}, {})
-    check(r["ok"] is False, "the raw per-tab result still says what really happened")
-    check(r["known_failing"] is True and r["xpass"] is False,
-          f"a real failure on a listed tab is known_failing, not xpass ({r})")
-    s = lib.build_summary([r])
-    check(s["ok"] is True and s["failed_tabs"] == [] and
-          s["known_failing_tabs"] == ["timeline"],
-          f"a known-failing tab's real failure does not fail the summary ({s})")
+    with known_failing_tabs_override({"faketab": 999}):
+        r = lib.build_tab_result(
+            "faketab", True, "ok:1", 6, [], 0.05, [],  # 5% blink -> raw fail
+            {"charts": 1, "uplots": 1, "pending": 0},
+            {"charts": 1, "uplots": 1, "pending": 0}, {})
+        check(r["ok"] is False, "the raw per-tab result still says what really happened")
+        check(r["known_failing"] is True and r["xpass"] is False,
+              f"a real failure on a listed tab is known_failing, not xpass ({r})")
+        s = lib.build_summary([r])
+        check(s["ok"] is True and s["failed_tabs"] == [] and
+              s["known_failing_tabs"] == ["faketab"],
+              f"a known-failing tab's real failure does not fail the summary ({s})")
 
 
 def test_build_tab_result_xpass_does_not_fail_summary_either():
-    # A listed tab (#100 Timeline) happening to pass this run: reported as
-    # xpass, not silently absorbed, but does not fail the run -- same
-    # semantics run_all.sh's own KNOWN_FAILING now uses too (an unexpected
-    # pass is reported, never a gate failure by itself; a single real-daemon
-    # run passing isn't proof an intermittent bug is fixed).
-    r = lib.build_tab_result(
-        "timeline", True, "ok:1", 6, [], 0.0, [],
-        {"charts": 1, "uplots": 1, "pending": 0},
-        {"charts": 1, "uplots": 1, "pending": 0}, {})
-    check(r["ok"] is True and r["xpass"] is True and r["known_failing"] is False,
-          f"a real pass on a listed tab is xpass, not known_failing ({r})")
-    s = lib.build_summary([r])
-    check(s["ok"] is True and s["xpass_tabs"] == ["timeline"],
-          f"an xpass tab does not fail the summary either ({s})")
+    # A listed tab happening to pass this run: reported as xpass, not
+    # silently absorbed, but does not fail the run -- same semantics
+    # run_all.sh's own KNOWN_FAILING now uses too (an unexpected pass is
+    # reported, never a gate failure by itself; a single real-daemon run
+    # passing isn't proof an intermittent bug is fixed).
+    with known_failing_tabs_override({"faketab": 999}):
+        r = lib.build_tab_result(
+            "faketab", True, "ok:1", 6, [], 0.0, [],
+            {"charts": 1, "uplots": 1, "pending": 0},
+            {"charts": 1, "uplots": 1, "pending": 0}, {})
+        check(r["ok"] is True and r["xpass"] is True and r["known_failing"] is False,
+              f"a real pass on a listed tab is xpass, not known_failing ({r})")
+        s = lib.build_summary([r])
+        check(s["ok"] is True and s["xpass_tabs"] == ["faketab"],
+              f"an xpass tab does not fail the summary either ({s})")
 
 
 def test_build_failed_tab_result_known_failing():
     # A listed tab that could not be checked at all goes through
     # build_failed_tab_result, not build_tab_result, and must still be
     # excused by its issue number.
-    r = lib.build_failed_tab_result(
-        "timeline", "panel did not render ('#timeline-chart canvas') within 60s")
-    check(r["known_failing"] is True and r["ok"] is False,
-          f"a could-not-check known-failing tab is still known_failing ({r})")
-    s = lib.build_summary([r])
-    check(s["ok"] is True, "a known-failing could-not-check tab does not fail the summary")
+    with known_failing_tabs_override({"faketab": 999}):
+        r = lib.build_failed_tab_result(
+            "faketab", "panel did not render ('#faketab-chart canvas') within 60s")
+        check(r["known_failing"] is True and r["ok"] is False,
+              f"a could-not-check known-failing tab is still known_failing ({r})")
+        s = lib.build_summary([r])
+        check(s["ok"] is True, "a known-failing could-not-check tab does not fail the summary")
 
 
 def test_delisted_waterfall_failure_is_a_real_failure():
     # issue #101 regression guard: the waterfall tab is no longer excused, so
     # its old failure shape must fail the run outright. A return of the
-    # empty-panel bug cannot slip through as "known failing" again.
+    # empty-panel bug cannot slip through as "known failing" again. Uses
+    # the REAL (un-overridden) KNOWN_FAILING_TABS deliberately.
     r = lib.build_failed_tab_result(
         "waterfall", "panel did not render ('#waterfall-chart canvas') within 60s")
     check(r["known_failing"] is False and r["ok"] is False,
@@ -1022,6 +1111,20 @@ def test_delisted_waterfall_failure_is_a_real_failure():
     s = lib.build_summary([r])
     check(s["ok"] is False and s["failed_tabs"] == ["waterfall"],
           f"a waterfall render failure fails the summary ({s})")
+
+
+def test_delisted_timeline_failure_is_a_real_failure():
+    # issue #100 regression guard (review round 5): timeline is no longer
+    # excused, so a real blink/render failure on it must fail the run
+    # outright, not disappear as "known failing" again. Uses the REAL
+    # (un-overridden) KNOWN_FAILING_TABS deliberately.
+    r = lib.build_failed_tab_result(
+        "timeline", "panel did not render ('#timeline-chart canvas') within 60s")
+    check(r["known_failing"] is False and r["ok"] is False,
+          f"a timeline render failure is a real failure again ({r})")
+    s = lib.build_summary([r])
+    check(s["ok"] is False and s["failed_tabs"] == ["timeline"],
+          f"a timeline render failure fails the summary ({s})")
 
 
 def test_known_failing_does_not_affect_unlisted_tabs():
@@ -1035,12 +1138,13 @@ def test_known_failing_does_not_affect_unlisted_tabs():
 
 def test_build_summary_mixed_known_failing_and_real_failure():
     # A KNOWN_FAILING tab failing must not mask a genuine, unlisted failure.
-    known = lib.build_failed_tab_result("timeline", "blink 4.46%")
-    real_fail = lib.build_failed_tab_result("overview", "no rows")
-    s = lib.build_summary([known, real_fail])
-    check(s["ok"] is False and s["failed_tabs"] == ["overview"] and
-          s["known_failing_tabs"] == ["timeline"],
-          f"a real failure still fails the summary alongside an excused one ({s})")
+    with known_failing_tabs_override({"faketab": 999}):
+        known = lib.build_failed_tab_result("faketab", "blink 4.46%")
+        real_fail = lib.build_failed_tab_result("overview", "no rows")
+        s = lib.build_summary([known, real_fail])
+        check(s["ok"] is False and s["failed_tabs"] == ["overview"] and
+              s["known_failing_tabs"] == ["faketab"],
+              f"a real failure still fails the summary alongside an excused one ({s})")
 
 
 def test_reset_output_dir_removes_stale_artifacts():
