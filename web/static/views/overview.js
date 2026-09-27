@@ -19,7 +19,21 @@ import {
     buildComparePaneFidelity, compareFidelityHtml,
     baselineUnavailableHtml,
 } from '../lib/panels.js';
-import { fmtMs, fmtAas } from '../lib/format.js';
+import { fmtMs, fmtAas, esc } from '../lib/format.js';
+
+/* #115 Part 2: the "operating system" CPU reference — a labelled secondary
+ * value, deliberately NOT a row in the time-model table or a band on the AAS
+ * chart, so it can never be mistaken for another slice of the decomposition
+ * (it overlaps CPU*, Off-CPU* and every wait class's measured spin/tail; it
+ * does not sit beside them). Server derivation: src/compute.c
+ * pgwt_compute_time_model (os_cpu_ms/has_os_cpu_ref) — see its comment for
+ * the exact sum and why it still reads below a true kernel figure. */
+export const OS_CPU_REF_TOOLTIP =
+    'Measured on-CPU time summed across the WHOLE window, regardless of ' +
+    'which PostgreSQL wait (or idle) event was set at the time — ' +
+    'closer to what the operating system shows than CPU* alone. Still ' +
+    'below it: this excludes time queued for a processor, which ' +
+    'pg_wait_tracer does not measure. See README § Time model.';
 
 /* PURE: time_model response -> summary metrics array. Exported for testing. */
 export function buildSummary(data, numCpus) {
@@ -32,12 +46,21 @@ export function buildSummary(data, numCpus) {
     out.push({ label: 'AAS', value: fmtAas(dbRow.aas) });
     if (idleRow) out.push({ label: 'Idle', value: fmtMs(idleRow.ms) });
     out.push({ label: 'CPUs', value: String(numCpus) });
+    /* Gated on the FLAG, never on os_cpu_ms being nonzero: a legitimately
+     * idle window measures a real 0 (flag true, value 0) and must still
+     * show it, while an unmeasured/mixed-tier window must stay absent even
+     * though os_cpu_ms holds SOME (untrustworthy) number server-side. */
+    if (data.has_os_cpu_ref === true) {
+        out.push({ label: 'OS CPU (ref)', value: fmtMs(data.os_cpu_ms),
+                   title: OS_CPU_REF_TOOLTIP });
+    }
     return out;
 }
 
 function summaryHtml(metrics) {
     return metrics.map(m =>
-        '<div class="metric"><span class="metric-label">' + m.label +
+        '<div class="metric"' + (m.title ? ' title="' + esc(m.title) + '"' : '') +
+        '><span class="metric-label">' + m.label +
         '</span><span class="metric-value">' + m.value + '</span></div>'
     ).join('');
 }

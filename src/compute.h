@@ -256,6 +256,28 @@ struct pgwt_tm_result {
     int    has_measured_cpu;
     double cpu_clamped_ms;
     double wait_gap_cpu_ms;
+
+    /* #115 Part 2: the "operating system" reference — measured on-CPU ns
+     * summed across the WHOLE window regardless of which PostgreSQL wait (or
+     * idle) event was set at the time: cpu_ms (CPU*) + wait_gap_cpu_ms
+     * (on-CPU while a wait event was set, the S3 spin measurement) +
+     * on-CPU-while-idle (new here — the same per-interval cpu_ns already
+     * carried by idle-labeled intervals, simply not summed before). This is
+     * the most complete on-CPU figure obtainable WITHOUT a new measurement,
+     * so it reads closer to `top`/the kernel's own view than CPU* alone —
+     * but it still excludes run-queue delay (time queued for a processor
+     * carries no cpu_ns at all; the daemon has no scheduler-tracepoint
+     * capture), so even os_cpu_ms typically reads BELOW a true kernel
+     * figure. See README "Time model" / docs/AAS_SEMANTICS_DECISION.md.
+     *
+     * has_os_cpu_ref is 0 — reference WITHHELD, never a confident wrong
+     * number — unless EVERY wait/idle interval touching the window carries a
+     * measured cpu_ns. A purely sampled/v2 window, or a tier switch
+     * mid-window (some intervals measured, some UNKNOWN), leaves part of
+     * os_cpu_ms genuinely unknown rather than zero, so the reference must be
+     * absent rather than a silently-low approximation. */
+    double os_cpu_ms;
+    int    has_os_cpu_ref;
 };
 
 void pgwt_compute_time_model(const struct pgwt_trace_event *events, int count,

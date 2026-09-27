@@ -14,9 +14,9 @@ import {
     stackedBar, eventStackedBar,
     BAR_MIN_SEG_PCT, BAR_BELOW_COLOR, BAR_OTHER_COLOR,
 } from '../../web/static/lib/table.js';
-import { overviewConfig, eventsConfig } from '../../web/static/lib/builders/table-configs.js';
-import { buildSummary } from '../../web/static/views/overview.js';
-import { WAIT_CLASSES, classColor, eventColor, fmtMs } from '../../web/static/lib/format.js';
+import { overviewConfig, eventsConfig, CPU_STAR_TOOLTIP } from '../../web/static/lib/builders/table-configs.js';
+import { buildSummary, OS_CPU_REF_TOOLTIP } from '../../web/static/views/overview.js';
+import { WAIT_CLASSES, classColor, eventColor, fmtMs, esc } from '../../web/static/lib/format.js';
 
 test('overview: rows keep server order (no sort) + clickable indent-1', () => {
     const rows = [
@@ -43,6 +43,24 @@ test('overview onClick: indent-1 -> class drill intent, strips asterisk', () => 
         { filterKey: 'class', filterValue: 'CPU', label: 'CPU' });
     assert.equal(overviewConfig.onClick({ indent: 0, name: 'DB Time' }), null);
     assert.equal(overviewConfig.onClick({ indent: 2, name: 'IO:WalSync' }), null);
+});
+
+// ── #115 Part 1: the CPU* tooltip (say what we count) ──────────────────────
+
+test('overview: CPU* row name cell carries the explanatory tooltip; others do not', () => {
+    const rows = [
+        { indent: 0, name: 'DB Time', ms: 12500, pct: 100, aas: 3.47 },
+        { indent: 1, name: 'CPU*', ms: 4800, pct: 38.4, aas: 1.33 },
+        { indent: 1, name: 'IO', ms: 2100, pct: 16.8, aas: 0.58 },
+        { indent: 2, name: 'IO:DataFileRead', ms: 900, pct: 7.2, aas: 0.25 },
+    ];
+    const model = buildTableModel(overviewConfig, rows, null);
+    const html = (i) => model.rows[i].cells[0].html;
+    assert.ok(html(1).includes('title="' + esc(CPU_STAR_TOOLTIP) + '"'),
+        'CPU* row carries the exact explanatory tooltip');
+    assert.ok(!html(0).includes('title='), 'DB Time row carries no CPU tooltip');
+    assert.ok(!html(2).includes('title='), 'IO class row carries no CPU tooltip');
+    assert.ok(!html(3).includes('title='), 'IO sub-event row carries no CPU tooltip');
 });
 
 test('events: descending sort by count', () => {
@@ -96,6 +114,46 @@ test('buildSummary: exact metric set + values', () => {
 test('buildSummary: empty data -> empty metrics', () => {
     assert.deepEqual(buildSummary(null, 4), []);
     assert.deepEqual(buildSummary({ rows: [] }, 4), []);
+});
+
+// ── #115 Part 2: the OS CPU reference secondary value ───────────────────────
+
+test('buildSummary: has_os_cpu_ref=true adds the OS CPU (ref) metric, with its tooltip', () => {
+    const data = { wall_ms: 3600000, has_os_cpu_ref: true, os_cpu_ms: 5300.4, rows: [
+        { indent: 0, name: 'DB Time', ms: 12500, pct: 100, aas: 3.47 },
+        { indent: 1, name: 'CPU*', ms: 4800 },
+    ] };
+    const s = buildSummary(data, 4);
+    const ref = s.find(m => m.label === 'OS CPU (ref)');
+    assert.ok(ref, 'OS CPU (ref) metric present');
+    assert.equal(ref.value, fmtMs(5300.4));
+    assert.equal(ref.title, OS_CPU_REF_TOOLTIP);
+});
+
+test('buildSummary: has_os_cpu_ref absent/false -> no OS CPU (ref) metric, ' +
+     'even though os_cpu_ms carries a number', () => {
+    // Bypass case: a tier switch mid-window (or a sampled/v2 window) leaves
+    // the server's os_cpu_ms holding an untrustworthy number and
+    // has_os_cpu_ref false. The client must gate on the FLAG, never treat a
+    // present numeric os_cpu_ms as license to render it.
+    const base = { wall_ms: 1000, os_cpu_ms: 999999, rows: [
+        { indent: 0, name: 'DB Time', ms: 100, pct: 100, aas: 0.1 },
+    ] };
+    assert.equal(buildSummary(base, 4).find(m => m.label === 'OS CPU (ref)'), undefined);
+    assert.equal(
+        buildSummary({ ...base, has_os_cpu_ref: false }, 4)
+            .find(m => m.label === 'OS CPU (ref)'),
+        undefined);
+});
+
+test('buildSummary: has_os_cpu_ref=true with a legitimate os_cpu_ms=0 still ' +
+     'renders the metric (a real zero is not "absent")', () => {
+    const data = { wall_ms: 500, has_os_cpu_ref: true, os_cpu_ms: 0, rows: [
+        { indent: 0, name: 'DB Time', ms: 0, pct: 100, aas: 0 },
+    ] };
+    const ref = buildSummary(data, 4).find(m => m.label === 'OS CPU (ref)');
+    assert.ok(ref, 'a measured (real) zero must still render the metric');
+    assert.equal(ref.value, fmtMs(0));
 });
 
 // ── U2 review P11: stacked-bar truth ────────────────────────────────────────

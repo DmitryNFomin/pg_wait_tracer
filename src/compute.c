@@ -732,6 +732,16 @@ void pgwt_compute_time_model(const struct pgwt_trace_event *events, int count,
     double cpu_measured_ns = 0.0, offcpu_ns = 0.0;
     double cpu_clamped_ns = 0.0, wait_gap_cpu_ns = 0.0;
     int    has_measured_cpu = 0;
+    /* #115 Part 2: on-CPU ns measured during IDLE-labeled intervals (the
+     * cpu_ns column already carries this — see the wire-format comment on
+     * struct pgwt_trace_event — it was simply never summed before). Together
+     * with cpu_measured_ns + wait_gap_cpu_ns this is the "OS reference".
+     * os_ref_gap is set when a wait- or idle-labeled interval with nonzero
+     * wall time has an UNKNOWN cpu_ns (sampled tier, v2 file, or a tier
+     * switch mid-window) — the reference is withheld entirely rather than
+     * silently under-counting that interval's on-CPU contribution as 0. */
+    double idle_cpu_ns = 0.0;
+    int    os_ref_gap = 0;
     double cat_ns[PGWT_NUM_CATS] = {0};
     /* io_worker busy%% needs the worker-pool size: count distinct io_worker
      * pids seen in the window (a handful — io_workers defaults to 3). */
@@ -761,6 +771,15 @@ void pgwt_compute_time_model(const struct pgwt_trace_event *events, int count,
 
         if (pgwt_is_idle_event(ev->old_event)) {
             idle_time_ns += dur_ns;
+            /* #115 Part 2: the idle interval's own measured cpu_ns (the
+             * protocol-tail-after-socket-read-returns sliver) — see the
+             * accumulator comment above. */
+            if (ev->cpu_ns != PGWT_CPU_NS_UNKNOWN) {
+                idle_cpu_ns += (double)ev->cpu_ns;
+                has_measured_cpu = 1;
+            } else if (dur_ns > 0) {
+                os_ref_gap = 1;
+            }
             continue;
         }
 
@@ -810,6 +829,10 @@ void pgwt_compute_time_model(const struct pgwt_trace_event *events, int count,
             if (ev->cpu_ns != PGWT_CPU_NS_UNKNOWN) {
                 wait_gap_cpu_ns += (double)ev->cpu_ns;   /* observability only */
                 has_measured_cpu = 1;
+            } else if (dur_ns > 0) {
+                /* #115 Part 2: this wait interval's on-CPU contribution to
+                 * the OS reference is genuinely unknown, not zero. */
+                os_ref_gap = 1;
             }
         }
     }
@@ -957,6 +980,15 @@ void pgwt_compute_time_model(const struct pgwt_trace_event *events, int count,
     out->has_measured_cpu = has_measured_cpu;
     out->cpu_clamped_ms  = cpu_clamped_ns / 1e6;
     out->wait_gap_cpu_ms = wait_gap_cpu_ns / 1e6;
+
+    /* #115 Part 2: the "OS" reference. has_os_cpu_ref requires BOTH some
+     * measured cpu_ns to exist (has_measured_cpu — rules out sampled/v2
+     * windows, where it stays 0/absent) AND no wait/idle interval with an
+     * unknown on-CPU contribution (os_ref_gap — rules out a tier switch
+     * mid-window). Absent renders as absent (0/false), never a confidently
+     * wrong low number. */
+    out->os_cpu_ms      = (cpu_measured_ns + wait_gap_cpu_ns + idle_cpu_ns) / 1e6;
+    out->has_os_cpu_ref = has_measured_cpu && !os_ref_gap;
 }
 
 /* ── Top Events ───────────────────────────────────────────── */

@@ -105,10 +105,26 @@ function pctlCell(key) {
     };
 }
 
+/* #115 Part 1: the one sentence that says what CPU* counts, and why a
+ * process-level (operating-system) figure reads higher for the same window —
+ * read in the CPU* row's own name cell, the one place "CPU" is already
+ * explained (the asterisk footnote — README "time_model"). */
+export const CPU_STAR_TOOLTIP =
+    'CPU is time with no PostgreSQL wait event set. An operating-system ' +
+    'figure reads higher, because time queued for a processor — or still ' +
+    'executing inside a wait region — still carries that wait’s event.';
+
 export const overviewConfig = {
     columns: [
         { key: 'name', label: 'Stat Name', format: (r) => {
-            if (r.indent >= 1) return _dot(r.name) + esc(r.name);
+            if (r.indent >= 1) {
+                const dotted = _dot(r.name) + esc(r.name);
+                if (r.name === 'CPU*') {
+                    return '<span class="cpu-star-name" title="' +
+                        esc(CPU_STAR_TOOLTIP) + '">' + dotted + '</span>';
+                }
+                return dotted;
+            }
             return esc(r.name);
         }},
         { key: 'ms', label: 'Time', cls: 'num', format: (r) => fmtMs(r.ms) },

@@ -80,3 +80,72 @@ signal (measured 80% busy at the default 3 workers = near saturation).
 - `pg_stat_io` cross-checks must compare COUNTS, not time (study Q3:
   the historical 0.80 "async overlap" ratio was per-op
   instrumentation-window overhead, 0.55–0.90 depending on latency).
+
+## Addendum (issue #115): CPU\* versus the operating system's own figure
+
+**The convention, stated plainly.** CPU\* is time with no PostgreSQL wait
+event set — nothing more. A backend keeps its wait's label (and its full
+wall-clock duration) for as long as that wait_event is set, even for the
+part of that duration spent queued for a processor after being woken, or
+spent already running on one before the field is cleared. So a backend
+never "loses" time between the wait bucket and CPU\* — every nanosecond the
+kernel can account for is inside DB Time, under one label or the other —
+but a fraction of what a kernel-level tool would call "on a CPU or waiting
+for one" is filed under the wait that caused it rather than under CPU\*.
+This is deliberate, not a bug: it matches Oracle's Active Session History
+(`ON CPU` is a state a session reaches only after leaving a wait bucket)
+and Amazon's Performance Insights, and it is the more useful convention for
+diagnosis — a backend queued for a processor while waiting on
+`LWLock:BufferContent` is still telling you the story is lock contention,
+not "CPU load" in the generic sense.
+
+**The consequence: an operating-system figure reads higher, on the same
+window, by construction.** `top`/`ps`-style per-process accounting (and any
+run-queue-aware sampler) counts a process as consuming a processor for as
+long as it is running OR runnable, with no notion of a PostgreSQL wait
+label at all. Every nanosecond pg_wait_tracer files under a wait's label
+that the kernel would count as "on CPU or run-queue" is, from the
+operating system's side, indistinguishable from CPU\*. The gap is not
+noise or measurement error on either side; it is two different, equally
+valid partitions of the same wall time.
+
+**The gap's shape (measured, kernel-timeline-joined ground truth, one
+saturated TPC-B window, from issue #115's final
+reconciliation — the split moves with workload structure, not the total):**
+
+| component | share of the gap |
+|---|---|
+| run-queue delay while a (non-idle) wait event is set | ~42% |
+| run-queue delay while `Client:ClientRead` (idle) is set | ~40% |
+| on-CPU execution while a wait event is set (the S3 "spin" measurement) | ~12% |
+| on-CPU execution while idle is set (the protocol tail after a socket read returns, before the next wait/idle transition) | ~6% |
+| unexplained | ~0% |
+
+Two-thirds of the gap is run-queue delay (queued for a processor, not yet
+running), split roughly evenly between "queued while a real wait is set"
+and "queued while idle is set" — both invisible to a per-process CPU
+sampler for exactly the reason above (it under-samples the state it is
+trying to measure: the sampler's own wakeup competes for the same queue).
+The remaining third is genuine on-CPU execution that pg_wait_tracer already
+attributes to a wait or to idle rather than to CPU\*, by the stated
+convention.
+
+**What pg_wait_tracer's own numbers are comparable with.** CPU\* alone is
+comparable to *no* single figure `top` reports — it is a strictly narrower
+quantity by design. The daemon surfaces one further figure that narrows the
+gap without changing the convention: `os_cpu_ms` (`src/compute.c`
+`pgwt_compute_time_model`, "OS CPU (ref)" in the web UI's overview panel) is
+CPU\* plus every wait's and every idle interval's own measured on-CPU
+nanoseconds (the two "on-CPU execution while X is set" rows above) — the
+most complete on-CPU figure obtainable from what the daemon already
+measures per interval, without adding a new instrument. It is comparable to
+a kernel on-CPU-only figure (e.g. `utime+stime`), and it still reads *below*
+a run-queue-aware figure (`top`'s notion of "busy", Oracle/AWS ASH's `ON
+CPU`, or the kernel-timeline join above), because pg_wait_tracer has no
+scheduler-tracepoint instrumentation and therefore cannot see run-queue
+delay at all — the two-thirds of the gap above stays permanently
+unaccounted for on our side until that instrument exists. The UI withholds
+`os_cpu_ms` outright (rather than showing an under-counted number) for any
+window where even one wait/idle interval's on-CPU contribution is not
+actually measured — a sampled-tier window, a `.trace` v2 file, or a tier
+switch partway through the window.

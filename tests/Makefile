@@ -20,7 +20,7 @@ TESTS     = test_wait_event test_cmdline test_spawn test_event_writer test_event
             test_pgss_resolver \
             test_pg13_resolve test_discovery_pie test_discovery_nopie \
             test_replay_fidelity test_durability test_query_text \
-            test_golden_fixture test_live_accum \
+            test_golden_fixture test_live_accum test_os_cpu_ref \
             gen_test_traces gen_bench_traces test_concurrent_rw cross_validate \
             dump_markers
 
@@ -73,6 +73,16 @@ test_bucket: test_bucket.c
 # wait_event.o only for the idle/hidden classification. Runs anywhere.
 test_live_accum: test_live_accum.c ../src/map_reader.c ../src/snapshot.c \
                  ../src/compute.c \
+                 $(BUILD)/wait_event.o $(BUILD)/spawn.o $(BUILD)/cJSON.o
+	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^
+
+# test_os_cpu_ref: issue #115 Part 2 — the "operating system" CPU reference
+# (pgwt_tm_result.os_cpu_ms/has_os_cpu_ref) in pgwt_compute_time_model.
+# Compiles compute.c directly (-DPGWT_SERVER); wait_event.o only for the
+# idle/class classification helpers. Same pgwt_visit_summaries stub pattern
+# as test_live_accum (compute.c's only foreign symbol, unused by the
+# function under test). Runs anywhere — no daemon, no BPF, no PostgreSQL.
+test_os_cpu_ref: test_os_cpu_ref.c ../src/compute.c \
                  $(BUILD)/wait_event.o $(BUILD)/spawn.o $(BUILD)/cJSON.o
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^
 

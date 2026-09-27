@@ -589,7 +589,11 @@ excluded from DB Time. It still shows up in event lists, but with `—` in the
   over a 5-second interval, the maximum is 60,000 ms (12 x 5000).
 - **CPU\*** means time when no PostgreSQL wait event was set. This is mostly
   CPU execution, but may include uninstrumented code paths. The asterisk
-  indicates it is an approximation.
+  indicates it is an approximation. An operating-system figure (`top`, etc.)
+  for the same window reads *higher*: time a backend spends queued for a
+  processor, or still running one instant before its wait field clears,
+  keeps that wait's label here instead of falling into CPU\* — see "CPU\*
+  vs the operating system's CPU%" below.
 - **IO at 13.0%** — and you can immediately see that **DataFileRead at 10.1%**
   is the dominant IO event. No need to switch to `system_event` view.
 - **Lock at 8.4%** — the sub-event shows it's almost entirely Transaction
@@ -598,6 +602,65 @@ excluded from DB Time. It still shows up in event lists, but with `—` in the
   `system_event` view for the full event list.
 - **Activity/Idle** is shown separately and excluded from DB Time. Idle backends
   contribute nothing to DB Time.
+
+#### CPU\* vs the operating system's CPU%
+
+Put `top` beside pg_wait_tracer during a busy window and its CPU figure for
+the postgres processes will read higher than CPU\* here — commonly by
+several points under real concurrency. That gap is not a bug in either
+tool; it is two different, equally valid ways of partitioning the same wall
+time.
+
+**The convention.** CPU\* is time with *no PostgreSQL wait event set* —
+nothing more. A backend keeps its wait's label, and its full wall-clock
+duration, for as long as that wait_event stays set — including the part of
+that duration spent queued for a processor after being woken, and the part
+spent already running on one before the field clears. `top`/`ps`-style
+accounting has no notion of a wait label at all: it counts a process as
+consuming a processor for as long as it is running or runnable, full stop.
+This is the same convention Oracle's Active Session History and Amazon's
+Performance Insights use (`ON CPU` is reached only after leaving a wait),
+and it is the more useful one for diagnosis: a backend queued for a
+processor while `LWLock:BufferContent` is set is still telling you the
+story is lock contention.
+
+**The gap's shape**, measured by joining pg_wait_tracer's own interval
+stream against a kernel scheduler timeline nanosecond-by-nanosecond over an
+identical saturated window (issue #115's kernel-timeline reconciliation; the
+split moves with workload structure, the shape is illustrative):
+
+| where the "missing" time actually is | share of the gap |
+|---|---|
+| queued for a processor, while a real wait event is set | ~42% |
+| queued for a processor, while idle (`Client:ClientRead`) is set | ~40% |
+| already on a processor, while a wait event is set (the "spin" pg_wait_tracer already measures per-interval, S3) | ~12% |
+| already on a processor, while idle is set (the protocol tail right after a socket read returns) | ~6% |
+| unexplained | ~0% |
+
+Two-thirds of the gap is run-queue delay — queued, not yet running —
+against which any per-process CPU sampler (including `top`, and including
+pg_wait_tracer's own sampled tier) is structurally biased low: the
+sampler's own wakeup competes for the same run queue it is trying to
+observe, so it disproportionately misses exactly the moments the queue is
+deep. pg_wait_tracer does not measure run-queue delay at all today (no
+scheduler-tracepoint capture) — that two-thirds of the gap is a known,
+named absence, not silently approximated as zero.
+
+**What our own numbers are comparable with.** CPU\* is strictly narrower
+than anything `top` reports, by design — there is no operating-system
+figure it should be expected to match. The one further figure
+pg_wait_tracer surfaces, **"OS CPU (ref)"** in the web UI's overview panel
+(`os_cpu_ms` from `src/compute.c`), is CPU\* plus the measured on-CPU
+nanoseconds of every wait and idle interval — the two "already on a
+processor" rows above. That is the most complete on-CPU figure obtainable
+from what the daemon already measures, without adding a new instrument. It
+is comparable to a kernel on-CPU-only figure (e.g. `utime+stime`) — closer
+to `top` than CPU\* alone, but still below it, since it still excludes the
+two-thirds run-queue share. The UI withholds it entirely, rather than
+showing an under-counted number, for any window where even one wait/idle
+interval's on-CPU contribution genuinely was not measured (a sampled-tier
+window, a `.trace` v2 file, or a tier switch partway through the window).
+See `docs/AAS_SEMANTICS_DECISION.md` for the full derivation.
 
 #### Multi-window mode
 
