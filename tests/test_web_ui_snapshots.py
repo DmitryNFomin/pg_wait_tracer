@@ -113,6 +113,7 @@ GALLERY_STATIC_CELLS = [
     "gallery-aas-dense",                        # 300-bucket class-mode stack
     "gallery-aas-dense-events",                 # event-mode: P2 identity colors
     "gallery-aas-sampled",                      # fidelity: amber sampled band
+    "gallery-aas-cpu-running-waiting",          # #187: CPU running/waiting bands + tier-switch conservation
     "gallery-aas-mixed-escalation",             # fidelity: mixed sub-ranges
     "gallery-aas-escalated-live-edge",          # fidelity: escalation edge line
     "gallery-aas-unicode-names",                # i18n event names

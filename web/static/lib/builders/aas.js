@@ -26,7 +26,9 @@
  * all-times-are-UTC convention (UI-11) — never ECharts' locale defaults.
  */
 
-import { WAIT_CLASSES, classIndex, eventColor, fmtTime, esc } from '../format.js';
+import {
+    WAIT_CLASSES, AAS_CLASS_ORDER, classIndex, eventColor, fmtTime, esc,
+} from '../format.js';
 import {
     buildFidelityShading, buildEscalationAnnotation, fidelityOf, fidelityLabel,
 } from './fidelity.js';
@@ -128,12 +130,19 @@ export function buildAasOption(data, opts) {
             return id != null ? id : null;
         });
     } else {
-        seriesDefs = WAIT_CLASSES.map(wc => ({
+        // AAS_CLASS_ORDER (not WAIT_CLASSES' wire-index-pinned order, see
+        // format.js): 'offcpu' stacks immediately above 'cpu' so the CPU
+        // group reads as one area split into two bands, not two unrelated
+        // classes. Conservation (T8, #187): a bucket's 'offcpu' key is 0 (not
+        // absent) wherever no measured cpu_ns exists — sampled windows and a
+        // tier switch mid-window both fall out of this same per-bucket sum
+        // with no special-casing, so the stack never silently under-totals.
+        seriesDefs = AAS_CLASS_ORDER.map(wc => ({
             name: wc.label,
             data: buckets.map(b => [nsToMs(b.t), +(b[wc.key] || 0).toFixed(4)]),
         }));
-        seriesColors = WAIT_CLASSES.map(c => c.color);
-        seriesIds = WAIT_CLASSES.map(() => null);   // class drills go by name
+        seriesColors = AAS_CLASS_ORDER.map(c => c.color);
+        seriesIds = AAS_CLASS_ORDER.map(() => null);   // class drills go by name
     }
 
     const maxAas = (data && data.max_aas) || 0;
@@ -383,6 +392,10 @@ export function buildAasOption(data, opts) {
     };
 }
 
+/* Label of the 'offcpu' WAIT_CLASSES entry — used to spot it among tooltip
+ * params by name (series carry their WAIT_CLASSES label as seriesName). */
+const OFFCPU_LABEL = WAIT_CLASSES.find(c => c.key === 'offcpu').label;
+
 /* Pure tooltip renderer (exported for testing). `params` is the ECharts axis
  * tooltip param array; value[0] is the bucket time in AXIS units — ms on the
  * U2a time axis — converted back to ns for the UTC fmtTime rendering. */
@@ -390,12 +403,14 @@ export function aasTooltip(params, bns) {
     if (!params || !params.length) return '';
     const t = fmtTime(params[0].value[0] * NS_PER_MS, bns);
     let total = 0;
+    let hasOffcpu = false;
     const items = [];
     for (const p of params) {
         const val = (p.value && p.value[1]) || 0;
         if (val > 0.001) {
             items.push({ name: p.seriesName, value: val, color: p.color });
             total += val;
+            if (p.seriesName === OFFCPU_LABEL) hasOffcpu = true;
         }
     }
     items.reverse();  // top-of-stack first, matching the old ApexCharts order
@@ -405,6 +420,16 @@ export function aasTooltip(params, bns) {
         const pct = total > 0 ? (it.value / total * 100).toFixed(0) : '0';
         html += '<span style="color:' + it.color + '">●</span> ' + esc(it.name) +
                 ': <b>' + it.value.toFixed(2) + '</b> (' + pct + '%)<br>';
+    }
+    // T8/#187: the CPU group is running + waiting for a core (see
+    // docs/AAS_SEMANTICS_DECISION.md); this footnote only shows when the
+    // split actually rendered a nonzero "waiting" band, since a sampled
+    // window's combined single band needs no explanation beyond its badge.
+    if (hasOffcpu) {
+        html += '<span style="opacity:0.7;font-size:11px">CPU is split into ' +
+                'running and waiting for a core wherever the exact tier can ' +
+                'measure the difference; a sampled window shows the combined ' +
+                'total instead.</span><br>';
     }
     html += '</div>';
     return html;

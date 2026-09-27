@@ -318,8 +318,10 @@ def test_summary_bar(page):
     check("DB Time" in metric_texts, f"DB Time metric present")
     check("CPUs" in metric_texts and metric_texts["CPUs"] == "4",
           f"CPUs = 4 (got '{metric_texts.get('CPUs', 'N/A')}')")
-    check("AAS" in metric_texts and "3.47" in metric_texts["AAS"],
-          f"AAS = 3.47 (got '{metric_texts.get('AAS', 'N/A')}')")
+    # #187: db_time_ms now includes the "CPU (waiting for a core)" row
+    # (12500 + offcpu_ms 260 = 12760), so AAS moved 3.47 -> 3.54 too.
+    check("AAS" in metric_texts and "3.54" in metric_texts["AAS"],
+          f"AAS = 3.54 (got '{metric_texts.get('AAS', 'N/A')}')")
 
 
 def test_overview_table(page):
@@ -338,9 +340,11 @@ def test_overview_table(page):
     first_row = page.text_content("#table-container table tbody tr:first-child")
     check("DB Time" in first_row, f"First row is 'DB Time'")
 
-    # Should have CPU* row
+    # Should have the CPU running/waiting-for-a-core rows (#187 two-band split)
     table_text = page.text_content("#table-container")
-    check("CPU*" in table_text, "Table has CPU* row")
+    check("CPU (running)" in table_text, "Table has CPU (running) row")
+    check("CPU (waiting for a core)" in table_text,
+          "Table has CPU (waiting for a core) row")
     check("IO" in table_text, "Table has IO row")
     check("Lock" in table_text, "Table has Lock row")
 
@@ -1342,15 +1346,16 @@ def test_exact_summary_values(page):
         value = m.query_selector(".metric-value").text_content()
         vals[label] = value
 
-    # Canned: DB Time=12500ms -> fmtMs -> "12.5s"
-    check(vals.get("DB Time") == "12.5s",
-          f"DB Time = 12.5s (got '{vals.get('DB Time')}')")
+    # Canned: DB Time=12760ms (#187: includes the "CPU (waiting for a core)"
+    # row, 12500 + offcpu_ms 260) -> fmtMs -> "12.8s"
+    check(vals.get("DB Time") == "12.8s",
+          f"DB Time = 12.8s (got '{vals.get('DB Time')}')")
     # Wall=3600000ms -> "3600.0s"
     check(vals.get("Wall") == "3600.0s",
           f"Wall = 3600.0s (got '{vals.get('Wall')}')")
-    # AAS=3.47
-    check(vals.get("AAS") == "3.47",
-          f"AAS = 3.47 (got '{vals.get('AAS')}')")
+    # AAS=3.54 (moved from 3.47 with db_time_ms above)
+    check(vals.get("AAS") == "3.54",
+          f"AAS = 3.54 (got '{vals.get('AAS')}')")
     # Idle=45000ms -> "45.0s"
     check(vals.get("Idle") == "45.0s",
           f"Idle = 45.0s (got '{vals.get('Idle')}')")
@@ -2755,7 +2760,8 @@ def test_histogram_clear_invalidates_strip(page):
           f"wheel strip requests are unfiltered after All ({sent})")
     dbg = page.evaluate("window.__pgwt.aasDebug()")
     names = (dbg or {}).get("seriesNames", [])
-    check("CPU" in names and "IO" in names,
+    # #187: the class-mode legend now reads "CPU (running)", not "CPU".
+    check("CPU (running)" in names and "IO" in names,
           f"painted strip is class-mode/unfiltered after wheel ({names[:4]})")
     yh = (dbg or {}).get("yHysteresis", {})
     check(yh.get("applied") is None and yh.get("run") == 0,

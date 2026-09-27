@@ -80,3 +80,57 @@ signal (measured 80% busy at the default 3 workers = near saturation).
 - `pg_stat_io` cross-checks must compare COUNTS, not time (study Q3:
   the historical 0.80 "async overlap" ratio was per-op
   instrumentation-window overhead, 0.55–0.90 depending on latency).
+
+## Addendum (#187): the CPU group's two bands
+
+Date: 2026-09-27
+Status: DECIDED (owner-approved, closes #187; implements the recommendation
+recorded on #115)
+
+**The CPU group's meaning does not change.** "CPU" keeps meaning running
+plus waiting for a processor — the Oracle ASH / AWS RDS Performance Insights
+convention this decision already cites above, and what a database engineer
+assumes "CPU" means in a wait-based tool. What changes is only that, where
+the exact tier can measure the two halves separately, the UI renders them as
+two adjacent bands/rows instead of one:
+
+- **CPU (running)** — on a processor right now (`wait_event_info == 0` AND
+  actually scheduled).
+- **CPU (waiting for a core)** — runnable but sitting in the kernel run
+  queue. No PostgreSQL wait event exists for this state, so by the group's
+  own definition it is CPU, not an unaccounted gap; #115's escalation-window
+  investigation found this to be a real, measurable ~3.4-3.7pp-of-non-idle
+  effect under CPU saturation, not sampling noise.
+
+**Conservation, not addition.** `CPU (running) + CPU (waiting for a core) +
+Σ every other wait class == DB Time` held before this change too (T8,
+`src/compute.c`'s `offcpu_ns` residual) — #187 was that the web UI's AAS
+chart silently DROPPED the already-computed `offcpu` series
+(`web/static/lib/builders/aas.js` stacked only the classes in
+`WAIT_CLASSES`, which had no `offcpu` entry), under-summing the headline
+chart's bands by exactly the run-queue time (~152s against 177s of
+execution in one measured window). This addendum fixes the display, not the
+computation.
+
+**Two caveats ride the same asterisk, not one.** An un-split `CPU*` row
+(the sampled tier, or the rare exact-tier window with no measured `cpu_ns`
+at all) means either or both of:
+
+1. PostgreSQL does not instrument every code path — some genuine CPU time
+   has no wait event and no further explanation (the ORIGINAL asterisk
+   caveat, unchanged).
+2. This window cannot separate "running" from "waiting for a core" even
+   where the exact tier could elsewhere — sampling cannot observe the run
+   queue at all (`pg_stat_activity`-style samplers only get scheduled when
+   the run queue is short, so they systematically under-observe exactly the
+   state they are trying to measure — #115's own finding).
+
+**Tier-switch behavior**: the sampled tier's `offcpu` value is always 0 (not
+absent — see `src/compute.c`'s `pgwt_compute_aas_from_summaries`), so the
+CPU group's stacked TOTAL is continuous across a tier switch mid-window; only
+the split disappears. No renormalization step, no visible jump.
+
+**Colour**: `offcpu`'s band uses a related hue to `cpu`'s (same green, darker/
+less saturated) so the two read as one group split in two rather than
+unrelated categories — flagged for the owner's eye as a starting point, not
+a final decision (`web/static/lib/format.js`).

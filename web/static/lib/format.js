@@ -7,8 +7,22 @@
 
 // -- Wait class colors (Oracle ASH / RDS PI inspired) -------------------------
 
+// The CPU *group* keeps its historical meaning — running plus waiting for a
+// processor (the Oracle ASH / RDS Performance Insights convention, and what a
+// database engineer assumes "CPU" means) — see docs/AAS_SEMANTICS_DECISION.md.
+// Where we can measure the split (the exact tier), it renders as two bands:
+// 'cpu' (running) and 'offcpu' (ready but waiting for a core). 'offcpu' is
+// appended at the END of this array, NOT spliced in next to 'cpu': array
+// POSITION here doubles as the wire-format class index (PGWT_NUM_CLASSES=11,
+// src/compute.h) that web/static/lib/builders/timeline.js and lib/table.js's
+// stackedBar() index into directly (WAIT_CLASSES[classIdx]) — 'offcpu' is not
+// one of those 11 real wait_event classes (it is a residual computed
+// server-side, never a per-span wait_event_info value), so inserting it
+// anywhere but the end would silently relabel every class after it. The AAS
+// stacked-area builders (aas.js, uplot-aas.js) that DO want 'offcpu' drawn
+// adjacent to 'cpu' use AAS_CLASS_ORDER below instead of this array's order.
 export const WAIT_CLASSES = [
-    { key: 'cpu',       label: 'CPU',       color: 'rgb(80,250,123)' },
+    { key: 'cpu',       label: 'CPU (running)', color: 'rgb(80,250,123)' },
     { key: 'io',        label: 'IO',        color: 'rgb(30,100,255)' },
     { key: 'lock',      label: 'Lock',      color: 'rgb(255,85,85)' },
     { key: 'lwlock',    label: 'LWLock',    color: 'rgb(255,121,198)' },
@@ -19,6 +33,10 @@ export const WAIT_CLASSES = [
     { key: 'activity',  label: 'Activity',  color: 'rgb(150,100,255)' },
     { key: 'extension', label: 'Extension', color: 'rgb(190,150,255)' },
     { key: 'unknown',   label: 'Unknown',   color: 'rgb(180,180,180)' },
+    // Related hue to 'cpu' (same 135° green, darker/less saturated) so the
+    // two read as one group split in two rather than unrelated categories —
+    // color choice flagged for the owner's eye, not final (spawn contract).
+    { key: 'offcpu',    label: 'CPU (waiting for a core)', color: 'rgb(22,195,66)' },
 ];
 
 export const CLASS_COLOR_MAP = {};
@@ -26,6 +44,19 @@ WAIT_CLASSES.forEach(c => {
     CLASS_COLOR_MAP[c.label.toLowerCase()] = c.color;
     CLASS_COLOR_MAP[c.key] = c.color;
 });
+
+// Stacking/legend order for the AAS stacked-area charts ONLY (aas.js,
+// uplot-aas.js): 'offcpu' immediately follows 'cpu' so the two bands paint as
+// one adjacent group, unlike WAIT_CLASSES' wire-format-pinned order above
+// (where 'offcpu' must stay last). Every other consumer (timeline.js,
+// table.js) keeps using WAIT_CLASSES directly.
+export const AAS_CLASS_ORDER = (() => {
+    const byKey = {};
+    WAIT_CLASSES.forEach(c => { byKey[c.key] = c; });
+    return ['cpu', 'offcpu', 'io', 'lock', 'lwlock', 'ipc', 'client',
+            'timeout', 'bufferpin', 'activity', 'extension', 'unknown']
+        .map(k => byKey[k]);
+})();
 
 export function classColor(name) {
     if (!name) return null;
@@ -54,6 +85,27 @@ export function classIndex(name) {
             return i;
     }
     return -1;
+}
+
+/* #187: the server-side `class_name` filter identity for a class DISPLAY
+ * LABEL — decoupled from the label on purpose. pgwt-server matches a click-
+ * drill's class_name via strcasecmp against pgwt_class_names ("cpu", "io",
+ * ...); it has never heard of a parenthetical qualifier. Before this
+ * existed, both the AAS band click (views/active.js) and the Time Model
+ * table row click (table-configs.js) sent the raw display label straight
+ * through as the filter value, which was harmless while every label matched
+ * its class 1:1 — until 'cpu' grew the "(running)" suffix here, at which
+ * point a class-mode drill on CPU silently matched zero rows (found live in
+ * this feature's own `make check` run, not by inspection).
+ *
+ * Returns null for 'offcpu' ("CPU (waiting for a core)"): it is a computed
+ * residual, not a wait_event class the server can filter by, and there is no
+ * Events-table row that could ever back it — callers must treat null as
+ * "not drillable", never fall back to sending the raw label. */
+export function classFilterName(label) {
+    if (label == null) return null;
+    if (label === 'CPU (waiting for a core)') return null;
+    return String(label).replace(/\s*\(running\)$/, '').replace('*', '');
 }
 
 // -- Event color service (U1, review P2) --------------------------------------

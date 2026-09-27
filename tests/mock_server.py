@@ -216,9 +216,13 @@ _CANNED["info"] = {
 
 _CANNED["time_model"] = {
     "wall_ms": 3600000,
-    "db_time_ms": 12500,
+    # #187: db_time_ms now includes the "CPU (waiting for a core)" row
+    # (12500 + offcpu_ms 260 = 12760) — see the "rows" note below. Before
+    # this fix db_time_ms silently excluded a row the payload already
+    # carried (offcpu_ms), which is exactly the under-sum bug #187 closes.
+    "db_time_ms": 12760,
     "idle_time_ms": 45000,
-    "aas": 3.47,
+    "aas": 3.54,
     # T2 (additive): category decomposition + io_worker utilization
     # (raw path; io_worker ms is OUTSIDE DB Time).
     "categories": [
@@ -232,29 +236,36 @@ _CANNED["time_model"] = {
     "io_worker_busy_pct": 22.2,
     # T8 (§5.5, additive): measured-CPU decomposition + self-checks. The real
     # server always emits these on time_model. has_measured_cpu gates the
-    # Off-CPU* row (present on v3 exact data, absent on sampled/v2). cpu_ms is
-    # the measured CPU* total, offcpu_ms its off-CPU sibling (both in DB Time).
-    # wait_gap_cpu_ms / cpu_clamped_ms are the accounting self-checks. NOTE: no
-    # Off-CPU* row is added to `rows` below — the visual-snapshot baselines are
-    # keyed to this exact table layout (see the top_events note) and the row
-    # schema is identical to any other, so protocol-drift is satisfied by the
-    # top-level keys alone.
+    # "CPU (waiting for a core)" row (present on v3 exact data, absent on
+    # sampled/v2 — those show the combined "CPU*" row alone). cpu_ms is the
+    # measured "CPU (running)" total, offcpu_ms its "waiting for a core"
+    # sibling (both inside DB Time). wait_gap_cpu_ms / cpu_clamped_ms are the
+    # accounting self-checks.
+    #
+    # #187: this row used to be OMITTED from `rows` on purpose (the payload
+    # carried offcpu_ms but the table never showed it, and db_time_ms was
+    # never adjusted to include it either) — deliberately, so no snapshot or
+    # gallery cell ever exercised it, which is exactly how #187 went
+    # unnoticed. It is included now, and db_time_ms above sums it in:
+    # CPU (running) 4800 + CPU (waiting) 260 + IO 3200 + Lock 1500 +
+    # LWLock 1200 + Timeout 1000 + Extension 800 = 12760.
     "has_measured_cpu": True,
     "cpu_ms": 4800,
     "offcpu_ms": 260,
     "wait_gap_cpu_ms": 0.003,
     "cpu_clamped_ms": 0.0,
     "rows": [
-        {"indent": 0, "name": "DB Time",  "ms": 12500, "pct": 100.0, "aas": 3.47},
-        {"indent": 1, "name": "CPU*",     "ms": 4800,  "pct": 38.4,  "aas": 1.33},
-        {"indent": 1, "name": "IO",       "ms": 3200,  "pct": 25.6,  "aas": 0.89},
-        {"indent": 2, "name": "IO:DataFileRead", "ms": 2100, "pct": 16.8, "aas": 0.58},
-        {"indent": 2, "name": "IO:WalSync",      "ms": 800,  "pct": 6.4,  "aas": 0.22},
+        {"indent": 0, "name": "DB Time",  "ms": 12760, "pct": 100.0, "aas": 3.54},
+        {"indent": 1, "name": "CPU (running)", "ms": 4800, "pct": 37.6, "aas": 1.33},
+        {"indent": 1, "name": "CPU (waiting for a core)", "ms": 260, "pct": 2.0, "aas": 0.07},
+        {"indent": 1, "name": "IO",       "ms": 3200,  "pct": 25.1,  "aas": 0.89},
+        {"indent": 2, "name": "IO:DataFileRead", "ms": 2100, "pct": 16.5, "aas": 0.58},
+        {"indent": 2, "name": "IO:WalSync",      "ms": 800,  "pct": 6.3,  "aas": 0.22},
         {"indent": 2, "name": "IO:WalWrite",     "ms": 300,  "pct": 2.4,  "aas": 0.08},
-        {"indent": 1, "name": "Lock",     "ms": 1500,  "pct": 12.0,  "aas": 0.42},
-        {"indent": 1, "name": "LWLock",   "ms": 1200,  "pct": 9.6,   "aas": 0.33},
-        {"indent": 1, "name": "Timeout",  "ms": 1000,  "pct": 8.0,   "aas": 0.28},
-        {"indent": 1, "name": "Extension","ms": 800,   "pct": 6.4,   "aas": 0.22},
+        {"indent": 1, "name": "Lock",     "ms": 1500,  "pct": 11.8,  "aas": 0.42},
+        {"indent": 1, "name": "LWLock",   "ms": 1200,  "pct": 9.4,   "aas": 0.33},
+        {"indent": 1, "name": "Timeout",  "ms": 1000,  "pct": 7.8,   "aas": 0.28},
+        {"indent": 1, "name": "Extension","ms": 800,   "pct": 6.3,   "aas": 0.22},
         {"indent": 0, "name": "Idle",     "ms": 45000, "pct": 0,     "aas": 0.0},
     ],
 }

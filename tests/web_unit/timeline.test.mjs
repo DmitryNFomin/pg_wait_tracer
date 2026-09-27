@@ -510,7 +510,12 @@ test('aggregation: a zero-duration span is present in its column counts', () => 
 test('aggregation: an out-of-range class becomes Unknown, never an off-palette fill', () => {
     const agg = aggregateTimelineColumns(
         [[10, 20, 0, 'weird', 99, '', 10, 10]], 1, 4, 0, 400);
-    assert.equal(agg.segments[0][3], WAIT_CLASSES.length - 1);
+    // NOT "WAIT_CLASSES.length - 1" (#187): 'offcpu' is appended AFTER
+    // 'unknown' in WAIT_CLASSES (it is not one of the 11 wire-format classes
+    // a per-span classIdx can ever be — see format.js), so the real "Unknown"
+    // fallback is found by key, matching timeline.js's own UNKNOWN_CLASS fix.
+    const unknownIdx = WAIT_CLASSES.findIndex(c => c.key === 'unknown');
+    assert.equal(agg.segments[0][3], unknownIdx);
     assert.equal(WAIT_CLASSES[agg.segments[0][3]].label, 'Unknown');
 });
 
