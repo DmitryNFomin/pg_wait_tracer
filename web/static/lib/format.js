@@ -21,8 +21,23 @@
 // anywhere but the end would silently relabel every class after it. The AAS
 // stacked-area builders (aas.js, uplot-aas.js) that DO want 'offcpu' drawn
 // adjacent to 'cpu' use AAS_CLASS_ORDER below instead of this array's order.
+// Owner's colour decision (#187 review): dark green for the ordinary state
+// ("CPU (running)") and an acid/electric green for the state worth noticing
+// ("CPU (waiting for a core)" — queued for a processor). Both sit in the
+// same ~113-142° green hue family (29° apart — a clearly related pair, not
+// a hue-only distinction) but 0.31 apart in HSL lightness (0.29 vs 0.60) so
+// the boundary reads even to someone with reduced green discrimination who
+// relies on lightness alone, not just hue — the WCAG relative-luminance
+// contrast between the two swatches themselves is ~4.0:1. Checked against
+// every other WAIT_CLASSES hue: the nearest neighbor is 'bufferpin' (171°),
+// 29° from the dark green and 59° from the electric one — no collision.
+// Against the app's dark theme background (#1a1a2e, style.css): the dark
+// green's own contrast ratio (~3.1:1) matches 'io' (3.5:1, the previous
+// lowest in the palette) so it stays visible rather than vanishing into the
+// background; the electric green's ratio (~12.2:1) is among the highest in
+// the palette, by design — it is the one meant to jump out.
 export const WAIT_CLASSES = [
-    { key: 'cpu',       label: 'CPU (running)', color: 'rgb(80,250,123)' },
+    { key: 'cpu',       label: 'CPU (running)', color: 'rgb(28,120,62)' },
     { key: 'io',        label: 'IO',        color: 'rgb(30,100,255)' },
     { key: 'lock',      label: 'Lock',      color: 'rgb(255,85,85)' },
     { key: 'lwlock',    label: 'LWLock',    color: 'rgb(255,121,198)' },
@@ -33,10 +48,7 @@ export const WAIT_CLASSES = [
     { key: 'activity',  label: 'Activity',  color: 'rgb(150,100,255)' },
     { key: 'extension', label: 'Extension', color: 'rgb(190,150,255)' },
     { key: 'unknown',   label: 'Unknown',   color: 'rgb(180,180,180)' },
-    // Related hue to 'cpu' (same 135° green, darker/less saturated) so the
-    // two read as one group split in two rather than unrelated categories —
-    // color choice flagged for the owner's eye, not final (spawn contract).
-    { key: 'offcpu',    label: 'CPU (waiting for a core)', color: 'rgb(22,195,66)' },
+    { key: 'offcpu',    label: 'CPU (waiting for a core)', color: 'rgb(79,250,56)' },
 ];
 
 export const CLASS_COLOR_MAP = {};

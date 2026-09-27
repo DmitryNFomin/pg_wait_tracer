@@ -184,7 +184,10 @@ export const sessionsConfig = {
         { key: 'user', label: 'User', format: (r) => esc(r.user || '') },
         { key: 'db', label: 'Database', format: (r) => esc(r.db || '') },
         { key: 'db_time_ms', label: 'DB Time', cls: 'num', format: (r) => fmtMs(r.db_time_ms) },
-        { key: 'cpu_pct', label: 'CPU%', cls: 'num', format: (r) => pctBar(r.cpu_pct, 'rgb(80,250,123)') },
+        // #187: was a hardcoded literal that silently went stale when the
+        // owner recoloured 'cpu' (dark green for "running"); classColor('cpu')
+        // stays in sync with WAIT_CLASSES by construction.
+        { key: 'cpu_pct', label: 'CPU%', cls: 'num', format: (r) => pctBar(r.cpu_pct, classColor('cpu') || 'rgb(28,120,62)') },
         { key: 'wait_pct', label: 'Wait%', cls: 'num', format: (r) => {
             const color = classColor(r.top_wait) || '#F44336';
             return pctBar(r.wait_pct, color);

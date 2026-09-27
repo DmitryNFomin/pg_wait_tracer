@@ -114,8 +114,9 @@ test('renderItem draws a class-colored rect at the bar start, 60% band height', 
     assert.equal(r.shape.width, 50);       // end-start
     assert.equal(r.shape.height, 24);      // 40 * 0.6
     assert.equal(r.shape.y, 200 - 12);     // centered
-    // class 0 (CPU) color from WAIT_CLASSES
-    assert.equal(r.style.fill, 'rgb(80,250,123)');
+    // class 0 (CPU) color from WAIT_CLASSES — dark green (#187 owner colour
+    // decision: CPU (running) is the calm/deep green in the pair).
+    assert.equal(r.style.fill, 'rgb(28,120,62)');
 });
 
 test('renderItem: unknown classIdx falls back to grey, width >= 1', () => {

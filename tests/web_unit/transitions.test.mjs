@@ -80,8 +80,9 @@ test('node size scales 15..120 by sqrt(ms/maxMs); eventColor identity tint appli
     // largest node -> sqrt(1)*105 + 15 = 120 (clamped max)
     assert.equal(cpu.symbolSize, 120);
     // eventColor('CPU', 'CPU*') — tint step 1 of the CPU hue, NOT the flat
-    // class green rgb(80,250,123).
-    assert.equal(cpu.itemStyle.color, 'rgb(155,247,178)');
+    // class green rgb(28,120,62) (#187 owner colour decision: dark green
+    // for CPU (running)).
+    assert.equal(cpu.itemStyle.color, 'rgb(52,167,95)');
 });
 
 test('cross-view identity: every node color equals eventColor(null, name)', () => {
