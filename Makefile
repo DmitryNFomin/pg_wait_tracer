@@ -261,8 +261,14 @@ clean:
 
 # ---------------------------------------------------------------------------
 # Developer loop (CLAUDE.md). None of these need the BPF build.
-#   check          deterministic tier on this machine (node/go/python/Playwright)
-#   check-fast     node + go + py_compile only (seconds)
+#   check          deterministic tier on this machine (node/go/python/Playwright),
+#                  serialized machine-wide by scripts/check-lock.sh so that
+#                  concurrent agent worktrees on this Mac queue for it
+#                  instead of competing (issue: raising the in-flight-agent
+#                  limit to three). Escape hatch for a human, never agents:
+#                  PGWT_SKIP_CHECK_LOCK=1 (mirrors PGWT_SKIP_PUSH_GUARD).
+#   check-fast     node + go + py_compile only (seconds) -- NOT locked,
+#                  it's the sub-second interactive loop
 #   box-check      live tier on an x86 Linux box: OS=ubuntu|el8|el9 PG=<major>
 #                  EPHEMERAL=1: throwaway Hetzner VM from the gate-box
 #                  snapshot, created/run/rsynced/deleted for this one run
@@ -283,7 +289,8 @@ clean:
 # ---------------------------------------------------------------------------
 .PHONY: check check-fast box-check hetzner-sweep ui-gallery demo-rehearsal
 check:
-	@scripts/check.sh
+	@bash tests/test_check_lock.sh
+	@scripts/check-lock.sh scripts/check.sh
 check-fast:
 	@scripts/check.sh --fast
 box-check:
