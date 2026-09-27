@@ -39,6 +39,12 @@ tests/test_query_text
 tests/test_golden_fixture
 tests/map_reader_core.o
 tests/__pycache__/
+scripts/hooks/__pycache__/
+
+# orphan-guard's own runtime state: per-session pid registries written by
+# the PreToolUse hook and consumed/pruned by the Stop/SubagentStop reaper
+# (scripts/hooks/orphan-guard.sh, orphan-reap.sh) -- never committed.
+.claude/orphan-guard/
 
 # Visual-snapshot diff/actual artifacts (transient — only baselines are tracked)
 tests/web_snapshots/*-actual.png

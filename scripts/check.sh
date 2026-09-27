@@ -56,6 +56,9 @@ run python3 tests/test_free_ports.py
 step "CI change-classifier table-driven test (issue #167)"
 run bash tests/test_classify_changed_files.sh
 
+step "orphan-guard PreToolUse/Stop hooks bypass suite"
+run bash tests/test_orphan_guard.sh
+
 if [[ $FAST -eq 0 ]]; then
     # ── Port allocation (so two `make check` runs on this Mac don't collide) ─
     # One free base per run, laid out at FIXED OFFSETS below so every mock

@@ -4,7 +4,24 @@
       {
         "matcher": "Bash",
         "hooks": [
-          { "type": "command", "command": "scripts/hooks/push-guard.sh" }
+          { "type": "command", "command": "scripts/hooks/push-guard.sh" },
+          { "type": "command", "command": "scripts/hooks/orphan-guard.sh" }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "*",
+        "hooks": [
+          { "type": "command", "command": "scripts/hooks/orphan-reap.sh" }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "matcher": "*",
+        "hooks": [
+          { "type": "command", "command": "scripts/hooks/orphan-reap.sh" }
         ]
       }
     ]
