@@ -257,17 +257,23 @@ def test_db_time_sanity(pm_pid):
     check(db_time_ms < theoretical_max_ms,
           f"DB Time {db_time_ms:.0f}ms < theoretical max {theoretical_max_ms:.0f}ms")
 
-    # Internal consistency: DB Time = CPU + sum of all Wait classes
-    # (class-level names only, not sub-events which contain ':')
+    # Internal consistency: DB Time = CPU* + Off-CPU* + sum of all Wait
+    # classes (class-level names only, not sub-events which contain ':').
+    # Off-CPU* (issue #202) is CPU*'s measured sibling — the wall of the
+    # on-CPU intervals the backend was NOT on a CPU for (runqueue/throttle).
+    # It is absent on the legacy/sampled tiers, where CPU* carries the whole
+    # gap; model.get() then returns 0 and the identity is the old one.
     WAIT_CLASSES = {'IO', 'LWLock', 'Lock', 'Client', 'IPC',
                     'BufferPin', 'Timeout', 'Extension'}
     wait_sum = sum(v for k, v in model.items() if k in WAIT_CLASSES)
+    offcpu_ms = model.get('Off-CPU*', 0)
 
-    reconstructed = cpu_time_ms + wait_sum
+    reconstructed = cpu_time_ms + offcpu_ms + wait_sum
     if db_time_ms > 0:
         error_pct = abs(reconstructed - db_time_ms) / db_time_ms * 100
         check(error_pct < 2.0,
-              f"DB Time consistency: CPU({cpu_time_ms:.0f}) + Waits({wait_sum:.0f}) "
+              f"DB Time consistency: CPU({cpu_time_ms:.0f}) + "
+              f"OffCPU({offcpu_ms:.0f}) + Waits({wait_sum:.0f}) "
               f"= {reconstructed:.0f}ms vs DB Time {db_time_ms:.0f}ms "
               f"(error {error_pct:.1f}%)")
 

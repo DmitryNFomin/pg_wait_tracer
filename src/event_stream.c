@@ -176,10 +176,16 @@ int pgwt_handle_trace_event(void *ctx, void *data, size_t data_sz)
         .pid             = evt->pid,
         .we              = we,
         .wall_ns         = dur,
-        .cpu_ns          = dur,      /* live display accounts a closed on-CPU
-                                      * segment at wall (measured cpu_ns is
-                                      * folded into the lifetime counters
-                                      * above); see ROADMAP "Multi-window %DB" */
+        /* #202: the MEASURED on-CPU ns of this closed segment (the whole gap
+         * only when CPU accounting is off / the record carries no cpu_ns).
+         * It used to be `dur` unconditionally while the open state_map
+         * stretch charged its measured ns — so the window in which a
+         * stretch CLOSED gained (gap - measured) of CPU* that DB Time never
+         * gained, and the multi-window rows summed to 120% of DB Time with
+         * ring_delta_clamps_total still 0. One rule for both paths now, and
+         * the same rule compute.c/pgwt-server uses offline. */
+        .cpu_ns          = pgwt_live_closed_cpu_ns(dur, evt->cpu_ns,
+                                                   d->cpu_accounting),
         .query_id        = evt->query_id,
         .cat_flag        = cat_flag,
         .cmd_gate_active = d->cmd_gate_active,

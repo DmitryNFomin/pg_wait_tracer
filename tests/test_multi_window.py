@@ -275,12 +275,30 @@ def test_internal_consistency(pm_pid):
                  if ':' not in k and k not in EXCLUDE}
     reconstructed = sum(top_level.values())
 
-    if db_time_ms > 0:
-        error_pct = abs(reconstructed - db_time_ms) / db_time_ms * 100
+    # The gate must RUN, not be skipped: a DB Time of 0 used to make this
+    # check disappear from the count entirely (tests_run never incremented),
+    # so a tick that produced nothing looked the same as a tick that
+    # balanced. Absent is a failure here, never an approval (issue #202).
+    if db_time_ms <= 0:
+        check(False,
+              "DB Time consistency: cannot check — DB Time is "
+              f"{db_time_ms:.0f}ms (rows {sorted(top_level)})")
+    elif not top_level:
+        check(False,
+              "DB Time consistency: cannot check — no top-level rows parsed "
+              f"from a DB Time of {db_time_ms:.0f}ms")
+    else:
+        excess = reconstructed - db_time_ms
+        error_pct = abs(excess) / db_time_ms * 100
+        # Signed, because the two directions mean different things: a
+        # positive excess is over-attribution (time counted twice, the only
+        # direction this identity can detect at all — src/compute.c's
+        # Off-CPU* residual absorbs the other one), a negative one is a row
+        # the view is not printing.
         check(error_pct < 2.0,
               f"DB Time consistency: Σ(top-level rows {sorted(top_level)}) "
               f"= {reconstructed:.0f}ms vs DB Time {db_time_ms:.0f}ms "
-              f"(error {error_pct:.1f}%)")
+              f"({excess:+.0f}ms, error {error_pct:.1f}%)")
 
 
 # ── Test 4: system_event Format ─────────────────────────────

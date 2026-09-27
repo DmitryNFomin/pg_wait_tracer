@@ -143,6 +143,15 @@ void pgwt_update_time_model(struct pgwt_time_model *tm, uint32_t event,
     }
 }
 
+/* #202 — see the contract on map_reader.h pgwt_live_closed_cpu_ns(). */
+uint64_t pgwt_live_closed_cpu_ns(uint64_t dur_ns, uint64_t cpu_ns,
+                                 bool cpu_accounting)
+{
+    if (!cpu_accounting || cpu_ns == PGWT_CPU_NS_UNKNOWN)
+        return dur_ns;                       /* legacy: the whole gap is CPU* */
+    return cpu_ns < dur_ns ? cpu_ns : dur_ns;   /* clamp skew to the gap */
+}
+
 uint32_t pgwt_live_effective_event(uint32_t we, uint32_t cat_flag,
                                    bool cmd_gate_active, bool cmd_open)
 {
@@ -263,9 +272,15 @@ void pgwt_accum_add_interval(struct pgwt_accumulator *acc,
                                             iv->cmd_gate_active, iv->cmd_open);
     bool io_worker = (iv->cat_flag & PGWT_EVENT_FLAG_IO_WORKER) != 0;
     bool idle = pgwt_is_idle_event(we);
-    /* Row value: the CPU* row carries the interval's on-CPU ns; every wait
-     * and idle row (incl. non-command CPU) carries wall. */
-    uint64_t stat_ns = (we == 0) ? iv->cpu_ns : iv->wall_ns;
+    /* Row value: the CPU* row carries the interval's MEASURED on-CPU ns
+     * (clamped to its wall — clock skew must never make the row exceed the
+     * time it happened in); every wait and idle row (incl. non-command CPU)
+     * carries wall. #202: the clamp lives here, on the one path both the
+     * closed record and the open stretch go through, so the two cannot
+     * disagree about what a we==0 interval contributes. */
+    uint64_t stat_ns = iv->wall_ns;
+    if (we == 0)
+        stat_ns = iv->cpu_ns < iv->wall_ns ? iv->cpu_ns : iv->wall_ns;
 
     /* Per-PID accumulation (the caller may pass the entry it already
      * resolved for the category/gate lookups — one pid lookup per event). */
@@ -291,12 +306,18 @@ void pgwt_accum_add_interval(struct pgwt_accumulator *acc,
     if (se)
         add_event_stats(se, stat_ns, iv->closed);
 
-    /* Time model by class. On-CPU splits into the CPU ns and the wall gap
-     * (both inside DB Time; the difference is the off-CPU remainder). */
+    /* Time model by class. An on-CPU interval splits its wall into the
+     * measured CPU ns and the off-CPU remainder (runqueue / throttle /
+     * unaccounted) — both inside DB Time, so
+     * cpu + offcpu + Σwaits == db exactly, in every snapshot AND in every
+     * windowed delta of two snapshots (the #202 conservation contract on
+     * map_reader.h). Legacy/sampled pass cpu_ns == wall_ns and the off-CPU
+     * term stays 0. */
     if (!io_worker) {
         if (we == 0) {
-            acc->tm.cpu_time_ns += stat_ns;
-            acc->tm.db_time_ns  += iv->wall_ns;
+            acc->tm.cpu_time_ns    += stat_ns;
+            acc->tm.offcpu_time_ns += iv->wall_ns - stat_ns;
+            acc->tm.db_time_ns     += iv->wall_ns;
         } else {
             pgwt_update_time_model(&acc->tm, we, iv->wall_ns);
         }

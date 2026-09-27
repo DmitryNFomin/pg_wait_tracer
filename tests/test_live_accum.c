@@ -289,6 +289,84 @@ static void test_open_interval(void)
     free(acc);
 }
 
+/* Σ of the eight wait-class fields of a time model (what the view prints as
+ * the ':'-free class rows under DB Time). Deliberately does NOT read
+ * db_time_ns, cpu_time_ns or offcpu_time_ns: the conservation checks below
+ * must compare two independently accumulated quantities, never two views of
+ * one sum (a conservation check whose sides share a summand cannot fail). */
+static uint64_t tm_wait_sum(const struct pgwt_time_model *tm)
+{
+    return tm->io_time_ns + tm->lwlock_time_ns + tm->lock_time_ns +
+           tm->bufferpin_time_ns + tm->client_time_ns + tm->ipc_time_ns +
+           tm->timeout_time_ns + tm->extension_time_ns;
+}
+
+/* A CLOSED we==0 record built the way src/event_stream.c builds it: the
+ * display CPU ns comes from pgwt_live_closed_cpu_ns(), NOT from the caller.
+ * `raw_cpu_ns` is what BPF stamped on the record (PGWT_CPU_NS_UNKNOWN for a
+ * legacy/sampled/v2 one). */
+static struct pgwt_live_interval closed_cpu(uint32_t pid, uint64_t wall,
+                                            uint64_t raw_cpu_ns,
+                                            bool cpu_accounting, int cmd_open)
+{
+    struct pgwt_live_interval iv = {
+        .pid = pid, .we = 0, .wall_ns = wall,
+        .cpu_ns = pgwt_live_closed_cpu_ns(wall, raw_cpu_ns, cpu_accounting),
+        .query_id = 0, .cat_flag = 0,
+        .cmd_gate_active = true, .cmd_open = cmd_open != 0, .closed = true,
+    };
+    return iv;
+}
+
+/* ── 3b. #202: the ONE measured-vs-gap rule both live paths use ─────── */
+static void test_closed_cpu_ns_rule(void)
+{
+    printf("--- closed-record CPU rule (#202) ---\n");
+    /* Measured, below the gap: the measurement wins. */
+    CHECK(pgwt_live_closed_cpu_ns(MS(2500), MS(1200), true) == MS(1200),
+          "measured 1200 ms of a 2500 ms gap -> 1200 ms");
+    /* Clock skew: a measurement ABOVE the gap is clamped, never > wall. */
+    CHECK(pgwt_live_closed_cpu_ns(MS(1000), MS(1400), true) == MS(1000),
+          "measured 1400 ms of a 1000 ms gap -> clamped to 1000 ms");
+    /* A measured 0 is a real 0 (sub-ms burst leaked into the next interval);
+     * a full-gap fallback here is what over-stated CPU* past physical cores
+     * (compute.c "Finding #1"). Absent-not-wrong: the value is present and 0. */
+    CHECK(pgwt_live_closed_cpu_ns(MS(700), 0, true) == 0,
+          "a measured 0 stays 0, never falls back to the gap");
+    /* The value is ABSENT (v2 file, sampled tier, no BTF): legacy shape, the
+     * whole gap is CPU* and the off-CPU term must stay 0. */
+    CHECK(pgwt_live_closed_cpu_ns(MS(700), PGWT_CPU_NS_UNKNOWN, true) == MS(700),
+          "PGWT_CPU_NS_UNKNOWN -> the whole gap (legacy)");
+    /* The capability is off: same, even when a value happens to be there. */
+    CHECK(pgwt_live_closed_cpu_ns(MS(700), MS(100), false) == MS(700),
+          "cpu_accounting off -> the whole gap, measurement ignored");
+    /* Zero-length gap: no division, no underflow. */
+    CHECK(pgwt_live_closed_cpu_ns(0, MS(5), true) == 0,
+          "a zero-length gap contributes 0");
+
+    /* And the accumulator's own half of the contract: on-CPU wall splits
+     * into CPU* + Off-CPU*, so the three fields conserve. */
+    struct pgwt_accumulator *acc = calloc(1, sizeof(*acc));
+    pgwt_accum_init(acc);
+    struct pgwt_live_interval c = closed_cpu(11, MS(2500), MS(1200), true, 1);
+    pgwt_accum_add_interval(acc, &c);
+    CHECK(acc->tm.cpu_time_ns == MS(1200), "closed record -> CPU* 1200 ms");
+    CHECK(acc->tm.offcpu_time_ns == MS(1300), "…Off-CPU* 1300 ms");
+    CHECK(acc->tm.db_time_ns == MS(2500), "…DB Time 2500 ms (the whole wall)");
+    CHECK(sys_row(acc, 0) == MS(1200),
+          "…and the CPU* ROW agrees with tm.cpu (got %llu)",
+          (unsigned long long)sys_row(acc, 0));
+    /* Legacy record in the SAME accumulator: gap-as-CPU, Off-CPU* unmoved. */
+    struct pgwt_live_interval l =
+        closed_cpu(12, MS(400), PGWT_CPU_NS_UNKNOWN, true, 1);
+    pgwt_accum_add_interval(acc, &l);
+    CHECK(acc->tm.cpu_time_ns == MS(1600) &&
+          acc->tm.offcpu_time_ns == MS(1300) &&
+          acc->tm.db_time_ns == MS(2900),
+          "a legacy record adds its whole gap to CPU* and nothing to Off-CPU*");
+    free(acc);
+}
+
 /* ── 4. Multi-window delta of ring snapshots ───────────────────────── */
 static void test_ring_delta(void)
 {
@@ -382,8 +460,9 @@ static void test_ring_delta(void)
               "no wrapped counter in the delta (event 0x%x)", d->events[i].wait_event);
     /* The fail-safe is not silent: every clamped field is counted (the
      * daemon folds it into metrics ring_delta_clamps_total). Here: tm.db,
-     * tm.cpu, CPU* row count + total_ns = 4. */
-    CHECK(d->clamped_fields == 4, "clamped_fields = %u (expected 4)",
+     * tm.cpu, tm.offcpu (#202: the reclassified stretch's 2 s off-CPU
+     * remainder leaves the model with it), CPU* row count + total_ns = 5. */
+    CHECK(d->clamped_fields == 5, "clamped_fields = %u (expected 5)",
           d->clamped_fields);
 
     /* Tick 4-5, the MIXED window (what the clamp does NOT repair): pid 3
@@ -421,10 +500,173 @@ static void test_ring_delta(void)
           "bounded by the reclassified stretch", pio);
     CHECK(d->tm.cpu_time_ns == 0 && snap_row(d, 0) == 0,
           "CPU delta clamped at 0 for the reclassified run");
-    CHECK(d->clamped_fields == 3, "clamped_fields = %u (tm.cpu, CPU* count, CPU* total)",
+    CHECK(d->clamped_fields == 4,
+          "clamped_fields = %u (tm.cpu, tm.offcpu, CPU* count, CPU* total)",
           d->clamped_fields);
     CHECK(snap_row(d, PGWT_WEI_NONCMD_CPU) == MS(2500),
           "…the run is whole under NonCommandCpu");
+
+    free(d);
+    free(view);
+    free(closed);
+    pgwt_ring_free(&ring);
+}
+
+/* ── 4b. Issue #202: the window in which an on-CPU stretch CLOSES ─────
+ *
+ * tests/test_multi_window.py Test 3 on the pgwt-gate box: the ':'-free
+ * top-level rows summed to 18330 ms against a DB Time of 15255 ms — a
+ * +3075 ms (20.2%) over-attribution, with ring_delta_clamps_total 0, so
+ * #97's fail-safe had nothing to say about it.
+ *
+ * Mechanism, reproduced exactly below: the OPEN state_map stretch charged
+ * the CPU* row its MEASURED on-CPU ns while charging DB Time its full wall
+ * (map_reader.c cpu_open, T8/S3), and the CLOSED record that later ended
+ * that same stretch charged the CPU* row the FULL GAP. So across the window
+ * where the stretch closes, CPU* grows by (gap - measured_at_prev_tick)
+ * more than DB Time does. Nothing goes down, so nothing is clamped and no
+ * counter moves: the excess is exactly the previous snapshot's accumulated
+ * off-CPU remainder, which on a loaded box is seconds.
+ *
+ * The fix is one rule for both paths (pgwt_live_closed_cpu_ns) plus the
+ * Off-CPU* sibling row, so cpu + offcpu + Σwaits == db in every snapshot
+ * AND in every delta of two snapshots. */
+static void test_ring_delta_cpu_close(void)
+{
+    printf("--- ring delta: an on-CPU stretch closing (#202) ---\n");
+    struct pgwt_ring ring;
+    CHECK(pgwt_ring_init(&ring, 4) == 0, "ring init");
+    struct pgwt_accumulator *closed = calloc(1, sizeof(*closed));
+    struct pgwt_accumulator *view = calloc(1, sizeof(*view));
+    struct pgwt_snapshot *d = calloc(1, sizeof(*d));
+    pgwt_accum_init(closed);
+
+    /* Cumulative closed history before the window: one 200 ms IO wait. */
+    struct pgwt_live_interval prior = closed_fg(1, IO_WALSYNC, MS(200), 1, 0);
+    pgwt_accum_add_interval(closed, &prior);
+
+    /* Snapshot A: pid 7 is mid-run — 2000 ms of wall so far, of which only
+     * 1000 ms was actually on a CPU (1000 ms runqueue on a loaded box). */
+    memcpy(view, closed, sizeof(*view));
+    struct pgwt_live_interval open_a = {
+        .pid = 7, .we = 0, .wall_ns = MS(2000), .cpu_ns = MS(1000),
+        .cmd_gate_active = true, .cmd_open = true, .closed = false,
+    };
+    pgwt_accum_add_interval(view, &open_a);
+    pgwt_ring_push(&ring, view);
+    CHECK(view->tm.cpu_time_ns + view->tm.offcpu_time_ns +
+          tm_wait_sum(&view->tm) == view->tm.db_time_ns,
+          "snapshot A conserves: %llu + %llu + %llu vs DB %llu",
+          (unsigned long long)view->tm.cpu_time_ns,
+          (unsigned long long)view->tm.offcpu_time_ns,
+          (unsigned long long)tm_wait_sum(&view->tm),
+          (unsigned long long)view->tm.db_time_ns);
+
+    /* Snapshot B: the run CLOSES, still IN-COMMAND — no reclassification,
+     * so #97's clamp is not involved at all. Total 2500 ms wall, 1200 ms
+     * measured on-CPU. */
+    struct pgwt_live_interval close_b = closed_cpu(7, MS(2500), MS(1200),
+                                                   true, 1);
+    pgwt_accum_add_interval(closed, &close_b);
+    memcpy(view, closed, sizeof(*view));
+    pgwt_ring_push(&ring, view);
+
+    CHECK(pgwt_ring_delta(&ring, 1, d) == 0,
+          "delta over the closing window resolved");   /* never skip silently */
+    CHECK(d->tm.db_time_ns > 0,
+          "window DB Time > 0 (a 0 makes the identity vacuous): got %llu",
+          (unsigned long long)d->tm.db_time_ns);
+    CHECK(d->clamped_fields == 0,
+          "nothing is clamped here — #97's fail-safe cannot see this "
+          "(clamped_fields = %u)", d->clamped_fields);
+
+    /* Explicit expected values, not just the identity: a residual-style
+     * Off-CPU* (db - cpu - waits) would satisfy any identity by
+     * construction, so each term is pinned to a number derived by hand.
+     *   DB     2700 - 2200 =  500 ms   (2500 closed wall - 2000 open wall)
+     *   CPU*   1200 - 1000 =  200 ms
+     *   OffCPU 1300 - 1000 =  300 ms
+     *   waits   200 -  200 =    0 ms                                     */
+    CHECK(d->tm.db_time_ns == MS(500), "window DB Time = 500 ms (got %llu)",
+          (unsigned long long)d->tm.db_time_ns);
+    CHECK(d->tm.cpu_time_ns == MS(200), "window CPU* = 200 ms (got %llu)",
+          (unsigned long long)d->tm.cpu_time_ns);
+    CHECK(d->tm.offcpu_time_ns == MS(300),
+          "window Off-CPU* = 300 ms (got %llu)",
+          (unsigned long long)d->tm.offcpu_time_ns);
+    CHECK(tm_wait_sum(&d->tm) == 0, "window waits = 0 ms (got %llu)",
+          (unsigned long long)tm_wait_sum(&d->tm));
+
+    /* The assertion test_multi_window.py makes on the printed rows: the
+     * ':'-free top-level rows sum to DB Time. Pre-fix this read
+     * (2500-1000) = 1500 ms against 500 ms — 300%. */
+    uint64_t rows = d->tm.cpu_time_ns + d->tm.offcpu_time_ns +
+                    tm_wait_sum(&d->tm);
+    CHECK(rows == d->tm.db_time_ns,
+          "Σ top-level window rows == window DB Time (%llu vs %llu)",
+          (unsigned long long)rows, (unsigned long long)d->tm.db_time_ns);
+
+    /* Same window, the SYSTEM-EVENT row path (output.c prints %DB from
+     * these, not from tm): the CPU* row must carry the same 200 ms. */
+    CHECK(snap_row(d, 0) == MS(200),
+          "window CPU* ROW = 200 ms (got %llu)",
+          (unsigned long long)snap_row(d, 0));
+
+    /* A window whose BASE cannot be resolved must REFUSE, never approve:
+     * with one snapshot in the ring there is no previous tick, and
+     * pgwt_ring_delta must say so (output.c then prints "-" for that
+     * column) instead of handing back a zeroed snapshot whose identity
+     * 0 == 0 would satisfy any conservation check. */
+    {
+        struct pgwt_ring one;
+        pgwt_ring_init(&one, 4);
+        struct pgwt_accumulator *a1 = calloc(1, sizeof(*a1));
+        pgwt_accum_init(a1);
+        struct pgwt_live_interval only = closed_cpu(9, MS(800), MS(500),
+                                                    true, 1);
+        pgwt_accum_add_interval(a1, &only);
+        pgwt_ring_push(&one, a1);
+        struct pgwt_snapshot *nd = calloc(1, sizeof(*nd));
+        memset(nd, 0xAA, sizeof(*nd));   /* must not be read back as data */
+        CHECK(pgwt_ring_delta(&one, 1, nd) == -1,
+              "one snapshot: the 1-tick delta REFUSES (no base) rather than "
+              "returning a vacuous all-zero window");
+        /* …and a 0-tick delta (the degenerate self-difference) is all zeros,
+         * which is exactly why a refusing return code, not the values, is
+         * what callers must key on. */
+        CHECK(pgwt_ring_delta(&one, 0, nd) == 0 && nd->tm.db_time_ns == 0,
+              "a 0-tick delta is empty (DB Time %llu) — valid() must gate on "
+              "the return code", (unsigned long long)nd->tm.db_time_ns);
+        free(nd);
+        free(a1);
+        pgwt_ring_free(&one);
+    }
+
+    /* Legacy tier (no measured CPU anywhere): Off-CPU* must be absent, not
+     * merely small, and the old CPU*-carries-the-gap shape must survive —
+     * the fix must not change the sampled/v2 answer. */
+    struct pgwt_ring lring;
+    pgwt_ring_init(&lring, 4);
+    struct pgwt_accumulator *lclosed = calloc(1, sizeof(*lclosed));
+    pgwt_accum_init(lclosed);
+    struct pgwt_live_interval l1 =
+        closed_cpu(8, MS(1000), PGWT_CPU_NS_UNKNOWN, true, 1);
+    pgwt_accum_add_interval(lclosed, &l1);
+    pgwt_ring_push(&lring, lclosed);
+    struct pgwt_live_interval l2 =
+        closed_cpu(8, MS(1500), PGWT_CPU_NS_UNKNOWN, true, 1);
+    pgwt_accum_add_interval(lclosed, &l2);
+    pgwt_ring_push(&lring, lclosed);
+    struct pgwt_snapshot *ld = calloc(1, sizeof(*ld));
+    CHECK(pgwt_ring_delta(&lring, 1, ld) == 0, "legacy-tier delta resolved");
+    CHECK(ld->tm.offcpu_time_ns == 0,
+          "legacy tier has NO Off-CPU* (got %llu)",
+          (unsigned long long)ld->tm.offcpu_time_ns);
+    CHECK(ld->tm.cpu_time_ns == MS(1500) && ld->tm.db_time_ns == MS(1500),
+          "legacy tier: the whole gap is still CPU* and equals DB Time");
+    free(ld);
+    free(lclosed);
+    pgwt_ring_free(&lring);
 
     free(d);
     free(view);
@@ -479,15 +721,21 @@ static void stream_marker_q(struct stream *s, uint32_t marker, uint64_t ts,
     pgwt_live_qattr_marker(s->acc, s->pa, marker, qid);
 }
 
-/* Closed record [t0, t1) of `we`; emit_open = the emission-time gate. */
-static bool stream_record(struct stream *s, uint32_t we, uint64_t t0,
-                          uint64_t t1, int emit_open, uint64_t qid)
+/* Closed record [t0, t1) of `we`; emit_open = the emission-time gate.
+ * `raw_cpu_ns` is what BPF stamped (PGWT_CPU_NS_UNKNOWN = legacy tier), fed
+ * through pgwt_live_closed_cpu_ns() exactly as event_stream.c does (#202) —
+ * so a stream driven here cannot accidentally model a CPU split production
+ * would never produce. */
+static bool stream_record_cpu(struct stream *s, uint32_t we, uint64_t t0,
+                              uint64_t t1, int emit_open, uint64_t qid,
+                              uint64_t raw_cpu_ns)
 {
     bool in_cmd = false;
     pgwt_live_cmd_gate_classify(&s->pa->cmd_gate, true, t0, t1,
                                 emit_open != 0, &in_cmd);
     struct pgwt_live_interval iv = {
-        .pid = s->pid, .we = we, .wall_ns = t1 - t0, .cpu_ns = t1 - t0,
+        .pid = s->pid, .we = we, .wall_ns = t1 - t0,
+        .cpu_ns = pgwt_live_closed_cpu_ns(t1 - t0, raw_cpu_ns, true),
         .query_id = qid, .cat_flag = 0,
         .cmd_gate_active = true, .cmd_open = in_cmd, .closed = true,
         .pa = s->pa,
@@ -500,6 +748,16 @@ static bool stream_record(struct stream *s, uint32_t we, uint64_t t0,
             s->we0_emit_open += t1 - t0;
     }
     return in_cmd;
+}
+
+/* The legacy tier (no measured CPU on the record): the whole gap is CPU*.
+ * The #98 tests below only care about the in-command classification, so
+ * this is the shape they use. */
+static bool stream_record(struct stream *s, uint32_t we, uint64_t t0,
+                          uint64_t t1, int emit_open, uint64_t qid)
+{
+    return stream_record_cpu(s, we, t0, t1, emit_open, qid,
+                             PGWT_CPU_NS_UNKNOWN);
 }
 
 /* The record that closes an exiting backend (new_event = PGWT_EVENT_EXIT):
@@ -642,7 +900,14 @@ static void test_cmd_gate_open_stretch(void)
      * record [40, 46.2) is emitted gate-clear. Consumed: 5.9 of 6.2 ms
      * in-command → CPU*, the same label the open stretch had. */
     stream_marker(&s, PGWT_MARKER_CMD_END, MS(46));
-    bool closed_in_cmd = stream_record(&s, 0, MS(40), MS(46) + US(200), 0, 0x7);
+    /* #202: the record carries the stretch's MEASURED on-CPU ns (6.0 of
+     * 6.2 ms), which must be >= the 4.8 ms the open stretch already showed
+     * — the same measurement, read later. Passing the whole gap here (what
+     * the live path did before #202) is precisely the over-attribution:
+     * CPU* would grow 6.2 - 4.8 = 1.4 ms across a window whose DB Time grew
+     * only 1.2 ms. */
+    bool closed_in_cmd = stream_record_cpu(&s, 0, MS(40), MS(46) + US(200),
+                                           0, 0x7, MS(6));
     CHECK(closed_in_cmd, "the closing record is in-command too");
     CHECK(s.pa->cmd_gate.banked_ns == 0 && !s.pa->cmd_gate.open,
           "consume banks the closed run and resets");
@@ -659,6 +924,18 @@ static void test_cmd_gate_open_stretch(void)
     CHECK(d->tm.db_time_ns == MS(6) + US(200) - MS(5),
           "window DB Time = the closed wall beyond the open stretch (%.2f ms)",
           d->tm.db_time_ns / 1e6);
+    /* #202: the conservation the multi-window view is read against. Before
+     * the fix this window read CPU* 1.4 ms against DB Time 1.2 ms — a 17%
+     * over-attribution in a test that only ever checked DB Time. */
+    CHECK(d->tm.cpu_time_ns + d->tm.offcpu_time_ns + tm_wait_sum(&d->tm)
+          == d->tm.db_time_ns,
+          "window rows conserve: CPU* %.2f + Off-CPU* %.2f + waits %.2f "
+          "vs DB %.2f ms", d->tm.cpu_time_ns / 1e6,
+          d->tm.offcpu_time_ns / 1e6, tm_wait_sum(&d->tm) / 1e6,
+          d->tm.db_time_ns / 1e6);
+    CHECK(d->tm.cpu_time_ns == MS(1) + US(200),
+          "window CPU* = 1.2 ms, not the 1.4 ms of the pre-#202 gap rule "
+          "(got %.2f ms)", d->tm.cpu_time_ns / 1e6);
     CHECK(snap_row(d, PGWT_WEI_NONCMD_CPU) == 0,
           "nothing moved to NonCommandCpu across the window");
 
@@ -1403,7 +1680,9 @@ int main(void)
     test_effective_event();
     test_closed_noncmd_cpu_row();
     test_open_interval();
+    test_closed_cpu_ns_rule();
     test_ring_delta();
+    test_ring_delta_cpu_close();
     test_cmd_gate_waitless_statement();
     test_cmd_gate_open_stretch();
     test_cmd_gate_fallback();

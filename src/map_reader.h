@@ -55,10 +55,33 @@ struct pgwt_pid_accum {
     struct pgwt_event_stats events[MAX_EVENTS_PER_PID];
 };
 
-/* Time model (system-wide) */
+/* Time model (system-wide).
+ *
+ * Conservation contract (issue #202): for EVERY value of this struct, and
+ * therefore for every windowed delta of two of them,
+ *
+ *     cpu_time_ns + offcpu_time_ns + Σ(the eight wait-class fields)
+ *         == db_time_ns
+ *
+ * exactly. An on-CPU interval contributes its MEASURED on-CPU ns to
+ * cpu_time_ns and the rest of its wall to offcpu_time_ns (runqueue /
+ * throttle / unaccounted); a wait contributes its whole wall to its class.
+ * Both live paths — the closed trace record (event_stream.c) and the open
+ * state_map stretch (map_reader.c) — must split an on-CPU interval the SAME
+ * way, or the multi-window ring delta shows a quantity no snapshot ever had
+ * (that is exactly what #202 was: the open stretch charged CPU* its measured
+ * ns while the closed record charged the full gap, so the window in which a
+ * stretch closed over-attributed by the stretch's off-CPU remainder — with
+ * no ring_delta clamp to show for it). pgwt_live_closed_cpu_ns() is the one
+ * place that decision is made. */
 struct pgwt_time_model {
     uint64_t db_time_ns;
     uint64_t cpu_time_ns;
+    /* #202: the wall of every on-CPU interval MINUS its measured on-CPU ns.
+     * Zero when CPU accounting is legacy/unavailable (whole gap = CPU*) and
+     * in the sampled tier (a sample's ASH weight is wall by construction),
+     * so those tiers keep the old "CPU* + Σwaits == DB Time" shape. */
+    uint64_t offcpu_time_ns;
     uint64_t io_time_ns;
     uint64_t lwlock_time_ns;
     uint64_t lock_time_ns;
@@ -159,6 +182,20 @@ struct pgwt_query_event_stats *pgwt_get_or_create_query_event(
 void pgwt_update_time_model(struct pgwt_time_model *tm, uint32_t event,
                              uint64_t duration_ns);
 
+/* #202: the display on-CPU ns of a CLOSED we==0 trace record — the single
+ * place the live path decides measured-vs-gap, so it cannot drift from the
+ * open state_map stretch (map_reader.c cpu_open) the way it did in #202.
+ * Mirrors compute.c's server rule exactly:
+ *   - cpu_accounting off, or cpu_ns == PGWT_CPU_NS_UNKNOWN (v2 file, sampled,
+ *     no BTF): the whole gap is CPU*, off-CPU remainder 0 — the legacy shape.
+ *   - otherwise: the measured ns, clamped to the gap. A measured 0 stays 0
+ *     (`sum_exec_runtime` is tick-quantised, so a sub-ms burst is counted in
+ *     the interval it leaked to; a full-gap fallback here over-stated CPU*
+ *     past physical cores — compute.c "Finding #1").
+ * Pure: no daemon, no BPF. */
+uint64_t pgwt_live_closed_cpu_ns(uint64_t dur_ns, uint64_t cpu_ns,
+                                 bool cpu_accounting);
+
 /* ── Live-view interval accounting (issues #97, #98) ─────────────────────
  *
  * The live accumulators are fed from TWO paths that must classify an
@@ -238,11 +275,16 @@ struct pgwt_live_interval {
     uint32_t pid;
     uint32_t we;              /* RAW wait_event_info (0 = on-CPU) */
     uint64_t wall_ns;         /* wall duration — DB Time and every wait/idle row */
-    uint64_t cpu_ns;          /* on-CPU ns for a we==0 interval: the CPU* row and
-                               * tm.cpu_time_ns (measured for the open stretch;
-                               * the closed record passes wall_ns — its display
-                               * accounting is wall, see ROADMAP "Multi-window
-                               * %DB"). Ignored when we != 0. */
+    uint64_t cpu_ns;          /* MEASURED on-CPU ns for a we==0 interval: the
+                               * CPU* row and tm.cpu_time_ns; wall_ns - cpu_ns
+                               * goes to tm.offcpu_time_ns. Clamped to wall_ns
+                               * by the accumulator. Ignored when we != 0.
+                               * BOTH live paths supply the measured quantity
+                               * (#202): the open stretch computes it from
+                               * state_map, the closed record via
+                               * pgwt_live_closed_cpu_ns(). Legacy / no CPU
+                               * capability passes wall_ns, which leaves
+                               * offcpu_time_ns at 0. */
     uint64_t query_id;        /* 0 = none */
     uint32_t cat_flag;        /* pid category: 0 foreground, or one of
                                * PGWT_EVENT_FLAG_{IO_WORKER,MAINT,BACKGROUND} */

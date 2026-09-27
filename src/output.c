@@ -189,6 +189,28 @@ static void print_time_model_multi(struct pgwt_daemon *d)
     }
     printf("\n");
 
+    /* Off-CPU* — CPU*'s measured sibling (#202): the wall of the on-CPU
+     * intervals that the backend was NOT actually on a CPU for
+     * (runqueue / throttle / unaccounted). Printed whenever any window has
+     * one, so the column's rows still add up to its DB Time; omitted
+     * entirely in the legacy / sampled shape where it is structurally 0. */
+    {
+        int any_offcpu = 0;
+        for (int w = 0; w < nw; w++)
+            if (valid[w] && deltas[w].tm.offcpu_time_ns > 0)
+                any_offcpu = 1;
+        if (any_offcpu) {
+            printf("    %-30s", "Off-CPU*");
+            for (int w = 0; w < nw; w++) {
+                if (!valid[w]) { printf(" %9s %7s", "-", "-"); continue; }
+                uint64_t db = deltas[w].tm.db_time_ns;
+                printf(" %9.1f %6.1f%%", ns_to_ms(deltas[w].tm.offcpu_time_ns),
+                       db ? 100.0 * deltas[w].tm.offcpu_time_ns / db : 0);
+            }
+            printf("\n");
+        }
+    }
+
     /* Wait classes sorted by first window */
     struct { const char *name; uint32_t class_id; uint64_t sort_ns; } classes[] = {
         {"IO",        PG_WAIT_IO,        deltas[0].tm.io_time_ns},
@@ -316,6 +338,12 @@ void pgwt_print_time_model(struct pgwt_daemon *d)
     printf("  %-36s %12.1f %9.1f%%\n", "DB Time", ns_to_ms(db), 100.0);
     printf("    %-34s %12.1f %9.1f%%\n", "CPU*", ns_to_ms(tm->cpu_time_ns),
            db ? 100.0 * tm->cpu_time_ns / db : 0);
+    /* #202: CPU*'s measured sibling, same rule as the multi-window view and
+     * as pgwt-server's offline model (compute.c Off-CPU*). */
+    if (tm->offcpu_time_ns > 0)
+        printf("    %-34s %12.1f %9.1f%%\n", "Off-CPU*",
+               ns_to_ms(tm->offcpu_time_ns),
+               db ? 100.0 * tm->offcpu_time_ns / db : 0);
 
     /* Wait classes, sorted by size */
     struct { const char *name; uint64_t ns; uint32_t class_id; } classes[] = {

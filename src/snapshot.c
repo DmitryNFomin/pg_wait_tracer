@@ -137,6 +137,7 @@ int pgwt_ring_delta(const struct pgwt_ring *ring, int ticks_ago,
     /* Time model: field-by-field subtraction */
     out->tm.db_time_ns        = sat_sub(curr->tm.db_time_ns,        prev->tm.db_time_ns, &out->clamped_fields);
     out->tm.cpu_time_ns       = sat_sub(curr->tm.cpu_time_ns,       prev->tm.cpu_time_ns, &out->clamped_fields);
+    out->tm.offcpu_time_ns    = sat_sub(curr->tm.offcpu_time_ns,    prev->tm.offcpu_time_ns, &out->clamped_fields);
     out->tm.io_time_ns        = sat_sub(curr->tm.io_time_ns,        prev->tm.io_time_ns, &out->clamped_fields);
     out->tm.lwlock_time_ns    = sat_sub(curr->tm.lwlock_time_ns,    prev->tm.lwlock_time_ns, &out->clamped_fields);
     out->tm.lock_time_ns      = sat_sub(curr->tm.lock_time_ns,      prev->tm.lock_time_ns, &out->clamped_fields);
