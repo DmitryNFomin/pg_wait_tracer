@@ -47,6 +47,16 @@ export class ViewManager {
         this.epoch = 0;           // bumped on every switch / explicit refresh
         this.containerEl = null;  // el handed to mount()
         this._channels = new Set(); // channels opened by the active view
+        // issue #193: the mount chokepoint already decides whether a fetched
+        // response is allowed to render — this records that existing event
+        // rather than inventing a new one. Bumped immediately after every
+        // SUCCESSFUL view.mount() (any view, not just the one a caller is
+        // watching), so a test can wait for "seq advanced past the value
+        // seen before this tick" instead of guessing how long a fetch will
+        // take. `at` is wall-clock Date.now() at that same instant, for
+        // logging only — `seq` is what callers should compare on, never `at`.
+        this._mountSeq = 0;
+        this.lastMount = null;    // {id, seq, at} | null before the first mount
     }
 
     register(view) {
@@ -128,6 +138,10 @@ export class ViewManager {
         try {
             view.mount(this.containerEl, model, ctx);
             this._clearPaneError();
+            // issue #193: record the mount AFTER it succeeded — a throw above
+            // must not advance the sequence, since nothing actually painted.
+            this._mountSeq++;
+            this.lastMount = { id: view.id, seq: this._mountSeq, at: Date.now() };
         } catch (e) {
             console.error('[pgwt] view mount failed:', view.id, e);
             this._viewError(view, e);

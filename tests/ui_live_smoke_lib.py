@@ -49,16 +49,32 @@ FIRST_DATA_TIMEOUT_S = 60
 # passed by tests/ui_live_smoke.sh.
 BLINK_THRESHOLD = 0.001  # 0.1%
 
-# Offset sweep (issue #119): tick-anchored offsets, in ms after each tick's
-# own timestamp, at which the driver grabs an EXTRA frame purely for
-# reporting -- never gating. Lets a re-layout/re-render show up at whichever
-# window it actually lands in (timeline's blink, #100, was never measured
-# this early: the gating pair alone only ever sampled ~1.2-1.3s after the
-# tick, and drifted to 1.8-3.0s on half the ticks when the render-check
-# retry loop ate the budget). The gating check itself stays exactly what it
-# was -- one pair at the anchored settle offset, BLINK_THRESHOLD -- this is
-# additional data, not a wider or narrower pass/fail rule.
+# Offset sweep (issue #119): offsets in ms after the sweep's own anchor at
+# which the driver grabs an EXTRA frame. Originally anchored on each tick's
+# AAS-request timestamp and reporting-only; issue #193 (review round 2) made
+# this the GATING instrument instead (blink_sweep_gate_verdict, graded on
+# the WORST consecutive-pair ratio) and re-anchored it on the ViewManager
+# mount event for the tab instead of the tick's AAS send -- a single
+# anchored pair (round 1's own first attempt) was proven blind to a
+# transient narrower than its own two-frame window (an injected 400ms
+# overlay: ratio 0.0 on the pair, 1.0 on every sweep offset); these values
+# are unchanged from the issue #119 gate-box evidence that picked them
+# (timeline's blink, #100, was never measured this early with the OLD
+# anchor: a single pair alone only ever sampled ~1.2-1.3s after the tick,
+# drifting to 1.8-3.0s under load) -- still the right spread now that the
+# zero point is honest, still BLINK_THRESHOLD, still no widening.
 SWEEP_OFFSETS_MS = (200, 500, 1000, 1500, 2000)
+
+# issue #193 (review round 2, SHOULD-FIX): a tab that discarded most of its
+# ticks as NOT MEASURED (blink_sweep_gate_verdict's ratio=None case) must
+# not report `ok` on whatever fraction it did manage to measure -- found in
+# review: a tab that measured 1 of 6 ticks at ratio 0.0 and discarded the
+# other 5 as not-measured passed anyway, on essentially no signal. At least
+# this fraction of a tab's ATTEMPTED ticks (see build_tab_result) must
+# actually be measured for the tab to pass at all; this is a coverage
+# floor, not the blink ratio threshold above -- BLINK_THRESHOLD is
+# untouched.
+MIN_MEASURED_FRACTION = 0.5
 
 # KNOWN_FAILING_TABS: tab name -> tracking issue number. ONLY for a tab that
 # reproduces a real, filed product bug (issue #100, #101) -- never for timing
@@ -157,9 +173,9 @@ def blink_check(frame_a, frame_b):
 
 
 def sweep_consecutive_diff_ratios(frames):
-    """Reporting-only companion to blink_check() for the offset sweep (issue
-    #119): frames is a list of (H, W, 3) uint8 arrays, or None where a
-    capture failed (e.g. the panel element was gone at that offset), one per
+    """Companion to blink_check() for the offset sweep (issue #119): frames
+    is a list of (H, W, 3) uint8 arrays, or None where a capture failed
+    (e.g. the panel element was gone at that offset), one per
     SWEEP_OFFSETS_MS entry in order.
 
     Returns a list of (ratio, note) pairs, one per CONSECUTIVE pair -- i.e.
@@ -169,10 +185,12 @@ def sweep_consecutive_diff_ratios(frames):
     or a torn-down panel anywhere in the sweep is visible in summary.json
     instead of crashing the tick.
 
-    Never read by build_tab_result's `ok` computation -- the gating check
-    stays exactly the one pair at the anchored settle offset it always was;
-    this is additional data for deciding the settle (issue #119 item 3), not
-    a second pass/fail rule."""
+    issue #193 (review round 2): this IS now the gating instrument (via
+    blink_sweep_gate_verdict's max() over these ratios), not merely a
+    reporting diagnostic -- a single anchored pair (round 1's design) was
+    proven blind to a transient that fell wholly inside or wholly outside
+    its own two-frame window; only multiple samples spread across the tick
+    catch that."""
     ratios = []
     for a, b in zip(frames, frames[1:]):
         if a is None or b is None:
@@ -182,13 +200,72 @@ def sweep_consecutive_diff_ratios(frames):
     return ratios
 
 
+def blink_sweep_gate_verdict(frames, seq_before_sweep, seq_after_sweep):
+    """GATING verdict for one tick (issue #193, review round 2), built on
+    the offset sweep (sweep_consecutive_diff_ratios) instead of a single
+    anchored pair.
+
+    Round 1 anchored a single two-frame pair on the ViewManager mount event
+    instead of a fixed delay from the tick's AAS-request send. Review then
+    injected a 400ms blank overlay into a view (the PR #188 shape) and ran
+    the check both ways: OLD fixed-delay pair -- ratio 0.0. Round 1's
+    mount-anchored pair -- ALSO ratio 0.0. Both compare two frames that
+    land wholly inside or wholly outside the transient, so neither can see
+    it by construction. The offset sweep (issue #119, SWEEP_OFFSETS_MS) was
+    the only instrument that caught it: ratio 1.0 on every consecutive
+    pair, because its five samples spread across the tick cannot both land
+    on the same side of a sub-second transient.
+
+    frames: the sweep's own decoded arrays/None list, one per
+    SWEEP_OFFSETS_MS entry, captured at increasing offsets AFTER the
+    ViewManager mount event (round 1's genuine insight, kept: NOT the
+    tick's AAS send, which undershoots under load -- see
+    tests/ui_live_smoke.py's _wait_for_mount_at_or_after).
+
+    seq_before_sweep/seq_after_sweep are the ViewManager mount chokepoint's
+    own sequence number (web/static/lib/view-manager.js's lastMount.seq),
+    sampled immediately before the sweep's first capture and immediately
+    after its last, i.e. bracketing the WHOLE sweep -- same not-measured
+    contract as round 1's pair verdict:
+
+      - seq_before_sweep != seq_after_sweep: a real mount landed WHILE the
+        sweep was being captured -- the sweep straddles a genuine content
+        boundary, not several samples of the same steady state. Returns
+        (None, note): NOT MEASURED, never a fabricated ratio.
+      - otherwise: the WORST (max) of the sweep's own consecutive-pair
+        ratios, INCLUDING when it is high because two samples genuinely
+        differ. A steady sequence number is exactly the claim "no content
+        changed here"; if any consecutive pair disagrees anyway, that is a
+        real blink and must still fail like any other.
+
+    Returns (ratio: float | None, note: str | None). ratio is None only for
+    the not-measured case; every other outcome (including a genuine
+    detected blink) returns a numeric ratio, so a caller can always tell a
+    real 0.0 apart from "we couldn't tell". `note` joins every non-None
+    per-pair note (e.g. a missing/resized frame anywhere in the sweep) so
+    none of them are silently dropped just because the worst ratio came
+    from a different pair."""
+    if seq_before_sweep != seq_after_sweep:
+        return None, (
+            f"mount sequence advanced mid-sweep ({seq_before_sweep!r} -> "
+            f"{seq_after_sweep!r}): sweep straddles a real content boundary, "
+            "not measured")
+    pairs = sweep_consecutive_diff_ratios(frames)
+    if not pairs:
+        return 1.0, "fewer than 2 sweep frames captured -- treated as maximal instability"
+    ratios = [r for r, _n in pairs]
+    notes = [n for _r, n in pairs if n]
+    return max(ratios), ("; ".join(notes) if notes else None)
+
+
 def build_sweep_tick_record(achieved_offsets_ms, frames,
                              target_offsets_ms=SWEEP_OFFSETS_MS):
     """One tick's offset-sweep record for summary.json (issue #119 item 2).
 
-    achieved_offsets_ms: `now_ms - tick_ts_ms` actually measured at each
-    capture, same idea as blink_pair_offsets_ms -- the target is tick-
-    anchored but preceding work can still push the real capture later.
+    achieved_offsets_ms: `now_ms - mount_at_ms` actually measured at each
+    capture (issue #193: the sweep's own base is the mount event, not the
+    tick's AAS send) -- the target is mount-anchored but preceding work can
+    still push the real capture later.
     frames: the decoded arrays (or None) captured at those offsets, same
     order, fed straight to sweep_consecutive_diff_ratios().
 
@@ -335,7 +412,9 @@ def build_tab_result(tab_id, rendered_ok, rendered_detail, ticks_observed,
                       blink_threshold=BLINK_THRESHOLD,
                       pgwt_console_errors=(),
                       leak_before_settle_s=None, leak_after_settle_s=None,
-                      blink_pair_offsets_ms=(), blink_sweep_ticks=()):
+                      blink_pair_offsets_ms=(), blink_sweep_ticks=(),
+                      blink_not_measured=(),
+                      min_measured_fraction=MIN_MEASURED_FRACTION):
     """Assembles one tab's verdict. Pure: every input is already-collected
     data, no page access.
 
@@ -353,25 +432,52 @@ def build_tab_result(tab_id, rendered_ok, rendered_detail, ticks_observed,
     is itself a latency regression worth a trace even though it does not, by
     itself, fail no_leak.
 
-    blink_pair_offsets_ms: per-tick `now_ms - tick_ts_ms` when frame_a of the
-    blink pair was actually captured (issue #93 review item 3) -- the settle
-    (ui_live_smoke.py's BLINK_PAIR_ANCHOR_MS) is anchored to the tick's own
-    timestamp, but preceding work (the blind-window check,
-    _poll_render_check's retry loop) can still push the actual capture past
-    the target under load. Recorded, not enforced: makes any future overrun
-    of the anchor visible in summary.json instead of silent.
+    blink_pair_offsets_ms: per-tick `mount_at_ms - tick_ts_ms` -- how long
+    after the tick's AAS request send the ViewManager mount actually landed
+    (issue #93 review item 3; issue #193 changed WHAT is being timed --
+    the mount event, not a fixed-delay guess -- but this field keeps the
+    same visibility purpose: a future drift under load stays visible in
+    summary.json, never silent). One entry per ATTEMPTED tick (appended
+    whether or not that tick ended up measured), so len() here is also this
+    tab's attempted-tick count -- see min_measured_fraction below.
+
+    blink_not_measured: per-tick {"tick": i, "reason": str} entries (issue
+    #193) for a tick whose gating sweep straddled a real mount mid-capture
+    (blink_sweep_gate_verdict's ratio=None case) -- reported for
+    visibility, and ALSO why `ok` below can still end up False on an
+    all-not-measured tab: blink_ratio is computed by the caller as
+    max(measured ratios), which is None when every tick was unmeasured, and
+    no_blink_ok(None, ...) is False by construction -- an unmeasured signal
+    fails the gate rather than silently passing it.
 
     blink_sweep_ticks: one build_sweep_tick_record() dict per tick (issue
-    #119 item 2) -- reporting only, never read below to compute `ok`; the
-    gating check stays the one pair at the anchored settle offset it always
-    was."""
+    #119 item 2) -- AND, since issue #193 review round 2, the gating data
+    itself: blink_ratio is the caller-computed max over these ticks' own
+    worst ratios (blink_sweep_gate_verdict), not a separate pair.
+
+    min_measured_fraction (issue #193 review round 2, SHOULD-FIX): a tab
+    that discarded most of its ATTEMPTED ticks (len(blink_pair_offsets_ms))
+    as not-measured must not report `ok` on whatever fraction it did manage
+    to measure -- found in review: a tab that measured 1 of 6 ticks at
+    ratio 0.0 and discarded the other 5 passed anyway, on essentially no
+    signal. measured_ok requires at least this fraction of attempted ticks
+    to have produced a real ratio. Zero attempted ticks (the default
+    blink_pair_offsets_ms=(), used by callers/tests that don't populate
+    this field) trivially satisfies measured_ok -- ticks_ok already fails
+    that tab for having no ticks at all, so this never becomes a second,
+    contradictory reason a legitimately-untested result looks wrong."""
     clean_ok = len(console_errors) == 0
     blink_ok = no_blink_ok(blink_ratio, blink_threshold)
     leak_ok = leak_probe_ok(leak_before) and leak_probe_ok(leak_after)
     color_ok = len(color_violations) == 0
     ticks_ok = ticks_observed >= MIN_TICKS
-    ok = (rendered_ok and clean_ok and blink_ok and leak_ok and color_ok and
-          ticks_ok)
+    attempted_count = len(blink_pair_offsets_ms)
+    not_measured_count = len(blink_not_measured)
+    measured_count = attempted_count - not_measured_count
+    measured_ok = (attempted_count == 0 or
+                   (measured_count / attempted_count) >= min_measured_fraction)
+    ok = (rendered_ok and clean_ok and blink_ok and measured_ok and leak_ok and
+          color_ok and ticks_ok)
     result = {
         "tab": tab_id,
         "ok": ok,
@@ -381,7 +487,12 @@ def build_tab_result(tab_id, rendered_ok, rendered_detail, ticks_observed,
                   "pgwt_errors": list(pgwt_console_errors)[:10]},
         "no_blink": {"ok": blink_ok, "ratio": blink_ratio,
                      "threshold": blink_threshold,
-                     "pair_offsets_ms": list(blink_pair_offsets_ms)},
+                     "pair_offsets_ms": list(blink_pair_offsets_ms),
+                     "not_measured": list(blink_not_measured),
+                     "measured": {"ok": measured_ok,
+                                  "measured_count": measured_count,
+                                  "attempted_count": attempted_count,
+                                  "min_fraction": min_measured_fraction}},
         "blink_sweep": {"offsets_ms": list(SWEEP_OFFSETS_MS),
                         "ticks": list(blink_sweep_ticks)},
         "color_stability": {"ok": color_ok, "violations": color_violations},
@@ -410,7 +521,10 @@ def build_failed_tab_result(tab_id, reason, ticks_observed=0, artifacts=None,
         "clean": {"ok": None, "console_errors": [],
                   "pgwt_errors": list(pgwt_console_errors)[:10]},
         "no_blink": {"ok": None, "ratio": None, "threshold": BLINK_THRESHOLD,
-                     "pair_offsets_ms": []},
+                     "pair_offsets_ms": [], "not_measured": [],
+                     "measured": {"ok": None, "measured_count": 0,
+                                  "attempted_count": 0,
+                                  "min_fraction": MIN_MEASURED_FRACTION}},
         "blink_sweep": {"offsets_ms": list(SWEEP_OFFSETS_MS), "ticks": []},
         "color_stability": {"ok": None, "violations": []},
         "no_leak": {"ok": None, "before": None, "after": None,

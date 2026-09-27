@@ -169,6 +169,102 @@ def test_build_sweep_tick_record_shape():
           f"only the pair touching the missing 5th frame gets a note ({rec['notes']})")
 
 
+# ── blink_sweep_gate_verdict (issue #193, review round 2) ──────────────────
+#
+# Round 1 gated on a single mount-anchored PAIR. Review injected a 400ms
+# blank overlay into a view (the PR #188 shape) and ran the live check both
+# ways: the fixed-delay pair AND the mount-anchored pair both measured
+# ratio 0.0 -- neither could see it, because both compare two frames that
+# land wholly inside or wholly outside the transient. Only the offset
+# sweep's consecutive pairs (ratio 1.0 on every one) caught it. These tests
+# reproduce that structurally and pin the sweep-based gate's own trap: it
+# must not lose the not-measured / genuine-repaint guarantees round 1 had.
+
+def test_blink_sweep_gate_verdict_all_identical_passes():
+    frame = np.zeros((10, 10, 3), dtype=np.uint8)
+    frames = [frame, frame.copy(), frame.copy(), frame.copy(), frame.copy()]
+    ratio, note = lib.blink_sweep_gate_verdict(frames, seq_before_sweep=4, seq_after_sweep=4)
+    check(ratio == 0.0 and note is None,
+          f"a steady sweep of identical frames -> ratio 0.0, no note ({ratio}, {note!r})")
+    check(lib.no_blink_ok(ratio), "and it passes the no_blink gate")
+
+
+def test_blink_sweep_gate_verdict_reproduces_the_injected_flash_experiment():
+    # Structural reproduction of the reviewer's live experiment: a ~400ms
+    # blank overlay that starts after the sweep's first sample (200ms) and
+    # resolves before its third (1000ms) -- i.e. it is fully contained
+    # between two INTERIOR sweep offsets, exactly the shape a single pair
+    # taken at the sweep's own first and last sample would miss entirely.
+    normal = np.full((10, 10, 3), 100, dtype=np.uint8)
+    flash = np.zeros((10, 10, 3), dtype=np.uint8)   # the injected blank overlay
+    # offsets:                 200      500     1000    1500    2000
+    frames = [normal, flash, normal, normal, normal]
+
+    # The instrument round 1 (and master, before it) used: a single pair,
+    # sampled at the sweep's own first and last point -- both land OUTSIDE
+    # the transient here, so it reads a clean pass. This is exactly what
+    # the reviewer measured against the real product (ratio 0.0 both ways).
+    single_pair_ratio, _ = lib.blink_check(frames[0], frames[-1])
+    check(single_pair_ratio == 0.0,
+          f"a single first/last pair is blind to a transient between two interior "
+          f"samples (ratio {single_pair_ratio}) -- reproducing the reviewer's finding")
+
+    # The sweep-based gate must NOT be blind to it: two of its own
+    # consecutive pairs straddle the transient's edges.
+    ratio, note = lib.blink_sweep_gate_verdict(frames, seq_before_sweep=1, seq_after_sweep=1)
+    check(ratio is not None and ratio > 0.5,
+          f"the sweep gate's worst consecutive-pair ratio catches the flash ({ratio})")
+    check(not lib.no_blink_ok(ratio),
+          "...and it fails the no_blink gate, unlike the single pair above")
+
+
+def test_blink_sweep_gate_verdict_seq_advance_mid_sweep_is_never_a_pass():
+    # Same not-measured contract as round 1's pair verdict, now for the
+    # sweep: tested with IDENTICAL frames (the case an implementation could
+    # wrongly special-case as "pixels agree, so ratio 0.0 is fine").
+    frame = np.zeros((10, 10, 3), dtype=np.uint8)
+    frames = [frame.copy() for _ in range(5)]
+    ratio, note = lib.blink_sweep_gate_verdict(frames, seq_before_sweep=5, seq_after_sweep=6)
+    check(ratio is None,
+          f"a mid-sweep sequence advance yields ratio=None even with identical pixels (got {ratio})")
+    check(note is not None and "not measured" in note,
+          f"...with an explanatory 'not measured' note ({note!r})")
+    check(not lib.no_blink_ok(ratio),
+          "None can never satisfy no_blink_ok -- 'not measured' is never read as a pass")
+
+
+def test_blink_sweep_gate_verdict_genuine_diff_with_steady_seq_still_fails():
+    a = np.full((100, 100, 3), 50, dtype=np.uint8)
+    b = a.copy()
+    b[0:10, :] = 255
+    frames = [a, a.copy(), b, b.copy(), b.copy()]  # a real change mid-sweep
+    ratio, note = lib.blink_sweep_gate_verdict(frames, seq_before_sweep=9, seq_after_sweep=9)
+    check(ratio is not None and ratio > 0.05,
+          f"a genuine repaint with an UNCHANGED sequence still yields a high ratio ({ratio})")
+    check(not lib.no_blink_ok(ratio), "...and still fails the gate")
+
+
+def test_blink_sweep_gate_verdict_missing_frame_note_surfaces_alongside_the_max():
+    a = np.full((10, 10, 3), 50, dtype=np.uint8)
+    b = a.copy()
+    b[0, 0:5] = 255  # a real, larger diff than the missing-frame pairs
+    frames = [a, None, a.copy(), b]
+    ratio, note = lib.blink_sweep_gate_verdict(frames, seq_before_sweep=0, seq_after_sweep=0)
+    check(ratio == 1.0,
+          f"a missing frame is still the worst-case ratio ({ratio})")
+    check(note is not None and "missing" in note,
+          f"the missing-frame note is not dropped just because it wasn't the sole cause ({note!r})")
+
+
+def test_blink_sweep_gate_verdict_fewer_than_two_frames_is_worst_case():
+    ratio, note = lib.blink_sweep_gate_verdict([None], seq_before_sweep=0, seq_after_sweep=0)
+    check(ratio == 1.0 and note is not None,
+          f"a degenerate sweep (< 2 frames) is worst-case, never a silent pass ({ratio}, {note!r})")
+    ratio2, note2 = lib.blink_sweep_gate_verdict([], seq_before_sweep=0, seq_after_sweep=0)
+    check(ratio2 == 1.0 and note2 is not None,
+          f"an EMPTY sweep is worst-case too, not a crash or an implicit 0.0 ({ratio2}, {note2!r})")
+
+
 def test_is_blank_frame_solid_colour():
     solid = np.full((20, 20, 3), 30, dtype=np.uint8)  # e.g. the dark theme bg
     check(lib.is_blank_frame(solid),
@@ -480,6 +576,133 @@ def test_build_failed_tab_result_pair_offsets_empty():
     r = lib.build_failed_tab_result("waterfall", "panel did not render within 60s")
     check(r["no_blink"]["pair_offsets_ms"] == [],
           "a tab that never reached the tick loop has no offsets to report")
+
+
+# ── blink_not_measured / all-not-measured fail-by-construction (issue #193) ─
+
+def test_build_tab_result_records_not_measured_ticks():
+    r = lib.build_tab_result(
+        "sessions", True, "ok:8", ticks_observed=6, console_errors=[],
+        blink_ratio=0.0, color_violations=[],
+        leak_before={"charts": 1, "uplots": 1, "pending": 0},
+        leak_after={"charts": 1, "uplots": 1, "pending": 0},
+        artifacts={},
+        blink_pair_offsets_ms=[5100, 1200, 3400, 5200, 5150, 5180],  # 6 attempted
+        blink_not_measured=[{"tick": 3, "reason": "mount sequence advanced mid-capture"}])
+    check(r["no_blink"]["not_measured"] ==
+          [{"tick": 3, "reason": "mount sequence advanced mid-capture"}],
+          f"not-measured ticks are visible in summary.json, not dropped ({r['no_blink']})")
+    check(r["no_blink"]["measured"] ==
+          {"ok": True, "measured_count": 5, "attempted_count": 6, "min_fraction": 0.5},
+          f"5 of 6 attempted ticks measured clears the 50% floor ({r['no_blink']['measured']})")
+    check(r["ok"] is True,
+          "one not-measured tick among otherwise-measured ones does not by itself fail the tab")
+
+
+# ── measured_ok / MIN_MEASURED_FRACTION (issue #193 review round 2 SHOULD-FIX)
+
+def test_build_tab_result_mostly_not_measured_fails_even_with_a_perfect_ratio():
+    # The reviewer's literal finding: "a tab can discard five of six ticks
+    # and still report ok with ratio 0.0." blink_ratio=0.0 here is exactly
+    # that one measured tick's own (genuinely clean) ratio -- this must now
+    # fail on COVERAGE, not on the ratio.
+    r = lib.build_tab_result(
+        "sessions", True, "ok:8", ticks_observed=6, console_errors=[],
+        blink_ratio=0.0, color_violations=[],
+        leak_before={"charts": 1, "uplots": 1, "pending": 0},
+        leak_after={"charts": 1, "uplots": 1, "pending": 0},
+        artifacts={},
+        blink_pair_offsets_ms=[5100, 1200, 3400, 5200, 5150, 5180],  # 6 attempted
+        blink_not_measured=[{"tick": i, "reason": "mid-sweep advance"} for i in (1, 3, 4, 5, 6)])
+    check(r["no_blink"]["ok"] is True,
+          "the ratio itself is clean (0.0 < threshold) -- this is NOT a blink failure")
+    check(r["no_blink"]["measured"]["ok"] is False,
+          f"but only 1 of 6 attempted ticks was measured, below the 50% floor "
+          f"({r['no_blink']['measured']})")
+    check(r["ok"] is False,
+          "...so the tab fails overall -- a near-blind tick loop must not read as ok")
+
+
+def test_build_tab_result_measured_fraction_exactly_at_the_floor_passes():
+    r = lib.build_tab_result(
+        "sessions", True, "ok:8", ticks_observed=6, console_errors=[],
+        blink_ratio=0.0, color_violations=[],
+        leak_before={"charts": 1, "uplots": 1, "pending": 0},
+        leak_after={"charts": 1, "uplots": 1, "pending": 0},
+        artifacts={},
+        blink_pair_offsets_ms=[5100, 1200, 3400, 5200, 5150, 5180],  # 6 attempted
+        blink_not_measured=[{"tick": i, "reason": "mid-sweep advance"} for i in (1, 2, 3)])
+    check(r["no_blink"]["measured"] ==
+          {"ok": True, "measured_count": 3, "attempted_count": 6, "min_fraction": 0.5},
+          f"exactly 50% measured clears the floor (>=, not >) ({r['no_blink']['measured']})")
+    check(r["ok"] is True, "and the tab passes")
+
+
+def test_build_tab_result_measured_fraction_just_below_the_floor_fails():
+    r = lib.build_tab_result(
+        "sessions", True, "ok:8", ticks_observed=7, console_errors=[],
+        blink_ratio=0.0, color_violations=[],
+        leak_before={"charts": 1, "uplots": 1, "pending": 0},
+        leak_after={"charts": 1, "uplots": 1, "pending": 0},
+        artifacts={},
+        blink_pair_offsets_ms=[5100, 1200, 3400, 5200, 5150, 5180, 5090],  # 7 attempted
+        blink_not_measured=[{"tick": i, "reason": "mid-sweep advance"} for i in (1, 2, 3, 4)])
+    check(r["no_blink"]["measured"]["ok"] is False,
+          f"3 of 7 (~42.9%) is just below the 50% floor ({r['no_blink']['measured']})")
+    check(r["ok"] is False, "and the tab fails")
+
+
+def test_build_tab_result_zero_attempted_ticks_does_not_fail_on_coverage_alone():
+    # A caller that doesn't populate blink_pair_offsets_ms at all (existing
+    # tests, or a code path that never reached the tick loop) must not be
+    # penalised by measured_ok -- ticks_ok already fails that case for
+    # having no ticks, so this must not become a SECOND, contradictory
+    # reason a legitimately-untested result looks wrong.
+    r = lib.build_tab_result(
+        "overview", True, "ok:8", ticks_observed=0, console_errors=[],
+        blink_ratio=None, color_violations=[],
+        leak_before={"charts": 1, "uplots": 1, "pending": 0},
+        leak_after={"charts": 1, "uplots": 1, "pending": 0}, artifacts={})
+    check(r["no_blink"]["measured"]["ok"] is True,
+          "zero attempted ticks trivially satisfies measured_ok")
+    check(r["ok"] is False, "but the tab still fails, via ticks_ok/blink_ok, not double-counted")
+
+
+def test_build_tab_result_not_measured_defaults_empty():
+    r = lib.build_tab_result(
+        "overview", True, "ok:8", ticks_observed=6, console_errors=[],
+        blink_ratio=0.0, color_violations=[],
+        leak_before={"charts": 1, "uplots": 1, "pending": 0},
+        leak_after={"charts": 1, "uplots": 1, "pending": 0}, artifacts={})
+    check(r["no_blink"]["not_measured"] == [],
+          "blink_not_measured defaults to an empty list, not missing/None")
+
+
+def test_build_tab_result_all_ticks_not_measured_fails_the_gate():
+    # issue #193: "empty ratios already fail by construction in the existing
+    # code" -- the previous agent VERIFIED this but did not test it. This is
+    # that test: the caller (run_tab) computes blink_ratio as
+    # max(measured-only ratios), which is None when every tick landed as
+    # not-measured -- pin that None reaches here and still fails, so a run
+    # where NOTHING was ever actually measured cannot pass by omission.
+    r = lib.build_tab_result(
+        "sessions", True, "ok:8", ticks_observed=6, console_errors=[],
+        blink_ratio=None, color_violations=[],
+        leak_before={"charts": 1, "uplots": 1, "pending": 0},
+        leak_after={"charts": 1, "uplots": 1, "pending": 0},
+        artifacts={},
+        blink_not_measured=[{"tick": i, "reason": "mid-capture advance"}
+                            for i in range(1, 7)])
+    check(r["no_blink"]["ok"] is False,
+          "an all-not-measured tab's no_blink check is False, never an implicit pass")
+    check(r["ok"] is False,
+          "...and that fails the whole tab (a gate that cannot see must refuse, never approve)")
+
+
+def test_build_failed_tab_result_not_measured_empty():
+    r = lib.build_failed_tab_result("waterfall", "panel did not render within 60s")
+    check(r["no_blink"]["not_measured"] == [],
+          "a tab that never reached the tick loop has no not-measured ticks to report")
 
 
 def test_build_tab_result_records_blink_sweep():

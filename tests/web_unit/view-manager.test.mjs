@@ -196,3 +196,76 @@ test('a stale refresh that errors after a switch does not report (its view is go
     await rA;
     assert.equal(errors.length, 0, 'stale-epoch error not reported');
 });
+
+// ── lastMount / seq (issue #193) ─────────────────────────────────────────────
+//
+// tests/ui_live_smoke.py's blink capture used to anchor on a fixed delay
+// after the AAS request was sent, which undershoots under real load because
+// ViewManager.refresh() runs sequentially AFTER the summary pane's own round
+// trip. The fix anchors on this chokepoint's own mount event instead, so
+// these tests pin the event the harness now depends on.
+
+test('lastMount is null before any mount, then records the mounted view\'s id after one', async () => {
+    const log = [], cancelled = [], errors = [];
+    const vm = newVM(log, cancelled, errors);
+    const a = makeView('a', log);
+    vm.register(a.view);
+    vm.active = a.view;
+    assert.equal(vm.lastMount, null, 'nothing mounted yet');
+
+    const r = vm.refresh();
+    a.gates[0].resolve({ v: 1 });
+    await r;
+
+    assert.ok(vm.lastMount, 'lastMount set after a successful mount');
+    assert.equal(vm.lastMount.id, 'a');
+    assert.equal(vm.lastMount.seq, 1);
+    assert.equal(typeof vm.lastMount.at, 'number');
+});
+
+test('lastMount.seq strictly advances across refreshes, including across a switchTo', async () => {
+    const log = [], cancelled = [], errors = [];
+    const vm = newVM(log, cancelled, errors);
+    const a = makeView('a', log);
+    const b = makeView('b', log);
+    vm.register(a.view).register(b.view);
+    vm.active = a.view;
+
+    const r1 = vm.refresh();
+    a.gates[0].resolve({ v: 1 });
+    await r1;
+    const seqAfterFirst = vm.lastMount.seq;
+
+    const r2 = vm.refresh();
+    a.gates[1].resolve({ v: 2 });
+    await r2;
+    assert.ok(vm.lastMount.seq > seqAfterFirst,
+        'a second mount of the SAME view still bumps seq — a caller polling ' +
+        'for "seq advanced" must see every repaint, not just an identity change');
+
+    const seqBeforeSwitch = vm.lastMount.seq;
+    const sw = vm.switchTo('b');
+    b.gates[0].resolve({ v: 3 });
+    await sw;
+    assert.equal(vm.lastMount.id, 'b');
+    assert.ok(vm.lastMount.seq > seqBeforeSwitch, 'switching views bumps seq too');
+});
+
+test('a view.mount() that throws does NOT bump lastMount — nothing actually painted', async () => {
+    const log = [], cancelled = [], errors = [];
+    const vm = newVM(log, cancelled, errors);
+    const view = {
+        id: 'broken',
+        requests() { return Promise.resolve({}); },
+        build(data) { return data; },
+        mount() { throw new Error('boom'); },
+        enter() {}, leave() {},
+    };
+    vm.register(view);
+    vm.active = view;
+
+    await vm.refresh();
+    assert.equal(vm.lastMount, null,
+        'a throwing mount must not be reported as a landed paint — a caller ' +
+        'waiting on seq would otherwise treat a failed render as fresh data');
+});
