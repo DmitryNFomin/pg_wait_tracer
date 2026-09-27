@@ -28,9 +28,9 @@
  *     (the server's seen_cmd rule — legacy traces, background processes);
  *   - no per-pid state at all (accumulator full) falls back to the
  *     emission-time gate the record carries;
- *   - a zero-length interval takes the instantaneous gate and consumes
- *     NOTHING, so banked command time survives for the interval that
- *     really contains it.
+ *   - a degenerate (empty) interval takes the instantaneous gate and is
+ *     credited nothing; see pgwt_cmd_gate_take for the one limitation this
+ *     rule still shares with compute.c.
  *
  * WHY A SINGLE-PASS SWEEP IS ENOUGH. The banked/anchor sweep below computes
  * the same overlap as intersecting the interval against a per-pid,
@@ -123,8 +123,16 @@ static inline uint64_t pgwt_cmd_gate_raw_ns(const struct pgwt_cmd_gate *g,
 
 /* Command-open ns of the closed record [t0, t1), clipped to its wall, and
  * ADVANCE the sweep to t1 (a pid's exact records tile contiguously, so
- * banked time since the previous record belongs to this one). A zero-length
- * interval consumes nothing. */
+ * banked time since the previous record belongs to this one).
+ *
+ * KNOWN SHARED LIMITATION, pinned by tests/test_cmd_gate.c: a DEGENERATE
+ * record — zero-length, or one whose duration runs past its own timestamp
+ * so [t0, t1) is empty — still consumes the pid's banked command time and
+ * credits it nowhere, because it has no wall to put it in. Not consuming
+ * would be better, but this state machine is byte-for-byte the one in
+ * compute.c pgwt_tag_events and tests/test_live_accum.c diffs the two on
+ * one stream; changing it here alone would split them. It moves with
+ * compute.c when the server path goes proportional. */
 static inline uint64_t pgwt_cmd_gate_take(struct pgwt_cmd_gate *g,
                                           uint64_t t0_ns, uint64_t t1_ns)
 {
@@ -132,11 +140,11 @@ static inline uint64_t pgwt_cmd_gate_take(struct pgwt_cmd_gate *g,
         return 0;
     uint64_t wall = t1_ns > t0_ns ? t1_ns - t0_ns : 0;
     uint64_t open_ns = pgwt_cmd_gate_raw_ns(g, t0_ns, t1_ns);
-    if (wall == 0)
-        return 0;
     g->banked_ns = 0;
     if (g->open)
         g->anchor_ns = t1_ns;
+    /* The clip cannot change the majority verdict (open_ns > wall already
+     * implies open_ns * 2 >= wall); it keeps out_ns from underflowing. */
     return open_ns < wall ? open_ns : wall;
 }
 

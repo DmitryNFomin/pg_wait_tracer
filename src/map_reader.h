@@ -218,6 +218,10 @@ struct pgwt_live_interval {
                                * interval is folded twice instead, see
                                * pgwt_accum_add_split */
     bool     closed;          /* closed record: also feeds the histograms */
+    bool     split_tail;      /* #115: the out-of-command half of a split
+                               * record — one event, two rows, so it must
+                               * not act as a second query-attribution
+                               * boundary (pgwt_accum_add_split) */
     struct pgwt_pid_accum *pa; /* pre-resolved per-pid entry (NULL = look up) */
 };
 

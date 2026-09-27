@@ -221,8 +221,15 @@ void pgwt_accum_add_interval(struct pgwt_accumulator *acc,
 
     /* Query-level accumulation (no histogram; issue #128: a closed record
      * without an id is deferred until the pid reports one). */
-    pgwt_live_qattr_record(acc, pa, iv->query_id, we, stat_ns, iv->cat_flag,
-                           iv->closed);
+    /* #115: the out-of-command half of a split record is not a second
+     * event. Its command boundary was already delivered by the CMD_END
+     * marker (pgwt_live_qattr_marker), so letting the synthetic
+     * NonCommandCpu row flush the pid's pending attribution again would
+     * resolve a deferred wait against the wrong statement. It still gets
+     * its own query row when the record carries an id. */
+    if (!(iv->split_tail && iv->query_id == 0))
+        pgwt_live_qattr_record(acc, pa, iv->query_id, we, stat_ns,
+                               iv->cat_flag, iv->closed);
 }
 
 void pgwt_accum_add_split(struct pgwt_accumulator *acc,
@@ -248,9 +255,10 @@ void pgwt_accum_add_split(struct pgwt_accumulator *acc,
     part.cpu_ns   = in_cpu;
     part.cmd_open = true;
     pgwt_accum_add_interval(acc, &part);
-    part.wall_ns  = iv->wall_ns - in_ns;
-    part.cpu_ns   = iv->cpu_ns > in_cpu ? iv->cpu_ns - in_cpu : 0;
-    part.cmd_open = false;
+    part.wall_ns    = iv->wall_ns - in_ns;
+    part.cpu_ns     = iv->cpu_ns > in_cpu ? iv->cpu_ns - in_cpu : 0;
+    part.cmd_open   = false;
+    part.split_tail = true;
     pgwt_accum_add_interval(acc, &part);
 }
 

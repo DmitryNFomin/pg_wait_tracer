@@ -653,7 +653,7 @@ static void test_cmd_gate_open_stretch(void)
     pgwt_accum_add_split(view, &open1, &csa);
     /* #115: the 0.1 ms before CMD_START is not this statement's CPU, and
      * the measured cpu_ns rides along with the wall it belongs to. */
-    CHECK(view->tm.cpu_time_ns == US(4704) * 1000 &&
+    CHECK(view->tm.cpu_time_ns == US(4704) &&
           view->tm.db_time_ns == MS(4) + US(900),
           "tick A: CPU* = 4.9/5 of the measured 4.8 ms, DB Time = 4.9 ms "
           "(got %.3f / %.3f ms)", view->tm.cpu_time_ns / 1e6,
@@ -801,7 +801,9 @@ static void test_cross_check_tag_events(void)
     enum { NPIDS = 3, MAXEV = 6000 };
     struct pgwt_trace_event *ev = calloc(MAXEV, sizeof(*ev));
     int n = 0;
-    uint64_t t[NPIDS] = { US(0), US(300), US(700) };   /* per-pid clocks */
+    /* Per-pid clocks, started past the longest generated interval (a real
+     * record's ktime stamp is never smaller than its own duration). */
+    uint64_t t[NPIDS] = { MS(10), MS(10) + US(300), MS(10) + US(700) };
     int mid_cmd[NPIDS] = { 0, 0, 0 };                   /* pid 2 attaches mid-command */
     mid_cmd[2] = 1;
 
@@ -960,8 +962,13 @@ static void test_query_attr_lock_before_report(void)
     CHECK(qrow(acc, Q, LOCK_RELATION) == MS(1000) + MS(3003),
           "plan_start(Q) resolves both lock records to Q (%.1f ms)",
           qrow(acc, Q, LOCK_RELATION) / 1e6);
-    CHECK(qrow(acc, Q, 0) == MS(1) + MS(1), "…and the parse-phase CPU");
-    CHECK(acc->qattr_backfilled_ns == MS(4005) && acc->qattr_unattributed_ns == 0,
+    /* #115: the first run opened 50 us before CMD_START, so 0.95 of its
+     * 1 ms is the statement's; the second is wholly in-command. */
+    CHECK(qrow(acc, Q, 0) == US(950) + MS(1),
+          "…and the parse-phase CPU, minus the 50 us before CMD_START "
+          "(%.3f ms)", qrow(acc, Q, 0) / 1e6);
+    CHECK(acc->qattr_backfilled_ns == MS(4004) + US(950) &&
+          acc->qattr_unattributed_ns == 0,
           "metrics: backfilled %.1f ms, unattributed %.1f ms",
           acc->qattr_backfilled_ns / 1e6, acc->qattr_unattributed_ns / 1e6);
     stream_marker_q(&s, PGWT_MARKER_PLAN_END, MS(7206) + US(827), Q);
@@ -970,8 +977,13 @@ static void test_query_attr_lock_before_report(void)
     stream_marker_q(&s, PGWT_MARKER_CMD_END, MS(7207) + US(148), Q);
     stream_record(&s, 0, MS(7206), MS(7207) + US(191), 0, Q);
     stream_record(&s, PG_WAIT_CLIENT_READ, MS(7207) + US(191), MS(13967), 0, Q);
-    CHECK(qrow(acc, Q, 0) == MS(2) + MS(1) + US(191),
-          "the closing run adds to Q's CPU* as before");
+    CHECK(qrow(acc, Q, 0) == US(950) + MS(1) + US(1148),
+          "the closing run adds its 1.148 ms of command overlap to Q's CPU* "
+          "(%.3f ms)", qrow(acc, Q, 0) / 1e6);
+    CHECK(qrow(acc, Q, PGWT_WEI_NONCMD_CPU) == US(43),
+          "…and the 43 us it ran after CMD_END is Q's NonCommandCpu row, "
+          "not its CPU* (%.3f ms)",
+          qrow(acc, Q, PGWT_WEI_NONCMD_CPU) / 1e6);
     CHECK(s.pa->qattr.npending == 0, "nothing left pending");
 
     /* Mode C denominator: Σ of Q's non-idle rows now includes the lock. */
@@ -980,8 +992,9 @@ static void test_query_attr_lock_before_report(void)
         if (acc->query_events[i].query_id == Q &&
             !pgwt_is_idle_event(acc->query_events[i].wait_event))
             q_nonidle += acc->query_events[i].total_ns;
-    CHECK(q_nonidle == MS(4003) + MS(3) + US(191),
-          "Q's wait profile = lock 4003 + CPU 3.191 ms (got %.3f ms)", q_nonidle / 1e6);
+    CHECK(q_nonidle == MS(4003) + US(3098),
+          "Q's wait profile = lock 4003 + in-command CPU 3.098 ms "
+          "(got %.3f ms)", q_nonidle / 1e6);
 
     /* PG13 shape: the id arrives at ExecutorStart and the edge is reset at
      * CMD_END, so the trailing run closes with 0 — rule 2 (cmd_qid). */
@@ -1000,7 +1013,9 @@ static void test_query_attr_lock_before_report(void)
     CHECK(p.pa->qattr.npending == 1 && qrow(acc, P, 0) == 0,
           "PG13: the trailing run (edge reset) waits for the boundary");
     stream_record(&p, PG_WAIT_CLIENT_READ, MS(21) + US(100), MS(30), 0, 0);
-    CHECK(qrow(acc, P, 0) == US(100), "…and takes the command's id at the ClientRead (rule 2)");
+    CHECK(qrow(acc, P, 0) == US(80),
+          "…and takes the command's id at the ClientRead (rule 2); only the "
+          "80 us before CMD_END is P's (%.3f ms)", qrow(acc, P, 0) / 1e6);
 
     /* A command that never reports an id (utility, no compute_query_id):
      * its non-idle time is the explicit unattributed bucket, never dropped. */
@@ -1100,7 +1115,13 @@ static void test_cross_check_query_attr(void)
     enum { NPIDS = 4, MAXEV = 8000 };
     struct pgwt_trace_event *ev = calloc(MAXEV, sizeof(*ev));
     int n = 0;
-    uint64_t t[NPIDS] = { US(0), US(300), US(700), US(900) };
+    /* A record's timestamp is ktime_get_ns, so it is always larger than the
+     * interval it closes; start the per-pid clocks past the longest wait the
+     * generator can produce so no record has t1 < t0 (which is not a stream
+     * the daemon can ever see, and which the two sweeps handle differently
+     * under #115's clipping). */
+    uint64_t t[NPIDS] = { MS(10), MS(10) + US(300), MS(10) + US(700),
+                          MS(10) + US(900) };
     lcg_state = 0x2545F491u;
 
     /* Statements of the probe's shape, randomised: some report the id only
@@ -1122,26 +1143,37 @@ static void test_cross_check_query_attr(void)
             ev[n++] = (struct pgwt_trace_event){ .timestamp_ns = t[p], .pid = pid, \
                 .old_event = (_m), .new_event = (_m), .duration_ns = 0, \
                 .query_id = (_qid) }; } while (0)
-        t[p] += US(100 + lcg(3000)); EMIT(PG_WAIT_CLIENT_READ, US(100 + lcg(3000)), 0);
+        /* STEP advances the pid clock by exactly the interval it then emits,
+         * so the pid's records TILE its timeline the way a real exact span
+         * does (measured on a live trace: covered == span, zero overlaps).
+         * The earlier form drew the advance and the duration independently,
+         * which produced overlapping records and markers landing mid-record
+         * — a stream the daemon cannot emit, and the only reason this #128
+         * guard saw #115 straddles at all. Straddling is exercised where it
+         * belongs: tests/test_cmd_gate.c and the #98 sweep cross-check. */
+        #define STEP(_we, _durexpr, _qid) do { \
+            uint64_t _d = (_durexpr); t[p] += _d; EMIT(_we, _d, _qid); } while (0)
+        STEP(PG_WAIT_CLIENT_READ, US(100 + lcg(3000)), 0);
         /* CMD_START carries the previous statement's id sometimes (stale). */
         MARK(PGWT_MARKER_CMD_START, lcg(2) ? 0x1000 + lcg(6) : 0);
         uint64_t open_at = t[p];
         int waits = 1 + lcg(3);
         for (int w = 0; w < waits; w++) {
-            t[p] += US(10 + lcg(200)); EMIT(0, US(10 + lcg(200)), 0);
-            t[p] += US(50 + lcg(4000)); EMIT(LOCK_RELATION, US(50 + lcg(4000)), 0);
+            STEP(0, US(10 + lcg(200)), 0);
+            STEP(LOCK_RELATION, US(50 + lcg(4000)), 0);
         }
         uint64_t id_now = (shape == 0 || shape == 3) ? qid : 0;
         if (shape == 0 || shape == 3) { MARK(PGWT_MARKER_PLAN_START, qid); MARK(PGWT_MARKER_PLAN_END, qid); }
         if (shape == 2) id_now = qid;   /* ExecutorStart publishes it */
         if (shape != 1) { MARK(PGWT_MARKER_EXEC_START, id_now); }
-        t[p] += US(10 + lcg(500)); EMIT(0, US(10 + lcg(500)), id_now);
-        if (lcg(2)) { t[p] += US(5 + lcg(300)); EMIT(IO_WALSYNC, US(5 + lcg(300)), id_now); }
+        STEP(0, US(10 + lcg(500)), id_now);
+        if (lcg(2)) STEP(IO_WALSYNC, US(5 + lcg(300)), id_now);
         if (shape != 1) { MARK(PGWT_MARKER_EXEC_END, id_now); }
         uint64_t cmd_end_qid = shape == 2 ? 0 : id_now;   /* PG13: edge reset before CMD_END */
         if (lcg(10) != 0) MARK(PGWT_MARKER_CMD_END, cmd_end_qid);
         (void)open_at;
-        t[p] += US(5 + lcg(100)); EMIT(0, US(5 + lcg(100)), cmd_end_qid);   /* trailing run */
+        STEP(0, US(5 + lcg(100)), cmd_end_qid);   /* trailing run */
+        #undef STEP
         #undef EMIT
         #undef MARK
     }
