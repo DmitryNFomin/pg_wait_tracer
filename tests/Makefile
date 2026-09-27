@@ -60,6 +60,15 @@ test_event_reader: test_event_reader.c $(BUILD)/event_reader.o $(BUILD)/event_wr
                    $(BUILD)/discovery.o $(BUILD)/backend_status_layout.o
 	$(CC) $(CFLAGS) -o $@ $^ -llz4 $(LIBBPF_LIB) -lelf -lz
 
+# xp_gate — issue #115 observer-bias study (docs/OBSERVER_BIAS.md), not a
+# unit test: not in TESTS/check, built on demand by
+# tests/observer_bias_study.sh. Same object list as test_event_reader above
+# (xp_gate.c reads the same trace format via event_reader.c/wait_event.c).
+xp_gate: xp_gate.c $(BUILD)/event_reader.o $(BUILD)/event_writer.o \
+                   $(BUILD)/map_reader.o $(BUILD)/wait_event.o $(BUILD)/spawn.o $(BUILD)/cJSON.o \
+                   $(BUILD)/discovery.o $(BUILD)/backend_status_layout.o
+	$(CC) $(CFLAGS) -o $@ $^ -llz4 $(LIBBPF_LIB) -lelf -lz
+
 test_bucket: test_bucket.c
 	$(CC) $(CFLAGS) -o $@ $^
 

@@ -56,6 +56,12 @@ run python3 tests/test_free_ports.py
 step "CI change-classifier table-driven test (issue #167)"
 run bash tests/test_classify_changed_files.sh
 
+step "observer-bias study: kernel_cpu_arbiter.py bpftrace-doubling / schedstats guards (issue #115)"
+run python3 tests/test_kernel_cpu_arbiter.py
+
+step "observer-bias study: capture-script fail-loud guards (issue #115)"
+run bash tests/test_observer_bias_guards.sh
+
 if [[ $FAST -eq 0 ]]; then
     # ── Port allocation (so two `make check` runs on this Mac don't collide) ─
     # One free base per run, laid out at FIXED OFFSETS below so every mock

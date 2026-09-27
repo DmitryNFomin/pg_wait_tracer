@@ -38,7 +38,9 @@ tests/test_durability
 tests/test_query_text
 tests/test_golden_fixture
 tests/map_reader_core.o
+tests/xp_gate
 tests/__pycache__/
+tests/**/__pycache__/
 
 # Visual-snapshot diff/actual artifacts (transient — only baselines are tracked)
 tests/web_snapshots/*-actual.png

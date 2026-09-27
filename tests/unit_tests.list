@@ -37,3 +37,5 @@ test_data_query_text_context.py
 test_ui_live_smoke_lib.py
 test_demo_rehearsal_lib.py
 test_hetzner_sweep.sh
+test_kernel_cpu_arbiter.py
+test_observer_bias_guards.sh

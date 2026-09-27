@@ -1,0 +1,110 @@
+/* sched2.bt — scheduler-tracepoint accounting PLUS a direct test of the
+ * "the pg_stat_activity sampler only runs when the run queue is short" claim.
+ *
+ * __TRACK__, __SOBS__ and __SAMPLER__ are substituted with the real pgbench
+ * backend pids and the sampler's backend pid before this runs, so every
+ * counter is restricted to exactly the population the other sources use.
+ *
+ * Per tracked backend:
+ *   @on[p] / @rq[p] / @off[p]   exact executing / runnable-but-queued /
+ *                               blocked ns, from sched_switch + sched_wakeup.
+ *
+ * The bias test, per backend, with NO running counter to drift:
+ *   @st[p]      1 while p is on a processor OR runnable, 0 while blocked.
+ *               Set unconditionally on every transition, so it cannot
+ *               accumulate error.
+ *   @sn         how many times the sampler was switched in.
+ *   @sobs[p]    how many of those found p on-a-processor-or-runnable.
+ * Time says p is in that state (on[p]+rq[p])/window of the time; the sampler
+ * says sobs[p]/sn of the time. If the sampler's figure is systematically
+ * lower, it really is scheduled preferentially when the queue is short, and
+ * the bias is observed rather than inferred.
+ *   @sdelay     the sampler's own wakeup -> on-cpu delay, the CFS sleeper
+ *               credit that would cause exactly that.
+ */
+BEGIN
+{
+__TRACK__
+}
+
+tracepoint:sched:sched_switch
+{
+    $prev = args.prev_pid;
+    $next = args.next_pid;
+    /* 0 = TASK_RUNNING, 256 = TASK_REPORT_MAX ("preempted while runnable"),
+     * per __trace_sched_switch_state. Either way it still wants a cpu. */
+    $runnable = (args.prev_state == 0 || args.prev_state == 256);
+
+    if (@track[$prev] == 1) {
+        if (@oncpu_ts[$prev] != 0) {
+            @on[$prev] += nsecs - @oncpu_ts[$prev];
+            delete(@oncpu_ts[$prev]);
+        }
+        if ($runnable) {
+            @rq_ts[$prev] = nsecs;
+            @st[$prev] = 1;
+        } else {
+            @off_ts[$prev] = nsecs;
+            @st[$prev] = 0;
+        }
+    }
+    if (@track[$next] == 1) {
+        @oncpu_ts[$next] = nsecs;
+        if (@rq_ts[$next] != 0) {
+            @rq[$next] += nsecs - @rq_ts[$next];
+            delete(@rq_ts[$next]);
+        }
+        @st[$next] = 1;
+    }
+
+    if ($next == __SAMPLER__) {
+        @sn = count();
+__SOBS__
+        if (@srq_ts != 0) {
+            @sdelay = hist((nsecs - @srq_ts) / 1000);
+            @srq_ts = 0;
+        }
+    }
+}
+
+tracepoint:sched:sched_wakeup,
+tracepoint:sched:sched_wakeup_new
+{
+    $p = args.pid;
+    if (@track[$p] == 1) {
+        if (@off_ts[$p] != 0) {
+            @off[$p] += nsecs - @off_ts[$p];
+            delete(@off_ts[$p]);
+        }
+        @rq_ts[$p] = nsecs;
+        @st[$p] = 1;
+    }
+    if ($p == __SAMPLER__) {
+        @srq_ts = nsecs;
+    }
+}
+
+interval:ms:200
+{
+    printf("TS %llu\n", nsecs);
+    print(@on);
+    print(@rq);
+    print(@off);
+    print(@sn);
+    print(@sobs);
+}
+
+END
+{
+    printf("SDELAY_US (sampler wakeup -> on cpu)\n");
+    print(@sdelay);
+    clear(@oncpu_ts);
+    clear(@rq_ts);
+    clear(@off_ts);
+    clear(@st);
+    clear(@track);
+    /* issue #115 tooling bug: bpftrace reprints every still-populated map
+     * at program exit, on top of the explicit print() above, silently
+     * doubling this histogram unless it is cleared too. */
+    clear(@sdelay);
+}

@@ -1,0 +1,87 @@
+/* xtab.bt.tmpl — issue #115: decompose the exact-tier vs kernel CPU gap.
+ *
+ * Derived from tests/results/issue115_pgws/sched3.bt.tmpl, with the two
+ * in-database sampler observers removed (this experiment does not measure
+ * sampling bias) and a per-transition DUMP added, so every tracked backend's
+ * kernel state can be intersected in userspace with the exact tier's own
+ * interval timeline.
+ *
+ * Placeholder substituted before running: TRACK.
+ *
+ * Aggregates (kept as a fail-loud cross-check on the dump; if the dump lost
+ * events the two disagree):
+ *   @on[p] / @rq[p] / @off[p]   executing / runnable-but-queued / blocked ns.
+ *
+ * Dump, one line per state change of a tracked pid:
+ *   K <pid> <nsecs> <state>    state 0 = on a processor
+ *                                    1 = runnable, queued (run-queue)
+ *                                    2 = blocked / sleeping (off-CPU)
+ * plus, once at BEGIN, one "KSTART <nsecs>" line, and at each 250 ms tick a
+ * "TS <nsecs>" line before the aggregate maps (the format parse_bt wants).
+ */
+BEGIN
+{
+__TRACK__
+    printf("KSTART %llu\n", nsecs);
+}
+
+tracepoint:sched:sched_switch
+{
+    $prev = args.prev_pid;
+    $next = args.next_pid;
+    /* 0 = TASK_RUNNING, 256 = TASK_REPORT_MAX ("preempted while runnable"). */
+    $runnable = (args.prev_state == 0 || args.prev_state == 256);
+
+    if (@track[$prev] == 1) {
+        if (@oncpu_ts[$prev] != 0) {
+            @on[$prev] += nsecs - @oncpu_ts[$prev];
+            delete(@oncpu_ts[$prev]);
+        }
+        if ($runnable) {
+            @rq_ts[$prev] = nsecs;
+            printf("K %d %llu 1\n", $prev, nsecs);
+        } else {
+            @off_ts[$prev] = nsecs;
+            printf("K %d %llu 2\n", $prev, nsecs);
+        }
+    }
+    if (@track[$next] == 1) {
+        @oncpu_ts[$next] = nsecs;
+        if (@rq_ts[$next] != 0) {
+            @rq[$next] += nsecs - @rq_ts[$next];
+            delete(@rq_ts[$next]);
+        }
+        printf("K %d %llu 0\n", $next, nsecs);
+    }
+}
+
+tracepoint:sched:sched_wakeup,
+tracepoint:sched:sched_wakeup_new
+{
+    $p = args.pid;
+    if (@track[$p] == 1) {
+        if (@off_ts[$p] != 0) {
+            @off[$p] += nsecs - @off_ts[$p];
+            delete(@off_ts[$p]);
+        }
+        @rq_ts[$p] = nsecs;
+        printf("K %d %llu 1\n", $p, nsecs);
+    }
+}
+
+interval:ms:250
+{
+    printf("TS %llu\n", nsecs);
+    print(@on);
+    print(@rq);
+    print(@off);
+}
+
+END
+{
+    printf("KEND %llu\n", nsecs);
+    clear(@oncpu_ts);
+    clear(@rq_ts);
+    clear(@off_ts);
+    clear(@track);
+}

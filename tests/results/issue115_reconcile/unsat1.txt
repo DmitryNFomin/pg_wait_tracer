@@ -1,0 +1,84 @@
+######## unsat1 ########
+WINDOW [1790508599980530163,1790508638980530163) secs=39.0 pgbench_backends=2: 4536,4537
+  M2 excludes from the trace side: --exclude-pid 4548 --exclude-pid 4618 --exclude-pid 4621 --exclude-pid 4628 --exclude-pid 4631 --exclude-pid 4634 --exclude-pid 4710
+  M1 excludes from the trace side: --exclude-pid 4548 (the pgsa sampler) only
+  tps: tps = 1225.312683 (without initial connection time)
+
+--- M2 exact side (strict pgbench-backend set) ---
+PIDS total=11 with_cmd_markers=2 overlapping_intervals=0 client_only=1
+CMD-OPEN total = 55.274 s over 299345 commands (mean 184.6 us)   wait inside cmd = 21.023 s   cpu outside cmd = 8.406 s
+INTERVALS cpu=418331 (mean 102.0 us) wait=119244 (mean 176.3 us) straddling=364369 (8.406 s outside)
+MARKERS start=348263 end=348263 dup_start(missing END)=0 orphan_end(missing START)=0 pids_unclosed_at_end=0
+SAMPLED                        cpu=26.461s nonidle=47.242s  share=56.0%  total=66.479s active_frac=71.1% noncmd_cpu=0.000s
+EXACT S (stream, majority)     cpu=40.321s wait=21.023s  share=65.7%
+EXACT A (sorted, majority)     cpu=40.321s wait=21.023s  share=65.7%
+EXACT B (sorted, proportional) cpu=34.251s wait=21.023s  share=62.0%
+EXACT C (2-pass, proportional) cpu=34.251s wait=21.023s  share=62.0%
+--- M2cap16 exact side (same list TRUNCATED to 16: emulates the pre-fix --exclude-pid cap) ---
+CAP16 CMD-OPEN total = 55.274 s over 299345 commands (mean 184.6 us)   wait inside cmd = 21.023 s   cpu outside cmd = 8.406 s
+CAP16 SAMPLED                        cpu=26.461s nonidle=47.242s  share=56.0%  total=66.479s active_frac=71.1% noncmd_cpu=0.000s
+CAP16 EXACT S (stream, majority)     cpu=40.321s wait=21.023s  share=65.7%
+CAP16 EXACT A (sorted, majority)     cpu=40.321s wait=21.023s  share=65.7%
+CAP16 EXACT B (sorted, proportional) cpu=34.251s wait=21.023s  share=62.0%
+CAP16 EXACT C (2-pass, proportional) cpu=34.251s wait=21.023s  share=62.0%
+--- M1 exact side (--client-only, sampler excluded only) ---
+PIDS total=17 with_cmd_markers=8 overlapping_intervals=0 client_only=1
+CMD-OPEN total = 55.442 s over 299346 commands (mean 185.2 us)   wait inside cmd = 21.117 s   cpu outside cmd = 8.409 s
+INTERVALS cpu=418767 (mean 102.0 us) wait=119679 (mean 176.5 us) straddling=364370 (8.406 s outside)
+MARKERS start=348269 end=348268 dup_start(missing END)=0 orphan_end(missing START)=0 pids_unclosed_at_end=1
+SAMPLED                        cpu=26.542s nonidle=47.430s  share=56.0%  total=66.667s active_frac=71.1% noncmd_cpu=0.000s
+EXACT S (stream, majority)     cpu=40.398s wait=21.118s  share=65.7%
+EXACT A (sorted, majority)     cpu=40.398s wait=21.118s  share=65.7%
+EXACT B (sorted, proportional) cpu=34.327s wait=21.118s  share=61.9%
+EXACT C (2-pass, proportional) cpu=34.325s wait=21.118s  share=61.9%
+
+--- reference side: pg_stat_activity, M2 pid set (strict) ---
+PGSA_IN M2strict   iters=1924 (49.3 Hz) rows=3848 backends=2.00 win=39.000s act_cpu=1532 act_wait=1007 torn=81(2.10%) nonactive_nowait=458(11.90%) idle_clientread=769 idle_activity=0 act_activity=0 nonactive_wait=1
+PGSA_V1 M2strict   share=60.34%  cpu_s=   31.05 nonidle_s=   51.47 cpu_n=1532 nonidle_n=2539
+PGSA_V2 M2strict   share=66.40%  cpu_s=   40.34 nonidle_s=   60.75 cpu_n=1990 nonidle_n=2997
+PGSA_V3 M2strict   share=61.56%  cpu_s=   32.70 nonidle_s=   53.11 cpu_n=1613 nonidle_n=2620
+PGSA_V4 M2strict   share=67.28%  cpu_s=   41.98 nonidle_s=   62.39 cpu_n=2071 nonidle_n=3078
+    M2strict   CPU                         60.34%     31.05s
+    M2strict   IO:WalSync                  31.51%     16.22s
+    M2strict   LWLock:WALWrite              4.81%      2.47s
+    M2strict   Lock:transactionid           1.46%      0.75s
+    M2strict   IO:WalWrite                  1.26%      0.65s
+    M2strict   IO:DataFileRead              0.55%      0.28s
+    M2strict   IO:DataFileWrite             0.04%      0.02s
+    M2strict   IO:WalInitSync               0.04%      0.02s
+--- reference side: pg_stat_activity, M1 pid set (every client backend) ---
+PGSA_IN M1all      iters=1924 (49.3 Hz) rows=3848 backends=2.00 win=39.000s act_cpu=1532 act_wait=1007 torn=81(2.10%) nonactive_nowait=458(11.90%) idle_clientread=769 idle_activity=0 act_activity=0 nonactive_wait=1
+PGSA_V1 M1all      share=60.34%  cpu_s=   31.05 nonidle_s=   51.47 cpu_n=1532 nonidle_n=2539
+PGSA_V2 M1all      share=66.40%  cpu_s=   40.34 nonidle_s=   60.75 cpu_n=1990 nonidle_n=2997
+PGSA_V3 M1all      share=61.56%  cpu_s=   32.70 nonidle_s=   53.11 cpu_n=1613 nonidle_n=2620
+PGSA_V4 M1all      share=67.28%  cpu_s=   41.98 nonidle_s=   62.39 cpu_n=2071 nonidle_n=3078
+    M1all      CPU                         60.34%     31.05s
+    M1all      IO:WalSync                  31.51%     16.22s
+    M1all      LWLock:WALWrite              4.81%      2.47s
+    M1all      Lock:transactionid           1.46%      0.75s
+    M1all      IO:WalWrite                  1.26%      0.65s
+    M1all      IO:DataFileRead              0.55%      0.28s
+    M1all      IO:DataFileWrite             0.04%      0.02s
+    M1all      IO:WalInitSync               0.04%      0.02s
+--- reference side: oracle_share.py verbatim (M1's own script, own spacing) ---
+ORACLE iters=1924 span=38.98s spacing=20.27ms rows=3848 backends=2.00 active_samples=2539 cpu_samples=1532 share=60.3%  active_frac=66.0% active_backend_s=51.5 cpu_backend_s=31.1 wait_backend_s=20.4
+  CPU                            60.3%     31.05s
+  IO:WalSync                     31.5%     16.22s
+
+--- kernel arbiter ---
+KERNEL window=39.000s pids=2 (not spanning the window, excluded: none)
+  schedstat f1 sum_exec_runtime (on a processor)   =   51.499 s
+  schedstat f2 run_delay        (runnable, queued) =    0.322 s
+  f1+f2  (on a processor OR wanting one)           =   51.821 s
+SCHEDTRACE window=39.000s backends=2 wall=78.000 backend-s
+  on-CPU  (executing)                =   50.756 s
+  run-queue delay (runnable, queued) =    1.494 s
+  off-CPU (blocked / sleeping)       =   25.497 s
+  ... of which EXECUTING on a cpu    =    0.000 s (0.0% -- on-CPU time PostgreSQL reports as the IO:WalSync wait)
+SAMPBIAS[pgsa]  backends=2  window=39.000s  sampler switch-ins in window=1947 (49.9/s)
+      pid  by time %   as sampler saw it %  delta pp
+    by time                 = 66.99%
+    at sampler switch-ins   = 65.74%
+  SCHEDULING BIAS[pgsa] = -1.25 pp (sampler UNDER-observes the on-cpu-or-runnable state)
+TORN rows=3848  active+ClientRead=81 (2.10%)  non-active+no-wait-event=458 (11.90%)
+

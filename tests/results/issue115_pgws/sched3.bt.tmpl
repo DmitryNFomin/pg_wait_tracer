@@ -1,0 +1,159 @@
+/* sched3.bt.tmpl — issue #115 follow-up: does pg_wait_sampling's collector
+ * background worker carry the same scheduler-induced sampling bias we
+ * measured for our own sampled tier and for a pg_stat_activity poller?
+ *
+ * Extends tests/results/issue115_reconcile/sched2.bt.tmpl with a SECOND
+ * observer process, the pg_wait_sampling collector (__COLLECTOR__), measured
+ * with exactly the same instrument as the pg_stat_activity sampler
+ * (__SAMPLER__), so the two biases are directly comparable.
+ *
+ * Placeholders substituted before running (named here without their leading
+ * and trailing double underscores so this comment is not itself rewritten):
+ *   TRACK, SOBS, COBS, COBSW, SAMPLER, COLLECTOR
+ *
+ * Per tracked pgbench backend:
+ *   @on[p] / @rq[p] / @off[p]   executing / runnable-but-queued / blocked ns.
+ *   @st[p]   1 while p is on a processor OR runnable, 0 while blocked.
+ *
+ * Per observer (s = pg_stat_activity sampler, c = pgws collector):
+ *   @sn  / @cn      switch-ins (any reason)
+ *   @cnw            switch-ins that follow a wakeup, i.e. the top of the
+ *                   collector's loop, which is where probe_waits() runs.
+ *   @sobs[p]/@cobs[p]/@cobsw[p]  how many of those found backend p
+ *                   on-a-processor-or-runnable.
+ *   @son / @con     the observer's own on-CPU ns (its overhead).
+ *   @sdelay/@cdelay wakeup -> running delay, us.
+ *   @cburst         the collector's on-CPU burst length, us (one probe walk).
+ */
+BEGIN
+{
+__TRACK__
+}
+
+tracepoint:sched:sched_switch
+{
+    $prev = args.prev_pid;
+    $next = args.next_pid;
+    /* 0 = TASK_RUNNING, 256 = TASK_REPORT_MAX ("preempted while runnable"). */
+    $runnable = (args.prev_state == 0 || args.prev_state == 256);
+
+    if (@track[$prev] == 1) {
+        if (@oncpu_ts[$prev] != 0) {
+            @on[$prev] += nsecs - @oncpu_ts[$prev];
+            delete(@oncpu_ts[$prev]);
+        }
+        if ($runnable) {
+            @rq_ts[$prev] = nsecs;
+            @st[$prev] = 1;
+        } else {
+            @off_ts[$prev] = nsecs;
+            @st[$prev] = 0;
+        }
+    }
+    if (@track[$next] == 1) {
+        @oncpu_ts[$next] = nsecs;
+        if (@rq_ts[$next] != 0) {
+            @rq[$next] += nsecs - @rq_ts[$next];
+            delete(@rq_ts[$next]);
+        }
+        @st[$next] = 1;
+    }
+
+    /* --- observer 1: the pg_stat_activity polling backend --- */
+    if ($prev == __SAMPLER__ && @s_on_ts != 0) {
+        @son += nsecs - @s_on_ts;
+        @s_on_ts = 0;
+    }
+    if ($next == __SAMPLER__) {
+        @sn = count();
+        @s_on_ts = nsecs;
+__SOBS__
+        if (@srq_ts != 0) {
+            @sdelay = hist((nsecs - @srq_ts) / 1000);
+            @srq_ts = 0;
+        }
+    }
+
+    /* --- observer 2: the pg_wait_sampling collector background worker --- */
+    if ($prev == __COLLECTOR__ && @c_on_ts != 0) {
+        @con += nsecs - @c_on_ts;
+        @cburst = hist((nsecs - @c_on_ts) / 1000);
+        @c_on_ts = 0;
+    }
+    if ($next == __COLLECTOR__) {
+        @cn = count();
+        @c_on_ts = nsecs;
+__COBS__
+        if (@crq_ts != 0) {
+            @cdelay = hist((nsecs - @crq_ts) / 1000);
+            @crq_ts = 0;
+            /* A wakeup-triggered switch-in: the collector has just returned
+             * from WaitLatch and is about to run probe_waits(). */
+            @cnw = count();
+__COBSW__
+        }
+    }
+}
+
+tracepoint:sched:sched_wakeup,
+tracepoint:sched:sched_wakeup_new
+{
+    $p = args.pid;
+    if (@track[$p] == 1) {
+        if (@off_ts[$p] != 0) {
+            @off[$p] += nsecs - @off_ts[$p];
+            delete(@off_ts[$p]);
+        }
+        @rq_ts[$p] = nsecs;
+        @st[$p] = 1;
+    }
+    if ($p == __SAMPLER__) {
+        @srq_ts = nsecs;
+    }
+    if ($p == __COLLECTOR__) {
+        @crq_ts = nsecs;
+        @cwake = count();
+    }
+}
+
+interval:ms:250
+{
+    printf("TS %llu\n", nsecs);
+    print(@on);
+    print(@rq);
+    print(@off);
+    print(@sn);
+    print(@sobs);
+    print(@son);
+    print(@cn);
+    print(@cnw);
+    print(@cwake);
+    print(@cobs);
+    print(@cobsw);
+    print(@con);
+}
+
+END
+{
+    printf("SDELAY_US (pg_stat_activity sampler wakeup -> on cpu)\n");
+    print(@sdelay);
+    printf("CDELAY_US (pg_wait_sampling collector wakeup -> on cpu)\n");
+    print(@cdelay);
+    printf("CBURST_US (pg_wait_sampling collector on-cpu burst)\n");
+    print(@cburst);
+    clear(@oncpu_ts);
+    clear(@rq_ts);
+    clear(@off_ts);
+    clear(@st);
+    clear(@track);
+    clear(@s_on_ts);
+    clear(@c_on_ts);
+    clear(@srq_ts);
+    clear(@crq_ts);
+    /* issue #115 tooling bug: bpftrace reprints every still-populated map
+     * at program exit, on top of the explicit print()s just above, silently
+     * doubling these three histograms unless they are cleared too. */
+    clear(@sdelay);
+    clear(@cdelay);
+    clear(@cburst);
+}
