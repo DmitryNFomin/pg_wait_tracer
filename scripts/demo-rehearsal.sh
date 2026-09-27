@@ -186,7 +186,17 @@ ephemeral_cleanup() {
         echo "demo-rehearsal: KEEP=1 -- leaving $server_name (id=$server_id, ip=$server_ip) up." | tee -a "$log"
         echo "demo-rehearsal: tests/hetzner-sweep.sh (make hetzner-sweep, cutoff ${MAX_AGE_HOURS:-6}h by default) WILL delete this VM on its own in a few hours unless you raise MAX_AGE_HOURS/--max-age-hours or delete it yourself first:" | tee -a "$log"
         echo "  HCLOUD_TOKEN=\"\$(security find-generic-password -s hcloud -a claude_token -w)\" tests/hetzner-vm.sh delete $server_id" | tee -a "$log"
-        rm -f "$STATE_FILE"
+        # Deliberately NOT removing $STATE_FILE here (issue #176 bug found
+        # live: a removed state file while the VM stays up means the very
+        # NEXT launch can't see it -- the "a state file already exists"
+        # guard above never fires, so a fresh `make demo-rehearsal` creates
+        # ANOTHER new VM instead of refusing/pointing at this one. That is
+        # exactly how three ephemeral VMs piled up and exhausted Hetzner's
+        # shared-core quota during this issue's own testing. Leaving the
+        # state file in place makes a subsequent launch attempt refuse (as
+        # the top-of-launch guard already does) and 'make
+        # demo-rehearsal-collect' still able to find and re-report on this
+        # kept VM.
         return
     fi
 
