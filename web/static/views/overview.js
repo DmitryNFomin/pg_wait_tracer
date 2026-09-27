@@ -42,10 +42,10 @@ import { fmtMs, fmtAas, esc } from '../lib/format.js';
 export const ON_CPU_MEASURED_TOOLTIP =
     'Measured on-CPU time summed across the WHOLE window, regardless of ' +
     'which PostgreSQL wait (or idle) event was set at the time. This is ' +
-    'still not what the operating system reports: it excludes time queued ' +
-    'for a processor (run-queue delay), which pg_wait_tracer does not ' +
-    'measure, so an operating-system figure for the same window reads ' +
-    'higher still. See README § Time model.';
+    'still not what the operating system reports: time queued for a ' +
+    'processor (run-queue delay) is not included in this figure, so an ' +
+    'operating-system figure for the same window reads higher still. ' +
+    'See README § Time model.';
 
 /* PURE: time_model response -> summary metrics array. Exported for testing. */
 export function buildSummary(data, numCpus) {
