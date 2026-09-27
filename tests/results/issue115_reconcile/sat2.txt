@@ -1,0 +1,81 @@
+######## sat2 ########
+WINDOW [1790497773343069427,1790497812343069427) secs=39.0 pgbench_backends=8: 6429,6430,6431,6432,6433,6434,6435,6436
+  M2 excludes from the trace side: --exclude-pid 6445 --exclude-pid 6513 --exclude-pid 6516 --exclude-pid 6519 --exclude-pid 6584
+  M1 excludes from the trace side: --exclude-pid 6445 (the pgsa sampler) only
+  tps: tps = 2539.878007 (without initial connection time)
+
+--- M2 exact side (strict pgbench-backend set) ---
+PIDS total=18 with_cmd_markers=8 overlapping_intervals=0 client_only=1
+CMD-OPEN total = 208.772 s over 653709 commands (mean 319.4 us)   wait inside cmd = 109.976 s   cpu outside cmd = 76.080 s
+INTERVALS cpu=509039 (mean 343.5 us) wait=339427 (mean 324.0 us) straddling=339082 (76.079 s outside)
+MARKERS start=1209383 end=1209383 dup_start(missing END)=2 orphan_end(missing START)=2 pids_unclosed_at_end=0
+SAMPLED                        cpu=91.401s nonidle=205.912s  share=44.4%  total=234.714s active_frac=87.7% noncmd_cpu=0.000s
+EXACT S (stream, majority)     cpu=97.087s wait=109.976s  share=46.9%
+EXACT A (sorted, majority)     cpu=97.087s wait=109.976s  share=46.9%
+EXACT B (sorted, proportional) cpu=98.797s wait=109.976s  share=47.3%
+EXACT C (2-pass, proportional) cpu=98.797s wait=109.976s  share=47.3%
+--- M1 exact side (--client-only, sampler excluded only) ---
+PIDS total=22 with_cmd_markers=12 overlapping_intervals=0 client_only=1
+CMD-OPEN total = 212.670 s over 653710 commands (mean 325.3 us)   wait inside cmd = 113.180 s   cpu outside cmd = 76.084 s
+INTERVALS cpu=521069 (mean 336.9 us) wait=351456 (mean 322.0 us) straddling=339083 (76.079 s outside)
+MARKERS start=1209387 end=1209386 dup_start(missing END)=2 orphan_end(missing START)=2 pids_unclosed_at_end=1
+SAMPLED                        cpu=91.950s nonidle=209.895s  share=43.8%  total=238.698s active_frac=87.9% noncmd_cpu=0.000s
+EXACT S (stream, majority)     cpu=97.784s wait=113.181s  share=46.4%
+EXACT A (sorted, majority)     cpu=97.784s wait=113.181s  share=46.4%
+EXACT B (sorted, proportional) cpu=99.493s wait=113.181s  share=46.8%
+EXACT C (2-pass, proportional) cpu=99.490s wait=113.181s  share=46.8%
+
+--- reference side: pg_stat_activity, M2 pid set (strict) ---
+PGSA_IN M2strict   iters=1899 (48.7 Hz) rows=15192 backends=8.00 win=39.000s act_cpu=3684 act_wait=6086 torn=90(0.59%) nonactive_nowait=3863(25.43%) idle_clientread=1449 idle_activity=0 act_activity=0 nonactive_wait=20
+PGSA_V1 M2strict   share=37.71%  cpu_s=   75.66 nonidle_s=  200.65 cpu_n=3684 nonidle_n=9770
+PGSA_V2 M2strict   share=55.36%  cpu_s=  154.99 nonidle_s=  279.98 cpu_n=7547 nonidle_n=13633
+PGSA_V3 M2strict   share=38.28%  cpu_s=   77.51 nonidle_s=  202.50 cpu_n=3774 nonidle_n=9860
+PGSA_V4 M2strict   share=55.65%  cpu_s=  156.84 nonidle_s=  281.83 cpu_n=7637 nonidle_n=13723
+    M2strict   CPU                         37.71%     75.66s
+    M2strict   LWLock:WALWrite             25.20%     50.56s
+    M2strict   Lock:transactionid          19.33%     38.79s
+    M2strict   IO:WalSync                  15.18%     30.46s
+    M2strict   Lock:tuple                   1.61%      3.22s
+    M2strict   IO:WalWrite                  0.39%      0.78s
+    M2strict   IO:DataFileRead              0.16%      0.33s
+    M2strict   IO:DataFileWrite             0.15%      0.31s
+    M2strict   LWLock:BufferContent         0.08%      0.16s
+    M2strict   LWLock:LockManager           0.04%      0.08s
+--- reference side: pg_stat_activity, M1 pid set (every client backend) ---
+PGSA_IN M1all      iters=1899 (48.7 Hz) rows=15192 backends=8.00 win=39.000s act_cpu=3684 act_wait=6086 torn=90(0.59%) nonactive_nowait=3863(25.43%) idle_clientread=1449 idle_activity=0 act_activity=0 nonactive_wait=20
+PGSA_V1 M1all      share=37.71%  cpu_s=   75.66 nonidle_s=  200.65 cpu_n=3684 nonidle_n=9770
+PGSA_V2 M1all      share=55.36%  cpu_s=  154.99 nonidle_s=  279.98 cpu_n=7547 nonidle_n=13633
+PGSA_V3 M1all      share=38.28%  cpu_s=   77.51 nonidle_s=  202.50 cpu_n=3774 nonidle_n=9860
+PGSA_V4 M1all      share=55.65%  cpu_s=  156.84 nonidle_s=  281.83 cpu_n=7637 nonidle_n=13723
+    M1all      CPU                         37.71%     75.66s
+    M1all      LWLock:WALWrite             25.20%     50.56s
+    M1all      Lock:transactionid          19.33%     38.79s
+    M1all      IO:WalSync                  15.18%     30.46s
+    M1all      Lock:tuple                   1.61%      3.22s
+    M1all      IO:WalWrite                  0.39%      0.78s
+    M1all      IO:DataFileRead              0.16%      0.33s
+    M1all      IO:DataFileWrite             0.15%      0.31s
+    M1all      LWLock:BufferContent         0.08%      0.16s
+    M1all      LWLock:LockManager           0.04%      0.08s
+--- reference side: oracle_share.py verbatim (M1's own script, own spacing) ---
+ORACLE iters=1899 span=38.98s spacing=20.54ms rows=15192 backends=8.00 active_samples=9770 cpu_samples=3684 share=37.7%  active_frac=64.3% active_backend_s=200.6 cpu_backend_s=75.7 wait_backend_s=125.0
+  CPU                            37.7%     75.66s
+  LWLock:WALWrite                25.2%     50.56s
+
+--- kernel arbiter ---
+KERNEL window=39.000s pids=8 (not spanning the window, excluded: none)
+  schedstat f1 sum_exec_runtime (on a processor)   =  115.204 s
+  schedstat f2 run_delay        (runnable, queued) =  109.560 s
+  f1+f2  (on a processor OR wanting one)           =  224.765 s
+SCHEDTRACE window=39.000s backends=8 wall=312.000 backend-s
+  on-CPU  (executing)                =  116.445 s
+  run-queue delay (runnable, queued) =  108.409 s
+  off-CPU (blocked / sleeping)       =   86.850 s
+  ... of which EXECUTING on a cpu    =    0.000 s (0.0% -- on-CPU time PostgreSQL reports as the IO:WalSync wait)
+SAMPBIAS  backends=8  window=39.000s  sampler switch-ins in window=2216 (56.8/s)
+      pid  by time %   as sampler saw it %  delta pp
+    by time                 = 72.07%
+    at sampler switch-ins   = 66.92%
+  SCHEDULING BIAS = -5.15 pp (sampler UNDER-observes the on-cpu-or-runnable state)
+TORN rows=15192  active+ClientRead=90 (0.59%)  non-active+no-wait-event=3863 (25.43%)
+
