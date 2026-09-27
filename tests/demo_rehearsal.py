@@ -37,6 +37,7 @@ import argparse
 import json
 import os
 import sys
+import threading
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -73,8 +74,25 @@ def _print_plan_banner(duration_s, ticks, passes):
               "product.")
 
 
+def _assert_daemon_alive(daemon_pid, where):
+    """Raw floor (docs/DEMO_REHEARSAL_CRITERIA.md §2: 'the daemon process
+    alive for the whole window'). Mirrors live_smoke._assert_workload_alive
+    exactly (same module already reuses that private helper directly, see
+    the calls below) -- a daemon that died partway through would leave
+    every remaining tab/sample grading a frozen or absent trace file, which
+    could still read as a clean (if stale) result. None means the caller
+    did not wire this up (e.g. a manual --url run)."""
+    if daemon_pid is None:
+        return
+    if not live_smoke._pid_is_live(daemon_pid):
+        print(f"FATAL: daemon (pid {daemon_pid}) is no longer running ({where}) -- "
+              f"refusing to grade the remaining checks against a dead capture",
+              file=sys.stderr)
+        sys.exit(1)
+
+
 def _run_passes(browser, url, out_dir, ticks, passes, first_data_timeout,
-                pgbench_pid, workload_pid, t0):
+                pgbench_pid, workload_pid, daemon_pid, t0):
     pass_results = []
     for name, target_offset_s in passes:
         remaining = target_offset_s - (time.monotonic() - t0)
@@ -90,6 +108,8 @@ def _run_passes(browser, url, out_dir, ticks, passes, first_data_timeout,
         live_smoke._assert_workload_alive(
             pgbench_pid, workload_pid,
             f"after sleeping to pass {name!r}'s target offset")
+        _assert_daemon_alive(daemon_pid,
+                             f"after sleeping to pass {name!r}'s target offset")
         actual_offset = time.monotonic() - t0
         print(f"\n=== pass {name} (target {target_offset_s:.0f}s, "
               f"actual {actual_offset:.0f}s) ===")
@@ -103,6 +123,7 @@ def _run_passes(browser, url, out_dir, ticks, passes, first_data_timeout,
             tab_results[tab_id] = result
             live_smoke._assert_workload_alive(
                 pgbench_pid, workload_pid, f"pass {name!r} tab {tab_id!r}")
+            _assert_daemon_alive(daemon_pid, f"pass {name!r} tab {tab_id!r}")
             kf_line = lib.known_failing_report_line(tab_id, result["ok"])
             # A KNOWN-FAILING line would be misleading here -- this harness
             # grants no such exemption (issue #157) -- so a listed tab's
@@ -138,44 +159,87 @@ def _error_or_none(resp, label):
     return None
 
 
-def _query_time_model(srv, from_ns, to_ns, label):
-    """One time_model query + its conservation verdict. Returns
-    (ok, detail, used_raw_path, fidelity) -- used_raw_path is OBSERVED
-    from the response (the `categories` key is only ever emitted by the
-    raw/non-summary handler, src/server.c handle_time_model), never
-    assumed from the requested window size alone (see
-    demo_rehearsal_lib.RECENT_WINDOW_S's comment)."""
+def _query_time_model_window(srv, from_ns, to_ns, label, gate_on_raw_path,
+                             check_criteria_floors=False):
+    """One time_model query, evaluated through
+    demo_rehearsal_lib.evaluate_time_model_window (identity conservation +
+    raw-path check [only when gate_on_raw_path] + both over-attribution
+    self-checks + the Off-CPU* cap + [when check_criteria_floors] the
+    criteria-doc #2 workload-signature and AAS floors). Returns that dict,
+    or an ok=False stand-in on a server-side error / a malformed response --
+    a gate that cannot see the fields it needs must refuse, never assume
+    they were fine."""
     tm = srv.query("time_model", from_=from_ns, to_=to_ns,
                    timeout=drlib.TIME_MODEL_QUERY_TIMEOUT_S)
     err = _error_or_none(tm, label)
     if err is not None:
-        return False, err, False, None
+        return {"ok": False, "detail": err}
     rows = tm.get("rows")
     db_time_ms = tm.get("db_time_ms")
     if rows is None or db_time_ms is None:
-        return (False, f"{label}: response missing rows/db_time_ms: {tm}",
-                False, tm.get("fidelity"))
-    ok, detail = drlib.time_model_conservation(rows, db_time_ms)
-    return ok, detail, "categories" in tm, tm.get("fidelity")
-
-
-def _time_model_check(srv, from_ns, to_ns):
-    full_ok, full_detail, full_raw, full_fid = _query_time_model(
-        srv, from_ns, to_ns, "time_model (full window)")
-    recent_from_ns = max(from_ns,
-                         to_ns - int(drlib.RECENT_WINDOW_S * 1_000_000_000))
-    recent_ok, recent_detail, recent_raw, recent_fid = _query_time_model(
-        srv, recent_from_ns, to_ns, "time_model (recent window)")
-    result = drlib.build_time_model_check(
-        recent_ok, recent_detail, recent_raw, full_ok, full_detail, full_raw)
-    print(f"demo_rehearsal: time_model_conserves: "
-          f"{'PASS' if result['ok'] else 'FAIL'}")
-    print(f"    recent ({drlib.RECENT_WINDOW_S:.0f}s, "
-          f"path={'raw' if recent_raw else 'summary'}, "
-          f"fidelity={recent_fid}) [GATES ok]: {recent_detail}")
-    print(f"    full window (path={'raw' if full_raw else 'summary'}, "
-          f"fidelity={full_fid}, informational only): {full_detail}")
+        return {"ok": False, "detail": f"{label}: response missing rows/db_time_ms: {tm}"}
+    used_raw_path = "categories" in tm
+    result = drlib.evaluate_time_model_window(
+        rows, db_time_ms,
+        wait_gap_cpu_ms=tm.get("wait_gap_cpu_ms", 0.0),
+        cpu_clamped_ms=tm.get("cpu_clamped_ms", 0.0),
+        offcpu_ms=tm.get("offcpu_ms", 0.0),
+        has_measured_cpu=tm.get("has_measured_cpu", False),
+        used_raw_path=used_raw_path if gate_on_raw_path else True,
+        aas=tm.get("aas"),
+        check_workload_signature=check_criteria_floors,
+        check_aas_floor=check_criteria_floors)
+    result["fidelity"] = tm.get("fidelity")
+    result["db_time_ms"] = db_time_ms
+    result["observed_raw_path"] = used_raw_path
     return result
+
+
+def _sample_recent_window(srv, offset_s):
+    """One in-capture conservation sample: query the RECENT_WINDOW_S
+    trailing window (the only one that forces the raw/exact compute path,
+    see demo_rehearsal_lib.RECENT_WINDOW_S) against pgwt-server's CURRENT
+    `to_ns`, gated on the raw path actually being observed AND (criteria
+    doc §2: this IS "the 60s recent window" the AAS/workload-signature
+    floors are stated against) the two extra floors."""
+    try:
+        info = srv.query("info", timeout=drlib.TIME_MODEL_QUERY_TIMEOUT_S)
+    except Exception as e:
+        return {"ok": False, "offset_s": offset_s, "detail": f"info query failed: {e!r}"}
+    from_ns = int(info.get("from_ns", 0))
+    to_ns = int(info.get("to_ns", 0))
+    recent_from_ns = max(from_ns, to_ns - int(drlib.RECENT_WINDOW_S * 1_000_000_000))
+    try:
+        result = _query_time_model_window(
+            srv, recent_from_ns, to_ns, "time_model (in-capture sample)",
+            gate_on_raw_path=True, check_criteria_floors=True)
+    except Exception as e:
+        return {"ok": False, "offset_s": offset_s, "detail": f"time_model query failed: {e!r}"}
+    result["offset_s"] = offset_s
+    return result
+
+
+def _conservation_sampler_loop(trace_dir, interval_s, stop_event, samples, t0):
+    """Runs in a background thread for the whole duration of the walk,
+    sampling the recent-window conservation gate every interval_s (owner
+    finding, 2026-09-27: 'the audience watches the whole run, not the last
+    minute of it' -- a single end-of-capture sample is n=1). A fresh
+    ServerHarness (and pgwt-server subprocess) per sample, never a
+    connection held open across iterations -- a timed-out query's stale
+    response sitting unread on a shared pipe would desync every later
+    query on that same connection. Any exception (including a pgwt-server
+    hang past its own query timeout) is recorded as a FAILING sample,
+    never silently dropped -- a crash here must shrink `ok`, not just the
+    sample count."""
+    while not stop_event.wait(interval_s):
+        offset_s = time.monotonic() - t0
+        try:
+            with ServerHarness(trace_dir) as srv:
+                result = _sample_recent_window(srv, offset_s)
+        except Exception as e:
+            result = {"ok": False, "offset_s": offset_s,
+                      "detail": f"sampler iteration crashed: {e!r}"}
+        samples.append(result)
 
 
 def _waterfall_latency_check(srv, from_ns, to_ns):
@@ -245,6 +309,9 @@ def main():
                     default=lib.FIRST_DATA_TIMEOUT_S)
     ap.add_argument("--pgbench-pid", type=int, default=None)
     ap.add_argument("--workload-pid", type=int, default=None)
+    ap.add_argument("--daemon-pid", type=int, default=None,
+                    help="the pg_wait_tracer daemon's own PID (criteria doc "
+                    "#157/§2 'the daemon process alive for the whole window')")
     args = ap.parse_args()
 
     duration_s = args.duration_min * 60.0
@@ -259,20 +326,52 @@ def main():
 
     live_smoke._assert_workload_alive(args.pgbench_pid, args.workload_pid,
                                       "before the walk")
+    _assert_daemon_alive(args.daemon_pid, "before the walk")
+
+    # Sample the conservation gate every few minutes THROUGHOUT the
+    # capture, not just once at the end (owner finding, 2026-09-27: "the
+    # audience watches the whole run, not the last minute of it"). Runs in
+    # a background thread against its own pgwt-server subprocess -- the
+    # walk itself never talks to pgwt-server directly (only to the Go
+    # bridge via Playwright/HTTP), so the two never contend for anything.
+    sample_interval_s = drlib.conservation_sample_interval_s(duration_s)
+    conservation_samples = []
+    sampler_stop = threading.Event()
 
     t0 = time.monotonic()
+    sampler_thread = threading.Thread(
+        target=_conservation_sampler_loop,
+        args=(args.trace_dir, sample_interval_s, sampler_stop,
+              conservation_samples, t0),
+        daemon=True)
+    sampler_thread.start()
+    print(f"demo_rehearsal: conservation sampler started "
+          f"(every {sample_interval_s:.0f}s through the capture)")
+
     with sync_playwright() as p:
         browser = p.chromium.launch()
         try:
             pass_results = _run_passes(
                 browser, args.url, out_dir, ticks, passes,
                 args.first_data_timeout, args.pgbench_pid,
-                args.workload_pid, t0)
+                args.workload_pid, args.daemon_pid, t0)
         finally:
             browser.close()
 
     live_smoke._assert_workload_alive(args.pgbench_pid, args.workload_pid,
                                       "after the walk, before end-of-capture checks")
+    _assert_daemon_alive(args.daemon_pid, "after the walk, before end-of-capture checks")
+
+    # Bounded stop: never let a stuck sampler iteration hang the rehearsal
+    # itself. The thread is a daemon (won't block process exit either) --
+    # this join is best-effort so the LAST in-flight sample, if any, still
+    # lands in conservation_samples before we read it.
+    sampler_stop.set()
+    sampler_thread.join(timeout=min(60.0, sample_interval_s))
+    if sampler_thread.is_alive():
+        print("demo_rehearsal: WARNING conservation sampler thread did not "
+              "stop within its join timeout -- proceeding with whatever "
+              "samples it collected so far")
 
     print("\n=== end-of-capture checks ===")
     extra_checks = {}
@@ -280,11 +379,82 @@ def main():
         info = srv.query("info")
         from_ns = int(info["from_ns"])
         to_ns = int(info["to_ns"])
-        extra_checks["time_model_conserves"] = _time_model_check(srv, from_ns, to_ns)
+
+        events_ok, events_detail = drlib.capture_has_events_ok(info.get("num_events"))
+        print(f"demo_rehearsal: capture_has_events: "
+              f"{'PASS' if events_ok else 'FAIL'} -- {events_detail}")
+        extra_checks["capture_has_events"] = {"ok": events_ok, "detail": events_detail}
+
+        # One final sample right at the true end of the capture -- the
+        # sampler thread's own last periodic sample can land up to
+        # sample_interval_s early, so this always covers the tail.
+        final_sample = _sample_recent_window(srv, time.monotonic() - t0)
+        conservation_samples.append(final_sample)
+
+        full_window_result = _query_time_model_window(
+            srv, from_ns, to_ns, "time_model (full window)",
+            gate_on_raw_path=False)
+        conservation_check = drlib.build_demo_conservation_check(
+            conservation_samples, full_window_result)
+        print(f"demo_rehearsal: time_model_conserves: "
+              f"{'PASS' if conservation_check['ok'] else 'FAIL'} "
+              f"({conservation_check['num_samples']} in-capture samples, "
+              f"failed offsets: {conservation_check['failed_offsets_s']})")
+        for s in conservation_samples:
+            print(f"    sample @{s.get('offset_s', -1):.0f}s: "
+                  f"{'PASS' if s.get('ok') else 'FAIL'} {s.get('detail', s)}")
+        print(f"    full window (informational only): "
+              f"{'PASS' if full_window_result.get('ok') else 'FAIL'} "
+              f"{full_window_result}")
+        extra_checks["time_model_conserves"] = conservation_check
+
         extra_checks["waterfall_query_latency"] = _waterfall_latency_check(srv, from_ns, to_ns)
+
+        # Cross-tab agreement (criteria doc §5): top_events answers the
+        # Top Events tab and carries its OWN top-level db_time_ms (not a
+        # sum of its own possibly-truncated row list -- src/server.c
+        # handle_top_events emits it independently), so this is a safe,
+        # direct comparison against time_model's (the Overview tab) number
+        # for the IDENTICAL window -- no bucket-weighted re-derivation
+        # needed.
+        recent_from_ns = max(from_ns, to_ns - int(drlib.RECENT_WINDOW_S * 1_000_000_000))
+        top_events_resp = srv.query("top_events", from_=recent_from_ns, to_=to_ns,
+                                    timeout=drlib.TIME_MODEL_QUERY_TIMEOUT_S)
+        top_events_err = _error_or_none(top_events_resp, "top_events (cross-tab)")
+        time_model_recent = srv.query("time_model", from_=recent_from_ns, to_=to_ns,
+                                      timeout=drlib.TIME_MODEL_QUERY_TIMEOUT_S)
+        time_model_err = _error_or_none(time_model_recent, "time_model (cross-tab)")
+        if top_events_err is not None or time_model_err is not None:
+            cross_tab_ok = False
+            cross_tab_detail = f"query error(s): {top_events_err!r} / {time_model_err!r}"
+        else:
+            cross_tab_ok, cross_tab_detail = drlib.cross_tab_db_time_agreement_ok(
+                time_model_recent.get("db_time_ms"), top_events_resp.get("db_time_ms"))
+        print(f"demo_rehearsal: cross_tab_db_time_agreement: "
+              f"{'PASS' if cross_tab_ok else 'FAIL'} -- {cross_tab_detail}")
+        extra_checks["cross_tab_db_time_agreement"] = {
+            "ok": cross_tab_ok, "detail": cross_tab_detail,
+            "note": ("compares Overview's time_model against Top Events' "
+                    "top_events for the identical recent window; the AAS "
+                    "leg (vs. the aas-bucketed Timeline endpoint) is NOT "
+                    "implemented -- deriving a comparable aggregate AAS "
+                    "from that endpoint's per-bucket per-class values "
+                    "needs bucket-weighted summation this branch did not "
+                    "implement with confidence in scope; see the PR "
+                    "report's gap table"),
+        }
+
+        # Freshness (criteria doc §5): the daemon's own latest event vs the
+        # server's own wall clock, both from the same `info` response.
+        fresh_ok, fresh_detail = drlib.freshness_ok(info.get("now_ns"), to_ns)
+        print(f"demo_rehearsal: capture_freshness: "
+              f"{'PASS' if fresh_ok else 'FAIL'} -- {fresh_detail}")
+        extra_checks["capture_freshness"] = {"ok": fresh_ok, "detail": fresh_detail}
+
     extra_checks["daemon_log_clean"] = _daemon_log_check(args.daemon_log)
 
-    summary = drlib.build_demo_summary(pass_results, extra_checks)
+    summary = drlib.build_demo_summary(pass_results, extra_checks,
+                                       expected_tabs_per_pass=len(lib.TABS))
     summary["duration_min"] = args.duration_min
     summary["ticks_per_tab"] = ticks
     summary["plan_degraded"] = ticks < lib.MIN_TICKS or len(passes) < 3

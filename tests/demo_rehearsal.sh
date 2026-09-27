@@ -143,6 +143,24 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
+# criteria doc (docs/DEMO_REHEARSAL_CRITERIA.md) §7: "no test anywhere in
+# the run exited 126 (not executable) or 127 (command not found)" -- that
+# is a broken invocation, never a known product bug. The kill -0 checks
+# below already catch ANY early death regardless of its exit code; this
+# just reaps the already-dead PID (harmless -- `wait` on a dead PID returns
+# immediately) and names 126/127 specifically so that failure mode is never
+# mistaken for a product regression in the log a human reads afterward.
+report_early_exit() {
+    local label="$1" pid="$2"
+    local rc=0
+    wait "$pid" 2>/dev/null; rc=$?
+    if [[ "$rc" -eq 126 || "$rc" -eq 127 ]]; then
+        echo "demo_rehearsal: $label exited $rc -- BROKEN INVOCATION (not executable / command not found), not a product bug"
+    else
+        echo "demo_rehearsal: $label exited with code $rc"
+    fi
+}
+
 # ── 1. Controlled load ───────────────────────────────────────────────────────
 check_pgbench_provisioned "demo_rehearsal" "$PGBENCH_LOG"
 
@@ -158,6 +176,7 @@ PGBENCH_PID=$!
 sleep 1
 if ! kill -0 "$PGBENCH_PID" 2>/dev/null; then
     echo "ERROR: pgbench exited immediately after starting:"
+    report_early_exit "pgbench" "$PGBENCH_PID"
     tail -n 20 "$PGBENCH_LOG"
     exit 1
 fi
@@ -168,6 +187,7 @@ WORKLOAD_PID=$!
 sleep 2
 if ! kill -0 "$WORKLOAD_PID" 2>/dev/null; then
     echo "ERROR: lock/sleep workload exited immediately after starting:"
+    report_early_exit "lock/sleep workload" "$WORKLOAD_PID"
     tail -n 40 "$WORKLOAD_LOG"
     exit 1
 fi
@@ -186,6 +206,7 @@ for _ in $(seq 1 60); do
     [[ -S "$SOCK" ]] && break
     if ! kill -0 "$TRACER_PID" 2>/dev/null; then
         echo "ERROR: daemon exited during startup:"
+        report_early_exit "daemon" "$TRACER_PID"
         tail -n 40 "$DAEMON_LOG"
         exit 1
     fi
@@ -211,6 +232,7 @@ for _ in $(seq 1 60); do
     fi
     if ! kill -0 "$BRIDGE_PID" 2>/dev/null; then
         echo "ERROR: bridge exited during startup:"
+        report_early_exit "bridge" "$BRIDGE_PID"
         tail -n 40 "$BRIDGE_LOG"
         exit 1
     fi
@@ -231,7 +253,8 @@ echo "demo_rehearsal: bridge ready at $BASE_URL"
 python3 -u "$SCRIPT_DIR/demo_rehearsal.py" --url "$BASE_URL" \
     --trace-dir "$TRACE_DIR" --daemon-log "$DAEMON_LOG" \
     --duration-min "$DURATION_MIN" \
-    --pgbench-pid "$PGBENCH_PID" --workload-pid "$WORKLOAD_PID"
+    --pgbench-pid "$PGBENCH_PID" --workload-pid "$WORKLOAD_PID" \
+    --daemon-pid "$TRACER_PID"
 DEMO_RC=$?
 
 exit "$DEMO_RC"
