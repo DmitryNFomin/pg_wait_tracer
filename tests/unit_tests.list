@@ -28,6 +28,10 @@ test_durability
 test_query_text
 test_golden_fixture
 test_live_accum
+# #202: the offline wait-CPU canary's decision logic (CPU recorded inside a
+# pure sleep, cpu_ns > duration_ns) and every way it could be satisfied
+# without looking at anything.
+test_wait_cpu_canary
 test_pg13_resolve
 test_discovery_pie
 test_discovery_nopie

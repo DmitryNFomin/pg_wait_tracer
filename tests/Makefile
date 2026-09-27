@@ -22,7 +22,7 @@ TESTS     = test_wait_event test_cmdline test_spawn test_event_writer test_event
             test_replay_fidelity test_durability test_query_text \
             test_golden_fixture test_live_accum \
             gen_test_traces gen_bench_traces test_concurrent_rw cross_validate \
-            dump_markers
+            dump_markers wait_cpu_canary test_wait_cpu_canary
 
 .PHONY: all clean check
 
@@ -230,6 +230,35 @@ cross_validate: cross_validate.c $(BUILD)/server_event_reader.o \
                 $(BUILD)/server_event_writer.o $(BUILD)/server_wait_event.o \
                 $(BUILD)/server_spawn.o $(BUILD)/server_cJSON.o
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -llz4 -lz
+
+# wait_cpu_canary: #202 helper — per-class Sum(cpu_ns) / Sum(duration) over a
+# trace dir, flagging CPU recorded inside a PURE-SLEEP wait (Lock, Timeout)
+# and any event with cpu_ns > duration_ns (src/compute.c's wait branch never
+# clamps that, so cpu_clamped_ms vouches for CPU gaps only). Server build.
+wait_cpu_canary: wait_cpu_canary.c $(BUILD)/server_event_reader.o \
+                 $(BUILD)/server_event_writer.o $(BUILD)/server_wait_event.o \
+                 $(BUILD)/server_compute.o $(BUILD)/server_summary_reader.o \
+                 $(BUILD)/server_summary_writer.o \
+                 $(BUILD)/server_spawn.o $(BUILD)/server_cJSON.o
+	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -llz4 -lz
+
+# test_wait_cpu_canary: the canary's own decision logic, including every way
+# it could be satisfied without looking at anything (no events, nothing
+# measured, UNKNOWN folded in as 0). Includes wait_cpu_canary.c with
+# -DWCC_NO_MAIN; no trace file, no BPF, runs anywhere.
+test_wait_cpu_canary: test_wait_cpu_canary.c wait_cpu_canary.c \
+                      $(BUILD)/server_event_reader.o \
+                      $(BUILD)/server_event_writer.o \
+                      $(BUILD)/server_wait_event.o \
+                      $(BUILD)/server_compute.o \
+                      $(BUILD)/server_summary_reader.o \
+                      $(BUILD)/server_summary_writer.o \
+                      $(BUILD)/server_spawn.o $(BUILD)/server_cJSON.o
+	$(CC) $(CFLAGS) -DPGWT_SERVER -DWCC_NO_MAIN -o $@ test_wait_cpu_canary.c \
+	      $(BUILD)/server_event_reader.o $(BUILD)/server_event_writer.o \
+	      $(BUILD)/server_wait_event.o $(BUILD)/server_compute.o \
+	      $(BUILD)/server_summary_reader.o $(BUILD)/server_summary_writer.o \
+	      $(BUILD)/server_spawn.o $(BUILD)/server_cJSON.o -llz4 -lz
 
 # dump_markers: A5 helper — decode escalation-window markers (reason + length)
 # from a trace dir. Used by the live anomaly test to prove an ANOMALY-reason
