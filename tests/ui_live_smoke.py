@@ -764,6 +764,11 @@ def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
         blink_pair_offsets_ms = []
         blink_sweep_ticks = []
         blink_not_measured = []
+        # issue #100 (review round 4): timeline-only diagnostic, one entry
+        # per tick -- see the capture site below for what it measures and
+        # why. Empty for every other tab; never read by build_tab_result's
+        # `ok` computation.
+        pre_mount_diagnostics = []
         render_ok, render_detail = False, "never checked"
         for i in range(1, ticks + 1):
             if not _wait_for_tick(page, i, TICK_TIMEOUT_S):
@@ -771,6 +776,23 @@ def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
                     f"tick {i}/{ticks} did not arrive within {TICK_TIMEOUT_S}s")
             tick_ts_ms = page.evaluate(
                 "window.__uiLiveTicks[window.__uiLiveTicks.length - 1]")
+
+            # issue #100 (review round 4), TIMELINE ONLY: capture the panel
+            # exactly as the PREVIOUS tick's mount left it, before this
+            # tick's own mount can touch it. Nothing repaints containerEl
+            # between mounts (ViewManager's own contract -- only mount()
+            # ever touches it), so this is safe to grab as soon as the tick
+            # is detected, with no race against the upcoming mount. Diffed
+            # below against the sweep's own first frame (mount+200ms) to
+            # test #100's premise (the reported ~4.5% "unchanged-data"
+            # redraw was actually the tick's own legitimate window-advance
+            # repaint -- axis labels/gridlines, timeline.js's xAxis sits at
+            # the bottom of the grid -- caught mid-flight by the OLD
+            # 1200ms-anchor instrument) with a NEW, honest instrument
+            # instead of re-running the artifact-producing one. Never
+            # gates: reporting-only, read by nothing in build_tab_result.
+            pre_mount_frame = (_safe_panel_screenshot(page, tab_id)
+                               if tab_id == "timeline" else None)
 
             # Blind-window check (issue #93 review item 5): between the tick
             # landing and the render-check retry + gating settle below,
@@ -847,6 +869,21 @@ def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
 
             sweep_arrays = [lib.png_bytes_to_array(f) if f is not None else None
                             for f in sweep_raw_frames]
+
+            # issue #100 (review round 4): pre-mount vs sweep's own first
+            # frame, timeline only -- see the capture site above.
+            if tab_id == "timeline":
+                pre_mount_arr = (lib.png_bytes_to_array(pre_mount_frame)
+                                 if pre_mount_frame is not None else None)
+                sweep_first_arr = sweep_arrays[0] if sweep_arrays else None
+                if pre_mount_arr is not None and sweep_first_arr is not None:
+                    sig = lib.frame_diff_signature(pre_mount_arr, sweep_first_arr)
+                else:
+                    sig = {"diff_pixel_frac": None, "bottom_band_pixel_frac": None,
+                           "rest_pixel_frac": None, "columns_touched_frac": None,
+                           "note": "pre-mount or sweep-first frame missing"}
+                pre_mount_diagnostics.append({"tick": i, **sig})
+
             ratio, blink_note = lib.blink_sweep_gate_verdict(
                 sweep_arrays, seq_before_sweep, seq_after_sweep)
             if blink_note:
@@ -906,7 +943,8 @@ def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
             leak_after_settle_s=leak_after_settle_s,
             blink_pair_offsets_ms=blink_pair_offsets_ms,
             blink_sweep_ticks=blink_sweep_ticks,
-            blink_not_measured=blink_not_measured)
+            blink_not_measured=blink_not_measured,
+            pre_mount_diagnostics=pre_mount_diagnostics)
     except SmokeFailure as e:
         print(f"  FAIL [{tab_id}]: {e}", file=sys.stderr)
         result = lib.build_failed_tab_result(tab_id, str(e),

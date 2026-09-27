@@ -172,6 +172,56 @@ def blink_check(frame_a, frame_b):
     return frame_diff_ratio(frame_a, frame_b), None
 
 
+def frame_diff_signature(frame_a, frame_b, edge_band_frac=0.15):
+    """issue #100 (timeline): characterizes WHERE two same-shape frames
+    differ, to test the issue's premise against a NEW, honest instrument
+    instead of re-running the artifact-producing one. #100 claims timeline
+    redraws ~4.5% of pixels "with unchanged data"; the issue's own
+    2026-09-17 08:12 diff mask instead shows axis labels advancing and
+    gridlines shifting -- i.e. the tick's own legitimate window-advance
+    repaint (web/static/lib/builders/timeline.js's xAxis sits at the
+    BOTTOM of the grid: axisLabel + axisLine), not a bug, caught mid-flight
+    by the OLD 1200ms-after-tick anchor. This signature exists to tell that
+    shape apart from a generic/uniform repaint (a real new render) or a
+    teardown-to-blank flash (touches nearly everything):
+
+      - a window-advance repaint: heavy diff in the BOTTOM edge band
+        (labels + axis line), light diff above it, and only a FEW columns
+        touched overall (a handful of gridlines shifting a few px, not a
+        wholesale re-render).
+      - a generic full repaint: diff roughly even between the bottom band
+        and the rest, most columns touched.
+
+    Returns a dict (never raises on a shape mismatch -- same worst-case
+    idiom as blink_check, but there is no single "ratio" to cap at 1.0
+    here, so the note says so and every OTHER field is None):
+      {"diff_pixel_frac", "bottom_band_pixel_frac", "rest_pixel_frac",
+       "columns_touched_frac", "note"}
+    diff_pixel_frac/bottom_band_pixel_frac/rest_pixel_frac are each "of the
+    pixels IN THAT REGION, what fraction differ" (comparable across panels
+    of different sizes); columns_touched_frac is "of all columns, what
+    fraction contain at least one differing pixel"."""
+    if frame_a.shape != frame_b.shape:
+        return {"diff_pixel_frac": None, "bottom_band_pixel_frac": None,
+                "rest_pixel_frac": None, "columns_touched_frac": None,
+                "note": f"panel resized between frames: {frame_a.shape} -> {frame_b.shape}"}
+    h = frame_a.shape[0]
+    band_h = max(1, int(round(h * edge_band_frac)))
+    diff = np.any(frame_a != frame_b, axis=-1)  # (H, W) bool
+    bottom = diff[h - band_h:, :]
+    rest = diff[:h - band_h, :]
+    columns_touched = np.any(diff, axis=0)  # (W,) bool -- any row differs in this column
+    return {
+        "diff_pixel_frac": float(np.count_nonzero(diff)) / diff.size,
+        "bottom_band_pixel_frac": (float(np.count_nonzero(bottom)) / bottom.size
+                                    if bottom.size else 0.0),
+        "rest_pixel_frac": (float(np.count_nonzero(rest)) / rest.size
+                             if rest.size else 0.0),
+        "columns_touched_frac": float(np.count_nonzero(columns_touched)) / columns_touched.size,
+        "note": None,
+    }
+
+
 def sweep_consecutive_diff_ratios(frames):
     """Companion to blink_check() for the offset sweep (issue #119): frames
     is a list of (H, W, 3) uint8 arrays, or None where a capture failed
@@ -414,7 +464,8 @@ def build_tab_result(tab_id, rendered_ok, rendered_detail, ticks_observed,
                       leak_before_settle_s=None, leak_after_settle_s=None,
                       blink_pair_offsets_ms=(), blink_sweep_ticks=(),
                       blink_not_measured=(),
-                      min_measured_fraction=MIN_MEASURED_FRACTION):
+                      min_measured_fraction=MIN_MEASURED_FRACTION,
+                      pre_mount_diagnostics=()):
     """Assembles one tab's verdict. Pure: every input is already-collected
     data, no page access.
 
@@ -465,7 +516,13 @@ def build_tab_result(tab_id, rendered_ok, rendered_detail, ticks_observed,
     blink_pair_offsets_ms=(), used by callers/tests that don't populate
     this field) trivially satisfies measured_ok -- ticks_ok already fails
     that tab for having no ticks at all, so this never becomes a second,
-    contradictory reason a legitimately-untested result looks wrong."""
+    contradictory reason a legitimately-untested result looks wrong.
+
+    pre_mount_diagnostics (issue #100, review round 4): timeline-tab-only,
+    one {"tick", "diff_pixel_frac", "bottom_band_pixel_frac",
+    "rest_pixel_frac", "columns_touched_frac", "note"} entry per tick
+    (frame_diff_signature's own return shape, plus "tick") -- reporting
+    only, never read here to compute `ok`. Empty for every other tab."""
     clean_ok = len(console_errors) == 0
     blink_ok = no_blink_ok(blink_ratio, blink_threshold)
     leak_ok = leak_probe_ok(leak_before) and leak_probe_ok(leak_after)
@@ -500,6 +557,7 @@ def build_tab_result(tab_id, rendered_ok, rendered_detail, ticks_observed,
                     "settle_s": {"before": leak_before_settle_s,
                                  "after": leak_after_settle_s}},
         "artifacts": artifacts,
+        "pre_mount_diagnostic": list(pre_mount_diagnostics),
     }
     return _apply_known_failing(result)
 
@@ -530,6 +588,7 @@ def build_failed_tab_result(tab_id, reason, ticks_observed=0, artifacts=None,
         "no_leak": {"ok": None, "before": None, "after": None,
                     "settle_s": {"before": None, "after": None}},
         "artifacts": artifacts or {},
+        "pre_mount_diagnostic": [],
     }
     return _apply_known_failing(result)
 

@@ -105,6 +105,60 @@ def test_blink_check_resized_panel_is_maximal_not_a_crash():
           "a resized-panel ratio of 1.0 always fails the no_blink threshold")
 
 
+# ── frame_diff_signature (issue #100) ───────────────────────────────────────
+
+def test_frame_diff_signature_window_pan_pattern():
+    # Synthetic stand-in for timeline's own window-advance repaint: the
+    # BOTTOM band (axis labels + axis line) changes heavily, the rest of
+    # the panel is untouched, and only a few COLUMNS (thin vertical
+    # gridlines) differ.
+    h, w = 200, 400
+    a = np.zeros((h, w, 3), dtype=np.uint8)
+    b = a.copy()
+    band_h = int(round(h * 0.15))
+    b[h - band_h:, 50:120] = 255      # bottom-band label text, ~18% of width
+    b[:, 10] = 255                    # one gridline shifted (whole column)
+    b[:, 200] = 255                   # a second gridline shifted
+    sig = lib.frame_diff_signature(a, b)
+    check(sig["note"] is None, f"matching shapes -> no note ({sig})")
+    check(sig["bottom_band_pixel_frac"] > sig["rest_pixel_frac"],
+          f"bottom band differs far more than the rest ({sig})")
+    check(sig["columns_touched_frac"] < 0.35,
+          f"only a modest fraction of columns touched, not most of them ({sig})")
+
+
+def test_frame_diff_signature_uniform_repaint_pattern():
+    # A generic full repaint (e.g. genuinely new content): diff spread
+    # roughly evenly, most columns touched -- the shape frame_diff_signature
+    # must be able to tell apart from the window-pan pattern above.
+    h, w = 200, 400
+    a = np.zeros((h, w, 3), dtype=np.uint8)
+    b = np.full((h, w, 3), 255, dtype=np.uint8)  # everything differs
+    sig = lib.frame_diff_signature(a, b)
+    check(abs(sig["bottom_band_pixel_frac"] - sig["rest_pixel_frac"]) < 1e-9,
+          f"a uniform repaint diffs the bottom band and the rest equally ({sig})")
+    check(sig["columns_touched_frac"] == 1.0,
+          f"a uniform repaint touches every column ({sig})")
+
+
+def test_frame_diff_signature_identical_frames():
+    a = np.zeros((50, 50, 3), dtype=np.uint8)
+    sig = lib.frame_diff_signature(a, a.copy())
+    check(sig == {"diff_pixel_frac": 0.0, "bottom_band_pixel_frac": 0.0,
+                   "rest_pixel_frac": 0.0, "columns_touched_frac": 0.0, "note": None},
+          f"identical frames -> every fraction 0.0, no note ({sig})")
+
+
+def test_frame_diff_signature_shape_mismatch_never_raises():
+    a = np.zeros((10, 10, 3), dtype=np.uint8)
+    b = np.zeros((12, 10, 3), dtype=np.uint8)
+    sig = lib.frame_diff_signature(a, b)
+    check(sig["note"] is not None and "resized" in sig["note"],
+          f"a shape mismatch is reported via note, never a raised exception ({sig})")
+    check(sig["diff_pixel_frac"] is None and sig["bottom_band_pixel_frac"] is None,
+          f"every numeric field is None on a shape mismatch -- never a fabricated 0.0 ({sig})")
+
+
 # ── sweep_consecutive_diff_ratios / build_sweep_tick_record (issue #119) ────
 
 def test_sweep_consecutive_diff_ratios_all_identical():
@@ -151,6 +205,70 @@ def test_sweep_offsets_pinned():
     check(lib.SWEEP_OFFSETS_MS == (200, 500, 1000, 1500, 2000),
           f"SWEEP_OFFSETS_MS matches issue #119's stated offsets exactly "
           f"(got {lib.SWEEP_OFFSETS_MS})")
+
+
+# ── sweep-vs-cadence coverage-floor guard (issue #193 review round 3) ──────
+#
+# blink_sweep_gate_verdict correctly reports NOT MEASURED (never a false
+# red) when a second tick's mount lands mid-sweep. But if the sweep's own
+# worst-case completion time ever gets as long as the gap between two
+# consecutive mounts, ticks start being discarded for a CADENCE reason, and
+# MIN_MEASURED_FRACTION starts failing tabs for nothing wrong with the
+# product. These two numbers are the tightest margin actually observed
+# (tests/results/ui_live/summary.json, one ephemeral box-check run, issue
+# #193, timeline tab -- the worst of the 11):
+#   MIN_OBSERVED_MOUNT_GAP_MS = 4982   -- the smallest gap between two
+#     consecutive mounts (derived from consecutive pair_offsets_ms deltas
+#     against the nominal 5000ms tick interval: tick 6's offset (48ms) was
+#     18ms less than tick 5's (66ms), i.e. tick 6's mount landed 4982ms,
+#     not the nominal 5000ms, after tick 5's).
+#   MAX_OBSERVED_SWEEP_OFFSET_MS = 3738 -- tick 4's own sweep, its slowest
+#     capture: SWEEP_OFFSETS_MS's last target (2000ms) landed at 3738ms
+#     under real render-check-retry-loop contention.
+# Slack that run: 4982 - 3738 = 1244ms.
+MIN_OBSERVED_MOUNT_GAP_MS = 4982
+MAX_OBSERVED_SWEEP_OFFSET_MS = 3738
+
+# A conservative stand-in for one capture's own screenshot+PNG-decode
+# overhead, NOT itself a live measurement -- multiplied by the sweep's
+# actual capture count, this is what makes the guard below fail on a
+# FUTURE SWEEP_OFFSETS_MS widening or TICK_INTERVAL_S reduction before it
+# ever reaches a real gate, rather than only after a live run happens to
+# reproduce contention as bad as the 3738ms above.
+PER_CAPTURE_BUDGET_MS = 400
+
+
+def test_sweep_slack_observed_this_run_is_positive():
+    slack_ms = MIN_OBSERVED_MOUNT_GAP_MS - MAX_OBSERVED_SWEEP_OFFSET_MS
+    check(slack_ms == 1244,
+          f"observed slack (min mount gap {MIN_OBSERVED_MOUNT_GAP_MS}ms - max "
+          f"achieved sweep offset {MAX_OBSERVED_SWEEP_OFFSET_MS}ms) is 1244ms "
+          f"(got {slack_ms}ms) -- pins the number itself, not just its sign")
+    check(slack_ms > 0,
+          "the sweep did not, in fact, run into the next tick's mount this run")
+
+
+def test_sweep_worst_case_completion_has_margin_below_the_observed_mount_gap():
+    """The forward-looking guard: reads SWEEP_OFFSETS_MS and TICK_INTERVAL_S
+    LIVE from the module (so a future change to either is exercised here,
+    in make check-fast), against the PINNED worst-case cadence jitter
+    actually observed (MIN_OBSERVED_MOUNT_GAP_MS above). A future
+    SWEEP_OFFSETS_MS widening or TICK_INTERVAL_S reduction that erodes this
+    margin must fail HERE, not on the gate at demo time."""
+    tick_interval_ms = lib.TICK_INTERVAL_S * 1000
+    worst_observed_mount_delay_ms = tick_interval_ms - MIN_OBSERVED_MOUNT_GAP_MS
+    worst_case_sweep_completion_ms = (
+        max(lib.SWEEP_OFFSETS_MS) +
+        len(lib.SWEEP_OFFSETS_MS) * PER_CAPTURE_BUDGET_MS)
+    limit_ms = tick_interval_ms - worst_observed_mount_delay_ms
+    margin_ms = limit_ms - worst_case_sweep_completion_ms
+    check(worst_case_sweep_completion_ms < limit_ms,
+          f"sweep's worst-case completion ({worst_case_sweep_completion_ms}ms = "
+          f"max(SWEEP_OFFSETS_MS)={max(lib.SWEEP_OFFSETS_MS)}ms + "
+          f"{len(lib.SWEEP_OFFSETS_MS)}x{PER_CAPTURE_BUDGET_MS}ms budget) stays "
+          f"below the tick interval ({tick_interval_ms}ms) minus the worst "
+          f"observed mount delay ({worst_observed_mount_delay_ms}ms) = "
+          f"{limit_ms}ms -- margin {margin_ms}ms")
 
 
 def test_build_sweep_tick_record_shape():
@@ -703,6 +821,39 @@ def test_build_failed_tab_result_not_measured_empty():
     r = lib.build_failed_tab_result("waterfall", "panel did not render within 60s")
     check(r["no_blink"]["not_measured"] == [],
           "a tab that never reached the tick loop has no not-measured ticks to report")
+
+
+# ── pre_mount_diagnostic passthrough (issue #100, review round 4) ──────────
+
+def test_build_tab_result_records_pre_mount_diagnostic():
+    entries = [{"tick": 1, "diff_pixel_frac": 0.045, "bottom_band_pixel_frac": 0.6,
+                "rest_pixel_frac": 0.01, "columns_touched_frac": 0.2, "note": None}]
+    r = lib.build_tab_result(
+        "timeline", True, "ok:8", ticks_observed=6, console_errors=[],
+        blink_ratio=0.0, color_violations=[],
+        leak_before={"charts": 1, "uplots": 1, "pending": 0},
+        leak_after={"charts": 1, "uplots": 1, "pending": 0},
+        artifacts={}, pre_mount_diagnostics=entries)
+    check(r["pre_mount_diagnostic"] == entries,
+          f"pre-mount diagnostic entries carried through unchanged ({r['pre_mount_diagnostic']})")
+    check(r["ok"] is True,
+          "the pre-mount diagnostic is reporting-only -- never affects the gating verdict")
+
+
+def test_build_tab_result_pre_mount_diagnostic_defaults_empty():
+    r = lib.build_tab_result(
+        "overview", True, "ok:8", ticks_observed=6, console_errors=[],
+        blink_ratio=0.0, color_violations=[],
+        leak_before={"charts": 1, "uplots": 1, "pending": 0},
+        leak_after={"charts": 1, "uplots": 1, "pending": 0}, artifacts={})
+    check(r["pre_mount_diagnostic"] == [],
+          "pre_mount_diagnostics defaults to an empty list for every non-timeline tab")
+
+
+def test_build_failed_tab_result_pre_mount_diagnostic_empty():
+    r = lib.build_failed_tab_result("timeline", "panel did not render within 60s")
+    check(r["pre_mount_diagnostic"] == [],
+          "a tab that never reached the tick loop has no pre-mount diagnostic to report")
 
 
 def test_build_tab_result_records_blink_sweep():
