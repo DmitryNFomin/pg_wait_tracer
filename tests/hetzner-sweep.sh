@@ -15,10 +15,17 @@
 # (ephemeral or not — a leaked VM from an earlier, interrupted run is
 # exactly what this catches) and on demand as `make hetzner-sweep`.
 #
-# Safety: the persistent gate box (`pgwt-gate`) is protected TWICE — it
-# carries no `pgwt=ephemeral` label (so the age check never even looks at
-# it), and its name is hard-coded below as a second, independent guard, so
-# a future mislabelling can never delete it via this script.
+# Safety: every persistent gate box (`pgwt-gate`, `pgwt-gate-2`, ... —
+# PROTECTED_NAMES below) is protected TWICE — it carries no `pgwt=ephemeral`
+# label (so the age check never even looks at it), and its name is
+# hard-coded below as a second, independent guard, so a future mislabelling
+# can never delete it via this script. The second guard is deliberate, not
+# incidental: a persistent box being unlabelled is exactly the same shape as
+# an operator's one-off manual VM (the `pgwt-dev-*` warn-only case below),
+# so relying on the missing label alone would make "never delete this" an
+# assumption rather than a checked property. Add a new persistent box's name
+# to PROTECTED_NAMES here — do not just trust that it will fall through
+# unlabelled.
 #
 # issue #162 — "a janitor for stale VMs silently became delete-everything":
 # an agent ran `MAX_AGE_HOURS=0 make hetzner-sweep` to remove its OWN VM and
@@ -71,8 +78,20 @@ MAX_AGE_HOURS=6
 DRY_RUN=0
 FORCE_ALL=0
 SERVERS_FILE=""
-# Hard-coded, independent of any label: never delete the persistent gate box.
-PROTECTED_NAME="pgwt-gate"
+# Hard-coded, independent of any label: never delete a persistent gate box.
+# One entry per persistent box — extend this array, deliberately, whenever
+# a new persistent (non-ephemeral) box is provisioned. `pgwt-gate` is the
+# original; `pgwt-gate-2` is its sibling (docs/DEV_LOOP_PLAN.md's second
+# gate runner, issue: reduce per-box occupancy).
+PROTECTED_NAMES=("pgwt-gate" "pgwt-gate-2")
+
+is_protected_name() {
+    local name="$1" p
+    for p in "${PROTECTED_NAMES[@]}"; do
+        [[ "$name" == "$p" ]] && return 0
+    done
+    return 1
+}
 
 # issue #162 guard 1: refuse a cutoff below this floor unless --force-all.
 MIN_AGE_HOURS_FLOOR=1
@@ -142,7 +161,7 @@ if [[ "$MAX_AGE_HOURS" -lt "$MIN_AGE_HOURS_FLOOR" && "$FORCE_ALL" -ne 1 ]]; then
     matched=0
     while IFS=$'\t' read -r id name pgwt_label created_label; do
         [[ -z "$id" ]] && continue
-        [[ "$name" == "$PROTECTED_NAME" ]] && continue
+        is_protected_name "$name" && continue
         [[ "$pgwt_label" == "ephemeral" ]] || continue
         if [[ "$created_label" =~ ^[0-9]+$ ]]; then
             age=$((now - created_label))
@@ -171,7 +190,7 @@ warned=0
 while IFS=$'\t' read -r id name pgwt_label created_label; do
     [[ -z "$id" ]] && continue
 
-    if [[ "$name" == "$PROTECTED_NAME" ]]; then
+    if is_protected_name "$name"; then
         continue
     fi
 

@@ -17,7 +17,8 @@ Logs: `tests/results/box-check-*.log` (`box-check-ephemeral-*.log` for `EPHEMERA
 
 `make hetzner-sweep` deletes any `pgwt=ephemeral`-labelled Hetzner VM older than
 6h (also runs automatically at the start of every `box-check`); the
-persistent gate box (`pgwt-gate`) is never touched by it. A cutoff below 1h is
+persistent gate boxes (`pgwt-gate`, `pgwt-gate-2`) are never touched by it,
+by name, regardless of label. A cutoff below 1h is
 refused (`FORCE_ALL=1` to override) and a VM younger than a few minutes, or
 whose age can't be determined at all (missing/unparseable `created=` label —
 unknown age is never treated as "infinitely old"), is never swept regardless

@@ -58,7 +58,8 @@ jq -n --argjson young_created "$((now - young_age))" \
     {id: 1002, name: "pgwt-dev-old",     labels: {pgwt: "ephemeral", created: ($old_created | tostring)}},
     {id: 1003, name: "pgwt-gate",        labels: {}},
     {id: 1004, name: "pgwt-dev-missing", labels: {pgwt: "ephemeral"}},
-    {id: 1005, name: "pgwt-dev-garbage", labels: {pgwt: "ephemeral", created: "2026-09-26T00:00:00Z"}}
+    {id: 1005, name: "pgwt-dev-garbage", labels: {pgwt: "ephemeral", created: "2026-09-26T00:00:00Z"}},
+    {id: 1006, name: "pgwt-gate-2",      labels: {}}
   ]
 }' > "$servers_file"
 
@@ -88,6 +89,12 @@ check_contains "$out" "deleting stale ephemeral server pgwt-dev-old" \
 # pgwt-gate must never be touched, whatever the cutoff.
 check_not_contains "$out" "pgwt-gate" \
     "pgwt-gate (unlabelled, hard-coded protected name) never appears as a candidate"
+# pgwt-gate-2 (the second persistent gate box) gets the exact same protection
+# — a plain sed for "pgwt-gate" would false-negative-pass this check even if
+# pgwt-gate-2's own protection were missing, since "pgwt-gate-2" also
+# contains the substring "pgwt-gate"; check it explicitly.
+check_not_contains "$out" "pgwt-gate-2" \
+    "pgwt-gate-2 (unlabelled, hard-coded protected name) never appears as a candidate"
 
 # ── Case 4b/4c: unknown age (missing/unparseable created=) is protected ──
 # Review round 2 (issue #162): the first version of this guard scored an
@@ -106,6 +113,11 @@ check_not_contains "$out_plain" "deleting stale ephemeral server pgwt-dev-garbag
     "a pgwt=ephemeral server with an UNPARSEABLE created= label is never deleted under a plain 6h sweep"
 check_contains "$out_plain" "pgwt-dev-garbage" \
     "the garbage-label machine is at least mentioned (not silently vanished)"
+
+# pgwt-gate-2 (second persistent gate box): never a delete candidate under a
+# plain, otherwise-valid sweep either.
+check_not_contains "$out_plain" "deleting stale ephemeral server pgwt-gate-2" \
+    "pgwt-gate-2 is never deleted under a plain 6h sweep"
 
 # ── Case 5: --force-all with cutoff 0 does delete (the old one) ─────────
 out=$("$SWEEP" --dry-run --servers-file "$servers_file" --max-age-hours 0 --force-all 2>&1)
@@ -131,6 +143,14 @@ check_not_contains "$out" "deleting stale ephemeral server pgwt-dev-missing" \
     "--force-all with cutoff 0 still never deletes the missing-label machine"
 check_not_contains "$out" "deleting stale ephemeral server pgwt-dev-garbage" \
     "--force-all with cutoff 0 still never deletes the garbage-label machine"
+
+# pgwt-gate-2: the second persistent gate box. --force-all with a zero
+# cutoff is the single most destructive combination this script accepts
+# (it would otherwise treat "age >= 0" as stale for every unprotected
+# ephemeral server) -- this is exactly the scenario the task's protection
+# guarantee has to survive, not just an ordinary sweep.
+check_not_contains "$out" "deleting stale ephemeral server pgwt-gate-2" \
+    "--force-all with cutoff 0 still never deletes pgwt-gate-2 (hard-coded protected name)"
 
 # ── Case 6: --servers-file without --dry-run is refused outright ────────
 out=$("$SWEEP" --servers-file "$servers_file" --max-age-hours 6 2>&1)

@@ -39,7 +39,15 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-DEFAULT_TYPE="cpx42"    # 8 CPU / 16 GB
+DEFAULT_TYPE="cx33"     # 4 shared vCPU / 8 GB — matches the persistent gate
+                        # box's class so pre-merge ephemeral evidence is
+                        # gathered on the same hardware CI gates on (issue:
+                        # cpx42 is a different processor family, 8x the
+                        # price of cx33, and a plausible reason
+                        # sampled-vs-exact cross-validation (#115) behaved
+                        # differently on throwaway machines than on the
+                        # gate box). Override with --type for a specific
+                        # need (e.g. --type cpx42 for more cores).
 DEFAULT_IMAGE="rocky-9"
 DEFAULT_NAME="pg-wait-tracer-test"
 LOCATIONS="fsn1 nbg1 hel1"   # EU only, try in order

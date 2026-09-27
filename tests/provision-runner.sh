@@ -13,6 +13,17 @@
 #     it right before calling this script — see that block's own comment for
 #     the exact command; never echo/log/commit it).
 #
+#   tests/provision-runner.sh ubuntu --runner-token TOKEN --runner-name pgwt-gate-2
+#     --runner-name (default: pgwt-gate) names the registered runner —
+#     needed when provisioning a SIBLING gate box (a second persistent
+#     machine, same labels, so CI's `[self-hosted, gate-box]` targeting sees
+#     it as just another box in the pool): GitHub runner names must be
+#     unique per repo, so a second box registering as "pgwt-gate" again
+#     would collide with the first. Labels are deliberately NOT
+#     parameterized here — every gate box, however many there are, carries
+#     the exact same `self-hosted,linux,x64,gate-box` set so CI never has to
+#     know how many boxes are in the pool.
+#
 # ubuntu installs everything `make box-check` needs for the LIVE tier
 # (tests/run_all.sh --require-live): build deps for the daemon + pgwt-server
 # (same recipe as .github/workflows/ci.yml / nightly.yml — the known-good
@@ -59,6 +70,9 @@ shift || true
 # --runner-token / PGWT_RUNNER_TOKEN: optional, only consumed by the "GitHub
 # Actions runner" block near the bottom of this script (OS=ubuntu only).
 RUNNER_TOKEN="${PGWT_RUNNER_TOKEN:-}"
+# --runner-name / PGWT_RUNNER_NAME: optional, defaults to "pgwt-gate" (the
+# original box's name) below — see the "GitHub Actions runner" block.
+RUNNER_NAME="${PGWT_RUNNER_NAME:-}"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --runner-token)
@@ -69,15 +83,24 @@ while [[ $# -gt 0 ]]; do
             RUNNER_TOKEN="${1#*=}"
             shift
             ;;
+        --runner-name)
+            RUNNER_NAME="${2:-}"
+            shift 2
+            ;;
+        --runner-name=*)
+            RUNNER_NAME="${1#*=}"
+            shift
+            ;;
         *)
             echo "Unknown argument: $1" >&2
             exit 2
             ;;
     esac
 done
+RUNNER_NAME="${RUNNER_NAME:-pgwt-gate}"
 
 if [[ -z "$OS" ]]; then
-    echo "Usage: $0 <ubuntu|el8|el9> [--runner-token TOKEN]" >&2
+    echo "Usage: $0 <ubuntu|el8|el9> [--runner-token TOKEN] [--runner-name NAME]" >&2
     exit 2
 fi
 
@@ -470,7 +493,9 @@ EOF
 #    - PERSISTENT: no --ephemeral. This is the one gate box, registered once
 #      and reused by every job — not a throwaway VM (that is step 4's
 #      ephemeral-VM runner, a separate, --ephemeral registration).
-#    - labels self-hosted,linux,x64,gate-box ; name pgwt-gate.
+#    - labels self-hosted,linux,x64,gate-box ; name $RUNNER_NAME (default
+#      pgwt-gate, override with --runner-name/PGWT_RUNNER_NAME for a
+#      sibling box).
 #    - one job at a time: config.sh's default (no extra flag needed) — the
 #      box is shared with agents running `make box-check`, and every timing
 #      test step already serialises on /tmp/pgwt-box-check.lock, but a
@@ -494,7 +519,7 @@ if [[ "$OS" == "ubuntu" && -n "$RUNNER_TOKEN" ]]; then
     RUNNER_SHA256="70920811a4f8ad4328818682bca5c6469c1c942fab52448868071d0063816613"
     RUNNER_REPO_URL="https://github.com/DmitryNFomin/pg_wait_tracer"
 
-    log "=== GitHub Actions runner (pgwt-gate) ==="
+    log "=== GitHub Actions runner ($RUNNER_NAME) ==="
 
     if ! id runner >/dev/null 2>&1; then
         log "creating dedicated 'runner' system user"
@@ -531,7 +556,7 @@ EOF
     if [[ -f "$RUNNER_HOME/.runner" ]]; then
         log "runner already registered — leaving registration alone (remove $RUNNER_HOME/.runner and re-run with a fresh token to re-register)"
     else
-        log "registering runner 'pgwt-gate' with GitHub (labels: self-hosted,linux,x64,gate-box)"
+        log "registering runner '$RUNNER_NAME' with GitHub (labels: self-hosted,linux,x64,gate-box)"
         # Note: GitHub's documented config.sh invocation takes --token on
         # the command line, so the registration token is briefly visible to
         # anyone who can read /proc/*/cmdline on this box while config.sh
@@ -544,12 +569,24 @@ EOF
             --unattended \
             --url "$RUNNER_REPO_URL" \
             --token "$RUNNER_TOKEN" \
-            --name pgwt-gate \
+            --name "$RUNNER_NAME" \
             --labels self-hosted,linux,x64,gate-box \
             --work _work
     fi
 
-    RUNNER_UNIT=$(systemctl list-unit-files 'actions.runner.*.service' --no-legend 2>/dev/null | awk '{print $1}' | head -1)
+    # `|| true`: under set -e/pipefail, `systemctl list-unit-files` exits 1
+    # (not 0-with-empty-output) when NOTHING matches the glob -- exactly the
+    # first-ever registration on a fresh box, before the service has been
+    # installed at all. Without this guard, that exit code propagates
+    # through the pipeline (pipefail: the pipeline's status is the last
+    # non-zero among all stages, even one that isn't rightmost) into this
+    # command substitution and aborts the whole script right after a
+    # successful `config.sh` registration -- reproduced provisioning
+    # pgwt-gate-2 from scratch: registration succeeded but the script died
+    # here, leaving a registered-but-not-running runner (never appears
+    # online to GitHub) with no indication beyond a bare "exited with
+    # code 1".
+    RUNNER_UNIT=$(systemctl list-unit-files 'actions.runner.*.service' --no-legend 2>/dev/null | awk '{print $1}' | head -1) || true
     if [[ -n "$RUNNER_UNIT" ]]; then
         if systemctl is-active --quiet "$RUNNER_UNIT"; then
             log "runner systemd service ($RUNNER_UNIT) already installed and active"
