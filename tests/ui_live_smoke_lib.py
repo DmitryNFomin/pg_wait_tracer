@@ -183,6 +183,72 @@ def frame_diff_ratio(frame_a, frame_b):
     return float(np.count_nonzero(diff)) / diff.size
 
 
+def clip_rect_to_viewport(x, y, width, height, viewport_width, viewport_height):
+    """Intersects a (x, y, width, height) rect (CSS px, viewport-relative --
+    exactly what Playwright's elementHandle.boundingBox() returns) with the
+    current viewport (0, 0, viewport_width, viewport_height). Returns a
+    {"x", "y", "width", "height"} dict usable as page.screenshot(clip=...),
+    or None if the rect has no positive-area intersection with the viewport
+    at all (panel scrolled fully out of view) -- a zero/negative-size clip
+    is a Playwright error, not a legitimate empty capture, so the caller
+    must treat this the same as "panel gone" (see _safe_panel_screenshot).
+
+    Pure/testable: this is the arithmetic issue #197's fix hangs on --
+    capturing only the viewport-visible slice of a panel instead of
+    Playwright's own element screenshot, which silently expands the capture
+    region (and the render cost with it) to the FULL element even when most
+    of it is scrolled off-screen. Measured on the gate box: the Sessions
+    panel at 205 rows is ~5793px tall; a whole-element capture cost ~1.4s,
+    so the blink sweep's 5 frames (SWEEP_OFFSETS_MS spans 200-2000ms) took
+    longer than the 5s live tick they were meant to sample inside of --
+    every sweep straddled a mount by construction, reporting a red the UI
+    never earned. Clipping to the viewport-visible slice makes one frame's
+    cost roughly constant regardless of row count."""
+    x0 = max(0.0, x)
+    y0 = max(0.0, y)
+    x1 = min(float(viewport_width), x + width)
+    y1 = min(float(viewport_height), y + height)
+    if x1 <= x0 or y1 <= y0:
+        return None
+    return {"x": x0, "y": y0, "width": x1 - x0, "height": y1 - y0}
+
+
+def mount_is_fresh(mount, tab_id, tick_ts_ms, min_seq):
+    """True if `mount` ({"id", "seq", "at"} or None) is usable as THIS
+    tick's blink-sweep anchor.
+
+    issue #197's second defect: a mount whose own refresh cycle takes
+    longer than the 5s live tick interval can land with `at` already past
+    the NEXT tick's own AAS-send timestamp -- so a caller that only checks
+    `mount.at >= tick_ts_ms` (the original issue #193 round-2 contract)
+    can be handed the SAME mount, already consumed by the PREVIOUS tick's
+    own sweep, for this tick too. _capture_at_offset computes its sleep
+    from that mount's (already old) `at`, so every target offset is
+    already in the past and all 5 frames fire back-to-back with no
+    inter-frame spacing -- exactly the spread that lets the sweep see a
+    sub-second transient at all is gone on that iteration, and
+    MIN_MEASURED_FRACTION's denominator still silently counts it as
+    measured (evidence: achieved first offsets of 2.5-4.5s instead of the
+    ~200ms target, one live mount sampled multiple times -- same tick_ts,
+    same seq, same pixels).
+
+    Adds a THIRD condition on top of id/timestamp: `mount.seq` must be
+    STRICTLY GREATER than `min_seq`, the seq the previous tick's own sweep
+    already anchored to (None for the first tick of a tab's walk, which has
+    no previous seq to be newer than -- same reasoning _wait_for_mount_at_or_after
+    already uses for why tick 1 has no timestamp baseline to carry either).
+    A mount reused across two ticks fails this by construction; the caller
+    (_wait_for_mount_at_or_after) keeps polling until a genuinely new one
+    lands, rather than sweeping the stale one."""
+    if mount is None or mount["id"] != tab_id:
+        return False
+    if mount["at"] < tick_ts_ms:
+        return False
+    if min_seq is not None and mount["seq"] <= min_seq:
+        return False
+    return True
+
+
 def blink_check(frame_a, frame_b):
     """frame_diff_ratio(), except a PANEL RESIZE between the two frames
     (e.g. a table still growing rows a few hundred ms after its first row
@@ -387,7 +453,8 @@ def blink_sweep_gate_verdict(frames, seq_before_sweep, seq_after_sweep):
 
 
 def build_sweep_tick_record(achieved_offsets_ms, frames,
-                             target_offsets_ms=SWEEP_OFFSETS_MS):
+                             target_offsets_ms=SWEEP_OFFSETS_MS,
+                             capture_ms=None, mount_seq=None):
     """One tick's offset-sweep record for summary.json (issue #119 item 2).
 
     achieved_offsets_ms: `now_ms - mount_at_ms` actually measured at each
@@ -396,6 +463,16 @@ def build_sweep_tick_record(achieved_offsets_ms, frames,
     still push the real capture later.
     frames: the decoded arrays (or None) captured at those offsets, same
     order, fed straight to sweep_consecutive_diff_ratios().
+    capture_ms: issue #197 evidence -- wall-clock milliseconds the SCREENSHOT
+    ITSELF took at each offset (page.screenshot(clip=...) start to return),
+    one entry per frame; None/empty for a caller that doesn't measure it.
+    Directly answers "is a frame's capture cost bounded" without inferring
+    it from achieved_offsets_ms drift.
+    mount_seq: issue #197 evidence -- the ViewManager mount seq this tick's
+    sweep is anchored to (mount_is_fresh's own accepted mount). Recorded so
+    a run's summary.json can be checked for distinct, strictly-increasing
+    seqs across ticks -- a repeated seq is exactly the stale-mount-reuse bug
+    this issue fixes.
 
     Pure: no page access. Kept here (not inline in ui_live_smoke.py) so the
     achieved-offsets-in, ratios-out shape has its own unit test."""
@@ -403,6 +480,8 @@ def build_sweep_tick_record(achieved_offsets_ms, frames,
     return {
         "target_offsets_ms": list(target_offsets_ms),
         "achieved_offsets_ms": list(achieved_offsets_ms),
+        "capture_ms": list(capture_ms) if capture_ms else [],
+        "mount_seq": mount_seq,
         "ratios": [ratio for ratio, _note in pairs],
         "notes": [note for _ratio, note in pairs if note],
     }
