@@ -19,6 +19,196 @@ Full mode. `RECENT_WINDOW_S` = 60 s, `TIME_MODEL_TOLERANCE_PCT` = 1.0.
 A rehearsal run on a different workload, client count, PG version, box class or
 script commit is a different experiment and does not count toward the sequence.
 
+## The demo configuration (owner, 2026-09-28)
+
+Pre-registered here so the rehearsal is run against the thing being demoed,
+rather than the thing that was convenient to test:
+
+- **PostgreSQL 18** (latest).
+- **The same hardware class as today's gate box** — Hetzner `cx33`.
+
+Two consequences follow, and both are deliberate:
+
+1. Rehearsals run on a `cx33`, which is what the throwaway VMs already are, so
+   the machine under test matches the machine that will be demoed. A rehearsal
+   on any other class does not count toward the sequence.
+2. **The client is the owner's Mac** (owner, 2026-09-28: "Demo will be using
+   my Mac where you are running now"). So the demo topology is: browser and
+   Go bridge on the Mac, ssh to the VM, daemon and PostgreSQL on the VM.
+   Nothing eBPF runs on macOS, so the capture is necessarily remote — but the
+   client half is the Mac, and that is the half a rehearsal on the VM does not
+   exercise at all.
+
+## Owner pre-flight checklist (run ONCE per rehearsal window)
+
+Every one of these was discovered the hard way on 2026-09-28, one at a time,
+each costing the owner a separate interruption. They are collected here so a
+rehearsal window costs him **one interaction instead of a dozen**. The harness
+asserts each of them and **fails fast naming the unmet one** — it never retries
+into an opaque error and never quietly proceeds.
+
+Before saying "go":
+
+1. **Auto-lock off.** System Settings → Lock Screen → "Require password after
+   screen saver begins or display is turned off" → **Never**, and display sleep
+   set long. macOS refuses WebDriver fullscreen on a locked session, and the
+   screen re-locks *during* the several minutes of VM provisioning — so
+   unlocking once is not enough. Restore afterwards.
+2. **Page zoom at 100% on the pgwt tab** (`Cmd+0`). Safari persists zoom
+   per-hostname: a 115% setting on `localhost` silently shrank the viewport by
+   15% and produced a layout nobody intended. The harness navigates via
+   `127.0.0.1`, which carries no such setting, but the owner's own tab is
+   still whatever he last left it at.
+3. **Display awake and the session unlocked** at the moment of starting.
+4. **No multipass or other local VMs running** (`multipass list`, then
+   `multipass stop <name>`). Two Ubuntu VMs were consuming CPU during the first
+   attempts.
+5. **Time Machine not mid-backup**, and no Photos media analysis running. Both
+   appeared in the top CPU consumers during a measurement.
+6. **Second display detached** if the demo is on the built-in panel.
+   WindowServer drew 40.7% CPU compositing a 6K external alongside the Retina
+   panel, versus 19.7% with it detached.
+7. **Quit heavy apps** that will not be part of the demo.
+
+Two things that are the harness's job, not the owner's, and are listed here
+only so nobody asks him for them again: holding the display awake (the harness
+owns its own `caffeinate` with a trap) and cleaning up its own processes and
+VMs. **The owner should never be asked to kill an orphaned shell.** That
+happened twice on 2026-09-28 and was a missing trap, not a thing for him to do.
+
+### What the harness must do with this list
+
+- Assert every item it can observe — lock state via `CGSSessionScreenIsLocked`,
+  display sleep, achieved viewport, effective zoom, load and memory pressure.
+- On an unmet precondition: **stop, name it, do not retry.** An opaque failure
+  costs an owner interaction; a named one costs a setting change.
+- Record every observed value in the verdict, so a reader can tell later which
+  conditions produced a number.
+
+## Two verdicts, never merged into one
+
+A rehearsal produces **two** results and they are reported separately:
+
+- **Capture-side**, walked on the VM: everything that does not depend on the
+  client — §1 verdict, §2 floors, §3 conservation, §6 daemon integrity, §7
+  execution, §8 known-failing, and the data half of §4 and §5 (console errors,
+  blank panels, cross-tab agreement).
+- **Mac-side**, walked on the Mac against the same VM in the demo topology:
+  §4's time to first paint and viewport, and §5's freshness — *as the audience
+  will see them*. These are different quantities from their VM-side
+  namesakes. Headless Chromium at DPR 1 on a cx33 over localhost is not real
+  Chrome at DPR 2 on Apple silicon over an ssh hop, and a bound measured on
+  one does not transfer to the other. The VM's number is kept only as a
+  regression detector.
+
+Reported as "capture-side clean k of N, Mac-side clean m of M". **Never as
+"two clean rehearsals"** — that would claim the Mac half on the strength of
+the VM half.
+
+### Attribution for the Mac side, pre-registered
+
+The Mac is also this project's build machine, and local memory pressure has
+already killed two rehearsal attempts (#176). So, decided in advance rather
+than after seeing a result:
+
+- a Mac tick recorded with memory pressure other than normal is **void**
+  (infrastructure), not a failure;
+- a tick over bound with **normal** pressure, while the VM-side walk is clean
+  for the same tick, is a **client-side product finding**;
+- both sides red is a product failure.
+
+`memory_pressure` and load are recorded per tick in the verdict, so this is
+decided by data rather than by "the Mac was busy". For the duration of a
+Mac-side walk, no implementing agents and no local VM work run on it — that
+cost is real and is accepted deliberately.
+
+### The client, pinned (owner, 2026-09-28: "Screen, chrome")
+
+- **Display: the Mac's built-in screen**, not the projector — `Color LCD`,
+  Built-in Liquid Retina, **2880 x 1864 Retina**, `Main Display: Yes`.
+- **Presented FULL SCREEN** (owner, 2026-09-28), so the pinned viewport is
+  **1710 x 1069 CSS at devicePixelRatio 2** — measured in real Safari via
+  WebDriver, not computed: `screen` reports 1710 x 1107 logical, full screen
+  leaves 38 px of chrome, and the content layer is 3420 x 2138 physical.
+
+  **An earlier pin of 1440 x 932 was wrong and is retracted.** It came from
+  dividing the panel's 2880 x 1864 by the DPR of 2, which assumes macOS maps
+  physical to logical at exactly the device pixel ratio. This Mac runs the
+  built-in display in a *scaled* mode: 1710 x 1107 logical at DPR 2, rendering
+  3420 x 2214 and downsampling to the 2880 x 1864 panel. So the derived number
+  was 19% too narrow, and any paint or layout measurement taken at it does not
+  describe the demo.
+
+  Two related traps, both measured rather than assumed:
+  - **A window rect is not a content viewport.** Asking WebDriver for a
+    1440 x 932 *window* yields an 880 px tall *page* — Safari's title and tab
+    bar take 52 px in a window, 38 px in full screen, and zero width in both.
+    A harness must set the outer size, read `innerWidth`/`innerHeight` back,
+    and assert the achieved viewport rather than trusting the request.
+  - Numbers taken at one viewport do not transfer to another, in either
+    direction.
+- **Browser: Safari** (owner, 2026-09-28: "it safari not chrome"). Pin the
+  Safari and macOS versions in the verdict; an update between a clean
+  rehearsal and the demo invalidates the client half, because rendering, paint
+  timing and WebSocket behaviour are exactly what that half measures.
+
+  **Safari must be driven as Safari.** Playwright's `webkit` is a different
+  build — different JIT, networking stack, and timer and WebSocket behaviour —
+  so measuring WebKit and reporting it as Safari would be the same class of
+  error as every instrument defect found on 2026-09-27: measuring a near
+  neighbour of the thing and labelling it the thing. `/usr/bin/safaridriver`
+  is present, so real Safari is drivable over WebDriver. If it ever cannot be,
+  the honest fallbacks are a scripted manual walk with the harness recording,
+  or WebKit **explicitly labelled a proxy** with its differences stated — never
+  WebKit under Safari's name.
+
+  A Chrome measurement is not evidence for this criterion. The first
+  Mac-side walk was built against Chrome before this correction; its findings
+  about the bridge, the ssh hop and freshness stand, its paint numbers do not.
+
+**Display confirmed** (owner, 2026-09-28): the built-in panel, not the
+`LG ULTRAFINE` 6016 x 3384 also attached to this Mac. So 1440 x 932 CSS at
+DPR 2 is final, and the display identity is recorded in the verdict alongside
+the Safari and macOS versions — a rehearsal walked on a different display is
+a different experiment, exactly as a different PG version would be.
+
+### Recovery after the bridge drops
+
+Added because the owner observed it before any harness did: a Safari tab open
+against a bridge that went away showed an error chip and eleven blank panels.
+
+The code path is sound on inspection — `connect()` re-fetches the session
+token on every attempt, so the bridge's per-process token rotating on restart
+does **not** strand an open tab — but nobody has ever observed a recovery.
+Inspection is not observation, and the difference between "recovers within the
+16 s backoff cap" and "stays blank until someone reloads" is the difference
+between a hiccup and a dead demo.
+
+So the Mac-side walk measures it: drop the bridge mid-walk, bring it back, and
+record whether the UI reconnects, how long it takes, and whether any state is
+lost. The measured number belongs in the verdict; the source's 16 s cap is not
+evidence.
+
+### The demo machine (owner, 2026-09-28: "we will provision dedicated node couple days in advance")
+
+A dedicated PG 18 `cx33`, created days ahead, **not** an ephemeral VM. Two
+requirements follow from how the janitor works, and both are mechanical:
+
+1. It must **not** carry the `pgwt=ephemeral` label. `tests/hetzner-sweep.sh`
+   deletes labelled machines older than its cutoff, and the demo node will be
+   days old by definition — precisely the shape the sweep exists to remove.
+2. Its name must be in `PROTECTED_NAMES` in `tests/hetzner-sweep.sh`, as a
+   second independent guard. The script's own comment says not to rely on the
+   missing label alone, because an unlabelled persistent box looks identical
+   to an operator's one-off VM.
+
+**Name: `pgwt-stage`, deliberately not `pgwt-demo`.** The rehearsal's own
+throwaway VMs are already created as `pgwt-demo-<epoch>-<rand>`, so a
+dedicated node called `pgwt-demo` would sit one careless prefix match away
+from the machines the sweep is built to delete. `PROTECTED_NAMES` matches
+exact names today, but the demo node is the one machine where a future
+loosening of that match must not be able to reach.
+
 ## A rehearsal is CLEAN only if ALL of these hold
 
 Any single failure makes the attempt not clean, however good the rest look.
