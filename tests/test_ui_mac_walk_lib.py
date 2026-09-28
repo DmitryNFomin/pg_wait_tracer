@@ -318,6 +318,83 @@ def test_build_tab_entry_clean():
     check(entry["void_reason"] is None, "build_tab_entry: clean tab has no void_reason")
 
 
+# ── freshness_status / verdict_status: the aggregation fix (review
+# blocker, 2026-09-28) ────────────────────────────────────────────────────
+# Found live: tests/results/ui_mac_walk_safari/summary.json recorded
+# `counted: true, ok: true` while every one of its 11 tabs carried
+# freshness age_s: null ("freshness not measured") -- an unmeasured
+# sub-check silently passed through into a verdict that said pass.
+
+def test_freshness_status_unmeasured():
+    check(lib.freshness_status(None) == "unmeasured",
+          "freshness_status: age_s=None -> 'unmeasured', not 'ok' or 'failed'")
+
+
+def test_freshness_status_ok():
+    check(lib.freshness_status(3.0) == "ok",
+          "freshness_status: within bound -> 'ok'")
+
+
+def test_freshness_status_failed():
+    check(lib.freshness_status(60.0) == "failed",
+          "freshness_status: over bound -> 'failed'")
+    check(lib.freshness_status(-1.0) == "failed",
+          "freshness_status: negative age -> 'failed'")
+
+
+def test_build_tab_entry_unmeasured_freshness_fails_the_tab():
+    # THE bypass this fix closes: rendered=True, no console errors, not
+    # void -- everything else about this tab looks clean -- but
+    # freshness_age_s=None must still make ok False.
+    entry = lib.build_tab_entry("overview", True, "5 rows", 1.2, [], [],
+                                 freshness_age_s=None, mac_void_reason=None)
+    check(entry["freshness"]["status"] == "unmeasured",
+          "build_tab_entry: unmeasured freshness recorded as such")
+    check(entry["ok"] is False,
+          "build_tab_entry: unmeasured freshness makes ok False -- an "
+          "unmeasured criterion is never a satisfied one")
+
+
+def test_build_tab_entry_failed_freshness_fails_the_tab():
+    entry = lib.build_tab_entry("overview", True, "5 rows", 1.2, [], [],
+                                 freshness_age_s=60.0, mac_void_reason=None)
+    check(entry["freshness"]["status"] == "failed",
+          "build_tab_entry: stale freshness recorded as 'failed'")
+    check(entry["ok"] is False,
+          "build_tab_entry: a real freshness failure makes ok False")
+
+
+def test_build_verdict_one_unmeasured_freshness_sub_check_fails_the_whole_run():
+    # The exact reproduction of the review's finding: 11 tabs, all
+    # rendered/clean/non-void, but freshness unmeasured on all of them --
+    # must NOT aggregate to ok: true.
+    tabs = [lib.build_tab_entry(f"tab{i}", True, "ok", 1.0, [], [],
+                                 freshness_age_s=None, mac_void_reason=None)
+            for i in range(11)]
+    v = lib.build_verdict("run-x", tabs, [{"ts": 1, "pressure_level": 1}])
+    check(v["ok"] is False,
+          "build_verdict: unmeasured freshness on every tab -> ok False, "
+          "not the vacuous pass found live")
+    check(v["status"] == "failed",
+          f"build_verdict: status is 'failed' (counted but not satisfied), "
+          f"got {v['status']!r}")
+
+
+def test_verdict_status_unmeasured():
+    check(lib.verdict_status(counted=False, ok=True) == "unmeasured",
+          "verdict_status: not counted -> 'unmeasured' regardless of ok")
+
+
+def test_verdict_status_failed():
+    check(lib.verdict_status(counted=True, ok=False) == "failed",
+          "verdict_status: counted but not ok -> 'failed'")
+
+
+def test_verdict_status_satisfied():
+    check(lib.verdict_status(counted=True, ok=True) == "satisfied",
+          "verdict_status: counted and ok -> 'satisfied'")
+
+
 def test_build_tab_entry_defaults_wall_times_to_none():
     # Existing callers (tests/ui_mac_walk.py's Chrome walk) never pass
     # these -- must not break, and must not fabricate a timestamp.

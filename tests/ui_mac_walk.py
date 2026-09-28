@@ -247,12 +247,17 @@ def main():
                 ages, version_skew = freshness_pass(browser, args.url, args.first_data_timeout)
                 print(f"  version_skew: {version_skew}")
                 for entry in tabs:
-                    entry["freshness"]["age_s"] = ages.get(entry["tab"])
-                    ok, detail = lib.freshness_ok(ages.get(entry["tab"]))
+                    age_s = ages.get(entry["tab"])
+                    entry["freshness"]["age_s"] = age_s
+                    ok, detail = lib.freshness_ok(age_s)
                     entry["freshness"]["ok"] = ok
+                    entry["freshness"]["status"] = lib.freshness_status(age_s)
                     entry["freshness"]["detail"] = detail
-                    # freshness is reported per tab but deliberately does not
-                    # gate entry["ok"] here -- see the appended note below.
+                    # freshness DOES gate entry["ok"] -- see the retroactive
+                    # void-attribution pass below, where "ok" is finally
+                    # computed (review blocker, 2026-09-28: an unmeasured
+                    # freshness reading must never let a tab/verdict
+                    # aggregate to ok: true).
 
                 # RETROACTIVE void attribution -- see
                 # tests/ui_mac_walk_safari.py's own identical block for the
@@ -279,8 +284,11 @@ def main():
                     entry["bracket_before"] = before
                     entry["bracket_after"] = after
                     entry["ok"] = (bool(entry["rendered"]) and not entry["console_errors"]
-                                   and reason is None)
-                    print(f"  [{entry['tab']}] void={reason!r}")
+                                   and reason is None
+                                   and entry["freshness"]["status"] == "ok")
+                    print(f"  [{entry['tab']}] void={reason!r} "
+                          f"freshness_status={entry['freshness']['status']!r} "
+                          f"ok={entry['ok']}")
             finally:
                 browser.close()
     finally:

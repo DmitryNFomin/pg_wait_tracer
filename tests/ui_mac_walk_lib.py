@@ -157,6 +157,39 @@ def freshness_ok(age_s, max_age_s=FRESHNESS_MAX_AGE_S):
     return True, f"{age_s:.1f}s old (<= {max_age_s:.1f}s bound)"
 
 
+def freshness_status(age_s, max_age_s=FRESHNESS_MAX_AGE_S):
+    """TRI-STATE, not the boolean freshness_ok() returns: 'unmeasured' |
+    'failed' | 'ok'. Found live (2026-09-28 review): a real run's verdict
+    aggregated to `ok: true` while every one of its 11 tabs carried
+    freshness age_s=None -- because freshness_ok(None) collapses
+    "could not measure" into the same False as a genuine staleness
+    failure, and nothing upstream then distinguished the two before
+    deciding the tab (and the whole run) passed. An unmeasured criterion
+    is not a satisfied one, and it is not the same claim as a measured
+    failure either -- a reader needs to tell "the product is stale" apart
+    from "we could not tell"."""
+    if age_s is None:
+        return "unmeasured"
+    if age_s < 0 or age_s > max_age_s:
+        return "failed"
+    return "ok"
+
+
+def verdict_status(counted, ok):
+    """Tri-state overall status, alongside the raw counted/ok booleans
+    (kept for backward compatibility): 'unmeasured' (majority-void --
+    the run could not be attributed to the Mac's environment at all),
+    'failed' (attributable, but at least one criterion did not pass --
+    includes an unmeasured PER-TAB criterion like freshness, since that
+    is folded into each tab's own `ok` before this is computed), or
+    'satisfied' (attributable and every criterion passed). Never
+    conflates "could not tell" with either a real pass or a real
+    failure."""
+    if not counted:
+        return "unmeasured"
+    return "satisfied" if ok else "failed"
+
+
 def build_tab_entry(tab_id, rendered, render_detail, ttfp_s, console_errors,
                      pgwt_console_errors, freshness_age_s, mac_void_reason,
                      wall_start=None, wall_end=None, bracket_before=None,
@@ -175,9 +208,18 @@ def build_tab_entry(tab_id, rendered, render_detail, ttfp_s, console_errors,
     its own saved summary.json afterward. All four default to None so
     existing callers that predate this (tests/ui_mac_walk.py's Chrome walk)
     keep working unchanged; a future run can be re-judged from stored data
-    without re-running only if these are populated."""
+    without re-running only if these are populated.
+
+    `ok` now REQUIRES freshness_status == "ok" too (fixed 2026-09-28,
+    review blocker): found live that a real run's verdict aggregated to
+    ok: true while freshness was unmeasured (age_s: None) on all 11
+    tabs -- freshness was computed and stored, but never gated this
+    field, so an unmeasured criterion silently passed through. An
+    unmeasured criterion is never treated as satisfied."""
     fresh_ok, fresh_detail = freshness_ok(freshness_age_s)
-    ok = bool(rendered) and not console_errors and mac_void_reason is None
+    fresh_status = freshness_status(freshness_age_s)
+    ok = (bool(rendered) and not console_errors and mac_void_reason is None
+          and fresh_status == "ok")
     return {
         "tab": tab_id,
         "rendered": bool(rendered),
@@ -185,7 +227,8 @@ def build_tab_entry(tab_id, rendered, render_detail, ttfp_s, console_errors,
         "ttfp_s": ttfp_s,
         "console_errors": list(console_errors),
         "pgwt_console_errors": list(pgwt_console_errors),
-        "freshness": {"age_s": freshness_age_s, "ok": fresh_ok, "detail": fresh_detail},
+        "freshness": {"age_s": freshness_age_s, "ok": fresh_ok,
+                       "status": fresh_status, "detail": fresh_detail},
         "void_reason": mac_void_reason,
         "wall_start": wall_start,
         "wall_end": wall_end,
@@ -380,4 +423,10 @@ def build_verdict(run_id, tabs, mac_samples, notes=None):
         "counted": counted,
         "mac_samples": mac_samples,
         "notes": notes or [],
+        # Tri-state summary of the two booleans above (review blocker,
+        # 2026-09-28) -- "unmeasured" (majority-void), "failed" (counted
+        # but a criterion did not pass, INCLUDING an unmeasured per-tab
+        # criterion like freshness, which is folded into `ok` above via
+        # each tab's own `ok`), or "satisfied".
+        "status": verdict_status(counted, ok),
     }

@@ -392,6 +392,8 @@ def main():
     notes = []
     version_skew = None
     display_identity = None
+    tick_wait_elapsed_s = None
+    tick_wait_bound_s = None
     session = None
     try:
         try:
@@ -515,15 +517,30 @@ def main():
             # fresh browser context per tab like tests/ui_mac_walk.py), so
             # it can outrun app.js's own 5s AAS auto-refresh cadence
             # entirely: the freshness pass ran before even ONE periodic
-            # tick had fired since the hook was installed. Wait (bounded)
-            # for the first tick here, once, before the per-tab loop --
-            # never a fabricated freshness reading, and this is the only
-            # place that needs the wait (once at least one tick exists,
-            # every later 'age since last tick' read is meaningful).
-            if wait_for_js(session, "window.__uiLiveTicks && "
-                           "window.__uiLiveTicks.length >= 1", 8.0) is None:
-                print("  note: no AAS tick observed within 8s of installing "
-                      "the tick hook -- freshness will read as unmeasured",
+            # tick had fired since the hook was installed. First fix tried
+            # an 8s bound here and STILL timed out on the next real run
+            # (0 ticks observed) -- 8s is under 2x the 5s cadence, not
+            # enough margin for jitter/startup. Chosen fix, decided
+            # 2026-09-28 (of the two options: wait longer up front, vs.
+            # accept a possibly-one-tick-stale read at walk end): wait
+            # longer up front, because "accept a stale read" still has
+            # nothing to read at all if zero ticks have fired by the time
+            # the freshness pass runs -- it does not fix the race, it just
+            # relabels the same None. Bound raised to 3x TICK_S (15s,
+            # ui_mac_walk_lib.TICK_S -- the SAME constant app.js's own
+            # cadence is written against, not an independent guess); the
+            # actual wait outcome (elapsed time, or 'timed out') is
+            # recorded in the verdict either way -- never a fabricated
+            # freshness reading, and this is the only place that needs the
+            # wait (once at least one tick exists, every later 'age since
+            # last tick' read is meaningful).
+            tick_wait_bound_s = lib.TICK_S * 3
+            tick_wait_elapsed_s = wait_for_js(
+                session, "window.__uiLiveTicks && "
+                "window.__uiLiveTicks.length >= 1", tick_wait_bound_s)
+            if tick_wait_elapsed_s is None:
+                print(f"  note: no AAS tick observed within {tick_wait_bound_s}s of "
+                      "installing the tick hook -- freshness will read as unmeasured",
                       file=sys.stderr)
             display_identity = screen_identity(session)
             display_identity["viewport_matches_target"] = (
@@ -610,6 +627,7 @@ def main():
                 fresh_ok, fresh_detail = lib.freshness_ok(age_s)
                 entry["freshness"]["age_s"] = age_s
                 entry["freshness"]["ok"] = fresh_ok
+                entry["freshness"]["status"] = lib.freshness_status(age_s)
                 entry["freshness"]["detail"] = fresh_detail
                 print(f"  freshness [{tab_id}]: {fresh_detail}")
 
@@ -648,9 +666,17 @@ def main():
                 entry["void_reason"] = reason
                 entry["bracket_before"] = before
                 entry["bracket_after"] = after
+                # ok recomputed here, not left as whatever build_tab_entry
+                # set at construction time (freshness wasn't measured yet
+                # then) -- MUST include freshness_status == "ok" (review
+                # blocker, 2026-09-28): a verdict aggregated to ok: true
+                # once with freshness unmeasured on every tab.
                 entry["ok"] = (bool(entry["rendered"]) and not entry["console_errors"]
-                               and reason is None)
-                print(f"  [{entry['tab']}] void={reason!r}")
+                               and reason is None
+                               and entry["freshness"]["status"] == "ok")
+                print(f"  [{entry['tab']}] void={reason!r} "
+                      f"freshness_status={entry['freshness']['status']!r} "
+                      f"ok={entry['ok']}")
         except Exception:
             traceback.print_exc()
     finally:
@@ -682,6 +708,12 @@ def main():
     verdict["criteria_commit"] = CRITERIA_COMMIT
     verdict["criteria_doc_blob"] = CRITERIA_DOC_BLOB
     verdict["branch_sha"] = _current_branch_sha()
+    # The pre-tab-walk wait for the first AAS tick (see the tick-hook
+    # install site above): bound and actual elapsed/timeout outcome,
+    # recorded either way so a reader can see whether freshness had a
+    # real chance to be measured this run, not just whether it was.
+    verdict["tick_wait_bound_s"] = tick_wait_bound_s
+    verdict["tick_wait_elapsed_s"] = tick_wait_elapsed_s
     # counted, precondition-only (coordinator, 2026-09-28): gated strictly
     # on the four assertions already enforced above by construction (a run
     # that reached this point already passed unlocked/awake at pre-flight,
