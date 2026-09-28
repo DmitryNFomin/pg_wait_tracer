@@ -123,9 +123,35 @@ class ProbeFailure(RuntimeError):
     pass
 
 
+def _open_app(page, url, timeout_s):
+    """Load the UI and wait for a live WebSocket. Every way this can fail --
+    nothing listening, something listening that is not pgwt, a bridge that
+    serves the page but never connects -- must REFUSE by name rather than
+    surface as a bare Playwright timeout or, worse, let the caller proceed to
+    measure an app that is not there."""
+    try:
+        page.goto(url)
+    except Exception as e:                       # noqa: BLE001 -- reported, not hidden
+        raise ProbeFailure("cannot load %s: %s" % (url, e))
+    try:
+        page.wait_for_selector("#status.connected", timeout=timeout_s * 1000)
+    except PWTimeoutError:
+        raise ProbeFailure(
+            "no #status.connected within %ds at %s -- the page is not a "
+            "connected pgwt UI, so there is nothing to measure" % (timeout_s, url))
+
+
 def _drill_to_timeline(page, timeout_s):
     page.click(".tab[data-tab='sessions']")
-    page.wait_for_selector("#table-container table tbody tr", timeout=timeout_s * 1000)
+    try:
+        page.wait_for_selector("#table-container table tbody tr",
+                               timeout=timeout_s * 1000)
+    except PWTimeoutError:
+        raise ProbeFailure(
+            "the sessions table showed no rows within %ds -- there is no "
+            "session to drill into, so the timeline cannot be measured "
+            "(absent, not slow: refusing rather than reporting a zero)"
+            % timeout_s)
     row = page.query_selector("#table-container table tbody tr.clickable")
     if row is None:
         raise ProbeFailure("no clickable session row to drill into for Timeline")
@@ -169,8 +195,7 @@ def emulate_smoke(url, ticks, out_dir, timeout_s):
         browser = p.chromium.launch()
         context = browser.new_context(viewport={"width": 1280, "height": 900})
         page = context.new_page()
-        page.goto(url)
-        page.wait_for_selector("#status.connected", timeout=timeout_s * 1000)
+        _open_app(page, url, timeout_s)
         deadline = time.time() + timeout_s
         while page.query_selector("#table-container table tbody tr") is None:
             if time.time() > deadline:
@@ -256,14 +281,57 @@ def emulate_smoke(url, ticks, out_dir, timeout_s):
     return 0
 
 
+def select_measurable(sent, ticks):
+    """Pure: split the recorded outgoing frames into (session_timeline, info)
+    and REFUSE unless there is enough of both to answer the question.
+
+    This is the probe's blindness guard, and it is the part that decides
+    whether a run is evidence at all. Every way it can be starved -- no frames
+    at all, `info` ticking while the timeline never fetched, a partial run
+    that captured fewer requests than the ticks asked for, a frame whose `cmd`
+    is missing or unparseable -- must refuse, because in each of those cases
+    the probe cannot see the window and MUST NOT report a zero as if it had.
+    Tested in tests/test_timeline_window_probe.py."""
+    if not isinstance(sent, list):
+        raise ProbeFailure("no recorded frames at all -- the WS hook never "
+                           "installed, so nothing was observed")
+    tl, info, unparseable = [], [], 0
+    for f in sent:
+        if not isinstance(f, dict) or not isinstance(f.get("cmd"), str):
+            unparseable += 1
+            continue
+        if f["cmd"] == "session_timeline":
+            tl.append(f)
+        elif f["cmd"] == "info":
+            info.append(f)
+    if unparseable:
+        raise ProbeFailure(
+            "%d recorded frame(s) had no readable `cmd` -- the recording is "
+            "not trustworthy, refusing to summarise it" % unparseable)
+    if not info:
+        raise ProbeFailure("no `info` request observed -- the live loop never ticked")
+    if len(tl) < ticks:
+        raise ProbeFailure(
+            "observed only %d session_timeline requests, needed %d -- "
+            "the timeline tab was not fetching" % (len(tl), ticks))
+    return tl, info
+
+
+def frozen_pair_count(tos):
+    """Pure: how many consecutive (to_ns) pairs did NOT move. The number the
+    whole measurement turns on, kept separate from the printing so a test can
+    feed it a frozen window and a moving one and see both answers."""
+    vals = [int(v) for v in tos]
+    return sum(1 for i in range(len(vals) - 1) if vals[i + 1] == vals[i])
+
+
 def run(url, ticks, out_dir, timeout_s):
     os.makedirs(out_dir, exist_ok=True)
     with sync_playwright() as p:
         browser = p.chromium.launch()
         context = browser.new_context(viewport={"width": 1280, "height": 900})
         page = context.new_page()
-        page.goto(url)
-        page.wait_for_selector("#status.connected", timeout=timeout_s * 1000)
+        _open_app(page, url, timeout_s)
         if page.evaluate(WS_PROBE_JS) is not True:
             raise ProbeFailure("window.__pgwt.transport.ws absent -- app.js did not boot")
         _drill_to_timeline(page, timeout_s)
@@ -280,15 +348,7 @@ def run(url, ticks, out_dir, timeout_s):
         frames = page.evaluate("() => window.__probe")
         browser.close()
 
-    sent = frames["sent"]
-    tl = [f for f in sent if f["cmd"] == "session_timeline"]
-    info = [f for f in sent if f["cmd"] == "info"]
-    if not info:
-        raise ProbeFailure("no `info` request observed -- the live loop never ticked")
-    if len(tl) < ticks:
-        raise ProbeFailure(
-            "observed only %d session_timeline requests, needed %d -- "
-            "the timeline tab was not fetching" % (len(tl), ticks))
+    tl, info = select_measurable(frames["sent"], ticks)
 
     result = {
         "url": url, "ticks_requested": ticks,
@@ -321,7 +381,7 @@ def summarise(result):
         prev_at, prev_to = f["at"], f["to"]
     tos = [f["to"] for f in tl]
     dts = _deltas(tos)
-    frozen = sum(1 for d in dts if d == 0)
+    frozen = frozen_pair_count(tos)
     print("\n  request-window advances: %d of %d consecutive pairs moved; "
           "%d frozen" % (len(dts) - frozen, len(dts), frozen))
 
