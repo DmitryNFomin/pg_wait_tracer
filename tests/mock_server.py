@@ -863,14 +863,16 @@ def _handle_request_inner(cmd, req_id, msg):
         filters = msg.get("filters", {})
         qid = str(filters.get("query_id", "100"))
         rows = [
-            # Latest first, like server.c handle_executions.
+            # Latest first, like server.c handle_executions with no `sort`
+            # (or sort=start_desc).
             # issue #101: on a real --mode full capture the NEWEST execution
             # is routinely a microsecond-scale statement that never changed
             # wait state -- no events, no workers, no plan, so its
             # execution_detail below is empty and there is no waterfall to
             # draw. Measured on the gate box: rows[0] was undrawable in 40 of
             # 40 simulated live ticks. The fixture carries that shape so the
-            # UI suite exercises the real default-selection path.
+            # UI suite exercises the real default-selection path when the
+            # user explicitly asks for latest-first (the #222 sort toggle).
             {"pid": 1004, "query_id": qid,
              "start_ns": "10000200000000", "end_ns": None,
              "duration_ms": None, "plan_ms": None,
@@ -889,6 +891,16 @@ def _handle_request_inner(cmd, req_id, msg):
         ]
         if "pid" in filters:
             rows = [r for r in rows if r["pid"] == filters["pid"]]
+        # #222: server.c orders the whole matching window by `sort` BEFORE
+        # truncating, so this is a server-side selection, not a client
+        # re-sort -- the mock must reorder the same way or the UI's default
+        # (sort=duration_desc) would exercise a fixture shape the real
+        # server never actually sends for that request. Unrecognized/absent
+        # sort falls back to the latest-first order above, matching
+        # server.c's cmp_execution_start_desc default.
+        if msg.get("sort") == "duration_desc":
+            rows = sorted(rows, key=lambda r: r["duration_ms"] or 0,
+                           reverse=True)
         return {"id": req_id, "rows": rows,
                 "total_count": len(rows), "truncated": False}
 

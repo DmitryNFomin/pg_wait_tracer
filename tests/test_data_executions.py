@@ -2,12 +2,14 @@
 """U3/B6 execution list, waterfall, worker lanes, and scatter honesty."""
 import os
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(__file__))
 from server_harness import (
     ServerHarness, generate_traces, cleanup_traces, TestRunner,
     CPU, IO_DATA_FILE_READ, LWLOCK_WAL_WRITE,
 )
+from demo_rehearsal_lib import WATERFALL_QUERY_THRESHOLD_S
 
 EXEC_START = 0xFFFFFFF0
 EXEC_END = 0xFFFFFFF1
@@ -305,6 +307,177 @@ def test_execution_filters(t):
         cleanup_traces(trace_dir)
 
 
+def test_sort_order_and_fallback(t):
+    print("\n### #222: sort=duration_desc orders by duration; "
+          "omitted/unrecognized sort falls back to start_desc ###")
+    # Five single-pid executions with deliberately distinct durations (and
+    # two never-closed ones) so duration order and start order disagree in
+    # every position -- a test that happened to pick durations that were
+    # already in start order could pass with the comparator never actually
+    # consulting duration.
+    events = [
+        marker(2000, BASE, EXEC_START, 700),
+        marker(2000, BASE + 50 * MS, EXEC_END, 700),        # 50ms
+        marker(2001, BASE + 1 * MS, EXEC_START, 700),
+        marker(2001, BASE + 11 * MS, EXEC_END, 700),        # 10ms
+        marker(2002, BASE + 2 * MS, EXEC_START, 700),
+        marker(2002, BASE + 202 * MS, EXEC_END, 700),       # 200ms, longest
+        marker(2003, BASE + 3 * MS, EXEC_START, 700),       # never closes
+        marker(2004, BASE + 4 * MS, EXEC_START, 700),       # never closes, later start
+    ]
+    scenario = {
+        "backends": [{"pid": p, "type": "client", "user": "u", "db": "d"}
+                     for p in (2000, 2001, 2002, 2003, 2004)],
+        "queries": [{"id": 700, "text": "SELECT sort_fixture()"}],
+        "events": sorted(events, key=lambda e: e["ts"]),
+    }
+    trace_dir = generate_traces(scenario)
+    try:
+        with ServerHarness(trace_dir) as srv:
+            duration_desc = srv.query("executions", sort="duration_desc")
+            pids = [r["pid"] for r in duration_desc.get("rows", [])]
+            # in_progress rows (2003, 2004) carry an unknown true duration and
+            # sort as duration 0 -- last here -- rather than threading `to_ns`
+            # through the comparator to approximate elapsed-so-far (that would
+            # make the order depend on when the request happened to land).
+            # Tied at 0, they still need a deterministic order: start_ns desc,
+            # same as cmp_execution_start_desc's own tie-break.
+            t.check_eq(pids, [2002, 2000, 2001, 2004, 2003],
+                       f"duration_desc: longest first, in_progress rows last "
+                       f"and tie-broken by start_ns desc ({pids})")
+
+            for sort_kwargs, label in [({}, "sort omitted"),
+                                        ({"sort": "bogus"}, "unrecognized sort")]:
+                resp = srv.query("executions", **sort_kwargs)
+                pids = [r["pid"] for r in resp.get("rows", [])]
+                t.check_eq(pids, [2004, 2003, 2002, 2001, 2000],
+                           f"{label}: falls back to start_desc, not some "
+                           f"other order and not a refusal ({pids})")
+    finally:
+        cleanup_traces(trace_dir)
+
+
+# #222's measured shape: a query firing roughly every 9.5s genuinely captured
+# but reliably crowded out of the default 100-row recency slice by ~125
+# exec/s of pgbench traffic, order 75k executions over a ~10 minute capture.
+# Scaled down here to keep this test's own runtime reasonable (a smaller
+# window, coarser fast-path rate) while staying in the same "tens of
+# thousands of executions" regime #101's fix had to hold its query-latency
+# budget at -- this is also the scale used to demonstrate that budget below.
+SLOW_QID = 918273645
+
+def crowded_scenario(window_s=300, fast_period_ms=12, slow_period_s=9.5):
+    events = []
+    backends = set()
+    fast_pids = list(range(5000, 5020))  # 20 concurrent-ish fast backends
+    t_ns = 0
+    i = 0
+    window_ns = window_s * 1_000_000_000
+    while t_ns < window_ns:
+        pid = fast_pids[i % len(fast_pids)]
+        qid = 100 + (i % 5)
+        backends.add(pid)
+        start = BASE + t_ns
+        events.append(marker(pid, start, EXEC_START, qid))
+        events.append({"pid": pid, "ts": start + 1000, "dur": 200_000,
+                       "old": CPU, "new": CPU, "qid": qid})
+        events.append(marker(pid, start + 210_000, EXEC_END, qid))
+        t_ns += fast_period_ms * 1_000_000
+        i += 1
+    n_fast = i
+
+    slow_pid = 6000
+    backends.add(slow_pid)
+    t_ns = 0
+    j = 0
+    slow_period_ns = int(slow_period_s * 1_000_000_000)
+    while t_ns < window_ns:
+        start = BASE + t_ns
+        events.append(marker(slow_pid, start, EXEC_START, SLOW_QID))
+        events.append({"pid": slow_pid, "ts": start + MS, "dur": 400 * MS,
+                       "old": IO_DATA_FILE_READ, "new": CPU,
+                       "qid": SLOW_QID, "cpu": 0})
+        events.append(marker(slow_pid, start + 401 * MS, EXEC_END, SLOW_QID))
+        t_ns += slow_period_ns
+        j += 1
+    n_slow = j
+
+    events.sort(key=lambda e: e["ts"])
+    scenario = {
+        "backends": [{"pid": p, "type": "client", "user": "u", "db": "d"}
+                     for p in sorted(backends)],
+        "queries": [{"id": 100 + k, "text": f"SELECT fast_{k}()"}
+                    for k in range(5)] +
+                   [{"id": SLOW_QID, "text": "SELECT pg_report_slow()"}],
+        "events": events,
+    }
+    return scenario, n_fast, n_slow
+
+
+def test_crowding_check_and_query_latency_bound(t):
+    print("\n### #222 cheap check + #101 budget at tens-of-thousands scale ###")
+    scenario, n_fast, n_slow = crowded_scenario()
+    trace_dir = generate_traces(scenario)
+    try:
+        t.check(n_fast >= 20_000,
+                f"fixture reaches tens-of-thousands of executions ({n_fast} fast + {n_slow} slow)")
+        with ServerHarness(trace_dir) as srv:
+            # ── The issue's own "cheap check, before any code" ──────────
+            # Filtering to the slow query's id bypasses the recency
+            # truncation entirely (execution_matches_request runs BEFORE
+            # the sort+limit), so a present row means the execution was
+            # genuinely captured -- "crowded out of the default view", not
+            # "lost". An absent row here would mean the opposite: a real,
+            # more serious capture defect, not this issue.
+            probe = srv.query("executions", limit=1,
+                              filters={"query_id": SLOW_QID},
+                              timeout=WATERFALL_QUERY_THRESHOLD_S)
+            t.check_eq(len(probe.get("rows", [])), 1,
+                       "cheap check: the slow query is genuinely captured "
+                       "(present under a query_id filter)")
+
+            # ── The regression this issue is actually about ─────────────
+            default_page = srv.query("executions", limit=100,
+                                     timeout=WATERFALL_QUERY_THRESHOLD_S)
+            default_pids = {r["pid"] for r in default_page.get("rows", [])}
+            t.check(6000 not in default_pids,
+                    "characterizes the bug: the unsorted default 100-row "
+                    "page is the fast-only recency tail, crowding the slow "
+                    "query out (pid 6000 absent)")
+
+            # ── The fix: ask for the slowest instead ─────────────────────
+            slow_start = time.monotonic()
+            slowest_page = srv.query("executions", limit=100,
+                                     sort="duration_desc",
+                                     timeout=WATERFALL_QUERY_THRESHOLD_S)
+            slow_elapsed = time.monotonic() - slow_start
+            slowest_pids = {r["pid"] for r in slowest_page.get("rows", [])}
+            t.check(6000 in slowest_pids,
+                    "sort=duration_desc surfaces the slow query in the "
+                    "default-sized page instead of the recency tail")
+
+            # ── #101's bound, demonstrated at this scale for BOTH sorts:
+            # sorting the full matching window by duration is the same
+            # qsort over the same already-materialized row array as the
+            # pre-existing start_desc sort -- no new pass over the
+            # underlying trace events, so the budget that closed #101 is
+            # unaffected by which comparator runs. ─────────────────────
+            recent_start = time.monotonic()
+            srv.query("executions", limit=100,
+                     timeout=WATERFALL_QUERY_THRESHOLD_S)
+            recent_elapsed = time.monotonic() - recent_start
+            t.check(recent_elapsed < WATERFALL_QUERY_THRESHOLD_S,
+                    f"start_desc (default) executions query: "
+                    f"{recent_elapsed:.2f}s over ~{n_fast + n_slow} executions "
+                    f"(threshold {WATERFALL_QUERY_THRESHOLD_S}s)")
+            t.check(slow_elapsed < WATERFALL_QUERY_THRESHOLD_S,
+                    f"duration_desc executions query: {slow_elapsed:.2f}s "
+                    f"over ~{n_fast + n_slow} executions "
+                    f"(threshold {WATERFALL_QUERY_THRESHOLD_S}s)")
+    finally:
+        cleanup_traces(trace_dir)
+
+
 def test_detail_window_bound_and_bounded_context(t):
     print("\n### detail bound is window-local and still enforced ###")
     start = BASE + 50_000 * MS
@@ -474,6 +647,8 @@ def main():
     test_scatter(t)
     test_straddling_and_marker_identity(t)
     test_execution_filters(t)
+    test_sort_order_and_fallback(t)
+    test_crowding_check_and_query_latency_bound(t)
     test_detail_window_bound_and_bounded_context(t)
     test_clustered_scatter_fills_budget(t)
     test_detail_cap(t)

@@ -48,8 +48,46 @@ export const executionsConfig = {
     rowClass: (r) => 'clickable' + (r._selected ? ' selected-execution' : ''),
 };
 
-/* executions response -> shared-table model. Server order is latest-first and
- * is preserved; client sorting is intentionally absent on this selector. */
+/* #222: which slice of executions the table asks for. The server orders the
+ * whole matching window before truncating to `limit` (src/server.c), so this
+ * is a REQUEST parameter, not a client-side re-sort -- picking "recent" here
+ * after the server already truncated to the newest rows cannot recover a
+ * slow outlier that aged out of that slice. Two values only: the server
+ * falls back to start_desc for anything else it doesn't recognize.
+ *
+ * Default is duration_desc: on a busy OLTP system the recency slice is
+ * roughly the last second of traffic (#222 -- a query firing every 9.5s was
+ * reliably crowded out of it by pgbench at ~125 exec/s, order 75k executions
+ * in a 10-minute capture), and "the slowest or most-wait-heavy executions"
+ * is what this tab exists to answer. "Latest first" stays one click away
+ * (the sort toggle in waterfall.js) for whoever wants recent activity
+ * instead -- both are legitimate questions, but only one can be silently
+ * the default, and the demo workload showed which one users hit the tab
+ * needing. */
+export const EXECUTIONS_SORT_DURATION = 'duration_desc';
+export const EXECUTIONS_SORT_RECENT = 'start_desc';
+export const EXECUTIONS_SORT_DEFAULT = EXECUTIONS_SORT_DURATION;
+
+/* Label for the current sort ("slowest first" / "latest first") and for the
+ * toggle control that switches to the OTHER mode -- exported separately so
+ * the view can put the state label and the action label in different spots
+ * (a status span vs. a button) without duplicating the ternary. */
+export function executionsSortLabel(sort) {
+    return sort === EXECUTIONS_SORT_RECENT ? 'latest first' : 'slowest first';
+}
+
+export function executionsSortToggleTarget(sort) {
+    return sort === EXECUTIONS_SORT_RECENT ? EXECUTIONS_SORT_DURATION : EXECUTIONS_SORT_RECENT;
+}
+
+export function executionsSortToggleLabel(sort) {
+    return sort === EXECUTIONS_SORT_RECENT
+        ? 'Show slowest first' : 'Show latest first';
+}
+
+/* executions response -> shared-table model. Server order matches whatever
+ * `sort` the request asked for (see EXECUTIONS_SORT_* above) and is
+ * preserved; client sorting is intentionally absent on this selector. */
 export function buildExecutionsModel(data, selected) {
     const rows = ((data && data.rows) || []).map(r =>
         Object.assign({}, r, { _selected: sameExecution(r, selected) }));
@@ -85,19 +123,24 @@ export function executionHasDetail(row) {
 /* Which execution the waterfall opens on when the user has not picked one.
  *
  * NOT simply rows[0]. Measured on a real `--mode full` capture (issue #101,
- * 40 simulated live ticks over a 3-minute pgbench trace): the newest
- * execution was drawable in 0 of 40 ticks. At pgbench rates most executions
- * are microsecond-scale statements that never change wait state, so the
- * newest row's execution_detail answers {leader:{events:[]}, workers:[],
- * plan:null} — buildWaterfallOption returns hasData:false, the view mounts
- * no ECharts instance, and the panel sits on "No execution events captured"
- * forever. About half of the 100 returned rows WERE drawable in every one of
- * those ticks, with the first drawable row at index 1-3.
+ * 40 simulated live ticks over a 3-minute pgbench trace, latest-first order):
+ * the newest execution was drawable in 0 of 40 ticks. At pgbench rates most
+ * executions are microsecond-scale statements that never change wait state,
+ * so the newest row's execution_detail answers {leader:{events:[]},
+ * workers:[], plan:null} — buildWaterfallOption returns hasData:false, the
+ * view mounts no ECharts instance, and the panel sits on "No execution
+ * events captured" forever. About half of the 100 returned rows WERE
+ * drawable in every one of those ticks, with the first drawable row at
+ * index 1-3.
  *
- * So: the newest execution that actually has something to show, preferring
- * one with real wait events over a worker-only or plan-only row. When
- * nothing in the page qualifies we still return the newest row — the empty
- * state is then the honest answer, not a hidden failure.
+ * So: the first row that actually has something to show, preferring one
+ * with real wait events over a worker-only or plan-only row. This still
+ * applies unchanged under #222's duration_desc default -- a genuinely slow
+ * row is even more likely than a fast one to have events, but a slow
+ * in_progress row can still legitimately have none yet, so the same
+ * fallback chain (not a bare rows[0]) still matters. When nothing in the
+ * page qualifies we still return the first row — the empty state is then
+ * the honest answer, not a hidden failure.
  */
 export function pickDefaultExecution(rows) {
     if (!rows || !rows.length) return null;

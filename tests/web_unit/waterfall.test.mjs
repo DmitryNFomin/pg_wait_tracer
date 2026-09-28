@@ -4,6 +4,8 @@ import {
     PLAN_COLOR, buildExecutionsModel, buildWaterfallOption,
     buildWaterfallReadout, executionHasDetail, pickDefaultExecution,
     waterfallRenderItem, waterfallTooltipFormatter,
+    EXECUTIONS_SORT_DURATION, EXECUTIONS_SORT_RECENT, EXECUTIONS_SORT_DEFAULT,
+    executionsSortLabel, executionsSortToggleLabel, executionsSortToggleTarget,
 } from '../../web/static/lib/builders/waterfall.js';
 import { eventColor, fmtTimeNs } from '../../web/static/lib/format.js';
 
@@ -203,4 +205,29 @@ test('default selection falls back to the newest row when nothing is drawable', 
     assert.equal(pickDefaultExecution(rows), rows[0]);
     assert.equal(pickDefaultExecution([]), null);
     assert.equal(pickDefaultExecution(null), null);
+});
+
+// #222: which slice the Waterfall tab asks the server for, and the toggle
+// between "slowest first" (the default) and "latest first".
+test('the shipped default is duration_desc (slowest first)', () => {
+    assert.equal(EXECUTIONS_SORT_DEFAULT, EXECUTIONS_SORT_DURATION);
+});
+
+test('sort label reflects the current mode; anything but explicit "start_desc" reads as slowest', () => {
+    assert.equal(executionsSortLabel(EXECUTIONS_SORT_DURATION), 'slowest first');
+    assert.equal(executionsSortLabel(EXECUTIONS_SORT_RECENT), 'latest first');
+    // Undefined/unset sort state (e.g. before the view has ever requested
+    // anything) reads as the default, not as some third, unlabeled mode.
+    assert.equal(executionsSortLabel(undefined), 'slowest first');
+});
+
+test('toggle target and toggle-button label are always the OTHER mode', () => {
+    assert.equal(executionsSortToggleTarget(EXECUTIONS_SORT_DURATION),
+                 EXECUTIONS_SORT_RECENT);
+    assert.equal(executionsSortToggleTarget(EXECUTIONS_SORT_RECENT),
+                 EXECUTIONS_SORT_DURATION);
+    assert.equal(executionsSortToggleLabel(EXECUTIONS_SORT_DURATION),
+                 'Show latest first');
+    assert.equal(executionsSortToggleLabel(EXECUTIONS_SORT_RECENT),
+                 'Show slowest first');
 });

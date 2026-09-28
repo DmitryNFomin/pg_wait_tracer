@@ -290,6 +290,7 @@ struct pgwt_request {
     uint64_t start_ns;
     uint64_t end_ns;
     char     detail[16];       /* "events" for per-event AAS breakdown */
+    char     sort[16];         /* "executions": "duration_desc" or "" (start_desc) */
     struct pgwt_filter filter;
 };
 
@@ -368,6 +369,10 @@ static void parse_request(const char *line, struct pgwt_request *req)
     cJSON *detail = cJSON_GetObjectItem(root, "detail");
     if (cJSON_IsString(detail) && detail->valuestring)
         snprintf(req->detail, sizeof(req->detail), "%s", detail->valuestring);
+
+    cJSON *sort = cJSON_GetObjectItem(root, "sort");
+    if (cJSON_IsString(sort) && sort->valuestring)
+        snprintf(req->sort, sizeof(req->sort), "%s", sort->valuestring);
 
     parse_filters(root, &req->filter);
 
@@ -3288,6 +3293,26 @@ static int cmp_execution_start_asc(const void *a, const void *b)
     return (ea->pid > eb->pid) - (ea->pid < eb->pid);
 }
 
+/* #222: "slowest first" for the Waterfall default. An in_progress row's true
+ * duration is unknown, so it sorts as duration 0 (the same convention
+ * scatter_downsample already uses via execution_duration_ns) rather than
+ * threading `to_ns` through the comparator to approximate elapsed-so-far --
+ * that would make the ordering depend on when the request happened to land,
+ * not on anything captured. Same O(n log n) qsort as cmp_execution_start_desc,
+ * over the same already-materialized row array: no new pass over `count`
+ * events, so the #101 budget is unaffected. */
+static int cmp_execution_duration_desc(const void *a, const void *b)
+{
+    const struct pgwt_execution *ea = a, *eb = b;
+    uint64_t da = ea->in_progress ? 0 : ea->end_ns - ea->start_ns;
+    uint64_t db = eb->in_progress ? 0 : eb->end_ns - eb->start_ns;
+    if (db > da) return 1;
+    if (db < da) return -1;
+    if (eb->start_ns > ea->start_ns) return 1;
+    if (eb->start_ns < ea->start_ns) return -1;
+    return (eb->pid > ea->pid) - (eb->pid < ea->pid);
+}
+
 static int execution_matches_request(const struct pgwt_execution *row,
                                      const struct pgwt_request *req)
 {
@@ -3423,8 +3448,16 @@ static void handle_executions(struct pgwt_server *srv,
         if (execution_matches_request(&res.rows[i], req))
             res.rows[kept++] = res.rows[i];
     res.num_rows = kept;
-    qsort(res.rows, res.num_rows, sizeof(res.rows[0]),
-          cmp_execution_start_desc);
+    /* Wire default stays start_desc (backward-compatible for any caller that
+     * omits `sort`); duration_desc is opt-in per request. #222: the Waterfall
+     * tab is the one caller that chooses to opt in by default, because the
+     * recency slice alone is what made the tab useless on a busy system --
+     * an unrecognized or empty sort value falls back here rather than being
+     * silently accepted as some other order. */
+    int (*cmp)(const void *, const void *) = cmp_execution_start_desc;
+    if (strcmp(req->sort, "duration_desc") == 0)
+        cmp = cmp_execution_duration_desc;
+    qsort(res.rows, res.num_rows, sizeof(res.rows[0]), cmp);
 
     int limit = req->limit > 0 ? req->limit : EXECUTIONS_DEFAULT_LIMIT;
     if (limit > EXECUTIONS_MAX_LIMIT) limit = EXECUTIONS_MAX_LIMIT;

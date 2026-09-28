@@ -478,6 +478,11 @@ h1 { font-size: 18px; font-weight: 600; color: #fff; }
   font-weight: 600;
 }
 .view-title span { color: #777; font-size: 11px; font-weight: 400; margin-left: 8px; }
+.view-title .link-button {
+  background: none; border: none; cursor: pointer; padding: 0;
+  margin-left: 10px; color: #4fc3f7; font-size: 11px; font-weight: 400;
+}
+.view-title .link-button:hover { text-decoration: underline; }
 .execution-list { max-height: 310px; overflow: auto; border-bottom: 1px solid #343454; }
 .execution-list table { min-width: 820px; }
 tr.selected-execution td { background: #173653; }
