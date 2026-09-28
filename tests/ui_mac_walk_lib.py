@@ -65,29 +65,55 @@ def sample_is_normal(sample):
     return sample.get("pressure_level") == 1
 
 
-def samples_in_window(samples, start_ts, end_ts):
-    return [s for s in samples if start_ts <= s.get("ts", float("-inf")) <= end_ts]
+def bracketing_samples(samples, start_ts, end_ts):
+    """Returns (before, after): the most recent sample at or before
+    start_ts, and the earliest sample at or after end_ts. Either is None if
+    no such sample exists. Does not assume `samples` is sorted (the caller
+    may be handing over a live sampler's accumulated list as-is)."""
+    before = None
+    after = None
+    for s in samples:
+        ts = s.get("ts")
+        if ts is None:
+            continue
+        if ts <= start_ts and (before is None or ts > before["ts"]):
+            before = s
+        if ts >= end_ts and (after is None or ts < after["ts"]):
+            after = s
+    return before, after
 
 
 def window_void_reason(samples, start_ts, end_ts):
     """Returns a human-readable reason if this [start_ts, end_ts] window
     cannot be certified as measured-under-normal-pressure, else None.
 
-    Two distinct void cases, both reported (never merged into a generic
-    "not ok"):
-      - the window has NO mac samples at all (sampler wasn't running, or the
-        window was too short to catch a sample) -- unattributable, not
-        "assumed fine";
-      - at least one sample inside the window was non-normal or unmeasured.
+    BRACKETING, not "a sample strictly inside the window" (changed
+    2026-09-28): found live that a tab window can be sub-second (0.16-0.88s
+    measured) while the environment sampler ticks on a much coarser cadence
+    by design -- requiring a sample INSIDE such a window discarded a
+    perfectly good, verifiably-quiet run (loadavg 1.37, 56% free) as
+    unattributable, which is exactly the false "cannot tell" this function
+    exists to avoid. A window is judged by the environment ENCLOSING it
+    instead: the most recent sample at/before the window start and the
+    earliest sample at/after the window end. Both must exist AND both must
+    read normal for the window to pass -- if either bracketing sample is
+    missing (genuinely no data before or after, e.g. the walk started
+    before sampling began, or ended after it stopped), that IS the real
+    "cannot attribute" case and the window still voids. Never speeds up
+    sampling or widens the window to manufacture an in-window sample --
+    the fix is in how existing samples are read, not in gathering more of
+    them to paper over the same question.
     """
-    in_window = samples_in_window(samples, start_ts, end_ts)
-    if not in_window:
-        return "no mac samples recorded during this window -- cannot attribute"
-    bad = [s for s in in_window if not sample_is_normal(s)]
+    before, after = bracketing_samples(samples, start_ts, end_ts)
+    if before is None or after is None:
+        side = "before" if before is None else "after"
+        return (f"no mac sample {side} this window's "
+                f"{'start' if side == 'before' else 'end'} -- cannot attribute")
+    bad = [s for s in (before, after) if not sample_is_normal(s)]
     if bad:
         names = sorted({pressure_level_name(s.get("pressure_level")) for s in bad})
-        return (f"{len(bad)}/{len(in_window)} mac samples non-normal during "
-                f"this window ({', '.join(names)})")
+        return (f"{len(bad)}/2 bracketing mac samples non-normal "
+                f"({', '.join(names)})")
     return None
 
 

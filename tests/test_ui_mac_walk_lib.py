@@ -123,44 +123,98 @@ def test_sample_is_normal_none_level_false():
           "sample_is_normal: pressure_level=None -> False")
 
 
-# ── window_void_reason: the attribution gate ─────────────────────────────
+# ── bracketing_samples / window_void_reason: the attribution gate ────────
+# BRACKETING semantics (changed 2026-09-28): a window is judged by the most
+# recent sample at/before its start and the earliest sample at/after its
+# end -- not by requiring a sample strictly inside it. See
+# ui_mac_walk_lib.window_void_reason's own docstring for why (a sub-second
+# tab window can legitimately have zero samples land inside it on a
+# perfectly quiet machine).
 
-def test_window_void_reason_all_normal():
-    samples = [{"ts": 10, "pressure_level": 1}, {"ts": 12, "pressure_level": 1}]
-    check(lib.window_void_reason(samples, 9, 13) is None,
-          "window_void_reason: all-normal window -> None (not void)")
+def test_bracketing_samples_finds_both_sides():
+    samples = [{"ts": 5, "pressure_level": 1}, {"ts": 15, "pressure_level": 1}]
+    before, after = lib.bracketing_samples(samples, 9, 13)
+    check(before["ts"] == 5, f"bracketing_samples: before is the ts=5 sample (got {before})")
+    check(after["ts"] == 15, f"bracketing_samples: after is the ts=15 sample (got {after})")
 
 
-def test_window_void_reason_one_bad():
-    samples = [{"ts": 10, "pressure_level": 1}, {"ts": 12, "pressure_level": 2}]
+def test_bracketing_samples_picks_nearest():
+    samples = [{"ts": 1, "pressure_level": 1}, {"ts": 8, "pressure_level": 1},
+               {"ts": 15, "pressure_level": 1}, {"ts": 30, "pressure_level": 1}]
+    before, after = lib.bracketing_samples(samples, 9, 13)
+    check(before["ts"] == 8, f"bracketing_samples: nearest before (8, not 1) (got {before})")
+    check(after["ts"] == 15, f"bracketing_samples: nearest after (15, not 30) (got {after})")
+
+
+def test_bracketing_samples_missing_before():
+    samples = [{"ts": 15, "pressure_level": 1}]
+    before, after = lib.bracketing_samples(samples, 9, 13)
+    check(before is None, "bracketing_samples: no sample <= start -> before is None")
+    check(after is not None, "bracketing_samples: after still found")
+
+
+def test_bracketing_samples_missing_after():
+    samples = [{"ts": 5, "pressure_level": 1}]
+    before, after = lib.bracketing_samples(samples, 9, 13)
+    check(before is not None, "bracketing_samples: before still found")
+    check(after is None, "bracketing_samples: no sample >= end -> after is None")
+
+
+def test_window_void_reason_bracketed_by_two_normal_counts():
+    # The exact case this change exists for: a sub-second window with NO
+    # sample landing inside it, bracketed by two normal samples just
+    # outside it -- must count, not void.
+    samples = [{"ts": 9.0, "pressure_level": 1}, {"ts": 9.9, "pressure_level": 1}]
+    reason = lib.window_void_reason(samples, 9.2, 9.5)
+    check(reason is None,
+          f"window_void_reason: bracketed by two normal samples (none inside "
+          f"the window itself) -> not void (got: {reason!r})")
+
+
+def test_window_void_reason_one_bracket_bad_voids():
+    samples = [{"ts": 5, "pressure_level": 1}, {"ts": 15, "pressure_level": 2}]
     reason = lib.window_void_reason(samples, 9, 13)
     check(reason is not None and "1/2" in reason,
-          f"window_void_reason: one non-normal sample voids the window (got: {reason!r})")
+          f"window_void_reason: one non-normal bracketing sample voids the window (got: {reason!r})")
 
 
-def test_window_void_reason_empty_window_is_void():
-    # RED-demonstrated bypass case: no samples landed in [start,end] at all
-    # (sampler never ran, or the window was shorter than the sample
-    # interval). A gate that skipped this check would silently certify an
-    # unmeasured window as clean -- exactly the "check that accepted
-    # evidence gathered on a stale/absent tree" failure shape.
-    samples = [{"ts": 100, "pressure_level": 1}]
-    reason = lib.window_void_reason(samples, 0, 5)
-    check(reason is not None and "no mac samples" in reason,
-          f"window_void_reason: empty window is void, not silently clean (got: {reason!r})")
+def test_window_void_reason_no_sample_before_is_void():
+    # RED-demonstrated bypass case: no sample on ONE side (e.g. the walk
+    # started before sampling began) -- the real "cannot attribute" case;
+    # a gate that only checked the "after" side would silently certify
+    # this as clean.
+    samples = [{"ts": 15, "pressure_level": 1}]
+    reason = lib.window_void_reason(samples, 9, 13)
+    check(reason is not None and "before" in reason,
+          f"window_void_reason: no sample before window start -> void (got: {reason!r})")
 
 
-def test_window_void_reason_unmeasured_sample_voids():
-    samples = [{"ts": 10, "pressure_level": None}]
-    reason = lib.window_void_reason(samples, 9, 11)
+def test_window_void_reason_no_sample_after_is_void():
+    samples = [{"ts": 5, "pressure_level": 1}]
+    reason = lib.window_void_reason(samples, 9, 13)
+    check(reason is not None and "after" in reason,
+          f"window_void_reason: no sample after window end -> void (got: {reason!r})")
+
+
+def test_window_void_reason_empty_samples_is_void():
+    reason = lib.window_void_reason([], 9, 13)
+    check(reason is not None,
+          f"window_void_reason: no samples at all -> void (got: {reason!r})")
+
+
+def test_window_void_reason_unmeasured_bracketing_sample_voids():
+    samples = [{"ts": 5, "pressure_level": None}, {"ts": 15, "pressure_level": 1}]
+    reason = lib.window_void_reason(samples, 9, 13)
     check(reason is not None and "unmeasured" in reason,
-          f"window_void_reason: an unmeasured sample voids the window too (got: {reason!r})")
+          f"window_void_reason: an unmeasured bracketing sample voids too (got: {reason!r})")
 
 
 def test_window_void_reason_boundary_inclusive():
+    # A sample exactly AT the window's start/end counts as its own bracket
+    # (ts <= start, ts >= end are both inclusive).
     samples = [{"ts": 5, "pressure_level": 1}, {"ts": 10, "pressure_level": 1}]
     check(lib.window_void_reason(samples, 5, 10) is None,
-          "window_void_reason: samples exactly on the window boundary count as in-window")
+          "window_void_reason: samples exactly on the window boundary bracket it")
 
 
 # ── freshness_ok ──────────────────────────────────────────────────────────

@@ -270,21 +270,28 @@ def main():
     # explicitly distinct from the `safaridriver --enable` category this
     # walk must never attempt itself.
     #
-    # ROOT-CAUSED (2026-09-28, coordinator's own ioreg/system_profiler
-    # measurement, corroborated independently here): session.fullscreen()'s
-    # opaque "unknown error" is macOS refusing a fullscreen Space
-    # transition while the console session is LOCKED
-    # (CGSSessionScreenIsLocked) -- not display sleep by itself. Display
-    # sleep is downstream of the same cause (the display sleeps, then the
-    # session locks), which is why waking the display alone did not fix it
-    # in this script's own earlier local repros: the session can still be
-    # locked with the display freshly awake. The actual fix is the
-    # check_walk_precondition() refusal above, which checks BOTH facts and
-    # never even reaches this point if either is true. `caffeinate -d` is
-    # kept as an ordinary, real (if partial) mitigation for the
-    # display-asleep sub-case specifically -- it cannot prevent or detect
-    # the lock, which is a separate macOS setting this walk does not and
-    # must not try to work around.
+    # ROOT-CAUSED AND SETTLED (2026-09-28). session.fullscreen()'s opaque
+    # "unknown error" is macOS refusing a fullscreen Space transition while
+    # the console session is LOCKED (CGSSessionScreenIsLocked) -- and THE
+    # LOCK IS SUFFICIENT, THE ONLY CAUSE, no third explanation needed.
+    # Bisected properly before settling this: 0 fullscreen failures across
+    # 7 attempts (plain WebDriver calls and this module's full
+    # reset_zoom()+settle-polling wrapper, both foreground and backgrounded)
+    # whenever CGSSessionScreenIsLocked read False at call time; 100%
+    # failure across 4 attempts -- including the coordinator's own minimal
+    # 6-step repro with none of this module's extras -- whenever it read
+    # True, re-checked at the moment of failure each time. Two earlier,
+    # now-retracted theories (display sleep alone; an unidentified further
+    # cause) were both artifacts of checking the lock state too early or
+    # not at all -- display sleep is genuinely downstream of the same
+    # cause (the display sleeps, then the session locks), never an
+    # independent trigger. The fix is the check_walk_precondition()
+    # refusal above: check BOTH facts, refuse outright, never reach this
+    # point if either is true. `caffeinate -d` is kept only as an
+    # ordinary, real mitigation for the display-asleep sub-case
+    # specifically -- it cannot prevent or detect the lock, which is a
+    # separate macOS setting this walk does not and must not try to work
+    # around itself.
     caffeinate_proc = subprocess.Popen(["caffeinate", "-d"])
 
     driver_log = os.path.join(args.out_dir, "safaridriver.log")
@@ -315,7 +322,23 @@ def main():
             caffeinate_proc.kill()
         return 1
 
-    sampler = MacSampler()
+    # Found live (2026-09-28): the default 10s SAMPLE_INTERVAL_S (tuned for
+    # tests/ui_mac_walk.py's slower Playwright-per-tab-context walk) is
+    # coarser than this module's own walk -- driving through execute_script
+    # DOM polling instead of a fresh browser context per tab, all 11 tabs'
+    # TTFP pass finished in ~5s on a real run -- so most/every tab's window
+    # fell entirely between two samples and window_void_reason correctly
+    # (by its own fail-closed contract) reported "no samples in window",
+    # even with the Mac genuinely idle (0/3 samples non-normal that run).
+    # A shorter interval here is the fix, not loosening the attribution
+    # rule itself.
+    # Found live (2026-09-28), second measurement: 2.0s still left 9/11 tabs
+    # void (0/11 samples non-normal both times -- a genuine sampling-density
+    # gap, not real Mac pressure). Each tab's own TTFP-pass window is
+    # ~0.2-0.9s; 0.5s gives most windows a real chance at a sample without
+    # a meaningfully heavier subprocess load (sysctl + memory_pressure, a
+    # few ms each).
+    sampler = MacSampler(interval_s=0.5)
     sampler.start()
 
     tabs = []
@@ -431,6 +454,31 @@ def main():
 
             session.execute_script(CONSOLE_HOOK_JS)
             drain_console_errors(session)  # discard anything from before the hook
+            # Found live (2026-09-28): every freshness read came back None
+            # on a real run because this hook was never installed -- the
+            # freshness pass below reads window.__uiLiveTicks, which only
+            # ever exists after this call (same idiom tests/ui_live_smoke.py
+            # / tests/ui_mac_walk.py use). Install once, right after the
+            # first connect, so it accumulates ticks across the WHOLE
+            # session (true SPA, tab switches never navigate) -- not
+            # freshness-pass-local.
+            session.execute_script(uls.TICK_HOOK_JS)
+            # Found live (2026-09-28): with the hook installed, EVERY
+            # freshness read still came back None -- this module's whole
+            # 11-tab walk finishes in ~5-8s (execute_script DOM polling, no
+            # fresh browser context per tab like tests/ui_mac_walk.py), so
+            # it can outrun app.js's own 5s AAS auto-refresh cadence
+            # entirely: the freshness pass ran before even ONE periodic
+            # tick had fired since the hook was installed. Wait (bounded)
+            # for the first tick here, once, before the per-tab loop --
+            # never a fabricated freshness reading, and this is the only
+            # place that needs the wait (once at least one tick exists,
+            # every later 'age since last tick' read is meaningful).
+            if wait_for_js(session, "window.__uiLiveTicks && "
+                           "window.__uiLiveTicks.length >= 1", 8.0) is None:
+                print("  note: no AAS tick observed within 8s of installing "
+                      "the tick hook -- freshness will read as unmeasured",
+                      file=sys.stderr)
             display_identity = screen_identity(session)
             display_identity["viewport_matches_target"] = (
                 display_identity["viewport"] == TARGET_VIEWPORT)
@@ -505,6 +553,7 @@ def main():
                 entry["freshness"]["age_s"] = age_s
                 entry["freshness"]["ok"] = fresh_ok
                 entry["freshness"]["detail"] = fresh_detail
+                print(f"  freshness [{tab_id}]: {fresh_detail}")
         except Exception:
             traceback.print_exc()
     finally:
