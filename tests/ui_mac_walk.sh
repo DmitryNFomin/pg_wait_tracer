@@ -36,11 +36,16 @@
 #
 # Usage:
 #   tests/ui_mac_walk.sh                # create/reuse a VM, run once, delete it
+#   DRIVER=safari tests/ui_mac_walk.sh  # same VM/build pipeline, but the walk
+#                                          itself is tests/ui_mac_walk_safari.py
+#                                          (real Safari via safaridriver, full
+#                                          screen, gated on the Mac going quiet)
 #   KEEP=1 tests/ui_mac_walk.sh          # leave the VM up; a later invocation
 #                                          reuses it via the state file
 #   tests/ui_mac_walk.sh --delete-vm     # delete a VM a KEEP=1 run left up
 #
 # Env:
+#   DRIVER                   chrome (default) | safari
 #   PG_MAJOR                 PostgreSQL major to trace (default 18, matches
 #                             the pre-registered demo config)
 #   PGWT_UI_MAC_DURATION_S   remote workload/daemon lifetime budget (default
@@ -61,6 +66,7 @@ source tests/live_daemon_lib.sh
 
 STATE_FILE="${UI_MAC_WALK_STATE_FILE:-tests/results/.ui-mac-walk-state.sh}"
 KEEP="${KEEP:-0}"
+DRIVER="${DRIVER:-chrome}"
 PG_MAJOR="${PG_MAJOR:-18}"
 DURATION_S="${PGWT_UI_MAC_DURATION_S:-900}"
 PORT="${PGWT_UI_MAC_PORT:-8385}"
@@ -372,8 +378,17 @@ fi
 echo "ui-mac-walk: bridge ready at $BASE_URL" | tee -a "$log"
 
 # ── The walk itself ─────────────────────────────────────────────────────────
+# DRIVER=chrome (default, Playwright real Chrome) | safari (real Safari via
+# safaridriver/WebDriver, tests/ui_mac_walk_safari.py -- full screen, gated
+# on the Mac going quiet first, see that script's own docstring).
 export PGWT_RUN_MARKER="${PGWT_RUN_MARKER:-$(date +%s)}"
-python3 tests/ui_mac_walk.py --url "$BASE_URL"
+if [[ "$DRIVER" == "safari" ]]; then
+    python3 tests/ui_mac_walk_safari.py --url "$BASE_URL" \
+        --safaridriver-port "${PGWT_UI_MAC_SAFARIDRIVER_PORT:-9994}" \
+        --max-quiet-wait-s "${PGWT_UI_MAC_MAX_QUIET_WAIT_S:-300}"
+else
+    python3 tests/ui_mac_walk.py --url "$BASE_URL"
+fi
 walk_rc=$?
 
 echo "ui-mac-walk: bridge log tail:" | tee -a "$log"

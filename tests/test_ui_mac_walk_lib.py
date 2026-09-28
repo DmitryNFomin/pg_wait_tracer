@@ -363,6 +363,52 @@ def test_version_skew_none_snapshot():
           "version_skew_from_snapshot: None snapshot -> None, not a crash")
 
 
+# ── majority_void ─────────────────────────────────────────────────────────
+
+def _entry(void):
+    return lib.build_tab_entry("x", True, "ok", 1.0, [], [], 1.0,
+                                "void" if void else None)
+
+
+def test_majority_void_all_clean():
+    tabs = [_entry(False) for _ in range(11)]
+    check(lib.majority_void(tabs) is False, "majority_void: 0/11 void -> False")
+
+
+def test_majority_void_majority():
+    tabs = [_entry(True)] * 6 + [_entry(False)] * 5
+    check(lib.majority_void(tabs) is True, "majority_void: 6/11 void -> True")
+
+
+def test_majority_void_exact_half_not_majority():
+    # RED case: a tie must NOT count as majority -- "more than half", not
+    # "at least half".
+    tabs = [_entry(True)] * 5 + [_entry(False)] * 5
+    check(lib.majority_void(tabs) is False,
+          "majority_void: 5/10 (exact half) -> False, not majority")
+
+
+def test_majority_void_empty_counts_as_void():
+    # RED case: an empty tab list (walk crashed before visiting anything)
+    # must not read as "0 void out of 0, so fine" -- nothing measured does
+    # not count.
+    check(lib.majority_void([]) is True,
+          "majority_void: empty list -> True (nothing measured doesn't count)")
+
+
+def test_build_verdict_counted_field():
+    clean_tabs = [_entry(False) for _ in range(11)]
+    v = lib.build_verdict("run-5", clean_tabs, [])
+    check(v["counted"] is True, "build_verdict: mostly-clean run has counted=True")
+    check(v["void_count"] == 0, "build_verdict: void_count reflects actual voids")
+
+    mostly_void_tabs = [_entry(True)] * 7 + [_entry(False)] * 4
+    v2 = lib.build_verdict("run-6", mostly_void_tabs, [])
+    check(v2["counted"] is False,
+          "build_verdict: majority-void run has counted=False")
+    check(v2["void_count"] == 7, "build_verdict: void_count == 7")
+
+
 if __name__ == "__main__":
     for name, fn in sorted(list(globals().items())):
         if name.startswith("test_") and callable(fn):

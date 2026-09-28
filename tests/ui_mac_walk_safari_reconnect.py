@@ -47,14 +47,15 @@ from safari_webdriver import SafariSession, WebDriverError
 RESULTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                             "results", "ui_mac_walk_safari_reconnect")
 
-# Measured empirically (2026-09-28, this Mac, Safari 18.6): an outer window
-# rect of 1440x984 yields an exact 1440x932 CSS inner viewport at DPR 2 --
-# WebDriver's setWindowRect sizes the OS window's OUTER bounds (title bar +
-# toolbar included), there is no direct "set CSS viewport" verb, so this is
-# a measured constant, not a formula -- verified again at runtime via
-# viewport_size() and recorded, never assumed.
-WINDOW_OUTER_SIZE = (1440, 984)
-TARGET_VIEWPORT = {"width": 1440, "height": 932, "dpr": 2}
+# The demo presents FULL SCREEN, not windowed -- corrected 2026-09-28 (see
+# tests/ui_mac_walk_safari.py's module docstring for the coordinator's own
+# WebDriver measurement and why the earlier 1440x932 windowed figure was
+# 19% too narrow on this Mac's scaled display mode). session.fullscreen()
+# (W3C WebDriver 'Fullscreen Window'), NOT set_window_rect; achieved
+# viewport is still measured at runtime and recorded, never assumed to
+# match. This run's OWN connectivity/recovery timings do not depend on
+# viewport -- only display_identity does.
+TARGET_VIEWPORT = {"width": 1710, "height": 1069, "dpr": 2}
 
 
 def url_ready(url, timeout=2.0):
@@ -203,7 +204,7 @@ def main():
         }
 
         session.navigate(base_url)
-        session.set_window_rect(*WINDOW_OUTER_SIZE)
+        session.fullscreen()
         achieved_viewport = session.viewport_size()
         result["display_identity"]["viewport"] = achieved_viewport
         result["display_identity"]["viewport_matches_target"] = (

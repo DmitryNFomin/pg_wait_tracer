@@ -76,4 +76,5 @@ tests/results/ui-mac-walk-*.log
 tests/results/ui_mac_walk/
 tests/results/ui_mac_walk_reconnect/
 tests/results/ui_mac_walk_safari_reconnect/
+tests/results/ui_mac_walk_safari/
 tests/results/.ui-mac-walk-state.sh

@@ -54,9 +54,7 @@ Usage:
 import argparse
 import json
 import os
-import subprocess
 import sys
-import threading
 import time
 import traceback
 
@@ -64,6 +62,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ui_mac_walk_lib as lib
 import ui_live_smoke as uls  # reused pieces only -- see module docstring
 import ui_live_smoke_lib as uls_lib
+from mac_sampler import MacSampler, SAMPLE_INTERVAL_S
 
 try:
     from playwright.sync_api import sync_playwright, TimeoutError as PWTimeoutError
@@ -79,70 +78,9 @@ RESULTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 VIEWPORT = {"width": 1440, "height": 932}
 DEVICE_SCALE_FACTOR = 2
 
-SAMPLE_INTERVAL_S = 10.0
-
-
-# ── Mac-side pressure/load sampler (impure: real subprocess + real clock;
-# ui_mac_walk_lib.py stays pure and gets the parsing) ───────────────────────
-
-class MacSampler:
-    """Background sampler, one process, stops with the process that started
-    it -- never a detached/orphaned loop. Bounded by an Event, joined with a
-    timeout by the caller before exit."""
-
-    def __init__(self, interval_s=SAMPLE_INTERVAL_S):
-        self.interval_s = interval_s
-        self._stop = threading.Event()
-        self._thread = None
-        self.samples = []
-
-    def _read_once(self):
-        ts = time.time()
-        pressure_level = None
-        free_pct = None
-        loadavg = None
-        note = None
-        try:
-            r = subprocess.run(
-                ["sysctl", "kern.memorystatus_vm_pressure_level"],
-                capture_output=True, text=True, timeout=5)
-            if r.returncode == 0:
-                pressure_level = lib.parse_pressure_level(r.stdout)
-            else:
-                note = f"sysctl exit {r.returncode}: {r.stderr.strip()[:200]}"
-        except Exception as e:
-            note = f"sysctl failed: {e}"
-        try:
-            r = subprocess.run(["memory_pressure", "-Q"],
-                                capture_output=True, text=True, timeout=5)
-            if r.returncode == 0:
-                free_pct = lib.parse_free_percent(r.stdout)
-        except Exception:
-            pass
-        try:
-            loadavg = list(os.getloadavg())
-        except (AttributeError, OSError):
-            loadavg = None
-        return {"ts": ts, "pressure_level": pressure_level,
-                "pressure_level_name": lib.pressure_level_name(pressure_level),
-                "free_pct": free_pct, "loadavg": loadavg, "note": note}
-
-    def _loop(self):
-        while not self._stop.is_set():
-            self.samples.append(self._read_once())
-            self._stop.wait(self.interval_s)
-
-    def start(self):
-        # One immediate sample so a short tab visit still has attribution
-        # even before the first interval elapses.
-        self.samples.append(self._read_once())
-        self._thread = threading.Thread(target=self._loop, daemon=True)
-        self._thread.start()
-
-    def stop(self):
-        self._stop.set()
-        if self._thread is not None:
-            self._thread.join(timeout=5)
+# MacSampler / SAMPLE_INTERVAL_S: tests/mac_sampler.py -- shared with
+# tests/ui_mac_walk_safari.py so both walks attribute ticks against the
+# same sampling code instead of two copies drifting apart.
 
 
 # ── one tab's TTFP / render / console-error visit ───────────────────────────

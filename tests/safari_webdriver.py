@@ -106,6 +106,14 @@ class SafariSession:
         return self._raw("POST", f"/session/{self.session_id}/window/rect",
                           {"width": width, "height": height, "x": x, "y": y})
 
+    def fullscreen(self):
+        """W3C WebDriver 'Fullscreen Window' -- what the demo actually
+        presents at, distinct from a sized-but-windowed rect
+        (set_window_rect). Returns the window rect WebDriver reports after
+        the transition; the caller should still measure viewport_size()
+        for the CSS content area, same as after set_window_rect."""
+        return self._raw("POST", f"/session/{self.session_id}/window/fullscreen")
+
     def viewport_size(self):
         """Actual CSS viewport of the content area (window.innerWidth/
         innerHeight) -- WebDriver's setWindowRect sizes the OS window's

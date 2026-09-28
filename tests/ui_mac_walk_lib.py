@@ -184,6 +184,21 @@ def version_skew_from_snapshot(snapshot):
     return {"level": level, "text": snapshot.get("text")}
 
 
+def majority_void(tabs):
+    """True if MORE THAN HALF of `tabs` (build_tab_entry dicts) are void
+    (Mac-side infrastructure noise, not a product signal) -- coordinator's
+    explicit rule (2026-09-28): "if more than half the ticks void, the run
+    does not count and say so rather than reporting the survivors." An
+    empty list counts as majority-void too (nothing measured is the same
+    as "does not count", not vacuously fine) -- fail closed, same as
+    build_verdict's own empty/all-void handling. A TIE (exactly half) does
+    NOT count as majority -- the rule is "more than half"."""
+    if not tabs:
+        return True
+    void_n = sum(1 for t in tabs if t.get("void_reason"))
+    return void_n * 2 > len(tabs)
+
+
 def build_verdict(run_id, tabs, mac_samples, notes=None):
     """Top-level verdict -- same shape discipline as
     tests/results/demo_rehearsal/summary.json: run.id present (checked by
@@ -199,13 +214,21 @@ def build_verdict(run_id, tabs, mac_samples, notes=None):
     must not report "clean" by vacuous truth over an empty list)."""
     non_void = [t for t in tabs if t.get("void_reason") is None]
     ok = bool(tabs) and len(non_void) > 0 and all(t["ok"] for t in non_void)
+    void_tabs = [t["tab"] for t in tabs if t.get("void_reason")]
+    counted = not majority_void(tabs)
     return {
         "run": {"id": run_id},
         "ok": ok,
         "note": "measurement only -- not a demo-rehearsal-criteria gate (docs/DEMO_REHEARSAL_CRITERIA.md)",
         "tabs": {t["tab"]: t for t in tabs},
         "tab_order": [t["tab"] for t in tabs],
-        "void_tabs": [t["tab"] for t in tabs if t.get("void_reason")],
+        "void_tabs": void_tabs,
+        "void_count": len(void_tabs),
+        "tab_count": len(tabs),
+        # coordinator's explicit rule (2026-09-28): more than half void ->
+        # the run does not count as a measurement, regardless of what the
+        # surviving non-void tabs show.
+        "counted": counted,
         "mac_samples": mac_samples,
         "notes": notes or [],
     }
