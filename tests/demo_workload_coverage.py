@@ -44,14 +44,17 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 # ── constants (all thresholds live here, named, not buried in a condition) ──
 
 # Concurrency: issue #214's own table asks for "AAS above the CPU-count
-# line at least once, to show saturation" -- the CPU count of whatever box
-# ran the capture is not knowable from the response alone, so this is a
-# documented PROXY floor ("more than one session genuinely concurrent at
-# some instant"), not a literal CPU-line check. A tighter, box-aware check
-# would need the box's nproc threaded through -- left as an open item
-# (see this branch's report) rather than silently claiming precision this
-# does not have.
-CONCURRENCY_AAS_FLOOR = 1.5
+# line at least once, to show saturation" -- and the CPU count IS reachable
+# here, not a proxy. It is the same `num_cpus` field the UI's own "N CPUs"
+# chip reads (web/static/views/active.js: ctx.server.numCpus, set from the
+# `info` response's num_cpus -- src/server.c handle_info,
+# cJSON_AddNumberToObject(root, "num_cpus", srv->num_cpus)). A first cut of
+# this module used a fixed proxy floor (AAS >= 1.5) because it did not look
+# for this field; checked concretely (grepped web/static/lib/builders/aas.js,
+# web/static/views/active.js and src/server.c's `info` handler) and it is
+# there, so concurrency_populated() below takes num_cpus as a required
+# argument -- a missing/invalid value REFUSES rather than silently grading
+# against the old proxy (a gate that cannot see the real line must say so).
 
 # Waterfall: issue #214's acceptance criterion names this explicitly --
 # "at least one slow enough to be interesting". 500ms is comfortably above
@@ -169,15 +172,24 @@ def matrix_populated(resp):
     return ok, f"distinct non-idle transition pairs: {sorted(pairs)}"
 
 
-def concurrency_populated(resp):
-    """concurrency: AAS peaks present, at least one instant with genuinely
-    concurrent activity (see CONCURRENCY_AAS_FLOOR docstring above)."""
+def concurrency_populated(resp, num_cpus):
+    """concurrency: AAS peaks present, with at least one instant where AAS
+    reaches or exceeds the capture box's own CPU count -- the literal
+    "above the CPU-count line" criterion (see the module docstring above
+    for where num_cpus comes from). `num_cpus` is REQUIRED and validated
+    here rather than defaulted: a caller that cannot supply it (an old
+    server predating the field, a bad response) gets an explicit FAIL
+    naming why, never a silent pass against a weaker floor."""
     peaks = (resp or {}).get("peaks") or []
     if not peaks:
         return False, "no AAS peaks in window"
+    if (not isinstance(num_cpus, (int, float)) or isinstance(num_cpus, bool)
+            or num_cpus <= 0):
+        return False, (f"num_cpus unavailable/invalid ({num_cpus!r}) -- "
+                        f"cannot verify AAS against the real CPU-count line")
     best = max((p.get("max") or 0) for p in peaks)
-    ok = best >= CONCURRENCY_AAS_FLOOR
-    return ok, f"peaks={len(peaks)}, max AAS={best:.2f} (floor {CONCURRENCY_AAS_FLOOR})"
+    ok = best >= num_cpus
+    return ok, f"peaks={len(peaks)}, max AAS={best:.2f} (CPU-count line {num_cpus})"
 
 
 def waterfall_populated(resp):
@@ -233,11 +245,16 @@ TAB_ORDER = (
 )
 
 
-def run_coverage(srv, from_ns, to_ns):
+def run_coverage(srv, from_ns, to_ns, num_cpus=None):
     """Query every tab's endpoint over [from_ns, to_ns] and apply its pure
     checker. Returns {tab: {"ok": bool, "detail": str}}. A query that
     itself errors or times out is recorded as a FAILING tab (never
-    silently skipped) -- a gate that cannot see must refuse, not approve."""
+    silently skipped) -- a gate that cannot see must refuse, not approve.
+
+    num_cpus: the capture box's CPU count (`info` response's `num_cpus`,
+    the same field the UI's "N CPUs" chip reads) -- forwarded only to the
+    concurrency checker, which requires it and fails loudly without it
+    rather than grading against a weaker proxy."""
     results = {}
     for tab in TAB_ORDER:
         cmd, extra, checker = TAB_QUERIES[tab]
@@ -250,7 +267,10 @@ def run_coverage(srv, from_ns, to_ns):
         if isinstance(resp, dict) and resp.get("error"):
             results[tab] = {"ok": False, "detail": f"{cmd} error: {resp['error']!r}"}
             continue
-        ok, detail = checker(resp)
+        if tab == "concurrency":
+            ok, detail = checker(resp, num_cpus)
+        else:
+            ok, detail = checker(resp)
         results[tab] = {"ok": bool(ok), "detail": detail}
     return results
 
@@ -261,6 +281,12 @@ def main():
     ap.add_argument("--window-s", type=float, default=None,
                      help="restrict to the trailing N seconds of the "
                           "capture (default: the whole capture)")
+    ap.add_argument("--out-json", default=None,
+                     help="write the full per-tab results (plus from_ns/"
+                          "to_ns/num_cpus) as JSON to this path, so a run's "
+                          "numbers stay auditable under tests/results/ "
+                          "instead of living only in prose (issue #214 "
+                          "review)")
     args = ap.parse_args()
 
     from server_harness import ServerHarness
@@ -269,15 +295,32 @@ def main():
         info = srv.query("info", timeout=30)
         from_ns = int(info.get("from_ns", 0))
         to_ns = int(info.get("to_ns", 0))
+        num_cpus = info.get("num_cpus")
         if args.window_s is not None:
             from_ns = max(from_ns, to_ns - int(args.window_s * 1_000_000_000))
-        results = run_coverage(srv, from_ns, to_ns)
+        results = run_coverage(srv, from_ns, to_ns, num_cpus=num_cpus)
 
     failed = [t for t in TAB_ORDER if not results[t]["ok"]]
     for tab in TAB_ORDER:
         r = results[tab]
         status = "PASS" if r["ok"] else "FAIL"
         print(f"demo_workload_coverage: {tab}: {status} -- {r['detail']}")
+
+    if args.out_json:
+        import json
+        os.makedirs(os.path.dirname(os.path.abspath(args.out_json)) or ".",
+                    exist_ok=True)
+        with open(args.out_json, "w") as f:
+            json.dump({
+                "trace_dir": args.trace_dir,
+                "from_ns": from_ns, "to_ns": to_ns, "num_cpus": num_cpus,
+                "window_s": args.window_s,
+                "results": results,
+                "failed": failed,
+                "ok": not failed,
+            }, f, indent=2, sort_keys=True)
+            f.write("\n")
+        print(f"demo_workload_coverage: wrote {args.out_json}")
 
     if failed:
         print(f"demo_workload_coverage: FAIL -- {len(failed)}/{len(TAB_ORDER)} "

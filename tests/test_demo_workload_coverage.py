@@ -271,21 +271,43 @@ def test_matrix_populated_one_pair_fails():
 
 # ── concurrency_populated ────────────────────────────────────────────────────
 
-def test_concurrency_populated_peak_passes():
+def test_concurrency_populated_peak_at_or_above_cpu_line_passes():
+    resp = {"peaks": [{"t": 1, "max": 2.5}, {"t": 2, "max": 4.2}]}
+    ok, detail = cov.concurrency_populated(resp, num_cpus=4)
+    check(ok, f"concurrency: max AAS 4.2 >= num_cpus 4 passes ({detail})")
+
+
+def test_concurrency_populated_below_cpu_line_fails():
+    """RED: ordinary background concurrency (AAS 2.1) that would have
+    passed the old fixed-1.5 proxy but never actually saturates a 4-CPU
+    box -- exactly the gap the review round asked to close."""
     resp = {"peaks": [{"t": 1, "max": 0.5}, {"t": 2, "max": 2.1}]}
-    ok, detail = cov.concurrency_populated(resp)
-    check(ok, f"concurrency: peak above floor passes ({detail})")
-
-
-def test_concurrency_populated_flat_low_fails():
-    resp = {"peaks": [{"t": 1, "max": 0.2}, {"t": 2, "max": 0.3}]}
-    ok, detail = cov.concurrency_populated(resp)
-    check(not ok, f"concurrency: peaks all below floor FAIL ({detail})")
+    ok, detail = cov.concurrency_populated(resp, num_cpus=4)
+    check(not ok, f"concurrency: max AAS 2.1 < num_cpus 4 FAILS "
+                   f"(would have passed the old 1.5 proxy) ({detail})")
 
 
 def test_concurrency_populated_no_peaks_fails():
-    ok, detail = cov.concurrency_populated({"peaks": []})
+    ok, detail = cov.concurrency_populated({"peaks": []}, num_cpus=4)
     check(not ok, f"concurrency: no peaks FAILS ({detail})")
+
+
+def test_concurrency_populated_missing_num_cpus_refuses():
+    """RED: num_cpus not supplied (e.g. an `info` response predating the
+    field, or a caller that forgot to thread it through) must REFUSE, not
+    silently grade against a weaker floor -- even with a peak that would
+    have passed any fixed proxy."""
+    resp = {"peaks": [{"t": 1, "max": 99.0}]}
+    ok, detail = cov.concurrency_populated(resp, num_cpus=None)
+    check(not ok, f"concurrency: missing num_cpus REFUSES even with a huge "
+                   f"peak, never treated as fine ({detail})")
+
+
+def test_concurrency_populated_invalid_num_cpus_refuses():
+    for bad in (0, -1, "4", True):
+        ok, detail = cov.concurrency_populated(
+            {"peaks": [{"t": 1, "max": 99.0}]}, num_cpus=bad)
+        check(not ok, f"concurrency: num_cpus={bad!r} REFUSES ({detail})")
 
 
 # ── waterfall_populated ──────────────────────────────────────────────────────
@@ -384,17 +406,45 @@ def test_run_coverage_query_exception_fails_that_tab_not_skips():
         "session_timeline": {"events": [{"p": 1, "n": "A"}, {"p": 1, "n": "B"}]},
         "transitions": {"links": [{"source": "CPU*", "target": "Lock:relation", "value": 1},
                                    {"source": "CPU*", "target": "Timeout:PgSleep", "value": 1}]},
-        "concurrency": {"peaks": [{"t": 1, "max": 3.0}]},
+        "concurrency": {"peaks": [{"t": 1, "max": 5.0}]},
         "exec_scatter": {"points": [{"duration_ms": d} for d in [1, 2, 5, 50, 400]]},
     }
     responses = dict(good)
     responses["executions"] = RuntimeError("pgwt-server pipe closed")
     srv = _FakeServer(responses)
-    results = cov.run_coverage(srv, 0, 1)
+    results = cov.run_coverage(srv, 0, 1, num_cpus=4)
     check(results["waterfall"]["ok"] is False,
           f"waterfall FAILS (not skipped) when its query raises ({results['waterfall']['detail']})")
     others_ok = all(results[t]["ok"] for t in cov.TAB_ORDER if t != "waterfall")
     check(others_ok, "every other tab still evaluated normally from its own response")
+
+
+def test_run_coverage_missing_num_cpus_fails_concurrency_not_skips():
+    """The num_cpus REFUSAL must reach through run_coverage's glue, not
+    just the pure function in isolation -- a caller of run_coverage() that
+    omits num_cpus (the default) must see concurrency FAIL, even with a
+    concurrency response that would otherwise pass easily."""
+    good = {
+        "time_model": {"rows": [{"name": "Lock", "indent": 1, "ms": 5},
+                                 {"name": "Timeout", "indent": 1, "ms": 5}]},
+        "top_events": {"rows": [{"name": "Lock:relation", "class": "Lock", "total_ms": 5},
+                                 {"name": "Timeout:PgSleep", "class": "Timeout", "total_ms": 5}]},
+        "top_sessions": {"rows": [{"pid": 1}, {"pid": 2}]},
+        "top_queries": {"rows": [
+            {"text": "A", "total_ms": 1}, {"text": "B", "total_ms": 2}]},
+        "heatmap": {"cells": [[0, 1, 5], [0, 2, 5]]},
+        "session_timeline": {"events": [{"p": 1, "n": "A"}, {"p": 1, "n": "B"}]},
+        "transitions": {"links": [{"source": "CPU*", "target": "Lock:relation", "value": 1},
+                                   {"source": "CPU*", "target": "Timeout:PgSleep", "value": 1}]},
+        "concurrency": {"peaks": [{"t": 1, "max": 99.0}]},
+        "executions": {"rows": [{"duration_ms": 1300.0}]},
+        "exec_scatter": {"points": [{"duration_ms": d} for d in [1, 2, 5, 50, 400]]},
+    }
+    srv = _FakeServer(good)
+    results = cov.run_coverage(srv, 0, 1)   # num_cpus omitted -> None
+    check(results["concurrency"]["ok"] is False,
+          f"concurrency FAILS when run_coverage's caller omits num_cpus, "
+          f"even with a huge peak ({results['concurrency']['detail']})")
 
 
 def test_run_coverage_server_error_field_fails_not_skips():
