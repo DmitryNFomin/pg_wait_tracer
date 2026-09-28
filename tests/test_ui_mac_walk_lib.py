@@ -160,12 +160,19 @@ def test_bracketing_samples_missing_after():
     check(after is None, "bracketing_samples: no sample >= end -> after is None")
 
 
+# max_gap_s=100 in the tests below: generously large, deliberately out of
+# scope for what those specific tests exercise (normal/bad/missing-side
+# logic, not the distance bound) -- see the dedicated max_gap_s tests
+# further down for the bound itself.
+_WIDE_BOUND = 100.0
+
+
 def test_window_void_reason_bracketed_by_two_normal_counts():
     # The exact case this change exists for: a sub-second window with NO
     # sample landing inside it, bracketed by two normal samples just
     # outside it -- must count, not void.
     samples = [{"ts": 9.0, "pressure_level": 1}, {"ts": 9.9, "pressure_level": 1}]
-    reason = lib.window_void_reason(samples, 9.2, 9.5)
+    reason = lib.window_void_reason(samples, 9.2, 9.5, _WIDE_BOUND)
     check(reason is None,
           f"window_void_reason: bracketed by two normal samples (none inside "
           f"the window itself) -> not void (got: {reason!r})")
@@ -173,7 +180,7 @@ def test_window_void_reason_bracketed_by_two_normal_counts():
 
 def test_window_void_reason_one_bracket_bad_voids():
     samples = [{"ts": 5, "pressure_level": 1}, {"ts": 15, "pressure_level": 2}]
-    reason = lib.window_void_reason(samples, 9, 13)
+    reason = lib.window_void_reason(samples, 9, 13, _WIDE_BOUND)
     check(reason is not None and "1/2" in reason,
           f"window_void_reason: one non-normal bracketing sample voids the window (got: {reason!r})")
 
@@ -184,27 +191,27 @@ def test_window_void_reason_no_sample_before_is_void():
     # a gate that only checked the "after" side would silently certify
     # this as clean.
     samples = [{"ts": 15, "pressure_level": 1}]
-    reason = lib.window_void_reason(samples, 9, 13)
+    reason = lib.window_void_reason(samples, 9, 13, _WIDE_BOUND)
     check(reason is not None and "before" in reason,
           f"window_void_reason: no sample before window start -> void (got: {reason!r})")
 
 
 def test_window_void_reason_no_sample_after_is_void():
     samples = [{"ts": 5, "pressure_level": 1}]
-    reason = lib.window_void_reason(samples, 9, 13)
+    reason = lib.window_void_reason(samples, 9, 13, _WIDE_BOUND)
     check(reason is not None and "after" in reason,
           f"window_void_reason: no sample after window end -> void (got: {reason!r})")
 
 
 def test_window_void_reason_empty_samples_is_void():
-    reason = lib.window_void_reason([], 9, 13)
+    reason = lib.window_void_reason([], 9, 13, _WIDE_BOUND)
     check(reason is not None,
           f"window_void_reason: no samples at all -> void (got: {reason!r})")
 
 
 def test_window_void_reason_unmeasured_bracketing_sample_voids():
     samples = [{"ts": 5, "pressure_level": None}, {"ts": 15, "pressure_level": 1}]
-    reason = lib.window_void_reason(samples, 9, 13)
+    reason = lib.window_void_reason(samples, 9, 13, _WIDE_BOUND)
     check(reason is not None and "unmeasured" in reason,
           f"window_void_reason: an unmeasured bracketing sample voids too (got: {reason!r})")
 
@@ -213,8 +220,64 @@ def test_window_void_reason_boundary_inclusive():
     # A sample exactly AT the window's start/end counts as its own bracket
     # (ts <= start, ts >= end are both inclusive).
     samples = [{"ts": 5, "pressure_level": 1}, {"ts": 10, "pressure_level": 1}]
-    check(lib.window_void_reason(samples, 5, 10) is None,
+    check(lib.window_void_reason(samples, 5, 10, _WIDE_BOUND) is None,
           "window_void_reason: samples exactly on the window boundary bracket it")
+
+
+# ── max_gap_s: the distance bound (review blocker, 2026-09-28) ───────────
+# Without a bound, two normal samples arbitrarily far apart certify
+# everything between them as quiet -- reproduced by the reviewer: samples
+# at ts=1000 and ts=1120 (120s apart) both normal "certify" a window at
+# 1059-1061 with nothing sampled anywhere near it, including two full
+# minutes of possible real load in between.
+
+def test_window_void_reason_stale_bracket_voids_even_when_normal():
+    # RED-demonstrated bypass case: this is EXACTLY the reviewer's
+    # reproduction. Both bracketing samples are normal; without a distance
+    # bound this would wrongly pass.
+    samples = [{"ts": 1000, "pressure_level": 1}, {"ts": 1120, "pressure_level": 1}]
+    reason = lib.window_void_reason(samples, 1059, 1061, max_gap_s=5.0)
+    check(reason is not None and "too far" in reason,
+          f"window_void_reason: bracketing samples 120s apart (bound 5s) "
+          f"void even though both are normal (got: {reason!r})")
+
+
+def test_window_void_reason_within_bound_counts():
+    samples = [{"ts": 1000, "pressure_level": 1}, {"ts": 1004, "pressure_level": 1}]
+    reason = lib.window_void_reason(samples, 1001, 1003, max_gap_s=5.0)
+    check(reason is None,
+          f"window_void_reason: bracketing gap (1s each side) within the "
+          f"5s bound -> not void (got: {reason!r})")
+
+
+def test_window_void_reason_exactly_at_bound_counts():
+    samples = [{"ts": 995, "pressure_level": 1}, {"ts": 1006, "pressure_level": 1}]
+    reason = lib.window_void_reason(samples, 1000, 1001, max_gap_s=5.0)
+    check(reason is None,
+          f"window_void_reason: gap exactly AT the bound (5.0s) counts, "
+          f"not just strictly under it (got: {reason!r})")
+
+
+# ── sample_cadence_stats ─────────────────────────────────────────────────
+
+def test_sample_cadence_stats_basic():
+    samples = [{"ts": 0}, {"ts": 1}, {"ts": 3}]
+    mean_gap, max_gap = lib.sample_cadence_stats(samples)
+    check(abs(mean_gap - 1.5) < 1e-9, f"sample_cadence_stats: mean of [1,2] -> 1.5 (got {mean_gap})")
+    check(max_gap == 2, f"sample_cadence_stats: max of [1,2] -> 2 (got {max_gap})")
+
+
+def test_sample_cadence_stats_unsorted_input():
+    samples = [{"ts": 3}, {"ts": 0}, {"ts": 1}]
+    mean_gap, max_gap = lib.sample_cadence_stats(samples)
+    check(max_gap == 2, f"sample_cadence_stats: sorts input before computing gaps (got {max_gap})")
+
+
+def test_sample_cadence_stats_fewer_than_two_is_none():
+    check(lib.sample_cadence_stats([{"ts": 0}]) == (None, None),
+          "sample_cadence_stats: fewer than 2 samples -> (None, None)")
+    check(lib.sample_cadence_stats([]) == (None, None),
+          "sample_cadence_stats: no samples -> (None, None)")
 
 
 # ── freshness_ok ──────────────────────────────────────────────────────────
@@ -253,6 +316,29 @@ def test_build_tab_entry_clean():
     entry = lib.build_tab_entry("overview", True, "5 rows", 1.2, [], [], 2.0, None)
     check(entry["ok"] is True, "build_tab_entry: clean tab is ok")
     check(entry["void_reason"] is None, "build_tab_entry: clean tab has no void_reason")
+
+
+def test_build_tab_entry_defaults_wall_times_to_none():
+    # Existing callers (tests/ui_mac_walk.py's Chrome walk) never pass
+    # these -- must not break, and must not fabricate a timestamp.
+    entry = lib.build_tab_entry("overview", True, "5 rows", 1.2, [], [], 2.0, None)
+    check(entry["wall_start"] is None and entry["wall_end"] is None,
+          "build_tab_entry: wall_start/wall_end default to None when not given")
+
+
+def test_build_tab_entry_persists_wall_times_and_bracket():
+    # The exact gap that made run8 un-re-derivable: these four fields must
+    # round-trip into the verdict so a future run can be re-judged from
+    # stored data alone.
+    entry = lib.build_tab_entry(
+        "overview", True, "5 rows", 1.2, [], [], 2.0, None,
+        wall_start=100.0, wall_end=100.5,
+        bracket_before={"ts": 99.0, "pressure_level": 1},
+        bracket_after={"ts": 101.0, "pressure_level": 1})
+    check(entry["wall_start"] == 100.0 and entry["wall_end"] == 100.5,
+          "build_tab_entry: wall_start/wall_end persisted verbatim")
+    check(entry["bracket_before"]["ts"] == 99.0 and entry["bracket_after"]["ts"] == 101.0,
+          "build_tab_entry: the actual bracketing samples are persisted, not just the verdict")
 
 
 def test_build_tab_entry_console_error_fails():

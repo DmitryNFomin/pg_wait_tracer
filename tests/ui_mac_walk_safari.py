@@ -74,6 +74,40 @@ RESULTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 # ASSERTED against this target below, never assumed.
 TARGET_VIEWPORT = {"width": 1710, "height": 1069, "dpr": 2}
 
+# Pinned criteria for this branch's counted attempt (coordinator,
+# 2026-09-28): docs/DEMO_REHEARSAL_CRITERIA.md as of commit f094280 on
+# agent/criteria-demo-config, doc blob 758302f. Recorded in every verdict
+# alongside this branch's own commit SHA (captured at runtime below) --
+# "that is what makes an attempt countable: the criteria cannot move under
+# it afterwards."
+CRITERIA_COMMIT = "f094280568be2dafa0122551519dd2789575b3cd"
+CRITERIA_DOC_BLOB = "758302f9af3a424abd7eb7793a2cca12d9a9226b"
+
+
+def _current_branch_sha():
+    try:
+        r = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True,
+                            text=True, cwd=os.path.dirname(os.path.abspath(__file__)))
+        return r.stdout.strip() if r.returncode == 0 else None
+    except Exception:
+        return None
+
+
+def _blocked_verdict(run_id, blocked_info):
+    """Shared shape for every early-refusal verdict (precondition,
+    fullscreen(), viewport assertion) -- always carries the pinned
+    criteria identity and attempt_counted=False, same fields as a
+    completed run's verdict, so a reader never has to guess why one path's
+    JSON looks different from another's."""
+    return {
+        "run": {"id": run_id}, "ok": False, "counted": False,
+        "attempt_counted": False,
+        "criteria_commit": CRITERIA_COMMIT,
+        "criteria_doc_blob": CRITERIA_DOC_BLOB,
+        "branch_sha": _current_branch_sha(),
+        "blocked": blocked_info,
+    }
+
 CONSOLE_HOOK_JS = """
 window.__macWalkErrors = [];
 (function () {
@@ -247,11 +281,11 @@ def main():
     if precondition_reason is not None:
         print(f"ERROR: refusing to start the Safari walk: {precondition_reason}",
               file=sys.stderr)
-        verdict = {"run": {"id": run_id}, "ok": False, "counted": False,
-                   "blocked": {"error": "walk precondition not met",
-                               "reason": precondition_reason,
-                               "screen_locked": screen_locked,
-                               "display_asleep": display_asleep}}
+        verdict = _blocked_verdict(run_id, {
+            "error": "walk precondition not met",
+            "reason": precondition_reason,
+            "screen_locked": screen_locked,
+            "display_asleep": display_asleep})
         with open(os.path.join(args.out_dir, "summary.json"), "w") as f:
             json.dump(verdict, f, indent=2, sort_keys=True)
         return 1
@@ -335,9 +369,22 @@ def main():
     # Found live (2026-09-28), second measurement: 2.0s still left 9/11 tabs
     # void (0/11 samples non-normal both times -- a genuine sampling-density
     # gap, not real Mac pressure). Each tab's own TTFP-pass window is
-    # ~0.2-0.9s; 0.5s gives most windows a real chance at a sample without
-    # a meaningfully heavier subprocess load (sysctl + memory_pressure, a
-    # few ms each).
+    # ~0.2-0.9s; 0.5s gives most windows a real chance at a sample.
+    #
+    # MEASURED per-read cost (2026-09-28, this Mac, n=20 calls to
+    # MacSampler.read_once() -- sysctl + memory_pressure -Q + os.getloadavg
+    # combined): min 3.1ms, max 4.2ms, mean 3.4ms -- NOT the "a few ms" this
+    # comment used to say without a number behind it, and also NOT the
+    # ~1.5s/read a review pass reported measuring separately (which would
+    # push a 0.5s-configured interval out to ~2.02s actual). Corroborated
+    # from a real run's own recorded mac_samples (run10, 53 samples): mean
+    # inter-sample gap 0.513s, max 0.529s -- the configured 0.5s interval
+    # was respected within ~6%, not stretched to ~2s. This discrepancy is
+    # unresolved and reported as such rather than silently trusting either
+    # number; window_void_reason's max_gap_s bound below is derived from
+    # THIS run's own sample_cadence_stats() regardless of which figure is
+    # right, so the bound is self-correcting per run even if the
+    # discrepancy's cause is never found.
     sampler = MacSampler(interval_s=0.5)
     sampler.start()
 
@@ -352,8 +399,7 @@ def main():
         except WebDriverError as e:
             print(f"BLOCKED: SafariSession could not open a session: {e}",
                   file=sys.stderr)
-            verdict = {"run": {"id": run_id}, "ok": False, "counted": False,
-                       "blocked": {"error": str(e), "raw": e.raw}}
+            verdict = _blocked_verdict(run_id, {"error": str(e), "raw": e.raw})
             with open(os.path.join(args.out_dir, "summary.json"), "w") as f:
                 json.dump(verdict, f, indent=2, sort_keys=True)
             return 1
@@ -406,11 +452,11 @@ def main():
             print(f"ERROR: session.fullscreen() failed: {e} "
                   f"(re-checked precondition: locked={locked_now} asleep={asleep_now})",
                   file=sys.stderr)
-            verdict = {"run": {"id": run_id}, "ok": False, "counted": False,
-                       "blocked": {"error": "fullscreen() failed",
-                                   "webdriver_error": str(e), "raw": e.raw,
-                                   "screen_locked_now": locked_now,
-                                   "display_asleep_now": asleep_now}}
+            verdict = _blocked_verdict(run_id, {
+                "error": "fullscreen() failed",
+                "webdriver_error": str(e), "raw": e.raw,
+                "screen_locked_now": locked_now,
+                "display_asleep_now": asleep_now})
             with open(os.path.join(args.out_dir, "summary.json"), "w") as f:
                 json.dump(verdict, f, indent=2, sort_keys=True)
             return 1
@@ -431,10 +477,10 @@ def main():
                   f"{TARGET_VIEWPORT} (effective_zoom={effective_zoom}) -- "
                   "refusing to run the walk at the wrong viewport",
                   file=sys.stderr)
-            verdict = {"run": {"id": run_id}, "ok": False, "counted": False,
-                       "blocked": {"error": "viewport assertion failed",
-                                   "achieved": achieved, "target": TARGET_VIEWPORT,
-                                   "effective_zoom": effective_zoom}}
+            verdict = _blocked_verdict(run_id, {
+                "error": "viewport assertion failed",
+                "achieved": achieved, "target": TARGET_VIEWPORT,
+                "effective_zoom": effective_zoom})
             with open(os.path.join(args.out_dir, "summary.json"), "w") as f:
                 json.dump(verdict, f, indent=2, sort_keys=True)
             return 1
@@ -527,13 +573,25 @@ def main():
                           file=sys.stderr)
 
                 wall_end = time.time()
-                void_reason = lib.window_void_reason(sampler.samples, wall_start, wall_end)
+                # Void attribution is NOT computed here -- found live
+                # (2026-09-28): bracketing needs a sample AT OR AFTER
+                # wall_end, which by definition cannot exist yet the
+                # instant wall_end is set (the sampler's next tick is up
+                # to interval_s in the FUTURE relative to right now). Every
+                # tab voided with "no sample after this window's end" on a
+                # verifiably quiet run for exactly this reason -- a
+                # causality bug in WHEN the check ran, not in the
+                # bracketing formula itself. wall_start/wall_end are
+                # recorded now; void_reason/brackets are computed
+                # retroactively below, once the walk (and its sampler) has
+                # had time to move past every tab's own window.
                 entry = lib.build_tab_entry(
                     tab_id, render_ok, render_detail, ttfp_s, console_errors,
-                    pgwt_errors, freshness_age_s=None, mac_void_reason=void_reason)
+                    pgwt_errors, freshness_age_s=None, mac_void_reason=None,
+                    wall_start=wall_start, wall_end=wall_end)
                 tabs.append(entry)
                 print(f"  rendered={entry['rendered']} ttfp_s={ttfp_s} "
-                      f"console_errors={len(console_errors)} void={void_reason!r}")
+                      f"console_errors={len(console_errors)} (void attribution pending)")
 
             print("=== freshness pass (revisit each tab, same session) ===")
             for entry in tabs:
@@ -554,6 +612,45 @@ def main():
                 entry["freshness"]["ok"] = fresh_ok
                 entry["freshness"]["detail"] = fresh_detail
                 print(f"  freshness [{tab_id}]: {fresh_detail}")
+
+            # RETROACTIVE void attribution, now that the freshness pass has
+            # given the sampler time to tick past every main-loop tab's own
+            # wall_end. max_gap_s is derived from this run's OWN measured
+            # sample cadence (sample_cadence_stats), never the configured
+            # interval -- 2026-09-28 review: a subprocess-based sampler on
+            # this Mac is not guaranteed to keep its configured interval
+            # (measured elsewhere on this branch: ~1.5s/read under load
+            # pushed a 0.5s-configured cadence out to ~2.02s actual), so a
+            # bound picked from the config would be a fiction. 3x the
+            # MEASURED max gap is the bound: generous enough to absorb one
+            # slow read without false-voiding a genuinely bracketed window,
+            # tight enough that two calm readings either side of real load
+            # (the review's own reproduction: two normal samples ~2 minutes
+            # apart certifying everything between them) still voids.
+            print("=== retroactive void attribution (bracketing against "
+                  "the final sample set) ===")
+            final_samples = list(sampler.samples)
+            mean_gap, max_gap = lib.sample_cadence_stats(final_samples)
+            if max_gap is None:
+                max_gap_s = 0.0  # fewer than 2 samples -- nothing can bracket
+                print(f"  note: fewer than 2 mac samples recorded ({len(final_samples)}) "
+                      "-- every window will void")
+            else:
+                max_gap_s = max_gap * 3
+                print(f"  measured sample cadence: mean={mean_gap:.3f}s "
+                      f"max={max_gap:.3f}s over {len(final_samples)} samples "
+                      f"-> max_gap_s bound={max_gap_s:.3f}s")
+            for entry in tabs:
+                reason = lib.window_void_reason(
+                    final_samples, entry["wall_start"], entry["wall_end"], max_gap_s)
+                before, after = lib.bracketing_samples(
+                    final_samples, entry["wall_start"], entry["wall_end"])
+                entry["void_reason"] = reason
+                entry["bracket_before"] = before
+                entry["bracket_after"] = after
+                entry["ok"] = (bool(entry["rendered"]) and not entry["console_errors"]
+                               and reason is None)
+                print(f"  [{entry['tab']}] void={reason!r}")
         except Exception:
             traceback.print_exc()
     finally:
@@ -582,6 +679,21 @@ def main():
     # False for every run that reaches this point).
     verdict["pre_flight_screen_locked"] = screen_locked
     verdict["pre_flight_display_asleep"] = display_asleep
+    verdict["criteria_commit"] = CRITERIA_COMMIT
+    verdict["criteria_doc_blob"] = CRITERIA_DOC_BLOB
+    verdict["branch_sha"] = _current_branch_sha()
+    # counted, precondition-only (coordinator, 2026-09-28): gated strictly
+    # on the four assertions already enforced above by construction (a run
+    # that reached this point already passed unlocked/awake at pre-flight,
+    # and viewport==TARGET_VIEWPORT with effective_zoom==1.0 or it would
+    # have returned 1 already) -- NOT on the walk being perfect (tab
+    # rendering, console errors, void count are separate facts, reported
+    # but not gating this field).
+    verdict["attempt_counted"] = (
+        screen_locked is False and display_asleep is False
+        and display_identity is not None
+        and display_identity.get("viewport") == TARGET_VIEWPORT
+        and display_identity.get("effective_zoom") == 1.0)
     verdict_path = os.path.join(args.out_dir, "summary.json")
     with open(verdict_path, "w") as f:
         json.dump(verdict, f, indent=2, sort_keys=True)

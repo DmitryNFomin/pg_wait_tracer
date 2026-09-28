@@ -83,7 +83,21 @@ def bracketing_samples(samples, start_ts, end_ts):
     return before, after
 
 
-def window_void_reason(samples, start_ts, end_ts):
+def sample_cadence_stats(samples):
+    """Returns (mean_gap, max_gap) between consecutive samples (sorted by
+    ts), or (None, None) if fewer than 2 timestamped samples exist. Used to
+    derive a bracketing distance bound from the sampler's OWN MEASURED
+    behavior, never its configured interval alone (2026-09-28 review: a
+    thread that cannot keep its configured cadence -- subprocess cost, GC,
+    system contention -- makes a bound picked from the config a fiction)."""
+    ts = sorted(s["ts"] for s in samples if s.get("ts") is not None)
+    if len(ts) < 2:
+        return None, None
+    gaps = [ts[i + 1] - ts[i] for i in range(len(ts) - 1)]
+    return sum(gaps) / len(gaps), max(gaps)
+
+
+def window_void_reason(samples, start_ts, end_ts, max_gap_s):
     """Returns a human-readable reason if this [start_ts, end_ts] window
     cannot be certified as measured-under-normal-pressure, else None.
 
@@ -95,10 +109,20 @@ def window_void_reason(samples, start_ts, end_ts):
     unattributable, which is exactly the false "cannot tell" this function
     exists to avoid. A window is judged by the environment ENCLOSING it
     instead: the most recent sample at/before the window start and the
-    earliest sample at/after the window end. Both must exist AND both must
-    read normal for the window to pass -- if either bracketing sample is
-    missing (genuinely no data before or after, e.g. the walk started
-    before sampling began, or ended after it stopped), that IS the real
+    earliest sample at/after the window end.
+
+    max_gap_s is REQUIRED, no default (2026-09-28 review, blocker): without
+    a distance bound, two normal samples an hour apart certify everything
+    between them as quiet, which defeats the whole check -- two calm
+    readings either side of two minutes of real load would score clean.
+    Callers must derive it from sample_cadence_stats() on their OWN
+    measured samples, not from the sampler's configured interval (which the
+    review also found this Mac's subprocess-based sampler does not
+    reliably keep).
+
+    Both bracketing samples must exist, each within max_gap_s of its own
+    window edge, AND both must read normal, for the window to pass -- a
+    missing bracket, or one farther than max_gap_s away, is the real
     "cannot attribute" case and the window still voids. Never speeds up
     sampling or widens the window to manufacture an in-window sample --
     the fix is in how existing samples are read, not in gathering more of
@@ -109,6 +133,12 @@ def window_void_reason(samples, start_ts, end_ts):
         side = "before" if before is None else "after"
         return (f"no mac sample {side} this window's "
                 f"{'start' if side == 'before' else 'end'} -- cannot attribute")
+    before_gap = start_ts - before["ts"]
+    after_gap = after["ts"] - end_ts
+    if before_gap > max_gap_s or after_gap > max_gap_s:
+        return (f"bracketing sample too far from window edge "
+                f"(before={before_gap:.2f}s, after={after_gap:.2f}s, "
+                f"bound={max_gap_s:.2f}s) -- cannot attribute")
     bad = [s for s in (before, after) if not sample_is_normal(s)]
     if bad:
         names = sorted({pressure_level_name(s.get("pressure_level")) for s in bad})
@@ -128,13 +158,24 @@ def freshness_ok(age_s, max_age_s=FRESHNESS_MAX_AGE_S):
 
 
 def build_tab_entry(tab_id, rendered, render_detail, ttfp_s, console_errors,
-                     pgwt_console_errors, freshness_age_s, mac_void_reason):
+                     pgwt_console_errors, freshness_age_s, mac_void_reason,
+                     wall_start=None, wall_end=None, bracket_before=None,
+                     bracket_after=None):
     """One tab's row in the verdict. `ok` is false if the tab didn't render,
     threw a real (non-'[pgwt]') console error, OR its window is void for
     Mac-side infrastructure reasons -- void_reason is reported SEPARATELY so
     a reader can tell "the product broke" from "the Mac was busy building
     something else at the time" (criteria doc: void is infrastructure, not
-    a product failure) rather than collapsing both into one boolean."""
+    a product failure) rather than collapsing both into one boolean.
+
+    wall_start/wall_end (epoch seconds) and bracket_before/bracket_after
+    (the actual mac_samples entries window_void_reason bracketed against,
+    or None) are persisted here -- found live 2026-09-28: their absence is
+    exactly why an earlier run's void verdict could not be re-derived from
+    its own saved summary.json afterward. All four default to None so
+    existing callers that predate this (tests/ui_mac_walk.py's Chrome walk)
+    keep working unchanged; a future run can be re-judged from stored data
+    without re-running only if these are populated."""
     fresh_ok, fresh_detail = freshness_ok(freshness_age_s)
     ok = bool(rendered) and not console_errors and mac_void_reason is None
     return {
@@ -146,6 +187,10 @@ def build_tab_entry(tab_id, rendered, render_detail, ttfp_s, console_errors,
         "pgwt_console_errors": list(pgwt_console_errors),
         "freshness": {"age_s": freshness_age_s, "ok": fresh_ok, "detail": fresh_detail},
         "void_reason": mac_void_reason,
+        "wall_start": wall_start,
+        "wall_end": wall_end,
+        "bracket_before": bracket_before,
+        "bracket_after": bracket_after,
         "ok": ok,
     }
 

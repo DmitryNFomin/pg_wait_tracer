@@ -226,16 +226,22 @@ def main():
                     print(f"=== {tab_id} (TTFP pass) ===")
                     v = visit_tab(browser, tab_id, args.url,
                                   args.first_data_timeout, args.out_dir)
-                    void_reason = lib.window_void_reason(
-                        sampler.samples, v["wall_start"], v["wall_end"])
+                    # Void attribution is deliberately NOT computed here --
+                    # same causality bug tests/ui_mac_walk_safari.py found
+                    # and fixed (2026-09-28): bracketing needs a sample AT
+                    # OR AFTER wall_end, which cannot exist yet the instant
+                    # wall_end is set. Computed retroactively below, once
+                    # the sampler has had time to move past every tab's
+                    # window.
                     entry = lib.build_tab_entry(
                         tab_id, v["render_ok"], v["render_detail"], v["ttfp_s"],
                         v["console_errors"], v["pgwt_errors"],
-                        freshness_age_s=None, mac_void_reason=void_reason)
+                        freshness_age_s=None, mac_void_reason=None,
+                        wall_start=v["wall_start"], wall_end=v["wall_end"])
                     tabs.append(entry)
                     print(f"  rendered={entry['rendered']} ttfp_s={v['ttfp_s']} "
                           f"console_errors={len(v['console_errors'])} "
-                          f"void={void_reason!r}")
+                          "(void attribution pending)")
 
                 print("=== freshness pass ===")
                 ages, version_skew = freshness_pass(browser, args.url, args.first_data_timeout)
@@ -247,6 +253,34 @@ def main():
                     entry["freshness"]["detail"] = detail
                     # freshness is reported per tab but deliberately does not
                     # gate entry["ok"] here -- see the appended note below.
+
+                # RETROACTIVE void attribution -- see
+                # tests/ui_mac_walk_safari.py's own identical block for the
+                # full rationale (max_gap_s from THIS run's measured
+                # cadence, never the configured interval).
+                print("=== retroactive void attribution ===")
+                final_samples = list(sampler.samples)
+                mean_gap, max_gap = lib.sample_cadence_stats(final_samples)
+                if max_gap is None:
+                    max_gap_s = 0.0
+                    print(f"  note: fewer than 2 mac samples recorded "
+                          f"({len(final_samples)}) -- every window will void")
+                else:
+                    max_gap_s = max_gap * 3
+                    print(f"  measured sample cadence: mean={mean_gap:.3f}s "
+                          f"max={max_gap:.3f}s over {len(final_samples)} samples "
+                          f"-> max_gap_s bound={max_gap_s:.3f}s")
+                for entry in tabs:
+                    reason = lib.window_void_reason(
+                        final_samples, entry["wall_start"], entry["wall_end"], max_gap_s)
+                    before, after = lib.bracketing_samples(
+                        final_samples, entry["wall_start"], entry["wall_end"])
+                    entry["void_reason"] = reason
+                    entry["bracket_before"] = before
+                    entry["bracket_after"] = after
+                    entry["ok"] = (bool(entry["rendered"]) and not entry["console_errors"]
+                                   and reason is None)
+                    print(f"  [{entry['tab']}] void={reason!r}")
             finally:
                 browser.close()
     finally:
