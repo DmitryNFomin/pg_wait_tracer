@@ -156,21 +156,55 @@ def wait_for_js(session, bool_expr, timeout_s, poll_s=0.15):
         time.sleep(poll_s)
 
 
-# Documented EMPTY-state markers (2026-09-28, review correction): waterfall
-# and scatter render a ".loading" div with a specific message when the
-# trace window has no completed executions -- no canvas is ever created for
-# that state BY DESIGN (waterfall.js:215 "No executions for selected
-# range", exec-scatter.js:70 "No completed, positive-duration executions
-# for selected range"). _READY_SELECTOR alone (from ui_live_smoke.py,
-# "#waterfall-chart canvas" / "#scatter-chart canvas") can never match that
-# state, so a legitimately empty panel used to time out and read as a
-# render FAILURE. Two different containers: waterfall's empty marker lands
-# in #executions-table (waterfall.js:215), not #waterfall-chart itself;
-# scatter's lands in its own #scatter-chart container (exec-scatter.js:70).
+# Documented EMPTY-state markers, container + EXACT text (both corrected/
+# added 2026-09-28, review round 2 -- see each note):
+#
+# - waterfall: #executions-table .loading, "No executions for selected
+#   range" (waterfall.js:215). Unchanged -- this one was verified live in
+#   attempt three.
+# - scatter: CORRECTED. exec-scatter.js:66-74's empty branch writes
+#   `el.innerHTML = '<div class="scatter-shell">...<div class="loading">
+#   No completed, positive-duration executions for selected range</div>
+#   </div>'` -- there is NO #scatter-chart element in that markup at all
+#   (it only exists on the data path, via ensureShell()). The original
+#   fix's "#scatter-chart .loading" could therefore never match; verified
+#   only against waterfall, not scatter, which is exactly how that gap
+#   survived a round of review. Selector is `.scatter-shell .loading`.
+# - queries: ADDED. queries.js:98-108's !model.hasRows branch writes
+#   '<div class="loading">No data for selected range</div>' into THE SAME
+#   #table-container every table tab shares -- and app.js's switchTab()
+#   (line ~763) puts a GENERIC '<div class="loading">Loading...</div>'
+#   into that identical container while a fetch is still in flight. A
+#   selector alone cannot tell these apart; only the exact text can (see
+#   ui_mac_walk_lib.empty_state_matches, and its own red-demonstrated
+#   "must not match 'Loading...'" bypass-trap test).
 _EMPTY_STATE_SELECTOR = {
     "waterfall": "#executions-table .loading",
-    "scatter": "#scatter-chart .loading",
+    "scatter": ".scatter-shell .loading",
+    "queries": "#table-container .loading",
 }
+_EMPTY_STATE_TEXT = {
+    "waterfall": "No executions for selected range",
+    "scatter": "No completed, positive-duration executions for selected range",
+    "queries": "No data for selected range",
+}
+
+
+def _empty_state_js_condition(tab_id):
+    """The JS boolean expression to OR into the readiness wait for a tab
+    with a documented empty state -- checks the SPECIFIC container's text
+    against the EXACT expected string, never presence alone (the bypass
+    trap: app.js's own generic transient 'Loading...' lives in the same
+    container/class as queries.js's genuine empty result, so presence
+    alone would go green on a hung fetch)."""
+    sel = _EMPTY_STATE_SELECTOR.get(tab_id)
+    if not sel:
+        return None
+    text = _EMPTY_STATE_TEXT[tab_id]
+    sel_json = json.dumps(sel)
+    text_json = json.dumps(text)
+    return (f"(() => {{ const el = document.querySelector({sel_json}); "
+            f"return !!el && el.textContent.trim() === {text_json}; }})()")
 
 
 def navigate_to_tab(session, tab_id, timeout_s):
@@ -178,9 +212,14 @@ def navigate_to_tab(session, tab_id, timeout_s):
     Timeline drill-in special case, same #live-btn resume idiom, driven
     through execute_script instead of Playwright element handles.
 
-    Returns 'data' or 'empty' -- WHICH documented state the panel reached
-    (see _EMPTY_STATE_SELECTOR), so a legitimately empty panel is never
-    conflated with one that actually failed to render."""
+    Returns 'data' or 'empty' -- WHICH documented state the panel reached,
+    so a legitimately empty panel is never conflated with one that
+    actually failed to render. On timeout, raises with the container's own
+    innerHTML attached (see TimeoutDiagnostic) so a real run's failure
+    mode is visible from the verdict, not just "didn't render" -- found
+    live (2026-09-28 review) that scatter's timeout produced NO screenshot
+    at all, because _PANEL_ELEMENT_SELECTOR's own #scatter-chart element
+    genuinely never existed for that panel's real (empty) markup either."""
     if tab_id == "timeline":
         ok = session.execute_script(
             "const b = document.querySelector(\".tab[data-tab='sessions']\"); "
@@ -204,22 +243,21 @@ def navigate_to_tab(session, tab_id, timeout_s):
             raise RuntimeError(f"no tab button for {tab_id!r}")
 
     ready_sel = json.dumps(uls._READY_SELECTOR[tab_id])
-    empty_sel = _EMPTY_STATE_SELECTOR.get(tab_id)
-    if empty_sel:
-        empty_sel_json = json.dumps(empty_sel)
-        condition = (f"document.querySelector({ready_sel}) || "
-                     f"document.querySelector({empty_sel_json})")
+    empty_condition = _empty_state_js_condition(tab_id)
+    if empty_condition:
+        condition = f"document.querySelector({ready_sel}) || {empty_condition}"
     else:
-        empty_sel_json = None
         condition = f"document.querySelector({ready_sel})"
     if wait_for_js(session, condition, timeout_s) is None:
-        extra = f" (no empty-state marker {empty_sel!r} either)" if empty_sel else ""
-        raise RuntimeError(f"panel did not render ({uls._READY_SELECTOR[tab_id]!r}) "
-                            f"within {timeout_s}s{extra}")
+        diag = TimeoutDiagnostic(session, tab_id)
+        extra = (f" (empty-state text {_EMPTY_STATE_TEXT[tab_id]!r} never "
+                  f"appeared in {_EMPTY_STATE_SELECTOR[tab_id]!r} either)"
+                  if empty_condition else "")
+        raise PanelTimeoutError(f"panel did not render ({uls._READY_SELECTOR[tab_id]!r}) "
+                            f"within {timeout_s}s{extra}", diag)
 
     render_state = "data"
-    if empty_sel_json and session.execute_script(
-            f"return document.querySelector({empty_sel_json}) !== null"):
+    if empty_condition and session.execute_script(f"return {empty_condition}"):
         render_state = "empty"
 
     live_active = session.execute_script(
@@ -237,19 +275,103 @@ def navigate_to_tab(session, tab_id, timeout_s):
                 "return !!b && b.classList.contains('active');"):
             raise RuntimeError("clicking #live-btn did not resume live mode")
 
+    if tab_id == "timeline":
+        clear_drill_filter(session)
+
     return render_state
 
 
-def empty_state_text(session, tab_id):
-    """The actual text of the documented empty-state marker (2026-09-28
-    review: "record which state it saw" -- not just that it was empty, but
-    what it said), or None if this tab has no documented empty state."""
-    sel = _EMPTY_STATE_SELECTOR.get(tab_id)
-    if not sel:
-        return None
+class PanelTimeoutError(RuntimeError):
+    """A render/empty-state wait that timed out, carrying a
+    TimeoutDiagnostic (container innerHTML + a full-page screenshot) so
+    the verdict can show WHAT was on screen when it gave up, not just that
+    it did (2026-09-28 review: scatter's prior timeout produced zero
+    evidence at all)."""
+    def __init__(self, message, diagnostic):
+        super().__init__(message)
+        self.diagnostic = diagnostic
+
+
+class TimeoutDiagnostic:
+    """Captured once, at the moment a readiness wait times out: the likely
+    container's innerHTML (best-effort across a few candidate selectors --
+    the exact live container for an unknown failure mode cannot be known
+    in advance) and a FULL-PAGE screenshot (not the panel-element
+    screenshot elsewhere in this module, which itself depends on the
+    panel's container existing -- exactly what may not be true here)."""
+    _CANDIDATE_SELECTORS = ("#table-container", "#executions-table",
+                             ".scatter-shell", "#scatter-chart",
+                             "#waterfall-chart", "#dfg-container",
+                             "#concurrency-chart", "#matrix-chart",
+                             "#heatmap-container", "#timeline-chart")
+
+    def __init__(self, session, tab_id):
+        self.tab_id = tab_id
+        self.container_html = {}
+        for sel in self._CANDIDATE_SELECTORS:
+            try:
+                html = session.execute_script(
+                    f"const el = document.querySelector({json.dumps(sel)}); "
+                    "return el ? el.innerHTML : null;")
+            except Exception as e:
+                html = f"<error reading {sel}: {e}>"
+            if html is not None:
+                self.container_html[sel] = html
+        try:
+            self.screenshot_png = session.screenshot_png_bytes()
+        except Exception:
+            self.screenshot_png = None
+
+    def save(self, out_dir):
+        tab_dir = os.path.join(out_dir, self.tab_id)
+        os.makedirs(tab_dir, exist_ok=True)
+        html_path = os.path.join(tab_dir, "timeout-containers.json")
+        with open(html_path, "w") as f:
+            json.dump(self.container_html, f, indent=2)
+        shot_path = None
+        if self.screenshot_png is not None:
+            shot_path = os.path.join(tab_dir, "timeout-fullpage.png")
+            with open(shot_path, "wb") as f:
+                f.write(self.screenshot_png)
+        return html_path, shot_path
+
+
+def clear_drill_filter(session):
+    """Clicks the breadcrumb's '(x) Clear all filters' chip (app.js
+    clearFilters(), wired to .crumb-clear in renderBreadcrumbTrail) if one
+    is present, and waits for it to disappear.
+
+    Found live (2026-09-28 review): the Timeline tab's drill pushes a pid
+    filter (app.js drill(), line ~839) that this module never cleared --
+    it persisted through every later tab in the walk (transitions,
+    concurrency, waterfall, scatter, matrix) AND the whole freshness-
+    revisit pass, silently filtering all of them to one backend.
+    Attempt four's "6 executions / 6 points" on waterfall/scatter was
+    luck: which pid gets drilled follows row sort order, and that pid
+    happened to have executions. clearFilters() also calls
+    setTabView('overview'), which is why this is called AFTER Timeline's
+    own render check completes, never before or during it -- clearing
+    while still viewing Timeline would navigate away before Timeline's
+    readiness/empty check could observe it."""
+    present = session.execute_script(
+        "return document.querySelector('.crumb-clear') !== null;")
+    if not present:
+        return False
+    session.execute_script(
+        "const b = document.querySelector('.crumb-clear'); if (b) b.click();")
+    wait_for_js(session, "document.querySelector('.crumb-clear') === null", 10.0)
+    return True
+
+
+def active_filters_snapshot(session):
+    """The breadcrumb's own rendered text (empty string if no filter is
+    active) -- recorded per tab in the verdict (2026-09-28 review: "record
+    the active filter chips per tab... so this can never again be
+    invisible") so a silently-persisting drill filter shows up in the
+    data, not just in a screenshot someone has to think to look at."""
     return session.execute_script(
-        f"const el = document.querySelector({json.dumps(sel)}); "
-        "return el ? el.textContent.trim() : null;")
+        "const el = document.getElementById('breadcrumb'); "
+        "return el ? el.textContent.trim() : '';")
 
 
 def render_check(session, tab_id, timeout_s=2.0, poll_s=0.15):
@@ -292,6 +414,21 @@ def main():
     ap.add_argument("--skip-quiet-wait", action="store_true",
                      help="skip the pre-flight quiet check (the walk's own "
                           "per-tab void accounting still applies either way)")
+    ap.add_argument("--capture-start-epoch", type=float, default=None,
+                     help="epoch seconds when the remote capture/workload "
+                          "started -- required to enforce --min-capture-age-s; "
+                          "omitting it refuses the walk (fail closed, same "
+                          "contract as the screen-lock/display-asleep "
+                          "precondition: an unmeasured capture age is never "
+                          "assumed old enough)")
+    ap.add_argument("--min-capture-age-s", type=float, default=120.0,
+                     help="refuse the walk if the remote capture has been "
+                          "running for less than this many seconds (default "
+                          "120s). Found live 2026-09-28: a run's own AAS "
+                          "chart showed activity only in the last ~30s of a "
+                          "15-minute window -- the workload had barely "
+                          "started, so most tabs had almost nothing to show "
+                          "regardless of the product")
     args = ap.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
@@ -335,6 +472,29 @@ def main():
             "reason": precondition_reason,
             "screen_locked": screen_locked,
             "display_asleep": display_asleep})
+        with open(os.path.join(args.out_dir, "summary.json"), "w") as f:
+            json.dump(verdict, f, indent=2, sort_keys=True)
+        return 1
+
+    # Minimum capture-age precondition (2026-09-28 review, new gate this
+    # round): checked here, before spawning safaridriver at all, same
+    # fail-closed shape as the screen-lock/display-asleep refusal above --
+    # capture_age_s=None (no --capture-start-epoch given) refuses just as
+    # hard as one that is too young, because "not provided" and "too
+    # young" are different claims and neither is "old enough".
+    capture_age_s = (time.time() - args.capture_start_epoch
+                      if args.capture_start_epoch is not None else None)
+    capture_age_reason = lib.capture_age_reason(capture_age_s, args.min_capture_age_s)
+    print(f"pre-flight: capture_age_s={capture_age_s} "
+          f"min_capture_age_s={args.min_capture_age_s}")
+    if capture_age_reason is not None:
+        print(f"ERROR: refusing to start the Safari walk: {capture_age_reason}",
+              file=sys.stderr)
+        verdict = _blocked_verdict(run_id, {
+            "error": "capture age precondition not met",
+            "reason": capture_age_reason,
+            "capture_age_s": capture_age_s,
+            "min_capture_age_s": args.min_capture_age_s})
         with open(os.path.join(args.out_dir, "summary.json"), "w") as f:
             json.dump(verdict, f, indent=2, sort_keys=True)
         return 1
@@ -632,6 +792,7 @@ def main():
                 wall_start = time.time()
                 t0 = time.monotonic()
                 render_ok, render_detail, ttfp_s, render_state = False, "never checked", None, None
+                timeout_diag_paths = None
                 try:
                     render_state = navigate_to_tab(session, tab_id, args.first_data_timeout)
                     ttfp_s = time.monotonic() - t0
@@ -649,9 +810,28 @@ def main():
                         render_detail = f"empty: {empty_state_text(session, tab_id)}"
                     else:
                         render_ok, render_detail = render_check(session, tab_id)
+                except PanelTimeoutError as e:
+                    render_detail = str(e)
+                    print(f"  FAIL [{tab_id}]: {e}", file=sys.stderr)
+                    try:
+                        html_path, shot_path2 = e.diagnostic.save(args.out_dir)
+                        timeout_diag_paths = {"containers_json": html_path,
+                                               "fullpage_png": shot_path2}
+                        print(f"  note [{tab_id}]: timeout diagnostic saved to "
+                              f"{html_path} / {shot_path2}", file=sys.stderr)
+                    except Exception as save_err:
+                        print(f"  note [{tab_id}]: failed to save timeout "
+                              f"diagnostic: {save_err}", file=sys.stderr)
                 except Exception as e:
                     render_detail = str(e)
                     print(f"  FAIL [{tab_id}]: {e}", file=sys.stderr)
+
+                active_filters = None
+                try:
+                    active_filters = active_filters_snapshot(session)
+                except Exception as e:
+                    print(f"  note [{tab_id}]: could not read active filters: {e}",
+                          file=sys.stderr)
 
                 raw_errors = drain_console_errors(session)
                 console_errors, pgwt_errors = [], []
@@ -689,9 +869,19 @@ def main():
                     pgwt_errors, freshness_age_s=None, mac_void_reason=None,
                     wall_start=wall_start, wall_end=wall_end,
                     render_state=render_state)
+                # active_filters (2026-09-28 review): the breadcrumb's own
+                # rendered text at the moment this tab was scored, recorded
+                # per tab rather than inferred -- so a persisted drill
+                # filter (see clear_drill_filter's docstring: this exact
+                # bug shipped invisibly for a full attempt) is visible in
+                # the data itself, not just in a screenshot someone has to
+                # think to go look at.
+                entry["active_filters"] = active_filters
+                entry["timeout_diagnostic"] = timeout_diag_paths
                 tabs.append(entry)
                 print(f"  rendered={entry['rendered']} render_state={render_state!r} "
                       f"ttfp_s={ttfp_s} console_errors={len(console_errors)} "
+                      f"active_filters={active_filters!r} "
                       "(void attribution pending)")
 
             print("=== freshness pass (revisit each tab, same session) ===")
@@ -705,6 +895,19 @@ def main():
                         "? window.__uiLiveTicks[window.__uiLiveTicks.length - 1] : null;")
                     now_ms = session.execute_script("return Date.now();")
                     age_s = (now_ms - last_ts) / 1000.0 if last_ts is not None else None
+                except PanelTimeoutError as e:
+                    print(f"  note [freshness {tab_id}]: {e}", file=sys.stderr)
+                    age_s = None
+                    try:
+                        html_path, shot_path2 = e.diagnostic.save(args.out_dir)
+                        entry.setdefault("timeout_diagnostic", None)
+                        entry["freshness_timeout_diagnostic"] = {
+                            "containers_json": html_path, "fullpage_png": shot_path2}
+                        print(f"  note [freshness {tab_id}]: timeout diagnostic "
+                              f"saved to {html_path} / {shot_path2}", file=sys.stderr)
+                    except Exception as save_err:
+                        print(f"  note [freshness {tab_id}]: failed to save "
+                              f"timeout diagnostic: {save_err}", file=sys.stderr)
                 except Exception as e:
                     print(f"  note [freshness {tab_id}]: {e}", file=sys.stderr)
                     age_s = None
@@ -798,6 +1001,8 @@ def main():
     # real chance to be measured this run, not just whether it was.
     verdict["tick_wait_bound_s"] = tick_wait_bound_s
     verdict["tick_wait_elapsed_s"] = tick_wait_elapsed_s
+    verdict["capture_age_s"] = capture_age_s
+    verdict["min_capture_age_s"] = args.min_capture_age_s
     # counted, precondition-only (coordinator, 2026-09-28): gated strictly
     # on the four assertions already enforced above by construction (a run
     # that reached this point already passed unlocked/awake at pre-flight,

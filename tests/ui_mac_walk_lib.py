@@ -390,6 +390,46 @@ def walk_precondition_reason(screen_locked, display_asleep):
     return None
 
 
+def empty_state_matches(snapshot, expected_text):
+    """snapshot: {"present": bool, "text": str|None} read from a page
+    element. Returns True only if present AND the text EXACTLY matches
+    expected_text -- never matches on element presence alone.
+
+    Bypass this closes (2026-09-28 review): app.js's own switchTab() puts
+    a GENERIC transient '<div class="loading">Loading...</div>' into the
+    SAME container (#table-container) a tab's own genuine empty-result
+    state (e.g. queries.js: "No data for selected range") uses. A check
+    that only asked "is there a .loading element here" would read GREEN
+    on a hung fetch that never actually returned -- the exact trap named
+    in review. Matching the precise text is what tells "still loading"
+    apart from "loaded, and the answer is nothing"."""
+    if not snapshot or not snapshot.get("present"):
+        return False
+    text = (snapshot.get("text") or "").strip()
+    return text == expected_text
+
+
+def capture_age_reason(capture_age_s, min_capture_age_s):
+    """Returns a reason string if the remote capture has not been running
+    long enough to be a meaningful walk, else None. Found live (2026-09-28
+    review): a run's own AAS chart showed activity only in the last ~30s of
+    a 15-minute window -- the workload had barely started when the walk
+    ran, so most tabs had almost nothing to show regardless of any code
+    defect. Fail closed: capture_age_s=None (the caller never told this
+    function when the capture started) refuses too -- an unmeasured
+    capture age is not the same claim as a long-running one, same
+    contract as walk_precondition_reason's screen-lock/display-asleep
+    checks."""
+    if capture_age_s is None:
+        return ("capture start time not provided -- cannot verify the "
+                "capture has been running long enough, refusing to guess")
+    if capture_age_s < min_capture_age_s:
+        return (f"capture has only been running {capture_age_s:.0f}s "
+                f"(< {min_capture_age_s:.0f}s minimum) -- most tabs would "
+                "have almost nothing to show regardless of the product")
+    return None
+
+
 def majority_void(tabs):
     """True if MORE THAN HALF of `tabs` (build_tab_entry dicts) are void
     (Mac-side infrastructure noise, not a product signal) -- coordinator's

@@ -711,6 +711,74 @@ def test_display_asleep_no_displays_is_none():
         "display_asleep_from_system_profiler: GPU with no displays -> None")
 
 
+# ── empty_state_matches: the bypass-trap fix (review blocker, 2026-09-28) ──
+# app.js's switchTab() puts a GENERIC ".loading">Loading...</div> into the
+# SAME container (#table-container) a tab's own genuine empty-result state
+# uses -- a check that only asked "is there a .loading element" would go
+# green on a hung fetch that never actually returned.
+
+def test_empty_state_matches_exact_text():
+    snap = {"present": True, "text": "No data for selected range"}
+    check(lib.empty_state_matches(snap, "No data for selected range") is True,
+          "empty_state_matches: exact text match -> True")
+
+
+def test_empty_state_matches_mocked_hung_request_is_red():
+    # THE bypass case, demonstrated directly: a hung fetch leaves the
+    # GENERIC transient "Loading..." text in the exact same container/class
+    # the genuine empty state uses. A naive "is .loading present" check
+    # would wrongly call this "empty" and pass -- this must stay False.
+    snap = {"present": True, "text": "Loading..."}
+    check(lib.empty_state_matches(snap, "No data for selected range") is False,
+          "empty_state_matches: generic 'Loading...' text (a hung/in-flight "
+          "fetch, not a genuine empty result) must NOT match -- red case "
+          "for the exact bypass review found")
+
+
+def test_empty_state_matches_not_present():
+    check(lib.empty_state_matches({"present": False, "text": None},
+                                   "No data for selected range") is False,
+          "empty_state_matches: element not present -> False")
+
+
+def test_empty_state_matches_whitespace_tolerant():
+    snap = {"present": True, "text": "  No data for selected range  \n"}
+    check(lib.empty_state_matches(snap, "No data for selected range") is True,
+          "empty_state_matches: surrounding whitespace from textContent is stripped")
+
+
+def test_empty_state_matches_none_snapshot():
+    check(lib.empty_state_matches(None, "No data for selected range") is False,
+          "empty_state_matches: None snapshot -> False, not a crash")
+
+
+# ── capture_age_reason ────────────────────────────────────────────────────
+
+def test_capture_age_reason_old_enough():
+    check(lib.capture_age_reason(300.0, 120.0) is None,
+          "capture_age_reason: 300s of capture >= 120s minimum -> None (proceed)")
+
+
+def test_capture_age_reason_too_young():
+    # RED case: this is the reviewer's exact reproduction -- a run whose
+    # AAS chart showed activity only in the last ~30s of a 15-minute
+    # window.
+    reason = lib.capture_age_reason(30.0, 120.0)
+    check(reason is not None and "30s" in reason,
+          f"capture_age_reason: 30s of capture < 120s minimum -> refuses (got {reason!r})")
+
+
+def test_capture_age_reason_unmeasured_refuses():
+    check(lib.capture_age_reason(None, 120.0) is not None,
+          "capture_age_reason: capture start time not provided -> refuses, "
+          "never assumed old enough")
+
+
+def test_capture_age_reason_exactly_at_bound():
+    check(lib.capture_age_reason(120.0, 120.0) is None,
+          "capture_age_reason: exactly at the minimum counts (>=, not >)")
+
+
 def test_walk_precondition_all_clear():
     check(lib.walk_precondition_reason(False, False) is None,
           "walk_precondition_reason: unlocked + awake -> None (walk may proceed)")

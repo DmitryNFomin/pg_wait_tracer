@@ -307,6 +307,13 @@ fi
 # ── Start the remote workload + daemon, all backgrounded with nohup + a PID
 # file each, torn down explicitly by ephemeral_cleanup above ────────────────
 echo "ui-mac-walk: starting pgbench + lock/sleep workload + daemon (--mode full, PG $PG_MAJOR) on $target" | tee -a "$log"
+# Recorded right before the ssh call that starts pgbench/workload/daemon --
+# passed to ui_mac_walk_safari.py's --capture-start-epoch so its minimum
+# capture-age precondition (2026-09-28 review: a run whose workload had
+# barely started produced a near-empty walk regardless of the product) has
+# a real start time to measure against, not an omitted one that would
+# refuse the walk outright.
+REMOTE_CAPTURE_START_EPOCH=$(date +%s)
 remote_start_out=$(ssh -o BatchMode=yes "$target" bash -s -- "$PG_MAJOR" "$DURATION_S" "$REMOTE_DIR" <<'REMOTE_EOF'
 set -uo pipefail
 pg_major="$1"; duration_s="$2"; remote_dir="$3"
@@ -416,7 +423,9 @@ if [[ "$DRIVER" == "safari" ]]; then
     SAFARI_BASE_URL="http://127.0.0.1:$PORT/"
     python3 tests/ui_mac_walk_safari.py --url "$SAFARI_BASE_URL" \
         --safaridriver-port "${PGWT_UI_MAC_SAFARIDRIVER_PORT:-9994}" \
-        --max-quiet-wait-s "${PGWT_UI_MAC_MAX_QUIET_WAIT_S:-300}"
+        --max-quiet-wait-s "${PGWT_UI_MAC_MAX_QUIET_WAIT_S:-300}" \
+        --capture-start-epoch "$REMOTE_CAPTURE_START_EPOCH" \
+        --min-capture-age-s "${PGWT_UI_MAC_MIN_CAPTURE_AGE_S:-120}"
 else
     python3 tests/ui_mac_walk.py --url "$BASE_URL"
 fi
