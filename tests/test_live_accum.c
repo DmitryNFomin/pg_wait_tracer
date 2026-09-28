@@ -640,6 +640,119 @@ static void test_ring_delta_cpu_close(void)
           "window CPU* ROW = 200 ms (got %llu)",
           (unsigned long long)snap_row(d, 0));
 
+    /* The in-daemon detector for THIS direction (#202 review). clamped_
+     * fields only sees a field going down, so it was blind to the failure
+     * that started all this; overshoot_ns is the counterpart. A healthy
+     * window must read 0 — and it must be 0 because the rows balance, not
+     * because nothing looked, which is why the explicit row values above
+     * are asserted first. */
+    CHECK(d->overshoot_ns == 0,
+          "healthy window: overshoot_ns = 0 (got %llu)",
+          (unsigned long long)d->overshoot_ns);
+
+    /* The detector must actually be able to FIRE. Rebuild the same window
+     * with the PRE-#202 closed-record rule — the gap charged to CPU* —
+     * which is the exact shape that produced 18330 ms of rows against
+     * 15255 ms of DB Time with clamped_fields 0. A counter nobody has seen
+     * move is not evidence that it can. */
+    {
+        struct pgwt_ring bad;
+        pgwt_ring_init(&bad, 4);
+        struct pgwt_accumulator *bclosed = calloc(1, sizeof(*bclosed));
+        struct pgwt_accumulator *bview = calloc(1, sizeof(*bview));
+        pgwt_accum_init(bclosed);
+        memcpy(bview, bclosed, sizeof(*bview));
+        struct pgwt_live_interval bopen = {
+            .pid = 7, .we = 0, .wall_ns = MS(2000), .cpu_ns = MS(1000),
+            .cmd_gate_active = true, .cmd_open = true, .closed = false,
+        };
+        pgwt_accum_add_interval(bview, &bopen);
+        pgwt_ring_push(&bad, bview);
+        /* The old rule: .cpu_ns = dur, i.e. the whole 2500 ms gap. */
+        struct pgwt_live_interval bclose = {
+            .pid = 7, .we = 0, .wall_ns = MS(2500), .cpu_ns = MS(2500),
+            .cmd_gate_active = true, .cmd_open = true, .closed = true,
+        };
+        pgwt_accum_add_interval(bclosed, &bclose);
+        memcpy(bview, bclosed, sizeof(*bview));
+        pgwt_ring_push(&bad, bview);
+        struct pgwt_snapshot *bd = calloc(1, sizeof(*bd));
+        CHECK(pgwt_ring_delta(&bad, 1, bd) == 0, "pre-fix window delta");
+        CHECK(bd->tm.db_time_ns == MS(500) && bd->tm.cpu_time_ns == MS(1500),
+              "…rows 1500 ms vs DB Time 500 ms");
+        CHECK(bd->overshoot_ns == MS(1000),
+              "…overshoot_ns FIRES at 1000 ms (got %llu)",
+              (unsigned long long)bd->overshoot_ns);
+        /* clamped_fields reads 1 here only because tm.offcpu_time_ns — a
+         * field the pre-fix tree did not have — fell from 1000 ms to 0.
+         * In the real #202 run it was 0. Either way a clamp COUNT says
+         * "one field went down", never "1000 ms was counted twice": the
+         * two counters answer different questions, which is the point. */
+        CHECK(bd->clamped_fields == 1,
+              "…and a clamp count (%u) does not carry that quantity",
+              bd->clamped_fields);
+        free(bd);
+        free(bview);
+        free(bclosed);
+        pgwt_ring_free(&bad);
+    }
+
+    /* The case the clamp counter is STRUCTURALLY blind to, which is how
+     * #202 arrived: every field goes UP, nothing is clamped, and the rows
+     * still exceed DB Time. clamped_fields must read 0 and overshoot_ns
+     * must read the excess — that contrast is the whole justification for
+     * adding a second counter rather than reusing the first. */
+    {
+        struct pgwt_snapshot o;
+        memset(&o, 0, sizeof(o));
+        struct pgwt_ring orr;
+        pgwt_ring_init(&orr, 4);
+        struct pgwt_accumulator *oa = calloc(1, sizeof(*oa));
+        pgwt_accum_init(oa);
+        oa->tm.db_time_ns = MS(10000);
+        oa->tm.cpu_time_ns = MS(10000);
+        pgwt_ring_push(&orr, oa);
+        oa->tm.db_time_ns  += MS(500);     /* both monotone increasing */
+        oa->tm.cpu_time_ns += MS(1500);
+        pgwt_ring_push(&orr, oa);
+        CHECK(pgwt_ring_delta(&orr, 1, &o) == 0, "monotone-overshoot delta");
+        CHECK(o.clamped_fields == 0,
+              "…nothing went down, so clamped_fields is 0 (got %u) — the "
+              "old fail-safe cannot see this at all", o.clamped_fields);
+        CHECK(o.overshoot_ns == MS(1000),
+              "…overshoot_ns reads the 1000 ms excess (got %llu)",
+              (unsigned long long)o.overshoot_ns);
+        free(oa);
+        pgwt_ring_free(&orr);
+    }
+
+    /* Under-shoot must NOT be counted: it is the direction a residual row
+     * absorbs silently, and calling it over-attribution would make the
+     * counter fire on every legacy-tier window. */
+    {
+        struct pgwt_snapshot u;
+        memset(&u, 0, sizeof(u));
+        struct pgwt_ring ur;
+        pgwt_ring_init(&ur, 4);
+        struct pgwt_accumulator *ua = calloc(1, sizeof(*ua));
+        pgwt_accum_init(ua);
+        pgwt_ring_push(&ur, ua);
+        /* db grows by 1000 while only 400 lands in a row (an Activity-class
+         * non-idle event: counted in DB Time, no top-level row prints it). */
+        ua->tm.db_time_ns += MS(1000);
+        ua->tm.io_time_ns += MS(400);
+        pgwt_ring_push(&ur, ua);
+        CHECK(pgwt_ring_delta(&ur, 1, &u) == 0, "under-shoot window delta");
+        CHECK(u.tm.db_time_ns == MS(1000) && u.tm.io_time_ns == MS(400),
+              "…600 ms of DB Time has no row");
+        CHECK(u.overshoot_ns == 0,
+              "…and overshoot_ns stays 0 (got %llu) — under-attribution is "
+              "not what this counter is for",
+              (unsigned long long)u.overshoot_ns);
+        free(ua);
+        pgwt_ring_free(&ur);
+    }
+
     /* A window whose BASE cannot be resolved must REFUSE, never approve:
      * with one snapshot in the ring there is no previous tick, and
      * pgwt_ring_delta must say so (output.c then prints "-" for that

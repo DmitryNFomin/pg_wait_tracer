@@ -64,6 +64,21 @@ static int window_delta(struct pgwt_daemon *d, int w, struct pgwt_snapshot *out)
                     d->windows[w], out->clamped_fields);
         }
     }
+    /* #202: the other direction, which the clamp above cannot see — rows
+     * summing to MORE than the window's DB Time is time counted against
+     * two buckets. Never silent. */
+    if (out->overshoot_ns) {
+        static int over_logged = 0;
+        d->counters.ring_delta_overshoot_ns_total += out->overshoot_ns;
+        if (d->debug_dump_state && !over_logged) {
+            over_logged = 1;
+            fprintf(stderr, "DEBUG: multi-window delta (Last %ds) rows "
+                    "OVERSHOOT DB Time by %.1f ms — time counted against "
+                    "more than one bucket (see metrics "
+                    "ring_delta_overshoot_ns_total)\n",
+                    d->windows[w], out->overshoot_ns / 1e6);
+        }
+    }
     return 1;
 }
 

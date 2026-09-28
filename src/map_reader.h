@@ -57,13 +57,21 @@ struct pgwt_pid_accum {
 
 /* Time model (system-wide).
  *
- * Conservation contract (issue #202): for EVERY value of this struct, and
- * therefore for every windowed delta of two of them,
+ * Conservation contract (issue #202): for EVERY value of this struct,
  *
  *     cpu_time_ns + offcpu_time_ns + Σ(the eight wait-class fields)
  *         == db_time_ns
  *
- * exactly. An on-CPU interval contributes its MEASURED on-CPU ns to
+ * exactly — and therefore for every windowed delta of two of them too,
+ * ABSENT A RING-DELTA CLAMP. snapshot.c's sat_sub floors a field that went
+ * DOWN at 0 (issue #97: an open stretch closing under a different label),
+ * and a floored field is no longer the true difference, so the identity
+ * can break in that one case. Neither half of that is silent: every clamp
+ * is counted (metrics ring_delta_clamps_total) and the resulting excess is
+ * measured (snapshot.h overshoot_ns → ring_delta_overshoot_ns_total),
+ * which is the direction the clamp counter is structurally blind to.
+ *
+ * An on-CPU interval contributes its MEASURED on-CPU ns to
  * cpu_time_ns and the rest of its wall to offcpu_time_ns (runqueue /
  * throttle / unaccounted); a wait contributes its whole wall to its class.
  * Both live paths — the closed trace record (event_stream.c) and the open

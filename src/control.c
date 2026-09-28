@@ -343,6 +343,10 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
      * of wrapping (an open stretch closed under a different label). */
     cjson_add_uint64(root, "ring_delta_clamps_total",
                      ctr->ring_delta_clamps_total);
+    /* #202: the over-attribution direction, which the clamp counter above
+     * is structurally blind to (it only sees a field going DOWN). */
+    cjson_add_uint64(root, "ring_delta_overshoot_ns_total",
+                     ctr->ring_delta_overshoot_ns_total);
     /* #98 live command gate: how the live CPU* classification was decided.
      * live_cpu_gate mirrors status; the counters are the non-marker share
      * (unmarked pids / full accumulator), so a scrape alone tells whether
