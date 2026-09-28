@@ -132,4 +132,15 @@ for i in $(seq 1 "$RUNS"); do
     rc=$?
     [[ $rc -ne 0 ]] && RC=$rc
 done
+
+if [[ "${PGWT_PROBE_EMULATE:-0}" != "0" ]]; then
+    for i in $(seq 1 "$RUNS"); do
+        echo "=== smoke-shaped emulation run $i/$RUNS ==="
+        python3 "$SCRIPT_DIR/timeline_window_probe.py" --url "$BASE_URL" \
+            --emulate-smoke --ticks 6 \
+            --out "$PROJECT_DIR/tests/results/timeline_probe/emulate$i"
+        rc=$?
+        [[ $rc -ne 0 ]] && RC=$rc
+    done
+fi
 exit "$RC"
