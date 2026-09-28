@@ -53,6 +53,9 @@ run python3 -m py_compile tests/*.py
 step "python: free_ports self-test"
 run python3 tests/test_free_ports.py
 
+step "python: ui_mac_walk_lib self-test"
+run python3 tests/test_ui_mac_walk_lib.py
+
 step "CI change-classifier table-driven test (issue #167)"
 run bash tests/test_classify_changed_files.sh
 

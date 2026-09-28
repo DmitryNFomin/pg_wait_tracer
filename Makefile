@@ -293,8 +293,15 @@ clean:
 #                  launcher was killed before it could collect results and
 #                  delete the VM -- reattaches via
 #                  tests/results/.demo-rehearsal-state.sh.
+#   ui-mac-walk    a FIRST measurement of the actual demo path: real Chrome
+#                  + the Go bridge on THIS Mac, ssh out to a throwaway
+#                  Hetzner VM running the daemon + PG -- every prior
+#                  rehearsal instead walked headless Chromium against a
+#                  bridge/daemon both on the VM. Not a gate (see
+#                  docs/DEMO_REHEARSAL_CRITERIA.md); KEEP=1 leaves the VM up
+#                  for a later round -> tests/results/ui_mac_walk/.
 # ---------------------------------------------------------------------------
-.PHONY: check check-fast box-check hetzner-sweep ui-gallery demo-rehearsal demo-rehearsal-collect
+.PHONY: check check-fast box-check hetzner-sweep ui-gallery demo-rehearsal demo-rehearsal-collect ui-mac-walk
 check:
 	@bash tests/test_check_lock.sh
 	@scripts/check-lock.sh scripts/check.sh
@@ -310,3 +317,5 @@ demo-rehearsal:
 	@DURATION_MIN=$(DURATION_MIN) KEEP=$(KEEP) scripts/demo-rehearsal.sh
 demo-rehearsal-collect:
 	@KEEP=$(KEEP) scripts/demo-rehearsal.sh --collect
+ui-mac-walk:
+	@KEEP=$(KEEP) tests/ui_mac_walk.sh

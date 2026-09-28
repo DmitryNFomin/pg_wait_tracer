@@ -72,3 +72,8 @@ tests/results/demo-rehearsal-*.log
 tests/results/demo_rehearsal/
 tests/results/.demo-rehearsal-state.sh
 tests/results/.demo_rehearsal_staging/
+tests/results/ui-mac-walk-*.log
+tests/results/ui_mac_walk/
+tests/results/ui_mac_walk_reconnect/
+tests/results/ui_mac_walk_safari_reconnect/
+tests/results/.ui-mac-walk-state.sh
