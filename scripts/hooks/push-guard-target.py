@@ -13,6 +13,8 @@ import sys
 
 
 SEPARATORS = {";", "&&", "||", "|", "&", "\n", "(", ")"}
+PUNCTUATION = ";&|()<>"
+OPERATORS = re.compile(r"&&|\|\||<<|>>|[;&|()<>]")
 VALUE_OPTIONS = {"-c", "--config-env", "--git-dir", "--work-tree", "--namespace", "--exec-path"}
 UNSAFE_OPTIONS = {"--git-dir", "--work-tree", "--namespace"}
 FLAG_OPTIONS = {"-p", "-P", "--paginate", "--no-pager", "--no-replace-objects",
@@ -55,10 +57,23 @@ def git_target(args, cwd):
 
 
 def targets(command, start=None):
-    lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|()<>")
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=PUNCTUATION)
     lexer.whitespace = " \t\r"
     lexer.commenters = "#"
-    raw = list(lexer)
+    raw = []
+    for token in lexer:
+        # shlex groups adjacent punctuation, including different operators.
+        # Split the run before separator recognition; reject unknown runs.
+        if token and all(char in PUNCTUATION for char in token):
+            operators = OPERATORS.findall(token)
+            if ("".join(operators) != token
+                    or any(op not in SEPARATORS | {"<<", ">", ">>"} for op in operators)
+                    or any(left not in {"(", ")"} and right not in {"(", ")"}
+                           for left, right in zip(operators, operators[1:]))):
+                raise ValueError(f"unknown shell operator: {token}")
+            raw.extend(operators)
+        else:
+            raw.append(token)
     tokens = []
     i = 0
     while i < len(raw):
@@ -88,7 +103,10 @@ def targets(command, start=None):
     cwd = start or os.getcwd()
     found = []
     segment = []
-    uncertain = any(name in os.environ for name in REPO_ENV)
+    # POSIX shlex removes quotes, making a quoted operator-only path look like
+    # shell punctuation. Refuse to resolve a push when that distinction is lost.
+    uncertain = (any(name in os.environ for name in REPO_ENV)
+                 or bool(re.search(r"(['\"])[;&|()<>]+\1", command)))
 
     def process(parts):
         nonlocal cwd, uncertain
@@ -130,6 +148,8 @@ def targets(command, start=None):
         else:
             # Unknown wrappers (for example sudo) can execute a git argument.
             # Detect its subcommand but refuse to guess the wrapper's cwd.
+            # A quoted ssh command runs on another machine; its repository
+            # cannot be checked against a local stamp, so exclude it here.
             for i, word in enumerate(parts[1:], 1):
                 if word == "git" or word.endswith("/git"):
                     push, _ = git_target(parts[i + 1:], cwd)
@@ -144,6 +164,11 @@ def targets(command, start=None):
             continue
         if token in SEPARATORS:
             process(segment)
+            # Grouping and conditional/parallel execution can change whether
+            # a preceding cd affects this shell. Keep the result uncertain.
+            if (token in {"(", ")", "||", "|", "&"}
+                    or (token == "&&" and (not segment or segment[0] != "cd"))):
+                uncertain = True
             if segment and segment[0] == "cd" and token != "&&":
                 uncertain = True
             segment = []

@@ -62,6 +62,13 @@ def cases(main, worktree):
     stamp(main)
     (worktree / ".pgwt-check.stamp").unlink()
     yield "unstamped worktree, clean main", f"cd {q} && git push origin agent/test", main, 2, True
+    (worktree / "data.txt").write_text("dirty and unstamped\n")
+    yield "substitution adjacent semicolon", f"x=$(pwd);cd {q} && git push origin agent/test", main, 2, True
+    yield "substitution adjacent and", f"x=$(pwd)&&cd {q} && git push origin agent/test", main, 2, True
+    yield "substitution adjacent or", f"x=$(pwd)||cd {q} && git push origin agent/test", main, 2, True
+    yield "substitution adjacent pipe", f"x=$(pwd)|cd {q} && git push origin agent/test", main, 2, True
+    yield "multiple glued operators", f"x=$(pwd);(cd {q} && git push origin agent/test)", main, 2, True
+    yield "glued close and", f"(cd {q})&&git push origin main", main, 2, True
     stamp(worktree)
     (worktree / "data.txt").write_text("changed in worktree\n")
     yield "stale worktree, clean main", f"cd {q} && git push origin agent/test", main, 2, True
@@ -78,21 +85,24 @@ def cases(main, worktree):
 
 
 def main():
-    old = os.environ.get("PGWT_TEST_PUSH_GUARD") is not None
     failed = 0
+    selected = os.environ.get("PGWT_TEST_CASE_FILTER")
+    count = 0
     with tempfile.TemporaryDirectory(prefix="pgwt-push-guard-") as tmp:
         repo, worktree = fixture(Path(tmp))
         stamp(repo)
         stamp(worktree)
-        for name, command, cwd, expected, should_red in cases(repo, worktree):
+        for name, command, cwd, expected, _should_red in cases(repo, worktree):
+            if selected and name not in selected.split(","):
+                continue
+            count += 1
             code, error = run(command, cwd, name == "skip escape hatch")
-            want = (code != expected) if old and should_red else (code == expected)
+            want = code == expected
             print(f"  {'PASS' if want else 'FAIL'}: {name} (exit {code}, fixed expectation {expected})")
             if not want:
                 print(f"    stderr: {error.strip()}")
                 failed += 1
-    mode = "original hook red cases" if old else "fixed hook"
-    print(f"push guard {mode}: {15 - failed}/15 passed")
+    print(f"push guard: {count - failed}/{count} passed")
     return 1 if failed else 0
 
 
