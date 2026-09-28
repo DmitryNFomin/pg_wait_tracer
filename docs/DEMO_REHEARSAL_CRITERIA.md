@@ -19,6 +19,25 @@ Full mode. `RECENT_WINDOW_S` = 60 s, `TIME_MODEL_TOLERANCE_PCT` = 1.0.
 A rehearsal run on a different workload, client count, PG version, box class or
 script commit is a different experiment and does not count toward the sequence.
 
+## The demo configuration (owner, 2026-09-28)
+
+Pre-registered here so the rehearsal is run against the thing being demoed,
+rather than the thing that was convenient to test:
+
+- **PostgreSQL 18** (latest).
+- **The same hardware class as today's gate box** — Hetzner `cx33`.
+
+Two consequences follow, and both are deliberate:
+
+1. Rehearsals run on a `cx33`, which is what the throwaway VMs already are, so
+   the machine under test matches the machine that will be demoed. A rehearsal
+   on any other class does not count toward the sequence.
+2. This validates the software, the capture and the script on the demo's
+   hardware. It does **not** validate the browser and screen the audience will
+   actually see: §4's viewport and time-to-first-paint criteria are still
+   pinned to a stated resolution rather than to the projector, and nothing here
+   measures the laptop driving it. That gap is named rather than closed.
+
 ## A rehearsal is CLEAN only if ALL of these hold
 
 Any single failure makes the attempt not clean, however good the rest look.
