@@ -102,6 +102,7 @@ token="$(hcloud_token || true)"
 
 server_id=""
 server_ip=""
+server_name=""
 reused=0
 if [[ -f "$STATE_FILE" ]]; then
     # shellcheck disable=SC1090
@@ -144,6 +145,26 @@ ephemeral_cleanup() {
         ' >>"$log" 2>&1
     fi
 
+    # ORPHAN-WINDOW GUARD (2026-09-28: found live, this exact gap leaked a
+    # VM). server_id is only assigned AFTER `hetzner-vm.sh create`'s command
+    # substitution returns -- a SIGTERM delivered while still inside that
+    # substitution (VM already created, e.g. waiting for SSH) used to hit
+    # the `-z "$server_id"` check below and return immediately, never
+    # deleting the VM it had already paid to create. This mirrors the same
+    # guard scripts/box-check.sh's EPHEMERAL=1 path and scripts/demo-
+    # rehearsal.sh already use -- server_name is set (and pre-declared
+    # empty under `set -u`, see above) BEFORE the create call, so it
+    # survives an interruption that server_id does not.
+    if [[ -z "$server_id" && -n "$server_name" ]]; then
+        local lookup_token="$token"
+        [[ -z "$lookup_token" ]] && lookup_token="$(hcloud_token || true)"
+        if [[ -n "$lookup_token" ]]; then
+            echo "ui-mac-walk: server_id not yet known at cleanup time -- looking up '$server_name' by name (orphan-window guard)" | tee -a "$log"
+            server_id=$(curl -s "https://api.hetzner.cloud/v1/servers?name=$server_name" \
+                -H "Authorization: Bearer $lookup_token" | jq -r '.servers[0].id // empty' 2>/dev/null)
+            [[ -n "$server_id" ]] && echo "ui-mac-walk: found $server_name as id=$server_id by name lookup" | tee -a "$log"
+        fi
+    fi
     [[ -z "$server_id" ]] && return
     if [[ "$KEEP" == "1" ]]; then
         cat > "$STATE_FILE" <<EOF
