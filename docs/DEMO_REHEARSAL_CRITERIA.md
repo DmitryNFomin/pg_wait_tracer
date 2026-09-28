@@ -39,6 +39,52 @@ Two consequences follow, and both are deliberate:
    client half is the Mac, and that is the half a rehearsal on the VM does not
    exercise at all.
 
+## Owner pre-flight checklist (run ONCE per rehearsal window)
+
+Every one of these was discovered the hard way on 2026-09-28, one at a time,
+each costing the owner a separate interruption. They are collected here so a
+rehearsal window costs him **one interaction instead of a dozen**. The harness
+asserts each of them and **fails fast naming the unmet one** — it never retries
+into an opaque error and never quietly proceeds.
+
+Before saying "go":
+
+1. **Auto-lock off.** System Settings → Lock Screen → "Require password after
+   screen saver begins or display is turned off" → **Never**, and display sleep
+   set long. macOS refuses WebDriver fullscreen on a locked session, and the
+   screen re-locks *during* the several minutes of VM provisioning — so
+   unlocking once is not enough. Restore afterwards.
+2. **Page zoom at 100% on the pgwt tab** (`Cmd+0`). Safari persists zoom
+   per-hostname: a 115% setting on `localhost` silently shrank the viewport by
+   15% and produced a layout nobody intended. The harness navigates via
+   `127.0.0.1`, which carries no such setting, but the owner's own tab is
+   still whatever he last left it at.
+3. **Display awake and the session unlocked** at the moment of starting.
+4. **No multipass or other local VMs running** (`multipass list`, then
+   `multipass stop <name>`). Two Ubuntu VMs were consuming CPU during the first
+   attempts.
+5. **Time Machine not mid-backup**, and no Photos media analysis running. Both
+   appeared in the top CPU consumers during a measurement.
+6. **Second display detached** if the demo is on the built-in panel.
+   WindowServer drew 40.7% CPU compositing a 6K external alongside the Retina
+   panel, versus 19.7% with it detached.
+7. **Quit heavy apps** that will not be part of the demo.
+
+Two things that are the harness's job, not the owner's, and are listed here
+only so nobody asks him for them again: holding the display awake (the harness
+owns its own `caffeinate` with a trap) and cleaning up its own processes and
+VMs. **The owner should never be asked to kill an orphaned shell.** That
+happened twice on 2026-09-28 and was a missing trap, not a thing for him to do.
+
+### What the harness must do with this list
+
+- Assert every item it can observe — lock state via `CGSSessionScreenIsLocked`,
+  display sleep, achieved viewport, effective zoom, load and memory pressure.
+- On an unmet precondition: **stop, name it, do not retry.** An opaque failure
+  costs an owner interaction; a named one costs a setting change.
+- Record every observed value in the verdict, so a reader can tell later which
+  conditions produced a number.
+
 ## Two verdicts, never merged into one
 
 A rehearsal produces **two** results and they are reported separately:
