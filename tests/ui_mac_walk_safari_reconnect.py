@@ -203,12 +203,24 @@ def main():
                 ["sw_vers", "-buildVersion"], capture_output=True, text=True).stdout.strip(),
         }
 
+        # ORDER MATTERS (confirmed independently twice -- see
+        # tests/ui_mac_walk_safari.py's own comment at the same call site):
+        # navigate() before fullscreen(), never the reverse. reset_zoom()
+        # (Cmd+0) counters Safari's persisted per-hostname page zoom
+        # (measured ~115% for "localhost" specifically on this Mac,
+        # 2026-09-28) -- there is no W3C "set zoom" endpoint, so its actual
+        # effect is verified via effective_zoom below regardless of whether
+        # the shortcut itself worked.
         session.navigate(base_url)
+        session.reset_zoom()
         session.fullscreen()
         achieved_viewport = session.viewport_size()
+        effective_zoom = lib.effective_zoom(TARGET_VIEWPORT["width"],
+                                             achieved_viewport.get("width"))
         result["display_identity"]["viewport"] = achieved_viewport
         result["display_identity"]["viewport_matches_target"] = (
             achieved_viewport == TARGET_VIEWPORT)
+        result["display_identity"]["effective_zoom"] = effective_zoom
         print(f"  display identity: {result['display_identity']}")
 
         print("[3/6] waiting for initial connect")

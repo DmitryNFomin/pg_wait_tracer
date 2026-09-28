@@ -28,6 +28,7 @@ Usage:
 """
 import base64
 import json
+import time
 import urllib.error
 import urllib.request
 
@@ -106,13 +107,62 @@ class SafariSession:
         return self._raw("POST", f"/session/{self.session_id}/window/rect",
                           {"width": width, "height": height, "x": x, "y": y})
 
-    def fullscreen(self):
+    def reset_zoom(self):
+        """Sends Cmd+0 (Safari's 'Actual Size' shortcut, resets page zoom to
+        100%) via the W3C WebDriver Actions API. Found live (2026-09-28,
+        coordinator): Safari persists a PER-HOSTNAME page zoom (measured
+        ~115% for the hostname 'localhost' specifically on this Mac,
+        confirmed by 127.0.0.1 and about:blank both being unaffected) --
+        invisible, permanent-until-cleared, per-machine state that makes a
+        rehearsal unreproducible if inherited rather than set. There is no
+        W3C-standard "set zoom" endpoint; a keyboard shortcut via Actions is
+        the only lever available here. Call AFTER navigate() (a shortcut
+        needs a page with focus) and BEFORE fullscreen() (viewport
+        assertions must see the reset zoom, not the persisted one)."""
+        actions = {"actions": [{
+            "type": "key", "id": "keyboard",
+            "actions": [
+                {"type": "keyDown", "value": ""},  # meta/cmd
+                {"type": "keyDown", "value": "0"},
+                {"type": "keyUp", "value": "0"},
+                {"type": "keyUp", "value": ""},
+            ],
+        }]}
+        self._raw("POST", f"/session/{self.session_id}/actions", actions)
+        # No native "zoom changed" event to wait on; the shortcut itself is
+        # synchronous UI work, a short settle covers the (rare) case Safari
+        # animates the zoom transition.
+        time.sleep(0.3)
+
+    def fullscreen(self, min_settle_s=1.5, settle_timeout_s=5.0, settle_poll_s=0.3):
         """W3C WebDriver 'Fullscreen Window' -- what the demo actually
         presents at, distinct from a sized-but-windowed rect
         (set_window_rect). Returns the window rect WebDriver reports after
-        the transition; the caller should still measure viewport_size()
-        for the CSS content area, same as after set_window_rect."""
-        return self._raw("POST", f"/session/{self.session_id}/window/fullscreen")
+        the transition.
+
+        Found live (2026-09-28): the reported CSS viewport PLATEAUS at a
+        transiently-too-tall value before reaching its true final size --
+        the toolbar-collapse animation isn't monotonically smooth, it
+        measured 1074 and HELD there for >=0.5s before dropping to the
+        correct 1069 around the 1s mark on this Mac. A naive "stop once two
+        consecutive polls agree" loop stops AT that plateau and returns the
+        wrong number with high confidence -- confirmed by hitting exactly
+        that bug here first. So: sleep an unconditional min_settle_s floor
+        first (past the known plateau), THEN poll for two consecutive equal
+        reads to absorb any further variance, bounded by settle_timeout_s
+        so a genuinely stuck transition still surfaces as a real mismatch
+        in the caller's own viewport assertion instead of hanging here."""
+        rect = self._raw("POST", f"/session/{self.session_id}/window/fullscreen")
+        time.sleep(min_settle_s)
+        deadline = time.monotonic() + settle_timeout_s
+        prev = self.viewport_size()
+        while time.monotonic() < deadline:
+            time.sleep(settle_poll_s)
+            cur = self.viewport_size()
+            if cur == prev:
+                break
+            prev = cur
+        return rect
 
     def viewport_size(self):
         """Actual CSS viewport of the content area (window.innerWidth/

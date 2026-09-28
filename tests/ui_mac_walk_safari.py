@@ -55,7 +55,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ui_mac_walk_lib as lib
 import ui_live_smoke as uls        # reused JS/selector dicts only
 import ui_live_smoke_lib as uls_lib
-from mac_sampler import MacSampler, wait_for_quiet
+from mac_sampler import MacSampler, wait_for_quiet, check_walk_precondition
 from safari_webdriver import SafariSession, WebDriverError
 
 RESULTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -224,6 +224,38 @@ def main():
     with open(os.path.join(args.out_dir, "run.id"), "w") as f:
         f.write(run_id)
 
+    # Root-caused live (2026-09-28, coordinator's own `ioreg`/
+    # `system_profiler` measurement, corroborated independently here):
+    # session.fullscreen() (POST /session/{id}/window/fullscreen) fails
+    # with an opaque "unknown error" when the console session is LOCKED
+    # (ioreg -n Root -d1 -a -> IOConsoleUsers[0].CGSSessionScreenIsLocked)
+    # -- macOS refuses a fullscreen Space transition on a locked session,
+    # full stop. Display-asleep is downstream of the same cause (the
+    # display sleeps, then the session locks) but checked on its own too.
+    # Asserted HERE, before spawning safaridriver/creating a Safari
+    # session at all, and FAILS LOUDLY WITHOUT RETRYING -- "an error naming
+    # the real cause is worth more than five minutes of opaque retries"
+    # (coordinator). Earlier iterations of this script tried mitigations
+    # that turned out insufficient (waking the display via caffeinate,
+    # waiting out an animation-settle window) BEFORE this was root-caused;
+    # those are kept (caffeinate -d below is still a real, ordinary
+    # mitigation for the display-asleep sub-case) but this assertion is
+    # the actual fix -- it stops the walk from ever reaching the point
+    # where it would fail opaquely.
+    precondition_reason, screen_locked, display_asleep = check_walk_precondition()
+    print(f"pre-flight: screen_locked={screen_locked} display_asleep={display_asleep}")
+    if precondition_reason is not None:
+        print(f"ERROR: refusing to start the Safari walk: {precondition_reason}",
+              file=sys.stderr)
+        verdict = {"run": {"id": run_id}, "ok": False, "counted": False,
+                   "blocked": {"error": "walk precondition not met",
+                               "reason": precondition_reason,
+                               "screen_locked": screen_locked,
+                               "display_asleep": display_asleep}}
+        with open(os.path.join(args.out_dir, "summary.json"), "w") as f:
+            json.dump(verdict, f, indent=2, sort_keys=True)
+        return 1
+
     if not args.skip_quiet_wait:
         print(f"pre-flight: waiting up to {args.max_quiet_wait_s}s for the "
               "Mac to go quiet (pressure_level == 1) before starting the timed walk")
@@ -231,6 +263,29 @@ def main():
         print(f"pre-flight: quiet={quiet} last_sample={last_sample}")
     else:
         print("pre-flight: --skip-quiet-wait given, starting immediately")
+
+    # Hold the display awake for the whole walk. `caffeinate -d` (prevent
+    # display idle sleep, no -t so it runs until killed) is ordinary,
+    # non-privileged tooling, not an interactive/security grant --
+    # explicitly distinct from the `safaridriver --enable` category this
+    # walk must never attempt itself.
+    #
+    # ROOT-CAUSED (2026-09-28, coordinator's own ioreg/system_profiler
+    # measurement, corroborated independently here): session.fullscreen()'s
+    # opaque "unknown error" is macOS refusing a fullscreen Space
+    # transition while the console session is LOCKED
+    # (CGSSessionScreenIsLocked) -- not display sleep by itself. Display
+    # sleep is downstream of the same cause (the display sleeps, then the
+    # session locks), which is why waking the display alone did not fix it
+    # in this script's own earlier local repros: the session can still be
+    # locked with the display freshly awake. The actual fix is the
+    # check_walk_precondition() refusal above, which checks BOTH facts and
+    # never even reaches this point if either is true. `caffeinate -d` is
+    # kept as an ordinary, real (if partial) mitigation for the
+    # display-asleep sub-case specifically -- it cannot prevent or detect
+    # the lock, which is a separate macOS setting this walk does not and
+    # must not try to work around.
+    caffeinate_proc = subprocess.Popen(["caffeinate", "-d"])
 
     driver_log = os.path.join(args.out_dir, "safaridriver.log")
     open(driver_log, "w").close()
@@ -254,6 +309,10 @@ def main():
     if not ready:
         print(f"ERROR: safaridriver never became ready on port {args.safaridriver_port}",
               file=sys.stderr)
+        if driver_proc.poll() is None:
+            driver_proc.kill()
+        if caffeinate_proc.poll() is None:
+            caffeinate_proc.kill()
         return 1
 
     sampler = MacSampler()
@@ -276,7 +335,29 @@ def main():
                 json.dump(verdict, f, indent=2, sort_keys=True)
             return 1
 
+        # ORDER MATTERS, confirmed independently twice (coordinator's own
+        # minimal script, and this script's own opaque-error history):
+        # create session -> NAVIGATE -> (short settle) -> fullscreen().
+        # Calling fullscreen() immediately after session creation with no
+        # navigation yet returns the same opaque HTTP 500 "unknown error"
+        # this module already works around for the locked-session case --
+        # a page must be loaded and focused before a Space transition is
+        # granted at all. Never reorder this.
         session.navigate(args.url)
+        # Safari persists a PER-HOSTNAME page zoom, invisible and permanent
+        # until cleared -- measured 2026-09-28 (coordinator): ~115% for the
+        # hostname "localhost" specifically on this Mac (127.0.0.1 and
+        # about:blank both unaffected), which silently shrank the achieved
+        # fullscreen viewport by the same 1440->1252 / 1710->1486 factor
+        # (0.8695, i.e. 1/1.15) on two separate real runs. The harness must
+        # SET the zoom, never inherit whatever Safari remembers for this
+        # hostname -- that is exactly the invisible per-machine state that
+        # makes a rehearsal unreproducible. reset_zoom() (Cmd+0) is the only
+        # lever WebDriver exposes (no W3C "set zoom" endpoint); its actual
+        # effect is verified below by comparing the achieved viewport
+        # against TARGET_VIEWPORT regardless -- this call is a mitigation
+        # attempt, the assertion after fullscreen() is the real gate.
+        session.reset_zoom()
         try:
             session.fullscreen()
             achieved = session.viewport_size()
@@ -286,17 +367,37 @@ def main():
             # "unknown error" (empty message) independent of this script or
             # the app under test -- reproduced against a trivial page
             # (example.com), with the SAME session's set_window_rect()
-            # working normally right before it. Caught here (not left to
-            # propagate as a bare traceback) so a real run still produces a
-            # verdict.json a caller can read, with the exact WebDriver error
-            # preserved verbatim -- never re-diagnosed or guessed at.
-            print(f"ERROR: session.fullscreen() failed: {e}", file=sys.stderr)
+            # working normally right before it. Root-caused (coordinator's
+            # ioreg/system_profiler measurement): macOS refuses a
+            # fullscreen Space transition while the console session is
+            # LOCKED (CGSSessionScreenIsLocked) -- check_walk_precondition()
+            # above should have refused BEFORE reaching here, so a failure
+            # at this point most likely means the session re-locked mid-walk
+            # (recorded below via the SAME precondition check, re-read now,
+            # not assumed still true from the pre-flight read). Caught here
+            # (not left to propagate as a bare traceback) so a real run
+            # still produces a verdict.json a caller can read, with the
+            # exact WebDriver error preserved verbatim -- never re-diagnosed
+            # or guessed at.
+            reason_now, locked_now, asleep_now = check_walk_precondition()
+            print(f"ERROR: session.fullscreen() failed: {e} "
+                  f"(re-checked precondition: locked={locked_now} asleep={asleep_now})",
+                  file=sys.stderr)
             verdict = {"run": {"id": run_id}, "ok": False, "counted": False,
                        "blocked": {"error": "fullscreen() failed",
-                                   "webdriver_error": str(e), "raw": e.raw}}
+                                   "webdriver_error": str(e), "raw": e.raw,
+                                   "screen_locked_now": locked_now,
+                                   "display_asleep_now": asleep_now}}
             with open(os.path.join(args.out_dir, "summary.json"), "w") as f:
                 json.dump(verdict, f, indent=2, sort_keys=True)
             return 1
+
+        # Effective zoom factor, recorded regardless of whether
+        # reset_zoom() actually worked -- coordinator: "if WebDriver cannot
+        # set Safari's page zoom directly, say so and record the measured
+        # zoom factor (target / achieved) so at least the number is
+        # explicit rather than hidden."
+        effective_zoom = lib.effective_zoom(TARGET_VIEWPORT["width"], achieved.get("width"))
 
         if achieved != TARGET_VIEWPORT:
             # Fail loudly (coordinator's explicit instruction), never
@@ -304,11 +405,13 @@ def main():
             # to produce -- a walk graded against the wrong viewport is
             # worse than no walk.
             print(f"ERROR: fullscreen viewport {achieved} != target "
-                  f"{TARGET_VIEWPORT} -- refusing to run the walk at the "
-                  "wrong viewport", file=sys.stderr)
+                  f"{TARGET_VIEWPORT} (effective_zoom={effective_zoom}) -- "
+                  "refusing to run the walk at the wrong viewport",
+                  file=sys.stderr)
             verdict = {"run": {"id": run_id}, "ok": False, "counted": False,
                        "blocked": {"error": "viewport assertion failed",
-                                   "achieved": achieved, "target": TARGET_VIEWPORT}}
+                                   "achieved": achieved, "target": TARGET_VIEWPORT,
+                                   "effective_zoom": effective_zoom}}
             with open(os.path.join(args.out_dir, "summary.json"), "w") as f:
                 json.dump(verdict, f, indent=2, sort_keys=True)
             return 1
@@ -331,6 +434,7 @@ def main():
             display_identity = screen_identity(session)
             display_identity["viewport_matches_target"] = (
                 display_identity["viewport"] == TARGET_VIEWPORT)
+            display_identity["effective_zoom"] = effective_zoom
             display_identity["safari_browser_version"] = session.capabilities.get("browserVersion")
             display_identity["safari_platform_build"] = session.capabilities.get(
                 "safari:platformBuildVersion")
@@ -409,6 +513,8 @@ def main():
             session.close()
         if driver_proc.poll() is None:
             driver_proc.kill()
+        if caffeinate_proc.poll() is None:
+            caffeinate_proc.kill()
 
     notes.append("freshness is a page-global AAS-tick-age proxy, not a per-chart-type "
                  "newest-bucket read -- see tests/ui_mac_walk.py's module docstring "
@@ -420,6 +526,13 @@ def main():
     verdict = lib.build_verdict(run_id, tabs, sampler.samples, notes=notes)
     verdict["version_skew"] = version_skew
     verdict["display_identity"] = display_identity
+    # Same environment-fact family as memory_pressure/loadavg (mac_samples
+    # above): the pre-flight reading, taken once before the timed walk
+    # started (not re-polled per tick -- the walk refuses outright rather
+    # than starting if either was true, so by construction both are False/
+    # False for every run that reaches this point).
+    verdict["pre_flight_screen_locked"] = screen_locked
+    verdict["pre_flight_display_asleep"] = display_asleep
     verdict_path = os.path.join(args.out_dir, "summary.json")
     with open(verdict_path, "w") as f:
         json.dump(verdict, f, indent=2, sort_keys=True)

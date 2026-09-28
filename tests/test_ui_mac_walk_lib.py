@@ -409,6 +409,124 @@ def test_build_verdict_counted_field():
     check(v2["void_count"] == 7, "build_verdict: void_count == 7")
 
 
+# ── screen_locked_from_ioreg / display_asleep_from_system_profiler /
+#    walk_precondition_reason ──────────────────────────────────────────────
+
+def test_screen_locked_true():
+    d = {"IOConsoleUsers": [{"CGSSessionScreenIsLocked": True}]}
+    check(lib.screen_locked_from_ioreg(d) is True,
+          "screen_locked_from_ioreg: locked -> True")
+
+
+def test_screen_locked_false():
+    d = {"IOConsoleUsers": [{"CGSSessionScreenIsLocked": False}]}
+    check(lib.screen_locked_from_ioreg(d) is False,
+          "screen_locked_from_ioreg: unlocked -> False")
+
+
+def test_screen_locked_missing_key_defaults_false():
+    # The real plist only carries CGSSessionScreenIsLocked when there IS a
+    # session; absence of the key on a present session dict is macOS's own
+    # "not locked" shape.
+    d = {"IOConsoleUsers": [{}]}
+    check(lib.screen_locked_from_ioreg(d) is False,
+          "screen_locked_from_ioreg: key absent on a real session dict -> False")
+
+
+def test_screen_locked_empty_shape_is_none():
+    # RED case: no IOConsoleUsers at all (ioreg exited 126/127, or its own
+    # output shape changed) must be None, never silently "unlocked".
+    check(lib.screen_locked_from_ioreg({}) is None,
+          "screen_locked_from_ioreg: no IOConsoleUsers -> None, not assumed unlocked")
+    check(lib.screen_locked_from_ioreg({"IOConsoleUsers": []}) is None,
+          "screen_locked_from_ioreg: empty IOConsoleUsers -> None")
+
+
+def test_display_asleep_true():
+    d = {"SPDisplaysDataType": [{"spdisplays_ndrvs": [
+        {"spdisplays_asleep": "spdisplays_yes"}]}]}
+    check(lib.display_asleep_from_system_profiler(d) is True,
+          "display_asleep_from_system_profiler: asleep -> True")
+
+
+def test_display_asleep_false():
+    d = {"SPDisplaysDataType": [{"spdisplays_ndrvs": [
+        {"spdisplays_online": "spdisplays_yes"}]}]}
+    check(lib.display_asleep_from_system_profiler(d) is False,
+          "display_asleep_from_system_profiler: display present, no asleep key -> False")
+
+
+def test_display_asleep_one_of_two_asleep():
+    d = {"SPDisplaysDataType": [{"spdisplays_ndrvs": [
+        {"spdisplays_asleep": "spdisplays_no"},
+        {"spdisplays_asleep": "spdisplays_yes"},
+    ]}]}
+    check(lib.display_asleep_from_system_profiler(d) is True,
+          "display_asleep_from_system_profiler: ANY asleep display -> True")
+
+
+def test_display_asleep_no_displays_is_none():
+    # RED case: no displays listed at all (system_profiler exited non-zero
+    # upstream, or its shape changed) must be None, not "not asleep".
+    check(lib.display_asleep_from_system_profiler({"SPDisplaysDataType": []}) is None,
+          "display_asleep_from_system_profiler: no GPUs -> None")
+    check(lib.display_asleep_from_system_profiler(
+        {"SPDisplaysDataType": [{"spdisplays_ndrvs": []}]}) is None,
+        "display_asleep_from_system_profiler: GPU with no displays -> None")
+
+
+def test_walk_precondition_all_clear():
+    check(lib.walk_precondition_reason(False, False) is None,
+          "walk_precondition_reason: unlocked + awake -> None (walk may proceed)")
+
+
+def test_walk_precondition_locked_refuses():
+    reason = lib.walk_precondition_reason(True, False)
+    check(reason is not None and "locked" in reason,
+          f"walk_precondition_reason: locked -> refuses (got {reason!r})")
+
+
+def test_walk_precondition_asleep_refuses():
+    reason = lib.walk_precondition_reason(False, True)
+    check(reason is not None and "asleep" in reason,
+          f"walk_precondition_reason: asleep -> refuses (got {reason!r})")
+
+
+def test_walk_precondition_unmeasured_refuses():
+    # RED case: an unmeasured precondition (ioreg/system_profiler failed)
+    # must refuse the walk, never silently proceed as if it were clear.
+    check(lib.walk_precondition_reason(None, False) is not None,
+          "walk_precondition_reason: lock state unmeasured -> refuses")
+    check(lib.walk_precondition_reason(False, None) is not None,
+          "walk_precondition_reason: display state unmeasured -> refuses")
+
+
+# ── effective_zoom ────────────────────────────────────────────────────────
+
+def test_effective_zoom_no_zoom():
+    check(lib.effective_zoom(1710, 1710) == 1.0,
+          "effective_zoom: achieved == target -> 1.0")
+
+
+def test_effective_zoom_matches_measured_115_percent():
+    z = lib.effective_zoom(1710, 1486)
+    check(abs(z - 1.15) < 0.01,
+          f"effective_zoom: 1710/1486 recovers ~1.15 (measured 115% Safari "
+          f"zoom on 'localhost', 2026-09-28) (got {z})")
+
+
+def test_effective_zoom_zero_achieved_is_none():
+    # RED case: a genuinely broken viewport read (0) must not divide by
+    # zero or report a fabricated zoom.
+    check(lib.effective_zoom(1710, 0) is None,
+          "effective_zoom: achieved width 0 -> None, not a crash or a lie")
+
+
+def test_effective_zoom_none_achieved_is_none():
+    check(lib.effective_zoom(1710, None) is None,
+          "effective_zoom: achieved width None -> None")
+
+
 if __name__ == "__main__":
     for name, fn in sorted(list(globals().items())):
         if name.startswith("test_") and callable(fn):

@@ -10,7 +10,9 @@ Impure by nature (real subprocess calls, real clock) -- tests/ui_mac_walk_lib
 feed into (parse_pressure_level, parse_free_percent, sample_is_normal,
 window_void_reason).
 """
+import json
 import os
+import plistlib
 import subprocess
 import threading
 import time
@@ -18,6 +20,49 @@ import time
 import ui_mac_walk_lib as lib
 
 SAMPLE_INTERVAL_S = 10.0
+
+
+def read_screen_lock_state():
+    """`ioreg -n Root -d1 -a` -> a parsed plist (stdlib plistlib, robust
+    against the free-text scraping this Mac's own display-sleep parsing
+    used before this was root-caused) -> screen_locked_from_ioreg(). None on
+    any failure (ioreg missing/non-zero exit, unparseable output) -- never
+    guessed as unlocked."""
+    try:
+        r = subprocess.run(["ioreg", "-n", "Root", "-d1", "-a"],
+                            capture_output=True, timeout=5)
+        if r.returncode != 0:
+            return None
+        return lib.screen_locked_from_ioreg(plistlib.loads(r.stdout))
+    except Exception:
+        return None
+
+
+def read_display_asleep_state():
+    """`system_profiler SPDisplaysDataType -json` -> display_asleep_from_
+    system_profiler(). None on any failure -- never guessed as awake."""
+    try:
+        r = subprocess.run(["system_profiler", "SPDisplaysDataType", "-json"],
+                            capture_output=True, timeout=15)
+        if r.returncode != 0:
+            return None
+        return lib.display_asleep_from_system_profiler(json.loads(r.stdout))
+    except Exception:
+        return None
+
+
+def check_walk_precondition():
+    """Reads BOTH environment facts and returns (reason_or_None,
+    screen_locked, display_asleep) -- the reason is what
+    ui_mac_walk_lib.walk_precondition_reason() computes from the two
+    (possibly-None) booleans, and the booleans themselves are returned too
+    so a caller can record them in its verdict alongside memory_pressure/
+    loadavg, per the same "environment facts that decide whether a run
+    counts" family."""
+    screen_locked = read_screen_lock_state()
+    display_asleep = read_display_asleep_state()
+    reason = lib.walk_precondition_reason(screen_locked, display_asleep)
+    return reason, screen_locked, display_asleep
 
 
 class MacSampler:

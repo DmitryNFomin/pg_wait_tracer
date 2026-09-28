@@ -184,6 +184,84 @@ def version_skew_from_snapshot(snapshot):
     return {"level": level, "text": snapshot.get("text")}
 
 
+def screen_locked_from_ioreg(ioreg_dict):
+    """Extracts CGSSessionScreenIsLocked from the parsed
+    `ioreg -n Root -d1 -a` plist (IOConsoleUsers[0].CGSSessionScreenIsLocked
+    -- confirmed root cause, 2026-09-28: macOS refuses a fullscreen Space
+    transition -- session.fullscreen()'s POST /session/{id}/window/fullscreen
+    -- when the console session is locked, which is why it failed with an
+    opaque "unknown error" independent of any code here). Returns True/
+    False, or None if the shape is missing/unexpected -- fail closed, the
+    caller must never treat None as "unlocked"."""
+    try:
+        users = ioreg_dict.get("IOConsoleUsers")
+        if not users:
+            return None
+        return bool(users[0].get("CGSSessionScreenIsLocked", False))
+    except (AttributeError, IndexError, TypeError):
+        return None
+
+
+def display_asleep_from_system_profiler(sp_dict):
+    """Extracts whether ANY display is asleep from the parsed
+    `system_profiler SPDisplaysDataType -json` output (a display's
+    'spdisplays_asleep' == 'spdisplays_yes'). Returns True if any display is
+    asleep, False if at least one display was found and none are asleep,
+    None if the shape is missing/unexpected (no GPUs/displays listed at
+    all) -- fail closed, same contract as screen_locked_from_ioreg."""
+    try:
+        gpus = sp_dict.get("SPDisplaysDataType")
+        if not gpus:
+            return None
+        any_display = False
+        for gpu in gpus:
+            for disp in gpu.get("spdisplays_ndrvs", []):
+                any_display = True
+                if disp.get("spdisplays_asleep") == "spdisplays_yes":
+                    return True
+        return False if any_display else None
+    except (AttributeError, TypeError):
+        return None
+
+
+def effective_zoom(target_width, achieved_width):
+    """Recovers Safari's effective page zoom factor from a viewport
+    assertion mismatch: target_width / achieved_width. Safari's persisted
+    per-hostname zoom SHRINKS the achieved CSS viewport by dividing it by
+    the zoom factor (measured 2026-09-28: ~115% zoom on the hostname
+    "localhost" turned a 1710px target into ~1486px achieved, 1710/1486 ~=
+    1.15), so this recovers the zoom to report even when the harness has
+    no way to set it directly (no W3C WebDriver "set zoom" endpoint).
+    Returns None when achieved_width is falsy (0/None/missing) -- "could
+    not compute" is not the same claim as "zoom is 1.0", and this also
+    avoids a ZeroDivisionError on a genuinely broken viewport read."""
+    if not achieved_width:
+        return None
+    return target_width / achieved_width
+
+
+def walk_precondition_reason(screen_locked, display_asleep):
+    """Given the two booleans (or None if unmeasured -- see the two
+    functions above), returns a reason string if the timed walk must
+    REFUSE to start (never attempted, never retried in a loop -- coordinator
+    2026-09-28: "an error naming the real cause is worth more than five
+    minutes of opaque retries"), else None. Fail closed: an unmeasured
+    (None) precondition refuses too -- "could not tell" is not "assume it's
+    fine". Lock is checked before sleep because it is the actual macOS
+    restriction; display-asleep is downstream of it (the display sleeps,
+    then the session locks) but still checked/reported on its own, since a
+    display can be asleep on an otherwise-unlocked session too."""
+    if screen_locked is None or display_asleep is None:
+        return ("could not determine screen lock / display sleep state "
+                "-- refusing to guess")
+    if screen_locked:
+        return ("screen session is locked (CGSSessionScreenIsLocked) -- "
+                "macOS refuses fullscreen automation on a locked session")
+    if display_asleep:
+        return "display is asleep (system_profiler spdisplays_asleep)"
+    return None
+
+
 def majority_void(tabs):
     """True if MORE THAN HALF of `tabs` (build_tab_entry dicts) are void
     (Mac-side infrastructure noise, not a product signal) -- coordinator's

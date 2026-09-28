@@ -383,7 +383,17 @@ echo "ui-mac-walk: bridge ready at $BASE_URL" | tee -a "$log"
 # on the Mac going quiet first, see that script's own docstring).
 export PGWT_RUN_MARKER="${PGWT_RUN_MARKER:-$(date +%s)}"
 if [[ "$DRIVER" == "safari" ]]; then
-    python3 tests/ui_mac_walk_safari.py --url "$BASE_URL" \
+    # 127.0.0.1, NOT localhost: Safari persists a per-HOSTNAME page zoom
+    # (measured 2026-09-28: ~115% for the hostname "localhost" specifically
+    # on this Mac, silently shrinking the achieved fullscreen viewport;
+    # 127.0.0.1 measured clean at the un-zoomed size in the same window).
+    # web/bridge.go's CheckOrigin already accepts both localhost and
+    # 127.0.0.1 origins, so this is a pure test-harness workaround, no
+    # product-side change. tests/ui_mac_walk_safari.py's own
+    # reset_zoom()/effective_zoom assertion is kept as defense in depth on
+    # top of this, not instead of it.
+    SAFARI_BASE_URL="http://127.0.0.1:$PORT/"
+    python3 tests/ui_mac_walk_safari.py --url "$SAFARI_BASE_URL" \
         --safaridriver-port "${PGWT_UI_MAC_SAFARIDRIVER_PORT:-9994}" \
         --max-quiet-wait-s "${PGWT_UI_MAC_MAX_QUIET_WAIT_S:-300}"
 else
