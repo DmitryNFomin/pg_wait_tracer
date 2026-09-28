@@ -12,9 +12,30 @@ so and the attempt counter resets. It is never reinterpreted in a report.
 ## The workload the criteria are written against
 
 `tests/demo_rehearsal.sh`: pgbench, 4 clients, `--rate=25`, plus
-`tests/live_loop_workload.py` (holder / waiter / sleeper sessions looping, so
-`Lock:relation` and `Timeout:PgSleep` recur in every tick rather than once).
-Full mode. `RECENT_WINDOW_S` = 60 s, `TIME_MODEL_TOLERANCE_PCT` = 1.0.
+`tests/live_loop_workload.py`. Full mode. `RECENT_WINDOW_S` = 60 s,
+`TIME_MODEL_TOLERANCE_PCT` = 1.0.
+
+`tests/live_loop_workload.py` (issue #214) loops five persistent sessions for
+the whole run, not just the two the §2 floors need:
+- `holder` / `waiter` / `sleeper`: `Lock:relation` and `Timeout:PgSleep`
+  recur in every tick — unchanged since issue #157, and what §2's floors and
+  the conservation check are written against.
+- `reporter`: rotates four structurally distinct SELECTs every tick (a
+  catalog lookup, a CPU-bound aggregate, and two differently-shaped
+  `pg_sleep` calls) — the query-id and duration variety Queries, Histogram,
+  Waterfall and Scatter need to show more than a single flat line.
+- `row_holder` / `row_waiter`: a hot-row `UPDATE` contended by two backends,
+  producing `Lock:transactionid` — a second, distinct wait class from the
+  table-level `Lock:relation` above, realistic because contention on a
+  shared counter/status row is one of the most common real-world lock
+  waits.
+
+`tests/demo_workload_coverage.py` is the machine-checkable half: given a
+trace dir this workload produced, it queries every tab's own endpoint and
+applies the per-tab condition (`python3 tests/demo_workload_coverage.py
+--trace-dir DIR`); its pure per-tab checkers are unit-tested by
+`tests/test_demo_workload_coverage.py`, wired into `scripts/check.sh`. It is
+a standalone check, not wired into `tests/demo_rehearsal.py`'s own verdict.
 
 A rehearsal run on a different workload, client count, PG version, box class or
 script commit is a different experiment and does not count toward the sequence.
@@ -167,10 +188,12 @@ cost is real and is accepted deliberately.
   about the bridge, the ssh hop and freshness stand, its paint numbers do not.
 
 **Display confirmed** (owner, 2026-09-28): the built-in panel, not the
-`LG ULTRAFINE` 6016 x 3384 also attached to this Mac. So 1440 x 932 CSS at
-DPR 2 is final, and the display identity is recorded in the verdict alongside
-the Safari and macOS versions — a rehearsal walked on a different display is
-a different experiment, exactly as a different PG version would be.
+`LG ULTRAFINE` 6016 x 3384 also attached to this Mac — the identity is
+recorded in the verdict alongside the Safari and macOS versions, and the
+pinned viewport is the measured **1710 x 1069 CSS at DPR 2** above (the
+1440 x 932 figure is the retracted, halved-from-2880 number, not a second
+final value) — a rehearsal walked on a different display is a different
+experiment, exactly as a different PG version would be.
 
 ### Recovery after the bridge drops
 
