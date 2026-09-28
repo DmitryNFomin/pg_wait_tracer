@@ -440,6 +440,44 @@ def test_clip_rect_to_viewport_zero_height_is_none():
           f"intersection -- None, never a 0-height clip Playwright would reject ({clip})")
 
 
+# ── panel_capture_clip (issue #197 review: the fail-safe finding) ──────────
+#
+# The FIRST version of this fix fell back to an unclipped, unbounded-cost
+# capture whenever page.viewport_size was None -- unreachable at today's
+# call site, but the shape (a silent fallback to exactly the cost regression
+# this issue removes, with nothing in summary.json to show it happened) is
+# the problem a fail-safe branch must never have. panel_capture_clip pins
+# the fix: no viewport (or no box) means "cannot safely capture", treated
+# identically to every other such case -- None, never an unclipped capture.
+
+def test_panel_capture_clip_no_viewport_is_none():
+    box = {"x": 0, "y": 0, "width": 1200, "height": 5793}
+    check(lib.panel_capture_clip(box, None) is None,
+          "no viewport -- cannot safely determine a clip -- None, NEVER a "
+          "fallback to an unclipped capture (the exact regression this issue fixes)")
+
+
+def test_panel_capture_clip_no_box_is_none():
+    viewport = {"width": 1280, "height": 900}
+    check(lib.panel_capture_clip(None, viewport) is None,
+          "no box (panel gone/detached) -- None, same as every other "
+          "cannot-capture case")
+
+
+def test_panel_capture_clip_no_box_and_no_viewport_is_none():
+    check(lib.panel_capture_clip(None, None) is None,
+          "neither box nor viewport available -- still None")
+
+
+def test_panel_capture_clip_normal_case_matches_clip_rect_to_viewport():
+    box = {"x": 0, "y": 0, "width": 1200, "height": 5793}
+    viewport = {"width": 1280, "height": 900}
+    got = lib.panel_capture_clip(box, viewport)
+    want = lib.clip_rect_to_viewport(0, 0, 1200, 5793, 1280, 900)
+    check(got == want == {"x": 0.0, "y": 0.0, "width": 1200.0, "height": 900.0},
+          f"the normal case delegates to clip_rect_to_viewport unchanged ({got})")
+
+
 # ── mount_is_fresh (issue #197: the stale-mount re-match defect) ───────────
 #
 # _wait_for_mount_at_or_after's ORIGINAL (issue #193 round 2) contract only

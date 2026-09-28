@@ -519,10 +519,11 @@ def _safe_panel_screenshot(page, tab_id):
     spans 200-2000ms) then took longer than the 5s live tick it was meant to
     sample inside of, so every sweep straddled a mount and the gate reported a
     red the UI never earned. Clipping the capture to the panel/viewport
-    intersection (lib.clip_rect_to_viewport) makes one frame's cost roughly
-    constant regardless of row count, and keeps the capture anchored to the
-    panel (never a whole-page screenshot, which would let unrelated chrome
-    dominate the diff -- see _PANEL_ELEMENT_SELECTOR's own comment).
+    intersection (lib.panel_capture_clip / lib.clip_rect_to_viewport) makes
+    one frame's cost roughly constant regardless of row count, and keeps the
+    capture anchored to the panel (never a whole-page screenshot, which
+    would let unrelated chrome dominate the diff -- see
+    _PANEL_ELEMENT_SELECTOR's own comment).
 
     scroll_into_view_if_needed() first, same as Playwright's own element
     screenshot semantics, so the visible slice is deterministic (the panel's
@@ -549,14 +550,15 @@ def _safe_panel_screenshot(page, tab_id):
     try:
         panel.scroll_into_view_if_needed()
         box = panel.bounding_box()
-        if box is None:
-            return None
         viewport = page.viewport_size
-        if viewport is None:
-            return panel.screenshot()
-        clip = lib.clip_rect_to_viewport(
-            box["x"], box["y"], box["width"], box["height"],
-            viewport["width"], viewport["height"])
+        # lib.panel_capture_clip returns None for "cannot safely determine
+        # a clip" (missing box OR missing viewport) -- treated the same as
+        # every other "cannot capture" case in this function, NEVER a
+        # fallback to panel.screenshot()'s unbounded, full-element capture
+        # (issue #197 review: that fallback silently reintroduces the exact
+        # cost regression this function exists to fix, with no signal in
+        # summary.json -- see panel_capture_clip's own docstring).
+        clip = lib.panel_capture_clip(box, viewport)
         if clip is None:
             return None
         return page.screenshot(clip=clip)

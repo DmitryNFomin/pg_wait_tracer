@@ -213,6 +213,32 @@ def clip_rect_to_viewport(x, y, width, height, viewport_width, viewport_height):
     return {"x": x0, "y": y0, "width": x1 - x0, "height": y1 - y0}
 
 
+def panel_capture_clip(box, viewport):
+    """Decides _safe_panel_screenshot's clip rect, or None if a safe clip
+    cannot be determined -- the caller must treat None here EXACTLY like
+    every other "cannot capture" case (missing panel, detached element),
+    NEVER fall back to an unclipped capture.
+
+    issue #197 review (fail-safe finding): the first version of this fix
+    fell back to panel.screenshot() -- the full-element, unbounded-cost
+    capture this issue exists to remove -- whenever `viewport` was None.
+    Unreachable with today's call site (run_tab's context always sets an
+    explicit viewport), but the SHAPE was the problem: "unreachable today"
+    is a property of the call site, not of this function, and the next
+    refactor that adds mobile emulation or calls set_viewport_size() would
+    silently reintroduce the exact cost regression, with nothing in
+    summary.json to show it happened. So: no viewport -> None, same as no
+    box (the panel's own elementHandle.boundingBox() came back empty) --
+    both are "cannot safely capture", not "capture unboundedly instead".
+
+    box: the panel's boundingBox() dict ({"x","y","width","height"}) or
+    None. viewport: page.viewport_size ({"width","height"}) or None."""
+    if box is None or viewport is None:
+        return None
+    return clip_rect_to_viewport(box["x"], box["y"], box["width"], box["height"],
+                                 viewport["width"], viewport["height"])
+
+
 def mount_is_fresh(mount, tab_id, tick_ts_ms, min_seq):
     """True if `mount` ({"id", "seq", "at"} or None) is usable as THIS
     tick's blink-sweep anchor.
