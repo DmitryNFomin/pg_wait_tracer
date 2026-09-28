@@ -1592,6 +1592,15 @@ function boot() {
             baselinePredates: baselinePredatesCurrent(),
         }),
         get activeTab() { return vm ? vm.activeId() : null; },
+        // issue #193: the last successful view.mount() — {id, seq, at} or
+        // null before the first one. `seq` is the chokepoint's own bumped
+        // sequence (web/static/lib/view-manager.js), so a caller (the live
+        // smoke's blink capture) can wait for "seq advanced past what it saw
+        // before this tick FOR THIS TAB" instead of guessing an offset from
+        // when the AAS request was sent — the summary pane's own round trip
+        // runs before ViewManager.refresh(), so a fixed delay from that send
+        // time systematically undershoots the active tab's actual paint.
+        viewMount: () => (vm ? vm.lastMount : null),
         // B5: read-only accessors for Playwright assertions on the daemon state.
         daemon,
         daemonTier() { return daemon.status ? daemon.status.tier : null; },

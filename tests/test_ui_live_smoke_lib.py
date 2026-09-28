@@ -12,12 +12,31 @@ import io
 import os
 import sys
 import tempfile
+from contextlib import contextmanager
 
 import numpy as np
 from PIL import Image
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ui_live_smoke_lib as lib
+
+
+@contextmanager
+def known_failing_tabs_override(fake):
+    """Temporarily replaces lib.KNOWN_FAILING_TABS so the known-failing
+    MECHANISM (known_failing_issue/known_failing_report_line/
+    _apply_known_failing/build_summary's exemption) has its own test
+    coverage independent of which real tabs happen to be listed right now.
+    Both #101 and #100 (review round 5) were delisted; a test that keeps
+    reaching into the REAL dict for an example entry breaks every time the
+    dict legitimately changes, which is exactly the kind of coupling that
+    made this delisting round more churn than it needed to be."""
+    original = lib.KNOWN_FAILING_TABS
+    lib.KNOWN_FAILING_TABS = fake
+    try:
+        yield
+    finally:
+        lib.KNOWN_FAILING_TABS = original
 
 tests_run = 0
 tests_passed = 0
@@ -105,6 +124,117 @@ def test_blink_check_resized_panel_is_maximal_not_a_crash():
           "a resized-panel ratio of 1.0 always fails the no_blink threshold")
 
 
+# ── frame_diff_signature (issue #100) ───────────────────────────────────────
+
+def test_frame_diff_signature_window_pan_pattern():
+    # Synthetic stand-in for timeline's own window-advance repaint: the
+    # BOTTOM band (axis labels + axis line) changes heavily, the rest of
+    # the panel is untouched, and only a few COLUMNS (thin vertical
+    # gridlines) differ.
+    h, w = 200, 400
+    a = np.zeros((h, w, 3), dtype=np.uint8)
+    b = a.copy()
+    band_h = int(round(h * 0.15))
+    b[h - band_h:, 50:120] = 255      # bottom-band label text, ~18% of width
+    b[:, 10] = 255                    # one gridline shifted (whole column)
+    b[:, 200] = 255                   # a second gridline shifted
+    sig = lib.frame_diff_signature(a, b)
+    check(sig["note"] is None, f"matching shapes -> no note ({sig})")
+    check(sig["bottom_band_pixel_frac"] > sig["rest_pixel_frac"],
+          f"bottom band differs far more than the rest ({sig})")
+    check(sig["columns_touched_frac"] < 0.35,
+          f"only a modest fraction of columns touched, not most of them ({sig})")
+
+
+def test_frame_diff_signature_uniform_repaint_pattern():
+    # A generic full repaint (e.g. genuinely new content): diff spread
+    # roughly evenly, most columns touched -- the shape frame_diff_signature
+    # must be able to tell apart from the window-pan pattern above.
+    h, w = 200, 400
+    a = np.zeros((h, w, 3), dtype=np.uint8)
+    b = np.full((h, w, 3), 255, dtype=np.uint8)  # everything differs
+    sig = lib.frame_diff_signature(a, b)
+    check(abs(sig["bottom_band_pixel_frac"] - sig["rest_pixel_frac"]) < 1e-9,
+          f"a uniform repaint diffs the bottom band and the rest equally ({sig})")
+    check(sig["columns_touched_frac"] == 1.0,
+          f"a uniform repaint touches every column ({sig})")
+
+
+def test_frame_diff_signature_identical_frames():
+    a = np.zeros((50, 50, 3), dtype=np.uint8)
+    sig = lib.frame_diff_signature(a, a.copy())
+    check(sig == {"diff_pixel_frac": 0.0, "bottom_band_pixel_frac": 0.0,
+                   "rest_pixel_frac": 0.0, "columns_touched_frac": 0.0, "note": None},
+          f"identical frames -> every fraction 0.0, no note ({sig})")
+
+
+def test_frame_diff_signature_shape_mismatch_never_raises():
+    a = np.zeros((10, 10, 3), dtype=np.uint8)
+    b = np.zeros((12, 10, 3), dtype=np.uint8)
+    sig = lib.frame_diff_signature(a, b)
+    check(sig["note"] is not None and "resized" in sig["note"],
+          f"a shape mismatch is reported via note, never a raised exception ({sig})")
+    check(sig["diff_pixel_frac"] is None and sig["bottom_band_pixel_frac"] is None,
+          f"every numeric field is None on a shape mismatch -- never a fabricated 0.0 ({sig})")
+
+
+# ── pre_mount_diagnostic_verdict (issue #100, review round 5) ──────────────
+#
+# Round 4's bug, reproduced here: it asserted the pre-mount capture
+# preceded the tick's own mount instead of proving it, and a real run
+# proved that assumption false on two ticks (5, 6) -- this probe read
+# diff_pixel_frac 0.0 on both while a plain consecutive-frame diff of the
+# SAME run's own saved PNGs showed a genuine ~1.2% window-advance repaint.
+# These tests pin the fix: the verdict must refuse to report a real
+# signature unless precedence is actually established.
+
+def test_pre_mount_diagnostic_verdict_precedence_established_computes_signature():
+    a = np.zeros((20, 20, 3), dtype=np.uint8)
+    b = a.copy()
+    b[15:, :] = 255  # a real change in the bottom band
+    sig = lib.pre_mount_diagnostic_verdict(a, b, pre_mount_seq_after=4, mount_seq=5)
+    check(sig["note"] is None and sig["diff_pixel_frac"] is not None,
+          f"seq_after(4) < mount_seq(5) -- precedence established, a real signature is computed ({sig})")
+
+
+def test_pre_mount_diagnostic_verdict_no_mount_observed_yet_precedes():
+    a = np.zeros((20, 20, 3), dtype=np.uint8)
+    sig = lib.pre_mount_diagnostic_verdict(a, a.copy(), pre_mount_seq_after=None, mount_seq=1)
+    check(sig["note"] is None and sig["diff_pixel_frac"] == 0.0,
+          f"no mount observed anywhere yet trivially precedes the first one ({sig})")
+
+
+def test_pre_mount_diagnostic_verdict_reproduces_the_round_4_bug_and_is_now_caught():
+    # The exact shape of the round-4 failure: the "pre-mount" screenshot
+    # was actually taken AFTER this tick's own mount already landed
+    # (pre_mount_seq_after == mount_seq, the tick's mount already fired by
+    # the time of the after-read) -- must now be NOT MEASURED, never a
+    # fabricated 0.0, even though the two frames handed in are pixel-
+    # identical (the case round 4's code would have silently accepted).
+    a = np.zeros((20, 20, 3), dtype=np.uint8)
+    sig = lib.pre_mount_diagnostic_verdict(a, a.copy(), pre_mount_seq_after=5, mount_seq=5)
+    check(sig["diff_pixel_frac"] is None,
+          f"seq_after(5) >= mount_seq(5) -- precedence NOT established, no signature computed ({sig})")
+    check(sig["note"] is not None and "did not precede" in sig["note"],
+          f"...with an explanatory note ({sig!r})")
+
+
+def test_pre_mount_diagnostic_verdict_seq_after_ahead_of_mount_is_also_not_measured():
+    # A later mount than the one we're testing against already happened by
+    # the after-read -- even further past precedence than the exact-match
+    # case above, must also be NOT MEASURED.
+    a = np.zeros((20, 20, 3), dtype=np.uint8)
+    sig = lib.pre_mount_diagnostic_verdict(a, a.copy(), pre_mount_seq_after=9, mount_seq=5)
+    check(sig["diff_pixel_frac"] is None,
+          f"seq_after(9) > mount_seq(5) -- also not measured ({sig})")
+
+
+def test_pre_mount_diagnostic_verdict_missing_frame_is_not_measured_not_a_crash():
+    sig = lib.pre_mount_diagnostic_verdict(None, None, pre_mount_seq_after=1, mount_seq=5)
+    check(sig["diff_pixel_frac"] is None and sig["note"] is not None,
+          f"a missing frame is not measured, never a crash ({sig})")
+
+
 # ── sweep_consecutive_diff_ratios / build_sweep_tick_record (issue #119) ────
 
 def test_sweep_consecutive_diff_ratios_all_identical():
@@ -153,6 +283,70 @@ def test_sweep_offsets_pinned():
           f"(got {lib.SWEEP_OFFSETS_MS})")
 
 
+# ── sweep-vs-cadence coverage-floor guard (issue #193 review round 3) ──────
+#
+# blink_sweep_gate_verdict correctly reports NOT MEASURED (never a false
+# red) when a second tick's mount lands mid-sweep. But if the sweep's own
+# worst-case completion time ever gets as long as the gap between two
+# consecutive mounts, ticks start being discarded for a CADENCE reason, and
+# MIN_MEASURED_FRACTION starts failing tabs for nothing wrong with the
+# product. These two numbers are the tightest margin actually observed
+# (tests/results/ui_live/summary.json, one ephemeral box-check run, issue
+# #193, timeline tab -- the worst of the 11):
+#   MIN_OBSERVED_MOUNT_GAP_MS = 4982   -- the smallest gap between two
+#     consecutive mounts (derived from consecutive pair_offsets_ms deltas
+#     against the nominal 5000ms tick interval: tick 6's offset (48ms) was
+#     18ms less than tick 5's (66ms), i.e. tick 6's mount landed 4982ms,
+#     not the nominal 5000ms, after tick 5's).
+#   MAX_OBSERVED_SWEEP_OFFSET_MS = 3738 -- tick 4's own sweep, its slowest
+#     capture: SWEEP_OFFSETS_MS's last target (2000ms) landed at 3738ms
+#     under real render-check-retry-loop contention.
+# Slack that run: 4982 - 3738 = 1244ms.
+MIN_OBSERVED_MOUNT_GAP_MS = 4982
+MAX_OBSERVED_SWEEP_OFFSET_MS = 3738
+
+# A conservative stand-in for one capture's own screenshot+PNG-decode
+# overhead, NOT itself a live measurement -- multiplied by the sweep's
+# actual capture count, this is what makes the guard below fail on a
+# FUTURE SWEEP_OFFSETS_MS widening or TICK_INTERVAL_S reduction before it
+# ever reaches a real gate, rather than only after a live run happens to
+# reproduce contention as bad as the 3738ms above.
+PER_CAPTURE_BUDGET_MS = 400
+
+
+def test_sweep_slack_observed_this_run_is_positive():
+    slack_ms = MIN_OBSERVED_MOUNT_GAP_MS - MAX_OBSERVED_SWEEP_OFFSET_MS
+    check(slack_ms == 1244,
+          f"observed slack (min mount gap {MIN_OBSERVED_MOUNT_GAP_MS}ms - max "
+          f"achieved sweep offset {MAX_OBSERVED_SWEEP_OFFSET_MS}ms) is 1244ms "
+          f"(got {slack_ms}ms) -- pins the number itself, not just its sign")
+    check(slack_ms > 0,
+          "the sweep did not, in fact, run into the next tick's mount this run")
+
+
+def test_sweep_worst_case_completion_has_margin_below_the_observed_mount_gap():
+    """The forward-looking guard: reads SWEEP_OFFSETS_MS and TICK_INTERVAL_S
+    LIVE from the module (so a future change to either is exercised here,
+    in make check-fast), against the PINNED worst-case cadence jitter
+    actually observed (MIN_OBSERVED_MOUNT_GAP_MS above). A future
+    SWEEP_OFFSETS_MS widening or TICK_INTERVAL_S reduction that erodes this
+    margin must fail HERE, not on the gate at demo time."""
+    tick_interval_ms = lib.TICK_INTERVAL_S * 1000
+    worst_observed_mount_delay_ms = tick_interval_ms - MIN_OBSERVED_MOUNT_GAP_MS
+    worst_case_sweep_completion_ms = (
+        max(lib.SWEEP_OFFSETS_MS) +
+        len(lib.SWEEP_OFFSETS_MS) * PER_CAPTURE_BUDGET_MS)
+    limit_ms = tick_interval_ms - worst_observed_mount_delay_ms
+    margin_ms = limit_ms - worst_case_sweep_completion_ms
+    check(worst_case_sweep_completion_ms < limit_ms,
+          f"sweep's worst-case completion ({worst_case_sweep_completion_ms}ms = "
+          f"max(SWEEP_OFFSETS_MS)={max(lib.SWEEP_OFFSETS_MS)}ms + "
+          f"{len(lib.SWEEP_OFFSETS_MS)}x{PER_CAPTURE_BUDGET_MS}ms budget) stays "
+          f"below the tick interval ({tick_interval_ms}ms) minus the worst "
+          f"observed mount delay ({worst_observed_mount_delay_ms}ms) = "
+          f"{limit_ms}ms -- margin {margin_ms}ms")
+
+
 def test_build_sweep_tick_record_shape():
     a = np.zeros((10, 10, 3), dtype=np.uint8)
     frames = [a, a.copy(), a.copy(), a.copy(), None]
@@ -167,6 +361,102 @@ def test_build_sweep_tick_record_shape():
           f"identical frames give ratio 0.0 ({rec['ratios']})")
     check(rec["notes"] == ["frame missing from the sweep"],
           f"only the pair touching the missing 5th frame gets a note ({rec['notes']})")
+
+
+# ── blink_sweep_gate_verdict (issue #193, review round 2) ──────────────────
+#
+# Round 1 gated on a single mount-anchored PAIR. Review injected a 400ms
+# blank overlay into a view (the PR #188 shape) and ran the live check both
+# ways: the fixed-delay pair AND the mount-anchored pair both measured
+# ratio 0.0 -- neither could see it, because both compare two frames that
+# land wholly inside or wholly outside the transient. Only the offset
+# sweep's consecutive pairs (ratio 1.0 on every one) caught it. These tests
+# reproduce that structurally and pin the sweep-based gate's own trap: it
+# must not lose the not-measured / genuine-repaint guarantees round 1 had.
+
+def test_blink_sweep_gate_verdict_all_identical_passes():
+    frame = np.zeros((10, 10, 3), dtype=np.uint8)
+    frames = [frame, frame.copy(), frame.copy(), frame.copy(), frame.copy()]
+    ratio, note = lib.blink_sweep_gate_verdict(frames, seq_before_sweep=4, seq_after_sweep=4)
+    check(ratio == 0.0 and note is None,
+          f"a steady sweep of identical frames -> ratio 0.0, no note ({ratio}, {note!r})")
+    check(lib.no_blink_ok(ratio), "and it passes the no_blink gate")
+
+
+def test_blink_sweep_gate_verdict_reproduces_the_injected_flash_experiment():
+    # Structural reproduction of the reviewer's live experiment: a ~400ms
+    # blank overlay that starts after the sweep's first sample (200ms) and
+    # resolves before its third (1000ms) -- i.e. it is fully contained
+    # between two INTERIOR sweep offsets, exactly the shape a single pair
+    # taken at the sweep's own first and last sample would miss entirely.
+    normal = np.full((10, 10, 3), 100, dtype=np.uint8)
+    flash = np.zeros((10, 10, 3), dtype=np.uint8)   # the injected blank overlay
+    # offsets:                 200      500     1000    1500    2000
+    frames = [normal, flash, normal, normal, normal]
+
+    # The instrument round 1 (and master, before it) used: a single pair,
+    # sampled at the sweep's own first and last point -- both land OUTSIDE
+    # the transient here, so it reads a clean pass. This is exactly what
+    # the reviewer measured against the real product (ratio 0.0 both ways).
+    single_pair_ratio, _ = lib.blink_check(frames[0], frames[-1])
+    check(single_pair_ratio == 0.0,
+          f"a single first/last pair is blind to a transient between two interior "
+          f"samples (ratio {single_pair_ratio}) -- reproducing the reviewer's finding")
+
+    # The sweep-based gate must NOT be blind to it: two of its own
+    # consecutive pairs straddle the transient's edges.
+    ratio, note = lib.blink_sweep_gate_verdict(frames, seq_before_sweep=1, seq_after_sweep=1)
+    check(ratio is not None and ratio > 0.5,
+          f"the sweep gate's worst consecutive-pair ratio catches the flash ({ratio})")
+    check(not lib.no_blink_ok(ratio),
+          "...and it fails the no_blink gate, unlike the single pair above")
+
+
+def test_blink_sweep_gate_verdict_seq_advance_mid_sweep_is_never_a_pass():
+    # Same not-measured contract as round 1's pair verdict, now for the
+    # sweep: tested with IDENTICAL frames (the case an implementation could
+    # wrongly special-case as "pixels agree, so ratio 0.0 is fine").
+    frame = np.zeros((10, 10, 3), dtype=np.uint8)
+    frames = [frame.copy() for _ in range(5)]
+    ratio, note = lib.blink_sweep_gate_verdict(frames, seq_before_sweep=5, seq_after_sweep=6)
+    check(ratio is None,
+          f"a mid-sweep sequence advance yields ratio=None even with identical pixels (got {ratio})")
+    check(note is not None and "not measured" in note,
+          f"...with an explanatory 'not measured' note ({note!r})")
+    check(not lib.no_blink_ok(ratio),
+          "None can never satisfy no_blink_ok -- 'not measured' is never read as a pass")
+
+
+def test_blink_sweep_gate_verdict_genuine_diff_with_steady_seq_still_fails():
+    a = np.full((100, 100, 3), 50, dtype=np.uint8)
+    b = a.copy()
+    b[0:10, :] = 255
+    frames = [a, a.copy(), b, b.copy(), b.copy()]  # a real change mid-sweep
+    ratio, note = lib.blink_sweep_gate_verdict(frames, seq_before_sweep=9, seq_after_sweep=9)
+    check(ratio is not None and ratio > 0.05,
+          f"a genuine repaint with an UNCHANGED sequence still yields a high ratio ({ratio})")
+    check(not lib.no_blink_ok(ratio), "...and still fails the gate")
+
+
+def test_blink_sweep_gate_verdict_missing_frame_note_surfaces_alongside_the_max():
+    a = np.full((10, 10, 3), 50, dtype=np.uint8)
+    b = a.copy()
+    b[0, 0:5] = 255  # a real, larger diff than the missing-frame pairs
+    frames = [a, None, a.copy(), b]
+    ratio, note = lib.blink_sweep_gate_verdict(frames, seq_before_sweep=0, seq_after_sweep=0)
+    check(ratio == 1.0,
+          f"a missing frame is still the worst-case ratio ({ratio})")
+    check(note is not None and "missing" in note,
+          f"the missing-frame note is not dropped just because it wasn't the sole cause ({note!r})")
+
+
+def test_blink_sweep_gate_verdict_fewer_than_two_frames_is_worst_case():
+    ratio, note = lib.blink_sweep_gate_verdict([None], seq_before_sweep=0, seq_after_sweep=0)
+    check(ratio == 1.0 and note is not None,
+          f"a degenerate sweep (< 2 frames) is worst-case, never a silent pass ({ratio}, {note!r})")
+    ratio2, note2 = lib.blink_sweep_gate_verdict([], seq_before_sweep=0, seq_after_sweep=0)
+    check(ratio2 == 1.0 and note2 is not None,
+          f"an EMPTY sweep is worst-case too, not a crash or an implicit 0.0 ({ratio2}, {note2!r})")
 
 
 def test_is_blank_frame_solid_colour():
@@ -482,6 +772,166 @@ def test_build_failed_tab_result_pair_offsets_empty():
           "a tab that never reached the tick loop has no offsets to report")
 
 
+# ── blink_not_measured / all-not-measured fail-by-construction (issue #193) ─
+
+def test_build_tab_result_records_not_measured_ticks():
+    r = lib.build_tab_result(
+        "sessions", True, "ok:8", ticks_observed=6, console_errors=[],
+        blink_ratio=0.0, color_violations=[],
+        leak_before={"charts": 1, "uplots": 1, "pending": 0},
+        leak_after={"charts": 1, "uplots": 1, "pending": 0},
+        artifacts={},
+        blink_pair_offsets_ms=[5100, 1200, 3400, 5200, 5150, 5180],  # 6 attempted
+        blink_not_measured=[{"tick": 3, "reason": "mount sequence advanced mid-capture"}])
+    check(r["no_blink"]["not_measured"] ==
+          [{"tick": 3, "reason": "mount sequence advanced mid-capture"}],
+          f"not-measured ticks are visible in summary.json, not dropped ({r['no_blink']})")
+    check(r["no_blink"]["measured"] ==
+          {"ok": True, "measured_count": 5, "attempted_count": 6, "min_fraction": 0.5},
+          f"5 of 6 attempted ticks measured clears the 50% floor ({r['no_blink']['measured']})")
+    check(r["ok"] is True,
+          "one not-measured tick among otherwise-measured ones does not by itself fail the tab")
+
+
+# ── measured_ok / MIN_MEASURED_FRACTION (issue #193 review round 2 SHOULD-FIX)
+
+def test_build_tab_result_mostly_not_measured_fails_even_with_a_perfect_ratio():
+    # The reviewer's literal finding: "a tab can discard five of six ticks
+    # and still report ok with ratio 0.0." blink_ratio=0.0 here is exactly
+    # that one measured tick's own (genuinely clean) ratio -- this must now
+    # fail on COVERAGE, not on the ratio.
+    r = lib.build_tab_result(
+        "sessions", True, "ok:8", ticks_observed=6, console_errors=[],
+        blink_ratio=0.0, color_violations=[],
+        leak_before={"charts": 1, "uplots": 1, "pending": 0},
+        leak_after={"charts": 1, "uplots": 1, "pending": 0},
+        artifacts={},
+        blink_pair_offsets_ms=[5100, 1200, 3400, 5200, 5150, 5180],  # 6 attempted
+        blink_not_measured=[{"tick": i, "reason": "mid-sweep advance"} for i in (1, 3, 4, 5, 6)])
+    check(r["no_blink"]["ok"] is True,
+          "the ratio itself is clean (0.0 < threshold) -- this is NOT a blink failure")
+    check(r["no_blink"]["measured"]["ok"] is False,
+          f"but only 1 of 6 attempted ticks was measured, below the 50% floor "
+          f"({r['no_blink']['measured']})")
+    check(r["ok"] is False,
+          "...so the tab fails overall -- a near-blind tick loop must not read as ok")
+
+
+def test_build_tab_result_measured_fraction_exactly_at_the_floor_passes():
+    r = lib.build_tab_result(
+        "sessions", True, "ok:8", ticks_observed=6, console_errors=[],
+        blink_ratio=0.0, color_violations=[],
+        leak_before={"charts": 1, "uplots": 1, "pending": 0},
+        leak_after={"charts": 1, "uplots": 1, "pending": 0},
+        artifacts={},
+        blink_pair_offsets_ms=[5100, 1200, 3400, 5200, 5150, 5180],  # 6 attempted
+        blink_not_measured=[{"tick": i, "reason": "mid-sweep advance"} for i in (1, 2, 3)])
+    check(r["no_blink"]["measured"] ==
+          {"ok": True, "measured_count": 3, "attempted_count": 6, "min_fraction": 0.5},
+          f"exactly 50% measured clears the floor (>=, not >) ({r['no_blink']['measured']})")
+    check(r["ok"] is True, "and the tab passes")
+
+
+def test_build_tab_result_measured_fraction_just_below_the_floor_fails():
+    r = lib.build_tab_result(
+        "sessions", True, "ok:8", ticks_observed=7, console_errors=[],
+        blink_ratio=0.0, color_violations=[],
+        leak_before={"charts": 1, "uplots": 1, "pending": 0},
+        leak_after={"charts": 1, "uplots": 1, "pending": 0},
+        artifacts={},
+        blink_pair_offsets_ms=[5100, 1200, 3400, 5200, 5150, 5180, 5090],  # 7 attempted
+        blink_not_measured=[{"tick": i, "reason": "mid-sweep advance"} for i in (1, 2, 3, 4)])
+    check(r["no_blink"]["measured"]["ok"] is False,
+          f"3 of 7 (~42.9%) is just below the 50% floor ({r['no_blink']['measured']})")
+    check(r["ok"] is False, "and the tab fails")
+
+
+def test_build_tab_result_zero_attempted_ticks_does_not_fail_on_coverage_alone():
+    # A caller that doesn't populate blink_pair_offsets_ms at all (existing
+    # tests, or a code path that never reached the tick loop) must not be
+    # penalised by measured_ok -- ticks_ok already fails that case for
+    # having no ticks, so this must not become a SECOND, contradictory
+    # reason a legitimately-untested result looks wrong.
+    r = lib.build_tab_result(
+        "overview", True, "ok:8", ticks_observed=0, console_errors=[],
+        blink_ratio=None, color_violations=[],
+        leak_before={"charts": 1, "uplots": 1, "pending": 0},
+        leak_after={"charts": 1, "uplots": 1, "pending": 0}, artifacts={})
+    check(r["no_blink"]["measured"]["ok"] is True,
+          "zero attempted ticks trivially satisfies measured_ok")
+    check(r["ok"] is False, "but the tab still fails, via ticks_ok/blink_ok, not double-counted")
+
+
+def test_build_tab_result_not_measured_defaults_empty():
+    r = lib.build_tab_result(
+        "overview", True, "ok:8", ticks_observed=6, console_errors=[],
+        blink_ratio=0.0, color_violations=[],
+        leak_before={"charts": 1, "uplots": 1, "pending": 0},
+        leak_after={"charts": 1, "uplots": 1, "pending": 0}, artifacts={})
+    check(r["no_blink"]["not_measured"] == [],
+          "blink_not_measured defaults to an empty list, not missing/None")
+
+
+def test_build_tab_result_all_ticks_not_measured_fails_the_gate():
+    # issue #193: "empty ratios already fail by construction in the existing
+    # code" -- the previous agent VERIFIED this but did not test it. This is
+    # that test: the caller (run_tab) computes blink_ratio as
+    # max(measured-only ratios), which is None when every tick landed as
+    # not-measured -- pin that None reaches here and still fails, so a run
+    # where NOTHING was ever actually measured cannot pass by omission.
+    r = lib.build_tab_result(
+        "sessions", True, "ok:8", ticks_observed=6, console_errors=[],
+        blink_ratio=None, color_violations=[],
+        leak_before={"charts": 1, "uplots": 1, "pending": 0},
+        leak_after={"charts": 1, "uplots": 1, "pending": 0},
+        artifacts={},
+        blink_not_measured=[{"tick": i, "reason": "mid-capture advance"}
+                            for i in range(1, 7)])
+    check(r["no_blink"]["ok"] is False,
+          "an all-not-measured tab's no_blink check is False, never an implicit pass")
+    check(r["ok"] is False,
+          "...and that fails the whole tab (a gate that cannot see must refuse, never approve)")
+
+
+def test_build_failed_tab_result_not_measured_empty():
+    r = lib.build_failed_tab_result("waterfall", "panel did not render within 60s")
+    check(r["no_blink"]["not_measured"] == [],
+          "a tab that never reached the tick loop has no not-measured ticks to report")
+
+
+# ── pre_mount_diagnostic passthrough (issue #100, review round 4) ──────────
+
+def test_build_tab_result_records_pre_mount_diagnostic():
+    entries = [{"tick": 1, "diff_pixel_frac": 0.045, "bottom_band_pixel_frac": 0.6,
+                "rest_pixel_frac": 0.01, "columns_touched_frac": 0.2, "note": None}]
+    r = lib.build_tab_result(
+        "timeline", True, "ok:8", ticks_observed=6, console_errors=[],
+        blink_ratio=0.0, color_violations=[],
+        leak_before={"charts": 1, "uplots": 1, "pending": 0},
+        leak_after={"charts": 1, "uplots": 1, "pending": 0},
+        artifacts={}, pre_mount_diagnostics=entries)
+    check(r["pre_mount_diagnostic"] == entries,
+          f"pre-mount diagnostic entries carried through unchanged ({r['pre_mount_diagnostic']})")
+    check(r["ok"] is True,
+          "the pre-mount diagnostic is reporting-only -- never affects the gating verdict")
+
+
+def test_build_tab_result_pre_mount_diagnostic_defaults_empty():
+    r = lib.build_tab_result(
+        "overview", True, "ok:8", ticks_observed=6, console_errors=[],
+        blink_ratio=0.0, color_violations=[],
+        leak_before={"charts": 1, "uplots": 1, "pending": 0},
+        leak_after={"charts": 1, "uplots": 1, "pending": 0}, artifacts={})
+    check(r["pre_mount_diagnostic"] == [],
+          "pre_mount_diagnostics defaults to an empty list for every non-timeline tab")
+
+
+def test_build_failed_tab_result_pre_mount_diagnostic_empty():
+    r = lib.build_failed_tab_result("timeline", "panel did not render within 60s")
+    check(r["pre_mount_diagnostic"] == [],
+          "a tab that never reached the tick loop has no pre-mount diagnostic to report")
+
+
 def test_build_tab_result_records_blink_sweep():
     a = np.zeros((10, 10, 3), dtype=np.uint8)
     tick_rec = lib.build_sweep_tick_record(
@@ -566,81 +1016,94 @@ def test_known_failing_tabs_pinned():
     # here too. #101 (Waterfall) was delisted once its single root cause was
     # found and fixed: the tab defaulted to the newest execution, which on a
     # real capture has no events, no workers and no plan, so the panel never
-    # mounted a chart (web/static/lib/builders/waterfall.js).
-    check(lib.KNOWN_FAILING_TABS == {"timeline": 100},
-          f"KNOWN_FAILING_TABS is exactly {{'timeline': 100}} "
-          f"(got {lib.KNOWN_FAILING_TABS})")
+    # mounted a chart (web/static/lib/builders/waterfall.js). #100
+    # (Timeline, review round 5) was delisted once its own literal claim --
+    # a redraw with UNCHANGED DATA moves ~4.5% of pixels -- was refuted by a
+    # real live run's own consecutive-tick frames (four straight
+    # unchanged-data redraws at exactly 0.00%) with a named mechanism for
+    # the original number (see KNOWN_FAILING_TABS's own comment). Empty is
+    # the correct, deliberate value here, not an oversight.
+    check(lib.KNOWN_FAILING_TABS == {},
+          f"KNOWN_FAILING_TABS is exactly {{}} (got {lib.KNOWN_FAILING_TABS})")
 
 
 def test_known_failing_issue():
-    check(lib.known_failing_issue("timeline") == 100, "timeline -> issue #100")
-    check(lib.known_failing_issue("waterfall") is None,
-          "waterfall is delisted (#101 fixed) and has no known-failing issue")
-    check(lib.known_failing_issue("overview") is None,
-          "an unlisted tab has no known-failing issue")
+    with known_failing_tabs_override({"faketab": 999}):
+        check(lib.known_failing_issue("faketab") == 999, "a listed tab -> its issue number")
+        check(lib.known_failing_issue("waterfall") is None,
+              "waterfall is delisted (#101 fixed) and has no known-failing issue")
+        check(lib.known_failing_issue("timeline") is None,
+              "timeline is delisted (#100, review round 5) and has no known-failing issue")
+        check(lib.known_failing_issue("overview") is None,
+              "an unlisted tab has no known-failing issue")
 
 
 def test_known_failing_report_line():
-    check(lib.known_failing_report_line("overview", False) is None,
-          "an unlisted tab never gets a known-failing report line")
-    fail_line = lib.known_failing_report_line("timeline", False)
-    check(fail_line == "KNOWN-FAILING (issue #100)",
-          f"a listed tab's real failure reports KNOWN-FAILING ({fail_line!r})")
-    pass_line = lib.known_failing_report_line("timeline", True)
-    check(pass_line == "UNEXPECTED PASS (issue #100) -- intermittent or fixed; check the issue",
-          f"a listed tab's real pass reports UNEXPECTED PASS ({pass_line!r})")
+    with known_failing_tabs_override({"faketab": 999}):
+        check(lib.known_failing_report_line("overview", False) is None,
+              "an unlisted tab never gets a known-failing report line")
+        fail_line = lib.known_failing_report_line("faketab", False)
+        check(fail_line == "KNOWN-FAILING (issue #999)",
+              f"a listed tab's real failure reports KNOWN-FAILING ({fail_line!r})")
+        pass_line = lib.known_failing_report_line("faketab", True)
+        check(pass_line == "UNEXPECTED PASS (issue #999) -- intermittent or fixed; check the issue",
+              f"a listed tab's real pass reports UNEXPECTED PASS ({pass_line!r})")
 
 
 def test_build_tab_result_known_failing_does_not_fail_summary():
-    # Timeline (#100) actually failing (raw ok=False): excused from the
+    # A listed tab actually failing (raw ok=False): excused from the
     # overall verdict, but the raw failure and the known_failing flag are
     # both visible in the tab's own record.
-    r = lib.build_tab_result(
-        "timeline", True, "ok:1", 6, [], 0.05, [],  # 5% blink -> raw fail
-        {"charts": 1, "uplots": 1, "pending": 0},
-        {"charts": 1, "uplots": 1, "pending": 0}, {})
-    check(r["ok"] is False, "the raw per-tab result still says what really happened")
-    check(r["known_failing"] is True and r["xpass"] is False,
-          f"a real failure on a listed tab is known_failing, not xpass ({r})")
-    s = lib.build_summary([r])
-    check(s["ok"] is True and s["failed_tabs"] == [] and
-          s["known_failing_tabs"] == ["timeline"],
-          f"a known-failing tab's real failure does not fail the summary ({s})")
+    with known_failing_tabs_override({"faketab": 999}):
+        r = lib.build_tab_result(
+            "faketab", True, "ok:1", 6, [], 0.05, [],  # 5% blink -> raw fail
+            {"charts": 1, "uplots": 1, "pending": 0},
+            {"charts": 1, "uplots": 1, "pending": 0}, {})
+        check(r["ok"] is False, "the raw per-tab result still says what really happened")
+        check(r["known_failing"] is True and r["xpass"] is False,
+              f"a real failure on a listed tab is known_failing, not xpass ({r})")
+        s = lib.build_summary([r])
+        check(s["ok"] is True and s["failed_tabs"] == [] and
+              s["known_failing_tabs"] == ["faketab"],
+              f"a known-failing tab's real failure does not fail the summary ({s})")
 
 
 def test_build_tab_result_xpass_does_not_fail_summary_either():
-    # A listed tab (#100 Timeline) happening to pass this run: reported as
-    # xpass, not silently absorbed, but does not fail the run -- same
-    # semantics run_all.sh's own KNOWN_FAILING now uses too (an unexpected
-    # pass is reported, never a gate failure by itself; a single real-daemon
-    # run passing isn't proof an intermittent bug is fixed).
-    r = lib.build_tab_result(
-        "timeline", True, "ok:1", 6, [], 0.0, [],
-        {"charts": 1, "uplots": 1, "pending": 0},
-        {"charts": 1, "uplots": 1, "pending": 0}, {})
-    check(r["ok"] is True and r["xpass"] is True and r["known_failing"] is False,
-          f"a real pass on a listed tab is xpass, not known_failing ({r})")
-    s = lib.build_summary([r])
-    check(s["ok"] is True and s["xpass_tabs"] == ["timeline"],
-          f"an xpass tab does not fail the summary either ({s})")
+    # A listed tab happening to pass this run: reported as xpass, not
+    # silently absorbed, but does not fail the run -- same semantics
+    # run_all.sh's own KNOWN_FAILING now uses too (an unexpected pass is
+    # reported, never a gate failure by itself; a single real-daemon run
+    # passing isn't proof an intermittent bug is fixed).
+    with known_failing_tabs_override({"faketab": 999}):
+        r = lib.build_tab_result(
+            "faketab", True, "ok:1", 6, [], 0.0, [],
+            {"charts": 1, "uplots": 1, "pending": 0},
+            {"charts": 1, "uplots": 1, "pending": 0}, {})
+        check(r["ok"] is True and r["xpass"] is True and r["known_failing"] is False,
+              f"a real pass on a listed tab is xpass, not known_failing ({r})")
+        s = lib.build_summary([r])
+        check(s["ok"] is True and s["xpass_tabs"] == ["faketab"],
+              f"an xpass tab does not fail the summary either ({s})")
 
 
 def test_build_failed_tab_result_known_failing():
     # A listed tab that could not be checked at all goes through
     # build_failed_tab_result, not build_tab_result, and must still be
     # excused by its issue number.
-    r = lib.build_failed_tab_result(
-        "timeline", "panel did not render ('#timeline-chart canvas') within 60s")
-    check(r["known_failing"] is True and r["ok"] is False,
-          f"a could-not-check known-failing tab is still known_failing ({r})")
-    s = lib.build_summary([r])
-    check(s["ok"] is True, "a known-failing could-not-check tab does not fail the summary")
+    with known_failing_tabs_override({"faketab": 999}):
+        r = lib.build_failed_tab_result(
+            "faketab", "panel did not render ('#faketab-chart canvas') within 60s")
+        check(r["known_failing"] is True and r["ok"] is False,
+              f"a could-not-check known-failing tab is still known_failing ({r})")
+        s = lib.build_summary([r])
+        check(s["ok"] is True, "a known-failing could-not-check tab does not fail the summary")
 
 
 def test_delisted_waterfall_failure_is_a_real_failure():
     # issue #101 regression guard: the waterfall tab is no longer excused, so
     # its old failure shape must fail the run outright. A return of the
-    # empty-panel bug cannot slip through as "known failing" again.
+    # empty-panel bug cannot slip through as "known failing" again. Uses
+    # the REAL (un-overridden) KNOWN_FAILING_TABS deliberately.
     r = lib.build_failed_tab_result(
         "waterfall", "panel did not render ('#waterfall-chart canvas') within 60s")
     check(r["known_failing"] is False and r["ok"] is False,
@@ -648,6 +1111,20 @@ def test_delisted_waterfall_failure_is_a_real_failure():
     s = lib.build_summary([r])
     check(s["ok"] is False and s["failed_tabs"] == ["waterfall"],
           f"a waterfall render failure fails the summary ({s})")
+
+
+def test_delisted_timeline_failure_is_a_real_failure():
+    # issue #100 regression guard (review round 5): timeline is no longer
+    # excused, so a real blink/render failure on it must fail the run
+    # outright, not disappear as "known failing" again. Uses the REAL
+    # (un-overridden) KNOWN_FAILING_TABS deliberately.
+    r = lib.build_failed_tab_result(
+        "timeline", "panel did not render ('#timeline-chart canvas') within 60s")
+    check(r["known_failing"] is False and r["ok"] is False,
+          f"a timeline render failure is a real failure again ({r})")
+    s = lib.build_summary([r])
+    check(s["ok"] is False and s["failed_tabs"] == ["timeline"],
+          f"a timeline render failure fails the summary ({s})")
 
 
 def test_known_failing_does_not_affect_unlisted_tabs():
@@ -661,12 +1138,13 @@ def test_known_failing_does_not_affect_unlisted_tabs():
 
 def test_build_summary_mixed_known_failing_and_real_failure():
     # A KNOWN_FAILING tab failing must not mask a genuine, unlisted failure.
-    known = lib.build_failed_tab_result("timeline", "blink 4.46%")
-    real_fail = lib.build_failed_tab_result("overview", "no rows")
-    s = lib.build_summary([known, real_fail])
-    check(s["ok"] is False and s["failed_tabs"] == ["overview"] and
-          s["known_failing_tabs"] == ["timeline"],
-          f"a real failure still fails the summary alongside an excused one ({s})")
+    with known_failing_tabs_override({"faketab": 999}):
+        known = lib.build_failed_tab_result("faketab", "blink 4.46%")
+        real_fail = lib.build_failed_tab_result("overview", "no rows")
+        s = lib.build_summary([known, real_fail])
+        check(s["ok"] is False and s["failed_tabs"] == ["overview"] and
+              s["known_failing_tabs"] == ["faketab"],
+              f"a real failure still fails the summary alongside an excused one ({s})")
 
 
 def test_reset_output_dir_removes_stale_artifacts():

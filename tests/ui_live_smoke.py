@@ -25,14 +25,28 @@ Transitions, Concurrency, Waterfall, Scatter, Matrix), live mode on
                      silently dropped).
   3. no_blink    -- a frame ~100ms after each tick is asserted non-blank
                      (a CONTINUITY teardown-to-blank flash must not pass);
-                     two frames captured back-to-back inside the same data
-                     window (after the render-check retry + a tick-anchored
-                     settle, BLINK_PAIR_ANCHOR_MS) differ by <
-                     ui_live_smoke_lib.BLINK_THRESHOLD (0.1%) of pixels; an
-                     offset sweep (issue #119, SWEEP_OFFSETS_MS) records
-                     extra frames around that settle for reporting only; the
-                     AAS legend keeps each event name's colour stable across
-                     ticks.
+                     the GATING check is the issue #119 offset sweep itself
+                     (SWEEP_OFFSETS_MS, 200-2000ms), now anchored on the
+                     ViewManager mount chokepoint's own event for this tab
+                     (issue #193 round 2) instead of a guess from the tick's
+                     AAS-request send -- graded on the WORST of its
+                     consecutive-pair diff ratios against
+                     ui_live_smoke_lib.BLINK_THRESHOLD (0.1%). A single
+                     anchored pair (issue #193's first round) was found by
+                     review to be blind to a transient that fell wholly
+                     inside or wholly outside its own two-frame window (an
+                     injected 400ms overlay measured ratio 0.0 on the pair,
+                     1.0 on every sweep offset) -- the sweep's multiple
+                     samples across the tick are what actually catch that.
+                     If the mount sequence itself advances while the sweep
+                     is being captured, the tick is reported NOT MEASURED
+                     instead of a fabricated ratio
+                     (ui_live_smoke_lib.blink_sweep_gate_verdict), and a tab
+                     needs a minimum FRACTION of its ticks actually measured
+                     (ui_live_smoke_lib.MIN_MEASURED_FRACTION) to pass at
+                     all -- discarding most ticks as unmeasured must not
+                     read as "ok, ratio 0.0". The AAS legend keeps each
+                     event name's colour stable across ticks.
   4. no_leak     -- chart/uplot/pending-request counts (the chaos suite's
                      probe, test_web_ui_chaos.py's _LEAK_PROBE) are stable
                      across the visit; how long the probe took to settle is
@@ -131,6 +145,21 @@ TICK_HOOK_JS = """() => {
         } catch (e) {}
         return send(data);
     };
+}"""
+
+# issue #193: reads window.__pgwt.viewMount() -- the ViewManager mount
+# chokepoint's own record of the last successful view.mount() ({id, seq,
+# at}, `at` = Date.now() in this SAME browser context at mount time),
+# exposed by web/static/app.js from web/static/lib/view-manager.js's
+# lastMount. Returns {missing: true} rather than throwing when the hook
+# itself is absent (an old/broken app.js), so the Python side can tell
+# "nothing mounted yet" (a legitimate wait) apart from "this build has no
+# such hook" (a loud failure, never a hang -- see
+# _view_mount/_wait_for_mount_at_or_after).
+VIEW_MOUNT_JS = """() => {
+    const fn = window.__pgwt && window.__pgwt.viewMount;
+    if (typeof fn !== 'function') return {missing: true};
+    return {missing: false, mount: fn()};
 }"""
 
 # AAS legend chip colours keyed by event/class name (active.js renderLegend:
@@ -289,40 +318,46 @@ _PANEL_ELEMENT_SELECTOR = {
 
 TICK_TIMEOUT_S = 30  # generous multiple of the 5s tick cadence
 
-# The gating blink pair's settle offset (tick-anchored ms). Named so the
-# offset sweep (issue #119, ui_live_smoke_lib.SWEEP_OFFSETS_MS) can split
-# around it without a second magic number -- see run_tab's sweep capture.
+# issue #193 (round 1): the gating check used to be a single pair of frames
+# anchored on a fixed delay after the tick's own AAS-request timestamp
+# (BLINK_PAIR_ANCHOR_MS, 500ms -- see git history for the issue #119
+# gate-box evidence that picked that value). That anchor was provably wrong
+# under real load: app.js's refresh() awaits the summary pane's own round
+# trip BEFORE calling ViewManager.refresh() (web/static/app.js), so the
+# ACTIVE TAB's data lands later than any guess made from the AAS send time.
 #
-# Reduced from 1200 to 500 (issue #119 item 3) on real gate-box evidence,
-# TWO full --mode full walks on the ephemeral box (2026-09-25):
+# issue #193 (round 2, review): round 1's fix kept a SINGLE anchored pair,
+# just re-anchored on the ViewManager mount chokepoint's own event instead
+# of a fixed delay. Review then PROVED that a single pair -- anchored on
+# ANYTHING -- is blind to a transient narrower than its own capture window:
+# injecting a 400ms blank overlay into a view (the PR #188 shape) and
+# running the live check both ways measured ratio 0.0 on the old fixed pair
+# AND 0.0 on the mount-anchored pair, because both compare two frames that
+# land wholly inside or wholly outside the transient. The ONLY instrument
+# that caught it was the issue #119 offset sweep (SWEEP_OFFSETS_MS) at
+# ratio 1.0 on every consecutive pair -- multiple samples spread across the
+# tick, not two samples chosen up front, are what actually detect a
+# transient of unknown width and unknown position.
 #
-#   run.id 1790308106 (this constant still 1200 that run, sweep only
-#   reporting): the offset sweep's four consecutive-pair diff ratios
-#   (200->500->1000->1500->2000ms) were EXACTLY 0.0 for every tick on every
-#   tab that reached its tick loop (9 of 11 -- Waterfall/#101 never got a
-#   tick, Matrix/#142 failed mid-walk) -- 54 ticks x 4 pairs = 216
-#   comparisons, all zero, including every +0.5s-onward pair issue #119
-#   item 3's criterion asks about.
+# The gate is now BUILT ON the sweep instead of a separate pair: the sweep
+# itself is anchored on the mount event (round 1's genuine insight -- the
+# AAS-send-time anchor undershoots under load, proven by the rehearsal's own
+# pair_offsets_ms drifting to 1-10s) via _wait_for_mount_at_or_after, then
+# graded on its WORST (max) consecutive-pair ratio
+# (ui_live_smoke_lib.blink_sweep_gate_verdict) instead of on one pair.
+# SWEEP_OFFSETS_MS (ui_live_smoke_lib.py) is unchanged -- the same 5 values
+# issue #119 picked from real gate-box evidence, just measured from the
+# mount event now instead of the tick's AAS send.
 #
-#   run.id 1790312398 (this constant already reduced to 500, confirming
-#   run): gating stayed green (blink ratio 0.0, pair_offsets_ms ~500-520)
-#   on every tab that produced one, AND the sweep caught a REAL early
-#   transition this time -- Transitions showed a nonzero 200->500ms pair
-#   (up to 4.79%) on 4 of 6 ticks, but its 500->1000/1000->1500/1500->2000
-#   pairs were still exactly 0.0 every time, i.e. whatever moves on
-#   Transitions settles by 500ms. That is direct evidence the sweep's own
-#   200ms floor would NOT have been safe as the anchor -- 500 is the
-#   smallest value both runs' data support. (Matrix/#142, Scatter/#142 --
-#   newly on this run -- and Waterfall/#101 again produced no tick data;
-#   unrelated to this constant -- #142 is the pre-existing "panel element
-#   gone ~100ms after the tick" intermittent, filed before issue #119 and
-#   out of this issue's scope, not a tab this change made newly red.)
-#
-# 500 keeps a margin above the 100ms blind-window check and ties the
-# constant directly to the "+0.5s" the decision criterion was written
-# against. Watch future box-check runs' blink ratios/pair_offsets for any
-# regression before assuming this is the final word.
-BLINK_PAIR_ANCHOR_MS = 500
+# The sequence is re-checked immediately before the sweep's first capture
+# and immediately after its last; if it advanced anywhere in that bracket
+# (a second tick's mount landing mid-sweep), the WHOLE sweep straddled a
+# real content boundary and the tick is reported NOT MEASURED (never a
+# fabricated ratio) -- see ui_live_smoke_lib.blink_sweep_gate_verdict. A tab
+# also needs at least ui_live_smoke_lib.MIN_MEASURED_FRACTION of its ticks
+# actually measured to pass at all (review SHOULD-FIX: a tab that discarded
+# most of its ticks as not-measured must not report ok on the remainder
+# alone).
 
 
 class SmokeFailure(Exception):
@@ -525,21 +560,82 @@ def _atomic_panel_snapshot(page, tab_id):
     return page.evaluate(_ATOMIC_PANEL_SNAPSHOT_JS, _PANEL_ELEMENT_SELECTOR[tab_id])
 
 
-def _capture_at_offset(page, tab_id, tick_ts_ms, offset_ms):
-    """Sleeps only the remainder to tick_ts_ms+offset_ms (never a flat sleep
-    from wherever this is called -- same tick-anchoring rationale as the
-    gating blink pair below) and screenshots the panel. Returns (raw_png_or_
-    None, achieved_offset_ms) -- the achieved offset can exceed offset_ms if
-    prior work already ran past the target, exactly like blink_pair_offsets_
-    ms below; used both by the offset sweep (issue #119) and the gating
-    pair itself."""
-    target_ms = tick_ts_ms + offset_ms
+def _capture_at_offset(page, tab_id, base_ts_ms, offset_ms):
+    """Sleeps only the remainder to base_ts_ms+offset_ms (never a flat sleep
+    from wherever this is called) and screenshots the panel. Returns
+    (raw_png_or_None, achieved_offset_ms) -- the achieved offset can exceed
+    offset_ms if prior work already ran past the target. base_ts_ms is the
+    mount event's own timestamp (issue #193 round 2), not the tick's
+    AAS-request send -- see _wait_for_mount_at_or_after."""
+    target_ms = base_ts_ms + offset_ms
     now_ms = page.evaluate("Date.now()")
     if target_ms > now_ms:
         page.wait_for_timeout(target_ms - now_ms)
         now_ms = page.evaluate("Date.now()")
     frame = _safe_panel_screenshot(page, tab_id)
-    return frame, now_ms - tick_ts_ms
+    return frame, now_ms - base_ts_ms
+
+
+def _view_mount(page):
+    """Reads window.__pgwt.viewMount() (issue #193's mount chokepoint hook:
+    web/static/lib/view-manager.js's ViewManager.lastMount, exposed by
+    web/static/app.js). Returns the raw {"id", "seq", "at"} dict, or None
+    before the first mount of the page's lifetime.
+
+    Raises SmokeFailure if the hook ITSELF is missing -- an old/broken
+    app.js build must fail loudly here, never be silently read as "nothing
+    has mounted yet" (which would make _wait_for_mount_at_or_after poll all
+    the way to its own timeout looking exactly like a slow-but-real wait,
+    hiding a missing-instrumentation bug behind a generic timeout
+    message)."""
+    result = page.evaluate(VIEW_MOUNT_JS)
+    if result.get("missing"):
+        raise SmokeFailure(
+            "window.__pgwt.viewMount() is missing -- the mount-sequence "
+            "instrumentation (issue #193) is not present in this build")
+    return result.get("mount")
+
+
+def _wait_for_mount_at_or_after(page, tab_id, tick_ts_ms, timeout_s=TICK_TIMEOUT_S,
+                                 interval_ms=50):
+    """Polls until the ViewManager mount chokepoint (_view_mount) reports a
+    mount of `tab_id` whose OWN wall-clock timestamp (`at`, Date.now() in
+    the SAME browser context as tick_ts_ms) is >= tick_ts_ms -- issue #193's
+    replacement for a fixed delay from the tick's AAS-request send: the
+    summary pane's own round trip runs before ViewManager.refresh()
+    (web/static/app.js's refresh()), so a fixed guess from the send time
+    undershoots under load; this waits for the actual paint decision
+    instead of guessing when it happens.
+
+    Compares TIMESTAMPS, not a seq baseline carried from the previous tick
+    (review round 2 found that off by one): navigating to a tab already
+    triggers its own refresh()/mount() (switchTab's refreshActive() +
+    vm.switchTo(), which is also __uiLiveTicks' very first entry), so a seq
+    value read right after navigation already reflects tick 1's own mount
+    -- waiting for "seq > that baseline" there silently waits for tick 2's
+    mount instead, and every later tick inherits the one-tick shift
+    (confirmed on the rehearsal: pair_offsets_ms drifted to 5-10s, roughly
+    one whole 5s tick beyond the honest 1-3s "AAS pane goes first" delay
+    round 1 was fixing). A timestamp comparison has no baseline to carry
+    across ticks and get wrong: `mount.at >= tick_ts_ms` is correct for
+    tick 1 the exact same way it is for every later tick.
+
+    Raises SmokeFailure -- NEVER hangs, never silently returns a stale
+    record -- if the hook is missing (see _view_mount) or no matching mount
+    lands within timeout_s. Both are real product-visible failures: the
+    first means the instrumentation itself regressed, the second means the
+    tab's view never repainted for a whole tick's worth of budget."""
+    deadline = time.monotonic() + timeout_s
+    while True:
+        mount = _view_mount(page)
+        if mount is not None and mount["id"] == tab_id and mount["at"] >= tick_ts_ms:
+            return mount
+        if time.monotonic() >= deadline:
+            raise SmokeFailure(
+                f"no view.mount() of tab {tab_id!r} at/after this tick's AAS "
+                f"send ({tick_ts_ms}) landed within {timeout_s}s (issue #193 "
+                "mount-anchor wait)")
+        page.wait_for_timeout(interval_ms)
 
 
 def _poll_render_check(page, tab_id, timeout_s=2.0, interval_ms=150):
@@ -667,6 +763,12 @@ def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
         blink_ratios = []
         blink_pair_offsets_ms = []
         blink_sweep_ticks = []
+        blink_not_measured = []
+        # issue #100 (review round 4): timeline-only diagnostic, one entry
+        # per tick -- see the capture site below for what it measures and
+        # why. Empty for every other tab; never read by build_tab_result's
+        # `ok` computation.
+        pre_mount_diagnostics = []
         render_ok, render_detail = False, "never checked"
         for i in range(1, ticks + 1):
             if not _wait_for_tick(page, i, TICK_TIMEOUT_S):
@@ -674,6 +776,45 @@ def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
                     f"tick {i}/{ticks} did not arrive within {TICK_TIMEOUT_S}s")
             tick_ts_ms = page.evaluate(
                 "window.__uiLiveTicks[window.__uiLiveTicks.length - 1]")
+
+            # issue #100 (review round 4, corrected round 5), TIMELINE
+            # ONLY: try to capture the panel as the PREVIOUS tick's mount
+            # left it, before THIS tick's own mount can touch it, then diff
+            # it below against the sweep's own first frame (mount+200ms) to
+            # test #100's premise (the reported ~4.5% "unchanged-data"
+            # redraw was actually the tick's own legitimate window-advance
+            # repaint -- axis labels/gridlines, timeline.js's xAxis sits at
+            # the bottom of the grid -- caught mid-flight by the OLD
+            # 1200ms-anchor instrument). Never gates: reporting-only, read
+            # by nothing in build_tab_result.
+            #
+            # Round 4's mistake: it assumed "nothing repaints containerEl
+            # between mounts" (true, ViewManager's own contract) meant this
+            # capture was safe to trust unconditionally. It does not -- that
+            # invariant says nothing about whether OUR OWN capture (a real
+            # round trip: page.evaluate + a screenshot + PNG decode, real
+            # wall-clock time) finishes BEFORE the next mount, which is
+            # timeline's own live race (its mount can land ~150ms after the
+            # tick, sometimes faster than this capture completes). Asserted,
+            # never proven -- and on a real run it was proven WRONG twice
+            # (ticks 5-6, review round 5): a genuine window-advance repaint
+            # happened on both, confirmed by diffing the run's own saved
+            # per-tick frames, while this probe read 0.0 on the exact same
+            # ticks, because its "before" frame was actually taken AFTER.
+            #
+            # Fixed the same way the gating sweep already brackets its own
+            # capture: read the mount seq immediately AFTER this screenshot;
+            # only trust the frame as "before" if that seq is STILL behind
+            # THIS tick's eventual mount once it lands (checked further
+            # down, once `mount` is known, via
+            # lib.pre_mount_diagnostic_verdict). None (no mount observed at
+            # all yet) trivially precedes any mount that will ever land.
+            pre_mount_frame = None
+            pre_mount_seq_after = None
+            if tab_id == "timeline":
+                pre_mount_frame = _safe_panel_screenshot(page, tab_id)
+                m_after = _view_mount(page)
+                pre_mount_seq_after = m_after["seq"] if m_after is not None else None
 
             # Blind-window check (issue #93 review item 5): between the tick
             # landing and the render-check retry + gating settle below,
@@ -709,101 +850,82 @@ def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
             if not render_ok:
                 raise SmokeFailure(f"tick {i}: {render_detail}")
 
-            # Offset sweep (issue #119 item 2), EARLY half: extra frames at
-            # every ui_live_smoke_lib.SWEEP_OFFSETS_MS offset below the
-            # gating pair's own anchor (BLINK_PAIR_ANCHOR_MS), captured here
-            # so they land BEFORE it chronologically. Reporting only --
-            # summary.json's blink_sweep, never a second pass/fail check.
-            sweep_offsets = list(lib.SWEEP_OFFSETS_MS)
-            early_offsets = [o for o in sweep_offsets if o < BLINK_PAIR_ANCHOR_MS]
-            late_offsets = [o for o in sweep_offsets if o >= BLINK_PAIR_ANCHOR_MS]
-            sweep_raw_frames = []
-            sweep_achieved_ms = []
-            for offset in early_offsets:
-                frame, achieved = _capture_at_offset(page, tab_id, tick_ts_ms, offset)
-                sweep_raw_frames.append(frame)
-                sweep_achieved_ms.append(achieved)
-
-            # Settle before measuring "the same data window" for the GATING
-            # blink pair. NOT about animation: issue #102 (missing
-            # animation:false on Concurrency/Timeline/Scatter/Matrix) is
-            # CLOSED -- disproved at runtime, all four builders already had
-            # animation:false at the option root (see
-            # ui_live_smoke_lib.KNOWN_FAILING_TABS's #100 comment). The
-            # settle that predates that finding (originally 1200ms) was
-            # written to dodge a transition that turned out not to exist;
-            # see BLINK_PAIR_ANCHOR_MS's own comment above for the real
-            # gate-box sweep data (issue #119 item 3) that justifies its
-            # current value.
+            # issue #193 (round 2, review): the GATING check IS the offset
+            # sweep (issue #119, SWEEP_OFFSETS_MS), anchored on the mount
+            # chokepoint's own event for this tab instead of a fixed delay
+            # from the tick's AAS-request send. Review proved a single
+            # anchored pair -- however it is anchored -- is blind to a
+            # transient narrower than its own capture window (an injected
+            # 400ms overlay measured ratio 0.0 on the pair, 1.0 on every
+            # sweep offset); multiple samples spread across the tick are
+            # what actually catch a transient of unknown width/position.
             #
-            # Anchored to the TICK's own timestamp, not a flat sleep from
-            # wherever this line happens to run: the blind-window check
-            # above (screenshot + PNG decode), _poll_render_check's retry
-            # loop, and now the early sweep captures all take variable time,
-            # and a flat `wait_for_timeout(N)` here would silently drift the
-            # blink pair later after the tick (exactly what happened when
-            # the blind-window check was added, issue #93 review, before
-            # this anchoring existed) -- moving it off whatever interval a
-            # builder's own re-render/re-layout lands in. _capture_at_offset
-            # sleeps only the REMAINDER to tick_ts_ms+BLINK_PAIR_ANCHOR_MS,
-            # keeping the measurement window stable regardless of preceding
-            # work.
-            frame_a, achieved_a_ms = _capture_at_offset(
-                page, tab_id, tick_ts_ms, BLINK_PAIR_ANCHOR_MS)
-            # issue #93 review item 3: record the ACHIEVED offset (not just
-            # the target) -- preceding work can still push the real capture
-            # past BLINK_PAIR_ANCHOR_MS under load, silently moving the
-            # measurement window the "anchored to the tick" fix above was
-            # meant to stabilise.
+            # 1. Wait for a mount of THIS TAB whose own timestamp is at/
+            #    after this tick's AAS send (_wait_for_mount_at_or_after) --
+            #    the chokepoint's own signal that a fresh response was
+            #    actually painted, never a guess at when that happens.
+            mount = _wait_for_mount_at_or_after(page, tab_id, tick_ts_ms, TICK_TIMEOUT_S)
+            mount_at_ms = mount["at"]
+            # issue #93 review item 3, kept: record how long after the AAS
+            # send the mount landed, so a future drift under load stays
+            # visible in summary.json.
+            achieved_a_ms = mount_at_ms - tick_ts_ms
             blink_pair_offsets_ms.append(achieved_a_ms)
 
-            page.wait_for_timeout(120)  # same data window, before the next tick
-            frame_b = _safe_panel_screenshot(page, tab_id)
-            if frame_a is None or frame_b is None:
-                # A real find (heavy real load, not the mock): the panel's
-                # host DOM node itself can be torn down and rebuilt (not
-                # merely resized -- see blink_check's shape-mismatch case)
-                # between two "steady state" frames, e.g. Waterfall/Matrix
-                # re-mounting when the underlying execution/transition
-                # identity rotates under continuous pgbench traffic. That
-                # IS instability -- report the worst possible ratio, never
-                # crash on Playwright's "Element is not attached" error.
-                ratio, blink_note = 1.0, "panel element detached from the DOM between frames"
-            else:
-                ratio, blink_note = lib.blink_check(
-                    lib.png_bytes_to_array(frame_a), lib.png_bytes_to_array(frame_b))
-            if blink_note:
-                print(f"  note [{tab_id}] tick {i}: {blink_note}")
-            blink_ratios.append(ratio)
-
-            if frame_a is not None:
-                tick_path = os.path.join(tab_dir, f"tick-{i}.png")
-                with open(tick_path, "wb") as f:
-                    f.write(frame_a)
-                tick_paths.append(tick_path)
-
-            # Offset sweep (issue #119 item 2), LATE half: the remaining
-            # offsets at or past the anchor, captured now, after the gating
-            # pair, so they stay in chronological (and SWEEP_OFFSETS_MS)
-            # order. A sweep offset that lands EXACTLY on the anchor (true
-            # whenever BLINK_PAIR_ANCHOR_MS is itself one of
-            # SWEEP_OFFSETS_MS's values, as it is now) reuses frame_a
-            # instead of a second screenshot a few hundred ms later than
-            # intended -- capturing "again" there would just land near
-            # frame_b's window, not a genuinely separate offset sample.
-            for offset in late_offsets:
-                if offset == BLINK_PAIR_ANCHOR_MS:
-                    sweep_raw_frames.append(frame_a)
-                    sweep_achieved_ms.append(achieved_a_ms)
-                    continue
-                frame, achieved = _capture_at_offset(page, tab_id, tick_ts_ms, offset)
+            # 2. Re-check the sequence immediately before the sweep's first
+            #    capture and immediately after its last, bracketing the
+            #    WHOLE sweep -- if it moved anywhere in between (a second
+            #    tick's mount landing mid-sweep), the sweep straddled a real
+            #    content boundary and must be reported NOT MEASURED, never
+            #    a fabricated ratio.
+            seq_before_sweep = mount["seq"]
+            sweep_offsets = list(lib.SWEEP_OFFSETS_MS)
+            sweep_raw_frames = []
+            sweep_achieved_ms = []
+            for offset in sweep_offsets:
+                frame, achieved = _capture_at_offset(page, tab_id, mount_at_ms, offset)
                 sweep_raw_frames.append(frame)
                 sweep_achieved_ms.append(achieved)
+            after_sweep = _view_mount(page)
+            seq_after_sweep = after_sweep["seq"] if after_sweep is not None else None
+
             sweep_arrays = [lib.png_bytes_to_array(f) if f is not None else None
                             for f in sweep_raw_frames]
+
+            # issue #100 (review round 4, corrected round 5): pre-mount vs
+            # sweep's own first frame, timeline only -- see the capture site
+            # above for what precedes and why, and
+            # lib.pre_mount_diagnostic_verdict's own docstring for the
+            # precedence check itself.
+            if tab_id == "timeline":
+                pre_mount_arr = (lib.png_bytes_to_array(pre_mount_frame)
+                                 if pre_mount_frame is not None else None)
+                sweep_first_arr = sweep_arrays[0] if sweep_arrays else None
+                sig = lib.pre_mount_diagnostic_verdict(
+                    pre_mount_arr, sweep_first_arr, pre_mount_seq_after, mount["seq"])
+                pre_mount_diagnostics.append({"tick": i, **sig})
+
+            ratio, blink_note = lib.blink_sweep_gate_verdict(
+                sweep_arrays, seq_before_sweep, seq_after_sweep)
+            if blink_note:
+                print(f"  note [{tab_id}] tick {i}: {blink_note}")
+            if ratio is None:
+                blink_not_measured.append({"tick": i, "reason": blink_note})
+            else:
+                blink_ratios.append(ratio)
+
             blink_sweep_ticks.append(
                 lib.build_sweep_tick_record(sweep_achieved_ms, sweep_arrays,
                                             target_offsets_ms=sweep_offsets))
+
+            # The sweep's smallest-offset frame doubles as this tick's
+            # artifact PNG (closest analogue to the old gating pair's
+            # frame_a).
+            if sweep_raw_frames and sweep_raw_frames[0] is not None:
+                tick_path = os.path.join(tab_dir, f"tick-{i}.png")
+                with open(tick_path, "wb") as f:
+                    f.write(sweep_raw_frames[0])
+                tick_paths.append(tick_path)
 
             legend = page.evaluate(LEGEND_COLORS_JS)
             if legend:
@@ -822,6 +944,15 @@ def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
         leak_after, leak_after_settle_s = _settled_leak_probe(page)
         color_violations = (lib.color_stability_violations(legend_ticks)
                             if legend_ticks else [])
+        # blink_ratios holds only MEASURED ticks (blink_sweep_gate_verdict's
+        # ratio=None/"not measured" ticks are excluded, tracked separately
+        # in blink_not_measured) -- so an all-not-measured tab lands here as
+        # an empty list, worst_blink=None, and no_blink_ok(None, ...) is
+        # False by construction: an unmeasured signal fails the gate rather
+        # than silently passing it (issue #193). build_tab_result ALSO
+        # requires a minimum fraction of ticks to be measured at all
+        # (review SHOULD-FIX) -- a tab that discarded most of its ticks as
+        # not-measured must not report ok on the remainder alone.
         worst_blink = max(blink_ratios) if blink_ratios else None
 
         result = lib.build_tab_result(
@@ -832,7 +963,9 @@ def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
             leak_before_settle_s=leak_before_settle_s,
             leak_after_settle_s=leak_after_settle_s,
             blink_pair_offsets_ms=blink_pair_offsets_ms,
-            blink_sweep_ticks=blink_sweep_ticks)
+            blink_sweep_ticks=blink_sweep_ticks,
+            blink_not_measured=blink_not_measured,
+            pre_mount_diagnostics=pre_mount_diagnostics)
     except SmokeFailure as e:
         print(f"  FAIL [{tab_id}]: {e}", file=sys.stderr)
         result = lib.build_failed_tab_result(tab_id, str(e),
