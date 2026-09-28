@@ -45,4 +45,10 @@ test_ui_live_smoke_lib.py
 test_multi_window_lib.py
 test_demo_rehearsal_lib.py
 test_demo_rehearsal_orchestrator_lib.py
+# #205: the blindness guard in tests/timeline_window_probe.py -- every way
+# the live-window measurement can be starved (nothing recorded, info ticking
+# while the tab never fetched, a partial run, an unparseable frame) must
+# refuse. The pre-guard version silently ACCEPTED a frame whose cmd was not
+# a string.
+test_timeline_window_probe.py
 test_hetzner_sweep.sh
