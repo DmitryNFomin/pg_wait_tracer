@@ -85,18 +85,23 @@ if [[ $FAST -eq 0 ]]; then
     #                                snapshot suite (test_web_ui_snapshots.py
     #                                isn't invoked here yet): HTTP +40/WS +41,
     #                                sampled +50/+51
-    PORT_SPAN=60
+    #     PGWT_CHIP_PORT  = base+60 test_chip_label_alignment.py: HTTP +60
+    #                                (gallery.html is static — no WS pair)
+    PORT_SPAN=70
     PGWT_PORT_BASE=$(python3 tests/free_ports.py "$PORT_SPAN") || { echo "free_ports: could not allocate $PORT_SPAN free ports"; exit 2; }
     [[ $PGWT_PORT_BASE =~ ^[0-9]+$ ]] || { echo "free_ports: non-numeric base '$PGWT_PORT_BASE'"; exit 2; }
     export PGWT_TEST_PORT=$PGWT_PORT_BASE
     export PGWT_CHAOS_PORT=$((PGWT_PORT_BASE + 30))
     export PGWT_SNAP_PORT=$((PGWT_PORT_BASE + 40))
-    echo "port base: $PGWT_PORT_BASE (span $PORT_SPAN — TEST=+0 CHAOS=+30 SNAP=+40)"
+    export PGWT_CHIP_PORT=$((PGWT_PORT_BASE + 60))
+    echo "port base: $PGWT_PORT_BASE (span $PORT_SPAN — TEST=+0 CHAOS=+30 SNAP=+40 CHIP=+60)"
 
     step "web UI suite vs mock_server.py (Playwright)"
     run python3 tests/test_web_ui.py
     step "web UI chaos suite (latency jitter / reconnects)"
     run python3 tests/test_web_ui_chaos.py
+    step "overlay chip label alignment at DSF 1/2 (issue #213)"
+    run python3 tests/test_chip_label_alignment.py
 fi
 
 if [[ $fail -ne 0 ]]; then
