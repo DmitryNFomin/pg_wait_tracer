@@ -36,6 +36,7 @@ Usage:
 import argparse
 import json
 import os
+import subprocess
 import sys
 import threading
 import time
@@ -73,6 +74,29 @@ def _print_plan_banner(duration_s, ticks, passes):
               "DURATION_MIN=35) and some tabs' ticks_ok WILL legitimately "
               "fail below -- that proves the harness's mechanics, not the "
               "product.")
+
+
+def _detect_git_tag():
+    """The exact tag this checkout is at, or None if it is not exactly on
+    one (docs/DEMO_REHEARSAL_CRITERIA.md "same tag, not merely the same
+    tree" -- two attempts only count as consecutive if this matches).
+    `git describe --tags --exact-match` fails on anything other than an
+    exact tag (a plain commit, a tag+N-commits-ahead) -- that failure is
+    the correct, honest answer "not on a tag", not an error worth raising:
+    an unattributed attempt should read as unattributed in the verdict,
+    never silently fall back to a commit hash it then gets confused with a
+    real tag."""
+    try:
+        out = subprocess.run(
+            ["git", "describe", "--tags", "--exact-match"],
+            cwd=os.path.dirname(os.path.abspath(__file__)),
+            capture_output=True, text=True, timeout=10)
+    except Exception:
+        return None
+    if out.returncode != 0:
+        return None
+    tag = out.stdout.strip()
+    return tag or None
 
 
 def _assert_daemon_alive(daemon_pid, where):
@@ -328,6 +352,15 @@ def main():
                     "lower this for a real baseline run, only for the "
                     "explicit DURATION_MIN=3 self-test)")
     ap.add_argument("--out-dir", default=RESULTS_DIR)
+    ap.add_argument("--tag", default=None,
+                    help="the git tag this attempt ran against (docs/"
+                    "DEMO_REHEARSAL_CRITERIA.md 'same tag, not merely the "
+                    "same tree'). Not required -- auto-detected via "
+                    "`git describe --tags --exact-match` against this "
+                    "checkout when omitted; recorded in summary.json as "
+                    "'tag' either way (null if neither yields one), so an "
+                    "attempt run from a non-tagged tree is visibly "
+                    "unattributed rather than silently uncounted")
     ap.add_argument("--first-data-timeout", type=float,
                     default=lib.FIRST_DATA_TIMEOUT_S)
     ap.add_argument("--pgbench-pid", type=int, default=None)
@@ -545,6 +578,13 @@ def main():
     summary["duration_min"] = args.duration_min
     summary["ticks_per_tab"] = ticks
     summary["plan_degraded"] = ticks < lib.MIN_TICKS or len(passes) < 3
+    # docs/DEMO_REHEARSAL_CRITERIA.md "same tag, not merely the same tree":
+    # --tag if the caller supplied one (e.g. demo_rehearsal.sh pinned to a
+    # specific release tag), else auto-detected from this checkout. Never
+    # gates `ok` -- a missing tag is a fact about provenance for a human
+    # deciding whether two attempts count as consecutive, not a pass/fail
+    # criterion this harness enforces itself.
+    summary["tag"] = args.tag or _detect_git_tag()
     # Reporting only (owner finding, 2026-09-28) -- never gates `ok`. See
     # summarize_sweep_offset_coverage's own comment.
     summary["sweep_offset_coverage"] = sweep_coverage
@@ -565,6 +605,7 @@ def main():
     for name, check in extra_checks.items():
         print(f"  {'PASS' if check['ok'] else 'FAIL'} {name}")
     print(f"  summary: {summary_path}")
+    print(f"  tag: {summary['tag'] or '(none -- not on a tag)'}")
     print(drlib.verdict_line(summary))
 
     return 0 if summary["ok"] else 1

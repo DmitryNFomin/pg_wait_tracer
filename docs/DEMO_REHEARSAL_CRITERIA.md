@@ -34,11 +34,15 @@ the whole run, not just the two the §2 floors need:
 trace dir this workload produced, it queries every tab's own endpoint and
 applies the per-tab condition (`python3 tests/demo_workload_coverage.py
 --trace-dir DIR`); its pure per-tab checkers are unit-tested by
-`tests/test_demo_workload_coverage.py`, wired into `scripts/check.sh`. It is
-a standalone check, not wired into `tests/demo_rehearsal.py`'s own verdict.
+`tests/test_demo_workload_coverage.py`, wired into `scripts/check.sh`. It also
+runs inside `tests/demo_rehearsal.py`'s own end-of-capture checks
+(`extra_checks["tab_coverage"]`, before the trace dir is torn down) — an empty
+tab on a real rehearsal fails that rehearsal's `ok`, not just the standalone
+tool a human has to remember to run.
 
 A rehearsal run on a different workload, client count, PG version, box class or
-script commit is a different experiment and does not count toward the sequence.
+**tag** (see "The sequence, and what stops it from being rolled" below) is a
+different experiment and does not count toward the sequence.
 
 ## The demo configuration (owner, 2026-09-28)
 
@@ -434,9 +438,27 @@ that captured nothing used to score clean) is now FIXED on
   happened by then, the result is "not clean" and that is what the owner is
   told. Re-rolling until two land in a row is the same after-the-fact selection
   this document exists to prevent.
-- The two clean runs must be on the same tree: same commit, same script commit,
-  same box class, same PG version, same pgbench parameters, with no commit in
-  between.
+- **The two clean runs must be on the same tag, not merely the same tree.**
+  Owner, 2026-09-28: "instead of code freeze we will make a tag on master when
+  it will be demo ready and will continue development" -- a tag pins the tree
+  the way "same commit, no commit in between" used to, without requiring
+  master itself to stop moving:
+  - When master is judged demo-ready it is **tagged**; the demo machine is
+    built from that tag, and every counted rehearsal runs **against that
+    tag**, from a worktree checked out at it — never from master HEAD, which
+    keeps moving.
+  - A counted attempt **names the tag it ran against**, alongside the box
+    class, PG version, pgbench parameters, and the display identity and
+    Safari/macOS versions already recorded in the verdict.
+  - Two clean attempts count as consecutive **only if they ran on the same
+    tag**.
+  - **Landing a fix and re-tagging resets the clean-attempt counter to
+    zero.** An early or hopeful tag costs the whole sequence, so the tag is
+    cut when the tree is genuinely ready, not to start the clock.
+  - Development continues on master in parallel and does not disturb an
+    in-flight sequence — that is the point of the tag, and it removes the
+    objection that with several branches in flight no two runs could ever
+    share a tree.
 
 ## Provenance
 
