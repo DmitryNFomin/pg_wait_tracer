@@ -256,20 +256,29 @@ def test_pg_sleep_exact_count(pm_pid):
     # records come closed off the watchpoint and sit in the recorded trace
     # file, and the split reproduces with no tracer process in existence
     # (6/6 runs, ftrace signal_generate as the tracer-independent oracle). No
-    # upper bound is asserted either: any ceiling would be a number picked to
+    # exact ceiling is asserted either: any ceiling would be a number picked to
     # fit today's boxes, and a busier one can honestly split more than once.
+    # What the equality really provided was that ceiling, so the average below
+    # restores a loose one — see there.
     #
     # Why a floor plus the total, and not the total alone: one extra interval
     # and one MISSING interval cancel out in the sum, so duration alone would
     # pass while the tracer dropped a wait. The two together do not.
     #
-    # EXACT counts still live in two places, and were not abandoned here:
-    #   * tests/test_data_events.py — exact count/total/avg/max against a
-    #     GENERATED event stream, where the number is a real invariant instead
-    #     of an assumption about what PostgreSQL does between two waits;
-    #   * tests/issue191_split_repro.py — a live run that sets the backend's
-    #     latch on purpose and requires exactly N+1, a sharper assertion than
-    #     this one ever was because the perturbation is deliberate.
+    # EXACT counts, and where they live now:
+    #   * tests/test_capture_smoke.py (controlled sleeper, "exactly one PgSleep
+    #     record" for one SELECT pg_sleep(3)) — the only exact LIVE-capture
+    #     PgSleep count left anywhere, and so the real remaining guard against
+    #     a capture-path over-count. It runs in CI's capture-smoke job
+    #     (.github/workflows/ci.yml → tests/ci_smoke.sh), NOT in run_all.sh, so
+    #     a box-check alone does not exercise it;
+    #   * tests/test_data_events.py — exact count/total/avg/max, but against a
+    #     GENERATED event stream, so it pins the compute path and cannot see a
+    #     capture-path phantom at all;
+    #   * tests/issue191_split_repro.py — ON DEMAND only (in no suite): a live
+    #     run that sets the backend's latch on purpose and requires exactly
+    #     N+1, sharper than this assertion ever was because the perturbation is
+    #     caused rather than awaited.
     # Asserting exactly N sleep EPISODES here (merging adjacent PgSleep records
     # separated by a short CPU gap) is deliberately NOT done: adjacency plus a
     # sub-millisecond gap does not prove one episode — two successive pg_sleep
@@ -281,20 +290,35 @@ def test_pg_sleep_exact_count(pm_pid):
           f"a signalled WaitLatch may split one sleep, see issue #191)")
 
     # All five waits start after attachment, so total is ≈10000ms. Keep the
-    # existing ±3000ms product-accuracy bound. This is the half of the pair
-    # that a spurious EXTRA interval would break: a split preserves the sum,
-    # a fabricated wait does not.
+    # existing ±3000ms product-accuracy bound. Measured on the gate box: this
+    # is what catches an extra interval carrying MATERIAL duration (7 sleeps →
+    # 14014ms, outside the bound, while count=7 passes the floor), and it is
+    # blind both to a missing interval (4 sleeps → 8008ms, inside the bound;
+    # the floor catches that one) and to a fabricated wait of near-zero
+    # duration (which is what the average below is for).
     check(7000 <= ev['total_ms'] <= 12000,
           f"total = {ev['total_ms']:.1f}ms "
           f"(expected {N * SLEEP_EACH_S * 1000}ms ±3000ms)")
 
-    # No avg assertion: avg = total / count, so any lower bound on it is an
-    # upper bound on the count wearing a disguise (avg > 1s fails at 10
-    # records), and #191 is exactly the case where extra records are honest.
-    # Max below carries what avg was really checking — that these are
-    # seconds-long sleeps, not a shower of fragments misattributed to PgSleep.
+    # The loose ceiling that replaces the old equality. avg = total/count, so
+    # with the total pinned this IS a bound on the count — that is the point:
+    # nothing else here can see a shower of near-zero phantoms. The floor
+    # cannot (more records only help it), the total cannot (~2000ms of headroom
+    # over the real ~10010ms absorbs ~199,000 records of 10us), and max cannot
+    # (it is an extremum: one genuine 2002ms record keeps max at 2002ms no
+    # matter how many fragments join it). 200ms tolerates ~45 honest #191
+    # splits of this 10s total while collapsing on the first fragment shower.
+    # Deliberately loose, not a tolerance widened to silence a red: the old
+    # bound was 1s, which fails at ten records, and #191 proved records past
+    # five can be honest.
+    check(ev['avg_us'] > 200000,
+          f"avg = {ev['avg_us']:.0f}us (expected > 200000us: with total pinned "
+          f"near {N * SLEEP_EACH_S * 1000}ms this is the ceiling on phantom "
+          f"records, see issue #191)")
 
-    # Max should be close to 2s (single sleep, no outliers)
+    # Max should be close to 2s (single sleep, no outliers). Catches
+    # over-attribution into one record; being an extremum it says nothing
+    # about how many records there are — that is the average's job.
     check(ev['max_us'] < SLEEP_EACH_S * 1.5e6,
           f"max = {ev['max_us']:.0f}us (expected < {SLEEP_EACH_S * 1.5e6:.0f}us)")
 
