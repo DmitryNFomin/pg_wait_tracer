@@ -106,7 +106,6 @@ details{{margin-top:1rem}} summary{{cursor:pointer;color:#9aa6af}}
                    "origin_master": args.origin_master,
                    "base_ahead_of_origin_master": args.base_ahead,
                    "base_behind_origin_master": args.base_behind,
-                   "base_is_ancestor_of_head": True,
                    "counts": counts,
                    "cells": [{"name": r[0], "verdict": r[1], "ratio": round(r[2], 5), "detail": r[3]} for r in rows]}, f, indent=1)
     print(f"gallery: {counts['changed']} changed, {counts['added']} added, {counts['removed']} removed, {counts['unchanged']} unchanged")

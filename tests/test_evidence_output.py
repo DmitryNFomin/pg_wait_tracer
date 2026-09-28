@@ -33,6 +33,7 @@ class GalleryEvidenceTests(unittest.TestCase):
                 self.assertEqual(summary["origin_master"], "new")
                 self.assertEqual(summary["base_ahead_of_origin_master"], ahead)
                 self.assertEqual(summary["base_behind_origin_master"], behind)
+                self.assertNotIn("base_is_ancestor_of_head", summary)
                 html = (root / "index.html").read_text()
                 if ahead or behind:
                     self.assertIn("WARNING", html)
@@ -47,7 +48,7 @@ class GalleryEvidenceTests(unittest.TestCase):
             git.write_text("""#!/bin/sh
 printf '%s\\n' "$*" >> "$GIT_CALLS"
 case "$1 $2" in
-  'fetch --quiet') exit 0 ;;
+  'fetch --quiet') [ "${FETCH_FAIL:-0}" != 1 ] ;;
   'rev-parse --verify')
     case "$3" in
       origin/master*) echo originhash ;;
@@ -82,6 +83,13 @@ exit 1
                         self.assertIn("not an ancestor", result.stdout + result.stderr)
                     else:
                         self.assertIn("rev-list --left-right --count", trace)
+            calls.write_text("")
+            env["FETCH_FAIL"] = "1"
+            result = subprocess.run(["bash", str(ROOT / "tests/ui_gallery.sh")],
+                                    env=env, capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("FAIL: could not refresh origin/master", result.stdout)
+            self.assertNotIn("rev-parse --verify", calls.read_text())
 
 
 class TieredOutputTests(unittest.TestCase):
