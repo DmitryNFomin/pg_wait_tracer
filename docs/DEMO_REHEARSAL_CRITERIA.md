@@ -82,12 +82,26 @@ cost is real and is accepted deliberately.
   Built-in Liquid Retina, **2880 x 1864 Retina**, `Main Display: Yes`.
 - **Viewport: 1440 x 932 CSS at devicePixelRatio 2.** That is what the walk
   pins, since a Retina panel reports twice the CSS resolution.
-- **Browser: Google Chrome**, 153.0.8010.53 at the time of writing. Pin the
-  major version in the verdict; a Chrome update between a clean rehearsal and
-  the demo invalidates the client half, because rendering and paint timing are
-  exactly what that half measures.
+- **Browser: Safari** (owner, 2026-09-28: "it safari not chrome"). Pin the
+  Safari and macOS versions in the verdict; an update between a clean
+  rehearsal and the demo invalidates the client half, because rendering, paint
+  timing and WebSocket behaviour are exactly what that half measures.
 
-**One ambiguity, flagged rather than assumed.** An `LG ULTRAFINE` at
+  **Safari must be driven as Safari.** Playwright's `webkit` is a different
+  build — different JIT, networking stack, and timer and WebSocket behaviour —
+  so measuring WebKit and reporting it as Safari would be the same class of
+  error as every instrument defect found on 2026-09-27: measuring a near
+  neighbour of the thing and labelling it the thing. `/usr/bin/safaridriver`
+  is present, so real Safari is drivable over WebDriver. If it ever cannot be,
+  the honest fallbacks are a scripted manual walk with the harness recording,
+  or WebKit **explicitly labelled a proxy** with its differences stated — never
+  WebKit under Safari's name.
+
+  A Chrome measurement is not evidence for this criterion. The first
+  Mac-side walk was built against Chrome before this correction; its findings
+  about the bridge, the ssh hop and freshness stand, its paint numbers do not.
+
+**One ambiguity, still open.** An `LG ULTRAFINE` at
 6016 x 3384 (UI 3008 x 1692) is also attached to this Mac. "Screen" was
 answered against a laptop-screen-or-projector question, so it is read as the
 built-in panel — but if the demo is actually driven on the external display,
