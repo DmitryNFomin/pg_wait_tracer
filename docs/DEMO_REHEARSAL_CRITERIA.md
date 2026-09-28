@@ -158,10 +158,10 @@ cost is real and is accepted deliberately.
 
 - **Display: the Mac's built-in screen**, not the projector — `Color LCD`,
   Built-in Liquid Retina, **2880 x 1864 Retina**, `Main Display: Yes`.
-- **Presented FULL SCREEN** (owner, 2026-09-28), so the pinned viewport is
-  **1710 x 1069 CSS at devicePixelRatio 2** — measured in real Safari via
-  WebDriver, not computed: `screen` reports 1710 x 1107 logical, full screen
-  leaves 38 px of chrome, and the content layer is 3420 x 2138 physical.
+- **Presented FULL SCREEN** (owner, 2026-09-28). Historically pinned to
+  Safari's measured **1710 x 1069 CSS at devicePixelRatio 2**; `screen`
+  reports 1710 x 1107 logical, full screen leaves 38 px of chrome, and the
+  content layer is 3420 x 2138 physical.
 
   **An earlier pin of 1440 x 932 was wrong and is retracted.** It came from
   dividing the panel's 2880 x 1864 by the DPR of 2, which assumes macOS maps
@@ -173,38 +173,59 @@ cost is real and is accepted deliberately.
 
   Two related traps, both measured rather than assumed:
   - **A window rect is not a content viewport.** Asking WebDriver for a
-    1440 x 932 *window* yields an 880 px tall *page* — Safari's title and tab
-    bar take 52 px in a window, 38 px in full screen, and zero width in both.
-    A harness must set the outer size, read `innerWidth`/`innerHeight` back,
+    1440 x 932 *window* yields an 880 px tall *page* — the browser's title and
+    tab bar take real px in a window, less (but not zero) in full screen. A
+    harness must set the outer size, read `innerWidth`/`innerHeight` back,
     and assert the achieved viewport rather than trusting the request.
   - Numbers taken at one viewport do not transfer to another, in either
     direction.
-- **Browser: Safari** (owner, 2026-09-28: "it safari not chrome"). Pin the
-  Safari and macOS versions in the verdict; an update between a clean
-  rehearsal and the demo invalidates the client half, because rendering, paint
-  timing and WebSocket behaviour are exactly what that half measures.
+  - **A viewport read immediately after entering full screen can be
+    transient, not settled.** During the Chrome measurement below, a reading
+    of exactly **1710 x 1069** — the old Safari pin, both plausible and
+    wrong for Chrome — appeared mid-animation and was superseded 637 ms
+    later by the settled 981. A single post-transition reading can catch
+    exactly this trap and "confirm" a stale number. **Required: a viewport
+    measurement is two identical readings taken after the full-screen
+    animation settles, never a single reading taken right after the
+    transition.**
 
-  **Safari must be driven as Safari.** Playwright's `webkit` is a different
-  build — different JIT, networking stack, and timer and WebSocket behaviour —
-  so measuring WebKit and reporting it as Safari would be the same class of
-  error as every instrument defect found on 2026-09-27: measuring a near
-  neighbour of the thing and labelling it the thing. `/usr/bin/safaridriver`
-  is present, so real Safari is drivable over WebDriver. If it ever cannot be,
-  the honest fallbacks are a scripted manual walk with the harness recording,
-  or WebKit **explicitly labelled a proxy** with its differences stated — never
-  WebKit under Safari's name.
+- **Browser changed: Chrome, not Safari** (owner, 2026-09-28). Supersedes
+  the Safari pin above, not a retraction of it as wrong — Safari's number
+  was correct for Safari; `screen` size and DPR are identical between the
+  two, Chrome's toolbar simply costs ~88px more height (981 vs 1069) than
+  Safari's did.
 
-  A Chrome measurement is not evidence for this criterion. The first
-  Mac-side walk was built against Chrome before this correction; its findings
-  about the bridge, the ssh hop and freshness stand, its paint numbers do not.
+  **Pin: 1710 x 981 CSS at devicePixelRatio 2** — Chrome full screen, the
+  built-in panel, 100% zoom, in a dedicated demo profile. Environment to
+  record alongside every counted attempt: **macOS 15.6.1 (24G90), Chrome
+  153.0.8010.53**, built-in `Color LCD` 2880 x 1864 Retina as the only
+  attached display, `screen` 1710 x 1107.
+
+  Evidence: 7 readings across 3 separate full-screen entries, all
+  identical, plus 2 more at the other hostname and an independent in-page
+  reporting channel that settled on the same number every time. Artifact:
+  `tests/results/chrome_demo_viewport/` on branch
+  `agent/chrome-viewport-measure`.
+
+  Pin the Chrome and macOS versions in the verdict, same reasoning as
+  before the browser changed: an update between a clean rehearsal and the
+  demo invalidates the client half, because rendering, paint timing and
+  WebSocket behaviour are exactly what that half measures.
+
+  **Still unmeasured, stated as such rather than assumed equal**: the
+  screen-shared (Zoom/Meet/Teams) variant. Screen sharing changes
+  resolution, scaling and layout in ways not yet quantified here, and
+  needs the owner driving the real conferencing tool to measure — open
+  item, not a criterion yet.
 
 **Display confirmed** (owner, 2026-09-28): the built-in panel, not the
 `LG ULTRAFINE` 6016 x 3384 also attached to this Mac — the identity is
-recorded in the verdict alongside the Safari and macOS versions, and the
-pinned viewport is the measured **1710 x 1069 CSS at DPR 2** above (the
-1440 x 932 figure is the retracted, halved-from-2880 number, not a second
-final value) — a rehearsal walked on a different display is a different
-experiment, exactly as a different PG version would be.
+recorded in the verdict alongside the Chrome and macOS versions, and the
+pinned viewport is the measured **1710 x 981 CSS at DPR 2** above (the
+1440 x 932 and the superseded Safari 1710 x 1069 figures are not second
+final values) — a rehearsal walked on a different display, or a different
+browser, is a different experiment, exactly as a different PG version
+would be.
 
 ### Recovery after the bridge drops
 
@@ -456,7 +477,7 @@ that captured nothing used to score clean) is now FIXED on
     keeps moving.
   - A counted attempt **names the tag it ran against**, alongside the box
     class, PG version, pgbench parameters, and the display identity and
-    Safari/macOS versions already recorded in the verdict.
+    Chrome/macOS versions already recorded in the verdict.
   - Two clean attempts count as consecutive **only if they ran on the same
     tag**.
   - **Landing a fix and re-tagging resets the clean-attempt counter to
