@@ -16,9 +16,22 @@ cd "$(dirname "$0")/.."
 # A local master may lag merged UI changes by several commits. Refresh the
 # remote-tracking ref before choosing a base, including for explicit overrides
 # so their distance from the same reference is meaningful.
-echo "fetching origin/master for gallery base (15s timeout) ..."
-timeout 15 git fetch --quiet origin master:refs/remotes/origin/master \
-    || { echo "FAIL: could not refresh origin/master"; exit 1; }
+echo "fetching origin/master for gallery base (15s deadline) ..."
+GIT_SSH_COMMAND="ssh -o ConnectTimeout=15" \
+    git -c http.lowSpeedLimit=1 -c http.lowSpeedTime=15 \
+    fetch --quiet origin master:refs/remotes/origin/master &
+fetch_pid=$!
+fetch_started=$SECONDS
+while kill -0 "$fetch_pid" 2>/dev/null; do
+    if (( SECONDS - fetch_started >= 15 )); then
+        kill "$fetch_pid" 2>/dev/null || true
+        wait "$fetch_pid" 2>/dev/null || true
+        echo "FAIL: timed out refreshing origin/master after 15s"
+        exit 1
+    fi
+    sleep 1
+done
+wait "$fetch_pid" || { echo "FAIL: could not refresh origin/master"; exit 1; }
 base_ref=$(git rev-parse --verify "${1:-origin/master}^{commit}") \
     || { echo "FAIL: invalid gallery base: ${1:-origin/master}"; exit 1; }
 origin_master=$(git rev-parse --verify 'origin/master^{commit}')

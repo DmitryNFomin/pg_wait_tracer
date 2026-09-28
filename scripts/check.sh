@@ -63,6 +63,8 @@ run python3 tests/test_free_ports.py
 # the fast deterministic tier.
 step "python: demo-rehearsal bypass-suite unit tests"
 run python3 tests/test_demo_rehearsal_lib.py
+
+step "python: gallery provenance and tiered output unit tests"
 run python3 tests/test_evidence_output.py
 
 step "CI change-classifier table-driven test (issue #167)"
