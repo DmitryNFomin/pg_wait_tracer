@@ -779,6 +779,37 @@ def test_capture_age_reason_exactly_at_bound():
           "capture_age_reason: exactly at the minimum counts (>=, not >)")
 
 
+def test_filter_leak_reason_before_timeline_never_flagged():
+    check(lib.filter_leak_reason(False, "›PID 22530 ✕") is None,
+          "filter_leak_reason: a tab before/at Timeline is never flagged, "
+          "even with filters showing (Timeline's own drill is intentional)")
+
+
+def test_filter_leak_reason_clean_after_timeline():
+    check(lib.filter_leak_reason(True, "") is None,
+          "filter_leak_reason: empty breadcrumb after Timeline -> no leak")
+
+
+def test_filter_leak_reason_whitespace_only_is_clean():
+    check(lib.filter_leak_reason(True, "   \n") is None,
+          "filter_leak_reason: whitespace-only breadcrumb text -> no leak")
+
+
+def test_filter_leak_reason_detects_leak():
+    reason = lib.filter_leak_reason(True, "›PID 22530 ✕")
+    check(reason is not None and "PID 22530" in reason,
+          "filter_leak_reason: non-empty breadcrumb after Timeline is a leak "
+          f"(got {reason!r})")
+
+
+def test_filter_leak_reason_unmeasured_refuses():
+    reason = lib.filter_leak_reason(True, None)
+    check(reason is not None,
+          "filter_leak_reason: could-not-read breadcrumb after Timeline "
+          "fails closed, never assumed clean "
+          f"(got {reason!r})")
+
+
 def test_walk_precondition_all_clear():
     check(lib.walk_precondition_reason(False, False) is None,
           "walk_precondition_reason: unlocked + awake -> None (walk may proceed)")

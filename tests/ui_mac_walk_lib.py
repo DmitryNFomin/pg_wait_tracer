@@ -430,6 +430,40 @@ def capture_age_reason(capture_age_s, min_capture_age_s):
     return None
 
 
+def filter_leak_reason(after_timeline, active_filters):
+    """Returns a reason string if a drill filter is active on a tab that
+    comes AFTER Timeline in the walk order, else None.
+
+    Found live (2026-09-28, review round 2): the Timeline tab's drill
+    pushes a pid filter that a previous fix cleared via clicking
+    '.crumb-clear', but that clear was only ever RECORDED in the verdict
+    (active_filters), never used to fail the run -- so a persisted filter
+    onto waterfall/scatter/matrix (attempt four's "6 executions / 6
+    points" being luck, not a validated clean state) was visible in the
+    data but did not make the walk say so. This function is what turns
+    "visible" into "gated": any tab after Timeline whose breadcrumb is
+    non-empty, or whose breadcrumb couldn't even be READ (fail-closed,
+    same contract as capture_age_reason/walk_precondition_reason -- an
+    unmeasured filter state is never assumed clean), is a failure with
+    its own reason string, independent of render/console/freshness.
+
+    `after_timeline` carries no ordering knowledge of its own: the caller
+    (which knows the walk's actual TABS order) decides which tabs count
+    as "after", so this function can't be fooled by a tab that merely
+    happens to be named 'timeline' or reordered TABS -- it only ever
+    trusts what it's told."""
+    if not after_timeline:
+        return None
+    if active_filters is None:
+        return ("active filter chips could not be read on a tab after "
+                "Timeline -- cannot verify the drill filter was actually "
+                "cleared, refusing to assume it was")
+    text = active_filters.strip()
+    if not text:
+        return None
+    return f"drill filter leaked onto a tab after Timeline: breadcrumb shows {text!r}"
+
+
 def majority_void(tabs):
     """True if MORE THAN HALF of `tabs` (build_tab_entry dicts) are void
     (Mac-side infrastructure noise, not a product signal) -- coordinator's

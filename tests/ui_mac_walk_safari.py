@@ -352,14 +352,25 @@ def clear_drill_filter(session):
     setTabView('overview'), which is why this is called AFTER Timeline's
     own render check completes, never before or during it -- clearing
     while still viewing Timeline would navigate away before Timeline's
-    readiness/empty check could observe it."""
+    readiness/empty check could observe it.
+
+    FAILS LOUDLY if a chip was present but did not disappear after the
+    click (2026-09-28 review round 2): a silent degrade here -- swallowing
+    the timeout and moving on -- would reproduce the EXACT invisible-
+    filter bug this function exists to close, just moved one layer down
+    (broken clear-button wiring instead of a missing clear call). An
+    unmeasured/failed clear is never treated as "clear enough"."""
     present = session.execute_script(
         "return document.querySelector('.crumb-clear') !== null;")
     if not present:
         return False
     session.execute_script(
         "const b = document.querySelector('.crumb-clear'); if (b) b.click();")
-    wait_for_js(session, "document.querySelector('.crumb-clear') === null", 10.0)
+    if wait_for_js(session, "document.querySelector('.crumb-clear') === null", 10.0) is None:
+        raise RuntimeError(
+            "clicked .crumb-clear but the breadcrumb chip is still present after 10s -- "
+            "refusing to silently continue with a possibly-still-active drill filter "
+            "(this is the exact invisible-filter failure mode the clear step exists to close)")
     return True
 
 
@@ -787,6 +798,12 @@ def main():
             version_skew = lib.version_skew_from_snapshot(version_skew_snapshot(session))
             print(f"version_skew: {version_skew}")
 
+            # seen_timeline gates filter_leak_reason (2026-09-28 review
+            # round 2): True only once the "timeline" tab -- the sole tab
+            # that drills -- has been fully processed in THIS pass, so
+            # Timeline's own intentional filter is never flagged and every
+            # tab strictly after it is.
+            seen_timeline = False
             for tab_id in uls_lib.TABS:
                 print(f"=== {tab_id} ===")
                 wall_start = time.time()
@@ -832,6 +849,14 @@ def main():
                 except Exception as e:
                     print(f"  note [{tab_id}]: could not read active filters: {e}",
                           file=sys.stderr)
+                # filter_leak_reason (2026-09-28 review round 2): a
+                # persisted drill filter on a tab AFTER Timeline is now a
+                # FAILURE with its own reason, not just recorded data a
+                # reader has to notice -- this is what closed attempt
+                # four's uncaught "luck" pass.
+                filter_leak = lib.filter_leak_reason(seen_timeline, active_filters)
+                if filter_leak:
+                    print(f"  FAIL [{tab_id}]: {filter_leak}", file=sys.stderr)
 
                 raw_errors = drain_console_errors(session)
                 console_errors, pgwt_errors = [], []
@@ -877,14 +902,26 @@ def main():
                 # the data itself, not just in a screenshot someone has to
                 # think to go look at.
                 entry["active_filters"] = active_filters
+                entry["filter_leak_reason"] = filter_leak
                 entry["timeout_diagnostic"] = timeout_diag_paths
+                if filter_leak is not None:
+                    entry["ok"] = False
                 tabs.append(entry)
                 print(f"  rendered={entry['rendered']} render_state={render_state!r} "
                       f"ttfp_s={ttfp_s} console_errors={len(console_errors)} "
-                      f"active_filters={active_filters!r} "
+                      f"active_filters={active_filters!r} filter_leak={filter_leak!r} "
                       "(void attribution pending)")
+                if tab_id == "timeline":
+                    seen_timeline = True
 
             print("=== freshness pass (revisit each tab, same session) ===")
+            # Separate seen_timeline for THIS pass (2026-09-28 review round
+            # 2): the freshness pass re-drills and re-clears Timeline on
+            # its own revisit (navigate_to_tab's timeline branch always
+            # drills+clears, main pass or not), so it needs its own
+            # "have we passed Timeline yet in this pass" tracking, not the
+            # main pass's already-True flag.
+            seen_timeline_fresh = False
             for entry in tabs:
                 tab_id = entry["tab"]
                 try:
@@ -917,6 +954,23 @@ def main():
                 entry["freshness"]["status"] = lib.freshness_status(age_s)
                 entry["freshness"]["detail"] = fresh_detail
                 print(f"  freshness [{tab_id}]: {fresh_detail}")
+
+                fresh_active_filters = None
+                try:
+                    fresh_active_filters = active_filters_snapshot(session)
+                except Exception as e:
+                    print(f"  note [freshness {tab_id}]: could not read active "
+                          f"filters: {e}", file=sys.stderr)
+                fresh_filter_leak = lib.filter_leak_reason(
+                    seen_timeline_fresh, fresh_active_filters)
+                entry["freshness_active_filters"] = fresh_active_filters
+                entry["freshness_filter_leak_reason"] = fresh_filter_leak
+                if fresh_filter_leak:
+                    print(f"  FAIL [freshness {tab_id}]: {fresh_filter_leak}",
+                          file=sys.stderr)
+                    entry["ok"] = False
+                if tab_id == "timeline":
+                    seen_timeline_fresh = True
 
             # RETROACTIVE void attribution, now that the freshness pass has
             # given the sampler time to tick past every main-loop tab's own
@@ -957,10 +1011,17 @@ def main():
                 # set at construction time (freshness wasn't measured yet
                 # then) -- MUST include freshness_status == "ok" (review
                 # blocker, 2026-09-28): a verdict aggregated to ok: true
-                # once with freshness unmeasured on every tab.
+                # once with freshness unmeasured on every tab. MUST also
+                # include both filter_leak_reason fields (review round 2
+                # blocker): this recompute runs AFTER the per-tab loops set
+                # entry["ok"] = False on a leak, and unconditionally
+                # overwrites entry["ok"] -- omitting the leak checks here
+                # would silently undo that gating for every entry.
                 entry["ok"] = (bool(entry["rendered"]) and not entry["console_errors"]
                                and reason is None
-                               and entry["freshness"]["status"] == "ok")
+                               and entry["freshness"]["status"] == "ok"
+                               and entry.get("filter_leak_reason") is None
+                               and entry.get("freshness_filter_leak_reason") is None)
                 print(f"  [{entry['tab']}] void={reason!r} "
                       f"freshness_status={entry['freshness']['status']!r} "
                       f"ok={entry['ok']}")
