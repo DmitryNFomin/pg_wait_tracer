@@ -743,6 +743,56 @@ def test_daemon_log_clean_stray_error_word_in_query_not_matched():
     check(ok and errors == [], "a line merely containing 'error' (not the prefix) is not flagged")
 
 
+# ── tab_coverage_check_ok (issue #214 review: wire the coverage checker
+# into the rehearsal's own gating verdict) ────────────────────────────────
+
+def test_tab_coverage_check_ok_all_pass():
+    results = {"overview": {"ok": True, "detail": "x"},
+               "waterfall": {"ok": True, "detail": "y"}}
+    ok, detail = lib.tab_coverage_check_ok(results)
+    check(ok, f"all tabs ok -> the aggregate check passes ({detail})")
+
+
+def test_tab_coverage_check_ok_one_tab_fails_fails_the_whole_check():
+    """RED: this is the exact case #214 exists for -- a single empty tab
+    (Waterfall showing 'No executions for selected range') must turn the
+    rehearsal's OWN verdict false, not just print a line nobody reads."""
+    results = {"overview": {"ok": True, "detail": "x"},
+               "waterfall": {"ok": False, "detail": "no slow execution"}}
+    ok, detail = lib.tab_coverage_check_ok(results)
+    check(not ok, f"one failing tab FAILS the aggregate check ({detail})")
+    check("waterfall" in detail, f"the failing tab is named ({detail})")
+
+
+def test_tab_coverage_check_ok_empty_results_fails():
+    """A gate that received nothing to check (the coverage run never
+    happened, or ran against the wrong window) must refuse, not vacuously
+    pass on zero tabs checked."""
+    ok, detail = lib.tab_coverage_check_ok({})
+    check(not ok, f"empty results dict FAILS, not a vacuous PASS ({detail})")
+    ok, detail = lib.tab_coverage_check_ok(None)
+    check(not ok, f"None results FAILS, does not crash ({detail})")
+
+
+def test_tab_coverage_check_ok_wrong_tab_set_fails():
+    """A coverage run that silently checked a DIFFERENT set of tabs than
+    expected (a wiring bug, e.g. an outdated TAB_ORDER import) must fail
+    loudly rather than reporting ok on whatever partial set it happened to
+    see."""
+    results = {"overview": {"ok": True}, "events": {"ok": True}}
+    ok, detail = lib.tab_coverage_check_ok(
+        results, expected_tabs=("overview", "events", "waterfall"))
+    check(not ok, f"missing an expected tab FAILS ({detail})")
+    check("waterfall" in detail, f"the missing tab is named ({detail})")
+
+
+def test_tab_coverage_check_ok_matching_expected_tabs_passes():
+    results = {"overview": {"ok": True}, "events": {"ok": True}}
+    ok, detail = lib.tab_coverage_check_ok(
+        results, expected_tabs=("overview", "events"))
+    check(ok, f"exact expected tab set, all ok, passes ({detail})")
+
+
 # ── build_demo_summary / verdict_line ────────────────────────────────────
 
 def _tab_result(ok):

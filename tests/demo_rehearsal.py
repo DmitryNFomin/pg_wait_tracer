@@ -44,6 +44,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ui_live_smoke as live_smoke
 import ui_live_smoke_lib as lib
 import demo_rehearsal_lib as drlib
+import demo_workload_coverage as cov
 from server_harness import ServerHarness
 
 from playwright.sync_api import sync_playwright
@@ -406,6 +407,44 @@ def main():
         print(f"demo_rehearsal: capture_has_events: "
               f"{'PASS' if events_ok else 'FAIL'} -- {events_detail}")
         extra_checks["capture_has_events"] = {"ok": events_ok, "detail": events_detail}
+
+        # issue #214 review: the per-tab "does this tab have real content"
+        # checker MUST run here, before ServerHarness/the trace dir go away
+        # -- this `with` block is still inside main(), well before
+        # tests/demo_rehearsal.sh's cleanup() trap (rm -rf "$TRACE_DIR")
+        # fires on script exit, and before tests/ui_live_smoke.sh's own
+        # teardown for the shorter live-smoke walk. Queried over the WHOLE
+        # capture window (not RECENT_WINDOW_S) so a tab's content earlier
+        # in a long rehearsal still counts. Registered in extra_checks,
+        # which build_demo_summary gates on UNCONDITIONALLY (this module
+        # has no separate informational-only registry -- everything written
+        # here fails the run's own `ok` if not ok, by construction).
+        coverage_results = cov.run_coverage(srv, from_ns, to_ns,
+                                            num_cpus=info.get("num_cpus"))
+        coverage_ok, coverage_detail = drlib.tab_coverage_check_ok(
+            coverage_results, expected_tabs=cov.TAB_ORDER)
+        print(f"demo_rehearsal: tab_coverage: "
+              f"{'PASS' if coverage_ok else 'FAIL'} -- {coverage_detail}")
+        for tab in cov.TAB_ORDER:
+            r = coverage_results.get(tab, {})
+            print(f"    {tab}: {'PASS' if r.get('ok') else 'FAIL'} -- {r.get('detail')}")
+        extra_checks["tab_coverage"] = {
+            "ok": coverage_ok, "detail": coverage_detail, "tabs": coverage_results,
+        }
+        # issue #214 review item 3: the per-tab numbers (row counts, band
+        # counts, spread ratios, ...) must be auditable from a file, not
+        # only from a commit message or a printed line -- written here
+        # too, alongside summary.json (which also carries this same dict
+        # via extra_checks, but a reviewer should not have to parse the
+        # whole rehearsal summary to find it).
+        with open(os.path.join(out_dir, "tab_coverage.json"), "w") as f:
+            json.dump({
+                "from_ns": from_ns, "to_ns": to_ns,
+                "num_cpus": info.get("num_cpus"),
+                "ok": coverage_ok, "detail": coverage_detail,
+                "results": coverage_results,
+            }, f, indent=2, sort_keys=True)
+            f.write("\n")
 
         # One final sample right at the true end of the capture -- the
         # sampler thread's own last periodic sample can land up to

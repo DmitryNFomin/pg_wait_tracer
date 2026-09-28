@@ -722,6 +722,41 @@ def daemon_log_clean(log_text):
     return (len(error_lines) == 0, error_lines, degraded_warnings)
 
 
+def tab_coverage_check_ok(results, expected_tabs=None):
+    """Aggregate tests/demo_workload_coverage.py's per-tab {ok, detail}
+    results (issue #214) into ONE gating check: (ok, detail).
+
+    This is the piece that makes #214's own goal real -- "an empty tab
+    becomes a test failure, not something the owner notices on stage".
+    Without this aggregation wired into demo_rehearsal.py's extra_checks,
+    the per-tab checker is a tool someone has to remember to run by hand;
+    with it, a tab silently going empty on a future rehearsal fails the
+    run's own `ok`, the same way every other extra_checks entry does (this
+    module has no separate "informational" registry -- build_demo_summary
+    gates unconditionally on every extra_checks entry, so registering it
+    there IS registering it as gating; there is no way to add a field that
+    is merely recorded).
+
+    expected_tabs, when given, is asserted against results' own key set
+    (demo_rehearsal.py always passes demo_workload_coverage.TAB_ORDER) --
+    a coverage run that silently checked fewer tabs than it should have
+    (a bug in the wiring, not in a checker) must fail loudly here too,
+    the same "cannot see -> refuse" rule every checker in this repo
+    follows, rather than passing on partial coverage of its own tab list."""
+    if not isinstance(results, dict) or not results:
+        return False, "no per-tab coverage results at all (empty or non-dict)"
+    if expected_tabs is not None and set(results.keys()) != set(expected_tabs):
+        missing = set(expected_tabs) - set(results.keys())
+        extra = set(results.keys()) - set(expected_tabs)
+        return False, (f"coverage checked the wrong tab set -- "
+                        f"missing={sorted(missing)}, unexpected={sorted(extra)}")
+    failed = sorted(tab for tab, r in results.items() if not r.get("ok"))
+    ok = len(failed) == 0
+    if ok:
+        return True, f"all {len(results)} tabs populated"
+    return False, f"{len(failed)}/{len(results)} tab(s) not populated: {failed}"
+
+
 def build_demo_summary(pass_results, extra_checks, expected_tabs_per_pass=None):
     """pass_results: list of {"pass": name, "tabs": {tab_id: tab_result}}
     (tab_result is exactly ui_live_smoke_lib.build_tab_result's output).
