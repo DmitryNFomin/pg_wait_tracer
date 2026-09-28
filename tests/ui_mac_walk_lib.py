@@ -611,13 +611,28 @@ def build_verdict(run_id, tabs, mac_samples, notes=None):
     run_id_matches, not assumed), a per-tab reason, machine-readable, never
     prose-only.
 
-    NOT a demo-rehearsal-criteria gate: this walk is a first honest
-    measurement of a path never exercised before, not part of the
-    pre-registered clean-rehearsal sequence. `ok` here means "every
-    attributable tab rendered cleanly", nothing more -- a reader must look
-    at void_tabs before treating a False as a product regression, and an
-    empty (all-void) run is explicitly NOT ok (a run that measured nothing
-    must not report "clean" by vacuous truth over an empty list)."""
+    IS the acceptance gate for the Mac-side Safari demo-path rehearsal
+    (real Safari + Go bridge on the Mac, real remote daemon+PG) -- the
+    coordinator cited it as exactly that to the owner, correctly, and the
+    verdict's own wording used to say the opposite ("measurement only --
+    not a demo-rehearsal-criteria gate"), which had to be retracted
+    (2026-09-28). It is a DIFFERENT gate from docs/DEMO_REHEARSAL_CRITERIA
+    .md's own pre-registered clean-rehearsal sequence, not a lesser one --
+    say which, never leave a reader to guess. `ok` here means "every
+    attributable tab rendered cleanly, no console errors, fresh, no
+    leaked drill filter, no client/server version skew", nothing more --
+    a reader must look at void_tabs before treating a False as a product
+    regression, and an empty (all-void) run is explicitly NOT ok (a run
+    that measured nothing must not report "clean" by vacuous truth over
+    an empty list).
+
+    Does NOT check visual correctness (2026-09-28: tree a1960c4 contains
+    the #213 chip-label-outside-its-chip defect, spotted by eye by the
+    owner twice, and this walk passed it green) -- it verifies registry
+    fields and rendering liveness, never pixel layout. Nothing in this
+    verdict or its wording may imply otherwise; a green run is evidence
+    the product ran and produced the right SHAPE of data, not evidence it
+    looks right."""
     non_void = [t for t in tabs if t.get("void_reason") is None]
     ok = bool(tabs) and len(non_void) > 0 and all(t["ok"] for t in non_void)
     void_tabs = [t["tab"] for t in tabs if t.get("void_reason")]
@@ -625,7 +640,14 @@ def build_verdict(run_id, tabs, mac_samples, notes=None):
     return {
         "run": {"id": run_id},
         "ok": ok,
-        "note": "measurement only -- not a demo-rehearsal-criteria gate (docs/DEMO_REHEARSAL_CRITERIA.md)",
+        "note": ("gate for the Mac-side Safari demo-path rehearsal (attempt_counted plus "
+                 "two consecutive clean runs on the same branch_sha is the acceptance bar) "
+                 "-- distinct from docs/DEMO_REHEARSAL_CRITERIA.md's own pre-registered "
+                 "gate, not a lesser or merely-informational measurement. Checks per-tab "
+                 "rendering liveness, console errors, freshness, drill-filter isolation and "
+                 "client/server version match; does NOT check visual correctness "
+                 "(issue #213 passed this walk green) -- never cite a green run as evidence "
+                 "a panel looks right, only that it rendered without contradicting itself"),
         "tabs": {t["tab"]: t for t in tabs},
         "tab_order": [t["tab"] for t in tabs],
         "void_tabs": void_tabs,

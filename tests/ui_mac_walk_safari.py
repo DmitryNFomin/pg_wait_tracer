@@ -45,6 +45,7 @@ Usage:
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -60,6 +61,46 @@ from safari_webdriver import SafariSession, WebDriverError
 
 RESULTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                             "results", "ui_mac_walk_safari")
+
+
+def prepare_run_dir(results_container, run_id):
+    """Returns a fresh <results_container>/runs/<run_id>/ directory,
+    creating it if needed. The ONLY directory this ever removes is one
+    that ALREADY has this exact run_id (an exact re-run reusing the same
+    marker, e.g. a fixed PGWT_RUN_MARKER in dev) -- never a sibling run's
+    directory, and never results_container/runs itself. This is the fix
+    for a real defect (2026-09-28, coordinator's finding): the walk used
+    to wipe and reuse ONE shared directory every run, so a second run
+    destroyed the first run's verdict on disk before anyone could compare
+    them -- "two consecutive clean runs on the same tree" was reported to
+    the owner and had to be retracted, because nothing on disk could
+    prove the pair once the second run overwrote the first."""
+    run_dir = os.path.join(results_container, "runs", run_id)
+    if os.path.isdir(run_dir):
+        shutil.rmtree(run_dir)
+    os.makedirs(run_dir, exist_ok=True)
+    return run_dir
+
+
+def update_latest_pointer(results_container, run_dir):
+    """Best-effort: (re)points <results_container>/latest at run_dir via a
+    relative symlink. Convenience ONLY -- a pair is proven by the two
+    runs/<run_id>/ directories on disk, never by this pointer, which a
+    third run moves again. A failure here (e.g. no symlink support) is
+    swallowed and printed, never allowed to fail a run that otherwise
+    completed and already has its real, permanent evidence under
+    runs/<run_id>/."""
+    try:
+        latest_path = os.path.join(results_container, "latest")
+        if os.path.islink(latest_path) or os.path.exists(latest_path):
+            os.remove(latest_path)
+        os.symlink(os.path.relpath(run_dir, results_container), latest_path)
+        return True
+    except OSError as e:
+        print(f"note: could not update 'latest' pointer (non-fatal): {e}",
+              file=sys.stderr)
+        return False
+
 
 # The demo presents FULL SCREEN, not windowed -- corrected 2026-09-28 after
 # the coordinator's own WebDriver measurement of the owner's actual panel:
@@ -460,16 +501,20 @@ def main():
                           "regardless of the product")
     args = ap.parse_args()
 
-    os.makedirs(args.out_dir, exist_ok=True)
-    for name in os.listdir(args.out_dir):
-        p = os.path.join(args.out_dir, name)
-        if os.path.isdir(p):
-            import shutil
-            shutil.rmtree(p)
-        else:
-            os.remove(p)
-
+    # Per-run directory, keyed by run.id (2026-09-28, coordinator's finding):
+    # this used to wipe and reuse ONE directory every run, so a second walk
+    # destroyed the first's verdict on disk -- "two consecutive clean runs
+    # on the same tree" was reported to the owner and had to be retracted,
+    # because nothing on disk could actually demonstrate the pair once the
+    # second run had overwritten the first. Every run now gets its own
+    # <out-dir>/runs/<run.id>/ directory that NOTHING else ever touches;
+    # <out-dir>/latest is a symlink kept pointing at the most recent one,
+    # for convenience only -- a pair is proven by the two directories under
+    # runs/, never by "latest" or by anything held in memory.
+    results_container = args.out_dir
     run_id = os.environ.get("PGWT_RUN_MARKER", str(int(time.time())))
+    run_dir = prepare_run_dir(results_container, run_id)
+    args.out_dir = run_dir  # every downstream write in this function goes here
     with open(os.path.join(args.out_dir, "run.id"), "w") as f:
         f.write(run_id)
 
@@ -1161,6 +1206,8 @@ def main():
         json.dump(verdict, f, indent=2, sort_keys=True)
 
     assert lib.run_id_matches(verdict, run_id), "run.id mismatch immediately after writing -- bug"
+
+    update_latest_pointer(results_container, run_dir)
 
     print()
     print("════════════════════════════════════════")

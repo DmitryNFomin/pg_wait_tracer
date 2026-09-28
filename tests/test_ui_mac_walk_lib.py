@@ -11,10 +11,18 @@ requires (a tick under non-normal Mac pressure must be void, not "failed" or
 never default to "fine").
 """
 import os
+import shutil
 import sys
+import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ui_mac_walk_lib as lib
+# prepare_run_dir/update_latest_pointer are pure filesystem helpers (no
+# subprocess, no network, no browser) -- imported here rather than
+# duplicated, so the run-directory-retention tests below exercise the
+# ACTUAL function ui_mac_walk_safari.py's main() calls, not a copy that
+# could drift from it.
+import ui_mac_walk_safari as walk
 
 tests_run = 0
 tests_passed = 0
@@ -996,6 +1004,106 @@ def test_effective_zoom_zero_achieved_is_none():
 def test_effective_zoom_none_achieved_is_none():
     check(lib.effective_zoom(1710, None) is None,
           "effective_zoom: achieved width None -> None")
+
+
+def test_prepare_run_dir_two_runs_both_survive():
+    """The core regression this round's fix closes (2026-09-28,
+    coordinator's finding): a run used to wipe and reuse ONE shared
+    directory, so a second run destroyed the first's verdict before
+    anyone could compare them -- "two consecutive clean runs on the same
+    tree" was reported to the owner and had to be retracted. Demonstrates
+    the fix directly: two different run_ids must produce two directories
+    that BOTH still exist and BOTH still hold their own file afterward."""
+    container = tempfile.mkdtemp(prefix="pgwt-rundir-test-")
+    try:
+        dir1 = walk.prepare_run_dir(container, "1111111111")
+        with open(os.path.join(dir1, "summary.json"), "w") as f:
+            f.write('{"run": "one"}')
+        dir2 = walk.prepare_run_dir(container, "2222222222")
+        with open(os.path.join(dir2, "summary.json"), "w") as f:
+            f.write('{"run": "two"}')
+        check(dir1 != dir2, f"prepare_run_dir: different run_ids -> different "
+                             f"directories (got {dir1!r} == {dir2!r})")
+        check(os.path.isfile(os.path.join(dir1, "summary.json")),
+              "prepare_run_dir: the FIRST run's file must still exist after "
+              "the second run's prepare_run_dir call -- this is exactly the "
+              "overwrite bug the fix closes")
+        with open(os.path.join(dir1, "summary.json")) as f:
+            check(f.read() == '{"run": "one"}',
+                  "prepare_run_dir: the first run's content must be intact, "
+                  "not truncated or replaced")
+        check(os.path.isfile(os.path.join(dir2, "summary.json")),
+              "prepare_run_dir: the second run's own file exists too")
+    finally:
+        shutil.rmtree(container, ignore_errors=True)
+
+
+def test_prepare_run_dir_same_run_id_replaces_only_that_one():
+    container = tempfile.mkdtemp(prefix="pgwt-rundir-test-")
+    try:
+        other_dir = walk.prepare_run_dir(container, "other-run")
+        with open(os.path.join(other_dir, "marker"), "w") as f:
+            f.write("untouched")
+        d1 = walk.prepare_run_dir(container, "same-id")
+        with open(os.path.join(d1, "stale.txt"), "w") as f:
+            f.write("should be gone next call")
+        d2 = walk.prepare_run_dir(container, "same-id")
+        check(d1 == d2, "prepare_run_dir: same run_id -> same path")
+        check(not os.path.exists(os.path.join(d2, "stale.txt")),
+              "prepare_run_dir: re-preparing the SAME run_id clears that "
+              "run's own stale content (an exact-marker re-run in dev)")
+        check(os.path.isfile(os.path.join(other_dir, "marker")),
+              "prepare_run_dir: a DIFFERENT run_id's directory is never "
+              "touched by preparing this one")
+    finally:
+        shutil.rmtree(container, ignore_errors=True)
+
+
+def test_update_latest_pointer_points_at_run_dir():
+    container = tempfile.mkdtemp(prefix="pgwt-latest-test-")
+    try:
+        run_dir = walk.prepare_run_dir(container, "run-a")
+        with open(os.path.join(run_dir, "summary.json"), "w") as f:
+            f.write("a")
+        ok = walk.update_latest_pointer(container, run_dir)
+        latest = os.path.join(container, "latest")
+        check(ok is True, "update_latest_pointer: succeeds on a normal filesystem")
+        check(os.path.islink(latest), "update_latest_pointer: 'latest' is a symlink")
+        check(os.path.realpath(latest) == os.path.realpath(run_dir),
+              "update_latest_pointer: 'latest' resolves to the run directory "
+              f"(got {os.path.realpath(latest)!r} != {os.path.realpath(run_dir)!r})")
+        # A second run's own prepare+update must MOVE the pointer, never
+        # leave it on the first run (which must itself remain untouched --
+        # the whole point of this round's fix).
+        run_dir_2 = walk.prepare_run_dir(container, "run-b")
+        with open(os.path.join(run_dir_2, "summary.json"), "w") as f:
+            f.write("b")
+        walk.update_latest_pointer(container, run_dir_2)
+        check(os.path.realpath(latest) == os.path.realpath(run_dir_2),
+              "update_latest_pointer: a later run moves 'latest' to itself")
+        check(os.path.isfile(os.path.join(run_dir, "summary.json")),
+              "update_latest_pointer: moving 'latest' never touches the "
+              "PREVIOUS run's own directory or file")
+    finally:
+        shutil.rmtree(container, ignore_errors=True)
+
+
+def test_build_verdict_note_asserts_gate_not_measurement_only():
+    """Locks in the coordinator's decision (2026-09-28): either this is a
+    gate and the old 'measurement only -- not a ... gate' wording goes, or
+    it stays informational and nobody may cite it as a gate. The decision
+    made: it IS the gate for this walk, distinct from (not lesser than)
+    docs/DEMO_REHEARSAL_CRITERIA.md's own gate, and it must explicitly
+    disclaim visual correctness (issue #213 passed this walk green)."""
+    v = lib.build_verdict("run-x", [], [])
+    note = v["note"]
+    check("measurement only" not in note,
+          f"build_verdict note: the old ambiguous framing must be gone (got {note!r})")
+    check("gate" in note.lower(),
+          f"build_verdict note: must say plainly that this IS a gate (got {note!r})")
+    check("visual correctness" in note.lower() or "visual" in note.lower(),
+          f"build_verdict note: must disclaim visual correctness explicitly "
+          f"(got {note!r}) -- a green run is not evidence a panel looks right")
 
 
 if __name__ == "__main__":
