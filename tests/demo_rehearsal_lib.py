@@ -588,6 +588,59 @@ def freshness_ok(now_ns, to_ns, tick_s=FRESHNESS_TICK_S,
     return ok, detail
 
 
+# ── Blink-sweep offset coverage (owner finding, 2026-09-28) ──────────────
+#
+# A live rehearsal run (run.id 1790574871, 19a95f7) showed the offset
+# sweep's samples landing FAR past their targets when a tab's mount was
+# late -- e.g. the 200ms-target first sample actually captured at 669,
+# 985, 2416, even 2446ms. When that happens the sweep silently SKIPS the
+# early window entirely, which is exactly where scatter's and transitions'
+# real transients live (0.1305 and 0.0072-0.0172 respectively, both at the
+# 200->500ms pair, invisible to a sweep whose first sample never got near
+# 200ms). This is reporting only (owner instruction, 2026-09-28: "report
+# the drift; do not try to fix the scheduling in this branch") -- it never
+# gates `ok`. Un-caught coverage loss here would be the NEXT version of
+# the same blindness this whole bypass suite exists to close: a gate that
+# silently never looks at the interval where the defect lives.
+def sweep_offset_drift(tick_record):
+    """tick_record: one ui_live_smoke_lib.build_sweep_tick_record() dict
+    (target_offsets_ms, achieved_offsets_ms, same length/order -- already
+    present in every tab result's blink_sweep.ticks, no new instrumentation
+    needed). Returns a dict with per-offset drift_ms (achieved - target)
+    and the first (200ms target) offset's own drift, since that is where
+    this finding's transients live."""
+    targets = tick_record.get("target_offsets_ms") or []
+    achieved = tick_record.get("achieved_offsets_ms") or []
+    n = min(len(targets), len(achieved))
+    drift_ms = [achieved[i] - targets[i] for i in range(n)]
+    first_drift_ms = drift_ms[0] if drift_ms else None
+    first_target_ms = targets[0] if targets else None
+    first_achieved_ms = achieved[0] if achieved else None
+    return {
+        "target_offsets_ms": list(targets),
+        "achieved_offsets_ms": list(achieved),
+        "drift_ms": drift_ms,
+        "first_target_ms": first_target_ms,
+        "first_achieved_ms": first_achieved_ms,
+        "first_drift_ms": first_drift_ms,
+    }
+
+
+def summarize_sweep_offset_coverage(tab_id, pass_name, blink_sweep_ticks):
+    """blink_sweep_ticks: a tab result's blink_sweep.ticks list (one
+    build_sweep_tick_record() dict per attempted tick). Returns
+    {"tab", "pass", "ticks": [sweep_offset_drift(...) per tick]} -- a
+    reporting-only summary, joined at the call site into
+    summary.json/print output so a human never has to hand-diff
+    target_offsets_ms against achieved_offsets_ms across every tick of
+    every tab to notice a coverage gap."""
+    return {
+        "tab": tab_id,
+        "pass": pass_name,
+        "ticks": [sweep_offset_drift(t) for t in (blink_sweep_ticks or [])],
+    }
+
+
 # ── Daemon integrity (criteria doc §6) ────────────────────────────────────
 #
 # "The daemon was alive" (daemon_log_clean, _assert_daemon_alive) is not

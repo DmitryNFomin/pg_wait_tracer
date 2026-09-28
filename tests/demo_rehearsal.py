@@ -94,6 +94,7 @@ def _assert_daemon_alive(daemon_pid, where):
 def _run_passes(browser, url, out_dir, ticks, passes, first_data_timeout,
                 pgbench_pid, workload_pid, daemon_pid, t0):
     pass_results = []
+    sweep_coverage = []
     for name, target_offset_s in passes:
         remaining = target_offset_s - (time.monotonic() - t0)
         if remaining > 0:
@@ -140,8 +141,30 @@ def _run_passes(browser, url, out_dir, ticks, passes, first_data_timeout,
             print(f"    {status} [{name}/{tab_id}] "
                   f"ticks={result['ticks_observed']} "
                   f"rendered={result['rendered']}")
+            # Sweep-offset coverage (owner finding, 2026-09-28): report,
+            # never gate, whether the blink-sweep's samples actually landed
+            # near their targets -- a late mount can silently push the
+            # WHOLE sweep past the early window where a real transient
+            # lives (see summarize_sweep_offset_coverage's own comment).
+            coverage = drlib.summarize_sweep_offset_coverage(
+                tab_id, name, result.get("blink_sweep", {}).get("ticks"))
+            sweep_coverage.append(coverage)
+            for tick_i, tick_drift in enumerate(coverage["ticks"], start=1):
+                fd = tick_drift["first_drift_ms"]
+                if fd is not None and fd > 0:
+                    target1 = tick_drift["target_offsets_ms"][0]
+                    achieved1 = tick_drift["first_achieved_ms"]
+                    target2 = (tick_drift["target_offsets_ms"][1]
+                              if len(tick_drift["target_offsets_ms"]) > 1 else None)
+                    note = ""
+                    if target2 is not None and achieved1 is not None and achieved1 >= target2:
+                        note = (" -- EARLY WINDOW LIKELY MISSED (first sample "
+                               f"landed at/past the {target2}ms target)")
+                    print(f"    sweep coverage [{name}/{tab_id}] tick {tick_i}: "
+                          f"first offset target={target1}ms achieved={achieved1}ms "
+                          f"drift=+{fd}ms{note}")
         pass_results.append({"pass": name, "tabs": tab_results})
-    return pass_results
+    return pass_results, sweep_coverage
 
 
 def _error_or_none(resp, label):
@@ -350,7 +373,7 @@ def main():
     with sync_playwright() as p:
         browser = p.chromium.launch()
         try:
-            pass_results = _run_passes(
+            pass_results, sweep_coverage = _run_passes(
                 browser, args.url, out_dir, ticks, passes,
                 args.first_data_timeout, args.pgbench_pid,
                 args.workload_pid, args.daemon_pid, t0)
@@ -483,6 +506,9 @@ def main():
     summary["duration_min"] = args.duration_min
     summary["ticks_per_tab"] = ticks
     summary["plan_degraded"] = ticks < lib.MIN_TICKS or len(passes) < 3
+    # Reporting only (owner finding, 2026-09-28) -- never gates `ok`. See
+    # summarize_sweep_offset_coverage's own comment.
+    summary["sweep_offset_coverage"] = sweep_coverage
 
     summary_path = os.path.join(out_dir, "summary.json")
     with open(summary_path, "w") as f:

@@ -536,6 +536,79 @@ def test_build_demo_summary_expected_tabs_none_skips_the_check():
     check(summary["ok"], "expected_tabs_per_pass=None does not gate on tab count")
 
 
+# ── sweep_offset_drift / summarize_sweep_offset_coverage ─────────────────
+# (owner finding, 2026-09-28, run.id 1790574871 on 19a95f7 -- numbers below
+# are the REAL achieved offsets from that live run, not invented.)
+
+def test_sweep_offset_drift_on_target_zero_drift():
+    tick = {"target_offsets_ms": [200, 500, 1000, 1500, 2000],
+           "achieved_offsets_ms": [205, 512, 1008, 1503, 2011]}
+    d = lib.sweep_offset_drift(tick)
+    check(d["first_target_ms"] == 200, "first target reported")
+    check(d["first_achieved_ms"] == 205, "first achieved reported")
+    check(d["first_drift_ms"] == 5, f"on-target drift is small ({d['first_drift_ms']})")
+    check(d["drift_ms"] == [5, 12, 8, 3, 11], f"per-offset drift computed ({d['drift_ms']})")
+
+
+def test_sweep_offset_drift_late_mount_misses_early_window():
+    # BYPASS-SUITE CASE: the real observed drift from the live run -- a
+    # 200ms target landing at 669ms. The 200->500ms window (where scatter's
+    # 0.1305 and transitions' transients live) was entirely skipped.
+    tick = {"target_offsets_ms": [200, 500, 1000, 1500, 2000],
+           "achieved_offsets_ms": [669, 985, 1502, 1998, 2503]}
+    d = lib.sweep_offset_drift(tick)
+    check(d["first_drift_ms"] == 469,
+          f"a late mount drifts the first sample far past its target ({d['first_drift_ms']})")
+    check(d["first_achieved_ms"] > d["target_offsets_ms"][1],
+          "the first achieved sample landed PAST the second offset's own target -- "
+          "the 200->500ms window was never actually sampled")
+
+
+def test_sweep_offset_drift_extreme_observed_case():
+    # The most extreme case from the same run: 2416/2446ms against a 200ms
+    # target -- the entire sweep compressed into what should have been one
+    # offset's worth of time.
+    tick = {"target_offsets_ms": [200, 500, 1000, 1500, 2000],
+           "achieved_offsets_ms": [2416, 2446, 2480, 2520, 2600]}
+    d = lib.sweep_offset_drift(tick)
+    check(d["first_drift_ms"] == 2216, f"extreme drift computed correctly ({d['first_drift_ms']})")
+
+
+def test_sweep_offset_drift_mismatched_lengths_does_not_crash():
+    # BYPASS-SUITE CASE: a truncated sweep (fewer achieved samples than
+    # targets, e.g. a mid-sweep capture failure) must not crash the report.
+    tick = {"target_offsets_ms": [200, 500, 1000, 1500, 2000],
+           "achieved_offsets_ms": [669, 985]}
+    d = lib.sweep_offset_drift(tick)
+    check(len(d["drift_ms"]) == 2, f"drift only computed for the offsets that were actually achieved ({d})")
+
+
+def test_sweep_offset_drift_empty_tick_does_not_crash():
+    d = lib.sweep_offset_drift({})
+    check(d["drift_ms"] == [], "an empty/missing tick record reports no drift, not a crash")
+    check(d["first_drift_ms"] is None, "first_drift_ms is None, not a fabricated 0")
+
+
+def test_summarize_sweep_offset_coverage_joins_tab_and_pass():
+    ticks = [
+        {"target_offsets_ms": [200, 500], "achieved_offsets_ms": [205, 510]},
+        {"target_offsets_ms": [200, 500], "achieved_offsets_ms": [669, 985]},
+    ]
+    summary = lib.summarize_sweep_offset_coverage("scatter", "early", ticks)
+    check(summary["tab"] == "scatter" and summary["pass"] == "early",
+          "tab/pass identity carried through")
+    check(len(summary["ticks"]) == 2, "one drift record per input tick")
+    check(summary["ticks"][1]["first_drift_ms"] == 469,
+          f"the late-mount tick's drift is visible in the summary ({summary['ticks'][1]})")
+
+
+def test_summarize_sweep_offset_coverage_empty_ticks():
+    summary = lib.summarize_sweep_offset_coverage("overview", "early", [])
+    check(summary["ticks"] == [], "no ticks -> empty list, not a crash")
+    summary_none = lib.summarize_sweep_offset_coverage("overview", "early", None)
+    check(summary_none["ticks"] == [], "None ticks -> empty list, not a crash")
+
+
 # ── daemon_integrity_ok (criteria doc §6) ─────────────────────────────────
 
 def test_daemon_integrity_all_zero_ok():
