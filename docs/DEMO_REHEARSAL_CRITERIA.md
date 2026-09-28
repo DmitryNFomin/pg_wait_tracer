@@ -186,26 +186,28 @@ left to be discovered.
 | Criterion | Implemented? |
 |---|---|
 | §1 exit code + JSON verdict | yes |
-| §1 run.id asserted against staleness | no — `run.id` is written (`demo_rehearsal.py:257`) but never checked |
-| §2 samples > 0, DB Time > 0 | no |
-| §2 `Lock:relation` + `Timeout:PgSleep` present | no |
-| §2 AAS ≥ 0.5 on the recent window | no |
-| §2 all 11 tabs reached, daemon alive throughout | partial (daemon-log ERROR/FATAL scan only) |
-| §3 conservation identity | yes, but ONCE at the end — not the 5-minute cadence |
-| §3 `wait_gap_cpu_ms` / `cpu_clamped_ms` ≤ 0.1% | no |
-| §3 Off-CPU\* ≤ 10% | no |
+| §1 run.id asserted against staleness | yes — not by this branch directly: `agent/rehearsal-bypass-suite` built its own `verdict_is_fresh` gate, then found at rebase time that master's `tests/demo_rehearsal_orchestrator_lib.validate_results_dir` (#176) already covers the identical concern, more thoroughly (also checks run.id's numeric format and summary.json's required keys) — removed the redundant duplicate rather than keep two |
+| §2 samples > 0, DB Time > 0 | yes (`capture_has_events_ok`, `time_model_conservation`'s `MIN_DB_TIME_MS` floor, checked before any ratio) |
+| §2 `Lock:relation` + `Timeout:PgSleep` present | yes (`workload_signature_present_ok`) |
+| §2 AAS ≥ 0.5 on the recent window | yes (`aas_floor_ok`) — still the PROVISIONAL floor this section describes, not yet replaced by a measured baseline |
+| §2 all 11 tabs reached, daemon alive throughout | yes (`build_demo_summary`'s `expected_tabs_per_pass` floor; `_assert_daemon_alive`, mirrors the existing workload-alive fail-safe) |
+| §3 conservation identity | yes, sampled every ~5 minutes through the capture (`conservation_sample_interval_s`), every sample must pass — not once at the end |
+| §3 `wait_gap_cpu_ms` ≤ 0.1% | **removed, not implemented** — corrected 2026-09-27/28: this was never a valid over-attribution detector (the BPF measures on-CPU across the whole wait-start/wait-end span, so an IO wait is legitimately CPU-bearing; two live runs measured 0.376–0.392%, expected on a correct implementation). The real per-class signature (a `Timeout:PgSleep`/`Lock:relation` event carrying millisecond-scale `cpu_ns`) needs data not on the wire in the `time_model` response today — reported as a gap, not proxied from the aggregate |
+| §3 `cpu_clamped_ms` ≤ 0.1% | yes (`cpu_clamped_ok`), scope corrected in its own code comment: vouches for CPU-class gaps only, never wait events (`src/compute.c`'s wait branch never clamps `cpu_ns > dur`) |
+| §3 Off-CPU\* ≤ 10% | yes (`time_model_offcpu_cap_ok`) |
 | §4 zero known-failing tabs | yes (`build_demo_summary` uses raw `ok`, ignoring the exemption) |
-| §4 blink measured fraction ≥ 0.5 | no — blocked on `agent/blink-anchor-mount-seq` |
-| §4 time to first paint, pinned viewport | no |
-| §5 cross-tab agreement, freshness | no |
-| §6 lost-event counters, overhead envelope | no |
-| §7 no test exited 126/127 | no |
-| §8 known-failing lines read by hand | manual by construction |
+| §4 blink measured fraction ≥ 0.5 | yes — landed via `agent/blink-anchor-mount-seq` (#209, merged to master), inherited automatically once `agent/rehearsal-bypass-suite` rebased: `demo_rehearsal.py` has no independent blink-measurement code, it fully delegates to `ui_live_smoke.py:run_tab()`, which now calls `blink_sweep_gate_verdict` itself. Pinned with a regression test using real measured numbers (`tests/test_demo_rehearsal_lib.py`, run.id 1790574871: scatter 0.1305, transitions 0.0072–0.0172) |
+| §4 time to first paint, pinned viewport | no — viewport IS pinned (1280×900, `ui_live_smoke.py:run_tab`) but confirming that matches the ACTUAL demo display resolution is a fact outside any harness's reach. Time-to-first-paint: still no timing field anywhere in a tab result; would need new instrumentation in `run_tab` itself, not attempted on `agent/rehearsal-bypass-suite` |
+| §5 cross-tab agreement, freshness | partial — freshness: yes (`freshness_ok`, `info`'s `now_ns` vs `to_ns`). Cross-tab agreement: DB-Time leg only, yes (`cross_tab_db_time_agreement_ok`, `time_model` vs `top_events` for the identical window); the AAS leg (vs. the bucketed `aas` endpoint) needs a bucket-weighted re-derivation not attempted with confidence in scope |
+| §6 lost-event counters, overhead envelope | partial — lost-event counters: yes (`daemon_integrity_ok`: `ringbuf_drops_total`/`state_map_full_total`/`seen_query_ids_full_total`, already on the wire via pgwt-server's control proxy, no `src/` change needed; blind spot stated in the code comment: a lost LIFECYCLE event is silent, no counter increments). Overhead envelope: no — only measurable via the separate ~10-minute `test_overhead.sh` sweep, out of this harness's own time budget |
+| §7 no test exited 126/127 | **partial, and this is a human-readable aid, not an automated gate**: `tests/demo_rehearsal.sh`'s `report_early_exit` labels a dead subprocess's 126/127 exit code in the log for a human reading it afterward. It does NOT change the script's own exit code (every call site already `exit 1` regardless of the labeled reason) and has no test coverage of its own — reviewer finding, 2026-09-28. Do not read this row as "126/127 fails the gate automatically"; it already did, via the pre-existing `kill -0` + `exit 1` checks, which is why this addition changes nothing observable except the log's wording |
+| §8 known-failing lines read by hand | manual by construction; not applicable to `demo_rehearsal.py` itself, which grants zero known-failing exemptions (§4 row above) -- nothing here for a human to hand-verify against an issue |
 
-Also confirmed present and wrong: `time_model_conservation()` returns pass
-outright when `db_time_ms <= 0`, so a rehearsal that captured nothing scores
-clean today. That work is in flight on `agent/rehearsal-bypass-suite`, where
-each criterion ships with a case proving it can go red.
+The `time_model_conservation()` vacuous pass on `db_time_ms <= 0` (a rehearsal
+that captured nothing used to score clean) is now FIXED on
+`agent/rehearsal-bypass-suite`, along with every other row marked "yes" above
+-- each ships with a case proving it can go red
+(`tests/test_demo_rehearsal_lib.py`).
 
 ## The sequence, and what stops it from being rolled
 
