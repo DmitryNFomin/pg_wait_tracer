@@ -203,9 +203,14 @@ cost is real and is accepted deliberately.
 
   Evidence: 7 readings across 3 separate full-screen entries, all
   identical, plus 2 more at the other hostname and an independent in-page
-  reporting channel that settled on the same number every time. Artifact:
-  `tests/results/chrome_demo_viewport/` on branch
-  `agent/chrome-viewport-measure`.
+  reporting channel that settled on the same number every time. Full
+  record — environment, the measurement table, the effective-zoom check,
+  the transient-1069 finding with its raw readings, and an explicit "what
+  is NOT measured" section — lives in `docs/chrome-demo-viewport-2026-09-28.md`
+  (same precedent as `docs/gate-box-noise-2026-09-17.json`: a dated raw-
+  measurement file in `docs/`, cited here rather than copied here, so
+  there is exactly one record of the number, never two to drift apart the
+  way 1440x932 and 1710x1069 once did).
 
   Pin the Chrome and macOS versions in the verdict, same reasoning as
   before the browser changed: an update between a clean rehearsal and the
