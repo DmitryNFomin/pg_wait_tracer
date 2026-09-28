@@ -201,7 +201,16 @@ export function buildEscalationAnnotation(status, win) {
 
     const fill   = isAnomaly ? ESC_ANOMALY_COLOR : ESC_MANUAL_COLOR;
     const border = isAnomaly ? ESC_ANOMALY_BORDER : ESC_MANUAL_BORDER;
-    const label  = 'Escalated (' + reason + ')';
+    // #213: src/control.c reports tier="escalated" for a full-mode daemon
+    // (fidelity == EXACT, escalation disabled) with escalation_reason:
+    // "none" — a genuine status, not a misparse; the UI was faithfully
+    // printing that sentinel verbatim as "Escalated (none)". The chip only
+    // draws at all when status.tier === 'escalated' (the guard above), so
+    // this substitution only ever replaces that one sentinel value; manual
+    // and anomaly reasons are real active escalations and keep their label
+    // untouched. Whether the daemon *should* report "escalated" for full
+    // mode is a separate question, out of scope here (src/ untouched).
+    const label = (reason === 'none') ? 'Full fidelity' : 'Escalated (' + reason + ')';
 
     const remainingS = +status.escalation_seconds_remaining || 0;
     const startNs = (typeof status.observed_start_ns === 'number')
