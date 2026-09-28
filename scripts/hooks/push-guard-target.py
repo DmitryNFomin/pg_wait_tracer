@@ -19,13 +19,70 @@ import sys
 
 SEPARATORS = {";", "&&", "||", "|", "&", "\n", "(", ")"}
 PUNCTUATION = ";&|()<>"
-OPERATORS = re.compile(r"&&|\|\||<<|>>|[;&|()<>]")
+OPERATORS = re.compile(r"&&|\|\||&>>|<<<|<<-|<<|>>|>&|<&|&>|<>|>\||[;&|()<>]")
+REDIRECTIONS = {"<", ">", ">>", "<<", "<<-", "<<<", ">&", "<&", "&>", "&>>", "<>", ">|"}
 VALUE_OPTIONS = {"-c", "--config-env", "--git-dir", "--work-tree", "--namespace", "--exec-path"}
 UNSAFE_OPTIONS = {"--git-dir", "--work-tree", "--namespace"}
 FLAG_OPTIONS = {"-p", "-P", "--paginate", "--no-pager", "--no-replace-objects",
                 "--no-optional-locks", "--literal-pathspecs", "--glob-pathspecs",
                 "--noglob-pathspecs", "--icase-pathspecs"}
 REPO_ENV = {"GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_CEILING_DIRECTORIES"}
+PUSH_VALUE_OPTIONS = {"--repo", "--push-option", "--receive-pack", "--exec",
+                      "--recurse-submodules"}
+PUSH_FLAG_OPTIONS = {
+    "--verbose", "--no-verbose", "--quiet", "--no-quiet", "--all", "--no-all",
+    "--branches", "--no-branches", "--mirror", "--no-mirror", "--delete",
+    "--no-delete", "--tags", "--no-tags", "--dry-run", "--no-dry-run",
+    "--porcelain", "--no-porcelain", "--force", "--no-force",
+    "--force-with-lease", "--no-force-with-lease", "--force-if-includes",
+    "--no-force-if-includes", "--no-recurse-submodules", "--thin", "--no-thin", "--set-upstream",
+    "--no-set-upstream", "--progress", "--no-progress", "--prune",
+    "--no-prune", "--verify", "--no-verify", "--follow-tags",
+    "--no-follow-tags", "--signed", "--no-signed", "--atomic",
+    "--no-atomic", "--ipv4", "--ipv6", "-4", "-6",
+}
+
+
+def push_operands(args):
+    """Remove known push options, including options interspersed with operands."""
+    operands = []
+    option_repo = None
+    i = 0
+    options = True
+    while i < len(args):
+        arg = args[i]
+        if options and arg == "--":
+            options = False
+        elif options and arg in PUSH_VALUE_OPTIONS | {"-o"}:
+            if i + 1 >= len(args):
+                return None
+            if arg == "--repo":
+                option_repo = args[i + 1]
+            i += 1
+        elif options and any(arg.startswith(opt + "=") for opt in PUSH_VALUE_OPTIONS):
+            if arg.startswith("--repo="):
+                option_repo = arg.split("=", 1)[1]
+        elif options and arg.startswith("-o") and len(arg) > 2:
+            pass
+        elif options and (arg in PUSH_FLAG_OPTIONS or
+                          arg.startswith("--force-with-lease=") or
+                          arg.startswith("--signed=")):
+            pass
+        elif options and arg.startswith("-") and len(arg) > 1 and not arg.startswith("--"):
+            # Git accepts clusters of the short, valueless push switches.
+            if any(char not in "vqfnud46" for char in arg[1:]):
+                return None
+        elif options and arg.startswith("-"):
+            return None
+        else:
+            operands.append(arg)
+        i += 1
+    if option_repo is not None:
+        if len(operands) == 1:
+            operands.insert(0, option_repo)
+        elif len(operands) != 2:
+            return None
+    return operands
 
 
 def repository_identity(directory):
@@ -42,15 +99,15 @@ def repository_identity(directory):
 def branch_worktree(args, repo):
     """Resolve a simple pushed local branch to its checked-out worktree.
 
-    Other refspecs and push options have context-dependent meaning and are
-    deliberately left unresolved.
+    Known push options are removed before locating the remote and refspec.
+    Context-dependent refspecs remain unresolved.
     """
     try:
         push = args.index("push")
     except ValueError:
         return False, None
-    operands = args[push + 1:]
-    if (len(operands) != 2 or operands[0].startswith("-")
+    operands = push_operands(args[push + 1:])
+    if (operands is None or len(operands) != 2 or operands[0].startswith("-")
             or operands[1].startswith("-") or ":" in operands[1]
             or operands[1].startswith("+") or operands[1] == "HEAD"):
         return False, None
@@ -149,6 +206,7 @@ def targets(command, start=None):
     if not re.search(r"\bgit\b", command) or not re.search(r"\bpush\b", command):
         return []
     lexer = shlex.shlex(command, posix=True, punctuation_chars=PUNCTUATION)
+    lexer.wordchars += ":"
     lexer.whitespace = " \t\r"
     lexer.commenters = "#"
     lexed = list(lexer)
@@ -168,7 +226,7 @@ def targets(command, start=None):
         if token and all(char in PUNCTUATION for char in token):
             operators = OPERATORS.findall(token)
             if ("".join(operators) != token
-                    or any(op not in SEPARATORS | {"<<", ">", ">>"} for op in operators)
+                    or any(op not in SEPARATORS | REDIRECTIONS for op in operators)
                     or any(left not in {"(", ")"} and right not in {"(", ")"}
                            for left, right in zip(operators, operators[1:]))):
                 raise ValueError(f"unknown shell operator: {token}")
@@ -178,7 +236,7 @@ def targets(command, start=None):
     tokens = []
     i = 0
     while i < len(raw):
-        if raw[i] != "<<" or i + 1 >= len(raw):
+        if raw[i] not in {"<<", "<<-"} or i + 1 >= len(raw):
             tokens.append(raw[i])
             i += 1
             continue
@@ -289,7 +347,11 @@ def targets(command, start=None):
     i = 0
     while i < len(tokens):
         token = tokens[i]
-        if token in {"<", ">", ">>"}:
+        if token in REDIRECTIONS:
+            if segment and segment[-1].isdigit():
+                segment.pop()  # File descriptor before a redirect, e.g. 2>&1.
+            if i + 1 >= len(tokens):
+                raise ValueError("redirection without a target")
             i += 2
             continue
         if token in SEPARATORS:

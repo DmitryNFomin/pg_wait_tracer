@@ -19,6 +19,16 @@ import tempfile
 SOURCE = Path(__file__).resolve().parents[1]
 GUARD = Path(os.environ.get("PGWT_TEST_PUSH_GUARD", SOURCE / "scripts/hooks/push-guard.sh"))
 HASH = SOURCE / "scripts/tree-hash.sh"
+
+
+def isolated_env():
+    """Keep inherited Git repository/configuration overrides out of fixtures."""
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+    env["GIT_CONFIG_GLOBAL"] = os.devnull
+    return env
+
+
 RED_523 = {
     "cross repo cd stamped push",
     "commit and push chain", "true and push", "case without push",
@@ -61,7 +71,8 @@ RED_007 = {
 
 
 def git(repo, *args):
-    subprocess.run(["git", "-C", str(repo), *args], check=True, stdout=subprocess.DEVNULL)
+    subprocess.run(["git", "-C", str(repo), *args], check=True,
+                   stdout=subprocess.DEVNULL, env=isolated_env())
 
 
 def fixture(parent):
@@ -73,8 +84,8 @@ def fixture(parent):
     (main / "data.txt").write_text("original\n")
     (main / "move.sh").write_text(f"cd {shlex.quote(str(worktree))}\n")
     git(main, "init", "-q", "-b", "main")
-    git(main, "config", "user.email", "test@example.com")
-    git(main, "config", "user.name", "Test")
+    git(main, "config", "--local", "user.email", "test@example.com")
+    git(main, "config", "--local", "user.name", "Test")
     git(main, "add", "-A")
     git(main, "commit", "-q", "-m", "initial")
     git(main, "worktree", "add", "-q", "-b", "agent/test", str(worktree))
@@ -82,12 +93,13 @@ def fixture(parent):
 
 
 def stamp(repo):
-    digest = subprocess.check_output([str(repo / "scripts/tree-hash.sh")], cwd=repo, text=True)
+    digest = subprocess.check_output([str(repo / "scripts/tree-hash.sh")], cwd=repo,
+                                     text=True, env=isolated_env())
     (repo / ".pgwt-check.stamp").write_text(digest)
 
 
 def run(command, cwd, guard, skip=False):
-    env = os.environ.copy()
+    env = isolated_env()
     env.pop("PGWT_SKIP_PUSH_GUARD", None)
     if skip:
         env["PGWT_SKIP_PUSH_GUARD"] = "1"
@@ -103,6 +115,53 @@ def cases(main, worktree, other, nonrepo):
     q = shlex.quote(str(worktree))
     other_q = shlex.quote(str(other))
     yield "bare clean push", "git push origin main", main, 0
+    # Real first-push shape, then redirections in each shell position.
+    yield "first push and redirect", "git push -q -u origin main && echo PUSHED 2>&1", main, 0
+    for label, command in {
+        "stdout": "git push origin main >/dev/null",
+        "stderr": "git push origin main 2>/dev/null",
+        "append": "git push origin main >>push.log",
+        "both": "git push origin main &>push.log",
+        "both append": "git push origin main &>>push.log",
+        "fd dup": "git push origin main 2>&1",
+        "fd input": "git push origin main 0<&1",
+        "clobber": "git push origin main >|push.log",
+        "here string": "git push origin main <<<'input'",
+        "before command": "2>/dev/null git push origin main",
+        "between operands": "git push origin 2>/dev/null main",
+        "before next command": "git push origin main 2>&1 && echo PUSHED",
+    }.items():
+        yield f"redirect {label}", command, main, 0
+    for label, option in {
+        "upstream short": "-u", "upstream long": "--set-upstream",
+        "force short": "-f", "force long": "--force",
+        "lease": "--force-with-lease", "lease value": "--force-with-lease=main:abc",
+        "quiet short": "-q", "quiet long": "--quiet", "verbose": "-v",
+        "no verify": "--no-verify", "tags": "--tags", "delete": "--delete",
+        "push option short": "-o ci.skip", "push option long": "--push-option ci.skip",
+        "push option equals": "--push-option=ci.skip",
+        "receive pack": "--receive-pack /bin/true",
+        "recurse": "--recurse-submodules check",
+        "signed": "--signed=if-asked",
+    }.items():
+        yield f"push flag {label}", f"git push {option} origin main", main, 0
+        yield f"push flag after refspec {label}", f"git push origin main {option}", main, 0
+    yield "push flags combined", "git push -qfu --no-verify -o ci.skip --force-with-lease origin main", main, 0
+    yield "push flags combined after refspec", "git push origin main -qfu --no-verify -o ci.skip --force-with-lease", main, 0
+    yield "push repo option", "git push --repo origin main", main, 0
+    yield "push repo option equals", "git push --repo=origin main", main, 0
+    yield "push -C before subcommand", f"git -C {q} push -u origin agent/test", main, 0
+    yield "unknown push option", "git push --future-option origin main", main, 2
+    yield "missing push option value", "git push origin main --push-option", main, 2
+    yield "push option consumes operand", "git push -o origin main", main, 2
+    # Shell fragments taken from Makefile and scripts/check*.sh.
+    yield "Makefile describe fallback", "git describe --tags --always --dirty 2>/dev/null || echo unknown", main, 0
+    yield "rehearsal script exec redirect", "exec >rehearsal.out 2>&1", main, 0
+    yield "check script need then push", "command -v python3 >/dev/null 2>&1 && git push origin main", main, 0
+    yield "snapshot script probe then push", 'git rev-parse --verify -q "$ref" >/dev/null && git push origin main', main, 0
+    yield "check script bash c then push", "bash -c 'cd web && go vet ./... && go test ./...' && git push origin main", main, 0
+    yield "rehearsal script append log", 'git push origin main 2>>"$log"', main, 0
+    yield "rehearsal script process redirect", 'git push origin main 2> >(tee -a "$log" >&2)', main, 0
     yield "commit and push chain", 'git add -A && git commit -m "msg" && git push origin main', main, 0
     yield "true and push", "true && git push origin main", main, 0
     yield "git status and push", "git status && git push origin main", main, 0
@@ -133,6 +192,7 @@ def cases(main, worktree, other, nonrepo):
     yield "dynamic cd destination", f"dest={other_q} && cd \"$dest\" && git push origin main", main, 2
     (main / "data.txt").write_text("changed\n")
     yield "bare stale push", "git push origin main", main, 2
+    yield "upstream stale push", "git push -u origin main 2>&1", main, 2
     yield "clean worktree, dirty main", f"cd {q} && git push origin agent/test", main, 0
     stamp(main)
     (worktree / ".pgwt-check.stamp").unlink()
@@ -189,7 +249,7 @@ def main():
             for filename in ("push-guard.sh", "push-guard-target.py"):
                 content = subprocess.check_output(
                     ["git", "show", f"{red_base}:scripts/hooks/{filename}"],
-                    cwd=SOURCE,
+                    cwd=SOURCE, env=isolated_env(),
                 )
                 (hook_dir / filename).write_bytes(content)
             guard = hook_dir / "push-guard.sh"
