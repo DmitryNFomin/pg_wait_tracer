@@ -101,13 +101,28 @@ cost is real and is accepted deliberately.
   Mac-side walk was built against Chrome before this correction; its findings
   about the bridge, the ssh hop and freshness stand, its paint numbers do not.
 
-**One ambiguity, still open.** An `LG ULTRAFINE` at
-6016 x 3384 (UI 3008 x 1692) is also attached to this Mac. "Screen" was
-answered against a laptop-screen-or-projector question, so it is read as the
-built-in panel — but if the demo is actually driven on the external display,
-the pinned viewport is 1504 x 846 CSS at DPR 2 instead, and every Mac-side
-first-paint number has to be re-measured on it. Cheap to correct now,
-expensive to discover on the day.
+**Display confirmed** (owner, 2026-09-28): the built-in panel, not the
+`LG ULTRAFINE` 6016 x 3384 also attached to this Mac. So 1440 x 932 CSS at
+DPR 2 is final, and the display identity is recorded in the verdict alongside
+the Safari and macOS versions — a rehearsal walked on a different display is
+a different experiment, exactly as a different PG version would be.
+
+### Recovery after the bridge drops
+
+Added because the owner observed it before any harness did: a Safari tab open
+against a bridge that went away showed an error chip and eleven blank panels.
+
+The code path is sound on inspection — `connect()` re-fetches the session
+token on every attempt, so the bridge's per-process token rotating on restart
+does **not** strand an open tab — but nobody has ever observed a recovery.
+Inspection is not observation, and the difference between "recovers within the
+16 s backoff cap" and "stays blank until someone reloads" is the difference
+between a hiccup and a dead demo.
+
+So the Mac-side walk measures it: drop the bridge mid-walk, bring it back, and
+record whether the UI reconnects, how long it takes, and whether any state is
+lost. The measured number belongs in the verdict; the source's 16 s cap is not
+evidence.
 
 ### The demo machine (owner, 2026-09-28: "we will provision dedicated node couple days in advance")
 
