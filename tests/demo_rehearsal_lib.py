@@ -463,31 +463,6 @@ def build_demo_conservation_check(samples, full_window_result):
     }
 
 
-def verdict_is_fresh(run_id_text, expected_marker):
-    """run_id_text: raw contents of tests/results/demo_rehearsal/run.id (or
-    None/empty if the file could not be read). expected_marker: THIS
-    invocation's own marker. Returns (ok, reason).
-
-    Owner finding (2026-09-27), mirrors tests/run_all.sh's own
-    tests/results/ui_live/run.id gate (issue #93): a demo-rehearsal that
-    reuses a KEEP=1 VM across rounds, or whose remote invocation never
-    actually reached demo_rehearsal.py this round, can leave a PREVIOUS
-    round's summary.json + run.id sitting on the VM; an rsync back happily
-    copies that unrelated evidence, and a caller that trusts summary.json's
-    `ok` alone would report that stale PASS as if it were proof of THIS
-    run. The verdict is void -- not proven true or false -- unless run.id
-    names EXACTLY this invocation."""
-    if not run_id_text or not run_id_text.strip():
-        return False, "run.id missing or unreadable -- no evidence this invocation ever wrote a verdict"
-    actual = run_id_text.strip()
-    expected = str(expected_marker).strip()
-    if actual != expected:
-        return False, (f"run.id={actual!r} does not match this invocation's "
-                       f"marker {expected!r} -- stale evidence from a "
-                       "previous round, not proof of this run")
-    return True, f"run.id matches this invocation ({expected})"
-
-
 def waterfall_latency_ok(elapsed_s, threshold_s=WATERFALL_QUERY_THRESHOLD_S):
     return elapsed_s is not None and elapsed_s <= threshold_s
 

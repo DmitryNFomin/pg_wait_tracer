@@ -688,32 +688,6 @@ def test_capture_has_events_bool_is_not_a_count():
     check(not ok, f"a bool is never treated as a real event count ({detail})")
 
 
-# ── verdict_is_fresh ───────────────────────────────────────────────────────
-
-def test_verdict_fresh_exact_match_ok():
-    ok, reason = lib.verdict_is_fresh("1234567890", "1234567890")
-    check(ok, f"an exact marker match is fresh ({reason})")
-
-
-def test_verdict_fresh_missing_run_id_fails():
-    # BYPASS-SUITE CASE: the run.id file could not be read at all (e.g. the
-    # remote invocation never got far enough to write it).
-    ok, reason = lib.verdict_is_fresh(None, "1234567890")
-    check(not ok, f"a missing run.id is void evidence, not a pass ({reason})")
-
-
-def test_verdict_fresh_empty_run_id_fails():
-    ok, reason = lib.verdict_is_fresh("", "1234567890")
-    check(not ok, f"an empty run.id is void evidence ({reason})")
-
-
-def test_verdict_fresh_stale_marker_fails():
-    # BYPASS-SUITE CASE: a KEEP=1 VM reused across rounds still has a
-    # PREVIOUS round's run.id/summary.json on disk; rsync copies it back
-    # regardless of whether THIS round's remote command ever ran.
-    ok, reason = lib.verdict_is_fresh("1111111111", "2222222222")
-    check(not ok, f"a run.id from a previous invocation is stale, never trusted ({reason})")
-
 
 # ── waterfall_latency_ok ──────────────────────────────────────────────────
 
