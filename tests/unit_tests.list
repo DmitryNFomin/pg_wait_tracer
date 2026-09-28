@@ -52,3 +52,4 @@ test_demo_rehearsal_orchestrator_lib.py
 # a string.
 test_timeline_window_probe.py
 test_hetzner_sweep.sh
+test_push_guard.py
