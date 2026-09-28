@@ -125,6 +125,16 @@ echo "probe: bridge ready at $BASE_URL"
 sleep 20
 
 RC=0
+# Demo-length ledger (issue #205 residual / #197): one row per live tick for
+# PGWT_PROBE_LEDGER_MIN minutes, written to tests/results/timeline_ledger/
+# summary.json. Runs INSTEAD of the short runs when set.
+if [[ -n "${PGWT_PROBE_LEDGER_MIN:-}" ]]; then
+    python3 "$SCRIPT_DIR/timeline_window_probe.py" --url "$BASE_URL" \
+        --ledger "$PGWT_PROBE_LEDGER_MIN" \
+        --out "$PROJECT_DIR/tests/results/timeline_ledger"
+    exit $?
+fi
+
 for i in $(seq 1 "$RUNS"); do
     echo "=== probe run $i/$RUNS ==="
     python3 "$SCRIPT_DIR/timeline_window_probe.py" --url "$BASE_URL" \

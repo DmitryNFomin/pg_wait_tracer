@@ -95,6 +95,9 @@ SAMPLE_JS = """() => {
         mount: mount ? { id: mount.id, seq: mount.seq, at: mount.at } : null,
         axis: axis,
         hasCanvas: !!document.querySelector('#timeline-chart canvas'),
+        numEvents: p.server.numEvents,
+        liveActive: (() => { const b = document.getElementById('live-btn');
+                             return !!b && b.classList.contains('active'); })(),
     };
 }"""
 
@@ -170,6 +173,118 @@ def _drill_to_timeline(page, timeout_s):
         page.wait_for_timeout(500)
         if not page.evaluate(LIVE_ACTIVE_JS):
             raise ProbeFailure("clicking #live-btn did not resume live mode")
+
+
+def ledger(url, minutes, out_dir, timeout_s):
+    """Demo-length per-tick ledger (issue #205 residual, #197's real question).
+
+    Sits on the timeline tab for `minutes` of real live ticks while the trace
+    grows underneath, and records ONE row per tick: the `__uiLiveTicks`
+    timestamp, the timeline mount that followed it, the `xAxis.max` the chart
+    was painting once it had, the trace size, and whether live mode and the
+    transport were healthy at that moment.
+
+    Tick identity is taken by INDEX into the app's own append-only
+    `__uiLiveTicks` array -- `[baseline + k]`, never `[length - 1]`. That is
+    the difference that matters: if this loop ever falls behind the 5 s
+    cadence it lags, but it can never credit one tick's timestamp to another
+    iteration, which is precisely how #205's evidence was manufactured.
+
+    The tick hook is installed AFTER navigation, so the navigation's own
+    `aas` requests are excluded by construction rather than by subtraction.
+    """
+    os.makedirs(out_dir, exist_ok=True)
+    recs = []
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        context = browser.new_context(viewport={"width": 1280, "height": 900})
+        page = context.new_page()
+        _open_app(page, url, timeout_s)
+        dl = time.time() + timeout_s
+        while page.query_selector("#table-container table tbody tr") is None:
+            if time.time() > dl:
+                raise ProbeFailure("UI showed no data within %ds" % timeout_s)
+            page.wait_for_timeout(200)
+        _drill_to_timeline(page, timeout_s)
+        page.evaluate(TICK_HOOK_JS)          # AFTER navigation, deliberately
+        baseline = page.evaluate("() => window.__uiLiveTicks.length")
+        if baseline != 0:
+            raise ProbeFailure(
+                "the tick hook was installed after navigation but already "
+                "holds %d entries -- it cannot be trusted to count only live "
+                "ticks" % baseline)
+
+        expected = int(minutes * 60 / (TICK_MS / 1000.0))
+        print("ledger: %d ticks expected over %s minutes" % (expected, minutes))
+        for k in range(expected):
+            try:
+                page.wait_for_function(
+                    "window.__uiLiveTicks && window.__uiLiveTicks.length >= %d" % (k + 1),
+                    timeout=30000)
+            except PWTimeoutError:
+                raise ProbeFailure(
+                    "tick %d/%d never arrived within 30s -- the live loop "
+                    "stopped, which is a stall, not a slow tick"
+                    % (k + 1, expected))
+            tick_ts = page.evaluate("() => window.__uiLiveTicks[%d]" % k)
+            mount = None
+            mdl = time.time() + 30
+            while time.time() < mdl:
+                s = page.evaluate(SAMPLE_JS)
+                if s.get("missing"):
+                    raise ProbeFailure("window.%s disappeared mid-run" % s["missing"])
+                m = s.get("mount")
+                if m and m["id"] == "timeline" and m["at"] >= tick_ts:
+                    mount = m
+                    break
+                page.wait_for_timeout(50)
+            # Read the axis AFTER the mount that belongs to this tick, so the
+            # value recorded is the one this tick painted -- not the previous
+            # tick's, which is the mistake being corrected.
+            s = page.evaluate(SAMPLE_JS)
+            recs.append({
+                "tick": k + 1, "tick_ts": tick_ts,
+                "mount": mount,
+                "axis_max": (s.get("axis") or {}).get("max"),
+                "to": s.get("to"), "num_events": s.get("numEvents"),
+                "degraded": s.get("degraded"), "live_active": s.get("liveActive"),
+                "has_canvas": s.get("hasCanvas"),
+            })
+            if (k + 1) % 24 == 0:
+                print("  ... %d/%d ticks" % (k + 1, expected))
+        browser.close()
+
+    summary = {"url": url, "minutes": minutes, "ticks": recs}
+    try:
+        summary["verdict"] = ledger_verdict(recs, expected)
+        refused = None
+    except ProbeFailure as e:
+        summary["verdict"] = None
+        summary["refused"] = str(e)
+        refused = e
+    path = os.path.join(out_dir, "summary.json")
+    with open(path, "w") as fh:
+        json.dump(summary, fh, indent=1)
+    print("ledger: wrote %s" % path)
+    if refused is not None:
+        raise refused
+
+    v = summary["verdict"]
+    print("\n-- demo-length ledger --")
+    print("  ticks                  : %d" % v["ticks"])
+    print("  tick gap ms            : min %d median %d max %d"
+          % (v["tick_gap_ms"]["min"], v["tick_gap_ms"]["median"], v["tick_gap_ms"]["max"]))
+    print("  xAxis.max step ms      : min %d median %d max %d"
+          % (v["axis_step_ms"]["min"], v["axis_step_ms"]["median"], v["axis_step_ms"]["max"]))
+    print("  frozen axis pairs      : %d of %d"
+          % (v["frozen_axis_pairs"], v["axis_pairs"]))
+    print("  paint latency ms       : min %d median %d max %d"
+          % (v["paint_latency_ms"]["min"], v["paint_latency_ms"]["median"],
+             v["paint_latency_ms"]["max"]))
+    print("  trace num_events       : %s -> %s"
+          % (v["num_events_first"], v["num_events_last"]))
+    print("  degraded ticks         : %s" % (v["degraded_ticks"] or "none"))
+    return 0
 
 
 def emulate_smoke(url, ticks, out_dir, timeout_s):
@@ -279,6 +394,69 @@ def emulate_smoke(url, ticks, out_dir, timeout_s):
     print("  pre-loop aas count (L): %d -> iterations 1..%d need no live tick"
           % (pre_loop_ticks, pre_loop_ticks))
     return 0
+
+
+def ledger_verdict(records, expected):
+    """Pure verdict over a demo-length per-tick ledger (issue #205/#197).
+
+    One record per live tick: the `__uiLiveTicks` timestamp, the timeline
+    mount that followed it, the ECharts `xAxis.max` the chart was painting
+    once it had, and the trace size at that moment.
+
+    REFUSES (ProbeFailure) rather than scoring, whenever the ledger cannot
+    answer the question it was collected for. A tick with no mount is not a
+    tick to skip -- it is exactly the stall #205 alleges, and it must be
+    loud. Likewise a tick whose axis could not be read: an unreadable axis is
+    not a stable one.
+
+    Returns a dict of counts/stats; the CALLER decides what is a pass, so
+    this function can never quietly approve."""
+    if not records:
+        raise ProbeFailure("the ledger is empty -- no tick was ever recorded, "
+                           "so nothing about freshness was measured")
+    if len(records) < expected:
+        raise ProbeFailure(
+            "the ledger holds %d ticks, %d were asked for -- a partial run "
+            "cannot settle a demo-length question" % (len(records), expected))
+
+    missing_mount = [r["tick"] for r in records if not r.get("mount")]
+    if missing_mount:
+        raise ProbeFailure(
+            "ticks %s produced no timeline mount at all -- that is a real "
+            "stall, reported rather than skipped" % missing_mount)
+    unreadable = [r["tick"] for r in records
+                  if not r.get("axis_max") or not str(r["axis_max"]).isdigit()]
+    if unreadable:
+        raise ProbeFailure(
+            "ticks %s had no readable xAxis.max -- an axis that cannot be "
+            "read is not an axis that held still" % unreadable)
+    not_live = [r["tick"] for r in records if not r.get("live_active")]
+    if not_live:
+        raise ProbeFailure(
+            "live mode was off at ticks %s -- the window is meant to be "
+            "frozen then, so those ticks say nothing" % not_live)
+
+    axes = [int(r["axis_max"]) for r in records]
+    lat = [r["mount"]["at"] - r["tick_ts"] for r in records]
+    gaps = [records[i + 1]["tick_ts"] - records[i]["tick_ts"]
+            for i in range(len(records) - 1)]
+    steps_ms = [(axes[i + 1] - axes[i]) // 1000000 for i in range(len(axes) - 1)]
+    lat_s, gap_s, step_s = sorted(lat), sorted(gaps), sorted(steps_ms)
+    degraded = [r["tick"] for r in records if r.get("degraded")]
+    return {
+        "ticks": len(records),
+        "frozen_axis_pairs": sum(1 for s in steps_ms if s == 0),
+        "axis_pairs": len(steps_ms),
+        "axis_step_ms": {"min": step_s[0], "median": step_s[len(step_s) // 2],
+                         "max": step_s[-1]},
+        "paint_latency_ms": {"min": lat_s[0], "median": lat_s[len(lat_s) // 2],
+                             "max": lat_s[-1]},
+        "tick_gap_ms": {"min": gap_s[0], "median": gap_s[len(gap_s) // 2],
+                        "max": gap_s[-1]},
+        "num_events_first": records[0].get("num_events"),
+        "num_events_last": records[-1].get("num_events"),
+        "degraded_ticks": degraded,
+    }
 
 
 def select_measurable(sent, ticks):
@@ -414,8 +592,12 @@ def main(argv=None):
     ap.add_argument("--timeout", type=int, default=60)
     ap.add_argument("--emulate-smoke", action="store_true",
                     help="replay tests/ui_live_smoke.py's per-tick capture loop")
+    ap.add_argument("--ledger", type=float, metavar="MINUTES",
+                    help="demo-length per-tick ledger -> summary.json")
     a = ap.parse_args(argv)
     try:
+        if a.ledger:
+            return ledger(a.url, a.ledger, a.out, a.timeout)
         if a.emulate_smoke:
             return emulate_smoke(a.url, a.ticks, a.out, a.timeout)
         return run(a.url, a.ticks, a.out, a.timeout)

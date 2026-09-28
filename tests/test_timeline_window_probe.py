@@ -132,6 +132,76 @@ def main():
     check("a single sample reads 0 pairs (never a fabricated verdict)",
           probe.frozen_pair_count(["100"]) == 0)
 
+    print("== ledger_verdict: the demo-length guard ==")
+
+    def rec(tick, axis_max, lat=60, live=True, degraded=False, mount=True):
+        base = 1_000_000_000_000
+        ts = base + tick * 5000
+        return {"tick": tick, "tick_ts": ts,
+                "mount": {"id": "timeline", "seq": tick, "at": ts + lat} if mount else None,
+                "axis_max": axis_max, "num_events": 1000 * tick,
+                "degraded": degraded, "live_active": live}
+
+    healthy = [rec(i, str(2_000_000_000_000_000_000 + i * 5_000_000_000))
+               for i in range(1, 11)]
+
+    # Nothing was collected. The single most dangerous input: a gate that
+    # scores an empty ledger reports a clean bill of health on no evidence.
+    refuses("an empty ledger -> refuses",
+            lambda: probe.ledger_verdict([], 10), "no tick was ever recorded")
+
+    # A run that died a third of the way in must not be scored as if it had
+    # reached demo length -- that is the whole point of the run.
+    refuses("a partial run (3 of 10 ticks) -> refuses",
+            lambda: probe.ledger_verdict(healthy[:3], 10), "partial run")
+
+    # A tick with no mount IS the alleged stall. Skipping it would let the
+    # very defect under investigation vanish from the summary.
+    starved = list(healthy)
+    starved[4] = rec(5, None, mount=False)
+    refuses("a tick that never mounted -> refuses, does not skip",
+            lambda: probe.ledger_verdict(starved, 10), "no timeline mount")
+
+    # An axis that could not be read is not an axis that held still.
+    blind = list(healthy)
+    blind[2] = rec(3, None)
+    refuses("a tick with an unreadable axis -> refuses",
+            lambda: probe.ledger_verdict(blind, 10), "readable xAxis.max")
+    blind2 = list(healthy)
+    blind2[2] = rec(3, "not-a-number")
+    refuses("a tick whose axis is not a number -> refuses",
+            lambda: probe.ledger_verdict(blind2, 10), "readable xAxis.max")
+
+    # Live mode off means the window is SUPPOSED to be frozen. Scoring those
+    # ticks would manufacture a stall out of correct behaviour.
+    paused = list(healthy)
+    paused[6] = rec(7, healthy[6]["axis_max"], live=False)
+    refuses("live mode off at a tick -> refuses",
+            lambda: probe.ledger_verdict(paused, 10), "live mode was off")
+
+    # ...and the healthy shape must score, or the guard is unfalsifiable.
+    v = probe.ledger_verdict(healthy, 10)
+    check("a complete healthy ledger scores",
+          v["ticks"] == 10 and v["frozen_axis_pairs"] == 0
+          and v["axis_step_ms"]["median"] == 5000,
+          "(got %s)" % v)
+
+    # The measurement must be able to SAY "frozen" -- an all-identical axis
+    # across a full ledger is #205's alleged world, and it has to show up as
+    # 9 frozen pairs of 9, not as a refusal and not as a pass.
+    stuck = [rec(i, "2000000000000000000") for i in range(1, 11)]
+    v2 = probe.ledger_verdict(stuck, 10)
+    check("a genuinely frozen demo-length window reads 9 frozen of 9",
+          v2["frozen_axis_pairs"] == 9 and v2["axis_pairs"] == 9,
+          "(got %d of %d)" % (v2["frozen_axis_pairs"], v2["axis_pairs"]))
+
+    # A degraded transport legitimately freezes the window (app.js UI-1), so
+    # it must be surfaced rather than silently scored as a freshness defect.
+    deg = [rec(i, "2000000000000000000", degraded=(i in (4, 5)))
+           for i in range(1, 11)]
+    check("degraded ticks are named, not silently scored",
+          probe.ledger_verdict(deg, 10)["degraded_ticks"] == [4, 5])
+
     print("\n%d checks, %d failed" % (checks, len(failures)))
     return 1 if failures else 0
 
