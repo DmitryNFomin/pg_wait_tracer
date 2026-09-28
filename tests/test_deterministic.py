@@ -158,7 +158,9 @@ def test_pg_sleep_exact_count(pm_pid):
       ready+2 first PgSleep→CPU transition fires watchpoint
       ...    each pg_sleep transition fires watchpoint
       ready+10 DO block done; interactive psql stays alive in ClientRead
-      tick   system_event reports exactly five closed PgSleep intervals
+      tick   system_event reports five sleeps' worth of PgSleep, in AT LEAST
+             five closed intervals (see the count assertion below for why the
+             floor is not an equality)
     """
     print("--- Test 1: pg_sleep Exact Count ---")
 
@@ -244,19 +246,53 @@ def test_pg_sleep_exact_count(pm_pid):
     # turn an in-progress fifth sleep into another instantaneous false failure.
     ev = pg_sleep_ev[-1]
 
-    # All 5 PgSleep→CPU transitions should fire the watchpoint
-    check(ev['count'] == N,
-          f"count = {ev['count']} (expected exactly {N})")
+    # Every one of the N PgSleep→CPU transitions must fire the watchpoint, so
+    # N is a FLOOR — but it is not an equality, and issue #191 is why. A signal
+    # delivered to the sleeping backend (in the field: a SIGALRM from
+    # PostgreSQL's own ~10s stats-flush timeout) ends its WaitLatch, and
+    # pg_sleep's loop re-enters WAIT_EVENT_PG_SLEEP for the remaining time — so
+    # PostgreSQL really performs N+1 waits and one 2002ms interval arrives as
+    # two real parts summing to 2002ms. That is not a tracer defect: all the
+    # records come closed off the watchpoint and sit in the recorded trace
+    # file, and the split reproduces with no tracer process in existence
+    # (6/6 runs, ftrace signal_generate as the tracer-independent oracle). No
+    # upper bound is asserted either: any ceiling would be a number picked to
+    # fit today's boxes, and a busier one can honestly split more than once.
+    #
+    # Why a floor plus the total, and not the total alone: one extra interval
+    # and one MISSING interval cancel out in the sum, so duration alone would
+    # pass while the tracer dropped a wait. The two together do not.
+    #
+    # EXACT counts still live in two places, and were not abandoned here:
+    #   * tests/test_data_events.py — exact count/total/avg/max against a
+    #     GENERATED event stream, where the number is a real invariant instead
+    #     of an assumption about what PostgreSQL does between two waits;
+    #   * tests/issue191_split_repro.py — a live run that sets the backend's
+    #     latch on purpose and requires exactly N+1, a sharper assertion than
+    #     this one ever was because the perturbation is deliberate.
+    # Asserting exactly N sleep EPISODES here (merging adjacent PgSleep records
+    # separated by a short CPU gap) is deliberately NOT done: adjacency plus a
+    # sub-millisecond gap does not prove one episode — two successive pg_sleep
+    # calls have exactly that shape too. Proving it would need an independent
+    # boundary per call (five separately marked commands), which is a bigger
+    # change than this assertion is worth.
+    check(ev['count'] >= N,
+          f"count = {ev['count']} (expected at least {N}; "
+          f"a signalled WaitLatch may split one sleep, see issue #191)")
 
     # All five waits start after attachment, so total is ≈10000ms. Keep the
-    # existing ±3000ms product-accuracy bound.
+    # existing ±3000ms product-accuracy bound. This is the half of the pair
+    # that a spurious EXTRA interval would break: a split preserves the sum,
+    # a fabricated wait does not.
     check(7000 <= ev['total_ms'] <= 12000,
           f"total = {ev['total_ms']:.1f}ms "
           f"(expected {N * SLEEP_EACH_S * 1000}ms ±3000ms)")
 
-    # Avg should be close to 2s; every sleep begins after attachment.
-    check(ev['avg_us'] > 1000000,
-          f"avg = {ev['avg_us']:.0f}us (expected ≈ {SLEEP_EACH_S * 1e6:.0f}us)")
+    # No avg assertion: avg = total / count, so any lower bound on it is an
+    # upper bound on the count wearing a disguise (avg > 1s fails at 10
+    # records), and #191 is exactly the case where extra records are honest.
+    # Max below carries what avg was really checking — that these are
+    # seconds-long sleeps, not a shower of fragments misattributed to PgSleep.
 
     # Max should be close to 2s (single sleep, no outliers)
     check(ev['max_us'] < SLEEP_EACH_S * 1.5e6,
