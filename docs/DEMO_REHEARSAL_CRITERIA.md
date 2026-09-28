@@ -80,8 +80,27 @@ cost is real and is accepted deliberately.
 
 - **Display: the Mac's built-in screen**, not the projector — `Color LCD`,
   Built-in Liquid Retina, **2880 x 1864 Retina**, `Main Display: Yes`.
-- **Viewport: 1440 x 932 CSS at devicePixelRatio 2.** That is what the walk
-  pins, since a Retina panel reports twice the CSS resolution.
+- **Presented FULL SCREEN** (owner, 2026-09-28), so the pinned viewport is
+  **1710 x 1069 CSS at devicePixelRatio 2** — measured in real Safari via
+  WebDriver, not computed: `screen` reports 1710 x 1107 logical, full screen
+  leaves 38 px of chrome, and the content layer is 3420 x 2138 physical.
+
+  **An earlier pin of 1440 x 932 was wrong and is retracted.** It came from
+  dividing the panel's 2880 x 1864 by the DPR of 2, which assumes macOS maps
+  physical to logical at exactly the device pixel ratio. This Mac runs the
+  built-in display in a *scaled* mode: 1710 x 1107 logical at DPR 2, rendering
+  3420 x 2214 and downsampling to the 2880 x 1864 panel. So the derived number
+  was 19% too narrow, and any paint or layout measurement taken at it does not
+  describe the demo.
+
+  Two related traps, both measured rather than assumed:
+  - **A window rect is not a content viewport.** Asking WebDriver for a
+    1440 x 932 *window* yields an 880 px tall *page* — Safari's title and tab
+    bar take 52 px in a window, 38 px in full screen, and zero width in both.
+    A harness must set the outer size, read `innerWidth`/`innerHeight` back,
+    and assert the achieved viewport rather than trusting the request.
+  - Numbers taken at one viewport do not transfer to another, in either
+    direction.
 - **Browser: Safari** (owner, 2026-09-28: "it safari not chrome"). Pin the
   Safari and macOS versions in the verdict; an update between a clean
   rehearsal and the demo invalidates the client half, because rendering, paint
