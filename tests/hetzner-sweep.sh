@@ -83,7 +83,12 @@ SERVERS_FILE=""
 # a new persistent (non-ephemeral) box is provisioned. `pgwt-gate` is the
 # original; `pgwt-gate-2` is its sibling (docs/DEV_LOOP_PLAN.md's second
 # gate runner, issue: reduce per-box occupancy).
-PROTECTED_NAMES=("pgwt-gate" "pgwt-gate-2")
+# pgwt-stage: the dedicated demo machine (owner, 2026-09-28 — provisioned
+# days in advance, PG 18, cx33). It is days old by design, which is exactly
+# the shape this sweep removes, so it is protected by name here as well as by
+# carrying no `pgwt=ephemeral` label. Deliberately NOT named `pgwt-demo`: the
+# rehearsal's own throwaway VMs are `pgwt-demo-<epoch>-<rand>`.
+PROTECTED_NAMES=("pgwt-gate" "pgwt-gate-2" "pgwt-stage")
 
 is_protected_name() {
     local name="$1" p

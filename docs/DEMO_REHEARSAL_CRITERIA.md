@@ -76,15 +76,44 @@ decided by data rather than by "the Mac was busy". For the duration of a
 Mac-side walk, no implementing agents and no local VM work run on it — that
 cost is real and is accepted deliberately.
 
-### Still open, and named rather than closed
+### The client, pinned (owner, 2026-09-28: "Screen, chrome")
 
-The viewport must be pinned to the display actually used — laptop screen or
-projector — and the browser named. Neither is decided yet, so §4's viewport
-criterion is not yet satisfiable, and the first-paint bound has to be set as
-an audience requirement and then measured on the Mac (n ≥ 2) before it is
-claimed. The demo also needs a PG 18 `cx33` that still exists on the day:
-throwaway VMs are swept at six hours, so either the gate box gets PG 18 or a
-deliberately exempt machine is kept.
+- **Display: the Mac's built-in screen**, not the projector — `Color LCD`,
+  Built-in Liquid Retina, **2880 x 1864 Retina**, `Main Display: Yes`.
+- **Viewport: 1440 x 932 CSS at devicePixelRatio 2.** That is what the walk
+  pins, since a Retina panel reports twice the CSS resolution.
+- **Browser: Google Chrome**, 153.0.8010.53 at the time of writing. Pin the
+  major version in the verdict; a Chrome update between a clean rehearsal and
+  the demo invalidates the client half, because rendering and paint timing are
+  exactly what that half measures.
+
+**One ambiguity, flagged rather than assumed.** An `LG ULTRAFINE` at
+6016 x 3384 (UI 3008 x 1692) is also attached to this Mac. "Screen" was
+answered against a laptop-screen-or-projector question, so it is read as the
+built-in panel — but if the demo is actually driven on the external display,
+the pinned viewport is 1504 x 846 CSS at DPR 2 instead, and every Mac-side
+first-paint number has to be re-measured on it. Cheap to correct now,
+expensive to discover on the day.
+
+### The demo machine (owner, 2026-09-28: "we will provision dedicated node couple days in advance")
+
+A dedicated PG 18 `cx33`, created days ahead, **not** an ephemeral VM. Two
+requirements follow from how the janitor works, and both are mechanical:
+
+1. It must **not** carry the `pgwt=ephemeral` label. `tests/hetzner-sweep.sh`
+   deletes labelled machines older than its cutoff, and the demo node will be
+   days old by definition — precisely the shape the sweep exists to remove.
+2. Its name must be in `PROTECTED_NAMES` in `tests/hetzner-sweep.sh`, as a
+   second independent guard. The script's own comment says not to rely on the
+   missing label alone, because an unlabelled persistent box looks identical
+   to an operator's one-off VM.
+
+**Name: `pgwt-stage`, deliberately not `pgwt-demo`.** The rehearsal's own
+throwaway VMs are already created as `pgwt-demo-<epoch>-<rand>`, so a
+dedicated node called `pgwt-demo` would sit one careless prefix match away
+from the machines the sweep is built to delete. `PROTECTED_NAMES` matches
+exact names today, but the demo node is the one machine where a future
+loosening of that match must not be able to reach.
 
 ## A rehearsal is CLEAN only if ALL of these hold
 
