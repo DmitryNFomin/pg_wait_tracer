@@ -32,11 +32,59 @@ Two consequences follow, and both are deliberate:
 1. Rehearsals run on a `cx33`, which is what the throwaway VMs already are, so
    the machine under test matches the machine that will be demoed. A rehearsal
    on any other class does not count toward the sequence.
-2. This validates the software, the capture and the script on the demo's
-   hardware. It does **not** validate the browser and screen the audience will
-   actually see: §4's viewport and time-to-first-paint criteria are still
-   pinned to a stated resolution rather than to the projector, and nothing here
-   measures the laptop driving it. That gap is named rather than closed.
+2. **The client is the owner's Mac** (owner, 2026-09-28: "Demo will be using
+   my Mac where you are running now"). So the demo topology is: browser and
+   Go bridge on the Mac, ssh to the VM, daemon and PostgreSQL on the VM.
+   Nothing eBPF runs on macOS, so the capture is necessarily remote — but the
+   client half is the Mac, and that is the half a rehearsal on the VM does not
+   exercise at all.
+
+## Two verdicts, never merged into one
+
+A rehearsal produces **two** results and they are reported separately:
+
+- **Capture-side**, walked on the VM: everything that does not depend on the
+  client — §1 verdict, §2 floors, §3 conservation, §6 daemon integrity, §7
+  execution, §8 known-failing, and the data half of §4 and §5 (console errors,
+  blank panels, cross-tab agreement).
+- **Mac-side**, walked on the Mac against the same VM in the demo topology:
+  §4's time to first paint and viewport, and §5's freshness — *as the audience
+  will see them*. These are different quantities from their VM-side
+  namesakes. Headless Chromium at DPR 1 on a cx33 over localhost is not real
+  Chrome at DPR 2 on Apple silicon over an ssh hop, and a bound measured on
+  one does not transfer to the other. The VM's number is kept only as a
+  regression detector.
+
+Reported as "capture-side clean k of N, Mac-side clean m of M". **Never as
+"two clean rehearsals"** — that would claim the Mac half on the strength of
+the VM half.
+
+### Attribution for the Mac side, pre-registered
+
+The Mac is also this project's build machine, and local memory pressure has
+already killed two rehearsal attempts (#176). So, decided in advance rather
+than after seeing a result:
+
+- a Mac tick recorded with memory pressure other than normal is **void**
+  (infrastructure), not a failure;
+- a tick over bound with **normal** pressure, while the VM-side walk is clean
+  for the same tick, is a **client-side product finding**;
+- both sides red is a product failure.
+
+`memory_pressure` and load are recorded per tick in the verdict, so this is
+decided by data rather than by "the Mac was busy". For the duration of a
+Mac-side walk, no implementing agents and no local VM work run on it — that
+cost is real and is accepted deliberately.
+
+### Still open, and named rather than closed
+
+The viewport must be pinned to the display actually used — laptop screen or
+projector — and the browser named. Neither is decided yet, so §4's viewport
+criterion is not yet satisfiable, and the first-paint bound has to be set as
+an audience requirement and then measured on the Mac (n ≥ 2) before it is
+claimed. The demo also needs a PG 18 `cx33` that still exists on the day:
+throwaway VMs are swept at six hours, so either the gate box gets PG 18 or a
+deliberately exempt machine is kept.
 
 ## A rehearsal is CLEAN only if ALL of these hold
 
