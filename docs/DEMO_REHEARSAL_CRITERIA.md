@@ -36,9 +36,16 @@ applies the per-tab condition (`python3 tests/demo_workload_coverage.py
 --trace-dir DIR`); its pure per-tab checkers are unit-tested by
 `tests/test_demo_workload_coverage.py`, wired into `scripts/check.sh`. It also
 runs inside `tests/demo_rehearsal.py`'s own end-of-capture checks
-(`extra_checks["tab_coverage"]`, before the trace dir is torn down) — an empty
-tab on a real rehearsal fails that rehearsal's `ok`, not just the standalone
-tool a human has to remember to run.
+(`extra_checks["tab_coverage"]`, before the trace dir is torn down, over the
+trailing `WATERFALL_LIVE_WINDOW_S` = 900s rather than the whole capture — a
+window_too_large refusal from pgwt-server is recorded as its own "could not
+evaluate" outcome, never conflated with a genuinely empty tab) — an empty tab
+on a real rehearsal fails that rehearsal's `ok`, not just the standalone tool
+a human has to remember to run. The Concurrency tab's check is **CPU-count-
+relative** (peak AAS >= the capture box's own `num_cpus`, not a fixed
+number) — measured once, on today's 4-vCPU `cx33`, with a comfortable 9.00-
+vs-4 margin; a future box-class change moves this gate's difficulty, so
+treat that as a deliberate decision, not a surprise discovered mid-rehearsal.
 
 A rehearsal run on a different workload, client count, PG version, box class or
 **tag** (see "The sequence, and what stops it from being rolled" below) is a
