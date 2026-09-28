@@ -56,12 +56,57 @@ def git_target(args, cwd):
     return i < len(args) and args[i] == "push", cwd if safe else None
 
 
+def may_push(raw):
+    """Find push candidates before rejecting syntax we cannot model.
+
+    The lexer keeps quoted prose as one token, so a quoted 'git push' in
+    ordinary output is not mistaken for a command. Unknown punctuation is
+    treated as a boundary here; actual resolution remains fail closed.
+    """
+    words = []
+    for token in raw:
+        if token and all(char in PUNCTUATION for char in token):
+            words.append(None)
+        else:
+            words.append(token)
+    for i, word in enumerate(words):
+        if word is None:
+            continue
+        if word == "git" or word.endswith("/git"):
+            args = []
+            ambiguous = False
+            for j, following in enumerate(words[i + 1:], i + 1):
+                if following is None:
+                    if args and args[-1] in VALUE_OPTIONS | {"-C"}:
+                        args.append(raw[j])
+                        ambiguous = True
+                        continue
+                    break
+                args.append(following)
+            if git_target(args, os.getcwd())[0]:
+                return True, ambiguous
+        # Command substitutions and shell -c scripts are single lexer tokens.
+        if ("$(" in word or "`" in word or
+                (i >= 2 and words[i - 2] in {"bash", "sh", "zsh"}) or
+                (i >= 1 and words[i - 1] == "eval")):
+            if re.search(r"(?:^|[^\w/])(?:[\w./-]*/)?git\s+(?:[^;&|()]*?\s+)?push(?:\s|$|[;&|()])", word):
+                return True, False
+    return False, False
+
+
 def targets(command, start=None):
+    # Unrelated, even malformed, shell input has no repository to resolve.
+    if not re.search(r"\bgit\b", command) or not re.search(r"\bpush\b", command):
+        return []
     lexer = shlex.shlex(command, posix=True, punctuation_chars=PUNCTUATION)
     lexer.whitespace = " \t\r"
     lexer.commenters = "#"
+    lexed = list(lexer)
+    push_candidate, ambiguous_candidate = may_push(lexed)
+    if not push_candidate:
+        return []
     raw = []
-    for token in lexer:
+    for token in lexed:
         # shlex groups adjacent punctuation, including different operators.
         # Split the run before separator recognition; reject unknown runs.
         if token and all(char in PUNCTUATION for char in token):
@@ -107,9 +152,14 @@ def targets(command, start=None):
     # shell punctuation. Refuse to resolve a push when that distinction is lost.
     uncertain = (any(name in os.environ for name in REPO_ENV)
                  or bool(re.search(r"(['\"])[;&|()<>]+\1", command)))
+    cwd_changed = False
 
     def process(parts):
-        nonlocal cwd, uncertain
+        nonlocal cwd, uncertain, cwd_changed
+        # Shell control words prefix a command, but do not themselves change
+        # the working directory. A cd inside the control flow is handled below.
+        while parts and parts[0] in {"if", "then", "elif", "else", "do", "while", "until", "!"}:
+            parts = parts[1:]
         while parts and re.match(r"^[A-Za-z_][A-Za-z_0-9]*=", parts[0]):
             uncertain = uncertain or parts[0].split("=", 1)[0] in REPO_ENV
             parts = parts[1:]
@@ -129,6 +179,7 @@ def targets(command, start=None):
         if parts[0] in {"pushd", "popd", "export"}:
             uncertain = True
         elif parts[0] == "cd":
+            cwd_changed = True
             if len(parts) != 2 or parts[1].startswith("-"):
                 uncertain = True
             else:
@@ -166,8 +217,7 @@ def targets(command, start=None):
             process(segment)
             # Grouping and conditional/parallel execution can change whether
             # a preceding cd affects this shell. Keep the result uncertain.
-            if (token in {"(", ")", "||", "|", "&"}
-                    or (token == "&&" and (not segment or segment[0] != "cd"))):
+            if cwd_changed and token in {"(", ")", "||", "|", "&"}:
                 uncertain = True
             if segment and segment[0] == "cd" and token != "&&":
                 uncertain = True
@@ -176,7 +226,7 @@ def targets(command, start=None):
             segment.append(token)
         i += 1
     process(segment)
-    return found
+    return found or ([None] if ambiguous_candidate else [])
 
 
 def main():
