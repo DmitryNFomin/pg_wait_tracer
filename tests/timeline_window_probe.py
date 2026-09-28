@@ -31,8 +31,18 @@ import os
 import sys
 import time
 
-from playwright.sync_api import sync_playwright
-from playwright.sync_api import TimeoutError as PWTimeoutError
+#
+# Playwright is imported LAZILY, inside the functions that actually drive a
+# browser -- never at module scope. The two verdict functions below
+# (select_measurable, ledger_verdict) are pure, and tests/
+# test_timeline_window_probe.py must be able to import this module with
+# nothing but the stdlib: it is registered in tests/unit_tests.list, so it
+# runs in CI's `build-and-unit` job, which has no Playwright. A module-scope
+# import made that job fail on a tree BOTH local gates passed -- `make check`
+# on the Mac and `make box-check` on the gate box each have Playwright
+# installed, so neither could see it. test_timeline_window_probe.py now pins
+# this directly (it asserts 'playwright' never enters sys.modules on import),
+# which is what lets a machine that HAS Playwright catch the regression.
 
 TICK_MS = 5000
 
@@ -126,12 +136,30 @@ class ProbeFailure(RuntimeError):
     pass
 
 
+def _pw():
+    """Import Playwright on first use and return (sync_playwright, TimeoutError).
+
+    Called only by the browser-driving paths. A missing Playwright is a
+    REFUSAL with a name, not an ImportError traceback halfway through a run --
+    and, crucially, not something that happens at module import, where it
+    would take the pure verdict functions and their unit test down with it."""
+    try:
+        from playwright.sync_api import sync_playwright
+        from playwright.sync_api import TimeoutError as PWTimeoutError
+    except ImportError as e:
+        raise ProbeFailure(
+            "Playwright is not installed, so no browser can be driven: %s "
+            "(the pure verdict functions do not need it)" % e)
+    return sync_playwright, PWTimeoutError
+
+
 def _open_app(page, url, timeout_s):
     """Load the UI and wait for a live WebSocket. Every way this can fail --
     nothing listening, something listening that is not pgwt, a bridge that
     serves the page but never connects -- must REFUSE by name rather than
     surface as a bare Playwright timeout or, worse, let the caller proceed to
     measure an app that is not there."""
+    _, PWTimeoutError = _pw()
     try:
         page.goto(url)
     except Exception as e:                       # noqa: BLE001 -- reported, not hidden
@@ -145,6 +173,7 @@ def _open_app(page, url, timeout_s):
 
 
 def _drill_to_timeline(page, timeout_s):
+    _, PWTimeoutError = _pw()
     page.click(".tab[data-tab='sessions']")
     try:
         page.wait_for_selector("#table-container table tbody tr",
@@ -193,6 +222,7 @@ def ledger(url, minutes, out_dir, timeout_s):
     The tick hook is installed AFTER navigation, so the navigation's own
     `aas` requests are excluded by construction rather than by subtraction.
     """
+    sync_playwright, PWTimeoutError = _pw()
     os.makedirs(out_dir, exist_ok=True)
     recs = []
     with sync_playwright() as p:
@@ -304,6 +334,7 @@ def emulate_smoke(url, ticks, out_dir, timeout_s):
     Reports, per iteration: the frame's md5, the mount seq, and timeRange.to.
     """
     import hashlib
+    sync_playwright, PWTimeoutError = _pw()
     os.makedirs(out_dir, exist_ok=True)
     recs = []
     with sync_playwright() as p:
@@ -504,6 +535,7 @@ def frozen_pair_count(tos):
 
 
 def run(url, ticks, out_dir, timeout_s):
+    sync_playwright, PWTimeoutError = _pw()
     os.makedirs(out_dir, exist_ok=True)
     with sync_playwright() as p:
         browser = p.chromium.launch()

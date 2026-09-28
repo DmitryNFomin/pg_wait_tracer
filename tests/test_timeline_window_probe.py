@@ -11,6 +11,16 @@ for "the window is fine" -- or, just as bad, for "the window is frozen" when
 in truth nothing was observed at all.
 
 No Playwright, no browser, no network: these are the two pure functions.
+
+This file is in tests/unit_tests.list, so it runs in CI's `build-and-unit`
+job, which has NO Playwright installed. That is not incidental -- it is the
+first thing this file checks. A module-scope `from playwright.sync_api import
+...` in the probe made that job fail on a tree that BOTH local gates passed,
+because `make check` on the Mac and `make box-check` on the gate box each
+have Playwright, so neither could see it. `check_import_is_stdlib_only()`
+below closes that blind spot from the other side: it asserts Playwright never
+enters sys.modules when the probe is imported, which FAILS on a machine that
+has Playwright -- exactly the machines the local gates run on.
 """
 import os
 import sys
@@ -206,13 +216,48 @@ def main():
     return 1 if failures else 0
 
 
+def import_probe_stdlib_only():
+    """Import the probe and prove the import needed nothing but the stdlib.
+
+    Ordering is the whole point and is pinned here: sys.modules is sampled
+    IMMEDIATELY BEFORE and IMMEDIATELY AFTER the import, with nothing in
+    between, so the verdict cannot be contaminated by some later import.
+
+    On a host WITHOUT Playwright this can only ever pass, so it proves
+    nothing there -- CI's own red is that side of the evidence. On a host
+    WITH Playwright (this Mac, the gate box) it is the real check, and it is
+    the only reason those two machines can now catch a module-scope import
+    that only CI would otherwise reject."""
+    before = "playwright" in sys.modules
+    import timeline_window_probe as probe
+    after = "playwright" in sys.modules
+    if before:
+        raise RuntimeError(
+            "playwright was already imported before this test ran -- the "
+            "check cannot attribute it to the probe, so it refuses rather "
+            "than passing on an unattributable sample")
+    if after:
+        raise RuntimeError(
+            "importing timeline_window_probe pulled in playwright. It must "
+            "import lazily, inside the browser-driving functions: this file "
+            "is in tests/unit_tests.list and runs in CI's build-and-unit "
+            "job, which has no playwright installed")
+    return probe
+
+
 if __name__ == "__main__":
     try:
-        import timeline_window_probe as probe
+        probe = import_probe_stdlib_only()
     except ImportError as e:
-        # The module imports Playwright at top level. On a host without it the
-        # right answer is a loud skip-as-failure, never a silent pass: a test
-        # that cannot import what it tests has not tested anything.
+        # A test that cannot import what it tests has not tested anything:
+        # loud failure, never a silent pass or a skip. After the lazy-import
+        # fix this can no longer be a MISSING playwright -- it would be a
+        # genuinely broken module.
         print("SKIP-AS-FAIL: cannot import timeline_window_probe: %s" % e)
         sys.exit(1)
+    except RuntimeError as e:
+        print("FAIL: %s" % e)
+        sys.exit(1)
+    print("  PASS: importing the probe needs only the stdlib "
+          "(playwright not in sys.modules)")
     sys.exit(main())
