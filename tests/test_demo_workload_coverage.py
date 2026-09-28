@@ -10,14 +10,29 @@ shape the ORIGINAL two-wait-class workload produced before issue #214 --
 this is the demonstrated "red": these are exactly the inputs that made
 Waterfall/Scatter empty on the 2026-09-28 Mac walk this issue is about).
 
+This file is in tests/unit_tests.list, so it runs in CI's `build-and-unit`
+job, which has NO Playwright installed -- unlike this Mac (`make check`) or
+the gate box (`make box-check`), both of which have it, and so cannot catch
+a module-scope Playwright import here (issue #205's own finding, applied
+here as a standing precaution: `demo_workload_coverage.py` imports
+`server_harness` lazily, inside `main()`, never at module scope, and
+`ui_live_smoke_lib` only needs numpy/PIL). `_PLAYWRIGHT_ENTERED_ON_IMPORT`
+below is sampled immediately before/after those two imports, with nothing
+in between, so a future change that pulls Playwright in at module scope
+fails loudly here -- on the machines that already have it, which are
+exactly the ones a CI-only failure would otherwise hide from.
+
 Usage: python3 tests/test_demo_workload_coverage.py
 """
 import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+_playwright_before_import = "playwright" in sys.modules
 import demo_workload_coverage as cov
 import ui_live_smoke_lib as ui_lib
+_PLAYWRIGHT_ENTERED_ON_IMPORT = (
+    not _playwright_before_import and "playwright" in sys.modules)
 
 tests_run = 0
 tests_passed = 0
@@ -33,6 +48,23 @@ def check(cond, msg):
     else:
         tests_failed += 1
         print(f"  FAIL: {msg}")
+
+
+# ── import must need only the stdlib (+ numpy/PIL via ui_live_smoke_lib) ──
+
+def test_import_needs_no_playwright():
+    """RED (issue #205's own finding, on a sibling file): a module-scope
+    Playwright import here would be invisible to `make check` and
+    `make box-check` (both have Playwright) and only fail CI's
+    `build-and-unit` job -- exactly the gap that cost #220 a red CI round.
+    This can only ever pass on a machine that HAS Playwright (this Mac, the
+    gate box); on a Playwright-free machine there is nothing to catch, which
+    is why it is not the only line of defense -- verified separately in a
+    real Playwright-free venv (tests/results/, this branch's report)."""
+    check(not _PLAYWRIGHT_ENTERED_ON_IMPORT,
+          "importing demo_workload_coverage/ui_live_smoke_lib pulled "
+          "playwright into sys.modules -- it must stay out of any "
+          "module-scope import reachable from tests/unit_tests.list")
 
 
 # ── TAB_ORDER agrees with the live-smoke driver's own tab list ────────────
