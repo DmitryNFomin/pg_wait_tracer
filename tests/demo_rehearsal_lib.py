@@ -44,10 +44,36 @@ WATERFALL_QUERY_THRESHOLD_S = 10.0
 # = DB Time" holds BY CONSTRUCTION on the raw (per-event) compute path
 # (Off-CPU* is defined as the residual that makes it hold exactly). 1% of
 # db_time_ms is the tolerance: generous enough to absorb floating-point/
-# ms-rounding noise, but far tighter than any real missing component would
-# produce (a genuinely dropped wait class is a double-digit-percent gap,
-# not a rounding error).
+# ms-rounding noise.
+#
+# CORRECTED (owner finding, 2026-09-27): this identity is NOT a general
+# dropped-class detector. src/compute.c computes Off-CPU* as the residual
+# `max(0, DB_Time - CPU* - Sigma waits)` -- so if a wait class's time is
+# never attributed to its own class row, that time is silently absorbed
+# into Off-CPU* and the sum still closes to within this tolerance. A
+# dropped wait class is INVISIBLE to this check alone (see
+# time_model_over_attribution_ok / time_model_offcpu_cap_ok below for the
+# checks that actually have power against that bug class). This identity
+# only catches OVER-attribution large enough to drive the residual
+# negative past the clamp, or a genuinely corrupted rows array.
 TIME_MODEL_TOLERANCE_PCT = 1.0
+
+# ── Time-model conservation: nonzero-DB-Time floor ───────────────────────
+#
+# Owner/reviewer finding (2026-09-27): the conservation check used to
+# special-case db_time_ms <= 0 as a trivial PASS ("nothing to conserve").
+# In THIS harness that is a void reading, not a clean one -- demo_rehearsal
+# runs under continuous pgbench + lock/sleep load for the entire capture
+# window, so a recent trailing window (or the whole capture) reporting
+# ~zero DB Time means the daemon caught no real activity in that window:
+# exactly the "capture with zero samples" failure mode this gate exists to
+# catch, not a legitimate idle reading. MIN_DB_TIME_MS is a literal-but-
+# tiny floor (not just db_time_ms > 0.0) so a value that is technically
+# positive only by floating-point noise cannot slip past as "nonzero"
+# either. This floor is checked BEFORE any ratio/equality below -- a gate
+# that cannot see real activity must refuse, never approve on a 0 ~= 0
+# reading.
+MIN_DB_TIME_MS = 1.0
 
 # ── Time-model conservation: WHICH compute path, and why it matters ──────
 #
@@ -213,12 +239,19 @@ def time_model_conservation(rows, db_time_ms,
     within tolerance_pct percent (docs/ROADMAP_AND_STATUS.md's "identity
     holds by construction" -- indent 0 is the DB Time row itself, indent 2
     rows are per-event BREAKDOWNS of their indent-1 parent and would
-    double-count if included).
+    double-count if included). db_time_ms must ALSO clear the absolute
+    MIN_DB_TIME_MS floor first -- an empty/near-empty window is void
+    evidence in this harness (see MIN_DB_TIME_MS's comment), never a
+    trivial pass; that floor is checked BEFORE the ratio below so a
+    0 ~= 0 reading cannot satisfy this function by construction.
 
     Returns (ok, detail) -- detail always states the actual numbers, never
     just true/false, since a failure here IS the finding."""
-    if db_time_ms <= 0:
-        return True, "db_time_ms <= 0 (empty/idle window) -- nothing to conserve"
+    if db_time_ms < MIN_DB_TIME_MS:
+        return False, (
+            f"db_time_ms={db_time_ms:.4f} is below the {MIN_DB_TIME_MS}ms "
+            "nonzero-DB-Time floor -- void reading (no real activity "
+            "captured in this window), not a passing conservation check")
     class_ms = sum(r.get("ms", 0.0) for r in rows if r.get("indent") == 1)
     gap_ms = db_time_ms - class_ms
     gap_pct = abs(gap_ms) / db_time_ms * 100.0
@@ -228,46 +261,424 @@ def time_model_conservation(rows, db_time_ms,
     return ok, detail
 
 
-def build_time_model_check(recent_ok, recent_detail, recent_used_raw_path,
-                           full_ok, full_detail, full_used_raw_path):
-    """Combines demo_rehearsal.py's two time_model queries (see
-    RECENT_WINDOW_S's comment above for why there are two). recent_* is
-    the short trailing window that forces the raw/exact compute path --
-    the ONLY one with real detection power, and the only one that gates
-    `ok`. full_* is the whole-capture-window query, kept purely as a
-    labeled, non-gating diagnostic (it is answered by the summary path on
-    every real run and cannot fail for the bug class this check exists to
-    catch).
+# ── Time-model over-attribution self-checks ──────────────────────────────
+#
+# Owner finding (2026-09-27), the reason this whole bypass suite exists:
+# time_model_conservation's identity CANNOT detect an entire wait class
+# being dropped -- src/compute.c defines Off-CPU* as the residual
+# `max(0, DB_Time - CPU* - Sigma waits)` (compute.c ~line 564), so time
+# that a bug fails to attribute to its own class flows straight into
+# Off-CPU* and the identity still closes inside 1%.
+#
+# CORRECTED 2026-09-27 (owner, second round): `wait_gap_cpu_ms` as a
+# fraction of DB Time is NOT an over-attribution detector, and an earlier
+# version of this file wrongly made it one at <=0.1%. The BPF measures
+# exact on-CPU between the wait-start and wait-end writes, which spans the
+# syscall's own on-CPU work, so an IO wait is LEGITIMATELY CPU-bearing -- a
+# pwrite to page cache is nearly all on-CPU under a wait label.
+# src/compute.h's "should be ~=0, a sleeping task burns no CPU" is a false
+# premise for IO classes. Two live self-test runs measured 0.376-0.392%
+# (~4k IO waits in ~40s carrying ~257ms, ~60us/event -- inside the
+# syscall-overhead envelope), and that is EXPECTED on a correct
+# implementation, not a defect. The a-priori bound the mechanism actually
+# supports (Sigma IO-class-wait-ms + N_wait * ~10us) is honest but far too
+# loose to gate on (~1.2s for that run); baselining the DB-Time fraction
+# instead would be illegitimate -- it is a property of the workload's IO
+# mix, not of the implementation, so it cannot separate a defect from a
+# change of mix. DROPPED. The real over-attribution signature -- a
+# Timeout:PgSleep or Lock:relation event (pure sleeps) carrying cpu_ns on
+# the order of a millisecond, a stale wait label or an unclosed
+# on_cpu_ts -- needs PER-CLASS wait CPU, which is not on the wire in the
+# time_model response today (only the aggregate `wait_gap_cpu_ms` across
+# ALL wait classes is). Not implemented here -- see this task's report for
+# the gap; do not invent a proxy from the aggregate.
+#
+# `cpu_clamped_ms` is kept: nonzero means the accounting already found an
+# inconsistency (CPU exceeded a gap's own wall time, or the Off-CPU*
+# residual went negative and got clamped back to 0) and papered over it.
+# Its scope is narrower than its name suggests: src/compute.c's wait
+# branch (~line 810) never clamps `cpu_ns > dur` -- only the CPU-class
+# branch does -- so `cpu_clamped_ms == 0` vouches for CPU-class gaps only,
+# NEVER for wait events. 0.1% of db_time_ms is far tighter than the 1%
+# identity tolerance above: it is a C-computed self-check meant to be
+# exactly (or almost exactly) zero on a healthy trace, not a rounding-
+# noise budget.
+OVER_ATTRIBUTION_TOLERANCE_PCT = 0.1
 
-    recent_used_raw_path/full_used_raw_path: whether demo_rehearsal.py
-    actually OBSERVED the raw path in that response (the presence of the
-    `categories` key, which only the raw/non-summary handler emits) --
-    not merely assumed from the window size. If the recent window did NOT
-    get the raw path, the check fails loudly instead of silently trusting
-    a result that may be just as vacuous as the whole-window one."""
-    ok = bool(recent_ok and recent_used_raw_path)
+
+def cpu_clamped_ok(cpu_clamped_ms, db_time_ms,
+                   tolerance_pct=OVER_ATTRIBUTION_TOLERANCE_PCT):
+    """cpu_clamped_ms must be within tolerance_pct percent of db_time_ms.
+    Caller must have already cleared the MIN_DB_TIME_MS floor -- db_time_ms
+    <=0 here raises ZeroDivisionError deliberately (never silently
+    trusted). See OVER_ATTRIBUTION_TOLERANCE_PCT's comment for this
+    check's narrow scope (CPU-class gaps only, never wait events)."""
+    clamped_pct = abs(cpu_clamped_ms) / db_time_ms * 100.0
+    ok = clamped_pct <= tolerance_pct
+    detail = (f"cpu_clamped_ms={cpu_clamped_ms:.2f} ({clamped_pct:.3f}%), "
+              f"tolerance {tolerance_pct}% (CPU-class gaps only -- see "
+              "this check's own comment for why it cannot vouch for "
+              "wait-event over-attribution)")
+    return ok, detail
+
+
+# Off-CPU* ("CPU (waiting for a core)" -- issue #190's recolour) is ITSELF
+# a residual: a dropped wait class's time flows INTO it, not out of the
+# identity above, so an anomalously large Off-CPU* is the closest thing to
+# a direct under-attribution detector available without new instrumentation
+# (owner note, 2026-09-27): on a box where pgbench clients <= physical
+# cores, the measured run-queue (waiting-for-a-core) share was 4.92
+# percentage points of DB Time on one machine that day. 10% is double
+# that -- one machine's worth of headroom, generous enough not to fire on
+# ordinary run-queue contention, still far under the double-digit-percent
+# size a genuinely dropped wait class would produce (this file's own
+# TIME_MODEL_TOLERANCE_PCT comment). This is a FIRST bound, not a
+# permanent one -- replace with a comparison against the AAS "CPU (waiting
+# for a core)" band integral once that plumbing exists.
+OFFCPU_CAP_PCT = 10.0
+
+
+def time_model_offcpu_cap_ok(offcpu_ms, db_time_ms, has_measured_cpu,
+                             cap_pct=OFFCPU_CAP_PCT):
+    """Only meaningful when has_measured_cpu (v3 exact-CPU data) -- the
+    legacy/sampled tier never computes a real Off-CPU* value (compute.h:
+    "there is NO Off-CPU* row... the quantity is unavailable, not zero"),
+    so this check is vacuously ok there -- REPORTED as such, not silently
+    skipped, so a reader can tell the difference between "checked and
+    clean" and "not applicable this tier"."""
+    if not has_measured_cpu:
+        return True, "has_measured_cpu=False (legacy/sampled tier -- no Off-CPU* signal to check)"
+    pct = (offcpu_ms / db_time_ms * 100.0) if db_time_ms > 0 else 0.0
+    ok = pct <= cap_pct
+    detail = f"offcpu_ms={offcpu_ms:.2f} ({pct:.2f}% of db_time_ms), cap {cap_pct}%"
+    return ok, detail
+
+
+def evaluate_time_model_window(rows, db_time_ms, cpu_clamped_ms,
+                               offcpu_ms, has_measured_cpu, used_raw_path,
+                               aas=None, check_workload_signature=False,
+                               check_aas_floor=False):
+    """The full per-window gate for one time_model response: the identity
+    conservation check (with its own nonzero-DB-Time floor), the raw/exact
+    compute path requirement, the cpu_clamped_ms self-check (CPU-class
+    gaps only -- see its own comment), the Off-CPU* cap, and (when
+    requested) the criteria-doc #2 floors -- the workload's own signature
+    events present with real time, and a non-vacuous AAS reading. ALL
+    requested checks must hold, checked in that order (raw floors before
+    any ratio/equality, per CLAUDE.md/issue #157's bypass-suite
+    requirement). Used both for the repeated in-capture samples (gating --
+    see conservation_sample_interval_s, which also requests the two extra
+    floors) and for the one-off whole-capture-window diagnostic (never
+    gating -- see RECENT_WINDOW_S's comment; the caller leaves
+    check_workload_signature/check_aas_floor False there since a 35-45 min
+    whole-window AAS average is not "the 60s recent window" the criteria
+    doc's floor is stated against).
+
+    NOTE (owner correction, 2026-09-27): this used to also gate on
+    `wait_gap_cpu_ms <= 0.1% of db_time_ms` -- dropped entirely, see
+    OVER_ATTRIBUTION_TOLERANCE_PCT's comment for why that was not a valid
+    over-attribution detector at all (IO waits are legitimately CPU-
+    bearing). The real per-class signature this check should use instead
+    is not on the wire and is NOT implemented here (see this task's
+    report)."""
+    cons_ok, cons_detail = time_model_conservation(rows, db_time_ms)
+    if db_time_ms >= MIN_DB_TIME_MS:
+        clamped_ok, clamped_detail = cpu_clamped_ok(cpu_clamped_ms, db_time_ms)
+        off_ok, off_detail = time_model_offcpu_cap_ok(
+            offcpu_ms, db_time_ms, has_measured_cpu)
+    else:
+        clamped_ok, clamped_detail = False, (
+            "db_time_ms below the nonzero-DB-Time floor -- cpu_clamped_ms "
+            "check skipped, not vacuously ok")
+        off_ok, off_detail = False, (
+            "db_time_ms below the nonzero-DB-Time floor -- Off-CPU* cap "
+            "check skipped, not vacuously ok")
+    ok = bool(cons_ok and used_raw_path and clamped_ok and off_ok)
+    result = {
+        "ok": ok,
+        "compute_path": "raw" if used_raw_path else "summary",
+        "conservation": {"ok": cons_ok, "detail": cons_detail},
+        "cpu_clamped": {"ok": clamped_ok, "detail": clamped_detail},
+        "offcpu_cap": {"ok": off_ok, "detail": off_detail},
+    }
+    if check_workload_signature:
+        sig_ok, sig_detail = workload_signature_present_ok(rows)
+        result["ok"] = bool(result["ok"] and sig_ok)
+        result["workload_signature"] = {"ok": sig_ok, "detail": sig_detail}
+    if check_aas_floor:
+        aas_ok, aas_detail = aas_floor_ok(aas)
+        result["ok"] = bool(result["ok"] and aas_ok)
+        result["aas_floor"] = {"ok": aas_ok, "detail": aas_detail}
+    return result
+
+
+# ── Conservation sampled THROUGHOUT the capture, not just at the end ─────
+#
+# Owner finding (2026-09-27): the checks above used to run against a single
+# trailing window at the very end of a 35-minute run -- n=1. "The audience
+# watches the whole run, not the last minute of it": a regression visible
+# for only part of the window could sit entirely outside that one sample.
+CONSERVATION_TARGET_INTERVAL_S = 300.0  # 5 minutes, a real 30-45 min run
+
+
+def conservation_sample_interval_s(duration_s,
+                                   target_interval_s=CONSERVATION_TARGET_INTERVAL_S,
+                                   min_samples=3):
+    """How often (seconds) to re-run the time-model gate through the whole
+    capture. target_interval_s (default 300 = 5 min) is what a REAL run
+    gets; scaled down for a short self-test (DURATION_MIN=3) so it still
+    exercises >= min_samples -- the same "never silently drop coverage"
+    rule schedule_passes/plan_passes already follow, extended to this
+    check's own coverage of time, not just of tabs."""
+    if duration_s <= 0:
+        raise ValueError(
+            f"conservation_sample_interval_s: duration_s={duration_s} must be positive")
+    return max(min(target_interval_s, duration_s / min_samples), 1.0)
+
+
+def build_demo_conservation_check(samples, full_window_result):
+    """samples: list of {"offset_s":..., **evaluate_time_model_window(...)}
+    dicts, one per in-capture sample. EVERY sample must pass -- not an
+    average, not just the last one (see CONSERVATION_TARGET_INTERVAL_S's
+    comment). An empty samples list is void (no evidence was ever
+    gathered through the run) and is NEVER vacuously ok, regardless of
+    what full_window_result says. full_window_result is the whole-capture-
+    window query, kept purely as a labeled, non-gating diagnostic (see
+    RECENT_WINDOW_S / evaluate_time_model_window's docstring)."""
+    ok = len(samples) > 0 and all(s.get("ok") for s in samples)
+    failed_offsets = [round(s.get("offset_s", -1), 1) for s in samples
+                      if not s.get("ok")]
     return {
         "ok": ok,
-        "recent_window": {
-            "ok": recent_ok, "detail": recent_detail,
-            "compute_path": "raw" if recent_used_raw_path else "summary",
-            "window_s": RECENT_WINDOW_S,
-        },
-        "full_window": {
-            "ok": full_ok, "detail": full_detail,
-            "compute_path": "raw" if full_used_raw_path else "summary",
-            "note": ("informational only -- does not gate `ok`; the "
-                     "summary compute path (src/compute.c "
-                     "tm_summary_visitor) adds the same value to "
-                     "db_time_ns and its class row in the same "
-                     "statement, so this assertion holds by construction "
-                     "and cannot detect a real conservation bug"),
-        },
+        "num_samples": len(samples),
+        "failed_offsets_s": failed_offsets,
+        "samples": samples,
+        "full_window": dict(
+            full_window_result,
+            note=("informational only -- does not gate `ok`; the whole-"
+                  "capture window is always long enough to route to the "
+                  "summary compute path (src/compute.c tm_summary_visitor), "
+                  "which cannot detect under- or over-attribution -- see "
+                  "RECENT_WINDOW_S")),
     }
 
 
 def waterfall_latency_ok(elapsed_s, threshold_s=WATERFALL_QUERY_THRESHOLD_S):
     return elapsed_s is not None and elapsed_s <= threshold_s
+
+
+# ── docs/DEMO_REHEARSAL_CRITERIA.md floors ────────────────────────────────
+#
+# Owner-pre-registered criteria (2026-09-27, agent/rehearsal-criteria commit
+# 7beeb28), section 2: two more raw floors, checked before any ratio, that
+# this harness did not measure at all before this change.
+
+# tests/live_loop_workload.py's holder/waiter/sleeper loop creates BOTH of
+# these events, by construction, on every iteration -- their absence from a
+# window means this window captured something other than the intended
+# workload (a dead workload process, a misrouted window, a misclassified
+# event), not a legitimately quiet window. Full "Class:Event" names, exactly
+# as src/wait_event.c pgwt_event_full_name emits them into a time_model
+# response's sub-event (indent==2) rows.
+REQUIRED_WORKLOAD_EVENTS = ("Lock:relation", "Timeout:PgSleep")
+
+
+def workload_signature_present_ok(rows, required=REQUIRED_WORKLOAD_EVENTS):
+    """Both of `required` must appear in `rows` with ms > 0. A time_model
+    response's sub-event rows only carry the top 5 per class (src/compute.c)
+    -- if the workload is running as intended this pair dominates its own
+    class, so this is a floor on "is the intended workload even present",
+    not a coverage guarantee for every possible event."""
+    seen_ms = {name: 0.0 for name in required}
+    for r in rows:
+        name = r.get("name")
+        if name in seen_ms:
+            seen_ms[name] = max(seen_ms[name], r.get("ms", 0.0) or 0.0)
+    missing = [name for name in required if seen_ms[name] <= 0]
+    ok = len(missing) == 0
+    detail = ", ".join(f"{name}={seen_ms[name]:.1f}ms" for name in required)
+    if missing:
+        detail += f" -- MISSING/zero: {', '.join(missing)}"
+    return ok, detail
+
+
+# PROVISIONAL (criteria doc §2): its only job is to be non-vacuous -- reject
+# an AAS reading of ~0 the same way MIN_DB_TIME_MS rejects a ~0 db_time_ms.
+# Replaced by half of the first clean rehearsal's own measured AAS, recorded
+# in docs/DEMO_REHEARSAL_CRITERIA.md by a commit that says so, before the
+# sequence is claimed -- never silently tightened or loosened here.
+AAS_FLOOR_PROVISIONAL = 0.5
+
+
+def aas_floor_ok(aas, floor=AAS_FLOOR_PROVISIONAL):
+    ok = isinstance(aas, (int, float)) and not isinstance(aas, bool) and aas >= floor
+    detail = f"aas={aas!r} (floor {floor})"
+    return ok, detail
+
+
+# ── Cross-tab agreement and freshness (criteria doc §5) ──────────────────
+#
+# Two endpoints answering queries for the SAME window must report the same
+# DB Time within TIME_MODEL_TOLERANCE_PCT -- a disagreeing denominator
+# between tabs is the product-facing version of a bookkeeping error. Uses
+# the SAME 1% bound as the identity check (docs/DEMO_REHEARSAL_CRITERIA.md
+# section 5 pins it to TIME_MODEL_TOLERANCE_PCT explicitly, not a separate
+# number).
+def cross_tab_db_time_agreement_ok(db_time_a, db_time_b,
+                                   tolerance_pct=TIME_MODEL_TOLERANCE_PCT):
+    if db_time_a is None or db_time_b is None:
+        return False, f"missing db_time_ms (a={db_time_a!r}, b={db_time_b!r})"
+    if db_time_a < MIN_DB_TIME_MS or db_time_b < MIN_DB_TIME_MS:
+        return False, (f"one side is below the nonzero-DB-Time floor "
+                       f"(a={db_time_a:.2f}ms, b={db_time_b:.2f}ms)")
+    gap_pct = abs(db_time_a - db_time_b) / max(db_time_a, db_time_b) * 100.0
+    ok = gap_pct <= tolerance_pct
+    detail = (f"a={db_time_a:.1f}ms b={db_time_b:.1f}ms gap={gap_pct:.2f}% "
+              f"(tolerance {tolerance_pct}%)")
+    return ok, detail
+
+
+# 5s: web/static's own live-tick cadence (app.js startAutoRefresh, the same
+# reference RECENT_WINDOW_S's comment above uses). "Within 2 ticks of wall
+# clock" (criteria doc §5) is 10s.
+FRESHNESS_TICK_S = 5.0
+FRESHNESS_MAX_TICKS = 2
+
+
+def freshness_ok(now_ns, to_ns, tick_s=FRESHNESS_TICK_S,
+                 max_ticks=FRESHNESS_MAX_TICKS):
+    """now_ns/to_ns both come from the SAME pgwt-server `info` response
+    (src/server.c handle_info emits both the daemon's latest captured event
+    time and the server's own wall clock together) -- no cross-machine
+    clock-skew risk from comparing a value stamped on one host against a
+    clock read on another. A capture that stalled (daemon alive but no
+    longer receiving events) would have to_ns stop advancing while now_ns
+    keeps moving, growing this gap without bound."""
+    if now_ns is None or to_ns is None:
+        return False, f"now_ns/to_ns missing from the info response (now_ns={now_ns!r}, to_ns={to_ns!r})"
+    age_s = (now_ns - to_ns) / 1e9
+    bound_s = tick_s * max_ticks
+    ok = age_s <= bound_s
+    detail = f"age={age_s:.1f}s (bound {bound_s:.0f}s = {max_ticks} ticks x {tick_s:.0f}s)"
+    return ok, detail
+
+
+# ── Blink-sweep offset coverage (owner finding, 2026-09-28) ──────────────
+#
+# A live rehearsal run (run.id 1790574871, 19a95f7) showed the offset
+# sweep's samples landing FAR past their targets when a tab's mount was
+# late -- e.g. the 200ms-target first sample actually captured at 669,
+# 985, 2416, even 2446ms. When that happens the sweep silently SKIPS the
+# early window entirely, which is exactly where scatter's and transitions'
+# real transients live (0.1305 and 0.0072-0.0172 respectively, both at the
+# 200->500ms pair, invisible to a sweep whose first sample never got near
+# 200ms). This is reporting only (owner instruction, 2026-09-28: "report
+# the drift; do not try to fix the scheduling in this branch") -- it never
+# gates `ok`. Un-caught coverage loss here would be the NEXT version of
+# the same blindness this whole bypass suite exists to close: a gate that
+# silently never looks at the interval where the defect lives.
+def sweep_offset_drift(tick_record):
+    """tick_record: one ui_live_smoke_lib.build_sweep_tick_record() dict
+    (target_offsets_ms, achieved_offsets_ms, same length/order -- already
+    present in every tab result's blink_sweep.ticks, no new instrumentation
+    needed). Returns a dict with per-offset drift_ms (achieved - target)
+    and the first (200ms target) offset's own drift, since that is where
+    this finding's transients live."""
+    targets = tick_record.get("target_offsets_ms") or []
+    achieved = tick_record.get("achieved_offsets_ms") or []
+    n = min(len(targets), len(achieved))
+    drift_ms = [achieved[i] - targets[i] for i in range(n)]
+    first_drift_ms = drift_ms[0] if drift_ms else None
+    first_target_ms = targets[0] if targets else None
+    first_achieved_ms = achieved[0] if achieved else None
+    return {
+        "target_offsets_ms": list(targets),
+        "achieved_offsets_ms": list(achieved),
+        "drift_ms": drift_ms,
+        "first_target_ms": first_target_ms,
+        "first_achieved_ms": first_achieved_ms,
+        "first_drift_ms": first_drift_ms,
+    }
+
+
+def summarize_sweep_offset_coverage(tab_id, pass_name, blink_sweep_ticks):
+    """blink_sweep_ticks: a tab result's blink_sweep.ticks list (one
+    build_sweep_tick_record() dict per attempted tick). Returns
+    {"tab", "pass", "ticks": [sweep_offset_drift(...) per tick]} -- a
+    reporting-only summary, joined at the call site into
+    summary.json/print output so a human never has to hand-diff
+    target_offsets_ms against achieved_offsets_ms across every tick of
+    every tab to notice a coverage gap."""
+    return {
+        "tab": tab_id,
+        "pass": pass_name,
+        "ticks": [sweep_offset_drift(t) for t in (blink_sweep_ticks or [])],
+    }
+
+
+# ── Daemon integrity (criteria doc §6) ────────────────────────────────────
+#
+# "The daemon was alive" (daemon_log_clean, _assert_daemon_alive) is not
+# "the daemon captured everything". These three counters are already in
+# the daemon's own metrics blob (src/control.c, the "metrics" control
+# command), reachable through pgwt-server's control proxy
+# (`{"cmd":"control","request":{"cmd":"metrics"}}`, src/server.c
+# handle_control) -- the SAME mechanism web/static/lib/control.js's
+# controlMetrics() already uses from the UI, so no new src/ instrumentation
+# is needed here.
+DAEMON_INTEGRITY_COUNTERS = ("ringbuf_drops_total", "state_map_full_total",
+                             "seen_query_ids_full_total")
+
+
+def daemon_integrity_ok(metrics):
+    """All three of DAEMON_INTEGRITY_COUNTERS must be exactly 0.
+    ringbuf_drops_total is the full tier's BPF-side event_ringbuf drop
+    count -- trace events are what DB Time is built from, so a nonzero
+    value here means data conservation was already violated upstream of
+    every other check in this file. state_map_full_total /
+    seen_query_ids_full_total are BPF/userspace insert-failure counters
+    (a backend recording nothing, or losing query attribution).
+
+    A missing or non-numeric counter FAILS (a gate that cannot see the
+    count must refuse), same as capture_has_events_ok's own contract.
+
+    KNOWN BLIND SPOT, stated rather than implied (criteria doc §6): a lost
+    LIFECYCLE event is silent -- lifecycle_rb reserve failures increment no
+    counter, so the symptom is a backend simply absent from the capture,
+    never a nonzero counter here. A clean result means "no TRACE events
+    were dropped", NEVER "nothing was missed" -- closing that blind spot
+    needs src/ work, out of scope for this branch."""
+    if not isinstance(metrics, dict):
+        return False, f"metrics response is not a dict: {metrics!r}"
+    bad = []
+    parts = []
+    for name in DAEMON_INTEGRITY_COUNTERS:
+        v = metrics.get(name)
+        parts.append(f"{name}={v!r}")
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or v != 0:
+            bad.append(f"{name}={v!r}")
+    ok = len(bad) == 0
+    detail = ", ".join(parts)
+    if bad:
+        detail += f" -- NONZERO or missing: {', '.join(bad)}"
+    return ok, detail
+
+
+def capture_has_events_ok(num_events):
+    """Raw floor (issue #157 bypass-suite item): a capture that recorded
+    ZERO events is void -- every downstream check (conservation, the
+    walk's own per-tab renders) could plausibly report clean-looking
+    values against an empty/near-empty trace, which is exactly "the
+    product is broken but the checks vacuously pass". num_events comes
+    straight off pgwt-server's own `info` response (src/server.c
+    handle_info's `num_events`, never inferred). Anything that is not a
+    real positive count (missing, None, non-numeric, zero, negative) fails
+    -- a gate that cannot see the count must refuse, not assume it is
+    fine."""
+    ok = isinstance(num_events, (int, float)) and not isinstance(num_events, bool) \
+        and num_events > 0
+    detail = f"num_events={num_events!r}"
+    return ok, detail
 
 
 # Daemon log lines that mean "this run is broken", scanned literally (not a
@@ -311,31 +722,54 @@ def daemon_log_clean(log_text):
     return (len(error_lines) == 0, error_lines, degraded_warnings)
 
 
-def build_demo_summary(pass_results, extra_checks):
+def build_demo_summary(pass_results, extra_checks, expected_tabs_per_pass=None):
     """pass_results: list of {"pass": name, "tabs": {tab_id: tab_result}}
     (tab_result is exactly ui_live_smoke_lib.build_tab_result's output).
     extra_checks: dict of check_name -> {"ok": bool, ...}.
+    expected_tabs_per_pass: when given (demo_rehearsal.py always passes
+    len(ui_live_smoke_lib.TABS) -- criteria doc §2 "all 11 tabs reached"),
+    every pass must have reached EXACTLY that many tabs, not merely "more
+    than zero".
 
     Overall `ok` uses the RAW `ok` of every tab result in every pass --
     deliberately ignoring ui_live_smoke_lib's known_failing/xpass
     machinery: issue #157 is explicit that #100/#101 get NO pass here,
     this is the instrument that decides whether a real viewer sees the
     bug, not a gating-CI exemption list. Returns the full summary dict
-    written to summary.json."""
+    written to summary.json.
+
+    Raw floor (bypass-suite item): total_tabs (the sum of tabs actually
+    walked across every pass) must be > 0. Without this, a walk where the
+    tab loop never ran at all (empty `tabs` dict per pass -- "no tab ever
+    loaded") produces zero failed entries by construction (there is
+    nothing to iterate and find failing) and would otherwise read as a
+    vacuous PASS."""
     failed = []
+    total_tabs = 0
+    incomplete_passes = []
     for p in pass_results:
+        n = len(p["tabs"])
+        total_tabs += n
+        if expected_tabs_per_pass is not None and n != expected_tabs_per_pass:
+            incomplete_passes.append(
+                f"{p['pass']} ({n}/{expected_tabs_per_pass} tabs reached)")
         for tab_id, result in p["tabs"].items():
             if not result.get("ok"):
                 failed.append(f"{p['pass']}/{tab_id}")
     for name, check in extra_checks.items():
         if not check.get("ok"):
             failed.append(name)
-    ok = len(failed) == 0 and len(pass_results) > 0 and len(extra_checks) > 0
+    for entry in incomplete_passes:
+        failed.append(f"incomplete_pass:{entry}")
+    ok = (len(failed) == 0 and len(pass_results) > 0
+          and len(extra_checks) > 0 and total_tabs > 0
+          and len(incomplete_passes) == 0)
     return {
         "ok": ok,
         "passes": {p["pass"]: p["tabs"] for p in pass_results},
         "checks": extra_checks,
         "failed": failed,
+        "total_tabs_walked": total_tabs,
     }
 
 

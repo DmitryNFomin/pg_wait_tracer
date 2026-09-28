@@ -2,9 +2,10 @@
 """test_demo_rehearsal_lib.py -- unit tests for tests/demo_rehearsal_lib.py
 (issue #157). Pure Python, no browser, no network, no subprocess -- can run
 on the Mac (python3 tests/test_demo_rehearsal_lib.py); wired into
-tests/unit_tests.list the same way tests/test_ui_live_smoke_lib.py is (runs
-in the C-unit-suite tier, CI/nightly/box-check, not scripts/check.sh -- see
-that file's own header for why).
+tests/unit_tests.list (CI/nightly/box-check) AND, since 2026-09-28
+(owner finding, run.id 1790574871), scripts/check.sh directly -- a
+regression in the rehearsal's own gating logic must fail `make check`, not
+wait for an actual 30-45 minute rehearsal run to surface it.
 
 Usage: python3 tests/test_demo_rehearsal_lib.py
 """
@@ -13,6 +14,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import demo_rehearsal_lib as lib
+import ui_live_smoke_lib as ui_lib
 
 tests_run = 0
 tests_passed = 0
@@ -174,57 +176,519 @@ def test_conservation_ignores_indent_0_and_2():
     check(ok, f"indent 0/2 rows excluded from the sum ({detail})")
 
 
-def test_conservation_empty_window_ok():
+def test_conservation_zero_db_time_fails():
+    # BYPASS-SUITE CASE (issue #157 rehearsal-gate audit, owner finding
+    # 2026-09-27): this used to be test_conservation_empty_window_ok,
+    # which asserted db_time_ms<=0 was a trivial PASS ("nothing to
+    # conserve"). In THIS harness (continuous load for the whole capture)
+    # a zero-DB-Time window is exactly "a capture with zero samples" --
+    # void evidence, never a clean pass. Demonstrated red against the
+    # pre-fix lib: it returned (True, "...nothing to conserve").
     ok, detail = lib.time_model_conservation([], 0.0)
-    check(ok, f"an empty/idle window (db_time_ms<=0) trivially conserves ({detail})")
+    check(not ok, f"a zero-DB-Time window must FAIL, not vacuously pass ({detail})")
+    check("floor" in detail, f"detail names the floor that tripped (got: {detail})")
 
 
-# ── build_time_model_check ────────────────────────────────────────────────
-
-def test_time_model_check_recent_raw_path_ok():
-    result = lib.build_time_model_check(
-        recent_ok=True, recent_detail="recent detail", recent_used_raw_path=True,
-        full_ok=True, full_detail="full detail", full_used_raw_path=False)
-    check(result["ok"], "recent window conserves AND used the raw path -> ok")
-    check(result["recent_window"]["compute_path"] == "raw",
-          "recent_window records compute_path='raw'")
-    check(result["full_window"]["compute_path"] == "summary",
-          "full_window records compute_path='summary' (the expected/normal case)")
-    check("does not gate" in result["full_window"]["note"],
-          "full_window's note says it does not gate `ok`")
+def test_conservation_floating_noise_below_floor_fails():
+    # A db_time_ms that is technically > 0.0 only by floating-point noise
+    # (e.g. accumulated rounding) must not slip past a literal ">0" check.
+    ok, detail = lib.time_model_conservation([], 1e-9)
+    check(not ok, f"a near-zero db_time_ms (float noise) must still fail ({detail})")
 
 
-def test_time_model_check_full_window_failure_does_not_gate():
-    # The whole point of the fix: a full-window (summary-path) "failure"
-    # must NOT fail the overall check -- it is structurally incapable of
-    # being a real signal, per the note above.
-    result = lib.build_time_model_check(
-        recent_ok=True, recent_detail="ok", recent_used_raw_path=True,
-        full_ok=False, full_detail="full-window mismatch", full_used_raw_path=False)
-    check(result["ok"],
-          "a full-window conservation 'failure' alone does not fail the check")
+def test_conservation_just_above_floor_is_evaluated_normally():
+    rows = [{"name": "CPU (running)", "ms": 2.0, "indent": 1}]
+    ok, detail = lib.time_model_conservation(rows, 2.0)
+    check(ok, f"db_time_ms clearing the floor is evaluated by the normal ratio ({detail})")
 
 
-def test_time_model_check_recent_conservation_failure_fails():
-    result = lib.build_time_model_check(
-        recent_ok=False, recent_detail="30% gap", recent_used_raw_path=True,
-        full_ok=True, full_detail="ok", full_used_raw_path=False)
+# ── cpu_clamped_ok / time_model_offcpu_cap_ok ─────────────────────────────
+#
+# time_model_over_attribution_ok (wait_gap_cpu_ms as a fraction of DB Time)
+# was REMOVED (owner correction, 2026-09-27): IO waits are legitimately
+# CPU-bearing (the BPF measures on-CPU across the whole wait-start/wait-end
+# span, which includes the syscall's own on-CPU work), so that was never a
+# valid over-attribution detector -- see cpu_clamped_ok's module-level
+# comment in demo_rehearsal_lib.py for the full correction. Only
+# cpu_clamped_ok remains, with its narrower (CPU-class-gaps-only) scope.
+
+def test_cpu_clamped_ok_negligible():
+    ok, detail = lib.cpu_clamped_ok(cpu_clamped_ms=0.05, db_time_ms=10000.0)
+    check(ok, f"negligible cpu_clamped_ms passes ({detail})")
+
+
+def test_cpu_clamped_fails_over_tolerance():
+    ok, detail = lib.cpu_clamped_ok(cpu_clamped_ms=50.0, db_time_ms=10000.0)
+    check(not ok, f"cpu_clamped_ms at 0.5% of db_time_ms fails the 0.1% bound ({detail})")
+
+
+def test_cpu_clamped_ok_states_its_narrow_scope():
+    ok, detail = lib.cpu_clamped_ok(cpu_clamped_ms=0.0, db_time_ms=10000.0)
+    check(ok, f"zero cpu_clamped_ms passes ({detail})")
+    check("wait" in detail.lower(),
+          f"detail states the check's narrow scope (CPU-class gaps only) ({detail})")
+
+
+def test_offcpu_cap_ok_under_cap():
+    ok, detail = lib.time_model_offcpu_cap_ok(
+        offcpu_ms=400.0, db_time_ms=10000.0, has_measured_cpu=True)
+    check(ok, f"4% Off-CPU* is under the 10% cap ({detail})")
+
+
+def test_offcpu_cap_fails_over_cap():
+    # BYPASS-SUITE CASE (the harder finding): a dropped wait class's time
+    # is absorbed into the Off-CPU* residual by construction (src/compute.c
+    # -- see time_model_conservation's own docstring), so it is
+    # over-sized rather than making the identity fail. This is the check
+    # with real detection power against that bug class.
+    ok, detail = lib.time_model_offcpu_cap_ok(
+        offcpu_ms=4000.0, db_time_ms=10000.0, has_measured_cpu=True)
+    check(not ok, f"40% Off-CPU* (a dropped-class-sized residual) fails the 10% cap ({detail})")
+
+
+def test_offcpu_cap_not_applicable_without_measured_cpu():
+    ok, detail = lib.time_model_offcpu_cap_ok(
+        offcpu_ms=9999.0, db_time_ms=10000.0, has_measured_cpu=False)
+    check(ok, f"legacy/sampled tier (no measured CPU) reports ok, labeled not applicable ({detail})")
+    check("not applicable" in detail or "no Off-CPU*" in detail,
+          f"detail says WHY it is vacuously ok, not just ok ({detail})")
+
+
+# ── evaluate_time_model_window ────────────────────────────────────────────
+
+def test_evaluate_window_clean_trace_ok():
+    rows = [
+        {"name": "CPU (running)", "ms": 6000.0, "indent": 1},
+        {"name": "Lock", "ms": 3600.0, "indent": 1},
+        {"name": "CPU (waiting for a core)", "ms": 400.0, "indent": 1},
+    ]
+    result = lib.evaluate_time_model_window(
+        rows, db_time_ms=10000.0, cpu_clamped_ms=0.0,
+        offcpu_ms=400.0, has_measured_cpu=True, used_raw_path=True)
+    check(result["ok"], f"a clean, fully-attributed trace passes every sub-check ({result})")
+
+
+def test_evaluate_window_dropped_wait_class_caught_by_offcpu_cap():
+    # BYPASS-SUITE CASE (the reason this task exists): an entire wait class
+    # (Lock, ~3000ms) is dropped from `rows`; src/compute.c's residual
+    # definition means its time is absorbed into Off-CPU* and the identity
+    # still closes EXACTLY. The identity sub-check alone says ok=True; the
+    # combined gate must still say ok=False via the Off-CPU* cap.
+    rows = [
+        {"name": "CPU (running)", "ms": 3000.0, "indent": 1},
+        {"name": "IO", "ms": 3000.0, "indent": 1},
+        {"name": "CPU (waiting for a core)", "ms": 4000.0, "indent": 1},
+    ]
+    result = lib.evaluate_time_model_window(
+        rows, db_time_ms=10000.0, cpu_clamped_ms=0.0,
+        offcpu_ms=4000.0, has_measured_cpu=True, used_raw_path=True)
+    check(result["conservation"]["ok"],
+          f"the identity alone still closes exactly for this dropped-class case ({result})")
     check(not result["ok"],
-          "a real conservation gap on the recent/raw-path window fails the check")
+          f"the combined gate still fails via the Off-CPU* cap ({result})")
+    check(not result["offcpu_cap"]["ok"], "offcpu_cap sub-check is the one that failed")
 
 
-def test_time_model_check_recent_not_raw_path_fails_loudly():
-    # If the short window somehow did NOT get the raw path (e.g. server.c's
-    # should_use_summaries threshold changes under us), the check must fail
-    # rather than silently trust what could be an equally vacuous result.
-    result = lib.build_time_model_check(
-        recent_ok=True, recent_detail="looks fine", recent_used_raw_path=False,
-        full_ok=True, full_detail="ok", full_used_raw_path=False)
+def test_evaluate_window_not_raw_path_fails_loudly():
+    rows = [{"name": "CPU*", "ms": 1000.0, "indent": 1}]
+    result = lib.evaluate_time_model_window(
+        rows, db_time_ms=1000.0, cpu_clamped_ms=0.0,
+        offcpu_ms=0.0, has_measured_cpu=False, used_raw_path=False)
     check(not result["ok"],
-          "recent window NOT using the raw path fails the check even though "
-          "its own conservation math reported ok=True")
-    check(result["recent_window"]["compute_path"] == "summary",
-          "the compute_path actually observed is reported, not assumed")
+          "summary compute path fails the window even though the identity closes")
+    check(result["compute_path"] == "summary", "compute_path reported accurately")
+
+
+def test_evaluate_window_zero_db_time_fails_every_subcheck():
+    result = lib.evaluate_time_model_window(
+        [], db_time_ms=0.0, cpu_clamped_ms=0.0,
+        offcpu_ms=0.0, has_measured_cpu=False, used_raw_path=True)
+    check(not result["ok"], f"a zero-DB-Time window fails the combined gate ({result})")
+    check(not result["cpu_clamped"]["ok"],
+          "cpu_clamped is not vacuously ok below the DB-Time floor")
+    check(not result["offcpu_cap"]["ok"],
+          "offcpu_cap is not vacuously ok below the DB-Time floor")
+
+
+# ── conservation_sample_interval_s / build_demo_conservation_check ───────
+
+def test_sample_interval_real_run_uses_target():
+    interval = lib.conservation_sample_interval_s(2100.0)  # 35 min
+    check(interval == 300.0, f"a real 35-min run samples every 5 minutes (got {interval})")
+
+
+def test_sample_interval_self_test_scales_down():
+    interval = lib.conservation_sample_interval_s(180.0)  # 3 min self-test
+    check(interval < 300.0, f"a 3-min self-test must not use the 5-min real-run interval (got {interval})")
+    check(180.0 / interval >= 3, f"self-test still yields >= 3 samples (got {180.0/interval:.1f})")
+
+
+def test_sample_interval_nonpositive_duration_raises():
+    raised = False
+    try:
+        lib.conservation_sample_interval_s(0.0)
+    except ValueError:
+        raised = True
+    check(raised, "a zero/negative duration raises rather than returning a bogus interval")
+
+
+def test_conservation_samples_empty_list_is_void():
+    # BYPASS-SUITE CASE: no in-capture samples were EVER gathered (e.g. the
+    # sampler thread crashed before its first iteration, or was never
+    # started) -- must never read as a vacuous PASS just because
+    # full_window_result looks fine.
+    result = lib.build_demo_conservation_check([], {"ok": True, "detail": "n/a"})
+    check(not result["ok"], f"zero samples is void, never a vacuous PASS ({result})")
+
+
+def test_conservation_samples_one_bad_sample_fails_even_if_others_pass():
+    samples = [
+        {"offset_s": 0.0, "ok": True},
+        {"offset_s": 300.0, "ok": False},
+        {"offset_s": 600.0, "ok": True},
+    ]
+    result = lib.build_demo_conservation_check(samples, {"ok": True})
+    check(not result["ok"],
+          "one failing sample fails the whole check -- not an average, not just the last one")
+    check(result["failed_offsets_s"] == [300.0],
+          f"the failing offset is named (got {result['failed_offsets_s']})")
+
+
+def test_conservation_samples_all_pass():
+    samples = [{"offset_s": 0.0, "ok": True}, {"offset_s": 300.0, "ok": True}]
+    result = lib.build_demo_conservation_check(samples, {"ok": True})
+    check(result["ok"], "every sample passing -> ok")
+    check(result["num_samples"] == 2, "num_samples reported")
+
+
+# ── workload_signature_present_ok / aas_floor_ok (criteria doc §2) ───────
+
+def test_workload_signature_both_present_ok():
+    rows = [
+        {"name": "Lock:relation", "ms": 300.0, "indent": 2},
+        {"name": "Timeout:PgSleep", "ms": 200.0, "indent": 2},
+    ]
+    ok, detail = lib.workload_signature_present_ok(rows)
+    check(ok, f"both signature events present with real time ({detail})")
+
+
+def test_workload_signature_missing_one_fails():
+    # BYPASS-SUITE CASE (criteria doc §2): we captured something other than
+    # the intended workload -- Timeout:PgSleep never shows up at all.
+    rows = [{"name": "Lock:relation", "ms": 300.0, "indent": 2}]
+    ok, detail = lib.workload_signature_present_ok(rows)
+    check(not ok, f"a missing required event fails ({detail})")
+    check("Timeout:PgSleep" in detail, f"detail names what's missing ({detail})")
+
+
+def test_workload_signature_zero_time_fails():
+    # Present in name only, zero real time -- must not count as "present".
+    rows = [
+        {"name": "Lock:relation", "ms": 0.0, "indent": 2},
+        {"name": "Timeout:PgSleep", "ms": 150.0, "indent": 2},
+    ]
+    ok, detail = lib.workload_signature_present_ok(rows)
+    check(not ok, f"a zero-time row does not count as present ({detail})")
+
+
+def test_workload_signature_empty_rows_fails():
+    ok, detail = lib.workload_signature_present_ok([])
+    check(not ok, f"empty rows (e.g. an idle/empty window) fails ({detail})")
+
+
+def test_aas_floor_ok_above_floor():
+    ok, detail = lib.aas_floor_ok(1.2)
+    check(ok, f"aas=1.2 clears the 0.5 floor ({detail})")
+
+
+def test_aas_floor_below_floor_fails():
+    # BYPASS-SUITE CASE: an AAS reading near zero is void the same way a
+    # near-zero db_time_ms is.
+    ok, detail = lib.aas_floor_ok(0.1)
+    check(not ok, f"aas=0.1 is below the provisional 0.5 floor ({detail})")
+
+
+def test_aas_floor_none_fails():
+    ok, detail = lib.aas_floor_ok(None)
+    check(not ok, f"a missing aas value fails, is not treated as fine ({detail})")
+
+
+# ── evaluate_time_model_window with the criteria-doc #2 extra floors ─────
+
+def test_evaluate_window_workload_signature_and_aas_when_requested():
+    rows = [
+        {"name": "CPU (running)", "ms": 6000.0, "indent": 1},
+        {"name": "Lock", "ms": 3600.0, "indent": 1},
+        {"name": "CPU (waiting for a core)", "ms": 400.0, "indent": 1},
+        {"name": "Lock:relation", "ms": 3000.0, "indent": 2},
+        {"name": "Timeout:PgSleep", "ms": 500.0, "indent": 2},
+    ]
+    result = lib.evaluate_time_model_window(
+        rows, db_time_ms=10000.0, cpu_clamped_ms=0.0,
+        offcpu_ms=400.0, has_measured_cpu=True, used_raw_path=True,
+        aas=1.5, check_workload_signature=True, check_aas_floor=True)
+    check(result["ok"], f"a clean sample with real workload signature and healthy AAS passes ({result})")
+    check(result["workload_signature"]["ok"], "workload_signature sub-check recorded ok")
+    check(result["aas_floor"]["ok"], "aas_floor sub-check recorded ok")
+
+
+def test_evaluate_window_missing_workload_signature_fails_when_requested():
+    # BYPASS-SUITE CASE: an otherwise-clean window whose workload signature
+    # is missing must still fail once that floor is requested.
+    rows = [
+        {"name": "CPU (running)", "ms": 6000.0, "indent": 1},
+        {"name": "Lock", "ms": 3600.0, "indent": 1},
+        {"name": "CPU (waiting for a core)", "ms": 400.0, "indent": 1},
+    ]
+    result = lib.evaluate_time_model_window(
+        rows, db_time_ms=10000.0, cpu_clamped_ms=0.0,
+        offcpu_ms=400.0, has_measured_cpu=True, used_raw_path=True,
+        aas=1.5, check_workload_signature=True, check_aas_floor=True)
+    check(not result["ok"], f"missing workload signature fails the window ({result})")
+    check(not result["workload_signature"]["ok"], "workload_signature sub-check recorded not ok")
+
+
+def test_evaluate_window_skips_extra_floors_by_default():
+    # The whole-capture-window diagnostic call site does NOT request these
+    # (see evaluate_time_model_window's own docstring) -- confirm the
+    # default really is "off", not silently on.
+    rows = [{"name": "CPU (running)", "ms": 1000.0, "indent": 1}]
+    result = lib.evaluate_time_model_window(
+        rows, db_time_ms=1000.0, cpu_clamped_ms=0.0,
+        offcpu_ms=0.0, has_measured_cpu=False, used_raw_path=True)
+    check("workload_signature" not in result, "workload_signature absent when not requested")
+    check("aas_floor" not in result, "aas_floor absent when not requested")
+
+
+# ── cross_tab_db_time_agreement_ok / freshness_ok (criteria doc §5) ──────
+
+def test_cross_tab_agreement_within_tolerance_ok():
+    ok, detail = lib.cross_tab_db_time_agreement_ok(10000.0, 10050.0)
+    check(ok, f"0.5% disagreement is within the 1% tolerance ({detail})")
+
+
+def test_cross_tab_agreement_disagreement_fails():
+    # BYPASS-SUITE CASE: two tabs computing DB Time for the identical
+    # window disagree by 10% -- a real bookkeeping/denominator bug.
+    ok, detail = lib.cross_tab_db_time_agreement_ok(10000.0, 11000.0)
+    check(not ok, f"a 10% cross-tab disagreement fails ({detail})")
+
+
+def test_cross_tab_agreement_zero_both_sides_fails():
+    # BYPASS-SUITE CASE: 0 ~= 0 must not satisfy cross-tab agreement any
+    # more than it satisfies the identity check.
+    ok, detail = lib.cross_tab_db_time_agreement_ok(0.0, 0.0)
+    check(not ok, f"both sides at zero DB Time is void, not agreement ({detail})")
+
+
+def test_cross_tab_agreement_missing_side_fails():
+    ok, detail = lib.cross_tab_db_time_agreement_ok(10000.0, None)
+    check(not ok, f"a missing side fails rather than being skipped ({detail})")
+
+
+def test_freshness_recent_bucket_ok():
+    now_ns = 1_000_000_000_000
+    to_ns = now_ns - 3_000_000_000  # 3s old, well under the 10s bound
+    ok, detail = lib.freshness_ok(now_ns, to_ns)
+    check(ok, f"a 3s-old newest bucket is fresh ({detail})")
+
+
+def test_freshness_stale_bucket_fails():
+    # BYPASS-SUITE CASE: a capture that stalled -- to_ns stopped advancing
+    # while now_ns kept moving, well past the 2-tick (10s) bound.
+    now_ns = 1_000_000_000_000
+    to_ns = now_ns - 60_000_000_000  # 60s old
+    ok, detail = lib.freshness_ok(now_ns, to_ns)
+    check(not ok, f"a 60s-old newest bucket fails the 10s freshness bound ({detail})")
+
+
+def test_freshness_missing_fields_fails():
+    ok, detail = lib.freshness_ok(None, None)
+    check(not ok, f"missing now_ns/to_ns fails rather than being skipped ({detail})")
+
+
+# ── build_demo_summary: expected_tabs_per_pass floor (criteria doc §2) ──
+
+def test_build_demo_summary_all_tabs_reached_with_expected_count_ok():
+    pass_results = [{"pass": "early",
+                     "tabs": {f"tab{i}": _tab_result(True) for i in range(11)}}]
+    summary = lib.build_demo_summary(pass_results, {"c": {"ok": True}},
+                                     expected_tabs_per_pass=11)
+    check(summary["ok"], "exactly 11/11 tabs reached passes the floor")
+
+
+def test_build_demo_summary_missing_tabs_fails_with_expected_count():
+    # BYPASS-SUITE CASE (criteria doc §2 "all 11 tabs reached"): a pass that
+    # only reached 9 of 11 tabs (e.g. the walk aborted early) must fail even
+    # though every reached tab individually passed.
+    pass_results = [{"pass": "early",
+                     "tabs": {f"tab{i}": _tab_result(True) for i in range(9)}}]
+    summary = lib.build_demo_summary(pass_results, {"c": {"ok": True}},
+                                     expected_tabs_per_pass=11)
+    check(not summary["ok"], f"9/11 tabs reached fails when 11 are expected ({summary})")
+    check(any("incomplete_pass" in f for f in summary["failed"]),
+          f"failed list names the incomplete pass ({summary['failed']})")
+
+
+def test_build_demo_summary_expected_tabs_none_skips_the_check():
+    # Backward compatible: callers that do not know/pass the expected count
+    # (existing tests above) are not newly broken by this floor.
+    pass_results = [{"pass": "early", "tabs": {"overview": _tab_result(True)}}]
+    summary = lib.build_demo_summary(pass_results, {"c": {"ok": True}})
+    check(summary["ok"], "expected_tabs_per_pass=None does not gate on tab count")
+
+
+# ── sweep_offset_drift / summarize_sweep_offset_coverage ─────────────────
+# (owner finding, 2026-09-28, run.id 1790574871 on 19a95f7 -- numbers below
+# are the REAL achieved offsets from that live run, not invented.)
+
+def test_sweep_offset_drift_on_target_zero_drift():
+    tick = {"target_offsets_ms": [200, 500, 1000, 1500, 2000],
+           "achieved_offsets_ms": [205, 512, 1008, 1503, 2011]}
+    d = lib.sweep_offset_drift(tick)
+    check(d["first_target_ms"] == 200, "first target reported")
+    check(d["first_achieved_ms"] == 205, "first achieved reported")
+    check(d["first_drift_ms"] == 5, f"on-target drift is small ({d['first_drift_ms']})")
+    check(d["drift_ms"] == [5, 12, 8, 3, 11], f"per-offset drift computed ({d['drift_ms']})")
+
+
+def test_sweep_offset_drift_late_mount_misses_early_window():
+    # BYPASS-SUITE CASE: the real observed drift from the live run -- a
+    # 200ms target landing at 669ms. The 200->500ms window (where scatter's
+    # 0.1305 and transitions' transients live) was entirely skipped.
+    tick = {"target_offsets_ms": [200, 500, 1000, 1500, 2000],
+           "achieved_offsets_ms": [669, 985, 1502, 1998, 2503]}
+    d = lib.sweep_offset_drift(tick)
+    check(d["first_drift_ms"] == 469,
+          f"a late mount drifts the first sample far past its target ({d['first_drift_ms']})")
+    check(d["first_achieved_ms"] > d["target_offsets_ms"][1],
+          "the first achieved sample landed PAST the second offset's own target -- "
+          "the 200->500ms window was never actually sampled")
+
+
+def test_sweep_offset_drift_extreme_observed_case():
+    # The most extreme case from the same run: 2416/2446ms against a 200ms
+    # target -- the entire sweep compressed into what should have been one
+    # offset's worth of time.
+    tick = {"target_offsets_ms": [200, 500, 1000, 1500, 2000],
+           "achieved_offsets_ms": [2416, 2446, 2480, 2520, 2600]}
+    d = lib.sweep_offset_drift(tick)
+    check(d["first_drift_ms"] == 2216, f"extreme drift computed correctly ({d['first_drift_ms']})")
+
+
+def test_sweep_offset_drift_mismatched_lengths_does_not_crash():
+    # BYPASS-SUITE CASE: a truncated sweep (fewer achieved samples than
+    # targets, e.g. a mid-sweep capture failure) must not crash the report.
+    tick = {"target_offsets_ms": [200, 500, 1000, 1500, 2000],
+           "achieved_offsets_ms": [669, 985]}
+    d = lib.sweep_offset_drift(tick)
+    check(len(d["drift_ms"]) == 2, f"drift only computed for the offsets that were actually achieved ({d})")
+
+
+def test_sweep_offset_drift_empty_tick_does_not_crash():
+    d = lib.sweep_offset_drift({})
+    check(d["drift_ms"] == [], "an empty/missing tick record reports no drift, not a crash")
+    check(d["first_drift_ms"] is None, "first_drift_ms is None, not a fabricated 0")
+
+
+def test_summarize_sweep_offset_coverage_joins_tab_and_pass():
+    ticks = [
+        {"target_offsets_ms": [200, 500], "achieved_offsets_ms": [205, 510]},
+        {"target_offsets_ms": [200, 500], "achieved_offsets_ms": [669, 985]},
+    ]
+    summary = lib.summarize_sweep_offset_coverage("scatter", "early", ticks)
+    check(summary["tab"] == "scatter" and summary["pass"] == "early",
+          "tab/pass identity carried through")
+    check(len(summary["ticks"]) == 2, "one drift record per input tick")
+    check(summary["ticks"][1]["first_drift_ms"] == 469,
+          f"the late-mount tick's drift is visible in the summary ({summary['ticks'][1]})")
+
+
+def test_summarize_sweep_offset_coverage_empty_ticks():
+    summary = lib.summarize_sweep_offset_coverage("overview", "early", [])
+    check(summary["ticks"] == [], "no ticks -> empty list, not a crash")
+    summary_none = lib.summarize_sweep_offset_coverage("overview", "early", None)
+    check(summary_none["ticks"] == [], "None ticks -> empty list, not a crash")
+
+
+# ── daemon_integrity_ok (criteria doc §6) ─────────────────────────────────
+
+def test_daemon_integrity_all_zero_ok():
+    metrics = {"ringbuf_drops_total": 0, "state_map_full_total": 0,
+              "seen_query_ids_full_total": 0, "some_other_field": 123}
+    ok, detail = lib.daemon_integrity_ok(metrics)
+    check(ok, f"all three counters at zero passes ({detail})")
+
+
+def test_daemon_integrity_ringbuf_drops_fails():
+    # BYPASS-SUITE CASE: trace events were dropped -- DB Time is built from
+    # trace events, so this is upstream of every other check in this file.
+    metrics = {"ringbuf_drops_total": 5, "state_map_full_total": 0,
+              "seen_query_ids_full_total": 0}
+    ok, detail = lib.daemon_integrity_ok(metrics)
+    check(not ok, f"nonzero ringbuf_drops_total fails ({detail})")
+    check("ringbuf_drops_total" in detail, f"detail names the offending counter ({detail})")
+
+
+def test_daemon_integrity_state_map_full_fails():
+    metrics = {"ringbuf_drops_total": 0, "state_map_full_total": 2,
+              "seen_query_ids_full_total": 0}
+    ok, detail = lib.daemon_integrity_ok(metrics)
+    check(not ok, f"nonzero state_map_full_total fails ({detail})")
+
+
+def test_daemon_integrity_seen_query_ids_full_fails():
+    metrics = {"ringbuf_drops_total": 0, "state_map_full_total": 0,
+              "seen_query_ids_full_total": 1}
+    ok, detail = lib.daemon_integrity_ok(metrics)
+    check(not ok, f"nonzero seen_query_ids_full_total fails ({detail})")
+
+
+def test_daemon_integrity_missing_counter_fails():
+    # BYPASS-SUITE CASE: an empty/truncated metrics response -- a gate that
+    # cannot see the count must refuse, not assume it is fine.
+    metrics = {"ringbuf_drops_total": 0}
+    ok, detail = lib.daemon_integrity_ok(metrics)
+    check(not ok, f"a missing counter fails rather than being treated as zero ({detail})")
+
+
+def test_daemon_integrity_non_dict_response_fails():
+    # BYPASS-SUITE CASE: the control/metrics query itself failed (e.g.
+    # {"error": "daemon not running"}) and the caller passed the whole
+    # error response through.
+    ok, detail = lib.daemon_integrity_ok(None)
+    check(not ok, f"a non-dict metrics response fails outright ({detail})")
+
+
+# ── capture_has_events_ok ─────────────────────────────────────────────────
+
+def test_capture_has_events_positive_ok():
+    ok, detail = lib.capture_has_events_ok(50000)
+    check(ok, f"a positive event count passes ({detail})")
+
+
+def test_capture_has_events_zero_fails():
+    # BYPASS-SUITE CASE: "a capture with zero samples" from the task brief.
+    ok, detail = lib.capture_has_events_ok(0)
+    check(not ok, f"zero events must fail, not vacuously pass ({detail})")
+
+
+def test_capture_has_events_none_fails():
+    # BYPASS-SUITE CASE: an empty/truncated info response (missing field).
+    ok, detail = lib.capture_has_events_ok(None)
+    check(not ok, f"a missing num_events field must fail, not be treated as fine ({detail})")
+
+
+def test_capture_has_events_negative_fails():
+    ok, detail = lib.capture_has_events_ok(-1)
+    check(not ok, f"a negative count must fail ({detail})")
+
+
+def test_capture_has_events_bool_is_not_a_count():
+    # bool is an int subclass in Python -- True must not slip through as "1".
+    ok, detail = lib.capture_has_events_ok(True)
+    check(not ok, f"a bool is never treated as a real event count ({detail})")
+
 
 
 # ── waterfall_latency_ok ──────────────────────────────────────────────────
@@ -329,6 +793,117 @@ def test_build_demo_summary_requires_passes_and_checks():
     check(not lib.build_demo_summary(
         [{"pass": "early", "tabs": {"overview": _tab_result(True)}}], {})["ok"],
           "no extra checks at all is never a PASS")
+
+
+def test_build_demo_summary_no_tabs_ever_reached_is_never_a_pass():
+    # BYPASS-SUITE CASE (task brief: "a walk where no tab ever loaded"):
+    # every pass has an EMPTY tabs dict. There is nothing to iterate, so
+    # `failed` stays empty and (before this floor) `ok` was vacuously True
+    # as long as pass_results/extra_checks were merely non-empty containers.
+    pass_results = [{"pass": "early", "tabs": {}}, {"pass": "middle", "tabs": {}}]
+    extra = {"some_check": {"ok": True}}
+    summary = lib.build_demo_summary(pass_results, extra)
+    check(not summary["ok"],
+          f"zero tabs actually walked must not be a vacuous PASS ({summary})")
+    check(summary["failed"] == [], "no individual tab/check failed -- the floor is what catches this")
+    check(summary["total_tabs_walked"] == 0, "total_tabs_walked reports the real count")
+
+
+def test_build_demo_summary_some_tabs_reached_is_fine():
+    pass_results = [{"pass": "early", "tabs": {"overview": _tab_result(True)}},
+                    {"pass": "middle", "tabs": {}}]
+    summary = lib.build_demo_summary(pass_results, {"c": {"ok": True}})
+    check(summary["ok"], "at least one tab reached across the passes is enough for this floor")
+    check(summary["total_tabs_walked"] == 1, "total_tabs_walked counts across all passes")
+
+
+# ── Blink-gate regression: demo_rehearsal's dependency on
+# ui_live_smoke_lib.build_tab_result's SWEEP-BASED verdict (criteria doc /
+# owner finding, 2026-09-28, run.id 1790574871 on master 19a95f7) ─────────
+#
+# demo_rehearsal.py has NO independent screenshot/blink-measurement code of
+# its own -- every tab's verdict comes straight from
+# ui_live_smoke.py:run_tab(), which calls ui_live_smoke_lib's own
+# blink_sweep_gate_verdict (the worst consecutive-pair ratio across the
+# WHOLE mount-anchored offset sweep, #209) to compute blink_ratio, then
+# build_tab_result(blink_ratio=...) to grade the tab. This IS that
+# dependency, pinned with the REAL numbers a live rehearsal measured
+# (run.id 1790574871): the OLD single-anchored-pair gate reported ratio 0.0
+# for scatter and transitions (PASS) because its one sampled pair landed
+# AFTER their real transients at the 200->500ms sweep pair; the fix grades
+# on the WORST ratio across the whole sweep instead. A future change that
+# reverts demo_rehearsal.py to computing its own single-pair ratio, or that
+# changes build_tab_result's grading formula, fails HERE -- in `make
+# check` -- rather than silently only on a 30-45 minute rehearsal.
+_BLINK_GATE_COMMON_KWARGS = dict(
+    rendered_ok=True, rendered_detail="ok", ticks_observed=6,
+    console_errors=[], color_violations=[],
+    leak_before={"pending": 0}, leak_after={"pending": 0}, artifacts={},
+)
+
+
+def test_blink_gate_scatter_13pct_transient_fails_run_1790574871():
+    # scatter, run.id 1790574871: tick 3's worst-sweep-pair ratio (the
+    # 200->500ms pair) measured 0.1305; ticks 1/2/4/5/6 assumed clean (0.0)
+    # -- the minimal fixture needed to prove max() over the sweep catches
+    # it (this is the same case demonstrated red/green in this task's
+    # standalone proof before landing here).
+    sweep_ratios = [0.0, 0.0, 0.1305, 0.0, 0.0, 0.0]
+    blink_ratio = max(sweep_ratios)
+    result = ui_lib.build_tab_result(
+        tab_id="scatter", blink_ratio=blink_ratio,
+        blink_pair_offsets_ms=[100] * len(sweep_ratios), blink_not_measured=[],
+        **_BLINK_GATE_COMMON_KWARGS)
+    check(result["no_blink"]["ratio"] == 0.1305,
+          f"the tab's graded ratio is the sweep's WORST pair, not an anchored single pair ({result['no_blink']['ratio']})")
+    check(not result["no_blink"]["ok"],
+          f"0.1305 fails the {ui_lib.BLINK_THRESHOLD} blink threshold ({result['no_blink']})")
+    check(not result["ok"],
+          f"scatter's tab-level verdict is FAIL, reproducing run.id 1790574871's finding ({result['ok']})")
+
+
+def test_blink_gate_transitions_subpercent_transient_fails_run_1790574871():
+    # transitions, run.id 1790574871: ticks 3-6's worst-sweep-pair ratios
+    # (also the 200->500ms pair) measured 0.0172, 0.0097, 0.0150, 0.0072.
+    sweep_ratios = [0.0, 0.0, 0.0172, 0.0097, 0.0150, 0.0072]
+    blink_ratio = max(sweep_ratios)
+    result = ui_lib.build_tab_result(
+        tab_id="transitions", blink_ratio=blink_ratio,
+        blink_pair_offsets_ms=[100] * len(sweep_ratios), blink_not_measured=[],
+        **_BLINK_GATE_COMMON_KWARGS)
+    check(abs(result["no_blink"]["ratio"] - 0.0172) < 1e-9,
+          f"graded ratio is tick 3's 0.0172, the worst of the four ({result['no_blink']['ratio']})")
+    check(not result["ok"],
+          f"transitions' tab-level verdict is FAIL, reproducing run.id 1790574871's finding ({result['ok']})")
+
+
+def test_blink_gate_queries_2_6pct_transient_still_fails_run_1790574871():
+    # queries, run.id 1790574871: the OLD anchored-pair gate ALREADY caught
+    # this one (tick 2 = 0.0262, at the 500->1000ms pair the old anchor
+    # happened to land on) -- included as a consistency check that the NEW
+    # sweep-based gate still fails it too, not just tabs the old gate
+    # missed.
+    sweep_ratios = [0.0, 0.0262, 0.0, 0.0, 0.0, 0.0]
+    blink_ratio = max(sweep_ratios)
+    result = ui_lib.build_tab_result(
+        tab_id="queries", blink_ratio=blink_ratio,
+        blink_pair_offsets_ms=[100] * len(sweep_ratios), blink_not_measured=[],
+        **_BLINK_GATE_COMMON_KWARGS)
+    check(not result["ok"],
+          f"queries' tab-level verdict stays FAIL under the new gate too ({result['ok']})")
+
+
+def test_blink_gate_clean_trace_still_passes():
+    # Baseline: a genuinely clean sweep (every tick's worst pair ~0) must
+    # still pass -- this suite only closes the false-PASS hole, it must
+    # never introduce a false FAIL on a clean trace.
+    sweep_ratios = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    blink_ratio = max(sweep_ratios)
+    result = ui_lib.build_tab_result(
+        tab_id="overview", blink_ratio=blink_ratio,
+        blink_pair_offsets_ms=[100] * len(sweep_ratios), blink_not_measured=[],
+        **_BLINK_GATE_COMMON_KWARGS)
+    check(result["ok"], f"a genuinely clean sweep still passes ({result})")
 
 
 def main():
