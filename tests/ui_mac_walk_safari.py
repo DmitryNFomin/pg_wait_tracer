@@ -275,9 +275,19 @@ def navigate_to_tab(session, tab_id, timeout_s):
                 "return !!b && b.classList.contains('active');"):
             raise RuntimeError("clicking #live-btn did not resume live mode")
 
-    if tab_id == "timeline":
-        clear_drill_filter(session)
-
+    # clear_drill_filter is NOT called here (moved out 2026-09-28, live-run
+    # finding on pgwt-gate): render_check() -- the panel-content check that
+    # matters -- and the panel screenshot are both called by THIS
+    # function's CALLER, AFTER navigate_to_tab() returns. Clearing in here
+    # ran clearFilters() (which calls setTabView('overview')) BEFORE either
+    # of those ran, so both ended up reading Overview's DOM instead of
+    # Timeline's: render_check reported "no container" (PANEL_CHECKS looks
+    # for #timeline-chart, which no longer existed) and the screenshot
+    # step silently produced nothing (_PANEL_ELEMENT_SELECTOR's own
+    # #timeline-chart also gone) -- despite navigate_to_tab itself having
+    # legitimately observed Timeline render (render_state == 'data',
+    # ttfp_s measured) moments earlier. The caller now clears once it is
+    # actually done observing Timeline, not before.
     return render_state
 
 
@@ -349,10 +359,18 @@ def clear_drill_filter(session):
     Attempt four's "6 executions / 6 points" on waterfall/scatter was
     luck: which pid gets drilled follows row sort order, and that pid
     happened to have executions. clearFilters() also calls
-    setTabView('overview'), which is why this is called AFTER Timeline's
-    own render check completes, never before or during it -- clearing
-    while still viewing Timeline would navigate away before Timeline's
-    readiness/empty check could observe it.
+    setTabView('overview') -- CALLERS must invoke this only once they are
+    completely done observing Timeline (render_check, screenshot,
+    active-filter snapshot all included), never from inside
+    navigate_to_tab itself. A live run on pgwt-gate (2026-09-28, review
+    round 3) found the ORIGINAL placement -- inside navigate_to_tab,
+    right after Timeline's readiness wait -- still fired before the
+    caller's own render_check()/screenshot ran, so those read Overview's
+    DOM instead of Timeline's (render_detail: "no container", no
+    timeline/ttfp.png) despite navigate_to_tab itself having legitimately
+    observed Timeline render moments earlier. The readiness wait alone is
+    not "done observing" -- render_check is a separate, later call by
+    the caller, not part of navigate_to_tab.
 
     FAILS LOUDLY if a chip was present but did not disappear after the
     click (2026-09-28 review round 2): a silent degrade here -- swallowing
@@ -912,13 +930,37 @@ def main():
                       f"active_filters={active_filters!r} filter_leak={filter_leak!r} "
                       "(void attribution pending)")
                 if tab_id == "timeline":
+                    # Clearing happens HERE, unconditionally, only once
+                    # every Timeline-specific observation above (render_
+                    # check/empty-state read, active_filters snapshot,
+                    # console drain, screenshot) is already done -- moved
+                    # out of navigate_to_tab (2026-09-28, live-run finding
+                    # on pgwt-gate): clearing from inside that function
+                    # fired before render_check/screenshot even ran (both
+                    # are called by THIS loop, after navigate_to_tab
+                    # returns), so they read Overview's DOM instead of
+                    # Timeline's after clearFilters()'s own
+                    # setTabView('overview'). Unconditional (outside the
+                    # try/except above) so a Timeline drill that failed
+                    # partway through still gets a clear attempt -- never
+                    # leaving a filter applied for the rest of the walk
+                    # just because navigate_to_tab raised.
+                    try:
+                        clear_drill_filter(session)
+                    except Exception as e:
+                        print(f"  FAIL [{tab_id}]: drill filter clear failed: {e}",
+                              file=sys.stderr)
+                        entry["drill_clear_reason"] = str(e)
+                        entry["ok"] = False
                     seen_timeline = True
 
             print("=== freshness pass (revisit each tab, same session) ===")
             # Separate seen_timeline for THIS pass (2026-09-28 review round
-            # 2): the freshness pass re-drills and re-clears Timeline on
-            # its own revisit (navigate_to_tab's timeline branch always
-            # drills+clears, main pass or not), so it needs its own
+            # 2): the freshness pass re-drills Timeline on its own revisit
+            # (navigate_to_tab's timeline branch always drills, main pass
+            # or not; the clear itself is now this pass's own explicit
+            # call below, same reasoning as the main pass above), so it
+            # needs its own
             # "have we passed Timeline yet in this pass" tracking, not the
             # main pass's already-True flag.
             seen_timeline_fresh = False
@@ -970,6 +1012,19 @@ def main():
                           file=sys.stderr)
                     entry["ok"] = False
                 if tab_id == "timeline":
+                    # Same reasoning as the main pass: navigate_to_tab no
+                    # longer clears on its own, so this pass's OWN revisit
+                    # to Timeline must clear explicitly too, or every tab
+                    # after it in THIS pass would read a leaked filter
+                    # (fresh_active_filters non-empty) purely as an
+                    # artifact of removing the auto-clear, not a real bug.
+                    try:
+                        clear_drill_filter(session)
+                    except Exception as e:
+                        print(f"  FAIL [freshness {tab_id}]: drill filter "
+                              f"clear failed: {e}", file=sys.stderr)
+                        entry["freshness_drill_clear_reason"] = str(e)
+                        entry["ok"] = False
                     seen_timeline_fresh = True
 
             # RETROACTIVE void attribution, now that the freshness pass has
@@ -1017,11 +1072,19 @@ def main():
                 # entry["ok"] = False on a leak, and unconditionally
                 # overwrites entry["ok"] -- omitting the leak checks here
                 # would silently undo that gating for every entry.
+                # Same trap flagged for filter_leak_reason (2026-09-28,
+                # round 2) applies to *_drill_clear_reason (round 3): this
+                # recompute unconditionally overwrites entry["ok"] set
+                # earlier in the per-tab loops, so both new fields must be
+                # in the formula or a failed drill-filter clear on
+                # Timeline gets silently un-failed here.
                 entry["ok"] = (bool(entry["rendered"]) and not entry["console_errors"]
                                and reason is None
                                and entry["freshness"]["status"] == "ok"
                                and entry.get("filter_leak_reason") is None
-                               and entry.get("freshness_filter_leak_reason") is None)
+                               and entry.get("freshness_filter_leak_reason") is None
+                               and entry.get("drill_clear_reason") is None
+                               and entry.get("freshness_drill_clear_reason") is None)
                 print(f"  [{entry['tab']}] void={reason!r} "
                       f"freshness_status={entry['freshness']['status']!r} "
                       f"ok={entry['ok']}")

@@ -810,6 +810,32 @@ def test_filter_leak_reason_unmeasured_refuses():
           f"(got {reason!r})")
 
 
+def test_navigate_to_tab_does_not_clear_drill_filter_inline():
+    """Structural regression guard for a bug found on a real live run
+    (pgwt-gate, 2026-09-28, round 3): navigate_to_tab() used to call
+    clear_drill_filter() for the Timeline tab as its OWN last step --
+    before its caller's render_check()/panel screenshot ran (both happen
+    AFTER navigate_to_tab() returns). clearFilters() calls
+    setTabView('overview'), so both ended up reading Overview's DOM
+    instead of Timeline's: a real run showed render_detail: "no
+    container" and no timeline/ttfp.png, despite navigate_to_tab itself
+    having legitimately observed Timeline render (render_state: 'data',
+    a measured ttfp_s) moments earlier in the SAME call. Demonstrated red
+    against the pre-fix source (a local backup of the function body
+    including the inline clear call) before this guard existed --
+    restoring the inline call reproduces the failure this test exists to
+    catch."""
+    src_path = os.path.join(os.path.dirname(__file__), "ui_mac_walk_safari.py")
+    src = open(src_path).read()
+    start = src.index("def navigate_to_tab(")
+    end = src.index("\ndef ", start + 1)
+    body = src[start:end]
+    check("clear_drill_filter(" not in body,
+          "navigate_to_tab() must never call clear_drill_filter() itself -- "
+          "only its caller may, once it is done observing Timeline "
+          "(render_check/screenshot both run after navigate_to_tab returns)")
+
+
 def test_walk_precondition_all_clear():
     check(lib.walk_precondition_reason(False, False) is None,
           "walk_precondition_reason: unlocked + awake -> None (walk may proceed)")

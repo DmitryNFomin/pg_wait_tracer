@@ -104,7 +104,14 @@ server_id=""
 server_ip=""
 server_name=""
 reused=0
-if [[ -f "$STATE_FILE" ]]; then
+using_existing_host=0
+# PGWT_UI_MAC_HOST takes precedence over any leftover KEEP=1 VM state file:
+# without this guard, a stale $STATE_FILE plus PGWT_UI_MAC_HOST set together
+# would have the VM-reuse block below populate server_id from the file, then
+# the PGWT_UI_MAC_HOST block (further down) silently reset it to "" --
+# abandoning that VM with no cleanup, since server_name (the orphan-window
+# guard's own fallback) is never set on the state-file path either.
+if [[ -z "${PGWT_UI_MAC_HOST:-}" && -f "$STATE_FILE" ]]; then
     # shellcheck disable=SC1090
     source "$STATE_FILE"
     code=$(curl -s -o /dev/null -w '%{http_code}' "https://api.hetzner.cloud/v1/servers/$SERVER_ID" \
@@ -143,6 +150,19 @@ ephemeral_cleanup() {
             done
             true
         ' >>"$log" 2>&1
+    fi
+
+    # Existing-host path (PGWT_UI_MAC_HOST): no VM to delete, but the repo
+    # checkout + build artifacts this run rsynced to the box are removed
+    # explicitly -- "leave the box exactly as found", the same standard
+    # applied to every persistent-box staging directory this session
+    # (2026-09-28). Left alone, $REMOTE_DIR is self-healing on the NEXT
+    # PGWT_UI_MAC_HOST run (rsync --delete overwrites it), but a box left
+    # idle between runs would otherwise carry a full checkout + built
+    # binaries indefinitely.
+    if [[ "$using_existing_host" == "1" && -n "$target" ]]; then
+        echo "ui-mac-walk: removing remote checkout $REMOTE_DIR from $target" | tee -a "$log"
+        ssh -o BatchMode=yes -o ConnectTimeout=10 "$target" "rm -rf '$REMOTE_DIR'" >>"$log" 2>&1
     fi
 
     # ORPHAN-WINDOW GUARD (2026-09-28: found live, this exact gap leaked a
@@ -184,6 +204,19 @@ EOF
 trap ephemeral_cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+
+# PGWT_UI_MAC_HOST: run against an EXISTING box instead of creating a VM.
+# Owner rule 2026-09-28 (master's CLAUDE.md, "Persistent boxes FIRST"): both
+# gate boxes bill whether or not they run anything, so an idle one is used
+# before a throwaway machine is created. With this set no VM is created, none
+# is deleted, and ephemeral_cleanup has nothing to do.
+if [[ -n "${PGWT_UI_MAC_HOST:-}" ]]; then
+    server_ip="${PGWT_UI_MAC_HOST#root@}"
+    server_id=""
+    reused=1
+    using_existing_host=1
+    echo "ui-mac-walk: using EXISTING host $server_ip (PGWT_UI_MAC_HOST) -- no VM created" | tee -a "$log"
+fi
 
 if [[ "$reused" != "1" ]]; then
     # tr -c replaces hostname -s's own trailing newline with a literal '-'
@@ -404,6 +437,23 @@ if [[ $bridge_ok -ne 1 ]]; then
     exit 1
 fi
 echo "ui-mac-walk: bridge ready at $BASE_URL" | tee -a "$log"
+
+# ── Let the capture reach the minimum age before walking ────────────────────
+# ui_mac_walk_safari.py refuses a walk whose capture is younger than
+# --min-capture-age-s (default 120), because a run whose workload had barely
+# started produces a near-empty walk regardless of the product -- that
+# precondition was added on 2026-09-28 after a run whose AAS chart showed
+# activity only in the last ~30s of its window. But this script starts the
+# capture and walked immediately, so it could never satisfy its own
+# precondition: the first live run refused itself at 7s. Wait the remainder
+# here, once, in the foreground -- no polling loop, nothing detached.
+MIN_CAPTURE_AGE_S="${PGWT_UI_MAC_MIN_CAPTURE_AGE_S:-120}"
+capture_age=$(( $(date +%s) - REMOTE_CAPTURE_START_EPOCH ))
+if (( capture_age < MIN_CAPTURE_AGE_S )); then
+    wait_s=$(( MIN_CAPTURE_AGE_S - capture_age + 5 ))
+    echo "ui-mac-walk: capture is ${capture_age}s old; sleeping ${wait_s}s so it reaches the ${MIN_CAPTURE_AGE_S}s minimum before the walk" | tee -a "$log"
+    sleep "$wait_s"
+fi
 
 # ── The walk itself ─────────────────────────────────────────────────────────
 # DRIVER=chrome (default, Playwright real Chrome) | safari (real Safari via
