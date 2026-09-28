@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Exercise the PreToolUse hook with real JSON and disposable git worktrees.
 
-Run normally for green. Set PGWT_TEST_RED_BASE to 5233266, d12ffee, or
-05eaad5 to materialize that hook from local history and verify the red cases.
+Run normally for green. Set PGWT_TEST_RED_BASE to 5233266, d12ffee,
+05eaad5, or 007c0b3 to materialize that hook from local history and verify
+the red cases.
 PGWT_TEST_PUSH_GUARD can instead supply a hook path for the same red mode.
 """
 
@@ -19,6 +20,7 @@ SOURCE = Path(__file__).resolve().parents[1]
 GUARD = Path(os.environ.get("PGWT_TEST_PUSH_GUARD", SOURCE / "scripts/hooks/push-guard.sh"))
 HASH = SOURCE / "scripts/tree-hash.sh"
 RED_523 = {
+    "cross repo cd stamped push",
     "commit and push chain", "true and push", "case without push",
     "cd then command then push", "git status then case without push",
     "git status and push", "if clean push", "for clean push",
@@ -30,6 +32,7 @@ RED_523 = {
     "unnamed push", "contextual HEAD ref",
 }
 RED_D12 = {
+    "cross repo cd stamped push", "dynamic cd destination",
     "substitution adjacent semicolon", "substitution adjacent and",
     "substitution adjacent or", "substitution adjacent pipe",
     "multiple glued operators", "glued close and",
@@ -44,11 +47,16 @@ RED_D12 = {
     "unnamed push", "contextual HEAD ref",
 }
 RED_05 = {
+    "cross repo cd stamped push", "dynamic cd destination",
     "function changes cwd before push", "source changes cwd before push",
     "dot changes cwd before push", "push inside function",
     "function moves before main push", "source moves before main push",
     "branch owner despite caller cwd", "branch absent from worktrees",
     "unnamed push", "contextual HEAD ref",
+}
+RED_007 = {
+    "cross repo cd unstamped push", "cross repo cd stamped push",
+    "cd to nonrepo then push", "dynamic cd destination",
 }
 
 
@@ -91,8 +99,9 @@ def run(command, cwd, guard, skip=False):
     return result.returncode, result.stderr
 
 
-def cases(main, worktree):
+def cases(main, worktree, other, nonrepo):
     q = shlex.quote(str(worktree))
+    other_q = shlex.quote(str(other))
     yield "bare clean push", "git push origin main", main, 0
     yield "commit and push chain", 'git add -A && git commit -m "msg" && git push origin main', main, 0
     yield "true and push", "true && git push origin main", main, 0
@@ -113,6 +122,15 @@ def cases(main, worktree):
     yield "make then push", "make && git push origin main", main, 0
     yield "npm then push", "npm run build && git push origin main", main, 0
     yield "script then push", "./deploy.sh && git push origin main", main, 0
+    yield "same repo cd then push main", f"cd {q} && git push origin main", main, 0
+    yield "cross repo cd unstamped push", f"cd {other_q} && git push origin main", main, 2
+    yield "explicit -C other unstamped push", f"git -C {other_q} push origin main", main, 2
+    stamp(other)
+    yield "cross repo cd stamped push", f"cd {other_q} && git push origin main", main, 2
+    yield "explicit -C other stamped push", f"git -C {other_q} push origin main", main, 0
+    yield "cd to nonrepo then push", f"cd {shlex.quote(str(nonrepo))} && git push origin main", main, 2
+    (main / "$dest").mkdir()
+    yield "dynamic cd destination", f"dest={other_q} && cd \"$dest\" && git push origin main", main, 2
     (main / "data.txt").write_text("changed\n")
     yield "bare stale push", "git push origin main", main, 2
     yield "clean worktree, dirty main", f"cd {q} && git push origin agent/test", main, 0
@@ -160,8 +178,8 @@ def main():
     red_base = os.environ.get("PGWT_TEST_RED_BASE")
     if os.environ.get("PGWT_TEST_PUSH_GUARD") and not red_base:
         red_base = "5233266"
-    if red_base not in {None, "5233266", "d12ffee", "05eaad5"}:
-        raise ValueError("PGWT_TEST_RED_BASE must be 5233266, d12ffee, or 05eaad5")
+    if red_base not in {None, "5233266", "d12ffee", "05eaad5", "007c0b3"}:
+        raise ValueError("PGWT_TEST_RED_BASE must be 5233266, d12ffee, 05eaad5, or 007c0b3")
     count = 0
     with tempfile.TemporaryDirectory(prefix="pgwt-push-guard-") as tmp:
         guard = GUARD
@@ -176,15 +194,18 @@ def main():
                 (hook_dir / filename).write_bytes(content)
             guard = hook_dir / "push-guard.sh"
         repo, worktree = fixture(Path(tmp))
+        other, _ = fixture(Path(tmp) / "other repo")
+        nonrepo = Path(tmp) / "nonrepo"
+        nonrepo.mkdir()
         stamp(repo)
         stamp(worktree)
-        for name, command, cwd, expected in cases(repo, worktree):
+        for name, command, cwd, expected in cases(repo, worktree, other, nonrepo):
             if selected and name not in selected.split(","):
                 continue
             count += 1
             code, error = run(command, cwd, guard, name == "skip escape hatch")
             should_red = name in ({"5233266": RED_523, "d12ffee": RED_D12,
-                                  "05eaad5": RED_05}.get(red_base, set()))
+                                  "05eaad5": RED_05, "007c0b3": RED_007}.get(red_base, set()))
             want = code != expected if red_base and should_red else code == expected
             print(f"  {'PASS' if want else 'FAIL'}: {name} (exit {code}, fixed expectation {expected})")
             if not want:

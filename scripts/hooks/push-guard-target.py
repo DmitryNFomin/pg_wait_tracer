@@ -3,6 +3,10 @@
 
 Exit 0 for no push, 1 with its directory on stdout for a resolved push,
 and 2 when a push cannot be resolved safely.
+
+This static check cannot observe inherited shell functions, aliases, or
+startup files that change the cwd or replace git at execution time. A strict
+guarantee requires checking at the actual push invocation instead.
 """
 
 import json
@@ -22,6 +26,17 @@ FLAG_OPTIONS = {"-p", "-P", "--paginate", "--no-pager", "--no-replace-objects",
                 "--no-optional-locks", "--literal-pathspecs", "--glob-pathspecs",
                 "--noglob-pathspecs", "--icase-pathspecs"}
 REPO_ENV = {"GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_CEILING_DIRECTORIES"}
+
+
+def repository_identity(directory):
+    """Return the common Git directory shared by a repository's worktrees."""
+    result = subprocess.run(
+        ["git", "-C", directory, "rev-parse", "--git-common-dir"],
+        capture_output=True, text=True,
+    )
+    if result.returncode or not result.stdout.strip():
+        return None
+    return os.path.realpath(os.path.join(directory, result.stdout.strip()))
 
 
 def branch_worktree(args, repo):
@@ -221,7 +236,9 @@ def targets(command, start=None):
             uncertain = True
         elif parts[0] == "cd":
             cwd_changed = True
-            if len(parts) != 2 or parts[1].startswith("-"):
+            # Shell expansion makes the destination unknowable from this text.
+            if (len(parts) != 2 or parts[1].startswith(("-", "~"))
+                    or any(char in parts[1] for char in "$`*?[]{}")):
                 uncertain = True
             else:
                 cwd = os.path.abspath(os.path.join(cwd, parts[1]))
@@ -232,6 +249,8 @@ def targets(command, start=None):
             if push:
                 # Use the invocation's original repository for worktree
                 # enumeration; a preceding shell function may have moved cwd.
+                # A literal cd may cross repository boundaries, however, so
+                # compare Git's common directory before trusting that anchor.
                 c_paths = []
                 for index, arg in enumerate(parts[1:]):
                     if arg == "-C" and index + 2 < len(parts):
@@ -242,6 +261,11 @@ def targets(command, start=None):
                 # actual cwd, which a prior function may have changed.
                 repo = target if c_paths else start or os.getcwd()
                 safe_repo = target and (not c_paths or os.path.isabs(c_paths[0]))
+                if cwd_changed and not c_paths:
+                    original = repository_identity(start or os.getcwd())
+                    current = repository_identity(cwd)
+                    if original is None or current is None or original != current:
+                        uncertain = True
                 named, branch_target = (branch_worktree(parts[1:], repo)
                                         if safe_repo else (False, None))
                 found.append(None if uncertain or not named else branch_target)
