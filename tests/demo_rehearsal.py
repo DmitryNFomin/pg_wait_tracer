@@ -36,6 +36,7 @@ Usage:
 import argparse
 import json
 import os
+import subprocess
 import sys
 import threading
 import time
@@ -44,6 +45,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ui_live_smoke as live_smoke
 import ui_live_smoke_lib as lib
 import demo_rehearsal_lib as drlib
+import demo_workload_coverage as cov
 from server_harness import ServerHarness
 
 from playwright.sync_api import sync_playwright
@@ -72,6 +74,29 @@ def _print_plan_banner(duration_s, ticks, passes):
               "DURATION_MIN=35) and some tabs' ticks_ok WILL legitimately "
               "fail below -- that proves the harness's mechanics, not the "
               "product.")
+
+
+def _detect_git_tag():
+    """The exact tag this checkout is at, or None if it is not exactly on
+    one (docs/DEMO_REHEARSAL_CRITERIA.md "same tag, not merely the same
+    tree" -- two attempts only count as consecutive if this matches).
+    `git describe --tags --exact-match` fails on anything other than an
+    exact tag (a plain commit, a tag+N-commits-ahead) -- that failure is
+    the correct, honest answer "not on a tag", not an error worth raising:
+    an unattributed attempt should read as unattributed in the verdict,
+    never silently fall back to a commit hash it then gets confused with a
+    real tag."""
+    try:
+        out = subprocess.run(
+            ["git", "describe", "--tags", "--exact-match"],
+            cwd=os.path.dirname(os.path.abspath(__file__)),
+            capture_output=True, text=True, timeout=10)
+    except Exception:
+        return None
+    if out.returncode != 0:
+        return None
+    tag = out.stdout.strip()
+    return tag or None
 
 
 def _assert_daemon_alive(daemon_pid, where):
@@ -327,6 +352,15 @@ def main():
                     "lower this for a real baseline run, only for the "
                     "explicit DURATION_MIN=3 self-test)")
     ap.add_argument("--out-dir", default=RESULTS_DIR)
+    ap.add_argument("--tag", default=None,
+                    help="the git tag this attempt ran against (docs/"
+                    "DEMO_REHEARSAL_CRITERIA.md 'same tag, not merely the "
+                    "same tree'). Not required -- auto-detected via "
+                    "`git describe --tags --exact-match` against this "
+                    "checkout when omitted; recorded in summary.json as "
+                    "'tag' either way (null if neither yields one), so an "
+                    "attempt run from a non-tagged tree is visibly "
+                    "unattributed rather than silently uncounted")
     ap.add_argument("--first-data-timeout", type=float,
                     default=lib.FIRST_DATA_TIMEOUT_S)
     ap.add_argument("--pgbench-pid", type=int, default=None)
@@ -406,6 +440,67 @@ def main():
         print(f"demo_rehearsal: capture_has_events: "
               f"{'PASS' if events_ok else 'FAIL'} -- {events_detail}")
         extra_checks["capture_has_events"] = {"ok": events_ok, "detail": events_detail}
+
+        # issue #214 review: the per-tab "does this tab have real content"
+        # checker MUST run here, before ServerHarness/the trace dir go away
+        # -- this `with` block is still inside main(), well before
+        # tests/demo_rehearsal.sh's cleanup() trap (rm -rf "$TRACE_DIR")
+        # fires on script exit, and before tests/ui_live_smoke.sh's own
+        # teardown for the shorter live-smoke walk. Registered in
+        # extra_checks, which build_demo_summary gates on UNCONDITIONALLY
+        # (this module has no separate informational-only registry --
+        # everything written here fails the run's own `ok` if not ok, by
+        # construction).
+        #
+        # Window (round 3 finding): querying the WHOLE capture, as this did
+        # originally, hit pgwt-server's window_too_large cap on a real
+        # demo-length (35 min, --mode full) trace under pgbench+workload
+        # load -- the raw-load working array is memory-bounded
+        # (src/server.c load_max_events()), and 35 minutes of full-mode
+        # events from a real box comfortably exceeds it on some endpoints.
+        # Bounded to the trailing WATERFALL_LIVE_WINDOW_S instead: the same
+        # 900s "what a live viewer's browser is actually asking for" window
+        # the waterfall-latency check below already uses, well inside the
+        # cap, and arguably the MORE honest question anyway -- an empty tab
+        # on stage is about what the audience sees THEN, not whether the
+        # tab was ever populated at any point across 35 minutes. Any
+        # capacity refusal that still happens despite the bound is caught
+        # separately below (could_not_evaluate), never silently read as
+        # "empty".
+        coverage_from_ns = max(from_ns,
+                               to_ns - int(WATERFALL_LIVE_WINDOW_S * 1_000_000_000))
+        coverage_results = cov.run_coverage(srv, coverage_from_ns, to_ns,
+                                            num_cpus=info.get("num_cpus"))
+        coverage_ok, coverage_detail = drlib.tab_coverage_check_ok(
+            coverage_results, expected_tabs=cov.TAB_ORDER)
+        print(f"demo_rehearsal: tab_coverage: "
+              f"{'PASS' if coverage_ok else 'FAIL'} -- {coverage_detail}")
+        for tab in cov.TAB_ORDER:
+            r = coverage_results.get(tab, {})
+            if r.get("ok"):
+                tab_status = "PASS"
+            elif r.get("could_not_evaluate"):
+                tab_status = "COULD NOT EVALUATE"
+            else:
+                tab_status = "FAIL"
+            print(f"    {tab}: {tab_status} -- {r.get('detail')}")
+        extra_checks["tab_coverage"] = {
+            "ok": coverage_ok, "detail": coverage_detail, "tabs": coverage_results,
+        }
+        # issue #214 review item 3: the per-tab numbers (row counts, band
+        # counts, spread ratios, ...) must be auditable from a file, not
+        # only from a commit message or a printed line -- written here
+        # too, alongside summary.json (which also carries this same dict
+        # via extra_checks, but a reviewer should not have to parse the
+        # whole rehearsal summary to find it).
+        with open(os.path.join(out_dir, "tab_coverage.json"), "w") as f:
+            json.dump({
+                "from_ns": coverage_from_ns, "to_ns": to_ns,
+                "num_cpus": info.get("num_cpus"),
+                "ok": coverage_ok, "detail": coverage_detail,
+                "results": coverage_results,
+            }, f, indent=2, sort_keys=True)
+            f.write("\n")
 
         # One final sample right at the true end of the capture -- the
         # sampler thread's own last periodic sample can land up to
@@ -506,6 +601,13 @@ def main():
     summary["duration_min"] = args.duration_min
     summary["ticks_per_tab"] = ticks
     summary["plan_degraded"] = ticks < lib.MIN_TICKS or len(passes) < 3
+    # docs/DEMO_REHEARSAL_CRITERIA.md "same tag, not merely the same tree":
+    # --tag if the caller supplied one (e.g. demo_rehearsal.sh pinned to a
+    # specific release tag), else auto-detected from this checkout. Never
+    # gates `ok` -- a missing tag is a fact about provenance for a human
+    # deciding whether two attempts count as consecutive, not a pass/fail
+    # criterion this harness enforces itself.
+    summary["tag"] = args.tag or _detect_git_tag()
     # Reporting only (owner finding, 2026-09-28) -- never gates `ok`. See
     # summarize_sweep_offset_coverage's own comment.
     summary["sweep_offset_coverage"] = sweep_coverage
@@ -526,6 +628,7 @@ def main():
     for name, check in extra_checks.items():
         print(f"  {'PASS' if check['ok'] else 'FAIL'} {name}")
     print(f"  summary: {summary_path}")
+    print(f"  tag: {summary['tag'] or '(none -- not on a tag)'}")
     print(drlib.verdict_line(summary))
 
     return 0 if summary["ok"] else 1
