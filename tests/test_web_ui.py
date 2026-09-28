@@ -2239,26 +2239,32 @@ def test_waterfall_view(page):
     page.wait_for_selector("#waterfall-chart canvas", timeout=5000)
     page.wait_for_timeout(700)
 
-    check("slowest first" in (page.text_content("#executions-sort-label") or ""),
-          "waterfall defaults to slowest-first (#222)")
+    check("longest running first" in (page.text_content("#executions-sort-label") or ""),
+          "waterfall defaults to longest-running-first (#222)")
 
     rows = page.query_selector_all("#executions-table tbody tr.clickable")
-    check(len(rows) == 3, f"execution selector rendered 3 rows ({len(rows)})")
-    # #222: default order is duration-desc, so PID 1002 (80ms) leads, then
-    # PID 1000 (30ms), then PID 1004 (in_progress, unknown duration sorts
-    # last) -- the inverse of the old latest-first slice.
+    check(len(rows) == 4, f"execution selector rendered 4 rows ({len(rows)})")
+    # #222 review: PID 1004 is in_progress and started BEFORE every other
+    # row (not the newest) -- its huge elapsed-so-far still puts it FIRST
+    # under duration_desc, exactly the "a currently-running execution must
+    # not sort last" fix. PID 1002 and PID 1010 tie at 80ms and are
+    # tie-broken by start_ns desc (1002 started later); PID 1000 (30ms)
+    # trails.
     pids_in_order = [r.text_content() for r in rows]
-    check("1002" in pids_in_order[0] and "1000" in pids_in_order[1]
-          and "1004" in pids_in_order[2],
-          f"slowest-first order is 1002, 1000, 1004 ({pids_in_order})")
+    check("1004" in pids_in_order[0] and "1002" in pids_in_order[1] and
+          "1010" in pids_in_order[2] and "1000" in pids_in_order[3],
+          f"slowest-first order is 1004, 1002, 1010, 1000 ({pids_in_order})")
+    # PID 1004 has no events/workers/plan -- the default-selection skip
+    # logic (issue #101) has to fire on the DEFAULT (slowest-first) view
+    # now, since the longest-elapsed row is exactly the empty one.
     selected = page.query_selector("#executions-table tr.selected-execution")
     check(selected is not None and "1002" in selected.text_content(),
-          f"default selection is the slowest execution ('{(selected.text_content() if selected else None)}')")
+          f"default selection skips the empty longest-elapsed execution ('{(selected.text_content() if selected else None)}')")
     lane_count = page.evaluate("""() => {
         const c = echarts.getInstanceByDom(document.getElementById('waterfall-chart'));
         return c.getOption().yAxis[0].data.length;
     }""")
-    check(lane_count == 1, f"slowest execution detail has one leader lane ({lane_count})")
+    check(lane_count == 1, f"selected execution detail has one leader lane ({lane_count})")
 
     # Explicitly picking the empty (in_progress) execution must still say so
     # honestly -- the fix changes the DEFAULT, it does not hide an empty
@@ -2269,7 +2275,7 @@ def test_waterfall_view(page):
         page.query_selector_all("#executions-table tbody tr.clickable")[idx].click()
         page.wait_for_timeout(1000)
 
-    click_execution_row(2)   # PID 1004, empty, now last under duration-desc
+    click_execution_row(0)   # PID 1004, empty, first under duration-desc
     empty_state = page.evaluate("""() => {
         const el = document.getElementById('waterfall-chart');
         return {text: el.textContent.trim(),
@@ -2279,7 +2285,7 @@ def test_waterfall_view(page):
           and "No execution events captured" in empty_state["text"],
           f"explicitly selected empty execution states it honestly ({empty_state})")
 
-    click_execution_row(1)   # PID 1000, now the middle row
+    click_execution_row(3)   # PID 1000, leader + 2 workers + plan
     selected = page.query_selector("#executions-table tr.selected-execution")
     check(selected is not None and "1000" in selected.text_content(),
           "row click selected the other completed execution")
@@ -2293,8 +2299,11 @@ def test_waterfall_view(page):
     # so the default-selection algorithm runs fresh against the reordered
     # rows (a resident `selected` deliberately survives a plain sort
     # change -- see waterfall.js -- so re-entering is what forces a new
-    # pick). This is issue #101's original scenario reproduced under an
-    # explicit user choice rather than the (now different) default.
+    # pick). PID 1004 is the OLDEST start here, so latest-first puts it
+    # last -- issue #101's original scenario ("the row the tab must skip
+    # past has nothing to draw") is now decoupled from recency entirely:
+    # it fires on the default for a different reason (longest elapsed) and
+    # does NOT fire here (rows[0] under latest-first already has data).
     page.click("#executions-sort-toggle")
     page.wait_for_timeout(700)
     check("latest first" in (page.text_content("#executions-sort-label") or ""),
@@ -2306,17 +2315,17 @@ def test_waterfall_view(page):
     page.wait_for_timeout(700)
     rows = page.query_selector_all("#executions-table tbody tr.clickable")
     pids_in_order = [r.text_content() for r in rows]
-    check("1004" in pids_in_order[0] and "1002" in pids_in_order[1]
-          and "1000" in pids_in_order[2],
-          f"latest-first order is 1004, 1002, 1000 ({pids_in_order})")
+    check("1002" in pids_in_order[0] and "1010" in pids_in_order[1] and
+          "1000" in pids_in_order[2] and "1004" in pids_in_order[3],
+          f"latest-first order is 1002, 1010, 1000, 1004 ({pids_in_order})")
     selected = page.query_selector("#executions-table tr.selected-execution")
     check(selected is not None and "1002" in selected.text_content(),
-          f"latest-first default still skips the empty newest execution ('{(selected.text_content() if selected else None)}')")
+          f"latest-first default selects the newest row directly, it already has data ('{(selected.text_content() if selected else None)}')")
     # Restore the default for the rest of this test (drag/dblclick/bar-click
-    # below assume the slowest-first leader-only detail).
+    # below assume the PID 1000 leader+2-worker detail).
     page.click("#executions-sort-toggle")
     page.wait_for_timeout(700)
-    click_execution_row(1)   # PID 1000 (duration-desc order) again
+    click_execution_row(3)   # PID 1000 (duration-desc order) again
 
     # The detail payload is fully resident: local zoom/restore must not send
     # executions or execution_detail again.

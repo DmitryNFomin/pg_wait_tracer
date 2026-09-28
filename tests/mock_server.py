@@ -863,18 +863,21 @@ def _handle_request_inner(cmd, req_id, msg):
         filters = msg.get("filters", {})
         qid = str(filters.get("query_id", "100"))
         rows = [
-            # Latest first, like server.c handle_executions with no `sort`
-            # (or sort=start_desc).
-            # issue #101: on a real --mode full capture the NEWEST execution
-            # is routinely a microsecond-scale statement that never changed
-            # wait state -- no events, no workers, no plan, so its
-            # execution_detail below is empty and there is no waterfall to
-            # draw. Measured on the gate box: rows[0] was undrawable in 40 of
-            # 40 simulated live ticks. The fixture carries that shape so the
-            # UI suite exercises the real default-selection path when the
-            # user explicitly asks for latest-first (the #222 sort toggle).
+            # #222 review: pid 1004 is in_progress and started BEFORE every
+            # other row here (not after -- see the comment on
+            # _exec_effective_duration_ms below for why), and it has no
+            # events/workers/plan. That shape does two jobs at once:
+            #  - under start_desc (latest first) it is the oldest start, so
+            #    it sorts LAST -- issue #101's original "the newest row on
+            #    a real --mode full capture is routinely empty" scenario
+            #    reproduced here as "the row the tab must skip past" isn't
+            #    tied to recency at all, just to having nothing to draw;
+            #  - under duration_desc (the #222 default, "slowest first")
+            #    its huge elapsed-so-far makes it sort FIRST, so the
+            #    default-selection skip logic (pickDefaultExecution) still
+            #    has to fire on the DEFAULT view, not just the toggle.
             {"pid": 1004, "query_id": qid,
-             "start_ns": "10000200000000", "end_ns": None,
+             "start_ns": "9999950000000", "end_ns": None,
              "duration_ms": None, "plan_ms": None,
              "n_events": 0, "n_workers": 0, "in_progress": True,
              "started_before_window": False},
@@ -882,6 +885,18 @@ def _handle_request_inner(cmd, req_id, msg):
              "start_ns": "10000100000000", "end_ns": "10000180000000",
              "duration_ms": 80.0, "plan_ms": None,
              "n_events": 2, "n_workers": 0, "in_progress": False,
+             "started_before_window": False},
+            # #222 review item 4: ties pid 1002's 80.0ms exactly but started
+            # earlier, so duration_desc's tie-break (start_ns desc, then
+            # pid desc -- matching cmp_execution_duration_desc in
+            # src/server.c) has to pick a winner instead of Python's
+            # stable sort coincidentally preserving fixture insertion
+            # order (which is what a tie-added-later would have silently
+            # gotten away with).
+            {"pid": 1010, "query_id": qid,
+             "start_ns": "10000050000000", "end_ns": "10000130000000",
+             "duration_ms": 80.0, "plan_ms": None,
+             "n_events": 1, "n_workers": 0, "in_progress": False,
              "started_before_window": False},
             {"pid": 1000, "query_id": qid,
              "start_ns": "10000000000000", "end_ns": "10000030001000",
@@ -891,18 +906,47 @@ def _handle_request_inner(cmd, req_id, msg):
         ]
         if "pid" in filters:
             rows = [r for r in rows if r["pid"] == filters["pid"]]
+
+        def _exec_effective_duration_ms(row):
+            # Mirrors execution_sort_duration_ns (src/server.c, #222
+            # review item 1): a closed row uses its real duration; an
+            # in_progress row's true duration is unknown, so ORDERING uses
+            # the request's own `to` as a deterministic lower bound
+            # (elapsed-so-far) -- never 0, because a currently-running
+            # execution must not fall to the bottom of a tab titled
+            # "slowest first". `to` is whatever the request actually sent
+            # (real callers always send one -- see waterfall.js's
+            # requests()); a missing/nonsensical `to` degrades to 0 rather
+            # than a negative/undefined ordering.
+            if not row["in_progress"]:
+                return row["duration_ms"] or 0.0
+            to_ns = msg.get("to")
+            start_ns = int(row["start_ns"])
+            if not isinstance(to_ns, (int, float)) or to_ns <= start_ns:
+                return 0.0
+            return (to_ns - start_ns) / 1e6
+
         # #222: server.c orders the whole matching window by `sort` BEFORE
         # truncating, so this is a server-side selection, not a client
         # re-sort -- the mock must reorder the same way or the UI's default
         # (sort=duration_desc) would exercise a fixture shape the real
         # server never actually sends for that request. Unrecognized/absent
-        # sort falls back to the latest-first order above, matching
-        # server.c's cmp_execution_start_desc default.
+        # sort falls back to the latest-first (start_ns desc) order below,
+        # matching server.c's cmp_execution_start_desc default.
         if msg.get("sort") == "duration_desc":
-            rows = sorted(rows, key=lambda r: r["duration_ms"] or 0,
-                           reverse=True)
+            # Explicit multi-key sort -- duration desc, then start_ns desc,
+            # then pid desc -- matching cmp_execution_duration_desc's own
+            # tie-break exactly, rather than relying on Python's stable
+            # sort to coincidentally preserve the tie in fixture order.
+            rows = sorted(rows, key=lambda r: (
+                -_exec_effective_duration_ms(r), -int(r["start_ns"]),
+                -r["pid"]))
+        else:
+            rows = sorted(rows, key=lambda r: (-int(r["start_ns"]), -r["pid"]))
+        open_count = sum(1 for r in rows if r["in_progress"])
         return {"id": req_id, "rows": rows,
-                "total_count": len(rows), "truncated": False}
+                "total_count": len(rows), "open_count": open_count,
+                "completed_count": len(rows) - open_count, "truncated": False}
 
     if cmd == "execution_detail":
         filters = msg.get("filters", {})

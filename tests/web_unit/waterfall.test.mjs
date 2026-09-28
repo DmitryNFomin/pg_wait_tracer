@@ -208,17 +208,21 @@ test('default selection falls back to the newest row when nothing is drawable', 
 });
 
 // #222: which slice the Waterfall tab asks the server for, and the toggle
-// between "slowest first" (the default) and "latest first".
-test('the shipped default is duration_desc (slowest first)', () => {
+// between "longest running first" (the default) and "latest first".
+test('the shipped default is duration_desc (longest running first)', () => {
     assert.equal(EXECUTIONS_SORT_DEFAULT, EXECUTIONS_SORT_DURATION);
 });
 
-test('sort label reflects the current mode; anything but explicit "start_desc" reads as slowest', () => {
-    assert.equal(executionsSortLabel(EXECUTIONS_SORT_DURATION), 'slowest first');
+test('sort label reflects the current mode; anything but explicit "start_desc" reads as longest-running', () => {
+    // Review on #222: an open row now ranks by elapsed-so-far alongside a
+    // closed row's real duration, one shared axis -- "longest running",
+    // not "slowest" (which would misdescribe an in-progress row that
+    // outranks a finished short query only because it is still running).
+    assert.equal(executionsSortLabel(EXECUTIONS_SORT_DURATION), 'longest running first');
     assert.equal(executionsSortLabel(EXECUTIONS_SORT_RECENT), 'latest first');
     // Undefined/unset sort state (e.g. before the view has ever requested
     // anything) reads as the default, not as some third, unlabeled mode.
-    assert.equal(executionsSortLabel(undefined), 'slowest first');
+    assert.equal(executionsSortLabel(undefined), 'longest running first');
 });
 
 test('toggle target and toggle-button label are always the OTHER mode', () => {
@@ -226,8 +230,10 @@ test('toggle target and toggle-button label are always the OTHER mode', () => {
                  EXECUTIONS_SORT_RECENT);
     assert.equal(executionsSortToggleTarget(EXECUTIONS_SORT_RECENT),
                  EXECUTIONS_SORT_DURATION);
+    // The toggle's "latest first" state is unaffected by the wording
+    // change -- recency was never ambiguous.
     assert.equal(executionsSortToggleLabel(EXECUTIONS_SORT_DURATION),
                  'Show latest first');
     assert.equal(executionsSortToggleLabel(EXECUTIONS_SORT_RECENT),
-                 'Show slowest first');
+                 'Show longest running first');
 });

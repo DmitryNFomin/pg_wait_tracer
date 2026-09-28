@@ -3293,19 +3293,49 @@ static int cmp_execution_start_asc(const void *a, const void *b)
     return (ea->pid > eb->pid) - (ea->pid < eb->pid);
 }
 
-/* #222: "slowest first" for the Waterfall default. An in_progress row's true
- * duration is unknown, so it sorts as duration 0 (the same convention
- * scatter_downsample already uses via execution_duration_ns) rather than
- * threading `to_ns` through the comparator to approximate elapsed-so-far --
- * that would make the ordering depend on when the request happened to land,
- * not on anything captured. Same O(n log n) qsort as cmp_execution_start_desc,
- * over the same already-materialized row array: no new pass over `count`
- * events, so the #101 budget is unaffected. */
+static uint64_t execution_duration_ns(const struct pgwt_execution *row);
+
+/* #222: a currently-running execution must not sort last on a tab titled
+ * "slowest first" -- that is the inverse of the tab's purpose in exactly
+ * the case an operator needs it (an incident: a query stuck for 90s must
+ * outrank every closed sub-millisecond statement). to_ns - start_ns is a
+ * deterministic LOWER BOUND on that row's eventual duration for the
+ * request's own [from, to] window -- not "whenever the request happens to
+ * land": to_ns is the window's own upper bound (same value the client
+ * already used to render "In progress"), not wall-clock now, and live
+ * mode re-anchors that window on every refresh regardless of ordering.
+ * ORDERING ONLY: the JSON response still reports duration_ms:null for an
+ * in_progress row (serialize_execution_row) -- this value never reaches
+ * the client. Closed rows reuse execution_duration_ns() (forward-declared
+ * above, defined below) rather than re-deriving `end_ns - start_ns` here,
+ * so scatter's per-bucket "known duration" convention and the waterfall's
+ * sort convention cannot silently drift apart on the same rows. */
+static uint64_t execution_sort_duration_ns(const struct pgwt_execution *row,
+                                           uint64_t to_ns)
+{
+    if (!row->in_progress)
+        return execution_duration_ns(row);
+    /* start_ns > to_ns cannot happen for a row this function ever sees --
+     * pgwt_compute_executions only turns an EXEC_START into a row when its
+     * timestamp is <= to_ns -- but a 0 fallback (never a wrapped/negative
+     * subtraction) keeps this total should that invariant ever change. */
+    return row->start_ns <= to_ns ? to_ns - row->start_ns : 0;
+}
+
+/* "slowest first" for the Waterfall default. Same O(n log n) qsort as
+ * cmp_execution_start_desc, over the same already-materialized row array:
+ * no new pass over `count` events, so the #101 budget is unaffected.
+ * `g_exec_sort_to_ns` supplies the window bound execution_sort_duration_ns
+ * needs; see the comment above handle_executions's qsort() call for why a
+ * plain file-scope variable is safe here (this server has no threads and
+ * the value is set and consumed within one synchronous request). */
+static uint64_t g_exec_sort_to_ns;
+
 static int cmp_execution_duration_desc(const void *a, const void *b)
 {
     const struct pgwt_execution *ea = a, *eb = b;
-    uint64_t da = ea->in_progress ? 0 : ea->end_ns - ea->start_ns;
-    uint64_t db = eb->in_progress ? 0 : eb->end_ns - eb->start_ns;
+    uint64_t da = execution_sort_duration_ns(ea, g_exec_sort_to_ns);
+    uint64_t db = execution_sort_duration_ns(eb, g_exec_sort_to_ns);
     if (db > da) return 1;
     if (db < da) return -1;
     if (eb->start_ns > ea->start_ns) return 1;
@@ -3455,13 +3485,38 @@ static void handle_executions(struct pgwt_server *srv,
      * an unrecognized or empty sort value falls back here rather than being
      * silently accepted as some other order. */
     int (*cmp)(const void *, const void *) = cmp_execution_start_desc;
-    if (strcmp(req->sort, "duration_desc") == 0)
+    if (strcmp(req->sort, "duration_desc") == 0) {
+        /* Same `to` load_execution_rows() already used to build `res` --
+         * recomputed here (not threaded through pgwt_load_info) because
+         * this server processes one stdin line at a time with no
+         * concurrent qsort ever in flight, so a plain file-scope variable
+         * set immediately before this qsort() and read only from inside
+         * it is exactly as safe as a parameter would be, without a
+         * non-portable qsort_r(). */
+        g_exec_sort_to_ns = req->to_ns ? req->to_ns : srv->latest_wall_ns;
         cmp = cmp_execution_duration_desc;
+    }
     qsort(res.rows, res.num_rows, sizeof(res.rows[0]), cmp);
 
     int limit = req->limit > 0 ? req->limit : EXECUTIONS_DEFAULT_LIMIT;
     if (limit > EXECUTIONS_MAX_LIMIT) limit = EXECUTIONS_MAX_LIMIT;
     int returned = res.num_rows < limit ? res.num_rows : limit;
+
+    /* #222 review: ranking an open row by elapsed-so-far fixes the original
+     * defect (a slow open execution no longer sorts last) but opens the
+     * inverse one -- a handful of long-LIVED open executions can dominate
+     * duration_desc the same way the old recency slice dominated start_desc,
+     * pushing genuinely slow CLOSED queries off a truncated page. Counted
+     * over the full matching window (before truncation, same as
+     * total_count), not shown in the UI yet (deferred: the real fix is two
+     * labelled, bounded sections, tracked as a follow-up) -- but at least
+     * visible in the response instead of silently hidden behind a single
+     * total_count/truncated pair that cannot say which kind got crowded
+     * out. */
+    int open_count = 0;
+    for (int i = 0; i < res.num_rows; i++)
+        if (res.rows[i].in_progress)
+            open_count++;
 
     cJSON *root = cJSON_CreateObject();
     cJSON_AddNumberToObject(root, "id", (double)req->id);
@@ -3470,6 +3525,8 @@ static void handle_executions(struct pgwt_server *srv,
     for (int i = 0; i < returned; i++)
         serialize_execution_row(rows, &res.rows[i]);
     cJSON_AddNumberToObject(root, "total_count", res.num_rows);
+    cJSON_AddNumberToObject(root, "open_count", open_count);
+    cJSON_AddNumberToObject(root, "completed_count", res.num_rows - open_count);
     cJSON_AddBoolToObject(root, "truncated", returned < res.num_rows);
     emit_json(root);
     free(res.rows);

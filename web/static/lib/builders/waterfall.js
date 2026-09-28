@@ -68,12 +68,20 @@ export const EXECUTIONS_SORT_DURATION = 'duration_desc';
 export const EXECUTIONS_SORT_RECENT = 'start_desc';
 export const EXECUTIONS_SORT_DEFAULT = EXECUTIONS_SORT_DURATION;
 
-/* Label for the current sort ("slowest first" / "latest first") and for the
- * toggle control that switches to the OTHER mode -- exported separately so
- * the view can put the state label and the action label in different spots
- * (a status span vs. a button) without duplicating the ternary. */
+/* Label for the current sort and for the toggle control that switches to
+ * the OTHER mode -- exported separately so the view can put the state
+ * label and the action label in different spots (a status span vs. a
+ * button) without duplicating the ternary.
+ *
+ * duration_desc reads "longest running first", not "slowest first"
+ * (review on #222): once an open row ranks by elapsed-so-far alongside a
+ * closed row's real duration, the list is ordered by ONE shared axis --
+ * longest elapsed-or-completed -- and a reader seeing an "In progress" row
+ * outrank a finished 30ms query needs that stated, not inferred. The
+ * toggle's OTHER state ("Show latest first") is unaffected: recency was
+ * never ambiguous. */
 export function executionsSortLabel(sort) {
-    return sort === EXECUTIONS_SORT_RECENT ? 'latest first' : 'slowest first';
+    return sort === EXECUTIONS_SORT_RECENT ? 'latest first' : 'longest running first';
 }
 
 export function executionsSortToggleTarget(sort) {
@@ -82,7 +90,7 @@ export function executionsSortToggleTarget(sort) {
 
 export function executionsSortToggleLabel(sort) {
     return sort === EXECUTIONS_SORT_RECENT
-        ? 'Show slowest first' : 'Show latest first';
+        ? 'Show longest running first' : 'Show latest first';
 }
 
 /* executions response -> shared-table model. Server order matches whatever

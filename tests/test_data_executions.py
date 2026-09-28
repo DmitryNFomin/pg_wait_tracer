@@ -308,49 +308,63 @@ def test_execution_filters(t):
 
 
 def test_sort_order_and_fallback(t):
-    print("\n### #222: sort=duration_desc orders by duration; "
+    print("\n### #222: sort=duration_desc orders by duration (in_progress "
+          "ranked by elapsed-so-far, never last-by-default); "
           "omitted/unrecognized sort falls back to start_desc ###")
-    # Five single-pid executions with deliberately distinct durations (and
-    # two never-closed ones) so duration order and start order disagree in
-    # every position -- a test that happened to pick durations that were
-    # already in start order could pass with the comparator never actually
-    # consulting duration.
+    # Six single-pid executions: three closed with deliberately distinct
+    # durations, and three never-closed (in_progress) ones -- a test that
+    # happened to pick durations already in start order, or in_progress
+    # rows that all trail every closed row, could pass without the
+    # comparator actually consulting elapsed-so-far.
+    TO = BASE + 1000 * MS   # the request's own window bound, not wall-clock
     events = [
         marker(2000, BASE, EXEC_START, 700),
-        marker(2000, BASE + 50 * MS, EXEC_END, 700),        # 50ms
+        marker(2000, BASE + 50 * MS, EXEC_END, 700),        # 50ms, closed
         marker(2001, BASE + 1 * MS, EXEC_START, 700),
-        marker(2001, BASE + 11 * MS, EXEC_END, 700),        # 10ms
+        marker(2001, BASE + 11 * MS, EXEC_END, 700),        # 10ms, closed
         marker(2002, BASE + 2 * MS, EXEC_START, 700),
-        marker(2002, BASE + 202 * MS, EXEC_END, 700),       # 200ms, longest
-        marker(2003, BASE + 3 * MS, EXEC_START, 700),       # never closes
-        marker(2004, BASE + 4 * MS, EXEC_START, 700),       # never closes, later start
+        marker(2002, BASE + 202 * MS, EXEC_END, 700),       # 200ms, closed
+        # #222 review: a currently-running execution must not sort last on
+        # a tab titled "slowest first" -- that defeats the tab's purpose in
+        # exactly the case an operator needs it (an incident). 2003/2004
+        # have been running since near BASE, so at TO they are the two
+        # longest-running things in the trace and must rank ABOVE every
+        # closed row, not below all of them.
+        marker(2003, BASE + 3 * MS, EXEC_START, 700),       # never closes: elapsed 997ms at TO
+        marker(2004, BASE + 4 * MS, EXEC_START, 700),       # never closes: elapsed 996ms at TO
+        # 2005's elapsed-so-far at TO is exactly 200ms -- ties pid 2002's
+        # closed duration. The tie-break (start_ns desc, then pid desc)
+        # must still pick a single deterministic winner between an
+        # in_progress row and a completed row of equal effective duration.
+        marker(2005, BASE + 800 * MS, EXEC_START, 700),     # never closes: elapsed 200ms at TO
     ]
     scenario = {
         "backends": [{"pid": p, "type": "client", "user": "u", "db": "d"}
-                     for p in (2000, 2001, 2002, 2003, 2004)],
+                     for p in (2000, 2001, 2002, 2003, 2004, 2005)],
         "queries": [{"id": 700, "text": "SELECT sort_fixture()"}],
         "events": sorted(events, key=lambda e: e["ts"]),
     }
     trace_dir = generate_traces(scenario)
     try:
         with ServerHarness(trace_dir) as srv:
-            duration_desc = srv.query("executions", sort="duration_desc")
+            duration_desc = srv.query("executions", sort="duration_desc",
+                                      from_=BASE, to_=TO)
             pids = [r["pid"] for r in duration_desc.get("rows", [])]
-            # in_progress rows (2003, 2004) carry an unknown true duration and
-            # sort as duration 0 -- last here -- rather than threading `to_ns`
-            # through the comparator to approximate elapsed-so-far (that would
-            # make the order depend on when the request happened to land).
-            # Tied at 0, they still need a deterministic order: start_ns desc,
-            # same as cmp_execution_start_desc's own tie-break.
-            t.check_eq(pids, [2002, 2000, 2001, 2004, 2003],
-                       f"duration_desc: longest first, in_progress rows last "
-                       f"and tie-broken by start_ns desc ({pids})")
+            # 2003 (elapsed 997ms) > 2004 (996ms) > [2005 (200ms) / 2002
+            # (200ms), tied -- 2005 wins on start_ns desc: 800ms > 2ms] >
+            # 2000 (50ms) > 2001 (10ms).
+            t.check_eq(pids, [2003, 2004, 2005, 2002, 2000, 2001],
+                       f"duration_desc: a long-running in_progress row "
+                       f"outranks short closed ones, and an elapsed-so-far "
+                       f"tie against a closed row is broken by start_ns "
+                       f"desc, not left to insertion order ({pids})")
 
             for sort_kwargs, label in [({}, "sort omitted"),
                                         ({"sort": "bogus"}, "unrecognized sort")]:
-                resp = srv.query("executions", **sort_kwargs)
+                resp = srv.query("executions", from_=BASE, to_=TO,
+                                 **sort_kwargs)
                 pids = [r["pid"] for r in resp.get("rows", [])]
-                t.check_eq(pids, [2004, 2003, 2002, 2001, 2000],
+                t.check_eq(pids, [2005, 2004, 2003, 2002, 2001, 2000],
                            f"{label}: falls back to start_desc, not some "
                            f"other order and not a refusal ({pids})")
     finally:
@@ -474,6 +488,85 @@ def test_crowding_check_and_query_latency_bound(t):
                     f"duration_desc executions query: {slow_elapsed:.2f}s "
                     f"over ~{n_fast + n_slow} executions "
                     f"(threshold {WATERFALL_QUERY_THRESHOLD_S}s)")
+    finally:
+        cleanup_traces(trace_dir)
+
+
+# #222 review: ranking an open row by elapsed-so-far fixes the original
+# defect (a long-running open execution no longer sorts last) but opens the
+# same defect with the sign flipped -- a flood of open executions, each
+# merely OLDER than a genuinely slow CLOSED query, can dominate
+# duration_desc's truncated page exactly the way the old recency slice
+# dominated start_desc. This does not fix that (the real fix is two
+# labelled, bounded sections -- filed as a follow-up); it PINS the current
+# behavior so it is characterized rather than accidental, and checks the
+# one cheap mitigation this branch does add: open_count/completed_count
+# report the true split even though `rows` (truncated) cannot.
+OPEN_FLOOD_QID = 314159265
+
+def open_flood_scenario(n_open=150, n_slow_closed=3):
+    events = []
+    # No backends.jsonl entries here: pgwt_compute_executions derives every
+    # row from EXEC_START/END markers alone (backend metadata only feeds
+    # parallel-worker attribution and other views' user/db labels, neither
+    # of which these single-pid leader executions touch), and
+    # tests/gen_test_traces.c's fixed-size backend array
+    # (MAX_TEST_BACKENDS 64, unrelated to anything this branch touches)
+    # cannot hold 150+ entries anyway.
+    #
+    # Every open execution started long before `to` (below), so its
+    # elapsed-so-far (tens of seconds) dwarfs any closed row's duration --
+    # this is the dominance mechanism itself, at the scale that crowds a
+    # truncated page, not just tips one comparison.
+    for i in range(n_open):
+        pid = 20000 + i
+        events.append(marker(pid, BASE + i * MS, EXEC_START, OPEN_FLOOD_QID))
+    # A handful of genuinely slow CLOSED executions -- 500ms each, an order
+    # of magnitude past anything else CLOSED in this fixture -- that a
+    # "slowest first" tab exists to surface.
+    slow_pids = []
+    for j in range(n_slow_closed):
+        pid = 30000 + j
+        slow_pids.append(pid)
+        start = BASE + (n_open + j) * MS
+        events.append(marker(pid, start, EXEC_START, OPEN_FLOOD_QID))
+        events.append(marker(pid, start + 500 * MS, EXEC_END, OPEN_FLOOD_QID))
+    events.sort(key=lambda e: e["ts"])
+    scenario = {
+        "queries": [{"id": OPEN_FLOOD_QID, "text": "SELECT open_flood()"}],
+        "events": events,
+    }
+    return scenario, slow_pids
+
+
+def test_open_row_crowding_characterized(t):
+    print("\n### #222 review: open-row flood crowding out closed slow rows "
+          "(characterized, not fixed) + open_count/completed_count ###")
+    scenario, slow_pids = open_flood_scenario()
+    trace_dir = generate_traces(scenario)
+    to_ns = BASE + 100_000 * MS   # far past every open row's start
+    try:
+        with ServerHarness(trace_dir) as srv:
+            page = srv.query("executions", limit=100, sort="duration_desc",
+                             from_=BASE, to_=to_ns,
+                             timeout=WATERFALL_QUERY_THRESHOLD_S)
+            t.check_eq(page.get("total_count"), 153,
+                       "fixture carries 150 open + 3 closed executions")
+            t.check_eq(page.get("open_count"), 150,
+                       "open_count reports the true open total, not the "
+                       "truncated page's count")
+            t.check_eq(page.get("completed_count"), 3,
+                       "completed_count reports the true closed total")
+            returned_pids = [r["pid"] for r in page.get("rows", [])]
+            t.check_eq(len(returned_pids), 100,
+                       "page is truncated to the request limit")
+            t.check(all(pid not in returned_pids for pid in slow_pids),
+                    "CHARACTERIZED (not fixed): a flood of merely-older open "
+                    "rows crowds every genuinely slow closed row off the "
+                    "truncated page -- the same defect #222 fixed for "
+                    "start_desc, sign flipped, now open_count/completed_count "
+                    "at least make it visible instead of silently hidden "
+                    "behind total_count/truncated alone")
     finally:
         cleanup_traces(trace_dir)
 
@@ -649,6 +742,7 @@ def main():
     test_execution_filters(t)
     test_sort_order_and_fallback(t)
     test_crowding_check_and_query_latency_bound(t)
+    test_open_row_crowding_characterized(t)
     test_detail_window_bound_and_bounded_context(t)
     test_clustered_scatter_fills_budget(t)
     test_detail_cap(t)
