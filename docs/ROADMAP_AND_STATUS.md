@@ -1491,6 +1491,50 @@ to a CHANGELOG entry).
   one stretch; a non-zero `ring_delta_clamps_total` is the tell. Unit:
   `tests/test_live_accum`.
 
+  **Superseded in part by #202 (below): the "≤ 0.4 ms per 5 s window" figure
+  above holds on a QUIET box and does not on a saturated one.** Re-measured on
+  a cx33 gate-snapshot VM, PG18: 0.0–0.7 ms per 5 s window idle (n=6 runs,
+  18 ticks), but `test_partition` at 8 clients on 4 vCPU accrued **7362 ms** of
+  off-CPU remainder over a ~15 s capture — ~490 ms/s — and the windowed
+  over-attribution is the DROP in that quantity across a window boundary, so
+  seconds of excess are reachable there. The measurement was not wrong; it was
+  taken on an idle box and generalised.
+
+- **Multi-window class rows summed to 120% of DB Time — FIXED (issue #202).**
+  `test_multi_window` Test 3 on `pgwt-gate`: `Σ(top-level rows) = 18330 ms` vs
+  `DB Time 15255 ms` (+3075 ms, 20.2% against a 2% threshold), intermittently
+  — 1 failure in 2 gate-box runs, 0 in 9 on a private VM. NOT the #97 clamp:
+  `CPU*` read 9789 ms, i.e. non-zero, so `tm.cpu` was not clamped, and no
+  clamp of a wait class or of DB Time can make a sum *overshoot*. Cause: the
+  **open** `state_map` stretch charged the `CPU*` row its MEASURED on-CPU ns
+  (T8/S3 `cpu_open`) while charging DB Time its full wall, and the **closed**
+  record that ended the same stretch charged `CPU*` the FULL GAP
+  (`event_stream.c .cpu_ns = dur`) — so the window in which a stretch closes
+  gains `(gap − measured_at_prev_tick)` that DB Time never gains. Nothing goes
+  down, so nothing clamps and no counter moves. In the cumulative
+  single-window view the same absolute error is diluted by minutes of DB Time,
+  which is why `test_accuracy`'s identical 2% check kept passing.
+  `pgwt_live_closed_cpu_ns()` is now the ONE measured-vs-gap rule for both
+  live paths — the same rule `compute.c` uses offline — and the remainder has
+  its own accumulator field and `Off-CPU*` row, so
+  `cpu + offcpu + Σwaits == db` holds per snapshot and per delta. Two
+  defects found alongside: `now - sval.last_ts` in `pgwt_read_state_map` was
+  unguarded and underflowed to 584 years when BPF stamped `last_ts` during the
+  scan (3 of 18 ticks idle, 7 of 18 under load, max 3132.5 µs ahead —
+  `pgwt_live_open_ns()` floors it), and `test_multi_window`'s own parser
+  merged every tick last-writer-wins while `output.c` omits zero-valued rows,
+  manufacturing positive excess inside the check itself. New self-checks:
+  `metrics.ring_delta_overshoot_ns_total` (the direction
+  `ring_delta_clamps_total` is structurally blind to) and
+  `tests/wait_cpu_canary` (offline per-class wait-CPU; `Timeout:PgSleep` and
+  `Lock:relation` both measured 0.0000% over 99.5 s of sleeping, eliminating
+  the stale-label family). **#99 closed with it** — its 0.11%
+  "CPU+Waits vs DB Time" miss was the under-attribution half of the same
+  identity and is now structurally zero, so `test_partition` came off
+  `KNOWN_FAILING`. Units: `tests/test_live_accum`,
+  `tests/test_wait_cpu_canary`, `tests/test_multi_window_lib.py`; live
+  reproduction harness `tests/repro_issue202.{py,sh}`.
+
 - **Live CPU\* classified by the command gate AT EMISSION — FIXED (issue #98).**
   `test_daemon_server` "CPU Time ratio server/CLI" read 4.6–7.1x. The live
   paths took "in-command" from the gate value BPF stamped on the CLOSING record

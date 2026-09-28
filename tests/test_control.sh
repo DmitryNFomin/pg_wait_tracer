@@ -176,8 +176,10 @@ for k in ('events_total', 'events_per_sec', 'lifecycle_events_total',
           # magnitudes are proven by the pure-CPU straddle acceptance test.
           'cpu_ns_total', 'offcpu_ns_total', 'cpu_clamped_total',
           'wait_gap_cpu_ns_total',
-          # #97 multi-window fail-safe (windowed-delta clamps).
-          'ring_delta_clamps_total',
+          # #97 multi-window fail-safe (windowed-delta clamps) and #202's
+          # counterpart for the direction a clamp cannot see: rows summing
+          # to MORE than the window's DB Time.
+          'ring_delta_clamps_total', 'ring_delta_overshoot_ns_total',
           # #98 live command gate: the non-marker share of the live CPU*
           # classification (unmarked pids / full accumulator fallback).
           'live_cmd_markers_total', 'live_cpu_unmarked_ns_total',

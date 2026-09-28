@@ -28,6 +28,10 @@ test_durability
 test_query_text
 test_golden_fixture
 test_live_accum
+# #202: the offline wait-CPU canary's decision logic (CPU recorded inside a
+# pure sleep, cpu_ns > duration_ns) and every way it could be satisfied
+# without looking at anything.
+test_wait_cpu_canary
 test_pg13_resolve
 test_discovery_pie
 test_discovery_nopie
@@ -35,6 +39,10 @@ test_replay_fidelity
 test_sampled_overhead_gate.py
 test_data_query_text_context.py
 test_ui_live_smoke_lib.py
+# #202 review: the pure parsers behind test_multi_window's conservation
+# check. The old whole-output, last-writer-wins parse merged two ticks and
+# MANUFACTURED positive excess inside that check (+13.3% on the fixture).
+test_multi_window_lib.py
 test_demo_rehearsal_lib.py
 test_demo_rehearsal_orchestrator_lib.py
 test_hetzner_sweep.sh

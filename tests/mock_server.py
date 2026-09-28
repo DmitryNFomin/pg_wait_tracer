@@ -649,6 +649,9 @@ class DaemonState:
             "wait_gap_cpu_ns_total": 3_000_000,
             # #97 multi-window fail-safe: windowed-delta fields clamped at 0.
             "ring_delta_clamps_total": 0,
+            # #202: ns by which a window's rows exceeded its DB Time — the
+            # over-attribution direction, which the clamp counter cannot see.
+            "ring_delta_overshoot_ns_total": 0,
             # #98 live command gate: mirrors status; the counters are the
             # non-marker share of the live CPU* classification.
             "live_cpu_gate": "markers (CMD_START/CMD_END sweep, majority rule)",

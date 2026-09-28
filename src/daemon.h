@@ -103,6 +103,15 @@ struct pgwt_counters {
      * as ring_delta_clamps_total. */
     uint64_t ring_delta_clamps_total;
 
+    /* Multi-window conservation self-check (issue #202, snapshot.h
+     * overshoot_ns): Σ ns by which a window's top-level rows exceeded its
+     * DB Time. ring_delta_clamps_total above only sees a field going DOWN,
+     * so it is blind to over-attribution — #202 was 18330 ms of rows
+     * against 15255 ms of DB Time with clamped_fields 0. Non-zero here
+     * means time was counted against more than one bucket in that window.
+     * Exported as ring_delta_overshoot_ns_total. */
+    uint64_t ring_delta_overshoot_ns_total;
+
     /* Live command-gate observability (issue #98, map_reader.h
      * pgwt_live_cmd_gate_*). The live CPU* classification is marker-driven;
      * these say how much of it was NOT decided by markers — never silent:

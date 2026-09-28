@@ -32,6 +32,21 @@ struct pgwt_snapshot {
      * wrapping (see sat_sub in snapshot.c). 0 for a pushed snapshot. The
      * daemon folds it into counters.ring_delta_clamps_total (metrics). */
     uint32_t clamped_fields;
+    /* Set by pgwt_ring_delta only (#202): the amount by which this window's
+     * top-level rows OVERSHOOT its DB Time, i.e.
+     *   max(0, cpu + offcpu + Sigma(wait classes) - db_time_ns).
+     * 0 for a pushed snapshot, and 0 for a healthy window — the live
+     * accumulator's conservation contract (map_reader.h) makes it exact.
+     *
+     * clamped_fields only sees a field going DOWN, so it is blind to this
+     * direction, which is the one #202 arrived in: nothing decreased, no
+     * clamp fired, and the rows still summed to 120% of DB Time. This is
+     * the detector for it, so a future third mechanism reports itself in
+     * metrics (ring_delta_overshoot_ns_total) instead of waiting to be
+     * noticed by a gate-box test. Under-shoot is deliberately NOT counted:
+     * it is the direction a residual row absorbs silently and is not
+     * evidence of double counting. */
+    uint64_t overshoot_ns;
     struct pgwt_time_model tm;
     int num_events;
     struct pgwt_snap_event events[MAX_SNAP_EVENTS];

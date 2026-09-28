@@ -30,6 +30,7 @@ void pgwt_ring_push(struct pgwt_ring *ring, const struct pgwt_accumulator *acc)
     struct pgwt_snapshot *snap = &ring->slots[ring->head % ring->capacity];
 
     snap->clamped_fields = 0;   /* only a delta carries clamps */
+    snap->overshoot_ns = 0;     /* …and only a delta can overshoot */
 
     /* Time model: copy as-is */
     snap->tm = acc->tm;
@@ -137,6 +138,7 @@ int pgwt_ring_delta(const struct pgwt_ring *ring, int ticks_ago,
     /* Time model: field-by-field subtraction */
     out->tm.db_time_ns        = sat_sub(curr->tm.db_time_ns,        prev->tm.db_time_ns, &out->clamped_fields);
     out->tm.cpu_time_ns       = sat_sub(curr->tm.cpu_time_ns,       prev->tm.cpu_time_ns, &out->clamped_fields);
+    out->tm.offcpu_time_ns    = sat_sub(curr->tm.offcpu_time_ns,    prev->tm.offcpu_time_ns, &out->clamped_fields);
     out->tm.io_time_ns        = sat_sub(curr->tm.io_time_ns,        prev->tm.io_time_ns, &out->clamped_fields);
     out->tm.lwlock_time_ns    = sat_sub(curr->tm.lwlock_time_ns,    prev->tm.lwlock_time_ns, &out->clamped_fields);
     out->tm.lock_time_ns      = sat_sub(curr->tm.lock_time_ns,      prev->tm.lock_time_ns, &out->clamped_fields);
@@ -191,6 +193,24 @@ int pgwt_ring_delta(const struct pgwt_ring *ring, int ticks_ago,
         }
     }
     out->num_query_events = nq;
+
+    /* #202: the self-check for the direction sat_sub cannot see. Every
+     * clamp above made a field SMALLER, so clamped_fields is blind to rows
+     * that sum to MORE than the window's DB Time — which is exactly how
+     * #202 presented (18330 ms of rows against 15255 ms of DB Time,
+     * clamped_fields 0). The live accumulator's contract makes
+     * cpu + offcpu + Sigma(waits) == db exact per snapshot, and the
+     * subtraction above is linear, so a healthy window reads 0 here; a
+     * clamp can push it positive, and so can any future asymmetry between
+     * the two live paths. Counted, never silent
+     * (metrics ring_delta_overshoot_ns_total). */
+    uint64_t rows = out->tm.cpu_time_ns + out->tm.offcpu_time_ns +
+                    out->tm.io_time_ns + out->tm.lwlock_time_ns +
+                    out->tm.lock_time_ns + out->tm.bufferpin_time_ns +
+                    out->tm.client_time_ns + out->tm.ipc_time_ns +
+                    out->tm.timeout_time_ns + out->tm.extension_time_ns;
+    out->overshoot_ns = rows > out->tm.db_time_ns
+                      ? rows - out->tm.db_time_ns : 0;
 
     return 0;
 }

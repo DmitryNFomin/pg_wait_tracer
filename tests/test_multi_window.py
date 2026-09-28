@@ -89,15 +89,26 @@ def split_ticks(output):
     return ticks
 
 
-def parse_first_window(output):
-    """Parse time_model multi-window output, extracting first window values.
+def parse_first_window(output, tick=-1):
+    """Parse ONE tick of time_model multi-window output, first window column.
 
-    Returns dict of {name: value_ms}. Works because the existing regex
-    captures the first numerical value on each row — which is the first
-    window's value in multi-window mode.
+    Returns dict of {name: value_ms} for `tick` (default: the last).
+
+    It must be one tick, not the whole stream. src/output.c omits a class
+    row whose first-window value is 0 (`if (classes[i].sort_ns == 0)
+    continue`) and omits Off-CPU* when every window's is 0, so the row SET
+    changes from tick to tick. Scanning the whole output with
+    last-writer-wins therefore kept a class's tick-2 milliseconds next to a
+    DB Time read from tick 3 — a conservation check against a mixture of
+    two windows, and an independent source of POSITIVE excess inside the
+    very assertion that reported #202's 18330 vs 15255. Some unknown part
+    of that original 20.2% was this parser, not the accounting.
     """
+    ticks = split_ticks(output)
+    if not ticks:
+        return {}
     model = {}
-    for line in output.split('\n'):
+    for line in ticks[tick].split('\n'):
         line = line.strip()
         m = re.match(r'^(.+?)\s{2,}([\d.]+)\s+[\d.]+%', line)
         if m:
@@ -275,12 +286,30 @@ def test_internal_consistency(pm_pid):
                  if ':' not in k and k not in EXCLUDE}
     reconstructed = sum(top_level.values())
 
-    if db_time_ms > 0:
-        error_pct = abs(reconstructed - db_time_ms) / db_time_ms * 100
+    # The gate must RUN, not be skipped: a DB Time of 0 used to make this
+    # check disappear from the count entirely (tests_run never incremented),
+    # so a tick that produced nothing looked the same as a tick that
+    # balanced. Absent is a failure here, never an approval (issue #202).
+    if db_time_ms <= 0:
+        check(False,
+              "DB Time consistency: cannot check — DB Time is "
+              f"{db_time_ms:.0f}ms (rows {sorted(top_level)})")
+    elif not top_level:
+        check(False,
+              "DB Time consistency: cannot check — no top-level rows parsed "
+              f"from a DB Time of {db_time_ms:.0f}ms")
+    else:
+        excess = reconstructed - db_time_ms
+        error_pct = abs(excess) / db_time_ms * 100
+        # Signed, because the two directions mean different things: a
+        # positive excess is over-attribution (time counted twice, the only
+        # direction this identity can detect at all — src/compute.c's
+        # Off-CPU* residual absorbs the other one), a negative one is a row
+        # the view is not printing.
         check(error_pct < 2.0,
               f"DB Time consistency: Σ(top-level rows {sorted(top_level)}) "
               f"= {reconstructed:.0f}ms vs DB Time {db_time_ms:.0f}ms "
-              f"(error {error_pct:.1f}%)")
+              f"({excess:+.0f}ms, error {error_pct:.1f}%)")
 
 
 # ── Test 4: system_event Format ─────────────────────────────

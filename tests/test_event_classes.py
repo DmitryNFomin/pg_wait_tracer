@@ -152,12 +152,16 @@ def test_activity(pm_pid):
     WAIT_CLASSES = {'IO', 'LWLock', 'Lock', 'Client', 'IPC',
                     'BufferPin', 'Timeout', 'Extension'}
     wait_sum = sum(v for k, v in model.items() if k in WAIT_CLASSES)
-    reconstructed = cpu_time + wait_sum
+    # Off-CPU* (issue #202) is CPU*'s measured sibling and a first-class
+    # component of DB Time; absent (0) on the legacy/sampled tiers.
+    offcpu = model.get('Off-CPU*', 0)
+    reconstructed = cpu_time + offcpu + wait_sum
     if db_time > 0:
         error_pct = abs(reconstructed - db_time) / db_time * 100
         check(error_pct < 2.0,
               f"Activity excluded from DB Time: "
-              f"CPU({cpu_time:.0f}) + Waits({wait_sum:.0f}) = "
+              f"CPU({cpu_time:.0f}) + OffCPU({offcpu:.0f}) + "
+              f"Waits({wait_sum:.0f}) = "
               f"{reconstructed:.0f}ms vs DB Time {db_time:.0f}ms "
               f"(error {error_pct:.1f}%)")
 

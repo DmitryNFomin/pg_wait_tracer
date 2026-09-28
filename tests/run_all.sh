@@ -136,16 +136,27 @@ xpass=0
 # test that could not even run (exit 126/127: not executable, or the file
 # is missing) is a broken test, not the tracked bug — that always counts as
 # a real failure regardless of KNOWN_FAILING membership.
-KNOWN_FAILING=(
-    "test_partition|99"
-)
+# Empty = nothing is expected to fail. test_partition|99 was removed with the
+# #202 fix: #99 was "conservation miss of 0.11% (CPU+Waits vs DB Time)", the
+# under-attribution half of the same identity, and the residual is now
+# STRUCTURALLY zero rather than merely small — with cpu_accounting off both
+# live paths charge the gap and there is no Off-CPU* term at all, with it on
+# both charge measured and the remainder has its own row, so the legacy/PG13
+# tier is exact too. Leaving the entry in would have disarmed the only
+# live-PG test that can catch a regression of that contract.
+KNOWN_FAILING=()
 
 # known_failing_issue NAME — prints the tracking issue number and returns 0
 # if NAME is listed in KNOWN_FAILING, else returns 1 with no output.
 known_failing_issue() {
     local target="$1"
     local entry name issue
-    for entry in "${KNOWN_FAILING[@]}"; do
+    # The ${a[@]+...} form, not a bare "${a[@]}": under `set -u` an EMPTY
+    # array expands to an unbound variable on bash < 4.4 (EL8's /bin/bash is
+    # 4.4, but the gate must not depend on that), which would abort run_all
+    # the first time any test finished — with the list now empty, that is
+    # every run.
+    for entry in ${KNOWN_FAILING[@]+"${KNOWN_FAILING[@]}"}; do
         IFS='|' read -r name issue <<< "$entry"
         if [[ "$name" == "$target" ]]; then
             echo "$issue"
