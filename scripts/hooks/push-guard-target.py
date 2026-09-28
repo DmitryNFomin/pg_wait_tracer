@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Resolve the working directory of a git push in Claude's Bash tool input.
+"""Resolve the checked-out worktree of a git push in Claude's Bash input.
 
 Exit 0 for no push, 1 with its directory on stdout for a resolved push,
 and 2 when a push cannot be resolved safely.
@@ -9,6 +9,7 @@ import json
 import os
 import re
 import shlex
+import subprocess
 import sys
 
 
@@ -21,6 +22,40 @@ FLAG_OPTIONS = {"-p", "-P", "--paginate", "--no-pager", "--no-replace-objects",
                 "--no-optional-locks", "--literal-pathspecs", "--glob-pathspecs",
                 "--noglob-pathspecs", "--icase-pathspecs"}
 REPO_ENV = {"GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_CEILING_DIRECTORIES"}
+
+
+def branch_worktree(args, repo):
+    """Resolve a simple pushed local branch to its checked-out worktree.
+
+    Other refspecs and push options have context-dependent meaning and are
+    deliberately left unresolved.
+    """
+    try:
+        push = args.index("push")
+    except ValueError:
+        return False, None
+    operands = args[push + 1:]
+    if (len(operands) != 2 or operands[0].startswith("-")
+            or operands[1].startswith("-") or ":" in operands[1]
+            or operands[1].startswith("+") or operands[1] == "HEAD"):
+        return False, None
+    branch = "refs/heads/" + operands[1]
+    result = subprocess.run(
+        ["git", "-C", repo, "worktree", "list", "--porcelain"],
+        capture_output=True, text=True,
+    )
+    if result.returncode:
+        return True, None
+    matches = []
+    path = None
+    for line in result.stdout.splitlines() + [""]:
+        if line.startswith("worktree "):
+            path = line[len("worktree "):]
+        elif line == "branch " + branch and path is not None:
+            matches.append(path)
+        elif not line:
+            path = None
+    return True, matches[0] if len(matches) == 1 else None
 
 
 def git_target(args, cwd):
@@ -105,6 +140,12 @@ def targets(command, start=None):
     push_candidate, ambiguous_candidate = may_push(lexed)
     if not push_candidate:
         return []
+    # A function or sourced file can switch to a different Git repository.
+    # Its branch names cannot safely be matched against the original repo.
+    function_definition = r"\b(?:function\s+)?[A-Za-z_]\w*\s*\(\s*\)\s*\{"
+    sourcing = r"(?:^|[;&|()\s])(?:source|\.)\s"
+    if re.search(function_definition, command) or re.search(sourcing, command):
+        return [None]
     raw = []
     for token in lexed:
         # shlex groups adjacent punctuation, including different operators.
@@ -189,7 +230,21 @@ def targets(command, start=None):
         elif parts[0] == "git" or parts[0].endswith("/git"):
             push, target = git_target(parts[1:], cwd)
             if push:
-                found.append(None if uncertain else target)
+                # Use the invocation's original repository for worktree
+                # enumeration; a preceding shell function may have moved cwd.
+                c_paths = []
+                for index, arg in enumerate(parts[1:]):
+                    if arg == "-C" and index + 2 < len(parts):
+                        c_paths.append(parts[index + 2])
+                    elif arg.startswith("-C") and len(arg) > 2:
+                        c_paths.append(arg[2:])
+                # A relative first -C is interpreted against the shell's
+                # actual cwd, which a prior function may have changed.
+                repo = target if c_paths else start or os.getcwd()
+                safe_repo = target and (not c_paths or os.path.isabs(c_paths[0]))
+                named, branch_target = (branch_worktree(parts[1:], repo)
+                                        if safe_repo else (False, None))
+                found.append(None if uncertain or not named else branch_target)
         elif (parts[0] in {"bash", "sh", "zsh"} and len(parts) >= 3
               and parts[1].startswith("-") and "c" in parts[1]):
             found.extend(None if uncertain else target for target in targets(parts[2], cwd))

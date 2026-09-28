@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Exercise the PreToolUse hook with real JSON and disposable git worktrees.
 
-Run normally for green. Set PGWT_TEST_RED_BASE to 5233266 or d12ffee to
-materialize that hook from local history and verify the named red cases.
+Run normally for green. Set PGWT_TEST_RED_BASE to 5233266, d12ffee, or
+05eaad5 to materialize that hook from local history and verify the red cases.
 PGWT_TEST_PUSH_GUARD can instead supply a hook path for the same red mode.
 """
 
@@ -25,6 +25,9 @@ RED_523 = {
     "unclassifiable nonpush operator",
     "malformed nonpush quote",
     "quoted punctuation path push",
+    "make then push", "npm then push", "script then push",
+    "branch owner despite caller cwd", "branch absent from worktrees",
+    "unnamed push", "contextual HEAD ref",
 }
 RED_D12 = {
     "substitution adjacent semicolon", "substitution adjacent and",
@@ -34,6 +37,18 @@ RED_D12 = {
     "unclassifiable push operator",
     "malformed nonpush quote",
     "quoted punctuation path push",
+    "function changes cwd before push", "source changes cwd before push",
+    "dot changes cwd before push", "push inside function",
+    "function moves before main push", "source moves before main push",
+    "branch owner despite caller cwd", "branch absent from worktrees",
+    "unnamed push", "contextual HEAD ref",
+}
+RED_05 = {
+    "function changes cwd before push", "source changes cwd before push",
+    "dot changes cwd before push", "push inside function",
+    "function moves before main push", "source moves before main push",
+    "branch owner despite caller cwd", "branch absent from worktrees",
+    "unnamed push", "contextual HEAD ref",
 }
 
 
@@ -48,6 +63,7 @@ def fixture(parent):
     shutil.copy2(HASH, main / "scripts/tree-hash.sh")
     (main / ".gitignore").write_text(".pgwt-check.stamp\n")
     (main / "data.txt").write_text("original\n")
+    (main / "move.sh").write_text(f"cd {shlex.quote(str(worktree))}\n")
     git(main, "init", "-q", "-b", "main")
     git(main, "config", "user.email", "test@example.com")
     git(main, "config", "user.name", "Test")
@@ -94,6 +110,9 @@ def cases(main, worktree):
     yield "malformed nonpush quote", "printf 'unfinished", main, 0
     yield "shell c clean push", "bash -c 'git push origin main'", main, 0
     yield "eval clean push", "eval 'git push origin main'", main, 0
+    yield "make then push", "make && git push origin main", main, 0
+    yield "npm then push", "npm run build && git push origin main", main, 0
+    yield "script then push", "./deploy.sh && git push origin main", main, 0
     (main / "data.txt").write_text("changed\n")
     yield "bare stale push", "git push origin main", main, 2
     yield "clean worktree, dirty main", f"cd {q} && git push origin agent/test", main, 0
@@ -101,6 +120,16 @@ def cases(main, worktree):
     (worktree / ".pgwt-check.stamp").unlink()
     yield "unstamped worktree, clean main", f"cd {q} && git push origin agent/test", main, 2
     (worktree / "data.txt").write_text("dirty and unstamped\n")
+    yield "function changes cwd before push", f"goto_worktree() {{ cd {q}; }}; goto_worktree && git push origin agent/test", main, 2
+    yield "source changes cwd before push", "source ./move.sh && git push origin agent/test", main, 2
+    yield "dot changes cwd before push", ". ./move.sh && git push origin agent/test", main, 2
+    yield "push inside function", f"deploy() {{ cd {q}; git push origin agent/test; }}; deploy", main, 2
+    yield "function moves before main push", f"f() {{ cd {q}; }}; f && git push origin main", main, 2
+    yield "source moves before main push", "source ./move.sh && git push origin main", main, 2
+    yield "branch owner despite caller cwd", "git push origin main", worktree, 0
+    yield "branch absent from worktrees", "git push origin agent/absent", main, 2
+    yield "unnamed push", "git push", main, 2
+    yield "contextual HEAD ref", "git push origin HEAD", main, 2
     yield "cd then command then dirty push", f"cd {q} && true && git push origin agent/test", main, 2
     yield "substitution adjacent semicolon", f"x=$(pwd);cd {q} && git push origin agent/test", main, 2
     yield "substitution adjacent and", f"x=$(pwd)&&cd {q} && git push origin agent/test", main, 2
@@ -131,8 +160,8 @@ def main():
     red_base = os.environ.get("PGWT_TEST_RED_BASE")
     if os.environ.get("PGWT_TEST_PUSH_GUARD") and not red_base:
         red_base = "5233266"
-    if red_base not in {None, "5233266", "d12ffee"}:
-        raise ValueError("PGWT_TEST_RED_BASE must be 5233266 or d12ffee")
+    if red_base not in {None, "5233266", "d12ffee", "05eaad5"}:
+        raise ValueError("PGWT_TEST_RED_BASE must be 5233266, d12ffee, or 05eaad5")
     count = 0
     with tempfile.TemporaryDirectory(prefix="pgwt-push-guard-") as tmp:
         guard = GUARD
@@ -154,7 +183,8 @@ def main():
                 continue
             count += 1
             code, error = run(command, cwd, guard, name == "skip escape hatch")
-            should_red = name in (RED_523 if red_base == "5233266" else RED_D12)
+            should_red = name in ({"5233266": RED_523, "d12ffee": RED_D12,
+                                  "05eaad5": RED_05}.get(red_base, set()))
             want = code != expected if red_base and should_red else code == expected
             print(f"  {'PASS' if want else 'FAIL'}: {name} (exit {code}, fixed expectation {expected})")
             if not want:

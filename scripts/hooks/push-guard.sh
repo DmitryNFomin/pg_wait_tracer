@@ -8,7 +8,7 @@ target=$(printf '%s' "$input" | python3 "$(dirname "$0")/push-guard-target.py")
 result=$?
 case "$result" in
     0) exit 0 ;; # No git push in the command.
-    1) ;;        # One push; target is its working directory.
+    1) ;;        # One push; target is the worktree holding its branch.
     *) echo "push blocked: cannot determine the repository being pushed ($target)." >&2; exit 2 ;;
 esac
 root=$(git -C "$target" rev-parse --show-toplevel 2>/dev/null) || {
