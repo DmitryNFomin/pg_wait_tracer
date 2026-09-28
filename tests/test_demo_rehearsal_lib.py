@@ -2,9 +2,10 @@
 """test_demo_rehearsal_lib.py -- unit tests for tests/demo_rehearsal_lib.py
 (issue #157). Pure Python, no browser, no network, no subprocess -- can run
 on the Mac (python3 tests/test_demo_rehearsal_lib.py); wired into
-tests/unit_tests.list the same way tests/test_ui_live_smoke_lib.py is (runs
-in the C-unit-suite tier, CI/nightly/box-check, not scripts/check.sh -- see
-that file's own header for why).
+tests/unit_tests.list (CI/nightly/box-check) AND, since 2026-09-28
+(owner finding, run.id 1790574871), scripts/check.sh directly -- a
+regression in the rehearsal's own gating logic must fail `make check`, not
+wait for an actual 30-45 minute rehearsal run to surface it.
 
 Usage: python3 tests/test_demo_rehearsal_lib.py
 """
@@ -13,6 +14,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import demo_rehearsal_lib as lib
+import ui_live_smoke_lib as ui_lib
 
 tests_run = 0
 tests_passed = 0
@@ -813,6 +815,95 @@ def test_build_demo_summary_some_tabs_reached_is_fine():
     summary = lib.build_demo_summary(pass_results, {"c": {"ok": True}})
     check(summary["ok"], "at least one tab reached across the passes is enough for this floor")
     check(summary["total_tabs_walked"] == 1, "total_tabs_walked counts across all passes")
+
+
+# ── Blink-gate regression: demo_rehearsal's dependency on
+# ui_live_smoke_lib.build_tab_result's SWEEP-BASED verdict (criteria doc /
+# owner finding, 2026-09-28, run.id 1790574871 on master 19a95f7) ─────────
+#
+# demo_rehearsal.py has NO independent screenshot/blink-measurement code of
+# its own -- every tab's verdict comes straight from
+# ui_live_smoke.py:run_tab(), which calls ui_live_smoke_lib's own
+# blink_sweep_gate_verdict (the worst consecutive-pair ratio across the
+# WHOLE mount-anchored offset sweep, #209) to compute blink_ratio, then
+# build_tab_result(blink_ratio=...) to grade the tab. This IS that
+# dependency, pinned with the REAL numbers a live rehearsal measured
+# (run.id 1790574871): the OLD single-anchored-pair gate reported ratio 0.0
+# for scatter and transitions (PASS) because its one sampled pair landed
+# AFTER their real transients at the 200->500ms sweep pair; the fix grades
+# on the WORST ratio across the whole sweep instead. A future change that
+# reverts demo_rehearsal.py to computing its own single-pair ratio, or that
+# changes build_tab_result's grading formula, fails HERE -- in `make
+# check` -- rather than silently only on a 30-45 minute rehearsal.
+_BLINK_GATE_COMMON_KWARGS = dict(
+    rendered_ok=True, rendered_detail="ok", ticks_observed=6,
+    console_errors=[], color_violations=[],
+    leak_before={"pending": 0}, leak_after={"pending": 0}, artifacts={},
+)
+
+
+def test_blink_gate_scatter_13pct_transient_fails_run_1790574871():
+    # scatter, run.id 1790574871: tick 3's worst-sweep-pair ratio (the
+    # 200->500ms pair) measured 0.1305; ticks 1/2/4/5/6 assumed clean (0.0)
+    # -- the minimal fixture needed to prove max() over the sweep catches
+    # it (this is the same case demonstrated red/green in this task's
+    # standalone proof before landing here).
+    sweep_ratios = [0.0, 0.0, 0.1305, 0.0, 0.0, 0.0]
+    blink_ratio = max(sweep_ratios)
+    result = ui_lib.build_tab_result(
+        tab_id="scatter", blink_ratio=blink_ratio,
+        blink_pair_offsets_ms=[100] * len(sweep_ratios), blink_not_measured=[],
+        **_BLINK_GATE_COMMON_KWARGS)
+    check(result["no_blink"]["ratio"] == 0.1305,
+          f"the tab's graded ratio is the sweep's WORST pair, not an anchored single pair ({result['no_blink']['ratio']})")
+    check(not result["no_blink"]["ok"],
+          f"0.1305 fails the {ui_lib.BLINK_THRESHOLD} blink threshold ({result['no_blink']})")
+    check(not result["ok"],
+          f"scatter's tab-level verdict is FAIL, reproducing run.id 1790574871's finding ({result['ok']})")
+
+
+def test_blink_gate_transitions_subpercent_transient_fails_run_1790574871():
+    # transitions, run.id 1790574871: ticks 3-6's worst-sweep-pair ratios
+    # (also the 200->500ms pair) measured 0.0172, 0.0097, 0.0150, 0.0072.
+    sweep_ratios = [0.0, 0.0, 0.0172, 0.0097, 0.0150, 0.0072]
+    blink_ratio = max(sweep_ratios)
+    result = ui_lib.build_tab_result(
+        tab_id="transitions", blink_ratio=blink_ratio,
+        blink_pair_offsets_ms=[100] * len(sweep_ratios), blink_not_measured=[],
+        **_BLINK_GATE_COMMON_KWARGS)
+    check(abs(result["no_blink"]["ratio"] - 0.0172) < 1e-9,
+          f"graded ratio is tick 3's 0.0172, the worst of the four ({result['no_blink']['ratio']})")
+    check(not result["ok"],
+          f"transitions' tab-level verdict is FAIL, reproducing run.id 1790574871's finding ({result['ok']})")
+
+
+def test_blink_gate_queries_2_6pct_transient_still_fails_run_1790574871():
+    # queries, run.id 1790574871: the OLD anchored-pair gate ALREADY caught
+    # this one (tick 2 = 0.0262, at the 500->1000ms pair the old anchor
+    # happened to land on) -- included as a consistency check that the NEW
+    # sweep-based gate still fails it too, not just tabs the old gate
+    # missed.
+    sweep_ratios = [0.0, 0.0262, 0.0, 0.0, 0.0, 0.0]
+    blink_ratio = max(sweep_ratios)
+    result = ui_lib.build_tab_result(
+        tab_id="queries", blink_ratio=blink_ratio,
+        blink_pair_offsets_ms=[100] * len(sweep_ratios), blink_not_measured=[],
+        **_BLINK_GATE_COMMON_KWARGS)
+    check(not result["ok"],
+          f"queries' tab-level verdict stays FAIL under the new gate too ({result['ok']})")
+
+
+def test_blink_gate_clean_trace_still_passes():
+    # Baseline: a genuinely clean sweep (every tick's worst pair ~0) must
+    # still pass -- this suite only closes the false-PASS hole, it must
+    # never introduce a false FAIL on a clean trace.
+    sweep_ratios = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    blink_ratio = max(sweep_ratios)
+    result = ui_lib.build_tab_result(
+        tab_id="overview", blink_ratio=blink_ratio,
+        blink_pair_offsets_ms=[100] * len(sweep_ratios), blink_not_measured=[],
+        **_BLINK_GATE_COMMON_KWARGS)
+    check(result["ok"], f"a genuinely clean sweep still passes ({result})")
 
 
 def main():

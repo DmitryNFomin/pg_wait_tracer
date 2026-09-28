@@ -53,6 +53,17 @@ run python3 -m py_compile tests/*.py
 step "python: free_ports self-test"
 run python3 tests/test_free_ports.py
 
+# Owner finding, 2026-09-28 (run.id 1790574871): the demo-rehearsal bypass
+# suite (tests/test_demo_rehearsal_lib.py) used to run only in the
+# box-check/CI tier (tests/unit_tests.list), so a regression in the
+# rehearsal's own gating logic -- e.g. its blink verdict silently
+# diverging from ui_live_smoke_lib.build_tab_result's -- was only ever
+# caught by an actual 30-45 minute rehearsal run, not by `make check`.
+# Pure Python, no browser, no network, no Linux/root needed -- belongs in
+# the fast deterministic tier.
+step "python: demo-rehearsal bypass-suite unit tests"
+run python3 tests/test_demo_rehearsal_lib.py
+
 step "CI change-classifier table-driven test (issue #167)"
 run bash tests/test_classify_changed_files.sh
 
