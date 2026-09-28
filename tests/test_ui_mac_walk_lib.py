@@ -318,6 +318,25 @@ def test_build_tab_entry_clean():
     check(entry["void_reason"] is None, "build_tab_entry: clean tab has no void_reason")
 
 
+def test_build_tab_entry_render_state_empty_still_ok():
+    # 2026-09-28 review correction: waterfall/scatter's documented empty
+    # state ("No executions for selected range") is a legitimate, working
+    # panel -- rendered=True, render_state='empty' -- distinct from a real
+    # render failure, and it must not fail the tab by itself.
+    entry = lib.build_tab_entry("waterfall", True, "empty: No executions for selected range",
+                                 0.5, [], [], 2.0, None, render_state="empty")
+    check(entry["render_state"] == "empty",
+          "build_tab_entry: render_state 'empty' persisted verbatim")
+    check(entry["ok"] is True,
+          "build_tab_entry: a legitimately empty panel is still ok=True")
+
+
+def test_build_tab_entry_render_state_defaults_to_none():
+    entry = lib.build_tab_entry("overview", True, "5 rows", 1.2, [], [], 2.0, None)
+    check(entry["render_state"] is None,
+          "build_tab_entry: render_state defaults to None for callers that don't set it")
+
+
 # ── freshness_status / verdict_status: the aggregation fix (review
 # blocker, 2026-09-28) ────────────────────────────────────────────────────
 # Found live: tests/results/ui_mac_walk_safari/summary.json recorded

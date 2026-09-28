@@ -156,10 +156,31 @@ def wait_for_js(session, bool_expr, timeout_s, poll_s=0.15):
         time.sleep(poll_s)
 
 
+# Documented EMPTY-state markers (2026-09-28, review correction): waterfall
+# and scatter render a ".loading" div with a specific message when the
+# trace window has no completed executions -- no canvas is ever created for
+# that state BY DESIGN (waterfall.js:215 "No executions for selected
+# range", exec-scatter.js:70 "No completed, positive-duration executions
+# for selected range"). _READY_SELECTOR alone (from ui_live_smoke.py,
+# "#waterfall-chart canvas" / "#scatter-chart canvas") can never match that
+# state, so a legitimately empty panel used to time out and read as a
+# render FAILURE. Two different containers: waterfall's empty marker lands
+# in #executions-table (waterfall.js:215), not #waterfall-chart itself;
+# scatter's lands in its own #scatter-chart container (exec-scatter.js:70).
+_EMPTY_STATE_SELECTOR = {
+    "waterfall": "#executions-table .loading",
+    "scatter": "#scatter-chart .loading",
+}
+
+
 def navigate_to_tab(session, tab_id, timeout_s):
     """WebDriver analogue of ui_live_smoke.py's _navigate_to_tab -- same
     Timeline drill-in special case, same #live-btn resume idiom, driven
-    through execute_script instead of Playwright element handles."""
+    through execute_script instead of Playwright element handles.
+
+    Returns 'data' or 'empty' -- WHICH documented state the panel reached
+    (see _EMPTY_STATE_SELECTOR), so a legitimately empty panel is never
+    conflated with one that actually failed to render."""
     if tab_id == "timeline":
         ok = session.execute_script(
             "const b = document.querySelector(\".tab[data-tab='sessions']\"); "
@@ -183,9 +204,23 @@ def navigate_to_tab(session, tab_id, timeout_s):
             raise RuntimeError(f"no tab button for {tab_id!r}")
 
     ready_sel = json.dumps(uls._READY_SELECTOR[tab_id])
-    if wait_for_js(session, f"document.querySelector({ready_sel})", timeout_s) is None:
+    empty_sel = _EMPTY_STATE_SELECTOR.get(tab_id)
+    if empty_sel:
+        empty_sel_json = json.dumps(empty_sel)
+        condition = (f"document.querySelector({ready_sel}) || "
+                     f"document.querySelector({empty_sel_json})")
+    else:
+        empty_sel_json = None
+        condition = f"document.querySelector({ready_sel})"
+    if wait_for_js(session, condition, timeout_s) is None:
+        extra = f" (no empty-state marker {empty_sel!r} either)" if empty_sel else ""
         raise RuntimeError(f"panel did not render ({uls._READY_SELECTOR[tab_id]!r}) "
-                            f"within {timeout_s}s")
+                            f"within {timeout_s}s{extra}")
+
+    render_state = "data"
+    if empty_sel_json and session.execute_script(
+            f"return document.querySelector({empty_sel_json}) !== null"):
+        render_state = "empty"
 
     live_active = session.execute_script(
         "const b = document.getElementById('live-btn'); "
@@ -201,6 +236,20 @@ def navigate_to_tab(session, tab_id, timeout_s):
                 "const b = document.getElementById('live-btn'); "
                 "return !!b && b.classList.contains('active');"):
             raise RuntimeError("clicking #live-btn did not resume live mode")
+
+    return render_state
+
+
+def empty_state_text(session, tab_id):
+    """The actual text of the documented empty-state marker (2026-09-28
+    review: "record which state it saw" -- not just that it was empty, but
+    what it said), or None if this tab has no documented empty state."""
+    sel = _EMPTY_STATE_SELECTOR.get(tab_id)
+    if not sel:
+        return None
+    return session.execute_script(
+        f"const el = document.querySelector({json.dumps(sel)}); "
+        "return el ? el.textContent.trim() : null;")
 
 
 def render_check(session, tab_id, timeout_s=2.0, poll_s=0.15):
@@ -502,18 +551,38 @@ def main():
 
             session.execute_script(CONSOLE_HOOK_JS)
             drain_console_errors(session)  # discard anything from before the hook
-            # Found live (2026-09-28): every freshness read came back None
-            # on a real run because this hook was never installed -- the
-            # freshness pass below reads window.__uiLiveTicks, which only
-            # ever exists after this call (same idiom tests/ui_live_smoke.py
-            # / tests/ui_mac_walk.py use). Install once, right after the
-            # first connect, so it accumulates ticks across the WHOLE
-            # session (true SPA, tab switches never navigate) -- not
-            # freshness-pass-local.
-            session.execute_script(uls.TICK_HOOK_JS)
-            # Found live (2026-09-28): with the hook installed, EVERY
-            # freshness read still came back None -- this module's whole
-            # 11-tab walk finishes in ~5-8s (execute_script DOM polling, no
+            # Install once, right after the first connect, so it
+            # accumulates ticks across the WHOLE session (true SPA, tab
+            # switches never navigate) -- not freshness-pass-local.
+            #
+            # ROOT-CAUSED AND FIXED (2026-09-28, review): the previous
+            # `session.execute_script(uls.TICK_HOOK_JS)` was the entire
+            # freshness story -- four consecutive "unmeasured" results were
+            # a deterministic install failure, not the walk outrunning the
+            # product. WebDriver's execute/sync posts `script` as a W3C
+            # FUNCTION BODY (wrapped internally as `function(args){
+            # <script> }`), but uls.TICK_HOOK_JS is written as
+            # `"() => { ... }"` -- an arrow function EXPRESSION, not
+            # statements. Posted bare, that body just constructs an
+            # anonymous function object and immediately discards it; the
+            # assignment to window.__uiLiveTicks inside it never runs.
+            # Proof: `session.execute_script("return typeof
+            # window.__uiLiveTicks")` read "undefined" right after the
+            # unwrapped call. CONSOLE_HOOK_JS above is written as bare
+            # statements (no arrow-function wrapper), which is exactly why
+            # it worked while this did not. Fix: wrap it as an IIFE so the
+            # posted body both defines AND calls it.
+            session.execute_script(f"({uls.TICK_HOOK_JS})()")
+            if session.execute_script("return typeof window.__uiLiveTicks") == "undefined":
+                raise RuntimeError(
+                    "TICK_HOOK_JS install verification failed: "
+                    "window.__uiLiveTicks is still undefined after the IIFE-wrapped "
+                    "install -- fail loudly rather than silently measuring nothing again")
+            # Found live (2026-09-28), superseded by the fix above (kept for
+            # the record): with the hook APPEARING installed but silently
+            # inert, EVERY freshness read still came back None -- this
+            # module's whole 11-tab walk finishes in ~5-8s (execute_script
+            # DOM polling, no
             # fresh browser context per tab like tests/ui_mac_walk.py), so
             # it can outrun app.js's own 5s AAS auto-refresh cadence
             # entirely: the freshness pass ran before even ONE periodic
@@ -562,11 +631,24 @@ def main():
                 print(f"=== {tab_id} ===")
                 wall_start = time.time()
                 t0 = time.monotonic()
-                render_ok, render_detail, ttfp_s = False, "never checked", None
+                render_ok, render_detail, ttfp_s, render_state = False, "never checked", None, None
                 try:
-                    navigate_to_tab(session, tab_id, args.first_data_timeout)
+                    render_state = navigate_to_tab(session, tab_id, args.first_data_timeout)
                     ttfp_s = time.monotonic() - t0
-                    render_ok, render_detail = render_check(session, tab_id)
+                    if render_state == "empty":
+                        # A documented empty state (2026-09-28 review
+                        # correction) is a legitimate, working panel --
+                        # PANEL_CHECKS (ui_live_smoke.py, read-only here)
+                        # would report ok:False for it (it checks for
+                        # rows/series data, which an empty result has
+                        # none of by design), so it is deliberately NOT
+                        # consulted for this state; render_ok is set True
+                        # directly and the actual empty-state message is
+                        # recorded verbatim in render_detail.
+                        render_ok = True
+                        render_detail = f"empty: {empty_state_text(session, tab_id)}"
+                    else:
+                        render_ok, render_detail = render_check(session, tab_id)
                 except Exception as e:
                     render_detail = str(e)
                     print(f"  FAIL [{tab_id}]: {e}", file=sys.stderr)
@@ -605,10 +687,12 @@ def main():
                 entry = lib.build_tab_entry(
                     tab_id, render_ok, render_detail, ttfp_s, console_errors,
                     pgwt_errors, freshness_age_s=None, mac_void_reason=None,
-                    wall_start=wall_start, wall_end=wall_end)
+                    wall_start=wall_start, wall_end=wall_end,
+                    render_state=render_state)
                 tabs.append(entry)
-                print(f"  rendered={entry['rendered']} ttfp_s={ttfp_s} "
-                      f"console_errors={len(console_errors)} (void attribution pending)")
+                print(f"  rendered={entry['rendered']} render_state={render_state!r} "
+                      f"ttfp_s={ttfp_s} console_errors={len(console_errors)} "
+                      "(void attribution pending)")
 
             print("=== freshness pass (revisit each tab, same session) ===")
             for entry in tabs:

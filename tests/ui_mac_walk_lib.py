@@ -193,7 +193,7 @@ def verdict_status(counted, ok):
 def build_tab_entry(tab_id, rendered, render_detail, ttfp_s, console_errors,
                      pgwt_console_errors, freshness_age_s, mac_void_reason,
                      wall_start=None, wall_end=None, bracket_before=None,
-                     bracket_after=None):
+                     bracket_after=None, render_state=None):
     """One tab's row in the verdict. `ok` is false if the tab didn't render,
     threw a real (non-'[pgwt]') console error, OR its window is void for
     Mac-side infrastructure reasons -- void_reason is reported SEPARATELY so
@@ -215,7 +215,20 @@ def build_tab_entry(tab_id, rendered, render_detail, ttfp_s, console_errors,
     ok: true while freshness was unmeasured (age_s: None) on all 11
     tabs -- freshness was computed and stored, but never gated this
     field, so an unmeasured criterion silently passed through. An
-    unmeasured criterion is never treated as satisfied."""
+    unmeasured criterion is never treated as satisfied.
+
+    render_state (2026-09-28, review correction): 'data' | 'empty' |
+    'failed' | None (default, for callers that don't distinguish).
+    waterfall/scatter legitimately render a documented EMPTY state
+    (".loading" div, e.g. "No executions for selected range") when the
+    trace window has no completed executions -- no canvas is ever created
+    for that state BY DESIGN (waterfall.js:215, exec-scatter.js:70), so it
+    is not the same result as a tab that actually failed to render, and
+    `rendered` alone collapsed the two. render_state is reported
+    separately so a reader can tell them apart; it does not itself gate
+    `ok` (that stays driven by `rendered`, which the caller sets True for
+    BOTH 'data' and 'empty' -- an empty panel showing its own correct
+    empty-state message is a legitimate, working panel)."""
     fresh_ok, fresh_detail = freshness_ok(freshness_age_s)
     fresh_status = freshness_status(freshness_age_s)
     ok = (bool(rendered) and not console_errors and mac_void_reason is None
@@ -224,6 +237,7 @@ def build_tab_entry(tab_id, rendered, render_detail, ttfp_s, console_errors,
         "tab": tab_id,
         "rendered": bool(rendered),
         "render_detail": render_detail,
+        "render_state": render_state,
         "ttfp_s": ttfp_s,
         "console_errors": list(console_errors),
         "pgwt_console_errors": list(pgwt_console_errors),
