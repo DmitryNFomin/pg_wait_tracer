@@ -13,6 +13,21 @@ backend, Go WebSocket bridge, ECharts/uPlot web UI). Plan and status:
 | `make box-check EPHEMERAL=1 [PG=…] [KEEP=1]` | throwaway Hetzner VM created from the `pgwt=gate-snapshot` image, always deleted at the end (`KEEP=1` leaves it up and prints the delete command) | the same live tier as above, on a private one-run VM — no `$PGWT_BOX`, no flock contention with other agents | **every agent run on Ubuntu, including the final pre-PR one** — the throwaway VM is the same Hetzner machine class as the gate box (103b1a0 matched cpx42→cx33), so for the Ubuntu tier it is the same evidence. The two persistent boxes are reserved for CI's self-hosted jobs: an agent running there queues behind CI on the same `flock`, which is most of the 29–117 min CI spread (n=9 runs). **`EPHEMERAL=1` supports `OS=ubuntu` only** — `scripts/box-check.sh` refuses anything else, because no `pgwt=gate-snapshot` image exists for el8/el9. So kernel/libbpf/layout work still runs `OS=el8` against `$PGWT_BOX_EL8`: 103b1a0 matched the machine class, never the kernel, and el8 is exactly the tier where that difference is the point |
 | `make ui-gallery [BASE=ref]` | this Mac | before/after screenshots of every UI snapshot cell → `tests/results/ui_gallery/index.html` + `summary.json` | before every PR that touches `web/` |
 
+**Persistent boxes FIRST; a throwaway VM is the exception** (owner rule
+2026-09-28: *"use second gate box for next tests as soon as it's idle, do not
+create new machine, create a new ONLY if it's needed and gate box busy with CI
+or other tests"*). Both `pgwt-gate` and `pgwt-gate-2` are paid for whether or
+not they run anything — a stopped Hetzner server still bills, so an idle box is
+pure waste. Before creating any VM, check both boxes; use one if it is free.
+`EPHEMERAL=1` is legitimate only when **both** are genuinely busy (CI job or
+another agent's run holding the flock), and the report must say which box was
+busy and why. On 2026-09-28 thirteen throwaway VMs were created in a day, each
+re-provisioning PostgreSQL and pgbench from scratch, while both gate boxes sat
+idle for nine to thirteen hours — and the multi-minute provisioning window was
+itself the cause of three failed Mac-side attempts, because the display slept
+and the session locked while it ran. Using a ready box removes the cost and the
+failure mode together.
+
 Logs: `tests/results/box-check-*.log` (`box-check-ephemeral-*.log` for `EPHEMERAL=1`), `tests/results/ui_gallery/`, `tests/results/ui_live/summary.json`.
 
 `make hetzner-sweep` deletes any `pgwt=ephemeral`-labelled Hetzner VM older than
