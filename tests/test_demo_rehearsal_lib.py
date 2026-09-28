@@ -793,6 +793,78 @@ def test_tab_coverage_check_ok_matching_expected_tabs_passes():
     check(ok, f"exact expected tab set, all ok, passes ({detail})")
 
 
+def test_tab_coverage_check_ok_could_not_evaluate_fails_but_named_separately():
+    """RED (round 3 review): a window_too_large refusal on a demo-length
+    capture must still fail the check (fail-closed), but must NOT read as
+    "not populated" in the detail -- conflating the two sends someone
+    chasing an empty tab that was never empty."""
+    results = {"overview": {"ok": True, "detail": "x"},
+               "waterfall": {"ok": False, "could_not_evaluate": True,
+                              "detail": "executions COULD NOT EVALUATE"}}
+    ok, detail = lib.tab_coverage_check_ok(results)
+    check(not ok, f"a could_not_evaluate tab still FAILS the check ({detail})")
+    check("waterfall" in detail, f"the tab is named ({detail})")
+    check("not populated" not in detail,
+          f"a could_not_evaluate tab is NOT described as 'not populated' ({detail})")
+    check("COULD NOT EVALUATE" in detail or "could not evaluate" in detail.lower(),
+          f"the detail says COULD NOT EVALUATE, distinct wording ({detail})")
+
+
+def test_tab_coverage_check_ok_separates_both_buckets_when_both_present():
+    results = {
+        "overview": {"ok": False, "detail": "empty"},
+        "waterfall": {"ok": False, "could_not_evaluate": True,
+                       "detail": "window_too_large"},
+    }
+    ok, detail = lib.tab_coverage_check_ok(results)
+    check(not ok, f"either bucket alone fails the check ({detail})")
+    check("overview" in detail and "waterfall" in detail,
+          f"both tabs are named, in their own bucket ({detail})")
+
+
+def test_tab_coverage_check_ok_could_not_evaluate_without_key_defaults_to_not_populated():
+    """A result dict with no could_not_evaluate key at all (every checker
+    that does not hit COULD_NOT_EVALUATE_CODES) must default to the
+    ordinary "not populated" bucket, not silently vanish from both."""
+    results = {"waterfall": {"ok": False, "detail": "empty, no key at all"}}
+    ok, detail = lib.tab_coverage_check_ok(results)
+    check(not ok, f"missing key still FAILS ({detail})")
+    check("not populated" in detail,
+          f"defaults to 'not populated' when could_not_evaluate is absent ({detail})")
+
+
+# ── the #214 wiring into demo_rehearsal.py itself still exists (round 3
+# review item 2) ────────────────────────────────────────────────────────
+
+def test_demo_rehearsal_still_wires_tab_coverage_into_extra_checks():
+    """Guards against a future edit silently deleting the coverage-check
+    block from demo_rehearsal.py: build_demo_summary() gates on whatever
+    keys happen to be in extra_checks, so a dropped block would silently
+    become "nothing to check here, all green" -- the exact failure #214
+    exists to prevent, one level up, where nothing else would catch it
+    (the wrong-tab-set guard above catches a DIFFERENT tab set, not a
+    MISSING block entirely).
+
+    Source-inspection, not an import: demo_rehearsal.py imports Playwright
+    at module scope, and this test file is in tests/unit_tests.list (CI's
+    build-and-unit job has no Playwright) -- importing the driver here
+    would reproduce the exact #205 bug this repo already fixed once on a
+    sibling file (see test_import_needs_no_playwright in
+    tests/test_demo_workload_coverage.py)."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "demo_rehearsal.py")
+    with open(path) as f:
+        src = f.read()
+    check('extra_checks["tab_coverage"]' in src,
+          "demo_rehearsal.py still assigns extra_checks['tab_coverage']")
+    check("cov.run_coverage(" in src,
+          "demo_rehearsal.py still calls cov.run_coverage(...)")
+    check("drlib.tab_coverage_check_ok(" in src,
+          "demo_rehearsal.py still calls drlib.tab_coverage_check_ok(...)")
+    check("import demo_workload_coverage as cov" in src,
+          "demo_rehearsal.py still imports demo_workload_coverage")
+
+
 # ── build_demo_summary / verdict_line ────────────────────────────────────
 
 def _tab_result(ok):

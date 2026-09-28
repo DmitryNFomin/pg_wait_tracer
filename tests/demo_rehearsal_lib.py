@@ -742,7 +742,18 @@ def tab_coverage_check_ok(results, expected_tabs=None):
     a coverage run that silently checked fewer tabs than it should have
     (a bug in the wiring, not in a checker) must fail loudly here too,
     the same "cannot see -> refuse" rule every checker in this repo
-    follows, rather than passing on partial coverage of its own tab list."""
+    follows, rather than passing on partial coverage of its own tab list.
+
+    A tab result carrying could_not_evaluate=True (demo_workload_coverage's
+    COULD_NOT_EVALUATE_CODES -- pgwt-server refused the query for a
+    capacity/tooling reason, e.g. window_too_large on a demo-length
+    capture, not because the tab is genuinely empty) is reported in its
+    OWN bucket, separate from "not populated" -- review finding (#214
+    round 3): conflating the two would send someone chasing an empty tab
+    that was never empty. Both buckets still fail this check (fail-closed,
+    never a silent pass, never counted as "populated") -- this is a
+    naming/legibility distinction in the detail string, not a second way
+    to pass."""
     if not isinstance(results, dict) or not results:
         return False, "no per-tab coverage results at all (empty or non-dict)"
     if expected_tabs is not None and set(results.keys()) != set(expected_tabs):
@@ -750,11 +761,21 @@ def tab_coverage_check_ok(results, expected_tabs=None):
         extra = set(results.keys()) - set(expected_tabs)
         return False, (f"coverage checked the wrong tab set -- "
                         f"missing={sorted(missing)}, unexpected={sorted(extra)}")
-    failed = sorted(tab for tab, r in results.items() if not r.get("ok"))
-    ok = len(failed) == 0
+    not_populated = sorted(tab for tab, r in results.items()
+                            if not r.get("ok") and not r.get("could_not_evaluate"))
+    could_not_evaluate = sorted(tab for tab, r in results.items()
+                                 if not r.get("ok") and r.get("could_not_evaluate"))
+    ok = len(not_populated) == 0 and len(could_not_evaluate) == 0
     if ok:
         return True, f"all {len(results)} tabs populated"
-    return False, f"{len(failed)}/{len(results)} tab(s) not populated: {failed}"
+    parts = []
+    if not_populated:
+        parts.append(f"{len(not_populated)} tab(s) not populated: {not_populated}")
+    if could_not_evaluate:
+        parts.append(f"{len(could_not_evaluate)} tab(s) COULD NOT EVALUATE "
+                      f"(capacity/tooling refusal, NOT evidence of an empty "
+                      f"tab): {could_not_evaluate}")
+    return False, "; ".join(parts)
 
 
 def build_demo_summary(pass_results, extra_checks, expected_tabs_per_pass=None):

@@ -446,13 +446,30 @@ def main():
         # -- this `with` block is still inside main(), well before
         # tests/demo_rehearsal.sh's cleanup() trap (rm -rf "$TRACE_DIR")
         # fires on script exit, and before tests/ui_live_smoke.sh's own
-        # teardown for the shorter live-smoke walk. Queried over the WHOLE
-        # capture window (not RECENT_WINDOW_S) so a tab's content earlier
-        # in a long rehearsal still counts. Registered in extra_checks,
-        # which build_demo_summary gates on UNCONDITIONALLY (this module
-        # has no separate informational-only registry -- everything written
-        # here fails the run's own `ok` if not ok, by construction).
-        coverage_results = cov.run_coverage(srv, from_ns, to_ns,
+        # teardown for the shorter live-smoke walk. Registered in
+        # extra_checks, which build_demo_summary gates on UNCONDITIONALLY
+        # (this module has no separate informational-only registry --
+        # everything written here fails the run's own `ok` if not ok, by
+        # construction).
+        #
+        # Window (round 3 finding): querying the WHOLE capture, as this did
+        # originally, hit pgwt-server's window_too_large cap on a real
+        # demo-length (35 min, --mode full) trace under pgbench+workload
+        # load -- the raw-load working array is memory-bounded
+        # (src/server.c load_max_events()), and 35 minutes of full-mode
+        # events from a real box comfortably exceeds it on some endpoints.
+        # Bounded to the trailing WATERFALL_LIVE_WINDOW_S instead: the same
+        # 900s "what a live viewer's browser is actually asking for" window
+        # the waterfall-latency check below already uses, well inside the
+        # cap, and arguably the MORE honest question anyway -- an empty tab
+        # on stage is about what the audience sees THEN, not whether the
+        # tab was ever populated at any point across 35 minutes. Any
+        # capacity refusal that still happens despite the bound is caught
+        # separately below (could_not_evaluate), never silently read as
+        # "empty".
+        coverage_from_ns = max(from_ns,
+                               to_ns - int(WATERFALL_LIVE_WINDOW_S * 1_000_000_000))
+        coverage_results = cov.run_coverage(srv, coverage_from_ns, to_ns,
                                             num_cpus=info.get("num_cpus"))
         coverage_ok, coverage_detail = drlib.tab_coverage_check_ok(
             coverage_results, expected_tabs=cov.TAB_ORDER)
@@ -460,7 +477,13 @@ def main():
               f"{'PASS' if coverage_ok else 'FAIL'} -- {coverage_detail}")
         for tab in cov.TAB_ORDER:
             r = coverage_results.get(tab, {})
-            print(f"    {tab}: {'PASS' if r.get('ok') else 'FAIL'} -- {r.get('detail')}")
+            if r.get("ok"):
+                tab_status = "PASS"
+            elif r.get("could_not_evaluate"):
+                tab_status = "COULD NOT EVALUATE"
+            else:
+                tab_status = "FAIL"
+            print(f"    {tab}: {tab_status} -- {r.get('detail')}")
         extra_checks["tab_coverage"] = {
             "ok": coverage_ok, "detail": coverage_detail, "tabs": coverage_results,
         }
@@ -472,7 +495,7 @@ def main():
         # whole rehearsal summary to find it).
         with open(os.path.join(out_dir, "tab_coverage.json"), "w") as f:
             json.dump({
-                "from_ns": from_ns, "to_ns": to_ns,
+                "from_ns": coverage_from_ns, "to_ns": to_ns,
                 "num_cpus": info.get("num_cpus"),
                 "ok": coverage_ok, "detail": coverage_detail,
                 "results": coverage_results,

@@ -245,11 +245,31 @@ TAB_ORDER = (
 )
 
 
+# Response `code`s meaning "pgwt-server itself refused this query for a
+# capacity/tooling reason, not because the tab genuinely has no data" --
+# src/server.c's reject_overload(): the raw-load working array hit its
+# memory-derived cap (window_too_large) or the load itself couldn't
+# allocate (allocation_failed). Review finding (#214 round 3): a demo-length
+# (35 min, --mode full) capture under real pgbench+workload load can hit
+# this on some endpoints well before the capture window is exhausted -- and
+# recording that identically to "empty tab" would send someone chasing a
+# tab that was never empty, for a whole counted rehearsal attempt (the tag
+# rule burns it either way). These get their OWN outcome below
+# ("could_not_evaluate": True) -- still ok=False, still fails the tab and
+# the overall check (fail-closed, never a silent pass, never counted as
+# "populated"), but named distinctly so a human reading the verdict does
+# not have to guess which failure mode they are looking at.
+COULD_NOT_EVALUATE_CODES = {"window_too_large", "allocation_failed"}
+
+
 def run_coverage(srv, from_ns, to_ns, num_cpus=None):
     """Query every tab's endpoint over [from_ns, to_ns] and apply its pure
-    checker. Returns {tab: {"ok": bool, "detail": str}}. A query that
-    itself errors or times out is recorded as a FAILING tab (never
-    silently skipped) -- a gate that cannot see must refuse, not approve.
+    checker. Returns {tab: {"ok": bool, "detail": str, "could_not_evaluate":
+    bool}}. A query that itself errors or times out is recorded as a
+    FAILING tab (never silently skipped) -- a gate that cannot see must
+    refuse, not approve. A response carrying a code in
+    COULD_NOT_EVALUATE_CODES is still ok=False but additionally flagged
+    could_not_evaluate=True -- see that constant's own comment.
 
     num_cpus: the capture box's CPU count (`info` response's `num_cpus`,
     the same field the UI's "N CPUs" chip reads) -- forwarded only to the
@@ -262,16 +282,28 @@ def run_coverage(srv, from_ns, to_ns, num_cpus=None):
             resp = srv.query(cmd, from_=from_ns, to_=to_ns,
                               timeout=30, **extra)
         except Exception as e:
-            results[tab] = {"ok": False, "detail": f"{cmd} query failed: {e!r}"}
+            results[tab] = {"ok": False, "could_not_evaluate": False,
+                             "detail": f"{cmd} query failed: {e!r}"}
             continue
         if isinstance(resp, dict) and resp.get("error"):
-            results[tab] = {"ok": False, "detail": f"{cmd} error: {resp['error']!r}"}
+            code = resp.get("code")
+            if code in COULD_NOT_EVALUATE_CODES:
+                hint = resp.get("hint", "no hint given")
+                results[tab] = {
+                    "ok": False, "could_not_evaluate": True,
+                    "detail": (f"{cmd} COULD NOT EVALUATE (code={code!r}): "
+                               f"{resp['error']!r} -- {hint} -- this is NOT "
+                               f"evidence the tab is empty"),
+                }
+            else:
+                results[tab] = {"ok": False, "could_not_evaluate": False,
+                                 "detail": f"{cmd} error: {resp['error']!r}"}
             continue
         if tab == "concurrency":
             ok, detail = checker(resp, num_cpus)
         else:
             ok, detail = checker(resp)
-        results[tab] = {"ok": bool(ok), "detail": detail}
+        results[tab] = {"ok": bool(ok), "could_not_evaluate": False, "detail": detail}
     return results
 
 
@@ -303,7 +335,12 @@ def main():
     failed = [t for t in TAB_ORDER if not results[t]["ok"]]
     for tab in TAB_ORDER:
         r = results[tab]
-        status = "PASS" if r["ok"] else "FAIL"
+        if r["ok"]:
+            status = "PASS"
+        elif r.get("could_not_evaluate"):
+            status = "COULD NOT EVALUATE"
+        else:
+            status = "FAIL"
         print(f"demo_workload_coverage: {tab}: {status} -- {r['detail']}")
 
     if args.out_json:

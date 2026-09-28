@@ -62,9 +62,9 @@ def test_import_needs_no_playwright():
     is why it is not the only line of defense -- verified separately in a
     real Playwright-free venv (tests/results/, this branch's report)."""
     check(not _PLAYWRIGHT_ENTERED_ON_IMPORT,
-          "importing demo_workload_coverage/ui_live_smoke_lib pulled "
-          "playwright into sys.modules -- it must stay out of any "
-          "module-scope import reachable from tests/unit_tests.list")
+          "importing demo_workload_coverage/ui_live_smoke_lib stays out of "
+          "playwright (module-scope import reachable from "
+          "tests/unit_tests.list must never pull it in)")
 
 
 # ── TAB_ORDER agrees with the live-smoke driver's own tab list ────────────
@@ -458,6 +458,97 @@ def test_run_coverage_server_error_field_fails_not_skips():
     results = cov.run_coverage(srv, 0, 1)
     check(results["overview"]["ok"] is False,
           f"a response carrying an 'error' field FAILS ({results['overview']['detail']})")
+
+
+# ── window_too_large / allocation_failed: a distinct "could not evaluate"
+# outcome, never conflated with "tab genuinely empty" (#214 round 3) ───────
+
+def test_run_coverage_window_too_large_is_could_not_evaluate_not_plain_fail():
+    """RED: this is the exact review finding -- pgwt-server's real
+    window_too_large response shape (src/server.c reject_overload), on a
+    demo-length capture. Before this fix, run_coverage recorded it
+    identically to an empty tab; a human reading the verdict could not
+    tell the difference."""
+    responses = {}
+    for tab in cov.TAB_ORDER:
+        cmd, _extra, _fn = cov.TAB_QUERIES[tab]
+        responses[cmd] = (
+            {"error": "window too large", "code": "window_too_large",
+             "max_events": 100000, "hint": "narrow the time range or add a "
+             "pid/query filter"}
+            if tab == "waterfall" else None)
+    srv = _FakeServer(responses)
+    results = cov.run_coverage(srv, 0, 1)
+    r = results["waterfall"]
+    check(r["ok"] is False, f"window_too_large still FAILS the tab ({r['detail']})")
+    check(r["could_not_evaluate"] is True,
+          f"window_too_large is flagged could_not_evaluate, not a plain "
+          f"empty-tab FAIL ({r['detail']})")
+    check("window_too_large" in r["detail"] or "COULD NOT EVALUATE" in r["detail"],
+          f"the detail string names it distinctly ({r['detail']})")
+
+
+def test_run_coverage_allocation_failed_is_also_could_not_evaluate():
+    responses = {}
+    for tab in cov.TAB_ORDER:
+        cmd, _extra, _fn = cov.TAB_QUERIES[tab]
+        responses[cmd] = (
+            {"error": "memory allocation failed", "code": "allocation_failed",
+             "hint": "retry the request or reduce the time range"}
+            if tab == "scatter" else None)
+    srv = _FakeServer(responses)
+    results = cov.run_coverage(srv, 0, 1)
+    r = results["scatter"]
+    check(r["ok"] is False, f"allocation_failed still FAILS the tab ({r['detail']})")
+    check(r["could_not_evaluate"] is True,
+          f"allocation_failed is also flagged could_not_evaluate ({r['detail']})")
+
+
+def test_run_coverage_ordinary_error_is_not_could_not_evaluate():
+    """RED: an ordinary error (no code, or a code outside
+    COULD_NOT_EVALUATE_CODES) must NOT be mislabeled could_not_evaluate --
+    that would let a genuinely broken query masquerade as 'not my fault,
+    just a capacity limit'."""
+    responses = {}
+    for tab in cov.TAB_ORDER:
+        cmd, _extra, _fn = cov.TAB_QUERIES[tab]
+        responses[cmd] = {"error": "boom", "code": "invalid_request"} if tab == "events" else None
+    srv = _FakeServer(responses)
+    results = cov.run_coverage(srv, 0, 1)
+    r = results["events"]
+    check(r["ok"] is False, f"an ordinary error still FAILS ({r['detail']})")
+    check(r["could_not_evaluate"] is False,
+          f"an ordinary error is NOT mislabeled could_not_evaluate ({r['detail']})")
+
+
+def test_run_coverage_exception_is_not_could_not_evaluate():
+    """A raised exception (pipe closed, timeout) is a different failure
+    mode from a structured server refusal -- not could_not_evaluate
+    either, so the two are never conflated."""
+    responses = dict.fromkeys(
+        (cmd for cmd, _e, _f in cov.TAB_QUERIES.values()), None)
+    responses[cov.TAB_QUERIES["waterfall"][0]] = RuntimeError("pipe closed")
+    srv = _FakeServer(responses)
+    results = cov.run_coverage(srv, 0, 1)
+    r = results["waterfall"]
+    check(r["ok"] is False, f"an exception still FAILS ({r['detail']})")
+    check(r["could_not_evaluate"] is False,
+          f"a raised exception is NOT mislabeled could_not_evaluate ({r['detail']})")
+
+
+def test_run_coverage_normal_pass_has_could_not_evaluate_false():
+    responses = {
+        "time_model": {"rows": [{"name": "Lock", "indent": 1, "ms": 5},
+                                 {"name": "Timeout", "indent": 1, "ms": 5}]},
+    }
+    for tab in cov.TAB_ORDER:
+        cmd, _e, _f = cov.TAB_QUERIES[tab]
+        responses.setdefault(cmd, None)
+    srv = _FakeServer(responses)
+    results = cov.run_coverage(srv, 0, 1)
+    check(results["overview"]["could_not_evaluate"] is False,
+          "a normal (non-error) response is could_not_evaluate=False, "
+          "whether it passes or fails its own checker")
 
 
 def run():
