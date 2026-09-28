@@ -320,6 +320,23 @@ rsync -az --delete -e "ssh -o StrictHostKeyChecking=no" \
 PGWT_BUILD_VERSION_PINNED=$(git describe --tags --always --dirty 2>/dev/null || echo unknown)
 echo "ui-mac-walk: pinning PGWT_BUILD_VERSION=$PGWT_BUILD_VERSION_PINNED for both the remote pgwt-server build and the local web/pgwt build" | tee -a "$log"
 
+# A REUSED target (either a KEEP=1 VM or PGWT_UI_MAC_HOST) keeps whatever
+# pgwt-server/pg_wait_tracer a PREVIOUS run left in $REMOTE_DIR -- found
+# live (2026-09-28, coordinator's own run on pgwt-gate): rsync -a preserves
+# source mtimes, and PGWT_BUILD_VERSION is only a -D compiler define, not a
+# file `make` tracks for staleness, so a source tree unchanged since the
+# last build looks up to date to `make` even though the PINNED VERSION
+# STRING changed -- the binary that shipped was linked with a PREVIOUS
+# run's version (one left over from the coordinator's own uncommitted-edit
+# run, "-dirty" and all), and the bridge correctly flagged version_skew
+# against it. A fresh VM never hit this (its $REMOTE_DIR never existed
+# before), so this is specific to $reused == 1, both the PGWT_UI_MAC_HOST
+# case AND a KEEP=1 VM reused across rounds -- same latent bug, same fix.
+if [[ "$reused" == "1" ]]; then
+    echo "ui-mac-walk: reused target ($target) -- make clean before building, so a changed PGWT_BUILD_VERSION always forces a real relink" | tee -a "$log"
+    ssh -o BatchMode=yes "$target" "cd '$REMOTE_DIR' && make clean" 2>&1 | tee -a "$log"
+fi
+
 echo "ui-mac-walk: building daemon + pgwt-server on $target" | tee -a "$log"
 ssh -o BatchMode=yes "$target" \
     "cd '$REMOTE_DIR' && ([ -w /tmp/pgwt-box-check.lock ] || sudo sh -c 'touch /tmp/pgwt-box-check.lock && chmod 0666 /tmp/pgwt-box-check.lock') && flock /tmp/pgwt-box-check.lock bash -c 'make -j\$(nproc) PGWT_BUILD_VERSION=$PGWT_BUILD_VERSION_PINNED'" \
@@ -329,6 +346,26 @@ if [[ $build_rc -ne 0 ]]; then
     echo "ui-mac-walk: remote build failed (rc=$build_rc)" | tee -a "$log" >&2
     exit 1
 fi
+
+# Defense in depth on top of `make clean` above (2026-09-28): VERIFY the
+# pinned version string is actually embedded in both built binaries,
+# abort if not, rather than trust that a clean build implies a matching
+# one -- "verify the built binary's reported version matches the pin and
+# abort if not" was the coordinator's own alternative fix, kept alongside
+# the clean-rebuild instead of instead of it, because a clean rebuild
+# still depends on the clean target staying in sync with everything the
+# build produces (BUILD_DIR, TARGET, pgwt-server today -- nothing stops a
+# future artifact from being added to the Makefile without being added to
+# `clean` too, the exact same "forgot to wire it in" class of bug this
+# whole branch has been closing all day).
+for bin in pg_wait_tracer pgwt-server; do
+    if ! ssh -o BatchMode=yes "$target" \
+            "strings '$REMOTE_DIR/$bin' | grep -qF '$PGWT_BUILD_VERSION_PINNED'"; then
+        echo "ui-mac-walk: built $bin on $target does not embed the pinned version $PGWT_BUILD_VERSION_PINNED -- stale binary, refusing to proceed" | tee -a "$log" >&2
+        exit 1
+    fi
+done
+echo "ui-mac-walk: verified both remote binaries embed $PGWT_BUILD_VERSION_PINNED" | tee -a "$log"
 
 # ── Build the LOCAL Mac bridge ──────────────────────────────────────────────
 echo "ui-mac-walk: building web/pgwt (Mac-local Go bridge)" | tee -a "$log"

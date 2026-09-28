@@ -1107,6 +1107,14 @@ def main():
                  "here) -- installed once right after first load, valid for the "
                  "whole SPA session since tab switches never navigate.")
     verdict = lib.build_verdict(run_id, tabs, sampler.samples, notes=notes)
+    # Snapshot of build_verdict()'s OWN base key set, taken before a single
+    # extra field is attached -- finalize_verdict_gating() (called right
+    # before this verdict is written) diffs the verdict's ACTUAL final keys
+    # against this snapshot to find "every extra field", so it can never
+    # miss one just because this function grows a new `verdict["x"] = ...`
+    # line beneath this point without someone also updating a separate
+    # list (see that function's own docstring).
+    verdict_base_keys = set(verdict)
     verdict["version_skew"] = version_skew
     verdict["display_identity"] = display_identity
     # Same environment-fact family as memory_pressure/loadavg (mac_samples
@@ -1139,6 +1147,15 @@ def main():
         and display_identity is not None
         and display_identity.get("viewport") == TARGET_VIEWPORT
         and display_identity.get("effective_zoom") == 1.0)
+    # Structural gating fix (2026-09-28, coordinator's finding): a run
+    # with version_skew:{'level':'warn',...} previously reported
+    # status:'satisfied', ok:true -- the THIRD time a recorded-but-
+    # ungated signal shipped in this branch. finalize_verdict_gating
+    # raises if any field attached to `verdict` above is not classified
+    # in ui_mac_walk_lib.py's own registry (never defaults an unknown
+    # field to harmless), and flips ok/status when a GATING one (today,
+    # only version_skew) reports a problem.
+    lib.finalize_verdict_gating(verdict, verdict_base_keys)
     verdict_path = os.path.join(args.out_dir, "summary.json")
     with open(verdict_path, "w") as f:
         json.dump(verdict, f, indent=2, sort_keys=True)
@@ -1167,8 +1184,11 @@ def main():
               "(Mac-side infrastructure noise) -- see mac_samples above")
     print(f"  version_skew: {verdict.get('version_skew')}")
     print(f"  display_identity: {verdict.get('display_identity')}")
+    gating_reasons = {k: v for k, v in verdict.get("gating_reasons", {}).items() if v}
+    if gating_reasons:
+        print(f"  GATING FAILURE(S): {gating_reasons}")
     print(f"  summary: {verdict_path}")
-    print(f"  overall ok: {verdict['ok']}")
+    print(f"  overall ok: {verdict['ok']} status: {verdict.get('status')}")
     return 0
 
 

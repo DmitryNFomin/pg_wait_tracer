@@ -836,6 +836,116 @@ def test_navigate_to_tab_does_not_clear_drill_filter_inline():
           "(render_check/screenshot both run after navigate_to_tab returns)")
 
 
+def test_version_skew_reason_none_is_ok():
+    check(lib.version_skew_reason(None) is None,
+          "version_skew_reason: no skew element measured -> not a failure "
+          "(absence of the badge is not evidence of anything wrong)")
+
+
+def test_version_skew_reason_warn_fails():
+    reason = lib.version_skew_reason({"level": "warn", "text": "⚠ version skew"})
+    check(reason is not None and "warn" in reason,
+          f"version_skew_reason: a warn-level badge must be a failure (got {reason!r})")
+
+
+def test_version_skew_reason_error_fails():
+    reason = lib.version_skew_reason({"level": "error", "text": "boom"})
+    check(reason is not None, f"version_skew_reason: error level fails too (got {reason!r})")
+
+
+def test_gating_ok_all_none():
+    check(lib.gating_ok(None, None, None) is True,
+          "gating_ok: every reason None -> True")
+
+
+def test_gating_ok_one_reason():
+    check(lib.gating_ok(None, "something broke", None) is False,
+          "gating_ok: any non-None reason -> False")
+
+
+def test_classify_verdict_extra_fields_accepts_known():
+    gating = lib.classify_verdict_extra_fields({
+        "version_skew": {"level": "warn", "text": "x"},
+        "branch_sha": "abc123",
+    })
+    check(gating == {"version_skew": {"level": "warn", "text": "x"}},
+          f"classify_verdict_extra_fields: returns only the GATING subset (got {gating!r})")
+
+
+def test_classify_verdict_extra_fields_rejects_unknown_field():
+    """The core bypass this registry exists to close: a brand-new verdict
+    field, attached without anyone deciding whether it gates `ok`, must be
+    a hard error -- never silently treated as informational. This is
+    exactly the shape version_skew shipped in before this fix."""
+    try:
+        lib.classify_verdict_extra_fields({"totally_new_field": 42})
+        ok = False
+    except ValueError as e:
+        ok = "totally_new_field" in str(e)
+    check(ok, "classify_verdict_extra_fields: an unclassified field must "
+              "raise ValueError naming it, never pass through silently")
+
+
+def _fake_verdict(status="satisfied", ok=True):
+    return {
+        "run": {"id": "x"}, "ok": ok, "note": "n", "tabs": {}, "tab_order": [],
+        "void_tabs": [], "void_count": 0, "tab_count": 0, "counted": True,
+        "mac_samples": [], "notes": [], "status": status,
+    }
+
+
+def test_finalize_verdict_gating_clean_run_stays_satisfied():
+    v = _fake_verdict()
+    base_keys = set(v)
+    v["version_skew"] = None
+    v["branch_sha"] = "abc"
+    lib.finalize_verdict_gating(v, base_keys)
+    check(v["ok"] is True and v["status"] == "satisfied",
+          f"finalize_verdict_gating: no skew -> unchanged (got ok={v['ok']!r} "
+          f"status={v['status']!r})")
+
+
+def test_finalize_verdict_gating_skew_flips_ok_false():
+    v = _fake_verdict()
+    base_keys = set(v)
+    v["version_skew"] = {"level": "warn", "text": "⚠ version skew"}
+    lib.finalize_verdict_gating(v, base_keys)
+    check(v["ok"] is False and v["status"] == "failed",
+          "finalize_verdict_gating: version_skew warn must flip ok/status "
+          f"(got ok={v['ok']!r} status={v['status']!r}) -- this is the exact "
+          "live bug: status:'satisfied', ok:true alongside a warn skew badge")
+    check(v["gating_reasons"]["version_skew"] is not None,
+          "finalize_verdict_gating: the reason itself is recorded, not just the flip")
+
+
+def test_finalize_verdict_gating_never_upgrades_unmeasured():
+    v = _fake_verdict(status="unmeasured", ok=False)
+    base_keys = set(v)
+    v["version_skew"] = {"level": "warn", "text": "x"}
+    lib.finalize_verdict_gating(v, base_keys)
+    check(v["status"] == "unmeasured",
+          "finalize_verdict_gating: must never turn an already-'unmeasured' "
+          f"status into 'failed' (got {v['status']!r}) -- majority-void means "
+          "'we could not tell', a claim finalize_verdict_gating must not "
+          "overwrite with the stronger, more specific 'failed'")
+
+
+def test_finalize_verdict_gating_rejects_unclassified_field():
+    v = _fake_verdict()
+    base_keys = set(v)
+    v["mystery_field"] = "surprise"
+    try:
+        lib.finalize_verdict_gating(v, base_keys)
+        ok = False
+    except ValueError as e:
+        ok = "mystery_field" in str(e)
+    check(ok, "finalize_verdict_gating: an unclassified extra field on the "
+              "REAL verdict dict must raise, same as calling "
+              "classify_verdict_extra_fields directly -- this is what makes "
+              "a future `verdict[\"x\"] = ...` line in ui_mac_walk_safari.py "
+              "impossible to ship unclassified")
+
+
 def test_walk_precondition_all_clear():
     check(lib.walk_precondition_reason(False, False) is None,
           "walk_precondition_reason: unlocked + awake -> None (walk may proceed)")

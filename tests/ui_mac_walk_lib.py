@@ -312,6 +312,132 @@ def version_skew_from_snapshot(snapshot):
     return {"level": level, "text": snapshot.get("text")}
 
 
+def version_skew_reason(version_skew):
+    """Returns a reason string if version_skew (version_skew_from_snapshot's
+    own return value) reports a real mismatch, else None.
+
+    Found live (2026-09-28, coordinator's run on pgwt-gate): a run reported
+    status:'satisfied', ok:true while carrying version_skew:{'level':'warn',
+    ...} -- the client and server were different builds (a stale remote
+    binary, fixed separately in ui_mac_walk.sh), and NOTHING in the verdict
+    turned that into a failure. This is the THIRD time the same shape
+    shipped in this branch (freshness_status once, the filter-leak
+    retroactive recompute once, version_skew now): a signal gets recorded,
+    and nobody wires it into `ok`. version_skew is None (never measured --
+    the #version-skew element was absent or hidden, app.js's own no-skew
+    path) is treated as OK here, not a failure: unlike freshness/capture-
+    age, the absence of this specific badge is not itself evidence of
+    anything wrong, just that this one check has nothing to report. A
+    caller that wants "we could not even check for skew" treated as a
+    failure needs a different, stronger check than this one."""
+    if version_skew is None:
+        return None
+    level = version_skew.get("level")
+    if level and level != "ok":
+        text = version_skew.get("text") or level
+        return f"version skew detected: {text!r} (level={level!r})"
+    return None
+
+
+def gating_ok(*reasons):
+    """True only if every positional reason is None. Exists so every
+    gating computation in this module -- a tab's own `ok`, the whole
+    verdict's `ok` -- goes through the SAME function instead of each
+    hand-rolling its own `and x is None and y is None and ...` chain,
+    which is exactly how three separate signals (freshness, the filter-
+    leak retroactive recompute, version_skew) each slipped through
+    ungated at some point: a chain is trivial to extend and just as
+    trivial to forget to extend."""
+    return all(r is None for r in reasons)
+
+
+# Every field a caller attaches to a verdict BEYOND build_verdict()'s own
+# base shape must be classified here as either GATING (a bad value must
+# flip the whole verdict's `ok`/`status`) or INFORMATIONAL (recorded for a
+# reader, never itself decides `ok`). See classify_verdict_extra_fields's
+# docstring for why this registry exists as a hard gate rather than a
+# convention.
+GATING_EXTRA_VERDICT_FIELDS = frozenset({"version_skew"})
+INFORMATIONAL_EXTRA_VERDICT_FIELDS = frozenset({
+    "display_identity", "pre_flight_screen_locked", "pre_flight_display_asleep",
+    "criteria_commit", "criteria_doc_blob", "branch_sha",
+    "tick_wait_bound_s", "tick_wait_elapsed_s",
+    "capture_age_s", "min_capture_age_s", "attempt_counted",
+})
+
+
+def classify_verdict_extra_fields(extra_fields):
+    """extra_fields: a dict of every field a caller intends to attach to a
+    verdict BEYOND build_verdict()'s own base shape. Raises ValueError,
+    naming the field(s), if any key is in NEITHER
+    GATING_EXTRA_VERDICT_FIELDS nor INFORMATIONAL_EXTRA_VERDICT_FIELDS --
+    never silently treats an unrecognized field as informational (which is
+    exactly the default that let version_skew ship unwired for as long as
+    it did: the field WAS recorded, correctly, and that alone looked done).
+
+    This is the structural fix asked for after the third instance of "a
+    recorded signal that does not gate" in one branch. Each prior fix
+    patched ONE ad hoc boolean chain (freshness_status folded into
+    build_tab_entry's `ok`; filter_leak_reason folded into the retroactive
+    recompute). Both of those fixes were themselves at risk of being
+    silently undone by a LATER unconditional overwrite of `ok` -- which is
+    exactly what almost happened twice already. Routing every extra
+    verdict field through this registry means a NEW field literally cannot
+    ship unclassified: omitting it here is not "it defaults to
+    informational", it is a raised exception the first time this function
+    runs against it, whether that is a live run or this module's own test
+    suite calling it against a fixture.
+
+    Returns the subset of extra_fields whose keys are in
+    GATING_EXTRA_VERDICT_FIELDS, unchanged -- the caller folds these into
+    its own gating_ok() computation."""
+    known = GATING_EXTRA_VERDICT_FIELDS | INFORMATIONAL_EXTRA_VERDICT_FIELDS
+    unknown = sorted(set(extra_fields) - known)
+    if unknown:
+        raise ValueError(
+            f"verdict field(s) {unknown!r} are not classified as gating or "
+            "informational -- add them to GATING_EXTRA_VERDICT_FIELDS or "
+            "INFORMATIONAL_EXTRA_VERDICT_FIELDS in ui_mac_walk_lib.py "
+            "before attaching them to a verdict")
+    return {k: v for k, v in extra_fields.items() if k in GATING_EXTRA_VERDICT_FIELDS}
+
+
+def finalize_verdict_gating(verdict, base_keys):
+    """Mutates `verdict` in place (also returned) so that every field
+    attached to it beyond build_verdict()'s own base shape is classified
+    (via classify_verdict_extra_fields -- raises on an unknown field) and
+    every GATING one that reports a problem flips `ok`/`status`.
+
+    base_keys: the verdict's OWN key set, captured by the caller
+    immediately after build_verdict() returned and BEFORE any extra field
+    was attached -- this function reads the ACTUAL verdict dict's current
+    keys minus base_keys to find "every extra field", rather than trusting
+    a separately hand-maintained list of what got attached. That is what
+    makes this a structural gate rather than another convention: a future
+    `verdict["something_new"] = ...` line added anywhere, however it is
+    written, changes `set(verdict)` and is therefore caught here, with no
+    second place that also has to be remembered.
+
+    On a gating failure: `ok` is set False, and `status` becomes 'failed'
+    -- UNLESS it is already 'unmeasured' (majority-void), which is left
+    alone: version skew is a real, attributable measurement (we know
+    exactly what happened), never "could not tell", so it must not
+    downgrade an already-weaker 'unmeasured' claim into the stronger,
+    more specific 'failed' one when the run did not even count."""
+    extra_keys = set(verdict) - set(base_keys)
+    extra_fields = {k: verdict[k] for k in extra_keys}
+    gating_values = classify_verdict_extra_fields(extra_fields)  # raises on unknown
+    reasons = {}
+    if "version_skew" in gating_values:
+        reasons["version_skew"] = version_skew_reason(gating_values["version_skew"])
+    verdict["gating_reasons"] = reasons
+    if not gating_ok(*reasons.values()):
+        verdict["ok"] = False
+        if verdict.get("status") != "unmeasured":
+            verdict["status"] = "failed"
+    return verdict
+
+
 def screen_locked_from_ioreg(ioreg_dict):
     """Extracts CGSSessionScreenIsLocked from the parsed
     `ioreg -n Root -d1 -a` plist (IOConsoleUsers[0].CGSSessionScreenIsLocked
