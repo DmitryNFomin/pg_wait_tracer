@@ -3379,6 +3379,14 @@ static void serialize_execution_row(cJSON *rows,
     cJSON_AddNumberToObject(r, "n_events", row->n_events);
     cJSON_AddNumberToObject(r, "n_workers", row->n_workers);
     cJSON_AddBoolToObject(r, "in_progress", row->in_progress);
+    /* #222 review: this row's end_ns/duration_ms is real (a genuine
+     * wall-clock timestamp), but DEDUCED from its pid's next CMD_END
+     * rather than measured at a real EXEC_END -- an ERROR, cancel,
+     * statement_timeout, disconnect, or a lost EXEC_END marker. Only
+     * meaningful when in_progress is false; always false while
+     * in_progress is true (no end at all yet to infer). */
+    cJSON_AddBoolToObject(r, "end_inferred",
+                          !row->in_progress && row->end_inferred);
     cJSON_AddBoolToObject(r, "started_before_window",
                           row->started_before_window);
     cJSON_AddItemToArray(rows, r);

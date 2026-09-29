@@ -29,6 +29,54 @@ function sameExecution(a, b) {
         String(a.start_ns) === String(b.start_ns));
 }
 
+/* #222 review (blocker follow-up): the Duration cell must say WHY an open
+ * row outranks a finished one under "longest running first" -- the sort
+ * key is elapsed-so-far (src/server.c's execution_sort_duration_ns), which
+ * is invisible if the cell just reads "In progress" with no number
+ * (docs/VISUAL_CHECKLIST.md SEMANTICS, #103 precedent: an open-ended value
+ * "is a bound, not a value: it must read >=N and say why in its tooltip").
+ * `windowTo` is the request's own `to` (the view already has it from
+ * ctx.timeRange.to) -- the SAME lower bound the server used to rank the
+ * row, not wall-clock now, so the two never disagree.
+ *
+ * A CLOSED row can also be real-but-not-measured: end_inferred (new
+ * server field, #222 review) means this row was closed at its pid's next
+ * CMD_END, not a real EXEC_END -- an error, cancel, timeout, disconnect,
+ * or a lost EXEC_END marker. The duration is still a genuine wall-clock
+ * span, just not one PostgreSQL itself reported as "this query finished
+ * normally" -- flagged, not hidden, and NOT styled like "still running"
+ * (it is closed) or left indistinguishable from a normal completion. */
+export function fmtExecutionDuration(row, windowTo) {
+    if (row.in_progress) {
+        const to = nsBig(windowTo);
+        const start = nsBig(row.start_ns);
+        if (to != null && start != null && to > start) {
+            const elapsedMs = Number(to - start) / 1e6;
+            return { text: '≥ ' + fmtMs(elapsedMs) + ' (running)',
+                tooltip: 'Still running: elapsed time so far, not a final duration.' };
+        }
+        return { text: 'In progress', tooltip: null };
+    }
+    if (row.duration_ms == null) return { text: '—', tooltip: null };
+    const text = fmtMs(row.duration_ms);
+    if (row.end_inferred) {
+        return { text: text + ' *',
+            tooltip: 'Inferred, not measured: this execution never reached '
+                + 'a normal completion (likely an error, cancel, or '
+                + 'timeout). Duration is real elapsed time, measured up to '
+                + 'when the connection went idle, not PostgreSQL’s own '
+                + 'query-end signal.' };
+    }
+    return { text, tooltip: null };
+}
+
+function durationCellHtml(r) {
+    const d = fmtExecutionDuration(r, r._windowTo);
+    if (!d.tooltip) return d.text;
+    const cls = r.in_progress ? 'execution-open' : 'execution-inferred';
+    return '<span class="' + cls + '" title="' + esc(d.tooltip) + '">' + d.text + '</span>';
+}
+
 export const executionsConfig = {
     columns: [
         { key: 'start_ns', label: 'Start (UTC)', format: (r) =>
@@ -38,9 +86,7 @@ export const executionsConfig = {
         { key: 'pid', label: 'Leader PID', cls: 'num', format: (r) => String(r.pid) },
         { key: 'query_id', label: 'Query ID', format: (r) =>
             '<span class="query-id">' + esc(String(r.query_id || '0')) + '</span>' },
-        { key: 'duration_ms', label: 'Duration', cls: 'num', format: (r) =>
-            r.in_progress || r.duration_ms == null
-                ? '<span class="execution-open">In progress</span>' : fmtMs(r.duration_ms) },
+        { key: 'duration_ms', label: 'Duration', cls: 'num', format: durationCellHtml },
         { key: 'plan_ms', label: 'Plan', cls: 'num', format: (r) => fmtMs(r.plan_ms) },
         { key: 'n_events', label: 'Leader events', cls: 'num', format: (r) => String(r.n_events) },
         { key: 'n_workers', label: 'Workers', cls: 'num', format: (r) => String(r.n_workers) },
@@ -93,12 +139,25 @@ export function executionsSortToggleLabel(sort) {
         ? 'Show longest running first' : 'Show latest first';
 }
 
+/* "150 running, 3 completed" next to the sort label -- open_count/
+ * completed_count (src/server.c, #222 review) over the FULL matching
+ * window, so a viewer can tell the crowding risk elapsed-so-far ranking
+ * reopened is (or is not) happening here, instead of the split being
+ * computed and never read. null counts (an older server, or a refused
+ * request) render nothing rather than "null running, null completed". */
+export function executionsCountsLabel(openCount, completedCount) {
+    if (typeof openCount !== 'number' || typeof completedCount !== 'number')
+        return null;
+    return openCount + ' running, ' + completedCount + ' completed';
+}
+
 /* executions response -> shared-table model. Server order matches whatever
  * `sort` the request asked for (see EXECUTIONS_SORT_* above) and is
  * preserved; client sorting is intentionally absent on this selector. */
-export function buildExecutionsModel(data, selected) {
+export function buildExecutionsModel(data, selected, windowTo) {
     const rows = ((data && data.rows) || []).map(r =>
-        Object.assign({}, r, { _selected: sameExecution(r, selected) }));
+        Object.assign({}, r, { _selected: sameExecution(r, selected),
+            _windowTo: windowTo }));
     return {
         hasRows: rows.length > 0,
         table: buildTableModel(executionsConfig, rows, null),
@@ -107,6 +166,16 @@ export function buildExecutionsModel(data, selected) {
         total_count: data && typeof data.total_count === 'number'
             ? data.total_count : null,
         truncated: !!(data && data.truncated),
+        // #222 review should-fix: the cheap mitigation for the crowding
+        // risk elapsed-so-far ranking reopened -- the truncated `rows`
+        // page cannot say which kind (open vs. completed) got crowded
+        // out, but these two counts (over the FULL matching window,
+        // src/server.c) can, so the view surfaces them instead of leaving
+        // them computed-and-unread.
+        open_count: data && typeof data.open_count === 'number'
+            ? data.open_count : null,
+        completed_count: data && typeof data.completed_count === 'number'
+            ? data.completed_count : null,
     };
 }
 

@@ -492,81 +492,266 @@ def test_crowding_check_and_query_latency_bound(t):
         cleanup_traces(trace_dir)
 
 
-# #222 review: ranking an open row by elapsed-so-far fixes the original
-# defect (a long-running open execution no longer sorts last) but opens the
-# same defect with the sign flipped -- a flood of open executions, each
-# merely OLDER than a genuinely slow CLOSED query, can dominate
-# duration_desc's truncated page exactly the way the old recency slice
-# dominated start_desc. This does not fix that (the real fix is two
-# labelled, bounded sections -- filed as a follow-up); it PINS the current
-# behavior so it is characterized rather than accidental, and checks the
-# one cheap mitigation this branch does add: open_count/completed_count
-# report the true split even though `rows` (truncated) cannot.
-OPEN_FLOOD_QID = 314159265
+# #222 review (round 2 blocker): ranking an open row by elapsed-so-far
+# fixed the original defect (a long-running open execution no longer sorts
+# last) but risked the same defect with the sign flipped -- a flood of
+# open executions, each merely OLDER than a genuinely slow CLOSED query,
+# dominating duration_desc's truncated page exactly the way the old
+# recency slice dominated start_desc. The flood this actually happens
+# with is not 100 concurrent backends: it is ~100 CUMULATIVE
+# errored/cancelled statements over a capture. Each one never reaches
+# src/daemon.c's query__execute__done probe (an ERROR longjmp, a cancel,
+# statement_timeout, or a client disconnect mid-query all skip it, same
+# as an EXEC_END lost to a ringbuf drop) -- but the pid's NEXT CMD_END,
+# emitted on the pgstat_report_activity gate flip to IDLE, DOES fire
+# after all of those, and src/compute.c's pgwt_compute_executions now
+# closes the stale row there with a REAL measured duration instead of
+# leaving it in_progress to accumulate an ever-growing fabricated one.
+ZOMBIE_QID = 314159265
+CMD_END = 0xFFFFFFF7   # PGWT_MARKER_CMD_END, src/pg_wait_tracer.h
 
-def open_flood_scenario(n_open=150, n_slow_closed=3):
+
+def zombie_row_scenario(n_zombies=100):
     events = []
     # No backends.jsonl entries here: pgwt_compute_executions derives every
-    # row from EXEC_START/END markers alone (backend metadata only feeds
-    # parallel-worker attribution and other views' user/db labels, neither
-    # of which these single-pid leader executions touch), and
+    # row from EXEC_START/END/CMD_END markers alone (backend metadata only
+    # feeds parallel-worker attribution and other views' user/db labels,
+    # neither of which these single-pid leader executions touch), and
     # tests/gen_test_traces.c's fixed-size backend array
-    # (MAX_TEST_BACKENDS 64, unrelated to anything this branch touches)
-    # cannot hold 150+ entries anyway.
-    #
-    # Every open execution started long before `to` (below), so its
-    # elapsed-so-far (tens of seconds) dwarfs any closed row's duration --
-    # this is the dominance mechanism itself, at the scale that crowds a
-    # truncated page, not just tips one comparison.
-    for i in range(n_open):
+    # (MAX_TEST_BACKENDS 64) cannot hold 100+ entries anyway.
+    zombie_pids = []
+    for i in range(n_zombies):
         pid = 20000 + i
-        events.append(marker(pid, BASE + i * MS, EXEC_START, OPEN_FLOOD_QID))
-    # A handful of genuinely slow CLOSED executions -- 500ms each, an order
-    # of magnitude past anything else CLOSED in this fixture -- that a
-    # "slowest first" tab exists to surface.
-    slow_pids = []
-    for j in range(n_slow_closed):
-        pid = 30000 + j
-        slow_pids.append(pid)
-        start = BASE + (n_open + j) * MS
-        events.append(marker(pid, start, EXEC_START, OPEN_FLOOD_QID))
-        events.append(marker(pid, start + 500 * MS, EXEC_END, OPEN_FLOOD_QID))
+        zombie_pids.append(pid)
+        start = BASE + i * MS
+        events.append(marker(pid, start, EXEC_START, ZOMBIE_QID))
+        # ERROR/cancel/timeout: no EXEC_END -- only the command closing,
+        # 2ms later, ever reaches this pid's stream again.
+        events.append(marker(pid, start + 2 * MS, CMD_END, ZOMBIE_QID))
+    # One genuinely slow CLOSED execution -- 500ms, two orders of magnitude
+    # past any zombie's real (post-CMD_END) duration -- that a "longest
+    # running first" tab exists to surface.
+    slow_pid = 30000
+    slow_start = BASE + (n_zombies + 5) * MS
+    events.append(marker(slow_pid, slow_start, EXEC_START, ZOMBIE_QID))
+    events.append(marker(slow_pid, slow_start + 500 * MS, EXEC_END, ZOMBIE_QID))
     events.sort(key=lambda e: e["ts"])
     scenario = {
-        "queries": [{"id": OPEN_FLOOD_QID, "text": "SELECT open_flood()"}],
+        "queries": [{"id": ZOMBIE_QID, "text": "SELECT zombie_row_fixture()"}],
         "events": events,
     }
-    return scenario, slow_pids
+    return scenario, zombie_pids, slow_pid
 
 
 def test_open_row_crowding_characterized(t):
-    print("\n### #222 review: open-row flood crowding out closed slow rows "
-          "(characterized, not fixed) + open_count/completed_count ###")
-    scenario, slow_pids = open_flood_scenario()
+    print("\n### #222 review: an errored/cancelled statement's row does not "
+          "survive its pid's next CMD_END -- closes with a real measured "
+          "duration, so 100 cumulative zombies no longer crowd a "
+          "genuinely slow execution off the duration_desc page ###")
+    scenario, zombie_pids, slow_pid = zombie_row_scenario()
     trace_dir = generate_traces(scenario)
-    to_ns = BASE + 100_000 * MS   # far past every open row's start
+    to_ns = BASE + 100_000 * MS   # far past every zombie's start
     try:
         with ServerHarness(trace_dir) as srv:
             page = srv.query("executions", limit=100, sort="duration_desc",
                              from_=BASE, to_=to_ns,
                              timeout=WATERFALL_QUERY_THRESHOLD_S)
-            t.check_eq(page.get("total_count"), 153,
-                       "fixture carries 150 open + 3 closed executions")
-            t.check_eq(page.get("open_count"), 150,
-                       "open_count reports the true open total, not the "
-                       "truncated page's count")
-            t.check_eq(page.get("completed_count"), 3,
-                       "completed_count reports the true closed total")
-            returned_pids = [r["pid"] for r in page.get("rows", [])]
-            t.check_eq(len(returned_pids), 100,
-                       "page is truncated to the request limit")
-            t.check(all(pid not in returned_pids for pid in slow_pids),
-                    "CHARACTERIZED (not fixed): a flood of merely-older open "
-                    "rows crowds every genuinely slow closed row off the "
-                    "truncated page -- the same defect #222 fixed for "
-                    "start_desc, sign flipped, now open_count/completed_count "
-                    "at least make it visible instead of silently hidden "
-                    "behind total_count/truncated alone")
+            t.check_eq(page.get("total_count"), len(zombie_pids) + 1,
+                       "fixture carries 100 zombies + 1 genuinely slow "
+                       "execution")
+            t.check_eq(page.get("open_count"), 0,
+                       "every zombie row closed at its own CMD_END -- none "
+                       "left in_progress (open_count=0, not 100)")
+            t.check_eq(page.get("completed_count"), len(zombie_pids) + 1,
+                       "every zombie plus the slow execution is now a "
+                       "closed row")
+
+            rows_by_pid = {r["pid"]: r for r in page.get("rows", [])}
+            # Only the last 5 (latest-started) zombies are guaranteed to
+            # survive the limit=100 truncation of 101 total rows -- they
+            # all tie at ~2ms, tie-broken by start_ns desc, so the single
+            # dropped row is the EARLIEST zombie, never one of these.
+            for pid in zombie_pids[-5:]:
+                row = rows_by_pid.get(pid)
+                t.check(row is not None and row.get("in_progress") is False,
+                        f"zombie pid {pid} is closed, not in_progress ({row})")
+                t.check(row is not None and row.get("duration_ms") is not None
+                        and row["duration_ms"] < 10.0,
+                        f"zombie pid {pid} carries its REAL ~2ms duration, "
+                        f"not one fabricated from the ~100s window bound "
+                        f"({row})")
+                t.check(row is not None and row.get("end_inferred") is True,
+                        f"zombie pid {pid} is flagged end_inferred -- closed "
+                        f"at CMD_END, never a real EXEC_END ({row})")
+
+            t.check(slow_pid in rows_by_pid,
+                    "FIXED (would have been crowded out before this "
+                    "round's fix): the genuinely slow 500ms execution is "
+                    "on the duration_desc page, not pushed off by 100 "
+                    "zombie rows each now carrying a real ~2ms duration "
+                    "instead of a fabricated one")
+            t.check(rows_by_pid.get(slow_pid, {}).get("end_inferred") is False,
+                    "the genuinely slow execution's real EXEC_END is NOT "
+                    "flagged end_inferred -- a measured completion still "
+                    "reads as measured")
+            pids_in_order = [r["pid"] for r in page.get("rows", [])]
+            t.check(pids_in_order and pids_in_order[0] == slow_pid,
+                    f"the genuinely slow execution sorts FIRST, ahead of "
+                    f"every closed zombie ({pids_in_order[:5]}...)")
+    finally:
+        cleanup_traces(trace_dir)
+
+
+# #222 review, adviser-found gap: EXEC_START unconditionally used to
+# overwrite the single active_row slot, so a pid that errors and then runs
+# ANOTHER statement on the SAME connection orphaned the first row beyond
+# the reach of a "close the active row at CMD_END" fix -- the common case,
+# not an edge case (a client that hits an error usually goes on to run
+# something else). The real-world hazard this covers: a single presenter
+# Ctrl-C on an ad-hoc query during a demo, then continuing to work on the
+# same connection -- n=1 is enough to pin one "In progress" row at the top
+# of the tab for the rest of the session.
+SEQ_QID = 271828182
+
+def sequential_errors_scenario(n_errors=5):
+    """One pid: N EXEC_START/CMD_END cycles with no EXEC_END (errors),
+    THEN one genuinely slow but SUCCESSFUL execution on the SAME
+    connection. Includes the n=1 case as errors[0] on its own is already a
+    complete reproduction of the single-cancel hazard; n_errors=5 pins
+    that repeated errors don't accumulate either."""
+    pid = 60000
+    events = []
+    for i in range(n_errors):
+        start = BASE + i * MS
+        events.append(marker(pid, start, EXEC_START, SEQ_QID))
+        events.append(marker(pid, start + 2 * MS, CMD_END, SEQ_QID))
+    slow_start = BASE + (n_errors + 1) * MS
+    events.append(marker(pid, slow_start, EXEC_START, SEQ_QID))
+    events.append(marker(pid, slow_start + 500 * MS, EXEC_END, SEQ_QID))
+    events.sort(key=lambda e: e["ts"])
+    scenario = {
+        "queries": [{"id": SEQ_QID, "text": "SELECT sequential_errors()"}],
+        "events": events,
+    }
+    return scenario, pid
+
+
+def test_sequential_errors_on_one_pid_do_not_accumulate(t):
+    print("\n### #222 review (adviser gap): sequential errors on ONE pid "
+          "each close at their OWN CMD_END -- a second EXEC_START does not "
+          "orphan the first row beyond CMD_END's reach ###")
+    scenario, pid = sequential_errors_scenario(n_errors=5)
+    trace_dir = generate_traces(scenario)
+    to_ns = BASE + 100_000 * MS
+    try:
+        with ServerHarness(trace_dir) as srv:
+            page = srv.query("executions", sort="duration_desc",
+                             from_=BASE, to_=to_ns,
+                             timeout=WATERFALL_QUERY_THRESHOLD_S)
+            rows = page.get("rows", [])
+            t.check_eq(len(rows), 6,
+                       f"5 errored + 1 successful execution, all on one "
+                       f"pid, all present ({len(rows)})")
+            t.check_eq(page.get("open_count"), 0,
+                       "RED before the adviser's fix: a second EXEC_START "
+                       "used to orphan the FIRST error's row beyond "
+                       "CMD_END's reach, leaving it permanently "
+                       "in_progress -- none are, now (open_count=0)")
+            errored = [r for r in rows if r["duration_ms"] is not None
+                      and r["duration_ms"] < 10.0]
+            t.check_eq(len(errored), 5,
+                       f"all 5 errors closed with their real ~2ms span, "
+                       f"none left open ({[r['duration_ms'] for r in errored]})")
+            t.check(all(r.get("end_inferred") is True for r in errored),
+                    "every errored row is flagged end_inferred")
+            t.check(all(r.get("in_progress") is False for r in rows),
+                    f"NOTHING on this pid is in_progress -- the n=1 case "
+                    f"alone (any single one of these 5) already proves a "
+                    f"single presenter cancel does not pin a row "
+                    f"({[r['in_progress'] for r in rows]})")
+            slow = next((r for r in rows if r["duration_ms"] and
+                        r["duration_ms"] > 100.0), None)
+            t.check(slow is not None and slow.get("end_inferred") is False,
+                    f"the final successful 500ms execution closed via its "
+                    f"own real EXEC_END, not inferred ({slow})")
+            t.check(rows[0] is slow if slow else False,
+                    f"the successful execution sorts FIRST, ahead of "
+                    f"every errored one on the same pid ({rows[0]})")
+    finally:
+        cleanup_traces(trace_dir)
+
+
+# #222 review: CMD_END is the correct closing point precisely because it
+# only fires once the backend has left RUNNING (src/bpf/pg_wait_tracer.bpf.c:
+# the pgstat_report_activity gate flip to IDLE happens after every nested
+# portal for this command has itself finished or errored) -- so it cannot
+# truncate a still-running statement. This must be PROVEN, not assumed:
+# genuine nesting (SQL-level EXECUTE of a prepared statement from inside
+# plpgsql) pushes a second EXEC_START onto the same pid's stack while the
+# outer is still legitimately open; both must close normally via their own
+# EXEC_END, neither early nor truncated by the other.
+NEST_QID_OUTER = 100
+NEST_QID_INNER = 200
+
+def nested_execution_scenario():
+    pid = 80000
+    outer_start = BASE
+    inner_start = BASE + 5 * MS
+    inner_end = BASE + 15 * MS
+    outer_end = BASE + 30 * MS
+    events = [
+        marker(pid, outer_start, EXEC_START, NEST_QID_OUTER),
+        marker(pid, inner_start, EXEC_START, NEST_QID_INNER),
+        marker(pid, inner_end, EXEC_END, NEST_QID_INNER),
+        marker(pid, outer_end, EXEC_END, NEST_QID_OUTER),
+    ]
+    scenario = {
+        "queries": [{"id": NEST_QID_OUTER, "text": "SELECT outer_call()"},
+                    {"id": NEST_QID_INNER, "text": "SELECT inner_call()"}],
+        "events": events,
+    }
+    return scenario, pid, outer_start, outer_end, inner_start, inner_end
+
+
+def test_nested_execution_not_truncated(t):
+    print("\n### #222 review: a legitimately nested execution is not cut "
+          "short or dropped -- CMD_END closes ONLY what is still open, "
+          "and only once the backend has actually gone idle ###")
+    (scenario, pid, outer_start, outer_end,
+     inner_start, inner_end) = nested_execution_scenario()
+    trace_dir = generate_traces(scenario)
+    try:
+        with ServerHarness(trace_dir) as srv:
+            page = srv.query("executions", sort="start_desc",
+                             timeout=WATERFALL_QUERY_THRESHOLD_S)
+            rows = {r["query_id"]: r for r in page.get("rows", [])}
+            t.check_eq(len(page.get("rows", [])), 2,
+                       f"both outer and inner rows are present, neither "
+                       f"dropped ({page.get('rows')})")
+            outer = rows.get(str(NEST_QID_OUTER))
+            inner = rows.get(str(NEST_QID_INNER))
+            t.check(outer is not None and outer.get("in_progress") is False
+                    and outer.get("end_inferred") is False,
+                    f"outer execution closed normally via its own real "
+                    f"EXEC_END, not truncated by the inner one ({outer})")
+            t.check(inner is not None and inner.get("in_progress") is False
+                    and inner.get("end_inferred") is False,
+                    f"inner execution closed normally via its own real "
+                    f"EXEC_END ({inner})")
+            t.check(outer is not None and
+                    abs(outer["duration_ms"] -
+                        (outer_end - outer_start) / MS) < 1e-6,
+                    f"outer duration is its OWN full span "
+                    f"({outer and outer['duration_ms']}ms, expected "
+                    f"{(outer_end - outer_start) / MS}ms) -- not clipped to "
+                    f"the inner's span")
+            t.check(inner is not None and
+                    abs(inner["duration_ms"] -
+                        (inner_end - inner_start) / MS) < 1e-6,
+                    f"inner duration is its OWN span "
+                    f"({inner and inner['duration_ms']}ms, expected "
+                    f"{(inner_end - inner_start) / MS}ms) -- not stretched "
+                    f"to the outer's span")
     finally:
         cleanup_traces(trace_dir)
 
@@ -743,6 +928,8 @@ def main():
     test_sort_order_and_fallback(t)
     test_crowding_check_and_query_latency_bound(t)
     test_open_row_crowding_characterized(t)
+    test_sequential_errors_on_one_pid_do_not_accumulate(t)
+    test_nested_execution_not_truncated(t)
     test_detail_window_bound_and_bounded_context(t)
     test_clustered_scatter_fills_budget(t)
     test_detail_cap(t)

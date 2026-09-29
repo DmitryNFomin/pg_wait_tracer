@@ -5,6 +5,7 @@ import {
     buildExecutionsModel, buildWaterfallOption, buildWaterfallReadout,
     executionsConfig, pickDefaultExecution, EXECUTIONS_SORT_DEFAULT,
     executionsSortLabel, executionsSortToggleLabel, executionsSortToggleTarget,
+    executionsCountsLabel,
 } from '../lib/builders/waterfall.js';
 import { isUnavailable } from '../lib/builders/fidelity.js';
 import { mountUnavailablePanel } from '../lib/panels.js';
@@ -59,6 +60,7 @@ export function createWaterfallView() {
             ' <div class="view-title">Executions ' +
             '<span id="executions-sort-label"></span>' +
             '<button id="executions-sort-toggle" class="link-button" type="button"></button>' +
+            '<span id="executions-counts-label"></span>' +
             '</div>' +
             ' <div id="executions-table"></div>' +
             '</section>' +
@@ -192,14 +194,16 @@ export function createWaterfallView() {
 
         async requests(ctx) {
             ctxRef = ctx;
+            const windowTo = ctx.timeRange.to;
             const executions = await ctx.transport.request(ctx.channel('executions'),
                 'executions', {
-                    from: ctx.timeRange.from, to: ctx.timeRange.to, limit: 100,
+                    from: ctx.timeRange.from, to: windowTo, limit: 100,
                     sort: sortMode, filters: ctx.filters.snapshot(),
                 });
-            if (isUnavailable(executions)) return { executions, detail: null, selected: null };
+            if (isUnavailable(executions))
+                return { executions, detail: null, selected: null, windowTo };
             const chosen = chooseExecution(executions.rows || []);
-            if (!chosen) return { executions, detail: null, selected: null };
+            if (!chosen) return { executions, detail: null, selected: null, windowTo };
             const detailEnd = chosen.end_ns != null
                 ? String(chosen.end_ns) : String(Math.round(ctx.timeRange.to));
             const detailFilters = Object.assign({}, ctx.filters.snapshot(), { pid: chosen.pid });
@@ -208,13 +212,13 @@ export function createWaterfallView() {
                     filters: detailFilters, start_ns: String(chosen.start_ns),
                     end_ns: detailEnd,
                 });
-            return { executions, detail, selected: chosen, detailEnd };
+            return { executions, detail, selected: chosen, detailEnd, windowTo };
         },
 
         build(data) {
             if (isUnavailable(data.executions)) return { unavailable: data.executions };
             if (isUnavailable(data.detail)) return { unavailable: data.detail };
-            const table = buildExecutionsModel(data.executions, data.selected);
+            const table = buildExecutionsModel(data.executions, data.selected, data.windowTo);
             const wf = data.detail ? buildWaterfallOption(data.detail, {
                 executionStart: data.selected.start_ns,
                 executionEnd: data.detailEnd,
@@ -234,6 +238,12 @@ export function createWaterfallView() {
             }
             ensureShell(el);
             updateSortControl();
+            const countsLabel = document.getElementById('executions-counts-label');
+            if (countsLabel) {
+                const text = executionsCountsLabel(
+                    model.table.open_count, model.table.completed_count);
+                countsLabel.textContent = text ? ' · ' + text : '';
+            }
             const tableHost = document.getElementById('executions-table');
             const pane = document.querySelector('.waterfall-pane');
             if (!model.table.hasRows) {

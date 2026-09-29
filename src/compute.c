@@ -3147,7 +3147,21 @@ void pgwt_compute_interference(const struct pgwt_trace_event *events, int count,
 
 struct exec_pid_state {
     uint32_t pid;
-    int active_row;
+    /* Stack (LIFO) of row indices this pid currently has open, deepest
+     * (innermost) execution last -- see pgwt_compute_executions's
+     * EXEC_START/EXEC_END/CMD_END handling. A single `active_row` int
+     * (the pre-#222-review shape) loses the OUTER row the moment a second
+     * EXEC_START fires -- true nesting (SQL-level EXECUTE of a prepared
+     * statement from inside plpgsql, PortalRun genuinely nested) and,
+     * just as commonly, a backend that errors on one statement and the
+     * client immediately sends another on the same connection with no
+     * EXEC_END in between for the first. Pushing (never overwriting)
+     * keeps every still-open row reachable so CMD_END -- the one marker
+     * that fires only once this pid has actually gone idle, so it can
+     * never cut a genuinely still-running statement -- can close every
+     * one of them, however deep. */
+    int *open_rows;
+    int n_open, cap_open;
     uint64_t plan_start_ns;
     uint64_t plan_query_id;
     int plan_open;
@@ -3177,8 +3191,37 @@ static int exec_pid_state_get(struct exec_pid_state **states, int *n_states,
     int idx = (*n_states)++;
     memset(&(*states)[idx], 0, sizeof((*states)[idx]));
     (*states)[idx].pid = pid;
-    (*states)[idx].active_row = -1;
     return idx;
+}
+
+/* Push a newly-opened row's index onto its pid's open stack. */
+static int exec_pid_push_row(struct exec_pid_state *st, int row_idx)
+{
+    if (st->n_open >= st->cap_open) {
+        int new_cap = st->cap_open ? st->cap_open * 2 : 4;
+        int *tmp = realloc(st->open_rows, new_cap * sizeof(*tmp));
+        if (!tmp)
+            return -1;
+        st->open_rows = tmp;
+        st->cap_open = new_cap;
+    }
+    st->open_rows[st->n_open++] = row_idx;
+    return 0;
+}
+
+/* Pop the innermost (most recently opened) still-open row, or -1 if none. */
+static int exec_pid_pop_row(struct exec_pid_state *st)
+{
+    if (st->n_open <= 0)
+        return -1;
+    return st->open_rows[--st->n_open];
+}
+
+/* The innermost still-open row without removing it -- the row a wait event
+ * arriving right now belongs to. */
+static int exec_pid_peek_row(const struct exec_pid_state *st)
+{
+    return st->n_open > 0 ? st->open_rows[st->n_open - 1] : -1;
 }
 
 static int execution_append(struct pgwt_execution **rows, int *n_rows,
@@ -3263,9 +3306,16 @@ void pgwt_compute_executions(const struct pgwt_trace_event *events, int count,
             continue;
         }
         if (marker == PGWT_MARKER_EXEC_START) {
-            /* A second start does not manufacture an end for the first one:
-             * the prior row remains explicitly in progress. */
-            st->active_row = -1;
+            /* PUSH, never overwrite: PortalRun genuinely nests for
+             * SQL-level EXECUTE of a prepared statement from inside
+             * plpgsql, and a backend that errors on one statement (no
+             * EXEC_END) commonly has the client send another right away
+             * on the same connection -- both leave an earlier row still
+             * open when this EXEC_START fires. Closing it here (or
+             * discarding it by overwriting a single active_row slot)
+             * would be wrong: the outer/earlier row might still be
+             * genuinely running. Only CMD_END (below) is a safe place to
+             * give up on a row this pid left open. */
             if (ev->timestamp_ns <= to_ns) {
                 struct pgwt_execution row;
                 memset(&row, 0, sizeof(row));
@@ -3281,9 +3331,9 @@ void pgwt_compute_executions(const struct pgwt_trace_event *events, int count,
                     row.plan_end_ns = st->ready_plan_end_ns;
                     row.has_plan = 1;
                 }
-                st->active_row = execution_append(&rows, &n_rows, &cap_rows,
-                                                  &row);
-                if (st->active_row < 0) {
+                int row_idx = execution_append(&rows, &n_rows, &cap_rows,
+                                               &row);
+                if (row_idx < 0 || exec_pid_push_row(st, row_idx) < 0) {
                     out->failed = 1;
                     break;
                 }
@@ -3294,15 +3344,78 @@ void pgwt_compute_executions(const struct pgwt_trace_event *events, int count,
             continue;
         }
         if (marker == PGWT_MARKER_EXEC_END) {
-            if (st->active_row >= 0 && st->active_row < n_rows &&
-                ev->timestamp_ns >= rows[st->active_row].start_ns) {
-                struct pgwt_execution *row = &rows[st->active_row];
+            /* Pops the INNERMOST open row -- correct for nesting (the
+             * statement that started last finishes first) and for the
+             * plain non-nested case (stack depth 1). A real, measured
+             * end: end_inferred stays 0. */
+            int row_idx = exec_pid_pop_row(st);
+            if (row_idx >= 0 && row_idx < n_rows &&
+                ev->timestamp_ns >= rows[row_idx].start_ns) {
+                struct pgwt_execution *row = &rows[row_idx];
                 row->end_ns = ev->timestamp_ns;
                 row->in_progress = 0;
                 if (row->query_id == 0)
                     row->query_id = ev->query_id;
             }
-            st->active_row = -1;
+            continue;
+        }
+        if (marker == PGWT_MARKER_CMD_END) {
+            /* A command can close without ever reaching EXEC_END: an ERROR
+             * longjmp, a cancel, statement_timeout, a client disconnect
+             * mid-query, or an EXEC_END lost to a ringbuf drop all skip
+             * src/daemon.c's query__execute__done probe. Left alone, that
+             * row stays in_progress for the rest of the retained capture
+             * with a duration fabricated from the caller's window bound
+             * (execution_sort_duration_ns, src/server.c) -- sorted above
+             * every genuinely slow COMPLETED execution once "longest
+             * running first" ranks by duration (#222 review: the
+             * demo-blocking failure #222 was filed to prevent,
+             * reintroduced from the other direction -- concretely, a
+             * single presenter Ctrl-C on an ad-hoc query pins one
+             * "In progress" row at the top of the tab for the rest of the
+             * session; n=1 is enough).
+             *
+             * CMD_END is the correct closing point, and closing every row
+             * still open for this pid (not just the innermost) is safe,
+             * BECAUSE of what CMD_END means: src/bpf/pg_wait_tracer.bpf.c
+             * emits it only on the pgstat_report_activity gate flip to
+             * IDLE, which happens after every nested portal for this
+             * command has itself finished or errored -- the backend
+             * cannot be RUNNING anything when this fires. So CMD_END can
+             * never truncate a still-running statement, nested or not;
+             * closing on a second EXEC_START instead would be wrong for
+             * exactly that reason (see the EXEC_START comment above). Each
+             * closed-here row's end_ns is a real wall-clock timestamp --
+             * not fabricated from the window bound -- but DEDUCED from the
+             * idle transition rather than measured at the query's own
+             * completion, so end_inferred=1 (struct pgwt_execution,
+             * compute.h): a cancelled statement is consequently
+             * indistinguishable from a normally-completed one of the same
+             * measured span in this field alone -- acceptable, but not
+             * invisible: end_inferred is exactly the bit that says so.
+             * Mirrors pgwt_tag_events's own CMD_END handling (this file,
+             * ~line 267: "an EXEC_END lost to a ringbuf drop must not leak
+             * the window across statements") for a different computation
+             * over the same markers.
+             *
+             * Not a total fix: CMD_END itself is not guaranteed. It is
+             * emitted only while a live watchpoint is open on this pid
+             * (src/bpf/pg_wait_tracer.bpf.c: st->wp_live &&
+             * exact_admission_open()) -- a pid that never escalated, or
+             * whose CMD_END marker is itself lost to a ringbuf drop, still
+             * leaves a genuine zombie. Nothing below claims otherwise. */
+            int row_idx;
+            while ((row_idx = exec_pid_pop_row(st)) >= 0) {
+                if (row_idx < n_rows && rows[row_idx].in_progress &&
+                    ev->timestamp_ns >= rows[row_idx].start_ns) {
+                    struct pgwt_execution *row = &rows[row_idx];
+                    row->end_ns = ev->timestamp_ns;
+                    row->in_progress = 0;
+                    row->end_inferred = 1;
+                }
+            }
+            st->plan_open = 0;
+            st->plan_ready = 0;
             continue;
         }
         if (PGWT_IS_MARKER(marker) ||
@@ -3321,9 +3434,10 @@ void pgwt_compute_executions(const struct pgwt_trace_event *events, int count,
             interval_overlaps(ev->timestamp_ns, ev->duration_ns,
                               from_ns, to_ns) &&
             pgwt_filter_matches(&event_filter, ev);
-        if (event_matches && st->active_row >= 0 && st->active_row < n_rows) {
-            rows[st->active_row].n_events++;
-            rows[st->active_row].matches_event_filter = 1;
+        int active_row = exec_pid_peek_row(st);
+        if (event_matches && active_row >= 0 && active_row < n_rows) {
+            rows[active_row].n_events++;
+            rows[active_row].matches_event_filter = 1;
         }
 
         int wi = worker_last_row
@@ -3335,7 +3449,7 @@ void pgwt_compute_executions(const struct pgwt_trace_event *events, int count,
                 out->failed = 1;
                 break;
             } else {
-                int row_idx = states[li].active_row;
+                int row_idx = exec_pid_peek_row(&states[li]);
                 if (event_matches && row_idx >= 0 && row_idx < n_rows &&
                     worker_last_row[wi] != row_idx) {
                     rows[row_idx].n_workers++;
@@ -3347,6 +3461,8 @@ void pgwt_compute_executions(const struct pgwt_trace_event *events, int count,
     }
 
     free(worker_last_row);
+    for (int i = 0; i < n_states; i++)
+        free(states[i].open_rows);
     free(states);
     if (out->failed) {
         free(rows);

@@ -880,29 +880,31 @@ def _handle_request_inner(cmd, req_id, msg):
              "start_ns": "9999950000000", "end_ns": None,
              "duration_ms": None, "plan_ms": None,
              "n_events": 0, "n_workers": 0, "in_progress": True,
-             "started_before_window": False},
+             "end_inferred": False, "started_before_window": False},
             {"pid": 1002, "query_id": qid,
              "start_ns": "10000100000000", "end_ns": "10000180000000",
              "duration_ms": 80.0, "plan_ms": None,
              "n_events": 2, "n_workers": 0, "in_progress": False,
-             "started_before_window": False},
+             "end_inferred": False, "started_before_window": False},
             # #222 review item 4: ties pid 1002's 80.0ms exactly but started
             # earlier, so duration_desc's tie-break (start_ns desc, then
             # pid desc -- matching cmp_execution_duration_desc in
             # src/server.c) has to pick a winner instead of Python's
             # stable sort coincidentally preserving fixture insertion
             # order (which is what a tie-added-later would have silently
-            # gotten away with).
+            # gotten away with). end_inferred=True: this row also exercises
+            # the "closed via CMD_END, not a measured EXEC_END" label (an
+            # ERROR/cancel/timeout) -- src/server.c's end_inferred field.
             {"pid": 1010, "query_id": qid,
              "start_ns": "10000050000000", "end_ns": "10000130000000",
              "duration_ms": 80.0, "plan_ms": None,
              "n_events": 1, "n_workers": 0, "in_progress": False,
-             "started_before_window": False},
+             "end_inferred": True, "started_before_window": False},
             {"pid": 1000, "query_id": qid,
              "start_ns": "10000000000000", "end_ns": "10000030001000",
              "duration_ms": 30.001, "plan_ms": 1.0,
              "n_events": 5, "n_workers": 2, "in_progress": False,
-             "started_before_window": False},
+             "end_inferred": False, "started_before_window": False},
         ]
         if "pid" in filters:
             rows = [r for r in rows if r["pid"] == filters["pid"]]

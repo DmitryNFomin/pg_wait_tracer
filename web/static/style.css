@@ -487,6 +487,7 @@ h1 { font-size: 18px; font-weight: 600; color: #fff; }
 .execution-list table { min-width: 820px; }
 tr.selected-execution td { background: #173653; }
 .execution-open { color: #ffd166; font-size: 11px; }
+.execution-inferred { border-bottom: 1px dotted #888; cursor: help; }
 .query-executions-action { color: #4fc3f7; white-space: nowrap; }
 .waterfall-pane, .scatter-shell, .matrix-shell { position: relative; }
 .waterfall-banner {
