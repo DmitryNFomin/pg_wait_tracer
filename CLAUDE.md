@@ -116,9 +116,9 @@ judges. It writes no feature code itself for anything bigger than a one-liner.
   goes back to the implementer whatever label the reviewer gave it.
   The orchestrator does not research: web searches, `gh api` reads, price
   lookups and code archaeology go to a Haiku or Sonnet agent and return as one
-  short report. Each orchestrator tool call costs a full context re-read; on
-  2026-09-29 that grew from 485k to 728k cache-read tokens per record across
-  the day's quartiles, and 57% of its turns followed its own tool calls.
+  short report. Each orchestrator tool call costs a full context re-read of a
+  conversation that only grows; on 2026-09-29, 57% of its turns followed its
+  own tool calls.
 - **Reports to the owner are FIVE LINES at most** (owner rule 2026-09-25):
   merged / in flight / blocked / needs you. Long form only when the owner has
   to decide something, or when a finding changes the plan. No bug narratives —
