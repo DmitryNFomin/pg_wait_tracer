@@ -47,6 +47,13 @@ on:
         type: boolean
         default: false
 
+# A new PR commit supersedes its old result. Give non-PR runs a unique suffix
+# so a pending post-merge master run (or merge-queue/manual evidence run)
+# cannot be replaced by a later run even with cancel-in-progress disabled.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name == 'pull_request' && 'latest' || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && github.ref != 'refs/heads/master' }}
+
 jobs:
   changed_files:
     # Drives how much of the self-hosted gate-box capture matrix runs below.
@@ -234,7 +241,7 @@ jobs:
     # docs/DEV_LOOP_PLAN.md step 1: moved to the persistent gate box (real
     # hardware, no noisy-neighbour hypervisor) instead of ubuntu-latest.
     #
-    # No `concurrency:` block (issue #126; removed 2026-09-18 — previously
+    # No job-level `concurrency:` block (issue #126; removed 2026-09-18 — previously
     # had a per-job-identity group here, added to fix a real bug: a single
     # literal "gate-box" group shared by all 5 moved jobs cancelled 3-4 of
     # them outright with zero duration the instant they all became eligible
@@ -245,14 +252,15 @@ jobs:
     # cancels the OLDER run's still-pending job the moment the newer run's
     # job joins the identical group — observed on PR #124 run 35354092704,
     # `capture-smoke (PG 18)` cancelled after 71 min of queueing instead of
-    # eventually running. No group is needed for correctness: the gate
+    # eventually running. No job-level group is needed for correctness: the gate
     # box's runner takes one job at a time by default
     # (tests/provision-runner.sh does not pass --ephemeral or any
     # multi-job flag), and every build/test step below additionally holds
     # /tmp/pgwt-box-check.lock (also serialising against an agent's ad hoc
     # `make box-check` over ssh, which no concurrency group could ever see
     # anyway) — that lock, not a concurrency group, is what actually
-    # prevents same-box overlap, and it queues rather than cancels.
+    # prevents same-box overlap. The workflow-level group above cancels only
+    # superseded PR runs, never unrelated PR cells or master runs.
     # Fork PRs (reviewer round 2, option c): a job-level `if:` that SKIPS the
     # job for a fork PR is the wrong shape — GitHub scores a skipped required
     # check as passing, so a fork PR would be mergeable with zero capture/
@@ -266,6 +274,8 @@ jobs:
     name: sampled-overhead (PG 17)
     needs: changed_files
     runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted","gate-box"]') }}
+    env:
+      PGWT_CI_CELL: ${{ github.run_id }}-${{ github.run_attempt }}-sampled-overhead
     # timeout-minutes: the gate itself takes ~9 min on the box; the rest is
     # the bounded wait (120 min) for /tmp/pgwt-box-check.lock, which agents'
     # `make box-check` runs hold for 45-80 min each. Queueing is the design.
@@ -464,7 +474,7 @@ jobs:
           exec 9>/tmp/pgwt-box-check.lock
           flock -w 7200 9 || { echo "FATAL: /tmp/pgwt-box-check.lock held >120 min" >&2; exit 1; }
           PM_PID=$(sudo head -1 /var/lib/postgresql/17/main/postmaster.pid)
-          sudo env "PATH=/usr/lib/postgresql/17/bin:$PATH" \
+          sudo env "PGWT_CI_CELL=$PGWT_CI_CELL" "PATH=/usr/lib/postgresql/17/bin:$PATH" \
             "BPFTOOL=$BPFTOOL" \
             python3 tests/sampled_overhead_gate.py \
               --pid "$PM_PID" --pg-version 17 --port "$SO_PGPORT" \
@@ -499,6 +509,12 @@ jobs:
               | tee -a "$GITHUB_STEP_SUMMARY"
           fi
 
+      # GitHub cancellation can interrupt sudo/Python before their normal
+      # finally blocks run. Reap only this cell's tagged descendants.
+      - name: Reap this cell's processes after cancellation
+        if: ${{ always() && steps.needed_filter.outputs.needed == 'true' && runner.environment == 'self-hosted' }}
+        run: sudo python3 .github/scripts/cleanup_gate_cell.py "$PGWT_CI_CELL"
+
   capture-smoke:
     # Phase T0 (Trust Milestone, TST-1/2): run the REAL capture path against
     # a real PostgreSQL on the runner. Every field escape to date (#8, #24,
@@ -522,7 +538,7 @@ jobs:
     # of ubuntu-latest — real hardware + real kernel for the capture path
     # every field escape to date lived in.
     #
-    # No `concurrency:` block (issue #126; removed 2026-09-18) — see
+    # No job-level `concurrency:` block (issue #126; removed 2026-09-18) — see
     # sampled-overhead's own comment above for the full history: a
     # per-job-identity group here originally fixed a real bug (one literal
     # "gate-box" group shared across this job's 4 matrix cells plus
@@ -533,12 +549,13 @@ jobs:
     # run's still-pending job the moment the newer run's job joins the
     # identical group — observed on PR #124 run 35354092704,
     # `capture-smoke (PG 18)` cancelled after 71 min of queueing instead of
-    # eventually running. No group is needed: the gate box's runner takes
+    # eventually running. No job-level group is needed: the gate box's runner takes
     # one job at a time by default, and every build/test step below
     # additionally holds /tmp/pgwt-box-check.lock (also covering an
     # agent's ad hoc `make box-check` over ssh, which no concurrency group
     # could ever see anyway) — that lock is what actually serialises
-    # same-box access, and it queues rather than cancels.
+    # same-box access. The workflow-level group above only supersedes PR
+    # runs for the same ref, while master runs keep distinct groups.
     #
     # Fork PRs (reviewer round 2, option c): a job-level `if:` that SKIPS the
     # job for a fork PR is the wrong shape — GitHub scores a skipped required
@@ -559,6 +576,8 @@ jobs:
     name: capture-smoke (PG ${{ matrix.pg }})
     needs: changed_files
     runs-on: ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-latest' || fromJSON('["self-hosted","gate-box"]') }}
+    env:
+      PGWT_CI_CELL: ${{ github.run_id }}-${{ github.run_attempt }}-capture-${{ matrix.pg }}
     timeout-minutes: 180
     strategy:
       fail-fast: false
@@ -778,11 +797,17 @@ jobs:
           # is tracing), and GITHUB_STEP_SUMMARY (the loud watchpoint-skip
           # note). BPFTOOL: the uprobe run_cnt assertion (T2) needs a
           # working bpftool inside the sudo environment.
-          sudo env "PATH=/usr/lib/postgresql/$V/bin:$PATH" \
+          sudo env "PGWT_CI_CELL=$PGWT_CI_CELL" "PATH=/usr/lib/postgresql/$V/bin:$PATH" \
             "PGPORT=$CS_PGPORT" \
             "GITHUB_STEP_SUMMARY=$GITHUB_STEP_SUMMARY" \
             "BPFTOOL=$BPFTOOL" \
             tests/ci_smoke.sh --pg-version "$V" $FLAGS
+
+      # Preserve the provisioned PostgreSQL clusters; only this cell's
+      # pgbench/tracer/server descendants are eligible for cleanup.
+      - name: Reap this cell's processes after cancellation
+        if: ${{ always() && steps.needed_filter.outputs.needed == 'true' && runner.environment == 'self-hosted' }}
+        run: sudo python3 .github/scripts/cleanup_gate_cell.py "$PGWT_CI_CELL"
 
   # Opt-in only: a plain `workflow_dispatch` (the kind agents use to prove a
   # branch on the gate box) does NOT launch this job — it also requires the

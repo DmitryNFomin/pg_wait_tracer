@@ -281,8 +281,11 @@ ssh_strict=""
 rsync_e="ssh"
 [[ -n "$ssh_strict" ]] && rsync_e="ssh $ssh_strict"
 
-echo "box-check: $target  OS=$OS PG=${PG:-all} EPHEMERAL=$EPHEMERAL  -> $remote_dir  (log: $log)"
-ssh -o BatchMode=yes $ssh_strict "$target" "mkdir -p '$remote_dir'" || exit 1
+echo "box-check: target=$target OS=$OS PG=${PG:-all} EPHEMERAL=$EPHEMERAL -> $remote_dir (log: $log)" | tee -a "$log"
+ssh -o BatchMode=yes $ssh_strict "$target" \
+    "mkdir -p '$remote_dir' && printf 'box-check: remote hostname=%s machine_id=%s\\n' \"\$(hostname -f 2>/dev/null || hostname)\" \"\$(cat /etc/machine-id 2>/dev/null || echo unavailable)\"" \
+    2>&1 | tee -a "$log"
+[[ ${PIPESTATUS[0]} -eq 0 ]] || exit 1
 # The binary excludes are anchored to the repo root (leading /): an
 # unanchored 'pg_wait_tracer*' also matches src/pg_wait_tracer.c,
 # src/pg_wait_tracer.h and src/bpf/pg_wait_tracer.bpf.c (rsync excludes
@@ -335,8 +338,9 @@ preflight="$preflight; then echo \"gate box needs re-provisioning after a kernel
 # `all` target) only builds the daemon + pgwt-server. Not needed until
 # issue #93's live-UI-smoke test (tests/ui_live_smoke.sh checks for
 # web/pgwt and fails loudly if it is missing, same as the other binaries).
+lock_header='exec 9>/tmp/pgwt-box-check.lock; if flock -n 9; then echo "box-check: lock acquired (waited_for_lock=no, lock_wait_ms=0)"; else lock_wait_start_ns=$(date +%s%N); echo "box-check: waiting for /tmp/pgwt-box-check.lock"; flock 9 || exit; lock_wait_ms=$(( ($(date +%s%N) - lock_wait_start_ns) / 1000000 )); echo "box-check: lock acquired (waited_for_lock=yes, lock_wait_ms=${lock_wait_ms})"; fi;'
 ssh -o BatchMode=yes $ssh_strict "$target" \
-    "cd '$remote_dir' && ([ -w /tmp/pgwt-box-check.lock ] || sudo sh -c 'touch /tmp/pgwt-box-check.lock && chmod 0666 /tmp/pgwt-box-check.lock') && flock /tmp/pgwt-box-check.lock bash -c '$preflight make -j\$(nproc) && make -C tests && make pgwt-client && sudo env$sudo_env tests/run_all.sh --require-live $pgarg'" \
+    "cd '$remote_dir' && ([ -w /tmp/pgwt-box-check.lock ] || sudo sh -c 'touch /tmp/pgwt-box-check.lock && chmod 0666 /tmp/pgwt-box-check.lock') && bash -c '$lock_header $preflight make -j\$(nproc) && make -C tests && make pgwt-client && sudo env$sudo_env tests/run_all.sh --require-live $pgarg'" \
     2>&1 | tee -a "$log"
 rc=${PIPESTATUS[0]}
 
