@@ -59,6 +59,16 @@ RESULTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 # what a viewer's browser is actually asking for at that moment.
 WATERFALL_LIVE_WINDOW_S = 900
 
+# issue #223: the pinned demo-client viewport -- docs/DEMO_REHEARSAL_CRITERIA.md
+# "Pin: 1710 x 981 CSS at devicePixelRatio 2", measured in
+# docs/chrome-demo-viewport-2026-09-28.md. Only this script passes a
+# non-default viewport/device_scale_factor into ui_live_smoke.run_tab();
+# ui_live_smoke.py's own CI-tier walk keeps 1280x900 DSF 1 (a different
+# gate with different goals -- see run_tab's own docstring).
+DEMO_VIEWPORT_WIDTH = 1710
+DEMO_VIEWPORT_HEIGHT = 981
+DEMO_DEVICE_SCALE_FACTOR = 2
+
 
 def _print_plan_banner(duration_s, ticks, passes):
     degraded = ticks < lib.MIN_TICKS or len(passes) < 3
@@ -117,7 +127,8 @@ def _assert_daemon_alive(daemon_pid, where):
 
 
 def _run_passes(browser, url, out_dir, ticks, passes, first_data_timeout,
-                pgbench_pid, workload_pid, daemon_pid, t0):
+                pgbench_pid, workload_pid, daemon_pid, t0,
+                viewport, device_scale_factor):
     pass_results = []
     sweep_coverage = []
     for name, target_offset_s in passes:
@@ -145,7 +156,9 @@ def _run_passes(browser, url, out_dir, ticks, passes, first_data_timeout,
             print(f"  --- {tab_id} ---")
             result = live_smoke.run_tab(browser, tab_id, url, pass_out_dir,
                                         ticks, first_data_timeout,
-                                        lib.BLINK_THRESHOLD)
+                                        lib.BLINK_THRESHOLD,
+                                        viewport=viewport,
+                                        device_scale_factor=device_scale_factor)
             tab_results[tab_id] = result
             live_smoke._assert_workload_alive(
                 pgbench_pid, workload_pid, f"pass {name!r} tab {tab_id!r}")
@@ -368,6 +381,17 @@ def main():
     ap.add_argument("--daemon-pid", type=int, default=None,
                     help="the pg_wait_tracer daemon's own PID (criteria doc "
                     "#157/§2 'the daemon process alive for the whole window')")
+    ap.add_argument("--viewport-width", type=int, default=DEMO_VIEWPORT_WIDTH,
+                    help="issue #223: pinned demo-client viewport width "
+                    "(default matches docs/DEMO_REHEARSAL_CRITERIA.md's "
+                    f"1710x981 @ DPR2 pin; default {DEMO_VIEWPORT_WIDTH})")
+    ap.add_argument("--viewport-height", type=int, default=DEMO_VIEWPORT_HEIGHT,
+                    help=f"issue #223: pinned viewport height (default "
+                    f"{DEMO_VIEWPORT_HEIGHT})")
+    ap.add_argument("--device-scale-factor", type=float,
+                    default=DEMO_DEVICE_SCALE_FACTOR,
+                    help="issue #223: pinned device scale factor / effective "
+                    f"zoom proxy (default {DEMO_DEVICE_SCALE_FACTOR})")
     args = ap.parse_args()
 
     duration_s = args.duration_min * 60.0
@@ -410,7 +434,10 @@ def main():
             pass_results, sweep_coverage = _run_passes(
                 browser, args.url, out_dir, ticks, passes,
                 args.first_data_timeout, args.pgbench_pid,
-                args.workload_pid, args.daemon_pid, t0)
+                args.workload_pid, args.daemon_pid, t0,
+                viewport={"width": args.viewport_width,
+                          "height": args.viewport_height},
+                device_scale_factor=args.device_scale_factor)
         finally:
             browser.close()
 

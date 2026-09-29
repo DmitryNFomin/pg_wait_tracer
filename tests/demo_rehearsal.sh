@@ -16,18 +16,29 @@
 # 11-tab walk at early/middle/late offsets instead of once) and the extra
 # end-of-capture checks it runs -- see that file's own header.
 #
-# Run via `make demo-rehearsal` (scripts/demo-rehearsal.sh), which creates
-# the throwaway Hetzner VM this script is meant to run on (EPHEMERAL=1
-# path, reusing tests/hetzner-vm.sh -- issue #157: "Never the persistent
-# gate box, never a gating CI job"). Not wired into tests/run_all.sh and
-# never should be -- it is 30-45x longer than everything else run_all.sh
-# does.
+# Run via `make demo-rehearsal` (scripts/demo-rehearsal.sh), which either
+# creates a throwaway Hetzner VM (the default, private to this one run) or
+# -- when PGWT_BOX is set -- targets a PERSISTENT, shared box instead
+# (owner rule 2026-09-28: persistent boxes first; required for a run that
+# is meant to count toward docs/DEMO_REHEARSAL_CRITERIA.md's sequence).
+# Not wired into tests/run_all.sh and never should be -- it is 30-45x
+# longer than everything else run_all.sh does.
 #
-# No flock here (unlike tests/ui_live_smoke.sh): this script is designed to
-# run on a PRIVATE ephemeral VM that scripts/demo-rehearsal.sh creates for
-# exactly one run and then deletes -- nothing else is ever sharing it, so
-# the box-wide lock tests/ui_live_smoke.sh needs on the persistent gate box
-# does not apply here. A manual run on a SHARED box must add it.
+# No flock in THIS script (unlike tests/ui_live_smoke.sh) -- the lock now
+# lives one level up, in scripts/demo-rehearsal-remote-run.sh (which wraps
+# THIS whole script, `sudo`+build included, in
+# /tmp/pgwt-box-check.lock -- the same lock box-check.sh uses), because
+# that is the process that is actually detached and long-lived, and taking
+# it there means an uncontended throwaway-VM run pays nothing extra while
+# a PERSISTENT-box run correctly queues behind CI/other agents instead of
+# colliding with them. remote-run.sh's `sudo ... tests/demo_rehearsal.sh`
+# invocation (which is what actually starts everything below: tracer,
+# bridge, pgwt-server, pgbench, the lock/sleep workload) is deliberately
+# run with `200>&-` so none of THIS script's own children ever inherit
+# that fd -- see the remote-run.sh comment for why an inherited fd on a
+# SHARED persistent box is now a real hazard, not just a hypothetical one:
+# cleanup() below already detects a leaked child and exits 1 but does NOT
+# kill it, exactly like tests/ui_live_smoke.sh's own cleanup() documents.
 #
 # Usage: tests/demo_rehearsal.sh [--pid POSTMASTER_PID] [--pg-version N]
 # Env: DURATION_MIN (default 35), PGWT_DEMO_PORT (default 8385)
@@ -114,9 +125,13 @@ cleanup() {
     tail -n 20 "$PGBENCH_LOG" 2>/dev/null | sed 's/^/  /'
 
     # Same leaked-process guard as tests/ui_live_smoke.sh (issue #93 review
-    # item 4) -- an ephemeral VM gets deleted right after this script exits
-    # either way, but a leftover process here would still mean the run's
-    # own teardown was not clean, worth reporting loudly.
+    # item 4). On a throwaway VM a leftover process here still gets swept
+    # away by that VM's own deletion right after this script exits -- but
+    # on a PERSISTENT box (PGWT_BOX) nothing ever deletes it, so a leftover
+    # process is no longer just an untidy-teardown signal, it is a
+    # potentially permanent resident. Reported loudly (exit 1) either way;
+    # this guard does not kill it, which is exactly why remote-run.sh's
+    # `200>&-` matters -- the flock fd must not be among what survives.
     sleep 1
     local leftover=""
     leftover="$(pgrep -f "$TRACE_DIR" 2>/dev/null || true)"
