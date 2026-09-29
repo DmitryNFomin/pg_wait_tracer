@@ -64,6 +64,14 @@ run python3 tests/test_free_ports.py
 step "python: demo-rehearsal bypass-suite unit tests"
 run python3 tests/test_demo_rehearsal_lib.py
 
+# #243: Workload.fire()'s verify flag -- pure Python, fakes psql/sessions,
+# no Linux/root/live-DB needed. Belongs in the fast deterministic tier for
+# the same reason as the bypass suite above: a regression here (verify
+# silently ignored) is otherwise only caught by an actual live capture's
+# Sessions-tab row count.
+step "python: Workload.fire() verify-flag unit tests (#243)"
+run python3 tests/test_workload_verify_flag.py
+
 step "CI change-classifier table-driven test (issue #167)"
 run bash tests/test_classify_changed_files.sh
 

@@ -375,13 +375,34 @@ class Workload:
             self.backend_pids = wait_for_observation(
                 self.holder, discover_backend_pids, 30, interval_s=0.2) or {}
 
-    def fire(self, sleep_s=3):
-        """Start the observable waits (call after the tracer attached)."""
+    def fire(self, sleep_s=3, verify=True):
+        """Start the observable waits (call after the tracer attached).
+
+        verify=True (default, every one-shot smoke-test call site) spawns a
+        fresh psql backend to assert the waiter actually blocked -- cheap
+        when fire() runs once or a few times per test. tests/live_loop_workload.py
+        calls fire() every ~5-8s for the WHOLE demo window (up to 900s) to
+        keep Lock:relation/Timeout:PgSleep appearing every live tick (#93);
+        at verify=True that repeated one-shot backend was the dominant
+        source of the ~150 distinct PIDs polluting the Sessions tab in a
+        demo workload with ~8 real sessions (#243) -- the SAME assertion,
+        re-run every tick, each time through a brand-new connect/query/exit
+        backend the Sessions tab (correctly) counts as a session. The
+        blocking behaviour itself is unconditional SQL identical to the one
+        proven once in open_sessions()/the first fire(); the real regression
+        guard for "the waiter silently stopped blocking" is the independent,
+        trace-driven Lock:relation-per-tick check in
+        tests/demo_workload_coverage.py (#243 acceptance), not this
+        self-check's opinion of pg_locks. So a long-running loop passes
+        verify=False and skips the extra backend entirely; one-shot callers
+        keep the assertion."""
         self.sleeper.stdin.write(f"SELECT pg_sleep({sleep_s});\n")
         self.sleeper.stdin.flush()
         self.waiter.stdin.write(f"SELECT count(*) FROM {self.LOCK_TABLE};\n")
         self.waiter.stdin.flush()
         time.sleep(1.5)
+        if not verify:
+            return
         waiters = psql(
             f"SELECT count(*) FROM pg_locks "
             f"WHERE relation = '{self.LOCK_TABLE}'::regclass AND NOT granted")

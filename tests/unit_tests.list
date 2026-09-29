@@ -45,4 +45,5 @@ test_ui_live_smoke_lib.py
 test_multi_window_lib.py
 test_demo_rehearsal_lib.py
 test_demo_rehearsal_orchestrator_lib.py
+test_workload_verify_flag.py
 test_hetzner_sweep.sh

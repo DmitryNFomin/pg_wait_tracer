@@ -49,7 +49,16 @@ def main():
                 f"BEGIN; LOCK TABLE {wl.LOCK_TABLE} IN ACCESS EXCLUSIVE MODE;\n")
             wl.holder.stdin.flush()
             time.sleep(0.5)   # let the re-lock land before the waiter tries
-            wl.fire(sleep_s=3)
+            # verify=False: fire()'s default "waiter actually blocked" check
+            # spawns a fresh one-shot psql backend. Fine for a smoke test
+            # calling fire() a few times, but this loop calls fire() every
+            # ~5-8s for the WHOLE demo window (up to 900s) -- at verify=True
+            # that repeated one-shot backend was the dominant source of the
+            # ~150 distinct PIDs polluting the Sessions tab in a demo
+            # workload with ~8 real sessions (#243). See fire()'s docstring
+            # for why skipping it here does not remove the real regression
+            # guard.
+            wl.fire(sleep_s=3, verify=False)
             time.sleep(2)
             wl.release()
             time.sleep(1)
