@@ -363,6 +363,194 @@ def test_build_sweep_tick_record_shape():
           f"only the pair touching the missing 5th frame gets a note ({rec['notes']})")
 
 
+def test_build_sweep_tick_record_records_capture_ms_and_mount_seq():
+    a = np.zeros((4, 4, 3), dtype=np.uint8)
+    frames = [a, a.copy()]
+    rec = lib.build_sweep_tick_record([201, 503], frames,
+                                      target_offsets_ms=(200, 500),
+                                      capture_ms=[42.5, 39.1], mount_seq=7)
+    check(rec["capture_ms"] == [42.5, 39.1],
+          f"per-frame capture wall-clock time is carried through (issue #197 evidence) ({rec['capture_ms']})")
+    check(rec["mount_seq"] == 7,
+          f"the mount seq this tick's sweep anchored to is recorded ({rec['mount_seq']})")
+
+
+def test_build_sweep_tick_record_capture_ms_and_mount_seq_default_empty():
+    a = np.zeros((4, 4, 3), dtype=np.uint8)
+    rec = lib.build_sweep_tick_record([201, 503], [a, a.copy()],
+                                      target_offsets_ms=(200, 500))
+    check(rec["capture_ms"] == [],
+          f"a caller that doesn't measure capture time gets [] not a missing key ({rec['capture_ms']})")
+    check(rec["mount_seq"] is None,
+          "a caller that doesn't pass mount_seq gets None not a missing key")
+
+
+# ── clip_rect_to_viewport (issue #197) ──────────────────────────────────────
+#
+# The Sessions panel (#table-container) has no vertical overflow/height cap,
+# so it grows to its full row count -- ~5793px at 205 rows on the gate box.
+# Playwright's own elementHandle.screenshot() captures such an element IN
+# FULL (expanding the capture region beyond the viewport), which measured
+# ~1.4s for that panel: the 5-frame blink sweep then cost more than the 5s
+# live tick it needs to fit inside of, so every sweep straddled a mount by
+# construction. clip_rect_to_viewport is the arithmetic behind capturing
+# only the viewport-visible slice instead, so one frame's cost stays roughly
+# constant regardless of row count.
+
+def test_clip_rect_to_viewport_panel_fits_entirely():
+    # A short panel (e.g. a chart tab) entirely inside the viewport: the
+    # clip is just the panel's own rect, unchanged.
+    clip = lib.clip_rect_to_viewport(10, 20, 300, 200, 1280, 900)
+    check(clip == {"x": 10.0, "y": 20.0, "width": 300.0, "height": 200.0},
+          f"a panel that fits is clipped to itself unchanged ({clip})")
+
+
+def test_clip_rect_to_viewport_tall_panel_clips_to_viewport_height():
+    # The Sessions-panel case: a 5793px-tall panel starting at y=0 (scrolled
+    # to the top), viewport 900px tall -- MUST clip to 900, never capture
+    # the whole 5793px (that's the bug this function exists to fix: a clip
+    # this function fails to produce leaves _safe_panel_screenshot calling
+    # panel.screenshot() on the full element instead, which is the exact
+    # cost regression issue #197 fixes).
+    clip = lib.clip_rect_to_viewport(0, 0, 1200, 5793, 1280, 900)
+    check(clip == {"x": 0.0, "y": 0.0, "width": 1200.0, "height": 900.0},
+          f"a too-tall panel clips to the viewport height, not its own full height ({clip})")
+
+
+def test_clip_rect_to_viewport_scrolled_past_top_negative_y():
+    # scroll_into_view_if_needed() aligning the panel can still leave a
+    # negative bounding-box y in principle (over-scroll); the clip must
+    # still land inside [0, viewport_height), never a negative origin.
+    clip = lib.clip_rect_to_viewport(0, -50, 800, 5793, 1280, 900)
+    check(clip == {"x": 0.0, "y": 0.0, "width": 800.0, "height": 900.0},
+          f"negative y clamps to the viewport top ({clip})")
+
+
+def test_clip_rect_to_viewport_panel_scrolled_fully_out_of_view_is_none():
+    clip = lib.clip_rect_to_viewport(0, 950, 800, 200, 1280, 900)
+    check(clip is None,
+          f"a panel entirely below the viewport has no intersection -- None, not a "
+          f"zero/negative-size clip ({clip})")
+
+
+def test_clip_rect_to_viewport_zero_height_is_none():
+    clip = lib.clip_rect_to_viewport(0, 900, 800, 200, 1280, 900)
+    check(clip is None,
+          f"a panel starting exactly at the viewport bottom edge has zero-area "
+          f"intersection -- None, never a 0-height clip Playwright would reject ({clip})")
+
+
+# ── panel_capture_clip (issue #197 review: the fail-safe finding) ──────────
+#
+# The FIRST version of this fix fell back to an unclipped, unbounded-cost
+# capture whenever page.viewport_size was None -- unreachable at today's
+# call site, but the shape (a silent fallback to exactly the cost regression
+# this issue removes, with nothing in summary.json to show it happened) is
+# the problem a fail-safe branch must never have. panel_capture_clip pins
+# the fix: no viewport (or no box) means "cannot safely capture", treated
+# identically to every other such case -- None, never an unclipped capture.
+
+def test_panel_capture_clip_no_viewport_is_none():
+    box = {"x": 0, "y": 0, "width": 1200, "height": 5793}
+    check(lib.panel_capture_clip(box, None) is None,
+          "no viewport -- cannot safely determine a clip -- None, NEVER a "
+          "fallback to an unclipped capture (the exact regression this issue fixes)")
+
+
+def test_panel_capture_clip_no_box_is_none():
+    viewport = {"width": 1280, "height": 900}
+    check(lib.panel_capture_clip(None, viewport) is None,
+          "no box (panel gone/detached) -- None, same as every other "
+          "cannot-capture case")
+
+
+def test_panel_capture_clip_no_box_and_no_viewport_is_none():
+    check(lib.panel_capture_clip(None, None) is None,
+          "neither box nor viewport available -- still None")
+
+
+def test_panel_capture_clip_normal_case_matches_clip_rect_to_viewport():
+    box = {"x": 0, "y": 0, "width": 1200, "height": 5793}
+    viewport = {"width": 1280, "height": 900}
+    got = lib.panel_capture_clip(box, viewport)
+    want = lib.clip_rect_to_viewport(0, 0, 1200, 5793, 1280, 900)
+    check(got == want == {"x": 0.0, "y": 0.0, "width": 1200.0, "height": 900.0},
+          f"the normal case delegates to clip_rect_to_viewport unchanged ({got})")
+
+
+# ── mount_is_fresh (issue #197: the stale-mount re-match defect) ───────────
+#
+# _wait_for_mount_at_or_after's ORIGINAL (issue #193 round 2) contract only
+# checked id + timestamp. A mount whose refresh cycle outran the 5s tick
+# interval can land with `at` already past the NEXT tick's own tick_ts, so
+# that check alone hands the SAME already-swept mount to two ticks in a row
+# -- the second sweep then fires all 5 frames back-to-back against a
+# already-stale mount_at_ms, with none of the spread across the tick that
+# lets the sweep see a sub-second transient at all. min_seq is the fix: the
+# THIS input that makes the OLD id+timestamp-only check pass while the
+# product is broken is exactly the case these tests name explicitly.
+
+def test_mount_is_fresh_accepts_a_genuinely_new_mount():
+    mount = {"id": "sessions", "seq": 5, "at": 1000}
+    check(lib.mount_is_fresh(mount, "sessions", tick_ts_ms=900, min_seq=4) is True,
+          "a mount newer than min_seq, at/after the tick, for the right tab: fresh")
+
+
+def test_mount_is_fresh_first_tick_has_no_min_seq_to_violate():
+    mount = {"id": "sessions", "seq": 1, "at": 1000}
+    check(lib.mount_is_fresh(mount, "sessions", tick_ts_ms=900, min_seq=None) is True,
+          "tick 1 has no previous tick's seq to be newer than -- min_seq=None never blocks it")
+
+
+def test_mount_is_fresh_rejects_the_stale_reused_mount():
+    # THE defect this fixes: the previous tick already anchored its sweep to
+    # seq=5, and that same mount's `at` still satisfies THIS tick's (later)
+    # timestamp threshold purely because its refresh cycle ran long. The old
+    # id+timestamp-only check (mount is not None and mount["id"] == tab_id
+    # and mount["at"] >= tick_ts_ms) would ACCEPT this and re-sweep it --
+    # demonstrated red below (test_mount_is_fresh_would_pass_without_the_seq_check).
+    mount = {"id": "sessions", "seq": 5, "at": 3200}
+    check(lib.mount_is_fresh(mount, "sessions", tick_ts_ms=3000, min_seq=5) is False,
+          "a mount whose seq == the already-consumed min_seq is stale, not fresh, "
+          "even though its timestamp alone would satisfy the old check")
+
+
+def test_mount_is_fresh_would_pass_without_the_seq_check():
+    """Demonstrates the exact input that makes the OLD (issue #193 round 2)
+    id+timestamp-only check pass while the product/harness is actually
+    broken -- the stale-mount re-match this issue fixes. Reproduces the OLD
+    predicate inline (not by calling mount_is_fresh) so this test documents
+    what a regression back to that predicate would look like, and stays red
+    against mount_is_fresh itself since the two are asserted to disagree."""
+    mount = {"id": "sessions", "seq": 5, "at": 3200}
+    tab_id, tick_ts_ms, min_seq = "sessions", 3000, 5
+    old_predicate_result = (mount is not None and mount["id"] == tab_id
+                            and mount["at"] >= tick_ts_ms)
+    check(old_predicate_result is True,
+          "the old id+timestamp-only predicate wrongly accepts the stale mount")
+    check(lib.mount_is_fresh(mount, tab_id, tick_ts_ms, min_seq) is False,
+          "mount_is_fresh correctly rejects the same input -- the two predicates "
+          "disagree on exactly the case this issue fixes")
+
+
+def test_mount_is_fresh_rejects_wrong_tab():
+    mount = {"id": "overview", "seq": 5, "at": 1000}
+    check(lib.mount_is_fresh(mount, "sessions", tick_ts_ms=900, min_seq=4) is False,
+          "a mount belonging to a different tab is never fresh for this one")
+
+
+def test_mount_is_fresh_rejects_none_mount():
+    check(lib.mount_is_fresh(None, "sessions", tick_ts_ms=900, min_seq=None) is False,
+          "no mount observed yet is never fresh")
+
+
+def test_mount_is_fresh_rejects_timestamp_before_the_tick():
+    mount = {"id": "sessions", "seq": 9, "at": 500}
+    check(lib.mount_is_fresh(mount, "sessions", tick_ts_ms=900, min_seq=None) is False,
+          "a mount that landed before this tick's own AAS send is never fresh, "
+          "regardless of seq")
+
+
 # ── blink_sweep_gate_verdict (issue #193, review round 2) ──────────────────
 #
 # Round 1 gated on a single mount-anchored PAIR. Review injected a 400ms
