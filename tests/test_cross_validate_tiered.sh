@@ -19,6 +19,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 TRACER="$SCRIPT_DIR/../pg_wait_tracer"
 XVAL="$SCRIPT_DIR/cross_validate"
 source "$SCRIPT_DIR/testutil.sh"
+source "$SCRIPT_DIR/cross_validate_rate_output.sh"
 
 PM_PID=""
 RATES="10 50 100 200"
@@ -114,7 +115,7 @@ for RATE in $RATES; do
 
     # Compare
     OUT=$("$XVAL" "$TRACE_DIR" --tolerance "$TOLERANCE")
-    echo "$OUT" | sed 's/^/  /'
+    print_rate_result "$RATE" "$OUT"
     if [[ "$OUT" == *"RESULT: PASS"* ]]; then
         rate_result[$RATE]="PASS"
         [[ -z "$best_rate" ]] && best_rate="$RATE"
@@ -128,7 +129,7 @@ done
 echo ""
 echo "===== Cross-validation summary ====="
 for RATE in $RATES; do
-    printf "  %4s Hz : %s\n" "$RATE" "${rate_result[$RATE]:-?}"
+    print_rate_summary "$RATE" "${rate_result[$RATE]:-?}"
 done
 if [[ -n "$best_rate" ]]; then
     echo "Recommended default --sample-rate: ${best_rate} Hz (first rate within +/-${TOLERANCE}pp)"
