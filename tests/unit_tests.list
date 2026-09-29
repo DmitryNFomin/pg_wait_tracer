@@ -45,6 +45,14 @@ test_ui_live_smoke_lib.py
 test_multi_window_lib.py
 test_demo_rehearsal_lib.py
 test_demo_rehearsal_orchestrator_lib.py
+# #214: per-tab "is this populated" checkers for tests/demo_workload_coverage.py
+# (companion to tests/live_loop_workload.py). Pure Python; its import chain
+# (server_harness lazily inside main(), ui_live_smoke_lib for numpy/PIL only)
+# needs no Playwright, verified in a Playwright-free venv and pinned by
+# test_import_needs_no_playwright (see #205/3e66b31 for why that matters:
+# make check and make box-check both have Playwright, so only CI's
+# build-and-unit job -- which runs this list -- can catch a module-scope leak).
+test_demo_workload_coverage.py
 # #205: the blindness guard in tests/timeline_window_probe.py -- every way
 # the live-window measurement can be starved (nothing recorded, info ticking
 # while the tab never fetched, a partial run, an unparseable frame) must
@@ -52,4 +60,5 @@ test_demo_rehearsal_orchestrator_lib.py
 # a string.
 test_timeline_window_probe.py
 test_hetzner_sweep.sh
+test_unit_import_guard.py
 test_push_guard.py

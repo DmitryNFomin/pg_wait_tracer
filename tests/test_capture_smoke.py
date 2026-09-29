@@ -1415,6 +1415,18 @@ def phase_trace_file(pm_pid, mode, pg_major, smoke_db, core=False):
                              for row in sleeper_rows)
             waiter_ms = sum(float(row.get("total_ms", 0.0))
                             for row in waiter_rows)
+            # This is the last exact LIVE-capture PgSleep count anywhere
+            # (test_deterministic now asserts a floor), and it runs in CI's
+            # capture-smoke job rather than in run_all.sh, so a box-check does
+            # not cover it. Keep it exact — but
+            # know that it is splittable in principle by issue #191: a signal
+            # to the sleeping backend ends its WaitLatch and pg_sleep re-enters
+            # the wait, which PostgreSQL does for real, so the count becomes 2
+            # with the same total. It is stable here because this session never
+            # arms the ~10s stats-flush timer that fires it (0 splits in 32
+            # unprimed runs). If it ever reports 2 with total unchanged, that
+            # is #191, not a capture defect — reproduce with
+            # tests/issue191_split_repro.py before treating it as one.
             check(sleeper_count == 1,
                   f"trace/full: controlled sleeper has exactly one PgSleep "
                   f"record (pid={wl.backend_pids['sleeper']}, "

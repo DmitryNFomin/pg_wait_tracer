@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """ui_gallery_report.py — build the before/after contact sheet for ui_gallery.sh.
 
-    ui_gallery_report.py BEFORE_DIR AFTER_DIR OUT_HTML [--base REF] [--head REF]
+    ui_gallery_report.py BEFORE_DIR AFTER_DIR OUT_HTML --base REF --head REF
+        --origin-master REF --base-ahead N --base-behind N
 
 For every PNG present on either side: pixel-diff ratio (same channel threshold
 as test_web_ui_snapshots.py), a highlighted diff image, and a verdict
@@ -37,7 +38,10 @@ def compare(a_path, b_path, diff_path):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("before"); ap.add_argument("after"); ap.add_argument("out")
-    ap.add_argument("--base", default="base"); ap.add_argument("--head", default="head")
+    ap.add_argument("--base", required=True); ap.add_argument("--head", required=True)
+    ap.add_argument("--origin-master", required=True)
+    ap.add_argument("--base-ahead", required=True, type=int)
+    ap.add_argument("--base-behind", required=True, type=int)
     args = ap.parse_args()
     out_dir = os.path.dirname(os.path.abspath(args.out))
     diff_dir = os.path.join(out_dir, "diff"); os.makedirs(diff_dir, exist_ok=True)
@@ -76,11 +80,17 @@ h1{{font-size:1.3rem;margin:0 0 .25rem}} .sum{{color:#9aa6af;margin-bottom:1.25r
 .changed{{background:#5a1f3a;color:#ffb3d1}} .added{{background:#1f4a3a;color:#9be0c1}} .removed{{background:#4a2a1f;color:#e0b49b}} .unchanged{{background:#243036;color:#9aa6af}}
 img{{max-width:100%;border:1px solid #2b353a;background:#000}} .none{{color:#5b6774;padding:2rem;text-align:center}}
 .lbl{{font-size:.7rem;letter-spacing:.1em;text-transform:uppercase;color:#9aa6af}}
+.warning{{background:#8b1e27;color:#fff;border:4px solid #ffdb4d;padding:1rem;margin:1rem 0;font-size:1.1rem;font-weight:700}}
 details{{margin-top:1rem}} summary{{cursor:pointer;color:#9aa6af}}
 </style>
 <h1>UI gallery: {html.escape(args.base)} → {html.escape(args.head)}</h1>
-<div class="sum"><b>{counts['changed']}</b> changed · <b>{counts['added']}</b> added · <b>{counts['removed']}</b> removed · {counts['unchanged']} unchanged</div>
-<div class="lbl" style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:.6rem"><span>before ({html.escape(args.base)})</span><span>after ({html.escape(args.head)})</span><span>diff (magenta = changed pixels)</span></div>"""]
+"""]
+    if args.base_ahead or args.base_behind:
+        parts.append(f'<div class="warning" role="alert">WARNING: Gallery base differs from origin/master '
+                     f'({args.base_ahead} commits ahead, {args.base_behind} commits behind). '
+                     'These cell diffs may include other branches’ changes; check the base before using this gallery as evidence.</div>')
+    parts.append(f"""<div class="sum"><b>{counts['changed']}</b> changed · <b>{counts['added']}</b> added · <b>{counts['removed']}</b> removed · {counts['unchanged']} unchanged</div>
+<div class="lbl" style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:.6rem"><span>before ({html.escape(args.base)})</span><span>after ({html.escape(args.head)})</span><span>diff (magenta = changed pixels)</span></div>""")
     def row_html(r):
         n, v, ratio, detail, b, a, d = r
         return f'<div class="row"><h3>{html.escape(n)}<span class="v {v}">{v} · {html.escape(detail)}</span></h3>{img(b)}{img(a)}{img(d)}</div>'
@@ -92,7 +102,11 @@ details{{margin-top:1rem}} summary{{cursor:pointer;color:#9aa6af}}
     parts.append("</details>")
     with open(args.out, "w") as f: f.write("\n".join(parts))
     with open(os.path.join(out_dir, "summary.json"), "w") as f:
-        json.dump({"base": args.base, "head": args.head, "counts": counts,
+        json.dump({"base": args.base, "head": args.head,
+                   "origin_master": args.origin_master,
+                   "base_ahead_of_origin_master": args.base_ahead,
+                   "base_behind_origin_master": args.base_behind,
+                   "counts": counts,
                    "cells": [{"name": r[0], "verdict": r[1], "ratio": round(r[2], 5), "detail": r[3]} for r in rows]}, f, indent=1)
     print(f"gallery: {counts['changed']} changed, {counts['added']} added, {counts['removed']} removed, {counts['unchanged']} unchanged")
     for r in rows:

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ui_gallery.sh — before/after screenshot sheet for UI changes.
 #
-#   tests/ui_gallery.sh [BASE_REF]      (default: merge-base with master)
+#   tests/ui_gallery.sh [BASE_REF]      (default: fetched origin/master)
 #
 # Renders every snapshot cell of tests/test_web_ui_snapshots.py (app panes,
 # exact/sampled fidelity states, the dev fixture gallery) TWICE on this machine:
@@ -12,6 +12,36 @@
 # here even though local PNGs must never be committed as CI baselines.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+
+# A local master may lag merged UI changes by several commits. Refresh the
+# remote-tracking ref before choosing a base, including for explicit overrides
+# so their distance from the same reference is meaningful.
+echo "fetching origin/master for gallery base (15s deadline) ..."
+GIT_SSH_COMMAND="ssh -o ConnectTimeout=15" \
+    git -c http.lowSpeedLimit=1 -c http.lowSpeedTime=15 \
+    fetch --quiet origin master:refs/remotes/origin/master &
+fetch_pid=$!
+fetch_started=$SECONDS
+while kill -0 "$fetch_pid" 2>/dev/null; do
+    if (( SECONDS - fetch_started >= 15 )); then
+        kill "$fetch_pid" 2>/dev/null || true
+        wait "$fetch_pid" 2>/dev/null || true
+        echo "FAIL: timed out refreshing origin/master after 15s"
+        exit 1
+    fi
+    sleep 1
+done
+wait "$fetch_pid" || { echo "FAIL: could not refresh origin/master"; exit 1; }
+base_ref=$(git rev-parse --verify "${1:-origin/master}^{commit}") \
+    || { echo "FAIL: invalid gallery base: ${1:-origin/master}"; exit 1; }
+origin_master=$(git rev-parse --verify 'origin/master^{commit}')
+if ! git merge-base --is-ancestor "$base_ref" HEAD; then
+    echo "FAIL: gallery base $base_ref is not an ancestor of HEAD"
+    exit 1
+fi
+distance=$(git rev-list --left-right --count "$base_ref...$origin_master")
+read -r base_ahead base_behind <<< "$distance"
+echo "base: $base_ref (origin/master: $origin_master; ahead $base_ahead, behind $base_behind)"
 
 # Resolve the interpreter ONCE, from this checkout, and use it for BOTH
 # renders. The base worktree below lives under $TMPDIR, outside the repo, so
@@ -28,7 +58,6 @@ if ! "$py" -c 'import playwright' 2>/dev/null; then
 fi
 echo "python: $py"
 
-base_ref="${1:-$(git merge-base HEAD master)}"
 out="tests/results/ui_gallery"
 rm -rf "$out"; mkdir -p "$out"
 wt=$(mktemp -d "${TMPDIR:-/tmp}/pgwt-gallery-base.XXXXXX")
@@ -84,5 +113,7 @@ echo "rendering after (working tree) ..."
 render after "$here" "$here/$out/after" "$after_snap_port" "$out/after.log"
 
 "$py" tests/ui_gallery_report.py "$out/before" "$out/after" "$out/index.html" \
-    --base "$(git rev-parse --short "$base_ref")" --head "$(git rev-parse --short HEAD)$(git diff --quiet || echo '+dirty')"
+    --base "$(git rev-parse --short "$base_ref")" --head "$(git rev-parse --short HEAD)$(git diff --quiet || echo '+dirty')" \
+    --origin-master "$(git rev-parse --short "$origin_master")" \
+    --base-ahead "$base_ahead" --base-behind "$base_behind"
 echo "gallery: $out/index.html"
