@@ -218,6 +218,84 @@ def test_decide_outcome_unreachable_fails():
     check(code == 1, f"decide-outcome: unreachable VM -> exit 1, never silently retried forever (got {code})")
 
 
+# ── parse_pg_probe_line / pg_version_verdict (PG-version enforcement) ───
+# The failure mode being closed: a rehearsal that starts against whatever
+# PostgreSQL happens to be reachable looks exactly like a correct run
+# (green exit code) right up until someone tries to count it -- the actual
+# bug behind the port-5413 (PG 13) attempt that could never have counted.
+
+def test_parse_pg_probe_confirmed():
+    r = lib.parse_pg_probe_line("PG_CONFIRMED=18 PID=4242")
+    check(r == {"confirmed": "18", "pid": "4242"},
+          "parse-pg-probe: a matching postmaster is parsed with its PID")
+
+
+def test_parse_pg_probe_none():
+    r = lib.parse_pg_probe_line("PG_CONFIRMED=NONE")
+    check(r == {"confirmed": None, "pid": None},
+          "parse-pg-probe: NONE means no matching postmaster found")
+
+
+def test_parse_pg_probe_garbage_raises():
+    check_raises(lambda: lib.parse_pg_probe_line("connection refused"),
+                 "parse-pg-probe: an ssh-error line is a parse failure, "
+                 "never silently read as PG_CONFIRMED=NONE")
+
+
+def test_parse_pg_probe_empty_raises():
+    # The exact shape a dropped/unreachable ssh call produces: no output
+    # at all. Must refuse (raise), never be interpreted as "no postmaster".
+    check_raises(lambda: lib.parse_pg_probe_line(""),
+                 "parse-pg-probe: empty input (unreachable target) refuses "
+                 "rather than reading as NONE")
+
+
+def test_parse_pg_probe_non_numeric_major_raises():
+    check_raises(lambda: lib.parse_pg_probe_line("PG_CONFIRMED=abc PID=1"),
+                 "parse-pg-probe: a non-numeric PG major is a parse failure")
+
+
+def test_pg_version_verdict_matching_ok():
+    ok, msg = lib.pg_version_verdict("18", {"confirmed": "18", "pid": "99"})
+    check(ok, "pg-version-verdict: requested == confirmed -> ok")
+    check("18" in msg, "pg-version-verdict: message names the confirmed version")
+
+
+def test_pg_version_verdict_none_confirmed_refuses():
+    # THE input that makes this check catch a broken product: a probe
+    # that found no postmaster at all for the requested version. A verdict
+    # function that only compared "confirmed != requested" (and treated
+    # None as just another string) would let this raise a TypeError or,
+    # worse, silently compare None != '18' as a plain mismatch -- losing
+    # the distinction between "wrong version" and "no version answered at
+    # all" that the message text depends on.
+    ok, msg = lib.pg_version_verdict("18", {"confirmed": None, "pid": None})
+    check(not ok, "pg-version-verdict: no postmaster found -> refused, not ok")
+    check("no PostgreSQL 18 postmaster" in msg,
+          "pg-version-verdict: message says WHY (none found), not just FAIL")
+
+
+def test_pg_version_verdict_wrong_version_refuses():
+    ok, msg = lib.pg_version_verdict("18", {"confirmed": "13", "pid": "77"})
+    check(not ok, "pg-version-verdict: PG 13 running while PG 18 was "
+                 "requested -- refused (this is the exact port-5413 bug)")
+    check("13" in msg and "18" in msg,
+          "pg-version-verdict: message names BOTH the requested and the "
+          "actually-found version")
+
+
+def test_pg_version_verdict_string_type_mismatch_does_not_silently_pass():
+    # requested arrives as an int from a careless caller; confirmed is
+    # always a str (parsed from probe text). int('18') == str('18') is
+    # False in Python, so a verdict function that forgot str(requested)
+    # would REFUSE a genuinely matching run -- the opposite bypass
+    # direction (a false negative on a correct run) is also checked here,
+    # not just "does a real mismatch get caught".
+    ok, msg = lib.pg_version_verdict(18, {"confirmed": "18", "pid": "1"})
+    check(ok, "pg-version-verdict: int 18 vs str '18' still compares equal "
+              "(str() normalization)")
+
+
 def main():
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

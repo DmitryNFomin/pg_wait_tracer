@@ -42,6 +42,8 @@ Usage (CLI, called from scripts/demo-rehearsal.sh):
   python3 tests/demo_rehearsal_orchestrator_lib.py wait-budget START NOW DURATION_MIN
   python3 tests/demo_rehearsal_orchestrator_lib.py validate-results DIR EXPECTED_RUN_ID
   python3 tests/demo_rehearsal_orchestrator_lib.py decide-outcome STATE RC RESULTS_OK
+  python3 tests/demo_rehearsal_orchestrator_lib.py parse-pg-probe "PG_CONFIRMED=..."
+  python3 tests/demo_rehearsal_orchestrator_lib.py pg-version-verdict REQUESTED CONFIRMED PID
 """
 import json
 import os
@@ -62,6 +64,14 @@ GRACE_S = 600
 VALID_STATES = {"finished", "running", "died", "not-started", "unreachable"}
 
 _STATE_RE = re.compile(r"^STATE=(\S+)\s+RC=(\S+)\s*$")
+
+# scripts/demo-rehearsal.sh: the outer launcher's own probe, run once
+# right before the detached capture starts (not part of the remote
+# rehearsal.* lifecycle marker above) -- "PG_CONFIRMED=<major> PID=<pid>"
+# when find_postmaster (tests/testutil.sh) located a running postmaster of
+# the requested major version on the target, "PG_CONFIRMED=NONE" when it
+# did not.
+_PG_PROBE_RE = re.compile(r"^PG_CONFIRMED=(\S+)(?:\s+PID=(\S+))?\s*$")
 
 
 class OrchestratorError(Exception):
@@ -175,6 +185,64 @@ def decide_outcome(state, rc, results_ok):
     raise OrchestratorError(f"unknown state {state!r}")
 
 
+def parse_pg_probe_line(line):
+    """Parse one line from scripts/demo-rehearsal.sh's PostgreSQL-version
+    probe (run against the target right before the detached capture
+    starts) into {"confirmed": str|None, "pid": str|None}. 'confirmed' is
+    None exactly when the probe found no matching postmaster at all
+    (PG_CONFIRMED=NONE); otherwise it is the PG major version string
+    found. Raises OrchestratorError on anything else -- an ssh hiccup, a
+    dropped connection, or a probe-format change must be a visible parse
+    failure, never silently read as 'no postmaster found' (which
+    pg_version_verdict below would then also refuse, but for the wrong,
+    misleading reason: 'wrong PG version' instead of 'could not check')."""
+    line = (line or "").strip()
+    m = _PG_PROBE_RE.match(line)
+    if not m:
+        raise OrchestratorError(f"unparseable PG-version probe line: {line!r}")
+    confirmed, pid = m.group(1), m.group(2)
+    if confirmed == "NONE":
+        return {"confirmed": None, "pid": None}
+    if not re.match(r"^\d+$", confirmed):
+        raise OrchestratorError(f"non-numeric PG major {confirmed!r} in line: {line!r}")
+    return {"confirmed": confirmed, "pid": pid}
+
+
+def pg_version_verdict(requested, probe):
+    """(ok: bool, message: str) for whether `probe` (parse_pg_probe_line's
+    return) satisfies `requested` (the PG major version this rehearsal was
+    asked to target, e.g. docs/DEMO_REHEARSAL_CRITERIA.md's pinned 18).
+
+    This is the check that closes the failure mode described in the
+    launcher script's own header: a run that starts against whatever
+    PostgreSQL happened to be reachable LOOKS exactly like a correct run,
+    green exit code and all, right up until someone tries to count it --
+    the actual bug that made the last capture-side attempt run against
+    port 5413 (PG 13) uncounted. So: a probe that found no postmaster at
+    all is never ok (a caller that only checked "did demo_rehearsal.sh
+    fail" would not learn WHY), and a probe that found the wrong major is
+    reported with both the requested and the actually-found version so the
+    mismatch is visible in the verdict, not just in a log someone has to
+    go read.
+
+    requested/probe['confirmed'] are compared as strings (both originate
+    as shell argv / probe text, never int-typed) so e.g. a stray decimal
+    or leading zero cannot coerce-compare equal to a plain major number."""
+    requested = str(requested)
+    if probe.get("confirmed") is None:
+        return False, (
+            f"REFUSING: no PostgreSQL {requested} postmaster found on the "
+            f"target -- this run cannot count toward the pre-registered "
+            f"rehearsal sequence (docs/DEMO_REHEARSAL_CRITERIA.md pins "
+            f"PG {requested})")
+    if probe["confirmed"] != requested:
+        return False, (
+            f"REFUSING: postmaster PID {probe.get('pid') or '?'} resolved to "
+            f"PostgreSQL {probe['confirmed']}, not the requested {requested} "
+            f"-- refusing a mismatched/uncounted run")
+    return True, f"PostgreSQL {probe['confirmed']} confirmed (pid={probe.get('pid') or '?'})"
+
+
 def _cli():
     args = sys.argv[1:]
     if not args:
@@ -203,6 +271,19 @@ def _cli():
             code, verdict = decide_outcome(state, rc, results_ok)
             print(f"{code}\t{verdict}")
             return 0
+        if cmd == "parse-pg-probe":
+            (line,) = rest
+            r = parse_pg_probe_line(line)
+            print(f"{r['confirmed'] if r['confirmed'] is not None else '-'}\t"
+                  f"{r['pid'] if r['pid'] is not None else '-'}")
+            return 0
+        if cmd == "pg-version-verdict":
+            requested, confirmed_raw, pid_raw = rest
+            probe = {"confirmed": None if confirmed_raw == "-" else confirmed_raw,
+                     "pid": None if pid_raw == "-" else pid_raw}
+            ok, message = pg_version_verdict(requested, probe)
+            print(message)
+            return 0 if ok else 1
         print(f"unknown subcommand: {cmd}", file=sys.stderr)
         return 2
     except OrchestratorError as e:

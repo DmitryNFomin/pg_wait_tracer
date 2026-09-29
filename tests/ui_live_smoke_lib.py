@@ -606,6 +606,48 @@ def render_check_ok(result):
     return False, f"unexpected render-check result: {result!r}"
 
 
+def viewport_mismatch_reason(requested_width, requested_height,
+                             requested_device_scale_factor,
+                             actual_inner_width, actual_inner_height,
+                             actual_device_pixel_ratio):
+    """None if the viewport/zoom a caller asked run_tab() to use is the one
+    the page actually ended up with; else a human-readable reason naming
+    every field that disagrees.
+
+    Exists because a *requested* viewport is not evidence of anything --
+    docs/DEMO_REHEARSAL_CRITERIA.md's viewport section names two traps a
+    harness must not fall into: trusting the size it asked for instead of
+    reading back `innerWidth`/`innerHeight`, and never checking the
+    per-hostname zoom that (Chrome and Safari both) silently rescales the
+    content layer even when the outer window size is right --
+    `devicePixelRatio` is the only signal Playwright exposes for that (see
+    docs/chrome-demo-viewport-2026-09-28.md's "Effective zoom check": at
+    100% zoom on a 2x-backing-scale display DPR reads exactly 2.0, and any
+    other zoom multiplies it away from that). A caller that wires a new
+    device_scale_factor kwarg into run_tab() without actually plumbing it
+    into browser.new_context() would otherwise report a plausible,
+    stable-looking PASS at the wrong zoom -- this is what catches that.
+
+    Width/height are compared exactly (Playwright's context viewport is a
+    fixed integer, not something that settles asynchronously); DPR is
+    compared with a small epsilon since it can arrive as e.g. 2 or 2.0."""
+    reasons = []
+    if actual_inner_width != requested_width:
+        reasons.append(f"width: requested {requested_width}, "
+                       f"got innerWidth={actual_inner_width}")
+    if actual_inner_height != requested_height:
+        reasons.append(f"height: requested {requested_height}, "
+                       f"got innerHeight={actual_inner_height}")
+    if abs(actual_device_pixel_ratio - requested_device_scale_factor) > 1e-6:
+        reasons.append(
+            f"zoom/devicePixelRatio: requested device_scale_factor="
+            f"{requested_device_scale_factor}, got "
+            f"devicePixelRatio={actual_device_pixel_ratio}")
+    if not reasons:
+        return None
+    return "; ".join(reasons)
+
+
 def known_failing_issue(tab_id):
     """The tracking issue number if tab_id is listed in KNOWN_FAILING_TABS,
     else None."""
