@@ -604,6 +604,25 @@ REMOTE_STATE_PROBE_BACKOFF_S="${REMOTE_STATE_PROBE_BACKOFF_S:-10}"
 # gate box -- generous on purpose, since giving up too early on a
 # genuinely-queued (not stuck) run is exactly the bug this closes.
 MAX_QUEUE_ROUNDS="${MAX_QUEUE_ROUNDS:-4}"
+# QUEUE_ROUND_MIN_SLEEP_S: floor applied (by
+# tests/demo_rehearsal_orchestrator_lib.py's queue_wait_sleep_s, called
+# below as `queue-wait-sleep-s`) under the "still queued" round sleep
+# (review round 3 finding). That sleep is a launch-anchored
+# compute_wait_budget_s, which clamps to 0 once its own deadline has
+# passed -- true on a fresh launch only near the very end of the window,
+# but ALWAYS true on a `--collect` invoked more than one budget window
+# after launch (exactly the case sustained contention produces: a killed
+# launcher, reattached later, while the capture is STILL queued). Without
+# a floor, 0s sleeps let all MAX_QUEUE_ROUNDS elapse in about a second,
+# reporting "never started" for a run that is healthy and about to start
+# -- the same false-failure class fix 1 closed, surviving on the
+# --collect recovery path. 600s matches GRACE_S below (same order of
+# magnitude as the OTHER "wait a bit longer, cheaply" sleep already in
+# this script) -- long enough that four rounds cannot busy-loop, short
+# enough that MAX_QUEUE_ROUNDS still bounds the total wait to a sane
+# multiple of it. The SAME function (unfloored) also drives the re-anchor
+# sleep once rehearsal.started is known -- see its own docstring.
+QUEUE_ROUND_MIN_SLEEP_S="${QUEUE_ROUND_MIN_SLEEP_S:-600}"
 
 remote_started_epoch() {
     # Best-effort, single probe (not remote_state()'s retry-with-backoff --
@@ -727,28 +746,40 @@ while true; do
         remember_started_epoch
         queued_for_s=$(( rehearsal_started_epoch - demo_rehearsal_start_epoch ))
         echo "demo-rehearsal: capture actually started at epoch $rehearsal_started_epoch (queued ${queued_for_s}s behind the box lock) -- recomputing the real remaining budget from that instant" | tee -a "$log"
-        budget_s=$(python3 tests/demo_rehearsal_orchestrator_lib.py wait-budget \
-            "$rehearsal_started_epoch" "$(date +%s)" "$DURATION_MIN")
-        if [[ "$budget_s" -gt 0 ]]; then
-            echo "demo-rehearsal: sleeping the corrected ${budget_s}s (capture-relative, not queue-relative)" | tee -a "$log"
-            sleep "$budget_s"
+        queue_sleep_s=$(python3 tests/demo_rehearsal_orchestrator_lib.py queue-wait-sleep-s \
+            "$rehearsal_started_epoch" "$demo_rehearsal_start_epoch" "$(date +%s)" "$DURATION_MIN" "$QUEUE_ROUND_MIN_SLEEP_S")
+        if [[ "$queue_sleep_s" -gt 0 ]]; then
+            echo "demo-rehearsal: sleeping the corrected ${queue_sleep_s}s (capture-relative, not queue-relative, never floored -- a low number here means the capture's own duration has genuinely elapsed)" | tee -a "$log"
+            sleep "$queue_sleep_s"
         fi
         continue
     fi
 
     # Still genuinely queued (never started at all yet) -- bounded retry,
     # never unbounded, never a tight loop: each round re-sleeps a full
-    # launch-anchored budget window before checking again.
+    # launch-anchored budget window before checking again -- FLOORED at
+    # QUEUE_ROUND_MIN_SLEEP_S by queue-wait-sleep-s (see its own docstring,
+    # tests/demo_rehearsal_orchestrator_lib.py): the launch-anchored budget
+    # this reuses (rehearsal_started_epoch is STILL unknown here) is
+    # clamped to 0 by compute_wait_budget_s once ITS OWN deadline has
+    # passed -- always true on a `--collect` invoked more than one budget
+    # window after the original launch. Without the floor this degenerates
+    # into MAX_QUEUE_ROUNDS back-to-back `sleep 0`s, exhausting the retry
+    # budget in about a second for a run that is healthy and simply still
+    # queued (review round 3 finding, reproduced in
+    # tests/test_demo_rehearsal_orchestrator_lib.py).
     queue_round=$((queue_round + 1))
     if [[ "$queue_round" -gt "$MAX_QUEUE_ROUNDS" ]]; then
-        echo "demo-rehearsal: still queued behind the box lock after $MAX_QUEUE_ROUNDS extended waits -- giving up (the box may be under sustained contention; this is NOT the same failure as a stuck/hung capture)" | tee -a "$log" >&2
+        echo "demo-rehearsal: still queued behind the box lock after $MAX_QUEUE_ROUNDS extended waits -- giving up (the box may be under sustained contention; this is NOT the same failure as a stuck/hung capture). The remote job is presumed still alive (queued, not confirmed dead) so \$STATE_FILE is kept -- re-run 'make demo-rehearsal-collect' to try again once the box frees up." | tee -a "$log" >&2
         collect_results
         outcome_rc=1
-        outcome_verdict="capture never started within $MAX_QUEUE_ROUNDS extended waits (still queued behind /tmp/pgwt-box-check.lock, not stuck mid-capture)"
+        outcome_verdict="capture never started within $MAX_QUEUE_ROUNDS extended waits (still queued behind /tmp/pgwt-box-check.lock, not stuck mid-capture) -- retry with 'make demo-rehearsal-collect'"
         break
     fi
-    echo "demo-rehearsal: still queued behind the box lock (round $queue_round/$MAX_QUEUE_ROUNDS) -- sleeping another ${budget_s}s window before checking again" | tee -a "$log"
-    sleep "$budget_s"
+    queue_sleep_s=$(python3 tests/demo_rehearsal_orchestrator_lib.py queue-wait-sleep-s \
+        "-" "$demo_rehearsal_start_epoch" "$(date +%s)" "$DURATION_MIN" "$QUEUE_ROUND_MIN_SLEEP_S")
+    echo "demo-rehearsal: still queued behind the box lock (round $queue_round/$MAX_QUEUE_ROUNDS) -- sleeping another ${queue_sleep_s}s window before checking again" | tee -a "$log"
+    sleep "$queue_sleep_s"
 done
 
 echo

@@ -40,6 +40,7 @@ data in, plain data out.
 Usage (CLI, called from scripts/demo-rehearsal.sh):
   python3 tests/demo_rehearsal_orchestrator_lib.py parse-state "STATE=... RC=..."
   python3 tests/demo_rehearsal_orchestrator_lib.py wait-budget START NOW DURATION_MIN
+  python3 tests/demo_rehearsal_orchestrator_lib.py queue-wait-sleep-s STARTED_OR_- LAUNCH NOW DURATION_MIN FLOOR_S
   python3 tests/demo_rehearsal_orchestrator_lib.py validate-results DIR EXPECTED_RUN_ID
   python3 tests/demo_rehearsal_orchestrator_lib.py decide-outcome STATE RC RESULTS_OK
   python3 tests/demo_rehearsal_orchestrator_lib.py parse-pg-probe "PG_CONFIRMED=..."
@@ -116,6 +117,39 @@ def compute_wait_budget_s(start_epoch, now_epoch, duration_min,
     deadline = float(start_epoch) + float(duration_min) * 60.0 + float(build_buffer_s)
     remaining = deadline - float(now_epoch)
     return max(0, int(round(remaining)))
+
+
+def queue_wait_sleep_s(rehearsal_started_epoch, demo_rehearsal_start_epoch,
+                       now_epoch, duration_min, floor_s):
+    """How long scripts/demo-rehearsal.sh's wait loop should sleep before
+    its next remote-state check, given check_and_finish() just reported
+    'running'. Covers the two decisions review rounds 2 and 3 found bugs
+    in (previously duplicated inline in the shell, untested):
+
+    - rehearsal_started_epoch is None (capture not yet confirmed to have
+      actually started -- still queued behind the box lock, or this is a
+      fresh launch that has never checked): the accurate anchor is not yet
+      known, so this uses demo_rehearsal_start_epoch (launch time) and
+      FLOORS the result at floor_s. Without the floor (round 3 finding): a
+      `--collect` invoked more than one budget window after launch, while
+      genuinely still queued, would get compute_wait_budget_s's own
+      zero-clamp (its deadline, anchored on launch time, has already
+      passed) and sleep(0) MAX_QUEUE_ROUNDS times in about a second,
+      reporting "never started" for a run that is healthy and about to
+      start -- the exact false-failure class round 2 closed for the
+      fresh-launch case, surviving here on the --collect recovery path.
+    - rehearsal_started_epoch is not None (round 2's fix: the capture IS
+      confirmed running, re-anchor on ITS actual start instead of launch
+      time): the accurate remaining budget from that instant, NEVER
+      floored -- a ~0 result here is not stale data to paper over, it
+      means the capture's own duration has elapsed and it should already
+      be finishing; the caller's own grace-sleep-then-give-up handles a
+      genuinely stuck capture from there, so manufacturing a floor sleep
+      here would only delay noticing that."""
+    if rehearsal_started_epoch is not None:
+        return compute_wait_budget_s(rehearsal_started_epoch, now_epoch, duration_min)
+    return max(compute_wait_budget_s(demo_rehearsal_start_epoch, now_epoch, duration_min),
+               int(floor_s))
 
 
 def validate_results_dir(path, expected_run_id):
@@ -278,6 +312,11 @@ def _cli():
         if cmd == "wait-budget":
             start, now, duration_min = rest
             print(compute_wait_budget_s(start, now, duration_min))
+            return 0
+        if cmd == "queue-wait-sleep-s":
+            started_raw, launch_epoch, now, duration_min, floor_s = rest
+            started = None if started_raw == "-" else started_raw
+            print(queue_wait_sleep_s(started, launch_epoch, now, duration_min, floor_s))
             return 0
         if cmd == "validate-results":
             path, expected_run_id = rest
