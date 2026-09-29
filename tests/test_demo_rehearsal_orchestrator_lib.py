@@ -255,6 +255,18 @@ def test_parse_pg_probe_non_numeric_major_raises():
                  "parse-pg-probe: a non-numeric PG major is a parse failure")
 
 
+def test_parse_pg_probe_unknown_keeps_the_pid():
+    # The narrow race review found: find_postmaster DID return a pid (so a
+    # matching postmaster existed a moment ago), but the probe's own
+    # second postmaster_version call on it failed. Must be parsed as a
+    # DISTINCT outcome from NONE -- a naive parser mapping any
+    # non-numeric, non-NONE token to "no postmaster found" would discard
+    # the pid and misreport a postmaster that WAS found as never found.
+    r = lib.parse_pg_probe_line("PG_CONFIRMED=UNKNOWN PID=4242")
+    check(r == {"confirmed": "UNKNOWN", "pid": "4242"},
+          "parse-pg-probe: UNKNOWN keeps the pid, distinct from NONE")
+
+
 def test_pg_version_verdict_matching_ok():
     ok, msg = lib.pg_version_verdict("18", {"confirmed": "18", "pid": "99"})
     check(ok, "pg-version-verdict: requested == confirmed -> ok")
@@ -282,6 +294,29 @@ def test_pg_version_verdict_wrong_version_refuses():
     check("13" in msg and "18" in msg,
           "pg-version-verdict: message names BOTH the requested and the "
           "actually-found version")
+
+
+def test_pg_version_verdict_unknown_refuses_with_accurate_message():
+    # Review nit: a probe that DID find a matching postmaster (has a pid)
+    # but couldn't re-confirm its version must still refuse (never ok),
+    # but the message must say THAT, not fall through to the generic
+    # wrong-version wording ("resolved to PostgreSQL UNKNOWN, not the
+    # requested 18") -- which is what a verdict function with no dedicated
+    # UNKNOWN branch produces: still refuses, still names the pid, so a
+    # weaker assertion here would pass against that broken behaviour too.
+    # "resolved to PostgreSQL" is the generic branch's own fixed wording,
+    # so its absence is what actually distinguishes the two code paths.
+    ok, msg = lib.pg_version_verdict("18", {"confirmed": "UNKNOWN", "pid": "4242"})
+    check(not ok, "pg-version-verdict: UNKNOWN confirmation still refuses")
+    check("4242" in msg,
+          "pg-version-verdict: UNKNOWN message names the pid that WAS found")
+    check("resolved to PostgreSQL" not in msg,
+          "pg-version-verdict: UNKNOWN takes its OWN branch, not the "
+          "generic wrong-version wording that would misreport UNKNOWN as "
+          "if it were a real resolved version number")
+    check("not be re-confirmed" in msg,
+          "pg-version-verdict: UNKNOWN message explains what actually "
+          "happened (found, then couldn't re-confirm), not just REFUSING")
 
 
 def test_pg_version_verdict_string_type_mismatch_does_not_silently_pass():

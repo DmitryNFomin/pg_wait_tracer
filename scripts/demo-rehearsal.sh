@@ -177,6 +177,17 @@ if [[ "$MODE" == "collect" ]]; then
         echo "demo-rehearsal --collect: no state file at $STATE_FILE -- nothing to collect" | tee -a "$log"
         exit 3
     fi
+    # Review finding: PERSISTENT was already "1" here whenever PGWT_BOX is
+    # exported (CLAUDE.md's own setup instructions export it) -- so
+    # `PERSISTENT="${PERSISTENT:-0}"` below was a no-op REGARDLESS of what
+    # (or whether) the state file itself said, and a state file predating
+    # this field would silently take the persistent (never-delete)
+    # cleanup branch for what might actually be an ephemeral VM sitting in
+    # SERVER_ID, permanently leaking it. Unset every field this block
+    # reads BEFORE sourcing so the file's own content (or its absence) is
+    # the only thing that can set them -- the ambient environment must
+    # never leak into a --collect reattach.
+    unset PERSISTENT PG_VERSION_REQUESTED PG_VERSION_CONFIRMED TARGET REHEARSAL_STARTED_EPOCH
     # shellcheck disable=SC1090
     source "$STATE_FILE"
     : "${SERVER_ID:?state file missing SERVER_ID}"
@@ -188,16 +199,23 @@ if [[ "$MODE" == "collect" ]]; then
     server_ip="$SERVER_IP"
     remote_dir="$REMOTE_DIR"
     demo_rehearsal_start_epoch="$START_EPOCH"
-    target="root@$server_ip"
-    # PERSISTENT/PG_VERSION_REQUESTED/PG_VERSION_CONFIRMED: optional
-    # fields, added alongside PGWT_BOX support -- default 0/unset so a
-    # state file written by an older launcher (no such run in flight
-    # today, but nothing enforces that) still reattaches instead of
-    # erroring on a missing field.
-    PERSISTENT="${PERSISTENT:-0}"
+    # PERSISTENT is derived from SERVER_ID, the unambiguous discriminator
+    # (the sentinel "persistent" this script itself writes below), never
+    # trusted as a standalone field even when present -- belt and braces
+    # on top of the unset-before-source fix above.
+    if [[ "$server_id" == "persistent" ]]; then
+        PERSISTENT=1
+    else
+        PERSISTENT=0
+    fi
+    # TARGET: the exact ssh target string recorded at launch (may name a
+    # non-root user, unlike the ephemeral path's assumed "root@$server_ip"
+    # reconstruction) -- falls back to that reconstruction for a state
+    # file written before this field existed.
+    target="${TARGET:-root@$server_ip}"
     PG="${PG_VERSION_REQUESTED:-$PG}"
     PG_VERSION_CONFIRMED="${PG_VERSION_CONFIRMED:-}"
-    echo "demo-rehearsal --collect: reattaching to $target (persistent=$PERSISTENT, server id=$server_id, remote_dir=$remote_dir, PG=$PG, started $(date -r "$demo_rehearsal_start_epoch" 2>/dev/null || echo "@$demo_rehearsal_start_epoch"))" | tee -a "$log"
+    echo "demo-rehearsal --collect: reattaching to $target (persistent=$PERSISTENT, server id=$server_id, remote_dir=$remote_dir, PG=$PG, capture_started=${REHEARSAL_STARTED_EPOCH:-not yet known}, launched $(date -r "$demo_rehearsal_start_epoch" 2>/dev/null || echo "@$demo_rehearsal_start_epoch"))" | tee -a "$log"
 fi
 
 if [[ "$PERSISTENT" != "1" && -z "$token" ]]; then
@@ -391,8 +409,14 @@ if [[ "$MODE" == "launch" ]]; then
         # (unlike the throwaway-VM branch below, whose IP is fresh every
         # run).
         server_id="persistent"
+        # target is PGWT_BOX verbatim -- do NOT reconstruct via
+        # "root@${PGWT_BOX#*@}" (review nit: that silently discarded a
+        # non-root user, unlike box-check.sh's own `target="$PGWT_BOX"`
+        # for the exact same variable). server_ip keeps the best-effort
+        # bare-host form purely for log/state-file readability -- it is
+        # never used to rebuild target again (see TARGET below).
+        target="$PGWT_BOX"
         server_ip="${PGWT_BOX#*@}"
-        target="root@$server_ip"
         branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null | tr '/' '_')
         remote_dir="pgwt-demo-rehearsal-${branch:-detached}"
         ssh_strict=""
@@ -435,6 +459,7 @@ if [[ "$MODE" == "launch" ]]; then
     cat > "$STATE_FILE" <<EOF
 SERVER_ID=$server_id
 SERVER_IP=$server_ip
+TARGET=$target
 REMOTE_DIR=$remote_dir
 START_EPOCH=$demo_rehearsal_start_epoch
 DURATION_MIN=$DURATION_MIN
@@ -442,6 +467,7 @@ LOG=$log
 PERSISTENT=$PERSISTENT
 PG_VERSION_REQUESTED=$PG
 PG_VERSION_CONFIRMED=
+REHEARSAL_STARTED_EPOCH=
 EOF
     echo "demo-rehearsal: state saved to $STATE_FILE (before provisioning) -- a killed launcher, or a provisioning/rsync failure, still leaves a guard so a next launch refuses to create a second VM/target" | tee -a "$log"
 
@@ -483,7 +509,7 @@ EOF
     pg_probe_out=$(ssh -o BatchMode=yes $ssh_strict -o ConnectTimeout=10 "$target" \
         "cd '$remote_dir' 2>/dev/null && . tests/testutil.sh 2>/dev/null && \
          pmpid=\$(find_postmaster --pg-version '$PG' 2>/dev/null); \
-         if [ -n \"\$pmpid\" ]; then ver=\$(postmaster_version \"\$pmpid\" 2>/dev/null); echo \"PG_CONFIRMED=\${ver:-NONE} PID=\$pmpid\"; \
+         if [ -n \"\$pmpid\" ]; then ver=\$(postmaster_version \"\$pmpid\" 2>/dev/null); echo \"PG_CONFIRMED=\${ver:-UNKNOWN} PID=\$pmpid\"; \
          else echo 'PG_CONFIRMED=NONE'; fi" \
         2>>"$log")
     pg_probe_line=$(tail -n1 <<<"$pg_probe_out")
@@ -520,7 +546,7 @@ EOF
     # so the cd sticks), and only the single `nohup ... &` command is
     # backgrounded.
     launch_out=$(ssh -o BatchMode=yes $ssh_strict "$target" \
-        "cd '$remote_dir' && rm -f rehearsal.done rehearsal.rc rehearsal.pid rehearsal.out; \
+        "cd '$remote_dir' && rm -f rehearsal.done rehearsal.rc rehearsal.pid rehearsal.out rehearsal.started; \
          nohup setsid -w bash scripts/demo-rehearsal-remote-run.sh '$DURATION_MIN' '$demo_rehearsal_start_epoch' '$PG' </dev/null >/dev/null 2>&1 & \
          echo \$! > rehearsal.pid; disown; \
          sleep 1; \
@@ -537,10 +563,28 @@ EOF
     # with 'make demo-rehearsal-collect'.
 fi
 
-# ── Poll for the completion marker with ONE long sleep, not a loop ──────
+# ── Poll for the completion marker with coarse-grained sleeps, never a
+# tight loop ────────────────────────────────────────────────────────────
 # (issue #176). wait-budget is relative to demo_rehearsal_start_epoch, so a
 # --collect invoked any time after a kill sleeps only the REMAINING budget,
 # never the full window again.
+#
+# BLOCKER fixed by review: that "relative to demo_rehearsal_start_epoch"
+# was ALWAYS true, even once PGWT_BOX made the target a SHARED box --
+# demo_rehearsal_start_epoch is stamped before the flock in
+# scripts/demo-rehearsal-remote-run.sh is even attempted, so a run that
+# queued behind CI/another agent (that box's own CI spread is 29-117
+# minutes, n=9) had its budget consumed by the QUEUE, not the capture, and
+# a perfectly healthy capture got declared "stuck". Fixed with
+# rehearsal.started (written by remote-run.sh the instant its flock
+# resolves, see that script's comment): once known, every subsequent
+# budget calculation is anchored on it instead, i.e. on when the capture
+# actually began. Until it is known, remote_started_epoch() below is
+# polled once per round -- each round being a normal wait-budget-length
+# sleep, never a tight loop -- for up to MAX_QUEUE_ROUNDS rounds, so a run
+# that is genuinely still queued is retried rather than declared stuck
+# using the wrong (queue-inclusive) clock.
+#
 # REMOTE_STATE_PROBE_ATTEMPTS / _BACKOFF_S: a single ssh call used to be
 # enough to declare a completed 35-45 minute rehearsal "unreachable" --
 # one dropped packet, a restarted sshd, a transient "connection refused"
@@ -552,6 +596,30 @@ fi
 # several attempts, spread out, have all failed the same way.
 REMOTE_STATE_PROBE_ATTEMPTS="${REMOTE_STATE_PROBE_ATTEMPTS:-5}"
 REMOTE_STATE_PROBE_BACKOFF_S="${REMOTE_STATE_PROBE_BACKOFF_S:-10}"
+# MAX_QUEUE_ROUNDS: bounds how long this launcher will keep re-arming its
+# wait while the capture has never even started (still queued behind
+# /tmp/pgwt-box-check.lock). Default 4 extra rounds of a ~50min (default
+# DURATION_MIN=35) budget each = ~200min of extra tolerance on top of the
+# first round, comfortably above the observed 29-117min CI spread on the
+# gate box -- generous on purpose, since giving up too early on a
+# genuinely-queued (not stuck) run is exactly the bug this closes.
+MAX_QUEUE_ROUNDS="${MAX_QUEUE_ROUNDS:-4}"
+
+remote_started_epoch() {
+    # Best-effort, single probe (not remote_state()'s retry-with-backoff --
+    # that function already establishes genuine unreachability at the same
+    # checkpoints this is called from; this is purely opportunistic).
+    # Prints the epoch rehearsal.started records, or nothing at all if the
+    # file does not exist yet (capture genuinely not started), the ssh
+    # call failed, or its content is not a bare integer -- any of those
+    # must read as "not yet known", never as a wrong number treated as
+    # real.
+    local strict="" out
+    [[ "$PERSISTENT" != "1" ]] && strict="-o StrictHostKeyChecking=no"
+    out=$(ssh -o BatchMode=yes $strict -o ConnectTimeout=10 "$target" \
+        "cat '$remote_dir/rehearsal.started' 2>/dev/null" 2>>"$log")
+    [[ "$out" =~ ^[0-9]+$ ]] && echo "$out"
+}
 
 remote_state() {
     local out ssh_rc attempt strict=""
@@ -601,29 +669,89 @@ check_and_finish() {
     return 0
 }
 
+# rehearsal_started_epoch: known already (persisted from a previous pass
+# through this same launcher invocation, or reloaded on --collect from
+# REHEARSAL_STARTED_EPOCH in $STATE_FILE) or empty (not yet learned --
+# the normal case for a fresh launch).
+rehearsal_started_epoch="${REHEARSAL_STARTED_EPOCH:-}"
+
+remember_started_epoch() {
+    # Persists rehearsal_started_epoch into $STATE_FILE so a LATER
+    # --collect (after this launcher itself got killed) reattaches already
+    # knowing it, instead of needing to relearn it. Best-effort: a failed
+    # sed here does not change correctness, only whether a future
+    # --collect has to re-probe for it.
+    [[ -f "$STATE_FILE" ]] || return
+    sed -i.bak "s/^REHEARSAL_STARTED_EPOCH=.*/REHEARSAL_STARTED_EPOCH=$rehearsal_started_epoch/" \
+        "$STATE_FILE" 2>/dev/null && rm -f "$STATE_FILE.bak"
+}
+
+# budget_anchor_epoch: the launch time on the very first round (matches
+# today's behaviour exactly when the box is uncontended -- the common
+# case), the actual capture-start time on every round after it is learned.
+budget_anchor_epoch="${rehearsal_started_epoch:-$demo_rehearsal_start_epoch}"
 budget_s=$(python3 tests/demo_rehearsal_orchestrator_lib.py wait-budget \
-    "$demo_rehearsal_start_epoch" "$(date +%s)" "$DURATION_MIN")
+    "$budget_anchor_epoch" "$(date +%s)" "$DURATION_MIN")
 if [[ "$budget_s" -gt 0 ]]; then
-    echo "demo-rehearsal: sleeping ${budget_s}s (single sleep, no polling loop) before checking remote state" | tee -a "$log"
+    echo "demo-rehearsal: sleeping ${budget_s}s before checking remote state (anchor: ${rehearsal_started_epoch:+capture start}${rehearsal_started_epoch:-launch time, capture not yet confirmed started})" | tee -a "$log"
     sleep "$budget_s"
 fi
 
 last_state=""
 outcome_verdict=""
-if ! check_and_finish; then
-    if [[ "$last_state" == "running" ]]; then
-        echo "demo-rehearsal: still running after the primary budget -- ONE grace sleep (600s), then a final check" | tee -a "$log"
-        sleep 600
-        if ! check_and_finish; then
-            echo "demo-rehearsal: still running after the grace sleep too -- treating as stuck; collecting whatever exists and tearing down" | tee -a "$log" >&2
-            collect_results
-            outcome_rc=1
-            outcome_verdict="remote run exceeded its wait budget + grace period (stuck)"
-        fi
+queue_round=1
+while true; do
+    if check_and_finish; then
+        break
     fi
-fi
+    # Only "running" reaches here. If we already know the real start time,
+    # this is genuine staleness (already slept the accurate budget, or
+    # this is the grace pass below) -- one grace sleep, then give up.
+    if [[ -n "$rehearsal_started_epoch" ]]; then
+        echo "demo-rehearsal: still running past its capture-accurate budget -- ONE grace sleep (600s), then a final check" | tee -a "$log"
+        sleep 600
+        if check_and_finish; then
+            break
+        fi
+        echo "demo-rehearsal: still running after the grace sleep too -- treating as stuck; collecting whatever exists" | tee -a "$log" >&2
+        collect_results
+        outcome_rc=1
+        outcome_verdict="remote run exceeded its capture-accurate wait budget + grace period (stuck)"
+        break
+    fi
+
+    # Not yet known to have started -- find out whether it has, cheaply,
+    # once per round (never a tight poll).
+    rehearsal_started_epoch=$(remote_started_epoch)
+    if [[ -n "$rehearsal_started_epoch" ]]; then
+        remember_started_epoch
+        queued_for_s=$(( rehearsal_started_epoch - demo_rehearsal_start_epoch ))
+        echo "demo-rehearsal: capture actually started at epoch $rehearsal_started_epoch (queued ${queued_for_s}s behind the box lock) -- recomputing the real remaining budget from that instant" | tee -a "$log"
+        budget_s=$(python3 tests/demo_rehearsal_orchestrator_lib.py wait-budget \
+            "$rehearsal_started_epoch" "$(date +%s)" "$DURATION_MIN")
+        if [[ "$budget_s" -gt 0 ]]; then
+            echo "demo-rehearsal: sleeping the corrected ${budget_s}s (capture-relative, not queue-relative)" | tee -a "$log"
+            sleep "$budget_s"
+        fi
+        continue
+    fi
+
+    # Still genuinely queued (never started at all yet) -- bounded retry,
+    # never unbounded, never a tight loop: each round re-sleeps a full
+    # launch-anchored budget window before checking again.
+    queue_round=$((queue_round + 1))
+    if [[ "$queue_round" -gt "$MAX_QUEUE_ROUNDS" ]]; then
+        echo "demo-rehearsal: still queued behind the box lock after $MAX_QUEUE_ROUNDS extended waits -- giving up (the box may be under sustained contention; this is NOT the same failure as a stuck/hung capture)" | tee -a "$log" >&2
+        collect_results
+        outcome_rc=1
+        outcome_verdict="capture never started within $MAX_QUEUE_ROUNDS extended waits (still queued behind /tmp/pgwt-box-check.lock, not stuck mid-capture)"
+        break
+    fi
+    echo "demo-rehearsal: still queued behind the box lock (round $queue_round/$MAX_QUEUE_ROUNDS) -- sleeping another ${budget_s}s window before checking again" | tee -a "$log"
+    sleep "$budget_s"
+done
 
 echo
-echo "demo-rehearsal (DURATION_MIN=$DURATION_MIN PG=$PG target=${target:-unknown} persistent=$PERSISTENT pg_confirmed=${PG_VERSION_CONFIRMED:-not verified}) verdict: $outcome_verdict (exit=$outcome_rc) -- summary:"
+echo "demo-rehearsal (DURATION_MIN=$DURATION_MIN PG=$PG target=${target:-unknown} persistent=$PERSISTENT pg_confirmed=${PG_VERSION_CONFIRMED:-not verified} rehearsal_started=${rehearsal_started_epoch:-never confirmed}) verdict: $outcome_verdict (exit=$outcome_rc) -- summary:"
 tail -n 30 "$log" | sed 's/^/  /'
 exit "$outcome_rc"

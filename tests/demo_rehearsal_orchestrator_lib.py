@@ -70,7 +70,14 @@ _STATE_RE = re.compile(r"^STATE=(\S+)\s+RC=(\S+)\s*$")
 # rehearsal.* lifecycle marker above) -- "PG_CONFIRMED=<major> PID=<pid>"
 # when find_postmaster (tests/testutil.sh) located a running postmaster of
 # the requested major version on the target, "PG_CONFIRMED=NONE" when it
-# did not.
+# did not (find_postmaster itself found nothing matching), and
+# "PG_CONFIRMED=UNKNOWN PID=<pid>" for the narrow race where find_postmaster
+# DID return a pid (so a matching postmaster existed a moment ago -- it
+# only returns a pid whose version already matched) but the probe's own
+# second, independent postmaster_version call on that same pid failed --
+# e.g. the process exited between the two calls. Kept distinct from NONE
+# (review nit) so the refusal message says what actually happened instead
+# of falsely claiming no postmaster was ever found.
 _PG_PROBE_RE = re.compile(r"^PG_CONFIRMED=(\S+)(?:\s+PID=(\S+))?\s*$")
 
 
@@ -190,12 +197,17 @@ def parse_pg_probe_line(line):
     probe (run against the target right before the detached capture
     starts) into {"confirmed": str|None, "pid": str|None}. 'confirmed' is
     None exactly when the probe found no matching postmaster at all
-    (PG_CONFIRMED=NONE); otherwise it is the PG major version string
-    found. Raises OrchestratorError on anything else -- an ssh hiccup, a
-    dropped connection, or a probe-format change must be a visible parse
-    failure, never silently read as 'no postmaster found' (which
-    pg_version_verdict below would then also refuse, but for the wrong,
-    misleading reason: 'wrong PG version' instead of 'could not check')."""
+    (PG_CONFIRMED=NONE); the literal string "UNKNOWN" for the narrow race
+    where a matching postmaster WAS found (find_postmaster returned a pid)
+    but the probe's own second postmaster_version call on it failed --
+    kept distinct from None so pg_version_verdict's message does not
+    falsely claim no postmaster was ever found; otherwise the PG major
+    version string found. Raises OrchestratorError on anything else -- an
+    ssh hiccup, a dropped connection, or a probe-format change must be a
+    visible parse failure, never silently read as 'no postmaster found'
+    (which pg_version_verdict below would then also refuse, but for the
+    wrong, misleading reason: 'wrong PG version' instead of 'could not
+    check')."""
     line = (line or "").strip()
     m = _PG_PROBE_RE.match(line)
     if not m:
@@ -203,6 +215,8 @@ def parse_pg_probe_line(line):
     confirmed, pid = m.group(1), m.group(2)
     if confirmed == "NONE":
         return {"confirmed": None, "pid": None}
+    if confirmed == "UNKNOWN":
+        return {"confirmed": "UNKNOWN", "pid": pid}
     if not re.match(r"^\d+$", confirmed):
         raise OrchestratorError(f"non-numeric PG major {confirmed!r} in line: {line!r}")
     return {"confirmed": confirmed, "pid": pid}
@@ -235,6 +249,12 @@ def pg_version_verdict(requested, probe):
             f"target -- this run cannot count toward the pre-registered "
             f"rehearsal sequence (docs/DEMO_REHEARSAL_CRITERIA.md pins "
             f"PG {requested})")
+    if probe["confirmed"] == "UNKNOWN":
+        return False, (
+            f"REFUSING: a postmaster matching PostgreSQL {requested} WAS "
+            f"found (pid={probe.get('pid') or '?'}) but its version could "
+            f"not be re-confirmed a moment later -- refusing rather than "
+            f"guessing (this is not the same as 'no postmaster found')")
     if probe["confirmed"] != requested:
         return False, (
             f"REFUSING: postmaster PID {probe.get('pid') or '?'} resolved to "

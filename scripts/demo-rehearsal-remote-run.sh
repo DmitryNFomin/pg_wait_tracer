@@ -48,6 +48,23 @@ PG_VERSION="${3:?Usage: demo-rehearsal-remote-run.sh DURATION_MIN RUN_MARKER PG_
 exec 200>/tmp/pgwt-box-check.lock
 flock -x 200
 
+# rehearsal.started -- BLOCKER fix (review): the launcher's wait budget
+# used to be computed from when THIS SCRIPT WAS LAUNCHED (before the
+# flock wait), not from when the capture actually began. On a shared
+# persistent box, `flock -x 200` above can queue behind CI or another
+# agent for as long as that job takes (CI's own spread on the gate box is
+# 29-117 minutes, n=9) -- with a 35-minute rehearsal that margin is
+# consumed entirely by queueing alone, so the launcher would declare a
+# capture that is running PERFECTLY "stuck" and tear down (well, collect
+# and report failure -- a persistent box is never torn down) while it is
+# still queued or has only just started. Written atomically (temp +
+# rename, same pattern as rehearsal.rc) immediately after the flock
+# actually resolves, so scripts/demo-rehearsal.sh's wait-budget
+# calculation can be anchored on this instant instead -- see its own
+# comment for how it uses this.
+date +%s > rehearsal.started.tmp
+mv -f rehearsal.started.tmp rehearsal.started
+
 exec >rehearsal.out 2>&1
 
 echo "demo-rehearsal-remote-run: flock acquired, DURATION_MIN=$DURATION_MIN PG_VERSION=$PG_VERSION"
@@ -68,7 +85,21 @@ else
     # postmaster, not merely "whatever find_postmaster picks with no
     # --pg-version at all" (which is how the port-5413/PG-13 attempt this
     # closes ran uncounted).
-    sudo DURATION_MIN="$DURATION_MIN" PGWT_RUN_MARKER="$RUN_MARKER" tests/demo_rehearsal.sh --pg-version "$PG_VERSION"
+    #
+    # 200>&-: close the flock fd for this command and everything it forks
+    # (tracer, bridge, pgwt-server, pgbench, the lock/sleep workload) --
+    # review finding: without this, fd 200 is inherited straight through
+    # `sudo` into every child tests/demo_rehearsal.sh starts. Its own
+    # cleanup() already detects a leaked child and exits 1 but does NOT
+    # kill it (tests/demo_rehearsal.sh, same as tests/ui_live_smoke.sh's
+    # documented hazard at its own cleanup()) -- on a SHARED persistent
+    # box that leaked child would keep holding /tmp/pgwt-box-check.lock
+    # forever, wedging every later box-check and every CI self-hosted step
+    # (which waits `-w 7200` on the same lock) until a human intervenes.
+    # Harmless when this script only holds the lock for build+capture; the
+    # risk is specifically fd inheritance surviving past THIS script's own
+    # teardown via an orphaned grandchild.
+    sudo DURATION_MIN="$DURATION_MIN" PGWT_RUN_MARKER="$RUN_MARKER" tests/demo_rehearsal.sh --pg-version "$PG_VERSION" 200>&-
     rc=$?
 fi
 
