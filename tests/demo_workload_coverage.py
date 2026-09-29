@@ -194,7 +194,20 @@ def concurrency_populated(resp, num_cpus):
 
 def waterfall_populated(resp):
     """executions: completed executions with query text, at least one slow
-    enough to be interesting."""
+    enough to be interesting.
+
+    #222 review: this checker itself never changed -- what changed is
+    WHICH SLICE TAB_QUERIES asks for (see its `sort` entry below). Queried
+    with no sort, `executions` returns the latest EXECUTIONS_DEFAULT_LIMIT
+    (100) by start time; on a real 40-minute capture at pgbench rates that
+    is on the order of the last ~0.8s, and a genuinely slow execution
+    sitting anywhere earlier in the window is invisible to `max(durations)`
+    here even though it was captured the whole time -- measured directly:
+    a real rehearsal run reported "slowest completed_ms=0.326" against
+    this floor while the same window's own artifacts (exec_scatter: 1101
+    points, max/min duration ratio 649,723; tests/live_loop_workload.py's
+    pg_sleep(1.3)/pg_sleep(0.4)/3M-row count(*)) show the slow work was
+    there all along."""
     rows = (resp or {}).get("rows") or []
     durations = [r.get("duration_ms") for r in rows
                  if r.get("duration_ms") is not None and not r.get("in_progress")]
@@ -219,7 +232,26 @@ def scatter_populated(resp):
 
 
 # ── tab -> (pgwt-server cmd, extra request params, pure checker) ──────────
-
+#
+# waterfall's extra params carry sort="duration_desc" (#222 review) --
+# deliberately the SAME slice web/static/views/waterfall.js's own
+# EXECUTIONS_SORT_DEFAULT requests by default, not a bespoke choice for
+# this checker alone. This table's own module-docstring rule ("if a
+# view's query command ever changes, this table and the view's own
+# requests() will disagree, which is a real drift worth catching") applies
+# just as much to which SLICE is asked for as to which COMMAND is --
+# querying recency here while the tab itself defaults to duration would
+# be exactly that drift, silently.
+#
+# Residual, not fixed here (tracked, not silent): #222's own review found
+# ranking open rows by elapsed-so-far can itself crowd genuinely slow
+# CLOSED rows off a truncated duration_desc page if a flood of merely-
+# older open executions dominates it (tests/test_data_executions.py's
+# test_open_row_crowding_characterized). At this workload's concurrency
+# (tests/live_loop_workload.py) that is far below the row flood the
+# characterization test uses, so it is not expected to recur here -- but
+# it is the same shape of bug with the sign flipped, worth naming rather
+# than assuming away.
 TAB_QUERIES = {
     "overview":     ("time_model", {}, overview_populated),
     "events":       ("top_events", {}, events_populated),
@@ -229,7 +261,7 @@ TAB_QUERIES = {
     "timeline":     ("session_timeline", {}, timeline_populated),
     "transitions":  ("transitions", {}, transitions_populated),
     "concurrency":  ("concurrency", {}, concurrency_populated),
-    "waterfall":    ("executions", {}, waterfall_populated),
+    "waterfall":    ("executions", {"sort": "duration_desc"}, waterfall_populated),
     "scatter":      ("exec_scatter", {"max_points": 2000}, scatter_populated),
     "matrix":       ("transitions", {"buckets": 200}, matrix_populated),
 }

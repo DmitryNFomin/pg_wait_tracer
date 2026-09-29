@@ -76,6 +76,26 @@ def test_tab_order_matches_ui_live_smoke_lib():
           "TAB_QUERIES has exactly one entry per tab in TAB_ORDER")
 
 
+def test_waterfall_query_requests_slowest_first_not_recency():
+    """#222 review: on a real 40-minute capture this check queried
+    `executions` with no `sort` -- the default recency (start_desc) slice,
+    the exact 100-row-of-the-last-~0.8s tail #222 exists to fix -- and
+    reported the rehearsal's "slowest completed execution" as 0.326ms
+    against the 500ms floor while the window's own genuinely slow
+    executions (pg_sleep(1.3)/pg_sleep(0.4)/a 3M-row count(*),
+    tests/live_loop_workload.py) sat outside that tail the whole time.
+    TAB_QUERIES["waterfall"] must ask for the SAME slice the tab itself
+    defaults to (web/static/views/waterfall.js's own sortMode default,
+    EXECUTIONS_SORT_DEFAULT) -- not just any slice that happens to be
+    "sorted somehow"."""
+    cmd, extra, _fn = cov.TAB_QUERIES["waterfall"]
+    check(cmd == "executions",
+          "waterfall coverage still queries the executions endpoint")
+    check(extra.get("sort") == "duration_desc",
+          f"waterfall coverage requests sort=duration_desc, the same "
+          f"slice the tab itself defaults to (extra={extra})")
+
+
 # ── overview_populated ─────────────────────────────────────────────────────
 
 def test_overview_populated_two_classes_passes():
@@ -377,12 +397,14 @@ def test_scatter_populated_zero_duration_excluded():
 
 class _FakeServer:
     """A tiny stand-in for server_harness.ServerHarness good enough for
-    run_coverage: records the cmd it was asked and returns a scripted
-    response or raises."""
+    run_coverage: records the cmd (and, since #222 review, the full kwargs)
+    it was asked and returns a scripted response or raises."""
     def __init__(self, responses):
         self.responses = responses   # cmd -> resp or Exception instance
+        self.calls = []              # [(cmd, kwargs), ...] in call order
 
     def query(self, cmd, **kwargs):
+        self.calls.append((cmd, kwargs))
         r = self.responses.get(cmd)
         if isinstance(r, Exception):
             raise r
@@ -445,6 +467,52 @@ def test_run_coverage_missing_num_cpus_fails_concurrency_not_skips():
     check(results["concurrency"]["ok"] is False,
           f"concurrency FAILS when run_coverage's caller omits num_cpus, "
           f"even with a huge peak ({results['concurrency']['detail']})")
+
+
+def test_run_coverage_waterfall_forwards_sort_and_sees_the_window_not_the_tail():
+    """#222 review, end to end through run_coverage's real glue (not just
+    the TAB_QUERIES table in isolation): the response below is the shape a
+    sort=duration_desc page actually looks like on a real capture -- the
+    genuinely slow execution present, NOT crowded out by a 0.8s recency
+    tail of pgbench noise. RED without the fix: revert
+    TAB_QUERIES["waterfall"]'s extra to {} and this still passes today
+    (the response is scripted to already contain the slow row), but the
+    kwargs assertion below catches the regression the response shape
+    alone cannot -- it fails the moment `sort` stops being forwarded to
+    srv.query, independent of what any particular response happens to
+    contain."""
+    good = {
+        "time_model": {"rows": [{"name": "Lock", "indent": 1, "ms": 5},
+                                 {"name": "Timeout", "indent": 1, "ms": 5}]},
+        "top_events": {"rows": [{"name": "Lock:relation", "class": "Lock", "total_ms": 5},
+                                 {"name": "Timeout:PgSleep", "class": "Timeout", "total_ms": 5}]},
+        "top_sessions": {"rows": [{"pid": 1}, {"pid": 2}]},
+        "top_queries": {"rows": [
+            {"text": "A", "total_ms": 1}, {"text": "B", "total_ms": 2}]},
+        "heatmap": {"cells": [[0, 1, 5], [0, 2, 5]]},
+        "session_timeline": {"events": [{"p": 1, "n": "A"}, {"p": 1, "n": "B"}]},
+        "transitions": {"links": [{"source": "CPU*", "target": "Lock:relation", "value": 1},
+                                   {"source": "CPU*", "target": "Timeout:PgSleep", "value": 1}]},
+        "concurrency": {"peaks": [{"t": 1, "max": 5.0}]},
+        # The duration_desc page: the reporter session's slow query leads,
+        # the pgbench tail trails -- exactly inverted from the recency
+        # page that made the real rehearsal see only 0.326ms.
+        "executions": {"rows": [
+            {"query_id": "1", "duration_ms": 1300.0},
+            {"query_id": "2", "duration_ms": 0.326},
+        ]},
+        "exec_scatter": {"points": [{"duration_ms": d} for d in [1, 2, 5, 50, 400]]},
+    }
+    srv = _FakeServer(good)
+    results = cov.run_coverage(srv, 0, 1, num_cpus=4)
+    check(results["waterfall"]["ok"] is True,
+          f"waterfall PASSES against the duration-sorted page "
+          f"({results['waterfall']['detail']})")
+    exec_calls = [kwargs for cmd, kwargs in srv.calls if cmd == "executions"]
+    check(len(exec_calls) == 1 and exec_calls[0].get("sort") == "duration_desc",
+          f"run_coverage's actual srv.query call for executions carried "
+          f"sort=duration_desc, not just the TAB_QUERIES table in the "
+          f"abstract (calls={exec_calls})")
 
 
 def test_run_coverage_server_error_field_fails_not_skips():
