@@ -61,3 +61,4 @@ test_demo_workload_coverage.py
 test_timeline_window_probe.py
 test_hetzner_sweep.sh
 test_unit_import_guard.py
+test_push_guard.py
