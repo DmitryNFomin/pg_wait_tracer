@@ -375,18 +375,58 @@ class Workload:
             self.backend_pids = wait_for_observation(
                 self.holder, discover_backend_pids, 30, interval_s=0.2) or {}
 
-    def fire(self, sleep_s=3):
-        """Start the observable waits (call after the tracer attached)."""
+    def fire(self, sleep_s=3, verify=True):
+        """Start the observable waits (call after the tracer attached).
+
+        verify=True (default, every one-shot smoke-test call site) spawns a
+        fresh psql backend to assert the waiter actually blocked -- cheap
+        when fire() runs once or a few times per test. tests/live_loop_workload.py
+        calls fire() every ~5-8s for the WHOLE demo window (up to 900s) to
+        keep Lock:relation/Timeout:PgSleep appearing every live tick (#93);
+        at verify=True unconditionally that repeated one-shot backend was
+        the dominant source of the ~150 distinct PIDs polluting the
+        Sessions tab in a demo workload with ~8 real sessions (#243) -- the
+        SAME assertion, re-run every tick, each time through a brand-new
+        connect/query/exit backend the Sessions tab (correctly) counts as a
+        session. The blocking SQL itself is unconditional and unchanged by
+        this flag.
+
+        #243 review round 2: nothing in any PR gate actually names
+        Lock:relation on THIS loop's re-lock path specifically (the
+        one-shot smoke-test verify=True call sites only ever exercise
+        open_sessions()'s single lock; live-UI-smoke checks rendering, not
+        which wait class produced it; demo_workload_coverage.py's
+        transitions/matrix checkers need any non-idle edge, not this one by
+        name; the one check that does name it,
+        ui_live_smoke_lib.workload_signature_present_ok, is wired only into
+        demo_rehearsal.py's verdict, and `make demo-rehearsal` never gates
+        CI) -- so live_loop_workload.py's loop calls this with verify=False
+        on MOST ticks but verify=True periodically (see
+        live_loop_workload.should_verify_tick), not never, and treats a
+        verify=True failure as fatal (exits loudly) rather than a
+        print-and-continue. That periodic call is the only thing that
+        would ever notice the re-lock loop silently breaking.
+
+        Returns True if verify=False (nothing to check) or the waiter was
+        found blocked; False if verify=True and it was not -- the caller
+        decides what to do with a False (test_capture_smoke.py's own
+        call sites rely on check()'s PASS/FAIL side effect, same as
+        before, and ignore the return value; live_loop_workload.py acts on
+        it directly)."""
         self.sleeper.stdin.write(f"SELECT pg_sleep({sleep_s});\n")
         self.sleeper.stdin.flush()
         self.waiter.stdin.write(f"SELECT count(*) FROM {self.LOCK_TABLE};\n")
         self.waiter.stdin.flush()
         time.sleep(1.5)
+        if not verify:
+            return True
         waiters = psql(
             f"SELECT count(*) FROM pg_locks "
             f"WHERE relation = '{self.LOCK_TABLE}'::regclass AND NOT granted")
-        check(waiters != "" and int(waiters) >= 1,
+        ok = waiters != "" and int(waiters) >= 1
+        check(ok,
               f"workload: waiter blocked on {self.LOCK_TABLE} (waiters={waiters!r})")
+        return ok
 
     def open_extra_session(self, role, sql):
         """Open one more session and immediately send it one SQL statement.

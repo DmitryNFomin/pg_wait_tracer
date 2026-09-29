@@ -37,6 +37,22 @@ original Lock:relation / Timeout:PgSleep guarantee is untouched:
     the original loop already covers, which is what gives Transitions/
     Matrix more than one non-idle edge.
 
+#243 review round 2: the re-lock loop below calls fire() with verify=False
+on most ticks (a one-shot psql backend per verify was the dominant source
+of ~150 distinct Sessions-tab PIDs against ~8 real workload sessions -- see
+Workload.fire()'s docstring), but NEVER is wrong: nothing in any PR gate
+would then notice this loop's own BEGIN/LOCK TABLE re-lock silently
+breaking (the smoke test's own verify=True call sites only ever exercise
+open_sessions()'s one-shot lock, not this repeated cycle; live-UI-smoke
+grades rendering, not which wait class produced it; demo_workload_coverage's
+transitions/matrix checkers need any non-idle edge, not Lock:relation by
+name; the one check that does name it is wired only into demo_rehearsal.py,
+which never gates CI). should_verify_tick() below re-enables verify=True
+periodically instead, and a failed periodic verify is FATAL (sys.exit(1)),
+not print-and-continue -- ui_live_smoke.py's/demo_rehearsal.py's own
+_assert_workload_alive liveness check (called at every tab boundary/pass)
+then catches the dead workload process and fails the whole run loudly.
+
 Usage: python3 tests/live_loop_workload.py DURATION_S
 (SIGTERM stops it early and cleanly, same as any other loop in this suite.)
 """
@@ -47,6 +63,30 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from test_capture_smoke import Workload, psql
+
+# How many ticks between periodic re-verification of "the waiter actually
+# blocked" on the LOOPING re-lock path (#243 review round 2). At ~5-8s/tick
+# a 900s demo window is roughly 130 ticks; every 10th tick keeps the added
+# one-shot backends (~13) a small fraction of the ~150 the #243 fix removed,
+# while still re-proving the mechanism every ~50-80s of wall time -- a break
+# would be caught well within a single rehearsal pass, not just "eventually,
+# by hand" (the gap review round 2 found). Any N that keeps the periodic
+# backends a small fraction of the real session count is fine; this is not
+# tuned to a precise floor.
+VERIFY_EVERY_N_TICKS = 10
+
+
+def should_verify_tick(iteration, every_n=VERIFY_EVERY_N_TICKS):
+    """True on tick 0 and every `every_n`th tick after. Pure (no I/O), so
+    the CADENCE itself -- not just fire()'s verify flag -- is unit-testable
+    without a live loop or database (tests/test_workload_verify_flag.py):
+    a regression that never verifies (always False) or that ignores
+    `every_n` and verifies every tick (always True) are both plausible
+    wrong implementations of "verify periodically", and both are
+    distinguishable from the real cadence over a handful of ticks. Tick 0
+    included so a run shorter than `every_n` ticks (e.g. a short self-test)
+    still verifies at least once."""
+    return iteration % every_n == 0
 
 ROW_LOCK_TABLE = "_smoke_row_lock_wait"
 
@@ -155,7 +195,25 @@ def main():
                 f"BEGIN; LOCK TABLE {wl.LOCK_TABLE} IN ACCESS EXCLUSIVE MODE;\n")
             wl.holder.stdin.flush()
             time.sleep(0.5)   # let the re-lock land before the waiter tries
-            wl.fire(sleep_s=3)
+            # verify=True on most ticks would spawn a fresh one-shot psql
+            # backend every ~5-8s for the WHOLE demo window (up to 900s) --
+            # the dominant source of the ~150 distinct PIDs polluting the
+            # Sessions tab in a demo workload with ~8 real sessions (#243).
+            # verify=False every tick removes that churn but also removes
+            # the ONLY thing that would ever notice this loop's re-lock
+            # silently breaking (#243 review round 2 -- see module
+            # docstring), so verify periodically instead and treat a
+            # failure as fatal, not print-and-continue.
+            verify_this_tick = should_verify_tick(iteration)
+            ok = wl.fire(sleep_s=3, verify=verify_this_tick)
+            if verify_this_tick and not ok:
+                print(f"FATAL: live_loop_workload: waiter did not block on "
+                      f"tick {iteration} -- the re-lock loop's Lock:relation "
+                      f"wait has broken; exiting so the caller's liveness "
+                      f"check (_assert_workload_alive) fails the run loudly "
+                      f"instead of silently grading a broken workload",
+                      file=sys.stderr)
+                sys.exit(1)
             _reporter_tick(reporter, iteration)
             _row_lock_tick(row_holder, row_waiter)
             time.sleep(2)

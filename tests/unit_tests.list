@@ -45,6 +45,7 @@ test_ui_live_smoke_lib.py
 test_multi_window_lib.py
 test_demo_rehearsal_lib.py
 test_demo_rehearsal_orchestrator_lib.py
+test_workload_verify_flag.py
 # #214: per-tab "is this populated" checkers for tests/demo_workload_coverage.py
 # (companion to tests/live_loop_workload.py). Pure Python; its import chain
 # (server_harness lazily inside main(), ui_live_smoke_lib for numpy/PIL only)
