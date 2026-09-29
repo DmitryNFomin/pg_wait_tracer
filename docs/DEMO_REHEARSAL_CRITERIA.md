@@ -75,9 +75,11 @@ Two consequences follow, and both are deliberate:
 
 Every one of these was discovered the hard way on 2026-09-28, one at a time,
 each costing the owner a separate interruption. They are collected here so a
-rehearsal window costs him **one interaction instead of a dozen**. The harness
-asserts each of them and **fails fast naming the unmet one** — it never retries
-into an opaque error and never quietly proceeds.
+rehearsal window costs him **one interaction instead of a dozen**. **Retracted
+for the Mac side (owner, 2026-09-29):** the claim that a harness asserts each
+item and fails fast was written before there was a Mac-side harness. The
+Mac-side pre-flight is checked and recorded by the walker in
+`docs/DEMO_MAC_WALK_CHECKLIST.md`.
 
 Before saying "go":
 
@@ -102,13 +104,17 @@ Before saying "go":
    panel, versus 19.7% with it detached.
 7. **Quit heavy apps** that will not be part of the demo.
 
-Two things that are the harness's job, not the owner's, and are listed here
-only so nobody asks him for them again: holding the display awake (the harness
-owns its own `caffeinate` with a trap) and cleaning up its own processes and
-VMs. **The owner should never be asked to kill an orphaned shell.** That
-happened twice on 2026-09-28 and was a missing trap, not a thing for him to do.
+**Retracted for the Mac-side walk:** the earlier text assigned holding the
+display awake (`caffeinate` with a trap) and process and VM cleanup to a
+Mac-side harness that does not exist. **The owner should never be asked to
+kill an orphaned shell.** That happened twice on 2026-09-28 and was a
+missing trap, not a thing for him to do.
 
 ### What the harness must do with this list
+
+**Retracted for the Mac side (owner, 2026-09-29):** these were proposed harness
+requirements, not implemented Mac-side checks. The manual checklist now owns
+the Mac-side observations. Do not report this list as automated evidence.
 
 - Assert every item it can observe — lock state via `CGSSessionScreenIsLocked`,
   display sleep, achieved viewport, effective zoom, load and memory pressure.
@@ -125,15 +131,30 @@ A rehearsal produces **two** results and they are reported separately:
   client — §1 verdict, §2 floors, §3 conservation, §6 daemon integrity, §7
   execution, §8 known-failing, and the data half of §4 and §5 (console errors,
   blank panels, cross-tab agreement).
-- **Mac-side**, walked on the Mac against the same VM in the demo topology:
-  §4's time to first paint and viewport, and §5's freshness — *as the audience
-  will see them*. These are different quantities from their VM-side
-  namesakes. Headless Chromium at DPR 1 on a cx33 over localhost is not real
-  Chrome at DPR 2 on Apple silicon over an ssh hop, and a bound measured on
-  one does not transfer to the other. The VM's number is kept only as a
-  regression detector.
+- **Mac-side**, walked by hand in real Chrome on the Mac's built-in display,
+  against `docs/DEMO_MAC_WALK_CHECKLIST.md` and the same VM in the demo
+  topology: §4's time to first paint and viewport, and §5's freshness — *as
+  the audience will see them*. The result is a human sign-off on the filled-in
+  checklist. These are different quantities from their VM-side namesakes.
+  Headless Chromium on a cx33 over localhost is not real Chrome at DPR 2 on
+  Apple silicon over an ssh hop, and a bound measured on one does not transfer
+  to the other. The VM's number is kept only as a regression detector.
 
-Reported as "capture-side clean k of N, Mac-side clean m of M". **Never as
+**Retracted (owner, 2026-09-29):** the Mac-side criteria were written as if an
+automated harness existed. It does not. `scripts/demo-rehearsal.sh` runs the
+walk over ssh on the VM via `scripts/demo-rehearsal-remote-run.sh`;
+`tests/demo_rehearsal.py` launches Playwright's bundled headless Chromium
+(`p.chromium.launch()`, with no `channel="chrome"` in the tree). It pins the
+1710 x 981 viewport at DPR 2 (#223), but a pinned viewport in headless
+Chromium on the VM is not a Mac-side walk. `memory_pressure` and bridge-drop
+recovery were specified here but implemented in no test or script. Thus
+"Mac-side m of M" was a counter that could not advance. Building that harness
+was judged days of work competing with the dry run and counted attempts. A
+manual walk observes the real presentation environment more honestly than a
+headless approximation of it.
+
+Reported as "capture-side clean k of N, Mac-side clean m of M". The Mac-side
+count means **signed-off manual walks**, not automated verdicts. **Never as
 "two clean rehearsals"** — that would claim the Mac half on the strength of
 the VM half.
 
@@ -149,10 +170,12 @@ than after seeing a result:
   for the same tick, is a **client-side product finding**;
 - both sides red is a product failure.
 
-`memory_pressure` and load are recorded per tick in the verdict, so this is
-decided by data rather than by "the Mac was busy". For the duration of a
-Mac-side walk, no implementing agents and no local VM work run on it — that
-cost is real and is accepted deliberately.
+The walker records `memory_pressure` and load by hand at the start and end of
+the walk and on any tick that looks slow, in the checklist. This is coarser
+than the per-tick verdict record originally specified; the trade was made
+deliberately for a manual walk. Record the observation, not "the Mac was
+busy". For the duration of a Mac-side walk, no implementing agents and no
+local VM work run on it — that cost is real and is accepted deliberately.
 
 ### The client, pinned (owner, 2026-09-28: "Screen, chrome")
 
@@ -244,10 +267,10 @@ Inspection is not observation, and the difference between "recovers within the
 16 s backoff cap" and "stays blank until someone reloads" is the difference
 between a hiccup and a dead demo.
 
-So the Mac-side walk measures it: drop the bridge mid-walk, bring it back, and
-record whether the UI reconnects, how long it takes, and whether any state is
-lost. The measured number belongs in the verdict; the source's 16 s cap is not
-evidence.
+So step 3 of the manual Mac-side walk drops the bridge mid-walk, brings it
+back, and records whether the UI reconnects, how long it takes, and whether
+any state is lost in the signed checklist. The observed number belongs there;
+the source's 16 s cap is not evidence.
 
 ### The demo machine (owner, 2026-09-28: "we will provision dedicated node couple days in advance")
 
@@ -461,8 +484,8 @@ left to be discovered.
 | §3 Off-CPU\* ≤ 10% | yes (`time_model_offcpu_cap_ok`) |
 | §4 zero known-failing tabs | yes (`build_demo_summary` uses raw `ok`, ignoring the exemption) |
 | §4 blink measured fraction ≥ 0.5 | yes — landed via `agent/blink-anchor-mount-seq` (#209, merged to master), inherited automatically once `agent/rehearsal-bypass-suite` rebased: `demo_rehearsal.py` has no independent blink-measurement code, it fully delegates to `ui_live_smoke.py:run_tab()`, which now calls `blink_sweep_gate_verdict` itself. Pinned with a regression test using real measured numbers (`tests/test_demo_rehearsal_lib.py`, run.id 1790574871: scatter 0.1305, transitions 0.0072–0.0172) |
-| §4 time to first paint, pinned viewport | no — the earlier "viewport IS pinned" described `ui_live_smoke.py:run_tab`'s 1280×900, not the demo's measured Chrome 1710×981; matching the demo viewport is not established. Time-to-first-paint still has no timing field in a tab result or stated bound. Set that bound from the first uncontended run on the demo configuration and pre-register it before counted attempt one; the contended 2026-09-29 walk cannot set it. Retracted: its 30 s Timeline finding measured the "select a session" prompt from a bare tab click, not paint after a Sessions-row drill-down (`_navigate_to_tab`) |
-| §5 cross-tab agreement, freshness | partial — freshness: yes (`freshness_ok`, `info`'s `now_ns` vs `to_ns`). Cross-tab agreement: DB-Time leg only, yes (`cross_tab_db_time_agreement_ok`, `time_model` vs `top_events` for the identical window). AAS leg: **not yet satisfied** — requires a bucket-weighted re-derivation from the `aas` endpoint over the identical window against `time_model.aas`. Retracted: the walk's 0.0000% came from an unweighted mean of buckets, which is not that comparison and establishes no agreement |
+| §4 time to first paint, pinned viewport | Mac-side: manual checklist and human sign-off, not an automated verdict. The VM's headless Chromium viewport is pinned at 1710×981, DPR 2 (#223), but that does not establish the real Chrome walk on the Mac. Time-to-first-paint still has no stated bound; set it from the first uncontended dry run on the demo configuration and pre-register it before counted attempt one. The contended 2026-09-29 walk cannot set it. Retracted: its 30 s Timeline finding measured the "select a session" prompt from a bare tab click, not paint after a Sessions-row drill-down (`_navigate_to_tab`) |
+| §5 cross-tab agreement, freshness | partial — VM-side freshness: yes (`freshness_ok`, `info`'s `now_ns` vs `to_ns`); Mac-side visible freshness: manual checklist and human sign-off. Cross-tab agreement: DB-Time leg only, yes (`cross_tab_db_time_agreement_ok`, `time_model` vs `top_events` for the identical window). AAS leg: **not yet satisfied** — requires a bucket-weighted re-derivation from the `aas` endpoint over the identical window against `time_model.aas`. Retracted: the walk's 0.0000% came from an unweighted mean of buckets, which is not that comparison and establishes no agreement |
 | §6 lost-event counters, overhead envelope | partial — lost-event counters: yes (`daemon_integrity_ok`: `ringbuf_drops_total`/`state_map_full_total`/`seen_query_ids_full_total`, already on the wire via pgwt-server's control proxy, no `src/` change needed; blind spot stated in the code comment: a lost LIFECYCLE event is silent, no counter increments). Overhead envelope: **not yet measured for the demo workload on the demo box**. Correction: the earlier claim that nothing measures full mode was wrong. Every box-check runs `tests/test_overhead.sh --quick` (~10 minutes) via `tests/run_all.sh`; its paired baseline/tracer A/B uses the default pgbench load, pins `--mode full`, and appends to `tests/results/overhead_trend.csv` on the box. The tracked CSV has only a header because `tests/results/` is excluded from box-check's up-rsync; box-generated rows are not synced back or committed. The ~70-minute sweep is the same script without `--quick`; `sampled_overhead_gate.py --mode sampled` runs only for `src/` changes. Retracted: the quick sweep is not a per-attempt requirement or a substitute for measuring the demo workload. Do n=3 paired full-mode A/B TPS runs with the demo workload on the demo box and record the envelope before counted attempt one; the 40-minute rehearsal retained neither an A/B baseline nor even its with-tracer `tps =` line (cleanup tailed 20 lines and deleted the full log) |
 | §7 no test exited 126/127 | **partial, and this is a human-readable aid, not an automated gate**: `tests/demo_rehearsal.sh`'s `report_early_exit` labels a dead subprocess's 126/127 exit code in the log for a human reading it afterward. It does NOT change the script's own exit code (every call site already `exit 1` regardless of the labeled reason) and has no test coverage of its own — reviewer finding, 2026-09-28. Do not read this row as "126/127 fails the gate automatically"; it already did, via the pre-existing `kill -0` + `exit 1` checks, which is why this addition changes nothing observable except the log's wording |
 | §8 known-failing lines read by hand | manual by construction; not applicable to `demo_rehearsal.py` itself, which grants zero known-failing exemptions (§4 row above) -- nothing here for a human to hand-verify against an issue |
