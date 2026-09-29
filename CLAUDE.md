@@ -84,7 +84,12 @@ judges. It writes no feature code itself for anything bigger than a one-liner.
   downgraded. `ui-reviewer` = Sonnet. `Explore`/triage: Sonnet or Haiku.
   ONE review round: READY-with-nits ships with the nits listed; a second round
   only for a code blocker; no confirmation re-reviews. Agents wait for box runs
-  with one long sleep inside a single command, never minute-by-minute polling.
+  with one `run_in_background` wait, then read the result. Do not loop: this
+  harness blocks long standalone `sleep` commands, and each short backgrounded
+  wait emits a `stopped with background work` notification that makes the
+  orchestrator re-read its full context. On 2026-09-29 one polling loop sent
+  15 such notifications in 2h10m, costing ~9M cache-read tokens (~5% of the
+  day's spend). Reviewers stop agents that poll.
   Reports are at most ~15 lines.
 - **Fable**: not an implementer, but it **is the standing adviser** (see the
   Adviser bullet below), and that is its normal, expected use. As an
@@ -100,14 +105,20 @@ judges. It writes no feature code itself for anything bigger than a one-liner.
   since when it has been in continuous use as the adviser; check before
   repeating "out of Fable tokens".
 - **Main session model**: the orchestrator runs on **Opus** (`/model`), never
-  Fable — it reads 15-line reports, decides ready/back, merges and spawns, and
-  every one of its turns re-reads the whole context, so its model is the
-  largest single token cost. It minimises its own turns: it acts only on agent
-  reports and on PRs that went green, never on "still running" notifications or
-  mid-flight status checks, and it never reads a diff itself when a reviewer's
+  Fable — it reads 15-line reports, decides ready/back, arms auto-merge and
+  spawns, and every one of its turns re-reads the whole context, so its model
+  is the largest single token cost. It minimises its own turns: it acts on
+  agent reports and checks once when a report-by deadline passes, never on
+  "still running" notifications or mid-flight status checks, and it never
+  reads a diff itself when a reviewer's
   report answers the question. Counterweight so quality does not slip: a
   finding that touches signal handling, loops, accounting or the fail-safe rule
   goes back to the implementer whatever label the reviewer gave it.
+  The orchestrator does not research: web searches, `gh api` reads, price
+  lookups and code archaeology go to a Haiku or Sonnet agent and return as one
+  short report. Each orchestrator tool call costs a full context re-read of a
+  conversation that only grows; on 2026-09-29, 57% of its turns followed its
+  own tool calls.
 - **Reports to the owner are FIVE LINES at most** (owner rule 2026-09-25):
   merged / in flight / blocked / needs you. Long form only when the owner has
   to decide something, or when a finding changes the plan. No bug narratives —
@@ -138,13 +149,29 @@ judges. It writes no feature code itself for anything bigger than a one-liner.
   the plan shows them independent.
 - **Spawning**: always `isolation: "worktree"`. The prompt is a contract:
   issue text, acceptance criteria, required `make` targets, "stop and report,
-  do not open the PR".
+  do not open the PR", and "report by T+N minutes even if incomplete". On
+  2026-09-29 every agent notification was `completed`, and 26 of 40 were
+  `stopped with background work` — a live-and-polling signal. A hung agent
+  emits nothing; absence is the only hang signal. Check once when the deadline
+  passes instead of watching the stream. When a contract is long enough to
+  write to a file, pass its path only; do not also paste its text into the
+  message. The duplicate brief stays in the orchestrator's context and is
+  re-read for the rest of the session.
 - **Review chain**: (1) scripts — `make check`/`box-check`/`ui-gallery`
   produce files the implementer cannot argue with; (2) a fresh `reviewer`
   (+ `ui-reviewer` when `web/` changed) reads code + evidence and writes the
   PR body; blockers go back to the implementer via SendMessage; (3) the main
   agent reads the reviewer's report, not the diff, and decides ready / back /
-  ask the owner. Only "Design questions for the owner" reach the human.
+  ask the owner. Only "Design questions for the owner" reach the human. On READY,
+  arm auto-merge in that same turn; do not watch CI or merge by hand. Repository
+  "Allow auto-merge" and branch protection "Require branches to be up to date
+  before merging" (`strict`) were enabled 2026-09-29. Strict matters: on
+  2026-09-28 #228, #229 and #233 hand-merged within 13 seconds, each having
+  passed CI against base `5c5e3c66`, none tested against the others. Strict
+  forces the second and third to update and re-run CI against the combined
+  tree, where a shared-file break goes red. Required approving reviews is 0:
+  a push after READY would merge unreviewed. The contract's no-push-after-READY
+  rule is now load-bearing.
 - **Adviser** (owner rule 2026-09-27): `.claude/agents/adviser.md`, model
   Fable, one standing conversation for the whole session (resume it with
   SendMessage, never respawn). The retro found the lead's own output is the
