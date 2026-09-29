@@ -149,6 +149,33 @@ test('escalation annotation: manual vs anomaly use distinct colors + labels', ()
     assert.equal(anomaly.markLine.data[0].xAxis, 1900);
 });
 
+// #213: src/control.c reports tier="escalated" for a full-mode daemon
+// (fidelity == EXACT, escalation disabled) with escalation_reason: "none" —
+// a real state, not a misparse. The raw 'Escalated (none)' sentinel must
+// never reach the label; full mode reads "Full fidelity" instead. Genuine
+// active escalations (manual/anomaly) are untouched by this branch.
+test('escalation annotation: reason "none" (full-mode sentinel) reads "Full fidelity"', () => {
+    const full = buildEscalationAnnotation(
+        { tier: 'escalated', escalation_reason: 'none',
+          escalation_seconds_remaining: 0, observed_start_ns: 1500 }, WIN);
+    assert.equal(full.reason, 'none');
+    assert.equal(full.label, 'Full fidelity');
+    assert.doesNotMatch(full.label, /none/);
+});
+
+test('escalation annotation: manual/anomaly labels are unchanged by the "none" fix', () => {
+    const manual = buildEscalationAnnotation(
+        { tier: 'escalated', escalation_reason: 'manual',
+          escalation_seconds_remaining: 42, observed_start_ns: 1500 }, WIN);
+    assert.equal(manual.label, 'Escalated (manual)');
+
+    const anomaly = buildEscalationAnnotation(
+        { tier: 'escalated', escalation_reason: 'anomaly',
+          escalation_seconds_remaining: 30, observed_start_ns: 1500 },
+        { ...WIN, axisMax: 1900 });
+    assert.equal(anomaly.label, 'Escalated (anomaly)');
+});
+
 /* UI-10: the band must cover only the escalation window actually observed —
  * never the whole view window (a 15-min window with a 5 s escalation used to
  * shade all 15 min, implying full-fidelity capture where there is none). */

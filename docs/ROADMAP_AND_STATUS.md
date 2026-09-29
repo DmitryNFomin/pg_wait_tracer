@@ -1578,12 +1578,25 @@ to a CHANGELOG entry).
   bug #51). The analogous **WAIT** case is still guarded: a backend that already
   completed one LWLock/Lock/IO wait and is CURRENTLY in another of the SAME class
   has that in-progress wait suppressed in the live `--view` until it closes — real
-  ongoing wait time that should show. Deferred because the guard is **load-bearing**
-  for existing wait accounting (asserted by `test_deterministic`, whose `pg_sleep`
-  keep-alive would otherwise count as a 6th in-progress PgSleep); removing it safely
-  needs the recorded-trace path checked for the same double-count invariant.
-  **Scope:** additive — make the open-wait read symmetric with the open-CPU read,
-  then re-baseline `test_deterministic`'s keep-alive to an idle (ClientRead) hold.
+  ongoing wait time that should show. Still deferred, but ONLY because removing it
+  safely needs the recorded-trace path checked for the same double-count invariant.
+  **Corrected 2026-09-28 (issue #191):** this entry used to claim the guard was
+  *load-bearing* for `test_deterministic`, whose `pg_sleep` keep-alive "would
+  otherwise count as a 6th in-progress PgSleep". That is wrong, and it cost a
+  duplicate issue (#218) and a wrong-path investigation. When that test does report
+  six, all six are **closed** records read back out of the recorded trace file —
+  written from watchpoint fires, e.g. one 2002 ms wait arriving as 1059.476 +
+  941.106 ms — so the live open-interval read, and this guard with it, contributed
+  nothing. The real cause is a signal (in the field a SIGALRM from PostgreSQL's own
+  ~10s stats-flush timeout) ending the backend's `WaitLatch`, after which
+  `pg_sleep`'s loop re-enters `WAIT_EVENT_PG_SLEEP`: PostgreSQL genuinely performs
+  six waits, and the split reproduces with **no tracer process in existence**
+  (6/6 runs; ftrace `signal_generate` + voluntary context switches as the
+  tracer-independent oracle). Reproduce either half on demand with
+  `tests/issue191_split_repro.py` (forced latch → exactly six, 3/3; `--control`
+  → five, 3/3). `test_deterministic` now asserts a FLOOR of five plus the summed
+  duration, so it no longer rests on this guard in either direction.
+  **Scope:** additive — make the open-wait read symmetric with the open-CPU read.
 
 - **On-CPU-spin vs off-CPU-blocked, *within* each wait class.** Sub-split every wait
   class into ON-CPU (spinning) vs OFF-CPU (genuinely blocked) time **while keeping

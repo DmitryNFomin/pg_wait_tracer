@@ -50,18 +50,20 @@ young_age=30                 # 30s old -- created seconds ago by a concurrent ag
 old_age=$((8 * 3600))        # 8h old -- genuinely stale
 
 servers_file="$tmpdir/servers.json"
-jq -n --argjson young_created "$((now - young_age))" \
-      --argjson old_created "$((now - old_age))" '
-{
-  servers: [
-    {id: 1001, name: "pgwt-dev-young",   labels: {pgwt: "ephemeral", created: ($young_created | tostring)}},
-    {id: 1002, name: "pgwt-dev-old",     labels: {pgwt: "ephemeral", created: ($old_created | tostring)}},
-    {id: 1003, name: "pgwt-gate",        labels: {}},
-    {id: 1004, name: "pgwt-dev-missing", labels: {pgwt: "ephemeral"}},
-    {id: 1005, name: "pgwt-dev-garbage", labels: {pgwt: "ephemeral", created: "2026-09-26T00:00:00Z"}},
-    {id: 1006, name: "pgwt-gate-2",      labels: {}}
-  ]
-}' > "$servers_file"
+python3 - "$((now - young_age))" "$((now - old_age))" > "$servers_file" <<'PY'
+import json
+import sys
+
+young_created, old_created = sys.argv[1:]
+json.dump({"servers": [
+    {"id": 1001, "name": "pgwt-dev-young", "labels": {"pgwt": "ephemeral", "created": young_created}},
+    {"id": 1002, "name": "pgwt-dev-old", "labels": {"pgwt": "ephemeral", "created": old_created}},
+    {"id": 1003, "name": "pgwt-gate", "labels": {}},
+    {"id": 1004, "name": "pgwt-dev-missing", "labels": {"pgwt": "ephemeral"}},
+    {"id": 1005, "name": "pgwt-dev-garbage", "labels": {"pgwt": "ephemeral", "created": "2026-09-26T00:00:00Z"}},
+    {"id": 1006, "name": "pgwt-gate-2", "labels": {}},
+]}, sys.stdout)
+PY
 
 # ── Case 1: cutoff 0 is refused ─────────────────────────────────────────
 out=$("$SWEEP" --dry-run --servers-file "$servers_file" --max-age-hours 0 2>&1)

@@ -1,0 +1,392 @@
+#!/usr/bin/env python3
+"""Resolve the checked-out worktree of a git push in Claude's Bash input.
+
+Exit 0 for no push, 1 with its directory on stdout for a resolved push,
+and 2 when a push cannot be resolved safely.
+
+This static check cannot observe inherited shell functions, aliases, or
+startup files that change the cwd or replace git at execution time. A strict
+guarantee requires checking at the actual push invocation instead.
+"""
+
+import json
+import os
+import re
+import shlex
+import subprocess
+import sys
+
+
+SEPARATORS = {";", "&&", "||", "|", "&", "\n", "(", ")"}
+PUNCTUATION = ";&|()<>"
+OPERATORS = re.compile(r"&&|\|\||&>>|<<<|<<-|<<|>>|>&|<&|&>|<>|>\||[;&|()<>]")
+REDIRECTIONS = {"<", ">", ">>", "<<", "<<-", "<<<", ">&", "<&", "&>", "&>>", "<>", ">|"}
+VALUE_OPTIONS = {"-c", "--config-env", "--git-dir", "--work-tree", "--namespace", "--exec-path"}
+UNSAFE_OPTIONS = {"--git-dir", "--work-tree", "--namespace"}
+FLAG_OPTIONS = {"-p", "-P", "--paginate", "--no-pager", "--no-replace-objects",
+                "--no-optional-locks", "--literal-pathspecs", "--glob-pathspecs",
+                "--noglob-pathspecs", "--icase-pathspecs"}
+REPO_ENV = {"GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_CEILING_DIRECTORIES"}
+PUSH_VALUE_OPTIONS = {"--repo", "--push-option", "--receive-pack", "--exec",
+                      "--recurse-submodules"}
+PUSH_FLAG_OPTIONS = {
+    "--verbose", "--no-verbose", "--quiet", "--no-quiet", "--all", "--no-all",
+    "--branches", "--no-branches", "--mirror", "--no-mirror", "--delete",
+    "--no-delete", "--tags", "--no-tags", "--dry-run", "--no-dry-run",
+    "--porcelain", "--no-porcelain", "--force", "--no-force",
+    "--force-with-lease", "--no-force-with-lease", "--force-if-includes",
+    "--no-force-if-includes", "--no-recurse-submodules", "--thin", "--no-thin", "--set-upstream",
+    "--no-set-upstream", "--progress", "--no-progress", "--prune",
+    "--no-prune", "--verify", "--no-verify", "--follow-tags",
+    "--no-follow-tags", "--signed", "--no-signed", "--atomic",
+    "--no-atomic", "--ipv4", "--ipv6", "-4", "-6",
+}
+
+
+def push_operands(args):
+    """Remove known push options, including options interspersed with operands."""
+    operands = []
+    option_repo = None
+    i = 0
+    options = True
+    while i < len(args):
+        arg = args[i]
+        if options and arg == "--":
+            options = False
+        elif options and arg in PUSH_VALUE_OPTIONS | {"-o"}:
+            if i + 1 >= len(args):
+                return None
+            if arg == "--repo":
+                option_repo = args[i + 1]
+            i += 1
+        elif options and any(arg.startswith(opt + "=") for opt in PUSH_VALUE_OPTIONS):
+            if arg.startswith("--repo="):
+                option_repo = arg.split("=", 1)[1]
+        elif options and arg.startswith("-o") and len(arg) > 2:
+            pass
+        elif options and (arg in PUSH_FLAG_OPTIONS or
+                          arg.startswith("--force-with-lease=") or
+                          arg.startswith("--signed=")):
+            pass
+        elif options and arg.startswith("-") and len(arg) > 1 and not arg.startswith("--"):
+            # Git accepts clusters of the short, valueless push switches.
+            if any(char not in "vqfnud46" for char in arg[1:]):
+                return None
+        elif options and arg.startswith("-"):
+            return None
+        else:
+            operands.append(arg)
+        i += 1
+    if option_repo is not None:
+        if len(operands) == 1:
+            operands.insert(0, option_repo)
+        elif len(operands) != 2:
+            return None
+    return operands
+
+
+def repository_identity(directory):
+    """Return the common Git directory shared by a repository's worktrees."""
+    result = subprocess.run(
+        ["git", "-C", directory, "rev-parse", "--git-common-dir"],
+        capture_output=True, text=True,
+    )
+    if result.returncode or not result.stdout.strip():
+        return None
+    return os.path.realpath(os.path.join(directory, result.stdout.strip()))
+
+
+def branch_worktree(args, repo):
+    """Resolve a simple pushed local branch to its checked-out worktree.
+
+    Known push options are removed before locating the remote and refspec.
+    Context-dependent refspecs remain unresolved.
+    """
+    try:
+        push = args.index("push")
+    except ValueError:
+        return False, None
+    operands = push_operands(args[push + 1:])
+    if (operands is None or len(operands) != 2 or operands[0].startswith("-")
+            or operands[1].startswith("-") or ":" in operands[1]
+            or operands[1].startswith("+") or operands[1] == "HEAD"):
+        return False, None
+    branch = "refs/heads/" + operands[1]
+    result = subprocess.run(
+        ["git", "-C", repo, "worktree", "list", "--porcelain"],
+        capture_output=True, text=True,
+    )
+    if result.returncode:
+        return True, None
+    matches = []
+    path = None
+    for line in result.stdout.splitlines() + [""]:
+        if line.startswith("worktree "):
+            path = line[len("worktree "):]
+        elif line == "branch " + branch and path is not None:
+            matches.append(path)
+        elif not line:
+            path = None
+    return True, matches[0] if len(matches) == 1 else None
+
+
+def git_target(args, cwd):
+    safe = True
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "--":
+            i += 1
+            break
+        if arg == "-C" or arg in VALUE_OPTIONS:
+            if i + 1 >= len(args):
+                return False, None
+            if arg == "-C":
+                cwd = os.path.abspath(os.path.join(cwd, args[i + 1]))
+            elif arg in UNSAFE_OPTIONS:
+                safe = False
+            i += 2
+        elif arg.startswith("-C") and len(arg) > 2:
+            cwd = os.path.abspath(os.path.join(cwd, arg[2:]))
+            i += 1
+        elif any(arg.startswith(option + "=") for option in VALUE_OPTIONS):
+            if any(arg.startswith(option + "=") for option in UNSAFE_OPTIONS):
+                safe = False
+            i += 1
+        elif arg in FLAG_OPTIONS:
+            i += 1
+        elif arg.startswith("-"):
+            safe = False
+            i += 1
+        else:
+            return arg == "push", cwd if safe else None
+    return i < len(args) and args[i] == "push", cwd if safe else None
+
+
+def may_push(raw):
+    """Find push candidates before rejecting syntax we cannot model.
+
+    The lexer keeps quoted prose as one token, so a quoted 'git push' in
+    ordinary output is not mistaken for a command. Unknown punctuation is
+    treated as a boundary here; actual resolution remains fail closed.
+    """
+    words = []
+    for token in raw:
+        if token and all(char in PUNCTUATION for char in token):
+            words.append(None)
+        else:
+            words.append(token)
+    for i, word in enumerate(words):
+        if word is None:
+            continue
+        if word == "git" or word.endswith("/git"):
+            args = []
+            ambiguous = False
+            for j, following in enumerate(words[i + 1:], i + 1):
+                if following is None:
+                    if args and args[-1] in VALUE_OPTIONS | {"-C"}:
+                        args.append(raw[j])
+                        ambiguous = True
+                        continue
+                    break
+                args.append(following)
+            if git_target(args, os.getcwd())[0]:
+                return True, ambiguous
+        # Command substitutions and shell -c scripts are single lexer tokens.
+        if ("$(" in word or "`" in word or
+                (i >= 2 and words[i - 2] in {"bash", "sh", "zsh"}) or
+                (i >= 1 and words[i - 1] == "eval")):
+            if re.search(r"(?:^|[^\w/])(?:[\w./-]*/)?git\s+(?:[^;&|()]*?\s+)?push(?:\s|$|[;&|()])", word):
+                return True, False
+    return False, False
+
+
+def targets(command, start=None):
+    # Unrelated, even malformed, shell input has no repository to resolve.
+    if not re.search(r"\bgit\b", command) or not re.search(r"\bpush\b", command):
+        return []
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=PUNCTUATION)
+    lexer.wordchars += ":"
+    lexer.whitespace = " \t\r"
+    lexer.commenters = "#"
+    lexed = list(lexer)
+    push_candidate, ambiguous_candidate = may_push(lexed)
+    if not push_candidate:
+        return []
+    # A function or sourced file can switch to a different Git repository.
+    # Its branch names cannot safely be matched against the original repo.
+    function_definition = r"\b(?:function\s+)?[A-Za-z_]\w*\s*\(\s*\)\s*\{"
+    sourcing = r"(?:^|[;&|()\s])(?:source|\.)\s"
+    if re.search(function_definition, command) or re.search(sourcing, command):
+        return [None]
+    raw = []
+    for token in lexed:
+        # shlex groups adjacent punctuation, including different operators.
+        # Split the run before separator recognition; reject unknown runs.
+        if token and all(char in PUNCTUATION for char in token):
+            operators = OPERATORS.findall(token)
+            if ("".join(operators) != token
+                    or any(op not in SEPARATORS | REDIRECTIONS for op in operators)
+                    or any(left not in {"(", ")"} and right not in {"(", ")"}
+                           for left, right in zip(operators, operators[1:]))):
+                raise ValueError(f"unknown shell operator: {token}")
+            raw.extend(operators)
+        else:
+            raw.append(token)
+    tokens = []
+    i = 0
+    while i < len(raw):
+        if raw[i] not in {"<<", "<<-"} or i + 1 >= len(raw):
+            tokens.append(raw[i])
+            i += 1
+            continue
+        delimiter = raw[i + 1]
+        i += 2
+        while i < len(raw) and raw[i] != "\n":
+            tokens.append(raw[i])
+            i += 1
+        if i == len(raw):
+            raise ValueError("unterminated here-document")
+        tokens.append("\n")
+        i += 1
+        while i < len(raw):
+            line = []
+            while i < len(raw) and raw[i] != "\n":
+                line.append(raw[i])
+                i += 1
+            i += 1
+            if line == [delimiter]:
+                break
+        else:
+            raise ValueError("unterminated here-document")
+    cwd = start or os.getcwd()
+    found = []
+    segment = []
+    # POSIX shlex removes quotes, making a quoted operator-only path look like
+    # shell punctuation. Refuse to resolve a push when that distinction is lost.
+    uncertain = (any(name in os.environ for name in REPO_ENV)
+                 or bool(re.search(r"(['\"])[;&|()<>]+\1", command)))
+    cwd_changed = False
+
+    def process(parts):
+        nonlocal cwd, uncertain, cwd_changed
+        # Shell control words prefix a command, but do not themselves change
+        # the working directory. A cd inside the control flow is handled below.
+        while parts and parts[0] in {"if", "then", "elif", "else", "do", "while", "until", "!"}:
+            parts = parts[1:]
+        while parts and re.match(r"^[A-Za-z_][A-Za-z_0-9]*=", parts[0]):
+            uncertain = uncertain or parts[0].split("=", 1)[0] in REPO_ENV
+            parts = parts[1:]
+        if parts and parts[0] in {"env", "command"}:
+            parts = parts[1:]
+            while parts and re.match(r"^[A-Za-z_][A-Za-z_0-9]*=", parts[0]):
+                uncertain = uncertain or parts[0].split("=", 1)[0] in REPO_ENV
+                parts = parts[1:]
+        if not parts:
+            return
+        for part in parts:
+            if "$(" in part or "`" in part:
+                inner = re.findall(r"\$\((.*?)\)|`(.*?)`", part)
+                for dollar, backtick in inner:
+                    found.extend(None if uncertain else target
+                                 for target in targets(dollar or backtick, cwd))
+        if parts[0] in {"pushd", "popd", "export"}:
+            uncertain = True
+        elif parts[0] == "cd":
+            cwd_changed = True
+            # Shell expansion makes the destination unknowable from this text.
+            if (len(parts) != 2 or parts[1].startswith(("-", "~"))
+                    or any(char in parts[1] for char in "$`*?[]{}")):
+                uncertain = True
+            else:
+                cwd = os.path.abspath(os.path.join(cwd, parts[1]))
+                if not os.path.isdir(cwd):
+                    uncertain = True
+        elif parts[0] == "git" or parts[0].endswith("/git"):
+            push, target = git_target(parts[1:], cwd)
+            if push:
+                # Use the invocation's original repository for worktree
+                # enumeration; a preceding shell function may have moved cwd.
+                # A literal cd may cross repository boundaries, however, so
+                # compare Git's common directory before trusting that anchor.
+                c_paths = []
+                for index, arg in enumerate(parts[1:]):
+                    if arg == "-C" and index + 2 < len(parts):
+                        c_paths.append(parts[index + 2])
+                    elif arg.startswith("-C") and len(arg) > 2:
+                        c_paths.append(arg[2:])
+                # A relative first -C is interpreted against the shell's
+                # actual cwd, which a prior function may have changed.
+                repo = target if c_paths else start or os.getcwd()
+                safe_repo = target and (not c_paths or os.path.isabs(c_paths[0]))
+                if cwd_changed and not c_paths:
+                    original = repository_identity(start or os.getcwd())
+                    current = repository_identity(cwd)
+                    if original is None or current is None or original != current:
+                        uncertain = True
+                named, branch_target = (branch_worktree(parts[1:], repo)
+                                        if safe_repo else (False, None))
+                found.append(None if uncertain or not named else branch_target)
+        elif (parts[0] in {"bash", "sh", "zsh"} and len(parts) >= 3
+              and parts[1].startswith("-") and "c" in parts[1]):
+            found.extend(None if uncertain else target for target in targets(parts[2], cwd))
+        elif parts[0] == "eval":
+            found.extend(None if uncertain else target
+                         for target in targets(" ".join(parts[1:]), cwd))
+        else:
+            # Unknown wrappers (for example sudo) can execute a git argument.
+            # Detect its subcommand but refuse to guess the wrapper's cwd.
+            # A quoted ssh command runs on another machine; its repository
+            # cannot be checked against a local stamp, so exclude it here.
+            for i, word in enumerate(parts[1:], 1):
+                if word == "git" or word.endswith("/git"):
+                    push, _ = git_target(parts[i + 1:], cwd)
+                    if push:
+                        found.append(None)
+
+    i = 0
+    while i < len(tokens):
+        token = tokens[i]
+        if token in REDIRECTIONS:
+            if segment and segment[-1].isdigit():
+                segment.pop()  # File descriptor before a redirect, e.g. 2>&1.
+            if i + 1 >= len(tokens):
+                raise ValueError("redirection without a target")
+            i += 2
+            continue
+        if token in SEPARATORS:
+            process(segment)
+            # Grouping and conditional/parallel execution can change whether
+            # a preceding cd affects this shell. Keep the result uncertain.
+            if cwd_changed and token in {"(", ")", "||", "|", "&"}:
+                uncertain = True
+            if segment and segment[0] == "cd" and token != "&&":
+                uncertain = True
+            segment = []
+        else:
+            segment.append(token)
+        i += 1
+    process(segment)
+    return found or ([None] if ambiguous_candidate else [])
+
+
+def main():
+    try:
+        command = json.load(sys.stdin)["tool_input"]["command"]
+        if not isinstance(command, str):
+            raise ValueError("command is not a string")
+        matches = targets(command)
+    except (ValueError, KeyError, TypeError) as exc:
+        print(f"invalid or unparseable tool command: {exc}")
+        return 2
+    if not matches:
+        return 0
+    if len(matches) != 1 or matches[0] is None:
+        print("ambiguous push command or repository")
+        return 2
+    print(matches[0])
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

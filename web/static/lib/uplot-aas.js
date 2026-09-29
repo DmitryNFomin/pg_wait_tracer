@@ -922,6 +922,18 @@ export function drawOverlayLines(u, geo) {
     ctx.save();
     ctx.font = (10 * dpr) + 'px sans-serif';
     ctx.textBaseline = 'top';
+    // #213: uPlot's own axis-label drawing (drawAxes hook, which runs
+    // before this 'draw' hook) sets ctx.textAlign per axis and leaves it
+    // set — verified against the vendored 1.6.32 bundle, which never
+    // resets it after its own axis pass. Left unset here, this function's
+    // fillText anchor (chip left edge + pad) is interpreted under
+    // whatever alignment the axis pass left behind (typically 'right' for
+    // a right-hand y-axis), so the label is drawn ENDING at that anchor
+    // instead of starting there — most of the text lands to the LEFT of
+    // the chip, on the plot background, at any DPR (confirmed via pixel
+    // sampling at DSF 1 and DSF 2 alike; see uplot-aas.test.mjs). Pin it
+    // explicitly so the chip and its label always agree.
+    ctx.textAlign = 'left';
     for (const l of vlines) {
         const x = u.valToPos(l.x, 'x', true);
         if (x < left || x > left + width) continue;

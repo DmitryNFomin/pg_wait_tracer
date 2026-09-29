@@ -12,12 +12,44 @@ so and the attempt counter resets. It is never reinterpreted in a report.
 ## The workload the criteria are written against
 
 `tests/demo_rehearsal.sh`: pgbench, 4 clients, `--rate=25`, plus
-`tests/live_loop_workload.py` (holder / waiter / sleeper sessions looping, so
-`Lock:relation` and `Timeout:PgSleep` recur in every tick rather than once).
-Full mode. `RECENT_WINDOW_S` = 60 s, `TIME_MODEL_TOLERANCE_PCT` = 1.0.
+`tests/live_loop_workload.py`. Full mode. `RECENT_WINDOW_S` = 60 s,
+`TIME_MODEL_TOLERANCE_PCT` = 1.0.
+
+`tests/live_loop_workload.py` (issue #214) loops five persistent sessions for
+the whole run, not just the two the §2 floors need:
+- `holder` / `waiter` / `sleeper`: `Lock:relation` and `Timeout:PgSleep`
+  recur in every tick — unchanged since issue #157, and what §2's floors and
+  the conservation check are written against.
+- `reporter`: rotates four structurally distinct SELECTs every tick (a
+  catalog lookup, a CPU-bound aggregate, and two differently-shaped
+  `pg_sleep` calls) — the query-id and duration variety Queries, Histogram,
+  Waterfall and Scatter need to show more than a single flat line.
+- `row_holder` / `row_waiter`: a hot-row `UPDATE` contended by two backends,
+  producing `Lock:transactionid` — a second, distinct wait class from the
+  table-level `Lock:relation` above, realistic because contention on a
+  shared counter/status row is one of the most common real-world lock
+  waits.
+
+`tests/demo_workload_coverage.py` is the machine-checkable half: given a
+trace dir this workload produced, it queries every tab's own endpoint and
+applies the per-tab condition (`python3 tests/demo_workload_coverage.py
+--trace-dir DIR`); its pure per-tab checkers are unit-tested by
+`tests/test_demo_workload_coverage.py`, wired into `scripts/check.sh`. It also
+runs inside `tests/demo_rehearsal.py`'s own end-of-capture checks
+(`extra_checks["tab_coverage"]`, before the trace dir is torn down, over the
+trailing `WATERFALL_LIVE_WINDOW_S` = 900s rather than the whole capture — a
+window_too_large refusal from pgwt-server is recorded as its own "could not
+evaluate" outcome, never conflated with a genuinely empty tab) — an empty tab
+on a real rehearsal fails that rehearsal's `ok`, not just the standalone tool
+a human has to remember to run. The Concurrency tab's check is **CPU-count-
+relative** (peak AAS >= the capture box's own `num_cpus`, not a fixed
+number) — measured once, on today's 4-vCPU `cx33`, with a comfortable 9.00-
+vs-4 margin; a future box-class change moves this gate's difficulty, so
+treat that as a deliberate decision, not a surprise discovered mid-rehearsal.
 
 A rehearsal run on a different workload, client count, PG version, box class or
-script commit is a different experiment and does not count toward the sequence.
+**tag** (see "The sequence, and what stops it from being rolled" below) is a
+different experiment and does not count toward the sequence.
 
 ## The demo configuration (owner, 2026-09-28)
 
@@ -126,10 +158,10 @@ cost is real and is accepted deliberately.
 
 - **Display: the Mac's built-in screen**, not the projector — `Color LCD`,
   Built-in Liquid Retina, **2880 x 1864 Retina**, `Main Display: Yes`.
-- **Presented FULL SCREEN** (owner, 2026-09-28), so the pinned viewport is
-  **1710 x 1069 CSS at devicePixelRatio 2** — measured in real Safari via
-  WebDriver, not computed: `screen` reports 1710 x 1107 logical, full screen
-  leaves 38 px of chrome, and the content layer is 3420 x 2138 physical.
+- **Presented FULL SCREEN** (owner, 2026-09-28). Historically pinned to
+  Safari's measured **1710 x 1069 CSS at devicePixelRatio 2**; `screen`
+  reports 1710 x 1107 logical, full screen leaves 38 px of chrome, and the
+  content layer is 3420 x 2138 physical.
 
   **An earlier pin of 1440 x 932 was wrong and is retracted.** It came from
   dividing the panel's 2880 x 1864 by the DPR of 2, which assumes macOS maps
@@ -141,36 +173,64 @@ cost is real and is accepted deliberately.
 
   Two related traps, both measured rather than assumed:
   - **A window rect is not a content viewport.** Asking WebDriver for a
-    1440 x 932 *window* yields an 880 px tall *page* — Safari's title and tab
-    bar take 52 px in a window, 38 px in full screen, and zero width in both.
-    A harness must set the outer size, read `innerWidth`/`innerHeight` back,
+    1440 x 932 *window* yields an 880 px tall *page* — the browser's title and
+    tab bar take real px in a window, less (but not zero) in full screen. A
+    harness must set the outer size, read `innerWidth`/`innerHeight` back,
     and assert the achieved viewport rather than trusting the request.
   - Numbers taken at one viewport do not transfer to another, in either
     direction.
-- **Browser: Safari** (owner, 2026-09-28: "it safari not chrome"). Pin the
-  Safari and macOS versions in the verdict; an update between a clean
-  rehearsal and the demo invalidates the client half, because rendering, paint
-  timing and WebSocket behaviour are exactly what that half measures.
+  - **A viewport read immediately after entering full screen can be
+    transient, not settled.** During the Chrome measurement below, a reading
+    of exactly **1710 x 1069** — the old Safari pin, both plausible and
+    wrong for Chrome — appeared mid-animation and was superseded 637 ms
+    later by the settled 981. A single post-transition reading can catch
+    exactly this trap and "confirm" a stale number. **Required: a viewport
+    measurement is two identical readings taken after the full-screen
+    animation settles, never a single reading taken right after the
+    transition.**
 
-  **Safari must be driven as Safari.** Playwright's `webkit` is a different
-  build — different JIT, networking stack, and timer and WebSocket behaviour —
-  so measuring WebKit and reporting it as Safari would be the same class of
-  error as every instrument defect found on 2026-09-27: measuring a near
-  neighbour of the thing and labelling it the thing. `/usr/bin/safaridriver`
-  is present, so real Safari is drivable over WebDriver. If it ever cannot be,
-  the honest fallbacks are a scripted manual walk with the harness recording,
-  or WebKit **explicitly labelled a proxy** with its differences stated — never
-  WebKit under Safari's name.
+- **Browser changed: Chrome, not Safari** (owner, 2026-09-28). Supersedes
+  the Safari pin above, not a retraction of it as wrong — Safari's number
+  was correct for Safari; `screen` size and DPR are identical between the
+  two, Chrome's toolbar simply costs ~88px more height (981 vs 1069) than
+  Safari's did.
 
-  A Chrome measurement is not evidence for this criterion. The first
-  Mac-side walk was built against Chrome before this correction; its findings
-  about the bridge, the ssh hop and freshness stand, its paint numbers do not.
+  **Pin: 1710 x 981 CSS at devicePixelRatio 2** — Chrome full screen, the
+  built-in panel, 100% zoom, in a dedicated demo profile. Environment to
+  record alongside every counted attempt: **macOS 15.6.1 (24G90), Chrome
+  153.0.8010.53**, built-in `Color LCD` 2880 x 1864 Retina as the only
+  attached display, `screen` 1710 x 1107.
+
+  Evidence: 7 readings across 3 separate full-screen entries, all
+  identical, plus 2 more at the other hostname and an independent in-page
+  reporting channel that settled on the same number every time. Full
+  record — environment, the measurement table, the effective-zoom check,
+  the transient-1069 finding with its raw readings, and an explicit "what
+  is NOT measured" section — lives in `docs/chrome-demo-viewport-2026-09-28.md`
+  (same precedent as `docs/gate-box-noise-2026-09-17.json`: a dated raw-
+  measurement file in `docs/`, cited here rather than copied here, so
+  there is exactly one record of the number, never two to drift apart the
+  way 1440x932 and 1710x1069 once did).
+
+  Pin the Chrome and macOS versions in the verdict, same reasoning as
+  before the browser changed: an update between a clean rehearsal and the
+  demo invalidates the client half, because rendering, paint timing and
+  WebSocket behaviour are exactly what that half measures.
+
+  **Still unmeasured, stated as such rather than assumed equal**: the
+  screen-shared (Zoom/Meet/Teams) variant. Screen sharing changes
+  resolution, scaling and layout in ways not yet quantified here, and
+  needs the owner driving the real conferencing tool to measure — open
+  item, not a criterion yet.
 
 **Display confirmed** (owner, 2026-09-28): the built-in panel, not the
-`LG ULTRAFINE` 6016 x 3384 also attached to this Mac. So 1440 x 932 CSS at
-DPR 2 is final, and the display identity is recorded in the verdict alongside
-the Safari and macOS versions — a rehearsal walked on a different display is
-a different experiment, exactly as a different PG version would be.
+`LG ULTRAFINE` 6016 x 3384 also attached to this Mac — the identity is
+recorded in the verdict alongside the Chrome and macOS versions, and the
+pinned viewport is the measured **1710 x 981 CSS at DPR 2** above (the
+1440 x 932 and the superseded Safari 1710 x 1069 figures are not second
+final values) — a rehearsal walked on a different display, or a different
+browser, is a different experiment, exactly as a different PG version
+would be.
 
 ### Recovery after the bridge drops
 
@@ -315,7 +375,15 @@ substitute one family for the other.
   attempt.
 - Per-tab time to first paint within a stated bound. A six-second spinner
   passes "no console errors" and "not blank" while being exactly what an
-  audience notices.
+  audience notices. Set the bound from the first uncontended run on the demo
+  configuration and pre-register it before counted attempt one; no bound is
+  set yet. The 2026-09-29 walk's ten-tab distribution was measured with a
+  second Chromium and server-side probes on the same 4-vCPU box, so using it
+  as the demo bound would repeat the wrong-configuration viewport pin.
+  **Retracted:** that walk's 30 s Timeline "paint" finding timed a bare tab
+  click's "select a session" prompt, not a chart. Timeline has no standalone
+  entry point with data; time the drill-down from a Sessions row as
+  `tests/ui_live_smoke.py`'s `_navigate_to_tab` does.
 - Viewport pinned to the resolution the demo will actually be shown at, not the
   driver's default.
 
@@ -324,7 +392,9 @@ substitute one family for the other.
 - Cross-tab agreement: DB Time and AAS for the same window must agree within
   the same 1% across overview, timeline and top-events. Disagreeing denominators
   between tabs is the product-facing version of the bookkeeping error this
-  project has already made in prose.
+  project has already made in prose. The AAS leg requires a bucket-weighted
+  re-derivation over the identical window; an unweighted mean of buckets
+  cannot establish it.
 - Freshness: at the end of the walk, every time-axis tab's newest bucket is
   within 2 ticks of wall clock. A frozen chart is neither blank nor throwing.
 
@@ -344,7 +414,11 @@ substitute one family for the other.
   were dropped", never "nothing was missed". Closing this needs `src/` work and
   is scheduled after the demo.
 - "The daemon was alive" is not "the daemon captured everything".
-- Overhead within the envelope recorded in `tests/results/overhead_trend.csv`.
+- One-time pre-demo overhead envelope: n=3 paired A/B pgbench TPS runs with
+  and without the tracer, in full mode with the demo workload on the demo box;
+  record the result and envelope before counted attempt one. The audience will
+  ask for this number; a rehearsal capture runs only the with-tracer arm and
+  cannot produce it.
 
 ### 7. Nothing failed to execute
 
@@ -387,9 +461,9 @@ left to be discovered.
 | §3 Off-CPU\* ≤ 10% | yes (`time_model_offcpu_cap_ok`) |
 | §4 zero known-failing tabs | yes (`build_demo_summary` uses raw `ok`, ignoring the exemption) |
 | §4 blink measured fraction ≥ 0.5 | yes — landed via `agent/blink-anchor-mount-seq` (#209, merged to master), inherited automatically once `agent/rehearsal-bypass-suite` rebased: `demo_rehearsal.py` has no independent blink-measurement code, it fully delegates to `ui_live_smoke.py:run_tab()`, which now calls `blink_sweep_gate_verdict` itself. Pinned with a regression test using real measured numbers (`tests/test_demo_rehearsal_lib.py`, run.id 1790574871: scatter 0.1305, transitions 0.0072–0.0172) |
-| §4 time to first paint, pinned viewport | no — viewport IS pinned (1280×900, `ui_live_smoke.py:run_tab`) but confirming that matches the ACTUAL demo display resolution is a fact outside any harness's reach. Time-to-first-paint: still no timing field anywhere in a tab result; would need new instrumentation in `run_tab` itself, not attempted on `agent/rehearsal-bypass-suite` |
-| §5 cross-tab agreement, freshness | partial — freshness: yes (`freshness_ok`, `info`'s `now_ns` vs `to_ns`). Cross-tab agreement: DB-Time leg only, yes (`cross_tab_db_time_agreement_ok`, `time_model` vs `top_events` for the identical window); the AAS leg (vs. the bucketed `aas` endpoint) needs a bucket-weighted re-derivation not attempted with confidence in scope |
-| §6 lost-event counters, overhead envelope | partial — lost-event counters: yes (`daemon_integrity_ok`: `ringbuf_drops_total`/`state_map_full_total`/`seen_query_ids_full_total`, already on the wire via pgwt-server's control proxy, no `src/` change needed; blind spot stated in the code comment: a lost LIFECYCLE event is silent, no counter increments). Overhead envelope: no — only measurable via the separate ~10-minute `test_overhead.sh` sweep, out of this harness's own time budget |
+| §4 time to first paint, pinned viewport | no — the earlier "viewport IS pinned" described `ui_live_smoke.py:run_tab`'s 1280×900, not the demo's measured Chrome 1710×981; matching the demo viewport is not established. Time-to-first-paint still has no timing field in a tab result or stated bound. Set that bound from the first uncontended run on the demo configuration and pre-register it before counted attempt one; the contended 2026-09-29 walk cannot set it. Retracted: its 30 s Timeline finding measured the "select a session" prompt from a bare tab click, not paint after a Sessions-row drill-down (`_navigate_to_tab`) |
+| §5 cross-tab agreement, freshness | partial — freshness: yes (`freshness_ok`, `info`'s `now_ns` vs `to_ns`). Cross-tab agreement: DB-Time leg only, yes (`cross_tab_db_time_agreement_ok`, `time_model` vs `top_events` for the identical window). AAS leg: **not yet satisfied** — requires a bucket-weighted re-derivation from the `aas` endpoint over the identical window against `time_model.aas`. Retracted: the walk's 0.0000% came from an unweighted mean of buckets, which is not that comparison and establishes no agreement |
+| §6 lost-event counters, overhead envelope | partial — lost-event counters: yes (`daemon_integrity_ok`: `ringbuf_drops_total`/`state_map_full_total`/`seen_query_ids_full_total`, already on the wire via pgwt-server's control proxy, no `src/` change needed; blind spot stated in the code comment: a lost LIFECYCLE event is silent, no counter increments). Overhead envelope: **not yet measured for the demo workload on the demo box**. Correction: the earlier claim that nothing measures full mode was wrong. Every box-check runs `tests/test_overhead.sh --quick` (~10 minutes) via `tests/run_all.sh`; its paired baseline/tracer A/B uses the default pgbench load, pins `--mode full`, and appends to `tests/results/overhead_trend.csv` on the box. The tracked CSV has only a header because `tests/results/` is excluded from box-check's up-rsync; box-generated rows are not synced back or committed. The ~70-minute sweep is the same script without `--quick`; `sampled_overhead_gate.py --mode sampled` runs only for `src/` changes. Retracted: the quick sweep is not a per-attempt requirement or a substitute for measuring the demo workload. Do n=3 paired full-mode A/B TPS runs with the demo workload on the demo box and record the envelope before counted attempt one; the 40-minute rehearsal retained neither an A/B baseline nor even its with-tracer `tps =` line (cleanup tailed 20 lines and deleted the full log) |
 | §7 no test exited 126/127 | **partial, and this is a human-readable aid, not an automated gate**: `tests/demo_rehearsal.sh`'s `report_early_exit` labels a dead subprocess's 126/127 exit code in the log for a human reading it afterward. It does NOT change the script's own exit code (every call site already `exit 1` regardless of the labeled reason) and has no test coverage of its own — reviewer finding, 2026-09-28. Do not read this row as "126/127 fails the gate automatically"; it already did, via the pre-existing `kill -0` + `exit 1` checks, which is why this addition changes nothing observable except the log's wording |
 | §8 known-failing lines read by hand | manual by construction; not applicable to `demo_rehearsal.py` itself, which grants zero known-failing exemptions (§4 row above) -- nothing here for a human to hand-verify against an issue |
 
@@ -411,9 +485,27 @@ that captured nothing used to score clean) is now FIXED on
   happened by then, the result is "not clean" and that is what the owner is
   told. Re-rolling until two land in a row is the same after-the-fact selection
   this document exists to prevent.
-- The two clean runs must be on the same tree: same commit, same script commit,
-  same box class, same PG version, same pgbench parameters, with no commit in
-  between.
+- **The two clean runs must be on the same tag, not merely the same tree.**
+  Owner, 2026-09-28: "instead of code freeze we will make a tag on master when
+  it will be demo ready and will continue development" -- a tag pins the tree
+  the way "same commit, no commit in between" used to, without requiring
+  master itself to stop moving:
+  - When master is judged demo-ready it is **tagged**; the demo machine is
+    built from that tag, and every counted rehearsal runs **against that
+    tag**, from a worktree checked out at it — never from master HEAD, which
+    keeps moving.
+  - A counted attempt **names the tag it ran against**, alongside the box
+    class, PG version, pgbench parameters, and the display identity and
+    Chrome/macOS versions already recorded in the verdict.
+  - Two clean attempts count as consecutive **only if they ran on the same
+    tag**.
+  - **Landing a fix and re-tagging resets the clean-attempt counter to
+    zero.** An early or hopeful tag costs the whole sequence, so the tag is
+    cut when the tree is genuinely ready, not to start the clock.
+  - Development continues on master in parallel and does not disturb an
+    in-flight sequence — that is the point of the tag, and it removes the
+    objection that with several branches in flight no two runs could ever
+    share a tree.
 
 ## Provenance
 

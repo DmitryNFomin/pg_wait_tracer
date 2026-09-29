@@ -501,31 +501,67 @@ def _wait_for_tick(page, target_count, timeout_s):
 
 
 def _safe_panel_screenshot(page, tab_id):
-    """Re-queries the panel element fresh and screenshots it, returning None
-    (never raising) if the element is missing or gets detached from the DOM
-    mid-call -- observed for real (Waterfall/Matrix/Scatter re-mounting their
-    host div when the underlying execution/transition identity rotates under
-    continuous real load); the caller treats None as maximal instability,
-    not a skip.
+    """Re-queries the panel element fresh and screenshots ONLY the slice of
+    it that intersects the current viewport, returning None (never raising)
+    if the element is missing, gets detached from the DOM mid-call, or is
+    scrolled entirely out of view -- observed for real (Waterfall/Matrix/
+    Scatter re-mounting their host div when the underlying execution/
+    transition identity rotates under continuous real load); the caller
+    treats None as maximal instability, not a skip.
 
-    query_selector() + .screenshot() is TWO separate CDP round trips: every
-    chart-tab view rebuilds its host div via el.innerHTML on EVERY refresh
-    (not just on a data-identity change -- see web/static/views/exec-scatter.js
-    mount() / matrix.js mount()), synchronously and atomically from the page's
-    own single JS thread's point of view. If that rebuild happens to run in
-    the gap between this function's two round trips, the handle this function
-    already holds goes stale and .screenshot() throws -- a real, if narrow,
-    Playwright-side race against a legitimate, instantaneous DOM swap, not
-    evidence the panel was ever actually absent/blank. Fine for THIS
-    function's own callers (the gating blink pair, offset sweep -- issue #119
-    -- which already treat a None result as "maximal instability", never a
-    crash, exactly because of this). NOT safe for a single-sample hard
-    pass/fail check -- see _atomic_panel_snapshot below, used for that."""
+    issue #197: this used to be a plain elementHandle.screenshot() call,
+    which -- when the element is taller than the viewport -- Playwright
+    captures IN FULL by temporarily expanding the capture region beyond the
+    viewport, not just the visible slice. The Sessions panel (#table-container
+    has no vertical overflow/height cap -- web/static/style.css -- so it grows
+    to its full row count) measured ~5793px tall at 205 rows on the gate box,
+    and that single capture cost ~1.4s: the 5-frame blink sweep (SWEEP_OFFSETS_MS
+    spans 200-2000ms) then took longer than the 5s live tick it was meant to
+    sample inside of, so every sweep straddled a mount and the gate reported a
+    red the UI never earned. Clipping the capture to the panel/viewport
+    intersection (lib.panel_capture_clip / lib.clip_rect_to_viewport) makes
+    one frame's cost roughly constant regardless of row count, and keeps the
+    capture anchored to the panel (never a whole-page screenshot, which
+    would let unrelated chrome dominate the diff -- see
+    _PANEL_ELEMENT_SELECTOR's own comment).
+
+    scroll_into_view_if_needed() first, same as Playwright's own element
+    screenshot semantics, so the visible slice is deterministic (the panel's
+    top edge at/near the viewport top) instead of whatever the page happened
+    to be scrolled to already.
+
+    query_selector() + .bounding_box() + .screenshot() are separate CDP round
+    trips: every chart-tab view rebuilds its host div via el.innerHTML on
+    EVERY refresh (not just on a data-identity change -- see
+    web/static/views/exec-scatter.js mount() / matrix.js mount()),
+    synchronously and atomically from the page's own single JS thread's point
+    of view. If that rebuild happens to run in the gap between these round
+    trips, a handle this function already holds goes stale and the next call
+    throws -- a real, if narrow, Playwright-side race against a legitimate,
+    instantaneous DOM swap, not evidence the panel was ever actually absent/
+    blank. Fine for THIS function's own callers (the gating offset sweep --
+    issue #119 -- which already treats a None result as "maximal
+    instability", never a crash, exactly because of this). NOT safe for a
+    single-sample hard pass/fail check -- see _atomic_panel_snapshot below,
+    used for that."""
     panel = page.query_selector(_PANEL_ELEMENT_SELECTOR[tab_id])
     if panel is None:
         return None
     try:
-        return panel.screenshot()
+        panel.scroll_into_view_if_needed()
+        box = panel.bounding_box()
+        viewport = page.viewport_size
+        # lib.panel_capture_clip returns None for "cannot safely determine
+        # a clip" (missing box OR missing viewport) -- treated the same as
+        # every other "cannot capture" case in this function, NEVER a
+        # fallback to panel.screenshot()'s unbounded, full-element capture
+        # (issue #197 review: that fallback silently reintroduces the exact
+        # cost regression this function exists to fix, with no signal in
+        # summary.json -- see panel_capture_clip's own docstring).
+        clip = lib.panel_capture_clip(box, viewport)
+        if clip is None:
+            return None
+        return page.screenshot(clip=clip)
     except PWError:
         return None
 
@@ -563,17 +599,22 @@ def _atomic_panel_snapshot(page, tab_id):
 def _capture_at_offset(page, tab_id, base_ts_ms, offset_ms):
     """Sleeps only the remainder to base_ts_ms+offset_ms (never a flat sleep
     from wherever this is called) and screenshots the panel. Returns
-    (raw_png_or_None, achieved_offset_ms) -- the achieved offset can exceed
-    offset_ms if prior work already ran past the target. base_ts_ms is the
-    mount event's own timestamp (issue #193 round 2), not the tick's
-    AAS-request send -- see _wait_for_mount_at_or_after."""
+    (raw_png_or_None, achieved_offset_ms, capture_ms) -- the achieved offset
+    can exceed offset_ms if prior work already ran past the target.
+    base_ts_ms is the mount event's own timestamp (issue #193 round 2), not
+    the tick's AAS-request send -- see _wait_for_mount_at_or_after.
+    capture_ms (issue #197 evidence) is the wall-clock time the screenshot
+    call itself took -- the direct, measured answer to "is a frame's capture
+    cost bounded", not inferred from achieved-offset drift."""
     target_ms = base_ts_ms + offset_ms
     now_ms = page.evaluate("Date.now()")
     if target_ms > now_ms:
         page.wait_for_timeout(target_ms - now_ms)
         now_ms = page.evaluate("Date.now()")
+    t0 = time.monotonic()
     frame = _safe_panel_screenshot(page, tab_id)
-    return frame, now_ms - base_ts_ms
+    capture_ms = (time.monotonic() - t0) * 1000.0
+    return frame, now_ms - base_ts_ms, capture_ms
 
 
 def _view_mount(page):
@@ -597,7 +638,7 @@ def _view_mount(page):
 
 
 def _wait_for_mount_at_or_after(page, tab_id, tick_ts_ms, timeout_s=TICK_TIMEOUT_S,
-                                 interval_ms=50):
+                                 interval_ms=50, min_seq=None):
     """Polls until the ViewManager mount chokepoint (_view_mount) reports a
     mount of `tab_id` whose OWN wall-clock timestamp (`at`, Date.now() in
     the SAME browser context as tick_ts_ms) is >= tick_ts_ms -- issue #193's
@@ -607,34 +648,53 @@ def _wait_for_mount_at_or_after(page, tab_id, tick_ts_ms, timeout_s=TICK_TIMEOUT
     undershoots under load; this waits for the actual paint decision
     instead of guessing when it happens.
 
-    Compares TIMESTAMPS, not a seq baseline carried from the previous tick
-    (review round 2 found that off by one): navigating to a tab already
+    Compares TIMESTAMPS, not a FIXED seq baseline read once at navigation
+    time (review round 2 found that off by one): navigating to a tab already
     triggers its own refresh()/mount() (switchTab's refreshActive() +
     vm.switchTo(), which is also __uiLiveTicks' very first entry), so a seq
     value read right after navigation already reflects tick 1's own mount
-    -- waiting for "seq > that baseline" there silently waits for tick 2's
-    mount instead, and every later tick inherits the one-tick shift
-    (confirmed on the rehearsal: pair_offsets_ms drifted to 5-10s, roughly
-    one whole 5s tick beyond the honest 1-3s "AAS pane goes first" delay
-    round 1 was fixing). A timestamp comparison has no baseline to carry
-    across ticks and get wrong: `mount.at >= tick_ts_ms` is correct for
-    tick 1 the exact same way it is for every later tick.
+    -- waiting for "seq > that ONE baseline, forever" there would silently
+    wait for tick 2's mount instead, and every later tick would inherit the
+    one-tick shift. A timestamp comparison alone has no such fixed baseline
+    to get wrong: `mount.at >= tick_ts_ms` is correct for tick 1 the exact
+    same way it is for every later tick.
+
+    min_seq (issue #197, per-call, NOT a fixed baseline -- the caller passes
+    the PREVIOUS TICK's own consumed mount seq each time, None for tick 1):
+    timestamp alone is not sufficient. A mount whose own refresh cycle takes
+    longer than the 5s live tick interval can land with `at` already past
+    the NEXT tick's tick_ts, so a purely timestamp-based wait can be handed
+    back the SAME mount the previous tick's sweep already anchored to and
+    consumed -- that tick's whole 5-frame sweep then fires back-to-back
+    against an already-stale mount_at_ms, with none of the spacing across
+    the tick that lets it see a sub-second transient at all (evidence: the
+    rehearsal's achieved first offsets drifted to 2.5-4.5s instead of the
+    ~200ms target -- one live mount sampled multiple times, same seq, same
+    pixels). min_seq requires the accepted mount's OWN seq to be strictly
+    newer than the one already consumed (lib.mount_is_fresh) -- this is
+    per-tick state threaded through by the caller, not the single
+    navigation-time baseline round 2 rejected, so it does not reintroduce
+    that bug: tick 1 passes min_seq=None (no previous tick to be newer
+    than), exactly like the timestamp check already does.
 
     Raises SmokeFailure -- NEVER hangs, never silently returns a stale
-    record -- if the hook is missing (see _view_mount) or no matching mount
-    lands within timeout_s. Both are real product-visible failures: the
-    first means the instrumentation itself regressed, the second means the
-    tab's view never repainted for a whole tick's worth of budget."""
+    record -- if the hook is missing (see _view_mount) or no matching FRESH
+    mount lands within timeout_s. Both are real product-visible failures:
+    the first means the instrumentation itself regressed, the second means
+    the tab's view never repainted a NEW mount for a whole tick's worth of
+    budget (a frozen tab, or -- pre-fix -- the harness quietly re-sweeping a
+    stale one forever)."""
     deadline = time.monotonic() + timeout_s
     while True:
         mount = _view_mount(page)
-        if mount is not None and mount["id"] == tab_id and mount["at"] >= tick_ts_ms:
+        if lib.mount_is_fresh(mount, tab_id, tick_ts_ms, min_seq):
             return mount
         if time.monotonic() >= deadline:
             raise SmokeFailure(
-                f"no view.mount() of tab {tab_id!r} at/after this tick's AAS "
-                f"send ({tick_ts_ms}) landed within {timeout_s}s (issue #193 "
-                "mount-anchor wait)")
+                f"no FRESH view.mount() of tab {tab_id!r} at/after this "
+                f"tick's AAS send ({tick_ts_ms}) with seq > {min_seq!r} "
+                f"landed within {timeout_s}s (issue #193/#197 mount-anchor "
+                "wait)")
         page.wait_for_timeout(interval_ms)
 
 
@@ -764,6 +824,12 @@ def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
         blink_pair_offsets_ms = []
         blink_sweep_ticks = []
         blink_not_measured = []
+        # issue #197: the seq of the mount the PREVIOUS tick's sweep
+        # consumed, so _wait_for_mount_at_or_after refuses to hand back the
+        # same (stale) mount to this tick -- see its own docstring and
+        # lib.mount_is_fresh. None for tick 1 (no previous tick to be newer
+        # than).
+        last_consumed_mount_seq = None
         # issue #100 (review round 4): timeline-only diagnostic, one entry
         # per tick -- see the capture site below for what it measures and
         # why. Empty for every other tab; never read by build_tab_result's
@@ -861,11 +927,16 @@ def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
             # what actually catch a transient of unknown width/position.
             #
             # 1. Wait for a mount of THIS TAB whose own timestamp is at/
-            #    after this tick's AAS send (_wait_for_mount_at_or_after) --
-            #    the chokepoint's own signal that a fresh response was
-            #    actually painted, never a guess at when that happens.
-            mount = _wait_for_mount_at_or_after(page, tab_id, tick_ts_ms, TICK_TIMEOUT_S)
+            #    after this tick's AAS send AND whose seq is strictly newer
+            #    than the previous tick's own consumed mount
+            #    (_wait_for_mount_at_or_after) -- the chokepoint's own signal
+            #    that a fresh response was actually painted, never a guess
+            #    at when that happens, and never the same mount a previous
+            #    tick already swept (issue #197).
+            mount = _wait_for_mount_at_or_after(page, tab_id, tick_ts_ms, TICK_TIMEOUT_S,
+                                                 min_seq=last_consumed_mount_seq)
             mount_at_ms = mount["at"]
+            last_consumed_mount_seq = mount["seq"]
             # issue #93 review item 3, kept: record how long after the AAS
             # send the mount landed, so a future drift under load stays
             # visible in summary.json.
@@ -882,10 +953,12 @@ def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
             sweep_offsets = list(lib.SWEEP_OFFSETS_MS)
             sweep_raw_frames = []
             sweep_achieved_ms = []
+            sweep_capture_ms = []
             for offset in sweep_offsets:
-                frame, achieved = _capture_at_offset(page, tab_id, mount_at_ms, offset)
+                frame, achieved, capture_ms = _capture_at_offset(page, tab_id, mount_at_ms, offset)
                 sweep_raw_frames.append(frame)
                 sweep_achieved_ms.append(achieved)
+                sweep_capture_ms.append(capture_ms)
             after_sweep = _view_mount(page)
             seq_after_sweep = after_sweep["seq"] if after_sweep is not None else None
 
@@ -916,7 +989,9 @@ def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
 
             blink_sweep_ticks.append(
                 lib.build_sweep_tick_record(sweep_achieved_ms, sweep_arrays,
-                                            target_offsets_ms=sweep_offsets))
+                                            target_offsets_ms=sweep_offsets,
+                                            capture_ms=sweep_capture_ms,
+                                            mount_seq=mount["seq"]))
 
             # The sweep's smallest-offset frame doubles as this tick's
             # artifact PNG (closest analogue to the old gating pair's
