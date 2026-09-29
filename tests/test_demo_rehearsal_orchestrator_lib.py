@@ -97,6 +97,62 @@ def test_wait_budget_never_negative():
     check(got == 0, f"wait-budget: past the deadline clamps to 0, not negative (got {got})")
 
 
+# ── queue_wait_sleep_s (review round 3: the queue-retry-sleep-collapses
+# -to-zero-on-a-late---collect blocker, and round 2's re-anchor branch it
+# shares code with) ───────────────────────────────────────────────────────
+
+def test_queue_wait_sleep_s_fresh_launch_uses_launch_anchor_no_floor_needed():
+    # Matches the LIVE 65-minute run: a fresh launch, budget still large
+    # and positive, floor never engaged.
+    got = lib.queue_wait_sleep_s(None, 1_000_000, 1_000_000, 35, 600)
+    check(got > 600, f"queue-wait: fresh launch's own budget already "
+                     f"exceeds the floor, floor is a no-op here (got {got})")
+
+
+def test_queue_wait_sleep_s_late_collect_still_queued_is_floored():
+    # THE input that reproduces the round-3 blocker: --collect invoked
+    # long (here: 3 hours) after launch, capture still genuinely queued
+    # (rehearsal_started_epoch is still None). The launch-anchored budget
+    # has long since clamped to 0 -- without the floor this would sleep 0.
+    launch = 1_000_000
+    now = launch + 3 * 3600
+    got = lib.queue_wait_sleep_s(None, launch, now, duration_min=35, floor_s=600)
+    check(got == 600, f"queue-wait: late --collect while still queued -- "
+                      f"floored at 600s, never the collapsed-to-zero "
+                      f"launch-anchored budget (got {got})")
+
+
+def test_queue_wait_sleep_s_floor_is_a_floor_not_a_ceiling():
+    # The bypass this guards against for the OTHER direction: a floor
+    # implemented as outright replacement (always return floor_s) would
+    # also pass the test above but silently cap a large, correct budget
+    # too. A real max() does not.
+    got = lib.queue_wait_sleep_s(None, 1_000_000, 1_000_000, duration_min=35, floor_s=600)
+    check(got > 600, f"queue-wait: a genuinely large budget is NOT capped "
+                     f"down to the floor (got {got}, floor 600)")
+
+
+def test_queue_wait_sleep_s_reanchored_on_confirmed_start_not_floored():
+    # Round 2's re-anchor case: once rehearsal_started_epoch is known, a
+    # near-zero remaining budget from THAT instant is real signal (the
+    # capture's own duration has elapsed) -- never floored, unlike the
+    # still-queued case above. Flooring here would just delay noticing a
+    # genuinely stuck capture.
+    started = 1_000_000
+    now = started + 35 * 60 + 900 - 5  # 5s before its OWN deadline
+    got = lib.queue_wait_sleep_s(started, 1_000_000 - 9999, now, duration_min=35, floor_s=600)
+    check(got == 5, f"queue-wait: re-anchored budget is used AS-IS, not "
+                    f"floored to 600 (got {got})")
+
+
+def test_queue_wait_sleep_s_reanchored_can_be_zero():
+    started = 1_000_000
+    now = started + 10**9  # long past its own deadline
+    got = lib.queue_wait_sleep_s(started, 1_000_000 - 9999, now, duration_min=35, floor_s=600)
+    check(got == 0, f"queue-wait: re-anchored budget can legitimately be "
+                    f"0 (check again right away) -- not floored (got {got})")
+
+
 # ── validate_results_dir: the bypass suite ───────────────────────────────
 
 def _write_summary(d, ok=True, failed=None):
@@ -216,6 +272,119 @@ def test_decide_outcome_not_started_fails():
 def test_decide_outcome_unreachable_fails():
     code, verdict = lib.decide_outcome("unreachable", None, False)
     check(code == 1, f"decide-outcome: unreachable VM -> exit 1, never silently retried forever (got {code})")
+
+
+# ── parse_pg_probe_line / pg_version_verdict (PG-version enforcement) ───
+# The failure mode being closed: a rehearsal that starts against whatever
+# PostgreSQL happens to be reachable looks exactly like a correct run
+# (green exit code) right up until someone tries to count it -- the actual
+# bug behind the port-5413 (PG 13) attempt that could never have counted.
+
+def test_parse_pg_probe_confirmed():
+    r = lib.parse_pg_probe_line("PG_CONFIRMED=18 PID=4242")
+    check(r == {"confirmed": "18", "pid": "4242"},
+          "parse-pg-probe: a matching postmaster is parsed with its PID")
+
+
+def test_parse_pg_probe_none():
+    r = lib.parse_pg_probe_line("PG_CONFIRMED=NONE")
+    check(r == {"confirmed": None, "pid": None},
+          "parse-pg-probe: NONE means no matching postmaster found")
+
+
+def test_parse_pg_probe_garbage_raises():
+    check_raises(lambda: lib.parse_pg_probe_line("connection refused"),
+                 "parse-pg-probe: an ssh-error line is a parse failure, "
+                 "never silently read as PG_CONFIRMED=NONE")
+
+
+def test_parse_pg_probe_empty_raises():
+    # The exact shape a dropped/unreachable ssh call produces: no output
+    # at all. Must refuse (raise), never be interpreted as "no postmaster".
+    check_raises(lambda: lib.parse_pg_probe_line(""),
+                 "parse-pg-probe: empty input (unreachable target) refuses "
+                 "rather than reading as NONE")
+
+
+def test_parse_pg_probe_non_numeric_major_raises():
+    check_raises(lambda: lib.parse_pg_probe_line("PG_CONFIRMED=abc PID=1"),
+                 "parse-pg-probe: a non-numeric PG major is a parse failure")
+
+
+def test_parse_pg_probe_unknown_keeps_the_pid():
+    # The narrow race review found: find_postmaster DID return a pid (so a
+    # matching postmaster existed a moment ago), but the probe's own
+    # second postmaster_version call on it failed. Must be parsed as a
+    # DISTINCT outcome from NONE -- a naive parser mapping any
+    # non-numeric, non-NONE token to "no postmaster found" would discard
+    # the pid and misreport a postmaster that WAS found as never found.
+    r = lib.parse_pg_probe_line("PG_CONFIRMED=UNKNOWN PID=4242")
+    check(r == {"confirmed": "UNKNOWN", "pid": "4242"},
+          "parse-pg-probe: UNKNOWN keeps the pid, distinct from NONE")
+
+
+def test_pg_version_verdict_matching_ok():
+    ok, msg = lib.pg_version_verdict("18", {"confirmed": "18", "pid": "99"})
+    check(ok, "pg-version-verdict: requested == confirmed -> ok")
+    check("18" in msg, "pg-version-verdict: message names the confirmed version")
+
+
+def test_pg_version_verdict_none_confirmed_refuses():
+    # THE input that makes this check catch a broken product: a probe
+    # that found no postmaster at all for the requested version. A verdict
+    # function that only compared "confirmed != requested" (and treated
+    # None as just another string) would let this raise a TypeError or,
+    # worse, silently compare None != '18' as a plain mismatch -- losing
+    # the distinction between "wrong version" and "no version answered at
+    # all" that the message text depends on.
+    ok, msg = lib.pg_version_verdict("18", {"confirmed": None, "pid": None})
+    check(not ok, "pg-version-verdict: no postmaster found -> refused, not ok")
+    check("no PostgreSQL 18 postmaster" in msg,
+          "pg-version-verdict: message says WHY (none found), not just FAIL")
+
+
+def test_pg_version_verdict_wrong_version_refuses():
+    ok, msg = lib.pg_version_verdict("18", {"confirmed": "13", "pid": "77"})
+    check(not ok, "pg-version-verdict: PG 13 running while PG 18 was "
+                 "requested -- refused (this is the exact port-5413 bug)")
+    check("13" in msg and "18" in msg,
+          "pg-version-verdict: message names BOTH the requested and the "
+          "actually-found version")
+
+
+def test_pg_version_verdict_unknown_refuses_with_accurate_message():
+    # Review nit: a probe that DID find a matching postmaster (has a pid)
+    # but couldn't re-confirm its version must still refuse (never ok),
+    # but the message must say THAT, not fall through to the generic
+    # wrong-version wording ("resolved to PostgreSQL UNKNOWN, not the
+    # requested 18") -- which is what a verdict function with no dedicated
+    # UNKNOWN branch produces: still refuses, still names the pid, so a
+    # weaker assertion here would pass against that broken behaviour too.
+    # "resolved to PostgreSQL" is the generic branch's own fixed wording,
+    # so its absence is what actually distinguishes the two code paths.
+    ok, msg = lib.pg_version_verdict("18", {"confirmed": "UNKNOWN", "pid": "4242"})
+    check(not ok, "pg-version-verdict: UNKNOWN confirmation still refuses")
+    check("4242" in msg,
+          "pg-version-verdict: UNKNOWN message names the pid that WAS found")
+    check("resolved to PostgreSQL" not in msg,
+          "pg-version-verdict: UNKNOWN takes its OWN branch, not the "
+          "generic wrong-version wording that would misreport UNKNOWN as "
+          "if it were a real resolved version number")
+    check("not be re-confirmed" in msg,
+          "pg-version-verdict: UNKNOWN message explains what actually "
+          "happened (found, then couldn't re-confirm), not just REFUSING")
+
+
+def test_pg_version_verdict_string_type_mismatch_does_not_silently_pass():
+    # requested arrives as an int from a careless caller; confirmed is
+    # always a str (parsed from probe text). int('18') == str('18') is
+    # False in Python, so a verdict function that forgot str(requested)
+    # would REFUSE a genuinely matching run -- the opposite bypass
+    # direction (a false negative on a correct run) is also checked here,
+    # not just "does a real mismatch get caught".
+    ok, msg = lib.pg_version_verdict(18, {"confirmed": "18", "pid": "1"})
+    check(ok, "pg-version-verdict: int 18 vs str '18' still compares equal "
+              "(str() normalization)")
 
 
 def main():

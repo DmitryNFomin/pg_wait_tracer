@@ -784,13 +784,33 @@ def _assert_workload_alive(pgbench_pid, workload_pid, where):
 # ── one tab's walk ───────────────────────────────────────────────────────────
 
 def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
-            blink_threshold):
+            blink_threshold, viewport=None, device_scale_factor=None):
+    """viewport / device_scale_factor (issue #223): only tests/demo_rehearsal.py
+    passes these (the criteria doc's pinned demo client viewport, 1710x981 at
+    DPR 2 -- see docs/DEMO_REHEARSAL_CRITERIA.md and
+    docs/chrome-demo-viewport-2026-09-28.md). ui_live_smoke.py's own CI-tier
+    walk (main(), below) passes neither, keeping the existing 1280x900 DSF 1
+    -- a different gate with different goals; widening it would slow every PR
+    for nothing.
+
+    Whichever viewport is requested, it is never trusted on faith: right
+    after the page loads, the ACTUAL innerWidth/innerHeight/devicePixelRatio
+    are read back and compared against what was requested
+    (lib.viewport_mismatch_reason) -- docs/DEMO_REHEARSAL_CRITERIA.md names
+    exactly this trap ("assert the viewport actually obtained, not the one
+    requested" / "assert the effective zoom too"): a request that never
+    actually reached browser.new_context() must fail loudly here, not read
+    as a silent, plausible-looking pass."""
+    req_width = viewport["width"] if viewport else 1280
+    req_height = viewport["height"] if viewport else 900
+    req_dsf = device_scale_factor if device_scale_factor is not None else 1
     tab_dir = os.path.join(out_dir, tab_id)
     os.makedirs(tab_dir, exist_ok=True)
     context = browser.new_context(
-        viewport={"width": 1280, "height": 900},
+        viewport={"width": req_width, "height": req_height},
+        device_scale_factor=req_dsf,
         record_video_dir=tab_dir,
-        record_video_size={"width": 1280, "height": 900})
+        record_video_size={"width": req_width, "height": req_height})
     context.add_init_script(UNHANDLED_REJECTION_HOOK)
     page = context.new_page()
     guard = ConsoleErrorGuard(page)
@@ -800,6 +820,15 @@ def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
     video_path = None
     try:
         page.goto(url)
+        actual = page.evaluate(
+            "() => ({w: window.innerWidth, h: window.innerHeight, "
+            "dpr: window.devicePixelRatio})")
+        viewport_reason = lib.viewport_mismatch_reason(
+            req_width, req_height, req_dsf,
+            actual["w"], actual["h"], actual["dpr"])
+        if viewport_reason is not None:
+            raise SmokeFailure(
+                f"viewport not achieved as requested: {viewport_reason}")
         try:
             page.wait_for_selector("#status.connected", timeout=first_data_timeout * 1000)
         except PWTimeoutError:

@@ -71,13 +71,26 @@ run python3 tests/test_demo_workload_coverage.py
 step "python: demo-rehearsal bypass-suite unit tests"
 run python3 tests/test_demo_rehearsal_lib.py
 
-# #243: Workload.fire()'s verify flag -- pure Python, fakes psql/sessions,
-# no Linux/root/live-DB needed. Belongs in the fast deterministic tier for
-# the same reason as the bypass suite above: a regression here (verify
-# silently ignored) is otherwise only caught by an actual live capture's
-# Sessions-tab row count.
-step "python: Workload.fire() verify-flag unit tests (#243)"
+# #243: Workload.fire()'s verify flag and live_loop_workload.py's periodic
+# verify cadence -- pure Python, fakes psql/sessions, no Linux/root/live-DB
+# needed. Belongs in the fast deterministic tier for the same reason as the
+# bypass suite above: a regression here (verify silently ignored, or the
+# cadence silently reverting to "always" or "never") is otherwise only
+# caught by an actual live capture's Sessions-tab row count or, worse, by
+# the re-lock loop breaking unnoticed.
+step "python: Workload.fire() verify-flag/cadence unit tests (#243)"
 run python3 tests/test_workload_verify_flag.py
+
+# Same reasoning as the bypass-suite step above, same owner rule (a
+# Mac-side script's unit tests must not live only in the box tier): the
+# PG-version gate in scripts/demo-rehearsal.sh (parse_pg_probe_line,
+# pg_version_verdict -- the check that refuses a rehearsal run against the
+# wrong PostgreSQL major) lives entirely in
+# tests/demo_rehearsal_orchestrator_lib.py, pure Python with no browser/
+# network/Linux dependency. Without this step a regression there would not
+# surface until the next box run.
+step "python: demo-rehearsal orchestrator unit tests"
+run python3 tests/test_demo_rehearsal_orchestrator_lib.py
 
 step "python: gallery provenance and tiered output unit tests"
 run python3 tests/test_evidence_output.py

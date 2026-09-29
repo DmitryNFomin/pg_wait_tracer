@@ -40,8 +40,11 @@ data in, plain data out.
 Usage (CLI, called from scripts/demo-rehearsal.sh):
   python3 tests/demo_rehearsal_orchestrator_lib.py parse-state "STATE=... RC=..."
   python3 tests/demo_rehearsal_orchestrator_lib.py wait-budget START NOW DURATION_MIN
+  python3 tests/demo_rehearsal_orchestrator_lib.py queue-wait-sleep-s STARTED_OR_- LAUNCH NOW DURATION_MIN FLOOR_S
   python3 tests/demo_rehearsal_orchestrator_lib.py validate-results DIR EXPECTED_RUN_ID
   python3 tests/demo_rehearsal_orchestrator_lib.py decide-outcome STATE RC RESULTS_OK
+  python3 tests/demo_rehearsal_orchestrator_lib.py parse-pg-probe "PG_CONFIRMED=..."
+  python3 tests/demo_rehearsal_orchestrator_lib.py pg-version-verdict REQUESTED CONFIRMED PID
 """
 import json
 import os
@@ -62,6 +65,21 @@ GRACE_S = 600
 VALID_STATES = {"finished", "running", "died", "not-started", "unreachable"}
 
 _STATE_RE = re.compile(r"^STATE=(\S+)\s+RC=(\S+)\s*$")
+
+# scripts/demo-rehearsal.sh: the outer launcher's own probe, run once
+# right before the detached capture starts (not part of the remote
+# rehearsal.* lifecycle marker above) -- "PG_CONFIRMED=<major> PID=<pid>"
+# when find_postmaster (tests/testutil.sh) located a running postmaster of
+# the requested major version on the target, "PG_CONFIRMED=NONE" when it
+# did not (find_postmaster itself found nothing matching), and
+# "PG_CONFIRMED=UNKNOWN PID=<pid>" for the narrow race where find_postmaster
+# DID return a pid (so a matching postmaster existed a moment ago -- it
+# only returns a pid whose version already matched) but the probe's own
+# second, independent postmaster_version call on that same pid failed --
+# e.g. the process exited between the two calls. Kept distinct from NONE
+# (review nit) so the refusal message says what actually happened instead
+# of falsely claiming no postmaster was ever found.
+_PG_PROBE_RE = re.compile(r"^PG_CONFIRMED=(\S+)(?:\s+PID=(\S+))?\s*$")
 
 
 class OrchestratorError(Exception):
@@ -99,6 +117,39 @@ def compute_wait_budget_s(start_epoch, now_epoch, duration_min,
     deadline = float(start_epoch) + float(duration_min) * 60.0 + float(build_buffer_s)
     remaining = deadline - float(now_epoch)
     return max(0, int(round(remaining)))
+
+
+def queue_wait_sleep_s(rehearsal_started_epoch, demo_rehearsal_start_epoch,
+                       now_epoch, duration_min, floor_s):
+    """How long scripts/demo-rehearsal.sh's wait loop should sleep before
+    its next remote-state check, given check_and_finish() just reported
+    'running'. Covers the two decisions review rounds 2 and 3 found bugs
+    in (previously duplicated inline in the shell, untested):
+
+    - rehearsal_started_epoch is None (capture not yet confirmed to have
+      actually started -- still queued behind the box lock, or this is a
+      fresh launch that has never checked): the accurate anchor is not yet
+      known, so this uses demo_rehearsal_start_epoch (launch time) and
+      FLOORS the result at floor_s. Without the floor (round 3 finding): a
+      `--collect` invoked more than one budget window after launch, while
+      genuinely still queued, would get compute_wait_budget_s's own
+      zero-clamp (its deadline, anchored on launch time, has already
+      passed) and sleep(0) MAX_QUEUE_ROUNDS times in about a second,
+      reporting "never started" for a run that is healthy and about to
+      start -- the exact false-failure class round 2 closed for the
+      fresh-launch case, surviving here on the --collect recovery path.
+    - rehearsal_started_epoch is not None (round 2's fix: the capture IS
+      confirmed running, re-anchor on ITS actual start instead of launch
+      time): the accurate remaining budget from that instant, NEVER
+      floored -- a ~0 result here is not stale data to paper over, it
+      means the capture's own duration has elapsed and it should already
+      be finishing; the caller's own grace-sleep-then-give-up handles a
+      genuinely stuck capture from there, so manufacturing a floor sleep
+      here would only delay noticing that."""
+    if rehearsal_started_epoch is not None:
+        return compute_wait_budget_s(rehearsal_started_epoch, now_epoch, duration_min)
+    return max(compute_wait_budget_s(demo_rehearsal_start_epoch, now_epoch, duration_min),
+               int(floor_s))
 
 
 def validate_results_dir(path, expected_run_id):
@@ -175,6 +226,77 @@ def decide_outcome(state, rc, results_ok):
     raise OrchestratorError(f"unknown state {state!r}")
 
 
+def parse_pg_probe_line(line):
+    """Parse one line from scripts/demo-rehearsal.sh's PostgreSQL-version
+    probe (run against the target right before the detached capture
+    starts) into {"confirmed": str|None, "pid": str|None}. 'confirmed' is
+    None exactly when the probe found no matching postmaster at all
+    (PG_CONFIRMED=NONE); the literal string "UNKNOWN" for the narrow race
+    where a matching postmaster WAS found (find_postmaster returned a pid)
+    but the probe's own second postmaster_version call on it failed --
+    kept distinct from None so pg_version_verdict's message does not
+    falsely claim no postmaster was ever found; otherwise the PG major
+    version string found. Raises OrchestratorError on anything else -- an
+    ssh hiccup, a dropped connection, or a probe-format change must be a
+    visible parse failure, never silently read as 'no postmaster found'
+    (which pg_version_verdict below would then also refuse, but for the
+    wrong, misleading reason: 'wrong PG version' instead of 'could not
+    check')."""
+    line = (line or "").strip()
+    m = _PG_PROBE_RE.match(line)
+    if not m:
+        raise OrchestratorError(f"unparseable PG-version probe line: {line!r}")
+    confirmed, pid = m.group(1), m.group(2)
+    if confirmed == "NONE":
+        return {"confirmed": None, "pid": None}
+    if confirmed == "UNKNOWN":
+        return {"confirmed": "UNKNOWN", "pid": pid}
+    if not re.match(r"^\d+$", confirmed):
+        raise OrchestratorError(f"non-numeric PG major {confirmed!r} in line: {line!r}")
+    return {"confirmed": confirmed, "pid": pid}
+
+
+def pg_version_verdict(requested, probe):
+    """(ok: bool, message: str) for whether `probe` (parse_pg_probe_line's
+    return) satisfies `requested` (the PG major version this rehearsal was
+    asked to target, e.g. docs/DEMO_REHEARSAL_CRITERIA.md's pinned 18).
+
+    This is the check that closes the failure mode described in the
+    launcher script's own header: a run that starts against whatever
+    PostgreSQL happened to be reachable LOOKS exactly like a correct run,
+    green exit code and all, right up until someone tries to count it --
+    the actual bug that made the last capture-side attempt run against
+    port 5413 (PG 13) uncounted. So: a probe that found no postmaster at
+    all is never ok (a caller that only checked "did demo_rehearsal.sh
+    fail" would not learn WHY), and a probe that found the wrong major is
+    reported with both the requested and the actually-found version so the
+    mismatch is visible in the verdict, not just in a log someone has to
+    go read.
+
+    requested/probe['confirmed'] are compared as strings (both originate
+    as shell argv / probe text, never int-typed) so e.g. a stray decimal
+    or leading zero cannot coerce-compare equal to a plain major number."""
+    requested = str(requested)
+    if probe.get("confirmed") is None:
+        return False, (
+            f"REFUSING: no PostgreSQL {requested} postmaster found on the "
+            f"target -- this run cannot count toward the pre-registered "
+            f"rehearsal sequence (docs/DEMO_REHEARSAL_CRITERIA.md pins "
+            f"PG {requested})")
+    if probe["confirmed"] == "UNKNOWN":
+        return False, (
+            f"REFUSING: a postmaster matching PostgreSQL {requested} WAS "
+            f"found (pid={probe.get('pid') or '?'}) but its version could "
+            f"not be re-confirmed a moment later -- refusing rather than "
+            f"guessing (this is not the same as 'no postmaster found')")
+    if probe["confirmed"] != requested:
+        return False, (
+            f"REFUSING: postmaster PID {probe.get('pid') or '?'} resolved to "
+            f"PostgreSQL {probe['confirmed']}, not the requested {requested} "
+            f"-- refusing a mismatched/uncounted run")
+    return True, f"PostgreSQL {probe['confirmed']} confirmed (pid={probe.get('pid') or '?'})"
+
+
 def _cli():
     args = sys.argv[1:]
     if not args:
@@ -191,6 +313,11 @@ def _cli():
             start, now, duration_min = rest
             print(compute_wait_budget_s(start, now, duration_min))
             return 0
+        if cmd == "queue-wait-sleep-s":
+            started_raw, launch_epoch, now, duration_min, floor_s = rest
+            started = None if started_raw == "-" else started_raw
+            print(queue_wait_sleep_s(started, launch_epoch, now, duration_min, floor_s))
+            return 0
         if cmd == "validate-results":
             path, expected_run_id = rest
             ok, reason = validate_results_dir(path, expected_run_id)
@@ -203,6 +330,19 @@ def _cli():
             code, verdict = decide_outcome(state, rc, results_ok)
             print(f"{code}\t{verdict}")
             return 0
+        if cmd == "parse-pg-probe":
+            (line,) = rest
+            r = parse_pg_probe_line(line)
+            print(f"{r['confirmed'] if r['confirmed'] is not None else '-'}\t"
+                  f"{r['pid'] if r['pid'] is not None else '-'}")
+            return 0
+        if cmd == "pg-version-verdict":
+            requested, confirmed_raw, pid_raw = rest
+            probe = {"confirmed": None if confirmed_raw == "-" else confirmed_raw,
+                     "pid": None if pid_raw == "-" else pid_raw}
+            ok, message = pg_version_verdict(requested, probe)
+            print(message)
+            return 0 if ok else 1
         print(f"unknown subcommand: {cmd}", file=sys.stderr)
         return 2
     except OrchestratorError as e:

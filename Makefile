@@ -284,11 +284,17 @@ clean:
 #   ui-gallery     before/after screenshot sheet -> tests/results/ui_gallery/
 #   demo-rehearsal issue #157: a single long (DURATION_MIN=, default 35)
 #                  real-PG capture under pgbench load, walked repeatedly,
-#                  on its own throwaway Hetzner VM (never the gate box,
-#                  never gating CI) -> tests/results/demo_rehearsal/. issue
-#                  #176: the capture runs DETACHED on the VM, not from this
-#                  Mac -- a killed launcher does not lose the run or leak
-#                  the machine, see demo-rehearsal-collect below.
+#                  on its own throwaway Hetzner VM by default (never gating
+#                  CI) -> tests/results/demo_rehearsal/. issue #176: the
+#                  capture runs DETACHED on the target, not from this Mac
+#                  -- a killed launcher does not lose the run or leak the
+#                  machine, see demo-rehearsal-collect below. PGWT_BOX=
+#                  targets a PERSISTENT box instead (owner rule
+#                  2026-09-28: persistent boxes first) -- required for a
+#                  COUNTED attempt, per docs/DEMO_REHEARSAL_CRITERIA.md.
+#                  PG= pins the PostgreSQL major version (default 18, the
+#                  criteria doc's pin); the run refuses loudly if that
+#                  version is not actually running on the target.
 #   demo-rehearsal-collect  issue #176: finish a demo-rehearsal run whose
 #                  launcher was killed before it could collect results and
 #                  delete the VM -- reattaches via
@@ -307,6 +313,6 @@ hetzner-sweep:
 ui-gallery:
 	@tests/ui_gallery.sh $(BASE)
 demo-rehearsal:
-	@DURATION_MIN=$(DURATION_MIN) KEEP=$(KEEP) scripts/demo-rehearsal.sh
+	@DURATION_MIN=$(DURATION_MIN) KEEP=$(KEEP) PG=$(PG) PGWT_BOX=$(PGWT_BOX) scripts/demo-rehearsal.sh
 demo-rehearsal-collect:
 	@KEEP=$(KEEP) scripts/demo-rehearsal.sh --collect
