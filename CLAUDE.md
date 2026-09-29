@@ -178,13 +178,31 @@ judges. It writes no feature code itself for anything bigger than a one-liner.
   tree, where a shared-file break goes red. Required approving reviews is 0:
   a push after READY would merge unreviewed. The contract's no-push-after-READY
   rule is now load-bearing.
-- **Adviser** (owner rule 2026-09-27): `.claude/agents/adviser.md`, model
-  Fable, one standing conversation for the whole session (resume it with
+- **Adviser** (owner rules 2026-09-27 and 2026-09-29): consult BOTH by default:
+  codex via `codex exec` is primary; Fable via `.claude/agents/adviser.md`
+  is the standing second.
+  Keep one standing Fable conversation for the whole session (resume it with
   SendMessage, never respawn). The retro found the lead's own output is the
   only artifact with no fresh reviewer — every wrong statement that reached
   the owner started there. So: the main agent consults the adviser on every
   found issue, plan and numeric claim BEFORE acting on it and BEFORE
-  reporting it to the owner. The adviser reviews reasoning, not code, and
+  reporting it to the owner. Consult both BEFORE accepting or rejecting a
+  review verdict or sending a branch back to an implementer; any number,
+  measurement or factual claim to the owner; any plan, ordering or scheduling
+  decision; any infrastructure or cost recommendation; and any retraction or
+  correction. On 2026-09-29 every consultation made a material correction;
+  the three unconsulted decisions — gate-box reprovisioning, the #222
+  send-back, and a CI lock diagnosis — were each wrong or self-serving.
+  On #222 codex found the relayed fix incomplete: a second `EXEC_START` sets
+  `active_row = -1`, so plain `CMD_END` cannot close the orphan row. Fable
+  found the implementer had already written the fix, the claimed ~100 zombie
+  rows were ~0 in the demo workload (the real hazard was one presenter
+  cancel), and a parallel branch overlapped on `tests/mock_server.py` and
+  `tests/test_web_ui.py`. Neither adviser alone caught all of it. Cost is no
+  reason to skip consultation: dispatch both in parallel, do independent work
+  while they run, and block only work that depends on their answers. A wasted
+  implementer round trip, owner-visible wrong statement or burned counted
+  rehearsal attempt costs more. The adviser reviews reasoning, not code, and
   never edits, commits or creates cloud resources. Its verdict is advice,
   not authority: the lead may overrule it, but then says so in the report.
 
