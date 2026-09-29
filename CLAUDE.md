@@ -57,7 +57,13 @@ A PR is ready when ALL of these are true and the evidence is in the PR body:
    Carve-out: a branch touching only CI infrastructure (no `src/` change, no
    test-assertion change) may substitute real `gh workflow run` evidence on
    the gate box for `make box-check` — state that substitution explicitly in
-   the PR body.
+   the PR body. After a branch's first passing `box-check`, review rounds for
+   docs-only changes or `tests/`-only changes touching no test the live tier
+   executes may skip re-runs; name each exempted round and why in the PR body.
+   Never exempt changes to `src/`, `web/`, `tests/run_all.sh`,
+   `tests/unit_tests.list`, or any live-tier test; if unsure, run `box-check`.
+   `.github/workflows/ci.yml` already narrows its tier by changed files; CI
+   still runs in full on every PR, and merge gates are unchanged.
 3. If `web/` changed: `make ui-gallery` ran; the `summary.json` counts and every
    `changed`/`added`/`removed` cell are listed with a one-line justification each.
 4. A fresh **reviewer** agent (`.claude/agents/reviewer.md`; `ui-reviewer.md`
