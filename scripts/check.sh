@@ -53,6 +53,13 @@ run python3 -m py_compile tests/*.py
 step "python: free_ports self-test"
 run python3 tests/test_free_ports.py
 
+# Issue #214: tests/demo_workload_coverage.py's per-tab *_populated()
+# checkers are pure (no browser, no network, no PG) -- same reasoning as
+# the demo-rehearsal bypass-suite step below, run in the fast tier rather
+# than waiting for an actual box capture to exercise them.
+step "python: demo-workload-coverage unit tests"
+run python3 tests/test_demo_workload_coverage.py
+
 # Owner finding, 2026-09-28 (run.id 1790574871): the demo-rehearsal bypass
 # suite (tests/test_demo_rehearsal_lib.py) used to run only in the
 # box-check/CI tier (tests/unit_tests.list), so a regression in the
@@ -63,6 +70,9 @@ run python3 tests/test_free_ports.py
 # the fast deterministic tier.
 step "python: demo-rehearsal bypass-suite unit tests"
 run python3 tests/test_demo_rehearsal_lib.py
+
+step "python: gallery provenance and tiered output unit tests"
+run python3 tests/test_evidence_output.py
 
 step "CI change-classifier table-driven test (issue #167)"
 run bash tests/test_classify_changed_files.sh
@@ -85,18 +95,23 @@ if [[ $FAST -eq 0 ]]; then
     #                                snapshot suite (test_web_ui_snapshots.py
     #                                isn't invoked here yet): HTTP +40/WS +41,
     #                                sampled +50/+51
-    PORT_SPAN=60
+    #     PGWT_CHIP_PORT  = base+60 test_chip_label_alignment.py: HTTP +60
+    #                                (gallery.html is static — no WS pair)
+    PORT_SPAN=70
     PGWT_PORT_BASE=$(python3 tests/free_ports.py "$PORT_SPAN") || { echo "free_ports: could not allocate $PORT_SPAN free ports"; exit 2; }
     [[ $PGWT_PORT_BASE =~ ^[0-9]+$ ]] || { echo "free_ports: non-numeric base '$PGWT_PORT_BASE'"; exit 2; }
     export PGWT_TEST_PORT=$PGWT_PORT_BASE
     export PGWT_CHAOS_PORT=$((PGWT_PORT_BASE + 30))
     export PGWT_SNAP_PORT=$((PGWT_PORT_BASE + 40))
-    echo "port base: $PGWT_PORT_BASE (span $PORT_SPAN — TEST=+0 CHAOS=+30 SNAP=+40)"
+    export PGWT_CHIP_PORT=$((PGWT_PORT_BASE + 60))
+    echo "port base: $PGWT_PORT_BASE (span $PORT_SPAN — TEST=+0 CHAOS=+30 SNAP=+40 CHIP=+60)"
 
     step "web UI suite vs mock_server.py (Playwright)"
     run python3 tests/test_web_ui.py
     step "web UI chaos suite (latency jitter / reconnects)"
     run python3 tests/test_web_ui_chaos.py
+    step "overlay chip label alignment at DSF 1/2 (issue #213)"
+    run python3 tests/test_chip_label_alignment.py
 fi
 
 if [[ $fail -ne 0 ]]; then
