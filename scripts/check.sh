@@ -71,6 +71,17 @@ run python3 tests/test_demo_workload_coverage.py
 step "python: demo-rehearsal bypass-suite unit tests"
 run python3 tests/test_demo_rehearsal_lib.py
 
+# Same reasoning as the bypass-suite step above, same owner rule (a
+# Mac-side script's unit tests must not live only in the box tier): the
+# PG-version gate in scripts/demo-rehearsal.sh (parse_pg_probe_line,
+# pg_version_verdict -- the check that refuses a rehearsal run against the
+# wrong PostgreSQL major) lives entirely in
+# tests/demo_rehearsal_orchestrator_lib.py, pure Python with no browser/
+# network/Linux dependency. Without this step a regression there would not
+# surface until the next box run.
+step "python: demo-rehearsal orchestrator unit tests"
+run python3 tests/test_demo_rehearsal_orchestrator_lib.py
+
 step "python: gallery provenance and tiered output unit tests"
 run python3 tests/test_evidence_output.py
 

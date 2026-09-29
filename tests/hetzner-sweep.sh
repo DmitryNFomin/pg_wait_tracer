@@ -131,7 +131,8 @@ hcloud_token() {
     security find-generic-password -s hcloud -a claude_token -w 2>/dev/null
 }
 
-command -v jq >/dev/null || { echo "hetzner-sweep: jq not found — skipping sweep" >&2; exit 0; }
+command -v python3 >/dev/null || { echo "hetzner-sweep: python3 not found — skipping sweep" >&2; exit 0; }
+JSON_HELPER="tests/hetzner-sweep-json.py"
 
 token=""
 if [[ -n "$SERVERS_FILE" ]]; then
@@ -146,7 +147,7 @@ else
     servers_json=$(curl -s "$API/servers?per_page=50" -H "Authorization: Bearer $token")
 fi
 
-if ! echo "$servers_json" | jq -e '.servers' >/dev/null 2>&1; then
+if ! python3 "$JSON_HELPER" validate <<< "$servers_json"; then
     echo "hetzner-sweep: could not list servers (bad token or API error) — skipping sweep" >&2
     exit 0
 fi
@@ -179,7 +180,7 @@ if [[ "$MAX_AGE_HOURS" -lt "$MIN_AGE_HOURS_FLOOR" && "$FORCE_ALL" -ne 1 ]]; then
         else
             echo "hetzner-sweep:   id=$id name=$name age=unknown (no/garbage created= label)" >&2
         fi
-    done < <(echo "$servers_json" | jq -r '.servers[] | [.id, .name, (.labels.pgwt // ""), (.labels.created // "")] | @tsv')
+    done < <(python3 "$JSON_HELPER" servers <<< "$servers_json")
     [[ "$matched" -eq 0 ]] && echo "hetzner-sweep:   (none currently — but the next agent to create one would be at risk)" >&2
     echo "hetzner-sweep: deleting YOUR OWN machine is a by-id operation, not a sweep — use:" >&2
     echo "hetzner-sweep:   HCLOUD_TOKEN=\"\$(security find-generic-password -s hcloud -a claude_token -w)\" tests/hetzner-vm.sh delete <id>" >&2
@@ -230,7 +231,7 @@ while IFS=$'\t' read -r id name pgwt_label created_label; do
                 # already-gone id) was silently counted as deleted. Check
                 # .error.message and only count it on an actual success.
                 del_result=$(curl -s -X DELETE "$API/servers/$id" -H "Authorization: Bearer $token")
-                del_err=$(echo "$del_result" | jq -r '.error.message // empty')
+                del_err=$(python3 "$JSON_HELPER" delete-error <<< "$del_result")
                 if [[ -n "$del_err" ]]; then
                     echo "hetzner-sweep: FAILED to delete $name (id=$id): $del_err" >&2
                 else
@@ -244,6 +245,6 @@ while IFS=$'\t' read -r id name pgwt_label created_label; do
         echo "hetzner-sweep: WARNING unlabelled dev server $name (id=$id) — no pgwt=ephemeral label, not auto-deleted, check manually"
         warned=$((warned + 1))
     fi
-done < <(echo "$servers_json" | jq -r '.servers[] | [.id, .name, (.labels.pgwt // ""), (.labels.created // "")] | @tsv')
+done < <(python3 "$JSON_HELPER" servers <<< "$servers_json")
 
 echo "hetzner-sweep: done (deleted=$deleted warned=$warned dry_run=$DRY_RUN cutoff=${MAX_AGE_HOURS}h force_all=$FORCE_ALL)"

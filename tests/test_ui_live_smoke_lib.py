@@ -1380,6 +1380,59 @@ def test_write_summary_roundtrip():
               "write_summary() writes exactly what build_summary() returned")
 
 
+# ── viewport_mismatch_reason (issue #223) ────────────────────────────────
+# docs/DEMO_REHEARSAL_CRITERIA.md: "assert the viewport actually obtained,
+# not the one requested" and "assert the effective zoom too". These cases
+# are exactly the input that makes the check catch a plausible-looking but
+# wrong result: a requested size/DSF that run_tab() never actually wired
+# into browser.new_context(), so the page silently kept the OLD viewport
+# or DPR while the caller believed it got the pinned one.
+
+def test_viewport_mismatch_reason_matching_is_none():
+    check(lib.viewport_mismatch_reason(1710, 981, 2, 1710, 981, 2) is None,
+          "matching width/height/DPR: no mismatch")
+
+
+def test_viewport_mismatch_reason_matching_int_vs_float_dpr():
+    check(lib.viewport_mismatch_reason(1710, 981, 2, 1710, 981, 2.0) is None,
+          "DPR compared with tolerance: 2 (int) vs 2.0 (float) still matches")
+
+
+def test_viewport_mismatch_reason_width_drift():
+    reason = lib.viewport_mismatch_reason(1710, 981, 2, 1280, 981, 2)
+    check(reason is not None, "width drift is reported, not swallowed")
+    check("width" in reason and "1710" in reason and "1280" in reason,
+          "width reason names both the requested and actual values")
+
+
+def test_viewport_mismatch_reason_height_drift():
+    reason = lib.viewport_mismatch_reason(1710, 981, 2, 1710, 900, 2)
+    check(reason is not None, "height drift is reported")
+    check("height" in reason and "981" in reason and "900" in reason,
+          "height reason names both values")
+
+
+def test_viewport_mismatch_reason_zoom_drift_size_still_matches():
+    # This is exactly the trap the criteria doc calls out: outer window
+    # size is right (1710x981) but the effective zoom/DPR silently stayed
+    # at the OLD value -- a harness that only checks width/height would
+    # report a clean PASS here.
+    reason = lib.viewport_mismatch_reason(1710, 981, 2, 1710, 981, 1)
+    check(reason is not None,
+          "zoom/DPR drift is caught even when width/height are correct")
+    check("zoom" in reason or "devicePixelRatio" in reason,
+          "zoom reason names the DPR field, not just 'mismatch'")
+
+
+def test_viewport_mismatch_reason_reports_every_mismatched_field():
+    reason = lib.viewport_mismatch_reason(1710, 981, 2, 1280, 900, 1)
+    check(reason is not None, "multiple drifts still reported")
+    check("width" in reason, "combined reason still names width")
+    check("height" in reason, "combined reason still names height")
+    check("zoom" in reason or "devicePixelRatio" in reason,
+          "combined reason still names zoom/DPR")
+
+
 def _discover_tests():
     """Every callable named test_* defined at module level, in declaration
     order (by source line). Replaces a hand-maintained TESTS list (issue #93
