@@ -375,7 +375,15 @@ substitute one family for the other.
   attempt.
 - Per-tab time to first paint within a stated bound. A six-second spinner
   passes "no console errors" and "not blank" while being exactly what an
-  audience notices.
+  audience notices. Set the bound from the first uncontended run on the demo
+  configuration and pre-register it before counted attempt one; no bound is
+  set yet. The 2026-09-29 walk's ten-tab distribution was measured with a
+  second Chromium and server-side probes on the same 4-vCPU box, so using it
+  as the demo bound would repeat the wrong-configuration viewport pin.
+  **Retracted:** that walk's 30 s Timeline "paint" finding timed a bare tab
+  click's "select a session" prompt, not a chart. Timeline has no standalone
+  entry point with data; time the drill-down from a Sessions row as
+  `tests/ui_live_smoke.py`'s `_navigate_to_tab` does.
 - Viewport pinned to the resolution the demo will actually be shown at, not the
   driver's default.
 
@@ -384,7 +392,9 @@ substitute one family for the other.
 - Cross-tab agreement: DB Time and AAS for the same window must agree within
   the same 1% across overview, timeline and top-events. Disagreeing denominators
   between tabs is the product-facing version of the bookkeeping error this
-  project has already made in prose.
+  project has already made in prose. The AAS leg requires a bucket-weighted
+  re-derivation over the identical window; an unweighted mean of buckets
+  cannot establish it.
 - Freshness: at the end of the walk, every time-axis tab's newest bucket is
   within 2 ticks of wall clock. A frozen chart is neither blank nor throwing.
 
@@ -404,7 +414,11 @@ substitute one family for the other.
   were dropped", never "nothing was missed". Closing this needs `src/` work and
   is scheduled after the demo.
 - "The daemon was alive" is not "the daemon captured everything".
-- Overhead within the envelope recorded in `tests/results/overhead_trend.csv`.
+- One-time pre-demo overhead envelope: n=3 paired A/B pgbench TPS runs with
+  and without the tracer, in full mode with the demo workload on the demo box;
+  record the result and envelope before counted attempt one. The audience will
+  ask for this number; a rehearsal capture runs only the with-tracer arm and
+  cannot produce it.
 
 ### 7. Nothing failed to execute
 
@@ -447,9 +461,9 @@ left to be discovered.
 | §3 Off-CPU\* ≤ 10% | yes (`time_model_offcpu_cap_ok`) |
 | §4 zero known-failing tabs | yes (`build_demo_summary` uses raw `ok`, ignoring the exemption) |
 | §4 blink measured fraction ≥ 0.5 | yes — landed via `agent/blink-anchor-mount-seq` (#209, merged to master), inherited automatically once `agent/rehearsal-bypass-suite` rebased: `demo_rehearsal.py` has no independent blink-measurement code, it fully delegates to `ui_live_smoke.py:run_tab()`, which now calls `blink_sweep_gate_verdict` itself. Pinned with a regression test using real measured numbers (`tests/test_demo_rehearsal_lib.py`, run.id 1790574871: scatter 0.1305, transitions 0.0072–0.0172) |
-| §4 time to first paint, pinned viewport | no — viewport IS pinned (1280×900, `ui_live_smoke.py:run_tab`) but confirming that matches the ACTUAL demo display resolution is a fact outside any harness's reach. Time-to-first-paint: still no timing field anywhere in a tab result; would need new instrumentation in `run_tab` itself, not attempted on `agent/rehearsal-bypass-suite` |
-| §5 cross-tab agreement, freshness | partial — freshness: yes (`freshness_ok`, `info`'s `now_ns` vs `to_ns`). Cross-tab agreement: DB-Time leg only, yes (`cross_tab_db_time_agreement_ok`, `time_model` vs `top_events` for the identical window); the AAS leg (vs. the bucketed `aas` endpoint) needs a bucket-weighted re-derivation not attempted with confidence in scope |
-| §6 lost-event counters, overhead envelope | partial — lost-event counters: yes (`daemon_integrity_ok`: `ringbuf_drops_total`/`state_map_full_total`/`seen_query_ids_full_total`, already on the wire via pgwt-server's control proxy, no `src/` change needed; blind spot stated in the code comment: a lost LIFECYCLE event is silent, no counter increments). Overhead envelope: no — only measurable via the separate ~10-minute `test_overhead.sh` sweep, out of this harness's own time budget |
+| §4 time to first paint, pinned viewport | no — the earlier "viewport IS pinned" described `ui_live_smoke.py:run_tab`'s 1280×900, not the demo's measured Chrome 1710×981; matching the demo viewport is not established. Time-to-first-paint still has no timing field in a tab result or stated bound. Set that bound from the first uncontended run on the demo configuration and pre-register it before counted attempt one; the contended 2026-09-29 walk cannot set it. Retracted: its 30 s Timeline finding measured the "select a session" prompt from a bare tab click, not paint after a Sessions-row drill-down (`_navigate_to_tab`) |
+| §5 cross-tab agreement, freshness | partial — freshness: yes (`freshness_ok`, `info`'s `now_ns` vs `to_ns`). Cross-tab agreement: DB-Time leg only, yes (`cross_tab_db_time_agreement_ok`, `time_model` vs `top_events` for the identical window). AAS leg: **not yet satisfied** — requires a bucket-weighted re-derivation from the `aas` endpoint over the identical window against `time_model.aas`. Retracted: the walk's 0.0000% came from an unweighted mean of buckets, which is not that comparison and establishes no agreement |
+| §6 lost-event counters, overhead envelope | partial — lost-event counters: yes (`daemon_integrity_ok`: `ringbuf_drops_total`/`state_map_full_total`/`seen_query_ids_full_total`, already on the wire via pgwt-server's control proxy, no `src/` change needed; blind spot stated in the code comment: a lost LIFECYCLE event is silent, no counter increments). Overhead envelope: **not yet measured**; `tests/results/overhead_trend.csv` has only a header, `sampled_overhead_gate.py --mode sampled` runs only for `src/` changes, and nothing measures full mode. Retracted: the separate ~10-minute sweep is not a per-attempt requirement or a substitute. Do n=3 paired full-mode A/B TPS runs with the demo workload on the demo box and record the envelope before counted attempt one; the 40-minute rehearsal retained neither an A/B baseline nor even its with-tracer `tps =` line (cleanup tailed 20 lines and deleted the full log) |
 | §7 no test exited 126/127 | **partial, and this is a human-readable aid, not an automated gate**: `tests/demo_rehearsal.sh`'s `report_early_exit` labels a dead subprocess's 126/127 exit code in the log for a human reading it afterward. It does NOT change the script's own exit code (every call site already `exit 1` regardless of the labeled reason) and has no test coverage of its own — reviewer finding, 2026-09-28. Do not read this row as "126/127 fails the gate automatically"; it already did, via the pre-existing `kill -0` + `exit 1` checks, which is why this addition changes nothing observable except the log's wording |
 | §8 known-failing lines read by hand | manual by construction; not applicable to `demo_rehearsal.py` itself, which grants zero known-failing exemptions (§4 row above) -- nothing here for a human to hand-verify against an issue |
 
