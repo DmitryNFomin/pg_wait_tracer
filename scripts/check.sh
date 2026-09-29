@@ -71,6 +71,16 @@ run python3 tests/test_demo_workload_coverage.py
 step "python: demo-rehearsal bypass-suite unit tests"
 run python3 tests/test_demo_rehearsal_lib.py
 
+# #243: Workload.fire()'s verify flag and live_loop_workload.py's periodic
+# verify cadence -- pure Python, fakes psql/sessions, no Linux/root/live-DB
+# needed. Belongs in the fast deterministic tier for the same reason as the
+# bypass suite above: a regression here (verify silently ignored, or the
+# cadence silently reverting to "always" or "never") is otherwise only
+# caught by an actual live capture's Sessions-tab row count or, worse, by
+# the re-lock loop breaking unnoticed.
+step "python: Workload.fire() verify-flag/cadence unit tests (#243)"
+run python3 tests/test_workload_verify_flag.py
+
 # Same reasoning as the bypass-suite step above, same owner rule (a
 # Mac-side script's unit tests must not live only in the box tier): the
 # PG-version gate in scripts/demo-rehearsal.sh (parse_pg_probe_line,
