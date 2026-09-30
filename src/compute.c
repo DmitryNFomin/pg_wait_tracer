@@ -26,17 +26,22 @@
  * forwards req->from_ns / req->to_ns verbatim, and both are 0 on a
  * whole-capture request, so those results are bit-identical to pre-fix.
  * Returns 0 for an event wholly outside the window (never a wrapped
- * uint64 difference).
+ * uint64 difference), and 0 for a record pgwt_filter_matches would refuse
+ * as impossible (duration > timestamp).
  */
 static inline uint64_t event_window_ns(const struct pgwt_trace_event *ev,
                                        uint64_t from_ns, uint64_t to_ns)
 {
-    /* A duration longer than the absolute timestamp is impossible in a real
-     * trace, but the subtraction would wrap to ~1.8e19 and the event would
-     * then look like it starts after it ends — silently losing its time.
-     * Treat it as starting at 0 instead: the clip still bounds it. */
-    uint64_t start = ev->duration_ns <= ev->timestamp_ns
-                     ? ev->timestamp_ns - ev->duration_ns : 0;
+    /* Defence in depth for the impossible record pgwt_filter_matches already
+     * refuses (duration > its own absolute timestamp): return 0 rather than
+     * clamp the start to 0. Clamping would have made the UNBOUNDED path
+     * return timestamp_ns instead of duration_ns — the one exception to
+     * "a whole-capture request is bit-identical to pre-fix". Refusing keeps
+     * that claim exact and keeps this helper agreeing with the filter for
+     * any future caller that reaches it without one. */
+    if (ev->duration_ns > ev->timestamp_ns)
+        return 0;
+    uint64_t start = ev->timestamp_ns - ev->duration_ns;
     uint64_t end   = ev->timestamp_ns;
     if (from_ns != 0 && start < from_ns) start = from_ns;
     if (to_ns   != 0 && end   > to_ns)   end   = to_ns;
@@ -199,6 +204,19 @@ int pgwt_filter_matches(const struct pgwt_filter *f,
      * legitimately READ markers (variants, the exec/plan lifecycle stats)
      * handle them before calling the filter. */
     if (PGWT_IS_MARKER(ev->old_event))
+        return 0;
+    /* A record whose duration exceeds its own absolute END timestamp cannot
+     * be true: timestamp_ns is CLOCK_REALTIME-derived (~1.8e18 now), so this
+     * needs a wait longer than the epoch. REFUSED here, at the same
+     * chokepoint, rather than reinterpreted — the two plausible repairs
+     * disagree with each other (clamp the start to 0 and you invent ~58
+     * years of wait time; let `end - duration` wrap and the event silently
+     * vanishes), and picking either would make the compute paths answer
+     * differently on the same bytes: pgwt_compute_aas derives its own
+     * ev_start by subtraction and would drop the record, while the Overview
+     * summers would count it. A record that cannot be true is refused, not
+     * repaired, and refusing it HERE is what keeps every path agreeing. */
+    if (ev->duration_ns > ev->timestamp_ns)
         return 0;
     if (f->class_name[0] != '\0') {
         const char *cls = pgwt_class_name(ev->old_event);

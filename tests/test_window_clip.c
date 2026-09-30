@@ -55,6 +55,16 @@ static int checks   = 0;
     else printf("  ok: %s\n", msg);                                  \
 } while (0)
 
+/* Dimensionless quantities (AAS) — same tolerance, no unit in the output. */
+#define CHECK_NUM(got, want, msg) do {                               \
+    checks++;                                                        \
+    double _g = (got), _w = (want);                                  \
+    if (fabs(_g - _w) > 1e-6) { failures++;                          \
+        printf("  FAIL: %s — got %.6f, want %.6f (%s:%d)\n",          \
+               msg, _g, _w, __FILE__, __LINE__); }                   \
+    else printf("  ok: %s (%.6f)\n", msg, _g);                       \
+} while (0)
+
 #define CHECK_MS(got, want, msg) do {                                \
     checks++;                                                        \
     double _g = (got), _w = (want);                                  \
@@ -190,7 +200,7 @@ static void test_straddler_leading_edge(void)
     pgwt_compute_time_model(evs, 1, &f, WFROM, WTO, 10000.0, &tm);
     CHECK_MS(tm.db_time_ms, 1000.0, "time_model DB Time = in-window 1 s");
     CHECK_MS(tm_class_ms(&tm, "Lock"), 1000.0, "time_model Lock row = 1 s");
-    CHECK_MS(tm.aas, 0.1, "time_model AAS = 1 s / 10 s window");
+    CHECK_NUM(tm.aas, 0.1, "time_model AAS = 1 s / 10 s window (dimensionless)");
     free(tm.rows);
 
     struct pgwt_events_result te;
@@ -438,17 +448,54 @@ static void test_bypass_paths(void)
           "zero-duration record leaves CPU* a real 0, not NaN");
     free(tmzd.rows);
 
-    /* 4g. Corrupt record: duration longer than the absolute timestamp. The
-     * naive end-duration subtraction wraps to ~1.8e19 and the event silently
-     * vanishes; it must instead be treated as starting at 0 and clipped. */
+    /* 4g. Impossible record: duration longer than its own absolute END
+     * timestamp (needs a wait longer than the epoch). It is REFUSED, not
+     * repaired — see pgwt_filter_matches. The two plausible repairs disagree
+     * with each other, and that disagreement is the bug: clamping the start
+     * to 0 makes the summers count ~58 years, while pgwt_compute_aas derives
+     * ev_start by subtraction, wraps, and drops the record — so Overview and
+     * the AAS chart would answer differently on the same bytes, which is the
+     * exact cross-tab defect this file exists for.
+     *
+     * Pinned on all three axes: windowed, UNBOUNDED (a clamp-to-0 repair
+     * returns timestamp_ns here instead of duration_ns, the one exception to
+     * "whole-capture is bit-identical"), and the AAS-vs-Overview identity on
+     * a mixed array, which is what proves the two paths agree on garbage. */
     struct pgwt_trace_event corrupt =
         mk(1, LOCK_RELATION, WFROM + S(1), WFROM + S(1) + S(5), 11,
            PGWT_CPU_NS_UNKNOWN);
     struct pgwt_tm_result tmc;
     pgwt_compute_time_model(&corrupt, 1, &f, WFROM, WTO, 10000.0, &tmc);
-    CHECK_MS(tmc.db_time_ms, 1000.0,
-             "duration > timestamp does not wrap the clip to zero");
+    CHECK_MS(tmc.db_time_ms, 0.0,
+             "duration > timestamp is refused, not clamped to a 1 s window");
     free(tmc.rows);
+
+    struct pgwt_tm_result tmcu;
+    pgwt_compute_time_model(&corrupt, 1, &f, 0, 0, 10000.0, &tmcu);
+    CHECK_MS(tmcu.db_time_ms, 0.0,
+             "...refused on the UNBOUNDED path too, not counted as timestamp_ns");
+    free(tmcu.rows);
+
+    /* The identity, on an array holding one good event and one impossible
+     * one: both paths must drop the same record and keep the same one. If
+     * either path repaired the corrupt record instead, these two numbers
+     * would differ — and a suite that only checked "corrupt == 0" in
+     * isolation would never notice. */
+    struct pgwt_trace_event mixed_corrupt[] = {
+        mk(1, LOCK_RELATION, WFROM + S(5), S(2), 11, PGWT_CPU_NS_UNKNOWN),
+        corrupt,
+    };
+    struct pgwt_tm_result tmmc;
+    pgwt_compute_time_model(mixed_corrupt, 2, &f, WFROM, WTO, 10000.0, &tmmc);
+    CHECK_MS(tmmc.db_time_ms, 2000.0,
+             "an impossible record does not disturb the valid one beside it");
+    struct pgwt_aas_result aasc;
+    pgwt_compute_aas(mixed_corrupt, 2, &f, WFROM, WTO, 10, 0, 0, &aasc);
+    CHECK_MS(aas_db_ns(&aasc) / 1e6, tmmc.db_time_ms,
+             "AAS and time_model agree on an array containing garbage");
+    free(aasc.buckets);
+    free(aasc.event_aas);
+    free(tmmc.rows);
 
     /* 4h. A filter that matches nothing must not be mistaken for agreement:
      * both sides go to zero, so section 2's identity would hold vacuously.
