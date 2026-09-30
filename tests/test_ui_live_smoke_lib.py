@@ -385,6 +385,57 @@ def test_build_sweep_tick_record_capture_ms_and_mount_seq_default_empty():
           "a caller that doesn't pass mount_seq gets None not a missing key")
 
 
+# ── capture_ms_total_ms / panel_dims (issue #252 evidence) ─────────────────
+#
+# #252's secondary finding: capture_ms existed in the raw per-frame list but
+# nothing summed it for a reader, and no field at all recorded the panel
+# size a frame's cost should be attributed to. These pin both additions so
+# a regression that silently drops either (e.g. the field reverting to a
+# hardcoded 0.0/{} regardless of input -- the exact shape of the original
+# bug, just moved) is caught here, not rediscovered from a 40-minute
+# rehearsal.
+def test_build_sweep_tick_record_capture_ms_total_is_the_sum():
+    a = np.zeros((4, 4, 3), dtype=np.uint8)
+    rec = lib.build_sweep_tick_record([201, 503, 1010], [a, a.copy(), a.copy()],
+                                      target_offsets_ms=(200, 500, 1000),
+                                      capture_ms=[120.5, 95.25, 88.0])
+    check(rec["capture_ms_total_ms"] == 303.75,
+          f"capture_ms_total_ms is the plain sum, not a placeholder (got "
+          f"{rec['capture_ms_total_ms']}) -- this is what a reviewer reads "
+          f"first against the ~300ms/frame acceptance bound, not the raw "
+          f"list")
+
+
+def test_build_sweep_tick_record_capture_ms_total_zero_when_not_measured():
+    a = np.zeros((4, 4, 3), dtype=np.uint8)
+    rec = lib.build_sweep_tick_record([201, 503], [a, a.copy()],
+                                      target_offsets_ms=(200, 500))
+    check(rec["capture_ms_total_ms"] == 0.0,
+          "no capture_ms measured sums to 0.0, not None -- the empty "
+          "capture_ms list itself is what signals 'not measured'")
+
+
+def test_build_sweep_tick_record_records_panel_dims():
+    a = np.zeros((4, 4, 3), dtype=np.uint8)
+    dims = {"box_width": 1698.0, "box_height": 2340.5,
+            "clip_width": 1698.0, "clip_height": 700.0}
+    rec = lib.build_sweep_tick_record([201, 503], [a, a.copy()],
+                                      target_offsets_ms=(200, 500),
+                                      panel_dims=dims)
+    check(rec["panel_dims"] == dims,
+          f"the panel size actually captured this tick is carried through "
+          f"unchanged (issue #252 evidence) ({rec['panel_dims']})")
+
+
+def test_build_sweep_tick_record_panel_dims_default_empty_dict():
+    a = np.zeros((4, 4, 3), dtype=np.uint8)
+    rec = lib.build_sweep_tick_record([201, 503], [a, a.copy()],
+                                      target_offsets_ms=(200, 500))
+    check(rec["panel_dims"] == {},
+          f"a caller that doesn't measure panel dims gets {{}} not a "
+          f"missing key ({rec['panel_dims']})")
+
+
 # ── clip_rect_to_viewport (issue #197) ──────────────────────────────────────
 #
 # The Sessions panel (#table-container) has no vertical overflow/height cap,

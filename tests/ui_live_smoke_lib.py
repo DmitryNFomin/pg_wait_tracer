@@ -480,7 +480,8 @@ def blink_sweep_gate_verdict(frames, seq_before_sweep, seq_after_sweep):
 
 def build_sweep_tick_record(achieved_offsets_ms, frames,
                              target_offsets_ms=SWEEP_OFFSETS_MS,
-                             capture_ms=None, mount_seq=None):
+                             capture_ms=None, mount_seq=None,
+                             panel_dims=None):
     """One tick's offset-sweep record for summary.json (issue #119 item 2).
 
     achieved_offsets_ms: `now_ms - mount_at_ms` actually measured at each
@@ -493,21 +494,37 @@ def build_sweep_tick_record(achieved_offsets_ms, frames,
     ITSELF took at each offset (page.screenshot(clip=...) start to return),
     one entry per frame; None/empty for a caller that doesn't measure it.
     Directly answers "is a frame's capture cost bounded" without inferring
-    it from achieved_offsets_ms drift.
+    it from achieved_offsets_ms drift. capture_ms_total_ms (issue #252
+    evidence) is the plain sum of that list -- how much of THIS tick's
+    whole sweep was spent inside the screenshot call itself, the number a
+    reader actually wants without hand-summing five floats; 0.0 (not None)
+    when capture_ms is empty, since "no frames measured" sums to zero cost,
+    not unknown cost -- the list itself (empty) is what signals "not
+    measured", not this field.
     mount_seq: issue #197 evidence -- the ViewManager mount seq this tick's
     sweep is anchored to (mount_is_fresh's own accepted mount). Recorded so
     a run's summary.json can be checked for distinct, strictly-increasing
     seqs across ticks -- a repeated seq is exactly the stale-mount-reuse bug
     this issue fixes.
+    panel_dims: issue #252 evidence -- ONE dims dict for the whole tick
+    ({"box_width", "box_height", "clip_width", "clip_height"}, CSS px --
+    _panel_clip_and_dims' own shape), the clip computed once and reused for
+    every frame of this tick's sweep (issue #252 performance change: the
+    clip is no longer recomputed per frame, so there is only one
+    measurement per tick to report, not one per frame). {} (not a missing
+    key) for a caller that doesn't measure it.
 
     Pure: no page access. Kept here (not inline in ui_live_smoke.py) so the
     achieved-offsets-in, ratios-out shape has its own unit test."""
     pairs = sweep_consecutive_diff_ratios(frames)
+    capture_ms_list = list(capture_ms) if capture_ms else []
     return {
         "target_offsets_ms": list(target_offsets_ms),
         "achieved_offsets_ms": list(achieved_offsets_ms),
-        "capture_ms": list(capture_ms) if capture_ms else [],
+        "capture_ms": capture_ms_list,
+        "capture_ms_total_ms": sum(capture_ms_list),
         "mount_seq": mount_seq,
+        "panel_dims": dict(panel_dims) if panel_dims else {},
         "ratios": [ratio for ratio, _note in pairs],
         "notes": [note for _ratio, note in pairs if note],
     }
