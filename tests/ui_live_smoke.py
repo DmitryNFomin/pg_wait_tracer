@@ -927,15 +927,18 @@ def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
     renders the demo's actual layout and raster geometry, the same
     viewport a real viewer/presenter sees, which 1280x900 DSF1 does not;
     (2) it is the TRIPWIRE for a FUTURE regression -- if scale="css" is
-    ever removed, capture_ms reverts to the old device-scale regime only
-    at DPR2 (DPR1's cost is already low and stays low either way), so
-    running the gate at DPR2 is what would make that specific regression
-    visible again (see build_tab_result's capture_budget check, issue #252
-    review round 1 finding 1). A later agent reading only the OLD wording
-    could conclude the DPR2 walk itself is the cost guard and remove
-    something else (e.g. this viewport default) as "redundant" with that
-    check -- it is not; the check depends on running at DPR2 to have
-    anything to catch. An explicit override
+    ever removed, decoded frame dimensions double relative to the CSS-px
+    clip only at DPR2 (DPR1's scale is 1x either way, so nothing there
+    would change), so running the gate at DPR2 is what would make that
+    specific regression visible (see build_tab_result's frame_dims_ok
+    check -- lib.FRAME_DIMS_TOLERANCE_PX's own comment -- which catches
+    exactly this deterministically, from the decoded array's own shape,
+    not from a wall-clock inference: lib.capture_budget is reporting-only
+    now, see lib.CAPTURE_MS_BOUND_MS's own comment for why). A later agent
+    reading only the OLD wording could conclude the DPR2 walk itself is
+    the cost guard and remove something else (e.g. this viewport default)
+    as "redundant" with that check -- it is not; the check depends on
+    running at DPR2 to have anything to catch. An explicit override
     (--viewport-width/--viewport-height/--device-scale-factor) is still
     available for anyone who needs the old, narrower walk.
 
