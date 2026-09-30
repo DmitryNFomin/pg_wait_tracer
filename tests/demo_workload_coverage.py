@@ -217,6 +217,58 @@ def waterfall_populated(resp):
                 f"(floor {WATERFALL_INTERESTING_MS})")
 
 
+def waterfall_floor_excludes_inferred(resp):
+    """#222 review round 2, addition 2: a row closed via CMD_END
+    (end_inferred=True, src/compute.c) carries a real wall-clock span, but
+    one DEDUCED from an idle transition rather than measured at the
+    statement's own completion -- a cancel, error, or statement_timeout,
+    not necessarily a genuinely slow completed execution. Without this,
+    waterfall_populated's 500ms floor could in principle be satisfied by
+    an inferred row alone (a single cancelled pg_sleep, no genuinely slow
+    completed execution anywhere in the capture) -- a real hole. Kept as
+    its own pure function, ANDed onto waterfall_populated's result in
+    run_coverage below, rather than folded into waterfall_populated
+    itself: that function's body stays byte-identical (see its own
+    docstring's "this checker itself never changed"), so the gate is
+    strictly stronger without disturbing that claim."""
+    rows = (resp or {}).get("rows") or []
+    measured_slow = [r for r in rows
+                      if r.get("duration_ms") is not None
+                      and not r.get("in_progress")
+                      and not r.get("end_inferred")
+                      and r["duration_ms"] >= WATERFALL_INTERESTING_MS]
+    ok = len(measured_slow) >= 1
+    return ok, (f"measured (end_inferred=False) completed rows >= "
+                f"{WATERFALL_INTERESTING_MS}ms: {len(measured_slow)}")
+
+
+def waterfall_recency_diagnostic(resp):
+    """executions (recency slice, no explicit sort -- start_desc, the same
+    query the tab issued before #222's review moved the gating floor onto
+    duration_desc): DIAGNOSTIC ONLY, deliberately not gating (adviser
+    correction, #222 review round 2 second correction). Whether anything
+    slow enough happens to sit in the last EXECUTIONS_DEFAULT_LIMIT starts
+    by wall-clock recency is exactly the timing-dependent accident this
+    whole change removes from the gate; re-asserting on it as a second
+    predicate would put that same accident back, just behind a different
+    name, so it is never ANDed into `ok` anywhere. Recorded (row count,
+    completed count, max completed duration, wall-clock start span) so a
+    future red is diagnosable and a report can show both slices side by
+    side from the same trace/window."""
+    rows = (resp or {}).get("rows") or []
+    completed = [r for r in rows if r.get("duration_ms") is not None
+                 and not r.get("in_progress")]
+    durations = [r["duration_ms"] for r in completed]
+    starts = [int(r["start_ns"]) for r in rows if r.get("start_ns") is not None]
+    span_ns = (max(starts) - min(starts)) if len(starts) >= 2 else 0
+    return {
+        "rows": len(rows),
+        "completed": len(completed),
+        "max_completed_duration_ms": max(durations) if durations else None,
+        "span_ns": span_ns,
+    }
+
+
 def scatter_populated(resp):
     """exec_scatter: enough completed executions to form a visible
     distribution (both a count floor and a spread floor)."""
@@ -306,7 +358,16 @@ def run_coverage(srv, from_ns, to_ns, num_cpus=None):
     num_cpus: the capture box's CPU count (`info` response's `num_cpus`,
     the same field the UI's "N CPUs" chip reads) -- forwarded only to the
     concurrency checker, which requires it and fails loudly without it
-    rather than grading against a weaker proxy."""
+    rather than grading against a weaker proxy.
+
+    "waterfall" is special-cased here (#222 review round 2): its `ok`
+    ANDs waterfall_populated's own 500ms floor (on the duration_desc
+    slice TAB_QUERIES asks for) with waterfall_floor_excludes_inferred
+    (the same slice, requiring the qualifying row to be measured, not
+    end_inferred); it ALSO issues a second, recency-slice `executions`
+    query purely for waterfall_recency_diagnostic's diagnostic fields,
+    which are recorded under results["waterfall"]["recency_diagnostic"]
+    but never affect `ok` -- see that function's own docstring for why."""
     results = {}
     for tab in TAB_ORDER:
         cmd, extra, checker = TAB_QUERIES[tab]
@@ -331,11 +392,45 @@ def run_coverage(srv, from_ns, to_ns, num_cpus=None):
                 results[tab] = {"ok": False, "could_not_evaluate": False,
                                  "detail": f"{cmd} error: {resp['error']!r}"}
             continue
+        extra_fields = {}
         if tab == "concurrency":
             ok, detail = checker(resp, num_cpus)
+        elif tab == "waterfall":
+            # waterfall_populated itself is untouched (its own docstring's
+            # "this checker itself never changed" claim); both additions
+            # below are layered on top in this glue instead.
+            ok, detail = checker(resp)
+            # Addition 2 (#222 review round 2): an inferred-only floor must
+            # not pass.
+            inferred_ok, inferred_detail = waterfall_floor_excludes_inferred(resp)
+            ok = ok and inferred_ok
+            open_count = resp.get("open_count") if isinstance(resp, dict) else None
+            completed_count = (resp.get("completed_count")
+                               if isinstance(resp, dict) else None)
+            detail = (f"{detail} | {inferred_detail} | "
+                      f"open_count={open_count}, completed_count={completed_count}")
+            # Addition 1, second adviser correction: the recency slice is
+            # queried and recorded as a DIAGNOSTIC ONLY -- see
+            # waterfall_recency_diagnostic's own docstring for why it must
+            # never gate `ok`.
+            try:
+                recency_resp = srv.query(cmd, from_=from_ns, to_=to_ns,
+                                         timeout=30)
+            except Exception as e:
+                recency_diag = {"error": f"recency slice query failed: {e!r}"}
+            else:
+                if isinstance(recency_resp, dict) and recency_resp.get("error"):
+                    recency_diag = {"error": (f"recency slice error: "
+                                              f"{recency_resp['error']!r}")}
+                else:
+                    recency_diag = waterfall_recency_diagnostic(recency_resp)
+            detail += (f" | recency slice (diagnostic only, does not "
+                      f"gate): {recency_diag}")
+            extra_fields["recency_diagnostic"] = recency_diag
         else:
             ok, detail = checker(resp)
-        results[tab] = {"ok": bool(ok), "could_not_evaluate": False, "detail": detail}
+        results[tab] = {"ok": bool(ok), "could_not_evaluate": False,
+                         "detail": detail, **extra_fields}
     return results
 
 

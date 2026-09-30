@@ -362,6 +362,146 @@ def test_waterfall_populated_in_progress_excluded():
     check(not ok, f"waterfall: in-progress-only execution FAILS ({detail})")
 
 
+# ── waterfall_floor_excludes_inferred (#222 review round 2, addition 2) ────
+
+def test_waterfall_floor_excludes_inferred_measured_row_passes():
+    resp = {"rows": [{"query_id": "1", "duration_ms": 700.0,
+                       "end_inferred": False}]}
+    ok, detail = cov.waterfall_floor_excludes_inferred(resp)
+    check(ok, f"a measured (end_inferred=False) slow row passes ({detail})")
+
+
+def test_waterfall_floor_excludes_inferred_only_inferred_row_fails():
+    """RED: this IS the hole addition 2 closes -- a cancelled/errored
+    statement (end_inferred=True) must not alone satisfy the floor even
+    though it clears the 500ms threshold and waterfall_populated (which
+    does not look at end_inferred) would pass it."""
+    resp = {"rows": [{"query_id": "1", "duration_ms": 700.0,
+                       "end_inferred": True}]}
+    populated_ok, _ = cov.waterfall_populated(resp)
+    check(populated_ok,
+          "waterfall_populated ALONE would pass this inferred-only row "
+          "(confirms addition 2 is the thing doing the excluding)")
+    ok, detail = cov.waterfall_floor_excludes_inferred(resp)
+    check(not ok, f"an inferred-only slow row FAILS the stricter floor ({detail})")
+
+
+def test_waterfall_floor_excludes_inferred_mixed_passes_on_the_measured_one():
+    resp = {"rows": [{"query_id": "1", "duration_ms": 700.0, "end_inferred": True},
+                      {"query_id": "2", "duration_ms": 600.0, "end_inferred": False}]}
+    ok, detail = cov.waterfall_floor_excludes_inferred(resp)
+    check(ok, f"a genuinely measured slow row among inferred ones still "
+              f"passes ({detail})")
+
+
+# ── waterfall_recency_diagnostic (diagnostic only, never gates) ───────────
+
+def test_waterfall_recency_diagnostic_shape():
+    resp = {"rows": [
+        {"query_id": "1", "duration_ms": 10.0, "start_ns": "100"},
+        {"query_id": "2", "duration_ms": 20.0, "start_ns": "200"},
+        {"query_id": "3", "duration_ms": None, "in_progress": True,
+         "start_ns": "300"},
+    ]}
+    diag = cov.waterfall_recency_diagnostic(resp)
+    check(diag["rows"] == 3, f"row count recorded ({diag})")
+    check(diag["completed"] == 2, f"in-progress row excluded from completed ({diag})")
+    check(diag["max_completed_duration_ms"] == 20.0, f"max completed duration ({diag})")
+    check(diag["span_ns"] == 200, f"wall-clock start span ({diag})")
+
+
+def test_waterfall_recency_diagnostic_empty():
+    diag = cov.waterfall_recency_diagnostic({"rows": []})
+    check(diag == {"rows": 0, "completed": 0,
+                    "max_completed_duration_ms": None, "span_ns": 0},
+          f"empty recency slice reports zeros, not an exception ({diag})")
+
+
+def test_run_coverage_recency_slice_never_gates_waterfall():
+    """The adviser-corrected version of addition 1: a recency slice with
+    NOTHING slow in it (the exact timing accident #222 removed from the
+    gate) must NOT fail waterfall as long as the duration_desc slice
+    clears the floor with a measured row -- proving the diagnostic really
+    is diagnostic-only, not a second gate wearing a different name."""
+    good = {
+        "time_model": {"rows": [{"name": "Lock", "indent": 1, "ms": 5},
+                                 {"name": "Timeout", "indent": 1, "ms": 5}]},
+        "top_events": {"rows": [{"name": "Lock:relation", "class": "Lock", "total_ms": 5},
+                                 {"name": "Timeout:PgSleep", "class": "Timeout", "total_ms": 5}]},
+        "top_sessions": {"rows": [{"pid": 1}, {"pid": 2}]},
+        "top_queries": {"rows": [
+            {"text": "A", "total_ms": 1}, {"text": "B", "total_ms": 2}]},
+        "heatmap": {"cells": [[0, 1, 5], [0, 2, 5]]},
+        "session_timeline": {"events": [{"p": 1, "n": "A"}, {"p": 1, "n": "B"}]},
+        "transitions": {"links": [{"source": "CPU*", "target": "Lock:relation", "value": 1},
+                                   {"source": "CPU*", "target": "Timeout:PgSleep", "value": 1}]},
+        "concurrency": {"peaks": [{"t": 1, "max": 5.0}]},
+        "executions": {"rows": [{"query_id": "1", "duration_ms": 0.05,
+                                  "end_inferred": False}]},
+        "exec_scatter": {"points": [{"duration_ms": d} for d in [1, 2, 5, 50, 400]]},
+    }
+    srv = _FakeServer(good)
+    results = cov.run_coverage(srv, 0, 1, num_cpus=4)
+    check(results["waterfall"]["ok"] is False,
+          f"waterfall still FAILS on its own merits (no row clears the "
+          f"500ms floor) -- this scenario does not exercise the "
+          f"diagnostic's non-gating behavior by accident "
+          f"({results['waterfall']['detail']})")
+    check(results["waterfall"]["recency_diagnostic"]["max_completed_duration_ms"] == 0.05,
+          f"the diagnostic recorded the (unhelpfully fast) recency slice "
+          f"regardless ({results['waterfall']['recency_diagnostic']})")
+
+
+def test_run_coverage_waterfall_ok_survives_an_empty_recency_slice():
+    """RED without addition 1's non-gating design: a recency slice with
+    NOTHING slow in it (all sub-ms pgbench noise, the exact shape a real
+    busy capture's last 100 starts actually has -- see waterfall_populated's
+    own docstring) must not drag down a waterfall tab whose duration_desc
+    slice genuinely clears the floor with a measured row. The gating and
+    diagnostic queries are BOTH `executions` with the same kwargs shape
+    except `sort`, so the fake server must actually distinguish them by
+    kwargs (via a callable response) -- a dict-per-cmd fake could not tell
+    the two queries apart and would make this test unable to fail for the
+    right reason."""
+    duration_desc_resp = {"rows": [{"query_id": "1", "duration_ms": 1300.0,
+                                    "end_inferred": False}]}
+    recency_resp = {"rows": [{"query_id": "2", "duration_ms": 0.3,
+                              "start_ns": "1"},
+                             {"query_id": "3", "duration_ms": 0.2,
+                              "start_ns": "2"}]}
+
+    def executions_responder(kwargs):
+        return (duration_desc_resp if kwargs.get("sort") == "duration_desc"
+                else recency_resp)
+
+    good = {
+        "time_model": {"rows": [{"name": "Lock", "indent": 1, "ms": 5},
+                                 {"name": "Timeout", "indent": 1, "ms": 5}]},
+        "top_events": {"rows": [{"name": "Lock:relation", "class": "Lock", "total_ms": 5},
+                                 {"name": "Timeout:PgSleep", "class": "Timeout", "total_ms": 5}]},
+        "top_sessions": {"rows": [{"pid": 1}, {"pid": 2}]},
+        "top_queries": {"rows": [
+            {"text": "A", "total_ms": 1}, {"text": "B", "total_ms": 2}]},
+        "heatmap": {"cells": [[0, 1, 5], [0, 2, 5]]},
+        "session_timeline": {"events": [{"p": 1, "n": "A"}, {"p": 1, "n": "B"}]},
+        "transitions": {"links": [{"source": "CPU*", "target": "Lock:relation", "value": 1},
+                                   {"source": "CPU*", "target": "Timeout:PgSleep", "value": 1}]},
+        "concurrency": {"peaks": [{"t": 1, "max": 5.0}]},
+        "executions": executions_responder,
+        "exec_scatter": {"points": [{"duration_ms": d} for d in [1, 2, 5, 50, 400]]},
+    }
+    srv = _FakeServer(good)
+    results = cov.run_coverage(srv, 0, 1, num_cpus=4)
+    check(results["waterfall"]["ok"] is True,
+          f"waterfall PASSES on the duration_desc slice's real measured "
+          f"slow row, even though the recency slice has nothing slow at "
+          f"all ({results['waterfall']['detail']})")
+    diag = results["waterfall"]["recency_diagnostic"]
+    check(diag["max_completed_duration_ms"] == 0.3,
+          f"the diagnostic still faithfully recorded the (unhelpful) "
+          f"recency slice's own data ({diag})")
+
+
 # ── scatter_populated ────────────────────────────────────────────────────────
 
 def test_scatter_populated_spread_passes():
@@ -398,14 +538,20 @@ def test_scatter_populated_zero_duration_excluded():
 class _FakeServer:
     """A tiny stand-in for server_harness.ServerHarness good enough for
     run_coverage: records the cmd (and, since #222 review, the full kwargs)
-    it was asked and returns a scripted response or raises."""
+    it was asked and returns a scripted response or raises. A response may
+    also be a callable(kwargs) -> resp (#222 review round 2) -- needed to
+    give the gating duration_desc `executions` query and the diagnostic
+    recency `executions` query (same cmd, different kwargs) genuinely
+    different scripted responses, which a single dict-per-cmd cannot."""
     def __init__(self, responses):
-        self.responses = responses   # cmd -> resp or Exception instance
+        self.responses = responses   # cmd -> resp, Exception, or callable
         self.calls = []              # [(cmd, kwargs), ...] in call order
 
     def query(self, cmd, **kwargs):
         self.calls.append((cmd, kwargs))
         r = self.responses.get(cmd)
+        if callable(r):
+            r = r(kwargs)
         if isinstance(r, Exception):
             raise r
         return r
@@ -508,11 +654,25 @@ def test_run_coverage_waterfall_forwards_sort_and_sees_the_window_not_the_tail()
     check(results["waterfall"]["ok"] is True,
           f"waterfall PASSES against the duration-sorted page "
           f"({results['waterfall']['detail']})")
+    # #222 review round 2: run_coverage now issues TWO executions queries
+    # for waterfall -- the gating duration_desc slice and a diagnostic-only
+    # recency slice (waterfall_recency_diagnostic) -- exactly one of each.
     exec_calls = [kwargs for cmd, kwargs in srv.calls if cmd == "executions"]
-    check(len(exec_calls) == 1 and exec_calls[0].get("sort") == "duration_desc",
-          f"run_coverage's actual srv.query call for executions carried "
-          f"sort=duration_desc, not just the TAB_QUERIES table in the "
-          f"abstract (calls={exec_calls})")
+    check(len(exec_calls) == 2,
+          f"run_coverage issues exactly two executions queries for "
+          f"waterfall: the gating slice and the diagnostic recency slice "
+          f"(calls={exec_calls})")
+    sort_calls = [k for k in exec_calls if k.get("sort") == "duration_desc"]
+    recency_calls = [k for k in exec_calls if "sort" not in k]
+    check(len(sort_calls) == 1,
+          f"exactly one call carries sort=duration_desc, not just the "
+          f"TAB_QUERIES table in the abstract (calls={exec_calls})")
+    check(len(recency_calls) == 1,
+          f"exactly one call carries no sort at all -- the recency slice "
+          f"(calls={exec_calls})")
+    check("recency_diagnostic" in results["waterfall"],
+          f"the recency slice's diagnostic is recorded on the result "
+          f"({results['waterfall'].keys()})")
 
 
 def test_run_coverage_server_error_field_fails_not_skips():
