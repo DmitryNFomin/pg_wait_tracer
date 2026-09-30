@@ -3057,6 +3057,18 @@ void pgwt_compute_interference(const struct pgwt_trace_event *events, int count,
 struct exec_pid_state {
     uint32_t pid;
     int active_row;
+    /* Orphan close: timestamp of the most recent transition INTO an idle
+     * wait observed while active_row was open. A statement that ERRORs, is
+     * cancelled, hits statement_timeout or disconnects never reaches
+     * query__execute__done (PostgreSQL longjmps past it), so its EXEC_END
+     * marker does not exist — but the backend's return to
+     * Client:ClientRead does land in the wait stream, which full mode
+     * captures for every traced pid. This is NOT committed at the idle
+     * record itself: an execution can legitimately contain idle waits
+     * (COPY FROM STDIN stalled on client input), and only a later
+     * EXEC_END / EXEC_START / exit / end-of-stream says which it was. */
+    uint64_t idle_end_ns;
+    int idle_end_valid;
     uint64_t plan_start_ns;
     uint64_t plan_query_id;
     int plan_open;
@@ -3088,6 +3100,30 @@ static int exec_pid_state_get(struct exec_pid_state **states, int *n_states,
     (*states)[idx].pid = pid;
     (*states)[idx].active_row = -1;
     return idx;
+}
+
+/* Close a pid's still-open row at a DEDUCED end and stop tracking it.
+ *
+ * end_ns is always a real record's timestamp (an observed idle transition or
+ * the process-exit sentinel) — never a window bound, never "now". A deduced
+ * end that would precede the row's own start is refused outright: the row
+ * keeps in_progress and reports no duration at all, which is honest, rather
+ * than a negative or invented one. Either way the pid stops pointing at the
+ * row, so no later record can reopen or re-close it. */
+static void exec_close_inferred(struct pgwt_execution *rows, int n_rows,
+                                struct exec_pid_state *st, uint64_t end_ns)
+{
+    if (st->active_row >= 0 && st->active_row < n_rows) {
+        struct pgwt_execution *row = &rows[st->active_row];
+        if (end_ns >= row->start_ns) {
+            row->end_ns = end_ns;
+            row->in_progress = 0;
+            row->end_inferred = 1;
+        }
+    }
+    st->active_row = -1;
+    st->idle_end_ns = 0;
+    st->idle_end_valid = 0;
 }
 
 static int execution_append(struct pgwt_execution **rows, int *n_rows,
@@ -3172,9 +3208,16 @@ void pgwt_compute_executions(const struct pgwt_trace_event *events, int count,
             continue;
         }
         if (marker == PGWT_MARKER_EXEC_START) {
-            /* A second start does not manufacture an end for the first one:
-             * the prior row remains explicitly in progress. */
+            /* A second start does not manufacture an end for the first one.
+             * It DOES settle a deduced one: the pid was observed idle while
+             * the previous row was open and has now started another
+             * execution, so that row certainly ended at the idle boundary.
+             * With no such observation the prior row stays in progress. */
+            if (st->idle_end_valid)
+                exec_close_inferred(rows, n_rows, st, st->idle_end_ns);
             st->active_row = -1;
+            st->idle_end_ns = 0;
+            st->idle_end_valid = 0;
             if (ev->timestamp_ns <= to_ns) {
                 struct pgwt_execution row;
                 memset(&row, 0, sizeof(row));
@@ -3211,7 +3254,12 @@ void pgwt_compute_executions(const struct pgwt_trace_event *events, int count,
                 if (row->query_id == 0)
                     row->query_id = ev->query_id;
             }
+            /* A measured end always wins: any idle boundary observed while
+             * this row was open was INSIDE the execution (COPY FROM STDIN
+             * waiting on its client), not the end of it. */
             st->active_row = -1;
+            st->idle_end_ns = 0;
+            st->idle_end_valid = 0;
             continue;
         }
         if (PGWT_IS_MARKER(marker) ||
@@ -3253,6 +3301,49 @@ void pgwt_compute_executions(const struct pgwt_trace_event *events, int count,
                 }
             }
         }
+        /* exec_pid_state_get above may have reallocated `states`. */
+        st = &states[si];
+
+        if (ev->new_event == PGWT_EVENT_EXIT) {
+            /* The backend is gone. Its execution ended no later than here,
+             * so an open row is closed at the idle boundary if one was
+             * observed and at the exit otherwise — a real timestamp either
+             * way. Then every scrap of per-pid state is dropped: the pid
+             * NUMBER can be reused by a new backend inside the same
+             * capture, and the new backend's records must not be able to
+             * touch this row (nor this backend's leftovers its rows). */
+            exec_close_inferred(rows, n_rows, st,
+                                st->idle_end_valid ? st->idle_end_ns
+                                                   : ev->timestamp_ns);
+            uint32_t pid = st->pid;
+            memset(st, 0, sizeof(*st));
+            st->pid = pid;
+            st->active_row = -1;
+            continue;
+        }
+
+        /* A transition INTO an idle wait while a row is open: the backend
+         * has gone back to waiting for its client. Remember it as the
+         * candidate deduced end; do not commit it here, because an
+         * execution may legitimately contain idle waits (COPY FROM STDIN)
+         * and its own EXEC_END would then be the measured truth. */
+        if (st->active_row >= 0 && st->active_row < n_rows &&
+            pgwt_is_idle_event(ev->new_event) &&
+            ev->timestamp_ns >= rows[st->active_row].start_ns) {
+            st->idle_end_ns = ev->timestamp_ns;
+            st->idle_end_valid = 1;
+        }
+    }
+
+    /* End of stream with a pid still sitting idle and a row still open: the
+     * statement never came back, so the idle boundary is its end. Nothing is
+     * closed here without such an observation — a row with no idle record
+     * and no exit stays in_progress, duration null. */
+    if (!out->failed) {
+        for (int i = 0; i < n_states; i++)
+            if (states[i].active_row >= 0 && states[i].idle_end_valid)
+                exec_close_inferred(rows, n_rows, &states[i],
+                                    states[i].idle_end_ns);
     }
 
     free(worker_last_row);

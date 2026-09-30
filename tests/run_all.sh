@@ -379,6 +379,11 @@ LIVE_TESTS=(
     # justified tiered as the default mode.
     "test_cross_validate_tiered|bash|test_cross_validate_tiered.sh"
     "test_anomaly_live|bash|test_anomaly_live.sh"
+    # The orphan-execution close (src/compute.c): a REAL cancelled statement
+    # in a full-mode capture must leave a CLOSED row with a bounded duration,
+    # not one that grows for the rest of the session. Proves from the raw
+    # trace that no EXEC_END exists for it, so the close can only be deduced.
+    "test_cancel_orphan|python3|test_cancel_orphan.py"
     # T4/CAP-1: a full BPF state_map must be loud (metrics + ERROR log)
     "test_state_map_loud|python3|test_state_map_loud.py"
     # issue #93: live UI smoke — walks all 11 tabs against a REAL daemon +

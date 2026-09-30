@@ -28,6 +28,11 @@ test_durability
 test_query_text
 test_golden_fixture
 test_live_accum
+# The orphan-execution close: a cancelled / errored / timed-out / disconnected
+# statement leaves no EXEC_END, and its row must close at the pid's next
+# observed idle boundary (or its exit) with the deduced end LABELLED —
+# never left growing for the rest of the capture, never fabricated.
+test_compute_orphan_close
 # #202: the offline wait-CPU canary's decision logic (CPU recorded inside a
 # pure sleep, cpu_ns > duration_ns) and every way it could be satisfied
 # without looking at anything.

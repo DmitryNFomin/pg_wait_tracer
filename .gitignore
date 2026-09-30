@@ -29,6 +29,8 @@ tests/test_pg13_resolve
 tests/test_discovery_pie
 tests/test_discovery_nopie
 tests/dump_markers
+tests/dump_exec_markers
+tests/test_compute_orphan_close
 tests/gen_test_traces
 tests/gen_bench_traces
 tests/cross_validate

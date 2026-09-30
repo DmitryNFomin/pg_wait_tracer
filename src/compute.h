@@ -556,6 +556,15 @@ struct pgwt_execution {
     uint64_t plan_end_ns;
     int      has_plan;
     int      in_progress;
+    /* This row never reached a real EXEC_END: PostgreSQL longjmped past
+     * query__execute__done (an ERROR, a cancel, statement_timeout, a
+     * client disconnect) or the marker was lost to a ringbuf drop. end_ns
+     * is still a real wall-clock timestamp taken from a real record — the
+     * moment the backend was next observed idle, or its process exit —
+     * never fabricated from a window bound; but it is DEDUCED, not
+     * measured at the query's own completion. Meaningful only when
+     * in_progress is false. */
+    int      end_inferred;
     int      started_before_window;
     int      matches_event_filter;
     int      n_events;
@@ -573,7 +582,20 @@ struct pgwt_executions_result {
  * same PID when present, and retain unpaired starts explicitly.
  * PLAN_START/END immediately preceding an execution are associated by PID and
  * query_id. Rows are not filtered or truncated here; callers can serve tables
- * and scatter plots from the same complete, honest extraction. */
+ * and scatter plots from the same complete, honest extraction.
+ *
+ * "Unpaired" is bounded, not unbounded. A statement that ERRORs, is
+ * cancelled, hits statement_timeout or disconnects mid-query never reaches
+ * query__execute__done, so no EXEC_END is ever emitted for it. Such a row is
+ * closed at the pid's next observed IDLE boundary in the wait stream (the
+ * backend went back to waiting for its client) or at its process exit,
+ * with end_inferred set. The boundary is committed only once the evidence
+ * says the execution did not continue past it — the pid starts another
+ * execution, the backend exits, or the stream ends with the pid still idle —
+ * so a COPY FROM STDIN stalled on client input INSIDE its execution is still
+ * closed by its own measured EXEC_END. A row with no idle boundary and no
+ * exit at all stays in_progress with a null duration: unresolved, never
+ * closed with a fabricated end. */
 void pgwt_compute_executions(const struct pgwt_trace_event *events, int count,
                              uint64_t from_ns, uint64_t to_ns,
                              const struct pgwt_filter *f,

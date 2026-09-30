@@ -21,8 +21,10 @@ TESTS     = test_wait_event test_cmdline test_spawn test_event_writer test_event
             test_pg13_resolve test_discovery_pie test_discovery_nopie \
             test_replay_fidelity test_durability test_query_text \
             test_golden_fixture test_live_accum \
+            test_compute_orphan_close \
             gen_test_traces gen_bench_traces test_concurrent_rw cross_validate \
-            dump_markers wait_cpu_canary test_wait_cpu_canary
+            dump_markers dump_exec_markers \
+            wait_cpu_canary test_wait_cpu_canary
 
 .PHONY: all clean check
 
@@ -74,6 +76,18 @@ test_bucket: test_bucket.c
 test_live_accum: test_live_accum.c ../src/map_reader.c ../src/snapshot.c \
                  ../src/compute.c \
                  $(BUILD)/wait_event.o $(BUILD)/spawn.o $(BUILD)/cJSON.o
+	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^
+
+# test_compute_orphan_close: pgwt_compute_executions' orphan-row close — a
+# statement that ERRORs / is cancelled / times out / disconnects never reaches
+# query__execute__done, so no EXEC_END marker exists and the row used to stay
+# in_progress (its elapsed-so-far growing for the whole capture, above every
+# genuinely slow query once the waterfall ranks by duration). Compiles
+# compute.c directly with -DPGWT_SERVER and stubs pgwt_visit_summaries, same
+# pattern as test_live_accum. No BPF, no PostgreSQL, no trace files.
+test_compute_orphan_close: test_compute_orphan_close.c ../src/compute.c \
+                           $(BUILD)/wait_event.o $(BUILD)/spawn.o \
+                           $(BUILD)/cJSON.o
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^
 
 # test_pg13_resolve: PG13 MyProc-path offset table + the runtime "refuse on
@@ -263,6 +277,16 @@ test_wait_cpu_canary: test_wait_cpu_canary.c wait_cpu_canary.c \
 # dump_markers: A5 helper — decode escalation-window markers (reason + length)
 # from a trace dir. Used by the live anomaly test to prove an ANOMALY-reason
 # window was recorded. Server build (no BPF skeleton).
+# dump_exec_markers: per-pid EXEC_START / EXEC_END / idle-transition / exit
+# evidence straight out of a trace dir. tests/test_cancel_orphan.py needs it
+# to prove the cancelled statement really has NO EXEC_END — otherwise "the
+# row is closed" could be a normal completion and the test would pass while
+# the defect it exists for was never reproduced.
+dump_exec_markers: dump_exec_markers.c $(BUILD)/server_event_reader.o \
+              $(BUILD)/server_event_writer.o $(BUILD)/server_wait_event.o \
+              $(BUILD)/server_spawn.o $(BUILD)/server_cJSON.o
+	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -llz4 -lz
+
 dump_markers: dump_markers.c $(BUILD)/server_event_reader.o \
               $(BUILD)/server_event_writer.o $(BUILD)/server_wait_event.o \
               $(BUILD)/server_spawn.o $(BUILD)/server_cJSON.o
