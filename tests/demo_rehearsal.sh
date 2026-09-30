@@ -95,6 +95,20 @@ DURATION_MIN="${DURATION_MIN:-35}"
 DURATION_S=$(python3 -c "print(int(float(\"$DURATION_MIN\") * 60))")
 PORT="${PGWT_DEMO_PORT:-8385}"
 
+# Retention (docs/DEMO_DELIVERY_QUEUE.md item 2): OFF by default -- a
+# 40-minute --mode full trace is large, and the default path stays cheap.
+# When "1", cleanup() below keeps TRACE_DIR (moved to
+# tests/results/demo_rehearsal/trace/, which scripts/demo-rehearsal.sh
+# already rsyncs back unmodified -- no new sync path needed) instead of
+# deleting it, and demo_rehearsal.py additionally saves the raw aas/
+# time_model responses its cross-tab checks queried. Exported so the
+# python child (PGWT_RETAIN_TRACE) sees it regardless of whether the
+# caller set it (then it is already in the environment) or left it to
+# this script's own default.
+RETAIN_TRACE="${RETAIN_TRACE:-0}"
+export RETAIN_TRACE
+export PGWT_RETAIN_TRACE="$RETAIN_TRACE"
+
 TRACE_DIR=$(mktemp -d /tmp/pgwt_demo_XXXXXX)
 DAEMON_LOG=$(mktemp /tmp/pgwt_demo_daemon_XXXXXX.log)
 BRIDGE_LOG=$(mktemp /tmp/pgwt_demo_bridge_XXXXXX.log)
@@ -143,7 +157,22 @@ cleanup() {
     done
     leftover="$(echo "$leftover" | sed '/^$/d')"
 
-    rm -rf "$TRACE_DIR"
+    if [[ "$RETAIN_TRACE" == "1" ]]; then
+        # tests/results/demo_rehearsal/ (never /tmp) so scripts/demo-
+        # rehearsal.sh's EXISTING rsync of that one directory picks this up
+        # too -- no separate sync path to add or keep in sync.
+        retain_dir="$PROJECT_DIR/tests/results/demo_rehearsal/trace"
+        rm -rf "$retain_dir"
+        mkdir -p "$(dirname "$retain_dir")"
+        if mv "$TRACE_DIR" "$retain_dir" 2>/dev/null; then
+            echo "demo_rehearsal: RETAIN_TRACE=1 -- kept the trace dir at $retain_dir (syncs back with tests/results/demo_rehearsal/)"
+        else
+            echo "demo_rehearsal: RETAIN_TRACE=1 but mv $TRACE_DIR -> $retain_dir failed -- removing it instead of leaking it in /tmp" >&2
+            rm -rf "$TRACE_DIR"
+        fi
+    else
+        rm -rf "$TRACE_DIR"
+    fi
     rm -f "$DAEMON_LOG" "$BRIDGE_LOG" "$WORKLOAD_LOG" "$PGBENCH_LOG"
 
     if [[ -n "$leftover" ]]; then
