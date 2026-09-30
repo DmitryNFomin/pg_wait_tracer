@@ -626,28 +626,44 @@ def frame_dims_ok(blink_sweep_ticks, tolerance_px=FRAME_DIMS_TOLERANCE_PX):
     box_height, which is the panel's full (pre-viewport-clip) size, not
     what was actually captured.
 
-    Unlike capture_budget_ok, a frame this check cannot evaluate --
-    frame_dims_px entry is None (capture failed/missing), or the tick's
-    panel_dims has no clip_width/clip_height to compare against -- is a
-    VIOLATION, not a skip. capture_budget_ok's skip is safe because an
-    unmeasured capture_ms is optional instrumentation with an independent
-    "not measured" signal elsewhere (MIN_MEASURED_FRACTION); this check IS
-    the instrument for the dimension regression, so a tick it cannot see
-    into gives it zero power to catch that regression on that tick -- a
-    gate that cannot see must refuse, never silently approve. (A tick with
-    genuinely zero attempted frames -- frame_dims_px itself absent/empty --
-    is still vacuous: there is nothing to have gotten wrong, and ticks_ok/
-    measured_ok already fail a tab that never captured anything.)
+    Unlike capture_budget_ok, a frame this check cannot evaluate -- a
+    tick's frame_dims_px is itself missing/empty, an individual entry is
+    None (capture failed/missing), or the tick's panel_dims has no
+    clip_width/clip_height to compare against -- is a VIOLATION, not a
+    skip, in EVERY one of those cases, with no carve-out. This check
+    stands alone: it does not lean on ticks_ok/measured_ok to catch the
+    "nothing was measured this tick" case on its behalf, because that
+    makes this gate's correctness depend on another gate's behaviour
+    rather than its own (review finding: an earlier version treated a
+    tick with no frame_dims_px key at all as vacuous, reasoning that
+    ticks_ok/measured_ok already fail that tab -- true today, but not a
+    property of THIS function, and the contract is explicit: fail loudly
+    on a missing frame or missing dimensions rather than skipping).
+    capture_budget_ok's skip is safe because an unmeasured capture_ms is
+    optional instrumentation with an independent "not measured" signal
+    elsewhere (MIN_MEASURED_FRACTION); this check IS the instrument for
+    the dimension regression, so a tick it cannot see into gives it zero
+    power to catch that regression on that tick -- a gate that cannot see
+    must refuse, never silently approve.
 
-    Returns (ok, detail) -- detail names every offending tick+frame so a
-    real regression (or a missing-measurement bug) is diagnosable from
-    summary.json alone."""
+    The only case that is NOT a violation is the outer list itself being
+    empty (frame_dims_ok([]) -- no ticks existed to attempt anything in),
+    same trivial-pass idiom every verdict function in this module uses for
+    "there was nothing here to check".
+
+    Returns (ok, detail) -- detail names every offending tick (+frame,
+    where applicable) so a real regression (or a missing-measurement bug)
+    is diagnosable from summary.json alone."""
     violations = []
     for i, tick in enumerate(blink_sweep_ticks, start=1):
-        frame_dims = tick.get("frame_dims_px") or []
+        frame_dims = tick.get("frame_dims_px")
         panel_dims = tick.get("panel_dims") or {}
         clip_w = panel_dims.get("clip_width")
         clip_h = panel_dims.get("clip_height")
+        if not frame_dims:
+            violations.append(
+                f"tick {i}: no frame dimensions recorded (frame_dims_px missing/empty)")
+            continue
         for j, fd in enumerate(frame_dims, start=1):
             if fd is None:
                 violations.append(f"tick {i} frame {j}: missing frame")
@@ -687,69 +703,97 @@ def frame_spacing_drift_ms(tick):
     return [achieved[i] - targets[i] for i in range(n)]
 
 
-# Derivation, verified against artifacts (not asserted -- CLAUDE.md
-# evidence rule):
+# Derivation, verified against RETAINED artifacts a reviewer can open
+# directly (tests/results/ui_live_gate1_healthy_run{1,2}/summary.json,
+# tests/results/ui_live_gate2_healthy_run{1,2}/summary.json,
+# tests/results/ui_live_gate1_bypass/summary.json,
+# tests/results/ui_live_gate2_bypass/summary.json -- CLAUDE.md evidence
+# rule: a number is checkable from a path, not asserted from a run id
+# nobody can open. An earlier version of this comment cited issue #252's
+# own run 1790716019 for the regression floor; that run is not retained
+# anywhere this repo's evidence trail can reach, so it has been replaced
+# below with numbers from this branch's own bypass runs instead):
 #
-#   Healthy, gate-1 (root@2.28.45.47), 11 tabs x 6 ticks, frames 2-5
-#   (drift indices 1-4, i.e. achieved/target offsets 500/1000/1500/2000ms)
-#   of ticks 2..N:
-#     .claude/worktrees/window-clip-aggregates/tests/results/ui_live/
-#     summary.json -- max drift 27ms (histogram, tick 5, frame 4).
+#   Healthy, BOTH gate boxes, 2 runs each (44 tab-ticks x 11 tabs x 6
+#   ticks): max drift 44ms (gate-1 run 1, queries, tick 3, frame 4) --
+#   every other of the 4 runs' own max is lower (35/30/31ms). This
+#   includes frames 3-5 of tick 1 (see the partial tick-1 exemption
+#   below) -- the 44ms max is NOT from tick 1 in any of the 4 runs, i.e.
+#   including tick 1's frames 3-5 in the gated population did not move
+#   the healthy ceiling at all.
 #
-#   Tick 1 is excluded WHOLE, not merely its frame 1 (the 200ms target).
-#   The SAME artifact shows tick 1's own frame 2 (index 1, not just index
-#   0) elevated on every one of the 11 tabs -- from 3ms (waterfall) to
-#   254ms (timeline) -- because the sweep's mount-anchor clock starts late
-#   on the run's first tick (77-500ms of pre-sweep work: page navigation,
-#   first AAS fetch, first ViewManager mount) and that fixed offset still
-#   shows up at the SECOND target before later, larger inter-offset gaps
-#   absorb it. Example per-tab tick-1 drift (ms, frames 1-5): timeline
-#   [492, 254, 11, 17, 14], transitions [267, 192, 17, 14, 12], matrix
-#   [242, 166, 9, 10, 10]. An earlier reading of this bound excluded only
-#   frame 1 of every tick, leaving tick 1's 254ms frame-2 drift in scope --
-#   only 1.4x below the regression floor below, nowhere near the >10x
-#   separation actually available. Excluding the whole first tick is what
-#   reproduces the <=30ms healthy number.
+#   Tick 1's frames 1-2 ONLY are excluded, not the whole tick. The same
+#   artifacts show tick 1's frame 2 (drift index 1) elevated on every one
+#   of the 11 tabs on gate-1 run 1 -- 3ms (waterfall) to 254ms (timeline)
+#   -- because the sweep's mount-anchor clock starts late on the run's
+#   first tick (77-500ms of pre-sweep work: page navigation, first AAS
+#   fetch, first ViewManager mount) and that fixed offset still shows up
+#   at the SECOND target before later, larger inter-offset gaps absorb
+#   it. But tick 1's frames 3-5 are NOT elevated by this effect -- e.g.
+#   timeline's own tick-1 drift (ms, frames 1-5) was [492, 254, 11, 17,
+#   14], transitions [267, 192, 17, 14, 12], matrix [242, 166, 9, 10,
+#   10]: the startup effect is gone by frame 3. A regression confined to
+#   tick 1's LATER frames would be invisible under a whole-tick exemption
+#   with no artifact justifying that width -- so only frames 1-2 of tick
+#   1 get it; frames 3-5 of tick 1 are gated exactly like any other
+#   tick's frames 2-5.
 #
-#   Regression floor, issue #252's own run 1790716019 (DPR2, viewport clip
-#   already in place, scale="css" NOT yet added): capture cost
-#   648-1086ms/frame against SWEEP_OFFSETS_MS's 300/500ms inter-frame
-#   gaps -- drift >=350ms at frame 2, accumulating to 1.5-4s by frame 5.
+#   Regression floor: this branch's own bypass runs (scale="css" removed,
+#   same runs frame_dims_ok's bypass evidence comes from) -- gate-1's
+#   bypass run alone produced 74 frame-tick drifts over 100ms, ranging
+#   102-480ms (min: overview tick 2 frame 3; max: sessions tick 2 frame
+#   4); gate-2's bypass run produced one, at 165ms (queries tick 1 frame
+#   3) -- gate-2's regression showed up almost entirely as frame_dims_ok
+#   violations instead (10/10 measurable tabs), which is expected: a
+#   doubled-pixel-count capture does not have to land outside every
+#   inter-offset gap to still be the wrong size, so frame_spacing_ok is a
+#   secondary, less deterministic signal for this specific regression --
+#   frame_dims_ok is the primary, always-fires-on-the-cause one.
 #
-#   27ms healthy vs 350ms regression floor: ~13x separation. Bound set at
-#   100ms -- >3.5x clear of the healthy max, >3.5x below the regression
-#   floor, deliberately centered rather than tight (contract: do not set
-#   it tight).
+#   44ms healthy ceiling vs 102ms minimum observed regression drift: the
+#   100ms bound sits between them, comfortably above the verified healthy
+#   ceiling (>2x clear) and already exceeded by the smallest violation
+#   actually observed under the real regression -- not tight, and not
+#   asserted past what these retained runs show.
 FRAME_SPACING_DRIFT_BOUND_MS = 100.0
 
 
 def frame_spacing_ok(blink_sweep_ticks, bound_ms=FRAME_SPACING_DRIFT_BOUND_MS):
-    """Bounds frames 2-5's achieved-vs-target offset drift (frame_spacing_
-    drift_ms indices 1-4) for every tick EXCEPT the first -- see
-    FRAME_SPACING_DRIFT_BOUND_MS's own comment for why tick 1 and frame 1
-    are both excluded, with the artifact numbers that justify it. This is
-    what CAPTURE_MS_BOUND_MS was actually trying to protect: once a
-    frame's own capture cost exceeds the gap to the NEXT sweep offset,
-    achieved_offsets_ms drifts away from target_offsets_ms and the sweep
-    stops sampling where SWEEP_OFFSETS_MS says it should -- bounding that
-    directly, rather than inferring it from a raw wall-clock budget.
+    """Bounds frames 2-5's achieved-vs-target offset drift
+    (frame_spacing_drift_ms indices 1-4) for every tick, EXCEPT tick 1's
+    own frames 1-2 (drift indices 0-1) -- see FRAME_SPACING_DRIFT_BOUND_MS's
+    own comment for why that exemption is scoped to exactly those two
+    frames of exactly that one tick, with the artifact numbers that
+    justify it (review finding: an earlier version excluded tick 1
+    WHOLE, which the evidence did not support -- tick 1's frames 3-5 are
+    not elevated, so a regression confined to them would have passed
+    silently). This is what CAPTURE_MS_BOUND_MS was actually trying to
+    protect: once a frame's own capture cost exceeds the gap to the NEXT
+    sweep offset, achieved_offsets_ms drifts away from target_offsets_ms
+    and the sweep stops sampling where SWEEP_OFFSETS_MS says it should --
+    bounding that directly, rather than inferring it from a raw wall-clock
+    budget.
 
     Like frame_dims_ok (and unlike capture_budget_ok): a tick within scope
-    (i > 1) that has fewer than 5 achieved offsets is not silently
-    skipped -- frame_spacing_drift_ms's own truncate-to-shorter behavior
-    means a tick record with no offsets at all (frame_spacing_drift_ms
-    returns []) is vacuous (nothing to have gotten wrong, same as
-    frame_dims_ok's zero-attempt case), but any offset that WAS recorded
-    is compared.
+    that has fewer than 5 achieved offsets is not silently skipped --
+    frame_spacing_drift_ms's own truncate-to-shorter behavior means a
+    tick record with no offsets at all in its checked range
+    (frame_spacing_drift_ms returns [] or something shorter than the
+    checked slice) is vacuous for whatever part is missing (nothing to
+    have gotten wrong there), but any offset that WAS recorded is
+    compared.
 
     Returns (ok, detail) -- detail names every offending tick+frame's own
     drift so a real regression is diagnosable from summary.json alone."""
     violations = []
     for i, tick in enumerate(blink_sweep_ticks, start=1):
-        if i == 1:
-            continue  # tick 1 excluded -- see FRAME_SPACING_DRIFT_BOUND_MS
         drift = frame_spacing_drift_ms(tick)
-        for idx, d in enumerate(drift[1:5], start=2):  # frames 2-5
+        # Tick 1: only frames 1-2 (drift indices 0-1) are exempt -- start
+        # checking at frame 3 (index 2). Every other tick: only frame 1
+        # (index 0) is exempt -- start checking at frame 2 (index 1). See
+        # FRAME_SPACING_DRIFT_BOUND_MS's own comment for the evidence.
+        start_idx = 2 if i == 1 else 1
+        for idx, d in enumerate(drift[start_idx:5], start=start_idx + 1):
             if abs(d) > bound_ms:
                 violations.append(
                     f"tick {i} frame {idx}: drift={d}ms > {bound_ms:.0f}ms bound")

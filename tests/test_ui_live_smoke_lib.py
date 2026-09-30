@@ -492,10 +492,16 @@ def test_capture_budget_ok_no_ticks_at_all_trivially_passes():
 
 def test_build_tab_result_capture_budget_reported_but_does_not_gate_ok():
     # An otherwise-clean tab with in-budget capture cost: capture_budget
-    # still reports True, tab still passes.
+    # still reports True, tab still passes. frame_dims_px/panel_dims are
+    # filled in (matching, well within tolerance) so frame_dims_ok isn't
+    # ALSO failing this tick for an unrelated reason (frame_dims_ok, this
+    # issue, fails loudly on a tick with no recorded dims -- see its own
+    # tests) -- this test isolates capture_budget's own demotion.
     tick_pass = {"target_offsets_ms": [200], "achieved_offsets_ms": [205],
                 "capture_ms": [50.0], "capture_ms_total_ms": 50.0,
-                "panel_dims": {}, "ratios": [], "notes": []}
+                "panel_dims": {"clip_width": 100.0, "clip_height": 50.0},
+                "frame_dims_px": [{"width": 100.0, "height": 50.0}],
+                "ratios": [], "notes": []}
     result = lib.build_tab_result(
         "sessions", True, "6 rows", 6, [], 0.0, [],
         {"charts": 0, "uplots": 0, "pending": 0},
@@ -515,12 +521,15 @@ def test_build_tab_result_capture_budget_over_bound_no_longer_fails_tab():
     # mis-specified (red on unmodified, healthy master) and frame_dims_ok/
     # frame_spacing_ok are what actually gate the regression this bound was
     # trying to catch. Same tick shape as the old (pre-demotion) "fails
-    # tab" case -- small, in-bound drift and no frame_dims_px key (vacuous
-    # for frame_dims_ok) -- so only capture_budget itself is over bound.
+    # tab" case -- small, in-bound drift -- plus matching frame_dims_px/
+    # panel_dims (frame_dims_ok, this issue, fails loudly on a tick with
+    # no recorded dims) so only capture_budget itself is over bound.
     tick_over = {"target_offsets_ms": [200, 500, 1000, 1500, 2000],
                 "achieved_offsets_ms": [205, 510, 1010, 1515, 2020],
                 "capture_ms": [120.0, 115.0, 130.0, 118.0, 122.0],
-                "capture_ms_total_ms": 605.0, "panel_dims": {},
+                "capture_ms_total_ms": 605.0,
+                "panel_dims": {"clip_width": 100.0, "clip_height": 50.0},
+                "frame_dims_px": [{"width": 100.0, "height": 50.0}] * 5,
                 "ratios": [0.0, 0.0, 0.0, 0.0], "notes": []}
     result = lib.build_tab_result(
         "sessions", True, "6 rows", 6, [], 0.0, [],
@@ -617,14 +626,30 @@ def test_frame_dims_ok_no_ticks_at_all_trivially_passes():
     check(detail is None, "no detail text for the trivial case")
 
 
-def test_frame_dims_ok_tick_with_no_frames_attempted_is_vacuous():
-    # A tick with no frame_dims_px key at all (e.g. a caller/fixture that
-    # never attempted a capture) is NOT the same as a tick that attempted
-    # and got None back -- there is nothing to have gotten wrong here, and
-    # ticks_ok/measured_ok already fail a tab that never captured anything.
+def test_frame_dims_ok_tick_with_missing_frame_dims_px_fails_loudly():
+    # Review finding: an earlier version treated a tick with no
+    # frame_dims_px key at all as vacuous, reasoning that ticks_ok/
+    # measured_ok already fail a tab that never captured anything -- true
+    # today, but it made THIS gate's correctness depend on ANOTHER gate's
+    # behaviour, which the contract explicitly ruled out ("fail loudly on
+    # a missing frame or missing dimensions rather than skipping" --
+    # applies to the tick's OWN frame_dims_px being missing, not just an
+    # individual entry within a non-empty list). Only the empty-LIST case
+    # (frame_dims_ok([]) -- no ticks existed at all) stays vacuous; a
+    # single tick with nothing recorded does not.
     ticks = [{"panel_dims": {}}]
     ok, detail = lib.frame_dims_ok(ticks)
-    check(ok is True, f"zero attempted frames this tick is vacuous, not a violation ({detail!r})")
+    check(ok is False, f"a tick missing frame_dims_px entirely is a violation, not a skip ({detail!r})")
+    check(detail is not None and "tick 1" in detail and "frame_dims_px" in detail,
+          f"names the tick and what's missing ({detail!r})")
+
+
+def test_frame_dims_ok_tick_with_empty_frame_dims_px_list_fails_loudly():
+    # Same as above but an explicit empty list rather than a missing key
+    # -- both are "nothing recorded", both must fail the same way.
+    ticks = [{"frame_dims_px": [], "panel_dims": {"clip_width": 100.0, "clip_height": 50.0}}]
+    ok, detail = lib.frame_dims_ok(ticks)
+    check(ok is False, f"an explicit empty frame_dims_px list is also a violation ({detail!r})")
 
 
 def test_build_tab_result_frame_dims_gates_ok():
@@ -682,25 +707,36 @@ def test_frame_spacing_drift_ms_mismatched_lengths_truncates_not_crashes():
           "a short achieved_offsets_ms truncates to the shorter length, never raises")
 
 
-def _spacing_tick(tick_i, drifts_from_200_500_1000_1500_2000):
+def _spacing_tick(tick_i, drifts_from_200_500_1000_1500_2000, with_dims=True):
     targets = [200, 500, 1000, 1500, 2000]
     achieved = [t + d for t, d in zip(targets, drifts_from_200_500_1000_1500_2000)]
-    return {"target_offsets_ms": targets, "achieved_offsets_ms": achieved}
+    tick = {"target_offsets_ms": targets, "achieved_offsets_ms": achieved}
+    if with_dims:
+        # Matching, in-tolerance dims by default so a test built on this
+        # helper and fed through build_tab_result isolates frame_spacing
+        # -- frame_dims_ok (this issue) fails loudly on a tick with no
+        # recorded dims, so a caller that only cares about spacing still
+        # needs SOMETHING here to keep dims green.
+        tick["panel_dims"] = {"clip_width": 100.0, "clip_height": 50.0}
+        tick["frame_dims_px"] = [{"width": 100.0, "height": 50.0}] * 5
+    return tick
 
 
 def test_frame_spacing_ok_within_bound_passes():
-    # Healthy shape from the artifact (window-clip-aggregates, tick 5,
-    # histogram): frame-2..5 drift stays under the 27ms observed max.
+    # Healthy shape from a retained run (tests/results/ui_live_gate1_
+    # healthy_run1/summary.json): frame-2..5 drift stays under the 44ms
+    # observed max, INCLUDING tick 1's own frames 3-5 (not elevated).
     ticks = [_spacing_tick(1, [492, 254, 11, 17, 14])] + \
             [_spacing_tick(i, [30, 5, 10, 15, 20]) for i in range(2, 7)]
     ok, detail = lib.frame_spacing_ok(ticks)
-    check(ok is True, f"healthy drift (tick 1 excluded) passes ({detail!r})")
+    check(ok is True, f"healthy drift (tick 1 frames 1-2 excluded) passes ({detail!r})")
 
 
 def test_frame_spacing_ok_over_bound_fails():
     # THE regression case (contract (c)): a 400ms drift at frame 2 --
-    # #252's own regression floor (>=350ms) rounded up past the 100ms
-    # bound by a wide margin, not a borderline value.
+    # well past the 100ms bound (this branch's own bypass evidence puts
+    # the real regression floor at 102-480ms; 400 sits inside that, not a
+    # borderline value picked to just clear the bound).
     ticks = [_spacing_tick(1, [30, 5, 10, 15, 20]),
             _spacing_tick(2, [30, 400, 10, 15, 20])]
     ok, detail = lib.frame_spacing_ok(ticks)
@@ -709,20 +745,34 @@ def test_frame_spacing_ok_over_bound_fails():
           f"the offending tick and frame are named ({detail!r})")
 
 
-def test_frame_spacing_ok_excludes_tick_1():
+def test_frame_spacing_ok_excludes_only_tick_1_frames_1_and_2():
     # Tick 1's own elevated frame-1/frame-2 drift (mount-anchor clock
     # starting late on the run's first tick -- FRAME_SPACING_DRIFT_BOUND_MS's
-    # own comment, verified against window-clip-aggregates/summary.json:
-    # timeline tick 1 was [492, 254, 11, 17, 14]) must NOT fail the tab by
-    # itself.
+    # own comment) must NOT fail the tab by itself -- but its frames 3-5
+    # (drift indices 2-4) are NOT part of that exemption and stay gated.
     ticks = [_spacing_tick(1, [492, 254, 11, 17, 14])]
     ok, detail = lib.frame_spacing_ok(ticks)
-    check(ok is True, f"tick 1 alone, however drifted, is excluded ({detail!r})")
+    check(ok is True, f"tick 1's frames 1-2, however drifted, are excluded ({detail!r})")
 
 
-def test_frame_spacing_ok_excludes_frame_1():
+def test_frame_spacing_ok_tick_1_frames_3_to_5_still_gated():
+    # Review blocker: an earlier version excluded tick 1 WHOLE, so a
+    # regression confined to its LATER frames (3-5) passed silently. This
+    # is the red/green pair that proves that gap is closed: frame 3's
+    # drift here (300ms) is well past the bound, and nothing about it
+    # being tick 1 should excuse it.
+    ticks = [_spacing_tick(1, [492, 254, 300, 17, 14])]
+    ok, detail = lib.frame_spacing_ok(ticks)
+    check(ok is False,
+          f"a regression in tick 1's frame 3 (outside the frames-1-2 exemption) must fail ({detail!r})")
+    check(detail is not None and "tick 1 frame 3" in detail and "300" in detail,
+          f"names tick 1 explicitly, not just 'some tick' ({detail!r})")
+
+
+def test_frame_spacing_ok_excludes_frame_1_on_every_tick():
     # Frame 1 (the 200ms target, drift index 0) is excluded on EVERY tick,
-    # not just tick 1 -- only frames 2-5 (indices 1-4) are bounded.
+    # not just tick 1 -- only frames 2-5 (indices 1-4) are bounded on a
+    # non-tick-1 tick.
     ticks = [_spacing_tick(2, [900, 5, 10, 15, 20])]  # huge frame-1 drift only
     ok, detail = lib.frame_spacing_ok(ticks)
     check(ok is True, f"frame 1's own drift never gates, on any tick ({detail!r})")
@@ -743,6 +793,8 @@ def test_build_tab_result_frame_spacing_gates_ok():
         blink_pair_offsets_ms=[10] * 6, blink_sweep_ticks=ticks)
     check(result["frame_spacing"]["ok"] is True,
           f"well-spaced frames pass ({result['frame_spacing']})")
+    check(result["frame_dims"]["ok"] is True,
+          f"dims stay clean too (_spacing_tick's default matching dims) ({result['frame_dims']})")
     check(result["ok"] is True, "a clean tab with well-spaced frames passes overall")
 
 
@@ -763,8 +815,9 @@ def test_build_tab_result_frame_spacing_over_bound_fails_tab():
     check(result["frame_spacing"]["ok"] is False,
           f"400ms drift at tick 2 frame 2 must be flagged ({result['frame_spacing']})")
     check(result["frame_dims"]["ok"] is True and result["capture_budget"]["ok"] is True,
-          "isolating the claim: dims/capture_budget are clean here (both ticks omit "
-          "frame_dims_px/capture_ms, vacuously passing), only spacing is over")
+          "isolating the claim: dims/capture_budget are clean here (_spacing_tick's "
+          "matching dims, no capture_ms recorded -> vacuous for capture_budget), only "
+          "spacing is over")
     check(result["ok"] is False,
           "a frame-spacing (drift) regression fails the WHOLE tab, even though "
           "rendered/clean/no_blink/measured/no_leak/ticks/dims/capture_budget are "
