@@ -76,18 +76,29 @@ SWEEP_OFFSETS_MS = (200, 500, 1000, 1500, 2000)
 # untouched.
 MIN_MEASURED_FRACTION = 0.5
 
-# issue #252 review round 1 finding 1: capture_ms/capture_ms_total_ms were
-# REPORT-ONLY -- no `.sh`, no check in demo_rehearsal.py, no criteria row
-# read them. Concretely: if a later refactor drops scale="css"
-# (_capture_with_clip), per-frame cost reverts to ~120ms and a sweep to
-# ~600ms; that still fits inside the 5s tick, so no sweep straddles a
-# mount, MIN_MEASURED_FRACTION stays satisfied, and NOTHING goes red --
-# the number sits in a JSON nobody reads until the next 40-minute
-# rehearsal, exactly the path #252 itself took to escape four PR gates.
-# CAPTURE_MS_BOUND_MS closes that: a generous bound (well clear of the
-# ~130-235ms measured on gate-2 at DPR2 after the #252 fix) that exists to
-# catch a regression back to the OLD ~600ms/sweep regime, not to police
-# normal variance -- see capture_budget_ok below.
+# issue #252 review round 1 finding 1 introduced CAPTURE_MS_BOUND_MS/
+# capture_budget_ok as a GATE on raw capture_ms_total_ms wall-clock time
+# (merged 44812c9). It was mis-specified: its own comment cited "~600ms/
+# sweep" as the regression regime, but that number is actually the OLD
+# DPR1 walk's HEALTHY cost (scale="css" changes nothing at DPR1;
+# .claude/worktrees/aas-agreement-and-retention/tests/results/ui_live/
+# summary.json: 302-545ms/sweep, 55-135ms/frame). The bound (800ms) was
+# red on an unmodified, healthy master within a day of merging: gate-1
+# measured 374-1156ms/sweep (window-clip-aggregates worktree's own
+# summary.json, same path pattern), closest miss "overview" at 802.7ms.
+#
+# Demoted to reporting-only (this issue): capture_ms/capture_ms_total_ms
+# stay in the artifact as evidence, and CAPTURE_MS_BOUND_MS stays as the
+# number a human skims against, but capture_budget_ok's result is no
+# longer read into build_tab_result's `ok`. What raw capture time was
+# actually trying to protect -- "did the sweep stop landing where
+# SWEEP_OFFSETS_MS says it should" -- is now gated directly by
+# frame_spacing_ok (achieved-vs-target drift) and frame_dims_ok (decoded
+# frame size vs the clip's own CSS dims), below. Do not re-add this to
+# `ok`: a slow-but-correctly-sized, correctly-spaced capture is not the
+# defect either of those two exists to catch, and this bound's own
+# calibration history (above) is why guessing a wall-clock number instead
+# of measuring the actual failure mode doesn't work.
 CAPTURE_MS_BOUND_MS = 800.0
 
 # KNOWN_FAILING_TABS: tab name -> tracking issue number. ONLY for a tab that
@@ -528,10 +539,24 @@ def build_sweep_tick_record(achieved_offsets_ms, frames,
     measurement per tick to report, not one per frame). {} (not a missing
     key) for a caller that doesn't measure it.
 
+    frame_dims_px (this issue): derived from `frames` itself, not a
+    caller-supplied argument -- one {"width", "height"} dict (CSS px, from
+    the decoded array's own (H, W, 3) shape) or None per entry of `frames`,
+    same order. This is the DIRECT evidence frame_dims_ok gates on: the
+    clip requested (panel_dims.clip_width/clip_height) vs what the
+    screenshot actually decoded to. Derived here rather than passed in
+    because `frames` (the decoded arrays) is already this function's own
+    input -- a caller has no extra measurement to take.
+
     Pure: no page access. Kept here (not inline in ui_live_smoke.py) so the
     achieved-offsets-in, ratios-out shape has its own unit test."""
     pairs = sweep_consecutive_diff_ratios(frames)
     capture_ms_list = list(capture_ms) if capture_ms else []
+    frame_dims_px = [
+        {"width": float(f.shape[1]), "height": float(f.shape[0])}
+        if f is not None else None
+        for f in frames
+    ]
     return {
         "target_offsets_ms": list(target_offsets_ms),
         "achieved_offsets_ms": list(achieved_offsets_ms),
@@ -539,17 +564,21 @@ def build_sweep_tick_record(achieved_offsets_ms, frames,
         "capture_ms_total_ms": sum(capture_ms_list),
         "mount_seq": mount_seq,
         "panel_dims": dict(panel_dims) if panel_dims else {},
+        "frame_dims_px": frame_dims_px,
         "ratios": [ratio for ratio, _note in pairs],
         "notes": [note for _ratio, note in pairs if note],
     }
 
 
 def capture_budget_ok(blink_sweep_ticks, bound_ms=CAPTURE_MS_BOUND_MS):
-    """issue #252 review round 1 finding 1: the per-tick assertion that
-    closes the "capture_ms is report-only" escape path -- see
-    CAPTURE_MS_BOUND_MS's own comment for the regression this exists to
-    catch. blink_sweep_ticks: a tab's blink_sweep.ticks list (one
-    build_sweep_tick_record() dict per tick).
+    """Reporting-only (this issue demoted it out of build_tab_result's
+    `ok` -- see CAPTURE_MS_BOUND_MS's own comment for why: the bound was
+    calibrated against the wrong regime and was red on unmodified, healthy
+    master). Still computed and still carried into summary.json's
+    capture_budget.ok/detail so the raw number stays visible to a human
+    skimming the artifact; frame_dims_ok/frame_spacing_ok below are what
+    actually gate now. blink_sweep_ticks: a tab's blink_sweep.ticks list
+    (one build_sweep_tick_record() dict per tick).
 
     Every tick whose capture_ms_total_ms was actually measured (its
     capture_ms list is non-empty -- build_sweep_tick_record's own "[]
@@ -578,6 +607,155 @@ def capture_budget_ok(blink_sweep_ticks, bound_ms=CAPTURE_MS_BOUND_MS):
         f"tick {i}: capture_ms_total_ms={total:.1f}ms > {bound_ms:.0f}ms bound"
         for i, total in over)
     return False, detail
+
+
+# issue (this branch): dimension assertion -- catches the capture-cost
+# regression's CAUSE directly instead of inferring it from wall-clock time.
+# Removing scale="css" at DPR2 (demo_rehearsal.py's pinned viewport;
+# _capture_with_clip's own docstring) doubles every decoded screenshot's
+# pixel dimensions relative to the CSS-px clip that was requested --
+# deterministic, not a timing inference.
+FRAME_DIMS_TOLERANCE_PX = 1.0
+
+
+def frame_dims_ok(blink_sweep_ticks, tolerance_px=FRAME_DIMS_TOLERANCE_PX):
+    """Each decoded frame's dimensions (build_sweep_tick_record's own
+    frame_dims_px, derived from the actually-decoded array) must be within
+    +-tolerance_px of the SAME tick's requested clip dimensions
+    (panel_dims.clip_width/clip_height, CSS px) -- never box_width/
+    box_height, which is the panel's full (pre-viewport-clip) size, not
+    what was actually captured.
+
+    Unlike capture_budget_ok, a frame this check cannot evaluate --
+    frame_dims_px entry is None (capture failed/missing), or the tick's
+    panel_dims has no clip_width/clip_height to compare against -- is a
+    VIOLATION, not a skip. capture_budget_ok's skip is safe because an
+    unmeasured capture_ms is optional instrumentation with an independent
+    "not measured" signal elsewhere (MIN_MEASURED_FRACTION); this check IS
+    the instrument for the dimension regression, so a tick it cannot see
+    into gives it zero power to catch that regression on that tick -- a
+    gate that cannot see must refuse, never silently approve. (A tick with
+    genuinely zero attempted frames -- frame_dims_px itself absent/empty --
+    is still vacuous: there is nothing to have gotten wrong, and ticks_ok/
+    measured_ok already fail a tab that never captured anything.)
+
+    Returns (ok, detail) -- detail names every offending tick+frame so a
+    real regression (or a missing-measurement bug) is diagnosable from
+    summary.json alone."""
+    violations = []
+    for i, tick in enumerate(blink_sweep_ticks, start=1):
+        frame_dims = tick.get("frame_dims_px") or []
+        panel_dims = tick.get("panel_dims") or {}
+        clip_w = panel_dims.get("clip_width")
+        clip_h = panel_dims.get("clip_height")
+        for j, fd in enumerate(frame_dims, start=1):
+            if fd is None:
+                violations.append(f"tick {i} frame {j}: missing frame")
+                continue
+            if clip_w is None or clip_h is None:
+                violations.append(
+                    f"tick {i} frame {j}: missing clip dims to compare against")
+                continue
+            dw = abs(fd["width"] - clip_w)
+            dh = abs(fd["height"] - clip_h)
+            if dw > tolerance_px or dh > tolerance_px:
+                violations.append(
+                    f"tick {i} frame {j}: frame {fd['width']:.0f}x{fd['height']:.0f}px "
+                    f"vs clip {clip_w:.0f}x{clip_h:.0f}px (tolerance {tolerance_px:.0f}px)")
+    if not violations:
+        return True, None
+    return False, "; ".join(violations)
+
+
+def frame_spacing_drift_ms(tick):
+    """Per-frame achieved-minus-target drift (ms) for one tick: same
+    two-line formula as tests/demo_rehearsal_lib.py's sweep_offset_drift
+    (which is reporting-only there, by owner instruction 2026-09-28 --
+    "report the drift; do not try to fix the scheduling in this branch",
+    a decision about THAT branch's coverage-loss diagnosis, not a
+    standing ban on ever gating on drift). Duplicated here as the two-line
+    core rather than imported: ui_live_smoke_lib.py has no other
+    dependency on demo_rehearsal_lib.py, and pulling in a whole sibling
+    harness module for one list comprehension is not worth the coupling.
+
+    tick: a build_sweep_tick_record() dict. Returns a list, one entry per
+    frame present in both target_offsets_ms and achieved_offsets_ms
+    (mismatched/short lists truncate to the shorter, never raise)."""
+    targets = tick.get("target_offsets_ms") or []
+    achieved = tick.get("achieved_offsets_ms") or []
+    n = min(len(targets), len(achieved))
+    return [achieved[i] - targets[i] for i in range(n)]
+
+
+# Derivation, verified against artifacts (not asserted -- CLAUDE.md
+# evidence rule):
+#
+#   Healthy, gate-1 (root@2.28.45.47), 11 tabs x 6 ticks, frames 2-5
+#   (drift indices 1-4, i.e. achieved/target offsets 500/1000/1500/2000ms)
+#   of ticks 2..N:
+#     .claude/worktrees/window-clip-aggregates/tests/results/ui_live/
+#     summary.json -- max drift 27ms (histogram, tick 5, frame 4).
+#
+#   Tick 1 is excluded WHOLE, not merely its frame 1 (the 200ms target).
+#   The SAME artifact shows tick 1's own frame 2 (index 1, not just index
+#   0) elevated on every one of the 11 tabs -- from 3ms (waterfall) to
+#   254ms (timeline) -- because the sweep's mount-anchor clock starts late
+#   on the run's first tick (77-500ms of pre-sweep work: page navigation,
+#   first AAS fetch, first ViewManager mount) and that fixed offset still
+#   shows up at the SECOND target before later, larger inter-offset gaps
+#   absorb it. Example per-tab tick-1 drift (ms, frames 1-5): timeline
+#   [492, 254, 11, 17, 14], transitions [267, 192, 17, 14, 12], matrix
+#   [242, 166, 9, 10, 10]. An earlier reading of this bound excluded only
+#   frame 1 of every tick, leaving tick 1's 254ms frame-2 drift in scope --
+#   only 1.4x below the regression floor below, nowhere near the >10x
+#   separation actually available. Excluding the whole first tick is what
+#   reproduces the <=30ms healthy number.
+#
+#   Regression floor, issue #252's own run 1790716019 (DPR2, viewport clip
+#   already in place, scale="css" NOT yet added): capture cost
+#   648-1086ms/frame against SWEEP_OFFSETS_MS's 300/500ms inter-frame
+#   gaps -- drift >=350ms at frame 2, accumulating to 1.5-4s by frame 5.
+#
+#   27ms healthy vs 350ms regression floor: ~13x separation. Bound set at
+#   100ms -- >3.5x clear of the healthy max, >3.5x below the regression
+#   floor, deliberately centered rather than tight (contract: do not set
+#   it tight).
+FRAME_SPACING_DRIFT_BOUND_MS = 100.0
+
+
+def frame_spacing_ok(blink_sweep_ticks, bound_ms=FRAME_SPACING_DRIFT_BOUND_MS):
+    """Bounds frames 2-5's achieved-vs-target offset drift (frame_spacing_
+    drift_ms indices 1-4) for every tick EXCEPT the first -- see
+    FRAME_SPACING_DRIFT_BOUND_MS's own comment for why tick 1 and frame 1
+    are both excluded, with the artifact numbers that justify it. This is
+    what CAPTURE_MS_BOUND_MS was actually trying to protect: once a
+    frame's own capture cost exceeds the gap to the NEXT sweep offset,
+    achieved_offsets_ms drifts away from target_offsets_ms and the sweep
+    stops sampling where SWEEP_OFFSETS_MS says it should -- bounding that
+    directly, rather than inferring it from a raw wall-clock budget.
+
+    Like frame_dims_ok (and unlike capture_budget_ok): a tick within scope
+    (i > 1) that has fewer than 5 achieved offsets is not silently
+    skipped -- frame_spacing_drift_ms's own truncate-to-shorter behavior
+    means a tick record with no offsets at all (frame_spacing_drift_ms
+    returns []) is vacuous (nothing to have gotten wrong, same as
+    frame_dims_ok's zero-attempt case), but any offset that WAS recorded
+    is compared.
+
+    Returns (ok, detail) -- detail names every offending tick+frame's own
+    drift so a real regression is diagnosable from summary.json alone."""
+    violations = []
+    for i, tick in enumerate(blink_sweep_ticks, start=1):
+        if i == 1:
+            continue  # tick 1 excluded -- see FRAME_SPACING_DRIFT_BOUND_MS
+        drift = frame_spacing_drift_ms(tick)
+        for idx, d in enumerate(drift[1:5], start=2):  # frames 2-5
+            if abs(d) > bound_ms:
+                violations.append(
+                    f"tick {i} frame {idx}: drift={d}ms > {bound_ms:.0f}ms bound")
+    if not violations:
+        return True, None
+    return False, "; ".join(violations)
 
 
 def is_blank_frame(frame, std_threshold=1.0):
@@ -821,11 +999,15 @@ def build_tab_result(tab_id, rendered_ok, rendered_detail, ticks_observed,
     pre_mount_diagnostic_verdict) -- never a fabricated 0.0. Empty for
     every other tab.
 
-    capture_ms_bound_ms (issue #252 review round 1 finding 1): see
-    capture_budget_ok/CAPTURE_MS_BOUND_MS's own comments -- this is what
-    turns capture_ms from report-only into an actual gate, closing the
-    escape path where a capture-cost regression stays invisible as long as
-    it still fits inside one live tick."""
+    capture_ms_bound_ms: see capture_budget_ok/CAPTURE_MS_BOUND_MS's own
+    comments -- capture_budget is REPORTING ONLY now (this issue demoted
+    it out of `ok`: it was mis-specified against the wrong regime and was
+    red on healthy master). frame_dims_ok and frame_spacing_ok (below) are
+    what now close the escape path where a capture-cost regression stays
+    invisible as long as it still fits inside one live tick -- the former
+    catches the regression's cause (decoded frame size vs requested clip)
+    directly, the latter catches its effect on the sweep's own sampling
+    schedule."""
     clean_ok = len(console_errors) == 0
     blink_ok = no_blink_ok(blink_ratio, blink_threshold)
     leak_ok = leak_probe_ok(leak_before) and leak_probe_ok(leak_after)
@@ -836,10 +1018,14 @@ def build_tab_result(tab_id, rendered_ok, rendered_detail, ticks_observed,
     measured_count = attempted_count - not_measured_count
     measured_ok = (attempted_count == 0 or
                    (measured_count / attempted_count) >= min_measured_fraction)
+    # Reporting only (see capture_ms_bound_ms above) -- deliberately NOT
+    # ANDed into `ok`.
     capture_ok, capture_detail = capture_budget_ok(blink_sweep_ticks,
                                                     bound_ms=capture_ms_bound_ms)
+    dims_ok, dims_detail = frame_dims_ok(blink_sweep_ticks)
+    spacing_ok, spacing_detail = frame_spacing_ok(blink_sweep_ticks)
     ok = (rendered_ok and clean_ok and blink_ok and measured_ok and leak_ok and
-          color_ok and ticks_ok and capture_ok)
+          color_ok and ticks_ok and dims_ok and spacing_ok)
     result = {
         "tab": tab_id,
         "ok": ok,
@@ -859,6 +1045,10 @@ def build_tab_result(tab_id, rendered_ok, rendered_detail, ticks_observed,
                         "ticks": list(blink_sweep_ticks)},
         "capture_budget": {"ok": capture_ok, "bound_ms": capture_ms_bound_ms,
                            "detail": capture_detail},
+        "frame_dims": {"ok": dims_ok, "tolerance_px": FRAME_DIMS_TOLERANCE_PX,
+                       "detail": dims_detail},
+        "frame_spacing": {"ok": spacing_ok, "bound_ms": FRAME_SPACING_DRIFT_BOUND_MS,
+                          "detail": spacing_detail},
         "color_stability": {"ok": color_ok, "violations": color_violations},
         "no_leak": {"ok": leak_ok, "before": leak_before, "after": leak_after,
                     "settle_s": {"before": leak_before_settle_s,
@@ -893,6 +1083,10 @@ def build_failed_tab_result(tab_id, reason, ticks_observed=0, artifacts=None,
         "blink_sweep": {"offsets_ms": list(SWEEP_OFFSETS_MS), "ticks": []},
         "capture_budget": {"ok": None, "bound_ms": CAPTURE_MS_BOUND_MS,
                            "detail": None},
+        "frame_dims": {"ok": None, "tolerance_px": FRAME_DIMS_TOLERANCE_PX,
+                       "detail": None},
+        "frame_spacing": {"ok": None, "bound_ms": FRAME_SPACING_DRIFT_BOUND_MS,
+                          "detail": None},
         "color_stability": {"ok": None, "violations": []},
         "no_leak": {"ok": None, "before": None, "after": None,
                     "settle_s": {"before": None, "after": None}},
