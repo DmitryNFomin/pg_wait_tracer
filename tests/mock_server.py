@@ -92,6 +92,16 @@ _BUCKET_NS = 60_000_000_000
 # window's `from` (still exercising the P6 left-edge clamp on a STRADDLING
 # wait — see test_timeline_bar_positions) with the rest fully inside it.
 _TIMELINE_BASE_NS = _TO_NS - 1_020_000_000_000
+
+# #222 review item 3: anchor for the "executions"/"execution_detail" fixture
+# rows, close to _TO_NS (the "now" a real request's `to` carries -- see
+# info.now_ns below) rather than an unrelated ~1e13 epoch. The old fixture
+# used raw ~1e13 start_ns values against a ~1.774e18 `to`, so an in_progress
+# row's elapsed-so-far (`to_ns - start_ns`, _exec_effective_duration_ms
+# below) came out ~56 YEARS, rendering the absurd "≥ 1773990000.0s
+# (running)" in the Waterfall tab's one gallery cell -- fmtExecutionDuration
+# itself was correct, only this fixture's magnitude was not.
+_EXEC_BASE_NS = _TO_NS - 950_000_000
 _COMPARE_MODE = os.environ.get("PGWT_MOCK_COMPARE", "0") not in ("0", "", "false")
 _INFO_TICKS = 0
 
@@ -862,6 +872,9 @@ def _handle_request_inner(cmd, req_id, msg):
     if cmd == "executions":
         filters = msg.get("filters", {})
         qid = str(filters.get("query_id", "100"))
+        # Same relative offsets as before this fixture moved to _EXEC_BASE_NS
+        # (pid 1004 50ms before it, pid 1000 AT it, pid 1010 +50ms, pid 1002
+        # +100ms) -- see _EXEC_BASE_NS's own comment above for why it moved.
         rows = [
             # #222 review: pid 1004 is in_progress and started BEFORE every
             # other row here (not after -- see the comment on
@@ -877,12 +890,13 @@ def _handle_request_inner(cmd, req_id, msg):
             #    default-selection skip logic (pickDefaultExecution) still
             #    has to fire on the DEFAULT view, not just the toggle.
             {"pid": 1004, "query_id": qid,
-             "start_ns": "9999950000000", "end_ns": None,
+             "start_ns": str(_EXEC_BASE_NS - 50_000_000), "end_ns": None,
              "duration_ms": None, "plan_ms": None,
              "n_events": 0, "n_workers": 0, "in_progress": True,
              "end_inferred": False, "started_before_window": False},
             {"pid": 1002, "query_id": qid,
-             "start_ns": "10000100000000", "end_ns": "10000180000000",
+             "start_ns": str(_EXEC_BASE_NS + 100_000_000),
+             "end_ns": str(_EXEC_BASE_NS + 180_000_000),
              "duration_ms": 80.0, "plan_ms": None,
              "n_events": 2, "n_workers": 0, "in_progress": False,
              "end_inferred": False, "started_before_window": False},
@@ -896,12 +910,14 @@ def _handle_request_inner(cmd, req_id, msg):
             # the "closed via CMD_END, not a measured EXEC_END" label (an
             # ERROR/cancel/timeout) -- src/server.c's end_inferred field.
             {"pid": 1010, "query_id": qid,
-             "start_ns": "10000050000000", "end_ns": "10000130000000",
+             "start_ns": str(_EXEC_BASE_NS + 50_000_000),
+             "end_ns": str(_EXEC_BASE_NS + 130_000_000),
              "duration_ms": 80.0, "plan_ms": None,
              "n_events": 1, "n_workers": 0, "in_progress": False,
              "end_inferred": True, "started_before_window": False},
             {"pid": 1000, "query_id": qid,
-             "start_ns": "10000000000000", "end_ns": "10000030001000",
+             "start_ns": str(_EXEC_BASE_NS),
+             "end_ns": str(_EXEC_BASE_NS + 30_001_000),
              "duration_ms": 30.001, "plan_ms": 1.0,
              "n_events": 5, "n_workers": 2, "in_progress": False,
              "end_inferred": False, "started_before_window": False},
@@ -954,7 +970,7 @@ def _handle_request_inner(cmd, req_id, msg):
         filters = msg.get("filters", {})
         pid = filters.get("pid", 1000)
         qid = str(filters.get("query_id", "100"))
-        start = str(msg.get("start_ns", "10000000000000"))
+        start = str(msg.get("start_ns", str(_EXEC_BASE_NS)))
         if pid == 1004:
             # The newest execution's empty detail (issue #101) -- verbatim
             # shape of a real pgwt-server answer for a statement with no
@@ -968,7 +984,8 @@ def _handle_request_inner(cmd, req_id, msg):
             events = [
                 {"we": 0x0100004e, "name": "IO:WalSync",
                  "start_ns": start, "dur_ns": "20000000", "cpu_ns": None},
-                {"we": 0, "name": "CPU*", "start_ns": "10000130000000",
+                {"we": 0, "name": "CPU*",
+                 "start_ns": str(_EXEC_BASE_NS + 130_000_000),
                  "dur_ns": "30000000", "cpu_ns": None},
             ]
             return {"id": req_id, "query_id": qid,
@@ -983,7 +1000,7 @@ def _handle_request_inner(cmd, req_id, msg):
                 "leader": {"pid": pid, "query_id": qid,
                            "events": [event,
                                 {"we": 0, "name": "CPU*",
-                                 "start_ns": "10000012000000",
+                                 "start_ns": str(_EXEC_BASE_NS + 12_000_000),
                                 "dur_ns": "8000000", "cpu_ns": None}],
                            "total_count": 2, "truncated": False},
                 "workers": [
@@ -992,8 +1009,8 @@ def _handle_request_inner(cmd, req_id, msg):
                     {"pid": 1008, "events": [dict(event)],
                      "total_count": 1, "truncated": False},
                 ],
-                "plan": {"start_ns": "9999998000000",
-                         "end_ns": "9999999000000"},
+                "plan": {"start_ns": str(_EXEC_BASE_NS - 2_000_000),
+                         "end_ns": str(_EXEC_BASE_NS - 1_000_000)},
                 "total_count": 4, "kept_count": 4, "truncated": False}
 
     if cmd == "exec_scatter":

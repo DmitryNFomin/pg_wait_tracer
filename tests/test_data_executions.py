@@ -756,6 +756,83 @@ def test_nested_execution_not_truncated(t):
         cleanup_traces(trace_dir)
 
 
+# #222 review (accounting misattribution): the reviewer's own bug
+# description -- a pid errors on A (row stays stacked, no EXEC_END), then
+# runs and finishes B on the same connection. A wait event landing after
+# B's EXEC_END but before anything else touches this pid's stack must be
+# credited to NEITHER row: A did not experience it (A is not running --
+# it is a dead orphan), and B is already closed. Before the
+# top_attributable fix, exec_pid_peek_row(st) handed that event to
+# whatever the pop exposed underneath B -- which is A -- silently
+# inflating a long-dead orphan's n_events (and flipping
+# matches_event_filter on it) for as long as CMD_END never arrives.
+MISATTR_QID_A = 555111
+MISATTR_QID_B = 555222
+
+
+def misattributed_orphan_scenario():
+    pid = 70000
+    events = [
+        marker(pid, BASE, EXEC_START, MISATTR_QID_A),
+        # A's own genuine wait event, while A is legitimately on top.
+        {"pid": pid, "ts": BASE + 1 * MS, "dur": 1 * MS,
+         "old": IO_DATA_FILE_READ, "new": CPU, "qid": MISATTR_QID_A,
+         "cpu": 0},
+        # A errors (no EXEC_END); the same pid runs B next.
+        marker(pid, BASE + 5 * MS, EXEC_START, MISATTR_QID_B),
+        # B's own genuine wait event.
+        {"pid": pid, "ts": BASE + 6 * MS, "dur": 1 * MS,
+         "old": IO_DATA_FILE_READ, "new": CPU, "qid": MISATTR_QID_B,
+         "cpu": 0},
+        marker(pid, BASE + 8 * MS, EXEC_END, MISATTR_QID_B),
+        # Strictly after B's EXEC_END, strictly before CMD_END: the row
+        # this exposes on top of the stack is A, but A must NOT get it.
+        {"pid": pid, "ts": BASE + 9 * MS, "dur": 1 * MS,
+         "old": IO_DATA_FILE_READ, "new": CPU, "qid": MISATTR_QID_A,
+         "cpu": 0},
+        # Only CMD_END may safely close A (see compute.c's own comment).
+        marker(pid, BASE + 20 * MS, CMD_END, MISATTR_QID_A),
+    ]
+    events.sort(key=lambda e: e["ts"])
+    scenario = {
+        "queries": [{"id": MISATTR_QID_A, "text": "SELECT a_errors()"},
+                    {"id": MISATTR_QID_B, "text": "SELECT b_succeeds()"}],
+        "events": events,
+    }
+    return scenario, pid
+
+
+def test_orphan_does_not_absorb_events_after_inner_exec_end(t):
+    print("\n### #222 review: a wait event after an inner EXEC_END pops "
+          "the stack is credited to NEITHER the exposed orphan NOR the "
+          "closed inner row -- not silently mis-attributed to whichever "
+          "row the pop happened to reveal ###")
+    scenario, pid = misattributed_orphan_scenario()
+    trace_dir = generate_traces(scenario)
+    to_ns = BASE + 100_000 * MS
+    try:
+        with ServerHarness(trace_dir) as srv:
+            page = srv.query("executions", sort="start_desc",
+                             from_=BASE, to_=to_ns,
+                             timeout=WATERFALL_QUERY_THRESHOLD_S)
+            rows = {r["query_id"]: r for r in page.get("rows", [])}
+            row_a = rows.get(str(MISATTR_QID_A))
+            row_b = rows.get(str(MISATTR_QID_B))
+            t.check(row_a is not None and row_b is not None,
+                    f"both A and B rows are present ({page.get('rows')})")
+            t.check_eq(row_a.get("n_events"), 1,
+                       "A ends with exactly its OWN one genuine event -- "
+                       "the post-B-EXEC_END event must NOT land on the "
+                       "reopened orphan (RED before the fix: this reads 2)")
+            t.check_eq(row_b.get("n_events"), 1,
+                       "B keeps exactly its own one genuine event")
+            t.check(row_a.get("end_inferred") is True and
+                    row_a.get("in_progress") is False,
+                    f"A closes via CMD_END, inferred, not left open ({row_a})")
+    finally:
+        cleanup_traces(trace_dir)
+
+
 def test_detail_window_bound_and_bounded_context(t):
     print("\n### detail bound is window-local and still enforced ###")
     start = BASE + 50_000 * MS
@@ -930,6 +1007,7 @@ def main():
     test_open_row_crowding_characterized(t)
     test_sequential_errors_on_one_pid_do_not_accumulate(t)
     test_nested_execution_not_truncated(t)
+    test_orphan_does_not_absorb_events_after_inner_exec_end(t)
     test_detail_window_bound_and_bounded_context(t)
     test_clustered_scatter_fills_budget(t)
     test_detail_cap(t)

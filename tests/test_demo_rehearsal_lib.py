@@ -771,6 +771,42 @@ def test_daemon_integrity_non_dict_response_fails():
     check(not ok, f"a non-dict metrics response fails outright ({detail})")
 
 
+# ── cmd_markers_observed (#222 review) ────────────────────────────────────
+
+def test_cmd_markers_observed_nonzero_reports_seen():
+    ok, count, detail = lib.cmd_markers_observed({"live_cmd_markers_total": 5})
+    check(ok is True and count == 5,
+          f"a nonzero count reports seen=True with the real count ({detail})")
+    check("fired live" in detail, f"detail says markers fired ({detail})")
+
+
+def test_cmd_markers_observed_zero_reports_not_seen_not_a_failure():
+    # BYPASS-SUITE CASE (the review's own point): zero is a real, expected
+    # outcome for a workload that never escalates a backend to exact tier
+    # -- this function itself must not turn that into an exception or a
+    # crash, and its caller (demo_rehearsal.py) must not gate on it.
+    ok, count, detail = lib.cmd_markers_observed({"live_cmd_markers_total": 0})
+    check(ok is False and count == 0,
+          f"a zero count reports seen=False, not an exception ({detail})")
+    check("UNPROVEN" in detail, f"detail names the coverage gap explicitly ({detail})")
+
+
+def test_cmd_markers_observed_missing_field_fails_closed():
+    # BYPASS-SUITE CASE: an older daemon/protocol without this field, or a
+    # truncated metrics blob -- must not silently read as "zero markers,
+    # fine", the same fail-closed contract as daemon_integrity_ok.
+    ok, count, detail = lib.cmd_markers_observed({"some_other_field": 1})
+    check(ok is False and count == 0,
+          f"a missing field reports seen=False, not treated as zero-and-fine ({detail})")
+    check("missing" in detail, f"detail names the field as missing ({detail})")
+
+
+def test_cmd_markers_observed_non_dict_response_fails():
+    ok, count, detail = lib.cmd_markers_observed(None)
+    check(ok is False and count == 0,
+          f"a non-dict metrics response fails outright, not seen=True ({detail})")
+
+
 # ── capture_has_events_ok ─────────────────────────────────────────────────
 
 def test_capture_has_events_positive_ok():

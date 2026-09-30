@@ -757,6 +757,39 @@ def daemon_integrity_ok(metrics):
     return ok, detail
 
 
+def cmd_markers_observed(metrics):
+    """#222 review: whether this capture's daemon ever emitted a CMD_START/
+    CMD_END marker pair -- the ONLY thing that closes an orphaned execution
+    row (src/compute.c's pgwt_compute_executions, CMD_END branch) for a
+    statement that errored, was cancelled, hit statement_timeout, or lost
+    its EXEC_END to a ringbuf drop. CMD markers are gated on
+    `st->wp_live && exact_admission_open()` (src/bpf/pg_wait_tracer.bpf.c) --
+    a pid that never escalates to a live watchpoint during the whole
+    capture produces none, and for that pid the orphan-close fix is
+    INERT: a single presenter Ctrl-C on that connection still pins one
+    "In progress" row at the top of the Waterfall tab for the rest of the
+    session, same as before #222's review round.
+
+    Informational only -- does NOT gate `ok`. Whether a rehearsal's
+    workload is expected to escalate any backend to exact tier is a
+    product/workload question this harness does not decide; this just
+    makes the fact visible instead of silently reading zero in a metrics
+    blob nobody diffs. See also DAEMON_INTEGRITY_COUNTERS above (a
+    related but distinct question: dropped vs. never-emitted markers)."""
+    if not isinstance(metrics, dict):
+        return False, 0, f"metrics response is not a dict: {metrics!r}"
+    v = metrics.get("live_cmd_markers_total")
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return False, 0, f"live_cmd_markers_total missing/non-numeric: {v!r}"
+    return v > 0, v, (
+        f"live_cmd_markers_total={v!r} -- "
+        + ("CMD markers fired live; the #222 orphan-close path (CMD_END) "
+           "was actually exercised by this capture" if v > 0 else
+           "ZERO CMD markers this capture -- no pid escalated to a live "
+           "watchpoint, so the #222 orphan-close fix is UNPROVEN (and "
+           "inert) for this run; not a harness failure, a coverage gap"))
+
+
 def capture_has_events_ok(num_events):
     """Raw floor (issue #157 bypass-suite item): a capture that recorded
     ZERO events is void -- every downstream check (conservation, the

@@ -3162,6 +3162,23 @@ struct exec_pid_state {
      * one of them, however deep. */
     int *open_rows;
     int n_open, cap_open;
+    /* #222 review: a wait event must attribute to the top-of-stack row
+     * only while that row is genuinely the one that JUST started -- not
+     * merely whatever an EXEC_END's pop happened to re-expose underneath
+     * it. Set on every push (a fresh EXEC_START), cleared on every pop
+     * (EXEC_END or CMD_END): once cleared, exec_pid_attributable_row()
+     * returns -1 until the next EXEC_START, even though the stack itself
+     * may still be non-empty. Without this, a pid that errors on A (A
+     * stays stacked, unclosed), then runs and finishes B, has every wait
+     * event AFTER B's EXEC_END mis-credited to A -- a long-dead orphan
+     * that silently keeps accruing n_events (and matches_event_filter)
+     * for as long as CMD_END never arrives to close it (see the CMD_END
+     * comment below). Master attributed those same events to no row at
+     * all; that is the safer default here too, since the marker stream
+     * alone cannot distinguish "B is legitimately nested inside A" from
+     * "B is an unrelated statement after A orphaned" -- CMD_END is the
+     * only marker that can. */
+    int top_attributable;
     uint64_t plan_start_ns;
     uint64_t plan_query_id;
     int plan_open;
@@ -3194,7 +3211,8 @@ static int exec_pid_state_get(struct exec_pid_state **states, int *n_states,
     return idx;
 }
 
-/* Push a newly-opened row's index onto its pid's open stack. */
+/* Push a newly-opened row's index onto its pid's open stack. Marks it
+ * freshly attributable -- see top_attributable's own comment. */
 static int exec_pid_push_row(struct exec_pid_state *st, int row_idx)
 {
     if (st->n_open >= st->cap_open) {
@@ -3206,12 +3224,17 @@ static int exec_pid_push_row(struct exec_pid_state *st, int row_idx)
         st->cap_open = new_cap;
     }
     st->open_rows[st->n_open++] = row_idx;
+    st->top_attributable = 1;
     return 0;
 }
 
-/* Pop the innermost (most recently opened) still-open row, or -1 if none. */
+/* Pop the innermost (most recently opened) still-open row, or -1 if none.
+ * Whatever the pop exposes underneath (if anything) is no longer
+ * attributable until its own EXEC_START pushes it again -- see
+ * top_attributable's own comment for why. */
 static int exec_pid_pop_row(struct exec_pid_state *st)
 {
+    st->top_attributable = 0;
     if (st->n_open <= 0)
         return -1;
     return st->open_rows[--st->n_open];
@@ -3222,6 +3245,18 @@ static int exec_pid_pop_row(struct exec_pid_state *st)
 static int exec_pid_peek_row(const struct exec_pid_state *st)
 {
     return st->n_open > 0 ? st->open_rows[st->n_open - 1] : -1;
+}
+
+/* Like exec_pid_peek_row, but -1 whenever the top was exposed by a pop
+ * rather than freshly pushed -- see top_attributable's own comment. This
+ * is the one callers use for wait-event attribution (n_events,
+ * matches_event_filter, n_workers); exec_pid_peek_row alone stays
+ * available for anything that legitimately wants "whatever's on top"
+ * regardless (there is no such caller today, kept for symmetry with push/
+ * pop). */
+static int exec_pid_attributable_row(const struct exec_pid_state *st)
+{
+    return st->top_attributable ? exec_pid_peek_row(st) : -1;
 }
 
 static int execution_append(struct pgwt_execution **rows, int *n_rows,
@@ -3434,7 +3469,7 @@ void pgwt_compute_executions(const struct pgwt_trace_event *events, int count,
             interval_overlaps(ev->timestamp_ns, ev->duration_ns,
                               from_ns, to_ns) &&
             pgwt_filter_matches(&event_filter, ev);
-        int active_row = exec_pid_peek_row(st);
+        int active_row = exec_pid_attributable_row(st);
         if (event_matches && active_row >= 0 && active_row < n_rows) {
             rows[active_row].n_events++;
             rows[active_row].matches_event_filter = 1;
@@ -3449,7 +3484,7 @@ void pgwt_compute_executions(const struct pgwt_trace_event *events, int count,
                 out->failed = 1;
                 break;
             } else {
-                int row_idx = exec_pid_peek_row(&states[li]);
+                int row_idx = exec_pid_attributable_row(&states[li]);
                 if (event_matches && row_idx >= 0 && row_idx < n_rows &&
                     worker_last_row[wi] != row_idx) {
                     rows[row_idx].n_workers++;

@@ -673,6 +673,24 @@ def main():
                     "section 6"),
         }
 
+        # #222 review: reported, not gated -- see cmd_markers_observed's own
+        # docstring for why a rehearsal whose workload never escalates a
+        # backend to exact tier legitimately reads zero here without that
+        # being a harness bug. The point is visibility: a future reader (or
+        # CI) can grep this field instead of the orphan-close fix silently
+        # having zero live coverage forever. Kept OUT of extra_checks (like
+        # sweep_offset_coverage below) precisely so it is never gated and
+        # never prints a misleading "PASS" for a zero count.
+        if metrics_err is not None:
+            cmd_markers_seen, cmd_markers_count, cmd_markers_detail = (
+                False, 0, metrics_err)
+        else:
+            cmd_markers_seen, cmd_markers_count, cmd_markers_detail = (
+                drlib.cmd_markers_observed(metrics_resp.get("response")))
+        print(f"demo_rehearsal: cmd_markers_observed (informational, does "
+              f"NOT gate the verdict): {'YES' if cmd_markers_seen else 'NO'} "
+              f"-- {cmd_markers_detail}")
+
     extra_checks["daemon_log_clean"] = _daemon_log_check(args.daemon_log)
 
     summary = drlib.build_demo_summary(pass_results, extra_checks,
