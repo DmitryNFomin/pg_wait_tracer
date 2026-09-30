@@ -2461,7 +2461,11 @@ def test_scatter_view(page):
     selected = page.text_content("#executions-table tr.selected-execution") or ""
     check("1002" in selected, f"scatter handoff selected interior PID 1002 execution ('{selected[:60]}')")
     selected_hash = page.evaluate("location.hash")
-    check("exec.pid=1002" in selected_hash and "exec.start=10000100000000" in selected_hash,
+    # #222 review item 3: this number is mock_server.py's _EXEC_BASE_NS +
+    # 100ms (pid 1002's start_ns in both the executions and exec_scatter
+    # fixtures -- they must agree, see exec_scatter's own comment there).
+    check("exec.pid=1002" in selected_hash and
+          "exec.start=1773999999150000000" in selected_hash,
           f"scatter execution identity is URL state ({selected_hash})")
     page.reload()
     page.wait_for_selector("#waterfall-chart canvas", timeout=10000)

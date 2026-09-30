@@ -1014,12 +1014,22 @@ def _handle_request_inner(cmd, req_id, msg):
                 "total_count": 4, "kept_count": 4, "truncated": False}
 
     if cmd == "exec_scatter":
+        # #222 review item 3 fix-up: pid 1002's "t" MUST equal the
+        # `executions` fixture's pid 1002 start_ns above -- test_scatter_view
+        # clicks this point, pivots to Waterfall, and the client selects the
+        # executions-table row by matching (pid, start_ns) exactly; before
+        # this fix the two fixtures happened to share the same ~1e13 epoch,
+        # so this coupling was invisible until _EXEC_BASE_NS moved the
+        # executions rows and left this canned point behind, which timed
+        # out waiting for "tr.selected-execution" (make check, 2026-09-30).
+        # pid 1000 and pid 1004 aligned too, for the same reason, even
+        # though nothing here currently clicks them.
         return {"id": req_id, "points": [
-            {"t": "10000000000000", "duration_ms": 30.001,
+            {"t": str(_EXEC_BASE_NS), "duration_ms": 30.001,
              "pid": 1000, "query_id": "100", "in_progress": False},
-            {"t": "10000100000000", "duration_ms": 80.0,
+            {"t": str(_EXEC_BASE_NS + 100_000_000), "duration_ms": 80.0,
              "pid": 1002, "query_id": "200", "in_progress": False},
-            {"t": "10000200000000", "duration_ms": None,
+            {"t": str(_EXEC_BASE_NS - 50_000_000), "duration_ms": None,
              "pid": 1004, "query_id": "300", "in_progress": True},
         ], "total_count": 3, "kept_count": 3, "downsampled": False}
 
