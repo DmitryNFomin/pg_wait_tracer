@@ -22,6 +22,7 @@ import { Transport, TransportError, CancelledError } from './lib/transport.js';
 import { Camera } from './lib/camera.js';
 import { StripCache } from './lib/stripcache.js';
 import { ViewManager } from './lib/view-manager.js';
+import { runConcurrentRefresh } from './lib/refresh-orchestration.js';
 import { mountTable } from './lib/table.js';
 import {
     classColor, fmtTime, fmtDuration, esc, fmtCount,
@@ -613,14 +614,21 @@ function clearPaneError(el) {
 
 // ── Refresh orchestration ─────────────────────────────────────────────────────
 //
-// One refresh = (1) re-render the persistent active/AAS chart, then (2) ask the
-// view-manager to refresh the active tab view. Both run under transport
-// single-flight + the view-manager epoch chokepoint, so a user action mid-flight
-// supersedes stale responses without any manual generation counters.
+// One refresh = re-render the persistent active/AAS chart AND ask the
+// view-manager to refresh the active tab view, CONCURRENTLY (issue #192):
+// the two round trips are independent (both derive their window from the
+// same shared `timeRange`, never from each other's response), so awaiting
+// them sequentially only adds one fetch's latency to the other's paint,
+// visible as the tab lagging the chart above it by up to ~1.7s every tick.
+// Both run under transport single-flight + the view-manager epoch
+// chokepoint, so a user action mid-flight supersedes stale responses
+// without any manual generation counters.
 
 async function refresh(aasMountReason) {
-    await refreshActive(aasMountReason);
-    await vm.refresh();
+    await runConcurrentRefresh(
+        () => refreshActive(aasMountReason),
+        () => vm.refresh(),
+    );
 }
 
 async function refreshActive(aasMountReason) {
