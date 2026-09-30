@@ -724,8 +724,10 @@ def _spacing_tick(tick_i, drifts_from_200_500_1000_1500_2000, with_dims=True):
 
 def test_frame_spacing_ok_within_bound_passes():
     # Healthy shape from a retained run (tests/results/ui_live_gate1_
-    # healthy_run1/summary.json): frame-2..5 drift stays under the 44ms
-    # observed max, INCLUDING tick 1's own frames 3-5 (not elevated).
+    # healthy_run1/summary.json): frame-2..5 drift stays under the 87ms
+    # observed max across all 5 retained healthy runs (see
+    # FRAME_SPACING_DRIFT_BOUND_MS's own comment), INCLUDING tick 1's own
+    # frames 3-5 (not elevated).
     ticks = [_spacing_tick(1, [492, 254, 11, 17, 14])] + \
             [_spacing_tick(i, [30, 5, 10, 15, 20]) for i in range(2, 7)]
     ok, detail = lib.frame_spacing_ok(ticks)
@@ -734,9 +736,10 @@ def test_frame_spacing_ok_within_bound_passes():
 
 def test_frame_spacing_ok_over_bound_fails():
     # THE regression case (contract (c)): a 400ms drift at frame 2 --
-    # well past the 100ms bound (this branch's own bypass evidence puts
-    # the real regression floor at 102-480ms; 400 sits inside that, not a
-    # borderline value picked to just clear the bound).
+    # well past the 150ms bound (this branch's own bypass evidence puts
+    # the real regression floor at 154-480ms on gate-1 at the shipped
+    # bound; 400 sits inside that, not a borderline value picked to just
+    # clear the bound).
     ticks = [_spacing_tick(1, [30, 5, 10, 15, 20]),
             _spacing_tick(2, [30, 400, 10, 15, 20])]
     ok, detail = lib.frame_spacing_ok(ticks)

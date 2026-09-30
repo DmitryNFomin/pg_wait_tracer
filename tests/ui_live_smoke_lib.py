@@ -704,8 +704,8 @@ def frame_spacing_drift_ms(tick):
 
 
 # Derivation, verified against RETAINED artifacts a reviewer can open
-# directly (tests/results/ui_live_gate1_healthy_run{1,2}/summary.json,
-# tests/results/ui_live_gate2_healthy_run{1,2}/summary.json,
+# directly (tests/results/ui_live_gate1_healthy_run{1,2,3_postfix}/
+# summary.json, tests/results/ui_live_gate2_healthy_run{1,2}/summary.json,
 # tests/results/ui_live_gate1_bypass/summary.json,
 # tests/results/ui_live_gate2_bypass/summary.json -- CLAUDE.md evidence
 # rule: a number is checkable from a path, not asserted from a run id
@@ -714,20 +714,31 @@ def frame_spacing_drift_ms(tick):
 # anywhere this repo's evidence trail can reach, so it has been replaced
 # below with numbers from this branch's own bypass runs instead):
 #
-#   Healthy, BOTH gate boxes, 2 runs each (44 tab-ticks x 11 tabs x 6
-#   ticks): max drift 44ms (gate-1 run 1, queries, tick 3, frame 4) --
-#   every other of the 4 runs' own max is lower (35/30/31ms). This
-#   includes frames 3-5 of tick 1 (see the partial tick-1 exemption
-#   below) -- the 44ms max is NOT from tick 1 in any of the 4 runs, i.e.
+#   Healthy, BOTH gate boxes, 5 retained runs (run3_postfix is a box-check
+#   run of THIS shipped code, not the pre-fix one the other 4 predate --
+#   its own verdicts were computed under the corrected exemption below,
+#   unlike the JSON stored in the other 4 runs' own frame_spacing field,
+#   which was written by the earlier whole-tick-exclusion logic and is
+#   evidence of DIMS/other checks only, not of this bound -- the ceiling
+#   below is recomputed straight from each run's raw target/achieved
+#   offsets, not read off any run's stored verdict): 1242 gated frames
+#   (11 tabs x 6 ticks x 5 checked frames per tick, minus tick 1's 2
+#   exempt frames, across 5 runs -- run.ids 1790796035, 1790799596,
+#   1790796123, 1790799745, 1790801156) -- max drift 87ms (run.id
+#   1790801156, queries, tick 5, frame 2; 81ms and 82ms alongside it on
+#   the same run). This includes frames 3-5 of tick 1 (see the partial
+#   tick-1 exemption below) -- the 87ms max is NOT from tick 1, i.e.
 #   including tick 1's frames 3-5 in the gated population did not move
-#   the healthy ceiling at all.
+#   the healthy ceiling.
 #
 #   Tick 1's frames 1-2 ONLY are excluded, not the whole tick. The same
-#   artifacts show tick 1's frame 2 (drift index 1) elevated on every one
-#   of the 11 tabs on gate-1 run 1 -- 3ms (waterfall) to 254ms (timeline)
-#   -- because the sweep's mount-anchor clock starts late on the run's
-#   first tick (77-500ms of pre-sweep work: page navigation, first AAS
-#   fetch, first ViewManager mount) and that fixed offset still shows up
+#   artifacts show tick 1's frame 2 (drift index 1) reaching 186-339ms on
+#   2-6 of the 11 tabs in EVERY one of the 5 healthy runs, and frame 1 of
+#   OTHER ticks reaching 116-143ms on gate-1 (gate-2 stays low there,
+#   3-14ms) -- both exempt slots are genuinely, repeatably elevated,
+#   nothing exempt here is quiet. This is the sweep's mount-anchor clock
+#   starting late on the run's first tick (77-500ms of pre-sweep work:
+#   page navigation, first AAS fetch, first ViewManager mount) showing up
 #   at the SECOND target before later, larger inter-offset gaps absorb
 #   it. But tick 1's frames 3-5 are NOT elevated by this effect -- e.g.
 #   timeline's own tick-1 drift (ms, frames 1-5) was [492, 254, 11, 17,
@@ -740,22 +751,28 @@ def frame_spacing_drift_ms(tick):
 #
 #   Regression floor: this branch's own bypass runs (scale="css" removed,
 #   same runs frame_dims_ok's bypass evidence comes from) -- gate-1's
-#   bypass run alone produced 74 frame-tick drifts over 100ms, ranging
-#   102-480ms (min: overview tick 2 frame 3; max: sessions tick 2 frame
-#   4); gate-2's bypass run produced one, at 165ms (queries tick 1 frame
-#   3) -- gate-2's regression showed up almost entirely as frame_dims_ok
-#   violations instead (10/10 measurable tabs), which is expected: a
-#   doubled-pixel-count capture does not have to land outside every
-#   inter-offset gap to still be the wrong size, so frame_spacing_ok is a
-#   secondary, less deterministic signal for this specific regression --
-#   frame_dims_ok is the primary, always-fires-on-the-cause one.
+#   bypass run alone produces 58 frame-tick drifts over 150ms (down from
+#   74 over the old 100ms bound), ranging 154-480ms, with a dense cluster
+#   starting around 300ms; gate-2's bypass run produces one, at 165ms
+#   (queries tick 1 frame 3) -- still red at 150ms. Gate-2's regression
+#   showed up almost entirely as frame_dims_ok violations instead (10/10
+#   measurable tabs), which is expected: a doubled-pixel-count capture
+#   does not have to land outside every inter-offset gap to still be the
+#   wrong size, so frame_spacing_ok is a secondary, less deterministic
+#   signal for THIS specific regression -- frame_dims_ok is the primary,
+#   always-fires-on-the-cause one.
 #
-#   44ms healthy ceiling vs 102ms minimum observed regression drift: the
-#   100ms bound sits between them, comfortably above the verified healthy
-#   ceiling (>2x clear) and already exceeded by the smallest violation
-#   actually observed under the real regression -- not tight, and not
-#   asserted past what these retained runs show.
-FRAME_SPACING_DRIFT_BOUND_MS = 100.0
+#   87ms healthy ceiling (5 runs / 1242 gated frames) vs the smallest
+#   dense regression cluster (~300ms, gate-1 bypass): 150ms is ~1.7x
+#   above the healthy ceiling and about half of that cluster -- a derived
+#   midpoint, not the smallest value that happens to clear healthy (the
+#   87ms ceiling on its own left only 13ms of margin to the OLD 100ms
+#   bound on the noisier box, in a gate that fails on any single frame
+#   over it -- exactly the "bound sits just above healthy" defect this
+#   whole issue exists to remove). Still caught with room to spare: the
+#   smallest bypass violation (154ms on gate-1, 165ms on gate-2) clears
+#   150ms on both boxes.
+FRAME_SPACING_DRIFT_BOUND_MS = 150.0
 
 
 def frame_spacing_ok(blink_sweep_ticks, bound_ms=FRAME_SPACING_DRIFT_BOUND_MS):
