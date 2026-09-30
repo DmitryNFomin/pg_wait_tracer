@@ -36,6 +36,7 @@ Usage:
     python3 tests/demo_workload_coverage.py --trace-dir DIR --window-s 300
 """
 import argparse
+import json
 import os
 import sys
 
@@ -346,7 +347,55 @@ TAB_ORDER = (
 COULD_NOT_EVALUATE_CODES = {"window_too_large", "allocation_failed"}
 
 
-def run_coverage(srv, from_ns, to_ns, num_cpus=None):
+# ── raw-slice retention (#222 review item 4) ──────────────────────────────
+#
+# The two `executions` responses the waterfall tab's verdict is computed
+# from, kept verbatim next to the run's own results so a later reader can
+# re-derive "a completed row >= 500ms was ON THE RETURNED PAGE" from the
+# page itself, rather than from a max() somebody already reduced for them.
+WATERFALL_RAW_SLICES = ("executions_duration_desc", "executions_recency")
+
+
+def _retain_waterfall_raw(raw_out_dir, collected):
+    """Write both waterfall slices to `raw_out_dir`, returning the paths.
+
+    Two properties this helper exists to guarantee, both of which are
+    false-negative holes rather than true-positive ones:
+
+    - NEVER SILENTLY ABSENT. Every name in WATERFALL_RAW_SLICES gets a
+      file on every call, even when the query raised, timed out or came
+      back as an `error` response -- in that case the file holds an
+      explicit `pgwt_artifact_error` marker. "No file" would otherwise be
+      ambiguous between "this run did not collect it" and "this code never
+      ran at all", and the second is exactly how an evidence gate stops
+      being able to see.
+    - NEVER STALE. Each file is rewritten (truncating open, "w") on every
+      run, so a reader cannot pick up a previous run's page and believe it
+      belongs to this one -- the retained-evidence failure mode that keeps
+      turning up in review.
+
+    Not a gate: it records, it never votes. A write failure here is a real
+    exception and propagates, because a harness that cannot write its own
+    evidence directory must stop, not carry on producing verdicts nobody
+    can check."""
+    os.makedirs(raw_out_dir, exist_ok=True)
+    paths = []
+    for name in WATERFALL_RAW_SLICES:
+        payload = collected.get(name)
+        if payload is None:
+            payload = {"pgwt_artifact_error": (
+                f"{name}: not collected this run -- the executions query "
+                f"raised, timed out, or returned no response at all; see "
+                f"this tab's `detail` for which")}
+        path = os.path.join(raw_out_dir, name + ".json")
+        with open(path, "w") as f:
+            json.dump(payload, f, indent=2, sort_keys=True)
+            f.write("\n")
+        paths.append(path)
+    return paths
+
+
+def run_coverage(srv, from_ns, to_ns, num_cpus=None, raw_out_dir=None):
     """Query every tab's endpoint over [from_ns, to_ns] and apply its pure
     checker. Returns {tab: {"ok": bool, "detail": str, "could_not_evaluate":
     bool}}. A query that itself errors or times out is recorded as a
@@ -367,8 +416,21 @@ def run_coverage(srv, from_ns, to_ns, num_cpus=None):
     end_inferred); it ALSO issues a second, recency-slice `executions`
     query purely for waterfall_recency_diagnostic's diagnostic fields,
     which are recorded under results["waterfall"]["recency_diagnostic"]
-    but never affect `ok` -- see that function's own docstring for why."""
+    but never affect `ok` -- see that function's own docstring for why.
+
+    raw_out_dir (#222 review item 4): when given, both waterfall
+    `executions` responses are written there verbatim
+    (WATERFALL_RAW_SLICES) after the loop, on every path including
+    failures -- see _retain_waterfall_raw. When None (the default, and
+    what every pre-existing caller gets) nothing is written and nothing
+    else changes."""
     results = {}
+    # Whatever each waterfall slice actually returned (an error response
+    # counts; an uncollected slice stays absent and gets an explicit
+    # marker file). Flushed once after the loop so that every exit path --
+    # pass, checker fail, error response, query exception -- still leaves
+    # both artifacts on disk.
+    wf_raw = {}
     for tab in TAB_ORDER:
         cmd, extra, checker = TAB_QUERIES[tab]
         try:
@@ -378,6 +440,8 @@ def run_coverage(srv, from_ns, to_ns, num_cpus=None):
             results[tab] = {"ok": False, "could_not_evaluate": False,
                              "detail": f"{cmd} query failed: {e!r}"}
             continue
+        if tab == "waterfall":
+            wf_raw["executions_duration_desc"] = resp
         if isinstance(resp, dict) and resp.get("error"):
             code = resp.get("code")
             if code in COULD_NOT_EVALUATE_CODES:
@@ -419,6 +483,7 @@ def run_coverage(srv, from_ns, to_ns, num_cpus=None):
             except Exception as e:
                 recency_diag = {"error": f"recency slice query failed: {e!r}"}
             else:
+                wf_raw["executions_recency"] = recency_resp
                 if isinstance(recency_resp, dict) and recency_resp.get("error"):
                     recency_diag = {"error": (f"recency slice error: "
                                               f"{recency_resp['error']!r}")}
@@ -431,6 +496,8 @@ def run_coverage(srv, from_ns, to_ns, num_cpus=None):
             ok, detail = checker(resp)
         results[tab] = {"ok": bool(ok), "could_not_evaluate": False,
                          "detail": detail, **extra_fields}
+    if raw_out_dir is not None:
+        _retain_waterfall_raw(raw_out_dir, wf_raw)
     return results
 
 
@@ -446,6 +513,13 @@ def main():
                           "numbers stay auditable under tests/results/ "
                           "instead of living only in prose (issue #214 "
                           "review)")
+    ap.add_argument("--raw-out-dir", default=None,
+                     help="retain the waterfall tab\'s two raw `executions` "
+                          "responses (the gating duration_desc page and the "
+                          "diagnostic recency page) verbatim in this "
+                          "directory, so the 500ms floor can be re-derived "
+                          "from the returned page itself rather than from a "
+                          "max() somebody already reduced (#222 review)")
     args = ap.parse_args()
 
     from server_harness import ServerHarness
@@ -457,7 +531,8 @@ def main():
         num_cpus = info.get("num_cpus")
         if args.window_s is not None:
             from_ns = max(from_ns, to_ns - int(args.window_s * 1_000_000_000))
-        results = run_coverage(srv, from_ns, to_ns, num_cpus=num_cpus)
+        results = run_coverage(srv, from_ns, to_ns, num_cpus=num_cpus,
+                                raw_out_dir=args.raw_out_dir)
 
     failed = [t for t in TAB_ORDER if not results[t]["ok"]]
     for tab in TAB_ORDER:
@@ -471,7 +546,6 @@ def main():
         print(f"demo_workload_coverage: {tab}: {status} -- {r['detail']}")
 
     if args.out_json:
-        import json
         os.makedirs(os.path.dirname(os.path.abspath(args.out_json)) or ".",
                     exist_ok=True)
         with open(args.out_json, "w") as f:

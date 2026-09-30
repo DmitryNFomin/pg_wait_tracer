@@ -506,8 +506,17 @@ def main():
         # "empty".
         coverage_from_ns = max(from_ns,
                                to_ns - int(WATERFALL_LIVE_WINDOW_S * 1_000_000_000))
+        # raw_out_dir (#222 review item 4): the waterfall verdict's own two
+        # `executions` pages are retained verbatim under <out_dir>/raw/,
+        # unconditionally (they are ~35KB each, unlike the trace itself,
+        # which stays behind PGWT_RETAIN_TRACE). Without them the tab's
+        # PASS is a max() over rows nobody outside this process ever sees,
+        # and the "a completed row >= 500ms was ON THE RETURNED PAGE"
+        # claim is unverifiable after the fact.
         coverage_results = cov.run_coverage(srv, coverage_from_ns, to_ns,
-                                            num_cpus=info.get("num_cpus"))
+                                            num_cpus=info.get("num_cpus"),
+                                            raw_out_dir=os.path.join(out_dir,
+                                                                     "raw"))
         coverage_ok, coverage_detail = drlib.tab_coverage_check_ok(
             coverage_results, expected_tabs=cov.TAB_ORDER)
         print(f"demo_rehearsal: tab_coverage: "

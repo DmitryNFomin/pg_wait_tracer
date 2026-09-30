@@ -779,6 +779,199 @@ def test_run_coverage_normal_pass_has_could_not_evaluate_false():
           "whether it passes or fails its own checker")
 
 
+# ── #222 review item 4: the returned PAGE, and the retained artifact ───────
+#
+# Bypass suite. The true-positive path (a page with no slow row fails) is
+# already covered above; every test below is about a way the check or its
+# evidence could stop being able to SEE -- which is the direction that
+# actually goes wrong: a verdict derived from a number nobody kept, an
+# artifact silently absent, or an artifact left over from another run.
+
+def _retention_server(duration_page, recency_page=None, exc=None):
+    """A _FakeServer whose `executions` cmd answers the gating
+    duration_desc query and the diagnostic recency query differently (or
+    raises), and answers every other tab with None (those tabs then fail
+    their own checkers, which is irrelevant here)."""
+    def executions(kwargs):
+        if exc is not None:
+            raise exc
+        if kwargs.get("sort") == "duration_desc":
+            return duration_page
+        return recency_page
+    responses = {"executions": executions}
+    for cmd, _e, _f in cov.TAB_QUERIES.values():
+        responses.setdefault(cmd, None)
+    return _FakeServer(responses)
+
+
+def _read_raw(raw_dir, name):
+    import json as _json
+    with open(os.path.join(raw_dir, name + ".json")) as f:
+        return _json.load(f)
+
+
+def _tmpdir():
+    import tempfile
+    return tempfile.mkdtemp(prefix="pgwt_cov_raw_")
+
+
+SLOW_PAGE = {"rows": [
+    {"query_id": "slow", "duration_ms": 1300.0, "in_progress": False,
+     "end_inferred": False},
+    {"query_id": "fast", "duration_ms": 0.326, "in_progress": False,
+     "end_inferred": False},
+], "total_count": 2, "open_count": 0, "completed_count": 2}
+
+
+def test_waterfall_floor_reads_the_returned_page_not_a_summary_field():
+    """#222 review item 4: the 500ms floor must be satisfied by a row that
+    is ACTUALLY ON THE RETURNED PAGE, never by a summary number the
+    response advertises about rows it did not return. RED input: this
+    response, whose own `max_duration_ms`/`slowest_ms`/`total_count`
+    announce a 3-second execution in the window while every returned row
+    is sub-millisecond. If either checker ever reached for a summary field
+    instead of `rows`, this passes and the tab is still empty on stage."""
+    crowded_out = {
+        "rows": [{"query_id": str(i), "duration_ms": 0.18,
+                  "in_progress": False, "end_inferred": False}
+                 for i in range(100)],
+        "total_count": 48000, "open_count": 0, "completed_count": 48000,
+        "max_duration_ms": 3003.8, "slowest_ms": 3003.8, "truncated": True,
+    }
+    ok, detail = cov.waterfall_populated(crowded_out)
+    check(ok is False,
+          f"the 500ms floor FAILS when no returned row clears it, however "
+          f"loudly the response's own summary fields claim otherwise "
+          f"({detail})")
+    ok2, detail2 = cov.waterfall_floor_excludes_inferred(crowded_out)
+    check(ok2 is False,
+          f"the measured-row requirement likewise reads only `rows` "
+          f"({detail2})")
+
+
+def test_retain_waterfall_raw_writes_every_slice_it_was_given():
+    raw = _tmpdir()
+    cov._retain_waterfall_raw(raw, {"executions_duration_desc": SLOW_PAGE,
+                                    "executions_recency": {"rows": []}})
+    for name in cov.WATERFALL_RAW_SLICES:
+        check(os.path.exists(os.path.join(raw, name + ".json")),
+              f"{name}.json was written")
+    check(_read_raw(raw, "executions_duration_desc") == SLOW_PAGE,
+          "the retained duration_desc page is the response VERBATIM, so "
+          "the floor can be re-derived from it")
+
+
+def test_retain_waterfall_raw_marks_an_uncollected_slice_never_omits_it():
+    """Absent-rather-than-wrong: when a slice was never collected the file
+    must still exist and say so. RED without the marker: the file is
+    simply missing, and "missing" cannot be told apart from "this code
+    never ran", which is how an evidence gate goes quietly blind."""
+    raw = _tmpdir()
+    cov._retain_waterfall_raw(raw, {"executions_duration_desc": SLOW_PAGE})
+    got = _read_raw(raw, "executions_recency")
+    check("pgwt_artifact_error" in got,
+          f"the uncollected slice still gets a file, carrying an explicit "
+          f"not-collected marker rather than being absent ({got})")
+
+
+def test_retain_waterfall_raw_overwrites_a_stale_previous_run():
+    """The retained-evidence failure this repo keeps finding: a reader
+    picks up the PREVIOUS run's page and believes it belongs to this one.
+    RED if the file were ever opened for append, or written only when the
+    slice was collected."""
+    raw = _tmpdir()
+    cov._retain_waterfall_raw(raw, {"executions_duration_desc":
+                                    {"rows": [{"stale": True}]}})
+    cov._retain_waterfall_raw(raw, {})          # a later run collects nothing
+    got = _read_raw(raw, "executions_duration_desc")
+    check("pgwt_artifact_error" in got and "rows" not in got,
+          f"the stale page is GONE, replaced by this run's marker ({got})")
+
+
+def test_run_coverage_retains_both_slices_end_to_end():
+    raw = _tmpdir()
+    srv = _retention_server(SLOW_PAGE, {"rows": [{"duration_ms": 0.1,
+                                                  "in_progress": False,
+                                                  "start_ns": "5"}]})
+    results = cov.run_coverage(srv, 0, 1, num_cpus=4, raw_out_dir=raw)
+    check(results["waterfall"]["ok"] is True,
+          f"waterfall passes on the slow page ({results['waterfall']['detail']})")
+    check(_read_raw(raw, "executions_duration_desc") == SLOW_PAGE,
+          "run_coverage retained the exact page its verdict came from")
+    check(_read_raw(raw, "executions_recency")["rows"][0]["duration_ms"] == 0.1,
+          "and the recency page beside it, from the same run and window")
+
+
+def test_run_coverage_retains_raw_when_the_executions_query_raises():
+    """Dependency-failure bypass: the query blows up (timeout, dead
+    server, exit 127 harness). The tab must FAIL (already covered) and the
+    artifacts must still exist as markers -- an unwritten directory would
+    read as "nobody checked" to the next person."""
+    raw = _tmpdir()
+    srv = _retention_server(None, exc=RuntimeError("server gone"))
+    results = cov.run_coverage(srv, 0, 1, num_cpus=4, raw_out_dir=raw)
+    check(results["waterfall"]["ok"] is False,
+          "waterfall fails when its query raises")
+    for name in cov.WATERFALL_RAW_SLICES:
+        got = _read_raw(raw, name)
+        check("pgwt_artifact_error" in got,
+              f"{name} exists and says it was not collected ({got})")
+
+
+def test_run_coverage_retains_an_error_response_rather_than_nothing():
+    raw = _tmpdir()
+    srv = _retention_server({"error": "window too large", "code": "E_TOO_BIG"})
+    results = cov.run_coverage(srv, 0, 1, num_cpus=4, raw_out_dir=raw)
+    check(results["waterfall"]["ok"] is False, "an error response fails the tab")
+    got = _read_raw(raw, "executions_duration_desc")
+    check(got.get("error") == "window too large",
+          f"the error response itself is retained, so the reason is "
+          f"readable from the artifact directory ({got})")
+
+
+def test_run_coverage_without_raw_out_dir_writes_nothing():
+    """The default must stay inert for every pre-existing caller: no
+    directory created, no file written, no exception. Checked by running
+    with cwd inside an empty scratch tree and then walking that WHOLE
+    tree -- not by re-listing one directory we happened to name. RED
+    input: make the flush unconditional with a fallback destination
+    (`_retain_waterfall_raw(raw_out_dir or os.getcwd(), wf_raw)`); a test
+    that only re-lists its own unused tmpdir still passes that mutation,
+    which is why this walks instead."""
+    import tempfile
+    root = tempfile.mkdtemp(prefix="pgwt_cov_noraw_")
+    cwd = os.getcwd()
+    try:
+        os.chdir(root)
+        srv = _retention_server(SLOW_PAGE, {"rows": []})
+        cov.run_coverage(srv, 0, 1, num_cpus=4)
+        written = [os.path.join(d, f)
+                   for d, _sub, files in os.walk(root) for f in files]
+    finally:
+        os.chdir(cwd)
+    check(written == [],
+          f"raw_out_dir defaults to None and nothing is written anywhere, "
+          f"including the process's own working directory ({written})")
+
+
+def test_demo_rehearsal_still_passes_raw_out_dir_to_run_coverage():
+    """Wiring guard: run_coverage's retention is opt-in, so the ONE caller
+    whose artifacts the PR evidence depends on must keep opting in. RED
+    input: drop `raw_out_dir=` from tests/demo_rehearsal.py's
+    run_coverage(...) call -- every other test here still passes, because
+    they call run_coverage directly."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    with open(os.path.join(here, "demo_rehearsal.py")) as f:
+        src = f.read()
+    i = src.find("cov.run_coverage(")
+    check(i >= 0, "demo_rehearsal.py calls cov.run_coverage")
+    call = src[i:i + 400]
+    check("raw_out_dir=" in call,
+          f"demo_rehearsal.py's run_coverage call still passes raw_out_dir "
+          f"({call[:200]!r})")
+
+
+
 def run():
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:
