@@ -12,6 +12,49 @@
 #include <string.h>
 #include <stdio.h>
 
+/* ── Window clipping ──────────────────────────────────────────────────────
+ *
+ * The raw loader (server_load_events_fi) selects events by their END
+ * timestamp, so a wait already running when the window opened arrives whole.
+ * pgwt_compute_aas has always clipped such a straddler to its in-window part;
+ * the Overview/Top-N summers did not, and counted it in full. On a 60 s
+ * window of an uncontended rehearsal that was +1.28% on DB Time (Timeout
+ * 931.110 ms + Lock 894.018 ms of 142,059.216 ms) — unbounded in a lock
+ * pileup, where one 10 s Lock:relation ending 1 s into the window adds 9 s.
+ *
+ * `from_ns == 0` / `to_ns == 0` mean "unbounded on that side". The server
+ * forwards req->from_ns / req->to_ns verbatim, and both are 0 on a
+ * whole-capture request, so those results are bit-identical to pre-fix.
+ * Returns 0 for an event wholly outside the window (never a wrapped
+ * uint64 difference).
+ */
+static inline uint64_t event_window_ns(const struct pgwt_trace_event *ev,
+                                       uint64_t from_ns, uint64_t to_ns)
+{
+    /* A duration longer than the absolute timestamp is impossible in a real
+     * trace, but the subtraction would wrap to ~1.8e19 and the event would
+     * then look like it starts after it ends — silently losing its time.
+     * Treat it as starting at 0 instead: the clip still bounds it. */
+    uint64_t start = ev->duration_ns <= ev->timestamp_ns
+                     ? ev->timestamp_ns - ev->duration_ns : 0;
+    uint64_t end   = ev->timestamp_ns;
+    if (from_ns != 0 && start < from_ns) start = from_ns;
+    if (to_ns   != 0 && end   > to_ns)   end   = to_ns;
+    return end > start ? end - start : 0;
+}
+
+/* Fraction of an event that lies inside the window, for quantities measured
+ * per-event rather than in wall time (cpu_ns). Matches the ov/dur split
+ * pgwt_compute_aas applies per bucket, so CPU* agrees between the two paths.
+ * Exactly 1.0 when the window does not cut the event, which keeps the
+ * no-window path bit-identical. */
+static inline double event_window_frac(uint64_t clip_ns, uint64_t dur_ns)
+{
+    if (dur_ns == 0) return 0.0;
+    if (clip_ns == dur_ns) return 1.0;
+    return (double)clip_ns / (double)dur_ns;
+}
+
 /* pgwt_duration_to_bucket: log2 latency bucket for heatmap.
  * In daemon build this comes from map_reader.c; inline it here for server. */
 #ifdef PGWT_SERVER
@@ -707,7 +750,8 @@ static int cmp_event_desc(const void *a, const void *b)
 }
 
 void pgwt_compute_time_model(const struct pgwt_trace_event *events, int count,
-                             const struct pgwt_filter *f, double wall_ms,
+                             const struct pgwt_filter *f,
+                             uint64_t from_ns, uint64_t to_ns, double wall_ms,
                              struct pgwt_tm_result *out)
 {
     memset(out, 0, sizeof(*out));
@@ -743,7 +787,13 @@ void pgwt_compute_time_model(const struct pgwt_trace_event *events, int count,
         if (!pgwt_filter_matches(f, ev))
             continue;
 
-        double dur_ns = (double)ev->duration_ns;
+        /* Every accumulator below is "time inside the requested window", so
+         * a straddler contributes only its overlap (see event_window_ns).
+         * clip_ns == duration_ns whenever the window does not cut the event,
+         * which is always true for a whole-capture request. */
+        uint64_t clip_u = event_window_ns(ev, from_ns, to_ns);
+        double dur_ns = (double)clip_u;
+        double frac   = event_window_frac(clip_u, ev->duration_ns);
 
         /* T2: io_worker time is OUTSIDE DB Time/idle — busy time goes to
          * its category slot (the utilization signal), idle time (their
@@ -784,7 +834,9 @@ void pgwt_compute_time_model(const struct pgwt_trace_event *events, int count,
              * in the interval it leaked to) — no full-gap fallback (which
              * over-stated CPU* past physical cores, Finding #1). */
             if (ev->cpu_ns != PGWT_CPU_NS_UNKNOWN) {
-                double m = (double)ev->cpu_ns;
+                /* Split measured CPU by the in-window fraction, the same
+                 * ov/dur split pgwt_compute_aas uses per bucket. */
+                double m = (double)ev->cpu_ns * frac;
                 if (m > dur_ns) { cpu_clamped_ns += m - dur_ns; m = dur_ns; }
                 cpu_measured_ns += m;
                 has_measured_cpu = 1;
@@ -808,7 +860,7 @@ void pgwt_compute_time_model(const struct pgwt_trace_event *events, int count,
             if (slot >= 0)
                 ev_ht[slot].total_ns += dur_ns;
             if (ev->cpu_ns != PGWT_CPU_NS_UNKNOWN) {
-                wait_gap_cpu_ns += (double)ev->cpu_ns;   /* observability only */
+                wait_gap_cpu_ns += (double)ev->cpu_ns * frac; /* observability only */
                 has_measured_cpu = 1;
             }
         }
@@ -1055,7 +1107,8 @@ static int cmp_event_row_desc(const void *a, const void *b)
 }
 
 void pgwt_compute_top_events(const struct pgwt_trace_event *events, int count,
-                             const struct pgwt_filter *f, double wall_ms,
+                             const struct pgwt_filter *f,
+                             uint64_t from_ns, uint64_t to_ns, double wall_ms,
                              struct pgwt_events_result *out)
 {
     memset(out, 0, sizeof(*out));
@@ -1076,13 +1129,19 @@ void pgwt_compute_top_events(const struct pgwt_trace_event *events, int count,
         if (ev->flags & PGWT_EVENT_FLAG_IO_WORKER)
             continue;
 
+        /* Time-in-window for the DB-Time columns; the LATENCY columns below
+         * keep the event's full duration on purpose (a wait's latency is a
+         * property of the wait, not of the window — clipping it would report
+         * a p99 no wait ever had). */
+        uint64_t clip_u = event_window_ns(ev, from_ns, to_ns);
+
         /* Idle-but-visible events (Client:ClientRead) appear in the list
          * but are excluded from DB Time. Their time is not part of the
          * DB-Time denominator, so a numeric %DB is meaningless for them
          * (it overshoots and makes the column sum past 100%). Their %DB is
          * marked with a sentinel below and rendered as "—". */
         if (!pgwt_is_idle_event(ev->old_event))
-            db_time_ns += ev->duration_ns;
+            db_time_ns += clip_u;
 
         /* Hash by event_id */
         uint32_t h = ev->old_event & EVENT_HT_MASK;
@@ -1098,8 +1157,8 @@ void pgwt_compute_top_events(const struct pgwt_trace_event *events, int count,
          * count the physical observation once. */
         if (!(ev->flags & PGWT_EVENT_FLAG_SAMPLE_CONT) || ht[h].count == 0)
             ht[h].count++;
-        ht[h].total_ns += ev->duration_ns;
-        /* Latency stats from exact records only (FID-3). */
+        ht[h].total_ns += clip_u;
+        /* Latency stats from exact records only (FID-3), on FULL durations. */
         if (!(ev->flags & PGWT_EVENT_FLAG_SAMPLE)) {
             ht[h].exact_count++;
             ht[h].exact_total_ns += ev->duration_ns;
@@ -1187,7 +1246,8 @@ static int cmp_session_row_desc(const void *a, const void *b)
 }
 
 void pgwt_compute_top_sessions(const struct pgwt_trace_event *events, int count,
-                               const struct pgwt_filter *f, double wall_ms,
+                               const struct pgwt_filter *f,
+                               uint64_t from_ns, uint64_t to_ns, double wall_ms,
                                struct pgwt_sessions_result *out)
 {
     (void)wall_ms;
@@ -1212,15 +1272,19 @@ void pgwt_compute_top_sessions(const struct pgwt_trace_event *events, int count,
             ht[h].pid = ev->pid;
             num_entries++;
         }
-        ht[h].total_ns += ev->duration_ns;
+        /* Per-session DB time is time inside the window (see
+         * event_window_ns); cpu_pct/wait_pct are ratios of the same clipped
+         * total, so they stay consistent. */
+        uint64_t clip_u = event_window_ns(ev, from_ns, to_ns);
+        ht[h].total_ns += clip_u;
 
         if (ev->old_event == 0) {
-            ht[h].cpu_ns += ev->duration_ns;
+            ht[h].cpu_ns += clip_u;
         } else {
             /* O(1) hash lookup for per-wait totals */
             int wslot = wait_ht_find_or_insert(ht[h].waits, ev->old_event);
             if (wslot >= 0)
-                ht[h].waits[wslot].total_ns += ev->duration_ns;
+                ht[h].waits[wslot].total_ns += clip_u;
         }
     }
 
@@ -1272,7 +1336,8 @@ void pgwt_compute_top_sessions(const struct pgwt_trace_event *events, int count,
 struct query_accum {
     uint64_t query_id;
     uint64_t count;
-    uint64_t total_ns;
+    uint64_t total_ns;   /* time INSIDE the requested window (DB-Time column) */
+    uint64_t full_ns;    /* sum of full durations — the avg latency column */
     uint64_t class_ns[PGWT_NUM_CLASSES]; /* per-class time breakdown */
     /* Per-wait hash table — O(1) lookup */
     struct wait_ht_entry waits[WAIT_HT_SIZE];
@@ -1289,7 +1354,8 @@ static int cmp_query_row_desc(const void *a, const void *b)
 }
 
 void pgwt_compute_top_queries(const struct pgwt_trace_event *events, int count,
-                              const struct pgwt_filter *f, double wall_ms,
+                              const struct pgwt_filter *f,
+                              uint64_t from_ns, uint64_t to_ns, double wall_ms,
                               struct pgwt_queries_result *out)
 {
     (void)wall_ms;
@@ -1307,19 +1373,23 @@ void pgwt_compute_top_queries(const struct pgwt_trace_event *events, int count,
             continue;
         if (ev->flags & PGWT_EVENT_FLAG_IO_WORKER)
             continue;   /* T2: io_workers are structurally query-less */
+        /* Time inside the requested window (see event_window_ns). Only the
+         * avg column keeps the full duration — it is a per-observation
+         * latency, not a share of the window. */
+        uint64_t clip_u = event_window_ns(ev, from_ns, to_ns);
         if (ev->query_id == 0) {
             /* #128: foreground non-idle time whose command never reported
              * an id is reported, not dropped. */
             if (ev->flags & PGWT_EVENT_FLAG_QUERY_UNATTRIB) {
-                unattributed_ns += ev->duration_ns;
+                unattributed_ns += clip_u;
                 unattributed_count++;
             }
             continue;
         }
         if (ev->flags & PGWT_EVENT_FLAG_QUERY_BACKFILL)
-            backfilled_ns += ev->duration_ns;
+            backfilled_ns += clip_u;
 
-        db_time_ns += ev->duration_ns;
+        db_time_ns += clip_u;
 
         uint32_t h = (uint32_t)(ev->query_id ^ (ev->query_id >> 32)) & QUERY_HT_MASK;
         while (ht[h].count > 0 && ht[h].query_id != ev->query_id)
@@ -1332,14 +1402,15 @@ void pgwt_compute_top_queries(const struct pgwt_trace_event *events, int count,
         /* Split sample continuations conserve time, not observation count. */
         if (!(ev->flags & PGWT_EVENT_FLAG_SAMPLE_CONT) || ht[h].count == 0)
             ht[h].count++;
-        ht[h].total_ns += ev->duration_ns;
-        ht[h].class_ns[pgwt_wait_class_index(ev->old_event)] += ev->duration_ns;
+        ht[h].total_ns += clip_u;
+        ht[h].full_ns  += ev->duration_ns;
+        ht[h].class_ns[pgwt_wait_class_index(ev->old_event)] += clip_u;
 
         /* O(1) hash lookup for per-wait totals */
         if (ev->old_event != 0) {
             int wslot = wait_ht_find_or_insert(ht[h].waits, ev->old_event);
             if (wslot >= 0)
-                ht[h].waits[wslot].total_ns += ev->duration_ns;
+                ht[h].waits[wslot].total_ns += clip_u;
         }
     }
 
@@ -1356,8 +1427,10 @@ void pgwt_compute_top_queries(const struct pgwt_trace_event *events, int count,
         r->query_id = ht[i].query_id;
         r->count    = ht[i].count;
         r->total_ms = (double)ht[i].total_ns / 1e6;
+        /* Latency, so from FULL durations (== total_ns for any window that
+         * does not cut an event, hence unchanged for whole-capture). */
         r->avg_us   = ht[i].count > 0
-                     ? (double)ht[i].total_ns / (double)ht[i].count / 1000.0
+                     ? (double)ht[i].full_ns / (double)ht[i].count / 1000.0
                      : 0;
         r->pct_db   = db_time_ms > 0 ? r->total_ms / db_time_ms * 100.0 : 0;
 
