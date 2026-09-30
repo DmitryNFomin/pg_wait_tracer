@@ -94,7 +94,22 @@ def test_many_pids(t):
 
 
 def test_large_duration(t):
-    """Very large duration (1 hour) — should not overflow."""
+    """Very large duration (1 hour) — should not overflow.
+
+    The 1-hour wait ENDS at the trace's only timestamp, so ServerHarness's
+    auto-injected window ([first − 30 s, last + 30 s], 60 s wide) contains
+    only the wait's last 30 s. A windowed aggregate reports time INSIDE the
+    window, so DB Time is 30,000 ms, not 3,600,000 ms: an hour of DB Time in
+    a 60-second window would be AAS 60 on one session, which is the exact
+    straddler defect tests/test_window_clip.c pins (Overview counted a wait
+    that started before `from` in full; the AAS chart did not).
+
+    The overflow property this case exists for is asserted on BOTH sides:
+    the clipped DB Time is exactly 30 s (a wrapped uint64 would be ~1.8e10 s,
+    a truncated one 0), and the LATENCY column — deliberately not clipped,
+    because a wait's duration is a property of the wait — still carries the
+    whole 3.6e9 µs.
+    """
     print("--- Large duration ---")
     one_hour = 3_600_000_000_000  # 1 hour in ns
     scenario = {
@@ -111,9 +126,20 @@ def test_large_duration(t):
             resp = srv.query("time_model")
             rows = {r["name"]: r for r in resp.get("rows", [])}
             db_ms = rows.get("DB Time", {}).get("ms", -1)
-            # 1 hour = 3,600,000 ms
-            t.check_approx(db_ms, 3_600_000.0, 0.001,
-                           "1-hour event: DB Time = 3,600,000ms")
+            # The harness expands the window 30 s each way around the single
+            # event's END timestamp, so 30 s of the hour is inside it.
+            t.check_approx(db_ms, 30_000.0, 0.001,
+                           "1-hour event clipped to the window: DB Time = 30,000ms")
+
+            ev = srv.query("top_events")
+            row = next((r for r in ev.get("rows", [])
+                        if r.get("name", "").startswith("IO:")), None)
+            t.check(row is not None, "1-hour event appears in top_events")
+            if row:
+                t.check_approx(row.get("total_ms", -1), 30_000.0, 0.001,
+                               "top_events DB-time column is clipped too")
+                t.check_approx(row.get("max_us", -1), 3_600_000_000.0, 0.001,
+                               "…but max latency is the full hour (no overflow)")
     finally:
         cleanup_traces(trace_dir)
 
