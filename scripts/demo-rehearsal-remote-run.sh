@@ -27,7 +27,7 @@
 # touches it there), so it is taken unconditionally rather than needing a
 # second code path.
 #
-# Usage: scripts/demo-rehearsal-remote-run.sh DURATION_MIN RUN_MARKER PG_VERSION
+# Usage: scripts/demo-rehearsal-remote-run.sh DURATION_MIN RUN_MARKER PG_VERSION [RETAIN_TRACE]
 # Run from the repo root on the target (the launcher cd's there first).
 # Writes, relative to cwd:
 #   rehearsal.out    combined stdout/stderr of the whole run
@@ -40,9 +40,12 @@
 #        itself failed (see tests/results/demo_rehearsal/summary.json)
 #   2    the build (make / make -C tests / make pgwt-client) failed
 set -u
-DURATION_MIN="${1:?Usage: demo-rehearsal-remote-run.sh DURATION_MIN RUN_MARKER PG_VERSION}"
-RUN_MARKER="${2:?Usage: demo-rehearsal-remote-run.sh DURATION_MIN RUN_MARKER PG_VERSION}"
-PG_VERSION="${3:?Usage: demo-rehearsal-remote-run.sh DURATION_MIN RUN_MARKER PG_VERSION}"
+DURATION_MIN="${1:?Usage: demo-rehearsal-remote-run.sh DURATION_MIN RUN_MARKER PG_VERSION [RETAIN_TRACE]}"
+RUN_MARKER="${2:?Usage: demo-rehearsal-remote-run.sh DURATION_MIN RUN_MARKER PG_VERSION [RETAIN_TRACE]}"
+PG_VERSION="${3:?Usage: demo-rehearsal-remote-run.sh DURATION_MIN RUN_MARKER PG_VERSION [RETAIN_TRACE]}"
+# Optional 4th arg (docs/DEMO_DELIVERY_QUEUE.md item 2) -- absent (older
+# caller) means "0", same as tests/demo_rehearsal.sh's own default.
+RETAIN_TRACE="${4:-0}"
 
 [ -w /tmp/pgwt-box-check.lock ] || { touch /tmp/pgwt-box-check.lock 2>/dev/null && chmod 0666 /tmp/pgwt-box-check.lock 2>/dev/null; }
 exec 200>/tmp/pgwt-box-check.lock
@@ -99,7 +102,7 @@ else
     # Harmless when this script only holds the lock for build+capture; the
     # risk is specifically fd inheritance surviving past THIS script's own
     # teardown via an orphaned grandchild.
-    sudo DURATION_MIN="$DURATION_MIN" PGWT_RUN_MARKER="$RUN_MARKER" tests/demo_rehearsal.sh --pg-version "$PG_VERSION" 200>&-
+    sudo DURATION_MIN="$DURATION_MIN" PGWT_RUN_MARKER="$RUN_MARKER" RETAIN_TRACE="$RETAIN_TRACE" tests/demo_rehearsal.sh --pg-version "$PG_VERSION" 200>&-
     rc=$?
 fi
 
