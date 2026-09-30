@@ -115,6 +115,16 @@
 #                  target, refuses loudly and exits non-zero if not, and
 #                  records both the requested and the confirmed version in
 #                  the final verdict.
+#   RETAIN_TRACE   docs/DEMO_DELIVERY_QUEUE.md item 2 -- opt-in, OFF (0) by
+#                  default: normal runs delete the trace dir as before. Set
+#                  to 1 to keep it (synced back to tests/results/
+#                  demo_rehearsal/trace/, alongside the raw aas/time_model
+#                  responses saved to .../raw/) instead of deleting it at
+#                  teardown -- unblocks an offline read (criteria doc §3's
+#                  per-class wait-CPU number, or any future check) without
+#                  paying for a whole new 30-45 minute capture. A 40-minute
+#                  --mode full trace is large, which is why this is never
+#                  the default.
 #
 # Needs the Hetzner token in the macOS Keychain (same as box-check.sh) for
 # the throwaway-VM path (PGWT_BOX unset); not needed when PGWT_BOX is set:
@@ -128,6 +138,13 @@ MODE="launch"
 DURATION_MIN="${DURATION_MIN:-35}"
 KEEP="${KEEP:-0}"
 PG="${PG:-18}"
+# docs/DEMO_DELIVERY_QUEUE.md item 2: opt-in, OFF by default -- keeps the
+# trace dir + raw aas/time_model responses (tests/demo_rehearsal.sh) instead
+# of deleting them, so they land in the already-rsynced tests/results/
+# demo_rehearsal/ with no separate sync path. Threaded through to the
+# detached remote job exactly like DURATION_MIN/PG below (positional arg to
+# scripts/demo-rehearsal-remote-run.sh).
+RETAIN_TRACE="${RETAIN_TRACE:-0}"
 STATE_FILE="${DEMO_REHEARSAL_STATE_FILE:-tests/results/.demo-rehearsal-state.sh}"
 
 # PERSISTENT=1 when PGWT_BOX names a persistent box (pgwt-gate/pgwt-gate-2)
@@ -483,7 +500,7 @@ EOF
         fi
     fi
 
-    echo "demo-rehearsal: $target  DURATION_MIN=$DURATION_MIN PG=$PG -> $remote_dir  (log: $log)"
+    echo "demo-rehearsal: $target  DURATION_MIN=$DURATION_MIN PG=$PG RETAIN_TRACE=$RETAIN_TRACE -> $remote_dir  (log: $log)"
     ssh -o BatchMode=yes $ssh_strict "$target" "mkdir -p '$remote_dir'" || exit 1
     rsync -az --delete -e "ssh $ssh_strict" \
         --exclude .git --exclude /build \
@@ -547,7 +564,7 @@ EOF
     # backgrounded.
     launch_out=$(ssh -o BatchMode=yes $ssh_strict "$target" \
         "cd '$remote_dir' && rm -f rehearsal.done rehearsal.rc rehearsal.pid rehearsal.out rehearsal.started; \
-         nohup setsid -w bash scripts/demo-rehearsal-remote-run.sh '$DURATION_MIN' '$demo_rehearsal_start_epoch' '$PG' </dev/null >/dev/null 2>&1 & \
+         nohup setsid -w bash scripts/demo-rehearsal-remote-run.sh '$DURATION_MIN' '$demo_rehearsal_start_epoch' '$PG' '$RETAIN_TRACE' </dev/null >/dev/null 2>&1 & \
          echo \$! > rehearsal.pid; disown; \
          sleep 1; \
          if [[ -s rehearsal.pid ]] && kill -0 \$(cat rehearsal.pid) 2>/dev/null; then echo LAUNCHED=1; else echo LAUNCHED=0; fi" \
@@ -783,6 +800,6 @@ while true; do
 done
 
 echo
-echo "demo-rehearsal (DURATION_MIN=$DURATION_MIN PG=$PG target=${target:-unknown} persistent=$PERSISTENT pg_confirmed=${PG_VERSION_CONFIRMED:-not verified} rehearsal_started=${rehearsal_started_epoch:-never confirmed}) verdict: $outcome_verdict (exit=$outcome_rc) -- summary:"
+echo "demo-rehearsal (DURATION_MIN=$DURATION_MIN PG=$PG RETAIN_TRACE=$RETAIN_TRACE target=${target:-unknown} persistent=$PERSISTENT pg_confirmed=${PG_VERSION_CONFIRMED:-not verified} rehearsal_started=${rehearsal_started_epoch:-never confirmed}) verdict: $outcome_verdict (exit=$outcome_rc) -- summary:"
 tail -n 30 "$log" | sed 's/^/  /'
 exit "$outcome_rc"
