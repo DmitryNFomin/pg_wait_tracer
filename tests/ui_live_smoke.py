@@ -188,16 +188,24 @@ LEGEND_COLORS_JS = """() => {
     return out;
 }"""
 
-# issue #252 self-test: a synthetic full-clip-rect overlay, shown/hidden at
-# absolute browser-clock times computed the SAME way _capture_at_offset
-# schedules its own waits (Date.now()-relative deltas, never a flat sleep
-# from whenever this evaluate() call happens to execute -- so the overlay's
-# actual on-screen window is exact regardless of Python/CDP round-trip
-# jitter before this call lands). position:fixed + the clip rect's own
-# viewport-relative x/y/width/height (the SAME coordinate space
-# page.screenshot(clip=...) uses) guarantees the overlay covers exactly the
-# region the sweep captures, independent of the target element's own
-# positioning context.
+# issue #252 self-test: a synthetic overlay (a top horizontal slice of the
+# clip rect -- see DEFAULT_INJECT_BLINK_FRAC below, review round 1: a FULL-
+# panel overlay proves only that a GROSS blink is caught, 1000x over
+# BLINK_THRESHOLD), shown/hidden at absolute browser-clock times computed
+# the SAME way _capture_at_offset schedules its own waits (Date.now()-
+# relative deltas, never a flat sleep from whenever this evaluate() call
+# happens to execute -- so the overlay's actual on-screen window is exact
+# regardless of Python/CDP round-trip jitter before this call lands).
+# position:fixed + the clip rect's own viewport-relative x/y (the SAME
+# coordinate space page.screenshot(clip=...) uses) guarantees the overlay
+# is positioned within the region the sweep captures, independent of the
+# target element's own positioning context.
+#
+# DEFAULT_INJECT_BLINK_FRAC: the overlay covers this fraction of the clip
+# rect's HEIGHT (full width, top-aligned) -- a slice comfortably above
+# BLINK_THRESHOLD (0.001) without stepping over it by three orders of
+# magnitude the way a full-panel overlay (frac=1.0) does.
+DEFAULT_INJECT_BLINK_FRAC = 0.2
 _INJECT_BLINK_OVERLAY_JS = """(p) => {
     const now = Date.now();
     const showDelay = Math.max(0, p.showAtMs - now);
@@ -867,20 +875,31 @@ def _assert_workload_alive(pgbench_pid, workload_pid, where):
 
 def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
             blink_threshold, viewport=None, device_scale_factor=None,
-            inject_blink_ms=None, inject_tick=None):
+            inject_blink_ms=None, inject_tick=None,
+            inject_blink_frac=DEFAULT_INJECT_BLINK_FRAC):
     """inject_blink_ms/inject_tick (issue #252 self-test, off by default --
     None/None, the value every real gating caller -- tests/ui_live_smoke.sh,
     demo_rehearsal.py -- passes, so this is a strict addition with no effect
-    on a normal run): when both are set, a synthetic full-panel overlay is
-    shown from this tab's `inject_tick`'th mount+700ms for `inject_blink_ms`
-    milliseconds -- deliberately landing between the sweep's 500ms and
-    1000ms offsets, inside the 1000ms sample's real capture window -- and
-    the resulting sweep ratio/verdict is recorded on the returned result as
-    "self_test". This is the proof that a REAL blink of known size and
-    timing still fails the gate after a capture-path change; the pure-
-    function tests (test_ui_live_smoke_lib.py) exercise the verdict math in
-    isolation but cannot see a capture resolution/region change, which is
-    exactly the kind of change issue #252 makes.
+    on a normal run): when both are set, a synthetic overlay covering the
+    top `inject_blink_frac` fraction of the panel's own clip rect (full
+    width) is shown from this tab's `inject_tick`'th mount+700ms for
+    `inject_blink_ms` milliseconds -- deliberately landing between the
+    sweep's 500ms and 1000ms offsets, inside the 1000ms sample's real
+    capture window -- and the resulting sweep ratio/verdict is recorded on
+    the returned result as "self_test". This is the proof that a REAL
+    blink of known size and timing still fails the gate after a capture-
+    path change; the pure-function tests (test_ui_live_smoke_lib.py)
+    exercise the verdict math in isolation but cannot see a capture
+    resolution/region change, which is exactly the kind of change issue
+    #252 makes.
+
+    inject_blink_frac (review round 1): a FULL-panel overlay produces
+    ratio~1.0, three orders of magnitude above BLINK_THRESHOLD (0.001) --
+    it proves a gross blink is caught, not that the actual configured
+    threshold still works. DEFAULT_INJECT_BLINK_FRAC (a top horizontal
+    slice, not the whole panel) still comfortably clears the threshold
+    (robust against anti-aliasing/cell-boundary noise a threshold-sized
+    slice would risk) while no longer stepping over it by 1000x.
 
     viewport / device_scale_factor (issue #223, default changed by #252):
     the criteria doc's pinned demo client viewport, 1710x981 at DPR 2 (see
@@ -889,21 +908,36 @@ def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
     tests/demo_rehearsal.py passed these, and this docstring used to say
     ui_live_smoke.py's own CI-tier walk (main(), below) keeping the
     narrower 1280x900 DSF1 default instead "would slow every PR for
-    nothing". #252 falsifies that: DPR2 quadruples the pixels a screenshot
-    has to encode/decode, that cost is exactly what made the Sessions
-    sweep drift past a whole tick at demo length, and NO PR gate ran at
-    DPR2 at all -- so the defect passed four PR gates before a 40-minute
-    rehearsal finally caught it, at real cost (the rehearsal's own attempt
-    counter, and a demo-blocking bug found far later than a PR gate could
-    have found it). #252's fix (page.screenshot(scale="css"); one clip
-    computed per tick, not per frame) brought real per-frame capture cost
-    at DPR2 down to double digits/low hundreds of ms (see that issue and
-    the PR that fixed it for measured numbers) -- narrow specifically to
-    dodge DPR2's cost is no longer the right trade once the cost itself is
-    fixed; main() now defaults to THIS viewport for exactly that reason.
-    An explicit override (--viewport-width/--viewport-height/
-    --device-scale-factor) is still available for anyone who needs the
-    old, narrower/faster walk.
+    nothing". #252 falsifies that: before its fix, DPR2 quadrupled the
+    pixels a screenshot had to encode/decode, that cost was exactly what
+    made the Sessions sweep drift past a whole tick at demo length, and NO
+    PR gate ran at DPR2 at all -- so the defect passed four PR gates
+    before a 40-minute rehearsal finally caught it, at real cost (the
+    rehearsal's own attempt counter, and a demo-blocking bug found far
+    later than a PR gate could have found it).
+
+    #252's fix (page.screenshot(scale="css"); one clip computed per tick,
+    not per frame) makes per-frame capture cost DPR-INDEPENDENT --
+    reviewed and measured: 64.5ms at DPR2 vs 62.0ms at DPR1, a 4% gap, not
+    the 2x/4x the pixel count would suggest. So the DPR2 default does NOT
+    exist to "exercise DPR2's real capture cost" (review round 1 finding
+    4 -- an earlier version of this comment claimed exactly that, and it
+    was wrong: with scale="css" there is no separate DPR2 cost left to
+    exercise). It exists for two different, narrower reasons: (1) it
+    renders the demo's actual layout and raster geometry, the same
+    viewport a real viewer/presenter sees, which 1280x900 DSF1 does not;
+    (2) it is the TRIPWIRE for a FUTURE regression -- if scale="css" is
+    ever removed, capture_ms reverts to the old device-scale regime only
+    at DPR2 (DPR1's cost is already low and stays low either way), so
+    running the gate at DPR2 is what would make that specific regression
+    visible again (see build_tab_result's capture_budget check, issue #252
+    review round 1 finding 1). A later agent reading only the OLD wording
+    could conclude the DPR2 walk itself is the cost guard and remove
+    something else (e.g. this viewport default) as "redundant" with that
+    check -- it is not; the check depends on running at DPR2 to have
+    anything to catch. An explicit override
+    (--viewport-width/--viewport-height/--device-scale-factor) is still
+    available for anyone who needs the old, narrower walk.
 
     Whichever viewport is requested, it is never trusted on faith: right
     after the page loads, the ACTUAL innerWidth/innerHeight/devicePixelRatio
@@ -1111,11 +1145,14 @@ def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
             if (inject_blink_ms is not None and inject_tick is not None
                     and i == inject_tick and sweep_clip is not None):
                 show_at_ms = mount_at_ms + 700
+                # review round 1: top SLICE of the clip rect, not the whole
+                # thing -- see DEFAULT_INJECT_BLINK_FRAC's own comment.
                 page.evaluate(_INJECT_BLINK_OVERLAY_JS, {
                     "showAtMs": show_at_ms,
                     "hideAtMs": show_at_ms + inject_blink_ms,
                     "x": sweep_clip["x"], "y": sweep_clip["y"],
-                    "width": sweep_clip["width"], "height": sweep_clip["height"],
+                    "width": sweep_clip["width"],
+                    "height": sweep_clip["height"] * inject_blink_frac,
                 })
             sweep_raw_frames = []
             sweep_achieved_ms = []
@@ -1159,7 +1196,16 @@ def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
                 self_test_result = {
                     "tick": i, "ratio": ratio, "measured": ratio is not None,
                     "note": blink_note, "inject_blink_ms": inject_blink_ms,
-                    "caught": ratio is not None and ratio >= 0.5,
+                    # review round 1: this used to hardcode >= 0.5, so
+                    # raising BLINK_THRESHOLD toward 0.5 (e.g. to 0.4) would
+                    # leave the self-test reporting PASS while the gate it
+                    # is supposed to defend had gone slack -- it certified
+                    # only that a GROSS blink is caught, not that the
+                    # actual configured threshold still works. Compare
+                    # against the same blink_threshold the tab's own
+                    # no_blink verdict uses, so the self-test tracks
+                    # whatever this run was actually configured to detect.
+                    "caught": ratio is not None and ratio >= blink_threshold,
                 }
 
             blink_sweep_ticks.append(
@@ -1294,10 +1340,20 @@ def main():
                     help="which 1-based tick of --inject-tab gets the "
                     "synthetic blink (default 2); ignored unless "
                     "--inject-blink-ms is set")
+    ap.add_argument("--inject-blink-frac", type=float,
+                    default=DEFAULT_INJECT_BLINK_FRAC,
+                    help="review round 1: fraction of --inject-tab's panel "
+                    "height the synthetic overlay covers (top slice, full "
+                    f"width; default {DEFAULT_INJECT_BLINK_FRAC} -- a full "
+                    "panel, frac=1.0, only proves a GROSS blink is caught, "
+                    "1000x over BLINK_THRESHOLD); ignored unless "
+                    "--inject-blink-ms is set")
     ap.add_argument("--viewport-width", type=int, default=DEMO_VIEWPORT_WIDTH,
                     help="issue #252: this CI-tier walk now defaults to the "
                     "SAME viewport demo_rehearsal.py pins, so a PR gate "
-                    f"exercises DPR2's real capture cost (default "
+                    "renders the demo's actual layout/raster geometry and "
+                    "acts as the tripwire that makes a future scale=\"css\" "
+                    "removal visible in capture_ms (default "
                     f"{DEMO_VIEWPORT_WIDTH}; see run_tab()'s own docstring)")
     ap.add_argument("--viewport-height", type=int, default=DEMO_VIEWPORT_HEIGHT,
                     help=f"issue #252 (default {DEMO_VIEWPORT_HEIGHT})")
@@ -1339,11 +1395,22 @@ def main():
 
     _assert_workload_alive(args.pgbench_pid, args.workload_pid, "before the walk")
     results = []
+    # review round 1 finding 3: self-test mode has no periodic caller
+    # because walking all 11 tabs just to exercise one injected tab is too
+    # expensive to wire into box-check on every run. Self-test mode walks
+    # ONLY --inject-tab -- the rest of the tabs contribute nothing to
+    # self_test_ok (main()'s own exit-code logic below only ever looks at
+    # args.inject_tab's result), so skipping them is a pure cost cut, not a
+    # narrower proof. A real gating invocation never sets --inject-blink-ms
+    # (tests/ui_live_smoke.sh, demo_rehearsal.py), so lib.TABS is still
+    # walked in full there.
+    tabs_to_walk = ([args.inject_tab] if args.inject_blink_ms is not None
+                    else lib.TABS)
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch()
             try:
-                for tab_id in lib.TABS:
+                for tab_id in tabs_to_walk:
                     print(f"=== {tab_id} ===")
                     inject_here = (args.inject_blink_ms is not None
                                    and tab_id == args.inject_tab)
@@ -1356,7 +1423,8 @@ def main():
                                      inject_blink_ms=(args.inject_blink_ms
                                                       if inject_here else None),
                                      inject_tick=(args.inject_tick
-                                                  if inject_here else None))
+                                                  if inject_here else None),
+                                     inject_blink_frac=args.inject_blink_frac)
                     results.append(result)
                     _assert_workload_alive(args.pgbench_pid, args.workload_pid,
                                            f"after tab {tab_id!r}")
@@ -1392,7 +1460,10 @@ def main():
     print("════════════════════════════════════════")
     print("  UI LIVE SMOKE SUMMARY")
     print("════════════════════════════════════════")
-    for tab_id in lib.TABS:
+    # self-test mode only ever walks tabs_to_walk (== [args.inject_tab]),
+    # not lib.TABS -- printing every OTHER tab as FAIL here would claim a
+    # result for tabs that were never even visited.
+    for tab_id in tabs_to_walk:
         r = summary["tabs"].get(tab_id)
         kf_line = lib.known_failing_report_line(tab_id, r["ok"]) if r else None
         label = kf_line if kf_line else ("PASS" if r and r["ok"] else "FAIL")

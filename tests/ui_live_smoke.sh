@@ -367,4 +367,33 @@ python3 "$SCRIPT_DIR/ui_live_smoke.py" --url "$BASE_URL" \
     --pgbench-pid "$PGBENCH_PID" --workload-pid "$WORKLOAD_PID"
 SMOKE_RC=$?
 
-exit "$SMOKE_RC"
+# ── 5. Self-test (issue #224 bypass suite; issue #252 review round 1
+#      finding 3) ───────────────────────────────────────────────────────────
+# --inject-blink-ms proves the gate still catches a REAL blink of known
+# size/timing after a capture-path change (issue #252's own capture-cost
+# fix among them) -- but as shipped it had no caller other than a human
+# choosing to run it by hand, which decays to "someone remembers to". This
+# is that caller: it runs on every box-check, the same place the main walk
+# above already runs, with no extra provisioning -- self-test mode walks
+# ONLY --inject-tab (see ui_live_smoke.py main()'s own comment), so it
+# costs one tab's worth of ticks against the daemon/bridge/pgbench/
+# workload started above, not another full 11-tab walk. A separate
+# --out-dir keeps this from ever overwriting the main walk's own
+# summary.json (same reason --mock gets MOCK_RESULTS_DIR, not RESULTS_DIR).
+# A self-test failure fails THIS script even when the main walk passed --
+# a gate that cannot prove it still detects a blink cannot be trusted just
+# because nothing blinked on this particular run.
+echo "ui_live_smoke: self-test -- injecting a synthetic blink and confirming the gate still catches it"
+python3 "$SCRIPT_DIR/ui_live_smoke.py" --url "$BASE_URL" \
+    --pgbench-pid "$PGBENCH_PID" --workload-pid "$WORKLOAD_PID" \
+    --out-dir "$SCRIPT_DIR/results/ui_live_self_test" \
+    --inject-blink-ms 400
+SELF_TEST_RC=$?
+if [[ "$SELF_TEST_RC" -ne 0 ]]; then
+    echo "ui_live_smoke: SELF-TEST FAILED (rc=$SELF_TEST_RC) -- the gate could not prove it still catches an injected blink; see results/ui_live_self_test/summary.json"
+fi
+
+if [[ "$SMOKE_RC" -ne 0 ]]; then
+    exit "$SMOKE_RC"
+fi
+exit "$SELF_TEST_RC"

@@ -76,6 +76,20 @@ SWEEP_OFFSETS_MS = (200, 500, 1000, 1500, 2000)
 # untouched.
 MIN_MEASURED_FRACTION = 0.5
 
+# issue #252 review round 1 finding 1: capture_ms/capture_ms_total_ms were
+# REPORT-ONLY -- no `.sh`, no check in demo_rehearsal.py, no criteria row
+# read them. Concretely: if a later refactor drops scale="css"
+# (_capture_with_clip), per-frame cost reverts to ~120ms and a sweep to
+# ~600ms; that still fits inside the 5s tick, so no sweep straddles a
+# mount, MIN_MEASURED_FRACTION stays satisfied, and NOTHING goes red --
+# the number sits in a JSON nobody reads until the next 40-minute
+# rehearsal, exactly the path #252 itself took to escape four PR gates.
+# CAPTURE_MS_BOUND_MS closes that: a generous bound (well clear of the
+# ~130-235ms measured on gate-2 at DPR2 after the #252 fix) that exists to
+# catch a regression back to the OLD ~600ms/sweep regime, not to police
+# normal variance -- see capture_budget_ok below.
+CAPTURE_MS_BOUND_MS = 800.0
+
 # KNOWN_FAILING_TABS: tab name -> tracking issue number. ONLY for a tab that
 # reproduces a real, filed product bug (issue #100, #101) -- never for timing
 # or runner noise; a noisy tab is investigated, never silenced here (see also
@@ -530,6 +544,42 @@ def build_sweep_tick_record(achieved_offsets_ms, frames,
     }
 
 
+def capture_budget_ok(blink_sweep_ticks, bound_ms=CAPTURE_MS_BOUND_MS):
+    """issue #252 review round 1 finding 1: the per-tick assertion that
+    closes the "capture_ms is report-only" escape path -- see
+    CAPTURE_MS_BOUND_MS's own comment for the regression this exists to
+    catch. blink_sweep_ticks: a tab's blink_sweep.ticks list (one
+    build_sweep_tick_record() dict per tick).
+
+    Every tick whose capture_ms_total_ms was actually measured (its
+    capture_ms list is non-empty -- build_sweep_tick_record's own "[]
+    means not measured" contract) must stay at/under bound_ms. A tick that
+    never measured capture_ms is SKIPPED, not counted as a violation --
+    this check has power only where there is something to check, same
+    idiom as measured_ok's own "zero attempted ticks trivially passes"
+    above. Zero MEASURED ticks (every caller/test before #252, or a tab
+    that discarded every tick as not-measured -- already failing via
+    measured_ok, never given a second, unrelated reason to look wrong)
+    trivially passes for the same reason.
+
+    Returns (ok, detail) -- detail is None when ok, else names every
+    offending tick's own total so a real regression is diagnosable from
+    summary.json alone, not just "something, somewhere, was slow"."""
+    over = []
+    for i, tick in enumerate(blink_sweep_ticks, start=1):
+        if not tick.get("capture_ms"):
+            continue
+        total = tick.get("capture_ms_total_ms")
+        if total is not None and total > bound_ms:
+            over.append((i, total))
+    if not over:
+        return True, None
+    detail = "; ".join(
+        f"tick {i}: capture_ms_total_ms={total:.1f}ms > {bound_ms:.0f}ms bound"
+        for i, total in over)
+    return False, detail
+
+
 def is_blank_frame(frame, std_threshold=1.0):
     """True if frame is (near-)solid-colour -- a CONTINUITY teardown-to-blank
     flash, not real rendered content. Real content (text, grid lines, chart
@@ -707,7 +757,8 @@ def build_tab_result(tab_id, rendered_ok, rendered_detail, ticks_observed,
                       blink_pair_offsets_ms=(), blink_sweep_ticks=(),
                       blink_not_measured=(),
                       min_measured_fraction=MIN_MEASURED_FRACTION,
-                      pre_mount_diagnostics=()):
+                      pre_mount_diagnostics=(),
+                      capture_ms_bound_ms=CAPTURE_MS_BOUND_MS):
     """Assembles one tab's verdict. Pure: every input is already-collected
     data, no page access.
 
@@ -768,7 +819,13 @@ def build_tab_result(tab_id, rendered_ok, rendered_detail, ticks_observed,
     `ok`. Every numeric field is None with an explanatory note when the
     capture could not prove it preceded the tick's own mount (see
     pre_mount_diagnostic_verdict) -- never a fabricated 0.0. Empty for
-    every other tab."""
+    every other tab.
+
+    capture_ms_bound_ms (issue #252 review round 1 finding 1): see
+    capture_budget_ok/CAPTURE_MS_BOUND_MS's own comments -- this is what
+    turns capture_ms from report-only into an actual gate, closing the
+    escape path where a capture-cost regression stays invisible as long as
+    it still fits inside one live tick."""
     clean_ok = len(console_errors) == 0
     blink_ok = no_blink_ok(blink_ratio, blink_threshold)
     leak_ok = leak_probe_ok(leak_before) and leak_probe_ok(leak_after)
@@ -779,8 +836,10 @@ def build_tab_result(tab_id, rendered_ok, rendered_detail, ticks_observed,
     measured_count = attempted_count - not_measured_count
     measured_ok = (attempted_count == 0 or
                    (measured_count / attempted_count) >= min_measured_fraction)
+    capture_ok, capture_detail = capture_budget_ok(blink_sweep_ticks,
+                                                    bound_ms=capture_ms_bound_ms)
     ok = (rendered_ok and clean_ok and blink_ok and measured_ok and leak_ok and
-          color_ok and ticks_ok)
+          color_ok and ticks_ok and capture_ok)
     result = {
         "tab": tab_id,
         "ok": ok,
@@ -798,6 +857,8 @@ def build_tab_result(tab_id, rendered_ok, rendered_detail, ticks_observed,
                                   "min_fraction": min_measured_fraction}},
         "blink_sweep": {"offsets_ms": list(SWEEP_OFFSETS_MS),
                         "ticks": list(blink_sweep_ticks)},
+        "capture_budget": {"ok": capture_ok, "bound_ms": capture_ms_bound_ms,
+                           "detail": capture_detail},
         "color_stability": {"ok": color_ok, "violations": color_violations},
         "no_leak": {"ok": leak_ok, "before": leak_before, "after": leak_after,
                     "settle_s": {"before": leak_before_settle_s,
@@ -830,6 +891,8 @@ def build_failed_tab_result(tab_id, reason, ticks_observed=0, artifacts=None,
                                   "attempted_count": 0,
                                   "min_fraction": MIN_MEASURED_FRACTION}},
         "blink_sweep": {"offsets_ms": list(SWEEP_OFFSETS_MS), "ticks": []},
+        "capture_budget": {"ok": None, "bound_ms": CAPTURE_MS_BOUND_MS,
+                           "detail": None},
         "color_stability": {"ok": None, "violations": []},
         "no_leak": {"ok": None, "before": None, "after": None,
                     "settle_s": {"before": None, "after": None}},
