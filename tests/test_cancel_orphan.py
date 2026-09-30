@@ -309,21 +309,33 @@ def main():
         mine = [r_ for r_ in rows if int(r_["pid"]) == victim_pid]
         if not check(mine, f"an execution row exists for pid {victim_pid}"):
             return 1
-        row = min(mine, key=lambda r_: abs(int(r_["start_ns"]) - start_ts))
-        check(int(row["start_ns"]) == start_ts,
-              "the server row matches the orphan EXEC_START exactly")
+        # dump_exec_markers reports the RAW monotonic ktime the daemon
+        # writes into the trace; pgwt-server reports wall-clock. The two tick
+        # at the same rate but have different origins, so every comparison
+        # here is between INTERVALS, never between absolute stamps.
+        check(len(mine) == kinds.count("EXEC_START"),
+              f"one server row per EXEC_START in the raw trace "
+              f"({len(mine)} rows vs {kinds.count('EXEC_START')} starts)")
 
-        if not check(not row.get("in_progress"),
+        closed = [r_ for r_ in mine if not r_.get("in_progress")]
+        if not check(closed,
                      "the cancelled statement's row is CLOSED, not left in "
                      "progress"):
             print("    (this is the defect: an orphan row whose elapsed-so-far "
                   "grows for the rest of the capture)")
             return 1
 
-        end_ns = int(row["end_ns"])
-        check(end_ns in boundaries,
-              f"the end ({(end_ns - start_ts) / 1e6:.1f} ms in) is EXACTLY an "
-              "observed idle/exit boundary — a real timestamp, not invented")
+        deltas = {b - start_ts for b in boundaries}
+        spans = {int(r_["end_ns"]) - int(r_["start_ns"]): r_ for r_ in closed}
+        matched = sorted(set(spans) & deltas)
+        check(matched,
+              "a closed row's span EXACTLY equals an observed EXEC_START -> "
+              f"idle/exit interval (row spans {sorted(spans)} ns vs "
+              f"boundaries {sorted(deltas)} ns)")
+        if not matched:
+            return 1
+        row = spans[matched[0]]
+
         dur_ms = float(row["duration_ms"])
         capture_ms = (to_ns - from_ns) / 1e6
         check(dur_ms < capture_ms - 1000,
