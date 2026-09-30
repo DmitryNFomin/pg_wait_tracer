@@ -385,6 +385,152 @@ def test_build_sweep_tick_record_capture_ms_and_mount_seq_default_empty():
           "a caller that doesn't pass mount_seq gets None not a missing key")
 
 
+# ── capture_ms_total_ms / panel_dims (issue #252 evidence) ─────────────────
+#
+# #252's secondary finding: capture_ms existed in the raw per-frame list but
+# nothing summed it for a reader, and no field at all recorded the panel
+# size a frame's cost should be attributed to. These pin both additions so
+# a regression that silently drops either (e.g. the field reverting to a
+# hardcoded 0.0/{} regardless of input -- the exact shape of the original
+# bug, just moved) is caught here, not rediscovered from a 40-minute
+# rehearsal.
+def test_build_sweep_tick_record_capture_ms_total_is_the_sum():
+    a = np.zeros((4, 4, 3), dtype=np.uint8)
+    rec = lib.build_sweep_tick_record([201, 503, 1010], [a, a.copy(), a.copy()],
+                                      target_offsets_ms=(200, 500, 1000),
+                                      capture_ms=[120.5, 95.25, 88.0])
+    check(rec["capture_ms_total_ms"] == 303.75,
+          f"capture_ms_total_ms is the plain sum, not a placeholder (got "
+          f"{rec['capture_ms_total_ms']}) -- this is what a reviewer reads "
+          f"first against the ~300ms/frame acceptance bound, not the raw "
+          f"list")
+
+
+def test_build_sweep_tick_record_capture_ms_total_zero_when_not_measured():
+    a = np.zeros((4, 4, 3), dtype=np.uint8)
+    rec = lib.build_sweep_tick_record([201, 503], [a, a.copy()],
+                                      target_offsets_ms=(200, 500))
+    check(rec["capture_ms_total_ms"] == 0.0,
+          "no capture_ms measured sums to 0.0, not None -- the empty "
+          "capture_ms list itself is what signals 'not measured'")
+
+
+def test_build_sweep_tick_record_records_panel_dims():
+    a = np.zeros((4, 4, 3), dtype=np.uint8)
+    dims = {"box_width": 1698.0, "box_height": 2340.5,
+            "clip_width": 1698.0, "clip_height": 700.0}
+    rec = lib.build_sweep_tick_record([201, 503], [a, a.copy()],
+                                      target_offsets_ms=(200, 500),
+                                      panel_dims=dims)
+    check(rec["panel_dims"] == dims,
+          f"the panel size actually captured this tick is carried through "
+          f"unchanged (issue #252 evidence) ({rec['panel_dims']})")
+
+
+def test_build_sweep_tick_record_panel_dims_default_empty_dict():
+    a = np.zeros((4, 4, 3), dtype=np.uint8)
+    rec = lib.build_sweep_tick_record([201, 503], [a, a.copy()],
+                                      target_offsets_ms=(200, 500))
+    check(rec["panel_dims"] == {},
+          f"a caller that doesn't measure panel dims gets {{}} not a "
+          f"missing key ({rec['panel_dims']})")
+
+
+# ── capture_budget_ok (issue #252 review round 1 finding 1) ────────────────
+#
+# capture_ms/capture_ms_total_ms used to be report-only: nothing gated on
+# them, so a regression that reverted scale="css"/clip-once-per-tick (per-
+# frame cost back up around 600ms/sweep) would stay invisible as long as
+# the resulting drift still fit inside one 5s live tick -- exactly the
+# escape path #252 itself took to reach a 40-minute rehearsal before being
+# noticed at all. These pin the bound that closes it.
+
+def test_capture_budget_ok_under_bound_passes():
+    ticks = [{"capture_ms": [60.0, 55.0], "capture_ms_total_ms": 115.0},
+            {"capture_ms": [70.0, 65.0], "capture_ms_total_ms": 135.0}]
+    ok, detail = lib.capture_budget_ok(ticks)
+    check(ok is True, f"well under CAPTURE_MS_BOUND_MS (800) passes (detail={detail!r})")
+    check(detail is None, "no offending tick -> no detail text")
+
+
+def test_capture_budget_ok_over_bound_fails():
+    # A regression roughly at the OLD ~600ms/sweep regime (pre-#252, per-
+    # frame elementHandle.screenshot() at full device scale) -- still
+    # comfortably inside a 5s tick, so nothing else in build_tab_result
+    # would ever flag it. Checked against a tighter bound (400ms) than the
+    # real 800ms default so this test does not depend on CAPTURE_MS_BOUND_MS
+    # itself ever changing -- the DEFAULT-bound case is covered separately
+    # (test_build_tab_result_capture_budget_over_bound_fails_tab, at the
+    # real production default of 800ms with a total picked to exceed it).
+    ticks = [{"capture_ms": [120.0, 115.0, 130.0, 118.0, 122.0],
+              "capture_ms_total_ms": 605.0}]
+    ok, detail = lib.capture_budget_ok(ticks, bound_ms=400.0)
+    check(ok is False, f"605ms > 400ms bound must fail (detail={detail!r})")
+    check(detail is not None and "tick 1" in detail and "605.0" in detail,
+          f"the offending tick and its own total are named, not just 'something failed' ({detail!r})")
+
+
+def test_capture_budget_ok_unmeasured_tick_skipped_not_violation():
+    # A tick whose capture_ms was never measured (empty list -- the "not
+    # measured" contract build_sweep_tick_record already uses) must not be
+    # treated as a budget violation just because capture_ms_total_ms
+    # defaults to 0.0 for it -- 0.0 there means "nothing to sum", not "zero
+    # cost measured". Mixed with a genuinely measured, well-under-bound
+    # tick so the skip is the reason it passes, not a vacuous empty list.
+    ticks = [{"capture_ms": [], "capture_ms_total_ms": 0.0},
+            {"capture_ms": [50.0], "capture_ms_total_ms": 50.0}]
+    ok, detail = lib.capture_budget_ok(ticks, bound_ms=800.0)
+    check(ok is True, f"an unmeasured tick is skipped, not scored (detail={detail!r})")
+
+
+def test_capture_budget_ok_no_ticks_at_all_trivially_passes():
+    ok, detail = lib.capture_budget_ok([])
+    check(ok is True, "no ticks at all -> nothing to violate the bound")
+    check(detail is None, "no detail text for the trivial case")
+
+
+def test_build_tab_result_capture_budget_gates_ok():
+    # Bypass-suite pairing with the FAIL case below: proves this is wired
+    # into build_tab_result's actual `ok`, not merely a standalone function
+    # nothing calls.
+    tick_pass = {"target_offsets_ms": [200], "achieved_offsets_ms": [205],
+                "capture_ms": [50.0], "capture_ms_total_ms": 50.0,
+                "panel_dims": {}, "ratios": [], "notes": []}
+    result = lib.build_tab_result(
+        "sessions", True, "6 rows", 6, [], 0.0, [],
+        {"charts": 0, "uplots": 0, "pending": 0},
+        {"charts": 0, "uplots": 0, "pending": 0}, {},
+        blink_pair_offsets_ms=[10] * 6, blink_sweep_ticks=[tick_pass] * 6)
+    check(result["capture_budget"]["ok"] is True,
+          f"under-bound capture cost does not gate the tab red ({result['capture_budget']})")
+    check(result["ok"] is True,
+          "an otherwise-clean tab with in-budget capture cost still passes overall")
+
+
+def test_build_tab_result_capture_budget_over_bound_fails_tab():
+    # THE regression case: a tab that is clean on every OTHER check (no
+    # console errors, no blink, no leak, enough ticks, fully measured) must
+    # still fail overall once its capture cost regresses past the bound --
+    # this is what makes the bound an actual gate, not a second report-only
+    # field next to the first two.
+    tick_over = {"target_offsets_ms": [200, 500, 1000, 1500, 2000],
+                "achieved_offsets_ms": [205, 510, 1010, 1515, 2020],
+                "capture_ms": [120.0, 115.0, 130.0, 118.0, 122.0],
+                "capture_ms_total_ms": 605.0, "panel_dims": {},
+                "ratios": [0.0, 0.0, 0.0, 0.0], "notes": []}
+    result = lib.build_tab_result(
+        "sessions", True, "6 rows", 6, [], 0.0, [],
+        {"charts": 0, "uplots": 0, "pending": 0},
+        {"charts": 0, "uplots": 0, "pending": 0}, {},
+        blink_pair_offsets_ms=[10] * 6, blink_sweep_ticks=[tick_over] * 6,
+        capture_ms_bound_ms=400.0)
+    check(result["capture_budget"]["ok"] is False,
+          f"605ms > 400ms bound must be flagged ({result['capture_budget']})")
+    check(result["ok"] is False,
+          "a capture-budget violation fails the WHOLE tab, even though "
+          "rendered/clean/no_blink/measured/no_leak/ticks are all clean")
+
+
 # ── clip_rect_to_viewport (issue #197) ──────────────────────────────────────
 #
 # The Sessions panel (#table-container) has no vertical overflow/height cap,

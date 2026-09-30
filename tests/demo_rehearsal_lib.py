@@ -663,7 +663,17 @@ def sweep_offset_drift(tick_record):
     present in every tab result's blink_sweep.ticks, no new instrumentation
     needed). Returns a dict with per-offset drift_ms (achieved - target)
     and the first (200ms target) offset's own drift, since that is where
-    this finding's transients live."""
+    this finding's transients live.
+
+    capture_ms/capture_ms_total_ms/panel_dims (issue #252 secondary
+    finding): build_sweep_tick_record already measures these, but this
+    function used to drop them when re-deriving its own per-tick view --
+    the ONE place `sweep_offset_coverage` (this function's caller) is meant
+    to make drift legible also had no cost data next to it, so a reader
+    checking a drifting tick here saw nothing that would attribute the
+    drift to capture cost, even though the raw number existed a few keys
+    away in the same summary.json under blink_sweep.ticks. Carried through
+    unchanged, same emptiness semantics as the source field."""
     targets = tick_record.get("target_offsets_ms") or []
     achieved = tick_record.get("achieved_offsets_ms") or []
     n = min(len(targets), len(achieved))
@@ -678,6 +688,9 @@ def sweep_offset_drift(tick_record):
         "first_target_ms": first_target_ms,
         "first_achieved_ms": first_achieved_ms,
         "first_drift_ms": first_drift_ms,
+        "capture_ms": list(tick_record.get("capture_ms") or []),
+        "capture_ms_total_ms": tick_record.get("capture_ms_total_ms"),
+        "panel_dims": dict(tick_record.get("panel_dims") or {}),
     }
 
 

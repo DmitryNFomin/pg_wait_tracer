@@ -669,6 +669,39 @@ def test_sweep_offset_drift_empty_tick_does_not_crash():
     check(d["first_drift_ms"] is None, "first_drift_ms is None, not a fabricated 0")
 
 
+def test_sweep_offset_drift_carries_capture_ms_and_panel_dims():
+    # issue #252 secondary finding: build_sweep_tick_record already measured
+    # capture_ms/capture_ms_total_ms/panel_dims, but this function -- the
+    # one sweep_offset_coverage (the diagnostic array a human actually reads
+    # for drift) is built from -- silently dropped all three when
+    # re-deriving its own per-tick dict. A reader following the drift array
+    # alone (as #252's own evidence section did) saw no cost data at all.
+    dims = {"box_width": 1698.0, "box_height": 2340.0,
+            "clip_width": 1698.0, "clip_height": 700.0}
+    tick = {"target_offsets_ms": [200, 500], "achieved_offsets_ms": [205, 512],
+           "capture_ms": [210.5, 198.2], "capture_ms_total_ms": 408.7,
+           "panel_dims": dims}
+    d = lib.sweep_offset_drift(tick)
+    check(d["capture_ms"] == [210.5, 198.2],
+          f"per-frame capture cost is visible next to the drift it may "
+          f"explain, not dropped ({d.get('capture_ms')})")
+    check(d["capture_ms_total_ms"] == 408.7,
+          f"the tick's total capture cost is carried through ({d.get('capture_ms_total_ms')})")
+    check(d["panel_dims"] == dims,
+          f"the panel size actually captured is carried through ({d.get('panel_dims')})")
+
+
+def test_sweep_offset_drift_capture_ms_absent_defaults_empty():
+    tick = {"target_offsets_ms": [200], "achieved_offsets_ms": [205]}
+    d = lib.sweep_offset_drift(tick)
+    check(d["capture_ms"] == [],
+          "a tick record that never measured capture cost gets [], not a missing key")
+    check(d["capture_ms_total_ms"] is None,
+          "capture_ms_total_ms is None (not fabricated 0.0) when the source tick never had it")
+    check(d["panel_dims"] == {},
+          "a tick record that never measured panel dims gets {}, not a missing key")
+
+
 def test_summarize_sweep_offset_coverage_joins_tab_and_pass():
     ticks = [
         {"target_offsets_ms": [200, 500], "achieved_offsets_ms": [205, 510]},
