@@ -486,6 +486,84 @@ def test_cross_tab_agreement_missing_side_fails():
     check(not ok, f"a missing side fails rather than being skipped ({detail})")
 
 
+# ── bucket_weighted_aas_ok (criteria doc §5, item 2.2) ───────────────────
+
+def test_bucket_weighted_aas_ok_evenly_divisible_window_ok():
+    # No truncation: 3 x 1s buckets exactly cover a 3s window, every
+    # bucket's total AAS is 2.0 -> weighted derivation is exactly 2.0.
+    buckets = [{"t": i * 1_000_000_000, "cpu": 1.5, "lock": 0.5}
+               for i in range(3)]
+    ok, detail = lib.bucket_weighted_aas_ok(
+        buckets, 1_000_000_000, 0, 3_000_000_000, 2.0)
+    check(ok, f"evenly-divisible window: weighted derivation matches exactly ({detail})")
+
+
+def test_bucket_weighted_aas_ok_catches_what_unweighted_mean_would_miss():
+    # BYPASS-SUITE CASE -- the whole point of this check. bucket_ns is a
+    # CEILING of range_ns/num_buckets (src/compute.c), so a window that
+    # does not divide evenly leaves a TRUNCATED tail bucket: here 3 x 1s
+    # nominal buckets nominally span 3s, but the true window is only 2.5s
+    # -- the server still divides that tail bucket's partial accumulation
+    # by the FULL 1s bucket_ns, producing 1.0 instead of what a full 1s
+    # would have shown.
+    buckets = [
+        {"t": 0, "cpu": 1.0, "lock": 1.0},                # 2.0, full bucket
+        {"t": 1_000_000_000, "cpu": 1.0, "lock": 1.0},    # 2.0, full bucket
+        {"t": 2_000_000_000, "cpu": 0.5, "lock": 0.5},    # 1.0, TRUNCATED tail
+    ]
+    bucket_ns = 1_000_000_000
+    from_ns, to_ns = 0, 2_500_000_000  # true window is 2.5s, not 3s
+
+    # An unweighted mean of the three bucket totals -- the retracted
+    # 2026-09-29 walk's approach.
+    unweighted_mean = (2.0 + 2.0 + 1.0) / 3  # == 1.6667
+    time_model_aas = unweighted_mean  # what time_model "happens to" report
+    unweighted_gap_pct = abs(unweighted_mean - time_model_aas) / time_model_aas * 100.0
+    check(unweighted_gap_pct <= lib.TIME_MODEL_TOLERANCE_PCT,
+          f"setup check: an unweighted mean would PASS this comparison "
+          f"(gap={unweighted_gap_pct:.2f}%)")
+
+    ok, detail = lib.bucket_weighted_aas_ok(
+        buckets, bucket_ns, from_ns, to_ns, time_model_aas)
+    check(not ok, f"the bucket-weighted derivation correctly FAILS the same "
+                  f"input an unweighted mean would have passed ({detail})")
+
+
+def test_bucket_weighted_aas_ok_ignores_cat_and_t_fields():
+    # "cat" is a nested per-category breakdown that double-counts against
+    # the class total already summed (src/server.c's own comment); "t" is
+    # the bucket's start_ns, not an AAS value. Both must be excluded from
+    # the per-bucket total, or the derived AAS would be wildly wrong.
+    buckets = [{"t": 0, "cpu": 1.0, "lock": 1.0,
+               "cat": {"io_worker": 99.0}}]
+    ok, detail = lib.bucket_weighted_aas_ok(
+        buckets, 1_000_000_000, 0, 1_000_000_000, 2.0)
+    check(ok, f"cat/t excluded from the per-bucket total ({detail})")
+
+
+def test_bucket_weighted_aas_ok_empty_buckets_fails():
+    ok, detail = lib.bucket_weighted_aas_ok([], 1_000_000_000, 0, 1_000_000_000, 2.0)
+    check(not ok, f"an empty buckets list fails rather than vacuously passing ({detail})")
+
+
+def test_bucket_weighted_aas_ok_missing_bucket_ns_fails():
+    ok, detail = lib.bucket_weighted_aas_ok(
+        [{"t": 0, "cpu": 2.0}], None, 0, 1_000_000_000, 2.0)
+    check(not ok, f"a missing bucket_ns fails rather than being assumed ({detail})")
+
+
+def test_bucket_weighted_aas_ok_missing_time_model_aas_fails():
+    ok, detail = lib.bucket_weighted_aas_ok(
+        [{"t": 0, "cpu": 2.0}], 1_000_000_000, 0, 1_000_000_000, None)
+    check(not ok, f"a missing time_model aas fails rather than being skipped ({detail})")
+
+
+def test_bucket_weighted_aas_ok_non_positive_window_fails():
+    ok, detail = lib.bucket_weighted_aas_ok(
+        [{"t": 0, "cpu": 2.0}], 1_000_000_000, 1_000_000_000, 1_000_000_000, 2.0)
+    check(not ok, f"from_ns == to_ns fails rather than dividing by zero ({detail})")
+
+
 def test_freshness_recent_bucket_ok():
     now_ns = 1_000_000_000_000
     to_ns = now_ns - 3_000_000_000  # 3s old, well under the 10s bound
@@ -589,6 +667,39 @@ def test_sweep_offset_drift_empty_tick_does_not_crash():
     d = lib.sweep_offset_drift({})
     check(d["drift_ms"] == [], "an empty/missing tick record reports no drift, not a crash")
     check(d["first_drift_ms"] is None, "first_drift_ms is None, not a fabricated 0")
+
+
+def test_sweep_offset_drift_carries_capture_ms_and_panel_dims():
+    # issue #252 secondary finding: build_sweep_tick_record already measured
+    # capture_ms/capture_ms_total_ms/panel_dims, but this function -- the
+    # one sweep_offset_coverage (the diagnostic array a human actually reads
+    # for drift) is built from -- silently dropped all three when
+    # re-deriving its own per-tick dict. A reader following the drift array
+    # alone (as #252's own evidence section did) saw no cost data at all.
+    dims = {"box_width": 1698.0, "box_height": 2340.0,
+            "clip_width": 1698.0, "clip_height": 700.0}
+    tick = {"target_offsets_ms": [200, 500], "achieved_offsets_ms": [205, 512],
+           "capture_ms": [210.5, 198.2], "capture_ms_total_ms": 408.7,
+           "panel_dims": dims}
+    d = lib.sweep_offset_drift(tick)
+    check(d["capture_ms"] == [210.5, 198.2],
+          f"per-frame capture cost is visible next to the drift it may "
+          f"explain, not dropped ({d.get('capture_ms')})")
+    check(d["capture_ms_total_ms"] == 408.7,
+          f"the tick's total capture cost is carried through ({d.get('capture_ms_total_ms')})")
+    check(d["panel_dims"] == dims,
+          f"the panel size actually captured is carried through ({d.get('panel_dims')})")
+
+
+def test_sweep_offset_drift_capture_ms_absent_defaults_empty():
+    tick = {"target_offsets_ms": [200], "achieved_offsets_ms": [205]}
+    d = lib.sweep_offset_drift(tick)
+    check(d["capture_ms"] == [],
+          "a tick record that never measured capture cost gets [], not a missing key")
+    check(d["capture_ms_total_ms"] is None,
+          "capture_ms_total_ms is None (not fabricated 0.0) when the source tick never had it")
+    check(d["panel_dims"] == {},
+          "a tick record that never measured panel dims gets {}, not a missing key")
 
 
 def test_summarize_sweep_offset_coverage_joins_tab_and_pass():

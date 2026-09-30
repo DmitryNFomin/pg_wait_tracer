@@ -538,6 +538,86 @@ def cross_tab_db_time_agreement_ok(db_time_a, db_time_b,
     return ok, detail
 
 
+# ── Cross-tab AAS agreement, bucket-weighted (criteria doc §5, item 2.2) ──
+#
+# A previous walk reported 0.0000% from an UNWEIGHTED MEAN of the `aas`
+# endpoint's buckets -- docs/DEMO_REHEARSAL_CRITERIA.md records that as
+# establishing no agreement, because it is not the same quantity as
+# time_model's top-level `aas` (db_time_ms / wall_ms over the window).
+#
+# Why a plain mean of buckets is the wrong comparison: every bucket's `aas`
+# value already comes normalized by the endpoint's own (single, constant
+# per response) `bucket_ns` -- src/compute.c accumulates busy-ns per bucket
+# and divides by bucket_ns before returning it. `aas_i * bucket_ns` recovers
+# that bucket's raw accumulated ns exactly, INCLUDING for a truncated tail
+# bucket: `bucket_ns` is a CEILING of range_ns/num_buckets
+# (src/compute.c: `(range_ns + num_buckets - 1) / num_buckets`), so
+# `actual_buckets * bucket_ns` can exceed the true window (`to_ns - from_ns`)
+# by up to one bucket's width -- the server still divides that last
+# bucket's partial accumulation by the FULL bucket_ns. Wall-clock windows
+# essentially never divide bucket_ns evenly, so this truncation is the
+# common case, not an edge case.
+#
+# The correct re-derivation: recover each bucket's raw ns (aas_i *
+# bucket_ns), sum them, and divide by the TRUE window length (to_ns -
+# from_ns, never actual_buckets * bucket_ns) -- this is exactly the ratio
+# time_model's own `aas` is computed as, over the identical window. An
+# UNWEIGHTED mean instead divides by bucket COUNT, silently treating every
+# bucket -- including a truncated tail one -- as an equal, full-width
+# sample. See test_bucket_weighted_aas_ok_catches_what_unweighted_mean_would_miss
+# for a case where the two formulas diverge enough to flip pass/fail.
+def _bucket_total_aas(bucket):
+    """Sum every additive numeric field in one `aas` endpoint bucket
+    (src/compute.h's pgwt_class_names[0..PGWT_NUM_CLASSES) plus the
+    additive T8 "offcpu" field) -- summing by key membership rather than
+    hard-coding compute.h's class-name list means a future additive class
+    needs no change here. Excludes "t" (the bucket's start_ns, not an AAS
+    value) and "cat" (a nested per-category breakdown that DOUBLE-COUNTS
+    against the class total already summed -- src/server.c's own comment:
+    "io_worker appears ONLY here -- excluded from the class AAS above")."""
+    total = 0.0
+    for k, v in bucket.items():
+        if k in ("t", "cat"):
+            continue
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            continue
+        total += v
+    return total
+
+
+def bucket_weighted_aas_ok(buckets, bucket_ns, from_ns, to_ns, time_model_aas,
+                           tolerance_pct=TIME_MODEL_TOLERANCE_PCT):
+    """buckets: the `aas` endpoint's own `buckets` array (list of dicts with
+    "t" plus per-class/offcpu numeric fields) for [from_ns, to_ns).
+    bucket_ns: the SAME response's top-level `bucket_ns` (the endpoint's own
+    bucket width -- the "weights" this check is required to derive them
+    from). time_model_aas: `time_model`'s top-level `aas` for the IDENTICAL
+    [from_ns, to_ns) window. Returns (ok, detail); fails closed on anything
+    it cannot evaluate (empty buckets, missing/non-positive bucket_ns,
+    missing/non-numeric time_model_aas, non-positive window) rather than
+    silently passing."""
+    if not buckets:
+        return False, "no buckets in aas response"
+    if bucket_ns is None or not isinstance(bucket_ns, (int, float)) or bucket_ns <= 0:
+        return False, f"missing/invalid bucket_ns ({bucket_ns!r})"
+    if (time_model_aas is None or isinstance(time_model_aas, bool)
+            or not isinstance(time_model_aas, (int, float))):
+        return False, f"missing/invalid time_model aas ({time_model_aas!r})"
+    if from_ns is None or to_ns is None or to_ns <= from_ns:
+        return False, f"non-positive window (from_ns={from_ns!r}, to_ns={to_ns!r})"
+    range_ns = to_ns - from_ns
+    weighted_ns_sum = sum(_bucket_total_aas(b) * bucket_ns for b in buckets)
+    derived_aas = weighted_ns_sum / range_ns
+    denom = max(abs(derived_aas), abs(time_model_aas))
+    gap_pct = 0.0 if denom == 0 else abs(derived_aas - time_model_aas) / denom * 100.0
+    ok = gap_pct <= tolerance_pct
+    detail = (f"derived={derived_aas:.4f} time_model={time_model_aas:.4f} "
+              f"gap={gap_pct:.2f}% (tolerance {tolerance_pct}%, "
+              f"{len(buckets)} buckets x {bucket_ns / 1e6:.1f}ms, "
+              f"window={range_ns / 1e9:.1f}s)")
+    return ok, detail
+
+
 # 5s: web/static's own live-tick cadence (app.js startAutoRefresh, the same
 # reference RECENT_WINDOW_S's comment above uses). "Within 2 ticks of wall
 # clock" (criteria doc §5) is 10s.
@@ -583,7 +663,17 @@ def sweep_offset_drift(tick_record):
     present in every tab result's blink_sweep.ticks, no new instrumentation
     needed). Returns a dict with per-offset drift_ms (achieved - target)
     and the first (200ms target) offset's own drift, since that is where
-    this finding's transients live."""
+    this finding's transients live.
+
+    capture_ms/capture_ms_total_ms/panel_dims (issue #252 secondary
+    finding): build_sweep_tick_record already measures these, but this
+    function used to drop them when re-deriving its own per-tick view --
+    the ONE place `sweep_offset_coverage` (this function's caller) is meant
+    to make drift legible also had no cost data next to it, so a reader
+    checking a drifting tick here saw nothing that would attribute the
+    drift to capture cost, even though the raw number existed a few keys
+    away in the same summary.json under blink_sweep.ticks. Carried through
+    unchanged, same emptiness semantics as the source field."""
     targets = tick_record.get("target_offsets_ms") or []
     achieved = tick_record.get("achieved_offsets_ms") or []
     n = min(len(targets), len(achieved))
@@ -598,6 +688,9 @@ def sweep_offset_drift(tick_record):
         "first_target_ms": first_target_ms,
         "first_achieved_ms": first_achieved_ms,
         "first_drift_ms": first_drift_ms,
+        "capture_ms": list(tick_record.get("capture_ms") or []),
+        "capture_ms_total_ms": tick_record.get("capture_ms_total_ms"),
+        "panel_dims": dict(tick_record.get("panel_dims") or {}),
     }
 
 

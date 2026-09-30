@@ -59,6 +59,16 @@ RESULTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 # what a viewer's browser is actually asking for at that moment.
 WATERFALL_LIVE_WINDOW_S = 900
 
+# Cross-tab AAS agreement (criteria doc §5, item 2.2): number of buckets to
+# request from the `aas` endpoint over the RECENT_WINDOW_S (60s) cross-tab
+# window -- 60 buckets = nominal 1s granularity, fine enough to be a
+# meaningful re-derivation without inflating the query. The comparison
+# itself (demo_rehearsal_lib.bucket_weighted_aas_ok) reads the endpoint's
+# OWN reported bucket_ns rather than assuming this number was honored
+# exactly, so it stays correct even if the server returns fewer/coarser
+# buckets than requested.
+AAS_CROSS_TAB_NUM_BUCKETS = 60
+
 # issue #223: the pinned demo-client viewport -- docs/DEMO_REHEARSAL_CRITERIA.md
 # "Pin: 1710 x 981 CSS at devicePixelRatio 2", measured in
 # docs/chrome-demo-viewport-2026-09-28.md. Only this script passes a
@@ -579,14 +589,56 @@ def main():
         extra_checks["cross_tab_db_time_agreement"] = {
             "ok": cross_tab_ok, "detail": cross_tab_detail,
             "note": ("compares Overview's time_model against Top Events' "
-                    "top_events for the identical recent window; the AAS "
-                    "leg (vs. the aas-bucketed Timeline endpoint) is NOT "
-                    "implemented -- deriving a comparable aggregate AAS "
-                    "from that endpoint's per-bucket per-class values "
-                    "needs bucket-weighted summation this branch did not "
-                    "implement with confidence in scope; see the PR "
-                    "report's gap table"),
+                    "top_events for the identical recent window"),
         }
+
+        # Cross-tab AAS agreement, bucket-weighted (criteria doc §5, item
+        # 2.2): the `aas` endpoint's own per-bucket breakdown, re-derived
+        # into a single weighted average over the IDENTICAL recent window
+        # and compared against time_model's own top-level `aas` -- see
+        # demo_rehearsal_lib.bucket_weighted_aas_ok for why an unweighted
+        # mean of buckets (the retracted 2026-09-29 walk's 0.0000%) is not
+        # this comparison.
+        aas_resp = srv.query("aas", from_=recent_from_ns, to_=to_ns,
+                             buckets=AAS_CROSS_TAB_NUM_BUCKETS,
+                             timeout=drlib.TIME_MODEL_QUERY_TIMEOUT_S)
+        aas_err = _error_or_none(aas_resp, "aas (cross-tab)")
+        if aas_err is not None or time_model_err is not None:
+            aas_agreement_ok = False
+            aas_agreement_detail = f"query error(s): {aas_err!r} / {time_model_err!r}"
+        else:
+            aas_agreement_ok, aas_agreement_detail = drlib.bucket_weighted_aas_ok(
+                aas_resp.get("buckets"), aas_resp.get("bucket_ns"),
+                recent_from_ns, to_ns, time_model_recent.get("aas"))
+        print(f"demo_rehearsal: cross_tab_aas_agreement: "
+              f"{'PASS' if aas_agreement_ok else 'FAIL'} -- {aas_agreement_detail}")
+        extra_checks["cross_tab_aas_agreement"] = {
+            "ok": aas_agreement_ok, "detail": aas_agreement_detail,
+            "note": ("bucket-weighted re-derivation of Timeline's `aas` "
+                    "endpoint against Overview's time_model `aas`, for the "
+                    "identical recent window (docs/DEMO_REHEARSAL_CRITERIA.md "
+                    "§5's AAS leg)"),
+        }
+
+        # Retention (opt-in, off by default -- docs/DEMO_DELIVERY_QUEUE.md
+        # item 2, PGWT_RETAIN_TRACE=1): the raw aas/time_model responses
+        # this check just computed from, saved verbatim so a later offline
+        # read never needs a fresh 30-45 minute capture to get them again.
+        # The trace directory itself is retained by tests/demo_rehearsal.sh's
+        # cleanup() (not here -- this process returns before that trap
+        # runs), which is what actually unblocks §3's per-class wait-CPU
+        # read; this is the paper trail for the two JSON responses above.
+        if os.environ.get("PGWT_RETAIN_TRACE") == "1":
+            raw_dir = os.path.join(out_dir, "raw")
+            os.makedirs(raw_dir, exist_ok=True)
+            with open(os.path.join(raw_dir, "aas_recent_window.json"), "w") as f:
+                json.dump(aas_resp, f, indent=2, sort_keys=True)
+                f.write("\n")
+            with open(os.path.join(raw_dir, "time_model_recent_window.json"), "w") as f:
+                json.dump(time_model_recent, f, indent=2, sort_keys=True)
+                f.write("\n")
+            print(f"demo_rehearsal: PGWT_RETAIN_TRACE=1 -- saved raw aas/"
+                  f"time_model responses to {raw_dir}")
 
         # Freshness (criteria doc §5): the daemon's own latest event vs the
         # server's own wall clock, both from the same `info` response.
