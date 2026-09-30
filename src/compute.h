@@ -591,11 +591,17 @@ struct pgwt_executions_result {
  * backend went back to waiting for its client) or at its process exit,
  * with end_inferred set. The boundary is committed only once the evidence
  * says the execution did not continue past it — the pid starts another
- * execution, the backend exits, or the stream ends with the pid still idle —
- * so a COPY FROM STDIN stalled on client input INSIDE its execution is still
- * closed by its own measured EXEC_END. A row with no idle boundary and no
- * exit at all stays in_progress with a null duration: unresolved, never
- * closed with a fabricated end. */
+ * execution, the backend exits, or the stream ends — and an idle boundary
+ * is only offered at exit or end of stream while it is still the pid's
+ * LAST observed state. An idle INSIDE an execution (COPY FROM STDIN
+ * stalled on client input) is therefore discarded as soon as the backend
+ * is observed working again, and the row is closed by its own measured
+ * EXEC_END when the capture contains one, by the exit timestamp when the
+ * backend exits first, and not at all when the stream simply ends: the
+ * exact case where no evidence of the end exists. A row with no usable
+ * boundary stays in_progress with a null duration — unresolved and visibly
+ * so, never closed with a fabricated end, and never with a stale one that
+ * would under-state the duration the Waterfall ranks on. */
 void pgwt_compute_executions(const struct pgwt_trace_event *events, int count,
                              uint64_t from_ns, uint64_t to_ns,
                              const struct pgwt_filter *f,

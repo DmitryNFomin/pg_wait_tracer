@@ -3069,6 +3069,14 @@ struct exec_pid_state {
      * EXEC_END / EXEC_START / exit / end-of-stream says which it was. */
     uint64_t idle_end_ns;
     int idle_end_valid;
+    /* ...and whether that idle boundary is still the pid's LAST observed
+     * state. A row that is open, went idle, and was then observed entering
+     * a non-idle wait has resumed work: the idle can no longer be presented
+     * as this execution's end at exit or at end of stream, because the
+     * stream itself shows the backend doing something after it. Cleared
+     * there, kept set for the EXEC_START path, where a later execution
+     * proves the earlier row did end no later than that idle. */
+    int idle_is_current;
     uint64_t plan_start_ns;
     uint64_t plan_query_id;
     int plan_open;
@@ -3124,6 +3132,7 @@ static void exec_close_inferred(struct pgwt_execution *rows, int n_rows,
     st->active_row = -1;
     st->idle_end_ns = 0;
     st->idle_end_valid = 0;
+    st->idle_is_current = 0;
 }
 
 static int execution_append(struct pgwt_execution **rows, int *n_rows,
@@ -3218,6 +3227,7 @@ void pgwt_compute_executions(const struct pgwt_trace_event *events, int count,
             st->active_row = -1;
             st->idle_end_ns = 0;
             st->idle_end_valid = 0;
+            st->idle_is_current = 0;
             if (ev->timestamp_ns <= to_ns) {
                 struct pgwt_execution row;
                 memset(&row, 0, sizeof(row));
@@ -3260,6 +3270,7 @@ void pgwt_compute_executions(const struct pgwt_trace_event *events, int count,
             st->active_row = -1;
             st->idle_end_ns = 0;
             st->idle_end_valid = 0;
+            st->idle_is_current = 0;
             continue;
         }
         if (PGWT_IS_MARKER(marker) ||
@@ -3306,15 +3317,20 @@ void pgwt_compute_executions(const struct pgwt_trace_event *events, int count,
 
         if (ev->new_event == PGWT_EVENT_EXIT) {
             /* The backend is gone. Its execution ended no later than here,
-             * so an open row is closed at the idle boundary if one was
-             * observed and at the exit otherwise — a real timestamp either
-             * way. Then every scrap of per-pid state is dropped: the pid
+             * so an open row is closed at the idle boundary when one was
+             * observed AND the pid was still idle at the exit, and at the
+             * exit timestamp otherwise — a real observed timestamp either
+             * way, never a window bound. A pid that went idle and then
+             * worked again before exiting gets the exit, not the stale
+             * idle: the later, larger value is the one the stream still
+             * supports. Then every scrap of per-pid state is dropped: the pid
              * NUMBER can be reused by a new backend inside the same
              * capture, and the new backend's records must not be able to
              * touch this row (nor this backend's leftovers its rows). */
             exec_close_inferred(rows, n_rows, st,
-                                st->idle_end_valid ? st->idle_end_ns
-                                                   : ev->timestamp_ns);
+                                (st->idle_end_valid && st->idle_is_current)
+                                    ? st->idle_end_ns
+                                    : ev->timestamp_ns);
             uint32_t pid = st->pid;
             memset(st, 0, sizeof(*st));
             st->pid = pid;
@@ -3327,21 +3343,36 @@ void pgwt_compute_executions(const struct pgwt_trace_event *events, int count,
          * candidate deduced end; do not commit it here, because an
          * execution may legitimately contain idle waits (COPY FROM STDIN)
          * and its own EXEC_END would then be the measured truth. */
-        if (st->active_row >= 0 && st->active_row < n_rows &&
-            pgwt_is_idle_event(ev->new_event) &&
-            ev->timestamp_ns >= rows[st->active_row].start_ns) {
+        if (!pgwt_is_idle_event(ev->new_event)) {
+            /* The pid ENTERED a non-idle wait: it is working again. Any
+             * earlier idle boundary is no longer the pid's current state,
+             * so it must not be offered as this row's end at exit or at
+             * end of stream — the stream contradicts it. Cleared on the
+             * record that enters non-idle, not one record later: a single
+             * intervening record is already proof of resumed work, and
+             * waiting for a second one closes the row at a boundary the
+             * stream has already contradicted. */
+            st->idle_is_current = 0;
+        } else if (st->active_row >= 0 && st->active_row < n_rows &&
+                   ev->timestamp_ns >= rows[st->active_row].start_ns) {
             st->idle_end_ns = ev->timestamp_ns;
             st->idle_end_valid = 1;
+            st->idle_is_current = 1;
         }
     }
 
     /* End of stream with a pid still sitting idle and a row still open: the
      * statement never came back, so the idle boundary is its end. Nothing is
      * closed here without such an observation — a row with no idle record
-     * and no exit stays in_progress, duration null. */
+     * and no exit stays in_progress, duration null, and so does a row whose
+     * pid was observed working again after the idle: there the execution may
+     * still be running, and reporting the earlier idle would under-state a
+     * duration that is the Waterfall's ranking key. Unresolved is visible;
+     * a too-small measured-looking number is not. */
     if (!out->failed) {
         for (int i = 0; i < n_states; i++)
-            if (states[i].active_row >= 0 && states[i].idle_end_valid)
+            if (states[i].active_row >= 0 && states[i].idle_end_valid &&
+                states[i].idle_is_current)
                 exec_close_inferred(rows, n_rows, &states[i],
                                     states[i].idle_end_ns);
     }

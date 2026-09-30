@@ -333,6 +333,16 @@ def main():
               f"idle/exit interval (row spans {sorted(spans)} ns vs "
               f"boundaries {sorted(deltas)} ns)")
         if not matched:
+            # Exact ns equality is deliberate and must NOT be widened into a
+            # tolerance: mono->wall is a pure integer offset (src/event_reader
+            # .c), so intervals are preserved bit for bit as long as both
+            # sides were read under ONE clock generation. If this ever goes
+            # red, the question to answer is whether that held -- a daemon
+            # restart or a re-derived offset mid-capture would break it -- not
+            # how many microseconds of slack to allow.
+            print("    (exact-interval equality failed; check for a second "
+                  "clock generation -- daemon restart or re-derived "
+                  "mono_to_wall offset -- before touching this assertion)")
             return 1
         row = spans[matched[0]]
 
@@ -346,8 +356,12 @@ def main():
         # it (src/server.c, owned by the #222 branch); assert only when the
         # field is actually on the wire, and say so loudly when it is not.
         if "end_inferred" in row:
-            check(row["end_inferred"] is True,
-                  "the deduced end is LABELLED end_inferred on the wire")
+            # Truthiness, not `is True`: cJSON_AddBoolToObject gives JSON
+            # true, cJSON_AddNumberToObject gives 1, and which one the
+            # executions serializer uses is owned by the #222 branch.
+            check(bool(row["end_inferred"]),
+                  "the deduced end is LABELLED end_inferred on the wire "
+                  f"(got {row['end_inferred']!r})")
         else:
             print("  NOTE: end_inferred is not serialized by this build; the "
                   "label is pinned by tests/test_compute_orphan_close.c")

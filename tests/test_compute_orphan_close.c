@@ -15,7 +15,10 @@
  *      rather than being closed with a fabricated duration;
  *   4. a measured EXEC_END always wins over a deduced boundary (COPY FROM
  *      STDIN legitimately waits on Client:ClientRead INSIDE its execution);
- *   5. every way the close could be made UNREACHABLE or could fire when
+ *   5. an idle boundary CONTRADICTED by later work is never used at exit
+ *      or at end of stream: the execution may still be running, and a
+ *      stale close under-states the duration the Waterfall ranks on;
+ *   6. every way the close could be made UNREACHABLE or could fire when
  *      there is nothing to close (the bypass suite at the bottom).
  *
  * Pure compute: no BPF, no PostgreSQL, no trace files. Runs anywhere.
@@ -220,6 +223,176 @@ static void test_next_statement_settles_previous(void)
     check(b && !b->in_progress && b->end_inferred == 0 &&
           b->end_ns == BASE + 80 * MS,
           "the following statement closed at its MEASURED EXEC_END");
+    free(r.rows);
+}
+
+
+/* ── 1d. work observed AFTER an intra-execution idle ──────────
+ *
+ * The idle candidate must be invalidated by later work. Without that, a
+ * row that went idle once and then kept working is closed at the idle: a
+ * still-running execution reported as a short one, and short is exactly
+ * the direction that hides it from a duration-ranked Waterfall.
+ *
+ * Each case below is paired with a CONTROL that is the same stream minus
+ * the post-idle work. The control must CLOSE. That pairing is what keeps
+ * these cases from passing vacuously: if the close path were dead — if
+ * pgwt_is_idle_event never matched, if the candidate were never set, if
+ * the whole feature were reverted — the "stays in_progress" assertions
+ * would still pass, and only the control would go red.
+ */
+
+static void test_work_after_idle_stays_unresolved(void)
+{
+    printf("\n### 1d. work after an intra-execution idle: no stale close ###\n");
+    /* Row opens at +0, idles at +10 (COPY FROM STDIN waiting on its client),
+     * leaves idle at +30, and is still emitting work at +60 and +90 when the
+     * stream ends. No EXEC_END, no exit. */
+    struct pgwt_trace_event evs[] = {
+        mark(4242, BASE, PGWT_MARKER_EXEC_START, 77),
+        wait_rec(4242, BASE + 10 * MS, 10 * MS, CPU_EVENT, CLIENT_READ, 77),
+        wait_rec(4242, BASE + 30 * MS, 20 * MS, CLIENT_READ, IO_READ, 77),
+        wait_rec(4242, BASE + 60 * MS, 30 * MS, IO_READ, CPU_EVENT, 77),
+        wait_rec(4242, BASE + 90 * MS, 30 * MS, CPU_EVENT, IO_READ, 77),
+    };
+    struct pgwt_executions_result r;
+    run(evs, 5, &r);
+    check(r.num_rows == 1, "the EXEC_START is a row (got %d)", r.num_rows);
+    if (r.num_rows == 1) {
+        const struct pgwt_execution *row = &r.rows[0];
+        check(row->in_progress == 1,
+              "a 90ms-and-counting execution stays IN PROGRESS, not closed "
+              "at its +10ms idle (in_progress=%d end=+%llu ms)",
+              row->in_progress,
+              (unsigned long long)((row->end_ns - BASE) / MS));
+        check(row->end_inferred == 0,
+              "and carries no inferred end (end_inferred=%d)",
+              row->end_inferred);
+    }
+    free(r.rows);
+
+    /* CONTROL: identical up to the idle, then the stream simply ends. This
+     * one MUST close — it is the cancel shape. A dead close path fails
+     * here, so the assertion above cannot pass for the wrong reason. */
+    struct pgwt_trace_event ctl[] = {
+        mark(4242, BASE, PGWT_MARKER_EXEC_START, 77),
+        wait_rec(4242, BASE + 10 * MS, 10 * MS, CPU_EVENT, CLIENT_READ, 77),
+    };
+    struct pgwt_executions_result c;
+    run(ctl, 2, &c);
+    check(c.num_rows == 1 && !c.rows[0].in_progress &&
+          c.rows[0].end_ns == BASE + 10 * MS && c.rows[0].end_inferred == 1,
+          "CONTROL — the same stream WITHOUT the post-idle work still "
+          "closes at +10ms, inferred (the close path is alive)");
+    free(c.rows);
+}
+
+static void test_one_record_of_work_already_invalidates(void)
+{
+    printf("\n### 1d'. a SINGLE post-idle record is enough to invalidate ###\n");
+    /* Pins the clearing rule to the record that ENTERS a non-idle wait,
+     * rather than one record later. With a one-record lag this stream
+     * would close at +10 — a boundary the very next record contradicts. */
+    struct pgwt_trace_event evs[] = {
+        mark(4242, BASE, PGWT_MARKER_EXEC_START, 77),
+        wait_rec(4242, BASE + 10 * MS, 10 * MS, CPU_EVENT, CLIENT_READ, 77),
+        wait_rec(4242, BASE + 30 * MS, 20 * MS, CLIENT_READ, IO_READ, 77),
+    };
+    struct pgwt_executions_result r;
+    run(evs, 3, &r);
+    check(r.num_rows == 1 && r.rows[0].in_progress == 1,
+          "one record leaving idle for IO already blocks the stale close "
+          "(in_progress=%d)", r.num_rows == 1 ? r.rows[0].in_progress : -1);
+    free(r.rows);
+}
+
+static void test_exit_after_work_closes_at_exit(void)
+{
+    printf("\n### 1e. exit after post-idle work closes at the EXIT ###\n");
+    /* Same shape, but the backend exits at +500. The row must close — the
+     * backend is gone — at the exit's own timestamp, not at the stale
+     * +10ms idle. The exit is the later and still-supported evidence. */
+    struct pgwt_trace_event evs[] = {
+        mark(4242, BASE, PGWT_MARKER_EXEC_START, 77),
+        wait_rec(4242, BASE + 10 * MS, 10 * MS, CPU_EVENT, CLIENT_READ, 77),
+        wait_rec(4242, BASE + 30 * MS, 20 * MS, CLIENT_READ, IO_READ, 77),
+        wait_rec(4242, BASE + 60 * MS, 30 * MS, IO_READ, CPU_EVENT, 77),
+        wait_rec(4242, BASE + 90 * MS, 30 * MS, CPU_EVENT, IO_READ, 77),
+        exit_rec(4242, BASE + 500 * MS, IO_READ, 77),
+    };
+    struct pgwt_executions_result r;
+    run(evs, 6, &r);
+    check(r.num_rows == 1, "the EXEC_START is a row (got %d)", r.num_rows);
+    if (r.num_rows == 1) {
+        const struct pgwt_execution *row = &r.rows[0];
+        check(!row->in_progress, "the exit closes the row");
+        check(row->end_ns == BASE + 500 * MS,
+              "closed at the EXIT (+500 ms), not the stale idle "
+              "(got +%llu ms)",
+              (unsigned long long)((row->end_ns - BASE) / MS));
+        check(row->end_inferred == 1, "still labelled end_inferred");
+    }
+    free(r.rows);
+
+    /* CONTROL: exit with the pid STILL idle — the idle is the better,
+     * earlier boundary and must win over the exit. */
+    struct pgwt_trace_event ctl[] = {
+        mark(4242, BASE, PGWT_MARKER_EXEC_START, 77),
+        wait_rec(4242, BASE + 10 * MS, 10 * MS, CPU_EVENT, CLIENT_READ, 77),
+        exit_rec(4242, BASE + 500 * MS, CLIENT_READ, 77),
+    };
+    struct pgwt_executions_result c;
+    run(ctl, 3, &c);
+    check(c.num_rows == 1 && !c.rows[0].in_progress &&
+          c.rows[0].end_ns == BASE + 10 * MS,
+          "CONTROL — exiting while STILL idle closes at the idle (+10 ms), "
+          "not at the exit");
+    free(c.rows);
+}
+
+static void test_work_after_idle_then_new_statement(void)
+{
+    printf("\n### 1f. a later EXEC_START still settles the earlier row ###\n");
+    /* The EXEC_START path is deliberately NOT gated on the candidate still
+     * being current: a second execution proves the first one ended no later
+     * than the idle observed while it was open, whatever happened in
+     * between (leaving idle, a utility statement, parse/bind work). */
+    struct pgwt_trace_event evs[] = {
+        mark(4242, BASE, PGWT_MARKER_EXEC_START, 77),
+        wait_rec(4242, BASE + 20 * MS, 20 * MS, CPU_EVENT, CLIENT_READ, 77),
+        wait_rec(4242, BASE + 60 * MS, 40 * MS, CLIENT_READ, IO_READ, 77),
+        wait_rec(4242, BASE + 70 * MS, 10 * MS, IO_READ, CPU_EVENT, 77),
+        mark(4242, BASE + 75 * MS, PGWT_MARKER_EXEC_START, 88),
+        mark(4242, BASE + 95 * MS, PGWT_MARKER_EXEC_END, 88),
+    };
+    struct pgwt_executions_result r;
+    run(evs, 6, &r);
+    const struct pgwt_execution *a = row_at(&r, BASE);
+    check(a && !a->in_progress && a->end_inferred == 1 &&
+          a->end_ns == BASE + 20 * MS,
+          "the earlier row still closes at its idle (+20 ms) even though "
+          "the pid did non-idle work before the next EXEC_START");
+    free(r.rows);
+}
+
+static void test_sample_records_do_not_invalidate(void)
+{
+    printf("\n### 1g. SAMPLE records do not invalidate the candidate ###\n");
+    /* Deliberate, documented boundary: sampled observations are excluded
+     * from execution accounting everywhere in this function, so they
+     * neither close a row nor contradict a boundary. Pinned so that a
+     * future change to the sample path is a visible decision. */
+    struct pgwt_trace_event evs[] = {
+        mark(4242, BASE, PGWT_MARKER_EXEC_START, 77),
+        wait_rec(4242, BASE + 10 * MS, 10 * MS, CPU_EVENT, CLIENT_READ, 77),
+        sample_rec(4242, BASE + 40 * MS, IO_READ, 77),
+        sample_rec(4242, BASE + 70 * MS, IO_READ, 77),
+    };
+    struct pgwt_executions_result r;
+    run(evs, 4, &r);
+    check(r.num_rows == 1 && !r.rows[0].in_progress &&
+          r.rows[0].end_ns == BASE + 10 * MS,
+          "sampled non-idle observations leave the +10 ms close standing");
     free(r.rows);
 }
 
@@ -511,6 +684,11 @@ int main(void)
     test_cancel_closes_at_idle();
     test_close_is_not_elapsed_so_far();
     test_next_statement_settles_previous();
+    test_work_after_idle_stays_unresolved();
+    test_one_record_of_work_already_invalidates();
+    test_exit_after_work_closes_at_exit();
+    test_work_after_idle_then_new_statement();
+    test_sample_records_do_not_invalidate();
     test_pid_reuse_does_not_cross_close();
     test_pid_reuse_new_idle_cannot_close_old();
     test_pid_reuse_does_not_inherit_plan();
