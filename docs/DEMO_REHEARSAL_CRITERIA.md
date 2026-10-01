@@ -365,12 +365,19 @@ checked first and independently:
   `AAS: 2.22` also reported from the same run, because this bullet's own
   text scopes the floor to "the 60 s recent window", and the whole-capture
   figure is a different window over a different quantity). Half of 2.3033
-  is **1.1517**, recorded here as **1.15**. **Run id not supplied to this
-  commit** — the coordinator ran this directly on the box and reported the
-  two AAS figures and the `ok`/`failed` verdict, but no `run.id` value;
-  whoever has it should backfill
-  `tests/results/demo_rehearsal/run.id` here so the derivation is traceable
-  to the exact artifact, not just the two cited numbers. **Doc vs. code,
+  is **1.1517**, recorded here as **1.15**. **`run.id`: 1790869219.**
+  Provenance, stated plainly rather than implied: the clean rehearsal ran on
+  a throwaway VM (`root@46.225.4.87`); its capture finished early
+  (`rehearsal.done` written while `scripts/demo-rehearsal.sh`'s own
+  `DURATION_MIN`-derived sleep was still running), so this run id and both
+  AAS figures were read directly off
+  `/root/pgwt-demo-rehearsal-master/tests/results/demo_rehearsal/` on that
+  box, not from a synced local artifact — none existed yet when this was
+  recorded (the rsync only happens after the launcher's sleep ends). This is
+  why no worktree in this repo's local clone had a matching `summary.json`:
+  the nearest candidate found (`aas-agreement-and-retention` worktree,
+  `derived=2.3617 time_model=2.3624`, `ok: False`) is a different, older,
+  failing run, not this one. **Doc vs. code,
   deliberately not closed here**: this branch is docs-only, so
   `tests/demo_rehearsal_lib.py`'s `AAS_FLOOR_PROVISIONAL = 0.5` constant is
   untouched — the gate itself still enforces 0.5 today. Per this project's
