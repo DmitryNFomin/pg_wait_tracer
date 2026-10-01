@@ -370,10 +370,20 @@ during the walk above, not test-only findings:
 - **#168** — The Timeline chart can show a degenerate, sub-pixel wait bar
   pinned at the left axis edge for a session whose window got clamped; a
   cosmetic edge artifact, not missing data.
-- **#197** — No time-to-first-paint bound is set yet for any tab
-  (`docs/DEMO_REHEARSAL_CRITERIA.md` §4 still has an open row for this).
-  Don't be alarmed by a tab taking a couple of seconds to paint; there is
-  currently no defined threshold for "too slow."
+- **#197** — Updated (review round 6): a time-to-first-paint bound is now
+  settled at 3000 ms per tab (`docs/DEMO_REHEARSAL_CRITERIA.md` §4), measured
+  on real Chrome on the Mac against a live full-mode capture. **Queries
+  specifically takes ~2.4 s to paint, consistently** (measured 2362-2432 ms
+  across 3 navigations) — the slowest tab by a wide margin, and close enough
+  to the 3000 ms bound that the margin on it is thin. A presenter clicking
+  Queries should expect and narrate a visibly empty panel for over two
+  seconds, not treat it as something broken. Every other tab paints well
+  under a second except Transitions (~1.1-1.2 s, its DFG graph layout) and
+  Waterfall/Scatter/Concurrency/Matrix (roughly 0.5-0.7 s). Timeline has no
+  real-Chrome-on-Mac measurement yet (the probe that produced the rest of
+  these numbers clicked the bare tab rather than drilling in from a Sessions
+  row, the same #242 trap below) — don't assume it is fast or slow from this
+  round's data.
 - **#215** — The first several live ticks after startup can look like the
   view isn't advancing yet before genuinely new data has accumulated; give
   it a few ticks before judging freshness, especially right after §2–§3.

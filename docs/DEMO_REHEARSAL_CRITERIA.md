@@ -566,85 +566,101 @@ substitute one family for the other.
   read into `<tab>.no_blink.measured.ok` via `measured_count/attempted_count
   >= min_measured_fraction`. This criterion is therefore evaluable now; the
   dependency is resolved, not open.
-- **Per-tab time to first paint — PROVISIONAL capture-side bound: 3000 ms,
-  global. Still unsettled against this criterion's own requirement; blocks
-  closing delivery-queue item 2.1.** `tests/ui_live_smoke.py`'s
+- **Per-tab time to first paint — SETTLED: 3000 ms, global, with a THIN
+  margin (owner, review round 6).** `tests/ui_live_smoke.py`'s
   `_navigate_to_tab` carries `ttfp_ms` (issue #245, merged to `master` as
   `fa20067` / PR #257): elapsed ms from the navigation's own landing click
   (the Sessions-row drill-down click for Timeline, the bare tab click
   everywhere else) to the ViewManager's first fresh mount of that tab.
 
-  **Scope: capture-side (VM) only.** This paragraph sets a number for the
-  automated `ttfp_ms` instrumentation running in headless Chromium on the VM.
-  It is **not** a Mac-side bound: `docs/DEMO_MAC_WALK_CHECKLIST.md` has no
-  stopwatch instrumentation for a human walking the tabs by hand, so the
-  Mac-side signed walk continues to judge paint **qualitatively** — "paints
-  without a visible spinner," per that checklist's own table column — and
-  does not record a millisecond number. The two documents are not in
-  conflict: the checklist's "no numeric bound is set here" is correct and
-  stays correct; this paragraph's bound applies only to the capture-side
-  verdict, which does not read `ttfp_ms` into any tab's `ok` either (next
-  table row).
+  **This criterion's own requirement — ≥3 navigations per tab, on the demo
+  configuration (real Chrome on the Mac, not headless Chromium on a VM) —
+  is now met.** The owner ran it directly: real Chrome 154 at the pinned
+  demo viewport (1710×981 @ DPR 2, full screen), against a **live full-mode
+  capture** on the actual demo topology (Go bridge on the Mac,
+  `pgwt-server` over ssh to the demo box), **3 navigations per tab**, each
+  preceded by a return to Overview so nothing is measured warm:
 
-  **Why PROVISIONAL, not settled:** the criterion this row exists to satisfy
-  calls for **≥3 navigations per tab on the demo configuration**
-  (`docs/DEMO_DELIVERY_QUEUE.md` item 2.1's own text). What exists today is
-  1-2 navigations per tab, in **headless Chromium on a VM** — not real Chrome
-  on the Mac, the actual demo client (see "The client, pinned" above). This
-  commit does not close that gap; it records the best current number and
-  says plainly what is still missing, rather than inventing a number that
-  looks more settled than it is.
-
-  Three independent real-box runs exist, all on `agent/ttfp-timing-field`,
-  same code, same workload:
-
-  | tab | run A (115044) | run B (150337) | run C (083418, latest) |
+  | tab | min | median | max |
   |---|---:|---:|---:|
-  | sessions | 67 | 148 | 264 |
-  | overview | 74 | 98 | 306 |
-  | events | 94 | 94 | 273 |
-  | histogram | 185 | 198 | 594 |
-  | timeline | 220 | 301 | 397 |
-  | queries | 227 | 248 | 509 |
-  | waterfall | 298 | 342 | 832 |
-  | concurrency | 304 | 291 | 734 |
-  | scatter | 318 | 389 | 809 |
-  | matrix | 341 | 332 | 889 |
-  | transitions | 533 | 541 | **1211** |
+  | **queries** | **2362** | **2362** | **2432** |
+  | transitions | 1077 | 1135 | 1150 |
+  | waterfall | 693 | 700 | 712 |
+  | scatter | 644 | 651 | 692 |
+  | concurrency | 518 | 614 | 628 |
+  | matrix | 462 | 498 | 518 |
+  | histogram | 288 | 319 | 334 |
+  | overview | 177 | 212 | 262 |
+  | events | 164 | 178 | 178 |
+  | sessions | 128 | 160 | 162 |
 
-  (Run A is `tests/results/box-check-ubuntu-20260930-115044.log`, cited
-  verbatim in PR #257's own body; run B is
-  `box-check-ubuntu-20260930-150337.log`; run C is
-  `box-check-ubuntu-20261001-083418.log` — all three logs plus their synced
-  `tests/results/ui_live/summary.json` are on disk in the
-  `agent/ttfp-timing-field` worktree.) Timeline's figures are all the
-  **Sessions-row drill-down** measurement, not the retracted bare-click
-  reading (#242, retracted by #245).
+  Raw per-navigation values checked against this table (3 values per tab,
+  min/median/max all reproduce exactly).
 
-  **This is not noise around a stable center — every tab rose from run A to
-  run C**, not just the slowest one: the three plain-table tabs roughly
-  quadrupled (sessions 67→264), and the chart tabs rose 2-4x as well
-  (matrix 341→889, transitions 533→1211). One pair of runs (A→B) already
-  swung a single tab by over 2x (sessions, +121%); across all three runs the
-  worst tab swung **+127%** again (transitions 533→1211, a further ~2.24x on
-  top of the first swing). A single n=1-2-per-tab navigation set is not a
-  stable per-tab figure, and this commit records that rather than smoothing
-  over it.
+  **Timeline is NOT in this table — recorded as not yet measured by this
+  method, not as a pass.** The measurement script clicked the bare Timeline
+  tab, which shows a "select a session" prompt rather than a chart (the
+  same #242/#245 trap this document has already retracted once) — an
+  instrumentation gap in this particular script, not a product result.
+  Timeline must be reached through a Sessions-row drill-down, as
+  `tests/ui_live_smoke.py`'s `_navigate_to_tab` already does; this ad hoc
+  Mac-side script did not. Until it is re-run correctly, Timeline has no
+  real-Chrome-on-Mac measurement.
 
-  **Margin, corrected:** the worst single observation across all three runs
-  is transitions at **1211 ms**, not 533 or 541. `docs/
-  DEMO_DELIVERY_QUEUE.md` item 2.1 pre-registered the shape of a bound before
-  any number existed: "set ONE generous global bound (never below 3 s)".
-  Taking **3000 ms as that floor** gives **3000/1211 ≈ 2.5x** margin over the
-  worst tab observed so far — not the ">5.5x" an earlier version of this
-  paragraph claimed from run A/B data alone. 2.5x is a real margin, not a
-  tight fit, but it is visibly thinner than first thought, and three
-  same-box runs trending the same direction (all up, not scattered) is a
-  reason to re-measure rather than assume 1211 ms is itself the ceiling.
-  **Global, not per-tab**, per the pre-registered guidance: a single number
-  is what a human watching a timer during the demo can actually hold in
-  their head, and per-tab numbers at this sample size are nowhere near
-  precise enough to defend eleven separate bounds.
+  **Methodological warning, worth recording even though superseded:** an
+  earlier attempt at this same measurement produced a worthless >15x
+  margin by measuring tabs against a *retained* (historical) trace, where
+  Events/Sessions/Queries returned "No data for selected range" and the
+  other tabs were timing an empty panel's paint, not real content — the
+  UI's default window is live, so a paint measurement against a historical
+  trace measures nothing. The table above is the corrected, live-capture
+  re-run; the >15x figure was never written into this document and should
+  not be treated as having existed as a measurement.
+
+  **Worst single navigation: 2432 ms (queries). Margin: 3000/2432 ≈ 1.23x,
+  rounded 1.2x — NOT the "≈2.5x" an earlier version of this paragraph
+  computed from VM/headless-Chromium data (below). Replace 2.5x wherever it
+  appeared; it is now wrong.** This margin is thin on purpose, not by
+  oversight: **the bound was NOT raised in response to this measurement.**
+  Raising a gating constant on n=3, hours before a tag, is exactly the kind
+  of after-the-fact adjustment this whole document exists to prevent — the
+  same reasoning that kept `OFFCPU_CAP_PCT` at 10% in §3 above. A future
+  reader should see this as a deliberate choice, not something nobody
+  noticed. **Practical consequence, stated plainly: one slower navigation
+  during a counted attempt can fail this criterion.** Queries' own spread
+  (2362–2432 ms, a 70 ms range across 3 runs) is already most of the
+  remaining headroom.
+
+  **Demo-visible, not just a gate concern:** Queries takes ~2.4 s to paint,
+  consistently, on a real capture — a presenter clicking it waits with a
+  visibly empty panel for over two seconds. `docs/DEMO_RUNBOOK.md` §7 is
+  updated (this commit) to tell the presenter to expect and cover this
+  rather than be surprised on stage.
+
+  **Prior VM/headless-Chromium data, superseded, kept for context only —
+  do not use for the margin above:** three runs on `agent/ttfp-timing-field`
+  (run A `tests/results/box-check-ubuntu-20260930-115044.log`, cited in PR
+  #257's body; run B `box-check-ubuntu-20260930-150337.log`; run C
+  `box-check-ubuntu-20261001-083418.log`) measured sessions 67→148→264,
+  overview 74→98→306, events 94→94→273, histogram 185→198→594, timeline
+  (drill-down) 220→301→397, queries 227→248→509, waterfall 298→342→832,
+  concurrency 304→291→734, scatter 318→389→809, matrix 341→332→889,
+  transitions 533→541→1211 — rising across all three runs, on a different
+  box class (VM, not the Mac client) and headless Chromium (not real
+  Chrome). These numbers established that n=1-2-per-tab VM data was not a
+  stable basis for the bound, which is exactly why this criterion asked for
+  ≥3 navigations on the real demo configuration in the first place; they
+  are superseded by the table above for every purpose other than that
+  historical point, and the real Chrome/Mac numbers are generally LOWER
+  than the VM/headless ones were trending toward (e.g. transitions 1211 on
+  the VM vs. 1150 max on real Chrome/Mac) — consistent with "capture-side
+  (VM) conditions do not establish the Mac-side result" elsewhere in this
+  document, in both directions.
+
+  **Global, not per-tab**, per the original pre-registered guidance
+  (`docs/DEMO_DELIVERY_QUEUE.md` item 2.1: "set ONE generous global bound
+  (never below 3 s)"): a single number is what a human watching a timer
+  during the demo can actually hold in their head.
 
   **What would settle this:** ≥3 navigations per tab, on real Chrome on the
   Mac (the actual demo client), ideally run back-to-back with a VM-side
@@ -753,7 +769,7 @@ left to be discovered.
 | §3 Off-CPU\* ≤ 10% | yes (`time_model_offcpu_cap_ok`), but the 10% is a **provisional catastrophic-loss tripwire**, not a calibrated bound — see §3's own corrected paragraph above: its cited "4.92 pp" derivation is a real sum but measures a different regime, unit, and quantity than the gate enforces; demo measured <0.1% (n=7, one run); kept at 10%, not tightened, on n=1 |
 | §4 zero known-failing tabs | yes (`build_demo_summary` uses raw `ok`, ignoring the exemption) |
 | §4 blink measured fraction ≥ 0.5 | yes — landed via `agent/blink-anchor-mount-seq` (#209, merged to master), inherited automatically once `agent/rehearsal-bypass-suite` rebased: `demo_rehearsal.py` has no independent blink-measurement code, it fully delegates to `ui_live_smoke.py:run_tab()`, which now calls `blink_sweep_gate_verdict` itself. Pinned with a regression test using real measured numbers (`tests/test_demo_rehearsal_lib.py`, run.id 1790574871: scatter 0.1305, transitions 0.0072–0.0172) |
-| §4 time to first paint, pinned viewport | **PROVISIONAL** capture-side bound set (3000 ms, global, ≈2.5x margin over the worst of three real-box observations — see §4's own derivation above), not yet settled against the criterion's own ≥3-navigations/real-Chrome-on-Mac requirement. `ttfp_ms` merged to `master` (`fa20067`, issue #245/PR #257) but is measurement-only and gates nothing — `build_tab_result` never reads it into `ok`. Mac-side: still manual checklist and human sign-off, not an automated verdict, and **deliberately stays qualitative** (paints without a visible spinner) rather than numeric — the checklist has no stopwatch instrumentation, so it is not asked to check the 3000 ms number. The VM's headless Chromium viewport is pinned at 1710×981, DPR 2 (#223), but that does not establish the real Chrome walk on the Mac. Retracted: the 2026-09-29 contended walk's 30 s Timeline finding measured the "select a session" prompt from a bare tab click, not paint after a Sessions-row drill-down (`_navigate_to_tab`) |
+| §4 time to first paint, pinned viewport | **SETTLED** (review round 6): bound 3000 ms, global, **≈1.2x margin** (worst observed: queries at 2432 ms) — measured ≥3 navigations/tab, real Chrome 154 on the Mac, live full-mode capture on the demo topology, satisfying this criterion's own requirement in full. Margin is THIN and deliberately not widened on n=3 hours before the tag; one slow navigation in a counted attempt can fail it. Timeline not yet measured by this method (instrumentation gap: bare click, not Sessions-row drill-down — recorded as unmeasured, not a pass). `ttfp_ms` (merged `master`, `fa20067`, issue #245/PR #257) remains measurement-only and gates nothing automatically — `build_tab_result` never reads it into `ok`; the bound above is enforced only by a human reading this document during a counted attempt. Mac-side checklist: still manual sign-off, **deliberately stays qualitative** (paints without a visible spinner) — it has no stopwatch, so it does not independently check the 3000 ms number either; this round's measurement was a one-off script, not the checklist itself. Retracted: the 2026-09-29 contended walk's 30 s Timeline finding measured the "select a session" prompt from a bare tab click, not paint after a Sessions-row drill-down — the same trap this round's Timeline gap repeats at the instrumentation level, not the product level |
 | §5 cross-tab agreement, freshness | partial — VM-side freshness: yes (`freshness_ok`, `info`'s `now_ns` vs `to_ns`); Mac-side visible freshness: manual checklist and human sign-off. Cross-tab agreement: DB-Time leg yes (`cross_tab_db_time_agreement_ok`, `time_model` vs `top_events` for the identical window); AAS leg yes (`bucket_weighted_aas_ok`, `agent/aas-agreement-and-retention`) — a bucket-weighted re-derivation from the `aas` endpoint's own `bucket_ns` over the identical window, compared against `time_model.aas`, wired into `extra_checks["cross_tab_aas_agreement"]` alongside the DB-Time leg. Retracted: the earlier walk's 0.0000% came from an unweighted mean of buckets, which was not that comparison and established no agreement; see `tests/demo_rehearsal_lib.bucket_weighted_aas_ok`'s own comment for why the two formulas diverge whenever the window does not divide the endpoint's `bucket_ns` evenly (the common case) |
 | §6 lost-event counters, overhead envelope | partial — lost-event counters: yes (`daemon_integrity_ok`: `ringbuf_drops_total`/`state_map_full_total`/`seen_query_ids_full_total`, already on the wire via pgwt-server's control proxy, no `src/` change needed; blind spot stated in the code comment: a lost LIFECYCLE event is silent, no counter increments). Overhead envelope: **not yet measured for the demo workload on the demo box**. Correction: the earlier claim that nothing measures full mode was wrong. Every box-check runs `tests/test_overhead.sh --quick` (~10 minutes) via `tests/run_all.sh`; its paired baseline/tracer A/B uses the default pgbench load, pins `--mode full`, and appends to `tests/results/overhead_trend.csv` on the box. The tracked CSV has only a header because `tests/results/` is excluded from box-check's up-rsync; box-generated rows are not synced back or committed. The ~70-minute sweep is the same script without `--quick`; `sampled_overhead_gate.py --mode sampled` runs only for `src/` changes. Retracted: the quick sweep is not a per-attempt requirement or a substitute for measuring the demo workload. Do n=3 paired full-mode A/B TPS runs with the demo workload on the demo box and record the envelope before counted attempt one; the 40-minute rehearsal retained neither an A/B baseline nor even its with-tracer `tps =` line (cleanup tailed 20 lines and deleted the full log) |
 | §7 no test exited 126/127 | **partial, and this is a human-readable aid, not an automated gate**: `tests/demo_rehearsal.sh`'s `report_early_exit` labels a dead subprocess's 126/127 exit code in the log for a human reading it afterward. It does NOT change the script's own exit code (every call site already `exit 1` regardless of the labeled reason) and has no test coverage of its own — reviewer finding, 2026-09-28. Do not read this row as "126/127 fails the gate automatically"; it already did, via the pre-existing `kill -0` + `exit 1` checks, which is why this addition changes nothing observable except the log's wording |
