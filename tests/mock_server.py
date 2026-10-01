@@ -92,6 +92,16 @@ _BUCKET_NS = 60_000_000_000
 # window's `from` (still exercising the P6 left-edge clamp on a STRADDLING
 # wait — see test_timeline_bar_positions) with the rest fully inside it.
 _TIMELINE_BASE_NS = _TO_NS - 1_020_000_000_000
+
+# #222 review item 3: anchor for the "executions"/"execution_detail" fixture
+# rows, close to _TO_NS (the "now" a real request's `to` carries -- see
+# info.now_ns below) rather than an unrelated ~1e13 epoch. The old fixture
+# used raw ~1e13 start_ns values against a ~1.774e18 `to`, so an in_progress
+# row's elapsed-so-far (`to_ns - start_ns`, _exec_effective_duration_ms
+# below) came out ~56 YEARS, rendering the absurd "≥ 1773990000.0s
+# (running)" in the Waterfall tab's one gallery cell -- fmtExecutionDuration
+# itself was correct, only this fixture's magnitude was not.
+_EXEC_BASE_NS = _TO_NS - 950_000_000
 _COMPARE_MODE = os.environ.get("PGWT_MOCK_COMPARE", "0") not in ("0", "", "false")
 _INFO_TICKS = 0
 
@@ -862,41 +872,105 @@ def _handle_request_inner(cmd, req_id, msg):
     if cmd == "executions":
         filters = msg.get("filters", {})
         qid = str(filters.get("query_id", "100"))
+        # Same relative offsets as before this fixture moved to _EXEC_BASE_NS
+        # (pid 1004 50ms before it, pid 1000 AT it, pid 1010 +50ms, pid 1002
+        # +100ms) -- see _EXEC_BASE_NS's own comment above for why it moved.
         rows = [
-            # Latest first, like server.c handle_executions.
-            # issue #101: on a real --mode full capture the NEWEST execution
-            # is routinely a microsecond-scale statement that never changed
-            # wait state -- no events, no workers, no plan, so its
-            # execution_detail below is empty and there is no waterfall to
-            # draw. Measured on the gate box: rows[0] was undrawable in 40 of
-            # 40 simulated live ticks. The fixture carries that shape so the
-            # UI suite exercises the real default-selection path.
+            # #222 review: pid 1004 is in_progress and started BEFORE every
+            # other row here (not after -- see the comment on
+            # _exec_effective_duration_ms below for why), and it has no
+            # events/workers/plan. That shape does two jobs at once:
+            #  - under start_desc (latest first) it is the oldest start, so
+            #    it sorts LAST -- issue #101's original "the newest row on
+            #    a real --mode full capture is routinely empty" scenario
+            #    reproduced here as "the row the tab must skip past" isn't
+            #    tied to recency at all, just to having nothing to draw;
+            #  - under duration_desc (the #222 default, "slowest first")
+            #    its huge elapsed-so-far makes it sort FIRST, so the
+            #    default-selection skip logic (pickDefaultExecution) still
+            #    has to fire on the DEFAULT view, not just the toggle.
             {"pid": 1004, "query_id": qid,
-             "start_ns": "10000200000000", "end_ns": None,
+             "start_ns": str(_EXEC_BASE_NS - 50_000_000), "end_ns": None,
              "duration_ms": None, "plan_ms": None,
              "n_events": 0, "n_workers": 0, "in_progress": True,
-             "started_before_window": False},
+             "end_inferred": False, "started_before_window": False},
             {"pid": 1002, "query_id": qid,
-             "start_ns": "10000100000000", "end_ns": "10000180000000",
+             "start_ns": str(_EXEC_BASE_NS + 100_000_000),
+             "end_ns": str(_EXEC_BASE_NS + 180_000_000),
              "duration_ms": 80.0, "plan_ms": None,
              "n_events": 2, "n_workers": 0, "in_progress": False,
-             "started_before_window": False},
+             "end_inferred": False, "started_before_window": False},
+            # #222 review item 4: ties pid 1002's 80.0ms exactly but started
+            # earlier, so duration_desc's tie-break (start_ns desc, then
+            # pid desc -- matching cmp_execution_duration_desc in
+            # src/server.c) has to pick a winner instead of Python's
+            # stable sort coincidentally preserving fixture insertion
+            # order (which is what a tie-added-later would have silently
+            # gotten away with). end_inferred=True: this row also exercises
+            # the "closed via CMD_END, not a measured EXEC_END" label (an
+            # ERROR/cancel/timeout) -- src/server.c's end_inferred field.
+            {"pid": 1010, "query_id": qid,
+             "start_ns": str(_EXEC_BASE_NS + 50_000_000),
+             "end_ns": str(_EXEC_BASE_NS + 130_000_000),
+             "duration_ms": 80.0, "plan_ms": None,
+             "n_events": 1, "n_workers": 0, "in_progress": False,
+             "end_inferred": True, "started_before_window": False},
             {"pid": 1000, "query_id": qid,
-             "start_ns": "10000000000000", "end_ns": "10000030001000",
+             "start_ns": str(_EXEC_BASE_NS),
+             "end_ns": str(_EXEC_BASE_NS + 30_001_000),
              "duration_ms": 30.001, "plan_ms": 1.0,
              "n_events": 5, "n_workers": 2, "in_progress": False,
-             "started_before_window": False},
+             "end_inferred": False, "started_before_window": False},
         ]
         if "pid" in filters:
             rows = [r for r in rows if r["pid"] == filters["pid"]]
+
+        def _exec_effective_duration_ms(row):
+            # Mirrors execution_sort_duration_ns (src/server.c, #222
+            # review item 1): a closed row uses its real duration; an
+            # in_progress row's true duration is unknown, so ORDERING uses
+            # the request's own `to` as a deterministic lower bound
+            # (elapsed-so-far) -- never 0, because a currently-running
+            # execution must not fall to the bottom of a tab titled
+            # "slowest first". `to` is whatever the request actually sent
+            # (real callers always send one -- see waterfall.js's
+            # requests()); a missing/nonsensical `to` degrades to 0 rather
+            # than a negative/undefined ordering.
+            if not row["in_progress"]:
+                return row["duration_ms"] or 0.0
+            to_ns = msg.get("to")
+            start_ns = int(row["start_ns"])
+            if not isinstance(to_ns, (int, float)) or to_ns <= start_ns:
+                return 0.0
+            return (to_ns - start_ns) / 1e6
+
+        # #222: server.c orders the whole matching window by `sort` BEFORE
+        # truncating, so this is a server-side selection, not a client
+        # re-sort -- the mock must reorder the same way or the UI's default
+        # (sort=duration_desc) would exercise a fixture shape the real
+        # server never actually sends for that request. Unrecognized/absent
+        # sort falls back to the latest-first (start_ns desc) order below,
+        # matching server.c's cmp_execution_start_desc default.
+        if msg.get("sort") == "duration_desc":
+            # Explicit multi-key sort -- duration desc, then start_ns desc,
+            # then pid desc -- matching cmp_execution_duration_desc's own
+            # tie-break exactly, rather than relying on Python's stable
+            # sort to coincidentally preserve the tie in fixture order.
+            rows = sorted(rows, key=lambda r: (
+                -_exec_effective_duration_ms(r), -int(r["start_ns"]),
+                -r["pid"]))
+        else:
+            rows = sorted(rows, key=lambda r: (-int(r["start_ns"]), -r["pid"]))
+        open_count = sum(1 for r in rows if r["in_progress"])
         return {"id": req_id, "rows": rows,
-                "total_count": len(rows), "truncated": False}
+                "total_count": len(rows), "open_count": open_count,
+                "completed_count": len(rows) - open_count, "truncated": False}
 
     if cmd == "execution_detail":
         filters = msg.get("filters", {})
         pid = filters.get("pid", 1000)
         qid = str(filters.get("query_id", "100"))
-        start = str(msg.get("start_ns", "10000000000000"))
+        start = str(msg.get("start_ns", str(_EXEC_BASE_NS)))
         if pid == 1004:
             # The newest execution's empty detail (issue #101) -- verbatim
             # shape of a real pgwt-server answer for a statement with no
@@ -910,7 +984,8 @@ def _handle_request_inner(cmd, req_id, msg):
             events = [
                 {"we": 0x0100004e, "name": "IO:WalSync",
                  "start_ns": start, "dur_ns": "20000000", "cpu_ns": None},
-                {"we": 0, "name": "CPU*", "start_ns": "10000130000000",
+                {"we": 0, "name": "CPU*",
+                 "start_ns": str(_EXEC_BASE_NS + 130_000_000),
                  "dur_ns": "30000000", "cpu_ns": None},
             ]
             return {"id": req_id, "query_id": qid,
@@ -925,7 +1000,7 @@ def _handle_request_inner(cmd, req_id, msg):
                 "leader": {"pid": pid, "query_id": qid,
                            "events": [event,
                                 {"we": 0, "name": "CPU*",
-                                 "start_ns": "10000012000000",
+                                 "start_ns": str(_EXEC_BASE_NS + 12_000_000),
                                 "dur_ns": "8000000", "cpu_ns": None}],
                            "total_count": 2, "truncated": False},
                 "workers": [
@@ -934,17 +1009,27 @@ def _handle_request_inner(cmd, req_id, msg):
                     {"pid": 1008, "events": [dict(event)],
                      "total_count": 1, "truncated": False},
                 ],
-                "plan": {"start_ns": "9999998000000",
-                         "end_ns": "9999999000000"},
+                "plan": {"start_ns": str(_EXEC_BASE_NS - 2_000_000),
+                         "end_ns": str(_EXEC_BASE_NS - 1_000_000)},
                 "total_count": 4, "kept_count": 4, "truncated": False}
 
     if cmd == "exec_scatter":
+        # #222 review item 3 fix-up: pid 1002's "t" MUST equal the
+        # `executions` fixture's pid 1002 start_ns above -- test_scatter_view
+        # clicks this point, pivots to Waterfall, and the client selects the
+        # executions-table row by matching (pid, start_ns) exactly; before
+        # this fix the two fixtures happened to share the same ~1e13 epoch,
+        # so this coupling was invisible until _EXEC_BASE_NS moved the
+        # executions rows and left this canned point behind, which timed
+        # out waiting for "tr.selected-execution" (make check, 2026-09-30).
+        # pid 1000 and pid 1004 aligned too, for the same reason, even
+        # though nothing here currently clicks them.
         return {"id": req_id, "points": [
-            {"t": "10000000000000", "duration_ms": 30.001,
+            {"t": str(_EXEC_BASE_NS), "duration_ms": 30.001,
              "pid": 1000, "query_id": "100", "in_progress": False},
-            {"t": "10000100000000", "duration_ms": 80.0,
+            {"t": str(_EXEC_BASE_NS + 100_000_000), "duration_ms": 80.0,
              "pid": 1002, "query_id": "200", "in_progress": False},
-            {"t": "10000200000000", "duration_ms": None,
+            {"t": str(_EXEC_BASE_NS - 50_000_000), "duration_ms": None,
              "pid": 1004, "query_id": "300", "in_progress": True},
         ], "total_count": 3, "kept_count": 3, "downsampled": False}
 

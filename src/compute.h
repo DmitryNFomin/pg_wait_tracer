@@ -570,6 +570,14 @@ struct pgwt_execution {
     uint64_t plan_end_ns;
     int      has_plan;
     int      in_progress;
+    /* #222 review: this row never reached a real EXEC_END -- it was
+     * closed at its pid's next CMD_END instead (an ERROR, a cancel,
+     * statement_timeout, a client disconnect, or a lost EXEC_END marker).
+     * end_ns is still a real wall-clock timestamp (when the command
+     * actually closed), not fabricated from a window bound, but it is
+     * DEDUCED from the idle transition, not measured at the query's own
+     * completion -- meaningful only when in_progress is false. */
+    int      end_inferred;
     int      started_before_window;
     int      matches_event_filter;
     int      n_events;
@@ -587,7 +595,15 @@ struct pgwt_executions_result {
  * same PID when present, and retain unpaired starts explicitly.
  * PLAN_START/END immediately preceding an execution are associated by PID and
  * query_id. Rows are not filtered or truncated here; callers can serve tables
- * and scatter plots from the same complete, honest extraction. */
+ * and scatter plots from the same complete, honest extraction.
+ *
+ * "Unpaired" is bounded, not unbounded: a row still open when its pid's next
+ * CMD_END fires (the command closed without a matching EXEC_END -- an
+ * ERROR, a cancel, statement_timeout, a lost EXEC_END) is closed there with
+ * a real measured duration, never left in_progress for the rest of the
+ * capture (#222 review). Only a row with no CMD_END at all before the
+ * window's own end -- the pid is still mid-statement right now -- stays
+ * in_progress with duration_ms:null. */
 void pgwt_compute_executions(const struct pgwt_trace_event *events, int count,
                              uint64_t from_ns, uint64_t to_ns,
                              const struct pgwt_filter *f,

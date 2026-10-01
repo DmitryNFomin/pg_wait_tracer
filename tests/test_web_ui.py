@@ -2229,9 +2229,9 @@ def test_dfg_node_drill(page):
 # ── U3 Stage 2 / B6: executions waterfall, latency scatter, matrix ──────────
 
 def test_waterfall_view(page):
-    """Waterfall renders the latest execution, row selection swaps detail,
-    local drag clips resident data, dblclick restores it, and bar click paints
-    the compact inspection panel."""
+    """Waterfall renders the slowest execution by default (#222), row
+    selection swaps detail, local drag clips resident data, dblclick
+    restores it, and bar click paints the compact inspection panel."""
     print("--- Test U3.1: Execution Waterfall ---")
     page.goto(MOCK_URL)
     page.wait_for_selector("#status.connected", timeout=10000)
@@ -2239,31 +2239,43 @@ def test_waterfall_view(page):
     page.wait_for_selector("#waterfall-chart canvas", timeout=5000)
     page.wait_for_timeout(700)
 
+    check("longest running first" in (page.text_content("#executions-sort-label") or ""),
+          "waterfall defaults to longest-running-first (#222)")
+
     rows = page.query_selector_all("#executions-table tbody tr.clickable")
-    check(len(rows) == 3, f"execution selector rendered 3 latest-first rows ({len(rows)})")
-    # issue #101: rows[0] (PID 1004) is the newest execution and has nothing
-    # to draw -- no events, no workers, no plan, exactly what a real --mode
-    # full capture hands the tab. Opening on it left the panel with no
-    # ECharts instance at all; the default must skip to the newest execution
-    # that actually has a waterfall.
+    check(len(rows) == 4, f"execution selector rendered 4 rows ({len(rows)})")
+    # #222 review: PID 1004 is in_progress and started BEFORE every other
+    # row (not the newest) -- its huge elapsed-so-far still puts it FIRST
+    # under duration_desc, exactly the "a currently-running execution must
+    # not sort last" fix. PID 1002 and PID 1010 tie at 80ms and are
+    # tie-broken by start_ns desc (1002 started later); PID 1000 (30ms)
+    # trails.
+    pids_in_order = [r.text_content() for r in rows]
+    check("1004" in pids_in_order[0] and "1002" in pids_in_order[1] and
+          "1010" in pids_in_order[2] and "1000" in pids_in_order[3],
+          f"slowest-first order is 1004, 1002, 1010, 1000 ({pids_in_order})")
+    # PID 1004 has no events/workers/plan -- the default-selection skip
+    # logic (issue #101) has to fire on the DEFAULT (slowest-first) view
+    # now, since the longest-elapsed row is exactly the empty one.
     selected = page.query_selector("#executions-table tr.selected-execution")
     check(selected is not None and "1002" in selected.text_content(),
-          f"default selection skipped the empty newest execution ('{(selected.text_content() if selected else None)}')")
+          f"default selection skips the empty longest-elapsed execution ('{(selected.text_content() if selected else None)}')")
     lane_count = page.evaluate("""() => {
         const c = echarts.getInstanceByDom(document.getElementById('waterfall-chart'));
         return c.getOption().yAxis[0].data.length;
     }""")
-    check(lane_count == 1, f"latest execution detail has one leader lane ({lane_count})")
+    check(lane_count == 1, f"selected execution detail has one leader lane ({lane_count})")
 
-    # Explicitly picking the empty execution must still say so honestly --
-    # the fix changes the DEFAULT, it does not hide an empty execution.
-    # Re-query each time: every selection re-mounts the table, so a handle
-    # taken before the click is detached by the time the next one is needed.
+    # Explicitly picking the empty (in_progress) execution must still say so
+    # honestly -- the fix changes the DEFAULT, it does not hide an empty
+    # execution. Re-query each time: every selection re-mounts the table, so
+    # a handle taken before the click is detached by the time the next one
+    # is needed.
     def click_execution_row(idx):
         page.query_selector_all("#executions-table tbody tr.clickable")[idx].click()
         page.wait_for_timeout(1000)
 
-    click_execution_row(0)
+    click_execution_row(0)   # PID 1004, empty, first under duration-desc
     empty_state = page.evaluate("""() => {
         const el = document.getElementById('waterfall-chart');
         return {text: el.textContent.trim(),
@@ -2273,15 +2285,47 @@ def test_waterfall_view(page):
           and "No execution events captured" in empty_state["text"],
           f"explicitly selected empty execution states it honestly ({empty_state})")
 
-    click_execution_row(2)
+    click_execution_row(3)   # PID 1000, leader + 2 workers + plan
     selected = page.query_selector("#executions-table tr.selected-execution")
     check(selected is not None and "1000" in selected.text_content(),
-          "row click selected the older execution")
+          "row click selected the other completed execution")
     lane_count = page.evaluate("""() => {
         const c = echarts.getInstanceByDom(document.getElementById('waterfall-chart'));
         return c.getOption().yAxis[0].data.length;
     }""")
     check(lane_count == 3, f"selected execution rendered leader + 2 workers ({lane_count} lanes)")
+
+    # #222 sort toggle: switch to latest-first, then leave/re-enter the tab
+    # so the default-selection algorithm runs fresh against the reordered
+    # rows (a resident `selected` deliberately survives a plain sort
+    # change -- see waterfall.js -- so re-entering is what forces a new
+    # pick). PID 1004 is the OLDEST start here, so latest-first puts it
+    # last -- issue #101's original scenario ("the row the tab must skip
+    # past has nothing to draw") is now decoupled from recency entirely:
+    # it fires on the default for a different reason (longest elapsed) and
+    # does NOT fire here (rows[0] under latest-first already has data).
+    page.click("#executions-sort-toggle")
+    page.wait_for_timeout(700)
+    check("latest first" in (page.text_content("#executions-sort-label") or ""),
+          "sort toggle switched the label to latest-first")
+    page.click(".tab[data-tab='overview']")
+    page.wait_for_timeout(500)
+    page.click(".tab[data-tab='waterfall']")
+    page.wait_for_selector("#waterfall-chart canvas", timeout=5000)
+    page.wait_for_timeout(700)
+    rows = page.query_selector_all("#executions-table tbody tr.clickable")
+    pids_in_order = [r.text_content() for r in rows]
+    check("1002" in pids_in_order[0] and "1010" in pids_in_order[1] and
+          "1000" in pids_in_order[2] and "1004" in pids_in_order[3],
+          f"latest-first order is 1002, 1010, 1000, 1004 ({pids_in_order})")
+    selected = page.query_selector("#executions-table tr.selected-execution")
+    check(selected is not None and "1002" in selected.text_content(),
+          f"latest-first default selects the newest row directly, it already has data ('{(selected.text_content() if selected else None)}')")
+    # Restore the default for the rest of this test (drag/dblclick/bar-click
+    # below assume the PID 1000 leader+2-worker detail).
+    page.click("#executions-sort-toggle")
+    page.wait_for_timeout(700)
+    click_execution_row(3)   # PID 1000 (duration-desc order) again
 
     # The detail payload is fully resident: local zoom/restore must not send
     # executions or execution_detail again.
@@ -2417,7 +2461,11 @@ def test_scatter_view(page):
     selected = page.text_content("#executions-table tr.selected-execution") or ""
     check("1002" in selected, f"scatter handoff selected interior PID 1002 execution ('{selected[:60]}')")
     selected_hash = page.evaluate("location.hash")
-    check("exec.pid=1002" in selected_hash and "exec.start=10000100000000" in selected_hash,
+    # #222 review item 3: this number is mock_server.py's _EXEC_BASE_NS +
+    # 100ms (pid 1002's start_ns in both the executions and exec_scatter
+    # fixtures -- they must agree, see exec_scatter's own comment there).
+    check("exec.pid=1002" in selected_hash and
+          "exec.start=1773999999150000000" in selected_hash,
           f"scatter execution identity is URL state ({selected_hash})")
     page.reload()
     page.wait_for_selector("#waterfall-chart canvas", timeout=10000)

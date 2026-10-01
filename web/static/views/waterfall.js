@@ -3,7 +3,9 @@
 
 import {
     buildExecutionsModel, buildWaterfallOption, buildWaterfallReadout,
-    executionsConfig, pickDefaultExecution,
+    executionsConfig, pickDefaultExecution, EXECUTIONS_SORT_DEFAULT,
+    executionsSortLabel, executionsSortToggleLabel, executionsSortToggleTarget,
+    executionsStatusLabel,
 } from '../lib/builders/waterfall.js';
 import { isUnavailable } from '../lib/builders/fidelity.js';
 import { mountUnavailablePanel } from '../lib/panels.js';
@@ -24,6 +26,11 @@ export function createWaterfallView() {
     let detailRef = null;
     let detailOpts = null;
     let currentWindow = null;
+    // #222: which slice requests() asks the server for -- see
+    // EXECUTIONS_SORT_* in lib/builders/waterfall.js for why the default is
+    // duration_desc. View-local, like `selected`; not persisted to the URL
+    // hash (a deliberate scope cut, not an oversight -- see PR body).
+    let sortMode = EXECUTIONS_SORT_DEFAULT;
     // #171: the drag-select listener below is attached ONCE against the
     // persisted chart instance, so it must read the CURRENT axisOrigin
     // through this ref rather than close over the `model` local from
@@ -50,7 +57,11 @@ export function createWaterfallView() {
         disposeChart();   // shell is being rebuilt -- any old chart DOM is gone
         el.innerHTML =
             '<section class="execution-list">' +
-            ' <div class="view-title">Executions <span>latest first</span></div>' +
+            ' <div class="view-title">Executions ' +
+            '<span id="executions-sort-label"></span>' +
+            '<button id="executions-sort-toggle" class="link-button" type="button"></button>' +
+            '<span id="executions-counts-label"></span>' +
+            '</div>' +
             ' <div id="executions-table"></div>' +
             '</section>' +
             '<section class="waterfall-pane">' +
@@ -60,6 +71,22 @@ export function createWaterfallView() {
             ' <div id="waterfall-chart"></div>' +
             ' <div id="waterfall-readout" class="chart-readout">Click a bar to inspect it.</div>' +
             '</section>';
+        // Wired once against the persisted shell (like the chart's drag
+        // listener above): sortMode is a `let` in this closure, so the
+        // handler always reads its CURRENT value, and ctxRef is reassigned
+        // on every mount() before a click can fire.
+        document.getElementById('executions-sort-toggle')
+            .addEventListener('click', () => {
+                sortMode = executionsSortToggleTarget(sortMode);
+                if (ctxRef) ctxRef.refresh();
+            });
+    }
+
+    function updateSortControl() {
+        const label = document.getElementById('executions-sort-label');
+        const toggle = document.getElementById('executions-sort-toggle');
+        if (label) label.textContent = executionsSortLabel(sortMode);
+        if (toggle) toggle.textContent = executionsSortToggleLabel(sortMode);
     }
 
     function chooseExecution(rows) {
@@ -167,14 +194,16 @@ export function createWaterfallView() {
 
         async requests(ctx) {
             ctxRef = ctx;
+            const windowTo = ctx.timeRange.to;
             const executions = await ctx.transport.request(ctx.channel('executions'),
                 'executions', {
-                    from: ctx.timeRange.from, to: ctx.timeRange.to, limit: 100,
-                    filters: ctx.filters.snapshot(),
+                    from: ctx.timeRange.from, to: windowTo, limit: 100,
+                    sort: sortMode, filters: ctx.filters.snapshot(),
                 });
-            if (isUnavailable(executions)) return { executions, detail: null, selected: null };
+            if (isUnavailable(executions))
+                return { executions, detail: null, selected: null, windowTo };
             const chosen = chooseExecution(executions.rows || []);
-            if (!chosen) return { executions, detail: null, selected: null };
+            if (!chosen) return { executions, detail: null, selected: null, windowTo };
             const detailEnd = chosen.end_ns != null
                 ? String(chosen.end_ns) : String(Math.round(ctx.timeRange.to));
             const detailFilters = Object.assign({}, ctx.filters.snapshot(), { pid: chosen.pid });
@@ -183,13 +212,13 @@ export function createWaterfallView() {
                     filters: detailFilters, start_ns: String(chosen.start_ns),
                     end_ns: detailEnd,
                 });
-            return { executions, detail, selected: chosen, detailEnd };
+            return { executions, detail, selected: chosen, detailEnd, windowTo };
         },
 
         build(data) {
             if (isUnavailable(data.executions)) return { unavailable: data.executions };
             if (isUnavailable(data.detail)) return { unavailable: data.detail };
-            const table = buildExecutionsModel(data.executions, data.selected);
+            const table = buildExecutionsModel(data.executions, data.selected, data.windowTo);
             const wf = data.detail ? buildWaterfallOption(data.detail, {
                 executionStart: data.selected.start_ns,
                 executionEnd: data.detailEnd,
@@ -208,6 +237,14 @@ export function createWaterfallView() {
                 return;
             }
             ensureShell(el);
+            updateSortControl();
+            const countsLabel = document.getElementById('executions-counts-label');
+            if (countsLabel) {
+                const text = executionsStatusLabel(
+                    model.table.open_count, model.table.completed_count,
+                    model.table.has_inferred_end);
+                countsLabel.textContent = text ? ' · ' + text : '';
+            }
             const tableHost = document.getElementById('executions-table');
             const pane = document.querySelector('.waterfall-pane');
             if (!model.table.hasRows) {

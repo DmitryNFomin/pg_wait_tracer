@@ -506,8 +506,17 @@ def main():
         # "empty".
         coverage_from_ns = max(from_ns,
                                to_ns - int(WATERFALL_LIVE_WINDOW_S * 1_000_000_000))
+        # raw_out_dir (#222 review item 4): the waterfall verdict's own two
+        # `executions` pages are retained verbatim under <out_dir>/raw/,
+        # unconditionally (they are ~35KB each, unlike the trace itself,
+        # which stays behind PGWT_RETAIN_TRACE). Without them the tab's
+        # PASS is a max() over rows nobody outside this process ever sees,
+        # and the "a completed row >= 500ms was ON THE RETURNED PAGE"
+        # claim is unverifiable after the fact.
         coverage_results = cov.run_coverage(srv, coverage_from_ns, to_ns,
-                                            num_cpus=info.get("num_cpus"))
+                                            num_cpus=info.get("num_cpus"),
+                                            raw_out_dir=os.path.join(out_dir,
+                                                                     "raw"))
         coverage_ok, coverage_detail = drlib.tab_coverage_check_ok(
             coverage_results, expected_tabs=cov.TAB_ORDER)
         print(f"demo_rehearsal: tab_coverage: "
@@ -672,6 +681,24 @@ def main():
                     "nothing was missed; see docs/DEMO_REHEARSAL_CRITERIA.md "
                     "section 6"),
         }
+
+        # #222 review: reported, not gated -- see cmd_markers_observed's own
+        # docstring for why a rehearsal whose workload never escalates a
+        # backend to exact tier legitimately reads zero here without that
+        # being a harness bug. The point is visibility: a future reader (or
+        # CI) can grep this field instead of the orphan-close fix silently
+        # having zero live coverage forever. Kept OUT of extra_checks (like
+        # sweep_offset_coverage below) precisely so it is never gated and
+        # never prints a misleading "PASS" for a zero count.
+        if metrics_err is not None:
+            cmd_markers_seen, cmd_markers_count, cmd_markers_detail = (
+                False, 0, metrics_err)
+        else:
+            cmd_markers_seen, cmd_markers_count, cmd_markers_detail = (
+                drlib.cmd_markers_observed(metrics_resp.get("response")))
+        print(f"demo_rehearsal: cmd_markers_observed (informational, does "
+              f"NOT gate the verdict): {'YES' if cmd_markers_seen else 'NO'} "
+              f"-- {cmd_markers_detail}")
 
     extra_checks["daemon_log_clean"] = _daemon_log_check(args.daemon_log)
 

@@ -36,6 +36,7 @@ Usage:
     python3 tests/demo_workload_coverage.py --trace-dir DIR --window-s 300
 """
 import argparse
+import json
 import os
 import sys
 
@@ -194,7 +195,20 @@ def concurrency_populated(resp, num_cpus):
 
 def waterfall_populated(resp):
     """executions: completed executions with query text, at least one slow
-    enough to be interesting."""
+    enough to be interesting.
+
+    #222 review: this checker itself never changed -- what changed is
+    WHICH SLICE TAB_QUERIES asks for (see its `sort` entry below). Queried
+    with no sort, `executions` returns the latest EXECUTIONS_DEFAULT_LIMIT
+    (100) by start time; on a real 40-minute capture at pgbench rates that
+    is on the order of the last ~0.8s, and a genuinely slow execution
+    sitting anywhere earlier in the window is invisible to `max(durations)`
+    here even though it was captured the whole time -- measured directly:
+    a real rehearsal run reported "slowest completed_ms=0.326" against
+    this floor while the same window's own artifacts (exec_scatter: 1101
+    points, max/min duration ratio 649,723; tests/live_loop_workload.py's
+    pg_sleep(1.3)/pg_sleep(0.4)/3M-row count(*)) show the slow work was
+    there all along."""
     rows = (resp or {}).get("rows") or []
     durations = [r.get("duration_ms") for r in rows
                  if r.get("duration_ms") is not None and not r.get("in_progress")]
@@ -202,6 +216,78 @@ def waterfall_populated(resp):
     ok = len(rows) >= 1 and slow is not None and slow >= WATERFALL_INTERESTING_MS
     return ok, (f"executions={len(rows)}, slowest completed_ms={slow} "
                 f"(floor {WATERFALL_INTERESTING_MS})")
+
+
+def waterfall_floor_excludes_inferred(resp):
+    """#222 review round 2, addition 2: a row closed via CMD_END
+    (end_inferred=True, src/compute.c) carries a real wall-clock span, but
+    one DEDUCED from an idle transition rather than measured at the
+    statement's own completion -- a cancel, error, or statement_timeout,
+    not necessarily a genuinely slow completed execution. Without this,
+    waterfall_populated's 500ms floor could in principle be satisfied by
+    an inferred row alone (a single cancelled pg_sleep, no genuinely slow
+    completed execution anywhere in the capture) -- a real hole. Kept as
+    its own pure function, ANDed onto waterfall_populated's result in
+    run_coverage below, rather than folded into waterfall_populated
+    itself: that function's body stays byte-identical (see its own
+    docstring's "this checker itself never changed"), so the gate is
+    strictly stronger without disturbing that claim."""
+    rows = (resp or {}).get("rows") or []
+    slow = [r for r in rows
+            if r.get("duration_ms") is not None
+            and not r.get("in_progress")
+            and r["duration_ms"] >= WATERFALL_INTERESTING_MS]
+    # FAIL CLOSED on version drift (#222 review round 3, item 1). `not
+    # r.get("end_inferred")` would read a MISSING key as "measured", so
+    # against a pgwt-server older than this branch -- one that never
+    # serialises the field at all -- this whole exclusion would silently
+    # no-op and the gate would quietly weaken back to waterfall_populated.
+    # A gate that cannot see must refuse, not approve, so the key has to
+    # be PRESENT and false. Same convention as
+    # demo_rehearsal_lib.cmd_markers_observed, which refuses a
+    # missing/non-numeric live_cmd_markers_total rather than reading it
+    # as zero. Counted separately below so the refusal is loud: "0
+    # measured rows" and "0 measured rows because the server never told
+    # us" are different failures and must not print the same line.
+    missing = [r for r in slow if "end_inferred" not in r]
+    measured_slow = [r for r in slow
+                     if "end_inferred" in r and not r["end_inferred"]]
+    ok = len(measured_slow) >= 1
+    detail = (f"measured (end_inferred=False) completed rows >= "
+              f"{WATERFALL_INTERESTING_MS}ms: {len(measured_slow)}")
+    if missing:
+        detail += (f" | FAIL-CLOSED: {len(missing)} row(s) >= "
+                   f"{WATERFALL_INTERESTING_MS}ms carry NO end_inferred "
+                   f"field at all (pgwt-server older than #222?) and are "
+                   f"NOT counted as measured")
+    return ok, detail
+
+
+def waterfall_recency_diagnostic(resp):
+    """executions (recency slice, no explicit sort -- start_desc, the same
+    query the tab issued before #222's review moved the gating floor onto
+    duration_desc): DIAGNOSTIC ONLY, deliberately not gating (adviser
+    correction, #222 review round 2 second correction). Whether anything
+    slow enough happens to sit in the last EXECUTIONS_DEFAULT_LIMIT starts
+    by wall-clock recency is exactly the timing-dependent accident this
+    whole change removes from the gate; re-asserting on it as a second
+    predicate would put that same accident back, just behind a different
+    name, so it is never ANDed into `ok` anywhere. Recorded (row count,
+    completed count, max completed duration, wall-clock start span) so a
+    future red is diagnosable and a report can show both slices side by
+    side from the same trace/window."""
+    rows = (resp or {}).get("rows") or []
+    completed = [r for r in rows if r.get("duration_ms") is not None
+                 and not r.get("in_progress")]
+    durations = [r["duration_ms"] for r in completed]
+    starts = [int(r["start_ns"]) for r in rows if r.get("start_ns") is not None]
+    span_ns = (max(starts) - min(starts)) if len(starts) >= 2 else 0
+    return {
+        "rows": len(rows),
+        "completed": len(completed),
+        "max_completed_duration_ms": max(durations) if durations else None,
+        "span_ns": span_ns,
+    }
 
 
 def scatter_populated(resp):
@@ -219,7 +305,26 @@ def scatter_populated(resp):
 
 
 # ── tab -> (pgwt-server cmd, extra request params, pure checker) ──────────
-
+#
+# waterfall's extra params carry sort="duration_desc" (#222 review) --
+# deliberately the SAME slice web/static/views/waterfall.js's own
+# EXECUTIONS_SORT_DEFAULT requests by default, not a bespoke choice for
+# this checker alone. This table's own module-docstring rule ("if a
+# view's query command ever changes, this table and the view's own
+# requests() will disagree, which is a real drift worth catching") applies
+# just as much to which SLICE is asked for as to which COMMAND is --
+# querying recency here while the tab itself defaults to duration would
+# be exactly that drift, silently.
+#
+# Residual, not fixed here (tracked, not silent): #222's own review found
+# ranking open rows by elapsed-so-far can itself crowd genuinely slow
+# CLOSED rows off a truncated duration_desc page if a flood of merely-
+# older open executions dominates it (tests/test_data_executions.py's
+# test_open_row_crowding_characterized). At this workload's concurrency
+# (tests/live_loop_workload.py) that is far below the row flood the
+# characterization test uses, so it is not expected to recur here -- but
+# it is the same shape of bug with the sign flipped, worth naming rather
+# than assuming away.
 TAB_QUERIES = {
     "overview":     ("time_model", {}, overview_populated),
     "events":       ("top_events", {}, events_populated),
@@ -229,7 +334,7 @@ TAB_QUERIES = {
     "timeline":     ("session_timeline", {}, timeline_populated),
     "transitions":  ("transitions", {}, transitions_populated),
     "concurrency":  ("concurrency", {}, concurrency_populated),
-    "waterfall":    ("executions", {}, waterfall_populated),
+    "waterfall":    ("executions", {"sort": "duration_desc"}, waterfall_populated),
     "scatter":      ("exec_scatter", {"max_points": 2000}, scatter_populated),
     "matrix":       ("transitions", {"buckets": 200}, matrix_populated),
 }
@@ -262,7 +367,55 @@ TAB_ORDER = (
 COULD_NOT_EVALUATE_CODES = {"window_too_large", "allocation_failed"}
 
 
-def run_coverage(srv, from_ns, to_ns, num_cpus=None):
+# ── raw-slice retention (#222 review item 4) ──────────────────────────────
+#
+# The two `executions` responses the waterfall tab's verdict is computed
+# from, kept verbatim next to the run's own results so a later reader can
+# re-derive "a completed row >= 500ms was ON THE RETURNED PAGE" from the
+# page itself, rather than from a max() somebody already reduced for them.
+WATERFALL_RAW_SLICES = ("executions_duration_desc", "executions_recency")
+
+
+def _retain_waterfall_raw(raw_out_dir, collected):
+    """Write both waterfall slices to `raw_out_dir`, returning the paths.
+
+    Two properties this helper exists to guarantee, both of which are
+    false-negative holes rather than true-positive ones:
+
+    - NEVER SILENTLY ABSENT. Every name in WATERFALL_RAW_SLICES gets a
+      file on every call, even when the query raised, timed out or came
+      back as an `error` response -- in that case the file holds an
+      explicit `pgwt_artifact_error` marker. "No file" would otherwise be
+      ambiguous between "this run did not collect it" and "this code never
+      ran at all", and the second is exactly how an evidence gate stops
+      being able to see.
+    - NEVER STALE. Each file is rewritten (truncating open, "w") on every
+      run, so a reader cannot pick up a previous run's page and believe it
+      belongs to this one -- the retained-evidence failure mode that keeps
+      turning up in review.
+
+    Not a gate: it records, it never votes. A write failure here is a real
+    exception and propagates, because a harness that cannot write its own
+    evidence directory must stop, not carry on producing verdicts nobody
+    can check."""
+    os.makedirs(raw_out_dir, exist_ok=True)
+    paths = []
+    for name in WATERFALL_RAW_SLICES:
+        payload = collected.get(name)
+        if payload is None:
+            payload = {"pgwt_artifact_error": (
+                f"{name}: not collected this run -- the executions query "
+                f"raised, timed out, or returned no response at all; see "
+                f"this tab's `detail` for which")}
+        path = os.path.join(raw_out_dir, name + ".json")
+        with open(path, "w") as f:
+            json.dump(payload, f, indent=2, sort_keys=True)
+            f.write("\n")
+        paths.append(path)
+    return paths
+
+
+def run_coverage(srv, from_ns, to_ns, num_cpus=None, raw_out_dir=None):
     """Query every tab's endpoint over [from_ns, to_ns] and apply its pure
     checker. Returns {tab: {"ok": bool, "detail": str, "could_not_evaluate":
     bool}}. A query that itself errors or times out is recorded as a
@@ -274,8 +427,30 @@ def run_coverage(srv, from_ns, to_ns, num_cpus=None):
     num_cpus: the capture box's CPU count (`info` response's `num_cpus`,
     the same field the UI's "N CPUs" chip reads) -- forwarded only to the
     concurrency checker, which requires it and fails loudly without it
-    rather than grading against a weaker proxy."""
+    rather than grading against a weaker proxy.
+
+    "waterfall" is special-cased here (#222 review round 2): its `ok`
+    ANDs waterfall_populated's own 500ms floor (on the duration_desc
+    slice TAB_QUERIES asks for) with waterfall_floor_excludes_inferred
+    (the same slice, requiring the qualifying row to be measured, not
+    end_inferred); it ALSO issues a second, recency-slice `executions`
+    query purely for waterfall_recency_diagnostic's diagnostic fields,
+    which are recorded under results["waterfall"]["recency_diagnostic"]
+    but never affect `ok` -- see that function's own docstring for why.
+
+    raw_out_dir (#222 review item 4): when given, both waterfall
+    `executions` responses are written there verbatim
+    (WATERFALL_RAW_SLICES) after the loop, on every path including
+    failures -- see _retain_waterfall_raw. When None (the default, and
+    what every pre-existing caller gets) nothing is written and nothing
+    else changes."""
     results = {}
+    # Whatever each waterfall slice actually returned (an error response
+    # counts; an uncollected slice stays absent and gets an explicit
+    # marker file). Flushed once after the loop so that every exit path --
+    # pass, checker fail, error response, query exception -- still leaves
+    # both artifacts on disk.
+    wf_raw = {}
     for tab in TAB_ORDER:
         cmd, extra, checker = TAB_QUERIES[tab]
         try:
@@ -285,6 +460,8 @@ def run_coverage(srv, from_ns, to_ns, num_cpus=None):
             results[tab] = {"ok": False, "could_not_evaluate": False,
                              "detail": f"{cmd} query failed: {e!r}"}
             continue
+        if tab == "waterfall":
+            wf_raw["executions_duration_desc"] = resp
         if isinstance(resp, dict) and resp.get("error"):
             code = resp.get("code")
             if code in COULD_NOT_EVALUATE_CODES:
@@ -299,11 +476,48 @@ def run_coverage(srv, from_ns, to_ns, num_cpus=None):
                 results[tab] = {"ok": False, "could_not_evaluate": False,
                                  "detail": f"{cmd} error: {resp['error']!r}"}
             continue
+        extra_fields = {}
         if tab == "concurrency":
             ok, detail = checker(resp, num_cpus)
+        elif tab == "waterfall":
+            # waterfall_populated itself is untouched (its own docstring's
+            # "this checker itself never changed" claim); both additions
+            # below are layered on top in this glue instead.
+            ok, detail = checker(resp)
+            # Addition 2 (#222 review round 2): an inferred-only floor must
+            # not pass.
+            inferred_ok, inferred_detail = waterfall_floor_excludes_inferred(resp)
+            ok = ok and inferred_ok
+            open_count = resp.get("open_count") if isinstance(resp, dict) else None
+            completed_count = (resp.get("completed_count")
+                               if isinstance(resp, dict) else None)
+            detail = (f"{detail} | {inferred_detail} | "
+                      f"open_count={open_count}, completed_count={completed_count}")
+            # Addition 1, second adviser correction: the recency slice is
+            # queried and recorded as a DIAGNOSTIC ONLY -- see
+            # waterfall_recency_diagnostic's own docstring for why it must
+            # never gate `ok`.
+            try:
+                recency_resp = srv.query(cmd, from_=from_ns, to_=to_ns,
+                                         timeout=30)
+            except Exception as e:
+                recency_diag = {"error": f"recency slice query failed: {e!r}"}
+            else:
+                wf_raw["executions_recency"] = recency_resp
+                if isinstance(recency_resp, dict) and recency_resp.get("error"):
+                    recency_diag = {"error": (f"recency slice error: "
+                                              f"{recency_resp['error']!r}")}
+                else:
+                    recency_diag = waterfall_recency_diagnostic(recency_resp)
+            detail += (f" | recency slice (diagnostic only, does not "
+                      f"gate): {recency_diag}")
+            extra_fields["recency_diagnostic"] = recency_diag
         else:
             ok, detail = checker(resp)
-        results[tab] = {"ok": bool(ok), "could_not_evaluate": False, "detail": detail}
+        results[tab] = {"ok": bool(ok), "could_not_evaluate": False,
+                         "detail": detail, **extra_fields}
+    if raw_out_dir is not None:
+        _retain_waterfall_raw(raw_out_dir, wf_raw)
     return results
 
 
@@ -319,6 +533,13 @@ def main():
                           "numbers stay auditable under tests/results/ "
                           "instead of living only in prose (issue #214 "
                           "review)")
+    ap.add_argument("--raw-out-dir", default=None,
+                     help="retain the waterfall tab\'s two raw `executions` "
+                          "responses (the gating duration_desc page and the "
+                          "diagnostic recency page) verbatim in this "
+                          "directory, so the 500ms floor can be re-derived "
+                          "from the returned page itself rather than from a "
+                          "max() somebody already reduced (#222 review)")
     args = ap.parse_args()
 
     from server_harness import ServerHarness
@@ -330,7 +551,8 @@ def main():
         num_cpus = info.get("num_cpus")
         if args.window_s is not None:
             from_ns = max(from_ns, to_ns - int(args.window_s * 1_000_000_000))
-        results = run_coverage(srv, from_ns, to_ns, num_cpus=num_cpus)
+        results = run_coverage(srv, from_ns, to_ns, num_cpus=num_cpus,
+                                raw_out_dir=args.raw_out_dir)
 
     failed = [t for t in TAB_ORDER if not results[t]["ok"]]
     for tab in TAB_ORDER:
@@ -344,7 +566,6 @@ def main():
         print(f"demo_workload_coverage: {tab}: {status} -- {r['detail']}")
 
     if args.out_json:
-        import json
         os.makedirs(os.path.dirname(os.path.abspath(args.out_json)) or ".",
                     exist_ok=True)
         with open(args.out_json, "w") as f:

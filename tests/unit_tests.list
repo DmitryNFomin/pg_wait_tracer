@@ -32,6 +32,11 @@ test_live_accum
 # count only each event's in-window part, exactly as the AAS chart does --
 # the cross-tab disagreement that failed a 35-minute rehearsal at 1.28%.
 test_window_clip
+# #222 review round 3: a skipped EXEC_START (start past the caller's to_ns)
+# must clear the pid's top_attributable bit, so a later wait event is never
+# credited to an earlier, superseded still-open row. Unreachable through
+# pgwt-server's own loader, hence a direct pgwt_compute_executions test.
+test_executions_attribution
 # A C unit test that tests/Makefile builds but this list never names is
 # compiled, linked and then never run (TST-3). Nothing else checks that.
 test_unit_list_coverage.py

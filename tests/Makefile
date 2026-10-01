@@ -21,6 +21,7 @@ TESTS     = test_wait_event test_cmdline test_spawn test_event_writer test_event
             test_pg13_resolve test_discovery_pie test_discovery_nopie \
             test_replay_fidelity test_durability test_query_text \
             test_golden_fixture test_live_accum test_window_clip \
+            test_executions_attribution \
             gen_test_traces gen_bench_traces test_concurrent_rw cross_validate \
             dump_markers wait_cpu_canary test_wait_cpu_canary
 
@@ -91,6 +92,20 @@ test_window_clip: test_window_clip.c ../src/compute.c \
 # garbage offset" validation guard. Compiles discovery.c directly (the helpers
 # under test are BPF-free; discovery.c only needs libelf). Runs anywhere — no
 # live PostgreSQL, no BPF skeleton.
+# test_executions_attribution: #222 review round 3 item 2 — the per-pid
+# "is the top row the one that just started" bit (compute.c
+# exec_pid_state.top_attributable) must be cleared by an EXEC_START whose
+# timestamp falls past the caller's to_ns, even though that start keeps no
+# row. Unreachable through pgwt-server (its loader stops at ts > to), so it
+# is pinned at the only layer that can observe it: pgwt_compute_executions
+# called directly. Same link set as test_live_accum; stubs
+# pgwt_visit_summaries, compute.c's only foreign symbol. Runs anywhere.
+test_executions_attribution: test_executions_attribution.c ../src/map_reader.c \
+                             ../src/snapshot.c ../src/compute.c \
+                             $(BUILD)/wait_event.o $(BUILD)/spawn.o \
+                             $(BUILD)/cJSON.o
+	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^
+
 test_pg13_resolve: test_pg13_resolve.c ../src/discovery.c ../src/spawn.c \
                    ../src/backend_status_layout.c \
                    $(BUILD)/wait_event.o $(BUILD)/cJSON.o
