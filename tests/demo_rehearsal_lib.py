@@ -325,16 +325,29 @@ def cpu_clamped_ok(cpu_clamped_ms, db_time_ms,
 # Off-CPU* ("CPU (waiting for a core)" -- issue #190's recolour) is ITSELF
 # a residual: a dropped wait class's time flows INTO it, not out of the
 # identity above, so an anomalously large Off-CPU* is the closest thing to
-# a direct under-attribution detector available without new instrumentation
-# (owner note, 2026-09-27): on a box where pgbench clients <= physical
-# cores, the measured run-queue (waiting-for-a-core) share was 4.92
-# percentage points of DB Time on one machine that day. 10% is double
-# that -- one machine's worth of headroom, generous enough not to fire on
-# ordinary run-queue contention, still far under the double-digit-percent
-# size a genuinely dropped wait class would produce (this file's own
-# TIME_MODEL_TOLERANCE_PCT comment). This is a FIRST bound, not a
-# permanent one -- replace with a comparison against the AAS "CPU (waiting
-# for a core)" band integral once that plumbing exists.
+# a direct under-attribution detector available without new instrumentation.
+#
+# CORRECTED, review round 3 (#264): this used to claim the bound was double
+# a "4.92 percentage points of DB Time" run-queue share measured where
+# "pgbench clients <= physical cores". Both clauses were wrong. The 4.92 pp
+# figure is real -- it is the sum of two cells docs/OBSERVER_BIAS.md writes
+# down on the unmerged agent/observer-bias-study branch (run-queue delay
+# while waiting, 2.53 pp, plus run-queue delay while idle/ClientRead,
+# 2.39 pp) -- but it is measured on a SATURATED box (8 clients on 4 vCPUs,
+# the opposite regime from "clients <= cores" this gate actually scopes
+# itself to), it is a percentage of BACKEND WALL-TIME, not DB Time, and
+# NEITHER cell ever flows into Off-CPU*: run-queue delay while already
+# marked waiting is booked under that wait event, not this residual;
+# run-queue delay while idle/ClientRead is outside DB Time entirely. So
+# 10% is not a calibrated 2x margin over a measured, comparable quantity --
+# it is a provisional catastrophic-loss tripwire: it catches a dropped wait
+# class worth >= 10% of DB Time (the demo's own workload has classes well
+# under that, e.g. LWLock:WALWrite ~3.7%, Lock:tuple ~1.5%, that could
+# silently vanish and still pass) and nothing finer. See
+# docs/DEMO_REHEARSAL_CRITERIA.md section 3 for the full derivation. This
+# is a FIRST bound, not a permanent one -- replace with a comparison
+# against the AAS "CPU (waiting for a core)" band integral once that
+# plumbing exists, measured on a clients<=cores box.
 OFFCPU_CAP_PCT = 10.0
 
 

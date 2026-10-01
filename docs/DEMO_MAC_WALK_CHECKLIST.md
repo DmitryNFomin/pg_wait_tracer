@@ -6,8 +6,18 @@ not establish the Mac-side result. A walk against a different tree or tag is
 a different experiment and does not count toward the same sequence.
 
 Use `docs/DEMO_REHEARSAL_CRITERIA.md` for the attribution and attempt rules.
-No numeric time-to-first-paint bound is set here; it must be pre-registered
-separately from the uncontended dry run before counted attempt one.
+
+**No numeric time-to-first-paint bound is set here, and that is deliberate,
+not an open gap.** `docs/DEMO_REHEARSAL_CRITERIA.md` §4 records a PROVISIONAL
+3000 ms bound, but it is scoped to the automated `ttfp_ms` instrumentation on
+the VM's headless Chromium, not to this manual walk — this checklist has no
+stopwatch, so a human cannot reliably record a millisecond figure while also
+watching for console errors and blank panels across eleven tabs. This walk
+keeps judging paint the way the table below already does: did it paint
+without a visible spinner, yes or no. If a numeric Mac-side bound is ever
+wanted, it needs its own instrumented harness (timed from a real click, on
+real Chrome) — pre-registered separately, before counted attempt one, same as
+every other number in this sequence; it does not yet exist.
 
 ## 1. Pre-flight
 
