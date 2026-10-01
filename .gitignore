@@ -38,6 +38,7 @@ tests/test_durability
 tests/test_query_text
 tests/test_golden_fixture
 tests/test_window_clip
+tests/test_top_queries_percentile
 tests/map_reader_core.o
 tests/__pycache__/
 

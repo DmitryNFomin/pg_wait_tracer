@@ -10,6 +10,7 @@
 #include "wait_event.h"
 #include "cmdline.h"
 #include "cJSON.h"
+#include "percentile.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -2945,17 +2946,18 @@ static void handle_top_queries(struct pgwt_server *srv, struct pgwt_request *req
                         lc->exec_total_ms / lc->exec_count);
                     int n = lc->exec_nsamples;
                     if (lc->exec_times && n > 1) {
-                        for (int a = 0; a < n-1; a++)
-                            for (int b = a+1; b < n; b++)
-                                if (lc->exec_times[a] > lc->exec_times[b]) {
-                                    double tmp = lc->exec_times[a];
-                                    lc->exec_times[a] = lc->exec_times[b];
-                                    lc->exec_times[b] = tmp;
-                                }
+                        /* #265: was an O(n^2) exchange sort; the samples are
+                         * capped at 10,000 and the demo workload sits at the
+                         * cap, which cost 2338 ms per top_queries response.
+                         * qsort over plain doubles is bit-identical here --
+                         * no satellite data, and `ms >= 0` at collection
+                         * keeps NaN out, so the ascending permutation is
+                         * unique. Index expressions unchanged. */
+                        pgwt_sort_doubles_asc(lc->exec_times, n);
                         cJSON_AddNumberToObject(r, "p95_exec_ms",
-                            lc->exec_times[n > 20 ? (int)((n-1)*0.95) : n-1]);
+                            pgwt_percentile_at(lc->exec_times, n, 0.95, 20));
                         cJSON_AddNumberToObject(r, "p99_exec_ms",
-                            lc->exec_times[n > 100 ? (int)((n-1)*0.99) : n-1]);
+                            pgwt_percentile_at(lc->exec_times, n, 0.99, 100));
                     }
                 }
                 if (lc->plan_count > 0) {
@@ -2963,17 +2965,12 @@ static void handle_top_queries(struct pgwt_server *srv, struct pgwt_request *req
                         lc->plan_total_ms / lc->plan_count);
                     int n = lc->plan_nsamples;
                     if (lc->plan_times && n > 1) {
-                        for (int a = 0; a < n-1; a++)
-                            for (int b = a+1; b < n; b++)
-                                if (lc->plan_times[a] > lc->plan_times[b]) {
-                                    double tmp = lc->plan_times[a];
-                                    lc->plan_times[a] = lc->plan_times[b];
-                                    lc->plan_times[b] = tmp;
-                                }
+                        /* #265: same exchange sort, same fix. */
+                        pgwt_sort_doubles_asc(lc->plan_times, n);
                         cJSON_AddNumberToObject(r, "p95_plan_ms",
-                            lc->plan_times[n > 20 ? (int)((n-1)*0.95) : n-1]);
+                            pgwt_percentile_at(lc->plan_times, n, 0.95, 20));
                         cJSON_AddNumberToObject(r, "p99_plan_ms",
-                            lc->plan_times[n > 100 ? (int)((n-1)*0.99) : n-1]);
+                            pgwt_percentile_at(lc->plan_times, n, 0.99, 100));
                     }
                 }
             }
