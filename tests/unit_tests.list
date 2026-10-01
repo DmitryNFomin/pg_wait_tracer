@@ -37,6 +37,12 @@ test_window_clip
 # credited to an earlier, superseded still-open row. Unreachable through
 # pgwt-server's own loader, hence a direct pgwt_compute_executions test.
 test_executions_attribution
+# #265: handle_top_queries' p95/p99 exchange sort (O(n^2), 10,000-sample
+# arrays, 2338 ms per response) became qsort. The safety argument is that the
+# output is bit-identical, so this is a differential against a verbatim copy
+# of the deleted sort, plus the (int)(a-b) comparator trap and a mutation
+# probe proving the differential can go red.
+test_top_queries_percentile
 # A C unit test that tests/Makefile builds but this list never names is
 # compiled, linked and then never run (TST-3). Nothing else checks that.
 test_unit_list_coverage.py
