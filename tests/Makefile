@@ -20,7 +20,7 @@ TESTS     = test_wait_event test_cmdline test_spawn test_event_writer test_event
             test_pgss_resolver \
             test_pg13_resolve test_discovery_pie test_discovery_nopie \
             test_replay_fidelity test_durability test_query_text \
-            test_golden_fixture test_live_accum \
+            test_golden_fixture test_live_accum test_window_clip \
             gen_test_traces gen_bench_traces test_concurrent_rw cross_validate \
             dump_markers wait_cpu_canary test_wait_cpu_canary
 
@@ -75,6 +75,17 @@ test_live_accum: test_live_accum.c ../src/map_reader.c ../src/snapshot.c \
                  ../src/compute.c \
                  $(BUILD)/wait_event.o $(BUILD)/spawn.o $(BUILD)/cJSON.o
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^
+
+# test_window_clip: windowed aggregates must count only the part of each
+# event that lies inside the requested window. The raw loader selects on END
+# timestamp, so a wait already running when the window opened arrives whole;
+# pgwt_compute_aas clipped it, the Overview/Top-N summers did not (+1.28% on a
+# 60 s rehearsal window, unbounded under a lock pileup). Same build shape as
+# test_live_accum: compute.c compiled directly with -DPGWT_SERVER, its only
+# foreign symbol (pgwt_visit_summaries) stubbed in the test. Runs anywhere.
+test_window_clip: test_window_clip.c ../src/compute.c \
+                  $(BUILD)/wait_event.o $(BUILD)/spawn.o $(BUILD)/cJSON.o
+	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -lm
 
 # test_pg13_resolve: PG13 MyProc-path offset table + the runtime "refuse on
 # garbage offset" validation guard. Compiles discovery.c directly (the helpers

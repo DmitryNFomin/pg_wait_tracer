@@ -28,6 +28,13 @@ test_durability
 test_query_text
 test_golden_fixture
 test_live_accum
+# Windowed aggregates (time model / top events / sessions / queries) must
+# count only each event's in-window part, exactly as the AAS chart does --
+# the cross-tab disagreement that failed a 35-minute rehearsal at 1.28%.
+test_window_clip
+# A C unit test that tests/Makefile builds but this list never names is
+# compiled, linked and then never run (TST-3). Nothing else checks that.
+test_unit_list_coverage.py
 # #202: the offline wait-CPU canary's decision logic (CPU recorded inside a
 # pure sleep, cpu_ns > duration_ns) and every way it could be satisfied
 # without looking at anything.

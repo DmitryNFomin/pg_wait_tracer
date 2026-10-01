@@ -258,8 +258,19 @@ struct pgwt_tm_result {
     double wait_gap_cpu_ms;
 };
 
+
+/* Window clipping (issue: windowed aggregates counted straddlers in full).
+ * `from_ns`/`to_ns` bound the REQUESTED window; each event contributes only
+ * min(end, to) - max(start, from), exactly as pgwt_compute_aas already does,
+ * so Overview/Top-N and the AAS chart answer the same question over the same
+ * events. 0 means "unbounded on that side": a whole-capture request (the
+ * server forwards req->from_ns / req->to_ns verbatim, both 0 when absent)
+ * therefore gets bit-identical pre-fix numbers. Latency columns (avg/max/
+ * percentiles) are deliberately NOT clipped — a wait's latency is a property
+ * of the wait, not of the window; only the time-in-window columns are. */
 void pgwt_compute_time_model(const struct pgwt_trace_event *events, int count,
-                             const struct pgwt_filter *f, double wall_ms,
+                             const struct pgwt_filter *f,
+                             uint64_t from_ns, uint64_t to_ns, double wall_ms,
                              struct pgwt_tm_result *out);
 
 /* ── Top Events ───────────────────────────────────────────── */
@@ -306,7 +317,8 @@ struct pgwt_events_result {
 };
 
 void pgwt_compute_top_events(const struct pgwt_trace_event *events, int count,
-                             const struct pgwt_filter *f, double wall_ms,
+                             const struct pgwt_filter *f,
+                             uint64_t from_ns, uint64_t to_ns, double wall_ms,
                              struct pgwt_events_result *out);
 
 /* ── Top Sessions ─────────────────────────────────────────── */
@@ -326,7 +338,8 @@ struct pgwt_sessions_result {
 };
 
 void pgwt_compute_top_sessions(const struct pgwt_trace_event *events, int count,
-                               const struct pgwt_filter *f, double wall_ms,
+                               const struct pgwt_filter *f,
+                               uint64_t from_ns, uint64_t to_ns, double wall_ms,
                                struct pgwt_sessions_result *out);
 
 /* ── Top Queries ──────────────────────────────────────────── */
@@ -362,7 +375,8 @@ struct pgwt_queries_result {
 };
 
 void pgwt_compute_top_queries(const struct pgwt_trace_event *events, int count,
-                              const struct pgwt_filter *f, double wall_ms,
+                              const struct pgwt_filter *f,
+                              uint64_t from_ns, uint64_t to_ns, double wall_ms,
                               struct pgwt_queries_result *out);
 
 /* ── Heatmap (latency distribution over time) ─────────────── */

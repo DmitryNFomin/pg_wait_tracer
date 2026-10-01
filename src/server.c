@@ -2505,7 +2505,8 @@ static void handle_time_model(struct pgwt_server *srv, struct pgwt_request *req)
             server_load_events_fi(srv, req->from_ns, req->to_ns,
                                   req->filter.pid, &count, &linfo);
         if (reject_overload(srv, req, events, &linfo)) return;
-        pgwt_compute_time_model(events, count, &req->filter, wall_ms, &tm);
+        pgwt_compute_time_model(events, count, &req->filter,
+                                req->from_ns, req->to_ns, wall_ms, &tm);
         free(events);
     }
 
@@ -2584,7 +2585,8 @@ static void handle_top_events(struct pgwt_server *srv, struct pgwt_request *req)
             server_load_events_fi(srv, req->from_ns, req->to_ns,
                                   req->filter.pid, &count, &linfo);
         if (reject_overload(srv, req, events, &linfo)) return;
-        pgwt_compute_top_events(events, count, &req->filter, wall_ms, &res);
+        pgwt_compute_top_events(events, count, &req->filter,
+                                req->from_ns, req->to_ns, wall_ms, &res);
         free(events);
     }
 
@@ -2676,7 +2678,8 @@ static void handle_top_sessions(struct pgwt_server *srv, struct pgwt_request *re
             server_load_events_fi(srv, req->from_ns, req->to_ns,
                                   req->filter.pid, &count, &linfo);
         if (reject_overload(srv, req, events, &linfo)) return;
-        pgwt_compute_top_sessions(events, count, &req->filter, wall_ms, &res);
+        pgwt_compute_top_sessions(events, count, &req->filter,
+                                  req->from_ns, req->to_ns, wall_ms, &res);
         free(events);
     }
 
@@ -2741,7 +2744,8 @@ static void handle_top_queries(struct pgwt_server *srv, struct pgwt_request *req
                                                  &req->filter, wall_ms, &res);
         from_summaries = 1;
     } else {
-        pgwt_compute_top_queries(all_events, ecount, &req->filter, wall_ms, &res);
+        pgwt_compute_top_queries(all_events, ecount, &req->filter,
+                                 req->from_ns, req->to_ns, wall_ms, &res);
     }
 
     /* Compute per-query exec/plan stats from markers (same events, no second load) */
@@ -4455,7 +4459,8 @@ static void dump_summary(struct pgwt_server *srv)
 
     /* Time Model */
     struct pgwt_tm_result tm;
-    pgwt_compute_time_model(events, count, &filt, wall_ms, &tm);
+    /* dump_summary is whole-capture: 0/0 = unbounded, no clipping. */
+    pgwt_compute_time_model(events, count, &filt, 0, 0, wall_ms, &tm);
 
     printf("\n  === Time Model ===\n\n");
     printf("  AAS: %.2f    DB Time: %.1f ms    Idle: %.1f ms\n\n",
@@ -4474,7 +4479,7 @@ static void dump_summary(struct pgwt_server *srv)
 
     /* Top Events */
     struct pgwt_events_result ev;
-    pgwt_compute_top_events(events, count, &filt, wall_ms, &ev);
+    pgwt_compute_top_events(events, count, &filt, 0, 0, wall_ms, &ev);
 
     printf("\n  === Top Events ===\n\n");
     printf("  %-28s %10s %12s %10s %8s\n", "Wait Event", "Waits", "Total (ms)", "Avg (us)", "% DB");
@@ -4501,7 +4506,7 @@ static void dump_summary(struct pgwt_server *srv)
 
     /* Top Sessions */
     struct pgwt_sessions_result sess;
-    pgwt_compute_top_sessions(events, count, &filt, wall_ms, &sess);
+    pgwt_compute_top_sessions(events, count, &filt, 0, 0, wall_ms, &sess);
 
     printf("\n  === Top Sessions ===\n\n");
     printf("  %7s %12s %7s %7s  %-20s\n",
@@ -4518,7 +4523,7 @@ static void dump_summary(struct pgwt_server *srv)
 
     /* Top Queries */
     struct pgwt_queries_result qry;
-    pgwt_compute_top_queries(events, count, &filt, wall_ms, &qry);
+    pgwt_compute_top_queries(events, count, &filt, 0, 0, wall_ms, &qry);
 
     printf("\n  === Top Queries ===\n\n");
     printf("  %20s %10s %12s %8s  %-20s\n",
