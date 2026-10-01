@@ -513,15 +513,34 @@ def _navigate_to_tab(page, tab_id, timeout_s):
     """Switches to tab_id, driving the same clicks a user would. Timeline has
     no standalone entry point with data (a bare tab click shows the "select a
     session" prompt) -- it is reached by drilling into a session row, exactly
-    like tests/test_web_ui.py's test_timeline_tab / test_sessions_table."""
+    like tests/test_web_ui.py's test_timeline_tab / test_sessions_table.
+
+    Returns ttfp_ms (issue #245, time-to-first-paint): elapsed milliseconds
+    from THIS navigation's own landing click -- the drill-down row click for
+    Timeline, the bare tab click for every other tab -- to the ViewManager
+    mount chokepoint's first FRESH mount of tab_id at/after that click (the
+    same chokepoint _wait_for_mount_at_or_after anchors the blink sweep to).
+    For Timeline, nav_start_ms is captured AFTER the Sessions-tab bare click
+    has already rendered its own table (page.wait_for_selector above) and
+    the clickable row has been located, immediately before row.click() --
+    so the timer spans only the drill-down that actually reaches Timeline's
+    own data, never the earlier Sessions-tab bare click (issue #242's
+    earlier 30s Timeline finding measured exactly that "select a session"
+    prompt; issue #245 retracted it and requires this measurement instead).
+
+    Measured and consumed BEFORE the live-resume click below: a paused-live
+    tab's #live-btn click triggers a SECOND, LATER mount (a plain refresh),
+    which must never be counted as this navigation's own first paint."""
     if tab_id == "timeline":
         page.click(".tab[data-tab='sessions']")
         page.wait_for_selector("#table-container table tbody tr", timeout=timeout_s * 1000)
         row = page.query_selector("#table-container table tbody tr.clickable")
         if row is None:
             raise SmokeFailure("no clickable session row to drill into for Timeline")
+        nav_start_ms = page.evaluate("Date.now()")
         row.click()
     else:
+        nav_start_ms = page.evaluate("Date.now()")
         page.click(f".tab[data-tab='{tab_id}']")
 
     try:
@@ -529,6 +548,9 @@ def _navigate_to_tab(page, tab_id, timeout_s):
     except PWTimeoutError:
         raise SmokeFailure(
             f"panel did not render ({_READY_SELECTOR[tab_id]!r}) within {timeout_s}s")
+
+    mount = _wait_for_mount_at_or_after(page, tab_id, nav_start_ms, timeout_s, min_seq=None)
+    ttfp_ms = mount["at"] - nav_start_ms
 
     if not page.evaluate(_LIVE_ACTIVE_JS):
         live_btn = page.query_selector("#live-btn")
@@ -538,6 +560,8 @@ def _navigate_to_tab(page, tab_id, timeout_s):
         page.wait_for_timeout(500)  # let the resumed refresh settle before ticks count
         if not page.evaluate(_LIVE_ACTIVE_JS):
             raise SmokeFailure("clicking #live-btn did not resume live mode")
+
+    return ttfp_ms
 
 
 def _wait_for_tick(page, target_count, timeout_s):
@@ -967,6 +991,13 @@ def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
     pgwt_errors = []
     tick_paths = []
     video_path = None
+    # None until _navigate_to_tab's own return sets it below -- if a
+    # SmokeFailure fires before then (or navigation itself fails), the
+    # except branch below passes this unmeasured None through rather than
+    # raising NameError. If navigation SUCCEEDS but a LATER tick-loop step
+    # fails, this already holds the real measured value, and
+    # build_failed_tab_result carries it through instead of discarding it.
+    ttfp_ms = None
     try:
         page.goto(url)
         actual = page.evaluate(
@@ -993,7 +1024,7 @@ def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
             page.wait_for_timeout(200)
 
         page.evaluate(TICK_HOOK_JS)
-        _navigate_to_tab(page, tab_id, first_data_timeout)
+        ttfp_ms = _navigate_to_tab(page, tab_id, first_data_timeout)
 
         leak_before, leak_before_settle_s = _settled_leak_probe(page)
 
@@ -1265,19 +1296,22 @@ def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
             blink_pair_offsets_ms=blink_pair_offsets_ms,
             blink_sweep_ticks=blink_sweep_ticks,
             blink_not_measured=blink_not_measured,
-            pre_mount_diagnostics=pre_mount_diagnostics)
+            pre_mount_diagnostics=pre_mount_diagnostics,
+            ttfp_ms=ttfp_ms)
         if self_test_result is not None:
             result["self_test"] = self_test_result
     except SmokeFailure as e:
         print(f"  FAIL [{tab_id}]: {e}", file=sys.stderr)
         result = lib.build_failed_tab_result(tab_id, str(e),
                                              ticks_observed=len(tick_paths),
-                                             pgwt_console_errors=pgwt_errors)
+                                             pgwt_console_errors=pgwt_errors,
+                                             ttfp_ms=ttfp_ms)
     except Exception:
         traceback.print_exc()
         result = lib.build_failed_tab_result(
             tab_id, "unhandled exception (see stderr traceback)",
-            ticks_observed=len(tick_paths), pgwt_console_errors=pgwt_errors)
+            ticks_observed=len(tick_paths), pgwt_console_errors=pgwt_errors,
+            ttfp_ms=ttfp_ms)
     finally:
         video = page.video
         context.close()

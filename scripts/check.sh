@@ -133,6 +133,15 @@ if [[ $FAST -eq 0 ]]; then
     run python3 tests/test_web_ui_chaos.py
     step "overlay chip label alignment at DSF 1/2 (issue #213)"
     run python3 tests/test_chip_label_alignment.py
+
+    # issue #245 (TTFP): _navigate_to_tab's ttfp_ms anchor and its wiring
+    # into run_tab's build_tab_result call -- imports ui_live_smoke.py,
+    # which hard-requires Playwright, so this runs here (already guarded
+    # above) rather than via tests/unit_tests.list (that list's CI job
+    # installs no Playwright on purpose -- see
+    # test_demo_workload_coverage.py's test_import_needs_no_playwright).
+    step "ui_live_smoke navigation TTFP anchor (issue #245)"
+    run python3 tests/test_ui_live_smoke_nav.py
 fi
 
 if [[ $fail -ne 0 ]]; then
