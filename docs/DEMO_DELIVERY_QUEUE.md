@@ -27,13 +27,15 @@ owner can do it · `DONE`
 
 | # | Item | Status | Next action | Depends on | Stop condition |
 |---|---|---|---|---|---|
-| 1.1 | **#252** blink sweep cannot measure Sessions/Events/Queries at demo length | DONE (merged 44812c9, #255) — follow-on mis-specification in its own `capture_ms` gate fixed by #259 (bb2ad84) | — | — | **Corrected, consistency pass (this commit):** the original stop condition here named a `capture_ms` bound and "≥5/6 measured" that match neither the merged code nor each other. As shipped: `<tab>.capture_budget.ok` is always `null`/reporting-only (`CAPTURE_MS_BOUND_MS`/`capture_budget_ok`, `tests/ui_live_smoke_lib.py`, demoted by #259 — a slow-but-correctly-sized capture is not what the gate protects against); the actual per-tick gates are `<tab>.frame_dims.ok` (±`FRAME_DIMS_TOLERANCE_PX` = 1.0 px) and `<tab>.frame_spacing.ok` (≤`FRAME_SPACING_DRIFT_BOUND_MS` = 150 ms); the measured-fraction gate is `<tab>.no_blink.measured.ok`, read from `measured_count/attempted_count >= MIN_MEASURED_FRACTION` where **`MIN_MEASURED_FRACTION = 0.5`** (`tests/ui_live_smoke_lib.py:77`) — i.e. **3/6**, not the 5/6 this row previously demanded. A document must not promise a threshold the code does not enforce; this row now names the fields and constants actually read |
-| 1.2 | **#222** Waterfall slowest-first + orphan-row fix | READY (confirmed open, 2026-10-01) | gate cycle on current tree (fix + red-case tests already complete) | — | check stamp matches tree-hash; box-check green; gallery justified |
+| 1.1 | **#252** blink sweep cannot measure Sessions/Events/Queries at demo length | DONE (merged 44812c9, #255) — follow-on mis-specification in its own `capture_ms` gate fixed by #259 (bb2ad84) | — | — | **Corrected, consistency pass (this commit):** the original stop condition here named a `capture_ms` bound and "≥5/6 measured" that match neither the merged code nor each other. As shipped: `<tab>.capture_budget.ok` is still computed as `true`/`false` per tick against `CAPTURE_MS_BOUND_MS` = 800 ms (`capture_budget_ok`, `tests/ui_live_smoke_lib.py`) — **corrected, review round 2**: an earlier version of this row wrongly said it is always `null`. It is `null` only on a tab that never got far enough to be measured at all (`build_failed_tab_result`'s default); on a normally-completing tab it is a real, often-`false` value — e.g. a 2026-10-01 live run on `agent/ttfp-timing-field` (`tests/results/ui_live/summary.json` in that worktree) has `sessions.capture_budget = {"ok": false, ...}` with six offending ticks up to 1248.9 ms, alongside four other `ok: false` tabs. The field is reporting-only because `capture_budget_ok`'s result is demoted out of `build_tab_result`'s `ok` by #259 (a slow-but-correctly-sized capture is not what the replacement gates protect against), not because it is never computed; the actual per-tick gates are `<tab>.frame_dims.ok` (±`FRAME_DIMS_TOLERANCE_PX` = 1.0 px) and `<tab>.frame_spacing.ok` (≤`FRAME_SPACING_DRIFT_BOUND_MS` = 150 ms); the measured-fraction gate is `<tab>.no_blink.measured.ok`, read from `measured_count/attempted_count >= MIN_MEASURED_FRACTION` where **`MIN_MEASURED_FRACTION = 0.5`** (`tests/ui_live_smoke_lib.py:77`) — i.e. **3/6**, not the 5/6 this row previously demanded. A document must not promise a threshold the code does not enforce; this row now names the fields and constants actually read |
+| 1.2 | **#222** Waterfall slowest-first + orphan-row fix | **DONE** (corrected, review round 2 — merged as #262/`8c1eb93`, confirmed via `gh issue view 222` now CLOSED; was wrongly re-confirmed READY earlier this round before the branch's rebase picked it up) | — | — | check stamp matches tree-hash; box-check green; gallery justified |
 | 1.3 | **#224** committed live injected-blink proof | DONE — shipped inside #252/#255 as `--inject-blink-ms`, off by default | — | — | self-test section of `tests/ui_live_smoke.py` injects a synthetic blink and asserts the gate catches it (`SELF-TEST PASS`, e.g. `tests/results/box-check-ubuntu-20260930-150337.log`); verified it still runs and still catches the injected blink |
 
-**1.1 is DONE** (corrected, this commit — was previously marked the hard
-blocker here; merged as #255, follow-on fixed by #259). **1.2 (#222) is now
-the remaining item in this section.**
+**Section 1 is now entirely DONE**: 1.1 (merged as #255, follow-on fixed by
+#259), 1.2 (merged as #262), and 1.3 (shipped inside #255) — corrected, this
+commit; an earlier pass through this review round left 1.2 at READY and a
+now-stale note claiming it was "the remaining item" after rebasing onto
+`origin/master` picked up its merge.
 
 ## 2. Criteria that must be pre-registered BEFORE counted attempt one
 
@@ -42,18 +44,18 @@ one reviewed criteria commit, and that commit must precede the tag.
 
 | # | Item | Status | Next action | Depends on |
 |---|---|---|---|---|
-| 2.1 | Time-to-first-paint bound | DONE (this commit) — **3000 ms, global**, recorded in `docs/DEMO_REHEARSAL_CRITERIA.md` §4 with derivation; sourced from `agent/ttfp-timing-field`/PR #257 (one navigation per tab, not yet the ≥3-navigations-each this row originally asked for — a reproducibility check against a second real run found a >2x per-tab swing, noted in the criteria doc, and the bound's margin was set wide enough to absorb it) | — | — |
-| 2.2 | AAS cross-tab agreement (bucket-weighted) | READY | compute offline from a run's `aas` + `time_model` responses over the identical window | — |
-| 2.3 | Overhead envelope, n=3 paired full-mode A/B | BLOCKED → 4.1 | the rehearsal runs only the tracer-on arm, so this needs its own paired runs on the demo box | 4.1 |
+| 2.1 | Time-to-first-paint bound | **PARTIAL, not DONE** (corrected, review round 2 — a prior version of this row wrongly marked it DONE) | a **PROVISIONAL capture-side-only** 3000 ms global bound is recorded in `docs/DEMO_REHEARSAL_CRITERIA.md` §4, derived from three real-box runs (`agent/ttfp-timing-field`, merged as `fa20067`/#257) — but this row's own requirement is **≥3 navigations per tab on the demo configuration**, and what exists is 1-2 navigations per tab in **headless Chromium on a VM**, not real Chrome on the Mac. Still needed: ≥3 navigations/tab on real Chrome on the Mac. Across the three VM runs the worst tab rose 533→541→1211 ms (+127% run B→C alone), which also cut the bound's margin from the originally-claimed >5.5x to **≈2.5x** — both corrected in the criteria doc | — |
+| 2.2 | AAS cross-tab agreement (bucket-weighted) | **DONE** (corrected, review round 2 — was stale READY; #254/`c69c84d` already shipped and wired this in) | `bucket_weighted_aas_ok` runs automatically inside `demo_rehearsal.py`'s `extra_checks["cross_tab_aas_agreement"]` — nothing left to dispatch | — |
+| 2.3 | Overhead envelope, n=3 paired full-mode A/B | BLOCKED → 4.1 | the rehearsal runs only the tracer-on arm, so this needs its own paired runs on the demo box. Owner decision recorded separately (criteria §6): current band is accepted as not-a-regression, which does not substitute for this specific demo-workload A/B | 4.1 |
 | 2.4 | §2 AAS floor — still PROVISIONAL | BLOCKED → 3.1 | set from the first clean uncontended run | 3.1 |
-| 2.5 | §3 per-class wait CPU | READY | settle offline: max `cpu_ns` on a `Timeout:PgSleep` event via `tests/cross_validate.c` | — |
-| 2.6 | §3 Off-CPU ≤10% placeholder | READY | commit the artifact from `agent/observer-bias-study` or reword the row | — |
+| 2.5 | §3 per-class wait CPU | BLOCKED → box access | settle offline: max `cpu_ns` on a `Timeout:PgSleep` event via `tests/cross_validate.c`, over a **real full-mode gate-box trace** — not checked-in golden fixtures (`tests/fixtures/golden/rev2\|rev3`), which stamp the legacy `cpu_ns` UNKNOWN sentinel and cannot answer this. No `$PGWT_BOX` was available to this commit's sandbox, so this is still open, not settled | — |
+| 2.6 | §3 Off-CPU ≤10% placeholder | **BLOCKED → #115**, not READY (corrected, review round 2) | **Checked this commit**: the cited "4.92 pp" does not appear anywhere on `agent/observer-bias-study` or its four predecessor branches (`git grep -F "4.92"` across all five, no match) — this is not just an uncommitted artifact, the figure itself could not be traced. Design question for the owner: land #115 so the artifact is committed and checkable, or replace the 10% bound with a traceable number | #115 |
 
 ## 3. Dry runs (uncounted)
 
 | # | Item | Status | Depends on |
 |---|---|---|---|
-| 3.1 | Uncontended dry run on the demo candidate tree, demo topology | BLOCKED → 1.2 (1.1 is now DONE) | produces 2.4's number (2.1 is now DONE — see above) |
+| 3.1 | Uncontended dry run on the demo candidate tree, demo topology | READY (section 1 is now entirely DONE — see above) | produces 2.4's number; also one of the real-Chrome-on-Mac navigations 2.1 still needs (2.1 is PARTIAL, not DONE — see above) |
 | 3.2 | Throwaway Mac walk against the checklist, to prove it is walkable | READY | needs a quiet Mac, not the tag |
 
 ## 4. Owner-only
