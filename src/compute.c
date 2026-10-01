@@ -3372,6 +3372,24 @@ void pgwt_compute_executions(const struct pgwt_trace_event *events, int count,
                     out->failed = 1;
                     break;
                 }
+            } else {
+                /* #222 review round 3, item 2: this pid HAS started a new
+                 * statement; we simply are not keeping a row for it (its
+                 * start is past the caller's window). The previous row
+                 * must stop being attributable all the same -- otherwise
+                 * top_attributable keeps whatever the last push left it
+                 * at, and a later wait event is credited to an earlier,
+                 * still-open row that the new statement has in fact
+                 * superseded. Master cleared active_row unconditionally
+                 * here for the same reason. Unreachable through the
+                 * server today (server_load_events_fi stops at
+                 * `ts > sample_to_m`, so no event after this one is even
+                 * loaded, and interval_overlaps would gate it anyway) --
+                 * this makes it unreachable BY CONSTRUCTION rather than
+                 * by caller discipline, and pgwt_compute_executions is a
+                 * public entry point that does not get to assume its
+                 * caller pre-filtered. */
+                st->top_attributable = 0;
             }
             /* A completed plan belongs to this next execution, including a
              * start outside the caller's output window. Never reuse it. */
