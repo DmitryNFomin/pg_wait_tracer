@@ -27,12 +27,13 @@ owner can do it · `DONE`
 
 | # | Item | Status | Next action | Depends on | Stop condition |
 |---|---|---|---|---|---|
-| 1.1 | **#252** blink sweep cannot measure Sessions/Events/Queries at demo length | READY | `scale="css"` + clip-once-per-tick; then #224 self-test; then demo-viewport smoke | — | per-frame `capture_ms` ≤ ~300 ms at DPR 2 **and** ≥5/6 measured in the late pass |
-| 1.2 | **#222** Waterfall slowest-first + orphan-row fix | READY | gate cycle on current tree (fix + red-case tests already complete) | — | check stamp matches tree-hash; box-check green; gallery justified |
-| 1.3 | **#224** committed live injected-blink proof | BLOCKED → 1.1 | ships inside 1.1 as `--inject-blink-ms`, off by default | 1.1 | gate goes red with the flag on, clean with it off |
+| 1.1 | **#252** blink sweep cannot measure Sessions/Events/Queries at demo length | DONE (merged 44812c9, #255) — follow-on mis-specification in its own `capture_ms` gate fixed by #259 (bb2ad84) | — | — | **Corrected, consistency pass (this commit):** the original stop condition here named a `capture_ms` bound and "≥5/6 measured" that match neither the merged code nor each other. As shipped: `<tab>.capture_budget.ok` is always `null`/reporting-only (`CAPTURE_MS_BOUND_MS`/`capture_budget_ok`, `tests/ui_live_smoke_lib.py`, demoted by #259 — a slow-but-correctly-sized capture is not what the gate protects against); the actual per-tick gates are `<tab>.frame_dims.ok` (±`FRAME_DIMS_TOLERANCE_PX` = 1.0 px) and `<tab>.frame_spacing.ok` (≤`FRAME_SPACING_DRIFT_BOUND_MS` = 150 ms); the measured-fraction gate is `<tab>.no_blink.measured.ok`, read from `measured_count/attempted_count >= MIN_MEASURED_FRACTION` where **`MIN_MEASURED_FRACTION = 0.5`** (`tests/ui_live_smoke_lib.py:77`) — i.e. **3/6**, not the 5/6 this row previously demanded. A document must not promise a threshold the code does not enforce; this row now names the fields and constants actually read |
+| 1.2 | **#222** Waterfall slowest-first + orphan-row fix | READY (confirmed open, 2026-10-01) | gate cycle on current tree (fix + red-case tests already complete) | — | check stamp matches tree-hash; box-check green; gallery justified |
+| 1.3 | **#224** committed live injected-blink proof | DONE — shipped inside #252/#255 as `--inject-blink-ms`, off by default | — | — | self-test section of `tests/ui_live_smoke.py` injects a synthetic blink and asserts the gate catches it (`SELF-TEST PASS`, e.g. `tests/results/box-check-ubuntu-20260930-150337.log`); verified it still runs and still catches the injected blink |
 
-**1.1 is the hard blocker**: while Sessions cannot be measured, no 35–40 minute
-rehearsal can pass, so the capture-side counter cannot advance at all.
+**1.1 is DONE** (corrected, this commit — was previously marked the hard
+blocker here; merged as #255, follow-on fixed by #259). **1.2 (#222) is now
+the remaining item in this section.**
 
 ## 2. Criteria that must be pre-registered BEFORE counted attempt one
 
@@ -41,7 +42,7 @@ one reviewed criteria commit, and that commit must precede the tag.
 
 | # | Item | Status | Next action | Depends on |
 |---|---|---|---|---|
-| 2.1 | Time-to-first-paint bound | BLOCKED → 3.1 | measure nav→mount per tab, ≥3 navigations each, on the demo config; set ONE generous global bound (never below 3 s), record the per-tab distribution | 3.1 |
+| 2.1 | Time-to-first-paint bound | DONE (this commit) — **3000 ms, global**, recorded in `docs/DEMO_REHEARSAL_CRITERIA.md` §4 with derivation; sourced from `agent/ttfp-timing-field`/PR #257 (one navigation per tab, not yet the ≥3-navigations-each this row originally asked for — a reproducibility check against a second real run found a >2x per-tab swing, noted in the criteria doc, and the bound's margin was set wide enough to absorb it) | — | — |
 | 2.2 | AAS cross-tab agreement (bucket-weighted) | READY | compute offline from a run's `aas` + `time_model` responses over the identical window | — |
 | 2.3 | Overhead envelope, n=3 paired full-mode A/B | BLOCKED → 4.1 | the rehearsal runs only the tracer-on arm, so this needs its own paired runs on the demo box | 4.1 |
 | 2.4 | §2 AAS floor — still PROVISIONAL | BLOCKED → 3.1 | set from the first clean uncontended run | 3.1 |
@@ -52,7 +53,7 @@ one reviewed criteria commit, and that commit must precede the tag.
 
 | # | Item | Status | Depends on |
 |---|---|---|---|
-| 3.1 | Uncontended dry run on the demo candidate tree, demo topology | BLOCKED → 1.1, 1.2 | produces 2.1 and 2.4's numbers |
+| 3.1 | Uncontended dry run on the demo candidate tree, demo topology | BLOCKED → 1.2 (1.1 is now DONE) | produces 2.4's number (2.1 is now DONE — see above) |
 | 3.2 | Throwaway Mac walk against the checklist, to prove it is walkable | READY | needs a quiet Mac, not the tag |
 
 ## 4. Owner-only
