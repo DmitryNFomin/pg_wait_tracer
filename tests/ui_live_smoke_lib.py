@@ -997,7 +997,8 @@ def build_tab_result(tab_id, rendered_ok, rendered_detail, ticks_observed,
                       blink_not_measured=(),
                       min_measured_fraction=MIN_MEASURED_FRACTION,
                       pre_mount_diagnostics=(),
-                      capture_ms_bound_ms=CAPTURE_MS_BOUND_MS):
+                      capture_ms_bound_ms=CAPTURE_MS_BOUND_MS,
+                      ttfp_ms=None):
     """Assembles one tab's verdict. Pure: every input is already-collected
     data, no page access.
 
@@ -1068,7 +1069,26 @@ def build_tab_result(tab_id, rendered_ok, rendered_detail, ticks_observed,
     invisible as long as it still fits inside one live tick -- the former
     catches the regression's cause (decoded frame size vs requested clip)
     directly, the latter catches its effect on the sweep's own sampling
-    schedule."""
+    schedule.
+
+    ttfp_ms (issue #245, time-to-first-paint): elapsed milliseconds from
+    THIS navigation's own landing click (ui_live_smoke._navigate_to_tab's
+    return value) to the ViewManager mount chokepoint's first FRESH mount
+    of this tab at/after that click -- one raw measurement for the ONE
+    navigation this tab result represents, never averaged or reduced here.
+    A caller that runs multiple navigations to the same tab (e.g.
+    demo_rehearsal.py's early/middle/late passes) gets one build_tab_result
+    call, and therefore one ttfp_ms, per navigation -- the per-tab
+    distribution lives across those separate results, not inside this
+    function. None when not measured (build_failed_tab_result, or an older
+    caller that hasn't been updated) -- reporting only, never read here to
+    compute `ok` (unlike dims_ok/spacing_ok just below, which DO gate `ok`
+    -- ttfp_ms is a different field with a different contract and must
+    never follow them in there, the same way it was never allowed to
+    follow capture_ok in there before this issue demoted capture_ok out),
+    so a missing/None value never silently passes or fails the tab; it is
+    a measurement, not a gate (the issue is explicit that this branch adds
+    measurement only)."""
     clean_ok = len(console_errors) == 0
     blink_ok = no_blink_ok(blink_ratio, blink_threshold)
     leak_ok = leak_probe_ok(leak_before) and leak_probe_ok(leak_after)
@@ -1116,18 +1136,24 @@ def build_tab_result(tab_id, rendered_ok, rendered_detail, ticks_observed,
                                  "after": leak_after_settle_s}},
         "artifacts": artifacts,
         "pre_mount_diagnostic": list(pre_mount_diagnostics),
+        "ttfp_ms": ttfp_ms,
     }
     return _apply_known_failing(result)
 
 
 def build_failed_tab_result(tab_id, reason, ticks_observed=0, artifacts=None,
-                            pgwt_console_errors=()):
+                            pgwt_console_errors=(), ttfp_ms=None):
     """A tab result for a tab that never got far enough to evaluate the four
     checks (e.g. the 60s no-data fail-safe fired, or navigation raised).
     Kept separate from build_tab_result so a genuine "checked and failed"
     result is never confused with "could not even check" -- both fail the
     tab (and, unless known-failing-listed, the run), but the JSON says which
-    happened."""
+    happened.
+
+    ttfp_ms: None by default (navigation never reached a mount to measure
+    against); a caller MAY pass a measured value if navigation itself
+    succeeded but a LATER step failed (build_tab_result's own docstring
+    covers the field's meaning)."""
     result = {
         "tab": tab_id,
         "ok": False,
@@ -1153,6 +1179,7 @@ def build_failed_tab_result(tab_id, reason, ticks_observed=0, artifacts=None,
                     "settle_s": {"before": None, "after": None}},
         "artifacts": artifacts or {},
         "pre_mount_diagnostic": [],
+        "ttfp_ms": ttfp_ms,
     }
     return _apply_known_failing(result)
 

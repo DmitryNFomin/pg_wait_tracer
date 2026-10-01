@@ -1646,6 +1646,87 @@ def test_build_failed_tab_result():
           "a failed-to-check tab fails the overall summary too")
 
 
+# ── ttfp_ms (issue #245, time-to-first-paint) ───────────────────────────────
+
+def test_build_tab_result_carries_ttfp_ms_through_unaveraged():
+    """The field this branch adds: one raw per-navigation measurement,
+    reaching summary.json unchanged -- never averaged, rounded, or dropped
+    by build_tab_result. What would make this fail: build_tab_result
+    ignoring its ttfp_ms kwarg (the field silently reading back None or the
+    default) -- see this repo's report for a demonstrated-red run with the
+    kwarg unwired at the caller."""
+    r = lib.build_tab_result(
+        "overview", True, "ok:8", ticks_observed=6, console_errors=[],
+        blink_ratio=0.0001, color_violations=[],
+        leak_before={"charts": 1, "uplots": 1, "pending": 0},
+        leak_after={"charts": 1, "uplots": 1, "pending": 0},
+        artifacts={}, ttfp_ms=842)
+    check(r["ttfp_ms"] == 842,
+          f"the exact measured ttfp_ms (842) reaches the tab result, got {r['ttfp_ms']!r}")
+
+
+def test_build_tab_result_ttfp_ms_defaults_to_none():
+    """A caller that hasn't been updated to pass ttfp_ms (or one that
+    legitimately has nothing to report) must read back None, not a
+    fabricated 0 -- 0 would be indistinguishable from a genuinely instant
+    paint."""
+    r = lib.build_tab_result(
+        "overview", True, "ok:8", ticks_observed=6, console_errors=[],
+        blink_ratio=0.0001, color_violations=[],
+        leak_before={"charts": 1, "uplots": 1, "pending": 0},
+        leak_after={"charts": 1, "uplots": 1, "pending": 0},
+        artifacts={})
+    check(r["ttfp_ms"] is None, "ttfp_ms defaults to None when the caller gives none")
+
+
+def test_build_tab_result_ttfp_ms_never_gates_ok():
+    """This branch adds measurement only (no bound, no gate, per the
+    issue): an extreme ttfp_ms must never flip `ok` by itself.
+
+    Two rebases landed new terms into `ok` right next to ttfp_ms in the
+    source (issue #255/#252: capture_ok, from capture_budget_ok/
+    CAPTURE_MS_BOUND_MS; issue #259 then demoted capture_ok OUT of `ok`
+    and replaced it with dims_ok/spacing_ok, from frame_dims_ok/
+    frame_spacing_ok) -- a single "ok is True" assertion alone would keep
+    passing even if a merge had accidentally routed ttfp_ms into one of
+    those terms instead of keeping it out of `ok` entirely, as long as
+    that term's own trivial default (empty blink_sweep_ticks --
+    frame_dims_ok([])/frame_spacing_ok([]) both trivially pass, same idiom
+    as capture_budget_ok before them) still came out True. So this also
+    directly compares two calls identical in EVERY OTHER argument, one
+    with ttfp_ms=None and one with ttfp_ms=60000, and asserts `ok` is
+    identical between them -- proof by construction that ttfp_ms's value
+    cannot be what determined either result, not just that one arbitrary
+    value happened to still pass. This mechanism does not name which
+    fields currently gate `ok` -- it stays valid across a future rebase
+    that changes them again, same as it survived #259."""
+    kwargs = dict(
+        tab_id="overview", rendered_ok=True, rendered_detail="ok:8",
+        ticks_observed=6, console_errors=[], blink_ratio=0.0001,
+        color_violations=[],
+        leak_before={"charts": 1, "uplots": 1, "pending": 0},
+        leak_after={"charts": 1, "uplots": 1, "pending": 0}, artifacts={})
+    good = lib.build_tab_result(**kwargs, ttfp_ms=60000)
+    check(good["ok"] is True,
+          "a huge ttfp_ms (60000ms) does not fail an otherwise-clean tab -- "
+          "this branch adds measurement, never a gate")
+    baseline = lib.build_tab_result(**kwargs, ttfp_ms=None)
+    check(baseline["ok"] == good["ok"],
+          "an otherwise-identical call differing ONLY in ttfp_ms (None vs "
+          "60000) produces the SAME `ok` -- ttfp_ms cannot be the thing "
+          "deciding it either way")
+
+
+def test_build_failed_tab_result_ttfp_ms_default_and_override():
+    r = lib.build_failed_tab_result("timeline", "panel did not render within 60s")
+    check(r["ttfp_ms"] is None,
+          "a failed navigation's ttfp_ms defaults to None, never a stale/fabricated value")
+    r2 = lib.build_failed_tab_result("timeline", "later step failed", ttfp_ms=310)
+    check(r2["ttfp_ms"] == 310,
+          "build_failed_tab_result can still carry a measured ttfp_ms when "
+          "navigation itself succeeded but a later step failed")
+
+
 def test_known_failing_tabs_pinned():
     # Owner-filed tracking issues -- pinned exactly so nothing else quietly
     # gets added to this dict, and so DELISTING one stays a deliberate edit
