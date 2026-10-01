@@ -394,6 +394,56 @@ def test_waterfall_floor_excludes_inferred_mixed_passes_on_the_measured_one():
               f"passes ({detail})")
 
 
+def test_waterfall_floor_excludes_inferred_missing_key_fails_closed():
+    """#222 review round 3, item 1. RED input: exactly this response --
+    a 700ms completed row with NO `end_inferred` key, which is what a
+    pgwt-server built before this branch returns. `not
+    r.get("end_inferred")` reads the missing key as "measured" and
+    PASSES, so the whole inferred-exclusion silently no-ops against an
+    older server instead of refusing. The key must be present AND
+    false."""
+    resp = {"rows": [{"query_id": "1", "duration_ms": 700.0}]}
+    populated_ok, _ = cov.waterfall_populated(resp)
+    check(populated_ok,
+          "waterfall_populated alone still passes this row (so the "
+          "fail-closed behaviour is this function's, not inherited)")
+    ok, detail = cov.waterfall_floor_excludes_inferred(resp)
+    check(not ok,
+          f"a slow row with NO end_inferred field does NOT satisfy the "
+          f"floor -- version drift refuses instead of approving ({detail})")
+    check("FAIL-CLOSED" in detail and "end_inferred" in detail,
+          f"and the detail NAMES version drift, so a future red is not "
+          f"mistaken for 'the capture had no slow query' ({detail})")
+
+
+def test_waterfall_floor_excludes_inferred_missing_key_is_not_a_blanket_refusal():
+    """Anti-bypass for the fix above: failing closed must not degrade into
+    failing ALWAYS. A page that carries one properly-serialised measured
+    row still passes even when some OTHER row lacks the field."""
+    resp = {"rows": [{"query_id": "1", "duration_ms": 700.0},
+                      {"query_id": "2", "duration_ms": 600.0,
+                       "end_inferred": False}]}
+    ok, detail = cov.waterfall_floor_excludes_inferred(resp)
+    check(ok, f"one correctly-serialised measured slow row still passes "
+              f"({detail})")
+    check("FAIL-CLOSED" in detail,
+          f"and the field-less row is still reported, not hidden by the "
+          f"pass ({detail})")
+
+
+def test_waterfall_floor_excludes_inferred_missing_key_only_counts_slow_rows():
+    """The fail-closed notice must not fire on rows the floor never
+    considered anyway -- a fast row with no end_inferred field is not
+    version drift worth shouting about, and a notice that fires on every
+    page is a notice nobody reads."""
+    resp = {"rows": [{"query_id": "1", "duration_ms": 0.3},
+                      {"query_id": "2", "duration_ms": 600.0,
+                       "end_inferred": False}]}
+    ok, detail = cov.waterfall_floor_excludes_inferred(resp)
+    check(ok and "FAIL-CLOSED" not in detail,
+          f"a sub-floor row without the field raises no notice ({detail})")
+
+
 # ── waterfall_recency_diagnostic (diagnostic only, never gates) ───────────
 
 def test_waterfall_recency_diagnostic_shape():
@@ -643,9 +693,14 @@ def test_run_coverage_waterfall_forwards_sort_and_sees_the_window_not_the_tail()
         # The duration_desc page: the reporter session's slow query leads,
         # the pgbench tail trails -- exactly inverted from the recency
         # page that made the real rehearsal see only 0.326ms.
+        # end_inferred present on every row: that is what every
+        # pgwt-server from #222 on actually serialises
+        # (serialize_execution_row), and waterfall_floor_excludes_inferred
+        # now FAILS CLOSED on its absence, so a fixture without it would
+        # be a shape no real server produces.
         "executions": {"rows": [
-            {"query_id": "1", "duration_ms": 1300.0},
-            {"query_id": "2", "duration_ms": 0.326},
+            {"query_id": "1", "duration_ms": 1300.0, "end_inferred": False},
+            {"query_id": "2", "duration_ms": 0.326, "end_inferred": False},
         ]},
         "exec_scatter": {"points": [{"duration_ms": d} for d in [1, 2, 5, 50, 400]]},
     }

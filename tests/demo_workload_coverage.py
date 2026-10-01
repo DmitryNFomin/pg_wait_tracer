@@ -233,14 +233,34 @@ def waterfall_floor_excludes_inferred(resp):
     docstring's "this checker itself never changed"), so the gate is
     strictly stronger without disturbing that claim."""
     rows = (resp or {}).get("rows") or []
-    measured_slow = [r for r in rows
-                      if r.get("duration_ms") is not None
-                      and not r.get("in_progress")
-                      and not r.get("end_inferred")
-                      and r["duration_ms"] >= WATERFALL_INTERESTING_MS]
+    slow = [r for r in rows
+            if r.get("duration_ms") is not None
+            and not r.get("in_progress")
+            and r["duration_ms"] >= WATERFALL_INTERESTING_MS]
+    # FAIL CLOSED on version drift (#222 review round 3, item 1). `not
+    # r.get("end_inferred")` would read a MISSING key as "measured", so
+    # against a pgwt-server older than this branch -- one that never
+    # serialises the field at all -- this whole exclusion would silently
+    # no-op and the gate would quietly weaken back to waterfall_populated.
+    # A gate that cannot see must refuse, not approve, so the key has to
+    # be PRESENT and false. Same convention as
+    # demo_rehearsal_lib.cmd_markers_observed, which refuses a
+    # missing/non-numeric live_cmd_markers_total rather than reading it
+    # as zero. Counted separately below so the refusal is loud: "0
+    # measured rows" and "0 measured rows because the server never told
+    # us" are different failures and must not print the same line.
+    missing = [r for r in slow if "end_inferred" not in r]
+    measured_slow = [r for r in slow
+                     if "end_inferred" in r and not r["end_inferred"]]
     ok = len(measured_slow) >= 1
-    return ok, (f"measured (end_inferred=False) completed rows >= "
-                f"{WATERFALL_INTERESTING_MS}ms: {len(measured_slow)}")
+    detail = (f"measured (end_inferred=False) completed rows >= "
+              f"{WATERFALL_INTERESTING_MS}ms: {len(measured_slow)}")
+    if missing:
+        detail += (f" | FAIL-CLOSED: {len(missing)} row(s) >= "
+                   f"{WATERFALL_INTERESTING_MS}ms carry NO end_inferred "
+                   f"field at all (pgwt-server older than #222?) and are "
+                   f"NOT counted as measured")
+    return ok, detail
 
 
 def waterfall_recency_diagnostic(resp):
