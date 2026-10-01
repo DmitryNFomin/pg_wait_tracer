@@ -151,6 +151,32 @@ export function executionsCountsLabel(openCount, completedCount) {
     return openCount + ' running, ' + completedCount + ' completed';
 }
 
+/* Does this page contain a row whose end was INFERRED (closed at the pid's
+ * next CMD_END, not measured at a real EXEC_END)? Those render their
+ * duration with a trailing '*' -- see fmtExecutionDuration. */
+export function executionsHasInferredEnd(rows) {
+    return (rows || []).some(r => r && !r.in_progress && !!r.end_inferred);
+}
+
+/* The one status line next to the sort control: the open/completed split
+ * plus, when and only when a '*' is actually on screen, what it means.
+ *
+ * #222 review round 3, item 3: the '*' was explained by a hover tooltip
+ * alone, and NOBODY HOVERS ON A PROJECTED SCREEN. This is the tab that
+ * carries the demo's main story, so the meaning has to be readable without
+ * a pointer. Deliberately independent of the counts: an older server that
+ * sends no open_count/completed_count still renders rows, so gating the
+ * legend on the counts being present would hide it exactly when the rest
+ * of the header is already degraded. Returns null when there is nothing to
+ * say, so the title row stays uncluttered on an ordinary page. */
+export function executionsStatusLabel(openCount, completedCount, hasInferredEnd) {
+    const parts = [];
+    const counts = executionsCountsLabel(openCount, completedCount);
+    if (counts) parts.push(counts);
+    if (hasInferredEnd) parts.push('* = inferred end');
+    return parts.length ? parts.join(' \u00b7 ') : null;
+}
+
 /* executions response -> shared-table model. Server order matches whatever
  * `sort` the request asked for (see EXECUTIONS_SORT_* above) and is
  * preserved; client sorting is intentionally absent on this selector. */
@@ -176,6 +202,11 @@ export function buildExecutionsModel(data, selected, windowTo) {
             ? data.open_count : null,
         completed_count: data && typeof data.completed_count === 'number'
             ? data.completed_count : null,
+        // #222 review round 3: drives the inline '* = inferred end'
+        // legend. Computed from the rows actually being rendered, so the
+        // legend appears exactly when a '*' can appear and never when it
+        // cannot.
+        has_inferred_end: executionsHasInferredEnd(rows),
     };
 }
 

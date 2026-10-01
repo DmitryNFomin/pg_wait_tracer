@@ -5,7 +5,7 @@ import {
     buildExecutionsModel, buildWaterfallOption, buildWaterfallReadout,
     executionsConfig, pickDefaultExecution, EXECUTIONS_SORT_DEFAULT,
     executionsSortLabel, executionsSortToggleLabel, executionsSortToggleTarget,
-    executionsCountsLabel,
+    executionsStatusLabel,
 } from '../lib/builders/waterfall.js';
 import { isUnavailable } from '../lib/builders/fidelity.js';
 import { mountUnavailablePanel } from '../lib/panels.js';
@@ -240,8 +240,9 @@ export function createWaterfallView() {
             updateSortControl();
             const countsLabel = document.getElementById('executions-counts-label');
             if (countsLabel) {
-                const text = executionsCountsLabel(
-                    model.table.open_count, model.table.completed_count);
+                const text = executionsStatusLabel(
+                    model.table.open_count, model.table.completed_count,
+                    model.table.has_inferred_end);
                 countsLabel.textContent = text ? ' · ' + text : '';
             }
             const tableHost = document.getElementById('executions-table');

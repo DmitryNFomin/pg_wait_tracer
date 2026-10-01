@@ -7,6 +7,7 @@ import {
     EXECUTIONS_SORT_DURATION, EXECUTIONS_SORT_RECENT, EXECUTIONS_SORT_DEFAULT,
     executionsSortLabel, executionsSortToggleLabel, executionsSortToggleTarget,
     fmtExecutionDuration, executionsCountsLabel,
+    executionsStatusLabel, executionsHasInferredEnd,
 } from '../../web/static/lib/builders/waterfall.js';
 import { eventColor, fmtTimeNs } from '../../web/static/lib/format.js';
 
@@ -167,6 +168,52 @@ test('an inferred-end row is flagged, not presented as an equal measurement', ()
         { in_progress: false, duration_ms: 80, end_inferred: true }, null);
     assert.equal(inferred.text, '80.0ms *');
     assert.ok(inferred.tooltip && /not measured/i.test(inferred.tooltip));
+});
+
+test('executionsHasInferredEnd sees an inferred-ended row, and only that', () => {
+    assert.equal(executionsHasInferredEnd([{ end_inferred: true }]), true);
+    assert.equal(executionsHasInferredEnd([{ end_inferred: false }]), false);
+    assert.equal(executionsHasInferredEnd([{}]), false);
+    assert.equal(executionsHasInferredEnd([]), false);
+    assert.equal(executionsHasInferredEnd(null), false);
+    // An in-progress row has no end to infer, so it never shows a '*'
+    // (fmtExecutionDuration renders it as "≥ … (running)") and must not
+    // pull the legend on by itself.
+    assert.equal(
+        executionsHasInferredEnd([{ in_progress: true, end_inferred: true }]),
+        false);
+});
+
+test('executionsStatusLabel spells the * out inline — nobody hovers on a '
+    + 'projected screen (#222 review round 3)', () => {
+    // RED input for the legend: this exact call. Before the fix the view
+    // rendered executionsCountsLabel(150, 3) alone, so a page containing a
+    // '*' said nothing at all about what it meant unless you hovered.
+    assert.equal(executionsStatusLabel(150, 3, true),
+        '150 running, 3 completed · * = inferred end');
+    // No '*' on the page -> no legend; the title row stays uncluttered.
+    assert.equal(executionsStatusLabel(150, 3, false),
+        '150 running, 3 completed');
+    // Counts unavailable (an older server) must not suppress the legend:
+    // the '*' is still on screen and still needs explaining.
+    assert.equal(executionsStatusLabel(null, null, true), '* = inferred end');
+    // Nothing to say at all.
+    assert.equal(executionsStatusLabel(null, null, false), null);
+});
+
+test('buildExecutionsModel exposes has_inferred_end from the rows it '
+    + 'actually renders', () => {
+    const withInferred = buildExecutionsModel(
+        { rows: [{ pid: 1, start_ns: '1', duration_ms: 5, end_inferred: true }] },
+        null, '10');
+    assert.equal(withInferred.has_inferred_end, true);
+    const without = buildExecutionsModel(
+        { rows: [{ pid: 1, start_ns: '1', duration_ms: 5, end_inferred: false }] },
+        null, '10');
+    assert.equal(without.has_inferred_end, false);
+    // Empty page: no rows, no '*', no legend.
+    assert.equal(buildExecutionsModel({ rows: [] }, null, '10').has_inferred_end,
+        false);
 });
 
 test('executionsCountsLabel renders the open/completed split, or nothing '
