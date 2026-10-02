@@ -180,6 +180,30 @@ struct pgwt_cov_mark {
     int      is_start;  /* 1 = ESCALATE_START, 0 = ESCALATE_END */
 };
 
+/* #274: one retained PLAN/EXEC/CMD/ESCALATE marker. The executions and
+ * exec_scatter views need every marker from trace start up to the window's
+ * left edge (a pre-window EXEC_START becomes a started_before_window row, a
+ * pre-window CMD_END closes a zombie), and used to get it by LZ4-decoding
+ * the entire pre-window prefix on EVERY request — so the same "last 15
+ * minutes" view got steadily slower as the capture aged (1398 ms at 98 s of
+ * prefix, 4104 ms at 4058 s, with the in-window volume flat).
+ *
+ * Retaining the markers as blocks are first seen makes that pass incremental
+ * across requests: a committed block is decoded once, ever. 24 bytes rather
+ * than the 48-byte pgwt_trace_event, because only these four fields are read
+ * for a marker — pgwt_compute_executions dispatches on old_event, keys state
+ * by pid, uses timestamp_ns and query_id, and every marker branch `continue`s
+ * before any use of new_event, duration_ns, cpu_ns or (for markers) flags.
+ * flags is kept anyway: it is one byte here and the rest is padding. */
+struct pgwt_exec_mark {
+    uint64_t ts;         /* mono */
+    uint64_t query_id;
+    uint32_t pid;
+    uint16_t flags;      /* PGWT_EVENT_FLAG_* (all current bits fit) */
+    uint8_t  marker;     /* old_event - PGWT_MARKER_EXEC_START (0..7) */
+    uint8_t  _pad;
+};
+
 struct pgwt_file_cov {
     char     path[512];
     int      present;              /* seen in the latest directory scan */
@@ -196,8 +220,16 @@ struct pgwt_file_cov {
     struct pgwt_span *s_spans; int n_s, cap_s;   /* SAMPLES block spans */
     struct pgwt_span *t_spans; int n_t, cap_t;   /* TRANSITIONS block spans */
     struct pgwt_cov_mark *marks; int n_marks, cap_marks;
-    int     *pending_tb; int n_pending, cap_pending;  /* blocks awaiting
-                                                         marker decode */
+    /* #274: retained structural markers for the executions prefix pass. */
+    struct pgwt_exec_mark *xmarks; int n_xmarks, cap_xmarks;
+    int     *pending_tb; int n_pending, cap_pending;  /* append-only queue of
+                                                         TRANSITIONS blocks */
+    int      esc_done;   /* queue entries already decoded for ESCALATE marks */
+    int      xm_done;    /* queue entries already decoded for exec markers */
+    int      marks_incomplete;  /* a block was dropped from the queue, or a
+                                   mark array could not grow: this file's
+                                   retained markers are NOT a complete
+                                   record and must not be trusted */
     int      gen;                  /* clock-domain generation */
     int64_t  canon_offset;         /* generation-canonical mono→wall */
 };
@@ -254,6 +286,17 @@ struct pgwt_server {
     int  any_samples;              /* any file has SAMPLES blocks */
     struct pgwt_gen_cov *gens;
     int  num_gens;
+
+    /* #274: retained structural markers for the executions/exec_scatter
+     * pre-window pass. Built lazily — the first request that needs it turns
+     * retention on; nothing else pays for it. xm_unusable is the refusal
+     * latch: once ANY file's retained markers are known to be incomplete,
+     * or the retained set outgrows its memory budget, the prefix pass goes
+     * back to the exact (slow) full decode for the rest of the process.
+     * A marker index that cannot see everything must never answer. */
+    int      retain_exec_marks;
+    int      xm_unusable;
+    size_t   xm_bytes;
 
     /* Query text map: query_id → SQL text (dynamic, power-of-2 sized) */
     struct qt_entry *qt_map;
@@ -1160,6 +1203,7 @@ static void cov_reset(struct pgwt_file_cov *fc)
     free(fc->s_spans);
     free(fc->t_spans);
     free(fc->marks);
+    free(fc->xmarks);
     free(fc->pending_tb);
     char path[512];
     memcpy(path, fc->path, sizeof(path));
@@ -1181,38 +1225,184 @@ static struct pgwt_file_cov *cov_find_or_add(struct pgwt_server *srv,
     return fc;
 }
 
+static bool test_load_alloc_failure(const char *point);
+
+/* Retained-marker memory budget (#274).
+ *
+ * The retained form is 24 bytes (struct pgwt_exec_mark) and PostgreSQL
+ * emits six structural markers per execution-plus-command (PLAN_START,
+ * PLAN_END, EXEC_START, EXEC_END, CMD_START, CMD_END). At the corrected
+ * demo rate of ~1000 executions/s that is ~144 KB/s = ~507 MB/h = ~12 GB
+ * per day — the index is NOT free, and it grows with capture length, not
+ * with what is on screen.
+ *
+ * So it is budgeted, on the same shape as cache_max_events(): a share of
+ * physical RAM with an absolute cap, PGWT_EXEC_MARK_MAX_MB overriding
+ * (tests use a tiny value to prove the refusal actually fires). 12.5%
+ * rather than the file cache's 25% because the two budgets are additive
+ * and the file cache is the one that serves every other view.
+ *
+ * Past the budget the index REFUSES — the whole process reverts to the
+ * pre-#274 behaviour of decoding the pre-window prefix on every request,
+ * with a WARNING on stderr. Correct and slow, never fast and short. It is
+ * emphatically not a bounded look-back: that would silently lose a
+ * long-running execution and mispair its end, which is the one fix shape
+ * ruled out for this issue.
+ *
+ * At the default on an 8 GB box (1 GB budget) that is ~2 hours of
+ * demo-rate capture, and ~11 hours at the 176 exec/s rate measured in
+ * #274. Making the retained set proportional to OPEN executions rather
+ * than to elapsed capture needs the prefix pass to mirror
+ * pgwt_compute_executions' state machine; that is a separate change. */
+static size_t exec_mark_max_bytes_uncached(void)
+{
+    const char *env = getenv("PGWT_EXEC_MARK_MAX_MB");
+    long mb = env ? atol(env) : 0;
+    if (mb > 0)
+        return (size_t)mb * 1024u * 1024u;
+    /* Exact-byte form so a test can trip the budget with a small fixture;
+     * a megabyte granularity would need ~44k markers to reach the smallest
+     * settable bound, which is a fixture nobody would keep honest. */
+    env = getenv("PGWT_EXEC_MARK_MAX_BYTES");
+    long bytes = env ? atol(env) : 0;
+    if (bytes > 0)
+        return (size_t)bytes;
+
+    long pages = sysconf(_SC_PHYS_PAGES);
+    long page_size = sysconf(_SC_PAGESIZE);
+    if (pages <= 0 || page_size <= 0)
+        return 256u * 1024u * 1024u;            /* conservative fallback */
+    uint64_t budget = ((uint64_t)pages * (uint64_t)page_size) / 8;  /* 12.5% */
+    if (budget > 2ULL * 1024 * 1024 * 1024)
+        budget = 2ULL * 1024 * 1024 * 1024;
+    if (budget < 64ULL * 1024 * 1024)
+        budget = 64ULL * 1024 * 1024;
+    return (size_t)budget;
+}
+
+/* Read once: this is consulted per retained marker. */
+static size_t exec_mark_max_bytes(void)
+{
+    static size_t cached = 0;
+    if (!cached)
+        cached = exec_mark_max_bytes_uncached();
+    return cached;
+}
+
+/* Mark this file's retained markers as an incomplete record, and latch the
+ * server-wide refusal. Called wherever a marker or a whole block could be
+ * lost: a partial index that still answers is the exact failure mode the
+ * #274 fix must not introduce. */
+static void cov_marks_give_up(struct pgwt_server *srv,
+                              struct pgwt_file_cov *fc, const char *why)
+{
+    if (fc)
+        fc->marks_incomplete = 1;
+    if (srv && !srv->xm_unusable) {
+        srv->xm_unusable = 1;
+        fprintf(stderr, "WARNING: structural-marker index unusable (%s); "
+                "executions/exec_scatter fall back to decoding the "
+                "pre-window prefix on every request\n", why);
+    }
+}
+
 /* Decode the pending TRANSITIONS blocks of a file, collecting escalation
- * markers. Committed blocks are immutable, so this is incremental-safe. */
-static void cov_decode_markers(struct pgwt_file_cov *fc,
+ * markers and — once a request has asked for them — the PLAN/EXEC/CMD
+ * markers the executions prefix pass needs. Committed blocks are immutable,
+ * so this is incremental-safe; each consumer has its own watermark into the
+ * append-only pending queue, so a block decoded for one is still available
+ * to the other later, and no block is decompressed twice for the same
+ * consumer. */
+static void cov_decode_markers(struct pgwt_server *srv,
+                               struct pgwt_file_cov *fc,
                                struct pgwt_event_reader *reader)
 {
     struct pgwt_trace_event buf[PGWT_BLOCK_EVENTS];
 
-    for (int p = 0; p < fc->n_pending; p++) {
+    int want_esc = (srv->any_samples || fc->has_samples) &&
+                   fc->esc_done < fc->n_pending;
+    int want_xm  = srv->retain_exec_marks && !srv->xm_unusable &&
+                   fc->xm_done < fc->n_pending;
+    if (!want_esc && !want_xm)
+        return;
+
+    int start = fc->n_pending;
+    if (want_esc && fc->esc_done < start) start = fc->esc_done;
+    if (want_xm  && fc->xm_done  < start) start = fc->xm_done;
+
+    for (int p = start; p < fc->n_pending; p++) {
         int b = fc->pending_tb[p];
         if (b >= reader->num_blocks)
             continue;
+        int esc_here = want_esc && p >= fc->esc_done;
+        int xm_here  = want_xm  && p >= fc->xm_done;
+        if (!esc_here && !xm_here)
+            continue;
         int n = pgwt_reader_decode_block(reader, b, buf, PGWT_BLOCK_EVENTS);
+        if (n < 0) {
+            /* A block that will not decode is missing markers, not zero
+             * markers. The escalate consumer has always tolerated that;
+             * the executions consumer must not. */
+            if (xm_here)
+                cov_marks_give_up(srv, fc,
+                                  "a TRANSITIONS block failed to decode");
+            continue;
+        }
         for (int i = 0; i < n; i++) {
             uint32_t m = buf[i].old_event;
-            if (m != PGWT_MARKER_ESCALATE_START &&
-                m != PGWT_MARKER_ESCALATE_END)
-                continue;
-            if (fc->n_marks >= fc->cap_marks) {
-                int newcap = fc->cap_marks ? fc->cap_marks * 2 : 8;
-                struct pgwt_cov_mark *tmp =
-                    realloc(fc->marks, newcap * sizeof(*tmp));
-                if (!tmp) return;
-                fc->marks = tmp;
-                fc->cap_marks = newcap;
+            if (esc_here && (m == PGWT_MARKER_ESCALATE_START ||
+                             m == PGWT_MARKER_ESCALATE_END)) {
+                if (fc->n_marks >= fc->cap_marks) {
+                    int newcap = fc->cap_marks ? fc->cap_marks * 2 : 8;
+                    struct pgwt_cov_mark *tmp =
+                        realloc(fc->marks, newcap * sizeof(*tmp));
+                    if (!tmp) return;
+                    fc->marks = tmp;
+                    fc->cap_marks = newcap;
+                }
+                fc->marks[fc->n_marks].ts = buf[i].timestamp_ns;
+                fc->marks[fc->n_marks].is_start =
+                    (m == PGWT_MARKER_ESCALATE_START);
+                fc->n_marks++;
             }
-            fc->marks[fc->n_marks].ts = buf[i].timestamp_ns;
-            fc->marks[fc->n_marks].is_start =
-                (m == PGWT_MARKER_ESCALATE_START);
-            fc->n_marks++;
+            if (xm_here && PGWT_IS_MARKER(m)) {
+                if (srv->xm_bytes + sizeof(struct pgwt_exec_mark)
+                        > exec_mark_max_bytes()) {
+                    cov_marks_give_up(srv, fc, "retained markers exceeded "
+                                      "PGWT_EXEC_MARK_MAX_MB");
+                    xm_here = 0;
+                    want_xm = 0;
+                    continue;
+                }
+                if (fc->n_xmarks >= fc->cap_xmarks) {
+                    int newcap = fc->cap_xmarks ? fc->cap_xmarks * 2 : 1024;
+                    struct pgwt_exec_mark *tmp =
+                        test_load_alloc_failure("exec_mark_grow") ? NULL :
+                        realloc(fc->xmarks, (size_t)newcap * sizeof(*tmp));
+                    if (!tmp) {
+                        cov_marks_give_up(srv, fc, "retained-marker array "
+                                          "could not grow");
+                        xm_here = 0;
+                        want_xm = 0;
+                        continue;
+                    }
+                    srv->xm_bytes += (size_t)(newcap - fc->cap_xmarks)
+                                   * sizeof(*tmp);
+                    fc->xmarks = tmp;
+                    fc->cap_xmarks = newcap;
+                }
+                struct pgwt_exec_mark *xm = &fc->xmarks[fc->n_xmarks++];
+                xm->ts = buf[i].timestamp_ns;
+                xm->query_id = buf[i].query_id;
+                xm->pid = buf[i].pid;
+                xm->flags = (uint16_t)buf[i].flags;
+                xm->marker = (uint8_t)(m - PGWT_MARKER_EXEC_START);
+                xm->_pad = 0;
+            }
         }
     }
-    fc->n_pending = 0;
+    if (want_esc) fc->esc_done = fc->n_pending;
+    if (want_xm)  fc->xm_done  = fc->n_pending;
 }
 
 /* Incrementally scan one file's block headers into its coverage entry.
@@ -1281,18 +1471,28 @@ static void cov_scan_file(struct pgwt_server *srv, struct pgwt_file_cov *fc)
                           bi.first_timestamp_ns, bi.last_timestamp_ns, 0);
             if (fc->n_pending >= fc->cap_pending) {
                 int newcap = fc->cap_pending ? fc->cap_pending * 2 : 16;
-                int *tmp = realloc(fc->pending_tb, newcap * sizeof(int));
+                int *tmp = test_load_alloc_failure("cov_pending_grow") ? NULL
+                         : realloc(fc->pending_tb, newcap * sizeof(int));
                 if (tmp) { fc->pending_tb = tmp; fc->cap_pending = newcap; }
             }
             if (fc->n_pending < fc->cap_pending)
                 fc->pending_tb[fc->n_pending++] = b;
+            else
+                /* #274: a block dropped from the queue is a block whose
+                 * markers are never retained. Silently skipping it was
+                 * tolerable when only escalation coverage read the queue;
+                 * it is not when the executions prefix pass does. */
+                cov_marks_give_up(srv, fc,
+                                  "a TRANSITIONS block could not be queued");
         }
     }
     fc->blocks_scanned = reader.num_blocks;
 
-    /* Markers matter only when the merge has samples to arbitrate. */
-    if (srv->any_samples || fc->has_samples)
-        cov_decode_markers(fc, &reader);
+    /* Escalation markers matter only when the merge has samples to
+     * arbitrate; structural markers only once a request has asked for
+     * them. cov_decode_markers decides, and decodes each block at most
+     * once per consumer. */
+    cov_decode_markers(srv, fc, &reader);
 
     pgwt_reader_close(&reader);
 }
@@ -1467,9 +1667,21 @@ static void coverage_refresh(struct pgwt_server *srv)
             struct pgwt_event_reader reader;
             if (pgwt_reader_open(&reader, fc->path) != 0)
                 continue;
-            cov_decode_markers(fc, &reader);
+            cov_decode_markers(srv, fc, &reader);
             pgwt_reader_close(&reader);
         }
+    }
+
+    /* #274: once the index has refused, the markers it already holds are
+     * dead weight — release them. The refusal is latched for the life of
+     * the process, so nothing will read them again. */
+    if (srv->xm_unusable && srv->xm_bytes > 0) {
+        for (int i = 0; i < srv->cov_count; i++) {
+            free(srv->cov[i].xmarks);
+            srv->cov[i].xmarks = NULL;
+            srv->cov[i].n_xmarks = srv->cov[i].cap_xmarks = 0;
+        }
+        srv->xm_bytes = 0;
     }
 
     /* Drop entries for deleted files (compact the array). */
@@ -2177,6 +2389,192 @@ server_load_markers_fi(struct pgwt_server *srv,
 {
     return server_load_events_fi_mode(srv, from_wall_ns, to_wall_ns, pid, 1,
                                       out_count, info);
+}
+
+/* ── #274: the executions/exec_scatter pre-window prefix ──────────────────
+ *
+ * executions and exec_scatter need every structural marker from trace start
+ * to the window's left edge, and there is no safe way to bound that: an
+ * execution can have started arbitrarily early, and a bounded look-back
+ * silently loses the long-running one and mispairs its end. What they do
+ * NOT need is to LZ4-decode the whole prefix again on every request, which
+ * is what server_load_markers_fi does (load_file_range_mono decompresses
+ * every block from file start and only then discards non-markers). That
+ * made the cost grow with capture age while the window's own contents
+ * stayed flat: 1398 ms at 98 s of prefix, 4104 ms at 4058 s, against a
+ * `transitions` control that only moved 8%.
+ *
+ * The markers are now retained as each committed block is first seen
+ * (cov_decode_markers), so this pass reads them straight out of memory.
+ * Same markers, same order, same filters — see server_load_exec_prefix's
+ * refusal rules for the cases where it declines to answer at all.
+ */
+
+/* Index of the first retained marker at or after `ts`, by binary search
+ * (retained in block order, which is timestamp order within a file). */
+static int xmarks_lower_bound(const struct pgwt_exec_mark *m, int n,
+                              uint64_t ts)
+{
+    int lo = 0, hi = n;
+    while (lo < hi) {
+        int mid = lo + (hi - lo) / 2;
+        if (m[mid].ts < ts) lo = mid + 1;
+        else                hi = mid;
+    }
+    return lo;
+}
+
+/* True when the retained-marker index may answer. Every "no" here is a
+ * refusal that falls back to the exact full decode — never an approval
+ * from a record that cannot see everything. */
+static int exec_prefix_index_usable(const struct pgwt_server *srv)
+{
+    const char *env = getenv("PGWT_EXEC_PREFIX_INDEX");
+    if (env && env[0] == '0')
+        return 0;                       /* escape hatch / differential test */
+    if (!srv->retain_exec_marks || srv->xm_unusable)
+        return 0;
+    for (int i = 0; i < srv->cov_count; i++) {
+        const struct pgwt_file_cov *fc = &srv->cov[i];
+        if (!fc->valid)
+            continue;
+        if (fc->marks_incomplete)
+            return 0;
+        /* A file with queued-but-undecoded blocks has markers the index
+         * has not seen yet. In practice cov_scan_file drains the queue on
+         * the same refresh; this is the backstop for any path that did
+         * not. */
+        if (fc->xm_done < fc->n_pending)
+            return 0;
+    }
+    return 1;
+}
+
+/* Rebuild the marker stream for [earliest, to_wall_ns] from the retained
+ * index. Mirrors server_load_events_fi_mode's markers_only path exactly:
+ * the same per-file window in the same clock domain, the same canonical
+ * mono→wall offset, the same pid pushdown, the same raw-load bound, and
+ * the same final ordering check. */
+static struct pgwt_trace_event *
+server_load_prefix_from_index(struct pgwt_server *srv, uint64_t to_wall_ns,
+                              uint32_t pid, int *out_count,
+                              struct pgwt_load_info *info)
+{
+    *out_count = 0;
+    if (info) memset(info, 0, sizeof(*info));
+    int overloaded = 0, allocation_failed = 0, has_transitions = 0;
+    int max_events = load_max_events();
+
+    uint64_t from_wall_ns = srv->earliest_wall_ns;
+
+    int cap = 4096;
+    if (cap > max_events) cap = max_events;
+    if (cap < 1) cap = 1;
+    struct pgwt_trace_event *events = malloc((size_t)cap * sizeof(*events));
+    if (!events) {
+        if (info) info->allocation_failed = 1;
+        return NULL;
+    }
+    int total = 0;
+
+    for (int ci = 0; ci < srv->cov_count && !overloaded && !allocation_failed;
+         ci++) {
+        struct pgwt_file_cov *fc = &srv->cov[ci];
+        if (!fc->valid || fc->n_xmarks == 0)
+            continue;
+        if ((int64_t)to_wall_ns - fc->canon_offset <= 0)
+            continue;
+        uint64_t from_m = ((int64_t)from_wall_ns - fc->canon_offset) > 0
+                        ? (uint64_t)((int64_t)from_wall_ns - fc->canon_offset)
+                        : 0;
+        uint64_t to_m = (uint64_t)((int64_t)to_wall_ns - fc->canon_offset);
+        if (fc->mono_first > to_m || fc->mono_last < from_m)
+            continue;
+
+        int i = xmarks_lower_bound(fc->xmarks, fc->n_xmarks, from_m);
+        for (; i < fc->n_xmarks; i++) {
+            const struct pgwt_exec_mark *xm = &fc->xmarks[i];
+            if (xm->ts > to_m)
+                break;
+            if (pid != 0 && xm->pid != pid)
+                continue;
+            if (total >= max_events) {
+                overloaded = 1;
+                break;
+            }
+            if (total >= cap) {
+                int next = cap < max_events / 2 ? cap * 2 : max_events;
+                if (next <= cap) { overloaded = 1; break; }
+                struct pgwt_trace_event *tmp =
+                    test_load_alloc_failure("prefix_grow") ? NULL :
+                    realloc(events, (size_t)next * sizeof(*tmp));
+                if (!tmp) { allocation_failed = 1; break; }
+                events = tmp;
+                cap = next;
+            }
+            struct pgwt_trace_event *ev = &events[total++];
+            memset(ev, 0, sizeof(*ev));
+            ev->timestamp_ns =
+                (uint64_t)((int64_t)xm->ts + fc->canon_offset);
+            ev->pid = xm->pid;
+            ev->old_event = PGWT_MARKER_EXEC_START + (uint32_t)xm->marker;
+            ev->new_event = ev->old_event;
+            ev->flags = xm->flags;
+            ev->duration_ns = 0;
+            ev->query_id = xm->query_id;
+            ev->cpu_ns = 0;
+            has_transitions = 1;
+        }
+    }
+
+    if (!overloaded && !allocation_failed) {
+        bool ordered = true;
+        for (int i = 1; i < total; i++) {
+            if (events[i - 1].timestamp_ns > events[i].timestamp_ns) {
+                ordered = false;
+                break;
+            }
+        }
+        if (!ordered && stable_sort_events(events, total) != 0)
+            allocation_failed = 1;
+    }
+
+    if (info) {
+        info->has_transitions = has_transitions;
+        info->overloaded = overloaded;
+        info->allocation_failed = allocation_failed;
+    }
+    if (overloaded)
+        fprintf(stderr, "ERROR: window too large: the requested range holds "
+                "more than %d events%s — narrow the time range%s\n",
+                max_events, pid ? " for this pid" : "",
+                pid ? "" : " or add a pid/query filter");
+    if (allocation_failed)
+        fprintf(stderr, "ERROR: memory allocation failed while loading or "
+                "merging the requested event window\n");
+
+    *out_count = total;
+    return events;
+}
+
+/* The prefix pass: the retained index when it can see everything, the exact
+ * full decode otherwise. Both produce the same marker stream. */
+static struct pgwt_trace_event *
+server_load_exec_prefix(struct pgwt_server *srv, uint64_t to_wall_ns,
+                        uint32_t pid, int *out_count,
+                        struct pgwt_load_info *info)
+{
+    int used_index = exec_prefix_index_usable(srv);
+    struct pgwt_trace_event *ev =
+        used_index
+        ? server_load_prefix_from_index(srv, to_wall_ns, pid, out_count, info)
+        : server_load_markers_fi(srv, srv->earliest_wall_ns, to_wall_ns, pid,
+                                 out_count, info);
+    const char *dbg = getenv("PGWT_EXEC_PREFIX_DEBUG");
+    if (dbg && dbg[0] == '1')
+        fprintf(stderr, "pgwt-prefix: path=%s markers=%d\n",
+                used_index ? "index" : "legacy", *out_count);
+    return ev;
 }
 
 /* Free everything the server owns (cache, coverage, metadata maps) so
@@ -3340,6 +3738,17 @@ static int load_execution_rows(struct pgwt_server *srv,
 {
     uint64_t from = req->from_ns ? req->from_ns : srv->earliest_wall_ns;
     uint64_t to = req->to_ns ? req->to_ns : srv->latest_wall_ns;
+
+    /* #274: turn structural-marker retention on BEFORE the first load, so
+     * the coverage refresh that load performs retains this request's
+     * prefix. Lazily, because a server whose client never opens Waterfall
+     * or Scatter should not carry the markers at all. */
+    {
+        const char *env = getenv("PGWT_EXEC_PREFIX_INDEX");
+        if (!(env && env[0] == '0'))
+            srv->retain_exec_marks = 1;
+    }
+
     int window_count;
     struct pgwt_trace_event *window_events = server_load_events_fi(
         srv, from, to, 0, &window_count, linfo);
@@ -3361,9 +3770,8 @@ static int load_execution_rows(struct pgwt_server *srv,
     struct pgwt_load_info context_info = {0};
     struct pgwt_trace_event *events = NULL;
     if (from > srv->earliest_wall_ns && from > 0) {
-        events = server_load_markers_fi(srv, srv->earliest_wall_ns, from - 1,
-                                        req->filter.pid, &context_count,
-                                        &context_info);
+        events = server_load_exec_prefix(srv, from - 1, req->filter.pid,
+                                         &context_count, &context_info);
         if (reject_overload(srv, req, events, &context_info)) {
             free(window_events);
             return -1;
