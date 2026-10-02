@@ -51,6 +51,15 @@ test_top_queries_percentile
 # copy of the deleted sort and a bypass suite (the issue's own
 # identical-durations fixture is blind; injected realloc failures).
 test_variants_p95
+# #275: handle_top_queries kept per-pid lifecycle state in a fixed 512-entry
+# array and pgwt_compute_variants in another, and both dropped the 513th
+# distinct pid of the window SILENTLY -- short exec counts and percentiles
+# under ordinary connection churn, with no flag anywhere. Both are now
+# unbounded hash tables; the Queries-tab scan moved into compute.c so this
+# test exercises the real code rather than a copy. Includes the bypass suite
+# (assertion shapes and fixtures blind to the bug, pid 0, dense pid runs, and
+# allocation failures that must come back ABSENT rather than short).
+test_pid_cap
 # A C unit test that tests/Makefile builds but this list never names is
 # compiled, linked and then never run (TST-3). Nothing else checks that.
 test_unit_list_coverage.py

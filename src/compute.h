@@ -686,10 +686,58 @@ struct pgwt_variant {
     uint64_t step_avg_ns[PGWT_MAX_VARIANT_STEPS];
 };
 
+/* ── Per-query execution/planning lifecycle (Queries tab) ─────────
+ *
+ * Extracted from handle_top_queries (#275). It used to carry its own
+ * `pid_st[512]` with a linear probe and `if (pi < 0) continue;`, which
+ * dropped the 513th distinct pid of the window and every one after it with
+ * no flag anywhere, and its own fixed 1024-slot query-id table whose probe
+ * loop had no bound (a window with 1024 distinct query ids spun forever).
+ * Both are now unbounded hash tables. It lives here so a unit test can call
+ * the real code rather than a copy of it.
+ */
+struct pgwt_qid_lifecycle {
+    uint64_t query_id;
+    int      used;
+    int      exec_count, plan_count;
+    double   exec_total_ms, plan_total_ms;
+    double  *exec_times, *plan_times;
+    int      exec_nsamples, plan_nsamples;  /* entries actually written */
+    int      exec_cap, plan_cap;
+};
+
+struct pgwt_lifecycle_result {
+    struct pgwt_qid_lifecycle *slots;   /* open-addressed, `cap` entries */
+    int      cap;                       /* power of two, 0 when unused */
+    int      n;                         /* occupied slots */
+    int      failed;                    /* allocation failure: the caller
+                                           MUST error, never serialise a
+                                           short-but-complete-looking answer */
+};
+
+/* Scan one loaded window's markers into per-query exec/plan totals and
+ * duration samples. Never partial: on allocation failure it sets
+ * out->failed and produces nothing. */
+void pgwt_compute_query_lifecycle(const struct pgwt_trace_event *events,
+                                  int count,
+                                  struct pgwt_lifecycle_result *out);
+
+/* The entry for `query_id`, or NULL. Non-const: the caller sorts the
+ * duration samples in place to pick percentiles. */
+struct pgwt_qid_lifecycle *
+pgwt_lifecycle_lookup(struct pgwt_lifecycle_result *r, uint64_t query_id);
+
+void pgwt_lifecycle_free(struct pgwt_lifecycle_result *r);
+
 struct pgwt_variants_result {
     struct pgwt_variant *variants;  /* malloc'd, caller frees */
     int    num_variants;
     int    total_executions;        /* total EXEC_START/END pairs found */
+    /* #275: the per-pid state map is unbounded, so the only way phase 1 can
+     * stop early is a real allocation failure. When it does, the caller
+     * MUST report an error — a short variant list that looks complete is
+     * the defect this field exists to prevent. */
+    int    failed;
 };
 
 /* Phase selectors for variant extraction */

@@ -2754,87 +2754,27 @@ static void handle_top_queries(struct pgwt_server *srv, struct pgwt_request *req
                                  req->from_ns, req->to_ns, wall_ms, &res);
     }
 
-    /* Compute per-query exec/plan stats from markers (same events, no second load) */
-    struct qid_lifecycle {
-        uint64_t query_id;
-        int used;
-        int exec_count, plan_count;
-        double exec_total_ms, plan_total_ms;
-        double *exec_times, *plan_times;
-        int exec_nsamples, plan_nsamples;  /* actual entries written */
-        int exec_cap, plan_cap;
-    };
-    #define QLC_HT_SIZE 1024
-    #define QLC_HT_MASK (QLC_HT_SIZE - 1)
-    struct qid_lifecycle *qlc = calloc(QLC_HT_SIZE, sizeof(*qlc));
-
-    if (qlc && all_events) {
-        struct { uint32_t pid; uint64_t exec_start_ns, plan_start_ns; uint64_t qid; }
-            pid_st[512];
-        int npids = 0;
-
-        for (int i = 0; i < ecount; i++) {
-            const struct pgwt_trace_event *ev = &all_events[i];
-            uint32_t m = ev->old_event;
-            if (!PGWT_IS_MARKER(m)) continue;
-
-            int pi = -1;
-            for (int j = 0; j < npids; j++)
-                if (pid_st[j].pid == ev->pid) { pi = j; break; }
-            if (pi < 0 && npids < 512) {
-                pi = npids++;
-                memset(&pid_st[pi], 0, sizeof(pid_st[0]));
-                pid_st[pi].pid = ev->pid;
-            }
-            if (pi < 0) continue;
-
-            if (m == PGWT_MARKER_EXEC_START) {
-                pid_st[pi].exec_start_ns = ev->timestamp_ns;
-                pid_st[pi].qid = ev->query_id;
-            } else if (m == PGWT_MARKER_EXEC_END && pid_st[pi].exec_start_ns) {
-                double ms = (ev->timestamp_ns - pid_st[pi].exec_start_ns) / 1e6;
-                uint64_t qid = pid_st[pi].qid;
-                pid_st[pi].exec_start_ns = 0;
-                if (qid == 0) continue;
-                uint32_t h = (uint32_t)((qid * 0x9e3779b9ULL) & QLC_HT_MASK);
-                while (qlc[h].used && qlc[h].query_id != qid) h = (h + 1) & QLC_HT_MASK;
-                if (!qlc[h].used) { qlc[h].used = 1; qlc[h].query_id = qid; }
-                qlc[h].exec_count++;
-                qlc[h].exec_total_ms += ms;
-                if (ms >= 0 && qlc[h].exec_nsamples < 10000) {
-                    if (qlc[h].exec_nsamples >= qlc[h].exec_cap) {
-                        int nc = qlc[h].exec_cap ? qlc[h].exec_cap * 2 : 64;
-                        double *t = realloc(qlc[h].exec_times, nc * sizeof(double));
-                        if (t) { qlc[h].exec_times = t; qlc[h].exec_cap = nc; }
-                    }
-                    if (qlc[h].exec_times && qlc[h].exec_nsamples < qlc[h].exec_cap)
-                        qlc[h].exec_times[qlc[h].exec_nsamples++] = ms;
-                }
-            } else if (m == PGWT_MARKER_PLAN_START) {
-                pid_st[pi].plan_start_ns = ev->timestamp_ns;
-                pid_st[pi].qid = ev->query_id;
-            } else if (m == PGWT_MARKER_PLAN_END && pid_st[pi].plan_start_ns) {
-                double ms = (ev->timestamp_ns - pid_st[pi].plan_start_ns) / 1e6;
-                uint64_t qid = pid_st[pi].qid;
-                pid_st[pi].plan_start_ns = 0;
-                if (qid == 0) continue;
-                uint32_t h = (uint32_t)((qid * 0x9e3779b9ULL) & QLC_HT_MASK);
-                while (qlc[h].used && qlc[h].query_id != qid) h = (h + 1) & QLC_HT_MASK;
-                if (!qlc[h].used) { qlc[h].used = 1; qlc[h].query_id = qid; }
-                qlc[h].plan_count++;
-                qlc[h].plan_total_ms += ms;
-                if (ms >= 0 && qlc[h].plan_nsamples < 10000) {
-                    if (qlc[h].plan_nsamples >= qlc[h].plan_cap) {
-                        int nc = qlc[h].plan_cap ? qlc[h].plan_cap * 2 : 64;
-                        double *t = realloc(qlc[h].plan_times, nc * sizeof(double));
-                        if (t) { qlc[h].plan_times = t; qlc[h].plan_cap = nc; }
-                    }
-                    if (qlc[h].plan_times && qlc[h].plan_nsamples < qlc[h].plan_cap)
-                        qlc[h].plan_times[qlc[h].plan_nsamples++] = ms;
-                }
-            }
-        }
-        /* events freed below with all_events */
+    /* Compute per-query exec/plan stats from markers (same events, no
+     * second load). #275: this used to be inline here with a fixed
+     * pid_st[512] that silently dropped the 513th pid of the window, and a
+     * fixed 1024-slot query-id table whose probe loop never terminated when
+     * full. Both are unbounded now, and the scan lives in compute.c so a
+     * unit test exercises the real code. */
+    struct pgwt_lifecycle_result lcres;
+    pgwt_compute_query_lifecycle(all_events, ecount, &lcres);
+    if (lcres.failed) {
+        pgwt_lifecycle_free(&lcres);
+        free(all_events);
+        free(res.rows);
+        cJSON *err = cJSON_CreateObject();
+        cJSON_AddNumberToObject(err, "id", (double)req->id);
+        cJSON_AddStringToObject(err, "error", "query lifecycle compute failed");
+        cJSON_AddStringToObject(err, "code", "compute_failed");
+        cJSON_AddStringToObject(err, "hint", "narrow the time range and retry");
+        if (from_summaries) add_fidelity_window(err, &wfid);
+        else                add_fidelity(err, &linfo);
+        emit_json(err);
+        return;
     }
 
     /* Helper: compute percentile from sorted array */
@@ -2932,12 +2872,10 @@ static void handle_top_queries(struct pgwt_server *srv, struct pgwt_request *req
         }
 
         /* Exec/plan lifecycle stats from markers */
-        if (qlc) {
-            uint64_t qid = res.rows[i].query_id;
-            uint32_t h = (uint32_t)((qid * 0x9e3779b9ULL) & QLC_HT_MASK);
-            while (qlc[h].used && qlc[h].query_id != qid) h = (h + 1) & QLC_HT_MASK;
-            if (qlc[h].used && qlc[h].query_id == qid) {
-                struct qid_lifecycle *lc = &qlc[h];
+        {
+            struct pgwt_qid_lifecycle *lc =
+                pgwt_lifecycle_lookup(&lcres, res.rows[i].query_id);
+            if (lc) {
                 cJSON_AddNumberToObject(r, "exec_count", lc->exec_count);
                 cJSON_AddNumberToObject(r, "plan_count", lc->plan_count);
                 if (lc->exec_count > 0) {
@@ -2994,13 +2932,7 @@ static void handle_top_queries(struct pgwt_server *srv, struct pgwt_request *req
     cJSON_AddNumberToObject(root, "backfilled_ms", res.backfilled_ms);
     emit_json(root);
 
-    if (qlc) {
-        for (int i = 0; i < QLC_HT_SIZE; i++) {
-            free(qlc[i].exec_times);
-            free(qlc[i].plan_times);
-        }
-        free(qlc);
-    }
+    pgwt_lifecycle_free(&lcres);
     free(all_events);
     free(res.rows);
 }
@@ -4260,6 +4192,22 @@ static void handle_variants(struct pgwt_server *srv, struct pgwt_request *req)
                            PGWT_PHASE_PLAN, &plan_res);
 
     free(events);
+
+    /* #275: the per-pid state map no longer has a 512-entry cap, so the
+     * only early exit is an allocation failure. Report it instead of
+     * serialising a variant list that is short but looks complete. */
+    if (exec_res.failed || plan_res.failed) {
+        free(exec_res.variants);
+        free(plan_res.variants);
+        cJSON *err = cJSON_CreateObject();
+        cJSON_AddNumberToObject(err, "id", (double)req->id);
+        cJSON_AddStringToObject(err, "error", "variants compute failed");
+        cJSON_AddStringToObject(err, "code", "compute_failed");
+        cJSON_AddStringToObject(err, "hint", "narrow the time range and retry");
+        add_fidelity(err, &linfo);
+        emit_json(err);
+        return;
+    }
 
     cJSON *root = cJSON_CreateObject();
     cJSON_AddNumberToObject(root, "id", (double)req->id);
