@@ -7,6 +7,7 @@
 #include "summary_writer.h"
 #include "summary_reader.h"
 #include "wait_event.h"
+#include "percentile.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -3822,6 +3823,15 @@ static int cmp_variant_time_desc(const void *a, const void *b)
 #define VARIANT_HT_SIZE 4096
 #define VARIANT_HT_MASK (VARIANT_HT_SIZE - 1)
 
+/* Per-variant p95 is computed from a bounded sample of execution times:
+ * the FIRST PGWT_VARIANT_MAX_SAMPLES executions of that variant, in arrival
+ * order. Beyond that the sample is closed and later executions are counted
+ * (exec_count) but not sampled, so a truncated p95 is a percentile of a
+ * prefix, not of the whole population -- prefix bias is a known limitation
+ * (#271); pgwt_variant.p95_sample_n reports the sample size so a consumer
+ * can tell a truncated p95 from a complete one. */
+#define PGWT_VARIANT_MAX_SAMPLES 10000
+
 struct variant_accum {
     uint64_t hash;
     int      used;
@@ -3830,6 +3840,13 @@ struct variant_accum {
     uint64_t total_ns;
     uint64_t *exec_times;       /* for percentile calculation */
     int      exec_times_cap;
+    /* Slots of exec_times ACTUALLY WRITTEN, incremented only on a successful
+     * store. Never inferred from exec_count/cap (#271): that inference was
+     * the bug -- it counted slots 10000..cap that the sampling guard never
+     * wrote, so the sort and the p95 pick ran over indeterminate memory
+     * (realloc does not zero). It also cannot survive a transient realloc
+     * failure, which drops a sample and would leave a hole below the bound. */
+    int      exec_times_n;
     double   loop_n_sum;        /* sum of loop iteration counts */
     int      loop_n_count;
     /* Track distinct query_ids (small set per variant) */
@@ -3946,15 +3963,19 @@ void pgwt_compute_variants(const struct pgwt_trace_event *events, int count,
             va->loop_n_count++;
             variant_accum_add_qid(va, re->query_id);
 
-            /* Track exec times for percentile */
-            if (va->exec_count <= 10000) {
-                if (va->exec_count > va->exec_times_cap) {
+            /* Sample this execution's duration for the p95, appending at
+             * exec_times_n so the written region stays contiguous even if a
+             * realloc fails for one execution and succeeds for the next. */
+            if (va->exec_times_n < PGWT_VARIANT_MAX_SAMPLES) {
+                if (va->exec_times_n >= va->exec_times_cap) {
                     int newcap = va->exec_times_cap ? va->exec_times_cap * 2 : 64;
+                    if (newcap > PGWT_VARIANT_MAX_SAMPLES)
+                        newcap = PGWT_VARIANT_MAX_SAMPLES;
                     uint64_t *tmp = realloc(va->exec_times, newcap * sizeof(uint64_t));
                     if (tmp) { va->exec_times = tmp; va->exec_times_cap = newcap; }
                 }
-                if (va->exec_times && va->exec_count <= va->exec_times_cap)
-                    va->exec_times[va->exec_count - 1] = re->total_ns;
+                if (va->exec_times && va->exec_times_n < va->exec_times_cap)
+                    va->exec_times[va->exec_times_n++] = re->total_ns;
             }
 
             /* Accumulate per-step durations from raw data */
@@ -4014,17 +4035,15 @@ void pgwt_compute_variants(const struct pgwt_trace_event *events, int count,
         /* Find most frequent query_id */
         v->top_query_id = va->num_query_ids > 0 ? va->query_ids[0] : 0;
 
-        /* p95 */
-        if (va->exec_times && va->exec_count > 0) {
-            int n = va->exec_count < va->exec_times_cap ? va->exec_count : va->exec_times_cap;
-            /* Simple sort for p95 */
-            for (int a = 0; a < n - 1; a++)
-                for (int b = a + 1; b < n; b++)
-                    if (va->exec_times[a] > va->exec_times[b]) {
-                        uint64_t tmp = va->exec_times[a];
-                        va->exec_times[a] = va->exec_times[b];
-                        va->exec_times[b] = tmp;
-                    }
+        /* p95 over the sampled executions ONLY -- exec_times_n, never
+         * exec_count (#271) and never the capacity. qsort, not the old
+         * O(n^2) exchange sort (#269): the array holds no satellite data,
+         * so the ascending permutation is unique and the picked value is
+         * bit-identical to the exchange sort's for the same input. */
+        v->p95_sample_n = va->exec_times_n;
+        if (va->exec_times && va->exec_times_n > 0) {
+            int n = va->exec_times_n;
+            pgwt_sort_u64_asc(va->exec_times, n);
             v->p95_ns = va->exec_times[(int)(n * 0.95)];
         }
 

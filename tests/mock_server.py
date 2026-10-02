@@ -434,7 +434,7 @@ _CANNED["variants"] = {
         "num_variants": 2,
         "variants": [
             {"exec_count": 30000, "num_queries": 1, "total_ms": 2790.0,
-             "avg_ms": 0.093, "p95_ms": 0.30, "avg_loop_n": 1,
+             "avg_ms": 0.093, "p95_ms": 0.30, "p95_sample_n": 10000, "avg_loop_n": 1,
              "top_query_id": 3886912043147135675,
              "steps": [
                  {"name": "CPU*", "avg_ms": 0.04, "class": "cpu"},
@@ -443,7 +443,7 @@ _CANNED["variants"] = {
              ],
              "query_text": "UPDATE pgbench_accounts SET abalance = abalance + $1 WHERE aid = $2"},
             {"exec_count": 15000, "num_queries": 1, "total_ms": 1360.0,
-             "avg_ms": 0.09, "p95_ms": 0.28, "avg_loop_n": 1,
+             "avg_ms": 0.09, "p95_ms": 0.28, "p95_sample_n": 10000, "avg_loop_n": 1,
              "top_query_id": 5371305355164922084,
              "steps": [
                  {"name": "CPU*", "avg_ms": 0.05, "class": "cpu"},
@@ -457,7 +457,7 @@ _CANNED["variants"] = {
         "num_variants": 1,
         "variants": [
             {"exec_count": 45000, "num_queries": 2, "total_ms": 495.0,
-             "avg_ms": 0.011, "p95_ms": 0.04, "avg_loop_n": 1,
+             "avg_ms": 0.011, "p95_ms": 0.04, "p95_sample_n": 10000, "avg_loop_n": 1,
              "top_query_id": 3886912043147135675,
              "steps": [
                  {"name": "CPU*", "avg_ms": 0.011, "class": "cpu"},

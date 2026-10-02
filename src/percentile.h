@@ -28,6 +28,7 @@
 #ifndef PGWT_PERCENTILE_H
 #define PGWT_PERCENTILE_H
 
+#include <stdint.h>
 #include <stdlib.h>
 
 /* Ascending order over doubles. Explicit -1/0/1 from sign comparisons, never
@@ -61,6 +62,39 @@ static inline double pgwt_percentile_at(const double *sorted, int n,
                                         double pct, int min_n)
 {
     return sorted[n > min_n ? (int)((n - 1) * pct) : n - 1];
+}
+
+/* ── uint64_t variants (#269, pgwt_compute_variants) ──────────────────────
+ *
+ * pgwt_compute_variants keeps per-variant execution times as uint64_t
+ * nanoseconds and had the same O(n^2) exchange sort. The double comparator
+ * above is NOT reusable for them: passing a uint64_t array through
+ * pgwt_cmp_double_asc reinterprets the bits as IEEE doubles, which orders
+ * them wrongly (and turns some values into NaN, for which every comparison
+ * is false).
+ *
+ * THE COMPARATOR TRAP, UNSIGNED EDITION. `return (int)(a - b)` is worse here
+ * than it is for doubles: a - b is computed in uint64_t, so 1 - 2 is
+ * 18446744073709551615, and the cast to int keeps only the low 32 bits
+ * (-1 here, but +1 for 1 - 4294967298). Nanosecond execution times routinely
+ * differ by more than 2^31, so a subtraction comparator mis-orders real
+ * data. Always the explicit -1/0/1 below.
+ */
+static inline int pgwt_cmp_u64_asc(const void *pa, const void *pb)
+{
+    uint64_t a = *(const uint64_t *)pa;
+    uint64_t b = *(const uint64_t *)pb;
+    if (a < b) return -1;
+    if (a > b) return 1;
+    return 0;
+}
+
+/* Sort v[0..n) ascending in place. n < 2 is a no-op. */
+static inline void pgwt_sort_u64_asc(uint64_t *v, int n)
+{
+    if (!v || n < 2)
+        return;
+    qsort(v, (size_t)n, sizeof(uint64_t), pgwt_cmp_u64_asc);
 }
 
 #endif /* PGWT_PERCENTILE_H */
