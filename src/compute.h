@@ -673,7 +673,13 @@ struct pgwt_variant {
     int      num_query_ids;    /* distinct query_ids */
     uint64_t total_ns;         /* total wall time across all executions */
     uint64_t avg_ns;           /* average execution time */
-    uint64_t p95_ns;           /* p95 execution time */
+    uint64_t p95_ns;           /* p95 execution time, over p95_sample_n samples */
+    int      p95_sample_n;     /* executions actually sampled for p95 (#271):
+                                * min(exec_count, PGWT_VARIANT_MAX_SAMPLES),
+                                * less any sample dropped by a failed realloc.
+                                * p95_sample_n < exec_count means the p95 is a
+                                * percentile of the FIRST p95_sample_n
+                                * executions, not of all of them. */
     double   avg_loop_n;       /* average loop iteration count */
     uint64_t top_query_id;     /* most frequent query_id */
     /* Per-step timing (avg duration per step across executions) */

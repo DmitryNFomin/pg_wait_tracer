@@ -23,6 +23,7 @@ TESTS     = test_wait_event test_cmdline test_spawn test_event_writer test_event
             test_golden_fixture test_live_accum test_window_clip \
             test_executions_attribution \
             test_top_queries_percentile \
+            test_variants_p95 \
             gen_test_traces gen_bench_traces test_concurrent_rw cross_validate \
             dump_markers wait_cpu_canary test_wait_cpu_canary
 
@@ -117,6 +118,21 @@ test_executions_attribution: test_executions_attribution.c ../src/map_reader.c \
 # I/O, no clock — runs anywhere.
 test_top_queries_percentile: test_top_queries_percentile.c ../src/percentile.h
 	$(CC) $(CFLAGS) -o $@ test_top_queries_percentile.c
+
+# test_variants_p95: #271 + #269 — pgwt_compute_variants sampled execution
+# times only while exec_count <= 10000 but read min(exec_count, cap) of a
+# realloc'd (never zeroed) array, so the p95 came out of slots that were
+# never written (~9.1 years on a real capture); the same lines sorted with
+# an O(n^2) exchange sort. Same link shape as test_window_clip (compute.c
+# with -DPGWT_SERVER, pgwt_visit_summaries stubbed in the test).
+# -Wl,--wrap=realloc lets sections 4.7/4.8 inject a transient and a total
+# allocation failure — the test FAILS if the interposer never fires, so a
+# toolchain where --wrap silently did nothing cannot pass blind.
+test_variants_p95: test_variants_p95.c ../src/compute.c ../src/percentile.h \
+                   $(BUILD)/wait_event.o $(BUILD)/spawn.o $(BUILD)/cJSON.o
+	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ test_variants_p95.c ../src/compute.c \
+	    $(BUILD)/wait_event.o $(BUILD)/spawn.o $(BUILD)/cJSON.o \
+	    -Wl,--wrap=realloc -lm
 
 test_pg13_resolve: test_pg13_resolve.c ../src/discovery.c ../src/spawn.c \
                    ../src/backend_status_layout.c \

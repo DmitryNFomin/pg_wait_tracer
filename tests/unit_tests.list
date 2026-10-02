@@ -43,6 +43,14 @@ test_executions_attribution
 # of the deleted sort, plus the (int)(a-b) comparator trap and a mutation
 # probe proving the differential can go red.
 test_top_queries_percentile
+# #271 (correctness) + #269 (cost), the same four lines of
+# pgwt_compute_variants: the p95 was selected from exec_times slots that the
+# <= 10000 sampling guard never wrote (realloc does not zero), reported as a
+# ~9.1-year p95 on the Transitions tab; and the sort was O(n^2). Now a
+# written-slot counter plus qsort. Includes a differential against a verbatim
+# copy of the deleted sort and a bypass suite (the issue's own
+# identical-durations fixture is blind; injected realloc failures).
+test_variants_p95
 # A C unit test that tests/Makefile builds but this list never names is
 # compiled, linked and then never run (TST-3). Nothing else checks that.
 test_unit_list_coverage.py

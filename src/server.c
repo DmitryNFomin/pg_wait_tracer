@@ -4185,6 +4185,9 @@ static cJSON *serialize_variants(struct pgwt_server *srv,
         cJSON_AddNumberToObject(vj, "total_ms", (double)v->total_ns / 1e6);
         cJSON_AddNumberToObject(vj, "avg_ms", (double)v->avg_ns / 1e6);
         cJSON_AddNumberToObject(vj, "p95_ms", (double)v->p95_ns / 1e6);
+        /* #271: p95 is computed from the first p95_sample_n executions, so a
+         * consumer can tell a truncated percentile from a complete one. */
+        cJSON_AddNumberToObject(vj, "p95_sample_n", v->p95_sample_n);
         cJSON_AddNumberToObject(vj, "avg_loop_n", v->avg_loop_n);
         cjson_add_int64(vj, "top_query_id", (int64_t)v->top_query_id);
 
