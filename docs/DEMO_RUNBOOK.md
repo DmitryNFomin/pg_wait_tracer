@@ -257,6 +257,22 @@ For each tab, the same four things `docs/DEMO_MAC_WALK_CHECKLIST.md` §2
 grades: no console errors, no blank panel, data actually present, and it
 paints without a visible spinner hanging.
 
+**Range and compare mode, for the duration of the walk:**
+
+- **Keep the range at 15 minutes** (the owner's stated plan is a moving
+  15-minute window). `top_queries` (behind the Queries tab) has latency
+  that tracks the requested window — measured 391 ms at 15 minutes on a
+  2583 s capture, rising toward 1237 ms at full-capture range. Widening to
+  full capture moves that cost toward seconds; there is no reason to during
+  the demo, and every reason not to.
+- **Keep compare mode off.** It was not part of this measurement and has no
+  equivalent paint-timing or window-dependence data recorded anywhere in
+  this repo.
+- **A moving window re-fetches and recomputes its overlapping data on every
+  live tick** — there is no sliding result cache. This is a property of
+  the live-window design, not a bug to watch for; it's recorded here so a
+  presenter narrating performance doesn't claim otherwise.
+
 ## 5. Recovery
 
 ### The bridge drops mid-demo
@@ -370,20 +386,30 @@ during the walk above, not test-only findings:
 - **#168** — The Timeline chart can show a degenerate, sub-pixel wait bar
   pinned at the left axis edge for a session whose window got clamped; a
   cosmetic edge artifact, not missing data.
-- **#197** — Updated (review round 6): a time-to-first-paint bound is now
-  settled at 3000 ms per tab (`docs/DEMO_REHEARSAL_CRITERIA.md` §4), measured
-  on real Chrome on the Mac against a live full-mode capture. **Queries
-  specifically takes ~2.4 s to paint, consistently** (measured 2362-2432 ms
-  across 3 navigations) — the slowest tab by a wide margin, and close enough
-  to the 3000 ms bound that the margin on it is thin. A presenter clicking
-  Queries should expect and narrate a visibly empty panel for over two
-  seconds, not treat it as something broken. Every other tab paints well
-  under a second except Transitions (~1.1-1.2 s, its DFG graph layout) and
-  Waterfall/Scatter/Concurrency/Matrix (roughly 0.5-0.7 s). Timeline has no
-  real-Chrome-on-Mac measurement yet (the probe that produced the rest of
-  these numbers clicked the bare tab rather than drilling in from a Sessions
-  row, the same #242 trap below) — don't assume it is fast or slow from this
-  round's data.
+- **#197** — Updated (post-#268 re-measurement): a time-to-first-paint bound
+  is settled at 3000 ms per tab (`docs/DEMO_REHEARSAL_CRITERIA.md` §4),
+  measured on real Chrome on the Mac against a live full-mode capture, and
+  re-run after PR #268 (#265) replaced `handle_top_queries`'s two O(n^2)
+  bubble sorts with `qsort`. **Queries previously took ~2.4 s to paint
+  (2362-2432 ms); that is now fixed — Queries measures 379-445 ms**, no
+  longer the slowest tab. **Transitions is now the slowest tab at 697-893
+  ms** (its DFG graph layout), still comfortably under the 3000 ms bound
+  (≈3.4x margin). Every other tab paints well under half a second:
+  Scatter 328-454 ms, Waterfall 380-428 ms, Concurrency 298-349 ms, Matrix
+  297-331 ms, Histogram 189-265 ms, Overview 126-193 ms, Events 137-146 ms,
+  Sessions 139-145 ms. Timeline has no real-Chrome-on-Mac measurement yet
+  (the probe that produced the rest of these numbers clicked the bare tab
+  rather than drilling in from a Sessions row, the same #242 trap below) —
+  don't assume it is fast or slow from this round's data.
+  - **Separately, `top_queries` (the server-side endpoint behind the
+    Queries tab) has latency that tracks the requested window, not a fixed
+    constant** — 14 ms at 60 s, 70 ms at 5 min, 391 ms at the demo's
+    planned 15-minute window, 1237 ms at full-capture range (measured on a
+    2583 s / 4.2M-event capture). This is a server-side range-dependence
+    finding, independent of the paint-timing fix above; see §4 below for
+    presenter guidance and `docs/DEMO_REHEARSAL_CRITERIA.md` §4 for the
+    full caveats (it is not shown to be flat across capture length, and the
+    60 s window's empty result is not attributed to a cause).
 - **#215** — The first several live ticks after startup can look like the
   view isn't advancing yet before genuinely new data has accumulated; give
   it a few ticks before judging freshness, especially right after §2–§3.

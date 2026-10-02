@@ -566,8 +566,8 @@ substitute one family for the other.
   read into `<tab>.no_blink.measured.ok` via `measured_count/attempted_count
   >= min_measured_fraction`. This criterion is therefore evaluable now; the
   dependency is resolved, not open.
-- **Per-tab time to first paint — SETTLED: 3000 ms, global, with a THIN
-  margin (owner, review round 6).** `tests/ui_live_smoke.py`'s
+- **Per-tab time to first paint — SETTLED: 3000 ms, global (owner, review
+  round 6).** `tests/ui_live_smoke.py`'s
   `_navigate_to_tab` carries `ttfp_ms` (issue #245, merged to `master` as
   `fa20067` / PR #257): elapsed ms from the navigation's own landing click
   (the Sessions-row drill-down click for Timeline, the bare tab click
@@ -575,27 +575,32 @@ substitute one family for the other.
 
   **This criterion's own requirement — ≥3 navigations per tab, on the demo
   configuration (real Chrome on the Mac, not headless Chromium on a VM) —
-  is now met.** The owner ran it directly: real Chrome 154 at the pinned
-  demo viewport (1710×981 @ DPR 2, full screen), against a **live full-mode
-  capture** on the actual demo topology (Go bridge on the Mac,
-  `pgwt-server` over ssh to the demo box), **3 navigations per tab**, each
-  preceded by a return to Overview so nothing is measured warm:
+  is now met.** The owner ran it directly, re-measured after PR #268 (#265)
+  replaced `handle_top_queries`'s two O(n^2) bubble sorts with `qsort` —
+  the prior table below was recorded before that fix and understated the
+  product: real Chrome 154 at the pinned demo viewport (1710×981 @ DPR 2,
+  full screen), against a **live full-mode capture** on the actual demo
+  topology (Go bridge on the Mac, `pgwt-server` over ssh to the demo box
+  (cx33)), **3 navigations per tab**, each preceded by a return to Overview
+  so nothing is measured warm:
 
   | tab | min | median | max |
   |---|---:|---:|---:|
-  | **queries** | **2362** | **2362** | **2432** |
-  | transitions | 1077 | 1135 | 1150 |
-  | waterfall | 693 | 700 | 712 |
-  | scatter | 644 | 651 | 692 |
-  | concurrency | 518 | 614 | 628 |
-  | matrix | 462 | 498 | 518 |
-  | histogram | 288 | 319 | 334 |
-  | overview | 177 | 212 | 262 |
-  | events | 164 | 178 | 178 |
-  | sessions | 128 | 160 | 162 |
+  | **transitions** | **697** | **707** | **893** |
+  | scatter | 328 | 445 | 454 |
+  | queries | 379 | 411 | 445 |
+  | waterfall | 380 | 412 | 428 |
+  | concurrency | 298 | 301 | 349 |
+  | matrix | 297 | 329 | 331 |
+  | histogram | 189 | 229 | 265 |
+  | overview | 126 | 133 | 193 |
+  | events | 137 | 144 | 146 |
+  | sessions | 139 | 142 | 145 |
 
   Raw per-navigation values checked against this table (3 values per tab,
-  min/median/max all reproduce exactly).
+  min/median/max all reproduce exactly;
+  `/private/tmp/claude-501/-Users-dmitryfomin-work-git-pg-wait-tracer/258d73f0-4867-4c95-9aca-9a7966648e2b/scratchpad/ttfp-post/post.json`
+  — the orchestrator's scratchpad, not checked into the repo).
 
   **Timeline is NOT in this table — recorded as not yet measured by this
   method, not as a pass.** The measurement script clicked the bare Timeline
@@ -617,25 +622,32 @@ substitute one family for the other.
   re-run; the >15x figure was never written into this document and should
   not be treated as having existed as a measurement.
 
-  **Worst single navigation: 2432 ms (queries). Margin: 3000/2432 ≈ 1.23x,
-  rounded 1.2x — NOT the "≈2.5x" an earlier version of this paragraph
-  computed from VM/headless-Chromium data (below). Replace 2.5x wherever it
-  appeared; it is now wrong.** This margin is thin on purpose, not by
-  oversight: **the bound was NOT raised in response to this measurement.**
-  Raising a gating constant on n=3, hours before a tag, is exactly the kind
-  of after-the-fact adjustment this whole document exists to prevent — the
-  same reasoning that kept `OFFCPU_CAP_PCT` at 10% in §3 above. A future
-  reader should see this as a deliberate choice, not something nobody
-  noticed. **Practical consequence, stated plainly: one slower navigation
-  during a counted attempt can fail this criterion.** Queries' own spread
-  (2362–2432 ms, a 70 ms range across 3 runs) is already most of the
-  remaining headroom.
+  **Worst single navigation: 893 ms (transitions). Margin: 3000/893 ≈
+  3.37x, rounded 3.4x.** This supersedes the pre-#268 figure of 2432 ms
+  (queries) / ≈1.2x recorded in the table above's predecessor — that
+  number is now wrong and must not be used; it measured `handle_top_queries`
+  before the qsort fix. It also supersedes the still-earlier "≈2.5x"
+  VM/headless-Chromium figure described further below, already superseded
+  once before this round. **The larger margin is a real product
+  improvement (the O(n^2) sorts were genuinely slow), not measurement
+  noise — but the bound itself was NOT raised, and is NOT being tightened,
+  on the strength of it.** Moving a gating constant in either direction on
+  n=3, hours before a tag, is exactly the kind of after-the-fact adjustment
+  this whole document exists to prevent — the same reasoning that kept
+  `OFFCPU_CAP_PCT` at 10% in §3 above and kept this bound at 3000 ms when
+  the margin was thin. A future reader should see 3000 ms as a deliberate,
+  unchanged choice, not something nobody revisited. Transitions' own spread
+  (697–893 ms, a 196 ms range across 3 runs) is now comfortably inside the
+  remaining headroom, unlike the pre-#268 queries spread that consumed most
+  of it.
 
-  **Demo-visible, not just a gate concern:** Queries takes ~2.4 s to paint,
-  consistently, on a real capture — a presenter clicking it waits with a
-  visibly empty panel for over two seconds. `docs/DEMO_RUNBOOK.md` §7 is
-  updated (this commit) to tell the presenter to expect and cover this
-  rather than be surprised on stage.
+  **Demo-visible, not just a gate concern:** pre-#268, Queries took ~2.4 s
+  to paint and was called out in `docs/DEMO_RUNBOOK.md` §7 as a tab a
+  presenter should expect and cover a visibly empty panel for. That is no
+  longer true — Queries now paints in well under half a second. The
+  slowest tab is now Transitions (~0.7–0.9 s, its DFG graph layout), which
+  was already noted in §7 as comparatively slow; `docs/DEMO_RUNBOOK.md` §7
+  is updated (this commit) to reflect both changes.
 
   **Prior VM/headless-Chromium data, superseded, kept for context only —
   do not use for the margin above:** three runs on `agent/ttfp-timing-field`
@@ -667,6 +679,40 @@ substitute one family for the other.
   capture to separate "box got busier" from "this code got slower." Until
   then, delivery-queue item 2.1 stays open (see that document) and this
   bound is the best available number, not a closed criterion.
+- **Window dependence: `top_queries` latency tracks the requested range,
+  not just whether it's one of the tabs above.** `handle_top_queries`
+  (`src/server.c:2720`) always loads raw events for its lifecycle stats
+  (exec/plan counts) — summaries carry no exec/plan markers — regardless of
+  whether `should_use_summaries` (`src/server.c:2255`) picks the summary
+  path for the class breakdown. So its cost tracks the **requested window**,
+  not a fixed per-tab constant. Measured on a 2583 s capture (4,227,072
+  events), `top_queries` alone:
+
+  | window | latency |
+  |---|---:|
+  | 60 s | 14 ms |
+  | 5 min | 70 ms |
+  | **15 min** | **391 ms** |
+  | full capture (43 min) | 1237 ms |
+
+  **Two things this does NOT establish, stated so neither gets assumed
+  later:**
+  1. **Not independent of capture length.** Each request refreshes
+     coverage twice (`coverage_refresh`, called once directly inside
+     `server_load_events_fi_mode` and once inside `should_use_summaries`,
+     `src/server.c:1845` and `src/server.c:2259`), and opening
+     `current.trace` rebuilds its block index from all committed block
+     headers every time (`pgwt_reader_open`'s meta-file strategy,
+     `src/event_reader.c`) — so some overhead does grow with the capture.
+     **391 ms is a measurement for this 43-minute session, not a constant**
+     that would hold at, say, 2 hours.
+  2. **The 60 s window's 0 rows is not explained here as "no completed
+     executions."** Below 120 s this endpoint uses raw events; at 5
+     minutes and above it can use summaries for the class breakdown
+     (`should_use_summaries`). Those are different code paths measured at
+     different window sizes, and the latency numbers above do not by
+     themselves establish why row counts differ between them — record the
+     latency observation without attaching that cause.
 - The 2026-09-29 walk's ten-tab distribution was measured with a second
   Chromium and server-side probes on the same 4-vCPU box, so using it as the
   demo bound would repeat the wrong-configuration viewport pin — superseded
@@ -769,7 +815,7 @@ left to be discovered.
 | §3 Off-CPU\* ≤ 10% | yes (`time_model_offcpu_cap_ok`), but the 10% is a **provisional catastrophic-loss tripwire**, not a calibrated bound — see §3's own corrected paragraph above: its cited "4.92 pp" derivation is a real sum but measures a different regime, unit, and quantity than the gate enforces; demo measured <0.1% (n=7, one run); kept at 10%, not tightened, on n=1 |
 | §4 zero known-failing tabs | yes (`build_demo_summary` uses raw `ok`, ignoring the exemption) |
 | §4 blink measured fraction ≥ 0.5 | yes — landed via `agent/blink-anchor-mount-seq` (#209, merged to master), inherited automatically once `agent/rehearsal-bypass-suite` rebased: `demo_rehearsal.py` has no independent blink-measurement code, it fully delegates to `ui_live_smoke.py:run_tab()`, which now calls `blink_sweep_gate_verdict` itself. Pinned with a regression test using real measured numbers (`tests/test_demo_rehearsal_lib.py`, run.id 1790574871: scatter 0.1305, transitions 0.0072–0.0172) |
-| §4 time to first paint, pinned viewport | **SETTLED** (review round 6): bound 3000 ms, global, **≈1.2x margin** (worst observed: queries at 2432 ms) — measured ≥3 navigations/tab, real Chrome 154 on the Mac, live full-mode capture on the demo topology, satisfying this criterion's own requirement in full. Margin is THIN and deliberately not widened on n=3 hours before the tag; one slow navigation in a counted attempt can fail it. Timeline not yet measured by this method (instrumentation gap: bare click, not Sessions-row drill-down — recorded as unmeasured, not a pass). `ttfp_ms` (merged `master`, `fa20067`, issue #245/PR #257) remains measurement-only and gates nothing automatically — `build_tab_result` never reads it into `ok`; the bound above is enforced only by a human reading this document during a counted attempt. Mac-side checklist: still manual sign-off, **deliberately stays qualitative** (paints without a visible spinner) — it has no stopwatch, so it does not independently check the 3000 ms number either; this round's measurement was a one-off script, not the checklist itself. Retracted: the 2026-09-29 contended walk's 30 s Timeline finding measured the "select a session" prompt from a bare tab click, not paint after a Sessions-row drill-down — the same trap this round's Timeline gap repeats at the instrumentation level, not the product level |
+| §4 time to first paint, pinned viewport | **SETTLED** (review round 6): bound 3000 ms, global, **≈3.4x margin** (worst observed: transitions at 893 ms) — re-measured after PR #268 (#265) replaced `handle_top_queries`'s O(n^2) bubble sorts with `qsort`; supersedes the pre-#268 figure of queries at 2432 ms / ≈1.2x margin, which is now wrong. Measured ≥3 navigations/tab, real Chrome 154 on the Mac, live full-mode capture on the demo topology, satisfying this criterion's own requirement in full. The bound itself (3000 ms) is unchanged and was neither widened when the margin was thin nor tightened now that it is comfortable — same reasoning both times. `top_queries` latency is separately window-dependent (391 ms at the demo's planned 15-minute window, rising toward 1237 ms at full-capture range on a 2583 s capture) — see the window-dependence finding below this bullet; that is a server-side cost, not a UI paint regression, and is unrelated to the ≈3.4x margin above. Timeline not yet measured by this method (instrumentation gap: bare click, not Sessions-row drill-down — recorded as unmeasured, not a pass). `ttfp_ms` (merged `master`, `fa20067`, issue #245/PR #257) remains measurement-only and gates nothing automatically — `build_tab_result` never reads it into `ok`; the bound above is enforced only by a human reading this document during a counted attempt. Mac-side checklist: still manual sign-off, **deliberately stays qualitative** (paints without a visible spinner) — it has no stopwatch, so it does not independently check the 3000 ms number either; this round's measurement was a one-off script, not the checklist itself. Retracted: the 2026-09-29 contended walk's 30 s Timeline finding measured the "select a session" prompt from a bare tab click, not paint after a Sessions-row drill-down — the same trap this round's Timeline gap repeats at the instrumentation level, not the product level |
 | §5 cross-tab agreement, freshness | partial — VM-side freshness: yes (`freshness_ok`, `info`'s `now_ns` vs `to_ns`); Mac-side visible freshness: manual checklist and human sign-off. Cross-tab agreement: DB-Time leg yes (`cross_tab_db_time_agreement_ok`, `time_model` vs `top_events` for the identical window); AAS leg yes (`bucket_weighted_aas_ok`, `agent/aas-agreement-and-retention`) — a bucket-weighted re-derivation from the `aas` endpoint's own `bucket_ns` over the identical window, compared against `time_model.aas`, wired into `extra_checks["cross_tab_aas_agreement"]` alongside the DB-Time leg. Retracted: the earlier walk's 0.0000% came from an unweighted mean of buckets, which was not that comparison and established no agreement; see `tests/demo_rehearsal_lib.bucket_weighted_aas_ok`'s own comment for why the two formulas diverge whenever the window does not divide the endpoint's `bucket_ns` evenly (the common case) |
 | §6 lost-event counters, overhead envelope | partial — lost-event counters: yes (`daemon_integrity_ok`: `ringbuf_drops_total`/`state_map_full_total`/`seen_query_ids_full_total`, already on the wire via pgwt-server's control proxy, no `src/` change needed; blind spot stated in the code comment: a lost LIFECYCLE event is silent, no counter increments). Overhead envelope: **not yet measured for the demo workload on the demo box**. Correction: the earlier claim that nothing measures full mode was wrong. Every box-check runs `tests/test_overhead.sh --quick` (~10 minutes) via `tests/run_all.sh`; its paired baseline/tracer A/B uses the default pgbench load, pins `--mode full`, and appends to `tests/results/overhead_trend.csv` on the box. The tracked CSV has only a header because `tests/results/` is excluded from box-check's up-rsync; box-generated rows are not synced back or committed. The ~70-minute sweep is the same script without `--quick`; `sampled_overhead_gate.py --mode sampled` runs only for `src/` changes. Retracted: the quick sweep is not a per-attempt requirement or a substitute for measuring the demo workload. Do n=3 paired full-mode A/B TPS runs with the demo workload on the demo box and record the envelope before counted attempt one; the 40-minute rehearsal retained neither an A/B baseline nor even its with-tracer `tps =` line (cleanup tailed 20 lines and deleted the full log) |
 | §7 no test exited 126/127 | **partial, and this is a human-readable aid, not an automated gate**: `tests/demo_rehearsal.sh`'s `report_early_exit` labels a dead subprocess's 126/127 exit code in the log for a human reading it afterward. It does NOT change the script's own exit code (every call site already `exit 1` regardless of the labeled reason) and has no test coverage of its own — reviewer finding, 2026-09-28. Do not read this row as "126/127 fails the gate automatically"; it already did, via the pre-existing `kill -0` + `exit 1` checks, which is why this addition changes nothing observable except the log's wording |
