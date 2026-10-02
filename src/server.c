@@ -1198,8 +1198,17 @@ static void span_list_add(struct pgwt_span **spans, int *n, int *cap,
     (*n)++;
 }
 
-static void cov_reset(struct pgwt_file_cov *fc)
+/* #274: `srv` is not optional — the retained-marker budget is a SERVER-wide
+ * byte count, and a file whose markers are dropped here (a rotation
+ * rewrites current.trace, a file disappears from the directory) must give
+ * those bytes back. Without that, xm_bytes only ever grows and an
+ * hours-long capture refuses the index for memory it no longer holds. */
+static void cov_reset(struct pgwt_server *srv, struct pgwt_file_cov *fc)
 {
+    if (srv) {
+        size_t held = (size_t)fc->cap_xmarks * sizeof(*fc->xmarks);
+        srv->xm_bytes = srv->xm_bytes > held ? srv->xm_bytes - held : 0;
+    }
     free(fc->s_spans);
     free(fc->t_spans);
     free(fc->marks);
@@ -1424,7 +1433,7 @@ static void cov_scan_file(struct pgwt_server *srv, struct pgwt_file_cov *fc)
         (fc->hdr_start_wall_ns != reader.header.start_time_ns ||
          fc->hdr_mono_ns != reader.header.clock_offset_ns ||
          reader.num_blocks < fc->blocks_scanned)) {
-        cov_reset(fc);
+        cov_reset(srv, fc);
         fc->is_current = is_current_trace(fc->path);
     }
 
@@ -1647,6 +1656,32 @@ static void coverage_refresh(struct pgwt_server *srv)
     for (int i = 0; i < srv->cov_count; i++)
         srv->cov[i].present = 0;
 
+    /* #274: decide which entries survive BEFORE scanning, and release the
+     * ones that do not, so a file that went away gives its retained-marker
+     * bytes back before any new file charges for its own. Rotation renames
+     * current.trace to an hourly file, which is one entry disappearing and
+     * one appearing with the SAME markers; charging both for one refresh
+     * doubles the count, and the budget refusal is latched for the life of
+     * the process, so a transient overshoot was permanent. */
+    for (int i = 0; i < srv->num_files; i++)
+        for (int c = 0; c < srv->cov_count; c++)
+            if (strcmp(srv->cov[c].path, srv->files[i].path) == 0) {
+                srv->cov[c].present = 1;
+                break;
+            }
+    {
+        int w = 0;
+        for (int i = 0; i < srv->cov_count; i++) {
+            if (srv->cov[i].present) {
+                if (w != i) srv->cov[w] = srv->cov[i];
+                w++;
+            } else {
+                cov_reset(srv, &srv->cov[i]);
+            }
+        }
+        srv->cov_count = w;
+    }
+
     int had_samples = srv->any_samples;
     for (int i = 0; i < srv->num_files; i++) {
         struct pgwt_file_cov *fc = cov_find_or_add(srv, srv->files[i].path);
@@ -1691,7 +1726,7 @@ static void coverage_refresh(struct pgwt_server *srv)
             if (w != i) srv->cov[w] = srv->cov[i];
             w++;
         } else {
-            cov_reset(&srv->cov[i]);
+            cov_reset(srv, &srv->cov[i]);
         }
     }
     srv->cov_count = w;
@@ -2585,7 +2620,7 @@ static void server_destroy(struct pgwt_server *srv)
         free(srv->cache[i].events);
     srv->cache_count = 0;
     for (int i = 0; i < srv->cov_count; i++)
-        cov_reset(&srv->cov[i]);
+        cov_reset(srv, &srv->cov[i]);
     srv->cov_count = 0;
     gens_free(srv);
     qt_map_clear(srv);

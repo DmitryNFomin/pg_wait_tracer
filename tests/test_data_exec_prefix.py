@@ -377,6 +377,56 @@ def test_rotation(t, tmpdir):
                 f"{cmd} across a rotation: identical to the full decode")
 
 
+def test_budget_released_on_rotation(t, tmpdir):
+    print("\n### 6. the byte budget is RELEASED when a file is dropped ###")
+    # The budget is a server-wide byte count. current.trace is rewritten
+    # whenever the daemon rotates at the top of the hour or restarts, and the
+    # coverage entry is reset — so the markers that file held are freed. If
+    # the counter is not credited back, an hours-long capture refuses the
+    # index for memory it no longer holds, which is exactly the capture
+    # length the demo runs at. The budget here fits ONE copy of the
+    # fixture's markers and not two.
+    trace_dir = tempfile.mkdtemp(prefix="pgwt_prefix_budget_", dir=tmpdir)
+    sc = build_scenario()
+    generate_traces(sc, output_dir=trace_dir)
+
+    err = os.path.join(tmpdir, "stderr-rotate.txt")
+    env = dict(PGWT_EXEC_PREFIX_DEBUG="1",
+               PGWT_EXEC_MARK_MAX_BYTES=str(150_000))
+    kw = {"from_": WIN_FROM, "to_": WIN_TO}
+    with ServerHarness(trace_dir, env=env, stderr_path=err) as srv:
+        first = srv.query("executions", **kw)
+        # Rotate: current.* is renamed to a timestamped immutable file,
+        # exactly as src/event_writer.c does at the top of the hour. The old
+        # coverage entry goes away and a new one is built for the renamed
+        # file, so the SAME markers are retained under a different entry.
+        # The byte count must end up where it started, not doubled.
+        # Same renaming tests/gen_test_traces.c's --rotate does, which is
+        # what src/event_writer.c does at the top of the hour.
+        os.rename(os.path.join(trace_dir, "current.trace"),
+                  os.path.join(trace_dir, "2025-01-01_11.trace.lz4"))
+        os.unlink(os.path.join(trace_dir, "current.trace.meta"))
+        if os.path.exists(os.path.join(trace_dir, "current.summary")):
+            os.rename(os.path.join(trace_dir, "current.summary"),
+                      os.path.join(trace_dir, "2025-01-01_11.summary.lz4"))
+        if os.path.exists(os.path.join(trace_dir, "current.summary.meta")):
+            os.unlink(os.path.join(trace_dir, "current.summary.meta"))
+        second = srv.query("executions", **kw)
+    paths = read_paths(err)
+
+    t.check_eq(len(paths), 2, f"two prefix path lines (got {paths})")
+    if len(paths) == 2:
+        t.check_eq(paths[0][0], "index",
+                   "the first request fits the budget and uses the index")
+        t.check_eq(paths[1][0], "index",
+                   "after the rotation the budget is credited back and "
+                   "the index is still used")
+        t.check_eq(paths[1][1], paths[0][1],
+                   "the rebuilt index holds the same marker count")
+    t.check(normalize(first) == normalize(second),
+            "the answer is unchanged across the rotation")
+
+
 def main():
     t = TestRunner("exec prefix index (#274)")
     print(f"=== {t.name} ===")
@@ -388,6 +438,7 @@ def main():
         test_incremental_across_requests(t, trace_dir, tmpdir)
         test_refusals(t, trace_dir, tmpdir)
         test_rotation(t, tmpdir)
+        test_budget_released_on_rotation(t, tmpdir)
     finally:
         cleanup_traces(trace_dir)
         cleanup_traces(tmpdir)
