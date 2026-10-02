@@ -265,6 +265,15 @@ paints without a visible spinner hanging.
   2583 s capture, rising toward 1237 ms at full-capture range. Widening to
   full capture moves that cost toward seconds; there is no reason to during
   the demo, and every reason not to.
+- **Never narrow to ~1 minute on Queries.** Measured (all windows anchored
+  well inside the capture, no edge effects): a 110 s window and a 130 s
+  window both returned 0 rows from `top_queries`, while 300 s and 900 s
+  windows returned 7 rows each — a window shorter than ~5 minutes can
+  legitimately render an empty Queries panel with no error chip. This is a
+  recorded observation, not an explained one: the data crosses the 120 s
+  raw/summaries code-path boundary (130 s) while still showing 0 rows, so
+  that boundary is not the cause either. An empty Queries panel on stage is
+  a visible failure that no gate catches — stay at 15 minutes.
 - **Keep compare mode off.** It was not part of this measurement and has no
   equivalent paint-timing or window-dependence data recorded anywhere in
   this repo.
@@ -272,6 +281,23 @@ paints without a visible spinner hanging.
   live tick** — there is no sliding result cache. This is a property of
   the live-window design, not a bug to watch for; it's recorded here so a
   presenter narrating performance doesn't claim otherwise.
+- **The live window's right edge always ends in uncommitted data.** The
+  daemon's event writer flushes a block only when it fills to 4096 events
+  (`PGWT_BLOCK_EVENTS`, `pgwt_writer_push_event`, `src/event_writer.c:654`)
+  — there is no timer-based flush. At a 15-minute window this is an
+  invisible trailing gap; don't read anything into the chart's last few
+  seconds looking slightly behind.
+- **Known one-tick stall if the session crosses an hour boundary.**
+  `pgwt_writer_check_rotation` (`src/event_writer.c:722`) rotates
+  `current.trace` on the **local top-of-hour** (`tm_yday*24+tm_hour` via
+  `localtime_r`, `src/event_writer.c:731`), renaming it to an archive
+  `.trace.lz4` and starting a fresh `current.trace`. The next request whose
+  window still overlaps that archive triggers `get_cached_immutable`
+  (`src/server.c:942`), which decodes the **entire** newly-rotated file's
+  blocks into cache in one pass on first access (every subsequent request
+  hits the cache and is fast again) — a one-time stall of unmeasured size.
+  If the demo slot crosses :00, expect one tick to pause longer than usual
+  right after the hour changes; it is this mechanism, not a frozen demo.
 
 ## 5. Recovery
 

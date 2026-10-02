@@ -697,22 +697,44 @@ substitute one family for the other.
 
   **Two things this does NOT establish, stated so neither gets assumed
   later:**
-  1. **Not independent of capture length.** Each request refreshes
-     coverage twice (`coverage_refresh`, called once directly inside
-     `server_load_events_fi_mode` and once inside `should_use_summaries`,
-     `src/server.c:1845` and `src/server.c:2259`), and opening
-     `current.trace` rebuilds its block index from all committed block
-     headers every time (`pgwt_reader_open`'s meta-file strategy,
-     `src/event_reader.c`) — so some overhead does grow with the capture.
-     **391 ms is a measurement for this 43-minute session, not a constant**
-     that would hold at, say, 2 hours.
+  1. **Not "flat", and not unbounded — grows by at most a few milliseconds
+     over the demo.** `handle_top_queries` opens `current.trace` three
+     times per request: once via `coverage_refresh` inside
+     `server_load_events_fi_mode` (`src/server.c:1845`), once more via
+     `load_file_range_mono`'s own `pgwt_reader_open` for the actual data
+     load (`src/server.c:1908`, function at `src/server.c:1064`), and a
+     third time via `coverage_refresh` inside `should_use_summaries`
+     (`src/server.c:2259`). Each open rebuilds `current.trace`'s block
+     index from all committed block headers via its meta-file strategy
+     (`pgwt_reader_open`, `src/event_reader.c`) — so this part of the cost
+     does grow with the capture, not with the requested window. But all
+     four rows in the table above were measured against the same capture
+     (so `current.trace` held the same committed-block count for all of
+     them, varying only the requested window), and the 60 s row already
+     pays this fixed per-request cost in full: its 14 ms total bounds it.
+     That caps the fixed component, not the total — **391 ms is a
+     measurement for this 43-minute session, not a constant that would
+     hold at a longer one**, since the fixed component itself would be
+     larger against a `current.trace` holding more committed blocks (up to
+     an hour's worth before rotation resets it; see the runbook's
+     hourly-rotation note).
   2. **The 60 s window's 0 rows is not explained here as "no completed
      executions."** Below 120 s this endpoint uses raw events; at 5
      minutes and above it can use summaries for the class breakdown
      (`should_use_summaries`). Those are different code paths measured at
      different window sizes, and the latency numbers above do not by
      themselves establish why row counts differ between them — record the
-     latency observation without attaching that cause.
+     latency observation without attaching that cause. Separately measured
+     (all windows anchored well inside the capture, ending 5 minutes before
+     the last event, so no edge effects): a 110 s window (raw path) and a
+     130 s window (summaries path, since it crosses the 120 s boundary)
+     both returned **0 rows**; 300 s and 900 s windows (both summaries)
+     returned 7 rows each. The 130 s result disproves treating 120 s as the
+     boundary between "empty" and "has rows" — rows appear somewhere
+     between 130 s and 5 minutes, and this data does not say where or why.
+     **Practical consequence: a window shorter than ~5 minutes can render
+     an empty Queries panel with no error** — keep the demo's range at 15
+     minutes; never narrow to 1 minute on Queries.
 - The 2026-09-29 walk's ten-tab distribution was measured with a second
   Chromium and server-side probes on the same 4-vCPU box, so using it as the
   demo bound would repeat the wrong-configuration viewport pin — superseded
