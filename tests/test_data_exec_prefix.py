@@ -191,8 +191,9 @@ def normalize(resp):
     return r
 
 
-def read_paths(stderr_path):
-    """pgwt-server's own record of which prefix path served each request."""
+def read_lines(stderr_path):
+    """pgwt-server's own record of each prefix pass: which path served it,
+    how many markers it read, and the retained-marker byte accounting."""
     out = []
     if not os.path.exists(stderr_path):
         return out
@@ -201,8 +202,19 @@ def read_paths(stderr_path):
             if line.startswith("pgwt-prefix: "):
                 parts = dict(kv.split("=", 1)
                              for kv in line.split(None, 1)[1].split())
-                out.append((parts.get("path"), int(parts.get("markers", -1))))
+                out.append({
+                    "path": parts.get("path"),
+                    "markers": int(parts.get("markers", -1)),
+                    "xm_bytes": int(parts.get("xm_bytes", -1)),
+                    "xm_peak": int(parts.get("xm_peak", -1)),
+                    "budget": int(parts.get("budget", -1)),
+                })
     return out
+
+
+def read_paths(stderr_path):
+    """(path, markers) pairs — the shape most sections want."""
+    return [(d["path"], d["markers"]) for d in read_lines(stderr_path)]
 
 
 def run_requests(trace_dir, env, tmpdir, tag, requests):
@@ -215,6 +227,7 @@ def run_requests(trace_dir, env, tmpdir, tag, requests):
     with ServerHarness(trace_dir, env=full_env, stderr_path=err) as srv:
         for cmd, kw in requests:
             out.append(srv.query(cmd, **kw))
+    run_requests.last_lines = read_lines(err)
     return out, read_paths(err)
 
 
@@ -427,6 +440,69 @@ def test_budget_released_on_rotation(t, tmpdir):
             "the answer is unchanged across the rotation")
 
 
+def test_budget_is_a_real_bound(t, trace_dir, tmpdir):
+    print("\n### 7. the budget bounds BYTES HELD, not just when it latches ###")
+    # The check that matters is against the size the allocation will
+    # actually REACH. Gating on "does one more marker fit" and then
+    # DOUBLING the array is not a bound: with the budget nearly full the
+    # doubling asks for roughly the whole budget again, and the process is
+    # far past it before the next marker trips refusal. On an 8 GB box
+    # shared with four PostgreSQL clusters and a 25%-of-RAM file cache,
+    # that is not a rounding error.
+    #
+    # 30,000 bytes is deliberately NOT a multiple of the 1024-marker first
+    # block (24,576 bytes), so the second growth must be CLAMPED to the
+    # 5,424 bytes that remain rather than refused outright or taken in
+    # full. That makes the three outcomes distinguishable:
+    #   peak == 24,576  -> refused instead of clamping (a bound, but lossy)
+    #   peak == 30,000  -> clamped exactly to the budget   (what we want)
+    #   peak == 49,152  -> doubled past it                 (the defect)
+    budget = 30_000
+    first_block = 1024 * 24
+    reqs = [("executions", {"from_": WIN_FROM, "to_": WIN_TO}),
+            ("exec_scatter", {"from_": WIN_FROM, "to_": WIN_TO})]
+
+    truth, _ = run_requests(trace_dir, {"PGWT_EXEC_PREFIX_INDEX": "0"},
+                            tmpdir, "bound_truth", reqs)
+    resp, _ = run_requests(trace_dir,
+                           {"PGWT_EXEC_MARK_MAX_BYTES": str(budget)},
+                           tmpdir, "bound", reqs)
+    lines = run_requests.last_lines
+
+    t.check(len(lines) == len(reqs),
+            f"a prefix line per request (got {len(lines)})")
+    t.check(all(d["budget"] == budget for d in lines),
+            f"pgwt-server is using the budget under test "
+            f"({[d['budget'] for d in lines]})")
+    peak = max((d["xm_peak"] for d in lines), default=-1)
+    t.check(peak >= 0, f"peak retained bytes were reported (got {peak})")
+    # THE assertion: the bytes actually held never exceeded the budget.
+    t.check(peak <= budget,
+            f"peak retained-marker bytes {peak} <= budget {budget}")
+    t.check(peak > first_block,
+            f"the growth was CLAMPED to the remaining budget, not refused "
+            f"at the first block (peak {peak} > {first_block})")
+    t.check(all(d["path"] == "legacy" for d in lines),
+            f"and once full the index refuses "
+            f"({[d['path'] for d in lines]})")
+    for (cmd, _kw), a, b in zip(reqs, resp, truth):
+        t.check(normalize(a) == normalize(b),
+                f"{cmd}: the bounded refusal still returns the exact answer")
+
+    # A budget the markers fit in must stay under it too, and must NOT
+    # refuse — otherwise the assertion above would hold for any budget.
+    big = 64 * 1024 * 1024
+    run_requests(trace_dir, {"PGWT_EXEC_MARK_MAX_BYTES": str(big)},
+                 tmpdir, "bound_ok", reqs)
+    ok = run_requests.last_lines
+    t.check(all(d["path"] == "index" for d in ok),
+            f"a budget the markers fit in does not refuse "
+            f"({[d['path'] for d in ok]})")
+    t.check(all(0 < d["xm_peak"] <= big for d in ok),
+            f"...and still holds within it "
+            f"({[d['xm_peak'] for d in ok]} <= {big})")
+
+
 def main():
     t = TestRunner("exec prefix index (#274)")
     print(f"=== {t.name} ===")
@@ -439,6 +515,7 @@ def main():
         test_refusals(t, trace_dir, tmpdir)
         test_rotation(t, tmpdir)
         test_budget_released_on_rotation(t, tmpdir)
+        test_budget_is_a_real_bound(t, trace_dir, tmpdir)
     finally:
         cleanup_traces(trace_dir)
         cleanup_traces(tmpdir)

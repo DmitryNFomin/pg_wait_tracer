@@ -296,7 +296,10 @@ struct pgwt_server {
      * A marker index that cannot see everything must never answer. */
     int      retain_exec_marks;
     int      xm_unusable;
-    size_t   xm_bytes;
+    size_t   xm_bytes;       /* retained-marker CAPACITY currently charged */
+    size_t   xm_peak_bytes;  /* high-water mark of the above, for the test
+                                that asserts the budget is a real bound and
+                                not just the point where refusal latches */
 
     /* Query text map: query_id → SQL text (dynamic, power-of-2 sized) */
     struct qt_entry *qt_map;
@@ -1375,19 +1378,59 @@ static void cov_decode_markers(struct pgwt_server *srv,
                 fc->n_marks++;
             }
             if (xm_here && PGWT_IS_MARKER(m)) {
-                if (srv->xm_bytes + sizeof(struct pgwt_exec_mark)
-                        > exec_mark_max_bytes()) {
-                    cov_marks_give_up(srv, fc, "retained markers exceeded "
-                                      "PGWT_EXEC_MARK_MAX_MB");
-                    xm_here = 0;
-                    want_xm = 0;
-                    continue;
-                }
+                /* The budget bounds CAPACITY, and capacity only changes
+                 * here, so this is the only place it has to be checked —
+                 * writing into capacity already charged cannot exceed it.
+                 *
+                 * It is checked against the size the allocation will
+                 * actually REACH, not against the current total plus one
+                 * element: gating on "does one more marker fit" and then
+                 * DOUBLING is not a bound at all. With a 1 GiB budget and
+                 * an array already near it, the doubling asks for ~2 GiB,
+                 * and the process is far past the budget before the next
+                 * marker trips refusal. The growth is clamped to whatever
+                 * remains instead, so a smaller step that still fits is
+                 * taken rather than refusing outright, and
+                 * srv->xm_bytes <= exec_mark_max_bytes() holds at every
+                 * point (asserted via xm_peak_bytes in
+                 * tests/test_data_exec_prefix.py section 7).
+                 *
+                 * The step is capped as well. realloc may map the old and
+                 * the new array at once while copying, so the transient
+                 * peak is xm_bytes + the step; the step is the only part
+                 * of that this code chooses, and an uncapped doubling
+                 * makes it as large as the budget. Capped, the transient
+                 * overshoot is at most XM_GROW_STEP_BYTES, independent of
+                 * the budget. Above that size growth is linear, which
+                 * costs one copy per step — at the demo marker rate that
+                 * is one extra copy every few minutes, which is the right
+                 * trade against asking an 8 GB box shared with four
+                 * PostgreSQL clusters for a gigabyte in one call. */
+                #define XM_GROW_STEP_BYTES ((size_t)64 * 1024 * 1024)
                 if (fc->n_xmarks >= fc->cap_xmarks) {
-                    int newcap = fc->cap_xmarks ? fc->cap_xmarks * 2 : 1024;
+                    const size_t esz = sizeof(struct pgwt_exec_mark);
+                    size_t budget = exec_mark_max_bytes();
+                    size_t room = srv->xm_bytes < budget
+                                ? budget - srv->xm_bytes : 0;
+                    size_t step_bytes = (size_t)fc->cap_xmarks * esz;
+                    if (step_bytes == 0)
+                        step_bytes = 1024 * esz;        /* first block */
+                    if (step_bytes > XM_GROW_STEP_BYTES)
+                        step_bytes = XM_GROW_STEP_BYTES;
+                    if (step_bytes > room)
+                        step_bytes = room;
+                    int step = (int)(step_bytes / esz);
+                    int newcap = step > 0 ? fc->cap_xmarks + step : 0;
+                    if (step <= 0 || newcap <= fc->cap_xmarks) {
+                        cov_marks_give_up(srv, fc, "retained markers reached "
+                                          "the PGWT_EXEC_MARK_MAX_MB budget");
+                        xm_here = 0;
+                        want_xm = 0;
+                        continue;
+                    }
                     struct pgwt_exec_mark *tmp =
                         test_load_alloc_failure("exec_mark_grow") ? NULL :
-                        realloc(fc->xmarks, (size_t)newcap * sizeof(*tmp));
+                        realloc(fc->xmarks, (size_t)newcap * esz);
                     if (!tmp) {
                         cov_marks_give_up(srv, fc, "retained-marker array "
                                           "could not grow");
@@ -1395,8 +1438,9 @@ static void cov_decode_markers(struct pgwt_server *srv,
                         want_xm = 0;
                         continue;
                     }
-                    srv->xm_bytes += (size_t)(newcap - fc->cap_xmarks)
-                                   * sizeof(*tmp);
+                    srv->xm_bytes += (size_t)step * esz;
+                    if (srv->xm_bytes > srv->xm_peak_bytes)
+                        srv->xm_peak_bytes = srv->xm_bytes;
                     fc->xmarks = tmp;
                     fc->cap_xmarks = newcap;
                 }
@@ -2607,8 +2651,10 @@ server_load_exec_prefix(struct pgwt_server *srv, uint64_t to_wall_ns,
                                  out_count, info);
     const char *dbg = getenv("PGWT_EXEC_PREFIX_DEBUG");
     if (dbg && dbg[0] == '1')
-        fprintf(stderr, "pgwt-prefix: path=%s markers=%d\n",
-                used_index ? "index" : "legacy", *out_count);
+        fprintf(stderr, "pgwt-prefix: path=%s markers=%d xm_bytes=%zu "
+                "xm_peak=%zu budget=%zu\n",
+                used_index ? "index" : "legacy", *out_count,
+                srv->xm_bytes, srv->xm_peak_bytes, exec_mark_max_bytes());
     return ev;
 }
 
