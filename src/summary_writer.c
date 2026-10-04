@@ -74,6 +74,17 @@ static void accum_reset(struct pgwt_summary_accum *acc)
     memset(acc, 0, sizeof(*acc));
 }
 
+/* End the current second. #277: clearing only accum_active left every
+ * counter in place, so the next event in that same second resumed counting
+ * on top of a record already on disk and the second was written again as a
+ * superset. The accumulator must never carry counts across a flush, so the
+ * reset and the flag live together in one place. */
+static void accum_close(struct pgwt_summary_writer *w)
+{
+    accum_reset(&w->accum);
+    w->accum_active = false;
+}
+
 static uint32_t hash32(uint32_t x)
 {
     x = ((x >> 16) ^ x) * 0x45d9f3b;
@@ -761,6 +772,7 @@ static int flush_accum(struct pgwt_summary_writer *w)
         return 0;
 
     struct pgwt_summary_accum *acc = &w->accum;
+    uint64_t flushed_second_mono_ns = acc->second_mono_ns;
 
     /* Serialize */
     size_t encoded_size = pgwt_summary_serialize(acc, w->encode_buf,
@@ -772,7 +784,10 @@ static int flush_accum(struct pgwt_summary_writer *w)
         (int)encoded_size, (int)w->compress_buf_size);
     if (compressed_size <= 0) {
         fprintf(stderr, "WARN: summary LZ4 compression failed\n");
-        w->accum_active = false;
+        /* Nothing reached the disk: drop the second rather than carry its
+         * counts into the next one, and leave last_flushed alone so a late
+         * event for it is still allowed to open a fresh record. */
+        accum_close(w);
         return -1;
     }
 
@@ -816,7 +831,10 @@ static int flush_accum(struct pgwt_summary_writer *w)
 
     w->total_records_written++;
     w->total_bytes_written += sizeof(bh) + compressed_size;
-    w->accum_active = false;
+    /* This second is now on disk and immutable (#277). */
+    w->last_flushed_second_mono_ns = flushed_second_mono_ns;
+    w->have_flushed_second = true;
+    accum_close(w);
 
     /* Flush + committed block count (same pattern as event_writer) */
     fflush(w->fp);
@@ -905,11 +923,24 @@ int pgwt_summary_push_event(struct pgwt_summary_writer *w,
     /* Determine which second this event belongs to (monotonic, floored) */
     uint64_t evt_second = (evt->timestamp_ns / 1000000000ULL) * 1000000000ULL;
 
+    /* #277: a second whose record is already on disk can never be reopened
+     * — the reader sums every record it finds, so a second record for the
+     * same second is counted twice. An event that arrives after its second
+     * was written is folded into the oldest second still open, which is
+     * exactly what already happens to an out-of-order event inside the
+     * stream (the boundary test below is `>`, so a backwards event joins
+     * the current accumulator). Counts are conserved; only the event's
+     * second moves, by less than one second. */
+    if (w->have_flushed_second &&
+        evt_second <= w->last_flushed_second_mono_ns) {
+        evt_second = w->last_flushed_second_mono_ns + 1000000000ULL;
+        w->late_events_folded_total++;
+    }
+
     /* Second boundary detection */
     if (w->accum_active && evt_second > w->accum.second_mono_ns) {
-        /* New second — flush old accumulator */
+        /* New second — flush old accumulator (which resets it) */
         flush_accum(w);
-        accum_reset(&w->accum);
     }
 
     /* Start new accumulator if needed */
@@ -928,6 +959,25 @@ int pgwt_summary_push_event(struct pgwt_summary_writer *w,
 
 int pgwt_summary_flush(struct pgwt_summary_writer *w)
 {
+    return flush_accum(w);
+}
+
+int pgwt_summary_flush_completed(struct pgwt_summary_writer *w,
+                                   uint64_t now_mono_ns)
+{
+    if (!w->enabled || !w->accum_active)
+        return 0;
+
+    /* The second is still open: writing it now would put a partial record
+     * on disk that the real second boundary writes again as a superset
+     * (#277). The decision is on the clock, not on event arrival, so a
+     * second that simply stops receiving events is still written on the
+     * next tick — this can delay a record, never withhold one. */
+    uint64_t ready_at = w->accum.second_mono_ns + 1000000000ULL
+                      + PGWT_SUMMARY_FLUSH_LAG_NS;
+    if (now_mono_ns < ready_at)
+        return 0;
+
     return flush_accum(w);
 }
 

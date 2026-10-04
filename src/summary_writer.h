@@ -42,6 +42,14 @@
 #define PGWT_SUMMARY_MAGIC    0x53574750   /* "PGWS" little-endian */
 #define PGWT_SUMMARY_VERSION  2
 
+/* #277: how long after a second ends it is treated as complete by the
+ * periodic flush. The daemon's timer handler runs BEFORE the event-ring
+ * drain in the same main-loop pass (and the ring is polled every 10 ms), so
+ * an event belonging to the just-ended second can still be in flight. Late
+ * arrivals beyond this are still counted exactly once -- they fold into the
+ * next open second -- this only keeps them in the right second. */
+#define PGWT_SUMMARY_FLUSH_LAG_NS  100000000ULL   /* 100 ms */
+
 /* Limits for per-second accumulator hash tables */
 #define SUMMARY_MAX_EVENTS    1024
 #define SUMMARY_MAX_SESSIONS  MAX_BACKENDS   /* 1024 */
@@ -151,6 +159,17 @@ struct pgwt_summary_writer {
     struct pgwt_summary_accum accum;
     bool          accum_active;    /* has any events been accumulated? */
 
+    /* #277: the monotonic second of the last record actually written. A
+     * record is immutable once on disk, so a second that has been written
+     * can never be reopened -- the reader would sum it twice. An event that
+     * arrives late for such a second is folded into the oldest second still
+     * open (late_events_folded_total counts those, so the fold is never
+     * silent). have_flushed_second distinguishes "nothing written yet" from
+     * "wrote the second at monotonic 0". */
+    uint64_t      last_flushed_second_mono_ns;
+    bool          have_flushed_second;
+    uint64_t      late_events_folded_total;
+
     /* Scratch buffers */
     uint8_t      *encode_buf;
     size_t        encode_buf_size;
@@ -184,8 +203,23 @@ int  pgwt_summary_writer_init(struct pgwt_summary_writer *w,
 int  pgwt_summary_push_event(struct pgwt_summary_writer *w,
                               const struct pgwt_trace_event *evt);
 
-/* Force-flush current accumulator (e.g. on rotation/close). */
+/* Force-flush the current accumulator whatever its state (rotation, close,
+ * and offline generators that drive the writer with synthetic timestamps).
+ * NOT for the periodic daemon tick: see pgwt_summary_flush_completed. */
 int  pgwt_summary_flush(struct pgwt_summary_writer *w);
+
+/* Periodic (daemon-tick) flush. Writes the accumulated second only once it
+ * is complete -- i.e. once now_mono_ns has passed its end plus
+ * PGWT_SUMMARY_FLUSH_LAG_NS -- and leaves a second still receiving events
+ * alone. #277: the unconditional flush wrote the in-progress second, and
+ * the rest of that same second was then written again as a superset, so
+ * every summaries-path aggregate counted part of each second twice.
+ *
+ * now_mono_ns is CLOCK_MONOTONIC, the same clock as evt->timestamp_ns
+ * (bpf_ktime_get_ns). It is a parameter, not a clock read, so the decision
+ * is testable without depending on wall time. */
+int  pgwt_summary_flush_completed(struct pgwt_summary_writer *w,
+                                   uint64_t now_mono_ns);
 
 /* Check for hourly rotation. Call from timer handler. */
 int  pgwt_summary_check_rotation(struct pgwt_summary_writer *w);
