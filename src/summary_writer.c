@@ -784,10 +784,12 @@ static int flush_accum(struct pgwt_summary_writer *w)
         (int)encoded_size, (int)w->compress_buf_size);
     if (compressed_size <= 0) {
         fprintf(stderr, "WARN: summary LZ4 compression failed\n");
-        /* Nothing reached the disk: drop the second rather than carry its
-         * counts into the next one, and leave last_flushed alone so a late
-         * event for it is still allowed to open a fresh record. */
-        accum_close(w);
+        /* Nothing reached the disk, so there is no duplicate to avoid here:
+         * leave the accumulator open and let the real second boundary (or
+         * the next tick) write it, rather than dropping the second. Also
+         * leaves last_flushed alone -- that second has not been written.
+         * Unreachable in practice: compress_buf is LZ4_compressBound(
+         * encode_buf_size) and encoded_size never exceeds encode_buf_size. */
         return -1;
     }
 

@@ -382,6 +382,16 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
                      d->summary_writer ? d->summary_writer->qattr_table_full_total : 0);
     cjson_add_uint64(root, "summary_query_unattributed_ns_total",
                      d->summary_writer ? d->summary_writer->qattr_unattributed_ns_total : 0);
+    /* #277: events that arrived after their second had already been written
+     * and were therefore counted in the NEXT second instead. Counts are
+     * conserved either way; a persistently nonzero rate means ticks are
+     * starved or the event ring is backing up, and the per-second timeline
+     * is skewed by up to one second -- which is otherwise indistinguishable
+     * from a clean capture. Markers and EXIT records are clamped before
+     * accum_event drops them, so they are counted here while contributing
+     * no time: treat this as a rate signal, not an exact event count. */
+    cjson_add_uint64(root, "summary_late_events_folded_total",
+                     d->summary_writer ? d->summary_writer->late_events_folded_total : 0);
 
     cjson_add_uint64(root, "io_worker_samples_total",
                      ctr->io_worker_samples_total);

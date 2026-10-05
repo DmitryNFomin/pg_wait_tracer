@@ -164,8 +164,14 @@ struct pgwt_summary_writer {
      * can never be reopened -- the reader would sum it twice. An event that
      * arrives late for such a second is folded into the oldest second still
      * open (late_events_folded_total counts those, so the fold is never
-     * silent). have_flushed_second distinguishes "nothing written yet" from
-     * "wrote the second at monotonic 0". */
+     * silent; the control socket publishes it as
+     * summary_late_events_folded_total). have_flushed_second distinguishes
+     * "nothing written yet" from "wrote the second at monotonic 0".
+     *
+     * The clamp runs before accum_event, which returns early for markers
+     * (PGWT_IS_MARKER) and for PGWT_EVENT_EXIT -- so a late marker is
+     * counted here while contributing no counts and no time. The counter is
+     * a skew signal, not an exact count of mis-timed wait events. */
     uint64_t      last_flushed_second_mono_ns;
     bool          have_flushed_second;
     uint64_t      late_events_folded_total;
