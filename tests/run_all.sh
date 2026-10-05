@@ -295,6 +295,15 @@ if [[ -x "$PROJECT_DIR/pgwt-server" ]] && [[ -x "$SCRIPT_DIR/gen_test_traces" ]]
     run_test "test_data_categories" python3 "$SCRIPT_DIR/test_data_categories.py"
     run_test "test_data_window_bound" python3 "$SCRIPT_DIR/test_data_window_bound.py"
     run_test "test_current_trace" python3 "$SCRIPT_DIR/test_current_trace.py"
+    # #283: current.trace's committed blocks are cached between requests. The
+    # differential (cache on vs PGWT_CURRENT_TRACE_CACHE=0) is the gate — a
+    # stale entry would serve events from a previous capture — plus the
+    # growth, restart and bypass sections.
+    # Named test_data_* on purpose: .github/workflows/ci.yml globs
+    # tests/test_data_*.py, so a new synthetic-data test is picked up there
+    # without a second hand-maintained list (TST-3).
+    run_test "test_data_current_trace_cache" \
+        python3 "$SCRIPT_DIR/test_data_current_trace_cache.py"
     run_test "test_protocol_drift" python3 "$SCRIPT_DIR/test_protocol_drift.py"
 else
     skip_test "test_data_*" "pgwt-server or gen_test_traces not built"

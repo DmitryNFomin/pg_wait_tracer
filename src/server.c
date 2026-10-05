@@ -255,6 +255,75 @@ struct file_cache_entry {
     uint64_t last_mono_ns;   /* latest event timestamp */
 };
 
+/* #283: decoded-event cache for the COMMITTED blocks of current.trace.
+ *
+ * Rotated .trace.lz4 files are cached forever (struct file_cache_entry);
+ * current.trace was explicitly not, so for the first hour of every capture —
+ * before the first rotation — every request re-LZ4-decoded the whole window.
+ * A 1 Hz live refresh on a 900 s window re-read ~98% of what it read a second
+ * ago. Five identical `executions` calls in one process measured 8283, 7057,
+ * 7414, 7297, 7299 ms: nothing was retained.
+ *
+ * What makes this safe is that the reader never exposes an uncommitted block.
+ * pgwt_reader_open reads current.trace.meta — the high-watermark the daemon
+ * renames into place after each block flush — and stops at exactly that many
+ * blocks (src/event_reader.c, "Strategy 1"). A block the reader can see is a
+ * block the writer has finished, and finished blocks are append-only and
+ * immutable; cov_decode_markers already relies on precisely that.
+ *
+ * Records are cached RAW, exactly as pgwt_reader_decode_block_info produced
+ * them, and the one consumer (load_file_range_mono) applies the same filters
+ * and the same SAMPLES normalization to a cached block as to a freshly
+ * decoded one. The cached and uncached paths are therefore the same code
+ * reading the same bytes, which is what makes the outputs identical rather
+ * than merely similar.
+ *
+ * The entry holds a CONTIGUOUS run of blocks [lo_block, lo_block + n_blocks)
+ * and only ever extends forward, because that is the direction a live window
+ * moves. A request reaching further back than lo_block decodes those blocks
+ * from disk and does not cache them; it is a zoom-out, not the steady state.
+ *
+ * PEAK MEMORY. The entry is charged against the SAME budget as the immutable
+ * cache (cache_total_events / cache_max_events, 25% of RAM capped at 2 GB), so
+ * the two together cannot exceed it; past the budget the entry is dropped and
+ * rebuilt from the current window, which is correct and no faster than today.
+ * It adds 48 bytes per cached event, i.e. up to one more copy of the events a
+ * window spans, on top of the per-request working array load_max_events()
+ * bounds. It does NOT make the #276 under-count worse: that is about one
+ * endpoint's extra per-interval array, which this does not touch.
+ */
+struct cur_cache_block {
+    int      start;              /* offset of this block's run in cc->events */
+    int      count;              /* records decoded from this block */
+    uint64_t index_ts;           /* block_index[b].timestamp_ns — identity */
+    uint64_t file_offset;        /* block_index[b].file_offset  — identity */
+    uint64_t sample_period_ns;   /* pgwt_block_info.sample_period_ns */
+    uint8_t  is_sample;          /* block_type == PGWT_BLOCK_SAMPLES */
+};
+
+struct cur_trace_cache {
+    char     path[512];
+    /* Identity of the file the cached blocks came from. A daemon restart
+     * truncates and rewrites current.trace; serving pre-restart events after
+     * that is the primary hazard of this whole change. */
+    uint64_t hdr_start_wall_ns;
+    uint64_t hdr_clock_offset_ns;
+    int      lo_block;
+    int      n_blocks;
+    struct cur_cache_block *blk;
+    int      blk_cap;
+    struct pgwt_trace_event *events;
+    int      count;
+    int      cap;
+    /* Observability (PGWT_CURRENT_TRACE_CACHE_STATS=1). Cumulative over the
+     * process, so a test can assert that a second identical request decoded
+     * NOTHING new — a cache that silently re-decoded would otherwise be
+     * indistinguishable from one that worked. */
+    uint64_t stat_blocks_decoded;  /* blocks LZ4-decoded from disk */
+    uint64_t stat_blocks_served;   /* blocks answered out of this cache */
+    uint64_t stat_resets;          /* identity/budget drops */
+};
+
 /* Fidelity summary of a loaded window, returned alongside the event array
  * so handlers can tag responses and gate EXACT-required views. */
 struct pgwt_load_info {
@@ -279,6 +348,10 @@ struct pgwt_server {
     /* Per-file event cache */
     struct file_cache_entry cache[256];
     int  cache_count;
+
+    /* #283: committed-block cache for current.trace. One entry — a trace dir
+     * has exactly one current.trace. */
+    struct cur_trace_cache cur;
 
     /* Coverage / clock-domain state (refreshed per request) */
     struct pgwt_file_cov cov[256];
@@ -981,7 +1054,219 @@ static int cache_total_events(struct pgwt_server *srv)
     int total = 0;
     for (int i = 0; i < srv->cache_count; i++)
         total += srv->cache[i].count;
+    /* #283: the current.trace entry is charged against the same budget. The
+     * two caches are additive in RAM, so they must be additive here too. */
+    total += srv->cur.count;
     return total;
+}
+
+/* ── #283: current.trace committed-block cache ─────────────── */
+
+/* Injected allocation failures (tests/test_data_*.py, PGWT_TEST_ALLOC_FAIL).
+ * Defined further down with the other load-path helpers. */
+static bool test_load_alloc_failure(const char *point);
+
+/* Off with PGWT_CURRENT_TRACE_CACHE=0, which keeps the pre-#283 path reachable
+ * and tested: the differential in tests/test_current_trace_cache.py compares
+ * responses across this switch. Read once — it is consulted per block. */
+static int cur_cache_enabled(void)
+{
+    static int cached = -1;
+    if (cached < 0) {
+        const char *env = getenv("PGWT_CURRENT_TRACE_CACHE");
+        cached = (env && env[0] == '0') ? 0 : 1;
+    }
+    return cached;
+}
+
+/* Extra cap on the #283 entry alone, on top of the shared cache_max_events()
+ * budget. It exists ONLY so a test can prove the over-budget drop path fires:
+ * the real budget is 25% of RAM, and a fixture that reaches it would have to
+ * be gigabytes. Unset (the deployed case) leaves the shared budget as the only
+ * limit — this never loosens it, it can only tighten. */
+static int cur_cache_max_events(void)
+{
+    static int cached = -1;
+    if (cached < 0) {
+        const char *env = getenv("PGWT_CURRENT_TRACE_CACHE_MAX_EVENTS");
+        int v = env ? atoi(env) : 0;
+        cached = (v > 0 && v < cache_max_events()) ? v : cache_max_events();
+    }
+    return cached;
+}
+
+static void cur_cache_drop(struct cur_trace_cache *cc)
+{
+    free(cc->events);
+    free(cc->blk);
+    cc->events = NULL;
+    cc->blk = NULL;
+    cc->count = cc->cap = 0;
+    cc->n_blocks = cc->blk_cap = 0;
+    cc->lo_block = 0;
+    cc->path[0] = '\0';
+    cc->hdr_start_wall_ns = 0;
+    cc->hdr_clock_offset_ns = 0;
+    cc->stat_resets++;
+}
+
+/*
+ * Decide whether the cached blocks still describe the file now open in
+ * `reader`, and drop them if not. Called before any cached block is served.
+ *
+ * The hazard this exists for: the daemon truncates and rewrites current.trace
+ * on restart (and rotation renames it away, so a brand-new file takes the
+ * name). Events from the previous capture served out of this cache would be
+ * silently wrong output — exactly the defect class #265/#271/#275/#276/#277
+ * were. So the check is deliberately stronger than a header compare:
+ *
+ *   - path, header start_time_ns and header clock_offset_ns must match (a new
+ *     file gets a fresh wall/mono anchor pair);
+ *   - the file must still have at least the blocks we cached (a truncation
+ *     shrinks the committed count);
+ *   - and every cached block's (first timestamp, file offset) must still agree
+ *     with the reader's block index. That costs one comparison per cached
+ *     block and no I/O — pgwt_reader_open already walked those headers — and
+ *     it catches a rewrite that happened to reproduce the header.
+ *
+ * Anything that does not match drops the whole entry. A cache that cannot
+ * prove what it holds must refuse to answer, never answer anyway.
+ */
+static void cur_cache_sync(struct cur_trace_cache *cc, const char *path,
+                           const struct pgwt_event_reader *reader)
+{
+    if (cc->n_blocks == 0) {
+        /* Nothing retained: just (re)anchor the identity for the next fill. */
+        snprintf(cc->path, sizeof(cc->path), "%s", path);
+        cc->hdr_start_wall_ns = reader->header.start_time_ns;
+        cc->hdr_clock_offset_ns = reader->header.clock_offset_ns;
+        cc->lo_block = 0;
+        return;
+    }
+
+    if (strcmp(cc->path, path) != 0 ||
+        cc->hdr_start_wall_ns != reader->header.start_time_ns ||
+        cc->hdr_clock_offset_ns != reader->header.clock_offset_ns ||
+        !reader->block_index ||
+        reader->num_blocks < cc->lo_block + cc->n_blocks) {
+        cur_cache_drop(cc);
+        cur_cache_sync(cc, path, reader);
+        return;
+    }
+
+    for (int i = 0; i < cc->n_blocks; i++) {
+        const struct pgwt_block_index_entry *bi =
+            &reader->block_index[cc->lo_block + i];
+        if (bi->timestamp_ns != cc->blk[i].index_ts ||
+            bi->file_offset != cc->blk[i].file_offset) {
+            cur_cache_drop(cc);
+            cur_cache_sync(cc, path, reader);
+            return;
+        }
+    }
+}
+
+/* The cached run for file block `b`, or NULL if this block is not held. */
+static const struct cur_cache_block *
+cur_cache_get(const struct cur_trace_cache *cc, int b)
+{
+    if (b < cc->lo_block || b >= cc->lo_block + cc->n_blocks)
+        return NULL;
+    return &cc->blk[b - cc->lo_block];
+}
+
+/*
+ * Retain block `b`'s raw records. Returns 1 when the block is now cached.
+ *
+ * Only a contiguous forward extension is accepted: block b must be the one
+ * immediately after the last held block (or the entry must be empty, in which
+ * case the run starts at b). A gap would make cur_cache_get's range test lie.
+ *
+ * Over the shared budget the entry is DROPPED and restarted at b rather than
+ * grown or half-kept: that bounds memory, keeps the run contiguous, and the
+ * degraded behaviour is today's — decode from disk — not a wrong answer.
+ */
+static int cur_cache_store(struct pgwt_server *srv, struct cur_trace_cache *cc,
+                           int b, const struct pgwt_event_reader *reader,
+                           const struct pgwt_trace_event *buf, int n,
+                           const struct pgwt_block_info *bi)
+{
+    if (n < 0 || !reader->block_index || b >= reader->num_blocks)
+        return 0;
+    if (cc->n_blocks > 0 && b != cc->lo_block + cc->n_blocks)
+        return 0;                       /* not a forward extension */
+
+    /* Charge against the shared budget BEFORE allocating. cache_total_events
+     * already includes cc->count, so this is "would the entry still fit". */
+    if ((int64_t)cache_total_events(srv) + n > (int64_t)CACHE_MAX_EVENTS ||
+        cc->count + n > cur_cache_max_events()) {
+        cur_cache_drop(cc);
+        snprintf(cc->path, sizeof(cc->path), "%s", reader->path);
+        cc->hdr_start_wall_ns = reader->header.start_time_ns;
+        cc->hdr_clock_offset_ns = reader->header.clock_offset_ns;
+        if (n > CACHE_MAX_EVENTS || n > cur_cache_max_events())
+            return 0;              /* a single block exceeds the whole budget */
+    }
+
+    if (cc->n_blocks == 0)
+        cc->lo_block = b;
+
+    if (cc->n_blocks >= cc->blk_cap) {
+        int newcap = cc->blk_cap ? cc->blk_cap * 2 : 64;
+        struct cur_cache_block *tb =
+            test_load_alloc_failure("cur_cache_blk_grow") ? NULL :
+            realloc(cc->blk, (size_t)newcap * sizeof(*tb));
+        if (!tb)
+            return 0;
+        cc->blk = tb;
+        cc->blk_cap = newcap;
+    }
+    if (cc->count + n > cc->cap) {
+        int newcap = cc->cap ? cc->cap : 16384;
+        while (newcap < cc->count + n) {
+            if (newcap > INT_MAX / 2) { newcap = cc->count + n; break; }
+            newcap *= 2;
+        }
+        struct pgwt_trace_event *te =
+            test_load_alloc_failure("cur_cache_grow") ? NULL :
+            realloc(cc->events, (size_t)newcap * sizeof(*te));
+        if (!te)
+            return 0;
+        cc->events = te;
+        cc->cap = newcap;
+    }
+
+    memcpy(cc->events + cc->count, buf, (size_t)n * sizeof(*buf));
+    struct cur_cache_block *cb = &cc->blk[cc->n_blocks++];
+    cb->start = cc->count;
+    cb->count = n;
+    cb->index_ts = reader->block_index[b].timestamp_ns;
+    cb->file_offset = reader->block_index[b].file_offset;
+    cb->sample_period_ns = bi->sample_period_ns;
+    cb->is_sample = (bi->block_type == PGWT_BLOCK_SAMPLES);
+    cc->count += n;
+    return 1;
+}
+
+/* One line per raw load when PGWT_CURRENT_TRACE_CACHE_STATS=1. The counters
+ * are what makes acceptance criterion 2 checkable: "the second request
+ * decoded no blocks" is observable, "it felt faster" is not. */
+static void cur_cache_report(const struct cur_trace_cache *cc)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *env = getenv("PGWT_CURRENT_TRACE_CACHE_STATS");
+        on = (env && env[0] && env[0] != '0') ? 1 : 0;
+    }
+    if (!on)
+        return;
+    fprintf(stderr, "pgwt-server: curcache enabled=%d lo=%d blocks=%d "
+            "events=%d decoded=%llu served=%llu resets=%llu\n",
+            cur_cache_enabled(), cc->lo_block, cc->n_blocks, cc->count,
+            (unsigned long long)cc->stat_blocks_decoded,
+            (unsigned long long)cc->stat_blocks_served,
+            (unsigned long long)cc->stat_resets);
+    fflush(stderr);
 }
 
 static struct file_cache_entry *
@@ -1117,8 +1402,8 @@ static int load_max_events(void)
     return cached;
 }
 
-/* Read events from a trace file for a MONO time range — on demand, no
- * caching. Opens file, seeks to the right blocks via block index, decodes
+/* Read events from a trace file for a MONO time range. Opens file, seeks to
+ * the right blocks via block index, decodes
  * only the blocks that overlap [from_mono, sample_to_mono]. Non-samples use
  * the nominal `to_mono`; the wider endpoint admits only delayed samples whose
  * intervals may overlap the requested right edge. Appends events at
@@ -1129,8 +1414,18 @@ static int load_max_events(void)
  * DUR-9: `pid` != 0 pushes the pid filter into the load (events for other
  * pids never enter the working array); *overloaded is set and the load
  * stops when *total reaches load_max_events(). Allocation failure is reported
- * independently through *allocation_failed. */
-static void load_file_range_mono(const char *path,
+ * independently through *allocation_failed.
+ *
+ * #283: `cc` non-NULL retains this file's decoded blocks across calls (only
+ * ever passed for current.trace — immutable files have their own cache). The
+ * block loop below is the SAME loop for a cached and an uncached block: only
+ * where the records come from differs, the filters and the SAMPLES
+ * normalization are applied once, afterwards, to raw records either way. That
+ * is the whole correctness argument for the cache, and it is why the records
+ * are stored raw rather than pre-filtered or pre-normalized. */
+static void load_file_range_mono(struct pgwt_server *srv,
+                                 struct cur_trace_cache *cc,
+                                 const char *path,
                                  uint64_t from_mono, uint64_t to_mono,
                                  uint64_t sample_to_mono,
                                  uint32_t pid, int markers_only,
@@ -1142,6 +1437,9 @@ static void load_file_range_mono(const char *path,
     if (pgwt_reader_open(&reader, path) != 0)
         return;
 
+    if (cc)
+        cur_cache_sync(cc, path, &reader);
+
     int first_block = pgwt_reader_find_block(&reader, from_mono);
     struct pgwt_trace_event block_buf[PGWT_BLOCK_EVENTS];
     int max_events = load_max_events();
@@ -1151,19 +1449,43 @@ static void load_file_range_mono(const char *path,
             break;
 
         struct pgwt_block_info bi;
-        int n = pgwt_reader_decode_block_info(&reader, b, block_buf,
+        const struct pgwt_trace_event *rec;
+        int n;
+        const struct cur_cache_block *cb = cc ? cur_cache_get(cc, b) : NULL;
+        if (cb) {
+            rec = cc->events + cb->start;
+            n = cb->count;
+            bi.block_type = cb->is_sample ? PGWT_BLOCK_SAMPLES
+                                          : PGWT_BLOCK_TRANSITIONS;
+            bi.sample_period_ns = cb->sample_period_ns;
+            bi.first_timestamp_ns = cb->index_ts;
+            bi.last_timestamp_ns = n > 0 ? rec[n - 1].timestamp_ns
+                                         : cb->index_ts;
+            cc->stat_blocks_served++;
+        } else {
+            n = pgwt_reader_decode_block_info(&reader, b, block_buf,
                                               PGWT_BLOCK_EVENTS, &bi);
-        if (n < 0) continue;
+            if (n < 0) continue;
+            rec = block_buf;
+            if (cc) {
+                cc->stat_blocks_decoded++;
+                /* The cached copy is byte-identical to block_buf, so `rec`
+                 * deliberately keeps pointing at block_buf: nothing below
+                 * can tell the difference, and no aliasing into an array
+                 * that may be reallocated is created. */
+                cur_cache_store(srv, cc, b, &reader, block_buf, n, &bi);
+            }
+        }
         bool sample_block = bi.block_type == PGWT_BLOCK_SAMPLES;
         uint64_t block_to = sample_block ? sample_to_mono : to_mono;
 
         for (int i = 0; i < n; i++) {
-            uint64_t ts_mono = block_buf[i].timestamp_ns;
+            uint64_t ts_mono = rec[i].timestamp_ns;
             if (ts_mono < from_mono) continue;
             if (ts_mono > block_to) break;
-            if (pid != 0 && block_buf[i].pid != pid)
+            if (pid != 0 && rec[i].pid != pid)
                 continue;
-            if (markers_only && !PGWT_IS_MARKER(block_buf[i].old_event))
+            if (markers_only && !PGWT_IS_MARKER(rec[i].old_event))
                 continue;
 
             if (*total >= max_events) {
@@ -1189,9 +1511,9 @@ static void load_file_range_mono(const char *path,
                 *cap = next;
             }
 
-            (*events)[*total] = block_buf[i];
-            if (block_buf[i].flags & PGWT_EVENT_FLAG_SAMPLE) {
-                (*events)[*total].old_event = block_buf[i].new_event;
+            (*events)[*total] = rec[i];
+            if (rec[i].flags & PGWT_EVENT_FLAG_SAMPLE) {
+                (*events)[*total].old_event = rec[i].new_event;
                 (*events)[*total].duration_ns = bi.sample_period_ns;
             }
             (*total)++;
@@ -2159,6 +2481,24 @@ server_load_events_fi_mode(struct pgwt_server *srv,
     /* Rescan directory + refresh coverage/clock-domain state. */
     coverage_refresh(srv);
 
+    /* #283: no current.trace in the directory any more (rotated away, dir
+     * cleaned). Give its cached blocks back instead of holding memory for a
+     * file that no longer exists — the same reason cov_reset returns xm_bytes.
+     * Not a correctness guard (the entry is only ever read through the
+     * is_current path); purely so an hours-long capture does not keep one
+     * hour's events per rotation. */
+    if (srv->cur.n_blocks > 0) {
+        int have_current = 0;
+        for (int i = 0; i < srv->cov_count; i++) {
+            if (srv->cov[i].valid && srv->cov[i].is_current) {
+                have_current = 1;
+                break;
+            }
+        }
+        if (!have_current)
+            cur_cache_drop(&srv->cur);
+    }
+
     if (from_wall_ns == 0)
         from_wall_ns = srv->earliest_wall_ns;
     if (to_wall_ns == 0)
@@ -2219,15 +2559,20 @@ server_load_events_fi_mode(struct pgwt_server *srv,
             /* Read through one maximum measured sample period beyond `to` so
              * a delayed observation whose interval overlaps the right edge is
              * available for clipping. Non-samples are rejected below. */
-            load_file_range_mono(fc->path, from_m, to_m, sample_to_m,
+            load_file_range_mono(srv,
+                                 cur_cache_enabled() ? &srv->cur : NULL,
+                                 fc->path, from_m, to_m, sample_to_m,
                                  pid, markers_only,
                                  &events, &total, &cap, &overloaded,
                                  &allocation_failed);
         } else {
             struct file_cache_entry *ce = get_cached_immutable(srv, fc->path);
             if (!ce || !ce->events) {
-                /* Cache miss (file too large or alloc failed) */
-                load_file_range_mono(fc->path, from_m, to_m, sample_to_m,
+                /* Cache miss (file too large or alloc failed). NOT the #283
+                 * cache: this is a rotated file, which has its own entry and
+                 * declined it. */
+                load_file_range_mono(srv, NULL,
+                                     fc->path, from_m, to_m, sample_to_m,
                                      pid, markers_only,
                                      &events, &total, &cap, &overloaded,
                                      &allocation_failed);
@@ -2279,6 +2624,8 @@ server_load_events_fi_mode(struct pgwt_server *srv,
             n_segs++;
         }
     }
+
+    cur_cache_report(&srv->cur);
 
     if (allocation_failed) {
         if (info)
