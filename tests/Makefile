@@ -24,6 +24,7 @@ TESTS     = test_wait_event test_cmdline test_spawn test_event_writer test_event
             test_executions_attribution \
             test_top_queries_percentile \
             test_variants_p95 \
+            test_pid_cap \
             gen_test_traces gen_bench_traces test_concurrent_rw cross_validate \
             dump_markers wait_cpu_canary test_wait_cpu_canary \
             test_summary_tick_flush
@@ -134,6 +135,21 @@ test_variants_p95: test_variants_p95.c ../src/compute.c ../src/percentile.h \
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ test_variants_p95.c ../src/compute.c \
 	    $(BUILD)/wait_event.o $(BUILD)/spawn.o $(BUILD)/cJSON.o \
 	    -Wl,--wrap=realloc -lm
+
+# test_pid_cap: #275 — the two per-pid execution-lifecycle tables that
+# silently dropped every pid past the 512th (handle_top_queries' pid_st[512],
+# pgwt_compute_variants' MAX_PIDS), plus the fixed 1024-slot query-id table
+# in the same scan whose probe loop never terminated when full. Same link
+# shape as test_variants_p95 (compute.c with -DPGWT_SERVER, pgwt_visit_summaries
+# stubbed in the test). Allocation failures are injected through
+# PGWT_TEST_ALLOC_FAIL (src/pid_index.h), the same env-var shape server.c
+# already uses for PGWT_TEST_LOAD_ALLOC_FAIL — no --wrap needed, so the
+# binary behaves identically on every toolchain.
+test_pid_cap: test_pid_cap.c ../src/compute.c ../src/pid_index.h \
+              ../src/percentile.h \
+              $(BUILD)/wait_event.o $(BUILD)/spawn.o $(BUILD)/cJSON.o
+	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ test_pid_cap.c ../src/compute.c \
+	    $(BUILD)/wait_event.o $(BUILD)/spawn.o $(BUILD)/cJSON.o -lm
 
 test_pg13_resolve: test_pg13_resolve.c ../src/discovery.c ../src/spawn.c \
                    ../src/backend_status_layout.c \

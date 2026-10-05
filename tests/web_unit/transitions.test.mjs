@@ -9,7 +9,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
     buildTransitionsOption, transitionsContext, buildVariantsHtml,
-    isIdleTransitionNode,
+    isIdleTransitionNode, p95TruncationMarker,
 } from '../../web/static/lib/builders/transitions.js';
 import { applyDragOffset } from '../../web/static/views/transitions.js';
 import { eventColor } from '../../web/static/lib/format.js';
@@ -196,6 +196,80 @@ test('variants HTML: exec + plan sections, percentages and step labels', () => {
 test('variants HTML: empty / missing -> empty string', () => {
     assert.equal(buildVariantsHtml(null, esc), '');
     assert.equal(buildVariantsHtml({ exec: { variants: [] } }, esc), '');
+});
+
+// p95TruncationMarker (issue #273): the server caps the p95 sample at
+// PGWT_VARIANT_MAX_SAMPLES executions, taken in arrival order — a prefix,
+// not a random sample. p95_sample_n < exec_count means the displayed p95
+// is from that truncated, biased prefix, not the full variant.
+test('p95TruncationMarker: truncated sample (p95_sample_n < exec_count) is marked', () => {
+    const marker = p95TruncationMarker({ exec_count: 30000, p95_sample_n: 10000 });
+    assert.ok(marker.length > 0, 'expected a non-empty marker for a truncated sample');
+    assert.ok(marker.includes('10,000'), 'marker should surface the actual sample size, not a hard-coded 10000');
+    assert.ok(marker.includes('30,000'), 'marker should also surface exec_count for context');
+});
+
+test('p95TruncationMarker: complete sample (p95_sample_n >= exec_count) is not marked', () => {
+    assert.equal(p95TruncationMarker({ exec_count: 120, p95_sample_n: 120 }), '');
+    // Defensive: a sample that somehow exceeds exec_count is still "complete".
+    assert.equal(p95TruncationMarker({ exec_count: 100, p95_sample_n: 150 }), '');
+});
+
+test('p95TruncationMarker: field absent (older server) -> no marker, no crash', () => {
+    assert.equal(p95TruncationMarker({ exec_count: 30000 }), '');
+    assert.equal(p95TruncationMarker({ exec_count: 30000, p95_sample_n: null }), '');
+    assert.equal(p95TruncationMarker({}), '');
+    assert.equal(p95TruncationMarker(null), '');
+    assert.equal(p95TruncationMarker(undefined), '');
+});
+
+test('variants HTML: p95 truncation marker rendered inline, driven by the field not a hard-coded cap', () => {
+    const truncated = {
+        exec: {
+            total: 30000, num_variants: 1,
+            variants: [{
+                exec_count: 30000, num_queries: 1, total_ms: 2790, avg_ms: 0.093,
+                p95_ms: 0.30, p95_sample_n: 10000, avg_loop_n: 1, top_query_id: 42,
+                steps: [{ name: 'CPU*', avg_ms: 0.093, class: 'cpu' }],
+                query_text: 'SELECT 1',
+            }],
+        },
+        plan: { total: 0, num_variants: 0, variants: [] },
+    };
+    const html = buildVariantsHtml(truncated, esc);
+    assert.ok(html.includes('(first 10,000)'), 'truncated variant should show the sample-size marker');
+
+    const complete = {
+        exec: {
+            total: 120, num_variants: 1,
+            variants: [{
+                exec_count: 120, num_queries: 1, total_ms: 900, avg_ms: 7.5,
+                p95_ms: 21.0, p95_sample_n: 120, avg_loop_n: 1, top_query_id: 42,
+                steps: [{ name: 'CPU*', avg_ms: 7.5, class: 'cpu' }],
+                query_text: 'SELECT 1',
+            }],
+        },
+        plan: { total: 0, num_variants: 0, variants: [] },
+    };
+    const completeHtml = buildVariantsHtml(complete, esc);
+    assert.ok(!completeHtml.includes('(first'), 'a complete sample must not show the truncation marker');
+
+    // Older server (no p95_sample_n at all): render exactly as before.
+    const noField = {
+        exec: {
+            total: 100, num_variants: 1,
+            variants: [{
+                exec_count: 100, num_queries: 1, total_ms: 50, avg_ms: 0.5,
+                p95_ms: 1, avg_loop_n: 1, top_query_id: 42,
+                steps: [{ name: 'CPU*', avg_ms: 0.5, class: 'cpu' }],
+                query_text: 'SELECT 1',
+            }],
+        },
+        plan: { total: 0, num_variants: 0, variants: [] },
+    };
+    const noFieldHtml = buildVariantsHtml(noField, esc);
+    assert.ok(!noFieldHtml.includes('(first'), 'absent p95_sample_n must not produce a marker');
+    assert.ok(noFieldHtml.includes('p95 1.0ms'), 'absent-field path renders p95 exactly as before, unmarked');
 });
 
 // ── issue #107: idle-loop dominance on a real OLTP workload ────────────────

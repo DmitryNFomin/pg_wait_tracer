@@ -27,11 +27,17 @@ GEN_BIN = os.path.join(SCRIPT_DIR, "gen_test_traces")
 class ServerHarness:
     """Manages a pgwt-server subprocess for testing."""
 
-    def __init__(self, trace_dir, env=None):
+    def __init__(self, trace_dir, env=None, stderr_path=None):
         self.trace_dir = trace_dir
         self.proc = None
         self._next_id = 1
         self._extra_env = env  # extra environment vars for pgwt-server
+        # #274: where to send pgwt-server's stderr. Default (None) keeps the
+        # pipe every existing caller reads on failure; a path is for a test
+        # that must READ a diagnostic line while the server is still
+        # running, which a pipe nobody drains cannot provide.
+        self._stderr_path = stderr_path
+        self._stderr_file = None
 
     def __enter__(self):
         self.start()
@@ -47,11 +53,16 @@ class ServerHarness:
         if self._extra_env:
             env = dict(os.environ)
             env.update({k: str(v) for k, v in self._extra_env.items()})
+        if self._stderr_path:
+            self._stderr_file = open(self._stderr_path, "w")
+            stderr_dst = self._stderr_file
+        else:
+            stderr_dst = subprocess.PIPE
         self.proc = subprocess.Popen(
             [SERVER_BIN, self.trace_dir],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stderr=stderr_dst,
             text=True,
             env=env,
         )
@@ -73,6 +84,9 @@ class ServerHarness:
             self.proc.stdin.close()
             self.proc.wait(timeout=5)
             self.proc = None
+        if self._stderr_file:
+            self._stderr_file.close()
+            self._stderr_file = None
 
     def query(self, cmd, timeout=None, **kwargs):
         """Send a command and return parsed JSON response.
@@ -131,7 +145,15 @@ class ServerHarness:
 
         resp_line = self.proc.stdout.readline()
         if not resp_line:
-            stderr = self.proc.stderr.read()
+            if self.proc.stderr is not None:
+                stderr = self.proc.stderr.read()
+            elif self._stderr_path:
+                if self._stderr_file:
+                    self._stderr_file.flush()
+                with open(self._stderr_path) as f:
+                    stderr = f.read()
+            else:
+                stderr = "(not captured)"
             raise RuntimeError(f"pgwt-server closed stdout. stderr: {stderr}")
 
         return json.loads(resp_line)

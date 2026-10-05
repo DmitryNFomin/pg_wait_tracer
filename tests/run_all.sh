@@ -287,6 +287,10 @@ if [[ -x "$PROJECT_DIR/pgwt-server" ]] && [[ -x "$SCRIPT_DIR/gen_test_traces" ]]
     run_test "test_data_esc_coverage" python3 "$SCRIPT_DIR/test_data_esc_coverage.py"
     run_test "test_data_summary_honesty" python3 "$SCRIPT_DIR/test_data_summary_honesty.py"
     run_test "test_data_markers" python3 "$SCRIPT_DIR/test_data_markers.py"
+    # #274: executions/exec_scatter read the pre-window marker prefix from
+    # the retained index; this is the differential proving it is the SAME
+    # answer the full pre-window decode gives, plus the refusal paths.
+    run_test "test_data_exec_prefix" python3 "$SCRIPT_DIR/test_data_exec_prefix.py"
     run_test "test_data_executions" python3 "$SCRIPT_DIR/test_data_executions.py"
     run_test "test_data_categories" python3 "$SCRIPT_DIR/test_data_categories.py"
     run_test "test_data_window_bound" python3 "$SCRIPT_DIR/test_data_window_bound.py"
