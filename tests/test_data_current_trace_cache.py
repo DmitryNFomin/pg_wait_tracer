@@ -33,6 +33,19 @@ restart — so the sections are, in order of what would hurt:
      generator that did not run, a stats line that cannot be parsed, and the
      over-budget drop. A gate that cannot see must refuse, never approve.
 
+WHAT THIS SUITE CANNOT GATE. The cached block descriptor carries the block's
+TYPE as well as its sample period, and the type is used for exactly one thing:
+whether to read one measured sample period past the window's right edge, so a
+delayed tick whose interval overlaps `to` is available for clipping. Measured
+2026-10-05: disabling that lookahead on BOTH paths leaves db_time_ms identical
+to the nanosecond (18473.999978 and 18525.999978 at two right edges placed
+mid-period), because gen_test_traces writes one NOMINAL period per file and the
+lookahead only bites for an SMP-3 delayed tick whose measured elapsed exceeds
+it. So a cached block that lost its type goes undetected here — not a weak
+assertion, a fixture the generator cannot write. Anything that reaches it
+through the sample PERIOD is gated: zeroing cc->blk[].sample_period_ns turns 38
+of section 1b's 40 responses red and flips fidelity from mixed to exact.
+
 Needs pgwt-server and tests/gen_test_traces built. No PG, no root, no network.
 """
 import json
@@ -150,6 +163,35 @@ def big_fixture_copy():
         if os.path.isfile(sp):
             shutil.copyfile(sp, os.path.join(dst, name))
     return dst
+
+
+def mixed_scenario(base=BASE, span_s=24, pids=4, per_pid=1500,
+                   period_ns=100 * MS):
+    """A fixture with BOTH block types, interleaved the way a tiered capture
+    writes them: SAMPLES blocks land between TRANSITIONS blocks.
+
+    Without this the suite is blind to half of #283. A SAMPLES record is
+    normalized at load time (old_event = sampled event, duration_ns = the
+    block's sample_period_ns) and then goes through the exact-wins merge, so a
+    cache that lost a block's type or its sample period would answer wrongly
+    for every sampled view and identically for every exact one. A
+    transitions-only fixture cannot tell those apart.
+    """
+    sc = busy_scenario(base=base, span_s=span_s, pids=pids, per_pid=per_pid)
+    waits = [IO_DATA_FILE_READ, LWLOCK_WAL_WRITE, CPU]
+    samples = []
+    ticks = span_s * S // period_ns
+    for k in range(int(ticks)):
+        ts = base + k * period_ns
+        for p in range(pids):
+            samples.append({"pid": 1000 + p, "ts": ts + p,
+                            "event": waits[(k + p) % len(waits)],
+                            "qid": 100 + (p % 3)})
+    samples.sort(key=lambda x: x["ts"])
+    sc["sample_period_ns"] = period_ns
+    sc["samples"] = samples
+    sc["interleave"] = 1
+    return sc
 
 
 # ── Reading the server's own view of its cache ───────────────────────────────
@@ -392,6 +434,116 @@ def section_differential(tr):
             shutil.rmtree(tmp, ignore_errors=True)
     finally:
         pass   # the shared fixture is removed in main()
+
+
+# ── 1b. ...including for a trace with SAMPLES blocks interleaved ────────────
+
+def section_differential_mixed(tr):
+    print("\n### 1b. mixed exact+sampled trace: byte-identical responses ###")
+    trace_dir = generate_traces(mixed_scenario())
+    tmp = tempfile.mkdtemp(prefix="pgwt_cc_err_")
+    try:
+        w_from, w_to = fixture_window(span_s=24)
+        steps = []
+        for cmd in RAW_COMMANDS:
+            steps.append((cmd, {"from_": w_from, "to_": w_to}))
+        # A few narrower windows: a sample interval that overlaps the right
+        # edge is read one sample period past `to` and then clipped, which is
+        # the one place block-level metadata (sample_period_ns, block type)
+        # changes the answer.
+        base = int(w_from)
+        span = int(w_to) - base
+        for k in range(4):
+            a = base + k * span // 8
+            for cmd in ("aas", "time_model", "top_events", "transitions",
+                        "concurrency", "top_sessions"):
+                steps.append((cmd, {"from_": str(a),
+                                    "to_": str(a + span // 3)}))
+        err_on = os.path.join(tmp, "mix_on.err")
+        on = run_sequence(trace_dir, True, err_on, steps)
+        off = run_sequence(trace_dir, False, os.path.join(tmp, "mix_off.err"),
+                           steps)
+        diffs = [i for i, (a, b) in enumerate(zip(on, off)) if a != b]
+        if diffs:
+            i = diffs[0]
+            print("    first divergence at step %d (%s %s)"
+                  % (i, steps[i][0], steps[i][1]))
+            print("    cache on : %s" % on[i][:400])
+            print("    cache off: %s" % off[i][:400])
+        tr.check_eq(len(diffs), 0,
+                    "all %d mixed-fidelity responses byte-identical across "
+                    "the toggle" % len(steps))
+        require_used(tr, read_curcache(err_on),
+                     "the mixed-fidelity run served cached blocks")
+        # The fixture must actually CONTAIN both block types, or this section
+        # is the transitions-only one again under a different name.
+        with ServerHarness(trace_dir, env=STATS_ENV) as srv:
+            tm = srv.query("time_model", from_=w_from, to_=w_to)
+        tr.check(tm.get("fidelity") in ("mixed", "sampled"),
+                 "the fixture really is sampled/mixed (fidelity=%r)"
+                 % tm.get("fidelity"))
+        tr.check(tm.get("sample_period_ns") is not None,
+                 "a sample period reached the response, so SAMPLES blocks "
+                 "contributed")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+        cleanup_traces(trace_dir)
+
+
+# ── 1c. The second read of a window is the same answer as the first ─────────
+
+def section_self_consistency(tr):
+    """Within ONE process, read each window twice and require the two answers
+    to be identical.
+
+    The first read decodes the blocks; the second serves them from the cache.
+    So this is the structural form of "the cache changes nothing": any
+    per-block metadata the entry failed to carry — the block TYPE, the sample
+    period, the records themselves — diverges here, and it does not depend on
+    the cache-off differential's windows happening to exercise the difference.
+    The right edges are placed deliberately mid-sample-period, because that is
+    where the block type matters: a delayed tick whose interval overlaps `to`
+    is only read when the block is known to be a SAMPLES block.
+    """
+    print("\n### 1c. second read of a window == first read ###")
+    trace_dir = generate_traces(mixed_scenario())
+    tmp = tempfile.mkdtemp(prefix="pgwt_cc_err_")
+    try:
+        err = os.path.join(tmp, "self.err")
+        env = dict(STATS_ENV)
+        env["PGWT_CURRENT_TRACE_CACHE"] = "1"
+        period = 100 * MS
+        windows = []
+        for k in (40, 77, 123, 180):
+            # right edge half a sample period past a tick, so a tick lands in
+            # (to, to + period] and the lookahead decides whether it is read
+            windows.append((BASE - 1 * S, BASE + k * period + period // 2))
+        cmds = ["aas", "time_model", "top_events", "top_sessions",
+                "transitions", "concurrency", "executions", "exec_scatter",
+                "heatmap", "top_queries"]
+        diverged = []
+        with ServerHarness(trace_dir, env=env, stderr_path=err) as srv:
+            for (a, b) in windows:
+                for cmd in cmds:
+                    first = canonical_body(
+                        srv.query(cmd, from_=str(a), to_=str(b)))
+                    second = canonical_body(
+                        srv.query(cmd, from_=str(a), to_=str(b)))
+                    if first != second:
+                        diverged.append((cmd, a, b, first, second))
+        if diverged:
+            cmd, a, b, first, second = diverged[0]
+            print("    first divergence: %s [%d, %d]" % (cmd, a, b))
+            print("    read 1 (decoded): %s" % first[:400])
+            print("    read 2 (cached) : %s" % second[:400])
+        tr.check_eq(len(diverged), 0,
+                    "all %d windows answer identically on the cached re-read"
+                    % (len(windows) * len(cmds)))
+        st = read_curcache(err)
+        require_used(tr, st, "the re-reads were actually served from cache")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+        cleanup_traces(trace_dir)
 
 
 # ── 2. Repeated identical requests decode nothing new ───────────────────────
@@ -879,6 +1031,8 @@ def section_bypass(tr):
 if __name__ == "__main__":
     try:
         section_differential(t)
+        section_differential_mixed(t)
+        section_self_consistency(t)
         section_repeat(t)
         section_growth(t)
         section_restart(t)
