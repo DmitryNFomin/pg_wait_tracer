@@ -4614,7 +4614,19 @@ static void handle_concurrency(struct pgwt_server *srv, struct pgwt_request *req
      * 20 was filled from a list that compute built in arrival order, so the
      * markers clustered at the left edge of the window; the count is now the
      * client's own bucket resolution, and `bursts_total` declares how many
-     * onsets were detected behind it. */
+     * onsets were detected behind it.
+     *
+     * READ BEFORE WIRING A GENERIC "truncated" BANNER TO THIS FIELD:
+     * `bursts_truncated` means "more onsets were detected than are listed",
+     * which for a STRATIFIED one-per-bucket selection is true on nearly every
+     * busy window. It is NOT the executions-style "we kept the top N and threw
+     * the tail away" — the listed set is a per-bucket maximum and so spans the
+     * whole range. web/static/lib/builders/concurrency.js says exactly that in
+     * words ("Showing the largest burst in each of N buckets, out of M burst
+     * onsets detected"); a shared banner that reads the flag alone (the
+     * direction #273/#278 are heading) would relabel a representative sample
+     * as a lossy cut. Give the banner a selection KIND, or leave this panel's
+     * own sentence to do the declaring. */
     cJSON_AddNumberToObject(root, "bursts_total", res.bursts_total);
     cJSON_AddBoolToObject(root, "bursts_truncated",
                           res.bursts_total > res.num_bursts);
