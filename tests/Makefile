@@ -27,7 +27,8 @@ TESTS     = test_wait_event test_cmdline test_spawn test_event_writer test_event
             test_pid_cap \
             test_concurrency_bounds \
             gen_test_traces gen_bench_traces test_concurrent_rw cross_validate \
-            dump_markers wait_cpu_canary test_wait_cpu_canary
+            dump_markers wait_cpu_canary test_wait_cpu_canary \
+            test_summary_tick_flush
 
 .PHONY: all clean check
 
@@ -354,6 +355,20 @@ test_wait_cpu_canary: test_wait_cpu_canary.c wait_cpu_canary.c \
 dump_markers: dump_markers.c $(BUILD)/server_event_reader.o \
               $(BUILD)/server_event_writer.o $(BUILD)/server_wait_event.o \
               $(BUILD)/server_spawn.o $(BUILD)/server_cJSON.o
+	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -llz4 -lz
+
+# test_summary_tick_flush: #277 — the daemon tick flushed the IN-PROGRESS
+# second and left the accumulator's counters in place, so the rest of that
+# second was written again as a superset and pgwt_visit_summaries summed both
+# (1.47x on a 121 s window, up to 2.16x at -i 1). Drives the real writer and
+# the real reader over synthetic seconds; every tick is an explicit
+# now_mono_ns, so nothing here depends on wall time. Server build (no BPF).
+test_summary_tick_flush: test_summary_tick_flush.c \
+                         $(BUILD)/server_summary_writer.o \
+                         $(BUILD)/server_summary_reader.o \
+                         $(BUILD)/server_event_writer.o \
+                         $(BUILD)/server_wait_event.o \
+                         $(BUILD)/server_spawn.o $(BUILD)/server_cJSON.o
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -llz4 -lz
 
 clean:

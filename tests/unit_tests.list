@@ -109,3 +109,11 @@ test_timeline_window_probe.py
 test_hetzner_sweep.sh
 test_unit_import_guard.py
 test_push_guard.py
+# #277: the summary writer's daemon-tick flush wrote the second still in
+# progress and did not reset the accumulator, so the rest of that second was
+# written again as a superset and the reader summed both. One logical second
+# must contribute its events exactly once to a reader-side sum. Includes a
+# bypass suite: an empty dir, a disabled writer, an unparseable file, a
+# missing dir and a hand-built duplicate second must each be refused or go
+# red, never read as agreement.
+test_summary_tick_flush

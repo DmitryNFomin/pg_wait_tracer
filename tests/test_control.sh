@@ -191,6 +191,10 @@ for k in ('events_total', 'events_per_sec', 'lifecycle_events_total',
           'live_query_pending_overflow_total',
           'summary_query_attr_table_full_total',
           'summary_query_unattributed_ns_total',
+          # #277: events folded into the next second because their own second
+          # had already been written. Unobservable before this key existed,
+          # and a mis-attributed capture looks exactly like a clean one.
+          'summary_late_events_folded_total',
           # #128 follow-up: sampled idle readings that contradict the same
           # tick's cmd_open (never a command boundary).
           'sampled_idle_in_command_total'):

@@ -348,7 +348,17 @@ static void handle_timer(struct pgwt_daemon *d)
     }
     if (d->summary_writer) {
         started_ns = pgwt_debug_block_begin(d);
-        pgwt_summary_flush(d->summary_writer);
+        /* #277: flush only a second that is already complete. The
+         * unconditional flush wrote the in-progress second and the rest of
+         * that second was then written again as a superset, so every
+         * summaries-path aggregate double-counted part of each second.
+         *
+         * pgwt_debug_monotonic_ns() is a plain CLOCK_MONOTONIC read despite
+         * the name (every other caller happens to sit behind
+         * debug_dump_state); the gate needs the same clock as
+         * evt->timestamp_ns, i.e. bpf_ktime_get_ns. */
+        pgwt_summary_flush_completed(d->summary_writer,
+                                     pgwt_debug_monotonic_ns());
         pgwt_summary_check_rotation(d->summary_writer);
         if (d->tick > 0 && d->tick % 60 == 0)
             pgwt_summary_cleanup_old_files(d->summary_writer);

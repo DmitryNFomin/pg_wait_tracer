@@ -247,7 +247,7 @@ What survives what:
 
 | failure | guaranteed loss bound |
 |---|---|
-| daemon crash / kill -9 | the unflushed tail only: < 1 buffered TRANSITIONS block (≤ 4096 events) + < ~1 s of batched samples + the current partial summary second. Every flushed block is in the OS page cache and is recovered on restart. |
+| daemon crash / kill -9 | the unflushed tail only: < 1 buffered TRANSITIONS block (≤ 4096 events) + < ~1 s of batched samples + the summary second still accumulating. Since #277 a summary second is written only once it is complete, so that last bound is measured from the EVENT, not from the second: one tick interval + PGWT_SUMMARY_FLUSH_LAG_NS (100 ms) after the second ends, i.e. up to ~2.1 s at `-i 1` and ~6.1 s at `-i 5`. On a busy stream the next second's first event flushes the previous one, so the loss is the current partial second; once the stream quiesces the last second waits for a tick. Every flushed block is in the OS page cache and is recovered on restart. |
 | OS crash / power loss | rotated/recovered archives are `fsync`ed and safe. The CURRENT hour's file has no per-block fsync — up to the entire current file can be lost (page cache never reached disk). The meta file may also be stale/absent, which readers tolerate. |
 
 Chosen policy: **fsync on rotation, close, and recovery + directory fsync
