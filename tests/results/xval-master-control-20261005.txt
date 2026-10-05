@@ -1,0 +1,197 @@
+=== control host ===
+pgwt-dev-1791205010-26507
+ 13:48:52 up 50 min,  1 user,  load average: 0.00, 0.30, 1.95
+postmaster: 3231 (expected 3231, port 5418)
+=== clone origin/master ===
+HEAD: 6f1382c Mark the pinned paint numbers as not describing the demo workload [skip ci] (#285)
+tree: clean (no local edits)
+=== build (master) ===
+./pg_wait_tracer 1649976
+tests/cross_validate 288504
+=== run test_cross_validate_tiered on master, under the box-check flock ===
+=== test_cross_validate_tiered (PID 3231) ===
+Rates: 10 50 100 200   escalation: 60s   clients: 8
+
+----- sample-rate 10 Hz -----
+  escalate: {"ok":true,"escalated":true,"granted_s":60,"seconds_remaining":59.98873979,"budget_remaining_s":599.988739279}
+  Overlap window: 63.0s (sampled + exact both present)
+  
+  wait_event                   exact_share%     sampled%   delta_pp
+  ------------------------------------------------------------------
+  CPU                                 42.5%        28.7%      13.8
+  WALWrite                            23.5%        29.8%       6.4
+  transactionid                       16.5%        21.4%       4.9
+  WalSync                             13.6%        15.4%       1.8
+  tuple                                1.5%         1.8%       0.3
+  VacuumDelay                          0.7%         0.8%       0.1
+  WalWrite                             0.6%         0.7%       0.1
+  DataFileWrite                        0.4%         0.4%       0.0
+  DataFileRead                         0.3%         0.4%       0.1
+  DataFileFlush                        0.2%         0.3%       0.0
+  LockManager                          0.1%         0.0%       0.0
+  SpinDelay                            0.0%         0.1%       0.0
+  BufferContent                        0.0%         0.1%       0.1
+  WALInsert                            0.0%         0.0%       0.0
+  DataFileExtend                       0.0%         0.0%       0.0
+  ProcArray                            0.0%         0.0%       0.0
+  XidGen                               0.0%         0.0%       0.0
+  XactSLRU                             0.0%         0.0%       0.0
+  AioIoCompletion                      0.0%         0.0%       0.0
+  ProcarrayGroupUpdate                 0.0%         0.0%       0.0
+  BufferMapping                        0.0%         0.0%       0.0
+  SlruWrite                            0.0%         0.0%       0.0
+  XactGroupUpdate                      0.0%         0.0%       0.0
+  WALBufMapping                        0.0%         0.0%       0.0
+  CheckpointerComm                     0.0%         0.0%       0.0
+  extend                               0.0%         0.0%       0.0
+  AioWorkerSubmissionQueue             0.0%         0.0%       0.0
+  RelationMapRead                      0.0%         0.0%       0.0
+  
+  Samples in window: 3086
+  Top-5 event overlap: 5/5
+  Max share disagreement (events >= 2% exact share): 13.8 pp (CPU)
+  Tolerance: +/- 10.0 pp
+  On-CPU-during-wait (spin): 6.9901% of wait time — exact on-CPU spin, attributed to its wait class (informational)
+  
+  RATE 10Hz (shipped default): outside tolerance (characterisation, non-gating)
+
+----- sample-rate 50 Hz -----
+  escalate: {"ok":true,"escalated":true,"granted_s":60,"seconds_remaining":59.99999463,"budget_remaining_s":597.514836499}
+  Overlap window: 62.5s (sampled + exact both present)
+  
+  wait_event                   exact_share%     sampled%   delta_pp
+  ------------------------------------------------------------------
+  CPU                                 41.7%        28.4%      13.4
+  WALWrite                            23.0%        28.9%       5.9
+  transactionid                       16.6%        20.2%       3.7
+  WalSync                             13.5%        16.2%       2.7
+  tuple                                1.5%         2.0%       0.5
+  VacuumTruncate                       1.4%         1.7%       0.3
+  VacuumDelay                          0.7%         0.8%       0.1
+  WalWrite                             0.6%         0.5%       0.0
+  DataFileWrite                        0.3%         0.4%       0.0
+  DataFileRead                         0.3%         0.3%       0.0
+  DataFileFlush                        0.2%         0.3%       0.0
+  LockManager                          0.1%         0.1%       0.1
+  SpinDelay                            0.0%         0.0%       0.0
+  BufferContent                        0.0%         0.1%       0.0
+  WALInsert                            0.0%         0.1%       0.0
+  DataFileExtend                       0.0%         0.0%       0.0
+  XactSLRU                             0.0%         0.0%       0.0
+  ProcArray                            0.0%         0.0%       0.0
+  XidGen                               0.0%         0.0%       0.0
+  AioIoCompletion                      0.0%         0.0%       0.0
+  XactGroupUpdate                      0.0%         0.0%       0.0
+  ProcarrayGroupUpdate                 0.0%         0.0%       0.0
+  SlruWrite                            0.0%         0.0%       0.0
+  CheckpointerComm                     0.0%         0.0%       0.0
+  BufferMapping                        0.0%         0.0%       0.0
+  extend                               0.0%         0.0%       0.0
+  RelationMapRead                      0.0%         0.0%       0.0
+  WALBufMapping                        0.0%         0.0%       0.0
+  LockFastPath                         0.0%         0.0%       0.0
+  AioWorkerSubmissionQueue             0.0%         0.0%       0.0
+  
+  Samples in window: 14888
+  Top-5 event overlap: 5/5
+  Max share disagreement (events >= 2% exact share): 13.4 pp (CPU)
+  Tolerance: +/- 10.0 pp
+  On-CPU-during-wait (spin): 6.6268% of wait time — exact on-CPU spin, attributed to its wait class (informational)
+  
+  RATE 50Hz (exploratory rate): outside tolerance (characterisation, non-gating)
+
+----- sample-rate 100 Hz -----
+  escalate: {"ok":true,"escalated":true,"granted_s":60,"seconds_remaining":59.999994651,"budget_remaining_s":598.375683978}
+  Overlap window: 61.6s (sampled + exact both present)
+  
+  wait_event                   exact_share%     sampled%   delta_pp
+  ------------------------------------------------------------------
+  CPU                                 44.9%        29.4%      15.6
+  WALWrite                            21.5%        27.8%       6.4
+  transactionid                       16.0%        20.8%       4.8
+  WalSync                             13.8%        17.3%       3.5
+  tuple                                1.4%         1.9%       0.5
+  VacuumDelay                          0.7%         0.9%       0.2
+  WalWrite                             0.6%         0.5%       0.1
+  DataFileWrite                        0.4%         0.4%       0.0
+  DataFileRead                         0.3%         0.3%       0.0
+  DataFileFlush                        0.2%         0.3%       0.1
+  LockManager                          0.1%         0.1%       0.0
+  SpinDelay                            0.0%         0.0%       0.0
+  BufferContent                        0.0%         0.1%       0.0
+  WALInsert                            0.0%         0.0%       0.0
+  DataFileExtend                       0.0%         0.0%       0.0
+  ProcArray                            0.0%         0.0%       0.0
+  XactSLRU                             0.0%         0.0%       0.0
+  AioIoCompletion                      0.0%         0.0%       0.0
+  XidGen                               0.0%         0.0%       0.0
+  ProcarrayGroupUpdate                 0.0%         0.0%       0.0
+  XactGroupUpdate                      0.0%         0.0%       0.0
+  SlruWrite                            0.0%         0.0%       0.0
+  BufferMapping                        0.0%         0.0%       0.0
+  WALBufMapping                        0.0%         0.0%       0.0
+  CheckpointerComm                     0.0%         0.0%       0.0
+  extend                               0.0%         0.0%       0.0
+  AioWorkerSubmissionQueue             0.0%         0.0%       0.0
+  RelationMapRead                      0.0%         0.0%       0.0
+  
+  Samples in window: 26937
+  Top-5 event overlap: 5/5
+  Max share disagreement (events >= 2% exact share): 15.6 pp (CPU)
+  Tolerance: +/- 10.0 pp
+  On-CPU-during-wait (spin): 7.1563% of wait time — exact on-CPU spin, attributed to its wait class (informational)
+  
+  RATE 100Hz (exploratory rate): outside tolerance (characterisation, non-gating)
+
+----- sample-rate 200 Hz -----
+  escalate: {"ok":true,"escalated":true,"granted_s":60,"seconds_remaining":59.999996384,"budget_remaining_s":597.567152122}
+  Overlap window: 62.4s (sampled + exact both present)
+  
+  wait_event                   exact_share%     sampled%   delta_pp
+  ------------------------------------------------------------------
+  CPU                                 39.8%        26.5%      13.3
+  WALWrite                            18.9%        23.7%       4.8
+  transactionid                       14.1%        17.6%       3.5
+  WalSync                             12.2%        14.6%       2.3
+  CheckpointWriteDelay                11.6%        13.8%       2.2
+  tuple                                1.2%         1.5%       0.3
+  VacuumDelay                          0.6%         0.8%       0.1
+  WalWrite                             0.5%         0.4%       0.1
+  DataFileWrite                        0.3%         0.4%       0.0
+  DataFileRead                         0.3%         0.3%       0.0
+  DataFileFlush                        0.2%         0.2%       0.0
+  LockManager                          0.1%         0.1%       0.0
+  SpinDelay                            0.0%         0.0%       0.0
+  BufferContent                        0.0%         0.1%       0.0
+  WALInsert                            0.0%         0.0%       0.0
+  DataFileExtend                       0.0%         0.0%       0.0
+  XactSLRU                             0.0%         0.0%       0.0
+  CheckpointDelayStart                 0.0%         0.0%       0.0
+  ProcArray                            0.0%         0.0%       0.0
+  WALBufMapping                        0.0%         0.0%       0.0
+  XactGroupUpdate                      0.0%         0.0%       0.0
+  AioIoCompletion                      0.0%         0.0%       0.0
+  XidGen                               0.0%         0.0%       0.0
+  ProcarrayGroupUpdate                 0.0%         0.0%       0.0
+  SlruWrite                            0.0%         0.0%       0.0
+  BufferMapping                        0.0%         0.0%       0.0
+  extend                               0.0%         0.0%       0.0
+  CheckpointerComm                     0.0%         0.0%       0.0
+  RelationMapRead                      0.0%         0.0%       0.0
+  AioWorkerSubmissionQueue             0.0%         0.0%       0.0
+  
+  Samples in window: 64308
+  Top-5 event overlap: 5/5
+  Max share disagreement (events >= 2% exact share): 13.3 pp (CPU)
+  Tolerance: +/- 10.0 pp
+  On-CPU-during-wait (spin): 5.7182% of wait time — exact on-CPU spin, attributed to its wait class (informational)
+  
+  RATE 200Hz (exploratory rate): outside tolerance (characterisation, non-gating)
+
+===== Cross-validation summary =====
+  RATE 10Hz (shipped default): outside tolerance (characterisation, non-gating)
+  RATE 50Hz (exploratory rate): outside tolerance (characterisation, non-gating)
+  RATE 100Hz (exploratory rate): outside tolerance (characterisation, non-gating)
+  RATE 200Hz (exploratory rate): outside tolerance (characterisation, non-gating)
+No tested rate met +/-10pp tolerance — see per-rate tables above.
+=== master control exit code: 1 ===
