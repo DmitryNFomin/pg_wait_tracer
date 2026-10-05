@@ -8,6 +8,7 @@
 #include "summary_reader.h"
 #include "wait_event.h"
 #include "percentile.h"
+#include "pid_index.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -3713,6 +3714,185 @@ void pgwt_free_execution_detail(struct pgwt_execution_detail_result *out)
     memset(out, 0, sizeof(*out));
 }
 
+/* ── Per-query exec/plan lifecycle (Queries tab) ──────────── */
+
+/* Grow (or create) the query-id table. 0 on success, -1 on allocation
+ * failure. The pre-#275 table was a fixed 1024 slots whose probe loop
+ * `while (used && query_id != qid) h = (h+1) & MASK;` never terminated once
+ * the table held 1024 distinct query ids — a hang, not a wrong number. */
+static int lifecycle_grow(struct pgwt_lifecycle_result *r)
+{
+    if (pgwt_test_alloc_fail("lifecycle_qid_grow"))
+        return -1;
+    int newcap = r->cap ? r->cap * 2 : 1024;
+    struct pgwt_qid_lifecycle *ns =
+        calloc((size_t)newcap, sizeof(*ns));
+    if (!ns)
+        return -1;
+    uint32_t mask = (uint32_t)newcap - 1;
+    for (int i = 0; i < r->cap; i++) {
+        if (!r->slots[i].used)
+            continue;
+        uint32_t h = (uint32_t)((r->slots[i].query_id * 0x9e3779b9ULL) & mask);
+        while (ns[h].used)
+            h = (h + 1) & mask;
+        ns[h] = r->slots[i];
+    }
+    free(r->slots);
+    r->slots = ns;
+    r->cap = newcap;
+    return 0;
+}
+
+/* Slot for `qid`, inserting if absent. NULL only on allocation failure. */
+static struct pgwt_qid_lifecycle *
+lifecycle_slot(struct pgwt_lifecycle_result *r, uint64_t qid)
+{
+    if (r->cap == 0 || (r->n + 1) * 10 >= r->cap * 7) {
+        if (lifecycle_grow(r) != 0)
+            return NULL;
+    }
+    uint32_t mask = (uint32_t)r->cap - 1;
+    uint32_t h = (uint32_t)((qid * 0x9e3779b9ULL) & mask);
+    while (r->slots[h].used && r->slots[h].query_id != qid)
+        h = (h + 1) & mask;
+    if (!r->slots[h].used) {
+        r->slots[h].used = 1;
+        r->slots[h].query_id = qid;
+        r->n++;
+    }
+    return &r->slots[h];
+}
+
+struct pgwt_qid_lifecycle *
+pgwt_lifecycle_lookup(struct pgwt_lifecycle_result *r, uint64_t query_id)
+{
+    if (!r || r->cap == 0 || !r->slots)
+        return NULL;
+    uint32_t mask = (uint32_t)r->cap - 1;
+    uint32_t h = (uint32_t)((query_id * 0x9e3779b9ULL) & mask);
+    while (r->slots[h].used && r->slots[h].query_id != query_id)
+        h = (h + 1) & mask;
+    return r->slots[h].used ? &r->slots[h] : NULL;
+}
+
+void pgwt_lifecycle_free(struct pgwt_lifecycle_result *r)
+{
+    if (!r)
+        return;
+    for (int i = 0; i < r->cap; i++) {
+        free(r->slots[i].exec_times);
+        free(r->slots[i].plan_times);
+    }
+    free(r->slots);
+    memset(r, 0, sizeof(*r));
+}
+
+/* Append one duration sample, keeping the written region contiguous. */
+static void lifecycle_sample(double **times, int *nsamples, int *cap,
+                             double ms)
+{
+    if (ms < 0 || *nsamples >= 10000)
+        return;
+    if (*nsamples >= *cap) {
+        int nc = *cap ? *cap * 2 : 64;
+        double *t = realloc(*times, (size_t)nc * sizeof(double));
+        if (t) { *times = t; *cap = nc; }
+    }
+    if (*times && *nsamples < *cap)
+        (*times)[(*nsamples)++] = ms;
+}
+
+void pgwt_compute_query_lifecycle(const struct pgwt_trace_event *events,
+                                  int count,
+                                  struct pgwt_lifecycle_result *out)
+{
+    memset(out, 0, sizeof(*out));
+    if (!events || count <= 0)
+        return;
+
+    /* Per-pid open-marker state. #275: was `pid_st[512]` + linear probe +
+     * `if (pi < 0) continue;`. Unbounded now; a pid gets a slot on its
+     * first marker, exactly as before. */
+    struct lc_pid_state {
+        uint32_t pid;
+        uint64_t exec_start_ns, plan_start_ns;
+        uint64_t qid;
+    };
+    struct lc_pid_state *pid_st = NULL;
+    int npids = 0, cap_pids = 0;
+    struct pgwt_pid_index pid_ix;
+    pgwt_pid_index_init(&pid_ix);
+
+    for (int i = 0; i < count; i++) {
+        const struct pgwt_trace_event *ev = &events[i];
+        uint32_t m = ev->old_event;
+        if (!PGWT_IS_MARKER(m)) continue;
+
+        int pi = pgwt_pid_index_find(&pid_ix, ev->pid);
+        if (pi < 0) {
+            if (npids >= cap_pids) {
+                int newcap = cap_pids ? cap_pids * 2 : 128;
+                struct lc_pid_state *tmp =
+                    pgwt_test_alloc_fail("lifecycle_pid_state") ? NULL
+                    : cap_pids == 0
+                      ? calloc((size_t)newcap, sizeof(*tmp))
+                      : realloc(pid_st, (size_t)newcap * sizeof(*tmp));
+                if (!tmp) goto oom;
+                pid_st = tmp;
+                cap_pids = newcap;
+            }
+            pi = npids;
+            if (pgwt_pid_index_put(&pid_ix, ev->pid, pi) != 0)
+                goto oom;
+            npids++;
+            memset(&pid_st[pi], 0, sizeof(pid_st[0]));
+            pid_st[pi].pid = ev->pid;
+        }
+
+        if (m == PGWT_MARKER_EXEC_START) {
+            pid_st[pi].exec_start_ns = ev->timestamp_ns;
+            pid_st[pi].qid = ev->query_id;
+        } else if (m == PGWT_MARKER_EXEC_END && pid_st[pi].exec_start_ns) {
+            double ms = (ev->timestamp_ns - pid_st[pi].exec_start_ns) / 1e6;
+            uint64_t qid = pid_st[pi].qid;
+            pid_st[pi].exec_start_ns = 0;
+            if (qid == 0) continue;
+            struct pgwt_qid_lifecycle *lc = lifecycle_slot(out, qid);
+            if (!lc) goto oom;
+            lc->exec_count++;
+            lc->exec_total_ms += ms;
+            lifecycle_sample(&lc->exec_times, &lc->exec_nsamples,
+                             &lc->exec_cap, ms);
+        } else if (m == PGWT_MARKER_PLAN_START) {
+            pid_st[pi].plan_start_ns = ev->timestamp_ns;
+            pid_st[pi].qid = ev->query_id;
+        } else if (m == PGWT_MARKER_PLAN_END && pid_st[pi].plan_start_ns) {
+            double ms = (ev->timestamp_ns - pid_st[pi].plan_start_ns) / 1e6;
+            uint64_t qid = pid_st[pi].qid;
+            pid_st[pi].plan_start_ns = 0;
+            if (qid == 0) continue;
+            struct pgwt_qid_lifecycle *lc = lifecycle_slot(out, qid);
+            if (!lc) goto oom;
+            lc->plan_count++;
+            lc->plan_total_ms += ms;
+            lifecycle_sample(&lc->plan_times, &lc->plan_nsamples,
+                             &lc->plan_cap, ms);
+        }
+    }
+
+    free(pid_st);
+    pgwt_pid_index_free(&pid_ix);
+    return;
+
+oom:
+    /* Never a partial table: #275 is a short answer presented as complete. */
+    free(pid_st);
+    pgwt_pid_index_free(&pid_ix);
+    pgwt_lifecycle_free(out);
+    out->failed = 1;
+}
+
 /* ── Variants ────────────────────────────────────────────── */
 
 /* One raw execution: events between EXEC_START and EXEC_END */
@@ -3891,22 +4071,60 @@ void pgwt_compute_variants(const struct pgwt_trace_event *events, int count,
         int      active;    /* 1 = inside start..end markers */
         struct raw_exec exec;
     };
-    #define MAX_PIDS 512
-    struct pid_exec_state *pids = calloc(MAX_PIDS, sizeof(*pids));
-    int num_pids = 0;
+    /* #275: this was `struct pid_exec_state pids[512]` with a linear probe
+     * and `if (num_pids >= MAX_PIDS) continue;` — the 513th distinct pid in
+     * the window, and every one after it, was dropped with no flag, no log
+     * and no error, so exec_count/avg/p95 came back quietly short under
+     * ordinary connection churn. Now a pid-keyed hash index (pid_index.h)
+     * over a growable state array, with NO bound: the only failure path is
+     * a real allocation failure, which fails the request rather than
+     * trimming the answer.
+     *
+     * State is created only for a pid that actually OPENS a phase
+     * (marker_start). That is behaviour-identical to creating it on first
+     * sight: every branch below is gated on ps->active, which a freshly
+     * created state has at 0, so a pid with no state can do nothing. It
+     * also keeps the footprint proportional to the pids that execute —
+     * pid_exec_state embeds a ~1.5 KB raw_exec — instead of to every pid
+     * that merely appears. */
+    struct pid_exec_state *pids = NULL;
+    int num_pids = 0, cap_pids = 0;
+    struct pgwt_pid_index pid_ix;
+    pgwt_pid_index_init(&pid_ix);
     int total_execs = 0;
+    int alloc_failed = 0;
 
-    for (int i = 0; i < count; i++) {
+    for (int i = 0; i < count && !alloc_failed; i++) {
         const struct pgwt_trace_event *ev = &events[i];
 
         /* Find or create PID state */
-        int pidx = -1;
-        for (int j = 0; j < num_pids; j++) {
-            if (pids[j].pid == ev->pid) { pidx = j; break; }
-        }
+        int pidx = pgwt_pid_index_find(&pid_ix, ev->pid);
         if (pidx < 0) {
-            if (num_pids >= MAX_PIDS) continue;
-            pidx = num_pids++;
+            if (ev->old_event != marker_start)
+                continue;
+            if (num_pids >= cap_pids) {
+                int newcap = cap_pids ? cap_pids * 2 : 64;
+                /* calloc for the first block, realloc to grow: the state
+                 * must start zeroed, and this keeps the common
+                 * few-pids case to a single allocation. */
+                struct pid_exec_state *tmp =
+                    pgwt_test_alloc_fail("variants_pid_state") ? NULL
+                    : cap_pids == 0
+                      ? calloc((size_t)newcap, sizeof(*tmp))
+                      : realloc(pids, (size_t)newcap * sizeof(*tmp));
+                if (!tmp) { alloc_failed = 1; break; }
+                pids = tmp;
+                if (cap_pids)
+                    memset(pids + cap_pids, 0,
+                           (size_t)(newcap - cap_pids) * sizeof(*pids));
+                cap_pids = newcap;
+            }
+            pidx = num_pids;
+            if (pgwt_pid_index_put(&pid_ix, ev->pid, pidx) != 0) {
+                alloc_failed = 1;
+                break;
+            }
+            num_pids++;
             pids[pidx].pid = ev->pid;
         }
 
@@ -4012,6 +4230,21 @@ void pgwt_compute_variants(const struct pgwt_trace_event *events, int count,
         }
     }
 
+    /* An allocation failure in the pid map is the ONLY way out of phase 1
+     * short of the end of the event array, and it fails the whole request.
+     * It is never a silent trim: #275 is exactly a partial answer presented
+     * as complete. */
+    if (alloc_failed) {
+        for (int i = 0; i < VARIANT_HT_SIZE; i++)
+            free(ht[i].exec_times);
+        free(ht);
+        free(pids);
+        pgwt_pid_index_free(&pid_ix);
+        memset(out, 0, sizeof(*out));
+        out->failed = 1;
+        return;
+    }
+
     /* Phase 2: collect variants, sort by total time */
     int nv = 0;
     for (int i = 0; i < VARIANT_HT_SIZE; i++)
@@ -4073,4 +4306,5 @@ void pgwt_compute_variants(const struct pgwt_trace_event *events, int count,
 
     free(ht);
     free(pids);
+    pgwt_pid_index_free(&pid_ix);
 }
