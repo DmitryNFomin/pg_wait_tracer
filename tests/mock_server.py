@@ -1096,7 +1096,15 @@ def _handle_request_inner(cmd, req_id, msg):
              "event": "IO:DataFileRead", "sessions": 5,
              "pids": [1001, 1003, 1005, 1007, 1009]},
         ]
-        return {"id": req_id, "peaks": peaks, "bursts": bursts, "bucket_ns": 60000000000}
+        # #276: the real server detects every burst ONSET in the window and
+        # returns the largest one in each bucket, declaring the onset count so
+        # the UI can say "showing N of M". The canned data IS complete (two
+        # onsets, two bursts), so bursts_truncated is False and the panel note
+        # stays empty -- the shape is what protocol drift compares, and keeping
+        # the rendered text unchanged keeps the committed snapshots valid.
+        return {"id": req_id, "peaks": peaks, "bursts": bursts,
+                "bursts_total": len(bursts), "bursts_truncated": False,
+                "bucket_ns": 60000000000}
 
     if cmd == "variants":
         return {"id": req_id, **_CANNED["variants"]}

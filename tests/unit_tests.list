@@ -60,6 +60,17 @@ test_variants_p95
 # (assertion shapes and fixtures blind to the bug, pid 0, dense pid runs, and
 # allocation failures that must come back ABSENT rather than short).
 test_pid_cap
+# #276: pgwt_compute_concurrency kept candidate intervals in a fixed
+# 100,000-entry array filled in ARRIVAL order, so the UI's default 900 s
+# window drew its first ~60 s and reported the other 825 s as max: 0 -- 8% of
+# the window, labelled "fidelity": "exact". Phase 1 is now bucketed on the fly
+# with unbounded distinct-pid tables (no cap left to declare), bursts are the
+# largest in each bucket with bursts_total declared, and the per-burst pid list
+# is a declared sample. Carries a verbatim copy of the deleted code so the
+# defect goes red on the same fixtures, plus the bypass suite (sub-cap and
+# window-spanning fixtures that are GREEN while broken, nothing-qualifying
+# windows, and allocation failures that must come back ABSENT).
+test_concurrency_bounds
 # A C unit test that tests/Makefile builds but this list never names is
 # compiled, linked and then never run (TST-3). Nothing else checks that.
 test_unit_list_coverage.py

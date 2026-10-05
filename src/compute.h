@@ -474,25 +474,44 @@ void pgwt_compute_fingerprints(const struct pgwt_trace_event *events, int count,
 
 /* ── Concurrency / Burst Detection ────────────────────────── */
 
+/* pids[] is a DISPLAY SAMPLE, not the burst (#276): the first
+ * PGWT_BURST_PID_SAMPLE distinct pids in entry order. num_sessions is the
+ * EXACT distinct-pid count, so num_pids < num_sessions is the sample bound
+ * being visible. Before #276 num_sessions was itself capped at 64, so the
+ * count and the list agreed by being equally short, with nothing saying so. */
+#define PGWT_BURST_PID_SAMPLE 64
+
 struct pgwt_burst {
     uint64_t timestamp_ns;    /* when the burst started */
     uint32_t event_id;        /* which wait event */
     char     event_name[64];
-    int      num_sessions;    /* how many sessions entered simultaneously */
-    uint32_t pids[64];        /* affected PIDs (up to 64) */
-    int      num_pids;
+    int      num_sessions;    /* exact distinct sessions that entered together */
+    uint32_t pids[PGWT_BURST_PID_SAMPLE];   /* display sample, see above */
+    int      num_pids;        /* <= num_sessions; smaller means sampled */
 };
 
 struct pgwt_concurrency_result {
-    /* Per-bucket peak concurrency (same layout as AAS buckets) */
+    /* Per-bucket peak concurrency (same layout as AAS buckets). No bound:
+     * every event of every bucket of the window is examined (#276). */
     int     *peak_sessions;   /* malloc'd [num_buckets] — max simultaneous waiters */
     uint32_t *peak_event;     /* malloc'd [num_buckets] — event with max concurrency */
     int      num_buckets;
     uint64_t bucket_ns;
 
-    /* Detected bursts (sorted by num_sessions descending) */
+    /* Bursts: the LARGEST burst in each bucket that had one, sorted by
+     * num_sessions descending (ties by time, then event id — a total order,
+     * because qsort is not stable). Selecting by size ALONE would cluster
+     * every marker wherever the ties fall; per bucket keeps the returned set
+     * representative of the whole window, which is what a time-bucketed view
+     * needs (#276). */
     struct pgwt_burst *bursts;  /* malloc'd, caller frees */
-    int    num_bursts;
+    int    num_bursts;          /* buckets that had a burst: <= num_buckets */
+    int    bursts_total;        /* burst ONSETS detected in the window */
+
+    /* Allocation failure: the answer is ABSENT, not short. The caller must
+     * report it (code "compute_failed") and never serialise the partial
+     * result — a short answer that looks complete is #276 itself. */
+    int    failed;
 };
 
 /* Detect concurrency peaks and burst events.

@@ -9,6 +9,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
     buildConcurrencyOption, buildConcurrencyTables,
+    burstSelectionNote, burstPidSampleMarker,
 } from '../../web/static/lib/builders/concurrency.js';
 
 function fivePeaks() {
@@ -262,4 +263,102 @@ test('captureFromNs: every burst pre-capture -> markPoint omitted entirely, burs
     const { option, bursts } = buildConcurrencyOption(d, { captureFromNs: 2500 });
     assert.equal(option.series[0].markPoint, undefined);
     assert.deepEqual(bursts, []);
+});
+
+/* ── #276: the two declared bounds the response can still carry ────────────
+ *
+ * The server detects every burst onset and returns the largest in each bucket,
+ * with `bursts_total` = onsets detected; a burst's `pids` list is a 64-pid
+ * sample of an exact `sessions` count. Both must be VISIBLE, and — equally
+ * important — must render exactly as before when there is nothing to declare,
+ * or when an older server omits the fields. A note that always shows is a note
+ * nobody reads.
+ */
+function burstData(extra) {
+    return Object.assign({
+        bucket_ns: 1_000,
+        peaks: [
+            { t: 1000, t_ms: 1, max: 4, event: 'A' },
+            { t: 2000, t_ms: 2, max: 9, event: 'B' },
+        ],
+        bursts: [
+            { timestamp_ns: 1500, timestamp_ms: 1, event: 'A', sessions: 4,
+              pids: [1, 2, 3, 4] },
+            { timestamp_ns: 2500, timestamp_ms: 2, event: 'B', sessions: 9,
+              pids: [1, 2, 3, 4, 5, 6, 7, 8, 9] },
+        ],
+    }, extra || {});
+}
+
+test('#276 note: the bucket maxima shown are declared against the onsets detected', () => {
+    const d = burstData({ bursts_total: 1284, bursts_truncated: true });
+    const model = buildConcurrencyOption(d);
+    assert.equal(model.burstNote,
+        'Showing the largest burst in each of 2 buckets, out of 1,284 burst ' +
+        'onsets detected across this window.');
+    const html = buildConcurrencyTables(model);
+    assert.ok(html.includes('class="chart-notes"'));
+    assert.ok(html.includes('1,284 burst onsets detected'));
+});
+
+test('#276 note: a single bucket reads as a sentence, not "1 buckets"', () => {
+    const d = burstData({ bursts_total: 40 });
+    d.bursts = [d.bursts[0]];
+    assert.equal(buildConcurrencyOption(d).burstNote,
+        'Showing the largest burst in each of 1 bucket, out of 40 burst ' +
+        'onsets detected across this window.');
+});
+
+/* The false-negative side: every way the note could appear when there is
+ * nothing to declare, which is how a panel note stops being read. */
+test('#276 note: absent, zero, or complete -> no note, panel renders as before', () => {
+    // Older server: no bursts_total at all.
+    assert.equal(buildConcurrencyOption(burstData()).burstNote, '');
+    // Nothing detected.
+    assert.equal(buildConcurrencyOption(burstData({ bursts_total: 0 })).burstNote, '');
+    // Every onset is on screen: 2 shown, 2 detected.
+    assert.equal(buildConcurrencyOption(burstData({ bursts_total: 2 })).burstNote, '');
+    // A server contradicting itself (fewer onsets than markers) says nothing
+    // rather than printing "2 of 1".
+    assert.equal(buildConcurrencyOption(burstData({ bursts_total: 1 })).burstNote, '');
+    // Non-numeric field (garbled response): ignored, never rendered raw.
+    assert.equal(burstSelectionNote({ bursts_total: 'lots' }, 2), '');
+    assert.equal(burstSelectionNote(null, 2), '');
+    // The empty <div> collapses via .chart-notes:empty, so a response with
+    // nothing to declare carries no text at all.
+    const html = buildConcurrencyTables(buildConcurrencyOption(burstData()));
+    assert.ok(html.includes('<div class="chart-notes"></div>'));
+    assert.ok(!html.includes('onsets detected'));
+});
+
+/* The note counts what is RENDERED, not what the server sent: #105 drops
+ * bursts landing in the not-captured prefix, and a note claiming 2 buckets
+ * beside a single row would be a new lie in place of the old one. */
+test('#276 note: counts the bursts actually shown, after the not-captured filter', () => {
+    const d = burstData({ bursts_total: 99 });
+    const model = buildConcurrencyOption(d, { captureFromNs: 2000 });
+    assert.equal(model.bursts.length, 1);
+    assert.ok(model.burstNote.startsWith(
+        'Showing the largest burst in each of 1 bucket,'));
+});
+
+test('#276 badge: a sampled PID list is marked on the row; a complete one is not', () => {
+    const pids = Array.from({ length: 64 }, (_, i) => 1000 + i);
+    const d = burstData({ bursts_total: 7 });
+    d.bursts = [{ timestamp_ns: 1500, timestamp_ms: 1, event: 'A',
+        sessions: 97, pids }];
+    const html = buildConcurrencyTables(buildConcurrencyOption(d));
+    assert.ok(html.includes('(64 of 97)'), 'row states the sample size');
+    assert.ok(html.includes('<b>97</b>'), 'and still reports the exact count');
+    // Complete list: no badge at all.
+    assert.equal(burstPidSampleMarker({ sessions: 4, pids: [1, 2, 3, 4] }), '');
+    // Exactly at the sample bound but complete: still no badge.
+    assert.equal(burstPidSampleMarker({ sessions: 64, pids }), '');
+});
+
+test('#276 badge: missing or malformed fields render exactly as before', () => {
+    assert.equal(burstPidSampleMarker(null), '');
+    assert.equal(burstPidSampleMarker({ sessions: 9 }), '');               // no pids
+    assert.equal(burstPidSampleMarker({ pids: [1, 2] }), '');              // no count
+    assert.equal(burstPidSampleMarker({ sessions: '9', pids: [1] }), '');  // not a number
 });

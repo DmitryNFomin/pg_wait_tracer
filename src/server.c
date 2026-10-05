@@ -4549,6 +4549,23 @@ static void handle_concurrency(struct pgwt_server *srv, struct pgwt_request *req
                               &res);
     free(events);
 
+    /* #276: the distinct-pid tables grow with the window, so an allocation
+     * failure is possible where a fixed array could only drop data. The
+     * answer is then ABSENT — never a short one that looks complete. */
+    if (res.failed) {
+        free(res.peak_sessions);
+        free(res.peak_event);
+        free(res.bursts);
+        cJSON *err = cJSON_CreateObject();
+        cJSON_AddNumberToObject(err, "id", (double)req->id);
+        cJSON_AddStringToObject(err, "error", "concurrency compute failed");
+        cJSON_AddStringToObject(err, "code", "compute_failed");
+        cJSON_AddStringToObject(err, "hint", "narrow the time range and retry");
+        add_fidelity(err, &linfo);
+        emit_json(err);
+        return;
+    }
+
     cJSON *root = cJSON_CreateObject();
     cJSON_AddNumberToObject(root, "id", (double)req->id);
     cJSON_AddStringToObject(root, "fidelity", pgwt_fidelity_str(fid));
@@ -4570,9 +4587,16 @@ static void handle_concurrency(struct pgwt_server *srv, struct pgwt_request *req
         cJSON_AddItemToArray(peaks, p);
     }
 
-    /* Bursts */
+    /* Bursts: the largest in each bucket that had one (#276). The old cap of
+     * 20 was filled from a list that compute built in arrival order, so the
+     * markers clustered at the left edge of the window; the count is now the
+     * client's own bucket resolution, and `bursts_total` declares how many
+     * onsets were detected behind it. */
+    cJSON_AddNumberToObject(root, "bursts_total", res.bursts_total);
+    cJSON_AddBoolToObject(root, "bursts_truncated",
+                          res.bursts_total > res.num_bursts);
     cJSON *bursts_arr = cJSON_AddArrayToObject(root, "bursts");
-    int nb = res.num_bursts < 20 ? res.num_bursts : 20;
+    int nb = res.num_bursts;
     for (int i = 0; i < nb; i++) {
         cJSON *b = cJSON_CreateObject();
         cjson_add_uint64(b, "timestamp_ns", res.bursts[i].timestamp_ns);
