@@ -2950,7 +2950,10 @@ void pgwt_compute_concurrency(const struct pgwt_trace_event *events, int count,
         return;
     }
 
-    qsort(entries, nentries, sizeof(entries[0]), cmp_burst_entry);
+    /* `entries` is NULL when nothing in the window qualified, and qsort(NULL,
+     * 0, ...) is formally undefined even though every libc tolerates it. */
+    if (nentries > 0)
+        qsort(entries, nentries, sizeof(entries[0]), cmp_burst_entry);
 
     /* Phase 2: one burst slot per bucket — the largest burst in it. Bounded
      * by the client's own chart resolution, not by an arbitrary 256. */

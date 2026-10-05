@@ -1080,7 +1080,30 @@ get_cached_immutable(struct pgwt_server *srv, const char *path)
 /* DUR-9: hard bound on the raw-load working array. Defaults to the same
  * budget as the immutable-file cache (25% of RAM, capped at 2 GB); the
  * PGWT_LOAD_MAX_EVENTS environment variable overrides it (tests use a tiny
- * value to prove the bound fires as a structured error, never an OOM). */
+ * value to prove the bound fires as a structured error, never an OOM).
+ *
+ * WHAT THIS BUDGET DOES *NOT* COVER (#276). It counts the 48-byte
+ * pgwt_trace_event array only. One endpoint allocates a second array
+ * proportional to the SAME window: handle_concurrency's burst pass keeps 16
+ * bytes per qualifying (non-idle, non-CPU, in-window) interval, so its peak
+ * footprint is up to ~1.33x the budgeted amount — measured 646 MB against a
+ * 480 MB event array at 10M events. A window that passes reject_overload can
+ * therefore still fail that malloc, and the request then answers
+ * "compute_failed" (pgwt_concurrency_result.failed) where the operator would
+ * have preferred the clearer "window too large". Both are loud refusals and
+ * neither invents data, so the fail-safe rule holds; the budget is simply
+ * under-counting what that one endpoint will take.
+ *
+ * Documented rather than folded in deliberately: this budget is consulted by
+ * every loader on every command, and it has no idea which endpoint will run.
+ * Scaling it down by 1.33x here would shrink the admissible window for the
+ * dozen endpoints that allocate nothing extra, and making it endpoint-aware
+ * means threading a per-command factor through server_load_events_fi and
+ * every caller of it — a refusal-behaviour change for the whole protocol, on
+ * a branch whose subject is concurrency's accounting. If that factor is ever
+ * wanted for real, it belongs in one place (a per-command multiplier applied
+ * where reject_overload decides), with its own test for each endpoint's
+ * refusal threshold. */
 static int load_max_events(void)
 {
     static int cached = 0;

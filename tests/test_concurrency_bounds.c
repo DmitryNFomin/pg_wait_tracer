@@ -13,7 +13,7 @@
  * burst_cap=256 bursts, and pids[64] per burst — the last of which also
  * capped the burst's REPORTED session count at 64.
  *
- * WHY THE FIXTURE LOOKS LIKE THIS. Section 1's window holds ~153,000
+ * WHY THE FIXTURE LOOKS LIKE THIS. Section 1's window holds 144,000
  * qualifying intervals spread EVENLY over 60 buckets, each interval short
  * enough to live inside exactly one bucket, and every bucket's expected peak
  * is a closed form of the generator's parameters (never read back from the
