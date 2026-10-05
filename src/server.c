@@ -283,14 +283,24 @@ struct file_cache_entry {
  * moves. A request reaching further back than lo_block decodes those blocks
  * from disk and does not cache them; it is a zoom-out, not the steady state.
  *
- * PEAK MEMORY. The entry is charged against the SAME budget as the immutable
- * cache (cache_total_events / cache_max_events, 25% of RAM capped at 2 GB), so
- * the two together cannot exceed it; past the budget the entry is dropped and
- * rebuilt from the current window, which is correct and no faster than today.
- * It adds 48 bytes per cached event, i.e. up to one more copy of the events a
- * window spans, on top of the per-request working array load_max_events()
- * bounds. It does NOT make the #276 under-count worse: that is about one
- * endpoint's extra per-interval array, which this does not touch.
+ * PEAK MEMORY — and it is not "one window". The entry only extends forward
+ * and never trims its front, so between two rotations it grows towards the
+ * WHOLE hour of current.trace, not the 900 s the window shows: 48 bytes per
+ * event, so ~718 MB/h at the demo's 4154 events/s. What bounds it is the SAME
+ * budget as the immutable cache (cache_total_events / cache_max_events, 25% of
+ * RAM capped at 2 GB — the two are additive in RAM and now additive in that
+ * accounting too), plus rotation, which gives a new current.trace a new header
+ * and so drops the entry once an hour. Past the budget the entry is dropped
+ * and rebuilt from the current window: correct, and no faster than before.
+ *
+ * That is the same shape the immutable cache already has — it holds whole
+ * rotated hours under the same budget — so this does not change the server's
+ * memory envelope, it fills it one hour sooner. Trimming the front to what
+ * recent windows actually touched would need a per-block last-use policy and
+ * is deliberately not here; the budget is the bound.
+ *
+ * It does NOT make the #276 under-count worse: that is one endpoint's extra
+ * per-interval array, which this does not touch.
  */
 struct cur_cache_block {
     int      start;              /* offset of this block's run in cc->events */
@@ -298,6 +308,7 @@ struct cur_cache_block {
     uint64_t index_ts;           /* block_index[b].timestamp_ns — identity */
     uint64_t file_offset;        /* block_index[b].file_offset  — identity */
     uint64_t sample_period_ns;   /* pgwt_block_info.sample_period_ns */
+    uint64_t last_ts;            /* pgwt_block_info.last_timestamp_ns */
     uint8_t  is_sample;          /* block_type == PGWT_BLOCK_SAMPLES */
 };
 
@@ -1067,8 +1078,8 @@ static int cache_total_events(struct pgwt_server *srv)
 static bool test_load_alloc_failure(const char *point);
 
 /* Off with PGWT_CURRENT_TRACE_CACHE=0, which keeps the pre-#283 path reachable
- * and tested: the differential in tests/test_current_trace_cache.py compares
- * responses across this switch. Read once — it is consulted per block. */
+ * and tested: the differential in tests/test_data_current_trace_cache.py
+ * compares responses across this switch. Read once — per block. */
 static int cur_cache_enabled(void)
 {
     static int cached = -1;
@@ -1243,6 +1254,7 @@ static int cur_cache_store(struct pgwt_server *srv, struct cur_trace_cache *cc,
     cb->index_ts = reader->block_index[b].timestamp_ns;
     cb->file_offset = reader->block_index[b].file_offset;
     cb->sample_period_ns = bi->sample_period_ns;
+    cb->last_ts = bi->last_timestamp_ns;
     cb->is_sample = (bi->block_type == PGWT_BLOCK_SAMPLES);
     cc->count += n;
     return 1;
@@ -1458,9 +1470,13 @@ static void load_file_range_mono(struct pgwt_server *srv,
             bi.block_type = cb->is_sample ? PGWT_BLOCK_SAMPLES
                                           : PGWT_BLOCK_TRANSITIONS;
             bi.sample_period_ns = cb->sample_period_ns;
+            /* Reconstructed from the descriptor, not from the records: these
+             * two are inert in this function today (only block_type and
+             * sample_period_ns are read below), and deriving them from
+             * rec[n-1] instead would quietly diverge from the block header the
+             * decode path reports if a future reader ever consults them. */
             bi.first_timestamp_ns = cb->index_ts;
-            bi.last_timestamp_ns = n > 0 ? rec[n - 1].timestamp_ns
-                                         : cb->index_ts;
+            bi.last_timestamp_ns = cb->last_ts;
             cc->stat_blocks_served++;
         } else {
             n = pgwt_reader_decode_block_info(&reader, b, block_buf,
