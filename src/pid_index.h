@@ -33,12 +33,10 @@
  * makes the named allocation fail once per call site. Production never
  * sets it. It exists because the refusal paths below are otherwise
  * unreachable, and an unreachable refusal is indistinguishable from one
- * that approves — which is the whole shape of #275. */
-static inline int pgwt_test_alloc_fail(const char *point)
-{
-    const char *v = getenv("PGWT_TEST_ALLOC_FAIL");
-    return v != NULL && strcmp(v, point) == 0;
-}
+ * that approves — which is the whole shape of #275. Lives in
+ * test_alloc_fail.h since #276 needed the same hook in triple_map.h;
+ * the behaviour and the "pid_index_grow" point name are unchanged. */
+#include "test_alloc_fail.h"
 
 struct pgwt_pid_index {
     uint32_t *keys;

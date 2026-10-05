@@ -1080,7 +1080,30 @@ get_cached_immutable(struct pgwt_server *srv, const char *path)
 /* DUR-9: hard bound on the raw-load working array. Defaults to the same
  * budget as the immutable-file cache (25% of RAM, capped at 2 GB); the
  * PGWT_LOAD_MAX_EVENTS environment variable overrides it (tests use a tiny
- * value to prove the bound fires as a structured error, never an OOM). */
+ * value to prove the bound fires as a structured error, never an OOM).
+ *
+ * WHAT THIS BUDGET DOES *NOT* COVER (#276). It counts the 48-byte
+ * pgwt_trace_event array only. One endpoint allocates a second array
+ * proportional to the SAME window: handle_concurrency's burst pass keeps 16
+ * bytes per qualifying (non-idle, non-CPU, in-window) interval, so its peak
+ * footprint is up to ~1.33x the budgeted amount — measured 646 MB against a
+ * 480 MB event array at 10M events. A window that passes reject_overload can
+ * therefore still fail that malloc, and the request then answers
+ * "compute_failed" (pgwt_concurrency_result.failed) where the operator would
+ * have preferred the clearer "window too large". Both are loud refusals and
+ * neither invents data, so the fail-safe rule holds; the budget is simply
+ * under-counting what that one endpoint will take.
+ *
+ * Documented rather than folded in deliberately: this budget is consulted by
+ * every loader on every command, and it has no idea which endpoint will run.
+ * Scaling it down by 1.33x here would shrink the admissible window for the
+ * dozen endpoints that allocate nothing extra, and making it endpoint-aware
+ * means threading a per-command factor through server_load_events_fi and
+ * every caller of it — a refusal-behaviour change for the whole protocol, on
+ * a branch whose subject is concurrency's accounting. If that factor is ever
+ * wanted for real, it belongs in one place (a per-command multiplier applied
+ * where reject_overload decides), with its own test for each endpoint's
+ * refusal threshold. */
 static int load_max_events(void)
 {
     static int cached = 0;
@@ -4549,6 +4572,23 @@ static void handle_concurrency(struct pgwt_server *srv, struct pgwt_request *req
                               &res);
     free(events);
 
+    /* #276: the distinct-pid tables grow with the window, so an allocation
+     * failure is possible where a fixed array could only drop data. The
+     * answer is then ABSENT — never a short one that looks complete. */
+    if (res.failed) {
+        free(res.peak_sessions);
+        free(res.peak_event);
+        free(res.bursts);
+        cJSON *err = cJSON_CreateObject();
+        cJSON_AddNumberToObject(err, "id", (double)req->id);
+        cJSON_AddStringToObject(err, "error", "concurrency compute failed");
+        cJSON_AddStringToObject(err, "code", "compute_failed");
+        cJSON_AddStringToObject(err, "hint", "narrow the time range and retry");
+        add_fidelity(err, &linfo);
+        emit_json(err);
+        return;
+    }
+
     cJSON *root = cJSON_CreateObject();
     cJSON_AddNumberToObject(root, "id", (double)req->id);
     cJSON_AddStringToObject(root, "fidelity", pgwt_fidelity_str(fid));
@@ -4570,9 +4610,28 @@ static void handle_concurrency(struct pgwt_server *srv, struct pgwt_request *req
         cJSON_AddItemToArray(peaks, p);
     }
 
-    /* Bursts */
+    /* Bursts: the largest in each bucket that had one (#276). The old cap of
+     * 20 was filled from a list that compute built in arrival order, so the
+     * markers clustered at the left edge of the window; the count is now the
+     * client's own bucket resolution, and `bursts_total` declares how many
+     * onsets were detected behind it.
+     *
+     * READ BEFORE WIRING A GENERIC "truncated" BANNER TO THIS FIELD:
+     * `bursts_truncated` means "more onsets were detected than are listed",
+     * which for a STRATIFIED one-per-bucket selection is true on nearly every
+     * busy window. It is NOT the executions-style "we kept the top N and threw
+     * the tail away" — the listed set is a per-bucket maximum and so spans the
+     * whole range. web/static/lib/builders/concurrency.js says exactly that in
+     * words ("Showing the largest burst in each of N buckets, out of M burst
+     * onsets detected"); a shared banner that reads the flag alone (the
+     * direction #273/#278 are heading) would relabel a representative sample
+     * as a lossy cut. Give the banner a selection KIND, or leave this panel's
+     * own sentence to do the declaring. */
+    cJSON_AddNumberToObject(root, "bursts_total", res.bursts_total);
+    cJSON_AddBoolToObject(root, "bursts_truncated",
+                          res.bursts_total > res.num_bursts);
     cJSON *bursts_arr = cJSON_AddArrayToObject(root, "bursts");
-    int nb = res.num_bursts < 20 ? res.num_bursts : 20;
+    int nb = res.num_bursts;
     for (int i = 0; i < nb; i++) {
         cJSON *b = cJSON_CreateObject();
         cjson_add_uint64(b, "timestamp_ns", res.bursts[i].timestamp_ns);

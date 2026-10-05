@@ -25,6 +25,7 @@ TESTS     = test_wait_event test_cmdline test_spawn test_event_writer test_event
             test_top_queries_percentile \
             test_variants_p95 \
             test_pid_cap \
+            test_concurrency_bounds \
             gen_test_traces gen_bench_traces test_concurrent_rw cross_validate \
             dump_markers wait_cpu_canary test_wait_cpu_canary \
             test_summary_tick_flush
@@ -149,6 +150,23 @@ test_pid_cap: test_pid_cap.c ../src/compute.c ../src/pid_index.h \
               ../src/percentile.h \
               $(BUILD)/wait_event.o $(BUILD)/spawn.o $(BUILD)/cJSON.o
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ test_pid_cap.c ../src/compute.c \
+	    $(BUILD)/wait_event.o $(BUILD)/spawn.o $(BUILD)/cJSON.o -lm
+
+# test_concurrency_bounds: #276 — pgwt_compute_concurrency materialised
+# candidate intervals into a fixed 100,000-entry array filled in ARRIVAL
+# order, so a 900 s window rendered its first ~60 s and reported the rest as
+# max: 0 ("fidelity": "exact" beside it), plus four more silent bounds
+# (ev_pids[64], pids[128], burst_cap=256, pids[64] per burst). Same link
+# shape as test_pid_cap (compute.c with -DPGWT_SERVER, pgwt_visit_summaries
+# stubbed in the test). The file carries a VERBATIM COPY of the deleted
+# phase 1, so the defect goes red here on the very fixtures that prove the
+# fix; allocation failures ride PGWT_TEST_ALLOC_FAIL (src/test_alloc_fail.h),
+# so the binary behaves identically on every toolchain.
+test_concurrency_bounds: test_concurrency_bounds.c ../src/compute.c \
+              ../src/triple_map.h ../src/test_alloc_fail.h \
+              ../src/pid_index.h ../src/percentile.h \
+              $(BUILD)/wait_event.o $(BUILD)/spawn.o $(BUILD)/cJSON.o
+	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ test_concurrency_bounds.c ../src/compute.c \
 	    $(BUILD)/wait_event.o $(BUILD)/spawn.o $(BUILD)/cJSON.o -lm
 
 test_pg13_resolve: test_pg13_resolve.c ../src/discovery.c ../src/spawn.c \

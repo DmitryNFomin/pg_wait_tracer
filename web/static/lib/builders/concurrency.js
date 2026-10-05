@@ -33,14 +33,16 @@ export const NOT_CAPTURED_BORDER = 'rgba(136, 136, 136, 0.45)';
  * leaves a gap rather than drawing through it) and covered by a labeled
  * "Not captured" markArea, so the pre-capture span never reads as measured
  * idle time.
- * Returns { option, hasData, topPeaks, bursts, bucketNs, notCapturedCount }.
+ * Returns { option, hasData, topPeaks, bursts, bucketNs, notCapturedCount,
+ * burstNote } -- burstNote is the #276 completeness sentence (empty when the
+ * server declared nothing to withhold).
  * The HTML tables are left to the view's mount (cheap string templating);
  * the row models here are the pure data the templates iterate. */
 export function buildConcurrencyOption(data, opts) {
     opts = opts || {};
     if (!data || !data.peaks || data.peaks.length === 0) {
         return { option: null, hasData: false, topPeaks: [], bursts: [], bucketNs: 0,
-            notCapturedCount: 0 };
+            notCapturedCount: 0, burstNote: '' };
     }
     const bns = data.bucket_ns || 0;
     const times = data.peaks.map(p => p.t);
@@ -137,8 +139,47 @@ export function buildConcurrencyOption(data, opts) {
     const topPeaks = data.peaks.filter((p, i) => i >= notCapturedCount && p.max > 1)
         .sort((a, b) => b.max - a.max).slice(0, 10);
 
+    const shownBursts = capturedBursts.map(({ b }) => b);
     return { option, hasData: true, topPeaks,
-        bursts: capturedBursts.map(({ b }) => b), bucketNs: bns, notCapturedCount };
+        bursts: shownBursts, bucketNs: bns, notCapturedCount,
+        burstNote: burstSelectionNote(data, shownBursts.length) };
+}
+
+/* PURE: the panel-level completeness sentence for the burst list (#276).
+ *
+ * The server detects every burst ONSET in the window and returns the LARGEST
+ * one in each bucket, declaring the onset count in `bursts_total`. Before #276
+ * it returned the first 20 of a list built in arrival order, so on a 900 s
+ * window every marker sat in the first minute and nothing said so.
+ *
+ * Returns '' when the server sent no `bursts_total` (older server: render
+ * exactly as before), when nothing was detected, or when the markers ARE every
+ * onset — a note that says "showing 3 of 3" is noise. Driven entirely by
+ * bursts_total vs the bursts actually rendered; no bound is hard-coded here. */
+export function burstSelectionNote(data, shownCount) {
+    if (!data || typeof data.bursts_total !== 'number') return '';
+    const total = data.bursts_total;
+    const shown = Number(shownCount) || 0;
+    if (!(total > 0) || shown <= 0 || shown >= total) return '';
+    return 'Showing the largest burst in each of ' + shown.toLocaleString() +
+        ' bucket' + (shown === 1 ? '' : 's') + ', out of ' +
+        total.toLocaleString() + ' burst onsets detected across this window.';
+}
+
+/* PURE: the terse per-row marker for the server's per-burst PID sample (#276).
+ *
+ * `sessions` is the exact distinct-session count; `pids` carries at most
+ * PGWT_BURST_PID_SAMPLE (64) of them. A shorter list than the count is the
+ * only bound left in the concurrency response, so it is stated on the row
+ * rather than implied by the list's length. '' when the list is complete, or
+ * when either field is missing (older server renders exactly as before). */
+export function burstPidSampleMarker(b) {
+    if (!b || !Array.isArray(b.pids) || typeof b.sessions !== 'number') return '';
+    if (b.pids.length >= b.sessions) return '';
+    return ' <span style="color:#d9a441;font-size:10px" title="The server returns ' +
+        b.pids.length.toLocaleString() + ' of this burst\u2019s ' +
+        b.sessions.toLocaleString() + ' PIDs">(' + b.pids.length.toLocaleString() +
+        ' of ' + b.sessions.toLocaleString() + ')</span>';
 }
 
 /* P3 wire 2: the row's zoom-intent attributes. Bursts are 4+ sessions inside
@@ -172,6 +213,10 @@ export function buildConcurrencyTables(model) {
     if (model.bursts.length > 0) {
         html += '<h3 style="color:#ccc;margin:15px 0 5px">Burst Events ' +
             '<span style="color:#666;font-size:12px">(4+ sessions within 10ms)</span></h3>' +
+            // #276: the panel-level completeness sentence. `.chart-notes:empty`
+            // collapses, so a response with nothing to declare renders exactly
+            // as it did before.
+            '<div class="chart-notes">' + esc(model.burstNote || '') + '</div>' +
             '<table class="data-table"><thead><tr>' +
             '<th>Time</th><th>Wait Event</th><th>Sessions</th><th>PIDs</th></tr></thead><tbody>';
         model.bursts.forEach(b => {
@@ -180,7 +225,8 @@ export function buildConcurrencyTables(model) {
                 (b.pids && b.pids.length > 8 ? '...' : '');
             html += '<tr' + zoomAttrs(b.timestamp_ns, model.bucketNs) + '><td>' + time +
                 '</td><td>' + esc(b.event) + '</td><td><b>' +
-                b.sessions + '</b></td><td>' + pids + '</td></tr>';
+                b.sessions + '</b></td><td>' + pids +
+                burstPidSampleMarker(b) + '</td></tr>';
         });
         html += '</tbody></table>';
     } else {

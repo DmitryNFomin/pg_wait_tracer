@@ -498,6 +498,17 @@ tr.selected-execution td { background: #173653; }
 #waterfall-chart { min-height: 240px; padding: 4px 10px; }
 #scatter-chart { height: 480px; padding: 4px 10px; }
 #matrix-chart { height: 660px; padding: 4px 10px; }
+/* #276: the Burst Events table is now one row per bucket that had a burst --
+ * up to the chart's own bucket count, which is 300 at a wide viewport, and
+ * measured ~8,800 px tall there. Bound the PANEL, never the row count: the
+ * rows the server just started reporting honestly (it declares the rest in
+ * bursts_total) must all stay reachable, and silently dropping them is the
+ * defect class #276 exists to remove. A px value, not vh: the snapshot
+ * baselines are captured at a fixed viewport and 640 px sits above the
+ * tallest committed cell (concurrency_burst_table.png is 499 px), so no
+ * baseline moves and no scrollbar appears until there is something to
+ * scroll. */
+#burst-table { max-height: 640px; overflow: auto; }
 .chart-readout {
   display: flex; gap: 14px; flex-wrap: wrap; align-items: center;
   min-height: 34px; padding: 7px 14px; color: #aaa; font-size: 11px;

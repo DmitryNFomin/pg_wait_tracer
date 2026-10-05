@@ -9,6 +9,7 @@
 #include "wait_event.h"
 #include "percentile.h"
 #include "pid_index.h"
+#include "triple_map.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -2724,9 +2725,46 @@ void pgwt_compute_fingerprints(const struct pgwt_trace_event *events, int count,
 
 /*
  * For each event, we know: PID was in old_event from (timestamp - duration)
- * to timestamp. Two sessions overlap if their time intervals overlap on the
- * same event. We detect bursts by sorting events by start time and using a
- * sliding window.
+ * to timestamp. Peak concurrency in a bucket is the maximum, over wait
+ * events, of the number of DISTINCT pids whose interval overlaps that
+ * bucket; a burst is burst_threshold+ distinct pids ENTERING the same wait
+ * event within burst_window_ns of each other.
+ *
+ * #276 — what this used to do and why it was wrong. Candidate intervals were
+ * materialised into a fixed 100,000-entry array filled in ARRIVAL order
+ * ("limit for memory"), and four more fixed arrays bounded the rest:
+ * ev_pids[64] distinct events per bucket, pids[128] distinct pids per event
+ * per bucket, burst_cap=256 bursts, pids[64] pids per burst. Every one of
+ * them dropped data silently. The interval cap was reached on every capture
+ * worth looking at: at the UI's default 900 s window on the demo workload
+ * the function examined the first ~60 s of events and reported the other
+ * 825 s as `max: 0` — a flat zero line that reads as "the database was
+ * idle", with "fidelity": "exact" beside it.
+ *
+ * Phase 1 therefore materialises nothing. Each qualifying event is bucketed
+ * ON THE FLY into every bucket its interval overlaps, and the distinct
+ * (bucket, event, pid) triples live in a hash map that grows
+ * (src/triple_map.h). Memory is then a function of the chart's resolution
+ * and of the workload's shape — buckets × distinct events × distinct pids —
+ * never of the event count, so there is no cap left to declare: every bucket
+ * sees every event in it, whether the window holds ten thousand events or
+ * ten million.
+ *
+ * Phase 2 (bursts) needs entry times in time order at 10 ms resolution,
+ * which no per-bucket pass supplies, so it does keep an array — but sized to
+ * the qualifying intervals actually present (16 bytes each, against the
+ * 48-byte event array the caller already holds and which load_max_events
+ * already bounds), never to a fixed 100,000. Bursts are then selected the
+ * way the rest of this codebase selects a bounded subset: the LARGEST burst
+ * in each bucket, so the returned set covers the whole window at the
+ * resolution the client asked for, with `bursts_total` declaring how many
+ * onsets were detected. Selecting the top N by size alone would have put
+ * every marker back at the left edge as soon as sizes tie, which on a steady
+ * workload they do.
+ *
+ * Allocation failure anywhere sets `failed` and the caller reports the answer
+ * as ABSENT (code "compute_failed"). A short answer that looks complete is
+ * the whole shape of this issue.
  */
 
 struct active_entry {
@@ -2743,11 +2781,57 @@ static int cmp_active_by_start(const void *a, const void *b)
     return (sa > sb) - (sa < sb);
 }
 
+/* One pid ENTERING one wait event: all phase 2 needs, 16 bytes. */
+struct burst_entry {
+    uint64_t start_ns;
+    uint32_t pid;
+    uint32_t event_id;
+};
+
+/* Event first (phase 2 walks one event's entries as a contiguous group), then
+ * entry time, then pid. The order is TOTAL on purpose: qsort is not stable,
+ * and which burst a bucket reports must not depend on the libc. */
+static int cmp_burst_entry(const void *a, const void *b)
+{
+    const struct burst_entry *x = (const struct burst_entry *)a;
+    const struct burst_entry *y = (const struct burst_entry *)b;
+    if (x->event_id != y->event_id)
+        return (x->event_id > y->event_id) - (x->event_id < y->event_id);
+    if (x->start_ns != y->start_ns)
+        return (x->start_ns > y->start_ns) - (x->start_ns < y->start_ns);
+    return (x->pid > y->pid) - (x->pid < y->pid);
+}
+
+/* Largest first; ties by time then event id, again for a total order. */
 static int cmp_burst_desc(const void *a, const void *b)
 {
-    int na = ((const struct pgwt_burst *)a)->num_sessions;
-    int nb = ((const struct pgwt_burst *)b)->num_sessions;
-    return (nb > na) - (nb < na);
+    const struct pgwt_burst *x = (const struct pgwt_burst *)a;
+    const struct pgwt_burst *y = (const struct pgwt_burst *)b;
+    if (x->num_sessions != y->num_sessions)
+        return (y->num_sessions > x->num_sessions) -
+               (y->num_sessions < x->num_sessions);
+    if (x->timestamp_ns != y->timestamp_ns)
+        return (x->timestamp_ns > y->timestamp_ns) -
+               (x->timestamp_ns < y->timestamp_ns);
+    return (x->event_id > y->event_id) - (x->event_id < y->event_id);
+}
+
+/* Does this record contribute an interval? The predicate is shared by the
+ * counting pass and the filling pass so the two can never disagree about the
+ * size of the array. Markers and records whose duration exceeds their own end
+ * timestamp are already refused by pgwt_filter_matches (the FID-4 chokepoint),
+ * which is what makes `timestamp_ns - duration_ns` below safe. */
+static inline int concurrency_qualifies(const struct pgwt_trace_event *ev,
+                                        const struct pgwt_filter *f,
+                                        uint64_t from_ns, uint64_t to_ns)
+{
+    if (!pgwt_filter_matches(f, ev) || pgwt_is_idle_event(ev->old_event))
+        return 0;
+    if (ev->old_event == 0)
+        return 0;        /* on-CPU: not a wait, never part of a burst */
+    if (ev->timestamp_ns < from_ns || ev->timestamp_ns > to_ns)
+        return 0;
+    return 1;
 }
 
 void pgwt_compute_concurrency(const struct pgwt_trace_event *events, int count,
@@ -2769,137 +2853,237 @@ void pgwt_compute_concurrency(const struct pgwt_trace_event *events, int count,
     out->bucket_ns = bucket_ns;
     out->peak_sessions = calloc(num_buckets, sizeof(int));
     out->peak_event = calloc(num_buckets, sizeof(uint32_t));
+    if (!out->peak_sessions || !out->peak_event) {
+        out->failed = 1;
+        return;
+    }
 
-    /* Build sorted list of active intervals */
-    int cap = count < 100000 ? count : 100000;  /* limit for memory */
-    struct active_entry *active = malloc(cap * sizeof(*active));
-    int nactive = 0;
+    /* Phase 1 state. Two maps so a pid key can never be read as a count key:
+     *   seen:   (bucket, event, pid) -> presence
+     *   counts: (bucket, event, 0)   -> distinct pids seen so far */
+    struct pgwt_triple_map seen, counts;
+    pgwt_triple_map_init(&seen);
+    pgwt_triple_map_init(&counts);
 
-    for (int i = 0; i < count && nactive < cap; i++) {
+    /* Phase 2 input: sized by a counting pass, so it is exactly as large as
+     * the qualifying intervals (16 bytes each) with no doubling slack — the
+     * cap it replaces was 100,000 entries of 24 bytes, and the array the
+     * caller already holds is 48 bytes per EVENT. One predicate
+     * (concurrency_qualifies) decides membership for both passes, so the two
+     * cannot drift apart and overrun. */
+    int failed = 0;
+    size_t nqual = 0;
+    for (int i = 0; i < count; i++)
+        if (concurrency_qualifies(&events[i], f, from_ns, to_ns))
+            nqual++;
+
+    struct burst_entry *entries = NULL;
+    if (nqual > 0) {
+        if (!pgwt_test_alloc_fail("concurrency_entries"))
+            entries = (struct burst_entry *)malloc(nqual * sizeof(*entries));
+        if (!entries) {
+            pgwt_triple_map_free(&seen);
+            pgwt_triple_map_free(&counts);
+            out->failed = 1;
+            return;
+        }
+    }
+    size_t nentries = 0;
+
+    for (int i = 0; i < count; i++) {
         const struct pgwt_trace_event *ev = &events[i];
-        if (!pgwt_filter_matches(f, ev) || pgwt_is_idle_event(ev->old_event))
-            continue;
-        if (ev->old_event == 0) continue;  /* skip CPU for burst detection */
-        if (ev->timestamp_ns < from_ns || ev->timestamp_ns > to_ns)
+        if (!concurrency_qualifies(ev, f, from_ns, to_ns))
             continue;
 
-        active[nactive].pid = ev->pid;
-        active[nactive].event_id = ev->old_event;
-        active[nactive].start_ns = ev->timestamp_ns - ev->duration_ns;
-        active[nactive].end_ns = ev->timestamp_ns;
-        nactive++;
-    }
+        uint64_t end_ns = ev->timestamp_ns;
+        uint64_t start_ns = end_ns - ev->duration_ns;
 
-    qsort(active, nactive, sizeof(active[0]), cmp_active_by_start);
-
-    /* Phase 1: Peak concurrency per AAS bucket.
-     * For each bucket, count DISTINCT PIDs waiting on the same event. */
-    for (int b = 0; b < num_buckets; b++) {
-        uint64_t bstart = from_ns + (uint64_t)b * bucket_ns;
-        uint64_t bend = bstart + bucket_ns;
-
-        /* Track distinct PIDs per event using small hash sets */
-        struct {
-            uint32_t eid;
-            uint32_t pids[128]; /* distinct PIDs for this event */
-            int npids;
-        } ev_pids[64];
-        int nev = 0;
-
-        for (int i = 0; i < nactive; i++) {
-            if (active[i].start_ns >= bend) break;
-            if (active[i].end_ns <= bstart) continue;
-
-            /* Find or create entry for this event */
-            int found = -1;
-            for (int j = 0; j < nev; j++) {
-                if (ev_pids[j].eid == active[i].event_id) {
-                    found = j;
-                    break;
+        /* Buckets overlapped: start < bucket_end && end > bucket_start. The
+         * window filter above guarantees end_ns <= to_ns and end_ns >= from_ns;
+         * end_ns == from_ns overlaps no bucket. */
+        if (end_ns > from_ns) {
+            uint64_t into = end_ns - from_ns;
+            int b_hi = (int)((into - 1) / bucket_ns);
+            if (b_hi > num_buckets - 1) b_hi = num_buckets - 1;
+            int b_lo = 0;
+            if (start_ns > from_ns) {
+                uint64_t q = (start_ns - from_ns) / bucket_ns;
+                b_lo = q > (uint64_t)num_buckets ? num_buckets : (int)q;
+            }
+            for (int b = b_lo; b <= b_hi; b++) {
+                int created = 0;
+                int *slot = pgwt_triple_map_slot(&seen, (uint32_t)b,
+                                                 ev->old_event, ev->pid,
+                                                 &created);
+                if (!slot) { failed = 1; break; }
+                if (!created)
+                    continue;      /* this pid is already counted here */
+                int *cnt = pgwt_triple_map_slot(&counts, (uint32_t)b,
+                                                ev->old_event, 0, &created);
+                if (!cnt) { failed = 1; break; }
+                (*cnt)++;
+                /* Strictly greater: the first event to REACH a count owns the
+                 * bucket, which is the pre-#276 tie-break (first-inserted
+                 * wins) and is deterministic for a given event order. */
+                if (*cnt > out->peak_sessions[b]) {
+                    out->peak_sessions[b] = *cnt;
+                    out->peak_event[b] = ev->old_event;
                 }
             }
-            if (found < 0 && nev < 64) {
-                found = nev;
-                ev_pids[nev].eid = active[i].event_id;
-                ev_pids[nev].npids = 0;
-                nev++;
-            }
-            if (found < 0) continue;
-
-            /* Add PID if not already present (distinct count) */
-            int dup = 0;
-            for (int k = 0; k < ev_pids[found].npids; k++) {
-                if (ev_pids[found].pids[k] == active[i].pid) {
-                    dup = 1;
-                    break;
-                }
-            }
-            if (!dup && ev_pids[found].npids < 128)
-                ev_pids[found].pids[ev_pids[found].npids++] = active[i].pid;
+            if (failed) break;
         }
 
-        /* Find peak (distinct PIDs, not event count) */
-        for (int j = 0; j < nev; j++) {
-            if (ev_pids[j].npids > out->peak_sessions[b]) {
-                out->peak_sessions[b] = ev_pids[j].npids;
-                out->peak_event[b] = ev_pids[j].eid;
-            }
-        }
+        if (nentries >= nqual)
+            continue;    /* unreachable: same predicate as the counting pass */
+        entries[nentries].start_ns = start_ns;
+        entries[nentries].pid = ev->pid;
+        entries[nentries].event_id = ev->old_event;
+        nentries++;
     }
 
-    /* Phase 2: Burst detection.
-     * Sliding window: find groups of N+ sessions entering the same wait
-     * event within burst_window_ns of each other. */
-    int burst_cap = 256;
-    struct pgwt_burst *bursts = calloc(burst_cap, sizeof(*bursts));
+    pgwt_triple_map_free(&seen);
+    pgwt_triple_map_free(&counts);
+
+    if (failed) {
+        free(entries);
+        out->failed = 1;
+        return;
+    }
+
+    /* `entries` is NULL when nothing in the window qualified, and qsort(NULL,
+     * 0, ...) is formally undefined even though every libc tolerates it. */
+    if (nentries > 0)
+        qsort(entries, nentries, sizeof(entries[0]), cmp_burst_entry);
+
+    /* Phase 2: one burst slot per bucket — the largest burst in it. Bounded
+     * by the client's own chart resolution, not by an arbitrary 256. */
+    struct pgwt_burst *per_bucket =
+        (struct pgwt_burst *)calloc((size_t)num_buckets, sizeof(*per_bucket));
+    int *has_burst = (int *)calloc((size_t)num_buckets, sizeof(int));
+    if (!per_bucket || !has_burst) {
+        free(per_bucket); free(has_burst); free(entries);
+        out->failed = 1;
+        return;
+    }
+
+    /* pid -> how many of its entries are inside the current window. A sliding
+     * window with both ends monotone, so distinct-pid bookkeeping is
+     * incremental: no rescan per anchor, and no 64-pid ceiling. */
+    struct pgwt_triple_map win;
+    pgwt_triple_map_init(&win);
+    int total_bursts = 0;
+
+    size_t g = 0;
+    while (g < nentries) {
+        uint32_t eid = entries[g].event_id;
+        size_t gend = g;
+        while (gend < nentries && entries[gend].event_id == eid)
+            gend++;
+
+        pgwt_triple_map_clear(&win);
+        size_t i = g, j = g;
+        int distinct = 0;
+
+        while (i < gend) {
+            uint64_t wend = entries[i].start_ns + burst_window_ns;
+            while (j < gend && entries[j].start_ns <= wend) {
+                int created = 0;
+                int *m = pgwt_triple_map_slot(&win, entries[j].pid, 0, 0,
+                                              &created);
+                if (!m) { failed = 1; break; }
+                if (*m == 0) distinct++;
+                (*m)++;
+                j++;
+            }
+            if (failed) break;
+
+            size_t consume_to = i + 1;
+            if (distinct >= burst_threshold) {
+                total_bursts++;
+                int b = 0;
+                if (entries[i].start_ns > from_ns) {
+                    uint64_t q = (entries[i].start_ns - from_ns) / bucket_ns;
+                    b = q > (uint64_t)(num_buckets - 1)
+                        ? num_buckets - 1 : (int)q;
+                }
+                if (!has_burst[b] || distinct > per_bucket[b].num_sessions) {
+                    struct pgwt_burst *nb = &per_bucket[b];
+                    memset(nb, 0, sizeof(*nb));
+                    has_burst[b] = 1;
+                    nb->timestamp_ns = entries[i].start_ns;
+                    nb->event_id = eid;
+                    nb->num_sessions = distinct;
+                    pgwt_event_full_name(eid, nb->event_name,
+                                         sizeof(nb->event_name));
+                    /* pids[] is a DISPLAY SAMPLE: the first
+                     * PGWT_BURST_PID_SAMPLE distinct pids of the burst in
+                     * entry order. num_sessions is the exact count, so
+                     * num_pids < num_sessions makes the bound visible
+                     * instead of silent (the pre-#276 code capped
+                     * num_sessions at 64 as well, so the count and the list
+                     * agreed by being equally short). */
+                    int np = 0;
+                    for (size_t k = i; k < j && np < PGWT_BURST_PID_SAMPLE; k++) {
+                        int dup = 0;
+                        for (int p = 0; p < np; p++)
+                            if (nb->pids[p] == entries[k].pid) { dup = 1; break; }
+                        if (!dup) nb->pids[np++] = entries[k].pid;
+                    }
+                    nb->num_pids = np;
+                }
+                /* One onset is reported once. The pre-#276 code also skipped
+                 * ahead, but stopped at the next entry of a DIFFERENT event,
+                 * so a single onset could be re-reported dozens of times and
+                 * fill the old 256-entry table by itself. */
+                while (consume_to < gend && entries[consume_to].start_ns <= wend)
+                    consume_to++;
+            }
+            for (; i < consume_to; i++) {
+                int created = 0;
+                int *m = pgwt_triple_map_slot(&win, entries[i].pid, 0, 0,
+                                              &created);
+                if (!m) { failed = 1; break; }
+                if (--(*m) == 0) distinct--;
+            }
+            if (failed) break;
+        }
+        if (failed) break;
+        g = gend;
+    }
+
+    pgwt_triple_map_free(&win);
+    free(entries);
+
+    if (failed) {
+        free(per_bucket); free(has_burst);
+        out->failed = 1;
+        return;
+    }
+
+    /* Compact to the buckets that had a burst, largest first. */
     int nbursts = 0;
+    for (int b = 0; b < num_buckets; b++)
+        if (has_burst[b]) nbursts++;
 
-    for (int i = 0; i < nactive && nbursts < burst_cap; i++) {
-        uint32_t eid = active[i].event_id;
-        uint64_t window_end = active[i].start_ns + burst_window_ns;
-
-        /* Count sessions with same event starting within window */
-        int burst_count = 0;
-        uint32_t pids[64];
-        int npids = 0;
-
-        for (int j = i; j < nactive; j++) {
-            if (active[j].start_ns > window_end) break;
-            if (active[j].event_id == eid) {
-                burst_count++;
-                if (npids < 64) {
-                    /* Avoid duplicate PIDs */
-                    int dup = 0;
-                    for (int k = 0; k < npids; k++)
-                        if (pids[k] == active[j].pid) { dup = 1; break; }
-                    if (!dup) pids[npids++] = active[j].pid;
-                }
-            }
+    struct pgwt_burst *bursts = NULL;
+    if (nbursts > 0) {
+        bursts = (struct pgwt_burst *)calloc((size_t)nbursts, sizeof(*bursts));
+        if (!bursts) {
+            free(per_bucket); free(has_burst);
+            out->failed = 1;
+            return;
         }
-
-        if (npids >= burst_threshold) {
-            struct pgwt_burst *b = &bursts[nbursts++];
-            b->timestamp_ns = active[i].start_ns;
-            b->event_id = eid;
-            b->num_sessions = npids;
-            pgwt_event_full_name(eid, b->event_name, sizeof(b->event_name));
-            b->num_pids = npids < 64 ? npids : 64;
-            memcpy(b->pids, pids, b->num_pids * sizeof(uint32_t));
-
-            /* Skip past this burst to avoid duplicates */
-            while (i + 1 < nactive &&
-                   active[i + 1].start_ns <= window_end &&
-                   active[i + 1].event_id == eid)
-                i++;
-        }
+        int w = 0;
+        for (int b = 0; b < num_buckets; b++)
+            if (has_burst[b]) bursts[w++] = per_bucket[b];
+        qsort(bursts, nbursts, sizeof(bursts[0]), cmp_burst_desc);
     }
-
-    free(active);
-
-    qsort(bursts, nbursts, sizeof(bursts[0]), cmp_burst_desc);
+    free(per_bucket);
+    free(has_burst);
 
     out->bursts = bursts;
     out->num_bursts = nbursts;
+    out->bursts_total = total_bursts;
 }
 
 /* ── Lock Chains ──────────────────────────────────────────── */
