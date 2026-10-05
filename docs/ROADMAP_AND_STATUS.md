@@ -1887,6 +1887,10 @@ the daemon is actively writing) via a footer-less block reader, caches immutable
 `.trace.lz4` per session, and re-reads only `current.trace` on a 5-second auto-refresh
 → 1–5 s latency, zero persistent server process, historical + live merged. (Sprint 12
 explicitly avoided merging daemon+server; see Sprint 11 / Arch 4.)
+*Superseded in part by #283:* `current.trace` is no longer re-read whole. Its
+**committed** blocks (the ones `current.trace.meta`'s high-watermark publishes, which
+the writer never rewrites) are cached as well, and the entry extends as new blocks
+commit; only blocks outside the retained run are read on demand.
 *Later:* the actual **daemon control socket** arrived in rework A0 (status/metrics/
 escalate — not AAS push); the "Live = last N min means NOW" contract was fixed by
 Trust **T6** (UI-11 UTC labels; UI-1 dead-transport visibility) and the summary path
@@ -2063,7 +2067,8 @@ without the merge.
 Near-real-time AAS + drill-down from the daemon's live trace, **without** merging
 daemon+server. Architecture: `pgwt-server` reads `current.trace` (footer-less streaming
 block reader), caches immutable `.trace.lz4` per session, re-reads only `current.trace`
-on refresh → 1–5s latency, zero persistent server. **12.1** streaming reader (stop at
+on refresh → 1–5s latency, zero persistent server. (#283 later cached
+`current.trace`'s committed blocks too — see Phase H above.) **12.1** streaming reader (stop at
 EOF/incomplete header, detect new blocks); **12.2** include `current.trace` in file list
 (rescan per request); **12.3** per-session cache for immutable files keyed by
 `(filename,time_range)` (**this realizes REVIEW Arch 6**); **12.4** web auto-refresh
@@ -2200,7 +2205,8 @@ Trust (the rework's "Non-goals" reaffirm: no userspace rewrite, server keeps com
 - **Arch 6 — Cache computed results in the server** — **[DONE, Sprint 12.3]**. Cache
   last-N results keyed by (command,from,to,filters); adjacent queries share work.
   Realized as the **per-session immutable-file cache** keyed by `(filename,time_range)`
-  in Sprint 12 (only `current.trace` re-read on refresh).
+  in Sprint 12; #283 extended it to `current.trace`'s committed blocks, so a refresh
+  re-decodes only the blocks that committed since the previous request.
 
 #### Part II — What I explicitly would NOT change — [all kept]
 BPF-watchpoint capture; columnar-LZ4 format; SSH-exec transport; Go+ECharts client;
