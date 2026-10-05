@@ -196,8 +196,17 @@ def mixed_scenario(base=BASE, span_s=24, pids=4, per_pid=1500,
 
 # ── Reading the server's own view of its cache ───────────────────────────────
 
-STAT_KEYS = {"enabled", "lo", "blocks", "events", "decoded", "served",
+# `cap` is required, not optional: it is the RESIDENT event count against
+# `events`, which is only what the shared budget is charged. A build that does
+# not report it cannot be checked for the charged-vs-resident property, so the
+# parser refuses rather than skipping that assertion.
+STAT_KEYS = {"enabled", "lo", "blocks", "events", "cap", "decoded", "served",
              "resets"}
+
+# src/server.c CUR_CACHE_GROW_EVENTS -- the fixed growth step. Resident must
+# stay within one step of charged; under the doubling this replaced, resident
+# was up to 2x charged and the documented MB/h figure was low by that much.
+CUR_CACHE_GROW_EVENTS = 1024 * 1024
 
 
 def read_curcache(stderr_path):
@@ -430,6 +439,18 @@ def section_differential(tr):
             payload = sum(len(line) for line in on)
             tr.check(payload > 50_000,
                      "responses carry real payload (%d bytes)" % payload)
+            if on_stats:
+                # Charged vs resident on a full-size entry. A doubling from
+                # 16384 would land cap at 32768 against 32320 charged here, so
+                # this fixture is too small to catch it on its own -- the
+                # tight-budget case in the bypass suite is the one with teeth.
+                # Stated rather than implied, so nobody reads this line as the
+                # proof it is not.
+                tr.check(on_stats["cap"] - on_stats["events"]
+                         <= CUR_CACHE_GROW_EVENTS,
+                         "resident within one growth step of charged "
+                         "(cap=%d events=%d)"
+                         % (on_stats["cap"], on_stats["events"]))
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
     finally:
@@ -667,6 +688,101 @@ def section_growth(tr):
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
         cleanup_traces(trace_dir)
+
+
+# ── 3b. A window that jumps PAST the cached run ─────────────────────────────
+
+def section_forward_gap(tr):
+    """The window jumps forward past the end of the retained run, leaving a gap.
+
+    This is the live case, not a corner case: a 120 s window whose tab stopped
+    refreshing for longer than the window is wide -- the display slept, the
+    presenter talked -- then refreshed. The first block it now needs is past
+    `lo_block + n_blocks`, so the run can neither serve it nor extend to it.
+
+    Declining to store without restarting is the trap. The entry then holds up
+    to a full hour of events that no request can ever reach, and because
+    cache_total_events() counts it, those events evict rotated-file entries as
+    well -- that session is strictly WORSE than before #283. So the gap must
+    restart the run at the block being read, exactly as the over-budget path
+    does.
+
+    The assertions are on the server's own counters rather than on latency:
+    after the jump the run must START somewhere past the old run's end (which
+    is what proves a gap was there to begin with -- without that the test could
+    pass on an overlapping window and prove nothing), and the repeat of the
+    jumped-to window must then be served without decoding anything new.
+    """
+    print("\n### 3b. the window jumps forward past the cached run ###")
+    trace_dir = big_fixture()
+    tmp = tempfile.mkdtemp(prefix="pgwt_cc_err_")
+    try:
+        err = os.path.join(tmp, "gap.err")
+        env = dict(STATS_ENV)
+        env["PGWT_CURRENT_TRACE_CACHE"] = "1"
+        # Early and late slices of the same capture, far enough apart that the
+        # late one's first block is past the end of the early one's run.
+        early = (BASE - 1 * S, BASE + 4 * S)
+        late = (BASE + 31 * S, BASE + 37 * S)
+        with ServerHarness(trace_dir, env=env, stderr_path=err) as srv:
+            a_resp = srv.query("transitions", from_=str(early[0]),
+                               to_=str(early[1]))
+            a = read_curcache(err)
+            b_resp = srv.query("transitions", from_=str(late[0]),
+                               to_=str(late[1]))
+            b = read_curcache(err)
+            c_resp = srv.query("transitions", from_=str(late[0]),
+                               to_=str(late[1]))
+            c = read_curcache(err)
+        print("    early %s" % a)
+        print("    jump  %s" % b)
+        print("    again %s" % c)
+        if not (a and b and c):
+            tr.check(False, "curcache stats unreadable across the jump")
+            return
+        tr.check(count_of(a_resp, "total") > 0,
+                 "the early window saw events (%d)" % count_of(a_resp, "total"))
+        tr.check(count_of(b_resp, "total") > 0,
+                 "the late window saw events (%d)" % count_of(b_resp, "total"))
+        # The gap is real: the run now starts past where the old one ended.
+        tr.check(b["lo"] > a["lo"] + a["blocks"],
+                 "the jumped-to window's first block (%d) really is past the "
+                 "old run's end (%d) -- there was a gap to restart over"
+                 % (b["lo"], a["lo"] + a["blocks"]))
+        # `blocks > 0` would be true of a FROZEN entry too, so the assertion is
+        # that the run MOVED onto the jumped-to blocks. (Checked: with the
+        # restart reverted this reads lo 0 -> 0 and goes red, where
+        # `blocks > 0` alone passed on the frozen entry. The "events were
+        # given back" check that used to sit here passed on the frozen entry
+        # for the same reason and is gone -- resets plus a moved lo already
+        # prove the old run was released.)
+        tr.check(b["lo"] > a["lo"] and b["blocks"] > 0,
+                 "the run restarted ON the new blocks instead of freezing "
+                 "(lo %d -> %d, blocks=%d)" % (a["lo"], b["lo"], b["blocks"]))
+        tr.check(b["resets"] > a["resets"],
+                 "the gap dropped the stale run rather than keeping it for "
+                 "nothing (resets %d -> %d)" % (a["resets"], b["resets"]))
+        # And the restarted run then behaves like any other run.
+        tr.check_eq(c["decoded"], b["decoded"],
+                    "repeating the jumped-to window decodes nothing new "
+                    "(decoded stayed %d)" % b["decoded"])
+        tr.check(c["served"] > b["served"],
+                 "repeating it is served from the restarted run "
+                 "(served %d -> %d)" % (b["served"], c["served"]))
+        # Correctness, not just bookkeeping: same answers as the old path.
+        with ServerHarness(trace_dir,
+                           env={"PGWT_CURRENT_TRACE_CACHE": "0"}) as srv:
+            ctl_a = srv.query("transitions", from_=str(early[0]),
+                              to_=str(early[1]))
+            ctl_b = srv.query("transitions", from_=str(late[0]),
+                              to_=str(late[1]))
+        tr.check_eq(canonical_body(a_resp), canonical_body(ctl_a),
+                    "the early window matches the uncached read")
+        tr.check_eq(canonical_body(c_resp), canonical_body(ctl_b),
+                    "the window read from the RESTARTED run matches the "
+                    "uncached read")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 # ── 4. Restart safety ───────────────────────────────────────────────────────
@@ -911,8 +1027,71 @@ def bypass_over_budget(tr):
                      "the tight budget actually fired the drop path "
                      "(resets=%d)" % st["resets"])
             tr.check(st["events"] <= 5000 + 4096,
-                     "the entry stayed inside its cap (events=%d)"
+                     "the charged entry stayed inside its cap (events=%d)"
                      % st["events"])
+            # Holds at every size, but cannot DISCRIMINATE at this one: with
+            # ~3.5k events a doubling and a fixed step both give the same cap.
+            # bypass_growth_step_is_a_bound is the instance with teeth.
+            tr.check(st["cap"] - st["events"] <= CUR_CACHE_GROW_EVENTS,
+                     "resident is within one growth step of charged "
+                     "(cap=%d events=%d delta=%d, step=%d; scale-blind here)"
+                     % (st["cap"], st["events"], st["cap"] - st["events"],
+                        CUR_CACHE_GROW_EVENTS))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+        cleanup_traces(trace_dir)
+
+
+def bypass_growth_step_is_a_bound(tr):
+    """Resident (cc->cap) must stay within ONE growth step of charged
+    (cc->count) -- the property the fixed-step growth exists for, and the one
+    that makes the header comment's MB/h figure describe the allocation rather
+    than only the accounting.
+
+    This needs a fixture whose event count sits just ABOVE a power of two.
+    Below one, a doubling and a fixed step land on the SAME cap and the
+    assertion cannot tell them apart: measured at 1,500,000 events both give
+    cap=2,097,152. Just above 2^21 they diverge -- at 2,200,000 events the
+    doubling gives cap=4,194,304 (slack 1,994,304 > the 1 Mi step) where the
+    fixed step gives 3,145,728 (slack 945,728). Rather than carry a 2.2M-event
+    (105 MB) fixture, the step is shrunk with
+    PGWT_CURRENT_TRACE_CACHE_GROW_EVENTS so a 33k-event one does the same job.
+    """
+    # ~33k cached events: just above 2^15 = 32768, which is what makes the
+    # doubling overshoot visible (it jumps to 65536).
+    trace_dir = generate_traces(busy_scenario(pids=8, per_pid=4100))
+    tmp = tempfile.mkdtemp(prefix="pgwt_cc_err_")
+    try:
+        step = 2048
+        err = os.path.join(tmp, "step.err")
+        env = dict(STATS_ENV)
+        env["PGWT_CURRENT_TRACE_CACHE"] = "1"
+        env["PGWT_CURRENT_TRACE_CACHE_GROW_EVENTS"] = str(step)
+        w_from, w_to = fixture_window()
+        with ServerHarness(trace_dir, env=env, stderr_path=err) as srv:
+            srv.query("transitions", from_=w_from, to_=w_to)
+        st = read_curcache(err)
+        if st is None:
+            tr.check(False, "curcache stats unreadable for the growth step")
+            return
+        print("    step=%d charged=%d resident=%d slack=%d"
+              % (step, st["events"], st["cap"], st["cap"] - st["events"]))
+        # The fixture must be past a power of two, or the assertion below is
+        # blind: a count just under one makes every growth policy agree.
+        pow2 = 1
+        while pow2 < st["events"]:
+            pow2 *= 2
+        tr.check(pow2 - st["events"] > step,
+                 "a doubling WOULD be caught on this fixture: it would reach "
+                 "cap=%d for %d events, overshooting by %d > step %d"
+                 % (pow2, st["events"], pow2 - st["events"], step))
+        tr.check(st["cap"] - st["events"] <= step,
+                 "resident is within one growth step of charged "
+                 "(cap=%d events=%d slack=%d step=%d)"
+                 % (st["cap"], st["events"], st["cap"] - st["events"], step))
+        tr.check(st["cap"] >= st["events"],
+                 "resident covers charged (cap=%d >= events=%d)"
+                 % (st["cap"], st["events"]))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
         cleanup_traces(trace_dir)
@@ -939,20 +1118,29 @@ def bypass_stats_parser(tr):
                     "a curcache line missing fields parses as None")
         with open(p, "w") as f:
             f.write("pgwt-server: curcache enabled=1 lo=0 blocks=two "
-                    "events=1 decoded=1 served=1 resets=0\n")
+                    "events=1 cap=1 decoded=1 served=1 resets=0\n")
         tr.check_eq(read_curcache(p), None,
                     "an unparseable field parses as None")
+        # A build that reports everything EXCEPT cap must refuse too: without
+        # cap the charged-vs-resident assertions silently stop running, which
+        # is the shape of a gate that quietly goes blind after a format change.
         with open(p, "w") as f:
             f.write("pgwt-server: curcache enabled=1 lo=0 blocks=2 events=8 "
-                    "decoded=2 served=0 resets=0\n")
-            f.write("pgwt-server: curcache enabled=1 lo=0 blocks=2 events=8 "
                     "decoded=2 served=2 resets=0\n")
+        tr.check_eq(read_curcache(p), None,
+                    "a line with no cap= field parses as None, so the "
+                    "resident-memory assertions cannot be skipped silently")
+        with open(p, "w") as f:
+            f.write("pgwt-server: curcache enabled=1 lo=0 blocks=2 events=8 "
+                    "cap=16 decoded=2 served=0 resets=0\n")
+            f.write("pgwt-server: curcache enabled=1 lo=0 blocks=2 events=8 "
+                    "cap=16 decoded=2 served=2 resets=0\n")
         got = read_curcache(p)
         tr.check(got is not None and got["served"] == 2,
                  "the LAST curcache line is the one reported")
         # And the guard built on it refuses every unreadable shape.
         for bad in (None, {"enabled": 1, "lo": 0, "blocks": 0, "events": 0,
-                           "decoded": 0, "served": 0, "resets": 0}):
+                           "cap": 0, "decoded": 0, "served": 0, "resets": 0}):
             probe = QuietRunner("probe")
             require_used(probe, bad, "x")
             tr.check_eq(probe.failed, 1,
@@ -972,7 +1160,11 @@ def bypass_dependencies(tr):
     tr.check(os.path.exists(server_harness.GEN_BIN)
              and os.access(server_harness.GEN_BIN, os.X_OK),
              "gen_test_traces exists and is executable")
-    # A generator that fails must raise, not quietly leave an empty dir.
+    # A generator given nothing must produce nothing -- never a
+    # plausible-looking fixture. Measured: it writes two empty .jsonl sidecars
+    # and NO trace file. The assertion is on that absence, because the version
+    # of this check that ended in `os.path.getsize(...) >= 0` was true of every
+    # file that exists and so could not fail at all.
     empty = tempfile.mkdtemp(prefix="pgwt_cc_empty_")
     try:
         raised = False
@@ -980,10 +1172,11 @@ def bypass_dependencies(tr):
             generate_traces({"events": []}, output_dir=empty)
         except Exception:
             raised = True
-        produced = os.path.exists(os.path.join(empty, "current.trace"))
-        tr.check(raised or not produced
-                 or os.path.getsize(os.path.join(empty, "current.trace")) >= 0,
-                 "an empty scenario is handled without inventing a fixture")
+        traces = sorted(f for f in os.listdir(empty)
+                        if f == "current.trace" or f.endswith(".trace.lz4"))
+        tr.check(raised or not traces,
+                 "an empty scenario raises or produces no trace file at all "
+                 "(found %s)" % (traces or "none"))
         # An empty trace dir: the server refuses to start rather than answering
         # zeros, and the harness surfaces that as an exception. An empty input
         # must never read as "the differential agreed".
@@ -992,13 +1185,21 @@ def bypass_dependencies(tr):
         try:
             err = os.path.join(tmp, "void.err")
             refused = False
+            why = ""
             try:
                 run_sequence(probe_dir, True, err, [("transitions", {})])
             except Exception as exc:
-                refused = "no trace files" in str(exc) or True
+                refused = True
+                why = str(exc)
             tr.check(refused,
                      "an empty trace dir is refused outright, never answered "
                      "as an agreeing differential")
+            # Separately, and this one can fail: the refusal must say WHY. The
+            # previous version computed `"no trace files" in str(exc) or True`,
+            # so it accepted any exception at all -- including one from a bug
+            # in this test.
+            tr.check("no trace files" in why,
+                     "and the refusal names the reason (%r)" % why[:90])
             probe = QuietRunner("probe")
             require_used(probe, read_curcache(err), "cache used")
             tr.check_eq(probe.failed, 1,
@@ -1024,6 +1225,7 @@ def section_bypass(tr):
     bypass_unparseable_meta(tr)
     bypass_truncated_file_under_meta(tr)
     bypass_over_budget(tr)
+    bypass_growth_step_is_a_bound(tr)
 
 
 # ── main ────────────────────────────────────────────────────────────────────
@@ -1035,6 +1237,7 @@ if __name__ == "__main__":
         section_self_consistency(t)
         section_repeat(t)
         section_growth(t)
+        section_forward_gap(t)
         section_restart(t)
         section_bypass(t)
     finally:

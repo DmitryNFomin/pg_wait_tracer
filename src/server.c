@@ -285,13 +285,21 @@ struct file_cache_entry {
  *
  * PEAK MEMORY — and it is not "one window". The entry only extends forward
  * and never trims its front, so between two rotations it grows towards the
- * WHOLE hour of current.trace, not the 900 s the window shows: 48 bytes per
- * event, so ~718 MB/h at the demo's 4154 events/s. What bounds it is the SAME
- * budget as the immutable cache (cache_total_events / cache_max_events, 25% of
- * RAM capped at 2 GB — the two are additive in RAM and now additive in that
- * accounting too), plus rotation, which gives a new current.trace a new header
- * and so drops the entry once an hour. Past the budget the entry is dropped
- * and rebuilt from the current window: correct, and no faster than before.
+ * WHOLE hour of current.trace, not the 900 s the window shows. At 48 bytes per
+ * event and the demo's 4154 events/s that is ~718 MB per pre-rotation hour
+ * CHARGED (cc->count). RESIDENT is cc->cap, which the fixed growth step
+ * (CUR_CACHE_GROW_EVENTS) keeps within 48 MB of charged — the distinction is
+ * load-bearing, because under the doubling this used to do, resident was up to
+ * 2x charged and the number above would have been low by that much. The
+ * transient during the final realloc is ~2x charged (old and new array mapped
+ * at once), which is inherent to one contiguous array.
+ *
+ * What bounds it is the SAME budget as the immutable cache
+ * (cache_total_events / cache_max_events, 25% of RAM capped at 2 GB — the two
+ * are additive in RAM and now additive in that accounting too), plus rotation,
+ * which gives a new current.trace a new header and so drops the entry once an
+ * hour. Past the budget the entry is dropped and restarted at the block being
+ * read: correct, and no faster than before.
  *
  * That is the same shape the immutable cache already has — it holds whole
  * rotated hours under the same budget — so this does not change the server's
@@ -1189,14 +1197,67 @@ cur_cache_get(const struct cur_trace_cache *cc, int b)
 /*
  * Retain block `b`'s raw records. Returns 1 when the block is now cached.
  *
- * Only a contiguous forward extension is accepted: block b must be the one
- * immediately after the last held block (or the entry must be empty, in which
- * case the run starts at b). A gap would make cur_cache_get's range test lie.
+ * Only a contiguous forward extension is accepted, because a gap would make
+ * cur_cache_get's range test lie. Three cases, and the difference between them
+ * is the whole point:
  *
- * Over the shared budget the entry is DROPPED and restarted at b rather than
- * grown or half-kept: that bounds memory, keeps the run contiguous, and the
- * degraded behaviour is today's — decode from disk — not a wrong answer.
+ *   - b is the block right after the run (or the run is empty): extend.
+ *   - b is BELOW the run: decline to store, keep the entry. This is a zoom-out;
+ *     the run still answers the right-hand part of the same request, so the
+ *     entry is earning its memory and must not be thrown away.
+ *   - b is ABOVE the run, with a gap: RESTART the run at b. Declining without
+ *     restarting is the trap — once the window has jumped past the cached run
+ *     (a 120 s window after the display slept, or a presenter who stopped
+ *     talking for longer than the window is wide), nothing is ever served and
+ *     nothing is ever stored again, so the entry holds up to an hour of events
+ *     for zero benefit until rotation. And because cache_total_events() counts
+ *     it, those events also evict rotated-file entries: that session would be
+ *     strictly WORSE than before #283, which is the opposite of the point.
+ *
+ * The over-budget path restarts for the same reason.
  */
+static void cur_cache_restart_at(struct cur_trace_cache *cc,
+                                 const struct pgwt_event_reader *reader, int b)
+{
+    cur_cache_drop(cc);
+    snprintf(cc->path, sizeof(cc->path), "%s", reader->path);
+    cc->hdr_start_wall_ns = reader->header.start_time_ns;
+    cc->hdr_clock_offset_ns = reader->header.clock_offset_ns;
+    cc->lo_block = b;
+}
+
+/* Events added per growth step once the array is past its first allocation.
+ *
+ * Deliberately NOT a doubling. The shared budget is charged cc->count, but the
+ * allocator holds cc->cap, and under doubling cap is up to 2x count — so the
+ * number an operator budgets against would be low by up to 2x, and the
+ * transient at the final realloc (old + new mapped at once) up to 3x. With a
+ * fixed step, resident is count + at most this step (48 MB) regardless of how
+ * big the entry gets, and the realloc transient is ~2x count + one step, which
+ * is inherent to growing one contiguous array and not something a growth
+ * policy can remove. The cost is one copy per step instead of per doubling:
+ * at the demo's 4154 events/s that is one copy every ~4 minutes. */
+#define CUR_CACHE_GROW_EVENTS (1024 * 1024)      /* 48 MB per step */
+
+/* The step, overridable ONLY so a test can observe the property at fixture
+ * scale. The two policies coincide for any count just below a power of two
+ * (both land on the same cap), so a gate on "resident stays within one step of
+ * charged" can only go red where the step is small relative to the count and
+ * the count sits just ABOVE a power of two. With the deployed 1 Mi step that
+ * needs ~2.1M events; with a small step a 33k-event fixture does it. Same
+ * shape as PGWT_CURRENT_TRACE_CACHE_MAX_EVENTS: test-only, and it cannot make
+ * the bound looser than the code's own invariant. */
+static int cur_cache_grow_events(void)
+{
+    static int cached = -1;
+    if (cached < 0) {
+        const char *env = getenv("PGWT_CURRENT_TRACE_CACHE_GROW_EVENTS");
+        int v = env ? atoi(env) : 0;
+        cached = v > 0 ? v : CUR_CACHE_GROW_EVENTS;
+    }
+    return cached;
+}
+
 static int cur_cache_store(struct pgwt_server *srv, struct cur_trace_cache *cc,
                            int b, const struct pgwt_event_reader *reader,
                            const struct pgwt_trace_event *buf, int n,
@@ -1204,17 +1265,17 @@ static int cur_cache_store(struct pgwt_server *srv, struct cur_trace_cache *cc,
 {
     if (n < 0 || !reader->block_index || b >= reader->num_blocks)
         return 0;
-    if (cc->n_blocks > 0 && b != cc->lo_block + cc->n_blocks)
-        return 0;                       /* not a forward extension */
+    if (cc->n_blocks > 0 && b != cc->lo_block + cc->n_blocks) {
+        if (b < cc->lo_block)
+            return 0;                   /* zoom-out: the run still serves */
+        cur_cache_restart_at(cc, reader, b);     /* forward gap: start over */
+    }
 
     /* Charge against the shared budget BEFORE allocating. cache_total_events
      * already includes cc->count, so this is "would the entry still fit". */
     if ((int64_t)cache_total_events(srv) + n > (int64_t)CACHE_MAX_EVENTS ||
         cc->count + n > cur_cache_max_events()) {
-        cur_cache_drop(cc);
-        snprintf(cc->path, sizeof(cc->path), "%s", reader->path);
-        cc->hdr_start_wall_ns = reader->header.start_time_ns;
-        cc->hdr_clock_offset_ns = reader->header.clock_offset_ns;
+        cur_cache_restart_at(cc, reader, b);
         if (n > CACHE_MAX_EVENTS || n > cur_cache_max_events())
             return 0;              /* a single block exceeds the whole budget */
     }
@@ -1223,6 +1284,8 @@ static int cur_cache_store(struct pgwt_server *srv, struct cur_trace_cache *cc,
         cc->lo_block = b;
 
     if (cc->n_blocks >= cc->blk_cap) {
+        /* Still a doubling: one descriptor per 4096 events, so a full hour of
+         * demo-rate capture is ~3700 of them (~150 KB). Nothing to bound. */
         int newcap = cc->blk_cap ? cc->blk_cap * 2 : 64;
         struct cur_cache_block *tb =
             test_load_alloc_failure("cur_cache_blk_grow") ? NULL :
@@ -1233,11 +1296,21 @@ static int cur_cache_store(struct pgwt_server *srv, struct cur_trace_cache *cc,
         cc->blk_cap = newcap;
     }
     if (cc->count + n > cc->cap) {
-        int newcap = cc->cap ? cc->cap : 16384;
-        while (newcap < cc->count + n) {
-            if (newcap > INT_MAX / 2) { newcap = cc->count + n; break; }
-            newcap *= 2;
-        }
+        int need = cc->count + n;
+        int limit = cur_cache_max_events();
+        int step = cur_cache_grow_events();
+        /* First allocation: 16384 events (768 KB), so a short capture does not
+         * pay a whole step up front. Clamped to the step, because a first
+         * allocation larger than the step would break the invariant the step
+         * exists to provide. */
+        if (!cc->cap)
+            step = step < 16384 ? step : 16384;
+        /* Round `need` up to a whole number of steps. need <= limit always:
+         * the budget check above restarted the run otherwise. */
+        int newcap = need <= INT_MAX - step
+                   ? ((need + step - 1) / step) * step : need;
+        if (newcap > limit) newcap = limit;
+        if (newcap < need)  newcap = need;
         struct pgwt_trace_event *te =
             test_load_alloc_failure("cur_cache_grow") ? NULL :
             realloc(cc->events, (size_t)newcap * sizeof(*te));
@@ -1272,9 +1345,16 @@ static void cur_cache_report(const struct cur_trace_cache *cc)
     }
     if (!on)
         return;
+    /* `events` is what the shared budget is CHARGED (cc->count); `cap` is what
+     * the allocator actually holds. Both are reported because they are not the
+     * same number and the difference is the thing a memory claim gets wrong:
+     * tests/test_data_current_trace_cache.py asserts cap - events stays within
+     * one growth step, which is the property the fixed-step growth exists for
+     * and which a doubling would break. */
     fprintf(stderr, "pgwt-server: curcache enabled=%d lo=%d blocks=%d "
-            "events=%d decoded=%llu served=%llu resets=%llu\n",
+            "events=%d cap=%d decoded=%llu served=%llu resets=%llu\n",
             cur_cache_enabled(), cc->lo_block, cc->n_blocks, cc->count,
+            cc->cap,
             (unsigned long long)cc->stat_blocks_decoded,
             (unsigned long long)cc->stat_blocks_served,
             (unsigned long long)cc->stat_resets);
@@ -2458,7 +2538,11 @@ static struct pgwt_wfid window_fidelity(struct pgwt_server *srv,
 /*
  * Load events in [from_wall_ns, to_wall_ns] from trace files.
  * Immutable .trace.lz4: from cache (read once per session).
- * current.trace: on-demand block reads (no caching, no memory growth).
+ * current.trace: its COMMITTED blocks are cached too (#283, struct
+ * cur_trace_cache) and the entry extends as new blocks commit; only blocks
+ * outside the retained run are read on demand. Both caches share one memory
+ * budget (cache_total_events / cache_max_events); PGWT_CURRENT_TRACE_CACHE=0
+ * returns current.trace to the pre-#283 read-every-time path.
  * Returns malloc'd array. Caller must free(). Sets *out_count.
  *
  * Fidelity (trace format v2, D3 + T1): SAMPLES records are normalized so
@@ -3604,7 +3688,9 @@ static void handle_top_queries(struct pgwt_server *srv, struct pgwt_request *req
 
     /* Use summaries for large ranges (>120s) for the class breakdown.
      * Always load raw events for lifecycle stats (exec/plan counts).
-     * Large files are read on-demand (not cached) so this is safe.
+     * A file too large to cache is read on-demand, so this is safe; a cached
+     * one (immutable, or #283's committed-block run for current.trace) costs
+     * memory bounded by cache_max_events() rather than by this call.
      * No pid pushdown: the lifecycle stats below read exec/plan markers
      * across ALL pids (markers never pass the uniform filter). */
     all_events = server_load_events_fi(srv, req->from_ns, req->to_ns, 0,
