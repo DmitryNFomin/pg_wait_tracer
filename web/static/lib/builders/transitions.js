@@ -186,6 +186,22 @@ export function buildTransitionsOption(data, threshold, dims, posOverrides, hide
     return { option, visibleCount: ecNodes.length, hiddenIdleLinks, hiddenIdleValue };
 }
 
+/* PURE: a variant's p95 truncation marker (issue #273). The server caps the
+ * p95 sample at PGWT_VARIANT_MAX_SAMPLES executions, taken in arrival order
+ * (a prefix, not a random sample — biased, not merely approximate: #272/#271),
+ * and reports how many it actually used in `p95_sample_n`. Returns '' when
+ * the field is absent (older server — render exactly as before, no marker,
+ * no crash) or when the sample covered every execution. Driven entirely by
+ * p95_sample_n vs exec_count; the 10,000 cap itself is never hard-coded here. */
+export function p95TruncationMarker(v) {
+    if (!v || v.p95_sample_n == null || v.exec_count == null) return '';
+    if (v.p95_sample_n >= v.exec_count) return '';
+    const n = v.p95_sample_n.toLocaleString();
+    return ' <span style="color:#d9a441;font-size:10px" title="p95 computed from the first ' +
+        n + ' of ' + v.exec_count.toLocaleString() + ' executions (arrival-order sample, biased)">' +
+        '(first ' + n + ')</span>';
+}
+
 /* PURE: a variants response section ("exec" or "plan") -> HTML string. Byte-
  * identical to the old renderVariantSection. Exported for testing. */
 export function buildVariantSectionHtml(vdata, title, esc) {
@@ -246,7 +262,7 @@ export function buildVariantSectionHtml(vdata, title, esc) {
             '<span style="color:#888;font-size:11px">' +
             '<b style="color:#4fc3f7">' + pctTime.toFixed(1) + '%</b> of time' +
             ' · ' + v.exec_count.toLocaleString() + ' exec · ' + v.num_queries + ' queries' +
-            ' · avg ' + avgStr + ' · p95 ' + p95Str + ' · total ' + totalStr +
+            ' · avg ' + avgStr + ' · p95 ' + p95Str + p95TruncationMarker(v) + ' · total ' + totalStr +
             (v.avg_loop_n > 1.5 ? ' · ~' + v.avg_loop_n.toFixed(0) + '× loop' : '') +
             '</span></div>' + flowHtml +
             '<div style="color:#888;font-size:10px;margin-top:2px">' + stepsText + '</div>' + queryHtml +
