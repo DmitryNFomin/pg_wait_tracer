@@ -118,7 +118,7 @@ const VARIANTS = {
         num_variants: 3,
         variants: [
             { exec_count: 30000, num_queries: 1, total_ms: 2790.0,
-              avg_ms: 0.093, p95_ms: 0.30, avg_loop_n: 1,
+              avg_ms: 0.093, p95_ms: 0.30, p95_sample_n: 10000, avg_loop_n: 1,
               top_query_id: 3886912043147135675,
               steps: [
                   { name: 'CPU*', avg_ms: 0.04, class: 'cpu' },
@@ -127,7 +127,7 @@ const VARIANTS = {
               ],
               query_text: 'UPDATE pgbench_accounts SET abalance = abalance + $1 WHERE aid = $2' },
             { exec_count: 15000, num_queries: 1, total_ms: 1360.0,
-              avg_ms: 0.09, p95_ms: 0.28, avg_loop_n: 4,
+              avg_ms: 0.09, p95_ms: 0.28, p95_sample_n: 10000, avg_loop_n: 4,
               top_query_id: 5371305355164922084,
               steps: [
                   { name: 'CPU*', avg_ms: 0.05, class: 'cpu' },
@@ -135,7 +135,7 @@ const VARIANTS = {
               ],
               query_text: 'SELECT abalance FROM pgbench_accounts WHERE aid = $1' },
             { exec_count: 120, num_queries: 1, total_ms: 900.0,
-              avg_ms: 7.5, p95_ms: 21.0, avg_loop_n: 1,
+              avg_ms: 7.5, p95_ms: 21.0, p95_sample_n: 120, avg_loop_n: 1,
               top_query_id: 6660000000000000666,
               steps: [
                   { name: 'CPU*', avg_ms: 0.5, class: 'cpu' },
@@ -149,7 +149,7 @@ const VARIANTS = {
         num_variants: 1,
         variants: [
             { exec_count: 45000, num_queries: 2, total_ms: 495.0,
-              avg_ms: 0.011, p95_ms: 0.04, avg_loop_n: 1,
+              avg_ms: 0.011, p95_ms: 0.04, p95_sample_n: 10000, avg_loop_n: 1,
               top_query_id: 3886912043147135675,
               steps: [
                   { name: 'CPU*', avg_ms: 0.011, class: 'cpu' },
