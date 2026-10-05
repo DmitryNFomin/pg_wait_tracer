@@ -597,6 +597,42 @@ substitute one family for the other.
   | events | 137 | 144 | 146 |
   | sessions | 139 | 142 | 145 |
 
+  > **These numbers do not describe the workload we intend to demo (2026-10-05).**
+  > They were recorded against the base workload only — pgbench `-c 4 --rate=25`
+  > plus the Python lock/sleep loop, roughly 1,000 trace records per second. They
+  > are internally consistent for that workload and were honestly measured; they
+  > are simply not the workload the owner asked for ("spikes, lwlocks,
+  > concurrency", every panel populated).
+  >
+  > Two independent reasons they cannot be carried forward:
+  >
+  > 1. **The enriched workload is denser.** With the four-burst cycle actually
+  >    running, the capture reaches ~4,154 records/s after detuning (6,692 before).
+  >    Server-side cost scales with in-window volume: at a 900 s window the five
+  >    raw-event endpoints measured 2,059-3,254 ms, against 256-423 ms at 120 s.
+  >    See #283 — `current.trace` events are never cached, so a moving window
+  >    re-decodes ~98% of the same data every refresh, which is the dominant term.
+  >
+  > 2. **Every summaries-path number here was inflated by #277.** The summary
+  >    writer double-wrote the in-progress second on every tick flush, so any
+  >    window >= 120 s with no pid filter over-reported: measured 2.16x at `-i 1`
+  >    and 1.14x at `-i 5`. That covers Overview AAS, Events, Time Model, Top
+  >    Queries and Sessions. The fix does not repair already-written summary files,
+  >    so the capture behind this table cannot be re-analysed — it has to be
+  >    retaken.
+  >
+  > Additionally, during part of the period these were pinned, the burst workload
+  > was silently a no-op: an `rsync --delete` into the workload directory removed
+  > the four pgbench script files at ~12:06 UTC on 2026-10-02, and the driver
+  > filtered pgbench's stderr through `grep`, so the failure was invisible. The
+  > last `pgwt_burst` row is 12:01:41 UTC. Any burst-related claim measured after
+  > that time, until the workload moved to `/root/workload` with a sentinel file
+  > and per-invocation assertions, is unsupported.
+  >
+  > Re-pin after #277 merges, on a fresh capture, recording: capture age, in-window
+  > record count, distinct sessions, achieved burst rates, box load, and which file
+  > each number came from.
+
   Raw per-navigation values checked against this table (3 values per tab,
   min/median/max all reproduce exactly;
   `/private/tmp/claude-501/-Users-dmitryfomin-work-git-pg-wait-tracer/258d73f0-4867-4c95-9aca-9a7966648e2b/scratchpad/ttfp-post/post.json`
