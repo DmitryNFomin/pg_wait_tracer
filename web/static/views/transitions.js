@@ -26,7 +26,7 @@
  */
 
 import {
-    buildTransitionsOption, buildVariantsHtml,
+    buildTransitionsOption, buildVariantsPanel,
 } from '../lib/builders/transitions.js';
 import { isUnavailable } from '../lib/builders/fidelity.js';
 import { mountUnavailablePanel } from '../lib/panels.js';
@@ -61,6 +61,14 @@ export function createTransitionsView() {
     let justDragged = false; // suppress the click that follows a drag
     let rafId = null;      // pending slider frame
     let resizePending = false;
+    // #291 progressive paint: bumped every time a new variants fetch is
+    // wired up in mount(). A same-tab refresh re-requests on the SAME
+    // 'variants' channel, so transport.request() already cancels the prior
+    // pending one (CancelledError) — this counter is the belt-and-suspenders
+    // check for the case where the rejection's microtask and the new mount()
+    // race in an order we did not intend: only the LATEST wiring's gen may
+    // ever paint, independent of which settles or runs first.
+    let variantsGen = 0;
 
     function disposeChart() {
         if (chart) { chart.dispose(); chart = null; }
@@ -257,6 +265,41 @@ export function createTransitionsView() {
         });
     }
 
+    /* #291 progressive paint: paint the #dfg-variants panel for `state`,
+     * guarded so a superseded fetch can never clobber a newer one:
+     *   - `gen` pins this call to the wiring that kicked it off (see
+     *     variantsGen above) — a same-tab refresh bumps it, so a late
+     *     settle from the PRIOR refresh's promise is a silent no-op here
+     *     even if it resolves successfully after the newer one started.
+     *   - ctx.isActive() mirrors the view-manager's own chokepoint (its
+     *     doc comment names this exact use) for the tab-switched-away case.
+     *   - the #dfg-variants lookup covers the shell having been torn down
+     *     (e.g. the tab now shows "No transitions found" or a different
+     *     view's unavailable panel). */
+    function paintVariants(gen, ctx, state, variants) {
+        if (gen !== variantsGen) return;
+        if (!ctx || typeof ctx.isActive !== 'function' || !ctx.isActive()) return;
+        const el = document.getElementById('dfg-variants');
+        if (!el) return;
+        el.innerHTML = buildVariantsPanel(state, variants, esc);
+    }
+
+    /* Wire the variants promise returned by requests() without awaiting it —
+     * that is the whole point: mount() has already painted the graph by the
+     * time this runs. A CancelledError (the transport's single-flight
+     * 'variants' channel cancelling a stale in-flight request on the next
+     * refresh) is dropped silently: the newer refresh's own wiring owns
+     * painting the panel, this one has nothing to say. */
+    function wireVariantsPromise(promise, ctx) {
+        if (!promise) return;
+        const gen = ++variantsGen;
+        promise.then((result) => {
+            if (result.ok) { paintVariants(gen, ctx, 'ready', result.variants); return; }
+            if (result.err && result.err.name === 'CancelledError') return;
+            paintVariants(gen, ctx, 'error', null);
+        });
+    }
+
     return {
         id: 'transitions',
 
@@ -277,14 +320,28 @@ export function createTransitionsView() {
                 from: ctx.timeRange.from, to: ctx.timeRange.to,
                 filters: ctx.filters.snapshot(), buckets: 200,
             });
-            let variants = null;
-            try {
-                variants = await ctx.transport.request(ctx.channel('variants'), 'variants', {
-                    from: ctx.timeRange.from, to: ctx.timeRange.to,
-                    filters: ctx.filters.snapshot(), buckets: 20,
-                });
-            } catch (e) { /* variants optional */ }
-            return { transitions: data, variants };
+            // #291 progressive paint: `variants` measures as expensive as
+            // `transitions` server-side (~699ms vs ~684ms per million
+            // in-window records on a cx33) and the server is single-threaded,
+            // so awaiting it HERE before returning would make every refresh
+            // pay both walks before the graph — which is ready right now —
+            // is allowed to paint. Kick it off but do NOT await it; mount()
+            // paints the graph from `data` immediately and wires this promise
+            // to fill the variants panel whenever (and however) it settles.
+            // Wrapped so this promise ITSELF never rejects: build() can bail
+            // out (unavailable / no-links) without ever reaching mount()'s
+            // wireVariantsPromise(), and a rejected, never-.catch()'d promise
+            // would be an unhandled-rejection console warning in that case —
+            // not a paint bug, but exactly the kind of noise the chaos/UI
+            // suites treat as a failure.
+            const variantsPromise = ctx.transport.request(ctx.channel('variants'), 'variants', {
+                from: ctx.timeRange.from, to: ctx.timeRange.to,
+                filters: ctx.filters.snapshot(), buckets: 20,
+            }).then(
+                (variants) => ({ ok: true, variants }),
+                (err) => ({ ok: false, err }),
+            );
+            return { transitions: data, variantsPromise };
         },
 
         build(data) {
@@ -297,7 +354,10 @@ export function createTransitionsView() {
                 transitions: t,
                 hasLinks,
                 total: (t && t.total) || 0,
-                variantsHtml: data.variants ? buildVariantsHtml(data.variants, esc) : '',
+                // Passed through, not resolved: build() stays pure (it makes
+                // no decision based on the variants response, which has not
+                // arrived yet) — mount() is where the promise is consumed.
+                variantsPromise: data.variantsPromise,
             };
         },
 
@@ -315,11 +375,22 @@ export function createTransitionsView() {
                 el.innerHTML = '<p style="color:#888;padding:20px">No transitions found</p>';
                 return;
             }
+            // #291: dataRef is set from model.transitions — the response this
+            // very requests() call just fetched — and renderDFG() below draws
+            // the graph from it synchronously, before the variants promise has
+            // had any chance to settle. First paint is real DFG data, not an
+            // empty chart waiting to fill.
             dataRef = model.transitions;
 
             ensureShell(el);
             renderDFG(threshold);   // sets #dfg-total too (idle-hidden count included)
-            document.getElementById('dfg-variants').innerHTML = model.variantsHtml || '';
+
+            // #291: declare the variants panel's own state while its request
+            // is still in flight (not empty, not complete), then let the
+            // wired promise fill it in place when it lands or fails.
+            const variantsEl = document.getElementById('dfg-variants');
+            if (variantsEl) variantsEl.innerHTML = buildVariantsPanel('pending');
+            wireVariantsPromise(model.variantsPromise, ctx);
         },
 
         enter(ctx) { ctxRef = ctx; /* chart created lazily in renderDFG */ },
