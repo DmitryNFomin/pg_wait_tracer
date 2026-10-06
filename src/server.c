@@ -3217,7 +3217,32 @@ static int should_use_summaries(struct pgwt_server *srv,
         return 0;
     /* Summaries are only honest when exact data covers everything the
      * window contains (EXACT), or the window is empty (NONE). */
-    return wf->fid == PGWT_FIDELITY_EXACT || wf->fid == PGWT_FIDELITY_NONE;
+    if (wf->fid != PGWT_FIDELITY_EXACT && wf->fid != PGWT_FIDELITY_NONE)
+        return 0;
+
+    /* ACCOUNTING-VERSION PREFLIGHT (summary v3, 2026-10-06).
+     *
+     * v1/v2 files precomputed their per-second totals under the old idle rule,
+     * so the reader refuses them. Refusing is not enough on its own: this
+     * function used to decide purely on fidelity, and pgwt_visit_summaries
+     * SKIPS a file it cannot open -- so a window containing one older file
+     * would have been answered from the remaining files and returned a
+     * plausible PARTIAL result (or an empty 900 s answer if every file was
+     * old), with "fidelity": "exact" on it and no error anywhere.
+     *
+     * Checking it here turns that into a REAL RAW FALLBACK: returning 0 sends
+     * the caller down the raw-events path, which is the source of truth and is
+     * always complete. If that path is too large it refuses out loud
+     * (reject_overload) -- an explicit error, never a quiet wrong number. */
+    int considered = 0, unusable = 0;
+    if (!pgwt_summaries_window_current(srv->trace_dir, from, to,
+                                       &considered, &unusable)) {
+        fprintf(stderr, "INFO: %d of %d summary file(s) covering this window "
+                "are not summary v%d -- recomputing from raw events\n",
+                unusable, considered, PGWT_SUMMARY_VERSION);
+        return 0;
+    }
+    return 1;
 }
 
 /* ── Fidelity (trace format v2, D3) ───────────────────────── */

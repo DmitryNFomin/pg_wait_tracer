@@ -44,21 +44,11 @@ const char *pgwt_event_name(uint32_t wait_event_info);
  * For event=0, writes "CPU*" (asterisk: not all CPU time is instrumented). */
 void pgwt_event_full_name(uint32_t wait_event_info, char *buf, size_t bufsz);
 
-/* LOAD accounting: returns true if this event must be EXCLUDED from
- * DB Time / AAS / active load. True for Activity-class events AND for
- * Client:ClientRead (idle between commands — like Oracle's "SQL*Net
- * message from client"). Use this anywhere you are deciding how much
- * LOAD an event represents (DB Time, idle bucket, AAS, active sessions,
- * % of DB Time, interference, etc.). */
-int pgwt_is_idle_event(uint32_t wait_event_info);
-
-/* VISIBILITY: returns true if this event must NOT be displayed in event
- * lists / graphs / breakdowns. True for Activity-class events ONLY.
- * Note: this deliberately does NOT include Client:ClientRead — that
- * event is excluded from load (pgwt_is_idle_event) but must remain
- * VISIBLE in event lists, timelines, transition graphs, histograms,
- * and class drill-downs. Use this anywhere you are deciding whether an
- * event ROW/series/marker should APPEAR to the user. */
-int pgwt_is_hidden_event(uint32_t wait_event_info);
+/* LOAD vs VISIBILITY: pgwt_is_idle_event(), pgwt_is_hidden_event() and the
+ * narrower pgwt_is_session_idle_event() are declared in idle_rule.h, which
+ * also documents the Timeout pacing set and why the predicate is derived from
+ * resolved NAMES rather than version-dependent ids. Included here so the ~45
+ * existing call sites that only include wait_event.h keep compiling. */
+#include "idle_rule.h"
 
 #endif /* PGWT_WAIT_EVENT_H */

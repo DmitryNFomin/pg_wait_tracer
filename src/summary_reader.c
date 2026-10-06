@@ -34,9 +34,25 @@ int pgwt_summary_reader_open(struct pgwt_summary_reader *r, const char *path)
         fclose(r->fp); r->fp = NULL;
         return -1;
     }
-    if (r->header.version != 1 && r->header.version != 2) {
-        fprintf(stderr, "WARN: unsupported summary version %d in %s\n",
-                r->header.version, path);
+    /* COMPUTATION requires the CURRENT accounting version.
+     *
+     * v1/v2 precomputed their per-second class_ns and per-query totals under
+     * the pre-2026-10-06 rule (idle events lumped into the class totals), so
+     * mixing them with v3 seconds inside one window would BLEND two accounting
+     * rules and report a DB Time that is neither. Refusing here is necessary
+     * but NOT sufficient on its own: pgwt_visit_summaries SKIPS a file it
+     * cannot open, which would silently return a plausible PARTIAL answer --
+     * a window that looks fine and is quietly missing seconds. That is why
+     * pgwt_summaries_window_current() exists and why pgwt-server preflights
+     * the window before choosing this path at all (src/server.c
+     * should_use_summaries). Startup recovery still accepts older intact
+     * headers so they are archived, not called corrupt
+     * (src/summary_writer.c). */
+    if (r->header.version != PGWT_SUMMARY_VERSION) {
+        fprintf(stderr, "WARN: summary %s is version %d, this build computes "
+                "only from version %d (older files use the pre-2026-10-06 "
+                "idle accounting) -- recomputing from raw events instead\n",
+                path, r->header.version, PGWT_SUMMARY_VERSION);
         fclose(r->fp); r->fp = NULL;
         return -1;
     }
@@ -318,6 +334,101 @@ int pgwt_scan_summary_files(const char *trace_dir,
 
 /* ── Streaming visitor ─────────────────────────────────── */
 
+/* Does this summary file's hour overlap [from, to]? The visitor and the
+ * preflight MUST use the same test: if the preflight checked a narrower set of
+ * files than the visitor then reads, it could approve a window containing a
+ * file the visitor skips -- a gate that cannot see what it is gating. Sharing
+ * the one function makes that divergence impossible rather than unlikely. */
+static int summary_file_in_window(const struct pgwt_summary_file_entry *e,
+                                  uint64_t from_wall_ns, uint64_t to_wall_ns)
+{
+    uint64_t file_end_ns = e->start_wall_ns + 3600ULL * 1000000000ULL;
+    if (to_wall_ns > 0 && e->start_wall_ns > to_wall_ns)
+        return 0;
+    if (from_wall_ns > 0 && file_end_ns < from_wall_ns)
+        return 0;
+    return 1;
+}
+
+int pgwt_summaries_window_current(const char *trace_dir,
+                                  uint64_t from_wall_ns, uint64_t to_wall_ns,
+                                  int *out_considered, int *out_unusable)
+{
+    if (out_considered) *out_considered = 0;
+    if (out_unusable)   *out_unusable = 0;
+
+    struct pgwt_summary_file_entry files[256];
+    int nfiles = pgwt_scan_summary_files(trace_dir, files, 256);
+    /* A scan error (-1) is NOT "nothing to worry about": it means this
+     * function could not see the directory it was asked to vouch for, so it
+     * REFUSES. nfiles == 0 is different and genuinely fine -- there are no
+     * summaries, the caller will read raw, and there is nothing to blend. */
+    if (nfiles < 0)
+        return 0;
+
+    int considered = 0, unusable = 0;
+    for (int f = 0; f < nfiles; f++) {
+        if (!summary_file_in_window(&files[f], from_wall_ns, to_wall_ns))
+            continue;
+        considered++;
+
+        FILE *fp = fopen(files[f].path, "rb");
+        if (!fp) { unusable++; continue; }
+        struct pgwt_trace_file_header hdr;
+        /* An unreadable or short header counts as UNUSABLE, not as absent:
+         * the visitor would skip this file and answer from the rest, which is
+         * exactly the silent-partial-window failure this guard exists for. */
+        if (fread(&hdr, sizeof(hdr), 1, fp) != 1 ||
+            hdr.magic != PGWT_SUMMARY_MAGIC ||
+            hdr.version != PGWT_SUMMARY_VERSION)
+            unusable++;
+        fclose(fp);
+    }
+
+    /* THE SCANNER'S BLIND SPOT, which is why this is not just a loop over
+     * pgwt_scan_summary_files.
+     *
+     * A rotated YYYY-MM-DD_HH.summary.lz4 file derives its start from its NAME,
+     * so the scanner lists it even when its contents are unreadable and the
+     * loop above sees it. `current.summary` is different: the scanner reads its
+     * START FROM ITS HEADER and DROPS the entry when that read fails
+     * (`if (e->start_wall_ns > 0) n++`). So a current.summary with a short,
+     * corrupt or older-version header is invisible to the scanner -- and
+     * therefore invisible to pgwt_visit_summaries, which silently answers the
+     * window from the remaining files and loses the current hour's seconds.
+     * That is precisely the silent-partial-window failure this function exists
+     * to prevent, so it has to look at the file directly.
+     *
+     * Its coverage is UNKNOWN when the header cannot be read, and unknown
+     * coverage is never treated as "does not overlap": it counts against every
+     * window. The cost of being wrong is one request recomputed from raw. */
+    {
+        char cur[600];
+        snprintf(cur, sizeof(cur), "%s/current.summary", trace_dir);
+        FILE *fp = fopen(cur, "rb");
+        if (fp) {
+            struct pgwt_trace_file_header hdr;
+            /* EXACTLY the scanner's own listing condition. If it holds, the
+             * loop above already examined this file (including its version) and
+             * counting it again here would double-report it; if it does not, the
+             * scanner dropped the entry and this is the only place that can see
+             * the file at all. */
+            int scanner_can_see = (fread(&hdr, sizeof(hdr), 1, fp) == 1 &&
+                                   hdr.magic == PGWT_SUMMARY_MAGIC &&
+                                   hdr.start_time_ns > 0);
+            fclose(fp);
+            if (!scanner_can_see) {
+                considered++;
+                unusable++;
+            }
+        }
+    }
+
+    if (out_considered) *out_considered = considered;
+    if (out_unusable)   *out_unusable = unusable;
+    return unusable == 0;
+}
+
 int pgwt_visit_summaries(const char *trace_dir,
                           uint64_t from_wall_ns, uint64_t to_wall_ns,
                           pgwt_summary_visitor visitor, void *ctx)
@@ -336,10 +447,7 @@ int pgwt_visit_summaries(const char *trace_dir,
 
     for (int f = 0; f < nfiles; f++) {
         /* Quick range check: skip files obviously outside range */
-        uint64_t file_end_ns = files[f].start_wall_ns + 3600ULL * 1000000000ULL;
-        if (to_wall_ns > 0 && files[f].start_wall_ns > to_wall_ns)
-            continue;
-        if (from_wall_ns > 0 && file_end_ns < from_wall_ns)
+        if (!summary_file_in_window(&files[f], from_wall_ns, to_wall_ns))
             continue;
 
         struct pgwt_summary_reader reader;

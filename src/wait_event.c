@@ -13,6 +13,7 @@
  * any PG version without hardcoded tables.
  */
 #include "wait_event.h"
+#include "idle_rule.h"
 #include "pg_wait_tracer.h"
 #include "cJSON.h"
 #include "spawn.h"
@@ -466,7 +467,13 @@ static const char *lwlock_tranches[] = {
 
 /* ── Initialization ──────────────────────────────────────── */
 
-void pgwt_init_event_names(int pg_major)
+/* Select the active per-class name tables for a PG major version. Separated
+ * from pgwt_init_event_names() because pgwt_load_names_json() must ALSO run it:
+ * the sidecar carries its own pg_version, and before this split a PG13 trace
+ * kept PG18's static tables (pgwt-server calls pgwt_init_event_names(18) and
+ * THEN loads the sidecar), so every Timeout id the sidecar did not cover
+ * decoded against the wrong version. */
+static void select_version_tables(int pg_major)
 {
     pg_version = pg_major;
 
@@ -513,6 +520,33 @@ void pgwt_init_event_names(int pg_major)
         io_events_max = IO_EVENTS_PG18_MAX;
         break;
     }
+}
+
+/* Rebuild the Timeout pacing mask FROM THE ACTIVE NAME TABLE (see
+ * src/idle_rule.h). Derived from names, never from hardcoded ids, so it is
+ * right by construction on every version — including the dynamic names loaded
+ * from a sidecar or a live PG, because pgwt_event_name() prefers those.
+ *
+ * Must run at the END of every entry point that can change which names an id
+ * resolves to: pgwt_init_event_names(), pgwt_load_names_json(),
+ * pgwt_load_event_names_from_buffer() and pgwt_load_event_names_from_pg().
+ * Missing any one of them leaves the predicate describing the PREVIOUS
+ * version's ids while the UI prints the new version's names. */
+static void rebuild_idle_mask(void)
+{
+    uint32_t mask = 0;
+    for (int id = 0; id < 32; id++) {
+        const char *n = pgwt_event_name(WEI(PG_WAIT_TIMEOUT, id));
+        if (n && pgwt_timeout_name_is_pacing(n))
+            mask |= 1u << id;
+    }
+    pgwt_idle_rule_set_timeout_mask(mask);
+}
+
+void pgwt_init_event_names(int pg_major)
+{
+    select_version_tables(pg_major);
+    rebuild_idle_mask();
 }
 
 /* ── Decode Functions ─────────────────────────────────────── */
@@ -613,36 +647,13 @@ void pgwt_event_full_name(uint32_t wei, char *buf, size_t bufsz)
         snprintf(buf, bufsz, "%s:id=%d", cls, WE_EVENT(wei));
 }
 
-/* LOAD vs VISIBILITY — two distinct concepts, intentionally split:
- *
- *  - pgwt_is_idle_event(): "excluded from DB Time / AAS / active load."
- *    True for Activity-class AND Client:ClientRead. Client:ClientRead is
- *    idle time spent waiting for the next command from the client (the
- *    direct analogue of Oracle's "SQL*Net message from client"); counting
- *    it as DB Time wrongly inflates load when connections sit idle (e.g.
- *    idle-in-transaction). So it is excluded from load accounting here.
- *
- *  - pgwt_is_hidden_event(): "do not display in lists/graphs/breakdowns."
- *    True for Activity-class ONLY. Client:ClientRead must stay VISIBLE in
- *    event lists, timelines, transition graphs, histograms and class
- *    drill-downs, so it is NOT hidden — only excluded from load.
- *
- * Conflating these two is what previously forced ClientRead to be marked
- * non-idle (otherwise the visibility filters deleted it from every view,
- * producing an empty Client class breakdown). Keeping them separate lets
- * ClientRead be both excluded-from-load and still-visible.
+/* LOAD vs VISIBILITY — the two predicates (pgwt_is_idle_event,
+ * pgwt_is_hidden_event, pgwt_is_session_idle_event) and the Timeout pacing
+ * set now live in src/idle_rule.c, a dependency-free TU the BPF-free pure
+ * cores can link too. See src/idle_rule.h for the rule. This file's job is
+ * only to keep the id-indexed pacing mask in step with the active name table
+ * (rebuild_idle_mask, above).
  */
-int pgwt_is_idle_event(uint32_t wei)
-{
-    return WE_CLASS(wei) == PG_WAIT_ACTIVITY ||
-           wei == WEI(PG_WAIT_CLIENT, 0);   /* Client:ClientRead */
-}
-
-int pgwt_is_hidden_event(uint32_t wei)
-{
-    /* Activity-class only — never hides Client:ClientRead. */
-    return WE_CLASS(wei) == PG_WAIT_ACTIVITY;
-}
 
 /* ── Dynamic Name Resolution ─────────────────────────────── */
 
@@ -802,10 +813,14 @@ int pgwt_load_event_names_from_pg(const char *pg_bindir, int pg_port,
     int status = pgwt_proc_close(&proc);
     if (status != 0 || count == 0) {
         dyn_clear();
+        /* dyn_clear() reverted to the hardcoded tables: the mask must follow,
+         * or a failed reload leaves the PREVIOUS load's mask in force. */
+        rebuild_idle_mask();
         return -1;
     }
 
     dyn_loaded = 1;
+    rebuild_idle_mask();
     return 0;
 }
 
@@ -826,9 +841,11 @@ int pgwt_load_event_names_from_buffer(const char *data)
 
     if (count == 0) {
         dyn_clear();
+        rebuild_idle_mask();     /* see pgwt_load_event_names_from_pg */
         return -1;
     }
     dyn_loaded = 1;
+    rebuild_idle_mask();
     return 0;
 }
 
@@ -950,10 +967,14 @@ int pgwt_load_names_json(const char *trace_dir)
 
     dyn_clear();
 
-    /* Load pg_version if present */
+    /* Load pg_version if present — and RE-SELECT the hardcoded tables for it.
+     * The sidecar covers only the classes the writer could enumerate; every id
+     * it does not cover falls back to the static tables, so assigning
+     * pg_version without re-selecting left a PG13 trace decoding PG13 ids with
+     * PG18 tables (pgwt-server: pgwt_init_event_names(18) then this). */
     cJSON *ver = cJSON_GetObjectItem(root, "pg_version");
     if (ver && cJSON_IsNumber(ver))
-        pg_version = (int)ver->valuedouble;
+        select_version_tables((int)ver->valuedouble);
 
     /* Iterate class arrays */
     cJSON *item;
@@ -974,5 +995,9 @@ int pgwt_load_names_json(const char *trace_dir)
 
     cJSON_Delete(root);
     dyn_loaded = 1;
+    /* LAST word: the sidecar's names are the ones the trace was written with,
+     * so the mask must be derived from them, not from the static tables that
+     * pgwt_init_event_names() installed a moment earlier. */
+    rebuild_idle_mask();
     return 0;
 }

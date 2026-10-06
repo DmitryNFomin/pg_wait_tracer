@@ -29,6 +29,28 @@ struct pgwt_summary_reader {
     size_t        decode_buf_size;
 };
 
+/* PREFLIGHT, for callers choosing between the summary fast path and a raw
+ * recompute. Returns 1 if every summary file whose hour overlaps
+ * [from_wall_ns, to_wall_ns] can actually be COMPUTED from -- readable header,
+ * right magic, and version == PGWT_SUMMARY_VERSION -- and 0 otherwise.
+ *
+ * Why a caller cannot just run pgwt_visit_summaries and look at the count:
+ * the visitor SKIPS any file it fails to open and returns the records from the
+ * rest, so a window containing one older-version file comes back as a
+ * plausible PARTIAL answer with no error anywhere. A 0 here means "recompute
+ * from raw events or report an error", never "there is no data".
+ *
+ * It refuses (returns 0) whenever it could not establish the answer: a failed
+ * directory scan, a file it cannot open, a short or unparseable header. An
+ * EMPTY overlap set returns 1 with *out_considered == 0 -- there are no
+ * summaries to blend, which is a legitimately clean answer, and the caller
+ * still gets the count so it can tell "all good" from "nothing there".
+ *
+ * out_considered / out_unusable may be NULL. */
+int pgwt_summaries_window_current(const char *trace_dir,
+                                  uint64_t from_wall_ns, uint64_t to_wall_ns,
+                                  int *out_considered, int *out_unusable);
+
 /* Open a summary file: read header, footer, block index.
  * Returns 0 on success, -1 on error. */
 int pgwt_summary_reader_open(struct pgwt_summary_reader *r, const char *path);

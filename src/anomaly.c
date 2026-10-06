@@ -11,6 +11,7 @@
  * unit test; the daemon wrapper is guarded out of the server build.
  */
 #include "anomaly.h"
+#include "idle_rule.h"        /* THE idle rule — one definition, see header */
 #include "pg_wait_tracer.h"   /* WE_CLASS, PG_WAIT_LOCK, marker macros */
 
 #include <limits.h>
@@ -20,16 +21,19 @@
 
 /* ── Pure rule core (no BPF, no escalation) ───────────────────────────── */
 
-/* Idle waits (Activity class, Client:ClientRead) ARE in the batch but must
- * be excluded from "active sessions" exactly as the AAS/DB-Time views do. We
- * inline the same predicate here to keep the pure core dependency-free
- * (pgwt_is_idle_event lives in wait_event.c, which the unit test does not
- * link); the definition must stay in sync with pgwt_is_idle_event(). */
-static bool sample_is_idle(uint32_t wei)
-{
-    return WE_CLASS(wei) == PG_WAIT_ACTIVITY        /* Activity class */
-        || wei == WEI(PG_WAIT_CLIENT, 0);           /* Client:ClientRead */
-}
+/* Idle waits (Activity class, Client:ClientRead, Timeout pacing sleeps) ARE in
+ * the batch but must be excluded from "active sessions" exactly as the
+ * AAS/DB-Time views do.
+ *
+ * This used to be an INLINE COPY of the rule with a comment asking the next
+ * person to keep it in sync by hand, because pgwt_is_idle_event() lived in
+ * wait_event.c, which this pure core could not link. 2026-10-06: the rule
+ * moved to src/idle_rule.c — a dependency-free TU — so there is now exactly
+ * ONE definition and nothing to keep in sync. Widening the rule (the Timeout
+ * pacing set) reaches this metric automatically; a divergence is impossible by
+ * construction rather than by vigilance, which is what
+ * tests/test_anomaly.c's whole-Timeout-class sweep now asserts.
+ */
 
 void pgwt_anomaly_metrics_from_batch(const struct pgwt_trace_event *samples,
                                      int n, double *out_aas,
@@ -50,7 +54,7 @@ void pgwt_anomaly_metrics_from_batch(const struct pgwt_trace_event *samples,
          * utilization metric instead — docs/AAS_SEMANTICS_DECISION.md). */
         if (samples[i].flags & PGWT_EVENT_FLAG_IO_WORKER)
             continue;
-        if (we != 0 && sample_is_idle(we))
+        if (we != 0 && pgwt_is_idle_event(we))
             continue;   /* instrumented idle: not an active session */
         active++;
         if (we == 0)

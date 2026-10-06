@@ -40,7 +40,23 @@
 /* ── On-disk format constants ─────────────────────────────── */
 
 #define PGWT_SUMMARY_MAGIC    0x53574750   /* "PGWS" little-endian */
-#define PGWT_SUMMARY_VERSION  2
+/* v3 (2026-10-06, the timer-sleep/idle accounting change): `class_ns`,
+ * `queries[].class_ns`, `queries[].count`, `queries[].total_ns`,
+ * `sessions[].top_wait_*` and `queries[].top_wait_*` now EXCLUDE idle events
+ * (pgwt_is_idle_event -- Activity, Client:ClientRead and the Timeout pacing
+ * sleeps). `events[]` is unchanged and still carries EVERY event including the
+ * idle ones, which is where every read path gets both the idle totals and the
+ * named Idle sub-rows from.
+ *
+ * Why the version had to move: v1/v2 precomputed those per-second totals at
+ * WRITE time under the OLD rule, so a trace directory holding v2 seconds and
+ * v3 seconds would BLEND two accounting rules inside one window and report a
+ * DB Time that is neither. The reader therefore refuses v1/v2 for computation
+ * (src/summary_reader.c) and pgwt-server preflights the window so a refusal
+ * becomes a RAW recompute, never a plausible-looking partial answer
+ * (should_use_summaries / pgwt_summaries_window_current). Startup recovery
+ * still archives an intact older file rather than calling it corrupt. */
+#define PGWT_SUMMARY_VERSION  3
 
 /* #277: how long after a second ends it is treated as complete by the
  * periodic flush. The daemon's timer handler runs BEFORE the event-ring

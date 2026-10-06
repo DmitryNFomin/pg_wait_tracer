@@ -26,6 +26,7 @@ TESTS     = test_wait_event test_cmdline test_spawn test_event_writer test_event
             test_variants_p95 \
             test_pid_cap \
             test_concurrency_bounds \
+            test_idle_accounting test_idle_summary \
             gen_test_traces gen_bench_traces test_concurrent_rw cross_validate \
             dump_markers wait_cpu_canary test_wait_cpu_canary \
             test_summary_tick_flush
@@ -49,7 +50,7 @@ check: all
 	done < unit_tests.list; \
 	exit $$fail
 
-test_wait_event: test_wait_event.c $(BUILD)/wait_event.o $(BUILD)/spawn.o $(BUILD)/cJSON.o
+test_wait_event: test_wait_event.c $(BUILD)/wait_event.o $(BUILD)/idle_rule.o $(BUILD)/spawn.o $(BUILD)/cJSON.o
 	$(CC) $(CFLAGS) -o $@ $^
 
 test_cmdline: test_cmdline.c $(BUILD)/cmdline.o
@@ -62,7 +63,7 @@ test_event_writer: test_event_writer.c $(BUILD)/event_writer.o
 	$(CC) $(CFLAGS) -o $@ $^ -llz4
 
 test_event_reader: test_event_reader.c $(BUILD)/event_reader.o $(BUILD)/event_writer.o \
-                   $(BUILD)/map_reader.o $(BUILD)/wait_event.o $(BUILD)/spawn.o $(BUILD)/cJSON.o \
+                   $(BUILD)/map_reader.o $(BUILD)/wait_event.o $(BUILD)/idle_rule.o $(BUILD)/spawn.o $(BUILD)/cJSON.o \
                    $(BUILD)/discovery.o $(BUILD)/backend_status_layout.o
 	$(CC) $(CFLAGS) -o $@ $^ -llz4 $(LIBBPF_LIB) -lelf -lz
 
@@ -79,7 +80,7 @@ test_bucket: test_bucket.c
 # wait_event.o only for the idle/hidden classification. Runs anywhere.
 test_live_accum: test_live_accum.c ../src/map_reader.c ../src/snapshot.c \
                  ../src/compute.c \
-                 $(BUILD)/wait_event.o $(BUILD)/spawn.o $(BUILD)/cJSON.o
+                 $(BUILD)/wait_event.o $(BUILD)/idle_rule.o $(BUILD)/spawn.o $(BUILD)/cJSON.o
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^
 
 # test_window_clip: windowed aggregates must count only the part of each
@@ -90,7 +91,7 @@ test_live_accum: test_live_accum.c ../src/map_reader.c ../src/snapshot.c \
 # test_live_accum: compute.c compiled directly with -DPGWT_SERVER, its only
 # foreign symbol (pgwt_visit_summaries) stubbed in the test. Runs anywhere.
 test_window_clip: test_window_clip.c ../src/compute.c \
-                  $(BUILD)/wait_event.o $(BUILD)/spawn.o $(BUILD)/cJSON.o
+                  $(BUILD)/wait_event.o $(BUILD)/idle_rule.o $(BUILD)/spawn.o $(BUILD)/cJSON.o
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -lm
 
 # test_pg13_resolve: PG13 MyProc-path offset table + the runtime "refuse on
@@ -107,7 +108,7 @@ test_window_clip: test_window_clip.c ../src/compute.c \
 # pgwt_visit_summaries, compute.c's only foreign symbol. Runs anywhere.
 test_executions_attribution: test_executions_attribution.c ../src/map_reader.c \
                              ../src/snapshot.c ../src/compute.c \
-                             $(BUILD)/wait_event.o $(BUILD)/spawn.o \
+                             $(BUILD)/wait_event.o $(BUILD)/idle_rule.o $(BUILD)/spawn.o \
                              $(BUILD)/cJSON.o
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^
 
@@ -132,9 +133,9 @@ test_top_queries_percentile: test_top_queries_percentile.c ../src/percentile.h
 # allocation failure — the test FAILS if the interposer never fires, so a
 # toolchain where --wrap silently did nothing cannot pass blind.
 test_variants_p95: test_variants_p95.c ../src/compute.c ../src/percentile.h \
-                   $(BUILD)/wait_event.o $(BUILD)/spawn.o $(BUILD)/cJSON.o
+                   $(BUILD)/wait_event.o $(BUILD)/idle_rule.o $(BUILD)/spawn.o $(BUILD)/cJSON.o
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ test_variants_p95.c ../src/compute.c \
-	    $(BUILD)/wait_event.o $(BUILD)/spawn.o $(BUILD)/cJSON.o \
+	    $(BUILD)/wait_event.o $(BUILD)/idle_rule.o $(BUILD)/spawn.o $(BUILD)/cJSON.o \
 	    -Wl,--wrap=realloc -lm
 
 # test_pid_cap: #275 — the two per-pid execution-lifecycle tables that
@@ -148,9 +149,9 @@ test_variants_p95: test_variants_p95.c ../src/compute.c ../src/percentile.h \
 # binary behaves identically on every toolchain.
 test_pid_cap: test_pid_cap.c ../src/compute.c ../src/pid_index.h \
               ../src/percentile.h \
-              $(BUILD)/wait_event.o $(BUILD)/spawn.o $(BUILD)/cJSON.o
+              $(BUILD)/wait_event.o $(BUILD)/idle_rule.o $(BUILD)/spawn.o $(BUILD)/cJSON.o
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ test_pid_cap.c ../src/compute.c \
-	    $(BUILD)/wait_event.o $(BUILD)/spawn.o $(BUILD)/cJSON.o -lm
+	    $(BUILD)/wait_event.o $(BUILD)/idle_rule.o $(BUILD)/spawn.o $(BUILD)/cJSON.o -lm
 
 # test_concurrency_bounds: #276 — pgwt_compute_concurrency materialised
 # candidate intervals into a fixed 100,000-entry array filled in ARRIVAL
@@ -165,13 +166,13 @@ test_pid_cap: test_pid_cap.c ../src/compute.c ../src/pid_index.h \
 test_concurrency_bounds: test_concurrency_bounds.c ../src/compute.c \
               ../src/triple_map.h ../src/test_alloc_fail.h \
               ../src/pid_index.h ../src/percentile.h \
-              $(BUILD)/wait_event.o $(BUILD)/spawn.o $(BUILD)/cJSON.o
+              $(BUILD)/wait_event.o $(BUILD)/idle_rule.o $(BUILD)/spawn.o $(BUILD)/cJSON.o
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ test_concurrency_bounds.c ../src/compute.c \
-	    $(BUILD)/wait_event.o $(BUILD)/spawn.o $(BUILD)/cJSON.o -lm
+	    $(BUILD)/wait_event.o $(BUILD)/idle_rule.o $(BUILD)/spawn.o $(BUILD)/cJSON.o -lm
 
 test_pg13_resolve: test_pg13_resolve.c ../src/discovery.c ../src/spawn.c \
                    ../src/backend_status_layout.c \
-                   $(BUILD)/wait_event.o $(BUILD)/cJSON.o
+                   $(BUILD)/wait_event.o $(BUILD)/idle_rule.o $(BUILD)/cJSON.o
 	$(CC) $(CFLAGS) -o $@ $^ -lelf -lz
 
 # test_discovery: load-base + ELF symbol resolution — the #24 regression
@@ -213,7 +214,13 @@ test_sampler: test_sampler.c ../src/sampler.c ../src/anomaly.c
 # derivation). Compiles anomaly.c with -DPGWT_SERVER so only the pure rule core
 # is built — no skeleton, no escalation engine, runnable in CI's server-only
 # jobs.
-test_anomaly: test_anomaly.c ../src/anomaly.c
+# test_anomaly also links wait_event.o + idle_rule.o now: src/anomaly.c no
+# longer carries its own inline copy of the idle rule (it calls the shared
+# pgwt_is_idle_event), and the test sweeps the whole Timeout class on BOTH the
+# PG13 and PG18 tables, which needs pgwt_init_event_names. Still BPF-free and
+# still runs anywhere.
+test_anomaly: test_anomaly.c ../src/anomaly.c $(BUILD)/wait_event.o $(BUILD)/idle_rule.o \
+              $(BUILD)/spawn.o $(BUILD)/cJSON.o
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^
 
 # test_escalation_budget: pure rolling-hour budget core (ESC-1/5/6). Compiles
@@ -266,7 +273,7 @@ map_reader_core.o: ../src/map_reader.c ../src/map_reader.h
 
 test_replay_fidelity: test_replay_fidelity.c ../src/event_reader.c \
                       map_reader_core.o $(BUILD)/server_event_writer.o \
-                      $(BUILD)/server_wait_event.o $(BUILD)/server_spawn.o \
+                      $(BUILD)/server_wait_event.o $(BUILD)/server_idle_rule.o $(BUILD)/server_spawn.o \
                       $(BUILD)/server_cJSON.o
 	$(CC) $(CFLAGS) -o $@ $^ -llz4 -lz
 
@@ -278,7 +285,7 @@ test_durability: test_durability.c $(BUILD)/server_event_writer.o \
                  $(BUILD)/server_event_reader.o \
                  $(BUILD)/server_summary_writer.o \
                  $(BUILD)/server_summary_reader.o \
-                 $(BUILD)/server_wait_event.o $(BUILD)/server_spawn.o \
+                 $(BUILD)/server_wait_event.o $(BUILD)/server_idle_rule.o $(BUILD)/server_spawn.o \
                  $(BUILD)/server_cJSON.o
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -llz4 -lz
 
@@ -299,7 +306,7 @@ test_golden_fixture: test_golden_fixture.c $(BUILD)/server_event_reader.o \
 
 # Server-build objects for gen_test_traces
 SERVER_OBJS = $(BUILD)/server_event_writer.o $(BUILD)/server_summary_writer.o \
-              $(BUILD)/server_wait_event.o $(BUILD)/server_spawn.o $(BUILD)/server_cJSON.o
+              $(BUILD)/server_wait_event.o $(BUILD)/server_idle_rule.o $(BUILD)/server_spawn.o $(BUILD)/server_cJSON.o
 
 gen_test_traces: gen_test_traces.c $(SERVER_OBJS)
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -llz4
@@ -308,7 +315,7 @@ gen_bench_traces: gen_bench_traces.c $(SERVER_OBJS)
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -llz4
 
 test_concurrent_rw: test_concurrent_rw.c $(BUILD)/event_reader.o $(BUILD)/event_writer.o \
-                    $(BUILD)/map_reader.o $(BUILD)/wait_event.o $(BUILD)/spawn.o $(BUILD)/cJSON.o \
+                    $(BUILD)/map_reader.o $(BUILD)/wait_event.o $(BUILD)/idle_rule.o $(BUILD)/spawn.o $(BUILD)/cJSON.o \
                     $(BUILD)/discovery.o $(BUILD)/backend_status_layout.o
 	$(CC) $(CFLAGS) -o $@ $^ -llz4 $(LIBBPF_LIB) -lelf -lz
 
@@ -316,7 +323,7 @@ test_concurrent_rw: test_concurrent_rw.c $(BUILD)/event_reader.o $(BUILD)/event_
 # (-DPGWT_SERVER) so it needs no BPF skeleton — runs anywhere the server
 # builds. Reads a tiered trace dir and reports estimator agreement.
 cross_validate: cross_validate.c $(BUILD)/server_event_reader.o \
-                $(BUILD)/server_event_writer.o $(BUILD)/server_wait_event.o \
+                $(BUILD)/server_event_writer.o $(BUILD)/server_wait_event.o $(BUILD)/server_idle_rule.o \
                 $(BUILD)/server_spawn.o $(BUILD)/server_cJSON.o
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -llz4 -lz
 
@@ -325,7 +332,7 @@ cross_validate: cross_validate.c $(BUILD)/server_event_reader.o \
 # and any event with cpu_ns > duration_ns (src/compute.c's wait branch never
 # clamps that, so cpu_clamped_ms vouches for CPU gaps only). Server build.
 wait_cpu_canary: wait_cpu_canary.c $(BUILD)/server_event_reader.o \
-                 $(BUILD)/server_event_writer.o $(BUILD)/server_wait_event.o \
+                 $(BUILD)/server_event_writer.o $(BUILD)/server_wait_event.o $(BUILD)/server_idle_rule.o \
                  $(BUILD)/server_compute.o $(BUILD)/server_summary_reader.o \
                  $(BUILD)/server_summary_writer.o \
                  $(BUILD)/server_spawn.o $(BUILD)/server_cJSON.o
@@ -338,14 +345,14 @@ wait_cpu_canary: wait_cpu_canary.c $(BUILD)/server_event_reader.o \
 test_wait_cpu_canary: test_wait_cpu_canary.c wait_cpu_canary.c \
                       $(BUILD)/server_event_reader.o \
                       $(BUILD)/server_event_writer.o \
-                      $(BUILD)/server_wait_event.o \
+                      $(BUILD)/server_wait_event.o $(BUILD)/server_idle_rule.o \
                       $(BUILD)/server_compute.o \
                       $(BUILD)/server_summary_reader.o \
                       $(BUILD)/server_summary_writer.o \
                       $(BUILD)/server_spawn.o $(BUILD)/server_cJSON.o
 	$(CC) $(CFLAGS) -DPGWT_SERVER -DWCC_NO_MAIN -o $@ test_wait_cpu_canary.c \
 	      $(BUILD)/server_event_reader.o $(BUILD)/server_event_writer.o \
-	      $(BUILD)/server_wait_event.o $(BUILD)/server_compute.o \
+	      $(BUILD)/server_wait_event.o $(BUILD)/server_idle_rule.o $(BUILD)/server_compute.o \
 	      $(BUILD)/server_summary_reader.o $(BUILD)/server_summary_writer.o \
 	      $(BUILD)/server_spawn.o $(BUILD)/server_cJSON.o -llz4 -lz
 
@@ -353,7 +360,7 @@ test_wait_cpu_canary: test_wait_cpu_canary.c wait_cpu_canary.c \
 # from a trace dir. Used by the live anomaly test to prove an ANOMALY-reason
 # window was recorded. Server build (no BPF skeleton).
 dump_markers: dump_markers.c $(BUILD)/server_event_reader.o \
-              $(BUILD)/server_event_writer.o $(BUILD)/server_wait_event.o \
+              $(BUILD)/server_event_writer.o $(BUILD)/server_wait_event.o $(BUILD)/server_idle_rule.o \
               $(BUILD)/server_spawn.o $(BUILD)/server_cJSON.o
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -llz4 -lz
 
@@ -367,9 +374,43 @@ test_summary_tick_flush: test_summary_tick_flush.c \
                          $(BUILD)/server_summary_writer.o \
                          $(BUILD)/server_summary_reader.o \
                          $(BUILD)/server_event_writer.o \
-                         $(BUILD)/server_wait_event.o \
+                         $(BUILD)/server_wait_event.o $(BUILD)/server_idle_rule.o \
                          $(BUILD)/server_spawn.o $(BUILD)/server_cJSON.o
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -llz4 -lz
+
+# test_idle_accounting: the timer-sleep/idle accounting in the RAW compute path
+# -- DB Time and the class rows after six Timeout events became pacing sleeps,
+# the pacing events staying VISIBLE, the Idle row and its NAMED children (the
+# 807 s of CheckpointWriteDelay must not become an unexplained number), the
+# conservation identity asserted by COMPONENT (the identity alone cannot fail:
+# Off-CPU* is the residual), CPU measured on and adjacent to a pacing wait, and
+# a bypass suite for every way a "time was excluded" assertion is satisfied by
+# 0 == 0. Same build shape as test_window_clip: compute.c compiled directly
+# with -DPGWT_SERVER, its only foreign symbol (pgwt_visit_summaries) stubbed in
+# the test. Runs anywhere -- no live PG, no BPF.
+test_idle_accounting: test_idle_accounting.c ../src/compute.c \
+                      $(BUILD)/wait_event.o $(BUILD)/idle_rule.o \
+                      $(BUILD)/spawn.o $(BUILD)/cJSON.o
+	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -lm
+
+# test_idle_summary: the SUMMARY fast path, which is the one the demo's 900 s
+# window actually takes (should_use_summaries). Changing the idle predicate
+# alone would have left that window reporting the OLD DB Time, because the
+# per-second class totals were precomputed LUMPED at the writer and the read
+# path subtracted only Client:ClientRead back out. Drives the REAL writer and
+# the REAL reader over a 150 s synthetic stream and compares every summary
+# aggregate against the raw path (unfiltered, query-filtered and
+# Timeout-class-filtered), checks the writer-side v3 exclusion on the records
+# themselves, and pins the accounting-VERSION preflight plus its bypass suite
+# (a v2 window, a truncated header, a missing dir, an empty dir, a writer that
+# wrote nothing, a non-overlapping window). Server build, no BPF.
+test_idle_summary: test_idle_summary.c ../src/compute.c \
+                   $(BUILD)/server_summary_writer.o \
+                   $(BUILD)/server_summary_reader.o \
+                   $(BUILD)/server_event_writer.o \
+                   $(BUILD)/wait_event.o $(BUILD)/idle_rule.o \
+                   $(BUILD)/spawn.o $(BUILD)/cJSON.o
+	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -llz4 -lz -lm
 
 clean:
 	rm -f $(TESTS) map_reader_core.o

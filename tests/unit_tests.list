@@ -117,3 +117,24 @@ test_push_guard.py
 # missing dir and a hand-built duplicate second must each be refused or go
 # red, never read as agreement.
 test_summary_tick_flush
+# 2026-10-06, the owner's timer-sleep rule ("there is DB time when database
+# doing smth - not just waiting for timer"). Six Timeout events are pure pacing
+# sleeps and leave DB Time / AAS while staying VISIBLE; Timeout:PgSleep,
+# SpinDelay, RegisterSyncRequest and VacuumTruncate stay in DB Time. The rule
+# lives in src/idle_rule.c (one table, derived from resolved NAMES because the
+# Timeout ids INVERT between PG13 and PG18 -- id 1 is CheckpointWriteDelay on 18
+# and PgSleep on 13).
+#   test_idle_accounting: the RAW compute path -- DB Time, the Timeout class row
+#   as a strict subset, the named Idle sub-rows (so 807 s of
+#   CheckpointWriteDelay is explained rather than anonymous), conservation
+#   asserted by COMPONENT, and CPU measured on/adjacent to a pacing wait.
+#   test_idle_summary: the SUMMARY path, which is what the demo's 900 s window
+#   takes -- a predicate-only change would have left it reporting the old
+#   number. Raw-vs-summary agreement under three filters, the writer-side v3
+#   exclusion, and the accounting-version preflight that turns a refused v2 file
+#   into a raw recompute instead of a plausible EMPTY window.
+# Both carry a bypass suite: "time was excluded" is satisfied by 0 == 0, so the
+# empty fixture, the absent-rather-than-wrong event, the clipped window, the
+# starved summary read and an empty pacing mask each have their own case.
+test_idle_accounting
+test_idle_summary

@@ -35,6 +35,7 @@ static uint32_t pgwt_duration_to_bucket(uint64_t ns)
 #include "map_reader.h"     /* pgwt_duration_to_bucket */
 #endif
 #include "wait_event.h"
+#include "idle_rule.h"   /* pgwt_is_idle_event / pgwt_is_session_idle_event */
 
 #include <string.h>
 #include <stdlib.h>
@@ -174,11 +175,21 @@ static void accum_query_add(struct pgwt_summary_accum *acc, uint64_t query_id,
     if (!sq)
         return;
     int cls = summary_wait_class_index(old_ev);
-    sq->count += count;
-    sq->total_ns += total_ns;
-    /* Per-class breakdown */
-    if (cls >= 0 && cls < PGWT_NUM_CLASSES)
-        sq->class_ns[cls] += total_ns;
+    /* v3: the per-query TOTALS exclude idle, matching the raw top-queries path
+     * (src/compute.c pgwt_compute_top_queries skips idle records). Before v3
+     * the summary path accumulated them and the raw path did not, so the same
+     * query reported a different total depending on which path answered.
+     * top_events[] below deliberately still records idle events: the Events
+     * tab under a query filter must keep showing them (they are excluded from
+     * load by pgwt_is_idle_event, not hidden by pgwt_is_hidden_event). */
+    int idle = pgwt_is_idle_event(old_ev);
+    if (!idle) {
+        sq->count += count;
+        sq->total_ns += total_ns;
+        /* Per-class breakdown */
+        if (cls >= 0 && cls < PGWT_NUM_CLASSES)
+            sq->class_ns[cls] += total_ns;
+    }
     /* Per-event top-8 tracking */
     if (old_ev != 0) {
         int found = -1;
@@ -195,7 +206,8 @@ static void accum_query_add(struct pgwt_summary_accum *acc, uint64_t query_id,
             sq->num_top_events++;
         }
     }
-    if (old_ev != 0 && max_ns > sq->top_wait_ns) {
+    /* v3: top wait is never an idle event -- see the per-session note above. */
+    if (old_ev != 0 && !idle && max_ns > sq->top_wait_ns) {
         sq->top_wait_id = old_ev;
         sq->top_wait_ns = max_ns;
     }
@@ -223,9 +235,23 @@ static void accum_event(struct pgwt_summary_accum *acc,
 
     acc->total_events++;
 
-    /* Time model: classify old_event into wait class */
+    /* Time model: classify old_event into wait class.
+     *
+     * v3: IDLE EVENTS ARE EXCLUDED HERE, at the writer. Before v3 this line
+     * had no idle check at all (while ss->db_time_ns below did), so the class
+     * totals were LUMPED: Client carried ClientRead and Timeout carried the
+     * pacing sleeps, and every read path had to subtract them back out by
+     * hand. It subtracted only ClientRead, and only by hunting
+     * WEI(PG_WAIT_CLIENT,0) in the events table -- which also meant the
+     * subtraction silently did nothing if that event had not claimed a
+     * SUMMARY_MAX_EVENTS slot. Excluding at the writer removes the lumping,
+     * the three hardcoded copies of the rule, and that failure mode together.
+     *
+     * The idle time is NOT lost: `events[]` (below) records every event
+     * including the idle ones, so readers recover both the idle total and the
+     * per-event named Idle sub-rows from there. */
     int cls = summary_wait_class_index(old_ev);
-    if (cls >= 0 && cls < PGWT_NUM_CLASSES)
+    if (cls >= 0 && cls < PGWT_NUM_CLASSES && !pgwt_is_idle_event(old_ev))
         acc->class_ns[cls] += dur;
 
     /* Per-event stats */
@@ -246,8 +272,11 @@ static void accum_event(struct pgwt_summary_accum *acc,
             ss->db_time_ns += dur;
         if (old_ev == 0)
             ss->cpu_ns += dur;
-        /* Track top wait per session */
-        if (old_ev != 0 && dur > ss->top_wait_ns) {
+        /* Track top wait per session. v3: never an IDLE event -- "this
+         * session's top wait is Timeout:CheckpointWriteDelay" names the thing
+         * that is explicitly NOT load, which is the opposite of what the
+         * column is for. */
+        if (old_ev != 0 && !pgwt_is_idle_event(old_ev) && dur > ss->top_wait_ns) {
             ss->top_wait_id = old_ev;
             ss->top_wait_ns = dur;
         }
@@ -361,7 +390,14 @@ static uint64_t summary_qattr_step(struct pgwt_summary_writer *w,
     } else if (evt->query_id != 0) {
         pgwt_qattr_observe(&s->q, evt->query_id, summary_qattr_emit, w);
         qid = evt->query_id;
-    } else if (pgwt_is_idle_event(we)) {
+    } else if (pgwt_is_session_idle_event(we)) {
+        /* COMMAND BOUNDARY, so deliberately the NARROW predicate (Activity /
+         * Client:ClientRead) and not the load rule. A Timeout pacing sleep is
+         * excluded from DB Time but happens INSIDE a running command -- a
+         * checkpointer in CheckpointWriteDelay is mid-checkpoint. Using the
+         * load rule here would flush the pid's deferred per-query attribution
+         * as "the command ended" every time an in-command sleep went by.
+         * src/idle_rule.h explains why the two predicates differ. */
         pgwt_qattr_boundary(&s->q, false, summary_qattr_emit, w);
     } else {
         pgwt_qattr_defer(&s->q, we, evt->duration_ns, summary_qattr_emit, w);
@@ -579,7 +615,12 @@ static void recover_current_summary(struct pgwt_summary_writer *w)
     }
     if (fread(&hdr, sizeof(hdr), 1, fp) != 1 ||
         hdr.magic != PGWT_SUMMARY_MAGIC ||
-        (hdr.version != 1 && hdr.version != PGWT_SUMMARY_VERSION)) {
+        /* Recovery only has to decide "is this header intact", not "can I
+         * COMPUTE from it": accept every version this project has ever
+         * written so an intact v2 file left by an older daemon is ARCHIVED
+         * normally instead of being renamed .corrupt. Refusing v2 for
+         * computation is the reader's job (src/summary_reader.c). */
+        hdr.version < 1 || hdr.version > PGWT_SUMMARY_VERSION) {
         fclose(fp);
         char aside[600];
         snprintf(aside, sizeof(aside), "%s.corrupt.%lld", cur,

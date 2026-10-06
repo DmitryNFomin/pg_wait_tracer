@@ -354,10 +354,17 @@ int pgwt_sampler_build_batch(const struct pgwt_sample_target *targets,
          * parse-phase waits that were sampled with query_id 0. In-command
          * attribution is unchanged. */
         e->query_id     = targets[i].query_id;
-        /* (pgwt_is_idle_event's rule, inline: this BPF-free core links
-         * without wait_event.c.) */
-        if (e->query_id == 0 && (WE_CLASS(we) == PG_WAIT_ACTIVITY ||
-                                 we == PG_WAIT_CLIENT_READ))
+        /* pgwt_is_session_idle_event, NOT pgwt_is_idle_event: this branch
+         * INHERITS the previous statement's id across a span where no command
+         * is running, and only Activity / Client:ClientRead mean that. The
+         * load rule is deliberately WIDER (it also excludes the Timeout pacing
+         * sleeps from DB Time), and this must not follow it: a pacing sleep
+         * can occur INSIDE a command whose query_id is still 0 (not yet
+         * reported), and inheriting there would file that sleep under the
+         * PREVIOUS statement. src/idle_rule.h documents both predicates; the
+         * narrower one is shared with summary_writer.c's command-boundary
+         * rule rather than inlined a third time. */
+        if (e->query_id == 0 && pgwt_is_session_idle_event(we))
             e->query_id = targets[i].last_query_id;
     }
     return count;
