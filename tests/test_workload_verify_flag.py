@@ -172,6 +172,48 @@ def test_fire_still_writes_sleeper_and_waiter_sql():
           f"(got {waiter_sql!r})")
 
 
+def test_fire_sleep_s_zero_skips_sleep_statement():
+    # 2026-10-06: tests/live_loop_workload.py calls fire(sleep_s=0) so the
+    # DEMO workload's slow query is the real waiter-blocked-on-holder
+    # Lock:relation wait, not a manufactured pg_sleep (owner: a literal
+    # pg_sleep(1.3) in the Top Queries panel reads as a faked demo). The
+    # sleeper must get NO SQL at all; the waiter's blocking SQL -- what
+    # actually produces Lock:relation -- stays unconditional.
+    orig_sleep = time.sleep
+    time.sleep = lambda s: None
+    try:
+        wl = _make_workload()
+        wl.fire(sleep_s=0, verify=False)
+    finally:
+        time.sleep = orig_sleep
+    sleeper_sql = "".join(wl.sleeper.stdin.writes)
+    waiter_sql = "".join(wl.waiter.stdin.writes)
+    check(sleeper_sql == "",
+          f"fire(sleep_s=0) writes NO SQL to the sleeper at all -- no "
+          f"pg_sleep statement is sent (got {sleeper_sql!r})")
+    check(wl.LOCK_TABLE in waiter_sql,
+          f"fire(sleep_s=0) still writes the waiter's blocking SQL -- "
+          f"the Lock:relation wait is unconditional (got {waiter_sql!r})")
+
+
+def test_fire_default_sleep_s_still_sends_pg_sleep():
+    # Pins the OTHER half of the contract: every existing one-shot
+    # smoke-test call site (test_capture_smoke.py, test_query_event.py)
+    # calls fire() with its default/explicit sleep_s=3 and must be totally
+    # unaffected by the sleep_s=0 addition.
+    wl = _make_workload()
+    orig_sleep = time.sleep
+    time.sleep = lambda s: None
+    try:
+        wl.fire(sleep_s=3, verify=False)
+    finally:
+        time.sleep = orig_sleep
+    sleeper_sql = "".join(wl.sleeper.stdin.writes)
+    check("pg_sleep(3)" in sleeper_sql,
+          f"fire() with the default sleep_s=3 still sends pg_sleep(3) "
+          f"(got {sleeper_sql!r})")
+
+
 def test_live_loop_workload_calls_fire_with_cadence():
     # Pins the actual fix in the actual caller, not just the mechanism in
     # Workload: the loop that runs for the whole demo window must pass
@@ -187,9 +229,11 @@ def test_live_loop_workload_calls_fire_with_cadence():
     check("verify_this_tick = should_verify_tick(iteration)" in src,
           "live_loop_workload.py's loop computes verify_this_tick via "
           "should_verify_tick(), not a fixed True/False")
-    check("wl.fire(sleep_s=3, verify=verify_this_tick)" in src,
+    check("wl.fire(sleep_s=0, verify=verify_this_tick)" in src,
           "live_loop_workload.py's per-tick fire() call passes the "
-          "cadence decision, not a hardcoded verify=")
+          "cadence decision, not a hardcoded verify= (sleep_s=0 since "
+          "2026-10-06: the demo workload's slow query is the real "
+          "Lock:relation wait, not a manufactured pg_sleep)")
     check("if verify_this_tick and not ok:" in src and "sys.exit(1)" in src,
           "live_loop_workload.py exits loudly (sys.exit(1)) when a "
           "verified tick finds the waiter not blocked")
@@ -259,6 +303,8 @@ def main():
     test_fire_verify_true_returns_true_when_blocked()
     test_fire_verify_true_returns_false_when_not_blocked()
     test_fire_still_writes_sleeper_and_waiter_sql()
+    test_fire_sleep_s_zero_skips_sleep_statement()
+    test_fire_default_sleep_s_still_sends_pg_sleep()
     test_live_loop_workload_calls_fire_with_cadence()
     test_should_verify_tick_fires_more_than_once()
     test_should_verify_tick_includes_tick_zero()

@@ -412,9 +412,16 @@ class Workload:
         decides what to do with a False (test_capture_smoke.py's own
         call sites rely on check()'s PASS/FAIL side effect, same as
         before, and ignore the return value; live_loop_workload.py acts on
-        it directly)."""
-        self.sleeper.stdin.write(f"SELECT pg_sleep({sleep_s});\n")
-        self.sleeper.stdin.flush()
+        it directly).
+
+        sleep_s=0 skips the sleeper's pg_sleep statement entirely (no
+        Timeout:PgSleep is produced) -- used by live_loop_workload.py so the
+        DEMO workload's slow query is the real Lock:relation wait, not a
+        manufactured sleep. The blocking SQL on self.waiter is unconditional
+        and unchanged either way."""
+        if sleep_s:
+            self.sleeper.stdin.write(f"SELECT pg_sleep({sleep_s});\n")
+            self.sleeper.stdin.flush()
         self.waiter.stdin.write(f"SELECT count(*) FROM {self.LOCK_TABLE};\n")
         self.waiter.stdin.flush()
         time.sleep(1.5)

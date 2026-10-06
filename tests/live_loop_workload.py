@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""live_loop_workload.py -- a LOOPING Lock:relation / Timeout:PgSleep
+"""live_loop_workload.py -- a LOOPING Lock:relation / Lock:advisory
 workload for a real daemon + real Go bridge session.
 
 Factored out of tests/ui_live_smoke.sh's original inline heredoc (issue
@@ -8,23 +8,42 @@ workload for a much longer window without a second copy drifting from the
 first (CLAUDE.md "Extend, do not fork"). Reuses test_capture_smoke.py's
 Workload class (the same holder/waiter/sleeper psql sessions that test
 already proves out) but LOOPs fire()/release() for the whole run instead
-of firing once, so Lock:relation and Timeout:PgSleep keep appearing in
-every live tick, not just the first one.
+of firing once, so Lock:relation keeps appearing in every live tick, not
+just the first one. fire() is called with sleep_s=0 (owner decision
+2026-10-06): a DBA watching the demo reads a literal `pg_sleep(1.3)` in
+the Top Queries panel as a faked workload, while the waiter genuinely
+blocking on the holder's lock is real, honest slow work -- so the
+sleeper's pg_sleep statement is skipped entirely here; the blocking SQL on
+the waiter (which is what actually produces Lock:relation) is
+unconditional and unaffected. `pg_sleep` itself is untouched everywhere
+else: it remains the known-quantity accuracy proof in
+test_aas_accuracy.py, test_accuracy.py, test_deterministic.py,
+test_query_accuracy.py and test_capture_smoke.py's own default-arg call
+sites.
 
-Issue #214 extended this: the original loop guarantees only two wait
-classes, which is enough for the §2 conservation floors but leaves several
-UI tabs structurally empty on a real rehearsal walk (Waterfall, Scatter --
-see docs/DEMO_REHEARSAL_CRITERIA.md's workload section and
-tests/demo_workload_coverage.py for the tab-by-tab table and the
-machine-checkable condition each one needs). Two more persistent sessions
+Issue #214 extended this: the original loop guarantees only one wait
+class (Lock:relation), which is enough for the §2 conservation floors but
+leaves several UI tabs structurally empty on a real rehearsal walk
+(Waterfall, Scatter -- see docs/DEMO_REHEARSAL_CRITERIA.md's workload
+section and tests/demo_workload_coverage.py for the tab-by-tab table and
+the machine-checkable condition each one needs). More persistent sessions
 are added alongside holder/waiter/sleeper -- NOT inside them, so the
-original Lock:relation / Timeout:PgSleep guarantee is untouched:
+original Lock:relation guarantee is untouched:
 
   - `reporter`: rotates through four structurally distinct, realistic
     SELECTs every tick (a catalog lookup, a CPU-bound aggregate, and two
-    differently-shaped pg_sleep calls) -- gives Queries/Histogram/Waterfall/
-    Scatter more than one query_id and a real spread of durations instead
-    of the single ~3s pg_sleep the original loop produces alone.
+    differently-shaped advisory-lock holds -- see `adv_holder` below) --
+    gives Queries/Histogram/Waterfall/Scatter more than one query_id and a
+    real spread of durations instead of the single Lock:relation wait the
+    original loop produces alone.
+  - `adv_holder`: a persistent session that holds `pg_advisory_lock(42)`
+    for a CLIENT-SIDE `time.sleep()` (never a server-side `pg_sleep`,
+    never `generate_series` -- its timing is CPU-dependent and the gate
+    boxes have different silicon) while the reporter's own
+    `pg_advisory_lock(42)` call blocks on it -> `Lock:advisory` of exactly
+    the hold duration, reading as an application mutex rather than a
+    manufactured sleep (owner 2026-10-06: a `pg_sleep(1.3)` visible in the
+    Top Queries panel reads as a faked demo to any DBA in the room).
   - `row_holder` / `row_waiter`: a hot-row UPDATE contended by two backends.
     row_waiter's UPDATE targets a row row_holder's OWN open transaction has
     already modified, so PostgreSQL makes it wait on row_holder's XID
@@ -90,41 +109,90 @@ def should_verify_tick(iteration, every_n=VERIFY_EVERY_N_TICKS):
 
 ROW_LOCK_TABLE = "_smoke_row_lock_wait"
 
-# Reporter's rotating query shapes (issue #214). Each is a DIFFERENT shape
-# (target list / function calls), not just a different literal -- pg's
-# query-id jumbling normalizes literals but not shape (see
+# Reporter's rotating query shapes (issue #214; advisory-lock holds
+# replaced pg_sleep on 2026-10-06 -- see module docstring). Each is a
+# DIFFERENT shape (target list / function calls), not just a different
+# literal -- pg's query-id jumbling normalizes literals but not shape (see
 # Workload.open_extra_session's own docstring), so each gets its own
 # query_id, which is what Queries/Matrix/Waterfall/Scatter need to show
 # more than one row. Durations span two orders of magnitude on purpose
 # (Histogram needs "a spread, not one mode"; Waterfall needs "at least one
 # slow enough to be interesting"):
-#   catalog lookup   -- sub-ms to a few ms: a real app runs plenty of these
-#   cpu aggregate     -- tens to a few hundred ms of genuine CPU work: the
-#                        realistic stand-in for a report/aggregation query
-#   short pg_sleep    -- ~0.4s: a fast dependent call (e.g. a synchronous
-#                        downstream RPC) modeled as PgSleep, same class the
-#                        original loop already guarantees every tick
-#   long pg_sleep     -- ~1.3s: the "at least one slow enough to be
-#                        interesting" execution Waterfall's own acceptance
-#                        criterion (issue #214) names explicitly
+#   catalog lookup      -- sub-ms to a few ms: a real app runs plenty of these
+#   cpu aggregate        -- tens to a few hundred ms of genuine CPU work: the
+#                           realistic stand-in for a report/aggregation query
+#   short advisory hold  -- ~0.4s: reporter's own pg_advisory_lock(42) call
+#                           blocks on adv_holder's hold for this long --
+#                           Lock:advisory, same class the original loop
+#                           guarantees Lock:relation every tick
+#   long advisory hold   -- ~1.3s: the "at least one slow enough to be
+#                           interesting" execution Waterfall's own acceptance
+#                           criterion (issue #214) names explicitly
+# None entries are not sent as SQL directly -- _reporter_tick dispatches
+# those two slots to _advisory_tick instead (ADVISORY_HOLD_S/
+# ADVISORY_TRAILING below carry the per-slot hold duration and the
+# distinct trailing columns that keep each shape's own query_id, exactly
+# as the two pg_sleep shapes did).
 REPORTER_QUERIES = (
     "SELECT count(*) FROM pg_class;",
     "SELECT count(*) FROM generate_series(1, 3000000);",
-    "SELECT pg_sleep(0.4), 1;",
-    "SELECT pg_sleep(1.3), 2, 3;",
+    None,
+    None,
 )
 # Sleep budget the main loop waits after sending each reporter query, so the
 # next tick's SQL is never sent while the previous one is still running.
 # Matches REPORTER_QUERIES order; generous over the expected runtime so a
 # slower box (a loaded CI runner, an el8/el9 box) still finishes in time.
-REPORTER_BUDGETS_S = (0.5, 2.0, 1.0, 2.0)
+# Unused for the advisory-hold slots (_advisory_tick manages its own
+# timing end to end).
+REPORTER_BUDGETS_S = (0.5, 2.0, None, None)
+
+ADVISORY_LOCK_ID = 42
+# Per-slot (hold duration, trailing columns) for the advisory-hold ticks;
+# aligned with REPORTER_QUERIES' None entries at index 2 and 3.
+ADVISORY_HOLD_S = (None, None, 0.4, 1.3)
+ADVISORY_TRAILING = (None, None, "1", "2, 3")
 
 
-def _reporter_tick(reporter, iteration):
-    idx = iteration % len(REPORTER_QUERIES)
-    reporter.stdin.write(REPORTER_QUERIES[idx] + "\n")
+def _advisory_tick(adv_holder, reporter, hold_s, trailing_sql):
+    """One Lock:advisory cycle: adv_holder takes the pg_advisory_lock(42)
+    mutex and holds it for a CLIENT-SIDE `hold_s` (this process sleeping,
+    never a server-side pg_sleep), while the reporter's own
+    pg_advisory_lock(42) call blocks on the same lock id for that long --
+    a real Lock:advisory wait of exactly the hold duration, reading as an
+    application mutex rather than a manufactured sleep. `trailing_sql`
+    keeps the reporter's two advisory-hold shapes on distinct query_ids
+    (pg's query-id jumbling normalizes literals but not shape), exactly as
+    the two pg_sleep shapes it replaced did."""
+    adv_holder.stdin.write(f"SELECT pg_advisory_lock({ADVISORY_LOCK_ID});\n")
+    adv_holder.stdin.flush()
+    time.sleep(0.2)   # let adv_holder acquire before the reporter tries
+    reporter.stdin.write(
+        f"SELECT pg_advisory_lock({ADVISORY_LOCK_ID}), {trailing_sql};\n")
     reporter.stdin.flush()
-    time.sleep(REPORTER_BUDGETS_S[idx])
+    time.sleep(hold_s)   # adv_holder holds the mutex this long (client-side)
+    adv_holder.stdin.write(
+        f"SELECT pg_advisory_unlock({ADVISORY_LOCK_ID});\n")
+    adv_holder.stdin.flush()
+    time.sleep(0.3)   # let the reporter's blocked statement land
+    # The reporter now holds the lock itself (its own pg_advisory_lock call
+    # succeeded) -- release it so the next cycle's adv_holder acquire does
+    # not block on a leftover hold from this session.
+    reporter.stdin.write(f"SELECT pg_advisory_unlock({ADVISORY_LOCK_ID});\n")
+    reporter.stdin.flush()
+    time.sleep(0.2)
+
+
+def _reporter_tick(reporter, adv_holder, iteration):
+    idx = iteration % len(REPORTER_QUERIES)
+    query = REPORTER_QUERIES[idx]
+    if query is not None:
+        reporter.stdin.write(query + "\n")
+        reporter.stdin.flush()
+        time.sleep(REPORTER_BUDGETS_S[idx])
+    else:
+        _advisory_tick(adv_holder, reporter,
+                        ADVISORY_HOLD_S[idx], ADVISORY_TRAILING[idx])
 
 
 def _row_lock_tick(row_holder, row_waiter):
@@ -163,18 +231,20 @@ def main():
     wl = Workload()
     wl.open_sessions()
 
-    # Two extra persistent sessions (issue #214), alongside -- not inside --
-    # the holder/waiter/sleeper trio above. open_extra_session() sends its
-    # SQL immediately at creation, which is right for a fire-once session
-    # but wrong here (reporter/row_holder/row_waiter are each sent DIFFERENT
-    # SQL on every tick for the whole run), so these are opened directly via
+    # Extra persistent sessions (issue #214; adv_holder added 2026-10-06),
+    # alongside -- not inside -- the holder/waiter/sleeper trio above.
+    # open_extra_session() sends its SQL immediately at creation, which is
+    # right for a fire-once session but wrong here (reporter/row_holder/
+    # row_waiter/adv_holder are each sent DIFFERENT SQL on every tick for
+    # the whole run), so these are opened directly via
     # Workload's own session-creation contract instead: a plain psql pipe
     # tagged under the same tag_base, reaped by the same stop() call because
     # it matches PGAPPNAME LIKE '{tag_base}%'.
     reporter = wl._session("reporter")
     row_holder = wl._session("row_holder")
     row_waiter = wl._session("row_waiter")
-    wl.extra_sessions.extend([reporter, row_holder, row_waiter])
+    adv_holder = wl._session("adv_holder")
+    wl.extra_sessions.extend([reporter, row_holder, row_waiter, adv_holder])
 
     psql(f"CREATE TABLE IF NOT EXISTS {ROW_LOCK_TABLE} (id int, v int)")
     psql(f"INSERT INTO {ROW_LOCK_TABLE} (id, v) "
@@ -205,7 +275,12 @@ def main():
             # docstring), so verify periodically instead and treat a
             # failure as fatal, not print-and-continue.
             verify_this_tick = should_verify_tick(iteration)
-            ok = wl.fire(sleep_s=3, verify=verify_this_tick)
+            # sleep_s=0: skip the sleeper's pg_sleep statement entirely --
+            # the demo's slow query is the real waiter-blocked-on-holder
+            # Lock:relation wait, not a manufactured sleep (owner
+            # 2026-10-06; see module docstring). The blocking SQL on
+            # wl.waiter is unconditional and unaffected.
+            ok = wl.fire(sleep_s=0, verify=verify_this_tick)
             if verify_this_tick and not ok:
                 print(f"FATAL: live_loop_workload: waiter did not block on "
                       f"tick {iteration} -- the re-lock loop's Lock:relation "
@@ -214,7 +289,7 @@ def main():
                       f"instead of silently grading a broken workload",
                       file=sys.stderr)
                 sys.exit(1)
-            _reporter_tick(reporter, iteration)
+            _reporter_tick(reporter, adv_holder, iteration)
             _row_lock_tick(row_holder, row_waiter)
             time.sleep(2)
             wl.release()

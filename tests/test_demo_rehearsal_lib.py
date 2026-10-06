@@ -366,7 +366,7 @@ def test_conservation_samples_all_pass():
 def test_workload_signature_both_present_ok():
     rows = [
         {"name": "Lock:relation", "ms": 300.0, "indent": 2},
-        {"name": "Timeout:PgSleep", "ms": 200.0, "indent": 2},
+        {"name": "Lock:advisory", "ms": 200.0, "indent": 2},
     ]
     ok, detail = lib.workload_signature_present_ok(rows)
     check(ok, f"both signature events present with real time ({detail})")
@@ -374,18 +374,18 @@ def test_workload_signature_both_present_ok():
 
 def test_workload_signature_missing_one_fails():
     # BYPASS-SUITE CASE (criteria doc §2): we captured something other than
-    # the intended workload -- Timeout:PgSleep never shows up at all.
+    # the intended workload -- Lock:advisory never shows up at all.
     rows = [{"name": "Lock:relation", "ms": 300.0, "indent": 2}]
     ok, detail = lib.workload_signature_present_ok(rows)
     check(not ok, f"a missing required event fails ({detail})")
-    check("Timeout:PgSleep" in detail, f"detail names what's missing ({detail})")
+    check("Lock:advisory" in detail, f"detail names what's missing ({detail})")
 
 
 def test_workload_signature_zero_time_fails():
     # Present in name only, zero real time -- must not count as "present".
     rows = [
         {"name": "Lock:relation", "ms": 0.0, "indent": 2},
-        {"name": "Timeout:PgSleep", "ms": 150.0, "indent": 2},
+        {"name": "Lock:advisory", "ms": 150.0, "indent": 2},
     ]
     ok, detail = lib.workload_signature_present_ok(rows)
     check(not ok, f"a zero-time row does not count as present ({detail})")
@@ -421,7 +421,7 @@ def test_evaluate_window_workload_signature_and_aas_when_requested():
         {"name": "Lock", "ms": 3600.0, "indent": 1},
         {"name": "CPU (waiting for a core)", "ms": 400.0, "indent": 1},
         {"name": "Lock:relation", "ms": 3000.0, "indent": 2},
-        {"name": "Timeout:PgSleep", "ms": 500.0, "indent": 2},
+        {"name": "Lock:advisory", "ms": 500.0, "indent": 2},
     ]
     result = lib.evaluate_time_model_window(
         rows, db_time_ms=10000.0, cpu_clamped_ms=0.0,
