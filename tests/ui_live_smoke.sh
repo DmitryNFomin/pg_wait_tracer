@@ -8,10 +8,11 @@
 # What it does, in order (mirrors the proven start/stop patterns in
 # tests/test_capture_smoke.py and tests/test_escalation.sh):
 #   1. Controlled load: pgbench (4 clients, background, for the whole run) +
-#      a LOOPING lock/sleep workload (tests/test_capture_smoke.py's Workload
+#      a LOOPING lock workload (tests/test_capture_smoke.py's Workload
 #      class, fired repeatedly instead of once) so Lock:relation and
-#      Timeout:PgSleep keep showing up in every live tick, not just the
-#      first one.
+#      Lock:advisory (tests/live_loop_workload.py's adv_holder/reporter
+#      pair; pg_sleep dropped from this demo loop 2026-10-06) keep showing
+#      up in every live tick, not just the first one.
 #   2. pg_wait_tracer --daemon --mode full on a fresh temp trace dir.
 #   3. The Go bridge (web/pgwt) against root@localhost, pointed at the
 #      daemon's trace dir.

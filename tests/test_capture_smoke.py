@@ -382,8 +382,11 @@ class Workload:
         fresh psql backend to assert the waiter actually blocked -- cheap
         when fire() runs once or a few times per test. tests/live_loop_workload.py
         calls fire() every ~5-8s for the WHOLE demo window (up to 900s) to
-        keep Lock:relation/Timeout:PgSleep appearing every live tick (#93);
-        at verify=True unconditionally that repeated one-shot backend was
+        keep Lock:relation appearing every live tick (#93; originally
+        Timeout:PgSleep too, until that loop moved to sleep_s=0 on
+        2026-10-06 to drop pg_sleep from the demo -- see this method's
+        sleep_s docs below); at verify=True unconditionally that repeated
+        one-shot backend was
         the dominant source of the ~150 distinct PIDs polluting the
         Sessions tab in a demo workload with ~8 real sessions (#243) -- the
         SAME assertion, re-run every tick, each time through a brand-new
