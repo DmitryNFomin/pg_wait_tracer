@@ -14,6 +14,15 @@
  */
 #define _GNU_SOURCE   /* process_vm_readv */
 #include "sampler.h"
+/* The idle rule, at the TOP of the file on purpose. sampler.c also includes
+ * wait_event.h further down, but that include sits inside the
+ * "#ifndef PGWT_SERVER" daemon half -- so the BPF-free core compiled with
+ * -DPGWT_SERVER (tests/test_sampler) saw no declaration at all, and even the
+ * daemon build saw it only AFTER the call site. A missing declaration is a
+ * WARNING under gcc's -Wall, so it linked wherever idle_rule.o happened to be
+ * on the link line and only failed in the one unit test that compiles this
+ * source directly. */
+#include "idle_rule.h"      /* pgwt_is_session_idle_event */
 #include "pg_wait_tracer.h"
 
 #include <stdio.h>

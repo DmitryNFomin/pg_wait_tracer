@@ -186,9 +186,15 @@ test_pg13_resolve: test_pg13_resolve.c ../src/discovery.c ../src/spawn.c \
 # the -pie build must link only -fPIE objects, but the main build's objects
 # default to non-PIE on EL toolchains (R_X86_64_32S relocations), which fails
 # the `-pie` link. Building them here inherits this target's -fPIE/-fno-pie.
+# idle_rule.c joins the list because wait_event.c now CALLS into it
+# (pgwt_timeout_name_is_pacing / pgwt_idle_rule_set_timeout_mask, to rebuild
+# the Timeout pacing mask from the active name table) -- the predicates moved
+# out of wait_event.c, so linking wait_event.c alone no longer resolves. Like
+# the rest of this list it is a SOURCE, not a $(BUILD) object: the -pie link
+# needs -fPIE objects and the main build's are not.
 DISCOVERY_TEST_DEPS = test_discovery.c ../src/discovery.c ../src/spawn.c \
                       ../src/backend_status_layout.c \
-                      ../src/wait_event.c ../src/cJSON.c
+                      ../src/wait_event.c ../src/idle_rule.c ../src/cJSON.c
 
 test_discovery_pie: $(DISCOVERY_TEST_DEPS)
 	$(CC) $(CFLAGS) -DPGWT_TEST_EXPECT_PIE=1 -fPIE -pie -o $@ $^ -lelf -lz
@@ -206,7 +212,11 @@ test_trace_v2: test_trace_v2.c $(BUILD)/server_event_writer.o \
 # test_sampler: sampler core (process_vm_readv read + batch encode + per-pid
 # fallback). Compiles sampler.c with -DPGWT_SERVER so only the BPF-free core
 # is built — no skeleton, no bpftool, runnable in CI's server-only jobs.
-test_sampler: test_sampler.c ../src/sampler.c ../src/anomaly.c
+# idle_rule.c is linked directly rather than via $(BUILD): this target
+# deliberately compiles its sources rather than depending on the daemon
+# build, and src/idle_rule.c is a ~110-line BPF-free TU with no deps of
+# its own -- which is exactly why the idle rule lives there.
+test_sampler: test_sampler.c ../src/sampler.c ../src/anomaly.c ../src/idle_rule.c
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^
 
 # test_anomaly: anomaly rule engine (AAS-vs-baseline, lock-fraction,
