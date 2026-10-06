@@ -15,9 +15,9 @@ so and the attempt counter resets. It is never reinterpreted in a report.
 `tests/live_loop_workload.py`. Full mode. `RECENT_WINDOW_S` = 60 s,
 `TIME_MODEL_TOLERANCE_PCT` = 1.0.
 
-`tests/live_loop_workload.py` (issue #214; `adv_holder` added 2026-10-06)
-loops seven persistent sessions for the whole run, not just the two the §2
-floors need:
+`tests/live_loop_workload.py` (issue #214; `adv_holder`/`io_reader` added
+2026-10-06) loops eight persistent sessions for the whole run, not just
+the two the §2 floors need:
 - `holder` / `waiter` / `sleeper`: `Lock:relation` recurs in every tick —
   the waiter genuinely blocking on the holder's lock, unchanged since issue
   #157 and what §2's floors and the conservation check are written
@@ -47,6 +47,17 @@ floors need:
   table-level `Lock:relation` above, realistic because contention on a
   shared counter/status row is one of the most common real-world lock
   waits.
+- `io_reader`: added 2026-10-06 after a live run showed the Transitions
+  tab had gone thin (3-5 nodes). "Nodes" there are distinct wait EVENT
+  NAMES (`web/static/lib/builders/transitions.js`), so more lock-id
+  variety on `Lock:advisory` would not have added nodes — only a genuinely
+  different wait event type does. `io_reader` runs `SELECT count(*) FROM
+  pgbench_accounts` every tick: pgbench_accounts plus its indexes measure
+  ~187MB against this box's 128MB `shared_buffers` (measured live,
+  2026-10-06), so the scan reliably evicts/refetches pages and produces
+  real `IO:DataFileRead` waits every tick, contending for buffer space
+  against pgbench's own OLTP traffic the way a reporting query against a
+  hot table would in production. No sleep, no CPU-dependent timing.
 
 `tests/demo_workload_coverage.py` is the machine-checkable half: given a
 trace dir this workload produced, it queries every tab's own endpoint and

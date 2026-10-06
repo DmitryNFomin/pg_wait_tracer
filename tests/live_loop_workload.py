@@ -55,6 +55,19 @@ original Lock:relation guarantee is untouched:
     It is a SECOND, DISTINCT wait class from the table-level Lock:relation
     the original loop already covers, which is what gives Transitions/
     Matrix more than one non-idle edge.
+  - `io_reader`: added 2026-10-06 alongside the sleep removal, after a
+    live run showed the Transitions tab had gone thin (3-5 nodes; "nodes"
+    there are distinct wait EVENT NAMES -- web/static/lib/builders/
+    transitions.js -- so more Lock:advisory lock-id variety would NOT add
+    nodes, only more distinct event TYPES does). Every tick it runs a
+    genuine `SELECT count(*) FROM pgbench_accounts` sequential scan --
+    pgbench_accounts+indexes measure ~187MB against this box's 128MB
+    shared_buffers (confirmed live, 2026-10-06), so the scan reliably
+    evicts/refetches pages and produces real IO:DataFileRead waits every
+    tick, competing for buffer space against pgbench's own OLTP traffic
+    the way a real reporting query against a hot OLTP table would. No
+    sleep, no CPU-dependent timing -- just a real statement against the
+    data that is already there.
 
 #243 review round 2: the re-lock loop below calls fire() with verify=False
 on most ticks (a one-shot psql backend per verify was the dominant source
@@ -216,6 +229,24 @@ def _row_lock_tick(row_holder, row_waiter):
     time.sleep(0.3)   # let row_waiter's statement land and auto-commit
 
 
+# pgbench_accounts (scale 10, provisioned by tests/provision-runner.sh) is
+# ~187MB with its indexes against this box's 128MB shared_buffers (measured
+# live, 2026-10-06) -- a full sequential scan reliably evicts/refetches
+# pages, producing real IO:DataFileRead waits every tick (added 2026-10-06
+# alongside the sleep removal -- see io_reader's module-docstring entry).
+IO_READER_TABLE = "pgbench_accounts"
+
+
+def _io_reader_tick(io_reader):
+    """A real IO-bound statement, no sleep: a sequential scan over a table
+    bigger than shared_buffers, contending for buffer space against
+    pgbench's own OLTP traffic the way a reporting query against a hot
+    table would in production."""
+    io_reader.stdin.write(f"SELECT count(*) FROM {IO_READER_TABLE};\n")
+    io_reader.stdin.flush()
+    time.sleep(0.5)   # let the scan mostly land before the next tick's SQL
+
+
 def main():
     if len(sys.argv) != 2:
         print("Usage: live_loop_workload.py DURATION_S", file=sys.stderr)
@@ -231,12 +262,13 @@ def main():
     wl = Workload()
     wl.open_sessions()
 
-    # Extra persistent sessions (issue #214; adv_holder added 2026-10-06),
-    # alongside -- not inside -- the holder/waiter/sleeper trio above.
-    # open_extra_session() sends its SQL immediately at creation, which is
-    # right for a fire-once session but wrong here (reporter/row_holder/
-    # row_waiter/adv_holder are each sent DIFFERENT SQL on every tick for
-    # the whole run), so these are opened directly via
+    # Extra persistent sessions (issue #214; adv_holder/io_reader added
+    # 2026-10-06), alongside -- not inside -- the holder/waiter/sleeper
+    # trio above. open_extra_session() sends its SQL immediately at
+    # creation, which is right for a fire-once session but wrong here
+    # (reporter/row_holder/row_waiter/adv_holder/io_reader are each sent
+    # DIFFERENT SQL on every tick for the whole run), so these are opened
+    # directly via
     # Workload's own session-creation contract instead: a plain psql pipe
     # tagged under the same tag_base, reaped by the same stop() call because
     # it matches PGAPPNAME LIKE '{tag_base}%'.
@@ -244,7 +276,9 @@ def main():
     row_holder = wl._session("row_holder")
     row_waiter = wl._session("row_waiter")
     adv_holder = wl._session("adv_holder")
-    wl.extra_sessions.extend([reporter, row_holder, row_waiter, adv_holder])
+    io_reader = wl._session("io_reader")
+    wl.extra_sessions.extend(
+        [reporter, row_holder, row_waiter, adv_holder, io_reader])
 
     psql(f"CREATE TABLE IF NOT EXISTS {ROW_LOCK_TABLE} (id int, v int)")
     psql(f"INSERT INTO {ROW_LOCK_TABLE} (id, v) "
@@ -291,6 +325,7 @@ def main():
                 sys.exit(1)
             _reporter_tick(reporter, adv_holder, iteration)
             _row_lock_tick(row_holder, row_waiter)
+            _io_reader_tick(io_reader)
             time.sleep(2)
             wl.release()
             time.sleep(1)
