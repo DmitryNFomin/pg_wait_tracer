@@ -125,8 +125,7 @@ int main(int argc, char **argv)
         pgwt_init_event_names(18);
         fprintf(stderr, "WARN: %s has no wait_event_names.json sidecar -- "
                 "decoding and idle classification assume PG18; shares for a "
-                "trace from another major may be mislabelled
-", trace_dir);
+                "trace from another major may be mislabelled\n", trace_dir);
     }
 
     struct pgwt_trace_file_entry files[256];
