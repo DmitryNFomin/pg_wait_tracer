@@ -855,8 +855,23 @@ static int emit_idle_rows(struct pgwt_tm_row *rows, int nr,
                           double *excess_ns)
 {
     if (excess_ns) *excess_ns = 0.0;
-    if (idle_time_ns <= 0)
+    if (idle_time_ns <= 0) {
+        /* A ZERO parent with NON-ZERO named children is the single most
+         * diagnostic shape this signal has: it means the writer recorded no
+         * idle time while the reader classified some of the same events as
+         * idle -- i.e. the two disagree about the rule. Returning early here
+         * skipped precisely that case, so the one scenario the counter exists
+         * to catch was the one it could not see (e.g. a PG16 record written
+         * with an empty pacing mask, read back under an erroneous PG18 one).
+         * Compare before returning. */
+        if (excess_ns) {
+            double named0 = 0;
+            for (int i = 0; i < n_ia; i++)
+                if (ia[i].total_ns > 0) named0 += ia[i].total_ns;
+            if (named0 > 0) *excess_ns = named0;
+        }
         return nr;
+    }
 
     snprintf(rows[nr].name, sizeof(rows[nr].name), "Idle");
     rows[nr].time_ms     = idle_time_ns / 1e6;
@@ -1206,6 +1221,11 @@ void pgwt_compute_time_model(const struct pgwt_trace_event *events, int count,
     nr = emit_idle_rows(rows, nr, idle_time_ns, idle_ev, n_idle_ev,
                         &idle_excess_ns);
     out->idle_children_excess_ms = idle_excess_ns / 1e6;
+    if (idle_excess_ns > 0)
+        fprintf(stderr, "ERROR: Idle children exceed their parent by %.6f ms "
+                "(raw path) -- the writer and the reader disagree about which "
+                "events are idle; see idle_children_excess_ms\n",
+                idle_excess_ns / 1e6);
 
     out->rows        = rows;
     out->num_rows    = nr;
@@ -2176,6 +2196,11 @@ void pgwt_compute_time_model_from_summaries(
     nr = emit_idle_rows(rows, nr, ctx.idle_time_ns, ctx.idle_ev,
                         ctx.n_idle_ev, &idle_excess_ns);
     out->idle_children_excess_ms = idle_excess_ns / 1e6;
+    if (idle_excess_ns > 0)
+        fprintf(stderr, "ERROR: Idle children exceed their parent by %.6f ms "
+                "(summary path) -- the writer and the reader disagree about "
+                "which events are idle; see idle_children_excess_ms\n",
+                idle_excess_ns / 1e6);
 
     out->rows         = rows;
     out->num_rows     = nr;

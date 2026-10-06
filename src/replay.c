@@ -140,10 +140,28 @@ int pgwt_run_replay(struct pgwt_daemon *d, const char *from_str,
         return 1;
     }
 
-    /* Fall back to PG18 if no version found */
+    /* REFUSE a trace that never declared its PostgreSQL major.
+     *
+     * This used to install PG18 here -- AFTER every event had already been
+     * accounted -- which was incoherent in both directions: the accounting
+     * ran under whatever mask happened to be current, and the PG18 mask it
+     * then installed could not retroactively change it. Since 2026-10-07 the
+     * uninitialised mask is empty, so such a trace silently counted pacing
+     * waits as DB Time while pgwt-server on the same directory answered
+     * differently.
+     *
+     * Rather than pick an assumption, refuse: a replay is pure accounting, and
+     * numbers produced under an undefined classification are the failure this
+     * branch exists to remove. Every trace this build writes records its
+     * major (pgwt_writer_init takes it), so this only rejects a file that
+     * genuinely does not say. */
     if (!pg_version_set) {
-        d->pg_major_version = 18;
-        pgwt_init_event_names(d->pg_major_version);
+        fprintf(stderr, "FATAL: no trace file in this directory records a "
+                "PostgreSQL major version, so wait events cannot be named or "
+                "classified (Timeout pacing waits would be counted as DB Time "
+                "without any way to tell). Refusing to replay rather than "
+                "report numbers under an assumed version.\n");
+        return 1;
     }
 
     if (d->verbose)

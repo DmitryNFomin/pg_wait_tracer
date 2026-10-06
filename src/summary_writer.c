@@ -866,6 +866,10 @@ static int flush_accum(struct pgwt_summary_writer *w)
 
     struct pgwt_summary_accum *acc = &w->accum;
     uint64_t flushed_second_mono_ns = acc->second_mono_ns;
+    /* Roll the per-record overflow count up to the writer so the control
+     * socket can report it; the per-record field stays, because a reader needs
+     * to know WHICH seconds are affected. */
+    w->events_overflow_total += acc->events_overflow;
 
     /* Serialize */
     size_t encoded_size = pgwt_summary_serialize(acc, w->encode_buf,
@@ -1073,9 +1077,22 @@ int pgwt_summary_push_event(struct pgwt_summary_writer *w,
     return 0;
 }
 
+/* Both public flush entry points route through here so a failure is counted
+ * exactly once wherever it came from. Previously these returned flush_accum's
+ * status without touching the counter, so only the internal second-boundary
+ * path incremented it -- and the daemon discards the periodic flush result, so
+ * a failing tick reached nobody at all. */
+static int flush_counted(struct pgwt_summary_writer *w)
+{
+    int rc = flush_accum(w);
+    if (rc != 0)
+        w->flush_failures_total++;
+    return rc;
+}
+
 int pgwt_summary_flush(struct pgwt_summary_writer *w)
 {
-    return flush_accum(w);
+    return flush_counted(w);
 }
 
 int pgwt_summary_flush_completed(struct pgwt_summary_writer *w,
@@ -1094,7 +1111,7 @@ int pgwt_summary_flush_completed(struct pgwt_summary_writer *w,
     if (now_mono_ns < ready_at)
         return 0;
 
-    return flush_accum(w);
+    return flush_counted(w);
 }
 
 int pgwt_summary_check_rotation(struct pgwt_summary_writer *w)
@@ -1117,8 +1134,18 @@ int pgwt_summary_check_rotation(struct pgwt_summary_writer *w)
      * point (the accumulator belongs to the file being closed). */
     if (flush_accum(w) != 0) {
         w->flush_failures_total++;
-        fprintf(stderr, "ERROR: summary rotation lost the open second "
-                "(flush failed); window will be short by one second\n");
+        /* BEHAVIOUR FIX, not just wording: accum_close() runs only on
+         * flush_accum's success path, so a failed rotate flush left the
+         * accumulator ACTIVE and it was written into the NEXT hour's file at
+         * the following boundary -- carrying a second_wall_ns earlier than
+         * that file's own name-derived start, which the reader's window
+         * filter then places wrongly. A lost second is a short window; a
+         * misfiled one is a wrong answer in two windows. So discard it
+         * explicitly, which also makes the message below true. */
+        accum_close(w);
+        fprintf(stderr, "ERROR: summary rotation could not write the open "
+                "second; it is DISCARDED (not carried into the next hour's "
+                "file) and that window is short by one second\n");
     }
     write_footer(w);
 

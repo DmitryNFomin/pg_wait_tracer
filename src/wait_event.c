@@ -717,6 +717,25 @@ void pgwt_event_full_name(uint32_t wei, char *buf, size_t bufsz)
  * (rebuild_idle_mask, above).
  */
 
+/* See wait_event.h for the order and why this is a function. */
+int pgwt_init_event_names_for_trace(const char *trace_dir, int header_major)
+{
+    /* Default the DISPLAY tables first so names render even if every step
+     * below fails; the mask this installs is replaced by whichever step wins. */
+    pgwt_init_event_names(18);
+
+    if (trace_dir && pgwt_load_names_json(trace_dir) == 0)
+        return pg_version;              /* the sidecar set it */
+
+    if (header_major > 0) {
+        pgwt_init_event_names(header_major);
+        return header_major;
+    }
+
+    pgwt_init_event_names(0);           /* unknown: empty mask */
+    return 0;
+}
+
 /* ── Dynamic Name Resolution ─────────────────────────────── */
 
 /* Map class name string to class byte (high byte of wait_event_info) */

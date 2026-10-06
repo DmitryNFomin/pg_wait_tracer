@@ -900,6 +900,66 @@ static void test_pg16_sidecar_round_trip(void)
           "...and an id the server never reported is NOT classified from the "
           "PG18 table (the same defect, one id at a time)");
 
+    /* EVERY major end-to-end, not just the two interesting ones: the mask the
+     * daemon would classify with must equal the mask the server ends up with
+     * after a real write/load cycle. Reviewed as covering only 16 and 18. */
+    {
+        const int majors[] = {13, 16, 17, 18};
+        for (size_t i = 0; i < sizeof(majors)/sizeof(majors[0]); i++) {
+            int m = majors[i];
+            char d2[] = "/tmp/pgwt_rt_XXXXXX";
+            if (mkdtemp(d2) == NULL) { CHECK(0, "mkdtemp %d", m); continue; }
+            /* Daemon leg: no dynamic names (the <17 reality; for 17/18 this
+             * models a failed pg_wait_events query, which also falls back to
+             * the static tables). */
+            CHECK(pgwt_load_event_names_from_buffer("no separators here") == -1,
+                  "PG%d: clear dyn", m);
+            pgwt_init_event_names(m);
+            uint32_t live = pgwt_idle_rule_timeout_mask();
+            CHECK(pgwt_write_names_json(d2) == 0, "PG%d: write sidecar", m);
+            /* Server leg, in pgwt-server's real order. */
+            pgwt_init_event_names(18);
+            CHECK(pgwt_load_names_json(d2) == 0, "PG%d: load sidecar", m);
+            uint32_t offline = pgwt_idle_rule_timeout_mask();
+            CHECK(live == offline,
+                  "PG%d: live mask 0x%03x == offline mask 0x%03x after a real "
+                  "sidecar round trip", m, live, offline);
+            char pp[760];
+            snprintf(pp, sizeof(pp), "%s/wait_event_names.json", d2);
+            remove(pp);
+            remove(d2);
+        }
+    }
+
+    /* PG17's "verified" status rests on an assumption the code makes silently:
+     * select_version_tables gives 17 and 18 the SAME timeout_events[] table
+     * (only io_events differs between them). True in the PostgreSQL source,
+     * but nothing pinned it, so a future edit that split them would quietly
+     * make one of the two wrong. Pin the assumption itself. */
+    {
+        CHECK(pgwt_load_event_names_from_buffer("no separators here") == -1,
+              "clear dyn before the 17-vs-18 comparison");
+        char n17[12][64];
+        pgwt_init_event_names(17);
+        uint32_t m17 = pgwt_idle_rule_timeout_mask();
+        for (int id = 0; id < 12; id++) {
+            const char *n = pgwt_event_name(WEI(PG_WAIT_TIMEOUT, id));
+            snprintf(n17[id], sizeof(n17[id]), "%s", n ? n : "(none)");
+        }
+        pgwt_init_event_names(18);
+        CHECK(pgwt_idle_rule_timeout_mask() == m17,
+              "PG17 and PG18 derive the SAME Timeout pacing mask (0x%03x) -- "
+              "PG17's verification rests on sharing PG18's table", m17);
+        int all_same = 1;
+        for (int id = 0; id < 12; id++) {
+            const char *n = pgwt_event_name(WEI(PG_WAIT_TIMEOUT, id));
+            if (strcmp(n17[id], n ? n : "(none)") != 0) all_same = 0;
+        }
+        CHECK(all_same,
+              "...and every Timeout id 0-11 resolves to the same NAME on both, "
+              "which is the assumption select_version_tables makes silently");
+    }
+
     char path[700];
     snprintf(path, sizeof(path), "%s/wait_event_names.json", dir);
     remove(path);
@@ -907,6 +967,122 @@ static void test_pg16_sidecar_round_trip(void)
     snprintf(path, sizeof(path), "%s/wait_event_names.json", dir18);
     remove(path);
     remove(dir18);
+    CHECK(pgwt_load_event_names_from_buffer("no separators here") == -1,
+          "dyn reset");
+    pgwt_init_event_names(18);
+}
+
+
+/* ── 9. A BROKEN OR ABSENT SIDECAR MUST NOT MEAN "PG18" ───────────────────
+ *
+ * Section 8 covers a sidecar that LOADS. The sidecar can also be absent (the
+ * daemon's write is best-effort) or truncated into invalid JSON, and pgwt-server
+ * previously kept the PG18 mask it had installed as a display default -- so a
+ * PG13 or PG16 trace was classified with PG18's Timeout ids. On PG16 that takes
+ * PgSleep OUT of DB Time, inverting the owner's decision, and it reinstated the
+ * live/offline disagreement for the one case with no names_source key to read.
+ *
+ * The order is now pgwt_init_event_names_for_trace(): sidecar, then the major
+ * recorded in the TRACE HEADER (which recovers the right mask rather than
+ * degrading), then the unknown state. This drives all three branches through
+ * the same function the server calls, so the test cannot drift from it. */
+static void test_trace_init_fallback_order(void)
+{
+    printf("--- 9. sidecar absent / invalid / version-less ---\n");
+
+    char dir[] = "/tmp/pgwt_fb_XXXXXX";
+    CHECK(mkdtemp(dir) != NULL, "mkdtemp failed");
+    char path[760];
+    snprintf(path, sizeof(path), "%s/wait_event_names.json", dir);
+
+    /* 9a. NO SIDECAR, header says 16 -> PG16's (empty) mask, NOT PG18's. */
+    remove(path);
+    CHECK(pgwt_init_event_names_for_trace(dir, 16) == 16,
+          "no sidecar + header 16 settles on 16");
+    CHECK(pgwt_idle_rule_timeout_mask() == 0,
+          "...so the mask is EMPTY (got 0x%03x), not PG18's 0x%03x",
+          pgwt_idle_rule_timeout_mask(), PGWT_IDLE_TIMEOUT_MASK_PG18);
+
+    /* 9b. NO SIDECAR, header says 13 -> PG13's mask recovered from the header.
+     * This is the case the header fallback exists for: the classification
+     * survives a lost sidecar instead of being degraded to nothing. */
+    CHECK(pgwt_init_event_names_for_trace(dir, 13) == 13,
+          "no sidecar + header 13 settles on 13");
+    CHECK(pgwt_idle_rule_timeout_mask() == 0x1Du,
+          "...and recovers the PG13 mask 0x01D from the header (got 0x%03x)",
+          pgwt_idle_rule_timeout_mask());
+    CHECK(pgwt_is_idle_event(WEI(PG_WAIT_TIMEOUT, 1)) == 0,
+          "...so PG13 id 1 is PgSleep and stays in DB Time");
+
+    /* 9c. TRUNCATED into invalid JSON, header says 16 -> same as absent. */
+    {
+        FILE *fp = fopen(path, "w");
+        CHECK(fp != NULL, "write a truncated sidecar");
+        if (fp) { fputs("{\"Timeout\": [\"BaseBackupThro", fp); fclose(fp); }
+    }
+    CHECK(pgwt_load_names_json(dir) == -1,
+          "the truncated sidecar is rejected by the loader");
+    CHECK(pgwt_init_event_names_for_trace(dir, 16) == 16,
+          "truncated sidecar + header 16 settles on 16");
+    CHECK(pgwt_idle_rule_timeout_mask() == 0,
+          "...mask EMPTY, not PG18's (got 0x%03x)",
+          pgwt_idle_rule_timeout_mask());
+
+    /* 9d. VALID JSON with no pg_version. The loader succeeds, so the sidecar
+     * wins -- and because it carries no version the tables stay as
+     * pgwt_init_event_names_for_trace left them (PG18 for display). The
+     * guard that matters here is PROVENANCE: no names_source means "static",
+     * so an unverified major cannot be classified from it. Written for PG16's
+     * ids to show the combination. */
+    {
+        FILE *fp = fopen(path, "w");
+        CHECK(fp != NULL, "write a version-less sidecar");
+        if (fp) {
+            fputs("{\"Timeout\":[\"BaseBackupThrottle\",\"CheckpointWriteDelay\"]}\n",
+                  fp);
+            fclose(fp);
+        }
+    }
+    CHECK(pgwt_init_event_names_for_trace(dir, 16) > 0,
+          "a version-less but VALID sidecar still loads (the loader succeeds)");
+    CHECK(pgwt_idle_rule_timeout_mask() == PGWT_IDLE_TIMEOUT_MASK_PG18,
+          "...and because it declares no version it is read as PG18 -- the "
+          "limit of what a sidecar with no version can tell us (got 0x%03x)",
+          pgwt_idle_rule_timeout_mask());
+
+    /* 9e. NO SIDECAR AND NO HEADER -> the unknown state: empty mask. This is
+     * the same situation src/replay.c refuses on, so the two agree. */
+    remove(path);
+    CHECK(pgwt_init_event_names_for_trace(dir, 0) == 0,
+          "no sidecar + no header settles on the unknown major");
+    CHECK(pgwt_idle_rule_timeout_mask() == 0,
+          "...with an EMPTY mask (got 0x%03x)",
+          pgwt_idle_rule_timeout_mask());
+    CHECK(pgwt_event_name(WEI(PG_WAIT_TIMEOUT, 1)) != NULL,
+          "...while names still RENDER from the PG18 tables");
+
+    /* 9f. CONTRAST: a GOOD sidecar still wins over the header, which is what
+     * makes the fallback a fallback and not the primary path.
+     *
+     * The dyn table MUST be cleared first. 9d loaded a two-entry Timeout list
+     * and pgwt_init_event_names() does not clear dyn state, so without this
+     * the PG13 sidecar below would be written from those two stale names
+     * (pgwt_write_names_json prefers dyn whenever dyn_loaded) and read back as
+     * mask 0x01F -- PgSleep classified as pacing. That was a leak between
+     * cases in this test, not a product defect, but it is the same shape as a
+     * real one and the first draft of this test hit it. */
+    CHECK(pgwt_load_event_names_from_buffer("no separators here") == -1,
+          "clear the dyn table left by 9d before writing a PG13 sidecar");
+    pgwt_init_event_names(13);
+    CHECK(pgwt_write_names_json(dir) == 0, "write a PG13 sidecar");
+    CHECK(pgwt_init_event_names_for_trace(dir, 18) == 13,
+          "a valid PG13 sidecar beats a header claiming 18");
+    CHECK(pgwt_idle_rule_timeout_mask() == 0x1Du,
+          "...and installs PG13's mask (got 0x%03x)",
+          pgwt_idle_rule_timeout_mask());
+
+    remove(path);
+    remove(dir);
     CHECK(pgwt_load_event_names_from_buffer("no separators here") == -1,
           "dyn reset");
     pgwt_init_event_names(18);
@@ -942,6 +1118,7 @@ int main(void)
     test_session_idle_narrower();
     test_unverified_majors_are_not_classified();
     test_pg16_sidecar_round_trip();
+    test_trace_init_fallback_order();
     test_dynamic_name_mapping();  /* must run last: sets dyn_loaded */
 
     printf("\n%d/%d tests passed\n", tests_passed, tests_run);

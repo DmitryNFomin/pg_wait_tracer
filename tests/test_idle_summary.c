@@ -232,6 +232,60 @@ static void write_summaries(const char *dir, const struct pgwt_trace_event *ev,
     free(w);
 }
 
+/* ── 12. A FAILED ROTATION FLUSH MUST DISCARD THE SECOND, NOT MISFILE IT ───
+ *
+ * accum_close() runs only on flush_accum's SUCCESS path, so a failed rotate
+ * flush used to leave the accumulator ACTIVE -- and it was then written into
+ * the NEXT hour's file at the following boundary, carrying a second_wall_ns
+ * earlier than that file's own name-derived start. The reader's file-level
+ * window filter places such a record wrongly, so one unwritable second became
+ * a wrong answer in two windows rather than a short one in one. (The ERROR
+ * text also claimed the second was "lost" when it was actually misfiled.)
+ *
+ * Reachable here because both the hour and the buffer size are fields:
+ * forcing current_hour makes check_rotation rotate, and a short buffer makes
+ * the flush inside it refuse. */
+static void test_failed_rotation_discards_the_second(void)
+{
+    printf("--- 12. a failed rotation flush discards, never misfiles ---\n");
+    const char *dir = fresh_dir("rotfail");
+    struct pgwt_summary_writer *w = calloc(1, sizeof(*w));
+    CHECK(w != NULL && pgwt_summary_writer_init(w, dir, 24, NULL) == 0,
+          "writer opens");
+    if (!w) return;
+
+    struct pgwt_trace_event e;
+    memset(&e, 0, sizeof(e));
+    e.new_event = EV_IO; e.cpu_ns = PGWT_CPU_NS_UNKNOWN; e.pid = 970;
+    e.timestamp_ns = mono_origin() + 100 * MS;
+    e.old_event = EV_LOCK; e.duration_ns = 10 * MS;
+    pgwt_summary_push_event(w, &e);
+    CHECK(w->accum_active, "a second is open before the rotation");
+
+    /* Force the rotation AND make its flush refuse. */
+    w->current_hour = (w->current_hour + 1) % (366 * 24);
+    size_t real = w->encode_buf_size;
+    uint64_t recs_before = w->total_records_written;
+    w->encode_buf_size = PGWT_SUMMARY_SERIALIZE_MAX - 1;
+    pgwt_summary_check_rotation(w);
+    w->encode_buf_size = real;
+
+    CHECK(w->flush_failures_total >= 1,
+          "the failed rotate flush is COUNTED (%llu)",
+          (unsigned long long)w->flush_failures_total);
+    CHECK(w->total_records_written == recs_before,
+          "no record was written (%llu == %llu)",
+          (unsigned long long)w->total_records_written,
+          (unsigned long long)recs_before);
+    CHECK(!w->accum_active,
+          "and the open second is DISCARDED, not left active to be written "
+          "into the next hour's file with an out-of-range wall_ns");
+
+    pgwt_summary_close(w);
+    pgwt_summary_destroy(w);
+    free(w);
+}
+
 /* ── reading the records back directly (section 2) ─────────────────────── */
 
 struct rec_ctx {
@@ -793,13 +847,18 @@ static void test_version_preflight(void)
     CHECK(unusable == t3, "all %d v3 file(s) reported unusable (got %d)",
           t3, unusable);
     {
+        /* This only shows the REFUSAL works: the payload under that rewritten
+         * header is still v4 bytes, so a zero-record read here proves the
+         * header check fired, nothing about layout compatibility. The claim
+         * "an unrefused old-layout block would mis-parse" needs a genuine
+         * old-layout payload and is made in test_old_layout_is_incompatible()
+         * below, against pgwt_summary_deserialize directly. */
         struct rec_ctx c3;
         memset(&c3, 0, sizeof(c3));
         pgwt_visit_summaries(dir, 0, 0, rec_visitor, &c3);
         CHECK(c3.records == 0,
-              "...and had it NOT been refused, the visitor would have returned "
-              "%d records -- a partial answer with no error, which is exactly "
-              "why the version had to move", c3.records);
+              "...and the reader returns 0 records for it (the header check "
+              "fired), got %d", c3.records);
     }
     CHECK(set_version(dir, PGWT_SUMMARY_VERSION) == t3, "restore to v%d",
           PGWT_SUMMARY_VERSION);
@@ -1192,12 +1251,357 @@ static void test_idle_children_sum_exactly(void)
         CHECK(oth != NULL,
               "a 500 ns hidden-Activity remainder STILL gets its row (the old "
               "> 1 us threshold dropped it)");
-        CHECK(NEAR_MS(sum_idle_children(&rt), rt.idle_time_ms),
-              "raw sub-microsecond: children %.6f == parent %.6f",
+        /* EXACT, not NEAR_MS: TOL_MS is 0.01 ms, which is 20x the 500 ns
+         * remainder under test, so a tolerance-based comparison here could
+         * not fail whether the row was emitted or not -- it looked like
+         * coverage and was not. `oth != NULL` above is the load-bearing
+         * assertion (it distinguishes `> 0` from `> 1e3`); this one now
+         * actually constrains the arithmetic. */
+        CHECK(fabs(sum_idle_children(&rt) - rt.idle_time_ms) < 1e-9,
+              "raw sub-microsecond: children %.9f == parent %.9f EXACTLY",
               sum_idle_children(&rt), rt.idle_time_ms);
         CHECK(rt.idle_children_excess_ms == 0.0, "no negative remainder");
         free(rt.rows);
     }
+}
+
+
+/* ── 9. THE ROUND-2 LAYOUT IS GENUINELY INCOMPATIBLE WITH v4 ──────────────
+ *
+ * Why this exists: section 4 rewrites a v4 file's HEADER to 3 and shows the
+ * reader refuses it. That proves the refusal fires -- but the bytes underneath
+ * are still v4, so it says nothing about whether an old-layout block would
+ * mis-parse, which is the entire justification for bumping the version. The
+ * first version of this file claimed the one from the other, which is the same
+ * mistake as the Timeout:* idle-children helper: a test measuring something
+ * other than what it asserted.
+ *
+ * So this builds an ACTUAL round-2-layout payload -- v4 bytes with the 8 bytes
+ * of per-query idle_ns and the 12-byte record trailer removed -- and feeds it
+ * to pgwt_summary_deserialize as if it were v4. No file, no compression, no
+ * block header: just the two layouts and the parser.
+ */
+static size_t strip_v4_additions(const uint8_t *in, size_t in_size,
+                                 const struct pgwt_summary_accum *src,
+                                 uint8_t *out)
+{
+    /* Walk the v4 layout and copy everything except the v4-only fields.
+     *   class_ns                      PGWT_NUM_CLASSES * 8
+     *   events    (non-empty slots)   28 + HISTOGRAM_BUCKETS*8 each
+     *   sessions  (non-empty slots)   32 each
+     *   queries                       36 + NUM_CLASSES*8 + 1 + nte*20 + [8]
+     *   trailer                       [12]
+     * The bracketed parts are what round 2 added. */
+    const uint8_t *p = in;
+    uint8_t *o = out;
+    size_t n;
+
+    n = PGWT_NUM_CLASSES * 8;        memcpy(o, p, n); p += n; o += n;
+
+    for (int i = 0; i < SUMMARY_MAX_EVENTS; i++) {
+        const struct pgwt_summary_event *e = &src->events[i];
+        if (e->event_id == 0 && e->count == 0) continue;
+        n = 28 + HISTOGRAM_BUCKETS * 8;  memcpy(o, p, n); p += n; o += n;
+    }
+    for (int i = 0; i < SUMMARY_MAX_SESSIONS; i++) {
+        const struct pgwt_summary_session *ss = &src->sessions[i];
+        if (ss->pid == 0 && ss->db_time_ns == 0) continue;
+        n = 32;                          memcpy(o, p, n); p += n; o += n;
+    }
+    for (int i = 0; i < SUMMARY_MAX_QUERIES; i++) {
+        const struct pgwt_summary_query *q = &src->queries[i];
+        if (q->query_id == 0 && q->count == 0) continue;
+        n = 36 + PGWT_NUM_CLASSES * 8;   memcpy(o, p, n); p += n; o += n;
+        uint8_t nte = *p;
+        *o++ = nte; p++;
+        n = (size_t)nte * 20;            memcpy(o, p, n); p += n; o += n;
+        p += 8;                          /* DROP the v4 per-query idle_ns */
+    }
+    p += 12;                             /* DROP the v4 record trailer */
+    (void)in_size;
+    return (size_t)(o - out);
+}
+
+static void test_old_layout_is_incompatible(void)
+{
+    printf("--- 9. a round-2-layout payload cannot be read as v4 ---\n");
+
+    /* A record with two queries, each carrying idle time, so both the
+     * per-query field and the trailer matter. */
+    struct pgwt_summary_accum *acc = calloc(1, sizeof(*acc));
+    CHECK(acc != NULL, "alloc accumulator");
+    if (!acc) return;
+    const char *dir = fresh_dir("layout");
+    struct pgwt_summary_writer *w = calloc(1, sizeof(*w));
+    CHECK(w != NULL && pgwt_summary_writer_init(w, dir, 24, NULL) == 0,
+          "writer opens");
+    if (w) {
+        uint64_t sec = mono_origin();
+        for (int i = 0; i < SLICE_N; i++) {
+            struct pgwt_trace_event e;
+            memset(&e, 0, sizeof(e));
+            e.new_event = EV_IO; e.cpu_ns = PGWT_CPU_NS_UNKNOWN;
+            e.timestamp_ns = sec + 100 * MS + (uint64_t)(i + 1) * MS;
+            e.pid = slice[i].pid; e.old_event = slice[i].ev;
+            e.duration_ns = slice[i].ms * MS; e.query_id = slice[i].qid;
+            pgwt_summary_push_event(w, &e);
+        }
+        /* Snapshot the live accumulator before it is flushed away. */
+        memcpy(acc, &w->accum, sizeof(*acc));
+        pgwt_summary_flush(w); pgwt_summary_close(w);
+        pgwt_summary_destroy(w); free(w);
+    }
+    CHECK(acc->idle_ns > 0, "the record has idle time (%llu ns)",
+          (unsigned long long)acc->idle_ns);
+
+    uint8_t *v4 = malloc(PGWT_SUMMARY_SERIALIZE_MAX);
+    uint8_t *old = malloc(PGWT_SUMMARY_SERIALIZE_MAX);
+    CHECK(v4 && old, "alloc buffers");
+    if (!v4 || !old) { free(acc); free(v4); free(old); return; }
+
+    size_t v4_size = pgwt_summary_serialize(acc, v4, PGWT_SUMMARY_SERIALIZE_MAX);
+    CHECK(v4_size > 0, "v4 serialize produced %zu bytes", v4_size);
+    size_t old_size = strip_v4_additions(v4, v4_size, acc, old);
+
+    /* The layouts differ by exactly (8 per query + 12). */
+    int nq = 0;
+    for (int i = 0; i < SUMMARY_MAX_QUERIES; i++)
+        if (!(acc->queries[i].query_id == 0 && acc->queries[i].count == 0)) nq++;
+    CHECK(nq > 0, "the record has %d query entries", nq);
+    CHECK(v4_size - old_size == (size_t)nq * 8 + 12,
+          "the round-2 payload is %zu bytes shorter = %d queries x 8 + 12",
+          v4_size - old_size, nq);
+
+    /* 9a. v4 bytes round-trip exactly -- the control, without which a
+     * mismatch below could just mean the parser is broken for everything. */
+    {
+        struct pgwt_summary_accum *back = calloc(1, sizeof(*back));
+        CHECK(back != NULL, "alloc");
+        if (back) {
+            back->second_wall_ns = acc->second_wall_ns;
+            back->num_events = acc->num_events;
+            back->num_sessions = acc->num_sessions;
+            back->num_queries = acc->num_queries;
+            CHECK(pgwt_summary_deserialize(v4, v4_size, back, 4) == 0,
+                  "v4 payload deserializes as v4");
+            CHECK(back->idle_ns == acc->idle_ns,
+                  "...and the record idle_ns round-trips (%llu == %llu)",
+                  (unsigned long long)back->idle_ns,
+                  (unsigned long long)acc->idle_ns);
+            free(back);
+        }
+    }
+
+    /* 9b. the SAME record in round-2 layout, read as v4, must NOT come back
+     * right. Either the parser refuses (short buffer) or it reads the wrong
+     * numbers -- both are acceptable; silently reproducing the original is
+     * not, because that is what "the bump was unnecessary" would look like. */
+    {
+        struct pgwt_summary_accum *back = calloc(1, sizeof(*back));
+        CHECK(back != NULL, "alloc");
+        if (back) {
+            back->second_wall_ns = acc->second_wall_ns;
+            back->num_events = acc->num_events;
+            back->num_sessions = acc->num_sessions;
+            back->num_queries = acc->num_queries;
+            int rc = pgwt_summary_deserialize(old, old_size, back, 4);
+            int wrong = (rc != 0) || (back->idle_ns != acc->idle_ns);
+            CHECK(wrong,
+                  "an old-layout payload read as v4 is REFUSED or mis-parsed "
+                  "(rc=%d, idle_ns %llu vs the real %llu) -- this is why the "
+                  "version had to move rather than the layout change in place",
+                  rc, (unsigned long long)back->idle_ns,
+                  (unsigned long long)acc->idle_ns);
+            free(back);
+        }
+    }
+
+    /* 9c. ...and read as v2 (its own field set) the old payload is fine, so
+     * 9b is about the v4-only bytes and not about the payload being corrupt. */
+    {
+        struct pgwt_summary_accum *back = calloc(1, sizeof(*back));
+        CHECK(back != NULL, "alloc");
+        if (back) {
+            back->second_wall_ns = acc->second_wall_ns;
+            back->num_events = acc->num_events;
+            back->num_sessions = acc->num_sessions;
+            back->num_queries = acc->num_queries;
+            CHECK(pgwt_summary_deserialize(old, old_size, back, 2) == 0,
+                  "the same old-layout payload parses cleanly as v2 -- so 9b "
+                  "is the v4-only fields, not a malformed buffer");
+            free(back);
+        }
+    }
+
+    free(acc); free(v4); free(old);
+}
+
+
+/* ── 10. THE ZERO-PARENT CASE, which is the one the excess signal is FOR ───
+ *
+ * idle_children_excess_ms exists to detect the writer and the reader
+ * disagreeing about which events are idle. The canonical shape of that
+ * disagreement is a record written with one pacing mask and read with a wider
+ * one: the writer's exact idle scalar is 0 (it saw no idle events) while the
+ * reader's per-event pass names some as idle. Parent 0, children > 0.
+ *
+ * emit_idle_rows returned before comparing whenever the parent was <= 0, so
+ * the single scenario the counter was added for was the one it could not see.
+ * This reproduces it by writing with an EMPTY mask (what a PG14-16 trace gets)
+ * and reading with PG18's (what a stale or wrong sidecar would cause), which
+ * is the real-world path, not an injected value.
+ */
+static void test_zero_parent_excess_is_detected(void)
+{
+    printf("--- 10. parent 0 with non-zero children is reported ---\n");
+
+    uint32_t saved = pgwt_idle_rule_timeout_mask();
+    const char *dir = fresh_dir("zeroparent");
+
+    /* WRITE with an empty mask: CheckpointWriteDelay is NOT idle to the
+     * writer, so idle_ns stays 0 and the time lands in class_ns[TIMEOUT]. */
+    pgwt_idle_rule_set_timeout_mask(0);
+    {
+        struct pgwt_summary_writer *w = calloc(1, sizeof(*w));
+        CHECK(w != NULL && pgwt_summary_writer_init(w, dir, 24, NULL) == 0,
+              "writer opens");
+        uint64_t origin = mono_origin();
+        for (int s2 = 0; s2 < SLICES && w; s2++) {
+            struct pgwt_trace_event e;
+            memset(&e, 0, sizeof(e));
+            e.new_event = EV_IO; e.cpu_ns = PGWT_CPU_NS_UNKNOWN; e.pid = 950;
+            e.timestamp_ns = origin + (uint64_t)s2 * ONE_SEC + 100 * MS;
+            e.old_event = EV_CHECKPOINT_DELAY; e.duration_ns = 40 * MS;
+            pgwt_summary_push_event(w, &e);
+        }
+        if (w) { pgwt_summary_flush(w); pgwt_summary_close(w);
+                 pgwt_summary_destroy(w); free(w); }
+    }
+
+    uint64_t from = 0, to = 0;
+    int records = 0;
+    CHECK(window_from_records(dir, &from, &to, &records) == 1 &&
+          records == SLICES, "written with the empty mask (%d records)",
+          records);
+    {
+        struct rec_ctx c;
+        memset(&c, 0, sizeof(c));
+        pgwt_visit_summaries(dir, 0, 0, rec_visitor, &c);
+        CHECK(c.idle_ns_total == 0,
+              "the writer recorded NO idle time (idle_ns=%llu) -- the parent "
+              "will be zero", (unsigned long long)c.idle_ns_total);
+    }
+
+    /* READ with PG18's mask: now the same event IS idle to the reader. */
+    pgwt_idle_rule_set_timeout_mask(PGWT_IDLE_TIMEOUT_MASK_PG18);
+    {
+        struct pgwt_filter f;
+        memset(&f, 0, sizeof(f));
+        struct pgwt_tm_result tm;
+        double wall_ms = (double)(to - from) / 1e6;
+        pgwt_compute_time_model_from_summaries(dir, from, to, &f, wall_ms, &tm);
+        CHECK(NEAR_MS(tm.idle_time_ms, 0.0),
+              "parent Idle is 0.0 (from the writer's scalar), got %.3f",
+              tm.idle_time_ms);
+        CHECK(tm.idle_children_excess_ms > 0,
+              "...and the mismatch IS REPORTED: "
+              "idle_children_excess_ms = %.3f (0 would mean the one scenario "
+              "this counter exists for is invisible)",
+              tm.idle_children_excess_ms);
+        CHECK(NEAR_MS(tm.idle_children_excess_ms, 40.0 * SLICES),
+              "...with the right magnitude, %.1f ms (got %.1f)",
+              40.0 * SLICES, tm.idle_children_excess_ms);
+        free(tm.rows);
+    }
+
+    pgwt_idle_rule_set_timeout_mask(saved);
+    CHECK(pgwt_idle_rule_timeout_mask() == saved, "mask restored");
+
+    /* NON-VACUITY: a window written AND read with the same mask reports zero
+     * excess, so the nonzero above is the mismatch and not a constant. */
+    {
+        const char *ok = fresh_dir("zeroparent_ok");
+        struct pgwt_trace_event *ev = malloc(sizeof(*ev) * MAX_EV);
+        int n = build_stream(ev, mono_origin());
+        write_summaries(ok, ev, n);
+        uint64_t f2 = 0, t2 = 0; int r2 = 0;
+        CHECK(window_from_records(ok, &f2, &t2, &r2) == 1, "consistent fixture");
+        struct pgwt_filter f;
+        memset(&f, 0, sizeof(f));
+        struct pgwt_tm_result tm;
+        pgwt_compute_time_model_from_summaries(ok, f2, t2, &f,
+                                               (double)(t2 - f2) / 1e6, &tm);
+        CHECK(tm.idle_children_excess_ms == 0.0,
+              "a consistently written/read window reports 0 excess (got %.6f)",
+              tm.idle_children_excess_ms);
+        free(tm.rows);
+        free(ev);
+    }
+}
+
+/* ── 11. A REFUSED SERIALIZE IS COUNTED, AND WRITES NOTHING ───────────────
+ *
+ * LZ4_compress_default() on 0 bytes returns 1, so before the explicit
+ * encoded_size == 0 path a refused serialize wrote a block whose header still
+ * claimed the record's event/session/query counts over an empty payload -- a
+ * silently dropped second. And every flush_accum caller discarded the return
+ * value, so flush_failures_total only ever moved on one internal path.
+ *
+ * A short buffer is the only way to reach the refusal, and it is reachable
+ * here because the writer's buffer size is a field. */
+static void test_refused_serialize_is_counted(void)
+{
+    printf("--- 11. a refused serialize is counted and writes no block ---\n");
+    const char *dir = fresh_dir("shortbuf");
+    struct pgwt_summary_writer *w = calloc(1, sizeof(*w));
+    CHECK(w != NULL && pgwt_summary_writer_init(w, dir, 24, NULL) == 0,
+          "writer opens");
+    if (!w) return;
+
+    uint64_t origin = mono_origin();
+    struct pgwt_trace_event e;
+    memset(&e, 0, sizeof(e));
+    e.new_event = EV_IO; e.cpu_ns = PGWT_CPU_NS_UNKNOWN; e.pid = 960;
+    e.timestamp_ns = origin + 100 * MS;
+    e.old_event = EV_LOCK; e.duration_ns = 10 * MS;
+    pgwt_summary_push_event(w, &e);
+    CHECK(w->accum_active, "a second is open");
+
+    uint64_t recs_before = w->total_records_written;
+    /* Make the serializer refuse: anything below PGWT_SUMMARY_SERIALIZE_MAX. */
+    size_t real = w->encode_buf_size;
+    w->encode_buf_size = PGWT_SUMMARY_SERIALIZE_MAX - 1;
+    int rc = pgwt_summary_flush(w);
+    w->encode_buf_size = real;
+
+    CHECK(rc != 0, "the flush REPORTS failure (rc=%d)", rc);
+    CHECK(w->flush_failures_total == 1,
+          "...and it is COUNTED (flush_failures_total=%llu) -- the public "
+          "wrappers used to return the status without touching the counter",
+          (unsigned long long)w->flush_failures_total);
+    CHECK(w->total_records_written == recs_before,
+          "...and NO block reached the file (%llu == %llu): LZ4 on 0 bytes "
+          "returns 1, so this used to write a header claiming the record's "
+          "counts over an empty payload",
+          (unsigned long long)w->total_records_written,
+          (unsigned long long)recs_before);
+    CHECK(w->accum_active,
+          "...and the second stays OPEN so the next boundary retries it, "
+          "rather than becoming a hole");
+
+    /* CONTRAST: with the real buffer the same second flushes and is counted
+     * as written -- so the assertions above are the refusal, not a writer
+     * that never works. */
+    int rc2 = pgwt_summary_flush(w);
+    CHECK(rc2 == 0, "with the real buffer the flush succeeds (rc=%d)", rc2);
+    CHECK(w->total_records_written == recs_before + 1,
+          "...and the record IS written (%llu)",
+          (unsigned long long)w->total_records_written);
+    CHECK(w->flush_failures_total == 1, "the failure count does not grow");
+
+    pgwt_summary_close(w);
+    pgwt_summary_destroy(w);
+    free(w);
 }
 
 /* ══ 5. FALSE NEGATIVES ═══════════════════════════════════════════════════
@@ -1405,6 +1809,10 @@ int main(void)
     test_bounded_tables();
     test_top_queries_filtered_excludes_idle();
     test_idle_children_sum_exactly();
+    test_old_layout_is_incompatible();
+    test_zero_parent_excess_is_detected();
+    test_refused_serialize_is_counted();
+    test_failed_rotation_discards_the_second();
     test_bypass_suite();
 
     snprintf(cmd, sizeof(cmd), "rm -rf '%s'", g_base);

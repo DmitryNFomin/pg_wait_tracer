@@ -33,6 +33,29 @@ int pgwt_write_names_json(const char *trace_dir);
  * Returns 0 on success (overrides hardcoded tables), -1 if not found. */
 int pgwt_load_names_json(const char *trace_dir);
 
+/* Establish the event-name tables AND the Timeout pacing mask for a TRACE
+ * DIRECTORY, in the only order that is safe:
+ *
+ *   1. the sidecar (wait_event_names.json) -- authoritative, because it carries
+ *      both the major the trace was written with and the provenance of its
+ *      names (observed from PostgreSQL vs this build's static fallback);
+ *   2. failing that, `header_major` -- the PostgreSQL major recorded in the
+ *      trace file header, which every trace this build writes carries. The
+ *      dynamic names are lost but the version-selected static tables are
+ *      right, so the classification survives;
+ *   3. failing that, the UNKNOWN-major state: PG18 tables for rendering and an
+ *      EMPTY pacing mask, so every Timeout event stays in DB Time.
+ *
+ * Pass header_major = 0 when no header is available. Returns the major it
+ * settled on, or 0 for the unknown state.
+ *
+ * This exists as a function rather than a sequence inlined in pgwt-server
+ * because step 2 was missing there: a missing or truncated sidecar left the
+ * PG18 default in force and classified a PG13/PG16 trace with PG18's Timeout
+ * ids. Having one implementation is what lets tests/test_wait_event.c drive
+ * all three branches instead of re-deriving the order. */
+int pgwt_init_event_names_for_trace(const char *trace_dir, int header_major);
+
 /* Returns class name: "IO", "LWLock", "Lock", "CPU", etc. */
 const char *pgwt_class_name(uint32_t wait_event_info);
 

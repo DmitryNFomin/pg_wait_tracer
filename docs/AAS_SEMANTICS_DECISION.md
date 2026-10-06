@@ -273,6 +273,19 @@ advisers disagreed about which of 14/15/16 are actually affected; rather than
 ship a table nobody could verify, the code was written not to depend on the
 answer.
 
+**A missing or corrupt sidecar does not fall back to PG18.** The trace file
+header already records the major, so `pgwt_init_event_names_for_trace()` tries,
+in order: the sidecar (authoritative — it carries both the major and the name
+provenance), then the header's major (dynamic names are lost, but the
+version-selected static tables are right, so the classification survives), then
+the unknown-major state (PG18 tables for rendering, **empty** pacing mask).
+Keeping the PG18 display default on sidecar failure classified a PG13 or PG16
+trace with PG18's Timeout ids — reinstating the live/offline disagreement for
+the one case that has no `names_source` key to read. `src/replay.c` **refuses**
+a trace whose header records no major at all, which is the same situation, so
+the two agree rather than each guessing. The daemon also now warns when its
+sidecar write fails, because that is what produces such a trace.
+
 A PG14–16 trace whose sidecar carries **names PostgreSQL actually reported** IS
 classified: those ids came from the server, so a mask derived from them is
 right by construction. That is the rescue path, and it is why this is a
@@ -300,7 +313,13 @@ the display default for classification made "nobody has said which PostgreSQL
 this is" silently equivalent to "this is PG18".
 
 Verified: **PG13, PG17, PG18** — exactly the majors this repo carries an exact
-Timeout enum for. Unclassified by design: **PG14, PG15, PG16, and every future
+Timeout enum for. PG17's status is derivative rather than independent:
+`select_version_tables` gives 17 and 18 the **same** `timeout_events[]` table
+(only `io_events` differs), so "17 is verified" means "17's Timeout enum equals
+18's". That is true in the PostgreSQL source and is now **pinned by a test** —
+`tests/test_wait_event.c` asserts both majors derive the same mask and that
+every Timeout id 0–11 resolves to the same name on each, so a future edit that
+split them fails loudly instead of quietly making one of the two wrong. Unclassified by design: **PG14, PG15, PG16, and every future
 major** (PG19+), unless their trace supplies observed names. The predicate was
 briefly `>= 17`, which quietly promised that every future major was verified
 and would have classified a PG19 trace against PG18's table whenever its name
@@ -367,7 +386,23 @@ lists only drive the NAMED breakdown, and whatever they miss lands in
 `Other (background)`. `events[]` additionally reports when it could not take an
 entry (`events_overflow`), because a full table still truncates the per-event
 breakdown and any class/event-FILTERED total while unfiltered DB Time stays
-right — a mismatch that previously had no signal at all. ~270 distinct
+right — a mismatch that previously had no signal at all.
+
+**The self-checks are surfaced, not merely recorded.** A counter nothing reads
+is a counter nobody acts on, which is how three of these were found to be
+invisible in review:
+
+| signal | where it appears |
+|---|---|
+| `idle_children_excess_ms` | the `time_model` response, plus an `ERROR` line naming the path |
+| `summary_flush_failures_total` | the control socket's `status` (seconds that are HOLES in every summaries-path window) |
+| `summary_events_overflow_total` | the control socket's `status`, plus one `WARN` per process |
+
+All three must be 0. `idle_children_excess_ms` is compared **even when the Idle
+parent is zero** — a zero parent with non-zero named children is the canonical
+shape of the writer and the reader disagreeing about the rule (a record written
+with an empty mask, read with PG18's), and returning early on a zero parent made
+the one scenario the counter exists for the one it could not see. ~270 distinct
 PostgreSQL wait events against 1024 slots is headroom, not a proof, and it is
 not a proof at all for `Extension` events.
 

@@ -262,6 +262,9 @@ struct pgwt_summary_writer {
      * window has holes; it was previously impossible to tell, because every
      * caller of flush_accum discarded its return value. */
     uint64_t      flush_failures_total;
+    /* Σ of every record's events_overflow, so the control socket can report
+     * one number instead of a reader having to sum the blocks. */
+    uint64_t      events_overflow_total;
     uint64_t      total_records_written;
     uint64_t      total_bytes_written;
 
