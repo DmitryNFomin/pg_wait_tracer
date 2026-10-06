@@ -297,6 +297,14 @@ export function createTransitionsView() {
             if (result.ok) { paintVariants(gen, ctx, 'ready', result.variants); return; }
             if (result.err && result.err.name === 'CancelledError') return;
             paintVariants(gen, ctx, 'error', null);
+        }).catch((e) => {
+            // paintVariants() calls buildVariantsPanel(), which is expected
+            // never to throw on a well-formed payload — but if it ever did
+            // (malformed server data), this async path must fail as LOUDLY
+            // as the synchronous build/mount chokepoint (view-manager's
+            // console.error for a build/mount throw), never a silent
+            // unhandled-rejection swallow.
+            console.error('[pgwt] transitions view: variants panel paint failed:', e);
         });
     }
 
