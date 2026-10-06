@@ -379,7 +379,15 @@ void pgwt_live_qattr_record(struct pgwt_accumulator *acc,
     }
     if (cat_flag != 0)
         return;   /* background / maintenance: never attributed (as before) */
-    if (pgwt_is_idle_event(we)) {
+    /* COMMAND BOUNDARY, so pgwt_is_session_idle_event and NOT the load rule
+     * (src/idle_rule.h explains the split). 2026-10-06: six Timeout events
+     * became load-idle, and a foreground backend DOES hit one of them --
+     * `VACUUM` run by a client sleeps in Timeout:VacuumDelay, inside the
+     * command, often before pgstat_report_query_id has run. Following the load
+     * rule here would read that sleep as "the command ended" and flush the
+     * pid's pending parse-phase waits into the unattributed bucket.
+     * tests/test_live_accum.c test_query_attr_pacing_not_a_boundary pins it. */
+    if (pgwt_is_session_idle_event(we)) {
         if (pa && defer)
             pgwt_qattr_boundary(&pa->qattr, false, qattr_emit, acc);
         return;
@@ -432,7 +440,14 @@ bool pgwt_live_qattr_sample(struct pgwt_accumulator *acc,
                             bool cmd_open)
 {
     const bool foreground = (cat_flag == 0);
-    const bool idle = pgwt_is_idle_event(we) != 0;
+    /* Both uses of `idle` below are COMMAND-BOUNDARY decisions, so this is
+     * pgwt_is_session_idle_event, not the load rule: a Timeout pacing sleep is
+     * excluded from DB Time but happens INSIDE a running command, and -- unlike
+     * a ClientRead sample -- it does not carry the finished statement's id
+     * (src/sampler.c only inherits last_query_id for session-idle events). So
+     * treating a sampled VacuumDelay as "between commands" would both reset the
+     * inheritance and flush the pid's pending waits for no reason. */
+    const bool idle = pgwt_is_session_idle_event(we) != 0;
 
     /* An idle wait event read for a backend the status read found INSIDE a
      * command is not evidence that the command ended (see map_reader.h):
