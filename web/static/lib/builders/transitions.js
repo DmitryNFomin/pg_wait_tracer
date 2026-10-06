@@ -280,3 +280,23 @@ export function buildVariantsHtml(vdata, esc) {
     if (vdata.plan) html += buildVariantSectionHtml(vdata.plan, 'Planning', esc);
     return html;
 }
+
+/* PURE: the variants panel's own state (#291 progressive paint). `variants`
+ * costs the server as much time as `transitions` (measured ~699ms vs ~684ms
+ * per million in-window records on a cx33) and the server is single-threaded,
+ * so the view no longer waits for it before painting the DFG — the panel
+ * below the graph must instead DECLARE which of three states it is in:
+ *   'pending' — the second request is still in flight: say so, so the panel
+ *               reads neither as empty (no variants exist) nor complete.
+ *   'ready'   — rendered normally (identical to the old synchronous path).
+ *   'error'   — the request failed or was superseded: silent, matching the
+ *               pre-existing optional-failure behaviour (the old try/catch
+ *               left `variants` null and rendered nothing extra). */
+export function buildVariantsPanel(state, vdata, esc) {
+    if (state === 'pending') {
+        return '<div style="padding:10px 20px;color:#888;font-size:12px">' +
+            'Loading flow variants…</div>';
+    }
+    if (state === 'ready') return buildVariantsHtml(vdata, esc);
+    return '';   // 'error' (or anything unrecognized): silent, never a stale look
+}

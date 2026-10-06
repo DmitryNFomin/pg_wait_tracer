@@ -8,7 +8,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    buildTransitionsOption, transitionsContext, buildVariantsHtml,
+    buildTransitionsOption, transitionsContext, buildVariantsHtml, buildVariantsPanel,
     isIdleTransitionNode, p95TruncationMarker,
 } from '../../web/static/lib/builders/transitions.js';
 import { applyDragOffset } from '../../web/static/views/transitions.js';
@@ -196,6 +196,46 @@ test('variants HTML: exec + plan sections, percentages and step labels', () => {
 test('variants HTML: empty / missing -> empty string', () => {
     assert.equal(buildVariantsHtml(null, esc), '');
     assert.equal(buildVariantsHtml({ exec: { variants: [] } }, esc), '');
+});
+
+// #291 progressive paint: the DFG paints from `transitions` alone; the
+// variants panel below it declares one of three states instead of always
+// rendering the same (possibly stale/empty-looking) HTML synchronously.
+function sampleVariants() {
+    return {
+        exec: {
+            total: 10, num_variants: 1,
+            variants: [{
+                exec_count: 10, num_queries: 1, total_ms: 50, avg_ms: 5,
+                p95_ms: 6, avg_loop_n: 1, top_query_id: 7,
+                steps: [{ name: 'CPU*', avg_ms: 5, class: 'cpu' }],
+                query_text: 'SELECT 2',
+            }],
+        },
+    };
+}
+
+test('variants panel: graph-with-pending-variants — declares loading, not empty and not complete', () => {
+    const html = buildVariantsPanel('pending', null, esc);
+    assert.ok(html.length > 0, 'pending must not render as empty (indistinguishable from "no variants")');
+    assert.ok(/loading/i.test(html), 'pending must say so, not just render blank markup');
+    assert.ok(!html.includes('Flow Patterns'), 'pending must not look like the completed panel');
+});
+
+test('variants panel: graph-with-variants — ready state renders exactly like the synchronous path did', () => {
+    const vdata = sampleVariants();
+    assert.equal(buildVariantsPanel('ready', vdata, esc), buildVariantsHtml(vdata, esc));
+    assert.ok(buildVariantsPanel('ready', vdata, esc).includes('SELECT 2'));
+});
+
+test('variants panel: graph-with-failed-variants — silent, matching the old optional-failure behaviour', () => {
+    // Pre-#291, a failed/superseded `variants` call left the local var null,
+    // so buildVariantsHtml(null) rendered '' — no error banner. The new
+    // explicit 'error' state must still land on that same empty string, not
+    // a scarier failure message nobody asked for.
+    assert.equal(buildVariantsPanel('error', null, esc), '');
+    assert.equal(buildVariantsPanel('error', sampleVariants(), esc), '',
+        'error state ignores any stale/partial vdata it might be handed');
 });
 
 // p95TruncationMarker (issue #273): the server caps the p95 sample at
