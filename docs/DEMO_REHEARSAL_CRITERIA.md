@@ -597,6 +597,74 @@ substitute one family for the other.
   | events | 137 | 144 | 146 |
   | sessions | 139 | 142 | 145 |
 
+  ### Re-pinned 2026-10-06, after eight defect fixes and on the demo workload
+
+  The table above is superseded. It is kept because the note below explains why,
+  and because deleting a wrong number hides that it was ever believed.
+
+  **Configuration.** Real Chrome 154 at the pinned demo viewport (1710x981 @ DPR 2,
+  full screen, verified by two consecutive readings in every run), 15-minute window,
+  enriched demo workload with WAL / advisory-lock / IO-read / IO-write bursts
+  verified firing (4,681-4,889 rows per WAL burst), master at `ae7e9d5`.
+  **4 independent runs**, each on a fresh throwaway VM with a fresh capture —
+  not four walks over one capture. 3 navigations per tab, each preceded by a full
+  page reload so no filter, zoom or warm cache carries between measurements.
+
+  | tab | best run | worst run | worst of 4 |
+  |---|---:|---:|---:|
+  | transitions | 1035 | 1628 | **1628** |
+  | waterfall | 1766 | 2030 | **2030** |
+  | queries | 1728 | 2079 | **2079** |
+  | scatter | 1483 | 1872 | **1872** |
+  | concurrency | 1218 | 1635 | **1635** |
+  | matrix | 1169 | 1426 | **1426** |
+  | timeline | 319 | 470 | **470** |
+  | histogram | 287 | 810 | **810** |
+  | overview | 171 | 882 | **882** |
+  | events | 216 | 263 | **263** |
+  | sessions | 179 | 284 | **284** |
+
+  **Worst per run: 2030 / 1766 / 1983 / 2079 ms. Worst overall 2079 ms, median
+  2006 ms, margin 3000/2079 = 1.44x. Zero console errors in all four runs.**
+
+  **The worst tab is not stable.** It was waterfall three times and queries once.
+  Any statement of the form "tab X is the bottleneck" is unsupported; the honest
+  form is "the worst case is ~2000-2080 ms, drawn from queries / waterfall /
+  scatter". An earlier two-run sample made waterfall look like a fixed ceiling and
+  made transitions look reproducible to 1 ms; four runs show transitions ranging
+  1035-1628 ms. Two samples were not enough to characterise either.
+
+  **Occasional outliers on normally-fast tabs** are recorded rather than smoothed:
+  overview hit 882 ms in run 3 against ~250 ms typical, and histogram 810 ms in
+  run 4 against ~290 ms typical. Both are single occurrences far under the bound,
+  but they show the system has stalls that a three-run sample would have hidden.
+
+  **What changed since the superseded table.** Eight defects were fixed and merged
+  between 2026-10-02 and 2026-10-06: #271/#269 (variants p95 read unwritten memory,
+  displaying a 9.1-year percentile), #273 (truncated p95 rendered as complete),
+  #274 (whole pre-window prefix re-decoded per request), #275 (silent 512-PID
+  truncation), #276 (Concurrency examined 8% of a 15-minute window and reported
+  `fidelity: exact`), #277 (summary writer double-wrote every second, inflating
+  every summaries-path aggregate up to 2.2x), #283 (`current.trace` never cached,
+  so a moving window re-decoded ~98% of the same data every refresh), #291
+  (Transitions awaited a second server call before painting).
+
+  For scale, measured on this workload before #291 and after #283: worst 2378 ms at
+  1.26x. Before #283: 2858 ms at 1.05x. The bound has not moved; the margin has.
+
+  ### Demo window: 900 s (owner, 2026-10-06)
+
+  The demo runs the UI's default 15-minute moving window. This was an open choice
+  for part of this week: before #283 the five raw-event endpoints cost 3.3-5.8 s at
+  900 s and the recommendation was to demo at 300 s instead. #283 (cache the
+  committed blocks of `current.trace`) and #291 removed enough of that cost that
+  900 s now clears the bound with the margin recorded above, so the narrower window
+  is no longer needed and the demo shows the full 15 minutes.
+
+  For reference, server-side on the same captures at 900 s after both fixes:
+  executions 1364 ms, exec_scatter 1260, transitions 950, concurrency 1206,
+  top_queries 1562 — all under the bound before the browser adds anything.
+
   > **These numbers do not describe the workload we intend to demo (2026-10-05).**
   > They were recorded against the base workload only — pgbench `-c 4 --rate=25`
   > plus the Python lock/sleep loop, roughly 1,000 trace records per second. They
@@ -873,7 +941,7 @@ left to be discovered.
 | §3 Off-CPU\* ≤ 10% | yes (`time_model_offcpu_cap_ok`), but the 10% is a **provisional catastrophic-loss tripwire**, not a calibrated bound — see §3's own corrected paragraph above: its cited "4.92 pp" derivation is a real sum but measures a different regime, unit, and quantity than the gate enforces; demo measured <0.1% (n=7, one run); kept at 10%, not tightened, on n=1 |
 | §4 zero known-failing tabs | yes (`build_demo_summary` uses raw `ok`, ignoring the exemption) |
 | §4 blink measured fraction ≥ 0.5 | yes — landed via `agent/blink-anchor-mount-seq` (#209, merged to master), inherited automatically once `agent/rehearsal-bypass-suite` rebased: `demo_rehearsal.py` has no independent blink-measurement code, it fully delegates to `ui_live_smoke.py:run_tab()`, which now calls `blink_sweep_gate_verdict` itself. Pinned with a regression test using real measured numbers (`tests/test_demo_rehearsal_lib.py`, run.id 1790574871: scatter 0.1305, transitions 0.0072–0.0172) |
-| §4 time to first paint, pinned viewport | **SETTLED** (review round 6): bound 3000 ms, global, **≈3.4x margin** (worst observed: transitions at 893 ms) — re-measured after PR #268 (#265) replaced `handle_top_queries`'s O(n^2) bubble sorts with `qsort`; supersedes the pre-#268 figure of queries at 2432 ms / ≈1.2x margin, which is now wrong. Measured ≥3 navigations/tab, real Chrome 154 on the Mac, live full-mode capture on the demo topology, satisfying this criterion's own requirement in full. The bound itself (3000 ms) is unchanged and was neither widened when the margin was thin nor tightened now that it is comfortable — same reasoning both times. `top_queries` latency is separately window-dependent (391 ms at the demo's planned 15-minute window, rising toward 1237 ms at full-capture range on a 2583 s capture) — see the window-dependence finding below this bullet; that is a server-side cost, not a UI paint regression, and is unrelated to the ≈3.4x margin above. Timeline not yet measured by this method (instrumentation gap: bare click, not Sessions-row drill-down — recorded as unmeasured, not a pass). `ttfp_ms` (merged `master`, `fa20067`, issue #245/PR #257) remains measurement-only and gates nothing automatically — `build_tab_result` never reads it into `ok`; the bound above is enforced only by a human reading this document during a counted attempt. Mac-side checklist: still manual sign-off, **deliberately stays qualitative** (paints without a visible spinner) — it has no stopwatch, so it does not independently check the 3000 ms number either; this round's measurement was a one-off script, not the checklist itself. Retracted: the 2026-09-29 contended walk's 30 s Timeline finding measured the "select a session" prompt from a bare tab click, not paint after a Sessions-row drill-down — the same trap this round's Timeline gap repeats at the instrumentation level, not the product level |
+| §4 time to first paint, pinned viewport | **SETTLED** (review round 6): bound 3000 ms, global. **Re-pinned 2026-10-06: worst 2079 ms, margin 1.44x, n=4 independent runs on the enriched demo workload** (see the re-pinned table above). The ≈3.4x / 893 ms figure below describes the BASE workload (~1,000 records/s) and eight-fixes-ago code; it is kept for history and is not the current number — re-measured after PR #268 (#265) replaced `handle_top_queries`'s O(n^2) bubble sorts with `qsort`; supersedes the pre-#268 figure of queries at 2432 ms / ≈1.2x margin, which is now wrong. Measured ≥3 navigations/tab, real Chrome 154 on the Mac, live full-mode capture on the demo topology, satisfying this criterion's own requirement in full. The bound itself (3000 ms) is unchanged and was neither widened when the margin was thin nor tightened now that it is comfortable — same reasoning both times. `top_queries` latency is separately window-dependent (391 ms at the demo's planned 15-minute window, rising toward 1237 ms at full-capture range on a 2583 s capture) — see the window-dependence finding below this bullet; that is a server-side cost, not a UI paint regression, and is unrelated to the ≈3.4x margin above. Timeline not yet measured by this method (instrumentation gap: bare click, not Sessions-row drill-down — recorded as unmeasured, not a pass). `ttfp_ms` (merged `master`, `fa20067`, issue #245/PR #257) remains measurement-only and gates nothing automatically — `build_tab_result` never reads it into `ok`; the bound above is enforced only by a human reading this document during a counted attempt. Mac-side checklist: still manual sign-off, **deliberately stays qualitative** (paints without a visible spinner) — it has no stopwatch, so it does not independently check the 3000 ms number either; this round's measurement was a one-off script, not the checklist itself. Retracted: the 2026-09-29 contended walk's 30 s Timeline finding measured the "select a session" prompt from a bare tab click, not paint after a Sessions-row drill-down — the same trap this round's Timeline gap repeats at the instrumentation level, not the product level |
 | §5 cross-tab agreement, freshness | partial — VM-side freshness: yes (`freshness_ok`, `info`'s `now_ns` vs `to_ns`); Mac-side visible freshness: manual checklist and human sign-off. Cross-tab agreement: DB-Time leg yes (`cross_tab_db_time_agreement_ok`, `time_model` vs `top_events` for the identical window); AAS leg yes (`bucket_weighted_aas_ok`, `agent/aas-agreement-and-retention`) — a bucket-weighted re-derivation from the `aas` endpoint's own `bucket_ns` over the identical window, compared against `time_model.aas`, wired into `extra_checks["cross_tab_aas_agreement"]` alongside the DB-Time leg. Retracted: the earlier walk's 0.0000% came from an unweighted mean of buckets, which was not that comparison and established no agreement; see `tests/demo_rehearsal_lib.bucket_weighted_aas_ok`'s own comment for why the two formulas diverge whenever the window does not divide the endpoint's `bucket_ns` evenly (the common case) |
 | §6 lost-event counters, overhead envelope | partial — lost-event counters: yes (`daemon_integrity_ok`: `ringbuf_drops_total`/`state_map_full_total`/`seen_query_ids_full_total`, already on the wire via pgwt-server's control proxy, no `src/` change needed; blind spot stated in the code comment: a lost LIFECYCLE event is silent, no counter increments). Overhead envelope: **not yet measured for the demo workload on the demo box**. Correction: the earlier claim that nothing measures full mode was wrong. Every box-check runs `tests/test_overhead.sh --quick` (~10 minutes) via `tests/run_all.sh`; its paired baseline/tracer A/B uses the default pgbench load, pins `--mode full`, and appends to `tests/results/overhead_trend.csv` on the box. The tracked CSV has only a header because `tests/results/` is excluded from box-check's up-rsync; box-generated rows are not synced back or committed. The ~70-minute sweep is the same script without `--quick`; `sampled_overhead_gate.py --mode sampled` runs only for `src/` changes. Retracted: the quick sweep is not a per-attempt requirement or a substitute for measuring the demo workload. Do n=3 paired full-mode A/B TPS runs with the demo workload on the demo box and record the envelope before counted attempt one; the 40-minute rehearsal retained neither an A/B baseline nor even its with-tracer `tps =` line (cleanup tailed 20 lines and deleted the full log) |
 | §7 no test exited 126/127 | **partial, and this is a human-readable aid, not an automated gate**: `tests/demo_rehearsal.sh`'s `report_early_exit` labels a dead subprocess's 126/127 exit code in the log for a human reading it afterward. It does NOT change the script's own exit code (every call site already `exit 1` regardless of the labeled reason) and has no test coverage of its own — reviewer finding, 2026-09-28. Do not read this row as "126/127 fails the gate automatically"; it already did, via the pre-existing `kill -0` + `exit 1` checks, which is why this addition changes nothing observable except the log's wording |
