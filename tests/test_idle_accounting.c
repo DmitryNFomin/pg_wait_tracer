@@ -311,6 +311,101 @@ static void test_pacing_rows_visible(void)
     free(er.rows);
 }
 
+
+/* ── 2b. VISIBLE also means transitions and the latency heatmap ────────────
+ *
+ * Criterion 4 of the task names timelines, transitions and histograms as well
+ * as event lists. Those views filter on pgwt_is_hidden_event, which this change
+ * did not touch, so they are correct by construction -- but "correct by
+ * construction" is an argument, and an argument is what a later refactor
+ * silently invalidates. A line added to pgwt_compute_transitions that skipped
+ * idle events would delete the checkpointer's whole state machine from the
+ * graph and nothing else in this file would notice. So they are asserted.
+ *
+ * Both are checked against the SAME fixture as section 2, and the contrast is
+ * the Activity event: it must be absent from both, which proves the assertions
+ * distinguish "visible-idle" from "idle" rather than just finding every event.
+ */
+static void test_pacing_in_transitions_and_heatmap(void)
+{
+    printf("--- 2b. pacing events in transitions and the heatmap ---\n");
+    struct pgwt_trace_event ev[16];
+    int n = build_fixture(ev);
+    struct pgwt_filter f;
+    memset(&f, 0, sizeof(f));
+
+    /* TRANSITIONS. build_fixture gives every record new_event == EV_IO, so each
+     * record is one <old_event> -> IO edge. */
+    struct pgwt_transitions_result tr;
+    pgwt_compute_transitions(ev, n, &f, 64, &tr);
+    CHECK(tr.num_rows > 0, "the fixture produces transitions (%d rows)",
+          tr.num_rows);
+    int found_cwd = 0, found_vd = 0, found_cr = 0, found_activity = 0;
+    double cwd_ns = 0;
+    for (int i = 0; i < tr.num_rows; i++) {
+        if (tr.rows[i].from_event == EV_CHECKPOINT_DELAY) {
+            found_cwd = 1; cwd_ns = tr.rows[i].total_ns;
+        }
+        if (tr.rows[i].from_event == EV_VACUUM_DELAY)  found_vd = 1;
+        if (tr.rows[i].from_event == EV_CLIENTREAD)    found_cr = 1;
+        if (tr.rows[i].from_event == EV_ACTIVITY ||
+            tr.rows[i].to_event   == EV_ACTIVITY)     found_activity = 1;
+    }
+    CHECK(found_cwd,
+          "Timeout:CheckpointWriteDelay keeps its edge in the transition graph "
+          "-- excluded from load, not from the state machine");
+    CHECK(NEAR(cwd_ns, 800.0 * 1e6),
+          "...carrying its real 800 ms (got %.1f ms)", cwd_ns / 1e6);
+    CHECK(found_vd, "Timeout:VacuumDelay too");
+    CHECK(found_cr, "Client:ClientRead unchanged (the precedent)");
+    CHECK(!found_activity,
+          "...and the HIDDEN Activity event is still absent, so these "
+          "assertions distinguish visible-idle from idle");
+    free(tr.rows);
+
+    /* HEATMAP (the latency histogram over time). Filtered to the pacing event:
+     * a hidden-event filter would come back empty. Unlike the other entry
+     * points this one REQUIRES a real window (it returns immediately when
+     * to_ns == from_ns), so the fixture's own second is passed explicitly --
+     * a 0,0 call here would report 0 events for every event and the contrast
+     * below would pass vacuously. */
+    const uint64_t HM_FROM = 1000ULL * 1000000000ULL;
+    const uint64_t HM_TO   = HM_FROM + 1000000000ULL;
+    struct pgwt_filter hf;
+    memset(&hf, 0, sizeof(hf));
+    hf.event_id = EV_CHECKPOINT_DELAY;
+    struct pgwt_heatmap_result hm;
+    pgwt_compute_heatmap(ev, n, &hf, HM_FROM, HM_TO, 8, &hm);
+    CHECK(hm.total_events == 1,
+          "the pacing event appears in the latency heatmap (%llu events)",
+          (unsigned long long)hm.total_events);
+    free(hm.grid); free(hm.times);
+
+    /* The contrast: the same request for the HIDDEN event must come back
+     * empty, which is what makes the count above mean "visible". */
+    memset(&hf, 0, sizeof(hf));
+    hf.event_id = EV_ACTIVITY;
+    pgwt_compute_heatmap(ev, n, &hf, HM_FROM, HM_TO, 8, &hm);
+    CHECK(hm.total_events == 0,
+          "the hidden Activity event does NOT (%llu events)",
+          (unsigned long long)hm.total_events);
+    free(hm.grid); free(hm.times);
+
+    /* ...and the empty result above is because the event is HIDDEN, not
+     * because the window missed it: the same window unfiltered sees every
+     * non-hidden record in the fixture (9 of the 10; the Activity one is the
+     * exception). Without this the contrast would also pass with a window
+     * that contains nothing at all. */
+    struct pgwt_filter nf;
+    memset(&nf, 0, sizeof(nf));
+    pgwt_compute_heatmap(ev, n, &nf, HM_FROM, HM_TO, 8, &hm);
+    CHECK(hm.total_events == 9,
+          "the same window unfiltered holds 9 visible records (got %llu) -- so "
+          "the Activity 0 above is hiddenness, not an empty window",
+          (unsigned long long)hm.total_events);
+    free(hm.grid); free(hm.times);
+}
+
 /* ── 3. the Idle row and its NAMED children ────────────────────────────────
  *
  * INDENTS ARE LOAD-BEARING, and not only cosmetically:
@@ -718,6 +813,7 @@ int main(void)
     }
     test_db_time_excludes_pacing();
     test_pacing_rows_visible();
+    test_pacing_in_transitions_and_heatmap();
     test_idle_row_named_children();
     test_conservation_components();
     test_cpu_on_and_adjacent_to_pacing();
