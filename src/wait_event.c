@@ -534,6 +534,36 @@ static void select_version_tables(int pg_major)
  * version's ids while the UI prints the new version's names. */
 static void rebuild_idle_mask(void)
 {
+    /* FAIL-SAFE ON UNVERIFIED MAJORS (2026-10-06 review).
+     *
+     * select_version_tables() has exact Timeout tables for PG13 and PG17/18
+     * only; PG14/15/16 fall through to the PG17/18 table as a best-effort
+     * DISPLAY fallback, which this file's own header comment already calls
+     * out. Deriving the pacing mask from that table would turn a cosmetic
+     * mislabel into a silent wrong ANSWER: a Timeout id that really is
+     * PgSleep can resolve to CheckpointWriteDelay, which would take PgSleep
+     * OUT of DB Time -- the exact inversion of the owner's 2026-10-06
+     * decision, on a major the live tier actually runs (PG16).
+     *
+     * Two advisers disagreed about which of 14/15/16 are affected. Rather
+     * than ship a table nobody could verify, the code is made not to depend
+     * on the answer: an unverified major gets an EMPTY mask, so every Timeout
+     * event stays in DB Time. That is the over-count direction src/idle_rule.h
+     * names as fail-safe -- too much load is visible on screen, too little is
+     * not.
+     *
+     * DYNAMIC NAMES OVERRIDE THIS. When the trace carries real names (a
+     * sidecar, or pg_wait_events on PG17+), the ids came from PostgreSQL
+     * itself and the mask derived from them is right by construction
+     * regardless of major -- so a PG14-16 trace whose sidecar does carry
+     * Timeout names IS classified. That is the rescue path; without it the
+     * major simply is not classified. */
+    int have_dyn_timeout = (dyn_loaded && dyn_max[PG_WAIT_TIMEOUT] >= 0);
+    if (!have_dyn_timeout && !PGWT_TIMEOUT_TABLE_VERIFIED(pg_version)) {
+        pgwt_idle_rule_set_timeout_mask(0);
+        return;
+    }
+
     uint32_t mask = 0;
     for (int id = 0; id < 32; id++) {
         const char *n = pgwt_event_name(WEI(PG_WAIT_TIMEOUT, id));

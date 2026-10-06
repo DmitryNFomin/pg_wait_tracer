@@ -257,8 +257,31 @@ A hardcoded id list is therefore not merely imprecise on PG13 — it gets
 id-indexed mask is derived from the ACTIVE name table, rebuilt at the end of
 both `pgwt_init_event_names()` and `pgwt_load_names_json()` (pgwt-server calls
 them in that order, so a trace's own sidecar must get the last word).
-PG14–16 use best-effort tables, so their `Timeout` classification is
-**not verified** — only PG13 and PG17/18 are.
+**PG14/15/16 are DELIBERATELY NOT CLASSIFIED.** `select_version_tables()` has
+exact Timeout enums for PG13 and PG17/18 only; 14/15/16 fall through to the
+PG17/18 table as a best-effort *display* fallback, and `src/discovery.c` only
+queries `pg_wait_events` on 17+, so nothing rescues them from the live side
+either. Deriving the mask from that fallback would turn a cosmetic mislabel
+into a silent wrong answer — a Timeout id that is really `PgSleep` resolving to
+`CheckpointWriteDelay` and so leaving DB Time, the exact inversion of the
+decision above, on a major the live tier runs (PG16).
+
+So an unverified major installs an **empty mask**: every Timeout event stays in
+DB Time. That is the over-count direction `src/idle_rule.h` names as fail-safe —
+too much load on screen is visible and arguable, too little is neither. Two
+advisers disagreed about which of 14/15/16 are actually affected; rather than
+ship a table nobody could verify, the code was written not to depend on the
+answer.
+
+A PG14–16 trace whose **sidecar carries real Timeout names** IS classified: the
+ids then came from PostgreSQL itself, so a mask derived from them is right by
+construction. That is the rescue path, and it is the reason this is a fail-safe
+default rather than a permanent downgrade.
+
+Verified: **PG13, PG17, PG18**. Unclassified by design: **PG14, PG15, PG16**
+(unless their trace supplies names). `tests/test_wait_event.c` pins all of it,
+including that the guard does not blanket-disable `Client:ClientRead` or
+`Activity`.
 
 ### Where the time goes instead: a named Idle row
 
@@ -273,6 +296,13 @@ Idle                                1,207,000 ms   indent 0
   Timeout:CheckpointWriteDelay        807,549 ms   indent 2
   Client:ClientRead                   399,000 ms   indent 2
 ```
+
+The children always account for the parent. What the named rows cannot
+cover — hidden `Activity` parking, plus anything the summary path's bounded
+per-event tables dropped — is emitted as a single labelled
+`Other (background)` row rather than left as an unexplained gap. An
+unexplained gap in a visible total is the thing this change exists to remove;
+leaving one at the next level down would have reintroduced it.
 
 Idle sits at indent **0**, not 1: `tests/demo_rehearsal_lib.py`'s
 `time_model_conservation()` sums every indent-1 row and requires the total to
@@ -293,6 +323,25 @@ precedent generalising, not a new behaviour, and it is pinned by
 `tests/test_idle_accounting.c` section 5, which asserts the two events are
 accounted identically. Fixing the spillover means changing how `cpu_ns` is
 attributed across interval boundaries, which is a separate change.
+
+### The totals are exact; only the breakdown is bounded
+
+v3 moved idle time out of `class_ns`, which made the per-event tables the only
+per-event source of it — and both are bounded: `queries[].top_events[]` holds 8
+entries and `events[]` holds 1024. Reading the Idle TOTAL out of either one
+reintroduces, one level down, the bug v3 removed: a query with 8 busier
+non-idle events would report `Idle = 0` beside a correct DB Time, so DB Time +
+Idle would stop accounting for the window under a query filter.
+
+Both totals therefore come from **exact scalars accumulated at the writer**
+(`pgwt_summary_accum::idle_ns`, `pgwt_summary_query::idle_ns`). The bounded
+lists only drive the NAMED breakdown, and whatever they miss lands in
+`Other (background)`. `events[]` additionally reports when it could not take an
+entry (`events_overflow`), because a full table still truncates the per-event
+breakdown and any class/event-FILTERED total while unfiltered DB Time stays
+right — a mismatch that previously had no signal at all. ~270 distinct
+PostgreSQL wait events against 1024 slots is headroom, not a proof, and it is
+not a proof at all for `Extension` events.
 
 ### Summary files moved to v3
 

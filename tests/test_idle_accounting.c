@@ -492,6 +492,18 @@ static void test_idle_row_named_children(void)
     CHECK(NEAR(kids, 1550.0) && NEAR(FIX_IDLE_MS - kids, 900.0),
           "visible children sum to %.1f; the %.1f ms remainder is the hidden "
           "Activity time", kids, FIX_IDLE_MS - kids);
+    /* That remainder is LABELLED, not left as an unexplained gap in a visible
+     * total -- the children must always account for the parent. */
+    const struct pgwt_tm_row *other = row_at(&tm, "Other (background)", 2);
+    CHECK(other != NULL && NEAR(other->time_ms, 900.0),
+          "the hidden Activity share appears as a labelled Other-background "
+          "row of 900 ms (got %.1f)",
+          other ? other->time_ms : -1);
+    /* indent 2 is shared with the per-CLASS sub-event rows, so this sums the
+     * IDLE children specifically: the three named ones plus the remainder. */
+    CHECK(NEAR(kids + (other ? other->time_ms : 0.0), FIX_IDLE_MS),
+          "...so the idle children account for the whole parent (%.1f vs %.1f)",
+          kids + (other ? other->time_ms : 0.0), FIX_IDLE_MS);
 
     /* rows[0] is still "DB Time": overview.js reads data.rows[0] directly. */
     CHECK(tm.num_rows > 0 && strcmp(tm.rows[0].name, "DB Time") == 0 &&
@@ -663,6 +675,143 @@ static void test_cpu_on_and_adjacent_to_pacing(void)
     free(tm.rows);
 }
 
+
+/* ── 7. ADJUDICATION: is pgwt_tag_events' query-id carry a LOAD decision or a
+ *      COMMAND-BOUNDARY decision? ─────────────────────────────────────────
+ *
+ * src/compute.c's offline attribution pass clears the carried query id at
+ * `pgwt_is_idle_event` in two places: the forward pass (gated on SAMPLE
+ * records) and the backward pass (every record). Those two sites are the
+ * OFFLINE counterparts of src/sampler.c and src/map_reader.c, both of which
+ * this branch converted to the narrower pgwt_is_session_idle_event because a
+ * Timeout pacing sleep happens INSIDE a running command.
+ *
+ * Two advisers read this as correct-as-is; one read it as the same bug left
+ * behind. An opinion cannot settle it, so this section drives the real
+ * sequence through the real function and asserts the attribution:
+ *
+ *     CMD_START -> Lock:relation (query_id 0, parse phase)
+ *               -> Timeout:VacuumDelay (query_id 0, IN COMMAND)
+ *               -> record carrying query id Q
+ *
+ * The lock must end up attributed to Q. If a pacing sleep clears the carry,
+ * the lock is left UNATTRIB and the Queries/Waterfall drill-down on a
+ * foreground VACUUM shows the wrong answer.
+ *
+ * The CONTRAST is what makes this test mean something: the identical sequence
+ * with Client:ClientRead in place of the sleep MUST lose the attribution,
+ * because that genuinely is a command boundary. A predicate that never
+ * cleared the carry would pass the first half and fail the second.
+ */
+static void tag_seq(struct pgwt_trace_event *ev, int n)
+{
+    pgwt_tag_events(ev, n, NULL, 0);
+}
+
+/* The record that carries the parse-phase lock, after tagging. */
+static const struct pgwt_trace_event *find_ev(const struct pgwt_trace_event *ev,
+                                              int n, uint32_t we)
+{
+    for (int i = 0; i < n; i++)
+        if (ev[i].old_event == we) return &ev[i];
+    return NULL;
+}
+
+static void test_tag_events_pacing_not_a_boundary(void)
+{
+    printf("--- 7. adjudication: pacing sleep in the offline attribution pass ---\n");
+    const uint64_t Q = 0xABCDEF01ULL;
+    uint64_t t = 5000ULL * 1000000000ULL;
+
+    /* 7a. EXACT records (no SAMPLE flag): the backward pass is the one that
+     * can clear the carry here. */
+    {
+        struct pgwt_trace_event ev[4];
+        int n = 0;
+        ev[n++] = mk(t + 1 * MS, 501, EV_LOCK,             10, PGWT_CPU_NS_UNKNOWN);
+        ev[n++] = mk(t + 2 * MS, 501, EV_VACUUM_DELAY,     20, PGWT_CPU_NS_UNKNOWN);
+        ev[n++] = mk(t + 3 * MS, 501, EV_IO,                5, PGWT_CPU_NS_UNKNOWN);
+        ev[n - 1].query_id = Q;      /* the command finally reports its id */
+        tag_seq(ev, n);
+
+        const struct pgwt_trace_event *lock = find_ev(ev, n, EV_LOCK);
+        CHECK(lock != NULL, "the lock record survived tagging");
+        if (lock) {
+            CHECK(lock->query_id == Q,
+                  "EXACT: the parse-phase lock is attributed to Q across an "
+                  "in-command VacuumDelay (got query_id=0x%llx, UNATTRIB=%d)",
+                  (unsigned long long)lock->query_id,
+                  (lock->flags & PGWT_EVENT_FLAG_QUERY_UNATTRIB) != 0);
+            CHECK((lock->flags & PGWT_EVENT_FLAG_QUERY_UNATTRIB) == 0,
+                  "...and is not flagged unattributed");
+        }
+    }
+
+    /* 7b. THE CONTRAST, exact: Client:ClientRead in the same slot IS a
+     * command boundary, so the lock must NOT inherit Q. */
+    {
+        struct pgwt_trace_event ev[4];
+        int n = 0;
+        ev[n++] = mk(t + 1 * MS, 502, EV_LOCK,       10, PGWT_CPU_NS_UNKNOWN);
+        ev[n++] = mk(t + 2 * MS, 502, EV_CLIENTREAD, 20, PGWT_CPU_NS_UNKNOWN);
+        ev[n++] = mk(t + 3 * MS, 502, EV_IO,          5, PGWT_CPU_NS_UNKNOWN);
+        ev[n - 1].query_id = Q;
+        tag_seq(ev, n);
+
+        const struct pgwt_trace_event *lock = find_ev(ev, n, EV_LOCK);
+        CHECK(lock != NULL && lock->query_id != Q,
+              "EXACT contrast: ClientRead DOES end the command, so the lock "
+              "must not inherit Q (got 0x%llx)",
+              lock ? (unsigned long long)lock->query_id : 0ULL);
+    }
+
+    /* 7c. SAMPLED records: the forward pass is gated on PGWT_EVENT_FLAG_SAMPLE
+     * and is the offline counterpart of src/sampler.c's live rule, which this
+     * branch converted. A sampled pacing wait must not end the command. */
+    {
+        struct pgwt_trace_event ev[4];
+        int n = 0;
+        /* A sample carries its event in new_event; old_event is 0. */
+        struct pgwt_trace_event s0 = mk(t + 1 * MS, 503, 0, 0, PGWT_CPU_NS_UNKNOWN);
+        s0.new_event = EV_IO; s0.flags = PGWT_EVENT_FLAG_SAMPLE; s0.query_id = Q;
+        ev[n++] = s0;
+        struct pgwt_trace_event s1 = mk(t + 2 * MS, 503, 0, 0, PGWT_CPU_NS_UNKNOWN);
+        s1.new_event = EV_VACUUM_DELAY; s1.flags = PGWT_EVENT_FLAG_SAMPLE;
+        s1.query_id = 0;
+        ev[n++] = s1;
+        struct pgwt_trace_event s2 = mk(t + 3 * MS, 503, 0, 0, PGWT_CPU_NS_UNKNOWN);
+        s2.new_event = EV_LOCK; s2.flags = PGWT_EVENT_FLAG_SAMPLE; s2.query_id = 0;
+        ev[n++] = s2;
+        tag_seq(ev, n);
+        CHECK(ev[2].query_id == Q,
+              "SAMPLED: a pacing sample does not end the command, so the "
+              "following lock sample still carries Q (got 0x%llx)",
+              (unsigned long long)ev[2].query_id);
+    }
+
+    /* 7d. THE CONTRAST, sampled: a ClientRead sample IS the between-commands
+     * boundary in the sampled tier (no markers exist there). */
+    {
+        struct pgwt_trace_event ev[4];
+        int n = 0;
+        struct pgwt_trace_event s0 = mk(t + 1 * MS, 504, 0, 0, PGWT_CPU_NS_UNKNOWN);
+        s0.new_event = EV_IO; s0.flags = PGWT_EVENT_FLAG_SAMPLE; s0.query_id = Q;
+        ev[n++] = s0;
+        struct pgwt_trace_event s1 = mk(t + 2 * MS, 504, 0, 0, PGWT_CPU_NS_UNKNOWN);
+        s1.new_event = EV_CLIENTREAD; s1.flags = PGWT_EVENT_FLAG_SAMPLE;
+        s1.query_id = 0;
+        ev[n++] = s1;
+        struct pgwt_trace_event s2 = mk(t + 3 * MS, 504, 0, 0, PGWT_CPU_NS_UNKNOWN);
+        s2.new_event = EV_LOCK; s2.flags = PGWT_EVENT_FLAG_SAMPLE; s2.query_id = 0;
+        ev[n++] = s2;
+        tag_seq(ev, n);
+        CHECK(ev[2].query_id != Q,
+              "SAMPLED contrast: a ClientRead sample DOES end the command, so "
+              "the following lock sample must not carry Q (got 0x%llx)",
+              (unsigned long long)ev[2].query_id);
+    }
+}
+
 /* ══ 6. FALSE NEGATIVES ═══════════════════════════════════════════════════
  * Every section above asserts that time was EXCLUDED. "0 ms excluded == 0 ms
  * expected" satisfies all of it. These are the ways this file could be unable
@@ -817,6 +966,7 @@ int main(void)
     test_idle_row_named_children();
     test_conservation_components();
     test_cpu_on_and_adjacent_to_pacing();
+    test_tag_events_pacing_not_a_boundary();
     test_bypass_suite();
 
     printf("\n%d checks, %d failed\n", tests_run, tests_failed);

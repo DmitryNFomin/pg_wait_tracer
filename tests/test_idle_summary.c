@@ -243,6 +243,8 @@ struct rec_ctx {
     uint64_t q_total_ns[2];             /* QID_A, QID_B */
     uint64_t q_class_ns[2][PGWT_NUM_CLASSES];
     uint64_t min_sec, max_sec;
+    uint32_t events_overflow;      /* v3 signal: events[] could not take an entry */
+    uint64_t idle_ns_total;        /* v3 exact system-wide idle */
 };
 
 static const uint32_t probe[] = {
@@ -261,6 +263,8 @@ static int rec_visitor(const struct pgwt_summary_accum *rec, void *vctx)
         c->max_sec = rec->second_wall_ns;
     for (int i = 0; i < PGWT_NUM_CLASSES; i++)
         c->class_ns[i] += rec->class_ns[i];
+    c->events_overflow += rec->events_overflow;
+    c->idle_ns_total += rec->idle_ns;
     for (int e = 0; e < SUMMARY_MAX_EVENTS; e++) {
         const struct pgwt_summary_event *se = &rec->events[e];
         if (se->event_id == 0 && se->count == 0) continue;
@@ -818,6 +822,235 @@ static void test_version_preflight(void)
     free(ev);
 }
 
+
+/* Inspects one query's top_events[] so a test can state, rather than assume,
+ * that the bounded list does not hold the event under test. */
+struct topev_ctx {
+    uint64_t query_id;
+    int seen_records;
+    int num_top_events;
+    int idle_in_top;
+};
+
+static int topev_visitor(const struct pgwt_summary_accum *rec, void *vctx)
+{
+    struct topev_ctx *c = vctx;
+    for (int q = 0; q < SUMMARY_MAX_QUERIES; q++) {
+        const struct pgwt_summary_query *sq = &rec->queries[q];
+        if (sq->query_id != c->query_id) continue;
+        c->seen_records++;
+        c->num_top_events = sq->num_top_events;
+        for (int j = 0; j < sq->num_top_events; j++)
+            if (pgwt_is_idle_event(sq->top_events[j].event_id))
+                c->idle_in_top++;
+    }
+    return 0;
+}
+
+/* ── 6. THE BOUNDED TABLES ────────────────────────────────────────────────
+ *
+ * v3 moved idle time OUT of class_ns, which made the per-event tables the only
+ * per-event source of it. Both tables are BOUNDED, so "read the idle total out
+ * of the event list" -- which is what the first version of this branch did --
+ * reintroduces, one level down, exactly the bug it replaced:
+ *
+ *   6a. queries[].top_events[] holds 8 entries. A query with 8 busier non-idle
+ *       events pushes its pacing sleep out, and the query-filtered Idle reads
+ *       0 beside a correct DB Time, so DB Time + Idle stops accounting for the
+ *       window. (This is literally reason #3 given in src/compute.c for why
+ *       the old summary_query_clientread_ns was wrong.)
+ *   6b. events[] holds 1024. ~270 distinct PG wait events is headroom, not a
+ *       proof -- Extension events are unbounded in principle -- and a full
+ *       table under-reported Idle with no signal at all.
+ *
+ * Both totals now come from exact scalars accumulated at the writer; the
+ * bounded lists only drive the NAMED breakdown, and whatever they miss shows
+ * up as the labelled "Other (background)" row rather than vanishing.
+ */
+static void test_bounded_tables(void)
+{
+    printf("--- 6. bounded per-event tables must not bound the Idle TOTAL ---\n");
+
+    /* 6a. Nine distinct events for one query, pacing LAST so it is the one
+     * top_events[] drops. */
+    const char *dir = fresh_dir("ninth");
+    const uint64_t QN = 0x9999ULL;
+    uint64_t origin = mono_origin();
+    {
+        struct pgwt_summary_writer *w = calloc(1, sizeof(*w));
+        CHECK(w != NULL && pgwt_summary_writer_init(w, dir, 24, NULL) == 0,
+              "writer opens");
+        for (int s2 = 0; s2 < SLICES && w; s2++) {
+            uint64_t sec = origin + (uint64_t)s2 * ONE_SEC;
+            struct pgwt_trace_event e;
+            memset(&e, 0, sizeof(e));
+            e.new_event = EV_IO; e.cpu_ns = PGWT_CPU_NS_UNKNOWN;
+            e.pid = 801; e.query_id = QN;
+            /* 8 distinct NON-idle events, 1 ms each, claim every slot. */
+            for (int k = 0; k < 8; k++) {
+                e.timestamp_ns = sec + 100 * MS + (uint64_t)(k + 1) * MS;
+                e.old_event = WEI(PG_WAIT_IPC, k);   /* 8 distinct IPC events */
+                e.duration_ns = 1 * MS;
+                pgwt_summary_push_event(w, &e);
+            }
+            /* the 9th distinct event: a pacing sleep, 40 ms */
+            e.timestamp_ns = sec + 100 * MS + 9 * MS;
+            e.old_event = EV_CHECKPOINT_DELAY;
+            e.duration_ns = 40 * MS;
+            pgwt_summary_push_event(w, &e);
+        }
+        if (w) { pgwt_summary_flush(w); pgwt_summary_close(w);
+                 pgwt_summary_destroy(w); free(w); }
+    }
+
+    uint64_t from = 0, to = 0;
+    int records = 0;
+    CHECK(window_from_records(dir, &from, &to, &records) == 1 &&
+          records == SLICES, "ninth-event fixture has %d records", records);
+    double wall_ms = (double)(to - from) / 1e6;
+
+    /* THE PRECONDITION that makes this test mean anything: the pacing event
+     * really IS absent from top_events[]. If the list happened to hold it,
+     * the Idle assertion below would pass for the wrong reason. */
+    {
+        struct topev_ctx tc;
+        memset(&tc, 0, sizeof(tc));
+        tc.query_id = QN;
+        pgwt_visit_summaries(dir, 0, 0, topev_visitor, &tc);
+        CHECK(tc.seen_records > 0, "inspected %d query records", tc.seen_records);
+        CHECK(tc.num_top_events == SUMMARY_QUERY_TOP_EVENTS,
+              "top_events is FULL (%d of %d)", tc.num_top_events,
+              SUMMARY_QUERY_TOP_EVENTS);
+        CHECK(tc.idle_in_top == 0,
+              "...and holds NO idle event (%d) -- so the Idle total below "
+              "cannot come from it", tc.idle_in_top);
+    }
+
+    struct pgwt_filter f;
+    memset(&f, 0, sizeof(f));
+    f.query_id = QN;
+    struct pgwt_tm_result tm;
+    pgwt_compute_time_model_from_summaries(dir, from, to, &f, wall_ms, &tm);
+    CHECK(NEAR_MS(tm.db_time_ms, 8.0 * SLICES),
+          "query DB Time = 8 x 1 ms/s = %.1f (got %.1f)", 8.0 * SLICES,
+          tm.db_time_ms);
+    CHECK(NEAR_MS(tm.idle_time_ms, 40.0 * SLICES),
+          "query Idle = %.1f ms EXACTLY, even though the pacing event was "
+          "pushed out of the 8-entry top_events list (got %.1f -- 0.0 is the "
+          "bug this pins)", 40.0 * SLICES, tm.idle_time_ms);
+    /* The breakdown cannot name it, so it must be LABELLED, not dropped. */
+    const struct pgwt_tm_row *other = row_at(&tm, "Other (background)", 2);
+    CHECK(other != NULL && NEAR_MS(other->time_ms, 40.0 * SLICES),
+          "...and it appears as the labelled remainder row (got %.1f)",
+          other ? other->time_ms : -1);
+    free(tm.rows);
+
+    /* 6b. The events[] overflow signal fires rather than silently truncating.
+     * Push more distinct events than the table holds. */
+    const char *odir = fresh_dir("overflow");
+    {
+        struct pgwt_summary_writer *w = calloc(1, sizeof(*w));
+        CHECK(w != NULL && pgwt_summary_writer_init(w, odir, 24, NULL) == 0,
+              "overflow writer opens");
+        uint64_t sec = mono_origin();
+        struct pgwt_trace_event e;
+        memset(&e, 0, sizeof(e));
+        e.new_event = EV_IO; e.cpu_ns = PGWT_CPU_NS_UNKNOWN; e.pid = 802;
+        /* SUMMARY_MAX_EVENTS + 200 distinct Extension ids, all in one second. */
+        for (int k = 0; k < SUMMARY_MAX_EVENTS + 200 && w; k++) {
+            e.timestamp_ns = sec + 100 * MS;
+            e.old_event = WEI(PG_WAIT_EXTENSION, k);
+            e.duration_ns = 1000;
+            pgwt_summary_push_event(w, &e);
+        }
+        /* plus a pacing sleep, which may or may not get a slot */
+        if (w) {
+            e.timestamp_ns = sec + 200 * MS;
+            e.old_event = EV_CHECKPOINT_DELAY;
+            e.duration_ns = 50 * MS;
+            pgwt_summary_push_event(w, &e);
+            pgwt_summary_flush(w); pgwt_summary_close(w);
+            pgwt_summary_destroy(w); free(w);
+        }
+    }
+    {
+        struct rec_ctx c;
+        memset(&c, 0, sizeof(c));
+        pgwt_visit_summaries(odir, 0, 0, rec_visitor, &c);
+        CHECK(c.records >= 1, "overflow fixture produced a record");
+        CHECK(c.events_overflow > 0,
+              "the full events[] table is REPORTED (events_overflow=%u), not "
+              "silently truncated", c.events_overflow);
+        CHECK(c.idle_ns_total == 50ULL * MS,
+              "...and the exact idle scalar still carries the whole 50 ms "
+              "(got %llu ns) even though the table was full",
+              (unsigned long long)c.idle_ns_total);
+    }
+}
+
+/* ── 7. TOP QUERIES under a class filter must not charge idle as DB Time ──
+ *
+ * pgwt_compute_top_queries_from_summaries' class/event-filtered branch reads
+ * queries[].top_events[], which deliberately RETAINS idle events so the Events
+ * tab can show them -- so it is the one place v3's writer-side exclusion does
+ * not reach, and it summed them straight into db_time_ns. The raw
+ * pgwt_compute_top_queries skips idle records outright, so the same window
+ * answered differently depending on which path served it. */
+static void test_top_queries_filtered_excludes_idle(void)
+{
+    printf("--- 7. top_queries class filter excludes idle ---\n");
+    const char *dir = fresh_dir("topq");
+    struct pgwt_trace_event *ev = malloc(sizeof(*ev) * MAX_EV);
+    int n = build_stream(ev, mono_origin());
+    write_summaries(dir, ev, n);
+
+    uint64_t from = 0, to = 0;
+    int records = 0;
+    CHECK(window_from_records(dir, &from, &to, &records) == 1, "records");
+    double wall_ms = (double)(to - from) / 1e6;
+
+    /* class=timeout. QID_B's only Timeout event is PgSleep (30 ms/s, DB Time).
+     * The checkpointer's pacing sleeps carry no query id in this fixture, so
+     * the discriminating case is Client: QID_A has ClientRead (idle, 25 ms/s)
+     * and nothing else in the Client class, so a correct answer is 0 ms. */
+    struct pgwt_filter f;
+    memset(&f, 0, sizeof(f));
+    snprintf(f.class_name, sizeof(f.class_name), "client");
+    struct pgwt_queries_result rq, sq;
+    pgwt_compute_top_queries(ev, n, &f, 0, 0, wall_ms, &rq);
+    pgwt_compute_top_queries_from_summaries(dir, from, to, &f, wall_ms, &sq);
+
+    double raw_a = 0, sum_a = 0;
+    for (int i = 0; i < rq.num_rows; i++)
+        if (rq.rows[i].query_id == QID_A) raw_a = rq.rows[i].total_ms;
+    for (int i = 0; i < sq.num_rows; i++)
+        if (sq.rows[i].query_id == QID_A) sum_a = sq.rows[i].total_ms;
+    CHECK(NEAR_MS(raw_a, 0.0),
+          "RAW: class=client, QID_A has only the idle ClientRead => 0 ms "
+          "(got %.1f)", raw_a);
+    CHECK(NEAR_MS(sum_a, 0.0),
+          "SUMMARY: same => 0 ms, not the %.1f ms of ClientRead (got %.1f)",
+          25.0 * SLICES, sum_a);
+    CHECK(NEAR_MS(sq.db_time_ms, raw_a + 0.0) || sq.db_time_ms < TOL_MS,
+          "SUMMARY db_time for the filtered view excludes idle (got %.3f)",
+          sq.db_time_ms);
+    free(rq.rows); free(sq.rows);
+
+    /* NON-VACUITY: the same fixture under a class the query really does have
+     * must come back NON-zero, or the zeros above prove nothing. */
+    memset(&f, 0, sizeof(f));
+    snprintf(f.class_name, sizeof(f.class_name), "lock");
+    pgwt_compute_top_queries_from_summaries(dir, from, to, &f, wall_ms, &sq);
+    double lock_a = 0;
+    for (int i = 0; i < sq.num_rows; i++)
+        if (sq.rows[i].query_id == QID_A) lock_a = sq.rows[i].total_ms;
+    CHECK(NEAR_MS(lock_a, 20.0 * SLICES),
+          "class=lock, QID_A = %.1f ms (got %.1f) -- so the zeros above are "
+          "the idle exclusion, not an empty fixture", 20.0 * SLICES, lock_a);
+    free(sq.rows);
+    free(ev);
+}
+
 /* ══ 5. FALSE NEGATIVES ═══════════════════════════════════════════════════
  * Section 1's agreement check is satisfied by 0 == 0 and section 4's gate is
  * satisfied by "there were no files". These are the ways each can be made
@@ -1020,6 +1253,8 @@ int main(void)
     test_writer_excludes_idle();
     test_summary_idle_rows();
     test_version_preflight();
+    test_bounded_tables();
+    test_top_queries_filtered_excludes_idle();
     test_bypass_suite();
 
     snprintf(cmd, sizeof(cmd), "rm -rf '%s'", g_base);

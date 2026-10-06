@@ -731,6 +731,87 @@ static void test_session_idle_narrower(void)
     CHECK(pgwt_is_session_idle_event(0) == 0, "CPU is not session-idle");
 }
 
+
+/* ── 7. UNVERIFIED MAJORS MUST NOT BE CLASSIFIED ───────────────────────────
+ *
+ * This file has exact Timeout tables for PG13 and PG17/18 only. PG14/15/16
+ * fall through to the PG17/18 table as a best-effort DISPLAY fallback
+ * (src/wait_event.c's header comment), and src/discovery.c only queries
+ * pg_wait_events on 17+, so there is no rescue from the live side either.
+ *
+ * Before 2026-10-06 that was a cosmetic mislabel. Deriving the pacing mask
+ * from the same table turns it into a silent WRONG ANSWER: a Timeout id that
+ * really is PgSleep can resolve to CheckpointWriteDelay and so leave DB Time
+ * -- the exact inversion of the owner's decision, on a major the live tier
+ * runs (PG16).
+ *
+ * Two advisers disagreed about which of 14/15/16 are actually affected. The
+ * code is therefore written not to depend on the answer: unverified major =>
+ * EMPTY mask => everything stays in DB Time, the over-count direction
+ * src/idle_rule.h names as fail-safe. These assertions pin that, so nobody
+ * can "optimise" the guard away on the strength of a remembered enum. */
+static void test_unverified_majors_are_not_classified(void)
+{
+    printf("--- unverified majors (14/15/16) are not classified ---\n");
+    const int unverified[] = {14, 15, 16};
+    for (size_t i = 0; i < sizeof(unverified)/sizeof(unverified[0]); i++) {
+        int m = unverified[i];
+        pgwt_init_event_names(m);
+        CHECK(pgwt_idle_rule_timeout_mask() == 0,
+              "PG%d installs an EMPTY pacing mask (got 0x%03x) -- this build "
+              "has no verified Timeout table for it", m,
+              pgwt_idle_rule_timeout_mask());
+        /* Every Timeout id therefore stays in DB Time -- including the ones
+         * that merely LOOK like pacing through the PG18 table. */
+        for (int id = 0; id < 10; id++)
+            CHECK(pgwt_is_idle_event(WEI(PG_WAIT_TIMEOUT, id)) == 0,
+                  "PG%d Timeout id %d stays in DB Time", m, id);
+        /* The unrelated rules are untouched: this guard must not blanket-
+         * disable idle accounting, only the version-dependent Timeout part. */
+        CHECK(pgwt_is_idle_event(WEI(PG_WAIT_CLIENT, 0)) != 0,
+              "PG%d: Client:ClientRead is still idle", m);
+        CHECK(pgwt_is_idle_event(WEI(PG_WAIT_ACTIVITY, 4)) != 0,
+              "PG%d: Activity is still idle", m);
+    }
+
+    /* The verified majors are unaffected -- otherwise the guard would be
+     * "disable everything", which passes the assertions above vacuously. */
+    pgwt_init_event_names(13);
+    CHECK(pgwt_idle_rule_timeout_mask() == 0x1Du, "PG13 still classified");
+    pgwt_init_event_names(18);
+    CHECK(pgwt_idle_rule_timeout_mask() == PGWT_IDLE_TIMEOUT_MASK_PG18,
+          "PG18 still classified");
+    pgwt_init_event_names(17);
+    CHECK(pgwt_idle_rule_timeout_mask() == PGWT_IDLE_TIMEOUT_MASK_PG18,
+          "PG17 still classified");
+
+    /* THE RESCUE PATH: real names from the server (sidecar or pg_wait_events)
+     * carry ids PostgreSQL itself assigned, so a mask derived from them is
+     * right whatever the major. A PG16 trace WITH Timeout names in its
+     * sidecar therefore IS classified -- without this the guard would be a
+     * permanent downgrade rather than a fail-safe default. */
+    pgwt_init_event_names(16);
+    CHECK(pgwt_idle_rule_timeout_mask() == 0, "PG16 unclassified on tables");
+    CHECK(pgwt_load_event_names_from_buffer(
+              "Timeout|BaseBackupThrottle\nTimeout|CheckpointWriteDelay\n"
+              "Timeout|PgSleep\n") == 0,
+          "load PG16 Timeout names from the server");
+    CHECK(pgwt_is_idle_event(WEI(PG_WAIT_TIMEOUT, 1)) != 0,
+          "PG16 WITH real names: id 1 = CheckpointWriteDelay => idle");
+    CHECK(pgwt_is_idle_event(WEI(PG_WAIT_TIMEOUT, 2)) == 0,
+          "PG16 WITH real names: id 2 = PgSleep => DB Time");
+
+    /* ...and dropping those names returns it to the fail-safe, rather than
+     * leaving the last derived mask in force. */
+    CHECK(pgwt_load_event_names_from_buffer("no separators here") == -1,
+          "drop the dynamic names");
+    CHECK(pgwt_idle_rule_timeout_mask() == 0,
+          "PG16 is unclassified again once the real names are gone "
+          "(got 0x%03x)", pgwt_idle_rule_timeout_mask());
+
+    pgwt_init_event_names(18);
+}
+
 int main(void)
 {
     printf("=== test_wait_event ===\n");
@@ -759,6 +840,7 @@ int main(void)
     test_pg13_sidecar_idle_roundtrip();
     test_pacing_visibility();
     test_session_idle_narrower();
+    test_unverified_majors_are_not_classified();
     test_dynamic_name_mapping();  /* must run last: sets dyn_loaded */
 
     printf("\n%d/%d tests passed\n", tests_passed, tests_run);

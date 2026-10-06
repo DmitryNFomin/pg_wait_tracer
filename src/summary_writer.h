@@ -71,6 +71,32 @@
 #define SUMMARY_MAX_SESSIONS  MAX_BACKENDS   /* 1024 */
 #define SUMMARY_MAX_QUERIES   2048
 
+/* Worst-case serialized size of one per-second record, COMPUTED from the
+ * table bounds rather than guessed.
+ *
+ * pgwt_summary_serialize() writes into a fixed buffer and (before v3) ignored
+ * its out_size entirely, so the only thing standing between a full record and
+ * a heap overrun was that 800 KB happened to be enough. v3 adds 8 bytes per
+ * query (idle_ns) and 12 per record, which cut the old margin to ~26 KB --
+ * close enough that the next field to be added would have been the one that
+ * silently overran. The bound is now derived here and the writer both sizes
+ * its buffer from it and refuses to write past out_size.
+ *
+ *   class_ns   PGWT_NUM_CLASSES * 8
+ *   events     SUMMARY_MAX_EVENTS   * (4+8+8+8 + HISTOGRAM_BUCKETS*8)
+ *   sessions   SUMMARY_MAX_SESSIONS * (4+8+8+4+8)
+ *   queries    SUMMARY_MAX_QUERIES  * (36 + PGWT_NUM_CLASSES*8 + 1
+ *                                      + SUMMARY_QUERY_TOP_EVENTS*20 + 8)
+ *   trailer    8 (idle_ns) + 4 (events_overflow)
+ */
+#define PGWT_SUMMARY_SERIALIZE_MAX                                            \
+    ((size_t)(PGWT_NUM_CLASSES * 8)                                           \
+     + (size_t)SUMMARY_MAX_EVENTS   * (28 + HISTOGRAM_BUCKETS * 8)            \
+     + (size_t)SUMMARY_MAX_SESSIONS * 32                                      \
+     + (size_t)SUMMARY_MAX_QUERIES  * (36 + PGWT_NUM_CLASSES * 8 + 1          \
+                                       + SUMMARY_QUERY_TOP_EVENTS * 20 + 8)   \
+     + 12)
+
 /* ── Per-second accumulator ───────────────────────────────── */
 
 struct pgwt_summary_event {
@@ -107,6 +133,13 @@ struct pgwt_summary_query {
     uint64_t class_ns[PGWT_NUM_CLASSES];
     struct pgwt_summary_query_event top_events[SUMMARY_QUERY_TOP_EVENTS];
     int      num_top_events;
+    /* v3: EXACT idle total for this query. top_events[] holds only 8 entries,
+     * so a query with 8 busier non-idle events would otherwise report Idle = 0
+     * while its DB Time was right -- DB Time + Idle would stop accounting for
+     * the window under a query filter. The named Idle CHILDREN still come from
+     * top_events (bounded); the difference is emitted as one labelled
+     * remainder row, so the total is exact even when the breakdown is not. */
+    uint64_t idle_ns;
 };
 
 struct pgwt_summary_accum {
@@ -120,6 +153,19 @@ struct pgwt_summary_accum {
     /* Per-event hash table (open addressing) */
     struct pgwt_summary_event events[SUMMARY_MAX_EVENTS];
     int num_events;            /* count of occupied slots */
+    /* v3: events[] could not take an entry because all SUMMARY_MAX_EVENTS
+     * slots were occupied. Since v3 moved idle time OUT of class_ns, events[]
+     * is the only per-event source left, so a full table under-reports the
+     * Idle breakdown and any class/event-FILTERED total while unfiltered
+     * DB Time stays correct -- a mismatch with no signal. This is that
+     * signal. ~270 distinct PG wait events against 1024 slots is headroom,
+     * not a proof, and it is not a proof at all for Extension events. */
+    uint32_t events_overflow;
+
+    /* v3: EXACT system-wide idle total (Activity + Client:ClientRead + the
+     * Timeout pacing sleeps), accumulated at the writer independently of
+     * events[] so it survives a full table. */
+    uint64_t idle_ns;
 
     /* Per-session hash table (open addressing) */
     struct pgwt_summary_session sessions[SUMMARY_MAX_SESSIONS];

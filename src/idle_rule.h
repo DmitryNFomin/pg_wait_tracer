@@ -60,6 +60,22 @@
  */
 int pgwt_timeout_name_is_pacing(const char *name);
 
+/* How many names pacing_timeout_names[] holds. The maximum number of VISIBLE
+ * idle events is therefore this + 1 (Client:ClientRead); Activity is hidden
+ * and never gets a row. src/compute.c static-asserts its Idle child-row budget
+ * against this, so adding a name to the table cannot silently overflow the
+ * breakdown. */
+#define PGWT_PACING_TIMEOUT_COUNT 6
+#define PGWT_MAX_VISIBLE_IDLE_EVENTS (PGWT_PACING_TIMEOUT_COUNT + 1)
+
+/* The Timeout majors this build has a VERIFIED enum table for. PG14/15/16 use
+ * the PG18 table as a best-effort fallback (src/wait_event.c's header comment
+ * says so), which is a cosmetic mislabel for DISPLAY but would be a silent
+ * WRONG ANSWER for classification -- so those majors get an EMPTY mask
+ * instead. See rebuild_idle_mask() in src/wait_event.c. */
+#define PGWT_TIMEOUT_TABLE_VERIFIED(major) \
+    ((major) == 13 || (major) >= 17)
+
 /* Install the id-indexed Timeout pacing mask (bit N set => Timeout event id
  * N is a pacing sleep). Called by wait_event.c only, from
  * pgwt_init_event_names() and pgwt_load_names_json(). Ids >= 32 are not

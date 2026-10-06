@@ -107,6 +107,28 @@ int main(int argc, char **argv)
             min_share = atof(argv[++i]);
     }
 
+    /* Decode this trace with the names it was WRITTEN with.
+     *
+     * This tool never initialised the event-name tables at all, so it ran on
+     * wait_event.c's file-scope defaults (PG18). That was a cosmetic mislabel
+     * while the tables were only used for display; since 2026-10-06 the
+     * idle/pacing classification is DERIVED from the resolved names, so a
+     * PG13 or PG16 trace was being classified with PG18 semantics -- and this
+     * is the tool whose +/-10pp verdict is used to justify the shipped sample
+     * rate. The sidecar carries the writing side'''s mapping and its pg_version,
+     * and loading it re-selects the version tables and rebuilds the pacing
+     * mask (src/wait_event.c pgwt_load_names_json).
+     *
+     * No sidecar: say so. The numbers are then produced under a PG18
+     * assumption and a reader needs to know that rather than infer it. */
+    if (pgwt_load_names_json(trace_dir) != 0) {
+        pgwt_init_event_names(18);
+        fprintf(stderr, "WARN: %s has no wait_event_names.json sidecar -- "
+                "decoding and idle classification assume PG18; shares for a "
+                "trace from another major may be mislabelled
+", trace_dir);
+    }
+
     struct pgwt_trace_file_entry files[256];
     int nfiles = pgwt_scan_trace_files(trace_dir, files, 256);
     if (nfiles <= 0) {

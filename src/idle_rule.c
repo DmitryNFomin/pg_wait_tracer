@@ -53,6 +53,14 @@ static const char *const pacing_timeout_names[] = {
  *                         meaning.)
  */
 
+/* PGWT_PACING_TIMEOUT_COUNT is consumed by src/compute.c to size the Idle
+ * breakdown. Tie it to the table here so adding a name without updating the
+ * constant is a COMPILE error rather than a silently truncated breakdown. */
+_Static_assert(sizeof(pacing_timeout_names) / sizeof(pacing_timeout_names[0])
+                   == PGWT_PACING_TIMEOUT_COUNT,
+               "PGWT_PACING_TIMEOUT_COUNT must equal pacing_timeout_names[]; "
+               "update src/idle_rule.h when you add or remove a pacing event");
+
 int pgwt_timeout_name_is_pacing(const char *name)
 {
     if (!name)

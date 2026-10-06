@@ -82,6 +82,22 @@ executions query needs, are gated on --mode full only"*).
 sudo ./pg_wait_tracer --daemon -T /var/lib/pgwt/traces --mode full -v
 ```
 
+> **START ON AN EMPTY TRACE DIRECTORY.** Summary files moved to v3 on
+> 2026-10-06 (the timer-sleep accounting change). The per-second records
+> precompute DB Time at WRITE time, so v2 and v3 seconds in one directory
+> would blend two accounting rules inside one window — `pgwt-server`
+> therefore refuses the summary fast path for any window that overlaps a
+> pre-v3 file and recomputes that window from RAW events instead
+> (`should_use_summaries` / `pgwt_summaries_window_current`).
+>
+> The answer is still correct, but the 900 s Overview window is exactly the
+> request that fast path exists for: taking the raw path for it costs the
+> paint latency this project spent a week reducing, live, on stage. If
+> `/var/lib/pgwt/traces` holds anything from before the upgrade, move it
+> aside (`mv traces traces.pre-v3`) before starting the daemon. A fresh
+> `mktemp -d` directory, as `tests/demo_rehearsal.sh` uses, is never
+> affected.
+
 (`-T`/`--trace-dir` enables recording and picks the directory, README.md
 "Trace Recording"; `-v`/`--verbose` prints diagnostics to stderr, README.md;
 `--daemon` auto-discovers the single running postmaster when neither

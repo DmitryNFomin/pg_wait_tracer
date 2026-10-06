@@ -183,6 +183,11 @@ static void accum_query_add(struct pgwt_summary_accum *acc, uint64_t query_id,
      * tab under a query filter must keep showing them (they are excluded from
      * load by pgwt_is_idle_event, not hidden by pgwt_is_hidden_event). */
     int idle = pgwt_is_idle_event(old_ev);
+    /* v3: exact, and NOT derived from top_events[] -- that list holds 8
+     * entries, so a 9th distinct event would vanish from the query's Idle
+     * total. See struct pgwt_summary_query::idle_ns. */
+    if (idle)
+        sq->idle_ns += total_ns;
     if (!idle) {
         sq->count += count;
         sq->total_ns += total_ns;
@@ -251,11 +256,18 @@ static void accum_event(struct pgwt_summary_accum *acc,
      * including the idle ones, so readers recover both the idle total and the
      * per-event named Idle sub-rows from there. */
     int cls = summary_wait_class_index(old_ev);
-    if (cls >= 0 && cls < PGWT_NUM_CLASSES && !pgwt_is_idle_event(old_ev))
+    int ev_idle = pgwt_is_idle_event(old_ev);
+    if (cls >= 0 && cls < PGWT_NUM_CLASSES && !ev_idle)
         acc->class_ns[cls] += dur;
+    /* v3: the exact system-wide idle total, independent of events[] so a full
+     * event table cannot under-report it (see acc->events_overflow). */
+    if (ev_idle)
+        acc->idle_ns += dur;
 
     /* Per-event stats */
     struct pgwt_summary_event *se = find_or_insert_event(acc, old_ev);
+    if (!se)
+        acc->events_overflow++;   /* v3: never a silent drop */
     if (se) {
         se->count++;
         se->total_ns += dur;
@@ -415,7 +427,13 @@ size_t pgwt_summary_serialize(const struct pgwt_summary_accum *acc,
                                uint8_t *out, size_t out_size)
 {
     uint8_t *p = out;
-    (void)out_size;
+    /* The buffer is sized from PGWT_SUMMARY_SERIALIZE_MAX, which is the
+     * worst case for the compiled-in table bounds -- so this can only fire if
+     * a caller passes a smaller buffer. Refusing (0 bytes, no write) is the
+     * fail-safe: a short record would deserialize as garbage. out_size was
+     * previously ignored outright. */
+    if (out_size < PGWT_SUMMARY_SERIALIZE_MAX)
+        return 0;
 
     /* Time model: 11 × 8 = 88 bytes */
     memcpy(p, acc->class_ns, sizeof(acc->class_ns));
@@ -469,7 +487,15 @@ size_t pgwt_summary_serialize(const struct pgwt_summary_accum *acc,
             memcpy(p, &q->top_events[j].count, 8);       p += 8;
             memcpy(p, &q->top_events[j].total_ns, 8);    p += 8;
         }
+        /* v3: appended AFTER the variable-length list, so a v2 reader that
+         * stops at the list is unaffected and a v3 reader finds it by the
+         * same walk. */
+        memcpy(p, &q->idle_ns, 8);       p += 8;
     }
+
+    /* v3 record-level trailer, appended last for the same reason. */
+    memcpy(p, &acc->idle_ns, 8);          p += 8;
+    memcpy(p, &acc->events_overflow, 4);  p += 4;
 
     return (size_t)(p - out);
 }
@@ -547,6 +573,8 @@ int pgwt_summary_deserialize(const uint8_t *in, size_t in_size,
                     uint8_t nte = *p;  p += 1;
                     p += nte * 20;     /* top_events */
                 }
+                if (version >= 3)
+                    p += 8;            /* idle_ns */
             }
             continue;
         }
@@ -569,7 +597,17 @@ int pgwt_summary_deserialize(const uint8_t *in, size_t in_size,
                 memcpy(&q->top_events[j].count, p, 8);       p += 8;
                 memcpy(&q->top_events[j].total_ns, p, 8);    p += 8;
             }
+            if (version >= 3) {
+                if (p + 8 > end) return -1;
+                memcpy(&q->idle_ns, p, 8);  p += 8;
+            }
         }
+    }
+
+    if (version >= 3) {
+        if (p + 12 > end) return -1;
+        memcpy(&acc->idle_ns, p, 8);          p += 8;
+        memcpy(&acc->events_overflow, p, 4);  p += 4;
     }
 
     return 0;
@@ -929,7 +967,9 @@ int pgwt_summary_writer_init(struct pgwt_summary_writer *w,
     /* Allocate scratch buffers.
      * Worst case: 1024 events × 156 + 1024 sessions × 32 + 2048 queries × 36
      *           = 159744 + 32768 + 73728 = ~260 KB uncompressed */
-    w->encode_buf_size = 800 * 1024;
+    /* Derived from the table bounds, not a round number: see
+     * PGWT_SUMMARY_SERIALIZE_MAX. */
+    w->encode_buf_size = PGWT_SUMMARY_SERIALIZE_MAX;
     w->encode_buf = malloc(w->encode_buf_size);
 
     w->compress_buf_size = LZ4_compressBound((int)w->encode_buf_size);
