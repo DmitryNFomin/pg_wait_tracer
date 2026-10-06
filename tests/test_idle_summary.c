@@ -774,9 +774,43 @@ static void test_version_preflight(void)
           "would also have returned 1", considered);
     CHECK(unusable == 0, "no unusable files (got %d)", unusable);
 
+    /* THE DANGEROUS ONE FIRST: version 3.
+     *
+     * v3 was shipped by an earlier build of this branch with a DIFFERENT
+     * layout -- no per-query idle_ns and no record trailer. Keeping the same
+     * version number while adding those bytes would have made a v3 file
+     * mis-parse under a v4 reader, and it fails in the worst shape: the
+     * file-level preflight only inspects the header, so it would APPROVE the
+     * file, and the visitor silently SKIPS blocks that fail to decode -- a
+     * plausible partial window, no error, no raw fallback. Hence v4, and
+     * hence this case. */
+    int t3 = set_version(dir, 3);
+    CHECK(t3 > 0, "rewrote %d header(s) to the OLD-layout version 3", t3);
+    CHECK(pgwt_summaries_window_current(dir, from, to, &considered,
+                                        &unusable) == 0,
+          "an old-layout v3 window is REFUSED (so the caller recomputes from "
+          "raw rather than decoding bytes that mean something else)");
+    CHECK(unusable == t3, "all %d v3 file(s) reported unusable (got %d)",
+          t3, unusable);
+    {
+        struct rec_ctx c3;
+        memset(&c3, 0, sizeof(c3));
+        pgwt_visit_summaries(dir, 0, 0, rec_visitor, &c3);
+        CHECK(c3.records == 0,
+              "...and had it NOT been refused, the visitor would have returned "
+              "%d records -- a partial answer with no error, which is exactly "
+              "why the version had to move", c3.records);
+    }
+    CHECK(set_version(dir, PGWT_SUMMARY_VERSION) == t3, "restore to v%d",
+          PGWT_SUMMARY_VERSION);
+    CHECK(pgwt_summaries_window_current(dir, from, to, &considered,
+                                        &unusable) == 1,
+          "the restored v%d window is current again", PGWT_SUMMARY_VERSION);
+
     /* Now make it a v2 window: the pre-2026-10-06 accounting. The preflight
-     * must refuse, because mixing v2 seconds with v3 seconds inside one window
-     * blends two accounting rules and reports a DB Time that is neither. */
+     * must refuse, because mixing v2 seconds with current seconds inside one
+     * window blends two accounting rules and reports a DB Time that is
+     * neither. */
     int touched = set_version(dir, 2);
     CHECK(touched > 0, "rewrote %d header(s) to version 2", touched);
     CHECK(pgwt_summaries_window_current(dir, from, to, &considered,
@@ -1051,6 +1085,121 @@ static void test_top_queries_filtered_excludes_idle(void)
     free(ev);
 }
 
+
+/* ── 8. parent == sum(children), EXACTLY, on every path ───────────────────
+ *
+ * Two reviews disagreed about whether this already held: one said the emitter
+ * dropped a positive remainder of <= 1 us and suppressed negatives, the other
+ * said equality held by construction on all three paths. Rather than argue,
+ * this asserts it -- including a sub-microsecond hidden-Activity case, which
+ * is precisely where the 1 us threshold would have shown.
+ *
+ * A NEGATIVE remainder (children exceeding the parent) should be impossible
+ * on every path; it is surfaced as idle_children_excess_ms rather than
+ * clamped, because it would mean the writer and the reader had diverged about
+ * what counts as idle. Asserted zero here. */
+static double sum_idle_children(const struct pgwt_tm_result *tm)
+{
+    /* indent 2 is shared with the per-CLASS sub-event rows, and a NAME test
+     * cannot tell them apart: "Timeout:PgSleep" is a DB-Time sub-event of the
+     * Timeout class while "Timeout:VacuumDelay" is an idle child. (The first
+     * draft of this helper summed every "Timeout:*" row and reported children
+     * exceeding the parent by exactly PgSleep's 4500 ms -- a bug in the test,
+     * not in the product.)
+     *
+     * emit_idle_rows appends the Idle parent LAST, with its children
+     * immediately after it, so the children are exactly the indent-2 rows
+     * that follow the indent-0 "Idle" row. */
+    double t = 0;
+    int in_idle = 0;
+    for (int i = 0; i < tm->num_rows; i++) {
+        if (tm->rows[i].indent == 0 &&
+            strcmp(tm->rows[i].name, "Idle") == 0) {
+            in_idle = 1;
+            continue;
+        }
+        if (!in_idle) continue;
+        if (tm->rows[i].indent == 2) t += tm->rows[i].time_ms;
+        else break;          /* left the Idle block */
+    }
+    return t;
+}
+
+static void test_idle_children_sum_exactly(void)
+{
+    printf("--- 8. Idle children sum to the parent exactly ---\n");
+    struct pgwt_filter f;
+    memset(&f, 0, sizeof(f));
+
+    /* 8a/8b: summary path, unfiltered and query-filtered. */
+    const char *dir = fresh_dir("exact");
+    struct pgwt_trace_event *ev = malloc(sizeof(*ev) * MAX_EV);
+    int n = build_stream(ev, mono_origin());
+    write_summaries(dir, ev, n);
+    uint64_t from = 0, to = 0;
+    int records = 0;
+    CHECK(window_from_records(dir, &from, &to, &records) == 1, "records");
+    double wall_ms = (double)(to - from) / 1e6;
+
+    struct pgwt_tm_result tm;
+    pgwt_compute_time_model_from_summaries(dir, from, to, &f, wall_ms, &tm);
+    CHECK(NEAR_MS(sum_idle_children(&tm), tm.idle_time_ms),
+          "summary unfiltered: children %.4f == parent %.4f",
+          sum_idle_children(&tm), tm.idle_time_ms);
+    CHECK(tm.idle_children_excess_ms == 0.0,
+          "no negative remainder (excess %.6f)", tm.idle_children_excess_ms);
+    free(tm.rows);
+
+    memset(&f, 0, sizeof(f));
+    f.query_id = QID_A;
+    pgwt_compute_time_model_from_summaries(dir, from, to, &f, wall_ms, &tm);
+    CHECK(NEAR_MS(sum_idle_children(&tm), tm.idle_time_ms),
+          "summary query-filtered: children %.4f == parent %.4f",
+          sum_idle_children(&tm), tm.idle_time_ms);
+    CHECK(tm.idle_children_excess_ms == 0.0, "no negative remainder");
+    free(tm.rows);
+
+    memset(&f, 0, sizeof(f));
+    snprintf(f.class_name, sizeof(f.class_name), "timeout");
+    pgwt_compute_time_model_from_summaries(dir, from, to, &f, wall_ms, &tm);
+    CHECK(NEAR_MS(sum_idle_children(&tm), tm.idle_time_ms),
+          "summary class-filtered: children %.4f == parent %.4f",
+          sum_idle_children(&tm), tm.idle_time_ms);
+    free(tm.rows);
+    free(ev);
+
+    /* 8c: SUB-MICROSECOND hidden Activity on the raw path. 500 ns of Activity
+     * is below the old 1 us threshold, so the remainder row was omitted and
+     * the children did not sum to the parent. */
+    {
+        struct pgwt_trace_event tiny[2];
+        memset(tiny, 0, sizeof(tiny));
+        uint64_t t = 400ULL * 1000000000ULL;
+        tiny[0].timestamp_ns = t + 1000000; tiny[0].pid = 901;
+        tiny[0].old_event = EV_CLIENTREAD; tiny[0].new_event = EV_IO;
+        tiny[0].duration_ns = 5 * MS; tiny[0].cpu_ns = PGWT_CPU_NS_UNKNOWN;
+        tiny[1].timestamp_ns = t + 2000000; tiny[1].pid = 902;
+        tiny[1].old_event = EV_ACTIVITY; tiny[1].new_event = EV_IO;
+        tiny[1].duration_ns = 500;            /* 500 ns, hidden */
+        tiny[1].cpu_ns = PGWT_CPU_NS_UNKNOWN;
+
+        memset(&f, 0, sizeof(f));
+        struct pgwt_tm_result rt;
+        pgwt_compute_time_model(tiny, 2, &f, 0, 0, 1000.0, &rt);
+        CHECK(rt.idle_time_ms > 0, "fixture has idle time (%.6f ms)",
+              rt.idle_time_ms);
+        const struct pgwt_tm_row *oth = row_at(&rt, "Other (background)", 2);
+        CHECK(oth != NULL,
+              "a 500 ns hidden-Activity remainder STILL gets its row (the old "
+              "> 1 us threshold dropped it)");
+        CHECK(NEAR_MS(sum_idle_children(&rt), rt.idle_time_ms),
+              "raw sub-microsecond: children %.6f == parent %.6f",
+              sum_idle_children(&rt), rt.idle_time_ms);
+        CHECK(rt.idle_children_excess_ms == 0.0, "no negative remainder");
+        free(rt.rows);
+    }
+}
+
 /* ══ 5. FALSE NEGATIVES ═══════════════════════════════════════════════════
  * Section 1's agreement check is satisfied by 0 == 0 and section 4's gate is
  * satisfied by "there were no files". These are the ways each can be made
@@ -1255,6 +1404,7 @@ int main(void)
     test_version_preflight();
     test_bounded_tables();
     test_top_queries_filtered_excludes_idle();
+    test_idle_children_sum_exactly();
     test_bypass_suite();
 
     snprintf(cmd, sizeof(cmd), "rm -rf '%s'", g_base);

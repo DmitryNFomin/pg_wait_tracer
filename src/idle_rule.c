@@ -72,10 +72,17 @@ int pgwt_timeout_name_is_pacing(const char *name)
     return 0;
 }
 
-/* Default = PG18, matching wait_event.c's default name tables. See the
- * PGWT_IDLE_TIMEOUT_MASK_PG18 comment: the constant is ASSERTED against the
- * table-derived mask in tests/test_wait_event.c, never merely believed. */
-static uint32_t timeout_pacing_mask = PGWT_IDLE_TIMEOUT_MASK_PG18;
+/* UNINITIALISED = EMPTY = everything stays in DB Time.
+ *
+ * This used to default to the PG18 mask on the reasoning that wait_event.c's
+ * name tables also default to PG18. But that version default exists for
+ * DISPLAY ("render something rather than Unknown"), and reusing it for
+ * CLASSIFICATION made "no one has said which PostgreSQL this is" silently
+ * equivalent to "this is PG18" -- so any process that never called
+ * pgwt_init_event_names got a real mask derived from an assumption. Empty is
+ * the fail-safe direction named at the top of idle_rule.h: over-counting load
+ * is visible on screen, under-counting is not. */
+static uint32_t timeout_pacing_mask = 0;
 
 void pgwt_idle_rule_set_timeout_mask(uint32_t mask)
 {

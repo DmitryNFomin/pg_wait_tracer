@@ -273,14 +273,42 @@ advisers disagreed about which of 14/15/16 are actually affected; rather than
 ship a table nobody could verify, the code was written not to depend on the
 answer.
 
-A PG14–16 trace whose **sidecar carries real Timeout names** IS classified: the
-ids then came from PostgreSQL itself, so a mask derived from them is right by
-construction. That is the rescue path, and it is the reason this is a fail-safe
-default rather than a permanent downgrade.
+A PG14–16 trace whose sidecar carries **names PostgreSQL actually reported** IS
+classified: those ids came from the server, so a mask derived from them is
+right by construction. That is the rescue path, and it is why this is a
+fail-safe default rather than a permanent downgrade.
 
-Verified: **PG13, PG17, PG18**. Unclassified by design: **PG14, PG15, PG16**
-(unless their trace supplies names). `tests/test_wait_event.c` pins all of it,
-including that the guard does not blanket-disable `Client:ClientRead` or
+**The sidecar records its own provenance** (`names_source`: `observed` vs
+`static`), and that is load-bearing rather than decorative. PG16 has no
+`pg_wait_events`, so the daemon loads no dynamic names — but it still *writes*
+a sidecar, and `pgwt_write_names_json` falls back to the active hardcoded
+tables, which for PG16 are PG18's. Without provenance `pgwt-server` loaded that
+file as "dynamic names", concluded they came from PostgreSQL, and derived a
+PG18 mask for a PG16 trace: the fail-safe defeated by an ordinary capture, with
+the daemon's live path (empty mask) and the offline path (PG18 mask)
+disagreeing about the same data. A sidecar with no `names_source` key is read
+as `static`, the safe assumption.
+
+A **partial** observed list is handled too: on an unverified major only the ids
+the server actually reported are classified, because `pgwt_event_name()` falls
+back to the static table for any gap — which would have reintroduced the same
+defect one id at a time.
+
+Note the uninitialised case: `pg_version` defaults to 18 so that names *render*
+rather than showing as Unknown, but the pacing mask starts **empty**. Reusing
+the display default for classification made "nobody has said which PostgreSQL
+this is" silently equivalent to "this is PG18".
+
+Verified: **PG13, PG17, PG18** — exactly the majors this repo carries an exact
+Timeout enum for. Unclassified by design: **PG14, PG15, PG16, and every future
+major** (PG19+), unless their trace supplies observed names. The predicate was
+briefly `>= 17`, which quietly promised that every future major was verified
+and would have classified a PG19 trace against PG18's table whenever its name
+load failed.
+
+`tests/test_wait_event.c` pins all of it: the empty mask per unverified major,
+the real PG16 capture→sidecar→server round trip, the partial-observed-list
+case, and that the guard does not blanket-disable `Client:ClientRead` or
 `Activity`.
 
 ### Where the time goes instead: a named Idle row
@@ -343,18 +371,27 @@ right — a mismatch that previously had no signal at all. ~270 distinct
 PostgreSQL wait events against 1024 slots is headroom, not a proof, and it is
 not a proof at all for `Extension` events.
 
-### Summary files moved to v3
+### Summary files moved to v4
 
 The per-second summary records precompute DB Time at WRITE time, so v1/v2 files
 carry the OLD accounting. A directory holding both would blend two rules inside
 one window and report a DB Time that is neither. `PGWT_SUMMARY_VERSION` is now
-3; v3 excludes idle events at the writer (so no read path subtracts anything
-back out); the reader refuses v1/v2 for computation; and `should_use_summaries()`
-PREFLIGHTS the window (`pgwt_summaries_window_current`) so a refusal becomes a
-raw recompute rather than a plausible-looking empty answer — the visitor skips
-files it cannot open, which on its own would have produced a silently partial
-window. Startup recovery still archives an intact older file instead of calling
-it corrupt.
+**4**; it excludes idle events at the writer (so no read path subtracts
+anything back out) and carries the exact idle scalars; the reader refuses every
+earlier version for computation; and `should_use_summaries()` PREFLIGHTS the
+window (`pgwt_summaries_window_current`) so a refusal becomes a raw recompute
+rather than a plausible-looking empty answer — the visitor skips files it
+cannot open, which on its own would have produced a silently partial window.
+Startup recovery still archives an intact older file instead of calling it
+corrupt.
+
+**Why two bumps.** v3 introduced the writer-side exclusion; v4 added the exact
+per-query and per-record idle scalars. Those added bytes changed the on-disk
+layout, and v3 files had already been written — so keeping the number would
+have left two layouts under one version, mis-parsing in the exact
+silently-partial shape the preflight exists to prevent. The version is the
+cheap half of that guarantee: "an old file is refused" is strictly stronger
+than "no such file should exist".
 
 ### Measured impact
 

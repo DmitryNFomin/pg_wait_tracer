@@ -266,8 +266,22 @@ static void accum_event(struct pgwt_summary_accum *acc,
 
     /* Per-event stats */
     struct pgwt_summary_event *se = find_or_insert_event(acc, old_ev);
-    if (!se)
-        acc->events_overflow++;   /* v3: never a silent drop */
+    if (!se) {
+        /* v4: recorded in the block AND reported once per process. Without
+         * the log line the only reader of this counter was a unit test, which
+         * made "never a silent drop" an overstatement: the drop was recorded
+         * but nothing ever said so. */
+        acc->events_overflow++;
+        static int warned_overflow;
+        if (!warned_overflow) {
+            warned_overflow = 1;
+            fprintf(stderr, "WARN: summary per-event table full (%d slots) -- "
+                    "per-event breakdowns and class/event-FILTERED totals for "
+                    "affected seconds are incomplete; unfiltered DB Time and "
+                    "Idle totals stay exact (events_overflow in each record)\n",
+                    SUMMARY_MAX_EVENTS);
+        }
+    }
     if (se) {
         se->count++;
         se->total_ns += dur;
@@ -487,13 +501,13 @@ size_t pgwt_summary_serialize(const struct pgwt_summary_accum *acc,
             memcpy(p, &q->top_events[j].count, 8);       p += 8;
             memcpy(p, &q->top_events[j].total_ns, 8);    p += 8;
         }
-        /* v3: appended AFTER the variable-length list, so a v2 reader that
+        /* v4: appended AFTER the variable-length list, so a v2 reader that
          * stops at the list is unaffected and a v3 reader finds it by the
          * same walk. */
         memcpy(p, &q->idle_ns, 8);       p += 8;
     }
 
-    /* v3 record-level trailer, appended last for the same reason. */
+    /* v4 record-level trailer, appended last for the same reason. */
     memcpy(p, &acc->idle_ns, 8);          p += 8;
     memcpy(p, &acc->events_overflow, 4);  p += 4;
 
@@ -573,7 +587,7 @@ int pgwt_summary_deserialize(const uint8_t *in, size_t in_size,
                     uint8_t nte = *p;  p += 1;
                     p += nte * 20;     /* top_events */
                 }
-                if (version >= 3)
+                if (version >= 4)
                     p += 8;            /* idle_ns */
             }
             continue;
@@ -597,14 +611,14 @@ int pgwt_summary_deserialize(const uint8_t *in, size_t in_size,
                 memcpy(&q->top_events[j].count, p, 8);       p += 8;
                 memcpy(&q->top_events[j].total_ns, p, 8);    p += 8;
             }
-            if (version >= 3) {
+            if (version >= 4) {
                 if (p + 8 > end) return -1;
                 memcpy(&q->idle_ns, p, 8);  p += 8;
             }
         }
     }
 
-    if (version >= 3) {
+    if (version >= 4) {
         if (p + 12 > end) return -1;
         memcpy(&acc->idle_ns, p, 8);          p += 8;
         memcpy(&acc->events_overflow, p, 4);  p += 4;
@@ -856,6 +870,20 @@ static int flush_accum(struct pgwt_summary_writer *w)
     /* Serialize */
     size_t encoded_size = pgwt_summary_serialize(acc, w->encode_buf,
                                                   w->encode_buf_size);
+    if (encoded_size == 0) {
+        /* The serializer refused (buffer smaller than
+         * PGWT_SUMMARY_SERIALIZE_MAX). Unreachable with the writer's own
+         * buffer, but it must not fall through: LZ4_compress_default() on 0
+         * bytes returns 1, so this used to write a block whose header still
+         * claimed the record's event/session/query counts over an empty
+         * payload -- which the reader turns into a silently dropped second.
+         * Refuse loudly and leave the accumulator open so the second is
+         * retried rather than lost. */
+        fprintf(stderr, "ERROR: summary serialize refused (buffer %zu < "
+                "required %zu) -- second not written, accumulator kept\n",
+                w->encode_buf_size, (size_t)PGWT_SUMMARY_SERIALIZE_MAX);
+        return -1;
+    }
 
     /* LZ4 compress */
     int compressed_size = LZ4_compress_default(
@@ -1022,8 +1050,13 @@ int pgwt_summary_push_event(struct pgwt_summary_writer *w,
 
     /* Second boundary detection */
     if (w->accum_active && evt_second > w->accum.second_mono_ns) {
-        /* New second — flush old accumulator (which resets it) */
-        flush_accum(w);
+        /* New second — flush old accumulator (which resets it).
+         * A failed flush leaves the accumulator OPEN on purpose (see
+         * flush_accum): the second is retried at the next boundary rather
+         * than silently becoming a hole in the window. Counted so the gap is
+         * attributable instead of merely absent. */
+        if (flush_accum(w) != 0)
+            w->flush_failures_total++;
     }
 
     /* Start new accumulator if needed */
@@ -1078,8 +1111,15 @@ int pgwt_summary_check_rotation(struct pgwt_summary_writer *w)
     if (current_hour == w->current_hour)
         return 0;
 
-    /* Hour changed — rotate */
-    flush_accum(w);
+    /* Hour changed — rotate. Refusing to rotate on a failed flush would
+     * strand the writer on a file it can no longer append to, so the rotation
+     * proceeds -- but loudly, because the un-flushed second is lost at this
+     * point (the accumulator belongs to the file being closed). */
+    if (flush_accum(w) != 0) {
+        w->flush_failures_total++;
+        fprintf(stderr, "ERROR: summary rotation lost the open second "
+                "(flush failed); window will be short by one second\n");
+    }
     write_footer(w);
 
     if (w->verbose) {
@@ -1128,7 +1168,11 @@ int pgwt_summary_close(struct pgwt_summary_writer *w)
 {
     if (!w->fp) return 0;
 
-    flush_accum(w);
+    if (flush_accum(w) != 0) {
+        w->flush_failures_total++;
+        fprintf(stderr, "ERROR: summary close lost the open second "
+                "(flush failed)\n");
+    }
     write_footer(w);
 
     if (w->verbose) {

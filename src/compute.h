@@ -256,6 +256,16 @@ struct pgwt_tm_result {
     int    has_measured_cpu;
     double cpu_clamped_ms;
     double wait_gap_cpu_ms;
+    /* The Idle row's named children must account for its total exactly. A
+     * POSITIVE remainder is expected and labelled ("Other (background)": the
+     * hidden Activity share, plus anything the summary path's bounded
+     * per-event tables could not hold). A NEGATIVE one -- children exceeding
+     * the parent -- cannot happen by construction on any of the three paths,
+     * so if it ever does it means the writer and the reader have diverged
+     * about what counts as idle. Surfaced here rather than clamped away,
+     * because that divergence is exactly the thing worth hearing about.
+     * Always 0 in a healthy window; asserted 0 by tests/test_idle_*.c. */
+    double idle_children_excess_ms;
 };
 
 

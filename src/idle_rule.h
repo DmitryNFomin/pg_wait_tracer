@@ -73,8 +73,16 @@ int pgwt_timeout_name_is_pacing(const char *name);
  * says so), which is a cosmetic mislabel for DISPLAY but would be a silent
  * WRONG ANSWER for classification -- so those majors get an EMPTY mask
  * instead. See rebuild_idle_mask() in src/wait_event.c. */
+/* ONLY the majors this build actually carries an exact Timeout enum for.
+ *
+ * This was `(major) >= 17`, which quietly promised that every FUTURE major is
+ * verified: a PG19 trace whose dynamic-name load failed would have been
+ * classified against PG18's table. "Verified" now means verified -- 13, 17 and
+ * 18, the three this repo has tables for. A newer major is classified only
+ * when PostgreSQL itself supplies the names (pg_wait_events / a sidecar marked
+ * as observed); otherwise its Timeout events stay in DB Time. */
 #define PGWT_TIMEOUT_TABLE_VERIFIED(major) \
-    ((major) == 13 || (major) >= 17)
+    ((major) == 13 || (major) == 17 || (major) == 18)
 
 /* Install the id-indexed Timeout pacing mask (bit N set => Timeout event id
  * N is a pacing sleep). Called by wait_event.c only, from
@@ -88,20 +96,22 @@ void pgwt_idle_rule_set_timeout_mask(uint32_t mask);
  * a version selection produced, rather than inferring it from behaviour. */
 uint32_t pgwt_idle_rule_timeout_mask(void);
 
-/* The mask in force before either entry point has run.
- *
- * It is the PG18 mask, because the hardcoded name tables in wait_event.c
- * also default to PG18 (io_events = io_events_pg18, timeout_events_active =
- * timeout_events). Any other default would make the predicate disagree with
- * the names printed next to it. tests/test_wait_event.c asserts that
- * pgwt_init_event_names(18) reproduces this constant exactly, so the two can
- * never drift: the constant is checked against the table, not trusted.
+/* The mask pgwt_init_event_names(18) must produce.
  *
  * PG18 timeout_events[]: 0 BaseBackupThrottle, 1 CheckpointWriteDelay,
  * 2 PgSleep, 3 RecoveryApplyDelay, 4 RecoveryRetrieveRetryInterval,
  * 5 RegisterSyncRequest, 6 SpinDelay, 7 VacuumDelay, 8 VacuumTruncate,
  * 9 WalSummarizerError  =>  pacing ids {0,1,3,4,7,9} = 0x29B.
- */
+ *
+ * tests/test_wait_event.c derives this from the real table and compares, so
+ * the constant is checked rather than trusted.
+ *
+ * NOTE: this is NOT the pre-init default. `pg_version` in wait_event.c
+ * defaults to 18 for DISPLAY purposes, which would have made "nobody called
+ * pgwt_init_event_names" indistinguishable from "this really is PG18" and
+ * handed the PG18 mask to any process that forgot. The uninitialised mask is
+ * EMPTY (src/idle_rule.c) -- everything stays in DB Time until something
+ * states the version. */
 #define PGWT_IDLE_TIMEOUT_MASK_PG18  0x29Bu
 
 /* LOAD accounting: returns true if this event must be EXCLUDED from

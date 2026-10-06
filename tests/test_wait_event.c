@@ -444,20 +444,22 @@ static void test_pacing_name_rule(void)
 static void test_idle_pre_init(void)
 {
     printf("--- pacing mask before any init ---\n");
-    /* Documented default (src/idle_rule.h): the PG18 mask, because
-     * wait_event.c's hardcoded tables also default to PG18. Any other default
-     * would make the predicate disagree with the names printed beside it.
-     * tests below assert init(18) REPRODUCES this constant from the table, so
-     * the constant is checked rather than believed. */
-    CHECK(pgwt_idle_rule_timeout_mask() == PGWT_IDLE_TIMEOUT_MASK_PG18,
-          "pre-init mask is the documented PG18 default (0x%03x, got 0x%03x)",
-          PGWT_IDLE_TIMEOUT_MASK_PG18, pgwt_idle_rule_timeout_mask());
-    /* And the predicate is usable with no init at all — tests/test_anomaly.c
-     * and the pure cores call it directly. */
-    CHECK(pgwt_is_idle_event(WEI(PG_WAIT_TIMEOUT, 1)) != 0,
-          "pre-init: PG18 id 1 (CheckpointWriteDelay) is idle");
+    /* UNINITIALISED FAILS SAFE. wait_event.c's `pg_version` defaults to 18 so
+     * that names RENDER rather than showing as Unknown; reusing that default
+     * for CLASSIFICATION made "nobody has said which PostgreSQL this is"
+     * indistinguishable from "this is PG18", and handed a real PG18 mask to
+     * any process that forgot to call pgwt_init_event_names. The mask now
+     * starts EMPTY: every Timeout event stays in DB Time until something
+     * states the version. */
+    CHECK(pgwt_idle_rule_timeout_mask() == 0,
+          "pre-init mask is EMPTY (got 0x%03x) -- uninitialised must not be "
+          "silently treated as PG18", pgwt_idle_rule_timeout_mask());
+    CHECK(pgwt_is_idle_event(WEI(PG_WAIT_TIMEOUT, 1)) == 0,
+          "pre-init: no Timeout id is classified, not even PG18's id 1");
     CHECK(pgwt_is_idle_event(WEI(PG_WAIT_TIMEOUT, 2)) == 0,
-          "pre-init: PG18 id 2 (PgSleep) is not idle");
+          "pre-init: PG18 id 2 (PgSleep) is not idle either");
+    /* The version-independent half of the rule still works with no init at
+     * all -- tests/test_anomaly.c and the pure cores rely on that. */
     CHECK(pgwt_is_idle_event(WEI(PG_WAIT_CLIENT, 0)) != 0,
           "pre-init: Client:ClientRead is idle");
     CHECK(pgwt_is_idle_event(WEI(PG_WAIT_ACTIVITY, 4)) != 0,
@@ -753,7 +755,10 @@ static void test_session_idle_narrower(void)
 static void test_unverified_majors_are_not_classified(void)
 {
     printf("--- unverified majors (14/15/16) are not classified ---\n");
-    const int unverified[] = {14, 15, 16};
+    /* 19 is here deliberately: "verified" used to mean `>= 17`, which
+     * promised that every FUTURE major was verified and would have classified
+     * a PG19 trace against PG18's table whenever its name load failed. */
+    const int unverified[] = {14, 15, 16, 19};
     for (size_t i = 0; i < sizeof(unverified)/sizeof(unverified[0]); i++) {
         int m = unverified[i];
         pgwt_init_event_names(m);
@@ -812,6 +817,101 @@ static void test_unverified_majors_are_not_classified(void)
     pgwt_init_event_names(18);
 }
 
+
+/* ── 8. THE REAL SIDECAR ROUND TRIP ON AN UNVERIFIED MAJOR ────────────────
+ *
+ * Section 7's "rescue path" case injects names with
+ * pgwt_load_event_names_from_buffer, which models pg_wait_events output -- so
+ * it only ever exercised the GOOD path and could not see the hole underneath
+ * it:
+ *
+ *   PG16 has no pg_wait_events, so the daemon loads no dynamic names -- but it
+ *   still WRITES a sidecar, and pgwt_write_names_json falls back to the active
+ *   hardcoded tables, which for PG16 are PG18's. pgwt-server then loaded that
+ *   sidecar as "dynamic names", concluded the names came from PostgreSQL, and
+ *   derived a PG18 pacing mask for a PG16 trace. The fail-safe was defeated by
+ *   an ordinary capture, and worse, the daemon's LIVE path (empty mask) and
+ *   the offline path (PG18 mask) disagreed about the same capture.
+ *
+ * The sidecar now records where its names came from, and this walks the real
+ * sequence end to end. Written as the exact test the review specified. */
+static void test_pg16_sidecar_round_trip(void)
+{
+    printf("--- PG16 capture -> sidecar -> server must stay unclassified ---\n");
+
+    char dir[] = "/tmp/pgwt_sc16_XXXXXX";
+    CHECK(mkdtemp(dir) != NULL, "mkdtemp failed");
+
+    /* Daemon side on PG16: no dynamic names are available at all. */
+    CHECK(pgwt_load_event_names_from_buffer("no separators here") == -1,
+          "clear any dynamic names (as a PG16 daemon would have none)");
+    pgwt_init_event_names(16);
+    CHECK(pgwt_idle_rule_timeout_mask() == 0,
+          "daemon side: PG16 is unclassified (got 0x%03x)",
+          pgwt_idle_rule_timeout_mask());
+    CHECK(pgwt_write_names_json(dir) == 0, "daemon writes its sidecar");
+
+    /* Server side, in pgwt-server's real order. */
+    pgwt_init_event_names(18);
+    CHECK(pgwt_load_names_json(dir) == 0, "server loads the sidecar");
+    CHECK(pgwt_idle_rule_timeout_mask() == 0,
+          "server side: STILL unclassified (got 0x%03x) -- the sidecar's "
+          "Timeout names are this build's PG18 fallback, not names PG16 "
+          "reported, and must not be mistaken for the latter",
+          pgwt_idle_rule_timeout_mask());
+    /* The specific inversion the owner's decision forbids. */
+    CHECK(pgwt_is_idle_event(WEI(PG_WAIT_TIMEOUT, 2)) == 0,
+          "PgSleep does not leave DB Time on a PG16 trace");
+    CHECK(pgwt_is_idle_event(WEI(PG_WAIT_TIMEOUT, 1)) == 0,
+          "...and no other Timeout id is classified either");
+    /* Live and offline must agree about the same capture. */
+    CHECK(pgwt_idle_rule_timeout_mask() == 0,
+          "live-path mask (0) == offline-path mask (0x%03x)",
+          pgwt_idle_rule_timeout_mask());
+
+    /* CONTRAST, so this is not just "PG16 is always 0": a PG18 daemon writes a
+     * sidecar from OBSERVED names and the server does classify it. */
+    char dir18[] = "/tmp/pgwt_sc18_XXXXXX";
+    CHECK(mkdtemp(dir18) != NULL, "mkdtemp 18 failed");
+    CHECK(pgwt_load_event_names_from_buffer(
+              "Timeout|BaseBackupThrottle\nTimeout|CheckpointWriteDelay\n"
+              "Timeout|PgSleep\n") == 0, "PG18 daemon observes real names");
+    pgwt_init_event_names(18);
+    CHECK(pgwt_write_names_json(dir18) == 0, "write observed sidecar");
+    CHECK(pgwt_load_event_names_from_buffer("no separators here") == -1,
+          "clear before the server leg");
+    pgwt_init_event_names(18);
+    CHECK(pgwt_load_names_json(dir18) == 0, "server loads observed sidecar");
+    CHECK(pgwt_is_idle_event(WEI(PG_WAIT_TIMEOUT, 1)) != 0,
+          "observed sidecar DOES classify: id 1 = CheckpointWriteDelay idle");
+    CHECK(pgwt_is_idle_event(WEI(PG_WAIT_TIMEOUT, 2)) == 0,
+          "...and PgSleep still is not");
+
+    /* PARTIAL observed list on an unverified major: the ids PostgreSQL did
+     * NOT report must not fall back to this build's table. Here only ids 0-1
+     * are reported, so id 7 (VacuumDelay in the PG18 table) must stay out. */
+    CHECK(pgwt_load_event_names_from_buffer(
+              "Timeout|BaseBackupThrottle\nTimeout|CheckpointWriteDelay\n") == 0,
+          "observe a PARTIAL Timeout list");
+    pgwt_init_event_names(16);
+    CHECK(pgwt_is_idle_event(WEI(PG_WAIT_TIMEOUT, 1)) != 0,
+          "partial list on PG16: the reported id 1 IS classified");
+    CHECK(pgwt_is_idle_event(WEI(PG_WAIT_TIMEOUT, 7)) == 0,
+          "...and an id the server never reported is NOT classified from the "
+          "PG18 table (the same defect, one id at a time)");
+
+    char path[700];
+    snprintf(path, sizeof(path), "%s/wait_event_names.json", dir);
+    remove(path);
+    remove(dir);
+    snprintf(path, sizeof(path), "%s/wait_event_names.json", dir18);
+    remove(path);
+    remove(dir18);
+    CHECK(pgwt_load_event_names_from_buffer("no separators here") == -1,
+          "dyn reset");
+    pgwt_init_event_names(18);
+}
+
 int main(void)
 {
     printf("=== test_wait_event ===\n");
@@ -841,6 +941,7 @@ int main(void)
     test_pacing_visibility();
     test_session_idle_narrower();
     test_unverified_majors_are_not_classified();
+    test_pg16_sidecar_round_trip();
     test_dynamic_name_mapping();  /* must run last: sets dyn_loaded */
 
     printf("\n%d/%d tests passed\n", tests_passed, tests_run);

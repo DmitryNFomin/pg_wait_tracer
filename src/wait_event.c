@@ -26,6 +26,25 @@
 /* PG major version, set by pgwt_init_event_names() */
 static int pg_version = 18;
 
+/* NAME PROVENANCE. dyn_loaded says "a dynamic table is in force"; this says
+ * WHERE it came from, which is a different question and the one the pacing
+ * classification depends on.
+ *
+ * 1 = OBSERVED: PostgreSQL itself reported these names (pg_wait_events, or a
+ *     sidecar written by a daemon that had them). The ids are then
+ *     authoritative whatever the major.
+ * 0 = STATIC fallback: the names are this build's own compiled-in table,
+ *     merely round-tripped through a sidecar.
+ *
+ * Why this exists: PG16 has no pg_wait_events, so the daemon loads no dynamic
+ * names -- but it STILL writes a sidecar, and pgwt_write_names_json falls back
+ * to the active hardcoded tables, which for PG16 are PG18's. pgwt-server then
+ * loaded that sidecar as "dynamic names" and derived a PG18 pacing mask for a
+ * PG16 trace, defeating the unverified-major fail-safe entirely -- and leaving
+ * the daemon's live path (empty mask) disagreeing with the offline path (PG18
+ * mask) on the same capture. */
+static int dyn_observed = 0;
+
 /* Dynamic name storage — heap-allocated when loaded from PG or sidecar.
  * Each class has an array of strdup'd names indexed by event_id. */
 #define DYN_MAX_EVENTS_PER_CLASS 512
@@ -558,15 +577,28 @@ static void rebuild_idle_mask(void)
      * regardless of major -- so a PG14-16 trace whose sidecar does carry
      * Timeout names IS classified. That is the rescue path; without it the
      * major simply is not classified. */
-    int have_dyn_timeout = (dyn_loaded && dyn_max[PG_WAIT_TIMEOUT] >= 0);
-    if (!have_dyn_timeout && !PGWT_TIMEOUT_TABLE_VERIFIED(pg_version)) {
+    int observed_timeout = (dyn_loaded && dyn_observed &&
+                            dyn_max[PG_WAIT_TIMEOUT] >= 0);
+    int verified = PGWT_TIMEOUT_TABLE_VERIFIED(pg_version);
+    if (!observed_timeout && !verified) {
         pgwt_idle_rule_set_timeout_mask(0);
         return;
     }
 
     uint32_t mask = 0;
     for (int id = 0; id < 32; id++) {
-        const char *n = pgwt_event_name(WEI(PG_WAIT_TIMEOUT, id));
+        const char *n;
+        if (verified) {
+            n = pgwt_event_name(WEI(PG_WAIT_TIMEOUT, id));
+        } else {
+            /* UNVERIFIED major rescued by observed names: use ONLY the ids
+             * PostgreSQL actually reported. pgwt_event_name() falls back to
+             * the static table for any id the dynamic list does not cover, so
+             * a PARTIAL observed list would otherwise classify its gaps
+             * against PG18's table -- the same defect, one id at a time. */
+            n = (id <= dyn_max[PG_WAIT_TIMEOUT])
+                    ? dyn_names[PG_WAIT_TIMEOUT][id] : NULL;
+        }
         if (n && pgwt_timeout_name_is_pacing(n))
             mask |= 1u << id;
     }
@@ -714,6 +746,7 @@ static void dyn_clear(void)
         dyn_max[c] = -1;
     }
     dyn_loaded = 0;
+    dyn_observed = 0;
 }
 
 static void dyn_add(int class_byte, int event_id, const char *name)
@@ -850,6 +883,7 @@ int pgwt_load_event_names_from_pg(const char *pg_bindir, int pg_port,
     }
 
     dyn_loaded = 1;
+    dyn_observed = 1;      /* straight from pg_wait_events */
     rebuild_idle_mask();
     return 0;
 }
@@ -875,6 +909,9 @@ int pgwt_load_event_names_from_buffer(const char *data)
         return -1;
     }
     dyn_loaded = 1;
+    /* Same format pg_wait_events produces, so the caller is modelling names
+     * PostgreSQL reported. */
+    dyn_observed = 1;
     rebuild_idle_mask();
     return 0;
 }
@@ -951,6 +988,16 @@ int pgwt_write_names_json(const char *trace_dir)
     /* Also store pg_version for reference */
     cJSON_AddNumberToObject(root, "pg_version", pg_version);
 
+    /* PROVENANCE (2026-10-07). Without this a reader cannot tell names
+     * PostgreSQL reported from this build's own fallback table echoed back at
+     * it -- and on an unverified major (PG14/15/16) those are PG18's names
+     * under PG16's ids, which is a silent misclassification rather than a
+     * cosmetic mislabel. A sidecar with no key at all is read as "static",
+     * the safe assumption. */
+    cJSON_AddStringToObject(root, "names_source",
+                            (dyn_loaded && dyn_observed) ? "observed"
+                                                         : "static");
+
     char *json_str = cJSON_Print(root);
     cJSON_Delete(root);
     if (!json_str) return -1;
@@ -1006,6 +1053,16 @@ int pgwt_load_names_json(const char *trace_dir)
     if (ver && cJSON_IsNumber(ver))
         select_version_tables((int)ver->valuedouble);
 
+    /* Absent key => "static": a sidecar written before provenance existed
+     * might be either, and assuming the weaker of the two only ever costs
+     * classification on an UNVERIFIED major (a verified one derives the same
+     * mask from its own exact table anyway). */
+    int sidecar_observed = 0;
+    cJSON *src = cJSON_GetObjectItem(root, "names_source");
+    if (src && cJSON_IsString(src) && src->valuestring &&
+        strcmp(src->valuestring, "observed") == 0)
+        sidecar_observed = 1;
+
     /* Iterate class arrays */
     cJSON *item;
     cJSON_ArrayForEach(item, root) {
@@ -1025,6 +1082,7 @@ int pgwt_load_names_json(const char *trace_dir)
 
     cJSON_Delete(root);
     dyn_loaded = 1;
+    dyn_observed = sidecar_observed;
     /* LAST word: the sidecar's names are the ones the trace was written with,
      * so the mask must be derived from them, not from the static tables that
      * pgwt_init_event_names() installed a moment earlier. */

@@ -851,8 +851,10 @@ static int cmp_idle_desc(const void *a, const void *b)
  * it at the next level down. */
 static int emit_idle_rows(struct pgwt_tm_row *rows, int nr,
                           double idle_time_ns,
-                          struct idle_accum *ia, int n_ia)
+                          struct idle_accum *ia, int n_ia,
+                          double *excess_ns)
 {
+    if (excess_ns) *excess_ns = 0.0;
     if (idle_time_ns <= 0)
         return nr;
 
@@ -882,13 +884,26 @@ static int emit_idle_rows(struct pgwt_tm_row *rows, int nr,
     for (int i = 0; i < n_ia; i++)
         if (ia[i].total_ns > 0) named += ia[i].total_ns;
     double other = idle_time_ns - named;
-    if (other > 1e3) {          /* > 1 us: ignore float dust */
+    /* ANY positive remainder gets a row. This was `> 1e3` -- "ignore float
+     * dust" -- which silently dropped up to 1 us: a record whose only hidden
+     * Activity was 500 ns produced an Idle parent with children that did not
+     * sum to it, which is the precise contract this row exists to keep. The
+     * values are sums of integer nanosecond durations, so there is no dust to
+     * ignore. */
+    if (other > 0) {
         snprintf(rows[nr].name, sizeof(rows[nr].name), "Other (background)");
         rows[nr].time_ms     = other / 1e6;
         rows[nr].pct_db_time = 0.0;
         rows[nr].aas         = 0.0;
         rows[nr].indent      = 2;
         nr++;
+    } else if (other < 0 && excess_ns) {
+        /* Children exceed the parent. Impossible on all three paths as they
+         * stand (raw sums the same events it names; the summary totals are
+         * writer-side scalars over a superset of what the bounded lists
+         * name), so this is reported rather than clamped: it would mean the
+         * writer and the reader disagree about what is idle. */
+        *excess_ns = -other;
     }
     return nr;
 }
@@ -1187,7 +1202,10 @@ void pgwt_compute_time_model(const struct pgwt_trace_event *events, int count,
     free(ev_accum);
 
     /* Idle LAST, so rows[0] stays "DB Time" (overview.js relies on that). */
-    nr = emit_idle_rows(rows, nr, idle_time_ns, idle_ev, n_idle_ev);
+    double idle_excess_ns = 0.0;
+    nr = emit_idle_rows(rows, nr, idle_time_ns, idle_ev, n_idle_ev,
+                        &idle_excess_ns);
+    out->idle_children_excess_ms = idle_excess_ns / 1e6;
 
     out->rows        = rows;
     out->num_rows    = nr;
@@ -2154,7 +2172,10 @@ void pgwt_compute_time_model_from_summaries(
     free(ctx.ev_accum);
 
     /* Idle LAST, so rows[0] stays "DB Time" -- same as the raw path. */
-    nr = emit_idle_rows(rows, nr, ctx.idle_time_ns, ctx.idle_ev, ctx.n_idle_ev);
+    double idle_excess_ns = 0.0;
+    nr = emit_idle_rows(rows, nr, ctx.idle_time_ns, ctx.idle_ev,
+                        ctx.n_idle_ev, &idle_excess_ns);
+    out->idle_children_excess_ms = idle_excess_ns / 1e6;
 
     out->rows         = rows;
     out->num_rows     = nr;

@@ -2014,6 +2014,13 @@ static void test_query_attr_pacing_not_a_boundary(void)
 
 int main(void)
 {
+    /* This file's fixtures use PG18 wait-event ids, and since 2026-10-07 the
+     * Timeout pacing mask starts EMPTY until a version is stated (an
+     * uninitialised process must not be assumed to be PG18). Saying so here
+     * is what makes "Timeout:VacuumDelay is load-idle" true for these
+     * fixtures -- test_query_attr_pacing_not_a_boundary asserts that
+     * precondition explicitly rather than assuming it. */
+    pgwt_init_event_names(18);
     test_effective_event();
     test_closed_noncmd_cpu_row();
     test_open_interval();

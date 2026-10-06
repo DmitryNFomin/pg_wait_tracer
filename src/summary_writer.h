@@ -56,7 +56,20 @@
  * becomes a RAW recompute, never a plausible-looking partial answer
  * (should_use_summaries / pgwt_summaries_window_current). Startup recovery
  * still archives an intact older file rather than calling it corrupt. */
-#define PGWT_SUMMARY_VERSION  3
+/* v4 (2026-10-07): the SAME change as v3 plus the exact idle scalars --
+ * `pgwt_summary_query::idle_ns` (8 bytes per query) and the record trailer
+ * (`idle_ns` + `events_overflow`, 12 bytes).
+ *
+ * Why this is a second bump rather than an edit to v3: v3 had already been
+ * written to disk by an earlier build of this branch, with the OLD layout,
+ * under the same version number. A reader that assumes the new bytes exist
+ * mis-parses those files -- and it fails in the shape v3 was introduced to
+ * close, because the file-level preflight only inspects the header, approves
+ * it, and then the visitor silently SKIPS the blocks that fail to decode,
+ * yielding a plausible partial window with no error and no raw fallback.
+ * "No such file should exist anywhere" is a weaker guarantee than "an old
+ * file is refused", so the version moves and the preflight refuses v3. */
+#define PGWT_SUMMARY_VERSION  4
 
 /* #277: how long after a second ends it is treated as complete by the
  * periodic flush. The daemon's timer handler runs BEFORE the event-ring
@@ -245,6 +258,10 @@ struct pgwt_summary_writer {
     size_t        compress_buf_size;
 
     /* Stats */
+    /* Seconds that could not be serialised/compressed. Non-zero means the
+     * window has holes; it was previously impossible to tell, because every
+     * caller of flush_accum discarded its return value. */
+    uint64_t      flush_failures_total;
     uint64_t      total_records_written;
     uint64_t      total_bytes_written;
 
