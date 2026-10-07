@@ -116,21 +116,83 @@ exit 1
 
 
 class TieredOutputTests(unittest.TestCase):
-    def test_each_rate_line_is_self_explanatory(self):
-        script = f'''source "{ROOT / 'tests/cross_validate_rate_output.sh'}"
-print_rate_result 10 'RESULT: PASS'
-print_rate_result 50 'RESULT: FAIL'
-print_rate_summary 10 PASS
-print_rate_summary 50 FAIL
-'''
-        result = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    LIB = ROOT / "tests/cross_validate_rate_output.sh"
+
+    def _render(self, *calls):
+        script = f'source "{self.LIB}"\n' + "\n".join(calls) + "\n"
+        result = subprocess.run(["bash", "-c", script],
+                                capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
-        lines = result.stdout.splitlines()
+        return result.stdout
+
+    def test_each_rate_line_is_self_explanatory(self):
+        out = self._render("print_rate_result 10 'RESULT: PASS'",
+                           "print_rate_result 50 'RESULT: FAIL'",
+                           "print_rate_summary 10 PASS",
+                           "print_rate_summary 50 FAIL")
+        lines = out.splitlines()
         self.assertEqual(len(lines), 4)
         self.assertTrue(all("characterisation" in line for line in lines))
         self.assertTrue(all("shipped default" in line for line in (lines[0], lines[2])))
         self.assertTrue(all("exploratory" in line for line in (lines[1], lines[3])))
-        self.assertNotIn("RESULT: FAIL", result.stdout)
+        self.assertNotIn("RESULT: FAIL", out)
+
+    # ── The label a FAIL gives itself ────────────────────────────────────
+    # test_cross_validate_tiered.sh exits 1 when no swept rate is inside the
+    # tolerance, and run_all.sh counts that as `failed`. Until 2026-10-07 both
+    # the pass and the fail path printed "(characterisation, non-gating)", so a
+    # genuinely red test described itself as informational -- and read that way
+    # for over a week. These cases pin the fail path's wording, which is the
+    # only reader-visible signal that the line belongs to a failing test.
+    def test_fail_path_does_not_call_itself_non_gating(self):
+        for call in ("print_rate_result 50 'RESULT: FAIL'",
+                     "print_rate_summary 50 FAIL"):
+            with self.subTest(call=call):
+                line = self._render(call).strip()
+                self.assertIn("outside tolerance", line)
+                self.assertNotIn("non-gating", line)
+                self.assertIn("FAILS the test", line)
+
+    def test_pass_path_does_not_call_itself_non_gating_either(self):
+        # A PASS decides the test's result too (it is what makes the sweep
+        # exit 0), so "non-gating" was false on this path as well.
+        for call in ("print_rate_result 10 'RESULT: PASS'",
+                     "print_rate_summary 10 PASS"):
+            with self.subTest(call=call):
+                line = self._render(call).strip()
+                self.assertIn("within tolerance", line)
+                self.assertNotIn("non-gating", line)
+                self.assertNotIn("FAILS the test", line)
+
+    # ── Bypass suite: ways this label check could pass while seeing nothing ──
+    def test_no_output_is_not_a_pass(self):
+        # A library that printed nothing (renamed function, early return)
+        # satisfies every "non-gating is absent" assertion vacuously. The fail
+        # path must emit exactly one non-empty line per call.
+        for call in ("print_rate_result 50 'RESULT: FAIL'",
+                     "print_rate_summary 50 FAIL"):
+            with self.subTest(call=call):
+                lines = [l for l in self._render(call).splitlines() if l.strip()]
+                self.assertEqual(len(lines), 1, f"{call} printed {lines!r}")
+
+    def test_unrecognised_result_is_not_silently_clean(self):
+        # The sweep leaves rate_result unset ('?') for a rate whose daemon
+        # never started. That third path is neither PASS nor FAIL; it must not
+        # claim tolerance was met, and it must not read as informational.
+        line = self._render("print_rate_summary 200 '?'").strip()
+        self.assertNotIn("non-gating", line)
+        self.assertIn("200Hz", line)
+        verdict = line.split("): ", 1)[1]
+        self.assertFalse(verdict.startswith("within tolerance"), line)
+        self.assertIn("FAILS the test", line)
+
+    def test_unsubstituted_result_line_would_be_visible(self):
+        # print_rate_result is a sed substitution: if cross_validate's verdict
+        # wording ever changes, the RESULT: line passes through verbatim. That
+        # must stay detectable rather than be mistaken for a label.
+        out = self._render("print_rate_result 50 'RESULT: INCONCLUSIVE'")
+        self.assertIn("RESULT: INCONCLUSIVE", out)
+        self.assertNotIn("outside tolerance", out)
 
 
 if __name__ == "__main__":
