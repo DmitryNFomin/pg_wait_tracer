@@ -1,0 +1,54 @@
+=== M1 second definition of in-a-command: 'not idle' instead of RUNNING/FASTPATH ===
+MUT M1: rc=1 failures=3
+  FAIL: every derivation agrees on cmd_open, state by state (15 mismatches)
+  FAIL: open states are exactly {running, fastpath} (5 wrong)
+  FAIL: the sweep saw both outcomes: 8 states, 7 open, 1 closed
+=== M2 always-closed predicate (the 'both agree because both are false' trap) ===
+MUT M2: rc=1 failures=14
+  FAIL: PG18 RUNNING=3 admits CPU and preserves signed query-id bits
+  FAIL: PG18 FASTPATH=5 is command-open
+  FAIL: live reader dereferences MyBEEntry and reuses coherent helper
+  FAIL: PG13 coherent activity/context is returned while RUNNING
+=== M3 live gate re-read approves when it cannot see (no layout check) ===
+MUT M3: rc=1 failures=1
+  FAIL: no row and no MyBEEntry: refuses
+=== M4 a FAILED fresh read fabricates an open gate ===
+MUT M4: rc=1 failures=3
+  FAIL: a failed fresh read never opens the gate (read_failed=2)
+  FAIL: unreadable gates stay dropped and stay counted (n=5 noncmd=1)
+  FAIL: and each target's gate matches its own outcome, not its neighbour's (got 1/0/1)
+=== M5 at-risk set widened to every client (recovers samples never dropped) ===
+MUT M5: rc=1 failures=9
+  FAIL: both raced samples recovered (rec=4 recovered=4 at_risk=4)
+  FAIL: only the raced targets are consulted (4 calls: 1 1 0 0 1 0 1)
+  FAIL: a failed fresh read never opens the gate (read_failed=4)
+  FAIL: a genuinely idle backend stays dropped (confirmed=4)
+=== M6 recheck decides on UNREAD values (the pre-batch placement) ===
+MUT M6: rc=1 failures=7
+  FAIL: both raced samples recovered (rec=3 recovered=3 at_risk=3)
+  FAIL: only the raced targets are consulted (3 calls: 1 0 0 1 0 0 1)
+  FAIL: a failed fresh read never opens the gate (read_failed=3)
+  FAIL: a genuinely idle backend stays dropped (confirmed=3)
+=== M7 recheck with no fresh-read function silently approves ===
+MUT M7: rc=1 failures=2
+  FAIL: no fresh-read function: refuses with zeroed stats
+  FAIL: a NULL stats pointer is tolerated, the recovery still happens
+=== M8 recovered sample loses its query id (silently unattributed) ===
+MUT M8: rc=1 failures=1
+  FAIL: a recovered sample carries the id from the SAME coherent snapshot
+=== M9 conservation: an at-risk target counted in two outcomes ===
+MUT M9: rc=1 failures=2
+  FAIL: at_risk == recovered + confirmed + failed (3 vs 1+2+1)
+  FAIL: one tick, three distinct outcomes, one each — a recovery tallied as a confirmation cannot hide in the sum (got 1/2/1)
+=== M10 cross-bucket misallocation: a recovery tallied as a confirmation ===
+MUT M10: rc=1 failures=3
+  FAIL: both raced samples recovered (rec=2 recovered=0 at_risk=2)
+  FAIL: one tick, three distinct outcomes, one each — a recovery tallied as a confirmation cannot hide in the sum (got 0/2/1)
+  FAIL: no query id available: gate opens, prior id preserved (qid=777)
+=== M11 a failed fresh read silently tallied as a confirmed close ===
+MUT M11: rc=1 failures=2
+  FAIL: a failed fresh read never opens the gate (read_failed=0)
+  FAIL: one tick, three distinct outcomes, one each — a recovery tallied as a confirmation cannot hide in the sum (got 1/2/0)
+=== restored; confirming green ===
+MUT BASE: rc=0 failures=0
+MUT BASE: rc=0 failures=0

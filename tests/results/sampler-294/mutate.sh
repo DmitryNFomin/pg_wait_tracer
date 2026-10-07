@@ -112,6 +112,26 @@ open(p,'w').write(s)
 PY
 run M9 test_sampler; restore
 
+echo "=== M10 cross-bucket misallocation: a recovery tallied as a confirmation ==="
+python3 - <<'PY'
+p='src/sampler.c'; s=open(p).read()
+s=s.replace("""            local.recovered++;
+            recovered++;""","""            local.confirmed_closed++;   /* MUTANT: wrong bucket */
+            recovered++;""",1)
+open(p,'w').write(s)
+PY
+run M10 test_sampler; restore
+
+echo "=== M11 a failed fresh read silently tallied as a confirmed close ==="
+python3 - <<'PY'
+p='src/sampler.c'; s=open(p).read()
+s=s.replace("""                local.read_failed++;
+                continue;             /* never fabricate an open gate */""","""                local.confirmed_closed++;   /* MUTANT: failure hidden as fact */
+                continue;""",1)
+open(p,'w').write(s)
+PY
+run M11 test_sampler; restore
+
 echo "=== restored; confirming green ==="
 run BASE test_sampler
 run BASE test_backend_status_layout
