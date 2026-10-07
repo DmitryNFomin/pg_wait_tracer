@@ -132,6 +132,19 @@ open(p,'w').write(s)
 PY
 run M11 test_sampler; restore
 
+echo "=== M12 #294 x #295: the idle predicate admits we==0, so a recovered"
+echo "    on-CPU sample inherits the FINISHED statement's query id ==="
+cp src/idle_rule.c src/idle_rule.c.orig
+python3 - <<'PY'
+p='src/idle_rule.c'; s=open(p).read()
+s=s.replace("""    return WE_CLASS(wei) == PG_WAIT_ACTIVITY ||
+           wei == WEI(PG_WAIT_CLIENT, 0);""","""    return wei == 0 || WE_CLASS(wei) == PG_WAIT_ACTIVITY ||
+           wei == WEI(PG_WAIT_CLIENT, 0);   /* MUTANT: CPU counts as idle */""",1)
+open(p,'w').write(s)
+PY
+run M12 test_sampler
+cp src/idle_rule.c.orig src/idle_rule.c; rm -f src/idle_rule.c.orig; restore
+
 echo "=== restored; confirming green ==="
 run BASE test_sampler
 run BASE test_backend_status_layout

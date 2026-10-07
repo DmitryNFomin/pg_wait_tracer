@@ -18,13 +18,13 @@ MUT M4: rc=1 failures=3
   FAIL: unreadable gates stay dropped and stay counted (n=5 noncmd=1)
   FAIL: and each target's gate matches its own outcome, not its neighbour's (got 1/0/1)
 === M5 at-risk set widened to every client (recovers samples never dropped) ===
-MUT M5: rc=1 failures=9
+MUT M5: rc=1 failures=10
   FAIL: both raced samples recovered (rec=4 recovered=4 at_risk=4)
   FAIL: only the raced targets are consulted (4 calls: 1 1 0 0 1 0 1)
   FAIL: a failed fresh read never opens the gate (read_failed=4)
   FAIL: a genuinely idle backend stays dropped (confirmed=4)
 === M6 recheck decides on UNREAD values (the pre-batch placement) ===
-MUT M6: rc=1 failures=7
+MUT M6: rc=1 failures=8
   FAIL: both raced samples recovered (rec=3 recovered=3 at_risk=3)
   FAIL: only the raced targets are consulted (3 calls: 1 0 0 1 0 0 1)
   FAIL: a failed fresh read never opens the gate (read_failed=3)
@@ -41,14 +41,19 @@ MUT M9: rc=1 failures=2
   FAIL: at_risk == recovered + confirmed + failed (3 vs 1+2+1)
   FAIL: one tick, three distinct outcomes, one each — a recovery tallied as a confirmation cannot hide in the sum (got 1/2/1)
 === M10 cross-bucket misallocation: a recovery tallied as a confirmation ===
-MUT M10: rc=1 failures=3
+MUT M10: rc=1 failures=4
   FAIL: both raced samples recovered (rec=2 recovered=0 at_risk=2)
   FAIL: one tick, three distinct outcomes, one each — a recovery tallied as a confirmation cannot hide in the sum (got 0/2/1)
+  FAIL: a command that has not reported its id yet recovers with id 0
   FAIL: no query id available: gate opens, prior id preserved (qid=777)
 === M11 a failed fresh read silently tallied as a confirmed close ===
 MUT M11: rc=1 failures=2
   FAIL: a failed fresh read never opens the gate (read_failed=0)
   FAIL: one tick, three distinct outcomes, one each — a recovery tallied as a confirmation cannot hide in the sum (got 1/2/0)
+=== M12 #294 x #295: the idle predicate admits we==0, so a recovered
+    on-CPU sample inherits the FINISHED statement's query id ===
+MUT M12: rc=1 failures=1
+  FAIL: a recovered on-CPU sample does NOT inherit the finished statement's id (got query_id 0xbeef, must be 0)
 === restored; confirming green ===
 MUT BASE: rc=0 failures=0
 MUT BASE: rc=0 failures=0
