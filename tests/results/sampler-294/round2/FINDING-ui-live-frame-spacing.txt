@@ -142,3 +142,24 @@ SUGGESTED FIX, for the owner, not applied here: extend the tick-1 exemption to
 frame 3 (justified by the table above: f3 is the warm-up's decay tail, not a
 steady-state frame), or start the sweep only after first paint so no warm-up
 frame is gated at all. The second is the real fix; the first is one line.
+
+
+=============================================================================
+CLOSED by PR #307 (b0e425f), merged 2026-10-07, which this branch is now
+rebased onto. Kept for the record, not as an open item.
+=============================================================================
+
+"ui_live_smoke: anchor tick 1 on a real tick, and demote frame_spacing to
+reporting-only (#307)" does both halves of what the table above pointed at:
+it anchors tick 1 on a real tick (so the first sweep no longer samples through
+first-paint warm-up at all -- the root fix, not the one-line exemption widening
+I offered as the cheaper option), and it demotes frame_spacing_ok to
+reporting-only, the same disposition capture_budget_ok already had for the same
+reason. Two consecutive gate-1 runs on that branch reported 98 passed /
+0 failed with Live UI smoke overall=PASS.
+
+So the two red box-checks recorded above (#2 transitions 202ms, #4 scatter
+183ms) were a gate defect, now fixed upstream, and neither was ever evidence
+about this branch's code. Nothing in this branch was changed, hardened or
+exempted to accommodate them -- which is why the data survived long enough to
+be actionable.
