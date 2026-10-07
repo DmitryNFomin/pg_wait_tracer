@@ -74,3 +74,71 @@ tick-1 exemption should cover frame 3 (with the artifact numbers above as the
 justification), or the sweep should not start measuring until after first paint
 so no warm-up frame is gated at all. Filing material, not something to patch
 from inside an unrelated branch.
+
+
+=============================================================================
+UPDATE after the post-rebase box-check (run #4): IT REPRODUCED, on a
+DIFFERENT TAB, in the SAME SLOT -- and one run now quantifies the mechanism.
+=============================================================================
+
+tests/results/box-check-ubuntu-20261007-165905.log
+  Executed: 98 (passed 97, failed 1), total 102
+  Live UI smoke: overall=FAIL (failed: scatter)
+  scatter frame_spacing ok=False  'tick 1 frame 3: drift=183ms > 150ms bound'
+  scatter: no_blink / clean / rendered / frame_dims / color_stability /
+           no_leak ALL ok=True  (again, only the capture-timing gate failed)
+
+Same slot as run #2's failure (tick 1, frame 3), different tab
+(transitions -> scatter). So this is neither tab-specific nor
+workload-specific.
+
+THE MECHANISM, QUANTIFIED FROM A SINGLE RUN (n=11 tabs, run #4)
+tick-1 drift per frame, achieved minus target, ms. Frame indices 0-1 are the
+documented exemption; index 2 is "frame 3", which is GATED:
+
+  tab           f1    f2  | f3  |  f4  f5        exempt f1+f2
+  scatter      572   504  | 183 |  11  13           1076   <== FAILED
+  matrix       502   454  | 117 |  13  12            956   over 87ms ceiling
+  timeline     653   418  |  74 |   6  14           1071
+  transitions  462   413  |  74 |  12  14            875
+  concurrency  548   374  |  57 |  10  12            922
+  sessions     201   171  |  13 |  10   9            372
+  overview     142   126  |  13 |  16  13            268
+  histogram    206    74  |  10 |  10  10            280
+  waterfall    160    64  |   8 |  15  26            224
+  queries      128    17  |   8 |  12  17            145
+  events        77    10  |   7 |  11   9             87
+
+Frame 3's drift tracks the size of the exempt warm-up almost monotonically:
+every tab with >850 ms of exempt warm-up has f3 in 57-183 ms, and every tab
+under 400 ms has f3 <= 13 ms. Frames 4-5 are 6-26 ms everywhere. The tick-1
+warm-up (first mount / first paint) does not end at frame 2 -- it decays
+across frame 3, which the exemption does not cover. The 150 ms bound sits
+inside that decay tail, so which tab trips it is decided by how heavy that
+tab's first paint is on the day.
+
+OBSERVATIONS ACROSS THIS BRANCH'S FOUR BOX-CHECKS
+  #1 4b48698      96/96   PASS
+  #2 final tree   95/96   FAIL  transitions  tick 1 frame 3  202 ms
+  #3 final tree   96/96   PASS  (transitions tick 1 frame 3  107 ms)
+  #4 post-rebase  97/98   FAIL  scatter      tick 1 frame 3  183 ms
+Two reds and one green-with-the-same-slot-at-71%-of-bound out of four.
+
+I STOPPED RE-RUNNING HERE, DELIBERATELY. One re-run was taken earlier to
+establish reproducibility; running more until the suite goes green is the
+retry-until-green pattern the project rule forbids, and it is also how a real
+regression on these tabs gets dismissed as flake. Nothing was hardened: the
+bound, the exemption window and KNOWN_FAILING are all untouched.
+
+WHY THIS CANNOT BE THE #294 BRANCH
+ui_live_smoke.sh runs the daemon in --mode full; src/daemon.c selects
+pgwt_provider_sampled only for PGWT_MODE_SAMPLED / PGWT_MODE_TIERED, so
+pgwt_sampler_poll and the entire command-gate recheck never execute during
+this test. Box-check #1, which already contained the whole recheck, passed.
+And in run #4 test_cross_validate_tiered -- the test that DOES exercise the
+sampled tier -- passed at all four rates (1.0 / 0.8 / 3.0 / 2.8 pp).
+
+SUGGESTED FIX, for the owner, not applied here: extend the tick-1 exemption to
+frame 3 (justified by the table above: f3 is the warm-up's decay tail, not a
+steady-state frame), or start the sweep only after first paint so no warm-up
+frame is gated at all. The second is the real fix; the first is one line.
