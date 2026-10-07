@@ -818,11 +818,15 @@ static void test_tag_events_pacing_not_a_boundary(void)
  * emit_idle_rows writes, worst case, the Idle parent + one row per accumulator
  * entry + the labelled remainder. The accumulator used to be sized at
  * MAX_IDLE_SUB_ROWS -- the ROW budget -- so it accepted one more distinct event
- * than there were rows to print it in, and a full accumulator wrote one
- * pgwt_tm_row PAST the caller's calloc. It never overflowed in practice only
- * because the Activity class emits no class row (all Activity time is idle, and
- * a class with total_ns <= 0 is skipped), leaving spare slots: a dependency on
- * an unrelated accounting detail, not a bound.
+ * than the reserved Idle SUB-BUDGET had rows to print it in: 10 rows into 9.
+ *
+ * NOT a write past the calloc, and this test is not a memory-safety test. The
+ * allocation has slack elsewhere (see the arithmetic in src/compute.c above
+ * MAX_IDLE_EV: worst case 67 rows against max_rows 77), so the symptom of the
+ * broken sub-budget was hidden rather than fatal. What this section gates is
+ * the invariant itself -- the breakdown must not name more rows than the Idle
+ * term reserves -- because the slack that hid it belongs to the class rows and
+ * the next change there could consume it.
  *
  * The trigger is reachable because the pacing mask is rebuilt from RESOLVED
  * NAMES: a sidecar whose "Timeout" array repeats a pacing name sets a bit at
@@ -926,12 +930,13 @@ static void test_idle_breakdown_at_its_bound(void)
     /* THE GATE. The rule admits PGWT_MAX_VISIBLE_IDLE_EVENTS distinct visible
      * idle events, so the breakdown can never name more than that -- plus the
      * single "Other (background)" remainder. With the accumulator sized at the
-     * ROW budget instead it named eight, one more than the rows reserved for
-     * it, and the last one was written past the allocation. */
+     * ROW budget instead it named eight, one more than the Idle sub-budget
+     * reserves. src/compute.c also asserts nr <= max_rows at runtime, which is
+     * what gates a genuinely too-small allocation; this gates the sub-budget. */
     CHECK(children <= PGWT_MAX_VISIBLE_IDLE_EVENTS + 1,
           "the Idle breakdown names at most %d rows (%d visible idle events "
           "plus the remainder); got %d -- more than that means the accumulator "
-          "outgrew the rows reserved for it",
+          "outgrew the Idle sub-budget reserved for it",
           PGWT_MAX_VISIBLE_IDLE_EVENTS + 1, PGWT_MAX_VISIBLE_IDLE_EVENTS,
           children);
 

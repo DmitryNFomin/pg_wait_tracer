@@ -396,7 +396,7 @@ invisible in review:
 |---|---|
 | `idle_children_excess_ms` | the `time_model` response, plus an `ERROR` line naming the path |
 | `summary_flush_failures_total` | the control socket's **`metrics`** reply (seconds that are HOLES in every summaries-path window) |
-| `summary_events_overflow_total` | the control socket's **`metrics`** reply, plus one `WARN` per process |
+| `summary_events_overflow_total` | the control socket's **`metrics`** reply, plus one `WARN` per process. Counts WRITTEN seconds only — a second lost to a failed rotation or close is discarded without being rolled up, so read it with `summary_flush_failures_total`, not as a complete total |
 
 All three must be 0. The two writer counters are in `metrics`, **not** `status`
 (`build_status()` does not embed `build_metrics()`), and

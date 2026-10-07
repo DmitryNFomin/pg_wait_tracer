@@ -950,7 +950,15 @@ static int flush_accum(struct pgwt_summary_writer *w)
      * Diagnostic only and bounded by the retry count, but a self-check that
      * inflates under failure is worse than useless -- it reads as a second,
      * independent problem. Placed with the other success-side counters, and
-     * before accum_close() clears the accumulator. */
+     * before accum_close() clears the accumulator.
+     *
+     * CONSEQUENCE, stated rather than glossed: a second that is LOST never has
+     * its overflow rolled up. The rotate path discards a failed second
+     * deliberately (see pgwt_summary_maybe_rotate) and pgwt_summary_close()
+     * logs and writes the footer, so neither reaches here. So
+     * events_overflow_total counts dropped events in WRITTEN seconds only; it
+     * is not a complete total, and flush_failures_total is the signal for the
+     * seconds it cannot speak for. The two must be read together. */
     w->events_overflow_total += acc->events_overflow;
     /* This second is now on disk and immutable (#277). */
     w->last_flushed_second_mono_ns = flushed_second_mono_ns;

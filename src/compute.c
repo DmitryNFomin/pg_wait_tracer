@@ -4,6 +4,8 @@
  * All result structs use malloc'd arrays — caller frees with free(result->rows).
  */
 #include "compute.h"
+
+#include <assert.h>
 #include "summary_writer.h"
 #include "summary_reader.h"
 #include "wait_event.h"
@@ -805,12 +807,22 @@ void pgwt_compute_aas(const struct pgwt_trace_event *events, int count,
  *                        remainder.
  *
  * Conflating them sized `idle_ev[]` at MAX_IDLE_SUB_ROWS, so the accumulator
- * took one more event than the row budget had room to print, and a full
- * accumulator made emit_idle_rows write one pgwt_tm_row PAST the caller's
- * calloc. It could not overflow in practice only because the Activity class
- * never emits a class row (all Activity time is idle, and a class with
- * total_ns <= 0 is skipped), leaving spare slots -- an unstated dependency on
- * an unrelated accounting detail, not a bound.
+ * took one more event than the Idle sub-budget had room to print: the reserved
+ * Idle SUB-BUDGET was one row short (a worst case of 10 rows into the 9 the
+ * `+ 1 + MAX_IDLE_SUB_ROWS` term reserved).
+ *
+ * TO BE PRECISE, because an earlier revision of this comment overstated it:
+ * this was NOT a write past the calloc, and the fix is not a memory-safety
+ * fix. The allocation has unrelated slack that absorbed the extra row --
+ * `max_rows` budgets 6 slots per class for all 11 classes and a leading 2,
+ * while the CPU class uses at most 2 of its 6 (class row + "CPU (waiting for a
+ * core)", then `continue`s past sub-events), the Activity class is entirely
+ * idle (idle_rule.c: the whole class returns 1) so never reaches a class row at
+ * all, and only one of the leading 2 is emitted outside the class loop. Worst
+ * case emitted is 1 + 2 + 9*6 + 10 = 67 rows against max_rows = 77. So the
+ * defect is a broken internal invariant whose symptom was hidden by slack
+ * somewhere else -- which is worth fixing exactly because the next change to
+ * the class rows could consume that slack silently.
  *
  * The trigger is reachable: the mask is rebuilt from RESOLVED NAMES, so a
  * sidecar whose "Timeout" array repeats a pacing name (hand-edited, or
@@ -826,6 +838,11 @@ void pgwt_compute_aas(const struct pgwt_trace_event *events, int count,
  * emitter's shape, the second from the `max_rows` expression below. Changing
  * either side alone is a compile error. */
 #define IDLE_ROWS_WORST_CASE (1 /* Idle parent */ + MAX_IDLE_EV + 1 /* rest */)
+/* Used BY BOTH max_rows expressions below, not merely defined next to them: as
+ * long as they spelled `1 + MAX_IDLE_SUB_ROWS` by hand the assertion below
+ * compared two expressions over the same constants and could not see a
+ * too-small calloc -- the same mirror-checking shape as the assertion it
+ * replaced, one level up. */
 #define IDLE_ROWS_RESERVED   (1 + MAX_IDLE_SUB_ROWS)
 _Static_assert(IDLE_ROWS_WORST_CASE <= IDLE_ROWS_RESERVED,
                "emit_idle_rows can write more rows than its callers reserve: "
@@ -1140,9 +1157,9 @@ void pgwt_compute_time_model(const struct pgwt_trace_event *events, int count,
 
     /* Phase 2: build result rows */
     /* Max rows: 1 (DB Time) + 1 (Off-CPU*) + NUM_CLASSES * (1 class + 5 sub)
-     * + 1 (Idle) + MAX_IDLE_SUB_ROWS (one row per named idle event PLUS the
-     * remainder row -- the remainder was the row the old bound forgot). */
-    int max_rows = 2 + PGWT_NUM_CLASSES * 6 + 1 + MAX_IDLE_SUB_ROWS;
+     * + IDLE_ROWS_RESERVED (the Idle parent, one row per named idle event, and
+     * the remainder row -- the remainder was the row the old bound forgot). */
+    int max_rows = 2 + PGWT_NUM_CLASSES * 6 + IDLE_ROWS_RESERVED;
     struct pgwt_tm_row *rows = calloc(max_rows, sizeof(*rows));
     int nr = 0;
 
@@ -1261,6 +1278,27 @@ void pgwt_compute_time_model(const struct pgwt_trace_event *events, int count,
                 "(raw path) -- the writer and the reader disagree about which "
                 "events are idle; see idle_children_excess_ms\n",
                 idle_excess_ns / 1e6);
+
+    /* The only check here that looks at the ALLOCATION rather than at constants
+     * derived from each other. The _Static_assert above constrains
+     * IDLE_ROWS_WORST_CASE against IDLE_ROWS_RESERVED, and max_rows now spells
+     * IDLE_ROWS_RESERVED, but a future row added anywhere in the loops above
+     * would still be invisible to it. NDEBUG is not defined anywhere in this
+     * build (no Makefile, source or test sets it) and `make test-asan` runs only
+     * test_wait_event / test_cmdline / test_bucket, so this path is never
+     * sanitised: without this line nothing at all observes nr against max_rows
+     * at runtime. Aborting is correct here -- the alternative is returning rows
+     * read from past the end of the array, i.e. a wrong answer.
+     *
+     * ITS LIMIT, measured rather than assumed, so this comment does not repeat
+     * the overclaim it sits next to: the budget carries large slack (the
+     * maximal fixture in tests/test_idle_accounting.c section 8 emits 57 rows
+     * of 77), so this catches a GROSSLY too-small allocation, not an off-by-one
+     * in one of the terms. Shrinking IDLE_ROWS_RESERVED by one leaves this
+     * assertion silent; it takes 21 before nr exceeds max_rows. The one-row
+     * sub-budget error that motivated all of this is gated by section 8's
+     * children-count check and by the _Static_assert above, not by this line. */
+    assert(nr <= max_rows);
 
     out->rows        = rows;
     out->num_rows    = nr;
@@ -2170,7 +2208,7 @@ void pgwt_compute_time_model_from_summaries(
     double idle_ms    = ctx.idle_time_ns / 1e6;
 
     /* Build result rows (same format as raw compute) */
-    int max_rows = 1 + PGWT_NUM_CLASSES * 6 + 1 + MAX_IDLE_SUB_ROWS;
+    int max_rows = 1 + PGWT_NUM_CLASSES * 6 + IDLE_ROWS_RESERVED;
     struct pgwt_tm_row *rows = calloc(max_rows, sizeof(*rows));
     int nr = 0;
 
@@ -2240,6 +2278,9 @@ void pgwt_compute_time_model_from_summaries(
                 "(summary path) -- the writer and the reader disagree about "
                 "which events are idle; see idle_children_excess_ms\n",
                 idle_excess_ns / 1e6);
+
+    /* Same guard as the raw path -- see the comment there. */
+    assert(nr <= max_rows);
 
     out->rows         = rows;
     out->num_rows     = nr;
