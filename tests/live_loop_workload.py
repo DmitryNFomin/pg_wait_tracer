@@ -309,8 +309,15 @@ def _io_reader_tick(io_reader):
 # timing.
 IO_LOAD_TABLE = "_smoke_io_load"
 IO_LOAD_ROWS = 3_000_000
-IO_LOAD_READS_PER_TICK = 200
-IO_LOAD_WRITES_PER_TICK = 100
+# Measured live (gate-2, 2026-10-07): 200 reads / 100 writes per tick gave
+# IO:DataFileRead 0.2% / IO:DataFileWrite ~0.0% of DB Time over a 120s
+# capture -- present but easy to miss. 600/400 measured 0.4% / 0.1% on the
+# same capture shape. Lock:relation dominates this workload's DB Time
+# (~49%) regardless, so these percentages were never going to rival it --
+# reported honestly rather than inflated further by guessing at a much
+# larger batch.
+IO_LOAD_READS_PER_TICK = 600
+IO_LOAD_WRITES_PER_TICK = 400
 
 
 def _io_load_read_tick(io_reader):

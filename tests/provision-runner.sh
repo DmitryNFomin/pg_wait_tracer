@@ -416,6 +416,27 @@ for V in 13 16 17 18; do
     log "PG $V: $(sudo -u postgres psql -p "$PORT" -tAc 'SELECT version()')"
 done
 
+# Ambient PGPORT=5418 (PG18's port) in /etc/environment, inherited by every
+# ssh session including non-interactive ones. 2026-10-07: found missing on
+# a second gate box (gate-2) while this script's own PG18 cluster worked
+# fine -- every bare `psql` call without an explicit -p (test_capture_
+# smoke.py's module-level psql(), any ad hoc manual invocation) silently
+# tried the PG wrapper's own default (port 5432, no cluster there) and
+# failed with a socket-not-found error, not a helpful one. gate-1 already
+# has this (set by hand, at some unknown point -- exactly the "box-local
+# state that silently vanishes" the owner flagged on 2026-10-02), so this
+# puts it in the provisioning script instead so it is never lost again.
+# tests/ui_live_smoke.sh's own derive_pgport (issue #157) NEVER trusts this
+# ambient value for the live-tier scripts that call it -- this default is
+# only a convenience for direct/manual psql and test invocations outside
+# that wrapper, the same convenience gate-1 already had.
+if ! grep -q '^PGPORT=' /etc/environment 2>/dev/null; then
+    echo "PGPORT=5418" >> /etc/environment
+    log "set PGPORT=5418 in /etc/environment (was missing)"
+else
+    log "PGPORT already set in /etc/environment: $(grep '^PGPORT=' /etc/environment)"
+fi
+
 log "clusters:"
 pg_lsclusters
 
