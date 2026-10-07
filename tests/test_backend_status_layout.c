@@ -550,6 +550,202 @@ static void test_sampled_attr(void)
           "PG13 direct-row reader rejects capacity-truncated activity");
 }
 
+/* #294: ONE definition of "inside a command".
+ *
+ * The rejected half-fix for #294 re-read a DIFFERENT predicate
+ * (debug_query_string != NULL) than the tick source and the exact tier's
+ * on_report_activity uprobe use (st_state == STATE_RUNNING/FASTPATH), which
+ * closed part of the CPU-share gap while leaving a definitional bias behind.
+ * This is the differential that makes a second definition impossible to add
+ * silently: over EVERY state value the layout admits, the standalone gate
+ * derivation, the PG14+ attribution derivation, the PG13 activity derivation
+ * and the shared predicate must agree, state by state.
+ *
+ * Bypass note: "they all agree" is also true of a predicate that is always
+ * false, so the sweep additionally pins WHICH states are open — exactly
+ * {state_running, state_fastpath} — and that both outcomes occur. */
+static void test_cmd_gate_one_predicate(void)
+{
+    printf("--- #294 one authoritative command-gate predicate ---\n");
+    struct PgBackendStatusLayout pg18;
+    CHECK(pgwt_pgbs_hard_table_lookup(18, PGWT_PGBS_ARCH_X86_64, 8,
+                                      PGWT_PGBS_ABI_SYSV_LP64, &pg18) == 0,
+          "PG18 fixture row for the predicate sweep");
+    validate_sampled_fields(&pg18);
+
+    struct PgBackendStatusLayout pg13;
+    uint8_t pg13_row[440];
+    char pg13_activity[64] = "SELECT 1";
+    CHECK(pgwt_pgbs_hard_table_lookup(13, PGWT_PGBS_ARCH_X86_64, 8,
+                                      PGWT_PGBS_ABI_SYSV_LP64, &pg13) == 0,
+          "PG13 fixture row for the predicate sweep");
+    validate_sampled_fields(&pg13);
+    pg13.st_query_id.validation = PGWT_PGBS_FIELD_ABSENT;
+    pg13.activity_buffer_size = sizeof(pg13_activity);
+    pg13.status_anchor = (uint64_t)(uintptr_t)pg13_row;
+    CHECK(pgwt_pgbs_sampled_query_id_enabled(&pg18) &&
+          pgwt_pgbs_sampled_activity_enabled(&pg13),
+          "the sweep runs against both live derivation routes, not one");
+
+    int opens = 0, closes = 0, disagreements = 0, open_states_wrong = 0;
+    int states_swept = 0;
+    for (uint32_t st = 0; st <= (uint32_t)pg18.state_max; st++) {
+        struct pgwt_pgbs_snapshot s = good_snapshot();
+        s.procpid = (uint32_t)getpid();
+        s.state = st;
+        struct pgwt_pgbs_sampled_attr attr = {0};
+        struct pgwt_pgbs_cmd_gate gate = {0};
+        if (pgwt_pgbs_derive_sampled_attr(&pg18, &s, getpid(), &attr) != 0 ||
+            pgwt_pgbs_derive_cmd_gate(&pg18, &s, getpid(), &gate) != 0)
+            continue;
+        states_swept++;
+        bool pred = pgwt_pgbs_state_is_cmd_open(&pg18, st);
+        if (attr.cmd_open != gate.cmd_open || pred != gate.cmd_open)
+            disagreements++;
+        /* …and the PG13 activity route, whose own state_running differs. */
+        struct pgwt_pgbs_snapshot s13 = s;
+        s13.state = st <= (uint32_t)pg13.state_max ? st : 0;
+        struct pgwt_pgbs_sampled_attr a13 = {0};
+        struct pgwt_pgbs_cmd_gate g13 = {0};
+        if (pgwt_pgbs_derive_sampled_activity(&pg13, &s13, getpid(), "x",
+                                              false, &a13) == 0 &&
+            pgwt_pgbs_derive_cmd_gate(&pg13, &s13, getpid(), &g13) == 0 &&
+            a13.cmd_open != g13.cmd_open)
+            disagreements++;
+        bool expect_open = st == (uint32_t)pg18.state_running ||
+                           st == (uint32_t)pg18.state_fastpath;
+        if (gate.cmd_open != expect_open)
+            open_states_wrong++;
+        if (gate.cmd_open) opens++; else closes++;
+        /* The query id must be the command's, zeroed while closed — same rule
+         * as the attribution derivation, so a recovered sample cannot carry
+         * the previous statement's id. */
+        if (gate.query_id_valid && gate.query_id != attr.query_id)
+            disagreements++;
+    }
+    CHECK(disagreements == 0,
+          "every derivation agrees on cmd_open, state by state (%d mismatches)",
+          disagreements);
+    CHECK(open_states_wrong == 0,
+          "open states are exactly {running, fastpath} (%d wrong)",
+          open_states_wrong);
+    /* Bypass: an all-false (or all-true) predicate agrees with itself. */
+    CHECK(states_swept >= 4 && opens == 2 && closes >= 2,
+          "the sweep saw both outcomes: %d states, %d open, %d closed",
+          states_swept, opens, closes);
+
+    /* A gate that cannot see must REFUSE, never approve. Each mutilation is
+     * applied to an otherwise-good snapshot, with the destination pre-seeded
+     * open so "left untouched" cannot pass as "closed". */
+    struct { const char *why; struct pgwt_pgbs_snapshot s; } bad[] = {
+        { "torn read (changecount moved)", good_snapshot() },
+        { "write in progress (odd changecount)", good_snapshot() },
+        { "wrong pid in the row", good_snapshot() },
+        { "state above state_max (garbage offset)", good_snapshot() },
+        { "st_state never read (short read)", good_snapshot() },
+        { "unset databaseid (row not initialised)", good_snapshot() },
+    };
+    bad[0].s.state = (uint32_t)pg18.state_running;
+    bad[0].s.changecount_after = bad[0].s.changecount_before + 2;
+    bad[1].s.state = (uint32_t)pg18.state_running;
+    bad[1].s.changecount_before = bad[1].s.changecount_after = 9;
+    bad[2].s.state = (uint32_t)pg18.state_running;
+    bad[2].s.procpid = (uint32_t)getpid() + 1;
+    bad[3].s.state = (uint32_t)pg18.state_max + 1;
+    bad[4].s.state = (uint32_t)pg18.state_running;
+    bad[4].s.read_mask &= ~(uint32_t)PGWT_PGBS_READ_STATE;
+    bad[5].s.state = (uint32_t)pg18.state_running;
+    bad[5].s.databaseid = 0;
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        if (i != 2)
+            bad[i].s.procpid = (uint32_t)getpid();
+        struct pgwt_pgbs_cmd_gate gate = { .cmd_open = true,
+                                           .query_id = UINT64_MAX,
+                                           .query_id_valid = true };
+        CHECK(pgwt_pgbs_derive_cmd_gate(&pg18, &bad[i].s, getpid(),
+                                        &gate) != 0 &&
+              !gate.cmd_open && gate.query_id == 0,
+              "refuses and clears: %s", bad[i].why);
+    }
+    struct pgwt_pgbs_cmd_gate gate = { .cmd_open = true };
+    CHECK(pgwt_pgbs_derive_cmd_gate(&pg18, NULL, getpid(), &gate) != 0 &&
+          !gate.cmd_open, "refuses a missing snapshot");
+    gate.cmd_open = true;
+    CHECK(pgwt_pgbs_derive_cmd_gate(NULL, NULL, getpid(), &gate) != 0 &&
+          !gate.cmd_open, "refuses with no layout at all");
+
+    /* The live reader, against a synthetic row in this process: both the
+     * MyBEEntry-indirect form and the cached-row form, open and closed. */
+    uint8_t row[440];
+    memset(row, 0, sizeof(row));
+    uint32_t changecount = 30, pid = (uint32_t)getpid();
+    uint32_t dbid = 16384, uid = 10, state = (uint32_t)pg18.state_running;
+    uint64_t qid = 0x55aa55aa0000beefULL;
+    memcpy(row + pg18.st_changecount.offset, &changecount, 4);
+    memcpy(row + pg18.st_procpid.offset, &pid, 4);
+    memcpy(row + pg18.st_databaseid.offset, &dbid, 4);
+    memcpy(row + pg18.st_userid.offset, &uid, 4);
+    memcpy(row + pg18.st_state.offset, &state, 4);
+    memcpy(row + pg18.st_query_id.offset, &qid, 8);
+    uint64_t my_be_entry = (uint64_t)(uintptr_t)row;
+    memset(&gate, 0, sizeof(gate));
+    CHECK(pgwt_pgbs_read_cmd_gate(getpid(),
+                                  (uint64_t)(uintptr_t)&my_be_entry, 0,
+                                  &pg18, &gate) == 0 &&
+          gate.cmd_open && gate.query_id_valid && gate.query_id == qid,
+          "live gate re-read via MyBEEntry sees RUNNING and its query id");
+    memset(&gate, 0, sizeof(gate));
+    CHECK(pgwt_pgbs_read_cmd_gate(getpid(), 0, (uint64_t)(uintptr_t)row,
+                                  &pg18, &gate) == 0 && gate.cmd_open,
+          "live gate re-read against a cached row needs no MyBEEntry");
+    state = 1;   /* idle */
+    memcpy(row + pg18.st_state.offset, &state, 4);
+    gate.cmd_open = true;
+    CHECK(pgwt_pgbs_read_cmd_gate(getpid(), 0, (uint64_t)(uintptr_t)row,
+                                  &pg18, &gate) == 0 && !gate.cmd_open &&
+          gate.query_id == 0,
+          "live gate re-read reports a genuinely idle backend as closed");
+    state = (uint32_t)pg18.state_running;
+    memcpy(row + pg18.st_state.offset, &state, 4);
+
+    /* Every way the live re-read can be unable to see: it must return
+     * nonzero with a CLOSED gate, never approve. */
+    gate.cmd_open = true;
+    CHECK(pgwt_pgbs_read_cmd_gate(getpid(), 0, 0, &pg18, &gate) != 0 &&
+          !gate.cmd_open, "no row and no MyBEEntry: refuses");
+    gate.cmd_open = true;
+    CHECK(pgwt_pgbs_read_cmd_gate(-1, 0, (uint64_t)(uintptr_t)row, &pg18,
+                                  &gate) != 0 && !gate.cmd_open,
+          "no such pid: refuses");
+    gate.cmd_open = true;
+    CHECK(pgwt_pgbs_read_cmd_gate(getpid(), 0, 1, &pg18, &gate) != 0 &&
+          !gate.cmd_open, "unreadable row address: refuses");
+    gate.cmd_open = true;
+    pg18.validation = PGWT_PGBS_VALIDATION_DEGRADED;
+    CHECK(pgwt_pgbs_read_cmd_gate(getpid(), 0, (uint64_t)(uintptr_t)row,
+                                  &pg18, &gate) != 0 && !gate.cmd_open,
+          "unvalidated layout: no authoritative predicate, so refuses");
+    pg18.validation = PGWT_PGBS_VALIDATION_VALIDATED;
+
+    /* PG13 has no st_query_id: the gate still decides, and says so. */
+    memset(pg13_row, 0, sizeof(pg13_row));
+    changecount = 32;
+    state = (uint32_t)pg13.state_running;
+    uint64_t act_ptr = (uint64_t)(uintptr_t)pg13_activity;
+    memcpy(pg13_row + pg13.st_changecount.offset, &changecount, 4);
+    memcpy(pg13_row + pg13.st_procpid.offset, &pid, 4);
+    memcpy(pg13_row + pg13.st_databaseid.offset, &dbid, 4);
+    memcpy(pg13_row + pg13.st_userid.offset, &uid, 4);
+    memcpy(pg13_row + pg13.st_state.offset, &state, 4);
+    memcpy(pg13_row + pg13.st_activity_raw.offset, &act_ptr, 8);
+    memset(&gate, 0, sizeof(gate));
+    CHECK(pgwt_pgbs_read_cmd_gate(getpid(), 0,
+                                  (uint64_t)(uintptr_t)pg13_row, &pg13,
+                                  &gate) == 0 && gate.cmd_open &&
+          !gate.query_id_valid && gate.query_id == 0,
+          "PG13 gate re-read decides without a query id and declares it absent");
+}
+
 static void test_warmup_aggregation(void)
 {
     printf("--- bounded warmup coincidence resistance ---\n");
@@ -685,6 +881,7 @@ int main(void)
     test_hard_table();
     test_validation();
     test_sampled_attr();
+    test_cmd_gate_one_predicate();
     test_warmup_aggregation();
     test_fail_safe_and_pid_exclusion();
     printf("\n%d/%d tests passed\n", ok, run);

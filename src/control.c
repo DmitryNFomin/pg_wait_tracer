@@ -416,6 +416,21 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
                      ctr->io_worker_busy_total);
     cjson_add_uint64(root, "noncmd_cpu_samples_total",
                      ctr->noncmd_cpu_samples_total);
+    /* #294: the read-order recheck's three outcomes. at_risk is the on-CPU
+     * population the CPU gate was about to reject; recovered is how many a
+     * fresh, same-predicate status read found inside a command after all;
+     * read_failed is how many could not be re-read and therefore stayed
+     * dropped — a persistently nonzero read_failed is lost CPU samples, not
+     * zero of them. What remains in noncmd_cpu_samples_total is the genuine
+     * between-command on-CPU churn the gate exists to exclude. */
+    cjson_add_uint64(root, "cmd_gate_order_at_risk_total",
+                     ctr->cmd_gate_order_at_risk_total);
+    cjson_add_uint64(root, "cmd_gate_order_recovered_total",
+                     ctr->cmd_gate_order_recovered_total);
+    cjson_add_uint64(root, "cmd_gate_order_read_failed_total",
+                     ctr->cmd_gate_order_read_failed_total);
+    cjson_add_uint64(root, "cmd_gate_recovered_total",
+                     ctr->cmd_gate_recovered_total);
 
     /* Provider self-metrics. ringbuf_drops_total is the full tier's BPF-side
      * event_ringbuf drop count (A2 wired this; A0 deliberately omitted it). */

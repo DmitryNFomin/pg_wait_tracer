@@ -130,6 +130,14 @@ struct pgwt_counters {
     uint64_t noncmd_cpu_samples_total; /* client we==0 readings outside a command (not recorded) */
     uint64_t cmd_gate_recovered_total; /* on-CPU client samples the edge-gate missed, recovered
                                         * from debug_query_string ground truth (EL9 fix) */
+    /* #294 read-ORDER recheck (sampler.h pgwt_sampler_recheck_cmd_gate). The
+     * three outcomes of the at-risk population, so none can hide:
+     * at_risk == recovered + read_failed + (what stayed in
+     * noncmd_cpu_samples_total). A read_failed rate above ~0 means fresh gate
+     * reads are failing and those samples were dropped, not counted. */
+    uint64_t cmd_gate_order_at_risk_total;
+    uint64_t cmd_gate_order_recovered_total;
+    uint64_t cmd_gate_order_read_failed_total;
     uint64_t io_worker_samples_total;  /* io_worker readings taken (excluded from AAS) */
     uint64_t io_worker_busy_total;     /* ... of which busy (on-CPU or a real wait) */
     uint64_t prev_io_worker_samples;   /* snapshots at previous display tick */

@@ -1149,6 +1149,62 @@ bool pgwt_pgbs_sampled_attr_enabled(
            pgwt_pgbs_sampled_activity_enabled(layout);
 }
 
+/* The one authoritative command-gate predicate (issue #294) — see the header.
+ * Three derivations call it and nothing else re-states the rule. */
+bool pgwt_pgbs_state_is_cmd_open(const struct PgBackendStatusLayout *layout,
+                                 uint32_t state)
+{
+    if (!layout)
+        return false;
+    return state == (uint32_t)layout->state_running ||
+           state == (uint32_t)layout->state_fastpath;
+}
+
+/* Shared identity/coherence gate for every snapshot-derived sampled value: a
+ * torn, short or wrong-pid read must fail closed, identically on all three
+ * paths. Factored out so a new derivation cannot quietly admit a weaker read. */
+static bool snapshot_usable(const struct PgBackendStatusLayout *layout,
+                            const struct pgwt_pgbs_snapshot *snapshot,
+                            pid_t expected_pid, uint32_t required)
+{
+    return layout && snapshot && expected_pid > 0 &&
+           (snapshot->read_mask & required) == required &&
+           snapshot->changecount_before == snapshot->changecount_after &&
+           (snapshot->changecount_after & 1u) == 0 &&
+           snapshot->procpid == (uint32_t)expected_pid &&
+           snapshot->databaseid != 0 && snapshot->userid != 0 &&
+           snapshot->state <= (uint32_t)layout->state_max;
+}
+
+int pgwt_pgbs_derive_cmd_gate(
+    const struct PgBackendStatusLayout *layout,
+    const struct pgwt_pgbs_snapshot *snapshot, pid_t expected_pid,
+    struct pgwt_pgbs_cmd_gate *out)
+{
+    if (!out)
+        return -1;
+    memset(out, 0, sizeof(*out));
+    if (!pgwt_pgbs_sampled_attr_enabled(layout))
+        return -1;
+
+    const uint32_t required = PGWT_PGBS_READ_CHANGECOUNT |
+                              PGWT_PGBS_READ_PROCPID |
+                              PGWT_PGBS_READ_DATABASEID |
+                              PGWT_PGBS_READ_USERID |
+                              PGWT_PGBS_READ_STATE;
+    if (!snapshot_usable(layout, snapshot, expected_pid, required))
+        return -1;
+
+    out->state = snapshot->state;
+    out->cmd_open = pgwt_pgbs_state_is_cmd_open(layout, snapshot->state);
+    if (pgwt_pgbs_sampled_query_id_enabled(layout) &&
+        (snapshot->read_mask & PGWT_PGBS_READ_QUERY_ID)) {
+        out->query_id_valid = true;
+        out->query_id = out->cmd_open ? snapshot->query_id : 0;
+    }
+    return 0;
+}
+
 int pgwt_pgbs_derive_sampled_attr(
     const struct PgBackendStatusLayout *layout,
     const struct pgwt_pgbs_snapshot *snapshot, pid_t expected_pid,
@@ -1167,19 +1223,13 @@ int pgwt_pgbs_derive_sampled_attr(
                               PGWT_PGBS_READ_USERID |
                               PGWT_PGBS_READ_STATE |
                               PGWT_PGBS_READ_QUERY_ID;
-    if ((snapshot->read_mask & required) != required ||
-        snapshot->changecount_before != snapshot->changecount_after ||
-        (snapshot->changecount_after & 1u) != 0 ||
-        snapshot->procpid != (uint32_t)expected_pid ||
-        snapshot->databaseid == 0 || snapshot->userid == 0 ||
-        snapshot->state > (uint32_t)layout->state_max)
+    if (!snapshot_usable(layout, snapshot, expected_pid, required))
         return -1;
 
     out->databaseid = snapshot->databaseid;
     out->userid = snapshot->userid;
     out->state = snapshot->state;
-    out->cmd_open = snapshot->state == (uint32_t)layout->state_running ||
-                    snapshot->state == (uint32_t)layout->state_fastpath;
+    out->cmd_open = pgwt_pgbs_state_is_cmd_open(layout, snapshot->state);
     /* Idle is query-less by design: drilldowns assign it to SESSION, not the finished query. */
     out->query_id = out->cmd_open ? snapshot->query_id : 0;
     /* #128: the raw field, for the deferred attribution of a parse-phase
@@ -1206,19 +1256,13 @@ int pgwt_pgbs_derive_sampled_activity(
                               PGWT_PGBS_READ_USERID |
                               PGWT_PGBS_READ_STATE |
                               PGWT_PGBS_READ_ACTIVITY;
-    if ((snapshot->read_mask & required) != required ||
-        snapshot->changecount_before != snapshot->changecount_after ||
-        (snapshot->changecount_after & 1u) != 0 ||
-        snapshot->procpid != (uint32_t)expected_pid ||
-        snapshot->databaseid == 0 || snapshot->userid == 0 ||
-        snapshot->state > (uint32_t)layout->state_max)
+    if (!snapshot_usable(layout, snapshot, expected_pid, required))
         return -1;
 
     out->databaseid = snapshot->databaseid;
     out->userid = snapshot->userid;
     out->state = snapshot->state;
-    out->cmd_open = snapshot->state == (uint32_t)layout->state_running ||
-                    snapshot->state == (uint32_t)layout->state_fastpath;
+    out->cmd_open = pgwt_pgbs_state_is_cmd_open(layout, snapshot->state);
     if (!out->cmd_open)
         return 0;
     if (!snapshot->activity_readable || activity_truncated || !activity ||
@@ -1298,6 +1342,49 @@ int pgwt_pgbs_read_sampled_attr(
     if (pread_exact(fd, &base, sizeof(base), my_be_entry_addr) >= 0 && base)
         rc = read_sampled_attr_at_fd(fd, backend_pid, base, layout, out);
     close(fd);
+    return rc;
+}
+
+int pgwt_pgbs_read_cmd_gate(
+    pid_t backend_pid, uint64_t my_be_entry_addr,
+    uint64_t backend_status_addr,
+    const struct PgBackendStatusLayout *layout,
+    struct pgwt_pgbs_cmd_gate *out)
+{
+    if (!out) return -1;
+    memset(out, 0, sizeof(*out));
+    /* A gate that cannot see must refuse, never approve: with no validated
+     * layout there is no authoritative predicate to apply. */
+    if (!pgwt_pgbs_sampled_attr_enabled(layout) || backend_pid <= 0)
+        return -1;
+    if (backend_status_addr == 0 && my_be_entry_addr == 0)
+        return -1;
+    int fd = open_mem(backend_pid);
+    if (fd < 0) return -1;
+
+    uint64_t base = backend_status_addr;
+    int rc = -1;
+    if (base == 0 &&
+        pread_exact(fd, &base, sizeof(base), my_be_entry_addr) < 0)
+        base = 0;
+    if (base != 0) {
+        /* No activity-buffer copy: the gate needs the identity fields, the
+         * state, and (PG14+) the query id that rides along in the same
+         * coherent snapshot. PG13 gets cmd_open only — recovering the sample
+         * unattributed beats dropping it. */
+        uint32_t wanted = PGWT_PGBS_READ_PROCPID |
+                          PGWT_PGBS_READ_DATABASEID |
+                          PGWT_PGBS_READ_USERID |
+                          PGWT_PGBS_READ_STATE;
+        if (pgwt_pgbs_sampled_query_id_enabled(layout))
+            wanted |= PGWT_PGBS_READ_QUERY_ID;
+        struct pgwt_pgbs_snapshot snapshot;
+        if (read_snapshot_fd(fd, base, layout, wanted, &snapshot, NULL, 0) == 0)
+            rc = pgwt_pgbs_derive_cmd_gate(layout, &snapshot, backend_pid, out);
+    }
+    close(fd);
+    if (rc != 0)
+        memset(out, 0, sizeof(*out));
     return rc;
 }
 

@@ -10,6 +10,25 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+- **capture(#294): the sampled tier no longer drops on-CPU samples to a
+  read-order race.** A tick read a backend's `cmd_open` in the target loop and
+  its `wait_event_info` in a later batched `process_vm_readv`; a command that
+  opened between those two reads produced `we == 0` (fresh, on CPU) paired with
+  `cmd_open == 0` (stale), and the CPU gate dropped the sample. One-directional,
+  so the sampled CPU share could only read low — measured 10.7–14.0 pp below the
+  exact tier's on the gate boxes, with the sampler reporting only ~0.52–0.57 of
+  the CPU time the kernel's own `/proc` attributed to those backends. Now the
+  at-risk set alone (a valid `we == 0` reading the CPU policy is about to reject)
+  gets a fresh command-gate read taken AFTER the wait_event read, through the
+  SAME predicate the exact tier's `on_report_activity` uprobe edges on
+  (`st_state == STATE_RUNNING`/`FASTPATH`, now the single
+  `pgwt_pgbs_state_is_cmd_open` every derivation calls) — deliberately NOT
+  `debug_query_string != NULL`, which is a different definition of "in a
+  command" and leaves a definitional bias behind. A failed re-read leaves the
+  gate closed and is counted, never fabricated; genuinely between-command on-CPU
+  churn is still excluded. New metrics:
+  `cmd_gate_order_{at_risk,recovered,read_failed}_total`.
+
 - **ui(U3): the B6 analysis views — per-execution waterfall, latency
   scatter, transition matrix** (Track U Phase U3). Server: new
   `executions` / `execution_detail` / `exec_scatter` commands built on the
