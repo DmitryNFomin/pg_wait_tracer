@@ -395,10 +395,13 @@ invisible in review:
 | signal | where it appears |
 |---|---|
 | `idle_children_excess_ms` | the `time_model` response, plus an `ERROR` line naming the path |
-| `summary_flush_failures_total` | the control socket's `status` (seconds that are HOLES in every summaries-path window) |
-| `summary_events_overflow_total` | the control socket's `status`, plus one `WARN` per process |
+| `summary_flush_failures_total` | the control socket's **`metrics`** reply (seconds that are HOLES in every summaries-path window) |
+| `summary_events_overflow_total` | the control socket's **`metrics`** reply, plus one `WARN` per process |
 
-All three must be 0. `idle_children_excess_ms` is compared **even when the Idle
+All three must be 0. The two writer counters are in `metrics`, **not** `status`
+(`build_status()` does not embed `build_metrics()`), and
+`tests/test_state_map_loud.py` asserts both keys are present in the `metrics`
+reply so that "surfaced" is a gated claim rather than a sentence in this file. `idle_children_excess_ms` is compared **even when the Idle
 parent is zero** — a zero parent with non-zero named children is the canonical
 shape of the writer and the reader disagreeing about the rule (a record written
 with an empty mask, read with PG18's), and returning early on a zero parent made

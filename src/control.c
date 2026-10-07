@@ -385,7 +385,9 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
     /* Seconds that could not be serialised or compressed: each one is a HOLE
      * in every summaries-path window that covers it. Individual failures also
      * print to stderr, which a running daemon's operator never sees -- so the
-     * count belongs here, where `status` can be scraped. Must be 0. */
+     * count belongs here, in the control socket's `metrics` reply (this is
+     * build_metrics(); `status` does NOT embed it, and saying "status" sends an
+     * operator looking in the wrong place). Must be 0. */
     cjson_add_uint64(root, "summary_flush_failures_total",
                      d->summary_writer ? d->summary_writer->flush_failures_total : 0);
     /* Wait events that could not claim a per-second events[] slot (1024 per

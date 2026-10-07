@@ -1567,6 +1567,14 @@ static void test_refused_serialize_is_counted(void)
     pgwt_summary_push_event(w, &e);
     CHECK(w->accum_active, "a second is open");
 
+    /* Mark this second as having dropped events, so the retry below also
+     * exercises the overflow ROLL-UP and not just the failure counter. Set
+     * directly rather than by pushing 1024 distinct events: the field is the
+     * writer's own state and this test already reaches into it for
+     * encode_buf_size. */
+    w->accum.events_overflow = 3;
+    uint64_t ovf_before = w->events_overflow_total;
+
     uint64_t recs_before = w->total_records_written;
     /* Make the serializer refuse: anything below PGWT_SUMMARY_SERIALIZE_MAX. */
     size_t real = w->encode_buf_size;
@@ -1598,6 +1606,20 @@ static void test_refused_serialize_is_counted(void)
           "...and the record IS written (%llu)",
           (unsigned long long)w->total_records_written);
     CHECK(w->flush_failures_total == 1, "the failure count does not grow");
+
+    /* THE ROLL-UP IS NOT DOUBLE-COUNTED. The failed attempt left the
+     * accumulator open, so the per-record events_overflow was still 3 when the
+     * retry ran. Rolling it up at the TOP of flush_accum therefore added the
+     * same 3 once per attempt: this second's three dropped events were reported
+     * as six. Bounded and diagnostic-only, but a self-check that inflates under
+     * failure reads as a second, independent problem -- the opposite of what a
+     * counter is for. The roll-up belongs after every early return, with the
+     * other success-side counters. */
+    CHECK(w->events_overflow_total == ovf_before + 3,
+          "the second's 3 dropped events are counted ONCE across a failed "
+          "attempt and its retry (events_overflow_total=%llu, expected %llu)",
+          (unsigned long long)w->events_overflow_total,
+          (unsigned long long)(ovf_before + 3));
 
     pgwt_summary_close(w);
     pgwt_summary_destroy(w);

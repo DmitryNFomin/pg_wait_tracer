@@ -866,10 +866,6 @@ static int flush_accum(struct pgwt_summary_writer *w)
 
     struct pgwt_summary_accum *acc = &w->accum;
     uint64_t flushed_second_mono_ns = acc->second_mono_ns;
-    /* Roll the per-record overflow count up to the writer so the control
-     * socket can report it; the per-record field stays, because a reader needs
-     * to know WHICH seconds are affected. */
-    w->events_overflow_total += acc->events_overflow;
 
     /* Serialize */
     size_t encoded_size = pgwt_summary_serialize(acc, w->encode_buf,
@@ -944,6 +940,18 @@ static int flush_accum(struct pgwt_summary_writer *w)
 
     w->total_records_written++;
     w->total_bytes_written += sizeof(bh) + compressed_size;
+    /* Roll the per-record overflow count up to the writer so the control
+     * socket's `metrics` can report it; the per-record field stays, because a
+     * reader needs to know WHICH seconds are affected.
+     *
+     * This has to happen AFTER every early return above, not before them: a
+     * failed flush leaves the accumulator open to be retried, so rolling up
+     * first counted the same acc->events_overflow again on each attempt.
+     * Diagnostic only and bounded by the retry count, but a self-check that
+     * inflates under failure is worse than useless -- it reads as a second,
+     * independent problem. Placed with the other success-side counters, and
+     * before accum_close() clears the accumulator. */
+    w->events_overflow_total += acc->events_overflow;
     /* This second is now on disk and immutable (#277). */
     w->last_flushed_second_mono_ns = flushed_second_mono_ns;
     w->have_flushed_second = true;

@@ -812,6 +812,162 @@ static void test_tag_events_pacing_not_a_boundary(void)
     }
 }
 
+
+/* ── 8. THE IDLE BREAKDOWN AT ITS BOUND, WITH A FULL CLASS TABLE ──────────
+ *
+ * emit_idle_rows writes, worst case, the Idle parent + one row per accumulator
+ * entry + the labelled remainder. The accumulator used to be sized at
+ * MAX_IDLE_SUB_ROWS -- the ROW budget -- so it accepted one more distinct event
+ * than there were rows to print it in, and a full accumulator wrote one
+ * pgwt_tm_row PAST the caller's calloc. It never overflowed in practice only
+ * because the Activity class emits no class row (all Activity time is idle, and
+ * a class with total_ns <= 0 is skipped), leaving spare slots: a dependency on
+ * an unrelated accounting detail, not a bound.
+ *
+ * The trigger is reachable because the pacing mask is rebuilt from RESOLVED
+ * NAMES: a sidecar whose "Timeout" array repeats a pacing name sets a bit at
+ * every id carrying that name, so the number of DISTINCT idle events exceeds
+ * the seven the rule admits (ClientRead + six pacing sleeps). This drives that
+ * state directly through the mask, which is the single input the predicate
+ * reads, and pairs it with a FULL class table so no class-row slack is left to
+ * absorb the extra write.
+ *
+ * The assertion is deterministic and does not depend on a sanitizer noticing
+ * the overflow: with the old capacity the breakdown reports EIGHT children,
+ * which is more than the rule can produce, so the count itself is the gate.
+ */
+static void test_idle_breakdown_at_its_bound(void)
+{
+    printf("--- 8. maximal idle breakdown + full class table ---\n");
+
+    uint32_t saved = pgwt_idle_rule_timeout_mask();
+
+    /* EIGHT Timeout ids classified as pacing (ids 0-7; PG18 names 0-11, so all
+     * resolve). With ClientRead that is NINE distinct visible idle events
+     * against a rule that admits seven -- the accumulator must cap, and the
+     * events it drops must still be inside the parent via the remainder. */
+    pgwt_idle_rule_set_timeout_mask(0x0FFu);
+    CHECK(pgwt_idle_rule_timeout_mask() == 0x0FFu,
+          "eight Timeout ids are pacing (mask 0x%03x)",
+          pgwt_idle_rule_timeout_mask());
+
+    struct pgwt_trace_event ev[64];
+    int n = 0;
+    const uint64_t T0 = 1000ULL * MS;
+    uint64_t ts = T0;          /* advanced explicitly: `ev[n++] = mk(.. n ..)`
+                                * reads and modifies n without a sequence
+                                * point, which is undefined behaviour. */
+
+    /* The nine distinct idle events, 10 ms each = 90 ms. */
+    for (uint32_t id = 0; id < 8; id++) {
+        ts += 100 * MS;
+        ev[n++] = mk(ts, 100, WEI(PG_WAIT_TIMEOUT, id), 10,
+                     PGWT_CPU_NS_UNKNOWN);
+    }
+    ts += 100 * MS;
+    ev[n++] = mk(ts, 100, EV_CLIENTREAD, 10, PGWT_CPU_NS_UNKNOWN);
+    /* Hidden idle, so the remainder row has a reason to exist independently of
+     * the capped events: 25 ms of Activity. */
+    ts += 100 * MS;
+    ev[n++] = mk(ts, 100, EV_ACTIVITY, 25, PGWT_CPU_NS_UNKNOWN);
+
+    /* A FULL class table: every wait class that can emit a class row gets a
+     * non-idle wait, so none of the slack that used to mask the overflow is
+     * available. Six sub-events per class, to fill those too. */
+    static const uint32_t cls[] = {
+        PG_WAIT_LWLOCK, PG_WAIT_LOCK, PG_WAIT_BUFFERPIN, PG_WAIT_CLIENT,
+        PG_WAIT_EXTENSION, PG_WAIT_IPC, PG_WAIT_IO,
+    };
+    /* Timeout too: ids 8-11 are OUTSIDE the mask above, so they are DB Time and
+     * the Timeout class row exists. Without one of these the Timeout class
+     * total is 0 and its row is skipped, which is slack the overflow could hide
+     * in -- the precise shape of the Activity dependency this bound replaces. */
+    for (uint32_t id = 8; id <= 11; id++) {
+        ts += 100 * MS;
+        ev[n++] = mk(ts, 300, WEI(PG_WAIT_TIMEOUT, id), 1,
+                     PGWT_CPU_NS_UNKNOWN);
+    }
+    for (size_t c = 0; c < sizeof(cls) / sizeof(cls[0]); c++) {
+        for (uint32_t sub = 1; sub <= 6; sub++) {
+            /* PG_WAIT_CLIENT id 0 is ClientRead (idle) -- start at 1, which the
+             * loop already does, so every event here is DB Time. */
+            ts += 100 * MS;
+            ev[n++] = mk(ts, 200 + (uint32_t)c, WEI(cls[c], sub), 1,
+                         PGWT_CPU_NS_UNKNOWN);
+        }
+    }
+    CHECK(n <= (int)(sizeof(ev) / sizeof(ev[0])),
+          "fixture fits (%d events)", n);
+
+    struct pgwt_filter f;
+    memset(&f, 0, sizeof(f));
+    struct pgwt_tm_result tm;
+    pgwt_compute_time_model(ev, n, &f, 0, 0, FIX_WALL_MS, &tm);
+
+    const struct pgwt_tm_row *parent = row_at(&tm, "Idle", 0);
+    CHECK(parent != NULL, "the Idle parent row exists");
+
+    /* Count the indent-2 rows that follow the indent-0 Idle row: emit_idle_rows
+     * appends the parent LAST with its children immediately after it. */
+    int first = -1;
+    for (int i = 0; i < tm.num_rows; i++)
+        if (tm.rows[i].indent == 0 && strcmp(tm.rows[i].name, "Idle") == 0) {
+            first = i + 1;
+            break;
+        }
+    int children = 0;
+    double kids_ms = 0.0;
+    for (int i = first; i >= 0 && i < tm.num_rows && tm.rows[i].indent == 2;
+         i++) {
+        children++;
+        kids_ms += tm.rows[i].time_ms;
+    }
+
+    /* THE GATE. The rule admits PGWT_MAX_VISIBLE_IDLE_EVENTS distinct visible
+     * idle events, so the breakdown can never name more than that -- plus the
+     * single "Other (background)" remainder. With the accumulator sized at the
+     * ROW budget instead it named eight, one more than the rows reserved for
+     * it, and the last one was written past the allocation. */
+    CHECK(children <= PGWT_MAX_VISIBLE_IDLE_EVENTS + 1,
+          "the Idle breakdown names at most %d rows (%d visible idle events "
+          "plus the remainder); got %d -- more than that means the accumulator "
+          "outgrew the rows reserved for it",
+          PGWT_MAX_VISIBLE_IDLE_EVENTS + 1, PGWT_MAX_VISIBLE_IDLE_EVENTS,
+          children);
+
+    /* The whole row array must fit the budget its callers compute. Derived here
+     * from the public constants, independently of src/compute.c's expression. */
+    int budget = 2 + PGWT_NUM_CLASSES * 6 + 1 + (PGWT_MAX_VISIBLE_IDLE_EVENTS + 1);
+    CHECK(tm.num_rows <= budget,
+          "the time model fits its row budget (%d rows <= %d)",
+          tm.num_rows, budget);
+
+    /* NON-VACUITY: the cap must actually have been reached, or the two
+     * assertions above are satisfied by a fixture that never stressed it. */
+    CHECK(children == PGWT_MAX_VISIBLE_IDLE_EVENTS + 1,
+          "...and the bound was actually REACHED (%d rows = %d events + "
+          "remainder), so the limit above is exercised rather than merely "
+          "respected", children, PGWT_MAX_VISIBLE_IDLE_EVENTS);
+
+    /* CONSERVATION still holds: what the accumulator could not name is in the
+     * remainder, not lost. 8*10 + 10 ClientRead + 25 Activity = 115 ms. */
+    CHECK(parent != NULL && NEAR(parent->time_ms, 115.0),
+          "Idle parent is the exact total, 115.000 ms (got %.3f)",
+          parent ? parent->time_ms : -1.0);
+    CHECK(parent != NULL && NEAR(kids_ms, parent->time_ms),
+          "children sum EXACTLY to the parent (%.9f vs %.9f) -- the two "
+          "events the accumulator refused are in Other (background), not "
+          "dropped", kids_ms, parent ? parent->time_ms : -1.0);
+    CHECK(tm.idle_children_excess_ms == 0.0,
+          "no excess reported (got %.9f)", tm.idle_children_excess_ms);
+    CHECK(row_at(&tm, "Other (background)", 2) != NULL,
+          "the remainder row is present and named");
+
+    free(tm.rows);
+    pgwt_idle_rule_set_timeout_mask(saved);
+    CHECK(pgwt_idle_rule_timeout_mask() == saved, "mask restored");
+}
+
 /* ══ 6. FALSE NEGATIVES ═══════════════════════════════════════════════════
  * Every section above asserts that time was EXCLUDED. "0 ms excluded == 0 ms
  * expected" satisfies all of it. These are the ways this file could be unable
@@ -967,6 +1123,7 @@ int main(void)
     test_conservation_components();
     test_cpu_on_and_adjacent_to_pacing();
     test_tag_events_pacing_not_a_boundary();
+    test_idle_breakdown_at_its_bound();
     test_bypass_suite();
 
     printf("\n%d checks, %d failed\n", tests_run, tests_failed);

@@ -797,14 +797,40 @@ void pgwt_compute_aas(const struct pgwt_trace_event *events, int count,
  * the six pacing sleeps), which is why they are not truncated to 5 the way
  * class sub-events are.
  */
-/* One row per VISIBLE idle event, plus one for the labelled remainder.
- * Tied to the rule rather than guessed: adding a name to
- * pacing_timeout_names[] without widening this is a COMPILE error, not a
- * silently truncated breakdown. */
-#define MAX_IDLE_SUB_ROWS (PGWT_MAX_VISIBLE_IDLE_EVENTS + 1)
-_Static_assert(MAX_IDLE_SUB_ROWS >= PGWT_MAX_VISIBLE_IDLE_EVENTS + 1,
-               "the Idle breakdown must hold every visible idle event plus "
-               "the remainder row");
+/* TWO different quantities, which were previously one and off by one:
+ *
+ *   MAX_IDLE_EV       -- how many DISTINCT idle events the accumulator holds.
+ *   MAX_IDLE_SUB_ROWS -- how many indent-2 rows emit_idle_rows can write:
+ *                        one per accumulator entry, plus the labelled
+ *                        remainder.
+ *
+ * Conflating them sized `idle_ev[]` at MAX_IDLE_SUB_ROWS, so the accumulator
+ * took one more event than the row budget had room to print, and a full
+ * accumulator made emit_idle_rows write one pgwt_tm_row PAST the caller's
+ * calloc. It could not overflow in practice only because the Activity class
+ * never emits a class row (all Activity time is idle, and a class with
+ * total_ns <= 0 is skipped), leaving spare slots -- an unstated dependency on
+ * an unrelated accounting detail, not a bound.
+ *
+ * The trigger is reachable: the mask is rebuilt from RESOLVED NAMES, so a
+ * sidecar whose "Timeout" array repeats a pacing name (hand-edited, or
+ * truncated and rewritten) sets a bit at every id carrying that name and
+ * drives the number of distinct idle events past the seven the rule admits. */
+#define MAX_IDLE_EV       PGWT_MAX_VISIBLE_IDLE_EVENTS
+#define MAX_IDLE_SUB_ROWS (MAX_IDLE_EV + 1)
+
+/* The rows emit_idle_rows can write, worst case, vs the rows its callers
+ * reserve for it. Unlike the assertion this replaces -- which compared
+ * MAX_IDLE_SUB_ROWS to its own definition and so could never fire -- these two
+ * are derived independently: the first from the accumulator's capacity and the
+ * emitter's shape, the second from the `max_rows` expression below. Changing
+ * either side alone is a compile error. */
+#define IDLE_ROWS_WORST_CASE (1 /* Idle parent */ + MAX_IDLE_EV + 1 /* rest */)
+#define IDLE_ROWS_RESERVED   (1 + MAX_IDLE_SUB_ROWS)
+_Static_assert(IDLE_ROWS_WORST_CASE <= IDLE_ROWS_RESERVED,
+               "emit_idle_rows can write more rows than its callers reserve: "
+               "the Idle parent, one row per accumulator entry, and the "
+               "remainder row must all fit");
 
 struct idle_accum {
     uint32_t event_id;
@@ -821,7 +847,11 @@ static void idle_accum_add(struct idle_accum *ia, int *n, uint32_t eid,
     for (int i = 0; i < *n; i++) {
         if (ia[i].event_id == eid) { ia[i].total_ns += ns; return; }
     }
-    if (*n >= MAX_IDLE_SUB_ROWS)
+    /* Capacity is in DISTINCT EVENTS (MAX_IDLE_EV), not rows: the row budget
+     * is one larger because of the remainder row, and using it here let the
+     * accumulator outgrow what the caller reserved. Anything dropped lands in
+     * "Other (background)", so the children still sum to the parent. */
+    if (*n >= MAX_IDLE_EV)
         return;
     ia[*n].event_id = eid;
     ia[*n].total_ns = ns;
@@ -838,7 +868,8 @@ static int cmp_idle_desc(const void *a, const void *b)
 
 /* Emit the Idle parent row plus one named row per visible idle event.
  * `rows`/`nr` are the time-model row array being built; the caller sized it
- * with 1 + MAX_IDLE_SUB_ROWS spare slots. pct_db_time and aas are deliberately
+ * with IDLE_ROWS_RESERVED spare slots, which the _Static_assert above checks
+ * against this function's worst case. pct_db_time and aas are deliberately
  * 0 on these rows: idle time has no share OF DB Time (it is excluded from it),
  * and reporting a percentage of a total it is not part of is how an excluded
  * number sneaks back into a reader's mental sum. */
@@ -971,7 +1002,10 @@ void pgwt_compute_time_model(const struct pgwt_trace_event *events, int count,
     double db_time_ns  = 0.0;
     double idle_time_ns = 0.0;
     /* Named breakdown of idle_time_ns -- see emit_idle_rows. */
-    struct idle_accum idle_ev[MAX_IDLE_SUB_ROWS];
+    struct idle_accum idle_ev[MAX_IDLE_EV];
+    _Static_assert(sizeof(idle_ev) / sizeof(idle_ev[0]) == MAX_IDLE_EV,
+                   "idle_ev must hold exactly MAX_IDLE_EV entries -- the row "
+                   "budget in max_rows below is computed from that number");
     int n_idle_ev = 0;
     /* T8 measured-CPU accumulators. cpu_measured_ns is the CPU* total (measured
      * where v3 cpu_ns exists, else the legacy full gap); offcpu_ns its off-CPU
@@ -1106,7 +1140,8 @@ void pgwt_compute_time_model(const struct pgwt_trace_event *events, int count,
 
     /* Phase 2: build result rows */
     /* Max rows: 1 (DB Time) + 1 (Off-CPU*) + NUM_CLASSES * (1 class + 5 sub)
-     * + 1 (Idle) + MAX_IDLE_SUB_ROWS (its named children). */
+     * + 1 (Idle) + MAX_IDLE_SUB_ROWS (one row per named idle event PLUS the
+     * remainder row -- the remainder was the row the old bound forgot). */
     int max_rows = 2 + PGWT_NUM_CLASSES * 6 + 1 + MAX_IDLE_SUB_ROWS;
     struct pgwt_tm_row *rows = calloc(max_rows, sizeof(*rows));
     int nr = 0;
@@ -1978,10 +2013,14 @@ struct tm_summary_ctx {
     int    num_ev_accum;
     double db_time_ns;
     double idle_time_ns;
-    struct idle_accum idle_ev[MAX_IDLE_SUB_ROWS];
+    struct idle_accum idle_ev[MAX_IDLE_EV];
     int    n_idle_ev;
     const struct pgwt_filter *f;
 };
+_Static_assert(sizeof(((struct tm_summary_ctx *)0)->idle_ev) /
+                   sizeof(struct idle_accum) == MAX_IDLE_EV,
+               "the summary path's idle_ev must hold exactly MAX_IDLE_EV "
+               "entries -- same row budget, same bound");
 
 static int tm_summary_visitor(const struct pgwt_summary_accum *rec, void *arg)
 {
