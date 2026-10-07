@@ -1,0 +1,76 @@
+ui_live_anchor_evidence -- why tick 1's blink-sweep anchor was moved
+====================================================================
+
+Every number in ui_live_smoke_lib.py's FRAME_SPACING_DRIFT_BOUND_MS comment,
+in ui_live_smoke.py's tick_baseline comment, and in the commit message that
+removed tick 1's frame-1-2 exemption, is derived here. Regenerate all of it:
+
+    sh scripts/regen.sh          # run from this directory
+
+That reads corpus/ and rewrites tables/. If a table changes, something drifted.
+
+corpus/<run.id>/summary.json
+    31 ui_live runs, 2026-09-27 .. 2026-10-07, REDUCED to the only four fields
+    the analysis reads (target_offsets_ms, achieved_offsets_ms, capture_ms per
+    tick; ttfp_ms per tab). Full summaries for these runs are 3.3 MB; reduced,
+    488 KB. scripts/reduce_corpus.py built them and documents the reduction;
+    verify.py, anticorr.py and headroom.py were diffed against the unreduced
+    originals and produce byte-identical output.
+
+    corpus/<run.id>/origin.txt names the artifact each run came from. Eight are
+    in-repo (tests/results/ui_live_gate1_healthy_run{1,2,3_postfix,4_bound150},
+    ui_live_gate{1,2}_bypass, ui_live_gate2_healthy_run{1,2}) and can be
+    re-reduced to check this corpus. The rest came from sibling agent
+    worktrees, which get deleted when their PRs land -- that is why these are
+    committed rather than cited by path.
+
+    CHRONOLOGY COMES FROM run.id (unix epoch seconds written by the run), never
+    file mtime: every committed artifact shares one checkout mtime, which would
+    silently collapse the whole time series into a single instant.
+
+tables/
+  01  the three load-bearing claims:
+        - frame 3's drift is ARITHMETIC: f3 = max(0, L3-1000) + one CDP hop,
+          L3 = max(500, A+s1)+s2. Residual over 1650 ticks: median 9ms, p95
+          20ms. Not a fit -- there is no free parameter.
+        - the 150ms bound does NOT separate the deliberate bypass regression
+          (smallest over-bound f3 = 158ms) from healthy load (max healthy f3 =
+          297ms). Filed separately; NOT changed by this branch.
+        - f4/f5 drift is unchanged across every post-#193 run (median 11ms,
+          p95 23ms); the only 480ms reading in the corpus is the bypass run.
+          This is the signature that says paint did not regress.
+  02  r(ttfp_ms, tick-1 A) = -0.77 over 30 gate-1-class tab-runs (timeline
+        -0.96). FASTER first paint produced a STALER anchor, because the
+        500ms live-resume settle is a fixed sleep. transitions: ttfp_ms
+        1211 -> 581ms while tick-1 A rose 479 -> 662ms.
+  03  minimum tick-1 headroom to the 1000ms clamp, per run. Healthy
+        gate-1-class: median 21ms, 3 of 13 runs already negative. A coin
+        flip, which is the ~50% flake rate this branch removes.
+  04  tick-1 excess over the per-tick floor, by tab: 111-641ms on the six
+        tabs whose views pause live (and so take the #live-btn resume click
+        and its 500ms settle), -5..+195ms on the five that do not.
+  05  one line per run: median tick-1 A, median capture cost, worst f3,
+        worst f4/f5, median ttfp. The 10-day overview.
+  06  the cliff metric L3 and its distance to the 1000ms edge, per heavy tab
+        per run -- the table where f3 ~ -edge is visible directly.
+  07  THEN (the five runs FRAME_SPACING_DRIFT_BOUND_MS names as its
+        calibration set) vs NOW (2026-10-07), with the gated-frame count per
+        run: 253 before this change, 264 after.
+  08  per-tick A for run.id 1791385783, the run that went red. A = 662-853ms
+        on tick 1 and 207-233ms on ticks 2-6, for all five heavy tabs. This
+        single table is why the fix targets tick 1 and nothing else.
+
+Known gap, NOT closed here (pinned by
+tests/test_ui_live_smoke_lib.py::test_frame_spacing_vacuous_pass_is_a_KNOWN_
+unclosed_blind_spot): a tab claiming ticks_observed=6 while recording zero
+sweep records reports ok=True -- frame_spacing_ok, frame_dims_ok and
+measured_ok all pass vacuously. The guard for it would turn another in-flight
+branch's test_blink_gate_clean_trace_still_passes red, so it is filed as its
+own issue instead of being smuggled in here.
+
+One figure in FRAME_SPACING_DRIFT_BOUND_MS's older text could not be
+reproduced from the runs it cites: the triplets `timeline [492, 254, 11, 17,
+14]`, `transitions [267, 192, 17, 14, 12]` and `matrix [242, 166, 9, 10, 10]`
+appear in none of the five named artifacts (table 07 has what they actually
+hold). Filed as its own issue; the comment is left alone here so the issue
+stays the record.
