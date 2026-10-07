@@ -237,6 +237,292 @@ static void test_build_batch_cpu_policy(void)
     CHECK(n == 1, "UNKNOWN type we==0 records when command open");
 }
 
+/* ── #294: the read-ORDER race, and every way the recheck could be blind ── */
+
+#define RC_N 7
+struct fake_gate {
+    int calls[RC_N];     /* per-index consultations: proves WHO was consulted */
+    int total_calls;
+    int succeed;         /* 0 = the fresh read fails (writes nothing) */
+    int open_now;        /* what a successful fresh read reports */
+    uint64_t qid;
+    int qid_valid;
+    /* Per-index outcome, so ONE tick can produce all three buckets at once:
+     * 1 = in a command, 0 = between commands, -1 = the read fails. Without
+     * this the conservation check only ever sees n == n + 0 + 0, which a
+     * cross-bucket misallocation (a recovery tallied as a confirmation)
+     * satisfies just as well as correct accounting. */
+    int use_plan;
+    int plan[RC_N];
+};
+
+static int fake_gate_read(void *ctx, int idx,
+                          const struct pgwt_sample_target *t,
+                          int *cmd_open, uint64_t *query_id,
+                          int *query_id_valid)
+{
+    struct fake_gate *f = ctx;
+    (void)t;
+    if (idx >= 0 && idx < RC_N)
+        f->calls[idx]++;
+    f->total_calls++;
+    if (f->use_plan) {
+        int want = (idx >= 0 && idx < RC_N) ? f->plan[idx] : -1;
+        if (want < 0)
+            return 0;    /* this target's fresh read fails */
+        *cmd_open = want;
+        if (f->qid_valid) {
+            *query_id = f->qid;
+            *query_id_valid = 1;
+        }
+        return 1;
+    }
+    if (!f->succeed)
+        return 0;        /* a failed read must write NOTHING */
+    *cmd_open = f->open_now;
+    if (f->qid_valid) {
+        *query_id = f->qid;
+        *query_id_valid = 1;
+    }
+    return 1;
+}
+
+/* The tick's two reads, as the live path takes them:
+ *   cmd_open  <- target loop, time T1
+ *   we        <- batched process_vm_readv, time T2 > T1
+ * A command that OPENS in [T1,T2] is the race: we==0 (fresh) with cmd_open==0
+ * (stale). Targets 0 and 6 are in that state; nothing else is. */
+static void rc_reset(struct pgwt_sample_target *t, uint32_t *vals,
+                     uint8_t *valid)
+{
+    memset(t, 0, sizeof(*t) * RC_N);
+    /* 0: CLIENT, on CPU, gate stale-closed            -> THE RACE */
+    t[0].pid = 101; t[0].backend_type = PGWT_BT_CLIENT; t[0].query_id = 7;
+    /* 1: CLIENT, on CPU, gate already open            -> nothing at risk */
+    t[1].pid = 102; t[1].backend_type = PGWT_BT_CLIENT; t[1].cmd_open = 1;
+    /* 2: CLIENT, WAITING                              -> gate does not apply */
+    t[2].pid = 103; t[2].backend_type = PGWT_BT_CLIENT;
+    /* 3: CLIENT, on CPU, but the read FAILED          -> not an observation */
+    t[3].pid = 104; t[3].backend_type = PGWT_BT_CLIENT;
+    /* 4: CHECKPOINTER, on CPU                         -> recordable anyway */
+    t[4].pid = 105; t[4].backend_type = PGWT_BT_CHECKPOINTER;
+    /* 5: LOGGER, on CPU                               -> never recordable */
+    t[5].pid = 106; t[5].backend_type = PGWT_BT_LOGGER;
+    /* 6: UNKNOWN, on CPU, gate stale-closed           -> THE RACE */
+    t[6].pid = 107; t[6].backend_type = PGWT_BT_UNKNOWN;
+
+    for (int i = 0; i < RC_N; i++) { vals[i] = 0; valid[i] = 1; }
+    vals[2] = WEI(PG_WAIT_LOCK, 0x01);   /* waiting, not on CPU */
+    valid[3] = 0;                        /* unread */
+}
+
+static void test_recheck_cmd_gate_order_race(void)
+{
+    printf("--- #294 read-order recheck: the race, and its blind spots ---\n");
+
+    struct pgwt_sample_target t[RC_N];
+    uint32_t vals[RC_N];
+    uint8_t valid[RC_N];
+    struct pgwt_trace_event out[RC_N];
+    struct pgwt_sampler_recheck_stats st;
+    uint64_t noncmd;
+
+    /* RED without the fix: build the batch straight from the tick's reads and
+     * both raced samples are lost — exactly the shipped behaviour #294
+     * measured as 10.7-11.7 pp of missing CPU share. */
+    rc_reset(t, vals, valid);
+    noncmd = 0;
+    int n = pgwt_sampler_build_batch(t, vals, valid, RC_N, 11, out, NULL,
+                                     &noncmd);
+    CHECK(n == 3, "unfixed order: only 3 of 6 readable samples survive (got %d)",
+          n);
+    CHECK(noncmd == 3,
+          "unfixed order: 2 raced client/unknown CPU samples + the logger are "
+          "dropped (got %llu)", (unsigned long long)noncmd);
+
+    /* GREEN with the fix: a fresh gate read, taken AFTER the wait_event read,
+     * finds both raced backends inside a command. */
+    rc_reset(t, vals, valid);
+    struct fake_gate f = { .succeed = 1, .open_now = 1,
+                           .qid = 0xabcdef, .qid_valid = 1 };
+    int rec = pgwt_sampler_recheck_cmd_gate(t, vals, valid, RC_N,
+                                            fake_gate_read, &f, &st);
+    CHECK(rec == 2 && st.recovered == 2 && st.at_risk == 2,
+          "both raced samples recovered (rec=%d recovered=%llu at_risk=%llu)",
+          rec, (unsigned long long)st.recovered,
+          (unsigned long long)st.at_risk);
+    /* The at-risk set is exactly the raced pair: anything wider would recover
+     * samples that were never dropped, which is how this check could pass
+     * while measuring nothing. */
+    CHECK(f.total_calls == 2 && f.calls[0] == 1 && f.calls[6] == 1 &&
+          f.calls[1] == 0 && f.calls[2] == 0 && f.calls[3] == 0 &&
+          f.calls[4] == 0 && f.calls[5] == 0,
+          "only the raced targets are consulted (%d calls: "
+          "%d %d %d %d %d %d %d)", f.total_calls, f.calls[0], f.calls[1],
+          f.calls[2], f.calls[3], f.calls[4], f.calls[5], f.calls[6]);
+    CHECK(t[0].query_id == 0xabcdef &&
+          t[0].query_quality == PGWT_QUERY_QUALITY_REAL,
+          "a recovered sample carries the id from the SAME coherent snapshot");
+    noncmd = 0;
+    n = pgwt_sampler_build_batch(t, vals, valid, RC_N, 12, out, NULL, &noncmd);
+    CHECK(n == 5, "fixed order: 5 samples recorded (got %d)", n);
+    CHECK(noncmd == 1,
+          "the remainder is the logger alone — the counter must NOT reach 0, "
+          "genuinely-non-command CPU still belongs outside AAS (got %llu)",
+          (unsigned long long)noncmd);
+    CHECK(out[0].pid == 101 && out[0].new_event == 0 &&
+          (out[0].flags & PGWT_EVENT_FLAG_CMD_OPEN),
+          "the recovered sample is an on-CPU record stamped command-open");
+
+    /* Blind spot 1 — the fresh read FAILS (backend exited, EPERM, torn row).
+     * It must leave the gate closed and say so, never fabricate a command. */
+    rc_reset(t, vals, valid);
+    f = (struct fake_gate){ .succeed = 0 };
+    rec = pgwt_sampler_recheck_cmd_gate(t, vals, valid, RC_N, fake_gate_read,
+                                        &f, &st);
+    CHECK(rec == 0 && st.read_failed == 2 && st.at_risk == 2 &&
+          !t[0].cmd_open && !t[6].cmd_open,
+          "a failed fresh read never opens the gate (read_failed=%llu)",
+          (unsigned long long)st.read_failed);
+    noncmd = 0;
+    n = pgwt_sampler_build_batch(t, vals, valid, RC_N, 13, out, NULL, &noncmd);
+    CHECK(n == 3 && noncmd == 3,
+          "unreadable gates stay dropped and stay counted (n=%d noncmd=%llu)",
+          n, (unsigned long long)noncmd);
+
+    /* Blind spot 2 — the thing being checked is ABSENT, not wrong: the
+     * backend really is between commands. The recheck must confirm the drop,
+     * not launder it into a CPU sample. */
+    rc_reset(t, vals, valid);
+    f = (struct fake_gate){ .succeed = 1, .open_now = 0 };
+    rec = pgwt_sampler_recheck_cmd_gate(t, vals, valid, RC_N, fake_gate_read,
+                                        &f, &st);
+    CHECK(rec == 0 && st.confirmed_closed == 2 && !t[0].cmd_open,
+          "a genuinely idle backend stays dropped (confirmed=%llu)",
+          (unsigned long long)st.confirmed_closed);
+
+    /* Blind spot 3 — WRONG PLACEMENT. Run before the wait_event batch read
+     * and every valid[] is still 0; the recheck must then see nothing at all.
+     * A nonzero at_risk here would mean it is deciding on unread values. */
+    rc_reset(t, vals, valid);
+    memset(valid, 0, sizeof(valid));
+    f = (struct fake_gate){ .succeed = 1, .open_now = 1 };
+    rec = pgwt_sampler_recheck_cmd_gate(t, vals, valid, RC_N, fake_gate_read,
+                                        &f, &st);
+    CHECK(rec == 0 && st.at_risk == 0 && f.total_calls == 0,
+          "placed before the wait_event read it recovers nothing (at_risk=%llu)",
+          (unsigned long long)st.at_risk);
+
+    /* Blind spot 4 — missing dependency / empty input: refuse, never approve.
+     * stats must come back zeroed rather than stale. */
+    rc_reset(t, vals, valid);
+    st.at_risk = st.recovered = 99;
+    CHECK(pgwt_sampler_recheck_cmd_gate(t, vals, valid, RC_N, NULL, NULL,
+                                        &st) == 0 &&
+          st.at_risk == 0 && st.recovered == 0 && !t[0].cmd_open,
+          "no fresh-read function: refuses with zeroed stats");
+    st.at_risk = st.recovered = 99;
+    f = (struct fake_gate){ .succeed = 1, .open_now = 1 };
+    CHECK(pgwt_sampler_recheck_cmd_gate(t, vals, valid, 0, fake_gate_read,
+                                        &f, &st) == 0 &&
+          st.at_risk == 0 && f.total_calls == 0,
+          "no targets: refuses");
+    CHECK(pgwt_sampler_recheck_cmd_gate(t, NULL, valid, RC_N, fake_gate_read,
+                                        &f, &st) == 0 &&
+          st.at_risk == 0 && f.total_calls == 0,
+          "no readings array: refuses");
+    CHECK(pgwt_sampler_recheck_cmd_gate(t, vals, NULL, RC_N, fake_gate_read,
+                                        &f, &st) == 0 &&
+          st.at_risk == 0 && f.total_calls == 0,
+          "no validity array: refuses");
+    CHECK(pgwt_sampler_recheck_cmd_gate(NULL, vals, valid, RC_N,
+                                        fake_gate_read, &f, &st) == 0 &&
+          st.at_risk == 0, "no targets array: refuses");
+    CHECK(pgwt_sampler_recheck_cmd_gate(t, vals, valid, RC_N, fake_gate_read,
+                                        &f, NULL) == 2,
+          "a NULL stats pointer is tolerated, the recovery still happens");
+
+    /* Conservation: every at-risk target lands in exactly one outcome, so no
+     * outcome can hide inside another (the two-sides-from-one-sum trap).
+     *
+     * The sum alone is too weak: with both at-risk targets taking the SAME
+     * outcome the identity reads 2 == 2+0+0, which a cross-bucket
+     * misallocation satisfies too. So drive ALL THREE outcomes in ONE tick
+     * (index 3 becomes at-risk by marking its read valid) and assert each
+     * bucket is exactly 1 as well as the sum. */
+    rc_reset(t, vals, valid);
+    valid[3] = 1;                 /* now a third at-risk client */
+    f = (struct fake_gate){ .use_plan = 1 };
+    f.plan[0] = 1;                /* -> recovered */
+    f.plan[3] = 0;                /* -> confirmed_closed */
+    f.plan[6] = -1;               /* -> read_failed */
+    pgwt_sampler_recheck_cmd_gate(t, vals, valid, RC_N, fake_gate_read, &f,
+                                  &st);
+    CHECK(st.at_risk == st.recovered + st.confirmed_closed + st.read_failed &&
+          st.at_risk == 3,
+          "at_risk == recovered + confirmed + failed (%llu vs %llu+%llu+%llu)",
+          (unsigned long long)st.at_risk, (unsigned long long)st.recovered,
+          (unsigned long long)st.confirmed_closed,
+          (unsigned long long)st.read_failed);
+    CHECK(st.recovered == 1 && st.confirmed_closed == 1 && st.read_failed == 1,
+          "one tick, three distinct outcomes, one each — a recovery tallied as "
+          "a confirmation cannot hide in the sum (got %llu/%llu/%llu)",
+          (unsigned long long)st.recovered,
+          (unsigned long long)st.confirmed_closed,
+          (unsigned long long)st.read_failed);
+    CHECK(t[0].cmd_open == 1 && t[3].cmd_open == 0 && t[6].cmd_open == 0,
+          "and each target's gate matches its own outcome, not its neighbour's "
+          "(got %d/%d/%d)", t[0].cmd_open, t[3].cmd_open, t[6].cmd_open);
+
+    /* One-directional by design: an already-open gate is never re-read, so the
+     * recheck cannot CLOSE one. That is the residual over-count side, and it
+     * is deliberate — documented in sampler.h. */
+    rc_reset(t, vals, valid);
+    f = (struct fake_gate){ .succeed = 1, .open_now = 0 };
+    pgwt_sampler_recheck_cmd_gate(t, vals, valid, RC_N, fake_gate_read, &f,
+                                  &st);
+    CHECK(t[1].cmd_open == 1 && f.calls[1] == 0,
+          "an already-open gate is left alone (one-directional)");
+
+    /* #294 x #295 interaction pin. #295 replaced build_batch's inline idle
+     * rule with pgwt_is_session_idle_event() for the branch that INHERITS the
+     * previous statement's id when a sample's own query_id is 0. PG14+ zeroes
+     * st_query_id at STATE_RUNNING, so a sample the recheck recovers
+     * microseconds after the command opened legitimately carries query_id 0 —
+     * a combination that did not exist before this branch, because those
+     * samples were dropped. If that predicate ever admitted we == 0, every
+     * recovered on-CPU sample would be filed under the PREVIOUS statement:
+     * in-command CPU, attributed to the wrong query, silently. It must not.
+     * The two changes rebased with no textual conflict, which is exactly when
+     * this needs a test rather than a reading. */
+    rc_reset(t, vals, valid);
+    t[0].query_id = 0;
+    t[0].last_query_id = 0xBEEF;   /* the statement that just finished */
+    f = (struct fake_gate){ .succeed = 1, .open_now = 1, .qid = 0,
+                            .qid_valid = 1 };
+    pgwt_sampler_recheck_cmd_gate(t, vals, valid, RC_N, fake_gate_read, &f,
+                                  &st);
+    CHECK(st.recovered == 2 && t[0].cmd_open == 1 && t[0].query_id == 0,
+          "a command that has not reported its id yet recovers with id 0");
+    n = pgwt_sampler_build_batch(t, vals, valid, RC_N, 14, out, NULL, NULL);
+    CHECK(n == 5 && out[0].pid == 101 && out[0].new_event == 0 &&
+          out[0].query_id == 0,
+          "a recovered on-CPU sample does NOT inherit the finished "
+          "statement's id (got query_id 0x%llx, must be 0)",
+          (unsigned long long)out[0].query_id);
+
+    /* PG13 has no st_query_id: the gate opens, the id is left as it was,
+     * never overwritten with a zero that would look like a real reading. */
+    rc_reset(t, vals, valid);
+    t[0].query_id = 777;
+    f = (struct fake_gate){ .succeed = 1, .open_now = 1, .qid_valid = 0 };
+    pgwt_sampler_recheck_cmd_gate(t, vals, valid, RC_N, fake_gate_read, &f,
+                                  &st);
+    CHECK(st.recovered == 2 && t[0].cmd_open == 1 && t[0].query_id == 777,
+          "no query id available: gate opens, prior id preserved (qid=%llu)",
+          (unsigned long long)t[0].query_id);
+}
+
 /* ── Test 2b: build_batch drops + counts garbage readings (CAP-2/5) ───── */
 
 static void test_build_batch_garbage(void)
@@ -777,6 +1063,7 @@ int main(void)
     test_build_batch();
     test_build_batch_garbage();
     test_build_batch_cpu_policy();
+    test_recheck_cmd_gate_order_race();
     test_fallback();
     test_read_validity_excludes_failures();
     test_child_read();

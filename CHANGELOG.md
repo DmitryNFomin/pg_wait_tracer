@@ -10,6 +10,59 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+- **capture(#294): the sampled tier no longer drops on-CPU samples to a
+  read-order race.** A tick read a backend's `cmd_open` in the target loop and
+  its `wait_event_info` in a later batched `process_vm_readv`; a command that
+  opened between those two reads produced `we == 0` (fresh, on CPU) paired with
+  `cmd_open == 0` (stale), and the CPU gate dropped the sample. The **dominant**
+  direction was loss — measured 10.7–14.0 pp below the exact tier's CPU share on
+  the gate boxes. The clearest evidence it was the GATE and not the wait read:
+  the sampler rejected 42–44% of its own `we == 0` observations as
+  out-of-command while the exact tier rejected only 17–20% of its equivalent;
+  with the gate removed from both sides the two tiers' ungated `we == 0` shares
+  differed by only 4.5–6.3 pp instead of 10.8–14.0. Now the
+  at-risk set alone (a valid `we == 0` reading the CPU policy is about to reject)
+  gets a fresh command-gate read taken AFTER the wait_event read, through the
+  SAME predicate the exact tier's `on_report_activity` uprobe edges on
+  (`st_state == STATE_RUNNING`/`FASTPATH`, now the single
+  `pgwt_pgbs_state_is_cmd_open` every derivation calls) — deliberately NOT
+  `debug_query_string != NULL`, which is a different definition of "in a
+  command" and leaves a definitional bias behind. A failed re-read leaves the
+  gate closed and is counted, never fabricated; genuinely between-command on-CPU
+  churn is still excluded. New metrics:
+  `cmd_gate_order_{at_risk,recovered,read_failed}_total`.
+
+  After the fix the two tiers reject the same share of their own `we == 0`
+  (17.3/18.5% at 10 Hz, 20.1/19.2% at 200 Hz) and the ungated and gated
+  disagreements coincide (7.3 vs 7.2 pp, 4.4 vs 3.9 pp) — i.e. no gate-order
+  variant remains. **What this does NOT fix:** sampled CPU is still 0.77 (10 Hz)
+  to 0.88 (200 Hz) of the exact tier's on the same window, and that residual sits
+  upstream of any `cmd_open` decision, in how often the sampler reads `we == 0`
+  at all (the wait-read path). It is tracked separately; this entry claims the
+  read-order half of #294 only, not that the sampled CPU gap is resolved.
+
+  Three bounded residuals, stated rather than implied:
+  - **stale-OPEN is uncorrected.** `cmd_open` reads 1 in the target loop, the
+    command closes before the wait read, and a between-command `we == 0` is
+    admitted — an over-count. The recheck is deliberately one-directional (it
+    opens a stale-closed gate, never closes an open one), so it cannot catch
+    this; it is bounded by the noncmd fraction, order 1 pp.
+  - **the `[wait read, gate read]` window still exists**, 9.6× smaller than the
+    one it replaces (24.1 µs vs 232.3 µs, measured). A double-read probe over
+    that window saw 492 closing vs 545 opening transitions in 14,146 reads, so
+    the residual is now two-sided and nets to +0.37% of the at-risk set instead
+    of a one-sided loss.
+  - **scope: the fix applies only where the validated-layout tick source is in
+    force** (`tick_source_enabled`). Where PgBackendStatus layout validation
+    fails, the degraded uprobe-edge fallback keeps both the old read-order race
+    AND the old `debug_query_string` predicate; that path is unchanged here.
+
+  `sampled_attr_shadow_*` is unchanged by design and now says so at both its
+  declaration and its emission: it compares the pre-recheck target-loop read, so
+  its ~29% `cmd_open` mismatch is not the rate at which the shipped gate
+  disagreed with the uprobe. The gate in force is
+  `cmd_gate_order_recovered_total / cmd_gate_order_at_risk_total`.
+
 - **ui(U3): the B6 analysis views — per-execution waterfall, latency
   scatter, transition matrix** (Track U Phase U3). Server: new
   `executions` / `execution_detail` / `exec_scatter` commands built on the
