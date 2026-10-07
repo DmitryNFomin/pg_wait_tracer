@@ -16,8 +16,12 @@ It runs in **two tiers** (default `--mode tiered`):
 
 This gives you Active Session History continuously, plus exact, every-transition
 detail exactly when you need it — without paying the watchpoint overhead all the
-time. The 10 Hz sampler agrees with the exact tier to within ~1 percentage point
-(top-5 events match) on the same window, so tiered-by-default is trustworthy.
+time. The sampler's top-5 wait-event *ranking* matches the exact tier's
+(5/5 events, every rate, every run measured) — but its CPU-share estimate is
+currently known to run low; see [Cross-validation: sampling vs
+exact](#cross-validation-sampling-vs-exact) for the measured gap and
+[issue #294](https://github.com/DmitryNFomin/pg_wait_tracer/issues/294) for
+the root cause and status.
 
 Key capabilities:
 
@@ -59,7 +63,8 @@ In the default tiered mode the always-on sampler has **~0% impact on
 PostgreSQL** (the daemon itself uses ~0.6% of one core at 10 Hz). The exact
 watchpoint tier — used only during bounded escalation windows — costs ~6% on
 write-heavy OLTP, up to ~30% on read-heavy workloads with high buffer miss
-rates. See [Performance](#performance) for details.
+rates (measured on Hetzner cx43, 8 vCPU/16 GB RAM — see
+[Performance](#performance) for the full benchmark environment and details).
 
 > **Requirements — Linux only.** pg_wait_tracer relies on Linux-specific
 > facilities (eBPF, `process_vm_readv`, `perf_event_open`, CPU hardware
@@ -143,7 +148,7 @@ captured. The default is **`tiered`**.
 |------|----------|-------------|--------------|
 | `tiered` *(default)* | sampled, escalates to exact | ~0% baseline, bounded during escalation | Always-on userspace sampler (`process_vm_readv`); escalates to full watchpoint tracing for bounded, budgeted windows — on demand (control socket / web UI) or on anomaly. The "leave it running 24/7" posture. |
 | `sampled` | sampled | ~0% on PostgreSQL | Pure-userspace ASH-style sampling at a fixed rate. No watchpoints, never escalates. |
-| `full` | exact | 6-30% (workload-dependent) | Always-on hardware watchpoints — every `wait_event_info` transition captured exactly. The original behavior, now opt-in. |
+| `full` | exact | 6-30% (workload-dependent, measured on Hetzner cx43, 8 vCPU/16 GB) | Always-on hardware watchpoints — every `wait_event_info` transition captured exactly. The original behavior, now opt-in. |
 | `coop` | exact | — | Cooperative (PostgreSQL extension) tier — **stub only**: the interface is frozen but the provider advertises itself and then returns "not available in this build". The real implementation ships in the separate PG-extension track. |
 
 ```bash
@@ -1458,12 +1463,31 @@ window you asked for.
 
 Because the default tier is sampled, its accuracy is verified against the exact
 tier over the same window. The `cross_validate` tool compares per-event time
-shares both ways and the top-N event overlap. At 10 Hz the worst-case event-
-share disagreement is **~0.9 percentage points** with **5/5 top-5** events
-matching — well inside the test's ±10pp / top-5-≥4 pass gate. This is why
-tiered-by-default is trustworthy: the always-on sampler reproduces the exact
-profile closely enough to drive investigation, and you escalate only when you
-need per-transition detail.
+shares both ways and the top-N event overlap. Measured on Hetzner gate boxes
+(pgbench, 8 clients, 60 s windows) across sample rates 10-200 Hz, the worst-case
+share disagreement is always on **CPU** and ranges **3-6 pp on an Intel Xeon
+Skylake box at 10-100 Hz, rising to ~13 pp at 200 Hz**, and **11-15 pp across
+all rates on an AMD EPYC-Rome box (cx33, 4 vCPU/8 GB)** — in several of those
+cells outside the test's ±10 pp tolerance.
+
+The known cause is a read-order bias: the sampler reads a backend's
+`cmd_open` state in its polling loop before reading `wait_event_info` in a
+later batched read, so a command that opens in that gap is observed on-CPU
+but not yet "in a command" and gets dropped rather than counted — see
+[issue #294](https://github.com/DmitryNFomin/pg_wait_tracer/issues/294) for
+the mechanism and current status. The user-visible consequence: in sampled
+(non-escalated) windows, **CPU share is under-reported and AAS/DB Time are
+deflated along with it** — in the worst measured case the sampler captures
+only ~52-57% of the CPU time the kernel's own `/proc` stats attribute to those
+backends. Escalated/exact windows are not affected; this is specific to the
+always-on sampled tier's CPU estimate.
+
+What still holds: the top-5 wait-event **ranking** matched the exact tier
+**5/5** in every run measured, across both machines and all four rates — the
+sampler is reliable for "which wait event dominates" even while its CPU-share
+*magnitude* runs low. Treat the sampled tier's CPU numbers as a lower bound
+until #294 is resolved, and escalate to the exact tier when you need a
+trustworthy CPU share rather than just the ranking.
 
 #### What drives overhead
 
