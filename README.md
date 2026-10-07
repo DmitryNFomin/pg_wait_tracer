@@ -17,11 +17,12 @@ It runs in **two tiers** (default `--mode tiered`):
 This gives you Active Session History continuously, plus exact, every-transition
 detail exactly when you need it — without paying the watchpoint overhead all the
 time. The sampler's top-5 wait-event *ranking* matches the exact tier's
-(5/5 events, every rate, every run measured) — but its CPU-share estimate is
-currently known to run low; see [Cross-validation: sampling vs
-exact](#cross-validation-sampling-vs-exact) for the measured gap and
-[issue #294](https://github.com/DmitryNFomin/pg_wait_tracer/issues/294) for
-the root cause and status.
+(5/5 events, every rate, every run measured) — but its CPU-share estimate still
+runs low, by a tenth to a quarter, after the
+[read-order bias](https://github.com/DmitryNFomin/pg_wait_tracer/issues/294)
+that used to account for most of it was fixed. See [Cross-validation: sampling
+vs exact](#cross-validation-sampling-vs-exact) for the before/after per rate and
+for what remains.
 
 Key capabilities:
 
@@ -1463,31 +1464,50 @@ window you asked for.
 
 Because the default tier is sampled, its accuracy is verified against the exact
 tier over the same window. The `cross_validate` tool compares per-event time
-shares both ways and the top-N event overlap. Measured on Hetzner gate boxes
-(pgbench, 8 clients, 60 s windows) across sample rates 10-200 Hz, the worst-case
-share disagreement is always on **CPU** and ranges **3-6 pp on an Intel Xeon
-Skylake box at 10-100 Hz, rising to ~13 pp at 200 Hz**, and **11-15 pp across
-all rates on an AMD EPYC-Rome box (cx33, 4 vCPU/8 GB)** — in several of those
-cells outside the test's ±10 pp tolerance.
+shares both ways and the top-N event overlap. The worst-case share disagreement
+is always on **CPU**. Measured on Hetzner gate boxes (pgbench, 8 clients, 60 s
+windows), one capture per cell:
 
-The known cause is a read-order bias: the sampler reads a backend's
-`cmd_open` state in its polling loop before reading `wait_event_info` in a
-later batched read, so a command that opens in that gap is observed on-CPU
-but not yet "in a command" and gets dropped rather than counted — see
-[issue #294](https://github.com/DmitryNFomin/pg_wait_tracer/issues/294) for
-the mechanism and current status. The user-visible consequence: in sampled
-(non-escalated) windows, **CPU share is under-reported and AAS/DB Time are
-deflated along with it** — in the worst measured case the sampler captures
-only ~52-57% of the CPU time the kernel's own `/proc` stats attribute to those
-backends. Escalated/exact windows are not affected; this is specific to the
-always-on sampled tier's CPU estimate.
+| sample rate | AMD EPYC-Rome (cx33) before → after | Intel Xeon Skylake before → after |
+|---|---|---|
+| 10 Hz (shipped default) | 14.0 pp → **7.2 pp** | 3.7 pp → **2.1 pp** |
+| 50 Hz | 12.5 pp → **5.4 pp** | 3.7 pp → **0.7 pp** |
+| 100 Hz | 12.8 pp → **6.5 pp** | 11.6 pp → **4.3 pp** |
+| 200 Hz | 10.8 pp → **3.9 pp** | 15.0 pp → **1.7 pp** |
 
-What still holds: the top-5 wait-event **ranking** matched the exact tier
-**5/5** in every run measured, across both machines and all four rates — the
-sampler is reliable for "which wait event dominates" even while its CPU-share
-*magnitude* runs low. Treat the sampled tier's CPU numbers as a lower bound
-until #294 is resolved, and escalate to the exact tier when you need a
-trustworthy CPU share rather than just the ranking.
+**All four rates are now inside the test's ±10 pp tolerance on both machines**;
+before, all four were outside it on the AMD box and two were on the Intel box.
+
+A read-order bias accounted for that difference and **is fixed**: the sampler
+read a backend's `cmd_open` in its polling loop before reading `wait_event_info`
+in a later batched read, so a command opening in that gap was observed on-CPU
+but not yet "in a command" and was dropped rather than counted. It now re-reads
+the gate *after* the wait read, for the at-risk samples only, using the same
+`st_state` predicate the exact tier's uprobe uses. The direct evidence that
+nothing gate-ordered is left: the sampler used to reject **42-44%** of its own
+on-CPU observations as out-of-command while the exact tier rejected only
+**17-20%**; the two now agree to within ~1.5 pp.
+
+**A residual under-read remains, from a different cause.** The sampler still
+reports only **0.77 (10 Hz) to 0.88 (200 Hz)** of the CPU nanoseconds the exact
+tier measures over the same window — so in sampled (non-escalated) windows CPU
+share is still low and AAS/DB Time are still deflated with it, by roughly a
+tenth to a quarter rather than by half. That ratio against the **exact tier** is
+the right comparison, because both tiers define "on CPU" the same way (no wait
+event registered). Comparing either tier against the kernel's `/proc`
+`utime+stime` is *not* a clean check: `/proc` counts only time actually on a
+core, while both tiers also count runnable-but-waiting-for-a-core time, and each
+tier separately excludes 15-20% of its own on-CPU readings as out-of-command.
+The remaining gap sits **upstream of the command gate**, in how often the
+sampler observes an on-CPU reading at all (the wait-read path) — tracked
+separately from the read-order fix. Escalated/exact windows are unaffected
+either way.
+
+What still holds, and is unchanged by all of this: the top-5 wait-event
+**ranking** matched the exact tier **5/5** in every run measured, across both
+machines and all four rates. The sampler is reliable for "which wait event
+dominates"; treat its CPU-share *magnitude* as a lower bound, and escalate to
+the exact tier when you need a trustworthy CPU number rather than the ranking.
 
 #### What drives overhead
 

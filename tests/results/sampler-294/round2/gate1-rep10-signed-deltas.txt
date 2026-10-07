@@ -1,0 +1,29 @@
+Item 6 / question (b): is the fix OVERSHOOTING at the shipped 10 Hz rate?
+
+The single box-check cell showed sampled 47.7% vs exact 45.6% = +2.1 pp, i.e.
+the sampler reading ABOVE exact for the first time. Asked for three cells; ran
+five, on gate-1 (root@2.28.45.47, the decisive box), fix tree at commit
+4b48698, 10 Hz, pgbench -c 8 -j 2, 60 s escalation window, PG 18.6.
+Script: ../rep10.sh (reports the SIGNED delta, because the question is
+direction, not magnitude).
+
+  REP iter=1 exit=0 exact=47.2% sampled=41.2% signed_delta=-6.0 pp (below)
+  REP iter=2 exit=0 exact=41.2% sampled=34.9% signed_delta=-6.3 pp (below)
+  REP iter=3 exit=0 exact=42.7% sampled=36.4% signed_delta=-6.3 pp (below)
+  REP iter=4 exit=0 exact=40.5% sampled=35.7% signed_delta=-4.8 pp (below)
+  REP iter=5 exit=0 exact=42.9% sampled=37.9% signed_delta=-5.0 pp (below)
+
+VERDICT: 5 of 5 BELOW exact, range -4.8 to -6.3 pp, median -6.0. No overshoot
+at the shipped rate. The +2.1 pp did not replicate even in sign.
+
+Corroboration from mechanism: the recheck's only over-admission channel is a
+command OPENING inside the [wait read, gate read] window, which the double-read
+probe bounded at 545 / 187,043 samples ~ 0.3 pp -- an order of magnitude too
+small to produce +2.1 pp. And 7 of the 8 round-1 gate-2/gate-1 cells already
+read below exact.
+
+LIMIT OF THIS EVIDENCE: these five cells use the diagnostic's own pgbench
+workload, NOT test_cross_validate_tiered's workload, so they answer the
+direction question and do NOT replicate the +2.1 pp number itself. The exact
+share alone moved 40.5-47.2% across five captures of an identical setup, which
+is the size of run-to-run variation that single cell sat inside.

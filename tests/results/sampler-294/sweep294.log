@@ -1,0 +1,136 @@
+##### base @ 10Hz #####
+exit=0
+CPU                                 43.9%        30.0%      14.0
+Max share disagreement (events >= 2% exact share): 14.0 pp (CPU)
+RESULT: FAIL
+PROC_CLIENT_TOTAL_CPU_NS 155350000000
+METRIC noncmd_cpu_samples_total 678
+METRIC cmd_gate_order_at_risk_total ABSENT-from-metrics
+METRIC cmd_gate_order_recovered_total ABSENT-from-metrics
+METRIC cmd_gate_order_read_failed_total ABSENT-from-metrics
+METRIC cmd_gate_recovered_total ABSENT-from-metrics
+METRIC samples_total 9181
+METRIC sampled_attr_tick_read_failures_total 4971
+METRIC sampled_attr_shadow_cmd_open_mismatch_total 1307
+METRIC sampled_attr_shadow_total 4648
+METRIC invalid_wait_reads_total 0
+METRIC sampled_idle_in_command_total 15
+##### fix @ 10Hz #####
+exit=0
+CPU                                 38.5%        31.3%       7.2
+Max share disagreement (events >= 2% exact share): 7.2 pp (CPU)
+RESULT: PASS
+PROC_CLIENT_TOTAL_CPU_NS 153650000000
+METRIC noncmd_cpu_samples_total 266
+METRIC cmd_gate_order_at_risk_total 618
+METRIC cmd_gate_order_recovered_total 352
+METRIC cmd_gate_order_read_failed_total 0
+METRIC cmd_gate_recovered_total 0
+METRIC samples_total 9533
+METRIC sampled_attr_tick_read_failures_total 4918
+METRIC sampled_attr_shadow_cmd_open_mismatch_total 1400
+METRIC sampled_attr_shadow_total 4640
+METRIC invalid_wait_reads_total 0
+METRIC sampled_idle_in_command_total 15
+##### base @ 50Hz #####
+exit=0
+CPU                                 36.9%        24.4%      12.5
+Max share disagreement (events >= 2% exact share): 12.5 pp (CPU)
+RESULT: FAIL
+PROC_CLIENT_TOTAL_CPU_NS 154420000000
+METRIC noncmd_cpu_samples_total 3432
+METRIC cmd_gate_order_at_risk_total ABSENT-from-metrics
+METRIC cmd_gate_order_recovered_total ABSENT-from-metrics
+METRIC cmd_gate_order_read_failed_total ABSENT-from-metrics
+METRIC cmd_gate_recovered_total ABSENT-from-metrics
+METRIC samples_total 45685
+METRIC sampled_attr_tick_read_failures_total 24775
+METRIC sampled_attr_shadow_cmd_open_mismatch_total 6721
+METRIC sampled_attr_shadow_total 23150
+METRIC invalid_wait_reads_total 0
+METRIC sampled_idle_in_command_total 91
+##### fix @ 50Hz #####
+exit=0
+CPU                                 36.7%        31.3%       5.4
+Max share disagreement (events >= 2% exact share): 5.4 pp (CPU)
+RESULT: PASS
+PROC_CLIENT_TOTAL_CPU_NS 153640000000
+METRIC noncmd_cpu_samples_total 1558
+METRIC cmd_gate_order_at_risk_total 3459
+METRIC cmd_gate_order_recovered_total 1901
+METRIC cmd_gate_order_read_failed_total 0
+METRIC cmd_gate_recovered_total 0
+METRIC samples_total 47494
+METRIC sampled_attr_tick_read_failures_total 24719
+METRIC sampled_attr_shadow_cmd_open_mismatch_total 6722
+METRIC sampled_attr_shadow_total 23127
+METRIC invalid_wait_reads_total 0
+METRIC sampled_idle_in_command_total 71
+##### base @ 100Hz #####
+exit=0
+CPU                                 38.0%        25.2%      12.8
+Max share disagreement (events >= 2% exact share): 12.8 pp (CPU)
+RESULT: FAIL
+PROC_CLIENT_TOTAL_CPU_NS 152440000000
+METRIC noncmd_cpu_samples_total 6505
+METRIC cmd_gate_order_at_risk_total ABSENT-from-metrics
+METRIC cmd_gate_order_recovered_total ABSENT-from-metrics
+METRIC cmd_gate_order_read_failed_total ABSENT-from-metrics
+METRIC cmd_gate_recovered_total ABSENT-from-metrics
+METRIC samples_total 90625
+METRIC sampled_attr_tick_read_failures_total 48820
+METRIC sampled_attr_shadow_cmd_open_mismatch_total 13889
+METRIC sampled_attr_shadow_total 47679
+METRIC invalid_wait_reads_total 0
+METRIC sampled_idle_in_command_total 29
+##### fix @ 100Hz #####
+exit=0
+CPU                                 40.9%        34.4%       6.5
+Max share disagreement (events >= 2% exact share): 6.5 pp (CPU)
+RESULT: PASS
+PROC_CLIENT_TOTAL_CPU_NS 150170000000
+METRIC noncmd_cpu_samples_total 2316
+METRIC cmd_gate_order_at_risk_total 5845
+METRIC cmd_gate_order_recovered_total 3529
+METRIC cmd_gate_order_read_failed_total 0
+METRIC cmd_gate_recovered_total 0
+METRIC samples_total 94839
+METRIC sampled_attr_tick_read_failures_total 48830
+METRIC sampled_attr_shadow_cmd_open_mismatch_total 13511
+METRIC sampled_attr_shadow_total 46568
+METRIC invalid_wait_reads_total 0
+METRIC sampled_idle_in_command_total 95
+##### base @ 200Hz #####
+exit=0
+CPU                                 37.0%        26.2%      10.8
+Max share disagreement (events >= 2% exact share): 10.8 pp (CPU)
+RESULT: FAIL
+PROC_CLIENT_TOTAL_CPU_NS 150810000000
+METRIC noncmd_cpu_samples_total 13727
+METRIC cmd_gate_order_at_risk_total ABSENT-from-metrics
+METRIC cmd_gate_order_recovered_total ABSENT-from-metrics
+METRIC cmd_gate_order_read_failed_total ABSENT-from-metrics
+METRIC cmd_gate_recovered_total ABSENT-from-metrics
+METRIC samples_total 179378
+METRIC sampled_attr_tick_read_failures_total 97019
+METRIC sampled_attr_shadow_cmd_open_mismatch_total 26905
+METRIC sampled_attr_shadow_total 94589
+METRIC invalid_wait_reads_total 0
+METRIC sampled_idle_in_command_total 103
+##### fix @ 200Hz #####
+exit=0
+CPU                                 36.6%        32.7%       3.9
+Max share disagreement (events >= 2% exact share): 3.9 pp (CPU)
+RESULT: PASS
+PROC_CLIENT_TOTAL_CPU_NS 150220000000
+METRIC noncmd_cpu_samples_total 6380
+METRIC cmd_gate_order_at_risk_total 13955
+METRIC cmd_gate_order_recovered_total 7575
+METRIC cmd_gate_order_read_failed_total 1
+METRIC cmd_gate_recovered_total 0
+METRIC samples_total 188124
+METRIC sampled_attr_tick_read_failures_total 98214
+METRIC sampled_attr_shadow_cmd_open_mismatch_total 27798
+METRIC sampled_attr_shadow_total 96171
+METRIC invalid_wait_reads_total 1
+METRIC sampled_idle_in_command_total 5

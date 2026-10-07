@@ -1,0 +1,32 @@
+DIAG rate=50Hz tracer=/root/pgwt-check/master-base/pg_wait_tracer xval=/root/pgwt-check/master-base/tests/cross_validate out=/root/diag294/base-50
+
+DIAG client_backends=8
+DIAG escalate: {"ok":true,"escalated":true,"granted_s":60,"seconds_remaining":59.979507966,"budget_remaining_s":599.979507656}
+
+DIAG pgbench: 
+DIAG cross_validate exit=1
+CPU                                 36.9%        24.4%      12.5
+Max share disagreement (events >= 2% exact share): 12.5 pp (CPU)
+RESULT: FAIL
+PROC_WALL_S 58.023610  CLK_TCK 100
+PROC_DAEMON_PID 1839031 TICKS 287 CPU_NS 2870000000
+PROC_BACKEND_PID 1839063 TICKS 1946 CPU_NS 19460000000
+PROC_BACKEND_PID 1839064 TICKS 1943 CPU_NS 19430000000
+PROC_BACKEND_PID 1839065 TICKS 1930 CPU_NS 19300000000
+PROC_BACKEND_PID 1839066 TICKS 1934 CPU_NS 19340000000
+PROC_BACKEND_PID 1839067 TICKS 1923 CPU_NS 19230000000
+PROC_BACKEND_PID 1839068 TICKS 1918 CPU_NS 19180000000
+PROC_BACKEND_PID 1839069 TICKS 1926 CPU_NS 19260000000
+PROC_BACKEND_PID 1839070 TICKS 1922 CPU_NS 19220000000
+PROC_CLIENT_TOTAL_CPU_NS 154420000000
+METRIC noncmd_cpu_samples_total 3432
+METRIC cmd_gate_order_at_risk_total ABSENT-from-metrics
+METRIC cmd_gate_order_recovered_total ABSENT-from-metrics
+METRIC cmd_gate_order_read_failed_total ABSENT-from-metrics
+METRIC cmd_gate_recovered_total ABSENT-from-metrics
+METRIC samples_total 45685
+METRIC sampled_attr_tick_read_failures_total 24775
+METRIC sampled_attr_shadow_cmd_open_mismatch_total 6721
+METRIC sampled_attr_shadow_total 23150
+METRIC invalid_wait_reads_total 0
+METRIC sampled_idle_in_command_total 91

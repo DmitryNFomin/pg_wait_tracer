@@ -131,6 +131,16 @@ struct pgwt_pgbs_sampled_attr {
     char activity[PGWT_PGBS_ACTIVITY_MAX];
 };
 
+/* The sampled tier's command gate, read on its own (issue #294). Carries only
+ * what the gate decision needs plus the query id that comes free in the same
+ * coherent snapshot, so a re-read costs no activity-buffer copy. */
+struct pgwt_pgbs_cmd_gate {
+    uint32_t state;
+    bool cmd_open;
+    bool query_id_valid;   /* st_query_id was part of this coherent snapshot */
+    uint64_t query_id;     /* effective: raw st_query_id in a command, else 0 */
+};
+
 struct pgwt_pgbs_expected {
     pid_t pid;
     uint32_t databaseid; /* 0 means plausibility check only */
@@ -214,6 +224,40 @@ bool pgwt_pgbs_sampled_query_id_enabled(
     const struct PgBackendStatusLayout *layout);
 bool pgwt_pgbs_sampled_activity_enabled(
     const struct PgBackendStatusLayout *layout);
+/* The AUTHORITATIVE "inside a command" predicate (issue #294).
+ *
+ * One definition, one function, every caller. PostgreSQL's pg_stat_activity
+ * state='active' window is STATE_RUNNING (plus STATE_FASTPATH, the
+ * fastpath-function variant), and that is exactly the predicate the exact
+ * tier's on_report_activity uprobe edges on (src/bpf/pg_wait_tracer.bpf.c) to
+ * emit CMD_START/CMD_END. Any SECOND definition — debug_query_string != NULL,
+ * a non-empty activity string, "not idle" — admits a different population than
+ * the exact tier and surfaces as a systematic CPU-share disagreement between
+ * the two tiers, which is precisely the defect #294 tracked. So the sampled
+ * tier derives cmd_open here and nowhere else. */
+bool pgwt_pgbs_state_is_cmd_open(const struct PgBackendStatusLayout *layout,
+                                 uint32_t state);
+
+/* Derive the command gate alone from a coherent snapshot. Same identity and
+ * coherence validation as pgwt_pgbs_derive_sampled_attr and the same
+ * predicate; st_query_id is optional (PG13 has none) and its presence in the
+ * snapshot is reported via query_id_valid. */
+int pgwt_pgbs_derive_cmd_gate(
+    const struct PgBackendStatusLayout *layout,
+    const struct pgwt_pgbs_snapshot *snapshot, pid_t expected_pid,
+    struct pgwt_pgbs_cmd_gate *out);
+
+/* Re-read the command gate for ONE backend, now. backend_status_addr is the
+ * caller's cached PgBackendStatus row when it has one (PG13 path); 0 means
+ * resolve it through the backend's own MyBEEntry pointer. Returns 0 only on a
+ * coherent, identity-checked read; *out is zeroed on every failure path, so a
+ * failed re-read can never read as "in a command". */
+int pgwt_pgbs_read_cmd_gate(
+    pid_t backend_pid, uint64_t my_be_entry_addr,
+    uint64_t backend_status_addr,
+    const struct PgBackendStatusLayout *layout,
+    struct pgwt_pgbs_cmd_gate *out);
+
 int pgwt_pgbs_derive_sampled_attr(
     const struct PgBackendStatusLayout *layout,
     const struct pgwt_pgbs_snapshot *snapshot, pid_t expected_pid,
