@@ -1,0 +1,12 @@
+C3 cliff fit  n=1650 ticks with capture_ms recorded
+   residual f3 - max(0, L3-1000):  min 1  median 9  p95 20  max 82 ms
+   (residual is the CDP round-trip epsilon; it is NOT fitted)
+
+C4 separation  healthy n=1524  bypass n=126
+   healthy MAX f3 = 297 ms  (run.id 1791390326 events tick 5)
+   bypass f3 readings over the 150 ms bound: n=19
+   bypass SMALLEST over-bound f3 = 158 ms (run.id 1790798813 events tick 2)
+   -> populations OVERLAP: healthy max 297 vs bypass min-over-bound 158
+
+C6 f4/f5 worst-of-pair  n=1650 ticks (post-#193-anchor runs only)
+   min 4  median 11  p95 23  max 480 ms (max at run.id 1790798813 sessions tick 2)

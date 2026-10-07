@@ -1,0 +1,14 @@
+transitions, gate-1-class runs, chronological (ae7e9d5 = #291/#292 transitions paint fix merged 2026-10-06 11:01 UTC):
+   10-07 17:09  run.id=1791385783  ttfp=   581 ms   tick-1 A=  662 ms
+   10-07 08:28  run.id=1791354539  ttfp=   600 ms   tick-1 A=  589 ms
+   10-02 15:04  run.id=1790946278  ttfp=   780 ms   tick-1 A=  549 ms
+   10-01 14:32  run.id=1790857958  ttfp=  1042 ms   tick-1 A=  398 ms
+   10-01 23:25  run.id=1790889936  ttfp=  1183 ms   tick-1 A=  495 ms
+   10-01 08:41  run.id=1790836919  ttfp=  1211 ms   tick-1 A=  479 ms
+
+Pearson r(ttfp_ms, tick-1 A), all heavy tabs, gate-1-class, n=30: -0.77
+   scatter       n=6  r=-0.51
+   matrix        n=6  r=-0.85
+   timeline      n=6  r=-0.96
+   transitions   n=6  r=-0.81
+   concurrency   n=6  r=-0.46
