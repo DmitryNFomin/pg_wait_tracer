@@ -297,6 +297,94 @@ def test_run_tab_except_branches_carry_ttfp_ms_into_build_failed_tab_result():
           "fires before _navigate_to_tab ever returns")
 
 
+# ── the sweep anchor (this issue) ──────────────────────────────────────────
+#
+# THE regression this issue exists to prevent coming back. The whole tick loop
+# is inside run_tab's Playwright lifecycle, which this fast tier deliberately
+# does not stub, so the one-line revert that reintroduces the bug --
+# `_wait_for_tick(page, i, ...)` instead of `_wait_for_tick(page,
+# tick_baseline + i, ...)` -- would otherwise have NO fast-tier coverage at
+# all. It would only resurface on the live tier as tick-1 frame-2 drift of
+# 400-500ms, i.e. a red gate on a healthy tree: exactly the ~50% flake this
+# issue removed, and exactly the symptom whose last diagnosis cost a full
+# investigation. An AST check of run_tab's own source is the cheapest thing
+# that looks at the call site rather than assuming it.
+
+def test_run_tab_waits_for_a_tick_baselined_after_navigation():
+    tree = ast.parse(inspect.getsource(smoke.run_tab))
+
+    # 1. The baseline is read from the tick hook's own length, ONCE.
+    baseline_assigns = [
+        n for n in ast.walk(tree) if isinstance(n, ast.Assign)
+        and any(isinstance(t, ast.Name) and t.id == "tick_baseline" for t in n.targets)]
+    check(len(baseline_assigns) == 1,
+          "run_tab assigns tick_baseline exactly once")
+    if baseline_assigns:
+        src = ast.dump(baseline_assigns[0])
+        check("__uiLiveTicks" in src and "length" in src,
+              "tick_baseline is read from window.__uiLiveTicks.length, not "
+              "guessed or hardcoded")
+
+    # 2. It is read AFTER navigation and the leak probe -- a baseline taken
+    #    before either would still include their AAS sends and change nothing.
+    def first_line(pred):
+        return min((n.lineno for n in ast.walk(tree)
+                    if isinstance(n, ast.Call) and pred(n)), default=None)
+
+    nav_line = first_line(lambda n: isinstance(n.func, ast.Name)
+                          and n.func.id == "_navigate_to_tab")
+    leak_line = first_line(lambda n: isinstance(n.func, ast.Name)
+                           and n.func.id == "_settled_leak_probe")
+    check(nav_line is not None and leak_line is not None,
+          "run_tab still calls _navigate_to_tab and _settled_leak_probe")
+    if baseline_assigns and nav_line and leak_line:
+        check(baseline_assigns[0].lineno > nav_line,
+              "tick_baseline is read AFTER _navigate_to_tab (whose tab click "
+              "and #live-btn resume click each send AAS)")
+        check(baseline_assigns[0].lineno > leak_line,
+              "tick_baseline is read AFTER _settled_leak_probe, so the probe's "
+              "own elapsed time cannot land between the anchor and the sweep")
+
+    # 3. _wait_for_tick's target is OFFSET BY the baseline, not a bare `i`.
+    waits = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
+             and isinstance(n.func, ast.Name) and n.func.id == "_wait_for_tick"]
+    check(len(waits) == 1, "run_tab calls _wait_for_tick exactly once")
+    if waits:
+        target = waits[0].args[1] if len(waits[0].args) > 1 else None
+        check(isinstance(target, ast.BinOp) and isinstance(target.op, ast.Add),
+              "the tick target is an addition, not a bare loop index -- a bare "
+              "`i` is the exact pre-fix form: it is satisfied by navigation's "
+              "own AAS sends and anchors tick 1 on a mount ~500ms stale")
+        names = {n.id for n in ast.walk(target) if isinstance(n, ast.Name)} \
+            if target is not None else set()
+        check({"tick_baseline", "i"} <= names,
+              f"the tick target adds tick_baseline to the loop index ({names})")
+
+
+def test_run_tab_reads_the_tick_it_waited_for_by_index_not_last():
+    """The companion half: having waited for `tick_baseline + i` ticks, the
+    loop must read THAT entry, not `__uiLiveTicks[length - 1]`.
+
+    They differ whenever another tick lands while this iteration is still
+    working (its sweep alone spans ~2s of a 5s cadence), and reading `last`
+    there silently re-anchors the iteration on a newer send than the one it
+    represents -- the same class of bug as the stale anchor, in the opposite
+    direction, and just as invisible downstream because every later number is
+    derived from this timestamp."""
+    src = inspect.getsource(smoke.run_tab)
+    check("window.__uiLiveTicks[window.__uiLiveTicks.length - 1]" not in src,
+          "run_tab no longer reads the LAST tick regardless of which one it "
+          "waited for (the pre-fix form)")
+    tree = ast.parse(src)
+    idx_calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
+                 and isinstance(n.func, ast.Attribute)
+                 and n.func.attr == "tick_hook_index"]
+    check(len(idx_calls) >= 1,
+          "run_tab uses lib.tick_hook_index(...) to address the tick it "
+          "waited for -- the pure, unit-tested index arithmetic that refuses "
+          "a baseline/i it cannot address instead of clamping")
+
+
 def _discover_tests():
     found = [obj for name, obj in list(globals().items())
              if name.startswith("test_") and inspect.isfunction(obj)]

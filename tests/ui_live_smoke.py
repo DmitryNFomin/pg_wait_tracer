@@ -1028,6 +1028,52 @@ def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
 
         leak_before, leak_before_settle_s = _settled_leak_probe(page)
 
+        # Tick BASELINE (this issue): the number of AAS sends TICK_HOOK_JS has
+        # already recorded by the time navigation and the leak probe are both
+        # finished. The loop below waits for `tick_baseline + i`, not `i`.
+        #
+        # Why: the hook is installed BEFORE _navigate_to_tab, and navigation
+        # itself sends AAS -- switchTab's refreshActive(), plus a SECOND send
+        # from the #live-btn resume click on every tab whose view pauses live
+        # (app.js pausesLive: transitions/concurrency/waterfall/scatter/matrix,
+        # and timeline via drill()). So __uiLiveTicks was already non-empty
+        # here and `_wait_for_tick(page, 1)` returned IMMEDIATELY, handing
+        # tick 1 a tick_ts that predates _navigate_to_tab's own fixed
+        # `wait_for_timeout(500)` resume settle. The sweep then anchored on
+        # that navigation mount, so 500ms of settle + the leak probe + the
+        # 100ms blind-window sleep + the render check all sat BETWEEN the
+        # anchor and the sweep's own first frame.
+        #
+        # Measured (achieved_offsets_ms[0], i.e. mount -> just before frame 1):
+        # tick 1 ran 426-853ms against 203-226ms on ticks 2-6, in every one of
+        # 31 retained runs over 10 days, and ONLY on the tabs that pause live
+        # (excess 111-641ms vs -5..+195ms for the rest). That is what forced
+        # frame_spacing_ok's tick-1 exemption, and it is why frame 3 of tick 1
+        # drifted 57-183ms on a HEALTHY tree: frame 3's target of 1000ms was
+        # already in the past once A+capture(f1)+capture(f2) exceeded it.
+        # See tests/results/ui_live_anchor_evidence/ for the full derivation.
+        #
+        # Worse, the drift it produced moved the WRONG WAY: because the 500ms
+        # settle is a fixed sleep, a tab that painted FASTER left more of that
+        # sleep on the far side of its own mount, so its anchor was STALER.
+        # r(ttfp_ms, tick-1 A) = -0.77 over 30 gate-1-class tab-runs
+        # (timeline -0.96); transitions' ttfp_ms fell 1211 -> 581ms while its
+        # tick-1 A rose 479 -> 662ms. The gate was firing because first paint
+        # IMPROVED.
+        #
+        # NOT a navigation-time SEQ baseline: _wait_for_mount_at_or_after's own
+        # docstring records review round 2 rejecting exactly that ("seq > that
+        # ONE baseline, forever" silently waits for tick 2's mount and shifts
+        # every later tick). This is a TICK-COUNT baseline consumed once to
+        # offset the loop's target; the per-tick min_seq threading below is
+        # untouched, so that bug is not reintroduced.
+        #
+        # Cost: tick 1 now waits for a genuinely new live tick, so a tab's walk
+        # starts up to one TICK_INTERVAL_S (5s) later -- ~55s across 11 tabs.
+        # TICK_TIMEOUT_S is 30s, a 6x margin over that one 5s interval, so the
+        # baseline cannot turn a healthy tab into a timeout.
+        tick_baseline = page.evaluate("window.__uiLiveTicks.length")
+
         legend_ticks = []
         blink_ratios = []
         blink_pair_offsets_ms = []
@@ -1050,11 +1096,28 @@ def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
         pre_mount_diagnostics = []
         render_ok, render_detail = False, "never checked"
         for i in range(1, ticks + 1):
-            if not _wait_for_tick(page, i, TICK_TIMEOUT_S):
+            if not _wait_for_tick(page, tick_baseline + i, TICK_TIMEOUT_S):
                 raise SmokeFailure(
-                    f"tick {i}/{ticks} did not arrive within {TICK_TIMEOUT_S}s")
+                    f"tick {i}/{ticks} (hook index {tick_baseline + i - 1}, "
+                    f"baseline {tick_baseline}) did not arrive within "
+                    f"{TICK_TIMEOUT_S}s")
+            # Read the tick this iteration actually waited for, by INDEX --
+            # not "whatever is last". The two differ whenever a further tick
+            # lands while this iteration is still working (the sweep alone
+            # spans ~2s of a 5s cadence), and reading `last` there would
+            # silently re-anchor the iteration on a NEWER send than the one it
+            # represents. lib.tick_hook_index() is the pure index arithmetic
+            # (unit-tested); it refuses a baseline/i that cannot address a
+            # real entry rather than returning something plausible.
             tick_ts_ms = page.evaluate(
-                "window.__uiLiveTicks[window.__uiLiveTicks.length - 1]")
+                "idx => window.__uiLiveTicks[idx]",
+                lib.tick_hook_index(tick_baseline, i))
+            if tick_ts_ms is None:
+                raise SmokeFailure(
+                    f"tick {i}/{ticks}: __uiLiveTicks["
+                    f"{lib.tick_hook_index(tick_baseline, i)}] is absent after "
+                    f"_wait_for_tick reported {tick_baseline + i} ticks -- the "
+                    "tick hook was replaced or reset mid-walk")
 
             # issue #100 (review round 4, corrected round 5), TIMELINE
             # ONLY: try to capture the panel as the PREVIOUS tick's mount
@@ -1470,6 +1533,17 @@ def main():
                     print(f"  {status} [{tab_id}] "
                           f"ticks={result['ticks_observed']} "
                           f"rendered={result['rendered']}")
+                    # frame_spacing is REPORTING-ONLY (see
+                    # ui_live_smoke_lib.FRAME_SPACING_DRIFT_BOUND_MS): it no
+                    # longer fails the tab, so without this line a drift
+                    # regression would be invisible to anyone reading the log
+                    # and would only exist inside summary.json. Printed as a
+                    # note, never as a FAIL, and never consulted for `status`.
+                    spacing = result.get("frame_spacing") or {}
+                    if spacing.get("ok") is False:
+                        print(f"  note [{tab_id}] frame_spacing "
+                              f"(REPORTING-ONLY, does not gate): "
+                              f"{spacing.get('detail')}")
             finally:
                 browser.close()
     finally:

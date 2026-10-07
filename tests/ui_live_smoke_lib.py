@@ -264,6 +264,35 @@ def panel_capture_clip(box, viewport):
                                  viewport["width"], viewport["height"])
 
 
+def tick_hook_index(tick_baseline, i):
+    """Index into window.__uiLiveTicks of the AAS send that iteration `i` of a
+    tab's tick loop represents, given the baseline count recorded once after
+    navigation and the leak probe (ui_live_smoke.py's tick_baseline -- see its
+    own comment for why a baseline is needed at all).
+
+    i is 1-based, like the loop; the hook's array is 0-based, so the i-th tick
+    AFTER the baseline sits at `tick_baseline + i - 1`.
+
+    RAISES ValueError on anything that cannot address a real entry -- a
+    negative baseline, or i < 1. It never clamps and never falls back to "the
+    last element": this index exists so the sweep anchors on the send the
+    iteration actually waited for, and a silently-wrong index would re-anchor
+    the whole tick on a different send while still looking like a measurement.
+    Refusing is the only safe failure here (the caller turns it into a loud
+    SmokeFailure), because every downstream number -- the mount wait, the
+    sweep's achieved offsets, the drift bound -- is computed FROM this
+    timestamp, so a wrong one is not detectable later."""
+    if not isinstance(tick_baseline, int) or isinstance(tick_baseline, bool):
+        raise ValueError(f"tick_baseline must be an int, got {tick_baseline!r}")
+    if not isinstance(i, int) or isinstance(i, bool):
+        raise ValueError(f"tick index i must be an int, got {i!r}")
+    if tick_baseline < 0:
+        raise ValueError(f"tick_baseline must be >= 0, got {tick_baseline}")
+    if i < 1:
+        raise ValueError(f"tick index i is 1-based and must be >= 1, got {i}")
+    return tick_baseline + i - 1
+
+
 def mount_is_fresh(mount, tab_id, tick_ts_ms, min_seq):
     """True if `mount` ({"id", "seq", "at"} or None) is usable as THIS
     tick's blink-sweep anchor.
@@ -731,23 +760,126 @@ def frame_spacing_drift_ms(tick):
 #   including tick 1's frames 3-5 in the gated population did not move
 #   the healthy ceiling.
 #
-#   Tick 1's frames 1-2 ONLY are excluded, not the whole tick. The same
-#   artifacts show tick 1's frame 2 (drift index 1) reaching 186-339ms on
-#   2-6 of the 11 tabs in EVERY one of the 5 healthy runs, and frame 1 of
-#   OTHER ticks reaching 116-143ms on gate-1 (gate-2 stays low there,
-#   3-14ms) -- both exempt slots are genuinely, repeatably elevated,
-#   nothing exempt here is quiet. This is the sweep's mount-anchor clock
-#   starting late on the run's first tick (77-500ms of pre-sweep work:
-#   page navigation, first AAS fetch, first ViewManager mount) showing up
-#   at the SECOND target before later, larger inter-offset gaps absorb
-#   it. But tick 1's frames 3-5 are NOT elevated by this effect -- e.g.
-#   timeline's own tick-1 drift (ms, frames 1-5) was [492, 254, 11, 17,
-#   14], transitions [267, 192, 17, 14, 12], matrix [242, 166, 9, 10,
-#   10]: the startup effect is gone by frame 3. A regression confined to
-#   tick 1's LATER frames would be invisible under a whole-tick exemption
-#   with no artifact justifying that width -- so only frames 1-2 of tick
-#   1 get it; frames 3-5 of tick 1 are gated exactly like any other
-#   tick's frames 2-5.
+#   TICK 1 HAS NO EXEMPTION OF ITS OWN ANY MORE (this issue). It used to
+#   get frames 1-2, on the reading that 77-500ms of "pre-sweep work (page
+#   navigation, first AAS fetch, first ViewManager mount)" made its anchor
+#   start late and that this was irreducible. It was not irreducible: it
+#   was one line. TICK_HOOK_JS is installed BEFORE _navigate_to_tab, and
+#   navigation sends AAS (switchTab's refreshActive(), plus a second send
+#   from the #live-btn resume click on every tab whose view pauses live),
+#   so __uiLiveTicks was already non-empty when the tick loop started and
+#   `_wait_for_tick(page, 1)` returned at once -- handing tick 1 a tick_ts
+#   that predated _navigate_to_tab's own fixed `wait_for_timeout(500)`
+#   resume settle, and an anchor mount 450-640ms older than the sweep that
+#   measured from it. ui_live_smoke.py's tick_baseline fixes that at the
+#   source, so tick 1 now anchors on a genuinely new live tick like every
+#   other tick, and frames 2-5 of tick 1 are gated exactly like frames 2-5
+#   of ticks 2-6. Only frame 1 (the 200ms target) stays exempt, on every
+#   tick alike -- the per-tick floor below it is the 100ms blind-window
+#   sleep plus the render check and clip, measured at 203-226ms on ticks
+#   2-6 in all 31 retained runs, i.e. already past the 200ms target by a
+#   few ms for reasons no scheduling change can remove.
+#
+#   The evidence that the tick-1 elevation was an anchor artefact and not
+#   paint cost (full derivation and the scripts that compute it:
+#   tests/results/ui_live_anchor_evidence/):
+#     - achieved_offsets_ms[0] (mount -> just before frame 1) was 203-226ms
+#       on ticks 2-6 in EVERY one of 31 retained runs across 10 days and
+#       both box classes, and 426-853ms on tick 1 -- the anomaly was
+#       confined to one tick.
+#       CORRECTION (measured after the fix landed, two gate-1 runs): that
+#       203-226ms constancy was NOT a healthy per-tick floor. It was the
+#       SAME one-tick lag masking a variable interval -- the loop ran one
+#       AAS send behind, so the mount had already happened before the loop
+#       began its mandatory pre-sweep work, and A measured only the 50ms
+#       poll lag. With the lag gone the mount lands at a variable point
+#       INSIDE that work, and A on ticks 2-6 spreads 200-526ms (stdev 22-28
+#       before, 78-83 after). Do not cite 203-226ms as a healthy baseline.
+#       The real conclusion is stronger and is why #304 exists: ~550-750ms
+#       of mandatory work (the 100ms blind-window sleep, the atomic
+#       snapshot, the render check, the clip, the CDP hops) sits between a
+#       tick and its first possible frame, so targets of 200 and 500ms are
+#       not reachable from the MOUNT at all. r(mount lag, A) = -0.72 over
+#       60 ticks, and tick_ts -> frame 1 is near-constant per tab.
+#     - tick-1 excess over that steady floor was 111-641ms on the six tabs
+#       that pause live and -5..+195ms on the five that do not, which is
+#       exactly the set that takes the resume click and its 500ms settle.
+#     - frame 3's drift was ARITHMETIC, not an independent measurement:
+#       f3 = max(0, L3 - 1000) + one CDP hop, where L3 = max(500, A+s1)+s2
+#       and s_k is the recorded capture_ms. Residual over 1650 ticks:
+#       median 9ms, p95 20ms. So f3 was a step function of recorded
+#       capture cost whose small side is ~9ms and whose large side is
+#       100-300ms, with a MEDIAN of 21ms of headroom to the step on
+#       gate-1-class runs -- a coin flip, which is the ~50% flake rate.
+#     - and it moved the WRONG WAY: the 500ms settle being a fixed sleep,
+#       a tab that painted faster left more of it on the far side of its
+#       own mount, so a faster tab got a staler anchor.
+#       r(ttfp_ms, tick-1 A) = -0.77 over 30 gate-1-class tab-runs
+#       (timeline -0.96, matrix -0.85, transitions -0.81); transitions'
+#       ttfp_ms fell 1211 -> 581ms while its tick-1 A rose 479 -> 662ms.
+#       The gate was going red because first paint IMPROVED.
+#
+#   Removing the exemption RAISES coverage from 253 to 264 gated frames
+#   per 11-tab run (+1 per tab: tick 1's frame 2). Nothing here is widened
+#   to achieve it -- the bound is still 150ms and frame 1 is still exempt
+#   on every tick.
+#
+#   *** DEMOTED TO REPORTING-ONLY (owner-approved). ***
+#
+#   This is a DEMOTION of a check that cannot discriminate, NOT a widening
+#   of a bound. The bound below is deliberately left at 150.0 so every
+#   number stays directly comparable with every retained artifact; what
+#   changed is only that build_tab_result no longer ANDs frame_spacing_ok
+#   into a tab's `ok`. Every number is still computed, still written to
+#   summary.json, and still printed. Successors are filed: issue #303
+#   (achieved COVERAGE -- max gap between consecutive achieved frames plus
+#   first-frame latency, both computable from achieved_offsets_ms, no new
+#   instrumentation, validated against the 400ms blink the harness already
+#   injects deliberately) and issue #304 (re-anchor the sweep on "ready to
+#   capture"). The demotion is temporary and has a named successor.
+#
+#   Three reasons, each checkable from a path:
+#
+#   1. IT CANNOT DISCRIMINATE. The deliberate scale="css" regression
+#      retained as a fixture scores f3 = 158ms
+#      (tests/results/ui_live_gate1_bypass/summary.json, scatter tick 1,
+#      capture_ms 284/414). A HEALTHY but loaded run scores f3 = 297ms
+#      (tests/results/ui_live_anchor_evidence/corpus/1791390326, events
+#      tick 5: drift [190, 299, 297, 319, 270] on all five frames,
+#      capture_ms 388-506). The defect scores BETTER than health. No
+#      scalar drift threshold separates those two populations.
+#
+#   2. WHAT IT WAS BUILT TO CATCH HAS A STRICTLY BETTER DETECTOR.
+#      frame_dims_ok flags the same regression deterministically and on
+#      every tab: 11/11 tabs on gate1_bypass, 10/11 on gate2_bypass (the
+#      11th, overview, was not measurable at all, so frame_spacing could
+#      not have graded it either). frame_spacing has no demonstrated true
+#      positive that frame_dims_ok does not already catch -- gate-2's
+#      lone over-bound reading in the whole bypass run is queries tick 1
+#      frame 3 at 165ms, which is the TICK-1 ANCHOR ARTEFACT this issue's
+#      tick_baseline fix removes, not the regression.
+#
+#   3. THE PRACTICAL COST. Even with the anchor fixed the red rate on
+#      healthy runs is not zero -- the 1791390326 tick-5 case above has
+#      nothing to do with tick 1 and the anchor fix cannot touch it. Two
+#      consecutive clean rehearsals on a frozen master are needed, and a
+#      check that reddens healthy runs makes a rehearsal verdict
+#      uninterpretable, which is worse than not having the check.
+#
+#   One correction to the calibration text above, from the artifacts
+#   themselves (issue #299): the quoted tick-1 drift triplets `timeline
+#   [492, 254, 11, 17, 14]`, `transitions [267, 192, 17, 14, 12]` and
+#   `matrix [242, 166, 9, 10, 10]` appear in NONE of the eight retained
+#   artifacts, and are not reproducible from the five run ids cited. The
+#   RUN IDS THEMSELVES ARE FINE -- every retained artifact carries a
+#   committed run.id sibling file and all five resolve
+#   (1790796035/1790799596 = gate1_healthy_run1/run2, 1790796123/
+#   1790799745 = gate2_healthy_run1/run2, 1790801156 =
+#   gate1_healthy_run3_postfix), which is exactly how the triplets were
+#   shown to be wrong. The 87ms ceiling IS recomputable, from
+#   gate1_healthy_run3_postfix: 87ms at queries tick 5 frame 2, with 82ms
+#   (queries t2f3) and 81ms (overview t2f2) alongside it. Only the
+#   triplets are wrong; the ceiling and the run ids are not.
 #
 #   Regression floor: this branch's own bypass runs (scale="css" removed,
 #   same runs frame_dims_ok's bypass evidence comes from) -- gate-1's
@@ -777,14 +909,23 @@ FRAME_SPACING_DRIFT_BOUND_MS = 150.0
 
 def frame_spacing_ok(blink_sweep_ticks, bound_ms=FRAME_SPACING_DRIFT_BOUND_MS):
     """Bounds frames 2-5's achieved-vs-target offset drift
-    (frame_spacing_drift_ms indices 1-4) for every tick, EXCEPT tick 1's
-    own frames 1-2 (drift indices 0-1) -- see FRAME_SPACING_DRIFT_BOUND_MS's
-    own comment for why that exemption is scoped to exactly those two
-    frames of exactly that one tick, with the artifact numbers that
-    justify it (review finding: an earlier version excluded tick 1
-    WHOLE, which the evidence did not support -- tick 1's frames 3-5 are
-    not elevated, so a regression confined to them would have passed
-    silently). This is what CAPTURE_MS_BOUND_MS was actually trying to
+    (frame_spacing_drift_ms indices 1-4) for EVERY tick, tick 1 included.
+    Only frame 1 (drift index 0) is exempt, uniformly on every tick, because
+    the per-tick floor beneath it (the 100ms blind-window sleep plus the
+    render check and the clip) measures 203-226ms against a 200ms target and
+    no scheduling change can remove that.
+
+    Tick 1 USED to get frames 1-2. That exemption is gone (see
+    FRAME_SPACING_DRIFT_BOUND_MS's own comment): its cause was not
+    irreducible startup cost but a stale anchor -- tick 1 was handed a
+    tick_ts from before _navigate_to_tab's fixed 500ms live-resume settle,
+    so its sweep measured from a mount 450-640ms older than itself. Fixed
+    at the source by ui_live_smoke.py's tick_baseline; coverage rose from
+    253 to 264 gated frames per 11-tab run. Two earlier review findings
+    still stand and are both subsumed by having no tick-1 exemption at all:
+    excluding tick 1 WHOLE hid a regression confined to its later frames,
+    and excluding its frames 1-2 hid one confined to its frame 2.
+    This is what CAPTURE_MS_BOUND_MS was actually trying to
     protect: once a frame's own capture cost exceeds the gap to the NEXT
     sweep offset, achieved_offsets_ms drifts away from target_offsets_ms
     and the sweep stops sampling where SWEEP_OFFSETS_MS says it should --
@@ -805,11 +946,14 @@ def frame_spacing_ok(blink_sweep_ticks, bound_ms=FRAME_SPACING_DRIFT_BOUND_MS):
     violations = []
     for i, tick in enumerate(blink_sweep_ticks, start=1):
         drift = frame_spacing_drift_ms(tick)
-        # Tick 1: only frames 1-2 (drift indices 0-1) are exempt -- start
-        # checking at frame 3 (index 2). Every other tick: only frame 1
-        # (index 0) is exempt -- start checking at frame 2 (index 1). See
-        # FRAME_SPACING_DRIFT_BOUND_MS's own comment for the evidence.
-        start_idx = 2 if i == 1 else 1
+        # EVERY tick, tick 1 included: only frame 1 (drift index 0) is
+        # exempt -- start checking at frame 2 (index 1). Tick 1 used to get
+        # frames 1-2, because its sweep anchored on a mount that predated
+        # _navigate_to_tab's fixed 500ms live-resume settle; that is fixed at
+        # the source now (ui_live_smoke.py's tick_baseline), so tick 1's
+        # anchor is as fresh as every other tick's and has no claim to a
+        # wider exemption. See FRAME_SPACING_DRIFT_BOUND_MS's own comment.
+        start_idx = 1
         for idx, d in enumerate(drift[start_idx:5], start=start_idx + 1):
             if abs(d) > bound_ms:
                 violations.append(
@@ -1104,9 +1248,15 @@ def build_tab_result(tab_id, rendered_ok, rendered_detail, ticks_observed,
     capture_ok, capture_detail = capture_budget_ok(blink_sweep_ticks,
                                                     bound_ms=capture_ms_bound_ms)
     dims_ok, dims_detail = frame_dims_ok(blink_sweep_ticks)
+    # Reporting only as of this issue, same as capture_budget above --
+    # deliberately NOT ANDed into `ok`. See FRAME_SPACING_DRIFT_BOUND_MS's own
+    # comment for the evidence: it cannot discriminate (the deliberate
+    # regression scores BETTER than a loaded healthy run), and what it was
+    # built to catch is caught deterministically by dims_ok on every tab.
+    # Do not re-add it to `ok` without the successor check (issues #303/#304).
     spacing_ok, spacing_detail = frame_spacing_ok(blink_sweep_ticks)
     ok = (rendered_ok and clean_ok and blink_ok and measured_ok and leak_ok and
-          color_ok and ticks_ok and dims_ok and spacing_ok)
+          color_ok and ticks_ok and dims_ok)
     result = {
         "tab": tab_id,
         "ok": ok,
