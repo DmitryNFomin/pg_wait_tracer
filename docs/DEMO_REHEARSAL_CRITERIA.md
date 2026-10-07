@@ -47,17 +47,27 @@ the two the §2 floors need:
   table-level `Lock:relation` above, realistic because contention on a
   shared counter/status row is one of the most common real-world lock
   waits.
-- `io_reader`: added 2026-10-06 after a live run showed the Transitions
-  tab had gone thin (3-5 nodes). "Nodes" there are distinct wait EVENT
-  NAMES (`web/static/lib/builders/transitions.js`), so more lock-id
-  variety on `Lock:advisory` would not have added nodes — only a genuinely
-  different wait event type does. `io_reader` runs `SELECT count(*) FROM
-  pgbench_accounts` every tick: pgbench_accounts plus its indexes measure
-  ~187MB against this box's 128MB `shared_buffers` (measured live,
-  2026-10-06), so the scan reliably evicts/refetches pages and produces
-  real `IO:DataFileRead` waits every tick, contending for buffer space
-  against pgbench's own OLTP traffic the way a reporting query against a
-  hot table would in production. No sleep, no CPU-dependent timing.
+- `io_reader`: added 2026-10-06 so the IO panels show real
+  `IO:DataFileRead`/`IO:DataFileWrite` activity (owner: "we also need IO
+  datafile read and write"). An initial version (`SELECT count(*) FROM
+  pgbench_accounts`, a full sequential scan) was tried after a live run
+  showed the Transitions tab thin (3-5 nodes), on the theory that more IO
+  activity might add Transitions node variety — it did NOT ("nodes" there
+  are distinct wait EVENT NAMES, `web/static/lib/builders/
+  transitions.js`; measured 5 nodes with or without it on two independent
+  box-check runs, 2026-10-07) — and a ~150MB scan every tick was heavy for
+  no node-count benefit. **A separate, unrelated finding the same day**
+  (`tests/results/sampler-294/round2/FINDING-ui-live-frame-spacing.txt` on
+  another branch, read-only evidence) established that the Transitions
+  tab's intermittent live-UI-smoke failure is a `frame_spacing`
+  calibration edge on the tab's own tick-1 warm-up transient, reproduced
+  on an unmodified tree with no workload change at all — not caused by
+  this workload. `io_reader` was simplified 2026-10-07 regardless, on its
+  own merits: an indexed single-row read on a random `aid`
+  (pgbench_accounts has 1,000,000 rows) still produces a real
+  `IO:DataFileRead` whenever that row's page is not in `shared_buffers`,
+  at a small fraction of the scan's cost. No sleep, no CPU-dependent
+  timing.
 
 `tests/demo_workload_coverage.py` is the machine-checkable half: given a
 trace dir this workload produced, it queries every tab's own endpoint and

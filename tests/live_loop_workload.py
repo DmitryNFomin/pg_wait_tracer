@@ -55,19 +55,19 @@ original Lock:relation guarantee is untouched:
     It is a SECOND, DISTINCT wait class from the table-level Lock:relation
     the original loop already covers, which is what gives Transitions/
     Matrix more than one non-idle edge.
-  - `io_reader`: added 2026-10-06 alongside the sleep removal, after a
-    live run showed the Transitions tab had gone thin (3-5 nodes; "nodes"
-    there are distinct wait EVENT NAMES -- web/static/lib/builders/
-    transitions.js -- so more Lock:advisory lock-id variety would NOT add
-    nodes, only more distinct event TYPES does). Every tick it runs a
-    genuine `SELECT count(*) FROM pgbench_accounts` sequential scan --
-    pgbench_accounts+indexes measure ~187MB against this box's 128MB
-    shared_buffers (confirmed live, 2026-10-06), so the scan reliably
-    evicts/refetches pages and produces real IO:DataFileRead waits every
-    tick, competing for buffer space against pgbench's own OLTP traffic
-    the way a real reporting query against a hot OLTP table would. No
-    sleep, no CPU-dependent timing -- just a real statement against the
-    data that is already there.
+  - `io_reader`: added 2026-10-06 so the IO panels show real
+    `IO:DataFileRead`/`IO:DataFileWrite` activity (owner: "we also need IO
+    datafile read and write"), not because it changes the Transitions tab
+    -- an initial version (a `SELECT count(*)` full sequential scan) did
+    NOT add Transitions node variety (5 nodes with or without it, measured
+    on two independent full box-check runs, 2026-10-07) and was a heavy
+    ~150MB-ish scan every tick for no node-count benefit. Replaced
+    2026-10-07 with an indexed single-row read on a random `aid`
+    (pgbench_accounts has 1,000,000 rows): a primary-key lookup still
+    produces a real `IO:DataFileRead` whenever that row's page is not in
+    shared_buffers, at a small fraction of the scan's cost. No sleep, no
+    CPU-dependent timing -- just a real statement against data already
+    there.
 
 #243 review round 2: the re-lock loop below calls fire() with verify=False
 on most ticks (a one-shot psql backend per verify was the dominant source
@@ -89,6 +89,7 @@ Usage: python3 tests/live_loop_workload.py DURATION_S
 (SIGTERM stops it early and cleanly, same as any other loop in this suite.)
 """
 import os
+import random
 import signal
 import sys
 import time
@@ -229,22 +230,33 @@ def _row_lock_tick(row_holder, row_waiter):
     time.sleep(0.3)   # let row_waiter's statement land and auto-commit
 
 
-# pgbench_accounts (scale 10, provisioned by tests/provision-runner.sh) is
-# ~187MB with its indexes against this box's 128MB shared_buffers (measured
-# live, 2026-10-06) -- a full sequential scan reliably evicts/refetches
-# pages, producing real IO:DataFileRead waits every tick (added 2026-10-06
-# alongside the sleep removal -- see io_reader's module-docstring entry).
+# pgbench_accounts (scale 10, provisioned by tests/provision-runner.sh) has
+# 1,000,000 rows (aid 1..1,000,000) and measures ~187MB with its indexes
+# against this box's 128MB shared_buffers (measured live, 2026-10-06).
+# 2026-10-07: an earlier version of this tick ran a full `SELECT count(*)`
+# sequential scan every tick -- real IO:DataFileRead, but a heavy ~150MB
+# scan for no measured benefit (it did not change the Transitions tab's
+# node count either way -- see demo_rehearsal_lib's/the box-check report's
+# own node-count comparison). Replaced with an indexed single-row read on
+# a RANDOM aid: a primary-key index lookup still produces a real
+# IO:DataFileRead whenever that row's page is not already in
+# shared_buffers (which a random aid across 1M rows against 128MB of
+# buffers makes likely most of the time), at a small fraction of the
+# scan's cost -- the IO:DataFileRead class the owner asked the IO panels
+# to show, without the heavy per-tick scan.
 IO_READER_TABLE = "pgbench_accounts"
+IO_READER_AID_MAX = 1_000_000
 
 
 def _io_reader_tick(io_reader):
-    """A real IO-bound statement, no sleep: a sequential scan over a table
-    bigger than shared_buffers, contending for buffer space against
-    pgbench's own OLTP traffic the way a reporting query against a hot
-    table would in production."""
-    io_reader.stdin.write(f"SELECT count(*) FROM {IO_READER_TABLE};\n")
+    """A real IO-bound statement, no sleep: an indexed single-row read on a
+    random aid, competing for buffer space against pgbench's own OLTP
+    traffic the way a point-lookup reporting query would in production."""
+    aid = random.randint(1, IO_READER_AID_MAX)
+    io_reader.stdin.write(
+        f"SELECT abalance FROM {IO_READER_TABLE} WHERE aid = {aid};\n")
     io_reader.stdin.flush()
-    time.sleep(0.5)   # let the scan mostly land before the next tick's SQL
+    time.sleep(0.2)   # let the lookup land before the next tick's SQL
 
 
 def main():
