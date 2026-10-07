@@ -1,0 +1,30 @@
+when         run.id       med s  class min headroom t1            at  run red?
+09-29 19:09  1790701740     129   slow             187      timeline     False
+09-29 22:55  1790715318      84   fast             246      timeline     False
+09-30 09:26  1790753172      80   fast             219      timeline     False
+09-30 10:45  1790757933      72   fast             222      timeline     False
+09-30 17:18  1790781503     131   slow             180      timeline     False
+09-30 19:36  1790789770     136   slow              12   transitions      True
+09-30 21:20  1790796035     137   slow             101   transitions     False
+09-30 21:22  1790796123      69   fast             254      timeline     False
+09-30 22:06  1790798813     297   slow            -315        matrix      True  BYPASS
+09-30 22:09  1790798974     141   slow              49        matrix      True  BYPASS
+09-30 22:19  1790799596     134   slow              64      timeline     False
+09-30 22:22  1790799745      70   fast             193      timeline      True
+09-30 22:45  1790801156     135   slow              15   transitions     False
+09-30 23:44  1790804672     129   slow              38        matrix     False
+10-01 08:41  1790836919     145   slow              21        matrix     False
+10-01 14:32  1790857958     138   slow              92        matrix     False
+10-01 23:25  1790889936     143   slow               2        matrix     False
+10-02 15:04  1790946278     146   slow            -136        matrix     False
+10-04 22:48  1791146891      68   fast             194      timeline     False
+10-05 11:38  1791193113      74   fast             223      timeline     False
+10-05 14:59  1791205181      73   fast             234       scatter     False
+10-06 00:04  1791237870      73   fast             230      timeline     False
+10-06 11:54  1791280496      68   fast             261   transitions     False
+10-07 08:28  1791354539     149   slow             -61   transitions     False
+10-07 17:09  1791385783     147   slow            -164       scatter      True
+
+min-headroom summary, HEALTHY 'slow' (gate-1-class) runs only:
+   n=13 runs: [-164, -136, -61, 2, 12, 15, 21, 38, 64, 92, 101, 180, 187]
+   median 21 ms, 3/13 already negative

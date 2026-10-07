@@ -1,0 +1,41 @@
+
+### THEN (calibration set)
+run.id      when         tab           ttfp_mst1 drift f1..f5             A t1  A t2-6 gated frames
+1790796035  09-30 21:20  scatter        ABSENT[239, 103, 9, 9, 6]          439     210          253
+                         matrix         ABSENT[266, 227, 14, 10, 9]        466     209             
+                         timeline       ABSENT[463, 229, 8, 9, 10]         663     210             
+                         transitions    ABSENT[309, 256, 19, 14, 7]        509     210             
+                         concurrency    ABSENT[229, 34, 8, 8, 9]           429     211             
+1790799596  09-30 22:19  scatter        ABSENT[249, 112, 9, 13, 7]         449     209          253
+                         matrix         ABSENT[298, 277, 8, 9, 8]          498     210             
+                         timeline       ABSENT[547, 327, 13, 15, 14]       747     213             
+                         transitions    ABSENT[270, 244, 11, 10, 9]        470     209             
+                         concurrency    ABSENT[272, 93, 7, 7, 10]          472     210             
+1790796123  09-30 21:22  scatter        ABSENT[315, 95, 4, 5, 5]           515     206          253
+                         matrix         ABSENT[361, 138, 3, 7, 5]          561     204             
+                         timeline       ABSENT[443, 186, 6, 11, 6]         643     206             
+                         transitions    ABSENT[128, 5, 7, 5, 5]            328     203             
+                         concurrency    ABSENT[311, 73, 4, 6, 5]           511     204             
+1790799745  09-30 22:22  scatter        ABSENT[323, 113, 5, 5, 4]          523     205          230
+                         matrix         ABSENT[372, 161, 5, 4, 5]          572     205             
+                         timeline       ABSENT[494, 241, 5, 4, 6]          694     205             
+                         transitions    ABSENT[141, 3, 5, 5, 6]            341     204             
+                         concurrency    ABSENT[275, 43, 6, 6, 5]           475     204             
+1790801156  09-30 22:45  scatter        ABSENT[304, 129, 9, 10, 8]         504     211          253
+                         matrix         ABSENT[337, 280, 8, 12, 14]        537     210             
+                         timeline       ABSENT[521, 289, 9, 11, 15]        721     211             
+                         transitions    ABSENT[377, 339, 6, 20, 7]         577     211             
+                         concurrency    ABSENT[189, 18, 11, 10, 9]         389     208             
+
+### NOW (2026-10-07)
+run.id      when         tab           ttfp_mst1 drift f1..f5             A t1  A t2-6 gated frames
+1791354539  10-07 08:28  scatter           730[306, 278, 19, 7, 20]        506     212          253
+                         matrix            718[382, 389, 67, 8, 13]        582     207             
+                         timeline          365[606, 373, 7, 11, 10]        806     210             
+                         transitions       600[389, 332, 72, 10, 14]       589     226             
+                         concurrency       763[226, 20, 12, 16, 9]         426     210             
+1791385783  10-07 17:09  scatter           749[572, 504, 183, 11, 13]      772     211          253
+                         matrix            640[502, 454, 117, 13, 12]      702     217             
+                         timeline          357[653, 418, 74, 6, 14]        853     212             
+                         transitions       581[462, 413, 74, 12, 14]       662     214             
+                         concurrency       689[548, 374, 57, 10, 12]       748     217             
