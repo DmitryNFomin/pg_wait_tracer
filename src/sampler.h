@@ -69,6 +69,10 @@ struct pgwt_sample_target {
      * whether a CLIENT backend's we==0 reading is a CPU sample. */
     enum pgwt_backend_type backend_type;
     int      cmd_open;
+    /* Cached PgBackendStatus row for this backend, when the caller has one
+     * (PG13 resolves and caches it); 0 = resolve via MyBEEntry. Used only by
+     * the post-read command-gate recheck (#294). */
+    uint64_t status_addr;
 };
 
 /* The two sampled-attribution sources use the same normalized shape.  The
@@ -195,6 +199,58 @@ int pgwt_sampler_build_batch(const struct pgwt_sample_target *targets,
                              struct pgwt_trace_event *out,
                              uint64_t *invalid_reads,
                              uint64_t *noncmd_cpu_skipped);
+
+/* ── #294: the post-read command-gate recheck ─────────────────────────── */
+
+/* Per-tick outcome of the recheck, for the daemon counters. at_risk is the
+ * population the recheck looked at; recovered + confirmed_closed + read_failed
+ * sums to it exactly, so no outcome can hide. */
+struct pgwt_sampler_recheck_stats {
+    uint64_t at_risk;
+    uint64_t recovered;         /* fresh read says: inside a command */
+    uint64_t confirmed_closed;  /* fresh read agrees: between commands */
+    uint64_t read_failed;       /* no fresh read — gate stays closed */
+};
+
+/* Fresh command-gate read for ONE target. Must return 1 only on a successful
+ * read (writing *cmd_open, and *query_id/*query_id_valid when it has them) and
+ * 0 on any failure, writing nothing — a failed read may never be turned into
+ * "in a command". idx is the target index, passed so a test can prove exactly
+ * which targets the recheck consulted. */
+typedef int (*pgwt_sampler_cmd_gate_fn)(void *ctx, int idx,
+                                        const struct pgwt_sample_target *t,
+                                        int *cmd_open, uint64_t *query_id,
+                                        int *query_id_valid);
+
+/* Close the sampled tier's read-ORDER window (#294).
+ *
+ * A tick reads cmd_open in the target loop and wait_event_info in a LATER
+ * batched process_vm_readv. A command that OPENS in that gap yields we == 0
+ * (on-CPU, fresh) paired with cmd_open == 0 (stale), and build_batch then
+ * drops the sample — a one-directional loss of on-CPU samples that measured
+ * 10.7–11.7 pp of CPU share on the gate boxes.
+ *
+ * So for exactly the at-risk set — a VALID we == 0 reading whose target the
+ * CPU policy is about to reject, excluding PGWT_BT_LOGGER (never recordable,
+ * so never recoverable) — take a FRESH gate read, AFTER the wait_event read,
+ * using the authoritative predicate (pgwt_pgbs_state_is_cmd_open). The at-risk
+ * set is defined by pgwt_cpu_sample_recordable itself, so "about to be
+ * dropped" has one definition, not two.
+ *
+ * Called between pgwt_sampler_read_targets and pgwt_sampler_build_batch; with
+ * all valid[] == 0 (what the wrong, pre-read placement looks like) it is a
+ * no-op by construction. One-directional on purpose: it can only OPEN a gate
+ * the stale read left closed, never close one — the residual bias and why it
+ * is the smaller of the two is documented in the issue. Returns the number of
+ * targets whose gate was opened. stats may be NULL.
+ *
+ * Pure: the fresh read is injected, so the unit harness drives the race
+ * directly, with no live PostgreSQL. */
+int pgwt_sampler_recheck_cmd_gate(struct pgwt_sample_target *targets,
+                                  const uint32_t *vals, const uint8_t *valid,
+                                  int n, pgwt_sampler_cmd_gate_fn read_gate,
+                                  void *ctx,
+                                  struct pgwt_sampler_recheck_stats *stats);
 
 /* Record one tick's target-level read coverage. Counts are clamped to a
  * coherent 0 <= valid <= targets range; each invalid target contributes once

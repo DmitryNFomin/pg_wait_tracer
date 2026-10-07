@@ -232,6 +232,15 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
                      ctr->pgbackend_layout_fallbacks_total);
     cjson_add_uint64(root, "sampled_attr_tick_read_failures_total",
                      ctr->sampled_attr_tick_read_failures_total);
+    /* SCOPE (#294), repeated here because a metrics scrape sees these keys and
+     * not daemon.h: every sampled_attr_shadow_* key compares the TARGET-LOOP
+     * status read against the uprobe map, i.e. the read taken BEFORE the
+     * batched wait_event_info read and so BEFORE the #294 command-gate
+     * recheck, whose result OVERRIDES that cmd_open for on-CPU samples.
+     * sampled_attr_shadow_cmd_open_mismatch_total therefore measures the
+     * PRE-RECHECK read, not the gate the sampler actually shipped; it is
+     * unchanged by the #294 fix by construction. For the gate in force use
+     * cmd_gate_order_recovered_total / cmd_gate_order_at_risk_total. */
     cjson_add_uint64(root, "sampled_attr_shadow_total",
                      ctr->sampled_attr_shadow_total);
     cjson_add_uint64(root, "sampled_attr_shadow_mismatch_total",
@@ -416,6 +425,24 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
                      ctr->io_worker_busy_total);
     cjson_add_uint64(root, "noncmd_cpu_samples_total",
                      ctr->noncmd_cpu_samples_total);
+    /* #294: the read-order recheck. at_risk is the on-CPU population the CPU
+     * gate was about to reject; recovered is how many a fresh, same-predicate
+     * status read found inside a command after all; read_failed is how many
+     * could not be re-read and therefore stayed dropped — a persistently
+     * nonzero read_failed is lost CPU samples, not zero of them.
+     * at_risk == recovered + confirmed_closed + read_failed, and the two the
+     * recheck did not rescue (confirmed_closed + read_failed) are what
+     * noncmd_cpu_samples_total then counts, so read_failed is a SUBSET of
+     * noncmd, not a separate term. What remains in noncmd is the genuine
+     * between-command on-CPU churn the gate exists to exclude. */
+    cjson_add_uint64(root, "cmd_gate_order_at_risk_total",
+                     ctr->cmd_gate_order_at_risk_total);
+    cjson_add_uint64(root, "cmd_gate_order_recovered_total",
+                     ctr->cmd_gate_order_recovered_total);
+    cjson_add_uint64(root, "cmd_gate_order_read_failed_total",
+                     ctr->cmd_gate_order_read_failed_total);
+    cjson_add_uint64(root, "cmd_gate_recovered_total",
+                     ctr->cmd_gate_recovered_total);
 
     /* Provider self-metrics. ringbuf_drops_total is the full tier's BPF-side
      * event_ringbuf drop count (A2 wired this; A0 deliberately omitted it). */

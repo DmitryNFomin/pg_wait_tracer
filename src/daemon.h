@@ -47,6 +47,19 @@ struct pgwt_counters {
                                                  * layout validation */
     uint64_t sampled_attr_tick_read_failures_total; /* validated-layout
                                                       * coherent reads dropped */
+    /* SCOPE (#294): every sampled_attr_shadow_* counter below compares the
+     * TARGET-LOOP status read against the uprobe map — the read taken BEFORE
+     * the batched wait_event_info read, and therefore BEFORE the #294
+     * post-batch command-gate recheck. For an on-CPU sample the recheck can
+     * OVERRIDE the cmd_open these counters compared, so
+     * sampled_attr_shadow_cmd_open_mismatch_total is NOT the rate at which the
+     * shipped gate disagreed with the uprobe: it is the rate at which the
+     * pre-recheck read did. It stayed at ~29% across the #294 fix precisely
+     * because it watches the earlier read. The decision-relevant pair is
+     * cmd_gate_order_recovered_total / cmd_gate_order_at_risk_total below,
+     * which is how often the shipped gate overrode that read (~54-60%
+     * of the at-risk set, measured on gate-2). Do not read a high
+     * shadow-mismatch rate as "the sampler's command gate is wrong". */
     uint64_t sampled_attr_shadow_total; /* coherent tick/map pairs compared */
     uint64_t sampled_attr_shadow_mismatch_total; /* effective tuples differing */
     uint64_t sampled_attr_shadow_active_total; /* at-tick cmd_open comparisons */
@@ -130,6 +143,25 @@ struct pgwt_counters {
     uint64_t noncmd_cpu_samples_total; /* client we==0 readings outside a command (not recorded) */
     uint64_t cmd_gate_recovered_total; /* on-CPU client samples the edge-gate missed, recovered
                                         * from debug_query_string ground truth (EL9 fix) */
+    /* #294 read-ORDER recheck (sampler.h pgwt_sampler_recheck_cmd_gate). The
+     * at-risk population splits into exactly three outcomes, so none can hide:
+     *
+     *   at_risk == recovered + confirmed_closed + read_failed
+     *
+     * Only `recovered` and `read_failed` are counted here; confirmed_closed is
+     * the remainder. The samples the recheck did NOT rescue —
+     * confirmed_closed AND read_failed — are what build_batch then drops into
+     * noncmd_cpu_samples_total, alongside any backend type the CPU policy
+     * never admits (logger). So read_failed is a SUBSET of
+     * noncmd_cpu_samples_total, NOT a term to be added alongside it:
+     * measured at 200 Hz on gate-2, at_risk 13955 = recovered 7575 +
+     * confirmed 6379 + read_failed 1, and noncmd 6380 = 6379 + 1.
+     *
+     * A read_failed rate above ~0 means fresh gate reads are failing and those
+     * samples were dropped, not counted. */
+    uint64_t cmd_gate_order_at_risk_total;
+    uint64_t cmd_gate_order_recovered_total;
+    uint64_t cmd_gate_order_read_failed_total;
     uint64_t io_worker_samples_total;  /* io_worker readings taken (excluded from AAS) */
     uint64_t io_worker_busy_total;     /* ... of which busy (on-CPU or a real wait) */
     uint64_t prev_io_worker_samples;   /* snapshots at previous display tick */
@@ -317,6 +349,7 @@ struct pgwt_daemon {
     bool state_map_full_logged;      /* CAP-1 */
     bool seen_qids_full_logged;      /* CAP-6 */
     bool invalid_wait_reads_logged;  /* CAP-2/5 backstop */
+    bool cmd_gate_order_read_failed_logged;  /* #294 recheck, one-shot */
 
     /* State */
     struct pgwt_backend_table backends;
