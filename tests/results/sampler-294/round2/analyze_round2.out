@@ -1,0 +1,70 @@
+==============================================================================
+1. THE ORACLE: sampled CPU ns / EXACT CPU ns (same window, same
+   definition of CPU). /proc shown only as context -- see the caveat.
+==============================================================================
+rate tree    sampled Gns     exact Gns  sampled/EXACT    sampled//proc
+  10 base           90.0         152.9          0.588            0.551
+  10 fix           116.9         152.2          0.768            0.723
+  50 base           87.3         150.6          0.580            0.537
+  50 fix           124.0         150.0          0.826            0.766
+ 100 base           88.7         154.1          0.575            0.543
+ 100 fix           119.7         150.5          0.795            0.761
+ 200 base           95.4         151.1          0.632            0.592
+ 200 fix           134.6         152.8          0.881            0.826
+
+CAVEAT on the //proc column: neither tier's ratio to /proc is an oracle.
+Both tiers call a backend on-CPU when NO wait event is registered, which
+on an oversubscribed box also counts run-queue delay; /proc utime+stime
+counts only time actually on a core; and each tier separately excludes
+15-20% of its own we==0 as out-of-command. The exact tier's ~0.93 is
+offsetting errors, not accuracy, so it was never a reachable target.
+
+==============================================================================
+2. UNGATED we==0: is any gate-order variant left?
+   ungated = that tier's CPU + that tier's own gate-rejected CPU.
+==============================================================================
+rate tree  ungated_ex% ungated_sa% ungated_pp  gated_pp  ex_rej%ofwe0  sa_rej%ofwe0
+  10 base         49.2        42.9       6.3      14.0          19.1          43.0
+  10 fix          43.1        35.8       7.3       7.2          17.3          18.5
+  50 base         42.3        36.6       5.7      12.5          20.1          44.0
+  50 fix          41.9        36.3       5.6       5.4          19.4          20.1
+ 100 base         42.5        36.8       5.7      12.8          17.2          42.3
+ 100 fix          44.9        38.5       6.4       6.5          15.1          16.2
+ 200 base         42.4        38.0       4.5      10.8          20.1          41.8
+ 200 fix          42.0        37.5       4.4       3.9          20.1          19.2
+
+Reading: on BASE the gate roughly DOUBLES the disagreement (ungated
+4.5-6.3 pp -> gated 10.8-14.0 pp) because the sampler rejects 42-44% of
+its own we==0 while the exact tier rejects 17-20%. On FIX the two
+rejection shares agree and ungated ~= gated, so nothing gate-ordered is
+left; the remaining 4.4-7.3 pp is upstream of the gate, in how often the
+sampler observes we==0 at all (the wait-read path).
+
+==============================================================================
+3. ITEM 4: did the recovered CPU become an attribution hole?
+==============================================================================
+rate recovered recovered_Gns   d_unattributed_Gns     d_backfilled_Gns  pend_overflow
+  10       352        35.20               0.0009                0.421              0
+  50      1901        38.02              -0.0023                0.455              0
+ 100      3529        35.29               0.0045                0.935              0
+ 200      7575        37.88              -0.0008               -0.298              0
+
+The live unattributed bucket is 3-5 MILLIseconds in both trees, so the
+delta is ~0.000 Gns against 35-38 Gns recovered: 0.00% of the recovered
+CPU lands there, and pending_overflow is 0 everywhere, so the #128
+deferred-attribution path absorbed all of it. Mechanism agrees: for an
+at-risk target the pre-recheck query_id was ALREADY 0 (the tick
+derivation zeroes it while cmd_open is false), so the recheck cannot
+make those samples' attribution worse than it already was -- and before
+the fix they did not exist at all.
+
+NOT clean, stated rather than hidden: summary_query_unattributed_ns_total
+(the SUMMARY writer's bucket, which has no deferral) swings in BOTH
+directions between trees and does not track the recovered volume, which
+is ~constant at 35-38 Gns across rates:
+     10 Hz base     8.33 Gns -> fix     4.00 Gns (delta    -4.34)
+     50 Hz base     8.23 Gns -> fix     7.23 Gns (delta    -1.00)
+    100 Hz base     1.73 Gns -> fix    21.77 Gns (delta   +20.04)
+    200 Hz base     4.28 Gns -> fix     9.42 Gns (delta    +5.13)
+   At n=1 per cell no part of that is attributable to this fix; it is
+   also not shown to be unrelated. Flagged, not claimed either way.

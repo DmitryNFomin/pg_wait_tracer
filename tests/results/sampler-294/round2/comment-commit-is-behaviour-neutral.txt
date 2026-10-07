@@ -1,0 +1,36 @@
+Why the box-check taken at commit 4b48698 still covers the comment commit.
+
+The coordinator scoped out a new box-check for the round-2 edits, which touch
+src/daemon.h and src/control.c. Those are comment-only, and rather than assert
+that, here is the proof.
+
+STEP 1 -- the edits touch no non-comment line. On gate-2, comparing the two
+trees with comment lines filtered out:
+
+  === src/daemon.h ===                no non-comment-line difference
+  === src/control.c ===               no non-comment-line difference
+  === src/sampler.c ===               no non-comment-line difference
+  === src/backend_status_layout.c === no non-comment-line difference
+
+STEP 2 -- the compiled code is byte-identical. A first attempt compared two
+trees in DIFFERENT directories and .text/.rodata differed; that was the build
+path baked into the binary, not the edits. Controlled re-run, SAME directory
+(/root/pgwt-check/agent_sampler-cmd-gate-order), only the two files swapped,
+full rebuild each time:
+
+  PRE-comment  (same dir)  stripped=07b0c19ad742449d  text=3fb5be1228352b9d  rodata=c811834454f3382d
+  POST-comment (same dir)  stripped=c066381be4d8b40a  text=3fb5be1228352b9d  rodata=c811834454f3382d
+                                                      ^^^^ IDENTICAL         ^^^^ IDENTICAL
+
+.text and .rodata -- all executable code and all constants -- are identical.
+The `stripped` hashes differ because strip leaves the GNU build-id, which is a
+hash over the whole input including the DWARF line table, and comments move line
+numbers. That is debug metadata, not behaviour.
+
+CONCLUSION: the comment commit cannot change what the daemon does, so the
+box-check run at 4b48698 (gate-1, 96 passed / 0 failed, Live UI smoke PASS,
+tests/results/box-check-ubuntu-20261007-122820.log) remains valid evidence for
+the final tree. Stated explicitly rather than relied on silently.
+
+NOTE: the evidence commit that follows contains no src/ or tests/ code at all,
+only files under tests/results/, so it cannot affect any gate either.
