@@ -1,0 +1,76 @@
+FINDING (not caused by this branch): ui_live_smoke frame_spacing_ok is
+calibrated right on top of the transitions tab's tick-1 warm-up transient.
+
+Reported rather than worked around. No test, bound or tolerance was touched.
+
+WHAT HAPPENED
+The first box-check of the final tree went RED:
+  tests/results/box-check-ubuntu-20261007-134417.log
+  Executed: 96 (passed 95, failed 1), Live UI smoke: overall=FAIL
+             (failed: transitions)
+The transitions tab's gating checks, from that run's summary.json (since
+overwritten by the next run, so these values are transcribed here -- that is
+why this file exists):
+  frame_spacing   ok=False  'tick 1 frame 3: drift=202ms > 150ms bound'
+  capture_budget  ok=False  tick 1 999.9ms / 3 1058.2 / 4 1005.2 / 5 831.1
+                            / 6 891.4, all > 800ms   [REPORTING ONLY, not
+                            read into the tab verdict -- see
+                            ui_live_smoke_lib.py:75-100]
+  no_blink ok=True (ratio 0.0)   clean ok=True (0 console, 0 pgwt errors)
+  rendered ok=True   color_stability ok=True   frame_dims ok=True
+  no_leak ok=True    ttfp_ms=564    ticks_observed=6
+So every check of product behaviour passed; the one gating failure was a
+screenshot-scheduling drift measurement.
+
+IT IS NOT THIS BRANCH
+1. ui_live_smoke.sh runs the daemon in --mode full. src/daemon.c:705-716
+   selects pgwt_provider_sampled only for PGWT_MODE_SAMPLED / PGWT_MODE_TIERED,
+   so pgwt_sampler_poll -- and therefore the whole #294 recheck and the new
+   WARNING -- cannot execute during this test at all.
+2. The immediately preceding box-check of this same branch on this same box,
+   at commit 4b48698 which already contained the entire recheck, passed with
+   Live UI smoke overall=PASS
+   (tests/results/box-check-ubuntu-20261007-122820.log). The only code delta
+   since is a one-shot WARNING in the sampled path plus a test-only change.
+
+IT IS ALSO NOT SIMPLY "NOISE" -- IT IS A CALIBRATION EDGE
+The GREEN re-run's own artifact shows the same slot elevated, just under the
+bound. Per-tick achieved-minus-target drift (ms), green run:
+  tick 1: [451, 453, 107, 7, 9]      <-- frames 1-2 are EXEMPT; frame 3 is NOT
+  tick 2: [13, 8, 10, 12, 15]
+  tick 3: [16, 12, 9, 11, 13]
+  tick 4: [22, 7, 8, 11, 11]
+  tick 5: [25, 32, 21, 12, 20]
+  tick 6: [6, 10, 7, 12, 14]
+Tick 1's warm-up (first chart mount / first paint) costs ~450 ms on frames 1-2,
+which FRAME_SPACING_DRIFT_BOUND_MS's comment exempts by name, and it bleeds
+into frame 3: 107 ms green, 202 ms red. Every other frame in the run is
+<= 32 ms. The bound is 150 ms, derived (per its own comment) from an "87ms
+healthy ceiling (5 runs / 1242 gated frames)" versus a ~300 ms regression
+cluster. This slot sits between: 107 ms is already 1.2x the documented healthy
+ceiling at 71% of the bound, so a moderately slower run crosses it without any
+regression being present.
+
+Mechanism hypothesis, NOT established: in box-check the smoke runs immediately
+after run_all's TPS/overhead benchmark section, so the box is warm; the
+standalone re-run started from an idle box. 1-minute load at the standalone
+re-run was 0.16 (15-min 2.51, the decaying benchmark load).
+
+REPRODUCIBILITY, stated honestly
+  box-check #2 (final tree)            frame_spacing FAIL (202 ms)
+  standalone ui_live_smoke.sh re-run   frame_spacing PASS
+  box-check #3 (final tree, unchanged) frame_spacing PASS, 96/96, exit 0
+                                       tests/results/box-check-ubuntu-20261007-144240.log
+n=3 observations, 1 red. One re-run was taken to establish reproducibility and
+one full box-check to obtain the required green gate; no further retries were
+run, and the red result is reported here rather than discarded.
+
+WHAT I DID NOT DO
+Did not raise FRAME_SPACING_DRIFT_BOUND_MS, did not widen the tick-1 exemption
+to frame 3, did not add a retry, and did not add this to KNOWN_FAILING. The
+bound's own history is a bound-just-above-healthy defect that a previous issue
+existed to remove, and the honest fix is a decision for the owner: either the
+tick-1 exemption should cover frame 3 (with the artifact numbers above as the
+justification), or the sweep should not start measuring until after first paint
+so no warm-up frame is gated at all. Filing material, not something to patch
+from inside an unrelated branch.
