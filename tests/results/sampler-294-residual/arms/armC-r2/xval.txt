@@ -1,0 +1,71 @@
+Overlap window: 60.0s (sampled + exact both present)
+
+wait_event                   exact_share%     sampled%   delta_pp
+------------------------------------------------------------------
+CPU                                 37.2%        34.7%       2.6
+WalSync                             31.3%        33.4%       2.1
+WALWrite                            24.0%        24.8%       0.8
+transactionid                        5.4%         5.3%       0.1
+WalWrite                             0.8%         0.8%       0.0
+DataFileFlush                        0.6%         0.3%       0.3
+DataFileRead                         0.3%         0.4%       0.1
+DataFileWrite                        0.2%         0.2%       0.0
+tuple                                0.1%         0.1%       0.0
+DataFileExtend                       0.0%         0.0%       0.0
+BufferContent                        0.0%         0.0%       0.0
+AioIoCompletion                      0.0%         0.0%       0.0
+WALInsert                            0.0%         0.0%       0.0
+XidGen                               0.0%         0.0%       0.0
+XactSLRU                             0.0%         0.0%       0.0
+LockManager                          0.0%         0.0%       0.0
+ProcArray                            0.0%         0.0%       0.0
+SlruWrite                            0.0%         0.0%       0.0
+BufferMapping                        0.0%         0.0%       0.0
+RelationMapRead                      0.0%         0.0%       0.0
+WALBufMapping                        0.0%         0.0%       0.0
+CheckpointerComm                     0.0%         0.0%       0.0
+
+Samples in window: 1387
+Top-5 event overlap: 5/5
+Max share disagreement (events >= 2% exact share): 2.6 pp (CPU)
+Tolerance: +/- 10.0 pp
+
+=== IDLE: NOT DB Time (excluded from every share above) ===
+IDLE_PACING_MASK 0x29B  settled_pg_major=18  sidecar=yes
+
+idle_event                         exact_ns     sampled_ns    ex%DBT    sm%DBT
+--------------------------------------------------------------------------------
+IoWorkerMain                   179979504484   184151277492    116.9%    129.2%
+LogicalLauncherMain             59994553721    61383759164     39.0%     43.1%
+AutovacuumMain                  59994328807    61383759164     39.0%     43.1%
+CheckpointWriteDelay            59928524404    61275509600     38.9%     43.0%
+WalWriterMain                   59347973259    60235807588     38.5%     42.3%
+BgwriterMain                    58447756092    60366572459     38.0%     42.3%
+ClientRead                      25398365758    40245462639     16.5%     28.2%
+VacuumDelay                        19642090              0      0.0%      0.0%
+IDLE_EVENT_ROWS 8
+IDLE_TOTAL_EXACT_NS 503110648615
+IDLE_TOTAL_SAMPLED_NS 529042148106
+IDLE_SAMPLES 5145
+IDLE_EXACT_PCT_OF_DBTIME 326.69
+IDLE_SAMPLED_PCT_OF_DBTIME 371.12
+
+RAW_WINDOW_S 60.000284
+RAW_SAMPLE_PERIOD_NS 100000000
+RAW_TOTAL_EXACT_NS 154004734436
+RAW_TOTAL_SAMPLED_NS 142552311477
+RAW_AAS_EXACT 2.566733
+RAW_AAS_SAMPLED 2.375861
+RAW_CPU_EXACT_NS 57343925769
+RAW_CPU_SAMPLED_NS 49410124647
+RAW_NONCPU_EXACT_NS 96660808667
+RAW_NONCPU_SAMPLED_NS 93142186830
+RAW_CPU_SAMPLES 480
+RAW_NONCPU_SAMPLES 907
+RAW_GATE_REJECTED_EXACT_CPU_NS 2941925074
+RAW_GATE_REJECTED_INTERVALS 57008
+RAW_SAMPLED_CPU_NS_NEEDED_FOR_PARITY 5846382320
+RAW_SAMPLED_CPU_SAMPLES_NEEDED_FOR_PARITY 58
+On-CPU-during-wait (spin): 7.3015% of wait time — exact on-CPU spin, attributed to its wait class (informational)
+
+RESULT: PASS

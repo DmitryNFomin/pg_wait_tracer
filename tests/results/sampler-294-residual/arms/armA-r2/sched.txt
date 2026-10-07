@@ -1,0 +1,1 @@
+DIAG daemon_sched policy=0 rt_priority=0
