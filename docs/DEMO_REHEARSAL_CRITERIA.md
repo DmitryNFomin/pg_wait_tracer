@@ -16,8 +16,12 @@ so and the attempt counter resets. It is never reinterpreted in a report.
 `TIME_MODEL_TOLERANCE_PCT` = 1.0.
 
 `tests/live_loop_workload.py` (issue #214; `adv_holder`/`io_reader` added
-2026-10-06) loops eight persistent sessions for the whole run, not just
-the two the §2 floors need:
+2026-10-06; `io_writer`/eight `lockmgr_N` sessions added 2026-10-07, owner
+scope addition "add more load") loops seventeen persistent sessions for
+the whole run, not just the two the §2 floors need. **Every pinned number
+below this point in the doc predates the 2026-10-07 load addition and
+needs re-measuring** -- the owner has implicitly accepted that by asking
+for more load:
 - `holder` / `waiter` / `sleeper`: `Lock:relation` recurs in every tick —
   the waiter genuinely blocking on the holder's lock, unchanged since issue
   #157 and what §2's floors and the conservation check are written
@@ -32,16 +36,19 @@ the two the §2 floors need:
   test_deterministic.py, test_query_accuracy.py,
   test_capture_smoke.py's own default-arg call sites) — only this live
   demo loop changed.
-- `reporter` / `adv_holder`: `reporter` rotates four structurally distinct
-  SELECTs every tick (a catalog lookup, a CPU-bound aggregate, and two
+- `reporter` / `adv_holder`: `reporter` rotates six structurally distinct
+  SELECTs every tick (a catalog lookup, a CPU-bound aggregate, and FOUR
   differently-shaped advisory-lock holds) — the query-id and duration
   variety Queries, Histogram, Waterfall and Scatter need to show more than
-  a single flat line. The two advisory-lock shapes (added 2026-10-06,
-  replacing two `pg_sleep` calls) have `adv_holder` hold
-  `pg_advisory_lock(42)` for a client-side sleep (~0.4s / ~1.3s) while
-  `reporter`'s own `pg_advisory_lock(42)` call blocks on it for that long —
-  a real `Lock:advisory` wait of exactly the hold duration, reading as an
-  application mutex rather than a manufactured sleep.
+  a single flat line. The advisory-lock shapes (added 2026-10-06, replacing
+  two `pg_sleep` calls; expanded from two to four shapes 2026-10-07, owner
+  scope addition — dropping `pg_sleep` cost the demo ~36s of visible DB
+  Time per 90s window and the original two-shape replacement only gave
+  back ~3.4s) have `adv_holder` hold `pg_advisory_lock(id)` — four distinct
+  lock ids, 42/43/44/45 — for a client-side sleep (0.1s/0.3s/1.0s/3.0s)
+  while `reporter`'s own `pg_advisory_lock(id)` call blocks on it for that
+  long — a real `Lock:advisory` wait of exactly the hold duration, reading
+  as an application mutex rather than a manufactured sleep.
 - `row_holder` / `row_waiter`: a hot-row `UPDATE` contended by two backends,
   producing `Lock:transactionid` — a second, distinct wait class from the
   table-level `Lock:relation` above, realistic because contention on a
@@ -67,7 +74,27 @@ the two the §2 floors need:
   (pgbench_accounts has 1,000,000 rows) still produces a real
   `IO:DataFileRead` whenever that row's page is not in `shared_buffers`,
   at a small fraction of the scan's cost. No sleep, no CPU-dependent
-  timing.
+  timing. One point-read per ~9s tick measured at ~0.1% of DB Time —
+  not visible on the IO panels — so `io_reader` also runs a BATCH of 200
+  random single-row reads every tick against `IO_LOAD_TABLE` (below).
+- `io_writer`: added 2026-10-07, same scope addition. A batch of 100
+  scattered single-row `UPDATE`s every tick against `IO_LOAD_TABLE`, a
+  dedicated side table (`_smoke_io_load`, provisioned once by
+  `tests/provision-runner.sh`, 3,000,000 rows, sized comfortably above
+  this box's 128MB `shared_buffers` — see that script's own comment for
+  the measured build time and on-disk size) — dirties pages that the
+  background writer/checkpointer later evict, producing real
+  `IO:DataFileWrite`. No sleep anywhere in either batch.
+- `lockmgr_0`..`lockmgr_7`: added 2026-10-07, same scope addition
+  (`LWLock:LockManager` explicitly requested weeks ago, still ~0.0%).
+  Eight CONCURRENT sessions fire 20 repetitions each, every tick, of a
+  query against `_smoke_lockmgr_fanout` (also provisioned once by
+  `tests/provision-runner.sh`: a 200-partition RANGE-partitioned table,
+  left empty on purpose) filtered on a non-partition-key column so no
+  partition can be pruned. A single backend's fast path holds at most 16
+  weak relation locks (a fixed PostgreSQL constant, not a GUC); touching
+  200 relations in one query falls through to the shared, partitioned
+  lock manager `LWLock:LockManager` guards. No sleep.
 
 `tests/demo_workload_coverage.py` is the machine-checkable half: given a
 trace dir this workload produced, it queries every tab's own endpoint and

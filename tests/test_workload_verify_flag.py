@@ -296,6 +296,107 @@ def test_verify_every_n_ticks_is_small_fraction():
           f"anything notices")
 
 
+def test_advisory_rotation_covers_four_distinct_lock_shapes():
+    # 2026-10-07 owner scope addition ("add more load"): four advisory-hold
+    # shapes, not two -- pin that _reporter_tick's rotation actually
+    # reaches all four, each with its own lock id and distinct
+    # trailing-column count (what drives a distinct query_id).
+    reporter = FakeSession()
+    adv_holder = FakeSession()
+    orig_sleep = time.sleep
+    time.sleep = lambda s: None
+    try:
+        for i in range(len(llw.REPORTER_QUERIES)):
+            llw._reporter_tick(reporter, adv_holder, i)
+    finally:
+        time.sleep = orig_sleep
+    adv_holder_sql = "".join(adv_holder.stdin.writes)
+    reporter_sql = "".join(reporter.stdin.writes)
+    for lock_id in (42, 43, 44, 45):
+        check(f"pg_advisory_lock({lock_id})" in adv_holder_sql,
+              f"adv_holder acquires lock id {lock_id} somewhere in one "
+              f"full rotation")
+    for trailing in ("1", "2, 3", "4, 5, 6", "7, 8, 9, 10"):
+        check(f", {trailing};" in reporter_sql,
+              f"reporter's own call carries trailing columns {trailing!r} "
+              f"somewhere in one full rotation")
+
+
+def test_advisory_hold_durations_are_the_requested_spread():
+    check(llw.ADVISORY_HOLD_S[2:] == (0.1, 0.3, 1.0, 3.0),
+          f"the four advisory hold durations are exactly 0.1/0.3/1.0/3.0s "
+          f"(got {llw.ADVISORY_HOLD_S[2:]})")
+
+
+def test_advisory_lock_ids_are_distinct():
+    ids = [i for i in llw.ADVISORY_LOCK_IDS if i is not None]
+    check(len(ids) == len(set(ids)),
+          f"all four advisory lock ids are distinct (got {ids})")
+
+
+def test_io_load_read_tick_sends_exact_batch_size_no_sleep():
+    io_reader = FakeSession()
+    orig_sleep = time.sleep
+    time.sleep = lambda s: None
+    try:
+        llw._io_load_read_tick(io_reader)
+    finally:
+        time.sleep = orig_sleep
+    sql = "".join(io_reader.stdin.writes)
+    count = sql.count(f"FROM {llw.IO_LOAD_TABLE}")
+    check(count == llw.IO_LOAD_READS_PER_TICK,
+          f"_io_load_read_tick sends exactly IO_LOAD_READS_PER_TICK "
+          f"({llw.IO_LOAD_READS_PER_TICK}) reads (got {count})")
+    check("pg_sleep" not in sql,
+          f"_io_load_read_tick writes no server-side pg_sleep")
+
+
+def test_io_load_write_tick_sends_exact_batch_size_no_sleep():
+    io_writer = FakeSession()
+    orig_sleep = time.sleep
+    time.sleep = lambda s: None
+    try:
+        llw._io_load_write_tick(io_writer)
+    finally:
+        time.sleep = orig_sleep
+    sql = "".join(io_writer.stdin.writes)
+    count = sql.count(f"UPDATE {llw.IO_LOAD_TABLE}")
+    check(count == llw.IO_LOAD_WRITES_PER_TICK,
+          f"_io_load_write_tick sends exactly IO_LOAD_WRITES_PER_TICK "
+          f"({llw.IO_LOAD_WRITES_PER_TICK}) updates (got {count})")
+    check("pg_sleep" not in sql,
+          f"_io_load_write_tick writes no server-side pg_sleep")
+
+
+def test_lockmgr_tick_fires_every_session_with_exact_repeat_count():
+    sessions = [FakeSession() for _ in range(llw.LOCKMGR_SESSION_COUNT)]
+    orig_sleep = time.sleep
+    time.sleep = lambda s: None
+    try:
+        llw._lockmgr_tick(sessions)
+    finally:
+        time.sleep = orig_sleep
+    for i, sess in enumerate(sessions):
+        sql = "".join(sess.stdin.writes)
+        count = sql.count(f"FROM {llw.LOCKMGR_TABLE}")
+        check(count == llw.LOCKMGR_QUERIES_PER_TICK,
+              f"lockmgr session {i} gets exactly LOCKMGR_QUERIES_PER_TICK "
+              f"({llw.LOCKMGR_QUERIES_PER_TICK}) fanout queries "
+              f"(got {count})")
+        check("val > 0" in sql,
+              f"lockmgr session {i}'s query filters on val, not the "
+              f"partition key id (the pruning-defeating predicate)")
+
+
+def test_lockmgr_query_does_not_filter_on_partition_key():
+    where_clause = llw.LOCKMGR_QUERY.split("WHERE", 1)[1]
+    check("id" not in where_clause,
+          f"LOCKMGR_QUERY's WHERE clause does not reference id (the "
+          f"partition key) -- filtering on it would let the planner prune "
+          f"partitions instead of touching all {llw.LOCKMGR_PARTITIONS} "
+          f"(got {llw.LOCKMGR_QUERY!r})")
+
+
 def main():
     test_fire_verify_true_spawns_one_backend()
     test_fire_verify_false_spawns_no_backend()
@@ -311,6 +412,13 @@ def main():
     test_should_verify_tick_skips_most_ticks()
     test_should_verify_tick_matches_every_n()
     test_verify_every_n_ticks_is_small_fraction()
+    test_advisory_rotation_covers_four_distinct_lock_shapes()
+    test_advisory_hold_durations_are_the_requested_spread()
+    test_advisory_lock_ids_are_distinct()
+    test_io_load_read_tick_sends_exact_batch_size_no_sleep()
+    test_io_load_write_tick_sends_exact_batch_size_no_sleep()
+    test_lockmgr_tick_fires_every_session_with_exact_repeat_count()
+    test_lockmgr_query_does_not_filter_on_partition_key()
     print(f"\n{tests_passed}/{tests_run} passed")
     return 0 if tests_failed == 0 else 1
 

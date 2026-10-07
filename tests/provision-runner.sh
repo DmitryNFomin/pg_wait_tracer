@@ -350,6 +350,69 @@ for V in 13 16 17 18; do
         log "pgbench tables already present on port $PORT ($ROWS rows)"
     fi
 
+    # tests/live_loop_workload.py's IO_LOAD_TABLE (2026-10-07 owner scope
+    # addition: "add more load"; IO:DataFileRead/Write explicitly asked for
+    # weeks ago, still ~0.1%). Sized comfortably above this cluster's
+    # shared_buffers (128MB on the gate box) so random single-row reads by
+    # primary key keep missing the buffer cache and scattered UPDATEs keep
+    # dirtying pages for eviction -- a one-time, idempotent build here
+    # (like pgbench -i above), NOT created inline by the demo loop on every
+    # run: a 3,000,000-row table with a 200-byte filler is too expensive to
+    # populate every test invocation. Idempotent the same way as the
+    # pgbench check above: only (re)builds when missing or short.
+    IO_LOAD_TABLE="_smoke_io_load"
+    IO_LOAD_ROWS=3000000
+    IO_LOAD_FOUND=$(sudo -u postgres psql -p "$PORT" -tAc \
+        "SELECT count(*) FROM $IO_LOAD_TABLE" 2>/dev/null || echo 0)
+    if [[ "${IO_LOAD_FOUND:-0}" -lt "$IO_LOAD_ROWS" ]]; then
+        log "$IO_LOAD_TABLE missing/short on port $PORT" \
+            "(found ${IO_LOAD_FOUND:-0} rows, want $IO_LOAD_ROWS) --" \
+            "building (measured on a gate-box cx33 and reported in the" \
+            "owning branch's PR body: build time + pg_total_relation_size)"
+        IO_LOAD_START=$(date +%s)
+        sudo -u postgres psql -p "$PORT" -d postgres -v ON_ERROR_STOP=1 -c "
+            DROP TABLE IF EXISTS $IO_LOAD_TABLE;
+            CREATE TABLE $IO_LOAD_TABLE (
+                id bigint PRIMARY KEY, filler text, ctr int NOT NULL DEFAULT 0);
+            INSERT INTO $IO_LOAD_TABLE (id, filler, ctr)
+                SELECT g, repeat('x', 200), 0
+                FROM generate_series(1, $IO_LOAD_ROWS) g;
+        " >/dev/null
+        IO_LOAD_ELAPSED=$(( $(date +%s) - IO_LOAD_START ))
+        IO_LOAD_SIZE=$(sudo -u postgres psql -p "$PORT" -tAc \
+            "SELECT pg_size_pretty(pg_total_relation_size('$IO_LOAD_TABLE'))")
+        log "$IO_LOAD_TABLE built on port $PORT in ${IO_LOAD_ELAPSED}s," \
+            "on-disk size $IO_LOAD_SIZE"
+    else
+        log "$IO_LOAD_TABLE already present on port $PORT (${IO_LOAD_FOUND} rows)"
+    fi
+
+    # tests/live_loop_workload.py's LOCKMGR_TABLE (same 2026-10-07 addition;
+    # LWLock:LockManager explicitly asked for weeks ago, still ~0.0%).
+    # RANGE-partitioned, LOCKMGR_PARTITIONS child partitions, all left
+    # EMPTY on purpose -- a lock is taken on every unpruned partition at
+    # plan/open time regardless of row count, so this is a pure
+    # lock-table-fanout fixture, not a data table. Idempotent: CREATE TABLE
+    # IF NOT EXISTS / CREATE ... PARTITION OF IF NOT EXISTS means a
+    # re-provision of an already-built box is a cheap no-op.
+    LOCKMGR_TABLE="_smoke_lockmgr_fanout"
+    LOCKMGR_PARTITIONS=200
+    sudo -u postgres psql -p "$PORT" -d postgres -v ON_ERROR_STOP=1 -c "
+        CREATE TABLE IF NOT EXISTS $LOCKMGR_TABLE (id bigint, val int)
+            PARTITION BY RANGE (id);
+        DO \$\$
+        DECLARE i int;
+        BEGIN
+            FOR i IN 0..$((LOCKMGR_PARTITIONS - 1)) LOOP
+                EXECUTE format(
+                    'CREATE TABLE IF NOT EXISTS %I PARTITION OF $LOCKMGR_TABLE '
+                    'FOR VALUES FROM (%s) TO (%s)',
+                    '${LOCKMGR_TABLE}_p' || i, i * 1000, (i + 1) * 1000);
+            END LOOP;
+        END \$\$;
+    " >/dev/null
+    log "$LOCKMGR_TABLE: $LOCKMGR_PARTITIONS partitions present on port $PORT"
+
     log "PG $V: $(sudo -u postgres psql -p "$PORT" -tAc 'SELECT version()')"
 done
 
