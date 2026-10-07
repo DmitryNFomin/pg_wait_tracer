@@ -16,6 +16,14 @@
  * Built with -DPGWT_SERVER (no BPF) so it runs anywhere the server builds.
  *
  * Usage: cross_validate <trace_dir> [--tolerance PCT] [--min-share PCT]
+ *                       [--raw-ns]
+ *
+ * --raw-ns adds a RAW block after the share table: the nanosecond totals
+ * behind every share, the per-side AAS they imply, the CPU/non-CPU split of
+ * each side, and the exact we==0 time this comparator's own command gate
+ * REJECTED. Shares alone cannot tell "the sampled side lost CPU" from "the
+ * exact side gained it": both move every other share by the same factor.
+ * Off by default: no existing output line changes.
  */
 #include "event_reader.h"
 #include "event_writer.h"
@@ -94,17 +102,20 @@ int main(int argc, char **argv)
 {
     if (argc < 2) {
         fprintf(stderr, "usage: %s <trace_dir> [--tolerance PCT] "
-                "[--min-share PCT]\n", argv[0]);
+                "[--min-share PCT] [--raw-ns]\n", argv[0]);
         return 2;
     }
     const char *trace_dir = argv[1];
     double tolerance = 10.0;   /* percentage points */
     double min_share = 2.0;    /* ignore events below this exact share */
+    int raw_ns = 0;
     for (int i = 2; i < argc; i++) {
         if (!strcmp(argv[i], "--tolerance") && i + 1 < argc)
             tolerance = atof(argv[++i]);
         else if (!strcmp(argv[i], "--min-share") && i + 1 < argc)
             min_share = atof(argv[++i]);
+        else if (!strcmp(argv[i], "--raw-ns"))
+            raw_ns = 1;
     }
 
     /* Decode this trace with the names it was WRITTEN with.
@@ -231,6 +242,16 @@ int main(int argc, char **argv)
      * measured cpu_ns (v2/legacy traces stamp the UNKNOWN sentinel). */
     double wait_gap_cpu_ns = 0, wait_total_ns_sc = 0;
     int have_measured_cpu = 0;
+    /* --raw-ns diagnostics. gate_rejected_cpu_ns is the exact we==0 time this
+     * comparator threw away because its own CMD_START/CMD_END sweep called the
+     * interval out-of-command: the quantity that decides whether a CPU share
+     * gap lives on the sampled side or on this gate. Clipped to the window, so
+     * it is directly comparable with total_exact_ns. */
+    double gate_rejected_cpu_ns = 0;
+    long   gate_rejected_intervals = 0;
+    long   n_samples_cpu = 0;        /* we==0 samples counted in the window */
+    long   n_samples_noncpu = 0;
+    uint64_t sample_period_seen = 0; /* last SAMPLES block period, for arithmetic */
 
     for (int fi = 0; fi < nfiles; fi++) {
         struct pgwt_event_reader r;
@@ -256,6 +277,8 @@ int main(int argc, char **argv)
                     acc_find(table, ev)->sampled_ns += contrib;
                     total_sampled_ns += contrib;
                     n_samples++;
+                    sample_period_seen = info.sample_period_ns;
+                    if (ev == 0) n_samples_cpu++; else n_samples_noncpu++;
                 } else { /* TRANSITIONS */
                     uint32_t ev = e->old_event;
                     /* CMD markers drive the exact-tier command gate. */
@@ -284,8 +307,24 @@ int main(int argc, char **argv)
                     /* T2: exact we==0 intervals count as CPU only when
                      * majority in-command — the same definition the
                      * sampled side captured with. */
-                    if (ev == 0 && !in_cmd)
+                    if (ev == 0 && !in_cmd) {
+                        /* Same window clip the accepted path applies below, so
+                         * the rejected total is comparable with total_exact_ns
+                         * rather than being a whole-capture figure. */
+                        uint64_t rend = pgwt_reader_mono_to_wall(
+                            &r, e->timestamp_ns);
+                        uint64_t rdur = e->duration_ns;
+                        uint64_t rstart = rend > rdur ? rend - rdur : 0;
+                        if (rend > win_from && rstart < win_to) {
+                            uint64_t cs = rstart > win_from ? rstart : win_from;
+                            uint64_t ce = rend < win_to ? rend : win_to;
+                            if (ce > cs) {
+                                gate_rejected_cpu_ns += (double)(ce - cs);
+                                gate_rejected_intervals++;
+                            }
+                        }
                         continue;
+                    }
                     /* T8 self-check: fold measured cpu_ns of WAIT intervals
                      * (the ≈0 quantity). Uses full interval values — an edge
                      * interval partially outside the window barely perturbs a
@@ -383,6 +422,45 @@ int main(int argc, char **argv)
            "%.1f pp (%s)\n", min_share, max_delta,
            max_delta_ev[0] ? max_delta_ev : "n/a");
     printf("Tolerance: +/- %.1f pp\n", tolerance);
+
+    /* --raw-ns: the nanoseconds behind the shares. A share table cannot
+     * localise a disagreement — if one side's CPU total is wrong, EVERY other
+     * share on that side moves by the same factor, which looks identical to
+     * "every event is inflated". These raw totals, plus the AAS each side
+     * implies over the same window, separate a missing numerator (sampled CPU
+     * dropped) from an inflated one (exact CPU over-counted). */
+    if (raw_ns) {
+        struct evt_acc *cpu = acc_find(table, 0);
+        double cpu_ex = cpu->exact_ns, cpu_sm = cpu->sampled_ns;
+        double non_ex = total_exact_ns - cpu_ex;
+        double non_sm = total_sampled_ns - cpu_sm;
+        printf("\nRAW_WINDOW_S %.6f\n", win_s);
+        printf("RAW_SAMPLE_PERIOD_NS %llu\n",
+               (unsigned long long)sample_period_seen);
+        printf("RAW_TOTAL_EXACT_NS %.0f\n", total_exact_ns);
+        printf("RAW_TOTAL_SAMPLED_NS %.0f\n", total_sampled_ns);
+        printf("RAW_AAS_EXACT %.6f\n", total_exact_ns / 1e9 / win_s);
+        printf("RAW_AAS_SAMPLED %.6f\n", total_sampled_ns / 1e9 / win_s);
+        printf("RAW_CPU_EXACT_NS %.0f\n", cpu_ex);
+        printf("RAW_CPU_SAMPLED_NS %.0f\n", cpu_sm);
+        printf("RAW_NONCPU_EXACT_NS %.0f\n", non_ex);
+        printf("RAW_NONCPU_SAMPLED_NS %.0f\n", non_sm);
+        printf("RAW_CPU_SAMPLES %ld\n", n_samples_cpu);
+        printf("RAW_NONCPU_SAMPLES %ld\n", n_samples_noncpu);
+        printf("RAW_GATE_REJECTED_EXACT_CPU_NS %.0f\n", gate_rejected_cpu_ns);
+        printf("RAW_GATE_REJECTED_INTERVALS %ld\n", gate_rejected_intervals);
+        /* How many extra we==0 samples the sampled side would have had to
+         * record for its CPU share to equal the exact side's. Positive = the
+         * sampled side is SHORT of CPU. Denominator is the sampled total with
+         * those samples added, which is why this is not a plain subtraction. */
+        double ex_share = total_exact_ns > 0 ? cpu_ex / total_exact_ns : 0;
+        double missing_ns = ex_share < 1.0
+            ? (ex_share * non_sm / (1.0 - ex_share)) - cpu_sm : 0;
+        printf("RAW_SAMPLED_CPU_NS_NEEDED_FOR_PARITY %.0f\n", missing_ns);
+        if (sample_period_seen > 0)
+            printf("RAW_SAMPLED_CPU_SAMPLES_NEEDED_FOR_PARITY %.0f\n",
+                   missing_ns / (double)sample_period_seen);
+    }
 
     int ok = (max_delta <= tolerance) && (overlap >= (top >= 5 ? 4 : top));
 
