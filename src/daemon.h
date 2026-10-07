@@ -349,6 +349,7 @@ struct pgwt_daemon {
     bool state_map_full_logged;      /* CAP-1 */
     bool seen_qids_full_logged;      /* CAP-6 */
     bool invalid_wait_reads_logged;  /* CAP-2/5 backstop */
+    bool cmd_gate_order_read_failed_logged;  /* #294 recheck, one-shot */
 
     /* State */
     struct pgwt_backend_table backends;

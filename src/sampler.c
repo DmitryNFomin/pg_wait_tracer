@@ -1298,6 +1298,28 @@ int pgwt_sampler_poll(struct pgwt_daemon *d)
         d->counters.cmd_gate_order_at_risk_total += rs.at_risk;
         d->counters.cmd_gate_order_recovered_total += rs.recovered;
         d->counters.cmd_gate_order_read_failed_total += rs.read_failed;
+        /* A fresh gate read that cannot be taken fails CLOSED, which means the
+         * sample is dropped — correct, but indistinguishable in the data from a
+         * backend that genuinely was not in a command. On a host that blocks
+         * /proc/<pid>/mem (hardened kernel, restricted ptrace scope) this would
+         * be EVERY at-risk sample, i.e. the whole #294 under-count silently
+         * back. Say it once, out of band. WARNING, not ERROR: unlike the
+         * invalid-class-byte backstop below this is a degradation that fails
+         * safe, not a wrong reading. */
+        if (rs.read_failed && !d->cmd_gate_order_read_failed_logged) {
+            d->cmd_gate_order_read_failed_logged = true;
+            fprintf(stderr,
+                    "WARNING: sampler could not re-read the command gate for "
+                    "%llu on-CPU sample(s) this tick; those samples were "
+                    "DROPPED, not counted as CPU.\n"
+                    "  The gate fails closed, so this under-counts CPU rather "
+                    "than inventing it (cmd_gate_order_read_failed_total "
+                    "counts them; compare cmd_gate_order_at_risk_total).\n"
+                    "  A persistently growing count means /proc/<pid>/mem "
+                    "reads are being refused — check ptrace_scope and any "
+                    "kernel hardening.\n",
+                    (unsigned long long)rs.read_failed);
+        }
     }
 
     if (!tick_source_enabled && d->debug_query_string_addr) {

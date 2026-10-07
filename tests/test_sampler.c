@@ -247,6 +247,13 @@ struct fake_gate {
     int open_now;        /* what a successful fresh read reports */
     uint64_t qid;
     int qid_valid;
+    /* Per-index outcome, so ONE tick can produce all three buckets at once:
+     * 1 = in a command, 0 = between commands, -1 = the read fails. Without
+     * this the conservation check only ever sees n == n + 0 + 0, which a
+     * cross-bucket misallocation (a recovery tallied as a confirmation)
+     * satisfies just as well as correct accounting. */
+    int use_plan;
+    int plan[RC_N];
 };
 
 static int fake_gate_read(void *ctx, int idx,
@@ -259,6 +266,17 @@ static int fake_gate_read(void *ctx, int idx,
     if (idx >= 0 && idx < RC_N)
         f->calls[idx]++;
     f->total_calls++;
+    if (f->use_plan) {
+        int want = (idx >= 0 && idx < RC_N) ? f->plan[idx] : -1;
+        if (want < 0)
+            return 0;    /* this target's fresh read fails */
+        *cmd_open = want;
+        if (f->qid_valid) {
+            *query_id = f->qid;
+            *query_id_valid = 1;
+        }
+        return 1;
+    }
     if (!f->succeed)
         return 0;        /* a failed read must write NOTHING */
     *cmd_open = f->open_now;
@@ -425,18 +443,36 @@ static void test_recheck_cmd_gate_order_race(void)
           "a NULL stats pointer is tolerated, the recovery still happens");
 
     /* Conservation: every at-risk target lands in exactly one outcome, so no
-     * outcome can hide inside another (the two-sides-from-one-sum trap). */
+     * outcome can hide inside another (the two-sides-from-one-sum trap).
+     *
+     * The sum alone is too weak: with both at-risk targets taking the SAME
+     * outcome the identity reads 2 == 2+0+0, which a cross-bucket
+     * misallocation satisfies too. So drive ALL THREE outcomes in ONE tick
+     * (index 3 becomes at-risk by marking its read valid) and assert each
+     * bucket is exactly 1 as well as the sum. */
     rc_reset(t, vals, valid);
-    t[6].backend_type = PGWT_BT_CLIENT;
-    f = (struct fake_gate){ .succeed = 1, .open_now = 1 };
+    valid[3] = 1;                 /* now a third at-risk client */
+    f = (struct fake_gate){ .use_plan = 1 };
+    f.plan[0] = 1;                /* -> recovered */
+    f.plan[3] = 0;                /* -> confirmed_closed */
+    f.plan[6] = -1;               /* -> read_failed */
     pgwt_sampler_recheck_cmd_gate(t, vals, valid, RC_N, fake_gate_read, &f,
                                   &st);
     CHECK(st.at_risk == st.recovered + st.confirmed_closed + st.read_failed &&
-          st.at_risk == 2,
+          st.at_risk == 3,
           "at_risk == recovered + confirmed + failed (%llu vs %llu+%llu+%llu)",
           (unsigned long long)st.at_risk, (unsigned long long)st.recovered,
           (unsigned long long)st.confirmed_closed,
           (unsigned long long)st.read_failed);
+    CHECK(st.recovered == 1 && st.confirmed_closed == 1 && st.read_failed == 1,
+          "one tick, three distinct outcomes, one each — a recovery tallied as "
+          "a confirmation cannot hide in the sum (got %llu/%llu/%llu)",
+          (unsigned long long)st.recovered,
+          (unsigned long long)st.confirmed_closed,
+          (unsigned long long)st.read_failed);
+    CHECK(t[0].cmd_open == 1 && t[3].cmd_open == 0 && t[6].cmd_open == 0,
+          "and each target's gate matches its own outcome, not its neighbour's "
+          "(got %d/%d/%d)", t[0].cmd_open, t[3].cmd_open, t[6].cmd_open);
 
     /* One-directional by design: an already-open gate is never re-read, so the
      * recheck cannot CLOSE one. That is the residual over-count side, and it
