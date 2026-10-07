@@ -421,6 +421,21 @@ def main():
     io_writer = wl._session("io_writer")
     lockmgr_sessions = [wl._session(f"lockmgr_{i}")
                          for i in range(LOCKMGR_SESSION_COUNT)]
+    # 2026-10-07 regression found live (gate-1 box-check): a COUNT(*) over
+    # a 200-partition table is a classic parallel-query candidate --
+    # EXPLAIN confirmed "Gather Workers Planned: 2" -- so LOCKMGR_QUERY's
+    # 20 repetitions x 8 sessions each spawned 2 additional forked parallel
+    # workers, ~320 extra forks/tick on top of the 160 "real" executions.
+    # Over a full ~20min live-ui-smoke walk this overwhelmed the daemon's
+    # per-backend tracking (pgwt-server pegged at ~90% CPU, every tab after
+    # the first timed out waiting for a WebSocket connection). Disabling
+    # parallel workers for just these sessions (a session-level GUC, no
+    # server restart, no change to anyone else's connection) keeps the
+    # mechanism -- one backend's own fast-path overflow into the shared
+    # lock manager -- without the fork storm, which was never the point.
+    for sess in lockmgr_sessions:
+        sess.stdin.write("SET max_parallel_workers_per_gather = 0;\n")
+        sess.stdin.flush()
     wl.extra_sessions.extend(
         [reporter, row_holder, row_waiter, adv_holder, io_reader,
          io_writer, *lockmgr_sessions])

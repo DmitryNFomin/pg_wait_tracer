@@ -397,6 +397,27 @@ def test_lockmgr_query_does_not_filter_on_partition_key():
           f"(got {llw.LOCKMGR_QUERY!r})")
 
 
+def test_lockmgr_sessions_disable_parallel_workers():
+    # 2026-10-07 regression (live, gate-1 box-check): LOCKMGR_QUERY's
+    # COUNT(*) over a 200-partition table is a parallel-query candidate --
+    # EXPLAIN confirmed "Gather Workers Planned: 2" -- so the 20x8=160
+    # fanout executions per tick spawned ~320 extra forked parallel
+    # workers/tick, which overwhelmed the daemon's backend tracking over a
+    # full live-ui-smoke walk (pgwt-server pegged at CPU, every tab after
+    # the first timed out). This is a source-text check (the SET is sent
+    # once at session setup in main(), not inside a standalone testable
+    # tick function) -- same pattern as
+    # test_live_loop_workload_calls_fire_with_cadence above.
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                         "live_loop_workload.py")
+    with open(path) as f:
+        src = f.read()
+    check("max_parallel_workers_per_gather = 0" in src,
+          "live_loop_workload.py disables parallel workers for the "
+          "lockmgr sessions, so the fast-path-overflow mechanism does not "
+          "also spawn a parallel-worker fork storm")
+
+
 def main():
     test_fire_verify_true_spawns_one_backend()
     test_fire_verify_false_spawns_no_backend()
@@ -419,6 +440,7 @@ def main():
     test_io_load_write_tick_sends_exact_batch_size_no_sleep()
     test_lockmgr_tick_fires_every_session_with_exact_repeat_count()
     test_lockmgr_query_does_not_filter_on_partition_key()
+    test_lockmgr_sessions_disable_parallel_workers()
     print(f"\n{tests_passed}/{tests_run} passed")
     return 0 if tests_failed == 0 else 1
 
