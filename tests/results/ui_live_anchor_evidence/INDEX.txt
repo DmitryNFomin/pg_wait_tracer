@@ -58,7 +58,28 @@ tables/
         run: 253 before this change, 264 after.
   08  per-tick A for run.id 1791385783, the run that went red. A = 662-853ms
         on tick 1 and 207-233ms on ticks 2-6, for all five heavy tabs. This
-        single table is why the fix targets tick 1 and nothing else.
+        single table is why the fix targets tick 1.
+
+CORRECTION, measured after the anchor fix landed (two gate-1 runs, run.id
+1791396936 and 1791399562). Table 08's 207-233ms on ticks 2-6 is a real
+measurement but it was WRONGLY read, here and in the commit message, as the
+healthy per-tick floor. It was the SAME one-tick lag masking a variable
+interval: the loop ran one AAS send behind, so the mount had already happened
+before the loop began its mandatory pre-sweep work, and A measured only the
+~50ms poll lag. With the lag gone the mount lands at a variable point inside
+that work and A on ticks 2-6 spreads 200-526ms -- stdev 22-28 before the fix,
+78-83 after. So:
+  - tick 1 was genuinely broken and is genuinely fixed (A 426-853 -> 208-394),
+    and the recorded mount lag pair_offsets_ms went from 5127-5843ms (one whole
+    tick interval, i.e. nonsense) to 54-491ms on the heavy tabs;
+  - but ticks 2-6 were never the healthy baseline this corpus took them for.
+The real conclusion, and the reason issue #304 exists: ~550-750ms of mandatory
+work sits between a tick and its first possible frame, so SWEEP_OFFSETS_MS's
+200 and 500ms targets are not reachable from the MOUNT at all, before and after
+this fix alike. r(mount lag, A) = -0.72 over 60 ticks, and tick_ts -> frame 1
+is near-constant per tab (spread 36-219ms for 9 of 10 tab-runs).
+frame_spacing_ok is reporting-only as of this branch for that reason among
+others; see FRAME_SPACING_DRIFT_BOUND_MS's own comment.
 
 Known gap, NOT closed here (pinned by
 tests/test_ui_live_smoke_lib.py::test_frame_spacing_vacuous_pass_is_a_KNOWN_
