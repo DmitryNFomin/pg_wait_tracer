@@ -1172,7 +1172,7 @@ int pgwt_sampler_poll(struct pgwt_daemon *d)
      * the common steady state (edge already open, or not on CPU) does zero
      * extra reads. When ground truth says "in a command", also refresh the
      * query_id the edge-uprobe likewise missed. */
-    if (!tick_source_enabled && d->debug_query_string_addr) {
+    if (d->debug_query_string_addr) {
         for (int i = 0; i < n; i++) {
             if (!s->read_valid[i] || s->read_vals[i] != 0
                 || targets[i].cmd_open)
