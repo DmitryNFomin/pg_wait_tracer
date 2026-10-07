@@ -1,0 +1,185 @@
+DIAG(fix) waiting for lock at 2026-10-07T07:07:33+00:00
+DIAG(fix) lock acquired at 2026-10-07T07:07:33+00:00
+1175:    if (d->debug_query_string_addr) {
+DIAG(fix) build ok
+================ FIX rate=10 ================
+DIAG rate=10Hz postmaster=22526 pgbench_accounts=1000000 out=/root/diag-out/fix-10
+
+"sampled_attr_source":"pgbackend_status"
+DIAG client_backends=8 pids=1820298 1820296 1820299 1820301 1820300 1820297 1820295 1820302
+DIAG escalate: {"ok":true,"escalated":true,"granted_s":60,"seconds_remaining":59.990300807,"budget_remaining_s":599.990300486}
+
+DIAG pgbench: 
+DIAG cross_validate exit=0
+Overlap window: 61.0s (sampled + exact both present)
+
+wait_event                   exact_share%     sampled%   delta_pp
+------------------------------------------------------------------
+CPU                                 37.6%        31.6%       6.0
+WALWrite                            19.0%        21.4%       2.3
+CheckpointWriteDelay                15.1%        15.9%       0.8
+transactionid                       13.7%        15.4%       1.6
+WalSync                             11.6%        12.7%       1.1
+tuple                                1.2%         1.4%       0.2
+VacuumDelay                          0.5%         0.4%       0.1
+WalWrite                             0.5%         0.4%       0.0
+DataFileWrite                        0.2%         0.3%       0.1
+DataFileRead                         0.2%         0.2%       0.0
+DataFileFlush                        0.2%         0.1%       0.1
+LockManager                          0.1%         0.1%       0.0
+SpinDelay                            0.0%         0.1%       0.0
+WALInsert                            0.0%         0.0%       0.0
+BufferContent                        0.0%         0.0%       0.0
+DataFileExtend                       0.0%         0.0%       0.0
+XactSLRU                             0.0%         0.0%       0.0
+ProcArray                            0.0%         0.0%       0.0
+AioIoCompletion                      0.0%         0.0%       0.0
+XidGen                               0.0%         0.0%       0.0
+ProcarrayGroupUpdate                 0.0%         0.0%       0.0
+SlruWrite                            0.0%         0.0%       0.0
+XactGroupUpdate                      0.0%         0.0%       0.0
+WALBufMapping                        0.0%         0.0%       0.0
+BufferMapping                        0.0%         0.0%       0.0
+extend                               0.0%         0.0%       0.0
+AioWorkerSubmissionQueue             0.0%         0.0%       0.0
+CheckpointerComm                     0.0%         0.0%       0.0
+RelationMapRead                      0.0%         0.0%       0.0
+DataFilePrefetch                     0.0%         0.0%       0.0
+
+Samples in window: 3851
+Top-5 event overlap: 5/5
+Max share disagreement (events >= 2% exact share): 6.0 pp (CPU)
+Tolerance: +/- 10.0 pp
+
+RAW_WINDOW_S 61.014367
+RAW_SAMPLE_PERIOD_NS 100000000
+RAW_TOTAL_EXACT_NS 403923162013
+RAW_TOTAL_SAMPLED_NS 394537134055
+RAW_AAS_EXACT 6.620132
+RAW_AAS_SAMPLED 6.466299
+RAW_CPU_EXACT_NS 152019486539
+RAW_CPU_SAMPLED_NS 124840018608
+RAW_NONCPU_EXACT_NS 251903675474
+RAW_NONCPU_SAMPLED_NS 269697115447
+RAW_CPU_SAMPLES 1218
+RAW_NONCPU_SAMPLES 2633
+RAW_GATE_REJECTED_EXACT_CPU_NS 35543893964
+RAW_GATE_REJECTED_INTERVALS 195958
+RAW_SAMPLED_CPU_NS_NEEDED_FOR_PARITY 37917499456
+RAW_SAMPLED_CPU_SAMPLES_NEEDED_FOR_PARITY 379
+On-CPU-during-wait (spin): 5.2222% of wait time — exact on-CPU spin, attributed to its wait class (informational)
+
+RESULT: PASS
+PROC_WALL_S 58.018675  CLK_TCK 100
+PROC_DAEMON_PID 1820262 TICKS 182 CPU_NS 1820000000
+PROC_BACKEND_PID 1820295 TICKS 1952 CPU_NS 19520000000
+PROC_BACKEND_PID 1820296 TICKS 1957 CPU_NS 19570000000
+PROC_BACKEND_PID 1820297 TICKS 1944 CPU_NS 19440000000
+PROC_BACKEND_PID 1820298 TICKS 1937 CPU_NS 19370000000
+PROC_BACKEND_PID 1820299 TICKS 1935 CPU_NS 19350000000
+PROC_BACKEND_PID 1820300 TICKS 1934 CPU_NS 19340000000
+PROC_BACKEND_PID 1820301 TICKS 1925 CPU_NS 19250000000
+PROC_BACKEND_PID 1820302 TICKS 1921 CPU_NS 19210000000
+PROC_CLIENT_TOTAL_CPU_NS 155050000000
+PROC_CLIENT_TOTAL_CPU_OVER_WALL 2.6724
+METRIC noncmd_cpu_samples_total 281
+METRIC sampled_attr_tick_read_failures_total 4937
+METRIC sample_read_faults_total 0
+METRIC cmd_gate_recovered_total ABSENT-from-metrics
+METRIC invalid_wait_reads_total 1
+METRIC samples_written_total ABSENT-from-metrics
+METRIC sampled_attr_shadow_mismatch_total 1859
+METRIC sampled_attr_shadow_checks_total ABSENT-from-metrics
+DIAG capture exit=0
+================ FIX rate=200 ================
+DIAG rate=200Hz postmaster=22526 pgbench_accounts=1000000 out=/root/diag-out/fix-200
+
+"sampled_attr_source":"pgbackend_status"
+DIAG client_backends=8 pids=1820610 1820607 1820608 1820613 1820614 1820609 1820611 1820615
+DIAG escalate: {"ok":true,"escalated":true,"granted_s":60,"seconds_remaining":59.9999949,"budget_remaining_s":598.149550472}
+
+DIAG pgbench: 
+DIAG cross_validate exit=0
+Overlap window: 61.9s (sampled + exact both present)
+
+wait_event                   exact_share%     sampled%   delta_pp
+------------------------------------------------------------------
+CPU                                 36.7%        33.5%       3.2
+WALWrite                            18.9%        20.3%       1.4
+CheckpointWriteDelay                15.0%        15.4%       0.3
+transactionid                       13.8%        14.8%       1.0
+WalSync                             11.5%        11.9%       0.3
+VacuumTruncate                       1.2%         1.2%       0.0
+tuple                                1.2%         1.3%       0.1
+VacuumDelay                          0.5%         0.5%       0.0
+WalWrite                             0.4%         0.4%       0.1
+DataFileWrite                        0.2%         0.2%       0.0
+DataFileRead                         0.2%         0.2%       0.0
+DataFileFlush                        0.2%         0.2%       0.0
+LockManager                          0.1%         0.1%       0.0
+SpinDelay                            0.0%         0.0%       0.0
+BufferContent                        0.0%         0.0%       0.0
+WALInsert                            0.0%         0.0%       0.0
+DataFileExtend                       0.0%         0.0%       0.0
+XactSLRU                             0.0%         0.0%       0.0
+ProcArray                            0.0%         0.0%       0.0
+XidGen                               0.0%         0.0%       0.0
+AioIoCompletion                      0.0%         0.0%       0.0
+WALBufMapping                        0.0%         0.0%       0.0
+XactGroupUpdate                      0.0%         0.0%       0.0
+ProcarrayGroupUpdate                 0.0%         0.0%       0.0
+SlruWrite                            0.0%         0.0%       0.0
+BufferMapping                        0.0%         0.0%       0.0
+extend                               0.0%         0.0%       0.0
+AioWorkerSubmissionQueue             0.0%         0.0%       0.0
+RelationMapRead                      0.0%         0.0%       0.0
+CheckpointerComm                     0.0%         0.0%       0.0
+LockFastPath                         0.0%         0.0%       0.0
+(null)                               0.0%         0.0%       0.0
+
+Samples in window: 79422
+Top-5 event overlap: 5/5
+Max share disagreement (events >= 2% exact share): 3.2 pp (CPU)
+Tolerance: +/- 10.0 pp
+
+RAW_WINDOW_S 61.850661
+RAW_SAMPLE_PERIOD_NS 5017095
+RAW_TOTAL_EXACT_NS 411785087995
+RAW_TOTAL_SAMPLED_NS 410515743565
+RAW_AAS_EXACT 6.657731
+RAW_AAS_SAMPLED 6.637209
+RAW_CPU_EXACT_NS 151071315322
+RAW_CPU_SAMPLED_NS 137657742643
+RAW_NONCPU_EXACT_NS 260713772673
+RAW_NONCPU_SAMPLED_NS 272858000922
+RAW_CPU_SAMPLES 26654
+RAW_NONCPU_SAMPLES 52768
+RAW_GATE_REJECTED_EXACT_CPU_NS 37337273511
+RAW_GATE_REJECTED_INTERVALS 194568
+RAW_SAMPLED_CPU_NS_NEEDED_FOR_PARITY 20450579264
+RAW_SAMPLED_CPU_SAMPLES_NEEDED_FOR_PARITY 4076
+On-CPU-during-wait (spin): 5.0123% of wait time — exact on-CPU spin, attributed to its wait class (informational)
+
+RESULT: PASS
+PROC_WALL_S 58.018058  CLK_TCK 100
+PROC_DAEMON_PID 1820573 TICKS 617 CPU_NS 6170000000
+PROC_BACKEND_PID 1820607 TICKS 1912 CPU_NS 19120000000
+PROC_BACKEND_PID 1820608 TICKS 1907 CPU_NS 19070000000
+PROC_BACKEND_PID 1820609 TICKS 1895 CPU_NS 18950000000
+PROC_BACKEND_PID 1820610 TICKS 1898 CPU_NS 18980000000
+PROC_BACKEND_PID 1820611 TICKS 1889 CPU_NS 18890000000
+PROC_BACKEND_PID 1820613 TICKS 1882 CPU_NS 18820000000
+PROC_BACKEND_PID 1820614 TICKS 1897 CPU_NS 18970000000
+PROC_BACKEND_PID 1820615 TICKS 1871 CPU_NS 18710000000
+PROC_CLIENT_TOTAL_CPU_NS 151510000000
+PROC_CLIENT_TOTAL_CPU_OVER_WALL 2.6114
+METRIC noncmd_cpu_samples_total 5638
+METRIC sampled_attr_tick_read_failures_total 98188
+METRIC sample_read_faults_total 0
+METRIC cmd_gate_recovered_total ABSENT-from-metrics
+METRIC invalid_wait_reads_total 0
+METRIC samples_written_total ABSENT-from-metrics
+METRIC sampled_attr_shadow_mismatch_total 35056
+METRIC sampled_attr_shadow_checks_total ABSENT-from-metrics
+DIAG capture exit=0
+DIAG(fix) done at 2026-10-07T07:09:47+00:00

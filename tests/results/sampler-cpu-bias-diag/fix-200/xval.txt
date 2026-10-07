@@ -1,0 +1,61 @@
+Overlap window: 61.9s (sampled + exact both present)
+
+wait_event                   exact_share%     sampled%   delta_pp
+------------------------------------------------------------------
+CPU                                 36.7%        33.5%       3.2
+WALWrite                            18.9%        20.3%       1.4
+CheckpointWriteDelay                15.0%        15.4%       0.3
+transactionid                       13.8%        14.8%       1.0
+WalSync                             11.5%        11.9%       0.3
+VacuumTruncate                       1.2%         1.2%       0.0
+tuple                                1.2%         1.3%       0.1
+VacuumDelay                          0.5%         0.5%       0.0
+WalWrite                             0.4%         0.4%       0.1
+DataFileWrite                        0.2%         0.2%       0.0
+DataFileRead                         0.2%         0.2%       0.0
+DataFileFlush                        0.2%         0.2%       0.0
+LockManager                          0.1%         0.1%       0.0
+SpinDelay                            0.0%         0.0%       0.0
+BufferContent                        0.0%         0.0%       0.0
+WALInsert                            0.0%         0.0%       0.0
+DataFileExtend                       0.0%         0.0%       0.0
+XactSLRU                             0.0%         0.0%       0.0
+ProcArray                            0.0%         0.0%       0.0
+XidGen                               0.0%         0.0%       0.0
+AioIoCompletion                      0.0%         0.0%       0.0
+WALBufMapping                        0.0%         0.0%       0.0
+XactGroupUpdate                      0.0%         0.0%       0.0
+ProcarrayGroupUpdate                 0.0%         0.0%       0.0
+SlruWrite                            0.0%         0.0%       0.0
+BufferMapping                        0.0%         0.0%       0.0
+extend                               0.0%         0.0%       0.0
+AioWorkerSubmissionQueue             0.0%         0.0%       0.0
+RelationMapRead                      0.0%         0.0%       0.0
+CheckpointerComm                     0.0%         0.0%       0.0
+LockFastPath                         0.0%         0.0%       0.0
+(null)                               0.0%         0.0%       0.0
+
+Samples in window: 79422
+Top-5 event overlap: 5/5
+Max share disagreement (events >= 2% exact share): 3.2 pp (CPU)
+Tolerance: +/- 10.0 pp
+
+RAW_WINDOW_S 61.850661
+RAW_SAMPLE_PERIOD_NS 5017095
+RAW_TOTAL_EXACT_NS 411785087995
+RAW_TOTAL_SAMPLED_NS 410515743565
+RAW_AAS_EXACT 6.657731
+RAW_AAS_SAMPLED 6.637209
+RAW_CPU_EXACT_NS 151071315322
+RAW_CPU_SAMPLED_NS 137657742643
+RAW_NONCPU_EXACT_NS 260713772673
+RAW_NONCPU_SAMPLED_NS 272858000922
+RAW_CPU_SAMPLES 26654
+RAW_NONCPU_SAMPLES 52768
+RAW_GATE_REJECTED_EXACT_CPU_NS 37337273511
+RAW_GATE_REJECTED_INTERVALS 194568
+RAW_SAMPLED_CPU_NS_NEEDED_FOR_PARITY 20450579264
+RAW_SAMPLED_CPU_SAMPLES_NEEDED_FOR_PARITY 4076
+On-CPU-during-wait (spin): 5.0123% of wait time — exact on-CPU spin, attributed to its wait class (informational)
+
+RESULT: PASS
