@@ -4,6 +4,8 @@
  * All result structs use malloc'd arrays — caller frees with free(result->rows).
  */
 #include "compute.h"
+
+#include <assert.h>
 #include "summary_writer.h"
 #include "summary_reader.h"
 #include "wait_event.h"
@@ -361,8 +363,18 @@ void pgwt_tag_events(struct pgwt_trace_event *events, int count,
          * command must not inherit it. */
         if (fwd)
             fwd[i] = st->cmd_qid;
+        /* pgwt_is_session_idle_event, NOT the load rule: this ENDS THE
+         * COMMAND, and it is the offline counterpart of src/sampler.c's live
+         * rule, which uses the narrow predicate. Before this was fixed the
+         * same decision was made two different ways depending on whether it
+         * ran live or offline. A sampled Timeout:VacuumDelay is excluded from
+         * DB Time but happens INSIDE a running VACUUM, and treating it as a
+         * boundary dropped the command's parse-phase waits. Adjudicated by
+         * tests/test_idle_accounting.c section 7, which failed here before
+         * the change and passes its ClientRead contrast either way. */
         if ((ev->flags & PGWT_EVENT_FLAG_SAMPLE) &&
-            pgwt_is_idle_event(ev->new_event ? ev->new_event : ev->old_event))
+            pgwt_is_session_idle_event(ev->new_event ? ev->new_event
+                                                     : ev->old_event))
             st->cmd_qid = 0;
         else if (ev->query_id != 0)
             st->cmd_qid = ev->query_id;
@@ -456,7 +468,12 @@ void pgwt_tag_events(struct pgwt_trace_event *events, int count,
                 st->next_qid = ev->query_id;
                 continue;
             }
-            if (pgwt_is_idle_event(we)) {
+            /* Same command-boundary question as the forward pass above, on
+             * the backward (backfill) pass -- and this one is NOT gated on
+             * SAMPLE, so it reached exact records too: an in-command pacing
+             * sleep with query_id 0 cleared the carry AND skipped backfill,
+             * losing the statement's parse-phase lock entirely. */
+            if (pgwt_is_session_idle_event(we)) {
                 st->next_qid = 0;
                 continue;
             }
@@ -744,6 +761,217 @@ void pgwt_compute_aas(const struct pgwt_trace_event *events, int count,
 
 /* ── Time Model ───────────────────────────────────────────── */
 
+/* ── The Idle row and its NAMED sub-rows ──────────────────────────────────
+ *
+ * Before 2026-10-06 every idle interval was summed into one scalar and the
+ * time model emitted no Idle row at all, so `idle_time_ms` was a number with
+ * nothing behind it. Making the Timeout pacing sleeps idle would have turned
+ * ~807 s of Timeout:CheckpointWriteDelay into an UNEXPLAINED figure on the
+ * Overview, which is the opposite of the point.
+ *
+ * So the time model now emits:
+ *
+ *     Idle                              1,207,000 ms     indent 0
+ *       Timeout:CheckpointWriteDelay      807,549 ms     indent 2
+ *       Client:ClientRead                 399,000 ms     indent 2
+ *
+ * INDENTS, and why they are 0 and 2 rather than the more obvious 1 and 2:
+ *
+ *  - indent 0. tests/demo_rehearsal_lib.py time_model_conservation() sums
+ *    EVERY indent==1 row and requires the total to equal db_time_ms within
+ *    tolerance. An indent-1 Idle row is time that is BY DEFINITION not in
+ *    db_time_ms, so it would break that check on contact -- and that file
+ *    belongs to another branch. indent 0 also happens to be what the UI
+ *    already expects: web/static/views/overview.js looks the row up with
+ *    `r.indent === 0 && r.name.indexOf('Idle') >= 0`, and
+ *    tests/mock_server.py has shipped `{"indent": 0, "name": "Idle"}` in its
+ *    fixture all along. The real server simply never emitted it.
+ *  - indent 2 for the children, which is what
+ *    demo_rehearsal_lib.REQUIRED_WORKLOAD_EVENTS reads sub-event rows at.
+ *    Adding rows there is additive: those names are "Lock:relation" and
+ *    "Timeout:PgSleep", and PgSleep is not idle.
+ *
+ * HIDDEN events are deliberately NOT broken out. pgwt_is_hidden_event (the
+ * Activity class) means "never display this row", and that has not changed:
+ * background processes parked in their main loop are not a diagnostic. So the
+ * Activity share of Idle stays inside the parent total, and the children
+ * explain the VISIBLE idle events -- at most 7 of them today (ClientRead plus
+ * the six pacing sleeps), which is why they are not truncated to 5 the way
+ * class sub-events are.
+ */
+/* TWO different quantities, which were previously one and off by one:
+ *
+ *   MAX_IDLE_EV       -- how many DISTINCT idle events the accumulator holds.
+ *   MAX_IDLE_SUB_ROWS -- how many indent-2 rows emit_idle_rows can write:
+ *                        one per accumulator entry, plus the labelled
+ *                        remainder.
+ *
+ * Conflating them sized `idle_ev[]` at MAX_IDLE_SUB_ROWS, so the accumulator
+ * took one more event than the Idle sub-budget had room to print: the reserved
+ * Idle SUB-BUDGET was one row short (a worst case of 10 rows into the 9 the
+ * `+ 1 + MAX_IDLE_SUB_ROWS` term reserved).
+ *
+ * TO BE PRECISE, because an earlier revision of this comment overstated it:
+ * this was NOT a write past the calloc, and the fix is not a memory-safety
+ * fix. The allocation has unrelated slack that absorbed the extra row --
+ * `max_rows` budgets 6 slots per class for all 11 classes and a leading 2,
+ * while the CPU class uses at most 2 of its 6 (class row + "CPU (waiting for a
+ * core)", then `continue`s past sub-events), the Activity class is entirely
+ * idle (idle_rule.c: the whole class returns 1) so never reaches a class row at
+ * all, and only one of the leading 2 is emitted outside the class loop. Worst
+ * case emitted is 1 + 2 + 9*6 + 10 = 67 rows against max_rows = 77. So the
+ * defect is a broken internal invariant whose symptom was hidden by slack
+ * somewhere else -- which is worth fixing exactly because the next change to
+ * the class rows could consume that slack silently.
+ *
+ * The trigger is reachable: the mask is rebuilt from RESOLVED NAMES, so a
+ * sidecar whose "Timeout" array repeats a pacing name (hand-edited, or
+ * truncated and rewritten) sets a bit at every id carrying that name and
+ * drives the number of distinct idle events past the seven the rule admits. */
+#define MAX_IDLE_EV       PGWT_MAX_VISIBLE_IDLE_EVENTS
+#define MAX_IDLE_SUB_ROWS (MAX_IDLE_EV + 1)
+
+/* The rows emit_idle_rows can write, worst case, vs the rows its callers
+ * reserve for it. Unlike the assertion this replaces -- which compared
+ * MAX_IDLE_SUB_ROWS to its own definition and so could never fire -- these two
+ * are derived independently: the first from the accumulator's capacity and the
+ * emitter's shape, the second from the `max_rows` expression below. Changing
+ * either side alone is a compile error. */
+#define IDLE_ROWS_WORST_CASE (1 /* Idle parent */ + MAX_IDLE_EV + 1 /* rest */)
+/* Used BY BOTH max_rows expressions below, not merely defined next to them: as
+ * long as they spelled `1 + MAX_IDLE_SUB_ROWS` by hand the assertion below
+ * compared two expressions over the same constants and could not see a
+ * too-small calloc -- the same mirror-checking shape as the assertion it
+ * replaced, one level up. */
+#define IDLE_ROWS_RESERVED   (1 + MAX_IDLE_SUB_ROWS)
+_Static_assert(IDLE_ROWS_WORST_CASE <= IDLE_ROWS_RESERVED,
+               "emit_idle_rows can write more rows than its callers reserve: "
+               "the Idle parent, one row per accumulator entry, and the "
+               "remainder row must all fit");
+
+struct idle_accum {
+    uint32_t event_id;
+    double   total_ns;
+};
+
+/* Add `ns` of `eid` to the visible-idle breakdown. Hidden events are counted
+ * in the parent total by the caller but never given a row. */
+static void idle_accum_add(struct idle_accum *ia, int *n, uint32_t eid,
+                           double ns)
+{
+    if (pgwt_is_hidden_event(eid))
+        return;
+    for (int i = 0; i < *n; i++) {
+        if (ia[i].event_id == eid) { ia[i].total_ns += ns; return; }
+    }
+    /* Capacity is in DISTINCT EVENTS (MAX_IDLE_EV), not rows: the row budget
+     * is one larger because of the remainder row, and using it here let the
+     * accumulator outgrow what the caller reserved. Anything dropped lands in
+     * "Other (background)", so the children still sum to the parent. */
+    if (*n >= MAX_IDLE_EV)
+        return;
+    ia[*n].event_id = eid;
+    ia[*n].total_ns = ns;
+    (*n)++;
+}
+
+static int cmp_idle_desc(const void *a, const void *b)
+{
+    const struct idle_accum *x = a, *y = b;
+    if (x->total_ns < y->total_ns) return 1;
+    if (x->total_ns > y->total_ns) return -1;
+    return 0;
+}
+
+/* Emit the Idle parent row plus one named row per visible idle event.
+ * `rows`/`nr` are the time-model row array being built; the caller sized it
+ * with IDLE_ROWS_RESERVED spare slots, which the _Static_assert above checks
+ * against this function's worst case. pct_db_time and aas are deliberately
+ * 0 on these rows: idle time has no share OF DB Time (it is excluded from it),
+ * and reporting a percentage of a total it is not part of is how an excluded
+ * number sneaks back into a reader's mental sum. */
+/* `idle_time_ns` is the EXACT total; `ia` holds the per-event breakdown of
+ * the VISIBLE part of it. The two differ by the hidden (Activity) share, and
+ * on the summary path also by anything the bounded per-event tables could not
+ * hold. The difference is emitted as one labelled row so the children always
+ * sum to the parent -- an unexplained gap in a visible total is the thing
+ * this whole change exists to remove, and leaving one would have reintroduced
+ * it at the next level down. */
+static int emit_idle_rows(struct pgwt_tm_row *rows, int nr,
+                          double idle_time_ns,
+                          struct idle_accum *ia, int n_ia,
+                          double *excess_ns)
+{
+    if (excess_ns) *excess_ns = 0.0;
+    if (idle_time_ns <= 0) {
+        /* A ZERO parent with NON-ZERO named children is the single most
+         * diagnostic shape this signal has: it means the writer recorded no
+         * idle time while the reader classified some of the same events as
+         * idle -- i.e. the two disagree about the rule. Returning early here
+         * skipped precisely that case, so the one scenario the counter exists
+         * to catch was the one it could not see (e.g. a PG16 record written
+         * with an empty pacing mask, read back under an erroneous PG18 one).
+         * Compare before returning. */
+        if (excess_ns) {
+            double named0 = 0;
+            for (int i = 0; i < n_ia; i++)
+                if (ia[i].total_ns > 0) named0 += ia[i].total_ns;
+            if (named0 > 0) *excess_ns = named0;
+        }
+        return nr;
+    }
+
+    snprintf(rows[nr].name, sizeof(rows[nr].name), "Idle");
+    rows[nr].time_ms     = idle_time_ns / 1e6;
+    rows[nr].pct_db_time = 0.0;
+    rows[nr].aas         = 0.0;
+    rows[nr].indent      = 0;
+    nr++;
+
+    qsort(ia, n_ia, sizeof(ia[0]), cmp_idle_desc);
+    for (int i = 0; i < n_ia; i++) {
+        if (ia[i].total_ns <= 0) continue;
+        char buf[64];
+        pgwt_event_full_name(ia[i].event_id, buf, sizeof(buf));
+        snprintf(rows[nr].name, sizeof(rows[nr].name), "%s", buf);
+        rows[nr].time_ms     = ia[i].total_ns / 1e6;
+        rows[nr].pct_db_time = 0.0;
+        rows[nr].aas         = 0.0;
+        rows[nr].indent      = 2;
+        nr++;
+    }
+
+    /* The remainder: hidden background parking (Activity) plus, on the
+     * summary path, any visible idle event the bounded tables dropped. */
+    double named = 0;
+    for (int i = 0; i < n_ia; i++)
+        if (ia[i].total_ns > 0) named += ia[i].total_ns;
+    double other = idle_time_ns - named;
+    /* ANY positive remainder gets a row. This was `> 1e3` -- "ignore float
+     * dust" -- which silently dropped up to 1 us: a record whose only hidden
+     * Activity was 500 ns produced an Idle parent with children that did not
+     * sum to it, which is the precise contract this row exists to keep. The
+     * values are sums of integer nanosecond durations, so there is no dust to
+     * ignore. */
+    if (other > 0) {
+        snprintf(rows[nr].name, sizeof(rows[nr].name), "Other (background)");
+        rows[nr].time_ms     = other / 1e6;
+        rows[nr].pct_db_time = 0.0;
+        rows[nr].aas         = 0.0;
+        rows[nr].indent      = 2;
+        nr++;
+    } else if (other < 0 && excess_ns) {
+        /* Children exceed the parent. Impossible on all three paths as they
+         * stand (raw sums the same events it names; the summary totals are
+         * writer-side scalars over a superset of what the bounded lists
+         * name), so this is reported rather than clamped: it would mean the
+         * writer and the reader disagree about what is idle. */
+        *excess_ns = -other;
+    }
+    return nr;
+}
+
+
 /* Internal accumulator for class/event totals */
 struct class_accum {
     char     name[32];
@@ -790,6 +1018,12 @@ void pgwt_compute_time_model(const struct pgwt_trace_event *events, int count,
 
     double db_time_ns  = 0.0;
     double idle_time_ns = 0.0;
+    /* Named breakdown of idle_time_ns -- see emit_idle_rows. */
+    struct idle_accum idle_ev[MAX_IDLE_EV];
+    _Static_assert(sizeof(idle_ev) / sizeof(idle_ev[0]) == MAX_IDLE_EV,
+                   "idle_ev must hold exactly MAX_IDLE_EV entries -- the row "
+                   "budget in max_rows below is computed from that number");
+    int n_idle_ev = 0;
     /* T8 measured-CPU accumulators. cpu_measured_ns is the CPU* total (measured
      * where v3 cpu_ns exists, else the legacy full gap); offcpu_ns its off-CPU
      * sibling; the two sum to the old full CPU-class total, so DB Time is
@@ -832,6 +1066,7 @@ void pgwt_compute_time_model(const struct pgwt_trace_event *events, int count,
 
         if (pgwt_is_idle_event(ev->old_event)) {
             idle_time_ns += dur_ns;
+            idle_accum_add(idle_ev, &n_idle_ev, ev->old_event, dur_ns);
             continue;
         }
 
@@ -921,8 +1156,10 @@ void pgwt_compute_time_model(const struct pgwt_trace_event *events, int count,
     double idle_ms     = idle_time_ns / 1e6;
 
     /* Phase 2: build result rows */
-    /* Max rows: 1 (DB Time) + 1 (Off-CPU*) + NUM_CLASSES * (1 class + 5 sub) */
-    int max_rows = 2 + PGWT_NUM_CLASSES * 6;
+    /* Max rows: 1 (DB Time) + 1 (Off-CPU*) + NUM_CLASSES * (1 class + 5 sub)
+     * + IDLE_ROWS_RESERVED (the Idle parent, one row per named idle event, and
+     * the remainder row -- the remainder was the row the old bound forgot). */
+    int max_rows = 2 + PGWT_NUM_CLASSES * 6 + IDLE_ROWS_RESERVED;
     struct pgwt_tm_row *rows = calloc(max_rows, sizeof(*rows));
     int nr = 0;
 
@@ -1030,6 +1267,38 @@ void pgwt_compute_time_model(const struct pgwt_trace_event *events, int count,
     }
 
     free(ev_accum);
+
+    /* Idle LAST, so rows[0] stays "DB Time" (overview.js relies on that). */
+    double idle_excess_ns = 0.0;
+    nr = emit_idle_rows(rows, nr, idle_time_ns, idle_ev, n_idle_ev,
+                        &idle_excess_ns);
+    out->idle_children_excess_ms = idle_excess_ns / 1e6;
+    if (idle_excess_ns > 0)
+        fprintf(stderr, "ERROR: Idle children exceed their parent by %.6f ms "
+                "(raw path) -- the writer and the reader disagree about which "
+                "events are idle; see idle_children_excess_ms\n",
+                idle_excess_ns / 1e6);
+
+    /* The only check here that looks at the ALLOCATION rather than at constants
+     * derived from each other. The _Static_assert above constrains
+     * IDLE_ROWS_WORST_CASE against IDLE_ROWS_RESERVED, and max_rows now spells
+     * IDLE_ROWS_RESERVED, but a future row added anywhere in the loops above
+     * would still be invisible to it. NDEBUG is not defined anywhere in this
+     * build (no Makefile, source or test sets it) and `make test-asan` runs only
+     * test_wait_event / test_cmdline / test_bucket, so this path is never
+     * sanitised: without this line nothing at all observes nr against max_rows
+     * at runtime. Aborting is correct here -- the alternative is returning rows
+     * read from past the end of the array, i.e. a wrong answer.
+     *
+     * ITS LIMIT, measured rather than assumed, so this comment does not repeat
+     * the overclaim it sits next to: the budget carries large slack (the
+     * maximal fixture in tests/test_idle_accounting.c section 8 emits 57 rows
+     * of 77), so this catches a GROSSLY too-small allocation, not an off-by-one
+     * in one of the terms. Shrinking IDLE_ROWS_RESERVED by one leaves this
+     * assertion silent; it takes 21 before nr exceeds max_rows. The one-row
+     * sub-budget error that motivated all of this is gated by section 8's
+     * children-count check and by the _Static_assert above, not by this line. */
+    assert(nr <= max_rows);
 
     out->rows        = rows;
     out->num_rows    = nr;
@@ -1640,29 +1909,32 @@ struct aas_summary_ctx {
     int has_query_filter;
 };
 
-/* Client:ClientRead time recorded for a query in this summary record
- * (from its top_events). Used to subtract the idle-but-visible ClientRead
- * portion out of the lumped Client class_ns so it is not counted as DB
- * Time / AAS (load), while ClientRead still shows in event lists. */
-static double summary_query_clientread_ns(const struct pgwt_summary_query *sq)
-{
-    for (int j = 0; j < sq->num_top_events; j++)
-        if (sq->top_events[j].event_id == WEI(PG_WAIT_CLIENT, 0))
-            return (double)sq->top_events[j].total_ns;
-    return 0.0;
-}
-
-/* System-wide Client:ClientRead time recorded in this summary record
- * (from the per-event table). Same purpose as above for the no-filter path. */
-static double summary_clientread_ns(const struct pgwt_summary_accum *rec)
-{
-    for (int e = 0; e < SUMMARY_MAX_EVENTS; e++) {
-        const struct pgwt_summary_event *se = &rec->events[e];
-        if (se->event_id == WEI(PG_WAIT_CLIENT, 0))
-            return (double)se->total_ns;
-    }
-    return 0.0;
-}
+/* summary_clientread_ns() / summary_query_clientread_ns() USED TO LIVE HERE.
+ *
+ * They subtracted Client:ClientRead back out of the LUMPED `class_ns` that
+ * summary v1/v2 wrote, because the writer accumulated idle events into the
+ * class totals with no idle check at all. Three problems, all gone in v3:
+ *
+ *  1. They were a THIRD hardcoded copy of the idle rule --
+ *     `WEI(PG_WAIT_CLIENT, 0)`, spelled out, in compute.c. Widening the rule
+ *     (the Timeout pacing sleeps) would have left the Timeout class total
+ *     flowing into db_time_ns untouched: the predicate would say "idle" and
+ *     this path would keep charging it as DB Time. The demo's 900 s window
+ *     takes this path (should_use_summaries), so the predicate change alone
+ *     would have reported the OLD DB Time there.
+ *  2. The system-wide one only worked if ClientRead had claimed one of the
+ *     1024 SUMMARY_MAX_EVENTS slots; if it had not, the subtraction silently
+ *     did nothing.
+ *  3. The per-query one read `top_events`, which holds at most 8 entries, so
+ *     a query with 8 busier events subtracted zero.
+ *
+ * v3 excludes idle at the WRITER (src/summary_writer.c accum_event /
+ * accum_query_add), so `class_ns` is already load-only and there is nothing to
+ * subtract. Idle totals and the named Idle sub-rows come from `events[]` /
+ * `top_events[]`, which still record every event. Mixed-version windows cannot
+ * reach here: the reader refuses non-current files and pgwt-server preflights
+ * the window (pgwt_summaries_window_current).
+ */
 
 static int aas_summary_visitor(const struct pgwt_summary_accum *rec, void *arg)
 {
@@ -1683,14 +1955,13 @@ static int aas_summary_visitor(const struct pgwt_summary_accum *rec, void *arg)
             const struct pgwt_summary_query *sq = &rec->queries[q];
             if (sq->query_id == 0 && sq->count == 0) continue;
             if (sq->query_id != ctx->f->query_id) continue;
-            /* AAS is active load: exclude idle Client:ClientRead from the
-             * lumped Client class_ns. */
-            double cr_ns = summary_query_clientread_ns(sq);
+            /* v3: sq->class_ns is already load-only (idle excluded at the
+             * writer), so it is used as-is. The ACTIVITY skip is kept as a
+             * belt: that class is idle by definition and must never add load
+             * even if a future writer change put something there. */
             for (int c = 0; c < PGWT_NUM_CLASSES; c++) {
                 if (c == PGWT_CLASS_ACTIVITY) continue;
-                double cls_ns = (double)sq->class_ns[c];
-                if (c == PGWT_CLASS_CLIENT) cls_ns -= cr_ns;
-                ctx->buckets[bi].class_aas[c] += cls_ns;
+                ctx->buckets[bi].class_aas[c] += (double)sq->class_ns[c];
             }
             break;
         }
@@ -1698,13 +1969,11 @@ static int aas_summary_visitor(const struct pgwt_summary_accum *rec, void *arg)
     }
 
     if (!ctx->has_class_filter && !ctx->has_event_filter) {
-        /* AAS is active load: exclude idle Client:ClientRead. */
-        double cr_ns = summary_clientread_ns(rec);
+        /* v3: rec->class_ns is already load-only -- see the note where
+         * summary_clientread_ns used to be. */
         for (int c = 0; c < PGWT_NUM_CLASSES; c++) {
             if (c == PGWT_CLASS_ACTIVITY) continue;
-            double cls_ns = (double)rec->class_ns[c];
-            if (c == PGWT_CLASS_CLIENT) cls_ns -= cr_ns;
-            ctx->buckets[bi].class_aas[c] += cls_ns;
+            ctx->buckets[bi].class_aas[c] += (double)rec->class_ns[c];
         }
     } else {
         for (int e = 0; e < SUMMARY_MAX_EVENTS; e++) {
@@ -1782,8 +2051,14 @@ struct tm_summary_ctx {
     int    num_ev_accum;
     double db_time_ns;
     double idle_time_ns;
+    struct idle_accum idle_ev[MAX_IDLE_EV];
+    int    n_idle_ev;
     const struct pgwt_filter *f;
 };
+_Static_assert(sizeof(((struct tm_summary_ctx *)0)->idle_ev) /
+                   sizeof(struct idle_accum) == MAX_IDLE_EV,
+               "the summary path's idle_ev must hold exactly MAX_IDLE_EV "
+               "entries -- same row budget, same bound");
 
 static int tm_summary_visitor(const struct pgwt_summary_accum *rec, void *arg)
 {
@@ -1797,24 +2072,29 @@ static int tm_summary_visitor(const struct pgwt_summary_accum *rec, void *arg)
             if (sq->query_id == 0 && sq->count == 0) continue;
             if (sq->query_id != f->query_id) continue;
 
-            /* Client:ClientRead is idle: route it to the idle bucket, not
-             * DB Time, even though it is lumped into the Client class_ns. */
-            double cr_ns = summary_query_clientread_ns(sq);
+            /* v3: sq->class_ns is load-only already. The idle time for this
+             * query comes from top_events[], which still records idle events
+             * -- so it is both counted into the Idle total and given a NAMED
+             * sub-row, instead of being an anonymous scalar. */
             for (int c = 0; c < PGWT_NUM_CLASSES; c++) {
-                double cls_ns = (double)sq->class_ns[c];
-                if (c == PGWT_CLASS_CLIENT)
-                    cls_ns -= cr_ns;
-                if (c == PGWT_CLASS_ACTIVITY) {
-                    ctx->idle_time_ns += (double)sq->class_ns[c];
-                } else {
-                    ctx->classes[c].total_ns += cls_ns;
-                    ctx->db_time_ns += cls_ns;
-                }
+                if (c == PGWT_CLASS_ACTIVITY) continue;   /* idle by definition */
+                ctx->classes[c].total_ns += (double)sq->class_ns[c];
+                ctx->db_time_ns += (double)sq->class_ns[c];
             }
-            ctx->idle_time_ns += cr_ns;
+            /* v3: the query's idle TOTAL is the exact scalar, never the sum
+             * of top_events[] -- that list holds 8 entries, so a query with 8
+             * busier non-idle events reported Idle = 0 beside a correct DB
+             * Time and the two stopped accounting for the window. The named
+             * children below are still drawn from the bounded list; whatever
+             * they do not cover becomes the "Other (background)" row. */
+            ctx->idle_time_ns += (double)sq->idle_ns;
             for (int j = 0; j < sq->num_top_events; j++) {
                 uint32_t eid = sq->top_events[j].event_id;
-                if (pgwt_is_idle_event(eid)) continue;
+                if (pgwt_is_idle_event(eid)) {
+                    idle_accum_add(ctx->idle_ev, &ctx->n_idle_ev, eid,
+                                   (double)sq->top_events[j].total_ns);
+                    continue;
+                }
                 double ns = (double)sq->top_events[j].total_ns;
                 int cls_idx = pgwt_wait_class_index(eid);
                 int found = -1;
@@ -1838,22 +2118,20 @@ static int tm_summary_visitor(const struct pgwt_summary_accum *rec, void *arg)
     }
 
     /* If no class/event filter: use class_ns directly */
-    if (f->class_name[0] == '\0' && f->event_id == 0) {
-        /* Client:ClientRead is idle: subtract it out of the lumped Client
-         * class_ns so it counts toward idle time, not DB Time. */
-        double cr_ns = summary_clientread_ns(rec);
+    int unfiltered = (f->class_name[0] == '\0' && f->event_id == 0);
+    if (unfiltered) {
+        /* v3: rec->class_ns is load-only already -- see the note where
+         * summary_clientread_ns used to be. */
         for (int c = 0; c < PGWT_NUM_CLASSES; c++) {
-            double cls_ns = (double)rec->class_ns[c];
-            if (c == PGWT_CLASS_CLIENT)
-                cls_ns -= cr_ns;
-            if (c == PGWT_CLASS_ACTIVITY) {
-                ctx->idle_time_ns += (double)rec->class_ns[c];
-            } else {
-                ctx->classes[c].total_ns += cls_ns;
-                ctx->db_time_ns += cls_ns;
-            }
+            if (c == PGWT_CLASS_ACTIVITY) continue;   /* idle by definition */
+            ctx->classes[c].total_ns += (double)rec->class_ns[c];
+            ctx->db_time_ns += (double)rec->class_ns[c];
         }
-        ctx->idle_time_ns += cr_ns;
+        /* EXACT, and deliberately not the sum of events[]: that table is
+         * bounded (rec->events_overflow says when it filled) and since v3 it
+         * is the only per-event idle source, so summing it would under-report
+         * Idle while DB Time stayed right. */
+        ctx->idle_time_ns += (double)rec->idle_ns;
     }
 
     /* Per-event stats: iterate event entries */
@@ -1861,7 +2139,23 @@ static int tm_summary_visitor(const struct pgwt_summary_accum *rec, void *arg)
         const struct pgwt_summary_event *se = &rec->events[e];
         if (se->event_id == 0 && se->count == 0) continue;
         if (!summary_event_matches_filter(f, se->event_id)) continue;
-        if (pgwt_is_idle_event(se->event_id)) continue;
+        if (pgwt_is_idle_event(se->event_id)) {
+            /* UNFILTERED: the total already came from rec->idle_ns above, so
+             * this only builds the named breakdown.
+             *
+             * FILTERED: the exact scalar covers the whole record, which is a
+             * different population from what the caller asked for, so the
+             * total is summed from the matching events instead. The raw path
+             * applies pgwt_filter_matches before its own idle branch, so a
+             * class=timeout request reports only the Timeout class's idle time
+             * there too -- the two paths must agree, filter or no filter,
+             * because cross_validate compares them. */
+            if (!unfiltered)
+                ctx->idle_time_ns += (double)se->total_ns;
+            idle_accum_add(ctx->idle_ev, &ctx->n_idle_ev,
+                           se->event_id, (double)se->total_ns);
+            continue;
+        }
 
         int cls_idx = pgwt_wait_class_index(se->event_id);
 
@@ -1914,7 +2208,7 @@ void pgwt_compute_time_model_from_summaries(
     double idle_ms    = ctx.idle_time_ns / 1e6;
 
     /* Build result rows (same format as raw compute) */
-    int max_rows = 1 + PGWT_NUM_CLASSES * 6;
+    int max_rows = 1 + PGWT_NUM_CLASSES * 6 + IDLE_ROWS_RESERVED;
     struct pgwt_tm_row *rows = calloc(max_rows, sizeof(*rows));
     int nr = 0;
 
@@ -1973,6 +2267,20 @@ void pgwt_compute_time_model_from_summaries(
     }
 
     free(ctx.ev_accum);
+
+    /* Idle LAST, so rows[0] stays "DB Time" -- same as the raw path. */
+    double idle_excess_ns = 0.0;
+    nr = emit_idle_rows(rows, nr, ctx.idle_time_ns, ctx.idle_ev,
+                        ctx.n_idle_ev, &idle_excess_ns);
+    out->idle_children_excess_ms = idle_excess_ns / 1e6;
+    if (idle_excess_ns > 0)
+        fprintf(stderr, "ERROR: Idle children exceed their parent by %.6f ms "
+                "(summary path) -- the writer and the reader disagree about "
+                "which events are idle; see idle_children_excess_ms\n",
+                idle_excess_ns / 1e6);
+
+    /* Same guard as the raw path -- see the comment there. */
+    assert(nr <= max_rows);
 
     out->rows         = rows;
     out->num_rows     = nr;
@@ -2272,6 +2580,18 @@ static int tq_summary_visitor(const struct pgwt_summary_accum *rec, void *arg)
 
             for (int j = 0; j < sq->num_top_events; j++) {
                 uint32_t eid = sq->top_events[j].event_id;
+                /* IDLE IS NOT DB TIME, on this path either. top_events[]
+                 * deliberately retains idle events so the Events tab can show
+                 * them, so this branch has to filter them out itself -- it is
+                 * the one place v3's writer-side exclusion does not reach,
+                 * because it reads the per-event list rather than class_ns.
+                 * The raw pgwt_compute_top_queries skips idle records
+                 * outright; without this the same window answered differently
+                 * depending on which path served it, charging a foreground
+                 * VACUUM's Timeout:VacuumDelay (and, before 2026-10-06,
+                 * Client:ClientRead) as DB Time under a class filter. */
+                if (pgwt_is_idle_event(eid))
+                    continue;
                 /* Class filter */
                 if (filter_cls >= 0 && pgwt_wait_class_index(eid) != filter_cls)
                     continue;

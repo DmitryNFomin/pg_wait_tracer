@@ -1,11 +1,13 @@
 /* test_wait_event.c — Unit tests for wait event decode tables (PG18) */
 #include "wait_event.h"
+#include "idle_rule.h"
 #include "pg_wait_tracer.h"
 
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 #include <assert.h>
+#include <unistd.h>   /* mkdtemp on BSD/macOS; harmless on glibc */
 
 static int tests_run = 0;
 static int tests_passed = 0;
@@ -341,10 +343,758 @@ static void test_pg13_sidecar_roundtrip(void)
           "dyn reset via invalid buffer");
 }
 
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * TIMER-SLEEP / IDLE ACCOUNTING (2026-10-06)
+ *
+ * Owner's rule: "there is DB time when database doing smth - not just waiting
+ * for timer". Six Timeout events are pure pacing sleeps and leave DB Time;
+ * four stay in it. src/idle_rule.c holds the one list.
+ *
+ * WHAT MAKES THIS HARD, AND WHY THESE TESTS LOOK THE WAY THEY DO. The Timeout
+ * event ids are VERSION-DEPENDENT:
+ *
+ *      id   PG18                             PG13
+ *      0    BaseBackupThrottle   (pacing)    BaseBackupThrottle  (pacing)
+ *      1    CheckpointWriteDelay (pacing)    PgSleep             (DB Time)
+ *      2    PgSleep              (DB Time)   RecoveryApplyDelay  (pacing)
+ *      3    RecoveryApplyDelay   (pacing)    RecoveryRetrieve... (pacing)
+ *      4    RecoveryRetrieve...  (pacing)    VacuumDelay         (pacing)
+ *      5    RegisterSyncRequest  (DB Time)   RegisterSyncRequest (DB Time)
+ *      6    SpinDelay            (DB Time)   -- none --
+ *      7    VacuumDelay          (pacing)    -- none --
+ *      8    VacuumTruncate       (DB Time)   -- none --
+ *      9    WalSummarizerError   (pacing)    -- none --
+ *
+ * Ids 1 and 2 INVERT between the two versions, so a hardcoded id list is not
+ * merely imprecise on PG13 — it gets PgSleep exactly backwards, which is the
+ * one event the live accuracy tests' premise depends on. Every assertion below
+ * is therefore written BY NAME: it looks the name up through the same
+ * pgwt_event_name() the UI prints, then asserts the classification of THAT.
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+static int popcount32(uint32_t v)
+{
+    int n = 0;
+    while (v) { n += (int)(v & 1u); v >>= 1; }
+    return n;
+}
+
+/* Assert, for Timeout event `id` on the currently-active tables, that its name
+ * is `want_name` and that pgwt_is_idle_event agrees with `want_idle`. Also
+ * asserts it is never HIDDEN: the whole point of the change is that pacing time
+ * leaves DB Time and stays VISIBLE (the Client:ClientRead precedent). */
+static void check_timeout(const char *ver, int id, const char *want_name,
+                          int want_idle)
+{
+    uint32_t wei = WEI(PG_WAIT_TIMEOUT, id);
+    const char *got = pgwt_event_name(wei);
+    CHECK(got != NULL && strcmp(got, want_name) == 0,
+          "%s Timeout id %d: name expected \"%s\", got \"%s\"",
+          ver, id, want_name, got ? got : "(null)");
+    CHECK((pgwt_is_idle_event(wei) != 0) == (want_idle != 0),
+          "%s Timeout:%s (id %d): idle expected %d, got %d",
+          ver, want_name, id, want_idle, pgwt_is_idle_event(wei) != 0);
+    CHECK(pgwt_is_hidden_event(wei) == 0,
+          "%s Timeout:%s (id %d) must stay VISIBLE (not hidden)",
+          ver, want_name, id);
+}
+
+/* ── 0. the rule, as a pure name predicate ─────────────────────────────── */
+static void test_pacing_name_rule(void)
+{
+    printf("--- pacing rule by name ---\n");
+    const char *pacing[] = {
+        "CheckpointWriteDelay", "VacuumDelay", "BaseBackupThrottle",
+        "RecoveryApplyDelay", "RecoveryRetrieveRetryInterval",
+        "WalSummarizerError",
+    };
+    for (size_t i = 0; i < sizeof(pacing)/sizeof(pacing[0]); i++)
+        CHECK(pgwt_timeout_name_is_pacing(pacing[i]) == 1,
+              "\"%s\" must be pacing", pacing[i]);
+
+    /* Owner decision 2026-10-06: PgSleep stays DB Time. A client ASKED for the
+     * sleep and the server is inside that command. This assertion is the guard
+     * on the one-line switch in src/idle_rule.c: flipping it fails here first,
+     * before it reaches tests/test_aas_accuracy.py (4 backends in pg_sleep(10),
+     * asserts Client AAS ~= 4.0) where the failure would look like noise. */
+    CHECK(pgwt_timeout_name_is_pacing("PgSleep") == 0,
+          "PgSleep stays DB Time (owner decision 2026-10-06)");
+    /* The three outstanding-request backoffs. */
+    CHECK(pgwt_timeout_name_is_pacing("SpinDelay") == 0, "SpinDelay is DB Time");
+    CHECK(pgwt_timeout_name_is_pacing("RegisterSyncRequest") == 0,
+          "RegisterSyncRequest is DB Time");
+    CHECK(pgwt_timeout_name_is_pacing("VacuumTruncate") == 0,
+          "VacuumTruncate is DB Time");
+
+    /* BYPASS: an event this build has never heard of must stay in DB Time, and
+     * a NULL name must not crash or be treated as pacing. Over-counting load is
+     * visible in the UI; silently dropping a future Timeout event out of DB
+     * Time would not be. */
+    CHECK(pgwt_timeout_name_is_pacing("SomeFuturePgTimerEvent") == 0,
+          "unknown Timeout name defaults to DB Time (fail-safe direction)");
+    CHECK(pgwt_timeout_name_is_pacing(NULL) == 0, "NULL name is not pacing");
+    /* Exact match only: a prefix must not satisfy it. */
+    CHECK(pgwt_timeout_name_is_pacing("VacuumDelayExtra") == 0,
+          "pacing match is exact, not a prefix");
+    CHECK(pgwt_timeout_name_is_pacing("") == 0, "empty name is not pacing");
+}
+
+/* ── 1. PRE-INIT. Must run before any pgwt_init_event_names call. ───────── */
+static void test_idle_pre_init(void)
+{
+    printf("--- pacing mask before any init ---\n");
+    /* UNINITIALISED FAILS SAFE. wait_event.c's `pg_version` defaults to 18 so
+     * that names RENDER rather than showing as Unknown; reusing that default
+     * for CLASSIFICATION made "nobody has said which PostgreSQL this is"
+     * indistinguishable from "this is PG18", and handed a real PG18 mask to
+     * any process that forgot to call pgwt_init_event_names. The mask now
+     * starts EMPTY: every Timeout event stays in DB Time until something
+     * states the version. */
+    CHECK(pgwt_idle_rule_timeout_mask() == 0,
+          "pre-init mask is EMPTY (got 0x%03x) -- uninitialised must not be "
+          "silently treated as PG18", pgwt_idle_rule_timeout_mask());
+    CHECK(pgwt_is_idle_event(WEI(PG_WAIT_TIMEOUT, 1)) == 0,
+          "pre-init: no Timeout id is classified, not even PG18's id 1");
+    CHECK(pgwt_is_idle_event(WEI(PG_WAIT_TIMEOUT, 2)) == 0,
+          "pre-init: PG18 id 2 (PgSleep) is not idle either");
+    /* The version-independent half of the rule still works with no init at
+     * all -- tests/test_anomaly.c and the pure cores rely on that. */
+    CHECK(pgwt_is_idle_event(WEI(PG_WAIT_CLIENT, 0)) != 0,
+          "pre-init: Client:ClientRead is idle");
+    CHECK(pgwt_is_idle_event(WEI(PG_WAIT_ACTIVITY, 4)) != 0,
+          "pre-init: Activity is idle");
+}
+
+/* ── 2. every Timeout id on PG18 and on PG13, by name ──────────────────── */
+static void test_timeout_idle_pg18(void)
+{
+    printf("--- Timeout idleness: PG18 ---\n");
+    pgwt_init_event_names(18);
+    check_timeout("PG18", 0, "BaseBackupThrottle",            1);
+    check_timeout("PG18", 1, "CheckpointWriteDelay",          1);
+    check_timeout("PG18", 2, "PgSleep",                       0);
+    check_timeout("PG18", 3, "RecoveryApplyDelay",            1);
+    check_timeout("PG18", 4, "RecoveryRetrieveRetryInterval", 1);
+    check_timeout("PG18", 5, "RegisterSyncRequest",           0);
+    check_timeout("PG18", 6, "SpinDelay",                     0);
+    check_timeout("PG18", 7, "VacuumDelay",                   1);
+    check_timeout("PG18", 8, "VacuumTruncate",                0);
+    check_timeout("PG18", 9, "WalSummarizerError",            1);
+
+    /* The mask the table produced must equal the documented default. This is
+     * what keeps PGWT_IDLE_TIMEOUT_MASK_PG18 honest: it is derived here from
+     * the real table and compared, never trusted. */
+    CHECK(pgwt_idle_rule_timeout_mask() == PGWT_IDLE_TIMEOUT_MASK_PG18,
+          "PG18 table-derived mask == PGWT_IDLE_TIMEOUT_MASK_PG18 "
+          "(0x%03x vs 0x%03x)", pgwt_idle_rule_timeout_mask(),
+          PGWT_IDLE_TIMEOUT_MASK_PG18);
+    /* BYPASS: a mask of 0 would make every assertion above that expects
+     * "not idle" pass vacuously, and only the six positive ones would fail.
+     * Pin the POPCOUNT so a mask that is empty, all-ones, or off by an entry
+     * is a separate, named failure. */
+    CHECK(popcount32(pgwt_idle_rule_timeout_mask()) == 6,
+          "PG18: exactly 6 pacing ids (got %d, mask 0x%03x)",
+          popcount32(pgwt_idle_rule_timeout_mask()),
+          pgwt_idle_rule_timeout_mask());
+
+    /* Ids past the end of the table resolve to no name, so they are NOT
+     * pacing — never pacing-by-default. */
+    CHECK(pgwt_event_name(WEI(PG_WAIT_TIMEOUT, 10)) == NULL,
+          "PG18 Timeout id 10 has no name");
+    CHECK(pgwt_is_idle_event(WEI(PG_WAIT_TIMEOUT, 10)) == 0,
+          "PG18 Timeout id 10 (unnamed) is not idle");
+    /* Mask width: the predicate can only represent ids 0..31, so an active
+     * table that ever grew past 31 would silently classify the tail as DB
+     * Time. Assert the table does not reach there. */
+    CHECK(pgwt_event_name(WEI(PG_WAIT_TIMEOUT, 32)) == NULL,
+          "PG18 Timeout table stays inside the 32-bit mask width");
+}
+
+static void test_timeout_idle_pg13(void)
+{
+    printf("--- Timeout idleness: PG13 ---\n");
+    pgwt_init_event_names(13);
+    check_timeout("PG13", 0, "BaseBackupThrottle",            1);
+    check_timeout("PG13", 1, "PgSleep",                       0);
+    check_timeout("PG13", 2, "RecoveryApplyDelay",            1);
+    check_timeout("PG13", 3, "RecoveryRetrieveRetryInterval", 1);
+    check_timeout("PG13", 4, "VacuumDelay",                   1);
+    check_timeout("PG13", 5, "RegisterSyncRequest",           0);
+
+    CHECK(pgwt_idle_rule_timeout_mask() == 0x1Du,
+          "PG13 mask is 0x01D {0,2,3,4} (got 0x%03x)",
+          pgwt_idle_rule_timeout_mask());
+    CHECK(popcount32(pgwt_idle_rule_timeout_mask()) == 4,
+          "PG13: exactly 4 pacing ids (got %d)",
+          popcount32(pgwt_idle_rule_timeout_mask()));
+
+    /* PG13 has no CheckpointWriteDelay, SpinDelay, VacuumTruncate or
+     * WalSummarizerError at all. Ids 6..9 are unnamed and must be DB Time —
+     * a PG18-derived id mask would have marked 7 and 9 pacing here. */
+    for (int id = 6; id <= 9; id++) {
+        CHECK(pgwt_event_name(WEI(PG_WAIT_TIMEOUT, id)) == NULL,
+              "PG13 Timeout id %d has no name", id);
+        CHECK(pgwt_is_idle_event(WEI(PG_WAIT_TIMEOUT, id)) == 0,
+              "PG13 Timeout id %d (unnamed) is not idle", id);
+    }
+    CHECK(pgwt_event_name(WEI(PG_WAIT_TIMEOUT, 32)) == NULL,
+          "PG13 Timeout table stays inside the 32-bit mask width");
+    pgwt_init_event_names(18);
+}
+
+/* ── 3. THE INDEX COLLISION, stated as its own test ────────────────────────
+ *
+ * Criterion 2 of the task: prove WEI(PG_WAIT_TIMEOUT, 1) is not
+ * idle-for-the-wrong-reason on either version. Ids 1 and 2 carry OPPOSITE
+ * classifications on PG13 and PG18, so this is a real discriminator and not a
+ * restatement: any implementation that hardcodes one version's ids fails it. */
+static void test_timeout_index_collision(void)
+{
+    printf("--- PG13/PG18 Timeout index collision ---\n");
+
+    pgwt_init_event_names(18);
+    uint32_t mask18 = pgwt_idle_rule_timeout_mask();
+    int id1_18 = pgwt_is_idle_event(WEI(PG_WAIT_TIMEOUT, 1)) != 0;
+    int id2_18 = pgwt_is_idle_event(WEI(PG_WAIT_TIMEOUT, 2)) != 0;
+    const char *n1_18 = pgwt_event_name(WEI(PG_WAIT_TIMEOUT, 1));
+    const char *n2_18 = pgwt_event_name(WEI(PG_WAIT_TIMEOUT, 2));
+
+    pgwt_init_event_names(13);
+    uint32_t mask13 = pgwt_idle_rule_timeout_mask();
+    int id1_13 = pgwt_is_idle_event(WEI(PG_WAIT_TIMEOUT, 1)) != 0;
+    int id2_13 = pgwt_is_idle_event(WEI(PG_WAIT_TIMEOUT, 2)) != 0;
+    const char *n1_13 = pgwt_event_name(WEI(PG_WAIT_TIMEOUT, 1));
+    const char *n2_13 = pgwt_event_name(WEI(PG_WAIT_TIMEOUT, 2));
+    pgwt_init_event_names(18);
+
+    CHECK(strcmp(n1_18, "CheckpointWriteDelay") == 0 && id1_18 == 1,
+          "id 1 on PG18 is CheckpointWriteDelay and IS idle (got %s, idle=%d)",
+          n1_18, id1_18);
+    CHECK(strcmp(n1_13, "PgSleep") == 0 && id1_13 == 0,
+          "id 1 on PG13 is PgSleep and is NOT idle (got %s, idle=%d)",
+          n1_13, id1_13);
+    CHECK(strcmp(n2_18, "PgSleep") == 0 && id2_18 == 0,
+          "id 2 on PG18 is PgSleep and is NOT idle (got %s, idle=%d)",
+          n2_18, id2_18);
+    CHECK(strcmp(n2_13, "RecoveryApplyDelay") == 0 && id2_13 == 1,
+          "id 2 on PG13 is RecoveryApplyDelay and IS idle (got %s, idle=%d)",
+          n2_13, id2_13);
+
+    /* The two masks MUST differ. If a future refactor made the mask
+     * version-independent again, every by-name assertion above would still
+     * pass on whichever version happened to be active last; this one would
+     * not. */
+    CHECK(mask18 != mask13,
+          "PG13 and PG18 masks must differ (0x%03x vs 0x%03x)",
+          mask18, mask13);
+}
+
+/* ── 4. the ORDERING bug: init(18) then a PG13 sidecar ─────────────────────
+ *
+ * pgwt-server calls pgwt_init_event_names(18) (src/server.c) and THEN
+ * pgwt_load_names_json(trace_dir). Before this change pgwt_load_names_json
+ * assigned pg_version WITHOUT re-selecting the active tables and never
+ * rebuilt the mask, so a PG13 trace kept PG18's classification: its
+ * Timeout:PgSleep (id 1) would have been reported as idle and dropped out of
+ * DB Time. This is the one assertion in the file whose subject is ORDER. */
+static void test_pg13_sidecar_idle_roundtrip(void)
+{
+    printf("--- PG13 sidecar: classification after load ---\n");
+
+    char dir[] = "/tmp/pgwt_idle_sc_XXXXXX";
+    CHECK(mkdtemp(dir) != NULL, "mkdtemp failed");
+
+    /* Daemon side: a PG13 host writes the sidecar. */
+    pgwt_init_event_names(13);
+    CHECK(pgwt_write_names_json(dir) == 0, "write PG13 sidecar");
+
+    /* Reader side, in pgwt-server's real order. */
+    pgwt_init_event_names(18);
+    CHECK(pgwt_is_idle_event(WEI(PG_WAIT_TIMEOUT, 1)) != 0,
+          "after init(18), id 1 is CheckpointWriteDelay => idle");
+
+    CHECK(pgwt_load_names_json(dir) == 0, "load PG13 sidecar");
+    CHECK(pgwt_is_idle_event(WEI(PG_WAIT_TIMEOUT, 1)) == 0,
+          "after loading the PG13 sidecar, id 1 is PgSleep => NOT idle");
+    CHECK(pgwt_is_idle_event(WEI(PG_WAIT_TIMEOUT, 2)) != 0,
+          "after loading the PG13 sidecar, id 2 is RecoveryApplyDelay => idle");
+    CHECK(pgwt_is_idle_event(WEI(PG_WAIT_TIMEOUT, 4)) != 0,
+          "after loading the PG13 sidecar, id 4 is VacuumDelay => idle");
+    CHECK(pgwt_idle_rule_timeout_mask() == 0x1Du,
+          "sidecar load installs the PG13 mask (got 0x%03x)",
+          pgwt_idle_rule_timeout_mask());
+
+    /* BYPASS 1: a load that FAILS must not leave a mask from nowhere. The
+     * PG13 mask installed above has to survive, because nothing changed. */
+    CHECK(pgwt_load_names_json("/nonexistent/pgwt/dir") == -1,
+          "missing sidecar reports -1");
+    CHECK(pgwt_idle_rule_timeout_mask() == 0x1Du,
+          "a failed sidecar load leaves the previous mask in place "
+          "(got 0x%03x)", pgwt_idle_rule_timeout_mask());
+
+    /* BYPASS 2: an UNPARSEABLE buffer makes the dynamic loader clear its
+     * tables and return -1. The mask must then describe the hardcoded tables
+     * that are now in force again — a stale mask from the cleared dynamic
+     * names would be a silent wrong answer with nothing to point at. */
+    CHECK(pgwt_load_event_names_from_buffer("no separators here") == -1,
+          "unparseable dyn buffer reports -1");
+    CHECK(pgwt_idle_rule_timeout_mask() == 0x1Du,
+          "after a failed dyn load the mask matches the active PG13 tables "
+          "(got 0x%03x)", pgwt_idle_rule_timeout_mask());
+
+    /* BYPASS 3: a sidecar whose Timeout array is present but EMPTY-STRINGED
+     * must fall back to the hardcoded table rather than classify nothing. */
+    char path[700];
+    snprintf(path, sizeof(path), "%s/wait_event_names.json", dir);
+    FILE *fp = fopen(path, "w");
+    CHECK(fp != NULL, "rewrite sidecar");
+    if (fp) {
+        fputs("{\"Timeout\":[\"\",\"\",\"\"],\"pg_version\":13}\n", fp);
+        fclose(fp);
+    }
+    CHECK(pgwt_load_names_json(dir) == 0, "load blank-name sidecar");
+    CHECK(pgwt_is_idle_event(WEI(PG_WAIT_TIMEOUT, 1)) == 0,
+          "blank sidecar names fall back to the PG13 table: id 1 = PgSleep, "
+          "not idle");
+    CHECK(pgwt_idle_rule_timeout_mask() == 0x1Du,
+          "blank sidecar still yields the PG13 mask (got 0x%03x)",
+          pgwt_idle_rule_timeout_mask());
+
+    /* BYPASS 4: dynamic names from a live PG must drive the mask too — the
+     * ids there come from the server, not from any table in this build. A
+     * one-entry Timeout list makes id 0 CheckpointWriteDelay, which no
+     * hardcoded table ever says. */
+    CHECK(pgwt_load_event_names_from_buffer(
+              "Timeout|CheckpointWriteDelay\nTimeout|PgSleep\n") == 0,
+          "load dynamic Timeout names");
+    CHECK(pgwt_is_idle_event(WEI(PG_WAIT_TIMEOUT, 1)) != 0,
+          "dyn names: CheckpointWriteDelay keeps its hardcoded id 1 and is "
+          "idle");
+    CHECK(pgwt_is_idle_event(WEI(PG_WAIT_TIMEOUT, 2)) == 0,
+          "dyn names: PgSleep at id 2 is not idle");
+
+    remove(path);
+    remove(dir);
+    /* Leave the process in the state the remaining tests expect. */
+    CHECK(pgwt_load_event_names_from_buffer("no separators here") == -1,
+          "dyn reset");
+    pgwt_init_event_names(18);
+}
+
+/* ── 5. the pacing events stay VISIBLE (criterion 4) ──────────────────────
+ * pgwt_is_hidden_event is UNCHANGED: Activity class only. Pacing events are
+ * excluded from load and still render in every list. */
+static void test_pacing_visibility(void)
+{
+    printf("--- pacing events stay visible ---\n");
+    pgwt_init_event_names(18);
+    const int pacing_ids[] = {0, 1, 3, 4, 7, 9};
+    for (size_t i = 0; i < sizeof(pacing_ids)/sizeof(pacing_ids[0]); i++) {
+        uint32_t wei = WEI(PG_WAIT_TIMEOUT, pacing_ids[i]);
+        CHECK(pgwt_is_idle_event(wei) != 0 && pgwt_is_hidden_event(wei) == 0,
+              "Timeout id %d: idle AND visible", pacing_ids[i]);
+        /* It must also still have a printable full name — an idle row with no
+         * name is the "anonymous Idle number" this change exists to remove. */
+        char buf[64];
+        pgwt_event_full_name(wei, buf, sizeof(buf));
+        CHECK(strncmp(buf, "Timeout:", 8) == 0 && strchr(buf, '=') == NULL,
+              "Timeout id %d renders a real name (%s)", pacing_ids[i], buf);
+    }
+    /* Unchanged neighbours. */
+    CHECK(pgwt_is_hidden_event(WEI(PG_WAIT_CLIENT, 0)) == 0,
+          "Client:ClientRead still visible");
+    CHECK(pgwt_is_hidden_event(WEI(PG_WAIT_ACTIVITY, 4)) != 0,
+          "Activity still hidden");
+}
+
+/* ── 6. the NARROW session-idle predicate ─────────────────────────────────
+ * src/sampler.c (query_id inheritance) and src/summary_writer.c (command
+ * boundary) must NOT follow the load rule. A pacing sleep happens inside a
+ * running command. */
+static void test_session_idle_narrower(void)
+{
+    printf("--- session-idle is narrower than load-idle ---\n");
+    pgwt_init_event_names(18);
+    CHECK(pgwt_is_session_idle_event(WEI(PG_WAIT_ACTIVITY, 4)) != 0,
+          "Activity is session-idle");
+    CHECK(pgwt_is_session_idle_event(WEI(PG_WAIT_CLIENT, 0)) != 0,
+          "Client:ClientRead is session-idle");
+    const int pacing_ids[] = {0, 1, 3, 4, 7, 9};
+    for (size_t i = 0; i < sizeof(pacing_ids)/sizeof(pacing_ids[0]); i++) {
+        uint32_t wei = WEI(PG_WAIT_TIMEOUT, pacing_ids[i]);
+        CHECK(pgwt_is_idle_event(wei) != 0 &&
+              pgwt_is_session_idle_event(wei) == 0,
+              "Timeout id %d is load-idle but NOT session-idle",
+              pacing_ids[i]);
+    }
+    CHECK(pgwt_is_session_idle_event(WEI(PG_WAIT_TIMEOUT, 2)) == 0,
+          "PgSleep is neither");
+    CHECK(pgwt_is_session_idle_event(0) == 0, "CPU is not session-idle");
+}
+
+
+/* ── 7. UNVERIFIED MAJORS MUST NOT BE CLASSIFIED ───────────────────────────
+ *
+ * This file has exact Timeout tables for PG13 and PG17/18 only. PG14/15/16
+ * fall through to the PG17/18 table as a best-effort DISPLAY fallback
+ * (src/wait_event.c's header comment), and src/discovery.c only queries
+ * pg_wait_events on 17+, so there is no rescue from the live side either.
+ *
+ * Before 2026-10-06 that was a cosmetic mislabel. Deriving the pacing mask
+ * from the same table turns it into a silent WRONG ANSWER: a Timeout id that
+ * really is PgSleep can resolve to CheckpointWriteDelay and so leave DB Time
+ * -- the exact inversion of the owner's decision, on a major the live tier
+ * runs (PG16).
+ *
+ * Two advisers disagreed about which of 14/15/16 are actually affected. The
+ * code is therefore written not to depend on the answer: unverified major =>
+ * EMPTY mask => everything stays in DB Time, the over-count direction
+ * src/idle_rule.h names as fail-safe. These assertions pin that, so nobody
+ * can "optimise" the guard away on the strength of a remembered enum. */
+static void test_unverified_majors_are_not_classified(void)
+{
+    printf("--- unverified majors (14/15/16) are not classified ---\n");
+    /* 19 is here deliberately: "verified" used to mean `>= 17`, which
+     * promised that every FUTURE major was verified and would have classified
+     * a PG19 trace against PG18's table whenever its name load failed. */
+    const int unverified[] = {14, 15, 16, 19};
+    for (size_t i = 0; i < sizeof(unverified)/sizeof(unverified[0]); i++) {
+        int m = unverified[i];
+        pgwt_init_event_names(m);
+        CHECK(pgwt_idle_rule_timeout_mask() == 0,
+              "PG%d installs an EMPTY pacing mask (got 0x%03x) -- this build "
+              "has no verified Timeout table for it", m,
+              pgwt_idle_rule_timeout_mask());
+        /* Every Timeout id therefore stays in DB Time -- including the ones
+         * that merely LOOK like pacing through the PG18 table. */
+        for (int id = 0; id < 10; id++)
+            CHECK(pgwt_is_idle_event(WEI(PG_WAIT_TIMEOUT, id)) == 0,
+                  "PG%d Timeout id %d stays in DB Time", m, id);
+        /* The unrelated rules are untouched: this guard must not blanket-
+         * disable idle accounting, only the version-dependent Timeout part. */
+        CHECK(pgwt_is_idle_event(WEI(PG_WAIT_CLIENT, 0)) != 0,
+              "PG%d: Client:ClientRead is still idle", m);
+        CHECK(pgwt_is_idle_event(WEI(PG_WAIT_ACTIVITY, 4)) != 0,
+              "PG%d: Activity is still idle", m);
+    }
+
+    /* The verified majors are unaffected -- otherwise the guard would be
+     * "disable everything", which passes the assertions above vacuously. */
+    pgwt_init_event_names(13);
+    CHECK(pgwt_idle_rule_timeout_mask() == 0x1Du, "PG13 still classified");
+    pgwt_init_event_names(18);
+    CHECK(pgwt_idle_rule_timeout_mask() == PGWT_IDLE_TIMEOUT_MASK_PG18,
+          "PG18 still classified");
+    pgwt_init_event_names(17);
+    CHECK(pgwt_idle_rule_timeout_mask() == PGWT_IDLE_TIMEOUT_MASK_PG18,
+          "PG17 still classified");
+
+    /* THE RESCUE PATH: real names from the server (sidecar or pg_wait_events)
+     * carry ids PostgreSQL itself assigned, so a mask derived from them is
+     * right whatever the major. A PG16 trace WITH Timeout names in its
+     * sidecar therefore IS classified -- without this the guard would be a
+     * permanent downgrade rather than a fail-safe default. */
+    pgwt_init_event_names(16);
+    CHECK(pgwt_idle_rule_timeout_mask() == 0, "PG16 unclassified on tables");
+    CHECK(pgwt_load_event_names_from_buffer(
+              "Timeout|BaseBackupThrottle\nTimeout|CheckpointWriteDelay\n"
+              "Timeout|PgSleep\n") == 0,
+          "load PG16 Timeout names from the server");
+    CHECK(pgwt_is_idle_event(WEI(PG_WAIT_TIMEOUT, 1)) != 0,
+          "PG16 WITH real names: id 1 = CheckpointWriteDelay => idle");
+    CHECK(pgwt_is_idle_event(WEI(PG_WAIT_TIMEOUT, 2)) == 0,
+          "PG16 WITH real names: id 2 = PgSleep => DB Time");
+
+    /* ...and dropping those names returns it to the fail-safe, rather than
+     * leaving the last derived mask in force. */
+    CHECK(pgwt_load_event_names_from_buffer("no separators here") == -1,
+          "drop the dynamic names");
+    CHECK(pgwt_idle_rule_timeout_mask() == 0,
+          "PG16 is unclassified again once the real names are gone "
+          "(got 0x%03x)", pgwt_idle_rule_timeout_mask());
+
+    pgwt_init_event_names(18);
+}
+
+
+/* ── 8. THE REAL SIDECAR ROUND TRIP ON AN UNVERIFIED MAJOR ────────────────
+ *
+ * Section 7's "rescue path" case injects names with
+ * pgwt_load_event_names_from_buffer, which models pg_wait_events output -- so
+ * it only ever exercised the GOOD path and could not see the hole underneath
+ * it:
+ *
+ *   PG16 has no pg_wait_events, so the daemon loads no dynamic names -- but it
+ *   still WRITES a sidecar, and pgwt_write_names_json falls back to the active
+ *   hardcoded tables, which for PG16 are PG18's. pgwt-server then loaded that
+ *   sidecar as "dynamic names", concluded the names came from PostgreSQL, and
+ *   derived a PG18 pacing mask for a PG16 trace. The fail-safe was defeated by
+ *   an ordinary capture, and worse, the daemon's LIVE path (empty mask) and
+ *   the offline path (PG18 mask) disagreed about the same capture.
+ *
+ * The sidecar now records where its names came from, and this walks the real
+ * sequence end to end. Written as the exact test the review specified. */
+static void test_pg16_sidecar_round_trip(void)
+{
+    printf("--- PG16 capture -> sidecar -> server must stay unclassified ---\n");
+
+    char dir[] = "/tmp/pgwt_sc16_XXXXXX";
+    CHECK(mkdtemp(dir) != NULL, "mkdtemp failed");
+
+    /* Daemon side on PG16: no dynamic names are available at all. */
+    CHECK(pgwt_load_event_names_from_buffer("no separators here") == -1,
+          "clear any dynamic names (as a PG16 daemon would have none)");
+    pgwt_init_event_names(16);
+    CHECK(pgwt_idle_rule_timeout_mask() == 0,
+          "daemon side: PG16 is unclassified (got 0x%03x)",
+          pgwt_idle_rule_timeout_mask());
+    CHECK(pgwt_write_names_json(dir) == 0, "daemon writes its sidecar");
+
+    /* Server side, in pgwt-server's real order. */
+    pgwt_init_event_names(18);
+    CHECK(pgwt_load_names_json(dir) == 0, "server loads the sidecar");
+    CHECK(pgwt_idle_rule_timeout_mask() == 0,
+          "server side: STILL unclassified (got 0x%03x) -- the sidecar's "
+          "Timeout names are this build's PG18 fallback, not names PG16 "
+          "reported, and must not be mistaken for the latter",
+          pgwt_idle_rule_timeout_mask());
+    /* The specific inversion the owner's decision forbids. */
+    CHECK(pgwt_is_idle_event(WEI(PG_WAIT_TIMEOUT, 2)) == 0,
+          "PgSleep does not leave DB Time on a PG16 trace");
+    CHECK(pgwt_is_idle_event(WEI(PG_WAIT_TIMEOUT, 1)) == 0,
+          "...and no other Timeout id is classified either");
+    /* Live and offline must agree about the same capture. */
+    CHECK(pgwt_idle_rule_timeout_mask() == 0,
+          "live-path mask (0) == offline-path mask (0x%03x)",
+          pgwt_idle_rule_timeout_mask());
+
+    /* CONTRAST, so this is not just "PG16 is always 0": a PG18 daemon writes a
+     * sidecar from OBSERVED names and the server does classify it. */
+    char dir18[] = "/tmp/pgwt_sc18_XXXXXX";
+    CHECK(mkdtemp(dir18) != NULL, "mkdtemp 18 failed");
+    CHECK(pgwt_load_event_names_from_buffer(
+              "Timeout|BaseBackupThrottle\nTimeout|CheckpointWriteDelay\n"
+              "Timeout|PgSleep\n") == 0, "PG18 daemon observes real names");
+    pgwt_init_event_names(18);
+    CHECK(pgwt_write_names_json(dir18) == 0, "write observed sidecar");
+    CHECK(pgwt_load_event_names_from_buffer("no separators here") == -1,
+          "clear before the server leg");
+    pgwt_init_event_names(18);
+    CHECK(pgwt_load_names_json(dir18) == 0, "server loads observed sidecar");
+    CHECK(pgwt_is_idle_event(WEI(PG_WAIT_TIMEOUT, 1)) != 0,
+          "observed sidecar DOES classify: id 1 = CheckpointWriteDelay idle");
+    CHECK(pgwt_is_idle_event(WEI(PG_WAIT_TIMEOUT, 2)) == 0,
+          "...and PgSleep still is not");
+
+    /* PARTIAL observed list on an unverified major: the ids PostgreSQL did
+     * NOT report must not fall back to this build's table. Here only ids 0-1
+     * are reported, so id 7 (VacuumDelay in the PG18 table) must stay out. */
+    CHECK(pgwt_load_event_names_from_buffer(
+              "Timeout|BaseBackupThrottle\nTimeout|CheckpointWriteDelay\n") == 0,
+          "observe a PARTIAL Timeout list");
+    pgwt_init_event_names(16);
+    CHECK(pgwt_is_idle_event(WEI(PG_WAIT_TIMEOUT, 1)) != 0,
+          "partial list on PG16: the reported id 1 IS classified");
+    CHECK(pgwt_is_idle_event(WEI(PG_WAIT_TIMEOUT, 7)) == 0,
+          "...and an id the server never reported is NOT classified from the "
+          "PG18 table (the same defect, one id at a time)");
+
+    /* EVERY major end-to-end, not just the two interesting ones: the mask the
+     * daemon would classify with must equal the mask the server ends up with
+     * after a real write/load cycle. Reviewed as covering only 16 and 18. */
+    {
+        const int majors[] = {13, 16, 17, 18};
+        for (size_t i = 0; i < sizeof(majors)/sizeof(majors[0]); i++) {
+            int m = majors[i];
+            char d2[] = "/tmp/pgwt_rt_XXXXXX";
+            if (mkdtemp(d2) == NULL) { CHECK(0, "mkdtemp %d", m); continue; }
+            /* Daemon leg: no dynamic names (the <17 reality; for 17/18 this
+             * models a failed pg_wait_events query, which also falls back to
+             * the static tables). */
+            CHECK(pgwt_load_event_names_from_buffer("no separators here") == -1,
+                  "PG%d: clear dyn", m);
+            pgwt_init_event_names(m);
+            uint32_t live = pgwt_idle_rule_timeout_mask();
+            CHECK(pgwt_write_names_json(d2) == 0, "PG%d: write sidecar", m);
+            /* Server leg, in pgwt-server's real order. */
+            pgwt_init_event_names(18);
+            CHECK(pgwt_load_names_json(d2) == 0, "PG%d: load sidecar", m);
+            uint32_t offline = pgwt_idle_rule_timeout_mask();
+            CHECK(live == offline,
+                  "PG%d: live mask 0x%03x == offline mask 0x%03x after a real "
+                  "sidecar round trip", m, live, offline);
+            char pp[760];
+            snprintf(pp, sizeof(pp), "%s/wait_event_names.json", d2);
+            remove(pp);
+            remove(d2);
+        }
+    }
+
+    /* PG17's "verified" status rests on an assumption the code makes silently:
+     * select_version_tables gives 17 and 18 the SAME timeout_events[] table
+     * (only io_events differs between them). True in the PostgreSQL source,
+     * but nothing pinned it, so a future edit that split them would quietly
+     * make one of the two wrong. Pin the assumption itself. */
+    {
+        CHECK(pgwt_load_event_names_from_buffer("no separators here") == -1,
+              "clear dyn before the 17-vs-18 comparison");
+        char n17[12][64];
+        pgwt_init_event_names(17);
+        uint32_t m17 = pgwt_idle_rule_timeout_mask();
+        for (int id = 0; id < 12; id++) {
+            const char *n = pgwt_event_name(WEI(PG_WAIT_TIMEOUT, id));
+            snprintf(n17[id], sizeof(n17[id]), "%s", n ? n : "(none)");
+        }
+        pgwt_init_event_names(18);
+        CHECK(pgwt_idle_rule_timeout_mask() == m17,
+              "PG17 and PG18 derive the SAME Timeout pacing mask (0x%03x) -- "
+              "PG17's verification rests on sharing PG18's table", m17);
+        int all_same = 1;
+        for (int id = 0; id < 12; id++) {
+            const char *n = pgwt_event_name(WEI(PG_WAIT_TIMEOUT, id));
+            if (strcmp(n17[id], n ? n : "(none)") != 0) all_same = 0;
+        }
+        CHECK(all_same,
+              "...and every Timeout id 0-11 resolves to the same NAME on both, "
+              "which is the assumption select_version_tables makes silently");
+    }
+
+    char path[700];
+    snprintf(path, sizeof(path), "%s/wait_event_names.json", dir);
+    remove(path);
+    remove(dir);
+    snprintf(path, sizeof(path), "%s/wait_event_names.json", dir18);
+    remove(path);
+    remove(dir18);
+    CHECK(pgwt_load_event_names_from_buffer("no separators here") == -1,
+          "dyn reset");
+    pgwt_init_event_names(18);
+}
+
+
+/* ── 9. A BROKEN OR ABSENT SIDECAR MUST NOT MEAN "PG18" ───────────────────
+ *
+ * Section 8 covers a sidecar that LOADS. The sidecar can also be absent (the
+ * daemon's write is best-effort) or truncated into invalid JSON, and pgwt-server
+ * previously kept the PG18 mask it had installed as a display default -- so a
+ * PG13 or PG16 trace was classified with PG18's Timeout ids. On PG16 that takes
+ * PgSleep OUT of DB Time, inverting the owner's decision, and it reinstated the
+ * live/offline disagreement for the one case with no names_source key to read.
+ *
+ * The order is now pgwt_init_event_names_for_trace(): sidecar, then the major
+ * recorded in the TRACE HEADER (which recovers the right mask rather than
+ * degrading), then the unknown state. This drives all three branches through
+ * the same function the server calls, so the test cannot drift from it. */
+static void test_trace_init_fallback_order(void)
+{
+    printf("--- 9. sidecar absent / invalid / version-less ---\n");
+
+    char dir[] = "/tmp/pgwt_fb_XXXXXX";
+    CHECK(mkdtemp(dir) != NULL, "mkdtemp failed");
+    char path[760];
+    snprintf(path, sizeof(path), "%s/wait_event_names.json", dir);
+
+    /* 9a. NO SIDECAR, header says 16 -> PG16's (empty) mask, NOT PG18's. */
+    remove(path);
+    CHECK(pgwt_init_event_names_for_trace(dir, 16) == 16,
+          "no sidecar + header 16 settles on 16");
+    CHECK(pgwt_idle_rule_timeout_mask() == 0,
+          "...so the mask is EMPTY (got 0x%03x), not PG18's 0x%03x",
+          pgwt_idle_rule_timeout_mask(), PGWT_IDLE_TIMEOUT_MASK_PG18);
+
+    /* 9b. NO SIDECAR, header says 13 -> PG13's mask recovered from the header.
+     * This is the case the header fallback exists for: the classification
+     * survives a lost sidecar instead of being degraded to nothing. */
+    CHECK(pgwt_init_event_names_for_trace(dir, 13) == 13,
+          "no sidecar + header 13 settles on 13");
+    CHECK(pgwt_idle_rule_timeout_mask() == 0x1Du,
+          "...and recovers the PG13 mask 0x01D from the header (got 0x%03x)",
+          pgwt_idle_rule_timeout_mask());
+    CHECK(pgwt_is_idle_event(WEI(PG_WAIT_TIMEOUT, 1)) == 0,
+          "...so PG13 id 1 is PgSleep and stays in DB Time");
+
+    /* 9c. TRUNCATED into invalid JSON, header says 16 -> same as absent. */
+    {
+        FILE *fp = fopen(path, "w");
+        CHECK(fp != NULL, "write a truncated sidecar");
+        if (fp) { fputs("{\"Timeout\": [\"BaseBackupThro", fp); fclose(fp); }
+    }
+    CHECK(pgwt_load_names_json(dir) == -1,
+          "the truncated sidecar is rejected by the loader");
+    CHECK(pgwt_init_event_names_for_trace(dir, 16) == 16,
+          "truncated sidecar + header 16 settles on 16");
+    CHECK(pgwt_idle_rule_timeout_mask() == 0,
+          "...mask EMPTY, not PG18's (got 0x%03x)",
+          pgwt_idle_rule_timeout_mask());
+
+    /* 9d. VALID JSON with no pg_version. The loader succeeds, so the sidecar
+     * wins -- and because it carries no version the tables stay as
+     * pgwt_init_event_names_for_trace left them (PG18 for display). The
+     * guard that matters here is PROVENANCE: no names_source means "static",
+     * so an unverified major cannot be classified from it. Written for PG16's
+     * ids to show the combination. */
+    {
+        FILE *fp = fopen(path, "w");
+        CHECK(fp != NULL, "write a version-less sidecar");
+        if (fp) {
+            fputs("{\"Timeout\":[\"BaseBackupThrottle\",\"CheckpointWriteDelay\"]}\n",
+                  fp);
+            fclose(fp);
+        }
+    }
+    CHECK(pgwt_init_event_names_for_trace(dir, 16) > 0,
+          "a version-less but VALID sidecar still loads (the loader succeeds)");
+    CHECK(pgwt_idle_rule_timeout_mask() == PGWT_IDLE_TIMEOUT_MASK_PG18,
+          "...and because it declares no version it is read as PG18 -- the "
+          "limit of what a sidecar with no version can tell us (got 0x%03x)",
+          pgwt_idle_rule_timeout_mask());
+
+    /* 9e. NO SIDECAR AND NO HEADER -> the unknown state: empty mask. This is
+     * the same situation src/replay.c refuses on, so the two agree. */
+    remove(path);
+    CHECK(pgwt_init_event_names_for_trace(dir, 0) == 0,
+          "no sidecar + no header settles on the unknown major");
+    CHECK(pgwt_idle_rule_timeout_mask() == 0,
+          "...with an EMPTY mask (got 0x%03x)",
+          pgwt_idle_rule_timeout_mask());
+    CHECK(pgwt_event_name(WEI(PG_WAIT_TIMEOUT, 1)) != NULL,
+          "...while names still RENDER from the PG18 tables");
+
+    /* 9f. CONTRAST: a GOOD sidecar still wins over the header, which is what
+     * makes the fallback a fallback and not the primary path.
+     *
+     * The dyn table MUST be cleared first. 9d loaded a two-entry Timeout list
+     * and pgwt_init_event_names() does not clear dyn state, so without this
+     * the PG13 sidecar below would be written from those two stale names
+     * (pgwt_write_names_json prefers dyn whenever dyn_loaded) and read back as
+     * mask 0x01F -- PgSleep classified as pacing. That was a leak between
+     * cases in this test, not a product defect, but it is the same shape as a
+     * real one and the first draft of this test hit it. */
+    CHECK(pgwt_load_event_names_from_buffer("no separators here") == -1,
+          "clear the dyn table left by 9d before writing a PG13 sidecar");
+    pgwt_init_event_names(13);
+    CHECK(pgwt_write_names_json(dir) == 0, "write a PG13 sidecar");
+    CHECK(pgwt_init_event_names_for_trace(dir, 18) == 13,
+          "a valid PG13 sidecar beats a header claiming 18");
+    CHECK(pgwt_idle_rule_timeout_mask() == 0x1Du,
+          "...and installs PG13's mask (got 0x%03x)",
+          pgwt_idle_rule_timeout_mask());
+
+    remove(path);
+    remove(dir);
+    CHECK(pgwt_load_event_names_from_buffer("no separators here") == -1,
+          "dyn reset");
+    pgwt_init_event_names(18);
+}
+
 int main(void)
 {
     printf("=== test_wait_event ===\n");
-    test_pg13_sidecar_roundtrip();   /* FIRST: needs fresh-process dyn state */
+    /* FIRST of all: the pre-init default mask is only observable before any
+     * pgwt_init_event_names() call, and this test reads nothing else. */
+    test_idle_pre_init();
+    test_pg13_sidecar_roundtrip();   /* needs fresh-process dyn state */
     pgwt_init_event_names(18);
     test_cpu();
     test_io_events();
@@ -358,6 +1108,17 @@ int main(void)
     test_extension();
     test_pg13_names();
     test_unknown_fallbacks();
+    /* Timer-sleep / idle accounting (2026-10-06). */
+    test_pacing_name_rule();
+    test_timeout_idle_pg18();
+    test_timeout_idle_pg13();
+    test_timeout_index_collision();
+    test_pg13_sidecar_idle_roundtrip();
+    test_pacing_visibility();
+    test_session_idle_narrower();
+    test_unverified_majors_are_not_classified();
+    test_pg16_sidecar_round_trip();
+    test_trace_init_fallback_order();
     test_dynamic_name_mapping();  /* must run last: sets dyn_loaded */
 
     printf("\n%d/%d tests passed\n", tests_passed, tests_run);

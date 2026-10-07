@@ -13,6 +13,7 @@
  * any PG version without hardcoded tables.
  */
 #include "wait_event.h"
+#include "idle_rule.h"
 #include "pg_wait_tracer.h"
 #include "cJSON.h"
 #include "spawn.h"
@@ -24,6 +25,25 @@
 
 /* PG major version, set by pgwt_init_event_names() */
 static int pg_version = 18;
+
+/* NAME PROVENANCE. dyn_loaded says "a dynamic table is in force"; this says
+ * WHERE it came from, which is a different question and the one the pacing
+ * classification depends on.
+ *
+ * 1 = OBSERVED: PostgreSQL itself reported these names (pg_wait_events, or a
+ *     sidecar written by a daemon that had them). The ids are then
+ *     authoritative whatever the major.
+ * 0 = STATIC fallback: the names are this build's own compiled-in table,
+ *     merely round-tripped through a sidecar.
+ *
+ * Why this exists: PG16 has no pg_wait_events, so the daemon loads no dynamic
+ * names -- but it STILL writes a sidecar, and pgwt_write_names_json falls back
+ * to the active hardcoded tables, which for PG16 are PG18's. pgwt-server then
+ * loaded that sidecar as "dynamic names" and derived a PG18 pacing mask for a
+ * PG16 trace, defeating the unverified-major fail-safe entirely -- and leaving
+ * the daemon's live path (empty mask) disagreeing with the offline path (PG18
+ * mask) on the same capture. */
+static int dyn_observed = 0;
 
 /* Dynamic name storage — heap-allocated when loaded from PG or sidecar.
  * Each class has an array of strdup'd names indexed by event_id. */
@@ -466,7 +486,13 @@ static const char *lwlock_tranches[] = {
 
 /* ── Initialization ──────────────────────────────────────── */
 
-void pgwt_init_event_names(int pg_major)
+/* Select the active per-class name tables for a PG major version. Separated
+ * from pgwt_init_event_names() because pgwt_load_names_json() must ALSO run it:
+ * the sidecar carries its own pg_version, and before this split a PG13 trace
+ * kept PG18's static tables (pgwt-server calls pgwt_init_event_names(18) and
+ * THEN loads the sidecar), so every Timeout id the sidecar did not cover
+ * decoded against the wrong version. */
+static void select_version_tables(int pg_major)
 {
     pg_version = pg_major;
 
@@ -513,6 +539,76 @@ void pgwt_init_event_names(int pg_major)
         io_events_max = IO_EVENTS_PG18_MAX;
         break;
     }
+}
+
+/* Rebuild the Timeout pacing mask FROM THE ACTIVE NAME TABLE (see
+ * src/idle_rule.h). Derived from names, never from hardcoded ids, so it is
+ * right by construction on every version — including the dynamic names loaded
+ * from a sidecar or a live PG, because pgwt_event_name() prefers those.
+ *
+ * Must run at the END of every entry point that can change which names an id
+ * resolves to: pgwt_init_event_names(), pgwt_load_names_json(),
+ * pgwt_load_event_names_from_buffer() and pgwt_load_event_names_from_pg().
+ * Missing any one of them leaves the predicate describing the PREVIOUS
+ * version's ids while the UI prints the new version's names. */
+static void rebuild_idle_mask(void)
+{
+    /* FAIL-SAFE ON UNVERIFIED MAJORS (2026-10-06 review).
+     *
+     * select_version_tables() has exact Timeout tables for PG13 and PG17/18
+     * only; PG14/15/16 fall through to the PG17/18 table as a best-effort
+     * DISPLAY fallback, which this file's own header comment already calls
+     * out. Deriving the pacing mask from that table would turn a cosmetic
+     * mislabel into a silent wrong ANSWER: a Timeout id that really is
+     * PgSleep can resolve to CheckpointWriteDelay, which would take PgSleep
+     * OUT of DB Time -- the exact inversion of the owner's 2026-10-06
+     * decision, on a major the live tier actually runs (PG16).
+     *
+     * Two advisers disagreed about which of 14/15/16 are affected. Rather
+     * than ship a table nobody could verify, the code is made not to depend
+     * on the answer: an unverified major gets an EMPTY mask, so every Timeout
+     * event stays in DB Time. That is the over-count direction src/idle_rule.h
+     * names as fail-safe -- too much load is visible on screen, too little is
+     * not.
+     *
+     * DYNAMIC NAMES OVERRIDE THIS. When the trace carries real names (a
+     * sidecar, or pg_wait_events on PG17+), the ids came from PostgreSQL
+     * itself and the mask derived from them is right by construction
+     * regardless of major -- so a PG14-16 trace whose sidecar does carry
+     * Timeout names IS classified. That is the rescue path; without it the
+     * major simply is not classified. */
+    int observed_timeout = (dyn_loaded && dyn_observed &&
+                            dyn_max[PG_WAIT_TIMEOUT] >= 0);
+    int verified = PGWT_TIMEOUT_TABLE_VERIFIED(pg_version);
+    if (!observed_timeout && !verified) {
+        pgwt_idle_rule_set_timeout_mask(0);
+        return;
+    }
+
+    uint32_t mask = 0;
+    for (int id = 0; id < 32; id++) {
+        const char *n;
+        if (verified) {
+            n = pgwt_event_name(WEI(PG_WAIT_TIMEOUT, id));
+        } else {
+            /* UNVERIFIED major rescued by observed names: use ONLY the ids
+             * PostgreSQL actually reported. pgwt_event_name() falls back to
+             * the static table for any id the dynamic list does not cover, so
+             * a PARTIAL observed list would otherwise classify its gaps
+             * against PG18's table -- the same defect, one id at a time. */
+            n = (id <= dyn_max[PG_WAIT_TIMEOUT])
+                    ? dyn_names[PG_WAIT_TIMEOUT][id] : NULL;
+        }
+        if (n && pgwt_timeout_name_is_pacing(n))
+            mask |= 1u << id;
+    }
+    pgwt_idle_rule_set_timeout_mask(mask);
+}
+
+void pgwt_init_event_names(int pg_major)
+{
+    select_version_tables(pg_major);
+    rebuild_idle_mask();
 }
 
 /* ── Decode Functions ─────────────────────────────────────── */
@@ -613,35 +709,31 @@ void pgwt_event_full_name(uint32_t wei, char *buf, size_t bufsz)
         snprintf(buf, bufsz, "%s:id=%d", cls, WE_EVENT(wei));
 }
 
-/* LOAD vs VISIBILITY — two distinct concepts, intentionally split:
- *
- *  - pgwt_is_idle_event(): "excluded from DB Time / AAS / active load."
- *    True for Activity-class AND Client:ClientRead. Client:ClientRead is
- *    idle time spent waiting for the next command from the client (the
- *    direct analogue of Oracle's "SQL*Net message from client"); counting
- *    it as DB Time wrongly inflates load when connections sit idle (e.g.
- *    idle-in-transaction). So it is excluded from load accounting here.
- *
- *  - pgwt_is_hidden_event(): "do not display in lists/graphs/breakdowns."
- *    True for Activity-class ONLY. Client:ClientRead must stay VISIBLE in
- *    event lists, timelines, transition graphs, histograms and class
- *    drill-downs, so it is NOT hidden — only excluded from load.
- *
- * Conflating these two is what previously forced ClientRead to be marked
- * non-idle (otherwise the visibility filters deleted it from every view,
- * producing an empty Client class breakdown). Keeping them separate lets
- * ClientRead be both excluded-from-load and still-visible.
+/* LOAD vs VISIBILITY — the two predicates (pgwt_is_idle_event,
+ * pgwt_is_hidden_event, pgwt_is_session_idle_event) and the Timeout pacing
+ * set now live in src/idle_rule.c, a dependency-free TU the BPF-free pure
+ * cores can link too. See src/idle_rule.h for the rule. This file's job is
+ * only to keep the id-indexed pacing mask in step with the active name table
+ * (rebuild_idle_mask, above).
  */
-int pgwt_is_idle_event(uint32_t wei)
-{
-    return WE_CLASS(wei) == PG_WAIT_ACTIVITY ||
-           wei == WEI(PG_WAIT_CLIENT, 0);   /* Client:ClientRead */
-}
 
-int pgwt_is_hidden_event(uint32_t wei)
+/* See wait_event.h for the order and why this is a function. */
+int pgwt_init_event_names_for_trace(const char *trace_dir, int header_major)
 {
-    /* Activity-class only — never hides Client:ClientRead. */
-    return WE_CLASS(wei) == PG_WAIT_ACTIVITY;
+    /* Default the DISPLAY tables first so names render even if every step
+     * below fails; the mask this installs is replaced by whichever step wins. */
+    pgwt_init_event_names(18);
+
+    if (trace_dir && pgwt_load_names_json(trace_dir) == 0)
+        return pg_version;              /* the sidecar set it */
+
+    if (header_major > 0) {
+        pgwt_init_event_names(header_major);
+        return header_major;
+    }
+
+    pgwt_init_event_names(0);           /* unknown: empty mask */
+    return 0;
 }
 
 /* ── Dynamic Name Resolution ─────────────────────────────── */
@@ -673,6 +765,7 @@ static void dyn_clear(void)
         dyn_max[c] = -1;
     }
     dyn_loaded = 0;
+    dyn_observed = 0;
 }
 
 static void dyn_add(int class_byte, int event_id, const char *name)
@@ -802,10 +895,15 @@ int pgwt_load_event_names_from_pg(const char *pg_bindir, int pg_port,
     int status = pgwt_proc_close(&proc);
     if (status != 0 || count == 0) {
         dyn_clear();
+        /* dyn_clear() reverted to the hardcoded tables: the mask must follow,
+         * or a failed reload leaves the PREVIOUS load's mask in force. */
+        rebuild_idle_mask();
         return -1;
     }
 
     dyn_loaded = 1;
+    dyn_observed = 1;      /* straight from pg_wait_events */
+    rebuild_idle_mask();
     return 0;
 }
 
@@ -826,9 +924,14 @@ int pgwt_load_event_names_from_buffer(const char *data)
 
     if (count == 0) {
         dyn_clear();
+        rebuild_idle_mask();     /* see pgwt_load_event_names_from_pg */
         return -1;
     }
     dyn_loaded = 1;
+    /* Same format pg_wait_events produces, so the caller is modelling names
+     * PostgreSQL reported. */
+    dyn_observed = 1;
+    rebuild_idle_mask();
     return 0;
 }
 
@@ -904,6 +1007,16 @@ int pgwt_write_names_json(const char *trace_dir)
     /* Also store pg_version for reference */
     cJSON_AddNumberToObject(root, "pg_version", pg_version);
 
+    /* PROVENANCE (2026-10-07). Without this a reader cannot tell names
+     * PostgreSQL reported from this build's own fallback table echoed back at
+     * it -- and on an unverified major (PG14/15/16) those are PG18's names
+     * under PG16's ids, which is a silent misclassification rather than a
+     * cosmetic mislabel. A sidecar with no key at all is read as "static",
+     * the safe assumption. */
+    cJSON_AddStringToObject(root, "names_source",
+                            (dyn_loaded && dyn_observed) ? "observed"
+                                                         : "static");
+
     char *json_str = cJSON_Print(root);
     cJSON_Delete(root);
     if (!json_str) return -1;
@@ -950,10 +1063,24 @@ int pgwt_load_names_json(const char *trace_dir)
 
     dyn_clear();
 
-    /* Load pg_version if present */
+    /* Load pg_version if present — and RE-SELECT the hardcoded tables for it.
+     * The sidecar covers only the classes the writer could enumerate; every id
+     * it does not cover falls back to the static tables, so assigning
+     * pg_version without re-selecting left a PG13 trace decoding PG13 ids with
+     * PG18 tables (pgwt-server: pgwt_init_event_names(18) then this). */
     cJSON *ver = cJSON_GetObjectItem(root, "pg_version");
     if (ver && cJSON_IsNumber(ver))
-        pg_version = (int)ver->valuedouble;
+        select_version_tables((int)ver->valuedouble);
+
+    /* Absent key => "static": a sidecar written before provenance existed
+     * might be either, and assuming the weaker of the two only ever costs
+     * classification on an UNVERIFIED major (a verified one derives the same
+     * mask from its own exact table anyway). */
+    int sidecar_observed = 0;
+    cJSON *src = cJSON_GetObjectItem(root, "names_source");
+    if (src && cJSON_IsString(src) && src->valuestring &&
+        strcmp(src->valuestring, "observed") == 0)
+        sidecar_observed = 1;
 
     /* Iterate class arrays */
     cJSON *item;
@@ -974,5 +1101,10 @@ int pgwt_load_names_json(const char *trace_dir)
 
     cJSON_Delete(root);
     dyn_loaded = 1;
+    dyn_observed = sidecar_observed;
+    /* LAST word: the sidecar's names are the ones the trace was written with,
+     * so the mask must be derived from them, not from the static tables that
+     * pgwt_init_event_names() installed a moment earlier. */
+    rebuild_idle_mask();
     return 0;
 }

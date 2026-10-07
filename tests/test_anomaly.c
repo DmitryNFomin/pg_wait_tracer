@@ -16,6 +16,8 @@
  */
 #define _GNU_SOURCE
 #include "anomaly.h"
+#include "idle_rule.h"
+#include "wait_event.h"
 #include "pg_wait_tracer.h"
 
 #include <stdio.h>
@@ -1585,6 +1587,165 @@ static void test_cpu_cusum_false_positive_matrix(void)
           "drain amount %.6f expected 0.370", drain.cpu_cusum);
 }
 
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * THE IDLE RULE IS NOT COPIED HERE ANY MORE (criterion 3, 2026-10-06)
+ *
+ * src/anomaly.c used to carry its own `sample_is_idle()` with the comment
+ * "the definition must stay in sync with pgwt_is_idle_event()", because the
+ * pure core could not link wait_event.c. Widening the load rule (the six
+ * Timeout pacing sleeps) under that arrangement would have left this metric
+ * counting a sleeping checkpointer as an active session while every other view
+ * excluded it — a divergence kept away only by someone remembering.
+ *
+ * The rule now lives in src/idle_rule.c and anomaly.c CALLS it, so there is one
+ * definition and divergence is impossible by construction. That makes the
+ * interesting question not "do the two agree" but "is this metric actually
+ * WIRED to the shared predicate" — a copy could have been reintroduced, or the
+ * call dropped. So section A sweeps the WHOLE Timeout class on BOTH the PG13
+ * and the PG18 tables and asserts, per id, that the active-session count agrees
+ * with pgwt_is_idle_event for THAT id. Any second definition anywhere, or any
+ * hardcoded id list, disagrees on at least one of the 64 cases: ids 1 and 2
+ * invert between PG13 and PG18.
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+/* Active-session count the anomaly core derives from a single-sample batch. */
+static double aas_of_one(uint32_t wei)
+{
+    struct pgwt_trace_event one[1];
+    memset(one, 0, sizeof(one));
+    one[0].new_event = wei;
+    double aas = -1, frac = -1, cpu = -1;
+    pgwt_anomaly_metrics_from_batch(one, 1, &aas, &frac, &cpu);
+    return aas;
+}
+
+static void sweep_timeout_class(const char *ver)
+{
+    int n_idle = 0, n_active = 0;
+    for (int id = 0; id < 32; id++) {
+        uint32_t wei = WEI(PG_WAIT_TIMEOUT, id);
+        int idle = pgwt_is_idle_event(wei) != 0;
+        double aas = aas_of_one(wei);
+        /* An idle event contributes 0 active sessions; anything else 1. */
+        CHECK(aas == (idle ? 0.0 : 1.0),
+              "%s Timeout id %d (%s): pgwt_is_idle_event=%d but "
+              "anomaly aas=%.1f", ver, id,
+              pgwt_event_name(wei) ? pgwt_event_name(wei) : "(unnamed)",
+              idle, aas);
+        if (idle) n_idle++; else n_active++;
+    }
+    /* BYPASS: the loop above is satisfied trivially if every id falls on the
+     * same side — e.g. a mask of 0 makes all 32 "active" and all 32
+     * comparisons pass. Require BOTH outcomes to occur, so the sweep is
+     * proven to exercise both branches on this version. */
+    CHECK(n_idle > 0 && n_active > 0,
+          "%s sweep must cover both outcomes (idle=%d active=%d)",
+          ver, n_idle, n_active);
+}
+
+static void test_idle_rule_shared_with_anomaly(void)
+{
+    printf("--- idle rule: anomaly metric is wired to the shared predicate ---\n");
+
+    pgwt_init_event_names(18);
+    sweep_timeout_class("PG18");
+    pgwt_init_event_names(13);
+    sweep_timeout_class("PG13");
+    pgwt_init_event_names(18);
+
+    /* Spot-check the two inverted ids explicitly, so a failure names the
+     * actual defect rather than "id 1 disagreed". */
+    pgwt_init_event_names(18);
+    CHECK(aas_of_one(WEI(PG_WAIT_TIMEOUT, 1)) == 0.0,
+          "PG18: a checkpointer in CheckpointWriteDelay is not an active "
+          "session");
+    CHECK(aas_of_one(WEI(PG_WAIT_TIMEOUT, 2)) == 1.0,
+          "PG18: a backend in PgSleep IS an active session");
+    CHECK(aas_of_one(WEI(PG_WAIT_TIMEOUT, 6)) == 1.0,
+          "PG18: SpinDelay (outstanding spinlock request) IS active");
+    pgwt_init_event_names(13);
+    CHECK(aas_of_one(WEI(PG_WAIT_TIMEOUT, 1)) == 1.0,
+          "PG13: id 1 is PgSleep => active (a PG18 id list would say idle)");
+    CHECK(aas_of_one(WEI(PG_WAIT_TIMEOUT, 2)) == 0.0,
+          "PG13: id 2 is RecoveryApplyDelay => idle");
+    CHECK(aas_of_one(WEI(PG_WAIT_TIMEOUT, 7)) == 1.0,
+          "PG13: id 7 does not exist => active (a PG18 id list would say "
+          "idle: VacuumDelay)");
+    pgwt_init_event_names(18);
+
+    /* Unchanged classes, to show the sweep did not widen anything else. */
+    CHECK(aas_of_one(WEI(PG_WAIT_CLIENT, 0)) == 0.0, "ClientRead idle");
+    CHECK(aas_of_one(WEI(PG_WAIT_CLIENT, 1)) == 1.0, "ClientWrite active");
+    CHECK(aas_of_one(WEI(PG_WAIT_ACTIVITY, 4)) == 0.0, "Activity idle");
+    CHECK(aas_of_one(WEI(PG_WAIT_IO, 21)) == 1.0, "IO active");
+    CHECK(aas_of_one(WEI(PG_WAIT_LOCK, 0)) == 1.0, "Lock active");
+    CHECK(aas_of_one(0) == 1.0, "on-CPU sample is active");
+}
+
+/* ── the lock_fraction DENOMINATOR ────────────────────────────────────────
+ *
+ * lock_fraction = locks / ACTIVE, and `active` is where the idle rule lands.
+ * A sleeping checkpointer in the batch used to inflate the denominator and
+ * dilute a real lock pileup: the same two lock samples read 0.50 instead of
+ * 1.00 with two pacing sleeps alongside them, which is the difference between
+ * firing the lock rule and not. This asserts the denominator directly, with a
+ * fixture where the wrong denominator gives a different, nameable number. */
+static void test_lock_fraction_denominator_excludes_pacing(void)
+{
+    printf("--- lock_fraction denominator excludes pacing sleeps ---\n");
+    pgwt_init_event_names(18);
+
+    struct pgwt_trace_event batch[4];
+    memset(batch, 0, sizeof(batch));
+    batch[0].new_event = WEI(PG_WAIT_LOCK, 0);                /* active, lock */
+    batch[1].new_event = WEI(PG_WAIT_LOCK, 5);                /* active, lock */
+    batch[2].new_event = WEI(PG_WAIT_TIMEOUT, 1);  /* CheckpointWriteDelay */
+    batch[3].new_event = WEI(PG_WAIT_TIMEOUT, 7);  /* VacuumDelay */
+
+    double aas = -1, frac = -1, cpu = -1;
+    pgwt_anomaly_metrics_from_batch(batch, 4, &aas, &frac, &cpu);
+    CHECK(aas == 2.0, "aas=%.1f expected 2 (the two pacing sleeps excluded)",
+          aas);
+    CHECK(frac == 1.0,
+          "lock_fraction=%.2f expected 1.00 — counting the pacing sleeps in "
+          "the denominator gives 0.50", frac);
+    CHECK(cpu == 0.0, "cpu_aas=%.1f expected 0", cpu);
+
+    /* The same batch with PgSleep instead: it stays DB Time, so it DOES count
+     * and the denominator is 3 => 0.666..., a number the pacing version can
+     * never produce. This is the discriminating case: it fails if the rule is
+     * widened to PgSleep by accident. */
+    batch[2].new_event = WEI(PG_WAIT_TIMEOUT, 2);  /* PgSleep */
+    batch[3].new_event = WEI(PG_WAIT_TIMEOUT, 6);  /* SpinDelay */
+    pgwt_anomaly_metrics_from_batch(batch, 4, &aas, &frac, &cpu);
+    CHECK(aas == 4.0, "aas=%.1f expected 4 (PgSleep + SpinDelay are load)",
+          aas);
+    CHECK(frac == 0.5, "lock_fraction=%.3f expected 0.500", frac);
+
+    /* All-pacing batch: AAS 0, fraction 0, no divide-by-zero. The same
+     * property the all-idle batch has — proving the widened rule did not
+     * introduce a new 0/0 path. */
+    struct pgwt_trace_event allpace[3];
+    memset(allpace, 0, sizeof(allpace));
+    allpace[0].new_event = WEI(PG_WAIT_TIMEOUT, 1);
+    allpace[1].new_event = WEI(PG_WAIT_TIMEOUT, 3);
+    allpace[2].new_event = WEI(PG_WAIT_TIMEOUT, 9);
+    pgwt_anomaly_metrics_from_batch(allpace, 3, &aas, &frac, &cpu);
+    CHECK(aas == 0.0, "all-pacing aas=%.1f expected 0", aas);
+    CHECK(frac == 0.0, "all-pacing frac=%.2f expected 0", frac);
+    CHECK(cpu == 0.0, "all-pacing cpu_aas=%.1f expected 0", cpu);
+
+    /* BYPASS: an EMPTY batch also yields 0/0/0, so the three assertions above
+     * are not evidence on their own that the batch was looked at. Assert the
+     * empty case separately so "0 because excluded" and "0 because nothing was
+     * there" are distinguishable failures. */
+    pgwt_anomaly_metrics_from_batch(allpace, 0, &aas, &frac, &cpu);
+    CHECK(aas == 0.0 && frac == 0.0 && cpu == 0.0,
+          "empty batch is 0/0/0 (so the all-pacing result above needs its own "
+          "non-empty fixture to mean anything)");
+}
+
 int main(void)
 {
     test_disabled();
@@ -1595,6 +1756,8 @@ int main(void)
     test_baseline_protected();
     test_budget_boundary();
     test_metrics_from_batch();
+    test_idle_rule_shared_with_anomaly();
+    test_lock_fraction_denominator_excludes_pacing();
     test_cpu_storm_fires();
     test_lock_min_activity();
     test_baseline_learn_through();

@@ -176,6 +176,13 @@ def main():
                     "sampled_text_absent_total", "sampled_text_evicted_total",
                     "sampled_text_error_total",
                     "sampled_text_retry_exhausted_total",
+                    # Summary-writer self-checks. They live in `metrics`, not
+                    # `status` -- build_status() does not embed build_metrics()
+                    # -- and without them on this list nothing verified that
+                    # they are reachable at all, which is the only part of
+                    # "the counters are surfaced" a doc sentence cannot prove.
+                    "summary_flush_failures_total",
+                    "summary_events_overflow_total",
                     "sampler_healthy"):
             check(metrics is not None and key in metrics,
                   f"metrics carries '{key}'")

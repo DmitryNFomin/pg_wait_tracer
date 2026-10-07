@@ -1788,7 +1788,11 @@ foundational command set and shapes (preserved):
 - `top_events` → rows `{event_id,name,class,count,total_ms,avg_us,max_us,pct,aas}`, `db_time_ms`
 - `top_sessions` → rows `{pid,db_time_ms,cpu_pct,top_wait}`
 - `top_queries` → rows `{query_id,count,total_ms,pct,top_wait}`
-- `time_model` → `{db_time_ms,idle_time_ms,aas,classes:[{name,ms,pct,aas}],wall_ms}`
+- `time_model` → `{db_time_ms,idle_time_ms,aas,classes:[{name,ms,pct,aas}],wall_ms,`
+  `idle_children_excess_ms,rows:[…]}` — `rows` carries the indent-0 `Idle` row and its
+  indent-2 named children (`Timeout:VacuumDelay`, `Activity`-backed `Other (background)`, …);
+  `idle_children_excess_ms` is the self-check that those children sum to the parent and
+  must be 0. Idle is EXCLUDED from `db_time_ms`/`aas`.
 - **Filters** (all optional, AND logic): `{class,event_id,pid,query_id}`.
 - **Build:** compiled by the existing Makefile against the same object files, no new deps.
 

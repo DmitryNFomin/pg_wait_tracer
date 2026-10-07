@@ -991,8 +991,18 @@ int pgwt_discover(struct pgwt_daemon *d)
      * version-selected hardcoded tables otherwise); without it a PG13
      * trace was silently decoded with PG18 tables by pgwt-server (the #8
      * mislabeling class — caught by the CI capture-smoke PG13 cell). */
-    if (d->trace_dir)
-        pgwt_write_names_json(d->trace_dir);
+    if (d->trace_dir && pgwt_write_names_json(d->trace_dir) != 0) {
+        /* Not fatal -- the capture is still worth having -- but it must not be
+         * silent: without the sidecar, pgwt-server cannot establish this
+         * trace's major or its name provenance, so it will refuse to classify
+         * Timeout events at all (every pacing wait stays in DB Time). On an
+         * unverified major that is the difference between a correct answer and
+         * a quietly wrong one, so the operator needs to know now, while the
+         * directory is still writable. */
+        fprintf(stderr, "WARN: could not write %s/wait_event_names.json -- "
+                "pgwt-server will not be able to classify Timeout pacing "
+                "waits for this trace\n", d->trace_dir);
+    }
 
     /* Resolve the wait_event_info access path. Per-version strategy:
      *   PG17+  → the `my_wait_event_info` global (a uint32* pointing AT the

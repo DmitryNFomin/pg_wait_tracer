@@ -40,7 +40,36 @@
 /* ── On-disk format constants ─────────────────────────────── */
 
 #define PGWT_SUMMARY_MAGIC    0x53574750   /* "PGWS" little-endian */
-#define PGWT_SUMMARY_VERSION  2
+/* v3 (2026-10-06, the timer-sleep/idle accounting change): `class_ns`,
+ * `queries[].class_ns`, `queries[].count`, `queries[].total_ns`,
+ * `sessions[].top_wait_*` and `queries[].top_wait_*` now EXCLUDE idle events
+ * (pgwt_is_idle_event -- Activity, Client:ClientRead and the Timeout pacing
+ * sleeps). `events[]` is unchanged and still carries EVERY event including the
+ * idle ones, which is where every read path gets both the idle totals and the
+ * named Idle sub-rows from.
+ *
+ * Why the version had to move: v1/v2 precomputed those per-second totals at
+ * WRITE time under the OLD rule, so a trace directory holding v2 seconds and
+ * v3 seconds would BLEND two accounting rules inside one window and report a
+ * DB Time that is neither. The reader therefore refuses v1/v2 for computation
+ * (src/summary_reader.c) and pgwt-server preflights the window so a refusal
+ * becomes a RAW recompute, never a plausible-looking partial answer
+ * (should_use_summaries / pgwt_summaries_window_current). Startup recovery
+ * still archives an intact older file rather than calling it corrupt. */
+/* v4 (2026-10-07): the SAME change as v3 plus the exact idle scalars --
+ * `pgwt_summary_query::idle_ns` (8 bytes per query) and the record trailer
+ * (`idle_ns` + `events_overflow`, 12 bytes).
+ *
+ * Why this is a second bump rather than an edit to v3: v3 had already been
+ * written to disk by an earlier build of this branch, with the OLD layout,
+ * under the same version number. A reader that assumes the new bytes exist
+ * mis-parses those files -- and it fails in the shape v3 was introduced to
+ * close, because the file-level preflight only inspects the header, approves
+ * it, and then the visitor silently SKIPS the blocks that fail to decode,
+ * yielding a plausible partial window with no error and no raw fallback.
+ * "No such file should exist anywhere" is a weaker guarantee than "an old
+ * file is refused", so the version moves and the preflight refuses v3. */
+#define PGWT_SUMMARY_VERSION  4
 
 /* #277: how long after a second ends it is treated as complete by the
  * periodic flush. The daemon's timer handler runs BEFORE the event-ring
@@ -54,6 +83,32 @@
 #define SUMMARY_MAX_EVENTS    1024
 #define SUMMARY_MAX_SESSIONS  MAX_BACKENDS   /* 1024 */
 #define SUMMARY_MAX_QUERIES   2048
+
+/* Worst-case serialized size of one per-second record, COMPUTED from the
+ * table bounds rather than guessed.
+ *
+ * pgwt_summary_serialize() writes into a fixed buffer and (before v3) ignored
+ * its out_size entirely, so the only thing standing between a full record and
+ * a heap overrun was that 800 KB happened to be enough. v3 adds 8 bytes per
+ * query (idle_ns) and 12 per record, which cut the old margin to ~26 KB --
+ * close enough that the next field to be added would have been the one that
+ * silently overran. The bound is now derived here and the writer both sizes
+ * its buffer from it and refuses to write past out_size.
+ *
+ *   class_ns   PGWT_NUM_CLASSES * 8
+ *   events     SUMMARY_MAX_EVENTS   * (4+8+8+8 + HISTOGRAM_BUCKETS*8)
+ *   sessions   SUMMARY_MAX_SESSIONS * (4+8+8+4+8)
+ *   queries    SUMMARY_MAX_QUERIES  * (36 + PGWT_NUM_CLASSES*8 + 1
+ *                                      + SUMMARY_QUERY_TOP_EVENTS*20 + 8)
+ *   trailer    8 (idle_ns) + 4 (events_overflow)
+ */
+#define PGWT_SUMMARY_SERIALIZE_MAX                                            \
+    ((size_t)(PGWT_NUM_CLASSES * 8)                                           \
+     + (size_t)SUMMARY_MAX_EVENTS   * (28 + HISTOGRAM_BUCKETS * 8)            \
+     + (size_t)SUMMARY_MAX_SESSIONS * 32                                      \
+     + (size_t)SUMMARY_MAX_QUERIES  * (36 + PGWT_NUM_CLASSES * 8 + 1          \
+                                       + SUMMARY_QUERY_TOP_EVENTS * 20 + 8)   \
+     + 12)
 
 /* ── Per-second accumulator ───────────────────────────────── */
 
@@ -91,6 +146,13 @@ struct pgwt_summary_query {
     uint64_t class_ns[PGWT_NUM_CLASSES];
     struct pgwt_summary_query_event top_events[SUMMARY_QUERY_TOP_EVENTS];
     int      num_top_events;
+    /* v3: EXACT idle total for this query. top_events[] holds only 8 entries,
+     * so a query with 8 busier non-idle events would otherwise report Idle = 0
+     * while its DB Time was right -- DB Time + Idle would stop accounting for
+     * the window under a query filter. The named Idle CHILDREN still come from
+     * top_events (bounded); the difference is emitted as one labelled
+     * remainder row, so the total is exact even when the breakdown is not. */
+    uint64_t idle_ns;
 };
 
 struct pgwt_summary_accum {
@@ -104,6 +166,19 @@ struct pgwt_summary_accum {
     /* Per-event hash table (open addressing) */
     struct pgwt_summary_event events[SUMMARY_MAX_EVENTS];
     int num_events;            /* count of occupied slots */
+    /* v3: events[] could not take an entry because all SUMMARY_MAX_EVENTS
+     * slots were occupied. Since v3 moved idle time OUT of class_ns, events[]
+     * is the only per-event source left, so a full table under-reports the
+     * Idle breakdown and any class/event-FILTERED total while unfiltered
+     * DB Time stays correct -- a mismatch with no signal. This is that
+     * signal. ~270 distinct PG wait events against 1024 slots is headroom,
+     * not a proof, and it is not a proof at all for Extension events. */
+    uint32_t events_overflow;
+
+    /* v3: EXACT system-wide idle total (Activity + Client:ClientRead + the
+     * Timeout pacing sleeps), accumulated at the writer independently of
+     * events[] so it survives a full table. */
+    uint64_t idle_ns;
 
     /* Per-session hash table (open addressing) */
     struct pgwt_summary_session sessions[SUMMARY_MAX_SESSIONS];
@@ -183,6 +258,13 @@ struct pgwt_summary_writer {
     size_t        compress_buf_size;
 
     /* Stats */
+    /* Seconds that could not be serialised/compressed. Non-zero means the
+     * window has holes; it was previously impossible to tell, because every
+     * caller of flush_accum discarded its return value. */
+    uint64_t      flush_failures_total;
+    /* Σ of every record's events_overflow, so the control socket can report
+     * one number instead of a reader having to sum the blocks. */
+    uint64_t      events_overflow_total;
     uint64_t      total_records_written;
     uint64_t      total_bytes_written;
 

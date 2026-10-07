@@ -382,6 +382,23 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
                      d->summary_writer ? d->summary_writer->qattr_table_full_total : 0);
     cjson_add_uint64(root, "summary_query_unattributed_ns_total",
                      d->summary_writer ? d->summary_writer->qattr_unattributed_ns_total : 0);
+    /* Seconds that could not be serialised or compressed: each one is a HOLE
+     * in every summaries-path window that covers it. Individual failures also
+     * print to stderr, which a running daemon's operator never sees -- so the
+     * count belongs here, in the control socket's `metrics` reply (this is
+     * build_metrics(); `status` does NOT embed it, and saying "status" sends an
+     * operator looking in the wrong place). Must be 0. */
+    cjson_add_uint64(root, "summary_flush_failures_total",
+                     d->summary_writer ? d->summary_writer->flush_failures_total : 0);
+    /* Wait events that could not claim a per-second events[] slot (1024 per
+     * second). Nonzero means the per-event breakdown and any class/event
+     * FILTERED total are incomplete for those seconds, while unfiltered DB
+     * Time and Idle stay exact -- a discrepancy with no other signal.
+     * Counts WRITTEN seconds only: a second lost to a failed rotation or close
+     * is discarded without being rolled up, so read this together with
+     * summary_flush_failures_total rather than as a complete total. */
+    cjson_add_uint64(root, "summary_events_overflow_total",
+                     d->summary_writer ? d->summary_writer->events_overflow_total : 0);
     /* #277: events that arrived after their second had already been written
      * and were therefore counted in the NEXT second instead. Counts are
      * conserved either way; a persistently nonzero rate means ticks are

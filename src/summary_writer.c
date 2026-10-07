@@ -35,6 +35,7 @@ static uint32_t pgwt_duration_to_bucket(uint64_t ns)
 #include "map_reader.h"     /* pgwt_duration_to_bucket */
 #endif
 #include "wait_event.h"
+#include "idle_rule.h"   /* pgwt_is_idle_event / pgwt_is_session_idle_event */
 
 #include <string.h>
 #include <stdlib.h>
@@ -174,11 +175,26 @@ static void accum_query_add(struct pgwt_summary_accum *acc, uint64_t query_id,
     if (!sq)
         return;
     int cls = summary_wait_class_index(old_ev);
-    sq->count += count;
-    sq->total_ns += total_ns;
-    /* Per-class breakdown */
-    if (cls >= 0 && cls < PGWT_NUM_CLASSES)
-        sq->class_ns[cls] += total_ns;
+    /* v3: the per-query TOTALS exclude idle, matching the raw top-queries path
+     * (src/compute.c pgwt_compute_top_queries skips idle records). Before v3
+     * the summary path accumulated them and the raw path did not, so the same
+     * query reported a different total depending on which path answered.
+     * top_events[] below deliberately still records idle events: the Events
+     * tab under a query filter must keep showing them (they are excluded from
+     * load by pgwt_is_idle_event, not hidden by pgwt_is_hidden_event). */
+    int idle = pgwt_is_idle_event(old_ev);
+    /* v3: exact, and NOT derived from top_events[] -- that list holds 8
+     * entries, so a 9th distinct event would vanish from the query's Idle
+     * total. See struct pgwt_summary_query::idle_ns. */
+    if (idle)
+        sq->idle_ns += total_ns;
+    if (!idle) {
+        sq->count += count;
+        sq->total_ns += total_ns;
+        /* Per-class breakdown */
+        if (cls >= 0 && cls < PGWT_NUM_CLASSES)
+            sq->class_ns[cls] += total_ns;
+    }
     /* Per-event top-8 tracking */
     if (old_ev != 0) {
         int found = -1;
@@ -195,7 +211,8 @@ static void accum_query_add(struct pgwt_summary_accum *acc, uint64_t query_id,
             sq->num_top_events++;
         }
     }
-    if (old_ev != 0 && max_ns > sq->top_wait_ns) {
+    /* v3: top wait is never an idle event -- see the per-session note above. */
+    if (old_ev != 0 && !idle && max_ns > sq->top_wait_ns) {
         sq->top_wait_id = old_ev;
         sq->top_wait_ns = max_ns;
     }
@@ -223,13 +240,48 @@ static void accum_event(struct pgwt_summary_accum *acc,
 
     acc->total_events++;
 
-    /* Time model: classify old_event into wait class */
+    /* Time model: classify old_event into wait class.
+     *
+     * v3: IDLE EVENTS ARE EXCLUDED HERE, at the writer. Before v3 this line
+     * had no idle check at all (while ss->db_time_ns below did), so the class
+     * totals were LUMPED: Client carried ClientRead and Timeout carried the
+     * pacing sleeps, and every read path had to subtract them back out by
+     * hand. It subtracted only ClientRead, and only by hunting
+     * WEI(PG_WAIT_CLIENT,0) in the events table -- which also meant the
+     * subtraction silently did nothing if that event had not claimed a
+     * SUMMARY_MAX_EVENTS slot. Excluding at the writer removes the lumping,
+     * the three hardcoded copies of the rule, and that failure mode together.
+     *
+     * The idle time is NOT lost: `events[]` (below) records every event
+     * including the idle ones, so readers recover both the idle total and the
+     * per-event named Idle sub-rows from there. */
     int cls = summary_wait_class_index(old_ev);
-    if (cls >= 0 && cls < PGWT_NUM_CLASSES)
+    int ev_idle = pgwt_is_idle_event(old_ev);
+    if (cls >= 0 && cls < PGWT_NUM_CLASSES && !ev_idle)
         acc->class_ns[cls] += dur;
+    /* v3: the exact system-wide idle total, independent of events[] so a full
+     * event table cannot under-report it (see acc->events_overflow). */
+    if (ev_idle)
+        acc->idle_ns += dur;
 
     /* Per-event stats */
     struct pgwt_summary_event *se = find_or_insert_event(acc, old_ev);
+    if (!se) {
+        /* v4: recorded in the block AND reported once per process. Without
+         * the log line the only reader of this counter was a unit test, which
+         * made "never a silent drop" an overstatement: the drop was recorded
+         * but nothing ever said so. */
+        acc->events_overflow++;
+        static int warned_overflow;
+        if (!warned_overflow) {
+            warned_overflow = 1;
+            fprintf(stderr, "WARN: summary per-event table full (%d slots) -- "
+                    "per-event breakdowns and class/event-FILTERED totals for "
+                    "affected seconds are incomplete; unfiltered DB Time and "
+                    "Idle totals stay exact (events_overflow in each record)\n",
+                    SUMMARY_MAX_EVENTS);
+        }
+    }
     if (se) {
         se->count++;
         se->total_ns += dur;
@@ -246,8 +298,11 @@ static void accum_event(struct pgwt_summary_accum *acc,
             ss->db_time_ns += dur;
         if (old_ev == 0)
             ss->cpu_ns += dur;
-        /* Track top wait per session */
-        if (old_ev != 0 && dur > ss->top_wait_ns) {
+        /* Track top wait per session. v3: never an IDLE event -- "this
+         * session's top wait is Timeout:CheckpointWriteDelay" names the thing
+         * that is explicitly NOT load, which is the opposite of what the
+         * column is for. */
+        if (old_ev != 0 && !pgwt_is_idle_event(old_ev) && dur > ss->top_wait_ns) {
             ss->top_wait_id = old_ev;
             ss->top_wait_ns = dur;
         }
@@ -361,7 +416,14 @@ static uint64_t summary_qattr_step(struct pgwt_summary_writer *w,
     } else if (evt->query_id != 0) {
         pgwt_qattr_observe(&s->q, evt->query_id, summary_qattr_emit, w);
         qid = evt->query_id;
-    } else if (pgwt_is_idle_event(we)) {
+    } else if (pgwt_is_session_idle_event(we)) {
+        /* COMMAND BOUNDARY, so deliberately the NARROW predicate (Activity /
+         * Client:ClientRead) and not the load rule. A Timeout pacing sleep is
+         * excluded from DB Time but happens INSIDE a running command -- a
+         * checkpointer in CheckpointWriteDelay is mid-checkpoint. Using the
+         * load rule here would flush the pid's deferred per-query attribution
+         * as "the command ended" every time an in-command sleep went by.
+         * src/idle_rule.h explains why the two predicates differ. */
         pgwt_qattr_boundary(&s->q, false, summary_qattr_emit, w);
     } else {
         pgwt_qattr_defer(&s->q, we, evt->duration_ns, summary_qattr_emit, w);
@@ -379,7 +441,13 @@ size_t pgwt_summary_serialize(const struct pgwt_summary_accum *acc,
                                uint8_t *out, size_t out_size)
 {
     uint8_t *p = out;
-    (void)out_size;
+    /* The buffer is sized from PGWT_SUMMARY_SERIALIZE_MAX, which is the
+     * worst case for the compiled-in table bounds -- so this can only fire if
+     * a caller passes a smaller buffer. Refusing (0 bytes, no write) is the
+     * fail-safe: a short record would deserialize as garbage. out_size was
+     * previously ignored outright. */
+    if (out_size < PGWT_SUMMARY_SERIALIZE_MAX)
+        return 0;
 
     /* Time model: 11 × 8 = 88 bytes */
     memcpy(p, acc->class_ns, sizeof(acc->class_ns));
@@ -433,7 +501,15 @@ size_t pgwt_summary_serialize(const struct pgwt_summary_accum *acc,
             memcpy(p, &q->top_events[j].count, 8);       p += 8;
             memcpy(p, &q->top_events[j].total_ns, 8);    p += 8;
         }
+        /* v4: appended AFTER the variable-length list, so a v2 reader that
+         * stops at the list is unaffected and a v3 reader finds it by the
+         * same walk. */
+        memcpy(p, &q->idle_ns, 8);       p += 8;
     }
+
+    /* v4 record-level trailer, appended last for the same reason. */
+    memcpy(p, &acc->idle_ns, 8);          p += 8;
+    memcpy(p, &acc->events_overflow, 4);  p += 4;
 
     return (size_t)(p - out);
 }
@@ -511,6 +587,8 @@ int pgwt_summary_deserialize(const uint8_t *in, size_t in_size,
                     uint8_t nte = *p;  p += 1;
                     p += nte * 20;     /* top_events */
                 }
+                if (version >= 4)
+                    p += 8;            /* idle_ns */
             }
             continue;
         }
@@ -533,7 +611,17 @@ int pgwt_summary_deserialize(const uint8_t *in, size_t in_size,
                 memcpy(&q->top_events[j].count, p, 8);       p += 8;
                 memcpy(&q->top_events[j].total_ns, p, 8);    p += 8;
             }
+            if (version >= 4) {
+                if (p + 8 > end) return -1;
+                memcpy(&q->idle_ns, p, 8);  p += 8;
+            }
         }
+    }
+
+    if (version >= 4) {
+        if (p + 12 > end) return -1;
+        memcpy(&acc->idle_ns, p, 8);          p += 8;
+        memcpy(&acc->events_overflow, p, 4);  p += 4;
     }
 
     return 0;
@@ -579,7 +667,12 @@ static void recover_current_summary(struct pgwt_summary_writer *w)
     }
     if (fread(&hdr, sizeof(hdr), 1, fp) != 1 ||
         hdr.magic != PGWT_SUMMARY_MAGIC ||
-        (hdr.version != 1 && hdr.version != PGWT_SUMMARY_VERSION)) {
+        /* Recovery only has to decide "is this header intact", not "can I
+         * COMPUTE from it": accept every version this project has ever
+         * written so an intact v2 file left by an older daemon is ARCHIVED
+         * normally instead of being renamed .corrupt. Refusing v2 for
+         * computation is the reader's job (src/summary_reader.c). */
+        hdr.version < 1 || hdr.version > PGWT_SUMMARY_VERSION) {
         fclose(fp);
         char aside[600];
         snprintf(aside, sizeof(aside), "%s.corrupt.%lld", cur,
@@ -777,6 +870,20 @@ static int flush_accum(struct pgwt_summary_writer *w)
     /* Serialize */
     size_t encoded_size = pgwt_summary_serialize(acc, w->encode_buf,
                                                   w->encode_buf_size);
+    if (encoded_size == 0) {
+        /* The serializer refused (buffer smaller than
+         * PGWT_SUMMARY_SERIALIZE_MAX). Unreachable with the writer's own
+         * buffer, but it must not fall through: LZ4_compress_default() on 0
+         * bytes returns 1, so this used to write a block whose header still
+         * claimed the record's event/session/query counts over an empty
+         * payload -- which the reader turns into a silently dropped second.
+         * Refuse loudly and leave the accumulator open so the second is
+         * retried rather than lost. */
+        fprintf(stderr, "ERROR: summary serialize refused (buffer %zu < "
+                "required %zu) -- second not written, accumulator kept\n",
+                w->encode_buf_size, (size_t)PGWT_SUMMARY_SERIALIZE_MAX);
+        return -1;
+    }
 
     /* LZ4 compress */
     int compressed_size = LZ4_compress_default(
@@ -833,6 +940,26 @@ static int flush_accum(struct pgwt_summary_writer *w)
 
     w->total_records_written++;
     w->total_bytes_written += sizeof(bh) + compressed_size;
+    /* Roll the per-record overflow count up to the writer so the control
+     * socket's `metrics` can report it; the per-record field stays, because a
+     * reader needs to know WHICH seconds are affected.
+     *
+     * This has to happen AFTER every early return above, not before them: a
+     * failed flush leaves the accumulator open to be retried, so rolling up
+     * first counted the same acc->events_overflow again on each attempt.
+     * Diagnostic only and bounded by the retry count, but a self-check that
+     * inflates under failure is worse than useless -- it reads as a second,
+     * independent problem. Placed with the other success-side counters, and
+     * before accum_close() clears the accumulator.
+     *
+     * CONSEQUENCE, stated rather than glossed: a second that is LOST never has
+     * its overflow rolled up. The rotate path discards a failed second
+     * deliberately (see pgwt_summary_maybe_rotate) and pgwt_summary_close()
+     * logs and writes the footer, so neither reaches here. So
+     * events_overflow_total counts dropped events in WRITTEN seconds only; it
+     * is not a complete total, and flush_failures_total is the signal for the
+     * seconds it cannot speak for. The two must be read together. */
+    w->events_overflow_total += acc->events_overflow;
     /* This second is now on disk and immutable (#277). */
     w->last_flushed_second_mono_ns = flushed_second_mono_ns;
     w->have_flushed_second = true;
@@ -888,7 +1015,9 @@ int pgwt_summary_writer_init(struct pgwt_summary_writer *w,
     /* Allocate scratch buffers.
      * Worst case: 1024 events × 156 + 1024 sessions × 32 + 2048 queries × 36
      *           = 159744 + 32768 + 73728 = ~260 KB uncompressed */
-    w->encode_buf_size = 800 * 1024;
+    /* Derived from the table bounds, not a round number: see
+     * PGWT_SUMMARY_SERIALIZE_MAX. */
+    w->encode_buf_size = PGWT_SUMMARY_SERIALIZE_MAX;
     w->encode_buf = malloc(w->encode_buf_size);
 
     w->compress_buf_size = LZ4_compressBound((int)w->encode_buf_size);
@@ -941,8 +1070,13 @@ int pgwt_summary_push_event(struct pgwt_summary_writer *w,
 
     /* Second boundary detection */
     if (w->accum_active && evt_second > w->accum.second_mono_ns) {
-        /* New second — flush old accumulator (which resets it) */
-        flush_accum(w);
+        /* New second — flush old accumulator (which resets it).
+         * A failed flush leaves the accumulator OPEN on purpose (see
+         * flush_accum): the second is retried at the next boundary rather
+         * than silently becoming a hole in the window. Counted so the gap is
+         * attributable instead of merely absent. */
+        if (flush_accum(w) != 0)
+            w->flush_failures_total++;
     }
 
     /* Start new accumulator if needed */
@@ -959,9 +1093,22 @@ int pgwt_summary_push_event(struct pgwt_summary_writer *w,
     return 0;
 }
 
+/* Both public flush entry points route through here so a failure is counted
+ * exactly once wherever it came from. Previously these returned flush_accum's
+ * status without touching the counter, so only the internal second-boundary
+ * path incremented it -- and the daemon discards the periodic flush result, so
+ * a failing tick reached nobody at all. */
+static int flush_counted(struct pgwt_summary_writer *w)
+{
+    int rc = flush_accum(w);
+    if (rc != 0)
+        w->flush_failures_total++;
+    return rc;
+}
+
 int pgwt_summary_flush(struct pgwt_summary_writer *w)
 {
-    return flush_accum(w);
+    return flush_counted(w);
 }
 
 int pgwt_summary_flush_completed(struct pgwt_summary_writer *w,
@@ -980,7 +1127,7 @@ int pgwt_summary_flush_completed(struct pgwt_summary_writer *w,
     if (now_mono_ns < ready_at)
         return 0;
 
-    return flush_accum(w);
+    return flush_counted(w);
 }
 
 int pgwt_summary_check_rotation(struct pgwt_summary_writer *w)
@@ -997,8 +1144,25 @@ int pgwt_summary_check_rotation(struct pgwt_summary_writer *w)
     if (current_hour == w->current_hour)
         return 0;
 
-    /* Hour changed — rotate */
-    flush_accum(w);
+    /* Hour changed — rotate. Refusing to rotate on a failed flush would
+     * strand the writer on a file it can no longer append to, so the rotation
+     * proceeds -- but loudly, because the un-flushed second is lost at this
+     * point (the accumulator belongs to the file being closed). */
+    if (flush_accum(w) != 0) {
+        w->flush_failures_total++;
+        /* BEHAVIOUR FIX, not just wording: accum_close() runs only on
+         * flush_accum's success path, so a failed rotate flush left the
+         * accumulator ACTIVE and it was written into the NEXT hour's file at
+         * the following boundary -- carrying a second_wall_ns earlier than
+         * that file's own name-derived start, which the reader's window
+         * filter then places wrongly. A lost second is a short window; a
+         * misfiled one is a wrong answer in two windows. So discard it
+         * explicitly, which also makes the message below true. */
+        accum_close(w);
+        fprintf(stderr, "ERROR: summary rotation could not write the open "
+                "second; it is DISCARDED (not carried into the next hour's "
+                "file) and that window is short by one second\n");
+    }
     write_footer(w);
 
     if (w->verbose) {
@@ -1047,7 +1211,11 @@ int pgwt_summary_close(struct pgwt_summary_writer *w)
 {
     if (!w->fp) return 0;
 
-    flush_accum(w);
+    if (flush_accum(w) != 0) {
+        w->flush_failures_total++;
+        fprintf(stderr, "ERROR: summary close lost the open second "
+                "(flush failed)\n");
+    }
     write_footer(w);
 
     if (w->verbose) {

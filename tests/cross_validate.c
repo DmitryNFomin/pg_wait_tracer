@@ -107,11 +107,65 @@ int main(int argc, char **argv)
             min_share = atof(argv[++i]);
     }
 
+    /* Decode this trace with the names it was WRITTEN with.
+     *
+     * This tool never initialised the event-name tables at all, so it ran on
+     * wait_event.c's file-scope defaults (PG18). That was a cosmetic mislabel
+     * while the tables were only used for display; since 2026-10-06 the
+     * idle/pacing classification is DERIVED from the resolved names, so a
+     * PG13 or PG16 trace was being classified with PG18 semantics -- and this
+     * is the tool whose +/-10pp verdict is used to justify the shipped sample
+     * rate. The sidecar carries the writing side'''s mapping and its pg_version,
+     * and loading it re-selects the version tables and rebuilds the pacing
+     * mask (src/wait_event.c pgwt_load_names_json).
+     *
+     * No sidecar: fall back exactly the way pgwt-server does, via the shared
+     * pgwt_init_event_names_for_trace() -- the trace HEADER's major, then the
+     * unknown-major state (PG18 tables for display, EMPTY pacing mask). This
+     * tool used to call pgwt_init_event_names(18) here and warn, which made it
+     * the last place still assuming PG18: a PG13 or PG16 trace with no sidecar
+     * was classified with PG18's Timeout ids by the very tool whose +/-10pp
+     * verdict justifies the shipped sample rate, while pgwt-server on the same
+     * directory would refuse to classify it at all. Two tools disagreeing about
+     * what is idle is exactly the failure the shared helper exists to prevent,
+     * so it must be used here too, not reimplemented. */
     struct pgwt_trace_file_entry files[256];
     int nfiles = pgwt_scan_trace_files(trace_dir, files, 256);
     if (nfiles <= 0) {
         fprintf(stderr, "ERROR: no trace files in %s\n", trace_dir);
         return 1;
+    }
+
+    int hdr_major = 0;
+    for (int i = 0; i < nfiles && hdr_major == 0; i++) {
+        struct pgwt_event_reader hr;
+        if (pgwt_reader_open(&hr, files[i].path) != 0)
+            continue;
+        if (hr.header.pg_version > 0)
+            hdr_major = (int)hr.header.pg_version;
+        pgwt_reader_close(&hr);
+    }
+
+    {
+        /* Same shape as src/server.c's server_init(): probe the sidecar to
+         * decide whether to warn, then let the shared helper settle the
+         * tables. Loading twice is idempotent. */
+        int sidecar_ok = (pgwt_load_names_json(trace_dir) == 0);
+        int settled = pgwt_init_event_names_for_trace(trace_dir, hdr_major);
+        if (!sidecar_ok) {
+            if (settled > 0)
+                fprintf(stderr, "WARN: %s has no wait_event_names.json "
+                        "sidecar -- using the PG%d tables recorded in the "
+                        "trace header. Names are this build's static tables, "
+                        "not the ones the trace was written with.\n",
+                        trace_dir, settled);
+            else
+                fprintf(stderr, "WARN: %s has neither a "
+                        "wait_event_names.json sidecar nor a PG major in any "
+                        "trace header -- NO event is classified as idle "
+                        "(empty pacing mask), so pacing sleeps are counted "
+                        "as DB Time in the shares below\n", trace_dir);
+        }
     }
 
     /* First pass over all blocks: find the overlapping wall window where BOTH

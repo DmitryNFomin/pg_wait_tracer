@@ -3158,17 +3158,47 @@ static int server_init(struct pgwt_server *srv, const char *trace_dir)
     if (srv->num_cpus <= 0)
         srv->num_cpus = 1;
 
-    pgwt_init_event_names(18); /* Default to PG18 tables */
-
-    /* Try loading dynamic event names from sidecar file.
-     * Written by the daemon when it queries pg_wait_events. */
-    if (pgwt_load_names_json(trace_dir) == 0)
-        fprintf(stderr, "pgwt-server: loaded event names from wait_event_names.json\n");
-
+    /* The trace's names + pacing mask come from the sidecar, else the trace
+     * header's major, else the unknown-major state -- see
+     * pgwt_init_event_names_for_trace(). The file scan has to happen first
+     * because step 2 needs a header to read. */
     srv->num_files = pgwt_scan_trace_files(trace_dir, srv->files, 256);
     if (srv->num_files <= 0) {
         fprintf(stderr, "pgwt-server: no trace files found in %s\n", trace_dir);
         return -1;
+    }
+
+    int hdr_major = 0;
+    for (int i = 0; i < srv->num_files && hdr_major == 0; i++) {
+        struct pgwt_event_reader r;
+        if (pgwt_reader_open(&r, srv->files[i].path) != 0)
+            continue;
+        if (r.header.pg_version > 0)
+            hdr_major = (int)r.header.pg_version;
+        pgwt_reader_close(&r);
+    }
+
+    int sidecar_ok = (pgwt_load_names_json(trace_dir) == 0);
+    if (sidecar_ok) {
+        /* Re-run through the shared helper so the two paths cannot drift;
+         * loading twice is idempotent. */
+        pgwt_init_event_names_for_trace(trace_dir, hdr_major);
+        fprintf(stderr, "pgwt-server: loaded event names from "
+                "wait_event_names.json\n");
+    } else {
+        int settled = pgwt_init_event_names_for_trace(trace_dir, hdr_major);
+        if (settled > 0)
+            fprintf(stderr, "pgwt-server: no usable wait_event_names.json in "
+                    "%s -- falling back to the PG%d tables recorded in the "
+                    "trace header. Names are this build's static tables, not "
+                    "the ones the trace was written with.\n",
+                    trace_dir, settled);
+        else
+            fprintf(stderr, "pgwt-server: no usable wait_event_names.json in "
+                    "%s AND no PostgreSQL major in any trace header -- the "
+                    "version is unknown, so Timeout events are NOT classified "
+                    "as pacing (all stay in DB Time). Names render with the "
+                    "PG18 tables.\n", trace_dir);
     }
 
     /* Scan block headers, build the coverage table + clock generations,
@@ -3217,7 +3247,32 @@ static int should_use_summaries(struct pgwt_server *srv,
         return 0;
     /* Summaries are only honest when exact data covers everything the
      * window contains (EXACT), or the window is empty (NONE). */
-    return wf->fid == PGWT_FIDELITY_EXACT || wf->fid == PGWT_FIDELITY_NONE;
+    if (wf->fid != PGWT_FIDELITY_EXACT && wf->fid != PGWT_FIDELITY_NONE)
+        return 0;
+
+    /* ACCOUNTING-VERSION PREFLIGHT (summary v3, 2026-10-06).
+     *
+     * v1/v2 files precomputed their per-second totals under the old idle rule,
+     * so the reader refuses them. Refusing is not enough on its own: this
+     * function used to decide purely on fidelity, and pgwt_visit_summaries
+     * SKIPS a file it cannot open -- so a window containing one older file
+     * would have been answered from the remaining files and returned a
+     * plausible PARTIAL result (or an empty 900 s answer if every file was
+     * old), with "fidelity": "exact" on it and no error anywhere.
+     *
+     * Checking it here turns that into a REAL RAW FALLBACK: returning 0 sends
+     * the caller down the raw-events path, which is the source of truth and is
+     * always complete. If that path is too large it refuses out loud
+     * (reject_overload) -- an explicit error, never a quiet wrong number. */
+    int considered = 0, unusable = 0;
+    if (!pgwt_summaries_window_current(srv->trace_dir, from, to,
+                                       &considered, &unusable)) {
+        fprintf(stderr, "INFO: %d of %d summary file(s) covering this window "
+                "are not summary v%d -- recomputing from raw events\n",
+                unusable, considered, PGWT_SUMMARY_VERSION);
+        return 0;
+    }
+    return 1;
 }
 
 /* ── Fidelity (trace format v2, D3) ───────────────────────── */
@@ -3483,6 +3538,14 @@ static void handle_time_model(struct pgwt_server *srv, struct pgwt_request *req)
 
     cJSON_AddNumberToObject(root, "db_time_ms", tm.db_time_ms);
     cJSON_AddNumberToObject(root, "idle_time_ms", tm.idle_time_ms);
+    /* ACCOUNTING SELF-CHECK, not a metric: nonzero means the Idle row's named
+     * children exceeded their parent, which cannot happen while the writer and
+     * the reader agree about what counts as idle. It is emitted even though it
+     * should always be 0 -- a counter nothing can read is a counter nobody
+     * acts on, which is how events_overflow and flush_failures_total were both
+     * found to be unobservable in review. */
+    cJSON_AddNumberToObject(root, "idle_children_excess_ms",
+                            tm.idle_children_excess_ms);
     cJSON_AddNumberToObject(root, "aas", tm.aas);
     cJSON_AddNumberToObject(root, "wall_ms", tm.wall_ms);
 

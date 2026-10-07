@@ -264,6 +264,13 @@ _CANNED["time_model"] = {
     "offcpu_ms": 260,
     "wait_gap_cpu_ms": 0.003,
     "cpu_clamped_ms": 0.0,
+    # Idle self-check: the ms by which the named Idle sub-event rows exceed the
+    # Idle parent. 0.0 on a healthy server; nonzero means the summary writer and
+    # the reader disagree about which events are pacing (e.g. a record written
+    # with an empty Timeout mask, read with PG18's). The real server emits it on
+    # EVERY time_model, so the mock must carry it or test_protocol_drift fails —
+    # which is how this field was caught as missing here.
+    "idle_children_excess_ms": 0.0,
     "rows": [
         {"indent": 0, "name": "DB Time",  "ms": 12760, "pct": 100.0, "aas": 3.54},
         {"indent": 1, "name": "CPU (running)", "ms": 4800, "pct": 37.6, "aas": 1.33},

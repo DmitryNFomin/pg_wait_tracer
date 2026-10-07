@@ -14,6 +14,15 @@
  */
 #define _GNU_SOURCE   /* process_vm_readv */
 #include "sampler.h"
+/* The idle rule, at the TOP of the file on purpose. sampler.c also includes
+ * wait_event.h further down, but that include sits inside the
+ * "#ifndef PGWT_SERVER" daemon half -- so the BPF-free core compiled with
+ * -DPGWT_SERVER (tests/test_sampler) saw no declaration at all, and even the
+ * daemon build saw it only AFTER the call site. A missing declaration is a
+ * WARNING under gcc's -Wall, so it linked wherever idle_rule.o happened to be
+ * on the link line and only failed in the one unit test that compiles this
+ * source directly. */
+#include "idle_rule.h"      /* pgwt_is_session_idle_event */
 #include "pg_wait_tracer.h"
 
 #include <stdio.h>
@@ -354,10 +363,17 @@ int pgwt_sampler_build_batch(const struct pgwt_sample_target *targets,
          * parse-phase waits that were sampled with query_id 0. In-command
          * attribution is unchanged. */
         e->query_id     = targets[i].query_id;
-        /* (pgwt_is_idle_event's rule, inline: this BPF-free core links
-         * without wait_event.c.) */
-        if (e->query_id == 0 && (WE_CLASS(we) == PG_WAIT_ACTIVITY ||
-                                 we == PG_WAIT_CLIENT_READ))
+        /* pgwt_is_session_idle_event, NOT pgwt_is_idle_event: this branch
+         * INHERITS the previous statement's id across a span where no command
+         * is running, and only Activity / Client:ClientRead mean that. The
+         * load rule is deliberately WIDER (it also excludes the Timeout pacing
+         * sleeps from DB Time), and this must not follow it: a pacing sleep
+         * can occur INSIDE a command whose query_id is still 0 (not yet
+         * reported), and inheriting there would file that sleep under the
+         * PREVIOUS statement. src/idle_rule.h documents both predicates; the
+         * narrower one is shared with summary_writer.c's command-boundary
+         * rule rather than inlined a third time. */
+        if (e->query_id == 0 && pgwt_is_session_idle_event(we))
             e->query_id = targets[i].last_query_id;
     }
     return count;

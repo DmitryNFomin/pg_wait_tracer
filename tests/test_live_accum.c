@@ -1816,8 +1816,211 @@ static void test_query_attr_sampled_idle_skew(void)
     free(acc);
 }
 
+
+/* ── 12. A pacing sleep is NOT a command boundary (2026-10-06) ─────────────
+ *
+ * Six Timeout events became load-idle on 2026-10-06 (the owner's timer-sleep
+ * rule). src/map_reader.c's per-query attribution used pgwt_is_idle_event to
+ * decide "this pid's command ended, flush its pending parse-phase waits", and
+ * that is a DIFFERENT question from "does this time count as load".
+ *
+ * A foreground backend really does hit one of the six: a client running
+ * `VACUUM` sleeps in Timeout:VacuumDelay, INSIDE the command, routinely before
+ * pgstat_report_query_id has run. Under the load rule that sleep would read as
+ * "the command ended" and dump the pid's pending lock time into the
+ * unattributed bucket -- the statement would lose its parse-phase waits, and
+ * the bug would present as "VACUUM shows almost no wait profile".
+ *
+ * So both paths use the narrower pgwt_is_session_idle_event (Activity +
+ * Client:ClientRead only). These cases pin the distinction in BOTH directions:
+ * the pacing sleep must NOT close the command, and Client:ClientRead must
+ * still close it -- a predicate that answered "never a boundary" would pass
+ * half of this and is caught by the contrast. */
+#define TIMEOUT_VACUUM_DELAY WEI(PG_WAIT_TIMEOUT, 7)   /* PG18: pacing */
+#define TIMEOUT_PGSLEEP      WEI(PG_WAIT_TIMEOUT, 2)   /* PG18: DB Time */
+
+static void test_query_attr_pacing_not_a_boundary(void)
+{
+    printf("--- pacing sleep is not a command boundary (closed + sampled) ---\n");
+
+    /* Guard: every event id here is a PG18 id. */
+    CHECK(pgwt_is_idle_event(TIMEOUT_VACUUM_DELAY) != 0 &&
+          pgwt_is_session_idle_event(TIMEOUT_VACUUM_DELAY) == 0,
+          "fixture precondition: VacuumDelay is load-idle but not session-idle");
+    CHECK(pgwt_is_idle_event(PG_WAIT_CLIENT_READ) != 0 &&
+          pgwt_is_session_idle_event(PG_WAIT_CLIENT_READ) != 0,
+          "fixture precondition: ClientRead is both");
+
+    /* ── 12a. CLOSED-RECORD path. A parse-phase lock is pending; then the
+     * command sleeps on the vacuum cost delay; then the id is reported. The
+     * lock must land under the id. */
+    {
+        struct pgwt_accumulator *acc = calloc(1, sizeof(*acc));
+        pgwt_accum_init(acc);
+        struct stream s;
+        stream_init(&s, acc, 61);
+        const uint64_t Q = 0xBEEF01ULL;
+
+        stream_marker(&s, PGWT_MARKER_CMD_START, MS(0));
+        stream_record(&s, LOCK_RELATION, MS(1), MS(11), 1, 0);
+        CHECK(s.pa->qattr.npending == 1,
+              "the lock is pending (%d)", s.pa->qattr.npending);
+        /* The vacuum cost delay, still inside the command, still no id. It is
+         * DEFERRED like any other in-command wait -- which is the point: a
+         * boundary would have emptied the pending list instead of adding to
+         * it. So the discriminating observation is that the LOCK entry is
+         * still there and nothing was flushed. */
+        stream_record(&s, TIMEOUT_VACUUM_DELAY, MS(11), MS(31), 1, 0);
+        CHECK(s.pa->qattr.npending == 2,
+              "the pacing sleep is deferred, not a boundary: 2 pending (%d)",
+              s.pa->qattr.npending);
+        int saw_lock = 0;
+        for (int i = 0; i < s.pa->qattr.npending; i++)
+            if (s.pa->qattr.pending[i].we == LOCK_RELATION) saw_lock = 1;
+        CHECK(saw_lock,
+              "...and the pending LOCK entry specifically survived (a boundary "
+              "would have flushed it)");
+        CHECK(acc->qattr_unattributed_ns == 0,
+              "...and nothing was flushed as unattributed (%.1f ms)",
+              acc->qattr_unattributed_ns / 1e6);
+        /* Now the id is reported. */
+        stream_marker_q(&s, PGWT_MARKER_PLAN_START, MS(32), Q);
+        CHECK(qrow(acc, Q, LOCK_RELATION) == MS(10),
+              "the parse-phase lock lands under Q (%.1f ms, expected 10.0)",
+              qrow(acc, Q, LOCK_RELATION) / 1e6);
+        CHECK(acc->qattr_unattributed_ns == 0,
+              "no unattributed time at all (%.1f ms)",
+              acc->qattr_unattributed_ns / 1e6);
+        /* The pacing sleep itself is still VISIBLE on the system row -- it left
+         * DB Time, it did not leave the trace. */
+        CHECK(sys_row(acc, TIMEOUT_VACUUM_DELAY) == MS(20),
+              "the pacing sleep keeps its system row (%.1f ms)",
+              sys_row(acc, TIMEOUT_VACUUM_DELAY) / 1e6);
+        /* ...and it is OUT of DB Time, which is the other half of the change. */
+        CHECK(acc->tm.db_time_ns == MS(10),
+              "DB Time = the 10 ms lock only (%.3f ms)",
+              acc->tm.db_time_ns / 1e6);
+        free(acc);
+    }
+
+    /* ── 12b. THE CONTRAST. The identical stream with Client:ClientRead in
+     * place of the sleep MUST close the command: the pending lock becomes
+     * unattributed. Without this case a predicate that said "nothing is ever a
+     * boundary" would satisfy 12a. */
+    {
+        struct pgwt_accumulator *acc = calloc(1, sizeof(*acc));
+        pgwt_accum_init(acc);
+        struct stream s;
+        stream_init(&s, acc, 62);
+        const uint64_t Q = 0xBEEF02ULL;
+
+        stream_marker(&s, PGWT_MARKER_CMD_START, MS(0));
+        stream_record(&s, LOCK_RELATION, MS(1), MS(11), 1, 0);
+        stream_record(&s, PG_WAIT_CLIENT_READ, MS(11), MS(31), 0, 0);
+        CHECK(s.pa->qattr.npending == 0,
+              "ClientRead DOES close the command: nothing left pending (%d)",
+              s.pa->qattr.npending);
+        CHECK(acc->qattr_unattributed_ns == MS(10),
+              "...and the lock went to the unattributed bucket (%.1f ms, "
+              "expected 10.0)", acc->qattr_unattributed_ns / 1e6);
+        stream_marker_q(&s, PGWT_MARKER_PLAN_START, MS(32), Q);
+        CHECK(qrow(acc, Q, LOCK_RELATION) == 0,
+              "...so Q gets none of it (%.1f ms)",
+              qrow(acc, Q, LOCK_RELATION) / 1e6);
+        free(acc);
+    }
+
+    /* ── 12c. PgSleep, which stays in DB Time, must also not be a boundary --
+     * and for a second reason: it is not idle at all, so it is DEFERRED like
+     * any other in-command wait and lands under the id with the lock. */
+    {
+        struct pgwt_accumulator *acc = calloc(1, sizeof(*acc));
+        pgwt_accum_init(acc);
+        struct stream s;
+        stream_init(&s, acc, 63);
+        const uint64_t Q = 0xBEEF03ULL;
+
+        stream_marker(&s, PGWT_MARKER_CMD_START, MS(0));
+        stream_record(&s, LOCK_RELATION, MS(1), MS(11), 1, 0);
+        stream_record(&s, TIMEOUT_PGSLEEP, MS(11), MS(31), 1, 0);
+        stream_marker_q(&s, PGWT_MARKER_PLAN_START, MS(32), Q);
+        CHECK(qrow(acc, Q, LOCK_RELATION) == MS(10) &&
+              qrow(acc, Q, TIMEOUT_PGSLEEP) == MS(20),
+              "PgSleep is deferred and attributed like any wait "
+              "(lock %.1f, sleep %.1f ms)",
+              qrow(acc, Q, LOCK_RELATION) / 1e6,
+              qrow(acc, Q, TIMEOUT_PGSLEEP) / 1e6);
+        CHECK(acc->tm.db_time_ns == MS(30),
+              "and it stays IN DB Time: 10 + 20 = 30 ms (%.3f ms)",
+              acc->tm.db_time_ns / 1e6);
+        free(acc);
+    }
+
+    /* ── 12d. SAMPLED path (pgwt_live_qattr_sample). No markers exist there;
+     * a coherent idle sample is the between-commands boundary. A sampled
+     * pacing sleep must not be treated as one -- it does not carry the
+     * finished statement's id (src/sampler.c inherits last_query_id only for
+     * session-idle events), so using it as a boundary would reset the
+     * inheritance AND flush the pending waits. */
+    {
+        const uint64_t P = MS(100), Q = 0x64;
+        struct pgwt_accumulator *acc = calloc(1, sizeof(*acc));
+        pgwt_accum_init(acc);
+        struct pgwt_pid_accum *pa = pgwt_get_or_create_pid(acc, 64);
+
+        /* parse-phase lock sampled with no id yet */
+        sample_live_cmd(acc, pa, 0, LOCK_RELATION, P, true);
+        CHECK(pa->qattr.npending == 1, "lock pending (%d)", pa->qattr.npending);
+        /* a sampled vacuum cost delay; the status read says no command open
+         * (the pessimistic case -- a skewed read) */
+        bool withheld = sample_live_cmd(acc, pa, 0, TIMEOUT_VACUUM_DELAY, P,
+                                        false);
+        CHECK(!withheld,
+              "a pacing sample is not the contradicted-idle case");
+        CHECK(pa->qattr.npending == 2,
+              "the pacing sample is deferred, not a between-commands boundary "
+              "(%d pending)", pa->qattr.npending);
+        int saw_lock_s = 0;
+        for (int i = 0; i < pa->qattr.npending; i++)
+            if (pa->qattr.pending[i].we == LOCK_RELATION) saw_lock_s = 1;
+        CHECK(saw_lock_s, "...with the pending LOCK entry intact");
+        CHECK(acc->qattr_unattributed_ns == 0,
+              "nothing unattributed yet (%.1f ms)",
+              acc->qattr_unattributed_ns / 1e6);
+        /* the id finally shows up on an in-command sample */
+        sample_live_cmd(acc, pa, Q, LOCK_RELATION, P, true);
+        CHECK(qrow(acc, Q, LOCK_RELATION) == 2 * P,
+              "both lock samples land under Q (%.1f ms, expected %.1f)",
+              qrow(acc, Q, LOCK_RELATION) / 1e6, 2.0 * P / 1e6);
+        CHECK(acc->qattr_unattributed_ns == 0,
+              "still nothing unattributed (%.1f ms)",
+              acc->qattr_unattributed_ns / 1e6);
+
+        /* THE CONTRAST on the sampled path too: a coherent ClientRead sample
+         * IS the boundary. */
+        struct pgwt_pid_accum *pb = pgwt_get_or_create_pid(acc, 65);
+        uint64_t un_before = acc->qattr_unattributed_ns;
+        sample_live_cmd(acc, pb, 0, LOCK_RELATION, P, true);
+        CHECK(pb->qattr.npending == 1, "pid 65 lock pending");
+        sample_live_cmd(acc, pb, 0, PG_WAIT_CLIENT_READ, P, false);
+        CHECK(pb->qattr.npending == 0 &&
+              acc->qattr_unattributed_ns == un_before + P,
+              "a coherent ClientRead sample closes the command and the lock "
+              "becomes unattributed (+%.1f ms)",
+              (acc->qattr_unattributed_ns - un_before) / 1e6);
+        free(acc);
+    }
+}
+
 int main(void)
 {
+    /* This file's fixtures use PG18 wait-event ids, and since 2026-10-07 the
+     * Timeout pacing mask starts EMPTY until a version is stated (an
+     * uninitialised process must not be assumed to be PG18). Saying so here
+     * is what makes "Timeout:VacuumDelay is load-idle" true for these
+     * fixtures -- test_query_attr_pacing_not_a_boundary asserts that
+     * precondition explicitly rather than assuming it. */
+    pgwt_init_event_names(18);
     test_effective_event();
     test_closed_noncmd_cpu_row();
     test_open_interval();
@@ -1832,6 +2035,7 @@ int main(void)
     test_cross_check_query_attr();
     test_query_attr_sampled();
     test_query_attr_sampled_idle_skew();
+    test_query_attr_pacing_not_a_boundary();
     printf("\n%d/%d checks passed\n", tests_passed, tests_run);
     return tests_passed == tests_run ? 0 : 1;
 }

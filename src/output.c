@@ -1267,7 +1267,21 @@ void pgwt_print_active(struct pgwt_daemon *d)
 
             if (pgwt_is_idle_event(pa->current_event)) {
                 e->state = ACTIVE_STATE_IDLE;
-                e->event_name[0] = '\0';
+                /* The STATE stays idle -- this column means "is this session
+                 * load", and a pacing sleep is not. But the NAME is kept for
+                 * any event that is not HIDDEN: before 2026-10-06 the only
+                 * idle-and-visible event was Client:ClientRead and blanking it
+                 * cost nothing, whereas blanking a checkpointer's
+                 * Timeout:CheckpointWriteDelay turns the single most useful
+                 * line in this view into an anonymous "idle" -- the same
+                 * anonymous-number regression the time model's named Idle
+                 * children exist to prevent. Hidden (Activity) events still
+                 * blank: they are parked background loops, not a diagnostic. */
+                if (pgwt_is_hidden_event(pa->current_event))
+                    e->event_name[0] = '\0';
+                else
+                    pgwt_event_full_name(pa->current_event,
+                                         e->event_name, sizeof(e->event_name));
             } else if (pa->current_event == 0) {
                 e->state = ACTIVE_STATE_ON_CPU;
                 e->event_name[0] = '\0';

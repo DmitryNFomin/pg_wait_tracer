@@ -33,6 +33,29 @@ int pgwt_write_names_json(const char *trace_dir);
  * Returns 0 on success (overrides hardcoded tables), -1 if not found. */
 int pgwt_load_names_json(const char *trace_dir);
 
+/* Establish the event-name tables AND the Timeout pacing mask for a TRACE
+ * DIRECTORY, in the only order that is safe:
+ *
+ *   1. the sidecar (wait_event_names.json) -- authoritative, because it carries
+ *      both the major the trace was written with and the provenance of its
+ *      names (observed from PostgreSQL vs this build's static fallback);
+ *   2. failing that, `header_major` -- the PostgreSQL major recorded in the
+ *      trace file header, which every trace this build writes carries. The
+ *      dynamic names are lost but the version-selected static tables are
+ *      right, so the classification survives;
+ *   3. failing that, the UNKNOWN-major state: PG18 tables for rendering and an
+ *      EMPTY pacing mask, so every Timeout event stays in DB Time.
+ *
+ * Pass header_major = 0 when no header is available. Returns the major it
+ * settled on, or 0 for the unknown state.
+ *
+ * This exists as a function rather than a sequence inlined in pgwt-server
+ * because step 2 was missing there: a missing or truncated sidecar left the
+ * PG18 default in force and classified a PG13/PG16 trace with PG18's Timeout
+ * ids. Having one implementation is what lets tests/test_wait_event.c drive
+ * all three branches instead of re-deriving the order. */
+int pgwt_init_event_names_for_trace(const char *trace_dir, int header_major);
+
 /* Returns class name: "IO", "LWLock", "Lock", "CPU", etc. */
 const char *pgwt_class_name(uint32_t wait_event_info);
 
@@ -44,21 +67,11 @@ const char *pgwt_event_name(uint32_t wait_event_info);
  * For event=0, writes "CPU*" (asterisk: not all CPU time is instrumented). */
 void pgwt_event_full_name(uint32_t wait_event_info, char *buf, size_t bufsz);
 
-/* LOAD accounting: returns true if this event must be EXCLUDED from
- * DB Time / AAS / active load. True for Activity-class events AND for
- * Client:ClientRead (idle between commands — like Oracle's "SQL*Net
- * message from client"). Use this anywhere you are deciding how much
- * LOAD an event represents (DB Time, idle bucket, AAS, active sessions,
- * % of DB Time, interference, etc.). */
-int pgwt_is_idle_event(uint32_t wait_event_info);
-
-/* VISIBILITY: returns true if this event must NOT be displayed in event
- * lists / graphs / breakdowns. True for Activity-class events ONLY.
- * Note: this deliberately does NOT include Client:ClientRead — that
- * event is excluded from load (pgwt_is_idle_event) but must remain
- * VISIBLE in event lists, timelines, transition graphs, histograms,
- * and class drill-downs. Use this anywhere you are deciding whether an
- * event ROW/series/marker should APPEAR to the user. */
-int pgwt_is_hidden_event(uint32_t wait_event_info);
+/* LOAD vs VISIBILITY: pgwt_is_idle_event(), pgwt_is_hidden_event() and the
+ * narrower pgwt_is_session_idle_event() are declared in idle_rule.h, which
+ * also documents the Timeout pacing set and why the predicate is derived from
+ * resolved NAMES rather than version-dependent ids. Included here so the ~45
+ * existing call sites that only include wait_event.h keep compiling. */
+#include "idle_rule.h"
 
 #endif /* PGWT_WAIT_EVENT_H */
