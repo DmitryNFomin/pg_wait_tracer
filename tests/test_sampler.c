@@ -484,6 +484,33 @@ static void test_recheck_cmd_gate_order_race(void)
     CHECK(t[1].cmd_open == 1 && f.calls[1] == 0,
           "an already-open gate is left alone (one-directional)");
 
+    /* #294 x #295 interaction pin. #295 replaced build_batch's inline idle
+     * rule with pgwt_is_session_idle_event() for the branch that INHERITS the
+     * previous statement's id when a sample's own query_id is 0. PG14+ zeroes
+     * st_query_id at STATE_RUNNING, so a sample the recheck recovers
+     * microseconds after the command opened legitimately carries query_id 0 —
+     * a combination that did not exist before this branch, because those
+     * samples were dropped. If that predicate ever admitted we == 0, every
+     * recovered on-CPU sample would be filed under the PREVIOUS statement:
+     * in-command CPU, attributed to the wrong query, silently. It must not.
+     * The two changes rebased with no textual conflict, which is exactly when
+     * this needs a test rather than a reading. */
+    rc_reset(t, vals, valid);
+    t[0].query_id = 0;
+    t[0].last_query_id = 0xBEEF;   /* the statement that just finished */
+    f = (struct fake_gate){ .succeed = 1, .open_now = 1, .qid = 0,
+                            .qid_valid = 1 };
+    pgwt_sampler_recheck_cmd_gate(t, vals, valid, RC_N, fake_gate_read, &f,
+                                  &st);
+    CHECK(st.recovered == 2 && t[0].cmd_open == 1 && t[0].query_id == 0,
+          "a command that has not reported its id yet recovers with id 0");
+    n = pgwt_sampler_build_batch(t, vals, valid, RC_N, 14, out, NULL, NULL);
+    CHECK(n == 5 && out[0].pid == 101 && out[0].new_event == 0 &&
+          out[0].query_id == 0,
+          "a recovered on-CPU sample does NOT inherit the finished "
+          "statement's id (got query_id 0x%llx, must be 0)",
+          (unsigned long long)out[0].query_id);
+
     /* PG13 has no st_query_id: the gate opens, the id is left as it was,
      * never overwritten with a zero that would look like a real reading. */
     rc_reset(t, vals, valid);
