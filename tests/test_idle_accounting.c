@@ -39,6 +39,14 @@
  *     (se.sum_exec_runtime is only current at a tick or a context switch). This
  *     section asserts the behaviour and asserts that pacing and ClientRead are
  *     treated IDENTICALLY, which is the claim "we followed the precedent".
+ *  9. THE IDLE ROW'S AAS. pct_db_time is 0 on an idle row because a share
+ *     of DB Time is undefined there; AAS is NOT that case -- it is a rate
+ *     over wall clock, and it was hardcoded to 0, so 807 s of checkpointer
+ *     pacing rendered "AAS 0.00". Pins the exact rate on the parent and
+ *     every child, that the children's rates sum to the parent's, that
+ *     pct_db_time stays 0, and the four ways the pin could stop seeing (no
+ *     denominator, no idle time, a single-child breakdown, and a constant
+ *     that is not actually a division by the window).
  *  6. FALSE NEGATIVES. Every assertion above is satisfiable by an empty or
  *     Timeout-free fixture: 0 ms excluded == 0 ms expected. Section 6 walks the
  *     ways this file could stop being able to see — nothing in the window, no
@@ -438,12 +446,18 @@ static void test_idle_row_named_children(void)
         CHECK(NEAR(idle->time_ms, tm.idle_time_ms),
               "the Idle ROW and idle_time_ms must agree (%.1f vs %.1f)",
               idle->time_ms, tm.idle_time_ms);
-        /* No share of a total it is not part of, and no AAS: reporting 68%% of
-         * DB Time next to a row excluded from DB Time is how an excluded
-         * number gets added back into a reader's mental sum. */
+        /* No share of a total it is not part of: reporting 68%% of DB Time
+         * next to a row excluded from DB Time is how an excluded number gets
+         * added back into a reader's mental sum. KEEP THIS 0 -- it is correct,
+         * not a bug. AAS is the opposite case and is asserted in section 9:
+         * it is a RATE over wall clock, defined for idle time, and was
+         * hardcoded to 0 here until 2026-10-07. */
         CHECK(idle->pct_db_time == 0.0,
               "Idle pct_db_time=%.2f must be 0", idle->pct_db_time);
-        CHECK(idle->aas == 0.0, "Idle aas=%.2f must be 0", idle->aas);
+        CHECK(NEAR(idle->aas, FIX_IDLE_MS / FIX_WALL_MS),
+              "Idle aas=%.6f expected %.6f (= %.1f ms / %.1f ms wall); 0.00 "
+              "means the rate is still hardcoded", idle->aas,
+              FIX_IDLE_MS / FIX_WALL_MS, FIX_IDLE_MS, FIX_WALL_MS);
     }
 
     /* The whole point: the number is EXPLAINED. */
@@ -459,8 +473,11 @@ static void test_idle_row_named_children(void)
     CHECK(c3 != NULL && NEAR(c3->time_ms, 150.0),
           "named child Timeout:VacuumDelay = 150 ms (got %.1f)",
           c3 ? c3->time_ms : -1);
-    if (c1) CHECK(c1->pct_db_time == 0.0 && c1->aas == 0.0,
-                  "idle children carry no %%DB and no AAS");
+    if (c1) CHECK(c1->pct_db_time == 0.0,
+                  "idle children carry no %%DB (got %.2f)", c1->pct_db_time);
+    if (c1) CHECK(NEAR(c1->aas, 800.0 / FIX_WALL_MS),
+                  "...but they DO carry a rate: Timeout:CheckpointWriteDelay "
+                  "aas=%.6f expected %.6f", c1->aas, 800.0 / FIX_WALL_MS);
 
     /* Sorted descending, like every other breakdown in the model. */
     int i1 = -1, i2 = -1, i3 = -1;
@@ -1109,6 +1126,264 @@ static void test_bypass_suite(void)
     free(tm.rows);
 }
 
+/* ══ 9. THE IDLE ROW'S AAS IS A RATE, NOT A ZERO ══════════════════════════
+ *
+ * AAS = time / wall clock: "how many sessions' worth of time was this". It is
+ * defined for ANY duration, idle or not; what is undefined for an idle row is
+ * a SHARE OF DB TIME, which is why pct_db_time stays 0 above and here. Until
+ * 2026-10-07 emit_idle_rows wrote `aas = 0.0` on the parent and on every
+ * child, so a 900 s demo window rendered "Idle 1,207,000 ms / AAS 0.00" and
+ * "Timeout:CheckpointWriteDelay 807,000 ms / AAS 0.00" -- which is not a
+ * statement about exclusion, it reads as a broken column, and it is precisely
+ * the number the demo points at ("0.9 of a session's worth of time that is
+ * NOT database work").
+ *
+ * WHY EACH ASSERTION IS SHAPED THE WAY IT IS -- the false negatives this
+ * section exists to close, every one of which a plainer test would have:
+ *
+ *  - "aas != 0" passes for aas = time_ms (2450), time_ms/1000 (2.45), or any
+ *    other wrong formula. So every value is pinned EXACTLY, against a
+ *    constant written here divided by the wall clock passed in, and the
+ *    fixture's numbers are chosen so each wrong formula gives a different
+ *    answer (0.816667 vs 2450 vs 2.45 vs 2.041667 = ms/db_time vs 0.4 =
+ *    the DB Time row's own rate).
+ *  - "children sum to the parent" is satisfied by 0 == 0, which is exactly
+ *    what the BROKEN code produced. So the parent's own value is pinned to a
+ *    nonzero constant FIRST, the child COUNT is pinned (an empty breakdown
+ *    cannot satisfy a sum), and the children's total is compared BOTH to the
+ *    parent row and to FIX_IDLE_MS/FIX_WALL_MS computed independently of any
+ *    row -- never two sides of one sum.
+ *  - a constant that merely happens to equal 0.816667 would pass everything
+ *    above. So the whole model is recomputed at DOUBLE the wall clock and
+ *    every idle AAS must halve: only a real division by wall_ms does that.
+ *  - wall_ms <= 0 makes ms/wall undefined, the guard returns 0, and then
+ *    every assertion of the form "aas == expected" and "children sum to
+ *    parent" is trivially true. That is the one shape where 0 is correct, so
+ *    it is asserted SEPARATELY and labelled, and the live assertions above
+ *    use a wall clock of 3000 ms.
+ */
+static void test_idle_aas_is_a_rate(void)
+{
+    printf("--- 9. the Idle row's AAS is a rate (time / wall), not 0 ---\n");
+    struct pgwt_trace_event ev[16];
+    int n = build_fixture(ev);
+    struct pgwt_filter f;
+    memset(&f, 0, sizeof(f));
+    struct pgwt_tm_result tm;
+    pgwt_compute_time_model(ev, n, &f, 0, 0, FIX_WALL_MS, &tm);
+
+    /* The idle rows this fixture must produce, with the ms each carries read
+     * off THE FIXTURE (section 3 pins those same numbers) and the AAS derived
+     * here as ms/FIX_WALL_MS -- never read back from any row. */
+    struct { const char *name; int indent; double ms; } idle_rows[] = {
+        { "Idle",                           0, FIX_IDLE_MS },
+        { "Timeout:CheckpointWriteDelay",   2,  800.0 },
+        { "Client:ClientRead",              2,  600.0 },
+        { "Timeout:VacuumDelay",            2,  150.0 },
+        { "Other (background)",             2,  900.0 },
+    };
+    const int N_IDLE_ROWS = (int)(sizeof(idle_rows) / sizeof(idle_rows[0]));
+
+    /* NON-VACUITY, before anything else: a wall clock of 0 would make every
+     * assertion below trivially true (see the header), and a wall clock of
+     * 1 ms would make aas == ms and hide a missing division. */
+    CHECK(FIX_WALL_MS > 0 && FIX_WALL_MS != 1.0,
+          "the fixture's wall clock is %.1f ms -- nonzero, and not 1 ms (where "
+          "aas == ms would pass without dividing)", FIX_WALL_MS);
+
+    const struct pgwt_tm_row *parent = row_at(&tm, "Idle", 0);
+    CHECK(parent != NULL, "the indent-0 Idle row exists (nothing below this "
+                          "can mean anything without it)");
+
+    /* THE HEADLINE. 2450 / 3000 = 0.816667. The wrong answers this
+     * distinguishes: 0.0 (hardcoded), 2450 (no division), 2.45 (divided by
+     * 1e3 instead of wall), 2.041667 (divided by db_time_ms), 0.4 (the DB
+     * Time row's rate copied across). */
+    if (parent) {
+        CHECK(NEAR(parent->aas, FIX_IDLE_MS / FIX_WALL_MS),
+              "Idle aas=%.6f expected %.6f", parent->aas,
+              FIX_IDLE_MS / FIX_WALL_MS);
+        CHECK(parent->aas > 0.0,
+              "...and it is strictly positive (%.6f), so \"children sum to the "
+              "parent\" below cannot be satisfied by 0 == 0 -- which is exactly "
+              "how the broken code passed", parent->aas);
+        CHECK(!NEAR(parent->aas, parent->time_ms) &&
+              !NEAR(parent->aas, parent->time_ms / 1e3) &&
+              !NEAR(parent->aas, tm.aas),
+              "...and it is not ms (%.6f), not ms/1e3, and not the DB Time "
+              "row's own AAS (%.6f) -- three formulas a \"non-zero\" assertion "
+              "would accept", parent->time_ms, tm.aas);
+    }
+
+    /* Every row, parent and children: the exact rate, and pct still 0. */
+    double kids_aas = 0.0, kids_ms = 0.0;
+    int found = 0;
+    for (int i = 0; i < N_IDLE_ROWS; i++) {
+        const struct pgwt_tm_row *r = row_at(&tm, idle_rows[i].name,
+                                             idle_rows[i].indent);
+        CHECK(r != NULL, "idle row \"%s\" (indent %d) exists",
+              idle_rows[i].name, idle_rows[i].indent);
+        if (!r) continue;
+        found++;
+        CHECK(NEAR(r->time_ms, idle_rows[i].ms),
+              "\"%s\" time=%.3f ms expected %.3f (the AAS below is only "
+              "meaningful against the right ms)", idle_rows[i].name,
+              r->time_ms, idle_rows[i].ms);
+        CHECK(NEAR(r->aas, idle_rows[i].ms / FIX_WALL_MS),
+              "\"%s\" aas=%.6f expected %.6f (%.1f ms / %.1f ms wall)",
+              idle_rows[i].name, r->aas, idle_rows[i].ms / FIX_WALL_MS,
+              idle_rows[i].ms, FIX_WALL_MS);
+        /* pct_db_time is NOT the same case and must stay 0 -- asserted here
+         * on every idle row so a future change that "makes the idle row
+         * consistent" cannot quietly take the percentage with it. */
+        CHECK(r->pct_db_time == 0.0,
+              "\"%s\" pct_db_time=%.4f must stay 0: idle time genuinely has "
+              "no share OF DB Time, and that is correct, not a bug",
+              idle_rows[i].name, r->pct_db_time);
+        if (idle_rows[i].indent == 2) {
+            kids_aas += r->aas;
+            kids_ms  += r->time_ms;
+        }
+    }
+    CHECK(found == N_IDLE_ROWS,
+          "all %d idle rows were found (got %d) -- a missing row would make "
+          "the conservation sums below quietly short", N_IDLE_ROWS, found);
+
+    /* CONSERVATION of the rate, including the Other (background) remainder.
+     * Compared against TWO independent right-hand sides: the parent ROW, and
+     * a constant computed from the fixture without touching any row. The
+     * child COUNT is pinned too, because a breakdown of zero children sums to
+     * 0 and would agree with a parent of 0. */
+    int n_kids = 0;
+    for (int i = 0; i < N_IDLE_ROWS; i++)
+        if (idle_rows[i].indent == 2) n_kids++;
+    CHECK(n_kids == 4 && found == N_IDLE_ROWS,
+          "the breakdown has %d children (expected 4) -- an empty breakdown "
+          "would satisfy the sums below vacuously", n_kids);
+    CHECK(NEAR(kids_ms, FIX_IDLE_MS),
+          "the children's ms already sum to the parent (%.3f vs %.1f) -- the "
+          "precondition for the AAS sum below", kids_ms, FIX_IDLE_MS);
+    CHECK(NEAR(kids_aas, FIX_IDLE_MS / FIX_WALL_MS),
+          "...so their AAS must follow: children sum %.9f expected %.9f "
+          "(computed from the fixture, not from any row)", kids_aas,
+          FIX_IDLE_MS / FIX_WALL_MS);
+    CHECK(parent != NULL && NEAR(kids_aas, parent->aas),
+          "...and it equals the PARENT ROW's AAS (%.9f vs %.9f)", kids_aas,
+          parent ? parent->aas : -1.0);
+
+    /* The DB Time side must be untouched by this change: the row still
+     * carries db_time/wall, not (db_time + idle)/wall. */
+    CHECK(NEAR(tm.rows[0].aas, FIX_DB_TIME_MS / FIX_WALL_MS),
+          "the DB Time row's AAS is unchanged at %.6f (got %.6f) -- idle time "
+          "did not leak into it", FIX_DB_TIME_MS / FIX_WALL_MS,
+          tm.rows[0].aas);
+    free(tm.rows);
+
+    /* ── the ways this section could stop being able to see ─────────────── */
+
+    /* 9a. IT IS REALLY A DIVISION BY WALL CLOCK. Double the window and every
+     * idle AAS must halve. A hardcoded 0.816667 -- or any value not derived
+     * from wall_ms -- passes everything above and fails exactly here. */
+    struct pgwt_tm_result tm2;
+    pgwt_compute_time_model(ev, n, &f, 0, 0, 2.0 * FIX_WALL_MS, &tm2);
+    for (int i = 0; i < N_IDLE_ROWS; i++) {
+        const struct pgwt_tm_row *r = row_at(&tm2, idle_rows[i].name,
+                                             idle_rows[i].indent);
+        CHECK(r != NULL && NEAR(r->aas, idle_rows[i].ms / (2.0 * FIX_WALL_MS)),
+              "at double the wall clock \"%s\" aas=%.6f expected %.6f (half) "
+              "-- only a real ms/wall_ms division responds to the window",
+              idle_rows[i].name, r ? r->aas : -1.0,
+              idle_rows[i].ms / (2.0 * FIX_WALL_MS));
+        CHECK(r != NULL && NEAR(r->time_ms, idle_rows[i].ms),
+              "...while its ms is unchanged at %.1f (got %.3f): the window "
+              "changed the rate, not the time", idle_rows[i].ms,
+              r ? r->time_ms : -1.0);
+    }
+    free(tm2.rows);
+
+    /* 9b. wall_ms == 0: the rate is UNDEFINED, the guard must yield exactly 0
+     * (never a division by zero, an inf or a NaN) -- and this is the one
+     * shape where an idle AAS of 0 is the right answer. Labelled as such so
+     * nobody reads it as the main case; every live assertion above uses a
+     * 3000 ms wall clock precisely because a 0 wall clock would satisfy them
+     * all without computing anything. */
+    struct pgwt_tm_result tm0;
+    pgwt_compute_time_model(ev, n, &f, 0, 0, 0.0, &tm0);
+    const struct pgwt_tm_row *p0 = row_at(&tm0, "Idle", 0);
+    CHECK(p0 != NULL && NEAR(p0->time_ms, FIX_IDLE_MS),
+          "wall_ms=0: the Idle row still carries its %.1f ms (got %.3f), so "
+          "this case is \"no denominator\", not \"no idle time\"", FIX_IDLE_MS,
+          p0 ? p0->time_ms : -1.0);
+    for (int i = 0; i < N_IDLE_ROWS; i++) {
+        const struct pgwt_tm_row *r = row_at(&tm0, idle_rows[i].name,
+                                             idle_rows[i].indent);
+        CHECK(r != NULL && r->aas == 0.0 && isfinite(r->aas),
+              "wall_ms=0: \"%s\" aas must be exactly 0 and finite, got %.6f",
+              idle_rows[i].name, r ? r->aas : -1.0);
+    }
+    free(tm0.rows);
+
+    /* 9c. THE ROW IS ABSENT, not wrong. With no idle time at all there is no
+     * Idle row to carry a rate, so "Idle aas == 0.816667" above is evidence
+     * that idle time was observed -- not that the row is unconditional. */
+    struct pgwt_trace_event busy[2];
+    int bn = 0;
+    uint64_t bt = 7000ULL * 1000000000ULL;
+    busy[bn++] = mk(bt + 1 * MS, 901, EV_LOCK, 300, PGWT_CPU_NS_UNKNOWN);
+    busy[bn++] = mk(bt + 2 * MS, 901, EV_IO,   200, PGWT_CPU_NS_UNKNOWN);
+    struct pgwt_tm_result tmb;
+    pgwt_compute_time_model(busy, bn, &f, 0, 0, FIX_WALL_MS, &tmb);
+    CHECK(tmb.idle_time_ms == 0.0 && row_at(&tmb, "Idle", 0) == NULL,
+          "no idle time (%.1f ms) => NO Idle row at all, rather than one "
+          "reading AAS 0.00", tmb.idle_time_ms);
+    CHECK(row_at(&tmb, "Other (background)", 2) == NULL,
+          "...and no orphaned remainder row either");
+    free(tmb.rows);
+
+    /* 9d. HIDDEN-ONLY IDLE: the breakdown is the single remainder row, and it
+     * must carry the parent's whole rate. This is the one-child shape -- a
+     * per-child formula applied only in the named-events loop would leave the
+     * remainder at 0 here and still pass every multi-child assertion above. */
+    struct pgwt_trace_event hid[2];
+    int hn = 0;
+    uint64_t ht = 8000ULL * 1000000000ULL;
+    hid[hn++] = mk(ht + 1 * MS, 902, EV_LOCK,     300, PGWT_CPU_NS_UNKNOWN);
+    hid[hn++] = mk(ht + 2 * MS, 902, EV_ACTIVITY, 450, PGWT_CPU_NS_UNKNOWN);
+    struct pgwt_tm_result tmh;
+    pgwt_compute_time_model(hid, hn, &f, 0, 0, FIX_WALL_MS, &tmh);
+    const struct pgwt_tm_row *hp = row_at(&tmh, "Idle", 0);
+    const struct pgwt_tm_row *ho = row_at(&tmh, "Other (background)", 2);
+    CHECK(hp != NULL && NEAR(hp->time_ms, 450.0),
+          "hidden-only idle: parent = 450 ms (got %.3f)",
+          hp ? hp->time_ms : -1.0);
+    CHECK(hp != NULL && NEAR(hp->aas, 450.0 / FIX_WALL_MS) && hp->aas > 0.0,
+          "hidden-only idle: parent aas=%.6f expected %.6f",
+          hp ? hp->aas : -1.0, 450.0 / FIX_WALL_MS);
+    CHECK(ho != NULL && NEAR(ho->aas, 450.0 / FIX_WALL_MS),
+          "hidden-only idle: the REMAINDER row carries the whole rate, "
+          "aas=%.6f expected %.6f", ho ? ho->aas : -1.0,
+          450.0 / FIX_WALL_MS);
+    /* Count the IDLE children specifically -- indent 2 is shared with the
+     * per-class sub-event rows (this fixture's Lock event has one), so
+     * count_indent(2) would read 2 here and the "one-child shape" claim would
+     * be about the wrong rows. emit_idle_rows appends the parent last with its
+     * children immediately after, which section 8 pins. */
+    int h_first = -1;
+    for (int i = 0; i < tmh.num_rows; i++)
+        if (tmh.rows[i].indent == 0 && strcmp(tmh.rows[i].name, "Idle") == 0) {
+            h_first = i + 1;
+            break;
+        }
+    int h_kids = 0;
+    for (int i = h_first; i >= 0 && i < tmh.num_rows &&
+                          tmh.rows[i].indent == 2; i++)
+        h_kids++;
+    CHECK(h_kids == 1,
+          "hidden-only idle: exactly one idle child (got %d), so the check "
+          "above really is the one-child shape", h_kids);
+    free(tmh.rows);
+}
+
 int main(void)
 {
     printf("=== test_idle_accounting ===\n");
@@ -1129,6 +1404,7 @@ int main(void)
     test_cpu_on_and_adjacent_to_pacing();
     test_tag_events_pacing_not_a_boundary();
     test_idle_breakdown_at_its_bound();
+    test_idle_aas_is_a_rate();
     test_bypass_suite();
 
     printf("\n%d checks, %d failed\n", tests_run, tests_failed);

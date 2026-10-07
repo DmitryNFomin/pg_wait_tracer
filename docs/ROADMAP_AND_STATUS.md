@@ -1792,7 +1792,11 @@ foundational command set and shapes (preserved):
   `idle_children_excess_ms,rows:[…]}` — `rows` carries the indent-0 `Idle` row and its
   indent-2 named children (`Timeout:VacuumDelay`, `Activity`-backed `Other (background)`, …);
   `idle_children_excess_ms` is the self-check that those children sum to the parent and
-  must be 0. Idle is EXCLUDED from `db_time_ms`/`aas`.
+  must be 0. Idle is EXCLUDED from `db_time_ms` and from the top-level `aas`.
+  On the Idle row and its children `pct` is 0 (a share of a total they are not
+  part of is undefined) but `aas` is NOT: it is `ms / wall_ms` like every other
+  row, because AAS is a rate and is defined for idle time — the children's
+  `aas` sum to the parent's exactly as their `ms` do.
 - **Filters** (all optional, AND logic): `{class,event_id,pid,query_id}`.
 - **Build:** compiled by the existing Makefile against the same object files, no new deps.
 
