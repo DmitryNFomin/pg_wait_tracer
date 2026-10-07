@@ -1533,6 +1533,17 @@ def main():
                     print(f"  {status} [{tab_id}] "
                           f"ticks={result['ticks_observed']} "
                           f"rendered={result['rendered']}")
+                    # frame_spacing is REPORTING-ONLY (see
+                    # ui_live_smoke_lib.FRAME_SPACING_DRIFT_BOUND_MS): it no
+                    # longer fails the tab, so without this line a drift
+                    # regression would be invisible to anyone reading the log
+                    # and would only exist inside summary.json. Printed as a
+                    # note, never as a FAIL, and never consulted for `status`.
+                    spacing = result.get("frame_spacing") or {}
+                    if spacing.get("ok") is False:
+                        print(f"  note [{tab_id}] frame_spacing "
+                              f"(REPORTING-ONLY, does not gate): "
+                              f"{spacing.get('detail')}")
             finally:
                 browser.close()
     finally:

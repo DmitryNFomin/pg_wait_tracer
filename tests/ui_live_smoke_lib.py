@@ -787,6 +787,20 @@ def frame_spacing_drift_ms(tick):
 #       on ticks 2-6 in EVERY one of 31 retained runs across 10 days and
 #       both box classes, and 426-853ms on tick 1 -- the anomaly was
 #       confined to one tick.
+#       CORRECTION (measured after the fix landed, two gate-1 runs): that
+#       203-226ms constancy was NOT a healthy per-tick floor. It was the
+#       SAME one-tick lag masking a variable interval -- the loop ran one
+#       AAS send behind, so the mount had already happened before the loop
+#       began its mandatory pre-sweep work, and A measured only the 50ms
+#       poll lag. With the lag gone the mount lands at a variable point
+#       INSIDE that work, and A on ticks 2-6 spreads 200-526ms (stdev 22-28
+#       before, 78-83 after). Do not cite 203-226ms as a healthy baseline.
+#       The real conclusion is stronger and is why #304 exists: ~550-750ms
+#       of mandatory work (the 100ms blind-window sleep, the atomic
+#       snapshot, the render check, the clip, the CDP hops) sits between a
+#       tick and its first possible frame, so targets of 200 and 500ms are
+#       not reachable from the MOUNT at all. r(mount lag, A) = -0.72 over
+#       60 ticks, and tick_ts -> frame 1 is near-constant per tab.
 #     - tick-1 excess over that steady floor was 111-641ms on the six tabs
 #       that pause live and -5..+195ms on the five that do not, which is
 #       exactly the set that takes the resume click and its 500ms settle.
@@ -810,16 +824,62 @@ def frame_spacing_drift_ms(tick):
 #   to achieve it -- the bound is still 150ms and frame 1 is still exempt
 #   on every tick.
 #
-#   NOT YET SOLVED, deliberately out of scope here (filed separately): at
-#   frame 3 the 150ms bound does not separate the regression it was
-#   calibrated against from ordinary box load. The deliberate bypass
-#   regression read f3=158ms at capture_ms 284/414
-#   (tests/results/ui_live_gate1_bypass/summary.json, scatter tick 1),
-#   while a healthy-but-loaded run read f3=297ms at capture_ms 388-506 --
-#   the same magnitudes, opposite verdicts wanted. capture_ms itself is
-#   the direct instrument for that, and frame_dims_ok is already the
-#   deterministic detector for the bypass regression specifically. Do not
-#   re-pick this bound as a side effect of some other change.
+#   *** DEMOTED TO REPORTING-ONLY (owner-approved). ***
+#
+#   This is a DEMOTION of a check that cannot discriminate, NOT a widening
+#   of a bound. The bound below is deliberately left at 150.0 so every
+#   number stays directly comparable with every retained artifact; what
+#   changed is only that build_tab_result no longer ANDs frame_spacing_ok
+#   into a tab's `ok`. Every number is still computed, still written to
+#   summary.json, and still printed. Successors are filed: issue #303
+#   (achieved COVERAGE -- max gap between consecutive achieved frames plus
+#   first-frame latency, both computable from achieved_offsets_ms, no new
+#   instrumentation, validated against the 400ms blink the harness already
+#   injects deliberately) and issue #304 (re-anchor the sweep on "ready to
+#   capture"). The demotion is temporary and has a named successor.
+#
+#   Three reasons, each checkable from a path:
+#
+#   1. IT CANNOT DISCRIMINATE. The deliberate scale="css" regression
+#      retained as a fixture scores f3 = 158ms
+#      (tests/results/ui_live_gate1_bypass/summary.json, scatter tick 1,
+#      capture_ms 284/414). A HEALTHY but loaded run scores f3 = 297ms
+#      (tests/results/ui_live_anchor_evidence/corpus/1791390326, events
+#      tick 5: drift [190, 299, 297, 319, 270] on all five frames,
+#      capture_ms 388-506). The defect scores BETTER than health. No
+#      scalar drift threshold separates those two populations.
+#
+#   2. WHAT IT WAS BUILT TO CATCH HAS A STRICTLY BETTER DETECTOR.
+#      frame_dims_ok flags the same regression deterministically and on
+#      every tab: 11/11 tabs on gate1_bypass, 10/11 on gate2_bypass (the
+#      11th, overview, was not measurable at all, so frame_spacing could
+#      not have graded it either). frame_spacing has no demonstrated true
+#      positive that frame_dims_ok does not already catch -- gate-2's
+#      lone over-bound reading in the whole bypass run is queries tick 1
+#      frame 3 at 165ms, which is the TICK-1 ANCHOR ARTEFACT this issue's
+#      tick_baseline fix removes, not the regression.
+#
+#   3. THE PRACTICAL COST. Even with the anchor fixed the red rate on
+#      healthy runs is not zero -- the 1791390326 tick-5 case above has
+#      nothing to do with tick 1 and the anchor fix cannot touch it. Two
+#      consecutive clean rehearsals on a frozen master are needed, and a
+#      check that reddens healthy runs makes a rehearsal verdict
+#      uninterpretable, which is worse than not having the check.
+#
+#   One correction to the calibration text above, from the artifacts
+#   themselves (issue #299): the quoted tick-1 drift triplets `timeline
+#   [492, 254, 11, 17, 14]`, `transitions [267, 192, 17, 14, 12]` and
+#   `matrix [242, 166, 9, 10, 10]` appear in NONE of the eight retained
+#   artifacts, and are not reproducible from the five run ids cited. The
+#   RUN IDS THEMSELVES ARE FINE -- every retained artifact carries a
+#   committed run.id sibling file and all five resolve
+#   (1790796035/1790799596 = gate1_healthy_run1/run2, 1790796123/
+#   1790799745 = gate2_healthy_run1/run2, 1790801156 =
+#   gate1_healthy_run3_postfix), which is exactly how the triplets were
+#   shown to be wrong. The 87ms ceiling IS recomputable, from
+#   gate1_healthy_run3_postfix: 87ms at queries tick 5 frame 2, with 82ms
+#   (queries t2f3) and 81ms (overview t2f2) alongside it. Only the
+#   triplets are wrong; the ceiling and the run ids are not.
 #
 #   Regression floor: this branch's own bypass runs (scale="css" removed,
 #   same runs frame_dims_ok's bypass evidence comes from) -- gate-1's
@@ -1188,9 +1248,15 @@ def build_tab_result(tab_id, rendered_ok, rendered_detail, ticks_observed,
     capture_ok, capture_detail = capture_budget_ok(blink_sweep_ticks,
                                                     bound_ms=capture_ms_bound_ms)
     dims_ok, dims_detail = frame_dims_ok(blink_sweep_ticks)
+    # Reporting only as of this issue, same as capture_budget above --
+    # deliberately NOT ANDed into `ok`. See FRAME_SPACING_DRIFT_BOUND_MS's own
+    # comment for the evidence: it cannot discriminate (the deliberate
+    # regression scores BETTER than a loaded healthy run), and what it was
+    # built to catch is caught deterministically by dims_ok on every tab.
+    # Do not re-add it to `ok` without the successor check (issues #303/#304).
     spacing_ok, spacing_detail = frame_spacing_ok(blink_sweep_ticks)
     ok = (rendered_ok and clean_ok and blink_ok and measured_ok and leak_ok and
-          color_ok and ticks_ok and dims_ok and spacing_ok)
+          color_ok and ticks_ok and dims_ok)
     result = {
         "tab": tab_id,
         "ok": ok,

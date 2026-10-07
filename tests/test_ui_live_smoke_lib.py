@@ -920,7 +920,11 @@ def test_frame_spacing_vacuous_pass_is_a_KNOWN_unclosed_blind_spot():
           "and its issue rather than deleting it")
 
 
-def test_build_tab_result_frame_spacing_gates_ok():
+def test_build_tab_result_frame_spacing_reported_but_does_not_gate_ok():
+    # Renamed with the demotion: frame_spacing no longer gates, so the old
+    # name ("gates_ok") asserted something that is no longer true. The
+    # assertions are unchanged -- a clean tab with well-spaced frames reports
+    # True and passes; the demotion's own proof is the test below.
     ticks = [_spacing_tick(i, [30, 5, 10, 15, 20]) for i in range(1, 7)]
     result = lib.build_tab_result(
         "sessions", True, "6 rows", 6, [], 0.0, [],
@@ -934,13 +938,20 @@ def test_build_tab_result_frame_spacing_gates_ok():
     check(result["ok"] is True, "a clean tab with well-spaced frames passes overall")
 
 
-def test_build_tab_result_frame_spacing_over_bound_fails_tab():
-    # Bypass-suite pairing with the PASS case above: proves this is wired
-    # into build_tab_result's actual `ok`, not merely a standalone function
-    # nothing calls. A tab clean on every OTHER check (including
-    # frame_dims and capture_budget) must still fail overall once a
-    # non-tick-1 sweep drifts past the bound.
-    ticks = [_spacing_tick(1, [492, 254, 11, 17, 14])] + \
+def test_build_tab_result_frame_spacing_over_bound_no_longer_fails_tab():
+    # THE demotion proof (this issue), same shape as capture_budget's own
+    # demotion test above. A drift regression must still be VISIBLE
+    # (frame_spacing.ok False, detail naming the offending tick+frame) but
+    # must NOT fail the tab by itself any more.
+    #
+    # This is a DEMOTION of a non-discriminating check, not a widening: the
+    # bound is still 150.0 (asserted below, so a future "fix" that quietly
+    # raises it instead fails here), and frame_dims_ok still gates. See
+    # FRAME_SPACING_DRIFT_BOUND_MS's own comment: the deliberate bypass
+    # regression scores f3=158ms while a healthy loaded run scores 297ms,
+    # i.e. the defect scores BETTER than health, and frame_dims_ok catches
+    # that same regression on 11/11 and 10/11 tabs of the two bypass runs.
+    ticks = [_spacing_tick(1, [30, 5, 11, 17, 14])] + \
             [_spacing_tick(2, [30, 400, 10, 15, 20])] + \
             [_spacing_tick(i, [30, 5, 10, 15, 20]) for i in range(3, 7)]
     result = lib.build_tab_result(
@@ -949,15 +960,70 @@ def test_build_tab_result_frame_spacing_over_bound_fails_tab():
         {"charts": 0, "uplots": 0, "pending": 0}, {},
         blink_pair_offsets_ms=[10] * 6, blink_sweep_ticks=ticks)
     check(result["frame_spacing"]["ok"] is False,
-          f"400ms drift at tick 2 frame 2 must be flagged ({result['frame_spacing']})")
+          f"400ms drift at tick 2 frame 2 is still FLAGGED ({result['frame_spacing']})")
+    check(result["frame_spacing"]["detail"] is not None
+          and "tick 2 frame 2" in result["frame_spacing"]["detail"],
+          f"...and still names the offending tick+frame ({result['frame_spacing']})")
+    check(result["frame_spacing"]["bound_ms"] == 150.0,
+          f"the bound is UNCHANGED at 150ms -- this is a demotion, not a widening "
+          f"({result['frame_spacing']['bound_ms']})")
     check(result["frame_dims"]["ok"] is True and result["capture_budget"]["ok"] is True,
-          "isolating the claim: dims/capture_budget are clean here (_spacing_tick's "
-          "matching dims, no capture_ms recorded -> vacuous for capture_budget), only "
-          "spacing is over")
-    check(result["ok"] is False,
-          "a frame-spacing (drift) regression fails the WHOLE tab, even though "
-          "rendered/clean/no_blink/measured/no_leak/ticks/dims/capture_budget are "
-          "all clean")
+          "isolating the claim: dims/capture_budget are clean here, only spacing is over")
+    check(result["ok"] is True,
+          "a frame-spacing-only violation no longer fails the tab -- demoted to "
+          f"reporting (got ok={result['ok']!r})")
+
+
+def test_frame_spacing_demotion_did_not_de_tooth_the_product_checks():
+    """The other half of the demotion: everything product-facing KEEPS its
+    teeth. If a future edit demotes one of these by accident -- or copies the
+    demotion pattern one line too far -- this goes red.
+
+    Each case is a tab that is clean except for ONE check, and each must still
+    fail the tab. The sweep ticks are deliberately well-spaced and
+    well-dimensioned throughout, so frame_spacing and frame_dims are green and
+    the only thing under test is the named check."""
+    clean = [_spacing_tick(i, [30, 5, 10, 15, 20]) for i in range(1, 7)]
+    good_leak = {"charts": 0, "uplots": 0, "pending": 0}
+    base = dict(ticks_observed=6, console_errors=[], blink_ratio=0.0,
+                color_violations=[], leak_before=good_leak,
+                leak_after=good_leak, artifacts={},
+                blink_pair_offsets_ms=[10] * 6, blink_sweep_ticks=clean)
+
+    def build(**over):
+        kw = dict(base)
+        kw.update(over)
+        kw.setdefault("rendered_ok", True)
+        kw.setdefault("rendered_detail", "6 rows")
+        return lib.build_tab_result("sessions", kw.pop("rendered_ok"),
+                                    kw.pop("rendered_detail"), **kw)
+
+    cases = [
+        ("rendered", dict(rendered_ok=False, rendered_detail="no rows")),
+        ("clean (console errors)", dict(console_errors=["TypeError: x"])),
+        ("no_blink", dict(blink_ratio=0.5)),
+        ("color_stability", dict(color_violations=["IO changed colour"])),
+        ("no_leak", dict(leak_after={"charts": 9, "uplots": 9, "pending": 3})),
+        ("ticks_observed", dict(ticks_observed=1)),
+        # measured-fraction floor (MIN_MEASURED_FRACTION): 2 of 6 ticks
+        # actually measured is 0.33, under the 0.5 floor. Added after a
+        # mutation run showed this guard caught 7 of 8 dropped checks and was
+        # BLIND to measured_ok -- see this branch's report for the harness.
+        ("measured fraction", dict(blink_not_measured=[3, 4, 5, 6])),
+    ]
+    for name, over in cases:
+        r = build(**over)
+        check(r["ok"] is False,
+              f"{name} must still GATE the tab after frame_spacing's demotion "
+              f"(got ok={r['ok']!r})")
+    # frame_dims is the one that REPLACES frame_spacing's stated purpose, so
+    # it gets its own explicit case rather than riding along above.
+    bad_dims = dict(clean[0])
+    bad_dims["frame_dims_px"] = [{"width": 200.0, "height": 100.0}] * 5
+    r = build(blink_sweep_ticks=[bad_dims] + clean[1:])
+    check(r["frame_dims"]["ok"] is False and r["ok"] is False,
+          f"frame_dims must still GATE -- it is the detector frame_spacing was "
+          f"demoted in favour of ({r['frame_dims']}, ok={r['ok']!r})")
 
 
 # ── clip_rect_to_viewport (issue #197) ──────────────────────────────────────
