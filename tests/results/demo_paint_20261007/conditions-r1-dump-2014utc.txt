@@ -1,0 +1,30 @@
+Run r1 trace volume, taken BY HAND at 20:14 UTC, one minute after r1's walk
+ended (20:13 UTC). The automated conditions collector
+(box_run_conditions.sh) only began recording these lines from r2 onwards --
+conditions-r1.txt therefore carries r1's capture age, load average and
+liveness but not its volume, and this file supplies the missing half rather
+than being back-filled into that one.
+
+Command, on pgwt-gate-2:
+    cd /root/pgwt-paint2 && ./pgwt-server --dump /root/paint2_trace_r1 | head -40
+
+Output (verbatim, first 12 lines):
+
+pgwt-server: loaded event names from wait_event_names.json
+pgwt-server: 2 trace files, 4 CPUs, ~4067328 events
+pgwt-server: loaded 23 query texts
+pgwt-server: loaded 76 backend metadata entries
+Daemon: running    mode: full    uptime: 1055s    events/s: 2244    backends: 29    pg_pid: 1895007
+
+════════════════════════════════════════════════════════════════════════════════
+pgwt-server — Summary    Events: 4066533 (4066533 transitions, 0 samples)    Duration: 1055.1s
+Fidelity: exact
+════════════════════════════════════════════════════════════════════════════════
+
+  === Time Model ===
+
+  AAS: 1.12    DB Time: 1181303.2 ms    Idle: 24997041.8 ms
+
+Note on what "Events" counts: this is the WHOLE trace (1055.1 s), not the
+UI's 900 s window. The derived in-window figure in the report is
+rate x 900 s and is labelled derived there, never presented as a count.

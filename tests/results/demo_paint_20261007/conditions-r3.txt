@@ -1,0 +1,65 @@
+run=r3 capture_age_s=1030
+loadavg=0.23 0.28 0.27
+alive 2156970: /usr/lib/postgresql/18/bin/pgbench -U postgres -p 5418 -d postgres -c 
+alive 2157078: python3 tests/live_loop_workload.py 7200
+alive 2217717: ./pg_wait_tracer --daemon --pid 1895007 -i 1 -T /root/paint2_trace_r3 
+trace dir:
+drwxr-xr-x  2 root root     4096 Oct  7 20:48 .
+drwx------ 20 root root     4096 Oct  7 20:31 ..
+-rw-r--r--  1 root root    11280 Oct  7 20:48 backends.jsonl
+-rw-r--r--  1 root root  1144629 Oct  7 20:48 current.summary
+-rw-r--r--  1 root root        5 Oct  7 20:48 current.summary.meta
+-rw-r--r--  1 root root 23016525 Oct  7 20:48 current.trace
+-rw-r--r--  1 root root        4 Oct  7 20:48 current.trace.meta
+srw-------  1 root root        0 Oct  7 20:31 pgwt.sock
+-rw-r--r--  1 root root        0 Oct  7 20:31 query_sources.jsonl
+-rw-r--r--  1 root root     2927 Oct  7 20:32 query_texts.jsonl
+-rw-r--r--  1 root root     5696 Oct  7 20:31 wait_event_names.json
+daemon log tail:
+daemon flush lines:
+INFO: PID 2242738 exited (autovac_worker)
+INFO: fork detected PID 2243040, bootstrap watchpoint attached
+INFO: PID 2243040 initialized (client), real watchpoint at 0x7a3064663348
+INFO: PID 2243040 exited (client)
+--- trace volume (pgwt-server --dump) ---
+Daemon: running    mode: full    uptime: 1032s    events/s: 1819    backends: 29    pg_pid: 1895007
+pgwt-server — Summary    Events: 3997696 (3997696 transitions, 0 samples)    Duration: 1031.9s
+Fidelity: exact
+  AAS: 1.13    DB Time: 1163905.5 ms    Idle: 24492149.5 ms
+  DB Time                           1163905.5 ms   100.0%
+  Idle                             24492149.5 ms     0.0%
+--- time model (whole trace) ---
+  === Time Model ===
+
+  AAS: 1.13    DB Time: 1163905.5 ms    Idle: 24492149.5 ms
+
+  DB Time                           1163905.5 ms   100.0%
+    Lock                            1007304.6 ms    86.5%
+      Lock:relation                  823027.2 ms    70.7%
+      Lock:transactionid             105160.7 ms     9.0%
+      Lock:advisory                   79116.7 ms     6.8%
+    CPU (running)                     89447.4 ms     7.7%
+    CPU (waiting for a core)          23452.2 ms     2.0%
+    IO                                41954.5 ms     3.6%
+      IO:WalSync                      32987.1 ms     2.8%
+      IO:DataFileRead                  2211.3 ms     0.2%
+      IO:DataFileFlush                 2198.4 ms     0.2%
+      IO:WalWrite                      1669.1 ms     0.1%
+      IO:DataFileWrite                 1320.5 ms     0.1%
+    LWLock                             1746.9 ms     0.2%
+      LWLock:LockManager               1082.5 ms     0.1%
+      LWLock:WALWrite                   663.9 ms     0.1%
+      LWLock:XidGen                       0.1 ms     0.0%
+      LWLock:WALBufMapping                0.1 ms     0.0%
+      LWLock:BufferContent                0.1 ms     0.0%
+  Idle                             24492149.5 ms     0.0%
+      Client:ClientRead            19415508.4 ms     0.0%
+      Timeout:CheckpointWriteDelay   911191.4 ms     0.0%
+      Timeout:VacuumDelay               274.5 ms     0.0%
+      Other (background)            4165175.2 ms     0.0%
+
+  === Top Events ===
+--- distinct sessions in the trace ---
+141
+--- summary records ---
+206615

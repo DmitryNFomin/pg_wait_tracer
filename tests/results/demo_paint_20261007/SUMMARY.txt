@@ -1,0 +1,22 @@
+per-run worst / rate / panel sizes
+  r1 worst 1616 scatter     events 4066533 / 1055.1s = 3854/s  in-window(900s,derived) 3.47M  sessions 68 rows   queries 22 rows   histogram 3335 cells
+  r2 worst 1469 queries     events 3993600 / 1030.4s = 3876/s  in-window(900s,derived) 3.49M  sessions 67 rows   queries 22 rows   histogram 3319 cells
+  r3 worst 1592 queries     events 3997696 / 1031.9s = 3874/s  in-window(900s,derived) 3.49M  sessions 67 rows   queries 22 rows   histogram 3313 cells
+  r4 worst 1485 queries     events 4047420 / 1028.3s = 3936/s  in-window(900s,derived) 3.54M  sessions 66 rows   queries 22 rows   histogram 3280 cells
+  r5 worst 1388 waterfall   events 4063232 / 1028.9s = 3949/s  in-window(900s,derived) 3.55M  sessions 67 rows   queries 22 rows   histogram 3302 cells
+
+n=4 per-run worst: [1616, 1469, 1592, 1485] median 1538.5 range 147 -> margin 1.86x
+n=5 per-run worst: [1616, 1469, 1592, 1485, 1388] median 1485.3 range 228 -> margin 1.86x
+
+per tab over all five walks (15 navigations each):
+  scatter      min   1050 med   1172 max   1616 n=15
+  queries      min   1271 med   1360 max   1592 n=15
+  waterfall    min   1127 med   1290 max   1464 n=15
+  concurrency  min    956 med   1002 max   1165 n=15
+  matrix       min    832 med    912 max   1139 n=15
+  transitions  min    840 med    895 max    971 n=15
+  timeline     min    136 med    176 max    441 n=15
+  histogram    min    210 med    287 max    440 n=15
+  overview     min    145 med    208 max    395 n=15
+  events       min    173 med    185 max    266 n=15
+  sessions     min    170 med    184 max    264 n=15

@@ -1,0 +1,42 @@
+viewport read1: {'w': 1710, 'h': 981, 'dpr': 2} read2: {'w': 1710, 'h': 981, 'dpr': 2} | agree: True | matches pinned 1710x981@2: True
+chrome: 154.0.8037.100 | active range button: 15m
+  overview     min    222  med    248  max    360  n=3  23 rows
+  events       min    173  med    183  max    185  n=3  33 rows
+  sessions     min    181  med    202  max    217  n=3  67 rows
+  queries      min   1290  med   1495  max   1592  n=3  22 rows
+  histogram    min    412  med    412  max    440  n=3  3313 cells
+  transitions  min    885  med    929  max    964  n=3  8 nodes
+  concurrency  min    956  med   1108  max   1165  n=3  300 buckets
+  waterfall    min   1145  med   1273  max   1464  n=3  101 executions, 1 lanes
+  scatter      min   1095  med   1127  max   1172  n=3  2000 points
+  matrix       min    844  med    859  max    914  n=3  38 cells
+  timeline     min    136  med    171  max    194  n=3  551 spans
+
+time-model rows: 23
+   pad=12px    DB Time 1021.0s 100.0% 1.13
+   pad=28px    Lock 874.3s 85.6% 0.97
+   pad=48px    Lock:relation 712.2s 69.8% 0.79
+   pad=48px    Lock:transactionid 92.1s 9.0% 0.10
+   pad=48px    Lock:advisory 70.0s 6.9% 0.08
+   pad=28px    CPU* 108.3s 10.6% 0.12
+   pad=28px    IO 36.8s 3.6% 0.04
+   pad=48px    IO:WalSync 28.9s 2.8% 0.03
+   pad=48px    IO:DataFileRead 1.9s 0.2% 0.00
+   pad=48px    IO:DataFileFlush 1.9s 0.2% 0.00
+   pad=48px    IO:WalWrite 1.5s 0.1% 0.00
+   pad=48px    IO:DataFileWrite 1.1s 0.1% 0.00
+   pad=28px    LWLock 1.6s 0.2% 0.00
+   pad=48px    LWLock:LockManager 1.0s 0.1% 0.00
+   pad=48px    LWLock:WALWrite 584.2ms 0.1% 0.00
+   pad=48px    LWLock:XidGen 125µs 0.0% 0.00
+   pad=48px    LWLock:WALBufMapping 108µs 0.0% 0.00
+   pad=48px    LWLock:BufferContent 67µs 0.0% 0.00
+   pad=12px    Idle 24200.2s 0.0% 0.00
+   pad=48px    Client:ClientRead 17033.3s 0.0% 0.00
+   pad=48px    Timeout:CheckpointWriteDelay 809.4s 0.0% 0.00
+   pad=48px    Timeout:VacuumDelay 252.1ms 0.0% 0.00
+   pad=48px    Other (background) 6357.2s 0.0% 0.00
+summary bar: ['DB TIME 1021.0s', 'WALL 900.0s', 'AAS 1.13', 'IDLE 24200.2s', 'CPUS 4']
+
+console errors: 0
+written: /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a5701cfbf20ffbcb6/tests/results/demo_paint_20261007/walk-r3.json

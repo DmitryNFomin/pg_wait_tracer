@@ -1,0 +1,162 @@
+######## r5: starting a fresh capture ########
+Wed Oct  7 21:08:53 UTC 2026
+RUN=r5
+TRACE_DIR=/root/paint2_trace_r5
+DAEMON_PID=2273383
+START_EPOCH=1791407335
+RUN_STARTED
+=== r5: waiting for a full 900s window ===
+  capture age 1s
+  capture age 31s
+  capture age 62s
+  capture age 92s
+  capture age 123s
+  capture age 153s
+  capture age 184s
+  capture age 214s
+  capture age 245s
+  capture age 275s
+  capture age 306s
+  capture age 336s
+  capture age 367s
+  capture age 397s
+  capture age 428s
+  capture age 458s
+  capture age 489s
+  capture age 519s
+  capture age 550s
+  capture age 581s
+  capture age 611s
+  capture age 642s
+  capture age 672s
+  capture age 703s
+  capture age 733s
+  capture age 764s
+  capture age 794s
+  capture age 825s
+  capture age 855s
+  capture age 886s
+  capture age 916s
+=== r5: bridge ===
+bridge http 200, pid 66254
+bridge args: ./pgwt --trace-dir /root/paint2_trace_r5 --server-path /root/pgwt-paint2/pgwt-server --port 8384 root@142.132.191.18
+BRIDGE_OK
+=== r5: walk ===
+viewport read1: {'w': 1710, 'h': 981, 'dpr': 2} read2: {'w': 1710, 'h': 981, 'dpr': 2} | agree: True | matches pinned 1710x981@2: True
+chrome: 154.0.8037.100 | active range button: 15m
+  overview     min    145  med    209  max    395  n=3  23 rows
+  events       min    173  med    183  max    266  n=3  32 rows
+  sessions     min    171  med    239  max    264  n=3  67 rows
+  queries      min   1287  med   1347  max   1360  n=3  22 rows
+  histogram    min    235  med    243  max    315  n=3  3302 cells
+  transitions  min    840  med    852  max    895  n=3  8 nodes
+  concurrency  min    975  med    981  max   1098  n=3  300 buckets
+  waterfall    min   1173  med   1290  max   1388  n=3  101 executions, 1 lanes
+  scatter      min   1118  med   1152  max   1223  n=3  2000 points
+  matrix       min    832  med    888  max    948  n=3  38 cells
+  timeline     min    138  med    148  max    257  n=3  547 spans
+
+time-model rows: 23
+   pad=12px    DB Time 1019.8s 100.0% 1.13
+   pad=28px    Lock 876.9s 86.0% 0.97
+   pad=48px    Lock:relation 718.4s 70.4% 0.80
+   pad=48px    Lock:transactionid 91.1s 8.9% 0.10
+   pad=48px    Lock:advisory 67.3s 6.6% 0.07
+   pad=28px    CPU* 105.6s 10.4% 0.12
+   pad=28px    IO 36.0s 3.5% 0.04
+   pad=48px    IO:WalSync 28.3s 2.8% 0.03
+   pad=48px    IO:DataFileRead 1.9s 0.2% 0.00
+   pad=48px    IO:DataFileFlush 1.8s 0.2% 0.00
+   pad=48px    IO:WalWrite 1.3s 0.1% 0.00
+   pad=48px    IO:DataFileWrite 1.2s 0.1% 0.00
+   pad=28px    LWLock 1.3s 0.1% 0.00
+   pad=48px    LWLock:LockManager 729.5ms 0.1% 0.00
+   pad=48px    LWLock:WALWrite 618.1ms 0.1% 0.00
+   pad=48px    LWLock:AioWorkerSubmissionQueue 1.2ms 0.0% 0.00
+   pad=48px    LWLock:XidGen 150µs 0.0% 0.00
+   pad=48px    LWLock:BufferContent 67µs 0.0% 0.00
+   pad=12px    Idle 23913.9s 0.0% 0.00
+   pad=48px    Client:ClientRead 16925.1s 0.0% 0.00
+   pad=48px    Timeout:CheckpointWriteDelay 809.4s 0.0% 0.00
+   pad=48px    Timeout:VacuumDelay 3.2s 0.0% 0.00
+   pad=48px    Other (background) 6176.2s 0.0% 0.00
+summary bar: ['DB TIME 1019.8s', 'WALL 900.0s', 'AAS 1.13', 'IDLE 23913.9s', 'CPUS 4']
+
+console errors: 0
+written: /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a5701cfbf20ffbcb6/tests/results/demo_paint_20261007/walk-r5.json
+walk exit=0
+=== r5: conditions ===
+run=r5 capture_age_s=1027
+loadavg=0.15 0.17 0.19
+alive 2156970: /usr/lib/postgresql/18/bin/pgbench -U postgres -p 5418 -d postgres -c 
+alive 2157078: python3 tests/live_loop_workload.py 7200
+alive 2273383: ./pg_wait_tracer --daemon --pid 1895007 -i 1 -T /root/paint2_trace_r5 
+trace dir:
+drwxr-xr-x  2 root root     4096 Oct  7 21:26 .
+drwx------ 22 root root     4096 Oct  7 21:08 ..
+-rw-r--r--  1 root root    11133 Oct  7 21:25 backends.jsonl
+-rw-r--r--  1 root root  1140988 Oct  7 21:26 current.summary
+-rw-r--r--  1 root root        5 Oct  7 21:26 current.summary.meta
+-rw-r--r--  1 root root 23584277 Oct  7 21:26 current.trace
+-rw-r--r--  1 root root        4 Oct  7 21:26 current.trace.meta
+srw-------  1 root root        0 Oct  7 21:08 pgwt.sock
+-rw-r--r--  1 root root        0 Oct  7 21:08 query_sources.jsonl
+-rw-r--r--  1 root root     2935 Oct  7 21:09 query_texts.jsonl
+-rw-r--r--  1 root root     5696 Oct  7 21:08 wait_event_names.json
+daemon log tail:
+daemon flush lines:
+INFO: PID 2298032 exited (autovac_worker)
+INFO: fork detected PID 2298754, bootstrap watchpoint attached
+INFO: PID 2298754 initialized (autovac_worker), real watchpoint at 0x7a306466d908
+INFO: PID 2298754 exited (autovac_worker)
+--- trace volume (pgwt-server --dump) ---
+Daemon: running    mode: full    uptime: 1028s    events/s: 17974    backends: 29    pg_pid: 1895007
+pgwt-server — Summary    Events: 4063232 (4063232 transitions, 0 samples)    Duration: 1028.9s
+Fidelity: exact
+  AAS: 1.11    DB Time: 1146936.2 ms    Idle: 24424281.0 ms
+  DB Time                           1146936.2 ms   100.0%
+  Idle                             24424281.0 ms     0.0%
+--- time model (whole trace) ---
+  === Time Model ===
+
+  AAS: 1.11    DB Time: 1146936.2 ms    Idle: 24424281.0 ms
+
+  DB Time                           1146936.2 ms   100.0%
+    Lock                             995044.8 ms    86.8%
+      Lock:relation                  813685.3 ms    70.9%
+      Lock:transactionid             105147.9 ms     9.2%
+      Lock:advisory                   76211.6 ms     6.6%
+    CPU (running)                     87110.9 ms     7.6%
+    CPU (waiting for a core)          22258.6 ms     1.9%
+    IO                                41007.3 ms     3.6%
+      IO:WalSync                      32504.9 ms     2.8%
+      IO:DataFileFlush                 2091.4 ms     0.2%
+      IO:DataFileRead                  1899.7 ms     0.2%
+      IO:WalWrite                      1522.7 ms     0.1%
+      IO:DataFileWrite                 1399.9 ms     0.1%
+    LWLock                             1514.8 ms     0.1%
+      LWLock:LockManager                795.9 ms     0.1%
+      LWLock:WALWrite                   718.1 ms     0.1%
+      LWLock:AioWorkerSubmissionQueue        0.5 ms     0.0%
+      LWLock:XidGen                       0.2 ms     0.0%
+      LWLock:BufferContent                0.1 ms     0.0%
+  Idle                             24424281.0 ms     0.0%
+      Client:ClientRead            19398098.4 ms     0.0%
+      Timeout:CheckpointWriteDelay   938333.2 ms     0.0%
+      Timeout:VacuumDelay              3274.2 ms     0.0%
+      Other (background)            4084575.2 ms     0.0%
+
+  === Top Events ===
+--- distinct sessions in the trace ---
+140
+--- summary records ---
+205890
+=== r5: stamping conditions into the walk JSON ===
+stamped /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a5701cfbf20ffbcb6/tests/results/demo_paint_20261007/walk-r5.json: workload_alive=True alive=3 dead=0 capture_age_s=1027
+RUN_r5-DONE rc=0
+######## r5: stopping its daemon ########
+daemon stopped
+INFO: query text capture: 22 unique queries captured
+INFO: summary file closed: 1032 records, 1144165 bytes
+INFO: trace file closed: 4067207 events, 23631785 bytes (6.2x compression)
+CHAIN_DONE

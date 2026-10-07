@@ -1,0 +1,10 @@
+real walk r1, intact:
+  predecessor   : worst 1616 ms, margin 1.86x
+  paint_analyse : ok=True worst 1616 (scatter) margin 1.86x
+
+same walk, scatter replaced by the REAL dead-bridge record
+  spliced scatter entry: {'samples': [], 'detail': '', 'error': 'navigation failed: Page.click: Timeout 30000ms exceeded.\nCall log:\n  - waiting for locator("button.'}
+  predecessor   : worst 1501 ms, margin 2.00x  <-- scatter (the real worst tab, 1616 ms) never painted, and the margin went UP
+  paint_analyse : ok=False  r1-with-a-real-dead-scatter: tab scatter did not render (navigation failed: Page.click: Timeout 30000ms exceeded.
+Call log:
+  - waiting for locator("button.) -- a tab that never painted cannot be excluded from the worst case

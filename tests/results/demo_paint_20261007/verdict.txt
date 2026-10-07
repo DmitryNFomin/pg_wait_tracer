@@ -1,0 +1,18 @@
+files: walk-r1.json, walk-r2.json, walk-r3.json, walk-r4.json
+VERDICT: complete: 4 walks x 11 tabs x 3 navs
+
+tab              min     med     max    n
+scatter         1050    1184    1616   12
+queries         1271    1388    1592   12
+waterfall       1127    1321    1464   12
+concurrency      956    1006    1165   12
+matrix           844     913    1139   12
+transitions      867     914     971   12
+timeline         136     185     441   12
+histogram        210     306     440   12
+overview         158     205     360   12
+events           173     196     263   12
+sessions         170     183     239   12
+
+per-walk worst: r1 1616 (scatter), r2 1469 (queries), r3 1592 (queries), r4 1485 (queries)
+worst overall: 1616 ms (scatter); bound 3000 ms; margin 1.86x

@@ -1,0 +1,17 @@
+ok    empty input                                        -> refused: no walks: zero input files produced zero evidence
+ok    tab absent entirely (not wrong -- missing)         -> refused: w: tab scatter absent from the results -- absent is not fast
+ok    tab never rendered (dead bridge/daemon)            -> refused: w: tab waterfall did not render (timeout) -- a tab that never painted 
+ok    partial nav range (1 of 3 navigations)             -> refused: w: tab queries has 1 samples, expected 3
+ok    unparseable readiness detail                       -> refused: w: tab queries readiness detail 'rows' carries no item count -- unpars
+ok    absent readiness detail                            -> refused: w: tab queries readiness detail None carries no item count -- unparsea
+ok    panel painted nothing (empty, not slow)            -> refused: w: tab events painted 0 items -- an empty panel's paint is not the dem
+ok    stale-zoom viewport (smaller = less work)          -> refused: w: viewport {'w': 1200, 'h': 937, 'dpr': 2} is not the pinned (1710, 9
+ok    viewport read once, mid-animation                  -> refused: w: viewport not confirmed by two agreeing reads
+ok    wrong window (cheap 2 m instead of 15 m)           -> refused: w: active range '2m' is not the 15m demo window
+ok    workload died -- paint against an idle system      -> refused: w: workload/daemon liveness not confirmed -- paint measured against a 
+ok    non-numeric timing                                 -> refused: w: tab matrix has a non-numeric or non-positive timing: [400.0, None, 
+ok    zero-ms timing (nothing was actually measured)     -> refused: w: tab matrix has a non-numeric or non-positive timing: [400.0, 0, 500
+ok    complete input is accepted                         -> worst waterfall 1600 ms margin 1.88x
+ok    an over-bound walk is reported, not hidden         -> margin 0.75x (< 1.0, i.e. OVER)
+
+all cases passed

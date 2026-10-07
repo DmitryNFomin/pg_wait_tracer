@@ -1,0 +1,40 @@
+bridge holding 8384:
+48883 ./pgwt --trace-dir /root/paint2_trace_r4 --server-path /root/pgwt-paint2/pgwt-server --port 8384 root@142.132.191.18
+bridge is down: curl -> 000refused
+  overview nav 1: NOT RENDERED (navigation failed: Page.click: Timeout 30000ms exceeded.
+Call log:
+  - waiting for locator("button.)
+  overview nav 2: NOT RENDERED (navigation failed: Page.click: Timeout 30000ms exceeded.
+Call log:
+  - waiting for locator("button.)
+  queries nav 0: NOT RENDERED (navigation failed: Page.click: Timeout 30000ms exceeded.
+Call log:
+  - waiting for locator("button.)
+  queries nav 1: NOT RENDERED (navigation failed: Page.click: Timeout 30000ms exceeded.
+Call log:
+  - waiting for locator("button.)
+  queries nav 2: NOT RENDERED (navigation failed: Page.click: Timeout 30000ms exceeded.
+Call log:
+  - waiting for locator("button.)
+  waterfall nav 0: NOT RENDERED (navigation failed: Page.click: Timeout 30000ms exceeded.
+Call log:
+  - waiting for locator("button.)
+  waterfall nav 1: NOT RENDERED (navigation failed: Page.click: Timeout 30000ms exceeded.
+Call log:
+  - waiting for locator("button.)
+  waterfall nav 2: NOT RENDERED (navigation failed: Page.click: Timeout 30000ms exceeded.
+Call log:
+  - waiting for locator("button.)
+
+time-model rows: 0
+summary bar: []
+
+console errors: 0
+written: /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a5701cfbf20ffbcb6/tests/results/demo_paint_20261007/redlive-bridge-down.json
+
+=== predecessor arithmetic vs paint_analyse.verdict, on THIS real file ===
+tabs in the file: {'overview': {'samples': [], 'error': 'navigation failed: Page.click: Timeout 3'}, 'queries': {'samples': [], 'error': 'navigation failed: Page.click: Timeout 3'}, 'waterfall': {'samples': [], 'error': 'navigation failed: Page.click: Timeout 3'}}
+console/load errors: 0 ['Page.goto: net::ERR_CONNECTION_REFUSED at http://localhost:8384/\nCall log:\n  - navigating to "http://localhost:8384/", waiting until "domcon', 'Page.goto: net::ERR_CONNECTION_REFUSED at http://localhost:8384/\nCall log:\n  - navigating to "http://localhost:8384/", waiting until "domcon']
+
+predecessor      : worst=0 ms  margin=0.00x  -> APPROVED (no tab rendered, yet a margin was printed)
+paint_analyse    : ok=False  reason=redlive-bridge-down: active range '?' is not the 15m demo window

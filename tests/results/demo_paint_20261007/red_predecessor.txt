@@ -1,0 +1,17 @@
+bypass case                                        predecessor                  paint_analyse.verdict
+--------------------------------------------------------------------------------------------------------------
+empty input                                        APPROVED worst 0 margin 0.00x REFUSED
+tab absent entirely                                APPROVED worst 1500 margin 2.00x REFUSED
+tab never rendered (dead bridge/daemon)            APPROVED worst 500 margin 6.00x REFUSED
+partial nav range (1 of 3)                         APPROVED worst 1500 margin 2.00x REFUSED
+unparseable readiness detail                       APPROVED worst 1500 margin 2.00x REFUSED
+absent readiness detail                            APPROVED worst 1500 margin 2.00x REFUSED
+panel painted nothing (empty, not slow)            APPROVED worst 1500 margin 2.00x REFUSED
+stale-zoom viewport                                APPROVED worst 1500 margin 2.00x REFUSED
+viewport read once, mid-animation                  APPROVED worst 1500 margin 2.00x REFUSED
+wrong window (2 m, not 15 m)                       APPROVED worst 1500 margin 2.00x REFUSED
+workload died (idle system)                        APPROVED worst 1500 margin 2.00x REFUSED
+non-numeric timing                                 APPROVED worst 1500 margin 2.00x REFUSED
+zero-ms timing                                     APPROVED worst 1500 margin 2.00x REFUSED
+--------------------------------------------------------------------------------------------------------------
+13/13 cases the predecessor turned into a margin, and this analyser refuses.

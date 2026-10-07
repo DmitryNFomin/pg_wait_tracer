@@ -1,0 +1,59 @@
+{
+  "label": "redlive-bridge-down",
+  "url": "http://localhost:8384/",
+  "chrome": "154.0.8037.100",
+  "viewport": {
+    "w": 1710,
+    "h": 981,
+    "dpr": 2
+  },
+  "viewport_read2": {
+    "w": 1710,
+    "h": 981,
+    "dpr": 2
+  },
+  "viewport_agree": true,
+  "pinned": true,
+  "range": "?",
+  "navs_per_tab": 3,
+  "tabs_walked": [
+    "overview",
+    "queries",
+    "waterfall"
+  ],
+  "results": {
+    "overview": {
+      "samples": [],
+      "detail": "",
+      "error": "navigation failed: Page.click: Timeout 30000ms exceeded.\nCall log:\n  - waiting for locator(\"button."
+    },
+    "queries": {
+      "samples": [],
+      "detail": "",
+      "error": "navigation failed: Page.click: Timeout 30000ms exceeded.\nCall log:\n  - waiting for locator(\"button."
+    },
+    "waterfall": {
+      "samples": [],
+      "detail": "",
+      "error": "navigation failed: Page.click: Timeout 30000ms exceeded.\nCall log:\n  - waiting for locator(\"button."
+    }
+  },
+  "time_model_rows": [],
+  "summary_bar": [],
+  "console_errors": [],
+  "console_error_count": 0,
+  "load_errors": [
+    "Page.goto: net::ERR_CONNECTION_REFUSED at http://localhost:8384/\nCall log:\n  - navigating to \"http://localhost:8384/\", waiting until \"domcon",
+    "Page.goto: net::ERR_CONNECTION_REFUSED at http://localhost:8384/\nCall log:\n  - navigating to \"http://localhost:8384/\", waiting until \"domcon",
+    "Page.goto: net::ERR_CONNECTION_REFUSED at http://localhost:8384/\nCall log:\n  - navigating to \"http://localhost:8384/\", waiting until \"domcon",
+    "Page.goto: net::ERR_CONNECTION_REFUSED at http://localhost:8384/\nCall log:\n  - navigating to \"http://localhost:8384/\", waiting until \"domcon",
+    "Page.goto: net::ERR_CONNECTION_REFUSED at http://localhost:8384/\nCall log:\n  - navigating to \"http://localhost:8384/\", waiting until \"domcon",
+    "Page.goto: net::ERR_CONNECTION_REFUSED at http://localhost:8384/\nCall log:\n  - navigating to \"http://localhost:8384/\", waiting until \"domcon",
+    "Page.goto: net::ERR_CONNECTION_REFUSED at http://localhost:8384/\nCall log:\n  - navigating to \"http://localhost:8384/\", waiting until \"domcon",
+    "Page.goto: net::ERR_CONNECTION_REFUSED at http://localhost:8384/\nCall log:\n  - navigating to \"http://localhost:8384/\", waiting until \"domcon",
+    "Page.goto: net::ERR_CONNECTION_REFUSED at http://localhost:8384/\nCall log:\n  - navigating to \"http://localhost:8384/\", waiting until \"domcon",
+    "Page.goto: net::ERR_CONNECTION_REFUSED at http://localhost:8384/\nCall log:\n  - navigating to \"http://localhost:8384/\", waiting until \"domcon",
+    "Page.goto: net::ERR_CONNECTION_REFUSED at http://localhost:8384/\nCall log:\n  - navigating to \"http://localhost:8384/\", waiting until \"domcon"
+  ],
+  "finished_epoch": 1791407636.434047
+}
