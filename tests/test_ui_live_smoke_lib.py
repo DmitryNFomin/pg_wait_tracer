@@ -723,15 +723,15 @@ def _spacing_tick(tick_i, drifts_from_200_500_1000_1500_2000, with_dims=True):
 
 
 def test_frame_spacing_ok_within_bound_passes():
-    # Healthy shape from a retained run (tests/results/ui_live_gate1_
-    # healthy_run1/summary.json): frame-2..5 drift stays under the 87ms
-    # observed max across all 5 retained healthy runs (see
-    # FRAME_SPACING_DRIFT_BOUND_MS's own comment), INCLUDING tick 1's own
-    # frames 3-5 (not elevated).
-    ticks = [_spacing_tick(1, [492, 254, 11, 17, 14])] + \
-            [_spacing_tick(i, [30, 5, 10, 15, 20]) for i in range(2, 7)]
+    # Healthy shape, POST-tick_baseline-fix: tick 1 looks like every other
+    # tick, because its anchor is now a genuinely new live tick. These are the
+    # real recorded offsets of scatter TICK 2 from gate-1 run.id 1791385783
+    # (A=207ms, frames 2-5 drifting 11/14/18/10ms) -- the steady per-tick
+    # shape that 203-226ms of floor produces, and what tick 1 is expected to
+    # join. Nothing here relies on an exemption.
+    ticks = [_spacing_tick(i, [7, 11, 14, 18, 10]) for i in range(1, 7)]
     ok, detail = lib.frame_spacing_ok(ticks)
-    check(ok is True, f"healthy drift (tick 1 frames 1-2 excluded) passes ({detail!r})")
+    check(ok is True, f"healthy drift passes with NO tick-1 exemption ({detail!r})")
 
 
 def test_frame_spacing_ok_over_bound_fails():
@@ -748,23 +748,73 @@ def test_frame_spacing_ok_over_bound_fails():
           f"the offending tick and frame are named ({detail!r})")
 
 
-def test_frame_spacing_ok_excludes_only_tick_1_frames_1_and_2():
-    # Tick 1's own elevated frame-1/frame-2 drift (mount-anchor clock
-    # starting late on the run's first tick -- FRAME_SPACING_DRIFT_BOUND_MS's
-    # own comment) must NOT fail the tab by itself -- but its frames 3-5
-    # (drift indices 2-4) are NOT part of that exemption and stay gated.
-    ticks = [_spacing_tick(1, [492, 254, 11, 17, 14])]
+def test_frame_spacing_ok_tick_1_frame_2_is_gated_like_every_other_tick():
+    # THE BUG THIS ISSUE FIXES, as its own red/green pair.
+    #
+    # These are the REAL recorded offsets of scatter tick 1 from gate-1 run.id
+    # 1791385783 (achieved [772, 1004, 1183, 1511, 2013] against the standard
+    # [200, 500, 1000, 1500, 2000] targets -- see
+    # tests/results/ui_live_anchor_evidence/). On a HEALTHY tree: the sweep
+    # anchored on a mount that predated _navigate_to_tab's 500ms live-resume
+    # settle, so frame 2 landed 504ms after its target.
+    #
+    # Under the old tick-1 frames-1-2 exemption this whole tick PASSED. It must
+    # not: 504ms of drift is 3.4x the bound, and the tick_baseline fix means
+    # tick 1's anchor is now as fresh as any other tick's, so there is nothing
+    # left for the exemption to excuse.
+    ticks = [_spacing_tick(1, [572, 504, 183, 11, 13])]
     ok, detail = lib.frame_spacing_ok(ticks)
-    check(ok is True, f"tick 1's frames 1-2, however drifted, are excluded ({detail!r})")
+    check(ok is False,
+          f"tick 1's frame 2 is gated like every other tick's frame 2 ({detail!r})")
+    check(detail is not None and "tick 1 frame 2" in detail and "504" in detail,
+          f"names tick 1 frame 2 explicitly ({detail!r})")
+    check(detail is not None and "tick 1 frame 3" in detail,
+          f"and still names frame 3 alongside it ({detail!r})")
+
+
+def test_frame_spacing_ok_tick_1_frame_2_ISOLATED_is_enough_to_fail():
+    # The same bug with frame 2 as the ONLY breach, so the verdict cannot be
+    # reached via some other frame. [266, 227, 14, 10, 9] is matrix tick 1
+    # verbatim from the committed artifact
+    # tests/results/ui_live_gate1_healthy_run1/summary.json (run.id
+    # 1790796035): frame 2 drifts 227ms, and frame 3 recovered to 14ms because
+    # A+capture(f1) had not yet pushed past the 1000ms target.
+    #
+    # On the pre-fix tree this tick passed COMPLETELY -- 227ms of drift inside
+    # the tick-1 frames-1-2 exemption, in one of the five runs the bound was
+    # calibrated on. That is the false negative the exemption was buying, in a
+    # retained artifact anyone can open.
+    ticks = [_spacing_tick(1, [266, 227, 14, 10, 9])]
+    ok, detail = lib.frame_spacing_ok(ticks)
+    check(ok is False,
+          f"227ms at tick 1 frame 2 alone fails the tab ({detail!r})")
+    check(detail is not None and "tick 1 frame 2" in detail and "227" in detail,
+          f"and frame 2 is the frame named ({detail!r})")
+    check(detail is not None and "frame 3" not in detail and "frame 4" not in detail,
+          f"no other frame of this tick is implicated ({detail!r})")
+
+
+def test_frame_spacing_ok_tick_1_frame_1_still_exempt_like_every_tick():
+    # The exemption that REMAINS, and is unchanged: frame 1 (the 200ms
+    # target) on every tick alike. The per-tick floor beneath it measured
+    # 203-226ms across all 31 retained runs, so a few ms of drift there is
+    # structural. A tick whose ONLY elevated frame is frame 1 still passes --
+    # this is the boundary that proves the remaining exemption was not
+    # widened to absorb the frames the fix is meant to expose.
+    ticks = [_spacing_tick(1, [900, 5, 10, 15, 20])]
+    ok, detail = lib.frame_spacing_ok(ticks)
+    check(ok is True,
+          f"frame 1's own drift never gates, on tick 1 either ({detail!r})")
 
 
 def test_frame_spacing_ok_tick_1_frames_3_to_5_still_gated():
-    # Review blocker: an earlier version excluded tick 1 WHOLE, so a
-    # regression confined to its LATER frames (3-5) passed silently. This
-    # is the red/green pair that proves that gap is closed: frame 3's
-    # drift here (300ms) is well past the bound, and nothing about it
-    # being tick 1 should excuse it.
-    ticks = [_spacing_tick(1, [492, 254, 300, 17, 14])]
+    # Review blocker from an earlier round: a version that excluded tick 1
+    # WHOLE let a regression confined to its LATER frames (3-5) pass
+    # silently. Still guarded, and now ISOLATED to frame 3 -- every other
+    # frame of this tick is healthy, so the only thing that can fail it is
+    # frame 3 itself. (Before this issue the same isolation was impossible
+    # to express: frames 1-2 had to be elevated to be realistic.)
+    ticks = [_spacing_tick(1, [30, 5, 300, 17, 14])]
     ok, detail = lib.frame_spacing_ok(ticks)
     check(ok is False,
           f"a regression in tick 1's frame 3 (outside the frames-1-2 exemption) must fail ({detail!r})")
@@ -781,10 +831,93 @@ def test_frame_spacing_ok_excludes_frame_1_on_every_tick():
     check(ok is True, f"frame 1's own drift never gates, on any tick ({detail!r})")
 
 
+# ── tick_hook_index (this issue) ───────────────────────────────────────────
+#
+# The pure arithmetic behind the tick_baseline fix. Every number the sweep
+# later produces -- the mount wait, achieved_offsets_ms, the drift bound -- is
+# computed FROM the timestamp this index selects, so a silently-wrong index is
+# undetectable downstream: it just re-anchors the tick and keeps looking like a
+# measurement. Hence these tests are mostly about REFUSING, not computing.
+
+def test_tick_hook_index_is_one_based_i_into_a_zero_based_array():
+    check(lib.tick_hook_index(0, 1) == 0, "no baseline, first tick -> index 0")
+    check(lib.tick_hook_index(2, 1) == 2,
+          "2 navigation sends already recorded -> tick 1 is index 2")
+    check(lib.tick_hook_index(2, 6) == 7, "...and tick 6 is index 7")
+
+
+def test_tick_hook_index_refuses_rather_than_clamping():
+    # A gate that cannot address the right entry must refuse, never return
+    # something plausible. i=0 is the off-by-one a future edit is most likely
+    # to introduce (treating the loop as 0-based); a negative baseline means
+    # the page.evaluate that produced it returned nonsense.
+    for baseline, i, why in ((0, 0, "i=0 (loop is 1-based)"),
+                             (0, -1, "negative i"),
+                             (-1, 1, "negative baseline")):
+        try:
+            got = lib.tick_hook_index(baseline, i)
+        except ValueError:
+            continue
+        check(False, f"tick_hook_index({baseline}, {i}) must raise for {why}, got {got!r}")
+
+
+def test_tick_hook_index_refuses_non_int_and_bool():
+    # window.__uiLiveTicks.length arriving as None/str/float (a hook that was
+    # replaced or reset, or a changed evaluate) must not silently become an
+    # index. bool is an int subclass in Python, so True would otherwise pass
+    # as i=1 and quietly anchor every tick on the same entry.
+    for baseline, i, why in ((None, 1, "baseline None"),
+                             ("3", 1, "baseline str"),
+                             (3.0, 1, "baseline float"),
+                             (0, True, "i as bool True"),
+                             (True, 1, "baseline as bool True"),
+                             (0, None, "i None")):
+        try:
+            got = lib.tick_hook_index(baseline, i)
+        except ValueError:
+            continue
+        check(False, f"tick_hook_index({baseline!r}, {i!r}) must raise for {why}, got {got!r}")
+
+
 def test_frame_spacing_ok_no_ticks_at_all_trivially_passes():
     ok, detail = lib.frame_spacing_ok([])
     check(ok is True, "no ticks at all -> nothing to have gotten wrong")
     check(detail is None, "no detail text for the trivial case")
+
+
+def test_frame_spacing_vacuous_pass_is_a_KNOWN_unclosed_blind_spot():
+    """PINS a false negative rather than claiming it is fixed.
+
+    frame_spacing_ok([]) passes vacuously (above), and so do frame_dims_ok([])
+    and measured_ok at zero attempted ticks. So a tab that claims
+    ticks_observed=6 while recording NO sweep records at all is reported
+    ok=True -- the gate is not wrong, it is BLIND, which is the worse of the
+    two. This issue makes frame_spacing carry more weight (tick 1's frame 2 is
+    now gated), so the hole is worth naming precisely.
+
+    NOT closed here, for a checked reason rather than an assumed one: the
+    obvious guard ("ticks_observed >= MIN_TICKS implies blink_sweep_ticks is
+    non-empty") would turn tests/test_demo_rehearsal_lib.py's
+    test_blink_gate_clean_trace_still_passes red -- it calls build_tab_result
+    with blink_pair_offsets_ms=[100]*6 and no blink_sweep_ticks and asserts
+    ok is True. That file and tests/demo_rehearsal_lib.py belong to another
+    in-flight branch, so the guard is filed as its own issue instead of being
+    smuggled in here.
+
+    This test exists so the hole cannot be closed BY ACCIDENT without someone
+    reading this comment: if a future change makes the no-sweep-records case
+    fail, this test goes red and points at the issue."""
+    r = lib.build_tab_result(
+        "scatter", True, "rendered", 6, [], 0.0, [],
+        {"charts": 1, "uplots": 1, "pending": 0},
+        {"charts": 1, "uplots": 1, "pending": 0}, {},
+        blink_pair_offsets_ms=[], blink_sweep_ticks=[])
+    check(r["frame_spacing"]["ok"] is True,
+          "frame_spacing passes vacuously with no sweep records (documented)")
+    check(r["ok"] is True,
+          "KNOWN GAP: ticks_observed=6 with zero sweep records is still ok=True "
+          "-- if this went False, the blind spot was closed; update this test "
+          "and its issue rather than deleting it")
 
 
 def test_build_tab_result_frame_spacing_gates_ok():
