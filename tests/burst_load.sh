@@ -188,6 +188,83 @@ fi
 # GUARD-END:iorows
 echo "burst_load: _smoke_io_load has $io_rows rows (>= $IO_LOAD_MIN_ROWS) -- IO bursts will miss shared_buffers" | tee -a "$LOG"
 
+# ── Connection reuse: how LONG each burst runs, not how HARD ───────────────
+#
+# WHY THIS EXISTS. The recovered rig ran four short pgbench invocations per
+# 138 s cycle. pgbench holds one connection per client for the whole
+# invocation and then exits, so every cycle retired 19 backends and started 19
+# fresh ones: over a 900 s UI window, ~124 short-lived backends from the burst
+# tier alone. Measured consequences (2026-10-08, tests/results/):
+#   * 537 distinct sessions in a 900 s trace against ~67 before the burst
+#     tier; the Sessions tab showed 245 rows.
+#   * Worst tab paint 5785 ms against a 3000 ms bound. The five tabs whose
+#     cost does not depend on session count sat at 0.68-1.19x of their pinned
+#     maxima; the six whose server-side queries are per-session or
+#     per-execution sat at 2.59-3.63x. Event volume had risen only 1.55x, so
+#     volume was not what moved them -- session churn was.
+#   * tests/ui_live_smoke.sh's blink self-test failed 2/2 runs: at 146-148
+#     Sessions rows the panel is ~4000 px tall, a screenshot costs 232-456 ms,
+#     and a 400 ms injected overlay can no longer be isolated frame to frame.
+#     Every one of the 59 previously passing runs sat at 21-46 rows.
+#
+# THE FIX IS DURATION, NOT INTENSITY. Every burst keeps its CLIENT COUNT and
+# its --rate exactly as the probe set them, so instantaneous concurrency and
+# peak pressure on the WAL, lock-manager and buffer-mapping paths are
+# unchanged. What changes is that each burst runs BURST_SCALE times longer and
+# each pause is BURST_SCALE times longer. Because durations and pauses scale
+# by the SAME factor, transactions per second AVERAGED over a cycle are
+# identical at every scale -- `pgbench -T 8 --rate=600` once per 138 s and
+# `-T 48 --rate=600` once per 828 s both deliver 34.8 tx/s. The load is not
+# thinned; the same work arrives from backends that live BURST_SCALE times
+# longer, so BURST_SCALE times fewer of them are created.
+# tests/test_burst_load_guards.sh asserts that invariance arithmetically.
+#
+# BURST_SCALE_MAX = 6 is a constraint, not a preference: the cycle must fit
+# inside the UI's own 900 s window, or a window can contain no WAL burst at
+# all and the demo shows a tier that is running but invisible. 6 x 138 = 828
+# <= 900; 7 x 138 = 966 > 900.
+BURST_SCALE_MAX=6
+
+# Base (scale 1) timings -- the probe's own figures, unchanged.
+B_WAL_T=8;  B_WAL_PAUSE=32
+B_LM_T=1;   B_LM_PAUSE=37
+B_IO_T=6;   B_IO_PAUSE=54
+BASE_CYCLE_S=$(( B_WAL_T + B_WAL_PAUSE + B_LM_T + B_LM_PAUSE + B_IO_T + B_IO_PAUSE ))
+
+# burst_scale_for DURATION_S [MAX] [BASE_CYCLE]
+# The largest scale in 1..MAX whose cycle still fits in DURATION_S, or 0 when
+# not even scale 1 fits. DERIVED, not configured: the only input is the
+# duration the caller asked for, so a 1800 s live walk automatically gets the
+# churn-minimising scale 6 while demo_rehearsal.sh's documented DURATION_MIN=3
+# self-test (180 s) automatically gets scale 1 and still completes a cycle.
+# A knob here would be a way to silently change the load; a derivation cannot
+# be set wrong.
+burst_scale_for() {
+    local dur="$1" max="${2:-$BURST_SCALE_MAX}" base="${3:-$BASE_CYCLE_S}"
+    local s
+    for (( s = max; s >= 1; s-- )); do
+        if [[ $(( s * base )) -le $dur ]]; then
+            echo "$s"
+            return 0
+        fi
+    done
+    echo 0
+}
+
+BURST_SCALE=$(burst_scale_for "$DURATION_S")
+# GUARD-BEGIN:scale
+if [[ "$BURST_SCALE" -lt 1 ]]; then
+    die "DURATION_S=${DURATION_S}s is shorter than even one scale-1 cycle (${BASE_CYCLE_S}s), so this run could not complete a single cycle and would prove nothing. Give the burst tier at least ${BASE_CYCLE_S}s."
+fi
+# GUARD-END:scale
+CYCLE_S=$(( BURST_SCALE * BASE_CYCLE_S ))
+echo "burst_load: scale=$BURST_SCALE/$BURST_SCALE_MAX cycle=${CYCLE_S}s" \
+     "(derived from DURATION_S=${DURATION_S}s; base cycle ${BASE_CYCLE_S}s)." \
+     "Rates and client counts are scale-independent, so tx/s averaged over a" \
+     "cycle is identical at every scale; only backend lifetime changes." \
+     "Backend generations in this run: ~$(( (DURATION_S + CYCLE_S - 1) / CYCLE_S )) x 19 clients." \
+     | tee -a "$LOG"
+
 # ── Burst sizing ────────────────────────────────────────────────────────────
 # From a per-component probe on the gate box (60 s each, alone, tracer
 # attached), NOT from guesswork -- two 25-minute captures were spent
@@ -263,7 +340,7 @@ deadline=$(( $(date +%s) + DURATION_S ))
 cycle=0
 while [[ $(date +%s) -lt $deadline ]]; do
     before=$(ins)
-    run b_wal 100 -c 6 -j 2 -T 8 --rate=600 -f "$SQL_DIR/burst.sql"
+    run b_wal 100 -c 6 -j 2 -T $(( BURST_SCALE * B_WAL_T )) --rate=600 -f "$SQL_DIR/burst.sql"
     after=$(ins)
 # GUARD-BEGIN:walparse
     if [[ ! "$before" =~ ^[0-9]+$ || ! "$after" =~ ^[0-9]+$ ]]; then
@@ -276,19 +353,19 @@ while [[ $(date +%s) -lt $deadline ]]; do
     [[ "$d" -gt 0 ]] || \
         die "b_wal inserted $d rows into pgwt_burst -- pgbench reported success but nothing reached the table (the 2026-10-02 no-op signature)"
 # GUARD-END:walrows
-    isleep 32
+    isleep $(( BURST_SCALE * B_WAL_PAUSE ))
     [[ $(date +%s) -lt $deadline ]] || break
 
-    run b_lm 500 -c 4 -j 2 -T 1 -f "$SQL_DIR/adv300.sql"
-    isleep 37
+    run b_lm 500 -c 4 -j 2 -T $(( BURST_SCALE * B_LM_T )) -f "$SQL_DIR/adv300.sql"
+    isleep $(( BURST_SCALE * B_LM_PAUSE ))
     [[ $(date +%s) -lt $deadline ]] || break
 
     # Read and write bursts overlap on purpose: concurrent readers and
     # writers on the same above-shared_buffers table is what makes the
     # buffer-mapping and eviction paths contend.
-    run b_ior 50 -c 6 -j 2 -T 6 --rate=300 -f "$SQL_DIR/io_read.sql" &
+    run b_ior 50 -c 6 -j 2 -T $(( BURST_SCALE * B_IO_T )) --rate=300 -f "$SQL_DIR/io_read.sql" &
     ior_pid=$!
-    run b_iow 10 -c 3 -j 1 -T 6 --rate=50 -f "$SQL_DIR/io_write.sql"
+    run b_iow 10 -c 3 -j 1 -T $(( BURST_SCALE * B_IO_T )) --rate=50 -f "$SQL_DIR/io_write.sql"
     # `run` dies (exit 1) inside the subshell on failure, so the background
     # burst's status must be collected, not discarded.
     if ! wait "$ior_pid"; then
@@ -303,13 +380,13 @@ while [[ $(date +%s) -lt $deadline ]]; do
         echo "burst_load: completed $cycle cycle(s) as requested (PGWT_BURST_CYCLES=$CYCLES)" | tee -a "$LOG"
         exit 0
     fi
-    isleep 54
+    isleep $(( BURST_SCALE * B_IO_PAUSE ))
 done
 
 echo "burst_load: duration budget reached after $cycle cycle(s)" | tee -a "$LOG"
 # GUARD-BEGIN:nocycle
 if [[ $cycle -eq 0 ]]; then
-    die "the duration budget (${DURATION_S}s) expired before a single cycle completed -- one cycle needs ~2.5 min, so this run proved nothing"
+    die "the duration budget (${DURATION_S}s) expired before a single cycle completed -- at scale $BURST_SCALE a cycle needs ${CYCLE_S}s, so this run proved nothing"
 fi
 # GUARD-END:nocycle
 exit 0

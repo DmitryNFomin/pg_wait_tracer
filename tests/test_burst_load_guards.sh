@@ -63,10 +63,16 @@ mkdir -p "$BIN"
 # budget" is decided by arithmetic, not by how loaded this Mac is.
 cat >"$BIN/sleep" <<'EOF'
 #!/bin/bash
+# PGWT_T_SLEEP_MULT: advance the fake clock by n x mult instead of n. The
+# stub bursts are instantaneous, so the clock only ever moves by the PAUSES
+# -- which means no duration that passes the scale derivation could overrun
+# its own cycle, and the `nocycle` guard would be unreachable in this suite.
+# A multiplier models "the box was slower than the pauses assume" without
+# making anything depend on real wall time.
 n=${1:-0}
 n=${n%%.*}
 cur=$(cat "$PGWT_T_CLOCK" 2>/dev/null || echo 0)
-echo $(( cur + ${n:-0} )) > "$PGWT_T_CLOCK"
+echo $(( cur + ${n:-0} * ${PGWT_T_SLEEP_MULT:-1} )) > "$PGWT_T_CLOCK"
 exit 0
 EOF
 
@@ -312,12 +318,22 @@ expect_refusal "walparse: n_tup_ins unreadable" \
     "refusing to approve a WAL burst whose end-to-end proof" \
     "$BURST" "$WORK/sql_good" 600 PGWT_T_INS_BEFORE= PGWT_T_INS_AFTER=
 
-# nocycle: the duration budget expires mid-cycle. Pinned by the fake clock
-# (the first inter-burst pause advances it 32 s past a 10 s budget), so this
-# case is arithmetic, not a race.
-expect_refusal "nocycle: budget expired before one cycle completed" \
-    "expired before a single cycle completed" \
+# scale: a duration shorter than even one scale-1 cycle is refused UP FRONT,
+# before any burst runs -- cheaper and clearer than discovering it after
+# burning a partial cycle.
+expect_refusal "scale: duration shorter than one base cycle" \
+    "shorter than even one scale-1 cycle" \
     "$BURST" "$WORK/sql_good" 10
+
+# nocycle: the duration passes the scale derivation (138s fits one scale-1
+# cycle) but the cycle then overruns it anyway -- a box slower than the pauses
+# assume. Pinned by the fake clock via PGWT_T_SLEEP_MULT=5, so this is
+# arithmetic rather than a race: the first 32 s pause advances the clock 160 s
+# past a 138 s budget. Without this case the `nocycle` guard is unreachable in
+# this suite and its Phase A pass would prove nothing.
+expect_refusal "nocycle: cycle overran a duration that the scale fitted" \
+    "expired before a single cycle completed" \
+    "$BURST" "$WORK/sql_good" 138 PGWT_T_SLEEP_MULT=5
 
 # ── Phase B: each guard is REACHABLE and is what produces its refusal ───────
 echo
@@ -381,7 +397,14 @@ expect_bypass "walparse deleted" walparse \
     "refusing to approve a WAL burst whose end-to-end proof" "$WORK/sql_good" 600 \
     PGWT_T_INS_BEFORE= PGWT_T_INS_AFTER=
 expect_bypass "nocycle deleted" nocycle \
-    "expired before a single cycle completed" "$WORK/sql_good" 10
+    "expired before a single cycle completed" "$WORK/sql_good" 138 \
+    PGWT_T_SLEEP_MULT=5
+# Deleting the scale guard leaves BURST_SCALE=0, so every -T becomes 0 and
+# every pause becomes 0: the stub bursts still "succeed" and the run reports a
+# completed cycle. A real pgbench -T 0 does no work at all, so this mutant is
+# the shape of "the burst tier ran and measured nothing" being APPROVED.
+expect_bypass "scale deleted" scale \
+    "shorter than even one scale-1 cycle" "$WORK/sql_good" 10
 expect_bypass "pgport deleted" pgport \
     "PGPORT is unset or not numeric" "$WORK/sql_good" 600 PGPORT=
 # tooling's bypass case cannot go through run_case (which puts the full
@@ -397,6 +420,216 @@ if m=$(mutant tooling); then
     else
         ok "tooling deleted: without guard 'tooling' the refusal is gone (exit $rc, bare 127 from inside the cycle loop instead of a named diagnosis)"
     fi
+fi
+
+# ── Phase C: the connection-reuse scale derivation ─────────────────────────
+#
+# The 2026-10-08 fix for paint and for the blink self-test is connection reuse:
+# every burst keeps its client count and its --rate, but runs BURST_SCALE times
+# longer with BURST_SCALE times longer pauses, so the same work arrives from
+# BURST_SCALE times fewer backend generations. Two things have to hold or that
+# claim is false:
+#
+#   1. The scale is DERIVED from DURATION_S, never configured -- a knob would
+#      be a way to change the load silently. It must pick the largest scale
+#      that still completes a cycle, cap at the scale whose cycle fits the UI's
+#      900 s window, and REFUSE (0) when not even scale 1 fits, rather than
+#      clamping to 1 and running a cycle the caller has no time for.
+#   2. Transactions per second averaged over a cycle must be IDENTICAL at
+#      every scale. If it is not, "connection reuse" quietly became "thinner
+#      load", which is the one thing the owner ruled out. This is arithmetic,
+#      so it is checked as arithmetic rather than asserted in a comment.
+echo
+echo "Phase C -- scale derivation and load invariance"
+
+# burst_scale_for is a function inside burst_load.sh, which exits early without
+# PGPORT, so it is extracted and called in a subshell. Every constant it needs
+# is read OUT OF THE SCRIPT, never re-declared here. An earlier version of this
+# helper declared `BURST_SCALE_MAX=6` itself, which meant capping the script's
+# own BURST_SCALE_MAX to 1 -- the entire connection-reuse change reverted --
+# still passed every case in this file. A suite that supplies the value it is
+# meant to be checking cannot fail.
+grab() {   # grab NAME -> the script's own assignment, or empty
+    # Not anchored at line start: burst_load.sh puts two constants on one line
+    # ("B_WAL_T=8;  B_WAL_PAUSE=32"), and an anchored pattern silently matched
+    # nothing for the second of each pair. The "could not read" refusal below
+    # is what caught that, instead of this suite inventing a value -- which is
+    # the whole reason that refusal is there.
+    grep -oE "(^|[;[:space:]])$1=[0-9]+" "$BURST" | head -1 | grep -oE '[0-9]+$'
+}
+SCRIPT_MAX=$(grab BURST_SCALE_MAX)
+SCRIPT_WAL_T=$(grab B_WAL_T);  SCRIPT_WAL_P=$(grab B_WAL_PAUSE)
+SCRIPT_LM_T=$(grab B_LM_T);    SCRIPT_LM_P=$(grab B_LM_PAUSE)
+SCRIPT_IO_T=$(grab B_IO_T);    SCRIPT_IO_P=$(grab B_IO_PAUSE)
+for v in SCRIPT_MAX SCRIPT_WAL_T SCRIPT_WAL_P SCRIPT_LM_T SCRIPT_LM_P SCRIPT_IO_T SCRIPT_IO_P; do
+    if [[ -n "${!v}" ]]; then :; else
+        bad "could not read $v out of burst_load.sh -- refusing to test against values this suite invented"
+    fi
+done
+BASE=$(( SCRIPT_WAL_T + SCRIPT_WAL_P + SCRIPT_LM_T + SCRIPT_LM_P + SCRIPT_IO_T + SCRIPT_IO_P ))
+
+scale_for() {
+    bash -c '
+        '"$(sed -n '/^burst_scale_for() {/,/^}/p' "$BURST")"'
+        BURST_SCALE_MAX='"$SCRIPT_MAX"'
+        BASE_CYCLE_S='"$BASE"'
+        burst_scale_for "$1" "${2:-$BURST_SCALE_MAX}" "${3:-$BASE_CYCLE_S}"
+    ' _ "$@"
+}
+
+if [[ "$BASE" == "138" ]]; then
+    ok "base cycle read from burst_load.sh is ${BASE}s (8+32+1+37+6+54)"
+else
+    bad "base cycle read from burst_load.sh is ${BASE}s, this suite's table assumes 138s"
+fi
+# THE CAP ITSELF, read from the script: 6 x 138 = 828 <= 900 < 7 x 138 = 966.
+# This is what catches the cap being lowered (no reuse) or raised (a cycle
+# longer than the UI window).
+if [[ "$SCRIPT_MAX" == "6" ]]; then
+    ok "burst_load.sh's own BURST_SCALE_MAX is 6 (cycle $(( 6 * BASE ))s <= the 900s UI window)"
+else
+    bad "burst_load.sh's own BURST_SCALE_MAX is $SCRIPT_MAX, not 6 -- at $SCRIPT_MAX the cycle is $(( SCRIPT_MAX * BASE ))s; below 6 the backend churn this change exists to remove comes back, above 6 a 900s window can contain no WAL burst"
+fi
+
+expect_scale() {
+    local dur="$1" want="$2" why="$3" got
+    got=$(scale_for "$dur")
+    if [[ "$got" == "$want" ]]; then
+        ok "DURATION_S=$dur -> scale $got ($why)"
+    else
+        bad "DURATION_S=$dur -> scale $got, expected $want ($why)"
+    fi
+}
+
+# The cap: 6 x 138 = 828 <= 900 (the UI window); 7 x 138 = 966 > 900.
+expect_scale 1800 6 "the live-UI-smoke walk: churn-minimising scale, cycle 828s"
+expect_scale 2100 6 "demo_rehearsal default 35min: capped at 6, not 15"
+expect_scale 86400 6 "a very long run is still capped at 6 (window coverage)"
+expect_scale 828  6 "exactly one scale-6 cycle fits"
+expect_scale 827  5 "one second short of a scale-6 cycle -> scale 5 (690s)"
+expect_scale 690  5 "exactly one scale-5 cycle"
+expect_scale 552  4 "exactly one scale-4 cycle"
+expect_scale 414  3 "exactly one scale-3 cycle"
+expect_scale 276  2 "exactly one scale-2 cycle"
+expect_scale 180  1 "demo_rehearsal.sh's documented DURATION_MIN=3 self-test"
+expect_scale 138  1 "exactly one base cycle"
+# The refusal, not a clamp: scale 0 is the signal burst_load.sh dies on.
+expect_scale 137  0 "one second short of a base cycle -> REFUSE, never clamp to 1"
+expect_scale 1    0 "absurdly short -> REFUSE"
+
+# Monotonic: a longer run must never get a SMALLER scale (fewer backends is
+# always available to a longer run). A non-monotonic derivation would mean some
+# durations silently churn more than shorter ones do.
+prev=0
+nonmono=""
+for d in 100 138 200 276 300 414 500 552 600 690 700 828 900 1200 1800 3600; do
+    cur=$(scale_for "$d")
+    [[ "$cur" -lt "$prev" ]] && nonmono="$nonmono ${d}s($cur<$prev)"
+    prev=$cur
+done
+if [[ -z "$nonmono" ]]; then
+    ok "scale is monotonic non-decreasing in DURATION_S"
+else
+    bad "scale DECREASES as duration grows at:$nonmono"
+fi
+
+# Every derived scale must actually fit at least one cycle -- a scale whose
+# cycle exceeds the duration is the bug the refusal exists to prevent.
+badfit=""
+for d in 138 180 276 414 552 690 828 900 1800 2100; do
+    cur=$(scale_for "$d")
+    [[ $(( cur * BASE )) -le "$d" ]] || badfit="$badfit ${d}s(scale $cur)"
+done
+if [[ -z "$badfit" ]]; then
+    ok "every derived scale completes at least one cycle within its duration"
+else
+    bad "derived a scale that cannot complete a cycle:$badfit"
+fi
+
+# Cap respected for real: no duration may yield a cycle longer than the 900 s
+# UI window, or a window can contain no WAL burst at all.
+overwin=""
+for d in 828 900 1800 2100 86400; do
+    cur=$(scale_for "$d")
+    [[ $(( cur * BASE )) -le 900 ]] || overwin="$overwin ${d}s(cycle $(( cur * BASE ))s)"
+done
+if [[ -z "$overwin" ]]; then
+    ok "no duration yields a cycle longer than the 900s UI window"
+else
+    bad "cycle exceeds the 900s window for:$overwin"
+fi
+
+# A custom max is honoured (so the cap is a parameter of the derivation, not
+# baked into its body -- otherwise the cases above cannot distinguish a real
+# cap from a coincidence).
+got=$(scale_for 86400 3)
+if [[ "$got" == "3" ]]; then
+    ok "an explicit max is honoured (max=3 -> scale 3, not 6)"
+else
+    bad "an explicit max is ignored: max=3 gave scale $got"
+fi
+
+# ── Load invariance: the whole point of the change ─────────────────────────
+# Per-cycle transactions = rate x duration; per-cycle seconds = scale x base.
+# tx/s averaged over a cycle must not move with scale. Checked for each burst
+# with its own rate, in integer hundredths to avoid shell float arithmetic.
+invariance_fail=""
+for spec in "600:8:b_wal" "300:6:b_ior" "50:6:b_iow"; do
+    rate=${spec%%:*}; rest=${spec#*:}; dur=${rest%%:*}; tag=${rest##*:}
+    ref=""
+    for (( sc = 1; sc <= SCRIPT_MAX; sc++ )); do
+        # (rate * dur * sc * 100) / (base * sc)  == (rate * dur * 100) / base
+        v=$(( (rate * dur * sc * 100) / (BASE * sc) ))
+        [[ -z "$ref" ]] && ref=$v
+        [[ "$v" == "$ref" ]] || invariance_fail="$invariance_fail $tag@scale$sc($v!=$ref)"
+    done
+    ok "$tag average load is ${ref} tx/s x100 at every scale 1..$SCRIPT_MAX"
+done
+if [[ -n "$invariance_fail" ]]; then
+    bad "average load CHANGES with scale (the load would be thinned):$invariance_fail"
+fi
+
+# BEHAVIOURAL check that the PAUSES really scale, not just the durations.
+# The arithmetic above is over constants, so it cannot see a script that scales
+# `-T` but leaves `isleep` at its base value -- which would make the load 6x
+# THICKER, the opposite of the intent and exactly the kind of silent change the
+# owner ruled out. The fake clock only advances when the script sleeps, so the
+# clock delta across one completed cycle IS the sum of that cycle's pauses.
+# (With PGWT_BURST_CYCLES=1 the trailing pause is never reached, so the delta
+# is the first two pauses: 32+37 at scale 1, and 6x that at scale 6.)
+cycle_pause_delta() {   # cycle_pause_delta DURATION_S -> fake-clock delta
+    local dur="$1"
+    local clock="$WORK/clock.beh.$RANDOM" ins="$WORK/ins.beh.$RANDOM"
+    echo 1000 >"$clock"; echo 0 >"$ins"; echo before >"$ins.side"
+    env PATH="$BIN:$PATH" PGWT_T_CLOCK="$clock" PGWT_T_INS="$ins" \
+        PGWT_BURST_SQL_DIR="$WORK/sql_good" PGWT_BURST_LOG="$WORK/beh.log.$RANDOM" \
+        PGWT_BURST_CYCLES=1 PGPORT=5432 \
+        bash "$BURST" "$dur" >/dev/null 2>&1
+    echo $(( $(cat "$clock") - 1000 ))
+}
+d1=$(cycle_pause_delta "$BASE")
+d6=$(cycle_pause_delta $(( SCRIPT_MAX * BASE )))
+want1=$(( SCRIPT_WAL_P + SCRIPT_LM_P ))
+want6=$(( SCRIPT_MAX * want1 ))
+if [[ "$d1" == "$want1" ]]; then
+    ok "one scale-1 cycle slept ${d1}s of pauses (= ${SCRIPT_WAL_P}+${SCRIPT_LM_P})"
+else
+    bad "one scale-1 cycle slept ${d1}s of pauses, expected ${want1}s"
+fi
+if [[ "$d6" == "$want6" ]]; then
+    ok "one scale-$SCRIPT_MAX cycle slept ${d6}s of pauses (= $SCRIPT_MAX x ${want1}) -- pauses scale with the durations, so average load is unchanged"
+else
+    bad "one scale-$SCRIPT_MAX cycle slept ${d6}s of pauses, expected ${want6}s -- the PAUSES are not scaling with the durations, so the load is $(( d1 > 0 ? want6 / (d6 > 0 ? d6 : 1) : 0 ))x thicker than intended, not merely reusing connections"
+fi
+
+# Backend generations must actually FALL with scale -- otherwise the change
+# achieves nothing. 19 clients per cycle, over a 1800 s run.
+g1=$(( (1800 + BASE - 1) / BASE * 19 ))
+g6=$(( (1800 + SCRIPT_MAX * BASE - 1) / (SCRIPT_MAX * BASE) * 19 ))
+if [[ "$g6" -lt "$g1" ]]; then
+    ok "backend generations over 1800s fall from $g1 (scale 1) to $g6 (scale $SCRIPT_MAX)"
+else
+    bad "backend generations did not fall: scale1=$g1 scale$SCRIPT_MAX=$g6 -- the change achieves nothing"
 fi
 
 echo
