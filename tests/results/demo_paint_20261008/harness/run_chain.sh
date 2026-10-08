@@ -25,6 +25,29 @@ RUN="${1:-r1}"
 
 teardown() {
     echo "=== teardown ==="
+    # The Mac-side bridge FIRST, and with SIGTERM to the process holding the
+    # port -- web/main.go's shutdown path is what runs bridge.Close(), which is
+    # what reaps the pgwt-server it started over ssh ON THE BOX. Skipping this
+    # (as the 2026-10-08 run did) leaves an orphaned
+    # `pgwt-server /root/paint1_trace_r1` resident on a shared box with the
+    # trace dir open. Found by hand after the run; killing the bridge reaped it
+    # exactly as designed, which is the whole reason to go through the bridge
+    # rather than pkill the server directly.
+    local holder
+    holder=$(lsof -nP -iTCP:8384 -sTCP:LISTEN -t 2>/dev/null)
+    if [ -n "$holder" ]; then
+        echo "  bridge on 8384: $(ps -p "$holder" -o args= | cut -c1-90)"
+        kill "$holder" 2>/dev/null
+        for _ in $(seq 1 20); do
+            lsof -nP -iTCP:8384 -sTCP:LISTEN -t >/dev/null 2>&1 || break
+            sleep 1
+        done
+        if lsof -nP -iTCP:8384 -sTCP:LISTEN -t >/dev/null 2>&1; then
+            echo "  WARNING: port 8384 still held after TERM"
+        else
+            echo "  bridge stopped, port 8384 free"
+        fi
+    fi
     ssh -o ConnectTimeout=10 "$BOX" "
         . /tmp/paint1_run_$RUN.env 2>/dev/null
         . /tmp/paint1_pids.env 2>/dev/null
@@ -58,7 +81,15 @@ teardown() {
         else
             echo 'lock free'
         fi
-        pgrep -af 'burst_load.sh|live_loop_workload|pg_wait_tracer --daemon' || echo 'no load/daemon left'
+        # pgwt-server too: if the bridge shutdown above did not reap it (a
+        # KILLed bridge never calls bridge.Close()), it is a resident process
+        # on a shared box holding the trace dir open. \$\$ is excluded so this
+        # shell does not match its own command line and kill itself.
+        for p in \$(pgrep -f 'pgwt-server /root/paint1_trace'); do
+            [ \"\$p\" = \"\$\$\" ] && continue
+            kill \$p 2>/dev/null && echo \"orphaned pgwt-server \$p killed\"
+        done
+        ps -eo pid,args | grep -E 'burst_load.sh|live_loop_workload|pg_wait_tracer --daemon|pgwt-server /root/paint1' | grep -v 'grep -E' || echo 'no load/daemon/server left'
     " 2>&1 | sed 's/^/  /'
 }
 
