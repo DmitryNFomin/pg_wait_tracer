@@ -61,14 +61,22 @@
  *   §6b the known divergence from src/server.c's inclusive end bound
  *   §7 mutation probes: the comparator can see one count / one ns / one pair
  *   §8 bypass suite: every way this gate's detection can be made unreachable
+ *   §9 on-disk, through the real writer/reader, driving the very function
+ *      src/server.c's handle_transitions() calls — twice, so the cache's
+ *      "a merged aggregate equals a fresh decode" contract is exercised
  */
 #include "block_agg.h"
 #include "compute.h"
 #include "idle_rule.h"
 #include "summary_reader.h"
+#include "event_reader.h"
+#include "event_writer.h"
 
 #include <assert.h>
 #include <stddef.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <unistd.h>
 #include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -708,7 +716,8 @@ static void section3_merge_algebra(void)
     }
     CHECK(ties >= 9, "§3b saw only %d tied adjacent pairs — without ties this "
           "check cannot see an unordered comparator", ties);
-    free(sp);
+    struct pgwt_block_agg_pair *sp2 = sp;   /* kept for §3c's row comparison */
+    int spn2 = spn;
 
     struct pgwt_block_agg_node *sn = NULL;
     int snn = 0;
@@ -721,6 +730,51 @@ static void section3_merge_algebra(void)
               "§3b node rows %d/%d violate (total_ns desc, event_id asc)",
               i, i + 1);
     free(sn);
+
+    /* §3c the RAW path's row order must be the SAME total order.
+     *
+     * pgwt_compute_transitions()' comparator used to order by count alone,
+     * which is not a total order, so equal-count links came out in whatever
+     * sequence qsort made of the hash table's layout. Two consequences: the
+     * Transitions tab could reorder tied rows between identical requests, and
+     * a row-by-row comparison against the aggregate's readout was meaningless.
+     * Both sides now break ties by (from ASC, to ASC). Asserted here against
+     * the same tie-heavy fixture, because the set-based comparator used
+     * everywhere else in this file cannot see row ORDER at all. */
+    struct pgwt_filter nof;
+    memset(&nof, 0, sizeof(nof));
+    struct pgwt_transitions_result rawr;
+    pgwt_compute_transitions(tie.ev, tie.n, &nof, ORACLE_MAX_ROWS, &rawr);
+    CHECK(rawr.num_rows == spn,
+          "§3c raw found %d rows, the aggregate %d", rawr.num_rows, spn);
+    int order_ties = 0;
+    for (int i = 0; i + 1 < rawr.num_rows; i++) {
+        if (rawr.rows[i].count == rawr.rows[i + 1].count)
+            order_ties++;
+        CHECK(rawr.rows[i].count > rawr.rows[i + 1].count ||
+              (rawr.rows[i].count == rawr.rows[i + 1].count &&
+               (rawr.rows[i].from_event < rawr.rows[i + 1].from_event ||
+                (rawr.rows[i].from_event == rawr.rows[i + 1].from_event &&
+                 rawr.rows[i].to_event < rawr.rows[i + 1].to_event))),
+              "§3c raw rows %d/%d violate (count desc, from asc, to asc): "
+              "(%u->%u, %" PRIu64 ") then (%u->%u, %" PRIu64 ")",
+              i, i + 1, rawr.rows[i].from_event, rawr.rows[i].to_event,
+              rawr.rows[i].count, rawr.rows[i + 1].from_event,
+              rawr.rows[i + 1].to_event, rawr.rows[i + 1].count);
+    }
+    CHECK(order_ties >= 9, "§3c saw only %d tied adjacent raw rows — without "
+          "ties this check cannot see an unordered comparator", order_ties);
+    /* And the two orders agree row for row, which is what makes a bit-exact
+     * row comparison between the paths possible at all. */
+    for (int i = 0; i < rawr.num_rows && i < spn2; i++)
+        CHECK(rawr.rows[i].from_event == sp2[i].from_event &&
+              rawr.rows[i].to_event == sp2[i].to_event,
+              "§3c row %d differs: raw %u->%u, aggregate %u->%u", i,
+              rawr.rows[i].from_event, rawr.rows[i].to_event,
+              sp2[i].from_event, sp2[i].to_event);
+    free(rawr.rows);
+    free(sp2);
+
     pgwt_block_agg_free(&wt);
     pgwt_block_agg_free(&at);
 }
@@ -1625,6 +1679,419 @@ static void section8_bypass(void)
     }
 }
 
+
+/* ── §9 on-disk: the SAME iteration the server runs, against raw ─────────
+ *
+ * §1-§8 work on in-memory fixtures. This section writes a real multi-block
+ * trace with the real writer, reads it back with the real reader, and drives
+ * pgwt_block_agg_window_from_reader() — the exact function src/server.c's
+ * handle_transitions() calls. So what is compared here is the shipped
+ * plan/merge/decode sequence, not a restatement of it.
+ *
+ * The cache contract is the other half: the sweep runs TWICE over the same
+ * windows. Pass 1 starts cold, so every block DECODEs and the aggregates get
+ * built and stored. Pass 2 finds them and MERGEs. Both passes must agree with
+ * raw AND with each other, to the nanosecond — "a cached aggregate answers
+ * identically to a fresh decode" is the entire reason the cache is allowed to
+ * exist, and if it did not hold, the fast path would return a different number
+ * the second time you looked at the same window.
+ */
+
+#define SEC9_CACHE_MAX 64
+
+struct sec9_cache {
+    struct pgwt_block_agg agg[SEC9_CACHE_MAX];
+    int used[SEC9_CACHE_MAX];
+    int n;
+    long lookups, hits, stores, rejected;
+};
+
+static const struct pgwt_block_agg *
+sec9_lookup(void *ctx, const struct pgwt_block_identity *id)
+{
+    struct sec9_cache *c = ctx;
+    c->lookups++;
+    for (int i = 0; i < SEC9_CACHE_MAX; i++) {
+        if (!c->used[i])
+            continue;
+        /* Revalidate exactly as the server's hook does: an entry that cannot
+         * be proven to still describe this block is not returned. */
+        if (pgwt_block_agg_matches(&c->agg[i], id)) {
+            c->hits++;
+            return &c->agg[i];
+        }
+    }
+    return NULL;
+}
+
+static void sec9_store(void *ctx, struct pgwt_block_agg *agg)
+{
+    struct sec9_cache *c = ctx;
+    for (int i = 0; i < SEC9_CACHE_MAX; i++) {
+        if (c->used[i])
+            continue;
+        c->used[i] = 1;
+        c->agg[i] = *agg;
+        memset(agg, 0, sizeof(*agg));   /* ownership moved */
+        c->n++;
+        c->stores++;
+        return;
+    }
+    c->rejected++;                      /* full: declining is not an error */
+}
+
+static void sec9_cache_free(struct sec9_cache *c)
+{
+    for (int i = 0; i < SEC9_CACHE_MAX; i++)
+        if (c->used[i])
+            pgwt_block_agg_free(&c->agg[i]);
+    memset(c, 0, sizeof(*c));
+}
+
+/* A never-matching lookup: the plan must then DECODE every block and still
+ * produce the right answer. This is the "cache that cannot see" case. */
+static const struct pgwt_block_agg *
+sec9_lookup_blind(void *ctx, const struct pgwt_block_identity *id)
+{
+    (void)ctx; (void)id;
+    return NULL;
+}
+
+static int sec9_write_trace(const char *dir, int n_blocks, int with_samples,
+                            uint64_t *first_ts, uint64_t *last_ts)
+{
+    struct pgwt_event_writer w;
+    memset(&w, 0, sizeof(w));
+    if (pgwt_writer_init(&w, dir, 170004, 0, NULL) != 0)
+        return -1;
+    uint64_t ts = 1700000000000000000ULL;
+    *first_ts = ts;
+    static const uint32_t froms[] = { E_CPU, E_IO1, E_LW1, E_LOCK1, E_CLIR,
+                                      E_IO2 };
+    static const uint32_t tos[]   = { E_IO1, E_CPU, E_LW1, E_IO2, E_LOCK1 };
+    int k = 0;
+    for (int b = 0; b < n_blocks; b++) {
+        for (int i = 0; i < PGWT_BLOCK_EVENTS; i++) {
+            struct pgwt_trace_event e;
+            memset(&e, 0, sizeof(e));
+            e.timestamp_ns = ts;
+            e.pid = 100 + (uint32_t)(k % 7);
+            e.cpu_ns = PGWT_CPU_NS_UNKNOWN;
+            /* Every seventh record is structural or invisible, so markers,
+             * EXIT and Activity-class endpoints all cross the window edges. */
+            if (k % 7 == 3) {
+                e.old_event = PGWT_MARKER_EXEC_START;
+                e.new_event = PGWT_MARKER_EXEC_START;
+            } else if (k % 11 == 5) {
+                e.old_event = E_IO1;
+                e.new_event = PGWT_EVENT_EXIT;
+                e.duration_ns = 1000 + (uint64_t)(k % 997);
+            } else if (k % 13 == 7) {
+                e.old_event = E_HIDE;
+                e.new_event = E_CPU;
+                e.duration_ns = 2000 + (uint64_t)(k % 101);
+            } else {
+                e.old_event = froms[k % 6];
+                e.new_event = tos[k % 5];
+                e.duration_ns = 101 + (uint64_t)(k % 9173);
+            }
+            e.query_id = 900 + (uint64_t)(k % 3);
+            if (pgwt_writer_push_event(&w, &e) != 0) {
+                pgwt_writer_close(&w);
+                return -1;
+            }
+            ts += 1000;
+            k++;
+        }
+    }
+    if (with_samples) {
+        /* One SAMPLES block AFTER the transition blocks. Its records sit past
+         * every transition record, so a window that stops before it must still
+         * be eligible, and one that reaches it must be refused. */
+        struct pgwt_trace_event smp[8];
+        for (int i = 0; i < 8; i++) {
+            memset(&smp[i], 0, sizeof(smp[i]));
+            smp[i].timestamp_ns = ts + (uint64_t)i * 1000;
+            smp[i].pid = 200;
+            smp[i].new_event = E_IO1;
+            smp[i].query_id = 7;
+            smp[i].cpu_ns = PGWT_CPU_NS_UNKNOWN;
+        }
+        if (pgwt_writer_push_samples(&w, smp, 8, 100000000ULL) != 0) {
+            pgwt_writer_close(&w);
+            return -1;
+        }
+        ts += 8 * 1000;
+    }
+    *last_ts = ts - 1000;
+    return pgwt_writer_close(&w);
+}
+
+/* The one trace file the writer produced in `dir`. */
+static int sec9_find_trace(const char *dir, char *out, size_t outsz)
+{
+    struct pgwt_trace_file_entry entries[8];
+    int n = pgwt_scan_trace_files(dir, entries, 8);
+    if (n <= 0)
+        return -1;
+    snprintf(out, outsz, "%s", entries[n - 1].path);
+    return 0;
+}
+
+/* Decode every block of the file into one array — the raw side's input. */
+static int sec9_decode_all(const char *path, struct pgwt_trace_event **out)
+{
+    struct pgwt_event_reader r;
+    if (pgwt_reader_open(&r, path) != 0)
+        return -1;
+    int cap = r.num_blocks * PGWT_BLOCK_EVENTS + 64, n = 0;
+    struct pgwt_trace_event *all = calloc((size_t)cap, sizeof(*all));
+    if (!all) { pgwt_reader_close(&r); return -1; }
+    for (int b = 0; b < r.num_blocks; b++) {
+        struct pgwt_block_info bi;
+        int got = pgwt_reader_decode_block_info(&r, b, all + n, cap - n, &bi);
+        if (got < 0) { free(all); pgwt_reader_close(&r); return -1; }
+        /* SAMPLES records come back carrying the reader's SAMPLE flag, exactly
+         * as the server's loader sees them, so the raw side rejects them for
+         * the same reason the aggregate side does. */
+        n += got;
+    }
+    pgwt_reader_close(&r);
+    *out = all;
+    return n;
+}
+
+static void section9_on_disk(void)
+{
+    printf("=== §9 on-disk: pgwt_block_agg_window_from_reader vs raw, twice "
+           "===\n");
+
+    char dir[256];
+    snprintf(dir, sizeof(dir), "/tmp/pgwt_bagg_sec9_%d", (int)getpid());
+    char rm[320];
+    snprintf(rm, sizeof(rm), "rm -rf '%s'", dir);
+    if (system(rm) != 0) { /* nothing to remove yet */ }
+    if (mkdir(dir, 0700) != 0) {
+        CHECK(0, "§9 could not create %s", dir);
+        return;
+    }
+
+    uint64_t first_ts = 0, last_ts = 0;
+    if (sec9_write_trace(dir, 4, 0, &first_ts, &last_ts) != 0) {
+        CHECK(0, "§9 could not write the trace fixture");
+        if (system(rm) != 0) { }
+        return;
+    }
+    char path[512];
+    if (sec9_find_trace(dir, path, sizeof(path)) != 0) {
+        CHECK(0, "§9 could not find the written trace");
+        if (system(rm) != 0) { }
+        return;
+    }
+
+    struct pgwt_trace_event *all = NULL;
+    int n_all = sec9_decode_all(path, &all);
+    CHECK(n_all == 4 * PGWT_BLOCK_EVENTS,
+          "§9 expected %d records on disk, decoded %d",
+          4 * PGWT_BLOCK_EVENTS, n_all);
+    if (n_all <= 0) { free(all); if (system(rm) != 0) { } return; }
+
+    /* Block bounds, so windows can land exactly on them. */
+    struct pgwt_event_reader r0;
+    CHECK(pgwt_reader_open(&r0, path) == 0, "§9 reopen");
+    uint64_t bnd[64];
+    int nbnd = 0;
+    for (int b = 0; b < r0.num_blocks && nbnd < 56; b++) {
+        struct pgwt_block_info bi;
+        if (pgwt_reader_block_info(&r0, b, &bi) != 0)
+            continue;
+        uint64_t v[5] = { bi.first_timestamp_ns - 1, bi.first_timestamp_ns,
+                          bi.first_timestamp_ns + 1000,
+                          bi.last_timestamp_ns, bi.last_timestamp_ns + 1 };
+        for (int i = 0; i < 5; i++) {
+            int dup = 0;
+            for (int j = 0; j < nbnd; j++) if (bnd[j] == v[i]) { dup = 1; break; }
+            if (!dup) bnd[nbnd++] = v[i];
+        }
+    }
+    int n_blocks_on_disk = r0.num_blocks;
+    pgwt_reader_close(&r0);
+    CHECK(n_blocks_on_disk == 4, "§9 expected 4 blocks, got %d",
+          n_blocks_on_disk);
+    for (int i = 1; i < nbnd; i++)
+        for (int j = i; j > 0 && bnd[j - 1] > bnd[j]; j--) {
+            uint64_t t = bnd[j]; bnd[j] = bnd[j - 1]; bnd[j - 1] = t;
+        }
+
+    struct sec9_cache cache;
+    memset(&cache, 0, sizeof(cache));
+    long windows = 0, merges = 0, decodes = 0, pass2_merges = 0;
+
+    for (int pass = 1; pass <= 2; pass++) {
+        for (int i = 0; i < nbnd; i++) {
+            for (int j = i + 1; j < nbnd; j++) {
+                uint64_t from = bnd[i], to = bnd[j];
+
+                struct pgwt_event_reader r;
+                CHECK(pgwt_reader_open(&r, path) == 0, "§9 open in sweep");
+                struct pgwt_block_agg win;
+                pgwt_block_agg_init_window(&win);
+                uint64_t exact = 0;
+                int m = 0, d = 0;
+                int rc = pgwt_block_agg_window_from_reader(
+                    &r, from, to, &win, sec9_lookup, sec9_store, &cache,
+                    &exact, &m, &d);
+                pgwt_reader_close(&r);
+                CHECK(rc == PGWT_BAGG_OK, "§9 pass %d window refused rc=%d",
+                      pass, rc);
+                if (rc != PGWT_BAGG_OK) { pgwt_block_agg_free(&win); continue; }
+
+                /* raw side: the shipping pair implementation plus the
+                 * independent node oracle, over the same half-open window. */
+                struct pgwt_trace_event *sel =
+                    calloc((size_t)n_all, sizeof(*sel));
+                int ns = 0;
+                for (int k2 = 0; k2 < n_all; k2++)
+                    if (all[k2].timestamp_ns >= from &&
+                        all[k2].timestamp_ns < to)
+                        sel[ns++] = all[k2];
+                struct raw_pairs rp;
+                raw_pairs_of(&rp, sel, ns);
+                struct node_oracle_row nrows[64];
+                int nn = raw_node_oracle(sel, ns, nrows, 64);
+
+                int bad = compare_agg_vs_raw(&win, &rp.res, nrows, nn, 0);
+                if (bad) {
+                    fprintf(stderr, "§9 pass %d window [%" PRIu64 ", %" PRIu64
+                            ") merge=%d decode=%d:\n", pass, from, to, m, d);
+                    compare_agg_vs_raw(&win, &rp.res, nrows, nn, 1);
+                }
+                CHECK(bad == 0, "§9 pass %d window [%" PRIu64 ", %" PRIu64
+                      "): %d disagreement(s) with raw", pass, from, to, bad);
+                CHECK(exact == (uint64_t)ns,
+                      "§9 exact-record count %" PRIu64 " != %d admitted",
+                      exact, ns);
+
+                windows++;
+                merges += m;
+                decodes += d;
+                if (pass == 2) pass2_merges += m;
+
+                raw_pairs_free(&rp);
+                free(sel);
+                pgwt_block_agg_free(&win);
+            }
+        }
+    }
+    printf("    %ld windows x 2 passes, %ld merges (%ld in pass 2), "
+           "%ld decodes, cache: %ld lookups / %ld hits / %ld stores\n",
+           windows / 2, merges, pass2_merges, decodes,
+           cache.lookups, cache.hits, cache.stores);
+    CHECK(pass2_merges > 0,
+          "§9 pass 2 never MERGEd a cached block — the cache contract was "
+          "never exercised, so agreement proves only that decoding works");
+    CHECK(decodes > 0, "§9 never DECODEd a block");
+    CHECK(cache.hits > 0, "§9 the cache was never hit");
+
+    /* A cache that can never answer: every block DECODEs, and the result must
+     * be identical. "No aggregate" is a complete answer, not a degraded one. */
+    {
+        uint64_t from = bnd[0], to = bnd[nbnd - 1];
+        struct pgwt_event_reader ra, rb;
+        struct pgwt_block_agg wa, wb;
+        uint64_t ea = 0, eb = 0;
+        int ma = 0, da = 0, mb = 0, db = 0;
+        CHECK(pgwt_reader_open(&ra, path) == 0, "§9 blind open a");
+        pgwt_block_agg_init_window(&wa);
+        CHECK(pgwt_block_agg_window_from_reader(&ra, from, to, &wa,
+              sec9_lookup_blind, NULL, NULL, &ea, &ma, &da) == PGWT_BAGG_OK,
+              "§9 blind-cache window");
+        pgwt_reader_close(&ra);
+        CHECK(pgwt_reader_open(&rb, path) == 0, "§9 blind open b");
+        pgwt_block_agg_init_window(&wb);
+        CHECK(pgwt_block_agg_window_from_reader(&rb, from, to, &wb,
+              sec9_lookup, sec9_store, &cache, &eb, &mb, &db) == PGWT_BAGG_OK,
+              "§9 warm-cache window");
+        pgwt_reader_close(&rb);
+        CHECK(ma == 0 && da > 0,
+              "§9 a blind cache must DECODE everything (merged=%d decoded=%d)",
+              ma, da);
+        CHECK(mb > 0, "§9 the warm cache must MERGE (merged=%d)", mb);
+        CHECK(wa.total_transitions == wb.total_transitions &&
+              wa.pair_total_ns == wb.pair_total_ns &&
+              wa.node_total_ns == wb.node_total_ns &&
+              wa.n_pairs == wb.n_pairs && wa.n_nodes == wb.n_nodes &&
+              ea == eb,
+              "§9 blind-cache and warm-cache answers differ: "
+              "(%" PRIu64 ", %" PRIu64 ", %" PRIu64 ") vs (%" PRIu64
+              ", %" PRIu64 ", %" PRIu64 ")",
+              wa.total_transitions, wa.pair_total_ns, wa.node_total_ns,
+              wb.total_transitions, wb.pair_total_ns, wb.node_total_ns);
+        seen.refusals_observed++;
+        pgwt_block_agg_free(&wa);
+        pgwt_block_agg_free(&wb);
+    }
+
+    sec9_cache_free(&cache);
+    free(all);
+    if (system(rm) != 0) { }
+
+    /* A SAMPLES block that overlaps the window must be REFUSED, not skipped:
+     * the tables would be right and the fidelity label wrong, and a wrong
+     * label on a right number is still a wrong answer. One outside the window
+     * is skipped, and that window still answers. */
+    {
+        char sdir[256];
+        snprintf(sdir, sizeof(sdir), "/tmp/pgwt_bagg_sec9s_%d", (int)getpid());
+        char srm[320];
+        snprintf(srm, sizeof(srm), "rm -rf '%s'", sdir);
+        if (system(srm) != 0) { }
+        CHECK(mkdir(sdir, 0700) == 0, "§9 mkdir samples dir");
+        uint64_t f2 = 0, l2 = 0;
+        CHECK(sec9_write_trace(sdir, 1, 1, &f2, &l2) == 0,
+              "§9 write samples fixture");
+        char spath[512];
+        if (sec9_find_trace(sdir, spath, sizeof(spath)) == 0) {
+            struct pgwt_event_reader r;
+            CHECK(pgwt_reader_open(&r, spath) == 0, "§9 open samples fixture");
+            /* Window reaching the end: the SAMPLES block overlaps. */
+            struct pgwt_block_agg w1;
+            pgwt_block_agg_init_window(&w1);
+            uint64_t e1 = 0; int m1 = 0, d1 = 0;
+            int rc1 = pgwt_block_agg_window_from_reader(&r, f2, l2 + 1, &w1,
+                          sec9_lookup_blind, NULL, NULL, &e1, &m1, &d1);
+            CHECK(rc1 == PGWT_BAGG_REFUSED_BLOCK_TYPE,
+                  "§9 an overlapping SAMPLES block must be REFUSED, got %d",
+                  rc1);
+            pgwt_block_agg_free(&w1);
+            seen.refusals_observed++;
+            /* Window stopping before the samples: eligible, and answers. */
+            struct pgwt_block_agg w2;
+            pgwt_block_agg_init_window(&w2);
+            uint64_t e2 = 0; int m2 = 0, d2 = 0;
+            int rc2 = pgwt_block_agg_window_from_reader(&r, f2,
+                          f2 + 1000ULL * 64, &w2, sec9_lookup_blind, NULL,
+                          NULL, &e2, &m2, &d2);
+            CHECK(rc2 == PGWT_BAGG_OK,
+                  "§9 a SAMPLES block OUTSIDE the window must be skipped, "
+                  "not refused (got %d)", rc2);
+            CHECK(e2 == 64, "§9 expected 64 admitted records, got %" PRIu64,
+                  e2);
+            pgwt_block_agg_free(&w2);
+            pgwt_reader_close(&r);
+        }
+        if (system(srm) != 0) { }
+    }
+
+    /* A file that cannot be opened must refuse, never answer zero. */
+    {
+        struct pgwt_event_reader r;
+        CHECK(pgwt_reader_open(&r, "/nonexistent/pgwt/no-such.trace") != 0,
+              "§9 opening a missing trace must fail");
+        seen.refusals_observed++;
+    }
+}
+
 /* ── main ───────────────────────────────────────────────────────────────── */
 
 int main(void)
@@ -1641,6 +2108,7 @@ int main(void)
     section6b_inclusive_end_divergence();
     section7_mutation_probes();
     section8_bypass();
+    section9_on_disk();
 
     /* §0 the ledger. A green run that exercised nothing is not a pass. */
     printf("=== §0 vacuity ledger ===\n");

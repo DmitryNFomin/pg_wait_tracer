@@ -10,6 +10,15 @@ src/block_agg.c and the driver requires the test to go RED for it. A mutation
 that leaves the suite GREEN is a hole in the suite, and the driver reports it
 as such.
 
+Each mutation names the source file it breaks, so the set covers every file
+this phase touches that a C unit test can reach: src/block_agg.c and
+src/compute.c. src/server.c is NOT mutated here -- its code is only reachable
+through a running pgwt-server, so the loader's half-open bound and the
+transitions handler are covered by the Linux synthetic-data and live tiers
+instead (tests/run_all.sh), not by this driver. Saying so is the point: a
+driver that silently covered less than it looked like it did would be the
+same false-negative shape it exists to catch.
+
 Usage (from the repo root):
     python3 tests/results/block-agg/run_mutations.py            # all
     python3 tests/results/block-agg/run_mutations.py M3         # one
@@ -37,9 +46,10 @@ int pgwt_proc_open(struct pgwt_proc *p, char *const argv[])
 int pgwt_proc_close(struct pgwt_proc *p) { (void)p; return -1; }
 '''
 
-# (id, what guard is broken, which sections must catch it, (old, new))
+# (id, target source file, what guard is broken, which sections must catch
+#  it, (old, new))
 MUTATIONS = [
-    ("M1",
+    ("M1", "block_agg.c",
      "plan(): MERGE accepts a block ending exactly AT `to` (inclusive end) -- "
      "the #316 shape. A merged block then carries a record the raw path "
      "excluded.",
@@ -47,14 +57,14 @@ MUTATIONS = [
      ("id->first_timestamp_ns >= from_mono_ns && id->last_timestamp_ns < to_mono_ns",
       "id->first_timestamp_ns >= from_mono_ns && id->last_timestamp_ns <= to_mono_ns")),
 
-    ("M2",
+    ("M2", "block_agg.c",
      "plan(): SKIP is off by one at the START edge -- a block whose last "
      "record sits exactly at `from` is dropped, losing an in-window record.",
      "sec5/sec6",
      ("if (id->last_timestamp_ns < from_mono_ns)\n        return PGWT_BLOCK_SKIP;",
       "if (id->last_timestamp_ns <= from_mono_ns)\n        return PGWT_BLOCK_SKIP;")),
 
-    ("M3",
+    ("M3", "block_agg.c",
      "merge(): the double-count guard is removed, so the same block can be "
      "folded in twice.",
      "sec8 B9",
@@ -63,14 +73,14 @@ MUTATIONS = [
       "            return PGWT_BAGG_REFUSED_DUPLICATE;",
       "    /* MUTANT: duplicate guard removed */")),
 
-    ("M4",
+    ("M4", "block_agg.c",
      "plan(): a MISSING aggregate is merged anyway (`have_agg` ignored) -- "
      "absence read as an answer, violating C8.",
      "sec8 B2",
      ("    if (!have_agg)\n        return PGWT_BLOCK_DECODE;",
       "    /* MUTANT: have_agg ignored */")),
 
-    ("M5",
+    ("M5", "block_agg.c",
      "build(): a SAMPLES block is aggregated as if it held transitions (C1 "
      "guard removed).",
      "sec8 B3",
@@ -78,14 +88,14 @@ MUTATIONS = [
       "        return PGWT_BAGG_REFUSED_BLOCK_TYPE;",
       "    /* MUTANT: block type guard removed */")),
 
-    ("M6",
+    ("M6", "block_agg.c",
      "build(): an UNCOMMITTED block (the open block of current.trace) is "
      "aggregated (C2 guard removed).",
      "sec8 B4",
      ("    if (!committed)\n        return PGWT_BAGG_REFUSED_UNCOMMITTED;",
       "    /* MUTANT: committed guard removed */")),
 
-    ("M7",
+    ("M7", "block_agg.c",
      "record_counts(): the raw path's impossible-record refusal "
      "(duration_ns > timestamp_ns) is dropped, so the aggregate counts a link "
      "pgwt_compute_transitions refuses. This is the divergence §1 actually "
@@ -94,7 +104,7 @@ MUTATIONS = [
      ("    if (ev->duration_ns > ev->timestamp_ns)\n        return 0;",
       "    /* MUTANT: impossible-record refusal removed */")),
 
-    ("M8",
+    ("M8", "block_agg.c",
      "trace_identity_equal(): an UNRESOLVABLE identity compares equal -- "
      "unknown treated as a match, which is how a cache approves a block it "
      "cannot identify.",
@@ -103,7 +113,7 @@ MUTATIONS = [
       "        return 0;                       /* unknown never equals anything */",
       "    if (!a || !b) return 0;  /* MUTANT: unresolvable treated as equal */")),
 
-    ("M9",
+    ("M9", "block_agg.c",
      "matches(): num_events is no longer compared, so a REWRITTEN block at the "
      "same offset revalidates.",
      "sec8 B8",
@@ -112,7 +122,7 @@ MUTATIONS = [
       "    return a->id.block_index        == now->block_index &&\n"
       "           /* MUTANT: num_events no longer compared */")),
 
-    ("M10",
+    ("M10", "block_agg.c",
      "build(): an allocation failure returns OK with a PARTIAL aggregate "
      "instead of refusing -- a short answer that looks like a real one.",
      "sec8 B10",
@@ -125,7 +135,7 @@ MUTATIONS = [
       "                break;\n"
       "            }")),
 
-    ("M11",
+    ("M11", "block_agg.c",
      "node_counts(): SAMPLE records are counted as node time, so a sampled "
      "point observation fabricates a zero-duration node the raw node pass of "
      "the aggregate side does not have.",
@@ -142,7 +152,7 @@ MUTATIONS = [
       "        return 0;\n"
       "    /* MUTANT: SAMPLE records counted as node time */")),
 
-    ("M12",
+    ("M12", "block_agg.c",
      "plan(): a BOUNDARY block is merged whole instead of decoded (the start "
      "containment test is dropped), so records before `from` are counted.",
      "sec5/sec6",
@@ -151,7 +161,7 @@ MUTATIONS = [
       "    if (id->last_timestamp_ns < to_mono_ns)\n"
       "        return PGWT_BLOCK_MERGE;   /* MUTANT: start bound dropped */")),
 
-    ("M13",
+    ("M13", "block_agg.c",
      "pairs_sorted(): the total order is reduced to count-only, so the "
      "readout depends on hash-table layout and merge order.",
      "sec3",
@@ -168,7 +178,7 @@ MUTATIONS = [
       "\n"
       "static int cmp_node_total")),
 
-    ("M15",
+    ("M15", "block_agg.c",
      "merge(): a pair table that cannot grow mid-merge returns OK instead of "
      "NOMEM, so a PARTIAL merge is handed back as a complete answer.",
      "sec8 B10",
@@ -181,7 +191,50 @@ MUTATIONS = [
       "        if (rc != PGWT_BAGG_OK)\n"
       "            break;   /* MUTANT: partial merge reported as OK */")),
 
-    ("M14",
+    ("M16", "block_agg.c",
+     "window_from_reader(): a SAMPLES block that OVERLAPS the window is "
+     "skipped instead of refused. The tables stay right and the caller's "
+     "fidelity label goes wrong -- a wrong label on a right number.",
+     "sec9",
+     ("        if (bi.block_type != PGWT_BLOCK_TRANSITIONS) {\n"
+      "            if (overlaps) {\n"
+      "                rc = PGWT_BAGG_REFUSED_BLOCK_TYPE;\n"
+      "                break;\n"
+      "            }\n"
+      "            continue;\n"
+      "        }",
+      "        if (bi.block_type != PGWT_BLOCK_TRANSITIONS)\n"
+      "            continue;   /* MUTANT: overlapping SAMPLES block skipped */")),
+
+    ("M17", "compute.c",
+     "cmp_trans_desc(): back to count-only, so the raw path's tied rows are "
+     "ordered by hash layout again and a row-by-row comparison against the "
+     "aggregate's readout stops meaning anything.",
+     "sec3c",
+     ("    const struct trans_accum *x = a, *y = b;\n"
+      "    if (x->count != y->count)\n"
+      "        return x->count > y->count ? -1 : 1;\n"
+      "    if (x->from_event != y->from_event)\n"
+      "        return x->from_event < y->from_event ? -1 : 1;\n"
+      "    if (x->to_event != y->to_event)\n"
+      "        return x->to_event < y->to_event ? -1 : 1;\n"
+      "    return 0;",
+      "    uint64_t ca = ((const struct trans_accum *)a)->count;\n"
+      "    uint64_t cb = ((const struct trans_accum *)b)->count;\n"
+      "    return (cb > ca) - (cb < ca);   /* MUTANT: not a total order */")),
+
+    ("M19", "block_agg.c",
+     "add_events(): the half-open window test becomes inclusive at the end, "
+     "so a boundary block contributes the record at ts == to that the raw "
+     "path excludes -- the #316 shape, on the decode side this time.",
+     "sec6/sec9",
+     ("        if (!pgwt_block_agg_in_window(&events[i], from_mono_ns, to_mono_ns))\n"
+      "            continue;",
+      "        if (events[i].timestamp_ns < from_mono_ns ||\n"
+      "            events[i].timestamp_ns > to_mono_ns)\n"
+      "            continue;   /* MUTANT: inclusive end */")),
+
+    ("M14", "block_agg.c",
      "lookup(): an ABSENT pair is reported as present with count 0 -- absence "
      "read as zero, the exact failure C8 forbids.",
      "sec2",
@@ -192,15 +245,18 @@ MUTATIONS = [
 ]
 
 
-def build_and_run(workdir, label):
-    """Compile the suite out of `workdir`'s src copy; return (exit, output)."""
+# Sources the suite links. The mutated one is swapped for the copy in the
+# work directory; everything else comes from src/.
+LINKED = ["block_agg.c", "compute.c", "event_reader.c", "event_writer.c",
+          "wait_event.c", "idle_rule.c", "cJSON.c"]
+
+
+def build_and_run(workdir, label, mutated=None):
+    """Compile the suite, taking `mutated` from `workdir`; return (exit, out)."""
     exe = os.path.join(workdir, "test_block_agg")
-    srcs = [os.path.join(TESTS, "test_block_agg.c"),
-            os.path.join(workdir, "block_agg.c"),
-            os.path.join(SRC, "compute.c"),
-            os.path.join(SRC, "wait_event.c"),
-            os.path.join(SRC, "idle_rule.c"),
-            os.path.join(SRC, "cJSON.c")]
+    srcs = [os.path.join(TESTS, "test_block_agg.c")]
+    for name in LINKED:
+        srcs.append(os.path.join(workdir if name == mutated else SRC, name))
     if sys.platform == "darwin":
         stub = os.path.join(workdir, "spawn_stub.c")
         with open(stub, "w") as fh:
@@ -210,7 +266,16 @@ def build_and_run(workdir, label):
         srcs.append(os.path.join(SRC, "spawn.c"))
     cc = os.environ.get("CC", "cc")
     cmd = [cc, "-g", "-O1", "-Wall", "-I" + SRC, "-I" + os.path.join(ROOT, "include"),
-           "-DPGWT_SERVER", "-o", exe] + srcs + ["-lm"]
+           "-DPGWT_SERVER"]
+    # Homebrew keeps lz4 outside the default search path on this Mac; on Linux
+    # these directories do not exist and are ignored.
+    for extra in ("/opt/homebrew/include", "/usr/local/include"):
+        if os.path.isdir(extra):
+            cmd += ["-I" + extra]
+    for extra in ("/opt/homebrew/lib", "/usr/local/lib"):
+        if os.path.isdir(extra):
+            cmd += ["-L" + extra]
+    cmd += ["-o", exe] + srcs + ["-llz4", "-lm"]
     b = subprocess.run(cmd, capture_output=True, text=True)
     if b.returncode != 0:
         return 126, "BUILD FAILED (%s)\n%s" % (label, b.stderr)
@@ -220,11 +285,10 @@ def build_and_run(workdir, label):
 
 def main():
     want = sys.argv[1:] or None
-    orig = open(os.path.join(SRC, "block_agg.c")).read()
+    orig = {name: open(os.path.join(SRC, name)).read() for name in LINKED}
 
     # Control: the unmutated tree must be GREEN, or nothing below means anything.
     with tempfile.TemporaryDirectory() as wd:
-        shutil.copy(os.path.join(SRC, "block_agg.c"), os.path.join(wd, "block_agg.c"))
         rc, out = build_and_run(wd, "control")
     with open(os.path.join(HERE, "mutation-control.log"), "w") as fh:
         fh.write(out)
@@ -235,26 +299,27 @@ def main():
     print("control: GREEN (exit 0)")
 
     rows = []
-    for mid, why, catches, (old, new) in MUTATIONS:
+    for mid, target, why, catches, (old, new) in MUTATIONS:
         if want and mid not in want:
             continue
-        if old not in orig:
+        if old not in orig[target]:
             rows.append((mid, "NOT-APPLIED", catches,
-                         "the mutation's anchor text is no longer in "
-                         "src/block_agg.c -- this mutation proves nothing"))
-            print("%-4s NOT-APPLIED (anchor missing)" % mid)
+                         "the mutation's anchor text is no longer in src/%s "
+                         "-- this mutation proves nothing" % target))
+            print("%-4s NOT-APPLIED (anchor missing in %s)" % (mid, target))
             continue
-        mutated = orig.replace(old, new, 1)
+        text = orig[target].replace(old, new, 1)
         with tempfile.TemporaryDirectory() as wd:
-            with open(os.path.join(wd, "block_agg.c"), "w") as fh:
-                fh.write(mutated)
-            rc, out = build_and_run(wd, mid)
+            with open(os.path.join(wd, target), "w") as fh:
+                fh.write(text)
+            rc, out = build_and_run(wd, mid, mutated=target)
         fails = [ln for ln in out.splitlines() if ln.startswith("FAIL ")]
         log = os.path.join(HERE, "mutation-%s.log" % mid)
         with open(log, "w") as fh:
-            fh.write("mutation %s\nbroken guard: %s\nexpected to be caught "
-                     "by: %s\n\n--- %s\n+++ %s\n\nexit=%d, %d FAIL line(s)\n\n"
-                     % (mid, why, catches, old.strip()[:200],
+            fh.write("mutation %s (src/%s)\nbroken guard: %s\nexpected to be "
+                     "caught by: %s\n\n--- %s\n+++ %s\n\nexit=%d, %d FAIL "
+                     "line(s)\n\n"
+                     % (mid, target, why, catches, old.strip()[:200],
                         new.strip()[:200], rc, len(fails)))
             fh.write(out)
         verdict = "RED" if rc != 0 else "GREEN-HOLE"
@@ -277,10 +342,10 @@ def main():
                      % (mid, verdict, catches, detail))
         fh.write("\n%d mutation(s), %d RED, %d NOT RED\n"
                  % (len(rows), len(rows) - len(holes), len(holes)))
-        for mid, why, catches, _ in MUTATIONS:
+        for mid, target, why, catches, _ in MUTATIONS:
             if want and mid not in want:
                 continue
-            fh.write("\n%s: %s\n" % (mid, why))
+            fh.write("\n%s (src/%s): %s\n" % (mid, target, why))
     print("\n%d mutation(s), %d RED, %d NOT RED -> %s"
           % (len(rows), len(rows) - len(holes), len(holes), summary))
     return 1 if holes else 0

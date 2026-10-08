@@ -280,9 +280,31 @@ int pgwt_block_agg_merge(struct pgwt_block_agg *dst,
 
 /* Add one boundary record to a window accumulator. The caller is responsible
  * for the window test (it owns the raw path's own predicate);
- * pgwt_block_agg_in_window() is the canonical one. */
+ * pgwt_block_agg_in_window() is the canonical one.
+ *
+ * ATOMICITY, same rule as merge(): a PGWT_BAGG_REFUSED_NOMEM return can leave
+ * *a PARTIALLY updated (the pair table may have taken the record while the
+ * node table could not grow). There is no rollback. A caller that sees NOMEM
+ * must discard the accumulator and recompute from raw, never read its
+ * numbers. Every other refusal leaves *a untouched. */
 int pgwt_block_agg_add_event(struct pgwt_block_agg *a,
                              const struct pgwt_trace_event *ev);
+
+/* Accumulate every record of `events` whose timestamp is in [from, to) into a
+ * window accumulator. THE one raw-side accumulator: both the raw `transitions`
+ * response and the aggregate-vs-raw cross-check go through it, so the per-node
+ * numbers the product emits cannot drift from the numbers the gate compares.
+ * Pass from = 0, to = UINT64_MAX for "every record given".
+ *
+ * `*n_in_window` (optional) receives the number of records admitted by the
+ * window test REGARDLESS of the counting predicates — that is the caller's
+ * "did any exact record actually land in this window" signal, which is what
+ * the fidelity indicator is derived from, and is NOT the same as
+ * total_transitions. Returns 0 or a negative pgwt_bagg_status. */
+int pgwt_block_agg_add_events(struct pgwt_block_agg *a,
+                              const struct pgwt_trace_event *events, int count,
+                              uint64_t from_mono_ns, uint64_t to_mono_ns,
+                              uint64_t *n_in_window);
 
 /* ── Validation ────────────────────────────────────────────────────────── */
 
@@ -326,5 +348,59 @@ int pgwt_block_agg_pairs_sorted(const struct pgwt_block_agg *a,
 /* total_ns DESC, then event_id ASC. Caller frees *out. */
 int pgwt_block_agg_nodes_sorted(const struct pgwt_block_agg *a,
                                 struct pgwt_block_agg_node **out, int *n);
+
+/* ── One trace file's contribution to a window ──────────────────────────── */
+
+struct pgwt_event_reader;   /* event_reader.h */
+
+/* Cache hooks. The POLICY (size caps, eviction, how long an entry lives) is
+ * the caller's; the DECISION of whether an entry may be used is not — it is
+ * pgwt_block_agg_matches(), which the lookup implementation must apply.
+ *
+ * lookup: return a usable aggregate for exactly this block identity, or NULL.
+ *         NULL is a complete answer ("no aggregate") and makes the block
+ *         DECODE; it must never return an entry it could not revalidate.
+ * store:  offered a freshly built aggregate; may take ownership (and must then
+ *         zero *agg) or decline (leave it alone — the caller frees it).
+ *         Declining costs speed, never correctness. */
+typedef const struct pgwt_block_agg *(*pgwt_bagg_lookup_fn)(
+    void *ctx, const struct pgwt_block_identity *id);
+typedef void (*pgwt_bagg_store_fn)(void *ctx, struct pgwt_block_agg *agg);
+
+/* Fold one trace file's blocks into the window accumulator `acc`, merging the
+ * blocks wholly inside [from_mono_ns, to_mono_ns) and decoding only the
+ * partial ones at the edges.
+ *
+ * This is THE iteration both the shipped `transitions` handler and
+ * tests/test_block_agg.c §9 drive, on purpose: the plan/merge/decode sequence
+ * is where a seam double-count or a lost edge record would live, so the gate
+ * must exercise the same code the server runs, not a restatement of it.
+ *
+ * `*exact_in_window` is incremented by the number of records admitted by the
+ * window test regardless of the counting predicates — the caller's fidelity
+ * signal (see pgwt_block_agg_add_events). `*merged`/`*decoded` count blocks,
+ * for callers that want to declare how an answer was produced. All three are
+ * optional.
+ *
+ * A SAMPLES block that OVERLAPS the window is refused
+ * (PGWT_BAGG_REFUSED_BLOCK_TYPE) rather than skipped: sampled records cannot
+ * corrupt the tables, but the caller's fidelity label would be wrong, and a
+ * wrong label on a right number is still a wrong answer. One outside the
+ * window is simply skipped.
+ *
+ * Returns 0, or a negative pgwt_bagg_status. On refusal `acc` may be partially
+ * populated and MUST be discarded by the caller. */
+int pgwt_block_agg_window_from_reader(struct pgwt_event_reader *r,
+                                      uint64_t from_mono_ns,
+                                      uint64_t to_mono_ns,
+                                      struct pgwt_block_agg *acc,
+                                      pgwt_bagg_lookup_fn lookup,
+                                      pgwt_bagg_store_fn store, void *ctx,
+                                      uint64_t *exact_in_window,
+                                      int *merged, int *decoded);
+
+/* The trace identity of an open reader, from its file header. */
+void pgwt_trace_identity_of_reader(const struct pgwt_event_reader *r,
+                                   struct pgwt_trace_identity *out);
 
 #endif /* PGWT_BLOCK_AGG_H */

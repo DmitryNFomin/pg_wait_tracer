@@ -8,6 +8,7 @@
 #include "block_agg.h"
 
 #include "compute.h"        /* struct pgwt_filter */
+#include "event_reader.h"   /* block headers + decode, for the window builder */
 #include "idle_rule.h"      /* pgwt_is_hidden_event */
 #include "test_alloc_fail.h"
 
@@ -334,10 +335,18 @@ static void bounds_widen(struct pgwt_block_agg *a, uint64_t first, uint64_t last
         a->last_timestamp_ns = last;
 }
 
-/* FNV-1a over the on-wire fields of every decoded record, contributing or
- * not. `flags` is deliberately excluded: it is a reader-side annotation and
- * is never persisted (pg_wait_tracer.h), so including it would make the hash
- * depend on which annotator ran. */
+/* FNV-1a over THE FIELDS THIS AGGREGATE DEPENDS ON, for every decoded record,
+ * contributing or not: timestamp_ns, pid, old_event, new_event, duration_ns,
+ * query_id.
+ *
+ * Deliberately NOT every on-wire field. `cpu_ns` is on the wire (trace v3) and
+ * is not hashed, because no number this module produces reads it — a block
+ * that differed only in cpu_ns would still yield byte-identical pair and node
+ * tables, so treating it as a mismatch would refuse a usable aggregate for no
+ * gain. `flags` is excluded for a different reason: it is a reader-side
+ * annotation, never persisted (pg_wait_tracer.h), so hashing it would make the
+ * hash depend on which annotator ran. If a later version starts reading
+ * cpu_ns, it must add it here AND bump PGWT_BLOCK_AGG_VERSION. */
 static uint64_t payload_hash_of(const struct pgwt_trace_event *events, int count)
 {
     uint64_t h = 0xcbf29ce484222325ULL;
@@ -410,6 +419,13 @@ int pgwt_block_agg_build(struct pgwt_block_agg *out,
     return PGWT_BAGG_OK;
 }
 
+/* ATOMICITY (stated here as well as in the merge paragraph of block_agg.h,
+ * because this is where a reader looks): a PGWT_BAGG_REFUSED_NOMEM return can
+ * leave *a PARTIALLY updated — the pair table may have taken the record and
+ * then the node table failed to grow. There is no rollback. A caller that
+ * sees NOMEM must DISCARD the accumulator and recompute from raw; it must not
+ * read the partial numbers, which would be a short answer wearing a plausible
+ * face. Every other refusal leaves *a untouched. */
 int pgwt_block_agg_add_event(struct pgwt_block_agg *a,
                              const struct pgwt_trace_event *ev)
 {
@@ -431,6 +447,29 @@ int pgwt_block_agg_add_event(struct pgwt_block_agg *a,
     }
     if (pgwt_block_agg_record_counts(ev) || pgwt_block_agg_node_counts(ev))
         bounds_widen(a, ev->timestamp_ns, ev->timestamp_ns);
+    return PGWT_BAGG_OK;
+}
+
+int pgwt_block_agg_add_events(struct pgwt_block_agg *a,
+                              const struct pgwt_trace_event *events, int count,
+                              uint64_t from_mono_ns, uint64_t to_mono_ns,
+                              uint64_t *n_in_window)
+{
+    if (n_in_window)
+        *n_in_window = 0;
+    if (!a || a->mode != PGWT_BAGG_MODE_WINDOW)
+        return PGWT_BAGG_REFUSED_MODE;
+    if (count < 0 || (count > 0 && !events))
+        return PGWT_BAGG_REFUSED_INVALID;
+    for (int i = 0; i < count; i++) {
+        if (!pgwt_block_agg_in_window(&events[i], from_mono_ns, to_mono_ns))
+            continue;
+        if (n_in_window)
+            (*n_in_window)++;
+        int rc = pgwt_block_agg_add_event(a, &events[i]);
+        if (rc != PGWT_BAGG_OK)
+            return rc;
+    }
     return PGWT_BAGG_OK;
 }
 
@@ -652,4 +691,135 @@ int pgwt_block_agg_nodes_sorted(const struct pgwt_block_agg *a,
     *out = arr;
     *n = k;
     return PGWT_BAGG_OK;
+}
+
+/* ── One trace file's contribution to a window ──────────────────────────── */
+
+void pgwt_trace_identity_of_reader(const struct pgwt_event_reader *r,
+                                   struct pgwt_trace_identity *out)
+{
+    if (!out)
+        return;
+    memset(out, 0, sizeof(*out));
+    if (!r)
+        return;
+    out->trace_version   = r->header.version;
+    out->pg_version      = r->header.pg_version;
+    out->start_time_ns   = r->header.start_time_ns;
+    out->clock_offset_ns = r->header.clock_offset_ns;
+}
+
+int pgwt_block_agg_window_from_reader(struct pgwt_event_reader *r,
+                                      uint64_t from_mono_ns,
+                                      uint64_t to_mono_ns,
+                                      struct pgwt_block_agg *acc,
+                                      pgwt_bagg_lookup_fn lookup,
+                                      pgwt_bagg_store_fn store, void *ctx,
+                                      uint64_t *exact_in_window,
+                                      int *merged, int *decoded)
+{
+    if (!r || !acc || acc->mode != PGWT_BAGG_MODE_WINDOW)
+        return PGWT_BAGG_REFUSED_MODE;
+    if (to_mono_ns <= from_mono_ns)
+        return PGWT_BAGG_OK;            /* selects nothing, and that is a fact */
+
+    struct pgwt_trace_identity tr;
+    pgwt_trace_identity_of_reader(r, &tr);
+    /* A header we cannot resolve can never be revalidated later, so it must
+     * not become the basis of a cached answer (C8). */
+    if (!pgwt_trace_identity_resolvable(&tr))
+        return PGWT_BAGG_REFUSED_IDENTITY;
+
+    struct pgwt_trace_event *buf = NULL;
+    int rc = PGWT_BAGG_OK;
+
+    for (int b = 0; b < r->num_blocks; b++) {
+        struct pgwt_block_info bi;
+        if (pgwt_reader_block_info(r, b, &bi) != 0) {
+            rc = PGWT_BAGG_REFUSED_INVALID;   /* cannot see => refuse */
+            break;
+        }
+
+        int overlaps = bi.last_timestamp_ns >= from_mono_ns &&
+                       bi.first_timestamp_ns < to_mono_ns;
+        if (bi.block_type != PGWT_BLOCK_TRANSITIONS) {
+            if (overlaps) {
+                rc = PGWT_BAGG_REFUSED_BLOCK_TYPE;
+                break;
+            }
+            continue;
+        }
+
+        struct pgwt_block_identity id = {
+            .trace              = tr,
+            .block_index        = (uint32_t)b,
+            .num_events         = bi.num_events,
+            .file_offset        = r->block_index[b].file_offset,
+            .first_timestamp_ns = bi.first_timestamp_ns,
+            .last_timestamp_ns  = bi.last_timestamp_ns,
+        };
+
+        const struct pgwt_block_agg *cached = lookup ? lookup(ctx, &id) : NULL;
+        enum pgwt_block_plan plan =
+            pgwt_block_agg_plan(&id, cached != NULL, from_mono_ns, to_mono_ns);
+
+        if (plan == PGWT_BLOCK_SKIP)
+            continue;
+
+        if (plan == PGWT_BLOCK_MERGE) {
+            rc = pgwt_block_agg_merge(acc, cached);
+            if (rc != PGWT_BAGG_OK)
+                break;
+            if (merged) (*merged)++;
+            if (exact_in_window) *exact_in_window += id.num_events;
+            continue;
+        }
+
+        /* DECODE: a boundary block, or one with no usable aggregate. */
+        if (!buf) {
+            buf = calloc(PGWT_BLOCK_EVENTS, sizeof(*buf));
+            if (!buf) {
+                rc = PGWT_BAGG_REFUSED_NOMEM;
+                break;
+            }
+        }
+        int n = pgwt_reader_decode_block_info(r, b, buf, PGWT_BLOCK_EVENTS, &bi);
+        if (n < 0) {
+            rc = PGWT_BAGG_REFUSED_INVALID;
+            break;
+        }
+        /* No header-vs-decode record-count check here, deliberately: it would
+         * be unreachable. pgwt_reader_decode_block_info() takes its own record
+         * count FROM the same block-header field this identity carries
+         * (src/event_reader.c, `count = bh.num_events`), so n and
+         * bi.num_events cannot disagree — a corrupt count makes the reader
+         * refuse the block outright, which lands on the n < 0 branch above.
+         * A guard that cannot fire is not protection, it is code that looks
+         * like protection; the mutation driver found this one GREEN (M18) and
+         * it was deleted rather than left in with no test behind it. */
+        uint64_t admitted = 0;
+        rc = pgwt_block_agg_add_events(acc, buf, n, from_mono_ns, to_mono_ns,
+                                       &admitted);
+        if (rc != PGWT_BAGG_OK)
+            break;
+        if (decoded) (*decoded)++;
+        if (exact_in_window) *exact_in_window += admitted;
+
+        /* Having paid for the decode, build the block's aggregate and offer it
+         * to the cache so the NEXT window that contains this block whole can
+         * merge it instead. This is what makes the phase a win rather than a
+         * rearrangement: without reuse the fast path decodes exactly what the
+         * raw path decodes. */
+        if (store) {
+            struct pgwt_block_agg fresh;
+            if (pgwt_block_agg_build(&fresh, &id, bi.block_type, 1, buf, n)
+                == PGWT_BAGG_OK) {
+                store(ctx, &fresh);
+                pgwt_block_agg_free(&fresh);   /* no-op once ownership moved */
+            }
+        }
+    }
+
+    free(buf);
+    return rc;
 }

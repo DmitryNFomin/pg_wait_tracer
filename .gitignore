@@ -43,7 +43,12 @@ tests/test_exec_index
 tests/test_block_agg
 tests/bench_block_agg
 tests/map_reader_core.o
-tests/__pycache__/
+# Python bytecode, at ANY depth. It used to be anchored to tests/, which left
+# tests/results/**/__pycache__/*.pyc untracked-but-not-ignored and therefore
+# INSIDE scripts/tree-hash.sh's scope: check.sh's py_compile step generated it,
+# so a passing `make check` stamp silently depended on bytecode and deleting a
+# .pyc invalidated the stamp. Bytecode is never content.
+__pycache__/
 
 # Visual-snapshot diff/actual artifacts (transient — only baselines are tracked)
 tests/web_snapshots/*-actual.png

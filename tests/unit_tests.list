@@ -176,14 +176,25 @@ test_agg_raw_crosscheck
 # §1 caught a real divergence before this shipped: pgwt_filter_matches()
 # refuses a record whose duration exceeds its own end timestamp, and the
 # aggregate did not.
-# Bypass suite (15 cases): an empty block, an absent aggregate, a SAMPLES
-# block, an uncommitted block, an unresolvable trace identity, a version
-# mismatch, a rotation, a rewritten block (every header field perturbed in a
-# loop), a double merge, injected allocation failures, every filter field, an
-# empty/inverted/unparseable window, a frozen or freed aggregate, and a window
-# where NOTHING qualifies — each must REFUSE, because "0 == 0" satisfies every
-# assertion in the file. tests/results/block-agg/run_mutations.py breaks one
-# guard at a time (14 mutations, all RED) so the suite is known able to fail.
+# §9 goes through the REAL writer and reader: a multi-block trace on disk,
+# driving the same pgwt_block_agg_window_from_reader() src/server.c's
+# handle_transitions() calls, swept twice so the cache's contract ("a merged
+# aggregate equals a fresh decode, to the nanosecond") is exercised rather
+# than assumed. §3b/§3c pin the readout's TOTAL order on both sides, which is
+# what makes a row-by-row comparison between the paths mean anything.
+# Bypass suite: an empty block, an absent aggregate, a SAMPLES block, an
+# uncommitted block, an unresolvable trace identity, a version mismatch, a
+# rotation, a rewritten block (every header field perturbed in a loop), a
+# double merge, injected allocation failures, every filter field, an
+# empty/inverted/unparseable window, a frozen or freed aggregate, a window
+# where NOTHING qualifies, a cache that can never answer, an overlapping
+# SAMPLES block and an unopenable trace file — each must REFUSE, because
+# "0 == 0" satisfies every assertion in the file.
+# tests/results/block-agg/run_mutations.py breaks one guard at a time across
+# src/block_agg.c and src/compute.c (18 mutations, all RED, control green). It
+# earned its keep twice: it found the tie-order check vacuous (M13) and an
+# unreachable guard that was deleted rather than left looking like protection
+# (M18).
 test_block_agg
 # #294: cross_validate drops pgwt_is_idle_event() time from BOTH sides before
 # any share is computed, so when the sampled tier reads less CPU than the exact

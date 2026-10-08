@@ -465,20 +465,25 @@ test_exec_index: test_exec_index.c ../src/exec_index.c ../src/compute.c \
 # -DPGWT_SERVER exactly as test_window_clip does, with its one foreign symbol
 # (pgwt_visit_summaries) stubbed in the test — so the comparison is against
 # the product rather than against a copy or against this module's own
-# accumulator. No BPF, no live PG, no files; runs anywhere; ~0.05 s.
+# accumulator. §9 additionally writes a real multi-block trace with the real
+# writer and reads it back with the real reader, driving the same
+# pgwt_block_agg_window_from_reader() the server calls, hence event_reader /
+# event_writer / -llz4. No BPF, no live PG; runs anywhere; ~1 s.
 test_block_agg: test_block_agg.c ../src/block_agg.c ../src/compute.c \
+                $(BUILD)/server_event_reader.o $(BUILD)/server_event_writer.o \
                 $(BUILD)/wait_event.o $(BUILD)/idle_rule.o \
                 $(BUILD)/spawn.o $(BUILD)/cJSON.o
-	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -lm
+	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -llz4 -lm
 
 # bench_block_agg: the measurement behind Phase 1's falsifiable prediction
 # (O(events in window) -> O(blocks x distinct pairs)). Deliberately NOT in
 # unit_tests.list: a wall-clock assertion on a shared runner is runner noise
 # dressed up as a gate. Built so the number can be reproduced on the gate box.
 bench_block_agg: bench_block_agg.c ../src/block_agg.c ../src/compute.c \
+                 $(BUILD)/server_event_reader.o $(BUILD)/server_event_writer.o \
                  $(BUILD)/wait_event.o $(BUILD)/idle_rule.o \
                  $(BUILD)/spawn.o $(BUILD)/cJSON.o
-	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -lm
+	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -llz4 -lm
 
 clean:
 	rm -f $(TESTS) test_exec_index map_reader_core.o
