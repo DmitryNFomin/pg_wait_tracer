@@ -53,7 +53,13 @@ def main():
     trace_dir = generate_traces(build_scenario())
     try:
         with ServerHarness(trace_dir,
-                           env={"PGWT_LOAD_MAX_EVENTS": 5_000}) as srv:
+                           env={"PGWT_LOAD_MAX_EVENTS": 5_000,
+                                # merged_blocks/decoded_blocks are opt-in
+                                # provenance (they must never change WHETHER
+                                # two answers compare equal), and the
+                                # `transitions` exemption below asserts on
+                                # them.
+                                "PGWT_TRANSITIONS_PROVENANCE": "1"}) as srv:
             # Unfiltered: 20k events > 5k bound → structured error.
             resp = srv.query("time_model")
             t.check("error" in resp, "unfiltered long window returns error")
@@ -90,14 +96,36 @@ def main():
             # the bound there is no raw result left to compare against (the
             # bit-exact comparison lives in tests/test_block_agg.c §6 and §9,
             # at sizes the raw path can still compute).
-            resp = srv.query("transitions")
-            t.check("error" not in resp,
+            # TWO requests, because the first cannot merge anything: a cold
+            # cache has no aggregates yet, so request 1 decodes every block
+            # and stores them (merged=0) and request 2 merges them. Asserting
+            # merged>0 on the FIRST request is simply wrong, and the gate said
+            # so (merged=0 decoded=5). What matters is that the cache delivers
+            # on the second look, and that both answers are IDENTICAL -- a
+            # cached aggregate that answered differently from a fresh decode
+            # would be the silent-wrong failure this whole phase is built
+            # against.
+            first = srv.query("transitions")
+            t.check("error" not in first,
                     "transitions: answers past the raw bound (block aggregate)")
+            t.check(first.get("decoded_blocks", 0) > 0,
+                    "transitions: the cold request decoded blocks "
+                    "(merged=%s decoded=%s)" % (first.get("merged_blocks"),
+                                                first.get("decoded_blocks")))
+            resp = srv.query("transitions")
+            t.check("error" not in resp, "transitions: second request answers")
             t.check(resp.get("merged_blocks", 0) > 0,
-                    "transitions: the answer came from MERGED blocks, not "
-                    "from a raw load that happened to fit (merged=%s "
+                    "transitions: the warm request MERGED blocks, so the "
+                    "aggregate cache actually delivered (merged=%s "
                     "decoded=%s)" % (resp.get("merged_blocks"),
                                      resp.get("decoded_blocks")))
+            t.check_eq(resp.get("total"), first.get("total"),
+                       "transitions: merged answer == freshly decoded answer "
+                       "(total)")
+            t.check_eq(resp.get("total_link_count"),
+                       first.get("total_link_count"),
+                       "transitions: merged answer == freshly decoded answer "
+                       "(distinct links)")
             links = resp.get("links", [])
             t.check(len(links) > 0 and resp.get("total", 0) > 0,
                     "transitions: non-empty, so the exemption is not hiding "

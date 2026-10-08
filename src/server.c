@@ -5276,11 +5276,27 @@ static void emit_transitions_response(struct pgwt_request *req,
     cJSON_AddNumberToObject(root, "link_count", shown);
     cJSON_AddNumberToObject(root, "total_link_count", total_links);
     cJSON_AddBoolToObject(root, "truncated", shown < total_links);
-    /* Declared, not inferred: how the answer was produced. 0/0 is the raw
-     * path. A reviewer (or the live-UI smoke) can tell the fast path actually
-     * ran instead of assuming it from a latency number. */
-    cJSON_AddNumberToObject(root, "merged_blocks", merged_blocks);
-    cJSON_AddNumberToObject(root, "decoded_blocks", decoded_blocks);
+    /* PROVENANCE, and OPT-IN. How the answer was produced — 0/0 is the raw
+     * path — so a reviewer or a test can tell the fast path actually ran
+     * instead of inferring it from a latency number.
+     *
+     * Behind an env var, like the curcache stats line, because provenance is
+     * DIAGNOSTICS and not data. Emitting it unconditionally made two
+     * numerically identical responses compare unequal: the
+     * current-trace-cache test deep-compares a cached read against an
+     * uncached one, and both had total=4404 with byte-identical links and
+     * nodes while differing in merged_blocks/decoded_blocks alone. A field
+     * that records HOW an answer was reached must never change WHETHER two
+     * answers are the same. */
+    static int provenance = -1;
+    if (provenance < 0) {
+        const char *env = getenv("PGWT_TRANSITIONS_PROVENANCE");
+        provenance = (env && env[0] && env[0] != '0') ? 1 : 0;
+    }
+    if (provenance) {
+        cJSON_AddNumberToObject(root, "merged_blocks", merged_blocks);
+        cJSON_AddNumberToObject(root, "decoded_blocks", decoded_blocks);
+    }
 
     cJSON *nodes = cJSON_AddArrayToObject(root, "nodes");
     for (int i = 0; i < n_nodes; i++) {
