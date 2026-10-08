@@ -1,0 +1,284 @@
+{
+  "label": "r2",
+  "url": "http://localhost:8384/",
+  "chrome": "154.0.8037.100",
+  "viewport": {
+    "w": 1710,
+    "h": 981,
+    "dpr": 2
+  },
+  "viewport_read2": {
+    "w": 1710,
+    "h": 981,
+    "dpr": 2
+  },
+  "viewport_agree": true,
+  "pinned": true,
+  "range": "15m",
+  "navs_per_tab": 3,
+  "tabs_walked": [
+    "overview",
+    "events",
+    "sessions",
+    "queries",
+    "histogram",
+    "transitions",
+    "concurrency",
+    "waterfall",
+    "scatter",
+    "matrix",
+    "timeline"
+  ],
+  "results": {
+    "overview": {
+      "samples": [
+        283.49900245666504,
+        234.6799373626709,
+        314.59498405456543
+      ],
+      "detail": "29 rows"
+    },
+    "events": {
+      "samples": [
+        259.1731548309326,
+        316.878080368042,
+        224.67923164367676
+      ],
+      "detail": "38 rows"
+    },
+    "sessions": {
+      "samples": [
+        234.74907875061035,
+        313.22216987609863,
+        238.11602592468262
+      ],
+      "detail": "109 rows"
+    },
+    "queries": {
+      "samples": [
+        5503.80802154541,
+        4389.136791229248,
+        4676.32794380188
+      ],
+      "detail": "26 rows"
+    },
+    "histogram": {
+      "samples": [
+        359.5089912414551,
+        292.26016998291016,
+        302.6559352874756
+      ],
+      "detail": "3513 cells"
+    },
+    "transitions": {
+      "samples": [
+        2830.4760456085205,
+        3023.101806640625
+      ],
+      "detail": "9 nodes",
+      "error": "no container"
+    },
+    "concurrency": {
+      "samples": [
+        3488.258123397827,
+        3468.724012374878
+      ],
+      "detail": "300 buckets",
+      "error": "no container"
+    },
+    "waterfall": {
+      "samples": [
+        4990.575790405273,
+        3934.1769218444824,
+        4101.198673248291
+      ],
+      "detail": "101 executions, 1 lanes"
+    },
+    "scatter": {
+      "samples": [
+        4404.731035232544,
+        4184.329032897949,
+        4332.590103149414
+      ],
+      "detail": "2000 points"
+    },
+    "matrix": {
+      "samples": [
+        2980.0021648406982,
+        3054.737329483032,
+        3207.2620391845703
+      ],
+      "detail": "38 cells"
+    },
+    "timeline": {
+      "samples": [
+        231.99176788330078,
+        256.95204734802246,
+        261.6441249847412
+      ],
+      "detail": "1096 spans"
+    }
+  },
+  "time_model_rows": [
+    {
+      "text": "DB Time 810.5s 100.0% 0.90",
+      "pad": "12px",
+      "cls": ""
+    },
+    {
+      "text": "CPU* 426.1s 52.6% 0.47",
+      "pad": "28px",
+      "cls": ""
+    },
+    {
+      "text": "Lock 234.5s 28.9% 0.26",
+      "pad": "28px",
+      "cls": ""
+    },
+    {
+      "text": "Lock:transactionid 115.4s 14.2% 0.13",
+      "pad": "48px",
+      "cls": ""
+    },
+    {
+      "text": "Lock:advisory 83.6s 10.3% 0.09",
+      "pad": "48px",
+      "cls": ""
+    },
+    {
+      "text": "Lock:relation 35.5s 4.4% 0.04",
+      "pad": "48px",
+      "cls": ""
+    },
+    {
+      "text": "Lock:extend 1.4ms 0.0% 0.00",
+      "pad": "48px",
+      "cls": ""
+    },
+    {
+      "text": "IO 113.3s 14.0% 0.13",
+      "pad": "28px",
+      "cls": ""
+    },
+    {
+      "text": "IO:WalSync 78.1s 9.6% 0.09",
+      "pad": "48px",
+      "cls": ""
+    },
+    {
+      "text": "IO:DataFileRead 15.9s 2.0% 0.02",
+      "pad": "48px",
+      "cls": ""
+    },
+    {
+      "text": "IO:WalWrite 5.4s 0.7% 0.01",
+      "pad": "48px",
+      "cls": ""
+    },
+    {
+      "text": "IO:DataFileFlush 4.8s 0.6% 0.01",
+      "pad": "48px",
+      "cls": ""
+    },
+    {
+      "text": "IO:DataFileWrite 4.3s 0.5% 0.00",
+      "pad": "48px",
+      "cls": ""
+    },
+    {
+      "text": "LWLock 36.6s 4.5% 0.04",
+      "pad": "28px",
+      "cls": ""
+    },
+    {
+      "text": "LWLock:LockManager 19.4s 2.4% 0.02",
+      "pad": "48px",
+      "cls": ""
+    },
+    {
+      "text": "LWLock:WALWrite 17.1s 2.1% 0.02",
+      "pad": "48px",
+      "cls": ""
+    },
+    {
+      "text": "LWLock:WALInsert 15.1ms 0.0% 0.00",
+      "pad": "48px",
+      "cls": ""
+    },
+    {
+      "text": "LWLock:ProcArray 12.0ms 0.0% 0.00",
+      "pad": "48px",
+      "cls": ""
+    },
+    {
+      "text": "LWLock:BufferMapping 2.7ms 0.0% 0.00",
+      "pad": "48px",
+      "cls": ""
+    },
+    {
+      "text": "Timeout 81.6ms 0.0% 0.00",
+      "pad": "28px",
+      "cls": ""
+    },
+    {
+      "text": "Timeout:SpinDelay 81.6ms 0.0% 0.00",
+      "pad": "48px",
+      "cls": ""
+    },
+    {
+      "text": "IPC 3.2ms 0.0% 0.00",
+      "pad": "28px",
+      "cls": ""
+    },
+    {
+      "text": "IPC:BufferIO 3.2ms 0.0% 0.00",
+      "pad": "48px",
+      "cls": ""
+    },
+    {
+      "text": "Idle 25074.0s 0.0% 0.00",
+      "pad": "12px",
+      "cls": ""
+    },
+    {
+      "text": "Client:ClientRead 17892.9s 0.0% 0.00",
+      "pad": "48px",
+      "cls": ""
+    },
+    {
+      "text": "Timeout:CheckpointWriteDelay 809.1s 0.0% 0.00",
+      "pad": "48px",
+      "cls": ""
+    },
+    {
+      "text": "Timeout:VacuumDelay 2.0s 0.0% 0.00",
+      "pad": "48px",
+      "cls": ""
+    },
+    {
+      "text": "Other (background) 6370.1s 0.0% 0.00",
+      "pad": "48px",
+      "cls": ""
+    }
+  ],
+  "summary_bar": [
+    "DB TIME 810.5s",
+    "WALL 900.0s",
+    "AAS 0.90",
+    "IDLE 25074.0s",
+    "CPUS 4"
+  ],
+  "console_errors": [],
+  "console_error_count": 0,
+  "load_errors": [],
+  "finished_epoch": 1791453097.910892,
+  "workload_alive": true,
+  "workload_alive_basis": "procs_expected=4 (alive=4 dead=0)",
+  "conditions_alive_count": 4,
+  "conditions_dead_count": 0,
+  "conditions_procs_expected": 4,
+  "capture_age_s": 1110,
+  "loadavg": "1.13 0.99 0.93",
+  "trace_events_total": null,
+  "conditions_raw": "run=r2 capture_age_s=1110\nloadavg=1.13 0.99 0.93\nprocs_expected=4\nalive 3553478: /usr/lib/postgresql/18/bin/pgbench -U postgres -p 5418 -d postgres -c \nalive 3553488: python3 tests/live_loop_workload.py 2400\nalive 3554040: bash tests/burst_load.sh 2400\nalive 3554301: ./pg_wait_tracer --daemon --pid 1883878 -i 1 -T /root/paint1_trace_r2 \ntrace dir:\ndrwxr-xr-x  2 root root     4096 Oct  8 09:51 .\ndrwx------ 32 root root     4096 Oct  8 09:33 ..\n-rw-r--r--  1 root root    19120 Oct  8 09:51 backends.jsonl\n-rw-r--r--  1 root root  1390715 Oct  8 09:51 current.summary\n-rw-r--r--  1 root root        5 Oct  8 09:51 current.summary.meta\n-rw-r--r--  1 root root 51840737 Oct  8 09:51 current.trace\n-rw-r--r--  1 root root        5 Oct  8 09:51 current.trace.meta\nsrw-------  1 root root        0 Oct  8 09:33 pgwt.sock\n-rw-r--r--  1 root root        0 Oct  8 09:33 query_sources.jsonl\n-rw-r--r--  1 root root     3650 Oct  8 09:40 query_texts.jsonl\n-rw-r--r--  1 root root     5696 Oct  8 09:33 wait_event_names.json\ndaemon log tail:\ndaemon flush lines:\nINFO: PID 3578838 exited (autovac_worker)\nINFO: fork detected PID 3579259, bootstrap watchpoint attached\nINFO: PID 3579259 initialized (autovac_worker), real watchpoint at 0x7e1eb646d5c8\nINFO: PID 3579259 exited (autovac_worker)\n--- trace volume (pgwt-server --dump) ---\nDaemon: running    mode: full    uptime: 1111s    events/s: 1565    backends: 29    pg_pid: 1883878\npgwt-server \u2014 Summary    Events: 6922240 (6922240 transitions, 0 samples)    Duration: 1110.1s\nFidelity: exact\n  AAS: 0.87    DB Time: 967989.1 ms    Idle: 27555506.1 ms\n  DB Time                            967989.1 ms   100.0%\n  Idle                             27555506.1 ms     0.0%\n--- time model (whole trace) ---\n  === Time Model ===\n\n  AAS: 0.87    DB Time: 967989.1 ms    Idle: 27555506.1 ms\n\n  DB Time                            967989.1 ms   100.0%\n    CPU (running)                    332164.8 ms    34.3%\n    CPU (waiting for a core)         159145.6 ms    16.4%\n    Lock                             291429.9 ms    30.1%\n      Lock:transactionid             141452.1 ms    14.6%\n      Lock:advisory                  105229.2 ms    10.9%\n      Lock:relation                   44747.2 ms     4.6%\n      Lock:extend                         1.5 ms     0.0%\n    IO                               137597.4 ms    14.2%\n      IO:WalSync                     103670.6 ms    10.7%\n      IO:DataFileRead                 10681.7 ms     1.1%\n      IO:WalWrite                      7012.0 ms     0.7%\n      IO:DataFileFlush                 5466.1 ms     0.6%\n      IO:DataFileWrite                 4939.7 ms     0.5%\n    LWLock                            47554.3 ms     4.9%\n      LWLock:WALWrite                 26780.8 ms     2.8%\n      LWLock:LockManager              20734.0 ms     2.1%\n      LWLock:WALInsert                   15.8 ms     0.0%\n      LWLock:ProcArray                   12.0 ms     0.0%\n      LWLock:BufferContent                5.3 ms     0.0%\n    Timeout                              83.8 ms     0.0%\n      Timeout:SpinDelay                  83.8 ms     0.0%\n    IPC                                  13.3 ms     0.0%\n      IPC:CheckpointDelayStart           10.1 ms     0.0%\n      IPC:BufferIO                        3.2 ms     0.0%\n  Idle                             27555506.1 ms     0.0%\n      Client:ClientRead            22054900.7 ms     0.0%\n      Timeout:CheckpointWriteDelay   918464.2 ms     0.0%\n      Timeout:VacuumDelay              2184.1 ms     0.0%\n      Other (background)            4579957.1 ms     0.0%\n\n  === Top Events ===\n--- distinct sessions in the trace ---\n238\n--- summary records ---\n253602\n--- burst tier: did it refuse at any point? ---\n0\n0\nburst_load: first cycle OK -- all four bursts did measurable work\nburst cycles (b_wal invocations): 4\n"
+}

@@ -1,0 +1,78 @@
+run=r2 capture_age_s=1110
+loadavg=1.13 0.99 0.93
+procs_expected=4
+alive 3553478: /usr/lib/postgresql/18/bin/pgbench -U postgres -p 5418 -d postgres -c 
+alive 3553488: python3 tests/live_loop_workload.py 2400
+alive 3554040: bash tests/burst_load.sh 2400
+alive 3554301: ./pg_wait_tracer --daemon --pid 1883878 -i 1 -T /root/paint1_trace_r2 
+trace dir:
+drwxr-xr-x  2 root root     4096 Oct  8 09:51 .
+drwx------ 32 root root     4096 Oct  8 09:33 ..
+-rw-r--r--  1 root root    19120 Oct  8 09:51 backends.jsonl
+-rw-r--r--  1 root root  1390715 Oct  8 09:51 current.summary
+-rw-r--r--  1 root root        5 Oct  8 09:51 current.summary.meta
+-rw-r--r--  1 root root 51840737 Oct  8 09:51 current.trace
+-rw-r--r--  1 root root        5 Oct  8 09:51 current.trace.meta
+srw-------  1 root root        0 Oct  8 09:33 pgwt.sock
+-rw-r--r--  1 root root        0 Oct  8 09:33 query_sources.jsonl
+-rw-r--r--  1 root root     3650 Oct  8 09:40 query_texts.jsonl
+-rw-r--r--  1 root root     5696 Oct  8 09:33 wait_event_names.json
+daemon log tail:
+daemon flush lines:
+INFO: PID 3578838 exited (autovac_worker)
+INFO: fork detected PID 3579259, bootstrap watchpoint attached
+INFO: PID 3579259 initialized (autovac_worker), real watchpoint at 0x7e1eb646d5c8
+INFO: PID 3579259 exited (autovac_worker)
+--- trace volume (pgwt-server --dump) ---
+Daemon: running    mode: full    uptime: 1111s    events/s: 1565    backends: 29    pg_pid: 1883878
+pgwt-server — Summary    Events: 6922240 (6922240 transitions, 0 samples)    Duration: 1110.1s
+Fidelity: exact
+  AAS: 0.87    DB Time: 967989.1 ms    Idle: 27555506.1 ms
+  DB Time                            967989.1 ms   100.0%
+  Idle                             27555506.1 ms     0.0%
+--- time model (whole trace) ---
+  === Time Model ===
+
+  AAS: 0.87    DB Time: 967989.1 ms    Idle: 27555506.1 ms
+
+  DB Time                            967989.1 ms   100.0%
+    CPU (running)                    332164.8 ms    34.3%
+    CPU (waiting for a core)         159145.6 ms    16.4%
+    Lock                             291429.9 ms    30.1%
+      Lock:transactionid             141452.1 ms    14.6%
+      Lock:advisory                  105229.2 ms    10.9%
+      Lock:relation                   44747.2 ms     4.6%
+      Lock:extend                         1.5 ms     0.0%
+    IO                               137597.4 ms    14.2%
+      IO:WalSync                     103670.6 ms    10.7%
+      IO:DataFileRead                 10681.7 ms     1.1%
+      IO:WalWrite                      7012.0 ms     0.7%
+      IO:DataFileFlush                 5466.1 ms     0.6%
+      IO:DataFileWrite                 4939.7 ms     0.5%
+    LWLock                            47554.3 ms     4.9%
+      LWLock:WALWrite                 26780.8 ms     2.8%
+      LWLock:LockManager              20734.0 ms     2.1%
+      LWLock:WALInsert                   15.8 ms     0.0%
+      LWLock:ProcArray                   12.0 ms     0.0%
+      LWLock:BufferContent                5.3 ms     0.0%
+    Timeout                              83.8 ms     0.0%
+      Timeout:SpinDelay                  83.8 ms     0.0%
+    IPC                                  13.3 ms     0.0%
+      IPC:CheckpointDelayStart           10.1 ms     0.0%
+      IPC:BufferIO                        3.2 ms     0.0%
+  Idle                             27555506.1 ms     0.0%
+      Client:ClientRead            22054900.7 ms     0.0%
+      Timeout:CheckpointWriteDelay   918464.2 ms     0.0%
+      Timeout:VacuumDelay              2184.1 ms     0.0%
+      Other (background)            4579957.1 ms     0.0%
+
+  === Top Events ===
+--- distinct sessions in the trace ---
+238
+--- summary records ---
+253602
+--- burst tier: did it refuse at any point? ---
+0
+0
+burst_load: first cycle OK -- all four bursts did measurable work
+burst cycles (b_wal invocations): 4

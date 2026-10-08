@@ -1,115 +1,104 @@
-# Click-to-painted latency after the 2026-10-08 workload change — OVER THE BOUND
+# Click-to-painted latency, 2026-10-08 — STILL OVER THE BOUND after connection reuse
 
-**STOP condition reached.** The brief: *"If paint exceeds or approaches
-3000 ms: STOP and report. Do NOT reduce the load. Owner's explicit
-instruction: the fix is then the UI or the server, not a thinner workload.
-That becomes a separate branch."*
+**STOP condition reached a second time.** Two measured walks in the demo's own
+topology on gate-1:
 
-Worst single navigation: **5785 ms against the 3000 ms bound — 0.52x margin,
-i.e. 1.93x OVER.** Five of eleven tabs exceed the bound. Two tabs failed to
-render *at all* on one navigation each. Nothing in this branch has been
-thinned, loosened or retried in response.
+| | r1 (short-lived burst clients) | r2 (connection reuse) | bound |
+|---|---|---|---|
+| worst single navigation | 5785 ms (queries) | **5504 ms (queries)** | 3000 ms |
+| margin | 0.52x | **0.55x** | 1.0x |
+| tabs over the bound | 5 of 11 | **6 of 11** | — |
+| tabs that failed to render ≥1 nav | 2 (concurrency, transitions) | **2 (the same two)** | — |
 
-## The numbers
+Connection reuse did what it was built to do and **did not fix paint.** Per the
+instruction not to iterate toward the bound, this stops here.
 
-`compare-r1.txt` (regenerate with `python3 compare.py walk-r1.json`). Pinned
-column = the 2026-10-07 per-tab maximum over 15 navigations, from
-`../demo_paint_20261007/SUMMARY.txt`.
+## The diagnosis this run REFUTES — mine
 
-| tab | n | min | med | max | pinned max | ratio | state |
-|---|---|---|---|---|---|---|---|
-| queries | 3 | 2091 | 4615 | **5785** | 1592 | 3.63 | OVER |
-| waterfall | 3 | 4401 | 4405 | **4796** | 1464 | 3.28 | OVER |
-| scatter | 3 | 3927 | 4065 | **4358** | 1616 | 2.70 | OVER |
-| concurrency | 2 | 3246 | 3569 | **3569** | 1165 | 3.06 | OVER + failed to render once |
-| transitions | 2 | 2889 | 3253 | **3253** | 971 | 3.35 | OVER + failed to render once |
-| matrix | 3 | 2818 | 2875 | 2949 | 1139 | 2.59 | under, barely |
-| events | 3 | 215 | 264 | 315 | 266 | 1.19 | ok |
-| sessions | 3 | 213 | 241 | 314 | 264 | 1.19 | ok |
-| histogram | 3 | 345 | 375 | 408 | 440 | 0.93 | ok |
-| overview | 3 | 175 | 239 | 329 | 395 | 0.83 | ok |
-| timeline | 3 | 230 | 251 | 300 | 441 | 0.68 | ok |
+After r1 I concluded the driver was **session churn**, not event volume, and
+that conclusion was accepted. r2 was the experiment that should have confirmed
+it. It did the opposite.
 
-`paint_analyse.py`'s own verdict is **REFUSED**, and for the right reason:
+r2 holds event volume constant by construction (durations and pauses scale by
+the same factor, so average tx/s is identical — asserted arithmetically and
+behaviourally in `tests/test_burst_load_guards.sh`) and cuts session churn:
 
-    r1: tab transitions did not render (no container) -- a tab that never
-    painted cannot be excluded from the worst case
+| quantity | r1 | r2 | change |
+|---|---|---|---|
+| burst `b_wal` invocations in the capture | 18 | 4 | **−78 %** |
+| distinct sessions in the trace | 537 | 238 | **−56 %** |
+| Sessions tab rows in the window | 245 | 109 | **−56 %** |
+| events / s | 5987 | 6236 | +4 % |
+| **worst tab paint** | **5785 ms** | **5504 ms** | **−5 %** |
 
-That is the gate working as designed (`verdict-r1.txt`). It will not certify a
-margin from a walk with a hole in it, which is exactly the false negative its
-predecessor had. Both facts point the same way: the raw numbers it declines to
-certify are all far over the bound, and two tabs stopped painting entirely.
+Session churn more than halved; paint moved 5 %, which is inside the
+run-to-run spread the pinned n=5 set already showed (1388–1616, ±8 %). Per tab,
+r1 → r2: queries −5 %, transitions −7 %, concurrency −2 %, scatter +1 %,
+waterfall +4 %, matrix +9 %. That is noise, not a response.
 
-## The confound, and the internal control that rules it out
+**So paint is not driven by session count.** The brief's original hypothesis —
+in-window event/execution volume — was closer than my refinement of it.
 
-The pinned baseline was taken on **gate-2**; this run is on **gate-1**. Same
-cx33 class, 4 cores, but the two boxes are known to differ in CPU vendor
-(owner declined a swap, 2026-09-29), so a cross-box comparison is not free.
+Where my reasoning went wrong, precisely: I treated "the five light tabs sit at
+0.68–1.19x while the six heavy ones sit at 2.6–3.6x" as a control that
+*discriminated* between volume and churn. It does not. The light tabs read
+summary files and are insensitive to **both** quantities, so that split is
+equally consistent with either hypothesis. It ruled out the cross-box confound,
+which is all I should have claimed for it.
 
-The five light tabs are the control. They read data whose volume barely moved
-and they land at **0.68-1.19x** of their pinned maxima — i.e. the two boxes
-render the same work in the same time. The six heavy tabs, on the same two
-boxes in the same session, are at **2.59-3.63x**. A hardware difference would
-not spare overview/events/sessions/histogram/timeline and triple
-queries/waterfall/scatter/concurrency/transitions/matrix. The blow-up tracks
-what those six tabs read, not which box read it.
+## What the evidence now supports
 
-## Conditions (`conditions-r1.txt`, stamped into `walk-r1.json`)
+Against the pinned baseline (3854 events/s → 1616 ms worst):
 
-| | |
-|---|---|
-| topology | real Chrome 154.0.8037.100 on this Mac, viewport 1710x981 @ DPR 2 confirmed by two agreeing reads -> `web/pgwt` on the Mac -> `pgwt-server` over ssh on gate-1 -> live `--mode full` capture of PostgreSQL 18 |
-| active range | 15m (asserted, not assumed) |
-| capture | fresh empty trace dir, age 1112 s at conditions time, `fidelity: exact` |
-| load | all three tiers alive and verified: `pgbench -c 4 --rate=25`, `live_loop_workload.py`, `burst_load.sh` — 18 burst cycles, **zero ABORT lines** |
-| box load | loadavg 1.71 / 1.31 / 1.73 on 4 cores — not a saturated box |
-| volume | 6 660 465 events over 1112.8 s = **5987 events/s**; 537 distinct sessions; whole-trace DB Time 940 950 ms, AAS 0.85 |
-| in-window (900 s, derived) | 5.39 M records, against 3.47 M when the 1616 ms figure was pinned — **1.55x** |
+    events/s   3854 -> 6236   = 1.62x
+    worst ms   1616 -> 5504   = 3.41x
 
-The walk's own scraped time model agrees with `../demo_mix_20261008/`:
-`Lock:relation` **4.5 %** of DB Time (was 71 %), `Lock:transactionid` 14.6 %,
-`IO:WalSync` 9.9 %, `LWLock` 3.9 %.
+Superlinear in volume, and the six affected tabs are the ones whose server-side
+queries walk executions or aggregate the whole window
+(`top_queries`, `executions`, `exec_scatter`, `concurrency`, `transitions`,
+`matrix`), while the five that read summaries are flat. The lever that would
+move paint is therefore in-window event/execution volume — which the owner has
+ruled out reducing. That makes this unambiguously a UI/server problem, now with
+a second data point and a refuted alternative rather than one measurement and a
+guess.
 
-## My prediction was wrong, and by how much
+Two further facts for whoever takes that branch:
+- `concurrency` and `transitions` each failed to render within the 15 s
+  readiness timeout on one of three navigations, **in both runs**. Reproducible,
+  not a fluke, and `paint_analyse.py` correctly refuses both walks for it
+  (`verdict-r1.txt`, `verdict-r2.txt`) rather than taking a max over the tabs
+  that happened to work.
+- `matrix` crossed the bound in r2 (3207 ms) having been 51 ms under it in r1.
 
-`PREDICTION.md` derived **2394 ms** (margin 1.25x) from the brief's
-`fixed + k x records` model and the measured 1.55-1.57x volume increase. The
-measurement is **5785 ms** — the prediction was low by **2.4x**, and it put the
-result on the safe side of a bound it is in fact well over.
+## Why the connection-reuse change is kept anyway
 
-The model's missing term is visible in the table: cost did not scale with
-records at a flat per-record rate. Records went up 1.55x; the heavy tabs went
-up 2.6-3.6x. The three unmodelled inputs flagged in `PREDICTION.md` all moved
-much further than the record count did — Sessions rows 67 -> **245**, distinct
-sessions in the trace 67 -> **537**, timeline spans -> 1086, histogram cells
--> 3544 — and the six affected tabs are precisely the ones whose server-side
-queries are per-session or per-execution rather than per-record. That is a
-hypothesis from this one walk, not a measurement; the separate UI/server branch
-should profile it rather than take my word.
+It is honest about what it achieves: 6x fewer backend generations for identical
+average load, 238 sessions instead of 537, 109 Sessions rows instead of 245. It
+is strictly better hygiene on a shared box and it is the only lever available
+for the second blocker (the live-UI-smoke blink self-test, which failed 2/2 at
+146–148 Sessions rows while all 59 historically passing runs sat at 21–46). At
+109 rows that gate may or may not recover — `box-check` on this tree is what
+answers it, and its result is reported separately.
+
+## Conditions (both runs, `conditions-r1.txt` / `conditions-r2.txt`)
+
+Real Chrome 154.0.8037.100 on this Mac, viewport 1710x981 @ DPR 2 confirmed by
+two agreeing reads, 15m range asserted → `web/pgwt` on the Mac → `pgwt-server`
+over ssh on gate-1 → fresh empty trace dir, `--mode full`, PostgreSQL 18,
+`shared_buffers` 128 MB. r2: capture age 1110 s, loadavg 1.13/0.99/0.93 on 4
+cores, all four load tiers alive (`procs_expected=4`, 0 dead), burst tier zero
+`ABORT` lines, `fidelity: exact`, 0 console errors.
+
+r2's scraped time model still shows the profile the owner asked for:
+`Lock:relation` 4.6 %, `Lock:transactionid` 14.6 %, `Lock:advisory` 10.9 %,
+`IO:WalSync` ~10 %, `LWLock` 3.9 %, AAS 0.90. The shape was not sacrificed.
 
 ## What was NOT done
 
-- The load was **not** reduced, thinned, rate-limited or shortened.
-- `BOUND_MS` (3000) was not moved. `paint_analyse.py` was not touched.
+- The load was not thinned. Rates, client counts, WAL volume, lock-manager
+  fanout and the IO batch are untouched; only backend lifetime changed.
+- `BOUND_MS` (3000) was not moved; `paint_analyse.py` was not touched.
 - The two render failures were not retried away.
-- n=1. The pinned figure is n=5. One walk is enough to establish "over the
-  bound by 1.9x with a 2.6-3.6x per-tab regression" and is **not** enough to
-  pin a new number; nothing here proposes one.
-
-## Harness correction made during this run
-
-`harness/stamp.py` computed `workload_alive` as `alive == 3` — a magic number
-coupled by convention to `box_run_conditions.sh`'s loop body. Adding the burst
-tier made the real count four, so this walk was first stamped
-`workload_alive=False` and refused despite its own conditions file listing
-four alive processes and zero dead. The safe failure direction was luck:
-`alive >= 3` would instead have **approved** a walk with the burst tier dead.
-
-Fixed: `box_run_conditions.sh` now prints `procs_expected=N` from the length of
-its own process list and `stamp.py` compares against that, with a floor so
-`procs_expected=0` cannot satisfy it and an explicit refusal when the value is
-present but unparseable. `harness/test_stamp.sh` is the bypass suite (12
-cases); run against the old rule it fails 5, **approving two walks with a dead
-tier**. `walk-r1.json` records which rule was applied in
-`workload_alive_basis` — here the documented legacy fallback, because this
-run's conditions file was written before the count line existed.
+- No third attempt. n=1 per configuration, against a pinned n=5 — enough to say
+  "still over by ~1.8x and unmoved by reuse", not enough to pin a number, and
+  none is proposed.

@@ -1,0 +1,11 @@
+files: tests/results/demo_paint_20261008/walk-r2.json
+VERDICT: REFUSED -- r2: tab transitions did not render (no container) -- a tab that never painted cannot be excluded from the worst case
+{
+  "ok": false,
+  "reason": "r2: tab transitions did not render (no container) -- a tab that never painted cannot be excluded from the worst case",
+  "worst_ms": null,
+  "worst_tab": null,
+  "margin": null,
+  "per_tab": {},
+  "per_walk": []
+}
