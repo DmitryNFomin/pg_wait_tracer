@@ -656,10 +656,14 @@ def test_transitions_tab(page):
                       if m.get("cmd") == "transitions"), {})
     check(trans_req.get("buckets") == 200 and "num_buckets" not in trans_req,
           f"transitions view requests the real server's buckets parameter ({trans_req})")
-    variants_req = next((m for m in page.evaluate("window.__transitionsMsgLog")
-                        if m.get("cmd") == "variants"), {})
-    check(variants_req.get("buckets") == 20 and "num_buckets" not in variants_req,
-          f"variants request also uses buckets, not num_buckets ({variants_req})")
+    # Variants-on-demand: `variants` costs the server as much as `transitions`
+    # itself and the server is single-threaded with no mid-flight command
+    # cancellation, so tab entry must NOT fire it — only a user click does
+    # (see loadVariants() in views/transitions.js).
+    variants_on_entry = [m for m in page.evaluate("window.__transitionsMsgLog")
+                         if m.get("cmd") == "variants"]
+    check(variants_on_entry == [],
+          f"variants is NOT requested on tab entry ({variants_on_entry})")
 
     active = page.query_selector(".tab.active")
     check(active and active.text_content() == "Transitions",
@@ -716,9 +720,30 @@ def test_transitions_tab(page):
     check(resize_counts == {"resize": 1, "layout": 1},
           f"DFG resize storm coalesced to one layout ({resize_counts})")
 
+    # Variants-on-demand: the panel declares itself idle with a discoverable
+    # affordance — not an empty-looking gap the user has to wonder about —
+    # until the user clicks it.
+    load_btn = page.query_selector("#dfg-load-variants")
+    check(load_btn is not None, "Variants panel shows a discoverable 'load' affordance")
+    idle_text = page.text_content("#dfg-variants") or ""
+    check("Flow Patterns" not in idle_text,
+          f"Variants panel is idle (not pre-loaded) before any click ({idle_text[:60]})")
+
+    # Click it: NOW the request goes out, and the panel fills in place.
+    load_btn.click()
+    page.wait_for_function(
+        "() => (document.getElementById('dfg-variants') || {}).textContent"
+        ".includes('Flow Patterns')", timeout=5000)
+
+    variants_req = next((m for m in page.evaluate("window.__transitionsMsgLog")
+                        if m.get("cmd") == "variants"), {})
+    check(variants_req.get("buckets") == 20 and "num_buckets" not in variants_req,
+          f"variants request (after the click) uses buckets, not num_buckets ({variants_req})")
+
     # Variant sections (served by the mock's `variants` command) render below
-    check("Execution" in container_text or "Variant" in container_text,
-          "Variants section rendered below the DFG")
+    loaded_text = page.text_content("#dfg-variants") or ""
+    check("Execution" in loaded_text or "Variant" in loaded_text,
+          "Variants section rendered below the DFG after the click")
 
 
 def test_time_picker(page):
