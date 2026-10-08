@@ -40,6 +40,8 @@ tests/test_golden_fixture
 tests/test_window_clip
 tests/test_top_queries_percentile
 tests/test_exec_index
+tests/test_block_agg
+tests/bench_block_agg
 tests/map_reader_core.o
 tests/__pycache__/
 

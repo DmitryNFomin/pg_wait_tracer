@@ -159,6 +159,32 @@ test_idle_summary
 # mutation probes proving each comparator can see one nanosecond, one count,
 # one grid cell and one missing row.
 test_agg_raw_crosscheck
+# Paint-latency Phase 1 (docs/PAINT_LATENCY_PLAN.md): the per-committed-block
+# transition aggregate, src/block_agg.c. `transitions` loads the full raw event
+# window on every request (~0.68 s per million records) because a per-second
+# summary record cannot express WHICH event followed which. A committed block
+# is immutable, so a (old_event, new_event) -> {count, summed duration} table
+# can be precomputed per block and MERGED; a request merges the blocks wholly
+# inside the window and decodes raw only at the two edges.
+# The oracle is the SHIPPING raw path, pgwt_compute_transitions(), not a copy
+# and not this module's own accumulator — if both sides came from the same
+# code the comparison could not fail. Bit-exact, no epsilon: 378 windows over
+# a 5-block fixture, each compared pair by pair and node by node, plus merge
+# associativity/commutativity over all 6 orderings, and the straddle rule (a
+# transition whose old_event began in an EARLIER block is counted once, in the
+# block holding the record, with its duration unclipped).
+# §1 caught a real divergence before this shipped: pgwt_filter_matches()
+# refuses a record whose duration exceeds its own end timestamp, and the
+# aggregate did not.
+# Bypass suite (15 cases): an empty block, an absent aggregate, a SAMPLES
+# block, an uncommitted block, an unresolvable trace identity, a version
+# mismatch, a rotation, a rewritten block (every header field perturbed in a
+# loop), a double merge, injected allocation failures, every filter field, an
+# empty/inverted/unparseable window, a frozen or freed aggregate, and a window
+# where NOTHING qualifies — each must REFUSE, because "0 == 0" satisfies every
+# assertion in the file. tests/results/block-agg/run_mutations.py breaks one
+# guard at a time (14 mutations, all RED) so the suite is known able to fail.
+test_block_agg
 # #294: cross_validate drops pgwt_is_idle_event() time from BOTH sides before
 # any share is computed, so when the sampled tier reads less CPU than the exact
 # tier the missing nanoseconds have no visible destination -- "it became
