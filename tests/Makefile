@@ -28,6 +28,7 @@ TESTS     = test_wait_event test_cmdline test_spawn test_event_writer test_event
             test_concurrency_bounds \
             test_idle_accounting test_idle_summary \
             test_agg_raw_crosscheck \
+            test_exec_index \
             gen_test_traces gen_bench_traces test_concurrent_rw cross_validate \
             dump_markers wait_cpu_canary test_wait_cpu_canary \
             test_summary_tick_flush
@@ -452,14 +453,6 @@ test_agg_raw_crosscheck: test_agg_raw_crosscheck.c ../src/compute.c \
 # and the measured O(executions in window) claim. Server build, no BPF, no
 # live PG; ~0.2 s.
 #
-# NOT in TESTS, deliberately and TEMPORARILY: tests/unit_tests.list is owned
-# by another in-flight branch for the duration of this one, and
-# test_unit_list_coverage.py (correctly) turns red on any test_* in TESTS that
-# unit_tests.list does not run. The two lines that finish the wiring are
-# applied together, by the owner:
-#     tests/Makefile  TESTS += test_exec_index
-#     tests/unit_tests.list  test_exec_index
-# Until then: `make -C tests test_exec_index && tests/test_exec_index`.
 test_exec_index: test_exec_index.c ../src/exec_index.c ../src/compute.c \
                    $(BUILD)/wait_event.o $(BUILD)/idle_rule.o \
                    $(BUILD)/spawn.o $(BUILD)/cJSON.o
