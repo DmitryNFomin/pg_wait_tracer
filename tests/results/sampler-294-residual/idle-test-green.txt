@@ -1,0 +1,59 @@
+== 1. idle breakdown on a hand-built trace ==
+Scenario: 9 events, 21 samples, 1 backends, 0 queries
+Wrote 9 events + 21 samples to /tmp/pgwt_xvidle_SQpZJP/t1
+  ok: exit code (mask resolved, shares within tolerance) = 0
+  ok: RAW_TOTAL_EXACT_NS = 9000000000
+  ok: RAW_TOTAL_SAMPLED_NS = 12000000000
+  ok: RAW_CPU_EXACT_NS = 6000000000
+  ok: RAW_CPU_SAMPLED_NS = 8000000000
+  ok: IDLE_EVENT_ROWS = 2
+  ok: IDLE_TOTAL_EXACT_NS = 4000000000
+  ok: IDLE_TOTAL_SAMPLED_NS = 4000000000
+  ok: IDLE_SAMPLES = 4
+  ok: IDLE_EXACT_PCT_OF_DBTIME = 44.44
+  ok: IDLE_SAMPLED_PCT_OF_DBTIME = 33.33
+  ok: ClientRead appears in the output
+  ok: the section is labelled non-DB-Time
+  ok: ClientRead exact_ns = 3000000000
+  ok: ClientRead sampled_ns = 3000000000
+  ok: CheckpointWriteDelay exact_ns = 1000000000
+  ok: CheckpointWriteDelay sampled_ns = 1000000000
+  ok: SpinDelay stays in DB Time (not swept into idle)
+  ok: exact DB Time + exact idle = 13000000000
+== 2. --show-idle does not perturb the share table, RESULT or exit code ==
+  ok: exit code without --show-idle = 0
+  ok: pre-existing output is byte-identical with and without --show-idle
+== B1. unresolvable pacing mask must REFUSE, not print zeros ==
+Scenario: 9 events, 21 samples, 1 backends, 0 queries
+Wrote 9 events + 21 samples to /tmp/pgwt_xvidle_SQpZJP/b1
+  ok: exit code (cannot classify) = 4
+  ok: prints IDLE-UNAVAILABLE
+  ok: printed no idle totals it could not measure
+  ok: IDLE_PACING_MASK = 0x0
+  ok: the share RESULT is still printed
+== B2. genuine absence of idle events is stated, not implied ==
+Scenario: 9 events, 21 samples, 1 backends, 0 queries
+Wrote 9 events + 21 samples to /tmp/pgwt_xvidle_SQpZJP/b2
+  ok: exit code (mask fine, no idle data) = 0
+  ok: absence stated explicitly
+  ok: IDLE_TOTAL_EXACT_NS = 0
+  ok: IDLE_TOTAL_SAMPLED_NS = 0
+  ok: did not refuse a classifiable trace
+== B3. empty trace dir must error, not report zero idle ==
+  ok: nonzero exit (1) on an empty dir
+  ok: no idle totals from an empty dir
+== B4. sampled-only trace (no exact tier) must error, not half-answer ==
+Scenario: 0 events, 21 samples, 1 backends, 0 queries
+Wrote 0 events + 21 samples to /tmp/pgwt_xvidle_SQpZJP/b4
+  ok: nonzero exit (1) with no exact tier
+  ok: no idle totals without an exact tier
+== B5. idle on the exact tier only must still print a row ==
+Scenario: 9 events, 21 samples, 1 backends, 0 queries
+Wrote 9 events + 21 samples to /tmp/pgwt_xvidle_SQpZJP/b5
+  ok: ClientRead row present despite 0 sampled ns
+  ok: one-sided ClientRead exact_ns = 3000000000
+  ok: one-sided ClientRead sampled_ns = 0
+== B6. no --show-idle, no idle output ==
+  ok: flag is opt-in
+
+test_cross_validate_idle: 39 passed, 0 failed

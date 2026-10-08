@@ -886,10 +886,25 @@ static int cmp_idle_desc(const void *a, const void *b)
 /* Emit the Idle parent row plus one named row per visible idle event.
  * `rows`/`nr` are the time-model row array being built; the caller sized it
  * with IDLE_ROWS_RESERVED spare slots, which the _Static_assert above checks
- * against this function's worst case. pct_db_time and aas are deliberately
- * 0 on these rows: idle time has no share OF DB Time (it is excluded from it),
- * and reporting a percentage of a total it is not part of is how an excluded
- * number sneaks back into a reader's mental sum. */
+ * against this function's worst case.
+ *
+ * pct_db_time is deliberately 0 on these rows: idle time has no share OF DB
+ * Time (it is excluded from it), and reporting a percentage of a total it is
+ * not part of is how an excluded number sneaks back into a reader's mental
+ * sum. DO NOT "fix" it.
+ *
+ * aas is NOT in that category, and hardcoding it to 0 was a bug. AAS is a
+ * RATE -- time over wall clock, "how many sessions' worth of time was this" --
+ * and every other row in both callers computes it as `ms / wall_ms`. It is
+ * defined for any duration, inside DB Time or not; the only thing that is
+ * undefined is a share of a total the row does not belong to. A 900 s demo
+ * window showing an Idle row of ~1,207,000 ms next to "AAS 0.00" does not read
+ * as "excluded from DB Time", it reads as broken -- and the one sentence the
+ * row exists to support ("0.9 of a session's worth of time that is not
+ * database work") is exactly the AAS number. So: same formula, same wall_ms>0
+ * guard as the DB Time / class / sub-event rows, for the parent AND every
+ * child. `wall_ms <= 0` yields 0 rather than a division by zero, which is the
+ * one shape where an idle AAS of 0 is correct. */
 /* `idle_time_ns` is the EXACT total; `ia` holds the per-event breakdown of
  * the VISIBLE part of it. The two differ by the hidden (Activity) share, and
  * on the summary path also by anything the bounded per-event tables could not
@@ -898,10 +913,15 @@ static int cmp_idle_desc(const void *a, const void *b)
  * this whole change exists to remove, and leaving one would have reintroduced
  * it at the next level down. */
 static int emit_idle_rows(struct pgwt_tm_row *rows, int nr,
-                          double idle_time_ns,
+                          double idle_time_ns, double wall_ms,
                           struct idle_accum *ia, int n_ia,
                           double *excess_ns)
 {
+    /* One expression for every idle row below, so the parent and its children
+     * cannot drift apart: whatever the parent's rate means, each child's means
+     * the same thing over the same denominator, and the children's AAS sum to
+     * the parent's exactly because their ms do. */
+    #define IDLE_AAS(ms) (wall_ms > 0 ? (ms) / wall_ms : 0.0)
     if (excess_ns) *excess_ns = 0.0;
     if (idle_time_ns <= 0) {
         /* A ZERO parent with NON-ZERO named children is the single most
@@ -924,7 +944,7 @@ static int emit_idle_rows(struct pgwt_tm_row *rows, int nr,
     snprintf(rows[nr].name, sizeof(rows[nr].name), "Idle");
     rows[nr].time_ms     = idle_time_ns / 1e6;
     rows[nr].pct_db_time = 0.0;
-    rows[nr].aas         = 0.0;
+    rows[nr].aas         = IDLE_AAS(rows[nr].time_ms);
     rows[nr].indent      = 0;
     nr++;
 
@@ -936,7 +956,7 @@ static int emit_idle_rows(struct pgwt_tm_row *rows, int nr,
         snprintf(rows[nr].name, sizeof(rows[nr].name), "%s", buf);
         rows[nr].time_ms     = ia[i].total_ns / 1e6;
         rows[nr].pct_db_time = 0.0;
-        rows[nr].aas         = 0.0;
+        rows[nr].aas         = IDLE_AAS(rows[nr].time_ms);
         rows[nr].indent      = 2;
         nr++;
     }
@@ -957,7 +977,7 @@ static int emit_idle_rows(struct pgwt_tm_row *rows, int nr,
         snprintf(rows[nr].name, sizeof(rows[nr].name), "Other (background)");
         rows[nr].time_ms     = other / 1e6;
         rows[nr].pct_db_time = 0.0;
-        rows[nr].aas         = 0.0;
+        rows[nr].aas         = IDLE_AAS(rows[nr].time_ms);
         rows[nr].indent      = 2;
         nr++;
     } else if (other < 0 && excess_ns) {
@@ -968,6 +988,7 @@ static int emit_idle_rows(struct pgwt_tm_row *rows, int nr,
          * writer and the reader disagree about what is idle. */
         *excess_ns = -other;
     }
+    #undef IDLE_AAS
     return nr;
 }
 
@@ -1270,7 +1291,7 @@ void pgwt_compute_time_model(const struct pgwt_trace_event *events, int count,
 
     /* Idle LAST, so rows[0] stays "DB Time" (overview.js relies on that). */
     double idle_excess_ns = 0.0;
-    nr = emit_idle_rows(rows, nr, idle_time_ns, idle_ev, n_idle_ev,
+    nr = emit_idle_rows(rows, nr, idle_time_ns, wall_ms, idle_ev, n_idle_ev,
                         &idle_excess_ns);
     out->idle_children_excess_ms = idle_excess_ns / 1e6;
     if (idle_excess_ns > 0)
@@ -2270,7 +2291,7 @@ void pgwt_compute_time_model_from_summaries(
 
     /* Idle LAST, so rows[0] stays "DB Time" -- same as the raw path. */
     double idle_excess_ns = 0.0;
-    nr = emit_idle_rows(rows, nr, ctx.idle_time_ns, ctx.idle_ev,
+    nr = emit_idle_rows(rows, nr, ctx.idle_time_ns, wall_ms, ctx.idle_ev,
                         ctx.n_idle_ev, &idle_excess_ns);
     out->idle_children_excess_ms = idle_excess_ns / 1e6;
     if (idle_excess_ns > 0)

@@ -1,0 +1,7 @@
+2026-10-07T19:56:47Z
+--- flock holder ---
+2156401 Wed Oct  7 19:52:45 2026     241 flock -n /tmp/pgwt-box-check.lock bash -c echo held; sleep 9000
+2156403 Wed Oct  7 19:52:45 2026     241 sleep 9000
+2156970 Wed Oct  7 19:52:52 2026     234 /usr/lib/postgresql/18/bin/pgbench -U postgres -p 5418 -d postgres -c 4 -T 7200 --rate=25
+--- foreign client backends ---
+22

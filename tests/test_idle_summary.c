@@ -26,7 +26,13 @@
  *   2. the writer-side exclusion, read off the records directly: class_ns
  *      carries no idle time, events[] carries all of it, and neither top-wait
  *      selection can pick an idle event.
- *   3. the Idle row and its named children on the SUMMARY path too.
+ *   3. the Idle row and its named children on the SUMMARY path too, and
+ *      their AAS -- a RATE over wall clock, which emit_idle_rows
+ *      hardcoded to 0 until 2026-10-07, so this window rendered
+ *      "Idle 19500 ms / AAS 0.00". Pinned here and not only in
+ *      test_idle_accounting because this is the path a 900 s window
+ *      takes: fixing the raw path alone would leave the demo unchanged.
+ *      pct_db_time stays 0 and is asserted so -- that one is correct.
  *   4. the VERSION PREFLIGHT. Refusing v1/v2 in the reader is not enough:
  *      pgwt_visit_summaries SKIPS a file it cannot open, so a mixed window
  *      would come back as a plausible PARTIAL answer. The preflight must
@@ -77,6 +83,15 @@ static int tests_failed = 0;
  * comparison here needs more than this, the two paths disagree. */
 #define TOL_MS 0.01
 #define NEAR_MS(a, b) (fabs((double)(a) - (double)(b)) <= TOL_MS)
+
+/* AAS is UNITLESS (ms / ms), so TOL_MS must never be reused for it: over this
+ * file's 150 s window 0.01 of AAS is 1500 ms of misaccounted time, which is
+ * 150x looser than the ms comparisons above and would accept a badly wrong
+ * rate. Every AAS here is one double division of two exactly-representable
+ * integer-nanosecond totals by the same denominator on both paths, so the
+ * honest tolerance is float noise, not a budget. */
+#define TOL_AAS 1e-9
+#define NEAR_AAS(a, b) (fabs((double)(a) - (double)(b)) <= TOL_AAS)
 
 #define MS      1000000ULL
 #define ONE_SEC 1000000000ULL
@@ -735,6 +750,135 @@ static void test_summary_idle_rows(void)
               "named child %s = %.1f ms expected %.1f", kids[i].name,
               r ? r->time_ms : -1, kids[i].ms);
     }
+    /* ── THE IDLE ROW'S AAS, ON THE PATH THE 900 s DEMO WINDOW TAKES ─────
+     *
+     * AAS is a RATE (time / wall clock) and is defined for idle time; only a
+     * SHARE OF DB TIME is not, which is why pct_db_time stays 0 and is
+     * asserted so below. emit_idle_rows hardcoded aas = 0 until 2026-10-07,
+     * so this window rendered "Idle 19500 ms / AAS 0.00" -- and the summary
+     * path is the one should_use_summaries picks for a window this long, so
+     * fixing only the raw path would have left the demo unchanged.
+     *
+     * Each value is pinned EXACTLY from the fixture's per-second ms times
+     * SLICES, divided by the window's own wall clock -- never read back off a
+     * row. "aas != 0" would accept ms (19500), ms/1e3 (19.5) or the DB Time
+     * row's own rate (0.06); every one of those differs from 0.13 here. */
+    struct { const char *name; int indent; double ms; } aas_rows[] = {
+        { "Idle",                         0, PER_SEC_IDLE_MS * SLICES },
+        { "Timeout:CheckpointWriteDelay", 2,  40.0 * SLICES },
+        { "Client:ClientRead",            2,  25.0 * SLICES },
+        { "Timeout:VacuumDelay",          2,  15.0 * SLICES },
+        /* The hidden Activity share, 50 ms/s, as the labelled remainder. */
+        { "Other (background)",           2,  50.0 * SLICES },
+    };
+    const int N_AAS_ROWS = (int)(sizeof(aas_rows) / sizeof(aas_rows[0]));
+
+    /* NON-VACUITY: wall_ms comes from window_from_records above (150 s), not
+     * from a clock read here. A 0 wall clock makes every assertion below
+     * trivially true -- that shape is pinned separately at the end of this
+     * section -- and a 1 ms wall clock would make aas == ms. */
+    CHECK(wall_ms > 0 && !NEAR_MS(wall_ms, 1.0),
+          "the window's wall clock is %.1f ms -- nonzero, and not 1 ms (where "
+          "aas == ms would pass without dividing)", wall_ms);
+
+    /* The raw path over the SAME window, so every row below is checked against
+     * the fixture AND against the other implementation: a shared wrong formula
+     * is the one thing agreement alone cannot see, which is why the expected
+     * values are written out above rather than taken from `rawtm_u`. */
+    struct pgwt_tm_result rawtm_u;
+    pgwt_compute_time_model(ev, n, &f, 0, 0, wall_ms, &rawtm_u);
+
+    double sum_aas = 0.0, sum_ms = 0.0;
+    int aas_found = 0, aas_kids = 0;
+    for (int i = 0; i < N_AAS_ROWS; i++) {
+        double want = aas_rows[i].ms / wall_ms;
+        const struct pgwt_tm_row *r = row_at(&tm, aas_rows[i].name,
+                                             aas_rows[i].indent);
+        CHECK(r != NULL, "summary idle row \"%s\" (indent %d) exists",
+              aas_rows[i].name, aas_rows[i].indent);
+        if (!r) continue;
+        aas_found++;
+        CHECK(NEAR_MS(r->time_ms, aas_rows[i].ms),
+              "\"%s\" time=%.3f ms expected %.1f (the AAS below is only "
+              "meaningful against the right ms)", aas_rows[i].name,
+              r->time_ms, aas_rows[i].ms);
+        CHECK(NEAR_AAS(r->aas, want),
+              "\"%s\" summary aas=%.9f expected %.9f (%.1f ms / %.1f ms "
+              "wall); 0.00 means the rate is still hardcoded",
+              aas_rows[i].name, r->aas, want, aas_rows[i].ms, wall_ms);
+        CHECK(r->pct_db_time == 0.0,
+              "\"%s\" pct_db_time=%.4f must stay 0: idle time genuinely has "
+              "no share OF DB Time, and that is correct, not a bug",
+              aas_rows[i].name, r->pct_db_time);
+        /* Both paths, row by row: cross_validate compares them, and an AAS
+         * that differed between them would be a drift the ms comparison above
+         * cannot see. */
+        const struct pgwt_tm_row *rr = row_at(&rawtm_u, aas_rows[i].name,
+                                              aas_rows[i].indent);
+        CHECK(rr != NULL && NEAR_AAS(rr->aas, r->aas),
+              "\"%s\": raw aas %.9f vs summary aas %.9f", aas_rows[i].name,
+              rr ? rr->aas : -1.0, r->aas);
+        if (aas_rows[i].indent == 2) {
+            aas_kids++;
+            sum_aas += r->aas;
+            sum_ms  += r->time_ms;
+        }
+    }
+    CHECK(aas_found == N_AAS_ROWS && aas_kids == 4,
+          "all %d idle rows found (got %d), 4 of them children (got %d) -- an "
+          "empty or short breakdown would satisfy the sums below vacuously",
+          N_AAS_ROWS, aas_found, aas_kids);
+
+    /* THE PARENT'S OWN RATE IS NONZERO, asserted before the conservation sum:
+     * "children sum to the parent" is satisfied by 0 == 0, which is precisely
+     * how the broken code passed. 19500 / 150000 = 0.13. */
+    const struct pgwt_tm_row *ip = row_at(&tm, "Idle", 0);
+    CHECK(ip != NULL && ip->aas > 0.0 &&
+          NEAR_AAS(ip->aas, PER_SEC_IDLE_MS * SLICES / wall_ms),
+          "the Idle parent's rate is strictly positive and exact: %.9f "
+          "expected %.9f", ip ? ip->aas : -1.0,
+          PER_SEC_IDLE_MS * SLICES / wall_ms);
+    CHECK(NEAR_MS(sum_ms, PER_SEC_IDLE_MS * SLICES),
+          "the children's ms already sum to the parent (%.3f vs %.1f) -- the "
+          "precondition for the AAS sum below", sum_ms,
+          PER_SEC_IDLE_MS * SLICES);
+    /* Compared against a constant derived from the fixture, NOT against the
+     * parent row alone: two sides of one sum cannot fail. */
+    CHECK(NEAR_AAS(sum_aas, PER_SEC_IDLE_MS * SLICES / wall_ms),
+          "...so their AAS must follow: children sum %.9f expected %.9f "
+          "(computed from the fixture, not from any row)", sum_aas,
+          PER_SEC_IDLE_MS * SLICES / wall_ms);
+    CHECK(ip != NULL && NEAR_AAS(sum_aas, ip->aas),
+          "...and it equals the PARENT ROW's AAS (%.9f vs %.9f)", sum_aas,
+          ip ? ip->aas : -1.0);
+    /* DB Time's own rate is untouched: 9000 / 150000 = 0.06, not 0.19. */
+    CHECK(NEAR_AAS(tm.rows[0].aas, PER_SEC_DB_MS * SLICES / wall_ms),
+          "the DB Time row's AAS is unchanged at %.9f (got %.9f) -- idle time "
+          "did not leak into it", PER_SEC_DB_MS * SLICES / wall_ms,
+          tm.rows[0].aas);
+    free(rawtm_u.rows);
+
+    /* wall_ms == 0 on the summary path: the rate is undefined, the guard must
+     * yield exactly 0 and never an inf/NaN. This is the one shape where an
+     * idle AAS of 0 is right -- and the reason every assertion above uses the
+     * window's real 150 s wall clock, since a 0 would satisfy them all
+     * without computing anything. */
+    struct pgwt_tm_result tmz;
+    pgwt_compute_time_model_from_summaries(dir, from, to, &f, 0.0, &tmz);
+    const struct pgwt_tm_row *zp = row_at(&tmz, "Idle", 0);
+    CHECK(zp != NULL && NEAR_MS(zp->time_ms, PER_SEC_IDLE_MS * SLICES),
+          "wall_ms=0: the Idle row still carries its %.1f ms (got %.3f), so "
+          "this is \"no denominator\", not \"no idle time\"",
+          PER_SEC_IDLE_MS * SLICES, zp ? zp->time_ms : -1.0);
+    for (int i = 0; i < N_AAS_ROWS; i++) {
+        const struct pgwt_tm_row *r = row_at(&tmz, aas_rows[i].name,
+                                             aas_rows[i].indent);
+        CHECK(r != NULL && r->aas == 0.0 && isfinite(r->aas),
+              "wall_ms=0: \"%s\" aas must be exactly 0 and finite, got %.9f",
+              aas_rows[i].name, r ? r->aas : -1.0);
+    }
+    free(tmz.rows);
+
     /* Same structural guards as the raw path: no indent-1 Idle row (it would
      * break demo_rehearsal_lib.time_model_conservation), rows[0] is DB Time. */
     CHECK(row_at(&tm, "Idle", 1) == NULL, "no indent-1 Idle row");

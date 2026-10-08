@@ -1,0 +1,3 @@
+FAIL: /root/probe294/nope is missing or not executable — run 'make -C tests' first.
+      (A missing dependency fails this test; it never skips it.)
+exit=1

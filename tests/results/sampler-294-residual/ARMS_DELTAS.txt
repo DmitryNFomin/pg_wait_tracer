@@ -1,0 +1,22 @@
+=== per-class deltas, sampled minus exact (Gns = 1e9 ns) ===
+run      dCPU_Gns  dWait_Gns  dIdle_Gns   cpu_smpl  wait_smpl  idle_smpl
+A1          -36.0       +9.6      +51.7       1119       2041       6404
+A2          -27.6      +12.9      +42.2       1103       2270       6209
+A3          -29.6      +10.6      +46.5       1147       2088       6264
+B1          -24.4       +0.9      +44.4       1232       1901       6332
+B2          -10.3       -5.3      +36.7       1113       2394       6035
+B3          -19.9       +3.8      +37.8       1273       1952       6258
+C1          -18.8       -5.4      +40.0        582        590       5378
+C2           -7.9       -3.5      +25.9        480        907       5145
+C3          -20.0       -1.5      +39.5        558        640       5370
+
+=== health counters (a nonzero read-failure/invalid count would mean something IS being dropped, which the issue states is not the case) ===
+A1     samples=9617 sampled_attr_tick_read_failures=4995 invalid_wait_reads=0 cmd_gate_order_read_failed=0 cmd_gate_order_at_risk=616 cmd_gate_order_recovered=342 noncmd_cpu_samples=274 sampled_idle_in_command=18
+A2     samples=9552 sampled_attr_tick_read_failures=4896 invalid_wait_reads=0 cmd_gate_order_read_failed=0 cmd_gate_order_at_risk=564 cmd_gate_order_recovered=340 noncmd_cpu_samples=224 sampled_idle_in_command=10
+A3     samples=9563 sampled_attr_tick_read_failures=4933 invalid_wait_reads=0 cmd_gate_order_read_failed=0 cmd_gate_order_at_risk=608 cmd_gate_order_recovered=349 noncmd_cpu_samples=259 sampled_idle_in_command=16
+B1     samples=9519 sampled_attr_tick_read_failures=4920 invalid_wait_reads=0 cmd_gate_order_read_failed=0 cmd_gate_order_at_risk=624 cmd_gate_order_recovered=351 noncmd_cpu_samples=273 sampled_idle_in_command=15
+B2     samples=9570 sampled_attr_tick_read_failures=4936 invalid_wait_reads=0 cmd_gate_order_read_failed=0 cmd_gate_order_at_risk=584 cmd_gate_order_recovered=330 noncmd_cpu_samples=254 sampled_idle_in_command=15
+B3     samples=9538 sampled_attr_tick_read_failures=4913 invalid_wait_reads=0 cmd_gate_order_read_failed=0 cmd_gate_order_at_risk=646 cmd_gate_order_recovered=383 noncmd_cpu_samples=263 sampled_idle_in_command=19
+C1     samples=6678 sampled_attr_tick_read_failures=4909 invalid_wait_reads=0 cmd_gate_order_read_failed=0 cmd_gate_order_at_risk=258 cmd_gate_order_recovered=200 noncmd_cpu_samples=58 sampled_idle_in_command=6
+C2     samples=6669 sampled_attr_tick_read_failures=4881 invalid_wait_reads=0 cmd_gate_order_read_failed=0 cmd_gate_order_at_risk=192 cmd_gate_order_recovered=156 noncmd_cpu_samples=36 sampled_idle_in_command=2
+C3     samples=6704 sampled_attr_tick_read_failures=4914 invalid_wait_reads=0 cmd_gate_order_read_failed=0 cmd_gate_order_at_risk=259 cmd_gate_order_recovered=213 noncmd_cpu_samples=46 sampled_idle_in_command=4
