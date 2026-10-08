@@ -114,17 +114,20 @@ DAEMON_LOG=$(mktemp /tmp/pgwt_demo_daemon_XXXXXX.log)
 BRIDGE_LOG=$(mktemp /tmp/pgwt_demo_bridge_XXXXXX.log)
 WORKLOAD_LOG=$(mktemp /tmp/pgwt_demo_workload_XXXXXX.log)
 PGBENCH_LOG=$(mktemp /tmp/pgwt_demo_pgbench_XXXXXX.log)
+BURST_LOG=$(mktemp /tmp/pgwt_demo_burst_XXXXXX.log)
 SOCK="$TRACE_DIR/pgwt.sock"
 
 TRACER_PID=""
 BRIDGE_PID=""
 WORKLOAD_PID=""
 PGBENCH_PID=""
+BURST_PID=""
 DEMO_RC=1
 
 # stop_pid: bounded wait (signal, poll, KILL) -- live_daemon_lib.sh. The
 # bridge gets SIGINT specifically (web/main.go only handles os.Interrupt).
 cleanup() {
+    stop_pid "$BURST_PID" 20
     stop_pid "$WORKLOAD_PID" 10
     stop_pid "$PGBENCH_PID" 10
     stop_pid "$BRIDGE_PID" 10 INT
@@ -137,6 +140,8 @@ cleanup() {
     echo "demo_rehearsal: workload log tail:"
     tail -n 20 "$WORKLOAD_LOG" 2>/dev/null | sed 's/^/  /'
     tail -n 20 "$PGBENCH_LOG" 2>/dev/null | sed 's/^/  /'
+    echo "demo_rehearsal: burst-load log tail:"
+    tail -n 25 "$BURST_LOG" 2>/dev/null | sed 's/^/  /'
 
     # Same leaked-process guard as tests/ui_live_smoke.sh (issue #93 review
     # item 4). On a throwaway VM a leftover process here still gets swept
@@ -150,7 +155,7 @@ cleanup() {
     local leftover=""
     leftover="$(pgrep -f "$TRACE_DIR" 2>/dev/null || true)"
     local pid
-    for pid in "$PGBENCH_PID" "$WORKLOAD_PID" "$BRIDGE_PID" "$TRACER_PID"; do
+    for pid in "$BURST_PID" "$PGBENCH_PID" "$WORKLOAD_PID" "$BRIDGE_PID" "$TRACER_PID"; do
         if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
             leftover="$leftover"$'\n'"$pid"
         fi
@@ -173,7 +178,7 @@ cleanup() {
     else
         rm -rf "$TRACE_DIR"
     fi
-    rm -f "$DAEMON_LOG" "$BRIDGE_LOG" "$WORKLOAD_LOG" "$PGBENCH_LOG"
+    rm -f "$DAEMON_LOG" "$BRIDGE_LOG" "$WORKLOAD_LOG" "$PGBENCH_LOG" "$BURST_LOG"
 
     if [[ -n "$leftover" ]]; then
         echo "ERROR: processes from this run survived teardown:"
@@ -233,6 +238,28 @@ if ! kill -0 "$WORKLOAD_PID" 2>/dev/null; then
     echo "ERROR: lock/sleep workload exited immediately after starting:"
     report_early_exit "lock/sleep workload" "$WORKLOAD_PID"
     tail -n 40 "$WORKLOAD_LOG"
+    exit 1
+fi
+
+# Burst tier: tests/burst_load.sh (owner 2026-10-08, "demo should demo more
+# or less real picture of wait events"). The psql-pipe loop above cannot
+# produce CONTENTION -- one statement at a time from one session never makes
+# several backends collide on the same WAL buffer or lock-manager partition --
+# so the commit-path LWLock and IO classes that dominate a real OLTP profile
+# come from short, concurrent pgbench bursts instead. PGPORT is already
+# exported by derive_pgport above, which is the only port derivation in play
+# (burst_load.sh refuses to run without it rather than deriving its own).
+echo "demo_rehearsal: starting burst load (tests/burst_load.sh, ${DURATION_S}s)"
+PGWT_BURST_LOG="$BURST_LOG" \
+    bash "$SCRIPT_DIR/burst_load.sh" "$DURATION_S" >>"$BURST_LOG" 2>&1 &
+BURST_PID=$!
+sleep 2
+if ! kill -0 "$BURST_PID" 2>/dev/null; then
+    echo "ERROR: burst load exited immediately after starting -- a REFUSAL," \
+         "not a slow start: burst_load.sh checks its sentinel, its four .sql" \
+         "files, PGPORT, pgbench/psql on PATH and _smoke_io_load's row count" \
+         "before its first burst. The reason is the last line below."
+    tail -n 30 "$BURST_LOG"
     exit 1
 fi
 
@@ -300,5 +327,31 @@ python3 -u "$SCRIPT_DIR/demo_rehearsal.py" --url "$BASE_URL" \
     --pgbench-pid "$PGBENCH_PID" --workload-pid "$WORKLOAD_PID" \
     --daemon-pid "$TRACER_PID"
 DEMO_RC=$?
+
+if [[ "$DEMO_RC" -ne 0 ]]; then
+    exit "$DEMO_RC"
+fi
+
+# A burst tier that REFUSED partway through must fail the run, not vanish
+# into a log tail nobody reads -- that is the 2026-10-02 failure shape (the
+# load silently stopped, the capture was graded as good). It cannot be
+# checked with "is it still alive": burst_load.sh exits 0 when its own
+# duration budget is reached, which can legitimately happen either side of
+# the walk's end. The EXIT STATUS is what distinguishes them, so it is read
+# only once the process has actually exited; non-zero means one of its five
+# guards refused.
+if [[ -n "$BURST_PID" ]] && ! kill -0 "$BURST_PID" 2>/dev/null; then
+    wait "$BURST_PID"
+    BURST_RC=$?
+    if [[ "$BURST_RC" -ne 0 ]]; then
+        echo "ERROR: burst load exited $BURST_RC before this run finished --" \
+             "one of tests/burst_load.sh's guards refused, so part of this" \
+             "capture ran WITHOUT the burst tier. The wait-event mix this run" \
+             "measured is therefore not the demo's mix. Reason below."
+        tail -n 30 "$BURST_LOG"
+        exit 1
+    fi
+    echo "demo_rehearsal: burst load had already finished its own duration budget (exit 0)"
+fi
 
 exit "$DEMO_RC"

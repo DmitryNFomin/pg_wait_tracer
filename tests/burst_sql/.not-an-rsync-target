@@ -1,0 +1,20 @@
+Guard sentinel for tests/burst_load.sh (see its "Guard 1" block).
+
+On 2026-10-02 an `rsync --delete` into the directory that then held these
+four .sql files removed all of them. The burst driver filtered pgbench's
+stderr through `grep`, so every burst for the next three hours was a no-op
+that LOOKED like it worked: pgbench printed "could not open file", grep
+dropped it, the driver carried on. Three hours of captures were lost.
+
+This file is tracked in git, so it travels with the repo and with
+box-check's own rsync of the repo. What it detects is therefore NOT
+"somebody rsynced the repo here" (box-check does exactly that, by design --
+from the repo, which contains this file) but "this directory is not an
+intact checkout of tests/burst_sql": a --delete from an unrelated source,
+a partial copy, or a hand-made directory passed via PGWT_BURST_SQL_DIR.
+
+It is deliberately only the FIRST of five guards, because on its own it
+cannot see a stale-but-present .sql file. The other four are in
+burst_load.sh: per-file non-empty+readable, pgbench's exit status checked
+directly (never through a pipe), a per-invocation achieved-tps floor, and
+an independent end-to-end row-count delta on the WAL burst's target table.

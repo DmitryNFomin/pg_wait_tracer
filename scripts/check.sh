@@ -98,6 +98,17 @@ run python3 tests/test_evidence_output.py
 step "CI change-classifier table-driven test (issue #167)"
 run bash tests/test_classify_changed_files.sh
 
+# tests/burst_load.sh's twelve guards. Two phases: each guard refuses its own
+# broken input, AND deleting that guard removes the refusal (so no guard can
+# quietly become unreachable while the suite still says PASS). Stub
+# pgbench/psql/sleep/date on PATH, a pinned fake clock, no PostgreSQL and no
+# Linux needed -- so it belongs in the fast deterministic tier, not in a
+# 40-minute box run. That placement is the point: the rig these guards protect
+# silently produced three hours of no-op captures in 2026-10-02, and a guard
+# suite that only runs on the box is a guard suite nobody runs while editing.
+step "burst-load guard bypass suite (owner 2026-10-08)"
+run bash tests/test_burst_load_guards.sh
+
 if [[ $FAST -eq 0 ]]; then
     # ── Port allocation (so two `make check` runs on this Mac don't collide) ─
     # One free base per run, laid out at FIXED OFFSETS below so every mock
