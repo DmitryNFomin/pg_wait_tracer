@@ -27,6 +27,7 @@ TESTS     = test_wait_event test_cmdline test_spawn test_event_writer test_event
             test_pid_cap \
             test_concurrency_bounds \
             test_idle_accounting test_idle_summary \
+            test_agg_raw_crosscheck \
             gen_test_traces gen_bench_traces test_concurrent_rw cross_validate \
             dump_markers wait_cpu_canary test_wait_cpu_canary \
             test_summary_tick_flush
@@ -415,6 +416,26 @@ test_idle_accounting: test_idle_accounting.c ../src/compute.c \
 # (a v2 window, a truncated header, a missing dir, an empty dir, a writer that
 # wrote nothing, a non-overlapping window). Server build, no BPF.
 test_idle_summary: test_idle_summary.c ../src/compute.c \
+                   $(BUILD)/server_summary_writer.o \
+                   $(BUILD)/server_summary_reader.o \
+                   $(BUILD)/server_event_writer.o \
+                   $(BUILD)/wait_event.o $(BUILD)/idle_rule.o \
+                   $(BUILD)/spawn.o $(BUILD)/cJSON.o
+	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -llz4 -lz -lm
+
+# test_agg_raw_crosscheck: the AGGREGATE-vs-RAW differential gate. pgwt-server
+# answers the same question from pre-aggregated per-second records or by
+# materialising every raw event, and the failure mode that matters is the two
+# silently disagreeing -- FID-2 shipped exactly that. For every
+# pgwt_compute_*_from_summaries() in src/compute.h this computes BOTH paths
+# over the SAME committed blocks and the SAME window and asserts bit-exact
+# agreement, field by field, with no blanket epsilon; a new aggregate path
+# with no differential turns it red (it parses ../src/compute.h and refuses a
+# header it cannot read or parse). Carries mutation probes proving each
+# comparator can see a one-nanosecond / one-count / one-cell / one-row
+# difference, and a bypass suite for every way the comparison can be starved
+# into "0 == 0". Server build, no BPF, no live PG; ~0.1 s.
+test_agg_raw_crosscheck: test_agg_raw_crosscheck.c ../src/compute.c \
                    $(BUILD)/server_summary_writer.o \
                    $(BUILD)/server_summary_reader.o \
                    $(BUILD)/server_event_writer.o \
