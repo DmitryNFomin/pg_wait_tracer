@@ -1,0 +1,82 @@
+run=r1 capture_age_s=1112
+loadavg=1.71 1.31 1.73
+alive 3402638: /usr/lib/postgresql/18/bin/pgbench -U postgres -p 5418 -d postgres -c 
+alive 3402653: python3 tests/live_loop_workload.py 2400
+alive 3403154: bash tests/burst_load.sh 2400
+alive 3403526: ./pg_wait_tracer --daemon --pid 1883878 -i 1 -T /root/paint1_trace_r1 
+trace dir:
+drwxr-xr-x  2 root root     4096 Oct  8 08:14 .
+drwx------ 32 root root     4096 Oct  8 07:55 ..
+-rw-r--r--  1 root root   320319 Oct  8 08:00 2026-10-08_07.summary.lz4
+-rw-r--r--  1 root root 10477173 Oct  8 08:00 2026-10-08_07.trace.lz4
+-rw-r--r--  1 root root    46810 Oct  8 08:14 backends.jsonl
+-rw-r--r--  1 root root  1082862 Oct  8 08:14 current.summary
+-rw-r--r--  1 root root        4 Oct  8 08:14 current.summary.meta
+-rw-r--r--  1 root root 38744226 Oct  8 08:14 current.trace
+-rw-r--r--  1 root root        5 Oct  8 08:14 current.trace.meta
+srw-------  1 root root        0 Oct  8 07:55 pgwt.sock
+-rw-r--r--  1 root root        0 Oct  8 07:55 query_sources.jsonl
+-rw-r--r--  1 root root     3647 Oct  8 07:57 query_texts.jsonl
+-rw-r--r--  1 root root     5696 Oct  8 07:55 wait_event_names.json
+daemon log tail:
+INFO: trace file closed: 1429873 events, 10471541 bytes (4.9x compression)
+INFO: summary file closed: 262 records, 316095 bytes
+daemon flush lines:
+INFO: PID 3428910 exited (client)
+INFO: fork detected PID 3429010, bootstrap watchpoint attached
+INFO: PID 3429010 initialized (autovac_worker), real watchpoint at 0x7e1eb646cc08
+INFO: PID 3429010 exited (autovac_worker)
+--- trace volume (pgwt-server --dump) ---
+Daemon: running    mode: full    uptime: 1113s    events/s: 13355    backends: 29    pg_pid: 1883878
+pgwt-server — Summary    Events: 6660465 (6660465 transitions, 0 samples)    Duration: 1112.8s
+Fidelity: exact
+  AAS: 0.85    DB Time: 940950.0 ms    Idle: 27567736.3 ms
+  DB Time                            940950.0 ms   100.0%
+  Idle                             27567736.3 ms     0.0%
+--- time model (whole trace) ---
+  === Time Model ===
+
+  AAS: 0.85    DB Time: 940950.0 ms    Idle: 27567736.3 ms
+
+  DB Time                            940950.0 ms   100.0%
+    CPU (running)                    325903.0 ms    34.6%
+    CPU (waiting for a core)         157380.3 ms    16.7%
+    Lock                             292395.0 ms    31.1%
+      Lock:transactionid             142422.5 ms    15.1%
+      Lock:advisory                  105225.8 ms    11.2%
+      Lock:relation                   44745.8 ms     4.8%
+      Lock:extend                         1.0 ms     0.0%
+    IO                               128361.3 ms    13.6%
+      IO:WalSync                      93779.1 ms    10.0%
+      IO:DataFileRead                 11584.1 ms     1.2%
+      IO:WalWrite                      6883.7 ms     0.7%
+      IO:DataFileFlush                 6314.5 ms     0.7%
+      IO:DataFileWrite                 5457.7 ms     0.6%
+    LWLock                            36812.6 ms     3.9%
+      LWLock:WALWrite                 20559.1 ms     2.2%
+      LWLock:LockManager              16189.8 ms     1.7%
+      LWLock:BufferContent               19.8 ms     0.0%
+      LWLock:ProcArray                   17.2 ms     0.0%
+      LWLock:WALInsert                   12.9 ms     0.0%
+    Timeout                              82.0 ms     0.0%
+      Timeout:SpinDelay                  82.0 ms     0.0%
+    IPC                                  15.8 ms     0.0%
+      IPC:ProcarrayGroupUpdate           14.6 ms     0.0%
+      IPC:BufferIO                        1.3 ms     0.0%
+  Idle                             27567736.3 ms     0.0%
+      Client:ClientRead            22153839.7 ms     0.0%
+      Timeout:CheckpointWriteDelay   854876.6 ms     0.0%
+      Timeout:VacuumDelay              3544.0 ms     0.0%
+      Other (background)            4555476.1 ms     0.0%
+
+  === Top Events ===
+--- distinct sessions in the trace ---
+537
+--- summary records ---
+198487
+INFO: summary file closed: 262 records, 316095 bytes
+--- burst tier: did it refuse at any point? ---
+0
+0
+burst_load: first cycle OK -- all four bursts did measurable work
+burst cycles (b_wal invocations): 18

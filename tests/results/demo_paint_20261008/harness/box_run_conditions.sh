@@ -16,7 +16,13 @@ cd "$ROOT" || exit 2
 NOW=$(date +%s)
 echo "run=$RUN capture_age_s=$(( NOW - START_EPOCH ))"
 echo "loadavg=$(cut -d' ' -f1-3 /proc/loadavg)"
-for p in "$PGBENCH_PID" "$WORKLOAD_PID" "$BURST_PID" "$DAEMON_PID"; do
+# procs_expected: the LENGTH of the list below, printed so stamp.py compares
+# against it instead of a hardcoded number. The 2026-10-07 stamp.py hardcoded
+# 3; adding the burst tier made it 4 and silently refused a valid walk. A
+# count emitted by the loop that produces the lines cannot drift from them.
+PROCS=("$PGBENCH_PID" "$WORKLOAD_PID" "$BURST_PID" "$DAEMON_PID")
+echo "procs_expected=${#PROCS[@]}"
+for p in "${PROCS[@]}"; do
     if kill -0 "$p" 2>/dev/null; then echo "alive $p: $(ps -p "$p" -o args= | cut -c1-70)";
     else echo "DEAD $p -- this run's numbers are NOT valid"; fi
 done

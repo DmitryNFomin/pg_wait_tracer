@@ -1,0 +1,51 @@
+viewport read1: {'w': 1710, 'h': 981, 'dpr': 2} read2: {'w': 1710, 'h': 981, 'dpr': 2} | agree: True | matches pinned 1710x981@2: True
+chrome: 154.0.8037.100 | active range button: 15m
+  overview     min    175  med    239  max    329  n=3  29 rows
+  events       min    215  med    264  max    315  n=3  37 rows
+  sessions     min    213  med    241  max    314  n=3  245 rows
+  queries      min   2091  med   4615  max   5785  n=3  29 rows
+  histogram    min    345  med    375  max    408  n=3  3544 cells
+  transitions nav 1: NOT RENDERED (no container)
+  transitions  min   2889  med   3071  max   3253  n=2  9 nodes
+  concurrency nav 0: NOT RENDERED (no container)
+  concurrency  min   3246  med   3408  max   3569  n=2  300 buckets
+  waterfall    min   4401  med   4405  max   4796  n=3  101 executions, 1 lanes
+  scatter      min   3927  med   4065  max   4358  n=3  2000 points
+  matrix       min   2818  med   2875  max   2949  n=3  38 cells
+  timeline     min    230  med    251  max    300  n=3  1086 spans
+
+time-model rows: 29
+   pad=12px    DB Time 787.8s 100.0% 0.88
+   pad=28px    CPU* 415.0s 52.7% 0.46
+   pad=28px    Lock 234.5s 29.8% 0.26
+   pad=48px    Lock:transactionid 115.4s 14.6% 0.13
+   pad=48px    Lock:advisory 83.6s 10.6% 0.09
+   pad=48px    Lock:relation 35.5s 4.5% 0.04
+   pad=48px    Lock:extend 738µs 0.0% 0.00
+   pad=28px    IO 107.6s 13.7% 0.12
+   pad=48px    IO:WalSync 77.7s 9.9% 0.09
+   pad=48px    IO:DataFileRead 10.3s 1.3% 0.01
+   pad=48px    IO:WalWrite 5.8s 0.7% 0.01
+   pad=48px    IO:DataFileFlush 5.4s 0.7% 0.01
+   pad=48px    IO:DataFileWrite 4.8s 0.6% 0.01
+   pad=28px    LWLock 30.7s 3.9% 0.03
+   pad=48px    LWLock:WALWrite 17.8s 2.3% 0.02
+   pad=48px    LWLock:LockManager 12.8s 1.6% 0.01
+   pad=48px    LWLock:BufferContent 19.4ms 0.0% 0.00
+   pad=48px    LWLock:ProcArray 16.5ms 0.0% 0.00
+   pad=48px    LWLock:WALInsert 12.7ms 0.0% 0.00
+   pad=28px    Timeout 75.3ms 0.0% 0.00
+   pad=48px    Timeout:SpinDelay 75.3ms 0.0% 0.00
+   pad=28px    IPC 15.0ms 0.0% 0.00
+   pad=48px    IPC:ProcarrayGroupUpdate 13.8ms 0.0% 0.00
+   pad=48px    IPC:BufferIO 1.3ms 0.0% 0.00
+   pad=12px    Idle 25148.5s 0.0% 0.00
+   pad=48px    Client:ClientRead 17961.6s 0.0% 0.00
+   pad=48px    Timeout:CheckpointWriteDelay 808.5s 0.0% 0.00
+   pad=48px    Timeout:VacuumDelay 3.4s 0.0% 0.00
+   pad=48px    Other (background) 6375.0s 0.0% 0.00
+summary bar: ['DB TIME 787.8s', 'WALL 900.0s', 'AAS 0.88', 'IDLE 25148.5s', 'CPUS 4']
+
+console errors: 1
+    ('error', 'Failed to load resource: the server responded with a status of 404 (Not Found)')
+written: /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-afa9ff9486d78f624/tests/results/demo_paint_20261008/walk-r1.json
