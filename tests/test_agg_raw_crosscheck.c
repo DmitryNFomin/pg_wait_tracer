@@ -124,63 +124,120 @@
  *                the single LONGEST INDIVIDUAL wait, because the writer keeps
  *                `dur > ss->top_wait_ns` per second and the reader keeps the
  *                max over seconds.
- *      MEASURED counterexample (a 130 s probe, pid 301): 130 x 10 ms of Lock
- *      (1300 ms total, 10 ms max) against 1 x 40 ms of IO (40 ms total, 40 ms
- *      max) — raw reports top_wait = Lock:relation, the summary path reports
- *      IO:DataFileRead, with both agreeing on db_time_ms 1340.000. Reachable
- *      unfiltered. Asserting equality would be green only by fixture choice, so this
- *      gate asserts instead the strongest FIX-PROOF invariant: the summary's
- *      top wait must be an event the session/query ACTUALLY had in the window
- *      with non-zero raw time, and must never be an idle event or 0. That
- *      catches a summary path naming an event that is not there, which is the
- *      failure worth catching, and it stays green whichever definition the
- *      product settles on. See FINDING 1 in the report.
+ *      STILL OPEN as a product decision (#319), and now PINNED ON BOTH
+ *      SIDES by section 6e rather than only described: that case builds its
+ *      own 130 s stream (pid 301: 130 x 10 ms of Lock = 1300 ms total,
+ *      10 ms max, against 1 x 40 ms of IO = 40 ms total, 40 ms max) and
+ *      asserts raw names Lock, the summary path names IO, and both agree on
+ *      db_time_ms 1340.000 — so it is a definition difference, not a
+ *      counting one. "Largest total" is the right answer, but it is NOT
+ *      derivable from the record: struct pgwt_summary_session carries one
+ *      (top_wait_id, top_wait_ns) pair per second, and no sequence of
+ *      per-second (id, max) pairs determines a window-wide argmax of
+ *      TOTALS. Fixing it needs per-session per-event totals in the record,
+ *      and any BOUNDED version of that re-introduces silent inexactness.
+ *      The main fixture CANNOT express the divergence at all (every
+ *      duration is base_us * (1 + s % 8), so totals and maxima rank
+ *      identically for every pid), which is why 6e has its own stream; the
+ *      invariant still asserted here is the fix-proof one — the summary's
+ *      top wait must be an event the session/query ACTUALLY had in the
+ *      window with non-zero raw time, never idle, never 0.
  *
- *  N5. top_sessions under a class / event / query filter —
- *      ts_summary_visitor (src/compute.c:2487-2491) looks at f->pid ONLY: it
- *      ignores class_name, event_id and query_id entirely, while the raw path
- *      applies all of them via pgwt_filter_matches. Not an accuracy gap, a
- *      missing feature, and REACHABLE (should_use_summaries blocks only pid).
- *      Compared UNFILTERED here; see FINDING 2.
+ *  N5. top_sessions under a class / event / query filter — the per-second
+ *      record has NO per-session breakdown by any of them
+ *      (struct pgwt_summary_session is {pid, db_time_ns, cpu_ns,
+ *      top_wait_id, top_wait_ns}), so the summary path cannot answer such a
+ *      request at all. FIXED (#318) in the only two places it can be:
+ *      handle_top_sessions now forces the RAW path for a class- or
+ *      event-filtered request as well as a query-filtered one, and
+ *      ts_summary_visitor REFUSES the filter (no rows) instead of returning
+ *      the UNFILTERED numbers under a filtered label, which is what it used
+ *      to do — reachable, since should_use_summaries blocks only pid.
+ *      Compared UNFILTERED here; the refusal and its non-vacuity are
+ *      section 6d.
  *
  *  N6. heatmap under a query filter — hm_summary_visitor consults
  *      summary_event_matches_filter (class/event) but there is no per-query
  *      histogram in the records, so query_id is ignored. Also reachable. See
  *      FINDING 3.
  *
- *  N7. events carrying PGWT_EVENT_FLAG_IO_WORKER are absent from the fixture.
- *      The raw paths exclude io_worker records from DB Time / Top Events /
- *      Top Sessions / Top Queries (src/compute.c:1077, 1440, 1575, 1685);
- *      src/summary_writer.c's accum_event has NO io_worker check at all, so
- *      they enter class_ns, events[], sessions[] and queries[]. There is no
- *      fix-proof invariant to assert here — one path counts the time and the
- *      other does not — so the fixture stays io_worker-free (asserted in
- *      assert_fixture_live, so the hole cannot be quietly widened) and the
- *      divergence is reported rather than hidden inside a tolerance.
- *      MEASURED on a 130 s probe with one io_worker burning 40 ms/s: raw DB
- *      Time 1300.000 ms vs summary 6500.000 ms (+400%), the io_worker also
- *      appearing as a Top Sessions row (5200.000 ms) and a Top Events row
- *      that exist only on the summary side. REACHABLE: no handler guards it.
+ *  N7. events carrying PGWT_EVENT_FLAG_IO_WORKER are absent from the
+ *      fixture, and the summary records still COUNT io_worker time. OPEN:
+ *      issue #315. The raw paths exclude io_worker records from DB Time, Top
+ *      Events, Top Sessions, Top Queries and AAS (src/compute.c:1077, 1440,
+ *      1575, 1685 and the AAS loop); src/summary_writer.c has no io_worker
+ *      check anywhere, so they enter class_ns, idle_ns, events[], sessions[]
+ *      and queries[]. MEASURED on a 130 s probe with one io_worker at
+ *      40 ms/s: raw DB Time 1300.000 ms vs summary 6500.000 ms (+400%), plus
+ *      an io_worker Top Sessions row (5200.000 ms) and a Top Events row that
+ *      exist only on the summary side. REACHABLE: no handler guards it.
+ *      There is no fix-proof invariant to assert -- one path counts the time
+ *      and the other does not -- so the fixture stays io_worker-free
+ *      (asserted in assert_fixture_live, so the hole cannot be quietly
+ *      widened) and the divergence is reported rather than hidden inside a
+ *      tolerance.
  *
- *  N8. the WINDOW END BOUND. pgwt_visit_summaries (src/summary_reader.c:474)
- *      drops a record only when `rec_ns > to_wall_ns`, so the record whose
- *      second starts exactly AT the window end is included in full, while
+ *      WHY THE ONE-LINE WRITER FIX DOES NOT WORK, recorded here so the fix
+ *      branch does not rediscover it: `evt->flags` is EMPTY of category bits
+ *      on the live path. The only producers of PGWT_EVENT_FLAG_IO_WORKER are
+ *      src/server.c's bm_type_to_cat_flag (applied by pgwt_tag_events at raw
+ *      LOAD time, server-side, long after the summary was written) and
+ *      src/sampler.c (whose events never reach the summary writer). Nothing
+ *      in src/event_stream.c or src/escalation.c sets it. So a
+ *      `evt->flags & PGWT_EVENT_FLAG_IO_WORKER` test inside
+ *      pgwt_summary_push_event is DEAD IN THE DAEMON, and a fixture that
+ *      pre-sets the bit greens it while testing an input shape production
+ *      never produces -- which is exactly what happened on the first attempt
+ *      at this. The daemon-side resolver is pgwt_live_pid_cat_flag
+ *      (src/map_reader.c), and using it needs real work: the summary push at
+ *      event_stream.c:96 runs BEFORE the resolve at :161, and the resolver
+ *      returns 0 for a pid whose metadata is not yet parsed, so an
+ *      io_worker's first events slip through regardless. Any test for the
+ *      fix must push UNFLAGGED events from an io_worker pid through the
+ *      daemon-side path.
+ *
+ *      NOTE for whoever takes #315: pgwt_compute_heatmap does NOT exclude
+ *      io_workers, so both heatmap paths currently agree by counting them.
+ *      Excluding them at the writer alone therefore MOVES the divergence to
+ *      the latency grid instead of removing it -- and handle_heatmap really
+ *      does route both ways (summary at src/server.c:3984, raw at :4001), so
+ *      a >= 120 s and a < 120 s window would disagree. The two changes have
+ *      to land together.
+ *  N8. the WINDOW END BOUND — FIXED (#316). pgwt_visit_summaries used to
+ *      drop a record only when `rec_ns > to_wall_ns`, so the record whose
+ *      second starts exactly AT the window end was included in full while
  *      every other window consumer is half-open (event_window_ns clips at
- *      to_ns; pgwt_compute_heatmap drops `ev_ts >= to_ns`). A summary-path
- *      answer over [T, T+W) therefore covers W+1 seconds, and the extra
- *      second lands on the LAST bucket of any chart. The main 130 s window
- *      below ends one second past the last record, so it is unaffected;
- *      section 5h measures the effect on an interior window and asserts it
- *      FIX-PROOF (the summary total must be exactly the in-window slice or
- *      exactly those two slices -- nothing else). Reported, not fixed:
- *      src/summary_reader.c is product code and this branch is the gate.
+ *      to_ns; pgwt_compute_heatmap drops `ev_ts >= to_ns`). A summary answer
+ *      over [T, T+W) therefore covered W+1 seconds, and because
+ *      aas_summary_visitor clamps an over-range bucket index to the last
+ *      bucket, the extra second landed entirely on the LAST bar of any
+ *      chart. Invisible on a live "last 15 min" (that second is not flushed
+ *      yet), never invisible on a historical window. The main 130 s window
+ *      below ends one second past the last record and so never showed it;
+ *      5h measures an interior window and now asserts plain EQUALITY, and
+ *      section 6a pins the bound in the three shapes that break
+ *      independently (interior, ending ON the last record's second — which
+ *      is the one that reaches the reader's block-level prune — and zero
+ *      width) plus the start bound, which must stay INCLUSIVE.
  *
- *  N9/N10/N11. three filter-shaped divergences the registry below names in
- *      full, each with the measured numbers: Top Events under a query filter
- *      loses the whole CPU* row, Top Queries under a class filter reports an
- *      unfiltered count, Top Queries under an event-only filter reports
- *      unfiltered per-class columns. All three are reachable
- *      (should_use_summaries blocks only pid filters).
+ *  N9. Top Events under a QUERY filter used to lose the whole CPU* row
+ *      (measured raw 7002.426 ms vs summary 2949.426 ms, -57.9%), because
+ *      accum_query_add guarded its per-query top_events[] filing with
+ *      `if (old_ev != 0)`. FIXED (#317) at the writer, and section 6c
+ *      compares the two paths row by row on that filter. What REMAINS a
+ *      named hole is only the LATENCY columns: the per-query list carries no
+ *      histogram and no max, so has_latency_dist is 0 there, which the
+ *      server renders as null — deliberate, #103. That is why the registry
+ *      entry below still omits F_QUERY (diff_top_events compares the latency
+ *      columns too); 6c compares everything else and asserts the latency
+ *      columns are ABSENT on the summary side and PRESENT on raw, so
+ *      "absent" cannot quietly become "zero".
+ *
+ *  N10/N11. two filter-shaped divergences the registry below names in full
+ *      with the measured numbers: Top Queries under a class filter reports
+ *      an unfiltered count, and under an event-only filter reports
+ *      unfiltered per-class columns. NOT reachable — handle_top_queries
+ *      forces raw for both — so they stay reported rather than fixed.
  *
  * ROW ORDER is also not comparable: both paths qsort by total descending and
  * neither sort is stable, so equal totals may come back in either order.
@@ -234,7 +291,14 @@
  *      summary-side result, proving each diff_*() can actually see a 1 ns /
  *      1-count / 1-cell / 1-row difference. A comparator that returned 0
  *      unconditionally would pass section 3 and fail every one of these.
- *   5. the bypass suite (above), plus 5h's measurement of N8.
+ *   5. the bypass suite (above), plus 5h's measurement of the #316 bound.
+ *   6. THE NAMED DIVERGENCES (#316, #317, #318 fixed; #319 pinned), one
+ *      case each so none can come back silently. #315 is NOT here: it is
+ *      still open, for the reason N7 now records in full. Each case asserts
+ *      its own non-vacuity premise FIRST, because all of them are "a number
+ *      that should be smaller" and a fixture that does not contain the thing
+ *      satisfies that for free. #319 needs a stream the main fixture cannot
+ *      express and builds its own (`mini`).
  *
  * ENVIRONMENT INDEPENDENCE. Which wait events count as idle is derived from
  * resolved NAMES (src/idle_rule.c), because the Timeout ids invert between
@@ -371,6 +435,7 @@ struct fixture {
     struct pgwt_trace_event *mono;   /* what was pushed into the writer */
     struct pgwt_trace_event *wall;   /* the same events, wall timestamps */
     int       n;
+    uint64_t  origin;                /* the ONE clock read (mono_origin) */
     uint64_t  from_ns, to_ns;        /* wall window, second-aligned */
     double    wall_ms;
     int       records;
@@ -494,6 +559,7 @@ static int fixture_build(struct fixture *fx, const char *dirname)
     snprintf(fx->dir, sizeof(fx->dir), "%s", fresh_dir(dirname));
 
     uint64_t origin = mono_origin();
+    fx->origin = origin;
     fx->mono = calloc(MAX_EV, sizeof(*fx->mono));
     fx->wall = calloc(MAX_EV, sizeof(*fx->wall));
     if (!fx->mono || !fx->wall) return -1;
@@ -594,13 +660,20 @@ static void assert_fixture_live(const struct fixture *fx)
           "(%d) and queries (%d)",
           fx->max_events, fx->max_sessions, fx->max_queries);
     /* N7's premise, checked rather than trusted. The fixture must stay
-     * io_worker-free: src/summary_writer.c's accum_event has no io_worker
-     * check, so such a record enters class_ns / events[] / sessions[] /
-     * queries[] while every raw path excludes it -- measured +400% on summary
-     * DB Time against raw for a 130 s stream with one io_worker. Adding one
-     * here would not reveal that; it would just make every comparison below
-     * red and invite someone to loosen them. The exclusion is the named hole;
-     * this is what stops it from being quietly widened. */
+     * io_worker-free: src/summary_writer.c has no io_worker check, so such a
+     * record enters class_ns / idle_ns / events[] / sessions[] / queries[]
+     * while every raw path except the heatmap excludes it -- measured +400%
+     * on summary DB Time against raw for a 130 s stream with one io_worker.
+     * Adding one here would not reveal that; it would just make every
+     * comparison below red and invite someone to loosen them.
+     *
+     * It is ALSO what stops #315 being "fixed" by a fixture rather than by
+     * the product. A pre-flagged io_worker event greens a
+     * `evt->flags & PGWT_EVENT_FLAG_IO_WORKER` guard in the writer that is
+     * DEAD IN THE DAEMON (nothing on the live path sets that bit -- see N7),
+     * so a fixture allowed to set it can certify a fix that does nothing.
+     * The exclusion is the named hole; this is what stops it from being
+     * quietly widened OR quietly closed. */
     int io_worker_events = 0;
     for (int i = 0; i < fx->n; i++)
         if (fx->mono[i].flags & PGWT_EVENT_FLAG_IO_WORKER) io_worker_events++;
@@ -1138,22 +1211,27 @@ static const struct pair PAIRS[] = {
     { "pgwt_compute_top_events_from_summaries",   run_top_events,
       F_NONE | F_CLASS | F_EVENT,
       "N9: under a QUERY filter the summary path reads the per-query "
-      "top_events[] list, which (a) is never given event_id 0, so the CPU* "
-      "row is absent and db_time_ms is short by the query's whole CPU time "
-      "(src/summary_writer.c accum_query_add: `if (old_ev != 0)`) and (b) "
-      "carries no histogram and no max, so the latency columns come back as "
-      "'absent' (has_latency_dist = 0, which the server renders as null -- "
-      "that part is deliberate, #103). Measured on this fixture: raw DB Time "
-      "7002.426 ms vs summary 2949.426 ms, -57.9%. REACHABLE: "
-      "handle_top_events (src/server.c:3596) adds no query guard, unlike "
-      "handle_top_sessions and handle_heatmap" },
+      "top_events[] list, which carries no histogram and no max -- so the "
+      "LATENCY columns come back as 'absent' (has_latency_dist = 0, which "
+      "the server renders as null). Deliberate, #103, and the only part of "
+      "this hole left: the missing CPU* row (accum_query_add's "
+      "`if (old_ev != 0)`, measured raw 7002.426 ms vs summary 2949.426 ms, "
+      "-57.9%) is FIXED in #317. F_QUERY stays off here only because "
+      "diff_top_events compares the latency columns too; section 6c compares "
+      "every other column on that filter row by row AND asserts the latency "
+      "columns absent on the summary side and present on raw" },
     { "pgwt_compute_top_sessions_from_summaries", run_top_sessions,
       F_NONE,
-      "N5: ts_summary_visitor (src/compute.c) reads f->pid ONLY -- "
-      "class_name, event_id and query_id are ignored. handle_top_sessions "
-      "(src/server.c:3688) guards only `query_id == 0`, so a CLASS- or "
-      "EVENT-filtered Sessions tab over a >= 120 s window gets UNFILTERED "
-      "numbers" },
+      "N5: the per-second record has no per-session breakdown by query, "
+      "class or event at all (struct pgwt_summary_session is {pid, "
+      "db_time_ns, cpu_ns, top_wait_id, top_wait_ns}), so no filter but pid "
+      "is answerable from summaries and pid is already forced raw. #318: "
+      "ts_summary_visitor used to read f->pid ONLY and silently return "
+      "UNFILTERED numbers for the other three, and handle_top_sessions "
+      "guarded only `query_id == 0`. Now the handler forces raw for all "
+      "three and the visitor REFUSES them (no rows) as the fail-safe -- "
+      "section 6d, which also checks the refusal is of the FILTER and not of "
+      "everything" },
     { "pgwt_compute_top_queries_from_summaries",  run_top_queries,
       F_NONE | F_QUERY,
       "N10/N11: under a CLASS filter the summary path filters total_ns but "
@@ -1767,15 +1845,19 @@ static void bypass_one_second_window(const struct fixture *fx)
  * that second has not been flushed yet; it is NOT invisible on any historical
  * window, nor on this file's own interior windows.
  *
- * ASSERTED FIX-PROOF AND SHARP: the summary total must be EITHER exactly the
- * one slice inside the window (correct, half-open) OR exactly those two slices
- * (today's inclusive bound). Any third value -- a partial second, a different
- * second, a scaling error -- fails. The two candidates are asserted distinct
- * first, so the `||` cannot be satisfied vacuously.
+ * FIXED (#316): the reader's record filter is `rec_ns >= to_wall_ns`, so this
+ * now asserts plain EQUALITY with the in-window slice. The inclusive-bound
+ * answer is still computed and named in the message, so a regression prints
+ * what it regressed TO rather than only that two numbers differ; the two
+ * candidates are asserted distinct first, so "equal to the right one" cannot
+ * be satisfied by accident. Section 6a pins the same bound in the three
+ * shapes that can each break independently (interior, on the last record's
+ * second, zero width) plus the start bound that must stay inclusive.
  */
 static void bypass_end_bound(const struct fixture *fx)
 {
-    printf("  5h. N8: the summary path's window END is INCLUSIVE\n");
+    printf("  5h. #316: the summary path's window END is EXCLUSIVE, like "
+           "every other consumer\n");
     const int K = 10;                     /* an interior second */
     struct pgwt_filter f;
     memset(&f, 0, sizeof(f));
@@ -1799,9 +1881,9 @@ static void bypass_end_bound(const struct fixture *fx)
     CHECK(raw.db_time_ms == want_half_open,
           "the RAW path is half-open: %.6f == %.6f ms",
           raw.db_time_ms, want_half_open);
-    CHECK(sum.db_time_ms == want_half_open || sum.db_time_ms == want_inclusive,
-          "the SUMMARY path is either half-open (%.6f) or includes exactly "
-          "the second at to_ns (%.6f) -- it answered %.6f ms",
+    CHECK(sum.db_time_ms == want_half_open,
+          "the SUMMARY path is half-open too (%.6f) and does NOT include the "
+          "second at to_ns (which would read %.6f) -- it answered %.6f ms",
           want_half_open, want_inclusive, sum.db_time_ms);
     printf("      raw %.6f ms, summary %.6f ms (%s; excess %.6f ms = %.1f%% "
            "of the window)\n", raw.db_time_ms, sum.db_time_ms,
@@ -1870,6 +1952,7 @@ static void bypass_absent_not_wrong(const struct fixture *fx)
     free_ev(&raw); free_ev(&sum);
 }
 
+
 static void test_bypass_suite(const struct fixture *fx)
 {
     printf("--- 5. the bypass suite: every way this gate could be blind ---\n");
@@ -1881,6 +1964,576 @@ static void test_bypass_suite(const struct fixture *fx)
     bypass_coverage_blind();
     bypass_absent_not_wrong(fx);
     bypass_end_bound(fx);
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * 6. THE NAMED DIVERGENCES (#316, #317, #318 — fixed; #319 — pinned)
+ *
+ * Section 5h and the PAIRS holes above REPORTED these; this section PINS
+ * them, one case each, so none can come back silently. Three are now fixed
+ * and asserted equal; #319 is a definition question the product has not
+ * settled, so both definitions are pinned exactly instead of one being
+ * asserted "correct" — the day it is decided, exactly one CHECK below has to
+ * flip, and the test says which.
+ *
+ * #315 (io_worker time on the summary path) is deliberately ABSENT. It is
+ * still open and N7 in the header records why the obvious writer-side fix is
+ * dead in the daemon: nothing on the live path sets the io_worker flag, so a
+ * fixture that pre-sets it tests an input shape production never produces.
+ * That mistake was made and reverted on this branch; the fixture stays
+ * io_worker-free and assert_fixture_live keeps it that way.
+ *
+ * Each case carries its own NON-VACUITY premise, because every one of these
+ * is "a number that should be smaller" and zero is smaller than everything:
+ * an io_worker fix is satisfied by a fixture with no io_workers, a CPU-row fix
+ * by a query with no CPU, and an end-bound fix by a window that already ends
+ * past the data. The premise is asserted first in each case, so the case
+ * cannot pass by not exercising the thing it is named after.
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+/* ── a SECOND fixture, from a caller-built stream ──────────────────────
+ *
+ * fixture_build() above is hardcoded to `slice`, which is correct for the
+ * matrix (one broad, io_worker-free, tie-free stream) and useless for cases
+ * that need a stream shaped around one divergence. This builds the same thing
+ * from any literal event array: real writer, every push checked, window
+ * derived from the records that were actually committed, and a wall-shifted
+ * copy for the raw side. */
+struct mini {
+    char      dir[600];
+    struct pgwt_trace_event *wall;
+    int       n;
+    uint64_t  from_ns, to_ns;
+    double    wall_ms;
+    int       records;
+    uint64_t  block_events;   /* sum of events[].count over the records */
+    uint32_t  overflow;
+};
+
+static int mini_build(struct mini *m, const char *dirname, uint64_t origin,
+                      const struct pgwt_trace_event *ev, int n)
+{
+    memset(m, 0, sizeof(*m));
+    snprintf(m->dir, sizeof(m->dir), "%s", fresh_dir(dirname));
+    m->n = n;
+
+    /* Every push checked: "the writer ACCEPTED it and deliberately did not
+     * account it" and "the writer REFUSED it" are different fixes, and only
+     * the first is the one being asserted below. */
+    long pushed = write_summaries(m->dir, ev, n);
+    if (pushed != n) {
+        printf("  FAIL: mini writer accepted %ld of %d events\n", pushed, n);
+        tests_failed++;
+        return -1;
+    }
+
+    struct rec_ctx rc;
+    memset(&rc, 0, sizeof(rc));
+    if (pgwt_visit_summaries(m->dir, 0, 0, rec_visitor, &rc) < 0 ||
+        rc.records == 0) {
+        printf("  FAIL: no summary records were committed to %s\n", m->dir);
+        tests_failed++;
+        return -1;
+    }
+    m->records      = rc.records;
+    m->block_events = rc.total_events;
+    m->overflow     = rc.overflow;
+    m->from_ns      = rc.min_sec;
+    m->to_ns        = rc.max_sec + ONE_SEC;
+    m->wall_ms      = (double)(m->to_ns - m->from_ns) / 1e6;
+
+    m->wall = calloc((size_t)n, sizeof(*m->wall));
+    if (!m->wall) { tests_failed++; return -1; }
+    uint64_t shift = m->from_ns - origin;
+    memcpy(m->wall, ev, (size_t)n * sizeof(*m->wall));
+    for (int i = 0; i < n; i++)
+        m->wall[i].timestamp_ns += shift;
+    return 0;
+}
+
+static void mini_free(struct mini *m) { free(m->wall); m->wall = NULL; }
+
+/* ── 6a. #316: the window end is HALF-OPEN on both paths ───────────────
+ *
+ * pgwt_visit_summaries used to drop a record only on `rec_ns > to_wall_ns`,
+ * so the second STARTING at the window end was included in full and a summary
+ * answer over [T, T+W) covered W+1 seconds. 5h above measured it; this pins
+ * the fix in the three shapes that can each be got wrong independently:
+ *
+ *   - an INTERIOR one-second window (the shape 5h measured);
+ *   - a window ending on the LAST record's second, which is also the shape
+ *     that exercises the block-level prune (`block_index[b].timestamp_ns`)
+ *     rather than only the per-record filter — a fix applied to one and not
+ *     the other passes the first case and fails this one;
+ *   - a ZERO-WIDTH window, which must see NOTHING. Under the old inclusive
+ *     bound it saw exactly one record, so this is the sharpest statement of
+ *     the bug that exists: half-open means from == to is empty.
+ *
+ * And the FROM side must stay INCLUSIVE: `>=` applied to the wrong bound
+ * would shift every window by one second and still give a one-second answer
+ * for a one-second request, so the interior case asserts the answer is slice
+ * K specifically, with slices K-1, K and K+1 asserted distinct first. */
+static void div316_half_open(const struct fixture *fx)
+{
+    printf("  6a. #316: both paths treat the window end as EXCLUSIVE\n");
+    const int K = 10;
+    struct pgwt_filter f;
+    memset(&f, 0, sizeof(f));
+
+    uint64_t prev_ns = slice_db_ns(K - 1);
+    uint64_t in_ns   = slice_db_ns(K);
+    uint64_t next_ns = slice_db_ns(K + 1);
+    /* NON-VACUITY: if the three neighbouring seconds carried the same DB
+     * Time, "it answered slice K" would also be true of an answer that was
+     * really slice K-1 or K+1, and an off-by-one-second window would read as
+     * correct. */
+    CHECK(prev_ns > 0 && in_ns > 0 && next_ns > 0 &&
+          prev_ns != in_ns && in_ns != next_ns && prev_ns != next_ns,
+          "slices %d, %d and %d carry three DIFFERENT non-zero DB Times "
+          "(%llu / %llu / %llu ns), so 'the window answered slice %d' is a "
+          "statement that can be wrong", K - 1, K, K + 1,
+          (unsigned long long)prev_ns, (unsigned long long)in_ns,
+          (unsigned long long)next_ns, K);
+
+    /* (1) interior one-second window */
+    uint64_t from = fx->from_ns + (uint64_t)K * ONE_SEC;
+    uint64_t to   = from + ONE_SEC;
+    struct pgwt_tm_result raw, sum;
+    pgwt_compute_time_model(fx->wall, fx->n, &f, from, to, 1000.0, &raw);
+    pgwt_compute_time_model_from_summaries(fx->dir, from, to, &f, 1000.0, &sum);
+    CHECK(raw.db_time_ms == (double)in_ns / 1e6,
+          "6a: the raw path answers slice %d exactly (%.6f == %.6f ms)", K,
+          raw.db_time_ms, (double)in_ns / 1e6);
+    CHECK(sum.db_time_ms == (double)in_ns / 1e6,
+          "6a: and so does the SUMMARY path -- not slice %d+%d together "
+          "(%.6f would be %.6f ms); answered %.6f ms", K, K + 1,
+          (double)(in_ns + next_ns) / 1e6, (double)(in_ns + next_ns) / 1e6,
+          sum.db_time_ms);
+    CHECK(diff_time_model("6a interior 1 s", &raw, &sum, 1) == 0,
+          "6a: and every other time-model field agrees on that window too");
+    free_tm(&raw); free_tm(&sum);
+
+    /* (2) a window ending ON the last record's second: that record is at
+     * to_ns and must be excluded. This is also the case where the reader's
+     * BLOCK-level prune sits exactly on the boundary. */
+    uint64_t all_but_last = 0;
+    for (int s = 0; s < SECS - 1; s++)
+        all_but_last += slice_db_ns(s);
+    uint64_t last = slice_db_ns(SECS - 1);
+    CHECK(last > 0 && all_but_last > 0,
+          "the last slice (%llu ns) and the preceding %d (%llu ns) are both "
+          "non-zero", (unsigned long long)last, SECS - 1,
+          (unsigned long long)all_but_last);
+    uint64_t to2 = fx->from_ns + (uint64_t)(SECS - 1) * ONE_SEC;
+    double wall2 = (double)(to2 - fx->from_ns) / 1e6;
+    pgwt_compute_time_model(fx->wall, fx->n, &f, fx->from_ns, to2, wall2, &raw);
+    pgwt_compute_time_model_from_summaries(fx->dir, fx->from_ns, to2, &f,
+                                           wall2, &sum);
+    CHECK(sum.db_time_ms == (double)all_but_last / 1e6,
+          "6a: a window ending ON the last record's second EXCLUDES it "
+          "(%.6f == %.6f ms, and would be %.6f with it)", sum.db_time_ms,
+          (double)all_but_last / 1e6, (double)(all_but_last + last) / 1e6);
+    CHECK(diff_time_model("6a ends on last second", &raw, &sum, 1) == 0,
+          "6a: and the two paths agree on it");
+    free_tm(&raw); free_tm(&sum);
+
+    /* (3) zero width: half-open means empty. Asserted at the visitor, which
+     * is where the bound lives -- the compute wrappers return early on a
+     * zero-length range, so they cannot see this either way. */
+    struct rec_ctx rc;
+    memset(&rc, 0, sizeof(rc));
+    uint64_t z = fx->from_ns + (uint64_t)K * ONE_SEC;
+    pgwt_visit_summaries(fx->dir, z, z, rec_visitor, &rc);
+    CHECK(rc.records == 0,
+          "6a: a ZERO-WIDTH window [T, T) visits no records (%d) -- under the "
+          "old inclusive bound it visited exactly the record at T",
+          rc.records);
+
+    /* (4) and the FROM bound is still INCLUSIVE: a window starting exactly on
+     * a record's second must contain it. Without this, changing `>` to `>=`
+     * on the wrong comparison would pass (1)-(3) by shifting every window one
+     * second earlier. */
+    memset(&rc, 0, sizeof(rc));
+    pgwt_visit_summaries(fx->dir, z, z + ONE_SEC, rec_visitor, &rc);
+    CHECK(rc.records == 1,
+          "6a: and [T, T+1s) visits exactly the ONE record at T (%d) -- the "
+          "start bound stays inclusive", rc.records);
+}
+
+/* ── 6c. #317: a query's CPU time is in its per-query event list ────────
+ *
+ * accum_query_add guarded the per-query top_events[] filing with
+ * `if (old_ev != 0)`, so event 0 -- CPU -- was never filed, and the Events
+ * tab drilled into one query over a >= 120 s window lost the whole CPU* row:
+ * measured raw 7002.426 ms vs summary 2949.426 ms, -57.9%, on this fixture.
+ * REACHABLE: handle_top_events has no query guard.
+ *
+ * The null LATENCY columns on this path are a different thing and are
+ * deliberate (#103): the per-query list carries no histogram and no max. That
+ * is asserted here explicitly rather than skipped, so "absent" cannot quietly
+ * become "zero" or "wrong". */
+static void div317_query_cpu(const struct fixture *fx)
+{
+    printf("  6c. #317: the per-query event list includes CPU (event 0)\n");
+
+    /* Independent expectation for QID_A's CPU time and its event count. */
+    uint64_t exp_cpu_ns = 0;
+    uint64_t exp_cpu_count = 0;
+    for (int s = 0; s < SECS; s++)
+        for (int i = 0; i < SLICE_N; i++)
+            if (slice[i].qid == QID_A && slice[i].ev == EV_CPU) {
+                exp_cpu_ns += spec_dur_ns(i, s);
+                exp_cpu_count++;
+            }
+    /* NON-VACUITY: a query with no CPU time would satisfy every assertion
+     * below while the product was still dropping the row. */
+    CHECK(exp_cpu_ns > 0 && exp_cpu_count > 0,
+          "6c: the filtered query really has CPU time (%.6f ms over %llu "
+          "intervals) -- a query without any would pass this case while the "
+          "CPU row was still being dropped", (double)exp_cpu_ns / 1e6,
+          (unsigned long long)exp_cpu_count);
+
+    struct pgwt_filter f;
+    memset(&f, 0, sizeof(f));
+    f.query_id = QID_A;
+
+    struct pgwt_events_result raw, sum;
+    pgwt_compute_top_events(fx->wall, fx->n, &f, fx->from_ns, fx->to_ns,
+                            fx->wall_ms, &raw);
+    pgwt_compute_top_events_from_summaries(fx->dir, fx->from_ns, fx->to_ns, &f,
+                                           fx->wall_ms, &sum);
+
+    /* The CPU row specifically, on both sides, with the independent total. */
+    const struct pgwt_event_row *rr = ev_find(&raw, EV_CPU);
+    const struct pgwt_event_row *rs = ev_find(&sum, EV_CPU);
+    CHECK(rr != NULL, "6c: the raw path has a CPU row under the query filter");
+    CHECK(rs != NULL,
+          "6c: and so does the SUMMARY path -- the row this fix restores");
+    if (rr && rs) {
+        CHECK(rr->total_ms == (double)exp_cpu_ns / 1e6 &&
+              rs->total_ms == (double)exp_cpu_ns / 1e6,
+              "6c: both CPU rows carry the query's whole CPU time "
+              "(raw %.6f, summary %.6f, expected %.6f ms)",
+              rr->total_ms, rs->total_ms, (double)exp_cpu_ns / 1e6);
+        CHECK(rr->count == exp_cpu_count && rs->count == exp_cpu_count,
+              "6c: and the same interval count (raw %llu, summary %llu, "
+              "expected %llu)", (unsigned long long)rr->count,
+              (unsigned long long)rs->count,
+              (unsigned long long)exp_cpu_count);
+    }
+
+    /* db_time_ms was short by exactly that row. */
+    CHECK(raw.db_time_ms == sum.db_time_ms,
+          "6c: and the query's DB Time now agrees (raw %.6f == summary %.6f "
+          "ms; the gap used to be the CPU row, %.6f ms)",
+          raw.db_time_ms, sum.db_time_ms, (double)exp_cpu_ns / 1e6);
+    CHECK(raw.db_time_ms > 0,
+          "6c: on a non-empty comparison (%.6f ms)", raw.db_time_ms);
+
+    /* Row sets, counts and the DB-Time columns are compared field by field
+     * here rather than via diff_top_events, because that comparator also
+     * compares the latency columns -- which are deliberately absent on this
+     * path (#103) and are asserted as absent just below. */
+    CHECK(raw.num_rows == sum.num_rows && raw.num_rows > 0,
+          "6c: the same number of rows on both paths (%d == %d, non-zero)",
+          raw.num_rows, sum.num_rows);
+    int bij = 0, agreed = 0, sum_claims_latency = 0;
+    for (int i = 0; i < raw.num_rows; i++) {
+        const struct pgwt_event_row *a = &raw.rows[i];
+        const struct pgwt_event_row *b = ev_find(&sum, a->event_id);
+        if (!b) {
+            printf("    DIFF 6c: event 0x%x ('%s') absent from the summary "
+                   "path\n", a->event_id, a->name);
+            continue;
+        }
+        bij++;
+        if (a->count != b->count || dne(a->total_ms, b->total_ms) ||
+            dne(a->pct_db, b->pct_db) || dne(a->aas, b->aas) ||
+            dne(a->avg_us, b->avg_us) || a->exact_count != b->exact_count)
+            printf("    DIFF 6c: event '%s' count %llu/%llu total_ms "
+                   "%.9f/%.9f pct_db %.9f/%.9f aas %.12f/%.12f\n", a->name,
+                   (unsigned long long)a->count, (unsigned long long)b->count,
+                   a->total_ms, b->total_ms, a->pct_db, b->pct_db,
+                   a->aas, b->aas);
+        else
+            agreed++;
+        if (b->has_latency_dist) sum_claims_latency++;
+    }
+    CHECK(bij == raw.num_rows,
+          "6c: every raw row has a summary counterpart (%d of %d)",
+          bij, raw.num_rows);
+    CHECK(agreed == raw.num_rows,
+          "6c: and every one agrees on count, total, pct_db, avg and AAS "
+          "(%d of %d)", agreed, raw.num_rows);
+    for (int i = 0; i < sum.num_rows; i++)
+        CHECK(ev_find(&raw, sum.rows[i].event_id) != NULL,
+              "6c: summary row 0x%x ('%s') exists on the raw path too",
+              sum.rows[i].event_id, sum.rows[i].name);
+    /* The #103 hole, pinned: absent on the summary path, present on raw. */
+    CHECK(sum_claims_latency == 0,
+          "6c: the summary path reports NO latency distribution under a query "
+          "filter (%d rows claimed one) -- deliberate, #103: the per-query "
+          "list carries no histogram and no max",
+          sum_claims_latency);
+    int lat_raw = 0;
+    for (int i = 0; i < raw.num_rows; i++)
+        if (raw.rows[i].has_latency_dist) lat_raw++;
+    CHECK(lat_raw > 0,
+          "6c: while the raw path does report one (%d rows) -- so the "
+          "assertion above is about a real difference, not about both paths "
+          "being empty", lat_raw);
+
+    free_ev(&raw); free_ev(&sum);
+}
+
+/* ── 6d. #318: Top Sessions cannot honour a class or event filter ───────
+ *
+ * ts_summary_visitor reads f->pid ONLY, so a class- or event-filtered
+ * Sessions tab over a >= 120 s window used to come back UNFILTERED while the
+ * UI said one class was selected. The issue proposed honouring the filter in
+ * the visitor instead, on the stated grounds that "the summary record does
+ * carry per-event totals per session" -- it does NOT:
+ * struct pgwt_summary_session is {pid, db_time_ns, cpu_ns, top_wait_id,
+ * top_wait_ns} and has no per-event field at all. So the fix is two-part:
+ * handle_top_sessions forces the RAW path for a class- or event-filtered
+ * request (the precedent handle_top_queries already sets), and
+ * ts_summary_visitor REFUSES such a filter -- no rows -- as the fail-safe
+ * underneath it.
+ *
+ * A C unit test cannot reach the handler (that layer is
+ * tests/test_data_*.py), which is exactly why the refusal matters and is what
+ * this case asserts: even if the guard were edited away, the answer would be
+ * visibly EMPTY rather than plausibly wrong. The refusal is also checked to
+ * be a refusal of the FILTER specifically -- the unfiltered request must
+ * still answer, and still agree with raw. */
+static void div318_session_filters(const struct fixture *fx)
+{
+    printf("  6d. #318: the summary Top Sessions path REFUSES a class or "
+           "event filter it cannot honour\n");
+
+    struct pgwt_filter f_none, f_class, f_event;
+    memset(&f_none,  0, sizeof(f_none));
+    memset(&f_class, 0, sizeof(f_class));
+    memset(&f_event, 0, sizeof(f_event));
+    snprintf(f_class.class_name, sizeof(f_class.class_name), "io");
+    f_event.event_id = EV_LOCK_A;
+
+    struct pgwt_sessions_result rn, rc_, re, sn, sc, se;
+    pgwt_compute_top_sessions(fx->wall, fx->n, &f_none, fx->from_ns, fx->to_ns,
+                              fx->wall_ms, &rn);
+    pgwt_compute_top_sessions(fx->wall, fx->n, &f_class, fx->from_ns,
+                              fx->to_ns, fx->wall_ms, &rc_);
+    pgwt_compute_top_sessions(fx->wall, fx->n, &f_event, fx->from_ns,
+                              fx->to_ns, fx->wall_ms, &re);
+    pgwt_compute_top_sessions_from_summaries(fx->dir, fx->from_ns, fx->to_ns,
+                                             &f_none, fx->wall_ms, &sn);
+    pgwt_compute_top_sessions_from_summaries(fx->dir, fx->from_ns, fx->to_ns,
+                                             &f_class, fx->wall_ms, &sc);
+    pgwt_compute_top_sessions_from_summaries(fx->dir, fx->from_ns, fx->to_ns,
+                                             &f_event, fx->wall_ms, &se);
+
+    /* NON-VACUITY: the filters must actually change the RAW answer, or
+     * "the summary answer is unfiltered" would be indistinguishable from
+     * "the filter matched everything". */
+    CHECK(rn.num_rows > 0 && rc_.num_rows > 0 && re.num_rows > 0,
+          "6d: all three raw answers have rows (%d / %d / %d)",
+          rn.num_rows, rc_.num_rows, re.num_rows);
+    CHECK(rc_.num_rows != rn.num_rows || re.num_rows != rn.num_rows,
+          "6d: and the class/event filters really change the raw row set "
+          "(unfiltered %d, class=io %d, event=Lock %d)",
+          rn.num_rows, rc_.num_rows, re.num_rows);
+
+    /* The summary path REFUSES both filters: no rows, rather than the
+     * unfiltered answer wearing a filtered label. */
+    CHECK(sc.num_rows == 0,
+          "6d: the summary path returns NO rows under a class filter (%d) -- "
+          "it used to return the UNFILTERED %d rows", sc.num_rows,
+          sn.num_rows);
+    CHECK(se.num_rows == 0,
+          "6d: and none under an event filter (%d)", se.num_rows);
+
+    /* NON-VACUITY of the refusal itself: it must be a refusal of the FILTER,
+     * not a path that returns nothing whatever it is asked. Without this,
+     * deleting the body of ts_summary_visitor would satisfy the two CHECKs
+     * above. */
+    CHECK(sn.num_rows > 0,
+          "6d: while the UNFILTERED summary request still returns rows (%d) "
+          "-- so this is a refusal of the filter, not a path that answers "
+          "nothing at all", sn.num_rows);
+    CHECK(diff_top_sessions("6d unfiltered", &rn, &sn, 1) == 0,
+          "6d: and that unfiltered answer still agrees with raw field by "
+          "field");
+
+    /* And the gate can SEE a filtered request being answered from summaries,
+     * so the guard in handle_top_sessions is not an argument from code
+     * reading. A refusal is a disagreement here, which is the point: it is
+     * loud, and the handler is what keeps it off the wire. */
+    CHECK(diff_top_sessions("6d class=io", &rc_, &sc, 0) > 0,
+          "6d: comparing raw class=io against the summary path's answer is a "
+          "DISAGREEMENT, not agreement -- so a handler that routed this to "
+          "summaries could not do it quietly");
+    CHECK(diff_top_sessions("6d event=Lock", &re, &se, 0) > 0,
+          "6d: same under an event filter");
+
+    free_se(&rn); free_se(&rc_); free_se(&re);
+    free_se(&sn); free_se(&sc); free_se(&se);
+}
+
+/* ── 6e. #319: top_wait means two different things -- BOTH pinned ───────
+ *
+ *   raw     = argmax over the window of the session's per-EVENT TOTAL
+ *             ("where did this session's time go")
+ *   summary = the single LONGEST INDIVIDUAL wait (the writer keeps
+ *             `dur > ss->top_wait_ns` per second; the reader keeps the max
+ *             over seconds)
+ *
+ * NOT FIXED, and deliberately so: "largest total" is the right answer (every
+ * other total in the product is a window total, and the column sits beside DB
+ * Time where a DBA reads it as "where the time went"), but it is NOT
+ * derivable from the record. struct pgwt_summary_session carries ONE
+ * (top_wait_id, top_wait_ns) pair per second, and no sequence of per-second
+ * (id, max) pairs determines the window-wide argmax of totals -- the fixture
+ * below is the counterexample: every second's longest wait is the IO one, in
+ * the only second that has it, while Lock has 32x the total. Making the
+ * summary path exact needs per-session per-event totals in the record, and
+ * any BOUNDED version of that (a top-8 list, like the per-query one) would
+ * re-introduce silent inexactness, which is the bug class this whole file
+ * exists for. So the decision is the owner's, and meanwhile BOTH definitions
+ * are pinned exactly: neither side can drift, and when it is decided exactly
+ * one CHECK here flips.
+ *
+ * The main fixture CANNOT express this: every one of its durations is
+ * base_us * (1 + s % 8), so per-event totals and per-event maxima rank
+ * identically for every pid and the two definitions agree by construction.
+ * That is precisely why it needs its own stream. */
+#define TW_SECS   130
+#define TW_PID    301u
+#define TW_LOCK_MS 10
+#define TW_IO_MS   40
+
+static void div319_top_wait(uint64_t origin)
+{
+    printf("  6e. #319: top_wait is 'largest total' on raw and 'longest "
+           "single wait' on the summary path -- both pinned\n");
+
+    /* BUILT IN TIMESTAMP ORDER, and that is load-bearing, not tidiness.
+     * pgwt_summary_push_event implements #277's late-arrival rule: an event
+     * whose second has already been flushed is FOLDED into the oldest second
+     * still open. Appending the single IO event after all 130 Lock events
+     * therefore moved it out of second TW_SECS/2 and into the LAST second --
+     * counts conserved, so nothing here went red, but the one event that
+     * distinguishes the two top_wait definitions ended up in the last
+     * record. That silently neutered a mutation probe (a reader keeping the
+     * LAST second's top wait instead of the max over seconds still answered
+     * IO, so the pin below could not see the drift). Emitting in timestamp
+     * order puts the IO wait in an interior second, where it belongs, and
+     * the probe goes red as it should. */
+    int n = 0;
+    struct pgwt_trace_event *ev = calloc(TW_SECS + 1, sizeof(*ev));
+    if (!ev) { tests_failed++; return; }
+    const int io_sec = TW_SECS / 2;
+    for (int s = 0; s < TW_SECS; s++) {
+        ev[n].timestamp_ns = origin + (uint64_t)s * ONE_SEC + 500 * MS;
+        ev[n].pid          = TW_PID;
+        ev[n].old_event    = EV_LOCK_A;
+        ev[n].new_event    = EV_IO_A;
+        ev[n].duration_ns  = TW_LOCK_MS * MS;
+        ev[n].query_id     = QID_A;
+        ev[n].cpu_ns       = PGWT_CPU_NS_UNKNOWN;
+        n++;
+        if (s == io_sec) {
+            /* ONE long IO wait, 200 ms later in the SAME second (so it does
+             * not straddle: 500 ms + 200 ms + 40 ms < 1 s). */
+            ev[n].timestamp_ns = origin + (uint64_t)s * ONE_SEC + 700 * MS;
+            ev[n].pid          = TW_PID;
+            ev[n].old_event    = EV_IO_A;
+            ev[n].new_event    = EV_LOCK_A;
+            ev[n].duration_ns  = TW_IO_MS * MS;
+            ev[n].query_id     = QID_A;
+            ev[n].cpu_ns       = PGWT_CPU_NS_UNKNOWN;
+            n++;
+        }
+    }
+    CHECK(io_sec > 0 && io_sec < TW_SECS - 1,
+          "6e: the IO wait is in an INTERIOR second (%d of 0..%d), not the "
+          "last one -- otherwise 'the max over seconds' and 'the last "
+          "second' are the same answer and the pin below cannot tell them "
+          "apart", io_sec, TW_SECS - 1);
+
+    uint64_t lock_total = (uint64_t)TW_SECS * TW_LOCK_MS * MS;
+    uint64_t lock_max   = (uint64_t)TW_LOCK_MS * MS;
+    uint64_t io_total   = (uint64_t)TW_IO_MS * MS;
+    uint64_t io_max     = (uint64_t)TW_IO_MS * MS;
+
+    /* NON-VACUITY: the two definitions must pick DIFFERENT events here, or
+     * "raw says Lock and the summary says IO" would be a statement that could
+     * not fail. */
+    CHECK(lock_total > io_total && io_max > lock_max,
+          "6e: Lock has the larger TOTAL (%.6f > %.6f ms) and IO the larger "
+          "SINGLE wait (%.6f > %.6f ms), so the two definitions disagree on "
+          "this stream", (double)lock_total / 1e6, (double)io_total / 1e6,
+          (double)io_max / 1e6, (double)lock_max / 1e6);
+
+    struct mini m;
+    if (mini_build(&m, "fixture_top_wait", origin, ev, n) != 0) {
+        free(ev);
+        return;
+    }
+    free(ev);
+    CHECK(m.records == TW_SECS, "6e: every second was committed (%d == %d)",
+          m.records, TW_SECS);
+    CHECK(m.block_events == (uint64_t)n,
+          "6e: and the blocks hold every pushed event (%llu == %d)",
+          (unsigned long long)m.block_events, n);
+
+    struct pgwt_filter f;
+    memset(&f, 0, sizeof(f));
+    struct pgwt_sessions_result raw, sum;
+    pgwt_compute_top_sessions(m.wall, m.n, &f, m.from_ns, m.to_ns, m.wall_ms,
+                              &raw);
+    pgwt_compute_top_sessions_from_summaries(m.dir, m.from_ns, m.to_ns, &f,
+                                             m.wall_ms, &sum);
+
+    const struct pgwt_session_row *a = se_find(&raw, TW_PID);
+    const struct pgwt_session_row *b = se_find(&sum, TW_PID);
+    CHECK(a != NULL && b != NULL,
+          "6e: the pid is a row on both paths (raw %s, summary %s)",
+          a ? "yes" : "NO", b ? "yes" : "NO");
+
+    /* This is NOT a counting error: the totals agree exactly. */
+    CHECK(a && b && a->db_time_ms == b->db_time_ms &&
+          a->db_time_ms == (double)(lock_total + io_total) / 1e6,
+          "6e: both paths agree on the session's DB Time (%.6f / %.6f, "
+          "expected %.6f ms) -- the top_wait difference is a DEFINITION "
+          "difference, not a counting one", a ? a->db_time_ms : -1.0,
+          b ? b->db_time_ms : -1.0, (double)(lock_total + io_total) / 1e6);
+
+    /* Both definitions, pinned. Flip exactly one of these when the product
+     * decides (see the note above). */
+    CHECK(a && a->top_wait_id == EV_LOCK_A,
+          "6e: the RAW path names the session's LARGEST TOTAL (Lock, 0x%x); "
+          "it named 0x%x", EV_LOCK_A, a ? a->top_wait_id : 0);
+    CHECK(b && b->top_wait_id == EV_IO_A,
+          "6e: the SUMMARY path names the LONGEST SINGLE WAIT (IO, 0x%x); it "
+          "named 0x%x. NOT a bug being left in place: see the note above -- "
+          "the per-second record cannot carry the other answer. When this is "
+          "decided, this is the assertion that changes", EV_IO_A,
+          b ? b->top_wait_id : 0);
+    CHECK(a && b && a->top_wait_id != b->top_wait_id,
+          "6e: and they really are different events here, so neither "
+          "assertion above is satisfied by the other definition");
+
+    free_se(&raw); free_se(&sum);
+    mini_free(&m);
+}
+
+static void test_divergences(const struct fixture *fx, uint64_t origin)
+{
+    printf("--- 6. the five named divergences (#315-#319) ---\n");
+    div316_half_open(fx);
+    div317_query_cpu(fx);
+    div318_session_filters(fx);
+    div319_top_wait(origin);
 }
 
 /* ── main ─────────────────────────────────────────────────────────────── */
@@ -1906,6 +2559,7 @@ int main(void)
         test_against_the_fixture(&fx);
         test_mutation_probes(&fx);
         test_bypass_suite(&fx);
+        test_divergences(&fx, fx.origin);
     } else {
         printf("  FAIL: could not build the fixture -- nothing was compared\n");
         tests_failed++;
