@@ -1,0 +1,448 @@
+burst_load: PGPORT=5418 sql_dir=/root/pgwt-box-check/agent-realistic-demo-workload/tests/burst_sql log=/tmp/pgwt_measure_out/burst.log duration=900s cycles=0
+### burst_load start 2026-10-08 06:45:44 UTC PGPORT=5418
+b0db0f282c4e48c79ededb533cc4043b  burst.sql
+6b08bff9fd35a22c3337609d126dc51f  adv300.sql
+2d0f39dbd3bdb5b70b8330eb74554d11  io_read.sql
+53408aeaf8b691a3a79435a29ae54818  io_write.sql
+NOTICE:  relation "pgwt_burst" already exists, skipping
+burst_load: _smoke_io_load has 3000000 rows (>= 3000000) -- IO bursts will miss shared_buffers
+burst_load: _smoke_io_load has 3000000 rows (>= 3000000) -- IO bursts will miss shared_buffers
+### b_wal 06:45:46
+pgbench (18.6 (Ubuntu 18.6-1.pgdg24.04+2))
+transaction type: /root/pgwt-box-check/agent-realistic-demo-workload/tests/burst_sql/burst.sql
+scaling factor: 1
+query mode: simple
+number of clients: 6
+number of threads: 2
+maximum number of tries: 1
+duration: 8 s
+number of transactions actually processed: 4891
+number of failed transactions: 0 (0.000%)
+latency average = 1.810 ms
+latency stddev = 1.472 ms
+rate limit schedule lag: avg 0.202 (max 13.490) ms
+initial connection time = 19.449 ms
+tps = 613.170132 (without initial connection time)
+burst_load: b_wal ok (tps=613 >= 100, 4891 transactions)
+### b_wal rows inserted: 4891
+### b_lm 06:46:26
+pgbench (18.6 (Ubuntu 18.6-1.pgdg24.04+2))
+transaction type: /root/pgwt-box-check/agent-realistic-demo-workload/tests/burst_sql/adv300.sql
+scaling factor: 1
+query mode: simple
+number of clients: 4
+number of threads: 2
+maximum number of tries: 1
+duration: 1 s
+number of transactions actually processed: 2059
+number of failed transactions: 0 (0.000%)
+latency average = 1.914 ms
+initial connection time = 15.767 ms
+tps = 2089.352017 (without initial connection time)
+burst_load: b_lm ok (tps=2089 >= 500, 2059 transactions)
+### b_iow 06:47:04
+### b_ior 06:47:04
+pgbench (18.6 (Ubuntu 18.6-1.pgdg24.04+2))
+transaction type: /root/pgwt-box-check/agent-realistic-demo-workload/tests/burst_sql/io_write.sql
+scaling factor: 1
+query mode: simple
+number of clients: 3
+number of threads: 1
+maximum number of tries: 1
+duration: 6 s
+number of transactions actually processed: 290
+number of failed transactions: 0 (0.000%)
+latency average = 6.291 ms
+latency stddev = 4.552 ms
+rate limit schedule lag: avg 0.194 (max 7.226) ms
+initial connection time = 16.266 ms
+tps = 48.602738 (without initial connection time)
+pgbench (18.6 (Ubuntu 18.6-1.pgdg24.04+2))
+transaction type: /root/pgwt-box-check/agent-realistic-demo-workload/tests/burst_sql/io_read.sql
+scaling factor: 1
+query mode: simple
+number of clients: 6
+number of threads: 2
+maximum number of tries: 1
+duration: 6 s
+number of transactions actually processed: 1818
+number of failed transactions: 0 (0.000%)
+latency average = 1.110 ms
+latency stddev = 1.007 ms
+rate limit schedule lag: avg 0.147 (max 2.817) ms
+initial connection time = 19.639 ms
+tps = 303.981607 (without initial connection time)
+burst_load: b_iow ok (tps=48 >= 10, 290 transactions)
+burst_load: b_ior ok (tps=303 >= 50, 1818 transactions)
+burst_load: first cycle OK -- all four bursts did measurable work
+burst_load: first cycle OK -- all four bursts did measurable work
+### b_wal 06:48:04
+pgbench (18.6 (Ubuntu 18.6-1.pgdg24.04+2))
+transaction type: /root/pgwt-box-check/agent-realistic-demo-workload/tests/burst_sql/burst.sql
+scaling factor: 1
+query mode: simple
+number of clients: 6
+number of threads: 2
+maximum number of tries: 1
+duration: 8 s
+number of transactions actually processed: 4631
+number of failed transactions: 0 (0.000%)
+latency average = 1.766 ms
+latency stddev = 1.216 ms
+rate limit schedule lag: avg 0.142 (max 9.200) ms
+initial connection time = 19.774 ms
+tps = 580.195307 (without initial connection time)
+burst_load: b_wal ok (tps=580 >= 100, 4631 transactions)
+### b_wal rows inserted: 4631
+### b_lm 06:48:44
+pgbench (18.6 (Ubuntu 18.6-1.pgdg24.04+2))
+transaction type: /root/pgwt-box-check/agent-realistic-demo-workload/tests/burst_sql/adv300.sql
+scaling factor: 1
+query mode: simple
+number of clients: 4
+number of threads: 2
+maximum number of tries: 1
+duration: 1 s
+number of transactions actually processed: 2342
+number of failed transactions: 0 (0.000%)
+latency average = 1.680 ms
+initial connection time = 18.367 ms
+tps = 2381.066152 (without initial connection time)
+burst_load: b_lm ok (tps=2381 >= 500, 2342 transactions)
+### b_iow 06:49:23
+### b_ior 06:49:23
+pgbench (18.6 (Ubuntu 18.6-1.pgdg24.04+2))
+transaction type: /root/pgwt-box-check/agent-realistic-demo-workload/tests/burst_sql/io_read.sql
+scaling factor: 1
+query mode: simple
+number of clients: 6
+number of threads: 2
+maximum number of tries: 1
+duration: 6 s
+number of transactions actually processed: 1806
+number of failed transactions: 0 (0.000%)
+latency average = 1.018 ms
+latency stddev = 0.551 ms
+rate limit schedule lag: avg 0.139 (max 8.728) ms
+initial connection time = 21.794 ms
+tps = 302.090395 (without initial connection time)
+pgbench (18.6 (Ubuntu 18.6-1.pgdg24.04+2))
+transaction type: /root/pgwt-box-check/agent-realistic-demo-workload/tests/burst_sql/io_write.sql
+scaling factor: 1
+query mode: simple
+number of clients: 3
+number of threads: 1
+maximum number of tries: 1
+duration: 6 s
+number of transactions actually processed: 294
+number of failed transactions: 0 (0.000%)
+latency average = 7.005 ms
+latency stddev = 7.105 ms
+rate limit schedule lag: avg 0.255 (max 24.042) ms
+initial connection time = 21.091 ms
+tps = 49.091211 (without initial connection time)
+burst_load: b_ior ok (tps=302 >= 50, 1806 transactions)
+burst_load: b_iow ok (tps=49 >= 10, 294 transactions)
+### b_wal 06:50:23
+pgbench (18.6 (Ubuntu 18.6-1.pgdg24.04+2))
+transaction type: /root/pgwt-box-check/agent-realistic-demo-workload/tests/burst_sql/burst.sql
+scaling factor: 1
+query mode: simple
+number of clients: 6
+number of threads: 2
+maximum number of tries: 1
+duration: 8 s
+number of transactions actually processed: 4826
+number of failed transactions: 0 (0.000%)
+latency average = 1.590 ms
+latency stddev = 0.816 ms
+rate limit schedule lag: avg 0.121 (max 3.839) ms
+initial connection time = 24.806 ms
+tps = 605.051844 (without initial connection time)
+burst_load: b_wal ok (tps=605 >= 100, 4826 transactions)
+### b_wal rows inserted: 4826
+### b_lm 06:51:03
+pgbench (18.6 (Ubuntu 18.6-1.pgdg24.04+2))
+transaction type: /root/pgwt-box-check/agent-realistic-demo-workload/tests/burst_sql/adv300.sql
+scaling factor: 1
+query mode: simple
+number of clients: 4
+number of threads: 2
+maximum number of tries: 1
+duration: 1 s
+number of transactions actually processed: 2225
+number of failed transactions: 0 (0.000%)
+latency average = 1.779 ms
+initial connection time = 14.453 ms
+tps = 2247.962941 (without initial connection time)
+burst_load: b_lm ok (tps=2247 >= 500, 2225 transactions)
+### b_ior 06:51:41
+### b_iow 06:51:41
+pgbench (18.6 (Ubuntu 18.6-1.pgdg24.04+2))
+transaction type: /root/pgwt-box-check/agent-realistic-demo-workload/tests/burst_sql/io_read.sql
+scaling factor: 1
+query mode: simple
+number of clients: 6
+number of threads: 2
+maximum number of tries: 1
+duration: 6 s
+number of transactions actually processed: 1849
+number of failed transactions: 0 (0.000%)
+latency average = 1.019 ms
+latency stddev = 0.633 ms
+rate limit schedule lag: avg 0.128 (max 3.328) ms
+initial connection time = 20.835 ms
+tps = 309.207097 (without initial connection time)
+pgbench (18.6 (Ubuntu 18.6-1.pgdg24.04+2))
+transaction type: /root/pgwt-box-check/agent-realistic-demo-workload/tests/burst_sql/io_write.sql
+scaling factor: 1
+query mode: simple
+number of clients: 3
+number of threads: 1
+maximum number of tries: 1
+duration: 6 s
+number of transactions actually processed: 298
+number of failed transactions: 0 (0.000%)
+latency average = 6.637 ms
+latency stddev = 5.425 ms
+rate limit schedule lag: avg 0.171 (max 9.322) ms
+initial connection time = 18.650 ms
+tps = 49.769864 (without initial connection time)
+burst_load: b_ior ok (tps=309 >= 50, 1849 transactions)
+burst_load: b_iow ok (tps=49 >= 10, 298 transactions)
+### b_wal 06:52:41
+pgbench (18.6 (Ubuntu 18.6-1.pgdg24.04+2))
+transaction type: /root/pgwt-box-check/agent-realistic-demo-workload/tests/burst_sql/burst.sql
+scaling factor: 1
+query mode: simple
+number of clients: 6
+number of threads: 2
+maximum number of tries: 1
+duration: 8 s
+number of transactions actually processed: 4652
+number of failed transactions: 0 (0.000%)
+latency average = 1.657 ms
+latency stddev = 0.916 ms
+rate limit schedule lag: avg 0.134 (max 8.585) ms
+initial connection time = 27.296 ms
+tps = 583.494677 (without initial connection time)
+burst_load: b_wal ok (tps=583 >= 100, 4652 transactions)
+### b_wal rows inserted: 4652
+### b_lm 06:53:22
+pgbench (18.6 (Ubuntu 18.6-1.pgdg24.04+2))
+transaction type: /root/pgwt-box-check/agent-realistic-demo-workload/tests/burst_sql/adv300.sql
+scaling factor: 1
+query mode: simple
+number of clients: 4
+number of threads: 2
+maximum number of tries: 1
+duration: 1 s
+number of transactions actually processed: 2119
+number of failed transactions: 0 (0.000%)
+latency average = 1.864 ms
+initial connection time = 13.459 ms
+tps = 2146.492273 (without initial connection time)
+burst_load: b_lm ok (tps=2146 >= 500, 2119 transactions)
+### b_iow 06:54:00
+### b_ior 06:54:00
+pgbench (18.6 (Ubuntu 18.6-1.pgdg24.04+2))
+transaction type: /root/pgwt-box-check/agent-realistic-demo-workload/tests/burst_sql/io_write.sql
+scaling factor: 1
+query mode: simple
+number of clients: 3
+number of threads: 1
+maximum number of tries: 1
+duration: 6 s
+number of transactions actually processed: 296
+number of failed transactions: 0 (0.000%)
+latency average = 7.920 ms
+latency stddev = 7.546 ms
+rate limit schedule lag: avg 0.286 (max 14.000) ms
+initial connection time = 25.110 ms
+tps = 49.656190 (without initial connection time)
+pgbench (18.6 (Ubuntu 18.6-1.pgdg24.04+2))
+transaction type: /root/pgwt-box-check/agent-realistic-demo-workload/tests/burst_sql/io_read.sql
+scaling factor: 1
+query mode: simple
+number of clients: 6
+number of threads: 2
+maximum number of tries: 1
+duration: 6 s
+number of transactions actually processed: 1719
+number of failed transactions: 0 (0.000%)
+latency average = 1.391 ms
+latency stddev = 1.488 ms
+rate limit schedule lag: avg 0.214 (max 5.750) ms
+initial connection time = 28.581 ms
+tps = 287.918044 (without initial connection time)
+burst_load: b_iow ok (tps=49 >= 10, 296 transactions)
+burst_load: b_ior ok (tps=287 >= 50, 1719 transactions)
+### b_wal 06:55:00
+pgbench (18.6 (Ubuntu 18.6-1.pgdg24.04+2))
+transaction type: /root/pgwt-box-check/agent-realistic-demo-workload/tests/burst_sql/burst.sql
+scaling factor: 1
+query mode: simple
+number of clients: 6
+number of threads: 2
+maximum number of tries: 1
+duration: 8 s
+number of transactions actually processed: 4758
+number of failed transactions: 0 (0.000%)
+latency average = 1.736 ms
+latency stddev = 1.014 ms
+rate limit schedule lag: avg 0.162 (max 8.618) ms
+initial connection time = 22.934 ms
+tps = 596.434106 (without initial connection time)
+burst_load: b_wal ok (tps=596 >= 100, 4758 transactions)
+### b_wal rows inserted: 4758
+### b_lm 06:55:40
+pgbench (18.6 (Ubuntu 18.6-1.pgdg24.04+2))
+transaction type: /root/pgwt-box-check/agent-realistic-demo-workload/tests/burst_sql/adv300.sql
+scaling factor: 1
+query mode: simple
+number of clients: 4
+number of threads: 2
+maximum number of tries: 1
+duration: 1 s
+number of transactions actually processed: 2041
+number of failed transactions: 0 (0.000%)
+latency average = 1.927 ms
+initial connection time = 19.200 ms
+tps = 2075.697357 (without initial connection time)
+burst_load: b_lm ok (tps=2075 >= 500, 2041 transactions)
+### b_iow 06:56:18
+### b_ior 06:56:18
+pgbench (18.6 (Ubuntu 18.6-1.pgdg24.04+2))
+transaction type: /root/pgwt-box-check/agent-realistic-demo-workload/tests/burst_sql/io_read.sql
+scaling factor: 1
+query mode: simple
+number of clients: 6
+number of threads: 2
+maximum number of tries: 1
+duration: 6 s
+number of transactions actually processed: 1758
+number of failed transactions: 0 (0.000%)
+latency average = 0.939 ms
+latency stddev = 0.550 ms
+rate limit schedule lag: avg 0.121 (max 2.682) ms
+initial connection time = 57.266 ms
+tps = 295.771079 (without initial connection time)
+pgbench (18.6 (Ubuntu 18.6-1.pgdg24.04+2))
+transaction type: /root/pgwt-box-check/agent-realistic-demo-workload/tests/burst_sql/io_write.sql
+scaling factor: 1
+query mode: simple
+number of clients: 3
+number of threads: 1
+maximum number of tries: 1
+duration: 6 s
+number of transactions actually processed: 290
+number of failed transactions: 0 (0.000%)
+latency average = 5.653 ms
+latency stddev = 3.300 ms
+rate limit schedule lag: avg 0.133 (max 1.051) ms
+initial connection time = 52.803 ms
+tps = 48.941811 (without initial connection time)
+burst_load: b_ior ok (tps=295 >= 50, 1758 transactions)
+burst_load: b_iow ok (tps=48 >= 10, 290 transactions)
+### b_wal 06:57:18
+pgbench (18.6 (Ubuntu 18.6-1.pgdg24.04+2))
+transaction type: /root/pgwt-box-check/agent-realistic-demo-workload/tests/burst_sql/burst.sql
+scaling factor: 1
+query mode: simple
+number of clients: 6
+number of threads: 2
+maximum number of tries: 1
+duration: 8 s
+number of transactions actually processed: 4875
+number of failed transactions: 0 (0.000%)
+latency average = 1.676 ms
+latency stddev = 1.022 ms
+rate limit schedule lag: avg 0.145 (max 9.471) ms
+initial connection time = 23.763 ms
+tps = 611.126335 (without initial connection time)
+burst_load: b_wal ok (tps=611 >= 100, 4875 transactions)
+### b_wal rows inserted: 4875
+### b_lm 06:57:59
+pgbench (18.6 (Ubuntu 18.6-1.pgdg24.04+2))
+transaction type: /root/pgwt-box-check/agent-realistic-demo-workload/tests/burst_sql/adv300.sql
+scaling factor: 1
+query mode: simple
+number of clients: 4
+number of threads: 2
+maximum number of tries: 1
+duration: 1 s
+number of transactions actually processed: 2127
+number of failed transactions: 0 (0.000%)
+latency average = 1.854 ms
+initial connection time = 15.132 ms
+tps = 2156.918618 (without initial connection time)
+burst_load: b_lm ok (tps=2156 >= 500, 2127 transactions)
+### b_iow 06:58:37
+### b_ior 06:58:37
+pgbench (18.6 (Ubuntu 18.6-1.pgdg24.04+2))
+transaction type: /root/pgwt-box-check/agent-realistic-demo-workload/tests/burst_sql/io_write.sql
+scaling factor: 1
+query mode: simple
+number of clients: 3
+number of threads: 1
+maximum number of tries: 1
+duration: 6 s
+number of transactions actually processed: 279
+number of failed transactions: 0 (0.000%)
+latency average = 6.333 ms
+latency stddev = 3.480 ms
+rate limit schedule lag: avg 0.246 (max 13.285) ms
+initial connection time = 22.389 ms
+tps = 46.796683 (without initial connection time)
+burst_load: b_iow ok (tps=46 >= 10, 279 transactions)
+pgbench (18.6 (Ubuntu 18.6-1.pgdg24.04+2))
+transaction type: /root/pgwt-box-check/agent-realistic-demo-workload/tests/burst_sql/io_read.sql
+scaling factor: 1
+query mode: simple
+number of clients: 6
+number of threads: 2
+maximum number of tries: 1
+duration: 6 s
+number of transactions actually processed: 1843
+number of failed transactions: 0 (0.000%)
+latency average = 0.988 ms
+latency stddev = 0.559 ms
+rate limit schedule lag: avg 0.128 (max 2.710) ms
+initial connection time = 29.088 ms
+tps = 308.632517 (without initial connection time)
+burst_load: b_ior ok (tps=308 >= 50, 1843 transactions)
+### b_wal 06:59:37
+pgbench (18.6 (Ubuntu 18.6-1.pgdg24.04+2))
+transaction type: /root/pgwt-box-check/agent-realistic-demo-workload/tests/burst_sql/burst.sql
+scaling factor: 1
+query mode: simple
+number of clients: 6
+number of threads: 2
+maximum number of tries: 1
+duration: 8 s
+number of transactions actually processed: 4800
+number of failed transactions: 0 (0.000%)
+latency average = 1.584 ms
+latency stddev = 0.975 ms
+rate limit schedule lag: avg 0.137 (max 12.136) ms
+initial connection time = 26.408 ms
+tps = 601.903746 (without initial connection time)
+burst_load: b_wal ok (tps=601 >= 100, 4800 transactions)
+### b_wal rows inserted: 4800
+### b_lm 07:00:17
+pgbench (18.6 (Ubuntu 18.6-1.pgdg24.04+2))
+transaction type: /root/pgwt-box-check/agent-realistic-demo-workload/tests/burst_sql/adv300.sql
+scaling factor: 1
+query mode: simple
+number of clients: 4
+number of threads: 2
+maximum number of tries: 1
+duration: 1 s
+number of transactions actually processed: 2104
+number of failed transactions: 0 (0.000%)
+latency average = 1.878 ms
+initial connection time = 15.413 ms
+tps = 2129.632254 (without initial connection time)
+burst_load: b_lm ok (tps=2129 >= 500, 2104 transactions)
+burst_load: duration budget reached after 6 cycle(s)
+burst_load: duration budget reached after 6 cycle(s)

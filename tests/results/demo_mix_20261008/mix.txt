@@ -1,0 +1,75 @@
+=== TIME MODEL (900 s nominal window; wall_ms is what the server reports) ===
+DB Time                            798352.5 ms   100.00%  AAS 0.8521
+  CPU*                               417615.4 ms    52.31%  AAS 0.4457
+  Lock                               236950.0 ms    29.68%  AAS 0.2529
+    Lock:transactionid                 116357.9 ms    14.57%  AAS 0.1242
+    Lock:advisory                       83621.1 ms    10.47%  AAS 0.0893
+    Lock:relation                       36969.8 ms     4.63%  AAS 0.0395
+    Lock:extend                             1.2 ms     0.00%  AAS 0.0000
+  IO                                 111367.1 ms    13.95%  AAS 0.1189
+    IO:WalSync                          78508.7 ms     9.83%  AAS 0.0838
+    IO:DataFileRead                     12895.4 ms     1.62%  AAS 0.0138
+    IO:WalWrite                          5473.7 ms     0.69%  AAS 0.0058
+    IO:DataFileFlush                     5470.7 ms     0.69%  AAS 0.0058
+    IO:DataFileWrite                     4682.4 ms     0.59%  AAS 0.0050
+  LWLock                              32120.3 ms     4.02%  AAS 0.0343
+    LWLock:WALWrite                     18307.1 ms     2.29%  AAS 0.0195
+    LWLock:LockManager                  13702.5 ms     1.72%  AAS 0.0146
+    LWLock:WALInsert                       35.5 ms     0.00%  AAS 0.0000
+    LWLock:BufferMapping                   27.0 ms     0.00%  AAS 0.0000
+    LWLock:WALBufMapping                   24.4 ms     0.00%  AAS 0.0000
+  Timeout                               192.3 ms     0.02%  AAS 0.0002
+    Timeout:VacuumTruncate                100.3 ms     0.01%  AAS 0.0001
+    Timeout:SpinDelay                      92.0 ms     0.01%  AAS 0.0001
+  IPC                                   107.4 ms     0.01%  AAS 0.0001
+    IPC:BtreePage                          87.4 ms     0.01%  AAS 0.0001
+    IPC:BgWorkerShutdown                   13.0 ms     0.00%  AAS 0.0000
+    IPC:BufferIO                            6.8 ms     0.00%  AAS 0.0000
+    IPC:ParallelFinish                      0.2 ms     0.00%  AAS 0.0000
+    IPC:ExecuteGather                       0.1 ms     0.00%  AAS 0.0000
+Idle                             26471327.5 ms     0.00%  AAS 0.0000
+    Client:ClientRead                18992906.3 ms     0.00%  AAS 0.0000
+    Timeout:CheckpointWriteDelay       768469.9 ms     0.00%  AAS 0.0000
+    Timeout:VacuumDelay                   518.0 ms     0.00%  AAS 0.0000
+    Other (background)                6709433.4 ms     0.00%  AAS 0.0000
+
+db_time_ms   = 798352.5
+idle_time_ms = 26471327.5
+wall_ms      = 936884.6
+window AAS   = 0.8521
+fidelity     = exact
+
+=== AAS SERIES ===
+buckets      = 120, bucket_ns = 7807372052
+max_aas (server) = 1.8970285082297242
+total AAS per bucket: min 0.008  p50 0.809  p90 1.174  max 1.897
+   cpu        peak 1.293  median 0.434
+   io         peak 0.546  median 0.097
+   lock       peak 0.577  median 0.256
+   lwlock     peak 0.288  median 0.011
+   ipc        peak 0.013  median 0.000
+   timeout    peak 0.006  median 0.000
+
+=== INFO ===
+  from_ns                  1791441943831291261
+  id                       1
+  now_ns                   1791442883309822620
+  num_cpus                 4
+  num_events               5668864
+  protocol                 1
+  server_version           unknown
+  to_ns                    1791442880715937424
+
+=== TRANSITIONS ===
+  id             4
+  fidelity       exact
+  total          3110080
+  link_count     50
+  total_link_count 90
+  truncated      True
+  nodes          46
+  links          50
+
+=== TOP QUERIES / SESSIONS ===
+  top_queries    42 rows
+  top_sessions   265 rows
