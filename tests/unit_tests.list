@@ -138,3 +138,15 @@ test_summary_tick_flush
 # starved summary read and an empty pacing mask each have their own case.
 test_idle_accounting
 test_idle_summary
+# #294: cross_validate drops pgwt_is_idle_event() time from BOTH sides before
+# any share is computed, so when the sampled tier reads less CPU than the exact
+# tier the missing nanoseconds have no visible destination -- "it became
+# ClientRead/idle" could only be INFERRED. --show-idle prints it, from a
+# hand-built trace whose expected nanoseconds are literal constants (not a
+# re-traversal of the tool's own loop). Bypass suite: an empty pacing mask must
+# REFUSE (exit 4) rather than print zeros that read as measured; a genuine
+# absence of idle events must say so in words; an empty dir and a
+# sampled-only (no exact tier) capture must error; idle present on one tier
+# only must still print a row; a missing/non-executable comparator and a
+# generator too old to reach the refusal path must fail, never skip.
+test_cross_validate_idle.sh

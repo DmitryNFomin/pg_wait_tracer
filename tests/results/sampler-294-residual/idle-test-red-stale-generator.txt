@@ -1,0 +1,3 @@
+FAIL: /root/probe294/gen_parent does not accept --pg-version, so bypass case B1 (the
+      empty pacing mask) cannot be reached and its refusal would go
+      untested. Rebuild tests/gen_test_traces from this tree.

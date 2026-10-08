@@ -1,0 +1,16 @@
+INFO: --mode tiered (default): sampler always-on; on-demand full-fidelity escalation (budget 600s/hour). Use --mode full for always-on exact tracing.
+INFO: PgBackendStatus layout PG18 source=hard-table arch=x86_64 ptr=8 abi=sysv-lp64 size=440 activity_buf=1024 validation=validated pid=28619 enums=RUNNING:3,FASTPATH:5,max:7
+INFO: PgBackendStatus fields: st_changecount=0/4(validated) st_procpid=4/4(validated) st_databaseid=48/4(validated) st_userid=52/4(validated) st_state=232/4(validated) st_activity_raw=248/8(validated) st_query_id=424/8(validated)[signed]
+INFO: PgBackendStatus validation detail: controlled backend retired before capture; idle/active state, activity markers and varying query IDs validated
+INFO: PgBackendStatus st_state/st_query_id plus db/user context are authoritative for sampled attribution; idle query_id is normalized to 0
+INFO: sampled exact probes detached: validated PgBackendStatus attribution is authoritative
+WARN: group 'dba' not found — trace files will be readable by root only
+INFO: anomaly near-trigger: aas=3.0 baseline=1.00 lock_frac=0.00 cpu_aas=0.0 cpu_cusum=0.000 [baseline-warmup]
+INFO: anomaly near-trigger: aas=3.0 baseline=2.69 lock_frac=0.67 cpu_aas=0.0 cpu_cusum=0.000 [lock-sustain] [baseline-warmup] (+9 suppressed)
+INFO: anomaly near-trigger: aas=3.0 baseline=2.71 lock_frac=0.00 cpu_aas=0.0 cpu_cusum=0.000 [baseline-warmup]
+INFO: anomaly near-trigger: aas=4.0 baseline=2.86 lock_frac=0.00 cpu_aas=1.0 cpu_cusum=0.000 [baseline-warmup] (+13 suppressed)
+INFO: anomaly near-trigger: aas=3.0 baseline=2.78 lock_frac=0.00 cpu_aas=2.0 cpu_cusum=0.000 [baseline-warmup] (+19 suppressed)
+INFO: anomaly near-trigger: aas=3.0 baseline=2.72 lock_frac=0.67 cpu_aas=1.0 cpu_cusum=0.000 [lock-sustain]
+INFO: anomaly near-trigger: aas=3.0 baseline=2.65 lock_frac=0.67 cpu_aas=0.0 cpu_cusum=0.000 [lock-sustain]
+
+pg_wait_tracer: shutting down

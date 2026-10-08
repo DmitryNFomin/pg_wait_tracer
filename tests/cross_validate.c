@@ -16,6 +16,31 @@
  * Built with -DPGWT_SERVER (no BPF) so it runs anywhere the server builds.
  *
  * Usage: cross_validate <trace_dir> [--tolerance PCT] [--min-share PCT]
+ *                       [--raw-ns] [--show-idle]
+ *
+ * --raw-ns adds a RAW block after the share table: the nanosecond totals
+ * behind every share, the per-side AAS they imply, the CPU/non-CPU split of
+ * each side, and the exact we==0 time this comparator's own command gate
+ * REJECTED. Shares alone cannot tell "the sampled side lost CPU" from "the
+ * exact side gained it": both move every other share by the same factor.
+ * Off by default: no existing output line changes.
+ *
+ * --show-idle adds the IDLE section: the events this comparator DROPS from
+ * both sides because pgwt_is_idle_event() says they are not the database
+ * doing work (Client:ClientRead, Activity, the Timeout pacing set). Without
+ * it those nanoseconds are invisible, so "CPU left the sampled side" can only
+ * be INFERRED to have become ClientRead/idle rather than SHOWN. The section is
+ * labelled non-DB-Time and is accumulated in its own table: it is not part of
+ * any share, of total_exact_ns/total_sampled_ns, of max_delta, or of RESULT.
+ *
+ * --show-idle REFUSES rather than printing zeros when the Timeout pacing mask
+ * is empty (no sidecar and no verified PG major in the header -- see
+ * src/idle_rule.h PGWT_TIMEOUT_TABLE_VERIFIED). With an empty mask no Timeout
+ * pacing sleep can be classified as idle, so the idle totals would be an
+ * UNDERCOUNT of unknown size while looking exactly like a measured result.
+ * It prints IDLE-UNAVAILABLE and exits 4. Exit 4 is reachable only when
+ * --show-idle was asked for; the share table's 0/1 PASS/FAIL contract and
+ * every byte of its output are unchanged.
  */
 #include "event_reader.h"
 #include "event_writer.h"
@@ -94,17 +119,23 @@ int main(int argc, char **argv)
 {
     if (argc < 2) {
         fprintf(stderr, "usage: %s <trace_dir> [--tolerance PCT] "
-                "[--min-share PCT]\n", argv[0]);
+                "[--min-share PCT] [--raw-ns] [--show-idle]\n", argv[0]);
         return 2;
     }
     const char *trace_dir = argv[1];
     double tolerance = 10.0;   /* percentage points */
     double min_share = 2.0;    /* ignore events below this exact share */
+    int raw_ns = 0;
+    int show_idle = 0;
     for (int i = 2; i < argc; i++) {
         if (!strcmp(argv[i], "--tolerance") && i + 1 < argc)
             tolerance = atof(argv[++i]);
         else if (!strcmp(argv[i], "--min-share") && i + 1 < argc)
             min_share = atof(argv[++i]);
+        else if (!strcmp(argv[i], "--raw-ns"))
+            raw_ns = 1;
+        else if (!strcmp(argv[i], "--show-idle"))
+            show_idle = 1;
     }
 
     /* Decode this trace with the names it was WRITTEN with.
@@ -146,12 +177,16 @@ int main(int argc, char **argv)
         pgwt_reader_close(&hr);
     }
 
+    /* Hoisted out of the block below: --show-idle must report the PROVENANCE
+     * of the idle classification (sidecar? which major settled?), because an
+     * unresolved provenance is exactly when its totals are an undercount. */
+    int sidecar_ok = 0, settled = 0;
     {
         /* Same shape as src/server.c's server_init(): probe the sidecar to
          * decide whether to warn, then let the shared helper settle the
          * tables. Loading twice is idempotent. */
-        int sidecar_ok = (pgwt_load_names_json(trace_dir) == 0);
-        int settled = pgwt_init_event_names_for_trace(trace_dir, hdr_major);
+        sidecar_ok = (pgwt_load_names_json(trace_dir) == 0);
+        settled = pgwt_init_event_names_for_trace(trace_dir, hdr_major);
         if (!sidecar_ok) {
             if (settled > 0)
                 fprintf(stderr, "WARN: %s has no wait_event_names.json "
@@ -231,6 +266,23 @@ int main(int argc, char **argv)
      * measured cpu_ns (v2/legacy traces stamp the UNKNOWN sentinel). */
     double wait_gap_cpu_ns = 0, wait_total_ns_sc = 0;
     int have_measured_cpu = 0;
+    /* --raw-ns diagnostics. gate_rejected_cpu_ns is the exact we==0 time this
+     * comparator threw away because its own CMD_START/CMD_END sweep called the
+     * interval out-of-command: the quantity that decides whether a CPU share
+     * gap lives on the sampled side or on this gate. Clipped to the window, so
+     * it is directly comparable with total_exact_ns. */
+    double gate_rejected_cpu_ns = 0;
+    long   gate_rejected_intervals = 0;
+    /* --show-idle: the NON-DB-TIME events both sides drop. Its own table, its
+     * own totals -- nothing here feeds total_exact_ns, total_sampled_ns, any
+     * share, max_delta or RESULT. */
+    struct evt_acc *idle_tab = calloc(MAX_DISTINCT, sizeof(*idle_tab));
+    double idle_exact_ns = 0, idle_sampled_ns = 0;
+    long   idle_samples = 0;
+    if (!idle_tab) { perror("calloc idle_tab"); return 1; }
+    long   n_samples_cpu = 0;        /* we==0 samples counted in the window */
+    long   n_samples_noncpu = 0;
+    uint64_t sample_period_seen = 0; /* last SAMPLES block period, for arithmetic */
 
     for (int fi = 0; fi < nfiles; fi++) {
         struct pgwt_event_reader r;
@@ -248,14 +300,27 @@ int main(int argc, char **argv)
                     if (w < win_from || w >= win_to)
                         continue;
                     uint32_t ev = e->new_event;
+                    /* Learn the period BEFORE the idle filter: a window whose
+                     * only in-range samples are idle still has a period, and
+                     * the idle section converts ns back to samples with it. */
+                    sample_period_seen = info.sample_period_ns;
                     /* T2: we==0 samples are first-class CPU (the capture
                      * side already applied the command gate). */
-                    if (ev != 0 && pgwt_is_idle_event(ev))
+                    if (ev != 0 && pgwt_is_idle_event(ev)) {
+                        /* NOT DB Time -- kept out of every share, recorded in
+                         * the idle table so --show-idle can SHOW where the
+                         * time went instead of leaving it to be inferred. */
+                        double ic = (double)info.sample_period_ns;
+                        acc_find(idle_tab, ev)->sampled_ns += ic;
+                        idle_sampled_ns += ic;
+                        idle_samples++;
                         continue;
+                    }
                     double contrib = (double)info.sample_period_ns;
                     acc_find(table, ev)->sampled_ns += contrib;
                     total_sampled_ns += contrib;
                     n_samples++;
+                    if (ev == 0) n_samples_cpu++; else n_samples_noncpu++;
                 } else { /* TRANSITIONS */
                     uint32_t ev = e->old_event;
                     /* CMD markers drive the exact-tier command gate. */
@@ -279,13 +344,47 @@ int main(int argc, char **argv)
                     int in_cmd = cmd_interval_open(cmd_get(cmd_ht, e->pid),
                                                    e->timestamp_ns,
                                                    e->duration_ns);
-                    if (pgwt_is_idle_event(ev))
+                    if (pgwt_is_idle_event(ev)) {
+                        /* NOT DB Time. Clipped to the SAME overlap window the
+                         * accepted path clips to below, so the idle totals are
+                         * directly comparable with total_exact_ns rather than
+                         * being whole-capture figures. */
+                        uint64_t iend = pgwt_reader_mono_to_wall(
+                            &r, e->timestamp_ns);
+                        uint64_t idur = e->duration_ns;
+                        uint64_t istart = iend > idur ? iend - idur : 0;
+                        if (iend > win_from && istart < win_to) {
+                            uint64_t cs = istart > win_from ? istart : win_from;
+                            uint64_t ce = iend < win_to ? iend : win_to;
+                            if (ce > cs) {
+                                acc_find(idle_tab, ev)->exact_ns +=
+                                    (double)(ce - cs);
+                                idle_exact_ns += (double)(ce - cs);
+                            }
+                        }
                         continue;
+                    }
                     /* T2: exact we==0 intervals count as CPU only when
                      * majority in-command — the same definition the
                      * sampled side captured with. */
-                    if (ev == 0 && !in_cmd)
+                    if (ev == 0 && !in_cmd) {
+                        /* Same window clip the accepted path applies below, so
+                         * the rejected total is comparable with total_exact_ns
+                         * rather than being a whole-capture figure. */
+                        uint64_t rend = pgwt_reader_mono_to_wall(
+                            &r, e->timestamp_ns);
+                        uint64_t rdur = e->duration_ns;
+                        uint64_t rstart = rend > rdur ? rend - rdur : 0;
+                        if (rend > win_from && rstart < win_to) {
+                            uint64_t cs = rstart > win_from ? rstart : win_from;
+                            uint64_t ce = rend < win_to ? rend : win_to;
+                            if (ce > cs) {
+                                gate_rejected_cpu_ns += (double)(ce - cs);
+                                gate_rejected_intervals++;
+                            }
+                        }
                         continue;
+                    }
                     /* T8 self-check: fold measured cpu_ns of WAIT intervals
                      * (the ≈0 quantity). Uses full interval values — an edge
                      * interval partially outside the window barely perturbs a
@@ -384,6 +483,119 @@ int main(int argc, char **argv)
            max_delta_ev[0] ? max_delta_ev : "n/a");
     printf("Tolerance: +/- %.1f pp\n", tolerance);
 
+    /* --show-idle: where the nanoseconds that are NOT DB Time went.
+     *
+     * Both sides drop pgwt_is_idle_event() time from every share, so a CPU
+     * total that shrinks between tiers has no visible destination: it is
+     * inferred to have become ClientRead/idle. This section prints that
+     * destination. It is NOT part of the shares above -- the denominators here
+     * are each side's DB-Time total, so these percentages deliberately do not
+     * sum into the 100%% of the table above.
+     *
+     * The refusal: Client:ClientRead and Activity are classified structurally
+     * (by class, version-independently), but the Timeout PACING subset comes
+     * from an id mask derived from the resolved PG major (src/idle_rule.c).
+     * With an empty mask, CheckpointWriteDelay et al. stay in DB Time, so
+     * these totals would be an undercount of unknown size that reads exactly
+     * like a measurement. A diagnostic that cannot see refuses. */
+    int idle_unavailable = 0;
+    if (show_idle) {
+        uint32_t pacing_mask = pgwt_idle_rule_timeout_mask();
+        printf("\n=== IDLE: NOT DB Time (excluded from every share above) ==="
+               "\n");
+        printf("IDLE_PACING_MASK 0x%X  settled_pg_major=%d  sidecar=%s\n",
+               pacing_mask, settled, sidecar_ok ? "yes" : "no");
+        if (pacing_mask == 0) {
+            printf("IDLE-UNAVAILABLE: the Timeout pacing mask is EMPTY, so no "
+                   "Timeout pacing sleep can be classified as idle and these "
+                   "totals would UNDERCOUNT by an unknown amount. Refusing to "
+                   "print numbers that would read as measured zeros. Supply a "
+                   "wait_event_names.json sidecar, or a trace header with a "
+                   "verified PG major (13/17/18).\n");
+            idle_unavailable = 1;
+        } else {
+            struct evt_acc il[MAX_DISTINCT];
+            int nil = 0;
+            for (int i = 0; i < MAX_DISTINCT; i++)
+                if (idle_tab[i].used &&
+                    (idle_tab[i].exact_ns > 0 || idle_tab[i].sampled_ns > 0))
+                    il[nil++] = idle_tab[i];
+            for (int i = 1; i < nil; i++) {
+                struct evt_acc tmp = il[i];
+                int j = i - 1;
+                while (j >= 0 && il[j].exact_ns < tmp.exact_ns) {
+                    il[j + 1] = il[j]; j--;
+                }
+                il[j + 1] = tmp;
+            }
+            if (nil == 0) {
+                /* Absence stated, not implied by an empty table: "this trace
+                 * recorded no idle event" and "nothing was classified" are
+                 * different answers and must not look the same. */
+                printf("IDLE_EVENTS none -- mask resolved, and this trace "
+                       "carries no idle event on either tier\n");
+            } else {
+                printf("\n%-28s %14s %14s %9s %9s\n", "idle_event",
+                       "exact_ns", "sampled_ns", "ex%DBT", "sm%DBT");
+                printf("------------------------------------------------------"
+                       "--------------------------\n");
+                for (int i = 0; i < nil; i++)
+                    printf("%-28s %14.0f %14.0f %8.1f%% %8.1f%%\n",
+                           pgwt_event_name(il[i].event_id),
+                           il[i].exact_ns, il[i].sampled_ns,
+                           100.0 * il[i].exact_ns / total_exact_ns,
+                           100.0 * il[i].sampled_ns / total_sampled_ns);
+            }
+            printf("IDLE_EVENT_ROWS %d\n", nil);
+            printf("IDLE_TOTAL_EXACT_NS %.0f\n", idle_exact_ns);
+            printf("IDLE_TOTAL_SAMPLED_NS %.0f\n", idle_sampled_ns);
+            printf("IDLE_SAMPLES %ld\n", idle_samples);
+            printf("IDLE_EXACT_PCT_OF_DBTIME %.2f\n",
+                   100.0 * idle_exact_ns / total_exact_ns);
+            printf("IDLE_SAMPLED_PCT_OF_DBTIME %.2f\n",
+                   100.0 * idle_sampled_ns / total_sampled_ns);
+        }
+    }
+
+    /* --raw-ns: the nanoseconds behind the shares. A share table cannot
+     * localise a disagreement — if one side's CPU total is wrong, EVERY other
+     * share on that side moves by the same factor, which looks identical to
+     * "every event is inflated". These raw totals, plus the AAS each side
+     * implies over the same window, separate a missing numerator (sampled CPU
+     * dropped) from an inflated one (exact CPU over-counted). */
+    if (raw_ns) {
+        struct evt_acc *cpu = acc_find(table, 0);
+        double cpu_ex = cpu->exact_ns, cpu_sm = cpu->sampled_ns;
+        double non_ex = total_exact_ns - cpu_ex;
+        double non_sm = total_sampled_ns - cpu_sm;
+        printf("\nRAW_WINDOW_S %.6f\n", win_s);
+        printf("RAW_SAMPLE_PERIOD_NS %llu\n",
+               (unsigned long long)sample_period_seen);
+        printf("RAW_TOTAL_EXACT_NS %.0f\n", total_exact_ns);
+        printf("RAW_TOTAL_SAMPLED_NS %.0f\n", total_sampled_ns);
+        printf("RAW_AAS_EXACT %.6f\n", total_exact_ns / 1e9 / win_s);
+        printf("RAW_AAS_SAMPLED %.6f\n", total_sampled_ns / 1e9 / win_s);
+        printf("RAW_CPU_EXACT_NS %.0f\n", cpu_ex);
+        printf("RAW_CPU_SAMPLED_NS %.0f\n", cpu_sm);
+        printf("RAW_NONCPU_EXACT_NS %.0f\n", non_ex);
+        printf("RAW_NONCPU_SAMPLED_NS %.0f\n", non_sm);
+        printf("RAW_CPU_SAMPLES %ld\n", n_samples_cpu);
+        printf("RAW_NONCPU_SAMPLES %ld\n", n_samples_noncpu);
+        printf("RAW_GATE_REJECTED_EXACT_CPU_NS %.0f\n", gate_rejected_cpu_ns);
+        printf("RAW_GATE_REJECTED_INTERVALS %ld\n", gate_rejected_intervals);
+        /* How many extra we==0 samples the sampled side would have had to
+         * record for its CPU share to equal the exact side's. Positive = the
+         * sampled side is SHORT of CPU. Denominator is the sampled total with
+         * those samples added, which is why this is not a plain subtraction. */
+        double ex_share = total_exact_ns > 0 ? cpu_ex / total_exact_ns : 0;
+        double missing_ns = ex_share < 1.0
+            ? (ex_share * non_sm / (1.0 - ex_share)) - cpu_sm : 0;
+        printf("RAW_SAMPLED_CPU_NS_NEEDED_FOR_PARITY %.0f\n", missing_ns);
+        if (sample_period_seen > 0)
+            printf("RAW_SAMPLED_CPU_SAMPLES_NEEDED_FOR_PARITY %.0f\n",
+                   missing_ns / (double)sample_period_seen);
+    }
+
     int ok = (max_delta <= tolerance) && (overlap >= (top >= 5 ? 4 : top));
 
     /* T8 §5.6.2: the trace's own CPU-accounting proof. Measured CPU during
@@ -409,5 +621,11 @@ int main(int argc, char **argv)
     free(table);
     free(evs);
     free(cmd_ht);
+    free(idle_tab);
+    /* Exit 4 = --show-idle was asked for and could not be answered. Only
+     * reachable when --show-idle is passed, so the share table's 0/1
+     * PASS/FAIL contract is untouched for every existing caller. */
+    if (idle_unavailable)
+        return 4;
     return ok ? 0 : 1;
 }
