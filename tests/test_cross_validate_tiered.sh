@@ -6,9 +6,15 @@
 # estimators against the exact transition data over the SAME window using the
 # cross_validate tool. Used to choose/justify the default --sample-rate.
 #
-# Sweeps a list of sample rates so the operator can see which rate hits the
-# +/-10pp tolerance on the workload. The first rate that PASSES is reported as
-# the recommended default.
+# Sweeps a list of sample rates. Issue #309: this used to exit 0 as soon as
+# ANY ONE rate passed, so a run where 3 of 4 rates were outside tolerance
+# still reported overall success -- "24/24 green" across several boxes was
+# not evidence any given rate, including the shipped default, actually held
+# up. Every rate in RATES must now be within tolerance for exit 0; one
+# out-of-tolerance rate (or one that could not even be measured, e.g. the
+# daemon never starting) fails the run. The first rate that PASSES is still
+# printed as the recommended default -- that framing is unchanged -- but it
+# no longer decides the exit code.
 #
 # Requires: root, running PostgreSQL, pgbench, cross_validate built.
 # Usage: sudo tests/test_cross_validate_tiered.sh [--pid PID] [--rates "10 50 100"]
@@ -25,6 +31,12 @@ PM_PID=""
 RATES="10 50 100 200"
 ESC_SECONDS=60
 CLIENTS=8
+# +/-10 percentage points. This number has shipped since the A4 tool's
+# original commit (eaf31b0, "A4: escalation integration test + sampled-vs-
+# exact cross-validation") with no derivation recorded anywhere in the repo
+# (docs/, commit message, or code comment) that this search found -- issue
+# #309 asked for the derivation or an explicit admission there isn't one.
+# Treat 10pp as a value someone should revisit, not a measured bound.
 TOLERANCE=10
 
 while [[ $# -gt 0 ]]; do
@@ -81,6 +93,8 @@ fi
 
 best_rate=""
 declare -A rate_result
+declare -A rate_delta
+declare -A rate_event
 
 for RATE in $RATES; do
     echo ""
@@ -116,6 +130,9 @@ for RATE in $RATES; do
     # Compare
     OUT=$("$XVAL" "$TRACE_DIR" --tolerance "$TOLERANCE")
     print_rate_result "$RATE" "$OUT"
+    DELTA_INFO=$(extract_max_delta "$OUT")
+    rate_delta[$RATE]="${DELTA_INFO%%|*}"
+    rate_event[$RATE]="${DELTA_INFO#*|}"
     if [[ "$OUT" == *"RESULT: PASS"* ]]; then
         rate_result[$RATE]="PASS"
         [[ -z "$best_rate" ]] && best_rate="$RATE"
@@ -128,13 +145,27 @@ done
 
 echo ""
 echo "===== Cross-validation summary ====="
+# Collect each requested rate's result as a token for all_passed, in the
+# SAME iteration order used to print the table -- a rate whose daemon never
+# started has no rate_result entry at all, so it defaults to "" here, which
+# all_passed treats as a failure rather than silently skipping it (issue
+# #309 bypass case: a component failing to even run must not read as a
+# pass-by-omission).
+RESULT_TOKENS=()
 for RATE in $RATES; do
-    print_rate_summary "$RATE" "${rate_result[$RATE]:-?}"
+    print_rate_summary "$RATE" "${rate_result[$RATE]:-}" "${rate_delta[$RATE]:-?}" \
+        "${rate_event[$RATE]:-n/a}" "$TOLERANCE"
+    RESULT_TOKENS+=("${rate_result[$RATE]:-}")
 done
+
 if [[ -n "$best_rate" ]]; then
-    echo "Recommended default --sample-rate: ${best_rate} Hz (first rate within +/-${TOLERANCE}pp)"
+    echo "First rate within +/-${TOLERANCE}pp tolerance: ${best_rate} Hz"
+fi
+
+if all_passed ${RESULT_TOKENS[@]+"${RESULT_TOKENS[@]}"}; then
+    echo "PASS: every requested rate ($RATES) is within +/-${TOLERANCE}pp tolerance."
     exit 0
 else
-    echo "No tested rate met +/-${TOLERANCE}pp tolerance — see per-rate tables above."
+    echo "FAIL: not every requested rate is within +/-${TOLERANCE}pp tolerance — see per-rate lines above for which rate(s) and by how much."
     exit 1
 fi
