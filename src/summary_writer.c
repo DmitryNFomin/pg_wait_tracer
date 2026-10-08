@@ -195,8 +195,38 @@ static void accum_query_add(struct pgwt_summary_accum *acc, uint64_t query_id,
         if (cls >= 0 && cls < PGWT_NUM_CLASSES)
             sq->class_ns[cls] += total_ns;
     }
-    /* Per-event top-8 tracking */
-    if (old_ev != 0) {
+    /* Per-event top-8 tracking.
+     *
+     * #317 (v5): event 0 -- CPU -- IS filed here. It used to be guarded out
+     * by `if (old_ev != 0)`, with no reason recorded, while every sibling
+     * accumulator files it (the system-wide events[] via
+     * find_or_insert_event, and sessions[].cpu_ns). top_events[] is the ONLY
+     * source the summary path has for a per-query event breakdown, so the
+     * Events tab drilled into one query over a >= 120 s window came back
+     * missing the whole CPU* row and its db_time_ms was short by that
+     * query's entire CPU time: measured raw 7002.426 ms vs summary 2949.426
+     * ms, -57.9%, on the cross-check fixture. REACHABLE -- handle_top_events
+     * adds no query guard, unlike handle_top_sessions and handle_heatmap.
+     *
+     * Filing it, rather than guarding the handler into the raw path, because
+     * the Events tab is the one users drill and this is the content the
+     * summary is for; and because nothing else needed changing to read it:
+     * the slot sentinel is not event_id but num_top_events (the lookup loop
+     * and the serializer both bound themselves by it), and te_summary_visitor
+     * probes its hash table on `count > 0`, so an occupied slot holding
+     * event_id 0 is unambiguous on the wire and in the reader.
+     *
+     * It does consume one of the 8 slots. CPU is normally among a query's
+     * largest consumers, so that is the right slot to spend; the bounded-list
+     * caveat is unchanged and the exact per-query totals (count, total_ns,
+     * class_ns, idle_ns) do not come from this list.
+     *
+     * NOT changed: the top_wait selection below still skips event 0. The raw
+     * path does the same (pgwt_compute_top_sessions sends event 0 to cpu_ns
+     * rather than to its per-wait table and renders "no wait" as "CPU*"), so
+     * the two paths already agree there -- see #319 for the part of top_wait
+     * that does NOT agree. */
+    {
         int found = -1;
         for (int j = 0; j < sq->num_top_events; j++) {
             if (sq->top_events[j].event_id == old_ev) { found = j; break; }
