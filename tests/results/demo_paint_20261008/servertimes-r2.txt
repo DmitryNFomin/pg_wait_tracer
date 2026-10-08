@@ -1,0 +1,20 @@
+trace      : /root/paint1_trace_r2
+num_events : 6955008
+window     : 900.0 s  (from_ns=1791452204790910847 to_ns=1791453104790910847)
+
+command                    ms  notes
+------------------------------------------------------------------------
+variants               5468.9  fidelity=exact
+transitions            3670.8  fidelity=exact nodes=38 links=50
+top_queries            5717.3  fidelity=exact rows=26
+concurrency            4141.0  fidelity=exact
+executions             4989.0  fidelity=exact rows=100
+exec_scatter           4689.5  fidelity=exact points=2000
+time_model               52.7  fidelity=exact rows=29
+aas                      47.4  fidelity=exact buckets=120
+top_events               47.8  fidelity=exact rows=38
+top_sessions             50.4  fidelity=exact rows=136
+heatmap                  57.2  fidelity=exact
+
+slowest: top_queries at 5717 ms
+sum of all commands: 28932 ms
