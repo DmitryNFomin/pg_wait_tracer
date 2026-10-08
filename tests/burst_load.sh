@@ -74,7 +74,14 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SQL_DIR="${PGWT_BURST_SQL_DIR:-$SCRIPT_DIR/burst_sql}"
-LOG="${PGWT_BURST_LOG:-$(mktemp /tmp/pgwt_burst_XXXXXX.log)}"
+# mktemp templates keep their X's LAST, with no suffix. BSD mktemp (macOS,
+# where tests/test_burst_load_guards.sh runs) does not accept a template
+# suffix: given `..._XXXXXX.log` it creates a file literally named
+# `..._XXXXXX.log` and then fails with "File exists" on every later run --
+# so the guard suite passed once on a clean /tmp and failed forever after.
+# Found by `make check` on 2026-10-08, after the suite's first green run.
+LOG="${PGWT_BURST_LOG:-$(mktemp /tmp/pgwt_burst_log_XXXXXX)}"
+[[ -n "$LOG" ]] || { echo "burst_load: ERROR: mktemp could not create a log file" >&2; exit 1; }
 CYCLES="${PGWT_BURST_CYCLES:-0}"
 
 DURATION_S="${1:-}"
@@ -210,7 +217,8 @@ run() {
     local tag="$1" floor="$2"
     shift 2
     local o
-    o=$(mktemp "/tmp/pgwt_burst_${tag}_XXXXXX.out")
+    o=$(mktemp "/tmp/pgwt_burst_${tag}_out_XXXXXX")   # X's last: see LOG above
+    [[ -n "$o" ]] || die "$tag: mktemp could not create an output file -- refusing to run a burst whose output cannot be captured or checked"
     echo "### $tag $(date -u +%H:%M:%S)" >>"$LOG"
     PGAPPNAME="$tag" "${PGB[@]}" "$@" >"$o" 2>&1
     local rc=$?
