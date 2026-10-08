@@ -2,28 +2,27 @@ tests/test_block_agg.c -- mutation / bypass results
 control (unmutated tree): GREEN
 every mutation below must be RED; a GREEN one is a hole in the suite, not a passing build
 
-M1   RED          caught-by=sec5/sec6    272 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:996: MERGE of a block not w
-M2   RED          caught-by=sec5/sec6    218 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1009: SKIPped block holds a
-M3   RED          caught-by=sec8 B9      3 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1471: B9 merging the same b
-M4   RED          caught-by=sec8 B2      485 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1033: have_agg=0 must give 
-M5   RED          caught-by=sec8 B3      2 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1322: B3 SAMPLES must be re
-M6   RED          caught-by=sec8 B4      2 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1329: B4 uncommitted must b
+M2   RED          caught-by=sec5/sec6    218 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1014: SKIPped block holds a
+M3   RED          caught-by=sec8 B9      3 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1507: B9 merging the same b
+M4   RED          caught-by=sec8 B2      558 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1050: have_agg=0 must give 
+M5   RED          caught-by=sec8 B3      2 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1358: B3 SAMPLES must be re
+M6   RED          caught-by=sec8 B4      2 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1365: B4 uncommitted must b
 M7   RED          caught-by=sec1         2 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:438: duration > own end tim
-M8   RED          caught-by=sec8 B5/B7   1 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1352: B5 zero vs zero must 
-M9   RED          caught-by=sec8 B8      1 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1444: B8 a block whose num_
-M10  RED          caught-by=sec8 B10     2 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1499: B10 block_agg_pairs_g
-M11  RED          caught-by=sec1         192 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:477: sample: no node time
-M12  RED          caught-by=sec5/sec6    1038 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:996: MERGE of a block not w
-M13  RED          caught-by=sec3         13 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:715: §3b rows 0/1 violate t
-M15  RED          caught-by=sec8 B10     1 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1533: B10 a merge whose pai
-M16  RED          caught-by=sec9         1 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:2065: §9 an overlapping SAM
-M17  RED          caught-by=sec3c        13 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:763: §3c raw rows 0/1 viola
-M19  RED          caught-by=sec6/sec9    261 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 1 window [169
-M14  RED          caught-by=sec2         3 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:564: absent pair must repor
+M8   RED          caught-by=sec8 B5/B7   1 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1388: B5 zero vs zero must 
+M9   RED          caught-by=sec8 B8      1 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1480: B8 a block whose num_
+M10  RED          caught-by=sec8 B10     2 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1535: B10 block_agg_pairs_g
+M11  RED          caught-by=sec1         201 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:477: sample: no node time
+M12  RED          caught-by=sec5/sec6/sec9 1086 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1001: MERGE of a block not 
+M13  RED          caught-by=sec3         13 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:719: §3b rows 0/1 violate t
+M15  RED          caught-by=sec8 B10     1 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1569: B10 a merge whose pai
+M16  RED          caught-by=sec9         1 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:2142: §9 an overlapping SAM
+M17  RED          caught-by=sec3c        13 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:767: §3c raw rows 0/1 viola
+M19  RED          caught-by=sec1/sec6b/sec6/sec9 454 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:487: ts == to is IN: timest
+M20  RED          caught-by=sec5         73 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1028: DECODE of a block who
+M21  RED          caught-by=sec5/sec6/sec9 263 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1014: SKIPped block holds a
+M14  RED          caught-by=sec2         3 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:568: absent pair must repor
 
-18 mutation(s), 18 RED, 0 NOT RED
-
-M1 (src/block_agg.c): plan(): MERGE accepts a block ending exactly AT `to` (inclusive end) -- the #316 shape. A merged block then carries a record the raw path excluded.
+19 mutation(s), 19 RED, 0 NOT RED
 
 M2 (src/block_agg.c): plan(): SKIP is off by one at the START edge -- a block whose last record sits exactly at `from` is dropped, losing an in-window record.
 
@@ -45,7 +44,7 @@ M10 (src/block_agg.c): build(): an allocation failure returns OK with a PARTIAL 
 
 M11 (src/block_agg.c): node_counts(): SAMPLE records are counted as node time, so a sampled point observation fabricates a zero-duration node the raw node pass of the aggregate side does not have.
 
-M12 (src/block_agg.c): plan(): a BOUNDARY block is merged whole instead of decoded (the start containment test is dropped), so records before `from` are counted.
+M12 (src/block_agg.c): plan(): the START containment test is dropped, so a BOUNDARY block is merged whole and records before `from` are counted.
 
 M13 (src/block_agg.c): pairs_sorted(): the total order is reduced to count-only, so the readout depends on hash-table layout and merge order.
 
@@ -55,6 +54,10 @@ M16 (src/block_agg.c): window_from_reader(): a SAMPLES block that OVERLAPS the w
 
 M17 (src/compute.c): cmp_trans_desc(): back to count-only, so the raw path's tied rows are ordered by hash layout again and a row-by-row comparison against the aggregate's readout stops meaning anything.
 
-M19 (src/block_agg.c): add_events(): the half-open window test becomes inclusive at the end, so a boundary block contributes the record at ts == to that the raw path excludes -- the #316 shape, on the decode side this time.
+M19 (src/block_agg.c): in_window(): the END bound becomes half-open, so a record whose wait ended exactly at `to` is dropped even though its whole interval lies inside the window. This is the convention that zeroed test_data_aas (Total AAS 4.0 -> 0) and test_data_categories on the gate box.
+
+M20 (src/block_agg.c): plan(): MERGE requires last < to instead of last <= to, so a block ending exactly at `to` decodes instead of merging. Conservative, so the numbers stay right -- what goes red is the vacuity ledger's merge/seam counters, which is the point: a 'safe' plan that stops merging is a phase that stopped working.
+
+M21 (src/block_agg.c): plan(): SKIP uses first >= to instead of first > to, so a block whose FIRST record sits exactly at `to` is skipped and that record is lost. The SKIP side is the one the half-open reading got wrong and the side MERGE's own strictness cannot compensate for.
 
 M14 (src/block_agg.c): lookup(): an ABSENT pair is reported as present with count 0 -- absence read as zero, the exact failure C8 forbids.

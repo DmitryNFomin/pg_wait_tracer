@@ -176,6 +176,15 @@ test_agg_raw_crosscheck
 # §1 caught a real divergence before this shipped: pgwt_filter_matches()
 # refuses a record whose duration exceeds its own end timestamp, and the
 # aggregate did not.
+# C7 is the clause to read first: TIME is half-open, but RECORD SELECTION is
+# inclusive at both ends, because a trace event's timestamp is when the wait
+# ENDED — an event ending exactly at `to` lies wholly inside the window, and
+# the raw loader selects it then clips the contribution. An earlier draft read
+# "half-open throughout" as applying to the END key, changed the loader to
+# match, and zeroed test_data_aas (Total AAS 4.0 -> 0) and
+# test_data_categories on the gate box. §6b now pins BOTH directions with the
+# same 163 ns literal: zero divergence from the loader, and exactly one lost
+# record under a half-open end bound.
 # §9 goes through the REAL writer and reader: a multi-block trace on disk,
 # driving the same pgwt_block_agg_window_from_reader() src/server.c's
 # handle_transitions() calls, swept twice so the cache's contract ("a merged
@@ -191,7 +200,7 @@ test_agg_raw_crosscheck
 # SAMPLES block and an unopenable trace file — each must REFUSE, because
 # "0 == 0" satisfies every assertion in the file.
 # tests/results/block-agg/run_mutations.py breaks one guard at a time across
-# src/block_agg.c and src/compute.c (18 mutations, all RED, control green). It
+# src/block_agg.c and src/compute.c (19 mutations, all RED, control green). It
 # earned its keep twice: it found the tie-order check vacuous (M13) and an
 # unreachable guard that was deleted rather than left looking like protection
 # (M18).

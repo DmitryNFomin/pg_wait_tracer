@@ -482,7 +482,11 @@ static void section1_predicate_differential(void)
     CHECK(pgwt_block_agg_in_window(&e, 500, 600) == 1, "ts == from is in");
     CHECK(pgwt_block_agg_in_window(&e, 501, 600) == 0, "ts < from is out");
     e.timestamp_ns = 600;
-    CHECK(pgwt_block_agg_in_window(&e, 500, 600) == 0, "ts == to is OUT");
+    CHECK(pgwt_block_agg_in_window(&e, 500, 600) == 1,
+          "ts == to is IN: timestamp_ns is when the wait ENDED, so an event "
+          "ending exactly at `to` lies wholly inside the window (C7)");
+    e.timestamp_ns = 601;
+    CHECK(pgwt_block_agg_in_window(&e, 500, 600) == 0, "ts == to+1 is out");
     e.timestamp_ns = 599;
     CHECK(pgwt_block_agg_in_window(&e, 500, 600) == 1, "ts == to-1 is in");
 }
@@ -831,7 +835,7 @@ static void section4_straddle(void)
     /* And the same against the raw oracle over both blocks' records. */
     struct pgwt_trace_event all[FIX_MAX_EV * 2];
     struct fix_block pair_blocks[2] = { b0, b1 };
-    int n = collect_window(pair_blocks, 2, 0, UINT64_MAX, 0, all,
+    int n = collect_window(pair_blocks, 2, 0, UINT64_MAX, 1, all,
                            (int)(sizeof(all) / sizeof(all[0])));
     struct raw_pairs rp;
     raw_pairs_of(&rp, all, n);
@@ -988,10 +992,11 @@ static void section5_plan_partition(void)
                       "plan returned %d, not one of the three", (int)p);
                 if (p == PGWT_BLOCK_MERGE) {
                     merge++;
-                    /* A MERGEd block must be wholly inside under the half-open
-                     * rule — stated here independently of plan()'s own code. */
+                    /* A MERGEd block must be wholly inside under the SAME
+                     * bound the records are selected by (C7: inclusive on the
+                     * END key) — stated here independently of plan()'s code. */
                     CHECK(b[k].id.first_timestamp_ns >= from &&
-                          b[k].id.last_timestamp_ns < to,
+                          b[k].id.last_timestamp_ns <= to,
                           "MERGE of a block not wholly inside [%" PRIu64
                           ", %" PRIu64 ")", from, to);
                     /* ... and therefore every one of its records is in-window,
@@ -1009,6 +1014,18 @@ static void section5_plan_partition(void)
                               "))", b[k].ev[e].timestamp_ns, from, to);
                 } else {
                     decode++;
+                    /* THE CONVERSE, and the assertion M20 showed was missing:
+                     * a block wholly inside the window WITH an aggregate
+                     * available must MERGE. Without this, plan() could
+                     * degrade to "always DECODE" and every number in this
+                     * file would still be right while the phase did nothing
+                     * at all — correct and worthless, which no other check
+                     * here can tell apart from correct and fast. */
+                    CHECK(!(b[k].id.first_timestamp_ns >= from &&
+                            b[k].id.last_timestamp_ns <= to),
+                          "DECODE of a block wholly inside [%" PRIu64
+                          ", %" PRIu64 "] that had an aggregate: the fast "
+                          "path declined work it could have done", from, to);
                 }
             }
         }
@@ -1071,7 +1088,7 @@ static void section6_model(void)
             CHECK(rc == PGWT_BAGG_OK, "phase1 answer refused rc=%d", rc);
 
             struct pgwt_trace_event raw[FIX_MAX_EV * FIX_MAX_BLOCKS];
-            int n = collect_window(b, nb, from, to, 0, raw,
+            int n = collect_window(b, nb, from, to, 1, raw,
                                    (int)(sizeof(raw) / sizeof(raw[0])));
             struct raw_pairs rp;
             raw_pairs_of(&rp, raw, n);
@@ -1109,17 +1126,23 @@ static void section6_model(void)
         pgwt_block_agg_free(&per_block[i]);
 }
 
-/* ── §6b the known divergence from the loader's inclusive end bound ─────── */
+/* ── §6b the END-KEY bound, pinned with a literal in both directions ────── */
 
 static void section6b_inclusive_end_divergence(void)
 {
-    printf("=== §6b the loader's inclusive end bound: the divergence, "
-           "with a literal ===\n");
+    printf("=== §6b the end-key bound: agreement with the loader, and the "
+           "cost of getting it wrong ===\n");
 
-    /* src/server.c admits an exact record when ts <= to_m. This module is
-     * half-open. The difference is exactly the records at ts == to — not
-     * "approximately", not "within tolerance". Pinned so the wiring step
-     * cannot forget to reconcile the loader (see block_agg.h). */
+    /* The loader selects `ts in [from, to]` because timestamp_ns is when the
+     * wait ENDED — an event ending exactly at `to` lies wholly inside the
+     * window. This module matches that (C7). Both directions are pinned:
+     *   - against the loader's own predicate: ZERO divergence;
+     *   - against a HALF-OPEN end bound: short by exactly the records at
+     *     ts == to, which is 1 record and 163 ns on this fixture.
+     * The second half is why this section exists. An earlier draft read the
+     * plan's "half-open throughout" as applying to the END key, made the
+     * loader match, and zeroed test_data_aas (Total AAS 4.0 -> 0) and
+     * test_data_categories on the box. The number below is what that costs. */
     struct fix_block b[FIX_MAX_BLOCKS];
     int nb = build_model_fixture(b, FIX_MAX_BLOCKS);
     struct pgwt_block_agg per_block[FIX_MAX_BLOCKS];
@@ -1146,10 +1169,10 @@ static void section6b_inclusive_end_divergence(void)
     struct raw_pairs rp_incl;
     raw_pairs_of(&rp_incl, raw_incl, n_incl);
 
-    /* The record at ts 4000 is CPU->IO1 with duration 163. */
-    CHECK(rp_incl.res.total_transitions == win.total_transitions + 1,
-          "end-inclusive raw must count exactly ONE more transition than the "
-          "half-open merge here: raw=%" PRIu64 " merged=%" PRIu64,
+    /* The loader's own predicate: the merged answer must match it exactly. */
+    CHECK(rp_incl.res.total_transitions == win.total_transitions,
+          "the merged answer must match the LOADER's inclusive-end selection "
+          "exactly: raw=%" PRIu64 " merged=%" PRIu64,
           rp_incl.res.total_transitions, win.total_transitions);
 
     uint64_t c_merged = 0, t_merged = 0;
@@ -1162,21 +1185,34 @@ static void section6b_inclusive_end_divergence(void)
             c_raw = rp_incl.res.rows[i].count;
             t_raw = (uint64_t)rp_incl.res.rows[i].total_ns;
         }
-    CHECK(c_raw == c_merged + 1 && t_raw == t_merged + 163,
-          "the divergence must be exactly the ts == to record (163 ns): "
-          "raw=(%" PRIu64 ", %" PRIu64 ") merged=(%" PRIu64 ", %" PRIu64 ")",
-          c_raw, t_raw, c_merged, t_merged);
+    CHECK(c_raw == c_merged && t_raw == t_merged,
+          "CPU->IO1 must match the loader exactly: raw=(%" PRIu64 ", %" PRIu64
+          ") merged=(%" PRIu64 ", %" PRIu64 ")", c_raw, t_raw, c_merged,
+          t_merged);
 
-    /* And with the matching half-open raw predicate, zero divergence. */
+    /* The other direction: a HALF-OPEN end bound is short by exactly the
+     * ts == to record. This literal makes the cost of the wrong convention a
+     * number rather than an argument. */
     struct pgwt_trace_event raw_ho[FIX_MAX_EV * FIX_MAX_BLOCKS];
     int n_ho = collect_window(b, nb, from, to, 0, raw_ho,
                               (int)(sizeof(raw_ho) / sizeof(raw_ho[0])));
     struct raw_pairs rp_ho;
     raw_pairs_of(&rp_ho, raw_ho, n_ho);
-    struct node_oracle_row nodes[32];
-    int nn = raw_node_oracle(raw_ho, n_ho, nodes, 32);
-    CHECK(compare_agg_vs_raw(&win, &rp_ho.res, nodes, nn, 1) == 0,
-          "half-open raw predicate must agree bit-exactly");
+    CHECK(rp_ho.res.total_transitions == win.total_transitions - 1,
+          "a half-open end bound must LOSE exactly one transition here: "
+          "half-open=%" PRIu64 " merged=%" PRIu64,
+          rp_ho.res.total_transitions, win.total_transitions);
+    uint64_t c_ho = 0, t_ho = 0;
+    for (int i = 0; i < rp_ho.res.num_rows; i++)
+        if (rp_ho.res.rows[i].from_event == E_CPU &&
+            rp_ho.res.rows[i].to_event == E_IO1) {
+            c_ho = rp_ho.res.rows[i].count;
+            t_ho = (uint64_t)rp_ho.res.rows[i].total_ns;
+        }
+    CHECK(c_ho == c_merged - 1 && t_ho == t_merged - 163,
+          "and the loss is exactly that record's 163 ns: half-open=(%" PRIu64
+          ", %" PRIu64 ") merged=(%" PRIu64 ", %" PRIu64 ")",
+          c_ho, t_ho, c_merged, t_merged);
 
     raw_pairs_free(&rp_incl);
     raw_pairs_free(&rp_ho);
@@ -1208,7 +1244,7 @@ static void section7_mutation_probes(void)
 
     uint64_t from = 0, to = UINT64_MAX;
     struct pgwt_trace_event raw[FIX_MAX_EV * FIX_MAX_BLOCKS];
-    int n = collect_window(b, nb, from, to, 0, raw,
+    int n = collect_window(b, nb, from, to, 1, raw,
                            (int)(sizeof(raw) / sizeof(raw[0])));
     struct raw_pairs rp;
     raw_pairs_of(&rp, raw, n);
@@ -1573,8 +1609,13 @@ static void section8_bypass(void)
     }
 
     /* B12 a window that selects nothing, and a nonsense block header. */
-    CHECK(pgwt_block_agg_plan(&b.id, 1, 1000, 1000) == PGWT_BLOCK_SKIP,
-          "B12 an empty window selects nothing");
+    /* from == to is a ONE-INSTANT window, not an empty one: with selection
+     * inclusive at both ends (C7), a record whose wait ended exactly at that
+     * instant belongs to it. Only an INVERTED window selects nothing. The
+     * block here spans [1000, 1100], so the instant 1000 is inside it. */
+    CHECK(pgwt_block_agg_plan(&b.id, 1, 1000, 1000) == PGWT_BLOCK_DECODE,
+          "B12 a one-instant window inside a block must DECODE, not SKIP it "
+          "and not merge it whole");
     CHECK(pgwt_block_agg_plan(&b.id, 1, 2000, 1000) == PGWT_BLOCK_SKIP,
           "B12 an inverted window selects nothing");
     CHECK(pgwt_block_agg_plan(NULL, 1, 0, 1000) == PGWT_BLOCK_SKIP,
@@ -1664,7 +1705,7 @@ static void section8_bypass(void)
         CHECK(answer_window_phase1(&nq, 1, &x, &ha, 0, UINT64_MAX, &w,
                                    &nm, &nd, &ns) == PGWT_BAGG_OK, "B15 answer");
         struct pgwt_trace_event raw[FIX_MAX_EV];
-        int n = collect_window(&nq, 1, 0, UINT64_MAX, 0, raw, FIX_MAX_EV);
+        int n = collect_window(&nq, 1, 0, UINT64_MAX, 1, raw, FIX_MAX_EV);
         struct raw_pairs rp;
         raw_pairs_of(&rp, raw, n);
         struct node_oracle_row nodes[8];
@@ -1755,6 +1796,42 @@ sec9_lookup_blind(void *ctx, const struct pgwt_block_identity *id)
 {
     (void)ctx; (void)id;
     return NULL;
+}
+
+
+/* A decode hook that counts its calls and otherwise behaves exactly like the
+ * built-in path. §9d uses it to prove the hook is REACHED and that routing the
+ * decode through it changes nothing about the answer — the property the
+ * server's current-trace-cache hook relies on. */
+struct sec9_decode_ctx {
+    struct sec9_cache cache;
+    struct pgwt_trace_event buf[PGWT_BLOCK_EVENTS];
+    long calls;
+};
+
+static const struct pgwt_block_agg *
+sec9d_lookup(void *ctx, const struct pgwt_block_identity *id)
+{
+    return sec9_lookup(&((struct sec9_decode_ctx *)ctx)->cache, id);
+}
+
+static void sec9d_store(void *ctx, struct pgwt_block_agg *agg)
+{
+    sec9_store(&((struct sec9_decode_ctx *)ctx)->cache, agg);
+}
+
+static int sec9d_decode(void *ctx, struct pgwt_event_reader *r, int block_idx,
+                        const struct pgwt_trace_event **out,
+                        struct pgwt_block_info *bi)
+{
+    struct sec9_decode_ctx *d = ctx;
+    d->calls++;
+    int n = pgwt_reader_decode_block_info(r, block_idx, d->buf,
+                                          PGWT_BLOCK_EVENTS, bi);
+    if (n < 0)
+        return -1;
+    *out = d->buf;
+    return n;
 }
 
 static int sec9_write_trace(const char *dir, int n_blocks, int with_samples,
@@ -1939,7 +2016,7 @@ static void section9_on_disk(void)
                 uint64_t exact = 0;
                 int m = 0, d = 0;
                 int rc = pgwt_block_agg_window_from_reader(
-                    &r, from, to, &win, sec9_lookup, sec9_store, &cache,
+                    &r, from, to, &win, sec9_lookup, sec9_store, NULL, &cache,
                     &exact, &m, &d);
                 pgwt_reader_close(&r);
                 CHECK(rc == PGWT_BAGG_OK, "§9 pass %d window refused rc=%d",
@@ -1953,7 +2030,7 @@ static void section9_on_disk(void)
                 int ns = 0;
                 for (int k2 = 0; k2 < n_all; k2++)
                     if (all[k2].timestamp_ns >= from &&
-                        all[k2].timestamp_ns < to)
+                        all[k2].timestamp_ns <= to)
                         sel[ns++] = all[k2];
                 struct raw_pairs rp;
                 raw_pairs_of(&rp, sel, ns);
@@ -2004,13 +2081,13 @@ static void section9_on_disk(void)
         CHECK(pgwt_reader_open(&ra, path) == 0, "§9 blind open a");
         pgwt_block_agg_init_window(&wa);
         CHECK(pgwt_block_agg_window_from_reader(&ra, from, to, &wa,
-              sec9_lookup_blind, NULL, NULL, &ea, &ma, &da) == PGWT_BAGG_OK,
+              sec9_lookup_blind, NULL, NULL, NULL, &ea, &ma, &da) == PGWT_BAGG_OK,
               "§9 blind-cache window");
         pgwt_reader_close(&ra);
         CHECK(pgwt_reader_open(&rb, path) == 0, "§9 blind open b");
         pgwt_block_agg_init_window(&wb);
         CHECK(pgwt_block_agg_window_from_reader(&rb, from, to, &wb,
-              sec9_lookup, sec9_store, &cache, &eb, &mb, &db) == PGWT_BAGG_OK,
+              sec9_lookup, sec9_store, NULL, &cache, &eb, &mb, &db) == PGWT_BAGG_OK,
               "§9 warm-cache window");
         pgwt_reader_close(&rb);
         CHECK(ma == 0 && da > 0,
@@ -2059,7 +2136,7 @@ static void section9_on_disk(void)
             pgwt_block_agg_init_window(&w1);
             uint64_t e1 = 0; int m1 = 0, d1 = 0;
             int rc1 = pgwt_block_agg_window_from_reader(&r, f2, l2 + 1, &w1,
-                          sec9_lookup_blind, NULL, NULL, &e1, &m1, &d1);
+                          sec9_lookup_blind, NULL, NULL, NULL, &e1, &m1, &d1);
             CHECK(rc1 == PGWT_BAGG_REFUSED_BLOCK_TYPE,
                   "§9 an overlapping SAMPLES block must be REFUSED, got %d",
                   rc1);
@@ -2071,16 +2148,86 @@ static void section9_on_disk(void)
             uint64_t e2 = 0; int m2 = 0, d2 = 0;
             int rc2 = pgwt_block_agg_window_from_reader(&r, f2,
                           f2 + 1000ULL * 64, &w2, sec9_lookup_blind, NULL,
-                          NULL, &e2, &m2, &d2);
+                          NULL, NULL, &e2, &m2, &d2);
             CHECK(rc2 == PGWT_BAGG_OK,
                   "§9 a SAMPLES block OUTSIDE the window must be skipped, "
                   "not refused (got %d)", rc2);
-            CHECK(e2 == 64, "§9 expected 64 admitted records, got %" PRIu64,
+            /* 65, not 64: the window end is inclusive (C7), so the record at
+             * exactly f2 + 64*1000 is admitted along with the 64 before it. */
+            CHECK(e2 == 65, "§9 expected 65 admitted records, got %" PRIu64,
                   e2);
             pgwt_block_agg_free(&w2);
             pgwt_reader_close(&r);
         }
         if (system(srm) != 0) { }
+    }
+
+    /* §9d THE DECODE HOOK. src/server.c supplies one so a boundary block of
+     * current.trace is read through the #283 decoded-block cache instead of
+     * being re-decompressed — which is also what keeps that cache's
+     * served/decoded counters meaningful for a request the fast path
+     * answered. Two things must hold, and neither is observable from the
+     * numbers alone: the hook is actually REACHED, and routing the decode
+     * through it changes NOTHING about the answer. */
+    {
+        char hdir[256];
+        snprintf(hdir, sizeof(hdir), "/tmp/pgwt_bagg_sec9d_%d", (int)getpid());
+        char hrm[320];
+        snprintf(hrm, sizeof(hrm), "rm -rf '%s'", hdir);
+        if (system(hrm) != 0) { }
+        CHECK(mkdir(hdir, 0700) == 0, "§9d mkdir");
+        uint64_t f4 = 0, l4 = 0;
+        CHECK(sec9_write_trace(hdir, 2, 0, &f4, &l4) == 0, "§9d write");
+        char hpath[512];
+        if (sec9_find_trace(hdir, hpath, sizeof(hpath)) == 0) {
+            /* A window that straddles both blocks' interiors, so at least one
+             * block must DECODE and therefore reach the hook. */
+            uint64_t from = f4 + 1000ULL * 10;
+            uint64_t to   = l4 - 1000ULL * 10;
+
+            struct pgwt_event_reader ra;
+            struct pgwt_block_agg wa;
+            uint64_t ea = 0; int ma = 0, da = 0;
+            CHECK(pgwt_reader_open(&ra, hpath) == 0, "§9d open built-in");
+            pgwt_block_agg_init_window(&wa);
+            CHECK(pgwt_block_agg_window_from_reader(&ra, from, to, &wa,
+                      sec9_lookup_blind, NULL, NULL, NULL, &ea, &ma, &da)
+                  == PGWT_BAGG_OK, "§9d built-in decode");
+            pgwt_reader_close(&ra);
+
+            struct sec9_decode_ctx d;
+            memset(&d, 0, sizeof(d));
+            struct pgwt_event_reader rb;
+            struct pgwt_block_agg wb;
+            uint64_t eb = 0; int mb = 0, db = 0;
+            CHECK(pgwt_reader_open(&rb, hpath) == 0, "§9d open hooked");
+            pgwt_block_agg_init_window(&wb);
+            CHECK(pgwt_block_agg_window_from_reader(&rb, from, to, &wb,
+                      sec9d_lookup, sec9d_store, sec9d_decode, &d,
+                      &eb, &mb, &db) == PGWT_BAGG_OK, "§9d hooked decode");
+            pgwt_reader_close(&rb);
+
+            CHECK(da > 0, "§9d the window must DECODE at least one block, "
+                  "or the hook is unreachable and this proves nothing");
+            CHECK(d.calls == db,
+                  "§9d the hook must be called once per DECODEd block "
+                  "(calls=%ld decoded=%d)", d.calls, db);
+            CHECK(d.calls > 0, "§9d the decode hook was never reached");
+            CHECK(ea == eb && wa.total_transitions == wb.total_transitions &&
+                  wa.pair_total_ns == wb.pair_total_ns &&
+                  wa.node_total_ns == wb.node_total_ns &&
+                  wa.n_pairs == wb.n_pairs && wa.n_nodes == wb.n_nodes,
+                  "§9d a decode hook must not change the answer: "
+                  "built-in (%" PRIu64 ", %" PRIu64 ") vs hooked (%" PRIu64
+                  ", %" PRIu64 ")", wa.total_transitions, wa.pair_total_ns,
+                  wb.total_transitions, wb.pair_total_ns);
+            CHECK(wa.pair_total_ns > 0,
+                  "§9d both answers were empty — the comparison is vacuous");
+            pgwt_block_agg_free(&wa);
+            pgwt_block_agg_free(&wb);
+            sec9_cache_free(&d.cache);
+        }
+        if (system(hrm) != 0) { }
     }
 
     /* A file that cannot be opened must refuse, never answer zero. */

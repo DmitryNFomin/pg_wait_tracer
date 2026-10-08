@@ -53,9 +53,27 @@
  *     old_event occupied may well have begun in an earlier block, or before
  *     the window opened; the record is still counted whole. This is the
  *     straddle rule, and tests/test_block_agg.c §4 pins it.
- * C7. Window semantics are HALF-OPEN [from, to) throughout
- *     (pgwt_block_agg_in_window, pgwt_block_agg_plan). See #316, where an
- *     inclusive end bound double-counted a record.
+ * C7. TIME is half-open; RECORD SELECTION is inclusive at both ends, and
+ *     those are the same rule read from opposite ends of an interval.
+ *
+ *     A trace event's timestamp_ns is when the wait ENDED, so an event ending
+ *     exactly at `to` has its whole interval inside the window — selecting it
+ *     is correct, and dropping it throws away a fully in-window wait. The raw
+ *     loader therefore selects `ts in [from, to]` (src/server.c) and then
+ *     CLIPS each interval's contribution to the window (event_window_ns,
+ *     src/compute.c). This module reproduces the selection; it does not clip,
+ *     because pgwt_compute_transitions() does not either (C6).
+ *
+ *     So: pgwt_block_agg_in_window is `ts >= from && ts <= to`, plan() SKIPs
+ *     iff `first > to`, and MERGEs iff `first >= from && last <= to`.
+ *
+ *     THIS IS NOT #316 RETURNING, and a future reader will assume it is. #316
+ *     is the same rule on the other key: the summary reader keys seconds by
+ *     their START, so a second at `to` is out. An earlier draft of this module
+ *     read "half-open throughout" as applying to the END key too and made the
+ *     loader match; that zeroed test_data_aas and test_data_categories
+ *     (Total AAS 4.0 -> 0), because their fixtures' events end exactly at the
+ *     window end. Those tests encode the correct behaviour.
  * C8. Absence is never an answer. No aggregate, a version mismatch, an
  *     identity mismatch, a filter, or an allocation failure all produce a
  *     REFUSAL (DECODE / negative status), never a zero. A caller that cannot
@@ -71,24 +89,16 @@
  * decide that a zero-duration node manufactured by a sample is a defect and
  * remove it from the raw side too. Nothing here guesses.
  *
- * ── Second open question — A BLOCKER for the wiring step ─────────────────
- * src/server.c's loader admits an exact record when
- * `ts >= from_m && ts <= to_m` — INCLUSIVE at the end, not half-open. That is
- * NOT the convention here and this module does not pretend to straddle both.
- *
- * The MERGE side would survive the difference on its own (MERGE needs
- * `last_timestamp_ns < to`, so every record it folds in has ts < to under
- * either reading). The SKIP side would not: a block with
- * `first_timestamp_ns == to` is SKIPped, and under an inclusive end bound the
- * raw path would still have counted its record at ts == to. So wiring this
- * module behind the current loader would LOSE those records.
- *
- * Therefore the wiring commit must reconcile the loader's exact-record test
- * to half-open `[from, to)` — the direction #316 already established — before
- * `transitions` reads from this module. tests/test_block_agg.c §6b pins the
- * divergence with a literal so it cannot be forgotten: under an end-inclusive
- * raw predicate the difference is exactly the records at ts == to, and the
- * test asserts that difference rather than tolerating it.
+ * ── The one documented ASYMMETRY against the raw path ────────────────────
+ * A window larger than load_max_events() is refused by the raw path with a
+ * structured "window too large" error, because materialising it would exceed
+ * the memory bound. The aggregate path never materialises the window, so it
+ * ANSWERS. That asymmetry is the entire point of the phase and is deliberate;
+ * the bound is unchanged for the other twelve detail commands, which still
+ * refuse. Consequence: above that size there is no raw answer to compare
+ * against, so the merge machinery's bit-exactness is pinned at sizes raw CAN
+ * compute (tests/test_block_agg.c §6, §9) and the aggregate's own internal
+ * consistency carries it above them.
  */
 #ifndef PGWT_BLOCK_AGG_H
 #define PGWT_BLOCK_AGG_H
@@ -352,6 +362,7 @@ int pgwt_block_agg_nodes_sorted(const struct pgwt_block_agg *a,
 /* ── One trace file's contribution to a window ──────────────────────────── */
 
 struct pgwt_event_reader;   /* event_reader.h */
+struct pgwt_block_info;     /* event_reader.h */
 
 /* Cache hooks. The POLICY (size caps, eviction, how long an entry lives) is
  * the caller's; the DECISION of whether an entry may be used is not — it is
@@ -362,10 +373,22 @@ struct pgwt_event_reader;   /* event_reader.h */
  *         DECODE; it must never return an entry it could not revalidate.
  * store:  offered a freshly built aggregate; may take ownership (and must then
  *         zero *agg) or decline (leave it alone — the caller frees it).
- *         Declining costs speed, never correctness. */
+ *         Declining costs speed, never correctness.
+ * decode: hand back block `block_idx`'s records. NULL means "decode straight
+ *         from the reader", which is what a test or a one-shot caller wants.
+ *         The server supplies one so a boundary block of current.trace is read
+ *         through the SAME decoded-block cache the raw loader uses (#283)
+ *         rather than re-decompressed — which also keeps that cache's
+ *         served/decoded counters meaningful for a request this path
+ *         answered. Returns the record count, or -1 to refuse. The records
+ *         must stay valid until the next call. */
 typedef const struct pgwt_block_agg *(*pgwt_bagg_lookup_fn)(
     void *ctx, const struct pgwt_block_identity *id);
 typedef void (*pgwt_bagg_store_fn)(void *ctx, struct pgwt_block_agg *agg);
+typedef int (*pgwt_bagg_decode_fn)(void *ctx, struct pgwt_event_reader *r,
+                                   int block_idx,
+                                   const struct pgwt_trace_event **out,
+                                   struct pgwt_block_info *bi);
 
 /* Fold one trace file's blocks into the window accumulator `acc`, merging the
  * blocks wholly inside [from_mono_ns, to_mono_ns) and decoding only the
@@ -382,20 +405,14 @@ typedef void (*pgwt_bagg_store_fn)(void *ctx, struct pgwt_block_agg *agg);
  * for callers that want to declare how an answer was produced. All three are
  * optional.
  *
- * A SAMPLES block that OVERLAPS the window is refused
- * (PGWT_BAGG_REFUSED_BLOCK_TYPE) rather than skipped: sampled records cannot
- * corrupt the tables, but the caller's fidelity label would be wrong, and a
- * wrong label on a right number is still a wrong answer. One outside the
- * window is simply skipped.
- *
- * Returns 0, or a negative pgwt_bagg_status. On refusal `acc` may be partially
- * populated and MUST be discarded by the caller. */
+ */
 int pgwt_block_agg_window_from_reader(struct pgwt_event_reader *r,
                                       uint64_t from_mono_ns,
                                       uint64_t to_mono_ns,
                                       struct pgwt_block_agg *acc,
                                       pgwt_bagg_lookup_fn lookup,
-                                      pgwt_bagg_store_fn store, void *ctx,
+                                      pgwt_bagg_store_fn store,
+                                      pgwt_bagg_decode_fn decode, void *ctx,
                                       uint64_t *exact_in_window,
                                       int *merged, int *decoded);
 

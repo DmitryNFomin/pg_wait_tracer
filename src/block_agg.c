@@ -69,14 +69,18 @@ int pgwt_block_agg_node_counts(const struct pgwt_trace_event *ev)
     return 1;
 }
 
-/* C7. Half-open on the record's END timestamp, which is the timestamp the
- * trace stores (duration_ns is time already spent in old_event). */
+/* C7. INCLUSIVE at both ends, on the record's END timestamp — which is the
+ * timestamp the trace stores (duration_ns is time already spent in
+ * old_event). An event ending exactly at `to` has its whole interval inside
+ * the window, so it belongs to the window; this mirrors the raw loader
+ * (src/server.c, `ts < from_m || ts > to_m` -> skip) exactly. See C7 in
+ * block_agg.h for why this is not #316 returning. */
 int pgwt_block_agg_in_window(const struct pgwt_trace_event *ev,
                              uint64_t from_mono_ns, uint64_t to_mono_ns)
 {
     if (!ev)
         return 0;
-    return ev->timestamp_ns >= from_mono_ns && ev->timestamp_ns < to_mono_ns;
+    return ev->timestamp_ns >= from_mono_ns && ev->timestamp_ns <= to_mono_ns;
 }
 
 /* C3. Every non-empty filter field disqualifies the aggregate. Written as an
@@ -565,27 +569,28 @@ enum pgwt_block_plan pgwt_block_agg_plan(const struct pgwt_block_identity *id,
      * the cross-check, never as a double-counted one. */
     if (!id)
         return PGWT_BLOCK_SKIP;
-    if (to_mono_ns <= from_mono_ns)
+    if (to_mono_ns < from_mono_ns)
         return PGWT_BLOCK_SKIP;
     if (id->last_timestamp_ns < id->first_timestamp_ns)
         return PGWT_BLOCK_DECODE;      /* nonsense header: do not trust bounds */
 
-    /* Half-open [from, to) against the block's header bounds (C7). */
+    /* Inclusive-at-both-ends against the block's header bounds (C7): a block
+     * is out only if it cannot hold a record in [from, to]. */
     if (id->last_timestamp_ns < from_mono_ns)
         return PGWT_BLOCK_SKIP;
-    if (id->first_timestamp_ns >= to_mono_ns)
+    if (id->first_timestamp_ns > to_mono_ns)
         return PGWT_BLOCK_SKIP;
 
     /* C8: no usable aggregate means recompute, never approximate. */
     if (!have_agg)
         return PGWT_BLOCK_DECODE;
 
-    /* Wholly inside. `last < to` (not `<=`) is deliberate and conservative:
-     * a block ending exactly at `to` decodes. That costs one extra block and
-     * makes the plan correct whether the caller's raw predicate treats the
-     * end bound as inclusive or exclusive — every record in a MERGEd block
-     * then has ts < to under either reading. */
-    if (id->first_timestamp_ns >= from_mono_ns && id->last_timestamp_ns < to_mono_ns)
+    /* Wholly inside, under the SAME bound the records are selected by: every
+     * record of a block with first >= from and last <= to satisfies
+     * ts in [from, to], which is what makes folding the whole aggregate
+     * sound. */
+    if (id->first_timestamp_ns >= from_mono_ns &&
+        id->last_timestamp_ns <= to_mono_ns)
         return PGWT_BLOCK_MERGE;
 
     return PGWT_BLOCK_DECODE;
@@ -714,7 +719,8 @@ int pgwt_block_agg_window_from_reader(struct pgwt_event_reader *r,
                                       uint64_t to_mono_ns,
                                       struct pgwt_block_agg *acc,
                                       pgwt_bagg_lookup_fn lookup,
-                                      pgwt_bagg_store_fn store, void *ctx,
+                                      pgwt_bagg_store_fn store,
+                                      pgwt_bagg_decode_fn decode, void *ctx,
                                       uint64_t *exact_in_window,
                                       int *merged, int *decoded)
 {
@@ -776,15 +782,23 @@ int pgwt_block_agg_window_from_reader(struct pgwt_event_reader *r,
         }
 
         /* DECODE: a boundary block, or one with no usable aggregate. */
-        if (!buf) {
-            buf = calloc(PGWT_BLOCK_EVENTS, sizeof(*buf));
+        const struct pgwt_trace_event *rec = NULL;
+        int n;
+        if (decode) {
+            n = decode(ctx, r, b, &rec, &bi);
+        } else {
             if (!buf) {
-                rc = PGWT_BAGG_REFUSED_NOMEM;
-                break;
+                buf = calloc(PGWT_BLOCK_EVENTS, sizeof(*buf));
+                if (!buf) {
+                    rc = PGWT_BAGG_REFUSED_NOMEM;
+                    break;
+                }
             }
+            n = pgwt_reader_decode_block_info(r, b, buf, PGWT_BLOCK_EVENTS,
+                                              &bi);
+            rec = buf;
         }
-        int n = pgwt_reader_decode_block_info(r, b, buf, PGWT_BLOCK_EVENTS, &bi);
-        if (n < 0) {
+        if (n < 0 || !rec) {
             rc = PGWT_BAGG_REFUSED_INVALID;
             break;
         }
@@ -798,7 +812,7 @@ int pgwt_block_agg_window_from_reader(struct pgwt_event_reader *r,
          * like protection; the mutation driver found this one GREEN (M18) and
          * it was deleted rather than left in with no test behind it. */
         uint64_t admitted = 0;
-        rc = pgwt_block_agg_add_events(acc, buf, n, from_mono_ns, to_mono_ns,
+        rc = pgwt_block_agg_add_events(acc, rec, n, from_mono_ns, to_mono_ns,
                                        &admitted);
         if (rc != PGWT_BAGG_OK)
             break;
@@ -812,7 +826,7 @@ int pgwt_block_agg_window_from_reader(struct pgwt_event_reader *r,
          * raw path decodes. */
         if (store) {
             struct pgwt_block_agg fresh;
-            if (pgwt_block_agg_build(&fresh, &id, bi.block_type, 1, buf, n)
+            if (pgwt_block_agg_build(&fresh, &id, bi.block_type, 1, rec, n)
                 == PGWT_BAGG_OK) {
                 store(ctx, &fresh);
                 pgwt_block_agg_free(&fresh);   /* no-op once ownership moved */

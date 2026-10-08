@@ -49,14 +49,6 @@ int pgwt_proc_close(struct pgwt_proc *p) { (void)p; return -1; }
 # (id, target source file, what guard is broken, which sections must catch
 #  it, (old, new))
 MUTATIONS = [
-    ("M1", "block_agg.c",
-     "plan(): MERGE accepts a block ending exactly AT `to` (inclusive end) -- "
-     "the #316 shape. A merged block then carries a record the raw path "
-     "excluded.",
-     "sec5/sec6",
-     ("id->first_timestamp_ns >= from_mono_ns && id->last_timestamp_ns < to_mono_ns",
-      "id->first_timestamp_ns >= from_mono_ns && id->last_timestamp_ns <= to_mono_ns")),
-
     ("M2", "block_agg.c",
      "plan(): SKIP is off by one at the START edge -- a block whose last "
      "record sits exactly at `from` is dropped, losing an in-window record.",
@@ -153,12 +145,13 @@ MUTATIONS = [
       "    /* MUTANT: SAMPLE records counted as node time */")),
 
     ("M12", "block_agg.c",
-     "plan(): a BOUNDARY block is merged whole instead of decoded (the start "
-     "containment test is dropped), so records before `from` are counted.",
-     "sec5/sec6",
-     ("    if (id->first_timestamp_ns >= from_mono_ns && id->last_timestamp_ns < to_mono_ns)\n"
+     "plan(): the START containment test is dropped, so a BOUNDARY block is "
+     "merged whole and records before `from` are counted.",
+     "sec5/sec6/sec9",
+     ("    if (id->first_timestamp_ns >= from_mono_ns &&\n"
+      "        id->last_timestamp_ns <= to_mono_ns)\n"
       "        return PGWT_BLOCK_MERGE;",
-      "    if (id->last_timestamp_ns < to_mono_ns)\n"
+      "    if (id->last_timestamp_ns <= to_mono_ns)\n"
       "        return PGWT_BLOCK_MERGE;   /* MUTANT: start bound dropped */")),
 
     ("M13", "block_agg.c",
@@ -224,15 +217,38 @@ MUTATIONS = [
       "    return (cb > ca) - (cb < ca);   /* MUTANT: not a total order */")),
 
     ("M19", "block_agg.c",
-     "add_events(): the half-open window test becomes inclusive at the end, "
-     "so a boundary block contributes the record at ts == to that the raw "
-     "path excludes -- the #316 shape, on the decode side this time.",
-     "sec6/sec9",
-     ("        if (!pgwt_block_agg_in_window(&events[i], from_mono_ns, to_mono_ns))\n"
-      "            continue;",
-      "        if (events[i].timestamp_ns < from_mono_ns ||\n"
-      "            events[i].timestamp_ns > to_mono_ns)\n"
-      "            continue;   /* MUTANT: inclusive end */")),
+     "in_window(): the END bound becomes half-open, so a record whose wait "
+     "ended exactly at `to` is dropped even though its whole interval lies "
+     "inside the window. This is the convention that zeroed test_data_aas "
+     "(Total AAS 4.0 -> 0) and test_data_categories on the gate box.",
+     "sec1/sec6b/sec6/sec9",
+     ("    return ev->timestamp_ns >= from_mono_ns && ev->timestamp_ns <= to_mono_ns;",
+      "    return ev->timestamp_ns >= from_mono_ns && ev->timestamp_ns < to_mono_ns;   /* MUTANT */")),
+
+    ("M20", "block_agg.c",
+     "plan(): MERGE requires last < to instead of last <= to, so a block "
+     "ending exactly at `to` decodes instead of merging. Conservative, so the "
+     "numbers stay right -- what goes red is the vacuity ledger's merge/seam "
+     "counters, which is the point: a 'safe' plan that stops merging is a "
+     "phase that stopped working.",
+     "sec5",
+     ("    if (id->first_timestamp_ns >= from_mono_ns &&\n"
+      "        id->last_timestamp_ns <= to_mono_ns)\n"
+      "        return PGWT_BLOCK_MERGE;",
+      "    if (id->first_timestamp_ns >= from_mono_ns &&\n"
+      "        id->last_timestamp_ns < to_mono_ns)\n"
+      "        return PGWT_BLOCK_MERGE;   /* MUTANT: half-open containment */")),
+
+    ("M21", "block_agg.c",
+     "plan(): SKIP uses first >= to instead of first > to, so a block whose "
+     "FIRST record sits exactly at `to` is skipped and that record is lost. "
+     "The SKIP side is the one the half-open reading got wrong and the side "
+     "MERGE's own strictness cannot compensate for.",
+     "sec5/sec6/sec9",
+     ("    if (id->first_timestamp_ns > to_mono_ns)\n"
+      "        return PGWT_BLOCK_SKIP;",
+      "    if (id->first_timestamp_ns >= to_mono_ns)\n"
+      "        return PGWT_BLOCK_SKIP;   /* MUTANT: loses the ts == to record */")),
 
     ("M14", "block_agg.c",
      "lookup(): an ABSENT pair is reported as present with count 0 -- absence "

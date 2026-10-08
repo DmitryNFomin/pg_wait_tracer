@@ -1612,15 +1612,7 @@ static void load_file_range_mono(struct pgwt_server *srv,
         for (int i = 0; i < n; i++) {
             uint64_t ts_mono = rec[i].timestamp_ns;
             if (ts_mono < from_mono) continue;
-            /* HALF-OPEN [from, to) for exact records (#316, and the Phase 1
-             * block aggregate: src/block_agg.h's plan SKIPs a block whose
-             * first_timestamp_ns == to, so an inclusive end here would make
-             * the aggregate short by exactly the ts == to records). A SAMPLES
-             * block keeps the inclusive right LOOKAHEAD — block_to is
-             * sample_to_mono there, not the window end, and those intervals
-             * are clipped to the window later. */
-            if (sample_block ? (ts_mono > block_to) : (ts_mono >= block_to))
-                break;
+            if (ts_mono > block_to) break;
             if (pid != 0 && rec[i].pid != pid)
                 continue;
             if (markers_only && !PGWT_IS_MARKER(rec[i].old_event))
@@ -2728,11 +2720,8 @@ server_load_events_fi_mode(struct pgwt_server *srv,
                     uint64_t ts = ce->events[i].timestamp_ns;
                     if (ts < from_m) continue;
                     if (ts > sample_to_m) break;
-                    /* HALF-OPEN [from, to) for exact records — see the same
-                     * change in load_file_range_mono() and the merge loop
-                     * below. */
                     if (!(ce->events[i].flags & PGWT_EVENT_FLAG_SAMPLE) &&
-                        ts >= to_m)
+                        ts > to_m)
                         continue;
                     if (pid != 0 && ce->events[i].pid != pid)
                         continue;
@@ -2893,20 +2882,20 @@ server_load_events_fi_mode(struct pgwt_server *srv,
                     has_samples = 1;
             } else {
                 /* The loader's right lookahead is only for overlapping sample
-                 * intervals; exact records and structural markers are selected
-                 * on their own endpoint, HALF-OPEN [from, to).
+                 * intervals; preserve the prior endpoint selection for exact
+                 * records and structural markers.
                  *
-                 * Half-open, not inclusive: an inclusive end bound counted the
-                 * record at ts == to in BOTH of two adjacent windows (#316),
-                 * and it is also the one place where the Phase 1 block
-                 * aggregate could not have matched the raw path — its plan
-                 * SKIPs a block whose first_timestamp_ns == to, so a wired
-                 * `transitions` would have been short by exactly those
-                 * records. tests/test_block_agg.c §6b pins the difference with
-                 * a literal; tests/test_window_clip.c and
-                 * tests/test_agg_raw_crosscheck.c pin the bound itself. */
+                 * INCLUSIVE at both ends, and that is correct, not a bug: a
+                 * trace event's timestamp_ns is when the wait ENDED, so an
+                 * event ending exactly at `to` has its whole interval inside
+                 * the window. Selection is inclusive on an END key; the
+                 * CONTRIBUTION is then clipped to the window (event_window_ns,
+                 * src/compute.c). #316 is the same rule read from the other
+                 * end of the interval: the summary reader keys seconds by
+                 * their START, so a second at `to` is out. Making this
+                 * half-open zeroed test_data_aas and test_data_categories. */
                 if (events[i].timestamp_ns < segs[s].from_m ||
-                    events[i].timestamp_ns >= segs[s].to_m)
+                    events[i].timestamp_ns > segs[s].to_m)
                     continue;
                 /* T2 backstop (study defect 2): an EXIT record whose closing
                  * interval lies OUTSIDE exact coverage in a generation that
@@ -5000,6 +4989,22 @@ static void bagg_cache_put(struct pgwt_server *srv, struct pgwt_block_agg *agg)
     srv->bagg_bytes += bytes;
 }
 
+/* The decode hook. A boundary block of current.trace is read through the SAME
+ * decoded-block cache the raw loader uses (#283) instead of being
+ * re-decompressed — so the fast path reuses that cache rather than racing it,
+ * and the cache's served/decoded counters stay meaningful for a request this
+ * path answered. (They are what makes "the second request decoded no blocks"
+ * observable; a diagnostic that goes silent because an unrelated code path was
+ * bypassed is a reporting bug, and tests/test_data_current_trace_cache.py
+ * treats an unreadable stats line as a failure, correctly.)
+ *
+ * For a rotated file `cc` is NULL and this is a plain decode. */
+struct bagg_hook_ctx {
+    struct pgwt_server *srv;
+    struct cur_trace_cache *cc;          /* NULL unless this file is current */
+    struct pgwt_trace_event *buf;        /* scratch for the decode path */
+};
+
 /* A cached aggregate for this block, or NULL — the pgwt_bagg_lookup_fn hook.
  * Revalidates against the block's CURRENT header via
  * pgwt_block_agg_matches(): a mismatch on any header-derived field (trace
@@ -5009,7 +5014,11 @@ static void bagg_cache_put(struct pgwt_server *srv, struct pgwt_block_agg *agg)
 static const struct pgwt_block_agg *
 bagg_cache_get(void *ctx, const struct pgwt_block_identity *id)
 {
-    struct pgwt_server *srv = ctx;
+    /* All three hooks share ONE ctx (block_agg.h), so every one of them must
+     * read it as the same type. This was briefly a cast to pgwt_server * while
+     * the decode hook passed its own struct — exactly the silent type
+     * confusion that produces plausible garbage instead of a crash. */
+    struct pgwt_server *srv = ((struct bagg_hook_ctx *)ctx)->srv;
     if (srv->bagg_cap == 0)
         return NULL;
     struct bagg_entry *e =
@@ -5030,7 +5039,7 @@ bagg_cache_get(void *ctx, const struct pgwt_block_identity *id)
 
 static void bagg_cache_store(void *ctx, struct pgwt_block_agg *agg)
 {
-    bagg_cache_put(ctx, agg);
+    bagg_cache_put(((struct bagg_hook_ctx *)ctx)->srv, agg);
 }
 
 /* Drop every cached aggregate. Called when a trace file's HEADER IDENTITY
@@ -5049,6 +5058,42 @@ static void bagg_cache_drop(struct pgwt_server *srv)
     srv->bagg = NULL;
     srv->bagg_cap = srv->bagg_count = 0;
     srv->bagg_bytes = 0;
+}
+
+static int bagg_decode_block(void *ctx, struct pgwt_event_reader *r,
+                             int block_idx,
+                             const struct pgwt_trace_event **out,
+                             struct pgwt_block_info *bi)
+{
+    struct bagg_hook_ctx *d = ctx;
+    const struct cur_cache_block *cb =
+        d->cc ? cur_cache_get(d->cc, block_idx) : NULL;
+    if (cb) {
+        *out = d->cc->events + cb->start;
+        bi->block_type = cb->is_sample ? PGWT_BLOCK_SAMPLES
+                                       : PGWT_BLOCK_TRANSITIONS;
+        bi->sample_period_ns  = cb->sample_period_ns;
+        bi->first_timestamp_ns = cb->index_ts;
+        bi->last_timestamp_ns  = cb->last_ts;
+        bi->num_events         = (uint32_t)cb->count;
+        d->cc->stat_blocks_served++;
+        return cb->count;
+    }
+    if (!d->buf) {
+        d->buf = calloc(PGWT_BLOCK_EVENTS, sizeof(*d->buf));
+        if (!d->buf)
+            return -1;
+    }
+    int n = pgwt_reader_decode_block_info(r, block_idx, d->buf,
+                                          PGWT_BLOCK_EVENTS, bi);
+    if (n < 0)
+        return -1;
+    *out = d->buf;
+    if (d->cc) {
+        d->cc->stat_blocks_decoded++;
+        cur_cache_store(d->srv, d->cc, block_idx, r, d->buf, n, bi);
+    }
+    return n;
 }
 
 /* Is this request answerable from block aggregates at all?
@@ -5141,11 +5186,18 @@ static int transitions_from_block_aggs(struct pgwt_server *srv,
             rc = PGWT_BAGG_REFUSED_INVALID;   /* cannot see => refuse */
             break;
         }
+        struct bagg_hook_ctx dctx = {
+            .srv = srv,
+            .cc  = (fc->is_current && cur_cache_enabled()) ? &srv->cur : NULL,
+            .buf = NULL,
+        };
         rc = pgwt_block_agg_window_from_reader(&r, from_m, to_m, out,
                                                bagg_cache_get,
-                                               bagg_cache_store, srv,
+                                               bagg_cache_store,
+                                               bagg_decode_block, &dctx,
                                                exact_in_window, merged_blocks,
                                                decoded_blocks);
+        free(dctx.buf);
         pgwt_reader_close(&r);
     }
 
@@ -5310,6 +5362,15 @@ static void handle_transitions(struct pgwt_server *srv, struct pgwt_request *req
         int rc = transitions_from_block_aggs(srv, from_ns, to_ns, &win,
                                              &exact_in_window, &merged,
                                              &decoded);
+        /* The current-trace cache stats line is a PER-REQUEST report, not a
+         * side effect of having called load_file_range_mono(). It used to be
+         * emitted only from the raw loader, so this fast path made the line
+         * vanish from `transitions` entirely — a diagnostic disappearing
+         * because an unrelated code path was bypassed. Emitted explicitly
+         * here, so every transitions request reports the cache state exactly
+         * once whichever path answered. */
+        cur_cache_report(&srv->cur);
+
         if (rc == PGWT_BAGG_OK) {
             /* Fidelity: the aggregate path is only eligible when no SAMPLES
              * block touches the window, so has_samples is provably 0 and the

@@ -75,12 +75,40 @@ def main():
 
             # Every raw-path view must reject, not truncate.
             for cmd in ("aas", "top_events", "top_sessions", "top_queries",
-                        "heatmap", "session_timeline", "transitions",
+                        "heatmap", "session_timeline",
                         "fingerprints", "lock_chains", "interference",
                         "concurrency", "variants"):
                 resp = srv.query(cmd)
                 t.check(resp.get("code") == "window_too_large",
                         f"{cmd}: structured error, not partial data")
+
+            # `transitions` is the ONE documented exception, and it is the
+            # point of the paint-latency block aggregate: it merges per-block
+            # (old_event, new_event) tables and never materialises the window,
+            # so the memory bound this test sets does not apply to it. It must
+            # ANSWER -- and the answer must be self-consistent, because above
+            # the bound there is no raw result left to compare against (the
+            # bit-exact comparison lives in tests/test_block_agg.c §6 and §9,
+            # at sizes the raw path can still compute).
+            resp = srv.query("transitions")
+            t.check("error" not in resp,
+                    "transitions: answers past the raw bound (block aggregate)")
+            t.check(resp.get("merged_blocks", 0) > 0,
+                    "transitions: the answer came from MERGED blocks, not "
+                    "from a raw load that happened to fit (merged=%s "
+                    "decoded=%s)" % (resp.get("merged_blocks"),
+                                     resp.get("decoded_blocks")))
+            links = resp.get("links", [])
+            t.check(len(links) > 0 and resp.get("total", 0) > 0,
+                    "transitions: non-empty, so the exemption is not hiding "
+                    "an empty answer (total=%s links=%d)"
+                    % (resp.get("total"), len(links)))
+            t.check(resp.get("total_link_count", 0) >= len(links),
+                    "transitions: total_link_count >= the rows emitted")
+            t.check(sum(l.get("value", 0) for l in links)
+                    <= resp.get("total", 0),
+                    "transitions: the emitted rows' counts cannot exceed the "
+                    "declared total (truncation is a cap, not an invention)")
 
         # Sanity: with the default (RAM-derived) bound the same trace loads.
         with ServerHarness(trace_dir) as srv:

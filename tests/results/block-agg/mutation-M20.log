@@ -1,0 +1,121 @@
+mutation M20 (src/block_agg.c)
+broken guard: plan(): MERGE requires last < to instead of last <= to, so a block ending exactly at `to` decodes instead of merging. Conservative, so the numbers stay right -- what goes red is the vacuity ledger's merge/seam counters, which is the point: a 'safe' plan that stops merging is a phase that stopped working.
+expected to be caught by: sec5
+
+--- if (id->first_timestamp_ns >= from_mono_ns &&
+        id->last_timestamp_ns <= to_mono_ns)
+        return PGWT_BLOCK_MERGE;
++++ if (id->first_timestamp_ns >= from_mono_ns &&
+        id->last_timestamp_ns < to_mono_ns)
+        return PGWT_BLOCK_MERGE;   /* MUTANT: half-open containment */
+
+exit=1, 73 FAIL line(s)
+
+test_block_agg — per-committed-block transition aggregate (Phase 1)
+=== §1 record predicate vs pgwt_compute_transitions ===
+    6 counted, 7 rejected, both predicates agreeing on all 13
+=== §2 build + merge against literal expected values ===
+=== §3 merge associativity + commutativity ===
+=== §4 straddle: a pair whose old_event began in an earlier block ===
+=== §5 plan(): exactly one of SKIP/MERGE/DECODE per block ===
+    plan outcomes over 378 windows: merge=480 decode=404 skip=1006
+=== §6 model: merged + decoded == raw, bit-exact, every window ===
+    378 windows compared, 185 of them at a merge/decode seam
+=== §6b the end-key bound: agreement with the loader, and the cost of getting it wrong ===
+=== §7 mutation probes: the comparator can see one count, one nanosecond, one pair ===
+    probe 0 (clean (control)         ) disagreements=0
+    probe 1 (+1 on one pair count    ) disagreements=2
+    probe 2 (+1 ns on one pair       ) disagreements=1
+    probe 3 (-1 ns on one pair       ) disagreements=1
+    probe 4 (an extra pair appears   ) disagreements=4
+    probe 5 (one pair disappears     ) disagreements=2
+    probe 6 (+1 ns on one node       ) disagreements=1
+    probe 7 (one node disappears     ) disagreements=2
+=== §8 bypass suite: a path that cannot see must refuse ===
+=== §9 on-disk: pgwt_block_agg_window_from_reader vs raw, twice ===
+    190 windows x 2 passes, 396 merges (198 in pass 2), 364 decodes, cache: 1520 lookups / 1486 hits / 64 stores
+=== §0 vacuity ledger ===
+    windows compared .................. 378
+    blocks MERGEd ..................... 480
+    blocks DECODEd .................... 404
+    blocks SKIPped .................... 1006
+    windows at a merge/decode seam .... 185
+    windows with positive total_ns .... 364
+    windows with >=1 merged pair ...... 364
+    mutation probes that went red ..... 7
+    refusals observed ................. 46
+FAILED: 73 check(s)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1028: DECODE of a block wholly inside [999, 1400] that had an aggregate: the fast path declined work it could have done
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1028: DECODE of a block wholly inside [999, 2400] that had an aggregate: the fast path declined work it could have done
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1028: DECODE of a block wholly inside [999, 3300] that had an aggregate: the fast path declined work it could have done
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1028: DECODE of a block wholly inside [999, 4000] that had an aggregate: the fast path declined work it could have done
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1028: DECODE of a block wholly inside [999, 5200] that had an aggregate: the fast path declined work it could have done
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1028: DECODE of a block wholly inside [1000, 1400] that had an aggregate: the fast path declined work it could have done
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1028: DECODE of a block wholly inside [1000, 2400] that had an aggregate: the fast path declined work it could have done
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1028: DECODE of a block wholly inside [1000, 3300] that had an aggregate: the fast path declined work it could have done
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1028: DECODE of a block wholly inside [1000, 4000] that had an aggregate: the fast path declined work it could have done
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1028: DECODE of a block wholly inside [1000, 5200] that had an aggregate: the fast path declined work it could have done
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1028: DECODE of a block wholly inside [1100, 2400] that had an aggregate: the fast path declined work it could have done
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1028: DECODE of a block wholly inside [1100, 3300] that had an aggregate: the fast path declined work it could have done
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1028: DECODE of a block wholly inside [1100, 4000] that had an aggregate: the fast path declined work it could have done
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1028: DECODE of a block wholly inside [1100, 5200] that had an aggregate: the fast path declined work it could have done
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1028: DECODE of a block wholly inside [1200, 2400] that had an aggregate: the fast path declined work it could have done
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1028: DECODE of a block wholly inside [1200, 3300] that had an aggregate: the fast path declined work it could have done
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1028: DECODE of a block wholly inside [1200, 4000] that had an aggregate: the fast path declined work it could have done
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1028: DECODE of a block wholly inside [1200, 5200] that had an aggregate: the fast path declined work it could have done
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1028: DECODE of a block wholly inside [1300, 2400] that had an aggregate: the fast path declined work it could have done
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1028: DECODE of a block wholly inside [1300, 3300] that had an aggregate: the fast path declined work it could have done
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1028: DECODE of a block wholly inside [1300, 4000] that had an aggregate: the fast path declined work it could have done
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1028: DECODE of a block wholly inside [1300, 5200] that had an aggregate: the fast path declined work it could have done
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1028: DECODE of a block wholly inside [1400, 2400] that had an aggregate: the fast path declined work it could have done
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1028: DECODE of a block wholly inside [1400, 3300] that had an aggregate: the fast path declined work it could have done
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1028: DECODE of a block wholly inside [1400, 4000] that had an aggregate: the fast path declined work it could have done
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1028: DECODE of a block wholly inside [1400, 5200] that had an aggregate: the fast path declined work it could have done
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1028: DECODE of a block wholly inside [1401, 2400] that had an aggregate: the fast path declined work it could have done
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1028: DECODE of a block wholly inside [1401, 3300] that had an aggregate: the fast path declined work it could have done
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1028: DECODE of a block wholly inside [1401, 4000] that had an aggregate: the fast path declined work it could have done
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1028: DECODE of a block wholly inside [1401, 5200] that had an aggregate: the fast path declined work it could have done
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1028: DECODE of a block wholly inside [1999, 2400] that had an aggregate: the fast path declined work it could have done
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1028: DECODE of a block wholly inside [1999, 3300] that had an aggregate: the fast path declined work it could have done
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1028: DECODE of a block wholly inside [1999, 4000] that had an aggregate: the fast path declined work it could have done
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1028: DECODE of a block wholly inside [1999, 5200] that had an aggregate: the fast path declined work it could have done
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1028: DECODE of a block wholly inside [2000, 2400] that had an aggregate: the fast path declined work it could have done
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1028: DECODE of a block wholly inside [2000, 3300] that had an aggregate: the fast path declined work it could have done
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1028: DECODE of a block wholly inside [2000, 4000] that had an aggregate: the fast path declined work it could have done
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1028: DECODE of a block wholly inside [2000, 5200] that had an aggregate: the fast path declined work it could have done
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1028: DECODE of a block wholly inside [2100, 3300] that had an aggregate: the fast path declined work it could have done
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1028: DECODE of a block wholly inside [2100, 4000] that had an aggregate: the fast path declined work it could have done
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1028: DECODE of a block wholly inside [2100, 5200] that had an aggregate: the fast path declined work it could have done
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1028: DECODE of a block wholly inside [2200, 3300] that had an aggregate: the fast path declined work it could have done
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1028: DECODE of a block wholly inside [2200, 4000] that had an aggregate: the fast path declined work it could have done
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1028: DECODE of a block wholly inside [2200, 5200] that had an aggregate: the fast path declined work it could have done
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1028: DECODE of a block wholly inside [2300, 3300] that had an aggregate: the fast path declined work it could have done
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1028: DECODE of a block wholly inside [2300, 4000] that had an aggregate: the fast path declined work it could have done
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1028: DECODE of a block wholly inside [2300, 5200] that had an aggregate: the fast path declined work it could have done
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1028: DECODE of a block wholly inside [2400, 3300] that had an aggregate: the fast path declined work it could have done
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1028: DECODE of a block wholly inside [2400, 4000] that had an aggregate: the fast path declined work it could have done
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1028: DECODE of a block wholly inside [2400, 5200] that had an aggregate: the fast path declined work it could have done
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1028: DECODE of a block wholly inside [2401, 3300] that had an aggregate: the fast path declined work it could have done
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1028: DECODE of a block wholly inside [2401, 4000] that had an aggregate: the fast path declined work it could have done
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1028: DECODE of a block wholly inside [2401, 5200] that had an aggregate: the fast path declined work it could have done
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1028: DECODE of a block wholly inside [2999, 3300] that had an aggregate: the fast path declined work it could have done
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1028: DECODE of a block wholly inside [2999, 4000] that had an aggregate: the fast path declined work it could have done
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1028: DECODE of a block wholly inside [2999, 5200] that had an aggregate: the fast path declined work it could have done
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1028: DECODE of a block wholly inside [3000, 3300] that had an aggregate: the fast path declined work it could have done
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1028: DECODE of a block wholly inside [3000, 4000] that had an aggregate: the fast path declined work it could have done
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1028: DECODE of a block wholly inside [3000, 5200] that had an aggregate: the fast path declined work it could have done
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1028: DECODE of a block wholly inside [3100, 4000] that had an aggregate: the fast path declined work it could have done
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1028: DECODE of a block wholly inside [3100, 5200] that had an aggregate: the fast path declined work it could have done
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1028: DECODE of a block wholly inside [3200, 4000] that had an aggregate: the fast path declined work it could have done
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1028: DECODE of a block wholly inside [3200, 5200] that had an aggregate: the fast path declined work it could have done
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1028: DECODE of a block wholly inside [3300, 4000] that had an aggregate: the fast path declined work it could have done
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1028: DECODE of a block wholly inside [3300, 5200] that had an aggregate: the fast path declined work it could have done
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1028: DECODE of a block wholly inside [3301, 4000] that had an aggregate: the fast path declined work it could have done
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1028: DECODE of a block wholly inside [3301, 5200] that had an aggregate: the fast path declined work it could have done
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1028: DECODE of a block wholly inside [3999, 4000] that had an aggregate: the fast path declined work it could have done
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1028: DECODE of a block wholly inside [3999, 5200] that had an aggregate: the fast path declined work it could have done
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1028: DECODE of a block wholly inside [4000, 5200] that had an aggregate: the fast path declined work it could have done
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1028: DECODE of a block wholly inside [4001, 5200] that had an aggregate: the fast path declined work it could have done
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1028: DECODE of a block wholly inside [4999, 5200] that had an aggregate: the fast path declined work it could have done
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1028: DECODE of a block wholly inside [5000, 5200] that had an aggregate: the fast path declined work it could have done
+WARN: cannot open /nonexistent/pgwt/no-such.trace: No such file or directory

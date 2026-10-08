@@ -20,10 +20,10 @@ test_block_agg — per-committed-block transition aggregate (Phase 1)
 === §3 merge associativity + commutativity ===
 === §4 straddle: a pair whose old_event began in an earlier block ===
 === §5 plan(): exactly one of SKIP/MERGE/DECODE per block ===
-    plan outcomes over 378 windows: merge=480 decode=335 skip=1075
+    plan outcomes over 378 windows: merge=553 decode=331 skip=1006
 === §6 model: merged + decoded == raw, bit-exact, every window ===
-    378 windows compared, 159 of them at a merge/decode seam
-=== §6b the loader's inclusive end bound: the divergence, with a literal ===
+    378 windows compared, 170 of them at a merge/decode seam
+=== §6b the end-key bound: agreement with the loader, and the cost of getting it wrong ===
 === §7 mutation probes: the comparator can see one count, one nanosecond, one pair ===
     probe 0 (clean (control)         ) disagreements=0
     probe 1 (+1 on one pair count    ) disagreements=2
@@ -35,17 +35,17 @@ test_block_agg — per-committed-block transition aggregate (Phase 1)
     probe 7 (one node disappears     ) disagreements=2
 === §8 bypass suite: a path that cannot see must refuse ===
 === §9 on-disk: pgwt_block_agg_window_from_reader vs raw, twice ===
-    190 windows x 2 passes, 396 merges (198 in pass 2), 296 decodes, cache: 1520 lookups / 1482 hits / 64 stores
+    190 windows x 2 passes, 472 merges (236 in pass 2), 288 decodes, cache: 1520 lookups / 1486 hits / 64 stores
 === §0 vacuity ledger ===
     windows compared .................. 378
-    blocks MERGEd ..................... 480
-    blocks DECODEd .................... 335
-    blocks SKIPped .................... 1075
-    windows at a merge/decode seam .... 159
-    windows with positive total_ns .... 350
-    windows with >=1 merged pair ...... 350
+    blocks MERGEd ..................... 553
+    blocks DECODEd .................... 331
+    blocks SKIPped .................... 1006
+    windows at a merge/decode seam .... 170
+    windows with positive total_ns .... 364
+    windows with >=1 merged pair ...... 364
     mutation probes that went red ..... 7
     refusals observed ................. 46
 FAILED: 1 check(s)
-FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1533: B10 a merge whose pair table cannot grow must return NOMEM, never OK — got 0
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1569: B10 a merge whose pair table cannot grow must return NOMEM, never OK — got 0
 WARN: cannot open /nonexistent/pgwt/no-such.trace: No such file or directory
