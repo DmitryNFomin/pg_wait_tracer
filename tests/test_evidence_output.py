@@ -116,20 +116,43 @@ exit 1
 
 
 class TieredOutputTests(unittest.TestCase):
+    # Issue #309: these lines used to say "(characterisation, non-gating)"
+    # on BOTH the pass and the fail path, even though
+    # test_cross_validate_tiered.sh's exit code already depended on them
+    # (and depends on ALL of them, after #309). That label was false, so it
+    # is gone -- a self-explanatory line now names the rate, the verdict,
+    # the measured disagreement and (on FAIL) the tolerance it missed,
+    # never a label claiming the result doesn't matter.
     def test_each_rate_line_is_self_explanatory(self):
+        pass_out = ("Max share disagreement (events >= 2% exact share): "
+                     "3.4 pp (LWLock)\nRESULT: PASS")
+        fail_out = ("Max share disagreement (events >= 2% exact share): "
+                     "14.9 pp (BufferPin)\nRESULT: FAIL")
         script = f'''source "{ROOT / 'tests/cross_validate_rate_output.sh'}"
-print_rate_result 10 'RESULT: PASS'
-print_rate_result 50 'RESULT: FAIL'
-print_rate_summary 10 PASS
-print_rate_summary 50 FAIL
+print_rate_result 10 "{pass_out}"
+print_rate_result 50 "{fail_out}"
+print_rate_summary 10 PASS 3.4 LWLock 10
+print_rate_summary 50 FAIL 14.9 BufferPin 10
 '''
         result = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         lines = result.stdout.splitlines()
         self.assertEqual(len(lines), 4)
-        self.assertTrue(all("characterisation" in line for line in lines))
+        self.assertFalse(any("characterisation" in line for line in lines))
+        self.assertFalse(any("non-gating" in line for line in lines))
         self.assertTrue(all("shipped default" in line for line in (lines[0], lines[2])))
         self.assertTrue(all("exploratory" in line for line in (lines[1], lines[3])))
+        # Every line names its rate and its measured delta -- a reader
+        # should not have to dig through the log to learn which rate
+        # failed or by how much (acceptance criterion #2).
+        for line in (lines[0], lines[2]):
+            self.assertIn("10", line)
+            self.assertIn("3.4", line)
+            self.assertIn("LWLock", line)
+        for line in (lines[1], lines[3]):
+            self.assertIn("50", line)
+            self.assertIn("14.9", line)
+            self.assertIn("BufferPin", line)
         self.assertNotIn("RESULT: FAIL", result.stdout)
 
 
