@@ -294,6 +294,161 @@ def mock_query(cmd, req_id, **kwargs):
     return mock_server.handle_request(msg)
 
 
+# ── Sampled/Mixed fidelity coverage (#306/#321 "mock-underread" follow-up) ───
+# Every COMMANDS run above uses an all-TRANSITIONS fixture, so the real
+# server's response is always "exact": before this, test_protocol_drift had
+# ZERO fidelity references (verified: `grep -c fidelity` on the pre-change
+# file was 0) and could not catch the mock inventing protocol under
+# PGWT_MOCK_FIDELITY=sampled/mixed -- e.g. a "fidelity_ranges" array
+# production does not emit (see the issue text; src/server.c's add_fidelity
+# emits only the scalar "fidelity" + "sample_period_ns"). gen_test_traces
+# already supports a "samples"/"sample_period_ns" scenario (trace format v2,
+# used by tests/test_data_fidelity.py), so this is mechanically achievable.
+
+FID_BASE = 20_000_000_000_000   # separate time range from SCENARIO above
+FID_PERIOD = 100_000_000        # 100ms = 10 Hz, matches the mock's default
+                                 # PGWT_MOCK_SAMPLE_PERIOD_NS
+
+
+def _fid_sample(pid, ts, event, qid=0):
+    return {"pid": pid, "ts": ts, "event": event, "qid": qid}
+
+
+def _build_samples(base):
+    """A SAMPLES run with a bit of everything (CPU, IO, Lock, LWLock) across
+    two pids/queries, used standalone (-> PGWT_FIDELITY_SAMPLED, no
+    transitions anywhere) and appended to SCENARIO (-> PGWT_FIDELITY_MIXED,
+    see SCENARIO_MIXED below)."""
+    samples = []
+    ts = base
+    for _ in range(10):
+        ts += FID_PERIOD
+        samples.append(_fid_sample(2000, ts, IO_DATA_FILE_READ, 300))
+    for _ in range(6):
+        ts += FID_PERIOD
+        samples.append(_fid_sample(2000, ts, LOCK_TXN, 300))
+    for _ in range(8):
+        ts += FID_PERIOD
+        samples.append(_fid_sample(2001, ts, CPU, 400))
+    for _ in range(4):
+        ts += FID_PERIOD
+        samples.append(_fid_sample(2001, ts, LWLOCK_WAL_WRITE, 400))
+    samples.sort(key=lambda s: s["ts"])
+    return samples
+
+
+SCENARIO_SAMPLED = {
+    "backends": [
+        {"pid": 2000, "type": "client", "user": "u", "db": "d"},
+        {"pid": 2001, "type": "client", "user": "u", "db": "d"},
+    ],
+    "queries": [{"id": 300, "text": "SELECT 2"}, {"id": 400, "text": "SELECT 3"}],
+    "sample_period_ns": FID_PERIOD,
+    "samples": _build_samples(FID_BASE),
+}
+
+# Mixed: SCENARIO's own all-transitions events, PLUS a disjoint samples run
+# well after them -- both has_transitions and has_samples are true for the
+# default (whole-capture) window, so load_fidelity reports
+# PGWT_FIDELITY_MIXED (src/compute.h pgwt_fidelity_of).
+SCENARIO_MIXED = dict(SCENARIO)
+SCENARIO_MIXED["sample_period_ns"] = FID_PERIOD
+SCENARIO_MIXED["samples"] = _build_samples(FID_BASE + 100_000_000_000)
+
+# EXACT-required commands whose "unavailable" gate the mock's _EXACT_VIEWS
+# ALREADY matches src/server.c for (each of these five calls
+# pgwt_fidelity_unavailable(PGWT_REQ_EXACT, ...) in both
+# handle_heatmap/handle_transitions/handle_concurrency/handle_lock_chains/
+# handle_interference AND is listed in mock_server._EXACT_VIEWS).
+# session_timeline, executions, execution_detail, exec_scatter,
+# fingerprints and variants are DELIBERATELY excluded here: src/server.c
+# gates session_timeline/fingerprints/variants as EXACT-required but
+# mock_server._EXACT_VIEWS does not, and the reverse for
+# executions/exec_scatter (gated in the mock, NOT in src/server.c) -- a
+# real, pre-existing mismatch this task did not introduce. Widening
+# _EXACT_VIEWS to "fix" it would also flip test_web_ui.py's
+# test_b5_unavailable_panel (which asserts the waterfall/scatter tabs --
+# executions/exec_scatter -- show the unavailable panel today), so it is
+# reported, not patched, here.
+#
+# "info" and "top_queries" are ALSO excluded, for reasons this gate itself
+# found (ran once, red, before these exclusions -- see the report):
+#   - "info" never carries a "fidelity" field at all (it is a capture-wide
+#     header, not a per-window view) -- asserting one here was a bug in
+#     THIS harness, not a mock/real mismatch.
+#   - "top_queries" rows carry lifecycle fields (exec_count, avg_exec_ms,
+#     plan_count, ...) ONLY when EXEC_START/END/PLAN_START/END markers
+#     exist, which are transitions -- a samples-only window never has them.
+#     src/server.c's real response omits the fields entirely there;
+#     mock_server.py's canned _CANNED["top_queries"] always includes them,
+#     unconditionally. That IS a real, separate pre-existing protocol gap in
+#     the mock (lifecycle fields are not fidelity-gated at all) -- distinct
+#     from the CPU-under-read this task fixes, reported rather than
+#     silently absorbed into this task's diff.
+FIDELITY_COMMANDS = [
+    ("time_model",          "time_model",       {}),
+    ("aas",                 "aas",              {"buckets": 30}),
+    ("aas detail=events",   "aas",              {"buckets": 30, "detail": "events"}),
+    ("top_events",          "top_events",       {}),
+    ("top_events class=io", "top_events",       {"filters": {"class": "io"}}),
+    ("top_sessions",        "top_sessions",     {}),
+    ("heatmap",             "heatmap",          {}),
+    ("transitions",         "transitions",      {}),
+    ("concurrency",         "concurrency",      {"buckets": 30}),
+    ("lock_chains",         "lock_chains",      {}),
+    ("interference",        "interference",     {}),
+]
+
+
+def run_fidelity_drift(t, label, scenario, mock_fidelity):
+    """Same schema-drift check as main()'s loop, but against a
+    samples-bearing fixture with the mock pinned (mock_server._FID.fidelity,
+    not the env var -- the module is already imported in-process, same
+    pattern test_b5_* uses via a subprocess env var, here done in-process
+    since this file calls handle_request() directly) to the matching
+    fidelity mode, so a mock that invented a field under
+    PGWT_MOCK_FIDELITY=sampled/mixed fails here exactly like a drifted
+    exact-mode field fails above."""
+    trace_dir = generate_traces(scenario)
+    prev_fidelity = mock_server._FID.fidelity
+    mock_server._FID.fidelity = mock_fidelity
+    try:
+        with ServerHarness(trace_dir) as srv:
+            for cmd_label, cmd, kwargs in FIDELITY_COMMANDS:
+                full_label = f"{label}/{cmd_label}"
+                real = srv.query(cmd, **kwargs)
+                mock = mock_query(cmd, req_id=real.get("id", 0), **kwargs)
+
+                t.check("error" not in real,
+                        f"[{full_label}] real server answered without error"
+                        + (f" (got: {real.get('error')})" if "error" in real else ""))
+                t.check("error" not in mock,
+                        f"[{full_label}] mock answered without error"
+                        + (f" (got: {mock.get('error')})" if "error" in mock else ""))
+                if "error" in real or "error" in mock:
+                    continue
+
+                # The real server's actual fidelity tag must match what we
+                # asked the mock to pretend -- otherwise the fixture itself
+                # is wrong (e.g. the samples run did not land where expected)
+                # and the schema comparison below would silently compare two
+                # different kinds of window.
+                t.check(real.get("fidelity") == mock_fidelity,
+                        f"[{full_label}] real server fixture is "
+                        f"'{mock_fidelity}' fidelity "
+                        f"(got '{real.get('fidelity')}')")
+
+                diffs = []
+                diff_schemas(schema_of(real), schema_of(mock), "", diffs)
+                diffs = filter_allowed(diffs)
+                t.check(not diffs, f"[{full_label}] response schemas match")
+                for d in diffs:
+                    print(f"    DRIFT: {d}")
+    finally:
+        mock_server._FID.fidelity = prev_fidelity
+        cleanup_traces(trace_dir)
+
+
 def main():
     t = TestRunner("test_protocol_drift")
     trace_dir = generate_traces(SCENARIO)
@@ -320,6 +475,9 @@ def main():
                     print(f"    DRIFT: {d}")
     finally:
         cleanup_traces(trace_dir)
+
+    run_fidelity_drift(t, "sampled", SCENARIO_SAMPLED, "sampled")
+    run_fidelity_drift(t, "mixed", SCENARIO_MIXED, "mixed")
 
     ok = t.summary()
     sys.exit(0 if ok else 1)
