@@ -1,12 +1,20 @@
 /* pgwt — "transitions" view: the directly-follows graph (DFG) + flow variants.
  *
  * Migrated to the { id, requests, build, mount, enter, leave } contract (B3
- * part 3 — the heaviest view, done last). requests() fetches transitions and
- * (optionally) variants on single-flight channels; build() is PURE
- * (lib/builders/transitions.js -> ECharts graph option + the variants HTML);
- * mount() maintains a stable shell (slider + DFG container + variants section)
- * and feeds options to the view-owned ECharts instance. The view OWNS its
- * instance: disposed in leave() — no module-level chart global.
+ * part 3 — the heaviest view, done last). requests() fetches transitions on
+ * its own single-flight channel; build() is PURE (lib/builders/transitions.js
+ * -> ECharts graph option); mount() maintains a stable shell (slider + DFG
+ * container + variants section) and feeds options to the view-owned ECharts
+ * instance. The view OWNS its instance: disposed in leave() — no
+ * module-level chart global.
+ *
+ * Variants are ON DEMAND (follow-up to #291, which first made the DFG paint
+ * from its own response without awaiting variants): `variants` measures
+ * ~5.5s against a realistic 900s window, the server is single-threaded with
+ * no mid-flight command cancellation, and an auto-fired request a tab switch
+ * away from orphans that whole cost behind whatever the user looks at next.
+ * requests()/build() never touch it; mount() always (re)paints the panel
+ * 'idle' with a button, and only a click (loadVariants()) ever fetches it.
  *
  * U2 lifecycle fixes (P5) — the old view was the churn poster child:
  *   - PERSISTED instance: init once, setOption per render. The old
@@ -61,13 +69,14 @@ export function createTransitionsView() {
     let justDragged = false; // suppress the click that follows a drag
     let rafId = null;      // pending slider frame
     let resizePending = false;
-    // #291 progressive paint: bumped every time a new variants fetch is
-    // wired up in mount(). A same-tab refresh re-requests on the SAME
-    // 'variants' channel, so transport.request() already cancels the prior
-    // pending one (CancelledError) — this counter is the belt-and-suspenders
-    // check for the case where the rejection's microtask and the new mount()
-    // race in an order we did not intend: only the LATEST wiring's gen may
-    // ever paint, independent of which settles or runs first.
+    // Variants-on-demand (follow-up to #291): bumped on every mount() AND on
+    // every user-triggered load, so a response can only ever paint if it is
+    // still the latest thing anyone asked for. `variants` measures ~5.5s
+    // against a realistic 900s window on a single-threaded server, and the
+    // in-flight server command cannot be cancelled once queued — so a stale
+    // click's eventual answer (superseded by a refresh, or by a second
+    // click) must still be rejected here even though transport.request()
+    // already cancels the prior pending request on the same channel.
     let variantsGen = 0;
 
     function disposeChart() {
@@ -265,11 +274,11 @@ export function createTransitionsView() {
         });
     }
 
-    /* #291 progressive paint: paint the #dfg-variants panel for `state`,
-     * guarded so a superseded fetch can never clobber a newer one:
-     *   - `gen` pins this call to the wiring that kicked it off (see
-     *     variantsGen above) — a same-tab refresh bumps it, so a late
-     *     settle from the PRIOR refresh's promise is a silent no-op here
+    /* Paint the #dfg-variants panel for `state`, guarded so a superseded
+     * fetch can never clobber a newer one:
+     *   - `gen` pins this call to the click (or mount) that kicked it off
+     *     (see variantsGen above) — a later mount or a second click bumps
+     *     it, so a late settle from an OLDER one is a silent no-op here
      *     even if it resolves successfully after the newer one started.
      *   - ctx.isActive() mirrors the view-manager's own chokepoint (its
      *     doc comment names this exact use) for the tab-switched-away case.
@@ -284,18 +293,25 @@ export function createTransitionsView() {
         el.innerHTML = buildVariantsPanel(state, variants, esc);
     }
 
-    /* Wire the variants promise returned by requests() without awaiting it —
-     * that is the whole point: mount() has already painted the graph by the
-     * time this runs. A CancelledError (the transport's single-flight
-     * 'variants' channel cancelling a stale in-flight request on the next
-     * refresh) is dropped silently: the newer refresh's own wiring owns
-     * painting the panel, this one has nothing to say. */
-    function wireVariantsPromise(promise, ctx) {
-        if (!promise) return;
+    /* On-demand variants (follow-up to #291): fired ONLY from the button's
+     * click handler — never on tab entry, never on a refresh tick. `variants`
+     * measures ~5.5s against a realistic 900s window and the server is
+     * single-threaded, so this is deliberately the one path in this view
+     * that can queue that much uncancellable work: it now happens because
+     * the user asked, not because a refresh timer did. If the user navigates
+     * away before it lands, that one request is still orphaned exactly like
+     * the old auto-fired one was — accepted, because it is now a single,
+     * user-initiated, bounded cost instead of one per refresh tick. */
+    function loadVariants(ctx) {
         const gen = ++variantsGen;
-        promise.then((result) => {
-            if (result.ok) { paintVariants(gen, ctx, 'ready', result.variants); return; }
-            if (result.err && result.err.name === 'CancelledError') return;
+        paintVariants(gen, ctx, 'pending', null);
+        ctx.transport.request(ctx.channel('variants'), 'variants', {
+            from: ctx.timeRange.from, to: ctx.timeRange.to,
+            filters: ctx.filters.snapshot(), buckets: 20,
+        }).then((variants) => {
+            paintVariants(gen, ctx, 'ready', variants);
+        }, (err) => {
+            if (err && err.name === 'CancelledError') return;
             paintVariants(gen, ctx, 'error', null);
         }).catch((e) => {
             // paintVariants() calls buildVariantsPanel(), which is expected
@@ -306,6 +322,20 @@ export function createTransitionsView() {
             // unhandled-rejection swallow.
             console.error('[pgwt] transitions view: variants panel paint failed:', e);
         });
+    }
+
+    /* Paint the panel's idle (not-yet-requested) state and wire its button.
+     * Called on every mount(), INCLUDING a same-tab refresh tick — variants
+     * data, once loaded, does NOT survive a refresh (see mount() below for
+     * why) — so every call here also bumps variantsGen, superseding any
+     * click-triggered fetch still in flight from a previous mount. */
+    function renderVariantsIdle(ctx) {
+        variantsGen++;
+        const el = document.getElementById('dfg-variants');
+        if (!el) return;
+        el.innerHTML = buildVariantsPanel('idle');
+        const btn = document.getElementById('dfg-load-variants');
+        if (btn) btn.addEventListener('click', () => loadVariants(ctx));
     }
 
     return {
@@ -324,32 +354,19 @@ export function createTransitionsView() {
             // check EPHEMERAL, pgbench+lock+IO workload): 66 distinct
             // transition pairs existed; only 50 were ever returned before
             // this fix, silently (truncated:true, unlogged by the UI).
+            //
+            // `variants` is NOT fetched here (follow-up to #291): it is as
+            // expensive as this request server-side and the server is
+            // single-threaded with no command cancellation, so firing it on
+            // every refresh queues ~5.5s of work nobody may be waiting for
+            // behind every OTHER tab's next request. It is now on demand —
+            // see loadVariants()/renderVariantsIdle() — triggered only by the
+            // panel's button click.
             const data = await ctx.transport.request(ctx.channel('table'), 'transitions', {
                 from: ctx.timeRange.from, to: ctx.timeRange.to,
                 filters: ctx.filters.snapshot(), buckets: 200,
             });
-            // #291 progressive paint: `variants` measures as expensive as
-            // `transitions` server-side (~699ms vs ~684ms per million
-            // in-window records on a cx33) and the server is single-threaded,
-            // so awaiting it HERE before returning would make every refresh
-            // pay both walks before the graph — which is ready right now —
-            // is allowed to paint. Kick it off but do NOT await it; mount()
-            // paints the graph from `data` immediately and wires this promise
-            // to fill the variants panel whenever (and however) it settles.
-            // Wrapped so this promise ITSELF never rejects: build() can bail
-            // out (unavailable / no-links) without ever reaching mount()'s
-            // wireVariantsPromise(), and a rejected, never-.catch()'d promise
-            // would be an unhandled-rejection console warning in that case —
-            // not a paint bug, but exactly the kind of noise the chaos/UI
-            // suites treat as a failure.
-            const variantsPromise = ctx.transport.request(ctx.channel('variants'), 'variants', {
-                from: ctx.timeRange.from, to: ctx.timeRange.to,
-                filters: ctx.filters.snapshot(), buckets: 20,
-            }).then(
-                (variants) => ({ ok: true, variants }),
-                (err) => ({ ok: false, err }),
-            );
-            return { transitions: data, variantsPromise };
+            return { transitions: data };
         },
 
         build(data) {
@@ -362,10 +379,6 @@ export function createTransitionsView() {
                 transitions: t,
                 hasLinks,
                 total: (t && t.total) || 0,
-                // Passed through, not resolved: build() stays pure (it makes
-                // no decision based on the variants response, which has not
-                // arrived yet) — mount() is where the promise is consumed.
-                variantsPromise: data.variantsPromise,
             };
         },
 
@@ -383,22 +396,23 @@ export function createTransitionsView() {
                 el.innerHTML = '<p style="color:#888;padding:20px">No transitions found</p>';
                 return;
             }
-            // #291: dataRef is set from model.transitions — the response this
-            // very requests() call just fetched — and renderDFG() below draws
-            // the graph from it synchronously, before the variants promise has
-            // had any chance to settle. First paint is real DFG data, not an
-            // empty chart waiting to fill.
             dataRef = model.transitions;
 
             ensureShell(el);
             renderDFG(threshold);   // sets #dfg-total too (idle-hidden count included)
 
-            // #291: declare the variants panel's own state while its request
-            // is still in flight (not empty, not complete), then let the
-            // wired promise fill it in place when it lands or fails.
-            const variantsEl = document.getElementById('dfg-variants');
-            if (variantsEl) variantsEl.innerHTML = buildVariantsPanel('pending');
-            wireVariantsPromise(model.variantsPromise, ctx);
+            // The variants panel always starts (or reverts to) 'idle' on
+            // every mount, including a same-tab refresh tick: variants is
+            // scoped to the window/filters this requests() call fetched for,
+            // and ensureShell() is a no-op once the shell exists, so a
+            // previously-loaded result would otherwise sit there silently
+            // describing a now-stale window next to a freshly-painted DFG —
+            // indistinguishable from current data. Reverting instead of
+            // auto-refreshing is also what keeps this view honestly "nothing
+            // fires variants on a refresh tick": the alternative (keep it
+            // loaded AND refresh it) is exactly the auto-fire this change
+            // removes, just delayed by one click.
+            renderVariantsIdle(ctx);
         },
 
         enter(ctx) { ctxRef = ctx; /* chart created lazily in renderDFG */ },

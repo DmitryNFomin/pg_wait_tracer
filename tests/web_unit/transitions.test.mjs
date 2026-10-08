@@ -215,6 +215,18 @@ function sampleVariants() {
     };
 }
 
+// Variants-on-demand: the panel's default/reverted state must be a
+// DISCOVERABLE affordance, not an empty-looking gap — and it must carry the
+// element id the view's click wiring (and the Playwright test) look up.
+test("variants panel: idle — discoverable affordance, not blank and not the loading/ready text", () => {
+    const html = buildVariantsPanel('idle', null, esc);
+    assert.ok(html.length > 0, 'idle must not render as empty (indistinguishable from "no variants exist")');
+    assert.ok(html.includes('id="dfg-load-variants"'),
+        'idle must expose the button id the view wires a click handler to');
+    assert.ok(!/loading/i.test(html), 'idle must not read as already in flight');
+    assert.ok(!html.includes('Flow Patterns'), 'idle must not look like the completed panel');
+});
+
 test('variants panel: graph-with-pending-variants — declares loading, not empty and not complete', () => {
     const html = buildVariantsPanel('pending', null, esc);
     assert.ok(html.length > 0, 'pending must not render as empty (indistinguishable from "no variants")');

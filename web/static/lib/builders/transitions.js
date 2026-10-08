@@ -281,18 +281,29 @@ export function buildVariantsHtml(vdata, esc) {
     return html;
 }
 
-/* PURE: the variants panel's own state (#291 progressive paint). `variants`
- * costs the server as much time as `transitions` (measured ~699ms vs ~684ms
- * per million in-window records on a cx33) and the server is single-threaded,
- * so the view no longer waits for it before painting the DFG — the panel
- * below the graph must instead DECLARE which of three states it is in:
- *   'pending' — the second request is still in flight: say so, so the panel
- *               reads neither as empty (no variants exist) nor complete.
+/* PURE: the variants panel's own state. `variants` measures ~5.5s against a
+ * realistic 900s window on a single-threaded server (issue follow-up to
+ * #291) — expensive enough that it must never fire on its own. It is now
+ * ON DEMAND: the panel declares which of four states it is in, and only a
+ * user click (wired in the view) ever moves it out of 'idle':
+ *   'idle'    — not requested. The discoverable affordance: a button, so the
+ *               user can tell data is AVAILABLE on request rather than
+ *               wondering why the panel is empty (an idle panel and a
+ *               genuinely-empty 'ready' one must not read the same).
+ *   'pending' — the user clicked and the request is in flight: say so, so
+ *               the panel reads neither as idle nor complete.
  *   'ready'   — rendered normally (identical to the old synchronous path).
  *   'error'   — the request failed or was superseded: silent, matching the
  *               pre-existing optional-failure behaviour (the old try/catch
  *               left `variants` null and rendered nothing extra). */
 export function buildVariantsPanel(state, vdata, esc) {
+    if (state === 'idle') {
+        return '<div style="padding:10px 20px">' +
+            '<button class="escalate-btn" id="dfg-load-variants" type="button">' +
+                'Load flow variants</button> ' +
+            '<span style="color:#666;font-size:11px">— execution/planning patterns ' +
+                'for this window (can take several seconds)</span></div>';
+    }
     if (state === 'pending') {
         return '<div style="padding:10px 20px;color:#888;font-size:12px">' +
             'Loading flow variants…</div>';
