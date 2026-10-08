@@ -1,0 +1,49 @@
+viewport read1: {'w': 1710, 'h': 981, 'dpr': 2} read2: {'w': 1710, 'h': 981, 'dpr': 2} | agree: True | matches pinned 1710x981@2: True
+chrome: 154.0.8037.100 | active range button: 15m
+  overview     min    235  med    283  max    315  n=3  29 rows
+  events       min    225  med    259  max    317  n=3  38 rows
+  sessions     min    235  med    238  max    313  n=3  109 rows
+  queries      min   4389  med   4676  max   5504  n=3  26 rows
+  histogram    min    292  med    303  max    360  n=3  3513 cells
+  transitions nav 1: NOT RENDERED (no container)
+  transitions  min   2830  med   2927  max   3023  n=2  9 nodes
+  concurrency nav 0: NOT RENDERED (no container)
+  concurrency  min   3469  med   3478  max   3488  n=2  300 buckets
+  waterfall    min   3934  med   4101  max   4991  n=3  101 executions, 1 lanes
+  scatter      min   4184  med   4333  max   4405  n=3  2000 points
+  matrix       min   2980  med   3055  max   3207  n=3  38 cells
+  timeline     min    232  med    257  max    262  n=3  1096 spans
+
+time-model rows: 28
+   pad=12px    DB Time 810.5s 100.0% 0.90
+   pad=28px    CPU* 426.1s 52.6% 0.47
+   pad=28px    Lock 234.5s 28.9% 0.26
+   pad=48px    Lock:transactionid 115.4s 14.2% 0.13
+   pad=48px    Lock:advisory 83.6s 10.3% 0.09
+   pad=48px    Lock:relation 35.5s 4.4% 0.04
+   pad=48px    Lock:extend 1.4ms 0.0% 0.00
+   pad=28px    IO 113.3s 14.0% 0.13
+   pad=48px    IO:WalSync 78.1s 9.6% 0.09
+   pad=48px    IO:DataFileRead 15.9s 2.0% 0.02
+   pad=48px    IO:WalWrite 5.4s 0.7% 0.01
+   pad=48px    IO:DataFileFlush 4.8s 0.6% 0.01
+   pad=48px    IO:DataFileWrite 4.3s 0.5% 0.00
+   pad=28px    LWLock 36.6s 4.5% 0.04
+   pad=48px    LWLock:LockManager 19.4s 2.4% 0.02
+   pad=48px    LWLock:WALWrite 17.1s 2.1% 0.02
+   pad=48px    LWLock:WALInsert 15.1ms 0.0% 0.00
+   pad=48px    LWLock:ProcArray 12.0ms 0.0% 0.00
+   pad=48px    LWLock:BufferMapping 2.7ms 0.0% 0.00
+   pad=28px    Timeout 81.6ms 0.0% 0.00
+   pad=48px    Timeout:SpinDelay 81.6ms 0.0% 0.00
+   pad=28px    IPC 3.2ms 0.0% 0.00
+   pad=48px    IPC:BufferIO 3.2ms 0.0% 0.00
+   pad=12px    Idle 25074.0s 0.0% 0.00
+   pad=48px    Client:ClientRead 17892.9s 0.0% 0.00
+   pad=48px    Timeout:CheckpointWriteDelay 809.1s 0.0% 0.00
+   pad=48px    Timeout:VacuumDelay 2.0s 0.0% 0.00
+   pad=48px    Other (background) 6370.1s 0.0% 0.00
+summary bar: ['DB TIME 810.5s', 'WALL 900.0s', 'AAS 0.90', 'IDLE 25074.0s', 'CPUS 4']
+
+console errors: 0
+written: /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-afa9ff9486d78f624/tests/results/demo_paint_20261008/walk-r2.json
