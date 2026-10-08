@@ -1,0 +1,19 @@
+bench_block_agg — Phase 1 prediction: O(events in window) -> O(blocks x distinct pairs)
+5 repetition(s) per cell; 16 distinct event ids (<= 256 distinct pairs)
+
+  blocks   ev/block     events         raw ms       merge ms    speedup
+      16        256       4096          0.036          0.021       1.7x   (build once: 0.370 ms, 256 pairs)
+      16       1024      16384          0.071          0.027       2.7x   (build once: 1.225 ms, 256 pairs)
+      16       4096      65536          0.228          0.023      10.1x   (build once: 4.168 ms, 256 pairs)
+
+      64        256      16384          0.068          0.073       0.9x   (build once: 1.203 ms, 256 pairs)
+      64       1024      65536          0.220          0.088       2.5x   (build once: 4.301 ms, 256 pairs)
+      64       4096     262144          0.774          0.082       9.4x   (build once: 15.306 ms, 256 pairs)
+
+     256        256      65536          0.198          0.375       0.5x   (build once: 4.234 ms, 256 pairs)
+     256       1024     262144          0.789          0.376       2.1x   (build once: 15.288 ms, 256 pairs)
+     256       4096    1048576          3.204          0.377       8.5x   (build once: 59.050 ms, 256 pairs)
+
+Read it down each block-count group: events per block rises 16x while the block
+count and the distinct-pair count stay fixed. The prediction holds only if the
+merge column is FLAT down the group while the raw column grows with events.

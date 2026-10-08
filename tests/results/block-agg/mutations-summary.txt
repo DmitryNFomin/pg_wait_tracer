@@ -1,0 +1,48 @@
+tests/test_block_agg.c -- mutation / bypass results
+control (unmutated tree): GREEN
+every mutation below must be RED; a GREEN one is a hole in the suite, not a passing build
+
+M1   RED          caught-by=sec5/sec6    154 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:942: MERGE of a block not w
+M2   RED          caught-by=sec5/sec6    84 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:955: SKIPped block holds an
+M3   RED          caught-by=sec8 B9      3 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1417: B9 merging the same b
+M4   RED          caught-by=sec8 B2      481 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:979: have_agg=0 must give D
+M5   RED          caught-by=sec8 B3      2 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1268: B3 SAMPLES must be re
+M6   RED          caught-by=sec8 B4      2 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1275: B4 uncommitted must b
+M7   RED          caught-by=sec1         2 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:430: duration > own end tim
+M8   RED          caught-by=sec8 B5/B7   1 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1298: B5 zero vs zero must 
+M9   RED          caught-by=sec8 B8      1 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1390: B8 a block whose num_
+M10  RED          caught-by=sec8 B10     2 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1445: B10 block_agg_pairs_g
+M11  RED          caught-by=sec1         192 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:469: sample: no node time
+M12  RED          caught-by=sec5/sec6    768 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:942: MERGE of a block not w
+M13  RED          caught-by=sec3         5 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:707: §3b rows 0/1 violate t
+M14  RED          caught-by=sec2         3 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:556: absent pair must repor
+
+14 mutation(s), 14 RED, 0 NOT RED
+
+M1: plan(): MERGE accepts a block ending exactly AT `to` (inclusive end) -- the #316 shape. A merged block then carries a record the raw path excluded.
+
+M2: plan(): SKIP is off by one at the START edge -- a block whose last record sits exactly at `from` is dropped, losing an in-window record.
+
+M3: merge(): the double-count guard is removed, so the same block can be folded in twice.
+
+M4: plan(): a MISSING aggregate is merged anyway (`have_agg` ignored) -- absence read as an answer, violating C8.
+
+M5: build(): a SAMPLES block is aggregated as if it held transitions (C1 guard removed).
+
+M6: build(): an UNCOMMITTED block (the open block of current.trace) is aggregated (C2 guard removed).
+
+M7: record_counts(): the raw path's impossible-record refusal (duration_ns > timestamp_ns) is dropped, so the aggregate counts a link pgwt_compute_transitions refuses. This is the divergence §1 actually found during development.
+
+M8: trace_identity_equal(): an UNRESOLVABLE identity compares equal -- unknown treated as a match, which is how a cache approves a block it cannot identify.
+
+M9: matches(): num_events is no longer compared, so a REWRITTEN block at the same offset revalidates.
+
+M10: build(): an allocation failure returns OK with a PARTIAL aggregate instead of refusing -- a short answer that looks like a real one.
+
+M11: node_counts(): SAMPLE records are counted as node time, so a sampled point observation fabricates a zero-duration node the raw node pass of the aggregate side does not have.
+
+M12: plan(): a BOUNDARY block is merged whole instead of decoded (the start containment test is dropped), so records before `from` are counted.
+
+M13: pairs_sorted(): the total order is reduced to count-only, so the readout depends on hash-table layout and merge order.
+
+M14: lookup(): an ABSENT pair is reported as present with count 0 -- absence read as zero, the exact failure C8 forbids.

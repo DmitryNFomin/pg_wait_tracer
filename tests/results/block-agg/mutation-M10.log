@@ -1,0 +1,49 @@
+mutation M10
+broken guard: build(): an allocation failure returns OK with a PARTIAL aggregate instead of refusing -- a short answer that looks like a real one.
+expected to be caught by: sec8 B10
+
+--- if (rc != PGWT_BAGG_OK) {
+                pgwt_block_agg_free(out);
+                return rc;              /* refuse whole, never partial */
+            }
++++ if (rc != PGWT_BAGG_OK) {
+                /* MUTANT: keep the partial aggregate and claim OK */
+                break;
+            }
+
+exit=1, 2 FAIL line(s)
+
+test_block_agg — per-committed-block transition aggregate (Phase 1)
+=== §1 record predicate vs pgwt_compute_transitions ===
+    6 counted, 7 rejected, both predicates agreeing on all 13
+=== §2 build + merge against literal expected values ===
+=== §3 merge associativity + commutativity ===
+=== §4 straddle: a pair whose old_event began in an earlier block ===
+=== §5 plan(): exactly one of SKIP/MERGE/DECODE per block ===
+    plan outcomes over 378 windows: merge=480 decode=335 skip=1075
+=== §6 model: merged + decoded == raw, bit-exact, every window ===
+    378 windows compared, 159 of them at a merge/decode seam
+=== §6b the loader's inclusive end bound: the divergence, with a literal ===
+=== §7 mutation probes: the comparator can see one count, one nanosecond, one pair ===
+    probe 0 (clean (control)         ) disagreements=0
+    probe 1 (+1 on one pair count    ) disagreements=2
+    probe 2 (+1 ns on one pair       ) disagreements=1
+    probe 3 (-1 ns on one pair       ) disagreements=1
+    probe 4 (an extra pair appears   ) disagreements=4
+    probe 5 (one pair disappears     ) disagreements=2
+    probe 6 (+1 ns on one node       ) disagreements=1
+    probe 7 (one node disappears     ) disagreements=2
+=== §8 bypass suite: a path that cannot see must refuse ===
+=== §0 vacuity ledger ===
+    windows compared .................. 378
+    blocks MERGEd ..................... 480
+    blocks DECODEd .................... 335
+    blocks SKIPped .................... 1075
+    windows at a merge/decode seam .... 159
+    windows with positive total_ns .... 350
+    windows with >=1 merged pair ...... 350
+    mutation probes that went red ..... 7
+    refusals observed ................. 42
+FAILED: 2 check(s)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1445: B10 block_agg_pairs_grow must refuse with NOMEM, got 0
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1448: B10 block_agg_pairs_grow must leave NO usable aggregate — a short one would be a silently wrong answer
