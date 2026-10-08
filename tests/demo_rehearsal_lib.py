@@ -486,14 +486,27 @@ def waterfall_latency_ok(elapsed_s, threshold_s=WATERFALL_QUERY_THRESHOLD_S):
 # 7beeb28), section 2: two more raw floors, checked before any ratio, that
 # this harness did not measure at all before this change.
 
-# tests/live_loop_workload.py's holder/waiter/sleeper loop creates BOTH of
-# these events, by construction, on every iteration -- their absence from a
-# window means this window captured something other than the intended
-# workload (a dead workload process, a misrouted window, a misclassified
-# event), not a legitimately quiet window. Full "Class:Event" names, exactly
-# as src/wait_event.c pgwt_event_full_name emits them into a time_model
-# response's sub-event (indent==2) rows.
-REQUIRED_WORKLOAD_EVENTS = ("Lock:relation", "Timeout:PgSleep")
+# tests/live_loop_workload.py's holder/waiter loop and adv_holder/reporter
+# pair create BOTH of these events, by construction, on every iteration --
+# their absence from a window means this window captured something other
+# than the intended workload (a dead workload process, a misrouted window,
+# a misclassified event), not a legitimately quiet window. Full
+# "Class:Event" names, exactly as src/wait_event.c pgwt_event_full_name
+# emits them into a time_model response's sub-event (indent==2) rows.
+#
+# Timeout:PgSleep was in this pair until 2026-10-06, when the DEMO workload
+# dropped pg_sleep entirely (owner: a literal `pg_sleep(1.3)` visible in the
+# Top Queries panel at PGCONF.EU reads as a faked slow query to any DBA in
+# the room). pg_sleep itself is untouched as the accuracy tests' known
+# quantity (test_aas_accuracy.py, test_accuracy.py, test_deterministic.py,
+# test_query_accuracy.py, test_capture_smoke.py default-arg call sites) --
+# only the live demo loop changed. Lock:advisory (adv_holder holding
+# pg_advisory_lock(42) for a client-side sleep while the reporter's own
+# pg_advisory_lock(42) call blocks on it) replaces it as the second
+# required event, derived the same way: it is what this loop now produces
+# unconditionally every iteration, not a floor chosen independently of the
+# workload.
+REQUIRED_WORKLOAD_EVENTS = ("Lock:relation", "Lock:advisory")
 
 
 def workload_signature_present_ok(rows, required=REQUIRED_WORKLOAD_EVENTS):

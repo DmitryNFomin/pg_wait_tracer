@@ -15,20 +15,86 @@ so and the attempt counter resets. It is never reinterpreted in a report.
 `tests/live_loop_workload.py`. Full mode. `RECENT_WINDOW_S` = 60 s,
 `TIME_MODEL_TOLERANCE_PCT` = 1.0.
 
-`tests/live_loop_workload.py` (issue #214) loops five persistent sessions for
-the whole run, not just the two the §2 floors need:
-- `holder` / `waiter` / `sleeper`: `Lock:relation` and `Timeout:PgSleep`
-  recur in every tick — unchanged since issue #157, and what §2's floors and
-  the conservation check are written against.
-- `reporter`: rotates four structurally distinct SELECTs every tick (a
-  catalog lookup, a CPU-bound aggregate, and two differently-shaped
-  `pg_sleep` calls) — the query-id and duration variety Queries, Histogram,
-  Waterfall and Scatter need to show more than a single flat line.
+`tests/live_loop_workload.py` (issue #214; `adv_holder`/`io_reader` added
+2026-10-06; `io_writer`/eight `lockmgr_N` sessions added 2026-10-07, owner
+scope addition "add more load") loops seventeen persistent sessions for
+the whole run, not just the two the §2 floors need. **Every pinned number
+below this point in the doc predates the 2026-10-07 load addition and
+needs re-measuring** -- the owner has implicitly accepted that by asking
+for more load:
+- `holder` / `waiter` / `sleeper`: `Lock:relation` recurs in every tick —
+  the waiter genuinely blocking on the holder's lock, unchanged since issue
+  #157 and what §2's floors and the conservation check are written
+  against. `sleeper` stopped issuing `pg_sleep` on 2026-10-06 (owner: a
+  literal `pg_sleep(1.3)` visible in the Top Queries panel at PGCONF.EU
+  reads as a faked slow query to any DBA in the room, while the waiter's
+  real multi-second block is honest slow work) — the session still exists
+  but `fire()` is called with `sleep_s=0`, which skips the sleep statement
+  entirely; the blocking SQL that produces `Lock:relation` is unconditional
+  and unaffected. `pg_sleep` itself is untouched as the accuracy tests'
+  known quantity (test_aas_accuracy.py, test_accuracy.py,
+  test_deterministic.py, test_query_accuracy.py,
+  test_capture_smoke.py's own default-arg call sites) — only this live
+  demo loop changed.
+- `reporter` / `adv_holder`: `reporter` rotates six structurally distinct
+  SELECTs every tick (a catalog lookup, a CPU-bound aggregate, and FOUR
+  differently-shaped advisory-lock holds) — the query-id and duration
+  variety Queries, Histogram, Waterfall and Scatter need to show more than
+  a single flat line. The advisory-lock shapes (added 2026-10-06, replacing
+  two `pg_sleep` calls; expanded from two to four shapes 2026-10-07, owner
+  scope addition — dropping `pg_sleep` cost the demo ~36s of visible DB
+  Time per 90s window and the original two-shape replacement only gave
+  back ~3.4s) have `adv_holder` hold `pg_advisory_lock(id)` — four distinct
+  lock ids, 42/43/44/45 — for a client-side sleep (0.1s/0.3s/1.0s/3.0s)
+  while `reporter`'s own `pg_advisory_lock(id)` call blocks on it for that
+  long — a real `Lock:advisory` wait of exactly the hold duration, reading
+  as an application mutex rather than a manufactured sleep.
 - `row_holder` / `row_waiter`: a hot-row `UPDATE` contended by two backends,
   producing `Lock:transactionid` — a second, distinct wait class from the
   table-level `Lock:relation` above, realistic because contention on a
   shared counter/status row is one of the most common real-world lock
   waits.
+- `io_reader`: added 2026-10-06 so the IO panels show real
+  `IO:DataFileRead`/`IO:DataFileWrite` activity (owner: "we also need IO
+  datafile read and write"). An initial version (`SELECT count(*) FROM
+  pgbench_accounts`, a full sequential scan) was tried after a live run
+  showed the Transitions tab thin (3-5 nodes), on the theory that more IO
+  activity might add Transitions node variety — it did NOT ("nodes" there
+  are distinct wait EVENT NAMES, `web/static/lib/builders/
+  transitions.js`; measured 5 nodes with or without it on two independent
+  box-check runs, 2026-10-07) — and a ~150MB scan every tick was heavy for
+  no node-count benefit. **A separate, unrelated finding the same day**
+  (`tests/results/sampler-294/round2/FINDING-ui-live-frame-spacing.txt` on
+  another branch, read-only evidence) established that the Transitions
+  tab's intermittent live-UI-smoke failure is a `frame_spacing`
+  calibration edge on the tab's own tick-1 warm-up transient, reproduced
+  on an unmodified tree with no workload change at all — not caused by
+  this workload. `io_reader` was simplified 2026-10-07 regardless, on its
+  own merits: an indexed single-row read on a random `aid`
+  (pgbench_accounts has 1,000,000 rows) still produces a real
+  `IO:DataFileRead` whenever that row's page is not in `shared_buffers`,
+  at a small fraction of the scan's cost. No sleep, no CPU-dependent
+  timing. One point-read per ~9s tick measured at ~0.1% of DB Time —
+  not visible on the IO panels — so `io_reader` also runs a BATCH of 200
+  random single-row reads every tick against `IO_LOAD_TABLE` (below).
+- `io_writer`: added 2026-10-07, same scope addition. A batch of 100
+  scattered single-row `UPDATE`s every tick against `IO_LOAD_TABLE`, a
+  dedicated side table (`_smoke_io_load`, provisioned once by
+  `tests/provision-runner.sh`, 3,000,000 rows, sized comfortably above
+  this box's 128MB `shared_buffers` — see that script's own comment for
+  the measured build time and on-disk size) — dirties pages that the
+  background writer/checkpointer later evict, producing real
+  `IO:DataFileWrite`. No sleep anywhere in either batch.
+- `lockmgr_0`..`lockmgr_7`: added 2026-10-07, same scope addition
+  (`LWLock:LockManager` explicitly requested weeks ago, still ~0.0%).
+  Eight CONCURRENT sessions fire 20 repetitions each, every tick, of a
+  query against `_smoke_lockmgr_fanout` (also provisioned once by
+  `tests/provision-runner.sh`: a 200-partition RANGE-partitioned table,
+  left empty on purpose) filtered on a non-partition-key column so no
+  partition can be pruned. A single backend's fast path holds at most 16
+  weak relation locks (a fixed PostgreSQL constant, not a GUC); touching
+  200 relations in one query falls through to the shared, partitioned
+  lock manager `LWLock:LockManager` guards. No sleep.
 
 `tests/demo_workload_coverage.py` is the machine-checkable half: given a
 trace dir this workload produced, it queries every tab's own endpoint and
@@ -352,9 +418,16 @@ checked first and independently:
 - total samples > 0;
 - DB Time > 0 on every window checked;
 - the window's wait-event list contains **both** `Lock:relation` and
-  `Timeout:PgSleep` with non-zero time. This is derived, not chosen: the
+  `Lock:advisory` with non-zero time. This is derived, not chosen: the
   workload creates those two events by construction, so their absence means we
-  captured something other than the workload;
+  captured something other than the workload. (Was `Lock:relation` +
+  `Timeout:PgSleep` until 2026-10-06, when the DEMO workload dropped
+  `pg_sleep` entirely — owner: a literal `pg_sleep(1.3)` visible in the Top
+  Queries panel at PGCONF.EU reads as a faked slow query to any DBA in the
+  room. `pg_sleep` is untouched as the accuracy tests' known quantity; only
+  this live loop's required pair changed, to what it now produces instead —
+  `adv_holder` holding `pg_advisory_lock(42)` while `reporter`'s own call
+  blocks on it.);
 - **AAS ≥ 1.15 on the 60 s recent window** (owner, box access, review round
   4 — settled; was ≥0.5, provisional). The first clean rehearsal landed:
   `ok: true`, `failed: []`. Its measured AAS on the 60 s recent window —
@@ -864,7 +937,7 @@ left to be discovered.
 | §1 exit code + JSON verdict | yes |
 | §1 run.id asserted against staleness | yes — not by this branch directly: `agent/rehearsal-bypass-suite` built its own `verdict_is_fresh` gate, then found at rebase time that master's `tests/demo_rehearsal_orchestrator_lib.validate_results_dir` (#176) already covers the identical concern, more thoroughly (also checks run.id's numeric format and summary.json's required keys) — removed the redundant duplicate rather than keep two |
 | §2 samples > 0, DB Time > 0 | yes (`capture_has_events_ok`, `time_model_conservation`'s `MIN_DB_TIME_MS` floor, checked before any ratio) |
-| §2 `Lock:relation` + `Timeout:PgSleep` present | yes (`workload_signature_present_ok`) |
+| §2 `Lock:relation` + `Lock:advisory` present (was `Timeout:PgSleep`; changed 2026-10-06, see §2 above) | yes (`workload_signature_present_ok`) |
 | §2 AAS ≥ 0.5 on the recent window | yes (`aas_floor_ok`), but **the gate still enforces the OLD provisional 0.5** — the doc's own floor is now settled at 1.15 (see §2's own paragraph above), `tests/demo_rehearsal_lib.py`'s `AAS_FLOOR_PROVISIONAL` constant is deliberately untouched by this docs-only commit, and moving it to 1.15 is a follow-up code change on a separate branch |
 | §2 all 11 tabs reached, daemon alive throughout | yes (`build_demo_summary`'s `expected_tabs_per_pass` floor; `_assert_daemon_alive`, mirrors the existing workload-alive fail-safe) |
 | §3 conservation identity | yes, sampled every ~5 minutes through the capture (`conservation_sample_interval_s`), every sample must pass — not once at the end |

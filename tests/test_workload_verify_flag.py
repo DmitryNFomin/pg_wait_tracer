@@ -172,6 +172,48 @@ def test_fire_still_writes_sleeper_and_waiter_sql():
           f"(got {waiter_sql!r})")
 
 
+def test_fire_sleep_s_zero_skips_sleep_statement():
+    # 2026-10-06: tests/live_loop_workload.py calls fire(sleep_s=0) so the
+    # DEMO workload's slow query is the real waiter-blocked-on-holder
+    # Lock:relation wait, not a manufactured pg_sleep (owner: a literal
+    # pg_sleep(1.3) in the Top Queries panel reads as a faked demo). The
+    # sleeper must get NO SQL at all; the waiter's blocking SQL -- what
+    # actually produces Lock:relation -- stays unconditional.
+    orig_sleep = time.sleep
+    time.sleep = lambda s: None
+    try:
+        wl = _make_workload()
+        wl.fire(sleep_s=0, verify=False)
+    finally:
+        time.sleep = orig_sleep
+    sleeper_sql = "".join(wl.sleeper.stdin.writes)
+    waiter_sql = "".join(wl.waiter.stdin.writes)
+    check(sleeper_sql == "",
+          f"fire(sleep_s=0) writes NO SQL to the sleeper at all -- no "
+          f"pg_sleep statement is sent (got {sleeper_sql!r})")
+    check(wl.LOCK_TABLE in waiter_sql,
+          f"fire(sleep_s=0) still writes the waiter's blocking SQL -- "
+          f"the Lock:relation wait is unconditional (got {waiter_sql!r})")
+
+
+def test_fire_default_sleep_s_still_sends_pg_sleep():
+    # Pins the OTHER half of the contract: every existing one-shot
+    # smoke-test call site (test_capture_smoke.py, test_query_event.py)
+    # calls fire() with its default/explicit sleep_s=3 and must be totally
+    # unaffected by the sleep_s=0 addition.
+    wl = _make_workload()
+    orig_sleep = time.sleep
+    time.sleep = lambda s: None
+    try:
+        wl.fire(sleep_s=3, verify=False)
+    finally:
+        time.sleep = orig_sleep
+    sleeper_sql = "".join(wl.sleeper.stdin.writes)
+    check("pg_sleep(3)" in sleeper_sql,
+          f"fire() with the default sleep_s=3 still sends pg_sleep(3) "
+          f"(got {sleeper_sql!r})")
+
+
 def test_live_loop_workload_calls_fire_with_cadence():
     # Pins the actual fix in the actual caller, not just the mechanism in
     # Workload: the loop that runs for the whole demo window must pass
@@ -187,9 +229,11 @@ def test_live_loop_workload_calls_fire_with_cadence():
     check("verify_this_tick = should_verify_tick(iteration)" in src,
           "live_loop_workload.py's loop computes verify_this_tick via "
           "should_verify_tick(), not a fixed True/False")
-    check("wl.fire(sleep_s=3, verify=verify_this_tick)" in src,
+    check("wl.fire(sleep_s=0, verify=verify_this_tick)" in src,
           "live_loop_workload.py's per-tick fire() call passes the "
-          "cadence decision, not a hardcoded verify=")
+          "cadence decision, not a hardcoded verify= (sleep_s=0 since "
+          "2026-10-06: the demo workload's slow query is the real "
+          "Lock:relation wait, not a manufactured pg_sleep)")
     check("if verify_this_tick and not ok:" in src and "sys.exit(1)" in src,
           "live_loop_workload.py exits loudly (sys.exit(1)) when a "
           "verified tick finds the waiter not blocked")
@@ -252,6 +296,128 @@ def test_verify_every_n_ticks_is_small_fraction():
           f"anything notices")
 
 
+def test_advisory_rotation_covers_four_distinct_lock_shapes():
+    # 2026-10-07 owner scope addition ("add more load"): four advisory-hold
+    # shapes, not two -- pin that _reporter_tick's rotation actually
+    # reaches all four, each with its own lock id and distinct
+    # trailing-column count (what drives a distinct query_id).
+    reporter = FakeSession()
+    adv_holder = FakeSession()
+    orig_sleep = time.sleep
+    time.sleep = lambda s: None
+    try:
+        for i in range(len(llw.REPORTER_QUERIES)):
+            llw._reporter_tick(reporter, adv_holder, i)
+    finally:
+        time.sleep = orig_sleep
+    adv_holder_sql = "".join(adv_holder.stdin.writes)
+    reporter_sql = "".join(reporter.stdin.writes)
+    for lock_id in (42, 43, 44, 45):
+        check(f"pg_advisory_lock({lock_id})" in adv_holder_sql,
+              f"adv_holder acquires lock id {lock_id} somewhere in one "
+              f"full rotation")
+    for trailing in ("1", "2, 3", "4, 5, 6", "7, 8, 9, 10"):
+        check(f", {trailing};" in reporter_sql,
+              f"reporter's own call carries trailing columns {trailing!r} "
+              f"somewhere in one full rotation")
+
+
+def test_advisory_hold_durations_are_the_requested_spread():
+    check(llw.ADVISORY_HOLD_S[2:] == (0.1, 0.3, 1.0, 3.0),
+          f"the four advisory hold durations are exactly 0.1/0.3/1.0/3.0s "
+          f"(got {llw.ADVISORY_HOLD_S[2:]})")
+
+
+def test_advisory_lock_ids_are_distinct():
+    ids = [i for i in llw.ADVISORY_LOCK_IDS if i is not None]
+    check(len(ids) == len(set(ids)),
+          f"all four advisory lock ids are distinct (got {ids})")
+
+
+def test_io_load_read_tick_sends_exact_batch_size_no_sleep():
+    io_reader = FakeSession()
+    orig_sleep = time.sleep
+    time.sleep = lambda s: None
+    try:
+        llw._io_load_read_tick(io_reader)
+    finally:
+        time.sleep = orig_sleep
+    sql = "".join(io_reader.stdin.writes)
+    count = sql.count(f"FROM {llw.IO_LOAD_TABLE}")
+    check(count == llw.IO_LOAD_READS_PER_TICK,
+          f"_io_load_read_tick sends exactly IO_LOAD_READS_PER_TICK "
+          f"({llw.IO_LOAD_READS_PER_TICK}) reads (got {count})")
+    check("pg_sleep" not in sql,
+          f"_io_load_read_tick writes no server-side pg_sleep")
+
+
+def test_io_load_write_tick_sends_exact_batch_size_no_sleep():
+    io_writer = FakeSession()
+    orig_sleep = time.sleep
+    time.sleep = lambda s: None
+    try:
+        llw._io_load_write_tick(io_writer)
+    finally:
+        time.sleep = orig_sleep
+    sql = "".join(io_writer.stdin.writes)
+    count = sql.count(f"UPDATE {llw.IO_LOAD_TABLE}")
+    check(count == llw.IO_LOAD_WRITES_PER_TICK,
+          f"_io_load_write_tick sends exactly IO_LOAD_WRITES_PER_TICK "
+          f"({llw.IO_LOAD_WRITES_PER_TICK}) updates (got {count})")
+    check("pg_sleep" not in sql,
+          f"_io_load_write_tick writes no server-side pg_sleep")
+
+
+def test_lockmgr_tick_fires_every_session_with_exact_repeat_count():
+    sessions = [FakeSession() for _ in range(llw.LOCKMGR_SESSION_COUNT)]
+    orig_sleep = time.sleep
+    time.sleep = lambda s: None
+    try:
+        llw._lockmgr_tick(sessions)
+    finally:
+        time.sleep = orig_sleep
+    for i, sess in enumerate(sessions):
+        sql = "".join(sess.stdin.writes)
+        count = sql.count(f"FROM {llw.LOCKMGR_TABLE}")
+        check(count == llw.LOCKMGR_QUERIES_PER_TICK,
+              f"lockmgr session {i} gets exactly LOCKMGR_QUERIES_PER_TICK "
+              f"({llw.LOCKMGR_QUERIES_PER_TICK}) fanout queries "
+              f"(got {count})")
+        check("val > 0" in sql,
+              f"lockmgr session {i}'s query filters on val, not the "
+              f"partition key id (the pruning-defeating predicate)")
+
+
+def test_lockmgr_query_does_not_filter_on_partition_key():
+    where_clause = llw.LOCKMGR_QUERY.split("WHERE", 1)[1]
+    check("id" not in where_clause,
+          f"LOCKMGR_QUERY's WHERE clause does not reference id (the "
+          f"partition key) -- filtering on it would let the planner prune "
+          f"partitions instead of touching all {llw.LOCKMGR_PARTITIONS} "
+          f"(got {llw.LOCKMGR_QUERY!r})")
+
+
+def test_lockmgr_sessions_disable_parallel_workers():
+    # 2026-10-07 regression (live, gate-1 box-check): LOCKMGR_QUERY's
+    # COUNT(*) over a 200-partition table is a parallel-query candidate --
+    # EXPLAIN confirmed "Gather Workers Planned: 2" -- so the 20x8=160
+    # fanout executions per tick spawned ~320 extra forked parallel
+    # workers/tick, which overwhelmed the daemon's backend tracking over a
+    # full live-ui-smoke walk (pgwt-server pegged at CPU, every tab after
+    # the first timed out). This is a source-text check (the SET is sent
+    # once at session setup in main(), not inside a standalone testable
+    # tick function) -- same pattern as
+    # test_live_loop_workload_calls_fire_with_cadence above.
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                         "live_loop_workload.py")
+    with open(path) as f:
+        src = f.read()
+    check("max_parallel_workers_per_gather = 0" in src,
+          "live_loop_workload.py disables parallel workers for the "
+          "lockmgr sessions, so the fast-path-overflow mechanism does not "
+          "also spawn a parallel-worker fork storm")
+
+
 def main():
     test_fire_verify_true_spawns_one_backend()
     test_fire_verify_false_spawns_no_backend()
@@ -259,12 +425,22 @@ def main():
     test_fire_verify_true_returns_true_when_blocked()
     test_fire_verify_true_returns_false_when_not_blocked()
     test_fire_still_writes_sleeper_and_waiter_sql()
+    test_fire_sleep_s_zero_skips_sleep_statement()
+    test_fire_default_sleep_s_still_sends_pg_sleep()
     test_live_loop_workload_calls_fire_with_cadence()
     test_should_verify_tick_fires_more_than_once()
     test_should_verify_tick_includes_tick_zero()
     test_should_verify_tick_skips_most_ticks()
     test_should_verify_tick_matches_every_n()
     test_verify_every_n_ticks_is_small_fraction()
+    test_advisory_rotation_covers_four_distinct_lock_shapes()
+    test_advisory_hold_durations_are_the_requested_spread()
+    test_advisory_lock_ids_are_distinct()
+    test_io_load_read_tick_sends_exact_batch_size_no_sleep()
+    test_io_load_write_tick_sends_exact_batch_size_no_sleep()
+    test_lockmgr_tick_fires_every_session_with_exact_repeat_count()
+    test_lockmgr_query_does_not_filter_on_partition_key()
+    test_lockmgr_sessions_disable_parallel_workers()
     print(f"\n{tests_passed}/{tests_run} passed")
     return 0 if tests_failed == 0 else 1
 

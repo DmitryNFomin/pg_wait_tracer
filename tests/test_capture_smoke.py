@@ -382,8 +382,11 @@ class Workload:
         fresh psql backend to assert the waiter actually blocked -- cheap
         when fire() runs once or a few times per test. tests/live_loop_workload.py
         calls fire() every ~5-8s for the WHOLE demo window (up to 900s) to
-        keep Lock:relation/Timeout:PgSleep appearing every live tick (#93);
-        at verify=True unconditionally that repeated one-shot backend was
+        keep Lock:relation appearing every live tick (#93; originally
+        Timeout:PgSleep too, until that loop moved to sleep_s=0 on
+        2026-10-06 to drop pg_sleep from the demo -- see this method's
+        sleep_s docs below); at verify=True unconditionally that repeated
+        one-shot backend was
         the dominant source of the ~150 distinct PIDs polluting the
         Sessions tab in a demo workload with ~8 real sessions (#243) -- the
         SAME assertion, re-run every tick, each time through a brand-new
@@ -412,9 +415,16 @@ class Workload:
         decides what to do with a False (test_capture_smoke.py's own
         call sites rely on check()'s PASS/FAIL side effect, same as
         before, and ignore the return value; live_loop_workload.py acts on
-        it directly)."""
-        self.sleeper.stdin.write(f"SELECT pg_sleep({sleep_s});\n")
-        self.sleeper.stdin.flush()
+        it directly).
+
+        sleep_s=0 skips the sleeper's pg_sleep statement entirely (no
+        Timeout:PgSleep is produced) -- used by live_loop_workload.py so the
+        DEMO workload's slow query is the real Lock:relation wait, not a
+        manufactured sleep. The blocking SQL on self.waiter is unconditional
+        and unchanged either way."""
+        if sleep_s:
+            self.sleeper.stdin.write(f"SELECT pg_sleep({sleep_s});\n")
+            self.sleeper.stdin.flush()
         self.waiter.stdin.write(f"SELECT count(*) FROM {self.LOCK_TABLE};\n")
         self.waiter.stdin.flush()
         time.sleep(1.5)
