@@ -138,6 +138,27 @@ test_summary_tick_flush
 # starved summary read and an empty pacing mask each have their own case.
 test_idle_accounting
 test_idle_summary
+# The AGGREGATE-vs-RAW differential gate, built BEFORE more views move onto the
+# aggregate side. pgwt-server answers every UI question two ways -- from
+# pre-aggregated per-second summary records (~50 ms at any width) or by
+# materialising every raw event (3-5 s at millions) -- and should_use_summaries
+# picks one, so the two never answer the same request and a disagreement is
+# invisible. FID-2 shipped exactly that (docs/ROADMAP_AND_STATUS.md:579).
+# For EVERY pgwt_compute_*_from_summaries() declared in src/compute.h this
+# computes both paths over the same committed blocks and the same window and
+# asserts BIT-EXACT agreement field by field -- no blanket epsilon, because a
+# blanket epsilon is how this class of bug hides; every field that genuinely
+# cannot be compared is excluded with its reason and its source line (N1..N11
+# in the file header). The registry is checked against src/compute.h itself, so
+# a new aggregate path with no differential turns this red, and a header it
+# cannot read or parse REFUSES rather than reporting full coverage.
+# Bypass suite: an empty dir, a missing dir, a window with no overlap, a
+# partially-decodable file, a filter that matches nothing, and a header with no
+# declarations must each be REFUSED -- "0 == 0" satisfies every assertion in
+# the file, so non-vacuity is pinned before any agreement is asserted. Plus
+# mutation probes proving each comparator can see one nanosecond, one count,
+# one grid cell and one missing row.
+test_agg_raw_crosscheck
 # #294: cross_validate drops pgwt_is_idle_event() time from BOTH sides before
 # any share is computed, so when the sampled tier reads less CPU than the exact
 # tier the missing nanoseconds have no visible destination -- "it became
