@@ -1,3 +1,23 @@
+> # ⚠ PARTIALLY RETRACTED — read `PHASE_SPLIT_CORRECTED.md` FIRST
+>
+> Two claims below are **WRONG**. My measurement driver sent the window as
+> `from_ns`/`to_ns`, but `src/server.c`'s `parse_request` reads `"from"`/`"to"`,
+> so the window was silently ignored and every timing in this file is for the
+> **whole 1110 s trace (6.96M events)**, not the 900 s / 5.70M window the UI
+> actually requests.
+>
+> * ~~"client share ~0 on all six heavy tabs"~~ — the server is **61-81 %** of
+>   paint, not ~100 %. Client+transport is ~270-320 ms on the light tabs and up
+>   to **~1.0 s** on the largest payloads. **Therefore the "measure to the next
+>   painted frame rather than `mount()`" item is NOT moot** — I wrongly retired
+>   it on the strength of this file.
+> * ~~"loads the whole trace regardless of window"~~ — my bug, not a product
+>   bug. The window is honoured exactly (82 % = 900/1110).
+>
+> What survives: the server is the dominant term, the summary-vs-raw split is
+> binary, and aggregation is negligible. The corrected numbers, the real phase
+> split and the measured window curve are in `PHASE_SPLIT_CORRECTED.md`.
+
 # Where the paint time actually goes — measured, 2026-10-08
 
 Two hypotheses died because both were inferred from end-to-end latency
