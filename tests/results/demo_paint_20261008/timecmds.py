@@ -64,7 +64,13 @@ CMDS = [
 ]
 rows = []
 for cmd, extra in CMDS:
-    d, ms = ask(cmd, from_ns=frm, to_ns=latest, **extra)
+    # The wire field names are "from"/"to" -- src/server.c parse_request reads
+    # cJSON_GetObjectItem(root, "from") / "to". An earlier version of this
+    # script sent from_ns/to_ns, which the server silently ignored, defaulting
+    # every request to the WHOLE trace. The numbers that produced were real
+    # server times but for the wrong window, and they made a 900 s claim that
+    # was never measured. Pass the names the server actually reads.
+    d, ms = ask(cmd, **{"from": frm, "to": latest}, **extra)
     note = ""
     if d is None:
         note = "NO RESPONSE"
