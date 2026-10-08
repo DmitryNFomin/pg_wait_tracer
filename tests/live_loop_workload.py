@@ -2,14 +2,28 @@
 """live_loop_workload.py -- a LOOPING Lock:relation / Lock:advisory
 workload for a real daemon + real Go bridge session.
 
+NOT the whole demo load. This file drives SINGLE psql pipes, one statement
+at a time, with client-side pauses between them -- a shape that can produce
+any named wait class but cannot produce CONTENTION, because contention needs
+many backends hitting the same lock/WAL buffer/buffer-mapping partition at
+the same instant. The commit-path LWLock and IO volume that should dominate a
+realistic OLTP profile comes from the BURST tier, tests/burst_load.sh, which
+both callers (tests/ui_live_smoke.sh, tests/demo_rehearsal.sh) start
+alongside this loop. Read that file's header before changing the balance
+between the two.
+
 Factored out of tests/ui_live_smoke.sh's original inline heredoc (issue
 #93) so tests/demo_rehearsal.sh (issue #157) can run the exact same
 workload for a much longer window without a second copy drifting from the
 first (CLAUDE.md "Extend, do not fork"). Reuses test_capture_smoke.py's
 Workload class (the same holder/waiter/sleeper psql sessions that test
-already proves out) but LOOPs fire()/release() for the whole run instead
-of firing once, so Lock:relation keeps appearing in every live tick, not
-just the first one. fire() is called with sleep_s=0 (owner decision
+already proves out) but LOOPs fire()/release() across the run instead
+of firing once, so Lock:relation keeps appearing through the window, not
+just at its start. Since 2026-10-08 that lock cycle is OCCASIONAL (every
+LOCK_EVERY_N_TICKS'th tick) and SHORT (released right after fire()), not
+every tick and held for the whole tick -- see LOCK_EVERY_N_TICKS' comment
+for the measurement that forced it (Lock:relation was 71% of DB Time).
+fire() is called with sleep_s=0 (owner decision
 2026-10-06): a DBA watching the demo reads a literal `pg_sleep(1.3)` in
 the Top Queries panel as a faked workload, while the waiter genuinely
 blocking on the holder's lock is real, honest slow work -- so the
@@ -145,6 +159,76 @@ def should_verify_tick(iteration, every_n=VERIFY_EVERY_N_TICKS):
     included so a run shorter than `every_n` ticks (e.g. a short self-test)
     still verifies at least once."""
     return iteration % every_n == 0
+
+
+# How often the explicit TABLE lock cycle runs (owner 2026-10-08: "demo
+# should demo more or less real picture of wait events, pgsleep or lock
+# relation looks very weird, So fix this").
+#
+# THE PROBLEM THIS FIXES. Until now the loop took an ACCESS EXCLUSIVE lock on
+# wl.LOCK_TABLE at the TOP of every tick and released it at the BOTTOM, after
+# the reporter/row-lock/IO/lockmgr ticks and a 2s pause had all run. The
+# waiter therefore sat blocked for the WHOLE tick -- 6 to 9 seconds, every
+# tick, with no gap. One backend blocked ~100% of the time on one wait event
+# is enough to make it the largest single thing in the window: measured on a
+# 900s capture, Lock:relation was 71% of DB Time, against 0.1% for
+# LWLock:LockManager and 0.2% for IO:DataFileRead. No real OLTP system looks
+# like that. Lock:relation in production comes from DDL colliding with DML --
+# occasional and short, not continuous and multi-second -- and it is the
+# first thing a DBA in the audience would call fake.
+#
+# THE FIX IS CADENCE AND DURATION, NOT REMOVAL. demo_rehearsal_lib's
+# REQUIRED_WORKLOAD_EVENTS still names Lock:relation, and it is a genuinely
+# interesting wait to show; it just must not dominate. So:
+#   - the lock cycle runs on every LOCK_EVERY_N_TICKS'th tick, not every one;
+#   - release() is called IMMEDIATELY after fire() instead of at the end of
+#     the tick, so the hold is fire()'s own ~1.5s rather than the whole tick.
+# Everything else in the tick (reporter/advisory, hot-row, IO, lockmgr) runs
+# every tick as before, and the burst tier (tests/burst_load.sh) supplies the
+# commit-path LWLock/IO volume that should be the bulk of a realistic
+# profile.
+#
+# 5, specifically: it must DIVIDE VERIFY_EVERY_N_TICKS. should_verify_tick
+# fires on ticks 0, 10, 20..., and a verify checks pg_locks for a waiter on a
+# lock this loop only takes on lock ticks -- so if a verify tick were ever
+# NOT a lock tick, the verify would look for a wait that was never started
+# and kill the run with a false FATAL. verify_tick_is_lock_tick() below is
+# that invariant, asserted at import and unit-tested, so changing either
+# constant to an incompatible pair fails immediately instead of at minute 20
+# of a rehearsal.
+LOCK_EVERY_N_TICKS = 5
+
+
+def should_lock_tick(iteration, every_n=LOCK_EVERY_N_TICKS):
+    """True on tick 0 and every `every_n`th tick after -- the ticks that run
+    the explicit LOCK TABLE / waiter / release cycle. Pure, same reasoning as
+    should_verify_tick: "lock occasionally" has two plausible wrong
+    implementations (never, and every tick -- the latter being exactly the
+    71%-of-DB-Time bug this replaced), and both are distinguishable from the
+    real cadence over a handful of ticks. Tick 0 included so a short run
+    still produces at least one Lock:relation wait -- REQUIRED_WORKLOAD_EVENTS
+    needs it present, and a 3-minute DURATION_MIN=3 self-test is fewer than
+    `every_n` ticks."""
+    return iteration % every_n == 0
+
+
+def verify_tick_is_lock_tick(verify_every_n=VERIFY_EVERY_N_TICKS,
+                             lock_every_n=LOCK_EVERY_N_TICKS):
+    """True iff every verify tick is also a lock tick, i.e. the verify
+    cadence is a multiple of the lock cadence. A verify asks pg_locks whether
+    the waiter is blocked on wl.LOCK_TABLE; on a tick where no lock was taken
+    the honest answer is "no", which fire() reports as failure and the loop
+    treats as FATAL. So an incompatible pair of constants is not a cosmetic
+    mismatch -- it is a run that kills itself partway through for no real
+    reason. Checked at import (below) rather than left to a comment."""
+    return (lock_every_n > 0 and verify_every_n > 0
+            and verify_every_n % lock_every_n == 0)
+
+
+assert verify_tick_is_lock_tick(), (
+    f"VERIFY_EVERY_N_TICKS={VERIFY_EVERY_N_TICKS} must be a multiple of "
+    f"LOCK_EVERY_N_TICKS={LOCK_EVERY_N_TICKS}, or a verify tick can land on "
+    f"a tick where no table lock was taken and fail the run spuriously")
 
 ROW_LOCK_TABLE = "_smoke_row_lock_wait"
 
@@ -450,48 +534,70 @@ def main():
     iteration = 0
     try:
         while not stop["flag"] and time.monotonic() < deadline:
-            # Workload.release() COMMITs the holder, permanently dropping the
-            # lock it took in open_sessions() -- a second fire() without
-            # re-acquiring it would have the waiter sail through with no
-            # Lock:relation wait at all. Re-issue the same BEGIN/LOCK
-            # open_sessions() used, then fire()/release() as normal.
-            wl.holder.stdin.write(
-                f"BEGIN; LOCK TABLE {wl.LOCK_TABLE} IN ACCESS EXCLUSIVE MODE;\n")
-            wl.holder.stdin.flush()
-            time.sleep(0.5)   # let the re-lock land before the waiter tries
-            # verify=True on most ticks would spawn a fresh one-shot psql
-            # backend every ~5-8s for the WHOLE demo window (up to 900s) --
-            # the dominant source of the ~150 distinct PIDs polluting the
-            # Sessions tab in a demo workload with ~8 real sessions (#243).
-            # verify=False every tick removes that churn but also removes
-            # the ONLY thing that would ever notice this loop's re-lock
-            # silently breaking (#243 review round 2 -- see module
-            # docstring), so verify periodically instead and treat a
-            # failure as fatal, not print-and-continue.
-            verify_this_tick = should_verify_tick(iteration)
-            # sleep_s=0: skip the sleeper's pg_sleep statement entirely --
-            # the demo's slow query is the real waiter-blocked-on-holder
-            # Lock:relation wait, not a manufactured sleep (owner
-            # 2026-10-06; see module docstring). The blocking SQL on
-            # wl.waiter is unconditional and unaffected.
-            ok = wl.fire(sleep_s=0, verify=verify_this_tick)
-            if verify_this_tick and not ok:
-                print(f"FATAL: live_loop_workload: waiter did not block on "
-                      f"tick {iteration} -- the re-lock loop's Lock:relation "
-                      f"wait has broken; exiting so the caller's liveness "
-                      f"check (_assert_workload_alive) fails the run loudly "
-                      f"instead of silently grading a broken workload",
-                      file=sys.stderr)
-                sys.exit(1)
+            # The explicit TABLE lock cycle: OCCASIONAL (every
+            # LOCK_EVERY_N_TICKS'th tick) and SHORT (released immediately
+            # after fire(), not at the end of the tick) -- see
+            # LOCK_EVERY_N_TICKS' own comment for the 71%-of-DB-Time bug both
+            # halves of that fix. Everything after this block runs every
+            # tick, as before.
+            if should_lock_tick(iteration):
+                # Workload.release() COMMITs the holder, permanently dropping
+                # the lock it took in open_sessions() -- a later fire()
+                # without re-acquiring it would have the waiter sail through
+                # with no Lock:relation wait at all. Re-issue the same
+                # BEGIN/LOCK open_sessions() used, then fire()/release().
+                wl.holder.stdin.write(
+                    f"BEGIN; LOCK TABLE {wl.LOCK_TABLE} "
+                    f"IN ACCESS EXCLUSIVE MODE;\n")
+                wl.holder.stdin.flush()
+                time.sleep(0.5)   # let the re-lock land before the waiter
+                # verify=True on most ticks would spawn a fresh one-shot psql
+                # backend every ~5-8s for the WHOLE demo window (up to 900s)
+                # -- the dominant source of the ~150 distinct PIDs polluting
+                # the Sessions tab in a demo workload with ~8 real sessions
+                # (#243). verify=False every tick removes that churn but also
+                # removes the ONLY thing that would ever notice this loop's
+                # re-lock silently breaking (#243 review round 2 -- see
+                # module docstring), so verify periodically instead and treat
+                # a failure as fatal, not print-and-continue. Every verify
+                # tick is a lock tick by construction
+                # (verify_tick_is_lock_tick, asserted at import).
+                verify_this_tick = should_verify_tick(iteration)
+                # sleep_s=0: skip the sleeper's pg_sleep statement entirely
+                # -- the demo's slow query is the real
+                # waiter-blocked-on-holder Lock:relation wait, not a
+                # manufactured sleep (owner 2026-10-06; see module
+                # docstring). The blocking SQL on wl.waiter is unconditional
+                # and unaffected.
+                ok = wl.fire(sleep_s=0, verify=verify_this_tick)
+                if verify_this_tick and not ok:
+                    print(f"FATAL: live_loop_workload: waiter did not block "
+                          f"on tick {iteration} -- the re-lock loop's "
+                          f"Lock:relation wait has broken; exiting so the "
+                          f"caller's liveness check "
+                          f"(_assert_workload_alive) fails the run loudly "
+                          f"instead of silently grading a broken workload",
+                          file=sys.stderr)
+                    sys.exit(1)
+                # Release HERE, not at the end of the tick. fire() already
+                # slept 1.5s with the waiter blocked, which is the whole
+                # Lock:relation wait this cycle is meant to produce; holding
+                # on through the rest of the tick is what turned a short,
+                # realistic lock wait into 71% of DB Time.
+                wl.release()
             _reporter_tick(reporter, adv_holder, iteration)
             _row_lock_tick(row_holder, row_waiter)
             _io_reader_tick(io_reader)
             _io_load_read_tick(io_reader)
             _io_load_write_tick(io_writer)
             _lockmgr_tick(lockmgr_sessions)
-            time.sleep(2)
-            wl.release()
-            time.sleep(1)
+            # 3s, which is the 2s + release()'s own 0.5s + 1s the tick used
+            # to end with; release() moved into the lock branch above, so the
+            # trailing pause is restated here to keep per-tick WALL TIME (and
+            # therefore the per-window volume of every other component) the
+            # same as before this change. Only the lock cycle's cadence and
+            # hold length are meant to differ.
+            time.sleep(3)
             iteration += 1
     finally:
         # wl.stop() reaps reporter/row_holder/row_waiter too (extra_sessions,

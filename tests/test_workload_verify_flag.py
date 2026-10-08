@@ -418,6 +418,178 @@ def test_lockmgr_sessions_disable_parallel_workers():
           "also spawn a parallel-worker fork storm")
 
 
+
+# ── should_lock_tick() cadence + the SHORT hold (owner 2026-10-08) ─────────
+#
+# The bug these pin: the loop used to take an ACCESS EXCLUSIVE table lock on
+# EVERY tick and release it at the END of the tick, so the waiter was blocked
+# for the whole 6-9s tick with no gap. Measured over a 900s capture that made
+# Lock:relation 71% of DB Time -- against 0.1% for LWLock:LockManager and
+# 0.2% for IO:DataFileRead. The owner's words: "pgsleep or lock relation
+# looks very weird, So fix this."
+#
+# Two halves, two kinds of check. The CADENCE is a pure function, so it is
+# tested directly (and every plausible wrong implementation is run against
+# the same assertions in test_lock_cadence_mutants_are_caught below). The
+# HOLD LENGTH is an ordering property of the loop body -- release() before
+# the rest of the tick, not after -- which cannot be observed without a live
+# capture, so it is pinned on the source text, same as
+# test_live_loop_workload_calls_fire_with_cadence above.
+
+def _lock_ticks(fn, n):
+    return [i for i in range(n) if fn(i)]
+
+
+def test_should_lock_tick_fires_more_than_once():
+    span = 3 * llw.LOCK_EVERY_N_TICKS
+    locked = _lock_ticks(llw.should_lock_tick, span)
+    # Catches "never lock": REQUIRED_WORKLOAD_EVENTS names Lock:relation, so
+    # a cadence that stops producing it fails the rehearsal verdict.
+    check(len(locked) >= 2,
+          f"should_lock_tick: locks more than once over {span} ticks "
+          f"(got {locked}) -- catches a cadence that silently never locks")
+
+
+def test_should_lock_tick_includes_tick_zero():
+    # A DURATION_MIN=3 self-test is fewer than LOCK_EVERY_N_TICKS ticks; if
+    # tick 0 did not lock, such a run would produce no Lock:relation at all
+    # and demo_rehearsal_lib's workload_signature_present_ok would fail for
+    # a reason that has nothing to do with the product.
+    check(llw.should_lock_tick(0),
+          "should_lock_tick(0) is True, so even a run shorter than "
+          "LOCK_EVERY_N_TICKS ticks produces one Lock:relation wait")
+
+
+def test_should_lock_tick_skips_most_ticks():
+    span = 10 * llw.LOCK_EVERY_N_TICKS
+    locked = _lock_ticks(llw.should_lock_tick, span)
+    # THE assertion for the 71% bug: "lock on every tick" is a cadence, and
+    # it is the one that was shipped. Anything above half the ticks is not
+    # "occasional" by any reading.
+    check(len(locked) * 2 <= span,
+          f"should_lock_tick: locks on {len(locked)}/{span} ticks, i.e. at "
+          f"most half -- catches the shipped regression where the explicit "
+          f"table lock was taken every single tick (71% of DB Time)")
+
+
+def test_should_lock_tick_matches_every_n():
+    span = 4 * llw.LOCK_EVERY_N_TICKS + 3
+    expected = [i for i in range(span) if i % llw.LOCK_EVERY_N_TICKS == 0]
+    actual = _lock_ticks(llw.should_lock_tick, span)
+    check(actual == expected,
+          f"should_lock_tick matches every {llw.LOCK_EVERY_N_TICKS}th tick "
+          f"exactly (expected {expected}, got {actual})")
+
+
+def test_should_lock_tick_honours_every_n_argument():
+    # Catches an implementation that ignores `every_n` and hardcodes the
+    # module constant -- which would make the mutant table below vacuous.
+    check(_lock_ticks(lambda i: llw.should_lock_tick(i, 3), 10)
+          == [0, 3, 6, 9],
+          "should_lock_tick honours an explicit every_n instead of always "
+          "using LOCK_EVERY_N_TICKS")
+
+
+def test_lock_cadence_mutants_are_caught():
+    # The bypass direction: every plausible wrong implementation of "lock
+    # occasionally" must FAIL at least one assertion above. A mutant that
+    # satisfies all of them would mean those assertions cannot see it.
+    span_small = 3 * llw.LOCK_EVERY_N_TICKS
+    span_big = 10 * llw.LOCK_EVERY_N_TICKS
+    mutants = {
+        # The shipped regression: lock on every tick.
+        "always True (lock every tick -- the 71% bug)":
+            lambda i, every_n=None: True,
+        # The opposite failure: never lock, Lock:relation disappears.
+        "always False (never lock)":
+            lambda i, every_n=None: False,
+        # Off by one: never fires on tick 0, so a short run produces no
+        # Lock:relation at all even though the cadence "looks periodic".
+        "off-by-one (i % n == 1)":
+            lambda i, every_n=llw.LOCK_EVERY_N_TICKS: i % every_n == 1,
+    }
+    for label, fn in mutants.items():
+        locked_small = _lock_ticks(fn, span_small)
+        locked_big = _lock_ticks(fn, span_big)
+        caught = (len(locked_small) < 2                      # fires once
+                  or not fn(0)                               # misses tick 0
+                  or len(locked_big) * 2 > span_big          # too often
+                  or locked_big != [i for i in range(span_big)
+                                    if i % llw.LOCK_EVERY_N_TICKS == 0])
+        check(caught,
+              f"lock-cadence mutant {label!r} is rejected by at least one "
+              f"of the assertions above")
+
+
+def test_verify_ticks_are_all_lock_ticks():
+    # A verify asks pg_locks whether the waiter is blocked on wl.LOCK_TABLE.
+    # On a tick where no lock was taken the honest answer is "no", which the
+    # loop treats as FATAL -- so a verify tick that is not a lock tick kills
+    # a rehearsal partway through for no product reason.
+    span = 5 * llw.VERIFY_EVERY_N_TICKS
+    stray = [i for i in range(span)
+             if llw.should_verify_tick(i) and not llw.should_lock_tick(i)]
+    check(not stray,
+          f"every verify tick over {span} ticks is also a lock tick "
+          f"(stray verify-without-lock ticks: {stray})")
+
+
+def test_verify_tick_is_lock_tick_predicate():
+    # The predicate the module asserts at import. Table-driven, including the
+    # degenerate inputs: a zero cadence must be REFUSED, not approved -- an
+    # accidental truth there is exactly how a guard ends up approving
+    # nonsense it cannot evaluate.
+    cases = [
+        ((10, 5), True,  "the shipped pair: 10 is a multiple of 5"),
+        ((10, 10), True, "equal cadences: every verify tick is a lock tick"),
+        ((10, 1), True,  "lock every tick is compatible (if wasteful)"),
+        ((10, 3), False, "10 is not a multiple of 3 -- ticks 10, 20 would "
+                         "verify a lock that was never taken"),
+        ((10, 4), False, "10 is not a multiple of 4"),
+        ((10, 0), False, "a zero lock cadence is refused, not approved"),
+        ((0, 5), False,  "a zero verify cadence is refused, not approved"),
+    ]
+    for (v, l), expected, why in cases:
+        got = llw.verify_tick_is_lock_tick(v, l)
+        check(got is expected,
+              f"verify_tick_is_lock_tick({v}, {l}) is {expected} -- {why} "
+              f"(got {got})")
+
+
+def test_shipped_constants_satisfy_the_invariant():
+    check(llw.verify_tick_is_lock_tick(),
+          f"the shipped VERIFY_EVERY_N_TICKS={llw.VERIFY_EVERY_N_TICKS} / "
+          f"LOCK_EVERY_N_TICKS={llw.LOCK_EVERY_N_TICKS} pair satisfies the "
+          f"invariant (the module also asserts this at import)")
+
+
+def test_lock_cycle_is_guarded_and_released_before_the_rest_of_the_tick():
+    # The HOLD-LENGTH half of the fix, pinned on source text because the
+    # thing being asserted is an ordering inside a loop that only runs
+    # against a live PostgreSQL.
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                         "live_loop_workload.py")
+    with open(path) as f:
+        src = f.read()
+    check("if should_lock_tick(iteration):" in src,
+          "live_loop_workload.py's loop guards the explicit LOCK TABLE "
+          "cycle behind should_lock_tick(), so it is occasional rather "
+          "than every tick")
+    i_lock = src.find("IN ACCESS EXCLUSIVE MODE")
+    i_release = src.find("wl.release()", i_lock)
+    i_reporter = src.find("_reporter_tick(reporter, adv_holder, iteration)",
+                           i_lock)
+    check(i_lock != -1 and i_release != -1 and i_reporter != -1,
+          "live_loop_workload.py's loop still contains the LOCK TABLE "
+          "statement, a wl.release() after it, and the reporter tick")
+    check(i_release < i_reporter,
+          "wl.release() comes BEFORE the rest of the tick's component "
+          "ticks, so the Lock:relation hold is fire()'s own ~1.5s rather "
+          "than the whole 6-9s tick -- the ordering that made Lock:relation "
+          f"71% of DB Time (release at {i_release}, reporter tick at "
+          f"{i_reporter})")
+
+
 def main():
     test_fire_verify_true_spawns_one_backend()
     test_fire_verify_false_spawns_no_backend()
@@ -441,6 +613,16 @@ def main():
     test_lockmgr_tick_fires_every_session_with_exact_repeat_count()
     test_lockmgr_query_does_not_filter_on_partition_key()
     test_lockmgr_sessions_disable_parallel_workers()
+    test_should_lock_tick_fires_more_than_once()
+    test_should_lock_tick_includes_tick_zero()
+    test_should_lock_tick_skips_most_ticks()
+    test_should_lock_tick_matches_every_n()
+    test_should_lock_tick_honours_every_n_argument()
+    test_lock_cadence_mutants_are_caught()
+    test_verify_ticks_are_all_lock_ticks()
+    test_verify_tick_is_lock_tick_predicate()
+    test_shipped_constants_satisfy_the_invariant()
+    test_lock_cycle_is_guarded_and_released_before_the_rest_of_the_tick()
     print(f"\n{tests_passed}/{tests_run} passed")
     return 0 if tests_failed == 0 else 1
 
