@@ -1,85 +1,112 @@
-# Finding: the live-UI-smoke self-test fails intermittently, ~6 % of runs
+# Finding: this branch breaks the live-UI-smoke self-test — 2 of 2 runs
 
-**Not caused by this branch.** Nothing here is fixed, hardened, widened or
-added to `KNOWN_FAILING` — this file is the evidence for an issue someone
-else should own.
+**This file previously claimed the failure was a pre-existing ~6 % flake and
+"not caused by this branch". That claim was wrong and is retracted below.** It
+was written after one failure, on a base rate that did not condition on the one
+variable this branch actually moves. The second box-check run and a per-run row
+count disprove it.
 
-## What happened
+Nothing is fixed, hardened, widened or added to `KNOWN_FAILING` here.
 
-`box-check` run 1 on this branch (gate-1, PG 18, 2026-10-08 09:05, log
-`../box-check-ubuntu-20261008-090532.log`) came back `Executed: 98 (passed 97,
-failed 1)`. The single failure was `tests/ui_live_smoke.sh`'s **self-test**
-(issue #224 bypass suite / #252 review round 1 finding 3) — the step that
-injects a synthetic 400 ms blink and confirms the blink gate still catches it:
+## What fails
+
+`tests/ui_live_smoke.sh`'s **self-test** (issue #224 bypass suite / #252 review
+round 1 finding 3): it injects a synthetic 400 ms blink and confirms the blink
+gate still catches it.
 
     SELF-TEST FAIL: the injected blink was NOT caught and the tab verdict was
     True (self_test={'tick': 2, 'ratio': 0.0, 'measured': True, 'note': None,
     'inject_blink_ms': 400, 'caught': False})
 
-The real walk that precedes it passed in full: **11/11 tabs**, `overall=PASS`,
-`failed_tabs: []` (`../ui_live/summary.json`), including Waterfall with 101
-executions and Scatter with 2000 points under the new three-tier load.
+Identical in both runs, so `box-check` is **red on this branch**:
 
-## It pre-dates this branch
-
-Searched every `box-check-*.log` on this Mac that actually ran the self-test
-(`grep -q "self-test -- injecting"`), across all worktrees:
-
-| | count |
-|---|---|
-| box-check runs that ran the self-test | **63** |
-| of those, self-test passed | 59 |
-| of those, self-test FAILED | **4** (6.3 %) |
-
-The four: `top-queries-qsort` 2026-10-01 22:41, `agent-aa38ac88aa3aff30a`
-2026-10-02 14:21, `agent-a4378baf8c0cc60db` 2026-10-07 18:24, and this one.
-The 2026-10-01 log carries a **byte-identical** signature — same `tick: 2`,
-same `ratio: 0.0`, same `measured: True`, same `note: None`, same
-`caught: False` — a week before any commit on this branch.
-
-(The 2026-10-07 one failed differently: `--inject-tick=2 was never reached on
-tab 'sessions'`. Two distinct failure modes of the same step.)
-
-## What the run-1 record shows, and what it rules out
-
-`summary.json` in this directory, tab `sessions`, `blink_sweep`:
-
-| tick | achieved offsets (ms) | ratios |
+| run | log | result |
 |---|---|---|
-| 1 | 215, 508, 1010, 1514, 2010 | 0, 0, 0, 0 |
-| 2 (inject) | 214, 512, 1011, 1514, 2009 | 0, 0, 0, 0 |
-| 3 | 211, 513, 1010, 1509, 2007 | 0, 0, 0, 0 |
-| 4 | 274, 547, 1012, 1510, 2008 | 0, 0, 0, 0 |
-| 5 | 275, 569, 1009, 1526, 2008 | 0, 0, 0, 0 |
-| 6 | 284, 619, 1008, 1516, 2034 | 0, 0, 0, 0 |
+| 1 | `../box-check-ubuntu-20261008-090532.log` | `Executed: 98 (passed 97, failed 1)` |
+| 2 | `../box-check-ubuntu-20261008-101424.log` | `Executed: 98 (passed 97, failed 1)` |
 
-Targets are 200/500/1000/1500/2000 ms and the achieved offsets track them to
-within ~20 ms on the inject tick. `frame_spacing` `ok: true`.
+The 11-tab walk that precedes the self-test passed in full in **both** runs
+(`overall: PASS`, `failed_tabs: []`) — Waterfall 101 executions, Scatter 2000
+points, Matrix 38 cells. Only the self-test fails.
 
-So **drift is ruled out** — the frame nominally inside the overlay's window
-(the injection runs `mount+700` .. `mount+1100`) was taken at offset 1011.
+## Why the first "pre-existing flake" reading was wrong
 
-What is left, and what an owner of this should look at first: `capture_ms` on
-that tick is 232-451 ms per frame. `_capture_at_offset` records `achieved` from
-a `Date.now()` read taken BEFORE `page.screenshot`, so the frame nominally "at
-1011 ms" has its pixels grabbed somewhere in 1011..1243 — straddling the
-overlay's 1100 ms removal. With a 400 ms overlay and a ~240 ms capture, exactly
-one sweep frame can see it and only if its grab lands in the first ~90 ms of
-its own capture window. That is a coin flip, and a ~6 % loss rate is the shape
-one would expect.
+The signature does pre-exist: `top-queries-qsort` 2026-10-01 carries a
+byte-identical one. Across all 63 box-check logs on this Mac that ran the
+self-test, 4 failed — 6.3 %. That was the number the retracted claim rested on.
 
-A contributing factor worth measuring separately: this tab's
-`panel_dims.box_height` is **4001 px** (148 session rows), and screenshot cost
-scales with it. Session-row count is load-dependent, so the odds may not be
-constant across workloads. I did not measure that and am not claiming it.
+But two consecutive failures at p=0.063 is p≈0.004 under independence, so
+"same old flake" was never a comfortable reading, and conditioning on the one
+thing this branch changes settles it. The self-test walks **only the Sessions
+tab**, and the burst tier's four pgbench invocations open 19 fresh client
+backends per ~2.5 min cycle, which the Sessions tab counts:
+
+| Sessions rows in the self-test walk | runs | self-test outcome |
+|---|---|---|
+| 21-25 | 39 | all pass |
+| 35, 36, 46 | 3 | all pass |
+| 24 | 1 | FAIL (the 2026-10-02 flake) |
+| 35 | 1 | FAIL (the 2026-10-01 flake) |
+| **146, 148** | **2 (both this branch)** | **both FAIL** |
+
+Every run before this branch sat at 21-46 rows, median 22. This branch runs at
+**146-148 — 3.2x the previous maximum, 6.6x the median** — and fails every
+time. Reproduce with `selftest_rate.sh` / `sessrows.sh` (committed beside this
+file).
+
+So: the mechanism is pre-existing and was already marginal, which is why it
+tripped twice in 61 runs by itself. This branch moves the input that governs
+it far outside its historical range and makes it fail deterministically. The
+honest attribution is **caused by this branch**, on a latent weakness it did
+not create.
+
+## Mechanism, from the two runs' own numbers
+
+`summary.json` here (run 1) and the same record from run 2:
+
+| | run 1 | run 2 |
+|---|---|---|
+| Sessions rows | 148 | 146 |
+| `panel_dims.box_height` | 4001 px | 3973 px |
+| achieved offsets, inject tick (ms) | 214, 512, 1011, 1514, 2009 | 229, 510, 1011, 1507, 2011 |
+| `capture_ms`, inject tick | 232-451 | 258, 351, 356, 267, 350 |
+| `frame_spacing` | ok | ok |
+| ratios, every tick | all 0.0 | all 0.0 |
+
+Offset drift is **ruled out** — the frames land within ~20 ms of their
+200/500/1000/1500/2000 ms targets.
+
+The overlay is on screen for `mount+700` .. `mount+1100`, a 400 ms window.
+`_capture_at_offset` reads `Date.now()` *before* calling `page.screenshot`, so
+the frame recorded "at 1011 ms" has its pixels grabbed somewhere in
+1011..1367 (capture_ms 356), and the frame "at 510" grabs in 510..861. With a
+~250-450 ms capture, neither frame reliably lands wholly inside the overlay's
+window — and the gate needs a frame WITH the overlay adjacent to one WITHOUT it
+to see a difference at all. A taller panel costs more per screenshot, which is
+how the row count reaches the outcome.
+
+## The root cause is shared with the paint result
+
+`../demo_paint_20261008/` reports the same branch blowing the 3000 ms paint
+bound, and the common factor is not event volume — events rose 1.55x — but
+**session churn**: 537 distinct sessions in a 900 s trace against ~67 before,
+245 Sessions rows on the paint walk. The six tabs that blew the paint bound are
+the ones whose server-side queries are per-session or per-execution. The burst
+tier spawns 19 short-lived backends every 2.5 minutes and keeps none.
+
+That points at a fix which does **not** thin the load the owner asked to keep:
+make the burst tier REUSE connections — fewer, longer-lived pgbench clients
+driving the same statement volume — so the contention and event rate survive
+while the backend churn does not. I have deliberately **not** made that change:
+it alters the recovered rig's four invocations, which the brief specified
+verbatim, and the branch is already stopped on the paint bound. It is a
+recommendation for whoever picks that up, not a conclusion.
 
 ## What was deliberately NOT done
 
-- No retry, no widened tolerance, no `KNOWN_FAILING` entry (CLAUDE.md: that
-  table is only for a filed product bug being fixed in `src/`; timing
-  intermittency gets investigated or moved, never listed).
-- No change to `tests/ui_live_smoke.py`, the injection window, the capture
-  path, `BLINK_THRESHOLD` or the self-test's verdict. Making this gate pass by
-  loosening it is the one outcome that would be worse than the flake.
-- box-check was re-run once to obtain gate evidence. BOTH runs are reported;
-  the re-run is not a fix and does not close this finding.
+- No retry inside the test, no widened injection window, no
+  `BLINK_THRESHOLD` change, no `KNOWN_FAILING` entry.
+- `tests/ui_live_smoke.py` and the capture path are untouched.
+- The load was not reduced.
+- box-check was run twice. **Both runs are reported and both are red.** The
+  re-run was not a fix and the branch is not green.

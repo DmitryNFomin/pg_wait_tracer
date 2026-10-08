@@ -1,0 +1,64 @@
+FAIL   ?              box-check-ubuntu-20261007-182402.log
+FAIL   146 rows       box-check-ubuntu-20261008-101424.log
+FAIL   148 rows       box-check-ubuntu-20261008-090532.log
+FAIL   24 rows        box-check-ubuntu-20261002-142140.log
+FAIL   35 rows        box-check-ubuntu-20261001-224123.log
+pass   ?              box-check-ephemeral-ubuntu-20260930-172917.log
+pass   ?              box-check-ubuntu-20260930-153829.log
+pass   ?              box-check-ubuntu-20260930-183520.log
+pass   ?              box-check-ubuntu-20260930-193508.log
+pass   ?              box-check-ubuntu-20261007-193222.log
+pass   18 rows        box-check-ubuntu-20261002-215536.log
+pass   19 rows        box-check-ephemeral-ubuntu-20261005-113539.log
+pass   19 rows        box-check-ubuntu-20261004-224735.log
+pass   20 rows        box-check-ephemeral-ubuntu-20261006-000138.log
+pass   20 rows        box-check-ephemeral-ubuntu-20261006-110824.log
+pass   20 rows        box-check-ubuntu-20260930-101301.log
+pass   20 rows        box-check-ubuntu-20260930-150337.log
+pass   20 rows        box-check-ubuntu-20260930-170518.log
+pass   20 rows        box-check-ubuntu-20261004-220610.log
+pass   20 rows        box-check-ubuntu-20261005-223757.log
+pass   20 rows        box-check-ubuntu-20261006-115415.log
+pass   20 rows        box-check-ubuntu-20261007-082327.log
+pass   21 rows        box-check-ephemeral-ubuntu-20261004-221734.log
+pass   21 rows        box-check-ephemeral-ubuntu-20261005-123429.log
+pass   21 rows        box-check-ephemeral-ubuntu-20261005-145649.log
+pass   21 rows        box-check-ubuntu-20260930-162100.log
+pass   21 rows        box-check-ubuntu-20260930-175732.log
+pass   21 rows        box-check-ubuntu-20260930-212132.log
+pass   21 rows        box-check-ubuntu-20261001-143137.log
+pass   21 rows        box-check-ubuntu-20261006-220608.log
+pass   21 rows        box-check-ubuntu-20261007-002401.log
+pass   21 rows        box-check-ubuntu-20261007-040215.log
+pass   22 rows        box-check-ephemeral-ubuntu-20261005-213401.log
+pass   22 rows        box-check-ephemeral-ubuntu-20261007-221559.log
+pass   22 rows        box-check-ubuntu-20260930-184709.log
+pass   22 rows        box-check-ubuntu-20260930-211929.log
+pass   22 rows        box-check-ubuntu-20260930-234341.log
+pass   22 rows        box-check-ubuntu-20261001-082213.log
+pass   22 rows        box-check-ubuntu-20261001-083418.log
+pass   22 rows        box-check-ubuntu-20261001-215103.log
+pass   22 rows        box-check-ubuntu-20261001-232435.log
+pass   22 rows        box-check-ubuntu-20261002-223545.log
+pass   22 rows        box-check-ubuntu-20261006-232736.log
+pass   22 rows        box-check-ubuntu-20261007-012529.log
+pass   22 rows        box-check-ubuntu-20261007-022846.log
+pass   22 rows        box-check-ubuntu-20261007-144240.log
+pass   23 rows        box-check-ubuntu-20260930-224458.log
+pass   23 rows        box-check-ubuntu-20261001-091614.log
+pass   23 rows        box-check-ubuntu-20261007-082735.log
+pass   23 rows        box-check-ubuntu-20261007-161206.log
+pass   23 rows        box-check-ubuntu-20261007-165905.log
+pass   24 rows        box-check-ubuntu-20261007-122820.log
+pass   24 rows        box-check-ubuntu-20261007-134417.log
+pass   24 rows        box-check-ubuntu-20261007-194937.log
+pass   24 rows        box-check-ubuntu-20261007-205759.log
+pass   24 rows        box-check-ubuntu-20261007-220011.log
+pass   24 rows        box-check-ubuntu-20261007-235314.log
+pass   24 rows        box-check-ubuntu-20261008-000957.log
+pass   25 rows        box-check-ubuntu-20261002-150336.log
+pass   25 rows        box-check-ubuntu-20261006-213741.log
+pass   25 rows        box-check-ubuntu-20261007-224343.log
+pass   35 rows        box-check-ubuntu-20261008-023554.log
+pass   36 rows        box-check-ubuntu-20261008-013639.log
+pass   46 rows        box-check-ubuntu-20261007-091002.log
