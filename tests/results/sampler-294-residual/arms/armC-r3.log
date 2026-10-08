@@ -1,0 +1,53 @@
+DIAG arm=C rate=10Hz clients=3 rt_prio=none
+DIAG tracer=/root/probe294/fixtree/pg_wait_tracer xval=/root/probe294/fixtree/tests/cross_validate out=/root/probe294/results/armC-r3
+DIAG daemon_sched policy=0 rt_priority=0
+
+DIAG client_backends=3
+DIAG escalate: {"ok":true,"escalated":true,"granted_s":60,"seconds_remaining":59.985711352,"budget_remaining_s":599.98571072}
+
+DIAG pgbench: 
+DIAG cross_validate exit=0
+CPU                                 53.6%        46.7%       6.9
+Max share disagreement (events >= 2% exact share): 6.9 pp (CPU)
+IDLE_PACING_MASK 0x29B  settled_pg_major=18  sidecar=yes
+IDLE_EVENT_ROWS 9
+IDLE_TOTAL_EXACT_NS 510972154678
+IDLE_TOTAL_SAMPLED_NS 550508317518
+IDLE_SAMPLES 5370
+IDLE_EXACT_PCT_OF_DBTIME 354.15
+IDLE_SAMPLED_PCT_OF_DBTIME 448.34
+RAW_WINDOW_S 60.000144
+RAW_SAMPLE_PERIOD_NS 105522976
+RAW_TOTAL_EXACT_NS 144283245301
+RAW_TOTAL_SAMPLED_NS 122787209573
+RAW_AAS_EXACT 2.404715
+RAW_AAS_SAMPLED 2.046449
+RAW_CPU_EXACT_NS 77283553921
+RAW_CPU_SAMPLED_NS 57325962278
+RAW_NONCPU_EXACT_NS 66999691380
+RAW_NONCPU_SAMPLED_NS 65461247295
+RAW_CPU_SAMPLES 558
+RAW_NONCPU_SAMPLES 640
+RAW_GATE_REJECTED_EXACT_CPU_NS 4904629004
+RAW_GATE_REJECTED_INTERVALS 116419
+RAW_SAMPLED_CPU_NS_NEEDED_FOR_PARITY 18183009940
+RAW_SAMPLED_CPU_SAMPLES_NEEDED_FOR_PARITY 172
+RESULT: PASS
+PROC_WALL_S 58.010690  CLK_TCK 100
+PROC_DAEMON_PID 28997 TICKS 148 CPU_NS 1480000000
+PROC_BACKEND_PID 29033 TICKS 3263 CPU_NS 32630000000
+PROC_BACKEND_PID 29034 TICKS 3295 CPU_NS 32950000000
+PROC_BACKEND_PID 29035 TICKS 3277 CPU_NS 32770000000
+PROC_CLIENT_TOTAL_CPU_NS 98350000000
+METRIC noncmd_cpu_samples_total 46
+METRIC cmd_gate_order_at_risk_total 259
+METRIC cmd_gate_order_recovered_total 213
+METRIC cmd_gate_order_read_failed_total 0
+METRIC cmd_gate_recovered_total 0
+METRIC samples_total 6704
+METRIC sampled_attr_tick_read_failures_total 4914
+METRIC sampled_attr_shadow_cmd_open_mismatch_total 621
+METRIC sampled_attr_shadow_total 1746
+METRIC invalid_wait_reads_total 0
+METRIC sampled_idle_in_command_total 4
+METRIC ticks_missed_total ABSENT-from-metrics

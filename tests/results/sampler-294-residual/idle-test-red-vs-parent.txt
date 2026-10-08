@@ -1,0 +1,60 @@
+== 1. idle breakdown on a hand-built trace ==
+Scenario: 9 events, 21 samples, 1 backends, 0 queries
+Wrote 9 events + 21 samples to /tmp/pgwt_xvidle_KTPMvK/t1
+  ok: exit code (mask resolved, shares within tolerance) = 0
+  FAIL: RAW_TOTAL_EXACT_NS: got '' want '9000000000'
+  FAIL: RAW_TOTAL_SAMPLED_NS: got '' want '12000000000'
+  FAIL: RAW_CPU_EXACT_NS: got '' want '6000000000'
+  FAIL: RAW_CPU_SAMPLED_NS: got '' want '8000000000'
+  FAIL: IDLE_EVENT_ROWS: got '' want '2'
+  FAIL: IDLE_TOTAL_EXACT_NS: got '' want '4000000000'
+  FAIL: IDLE_TOTAL_SAMPLED_NS: got '' want '4000000000'
+  FAIL: IDLE_SAMPLES: got '' want '4'
+  FAIL: IDLE_EXACT_PCT_OF_DBTIME: got '' want '44.44'
+  FAIL: IDLE_SAMPLED_PCT_OF_DBTIME: got '' want '33.33'
+  FAIL: ClientRead is still invisible — the change does nothing
+  FAIL: the idle section is not labelled as non-DB-Time
+  FAIL: no ClientRead ROW matched — the row anchors are stale, so every per-row assertion below would pass vacuously
+  FAIL: ClientRead exact_ns: got '' want '3000000000'
+  FAIL: ClientRead sampled_ns: got '' want '3000000000'
+  FAIL: CheckpointWriteDelay exact_ns: got '' want '1000000000'
+  FAIL: CheckpointWriteDelay sampled_ns: got '' want '1000000000'
+  ok: SpinDelay stays in DB Time (not swept into idle)
+  FAIL: conservation unmeasurable: RAW_TOTAL_EXACT_NS='' IDLE_TOTAL_EXACT_NS=''
+== 2. --show-idle does not perturb the share table, RESULT or exit code ==
+  ok: exit code without --show-idle = 0
+  ok: pre-existing output is byte-identical with and without --show-idle
+== B1. unresolvable pacing mask must REFUSE, not print zeros ==
+Scenario: 9 events, 21 samples, 1 backends, 0 queries
+Wrote 9 events + 21 samples to /tmp/pgwt_xvidle_KTPMvK/b1
+  FAIL: exit code (cannot classify): got '0' want '4'
+  FAIL: no IDLE-UNAVAILABLE line
+  ok: printed no idle totals it could not measure
+  FAIL: IDLE_PACING_MASK: got '' want '0x0'
+  ok: the share RESULT is still printed
+== B2. genuine absence of idle events is stated, not implied ==
+Scenario: 9 events, 21 samples, 1 backends, 0 queries
+Wrote 9 events + 21 samples to /tmp/pgwt_xvidle_KTPMvK/b2
+  ok: exit code (mask fine, no idle data) = 0
+  FAIL: absence is silent — an empty table reads like a measured zero
+  FAIL: IDLE_TOTAL_EXACT_NS: got '' want '0'
+  FAIL: IDLE_TOTAL_SAMPLED_NS: got '' want '0'
+  ok: did not refuse a classifiable trace
+== B3. empty trace dir must error, not report zero idle ==
+  ok: nonzero exit (1) on an empty dir
+  ok: no idle totals from an empty dir
+== B4. sampled-only trace (no exact tier) must error, not half-answer ==
+Scenario: 0 events, 21 samples, 1 backends, 0 queries
+Wrote 0 events + 21 samples to /tmp/pgwt_xvidle_KTPMvK/b4
+  ok: nonzero exit (1) with no exact tier
+  ok: no idle totals without an exact tier
+== B5. idle on the exact tier only must still print a row ==
+Scenario: 9 events, 21 samples, 1 backends, 0 queries
+Wrote 9 events + 21 samples to /tmp/pgwt_xvidle_KTPMvK/b5
+  FAIL: the row vanished when one tier had none — a one-sided loss is invisible
+  FAIL: one-sided ClientRead exact_ns: got '' want '3000000000'
+  FAIL: one-sided ClientRead sampled_ns: got '' want '0'
+== B6. no --show-idle, no idle output ==
+  ok: flag is opt-in
+
+test_cross_validate_idle: 13 passed, 27 failed

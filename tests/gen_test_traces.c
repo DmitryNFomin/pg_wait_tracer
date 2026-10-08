@@ -39,6 +39,13 @@
  * Extra options (T1 fidelity tests):
  *   --wall-offset <ns>  patch headers so mono→wall offset = <ns> instead of 0
  *                       (simulates an NTP step between file opens — FID-7).
+ *   --pg-version <N>    stamp <N> as the trace header's pg_version instead of
+ *                       18. Lets a test build a trace whose major has NO
+ *                       verified Timeout table (PGWT_TIMEOUT_TABLE_VERIFIED in
+ *                       src/idle_rule.h: only 13/17/18 are), which is the only
+ *                       way to reach the EMPTY-pacing-mask path from synthetic
+ *                       data. Default 18, so every existing scenario is
+ *                       byte-identical.
  *   --rotate <name>     after writing, rename current.trace →
  *                       <name>.trace.lz4 and current.summary →
  *                       <name>.summary.lz4 (footers are present because the
@@ -429,7 +436,7 @@ static void anchor_summary_clock(struct pgwt_summary_writer *sw,
 }
 
 static int write_traces(const char *dir, struct scenario *sc,
-                        uint64_t wall_offset_ns)
+                        uint64_t wall_offset_ns, int pg_version)
 {
     struct pgwt_event_writer ew;
     struct pgwt_summary_writer sw;
@@ -437,7 +444,7 @@ static int write_traces(const char *dir, struct scenario *sc,
     anchor_mono = (anchor_mono / 1000000000ULL) * 1000000000ULL;
     int summary_anchored = 0;
 
-    if (pgwt_writer_init(&ew, dir, 18, 24, NULL) != 0) {
+    if (pgwt_writer_init(&ew, dir, pg_version, 24, NULL) != 0) {
         fprintf(stderr, "Failed to init event writer\n");
         return -1;
     }
@@ -617,24 +624,33 @@ int main(int argc, char **argv)
     const char *inline_json = NULL;
     const char *rotate_name = NULL;
     uint64_t wall_offset_ns = 0;
+    int pg_version = 18;
 
     static struct option long_opts[] = {
         {"output",      required_argument, NULL, 'o'},
         {"scenario",    required_argument, NULL, 's'},
         {"inline",      required_argument, NULL, 'i'},
         {"wall-offset", required_argument, NULL, 'w'},
+        {"pg-version",  required_argument, NULL, 'P'},
         {"rotate",      required_argument, NULL, 'r'},
         {"help",        no_argument,       NULL, 'h'},
         {NULL, 0, NULL, 0}
     };
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "o:s:i:w:r:h", long_opts, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "o:s:i:w:r:P:h", long_opts, NULL)) != -1) {
         switch (opt) {
         case 'o': outdir = optarg; break;
         case 's': scenario_file = optarg; break;
         case 'i': inline_json = optarg; break;
         case 'w': wall_offset_ns = strtoull(optarg, NULL, 10); break;
+        case 'P':
+            pg_version = atoi(optarg);
+            if (pg_version <= 0) {
+                fprintf(stderr, "--pg-version must be a positive major\n");
+                return 1;
+            }
+            break;
         case 'r': rotate_name = optarg; break;
         default:  usage(argv[0]); return 1;
         }
@@ -675,7 +691,7 @@ int main(int argc, char **argv)
     int rc = 0;
     if (write_backends_jsonl(outdir, sc) != 0) rc = 1;
     if (write_query_texts(outdir, sc) != 0) rc = 1;
-    if (write_traces(outdir, sc, wall_offset_ns) != 0) rc = 1;
+    if (write_traces(outdir, sc, wall_offset_ns, pg_version) != 0) rc = 1;
 
     /* Patch file headers so mono_to_wall = wall_offset (default 0: wall
      * timestamps == mono timestamps). Synthetic events use known monotonic

@@ -1,0 +1,132 @@
+INFO: --mode tiered (default): sampler always-on; on-demand full-fidelity escalation (budget 600s/hour). Use --mode full for always-on exact tracing.
+INFO: PgBackendStatus layout PG18 source=hard-table arch=x86_64 ptr=8 abi=sysv-lp64 size=440 activity_buf=1024 validation=validated pid=28738 enums=RUNNING:3,FASTPATH:5,max:7
+INFO: PgBackendStatus fields: st_changecount=0/4(validated) st_procpid=4/4(validated) st_databaseid=48/4(validated) st_userid=52/4(validated) st_state=232/4(validated) st_activity_raw=248/8(validated) st_query_id=424/8(validated)[signed]
+INFO: PgBackendStatus validation detail: controlled backend retired before capture; idle/active state, activity markers and varying query IDs validated
+INFO: PgBackendStatus st_state/st_query_id plus db/user context are authoritative for sampled attribution; idle query_id is normalized to 0
+INFO: sampled exact probes detached: validated PgBackendStatus attribution is authoritative
+WARN: group 'dba' not found — trace files will be readable by root only
+INFO: anomaly near-trigger: aas=8.0 baseline=2.67 lock_frac=0.38 cpu_aas=1.0 cpu_cusum=0.000 [lock-sustain] [baseline-warmup]
+INFO: anomaly near-trigger: aas=4.0 baseline=3.00 lock_frac=0.25 cpu_aas=0.0 cpu_cusum=0.000 [baseline-warmup]
+INFO: anomaly near-trigger: aas=8.0 baseline=4.00 lock_frac=0.50 cpu_aas=1.0 cpu_cusum=0.000 [lock-sustain] [baseline-warmup] (+5 suppressed)
+INFO: anomaly near-trigger: aas=5.0 baseline=4.09 lock_frac=0.20 cpu_aas=2.0 cpu_cusum=0.000 [baseline-warmup]
+INFO: anomaly near-trigger: aas=8.0 baseline=4.31 lock_frac=0.38 cpu_aas=0.0 cpu_cusum=0.000 [lock-sustain] [baseline-warmup] (+1 suppressed)
+INFO: anomaly near-trigger: aas=8.0 baseline=4.33 lock_frac=0.12 cpu_aas=2.0 cpu_cusum=0.000 [baseline-warmup]
+INFO: anomaly near-trigger: aas=7.0 baseline=4.29 lock_frac=0.29 cpu_aas=2.0 cpu_cusum=0.000 [baseline-warmup]
+INFO: anomaly near-trigger: aas=8.0 baseline=4.35 lock_frac=0.38 cpu_aas=0.0 cpu_cusum=0.000 [lock-sustain] [baseline-warmup] (+2 suppressed)
+INFO: anomaly near-trigger: aas=5.0 baseline=4.45 lock_frac=0.20 cpu_aas=1.0 cpu_cusum=0.000 [baseline-warmup] (+1 suppressed)
+INFO: anomaly near-trigger: aas=4.0 baseline=4.52 lock_frac=0.50 cpu_aas=0.0 cpu_cusum=0.000 [lock-sustain] [baseline-warmup] (+4 suppressed)
+INFO: anomaly near-trigger: aas=7.0 baseline=4.61 lock_frac=0.29 cpu_aas=2.0 cpu_cusum=0.000 [baseline-warmup]
+INFO: anomaly near-trigger: aas=6.0 baseline=4.60 lock_frac=0.50 cpu_aas=0.0 cpu_cusum=0.000 [lock-sustain] [baseline-warmup] (+1 suppressed)
+INFO: anomaly near-trigger: aas=5.0 baseline=4.62 lock_frac=0.00 cpu_aas=3.0 cpu_cusum=0.000 [baseline-warmup] (+1 suppressed)
+INFO: anomaly near-trigger: aas=5.0 baseline=4.71 lock_frac=0.40 cpu_aas=3.0 cpu_cusum=0.000 [lock-sustain] [baseline-warmup] (+2 suppressed)
+INFO: anomaly near-trigger: aas=6.0 baseline=4.75 lock_frac=0.17 cpu_aas=3.0 cpu_cusum=0.000 [baseline-warmup]
+INFO: anomaly near-trigger: aas=8.0 baseline=5.00 lock_frac=0.50 cpu_aas=0.0 cpu_cusum=0.000 [lock-sustain] [baseline-warmup] (+2 suppressed)
+INFO: anomaly near-trigger: aas=3.0 baseline=5.02 lock_frac=0.00 cpu_aas=2.0 cpu_cusum=0.000 [baseline-warmup] (+1 suppressed)
+INFO: anomaly near-trigger: aas=6.0 baseline=5.05 lock_frac=0.33 cpu_aas=1.0 cpu_cusum=0.000 [lock-sustain] [baseline-warmup]
+INFO: anomaly near-trigger: aas=7.0 baseline=5.09 lock_frac=0.29 cpu_aas=5.0 cpu_cusum=0.000 [baseline-warmup]
+INFO: anomaly near-trigger: aas=5.0 baseline=5.15 lock_frac=0.20 cpu_aas=2.0 cpu_cusum=0.000 [baseline-warmup] (+2 suppressed)
+INFO: anomaly near-trigger: aas=6.0 baseline=5.12 lock_frac=0.50 cpu_aas=2.0 cpu_cusum=0.000 [lock-sustain] [baseline-warmup] (+1 suppressed)
+INFO: anomaly AUTO-escalation: rule=lock aas=6.0 baseline=5.12 lock_frac=0.33 cpu_aas=4.0 capacity=-1.000 -> full fidelity 60s
+INFO: anomaly near-trigger: aas=6.0 baseline=5.12 lock_frac=0.33 cpu_aas=3.0 cpu_cusum=0.000 [lock-sustain] (+1 suppressed)
+INFO: anomaly near-trigger: aas=5.0 baseline=5.12 lock_frac=0.40 cpu_aas=2.0 cpu_cusum=0.000 [lock-sustain]
+INFO: anomaly near-trigger: aas=8.0 baseline=5.12 lock_frac=0.50 cpu_aas=0.0 cpu_cusum=0.000 [lock-sustain]
+INFO: anomaly near-trigger: aas=7.0 baseline=5.13 lock_frac=0.43 cpu_aas=2.0 cpu_cusum=0.000 [lock-sustain] (+1 suppressed)
+INFO: anomaly near-trigger: aas=6.0 baseline=5.13 lock_frac=0.33 cpu_aas=2.0 cpu_cusum=0.000 [lock-sustain] (+1 suppressed)
+INFO: anomaly near-trigger: aas=4.0 baseline=5.12 lock_frac=0.50 cpu_aas=2.0 cpu_cusum=0.000 [lock-sustain]
+INFO: anomaly near-trigger: aas=8.0 baseline=5.13 lock_frac=0.50 cpu_aas=0.0 cpu_cusum=0.000 [lock-sustain]
+INFO: anomaly near-trigger: aas=8.0 baseline=5.13 lock_frac=0.50 cpu_aas=0.0 cpu_cusum=0.000 [lock-sustain]
+INFO: anomaly near-trigger: aas=6.0 baseline=5.13 lock_frac=0.33 cpu_aas=2.0 cpu_cusum=0.000 [lock-sustain] (+1 suppressed)
+INFO: anomaly near-trigger: aas=6.0 baseline=5.14 lock_frac=0.33 cpu_aas=0.0 cpu_cusum=0.000 [lock-sustain]
+INFO: anomaly near-trigger: aas=8.0 baseline=5.14 lock_frac=0.38 cpu_aas=1.0 cpu_cusum=0.000 [lock-sustain]
+INFO: anomaly near-trigger: aas=9.0 baseline=5.16 lock_frac=0.33 cpu_aas=0.0 cpu_cusum=0.000 [lock-sustain] (+1 suppressed)
+INFO: anomaly near-trigger: aas=5.0 baseline=5.16 lock_frac=0.40 cpu_aas=1.0 cpu_cusum=0.000 [lock-sustain] (+1 suppressed)
+INFO: anomaly near-trigger: aas=6.0 baseline=5.16 lock_frac=0.33 cpu_aas=2.0 cpu_cusum=0.000 [lock-sustain]
+INFO: anomaly near-trigger: aas=6.0 baseline=5.16 lock_frac=0.33 cpu_aas=2.0 cpu_cusum=0.000 [cooldown] (+1 suppressed)
+INFO: anomaly near-trigger: aas=6.0 baseline=5.17 lock_frac=0.33 cpu_aas=1.0 cpu_cusum=0.000 [lock-sustain]
+INFO: anomaly near-trigger: aas=4.0 baseline=5.16 lock_frac=0.50 cpu_aas=2.0 cpu_cusum=0.000 [lock-sustain]
+INFO: anomaly near-trigger: aas=5.0 baseline=5.17 lock_frac=0.40 cpu_aas=1.0 cpu_cusum=0.000 [lock-sustain]
+INFO: anomaly near-trigger: aas=5.0 baseline=5.16 lock_frac=0.40 cpu_aas=1.0 cpu_cusum=0.000 [lock-sustain]
+INFO: anomaly near-trigger: aas=8.0 baseline=5.17 lock_frac=0.38 cpu_aas=1.0 cpu_cusum=0.000 [lock-sustain]
+INFO: anomaly near-trigger: aas=5.0 baseline=5.17 lock_frac=0.40 cpu_aas=1.0 cpu_cusum=0.000 [lock-sustain]
+INFO: anomaly near-trigger: aas=5.0 baseline=5.17 lock_frac=0.40 cpu_aas=2.0 cpu_cusum=0.000 [lock-sustain]
+INFO: anomaly near-trigger: aas=6.0 baseline=5.19 lock_frac=0.33 cpu_aas=0.0 cpu_cusum=0.000 [lock-sustain] (+1 suppressed)
+INFO: anomaly near-trigger: aas=8.0 baseline=5.20 lock_frac=0.38 cpu_aas=0.0 cpu_cusum=0.000 [lock-sustain] (+1 suppressed)
+INFO: anomaly near-trigger: aas=6.0 baseline=5.19 lock_frac=0.33 cpu_aas=1.0 cpu_cusum=0.000 [lock-sustain]
+INFO: anomaly near-trigger: aas=7.0 baseline=5.19 lock_frac=0.43 cpu_aas=1.0 cpu_cusum=0.000 [lock-sustain]
+INFO: anomaly near-trigger: aas=6.0 baseline=5.19 lock_frac=0.50 cpu_aas=2.0 cpu_cusum=0.000 [lock-sustain]
+INFO: anomaly near-trigger: aas=6.0 baseline=5.18 lock_frac=0.33 cpu_aas=2.0 cpu_cusum=0.000 [lock-sustain]
+INFO: anomaly near-trigger: aas=6.0 baseline=5.18 lock_frac=0.33 cpu_aas=4.0 cpu_cusum=0.000 [lock-sustain]
+INFO: anomaly near-trigger: aas=4.0 baseline=5.18 lock_frac=0.50 cpu_aas=1.0 cpu_cusum=0.000 [lock-sustain]
+INFO: anomaly near-trigger: aas=6.0 baseline=5.17 lock_frac=0.33 cpu_aas=4.0 cpu_cusum=0.000 [lock-sustain]
+INFO: anomaly near-trigger: aas=4.0 baseline=5.18 lock_frac=0.50 cpu_aas=2.0 cpu_cusum=0.000 [lock-sustain]
+INFO: anomaly near-trigger: aas=6.0 baseline=5.17 lock_frac=0.33 cpu_aas=1.0 cpu_cusum=0.000 [lock-sustain]
+INFO: anomaly near-trigger: aas=6.0 baseline=5.18 lock_frac=0.33 cpu_aas=2.0 cpu_cusum=0.000 [lock-sustain] (+1 suppressed)
+INFO: anomaly near-trigger: aas=4.0 baseline=5.18 lock_frac=0.50 cpu_aas=1.0 cpu_cusum=0.000 [lock-sustain]
+INFO: anomaly near-trigger: aas=6.0 baseline=5.17 lock_frac=0.33 cpu_aas=1.0 cpu_cusum=0.000 [lock-sustain]
+INFO: anomaly near-trigger: aas=6.0 baseline=5.18 lock_frac=0.50 cpu_aas=1.0 cpu_cusum=0.000 [lock-sustain]
+INFO: anomaly near-trigger: aas=5.0 baseline=5.18 lock_frac=0.40 cpu_aas=1.0 cpu_cusum=0.000 [lock-sustain]
+INFO: anomaly near-trigger: aas=6.0 baseline=5.18 lock_frac=0.50 cpu_aas=1.0 cpu_cusum=0.000 [lock-sustain]
+INFO: anomaly near-trigger: aas=6.0 baseline=5.17 lock_frac=0.33 cpu_aas=3.0 cpu_cusum=0.000 [lock-sustain]
+INFO: anomaly near-trigger: aas=6.0 baseline=5.16 lock_frac=0.33 cpu_aas=2.0 cpu_cusum=0.000 [lock-sustain]
+INFO: anomaly near-trigger: aas=8.0 baseline=5.17 lock_frac=0.38 cpu_aas=2.0 cpu_cusum=0.000 [lock-sustain]
+INFO: anomaly near-trigger: aas=8.0 baseline=5.17 lock_frac=0.50 cpu_aas=0.0 cpu_cusum=0.000 [lock-sustain]
+INFO: anomaly near-trigger: aas=6.0 baseline=5.17 lock_frac=0.33 cpu_aas=2.0 cpu_cusum=0.000 [cooldown] (+1 suppressed)
+INFO: anomaly near-trigger: aas=6.0 baseline=5.17 lock_frac=0.50 cpu_aas=2.0 cpu_cusum=0.000 [lock-sustain]
+INFO: anomaly near-trigger: aas=8.0 baseline=5.18 lock_frac=0.38 cpu_aas=0.0 cpu_cusum=0.000 [lock-sustain]
+INFO: anomaly near-trigger: aas=6.0 baseline=5.19 lock_frac=0.33 cpu_aas=2.0 cpu_cusum=0.000 [lock-sustain]
+INFO: anomaly near-trigger: aas=5.0 baseline=5.19 lock_frac=0.40 cpu_aas=1.0 cpu_cusum=0.000 [lock-sustain]
+INFO: anomaly near-trigger: aas=8.0 baseline=5.19 lock_frac=0.50 cpu_aas=3.0 cpu_cusum=0.000 [lock-sustain] (+1 suppressed)
+INFO: anomaly near-trigger: aas=8.0 baseline=5.21 lock_frac=0.38 cpu_aas=0.0 cpu_cusum=0.000 [lock-sustain]
+INFO: anomaly near-trigger: aas=6.0 baseline=5.22 lock_frac=0.33 cpu_aas=2.0 cpu_cusum=0.000 [lock-sustain]
+INFO: anomaly near-trigger: aas=5.0 baseline=5.22 lock_frac=0.60 cpu_aas=2.0 cpu_cusum=0.000 [lock-sustain] (+1 suppressed)
+INFO: anomaly near-trigger: aas=7.0 baseline=5.23 lock_frac=0.43 cpu_aas=2.0 cpu_cusum=0.000 [lock-sustain]
+INFO: anomaly near-trigger: aas=4.0 baseline=5.22 lock_frac=0.50 cpu_aas=0.0 cpu_cusum=0.000 [lock-sustain]
+INFO: anomaly near-trigger: aas=6.0 baseline=5.22 lock_frac=0.33 cpu_aas=2.0 cpu_cusum=0.000 [lock-sustain]
+INFO: anomaly near-trigger: aas=6.0 baseline=5.22 lock_frac=0.50 cpu_aas=2.0 cpu_cusum=0.000 [lock-sustain]
+INFO: anomaly near-trigger: aas=5.0 baseline=5.22 lock_frac=0.60 cpu_aas=2.0 cpu_cusum=0.000 [lock-sustain]
+INFO: anomaly near-trigger: aas=5.0 baseline=5.21 lock_frac=0.40 cpu_aas=0.0 cpu_cusum=0.000 [lock-sustain] (+1 suppressed)
+INFO: anomaly near-trigger: aas=8.0 baseline=5.22 lock_frac=0.38 cpu_aas=2.0 cpu_cusum=0.000 [lock-sustain]
+INFO: anomaly near-trigger: aas=8.0 baseline=5.22 lock_frac=0.38 cpu_aas=1.0 cpu_cusum=0.000 [lock-sustain]
+INFO: anomaly near-trigger: aas=6.0 baseline=5.22 lock_frac=0.33 cpu_aas=1.0 cpu_cusum=0.000 [lock-sustain]
+INFO: anomaly near-trigger: aas=8.0 baseline=5.22 lock_frac=0.50 cpu_aas=1.0 cpu_cusum=0.000 [lock-sustain]
+INFO: anomaly near-trigger: aas=6.0 baseline=5.22 lock_frac=0.33 cpu_aas=2.0 cpu_cusum=0.000 [lock-sustain]
+INFO: anomaly near-trigger: aas=5.0 baseline=5.22 lock_frac=0.60 cpu_aas=1.0 cpu_cusum=0.000 [cooldown] (+1 suppressed)
+INFO: anomaly near-trigger: aas=6.0 baseline=5.22 lock_frac=0.33 cpu_aas=2.0 cpu_cusum=0.000 [lock-sustain]
+INFO: anomaly near-trigger: aas=6.0 baseline=5.22 lock_frac=0.33 cpu_aas=2.0 cpu_cusum=0.000 [lock-sustain]
+INFO: anomaly near-trigger: aas=6.0 baseline=5.23 lock_frac=0.33 cpu_aas=1.0 cpu_cusum=0.000 [lock-sustain] (+1 suppressed)
+INFO: anomaly near-trigger: aas=6.0 baseline=5.23 lock_frac=0.33 cpu_aas=3.0 cpu_cusum=0.000 [lock-sustain]
+INFO: anomaly near-trigger: aas=8.0 baseline=5.24 lock_frac=0.38 cpu_aas=0.0 cpu_cusum=0.000 [lock-sustain] (+1 suppressed)
+INFO: anomaly near-trigger: aas=8.0 baseline=5.25 lock_frac=0.38 cpu_aas=0.0 cpu_cusum=0.000 [lock-sustain] (+1 suppressed)
+INFO: anomaly near-trigger: aas=8.0 baseline=5.26 lock_frac=0.38 cpu_aas=0.0 cpu_cusum=0.000 [cooldown] (+1 suppressed)
+INFO: anomaly near-trigger: aas=6.0 baseline=5.26 lock_frac=0.33 cpu_aas=1.0 cpu_cusum=0.000 [lock-sustain] (+1 suppressed)
+INFO: anomaly near-trigger: aas=8.0 baseline=5.26 lock_frac=0.62 cpu_aas=0.0 cpu_cusum=0.000 [lock-sustain]
+INFO: anomaly near-trigger: aas=6.0 baseline=5.26 lock_frac=0.33 cpu_aas=4.0 cpu_cusum=0.000 [lock-sustain]
+INFO: anomaly near-trigger: aas=6.0 baseline=5.25 lock_frac=0.33 cpu_aas=2.0 cpu_cusum=0.000 [lock-sustain]
+INFO: anomaly near-trigger: aas=7.0 baseline=5.25 lock_frac=0.43 cpu_aas=1.0 cpu_cusum=0.000 [lock-sustain] (+1 suppressed)
+INFO: anomaly near-trigger: aas=5.0 baseline=5.25 lock_frac=0.40 cpu_aas=2.0 cpu_cusum=0.000 [lock-sustain]
+INFO: anomaly near-trigger: aas=7.0 baseline=5.25 lock_frac=0.57 cpu_aas=1.0 cpu_cusum=0.000 [lock-sustain]
+INFO: anomaly near-trigger: aas=5.0 baseline=5.25 lock_frac=0.40 cpu_aas=2.0 cpu_cusum=0.000 [lock-sustain]
+INFO: anomaly near-trigger: aas=6.0 baseline=5.25 lock_frac=0.33 cpu_aas=1.0 cpu_cusum=0.000 [lock-sustain]
+INFO: anomaly near-trigger: aas=6.0 baseline=5.25 lock_frac=0.33 cpu_aas=2.0 cpu_cusum=0.000 [cooldown] (+1 suppressed)
+INFO: anomaly near-trigger: aas=4.0 baseline=5.25 lock_frac=0.50 cpu_aas=1.0 cpu_cusum=0.000 [lock-sustain] (+1 suppressed)
+INFO: anomaly near-trigger: aas=5.0 baseline=5.24 lock_frac=0.60 cpu_aas=0.0 cpu_cusum=0.000 [lock-sustain]
+INFO: anomaly near-trigger: aas=8.0 baseline=5.25 lock_frac=0.38 cpu_aas=0.0 cpu_cusum=0.000 [lock-sustain] (+1 suppressed)
+INFO: anomaly near-trigger: aas=8.0 baseline=5.25 lock_frac=0.38 cpu_aas=0.0 cpu_cusum=0.000 [lock-sustain]
+INFO: anomaly near-trigger: aas=7.0 baseline=5.26 lock_frac=0.43 cpu_aas=1.0 cpu_cusum=0.000 [lock-sustain]
+INFO: anomaly near-trigger: aas=4.0 baseline=5.26 lock_frac=0.50 cpu_aas=0.0 cpu_cusum=0.000 [cooldown] (+1 suppressed)
+INFO: anomaly near-trigger: aas=7.0 baseline=5.25 lock_frac=0.57 cpu_aas=0.0 cpu_cusum=0.000 [lock-sustain]
+INFO: anomaly near-trigger: aas=8.0 baseline=5.25 lock_frac=0.50 cpu_aas=1.0 cpu_cusum=0.000 [lock-sustain] (+1 suppressed)
+INFO: anomaly near-trigger: aas=6.0 baseline=5.25 lock_frac=0.50 cpu_aas=2.0 cpu_cusum=0.000 [lock-sustain]
+INFO: anomaly near-trigger: aas=6.0 baseline=5.24 lock_frac=0.33 cpu_aas=1.0 cpu_cusum=0.000 [lock-sustain]
+INFO: anomaly near-trigger: aas=6.0 baseline=5.24 lock_frac=0.50 cpu_aas=0.0 cpu_cusum=0.000 [lock-sustain] (+1 suppressed)
+INFO: anomaly near-trigger: aas=4.0 baseline=5.22 lock_frac=0.50 cpu_aas=0.0 cpu_cusum=0.000 [lock-sustain]
+INFO: anomaly near-trigger: aas=7.0 baseline=5.23 lock_frac=0.43 cpu_aas=2.0 cpu_cusum=0.000 [lock-sustain] (+1 suppressed)
+INFO: anomaly near-trigger: aas=5.0 baseline=5.23 lock_frac=0.40 cpu_aas=0.0 cpu_cusum=0.000 [lock-sustain]
+INFO: anomaly near-trigger: aas=6.0 baseline=5.21 lock_frac=0.50 cpu_aas=1.0 cpu_cusum=0.000 [lock-sustain]
+INFO: anomaly near-trigger: aas=5.0 baseline=5.21 lock_frac=0.40 cpu_aas=0.0 cpu_cusum=0.000 [lock-sustain]
+INFO: anomaly near-trigger: aas=5.0 baseline=5.20 lock_frac=0.40 cpu_aas=1.0 cpu_cusum=0.000 [lock-sustain]
+INFO: anomaly near-trigger: aas=5.0 baseline=5.20 lock_frac=0.40 cpu_aas=2.0 cpu_cusum=0.000 [lock-sustain] (+1 suppressed)
+INFO: anomaly near-trigger: aas=7.0 baseline=5.20 lock_frac=0.57 cpu_aas=0.0 cpu_cusum=0.000 [lock-sustain]
+INFO: anomaly near-trigger: aas=7.0 baseline=5.21 lock_frac=0.43 cpu_aas=1.0 cpu_cusum=0.000 [lock-sustain]
+
+pg_wait_tracer: shutting down
