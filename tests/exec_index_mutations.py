@@ -169,11 +169,16 @@ def main():
     os.makedirs(WORK)
     os.makedirs(OUT, exist_ok=True)
 
-    extra = []
+    # src/spawn.c uses pipe2(), which Darwin lacks; wait_event.c needs its
+    # two symbols. Linux links the real file, macOS a stub. Neither path
+    # SKIPS: a build failure below is reported as a failure, because a
+    # mutation harness that could not build proves nothing.
     if sys.platform == "darwin":
         stub = os.path.join(WORK, "mac_stub.c")
         mac_stub(stub)
         extra = [stub]
+    else:
+        extra = [os.path.join(SRC, "spawn.c")]
 
     pristine = {}
     for name in ("exec_index.c", "exec_index.h"):
