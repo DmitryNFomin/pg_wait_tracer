@@ -35,8 +35,29 @@ teardown() {
         for p in \$DAEMON_PID \$BURST_PID \$WORKLOAD_PID \$PGBENCH_PID; do
             [ -n \"\$p\" ] && kill -0 \$p 2>/dev/null && echo \"still up: \$p\" || true
         done
-        lh=\$(pgrep -f 'sleep 2700' | head -1)
-        [ -n \"\$lh\" ] && { kill \$lh; echo \"lock holder \$lh killed\"; }
+        # The lock holder is \`bash -c 'echo held; sleep 2700'\` and its
+        # \`sleep\` CHILD, and the child inherits fd 9 -- so killing only the
+        # bash (which is what \`pgrep -f 'sleep 2700' | head -1\` returns,
+        # because the wrapper's own command line contains that string)
+        # leaves the sleep holding the flock and every later box-check
+        # queueing behind it. Observed on 2026-10-08: box-check run 2 sat on
+        # \"waiting for /tmp/pgwt-box-check.lock\" until the orphaned sleep
+        # was killed by hand. So: identify holders by the FD, not by a
+        # command-line pattern, and verify the lock is actually free.
+        for lh in \$(fuser /tmp/pgwt-box-check.lock 2>/dev/null); do
+            kill \$lh 2>/dev/null && echo \"lock holder \$lh signalled\"
+        done
+        sleep 3
+        for lh in \$(fuser /tmp/pgwt-box-check.lock 2>/dev/null); do
+            kill -9 \$lh 2>/dev/null && echo \"lock holder \$lh KILLed\"
+        done
+        sleep 1
+        if fuser /tmp/pgwt-box-check.lock >/dev/null 2>&1; then
+            echo 'ERROR: /tmp/pgwt-box-check.lock is STILL held after teardown:'
+            fuser -v /tmp/pgwt-box-check.lock 2>&1
+        else
+            echo 'lock free'
+        fi
         pgrep -af 'burst_load.sh|live_loop_workload|pg_wait_tracer --daemon' || echo 'no load/daemon left'
     " 2>&1 | sed 's/^/  /'
 }
