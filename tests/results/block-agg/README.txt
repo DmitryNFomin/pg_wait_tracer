@@ -49,9 +49,34 @@ FILES
           blocks avoids entirely. That saving is not in this table; it is the
           reason the table exists.
 
-  box-*.log (if present)
-      The Linux tier: `make box-check` output, including this test inside the
-      C unit suite.
+  make-check-full.log
+      `make check` (full, not --fast) on this Mac. Last line:
+      "CHECK PASSED (full) — stamp 05a2eef5ecdeec888a69a7460ae248a4fea9524a",
+      which equals `scripts/tree-hash.sh` on the committed tree, so the stamp
+      describes the tree that was actually tested.
+
+  box-check-summary.txt
+      The Linux tier, on gate-2 (pgwt-gate-2 / root@142.132.191.18, NOT an
+      ephemeral VM): test_block_agg's own output inside the C-unit suite, the
+      cross-validation rate sweep (all four rates in tolerance -- #323's
+      stricter gate), and the run_all summary: 101 executed, 101 passed,
+      0 failed, 0 known-failing, 0 xpass, 4 skipped, live UI smoke PASS,
+      exit 0. The ledger numbers are IDENTICAL to the macOS run (378 windows,
+      159 seams, 480/335/1075 merge/decode/skip, 7 probes red, 43 refusals),
+      which is the point: the aggregate's arithmetic is not platform
+      dependent. The full box log is gitignored
+      (tests/results/box-check-*.log) and stays in the worktree:
+      tests/results/box-check-ubuntu-20261008-224008.log
+
+      Two earlier attempts are NOT evidence and are not claimed as such:
+      the first was killed while queued (it had rsynced a tree that was one
+      commit stale, so it would have tested the wrong thing); the second died
+      at exit 255 on an ssh transport drop about a minute into the run, and
+      because scripts/box-check.sh runs the remote suite over a live ssh
+      channel with no detachment, the REMOTE command kept going and held the
+      box's flock for a full suite duration. tests/run_all.sh has no cleanup
+      traps, so killing it mid-live-tier risks orphaned PostgreSQL clusters;
+      it was left to drain and this run queued behind it.
 
 WHAT IS NOT HERE
   No `transitions` end-to-end numbers, because nothing is wired into

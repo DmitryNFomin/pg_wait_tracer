@@ -1,0 +1,66 @@
+box-check (ubuntu, PG=all, EPHEMERAL=0) on gate-2 -- hostname pgwt-gate-2,
+root@142.132.191.18, machine_id 2743fea0132c42349f4d0b52443a5fec.
+Tree under test: commit a943501, clean worktree.
+Full log (gitignored, kept in the worktree):
+  tests/results/box-check-ubuntu-20261008-224008.log
+
+=== test_block_agg, as it ran in the Linux C-unit tier ===
+=== §1 record predicate vs pgwt_compute_transitions ===
+    6 counted, 7 rejected, both predicates agreeing on all 13
+=== §2 build + merge against literal expected values ===
+=== §3 merge associativity + commutativity ===
+=== §4 straddle: a pair whose old_event began in an earlier block ===
+=== §5 plan(): exactly one of SKIP/MERGE/DECODE per block ===
+    plan outcomes over 378 windows: merge=480 decode=335 skip=1075
+=== §6 model: merged + decoded == raw, bit-exact, every window ===
+    378 windows compared, 159 of them at a merge/decode seam
+=== §6b the loader's inclusive end bound: the divergence, with a literal ===
+=== §7 mutation probes: the comparator can see one count, one nanosecond, one pair ===
+    probe 0 (clean (control)         ) disagreements=0
+    probe 1 (+1 on one pair count    ) disagreements=2
+    probe 2 (+1 ns on one pair       ) disagreements=1
+    probe 3 (-1 ns on one pair       ) disagreements=1
+    probe 4 (an extra pair appears   ) disagreements=4
+    probe 5 (one pair disappears     ) disagreements=2
+    probe 6 (+1 ns on one node       ) disagreements=1
+    probe 7 (one node disappears     ) disagreements=2
+=== §8 bypass suite: a path that cannot see must refuse ===
+=== §0 vacuity ledger ===
+    windows compared .................. 378
+    blocks MERGEd ..................... 480
+    blocks DECODEd .................... 335
+    blocks SKIPped .................... 1075
+    windows at a merge/decode seam .... 159
+    windows with positive total_ns .... 350
+    windows with >=1 merged pair ...... 350
+    mutation probes that went red ..... 7
+    refusals observed ................. 43
+PASS: test_block_agg
+
+=== cross-validation rate sweep (#323: EVERY rate must be in tolerance) ===
+  RATE 10Hz (shipped default): within tolerance (max disagreement 4.8 pp, CPU)
+  RATE 50Hz (exploratory rate): within tolerance (max disagreement 5.7 pp, CPU)
+  RATE 100Hz (exploratory rate): within tolerance (max disagreement 7.0 pp, CPU)
+  RATE 200Hz (exploratory rate): within tolerance (max disagreement 5.2 pp, CPU)
+
+=== run_all summary (last 20 lines of the box-check output) ===
+  ════════════════════════════════════════
+    test_web_ui — SKIPPED (opt-in: set PGWT_RUN_WEB_UI=1 (make check + ci.yml's web-ui job already cover this))
+  ════════════════════════════════════════
+  
+  ════════════════════════════════════════
+    test_web_ui_chaos — SKIPPED (opt-in: set PGWT_RUN_WEB_UI=1 (make check + ci.yml's web-ui job already cover this))
+  ════════════════════════════════════════
+  
+  ════════════════════════════════════════
+    test_web_ui_snapshots — SKIPPED (opt-in: set PGWT_RUN_SNAPSHOTS=1 (CI snapshots job is authoritative))
+  ════════════════════════════════════════
+    Live UI smoke: overall=PASS
+  
+  ════════════════════════════════════════
+    SUMMARY
+  ════════════════════════════════════════
+    Executed: 101 (passed 101, failed 0, known-failing 0 (0 xpass)), skipped 4, excluded 0, total 105
+    Mode:     --require-live (live-section skips counted as failures)
+  
+BOXCHECK_EXIT=0
