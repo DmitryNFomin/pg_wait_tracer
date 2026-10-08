@@ -2477,9 +2477,35 @@ struct ts_summary_ctx {
     const struct pgwt_filter *f;
 };
 
+/* #318: a class or event filter CANNOT be honoured from the per-second
+ * records, so this path REFUSES one instead of answering the unfiltered
+ * question under a filtered label.
+ *
+ * struct pgwt_summary_session is {pid, db_time_ns, cpu_ns, top_wait_id,
+ * top_wait_ns} -- there is no per-session per-event breakdown anywhere in the
+ * record. (The issue proposed filtering here on the stated grounds that the
+ * record "does carry per-event totals per session"; it does not. events[] is
+ * system-wide and top_events[] is per QUERY.) Honouring the filter would
+ * require a new per-session per-event table, and any BOUNDED version of it --
+ * a top-8 list like the per-query one -- would re-introduce exactly the kind
+ * of silent inexactness this whole comparison exists to catch.
+ *
+ * So the real fix is upstream: handle_top_sessions forces the RAW path for a
+ * class- or event-filtered request, the precedent handle_top_queries already
+ * sets. This refusal is the fail-safe underneath it. Until it was added, the
+ * visitor read f->pid ONLY and silently returned UNFILTERED session numbers
+ * while the UI said one wait class was selected -- plausible, wrong, and
+ * labelled "fidelity":"exact". Returning no rows is visibly empty instead,
+ * which is the house rule: a path that cannot see must refuse, never approve.
+ * (Same shape as aas_summary_visitor's `if (ctx->has_pid_filter) return 0;`.)
+ */
 static int ts_summary_visitor(const struct pgwt_summary_accum *rec, void *arg)
 {
     struct ts_summary_ctx *ctx = arg;
+
+    if (ctx->f->class_name[0] != '\0' || ctx->f->event_id != 0 ||
+        ctx->f->query_id != 0)
+        return 0;
 
     for (int s = 0; s < SUMMARY_MAX_SESSIONS; s++) {
         const struct pgwt_summary_session *ss = &rec->sessions[s];

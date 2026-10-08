@@ -409,17 +409,39 @@ the one scenario the counter exists for the one it could not see. ~270 distinct
 PostgreSQL wait events against 1024 slots is headroom, not a proof, and it is
 not a proof at all for `Extension` events.
 
-### Summary files moved to v4
+### Summary files moved to v5
 
 The per-second summary records precompute DB Time at WRITE time, so v1/v2 files
 carry the OLD accounting. A directory holding both would blend two rules inside
 one window and report a DB Time that is neither. `PGWT_SUMMARY_VERSION` is now
-**4**; it excludes idle events at the writer (so no read path subtracts
-anything back out) and carries the exact idle scalars; the reader refuses every
-earlier version for computation; and `should_use_summaries()` PREFLIGHTS the
-window (`pgwt_summaries_window_current`) so a refusal becomes a raw recompute
-rather than a plausible-looking empty answer — the visitor skips files it
-cannot open, which on its own would have produced a silently partial window.
+**5**; the reader refuses every earlier version for computation; and
+`should_use_summaries()` PREFLIGHTS the window
+(`pgwt_summaries_window_current`) so a refusal becomes a raw recompute rather
+than a plausible-looking empty answer — the visitor skips files it cannot
+open, which on its own would have produced a silently partial window.
+
+What each bump changed, since the version number is a statement about the
+accounting rule and not about the byte layout:
+
+- **v3/v4** exclude idle events at the writer (so no read path subtracts
+  anything back out) and carry the exact idle scalars.
+- **v5** (#317) also files event 0 — CPU — into `queries[].top_events[]`,
+  which `accum_query_add`'s `old_ev != 0` guard had been dropping. A v4 second
+  and a v5 second answer "what is in this query's event list" differently, so
+  a window holding both would report a per-query event breakdown that is
+  neither: the Events tab drilled into one query would show a CPU* row
+  carrying only part of the window. Layout is byte-identical to v4; the bump
+  exists for the rule, not for the bytes.
+
+**v5 says nothing about io_workers.** The summary records still COUNT
+io_worker time, so the exclusion described above holds on the raw paths only —
+tracked as issue #315, with the reason the obvious one-line writer fix does
+not work recorded in `tests/test_agg_raw_crosscheck.c` (hole N7): nothing on
+the live path sets `PGWT_EVENT_FLAG_IO_WORKER`, so a check on `evt->flags`
+inside the summary writer is dead in the daemon. Note also that
+`pgwt_compute_heatmap` does not exclude io_workers either, so both heatmap
+paths currently agree by counting them; excluding them at the writer alone
+would move the divergence to the latency grid rather than remove it.
 Startup recovery still archives an intact older file instead of calling it
 corrupt.
 

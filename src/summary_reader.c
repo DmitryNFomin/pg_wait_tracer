@@ -461,17 +461,44 @@ int pgwt_visit_summaries(const char *trace_dir,
 
         int stop = 0;
         for (int b = start_blk; b < reader.num_blocks && !stop; b++) {
-            /* Check if block is past the end of range */
+            /* Block-level PRUNE, deliberately still `>`: it is a conservative
+             * over-fetch (one extra block decoded at the boundary, which the
+             * per-record filter below then drops) and it does not depend on
+             * the block index being sorted at the exact boundary. The record
+             * filter is the authority on the window; this is an optimisation.
+             * Keeping it loose means a bug in one cannot be masked by the
+             * other -- #316's test asserts a window ending ON the last
+             * record's second, which is the case that reaches here. */
             if (to_wall_ns > 0 &&
                 reader.block_index[b].timestamp_ns > to_wall_ns)
                 break;
 
             if (pgwt_summary_reader_decode_block(&reader, b, record) == 0) {
-                /* Filter by exact time range */
+                /* Filter by exact time range.
+                 *
+                 * #316: HALF-OPEN, [from, to) -- `>=`, not `>`. Every other
+                 * window consumer in the codebase is half-open (the raw
+                 * path's event_window_ns clips at to_ns;
+                 * pgwt_compute_heatmap drops `ev_ts >= to_ns`), and a record
+                 * carries a WHOLE second, so including the one whose second
+                 * STARTS at to_ns made every summary answer over [T, T+W)
+                 * cover W+1 seconds. Measured on an interior 1 s window of
+                 * the cross-check fixture: raw 58.872 ms vs summary 137.368
+                 * ms, +133.3%. It was invisible on a live "last 15 minutes"
+                 * (the second at to_ns is not flushed yet) and never
+                 * invisible on a historical window -- and because
+                 * aas_summary_visitor clamps an out-of-range bucket index to
+                 * the last bucket, the extra second landed entirely on the
+                 * final bar of every chart.
+                 *
+                 * This is READER-bound: it changes which records an answer
+                 * is built from, not what any record contains, so it needs
+                 * no summary version bump and it applies to files already on
+                 * disk. The start bound stays INCLUSIVE. */
                 uint64_t rec_ns = record->second_wall_ns;
                 if (from_wall_ns > 0 && rec_ns < from_wall_ns)
                     continue;
-                if (to_wall_ns > 0 && rec_ns > to_wall_ns)
+                if (to_wall_ns > 0 && rec_ns >= to_wall_ns)
                     continue;
 
                 if (visitor(record, ctx) != 0)

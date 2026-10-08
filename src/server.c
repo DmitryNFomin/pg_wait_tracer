@@ -3685,8 +3685,23 @@ static void handle_top_sessions(struct pgwt_server *srv, struct pgwt_request *re
     struct pgwt_wfid wfid = {0};
     int from_summaries = 0;
 
-    /* Sessions + query_id: summaries lack per-session query data, use raw events */
-    if (should_use_summaries(srv, req, &wfid) && req->filter.query_id == 0) {
+    /* The per-second records carry NO per-session breakdown by query, wait
+     * class or wait event -- struct pgwt_summary_session is {pid, db_time_ns,
+     * cpu_ns, top_wait_id, top_wait_ns}. So every filter except pid (which
+     * should_use_summaries already forces raw for) has to go to raw events.
+     *
+     * #318: this guard used to cover query_id ONLY, so a CLASS- or
+     * EVENT-filtered Sessions tab over a >= 120 s window was answered from
+     * summaries that ignored the filter entirely and returned UNFILTERED
+     * session numbers under a filtered label, marked "fidelity":"exact".
+     * handle_top_queries (class_name / event_id) and handle_heatmap
+     * (query_id) already force raw for filters they cannot serve; this is the
+     * same rule, stated once for all three filter kinds. ts_summary_visitor
+     * refuses them too, as a fail-safe if this guard is ever edited away. */
+    int sessions_filter_needs_raw = (req->filter.query_id != 0 ||
+                                     req->filter.class_name[0] != '\0' ||
+                                     req->filter.event_id != 0);
+    if (should_use_summaries(srv, req, &wfid) && !sessions_filter_needs_raw) {
         pgwt_compute_top_sessions_from_summaries(srv->trace_dir, from, to,
                                                   &req->filter, wall_ms, &res);
         from_summaries = 1;

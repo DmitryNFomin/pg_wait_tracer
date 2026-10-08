@@ -69,7 +69,48 @@
  * yielding a plausible partial window with no error and no raw fallback.
  * "No such file should exist anywhere" is a weaker guarantee than "an old
  * file is refused", so the version moves and the preflight refuses v3. */
-#define PGWT_SUMMARY_VERSION  4
+/* v5 (2026-10-08, aggregate-vs-raw cross-check fix #317): ONE content change
+ * at the writer, no layout change. `queries[].top_events[]` now also carries
+ * event 0 (CPU), which accum_query_add's `old_ev != 0` guard had been
+ * dropping -- so the Events tab drilled into a single query over a >= 120 s
+ * window was missing that query's whole CPU* row and its db_time_ms was short
+ * by the query's entire CPU time (measured raw 7002.426 ms vs summary
+ * 2949.426 ms, -57.9%).
+ *
+ * WHY THE VERSION HAS TO MOVE even though the byte layout is identical: the
+ * version is what tells a reader which ACCOUNTING RULE the precomputed
+ * per-second totals were written under -- that is the whole reason v3 and v4
+ * exist. A v4 second and a v5 second answer "what is in this query's event
+ * list" differently, so a window holding both would report a per-query event
+ * breakdown that is neither: the v4 seconds contribute no CPU row and the v5
+ * seconds do, and the CPU* row would silently carry only part of the window.
+ *
+ * SCOPE, stated because it is easy to over-read: v5 says nothing about
+ * io_worker records. The summary records still CONTAIN io_worker time (see
+ * the N7 hole in tests/test_agg_raw_crosscheck.c and issue #315) -- excluding
+ * it needs a daemon-side fix that does not exist yet, and claiming otherwise
+ * here would be a false contract that a later version bump could only
+ * withdraw by refusing these files too.
+ *
+ * COMPATIBILITY FOR FILES ALREADY ON DISK, handled by machinery that already
+ * exists and is not changed here:
+ *   - pgwt_summary_reader_open refuses any file whose header version is not
+ *     PGWT_SUMMARY_VERSION, with a WARN naming both versions
+ *     (src/summary_reader.c), so a v4 file is never decoded for computation;
+ *   - pgwt-server PREFLIGHTS the window (should_use_summaries ->
+ *     pgwt_summaries_window_current) and takes the RAW path for any window
+ *     containing a non-current file. That is the part that matters: refusing
+ *     alone would have left pgwt_visit_summaries silently SKIPPING those
+ *     files and answering from the rest -- a plausible partial window
+ *     labelled "fidelity":"exact". So an existing v4 capture is still fully
+ *     readable, it is just recomputed from its raw events, which is the
+ *     source of truth and does carry every query's CPU time;
+ *   - startup recovery still FINALIZES and archives an intact older
+ *     current.summary rather than calling it corrupt, so nothing is deleted.
+ * No migration is possible or needed: a v4 record simply does not contain the
+ * per-query CPU entry, and the raw trace already holds what is required to
+ * recompute it. */
+#define PGWT_SUMMARY_VERSION  5
 
 /* #277: how long after a second ends it is treated as complete by the
  * periodic flush. The daemon's timer handler runs BEFORE the event-ring
