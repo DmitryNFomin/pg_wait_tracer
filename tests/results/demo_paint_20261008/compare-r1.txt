@@ -1,0 +1,23 @@
+label=r1 viewport={'w': 1710, 'h': 981, 'dpr': 2} agree=True range=15m chrome=154.0.8037.100
+workload_alive=True basis='legacy fallback: no procs_expected line in the conditions file; required alive >= 4 and dead == 0 (alive=4 dead=0)'
+capture_age_s=1112 loadavg=1.71 1.31 1.73 trace_events_total=1429873
+
+tab           n     min     med     max |  pinned  ratio | state | detail / error
+---------------------------------------------------------------------------------
+queries       3    2091    4615    5785 |    1592   3.63 | OVER  | 29 rows 
+waterfall     3    4401    4405    4796 |    1464   3.28 | OVER  | 101 executions, 1 lanes 
+scatter       3    3927    4065    4358 |    1616   2.70 | OVER  | 2000 points 
+concurrency   2    3246    3569    3569 |    1165   3.06 | ERR   | 300 buckets no container
+transitions   2    2889    3253    3253 |     971   3.35 | ERR   | 9 nodes no container
+matrix        3    2818    2875    2949 |    1139   2.59 | ok    | 38 cells 
+histogram     3     345     375     408 |     440   0.93 | ok    | 3544 cells 
+overview      3     175     239     329 |     395   0.83 | ok    | 29 rows 
+events        3     215     264     315 |     266   1.19 | ok    | 37 rows 
+sessions      3     213     241     314 |     264   1.19 | ok    | 245 rows 
+timeline      3     230     251     300 |     441   0.68 | ok    | 1086 spans 
+
+worst single navigation : 5785 ms
+bound                   : 3000 ms
+margin (bound / worst)  : 0.52x   OVER THE BOUND
+tabs over the bound (5) : concurrency, queries, scatter, transitions, waterfall
+tabs that failed to render on >=1 navigation (2): concurrency, transitions
