@@ -1462,6 +1462,24 @@ static void section8_bypass(void)
         seen.refusals_observed++;
         pgwt_block_agg_free(&w);
         if (rc == PGWT_BAGG_OK) pgwt_block_agg_free(&x);
+
+        /* The pair table failing to grow DURING a merge. There is no
+         * rollback, so the accumulator can be left partial — the contract
+         * (block_agg.h) is that the caller discards it. What must never
+         * happen is a PGWT_BAGG_OK return on a merge that did not complete. */
+        struct pgwt_block_agg mx, mw;
+        CHECK(pgwt_block_agg_build(&mx, &b.id, b.type, 1, b.ev, b.n)
+              == PGWT_BAGG_OK, "B10 merge-NOMEM build");
+        pgwt_block_agg_init_window(&mw);
+        setenv("PGWT_TEST_ALLOC_FAIL", "block_agg_pairs_grow", 1);
+        int mrc2 = pgwt_block_agg_merge(&mw, &mx);
+        unsetenv("PGWT_TEST_ALLOC_FAIL");
+        CHECK(mrc2 == PGWT_BAGG_REFUSED_NOMEM,
+              "B10 a merge whose pair table cannot grow must return NOMEM, "
+              "never OK — got %d", mrc2);
+        seen.refusals_observed++;
+        pgwt_block_agg_free(&mw);
+        pgwt_block_agg_free(&mx);
         /* and the readout */
         struct pgwt_block_agg z;
         CHECK(pgwt_block_agg_build(&z, &b.id, b.type, 1, b.ev, b.n)

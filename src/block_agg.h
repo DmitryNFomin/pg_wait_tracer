@@ -267,7 +267,14 @@ int pgwt_block_agg_build(struct pgwt_block_agg *out,
 /* Fold a block aggregate into a window accumulator. Refuses on version
  * mismatch, on an unresolvable or (for a trace-pinned destination) mismatched
  * trace identity, on a destination that is not MODE_WINDOW, and on a block
- * already merged in (the double-count guard). Associative and commutative. */
+ * already merged in (the double-count guard). Associative and commutative.
+ *
+ * ATOMICITY, stated exactly: every refusal EXCEPT PGWT_BAGG_REFUSED_NOMEM
+ * leaves *dst byte-identical, because all of them are decided before a single
+ * number moves. A NOMEM refusal can leave *dst PARTIALLY merged — there is no
+ * rollback — so a caller that sees NOMEM must discard the accumulator and
+ * recompute the request from raw. It must never read the partial numbers:
+ * that would be a short answer wearing a plausible face. */
 int pgwt_block_agg_merge(struct pgwt_block_agg *dst,
                          const struct pgwt_block_agg *src);
 

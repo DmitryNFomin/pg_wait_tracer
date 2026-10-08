@@ -168,6 +168,19 @@ MUTATIONS = [
       "\n"
       "static int cmp_node_total")),
 
+    ("M15",
+     "merge(): a pair table that cannot grow mid-merge returns OK instead of "
+     "NOMEM, so a PARTIAL merge is handed back as a complete answer.",
+     "sec8 B10",
+     ("        rc = pair_add(dst, src->pairs[i].from_event, src->pairs[i].to_event,\n"
+      "                      src->pairs[i].count, src->pairs[i].total_ns);\n"
+      "        if (rc != PGWT_BAGG_OK)\n"
+      "            return rc;",
+      "        rc = pair_add(dst, src->pairs[i].from_event, src->pairs[i].to_event,\n"
+      "                      src->pairs[i].count, src->pairs[i].total_ns);\n"
+      "        if (rc != PGWT_BAGG_OK)\n"
+      "            break;   /* MUTANT: partial merge reported as OK */")),
+
     ("M14",
      "lookup(): an ABSENT pair is reported as present with count 0 -- absence "
      "read as zero, the exact failure C8 forbids.",
