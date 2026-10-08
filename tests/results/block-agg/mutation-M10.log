@@ -1,4 +1,4 @@
-mutation M10
+mutation M10 (src/block_agg.c)
 broken guard: build(): an allocation failure returns OK with a PARTIAL aggregate instead of refusing -- a short answer that looks like a real one.
 expected to be caught by: sec8 B10
 
@@ -34,6 +34,8 @@ test_block_agg — per-committed-block transition aggregate (Phase 1)
     probe 6 (+1 ns on one node       ) disagreements=1
     probe 7 (one node disappears     ) disagreements=2
 === §8 bypass suite: a path that cannot see must refuse ===
+=== §9 on-disk: pgwt_block_agg_window_from_reader vs raw, twice ===
+    190 windows x 2 passes, 396 merges (198 in pass 2), 296 decodes, cache: 1520 lookups / 1482 hits / 64 stores
 === §0 vacuity ledger ===
     windows compared .................. 378
     blocks MERGEd ..................... 480
@@ -43,7 +45,8 @@ test_block_agg — per-committed-block transition aggregate (Phase 1)
     windows with positive total_ns .... 350
     windows with >=1 merged pair ...... 350
     mutation probes that went red ..... 7
-    refusals observed ................. 43
+    refusals observed ................. 46
 FAILED: 2 check(s)
-FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1445: B10 block_agg_pairs_grow must refuse with NOMEM, got 0
-FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1448: B10 block_agg_pairs_grow must leave NO usable aggregate — a short one would be a silently wrong answer
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1499: B10 block_agg_pairs_grow must refuse with NOMEM, got 0
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1502: B10 block_agg_pairs_grow must leave NO usable aggregate — a short one would be a silently wrong answer
+WARN: cannot open /nonexistent/pgwt/no-such.trace: No such file or directory

@@ -1,4 +1,4 @@
-mutation M6
+mutation M6 (src/block_agg.c)
 broken guard: build(): an UNCOMMITTED block (the open block of current.trace) is aggregated (C2 guard removed).
 expected to be caught by: sec8 B4
 
@@ -29,6 +29,8 @@ test_block_agg — per-committed-block transition aggregate (Phase 1)
     probe 6 (+1 ns on one node       ) disagreements=1
     probe 7 (one node disappears     ) disagreements=2
 === §8 bypass suite: a path that cannot see must refuse ===
+=== §9 on-disk: pgwt_block_agg_window_from_reader vs raw, twice ===
+    190 windows x 2 passes, 396 merges (198 in pass 2), 296 decodes, cache: 1520 lookups / 1482 hits / 64 stores
 === §0 vacuity ledger ===
     windows compared .................. 378
     blocks MERGEd ..................... 480
@@ -38,7 +40,8 @@ test_block_agg — per-committed-block transition aggregate (Phase 1)
     windows with positive total_ns .... 350
     windows with >=1 merged pair ...... 350
     mutation probes that went red ..... 7
-    refusals observed ................. 43
+    refusals observed ................. 46
 FAILED: 2 check(s)
-FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1275: B4 uncommitted must be refused
-FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1276: B4 no usable aggregate
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1329: B4 uncommitted must be refused
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1330: B4 no usable aggregate
+WARN: cannot open /nonexistent/pgwt/no-such.trace: No such file or directory

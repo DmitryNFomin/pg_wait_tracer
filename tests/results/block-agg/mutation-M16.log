@@ -1,13 +1,18 @@
-mutation M3 (src/block_agg.c)
-broken guard: merge(): the double-count guard is removed, so the same block can be folded in twice.
-expected to be caught by: sec8 B9
+mutation M16 (src/block_agg.c)
+broken guard: window_from_reader(): a SAMPLES block that OVERLAPS the window is skipped instead of refused. The tables stay right and the caller's fidelity label goes wrong -- a wrong label on a right number.
+expected to be caught by: sec9
 
---- for (int i = 0; i < a->n_keys; i++)
-        if (key_equal(&a->keys[i], k))
-            return PGWT_BAGG_REFUSED_DUPLICATE;
-+++ /* MUTANT: duplicate guard removed */
+--- if (bi.block_type != PGWT_BLOCK_TRANSITIONS) {
+            if (overlaps) {
+                rc = PGWT_BAGG_REFUSED_BLOCK_TYPE;
+                break;
+            }
+            continue;
+        }
++++ if (bi.block_type != PGWT_BLOCK_TRANSITIONS)
+            continue;   /* MUTANT: overlapping SAMPLES block skipped */
 
-exit=1, 3 FAIL line(s)
+exit=1, 1 FAIL line(s)
 
 test_block_agg — per-committed-block transition aggregate (Phase 1)
 === §1 record predicate vs pgwt_compute_transitions ===
@@ -42,8 +47,6 @@ test_block_agg — per-committed-block transition aggregate (Phase 1)
     windows with >=1 merged pair ...... 350
     mutation probes that went red ..... 7
     refusals observed ................. 46
-FAILED: 3 check(s)
-FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1471: B9 merging the same block twice must be REFUSED
-FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1474: B9 the refused duplicate must leave the accumulator untouched
-FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1481: B9 a re-read of the same block is still a duplicate
+FAILED: 1 check(s)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:2065: §9 an overlapping SAMPLES block must be REFUSED, got 0
 WARN: cannot open /nonexistent/pgwt/no-such.trace: No such file or directory

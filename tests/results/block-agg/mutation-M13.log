@@ -1,4 +1,4 @@
-mutation M13
+mutation M13 (src/block_agg.c)
 broken guard: pairs_sorted(): the total order is reduced to count-only, so the readout depends on hash-table layout and merge order.
 expected to be caught by: sec3
 
@@ -15,7 +15,7 @@ stati
 
 static int cmp_node_total
 
-exit=1, 5 FAIL line(s)
+exit=1, 13 FAIL line(s)
 
 test_block_agg — per-committed-block transition aggregate (Phase 1)
 === §1 record predicate vs pgwt_compute_transitions ===
@@ -38,6 +38,8 @@ test_block_agg — per-committed-block transition aggregate (Phase 1)
     probe 6 (+1 ns on one node       ) disagreements=1
     probe 7 (one node disappears     ) disagreements=2
 === §8 bypass suite: a path that cannot see must refuse ===
+=== §9 on-disk: pgwt_block_agg_window_from_reader vs raw, twice ===
+    190 windows x 2 passes, 396 merges (198 in pass 2), 296 decodes, cache: 1520 lookups / 1482 hits / 64 stores
 === §0 vacuity ledger ===
     windows compared .................. 378
     blocks MERGEd ..................... 480
@@ -47,10 +49,19 @@ test_block_agg — per-committed-block transition aggregate (Phase 1)
     windows with positive total_ns .... 350
     windows with >=1 merged pair ...... 350
     mutation probes that went red ..... 7
-    refusals observed ................. 43
-FAILED: 5 check(s)
-FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:707: §3b rows 0/1 violate the documented total order (count desc, from asc, to asc): (50331649->0, 1) then (16777217->167772161, 1)
-FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:707: §3b rows 2/3 violate the documented total order (count desc, from asc, to asc): (167772162->0, 1) then (0->167772161, 1)
-FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:707: §3b rows 4/5 violate the documented total order (count desc, from asc, to asc): (100663296->0, 1) then (50331649->167772161, 1)
-FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:707: §3b rows 5/6 violate the documented total order (count desc, from asc, to asc): (50331649->167772161, 1) then (16777217->0, 1)
-FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:707: §3b rows 7/8 violate the documented total order (count desc, from asc, to asc): (167772161->0, 1) then (100663296->167772161, 1)
+    refusals observed ................. 46
+FAILED: 13 check(s)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:715: §3b rows 0/1 violate the documented total order (count desc, from asc, to asc): (50331649->0, 1) then (16777217->167772161, 1)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:715: §3b rows 2/3 violate the documented total order (count desc, from asc, to asc): (167772162->0, 1) then (0->167772161, 1)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:715: §3b rows 4/5 violate the documented total order (count desc, from asc, to asc): (100663296->0, 1) then (50331649->167772161, 1)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:715: §3b rows 5/6 violate the documented total order (count desc, from asc, to asc): (50331649->167772161, 1) then (16777217->0, 1)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:715: §3b rows 7/8 violate the documented total order (count desc, from asc, to asc): (167772161->0, 1) then (100663296->167772161, 1)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:774: §3c row 0 differs: raw 0->167772161, aggregate 50331649->0
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:774: §3c row 1 differs: raw 16777217->0, aggregate 16777217->167772161
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:774: §3c row 2 differs: raw 16777217->167772161, aggregate 167772162->0
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:774: §3c row 3 differs: raw 50331649->0, aggregate 0->167772161
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:774: §3c row 4 differs: raw 50331649->167772161, aggregate 100663296->0
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:774: §3c row 5 differs: raw 100663296->0, aggregate 50331649->167772161
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:774: §3c row 6 differs: raw 100663296->167772161, aggregate 16777217->0
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:774: §3c row 8 differs: raw 167772162->0, aggregate 100663296->167772161
+WARN: cannot open /nonexistent/pgwt/no-such.trace: No such file or directory

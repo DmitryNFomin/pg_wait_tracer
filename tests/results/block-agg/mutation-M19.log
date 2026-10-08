@@ -1,0 +1,766 @@
+mutation M19 (src/block_agg.c)
+broken guard: add_events(): the half-open window test becomes inclusive at the end, so a boundary block contributes the record at ts == to that the raw path excludes -- the #316 shape, on the decode side this time.
+expected to be caught by: sec6/sec9
+
+--- if (!pgwt_block_agg_in_window(&events[i], from_mono_ns, to_mono_ns))
+            continue;
++++ if (events[i].timestamp_ns < from_mono_ns ||
+            events[i].timestamp_ns > to_mono_ns)
+            continue;   /* MUTANT: inclusive end */
+
+exit=1, 261 FAIL line(s)
+
+test_block_agg — per-committed-block transition aggregate (Phase 1)
+=== §1 record predicate vs pgwt_compute_transitions ===
+    6 counted, 7 rejected, both predicates agreeing on all 13
+=== §2 build + merge against literal expected values ===
+=== §3 merge associativity + commutativity ===
+=== §4 straddle: a pair whose old_event began in an earlier block ===
+=== §5 plan(): exactly one of SKIP/MERGE/DECODE per block ===
+    plan outcomes over 378 windows: merge=480 decode=335 skip=1075
+=== §6 model: merged + decoded == raw, bit-exact, every window ===
+    378 windows compared, 159 of them at a merge/decode seam
+=== §6b the loader's inclusive end bound: the divergence, with a literal ===
+=== §7 mutation probes: the comparator can see one count, one nanosecond, one pair ===
+    probe 0 (clean (control)         ) disagreements=0
+    probe 1 (+1 on one pair count    ) disagreements=2
+    probe 2 (+1 ns on one pair       ) disagreements=1
+    probe 3 (-1 ns on one pair       ) disagreements=1
+    probe 4 (an extra pair appears   ) disagreements=4
+    probe 5 (one pair disappears     ) disagreements=2
+    probe 6 (+1 ns on one node       ) disagreements=1
+    probe 7 (one node disappears     ) disagreements=2
+=== §8 bypass suite: a path that cannot see must refuse ===
+=== §9 on-disk: pgwt_block_agg_window_from_reader vs raw, twice ===
+    190 windows x 2 passes, 396 merges (198 in pass 2), 296 decodes, cache: 1520 lookups / 1482 hits / 64 stores
+=== §0 vacuity ledger ===
+    windows compared .................. 378
+    blocks MERGEd ..................... 480
+    blocks DECODEd .................... 335
+    blocks SKIPped .................... 1075
+    windows at a merge/decode seam .... 159
+    windows with positive total_ns .... 350
+    windows with >=1 merged pair ...... 350
+    mutation probes that went red ..... 7
+    refusals observed ................. 46
+FAILED: 261 check(s)
+§9 pass 1 window [1699999999999999999, 1700000000000001000) merge=0 decode=1:
+  total_transitions agg=2 raw=1
+  distinct pairs agg=2 raw=1
+  pair 167772161->0 present only in aggregate
+  node count agg=2 raw=1
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 1 window [1699999999999999999, 1700000000000001000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 2 != 1 admitted
+§9 pass 1 window [1699999999999999999, 1700000000004095000) merge=0 decode=1:
+  total_transitions agg=2946 raw=2945
+  pair 50331649->167772161 count agg=99 raw=98
+  pair 50331649->167772161 ns agg=214704 raw=210508
+  node 50331649 agg=(489,1054242) raw=(488,1050046)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 1 window [1699999999999999999, 1700000000004095000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 4096 != 4095 admitted
+§9 pass 1 window [1699999999999999999, 1700000000004097000) merge=1 decode=1:
+  node 167772161 agg=(811,1529288) raw=(810,1528179)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 1 window [1699999999999999999, 1700000000004097000): 1 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 4098 != 4097 admitted
+§9 pass 1 window [1699999999999999999, 1700000000008191000) merge=1 decode=1:
+  total_transitions agg=5892 raw=5891
+  pair 167772161->0 count agg=196 raw=195
+  pair 167772161->0 ns agg=819282 raw=810990
+  node 167772161 agg=(1622,5075165) raw=(1621,5066873)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 1 window [1699999999999999999, 1700000000008191000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 8192 != 8191 admitted
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 8194 != 8193 admitted
+§9 pass 1 window [1699999999999999999, 1700000000012287000) merge=2 decode=1:
+  total_transitions agg=8839 raw=8838
+  pair 167772162->16777217 count agg=293 raw=292
+  pair 167772162->16777217 ns agg=1155832 raw=1152617
+  node 167772162 agg=(1474,5785709) raw=(1473,5782494)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 1 window [1699999999999999999, 1700000000012287000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 12288 != 12287 admitted
+§9 pass 1 window [1699999999999999999, 1700000000012289000) merge=3 decode=1:
+  total_transitions agg=8840 raw=8839
+  pair 167772161->50331649 count agg=295 raw=294
+  pair 167772161->50331649 ns agg=1157558 raw=1154341
+  node 167772161 agg=(2432,7194966) raw=(2431,7191749)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 1 window [1699999999999999999, 1700000000012289000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 12290 != 12289 admitted
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 16384 != 16383 admitted
+§9 pass 1 window [1700000000000000000, 1700000000000001000) merge=0 decode=1:
+  total_transitions agg=2 raw=1
+  distinct pairs agg=2 raw=1
+  pair 167772161->0 present only in aggregate
+  node count agg=2 raw=1
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 1 window [1700000000000000000, 1700000000000001000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 2 != 1 admitted
+§9 pass 1 window [1700000000000000000, 1700000000004095000) merge=0 decode=1:
+  total_transitions agg=2946 raw=2945
+  pair 50331649->167772161 count agg=99 raw=98
+  pair 50331649->167772161 ns agg=214704 raw=210508
+  node 50331649 agg=(489,1054242) raw=(488,1050046)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 1 window [1700000000000000000, 1700000000004095000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 4096 != 4095 admitted
+§9 pass 1 window [1700000000000000000, 1700000000004097000) merge=1 decode=1:
+  node 167772161 agg=(811,1529288) raw=(810,1528179)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 1 window [1700000000000000000, 1700000000004097000): 1 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 4098 != 4097 admitted
+§9 pass 1 window [1700000000000000000, 1700000000008191000) merge=1 decode=1:
+  total_transitions agg=5892 raw=5891
+  pair 167772161->0 count agg=196 raw=195
+  pair 167772161->0 ns agg=819282 raw=810990
+  node 167772161 agg=(1622,5075165) raw=(1621,5066873)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 1 window [1700000000000000000, 1700000000008191000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 8192 != 8191 admitted
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 8194 != 8193 admitted
+§9 pass 1 window [1700000000000000000, 1700000000012287000) merge=2 decode=1:
+  total_transitions agg=8839 raw=8838
+  pair 167772162->16777217 count agg=293 raw=292
+  pair 167772162->16777217 ns agg=1155832 raw=1152617
+  node 167772162 agg=(1474,5785709) raw=(1473,5782494)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 1 window [1700000000000000000, 1700000000012287000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 12288 != 12287 admitted
+§9 pass 1 window [1700000000000000000, 1700000000012289000) merge=3 decode=1:
+  total_transitions agg=8840 raw=8839
+  pair 167772161->50331649 count agg=295 raw=294
+  pair 167772161->50331649 ns agg=1157558 raw=1154341
+  node 167772161 agg=(2432,7194966) raw=(2431,7191749)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 1 window [1700000000000000000, 1700000000012289000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 12290 != 12289 admitted
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 16384 != 16383 admitted
+§9 pass 1 window [1700000000000001000, 1700000000004095000) merge=0 decode=1:
+  total_transitions agg=2945 raw=2944
+  pair 50331649->167772161 count agg=99 raw=98
+  pair 50331649->167772161 ns agg=214704 raw=210508
+  node 50331649 agg=(489,1054242) raw=(488,1050046)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 1 window [1700000000000001000, 1700000000004095000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 4095 != 4094 admitted
+§9 pass 1 window [1700000000000001000, 1700000000004097000) merge=0 decode=2:
+  node 167772161 agg=(811,1529288) raw=(810,1528179)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 1 window [1700000000000001000, 1700000000004097000): 1 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 4097 != 4096 admitted
+§9 pass 1 window [1700000000000001000, 1700000000008191000) merge=0 decode=2:
+  total_transitions agg=5891 raw=5890
+  pair 167772161->0 count agg=196 raw=195
+  pair 167772161->0 ns agg=819282 raw=810990
+  node 167772161 agg=(1622,5075165) raw=(1621,5066873)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 1 window [1700000000000001000, 1700000000008191000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 8191 != 8190 admitted
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 8193 != 8192 admitted
+§9 pass 1 window [1700000000000001000, 1700000000012287000) merge=1 decode=2:
+  total_transitions agg=8838 raw=8837
+  pair 167772162->16777217 count agg=293 raw=292
+  pair 167772162->16777217 ns agg=1155832 raw=1152617
+  node 167772162 agg=(1474,5785709) raw=(1473,5782494)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 1 window [1700000000000001000, 1700000000012287000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 12287 != 12286 admitted
+§9 pass 1 window [1700000000000001000, 1700000000012289000) merge=2 decode=2:
+  total_transitions agg=8839 raw=8838
+  pair 167772161->50331649 count agg=295 raw=294
+  pair 167772161->50331649 ns agg=1157558 raw=1154341
+  node 167772161 agg=(2432,7194966) raw=(2431,7191749)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 1 window [1700000000000001000, 1700000000012289000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 12289 != 12288 admitted
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 16383 != 16382 admitted
+§9 pass 1 window [1700000000004095000, 1700000000004097000) merge=0 decode=2:
+  node count agg=3 raw=2
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 1 window [1700000000004095000, 1700000000004097000): 1 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 3 != 2 admitted
+§9 pass 1 window [1700000000004095000, 1700000000008191000) merge=0 decode=2:
+  total_transitions agg=2947 raw=2946
+  pair 167772161->0 count agg=97 raw=96
+  pair 167772161->0 ns agg=605574 raw=597282
+  node 167772161 agg=(812,3546986) raw=(811,3538694)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 1 window [1700000000004095000, 1700000000008191000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 4097 != 4096 admitted
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 4099 != 4098 admitted
+§9 pass 1 window [1700000000004095000, 1700000000012287000) merge=1 decode=2:
+  total_transitions agg=5894 raw=5893
+  pair 167772162->16777217 count agg=197 raw=196
+  pair 167772162->16777217 ns agg=951094 raw=947879
+  node 167772162 agg=(982,4728107) raw=(981,4724892)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 1 window [1700000000004095000, 1700000000012287000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 8193 != 8192 admitted
+§9 pass 1 window [1700000000004095000, 1700000000012289000) merge=2 decode=2:
+  total_transitions agg=5895 raw=5894
+  pair 167772161->50331649 count agg=197 raw=196
+  pair 167772161->50331649 ns agg=949508 raw=946291
+  node 167772161 agg=(1622,5666787) raw=(1621,5663570)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 1 window [1700000000004095000, 1700000000012289000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 8195 != 8194 admitted
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 12289 != 12288 admitted
+§9 pass 1 window [1700000000004095001, 1700000000004097000) merge=0 decode=1:
+  node count agg=2 raw=1
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 1 window [1700000000004095001, 1700000000004097000): 1 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 2 != 1 admitted
+§9 pass 1 window [1700000000004095001, 1700000000008191000) merge=0 decode=1:
+  total_transitions agg=2946 raw=2945
+  pair 167772161->0 count agg=97 raw=96
+  pair 167772161->0 ns agg=605574 raw=597282
+  node 167772161 agg=(812,3546986) raw=(811,3538694)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 1 window [1700000000004095001, 1700000000008191000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 4096 != 4095 admitted
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 4098 != 4097 admitted
+§9 pass 1 window [1700000000004095001, 1700000000012287000) merge=1 decode=1:
+  total_transitions agg=5893 raw=5892
+  pair 167772162->16777217 count agg=197 raw=196
+  pair 167772162->16777217 ns agg=951094 raw=947879
+  node 167772162 agg=(982,4728107) raw=(981,4724892)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 1 window [1700000000004095001, 1700000000012287000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 8192 != 8191 admitted
+§9 pass 1 window [1700000000004095001, 1700000000012289000) merge=2 decode=1:
+  total_transitions agg=5894 raw=5893
+  pair 167772161->50331649 count agg=197 raw=196
+  pair 167772161->50331649 ns agg=949508 raw=946291
+  node 167772161 agg=(1622,5666787) raw=(1621,5663570)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 1 window [1700000000004095001, 1700000000012289000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 8194 != 8193 admitted
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 12288 != 12287 admitted
+§9 pass 1 window [1700000000004095999, 1700000000004097000) merge=0 decode=1:
+  node count agg=2 raw=1
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 1 window [1700000000004095999, 1700000000004097000): 1 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 2 != 1 admitted
+§9 pass 1 window [1700000000004095999, 1700000000008191000) merge=0 decode=1:
+  total_transitions agg=2946 raw=2945
+  pair 167772161->0 count agg=97 raw=96
+  pair 167772161->0 ns agg=605574 raw=597282
+  node 167772161 agg=(812,3546986) raw=(811,3538694)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 1 window [1700000000004095999, 1700000000008191000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 4096 != 4095 admitted
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 4098 != 4097 admitted
+§9 pass 1 window [1700000000004095999, 1700000000012287000) merge=1 decode=1:
+  total_transitions agg=5893 raw=5892
+  pair 167772162->16777217 count agg=197 raw=196
+  pair 167772162->16777217 ns agg=951094 raw=947879
+  node 167772162 agg=(982,4728107) raw=(981,4724892)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 1 window [1700000000004095999, 1700000000012287000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 8192 != 8191 admitted
+§9 pass 1 window [1700000000004095999, 1700000000012289000) merge=2 decode=1:
+  total_transitions agg=5894 raw=5893
+  pair 167772161->50331649 count agg=197 raw=196
+  pair 167772161->50331649 ns agg=949508 raw=946291
+  node 167772161 agg=(1622,5666787) raw=(1621,5663570)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 1 window [1700000000004095999, 1700000000012289000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 8194 != 8193 admitted
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 12288 != 12287 admitted
+§9 pass 1 window [1700000000004096000, 1700000000004097000) merge=0 decode=1:
+  node count agg=2 raw=1
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 1 window [1700000000004096000, 1700000000004097000): 1 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 2 != 1 admitted
+§9 pass 1 window [1700000000004096000, 1700000000008191000) merge=0 decode=1:
+  total_transitions agg=2946 raw=2945
+  pair 167772161->0 count agg=97 raw=96
+  pair 167772161->0 ns agg=605574 raw=597282
+  node 167772161 agg=(812,3546986) raw=(811,3538694)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 1 window [1700000000004096000, 1700000000008191000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 4096 != 4095 admitted
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 4098 != 4097 admitted
+§9 pass 1 window [1700000000004096000, 1700000000012287000) merge=1 decode=1:
+  total_transitions agg=5893 raw=5892
+  pair 167772162->16777217 count agg=197 raw=196
+  pair 167772162->16777217 ns agg=951094 raw=947879
+  node 167772162 agg=(982,4728107) raw=(981,4724892)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 1 window [1700000000004096000, 1700000000012287000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 8192 != 8191 admitted
+§9 pass 1 window [1700000000004096000, 1700000000012289000) merge=2 decode=1:
+  total_transitions agg=5894 raw=5893
+  pair 167772161->50331649 count agg=197 raw=196
+  pair 167772161->50331649 ns agg=949508 raw=946291
+  node 167772161 agg=(1622,5666787) raw=(1621,5663570)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 1 window [1700000000004096000, 1700000000012289000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 8194 != 8193 admitted
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 12288 != 12287 admitted
+§9 pass 1 window [1700000000004097000, 1700000000008191000) merge=0 decode=1:
+  total_transitions agg=2945 raw=2944
+  pair 167772161->0 count agg=97 raw=96
+  pair 167772161->0 ns agg=605574 raw=597282
+  node 167772161 agg=(812,3546986) raw=(811,3538694)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 1 window [1700000000004097000, 1700000000008191000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 4095 != 4094 admitted
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 4097 != 4096 admitted
+§9 pass 1 window [1700000000004097000, 1700000000012287000) merge=0 decode=2:
+  total_transitions agg=5892 raw=5891
+  pair 167772162->16777217 count agg=197 raw=196
+  pair 167772162->16777217 ns agg=951094 raw=947879
+  node 167772162 agg=(982,4728107) raw=(981,4724892)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 1 window [1700000000004097000, 1700000000012287000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 8191 != 8190 admitted
+§9 pass 1 window [1700000000004097000, 1700000000012289000) merge=1 decode=2:
+  total_transitions agg=5893 raw=5892
+  pair 167772161->50331649 count agg=197 raw=196
+  pair 167772161->50331649 ns agg=949508 raw=946291
+  node 167772161 agg=(1622,5666787) raw=(1621,5663570)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 1 window [1700000000004097000, 1700000000012289000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 8193 != 8192 admitted
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 12287 != 12286 admitted
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 3 != 2 admitted
+§9 pass 1 window [1700000000008191000, 1700000000012287000) merge=0 decode=2:
+  total_transitions agg=2948 raw=2947
+  pair 167772162->16777217 count agg=98 raw=97
+  pair 167772162->16777217 ns agg=334432 raw=331217
+  node 167772162 agg=(492,1666771) raw=(491,1663556)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 1 window [1700000000008191000, 1700000000012287000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 4097 != 4096 admitted
+§9 pass 1 window [1700000000008191000, 1700000000012289000) merge=1 decode=2:
+  total_transitions agg=2949 raw=2948
+  pair 167772161->50331649 count agg=98 raw=97
+  pair 167772161->50331649 ns agg=333278 raw=330061
+  node 167772161 agg=(811,2128093) raw=(810,2124876)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 1 window [1700000000008191000, 1700000000012289000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 4099 != 4098 admitted
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 8193 != 8192 admitted
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 2 != 1 admitted
+§9 pass 1 window [1700000000008191001, 1700000000012287000) merge=0 decode=1:
+  total_transitions agg=2947 raw=2946
+  pair 167772162->16777217 count agg=98 raw=97
+  pair 167772162->16777217 ns agg=334432 raw=331217
+  node 167772162 agg=(492,1666771) raw=(491,1663556)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 1 window [1700000000008191001, 1700000000012287000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 4096 != 4095 admitted
+§9 pass 1 window [1700000000008191001, 1700000000012289000) merge=1 decode=1:
+  total_transitions agg=2948 raw=2947
+  pair 167772161->50331649 count agg=98 raw=97
+  pair 167772161->50331649 ns agg=333278 raw=330061
+  node 167772161 agg=(810,2119801) raw=(809,2116584)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 1 window [1700000000008191001, 1700000000012289000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 4098 != 4097 admitted
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 8192 != 8191 admitted
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 2 != 1 admitted
+§9 pass 1 window [1700000000008191999, 1700000000012287000) merge=0 decode=1:
+  total_transitions agg=2947 raw=2946
+  pair 167772162->16777217 count agg=98 raw=97
+  pair 167772162->16777217 ns agg=334432 raw=331217
+  node 167772162 agg=(492,1666771) raw=(491,1663556)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 1 window [1700000000008191999, 1700000000012287000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 4096 != 4095 admitted
+§9 pass 1 window [1700000000008191999, 1700000000012289000) merge=1 decode=1:
+  total_transitions agg=2948 raw=2947
+  pair 167772161->50331649 count agg=98 raw=97
+  pair 167772161->50331649 ns agg=333278 raw=330061
+  node 167772161 agg=(810,2119801) raw=(809,2116584)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 1 window [1700000000008191999, 1700000000012289000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 4098 != 4097 admitted
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 8192 != 8191 admitted
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 2 != 1 admitted
+§9 pass 1 window [1700000000008192000, 1700000000012287000) merge=0 decode=1:
+  total_transitions agg=2947 raw=2946
+  pair 167772162->16777217 count agg=98 raw=97
+  pair 167772162->16777217 ns agg=334432 raw=331217
+  node 167772162 agg=(492,1666771) raw=(491,1663556)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 1 window [1700000000008192000, 1700000000012287000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 4096 != 4095 admitted
+§9 pass 1 window [1700000000008192000, 1700000000012289000) merge=1 decode=1:
+  total_transitions agg=2948 raw=2947
+  pair 167772161->50331649 count agg=98 raw=97
+  pair 167772161->50331649 ns agg=333278 raw=330061
+  node 167772161 agg=(810,2119801) raw=(809,2116584)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 1 window [1700000000008192000, 1700000000012289000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 4098 != 4097 admitted
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 8192 != 8191 admitted
+§9 pass 1 window [1700000000008193000, 1700000000012287000) merge=0 decode=1:
+  total_transitions agg=2946 raw=2945
+  pair 167772162->16777217 count agg=98 raw=97
+  pair 167772162->16777217 ns agg=334432 raw=331217
+  node 167772162 agg=(492,1666771) raw=(491,1663556)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 1 window [1700000000008193000, 1700000000012287000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 4095 != 4094 admitted
+§9 pass 1 window [1700000000008193000, 1700000000012289000) merge=0 decode=2:
+  total_transitions agg=2947 raw=2946
+  pair 167772161->50331649 count agg=98 raw=97
+  pair 167772161->50331649 ns agg=333278 raw=330061
+  node 167772161 agg=(810,2119801) raw=(809,2116584)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 1 window [1700000000008193000, 1700000000012289000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 4097 != 4096 admitted
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 8191 != 8190 admitted
+§9 pass 1 window [1700000000012287000, 1700000000012289000) merge=0 decode=2:
+  total_transitions agg=2 raw=1
+  distinct pairs agg=2 raw=1
+  pair 167772161->50331649 present only in aggregate
+  node count agg=2 raw=1
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 1 window [1700000000012287000, 1700000000012289000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 3 != 2 admitted
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 4097 != 4096 admitted
+§9 pass 1 window [1700000000012287001, 1700000000012289000) merge=0 decode=1:
+  total_transitions agg=1 raw=0
+  distinct pairs agg=1 raw=0
+  pair 167772161->50331649 present only in aggregate
+  node count agg=1 raw=0
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 1 window [1700000000012287001, 1700000000012289000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 2 != 1 admitted
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 4096 != 4095 admitted
+§9 pass 1 window [1700000000012287999, 1700000000012289000) merge=0 decode=1:
+  total_transitions agg=1 raw=0
+  distinct pairs agg=1 raw=0
+  pair 167772161->50331649 present only in aggregate
+  node count agg=1 raw=0
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 1 window [1700000000012287999, 1700000000012289000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 2 != 1 admitted
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 4096 != 4095 admitted
+§9 pass 1 window [1700000000012288000, 1700000000012289000) merge=0 decode=1:
+  total_transitions agg=1 raw=0
+  distinct pairs agg=1 raw=0
+  pair 167772161->50331649 present only in aggregate
+  node count agg=1 raw=0
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 1 window [1700000000012288000, 1700000000012289000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 2 != 1 admitted
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 4096 != 4095 admitted
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 4095 != 4094 admitted
+§9 pass 2 window [1699999999999999999, 1700000000000001000) merge=0 decode=1:
+  total_transitions agg=2 raw=1
+  distinct pairs agg=2 raw=1
+  pair 167772161->0 present only in aggregate
+  node count agg=2 raw=1
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 2 window [1699999999999999999, 1700000000000001000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 2 != 1 admitted
+§9 pass 2 window [1699999999999999999, 1700000000004095000) merge=0 decode=1:
+  total_transitions agg=2946 raw=2945
+  pair 50331649->167772161 count agg=99 raw=98
+  pair 50331649->167772161 ns agg=214704 raw=210508
+  node 50331649 agg=(489,1054242) raw=(488,1050046)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 2 window [1699999999999999999, 1700000000004095000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 4096 != 4095 admitted
+§9 pass 2 window [1699999999999999999, 1700000000004097000) merge=1 decode=1:
+  node 167772161 agg=(811,1529288) raw=(810,1528179)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 2 window [1699999999999999999, 1700000000004097000): 1 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 4098 != 4097 admitted
+§9 pass 2 window [1699999999999999999, 1700000000008191000) merge=1 decode=1:
+  total_transitions agg=5892 raw=5891
+  pair 167772161->0 count agg=196 raw=195
+  pair 167772161->0 ns agg=819282 raw=810990
+  node 167772161 agg=(1622,5075165) raw=(1621,5066873)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 2 window [1699999999999999999, 1700000000008191000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 8192 != 8191 admitted
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 8194 != 8193 admitted
+§9 pass 2 window [1699999999999999999, 1700000000012287000) merge=2 decode=1:
+  total_transitions agg=8839 raw=8838
+  pair 167772162->16777217 count agg=293 raw=292
+  pair 167772162->16777217 ns agg=1155832 raw=1152617
+  node 167772162 agg=(1474,5785709) raw=(1473,5782494)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 2 window [1699999999999999999, 1700000000012287000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 12288 != 12287 admitted
+§9 pass 2 window [1699999999999999999, 1700000000012289000) merge=3 decode=1:
+  total_transitions agg=8840 raw=8839
+  pair 167772161->50331649 count agg=295 raw=294
+  pair 167772161->50331649 ns agg=1157558 raw=1154341
+  node 167772161 agg=(2432,7194966) raw=(2431,7191749)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 2 window [1699999999999999999, 1700000000012289000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 12290 != 12289 admitted
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 16384 != 16383 admitted
+§9 pass 2 window [1700000000000000000, 1700000000000001000) merge=0 decode=1:
+  total_transitions agg=2 raw=1
+  distinct pairs agg=2 raw=1
+  pair 167772161->0 present only in aggregate
+  node count agg=2 raw=1
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 2 window [1700000000000000000, 1700000000000001000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 2 != 1 admitted
+§9 pass 2 window [1700000000000000000, 1700000000004095000) merge=0 decode=1:
+  total_transitions agg=2946 raw=2945
+  pair 50331649->167772161 count agg=99 raw=98
+  pair 50331649->167772161 ns agg=214704 raw=210508
+  node 50331649 agg=(489,1054242) raw=(488,1050046)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 2 window [1700000000000000000, 1700000000004095000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 4096 != 4095 admitted
+§9 pass 2 window [1700000000000000000, 1700000000004097000) merge=1 decode=1:
+  node 167772161 agg=(811,1529288) raw=(810,1528179)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 2 window [1700000000000000000, 1700000000004097000): 1 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 4098 != 4097 admitted
+§9 pass 2 window [1700000000000000000, 1700000000008191000) merge=1 decode=1:
+  total_transitions agg=5892 raw=5891
+  pair 167772161->0 count agg=196 raw=195
+  pair 167772161->0 ns agg=819282 raw=810990
+  node 167772161 agg=(1622,5075165) raw=(1621,5066873)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 2 window [1700000000000000000, 1700000000008191000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 8192 != 8191 admitted
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 8194 != 8193 admitted
+§9 pass 2 window [1700000000000000000, 1700000000012287000) merge=2 decode=1:
+  total_transitions agg=8839 raw=8838
+  pair 167772162->16777217 count agg=293 raw=292
+  pair 167772162->16777217 ns agg=1155832 raw=1152617
+  node 167772162 agg=(1474,5785709) raw=(1473,5782494)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 2 window [1700000000000000000, 1700000000012287000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 12288 != 12287 admitted
+§9 pass 2 window [1700000000000000000, 1700000000012289000) merge=3 decode=1:
+  total_transitions agg=8840 raw=8839
+  pair 167772161->50331649 count agg=295 raw=294
+  pair 167772161->50331649 ns agg=1157558 raw=1154341
+  node 167772161 agg=(2432,7194966) raw=(2431,7191749)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 2 window [1700000000000000000, 1700000000012289000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 12290 != 12289 admitted
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 16384 != 16383 admitted
+§9 pass 2 window [1700000000000001000, 1700000000004095000) merge=0 decode=1:
+  total_transitions agg=2945 raw=2944
+  pair 50331649->167772161 count agg=99 raw=98
+  pair 50331649->167772161 ns agg=214704 raw=210508
+  node 50331649 agg=(489,1054242) raw=(488,1050046)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 2 window [1700000000000001000, 1700000000004095000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 4095 != 4094 admitted
+§9 pass 2 window [1700000000000001000, 1700000000004097000) merge=0 decode=2:
+  node 167772161 agg=(811,1529288) raw=(810,1528179)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 2 window [1700000000000001000, 1700000000004097000): 1 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 4097 != 4096 admitted
+§9 pass 2 window [1700000000000001000, 1700000000008191000) merge=0 decode=2:
+  total_transitions agg=5891 raw=5890
+  pair 167772161->0 count agg=196 raw=195
+  pair 167772161->0 ns agg=819282 raw=810990
+  node 167772161 agg=(1622,5075165) raw=(1621,5066873)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 2 window [1700000000000001000, 1700000000008191000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 8191 != 8190 admitted
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 8193 != 8192 admitted
+§9 pass 2 window [1700000000000001000, 1700000000012287000) merge=1 decode=2:
+  total_transitions agg=8838 raw=8837
+  pair 167772162->16777217 count agg=293 raw=292
+  pair 167772162->16777217 ns agg=1155832 raw=1152617
+  node 167772162 agg=(1474,5785709) raw=(1473,5782494)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 2 window [1700000000000001000, 1700000000012287000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 12287 != 12286 admitted
+§9 pass 2 window [1700000000000001000, 1700000000012289000) merge=2 decode=2:
+  total_transitions agg=8839 raw=8838
+  pair 167772161->50331649 count agg=295 raw=294
+  pair 167772161->50331649 ns agg=1157558 raw=1154341
+  node 167772161 agg=(2432,7194966) raw=(2431,7191749)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 2 window [1700000000000001000, 1700000000012289000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 12289 != 12288 admitted
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 16383 != 16382 admitted
+§9 pass 2 window [1700000000004095000, 1700000000004097000) merge=0 decode=2:
+  node count agg=3 raw=2
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 2 window [1700000000004095000, 1700000000004097000): 1 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 3 != 2 admitted
+§9 pass 2 window [1700000000004095000, 1700000000008191000) merge=0 decode=2:
+  total_transitions agg=2947 raw=2946
+  pair 167772161->0 count agg=97 raw=96
+  pair 167772161->0 ns agg=605574 raw=597282
+  node 167772161 agg=(812,3546986) raw=(811,3538694)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 2 window [1700000000004095000, 1700000000008191000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 4097 != 4096 admitted
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 4099 != 4098 admitted
+§9 pass 2 window [1700000000004095000, 1700000000012287000) merge=1 decode=2:
+  total_transitions agg=5894 raw=5893
+  pair 167772162->16777217 count agg=197 raw=196
+  pair 167772162->16777217 ns agg=951094 raw=947879
+  node 167772162 agg=(982,4728107) raw=(981,4724892)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 2 window [1700000000004095000, 1700000000012287000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 8193 != 8192 admitted
+§9 pass 2 window [1700000000004095000, 1700000000012289000) merge=2 decode=2:
+  total_transitions agg=5895 raw=5894
+  pair 167772161->50331649 count agg=197 raw=196
+  pair 167772161->50331649 ns agg=949508 raw=946291
+  node 167772161 agg=(1622,5666787) raw=(1621,5663570)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 2 window [1700000000004095000, 1700000000012289000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 8195 != 8194 admitted
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 12289 != 12288 admitted
+§9 pass 2 window [1700000000004095001, 1700000000004097000) merge=0 decode=1:
+  node count agg=2 raw=1
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 2 window [1700000000004095001, 1700000000004097000): 1 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 2 != 1 admitted
+§9 pass 2 window [1700000000004095001, 1700000000008191000) merge=0 decode=1:
+  total_transitions agg=2946 raw=2945
+  pair 167772161->0 count agg=97 raw=96
+  pair 167772161->0 ns agg=605574 raw=597282
+  node 167772161 agg=(812,3546986) raw=(811,3538694)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 2 window [1700000000004095001, 1700000000008191000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 4096 != 4095 admitted
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 4098 != 4097 admitted
+§9 pass 2 window [1700000000004095001, 1700000000012287000) merge=1 decode=1:
+  total_transitions agg=5893 raw=5892
+  pair 167772162->16777217 count agg=197 raw=196
+  pair 167772162->16777217 ns agg=951094 raw=947879
+  node 167772162 agg=(982,4728107) raw=(981,4724892)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 2 window [1700000000004095001, 1700000000012287000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 8192 != 8191 admitted
+§9 pass 2 window [1700000000004095001, 1700000000012289000) merge=2 decode=1:
+  total_transitions agg=5894 raw=5893
+  pair 167772161->50331649 count agg=197 raw=196
+  pair 167772161->50331649 ns agg=949508 raw=946291
+  node 167772161 agg=(1622,5666787) raw=(1621,5663570)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 2 window [1700000000004095001, 1700000000012289000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 8194 != 8193 admitted
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 12288 != 12287 admitted
+§9 pass 2 window [1700000000004095999, 1700000000004097000) merge=0 decode=1:
+  node count agg=2 raw=1
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 2 window [1700000000004095999, 1700000000004097000): 1 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 2 != 1 admitted
+§9 pass 2 window [1700000000004095999, 1700000000008191000) merge=0 decode=1:
+  total_transitions agg=2946 raw=2945
+  pair 167772161->0 count agg=97 raw=96
+  pair 167772161->0 ns agg=605574 raw=597282
+  node 167772161 agg=(812,3546986) raw=(811,3538694)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 2 window [1700000000004095999, 1700000000008191000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 4096 != 4095 admitted
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 4098 != 4097 admitted
+§9 pass 2 window [1700000000004095999, 1700000000012287000) merge=1 decode=1:
+  total_transitions agg=5893 raw=5892
+  pair 167772162->16777217 count agg=197 raw=196
+  pair 167772162->16777217 ns agg=951094 raw=947879
+  node 167772162 agg=(982,4728107) raw=(981,4724892)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 2 window [1700000000004095999, 1700000000012287000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 8192 != 8191 admitted
+§9 pass 2 window [1700000000004095999, 1700000000012289000) merge=2 decode=1:
+  total_transitions agg=5894 raw=5893
+  pair 167772161->50331649 count agg=197 raw=196
+  pair 167772161->50331649 ns agg=949508 raw=946291
+  node 167772161 agg=(1622,5666787) raw=(1621,5663570)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 2 window [1700000000004095999, 1700000000012289000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 8194 != 8193 admitted
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 12288 != 12287 admitted
+§9 pass 2 window [1700000000004096000, 1700000000004097000) merge=0 decode=1:
+  node count agg=2 raw=1
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 2 window [1700000000004096000, 1700000000004097000): 1 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 2 != 1 admitted
+§9 pass 2 window [1700000000004096000, 1700000000008191000) merge=0 decode=1:
+  total_transitions agg=2946 raw=2945
+  pair 167772161->0 count agg=97 raw=96
+  pair 167772161->0 ns agg=605574 raw=597282
+  node 167772161 agg=(812,3546986) raw=(811,3538694)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 2 window [1700000000004096000, 1700000000008191000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 4096 != 4095 admitted
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 4098 != 4097 admitted
+§9 pass 2 window [1700000000004096000, 1700000000012287000) merge=1 decode=1:
+  total_transitions agg=5893 raw=5892
+  pair 167772162->16777217 count agg=197 raw=196
+  pair 167772162->16777217 ns agg=951094 raw=947879
+  node 167772162 agg=(982,4728107) raw=(981,4724892)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 2 window [1700000000004096000, 1700000000012287000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 8192 != 8191 admitted
+§9 pass 2 window [1700000000004096000, 1700000000012289000) merge=2 decode=1:
+  total_transitions agg=5894 raw=5893
+  pair 167772161->50331649 count agg=197 raw=196
+  pair 167772161->50331649 ns agg=949508 raw=946291
+  node 167772161 agg=(1622,5666787) raw=(1621,5663570)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 2 window [1700000000004096000, 1700000000012289000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 8194 != 8193 admitted
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 12288 != 12287 admitted
+§9 pass 2 window [1700000000004097000, 1700000000008191000) merge=0 decode=1:
+  total_transitions agg=2945 raw=2944
+  pair 167772161->0 count agg=97 raw=96
+  pair 167772161->0 ns agg=605574 raw=597282
+  node 167772161 agg=(812,3546986) raw=(811,3538694)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 2 window [1700000000004097000, 1700000000008191000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 4095 != 4094 admitted
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 4097 != 4096 admitted
+§9 pass 2 window [1700000000004097000, 1700000000012287000) merge=0 decode=2:
+  total_transitions agg=5892 raw=5891
+  pair 167772162->16777217 count agg=197 raw=196
+  pair 167772162->16777217 ns agg=951094 raw=947879
+  node 167772162 agg=(982,4728107) raw=(981,4724892)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 2 window [1700000000004097000, 1700000000012287000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 8191 != 8190 admitted
+§9 pass 2 window [1700000000004097000, 1700000000012289000) merge=1 decode=2:
+  total_transitions agg=5893 raw=5892
+  pair 167772161->50331649 count agg=197 raw=196
+  pair 167772161->50331649 ns agg=949508 raw=946291
+  node 167772161 agg=(1622,5666787) raw=(1621,5663570)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 2 window [1700000000004097000, 1700000000012289000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 8193 != 8192 admitted
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 12287 != 12286 admitted
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 3 != 2 admitted
+§9 pass 2 window [1700000000008191000, 1700000000012287000) merge=0 decode=2:
+  total_transitions agg=2948 raw=2947
+  pair 167772162->16777217 count agg=98 raw=97
+  pair 167772162->16777217 ns agg=334432 raw=331217
+  node 167772162 agg=(492,1666771) raw=(491,1663556)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 2 window [1700000000008191000, 1700000000012287000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 4097 != 4096 admitted
+§9 pass 2 window [1700000000008191000, 1700000000012289000) merge=1 decode=2:
+  total_transitions agg=2949 raw=2948
+  pair 167772161->50331649 count agg=98 raw=97
+  pair 167772161->50331649 ns agg=333278 raw=330061
+  node 167772161 agg=(811,2128093) raw=(810,2124876)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 2 window [1700000000008191000, 1700000000012289000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 4099 != 4098 admitted
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 8193 != 8192 admitted
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 2 != 1 admitted
+§9 pass 2 window [1700000000008191001, 1700000000012287000) merge=0 decode=1:
+  total_transitions agg=2947 raw=2946
+  pair 167772162->16777217 count agg=98 raw=97
+  pair 167772162->16777217 ns agg=334432 raw=331217
+  node 167772162 agg=(492,1666771) raw=(491,1663556)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 2 window [1700000000008191001, 1700000000012287000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 4096 != 4095 admitted
+§9 pass 2 window [1700000000008191001, 1700000000012289000) merge=1 decode=1:
+  total_transitions agg=2948 raw=2947
+  pair 167772161->50331649 count agg=98 raw=97
+  pair 167772161->50331649 ns agg=333278 raw=330061
+  node 167772161 agg=(810,2119801) raw=(809,2116584)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 2 window [1700000000008191001, 1700000000012289000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 4098 != 4097 admitted
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 8192 != 8191 admitted
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 2 != 1 admitted
+§9 pass 2 window [1700000000008191999, 1700000000012287000) merge=0 decode=1:
+  total_transitions agg=2947 raw=2946
+  pair 167772162->16777217 count agg=98 raw=97
+  pair 167772162->16777217 ns agg=334432 raw=331217
+  node 167772162 agg=(492,1666771) raw=(491,1663556)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 2 window [1700000000008191999, 1700000000012287000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 4096 != 4095 admitted
+§9 pass 2 window [1700000000008191999, 1700000000012289000) merge=1 decode=1:
+  total_transitions agg=2948 raw=2947
+  pair 167772161->50331649 count agg=98 raw=97
+  pair 167772161->50331649 ns agg=333278 raw=330061
+  node 167772161 agg=(810,2119801) raw=(809,2116584)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 2 window [1700000000008191999, 1700000000012289000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 4098 != 4097 admitted
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 8192 != 8191 admitted
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 2 != 1 admitted
+§9 pass 2 window [1700000000008192000, 1700000000012287000) merge=0 decode=1:
+  total_transitions agg=2947 raw=2946
+  pair 167772162->16777217 count agg=98 raw=97
+  pair 167772162->16777217 ns agg=334432 raw=331217
+  node 167772162 agg=(492,1666771) raw=(491,1663556)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 2 window [1700000000008192000, 1700000000012287000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 4096 != 4095 admitted
+§9 pass 2 window [1700000000008192000, 1700000000012289000) merge=1 decode=1:
+  total_transitions agg=2948 raw=2947
+  pair 167772161->50331649 count agg=98 raw=97
+  pair 167772161->50331649 ns agg=333278 raw=330061
+  node 167772161 agg=(810,2119801) raw=(809,2116584)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 2 window [1700000000008192000, 1700000000012289000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 4098 != 4097 admitted
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 8192 != 8191 admitted
+§9 pass 2 window [1700000000008193000, 1700000000012287000) merge=0 decode=1:
+  total_transitions agg=2946 raw=2945
+  pair 167772162->16777217 count agg=98 raw=97
+  pair 167772162->16777217 ns agg=334432 raw=331217
+  node 167772162 agg=(492,1666771) raw=(491,1663556)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 2 window [1700000000008193000, 1700000000012287000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 4095 != 4094 admitted
+§9 pass 2 window [1700000000008193000, 1700000000012289000) merge=0 decode=2:
+  total_transitions agg=2947 raw=2946
+  pair 167772161->50331649 count agg=98 raw=97
+  pair 167772161->50331649 ns agg=333278 raw=330061
+  node 167772161 agg=(810,2119801) raw=(809,2116584)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 2 window [1700000000008193000, 1700000000012289000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 4097 != 4096 admitted
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 8191 != 8190 admitted
+§9 pass 2 window [1700000000012287000, 1700000000012289000) merge=0 decode=2:
+  total_transitions agg=2 raw=1
+  distinct pairs agg=2 raw=1
+  pair 167772161->50331649 present only in aggregate
+  node count agg=2 raw=1
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 2 window [1700000000012287000, 1700000000012289000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 3 != 2 admitted
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 4097 != 4096 admitted
+§9 pass 2 window [1700000000012287001, 1700000000012289000) merge=0 decode=1:
+  total_transitions agg=1 raw=0
+  distinct pairs agg=1 raw=0
+  pair 167772161->50331649 present only in aggregate
+  node count agg=1 raw=0
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 2 window [1700000000012287001, 1700000000012289000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 2 != 1 admitted
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 4096 != 4095 admitted
+§9 pass 2 window [1700000000012287999, 1700000000012289000) merge=0 decode=1:
+  total_transitions agg=1 raw=0
+  distinct pairs agg=1 raw=0
+  pair 167772161->50331649 present only in aggregate
+  node count agg=1 raw=0
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 2 window [1700000000012287999, 1700000000012289000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 2 != 1 admitted
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 4096 != 4095 admitted
+§9 pass 2 window [1700000000012288000, 1700000000012289000) merge=0 decode=1:
+  total_transitions agg=1 raw=0
+  distinct pairs agg=1 raw=0
+  pair 167772161->50331649 present only in aggregate
+  node count agg=1 raw=0
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1970: §9 pass 2 window [1700000000012288000, 1700000000012289000): 4 disagreement(s) with raw
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 2 != 1 admitted
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 4096 != 4095 admitted
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1973: §9 exact-record count 4095 != 4094 admitted
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:2079: §9 expected 64 admitted records, got 65
+WARN: cannot open /nonexistent/pgwt/no-such.trace: No such file or directory
