@@ -38,7 +38,7 @@ test_block_agg — per-committed-block transition aggregate (Phase 1)
     windows with positive total_ns .... 350
     windows with >=1 merged pair ...... 350
     mutation probes that went red ..... 7
-    refusals observed ................. 42
+    refusals observed ................. 43
 FAILED: 2 check(s)
 FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1268: B3 SAMPLES must be refused
 FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1270: B3 a refused build must not leave a usable aggregate

@@ -47,7 +47,7 @@ test_block_agg — per-committed-block transition aggregate (Phase 1)
     windows with positive total_ns .... 350
     windows with >=1 merged pair ...... 350
     mutation probes that went red ..... 7
-    refusals observed ................. 42
+    refusals observed ................. 43
 FAILED: 5 check(s)
 FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:707: §3b rows 0/1 violate the documented total order (count desc, from asc, to asc): (50331649->0, 1) then (16777217->167772161, 1)
 FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:707: §3b rows 2/3 violate the documented total order (count desc, from asc, to asc): (167772162->0, 1) then (0->167772161, 1)

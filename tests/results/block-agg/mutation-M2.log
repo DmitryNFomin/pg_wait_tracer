@@ -39,7 +39,7 @@ test_block_agg — per-committed-block transition aggregate (Phase 1)
     windows with positive total_ns .... 340
     windows with >=1 merged pair ...... 340
     mutation probes that went red ..... 7
-    refusals observed ................. 42
+    refusals observed ................. 43
 FAILED: 84 check(s)
 FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:955: SKIPped block holds an in-window record (ts 1400, window [1400, 1401))
 FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:955: SKIPped block holds an in-window record (ts 1400, window [1400, 1999))

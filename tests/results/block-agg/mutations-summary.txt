@@ -15,9 +15,10 @@ M10  RED          caught-by=sec8 B10     2 FAIL line(s); first: FAIL /Users/dmit
 M11  RED          caught-by=sec1         192 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:469: sample: no node time
 M12  RED          caught-by=sec5/sec6    768 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:942: MERGE of a block not w
 M13  RED          caught-by=sec3         5 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:707: §3b rows 0/1 violate t
+M15  RED          caught-by=sec8 B10     1 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1479: B10 a merge whose pai
 M14  RED          caught-by=sec2         3 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:556: absent pair must repor
 
-14 mutation(s), 14 RED, 0 NOT RED
+15 mutation(s), 15 RED, 0 NOT RED
 
 M1: plan(): MERGE accepts a block ending exactly AT `to` (inclusive end) -- the #316 shape. A merged block then carries a record the raw path excluded.
 
@@ -44,5 +45,7 @@ M11: node_counts(): SAMPLE records are counted as node time, so a sampled point 
 M12: plan(): a BOUNDARY block is merged whole instead of decoded (the start containment test is dropped), so records before `from` are counted.
 
 M13: pairs_sorted(): the total order is reduced to count-only, so the readout depends on hash-table layout and merge order.
+
+M15: merge(): a pair table that cannot grow mid-merge returns OK instead of NOMEM, so a PARTIAL merge is handed back as a complete answer.
 
 M14: lookup(): an ABSENT pair is reported as present with count 0 -- absence read as zero, the exact failure C8 forbids.
