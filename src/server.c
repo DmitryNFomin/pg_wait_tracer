@@ -3729,6 +3729,41 @@ static void handle_top_sessions(struct pgwt_server *srv, struct pgwt_request *re
     free(res.rows);
 }
 
+/* ── Phase timing: PGWT_PHASE_TIMING=1 ────────────────────────────────────
+ *
+ * Splits one request's server-side wall time into LOAD (walking the trace and
+ * materialising events), COMPUTE (aggregation) and SERIALISE (building and
+ * writing the JSON). Off unless the env var is set and non-"0", so a gating
+ * run and a demo run pay nothing and cannot come to depend on it.
+ *
+ * Why it exists (2026-10-08): two separate hypotheses about where tab-paint
+ * time goes -- in-window event volume, then backend session churn -- were both
+ * inferred from END-TO-END click-to-painted latency and both turned out wrong.
+ * End-to-end latency cannot localise a cost. These three numbers can.
+ *
+ * Written to STDERR, never stdout: stdout carries the newline-delimited JSON
+ * response stream that the Go bridge parses, and a stray line there would
+ * corrupt a response rather than annotate it. */
+static double phase_now_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1e6;
+}
+
+static int phase_timing_on(void)
+{
+    static int cached = -1;
+    if (cached < 0) {
+        const char *e = getenv("PGWT_PHASE_TIMING");
+        cached = (e && *e && strcmp(e, "0") != 0) ? 1 : 0;
+    }
+    return cached;
+}
+
+/* Reads the clock only when timing is on, so the disabled path is a branch. */
+#define PHASE_MARK() (phase_timing_on() ? phase_now_ms() : 0.0)
+
 static void handle_top_queries(struct pgwt_server *srv, struct pgwt_request *req)
 {
     server_refresh_query_texts(srv);
@@ -3756,8 +3791,10 @@ static void handle_top_queries(struct pgwt_server *srv, struct pgwt_request *req
      * memory bounded by cache_max_events() rather than by this call.
      * No pid pushdown: the lifecycle stats below read exec/plan markers
      * across ALL pids (markers never pass the uniform filter). */
+    double ph_t0 = PHASE_MARK();
     all_events = server_load_events_fi(srv, req->from_ns, req->to_ns, 0,
                                        &ecount, &linfo);
+    double ph_t1 = PHASE_MARK();
     if (reject_overload(srv, req, all_events, &linfo)) return;
     if (!has_event_filter && should_use_summaries(srv, req, &wfid)) {
         pgwt_compute_top_queries_from_summaries(srv->trace_dir, from, to,
@@ -3776,6 +3813,7 @@ static void handle_top_queries(struct pgwt_server *srv, struct pgwt_request *req
      * unit test exercises the real code. */
     struct pgwt_lifecycle_result lcres;
     pgwt_compute_query_lifecycle(all_events, ecount, &lcres);
+    double ph_t2 = PHASE_MARK();
     if (lcres.failed) {
         pgwt_lifecycle_free(&lcres);
         free(all_events);
@@ -3945,6 +3983,14 @@ static void handle_top_queries(struct pgwt_server *srv, struct pgwt_request *req
                             (double)res.unattributed_count);
     cJSON_AddNumberToObject(root, "backfilled_ms", res.backfilled_ms);
     emit_json(root);
+    if (phase_timing_on()) {
+        double ph_t3 = phase_now_ms();
+        fprintf(stderr, "PHASE top_queries load=%.1f compute=%.1f "
+                "serialise=%.1f total=%.1f events=%d from_summaries=%d\n",
+                ph_t1 - ph_t0, ph_t2 - ph_t1, ph_t3 - ph_t2,
+                ph_t3 - ph_t0, ecount, from_summaries);
+        fflush(stderr);
+    }
 
     pgwt_lifecycle_free(&lcres);
     free(all_events);
