@@ -443,5 +443,27 @@ test_agg_raw_crosscheck: test_agg_raw_crosscheck.c ../src/compute.c \
                    $(BUILD)/spawn.o $(BUILD)/cJSON.o
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -llz4 -lz -lm
 
+# test_exec_index: the EXECUTIONS INDEX (paint-latency plan, Phase 3,
+# src/exec_index.c). A differential against the real pgwt_compute_executions
+# over every block split of every fixture, asserting the ten boundary fields
+# BIT-EXACTLY, plus the bypass suite (an empty/unsealed/wrong-version index, a
+# skipped or reordered block, an out-of-order record, a window outside
+# coverage and every injected allocation failure must REFUSE, never answer)
+# and the measured O(executions in window) claim. Server build, no BPF, no
+# live PG; ~0.2 s.
+#
+# NOT in TESTS, deliberately and TEMPORARILY: tests/unit_tests.list is owned
+# by another in-flight branch for the duration of this one, and
+# test_unit_list_coverage.py (correctly) turns red on any test_* in TESTS that
+# unit_tests.list does not run. The two lines that finish the wiring are
+# applied together, by the owner:
+#     tests/Makefile  TESTS += test_exec_index
+#     tests/unit_tests.list  test_exec_index
+# Until then: `make -C tests test_exec_index && tests/test_exec_index`.
+test_exec_index: test_exec_index.c ../src/exec_index.c ../src/compute.c \
+                   $(BUILD)/wait_event.o $(BUILD)/idle_rule.o \
+                   $(BUILD)/spawn.o $(BUILD)/cJSON.o
+	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -lm
+
 clean:
-	rm -f $(TESTS) map_reader_core.o
+	rm -f $(TESTS) test_exec_index map_reader_core.o
