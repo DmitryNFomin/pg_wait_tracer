@@ -47,17 +47,17 @@ test_block_agg — per-committed-block transition aggregate (Phase 1)
     mutation probes that went red ..... 7
     refusals observed ................. 46
 FAILED: 13 check(s)
-FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:767: §3c raw rows 0/1 violate (count desc, from asc, to asc): (167772161->0, 1) then (16777217->167772161, 1)
-FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:767: §3c raw rows 3/4 violate (count desc, from asc, to asc): (167772162->167772161, 1) then (0->167772161, 1)
-FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:767: §3c raw rows 6/7 violate (count desc, from asc, to asc): (167772162->0, 1) then (16777217->0, 1)
-FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:778: §3c row 0 differs: raw 167772161->0, aggregate 0->167772161
-FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:778: §3c row 1 differs: raw 16777217->167772161, aggregate 16777217->0
-FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:778: §3c row 2 differs: raw 50331649->167772161, aggregate 16777217->167772161
-FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:778: §3c row 3 differs: raw 167772162->167772161, aggregate 50331649->0
-FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:778: §3c row 4 differs: raw 0->167772161, aggregate 50331649->167772161
-FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:778: §3c row 5 differs: raw 100663296->167772161, aggregate 100663296->0
-FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:778: §3c row 6 differs: raw 167772162->0, aggregate 100663296->167772161
-FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:778: §3c row 7 differs: raw 16777217->0, aggregate 167772161->0
-FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:778: §3c row 8 differs: raw 50331649->0, aggregate 167772162->0
-FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:778: §3c row 9 differs: raw 100663296->0, aggregate 167772162->167772161
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:840: §3c raw rows 0/1 violate (count desc, from asc, to asc): (167772161->0, 1) then (16777217->167772161, 1)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:840: §3c raw rows 3/4 violate (count desc, from asc, to asc): (167772162->167772161, 1) then (0->167772161, 1)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:840: §3c raw rows 6/7 violate (count desc, from asc, to asc): (167772162->0, 1) then (16777217->0, 1)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:851: §3c row 0 differs: raw 167772161->0, aggregate 0->167772161
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:851: §3c row 1 differs: raw 16777217->167772161, aggregate 16777217->0
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:851: §3c row 2 differs: raw 50331649->167772161, aggregate 16777217->167772161
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:851: §3c row 3 differs: raw 167772162->167772161, aggregate 50331649->0
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:851: §3c row 4 differs: raw 0->167772161, aggregate 50331649->167772161
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:851: §3c row 5 differs: raw 100663296->167772161, aggregate 100663296->0
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:851: §3c row 6 differs: raw 167772162->0, aggregate 100663296->167772161
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:851: §3c row 7 differs: raw 16777217->0, aggregate 167772161->0
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:851: §3c row 8 differs: raw 50331649->0, aggregate 167772162->0
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:851: §3c row 9 differs: raw 100663296->0, aggregate 167772162->167772161
 WARN: cannot open /nonexistent/pgwt/no-such.trace: No such file or directory

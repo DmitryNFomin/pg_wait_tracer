@@ -1,12 +1,13 @@
-mutation M5 (src/block_agg.c)
-broken guard: build(): a SAMPLES block is aggregated as if it held transitions (C1 guard removed).
-expected to be caught by: sec8 B3
+mutation M22 (src/block_agg.c)
+broken guard: pgwt_block_agg_file_can_contribute(): mono_first >= to instead of > to. This is M21's off-by-one one layer UP, at FILE granularity, and it is the form that actually SHIPPED: transitions_from_block_aggs() had a hand-written `fc->mono_first >= to_m` while the raw loader (server.c:2689) and the marker loader (:3089) both use `>`, so a file whose earliest record ends exactly at `to_m` was skipped WHOLE by the fast path and admitted by raw -- `total` and one link's value short by exactly those records, with NO refusal and NO fidelity change. M21 pinned this at block granularity and the suite still let the file-level copy through, which is why the rule is now one shared predicate with its own boundary sweep instead of three hand-written comparisons.
+expected to be caught by: sec1b
 
---- if (block_type != PGWT_BLOCK_TRANSITIONS)
-        return PGWT_BAGG_REFUSED_BLOCK_TYPE;
-+++ /* MUTANT: block type guard removed */
+--- if (mono_first > to_mono_ns)
+        return 0;
++++ if (mono_first >= to_mono_ns)
+        return 0;   /* MUTANT: skips the file holding ts == to */
 
-exit=1, 2 FAIL line(s)
+exit=1, 3 FAIL line(s)
 
 test_block_agg — per-committed-block transition aggregate (Phase 1)
 === §1 record predicate vs pgwt_compute_transitions ===
@@ -41,7 +42,8 @@ test_block_agg — per-committed-block transition aggregate (Phase 1)
     windows with >=1 merged pair ...... 364
     mutation probes that went red ..... 7
     refusals observed ................. 46
-FAILED: 2 check(s)
-FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1431: B3 SAMPLES must be refused
-FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1433: B3 a refused build must not leave a usable aggregate
+FAILED: 3 check(s)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:526: §1b a file whose FIRST record ends exactly at `to` CONTRIBUTES — `mono_first >= to_m` was the shipped bug
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:538: §1b a degenerate single-instant file at a single-instant window contributes: both bounds inclusive, so this is not empty
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:563: §1b the file predicate must agree with the raw loader's `first > to || last < from` rule on every boundary instant (3/5565 disagreed)
 WARN: cannot open /nonexistent/pgwt/no-such.trace: No such file or directory

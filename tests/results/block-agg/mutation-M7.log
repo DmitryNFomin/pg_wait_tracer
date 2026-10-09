@@ -42,6 +42,6 @@ test_block_agg — per-committed-block transition aggregate (Phase 1)
     mutation probes that went red ..... 7
     refusals observed ................. 46
 FAILED: 2 check(s)
-FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:438: duration > own end timestamp: pgwt_compute_transitions counted=0, pgwt_block_agg_record_counts=1
-FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:456: the impossible record must not be a link
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:451: duration > own end timestamp: pgwt_compute_transitions counted=0, pgwt_block_agg_record_counts=1
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:469: the impossible record must not be a link
 WARN: cannot open /nonexistent/pgwt/no-such.trace: No such file or directory

@@ -43,7 +43,7 @@ test_block_agg — per-committed-block transition aggregate (Phase 1)
     mutation probes that went red ..... 7
     refusals observed ................. 46
 FAILED: 3 check(s)
-FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1507: B9 merging the same block twice must be REFUSED
-FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1510: B9 the refused duplicate must leave the accumulator untouched
-FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1517: B9 a re-read of the same block is still a duplicate
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1580: B9 merging the same block twice must be REFUSED
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1583: B9 the refused duplicate must leave the accumulator untouched
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1590: B9 a re-read of the same block is still a duplicate
 WARN: cannot open /nonexistent/pgwt/no-such.trace: No such file or directory

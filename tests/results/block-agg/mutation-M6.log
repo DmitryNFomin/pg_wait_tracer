@@ -42,6 +42,6 @@ test_block_agg — per-committed-block transition aggregate (Phase 1)
     mutation probes that went red ..... 7
     refusals observed ................. 46
 FAILED: 2 check(s)
-FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1365: B4 uncommitted must be refused
-FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1366: B4 no usable aggregate
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1438: B4 uncommitted must be refused
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1439: B4 no usable aggregate
 WARN: cannot open /nonexistent/pgwt/no-such.trace: No such file or directory

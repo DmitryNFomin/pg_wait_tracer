@@ -1,0 +1,74 @@
+RED for the strengthened cold-vs-warm identity in test_data_window_bound.py
+===========================================================================
+
+Branch 187ae13. Run on gate-1 (pgwt-gate, root@2.28.45.47,
+machine_id 2cd101b7f7984352bac6db55b1655c2e), in a scratch copy at
+/root/pgwt-compile-ba (since removed), never the gate tree.
+
+WHAT CHANGED AND WHY IT NEEDED A RED
+------------------------------------
+The test's own comment promised "both answers are IDENTICAL", but it compared
+only two scalars:
+
+    t.check_eq(resp.get("total"),            first.get("total"))
+    t.check_eq(resp.get("total_link_count"), first.get("total_link_count"))
+
+`total` is a COUNT and `total_link_count` is a CARDINALITY. Neither can see a
+duration. So a merge path that got every count right and every nanosecond
+wrong would have passed, and the comment would still have claimed identity.
+The fix compares the `links` and `nodes` arrays as well.
+
+THE BREAK
+---------
+One line in pgwt_block_agg_merge(), src/block_agg.c -- the MERGE side only, so
+the cold (decode) answer is untouched and the warm (merge) answer drifts:
+
+    rc = pair_add(dst, ..., src->pairs[i].count, src->pairs[i].total_ns);
+ -> rc = pair_add(dst, ..., src->pairs[i].count, src->pairs[i].total_ns - 1);
+
+Counts are deliberately left alone. That is the whole point: it isolates a
+duration-only divergence, which is exactly the class the two old scalars were
+blind to.
+
+RESULT -- verbatim
+------------------
+  PASS: transitions: merged answer == freshly decoded answer (total)
+  PASS: transitions: merged answer == freshly decoded answer (distinct links)
+  FAIL: transitions: merged answer == freshly decoded answer (every link,
+        including duration_ms)
+        (got      [{'source': 'IO:DataFileRead', 'target': 'CPU*',
+                    'value': 20000, 'duration_ms': 19999.999995}],
+         expected [{'source': 'IO:DataFileRead', 'target': 'CPU*',
+                    'value': 20000, 'duration_ms': 20000}])
+  PASS: transitions: merged answer == freshly decoded answer (every node,
+        including total_ms and order)
+  PASS: transitions: the cold answer carries at least one link, so the array
+        comparison is not [] == [] (1)
+
+READ THAT CAREFULLY
+-------------------
+The two assertions that existed BEFORE this change both PASSED under the
+break. `value` is still 20000 on both sides. Only the new link-array
+assertion caught it, on duration_ms 19999.999995 vs 20000. The node assertion
+passed because the mutation touched pair_add and not node_add -- an honest
+result, not a hole: it means the two assertions are independent, and a
+node-side break is what the node one is for.
+
+HONEST LIMITS
+-------------
+- The guard is `>= 1`, not `> 1`. This fixture carries exactly ONE link and
+  ONE node. What the array comparison adds over the two scalars is every
+  FIELD of that one link and node -- notably duration_ms and total_ms. It is
+  NOT a many-row comparison, and asserting `> 1` would assert something false
+  about the fixture (it failed exactly that way on first run: "the cold answer
+  carries >1 link ... (1)").
+- n=1. This is a deterministic arithmetic break, not a timing test.
+- Scope: this proves the ASSERTION bites. It does not prove the merge path is
+  correct; that is what tests/test_block_agg.c §6/§9 and the 20-mutation suite
+  are for.
+
+REPRODUCE
+---------
+  1. apply the one-line change above to src/block_agg.c
+  2. make pgwt-server && make -C tests gen_test_traces
+  3. python3 tests/test_data_window_bound.py

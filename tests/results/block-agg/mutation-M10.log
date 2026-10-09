@@ -47,6 +47,6 @@ test_block_agg — per-committed-block transition aggregate (Phase 1)
     mutation probes that went red ..... 7
     refusals observed ................. 46
 FAILED: 2 check(s)
-FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1535: B10 block_agg_pairs_grow must refuse with NOMEM, got 0
-FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1538: B10 block_agg_pairs_grow must leave NO usable aggregate — a short one would be a silently wrong answer
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1608: B10 block_agg_pairs_grow must refuse with NOMEM, got 0
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1611: B10 block_agg_pairs_grow must leave NO usable aggregate — a short one would be a silently wrong answer
 WARN: cannot open /nonexistent/pgwt/no-such.trace: No such file or directory

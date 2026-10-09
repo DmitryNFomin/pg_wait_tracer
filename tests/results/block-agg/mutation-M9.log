@@ -43,5 +43,5 @@ test_block_agg — per-committed-block transition aggregate (Phase 1)
     mutation probes that went red ..... 7
     refusals observed ................. 46
 FAILED: 1 check(s)
-FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1480: B8 a block whose num_events changed must NOT match
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:1553: B8 a block whose num_events changed must NOT match
 WARN: cannot open /nonexistent/pgwt/no-such.trace: No such file or directory
