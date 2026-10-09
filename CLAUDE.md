@@ -138,13 +138,16 @@ judges. It writes no feature code itself for anything bigger than a one-liner.
   by `scripts/check-lock.sh` (the `check:` Makefile target): a third agent
   queues for the lock instead of piling a third concurrent Playwright/chaos
   run onto the same laptop. But the lock is a CPU cap, not a queue that costs
-  nothing: three agents in GATE phase are 3 x 22 min on this Mac, which
-  exceeds the 40-min box run, so the Mac becomes the critical path. The honest
-  cap is **at most two agents in GATE PHASE at once** (gate phase = waiting on
-  or running `make check`; distinct from the three-actively-implementing
-  count above, which counts agents writing code) — three implementing is fine
-  while at most two of them need the full `make check` (an `src/` agent spends hours
-  implementing and runs one check, so it barely touches the lock). Before spawning, list the files the task will
+  nothing. Corrected 2026-10-08: the figure here used to read "3 x 22 min",
+  which contradicted the measured median at the top of this file. Three agents
+  in GATE phase are 3 x ~7 min (the n=3 median above), so **~21 min, under the
+  40-min box run — the BOXES are the critical path, not this Mac**, at every
+  agent count we actually run. So there is no Mac-derived cap on agents in gate
+  phase (gate phase = waiting on or running `make check`); the lock makes them
+  queue, and the queue drains faster than a box run. The cap that binds is the
+  three-actively-implementing one above, plus the one-`web/`-branch rule. Do
+  not re-derive a "two in gate phase" limit from this paragraph: it came from
+  the wrong number. Before spawning, list the files the task will
   touch and compare them against every in-flight branch — an overlap is
   refused up front, not discovered at merge (2026-09-25: two branches both
   edited `tests/test_durability.c`, git merged them silently and the build
