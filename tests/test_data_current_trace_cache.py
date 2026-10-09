@@ -954,49 +954,69 @@ def bypass_unparseable_meta(tr):
 
 
 def bypass_truncated_file_under_meta(tr):
-    """The meta claims N committed blocks but the file has been truncated below
-    them — the partial-range case, the one where the thing being checked is
-    ABSENT rather than wrong. A cache holding blocks that no longer exist must
-    drop them, and the answer must be whatever a fresh uncached server says:
-    a smaller count or a loud refusal, never the retained superset."""
+    """Retract the committed watermark while retaining complete block bytes.
+
+    The reader can still load the surviving prefix. A separate info request
+    refreshes coverage after the watermark change: cov_scan_file resets its
+    entry on a smaller block count, clearing `present`, so that refresh drops
+    the entry and the next request rebuilds it. The measured request still
+    spans both blocks, making a retained stale suffix visible. Cached blocks
+    above the new watermark must disappear, and the answer must match a fresh
+    uncached server rather than include that suffix."""
     trace_dir = generate_traces(busy_scenario(span_s=12, pids=3, per_pid=2500))
     tmp = tempfile.mkdtemp(prefix="pgwt_cc_err_")
     try:
         err = os.path.join(tmp, "trunc.err")
         env = dict(STATS_ENV)
         env["PGWT_CURRENT_TRACE_CACHE"] = "1"
-        path = os.path.join(trace_dir, "current.trace")
-        size = os.path.getsize(path)
+        committed_before = read_meta(trace_dir)
+        tr.check(committed_before > 1,
+                 "the fixture has multiple committed blocks to retract")
+        if committed_before <= 1:
+            return
+        committed_after = committed_before - 1
         w_from, w_to = fixture_window(span_s=12)
         with ServerHarness(trace_dir, env=env, stderr_path=err) as srv:
             before = srv.query("transitions", from_=w_from, to_=w_to)
             n_before = count_of(before, "total")
             pre = read_curcache(err)
-            with open(path, "r+b") as f:
-                f.truncate(size // 3)
+            write_meta(trace_dir, committed_after)
+            srv.query("info")  # complete the coverage reset before measuring
             after = srv.query("transitions", from_=w_from, to_=w_to)
             post = read_curcache(err)
-        print("    truncation: %d events -> %s" % (n_before, canonical(after)[:160]))
+        print("    committed blocks %d -> %d; events %d -> %s"
+              % (committed_before, committed_after, n_before,
+                 canonical(after)[:160]))
         print("    curcache %s -> %s" % (pre, post))
         tr.check(n_before > 0, "the pre-truncation request saw events")
+        tr.check(pre is not None and
+                 pre["lo"] + pre["blocks"] > committed_after,
+                 "the cached entry held a block above the new watermark")
         refused = "unavailable" in after or "error" in after
-        tr.check(refused or count_of(after, "total") < n_before,
-                 "a truncated current.trace refuses or returns FEWER events, "
-                 "never the cached superset")
+        n_after = count_of(after, "total") if not refused else 0
+        tr.check(not refused and 0 < n_after < n_before,
+                 "a lower committed watermark serves a nonempty prefix, "
+                 "never the cached superset (%d -> %d)"
+                 % (n_before, n_after))
         if pre and post:
             tr.check(post["resets"] > pre["resets"],
                      "the vanished blocks were dropped from the entry "
                      "(resets %d -> %d)" % (pre["resets"], post["resets"]))
-            tr.check(post["blocks"] <= pre["blocks"],
+            tr.check(post["lo"] + post["blocks"] <= committed_after,
                      "the entry did not keep blocks the file no longer has "
-                     "(%d -> %d)" % (pre["blocks"], post["blocks"]))
+                     "(cached [%d, %d), committed %d)"
+                     % (post["lo"], post["lo"] + post["blocks"],
+                        committed_after))
         else:
             tr.check(False, "curcache stats unreadable across the truncation")
         with ServerHarness(trace_dir,
                            env={"PGWT_CURRENT_TRACE_CACHE": "0"}) as srv:
             ctl = srv.query("transitions", from_=w_from, to_=w_to)
+        tr.check("unavailable" not in ctl and "error" not in ctl and
+                 count_of(ctl, "total") > 0,
+                 "the fresh uncached lower-watermark read is nonempty")
         tr.check_eq(canonical_body(after), canonical_body(ctl),
-                    "the truncated read matches a fresh uncached read exactly")
+                    "the lower-watermark read matches a fresh uncached read exactly")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
         cleanup_traces(trace_dir)
