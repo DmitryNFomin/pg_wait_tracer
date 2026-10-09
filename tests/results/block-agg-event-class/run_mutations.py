@@ -427,6 +427,93 @@ def build_and_run(workdir, label, mutated=None):
     return r.returncode, r.stdout + r.stderr
 
 
+# A mutation that breaks an arithmetic rule fails once PER COMPARED ROW, and
+# the suite compares 17,899 rows over 5,067 windows. The first cut of this
+# driver wrote every one of those lines to disk: 11 of the 23 logs held
+# 111,901 of 114,034 total lines, and mutation-N18.log alone carried 13,994
+# FAIL lines expressing 75 DISTINCT assertions. The repetition is not
+# evidence -- it is the same assertion firing again on the next row -- and
+# 112k lines of it in git history is not something a reviewer can read.
+#
+# So a long log becomes a DIGEST that keeps everything load-bearing: the true
+# line and FAIL counts, one example of every distinct failing assertion, the
+# first raw FAIL lines, and the tail (which carries the vacuity ledger and
+# the "FAILED: n check(s)" total). The banner says TRUNCATED in as many
+# words, with both counts and the command to reproduce in full, so a digest
+# can never be mistaken for a complete run. A quietly shortened log would be
+# worse than an unreadably long one.
+LOG_VERBATIM_MAX = 400      # lines; at or below this the output is kept as-is
+DIGEST_SHAPES = 80          # distinct assertions to show one example of
+DIGEST_HEAD = 20            # raw FAIL lines from the start
+DIGEST_TAIL = 60            # trailing lines (ledger + totals)
+
+
+def fail_shape(line):
+    """The assertion's IDENTITY, with every per-row VALUE stripped off.
+
+    Keyed on `file:line` plus the message with all digit runs collapsed to
+    `#`, so one CHECK firing on 13,994 different rows becomes a single shape
+    while two different CHECKs never merge. The absolute path is dropped so
+    the key does not depend on which checkout produced the log.
+
+    The first cut kept 70 raw characters of the message, which still held the
+    event id and both compared numbers -- so it collapsed nothing and the
+    banner reported "13,921 distinct assertions" out of 13,994 FAIL lines.
+    That was worse than no summary at all: it stated the opposite of the
+    truth in a line a reviewer would otherwise trust. Hence the digit
+    normalisation, and hence the self-check in digest() below.
+    """
+    where, _, body = line.partition(": ")
+    where = re.sub(r"^FAIL .*/", "FAIL ", where)
+    return "%s: %s" % (where, re.sub(r"\d+", "#", body))
+
+
+def digest(out, fails):
+    lines = out.splitlines()
+    if len(lines) <= LOG_VERBATIM_MAX:
+        return out + "\n[complete output, %d line(s), not truncated]\n" % len(lines)
+
+    shapes, seen_shapes = [], set()
+    for ln in fails:
+        k = fail_shape(ln)
+        if k not in seen_shapes:
+            seen_shapes.add(k)
+            shapes.append(ln)
+
+    parts = [
+        "=" * 72,
+        "TRUNCATED -- this is a DIGEST of the run, NOT the complete output.",
+        "  complete output : %d line(s), of which %d are FAIL lines"
+        % (len(lines), len(fails)),
+        "  distinct failing assertions : %d%s" % (
+            len(shapes),
+            "" if len(shapes) * 2 <= len(fails) else
+            "   <-- WARNING: barely below the FAIL count, so the shape "
+            "normalisation in fail_shape() is NOT collapsing per-row values; "
+            "treat this number as unmeasured"),
+        "  the other %d FAIL line(s) are those same assertions firing again"
+        % max(0, len(fails) - len(shapes)),
+        "  on further rows and windows; they carry no further information.",
+        "  reproduce in full:",
+        "    python3 tests/results/block-agg-event-class/run_mutations.py <id>",
+        "=" * 72,
+        "",
+        "-- one example of each distinct failing assertion (%d of %d shown):"
+        % (min(len(shapes), DIGEST_SHAPES), len(shapes)),
+    ]
+    parts += shapes[:DIGEST_SHAPES]
+    if len(shapes) > DIGEST_SHAPES:
+        parts.append("   ... %d further distinct assertion(s) not shown"
+                     % (len(shapes) - DIGEST_SHAPES))
+    parts += ["", "-- first %d FAIL line(s), verbatim:" % DIGEST_HEAD]
+    parts += fails[:DIGEST_HEAD]
+    parts += ["",
+              "-- last %d line(s) of output (the vacuity ledger and the "
+              "total):" % DIGEST_TAIL]
+    parts += lines[-DIGEST_TAIL:]
+    return "\n".join(parts) + "\n"
+
+
 def main_inner(want):
     orig = {name: open(os.path.join(SRC, name)).read() for name in LINKED}
 
@@ -467,7 +554,7 @@ def main_inner(want):
                      "line(s)\n\n"
                      % (mid, target, why, catches, old.strip()[:200],
                         new.strip()[:200], rc, len(fails)))
-            fh.write(out)
+            fh.write(digest(out, fails))
         # A nonzero exit is only RED if the SUITE rejected the mutant. A
         # build that never ran, or a compiler that does not exist, is not a
         # caught mutation -- labelling either RED would be the driver taking
