@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# Git pre-push hook: require a passing check stamp for this worktree.
+set -euo pipefail
+
+[[ "${PGWT_SKIP_PUSH_GUARD:-}" == "1" ]] && exit 0
+
+root=$(git rev-parse --show-toplevel 2>/dev/null) || {
+    echo "push blocked: cannot determine the worktree being pushed. Re-run 'make check'." >&2
+    exit 2
+}
+cd "$root"
+
+if [[ ! -f .pgwt-check.stamp ]]; then
+    echo "push blocked: no .pgwt-check.stamp — re-run 'make check' first." >&2
+    exit 2
+fi
+now=$(scripts/tree-hash.sh) || {
+    echo "push blocked: could not hash the current tree in '$root'. Re-run 'make check'." >&2
+    exit 2
+}
+stamp=$(cat .pgwt-check.stamp) || {
+    echo "push blocked: could not read .pgwt-check.stamp. Re-run 'make check'." >&2
+    exit 2
+}
+if [[ "$now" != "$stamp" ]]; then
+    echo "push blocked: tree changed since the last passing 'make check' (stamp $stamp, tree $now). Re-run 'make check'." >&2
+    exit 2
+fi

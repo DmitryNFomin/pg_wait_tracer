@@ -263,6 +263,13 @@ judges. It writes no feature code itself for anything bigger than a one-liner.
 
 ## Local setup (one-time)
 
+Activate the Git pre-push stamp guard in each clone (this setting is per-clone
+and covers its linked worktrees):
+
+```
+git config core.hooksPath scripts/git-hooks
+```
+
 ```
 brew install node go
 python3 -m pip install --user playwright==1.60.0 websockets pillow numpy
