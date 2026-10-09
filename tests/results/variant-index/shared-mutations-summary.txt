@@ -1,0 +1,21 @@
+baseline: shared header pristine, test PASSED (212 checks, 0 failed)
+
+RED   S01 step ORDER folded out of the hash, for both sides at once
+        -> 1 failing checks; first: FAIL(1126): order significant: [A,B] and [B,A] are TWO variants (got 1)
+RED   S02 the loop flag is not folded into the hash, for both sides at once
+        -> 1 failing checks; first: FAIL(1108): loop flag hashed: [A] and [A,A] are TWO variants despite an identical step list (got 1)
+RED   S03 the CPU-only fill-in removed, for both sides at once
+        -> 3 failing checks; first: FAIL(979): cpu only: one step, event id 0
+RED   S04 the per-step si clamp removed (#343 'fixed' silently), for both sides at once
+        -> 1 failing checks; first: FAIL(970): ABAB across blocks: step avgs 1 ms and 3 ms — the oracle's si-clamping quirk reproduced, not corrected (got 1000000, 2000000)
+RED   S05 a loop needs THREE repetitions, for both sides at once
+        -> 6 failing checks; first: FAIL(952): ABAB across blocks: 2 pattern steps, not 4 and not a truncated 1 (got 4)
+RED   S06 loop_n reported for a single-record sequence too, for both sides at once
+        -> 1 failing checks; first: FAIL(984): cpu only: avg_loop_n 0, because the CPU fill-in sets raw_len=1 before loop_n is computed (got 1.000000)
+RED   S07 the per-step walk does not advance past a non-loop step, for both sides at once
+        -> 1 failing checks; first: FAIL(970): ABAB across blocks: step avgs 1 ms and 3 ms — the oracle's si-clamping quirk reproduced, not corrected (got 2000000, 0)
+RED   S08 the raw sequence cap drops to 3, for both sides at once
+        -> 6 failing checks; first: FAIL(952): ABAB across blocks: 2 pattern steps, not 4 and not a truncated 1 (got 3)
+
+8 shared-header mutations, 0 not detected
+PASSED

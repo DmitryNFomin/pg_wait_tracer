@@ -1,0 +1,117 @@
+baseline: pristine module, test PASSED (212 checks, 0 failed)
+
+RED   M01 no partial-sequence carry-over (open sequences reset each block)
+        -> 54 failing checks; first: FAIL(898): one exec one wait: 1 execution (got 0)
+RED   M02 the partial sequence survives but its CONTENT is dropped at a block edge (truncation to the last block's steps only)
+        -> 20 failing checks; first: FAIL(903): one exec one wait: total 5 ms (got 0)
+RED   M03 a row is appended TWICE (duplication across blocks)
+        -> 40 failing checks; first: FAIL(898): one exec one wait: 1 execution (got 2)
+RED   M04 selection half-open at to_ns (an execution closing exactly at `to` is dropped)
+        -> 41 failing checks; first: FAIL(898): one exec one wait: 1 execution (got 0)
+RED   M05 selection half-open at from_ns (an execution starting exactly at `from` is dropped)
+        -> 56 failing checks; first: FAIL(898): one exec one wait: 1 execution (got 0)
+RED   M06 selection keyed on the CLOSE only, ignoring whether the opening marker was in the window
+        -> 4 failing checks; first: FAIL(784): sweep A: 5137 disagreements over 25254 (fixture,split,window,phase) quadruples
+RED   M07 chunk prefilter narrowed, so a chunk that could contribute is skipped
+        -> 6 failing checks; first: FAIL(1048): zero-length: both executions reported (got 1)
+RED   M08 prefilter bounds computed from the chunk's FIRST row only, so later rows in the same block are prefiltered away
+        -> 4 failing checks; first: FAIL(784): sweep A: 1934 disagreements over 25254 (fixture,split,window,phase) quadruples
+RED   M09 #222: a second opening marker CONTINUES the first sequence instead of discarding it
+        -> 7 failing checks; first: FAIL(926): #222: the surviving pattern is [B], not [A] or [A,B]
+RED   M10 start_ns kept STALE across executions of the same pid (the first opening marker's timestamp wins forever)
+        -> 5 failing checks; first: FAIL(784): sweep A: 3085 disagreements over 25254 (fixture,split,window,phase) quadruples
+RED   M11 a closing marker with nothing open emits a row anyway
+        -> 7 failing checks; first: FAIL(1085): extra EXEC_END: exactly 1 execution, the surplus closing marker ignored (got 2)
+RED   M12 an execution still open at a BLOCK EDGE is closed and emitted as a truncated row instead of being carried over
+        -> 40 failing checks; first: FAIL(903): one exec one wait: total 5 ms (got 0)
+RED   M13 step ORDER folded out of the hash (so [A,B] and [B,A] collide)
+        -> 10 failing checks; first: FAIL(1126): order significant: [A,B] and [B,A] are TWO variants (got 1)
+RED   M14 the loop flag is not folded into the hash
+        -> 8 failing checks; first: FAIL(1108): loop flag hashed: [A] and [A,A] are TWO variants despite an identical step list (got 1)
+RED   M15 rows merged in ROW order per chunk but chunks visited backwards (close order broken: collision chains, query_id sets, p95 sample)
+        -> 6 failing checks; first: FAIL(784): sweep A: 1469 disagreements over 25254 (fixture,split,window,phase) quadruples
+RED   M16 idle records enter the sequence
+        -> 7 failing checks; first: FAIL(997): idle dropped: [A,idle,A] compresses to one A loop, not 3 steps (got 3 steps)
+RED   M17 the all-zero filter treated as a no-op (an impossible duration enters the sequence)
+        -> 7 failing checks; first: FAIL(1011): impossible duration: pattern is [A] only — an all-zero filter still rejects duration > timestamp
+RED   M18 the raw cap set to 3, truncating longer sequences
+        -> 14 failing checks; first: FAIL(952): ABAB across blocks: 2 pattern steps, not 4 and not a truncated 1 (got 3)
+RED   M19 the CPU-only fill-in moved AFTER loop_n would see it (raw_len 0)
+        -> 9 failing checks; first: FAIL(979): cpu only: one step, event id 0
+RED   M20 per-step accumulators not clamped to the last step (the oracle's si quirk 'fixed')
+        -> 8 failing checks; first: FAIL(970): ABAB across blocks: step avgs 1 ms and 3 ms — the oracle's si-clamping quirk reproduced, not corrected (got 1000000, 2000000)
+RED   M21 query_id taken from the opening marker only, never from an inner record
+        -> 7 failing checks; first: FAIL(1143): inner query_id 77 reaches the variant (got 0)
+RED   M22 avg_loop_n pre-aggregated per variant instead of summed per execution in close order
+        -> 5 failing checks; first: FAIL(784): sweep A: 17 disagreements over 25254 (fixture,split,window,phase) quadruples
+RED   M23 CMD_END closes an exec here (it does not, for variants)
+        -> 6 failing checks; first: FAIL(1024): CMD_END inside: pattern [A,B] spans the CMD_END — pgwt_compute_variants ignores it (got 1 steps)
+RED   M24 phases conflated (an exec row answers a plan query)
+        -> 9 failing checks; first: FAIL(1096): stray PLAN_END for a pid with exec-only state: no plan execution invented (got 1)
+RED   M25 max_variants truncation dropped
+        -> 2 failing checks; first: FAIL(845): sweep C: 66 disagreements over 448 more quadruples
+RED   G01 an empty index answers 'no variants' instead of refusing
+        -> 1 failing checks; first: FAIL(1269): empty index (no block ever added): REFUSES with empty-index, no variants, counts poisoned to -1, failed=1 (got rc=0 refused=ok nv=0 te=0 failed=0 si
+RED   G02 coverage check is an INTERSECTION, not containment
+        -> 5 failing checks; first: FAIL(1269): window past cover_to_ns (the 'ends at now' case): REFUSES with window-outside-coverage, no variants, counts poisoned to -1, failed=1 (got rc=0 refus
+RED   G03 a refusal leaves the counts at 0 instead of poisoning them
+        -> 55 failing checks; first: FAIL: seam TIE for zero-length execution (start == close) cuts=0x1 k=1 must refuse (rc=-1 tail-record-out-of-range)
+RED   G04 a refusal poisons the counts but does NOT set failed/indexed (the '-1 is truthy' trap: the caller sails past it)
+        -> 55 failing checks; first: FAIL: seam TIE for zero-length execution (start == close) cuts=0x1 k=1 must refuse (rc=-1 tail-record-out-of-range)
+RED   G05 a build allocation failure does not make the index unusable
+        -> 4 failing checks; first: FAIL(1269): skipped block: REFUSES with block-feed-gap, no variants, counts poisoned to -1, failed=1 (got rc=-1 refused=window-outside-coverage nv=-1 te=-1 fail
+RED   G06 a skipped block in the feed is accepted
+        -> 2 failing checks; first: FAIL(1316): feed: a SKIPPED block index is rejected
+RED   G07 out-of-order records are accepted silently
+        -> 3 failing checks; first: FAIL(1345): feed: a record whose timestamp goes BACKWARDS is rejected, never silently reordered
+RED   G08 a record outside its block's bounds is clamped, not refused
+        -> 5 failing checks; first: FAIL: seam TIE for zero-length execution (start == close) cuts=0x1 k=1 must refuse (rc=0 ok)
+RED   G09 the version stamp is not checked on query
+        -> 1 failing checks; first: FAIL(1269): unknown index version: REFUSES with version-mismatch, no variants, counts poisoned to -1, failed=1 (got rc=0 refused=ok nv=1 te=1 failed=0 si=1)
+RED   G10 an unsealed index is queried anyway (chunk bounds still UINT64_MAX/0)
+        -> 1 failing checks; first: FAIL(1269): unsealed index: REFUSES with unsealed, no variants, counts poisoned to -1, failed=1 (got rc=0 refused=ok nv=0 te=0 failed=0 si=1)
+RED   G11 a NON-EMPTY filter is answered from the unfiltered index
+        -> 8 failing checks; first: FAIL(1269): NULL filter: REFUSES with filter-not-indexable, no variants, counts poisoned to -1, failed=1 (got rc=0 refused=ok nv=1 te=1 failed=0 si=1)
+RED   G12 a NULL filter is accepted as 'no filter'
+        -> 2 failing checks; first: FAIL(1269): NULL filter: REFUSES with filter-not-indexable, no variants, counts poisoned to -1, failed=1 (got rc=0 refused=ok nv=1 te=1 failed=0 si=1)
+RED   G13 an inverted window is answered instead of refused
+        -> 2 failing checks; first: FAIL(1269): inverted window: REFUSES with inverted-window, no variants, counts poisoned to -1, failed=1 (got rc=0 refused=ok nv=0 te=0 failed=0 si=1)
+RED   G14 the ledger's carry-over counter cannot be driven: n_discarded is never incremented, so the #222 shape cannot be proven to have occurred
+        -> 1 failing checks; first: FAIL(924): #222: 1 partial sequence discarded (got 0)
+RED   G15 the measured-work counters stop counting, so the complexity claim becomes vacuously true
+        -> 4 failing checks; first: FAIL: TAIL disagreement one exec one wait cuts=0x1 k=1 window=[+0,+25] field=num_variants row=-1
+RED   G16 open_at_end always reports 0, so 'no sequence was left open' cannot be distinguished from 'the counter is broken'
+        -> 2 failing checks; first: FAIL(1037): open at capture end: 1 sequence still open (got 0)
+RED   T01 the tail's rows are merged BEFORE the indexed rows (the naive append: close order across the seam inverted)
+        -> 8 failing checks; first: FAIL: TAIL disagreement 20 distinct query_ids one pattern cuts=0x7fffffff k=29 window=[+0,+64] field=top_query_id row=0
+RED   T02 the carry state is NOT copied, so an execution open at the seam is lost instead of closed by the tail
+        -> 8 failing checks; first: FAIL: TAIL disagreement one exec one wait cuts=0x1 k=1 window=[+0,+25] field=num_variants row=-1
+RED   T03 the carry is copied but EMPTIED, so a crossing execution comes out truncated to the tail's steps (two different executions truncated alike hash to one variant)
+        -> 5 failing checks; first: FAIL: TAIL disagreement one exec one wait cuts=0x2 k=1 window=[+0,+25] field=hash row=0
+RED   T04 the copied carry loses start_ns, so a crossing execution is selected by the wrong opening timestamp
+        -> 8 failing checks; first: FAIL: TAIL disagreement one exec one wait cuts=0x1 k=1 window=[+0,+25] field=num_variants row=-1
+RED   T05 the tail walks the REAL carry state instead of a copy (the index is consumed: a second identical query answers differently)
+        -> 3 failing checks; first: FAIL: query_tail MUTATED the index for one exec one wait (rows 0->0, steps 0->0, open 1->0, disc 0->0)
+RED   T06 the seam is not checked, so a tail that overlaps the index or leaves a hole is accepted
+        -> 4 failing checks; first: FAIL(2272): tail seam one ns LOW (overlaps the index): REFUSES with tail-seam-mismatch, no variants, counts poisoned, failed=1 (got rc=0 refused=ok nv=2 te=2 fa
+RED   T07 the window is no longer required to fit inside the tail's declared coverage (answers short, says nothing)
+        -> 4 failing checks; first: FAIL(1269): window past cover_to_ns (the 'ends at now' case): REFUSES with window-outside-coverage, no variants, counts poisoned to -1, failed=1 (got rc=0 refus
+RED   T08 a NULL tail array with a positive count, or a negative count, is accepted as a tail
+        -> 2 failing checks; first: FAIL(2272): tail count > 0 with a NULL array: REFUSES with tail-null, no variants, counts poisoned, failed=1 (got rc=-1 refused=build-failed nv=-1 te=-1 failed=
+RED   T09 the tail's rows are merged against the INDEX's step arena, so their patterns come from the wrong offsets
+        -> -1 failing checks; first: (crash/abort)
+RED   T10 the tail's rows are never merged at all (the tail is decoded and then dropped: a window ending at now answers only the indexed part)
+        -> 20 failing checks; first: FAIL: TAIL disagreement one exec one wait cuts=0x1 k=1 window=[+0,+25] field=num_variants row=-1
+RED   T11 a tail the walk REJECTED is reported as OK (a refusal that approves)
+        -> 7 failing checks; first: FAIL: seam TIE for zero-length execution (start == close) cuts=0x1 k=1 must refuse (rc=0 ok)
+RED   T12 a one-record tail is silently dropped
+        -> 2 failing checks; first: FAIL: TAIL disagreement one exec one wait cuts=0x2 k=1 window=[+0,+25] field=num_variants row=-1
+RED   T13 GATE-BLINDING: tail_rows_crossing can never be driven, so 'an execution crossed the seam' cannot be proven
+        -> 2 failing checks; first: FAIL(1932): sweep D: 0 of those executions OPENED before the seam, i.e. came out of the copied carry state (need >= 10)
+RED   T14 GATE-BLINDING: tail_rows_selected stays 0, so the tail sweep's non-vacuity claim becomes unprovable
+        -> 3 failing checks; first: FAIL(1929): sweep D: 0 executions in the answers closed in the TAIL (need >= 100)
+RED   T15 GATE-BLINDING: the seam helper returns the index's own cover_to_ns, so a caller that trusts it re-feeds one record
+        -> 3 failing checks; first: FAIL: seam TIE for zero-length execution (start == close) cuts=0x1 k=1 must refuse (rc=0 ok)
+
+56 mutations, 0 not detected
+PASSED
