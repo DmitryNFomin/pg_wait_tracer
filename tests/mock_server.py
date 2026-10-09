@@ -549,6 +549,21 @@ _EXACT_VIEWS = {"heatmap", "transitions", "concurrency", "lock_chains",
 #                                            (default 0, matching static replay)
 #   PGWT_MOCK_TIER=sampled|escalated         initial daemon tier (default sampled)
 #   PGWT_MOCK_BUDGET_S=300                    escalation budget remaining seconds
+#   PGWT_MOCK_SAMPLED_CPU_UNDERREAD_FRAC=0.15 fraction of CPU time the sampled/
+#                                            mixed dataset drops, modeling the
+#                                            real sampled-tier CPU under-read
+#                                            (#306/#321) -- see the constant's
+#                                            own comment below for the
+#                                            measurement this defaults from.
+#                                            "mixed" reuses the SAME derived
+#                                            numbers as "sampled": without a
+#                                            "fidelity_ranges" field (which
+#                                            production does not emit either,
+#                                            and #322 tracks lighting up the
+#                                            UI's unreachable sub-range
+#                                            renderer separately) the mock
+#                                            cannot represent a window that is
+#                                            PART exact, part sampled.
 
 
 class FidelityConfig:
@@ -560,6 +575,182 @@ class FidelityConfig:
 
 
 _FID = FidelityConfig()
+
+
+# ── Sampled-tier CPU under-read (#306/#321 follow-up, issue text:
+# "mock-underread") ───────────────────────────────────────────────────────────
+#
+# tests/mock_server.py served the SAME _CANNED/_AAS_BUCKETS dataset in exact,
+# sampled and mixed fidelity modes -- only the chip/badge/tint changed. That
+# made the real product bug invisible to every UI test: at 10 Hz the sampler
+# measures a CPU/kernel share 3.7-7.6 pp BELOW the exact tier (n=7 across two
+# machines, 2026-10-08; see #306, #321). No test anywhere exercised a sampled
+# under-read end to end.
+#
+# Mechanism modeled: the sampler simply DROPS some fraction of the CPU-busy
+# ticks it should have observed. Wait-event wall time is unaffected (a wait's
+# duration comes from its own start/end, not from a sample tick) -- only the
+# CPU estimate is biased low, and since CPU no longer gets reattributed
+# anywhere, the DB Time / AAS totals the CPU feeds also shrink. This is NOT a
+# reallocation into wait classes -- no measurement supports that shape, so we
+# do not invent one (see the measurement note on _SAMPLED_CPU_UNDERREAD_FRAC).
+#
+# Expressed as a FRACTION of CPU time dropped, not a fixed percentage-point
+# offset: pp depends on the baseline CPU share, which moves the moment this
+# fixture does, so a pp constant silently drifts out of date (exactly how a
+# June "0.9 pp" figure sat stale in the README for months). A fraction is
+# stable under that kind of drift.
+_SAMPLED_CPU_UNDERREAD_FRAC = float(os.environ.get(
+    "PGWT_MOCK_SAMPLED_CPU_UNDERREAD_FRAC",
+    # 0.15 is the midpoint of "a tenth to a quarter" -- the README's
+    # qualitative description of the 10 Hz sampling loss (sample_period_ns
+    # defaults to 100ms == 10 Hz, see PGWT_MOCK_SAMPLE_PERIOD_NS above).
+    # Representative, not authoritative: measured range as of 2026-10-08,
+    # sampled CPU/kernel ratio 3.7-7.6 pp below exact, n=7, see #306/#321.
+    "0.15"))
+
+# Window length the canned time_model/top_events fixtures' "aas" fields are
+# computed over. Derived from _CANNED["time_model"]["wall_ms"] (set below;
+# forward reference resolved at first use since this is a plain float, not a
+# closure) -- NOT from _TO_NS/_FROM_NS, which cover a different span. Kept as
+# a function so it is read lazily after _CANNED gets its "time_model" key.
+def _wall_s():
+    return _CANNED["time_model"]["wall_ms"] / 1000.0
+
+
+def _derive_sampled_time_model(exact, frac):
+    """Build the sampled-tier time_model from the exact one (criterion 2: a
+    single source of truth, never a second hand-written canned dataset).
+
+    Merges "CPU (running)" + "CPU (waiting for a core)" into one "CPU*" row
+    (a sampled/legacy window cannot measure the running/waiting split --
+    compute.c's has_measured_cpu gates it off, see the field comment on
+    _CANNED["time_model"]["has_measured_cpu"] above), scales that merged
+    total down by `frac`, and recomputes db_time_ms/pct/aas for every row
+    from the new, smaller total -- never a cosmetic renormalization of the
+    old percentages. Idle is untouched: idle time comes from idle wait
+    events, not from the CPU estimate, so a CPU under-read does not move it.
+
+    With frac == 0 this reproduces every exact-mode ms/pct/aas value
+    bit-for-bit (verified in tests/results/mock-underread/); that identity is
+    the regression net for the refactor from literal to derived numbers.
+    """
+    rows = exact["rows"]
+    cpu_running = next(r for r in rows if r["name"] == "CPU (running)")
+    cpu_waiting = next(r for r in rows
+                       if r["name"] == "CPU (waiting for a core)")
+    idle_row = next(r for r in rows
+                    if r["indent"] == 0 and "Idle" in r["name"])
+    sampled_cpu_ms = round((cpu_running["ms"] + cpu_waiting["ms"])
+                          * (1.0 - frac), 6)
+
+    other_rows = []
+    other_total_ms = 0.0
+    for r in rows:
+        if r is cpu_running or r is cpu_waiting or r is idle_row:
+            continue
+        if r["indent"] == 1:
+            other_total_ms += r["ms"]
+        other_rows.append(r)
+
+    db_time_ms = other_total_ms + sampled_cpu_ms
+    wall_s = _wall_s()
+
+    def pct(ms):
+        return round(ms / db_time_ms * 100.0, 1) if db_time_ms > 0 else 0.0
+
+    def aas(ms):
+        return round(ms / wall_s, 2) if wall_s > 0 else 0.0
+
+    new_rows = [{"indent": 0, "name": "DB Time", "ms": round(db_time_ms, 4),
+                 "pct": 100.0, "aas": aas(db_time_ms)},
+                {"indent": 1, "name": "CPU*", "ms": sampled_cpu_ms,
+                 "pct": pct(sampled_cpu_ms), "aas": aas(sampled_cpu_ms)}]
+    for r in other_rows:
+        nr = dict(r)
+        nr["pct"] = pct(nr["ms"])
+        nr["aas"] = aas(nr["ms"])
+        new_rows.append(nr)
+    new_rows.append(dict(idle_row))
+
+    out = dict(exact)
+    out["rows"] = new_rows
+    out["db_time_ms"] = round(db_time_ms, 4)
+    out["aas"] = aas(db_time_ms)
+    # T8 gating (criterion 4): a sampled/legacy window never measures the
+    # running/waiting split (src/compute.c has_measured_cpu), so these all
+    # read as the "no measured cpu_ns" case -- mirrors a real sampled
+    # time_model response, not an invented shape.
+    out["has_measured_cpu"] = False
+    out["cpu_ms"] = sampled_cpu_ms
+    out["offcpu_ms"] = 0.0
+    out["wait_gap_cpu_ms"] = 0.0
+    out["cpu_clamped_ms"] = 0.0
+    # "categories"/"io_worker_busy_pct" are a DIFFERENT axis (query-phase,
+    # not wait-type -- see src/compute.c pgwt_event_category) that #306/#321
+    # never measured; left as the exact canned values rather than guessing
+    # at a bias this task has no evidence for (criterion 5).
+    return out
+
+
+def _derive_sampled_top_events(exact, frac):
+    """top_events sibling of _derive_sampled_time_model: same merge-and-scale,
+    applied to the single "CPU*" event_id==0 row top_events already carries
+    (top_events never splits running/waiting -- that split is a time_model-
+    only concept, see the "CPU (waiting for a core)" comment above)."""
+    rows = exact["rows"]
+    cpu_row = next(r for r in rows if r["event_id"] == 0)
+    sampled_cpu_ms = round(cpu_row["total_ms"] * (1.0 - frac), 6)
+    other_total_ms = sum(r["total_ms"] for r in rows if r["event_id"] != 0)
+    db_time_ms = other_total_ms + sampled_cpu_ms
+    wall_s = _wall_s()
+
+    def pct(ms):
+        return round(ms / db_time_ms * 100.0, 1) if db_time_ms > 0 else 0.0
+
+    def aas(ms):
+        return round(ms / wall_s, 2) if wall_s > 0 else 0.0
+
+    new_rows = []
+    for r in rows:
+        nr = dict(r)
+        if r["event_id"] == 0:
+            nr["total_ms"] = sampled_cpu_ms
+        nr["pct"] = pct(nr["total_ms"])
+        nr["aas"] = aas(nr["total_ms"])
+        new_rows.append(nr)
+    return {"db_time_ms": round(db_time_ms, 4), "rows": new_rows}
+
+
+def _derive_sampled_aas_buckets(buckets, frac):
+    """AAS chart sibling: scale the "cpu" series down per-bucket, and force
+    "offcpu" to 0 -- the real server only ever emits a nonzero measured
+    off-CPU AAS where has_measured_cpu is set, which a sampled/legacy window
+    never has (see the "offcpu" field comment on _make_aas_buckets above)."""
+    out = []
+    for b in buckets:
+        nb = dict(b)
+        nb["cpu"] = round(b["cpu"] * (1.0 - frac), 4)
+        nb["offcpu"] = 0.0
+        out.append(nb)
+    return out
+
+
+# Built once at import/load time from the single exact source (criterion 2).
+# Scope decision (adviser 2026-10-08): without "fidelity_ranges" (deliberately
+# out of scope -- see the module docstring's fidelity-mode table and issue
+# #322) the mock cannot represent a window that is PART exact, part sampled.
+# So "mixed" reuses these same sampled-derived figures; only the "fidelity"
+# tag differs. This is a documented mock limitation, not a claim that a real
+# mixed window has no exact contribution -- it visibly does (the EXACT-
+# required views stay available under "mixed", never emitting the
+# full_fidelity_required marker _EXACT_VIEWS triggers for "sampled").
+_SAMPLED_TIME_MODEL = _derive_sampled_time_model(
+    _CANNED["time_model"], _SAMPLED_CPU_UNDERREAD_FRAC)
+_SAMPLED_TOP_EVENTS = _derive_sampled_top_events(
+    _CANNED["top_events"], _SAMPLED_CPU_UNDERREAD_FRAC)
+_SAMPLED_AAS_BUCKETS = _derive_sampled_aas_buckets(
+    _AAS_BUCKETS, _SAMPLED_CPU_UNDERREAD_FRAC)
 
 
 class DaemonState:
@@ -777,7 +968,16 @@ def handle_request(msg):
     response_fidelity = "sampled" if _is_compare_baseline(msg) else _FID.fidelity
     if cmd in _FIDELITY_VIEWS and "fidelity" not in resp and "error" not in resp:
         resp["fidelity"] = response_fidelity
-        if response_fidelity in ("sampled", "mixed"):
+        # Found by the new sampled/mixed test_protocol_drift.py coverage
+        # (#306/#321 "mock-underread"): src/server.c's EXACT-required view
+        # handlers (handle_heatmap/handle_transitions/handle_concurrency/
+        # handle_lock_chains/handle_interference) emit their own bespoke
+        # {"id","fidelity",...} directly -- never through add_fidelity/
+        # add_fidelity_window -- so they NEVER carry "sample_period_ns", even
+        # when available over a "mixed" window. Only the SAMPLED-tolerant
+        # views (time_model, top_events, aas, ...) get it, mirroring
+        # add_fidelity's `info->has_samples && info->sample_period_ns` gate.
+        if response_fidelity in ("sampled", "mixed") and cmd not in _EXACT_VIEWS:
             resp["sample_period_ns"] = _FID.sample_period_ns
     # FID-3 (T1): over a sampled-only window the real server gates the
     # latency columns — samples carry no real durations, so avg/percentiles
@@ -829,11 +1029,20 @@ def _handle_request_inner(cmd, req_id, msg):
                     io=round(b["io"] * 1.35, 4), lock=round(b["lock"] * 0.4, 4))
                     for b in _AAS_BUCKETS]
             else:
-                resp["buckets"] = _AAS_BUCKETS
+                # #306/#321 CPU under-read (no fidelity_ranges -- "mixed"
+                # reuses the sampled-derived series, see the scope-decision
+                # comment above _SAMPLED_TIME_MODEL).
+                resp["buckets"] = (_SAMPLED_AAS_BUCKETS
+                                   if _FID.fidelity in ("sampled", "mixed")
+                                   else _AAS_BUCKETS)
         return resp
 
     if cmd == "time_model":
-        resp = {"id": req_id, **_CANNED["time_model"]}
+        # #306/#321 CPU under-read: sampled/mixed serve the derived, scaled
+        # dataset (single source of truth, see _derive_sampled_time_model).
+        base_tm = (_SAMPLED_TIME_MODEL if _FID.fidelity in ("sampled", "mixed")
+                   else _CANNED["time_model"])
+        resp = {"id": req_id, **base_tm}
         if _is_compare_baseline(msg):
             resp["db_time_ms"] = 10000
             resp["rows"] = [dict(r, ms=round(r["ms"] * 0.8, 3))
@@ -841,7 +1050,9 @@ def _handle_request_inner(cmd, req_id, msg):
         return resp
 
     if cmd == "top_events":
-        rows = _CANNED["top_events"]["rows"]
+        base_te = (_SAMPLED_TOP_EVENTS if _FID.fidelity in ("sampled", "mixed")
+                   else _CANNED["top_events"])
+        rows = base_te["rows"]
         filters = msg.get("filters", {})
         if "class" in filters:
             cls = filters["class"]
@@ -849,7 +1060,7 @@ def _handle_request_inner(cmd, req_id, msg):
         if _is_compare_baseline(msg):
             rows = _baseline_rows(rows, "total_ms")
         return {"id": req_id,
-                "db_time_ms": _CANNED["top_events"]["db_time_ms"],
+                "db_time_ms": base_te["db_time_ms"],
                 "rows": rows}
 
     if cmd == "top_sessions":

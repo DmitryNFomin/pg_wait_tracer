@@ -3269,6 +3269,82 @@ def test_b5_metrics_panel(page):
         check("Budget" in txt, "Metrics panel shows budget remaining")
 
 
+def _overview_metrics(page):
+    """{label: value text} from the summary bar's .metric elements (DB Time /
+    Wall / AAS / Idle / CPUs -- see web/static/views/overview.js
+    summaryHtml)."""
+    out = {}
+    for m in page.query_selector_all(".metric"):
+        label = m.query_selector(".metric-label").text_content()
+        value = m.query_selector(".metric-value").text_content()
+        out[label] = value
+    return out
+
+
+def _overview_class_rows(page):
+    """[(name, pct_float)] for every indent-1 ("class row") in the Overview
+    table -- CPU*/CPU (running)/CPU (waiting for a core)/IO/Lock/LWLock/
+    Timeout/Extension -- read straight off the rendered %DB Time cell
+    (web/static/lib/table.js pctBar renders "<N.N>%" in a <span>), so this is
+    the DISPLAYED number, not the wire JSON."""
+    rows = []
+    for tr in page.query_selector_all(
+            "#table-container table tbody tr.indent-1"):
+        cells = tr.query_selector_all("td")
+        name = cells[0].text_content().strip()
+        pct_txt = cells[2].text_content().strip()
+        rows.append((name, float(pct_txt.rstrip("%"))))
+    return rows
+
+
+def test_b5_sampled_cpu_underread(exact_page, sampled_page):
+    """B5.5 (#306/#321 "mock-underread"): the DISPLAYED sampled CPU share is
+    below the displayed exact CPU share, with DB Time/AAS following it down
+    and the non-idle class shares still summing to 100 -- the regression
+    guard for the real sampled-tier CPU under-read (mock previously served
+    byte-identical numbers in every fidelity mode, see the issue text)."""
+    print("--- Test B5.5: Sampled CPU Under-read (displayed) ---")
+
+    exact_page.goto(MOCK_URL)
+    exact_page.wait_for_selector("#status.connected", timeout=10000)
+    exact_page.wait_for_timeout(1000)
+    exact_metrics = _overview_metrics(exact_page)
+    exact_rows = _overview_class_rows(exact_page)
+    exact_cpu_pct = sum(p for n, p in exact_rows if n.startswith("CPU"))
+    check(exact_cpu_pct > 0, f"Exact CPU share is present ({exact_cpu_pct})")
+
+    sampled_page.goto(B5_URL)
+    sampled_page.wait_for_selector("#status.connected", timeout=10000)
+    sampled_page.wait_for_timeout(1000)
+    sampled_metrics = _overview_metrics(sampled_page)
+    sampled_rows = _overview_class_rows(sampled_page)
+    sampled_cpu_pct = sum(p for n, p in sampled_rows if n.startswith("CPU"))
+
+    check(sampled_cpu_pct <= exact_cpu_pct - 2.0,
+          f"Sampled CPU share ({sampled_cpu_pct}%) is at least 2pp below "
+          f"exact ({exact_cpu_pct}%)")
+
+    def _ms(text):
+        # fmtMs renders e.g. "12.8s" / "12001.0ms" -- strip the unit, keep
+        # the number; both sides use the same unit at this magnitude so a
+        # straight float comparison is valid.
+        return float(text.rstrip("s").rstrip("ms"))
+
+    check(_ms(sampled_metrics["DB Time"]) < _ms(exact_metrics["DB Time"]),
+          f"Sampled DB Time ({sampled_metrics['DB Time']}) is below exact "
+          f"({exact_metrics['DB Time']})")
+    check(float(sampled_metrics["AAS"]) < float(exact_metrics["AAS"]),
+          f"Sampled AAS ({sampled_metrics['AAS']}) is below exact "
+          f"({exact_metrics['AAS']})")
+
+    non_idle_total = sum(p for n, p in sampled_rows)
+    check(abs(non_idle_total - 100.0) < 1.0,
+          f"Sampled non-idle class shares sum to ~100% (got {non_idle_total})")
+
+    badge = sampled_page.query_selector(".pane-fidelity-badge")
+    check(badge is not None, "Sampled Overview pane carries the fidelity badge")
+
+
 # ── Track U Phase U4: compare mode ──────────────────────────────────────────
 
 def _enable_compare_5m(page, url=COMPARE_URL):
@@ -3621,6 +3697,11 @@ def main():
                 for fn in b5_tests:
                     fn(b5_page)
                     assert_no_console_errors(b5_page, b5_guard, fn.__name__)
+                # Two-page comparison (exact `page` vs sampled `b5_page`):
+                # not in b5_tests above, which assumes a single-page signature.
+                test_b5_sampled_cpu_underread(page, b5_page)
+                assert_no_console_errors(
+                    b5_page, b5_guard, test_b5_sampled_cpu_underread.__name__)
                 b5_ctx.close()
             finally:
                 set_failure_capture(page, guard)
