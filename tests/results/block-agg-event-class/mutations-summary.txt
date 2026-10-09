@@ -2,29 +2,29 @@ tests/test_block_agg.c -- mutation / bypass results
 control (unmutated tree): GREEN
 every mutation below must be RED; a GREEN one is a hole in the suite, not a passing build
 
-N1   RED          caught-by=sec9e/sec10b 10516 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2520: §9e [1700000000000000
-N2   RED          caught-by=sec9e/sec10b 6964 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2520: §9e [1700000000000000
-N3   RED          caught-by=sec11 E7     1 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3416: §11 E7 a block reachi
-N4   RED          caught-by=sec10a/sec10b 13768 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2813: §10a IO_WORKER flagge
-N5   RED          caught-by=sec10a/sec10b 11168 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2813: §10a SAMPLE flagged: 
-N6   RED          caught-by=sec11 E12    2 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3660: §11 E12b a continuati
-N7   RED          caught-by=sec11 E12    2 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3593: §11 E12 a block holdi
-N8   RED          caught-by=sec11 E1     5 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3281: §11 E1 an accumulator
-N9   RED          caught-by=sec11 E1     2 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3289: §11 E1 events_sorted 
-N10  RED          caught-by=sec11 E3     1 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3342: §11 E3 a window may n
-N11  RED          caught-by=sec11 E5     2 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3373: §11 E5 an inverted wi
-N12  RED          caught-by=sec9e        228 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2515: §9e [1700000000000000
+N1   RED          caught-by=sec9e/sec10b 10518 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2524: §9e [1700000000000000
+N2   RED          caught-by=sec9e/sec10b 6964 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2524: §9e [1700000000000000
+N3   RED          caught-by=sec11 E7     1 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3463: §11 E7 a block reachi
+N4   RED          caught-by=sec10a/sec10b 13768 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2817: §10a IO_WORKER flagge
+N5   RED          caught-by=sec10a/sec10b 11168 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2817: §10a SAMPLE flagged: 
+N6   RED          caught-by=sec11 E12    2 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3710: §11 E12b a continuati
+N7   RED          caught-by=sec11 E12    2 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3640: §11 E12 a block holdi
+N8   RED          caught-by=sec11 E1     8 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3295: §11 E1 an accumulator
+N9   RED          caught-by=sec11 E1     2 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3303: §11 E1 events_sorted 
+N10  RED          caught-by=sec11 E3     1 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3389: §11 E3 a window may n
+N11  RED          caught-by=sec11 E5     3 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3420: §11 E5 an inverted wi
+N12  RED          caught-by=sec9e        228 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2519: §9e [1700000000000000
 N13  RED          caught-by=sec9c-bis    1 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2303: §9c-bis a SAMPLES blo
-N14  RED          caught-by=sec11 E10    2 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3530: §11 E10 build must re
-N15  RED          caught-by=sec9e/sec10b/sec12 P5 1913 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2536: §9e [1700000000000000
-N16  RED          caught-by=sec10c       9 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3188: §10c durations 8000 a
-N17  RED          caught-by=sec10b       11458 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2922: §10b [970299999, 1000
-N18  RED          caught-by=sec9e/sec10b 13994 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2524: §9e event 167772161 e
-N19  RED          caught-by=sec10b       6510 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3061: §10b [970299999, 1000
-N20  RED          caught-by=sec9e/sec10b 10516 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2520: §9e [1700000000000000
-N21  RED          caught-by=sec9e/sec10b 10516 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2520: §9e [1700000000000000
-N22  RED          caught-by=sec10a/sec10b 13769 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2813: §10a IO_WORKER flagge
-N23  RED          caught-by=sec10c       9 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3188: §10c durations 8000 a
+N14  RED          caught-by=sec11 E10    2 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3577: §11 E10 build must re
+N15  RED          caught-by=sec9e/sec10b/sec12 P5 1913 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2540: §9e [1700000000000000
+N16  RED          caught-by=sec10c       9 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3201: §10c durations 8000 a
+N17  RED          caught-by=sec10b       11458 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2935: §10b [970299999, 1000
+N18  RED          caught-by=sec9e/sec10b 13994 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2528: §9e event 167772161 e
+N19  RED          caught-by=sec10b       6510 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3074: §10b [970299999, 1000
+N20  RED          caught-by=sec9e/sec10b 10517 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2524: §9e [1700000000000000
+N21  RED          caught-by=sec9e/sec10b 10517 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2524: §9e [1700000000000000
+N22  RED          caught-by=sec10a/sec10b 13769 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2817: §10a IO_WORKER flagge
+N23  RED          caught-by=sec10c       9 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3201: §10c durations 8000 a
 
 23 mutation(s), 23 RED, 0 NOT RED
 

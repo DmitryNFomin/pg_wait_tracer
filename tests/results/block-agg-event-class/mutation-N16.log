@@ -50,7 +50,7 @@ test_block_agg — per-committed-block transition aggregate (Phase 1)
     windows with positive total_ns .... 364
     windows with >=1 merged pair ...... 364
     mutation probes that went red ..... 7
-    refusals observed ................. 71
+    refusals observed ................. 75
     §2 predicate cases ................ 17
     §2 windows compared ............... 5067
     §2 windows with >=1 event row ..... 4582
@@ -68,12 +68,14 @@ test_block_agg — per-committed-block transition aggregate (Phase 1)
     §2 v2 probes that went red ........ 5
 FAILED: 9 check(s)
 WARN: cannot open /nonexistent/pgwt/no-such.trace: No such file or directory
-FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3188: §10c durations 8000 and 16000: the product puts them apart, this module puts them together (buckets 4/4)
-FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3188: §10c durations 8000 and 16001: the product puts them apart, this module puts them together (buckets 4/4)
-FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3188: §10c durations 8001 and 16000: the product puts them apart, this module puts them together (buckets 4/4)
-FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3188: §10c durations 8001 and 16001: the product puts them apart, this module puts them together (buckets 4/4)
-FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3188: §10c durations 15999 and 16000: the product puts them apart, this module puts them together (buckets 4/4)
-FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3188: §10c durations 15999 and 16001: the product puts them apart, this module puts them together (buckets 4/4)
-FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3188: §10c durations 16000 and 31999: the product puts them together, this module puts them apart (buckets 4/5)
-FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3188: §10c durations 16001 and 31999: the product puts them together, this module puts them apart (buckets 4/5)
-FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3194: §10c 8 bucket-partition disagreement(s)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3201: §10c durations 8000 and 16000: the product puts them apart, this module puts them together (buckets 4/4)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3201: §10c durations 8000 and 16001: the product puts them apart, this module puts them together (buckets 4/4)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3201: §10c durations 8001 and 16000: the product puts them apart, this module puts them together (buckets 4/4)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3201: §10c durations 8001 and 16001: the product puts them apart, this module puts them together (buckets 4/4)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3201: §10c durations 15999 and 16000: the product puts them apart, this module puts them together (buckets 4/4)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3201: §10c durations 15999 and 16001: the product puts them apart, this module puts them together (buckets 4/4)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3201: §10c durations 16000 and 31999: the product puts them together, this module puts them apart (buckets 4/5)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3201: §10c durations 16001 and 31999: the product puts them together, this module puts them apart (buckets 4/5)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3207: §10c 8 bucket-partition disagreement(s)
+
+[complete output, 70 line(s), not truncated]

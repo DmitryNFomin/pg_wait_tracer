@@ -52,7 +52,7 @@ test_block_agg — per-committed-block transition aggregate (Phase 1)
     windows with positive total_ns .... 364
     windows with >=1 merged pair ...... 364
     mutation probes that went red ..... 7
-    refusals observed ................. 71
+    refusals observed ................. 75
     §2 predicate cases ................ 17
     §2 windows compared ............... 5067
     §2 windows with >=1 event row ..... 4582
@@ -70,4 +70,6 @@ test_block_agg — per-committed-block transition aggregate (Phase 1)
     §2 v2 probes that went red ........ 5
 FAILED: 1 check(s)
 WARN: cannot open /nonexistent/pgwt/no-such.trace: No such file or directory
-FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3416: §11 E7 a block reaching past `to` must be REFUSED_CLIP
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3463: §11 E7 a block reaching past `to` must be REFUSED_CLIP
+
+[complete output, 62 line(s), not truncated]

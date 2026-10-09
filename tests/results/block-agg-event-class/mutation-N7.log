@@ -52,7 +52,7 @@ test_block_agg — per-committed-block transition aggregate (Phase 1)
     windows with positive total_ns .... 364
     windows with >=1 merged pair ...... 364
     mutation probes that went red ..... 7
-    refusals observed ................. 71
+    refusals observed ................. 75
     §2 predicate cases ................ 17
     §2 windows compared ............... 5067
     §2 windows with >=1 event row ..... 4582
@@ -70,5 +70,7 @@ test_block_agg — per-committed-block transition aggregate (Phase 1)
     §2 v2 probes that went red ........ 5
 FAILED: 2 check(s)
 WARN: cannot open /nonexistent/pgwt/no-such.trace: No such file or directory
-FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3593: §11 E12 a block holding a SAMPLE_CONT fragment must be REFUSED — its per-event count is order-dependent
-FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3595: §11 E12 the refused build must leave MODE_NONE
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3640: §11 E12 a block holding a SAMPLE_CONT fragment must be REFUSED — its per-event count is order-dependent
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3642: §11 E12 the refused build must leave MODE_NONE
+
+[complete output, 63 line(s), not truncated]

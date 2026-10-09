@@ -1,2 +1,61 @@
-COMPILER UNAVAILABLE (control): [Errno 2] No such file or directory: '/nonexistent/cc-127'
-cannot build, therefore cannot judge -- refusing
+test_block_agg — per-committed-block transition aggregate (Phase 1)
+=== §1 record predicate vs pgwt_compute_transitions ===
+    6 counted, 7 rejected, both predicates agreeing on all 13
+=== §2 build + merge against literal expected values ===
+=== §3 merge associativity + commutativity ===
+=== §4 straddle: a pair whose old_event began in an earlier block ===
+=== §5 plan(): exactly one of SKIP/MERGE/DECODE per block ===
+    plan outcomes over 378 windows: merge=553 decode=331 skip=1006
+=== §6 model: merged + decoded == raw, bit-exact, every window ===
+    378 windows compared, 170 of them at a merge/decode seam
+=== §6b the end-key bound: agreement with the loader, and the cost of getting it wrong ===
+=== §7 mutation probes: the comparator can see one count, one nanosecond, one pair ===
+    probe 0 (clean (control)         ) disagreements=0
+    probe 1 (+1 on one pair count    ) disagreements=2
+    probe 2 (+1 ns on one pair       ) disagreements=1
+    probe 3 (-1 ns on one pair       ) disagreements=1
+    probe 4 (an extra pair appears   ) disagreements=4
+    probe 5 (one pair disappears     ) disagreements=2
+    probe 6 (+1 ns on one node       ) disagreements=1
+    probe 7 (one node disappears     ) disagreements=2
+=== §8 bypass suite: a path that cannot see must refuse ===
+=== §9 on-disk: pgwt_block_agg_window_from_reader vs raw, twice ===
+    190 windows x 2 passes, 472 merges (236 in pass 2), 288 decodes, cache: 1520 lookups / 1486 hits / 64 stores
+=== §9e on-disk: the SHIPPED window builder with per-event totals, vs pgwt_compute_top_events ===
+    merges=30 decodes=114 clip-downgrades=12 rows=432
+=== §10a the per-event predicate vs pgwt_compute_top_events ===
+=== §10b model: per-event + per-class == pgwt_compute_top_events, bit-exact, every window ===
+    windows compared 3741, clipped records 4224, clip refusals 1938
+=== §10c the latency ladder vs the oracle's own bucket edges ===
+    51 probe durations, 1275 pairs partitioned identically
+=== §10f falsify the clip counters: a straddle-free fixture must drive them to ZERO ===
+    straddle-free fixture: clipped=0 refusals=0 (both must be 0)
+=== §11 bypass suite: the v2 readouts must REFUSE when they cannot see ===
+=== §12 mutation probes: the v2 comparator can see one count, one ns, one row ===
+=== §0 vacuity ledger ===
+    windows compared .................. 378
+    blocks MERGEd ..................... 553
+    blocks DECODEd .................... 331
+    blocks SKIPped .................... 1006
+    windows at a merge/decode seam .... 170
+    windows with positive total_ns .... 364
+    windows with >=1 merged pair ...... 364
+    mutation probes that went red ..... 7
+    refusals observed ................. 75
+    §2 predicate cases ................ 17
+    §2 windows compared ............... 5067
+    §2 windows with >=1 event row ..... 4582
+    §2 windows at a merge/decode seam . 2173
+    §2 event rows compared ............ 17899
+    §2 event-FILTERED rows compared ... 14248
+    §2 class rows compared ............ 15235
+    §2 class rows with >=2 events ..... 2664
+    §2 records that needed clipping ... 4224
+    §2 REFUSED_CLIP -> DECODE ......... 1938
+    §2 SHIPPED-builder rows compared ... 432
+    §2 SHIPPED clip downgrades ........ 12
+    §2 rows whose event is unfilterable 3651
+    §2 latency-bucket pairs checked ... 1275
+    §2 v2 probes that went red ........ 5
+PASS: test_block_agg
+WARN: cannot open /nonexistent/pgwt/no-such.trace: No such file or directory

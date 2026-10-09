@@ -5,7 +5,7 @@ expected to be caught by: sec11 E1
 --- return a->events_on ? 1 : 0;
 +++ return 1;   /* MUTANT: absence reads as available */
 
-exit=1, 5 FAIL line(s)
+exit=1, 8 FAIL line(s)
 
 test_block_agg — per-committed-block transition aggregate (Phase 1)
 === §1 record predicate vs pgwt_compute_transitions ===
@@ -50,7 +50,7 @@ test_block_agg — per-committed-block transition aggregate (Phase 1)
     windows with positive total_ns .... 364
     windows with >=1 merged pair ...... 364
     mutation probes that went red ..... 7
-    refusals observed ................. 71
+    refusals observed ................. 75
     §2 predicate cases ................ 17
     §2 windows compared ............... 5067
     §2 windows with >=1 event row ..... 4582
@@ -66,10 +66,15 @@ test_block_agg — per-committed-block transition aggregate (Phase 1)
     §2 rows whose event is unfilterable 3651
     §2 latency-bucket pairs checked ... 1275
     §2 v2 probes that went red ........ 5
-FAILED: 5 check(s)
+FAILED: 8 check(s)
 WARN: cannot open /nonexistent/pgwt/no-such.trace: No such file or directory
-FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3281: §11 E1 an accumulator with no declared window must report the per-event table UNAVAILABLE
-FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3289: §11 E1 events_sorted must refuse, not answer empty
-FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3297: §11 E1 classes_sorted must refuse
-FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3303: §11 E1 db_time must refuse when the table is off
-FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3375: §11 E5 a refused enable must leave the table OFF
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3295: §11 E1 an accumulator with no declared window must report the per-event table UNAVAILABLE
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3303: §11 E1 events_sorted must refuse, not answer empty
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3311: §11 E1 classes_sorted must refuse
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3317: §11 E1 db_time must refuse when the table is off
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3323: §11 E1 a refused db_time must write the impossible sentinel, got 0
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3325: §11 E1 a refused db_time must never read as zero
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3339: §11 E1 event_lookup must REFUSE when there is no table, not report the event absent
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3422: §11 E5 a refused enable must leave the table OFF
+
+[complete output, 69 line(s), not truncated]

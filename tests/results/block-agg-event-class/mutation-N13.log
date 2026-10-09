@@ -53,7 +53,7 @@ test_block_agg — per-committed-block transition aggregate (Phase 1)
     windows with positive total_ns .... 364
     windows with >=1 merged pair ...... 364
     mutation probes that went red ..... 7
-    refusals observed ................. 71
+    refusals observed ................. 75
     §2 predicate cases ................ 17
     §2 windows compared ............... 5067
     §2 windows with >=1 event row ..... 4582
@@ -72,3 +72,5 @@ test_block_agg — per-committed-block transition aggregate (Phase 1)
 FAILED: 1 check(s)
 FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2303: §9c-bis a SAMPLES block whose first record ends exactly at `to` must be REFUSED (C7 is inclusive), got rc=0 with 4096 records admitted — a half-open `first < to` reading returns OK here and answers a MIXED window as if it were EXACT
 WARN: cannot open /nonexistent/pgwt/no-such.trace: No such file or directory
+
+[complete output, 62 line(s), not truncated]
