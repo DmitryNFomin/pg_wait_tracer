@@ -29,6 +29,7 @@ TESTS     = test_wait_event test_cmdline test_spawn test_event_writer test_event
             test_idle_accounting test_idle_summary \
             test_agg_raw_crosscheck \
             test_exec_index \
+            test_variant_index \
             gen_test_traces gen_bench_traces test_concurrent_rw cross_validate \
             dump_markers wait_cpu_canary test_wait_cpu_canary \
             test_summary_tick_flush \
@@ -485,5 +486,26 @@ bench_block_agg: bench_block_agg.c ../src/block_agg.c ../src/compute.c \
                  $(BUILD)/spawn.o $(BUILD)/cJSON.o
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -llz4 -lm
 
+# test_variant_index: the per-execution STEP-SEQUENCE index (paint-latency
+# plan, Phase 3b, src/variant_index.c). Phase 3's boundary index cannot serve
+# `variants`, which groups executions by the ordered sequence of wait steps
+# between their markers. A differential against the real pgwt_compute_variants
+# over block splits of 25 fixtures x windows x both phases, asserting all 18
+# result fields BIT-EXACTLY (including the raw bits of the avg_loop_n double),
+# plus the bypass suite (an empty/unsealed/wrong-version index, a skipped or
+# reordered block, an out-of-order record, a record outside its block's
+# bounds, a window not contained in coverage, an inverted window, an unknown
+# phase, a NULL or non-empty filter and every injected allocation failure must
+# REFUSE, never answer) and the measured O(executions in window) claim.
+# PGWT_VARIANT_INDEX_ONE_BLOCK=1 re-runs the sweeps with no block cuts to
+# falsify the non-vacuity ledger; that mode never exits 0.
+# Server build, no BPF, no live PG; ~5 s (the oracle callocs a 4 MB hash
+# table per call and the sweep calls it ~38,000 times).
+#
+test_variant_index: test_variant_index.c ../src/variant_index.c ../src/compute.c \
+                   $(BUILD)/wait_event.o $(BUILD)/idle_rule.o \
+                   $(BUILD)/spawn.o $(BUILD)/cJSON.o
+	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -lm
+
 clean:
-	rm -f $(TESTS) test_exec_index map_reader_core.o
+	rm -f $(TESTS) test_exec_index test_variant_index map_reader_core.o
