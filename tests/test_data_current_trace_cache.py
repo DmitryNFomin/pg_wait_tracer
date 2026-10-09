@@ -1024,9 +1024,15 @@ def bypass_truncated_file_under_meta(tr):
                      "(%d -> %d)" % (pre["blocks"], post["blocks"]))
         else:
             tr.check(False, "curcache stats unreadable across the truncation")
+        # The control MUST query the same command as the probe. It said
+        # "transitions" while the probe moved to PROBE_CMD, so this compared
+        # two different commands -- session_timeline's empty-with-fidelity-none
+        # against transitions' full_fidelity_required refusal -- and could
+        # never hold whatever the product did. A cross-command check_eq is not
+        # a weaker assertion, it is no assertion at all.
         with ServerHarness(trace_dir,
                            env={"PGWT_CURRENT_TRACE_CACHE": "0"}) as srv:
-            ctl = srv.query("transitions", from_=w_from, to_=w_to)
+            ctl = srv.query(PROBE_CMD, from_=w_from, to_=w_to)
         tr.check_eq(canonical_body(after), canonical_body(ctl),
                     "the truncated read matches a fresh uncached read exactly")
     finally:
