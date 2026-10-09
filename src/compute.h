@@ -345,6 +345,12 @@ struct pgwt_session_row {
 struct pgwt_sessions_result {
     struct pgwt_session_row *rows;   /* malloc'd, caller frees */
     int num_rows;
+    /* #327: the per-pid table is unbounded now, so the only early exit is a
+     * real allocation failure. When it happens the caller MUST report an
+     * error — a session list that is short but looks complete is the defect
+     * this field exists to prevent. Set by both the raw and the summary
+     * path. */
+    int failed;
 };
 
 void pgwt_compute_top_sessions(const struct pgwt_trace_event *events, int count,
@@ -382,6 +388,11 @@ struct pgwt_queries_result {
     double   unattributed_ms;
     uint64_t unattributed_count;
     double   backfilled_ms;
+    /* #327: see pgwt_sessions_result.failed. server.c's handle_top_queries
+     * already emits code "compute_failed" when the lifecycle scan fails;
+     * this joins that condition rather than adding a second arm. Set by
+     * both the raw and the summary path. */
+    int      failed;
 };
 
 void pgwt_compute_top_queries(const struct pgwt_trace_event *events, int count,
@@ -475,6 +486,8 @@ struct pgwt_fingerprint_row {
 struct pgwt_fingerprint_result {
     struct pgwt_fingerprint_row *rows;  /* malloc'd, caller frees */
     int    num_rows;
+    /* #327: see pgwt_sessions_result.failed. */
+    int    failed;
 };
 
 /* Compute per-query wait fingerprints: class distribution + top transition. */

@@ -11,6 +11,7 @@
 #include "wait_event.h"
 #include "percentile.h"
 #include "pid_index.h"
+#include "qid_index.h"
 #include "triple_map.h"
 
 #include <stdlib.h>
@@ -106,13 +107,55 @@ static inline int hash32(uint32_t key, int mask)
     return (int)(key & mask);
 }
 
-/* Hash a uint64 key to a table slot (power-of-2 table size) */
-static inline int hash64(uint64_t key, int mask)
+/* #327: `static inline int hash64(uint64_t key, int mask)` used to live
+ * here, masking a splitmix64 finalizer down to a FIXED table size. Its last
+ * caller was the fingerprint table, which now uses pgwt_qid_index
+ * (src/qid_index.h) — same mixer, no mask, no bound. Removed rather than
+ * left to rot: -Wextra flags it unused, and a mask-to-a-fixed-size helper
+ * sitting in this file is an invitation to write the next unbounded probe
+ * loop. */
+
+/* ── Growable accumulator arrays (#327) ───────────────────────────────────
+ *
+ * Six tables in this file paired a FIXED power-of-two accumulator array with
+ * an unbounded probe loop, so the (size+1)-th distinct key spun forever.
+ * They are now a pgwt_pid_index / pgwt_qid_index (unbounded, `used`-byte
+ * occupancy) over a growable accumulator array indexed by insertion order.
+ * This helper is that array's only growth path.
+ *
+ * calloc + memcpy rather than realloc + memset: every accumulator type here
+ * must start zeroed, and all of them are memcpy-movable (an owned pointer
+ * such as variant_accum.exec_times moves with the struct; nothing aliases
+ * one). Peak cost during growth is 2x, which is the price of never dropping
+ * a key.
+ *
+ * 0 on success, -1 on allocation failure, with the array left untouched and
+ * usable so the caller can free it on the refusal path. A refusal is never a
+ * trim: the caller sets `failed` and the whole result is withheld. */
+static int accum_grow(void **arr, int *cap, int need, size_t elem,
+                      const char *fail_point)
 {
-    key = (key ^ (key >> 30)) * 0xbf58476d1ce4e5b9ULL;
-    key = (key ^ (key >> 27)) * 0x94d049bb133111ebULL;
-    key = key ^ (key >> 31);
-    return (int)(key & mask);
+    if (need <= *cap)
+        return 0;
+    if (pgwt_test_alloc_fail(fail_point))
+        return -1;
+    int newcap = *cap ? *cap : 128;
+    while (newcap < need) {
+        if (newcap > (1 << 29))
+            return -1;          /* refuse rather than overflow the capacity */
+        newcap *= 2;
+    }
+    if ((size_t)newcap > (size_t)-1 / elem)
+        return -1;
+    void *tmp = calloc((size_t)newcap, elem);
+    if (!tmp)
+        return -1;
+    if (*cap && *arr)
+        memcpy(tmp, *arr, (size_t)*cap * elem);
+    free(*arr);
+    *arr = tmp;
+    *cap = newcap;
+    return 0;
 }
 
 /*
@@ -630,7 +673,33 @@ void pgwt_compute_aas(const struct pgwt_trace_event *events, int count,
             }
         }
 
-        /* Per-event total for sorting (pass 1) */
+        /* Per-event total for sorting (pass 1).
+         *
+         * #347 proposed guarding the assignment below with
+         * `if (evt_ht[h].total_ns == 0)` on the grounds that a slot claimed
+         * by a zero-duration event is re-keyed and two ids merge into one
+         * series. That guard is a NO-OP here, and the merge does not
+         * happen: the loop can only exit with total_ns > 0 when
+         * event_id == ev->old_event, so the assignment is either into a
+         * slot that carries no time or a write of the value already there.
+         * A slot with total_ns == 0 holds no information — the collector
+         * below skips it, and pass 2 re-matches events against the sorted
+         * top-N by event_id, not by slot. Measured on the parent tree with
+         * two ids colliding at slot 1 (0x01000001 / 0x01000201) and the
+         * first one zero-duration: two distinct series, totals 0.0005 and
+         * 0.00025 AAS, both exact (tests/results/probe-bounds/).
+         *
+         * #347's SHAPE is real, at three other tables that used an
+         * accumulator as their occupancy test and also accumulated fields
+         * the test does not look at: fingerprints (total_transitions),
+         * tq_summary (total_ns under a count-0 record) and top_sessions
+         * (pid 0). All three now carry an explicit `used` byte. This one is
+         * left exactly as it was — a guard whose red case cannot be
+         * constructed is not a fix.
+         *
+         * The probe bound is a separate question and deliberately untouched:
+         * 512 slots against a verified PG17 valid-id ceiling of ~409 (~281
+         * in-core maxima plus <=128 custom) is unreachable by construction. */
         if (evt_ht && !io_worker) {
             uint32_t h = ev->old_event & AAS_EVT_HT_MASK;
             while (evt_ht[h].total_ns > 0 && evt_ht[h].event_id != ev->old_event)
@@ -1547,7 +1616,9 @@ struct session_accum {
     struct wait_ht_entry waits[WAIT_HT_SIZE];
 };
 
-#define SESSION_HT_SIZE MAX_BACKENDS
+/* #327: `#define SESSION_HT_SIZE MAX_BACKENDS` used to live here and sized
+ * BOTH session tables (raw and summary). Both grow now; the constant is
+ * gone so nobody sizes a third table from it. */
 
 static int cmp_session_row_desc(const void *a, const void *b)
 {
@@ -1564,24 +1635,43 @@ void pgwt_compute_top_sessions(const struct pgwt_trace_event *events, int count,
     (void)wall_ms;
     memset(out, 0, sizeof(*out));
 
-    /* Hash table keyed by PID, open addressing */
-    struct session_accum *ht = calloc(SESSION_HT_SIZE, sizeof(*ht));
-    int num_entries = 0;
+    /* #327: this was a FIXED `calloc(SESSION_HT_SIZE, ...)` (1024 slots)
+     * probed with `while (ht[h].pid != 0 && ht[h].pid != ev->pid)
+     * h = (h+1) % SIZE;` — no fullness test, so the 1025th distinct pid of
+     * the window spun forever. Distinct pids per window are driven by
+     * connection CHURN, not concurrency, so 1025 is ordinary.
+     *
+     * `pid != 0` is gone as the occupancy test too (#347's shape): a pid-0
+     * record left the slot reading as free, so the next real pid that probed
+     * to it claimed the slot AND INHERITED pid 0's accumulated time.
+     * Measured on the parent tree: pid 1024 reported 6.000 ms where its own
+     * events totalled 1.000 ms. pid 0 is now a key like any other. */
+    struct pgwt_pid_index ix;
+    pgwt_pid_index_init(&ix);
+    struct session_accum *ht = NULL;
+    int num_entries = 0, cap_entries = 0, alloc_failed = 0;
 
-    for (int i = 0; i < count; i++) {
+    for (int i = 0; i < count && !alloc_failed; i++) {
         const struct pgwt_trace_event *ev = &events[i];
         if (!pgwt_filter_matches(f, ev) || pgwt_is_idle_event(ev->old_event))
             continue;
         if (ev->flags & PGWT_EVENT_FLAG_IO_WORKER)
             continue;   /* T2: io_workers are not sessions doing DB work */
 
-        uint32_t h = ev->pid % SESSION_HT_SIZE;
-        while (ht[h].pid != 0 && ht[h].pid != ev->pid)
-            h = (h + 1) % SESSION_HT_SIZE;
-
-        if (ht[h].pid == 0) {
-            ht[h].pid = ev->pid;
+        int h = pgwt_pid_index_find(&ix, ev->pid);
+        if (h < 0) {
+            if (accum_grow((void **)&ht, &cap_entries, num_entries + 1,
+                           sizeof(*ht), "sessions_entries") != 0) {
+                alloc_failed = 1;
+                break;
+            }
+            h = num_entries;
+            if (pgwt_pid_index_put(&ix, ev->pid, h) != 0) {
+                alloc_failed = 1;
+                break;
+            }
             num_entries++;
+            ht[h].pid = ev->pid;
         }
         /* Per-session DB time is time inside the window (see
          * event_window_ns); cpu_pct/wait_pct are ratios of the same clipped
@@ -1599,14 +1689,29 @@ void pgwt_compute_top_sessions(const struct pgwt_trace_event *events, int count,
         }
     }
 
+    /* #327: an allocation failure fails the WHOLE result. Never a trim — a
+     * session list that is short but looks complete is the defect. */
+    if (alloc_failed) {
+        free(ht);
+        pgwt_pid_index_free(&ix);
+        memset(out, 0, sizeof(*out));
+        out->failed = 1;
+        return;
+    }
+
     /* Collect results */
-    struct pgwt_session_row *rows = calloc(num_entries, sizeof(*rows));
+    struct pgwt_session_row *rows = num_entries
+        ? calloc((size_t)num_entries, sizeof(*rows)) : NULL;
     int nr = 0;
+    if (num_entries && !rows) {
+        free(ht);
+        pgwt_pid_index_free(&ix);
+        memset(out, 0, sizeof(*out));
+        out->failed = 1;
+        return;
+    }
 
-    for (int i = 0; i < SESSION_HT_SIZE; i++) {
-        if (ht[i].pid == 0)
-            continue;
-
+    for (int i = 0; i < num_entries; i++) {
         struct pgwt_session_row *r = &rows[nr];
         r->pid        = ht[i].pid;
         r->db_time_ms = (double)ht[i].total_ns / 1e6;
@@ -1635,6 +1740,7 @@ void pgwt_compute_top_sessions(const struct pgwt_trace_event *events, int count,
     }
 
     free(ht);
+    pgwt_pid_index_free(&ix);
 
     qsort(rows, nr, sizeof(rows[0]), cmp_session_row_desc);
 
@@ -1654,8 +1760,8 @@ struct query_accum {
     struct wait_ht_entry waits[WAIT_HT_SIZE];
 };
 
-#define QUERY_HT_SIZE 2048
-#define QUERY_HT_MASK (QUERY_HT_SIZE - 1)
+/* #327: `#define QUERY_HT_SIZE 2048` / `QUERY_HT_MASK` used to live here and
+ * sized BOTH query tables (raw and summary). Both grow now. */
 
 static int cmp_query_row_desc(const void *a, const void *b)
 {
@@ -1672,13 +1778,20 @@ void pgwt_compute_top_queries(const struct pgwt_trace_event *events, int count,
     (void)wall_ms;
     memset(out, 0, sizeof(*out));
 
-    struct query_accum *ht = calloc(QUERY_HT_SIZE, sizeof(*ht));
-    int num_entries = 0;
+    /* #327: this was a FIXED `calloc(QUERY_HT_SIZE, ...)` (2048 slots)
+     * probed with `while (ht[h].count > 0 && ht[h].query_id != ev->query_id)
+     * h = (h+1) & MASK;` — no fullness test, so the 2049th distinct
+     * query_id of the window spun forever. Now an unbounded query-id index
+     * over a growable accumulator array. */
+    struct pgwt_qid_index ix;
+    pgwt_qid_index_init(&ix);
+    struct query_accum *ht = NULL;
+    int num_entries = 0, cap_entries = 0, alloc_failed = 0;
     uint64_t db_time_ns = 0;
     uint64_t unattributed_ns = 0, backfilled_ns = 0;
     uint64_t unattributed_count = 0;
 
-    for (int i = 0; i < count; i++) {
+    for (int i = 0; i < count && !alloc_failed; i++) {
         const struct pgwt_trace_event *ev = &events[i];
         if (!pgwt_filter_matches(f, ev) || pgwt_is_idle_event(ev->old_event))
             continue;
@@ -1702,13 +1815,20 @@ void pgwt_compute_top_queries(const struct pgwt_trace_event *events, int count,
 
         db_time_ns += clip_u;
 
-        uint32_t h = (uint32_t)(ev->query_id ^ (ev->query_id >> 32)) & QUERY_HT_MASK;
-        while (ht[h].count > 0 && ht[h].query_id != ev->query_id)
-            h = (h + 1) & QUERY_HT_MASK;
-
-        if (ht[h].count == 0) {
-            ht[h].query_id = ev->query_id;
+        int h = pgwt_qid_index_find(&ix, ev->query_id);
+        if (h < 0) {
+            if (accum_grow((void **)&ht, &cap_entries, num_entries + 1,
+                           sizeof(*ht), "queries_entries") != 0) {
+                alloc_failed = 1;
+                break;
+            }
+            h = num_entries;
+            if (pgwt_qid_index_put(&ix, ev->query_id, h) != 0) {
+                alloc_failed = 1;
+                break;
+            }
             num_entries++;
+            ht[h].query_id = ev->query_id;
         }
         /* Split sample continuations conserve time, not observation count. */
         if (!(ev->flags & PGWT_EVENT_FLAG_SAMPLE_CONT) || ht[h].count == 0)
@@ -1725,15 +1845,31 @@ void pgwt_compute_top_queries(const struct pgwt_trace_event *events, int count,
         }
     }
 
+    /* #327: an allocation failure fails the WHOLE result (server.c's
+     * handle_top_queries already emits compute_failed for the lifecycle
+     * scan; this joins that condition). */
+    if (alloc_failed) {
+        free(ht);
+        pgwt_qid_index_free(&ix);
+        memset(out, 0, sizeof(*out));
+        out->failed = 1;
+        return;
+    }
+
     double db_time_ms = (double)db_time_ns / 1e6;
 
-    struct pgwt_query_row *rows = calloc(num_entries, sizeof(*rows));
+    struct pgwt_query_row *rows = num_entries
+        ? calloc((size_t)num_entries, sizeof(*rows)) : NULL;
     int nr = 0;
+    if (num_entries && !rows) {
+        free(ht);
+        pgwt_qid_index_free(&ix);
+        memset(out, 0, sizeof(*out));
+        out->failed = 1;
+        return;
+    }
 
-    for (int i = 0; i < QUERY_HT_SIZE; i++) {
-        if (ht[i].count == 0)
-            continue;
-
+    for (int i = 0; i < num_entries; i++) {
         struct pgwt_query_row *r = &rows[nr];
         r->query_id = ht[i].query_id;
         r->count    = ht[i].count;
@@ -1808,6 +1944,7 @@ void pgwt_compute_top_queries(const struct pgwt_trace_event *events, int count,
     }
 
     free(ht);
+    pgwt_qid_index_free(&ix);
 
     qsort(rows, nr, sizeof(rows[0]), cmp_query_row_desc);
 
@@ -2471,9 +2608,23 @@ struct ts_summary_ht_entry {
     uint64_t top_wait_ns;
 };
 
+/* #327: this was a FIXED `calloc(SESSION_HT_SIZE, ...)` probed with
+ * `while (ht[h].pid != 0 && ht[h].pid != ss->pid) h = (h+1) % SIZE;` — no
+ * fullness test. SUMMARY_MAX_SESSIONS bounds ONE per-second record, not the
+ * window: distinct pids accumulate ACROSS records, so 1025 of them over a
+ * 900 s window made that loop spin forever. This is the UI's boot default
+ * (any >120 s range with no pid filter routes here, server.c:3246) and the
+ * summary paths never reach reject_overload, so nothing upstream bounds it.
+ *
+ * Now an unbounded pid index over a growable entry array. `pid != 0` is also
+ * gone as the occupancy test: a session slot with pid 0 made the first real
+ * pid that probed to it INHERIT its accumulated db_time (the #347 shape). */
 struct ts_summary_ctx {
     struct ts_summary_ht_entry *ht;
+    int cap;
     int num_entries;
+    struct pgwt_pid_index ix;
+    int failed;
     const struct pgwt_filter *f;
 };
 
@@ -2512,13 +2663,20 @@ static int ts_summary_visitor(const struct pgwt_summary_accum *rec, void *arg)
         if (ss->pid == 0 && ss->db_time_ns == 0) continue;
         if (ctx->f->pid != 0 && ss->pid != ctx->f->pid) continue;
 
-        uint32_t h = ss->pid % SESSION_HT_SIZE;
-        while (ctx->ht[h].pid != 0 && ctx->ht[h].pid != ss->pid)
-            h = (h + 1) % SESSION_HT_SIZE;
-
-        if (ctx->ht[h].pid == 0) {
-            ctx->ht[h].pid = ss->pid;
+        int h = pgwt_pid_index_find(&ctx->ix, ss->pid);
+        if (h < 0) {
+            if (accum_grow((void **)&ctx->ht, &ctx->cap, ctx->num_entries + 1,
+                           sizeof(*ctx->ht), "ts_summary_entries") != 0) {
+                ctx->failed = 1;
+                return -1;      /* stop the stream: refuse, never trim */
+            }
+            h = ctx->num_entries;
+            if (pgwt_pid_index_put(&ctx->ix, ss->pid, h) != 0) {
+                ctx->failed = 1;
+                return -1;
+            }
             ctx->num_entries++;
+            ctx->ht[h].pid = ss->pid;
         }
         ctx->ht[h].db_time_ns += ss->db_time_ns;
         ctx->ht[h].cpu_ns += ss->cpu_ns;
@@ -2539,20 +2697,39 @@ void pgwt_compute_top_sessions_from_summaries(
     memset(out, 0, sizeof(*out));
 
     struct ts_summary_ctx ctx = {
-        .ht = calloc(SESSION_HT_SIZE, sizeof(*ctx.ht)),
+        .ht = NULL,
+        .cap = 0,
         .num_entries = 0,
+        .failed = 0,
         .f = f,
     };
-    if (!ctx.ht) return;
+    pgwt_pid_index_init(&ctx.ix);
 
     pgwt_visit_summaries(trace_dir, from_ns, to_ns, ts_summary_visitor, &ctx);
 
-    struct pgwt_session_row *rows = calloc(ctx.num_entries, sizeof(*rows));
+    /* #327: an allocation failure is the only early exit, and it fails the
+     * WHOLE result. A session list that is short but looks complete is the
+     * defect this flag exists to prevent. */
+    if (ctx.failed) {
+        free(ctx.ht);
+        pgwt_pid_index_free(&ctx.ix);
+        memset(out, 0, sizeof(*out));
+        out->failed = 1;
+        return;
+    }
+
+    struct pgwt_session_row *rows = ctx.num_entries
+        ? calloc((size_t)ctx.num_entries, sizeof(*rows)) : NULL;
     int nr = 0;
+    if (ctx.num_entries && !rows) {
+        free(ctx.ht);
+        pgwt_pid_index_free(&ctx.ix);
+        memset(out, 0, sizeof(*out));
+        out->failed = 1;
+        return;
+    }
 
-    for (int i = 0; i < SESSION_HT_SIZE; i++) {
-        if (ctx.ht[i].pid == 0) continue;
-
+    for (int i = 0; i < ctx.num_entries; i++) {
         struct pgwt_session_row *row = &rows[nr];
         row->pid        = ctx.ht[i].pid;
         row->db_time_ms = (double)ctx.ht[i].db_time_ns / 1e6;
@@ -2569,6 +2746,7 @@ void pgwt_compute_top_sessions_from_summaries(
     }
 
     free(ctx.ht);
+    pgwt_pid_index_free(&ctx.ix);
     qsort(rows, nr, sizeof(rows[0]), cmp_session_row_desc);
 
     out->rows     = rows;
@@ -2586,9 +2764,20 @@ struct tq_summary_ht_entry {
     uint64_t class_ns[PGWT_NUM_CLASSES];
 };
 
+/* #327: this was a FIXED `calloc(QUERY_HT_SIZE, ...)` (2048 slots) probed
+ * with `while (ht[h].count > 0 && ht[h].query_id != sq->query_id)` — no
+ * fullness test. SUMMARY_MAX_QUERIES bounds ONE per-second record, not the
+ * window, so 2049 distinct query ids across the records of a long window
+ * spun forever. `count > 0` is also gone as the occupancy test (#347's
+ * shape): a record carrying a query_id with count 0 claimed a slot that
+ * still read as free, so the next query_id probing to it re-keyed the slot
+ * and inherited the first one's total_ns. */
 struct tq_summary_ctx {
     struct tq_summary_ht_entry *ht;
+    int      cap;
     int      num_entries;
+    struct pgwt_qid_index ix;
+    int      failed;
     uint64_t db_time_ns;
     const struct pgwt_filter *f;
 };
@@ -2671,13 +2860,20 @@ static int tq_summary_visitor(const struct pgwt_summary_accum *rec, void *arg)
 
         ctx->db_time_ns += effective_ns;
 
-        uint32_t h = (uint32_t)(sq->query_id ^ (sq->query_id >> 32)) & QUERY_HT_MASK;
-        while (ctx->ht[h].count > 0 && ctx->ht[h].query_id != sq->query_id)
-            h = (h + 1) & QUERY_HT_MASK;
-
-        if (ctx->ht[h].count == 0) {
-            ctx->ht[h].query_id = sq->query_id;
+        int h = pgwt_qid_index_find(&ctx->ix, sq->query_id);
+        if (h < 0) {
+            if (accum_grow((void **)&ctx->ht, &ctx->cap, ctx->num_entries + 1,
+                           sizeof(*ctx->ht), "tq_summary_entries") != 0) {
+                ctx->failed = 1;
+                return -1;      /* stop the stream: refuse, never trim */
+            }
+            h = ctx->num_entries;
+            if (pgwt_qid_index_put(&ctx->ix, sq->query_id, h) != 0) {
+                ctx->failed = 1;
+                return -1;
+            }
             ctx->num_entries++;
+            ctx->ht[h].query_id = sq->query_id;
         }
         ctx->ht[h].count += sq->count;
         ctx->ht[h].total_ns += effective_ns;
@@ -2712,23 +2908,40 @@ void pgwt_compute_top_queries_from_summaries(
     memset(out, 0, sizeof(*out));
 
     struct tq_summary_ctx ctx = {
-        .ht = calloc(QUERY_HT_SIZE, sizeof(*ctx.ht)),
+        .ht = NULL,
+        .cap = 0,
         .num_entries = 0,
+        .failed = 0,
         .db_time_ns = 0,
         .f = f,
     };
-    if (!ctx.ht) return;
+    pgwt_qid_index_init(&ctx.ix);
 
     pgwt_visit_summaries(trace_dir, from_ns, to_ns, tq_summary_visitor, &ctx);
 
+    /* #327: an allocation failure fails the WHOLE result. */
+    if (ctx.failed) {
+        free(ctx.ht);
+        pgwt_qid_index_free(&ctx.ix);
+        memset(out, 0, sizeof(*out));
+        out->failed = 1;
+        return;
+    }
+
     double db_time_ms = (double)ctx.db_time_ns / 1e6;
 
-    struct pgwt_query_row *rows = calloc(ctx.num_entries, sizeof(*rows));
+    struct pgwt_query_row *rows = ctx.num_entries
+        ? calloc((size_t)ctx.num_entries, sizeof(*rows)) : NULL;
     int nr = 0;
+    if (ctx.num_entries && !rows) {
+        free(ctx.ht);
+        pgwt_qid_index_free(&ctx.ix);
+        memset(out, 0, sizeof(*out));
+        out->failed = 1;
+        return;
+    }
 
-    for (int i = 0; i < QUERY_HT_SIZE; i++) {
-        if (ctx.ht[i].count == 0) continue;
-
+    for (int i = 0; i < ctx.num_entries; i++) {
         struct pgwt_query_row *row = &rows[nr];
         row->query_id = ctx.ht[i].query_id;
         row->count    = ctx.ht[i].count;
@@ -2748,6 +2961,7 @@ void pgwt_compute_top_queries_from_summaries(
     }
 
     free(ctx.ht);
+    pgwt_qid_index_free(&ctx.ix);
     qsort(rows, nr, sizeof(rows[0]), cmp_query_row_desc);
 
     out->rows       = rows;
@@ -2968,8 +3182,8 @@ struct fp_accum {
     int num_trans;
 };
 
-#define FP_HT_SIZE 2048
-#define FP_HT_MASK (FP_HT_SIZE - 1)
+/* #327: `#define FP_HT_SIZE 2048` / `FP_HT_MASK` used to live here. The
+ * fingerprint table grows now. */
 
 static int cmp_fp_desc(const void *a, const void *b)
 {
@@ -2984,10 +3198,26 @@ void pgwt_compute_fingerprints(const struct pgwt_trace_event *events, int count,
 {
     memset(out, 0, sizeof(*out));
 
-    struct fp_accum *ht = calloc(FP_HT_SIZE, sizeof(*ht));
-    int num_entries = 0;
+    /* #327: this was a FIXED `calloc(FP_HT_SIZE, ...)` (2048 slots) probed
+     * with `while (ht[h].total_ns > 0 && ht[h].query_id != ev->query_id)
+     * h = (h+1) & MASK;` — no fullness test, so the 2049th distinct
+     * query_id of the window spun forever.
+     *
+     * `total_ns > 0` is also gone as the occupancy test, and that was a
+     * LIVE wrong number (#347's shape, at the site where it actually
+     * bites): an event with duration_ns == 0 still incremented
+     * total_transitions and top_trans[], but left total_ns at 0, so the
+     * slot read as free and the next query_id probing to it re-keyed the
+     * slot AND INHERITED those transitions. Measured on the parent tree:
+     * two query ids with 1 and 2 transitions came back as one row with 3,
+     * the other id absent entirely. total_transitions is the fingerprint
+     * row's headline number. */
+    struct pgwt_qid_index ix;
+    pgwt_qid_index_init(&ix);
+    struct fp_accum *ht = NULL;
+    int num_entries = 0, cap_entries = 0, alloc_failed = 0;
 
-    for (int i = 0; i < count; i++) {
+    for (int i = 0; i < count && !alloc_failed; i++) {
         const struct pgwt_trace_event *ev = &events[i];
         /* Fingerprints describe exact transition structure; sampled records
          * (including clipped continuations) must not fabricate self-edges. */
@@ -3001,13 +3231,20 @@ void pgwt_compute_fingerprints(const struct pgwt_trace_event *events, int count,
             continue;
 
         /* Find query in hash table */
-        uint32_t h = hash64(ev->query_id, FP_HT_MASK);
-        while (ht[h].total_ns > 0 && ht[h].query_id != ev->query_id)
-            h = (h + 1) & FP_HT_MASK;
-
-        if (ht[h].total_ns == 0) {
-            ht[h].query_id = ev->query_id;
+        int h = pgwt_qid_index_find(&ix, ev->query_id);
+        if (h < 0) {
+            if (accum_grow((void **)&ht, &cap_entries, num_entries + 1,
+                           sizeof(*ht), "fingerprint_entries") != 0) {
+                alloc_failed = 1;
+                break;
+            }
+            h = num_entries;
+            if (pgwt_qid_index_put(&ix, ev->query_id, h) != 0) {
+                alloc_failed = 1;
+                break;
+            }
             num_entries++;
+            ht[h].query_id = ev->query_id;
         }
 
         int cls = pgwt_wait_class_index(ev->old_event);
@@ -3042,13 +3279,28 @@ void pgwt_compute_fingerprints(const struct pgwt_trace_event *events, int count,
         }
     }
 
+    /* #327: an allocation failure fails the WHOLE result. */
+    if (alloc_failed) {
+        free(ht);
+        pgwt_qid_index_free(&ix);
+        memset(out, 0, sizeof(*out));
+        out->failed = 1;
+        return;
+    }
+
     /* Build result rows */
-    struct pgwt_fingerprint_row *rows = calloc(num_entries, sizeof(*rows));
+    struct pgwt_fingerprint_row *rows = num_entries
+        ? calloc((size_t)num_entries, sizeof(*rows)) : NULL;
     int nr = 0;
+    if (num_entries && !rows) {
+        free(ht);
+        pgwt_qid_index_free(&ix);
+        memset(out, 0, sizeof(*out));
+        out->failed = 1;
+        return;
+    }
 
-    for (int i = 0; i < FP_HT_SIZE; i++) {
-        if (ht[i].total_ns == 0) continue;
-
+    for (int i = 0; i < num_entries; i++) {
         struct pgwt_fingerprint_row *r = &rows[nr];
         r->query_id = ht[i].query_id;
         r->total_transitions = ht[i].total_transitions;
@@ -3098,6 +3350,7 @@ void pgwt_compute_fingerprints(const struct pgwt_trace_event *events, int count,
     }
 
     free(ht);
+    pgwt_qid_index_free(&ix);
     qsort(rows, nr, sizeof(rows[0]), cmp_fp_desc);
 
     out->rows = rows;
@@ -4567,8 +4820,21 @@ static int cmp_variant_time_desc(const void *a, const void *b)
     return 0;
 }
 
-#define VARIANT_HT_SIZE 4096
-#define VARIANT_HT_MASK (VARIANT_HT_SIZE - 1)
+/* #327: there used to be `#define VARIANT_HT_SIZE 4096` here, a fixed table
+ * probed with `while (ht[slot].used && ht[slot].hash != h)
+ * slot = (slot+1) & VARIANT_HT_MASK;` — no fullness test, so the 4097th
+ * distinct flow pattern in the window spun forever. hash_pattern() keys on
+ * the compressed step sequence, which nothing in the trace format bounds the
+ * COUNT of (the 128-event/32-step limits bound length only), so neither
+ * adviser on #327 could rule the 4097th pattern out.
+ *
+ * Measured rather than argued, on the full 30-minute rehearsal trace
+ * (tests/results/demo_rehearsal/trace, 4,307,056 transition records over a
+ * 1851.0 s window, 323,930 EXEC pairs): 18 distinct exec patterns and 2 plan
+ * patterns — 0.4% of the old 4096 ceiling. So saturation is not something
+ * this workload reaches. The table grows anyway, because "the workload we
+ * rehearsed stays under it" is not a bound, and growth means the 4097th
+ * pattern costs memory instead of the whole server. */
 
 /* Per-variant p95 is computed from a bounded sample of execution times:
  * the FIRST PGWT_VARIANT_MAX_SAMPLES executions of that variant, in arrival
@@ -4629,8 +4895,14 @@ void pgwt_compute_variants(const struct pgwt_trace_event *events, int count,
     const uint32_t marker_end = (phase == PGWT_PHASE_PLAN)
         ? PGWT_MARKER_PLAN_END : PGWT_MARKER_EXEC_END;
 
-    struct variant_accum *ht = calloc(VARIANT_HT_SIZE, sizeof(*ht));
-    if (!ht) return;
+    /* Pattern-hash index over a growable accumulator array. The key is the
+     * pattern HASH, not the pattern, exactly as before: two patterns that
+     * collide on hash_pattern() merge into one variant now as they did
+     * then. */
+    struct pgwt_qid_index variant_ix;
+    pgwt_qid_index_init(&variant_ix);
+    struct variant_accum *ht = NULL;
+    int num_ht = 0, cap_ht = 0;
 
     /* Phase 1: scan events, extract sequences per PID */
     struct pid_exec_state {
@@ -4732,9 +5004,20 @@ void pgwt_compute_variants(const struct pgwt_trace_event *events, int count,
             }
 
             /* Insert into hash table */
-            uint32_t slot = (uint32_t)(h & VARIANT_HT_MASK);
-            while (ht[slot].used && ht[slot].hash != h)
-                slot = (slot + 1) & VARIANT_HT_MASK;
+            int slot = pgwt_qid_index_find(&variant_ix, h);
+            if (slot < 0) {
+                if (accum_grow((void **)&ht, &cap_ht, num_ht + 1,
+                               sizeof(*ht), "variant_entries") != 0) {
+                    alloc_failed = 1;
+                    break;
+                }
+                slot = num_ht;
+                if (pgwt_qid_index_put(&variant_ix, h, slot) != 0) {
+                    alloc_failed = 1;
+                    break;
+                }
+                num_ht++;
+            }
 
             struct variant_accum *va = &ht[slot];
             if (!va->used) {
@@ -4797,16 +5080,17 @@ void pgwt_compute_variants(const struct pgwt_trace_event *events, int count,
         }
     }
 
-    /* An allocation failure in the pid map is the ONLY way out of phase 1
-     * short of the end of the event array, and it fails the whole request.
-     * It is never a silent trim: #275 is exactly a partial answer presented
-     * as complete. */
+    /* An allocation failure in the pid map or either growable array is the
+     * ONLY way out of phase 1 short of the end of the event array, and it
+     * fails the whole request. It is never a silent trim: #275 is exactly a
+     * partial answer presented as complete. */
     if (alloc_failed) {
-        for (int i = 0; i < VARIANT_HT_SIZE; i++)
+        for (int i = 0; i < num_ht; i++)
             free(ht[i].exec_times);
         free(ht);
         free(pids);
         pgwt_pid_index_free(&pid_ix);
+        pgwt_qid_index_free(&variant_ix);
         memset(out, 0, sizeof(*out));
         out->failed = 1;
         return;
@@ -4814,12 +5098,24 @@ void pgwt_compute_variants(const struct pgwt_trace_event *events, int count,
 
     /* Phase 2: collect variants, sort by total time */
     int nv = 0;
-    for (int i = 0; i < VARIANT_HT_SIZE; i++)
+    for (int i = 0; i < num_ht; i++)
         if (ht[i].used) nv++;
 
-    struct pgwt_variant *variants = calloc(nv, sizeof(*variants));
+    struct pgwt_variant *variants = nv ? calloc((size_t)nv, sizeof(*variants))
+                                       : NULL;
+    if (nv && !variants) {
+        for (int i = 0; i < num_ht; i++)
+            free(ht[i].exec_times);
+        free(ht);
+        free(pids);
+        pgwt_pid_index_free(&pid_ix);
+        pgwt_qid_index_free(&variant_ix);
+        memset(out, 0, sizeof(*out));
+        out->failed = 1;
+        return;
+    }
     int vi = 0;
-    for (int i = 0; i < VARIANT_HT_SIZE && vi < nv; i++) {
+    for (int i = 0; i < num_ht && vi < nv; i++) {
         if (!ht[i].used) continue;
         struct variant_accum *va = &ht[i];
         struct pgwt_variant *v = &variants[vi++];
@@ -4874,4 +5170,5 @@ void pgwt_compute_variants(const struct pgwt_trace_event *events, int count,
     free(ht);
     free(pids);
     pgwt_pid_index_free(&pid_ix);
+    pgwt_qid_index_free(&variant_ix);
 }
