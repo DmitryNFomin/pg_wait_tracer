@@ -29,7 +29,7 @@
 #   EPHEMERAL=1       use a throwaway Hetzner VM instead of $PGWT_BOX* (see
 #                     above); OS must be ubuntu (the only OS with a
 #                     pgwt=gate-snapshot image so far). Needs the Hetzner
-#                     token in the macOS Keychain
+#                     token from HCLOUD_TOKEN or the macOS Keychain
 #                     (`security add-generic-password -s hcloud -a claude_token -w <token>`).
 #   KEEP=1            (EPHEMERAL=1 only) do not delete the VM at the end;
 #                     print the delete command instead.
@@ -92,6 +92,10 @@ fi
 : > "$log"
 
 hcloud_token() {
+    if [[ -n "${HCLOUD_TOKEN:-}" ]]; then
+        printf '%s\n' "$HCLOUD_TOKEN"
+        return 0
+    fi
     command -v security >/dev/null 2>&1 || return 1
     security find-generic-password -s hcloud -a claude_token -w 2>/dev/null
 }
