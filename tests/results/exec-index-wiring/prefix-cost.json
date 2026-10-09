@@ -1,0 +1,69 @@
+{
+  "near": {
+    "ms": [
+      12.2,
+      3.3,
+      4.5,
+      2.3
+    ],
+    "median_ms": 3.9,
+    "rows": 100,
+    "prefix_lines": [
+      [
+        "index",
+        500
+      ],
+      [
+        "index",
+        500
+      ],
+      [
+        "index",
+        500
+      ],
+      [
+        "index",
+        500
+      ]
+    ]
+  },
+  "far": {
+    "ms": [
+      12.9,
+      4.8,
+      4.5,
+      5.5
+    ],
+    "median_ms": 5.2,
+    "rows": 100,
+    "prefix_lines": [
+      [
+        "index",
+        41428
+      ],
+      [
+        "index",
+        41428
+      ],
+      [
+        "index",
+        41428
+      ],
+      [
+        "index",
+        41428
+      ]
+    ]
+  },
+  "delta_ms": 1.3,
+  "verdict": "measured",
+  "config": {
+    "capture_s": 1800,
+    "window_s": 300,
+    "rate": 20,
+    "pids": 8,
+    "reps": 4,
+    "json": "/tmp/prefix-cost.json"
+  },
+  "records": 252000
+}

@@ -51,6 +51,34 @@ box-check-ephemeral.log      ATTEMPT 2, FAILED (exit 1), and the failure was
                              2.28.138.111, kept (KEEP=1) for reuse and to be
                              deleted by id by this agent.
 
+box-check-ephemeral-run2.log ATTEMPT 3, STOPPED BEFORE A VERDICT. Same VM,
+                             PG left unset this time (the correct spelling of
+                             "all"). It got as far as the live-UI-smoke walk
+                             ("ui_live_smoke: bridge ready") and was then
+                             killed deliberately when the branch was stood
+                             down so src/server.c could be released for the
+                             demo-critical paint work. There is NO run_all
+                             summary and NO tests/results/ui_live/ verdict in
+                             this directory from any of the three attempts.
+
+prefix-cost-measurement.log  tests/measure_exec_prefix_cost.py on that VM.
+prefix-cost.json             The number that cancelled the Phase 3 serve
+                             path: an 83x larger marker prefix (500 ->
+                             41,428 markers, both path=index) moved the
+                             median executions response 3.9 -> 5.2 ms, a
+                             delta of 1.3 ms. The "1398 ms / 4104 ms" prefix
+                             figures the plan's Phase 3 rested on are
+                             PRE-#274 LZ4-decode numbers (see
+                             tests/test_data_exec_prefix.py's docstring);
+                             #274 had already removed that cost. Two earlier
+                             attempts reported markers=0 / rows=0 because the
+                             wire fields are "from"/"to", not
+                             "from_ns"/"to_ns" (src/server.c:521-525), and
+                             because the trace extent was computed instead of
+                             read from `info`. The script's own 10x-ratio
+                             guard REFUSED to report a delta both times
+                             rather than publish 8.9-vs-8.6 ms as a finding.
+
 Consequence, so no reviewer has to work it out: criteria 2+3 are NOT
 gate-ready on the evidence in this directory. make check passed; the live
 tier has not run to completion even once. src/ changed, so the
