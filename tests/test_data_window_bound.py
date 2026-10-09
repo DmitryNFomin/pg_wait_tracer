@@ -126,6 +126,33 @@ def main():
                        first.get("total_link_count"),
                        "transitions: merged answer == freshly decoded answer "
                        "(distinct links)")
+            # The two scalars above are NOT "identical answers": this fixture
+            # has few enough distinct pairs that `total` and the link count can
+            # both match while a per-link duration_ms or a node total differs.
+            # Comparing the arrays costs nothing and is what the comment above
+            # actually promises, so compare them.
+            t.check_eq(resp.get("links"), first.get("links"),
+                       "transitions: merged answer == freshly decoded answer "
+                       "(every link, including duration_ms)")
+            t.check_eq(resp.get("nodes"), first.get("nodes"),
+                       "transitions: merged answer == freshly decoded answer "
+                       "(every node, including total_ms and order)")
+            # ...and the arrays must be non-empty, or the two check_eq calls
+            # above are [] == [] and prove nothing. This fixture carries
+            # exactly ONE link and ONE node, so what the comparison adds over
+            # the two scalars is every FIELD of that link and node -- notably
+            # duration_ms and total_ms, which `total` and the link count
+            # cannot see. It is not a many-row comparison, and asserting >1
+            # here would be asserting something about the fixture that is
+            # false.
+            t.check(len(first.get("links") or []) >= 1,
+                    "transitions: the cold answer carries at least one link, "
+                    "so the array comparison is not [] == [] (%d)"
+                    % len(first.get("links") or []))
+            t.check(len(first.get("nodes") or []) >= 1,
+                    "transitions: the cold answer carries at least one node, "
+                    "so the array comparison is not [] == [] (%d)"
+                    % len(first.get("nodes") or []))
             links = resp.get("links", [])
             t.check(len(links) > 0 and resp.get("total", 0) > 0,
                     "transitions: non-empty, so the exemption is not hiding "

@@ -250,6 +250,24 @@ MUTATIONS = [
       "    if (id->first_timestamp_ns >= to_mono_ns)\n"
       "        return PGWT_BLOCK_SKIP;   /* MUTANT: loses the ts == to record */")),
 
+    ("M22", "block_agg.c",
+     "pgwt_block_agg_file_can_contribute(): mono_first >= to instead of > to. "
+     "This is M21's off-by-one one layer UP, at FILE granularity, and it is "
+     "the form that actually SHIPPED: transitions_from_block_aggs() had a "
+     "hand-written `fc->mono_first >= to_m` while the raw loader "
+     "(server.c:2689) and the marker loader (:3089) both use `>`, so a file "
+     "whose earliest record ends exactly at `to_m` was skipped WHOLE by the "
+     "fast path and admitted by raw -- `total` and one link's value short by "
+     "exactly those records, with NO refusal and NO fidelity change. M21 "
+     "pinned this at block granularity and the suite still let the file-level "
+     "copy through, which is why the rule is now one shared predicate with "
+     "its own boundary sweep instead of three hand-written comparisons.",
+     "sec1b",
+     ("    if (mono_first > to_mono_ns)\n"
+      "        return 0;",
+      "    if (mono_first >= to_mono_ns)\n"
+      "        return 0;   /* MUTANT: skips the file holding ts == to */")),
+
     ("M14", "block_agg.c",
      "lookup(): an ABSENT pair is reported as present with count 0 -- absence "
      "read as zero, the exact failure C8 forbids.",

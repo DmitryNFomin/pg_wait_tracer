@@ -5139,6 +5139,35 @@ static int bagg_window_eligible(struct pgwt_server *srv,
             if (fc->s_spans[i].end_ns >= from_m &&
                 fc->s_spans[i].start_ns < to_m)
                 return 0;           /* a SAMPLES block touches the window */
+
+        /* T2 phantom-EXIT backstop, mirrored by REFUSING rather than by
+         * reimplementing it. The raw loader drops an EXIT record whose closing
+         * interval lies outside exact coverage when its generation has sampled
+         * coverage (:2909-2916), and it sets has_transitions only for records
+         * that SURVIVE that drop. The aggregate's exact_in_window counts every
+         * admitted record, so a window whose only admitted records are phantom
+         * exits would be labelled "exact" with an empty graph here while raw
+         * returns a structured full_fidelity_required refusal — a label
+         * divergence on exactly the axis this function exists to protect.
+         *
+         * Reproducing the drop would mean reimplementing spans_contain over
+         * the generation's exact spans inside the aggregate path, i.e. a second
+         * hand-written copy of a rule that must match the loader exactly. The
+         * per-file window gate just taught us what that costs. So the fast path
+         * declines any window whose files belong to a generation with sampled
+         * coverage, and raw answers it, label and all.
+         *
+         * Cost, stated plainly: a trace dir with ANY sampled coverage in a
+         * generation gets no Phase 1 speedup for that generation's windows,
+         * even where no SAMPLES block overlaps. That is strictly narrower than
+         * the correctness risk, and the SAMPLES-overlap rule above already
+         * excluded the common mixed case. */
+        if (pgwt_block_agg_file_can_contribute(fc->mono_first, fc->mono_last,
+                                               from_m, to_m)) {
+            const struct pgwt_gen_cov *gc = gen_cov_get(srv, fc->gen);
+            if (gc && gc->n_sampled > 0)
+                return 0;
+        }
     }
     return 1;
 }
@@ -5178,7 +5207,13 @@ static int transitions_from_block_aggs(struct pgwt_server *srv,
         uint64_t from_m = ((int64_t)from_wall_ns - fc->canon_offset) > 0
                         ? (uint64_t)((int64_t)from_wall_ns - fc->canon_offset)
                         : 0;
-        if (fc->mono_first >= to_m || fc->mono_last < from_m)
+        /* Shared predicate, not a hand-written comparison: this site had
+         * `mono_first >= to_m` while the raw loader (:2689) and the marker
+         * loader (:3089) both use `>`, so a file whose earliest record ends
+         * exactly at `to_m` was skipped WHOLE here and admitted there —
+         * `total` short by those records, no refusal, no fidelity change. */
+        if (!pgwt_block_agg_file_can_contribute(fc->mono_first, fc->mono_last,
+                                                from_m, to_m))
             continue;               /* this file cannot contribute */
 
         struct pgwt_event_reader r;
@@ -5346,7 +5381,6 @@ static void emit_transitions_response(struct pgwt_request *req,
             pgwt_event_full_name(from_ev, from_name, sizeof(from_name));
             pgwt_event_full_name(to_ev, to_name, sizeof(to_name));
         }
-        (void)from_ev; (void)to_ev;
         cJSON *link = cJSON_CreateObject();
         cJSON_AddStringToObject(link, "source", from_name);
         cJSON_AddStringToObject(link, "target", to_name);
@@ -5378,20 +5412,35 @@ static void handle_transitions(struct pgwt_server *srv, struct pgwt_request *req
         int rc = transitions_from_block_aggs(srv, from_ns, to_ns, &win,
                                              &exact_in_window, &merged,
                                              &decoded);
-        /* The current-trace cache stats line is a PER-REQUEST report, not a
-         * side effect of having called load_file_range_mono(). It used to be
-         * emitted only from the raw loader, so this fast path made the line
-         * vanish from `transitions` entirely — a diagnostic disappearing
-         * because an unrelated code path was bypassed. Emitted explicitly
-         * here, so every transitions request reports the cache state exactly
-         * once whichever path answered. */
-        cur_cache_report(&srv->cur);
-
         if (rc == PGWT_BAGG_OK) {
-            /* Fidelity: the aggregate path is only eligible when no SAMPLES
-             * block touches the window, so has_samples is provably 0 and the
-             * only question is whether any exact record landed in it. That is
-             * exactly the raw loader's has_transitions. */
+            /* The current-trace cache stats line is a PER-REQUEST report, not
+             * a side effect of having called load_file_range_mono(). It used
+             * to be emitted only from the raw loader, so this fast path made
+             * the line vanish from `transitions` entirely — a diagnostic
+             * disappearing because an unrelated code path was bypassed.
+             *
+             * Emitted inside the OK branch, not before it: on a REFUSAL the
+             * raw loader runs and reports it itself (:2767), so emitting here
+             * too printed the line TWICE for one request and contradicted the
+             * "exactly once" this comment claims. read_curcache() in
+             * tests/test_data_current_trace_cache.py takes the LAST line, so
+             * the duplicate was invisible rather than harmless — a diagnostic
+             * whose contract is wrong is one nobody can reason about. Exactly
+             * once per request now, whichever path answers. */
+            cur_cache_report(&srv->cur);
+            /* Fidelity. has_samples is 0 because bagg_window_eligible()
+             * refuses any window a SAMPLES block touches. "Provably 0" is
+             * only as good as the block set this path inspects matching the
+             * file's, which is why that function now also refuses any window
+             * whose files sit in a generation with sampled coverage: without
+             * that, a window whose only admitted records are T2 phantom exits
+             * would be labelled "exact" with an empty graph here while raw
+             * refuses, because the raw loader sets has_transitions only for
+             * records that SURVIVE the phantom drop (:2909-2916).
+             *
+             * So the only remaining question is whether any exact record
+             * landed in the window — exactly the raw loader's
+             * has_transitions. */
             struct pgwt_load_info ag_linfo = {0};
             ag_linfo.has_transitions = exact_in_window > 0;
             enum pgwt_fidelity ag_fid = load_fidelity(&ag_linfo);

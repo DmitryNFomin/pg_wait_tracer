@@ -83,6 +83,35 @@ int pgwt_block_agg_in_window(const struct pgwt_trace_event *ev,
     return ev->timestamp_ns >= from_mono_ns && ev->timestamp_ns <= to_mono_ns;
 }
 
+/* C7, lifted to FILE granularity. Same rule, same reason: a file whose
+ * earliest record ends exactly at `to_m` still has that record inside the
+ * window, so the file CAN contribute and must not be skipped.
+ *
+ * This exists as a shared predicate because the per-file gate was written out
+ * by hand at three sites and one of them drifted: the aggregate path used
+ * `mono_first >= to_m` while the raw loader (src/server.c, `mono_first >
+ * sample_to_m`) and the marker loader (`mono_first > to_m`) both used `>`.
+ * The consequence was a silent-wrong answer — a file skipped WHOLE by the fast
+ * path and admitted by raw, so `total` and one link's value came back short by
+ * exactly those records, with no refusal and no fidelity change. That is
+ * mutation M21 one layer up from where M21 was pinned: the suite caught the
+ * off-by-one at BLOCK granularity and the identical error shipped at FILE
+ * granularity. Hand-copied comparisons are how that happens, so the rule now
+ * has one definition and tests point at it.
+ *
+ * `last < from_m` (not `<=`) is the mirror image: a file whose latest record
+ * ends exactly at `from_m` has that record in the window too. */
+int pgwt_block_agg_file_can_contribute(uint64_t mono_first, uint64_t mono_last,
+                                       uint64_t from_mono_ns,
+                                       uint64_t to_mono_ns)
+{
+    if (mono_first > to_mono_ns)
+        return 0;
+    if (mono_last < from_mono_ns)
+        return 0;
+    return 1;
+}
+
 /* C3. Every non-empty filter field disqualifies the aggregate. Written as an
  * explicit per-field test rather than a memcmp against a zeroed struct so
  * that adding a filter field without deciding about it is a compile-visible

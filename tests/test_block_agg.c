@@ -234,7 +234,20 @@ static void raw_pairs_free(struct raw_pairs *rp) { free(rp->res.rows); }
 
 /* Nodes: an INDEPENDENT implementation. The predicate is written out by hand
  * (not pgwt_block_agg_node_counts()) so a change to the module's predicate is
- * a disagreement here rather than a silent agreement. */
+ * a disagreement here rather than a silent agreement.
+ *
+ * The marker range below is spelled out as literals for that independence,
+ * which creates a second hazard: if PGWT_IS_MARKER's range ever moves, this
+ * oracle keeps testing the OLD range and agrees with nothing in particular.
+ * Independence from the predicate must not mean independence from reality, so
+ * the literals are pinned to the real macro at compile time. This fails the
+ * BUILD rather than a test, deliberately — a drifted oracle is not a test
+ * result, it is an instrument that stopped measuring. */
+_Static_assert(PGWT_IS_MARKER(0xFFFFFFF0U) && PGWT_IS_MARKER(0xFFFFFFF7U) &&
+               !PGWT_IS_MARKER(0xFFFFFFEFU) && !PGWT_IS_MARKER(0xFFFFFFF8U),
+               "raw_node_oracle's hardcoded marker range [0xFFFFFFF0, "
+               "0xFFFFFFF7] no longer matches PGWT_IS_MARKER — update the "
+               "oracle's literals, do not relax this assertion");
 struct node_oracle_row { uint32_t id; uint64_t count, total_ns; };
 
 static int raw_node_oracle(const struct pgwt_trace_event *ev, int n,
@@ -489,6 +502,66 @@ static void section1_predicate_differential(void)
     CHECK(pgwt_block_agg_in_window(&e, 500, 600) == 0, "ts == to+1 is out");
     e.timestamp_ns = 599;
     CHECK(pgwt_block_agg_in_window(&e, 500, 600) == 1, "ts == to-1 is in");
+
+    /* §1b C7 at FILE granularity — the same rule one layer up, where it
+     * drifted and shipped. transitions_from_block_aggs() used
+     * `mono_first >= to_m` while the raw loader (src/server.c:2689) and the
+     * marker loader (:3089) both use `>`, so a file whose EARLIEST record
+     * ends exactly at `to_m` was skipped WHOLE by the fast path and admitted
+     * by raw: `total` and one link's value short by exactly those records,
+     * with no refusal and no fidelity change.
+     *
+     * This is mutation M21's off-by-one at a granularity M21 never reached.
+     * §5/§6/§9 pin it per BLOCK; nothing pinned it per FILE, so the identical
+     * error got through the suite built to catch it. The literals below are
+     * the whole point: 600 == to must CONTRIBUTE, 601 must not.
+     *
+     * Honest limit: this pins the shared PREDICATE that the shipping site now
+     * calls, not transitions_from_block_aggs()' multi-file loop itself (that
+     * function is static and takes a live struct pgwt_server). Mutation M22 in
+     * run_mutations.py flips the comparison back at the shipping line and must
+     * go RED, which is what ties this assertion to the code that ships. */
+    CHECK(pgwt_block_agg_file_can_contribute(600, 900, 500, 600) == 1,
+          "§1b a file whose FIRST record ends exactly at `to` CONTRIBUTES — "
+          "`mono_first >= to_m` was the shipped bug");
+    CHECK(pgwt_block_agg_file_can_contribute(601, 900, 500, 600) == 0,
+          "§1b mono_first == to+1 cannot contribute");
+    CHECK(pgwt_block_agg_file_can_contribute(100, 500, 500, 600) == 1,
+          "§1b a file whose LAST record ends exactly at `from` CONTRIBUTES — "
+          "the mirror image, which is why `last < from` is not `<=`");
+    CHECK(pgwt_block_agg_file_can_contribute(100, 499, 500, 600) == 0,
+          "§1b mono_last == from-1 cannot contribute");
+    CHECK(pgwt_block_agg_file_can_contribute(500, 600, 500, 600) == 1,
+          "§1b a file exactly spanning the window contributes");
+    CHECK(pgwt_block_agg_file_can_contribute(600, 600, 600, 600) == 1,
+          "§1b a degenerate single-instant file at a single-instant window "
+          "contributes: both bounds inclusive, so this is not empty");
+
+    /* The predicate must agree with the raw loader's convention on the very
+     * instants where they could differ. Asserted as a property over a swept
+     * range rather than the two literals above, so a future edit that fixes
+     * one bound and breaks the other cannot pass. */
+    {
+        int disagreements = 0, exercised = 0;
+        for (uint64_t first = 498; first <= 602; first++) {
+            for (uint64_t last = first; last <= 602; last++) {
+                /* The raw/marker loaders' rule, written out independently
+                 * rather than by calling the predicate under test. */
+                int raw_admits = !(first > 600 || last < 500);
+                int agg_admits =
+                    pgwt_block_agg_file_can_contribute(first, last, 500, 600);
+                exercised++;
+                if (raw_admits != agg_admits)
+                    disagreements++;
+            }
+        }
+        CHECK(exercised > 1000, "§1b the sweep must actually run (%d cases)",
+              exercised);
+        CHECK(disagreements == 0,
+              "§1b the file predicate must agree with the raw loader's "
+              "`first > to || last < from` rule on every boundary instant "
+              "(%d/%d disagreed)", disagreements, exercised);
+    }
 }
 
 /* ── §2 build + merge against literals ──────────────────────────────────── */

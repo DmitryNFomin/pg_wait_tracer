@@ -10,6 +10,44 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+- **perf(paint-latency Phase 1): `transitions` answers from a per-block
+  transition aggregate instead of loading the raw window.** A committed trace
+  block is immutable, so its `(old_event, new_event)` count/duration table and
+  per-node duration totals are precomputed once and then MERGED; a request
+  merges the aggregates of the blocks wholly inside the window and decodes raw
+  events only for the partial blocks at each edge. Prediction, measured in
+  `tests/bench_block_agg.c`: O(events in window) -> O(blocks x distinct pairs),
+  with merge time flat as events/block grows 16x while the raw path grows
+  linearly. Bit-exact against the raw path, with no epsilon and no tolerance
+  anywhere; where the aggregate cannot prove its answer it REFUSES and raw
+  recomputes (`PGWT_BAGG_REFUSED_*`), because absence is never an answer.
+  **User-visible consequences, all deliberate:**
+  - `transitions` now **answers windows that previously returned
+    `window_too_large`**. The aggregate never materialises the window, so the
+    memory bound that forces that refusal does not apply to it. The bound is
+    **unchanged for the other twelve detail commands**, which still refuse.
+    This is the one documented asymmetry against the raw path.
+  - The DFG **node array order changed** from hash-table order to `total_ns`
+    DESC (ties by event id), and per-node `total_ms` is now one division of an
+    integer-nanosecond sum rather than an accumulation of doubles in loader
+    order — so the same window no longer yields slightly different totals
+    depending on the order records happened to be read.
+  - In a **MIXED** window the DFG's `CPU*` node total no longer includes the
+    uncovered sampled contribution, because the raw node pass now applies the
+    aggregate's predicate, which drops SAMPLE-flagged records. This makes nodes
+    consistent with links (which already excluded samples) but it **changes a
+    number a user sees**, it is **not** pinned by any test yet, and it is
+    flagged as an open decision in `src/block_agg.h` rather than presented as
+    settled.
+  - The aggregate path declines, and raw answers, whenever a filter is set, a
+    SAMPLES block touches the window, or the window's files belong to a
+    generation with sampled coverage — so a MIXED capture gets no speedup from
+    this phase.
+  - New opt-in env var **`PGWT_TRANSITIONS_PROVENANCE=1`** adds
+    `merged_blocks`/`decoded_blocks` to the `transitions` response. Off by
+    default, because two numerically identical answers must not compare
+    unequal just because one records how it was produced.
+
 - **capture(#294): the sampled tier no longer drops on-CPU samples to a
   read-order race.** A tick read a backend's `cmd_open` in the target loop and
   its `wait_event_info` in a later batched `process_vm_readv`; a command that

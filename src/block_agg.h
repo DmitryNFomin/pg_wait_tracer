@@ -43,8 +43,26 @@
  *     WIDER set than C4 (it keeps a record whose new_event is EXIT or hidden),
  *     deliberately, because that is what the raw `transitions` response sums
  *     per node. It is also NARROWER than the raw response in exactly one way:
- *     the raw node pass walks SAMPLE records too, which add zero nanoseconds
- *     but do create a node entry for event id 0. See the OPEN QUESTION below.
+ *     the raw node pass walks SAMPLE records too, and this module drops them.
+ *
+ *     CORRECTION, and it matters because the old wording here was used to
+ *     justify the drop as cost-free: "SAMPLE records add zero nanoseconds" is
+ *     true of the record AS DECODED (src/event_reader.c:338-341 zeroes
+ *     duration_ns) but FALSE of the record the `transitions` handler receives.
+ *     After the exact-wins merge each surviving sample fragment arrives as
+ *     old_event == 0 with a POSITIVE duration_ns (src/server.c:2434). So in a
+ *     MIXED window this drop removes the whole uncovered sampled contribution
+ *     from the DFG's CPU node total — a real change to a number a user sees,
+ *     not a no-op.
+ *
+ *     Whether that change is RIGHT is an open decision, NOT settled here: the
+ *     links already exclude samples, so dropping them from nodes makes nodes
+ *     and links consistent, which is an argument for it. It is reachable
+ *     today, because the fast path declines MIXED windows, so master and this
+ *     branch both answer them from raw — where they now disagree. Referred to
+ *     the owner; no test pins a mixed-window node total, so this was decided
+ *     by accident and must not stay that way. Do not turn this paragraph back
+ *     into a justification.
  * C6. Durations are UNCLIPPED. A record is attributed in full to the block
  *     that contains it, exactly as pgwt_compute_transitions() does — it does
  *     no window clipping either. A transition is ONE record, so a pair can
@@ -79,15 +97,26 @@
  *     REFUSAL (DECODE / negative status), never a zero. A caller that cannot
  *     see must fall back to raw.
  *
- * ── OPEN QUESTION for the wiring step (deliberately not decided here) ────
+ * ── OPEN QUESTION, STILL OPEN AND NOW LARGER THAN IT LOOKED ──────────────
  * The raw `transitions` response in src/server.c builds its node totals from
- * ALL loaded records, including SAMPLE-flagged ones. A sample has
- * old_event == 0 and duration_ns == 0, so in a MIXED window it can create a
- * node "CPU*" with total_ms == 0 that this aggregate does not have. The
- * difference is bounded to that one zero-nanosecond node entry. The wiring
- * commit must either keep node presence for id 0 from the raw side, or
- * decide that a zero-duration node manufactured by a sample is a defect and
- * remove it from the raw side too. Nothing here guesses.
+ * ALL loaded records, including SAMPLE-flagged ones. This paragraph used to
+ * say the difference was "bounded to that one zero-nanosecond node entry",
+ * on the premise that a sample has duration_ns == 0. That premise is WRONG
+ * for the records this handler sees: decode zeroes duration_ns
+ * (src/event_reader.c:338-341), but the exact-wins merge then emits each
+ * surviving sample fragment with a POSITIVE duration_ns
+ * (src/server.c:2434). So the difference is not one empty node — it is the
+ * entire uncovered sampled contribution to the CPU node total in a MIXED
+ * window.
+ *
+ * The wiring commit routed the raw node pass through
+ * pgwt_block_agg_add_events (src/server.c), which applies C5 and therefore
+ * drops those fragments. That is a change to a user-visible number, made
+ * without a test pinning it, i.e. decided by accident — exactly what this
+ * section said must not happen. It is referred to the owner rather than
+ * defended or reverted on an implementer's authority. Whichever way it goes,
+ * it needs a test that pins a MIXED-window node total; there is none today,
+ * and that absence is the real defect here.
  *
  * ── The one documented ASYMMETRY against the raw path ────────────────────
  * A window larger than load_max_events() is refused by the raw path with a
@@ -235,7 +264,7 @@ struct pgwt_block_agg {
  * every block — a partition, which is what makes double-counting at the seam
  * impossible rather than merely unlikely. */
 enum pgwt_block_plan {
-    PGWT_BLOCK_SKIP   = 0,  /* cannot overlap [from, to) */
+    PGWT_BLOCK_SKIP   = 0,  /* cannot overlap [from, to] — INCLUSIVE, C7 */
     PGWT_BLOCK_MERGE  = 1,  /* wholly inside, aggregate present: merge it */
     PGWT_BLOCK_DECODE = 2,  /* boundary block, or no usable aggregate: decode */
 };
@@ -246,9 +275,18 @@ enum pgwt_block_plan {
 int pgwt_block_agg_record_counts(const struct pgwt_trace_event *ev);
 /* C5: does this record contribute to its old_event's node total? */
 int pgwt_block_agg_node_counts(const struct pgwt_trace_event *ev);
-/* C7: half-open [from, to) on the record's end timestamp. */
+/* C7: INCLUSIVE at both ends, on the record's end timestamp. NOT half-open —
+ * see C7 above for why, and do not "correct" it to `<`: that reading cost a
+ * wiring round and zeroed test_data_aas (Total AAS 4.0 -> 0). */
 int pgwt_block_agg_in_window(const struct pgwt_trace_event *ev,
                              uint64_t from_mono_ns, uint64_t to_mono_ns);
+/* C7 at FILE granularity: can a file spanning [mono_first, mono_last]
+ * contribute to [from, to]? The same inclusive rule, shared rather than
+ * hand-copied, because the hand-copied version drifted to `>=` and produced a
+ * silently short answer. See the body in block_agg.c. */
+int pgwt_block_agg_file_can_contribute(uint64_t mono_first, uint64_t mono_last,
+                                       uint64_t from_mono_ns,
+                                       uint64_t to_mono_ns);
 /* C3: can the aggregate answer a request carrying this filter? NULL = no
  * filter = yes. Any non-empty field = no. */
 int pgwt_block_agg_filter_supported(const struct pgwt_filter *f);
@@ -300,10 +338,19 @@ int pgwt_block_agg_merge(struct pgwt_block_agg *dst,
 int pgwt_block_agg_add_event(struct pgwt_block_agg *a,
                              const struct pgwt_trace_event *ev);
 
-/* Accumulate every record of `events` whose timestamp is in [from, to) into a
- * window accumulator. THE one raw-side accumulator: both the raw `transitions`
- * response and the aggregate-vs-raw cross-check go through it, so the per-node
- * numbers the product emits cannot drift from the numbers the gate compares.
+/* Accumulate every record of `events` whose timestamp is in [from, to] —
+ * INCLUSIVE at both ends, C7 — into a window accumulator. THE one raw-side
+ * accumulator: the raw `transitions` response and tests/test_block_agg.c's
+ * oracle comparison both go through it, so the per-node numbers the product
+ * emits cannot drift from the numbers the gate compares.
+ *
+ * CORRECTION: this used to claim "the aggregate-vs-raw cross-check" goes
+ * through it too. It does not. tests/test_agg_raw_crosscheck.c is a different
+ * gate — per-second SUMMARY records vs raw — and it does not link block_agg.c
+ * at all (see its recipe in tests/Makefile). Naming an unrelated test as a
+ * guard here would let a reader believe this function is covered by a gate
+ * that never calls it.
+ *
  * Pass from = 0, to = UINT64_MAX for "every record given".
  *
  * `*n_in_window` (optional) receives the number of records admitted by the
@@ -391,7 +438,8 @@ typedef int (*pgwt_bagg_decode_fn)(void *ctx, struct pgwt_event_reader *r,
                                    struct pgwt_block_info *bi);
 
 /* Fold one trace file's blocks into the window accumulator `acc`, merging the
- * blocks wholly inside [from_mono_ns, to_mono_ns) and decoding only the
+ * blocks wholly inside [from_mono_ns, to_mono_ns] -- INCLUSIVE at both ends
+ * (C7; do not "correct" the bracket) -- and decoding only the
  * partial ones at the edges.
  *
  * This is THE iteration both the shipped `transitions` handler and
