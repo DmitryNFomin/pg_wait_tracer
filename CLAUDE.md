@@ -125,6 +125,21 @@ judges. It writes no feature code itself for anything bigger than a one-liner.
   short report. Each orchestrator tool call costs a full context re-read of a
   conversation that only grows; on 2026-09-29, 57% of its turns followed its
   own tool calls.
+- **Capacity check EVERY turn, before replying to an agent report** (owner rule
+  2026-10-09: *"why I asking you every time find that there are idle resources and
+  waiting for it work? Any good reason?"* — there was none). The orchestrator is
+  event-driven by default: each report triggers a response about that report, and
+  nothing asks "what else could be running?", so idle capacity persists until the
+  owner notices. It happened three times on 2026-10-09 — one implementer against a
+  cap of three while two independent modules waited; codex idle twice with unblocked
+  work available; gate-2 at load 0.02 while gate-1 sat at 7.30 with its lock held.
+  Before answering any report, check: implementers running vs the cap; codex (free
+  the moment it returns); both boxes (`uptime` plus `fuser /tmp/pgwt-box-check.lock`);
+  advisers; and open PRs for a `BEHIND` needing `gh pr update-branch`. Then answer
+  the report AND fill what is idle in the SAME turn. **Blocked is not idle — the
+  test is whether the work shares FILES, not whether it shares a phase number:
+  modules are parallel, wiring is serial.** And a box excluded from gating is not
+  useless: gate-2 is the right place to reproduce the very issue that excludes it.
 - **Reports to the owner are FIVE LINES at most** (owner rule 2026-09-25):
   merged / in flight / blocked / needs you. Long form only when the owner has
   to decide something, or when a finding changes the plan. No bug narratives —
