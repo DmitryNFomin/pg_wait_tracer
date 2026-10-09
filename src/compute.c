@@ -4,6 +4,7 @@
  * All result structs use malloc'd arrays — caller frees with free(result->rows).
  */
 #include "compute.h"
+#include "variant_pattern.h"
 
 #include <assert.h>
 #include "summary_writer.h"
@@ -4462,110 +4463,13 @@ oom:
 
 /* ── Variants ────────────────────────────────────────────── */
 
-/* One raw execution: events between EXEC_START and EXEC_END */
-struct raw_exec {
-    uint32_t events[128];       /* event_ids in order */
-    uint64_t durations[128];    /* duration per event */
-    int      len;
-    uint64_t total_ns;          /* sum of durations */
-    uint64_t query_id;
-};
-
-/* Compressed pattern for hashing */
-struct compressed_pattern {
-    uint32_t steps[PGWT_MAX_VARIANT_STEPS];
-    int      is_loop[PGWT_MAX_VARIANT_STEPS];
-    int      loop_len[PGWT_MAX_VARIANT_STEPS];
-    int      num_steps;
-};
-
-/* Detect the longest repeating subsequence starting at pos.
- * Returns loop body length (0 if no loop). */
-static int detect_loop(const uint32_t *events, int len, int pos)
-{
-    /* Try loop body lengths from 1 to len/2 */
-    for (int body = 1; body <= (len - pos) / 2; body++) {
-        int reps = 1;
-        int j = pos + body;
-        while (j + body <= len) {
-            int match = 1;
-            for (int k = 0; k < body; k++) {
-                if (events[pos + k] != events[j + k]) { match = 0; break; }
-            }
-            if (!match) break;
-            reps++;
-            j += body;
-        }
-        if (reps >= 2) return body;  /* found a loop with >=2 repetitions */
-    }
-    return 0;
-}
-
-/* Compress a raw event sequence: collapse loops */
-static void compress_exec(const struct raw_exec *raw, struct compressed_pattern *out)
-{
-    out->num_steps = 0;
-    int i = 0;
-    while (i < raw->len && out->num_steps < PGWT_MAX_VARIANT_STEPS) {
-        int body = detect_loop(raw->events, raw->len, i);
-        if (body > 0 && out->num_steps + body < PGWT_MAX_VARIANT_STEPS) {
-            /* Mark first step of loop */
-            out->steps[out->num_steps] = raw->events[i];
-            out->is_loop[out->num_steps] = 1;
-            out->loop_len[out->num_steps] = body;
-            out->num_steps++;
-            /* Add remaining loop body steps */
-            for (int k = 1; k < body && out->num_steps < PGWT_MAX_VARIANT_STEPS; k++) {
-                out->steps[out->num_steps] = raw->events[i + k];
-                out->is_loop[out->num_steps] = 0;
-                out->loop_len[out->num_steps] = 0;
-                out->num_steps++;
-            }
-            /* Skip past all repetitions */
-            int reps = 0;
-            int j = i;
-            while (j + body <= raw->len) {
-                int match = 1;
-                for (int k = 0; k < body; k++) {
-                    if (raw->events[i + k] != raw->events[j + k]) { match = 0; break; }
-                }
-                if (!match) break;
-                reps++;
-                j += body;
-            }
-            i = j;
-        } else {
-            out->steps[out->num_steps] = raw->events[i];
-            out->is_loop[out->num_steps] = 0;
-            out->loop_len[out->num_steps] = 0;
-            out->num_steps++;
-            i++;
-        }
-    }
-}
-
-/* Hash a compressed pattern */
-static uint64_t hash_pattern(const struct compressed_pattern *p)
-{
-    uint64_t h = 0xcbf29ce484222325ULL;
-    for (int i = 0; i < p->num_steps; i++) {
-        h ^= p->steps[i];
-        h *= 0x100000001b3ULL;
-        if (p->is_loop[i]) {
-            h ^= 0xDEADBEEF;
-            h *= 0x100000001b3ULL;
-        }
-    }
-    return h;
-}
-
-static int cmp_variant_time_desc(const void *a, const void *b)
-{
-    const struct pgwt_variant *va = a, *vb = b;
-    if (vb->total_ns > va->total_ns) return 1;
-    if (vb->total_ns < va->total_ns) return -1;
-    return 0;
-}
+/* The flow-pattern primitives (raw_exec, the compressed pattern,
+ * detect_loop, compress, hash, the CPU-only fill-in, loop_n, the
+ * per-step walk and the by-total-time comparator) live in ONE copy in
+ * src/variant_pattern.h, shared with src/variant_index.c. They used to
+ * be duplicated there verbatim because this file was held by other
+ * agents; see that header for what the fold costs and which tests
+ * cover it now. */
 
 #define VARIANT_HT_SIZE 4096
 #define VARIANT_HT_MASK (VARIANT_HT_SIZE - 1)
@@ -4582,7 +4486,7 @@ static int cmp_variant_time_desc(const void *a, const void *b)
 struct variant_accum {
     uint64_t hash;
     int      used;
-    struct compressed_pattern pattern;
+    struct pgwt_variant_pattern pattern;
     int      exec_count;
     uint64_t total_ns;
     uint64_t *exec_times;       /* for percentile calculation */
@@ -4636,7 +4540,7 @@ void pgwt_compute_variants(const struct pgwt_trace_event *events, int count,
     struct pid_exec_state {
         uint32_t pid;
         int      active;    /* 1 = inside start..end markers */
-        struct raw_exec exec;
+        struct pgwt_variant_raw_exec exec;
     };
     /* #275: this was `struct pid_exec_state pids[512]` with a linear probe
      * and `if (num_pids >= MAX_PIDS) continue;` — the 513th distinct pid in
@@ -4710,26 +4614,17 @@ void pgwt_compute_variants(const struct pgwt_trace_event *events, int count,
             ps->active = 0;
             total_execs++;
 
-            struct raw_exec *re = &ps->exec;
-            if (re->len == 0) {
-                /* CPU-only execution (no waits) */
-                re->events[0] = 0;  /* CPU */
-                re->durations[0] = re->total_ns;
-                re->len = 1;
-            }
+            struct pgwt_variant_raw_exec *re = &ps->exec;
+            pgwt_variant_cpu_only_fill(re);
 
             /* Compress and hash */
-            struct compressed_pattern cp;
+            struct pgwt_variant_pattern cp;
             memset(&cp, 0, sizeof(cp));
-            compress_exec(re, &cp);
-            uint64_t h = hash_pattern(&cp);
+            pgwt_variant_compress(re, &cp);
+            uint64_t h = pgwt_variant_hash_pattern(&cp);
 
             /* Count loop iterations in raw data */
-            double loop_n = 0;
-            if (re->len > 1) {
-                /* Simple heuristic: len / compressed_len gives avg repetition */
-                loop_n = cp.num_steps > 0 ? (double)re->len / cp.num_steps : 1;
-            }
+            double loop_n = pgwt_variant_loop_n(re->len, cp.num_steps);
 
             /* Insert into hash table */
             uint32_t slot = (uint32_t)(h & VARIANT_HT_MASK);
@@ -4763,18 +4658,17 @@ void pgwt_compute_variants(const struct pgwt_trace_event *events, int count,
                     va->exec_times[va->exec_times_n++] = re->total_ns;
             }
 
-            /* Accumulate per-step durations from raw data */
-            int si = 0;
-            for (int j = 0; j < re->len && si < cp.num_steps; j++) {
-                if (re->events[j] == cp.steps[si]) {
-                    va->step_total_ns[si] += re->durations[j];
-                    va->step_count[si]++;
-                    /* Advance through pattern steps (handle loops) */
-                    if (!cp.is_loop[si] || j + 1 >= re->len ||
-                        re->events[j + 1] != cp.steps[si])
-                        si++;
-                    if (si >= cp.num_steps) si = cp.num_steps - 1;
-                }
+            /* Accumulate per-step durations from raw data. The WALK is
+             * shared with the index (variant_pattern.h, si clamp and all);
+             * only the addition into this variant's accumulators stays
+             * here, and unsigned integer addition is exact, so one
+             * execution's contribution is the same bits either way. */
+            uint64_t step_ns[PGWT_MAX_VARIANT_STEPS];
+            int step_n[PGWT_MAX_VARIANT_STEPS];
+            pgwt_variant_step_walk(re, &cp, step_ns, step_n);
+            for (int s = 0; s < cp.num_steps; s++) {
+                va->step_total_ns[s] += step_ns[s];
+                va->step_count[s] += step_n[s];
             }
 
             continue;
@@ -4784,7 +4678,7 @@ void pgwt_compute_variants(const struct pgwt_trace_event *events, int count,
             continue;
 
         /* Regular event inside an execution */
-        if (ps->active && ps->exec.len < 128) {
+        if (ps->active && ps->exec.len < PGWT_VARIANT_RAW_MAX) {
             if (!f || pgwt_filter_matches(f, ev)) {
                 if (!pgwt_is_idle_event(ev->old_event)) {
                     ps->exec.events[ps->exec.len] = ev->old_event;
@@ -4864,7 +4758,7 @@ void pgwt_compute_variants(const struct pgwt_trace_event *events, int count,
         free(va->exec_times);
     }
 
-    qsort(variants, vi, sizeof(variants[0]), cmp_variant_time_desc);
+    qsort(variants, vi, sizeof(variants[0]), pgwt_variant_cmp_time_desc);
 
     int nr = vi < max_variants ? vi : max_variants;
     out->variants = variants;

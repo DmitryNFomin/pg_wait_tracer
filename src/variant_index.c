@@ -20,6 +20,8 @@
  */
 #include "variant_index.h"
 
+#include "variant_pattern.h"
+
 #include "idle_rule.h"
 #include "percentile.h"
 #include "pid_index.h"
@@ -30,120 +32,18 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* ── the oracle's structures, reimplemented (see NOT A SHARED
- * IMPLEMENTATION in the header: compute.c is held by other agents) ── */
-
-struct vi_raw_exec {
-    uint32_t events[PGWT_VARIANT_INDEX_MAX_RAW];
-    uint64_t durations[PGWT_VARIANT_INDEX_MAX_RAW];
-    int      len;
-    uint64_t total_ns;
-    uint64_t query_id;
-};
-
-struct vi_pattern {
-    uint32_t steps[PGWT_MAX_VARIANT_STEPS];
-    int      is_loop[PGWT_MAX_VARIANT_STEPS];
-    int      loop_len[PGWT_MAX_VARIANT_STEPS];
-    int      num_steps;
-};
-
-/* compute.c detect_loop(), verbatim. */
-static int vi_detect_loop(const uint32_t *events, int len, int pos)
-{
-    for (int body = 1; body <= (len - pos) / 2; body++) {
-        int reps = 1;
-        int j = pos + body;
-        while (j + body <= len) {
-            int match = 1;
-            for (int k = 0; k < body; k++) {
-                if (events[pos + k] != events[j + k]) { match = 0; break; }
-            }
-            if (!match) break;
-            reps++;
-            j += body;
-        }
-        if (reps >= 2) return body;
-    }
-    return 0;
-}
-
-/* compute.c compress_exec(), verbatim. */
-static void vi_compress_exec(const struct vi_raw_exec *raw,
-                             struct vi_pattern *out)
-{
-    out->num_steps = 0;
-    int i = 0;
-    while (i < raw->len && out->num_steps < PGWT_MAX_VARIANT_STEPS) {
-        int body = vi_detect_loop(raw->events, raw->len, i);
-        if (body > 0 && out->num_steps + body < PGWT_MAX_VARIANT_STEPS) {
-            out->steps[out->num_steps] = raw->events[i];
-            out->is_loop[out->num_steps] = 1;
-            out->loop_len[out->num_steps] = body;
-            out->num_steps++;
-            for (int k = 1; k < body && out->num_steps < PGWT_MAX_VARIANT_STEPS; k++) {
-                out->steps[out->num_steps] = raw->events[i + k];
-                out->is_loop[out->num_steps] = 0;
-                out->loop_len[out->num_steps] = 0;
-                out->num_steps++;
-            }
-            int reps = 0;
-            int j = i;
-            while (j + body <= raw->len) {
-                int match = 1;
-                for (int k = 0; k < body; k++) {
-                    if (raw->events[i + k] != raw->events[j + k]) { match = 0; break; }
-                }
-                if (!match) break;
-                reps++;
-                j += body;
-            }
-            i = j;
-        } else {
-            out->steps[out->num_steps] = raw->events[i];
-            out->is_loop[out->num_steps] = 0;
-            out->loop_len[out->num_steps] = 0;
-            out->num_steps++;
-            i++;
-        }
-    }
-}
-
-/* compute.c hash_pattern(), verbatim. Step ORDER is folded in, which is why
- * [A, B] and [B, A] are two variants. */
-static uint64_t vi_hash_pattern(const struct vi_pattern *p)
-{
-    uint64_t h = 0xcbf29ce484222325ULL;
-    for (int i = 0; i < p->num_steps; i++) {
-        h ^= p->steps[i];
-        h *= 0x100000001b3ULL;
-        if (p->is_loop[i]) {
-            h ^= 0xDEADBEEF;
-            h *= 0x100000001b3ULL;
-        }
-    }
-    return h;
-}
-
-/* compute.c cmp_variant_time_desc(), verbatim. It returns 0 for equal
- * total_ns, so qsort's tie order is unspecified by the standard — which is
- * fine and is why the test compares the SORTED arrays of both sides: an
- * identical pre-sort array through an identical comparator in one binary
- * yields one permutation. */
-static int vi_cmp_variant_time_desc(const void *a, const void *b)
-{
-    const struct pgwt_variant *va = a, *vb = b;
-    if (vb->total_ns > va->total_ns) return 1;
-    if (vb->total_ns < va->total_ns) return -1;
-    return 0;
-}
+/* The flow-pattern primitives are NOT reimplemented here any more: they
+ * live in src/variant_pattern.h, which src/compute.c includes too, so
+ * the pattern, the hash, loop_n, the per-step walk and the by-total-time
+ * comparator are ONE copy. See that header for what the fold costs and
+ * which tests cover the shared code now. */
 
 /* ── per-pid carry-over state ─────────────────────────────── */
 
 struct vi_phase_carry {
     int      active;
     uint64_t start_ns;      /* the opening marker's timestamp */
-    struct vi_raw_exec exec;
+    struct pgwt_variant_raw_exec exec;
 };
 
 struct vi_pid_carry {
@@ -354,20 +254,16 @@ static int vi_close_row(struct pgwt_variant_index *idx,
                         struct vi_phase_carry *pc, uint32_t pid, int phase,
                         uint64_t close_ns)
 {
-    struct vi_raw_exec *re = &pc->exec;
+    struct pgwt_variant_raw_exec *re = &pc->exec;
 
-    /* CPU-only execution (no waits). The oracle mutates re->len here,
-     * BEFORE loop_n is computed from it, so raw_len is 1 and loop_n is 0
-     * for a pure-CPU execution. */
-    if (re->len == 0) {
-        re->events[0] = 0;
-        re->durations[0] = re->total_ns;
-        re->len = 1;
-    }
+    /* CPU-only execution (no waits). This mutates re->len BEFORE loop_n is
+     * computed from it, so raw_len is 1 and loop_n is 0 for a pure-CPU
+     * execution — shared with the oracle, variant_pattern.h. */
+    pgwt_variant_cpu_only_fill(re);
 
-    struct vi_pattern cp;
+    struct pgwt_variant_pattern cp;
     memset(&cp, 0, sizeof(cp));
-    vi_compress_exec(re, &cp);
+    pgwt_variant_compress(re, &cp);
 
     if (vi_grow_rows(idx) != 0)
         return vi_fail_build(idx, PGWT_VARIANT_INDEX_REFUSE_BUILD_FAILED);
@@ -382,7 +278,7 @@ static int vi_close_row(struct pgwt_variant_index *idx,
     row->close_ns = close_ns;
     row->query_id = re->query_id;
     row->total_ns = re->total_ns;
-    row->hash = vi_hash_pattern(&cp);
+    row->hash = pgwt_variant_hash_pattern(&cp);
     row->raw_len = re->len;
     row->num_steps = cp.num_steps;
     row->step_off = idx->n_steps;
@@ -396,19 +292,17 @@ static int vi_close_row(struct pgwt_variant_index *idx,
         st->total_ns = 0;
     }
 
-    /* The oracle's per-step walk, verbatim, accumulating into this
-     * execution's own step slots instead of straight into the variant. */
-    int si = 0;
-    for (int j = 0; j < re->len && si < cp.num_steps; j++) {
-        if (re->events[j] == cp.steps[si]) {
-            struct pgwt_variant_index_step *st = &idx->steps[idx->n_steps + si];
-            st->total_ns += re->durations[j];
-            st->count++;
-            if (!cp.is_loop[si] || j + 1 >= re->len ||
-                re->events[j + 1] != cp.steps[si])
-                si++;
-            if (si >= cp.num_steps) si = cp.num_steps - 1;
-        }
+    /* The per-step walk, SHARED with the oracle (variant_pattern.h),
+     * landing in this execution's own step slots instead of straight into
+     * the variant. The query then sums these per variant with the same
+     * integer additions the oracle performs. */
+    uint64_t step_ns[PGWT_MAX_VARIANT_STEPS];
+    int step_n[PGWT_MAX_VARIANT_STEPS];
+    pgwt_variant_step_walk(re, &cp, step_ns, step_n);
+    for (int s = 0; s < cp.num_steps; s++) {
+        struct pgwt_variant_index_step *st = &idx->steps[idx->n_steps + s];
+        st->total_ns = step_ns[s];
+        st->count = step_n[s];
     }
 
     idx->n_steps += cp.num_steps;
@@ -518,7 +412,7 @@ int pgwt_variant_index_add_block(struct pgwt_variant_index *idx, int block_idx,
                     continue;
                 if (pgwt_is_idle_event(ev->old_event))
                     continue;
-                struct vi_raw_exec *re = &pc->exec;
+                struct pgwt_variant_raw_exec *re = &pc->exec;
                 re->events[re->len] = ev->old_event;
                 re->durations[re->len] = ev->duration_ns;
                 re->total_ns += ev->duration_ns;
@@ -600,7 +494,7 @@ int pgwt_variant_index_filter_ok(const struct pgwt_filter *f)
 struct vi_accum {
     uint64_t hash;
     int      used;
-    struct vi_pattern pattern;
+    struct pgwt_variant_pattern pattern;
     int      exec_count;
     uint64_t total_ns;
     uint64_t *exec_times;
@@ -689,7 +583,7 @@ static int vi_merge_rows(struct vi_accum *ht,
         (*total_execs)++;
 
         /* Rebuild the compressed pattern from the stored steps. */
-        struct vi_pattern cp;
+        struct pgwt_variant_pattern cp;
         memset(&cp, 0, sizeof(cp));
         cp.num_steps = e->num_steps;
         for (int s = 0; s < e->num_steps; s++) {
@@ -700,9 +594,7 @@ static int vi_merge_rows(struct vi_accum *ht,
         }
         out->steps_examined += e->num_steps;
 
-        double loop_n = 0;
-        if (e->raw_len > 1)
-            loop_n = cp.num_steps > 0 ? (double)e->raw_len / cp.num_steps : 1;
+        double loop_n = pgwt_variant_loop_n(e->raw_len, cp.num_steps);
 
         uint32_t slot = (uint32_t)(e->hash & (PGWT_VARIANT_INDEX_HT_SIZE - 1));
         while (ht[slot].used && ht[slot].hash != e->hash)
@@ -800,7 +692,7 @@ static int vi_emit_variants(struct vi_accum *ht, int max_variants,
         }
     }
 
-    qsort(variants, vi, sizeof(variants[0]), vi_cmp_variant_time_desc);
+    qsort(variants, vi, sizeof(variants[0]), pgwt_variant_cmp_time_desc);
 
     int nr = vi < max_variants ? vi : max_variants;
     out->res.variants = variants;

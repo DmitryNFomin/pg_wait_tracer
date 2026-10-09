@@ -26,6 +26,17 @@ wrong — a refusal that approves, a ledger counter that cannot be driven, a
 comparator field dropped. Those must go red too, because "the gate could not
 see" is how a gate fails in practice.
 
+AN ENTRY MAY NAME THE FILE IT MUTATES (4th element; default
+variant_index.c). src/variant_pattern.h holds the flow-pattern primitives that
+src/compute.c and src/variant_index.c now SHARE. Only the mutant copy of
+variant_index.c is compiled out of the mutant directory, and a quoted include
+resolves against the including file's own directory, so compute.c keeps the
+pristine header: a mutation here is "the index's view of a shared primitive
+drifted", which the differential sees. The other case -- the primitive changes
+for BOTH sides, where the differential is blind by construction -- is covered
+by tests/variant_pattern_shared_mutations.py, which compiles compute.c out of
+the mutant directory too.
+
 Run from tests/:  python3 variant_index_mutations.py
 """
 
@@ -153,14 +164,14 @@ MUTATIONS = [
      "    for (int i = 0; i < p->num_steps; i++) acc += p->steps[i];\n"
      "    for (int i = 0; i < (p->num_steps ? 1 : 0); i++) {\n"
      "        h ^= acc;\n"
-     "        h *= 0x100000001b3ULL;"),
+     "        h *= 0x100000001b3ULL;", "variant_pattern.h"),
 
     ("M14 the loop flag is not folded into the hash",
      "        if (p->is_loop[i]) {\n"
      "            h ^= 0xDEADBEEF;\n"
      "            h *= 0x100000001b3ULL;\n"
      "        }",
-     "        /* mutant: loop flag not hashed */"),
+     "        /* mutant: loop flag not hashed */", "variant_pattern.h"),
 
     ("M15 rows merged in ROW order per chunk but chunks visited backwards "
      "(close order broken: collision chains, query_id sets, p95 sample)",
@@ -186,16 +197,16 @@ MUTATIONS = [
 
     ("M19 the CPU-only fill-in moved AFTER loop_n would see it (raw_len 0)",
      "    if (re->len == 0) {\n"
-     "        re->events[0] = 0;\n"
+     "        re->events[0] = 0;  /* CPU */\n"
      "        re->durations[0] = re->total_ns;\n"
      "        re->len = 1;\n"
      "    }",
-     "    /* mutant: no CPU-only fill-in */"),
+     "    /* mutant: no CPU-only fill-in */", "variant_pattern.h"),
 
     ("M20 per-step accumulators not clamped to the last step (the oracle's "
      "si quirk 'fixed')",
-     "            if (si >= cp.num_steps) si = cp.num_steps - 1;",
-     "            /* mutant: no clamp */"),
+     "            if (si >= cp->num_steps) si = cp->num_steps - 1;",
+     "            /* mutant: no clamp */", "variant_pattern.h"),
 
     ("M21 query_id taken from the opening marker only, never from an inner "
      "record",
@@ -471,7 +482,7 @@ def main():
         extra = [os.path.join(SRC, "spawn.c")]
 
     pristine = {}
-    for name in ("variant_index.c", "variant_index.h"):
+    for name in ("variant_index.c", "variant_index.h", "variant_pattern.h"):
         with open(os.path.join(SRC, name)) as fh:
             pristine[name] = fh.read()
 
@@ -497,7 +508,9 @@ def main():
     print("baseline: pristine module, test PASSED (%s)" % lines[-2])
     print()
 
-    for i, (name, needle, repl) in enumerate(MUTATIONS, 1):
+    for i, entry in enumerate(MUTATIONS, 1):
+        name, needle, repl = entry[0], entry[1], entry[2]
+        fname = entry[3] if len(entry) > 3 else "variant_index.c"
         tag = "m%02d" % i
         d = os.path.join(WORK, tag)
         os.makedirs(d)
@@ -505,13 +518,14 @@ def main():
             with open(os.path.join(d, n), "w") as fh:
                 fh.write(t)
 
-        target = os.path.join(d, "variant_index.c")
+        target = os.path.join(d, fname)
         with open(target) as fh:
             text = fh.read()
         hits = text.count(needle)
         if hits != 1:
-            print("NOT-APPLIED  %s: needle matched %d times, must match "
-                  "exactly 1 (this script cannot see)" % (name, hits))
+            print("NOT-APPLIED  %s: needle matched %d times in %s, must "
+                  "match exactly 1 (this script cannot see)"
+                  % (name, hits, fname))
             failures += 1
             continue
         with open(target, "w") as fh:

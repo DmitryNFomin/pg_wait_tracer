@@ -323,4 +323,10 @@ test_exec_index
 #   one at a time and requires this test to catch each; it is not in this list
 #   because it recompiles the module once per mutation and is evidence, not a
 #   gate.
+#   Second companion: tests/variant_pattern_shared_mutations.py, for the
+#   primitives src/compute.c and src/variant_index.c now SHARE through
+#   src/variant_pattern.h. A mutation there moves the index AND the oracle, so
+#   the differential is blind to it by construction; that harness compiles
+#   compute.c out of the mutant tree too and requires the oracle-independent
+#   literal expectations above to go red anyway. Also evidence, not a gate.
 test_variant_index

@@ -156,20 +156,23 @@
  * out->refused == PGWT_VARIANT_INDEX_OK is the only encoding of "this
  * window genuinely contains no executions".
  *
- * NOT A SHARED IMPLEMENTATION, DELIBERATELY. compress_exec(), hash_pattern()
- * and the per-step walk are static inside src/compute.c and three other
- * agents hold that file, so they are reimplemented here. The duplication is
- * not taken on faith: tests/test_variant_index.c drives both through
- * randomised and literal sequences and requires bit-exact agreement, so a
- * drift between the copies is a red test, not a wrong tab. Folding them
- * into one copy belongs to the wiring step that is allowed to touch
- * compute.c.
+ * ONE COPY OF THE PRIMITIVES (folded 2026-10-09). compress, hash, the
+ * CPU-only fill-in, loop_n, the per-step walk and the by-total-time
+ * comparator were duplicated from src/compute.c here because that file was
+ * held by other agents. They now live once in src/variant_pattern.h, which
+ * both files include. That header states what the fold costs — a change to
+ * a shared primitive moves BOTH sides, so the differential is blind to it
+ * by construction — and which tests cover it instead
+ * (tests/variant_pattern_shared_mutations.py mutates the shared header so
+ * that compute.c and variant_index.c BOTH see it, and requires the
+ * oracle-independent literal expectations to go red).
  */
 #ifndef PGWT_VARIANT_INDEX_H
 #define PGWT_VARIANT_INDEX_H
 
 #include "compute.h"
 #include "pg_wait_tracer.h"
+#include "variant_pattern.h"
 
 #include <stdint.h>
 
@@ -183,7 +186,7 @@
 
 /* The oracle's own limits, mirrored so the merge is bit-identical. */
 #define PGWT_VARIANT_INDEX_HT_SIZE   4096
-#define PGWT_VARIANT_INDEX_MAX_RAW   128     /* raw_exec.events[] capacity */
+#define PGWT_VARIANT_INDEX_MAX_RAW   PGWT_VARIANT_RAW_MAX  /* raw_exec.events[] */
 #define PGWT_VARIANT_INDEX_MAX_SAMPLES 10000 /* PGWT_VARIANT_MAX_SAMPLES */
 
 enum pgwt_variant_index_refusal {
