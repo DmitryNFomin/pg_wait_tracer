@@ -200,10 +200,21 @@ test_agg_raw_crosscheck
 # SAMPLES block and an unopenable trace file — each must REFUSE, because
 # "0 == 0" satisfies every assertion in the file.
 # tests/results/block-agg/run_mutations.py breaks one guard at a time across
-# src/block_agg.c and src/compute.c (19 mutations, all RED, control green). It
-# earned its keep twice: it found the tie-order check vacuous (M13) and an
+# src/block_agg.c and src/compute.c (20 mutations, all RED, control green). It
+# earned its keep three times: it found the tie-order check vacuous (M13), an
 # unreachable guard that was deleted rather than left looking like protection
-# (M18).
+# (M18), and M20's converse -- nothing required a wholly-inside block to MERGE,
+# so the fast path could have degraded to always-DECODE with every number still
+# right.
+# M22 is the one to read: it restores `mono_first >= to_m`, the FILE-level form
+# of M21's off-by-one that actually shipped. M21 pinned that comparison per
+# BLOCK, the identical error was hand-written again per FILE, and the suite let
+# it through -- which is why the rule is now one shared predicate
+# (pgwt_block_agg_file_can_contribute) with §1b's literals and a 5565-case
+# boundary sweep against the raw loader's rule transcribed independently.
+# Known limit, tracked as #339: M22 mutates the PREDICATE, and
+# transitions_from_block_aggs() is static, so no C unit can reach the call
+# site -- a re-hand-written comparison there would still ship green.
 test_block_agg
 # #294: cross_validate drops pgwt_is_idle_event() time from BOTH sides before
 # any share is computed, so when the sampled tier reads less CPU than the exact

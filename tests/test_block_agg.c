@@ -53,12 +53,18 @@
  * SECTIONS
  *   §0 vacuity ledger
  *   §1 the record predicate, differentially against pgwt_compute_transitions
+ *   §1b C7 at FILE granularity: the per-file window gate, with a boundary
+ *       sweep against the raw loader's rule transcribed independently
  *   §2 build + merge against literal expected values
  *   §3 merge is associative and commutative
  *   §4 the straddle rule (a pair whose old_event began in an earlier block)
  *   §5 plan() is a partition: exactly one of SKIP/MERGE/DECODE per block
  *   §6 the model test: merged-plus-decoded == raw, over every window
- *   §6b the known divergence from src/server.c's inclusive end bound
+ *   §6b src/server.c's inclusive end bound, pinned in BOTH directions with
+ *       the same 163 ns literal: zero divergence from the loader, and
+ *       exactly one record lost under a half-open end bound. (This was a
+ *       "known divergence" until c27e084 reconciled the aggregate TO the
+ *       loader; it is now an agreement, and the literal is what holds it.)
  *   §7 mutation probes: the comparator can see one count / one ns / one pair
  *   §8 bypass suite: every way this gate's detection can be made unreachable
  *   §9 on-disk, through the real writer/reader, driving the very function
@@ -489,7 +495,11 @@ static void section1_predicate_differential(void)
     e.old_event = E_IO1; e.flags = PGWT_EVENT_FLAG_SAMPLE;
     CHECK(pgwt_block_agg_node_counts(&e) == 0, "sample: no node time");
 
-    /* C7 half-open, at the two bounds and one past each. */
+    /* C7 at the two bounds and one past each. INCLUSIVE at both ends, not
+     * half-open -- see the ts == to assertion three lines down. The stale
+     * "half-open" wording that used to head this block is the exact
+     * misreading that cost this branch a wiring round and took
+     * test_data_aas's Total AAS from 4.0 to 0. */
     memset(&e, 0, sizeof(e));
     e.timestamp_ns = 500;
     CHECK(pgwt_block_agg_in_window(&e, 500, 600) == 1, "ts == from is in");
@@ -2097,7 +2107,8 @@ static void section9_on_disk(void)
                 if (rc != PGWT_BAGG_OK) { pgwt_block_agg_free(&win); continue; }
 
                 /* raw side: the shipping pair implementation plus the
-                 * independent node oracle, over the same half-open window. */
+                 * independent node oracle, over the same window (C7:
+                 * INCLUSIVE at both ends, not half-open). */
                 struct pgwt_trace_event *sel =
                     calloc((size_t)n_all, sizeof(*sel));
                 int ns = 0;

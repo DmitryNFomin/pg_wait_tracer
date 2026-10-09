@@ -5265,7 +5265,15 @@ static void emit_transitions_compute_failed(const struct pgwt_request *req,
  * NODE rows always come from `win`, which on the raw path is the same
  * accumulator fed with the loaded events — so a node-total divergence between
  * the two paths cannot be a difference of implementation, only of the merge
- * arithmetic, which is what tests/test_agg_raw_crosscheck.c compares.
+ * arithmetic, which is what tests/test_block_agg.c §6/§9 compares.
+ *
+ * That citation used to read tests/test_agg_raw_crosscheck.c, which is wrong
+ * and was the second of two places the same false claim appeared (the first is
+ * corrected in block_agg.h). That file is the per-second SUMMARY-vs-raw gate
+ * and does not link src/block_agg.c at all, so it cannot compare this merge
+ * arithmetic. Naming a test that never runs this code as its guard is worse
+ * than naming none: it tells a reader the arithmetic is covered when it is
+ * covered somewhere else entirely.
  *
  * Node total_ms is ONE division of an integer nanosecond sum. It used to be a
  * per-record `double` ms accumulation in loader order, which made the emitted

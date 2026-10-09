@@ -32,6 +32,13 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
     integer-nanosecond sum rather than an accumulation of doubles in loader
     order — so the same window no longer yields slightly different totals
     depending on the order records happened to be read.
+  - **Tied LINK rows now have a defined order on the RAW path too**, not only
+    the aggregate one: `cmp_trans_desc` ordered by count alone, which is not a
+    total order, so two links with equal counts came back in whatever order
+    `qsort` happened to produce. It now breaks ties by `from_event` then
+    `to_event`. This changes raw-path output for tied rows — previously
+    arbitrary, now stable — and it is what makes a row-by-row comparison
+    between the raw and aggregate paths mean anything at all.
   - In a **MIXED** window the DFG's `CPU*` node total no longer includes the
     uncovered sampled contribution, because the raw node pass now applies the
     aggregate's predicate, which drops SAMPLE-flagged records. This makes nodes
