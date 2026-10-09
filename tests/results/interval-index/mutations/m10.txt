@@ -1,0 +1,135 @@
+M10 chunk prefilter narrowed at `to`
+
+=== test_interval_index: the concurrency interval index (Phase 4) ===
+index version under test: 1
+8 fixtures
+--- literal expectations: every boundary class, by value ---
+  PASS: fx_long: index built with cuts after records 0 and 1 (3 blocks)
+  PASS: fx_long: 3 blocks fed, got 3
+  PASS: fx_long: exactly 1 interval starts before its own block (got 1) — the clipped-start detector is live
+  PASS: fx_long: query answered (ok)
+  PASS: fx_long: peak_sessions == {1,1,2,1,1,1,1,2}; got {1,1,2,1,1,1,1,2}
+  PASS: fx_long: every bucket's peak_event is EV_A
+  PASS: fx_pidrepeat: index built with every record in its own block
+  PASS: fx_pidrepeat: query answered
+  PASS: fx_pidrepeat: bucket 4 peak is 3 DISTINCT pids, not 4 records (got 3) — sets union, they do not add
+  PASS: fx_main: index built with the burst's 4 ends in 4 blocks (+ a trailing EMPTY block)
+  PASS: fx_main: query answered (ok)
+  PASS: fx_main: exactly 1 burst onset even though its four members are in four different blocks (got 1)
+  PASS: fx_main: 1 bucket had a burst (got 1)
+  PASS: fx_main: burst has 4 sessions / 4 listed pids (got 4/4)
+  PASS: fx_main: burst pid list is {20,21,22,23}; got {20,21,22,23}
+  PASS: fx_main: burst onset is the UNCLIPPED first start (500 ms); got +500 ms
+  PASS: fx_main: burst event is EV_A
+  FAIL(654): fx_main: exactly 1 interval excluded for ending past `to` (got 0) — the raw path's exclusion, reproduced not 'fixed'
+  FAIL(660): fx_main: the wait ending exactly at `to` is selected (bucket 7 peak 0 >= 1)
+  FAIL(665): fx_main: 9 of its 14 records are indexable waits inside the window (got 8): the marker, the on-CPU gap, the idle wait, the impossible record and the one open past `to` are all out
+  PASS: fx_main: the shared predicate skipped exactly 4 records (marker, on-CPU, idle, impossible); got 4
+  PASS: fx_edge: index built with each record in its own block
+  PASS: fx_edge: query answered
+  FAIL(688): fx_edge: all 4 records selected, including the one ending exactly at `from` and the one ending exactly at `to` (got 3)
+  FAIL(691): fx_edge: the 4-pid burst survives (bursts_total 0, num_bursts 0)
+  FAIL(706): fx_edge: bucket 0 peak is 3 (the member ending exactly at `from` contributes to no bucket); got 2
+  PASS: fx_cover: index built with each record in its own block
+  PASS: fx_cover: all 4 intervals start before the indexed coverage (got 4)
+  PASS: fx_cover: query answered
+  PASS: fx_cover: the burst survives (bursts_total 1, num_bursts 1)
+  PASS: fx_cover: onset is 35 ms — before the coverage start (50 ms) and before the window (100 ms), UNCLIPPED
+  PASS: fx_cover: burst pid list is {100,101,102,103} (got 4 sessions, {100,101,102,103})
+--- the oracle's input: full array == loader-windowed array ---
+  PASS: 62 (fixture, window, resolution) cases compared
+  PASS: the full array and the loader-windowed array agree everywhere (0 disagreements)
+--- sweep: every block cut x every window x two resolutions ---
+  FAIL(917): no disagreement in 8460 comparisons — first: fx_main mask=0x800 w=[100,900] nb=8: peak_sessions[7] 1 vs 0
+--- comparator probes: the smallest possible difference ---
+  PASS: probe base: 8 buckets, 2 bursts, bursts_total 2 (got 8/2/2)
+  PASS: probe num_buckets-1: comparator reports it (num_buckets 8 vs 7)
+  PASS: probe bucket_ns+1: comparator reports it (bucket_ns 100000000 vs 100000001)
+  PASS: probe peak_sessions[3]+1: comparator reports it (peak_sessions[3] 0 vs 1)
+  PASS: probe peak_sessions[0]+1: comparator reports it (peak_sessions[0] 0 vs 1)
+  PASS: probe peak_event[3]+1: comparator reports it (peak_event[3] 0 vs 1)
+  PASS: probe bursts_total+1: comparator reports it (bursts_total 2 vs 3)
+  PASS: probe num_bursts-1: comparator reports it (num_bursts 2 vs 1)
+  PASS: probe burst[0].timestamp_ns+1: comparator reports it (bursts[0].timestamp_ns 1000300000000 vs 1000300000001)
+  PASS: probe burst[0].event_id+1: comparator reports it (bursts[0].event_id 167772183 vs 167772184)
+  PASS: probe burst[0].event_name: comparator reports it (bursts[0].event_name 'IO:DataFileTruncate' vs 'iO:DataFileTruncate')
+  PASS: probe burst[0].num_sessions+1: comparator reports it (bursts[0].num_sessions 5 vs 6)
+  PASS: probe burst[0].num_pids-1: comparator reports it (bursts[0].num_pids 5 vs 4)
+  PASS: probe burst[0].pids[0]+1: comparator reports it (bursts[0].pids differ)
+  PASS: probe burst[1].pids[2]+1: comparator reports it (bursts[1].pids differ)
+  PASS: probe burst[0].pids[63] (unused tail): comparator reports it (bursts[0].pids differ)
+  PASS: probe failed flag: comparator reports it (failed 0 vs 1)
+--- bypass suite: a gate that cannot see must REFUSE ---
+  PASS: NULL index: REFUSES with null-argument and no result (rc=-1 got=null-argument have=0)
+  PASS: bypass: base index built
+  PASS: NULL filter: REFUSES with null-argument and no result (rc=-1 got=null-argument have=0)
+  PASS: control: the same index DOES answer a good request
+  PASS: pid filter: REFUSES with filtered-request and no result (rc=-1 got=filtered-request have=0)
+  PASS: event filter: REFUSES with filtered-request and no result (rc=-1 got=filtered-request have=0)
+  PASS: class filter: REFUSES with filtered-request and no result (rc=-1 got=filtered-request have=0)
+  PASS: query_id filter: REFUSES with filtered-request and no result (rc=-1 got=filtered-request have=0)
+  PASS: inverted window: REFUSES with bad-window and no result (rc=-1 got=bad-window have=0)
+  PASS: zero-width window: REFUSES with bad-window and no result (rc=-1 got=bad-window have=0)
+  PASS: num_buckets 0: REFUSES with bad-bucket-count and no result (rc=-1 got=bad-bucket-count have=0)
+  PASS: num_buckets negative: REFUSES with bad-bucket-count and no result (rc=-1 got=bad-bucket-count have=0)
+  PASS: window past coverage end: REFUSES with window-outside-coverage and no result (rc=-1 got=window-outside-coverage have=0)
+  PASS: window before coverage start: REFUSES with window-outside-coverage and no result (rc=-1 got=window-outside-coverage have=0)
+  PASS: unsealed: REFUSES with unsealed and no result (rc=-1 got=unsealed have=0)
+  PASS: re-seal succeeds
+  PASS: wrong version: REFUSES with version-mismatch and no result (rc=-1 got=version-mismatch have=0)
+  PASS: seal REFUSES a row array that is not sorted by end_ns
+  PASS: unsorted rows: REFUSES with block-gap-or-reorder and no result (rc=-1 got=block-gap-or-reorder have=0)
+  PASS: empty index seals
+  PASS: empty index: REFUSES with empty-index and no result (rc=-1 got=empty-index have=0)
+  PASS: gap: block 0 accepted
+  PASS: gap: block 2 after block 0 is REFUSED (a skipped block)
+  PASS: skipped block: REFUSES with block-gap-or-reorder and no result (rc=-1 got=block-gap-or-reorder have=0)
+  PASS: reorder: a feed starting at block 1 is REFUSED
+  PASS: reordered feed: REFUSES with block-gap-or-reorder and no result (rc=-1 got=block-gap-or-reorder have=0)
+  PASS: record outside [block_first, block_last] is REFUSED
+  PASS: block_first > block_last is REFUSED
+  PASS: overlap: block 0 accepted
+  PASS: a block starting BEFORE the previous one ended is REFUSED
+  PASS: an out-of-order record is REFUSED, never sorted
+  PASS: out-of-order record: REFUSES with block-gap-or-reorder and no result (rc=-1 got=block-gap-or-reorder have=0)
+  PASS: fx_nowait: index built (0 intervals from 3 records)
+  PASS: fx_nowait: 0 intervals stored, 3 records skipped (got 0/3)
+  PASS: fixture with no waits: REFUSES with no-intervals-selected and no result (rc=-1 got=no-intervals-selected have=0)
+  PASS: fx_nowait: the RAW answer carries no signal either (0) — the refusal is not hiding one
+  PASS: fx_one: index built
+  PASS: covered window with no interval in it: REFUSES with no-intervals-selected and no result (rc=-1 got=no-intervals-selected have=0)
+  PASS: alloc fail at interval_index_rows: build FAILS
+  PASS: build alloc failure (rows): REFUSES with allocation-failure and no result (rc=-1 got=allocation-failure have=0)
+  PASS: alloc fail at interval_index_chunks: build FAILS
+  PASS: build alloc failure (chunks): REFUSES with allocation-failure and no result (rc=-1 got=allocation-failure have=0)
+  PASS: alloc: index rebuilt clean
+  PASS: query alloc failure: REFUSES with allocation-failure and no result (rc=-1 got=allocation-failure have=0)
+  PASS: the shipping computation itself failing: REFUSES with compute-failed and no result (rc=-1 got=compute-failed have=0)
+--- measured: compaction, not an O(blocks) jump ---
+  PASS: measure: 40 blocks, 120000 records, 40000 intervals indexed
+  PASS: measure: index answered (ok)
+  PASS: measure: 120k-record fixture agrees bit-exactly
+  PASS: compaction: 20000 intervals materialised for 60001 records in window
+  PASS: storage compaction: 960000 index bytes for 5760000 raw bytes (6.0x)
+  PASS: materialised compaction: 960000 bytes vs 2880048 raw bytes in window (3.0x)
+  PASS: the chunk prefilter SKIPPED 20 of 40 blocks (not a no-op)
+  PASS: measure: the fixture produced 589 burst onsets (not a vacuous comparison)
+  MEASURED n=1: records=120000 in_window=60001 index_rows=40000 index_bytes=960000 raw_bytes_total=5760000 intervals_used=20000 bytes_materialised=960000 raw_bytes_in_window=2880048 blocks=40 scanned=20 index_us=763.0 raw_us=1001.0 (timings REPORTED, never asserted)
+--- non-vacuity ledger: the interesting cases really ran ---
+  PASS: 802 block-cut sets were built
+  PASS: 8460 (cut, window, resolution) answers compared
+  PASS: 43728 intervals were actually compared (not 0 == 0)
+  PASS: 794 indexes had MORE THAN ONE block — a one-block suite never tests the boundary rule
+  PASS: 2714 intervals straddled an INTERNAL block boundary — stored in a later block, started before it opened (the clipped-start detector)
+  PASS: 545 intervals started before the indexed coverage itself
+  PASS: 2782 intervals were excluded for ending past `to` (the raw path's exclusion, exercised)
+  PASS: 4020 intervals were excluded for ending before `from`
+  PASS: 1058 answers had the SAME pid selected from two different blocks inside one bucket
+  PASS: 5286 answers had a bucket peak above 1
+  PASS: 6206 burst onsets were detected across the sweep
+  PASS: 4686 answers contained a burst whose members live in TWO OR MORE blocks
+  PASS: 1164 windows selected nothing and REFUSED
+  PASS: the prefilter skipped a block 20624 times across the sweep
+
+119 checks, 7 failed
+FAILED

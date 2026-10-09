@@ -1,0 +1,67 @@
+=== interval_index mutations: 27 injected silent-wrong risks ===
+baseline: pristine module, test PASSED (121 checks, 0 failed)
+ledger falsification: `oneblock` exits 1 with 6 red ledger rows (first: FAIL(1339): 0 indexes had MORE THAN ONE block — a one-block suite never tests the boundary)
+
+RED   M01 start_ns CLIPPED to the block start (the cardinal error)
+        -> 12 failing checks; first: FAIL(575): fx_long: exactly 1 interval starts before its own block (got 0) — the clipped-start detector is live
+RED   M02 start_ns CLIPPED to the indexed coverage start
+        -> 3 failing checks; first: FAIL(719): fx_cover: all 4 intervals start before the indexed coverage (got 1)
+RED   M03 start_ns := end_ns (the record's duration is ignored)
+        -> 16 failing checks; first: FAIL(575): fx_long: exactly 1 interval starts before its own block (got 0) — the clipped-start detector is live
+RED   M04 the materialised record loses its duration
+        -> 12 failing checks; first: FAIL(593): fx_long: peak_sessions == {1,1,2,1,1,1,1,2}; got {0,0,0,0,0,0,0,2}
+RED   M05 a boundary-straddling interval is stored TWICE
+        -> 3 failing checks; first: FAIL(665): fx_main: 9 of its 14 records are indexable waits inside the window (got 12): the marker, the on-CPU gap, the idle wait, the impos
+RED   M06 waits still open at `to` are INCLUDED (semantics changed)
+        -> 3 failing checks; first: FAIL(654): fx_main: exactly 1 interval excluded for ending past `to` (got 0) — the raw path's exclusion, reproduced not 'fixed'
+RED   M07 selection narrowed to half-open at `to`
+        -> 7 failing checks; first: FAIL(654): fx_main: exactly 1 interval excluded for ending past `to` (got 2) — the raw path's exclusion, reproduced not 'fixed'
+RED   M08 selection narrowed to half-open at `from`
+        -> 5 failing checks; first: FAIL(665): fx_main: 9 of its 14 records are indexable waits inside the window (got 8): the marker, the on-CPU gap, the idle wait, the imposs
+RED   M09 chunk prefilter narrowed at `from` (skips a live chunk)
+        -> 3 failing checks; first: FAIL(688): fx_edge: all 4 records selected, including the one ending exactly at `from` and the one ending exactly at `to` (got 3)
+RED   M10 chunk prefilter narrowed at `to`
+        -> 7 failing checks; first: FAIL(654): fx_main: exactly 1 interval excluded for ending past `to` (got 0) — the raw path's exclusion, reproduced not 'fixed'
+RED   M11 the idle-wait exclusion is dropped from the predicate
+        -> 2 failing checks; first: FAIL(665): fx_main: 9 of its 14 records are indexable waits inside the window (got 10): the marker, the on-CPU gap, the idle wait, the impos
+RED   M12 the FID-4 chokepoint is dropped (markers become intervals)
+        -> 7 failing checks; first: FAIL(665): fx_main: 9 of its 14 records are indexable waits inside the window (got 11): the marker, the on-CPU gap, the idle wait, the impos
+RED   M13 on-CPU records become intervals
+        -> 7 failing checks; first: FAIL(665): fx_main: 9 of its 14 records are indexable waits inside the window (got 10): the marker, the on-CPU gap, the idle wait, the impos
+RED   M14 an empty index answers 'no concurrency' instead of refusing
+        -> 1 failing checks; first: FAIL(990): empty index: REFUSES with empty-index and no result (rc=0 got=ok have=0)
+RED   M15 coverage check is an intersection, not containment
+        -> 2 failing checks; first: FAIL(990): window past coverage end: REFUSES with window-outside-coverage and no result (rc=0 got=ok have=1)
+RED   M16 a FILTERED request is answered from the unfiltered index
+        -> 4 failing checks; first: FAIL(990): pid filter: REFUSES with filtered-request and no result (rc=0 got=ok have=1)
+RED   M17 a window selecting nothing answers zeroes instead of refusing
+        -> 4 failing checks; first: FAIL(917): no disagreement in 9624 comparisons — first: fx_nowait mask=0x0 w=[100,900] nb=8: num_buckets 8 vs 0
+RED   M18 an inverted/zero-width window is not refused
+        -> 2 failing checks; first: FAIL(990): inverted window: REFUSES with bad-window and no result (rc=-1 got=no-intervals-selected have=0)
+RED   M19 num_buckets <= 0 is not refused
+        -> 2 failing checks; first: FAIL(990): num_buckets 0: REFUSES with bad-bucket-count and no result (rc=0 got=ok have=1)
+RED   M20 the version stamp is not checked on query
+        -> 1 failing checks; first: FAIL(990): wrong version: REFUSES with version-mismatch and no result (rc=0 got=ok have=1)
+RED   M21 an unsealed index answers
+        -> 1 failing checks; first: FAIL(990): unsealed: REFUSES with unsealed and no result (rc=0 got=ok have=1)
+RED   M22 a skipped block in the feed is accepted
+        -> 4 failing checks; first: FAIL(1090): gap: block 2 after block 0 is REFUSED (a skipped block)
+RED   M23 an out-of-order record is accepted silently
+        -> 2 failing checks; first: FAIL(1133): an out-of-order record is REFUSED, never sorted
+RED   M24 a record outside its own block's bounds is accepted
+        -> 1 failing checks; first: FAIL(1107): record outside [block_first, block_last] is REFUSED
+RED   M25 seal's sorted-by-end_ns invariant is not verified
+        -> 2 failing checks; first: FAIL(1070): seal REFUSES a row array that is not sorted by end_ns
+RED   M26 a build allocation failure does not make the index unusable
+        -> 6 failing checks; first: FAIL(990): unsorted rows: REFUSES with block-gap-or-reorder and no result (rc=-1 got=unsealed have=0)
+RED   M27 a failed computation is reported as a successful answer
+        -> 1 failing checks; first: FAIL(990): the shipping computation itself failing: REFUSES with compute-failed and no result (rc=0 got=ok have=1)
+
+mutants injected: 27
+detected (RED):   27
+STAYED-GREEN:     0
+BUILD-FAILED:     0
+NOT-APPLIED:      0
+TOOL-MISSING:     0
+BASELINE-RED:     0
+PASSED
