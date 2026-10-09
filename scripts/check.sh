@@ -12,7 +12,30 @@
 # On success writes .pgwt-check.stamp = hash of the exact working tree that
 # passed, so the guard can tell whether the tree changed since.
 set -uo pipefail
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/.." || exit 2
+
+# Running a check should install the push guard for this clone. Respect any
+# hooks directory chosen by the developer, and never fail a check over config.
+activate_push_guard() {
+    local hooks_path status
+    if hooks_path=$(git config --get core.hooksPath 2>/dev/null); then
+        if [[ "$hooks_path" != "scripts/git-hooks" ]]; then
+            printf "warning: core.hooksPath is '%s'; push guard is not active for this clone.\n" "$hooks_path" >&2
+        fi
+        return
+    else
+        status=$?
+    fi
+
+    if [[ $status -ne 1 ]] || ! git config --list >/dev/null 2>&1; then
+        echo "warning: could not read Git config; push guard may not be active for this clone." >&2
+    elif git config --local core.hooksPath scripts/git-hooks >/dev/null 2>&1; then
+        echo "activated push guard: core.hooksPath=scripts/git-hooks (.git/hooks is bypassed)"
+    else
+        echo "warning: could not set core.hooksPath; push guard is not active for this clone." >&2
+    fi
+}
+activate_push_guard
 
 FAST=0
 [[ "${1:-}" == "--fast" ]] && FAST=1

@@ -264,7 +264,9 @@ judges. It writes no feature code itself for anything bigger than a one-liner.
 ## Local setup (one-time)
 
 Activate the Git pre-push stamp guard in each clone (this setting is per-clone
-and covers its linked worktrees):
+and covers its linked worktrees; `make check` also activates it when unset).
+Setting `core.hooksPath` bypasses every hook in `.git/hooks/`: back up
+or move any existing personal hooks into `scripts/git-hooks/` first.
 
 ```
 git config core.hooksPath scripts/git-hooks
