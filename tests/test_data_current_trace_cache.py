@@ -956,9 +956,13 @@ def bypass_unparseable_meta(tr):
 def bypass_truncated_file_under_meta(tr):
     """Retract the committed watermark while retaining complete block bytes.
 
-    The reader and coverage layer can still load the surviving prefix. Cached
-    blocks above the new watermark must disappear, and the answer must match a
-    fresh uncached server rather than include the stale suffix."""
+    The reader can still load the surviving prefix. A separate info request
+    refreshes coverage after the watermark change: cov_scan_file resets its
+    entry on a smaller block count, clearing `present`, so that refresh drops
+    the entry and the next request rebuilds it. The measured request still
+    spans both blocks, making a retained stale suffix visible. Cached blocks
+    above the new watermark must disappear, and the answer must match a fresh
+    uncached server rather than include that suffix."""
     trace_dir = generate_traces(busy_scenario(span_s=12, pids=3, per_pid=2500))
     tmp = tempfile.mkdtemp(prefix="pgwt_cc_err_")
     try:
@@ -977,6 +981,7 @@ def bypass_truncated_file_under_meta(tr):
             n_before = count_of(before, "total")
             pre = read_curcache(err)
             write_meta(trace_dir, committed_after)
+            srv.query("info")  # complete the coverage reset before measuring
             after = srv.query("transitions", from_=w_from, to_=w_to)
             post = read_curcache(err)
         print("    committed blocks %d -> %d; events %d -> %s"
@@ -1007,6 +1012,9 @@ def bypass_truncated_file_under_meta(tr):
         with ServerHarness(trace_dir,
                            env={"PGWT_CURRENT_TRACE_CACHE": "0"}) as srv:
             ctl = srv.query("transitions", from_=w_from, to_=w_to)
+        tr.check("unavailable" not in ctl and "error" not in ctl and
+                 count_of(ctl, "total") > 0,
+                 "the fresh uncached lower-watermark read is nonempty")
         tr.check_eq(canonical_body(after), canonical_body(ctl),
                     "the lower-watermark read matches a fresh uncached read exactly")
     finally:
