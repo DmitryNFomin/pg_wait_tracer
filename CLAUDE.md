@@ -196,6 +196,22 @@ judges. It writes no feature code itself for anything bigger than a one-liner.
   tree, where a shared-file break goes red. Required approving reviews is 0:
   a push after READY would merge unreviewed. The contract's no-push-after-READY
   rule is now load-bearing.
+- **Two evidence guards a reviewer runs before declaring READY** (added after
+  two silent failures: a rebase that dropped `tests/Makefile`'s
+  `test_exec_index` command line with the target still listed, and a
+  `box-check` log carrying no commit id, so "passed" could be true of a tree
+  that no longer exists):
+  - `scripts/check-test-registration.sh` — fails if any entry present in
+    `tests/unit_tests.list` or `tests/Makefile`'s `TESTS` list at the
+    branch's merge-base is missing from the current tree (append-only
+    invariant; a rebase may add entries, never lose one). Names the missing
+    entry. Mac-side, seconds, no box. Self-tests:
+    `tests/test_check_test_registration.sh`.
+  - `scripts/box-check.sh` now writes `commit=<git rev-parse HEAD>
+    tree-hash=<scripts/tree-hash.sh>` into the log header, computed
+    immediately before the rsync that syncs that exact tree to the box —
+    match those two values against the PR head before trusting a
+    `box-check` log.
 - **Adviser** (owner rules 2026-09-27 and 2026-09-29): consult BOTH by default:
   codex via `codex exec` is primary; Fable via `.claude/agents/adviser.md`
   is the standing second.
