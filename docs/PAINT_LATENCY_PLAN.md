@@ -71,9 +71,34 @@ converged on independently.
    and is measured against it. A phase that cannot be measured cannot be claimed.
 3. **Fall back, never guess.** If a block has no aggregate, or an incompatible
    version, the request recomputes from raw. Absence is never an answer.
-4. **Boundary blocks decode.** Only *complete* blocks inside the window merge;
-   partial blocks at either edge are decoded. Half-open `[from, to)` throughout
-   (see #316).
+4. **Boundary blocks decode, and selection is keyed, not uniformly half-open.**
+   Only *complete* blocks inside the window merge; partial blocks at either edge
+   are decoded.
+
+   **Corrected 2026-10-09** — this rule previously read "half-open `[from, to)`
+   throughout (see #316)" and that was WRONG. It conflated two different keys and
+   cost a wiring round: half-opening the loader zeroed `test_data_aas` and
+   `test_data_categories` ("Total AAS got 0, expected 4.0"). The correct rule:
+
+   - **Time is half-open.** An event contributes its interval **clipped** to
+     `[from, to)` (`event_window_ns`, `src/compute.c:51`).
+   - **Records are selected by their key.** Trace events are selected by their
+     **END** timestamp, **inclusive at both ends** (`src/server.c:2848-2850`),
+     because an event ending exactly at `to` lies wholly inside the window.
+     Summary seconds are selected by their **START**, so a second beginning at
+     `to` is out — that is what #316 actually fixed.
+   - These are the **same rule read from opposite ends of an interval**, not a
+     contradiction. Selection and contribution are separate steps.
+   - **Every aggregate reproduces the loader's selection AND its clip,
+     bit-exact.** Reconcile the aggregate to the loader, never the loader to the
+     aggregate: the loader feeds every detail command, so changing it under a
+     performance banner would alter every command's answer — the #315 pattern.
+
+   Known consequence, filed as **#328** and deliberately NOT fixed inside any
+   performance phase: a record at exactly `from` is selected by both adjacent
+   windows, contributing 0 ns to the later one but **count 1**, so count-based
+   outputs can duplicate one record at a shared boundary. `concurrency` already
+   guards this with `end_ns > from_ns`.
 5. **Version is the contract.** A version records which rule the precomputed
    numbers were written under. Never ship a version whose stated contract is not
    yet true (the #315 lesson).
@@ -202,7 +227,8 @@ served by:
 |---|---|
 | Phase 1 | `transitions`, `matrix` |
 | Phase 2 | `heatmap` (Histogram), filtered `top_events` (Events) |
-| Phase 3 | `waterfall`, `executions`, `variants`, `exec_scatter` |
+| Phase 3 | `waterfall`, `executions`, `exec_scatter` (see 3b for `variants`) |
+| Phase 3b | `variants` — needs a per-execution STEP-SEQUENCE index, not boundaries |
 | Phase 4 | `concurrency` |
 
 What may still flex, per phase, without leaving a tab behind:
@@ -212,8 +238,27 @@ What may still flex, per phase, without leaving a tab behind:
 - **Phase 2:** per-event totals before per-class totals. Histogram served either
   way.
 - **Phase 3:** completed executions are indexed; an execution open at a window
-  edge may fall back to raw rather than be guessed. All four tabs served, because
-  the common case is indexed.
+  edge may fall back to raw rather than be guessed. `waterfall`, `executions` and
+  `exec_scatter` served.
+- **Phase 3b:** `variants`. **Correction made 2026-10-09 by the Phase 3
+  implementer, and it is a correction to this plan, not a shortfall in the work:**
+  a boundary index cannot serve `variants`. `handle_variants` builds flow patterns
+  from the event SEQUENCE between markers (`pgwt_compute_variants` over raw
+  events), so execution boundaries alone cannot produce the answer. It needs a
+  separate per-execution step-sequence index with partial-sequence carry-over
+  across blocks. Phase 3 serves three of its four named commands fully; `variants`
+  is its own slice. Under the all-tabs requirement this slice is REQUIRED, not
+  optional.
+
+  Also from the same work, carried forward as wiring requirements rather than
+  defects: `n_events` / `n_workers` / `matches_event_filter` are window-clipped and
+  filter-dependent, so the index poisons them to -1 with `counts_indexed = 0`
+  rather than zeroing (a zero would read as a true count) — therefore a
+  class/event-filtered `executions` or `exec_scatter` still needs raw. And index
+  coverage is *containment*, not intersection: a window reaching past the last
+  committed block REFUSES rather than silently shortening itself, so the common
+  "ends at now" case always needs a raw tail decode against the index's public
+  `cover_to_ns`.
 - **Phase 4:** interval index serving BOTH peak and bursts, unfiltered only;
   filtered requests fall back to raw. The earlier "intervals without onset
   ordering" split is withdrawn as incoherent: the index stored sorted by
