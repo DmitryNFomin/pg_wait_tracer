@@ -1,0 +1,1866 @@
+  PASS: uncontended acquire runs the wrapped command and returns its exit code
+  PASS: wrapped command's own exit code is propagated (got 7, want 7)
+  PASS: two fresh-file racing starts are fully serialized (result: OK)
+  PASS: holder process is running before being killed
+  PASS: a waiter acquires cleanly after the holder is SIGKILLed (rc=0 out='acquired after SIGKILL')
+  PASS: 8 concurrent waiters x 15 iterations against a fabricated stale lock: 0/15 had an overlapping critical section (want 0)
+  PASS: unwritable lock directory: check-lock.sh exits non-zero (rc=2)
+  PASS: unwritable lock directory: the wrapped command never ran (fail closed)
+  PASS: unwritable lock directory: error says it is refusing to run unlocked (output: check-lock: cannot open/create lock file '/var/folders/tf/4mlc41nx3zsbx0v4x8wy4hl00000gn/T/tmp.VVi4lGN8bA/noperm/check.lock': [Errno 13] Permission denied: '/var/folders/tf/4mlc41nx3zsbx0v4x8wy4hl00000gn/T/tmp.VVi4lGN8bA/noperm/check.lock' -- refusing to run 'touch /var/folders/tf/4mlc41nx3zsbx0v4x8wy4hl00000gn/T/tmp.VVi4lGN8bA/case4.marker' unlocked. (humans only: PGWT_SKIP_CHECK_LOCK=1))
+  PASS: the interrupted waiter never ran its wrapped command (rc=130)
+  PASS: interrupted waiter's exit code reflects the signal (rc=130, want >=128)
+  PASS: interrupted waiter leaves no sidecar/claim debris next to the lock file (found 0)
+  PASS: the real holder still completed and released cleanly despite the unrelated interrupted waiter (rc=0)
+  PASS: a fresh acquire after the interrupted-waiter episode still works (rc=0 out='fresh acquire ok')
+  PASS: missing lock tool (python3): check-lock.sh exits non-zero (rc=2)
+  PASS: missing lock tool (python3): the wrapped command never ran (fail closed, not silently unlocked)
+  PASS: missing lock tool (python3): error names the missing tool (output: check-lock: missing required tool 'python3' -- refusing to run 'touch /var/folders/tf/4mlc41nx3zsbx0v4x8wy4hl00000gn/T/tmp.VVi4lGN8bA/case6.marker' unlocked. Fix PATH, or (humans only) set PGWT_SKIP_CHECK_LOCK=1 to bypass this lock deliberately.)
+  PASS: PGWT_SKIP_CHECK_LOCK=1 bypasses locking even when the lock dir is unwritable (escape hatch works)
+
+18/18 passed
+check-lock: waiting to run 'scripts/check.sh' -- this is expected with several agents on one Mac, not a hang. held by /Users/dmitryfomin/work/git/pg_wait_tracer (agent/paint-latency-plan) (pid 57844, dmitryfomin@mac.home) for 274s; re-checking every 5s...
+check-lock: waiting to run 'scripts/check.sh' -- this is expected with several agents on one Mac, not a hang. held by /Users/dmitryfomin/work/git/pg_wait_tracer (agent/paint-latency-plan) (pid 54694, dmitryfomin@mac.home) for 2s; re-checking every 5s...
+check-lock: waiting to run 'scripts/check.sh' -- this is expected with several agents on one Mac, not a hang. held by /Users/dmitryfomin/work/git/pg_wait_tracer (agent/paint-latency-plan) (pid 54694, dmitryfomin@mac.home) for 22s; re-checking every 5s...
+check-lock: waiting to run 'scripts/check.sh' -- this is expected with several agents on one Mac, not a hang. held by /Users/dmitryfomin/work/git/pg_wait_tracer (agent/paint-latency-plan) (pid 54694, dmitryfomin@mac.home) for 42s; re-checking every 5s...
+check-lock: waiting to run 'scripts/check.sh' -- this is expected with several agents on one Mac, not a hang. held by /Users/dmitryfomin/work/git/pg_wait_tracer (agent/paint-latency-plan) (pid 54694, dmitryfomin@mac.home) for 62s; re-checking every 5s...
+check-lock: waiting to run 'scripts/check.sh' -- this is expected with several agents on one Mac, not a hang. held by /Users/dmitryfomin/work/git/pg_wait_tracer (agent/paint-latency-plan) (pid 54694, dmitryfomin@mac.home) for 82s; re-checking every 5s...
+check-lock: waiting to run 'scripts/check.sh' -- this is expected with several agents on one Mac, not a hang. held by /Users/dmitryfomin/work/git/pg_wait_tracer (agent/paint-latency-plan) (pid 54694, dmitryfomin@mac.home) for 102s; re-checking every 5s...
+check-lock: waiting to run 'scripts/check.sh' -- this is expected with several agents on one Mac, not a hang. held by /Users/dmitryfomin/work/git/pg_wait_tracer (agent/paint-latency-plan) (pid 54694, dmitryfomin@mac.home) for 122s; re-checking every 5s...
+check-lock: waiting to run 'scripts/check.sh' -- this is expected with several agents on one Mac, not a hang. held by /Users/dmitryfomin/work/git/pg_wait_tracer (agent/paint-latency-plan) (pid 54694, dmitryfomin@mac.home) for 142s; re-checking every 5s...
+check-lock: waiting to run 'scripts/check.sh' -- this is expected with several agents on one Mac, not a hang. held by /Users/dmitryfomin/work/git/pg_wait_tracer (agent/paint-latency-plan) (pid 54694, dmitryfomin@mac.home) for 162s; re-checking every 5s...
+check-lock: waiting to run 'scripts/check.sh' -- this is expected with several agents on one Mac, not a hang. held by /Users/dmitryfomin/work/git/pg_wait_tracer (agent/paint-latency-plan) (pid 54694, dmitryfomin@mac.home) for 182s; re-checking every 5s...
+check-lock: waiting to run 'scripts/check.sh' -- this is expected with several agents on one Mac, not a hang. held by /Users/dmitryfomin/work/git/pg_wait_tracer (agent/paint-latency-plan) (pid 54694, dmitryfomin@mac.home) for 202s; re-checking every 5s...
+check-lock: waiting to run 'scripts/check.sh' -- this is expected with several agents on one Mac, not a hang. held by /Users/dmitryfomin/work/git/pg_wait_tracer (agent/paint-latency-plan) (pid 54694, dmitryfomin@mac.home) for 222s; re-checking every 5s...
+check-lock: waiting to run 'scripts/check.sh' -- this is expected with several agents on one Mac, not a hang. held by /Users/dmitryfomin/work/git/pg_wait_tracer (agent/paint-latency-plan) (pid 54694, dmitryfomin@mac.home) for 242s; re-checking every 5s...
+check-lock: waiting to run 'scripts/check.sh' -- this is expected with several agents on one Mac, not a hang. held by /Users/dmitryfomin/work/git/pg_wait_tracer (agent/paint-latency-plan) (pid 54694, dmitryfomin@mac.home) for 262s; re-checking every 5s...
+check-lock: waiting to run 'scripts/check.sh' -- this is expected with several agents on one Mac, not a hang. held by /Users/dmitryfomin/work/git/pg_wait_tracer (agent/paint-latency-plan) (pid 54694, dmitryfomin@mac.home) for 282s; re-checking every 5s...
+check-lock: waiting to run 'scripts/check.sh' -- this is expected with several agents on one Mac, not a hang. held by /Users/dmitryfomin/work/git/pg_wait_tracer (agent/paint-latency-plan) (pid 49331, dmitryfomin@mac.home) for 11s; re-checking every 5s...
+check-lock: waiting to run 'scripts/check.sh' -- this is expected with several agents on one Mac, not a hang. held by /Users/dmitryfomin/work/git/pg_wait_tracer (agent/paint-latency-plan) (pid 49331, dmitryfomin@mac.home) for 31s; re-checking every 5s...
+check-lock: waiting to run 'scripts/check.sh' -- this is expected with several agents on one Mac, not a hang. held by /Users/dmitryfomin/work/git/pg_wait_tracer (agent/paint-latency-plan) (pid 49331, dmitryfomin@mac.home) for 51s; re-checking every 5s...
+check-lock: waiting to run 'scripts/check.sh' -- this is expected with several agents on one Mac, not a hang. held by /Users/dmitryfomin/work/git/pg_wait_tracer (agent/paint-latency-plan) (pid 49331, dmitryfomin@mac.home) for 71s; re-checking every 5s...
+check-lock: waiting to run 'scripts/check.sh' -- this is expected with several agents on one Mac, not a hang. held by /Users/dmitryfomin/work/git/pg_wait_tracer (agent/paint-latency-plan) (pid 49331, dmitryfomin@mac.home) for 91s; re-checking every 5s...
+check-lock: waiting to run 'scripts/check.sh' -- this is expected with several agents on one Mac, not a hang. held by /Users/dmitryfomin/work/git/pg_wait_tracer (agent/paint-latency-plan) (pid 49331, dmitryfomin@mac.home) for 111s; re-checking every 5s...
+check-lock: waiting to run 'scripts/check.sh' -- this is expected with several agents on one Mac, not a hang. held by /Users/dmitryfomin/work/git/pg_wait_tracer (agent/paint-latency-plan) (pid 49331, dmitryfomin@mac.home) for 131s; re-checking every 5s...
+check-lock: waiting to run 'scripts/check.sh' -- this is expected with several agents on one Mac, not a hang. held by /Users/dmitryfomin/work/git/pg_wait_tracer (agent/paint-latency-plan) (pid 49331, dmitryfomin@mac.home) for 151s; re-checking every 5s...
+check-lock: waiting to run 'scripts/check.sh' -- this is expected with several agents on one Mac, not a hang. held by /Users/dmitryfomin/work/git/pg_wait_tracer (agent/paint-latency-plan) (pid 49331, dmitryfomin@mac.home) for 171s; re-checking every 5s...
+check-lock: waiting to run 'scripts/check.sh' -- this is expected with several agents on one Mac, not a hang. held by /Users/dmitryfomin/work/git/pg_wait_tracer (agent/paint-latency-plan) (pid 49331, dmitryfomin@mac.home) for 191s; re-checking every 5s...
+check-lock: waiting to run 'scripts/check.sh' -- this is expected with several agents on one Mac, not a hang. held by /Users/dmitryfomin/work/git/pg_wait_tracer (agent/paint-latency-plan) (pid 49331, dmitryfomin@mac.home) for 211s; re-checking every 5s...
+check-lock: waiting to run 'scripts/check.sh' -- this is expected with several agents on one Mac, not a hang. held by /Users/dmitryfomin/work/git/pg_wait_tracer (agent/paint-latency-plan) (pid 49331, dmitryfomin@mac.home) for 231s; re-checking every 5s...
+check-lock: waiting to run 'scripts/check.sh' -- this is expected with several agents on one Mac, not a hang. held by /Users/dmitryfomin/work/git/pg_wait_tracer (agent/paint-latency-plan) (pid 49331, dmitryfomin@mac.home) for 251s; re-checking every 5s...
+check-lock: waiting to run 'scripts/check.sh' -- this is expected with several agents on one Mac, not a hang. held by /Users/dmitryfomin/work/git/pg_wait_tracer (agent/paint-latency-plan) (pid 49331, dmitryfomin@mac.home) for 271s; re-checking every 5s...
+
+[1m=== snapshot-history guard self-test ===[0m
+  PASS: clean tree, nothing changed (exit 0)
+  PASS: staged PNG change with no history entry is refused (exit 1)
+  PASS: same PNG change, now with a history entry, passes (exit 0)
+  PASS: non-PNG change under tests/web_snapshots never requires history (exit 0)
+  PASS: a newly added PNG with no history entry is refused (exit 1)
+  PASS: a committed regen+history pair on a feature branch passes (exit 0)
+  PASS: a 2nd commit's undocumented PNG is refused even though an earlier commit in the range has a history entry (exit 1)
+  PASS: failure names the actually-unaccounted PNG (table_events.png)
+  PASS: failure does not blame the already-documented commit's PNG (table_queries.png)
+  PASS: amending the same commit to add the missing history entry fixes it (exit 0)
+  PASS: no resolvable base fails closed (exit 1)
+  PASS: no-base failure says so explicitly ("no comparable base")
+
+12/12 passed
+
+[1m=== snapshot-history guard (this branch vs origin/master) ===[0m
+OK: snapshot-history guard (base f6da230c690b8cf6505de742823cac86f3700549)
+
+[1m=== web builder unit tests (node) ===[0m
+✔ class mode: one series per wait class, x=tMs y=aas (4.492459ms)
+✔ offcpu key absent: defaults to a real zero-valued series, never dropped (0.645833ms)
+✔ offcpu explicit zero and a tier switch mid-window both conserve the stack total (0.12725ms)
+✔ y max policy: maxAas floor, capped CPU influence (P7) (0.177083ms)
+✔ off-scale CPU reference becomes the "N CPUs ↑" graphic (P7) (0.134958ms)
+✔ ECharts CPU reference decision uses the hysteresis-applied axis top (0.104083ms)
+✔ cpu markLine rides the annotation series iff numCpus > 0 (0.089583ms)
+✔ event breakdown mode: one series per event with identity-keyed colors (0.3405ms)
+✔ drill surface: seriesIds + breakdown + triggerLineEvent (P3 wire 1) (0.117584ms)
+✔ empty data: no crash, hasData false (0.081708ms)
+✔ x axis falls back to first..last bucket timestamp (ms) without a window (0.054917ms)
+✔ aas values rounded to 4 decimals (0.057958ms)
+✔ escalation + fidelity marks: every mark x within the axis range (0.173458ms)
+✔ option root disables animation (U0: no replayed draw-in on refresh) (0.036833ms)
+✔ event mode: stack order + colors stable under permuted server rank (0.132708ms)
+✔ event mode: stacked totals invariant under input order permutation (0.098083ms)
+✔ annotation series: dataless, silent, excluded from legend + seriesNames (0.078291ms)
+✔ same event keeps the same color across builds and modes (0.067125ms)
+✔ eventColor: deterministic tint that keeps the class hue (0.192833ms)
+✔ x axis is type time, pinned to the window (First-catch regression) (0.05575ms)
+✔ axis label + tooltip formatters render UTC regardless of host TZ (5.820125ms)
+✔ inside dataZoom: gesture config + window crop pinned to win (0.173375ms)
+✔ opts.axis widens the pinned axis; window still crops; marks stay put (0.338375ms)
+✔ axis extent is the union of opts.axis and win (invariant) (0.089667ms)
+✔ tooltip totals visible series and orders top-of-stack first (0.058166ms)
+✔ tooltip explains the CPU split only when the waiting-for-a-core band is present (0.693542ms)
+✔ option root pins useUTC (tick positions TZ-stable) (0.039417ms)
+✔ baseline shift derives B without changing resolution or bucket count (2.109ms)
+✔ zoomAt pins the anchor timestamp exactly (power-of-two coordinates) (0.3315ms)
+✔ zoomAt pins the anchor at realistic 2026 ns epochs (ulp tolerance) (0.1735ms)
+✔ zoomAt in then out at the same cursor round-trips the window (0.109292ms)
+✔ zoomAt clamps span at minSpanNs with the anchor still pinned (0.304583ms)
+✔ zoomAt clamps span at maxSpanNs (0.153041ms)
+✔ zoomAt rejects nonsense factors without touching state (0.165083ms)
+✔ panByFrac shifts by the exact fraction of span (and inverts) (0.089708ms)
+✔ setWindow sorts unordered input (0.071916ms)
+✔ setWindow expands a degenerate range to minSpanNs around the point (0.104334ms)
+✔ followTick advances the window keeping span (right edge = now) (0.076709ms)
+✔ followTick ignores out-of-order (older/equal) now (0.045292ms)
+✔ followTick is a strict no-op when detached (tick never re-anchors) (0.050709ms)
+✔ attachFollow re-anchors a stale window to NOW, preserving span (0.038584ms)
+✔ FULL follow/detached transition table (0.129709ms)
+✔ quantize picks the largest power-of-2 bucket <= span/target (0.088792ms)
+✔ quantize: 3x skirt, outward alignment, exact at 2026 epochs (0.462416ms)
+✔ quantize is phase-stable: same window => same strip key (0.052625ms)
+✔ quantize: a pan by exactly resNs shifts the strip by exactly resNs (0.041958ms)
+✔ quantize ladder: zooming in 2x steps resNs down one power (0.041417ms)
+✔ quantize clamps resNs at MIN_RES_NS (the float64 ulp floor) (0.030541ms)
+✔ onChange delivers snapshots with causes, in order (0.065917ms)
+✔ onChange is silent on no-ops and after unsubscribe (0.047833ms)
+✔ quantizeCellHeight rounds a fractional height UP to the next integer (1.776584ms)
+✔ quantizeCellHeight leaves an already-integer height unchanged (idempotent) (0.163041ms)
+✔ quantizeCellHeight never rounds DOWN (would clip content under overflow:hidden) (0.117042ms)
+✔ summing quantized heights is always an integer, however many cells precede a given one (0.077125ms)
+✔ delta default ranks by absolute DB-time change (27.205958ms)
+✔ delta sort toggles rank by A/B ratio or by A (1.131291ms)
+✔ noise floor collapses exact count into the honest change-floor row (0.287666ms)
+✔ overview delta ranking excludes DB Time aggregate and Idle accounting row (0.484ms)
+✔ noise floor uses investigation window A even when baseline B is much busier (0.269667ms)
+✔ one-window entities are new/gone and never receive infinity ratios (0.54075ms)
+✔ retention-missing baseline emits no fabricated new entities (0.357708ms)
+✔ query IDs join as strings without uint64 coercion (1.976292ms)
+✔ line series maps per-bucket peak max; area + symbol-none (1.6995ms)
+✔ burst marker placed in the containing bucket (0.08525ms)
+✔ burst inside the final bucket -> marker at the last bucket, not bucket 0 (0.065375ms)
+✔ option root disables animation (U0: no replayed draw-in on refresh) (0.053458ms)
+✔ no bursts -> markPoint omitted (0.054125ms)
+✔ empty peaks -> hasData false, empty tables/topPeaks (0.0905ms)
+✔ topPeaks: only max>1, sorted desc, capped at 10 (0.081208ms)
+✔ tables HTML: top-peaks + burst sections, PID truncation at 8 (6.144ms)
+✔ rows carry the ±5-bucket zoom window as data-from/data-to (1.548ms)
+✔ rows are inert (no zoom attributes) when bucket_ns is missing (2.601791ms)
+✔ tables HTML: no bursts -> explicit "No burst events" line (0.205417ms)
+✔ y-axis title uses nameLocation middle with a gap that fits inside grid.left (0.145083ms)
+✔ captureFromNs: buckets before it are null in the series, not 0 (0.635959ms)
+✔ captureFromNs omitted or before the window start -> no exclusion, no markArea (0.056375ms)
+✔ captureFromNs: markArea covers exactly the not-captured buckets and is labeled (0.088958ms)
+✔ captureFromNs: tooltip reads "Not yet captured" for a pre-capture bucket, never a peak value (0.078375ms)
+✔ captureFromNs: whole window predates capture -> every bucket null, still hasData (no crash) (0.082209ms)
+✔ captureFromNs: a pre-capture bucket is excluded from topPeaks even if its raw max > 1 (0.045375ms)
+✔ captureFromNs: a burst in the not-captured prefix is dropped from markPoint and the bursts table; a captured one survives (0.053125ms)
+✔ captureFromNs: every burst pre-capture -> markPoint omitted entirely, bursts table empty (0.035375ms)
+✔ #276 note: the bucket maxima shown are declared against the onsets detected (15.4445ms)
+✔ #276 note: a single bucket reads as a sentence, not "1 buckets" (1.215583ms)
+✔ #276 note: absent, zero, or complete -> no note, panel renders as before (0.490583ms)
+✔ #276 note: counts the bursts actually shown, after the not-captured filter (0.118792ms)
+✔ #276 badge: a sampled PID list is marked on the row; a complete one is not (0.151709ms)
+✔ #276 badge: missing or malformed fields render exactly as before (0.043709ms)
+✔ no sort: keeps server order; every row clickable (4.211959ms)
+✔ descending sort by count puts largest first + shows ▼ arrow (0.564708ms)
+✔ ascending sort flips order + shows ▲ arrow (0.168417ms)
+✔ drill intent targets event_id with the event name as label (0.263208ms)
+✔ empty data -> hasRows false, zero rows (0.152334ms)
+✔ single row -> stable (0.180792ms)
+✔ B-only compare failure falls back to the ordinary A events model (0.3975ms)
+✔ idle event with pct=null renders "—" for %DB, not a bar (0.116667ms)
+✔ non-idle event with numeric pct still renders a pct-bar (0.076ms)
+✔ exact window: no badge, no percentile note, no truncation row (0.150625ms)
+✔ legacy response without a fidelity field defaults to exact: no badge (0.059958ms)
+✔ sampled window: badge model reuses the AAS chip colors + label (0.351916ms)
+✔ mixed window: badge uses the mixed chip colors (0.12825ms)
+✔ mixed window with percentiles: qualitative basis note (no counts today) (0.346416ms)
+✔ sampled window, all percentiles null: note explains the em-dashes (0.17875ms)
+✔ percentile basis renders exact "N of M" ONLY when every row carries counts (0.175042ms)
+✔ server-flagged truncation reaches the events model (0.171833ms)
+✔ #103 overflow percentiles reach the assembled model as ">=" bounds (0.341834ms)
+✔ percentile cells in the assembled model carry the histogram pivot intent (0.186167ms)
+✔ scatter pins time x axis, log y axis, UTC, large mode and raw ns (1.028208ms)
+✔ null and zero durations are excluded from log axis with an exact visible note (32.117208ms)
+✔ downsample line uses only server kept/total counts (0.771792ms)
+✔ tooltip uses raw UTC time and execution identity (2.167875ms)
+✔ point intent preserves decimal start and carries pid/start/end to waterfall (0.374875ms)
+✔ meaningful y constraint is measured in log space (0.13225ms)
+✔ all in-progress payload is honest empty with exclusion note (0.179417ms)
+✔ time axis pads both edges so first/last symbols are not half-clipped (0.151417ms)
+✔ fidelityOf: defaults to exact; passes through known tokens (0.728666ms)
+✔ isUnavailable: only true for the structured marker (0.05925ms)
+✔ fidelityLabel: human strings per token (0.08275ms)
+✔ compare fidelity mismatch is flagged, never blocked or silent (0.075125ms)
+✔ compare baseline before retention is a quiet no-data note (0.050625ms)
+✔ compare baseline command failure is a quiet unavailable note (0.040542ms)
+✔ shading: exact window → no bands, no markArea, no legend (0.60425ms)
+✔ shading: sampled window → one full-extent sampled band over the window (0.150583ms)
+✔ shading: mixed window WITHOUT sub-ranges → whole window marked mixed (0.104333ms)
+✔ shading: mixed window WITH sub-ranges → bands only over sampled parts (0.196542ms)
+✔ bandsToMarkArea: null for empty; dashed border per kind (0.062167ms)
+✔ escalation annotation: null when not escalated (1.051875ms)
+✔ escalation annotation: manual vs anomaly use distinct colors + labels (0.179708ms)
+✔ escalation annotation: reason "none" (full-mode sentinel) reads "Full fidelity" (0.100125ms)
+✔ escalation annotation: manual/anomaly labels are unchanged by the "none" fix (0.0995ms)
+✔ escalation annotation: band spans [observed start, live edge], not the window (0.072458ms)
+✔ escalation annotation: observed start clamps to the view window (0.118917ms)
+✔ escalation annotation: unknown start -> markLine only, NO fabricated band (0.179208ms)
+✔ escalation annotation: no axisMax -> live edge stays at win.to (no clamp) (0.129083ms)
+✔ escalation annotation: axisMax >= win.to (U2a pinned axis) leaves the edge at win.to (0.072209ms)
+✔ unavailable panel: offers escalate when supported, with the server message (0.277667ms)
+✔ unavailable panel consumes the server refusal hint when supplied (0.081833ms)
+✔ unavailable panel: hides escalate when escalation unsupported, explains why (0.126292ms)
+✔ metrics panel: derives rows incl. tier, rates, drops (warn), overhead, budget (0.785791ms)
+✔ metrics panel: missing fields → safe zeros, no NaN (0.144041ms)
+✔ escalate control: sampled tier → "Escalate 60s", can escalate within budget (0.127625ms)
+✔ escalate control: escalated tier → shows seconds left + deescalate (0.079ms)
+✔ escalate control: zero budget → cannot escalate (0.054667ms)
+✔ escalate control: zero budget = deny-all → cannot escalate (ESC-6) (0.059834ms)
+✔ escalate control: unlimited budget → can escalate, ∞ budget (ESC-6) (0.060834ms)
+✔ escalate control: unsupported daemon → not supported (hide control) (0.057041ms)
+✔ escalate result: ok grant, denial with budget, deescalate (0.365958ms)
+✔ format helpers (0.094ms)
+✔ estimateOverhead: conservative, labeled, scales with trap rate (0.056291ms)
+✔ nsToDatetimeLocalUTC renders the UTC wall time regardless of host TZ (2.921ms)
+✔ datetimeLocalUTCToNs parses the input as UTC (a UTC+3 browser gets no 3h shift) (0.090875ms)
+✔ round-trip ns -> input string -> ns is exact at second granularity (0.177834ms)
+✔ datetimeLocalUTCToNs rejects garbage (0.1405ms)
+✔ fmtTime renders HH:MM:SS in UTC (0.45125ms)
+✔ versionSkew returns null when client and server match exactly (0.204459ms)
+✔ versionSkew warns (safe) when versions differ but protocol matches (0.11725ms)
+✔ versionSkew errors on a protocol mismatch (0.042709ms)
+✔ versionSkew warns when the server predates the handshake (null fields) (0.046583ms)
+✔ esc escapes the five HTML-significant characters, quotes included (0.176625ms)
+✔ esc output cannot break out of a title attribute (0.579375ms)
+✔ classFilterName strips "(running)" and the legacy "*" down to the bare class (0.346125ms)
+✔ classFilterName returns null for "CPU (waiting for a core)" — never drillable (0.088333ms)
+✔ classFilterName(null/undefined) is null, never a crash (0.039958ms)
+✔ no isolateId returns every entry, unchanged order (3.117167ms)
+✔ a matching isolateId returns ONLY that one entry (0.498042ms)
+✔ a non-matching isolateId returns an EMPTY array, never the full set (0.103208ms)
+✔ heatmap option: category axes from times/labels, cells carry log1p + raw (5.159167ms)
+✔ heatmap visualMap maps log1p(count) through the single-hue violet ramp (0.247708ms)
+✔ heatmap sticky max: opts.maxCount overrides the response max (P8) (0.178333ms)
+✔ sticky max carries only across one forward live tick at the same span (0.245417ms)
+✔ heatmap tooltip + visualMap labels stay in RAW counts, never log values (12.933208ms)
+✔ option root disables animation (U0: no replayed draw-in on refresh) (0.095958ms)
+✔ heatmap empty / absent -> hasData false, no option (0.056875ms)
+✔ heatmap max_count defaults to 1 when missing (no NaN max) (0.061833ms)
+✔ selector model: distinct classes in first-seen order, events labeled name+count (0.158041ms)
+✔ selector model: caps the event list at 50 (0.133375ms)
+✔ selector model: empty input -> empty model, no crash (0.055542ms)
+✔ visualMap legend is piecewise with numeric bucket labels (#105) (0.067625ms)
+✔ captureFromNs: buckets before it are counted and get a labeled markArea (0.126792ms)
+✔ captureFromNs before every bucket -> no exclusion, no annotation series (0.043167ms)
+✔ matrix axes are source x / target y and cell carries log + raw + target id (23.293209ms)
+✔ top-N is incident-link ranked, deterministic, capped at 20 with honest N-more note (0.732417ms)
+✔ visualMap is piecewise over log1p(count) and uses one hue ramp (2.026708ms)
+✔ event identity appears only on axis-label text colors (1.4985ms)
+✔ tooltip direction, count and duration are raw analyst values (0.352417ms)
+✔ duplicate source-target links aggregate both count and duration (0.220458ms)
+✔ notes account for hidden transition volume and the server link cap (0.288875ms)
+✔ zero-link catalog nodes do not inflate hidden linked-event count (0.343791ms)
+✔ CPU target cells drill through the CPU class instead of going dead (0.66775ms)
+✔ empty matrix is explicit and animation is disabled for data (1.633875ms)
+✔ row/column order is stable across ticks even when scores reshuffle (#104) (0.190375ms)
+✔ a newly-entering event is appended, not inserted, holding old positions (0.085125ms)
+✔ legend bucket max is quantized to a fixed log grid and stable for a modest range change (0.0825ms)
+✔ axis names are positioned clear of tick labels, not at the clipped default end (0.061083ms)
+✔ no sort: server order; Query ID/Text/Wait Profile columns; all clickable (3.396083ms)
+✔ events present -> event stacked bar; only classes -> class stacked bar (0.231375ms)
+✔ long query text gets a qt-hover cell carrying the full text (0.07675ms)
+✔ empty query text renders an em-dash placeholder (0.057542ms)
+✔ descending sort by total_ms (0.116125ms)
+✔ drill intent targets query_id (-> events); label is text prefix (0.062625ms)
+✔ dedicated Waterfall cell emits query-executions without changing row drill (0.081834ms)
+✔ empty + single-row edge cases (0.068042ms)
+✔ B-only compare failure falls back to the ordinary A queries model (0.090417ms)
+✔ runConcurrentRefresh starts the tab fetch before the AAS fetch settles (2.451333ms)
+✔ runConcurrentRefresh waits for both sides before resolving (0.137167ms)
+✔ runConcurrentRefresh does not swallow a rejection (1.338583ms)
+✔ createRenderTracker: begin then settle is the normal one-shot cycle (1.542458ms)
+✔ createRenderTracker: repeated begin() before settle collapses to one unit (0.096292ms)
+✔ createRenderTracker: a stray settle with nothing pending is a no-op (0.06625ms)
+✔ createRenderTracker: settle -> begin -> settle is two independent cycles (0.045166ms)
+✔ createReadyGate: not ready until the loop is done AND nothing pending (0.083542ms)
+✔ createReadyGate: markLoopDone with nothing pending is ready immediately (0.03875ms)
+✔ createReadyGate: order does not matter -- resolvePending before markLoopDone (0.052667ms)
+✔ createReadyGate: ready never reverts once true, even if pending rises again (0.042125ms)
+✔ createReadyGate: multiple charts must ALL settle before ready (0.047959ms)
+✔ createReadyGate: a render that throws must still settle, or the gate hangs forever (0.444ms)
+✔ maps a left-to-right drag to sorted {from,to} (1.38075ms)
+✔ drag direction does not matter (always sorted) (0.076708ms)
+✔ degenerate (zero-width) range returns null (0.057208ms)
+✔ honors offset (non-zero axis origin) (0.048792ms)
+✔ null/NaN conversion -> null (no garbage range) (0.060958ms)
+✔ rounds to integer nanoseconds (0.0575ms)
+✔ 2D box maps and sorts time plus inverted pixel-y values (0.107833ms)
+✔ 2D box rejects degenerate or invalid conversion (0.045792ms)
+✔ horizontal-only box retains a valid time range with degenerate y (0.060334ms)
+✔ padded host keeps band host-local and conversion canvas-local (0.102417ms)
+✔ no sort: server order; PID/Backend/Top Wait columns; all clickable (6.614084ms)
+✔ descending sort by db_time_ms (0.355417ms)
+✔ ascending sort by pid (0.184166ms)
+✔ drill intent targets pid (-> timeline) with "PID n" label (0.197417ms)
+✔ missing user/db render empty, not "undefined" (0.172834ms)
+✔ empty + single-row edge cases (0.144208ms)
+✔ exact window: no badge, no truncation (noise-free common case) (0.224625ms)
+✔ sampled window: the pane badge model is present (0.202083ms)
+✔ server-flagged truncation reaches the sessions model (0.163333ms)
+✔ initDefault: last 15 min ending at server now (2.971959ms)
+✔ anchorLive always ends at NOW (never stale) (0.2065ms)
+✔ zoomTo records history; zoomOut pops it (1.379333ms)
+✔ zoomOut with empty history widens 2x clamped to trace bounds (0.139541ms)
+✔ compare state is one negative offset scalar and rejects future baselines (0.28775ms)
+✔ drill/drillUp round-trips filters and remembers the source view (0.280334ms)
+✔ clear resets everything (0.105375ms)
+✔ request supersedes the pending request on the same channel (1.091375ms)
+✔ different channels do not supersede each other (0.241792ms)
+✔ cancel rejects the pending request and drops its late response (0.2465ms)
+✔ rejectAll clears everything (disconnect) (0.279375ms)
+✔ ensure dedups in-flight fetches by strip key (1.732833ms)
+✔ ensure on an exact-cached strip is a no-fetch short-circuit (0.090708ms)
+✔ constructor requires fetchStrip (0.159ms)
+✔ get serves the coarser overlapping strip while the refine is in flight (0.109917ms)
+✔ small compare offset cannot reuse overlapping A skirt as baseline B (0.126708ms)
+✔ get returns null when nothing overlaps the window (0.058625ms)
+✔ best-pick prefers window coverage, then closest resolution (finer on tie) (0.179209ms)
+✔ LRU evicts the oldest strip beyond maxStrips (0.320833ms)
+✔ LRU: a get() touch protects a strip from eviction (0.21875ms)
+✔ invalidate discards all strips and drops in-flight results (0.398416ms)
+✔ onData flags latest-wins; superseded arrivals are kept, not latest (0.309541ms)
+✔ onData unsubscribe stops delivery (0.100292ms)
+✔ a failed fetch resolves { ok:false, error }, caches nothing, and can retry (0.116958ms)
+✔ a synchronously-throwing fetchStrip resolves { ok:false, error } (0.062542ms)
+✔ overview: rows keep server order (no sort) + clickable indent-1 (1.417291ms)
+✔ overview onClick: indent-1 -> class drill intent, strips asterisk (0.653208ms)
+✔ overview onClick: "CPU (running)" strips to class=CPU; "CPU (waiting for a core)" never drills (0.053542ms)
+✔ overview: "CPU (waiting for a core)" row is indent-1 but NOT clickable (0.090708ms)
+✔ events: descending sort by count (0.264417ms)
+✔ events: ascending sort flips order (0.098375ms)
+✔ events onClick: event_id drill intent (0.0515ms)
+✔ buildSummary: exact metric set + values (0.384042ms)
+✔ buildSummary: empty data -> empty metrics (0.266833ms)
+✔ bar segments: below-threshold and other are SEPARATE labeled facts (1.091375ms)
+✔ bar segments: zero-ms entries are absent, not "below threshold" (0.52725ms)
+✔ bar widths: floor applied, deficit paid by large segments, sum stays 100 (2.900625ms)
+✔ bar widths: shares summing past 100% are scaled, titles keep true pct (0.099ms)
+✔ bar widths: degenerate many-tiny case falls back to equal widths (0.117209ms)
+✔ stackedBar HTML: pre-normalized flex widths, min-width:0, 1px separators (0.192167ms)
+✔ eventStackedBar HTML: identity tints + separators + honest remainders (0.120458ms)
+✔ bars: empty/zero-total inputs render nothing (unchanged contract) (0.048ms)
+✔ buildTruncationRow: nothing without an explicit server truncated flag (0.154ms)
+✔ buildTruncationRow: count only when derivable, never invented (0.107375ms)
+✔ exact event row: P50/P95/P99 cells are drillable histogram pivots (0.507ms)
+✔ sampled-only row (null percentiles): cells render — and are NOT drillable (0.887292ms)
+✔ CPU* (event_id 0) percentile cells are not drillable (not a wait event) (0.098042ms)
+✔ #103 overflow percentile renders ">=", never an exact-looking number (0.179709ms)
+✔ #103 a normal-bucket percentile is unchanged (no ">=", same tooltip) (0.063041ms)
+✔ #103 rows with no overflow flags at all behave exactly as before (0.041416ms)
+✔ #103 an overflow cell keeps its drill affordance and pivot intent (0.069375ms)
+✔ #103 a NON-drillable overflow cell (CPU*) still discloses the bound (0.047291ms)
+✔ #103 a null percentile ignores an overflow flag and stays "—" (0.033083ms)
+✔ #103 sort treats ">=16.4ms" as 16.4ms (the shown bound), not +Infinity (0.097667ms)
+✔ events %DB bar uses the event identity tint, not the flat class hue (0.031833ms)
+✔ overview %DB bars: class rows keep class hue, event rows take the tint (0.041708ms)
+✔ bar data: [start=s, end=s+d, pidIdx, name, classIdx, query, dur, rawStart] (17.165917ms)
+✔ start uses s (not s+d) — Bug 1 regression (0.574417ms)
+✔ y categories are "PID <n>" in pids order; x spans the view window (0.533583ms)
+✔ chartHeight scales with pid count; truncation surfaced (0.153375ms)
+✔ empty events -> hasData false, no option (0.070333ms)
+✔ pre-window start: drawn geometry clamped, raw start kept for the tooltip (1.009417ms)
+✔ option root disables animation (U0: no replayed draw-in on refresh) (0.601959ms)
+✔ renderItem draws a class-colored rect at the bar start, 60% band height (0.287959ms)
+✔ renderItem: unknown classIdx falls back to grey, width >= 1 (0.171042ms)
+✔ tooltip escapes query text (HTML injection from SQL) (0.219417ms)
+✔ tooltip escapes the event name too, and omits empty/zero query (0.068792ms)
+✔ plot width = host width minus the grid margins; default when unmeasured (0.2365ms)
+✔ threshold boundary: exactly N spans/px stays per-span, N+1 over a block aggregates (1.265708ms)
+✔ one over-dense pixel does not aggregate a legible row (0.959834ms)
+✔ 199 spans in 20 px aggregates (0.415292ms)
+✔ the dense-column guard implies the span floor at the current constants (0.067583ms)
+✔ a span that starts after the window is clipped, not folded into the last px (0.069041ms)
+✔ an inverted (end < start) bar is dropped, not painted at the left edge (0.135084ms)
+✔ a single column is never aggregated, however deep: identity beats density (0.428041ms)
+✔ waits clamped to the window edge do not fake density on a small chart (0.0915ms)
+✔ #121: a wait fully before the window is dropped, not drawn at the left edge (0.0565ms)
+✔ #121: a wait fully after the window is dropped too (0.050167ms)
+✔ #121: a wait straddling the window start is clamped with start<=end (0.103583ms)
+✔ #121: a wait fully inside the window is unchanged (0.086083ms)
+✔ #121: no drawn interval ever has start>end, across a mix of positions (0.105542ms)
+✔ density is per PAINTED pixel: a burst in a sixth of the window aggregates (0.349708ms)
+✔ density is the BUSIEST ROW, not the total: 50 rows x 8 bars stays per-span (16.275375ms)
+✔ aggregation: one stack per occupied column, class shares from wait time (0.151708ms)
+✔ aggregation: a span covering many columns paints every column it covers (0.046917ms)
+✔ aggregation: a zero-duration span is present in its column counts (0.065834ms)
+✔ aggregation: an out-of-range class becomes Unknown, never an off-palette fill (0.037791ms)
+✔ aggregated fills come ONLY from the shared palette (no composited hue) (2.49575ms)
+✔ aggregated column stacks fill the band exactly (no gap, no overflow) (1.27925ms)
+✔ banner: one line stating truncation, density and what zooming restores (3.093625ms)
+✔ density banner reports the REAL per-pixel density of a burst (0.598041ms)
+✔ STABILITY: the same spans in a window shifted by whole columns translate (2.701833ms)
+✔ aggregated renderItem: stacked rect inside the 60% band, bottom-up (0.176375ms)
+✔ aggregated tooltip lists every class in the column, marking the hovered one (0.148334ms)
+✔ every segment of a column shares one complete breakdown, by reference (2.559459ms)
+✔ aggregated tooltip survives a segment with no breakdown (defensive) (0.051709ms)
+✔ aggregated option keeps the window axis, clipping and animation:false (0.336417ms)
+✔ sub-threshold builds are untouched: per-span renderItem and tooltip (0.065292ms)
+✔ aggregation needs a real window: no from/to means no aggregation (0.638875ms)
+✔ context: max edge count + name->node map (0.719333ms)
+✔ default threshold 20%: edges below 100 (=500*0.2) are hidden (15.884708ms)
+✔ option root disables animation (U0: no replayed draw-in on refresh) (0.149ms)
+✔ threshold 0%: all edges + nodes visible, sorted by total_ms desc (0.11ms)
+✔ node size scales 15..120 by sqrt(ms/maxMs); eventColor identity tint applied (0.137292ms)
+✔ cross-view identity: every node color equals eventColor(null, name) (0.111208ms)
+✔ nodes carry eventId + className for the dfg-event pivot (P3 wire 5) (0.113083ms)
+✔ posOverrides (user-dragged coords, P5) beat the grid layout (0.135625ms)
+✔ drag fallback preserves the node grab offset instead of snapping centre (0.937083ms)
+✔ self-loop link gets higher curveness (0.8) than cross edges (0.3) (0.148916ms)
+✔ threshold above every edge -> no visible nodes (0.118375ms)
+✔ variants HTML: exec + plan sections, percentages and step labels (0.301417ms)
+✔ variants HTML: empty / missing -> empty string (0.046458ms)
+✔ variants panel: idle — discoverable affordance, not blank and not the loading/ready text (0.089375ms)
+✔ variants panel: graph-with-pending-variants — declares loading, not empty and not complete (0.063333ms)
+✔ variants panel: graph-with-variants — ready state renders exactly like the synchronous path did (0.308917ms)
+✔ variants panel: graph-with-failed-variants — silent, matching the old optional-failure behaviour (0.04975ms)
+✔ p95TruncationMarker: truncated sample (p95_sample_n < exec_count) is marked (0.051ms)
+✔ p95TruncationMarker: complete sample (p95_sample_n >= exec_count) is not marked (0.032917ms)
+✔ p95TruncationMarker: field absent (older server) -> no marker, no crash (0.031958ms)
+✔ variants HTML: p95 truncation marker rendered inline, driven by the field not a hard-coded cap (0.11075ms)
+✔ isIdleTransitionNode: matches Client:ClientRead only — mirrors src pgwt_is_idle_event() as far as it can reach this payload (Activity class is already hidden server-side) (0.032333ms)
+✔ #107 BEFORE (hideIdle=false, the old default): the idle loop dominates the threshold ranking and every analytically interesting edge is dropped — this test would have failed before the fix (the whole builder defaulted this way) (0.086875ms)
+✔ #107 AFTER (hideIdle=true, the new default): the idle loop is removed from the ranking pool BEFORE the threshold is computed, so Lock/Timeout/IO edges rank against each other and survive (0.167917ms)
+✔ hideIdle on idle-only data: visibleCount 0 but hiddenIdleLinks/-Value say WHY (FEEDBACK — distinct from a genuinely empty window) (0.104917ms)
+✔ error envelope rejects the request (never resolves as data) (2.691166ms)
+✔ command-level error envelope rejects without the transport flag (0.118334ms)
+✔ error envelope on a channel rejects and frees the channel (0.15075ms)
+✔ a response with data and no error resolves (no false rejects) (0.063ms)
+✔ request supersedes the pending request on the same channel (0.110833ms)
+✔ a late ERROR envelope for a superseded id is dropped too (0.079ms)
+✔ request ids are strictly increasing, never reused (0.828833ms)
+✔ cancel rejects the pending request and drops its late response (0.222416ms)
+✔ rejectAll clears everything and rejects with a transport-level error (0.278416ms)
+✔ send while not connected rejects with a transport-level error (0.408875ms)
+✔ compare ghost and diff geometry is honest at strip boundaries (2.604ms)
+✔ baseline-predates geometry renders neither ghost nor diff (0.076833ms)
+✔ diff strip x mapping uses uPlot bbox inset in CSS pixels (0.107792ms)
+✔ diff strip gives equal positive and negative magnitudes equal pixel room (0.057792ms)
+✔ diff strip autoscale is intentionally scoped to visible qualitative lane (0.081709ms)
+✔ stackSeries: cumulative sums, bands clip upper to lower, stackIdxs (0.11075ms)
+✔ stackSeries: hidden series pass through raw, keep their slot (0.070417ms)
+✔ class mode: alignedData is [xsMs, cum per wait class] in identity order (0.643125ms)
+✔ values rounded to 4 decimals before stacking (ECharts parity) (0.108417ms)
+✔ event mode: stack + colors + data invariant under permuted server rank (0.654875ms)
+✔ hiddenNames: raw slot, show:false, chain/bands skip it, names stay full (0.344333ms)
+✔ empty data: hasData false, sane empty aligned arrays, no crash (0.144375ms)
+✔ PARITY: seriesNames/seriesColors identical to buildAasOption (both modes) (0.70775ms)
+✔ PARITY: P7 yMax policy identical in both builders across regimes (1.441917ms)
+✔ PARITY: seriesIds + breakdown identical to buildAasOption (0.676167ms)
+✔ PARITY: y pin, x window and axis-label text match the ECharts option (0.821625ms)
+✔ PARITY: honesty marks at the same axis-ms coordinates as ECharts (0.264875ms)
+✔ gesture ownership pins: ms=1, UTC tzDate, our cursor, no uPlot legend (0.056209ms)
+✔ series defs: identity stroke, 0.85 alpha fill, thin line, no points (0.062542ms)
+✔ xWindow: camera window in ms; degenerate window falls back to axis extent (0.055667ms)
+✔ axisRange is the union of opts.axis and win (never narrower than win) (0.04425ms)
+✔ y axis values render one decimal (ECharts formatter parity) (0.044917ms)
+✔ utcTzDate: local getters of the shifted Date read UTC components (0.053375ms)
+✔ x axis label text is UTC via fmtTime regardless of host TZ (0.056792ms)
+✔ withAlpha: rgb -> rgba at the stacked-area opacity; others untouched (0.022ms)
+✔ hitTest: walks bands bottom to top (dyadic cums 0.25/0.5/1.0) (0.112209ms)
+✔ hitTest: above the stack top, below zero, NaN -> null (0.048834ms)
+✔ hitTest: bucket ownership [t, t+bucketMs) — before-data, gaps, past-end miss (0.048167ms)
+✔ hitTest: zero-thickness layers are unhittable (0.037125ms)
+✔ hitTest: hidden series are skipped (visible chain only) (0.037833ms)
+✔ hitTest: empty spec / no buckets -> null (0.038209ms)
+✔ sampled window: one dashed band over the full rendered strip extent (0.046291ms)
+✔ mixed window with fidelity_ranges: sampled sub-bands at absolute positions (0.069ms)
+✔ mixed window without sub-ranges: whole extent banded mixed (0.03175ms)
+✔ exact window: no fidelity rects; N-CPUs hline iff numCpus > 0 (0.034875ms)
+✔ N-CPUs above the y scale top -> ncpus-offscale affordance (P7) (0.059958ms)
+✔ escalation: observed span band + live-edge line; anomaly recolors (0.346042ms)
+✔ escalation with unknown start: NO band, edge line only (never fabricate) (0.071542ms)
+✔ viewport clamp: rects clip to the window, never stretch past their data (0.089875ms)
+✔ viewport clamp: an off-window line is DROPPED, never moved into view (0.063833ms)
+✔ spec.overlays is the absolute (unclamped) geometry (0.0705ms)
+✔ overlayGeometry marks viewport-clamped rect sides (F3) (0.039625ms)
+✔ serialize: fixed window with filters and sort, ns as exact strings (2.168458ms)
+✔ serialize: live mode carries span, NEVER from/to (live means NOW) (0.28025ms)
+✔ compare offset round-trips as an exact signed ns string in live mode (0.343333ms)
+✔ compare codec rejects missing, future, fractional, overflow, and hostile offsets (0.245833ms)
+✔ dfg_idle: default (true/absent) never appears in the hash (0.144875ms)
+✔ dfg_idle: off round-trips through serialize + parse (0.258458ms)
+✔ dfg_idle: absent from the hash parses as null (view default stands) (0.116292ms)
+✔ serialize: canonical — filter key order is sorted, same state same string (0.14575ms)
+✔ execution identity round-trips as exact decimal strings (0.861625ms)
+✔ execution identity rejects incomplete, inverted, or non-decimal input (0.128792ms)
+✔ serialize: values are URI-encoded (hostile SQL in a query label-less value) (0.146375ms)
+✔ serialize: hostile keys are URI-encoded symmetrically (0.077458ms)
+✔ parse: full round-trip preserves every field and every ns digit (0.07275ms)
+✔ parse: live=1 strips any window a crafted hash smuggles in (0.038875ms)
+✔ parse: incomplete or inverted window is dropped, not half-applied (0.030459ms)
+✔ parse: hostile input never throws — empty, foreign, malformed escapes (0.046209ms)
+✔ parse: filter keys and numeric wire domains are strict allowlists (0.222166ms)
+✔ parse: sort direction decodes from the trailing .asc/.desc (0.116708ms)
+✔ removeFilter: drops one dimension as a NEW step (history append-only) (0.229542ms)
+✔ removeFilter: absent key is a no-op (0.064375ms)
+✔ restore: adopts a filter set with a fresh history (deep-link semantics) (0.088458ms)
+✔ drillUp restores the label map alongside the filters (0.073083ms)
+[pgwt] view mount failed: broken Error: boom
+    at Object.mount (file:///Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/web_unit/view-manager.test.mjs:261:25)
+    at ViewManager.refresh (file:///Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/web/static/lib/view-manager.js:139:18)
+    at async TestContext.<anonymous> (file:///Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/web_unit/view-manager.test.mjs:267:5)
+    at async Test.run (node:internal/test_runner/test:1113:7)
+    at async Test.processPendingSubtests (node:internal/test_runner/test:788:7)
+✔ a refresh superseded by a newer refresh never paints (0.866083ms)
+✔ switchTo leaves the old view (and cancels its channels) before entering the new one (0.729333ms)
+✔ a slow response for a no-longer-active view is dropped at the chokepoint (0.573084ms)
+✔ isActive() reflects the chokepoint for in-view async re-fetches (0.325875ms)
+✔ a transport-level failure surfaces via ctx.onRequestError (0.371334ms)
+✔ CancelledError (superseded) stays silent — no error report (0.216666ms)
+✔ a stale refresh that errors after a switch does not report (its view is gone) (0.223084ms)
+✔ lastMount is null before any mount, then records the mounted view's id after one (0.218583ms)
+✔ lastMount.seq strictly advances across refreshes, including across a switchTo (0.13225ms)
+✔ a view.mount() that throws does NOT bump lastMount — nothing actually painted (1.218375ms)
+✔ lane layout: leader first, sorted worker payload order retained, labels explicit (2.65575ms)
+✔ plan is a distinct leader-lane band and expands the full resident extent (0.447041ms)
+✔ clipping changes draw geometry only; raw tooltip start/duration/cpu survive (3.365792ms)
+✔ event bars use stable eventColor identity tint, not matrix/plan colors (0.164709ms)
+✔ UTC x-axis formatter and animation/clip pins (1.021916ms)
+✔ renderItem gives micro bars a visible 1px width (0.346875ms)
+✔ honest payload counts and per-lane truncation are carried without invention (0.258333ms)
+✔ executions table renders in-progress honestly and derives only known truncation count (0.953708ms)
+✔ in_progress duration reads as a lower bound, not a bare "In progress" (0.216625ms)
+✔ in_progress with no usable windowTo falls back to plain "In progress" (0.124708ms)
+✔ an inferred-end row is flagged, not presented as an equal measurement (0.083375ms)
+✔ executionsHasInferredEnd sees an inferred-ended row, and only that (0.0505ms)
+✔ executionsStatusLabel spells the * out inline — nobody hovers on a projected screen (#222 review round 3) (0.06475ms)
+✔ buildExecutionsModel exposes has_inferred_end from the rows it actually renders (0.122708ms)
+✔ executionsCountsLabel renders the open/completed split, or nothing when the counts are unavailable (0.037167ms)
+✔ buildExecutionsModel threads windowTo into the duration cell and passes open_count/completed_count through unmodified (0.2595ms)
+✔ empty detail stays empty without invented count (0.066209ms)
+✔ an execution with no events, workers or plan has no waterfall to draw (0.086625ms)
+✔ default selection skips the newest empty executions to one with data (0.049125ms)
+✔ default selection prefers events, then workers, then a plan phase (0.055666ms)
+✔ default selection falls back to the newest row when nothing is drawable (0.027292ms)
+✔ the shipped default is duration_desc (longest running first) (0.021708ms)
+✔ sort label reflects the current mode; anything but explicit "start_desc" reads as longest-running (0.03ms)
+✔ toggle target and toggle-button label are always the OTHER mode (0.029042ms)
+ℹ tests 467
+ℹ suites 0
+ℹ pass 467
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 443.699
+
+[1m=== go bridge (skips server-backed cases without a Linux pgwt-server) ===[0m
+ok  	github.com/DmitryNFomin/pg_wait_tracer/web	0.150s
+
+[1m=== python: compile every test module ===[0m
+
+[1m=== python: free_ports self-test ===[0m
+  PASS: is_free() reports the bound port 63808 as busy
+  PASS: is_free() reports 63808 free again once released
+  PASS: base 26664 is inside [20000, 39990)
+  PASS: base 26664..26673 are all still free
+  PASS: base 41064 (span 8) skips the busy port 41005
+  PASS: base 41015 (span 8) skips the busy port 41005
+  PASS: base 41010 (span 8) skips the busy port 41005
+  PASS: base 41073 (span 8) skips the busy port 41005
+  PASS: base 41047 (span 8) skips the busy port 41005
+  PASS: base 41014 (span 8) skips the busy port 41005
+  PASS: base 41028 (span 8) skips the busy port 41005
+  PASS: base 41069 (span 8) skips the busy port 41005
+  PASS: base 41019 (span 8) skips the busy port 41005
+  PASS: base 41007 (span 8) skips the busy port 41005
+  PASS: base 41079 (span 8) skips the busy port 41005
+  PASS: base 41034 (span 8) skips the busy port 41005
+  PASS: base 41040 (span 8) skips the busy port 41005
+  PASS: base 41056 (span 8) skips the busy port 41005
+  PASS: base 41031 (span 8) skips the busy port 41005
+  PASS: base 41066 (span 8) skips the busy port 41005
+  PASS: base 41032 (span 8) skips the busy port 41005
+  PASS: base 41007 (span 8) skips the busy port 41005
+  PASS: base 41080 (span 8) skips the busy port 41005
+  PASS: base 41069 (span 8) skips the busy port 41005
+  PASS: find_free_base() raises ValueError when span >= (hi - lo)
+  PASS: find_free_base(span=0) raises ValueError
+  PASS: find_free_base(span=-1) raises ValueError
+  PASS: find_free_base() raises RuntimeError once tries are exhausted against a busy-only range
+  PASS: CLI printed a base in range: 27735
+
+29/29 passed
+
+[1m=== python: demo-workload-coverage unit tests ===[0m
+-- test_concurrency_populated_below_cpu_line_fails
+  PASS: concurrency: max AAS 2.1 < num_cpus 4 FAILS (would have passed the old 1.5 proxy) (peaks=2, max AAS=2.10 (CPU-count line 4))
+-- test_concurrency_populated_invalid_num_cpus_refuses
+  PASS: concurrency: num_cpus=0 REFUSES (num_cpus unavailable/invalid (0) -- cannot verify AAS against the real CPU-count line)
+  PASS: concurrency: num_cpus=-1 REFUSES (num_cpus unavailable/invalid (-1) -- cannot verify AAS against the real CPU-count line)
+  PASS: concurrency: num_cpus='4' REFUSES (num_cpus unavailable/invalid ('4') -- cannot verify AAS against the real CPU-count line)
+  PASS: concurrency: num_cpus=True REFUSES (num_cpus unavailable/invalid (True) -- cannot verify AAS against the real CPU-count line)
+-- test_concurrency_populated_missing_num_cpus_refuses
+  PASS: concurrency: missing num_cpus REFUSES even with a huge peak, never treated as fine (num_cpus unavailable/invalid (None) -- cannot verify AAS against the real CPU-count line)
+-- test_concurrency_populated_no_peaks_fails
+  PASS: concurrency: no peaks FAILS (no AAS peaks in window)
+-- test_concurrency_populated_peak_at_or_above_cpu_line_passes
+  PASS: concurrency: max AAS 4.2 >= num_cpus 4 passes (peaks=2, max AAS=4.20 (CPU-count line 4))
+-- test_demo_rehearsal_still_passes_raw_out_dir_to_run_coverage
+  PASS: demo_rehearsal.py calls cov.run_coverage
+  PASS: demo_rehearsal.py's run_coverage call still passes raw_out_dir ('cov.run_coverage(srv, coverage_from_ns, to_ns,\n                                            num_cpus=info.get("num_cpus"),\n                                            raw_out_dir=os.path.join(out_dir,\n')
+-- test_events_populated_ms_field_not_total_ms_fails
+  PASS: events: rows carrying only 'ms' (wrong field) FAIL, not silently treated as zero-and-fine (event classes with total_ms>0: [])
+-- test_events_populated_one_class_fails
+  PASS: events: one class FAILS (event classes with total_ms>0: ['Lock'])
+-- test_events_populated_two_classes_passes
+  PASS: events: two classes passes (event classes with total_ms>0: ['Lock', 'Timeout'])
+-- test_histogram_populated_empty_fails
+  PASS: histogram: no cells FAILS (nonzero latency bands: [])
+-- test_histogram_populated_one_mode_fails
+  PASS: histogram: one band only FAILS (nonzero latency bands: [2])
+-- test_histogram_populated_spread_passes
+  PASS: histogram: two nonzero bands passes (nonzero latency bands: [2, 9])
+-- test_import_needs_no_playwright
+  PASS: importing demo_workload_coverage/ui_live_smoke_lib stays out of playwright (module-scope import reachable from tests/unit_tests.list must never pull it in)
+-- test_matrix_populated_one_pair_fails
+  PASS: matrix: one pair FAILS (distinct non-idle transition pairs: [('CPU*', 'Lock:relation')])
+-- test_matrix_populated_two_pairs_passes
+  PASS: matrix: two non-idle pairs passes (distinct non-idle transition pairs: [('CPU*', 'Lock:relation'), ('CPU*', 'Timeout:PgSleep')])
+-- test_overview_populated_empty_fails
+  PASS: overview: no rows at all FAILS (class-level wait classes with ms>0: [])
+  PASS: overview: None response FAILS, does not crash (class-level wait classes with ms>0: [])
+-- test_overview_populated_one_class_fails
+  PASS: overview: one nonzero class-level row FAILS (class-level wait classes with ms>0: ['Lock'])
+-- test_overview_populated_only_grand_total_row_fails
+  PASS: overview: only the indent==0 grand-total row FAILS, is not mistaken for a class (class-level wait classes with ms>0: [])
+-- test_overview_populated_two_classes_passes
+  PASS: overview: two class-level (indent 1) rows with ms>0 passes (class-level wait classes with ms>0: ['Lock', 'Timeout'])
+-- test_queries_populated_distinct_passes
+  PASS: queries: two distinct texts/totals passes (distinct query texts=2, distinct total_ms values=2)
+-- test_queries_populated_single_statement_fails
+  PASS: queries: one statement FAILS (distinct query texts=1, distinct total_ms values=1)
+-- test_retain_waterfall_raw_marks_an_uncollected_slice_never_omits_it
+  PASS: the uncollected slice still gets a file, carrying an explicit not-collected marker rather than being absent ({'pgwt_artifact_error': "executions_recency: not collected this run -- the executions query raised, timed out, or returned no response at all; see this tab's `detail` for which"})
+-- test_retain_waterfall_raw_overwrites_a_stale_previous_run
+  PASS: the stale page is GONE, replaced by this run's marker ({'pgwt_artifact_error': "executions_duration_desc: not collected this run -- the executions query raised, timed out, or returned no response at all; see this tab's `detail` for which"})
+-- test_retain_waterfall_raw_writes_every_slice_it_was_given
+  PASS: executions_duration_desc.json was written
+  PASS: executions_recency.json was written
+  PASS: the retained duration_desc page is the response VERBATIM, so the floor can be re-derived from it
+-- test_run_coverage_allocation_failed_is_also_could_not_evaluate
+  PASS: allocation_failed still FAILS the tab (exec_scatter COULD NOT EVALUATE (code='allocation_failed'): 'memory allocation failed' -- retry the request or reduce the time range -- this is NOT evidence the tab is empty)
+  PASS: allocation_failed is also flagged could_not_evaluate (exec_scatter COULD NOT EVALUATE (code='allocation_failed'): 'memory allocation failed' -- retry the request or reduce the time range -- this is NOT evidence the tab is empty)
+-- test_run_coverage_exception_is_not_could_not_evaluate
+  PASS: an exception still FAILS (executions query failed: RuntimeError('pipe closed'))
+  PASS: a raised exception is NOT mislabeled could_not_evaluate (executions query failed: RuntimeError('pipe closed'))
+-- test_run_coverage_missing_num_cpus_fails_concurrency_not_skips
+  PASS: concurrency FAILS when run_coverage's caller omits num_cpus, even with a huge peak (num_cpus unavailable/invalid (None) -- cannot verify AAS against the real CPU-count line)
+-- test_run_coverage_normal_pass_has_could_not_evaluate_false
+  PASS: a normal (non-error) response is could_not_evaluate=False, whether it passes or fails its own checker
+-- test_run_coverage_ordinary_error_is_not_could_not_evaluate
+  PASS: an ordinary error still FAILS (top_events error: 'boom')
+  PASS: an ordinary error is NOT mislabeled could_not_evaluate (top_events error: 'boom')
+-- test_run_coverage_query_exception_fails_that_tab_not_skips
+  PASS: waterfall FAILS (not skipped) when its query raises (executions query failed: RuntimeError('pgwt-server pipe closed'))
+  PASS: every other tab still evaluated normally from its own response
+-- test_run_coverage_recency_slice_never_gates_waterfall
+  PASS: waterfall still FAILS on its own merits (no row clears the 500ms floor) -- this scenario does not exercise the diagnostic's non-gating behavior by accident (executions=1, slowest completed_ms=0.05 (floor 500.0) | measured (end_inferred=False) completed rows >= 500.0ms: 0 | open_count=None, completed_count=None | recency slice (diagnostic only, does not gate): {'rows': 1, 'completed': 1, 'max_completed_duration_ms': 0.05, 'span_ns': 0})
+  PASS: the diagnostic recorded the (unhelpfully fast) recency slice regardless ({'rows': 1, 'completed': 1, 'max_completed_duration_ms': 0.05, 'span_ns': 0})
+-- test_run_coverage_retains_an_error_response_rather_than_nothing
+  PASS: an error response fails the tab
+  PASS: the error response itself is retained, so the reason is readable from the artifact directory ({'code': 'E_TOO_BIG', 'error': 'window too large'})
+-- test_run_coverage_retains_both_slices_end_to_end
+  PASS: waterfall passes on the slow page (executions=2, slowest completed_ms=1300.0 (floor 500.0) | measured (end_inferred=False) completed rows >= 500.0ms: 1 | open_count=0, completed_count=2 | recency slice (diagnostic only, does not gate): {'rows': 1, 'completed': 1, 'max_completed_duration_ms': 0.1, 'span_ns': 0})
+  PASS: run_coverage retained the exact page its verdict came from
+  PASS: and the recency page beside it, from the same run and window
+-- test_run_coverage_retains_raw_when_the_executions_query_raises
+  PASS: waterfall fails when its query raises
+  PASS: executions_duration_desc exists and says it was not collected ({'pgwt_artifact_error': "executions_duration_desc: not collected this run -- the executions query raised, timed out, or returned no response at all; see this tab's `detail` for which"})
+  PASS: executions_recency exists and says it was not collected ({'pgwt_artifact_error': "executions_recency: not collected this run -- the executions query raised, timed out, or returned no response at all; see this tab's `detail` for which"})
+-- test_run_coverage_server_error_field_fails_not_skips
+  PASS: a response carrying an 'error' field FAILS (time_model error: 'boom')
+-- test_run_coverage_waterfall_forwards_sort_and_sees_the_window_not_the_tail
+  PASS: waterfall PASSES against the duration-sorted page (executions=2, slowest completed_ms=1300.0 (floor 500.0) | measured (end_inferred=False) completed rows >= 500.0ms: 1 | open_count=None, completed_count=None | recency slice (diagnostic only, does not gate): {'rows': 2, 'completed': 2, 'max_completed_duration_ms': 1300.0, 'span_ns': 0})
+  PASS: run_coverage issues exactly two executions queries for waterfall: the gating slice and the diagnostic recency slice (calls=[{'from_': 0, 'to_': 1, 'timeout': 30, 'sort': 'duration_desc'}, {'from_': 0, 'to_': 1, 'timeout': 30}])
+  PASS: exactly one call carries sort=duration_desc, not just the TAB_QUERIES table in the abstract (calls=[{'from_': 0, 'to_': 1, 'timeout': 30, 'sort': 'duration_desc'}, {'from_': 0, 'to_': 1, 'timeout': 30}])
+  PASS: exactly one call carries no sort at all -- the recency slice (calls=[{'from_': 0, 'to_': 1, 'timeout': 30, 'sort': 'duration_desc'}, {'from_': 0, 'to_': 1, 'timeout': 30}])
+  PASS: the recency slice's diagnostic is recorded on the result (dict_keys(['ok', 'could_not_evaluate', 'detail', 'recency_diagnostic']))
+-- test_run_coverage_waterfall_ok_survives_an_empty_recency_slice
+  PASS: waterfall PASSES on the duration_desc slice's real measured slow row, even though the recency slice has nothing slow at all (executions=1, slowest completed_ms=1300.0 (floor 500.0) | measured (end_inferred=False) completed rows >= 500.0ms: 1 | open_count=None, completed_count=None | recency slice (diagnostic only, does not gate): {'rows': 2, 'completed': 2, 'max_completed_duration_ms': 0.3, 'span_ns': 1})
+  PASS: the diagnostic still faithfully recorded the (unhelpful) recency slice's own data ({'rows': 2, 'completed': 2, 'max_completed_duration_ms': 0.3, 'span_ns': 1})
+-- test_run_coverage_window_too_large_is_could_not_evaluate_not_plain_fail
+  PASS: window_too_large still FAILS the tab (executions COULD NOT EVALUATE (code='window_too_large'): 'window too large' -- narrow the time range or add a pid/query filter -- this is NOT evidence the tab is empty)
+  PASS: window_too_large is flagged could_not_evaluate, not a plain empty-tab FAIL (executions COULD NOT EVALUATE (code='window_too_large'): 'window too large' -- narrow the time range or add a pid/query filter -- this is NOT evidence the tab is empty)
+  PASS: the detail string names it distinctly (executions COULD NOT EVALUATE (code='window_too_large'): 'window too large' -- narrow the time range or add a pid/query filter -- this is NOT evidence the tab is empty)
+-- test_run_coverage_without_raw_out_dir_writes_nothing
+  PASS: raw_out_dir defaults to None and nothing is written anywhere, including the process's own working directory ([])
+-- test_scatter_populated_no_spread_fails
+  PASS: scatter: no spread among 5 points FAILS (completed points=5, max/min duration ratio=1.0 (floor 3.0))
+-- test_scatter_populated_spread_passes
+  PASS: scatter: 5 points with wide spread passes (completed points=5, max/min duration ratio=400.0 (floor 3.0))
+-- test_scatter_populated_too_few_points_fails
+  PASS: scatter: only 2 points FAILS (completed points=2 (floor 5))
+-- test_scatter_populated_zero_duration_excluded
+  PASS: scatter: zero/None durations excluded from the count (completed points=2 (floor 5))
+-- test_sessions_populated_several_passes
+  PASS: sessions: 2 rows passes (session rows: 2)
+-- test_sessions_populated_single_fails
+  PASS: sessions: 1 row FAILS (session rows: 1)
+-- test_tab_order_matches_ui_live_smoke_lib
+  PASS: TAB_ORDER matches ui_live_smoke_lib.TABS exactly (same 11, same order)
+  PASS: TAB_QUERIES has exactly one entry per tab in TAB_ORDER
+-- test_timeline_populated_changing_pid_passes
+  PASS: timeline: pid 100 has 2 distinct wait names, passes (pids with >=2 distinct wait names: [100] (pids seen: 2))
+-- test_timeline_populated_empty_fails
+  PASS: timeline: no events FAILS (pids with >=2 distinct wait names: [] (pids seen: 0))
+-- test_timeline_populated_static_pids_fail
+  PASS: timeline: no pid changes wait FAILS (pids with >=2 distinct wait names: [] (pids seen: 2))
+-- test_transitions_populated_idle_only_fails
+  PASS: transitions: idle-only links FAIL (non-idle state transitions: 0)
+-- test_transitions_populated_real_transition_passes
+  PASS: transitions: one non-idle transition passes (non-idle state transitions: 1)
+-- test_waterfall_floor_excludes_inferred_measured_row_passes
+  PASS: a measured (end_inferred=False) slow row passes (measured (end_inferred=False) completed rows >= 500.0ms: 1)
+-- test_waterfall_floor_excludes_inferred_missing_key_fails_closed
+  PASS: waterfall_populated alone still passes this row (so the fail-closed behaviour is this function's, not inherited)
+  PASS: a slow row with NO end_inferred field does NOT satisfy the floor -- version drift refuses instead of approving (measured (end_inferred=False) completed rows >= 500.0ms: 0 | FAIL-CLOSED: 1 row(s) >= 500.0ms carry NO end_inferred field at all (pgwt-server older than #222?) and are NOT counted as measured)
+  PASS: and the detail NAMES version drift, so a future red is not mistaken for 'the capture had no slow query' (measured (end_inferred=False) completed rows >= 500.0ms: 0 | FAIL-CLOSED: 1 row(s) >= 500.0ms carry NO end_inferred field at all (pgwt-server older than #222?) and are NOT counted as measured)
+-- test_waterfall_floor_excludes_inferred_missing_key_is_not_a_blanket_refusal
+  PASS: one correctly-serialised measured slow row still passes (measured (end_inferred=False) completed rows >= 500.0ms: 1 | FAIL-CLOSED: 1 row(s) >= 500.0ms carry NO end_inferred field at all (pgwt-server older than #222?) and are NOT counted as measured)
+  PASS: and the field-less row is still reported, not hidden by the pass (measured (end_inferred=False) completed rows >= 500.0ms: 1 | FAIL-CLOSED: 1 row(s) >= 500.0ms carry NO end_inferred field at all (pgwt-server older than #222?) and are NOT counted as measured)
+-- test_waterfall_floor_excludes_inferred_missing_key_only_counts_slow_rows
+  PASS: a sub-floor row without the field raises no notice (measured (end_inferred=False) completed rows >= 500.0ms: 1)
+-- test_waterfall_floor_excludes_inferred_mixed_passes_on_the_measured_one
+  PASS: a genuinely measured slow row among inferred ones still passes (measured (end_inferred=False) completed rows >= 500.0ms: 1)
+-- test_waterfall_floor_excludes_inferred_only_inferred_row_fails
+  PASS: waterfall_populated ALONE would pass this inferred-only row (confirms addition 2 is the thing doing the excluding)
+  PASS: an inferred-only slow row FAILS the stricter floor (measured (end_inferred=False) completed rows >= 500.0ms: 0)
+-- test_waterfall_floor_reads_the_returned_page_not_a_summary_field
+  PASS: the 500ms floor FAILS when no returned row clears it, however loudly the response's own summary fields claim otherwise (executions=100, slowest completed_ms=0.18 (floor 500.0))
+  PASS: the measured-row requirement likewise reads only `rows` (measured (end_inferred=False) completed rows >= 500.0ms: 0)
+-- test_waterfall_populated_empty_fails
+  PASS: waterfall: no rows FAILS (executions=0, slowest completed_ms=None (floor 500.0))
+-- test_waterfall_populated_in_progress_excluded
+  PASS: waterfall: in-progress-only execution FAILS (executions=1, slowest completed_ms=None (floor 500.0))
+-- test_waterfall_populated_no_slow_execution_fails
+  PASS: waterfall: only fast executions FAIL (executions=1, slowest completed_ms=5.0 (floor 500.0))
+-- test_waterfall_populated_slow_execution_passes
+  PASS: waterfall: one slow completed execution passes (executions=2, slowest completed_ms=1300.0 (floor 500.0))
+-- test_waterfall_query_requests_slowest_first_not_recency
+  PASS: waterfall coverage still queries the executions endpoint
+  PASS: waterfall coverage requests sort=duration_desc, the same slice the tab itself defaults to (extra={'sort': 'duration_desc'})
+-- test_waterfall_recency_diagnostic_empty
+  PASS: empty recency slice reports zeros, not an exception ({'rows': 0, 'completed': 0, 'max_completed_duration_ms': None, 'span_ns': 0})
+-- test_waterfall_recency_diagnostic_shape
+  PASS: row count recorded ({'rows': 3, 'completed': 2, 'max_completed_duration_ms': 20.0, 'span_ns': 200})
+  PASS: in-progress row excluded from completed ({'rows': 3, 'completed': 2, 'max_completed_duration_ms': 20.0, 'span_ns': 200})
+  PASS: max completed duration ({'rows': 3, 'completed': 2, 'max_completed_duration_ms': 20.0, 'span_ns': 200})
+  PASS: wall-clock start span ({'rows': 3, 'completed': 2, 'max_completed_duration_ms': 20.0, 'span_ns': 200})
+
+99/99 passed, 0 failed
+
+[1m=== python: demo-rehearsal bypass-suite unit tests ===[0m
+--- test_aas_floor_below_floor_fails ---
+  PASS: aas=0.1 is below the provisional 0.5 floor (aas=0.1 (floor 0.5))
+--- test_aas_floor_none_fails ---
+  PASS: a missing aas value fails, is not treated as fine (aas=None (floor 0.5))
+--- test_aas_floor_ok_above_floor ---
+  PASS: aas=1.2 clears the 0.5 floor (aas=1.2 (floor 0.5))
+--- test_blink_gate_clean_trace_still_passes ---
+  PASS: a genuinely clean sweep still passes ({'tab': 'overview', 'ok': True, 'ticks_observed': 6, 'rendered': {'ok': True, 'detail': 'ok'}, 'clean': {'ok': True, 'console_errors': [], 'pgwt_errors': []}, 'no_blink': {'ok': True, 'ratio': 0.0, 'threshold': 0.001, 'pair_offsets_ms': [100, 100, 100, 100, 100, 100], 'not_measured': [], 'measured': {'ok': True, 'measured_count': 6, 'attempted_count': 6, 'min_fraction': 0.5}}, 'blink_sweep': {'offsets_ms': [200, 500, 1000, 1500, 2000], 'ticks': []}, 'capture_budget': {'ok': True, 'bound_ms': 800.0, 'detail': None}, 'frame_dims': {'ok': True, 'tolerance_px': 1.0, 'detail': None}, 'frame_spacing': {'ok': True, 'bound_ms': 150.0, 'detail': None}, 'color_stability': {'ok': True, 'violations': []}, 'no_leak': {'ok': True, 'before': {'pending': 0}, 'after': {'pending': 0}, 'settle_s': {'before': None, 'after': None}}, 'artifacts': {}, 'pre_mount_diagnostic': [], 'ttfp_ms': None, 'known_failing': False, 'xpass': False})
+--- test_blink_gate_queries_2_6pct_transient_still_fails_run_1790574871 ---
+  PASS: queries' tab-level verdict stays FAIL under the new gate too (False)
+--- test_blink_gate_scatter_13pct_transient_fails_run_1790574871 ---
+  PASS: the tab's graded ratio is the sweep's WORST pair, not an anchored single pair (0.1305)
+  PASS: 0.1305 fails the 0.001 blink threshold ({'ok': False, 'ratio': 0.1305, 'threshold': 0.001, 'pair_offsets_ms': [100, 100, 100, 100, 100, 100], 'not_measured': [], 'measured': {'ok': True, 'measured_count': 6, 'attempted_count': 6, 'min_fraction': 0.5}})
+  PASS: scatter's tab-level verdict is FAIL, reproducing run.id 1790574871's finding (False)
+--- test_blink_gate_transitions_subpercent_transient_fails_run_1790574871 ---
+  PASS: graded ratio is tick 3's 0.0172, the worst of the four (0.0172)
+  PASS: transitions' tab-level verdict is FAIL, reproducing run.id 1790574871's finding (False)
+--- test_bucket_weighted_aas_ok_catches_what_unweighted_mean_would_miss ---
+  PASS: setup check: an unweighted mean would PASS this comparison (gap=0.00%)
+  PASS: the bucket-weighted derivation correctly FAILS the same input an unweighted mean would have passed (derived=2.0000 time_model=1.6667 gap=16.67% (tolerance 1.0%, 3 buckets x 1000.0ms, window=2.5s))
+--- test_bucket_weighted_aas_ok_empty_buckets_fails ---
+  PASS: an empty buckets list fails rather than vacuously passing (no buckets in aas response)
+--- test_bucket_weighted_aas_ok_evenly_divisible_window_ok ---
+  PASS: evenly-divisible window: weighted derivation matches exactly (derived=2.0000 time_model=2.0000 gap=0.00% (tolerance 1.0%, 3 buckets x 1000.0ms, window=3.0s))
+--- test_bucket_weighted_aas_ok_ignores_cat_and_t_fields ---
+  PASS: cat/t excluded from the per-bucket total (derived=2.0000 time_model=2.0000 gap=0.00% (tolerance 1.0%, 1 buckets x 1000.0ms, window=1.0s))
+--- test_bucket_weighted_aas_ok_missing_bucket_ns_fails ---
+  PASS: a missing bucket_ns fails rather than being assumed (missing/invalid bucket_ns (None))
+--- test_bucket_weighted_aas_ok_missing_time_model_aas_fails ---
+  PASS: a missing time_model aas fails rather than being skipped (missing/invalid time_model aas (None))
+--- test_bucket_weighted_aas_ok_non_positive_window_fails ---
+  PASS: from_ns == to_ns fails rather than dividing by zero (non-positive window (from_ns=1000000000, to_ns=1000000000))
+--- test_build_demo_summary_all_pass ---
+  PASS: all-pass summary is ok
+  PASS: no failed entries
+  PASS: verdict line PASS
+--- test_build_demo_summary_all_tabs_reached_with_expected_count_ok ---
+  PASS: exactly 11/11 tabs reached passes the floor
+--- test_build_demo_summary_expected_tabs_none_skips_the_check ---
+  PASS: expected_tabs_per_pass=None does not gate on tab count
+--- test_build_demo_summary_extra_check_failure ---
+  PASS: a failed extra check fails the summary
+  PASS: failed extra check named in failed list
+  PASS: verdict line FAIL
+--- test_build_demo_summary_ignores_known_failing_exemption ---
+  PASS: a known_failing=True tab with raw ok=False still fails the rehearsal
+  PASS: failed list names the pass/tab (got ['early/waterfall'])
+--- test_build_demo_summary_missing_tabs_fails_with_expected_count ---
+  PASS: 9/11 tabs reached fails when 11 are expected ({'ok': False, 'passes': {'early': {'tab0': {'ok': True}, 'tab1': {'ok': True}, 'tab2': {'ok': True}, 'tab3': {'ok': True}, 'tab4': {'ok': True}, 'tab5': {'ok': True}, 'tab6': {'ok': True}, 'tab7': {'ok': True}, 'tab8': {'ok': True}}}, 'checks': {'c': {'ok': True}}, 'failed': ['incomplete_pass:early (9/11 tabs reached)'], 'total_tabs_walked': 9})
+  PASS: failed list names the incomplete pass (['incomplete_pass:early (9/11 tabs reached)'])
+--- test_build_demo_summary_no_tabs_ever_reached_is_never_a_pass ---
+  PASS: zero tabs actually walked must not be a vacuous PASS ({'ok': False, 'passes': {'early': {}, 'middle': {}}, 'checks': {'some_check': {'ok': True}}, 'failed': [], 'total_tabs_walked': 0})
+  PASS: no individual tab/check failed -- the floor is what catches this
+  PASS: total_tabs_walked reports the real count
+--- test_build_demo_summary_requires_passes_and_checks ---
+  PASS: no passes at all is never a PASS
+  PASS: no extra checks at all is never a PASS
+--- test_build_demo_summary_some_tabs_reached_is_fine ---
+  PASS: at least one tab reached across the passes is enough for this floor
+  PASS: total_tabs_walked counts across all passes
+--- test_capture_has_events_bool_is_not_a_count ---
+  PASS: a bool is never treated as a real event count (num_events=True)
+--- test_capture_has_events_negative_fails ---
+  PASS: a negative count must fail (num_events=-1)
+--- test_capture_has_events_none_fails ---
+  PASS: a missing num_events field must fail, not be treated as fine (num_events=None)
+--- test_capture_has_events_positive_ok ---
+  PASS: a positive event count passes (num_events=50000)
+--- test_capture_has_events_zero_fails ---
+  PASS: zero events must fail, not vacuously pass (num_events=0)
+--- test_cmd_markers_observed_missing_field_fails_closed ---
+  PASS: a missing field reports seen=False, not treated as zero-and-fine (live_cmd_markers_total missing/non-numeric: None)
+  PASS: detail names the field as missing (live_cmd_markers_total missing/non-numeric: None)
+--- test_cmd_markers_observed_non_dict_response_fails ---
+  PASS: a non-dict metrics response fails outright, not seen=True (metrics response is not a dict: None)
+--- test_cmd_markers_observed_nonzero_reports_seen ---
+  PASS: a nonzero count reports seen=True with the real count (live_cmd_markers_total=5 -- CMD markers fired live; the #222 orphan-close path (CMD_END) was actually exercised by this capture)
+  PASS: detail says markers fired (live_cmd_markers_total=5 -- CMD markers fired live; the #222 orphan-close path (CMD_END) was actually exercised by this capture)
+--- test_cmd_markers_observed_zero_reports_not_seen_not_a_failure ---
+  PASS: a zero count reports seen=False, not an exception (live_cmd_markers_total=0 -- ZERO CMD markers this capture -- no pid escalated to a live watchpoint, so the #222 orphan-close fix is UNPROVEN (and inert) for this run; not a harness failure, a coverage gap)
+  PASS: detail names the coverage gap explicitly (live_cmd_markers_total=0 -- ZERO CMD markers this capture -- no pid escalated to a live watchpoint, so the #222 orphan-close fix is UNPROVEN (and inert) for this run; not a harness failure, a coverage gap)
+--- test_conservation_floating_noise_below_floor_fails ---
+  PASS: a near-zero db_time_ms (float noise) must still fail (db_time_ms=0.0000 is below the 1.0ms nonzero-DB-Time floor -- void reading (no real activity captured in this window), not a passing conservation check)
+--- test_conservation_holds_exactly ---
+  PASS: CPU*+Lock+IO == db_time_ms conserves exactly (db_time_ms=1000.0 class_rows_sum_ms=1000.0 gap=0.0ms (0.00%, tolerance 1.0%))
+--- test_conservation_ignores_indent_0_and_2 ---
+  PASS: indent 0/2 rows excluded from the sum (db_time_ms=1000.0 class_rows_sum_ms=1000.0 gap=0.0ms (0.00%, tolerance 1.0%))
+--- test_conservation_just_above_floor_is_evaluated_normally ---
+  PASS: db_time_ms clearing the floor is evaluated by the normal ratio (db_time_ms=2.0 class_rows_sum_ms=2.0 gap=0.0ms (0.00%, tolerance 1.0%))
+--- test_conservation_missing_offcpu_fails ---
+  PASS: a 30% missing residual fails conservation (db_time_ms=1000.0 class_rows_sum_ms=700.0 gap=300.0ms (30.00%, tolerance 1.0%))
+  PASS: detail states the actual gap (got: db_time_ms=1000.0 class_rows_sum_ms=700.0 gap=300.0ms (30.00%, tolerance 1.0%))
+--- test_conservation_samples_all_pass ---
+  PASS: every sample passing -> ok
+  PASS: num_samples reported
+--- test_conservation_samples_empty_list_is_void ---
+  PASS: zero samples is void, never a vacuous PASS ({'ok': False, 'num_samples': 0, 'failed_offsets_s': [], 'samples': [], 'full_window': {'ok': True, 'detail': 'n/a', 'note': 'informational only -- does not gate `ok`; the whole-capture window is always long enough to route to the summary compute path (src/compute.c tm_summary_visitor), which cannot detect under- or over-attribution -- see RECENT_WINDOW_S'}})
+--- test_conservation_samples_one_bad_sample_fails_even_if_others_pass ---
+  PASS: one failing sample fails the whole check -- not an average, not just the last one
+  PASS: the failing offset is named (got [300.0])
+--- test_conservation_within_tolerance ---
+  PASS: 0.5% gap is within the 1% tolerance (db_time_ms=1000.0 class_rows_sum_ms=995.0 gap=5.0ms (0.50%, tolerance 1.0%))
+--- test_conservation_zero_db_time_fails ---
+  PASS: a zero-DB-Time window must FAIL, not vacuously pass (db_time_ms=0.0000 is below the 1.0ms nonzero-DB-Time floor -- void reading (no real activity captured in this window), not a passing conservation check)
+  PASS: detail names the floor that tripped (got: db_time_ms=0.0000 is below the 1.0ms nonzero-DB-Time floor -- void reading (no real activity captured in this window), not a passing conservation check)
+--- test_cpu_clamped_fails_over_tolerance ---
+  PASS: cpu_clamped_ms at 0.5% of db_time_ms fails the 0.1% bound (cpu_clamped_ms=50.00 (0.500%), tolerance 0.1% (CPU-class gaps only -- see this check's own comment for why it cannot vouch for wait-event over-attribution))
+--- test_cpu_clamped_ok_negligible ---
+  PASS: negligible cpu_clamped_ms passes (cpu_clamped_ms=0.05 (0.001%), tolerance 0.1% (CPU-class gaps only -- see this check's own comment for why it cannot vouch for wait-event over-attribution))
+--- test_cpu_clamped_ok_states_its_narrow_scope ---
+  PASS: zero cpu_clamped_ms passes (cpu_clamped_ms=0.00 (0.000%), tolerance 0.1% (CPU-class gaps only -- see this check's own comment for why it cannot vouch for wait-event over-attribution))
+  PASS: detail states the check's narrow scope (CPU-class gaps only) (cpu_clamped_ms=0.00 (0.000%), tolerance 0.1% (CPU-class gaps only -- see this check's own comment for why it cannot vouch for wait-event over-attribution))
+--- test_cross_tab_agreement_disagreement_fails ---
+  PASS: a 10% cross-tab disagreement fails (a=10000.0ms b=11000.0ms gap=9.09% (tolerance 1.0%))
+--- test_cross_tab_agreement_missing_side_fails ---
+  PASS: a missing side fails rather than being skipped (missing db_time_ms (a=10000.0, b=None))
+--- test_cross_tab_agreement_within_tolerance_ok ---
+  PASS: 0.5% disagreement is within the 1% tolerance (a=10000.0ms b=10050.0ms gap=0.50% (tolerance 1.0%))
+--- test_cross_tab_agreement_zero_both_sides_fails ---
+  PASS: both sides at zero DB Time is void, not agreement (one side is below the nonzero-DB-Time floor (a=0.00ms, b=0.00ms))
+--- test_daemon_integrity_all_zero_ok ---
+  PASS: all three counters at zero passes (ringbuf_drops_total=0, state_map_full_total=0, seen_query_ids_full_total=0)
+--- test_daemon_integrity_missing_counter_fails ---
+  PASS: a missing counter fails rather than being treated as zero (ringbuf_drops_total=0, state_map_full_total=None, seen_query_ids_full_total=None -- NONZERO or missing: state_map_full_total=None, seen_query_ids_full_total=None)
+--- test_daemon_integrity_non_dict_response_fails ---
+  PASS: a non-dict metrics response fails outright (metrics response is not a dict: None)
+--- test_daemon_integrity_ringbuf_drops_fails ---
+  PASS: nonzero ringbuf_drops_total fails (ringbuf_drops_total=5, state_map_full_total=0, seen_query_ids_full_total=0 -- NONZERO or missing: ringbuf_drops_total=5)
+  PASS: detail names the offending counter (ringbuf_drops_total=5, state_map_full_total=0, seen_query_ids_full_total=0 -- NONZERO or missing: ringbuf_drops_total=5)
+--- test_daemon_integrity_seen_query_ids_full_fails ---
+  PASS: nonzero seen_query_ids_full_total fails (ringbuf_drops_total=0, state_map_full_total=0, seen_query_ids_full_total=1 -- NONZERO or missing: seen_query_ids_full_total=1)
+--- test_daemon_integrity_state_map_full_fails ---
+  PASS: nonzero state_map_full_total fails (ringbuf_drops_total=0, state_map_full_total=2, seen_query_ids_full_total=0 -- NONZERO or missing: state_map_full_total=2)
+--- test_daemon_log_clean_degraded_warn_announced_not_failed ---
+  PASS: a degraded-tier WARN alone does not fail the check (it was logged)
+  PASS: but it IS captured for the report (got ['WARN: CPU accounting: LEGACY gap-inference -- degraded mode'])
+--- test_daemon_log_clean_error_fails ---
+  PASS: an ERROR: line fails the check
+  PASS: error line captured verbatim (got ['ERROR: window too large'])
+--- test_daemon_log_clean_fatal_fails ---
+  PASS: a FATAL: line fails the check
+--- test_daemon_log_clean_no_findings ---
+  PASS: no ERROR:/FATAL: lines -> ok
+  PASS: no error lines collected
+  PASS: 'CPU capacity unknown' is not a degraded-tier marker
+--- test_daemon_log_clean_stray_error_word_in_query_not_matched ---
+  PASS: a line merely containing 'error' (not the prefix) is not flagged
+--- test_demo_rehearsal_still_wires_tab_coverage_into_extra_checks ---
+  PASS: demo_rehearsal.py still assigns extra_checks['tab_coverage']
+  PASS: demo_rehearsal.py still calls cov.run_coverage(...)
+  PASS: demo_rehearsal.py still calls drlib.tab_coverage_check_ok(...)
+  PASS: demo_rehearsal.py still imports demo_workload_coverage
+--- test_evaluate_window_clean_trace_ok ---
+  PASS: a clean, fully-attributed trace passes every sub-check ({'ok': True, 'compute_path': 'raw', 'conservation': {'ok': True, 'detail': 'db_time_ms=10000.0 class_rows_sum_ms=10000.0 gap=0.0ms (0.00%, tolerance 1.0%)'}, 'cpu_clamped': {'ok': True, 'detail': "cpu_clamped_ms=0.00 (0.000%), tolerance 0.1% (CPU-class gaps only -- see this check's own comment for why it cannot vouch for wait-event over-attribution)"}, 'offcpu_cap': {'ok': True, 'detail': 'offcpu_ms=400.00 (4.00% of db_time_ms), cap 10.0%'}})
+--- test_evaluate_window_dropped_wait_class_caught_by_offcpu_cap ---
+  PASS: the identity alone still closes exactly for this dropped-class case ({'ok': False, 'compute_path': 'raw', 'conservation': {'ok': True, 'detail': 'db_time_ms=10000.0 class_rows_sum_ms=10000.0 gap=0.0ms (0.00%, tolerance 1.0%)'}, 'cpu_clamped': {'ok': True, 'detail': "cpu_clamped_ms=0.00 (0.000%), tolerance 0.1% (CPU-class gaps only -- see this check's own comment for why it cannot vouch for wait-event over-attribution)"}, 'offcpu_cap': {'ok': False, 'detail': 'offcpu_ms=4000.00 (40.00% of db_time_ms), cap 10.0%'}})
+  PASS: the combined gate still fails via the Off-CPU* cap ({'ok': False, 'compute_path': 'raw', 'conservation': {'ok': True, 'detail': 'db_time_ms=10000.0 class_rows_sum_ms=10000.0 gap=0.0ms (0.00%, tolerance 1.0%)'}, 'cpu_clamped': {'ok': True, 'detail': "cpu_clamped_ms=0.00 (0.000%), tolerance 0.1% (CPU-class gaps only -- see this check's own comment for why it cannot vouch for wait-event over-attribution)"}, 'offcpu_cap': {'ok': False, 'detail': 'offcpu_ms=4000.00 (40.00% of db_time_ms), cap 10.0%'}})
+  PASS: offcpu_cap sub-check is the one that failed
+--- test_evaluate_window_missing_workload_signature_fails_when_requested ---
+  PASS: missing workload signature fails the window ({'ok': False, 'compute_path': 'raw', 'conservation': {'ok': True, 'detail': 'db_time_ms=10000.0 class_rows_sum_ms=10000.0 gap=0.0ms (0.00%, tolerance 1.0%)'}, 'cpu_clamped': {'ok': True, 'detail': "cpu_clamped_ms=0.00 (0.000%), tolerance 0.1% (CPU-class gaps only -- see this check's own comment for why it cannot vouch for wait-event over-attribution)"}, 'offcpu_cap': {'ok': True, 'detail': 'offcpu_ms=400.00 (4.00% of db_time_ms), cap 10.0%'}, 'workload_signature': {'ok': False, 'detail': 'Lock:relation=0.0ms, Lock:advisory=0.0ms -- MISSING/zero: Lock:relation, Lock:advisory'}, 'aas_floor': {'ok': True, 'detail': 'aas=1.5 (floor 0.5)'}})
+  PASS: workload_signature sub-check recorded not ok
+--- test_evaluate_window_not_raw_path_fails_loudly ---
+  PASS: summary compute path fails the window even though the identity closes
+  PASS: compute_path reported accurately
+--- test_evaluate_window_skips_extra_floors_by_default ---
+  PASS: workload_signature absent when not requested
+  PASS: aas_floor absent when not requested
+--- test_evaluate_window_workload_signature_and_aas_when_requested ---
+  PASS: a clean sample with real workload signature and healthy AAS passes ({'ok': True, 'compute_path': 'raw', 'conservation': {'ok': True, 'detail': 'db_time_ms=10000.0 class_rows_sum_ms=10000.0 gap=0.0ms (0.00%, tolerance 1.0%)'}, 'cpu_clamped': {'ok': True, 'detail': "cpu_clamped_ms=0.00 (0.000%), tolerance 0.1% (CPU-class gaps only -- see this check's own comment for why it cannot vouch for wait-event over-attribution)"}, 'offcpu_cap': {'ok': True, 'detail': 'offcpu_ms=400.00 (4.00% of db_time_ms), cap 10.0%'}, 'workload_signature': {'ok': True, 'detail': 'Lock:relation=3000.0ms, Lock:advisory=500.0ms'}, 'aas_floor': {'ok': True, 'detail': 'aas=1.5 (floor 0.5)'}})
+  PASS: workload_signature sub-check recorded ok
+  PASS: aas_floor sub-check recorded ok
+--- test_evaluate_window_zero_db_time_fails_every_subcheck ---
+  PASS: a zero-DB-Time window fails the combined gate ({'ok': False, 'compute_path': 'raw', 'conservation': {'ok': False, 'detail': 'db_time_ms=0.0000 is below the 1.0ms nonzero-DB-Time floor -- void reading (no real activity captured in this window), not a passing conservation check'}, 'cpu_clamped': {'ok': False, 'detail': 'db_time_ms below the nonzero-DB-Time floor -- cpu_clamped_ms check skipped, not vacuously ok'}, 'offcpu_cap': {'ok': False, 'detail': 'db_time_ms below the nonzero-DB-Time floor -- Off-CPU* cap check skipped, not vacuously ok'}})
+  PASS: cpu_clamped is not vacuously ok below the DB-Time floor
+  PASS: offcpu_cap is not vacuously ok below the DB-Time floor
+--- test_freshness_missing_fields_fails ---
+  PASS: missing now_ns/to_ns fails rather than being skipped (now_ns/to_ns missing from the info response (now_ns=None, to_ns=None))
+--- test_freshness_recent_bucket_ok ---
+  PASS: a 3s-old newest bucket is fresh (age=3.0s (bound 10s = 2 ticks x 5s))
+--- test_freshness_stale_bucket_fails ---
+  PASS: a 60s-old newest bucket fails the 10s freshness bound (age=60.0s (bound 10s = 2 ticks x 5s))
+--- test_offcpu_cap_fails_over_cap ---
+  PASS: 40% Off-CPU* (a dropped-class-sized residual) fails the 10% cap (offcpu_ms=4000.00 (40.00% of db_time_ms), cap 10.0%)
+--- test_offcpu_cap_not_applicable_without_measured_cpu ---
+  PASS: legacy/sampled tier (no measured CPU) reports ok, labeled not applicable (has_measured_cpu=False (legacy/sampled tier -- no Off-CPU* signal to check))
+  PASS: detail says WHY it is vacuously ok, not just ok (has_measured_cpu=False (legacy/sampled tier -- no Off-CPU* signal to check))
+--- test_offcpu_cap_ok_under_cap ---
+  PASS: 4% Off-CPU* is under the 10% cap (offcpu_ms=400.00 (4.00% of db_time_ms), cap 10.0%)
+--- test_plan_passes_impossibly_short_raises ---
+  PASS: an impossibly short duration raises rather than returning a plan that cannot actually run
+--- test_plan_passes_real_run_uses_max_ticks_and_three_passes ---
+  PASS: a real 35-min run gets the full MIN_TICKS=6 (got 6)
+  PASS: a real 35-min run gets all 3 passes
+--- test_plan_passes_self_test_degrades_gracefully ---
+  PASS: self-test still resolves to a positive tick count (got 1)
+  PASS: self-test still resolves to at least one pass (got [('early', 21.0)])
+  PASS: a 3-minute window cannot fit the full 6-tick/3-pass real-run plan -- plan_passes must have degraded ticks and/or pass count, not silently kept the real-run plan
+--- test_sample_interval_nonpositive_duration_raises ---
+  PASS: a zero/negative duration raises rather than returning a bogus interval
+--- test_sample_interval_real_run_uses_target ---
+  PASS: a real 35-min run samples every 5 minutes (got 300.0)
+--- test_sample_interval_self_test_scales_down ---
+  PASS: a 3-min self-test must not use the 5-min real-run interval (got 60.0)
+  PASS: self-test still yields >= 3 samples (got 3.0)
+--- test_schedule_passes_self_test_short_duration ---
+  PASS: self-test window still yields 3 passes
+  PASS: first pass starts no earlier than warmup_s (got 43.33333333333333)
+  PASS: self-test passes still >= pass_budget_s apart (43.33333333333333 -> 91.66666666666666)
+  PASS: self-test passes still >= pass_budget_s apart (91.66666666666666 -> 140.0)
+  PASS: last self-test pass still respects the tail buffer
+--- test_schedule_passes_single_pass_exact_fit ---
+  PASS: zero-slack single-name schedule is [(name, warmup_s)] (got [('only', 10.0)])
+--- test_schedule_passes_single_pass_with_slack ---
+  PASS: single pass keeps its name
+  PASS: offset never earlier than warmup_s (got 260.0)
+  PASS: offset + budget still respects the tail buffer (got 260.0)
+--- test_schedule_passes_three_spread_across_window ---
+  PASS: schedule_passes: names in order early/middle/late
+  PASS: schedule_passes: offsets non-decreasing
+  PASS: early pass starts after warmup (got 380.0)
+  PASS: consecutive passes are >= pass_budget_s apart (380.0 -> 1030.0), so one pass always finishes before the next starts
+  PASS: consecutive passes are >= pass_budget_s apart (1030.0 -> 1680.0), so one pass always finishes before the next starts
+  PASS: late pass (1680.0) + its budget fits before the tail buffer
+  PASS: middle pass (1030.0) is meaningfully between early/late (380.0/1680.0)
+--- test_schedule_passes_too_short_raises ---
+  PASS: schedule_passes: too-short duration raises ValueError (never silently drops coverage)
+--- test_summarize_sweep_offset_coverage_empty_ticks ---
+  PASS: no ticks -> empty list, not a crash
+  PASS: None ticks -> empty list, not a crash
+--- test_summarize_sweep_offset_coverage_joins_tab_and_pass ---
+  PASS: tab/pass identity carried through
+  PASS: one drift record per input tick
+  PASS: the late-mount tick's drift is visible in the summary ({'target_offsets_ms': [200, 500], 'achieved_offsets_ms': [669, 985], 'drift_ms': [469, 485], 'first_target_ms': 200, 'first_achieved_ms': 669, 'first_drift_ms': 469, 'capture_ms': [], 'capture_ms_total_ms': None, 'panel_dims': {}})
+--- test_sweep_offset_drift_capture_ms_absent_defaults_empty ---
+  PASS: a tick record that never measured capture cost gets [], not a missing key
+  PASS: capture_ms_total_ms is None (not fabricated 0.0) when the source tick never had it
+  PASS: a tick record that never measured panel dims gets {}, not a missing key
+--- test_sweep_offset_drift_carries_capture_ms_and_panel_dims ---
+  PASS: per-frame capture cost is visible next to the drift it may explain, not dropped ([210.5, 198.2])
+  PASS: the tick's total capture cost is carried through (408.7)
+  PASS: the panel size actually captured is carried through ({'box_width': 1698.0, 'box_height': 2340.0, 'clip_width': 1698.0, 'clip_height': 700.0})
+--- test_sweep_offset_drift_empty_tick_does_not_crash ---
+  PASS: an empty/missing tick record reports no drift, not a crash
+  PASS: first_drift_ms is None, not a fabricated 0
+--- test_sweep_offset_drift_extreme_observed_case ---
+  PASS: extreme drift computed correctly (2216)
+--- test_sweep_offset_drift_late_mount_misses_early_window ---
+  PASS: a late mount drifts the first sample far past its target (469)
+  PASS: the first achieved sample landed PAST the second offset's own target -- the 200->500ms window was never actually sampled
+--- test_sweep_offset_drift_mismatched_lengths_does_not_crash ---
+  PASS: drift only computed for the offsets that were actually achieved ({'target_offsets_ms': [200, 500, 1000, 1500, 2000], 'achieved_offsets_ms': [669, 985], 'drift_ms': [469, 485], 'first_target_ms': 200, 'first_achieved_ms': 669, 'first_drift_ms': 469, 'capture_ms': [], 'capture_ms_total_ms': None, 'panel_dims': {}})
+--- test_sweep_offset_drift_on_target_zero_drift ---
+  PASS: first target reported
+  PASS: first achieved reported
+  PASS: on-target drift is small (5)
+  PASS: per-offset drift computed ([5, 12, 8, 3, 11])
+--- test_tab_coverage_check_ok_all_pass ---
+  PASS: all tabs ok -> the aggregate check passes (all 2 tabs populated)
+--- test_tab_coverage_check_ok_could_not_evaluate_fails_but_named_separately ---
+  PASS: a could_not_evaluate tab still FAILS the check (1 tab(s) COULD NOT EVALUATE (capacity/tooling refusal, NOT evidence of an empty tab): ['waterfall'])
+  PASS: the tab is named (1 tab(s) COULD NOT EVALUATE (capacity/tooling refusal, NOT evidence of an empty tab): ['waterfall'])
+  PASS: a could_not_evaluate tab is NOT described as 'not populated' (1 tab(s) COULD NOT EVALUATE (capacity/tooling refusal, NOT evidence of an empty tab): ['waterfall'])
+  PASS: the detail says COULD NOT EVALUATE, distinct wording (1 tab(s) COULD NOT EVALUATE (capacity/tooling refusal, NOT evidence of an empty tab): ['waterfall'])
+--- test_tab_coverage_check_ok_could_not_evaluate_without_key_defaults_to_not_populated ---
+  PASS: missing key still FAILS (1 tab(s) not populated: ['waterfall'])
+  PASS: defaults to 'not populated' when could_not_evaluate is absent (1 tab(s) not populated: ['waterfall'])
+--- test_tab_coverage_check_ok_empty_results_fails ---
+  PASS: empty results dict FAILS, not a vacuous PASS (no per-tab coverage results at all (empty or non-dict))
+  PASS: None results FAILS, does not crash (no per-tab coverage results at all (empty or non-dict))
+--- test_tab_coverage_check_ok_matching_expected_tabs_passes ---
+  PASS: exact expected tab set, all ok, passes (all 2 tabs populated)
+--- test_tab_coverage_check_ok_one_tab_fails_fails_the_whole_check ---
+  PASS: one failing tab FAILS the aggregate check (1 tab(s) not populated: ['waterfall'])
+  PASS: the failing tab is named (1 tab(s) not populated: ['waterfall'])
+--- test_tab_coverage_check_ok_separates_both_buckets_when_both_present ---
+  PASS: either bucket alone fails the check (1 tab(s) not populated: ['overview']; 1 tab(s) COULD NOT EVALUATE (capacity/tooling refusal, NOT evidence of an empty tab): ['waterfall'])
+  PASS: both tabs are named, in their own bucket (1 tab(s) not populated: ['overview']; 1 tab(s) COULD NOT EVALUATE (capacity/tooling refusal, NOT evidence of an empty tab): ['waterfall'])
+--- test_tab_coverage_check_ok_wrong_tab_set_fails ---
+  PASS: missing an expected tab FAILS (coverage checked the wrong tab set -- missing=['waterfall'], unexpected=[])
+  PASS: the missing tab is named (coverage checked the wrong tab set -- missing=['waterfall'], unexpected=[])
+--- test_waterfall_latency_none_fails ---
+  PASS: None elapsed (query never returned) fails
+--- test_waterfall_latency_over_threshold ---
+  PASS: 10.1s exceeds the 10s threshold
+--- test_waterfall_latency_under_threshold ---
+  PASS: 9.9s is under the 10s threshold
+--- test_workload_signature_both_present_ok ---
+  PASS: both signature events present with real time (Lock:relation=300.0ms, Lock:advisory=200.0ms)
+--- test_workload_signature_empty_rows_fails ---
+  PASS: empty rows (e.g. an idle/empty window) fails (Lock:relation=0.0ms, Lock:advisory=0.0ms -- MISSING/zero: Lock:relation, Lock:advisory)
+--- test_workload_signature_missing_one_fails ---
+  PASS: a missing required event fails (Lock:relation=300.0ms, Lock:advisory=0.0ms -- MISSING/zero: Lock:advisory)
+  PASS: detail names what's missing (Lock:relation=300.0ms, Lock:advisory=0.0ms -- MISSING/zero: Lock:advisory)
+--- test_workload_signature_zero_time_fails ---
+  PASS: a zero-time row does not count as present (Lock:relation=0.0ms, Lock:advisory=150.0ms -- MISSING/zero: Lock:relation)
+
+186/186 passed, 0 failed
+
+[1m=== python: Workload.fire() verify-flag/cadence unit tests (#243) ===[0m
+  PASS: fire(verify=True) [the default, used by every one-shot smoke-test call site] spawns exactly one status-check backend via psql() (calls=1)
+  PASS: fire(verify=False) spawns NO one-shot status-check backend -- this is the #243 fix, used by tests/live_loop_workload.py's per-tick loop so a 900s demo window does not spawn ~150 one-shot backends (calls=0)
+  PASS: fire(verify=False) returns True (nothing was checked, so nothing can be reported as failed) (got True)
+  PASS: fire(verify=True) returns True when the waiter IS blocked (got True)
+  PASS: fire(verify=True) returns False when the waiter is NOT blocked -- this is what live_loop_workload.py's fatal-exit branch depends on (got False)
+  PASS: fire(verify=False) still writes the sleeper's pg_sleep SQL (got 'SELECT pg_sleep(3);\n')
+  PASS: fire(verify=False) still writes the waiter's blocking SQL (got 'SELECT count(*) FROM _smoke_lock_wait;\n')
+  PASS: fire(sleep_s=0) writes NO SQL to the sleeper at all -- no pg_sleep statement is sent (got '')
+  PASS: fire(sleep_s=0) still writes the waiter's blocking SQL -- the Lock:relation wait is unconditional (got 'SELECT count(*) FROM _smoke_lock_wait;\n')
+  PASS: fire() with the default sleep_s=3 still sends pg_sleep(3) (got 'SELECT pg_sleep(3);\n')
+  PASS: live_loop_workload.py's loop computes verify_this_tick via should_verify_tick(), not a fixed True/False
+  PASS: live_loop_workload.py's per-tick fire() call passes the cadence decision, not a hardcoded verify= (sleep_s=0 since 2026-10-06: the demo workload's slow query is the real Lock:relation wait, not a manufactured pg_sleep)
+  PASS: live_loop_workload.py exits loudly (sys.exit(1)) when a verified tick finds the waiter not blocked
+  PASS: should_verify_tick: verifies more than once over 30 ticks (got [0, 10, 20]) -- catches a cadence that silently never verifies
+  PASS: should_verify_tick(0) is True -- a run shorter than VERIFY_EVERY_N_TICKS still verifies at least once
+  PASS: should_verify_tick: does NOT verify every tick over 30 ticks (got [0, 10, 20]) -- catches a cadence that silently verifies every tick (defeats the #243 Sessions-tab fix)
+  PASS: should_verify_tick: verifies exactly tick 0 and every 10th tick after (expected [0, 10, 20], got [0, 10, 20])
+  PASS: VERIFY_EVERY_N_TICKS (10) is in a sane range: too low re-introduces the #243 churn, too high means a broken re-lock loop runs for a long time before anything notices
+  PASS: adv_holder acquires lock id 42 somewhere in one full rotation
+  PASS: adv_holder acquires lock id 43 somewhere in one full rotation
+  PASS: adv_holder acquires lock id 44 somewhere in one full rotation
+  PASS: adv_holder acquires lock id 45 somewhere in one full rotation
+  PASS: reporter's own call carries trailing columns '1' somewhere in one full rotation
+  PASS: reporter's own call carries trailing columns '2, 3' somewhere in one full rotation
+  PASS: reporter's own call carries trailing columns '4, 5, 6' somewhere in one full rotation
+  PASS: reporter's own call carries trailing columns '7, 8, 9, 10' somewhere in one full rotation
+  PASS: the four advisory hold durations are exactly 0.1/0.3/1.0/3.0s (got (0.1, 0.3, 1.0, 3.0))
+  PASS: all four advisory lock ids are distinct (got [42, 43, 44, 45])
+  PASS: _io_load_read_tick sends exactly IO_LOAD_READS_PER_TICK (600) reads (got 600)
+  PASS: _io_load_read_tick writes no server-side pg_sleep
+  PASS: _io_load_write_tick sends exactly IO_LOAD_WRITES_PER_TICK (400) updates (got 400)
+  PASS: _io_load_write_tick writes no server-side pg_sleep
+  PASS: lockmgr session 0 gets exactly LOCKMGR_QUERIES_PER_TICK (20) fanout queries (got 20)
+  PASS: lockmgr session 0's query filters on val, not the partition key id (the pruning-defeating predicate)
+  PASS: lockmgr session 1 gets exactly LOCKMGR_QUERIES_PER_TICK (20) fanout queries (got 20)
+  PASS: lockmgr session 1's query filters on val, not the partition key id (the pruning-defeating predicate)
+  PASS: lockmgr session 2 gets exactly LOCKMGR_QUERIES_PER_TICK (20) fanout queries (got 20)
+  PASS: lockmgr session 2's query filters on val, not the partition key id (the pruning-defeating predicate)
+  PASS: lockmgr session 3 gets exactly LOCKMGR_QUERIES_PER_TICK (20) fanout queries (got 20)
+  PASS: lockmgr session 3's query filters on val, not the partition key id (the pruning-defeating predicate)
+  PASS: lockmgr session 4 gets exactly LOCKMGR_QUERIES_PER_TICK (20) fanout queries (got 20)
+  PASS: lockmgr session 4's query filters on val, not the partition key id (the pruning-defeating predicate)
+  PASS: lockmgr session 5 gets exactly LOCKMGR_QUERIES_PER_TICK (20) fanout queries (got 20)
+  PASS: lockmgr session 5's query filters on val, not the partition key id (the pruning-defeating predicate)
+  PASS: lockmgr session 6 gets exactly LOCKMGR_QUERIES_PER_TICK (20) fanout queries (got 20)
+  PASS: lockmgr session 6's query filters on val, not the partition key id (the pruning-defeating predicate)
+  PASS: lockmgr session 7 gets exactly LOCKMGR_QUERIES_PER_TICK (20) fanout queries (got 20)
+  PASS: lockmgr session 7's query filters on val, not the partition key id (the pruning-defeating predicate)
+  PASS: LOCKMGR_QUERY's WHERE clause does not reference id (the partition key) -- filtering on it would let the planner prune partitions instead of touching all 200 (got 'SELECT count(*) FROM _smoke_lockmgr_fanout WHERE val > 0;\n')
+  PASS: live_loop_workload.py disables parallel workers for the lockmgr sessions, so the fast-path-overflow mechanism does not also spawn a parallel-worker fork storm
+
+50/50 passed
+
+[1m=== python: demo-rehearsal orchestrator unit tests ===[0m
+-- test_decide_outcome_died_fails
+  PASS: decide-outcome BYPASS CASE: died -> exit 1, verdict says died (got 1: remote run died (process gone, no completion marker))
+-- test_decide_outcome_finished_but_results_invalid_fails
+  PASS: decide-outcome BYPASS CASE: rc=0 but results_ok=False -> still exit 1 (got 1)
+-- test_decide_outcome_finished_nonzero_rc_fails
+  PASS: decide-outcome: finished/rc=1 -> exit 1 even with valid results (got 1)
+-- test_decide_outcome_not_started_fails
+  PASS: decide-outcome BYPASS CASE: never provisioned/started -> exit 1 (got 1)
+-- test_decide_outcome_running_is_not_a_failure
+  PASS: decide-outcome: still running -> distinct code 2, not success or failure (got 2)
+-- test_decide_outcome_success
+  PASS: decide-outcome: finished/rc=0/results_ok -> exit 0 (got 0: rehearsal passed, results collected)
+-- test_decide_outcome_unreachable_fails
+  PASS: decide-outcome: unreachable VM -> exit 1, never silently retried forever (got 1)
+-- test_parse_pg_probe_confirmed
+  PASS: parse-pg-probe: a matching postmaster is parsed with its PID
+-- test_parse_pg_probe_empty_raises
+  PASS: parse-pg-probe: empty input (unreachable target) refuses rather than reading as NONE
+-- test_parse_pg_probe_garbage_raises
+  PASS: parse-pg-probe: an ssh-error line is a parse failure, never silently read as PG_CONFIRMED=NONE
+-- test_parse_pg_probe_non_numeric_major_raises
+  PASS: parse-pg-probe: a non-numeric PG major is a parse failure
+-- test_parse_pg_probe_none
+  PASS: parse-pg-probe: NONE means no matching postmaster found
+-- test_parse_pg_probe_unknown_keeps_the_pid
+  PASS: parse-pg-probe: UNKNOWN keeps the pid, distinct from NONE
+-- test_parse_state_line_finished
+  PASS: parse-state: finished RC=0
+-- test_parse_state_line_finished_nonzero
+  PASS: parse-state: finished RC=1
+-- test_parse_state_line_garbage_raises
+  PASS: parse-state: empty line raises (ssh hiccup must not look like a state)
+  PASS: parse-state: garbled ssh output raises, not silently 'not-started'
+  PASS: parse-state: unknown state name raises
+  PASS: parse-state: non-numeric RC raises
+-- test_parse_state_line_running_died_not_started
+  PASS: parse-state: running RC=- -> rc None
+  PASS: parse-state: died RC=- -> rc None
+  PASS: parse-state: not-started RC=- -> rc None
+  PASS: parse-state: unreachable RC=- -> rc None
+-- test_pg_version_verdict_matching_ok
+  PASS: pg-version-verdict: requested == confirmed -> ok
+  PASS: pg-version-verdict: message names the confirmed version
+-- test_pg_version_verdict_none_confirmed_refuses
+  PASS: pg-version-verdict: no postmaster found -> refused, not ok
+  PASS: pg-version-verdict: message says WHY (none found), not just FAIL
+-- test_pg_version_verdict_string_type_mismatch_does_not_silently_pass
+  PASS: pg-version-verdict: int 18 vs str '18' still compares equal (str() normalization)
+-- test_pg_version_verdict_unknown_refuses_with_accurate_message
+  PASS: pg-version-verdict: UNKNOWN confirmation still refuses
+  PASS: pg-version-verdict: UNKNOWN message names the pid that WAS found
+  PASS: pg-version-verdict: UNKNOWN takes its OWN branch, not the generic wrong-version wording that would misreport UNKNOWN as if it were a real resolved version number
+  PASS: pg-version-verdict: UNKNOWN message explains what actually happened (found, then couldn't re-confirm), not just REFUSING
+-- test_pg_version_verdict_wrong_version_refuses
+  PASS: pg-version-verdict: PG 13 running while PG 18 was requested -- refused (this is the exact port-5413 bug)
+  PASS: pg-version-verdict: message names BOTH the requested and the actually-found version
+-- test_queue_wait_sleep_s_floor_is_a_floor_not_a_ceiling
+  PASS: queue-wait: a genuinely large budget is NOT capped down to the floor (got 3000, floor 600)
+-- test_queue_wait_sleep_s_fresh_launch_uses_launch_anchor_no_floor_needed
+  PASS: queue-wait: fresh launch's own budget already exceeds the floor, floor is a no-op here (got 3000)
+-- test_queue_wait_sleep_s_late_collect_still_queued_is_floored
+  PASS: queue-wait: late --collect while still queued -- floored at 600s, never the collapsed-to-zero launch-anchored budget (got 600)
+-- test_queue_wait_sleep_s_reanchored_can_be_zero
+  PASS: queue-wait: re-anchored budget can legitimately be 0 (check again right away) -- not floored (got 0)
+-- test_queue_wait_sleep_s_reanchored_on_confirmed_start_not_floored
+  PASS: queue-wait: re-anchored budget is used AS-IS, not floored to 600 (got 5)
+-- test_validate_complete_failed_result_still_accepted
+  PASS: validate-results: complete transfer of a FAILED rehearsal still accepted (complete)
+-- test_validate_complete_fresh_result_accepted
+  PASS: validate-results: complete, fresh, matching-run.id directory accepted (complete)
+-- test_validate_empty_directory_bypass
+  PASS: validate-results BYPASS CASE: empty directory rejected (run.id missing)
+-- test_validate_missing_directory_bypass
+  PASS: validate-results BYPASS CASE: missing directory rejected (no directory at '/nonexistent/does/not/exist')
+-- test_validate_missing_marker_bypass
+  PASS: validate-results BYPASS CASE: missing run.id (no marker) rejected (run.id missing)
+-- test_validate_missing_required_keys_bypass
+  PASS: validate-results BYPASS CASE: summary.json missing ok/failed rejected (summary.json missing required keys (ok/failed))
+-- test_validate_stale_run_id_bypass
+  PASS: validate-results BYPASS CASE: stale/foreign run.id rejected (run.id 111 does not match this invocation's 999 -- stale/foreign results directory)
+-- test_validate_truncated_summary_bypass
+  PASS: validate-results BYPASS CASE: truncated summary.json rejected (summary.json unreadable/truncated: Unterminated string starting at: line 1 column 14 (char 13))
+-- test_wait_budget_collect_reattach_is_remaining_only
+  PASS: wait-budget: --collect reattach 10min later waits the REMAINING budget only (got 2400)
+-- test_wait_budget_fresh_launch_is_full_window
+  PASS: wait-budget: fresh launch (now==start) is the full window+buffer (got 3000)
+-- test_wait_budget_never_negative
+  PASS: wait-budget: past the deadline clamps to 0, not negative (got 0)
+
+50/50 passed, 0 failed
+
+[1m=== python: gallery provenance and tiered output unit tests ===[0m
+...
+----------------------------------------------------------------------
+Ran 3 tests in 19.701s
+
+OK
+
+[1m=== CI change-classifier table-driven test (issue #167) ===[0m
+  PASS: only docs/: src_changed (got 'false', want 'false')
+  PASS: only docs/: docs_only (got 'true', want 'true')
+  PASS: only *.md outside docs/: src_changed (got 'false', want 'false')
+  PASS: only *.md outside docs/: docs_only (got 'true', want 'true')
+  PASS: only src/: src_changed (got 'true', want 'true')
+  PASS: only src/: docs_only (got 'false', want 'false')
+  PASS: only web/: src_changed (got 'false', want 'false')
+  PASS: only web/: docs_only (got 'false', want 'false')
+  PASS: only tests/: src_changed (got 'false', want 'false')
+  PASS: only tests/: docs_only (got 'false', want 'false')
+  PASS: mix of src/ and docs: src_changed (got 'true', want 'true')
+  PASS: mix of src/ and docs: docs_only (got 'false', want 'false')
+  PASS: a rename (tests/old.py -> tests/new.py): src_changed (got 'false', want 'false')
+  PASS: a rename (tests/old.py -> tests/new.py): docs_only (got 'false', want 'false')
+  PASS: empty file list: src_changed (got 'true', want 'true')
+  PASS: empty file list: docs_only (got 'false', want 'false')
+  PASS: merge_group event (files present but must be ignored): src_changed (got 'true', want 'true')
+  PASS: merge_group event (files present but must be ignored): docs_only (got 'false', want 'false')
+  PASS: merge_group event (no files): src_changed (got 'true', want 'true')
+  PASS: merge_group event (no files): docs_only (got 'false', want 'false')
+
+classify_changed_files: 20/20 passed
+
+[1m=== cross-validate rate-sweep gate unit tests (issue #309) ===[0m
+  PASS: all_passed: 4/4 PASS -> true
+  PASS: all_passed: 1/4 PASS, 3/4 FAIL -> false (the #309 scenario)
+  PASS: old_vacuous_gate: same input -> true (demonstrates the bug #309 fixes)
+  PASS: all_passed: 3/4 PASS, 1/4 FAIL (the last one) -> false
+  PASS: all_passed: no tokens at all -> false (empty input is not a pass)
+  PASS: all_passed: one rate never measured (empty token) -> false, not skipped
+  PASS: extract_max_delta: parses delta+event from a real PASS block (got '3.4'/'LWLock')
+  PASS: extract_max_delta: parses delta+event from a real FAIL block (got '14.9'/'BufferPin')
+  PASS: extract_max_delta: empty input -> '?'/'n/a', not a fabricated zero (got '?'/'n/a')
+  PASS: extract_max_delta: output missing the disagreement line -> '?'/'n/a' (got '?'/'n/a')
+  PASS: print_rate_result: 'non-gating' label is gone from both the pass and fail path
+  PASS: print_rate_summary: FAIL line names the rate, the delta, the event and the tolerance (got:   RATE 50Hz (exploratory rate): OUTSIDE TOLERANCE -- max disagreement 14.9 pp (BufferPin) vs +/-10 pp tolerance)
+  PASS: print_rate_summary: a never-measured rate prints NO RESULT, not a silent PASS
+
+cross_validate_rate_gate: 13/13 passed
+port base: 39484 (span 70 — TEST=+0 CHAOS=+30 SNAP=+40 CHIP=+60)
+
+[1m=== web UI suite vs mock_server.py (Playwright) ===[0m
+=== test_web_ui ===
+--- Test 1: Page Load ---
+  PASS: Status shows connection info: '4 CPUs · 15.0m window · peak 4.5 AAS'
+  PASS: Page title is 'pgwt' (got 'pgwt')
+  PASS: Header is 'pgwt'
+  PASS: [test_page_load] no console errors (got 0: [])
+--- Test 2: Tab Navigation ---
+  PASS: Tabs: ['Overview', 'Events', 'Sessions', 'Queries', 'Histogram', 'Timeline', 'Transitions', 'Concurrency', 'Waterfall', 'Scatter', 'Matrix']
+  PASS: Overview tab active by default
+  PASS: Events tab becomes active after click
+  PASS: Sessions tab becomes active after click
+  PASS: [test_tabs] no console errors (got 0: [])
+--- Test 3: Summary Bar ---
+  PASS: Summary has 'DB Time'
+  PASS: Summary has 'AAS'
+  PASS: Summary has 'CPUs'
+  PASS: DB Time metric present
+  PASS: CPUs = 4 (got '4')
+  PASS: AAS = 3.54 (got '3.54')
+  PASS: [test_summary_bar] no console errors (got 0: [])
+--- Test 4: Overview Table ---
+  PASS: Overview table has 12 rows
+  PASS: First row is 'DB Time'
+  PASS: Table has CPU (running) row
+  PASS: Table has CPU (waiting for a core) row
+  PASS: Table has IO row
+  PASS: Table has Lock row
+  PASS: [test_overview_table] no console errors (got 0: [])
+--- Test 5: Events Table ---
+  PASS: Has 'Wait Event' column
+  PASS: Has 'Count' column
+  PASS: Has 'P50' column
+  PASS: Has 'P95' column
+  PASS: Has 'AAS' column
+  PASS: Events table has 8 rows (expected >= 5)
+  PASS: Top event is CPU*
+  PASS: [test_events_table] no console errors (got 0: [])
+--- Test 6: Column Sorting ---
+  PASS: Sort indicator shown in Count header
+  PASS: Sort direction toggled (ascending)
+  PASS: [test_column_sorting] no console errors (got 0: [])
+--- Test 7: Drill-down Flow ---
+  PASS: Drill from Overview -> Events tab
+  PASS: Breadcrumb shown: '›CPU ✕'
+  PASS: Filter shown in breadcrumb
+  PASS: Drill from Events -> Queries tab
+  PASS: Breadcrumb has 2 entries after 2 drills
+  PASS: [test_drill_down] no console errors (got 0: [])
+--- Test 8: Breadcrumb Navigation ---
+  PASS: Clear filter button (X) exists
+  PASS: Clear filters returns to Overview
+  PASS: Breadcrumb cleared after Clear
+  PASS: [test_breadcrumb_navigation] no console errors (got 0: [])
+--- Test 9: Sessions Table ---
+  PASS: Sessions has 'PID' column
+  PASS: Sessions has 'DB Time' column
+  PASS: Sessions has 'Top Wait' column
+  PASS: Sessions has 6 rows (expected >= 4)
+  PASS: Click session -> Timeline tab
+  PASS: [test_sessions_table] no console errors (got 0: [])
+--- Test 10: Queries Table ---
+  PASS: Queries has 'Query ID' column
+  PASS: Queries has 'Query Text' column
+  PASS: Queries has 'Wait Profile' column
+  PASS: Queries has 3 rows (expected >= 3)
+  PASS: Stacked wait profile bars rendered (3)
+  PASS: [test_queries_table] no console errors (got 0: [])
+--- Test 11: Histogram Tab ---
+  PASS: Class selector exists
+  PASS: Event selector exists
+  PASS: Heatmap container exists
+  PASS: Heatmap canvas rendered
+  PASS: Heatmap series has data cells (ok:176)
+  PASS: [test_histogram_tab] no console errors (got 0: [])
+--- Test 12: Timeline Tab ---
+  PASS: Timeline shows 'Select a session' prompt without filter
+  PASS: Drill from Sessions -> Timeline
+  PASS: Timeline chart canvas rendered
+  PASS: Timeline custom series has spans (ok:8)
+  PASS: [test_timeline_tab] no console errors (got 0: [])
+--- Test 12b: Transitions Tab ---
+  PASS: transitions view requests the real server's buckets parameter ({'id': 7, 'cmd': 'transitions', 'from': 1773999100000000000, 'to': 1774000000000000000, 'filters': {}, 'buckets': 200})
+  PASS: variants is NOT requested on tab entry ([])
+  PASS: Transitions tab becomes active
+  PASS: Transitions DFG container exists
+  PASS: Simplify slider exists
+  PASS: No 'No transitions' message (got: 'Simplify:20%Hide idle waits1,800 transitions (1,460 idle hid')
+  PASS: No timeout error
+  PASS: Transition count shown
+  PASS: Transitions DFG rendered with data (ok:3)
+  PASS: DFG resize storm coalesced to one layout ({'resize': 1, 'layout': 1})
+  PASS: Variants panel shows a discoverable 'load' affordance
+  PASS: Variants panel is idle (not pre-loaded) before any click (Load flow variants — execution/planning patterns for this wi)
+  PASS: variants request (after the click) uses buckets, not num_buckets ({'id': 8, 'cmd': 'variants', 'from': 1773999100000000000, 'to': 1774000000000000000, 'filters': {}, 'buckets': 20})
+  PASS: Variants section rendered below the DFG after the click
+  PASS: [test_transitions_tab] no console errors (got 0: [])
+--- Test 13: Time Picker ---
+  PASS: Time range displayed: '09:31:40 – 09:46:40 UTC (15.0m)'
+  PASS: Time picker opens on click
+  PASS: Quick range buttons: 9 (expected >= 8)
+  PASS: Picker closes after quick range click
+  PASS: Custom range inputs exist
+  PASS: [test_time_picker] no console errors (got 0: [])
+--- Test 14: Zoom Out ---
+  PASS: Zoom out changes time range ('09:31:40 – 09:46:40 UTC (15.0m)' -> '09:24:10 – 09:46:40 UTC (22.5m)')
+  PASS: Zoom out button exists
+  PASS: [test_zoom_out] no console errors (got 0: [])
+--- Test 14b: Auto-Refresh ---
+  PASS: Live button exists
+  PASS: Live button active initially (live mode default)
+  PASS: Live indicator active after selecting '5m'
+  PASS: Live indicator off after selecting 'All'
+  PASS: Live button toggles on
+  PASS: Live button toggles off
+  PASS: [test_auto_refresh] no console errors (got 0: [])
+--- Test 15: Chart Rendering ---
+  PASS: default AAS renderer is uplot (got uplot)
+  PASS: AAS uPlot canvas rendered
+  PASS: uPlot instance mounted
+  PASS: AAS spec has series with data (buckets=60, series=12)
+  PASS: x scale is exactly the camera window (scale={'min': 1773999100000, 'max': 1774000000000}, cam=[1773999100000000000, 1774000000000000000])
+  PASS: Chart height = 300px (expected > 100)
+  PASS: ?renderer=echarts selects the ECharts baseline
+  PASS: ECharts baseline has series with data (ok:12)
+  PASS: [test_chart_rendering] no console errors (got 0: [])
+--- Test 15b: Concurrency Tab ---
+  PASS: Concurrency tab active
+  PASS: Peak concurrency chart container exists
+  PASS: Peak concurrency ECharts instance rendered
+  PASS: Concurrency peak line has data (ok:60)
+  PASS: Burst table container exists
+  PASS: Burst section has content
+  PASS: [test_concurrency_tab] no console errors (got 0: [])
+--- Test 15c: Legend Hover Survives Live Tick (echarts baseline) ---
+  PASS: IO legend chip rendered
+  PASS: hover solos the IO series (visible=['IO'])
+  PASS: hover-solo survived the live-tick rebuild (2 applies, non-solo=[])
+  PASS: chart still solos IO after the rebuild (visible=['IO'])
+  PASS: selection returns to all-on after leaving the legend (off=[])
+  PASS: [test_legend_hover_survives_tick] no console errors (got 0: [])
+--- Test 15d: uPlot Legend Semantics ---
+  PASS: IO legend chip rendered
+  PASS: hover solos the IO series (uPlot show flags)
+  PASS: hover-solo survived the live-tick rebuild (visible=['IO'])
+  PASS: all series visible after leaving the legend (off=[])
+  PASS: [test_uplot_legend] no console errors (got 0: [])
+--- Test 15e: uPlot Camera Gestures ---
+  PASS: uPlot pane mounted before gestures
+  PASS: camera follows (live) before any gesture
+  PASS: wheel zooms in (span 900000000000 -> 720000000000)
+  PASS: wheel gesture detaches the camera
+  PASS: gesture paused live mode (U0 machinery)
+  PASS: viewport = camera window after zoom (scale={'min': 1773999190000, 'max': 1773999910000})
+  PASS: shift+drag pans forward (from 1773999190000000000 -> 1773999264482758100)
+  PASS: pan preserved the span (span 720000000000 -> 720000000000)
+  PASS: plain drag brush-selects a sub-window ([1773999264482758100, 1773999984482758100] -> [1773999480483000000, 1773999696483000000])
+  PASS: dblclick zooms out (span 216000000000 -> 720000000000)
+  PASS: N-CPUs overlay line present under the gestured camera (hlines=['ncpus'])
+  PASS: [test_uplot_gestures] no console errors (got 0: [])
+--- Test 17: Session -> Timeline Flow ---
+  PASS: First session PID: 1001
+  PASS: Breadcrumb shows pid filter: '›PID 1001 ✕'
+  PASS: [test_session_drill_to_timeline] no console errors (got 0: [])
+--- Test 18: Query Drill-down ---
+  PASS: Query drill -> Events tab
+  PASS: Breadcrumb shows query filter: '›UPDATE pgbench_accounts SET abalance = a ✕'
+  PASS: [test_query_drill] no console errors (got 0: [])
+--- Test 19: Exact Summary Values ---
+  PASS: DB Time = 12.8s (got '12.8s')
+  PASS: Wall = 3600.0s (got '3600.0s')
+  PASS: AAS = 3.54 (got '3.54')
+  PASS: Idle = 45.0s (got '45.0s')
+  PASS: CPUs = 4 (got '4')
+  PASS: [test_exact_summary_values] no console errors (got 0: [])
+--- Test 20: Exact Event Cell Values ---
+  PASS: First row is CPU* (cells: ['CPU*', '250.0K', '4.8s'])
+  PASS: CPU* count contains '250' (250.0K)
+  PASS: CPU* total ~4800ms
+  PASS: CPU* pct = 38.4%
+  PASS: CPU* AAS = 1.33
+  PASS: Second event is IO:DataFileRead
+  PASS: IO:DataFileRead pct = 16.8%
+  PASS: [test_exact_event_values] no console errors (got 0: [])
+--- Test 21: Exact Session Cell Values ---
+  PASS: First session PID = 1001
+  PASS: First session user = postgres
+  PASS: First session db = testdb
+  PASS: First session top wait = IO:DataFileRead
+  PASS: Checkpointer PID 4870 in sessions
+  PASS: Checkpointer type shown
+  PASS: [test_exact_session_values] no console errors (got 0: [])
+--- Test 22: Exact Query Cell Values ---
+  PASS: First query text contains UPDATE pgbench_accounts
+  PASS: First query pct = 33.6%
+  PASS: Second query is SELECT
+  PASS: [test_exact_query_values] no console errors (got 0: [])
+--- Test 23: Timeline Bar Positions ---
+  PASS: Timeline has 4 bars
+  PASS: all drawn bar coords clamped to the window (bars=[(1773999100000000000, 1773999130000000000), (1773999130000000000, 1773999160000000000), (1773999160000000000, 1773999180000000000), (1773999180000000000, 1773999220000000000)], window=[1773999100000000000,1774000000000000000])
+  PASS: all bars keep a positive raw duration (d[6])
+  PASS: first bar raw duration ≈ 50s (got 50.0s)
+  PASS: raw start <= drawn start (raw=1773999080000000000, drawn=1773999100000000000)
+  PASS: pre-window wait drawn from the window edge (drawn=1773999100000000000, from=1773999100000000000)
+  PASS: [test_timeline_bar_positions] no console errors (got 0: [])
+--- Test 24: No Double Refresh ---
+  PASS: Drill-down sent 1 window aas request(s) (expected 1)
+  PASS: Drill-down sent 1 strip prefetch(es) (expected <= 1)
+  PASS: Drill-down sent 1 table request(s) (expected 1)
+  PASS: [test_no_double_refresh] no console errors (got 0: [])
+--- Test 25: Filter Persistence Across Tabs ---
+  PASS: Filter active: '›CPU ✕'
+  PASS: Filter preserved after tab switch
+  PASS: Filter still preserved on Queries tab
+  PASS: Filter preserved back on Overview tab
+  PASS: [test_filter_persists_across_tabs] no console errors (got 0: [])
+--- Test T6.1: Degraded Transport ---
+  PASS: table has data before the outage
+  PASS: degraded overlay hidden while healthy
+  PASS: status pill shows degraded (class='status degraded')
+  PASS: status text explains the outage: 'Connection lost — retrying'
+  PASS: connection-lost overlay is visible
+  PASS: tables do NOT claim 'No data' during a transport outage
+  PASS: degraded state exposed to tests
+  PASS: window frozen while degraded (was [1773999100000000000, 1774000000000000000], now [1773999100000000000, 1774000000000000000])
+  PASS: still degraded while upstream stays dead
+  PASS: degraded state cleared after recovery
+  PASS: overlay hidden after recovery
+  PASS: table repainted with data after recovery
+  PASS: [test_degraded_transport] no console errors (got 0: [])
+--- Test T6.2: UTC Custom Range + AAS Empty State ---
+  PASS: time-range readout labeled UTC
+  PASS: AAS chart painted for the live window
+  PASS: custom From parsed as UTC (want 2177452800000000000, got 2177452800000000000)
+  PASS: AAS chart cleared on empty window ({'renderer': 'uplot', 'mounted': False, 'hasData': False, 'cardText': 'No data in selected range'})
+  PASS: AAS chart shows an explicit 'No data' placeholder (got 'No data in selected range')
+  PASS: [utc/empty-state] no console errors (got 0: [])
+  PASS: [test_custom_range_utc_and_aas_empty_state] no console errors (got 0: [])
+--- Test T6.3: Reconnect Idempotence ---
+  PASS: no ECharts instance leak after 3 reconnects (live instances=0)
+  PASS: no uPlot instance leak after 3 reconnects (roots=1)
+  PASS: one tab click sends exactly 1 top_events after reconnects (got ['aas', 'top_events'])
+  PASS: one tab click sends exactly 1 aas after reconnects (got ['aas', 'top_events'])
+  PASS: [test_reconnect_idempotent_no_leak] no console errors (got 0: [])
+--- Test U0.1: Command Error Card ---
+  PASS: pane error card painted on a command error
+  PASS: card carries the server's error text ('⚠ unknown command: top_events_brokenview: events · command: top_eventsRetry')
+  PASS: card names the failing view + command ('view: events · command: top_events')
+  PASS: no eternal 'Loading...' placeholder behind the error card
+  PASS: error card offers a Retry button
+  PASS: error card cleared after a successful retry
+  PASS: Events table repainted after retry (headers=['Wait Event', 'Count', 'Total'])
+  note: [pgwt] error surface: console: [pgwt] command error: events TransportError: unknown command: top_events_broken
+    at Tran
+  PASS: [test_command_error_card] no console errors (got 0: [])
+  PASS: [test_command_error_card] provoked failure reported via '[pgwt]' console.error
+--- Test U2.a: AAS Band Click -> Drill ---
+  PASS: uPlot pane mounted before click
+  PASS: band click pivoted to the Events tab
+  PASS: class-mode band click drilled class=CPU (filters={'class': 'CPU'})
+  PASS: drill paused live mode (P4)
+  PASS: breadcrumb shows the drilled class ('›CPU (running) ✕')
+  PASS: filter bar shows 1 chip after the drill (1)
+  PASS: Events table filtered to the drilled class (1 rows)
+  PASS: [test_aas_click_drill] no console errors (got 0: [])
+--- Test U2.b: Burst Row -> Zoom ---
+  PASS: burst/peak rows carry the zoom-intent attributes
+  PASS: row click zoomed to exactly data-from..data-to (±5-bucket window, span=600s)
+  PASS: burst-zoom keeps the current tab (pure time jump)
+  PASS: burst-zoom applied no filter ({})
+  PASS: zoom recorded in history (len=1)
+  PASS: [test_burst_row_zoom] no console errors (got 0: [])
+--- Test U2.c: Timeline Drag-Zoom ---
+  PASS: drilled from Sessions into the timeline
+  PASS: timeline chart instance is resolvable
+  PASS: drag narrowed the window (900s -> 310s)
+  PASS: zoomed window is a sub-range of the old ([1773999100000000000, 1774000000000000000] -> [1773999361666666800, 1773999671666666800])
+  PASS: drag-zoom refetched the timeline exactly once (cmds=['aas', 'aas', 'session_timeline'])
+  PASS: P5: the timeline chart HOST node survived the refetch remount
+  PASS: P5: the ECharts instance was REUSED, not disposed/re-init (ec_1791492607416 -> ec_1791492607416)
+  PASS: P5: the stable shell keeps a banner slot above the chart
+  PASS: [test_timeline_drag_zoom] no console errors (got 0: [])
+--- Test U2.d: Heatmap Cell -> Drill ---
+  PASS: heatmap chart mounted (cell pixel resolved)
+  PASS: cell click pivoted to the Queries tab
+  PASS: window zoomed to exactly the clicked cell's bucket
+  PASS: no duplicate filter drill (scope stays FilterStack-owned): {}
+  PASS: one Back from a windowed pivot returned directly to Histogram
+  PASS: [test_heatmap_cell_drill] no console errors (got 0: [])
+--- Test U2.e: DFG Node -> Drill ---
+  PASS: CPU* node carries eventId 0 ({'x': 144, 'y': 746, 'eventId': 0})
+  PASS: CPU* pseudo-node click does not pivot
+  PASS: IO:DataFileRead node carries the server event_id ({'x': 640, 'y': 746, 'eventId': 16777237})
+  PASS: node click pivoted to the Queries tab
+  PASS: node drill filtered event_id (filters={'event_id': 16777237})
+  PASS: breadcrumb labels the drilled node ('›IO:DataFileRead ✕')
+  PASS: [test_dfg_node_drill] no console errors (got 0: [])
+--- Test U2.f: Percentile Cell -> Histogram Pivot ---
+  PASS: CPU* row has no drillable percentile cells (0)
+  PASS: IO:DataFileRead row has 3 drillable percentile cells (3)
+  PASS: P95 cell pivoted to the Histogram tab (row drill did NOT fire)
+  PASS: percentile cell drilled event_id (filters={'event_id': 16777237})
+  PASS: histogram event dropdown reflects the FilterStack ('16777237')
+  PASS: breadcrumb labels the drilled event ('›IO:DataFileRead ✕')
+  PASS: [test_percentile_cell_pivot] no console errors (got 0: [])
+--- Test U2.g: Filter Bar Chips + Tab Badges ---
+  PASS: no chips while unfiltered
+  PASS: no tab badges while unfiltered
+  PASS: 1 chip after the class drill (1)
+  PASS: ALL 11 tabs badge while filtered — every tab is a lens (got 11)
+  PASS: 2 chips after the event drill (2)
+  PASS: class chip has its own ✕
+  PASS: ✕ removed only the class dimension (filters={'event_id': 0})
+  PASS: removal recorded as a NEW breadcrumb (append-only)
+  PASS: one chip remains after the ✕
+  PASS: badges stay while a filter remains
+  PASS: no chips after removing the last filter
+  PASS: tab badges off with no active filters
+  PASS: breadcrumb trail survives (drillUp can restore the removed filter)
+  PASS: [test_filter_bar_chips_and_badges] no console errors (got 0: [])
+--- Test U2.h: Histogram Dropdown Write-Through ---
+  PASS: class select wrote through to the FilterStack ({'class': 'IO'})
+  PASS: histogram-event intent keeps the histogram tab
+  PASS: filter bar chip follows the dropdown edit
+  PASS: URL hash carries the dropdown filter (P9)
+  PASS: dropdown edit paused live (investigation gesture)
+  PASS: event select stacked event_id on class ({'class': 'IO', 'event_id': 16777237})
+  PASS: selects re-derived from the FilterStack after a tab round-trip ({'cls': 'IO', 'ev': '16777237'})
+  PASS: external filter change synced the non-focused event select
+  PASS: clearing the class removed both dimensions ({})
+  PASS: chips cleared with the filters
+  PASS: [test_histogram_dropdown_writethrough] no console errors (got 0: [])
+--- Test U2.j: Histogram Clear -> Strip Invalidation ---
+  PASS: All-clear invalidated the strip generation (1 -> 2)
+  PASS: wheel strip requests are unfiltered after All ([{'id': 17, 'cmd': 'aas', 'from': 1773998469522915300, 'to': 1774000632038948900, 'buckets': 1007, 'filters': {}}])
+  PASS: painted strip is class-mode/unfiltered after wheel (['CPU (running)', 'CPU (waiting for a core)', 'IO', 'Lock'])
+  PASS: provisional window repaint did not count as a live tick ({'applied': None, 'run': 0})
+  PASS: [test_histogram_clear_invalidates_strip] no console errors (got 0: [])
+--- Test U2.k: 400 ms Double-Click Arbitration ---
+  PASS: 400 ms dblclick fired zero drills ({})
+  PASS: 400 ms dblclick widened the window (900000000000 -> 1350000000000)
+  PASS: 400 ms dblclick applied zoom-out exactly once ([1773998650000000000, 1774000000000000000])
+  PASS: [test_aas_slow_double_click] no console errors (got 0: [])
+--- Test U2.l: Hash Without Sort Clears Sort ---
+  PASS: sorted entry names its sort (#tab=events&live=1&span=900&sort=count.desc)
+  PASS: sort-less hash cleared tabSort ('Count')
+  PASS: [test_hash_sort_clear] no console errors (got 0: [])
+--- Test U2.m: Rapid Hash Traversal Coalescing ---
+  PASS: history setup drilled to Events
+  PASS: rapid Back/Back reached the first entry ({'hash': '#tab=overview&live=1&span=900', 'tab': 'overview', 'filters': {}})
+  PASS: Forward restored the drill entry after rapid traversal
+  PASS: [test_rapid_hash_traversal] no console errors (got 0: [])
+--- Test U2.i: URL State Round-Trip ---
+  PASS: investigation state built (tab=events, filters={'class': 'CPU'})
+  PASS: hash names window + filters ('#tab=events&from=1773999370000000000&to=1773999640000000000&f.class=CP')
+  PASS: tab restored from the deep link (events)
+  PASS: filters restored ns-typed ({'class': 'CPU'})
+  PASS: window restored ns-exact ([1773999370000000000, 1773999640000000000])
+  PASS: canonical hash stable across the reload
+  PASS: filter chip restored from the deep link
+  PASS: frozen-window link restores paused, not live
+  PASS: live=1 deep link restored live mode
+  PASS: live restore re-anchored to the server clock NOW (mock now_ns)
+  PASS: span=300s honored (300000000000)
+  PASS: live hash carries span, never a window ('#tab=events&live=1&span=300')
+  PASS: deep-linked event chip resolved its payload name ('IO:DataFileRead✕')
+  PASS: [test_url_state_roundtrip] no console errors (got 0: [])
+--- Test U3.1: Execution Waterfall ---
+  PASS: waterfall defaults to longest-running-first (#222)
+  PASS: execution selector rendered 4 rows (4)
+  PASS: slowest-first order is 1004, 1002, 1010, 1000 (['09:46:39.0001004100≥ 1.0s (running)—00', '09:46:39.150100210080.0ms—20', '09:46:39.100101010080.0ms *—10', '09:46:39.050100010030.0ms1.0ms52'])
+  PASS: default selection skips the empty longest-elapsed execution ('09:46:39.150100210080.0ms—20')
+  PASS: selected execution detail has one leader lane (1)
+  PASS: explicitly selected empty execution states it honestly ({'text': 'No execution events captured', 'chart': False})
+  PASS: row click selected the other completed execution
+  PASS: selected execution rendered leader + 2 workers (3 lanes)
+  PASS: sort toggle switched the label to latest-first
+  PASS: latest-first order is 1002, 1010, 1000, 1004 (['09:46:39.150100210080.0ms—20', '09:46:39.100101010080.0ms *—10', '09:46:39.050100010030.0ms1.0ms52', '09:46:39.0001004100≥ 1.0s (running)—00'])
+  PASS: latest-first default selects the newest row directly, it already has data ('09:46:39.150100210080.0ms—20')
+  PASS: plain drag locally zoomed resident detail (32001000 -> 13579873)
+  PASS: padded waterfall drag applied canvas-relative band ({'x1': 417, 'x2': 863, 'from': 7368450.9990485255, 'to': 20948323.501427215} -> {'from': 7368451, 'to': 20948324})
+  PASS: waterfall labels its local zoom state
+  PASS: double-click restored full execution (32001000)
+  PASS: local zoom/restore used resident detail with no refetch (cmds=[])
+  PASS: bar click opened compact readout ('IO:DataFileReadPID 1000Start 09:46:39.050 UTCDuration 10.0ms')
+  PASS: [test_waterfall_view] no console errors (got 0: [])
+--- Test U3.2: Query -> Waterfall Pivot ---
+  PASS: query Waterfall action is visible without horizontal scroll ({'x': 542, 'y': 474, 'width': 81.0625, 'height': 16})
+  PASS: dedicated query action pivoted to Waterfall
+  PASS: query-executions pivot applied query_id through FilterStack ({'query_id': '3886912043147135675'})
+  PASS: query pivot loaded selected execution detail
+  PASS: [test_query_to_waterfall_pivot] no console errors (got 0: [])
+--- Test U3.3: Execution Scatter ---
+  PASS: scatter rendered time/log large series with 2 completed points ({'type': 'time', 'y': 'log', 'large': True, 'n': 2})
+  PASS: scatter states the one excluded in-progress point
+  PASS: scatter point pivoted to Waterfall
+  PASS: scatter handoff selected interior PID 1002 execution ('09:46:39.150100210080.0ms—20')
+  PASS: scatter execution identity is URL state (#tab=waterfall&from=1773999100000000000&to=1774000000000000000&exec.pid=1002&exec.start=1773999999150000000&exec.end=1773999999230000000&exec.query=200)
+  PASS: reload restored the exact scatter selection ('09:46:39.150100210080.0ms—20')
+  PASS: 2-D box made time the primary zoom semantic (900000000000 -> 51765248)
+  PASS: meaningful y box disclosed both applied dimensions ('Selected latency context: 25.97 ms–35.63 ms (time and latency ranges applied)')
+  PASS: 2-D selection actually constrained the latency axis ({'min': 25.97214220054101, 'max': 35.62980713431514})
+  PASS: horizontal padded-host drag applied the canvas-relative time range ({'x1': 392, 'x2': 888, 'y': 705, 'from': 1773999999073.9749, 'to': 1773999999121.0862} -> {'from': 1773999999073974800, 'to': 1773999999121086200})
+  PASS: [test_scatter_view] no console errors (got 0: [])
+--- Test U3.4: Transition Matrix ---
+  PASS: matrix rendered heatmap with log-piecewise dimension ({'type': 'heatmap', 'vm': 'piecewise', 'dim': 2, 'n': 5})
+  PASS: matrix note is volume-honest and discloses the server link cap ('Showing 1,670 of 1,800 transitions; 130 not shown · Server returned 5 of 8 transition links (link cap); transition totals include omitted links')
+  PASS: matrix requests the real server's buckets parameter ({'id': 7, 'cmd': 'transitions', 'from': 1773999100000000000, 'to': 1774000000000000000, 'filters': {}, 'buckets': 200})
+  PASS: matrix cell pivoted to Queries
+  PASS: matrix cell drilled the TARGET event id ({'event_id': 100663296})
+  PASS: [test_matrix_view] no console errors (got 0: [])
+--- Test #171: chart views update in place (not rebuilt) on a tick ---
+  PASS: scatter chart canvas present before a tick
+  PASS: scatter's chart canvas survives a live tick unchanged (no rebuild-on-tick flash)
+  PASS: scatter rebuilds a fresh canvas on a genuine identity change (tab re-entry)
+  PASS: matrix chart canvas present before a tick
+  PASS: matrix's chart canvas survives a live tick unchanged (no rebuild-on-tick flash)
+  PASS: matrix rebuilds a fresh canvas on a genuine identity change (tab re-entry)
+  PASS: waterfall chart canvas present before a tick
+  PASS: waterfall's chart canvas survives a live tick unchanged (no rebuild-on-tick flash)
+  PASS: waterfall rebuilds a fresh canvas on a genuine identity change (tab re-entry)
+  PASS: [test_chart_views_update_in_place_on_tick] no console errors (got 0: [])
+--- Test U3.5: B6 Deep Links ---
+  PASS: waterfall deep link hydrated tab + query_id filter
+  PASS: scatter deep link hydrated
+  PASS: matrix deep link hydrated
+  PASS: [test_b6_deep_links] no console errors (got 0: [])
+--- Test B5.1: Sampled Fidelity Shading ---
+  PASS: AAS pane has a fidelity shading band in view (ok:1)
+  PASS: Fidelity legend chip rendered
+  PASS: Fidelity chip explains sampled shading: 'Sampled (estimated)shaded = sampled (estimated, not exact)'
+  PASS: [test_b5_sampled_shading] no console errors (got 0: [])
+--- Test B5.2: Exact-only Unavailable Panel ---
+  PASS: Transitions shows the unavailable panel
+  PASS: Panel explains no full-fidelity data: '  ◐  No full-fidelity data in this window  capture an exact '
+  PASS: Panel offers an Escalate button
+  PASS: Concurrency shows the unavailable panel
+  PASS: Histogram shows the unavailable panel
+  PASS: waterfall shows expected full-fidelity refusal panel
+  PASS: scatter shows expected full-fidelity refusal panel
+  PASS: matrix shows expected full-fidelity refusal panel
+  PASS: [test_b5_unavailable_panel] no console errors (got 0: [])
+--- Test B5.3: Escalate Flow ---
+  PASS: Escalate control visible (daemon supports escalation)
+  PASS: Escalate button present
+  PASS: Button reads 'Escalate' (got 'Escalate 60s')
+  PASS: Tier sampled before escalate (got sampled)
+  PASS: Tier escalated after click (got escalated)
+  PASS: Button shows escalated state: 'Escalated · 60s left'
+  PASS: Stop (de-escalate) button appears while escalated
+  PASS: [test_b5_escalate_flow] no console errors (got 0: [])
+--- Test B5.4: Daemon Metrics Panel ---
+  PASS: Metrics button visible when daemon present
+  PASS: Metrics panel opens
+  PASS: Metrics panel shows Events/s
+  PASS: Metrics panel shows ringbuf drops
+  PASS: Metrics panel shows overhead estimate
+  PASS: Metrics panel shows budget remaining
+  PASS: [test_b5_metrics_panel] no console errors (got 0: [])
+--- Test U4.1: Compare geometry + delta ranking ---
+  PASS: compare AAS paints B-total ghost geometry and signed diff buckets
+  PASS: delta table exposes A | B | Δ | × with Δ default (['Wait Event', 'A', 'B', 'Δ ▼', '×'])
+  PASS: largest |Δ| entity ranks first and is labeled new ('Lock:relation1.5s—+1.5snew')
+  PASS: delta table ends with the honest below-change-floor row
+  PASS: [test_compare_delta_ranking] no console errors (got 0: [])
+--- Test U4.2: Compare live offset follow ---
+  PASS: enabling compare does not pause live follow
+  PASS: live tick moved A and derived B equally (30000000000 ns)
+  PASS: B remains exactly A + b_off after the live tick
+  PASS: [test_compare_live_offset_follow] no console errors (got 0: [])
+--- Test U4.3: Compare fidelity mismatch ---
+  PASS: compare header keeps both fidelity badges ('A vs 5 min agoA ExactB Sampled (estimated)⚠ Δ compares exact against sampled estimates')
+  PASS: fidelity mismatch warning is persistent and explicit
+  PASS: fidelity mismatch flags but does not block rendering
+  PASS: [test_compare_fidelity_mismatch] no console errors (got 0: [])
+--- Test U4.4: Compare URL reload + history ---
+  PASS: compare URL names the signed ns offset ('#tab=overview&live=1&span=900&cmp=1&b_off=-300000000000')
+  PASS: compare state survives reload exactly
+  PASS: single exit removes both compare URL keys
+  PASS: Back restores the compare entry
+  PASS: Forward restores the one-step compare exit
+  PASS: [test_compare_url_roundtrip] no console errors (got 0: [])
+--- Test U4.5: Baseline predates trace ---
+  PASS: retention edge is a quiet compare note ('A vs 1 d agoA ExactB No databaseline predates the trace')
+  PASS: predating baseline renders neither ghost nor diff
+  PASS: predating baseline is not an error card
+  PASS: [test_compare_baseline_predates] no console errors (got 0: [])
+--- Test U4.6: Superseded B strip is silent ---
+  PASS: superseded B result produced no active-pane error card
+  PASS: newer compare refresh still owns the rendered AAS pane
+  PASS: [test_compare_superseded_baseline_is_silent] no console errors (got 0: [])
+--- Test U4.7: B-only command failure degrades to A ---
+  PASS: AAS pane explains the B-only degradation ('Baseline unavailable; showing A only')
+  PASS: AAS investigation window A remains rendered
+  PASS: B-only AAS failure does not paint a P1 error card
+  PASS: overview renders investigation window A after B failure
+  PASS: overview carries the quiet baseline-unavailable note
+  PASS: overview B-only failure does not paint a P1 error card
+  PASS: events renders investigation window A after B failure
+  PASS: events carries the quiet baseline-unavailable note
+  PASS: events B-only failure does not paint a P1 error card
+  PASS: queries renders investigation window A after B failure
+  PASS: queries carries the quiet baseline-unavailable note
+  PASS: queries B-only failure does not paint a P1 error card
+  PASS: [test_compare_baseline_failure_degrades_to_a] no console errors (got 0: [])
+--- Test U4.8: ECharts compare limitation is explicit ---
+  PASS: test is exercising the ECharts rollback renderer
+  PASS: ECharts compare omission is explicit ('Compare visuals require the uPlot renderer')
+  PASS: ECharts still renders investigation window A
+  PASS: [test_compare_echarts_renderer_note] no console errors (got 0: [])
+--- Test 16: Reconnection ---
+  PASS: Status shows reconnecting after disconnect: 'Reconnecting in 2s...'
+  PASS: Reconnected after server restart: '4 CPUs · 15.0m window · peak 4.5 AAS'
+  PASS: [test_reconnection] no console errors (got 0: [])
+
+444/444 tests passed
+
+[1m=== web UI chaos suite (latency jitter / reconnects) ===[0m
+=== test_web_ui_chaos (Phase B2 — chaos mode) ===
+
+--- [gating] test_rapid_tab_switching ---
+  PASS: final active tab is Events (got Events)
+  PASS: final container holds the Events table (headers=['Wait Event', 'Count', 'Total', 'Avg'])
+  PASS: no stale heatmap container leaked under Events tab
+  PASS: no stale timeline prompt leaked under Events tab
+  PASS: no stale transitions DFG leaked under Events tab
+  PASS: [test_rapid_tab_switching] no console errors (got 0: [])
+
+--- [gating] test_click_drilldown_before_load ---
+  PASS: have >=2 session rows to drill (6)
+  PASS: drill lands on Timeline (got Timeline)
+  PASS: breadcrumb shows the final drill (PID 1002); got '›PID 1001›PID 1002 ✕'
+  PASS: timeline chart renders the final drill PID 1002 (y-axis=['PID 1002'])
+  PASS: timeline chart does NOT show the stale PID 1001 (y-axis=['PID 1002'])
+  PASS: [test_click_drilldown_before_load] no console errors (got 0: [])
+
+--- [gating] test_toggle_live_mid_refresh ---
+  PASS: Live button is off after final toggle (active=False)
+  PASS: Live label/class consistent (label='Live', active=False)
+  PASS: view window stayed frozen (target=[1773996400000000000, 1774000000000000000], final=[1773996400000000000, 1774000000000000000])
+  PASS: [test_toggle_live_mid_refresh] no console errors (got 0: [])
+
+--- [gating] test_dragzoom_during_refresh ---
+  PASS: AAS chart canvas still present after drag-zoom
+  PASS: AAS chart still painted with series data after drag-zoom
+  PASS: view window self-consistent (from < to) after drag-zoom
+  PASS: [test_dragzoom_during_refresh] no console errors (got 0: [])
+
+--- [gating] test_soak_random_navigation ---
+  PASS: soak ends on Overview (got Overview)
+  PASS: no ECharts instance leak after 50 transitions (live instances=0)
+  PASS: no uPlot root leak after 50 transitions (roots=1, expected 1 AAS pane)
+  PASS: no transport requests left pending after soak (pending=0)
+  PASS: resource counts stable on re-probe (charts=0, uplots=1, pending=0)
+  PASS: [test_soak_random_navigation] no console errors (got 0: [])
+
+============================================================
+  CHAOS SUITE SUMMARY
+============================================================
+  Gating checks: 26/26 passed
+
+  XFAIL (B3 acceptance list) — 0 failing as expected:
+
+RESULT: PASS (xfail races documented for B3; CI green)
+
+[1m=== overlay chip label alignment at DSF 1/2 (issue #213) ===[0m
+PASS: chip label alignment -- every overlay label stays inside its chip at DSF 1 and DSF 2
+
+[1m=== ui_live_smoke navigation TTFP anchor (issue #245) ===[0m
+discovered 10 test functions
+--- test_navigate_returns_ttfp_ms_as_mount_minus_nav_start ---
+  PASS: ttfp_ms is mount.at - nav_start_ms (5137-5000=137), got 137
+--- test_ttfp_ms_reaches_build_tab_result_unaveraged ---
+  PASS: build_tab_result carries the exact measured ttfp_ms through (20345-20000=345), got 345
+--- test_ttfp_ms_defaults_to_none_when_not_measured ---
+  PASS: a failed navigation's ttfp_ms is None, never a fabricated 0
+--- test_navigate_nontimeline_anchors_ttfp_at_the_landing_click ---
+  PASS: nav_start_ms (Date.now()) is captured BEFORE the landing click for a non-Timeline tab (date_idx=0, click_idx=1)
+--- test_navigate_timeline_spans_the_drill_down_not_the_bare_click ---
+  PASS: ttfp_ms = 9000-8850 = 150, got 150
+  PASS: sanity: the bare Sessions-tab click happens before its own table wait
+  PASS: sanity: the table wait happens before the row is located
+  PASS: ttfp_ms anchor (Date.now()) is captured AFTER the Sessions bare click's own render/table-wait AND the row lookup, and BEFORE the drill-down row click -- so it spans the drill, never the bare click (row_query_idx=2, date_idx=3, row_click_idx=4)
+--- test_navigate_timeline_no_clickable_row_raises_loudly ---
+  PASS: no clickable row raises SmokeFailure loudly
+--- test_run_tab_wires_ttfp_ms_into_build_tab_result ---
+  PASS: run_tab calls lib.build_tab_result exactly once
+  PASS: run_tab's build_tab_result call passes a ttfp_ms= kwarg
+  PASS: the ttfp_ms kwarg's value is the `ttfp_ms` local variable, not a literal or a differently-named variable
+  PASS: ttfp_ms is assigned exactly once, from _navigate_to_tab(...)'s own return value -- not some other call or a hardcoded default
+--- test_run_tab_except_branches_carry_ttfp_ms_into_build_failed_tab_result ---
+  PASS: run_tab calls lib.build_failed_tab_result exactly twice (one per except branch), found 2
+  PASS: build_failed_tab_result call #1 passes a ttfp_ms= kwarg
+  PASS: build_failed_tab_result call #1's ttfp_ms kwarg is the `ttfp_ms` local variable, not a literal or a differently-named variable
+  PASS: build_failed_tab_result call #2 passes a ttfp_ms= kwarg
+  PASS: build_failed_tab_result call #2's ttfp_ms kwarg is the `ttfp_ms` local variable, not a literal or a differently-named variable
+  PASS: ttfp_ms is pre-initialised to None before the try block, so both except branches can reference it even when a SmokeFailure fires before _navigate_to_tab ever returns
+--- test_run_tab_waits_for_a_tick_baselined_after_navigation ---
+  PASS: run_tab assigns tick_baseline exactly once
+  PASS: tick_baseline is read from window.__uiLiveTicks.length, not guessed or hardcoded
+  PASS: run_tab still calls _navigate_to_tab and _settled_leak_probe
+  PASS: tick_baseline is read AFTER _navigate_to_tab (whose tab click and #live-btn resume click each send AAS)
+  PASS: tick_baseline is read AFTER _settled_leak_probe, so the probe's own elapsed time cannot land between the anchor and the sweep
+  PASS: run_tab calls _wait_for_tick exactly once
+  PASS: the tick target is an addition, not a bare loop index -- a bare `i` is the exact pre-fix form: it is satisfied by navigation's own AAS sends and anchors tick 1 on a mount ~500ms stale
+  PASS: the tick target adds tick_baseline to the loop index ({'tick_baseline', 'i'})
+--- test_run_tab_reads_the_tick_it_waited_for_by_index_not_last ---
+  PASS: run_tab no longer reads the LAST tick regardless of which one it waited for (the pre-fix form)
+  PASS: run_tab uses lib.tick_hook_index(...) to address the tick it waited for -- the pure, unit-tested index arithmetic that refuses a baseline/i it cannot address instead of clamping
+
+Ran 29, passed 29, failed 0 (10 test functions discovered)
+
+CHECK PASSED (full) — stamp 05a2eef5ecdeec888a69a7460ae248a4fea9524a

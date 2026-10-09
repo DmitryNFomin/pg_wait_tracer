@@ -2854,11 +2854,27 @@ struct trans_accum {
 #define TRANS_HT_SIZE 4096
 #define TRANS_HT_MASK (TRANS_HT_SIZE - 1)
 
+/* TOTAL order: count DESC, then from_event ASC, then to_event ASC.
+ *
+ * It used to order by count alone, which is not a total order, so the relative
+ * order of equal-count links was whatever qsort (not stable) happened to do
+ * with the hash table's iteration order. Two consequences, one cosmetic and
+ * one that matters: the Transitions tab could reorder tied rows between
+ * otherwise identical requests, and — the reason this changed — a bit-exact
+ * row-by-row comparison against the Phase 1 block aggregate's readout
+ * (pgwt_block_agg_pairs_sorted(), src/block_agg.c) was not meaningful while
+ * ties were free to differ. Both sides now break ties the same way, so the
+ * cross-check compares rows rather than having to compare sets and hope. */
 static int cmp_trans_desc(const void *a, const void *b)
 {
-    uint64_t ca = ((const struct trans_accum *)a)->count;
-    uint64_t cb = ((const struct trans_accum *)b)->count;
-    return (cb > ca) - (cb < ca);
+    const struct trans_accum *x = a, *y = b;
+    if (x->count != y->count)
+        return x->count > y->count ? -1 : 1;
+    if (x->from_event != y->from_event)
+        return x->from_event < y->from_event ? -1 : 1;
+    if (x->to_event != y->to_event)
+        return x->to_event < y->to_event ? -1 : 1;
+    return 0;
 }
 
 void pgwt_compute_transitions(const struct pgwt_trace_event *events, int count,

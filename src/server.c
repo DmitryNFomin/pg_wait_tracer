@@ -4,6 +4,7 @@
  * Designed to run over SSH: ssh user@host pgwt-server /path/to/traces
  */
 #include "pg_wait_tracer.h"
+#include "block_agg.h"
 #include "event_reader.h"
 #include "summary_reader.h"
 #include "compute.h"
@@ -255,6 +256,16 @@ struct file_cache_entry {
     uint64_t last_mono_ns;   /* latest event timestamp */
 };
 
+/* Paint-latency Phase 1: one cached per-block transition aggregate.
+ * `used` is the slot-occupancy bit for the open-addressed table; `agg` carries
+ * its own block identity (trace + index + num_events + file_offset + bounds),
+ * which is what pgwt_block_agg_matches() revalidates against the block's
+ * header before the entry is trusted. */
+struct bagg_entry {
+    int  used;
+    struct pgwt_block_agg agg;
+};
+
 /* #283: decoded-event cache for the COMMITTED blocks of current.trace.
  *
  * Rotated .trace.lz4 files are cached forever (struct file_cache_entry);
@@ -372,6 +383,22 @@ struct pgwt_server {
      * has exactly one current.trace. */
     struct cur_trace_cache cur;
 
+    /* Paint-latency Phase 1: per-committed-block transition aggregates
+     * (src/block_agg.h). Keyed by (trace identity, block index) and
+     * REVALIDATED against the block's current header before every use, so a
+     * rewritten or rotated block can never be answered from a stale entry.
+     *
+     * The cache is what makes the phase a win: building an aggregate costs a
+     * block decode, so without reuse the fast path would decode exactly what
+     * the raw path decodes. Both caps below are declared bounds, not hopes —
+     * past either one the fast path still answers correctly, it just builds
+     * the aggregate on the fly for the uncached blocks. */
+    struct bagg_entry *bagg;
+    int      bagg_cap;             /* power of two; 0 = not allocated */
+    int      bagg_count;
+    size_t   bagg_bytes;           /* table CAPACITY currently charged */
+    uint64_t bagg_hits, bagg_misses, bagg_evictions;
+
     /* Coverage / clock-domain state (refreshed per request) */
     struct pgwt_file_cov cov[256];
     int  cov_count;
@@ -415,6 +442,13 @@ struct pgwt_server {
     struct pgwt_pid_cat *pid_cats;
     int  n_pid_cats;
 };
+
+/* Paint-latency Phase 1 forward declaration: the block-aggregate cache is
+ * defined with the rest of the transitions fast path, far below, but the
+ * coverage scan has to drop it the moment a trace file's header identity
+ * changes under us. */
+static void bagg_cache_drop(struct pgwt_server *srv);
+
 
 /* ── JSON request parsing (cJSON) ─────────────────────────── */
 
@@ -1920,6 +1954,11 @@ static void cov_scan_file(struct pgwt_server *srv, struct pgwt_file_cov *fc)
          reader.num_blocks < fc->blocks_scanned)) {
         cov_reset(srv, fc);
         fc->is_current = is_current_trace(fc->path);
+        /* Paint-latency Phase 1: this file's blocks are gone, and any cached
+         * aggregate for them can never match a live block again (the trace
+         * identity moved). Drop them so the cache's byte budget describes
+         * usable memory. */
+        bagg_cache_drop(srv);
     }
 
     fc->hdr_start_wall_ns = reader.header.start_time_ns;
@@ -2844,7 +2883,17 @@ server_load_events_fi_mode(struct pgwt_server *srv,
             } else {
                 /* The loader's right lookahead is only for overlapping sample
                  * intervals; preserve the prior endpoint selection for exact
-                 * records and structural markers. */
+                 * records and structural markers.
+                 *
+                 * INCLUSIVE at both ends, and that is correct, not a bug: a
+                 * trace event's timestamp_ns is when the wait ENDED, so an
+                 * event ending exactly at `to` has its whole interval inside
+                 * the window. Selection is inclusive on an END key; the
+                 * CONTRIBUTION is then clipped to the window (event_window_ns,
+                 * src/compute.c). #316 is the same rule read from the other
+                 * end of the interval: the summary reader keys seconds by
+                 * their START, so a second at `to` is out. Making this
+                 * half-open zeroed test_data_aas and test_data_categories. */
                 if (events[i].timestamp_ns < segs[s].from_m ||
                     events[i].timestamp_ns > segs[s].to_m)
                     continue;
@@ -4826,10 +4875,597 @@ static void handle_exec_scatter(struct pgwt_server *srv,
     free(res.rows);
 }
 
+/* ── Paint-latency Phase 1: `transitions` from block aggregates ──────────
+ *
+ * The problem (docs/PAINT_LATENCY_PLAN.md): `transitions` materialises every
+ * raw event in the window on EVERY request, at ~0.68 s per million records,
+ * and the per-second summary records cannot answer it because a per-second
+ * total does not record which event FOLLOWED which.
+ *
+ * The fix: a committed block is immutable, so per block we precompute a table
+ * keyed by (old_event, new_event) carrying count + summed duration, plus
+ * per-node duration totals (src/block_agg.h). Those tables are ADDITIVE, so a
+ * request merges the blocks WHOLLY INSIDE the window and decodes raw events
+ * only for the partial blocks at each edge.
+ *
+ * Everything below either produces a bit-exact answer or REFUSES, and a
+ * refusal means the caller recomputes from raw. The preconditions are checked
+ * in one place (bagg_window_eligible) rather than scattered, because "the
+ * fast path quietly answered a question it should have declined" is the
+ * failure mode that would make the whole phase worse than useless.
+ */
+
+/* Cache budget. 4096 entries covers ~4.5 hours of 1 s TRANSITIONS blocks; the
+ * byte cap is the real bound, because a pathological block (4096 records, all
+ * distinct pairs) carries a far bigger table than a typical one (tens). */
+#define BAGG_CACHE_MAX_ENTRIES 4096
+#define BAGG_CACHE_MAX_BYTES   (64u * 1024u * 1024u)
+
+static size_t bagg_entry_bytes(const struct pgwt_block_agg *a)
+{
+    return (size_t)a->pair_cap * sizeof(*a->pairs) +
+           (size_t)a->node_cap * sizeof(*a->nodes) +
+           (size_t)a->key_cap * sizeof(*a->keys);
+}
+
+static uint32_t bagg_key_hash(uint64_t start_time_ns, uint32_t block_index)
+{
+    uint64_t h = start_time_ns ^ ((uint64_t)block_index << 32) ^ block_index;
+    h ^= h >> 33; h *= 0xff51afd7ed558ccdULL;
+    h ^= h >> 33; h *= 0xc4ceb9fe1a85ec53ULL;
+    h ^= h >> 33;
+    return (uint32_t)h;
+}
+
+/* Slot for (trace, block index). Never returns NULL: the table is kept below
+ * 70% load, so an empty slot always exists. */
+static struct bagg_entry *
+bagg_slot(struct bagg_entry *tab, int cap,
+          const struct pgwt_trace_identity *tr, uint32_t block_index)
+{
+    uint32_t mask = (uint32_t)cap - 1;
+    uint32_t h = bagg_key_hash(tr->start_time_ns, block_index) & mask;
+    for (;;) {
+        if (!tab[h].used)
+            return &tab[h];
+        if (tab[h].agg.id.block_index == block_index &&
+            tab[h].agg.id.trace.start_time_ns == tr->start_time_ns &&
+            tab[h].agg.id.trace.clock_offset_ns == tr->clock_offset_ns)
+            return &tab[h];
+        h = (h + 1) & mask;
+    }
+}
+
+static int bagg_cache_grow(struct pgwt_server *srv)
+{
+    int ncap = srv->bagg_cap ? srv->bagg_cap * 2 : 256;
+    if (ncap <= srv->bagg_cap || ncap > BAGG_CACHE_MAX_ENTRIES * 2)
+        return -1;
+    struct bagg_entry *nt = calloc((size_t)ncap, sizeof(*nt));
+    if (!nt)
+        return -1;
+    for (int i = 0; i < srv->bagg_cap; i++) {
+        if (!srv->bagg[i].used)
+            continue;
+        *bagg_slot(nt, ncap, &srv->bagg[i].agg.id.trace,
+                   srv->bagg[i].agg.id.block_index) = srv->bagg[i];
+    }
+    free(srv->bagg);
+    srv->bagg = nt;
+    srv->bagg_cap = ncap;
+    return 0;
+}
+
+/* Hand the cache a freshly built aggregate. Takes ownership on success. On
+ * refusal the caller keeps (and frees) it — declining to cache is never a
+ * correctness problem, only a speed one. */
+static void bagg_cache_put(struct pgwt_server *srv, struct pgwt_block_agg *agg)
+{
+    size_t bytes = bagg_entry_bytes(agg);
+    if (srv->bagg_count >= BAGG_CACHE_MAX_ENTRIES ||
+        srv->bagg_bytes + bytes > BAGG_CACHE_MAX_BYTES) {
+        srv->bagg_evictions++;      /* declined, not evicted-after-the-fact */
+        return;
+    }
+    if (srv->bagg_cap == 0 || (srv->bagg_count + 1) * 10 >= srv->bagg_cap * 7) {
+        if (bagg_cache_grow(srv) != 0) {
+            srv->bagg_evictions++;
+            return;
+        }
+    }
+    struct bagg_entry *e =
+        bagg_slot(srv->bagg, srv->bagg_cap, &agg->id.trace,
+                  agg->id.block_index);
+    if (e->used) {
+        /* Same key, stale content (the block was rewritten). Replace. */
+        srv->bagg_bytes -= bagg_entry_bytes(&e->agg);
+        pgwt_block_agg_free(&e->agg);
+        srv->bagg_count--;
+    }
+    e->used = 1;
+    e->agg = *agg;                  /* ownership moves into the cache */
+    memset(agg, 0, sizeof(*agg));
+    srv->bagg_count++;
+    srv->bagg_bytes += bytes;
+}
+
+/* The decode hook. A boundary block of current.trace is read through the SAME
+ * decoded-block cache the raw loader uses (#283) instead of being
+ * re-decompressed — so the fast path reuses that cache rather than racing it,
+ * and the cache's served/decoded counters stay meaningful for a request this
+ * path answered. (They are what makes "the second request decoded no blocks"
+ * observable; a diagnostic that goes silent because an unrelated code path was
+ * bypassed is a reporting bug, and tests/test_data_current_trace_cache.py
+ * treats an unreadable stats line as a failure, correctly.)
+ *
+ * For a rotated file `cc` is NULL and this is a plain decode. */
+struct bagg_hook_ctx {
+    struct pgwt_server *srv;
+    struct cur_trace_cache *cc;          /* NULL unless this file is current */
+    struct pgwt_trace_event *buf;        /* scratch for the decode path */
+};
+
+/* A cached aggregate for this block, or NULL — the pgwt_bagg_lookup_fn hook.
+ * Revalidates against the block's CURRENT header via
+ * pgwt_block_agg_matches(): a mismatch on any header-derived field (trace
+ * identity, index, num_events, file offset, time bounds) drops the entry
+ * instead of answering from it. A cache that cannot prove an entry still
+ * describes the block must refuse, and refusing here just means DECODE. */
+static const struct pgwt_block_agg *
+bagg_cache_get(void *ctx, const struct pgwt_block_identity *id)
+{
+    /* All three hooks share ONE ctx (block_agg.h), so every one of them must
+     * read it as the same type. This was briefly a cast to pgwt_server * while
+     * the decode hook passed its own struct — exactly the silent type
+     * confusion that produces plausible garbage instead of a crash. */
+    struct pgwt_server *srv = ((struct bagg_hook_ctx *)ctx)->srv;
+    if (srv->bagg_cap == 0)
+        return NULL;
+    struct bagg_entry *e =
+        bagg_slot(srv->bagg, srv->bagg_cap, &id->trace, id->block_index);
+    if (!e->used)
+        return NULL;
+    if (!pgwt_block_agg_matches(&e->agg, id)) {
+        srv->bagg_bytes -= bagg_entry_bytes(&e->agg);
+        pgwt_block_agg_free(&e->agg);
+        e->used = 0;
+        srv->bagg_count--;
+        srv->bagg_misses++;
+        return NULL;                /* stale: rebuild, never trust */
+    }
+    srv->bagg_hits++;
+    return &e->agg;
+}
+
+static void bagg_cache_store(void *ctx, struct pgwt_block_agg *agg)
+{
+    bagg_cache_put(((struct bagg_hook_ctx *)ctx)->srv, agg);
+}
+
+/* Drop every cached aggregate. Called when a trace file's HEADER IDENTITY
+ * changed under us (a daemon restart that truncated the file): the entries
+ * could never match such a block again — pgwt_block_agg_matches() compares the
+ * trace identity — so they are pure dead weight, and holding them would make
+ * the cache's byte budget describe memory that can never be used. Not called
+ * on rotation: rotation renames a file but does not rewrite its header, so
+ * those blocks stay reachable under the archived path. */
+static void bagg_cache_drop(struct pgwt_server *srv)
+{
+    for (int i = 0; srv->bagg && i < srv->bagg_cap; i++)
+        if (srv->bagg[i].used)
+            pgwt_block_agg_free(&srv->bagg[i].agg);
+    free(srv->bagg);
+    srv->bagg = NULL;
+    srv->bagg_cap = srv->bagg_count = 0;
+    srv->bagg_bytes = 0;
+}
+
+static int bagg_decode_block(void *ctx, struct pgwt_event_reader *r,
+                             int block_idx,
+                             const struct pgwt_trace_event **out,
+                             struct pgwt_block_info *bi)
+{
+    struct bagg_hook_ctx *d = ctx;
+    const struct cur_cache_block *cb =
+        d->cc ? cur_cache_get(d->cc, block_idx) : NULL;
+    if (cb) {
+        *out = d->cc->events + cb->start;
+        bi->block_type = cb->is_sample ? PGWT_BLOCK_SAMPLES
+                                       : PGWT_BLOCK_TRANSITIONS;
+        bi->sample_period_ns  = cb->sample_period_ns;
+        bi->first_timestamp_ns = cb->index_ts;
+        bi->last_timestamp_ns  = cb->last_ts;
+        bi->num_events         = (uint32_t)cb->count;
+        d->cc->stat_blocks_served++;
+        return cb->count;
+    }
+    if (!d->buf) {
+        d->buf = calloc(PGWT_BLOCK_EVENTS, sizeof(*d->buf));
+        if (!d->buf)
+            return -1;
+    }
+    int n = pgwt_reader_decode_block_info(r, block_idx, d->buf,
+                                          PGWT_BLOCK_EVENTS, bi);
+    if (n < 0)
+        return -1;
+    *out = d->buf;
+    if (d->cc) {
+        d->cc->stat_blocks_decoded++;
+        cur_cache_store(d->srv, d->cc, block_idx, r, d->buf, n, bi);
+    }
+    return n;
+}
+
+/* Is this request answerable from block aggregates at all?
+ *
+ * Two preconditions, both conservative, both stated as the v1 boundary:
+ *
+ *  1. NO FILTER. The tables keep no pid / class / event / query_id dimension
+ *     (block_agg.h C3), so a filtered request cannot be answered from them.
+ *     The Transitions tab's default wire payload is `filters: {}` — a filter
+ *     only appears after a drill-down — so the common case is covered.
+ *
+ *  2. NO SAMPLES BLOCK MAY OVERLAP THE WINDOW. Not because samples would
+ *     corrupt the tables: they cannot, a SAMPLE record fails both counting
+ *     predicates. It is the FIDELITY LABEL. The raw loader sets has_samples
+ *     only when a sample record SURVIVES exact-wins subtraction, so a window
+ *     whose samples are entirely covered by exact spans is labelled "exact"
+ *     while a block-type scan would say "mixed". Reproducing that from block
+ *     headers alone means reimplementing the exact-wins merge, so instead the
+ *     fast path declines any window a SAMPLES block touches and the raw path
+ *     answers it, label and all. Consequence to be honest about: a MIXED
+ *     capture gets no speedup from Phase 1. Lifting this needs the fidelity
+ *     derivation factored out of the loader, which is its own change.
+ */
+static int bagg_window_eligible(struct pgwt_server *srv,
+                                const struct pgwt_filter *f,
+                                uint64_t from_wall_ns, uint64_t to_wall_ns)
+{
+    if (!pgwt_block_agg_filter_supported(f))
+        return 0;
+    if (to_wall_ns <= from_wall_ns)
+        return 0;
+    for (int ci = 0; ci < srv->cov_count; ci++) {
+        struct pgwt_file_cov *fc = &srv->cov[ci];
+        if (!fc->valid)
+            continue;
+        if ((int64_t)to_wall_ns - fc->canon_offset <= 0)
+            continue;
+        uint64_t to_m = (uint64_t)((int64_t)to_wall_ns - fc->canon_offset);
+        uint64_t from_m = ((int64_t)from_wall_ns - fc->canon_offset) > 0
+                        ? (uint64_t)((int64_t)from_wall_ns - fc->canon_offset)
+                        : 0;
+        for (int i = 0; i < fc->n_s; i++)
+            if (fc->s_spans[i].end_ns >= from_m &&
+                fc->s_spans[i].start_ns < to_m)
+                return 0;           /* a SAMPLES block touches the window */
+
+        /* T2 phantom-EXIT backstop, mirrored by REFUSING rather than by
+         * reimplementing it. The raw loader drops an EXIT record whose closing
+         * interval lies outside exact coverage when its generation has sampled
+         * coverage (:2909-2916), and it sets has_transitions only for records
+         * that SURVIVE that drop. The aggregate's exact_in_window counts every
+         * admitted record, so a window whose only admitted records are phantom
+         * exits would be labelled "exact" with an empty graph here while raw
+         * returns a structured full_fidelity_required refusal — a label
+         * divergence on exactly the axis this function exists to protect.
+         *
+         * Reproducing the drop would mean reimplementing spans_contain over
+         * the generation's exact spans inside the aggregate path, i.e. a second
+         * hand-written copy of a rule that must match the loader exactly. The
+         * per-file window gate just taught us what that costs. So the fast path
+         * declines any window whose files belong to a generation with sampled
+         * coverage, and raw answers it, label and all.
+         *
+         * Cost, stated plainly: a trace dir with ANY sampled coverage in a
+         * generation gets no Phase 1 speedup for that generation's windows,
+         * even where no SAMPLES block overlaps. That is strictly narrower than
+         * the correctness risk, and the SAMPLES-overlap rule above already
+         * excluded the common mixed case. */
+        if (pgwt_block_agg_file_can_contribute(fc->mono_first, fc->mono_last,
+                                               from_m, to_m)) {
+            const struct pgwt_gen_cov *gc = gen_cov_get(srv, fc->gen);
+            if (gc && gc->n_sampled > 0)
+                return 0;
+        }
+    }
+    return 1;
+}
+
+/* Answer `transitions` for [from, to) by merging whole blocks and decoding
+ * only the edges. Returns 0 on success (and *out holds the merged window
+ * aggregate, caller frees), or a negative pgwt_bagg_status on refusal — in
+ * which case *out is already freed and the caller MUST recompute from raw.
+ *
+ * `*exact_in_window` receives the number of exact records the window admitted
+ * regardless of the counting predicates. That is the fidelity signal: the raw
+ * loader sets has_transitions when any exact record is appended, markers and
+ * EXIT records included, so counting only pairs would label a window that
+ * holds nothing but markers as NONE when raw calls it EXACT. */
+static int transitions_from_block_aggs(struct pgwt_server *srv,
+                                       uint64_t from_wall_ns,
+                                       uint64_t to_wall_ns,
+                                       struct pgwt_block_agg *out,
+                                       uint64_t *exact_in_window,
+                                       int *merged_blocks, int *decoded_blocks)
+{
+    pgwt_block_agg_init_window(out);
+    *exact_in_window = 0;
+    *merged_blocks = *decoded_blocks = 0;
+
+    int rc = PGWT_BAGG_OK;
+    for (int ci = 0; ci < srv->cov_count && rc == PGWT_BAGG_OK; ci++) {
+        struct pgwt_file_cov *fc = &srv->cov[ci];
+        if (!fc->valid)
+            continue;
+        /* Window in this file's mono domain, with the generation-canonical
+         * offset — the same arithmetic server_load_events_fi_mode() uses, so
+         * the two paths select on the same instants. */
+        if ((int64_t)to_wall_ns - fc->canon_offset <= 0)
+            continue;
+        uint64_t to_m = (uint64_t)((int64_t)to_wall_ns - fc->canon_offset);
+        uint64_t from_m = ((int64_t)from_wall_ns - fc->canon_offset) > 0
+                        ? (uint64_t)((int64_t)from_wall_ns - fc->canon_offset)
+                        : 0;
+        /* Shared predicate, not a hand-written comparison: this site had
+         * `mono_first >= to_m` while the raw loader (:2689) and the marker
+         * loader (:3089) both use `>`, so a file whose earliest record ends
+         * exactly at `to_m` was skipped WHOLE here and admitted there —
+         * `total` short by those records, no refusal, no fidelity change. */
+        if (!pgwt_block_agg_file_can_contribute(fc->mono_first, fc->mono_last,
+                                                from_m, to_m))
+            continue;               /* this file cannot contribute */
+
+        struct pgwt_event_reader r;
+        if (pgwt_reader_open(&r, fc->path) != 0) {
+            rc = PGWT_BAGG_REFUSED_INVALID;   /* cannot see => refuse */
+            break;
+        }
+        struct bagg_hook_ctx dctx = {
+            .srv = srv,
+            .cc  = (fc->is_current && cur_cache_enabled()) ? &srv->cur : NULL,
+            .buf = NULL,
+        };
+        rc = pgwt_block_agg_window_from_reader(&r, from_m, to_m, out,
+                                               bagg_cache_get,
+                                               bagg_cache_store,
+                                               bagg_decode_block, &dctx,
+                                               exact_in_window, merged_blocks,
+                                               decoded_blocks);
+        free(dctx.buf);
+        pgwt_reader_close(&r);
+    }
+
+    if (rc != PGWT_BAGG_OK) {
+        pgwt_block_agg_free(out);
+        return rc;
+    }
+    return PGWT_BAGG_OK;
+}
+
+/* The one refusal this view can emit that is not a fidelity verdict: the node
+ * or link table could not be read out (allocation failure). Refuse loudly
+ * rather than ship a response with half a graph — a partial DFG is
+ * indistinguishable from a quiet workload. */
+static void emit_transitions_compute_failed(const struct pgwt_request *req,
+                                            const char *what)
+{
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(root, "id", (double)req->id);
+    cJSON_AddStringToObject(root, "error", what);
+    cJSON_AddStringToObject(root, "code", "compute_failed");
+    cJSON_AddStringToObject(root, "hint", "narrow the time range and retry");
+    emit_json(root);
+}
+
+/* ONE response builder for both paths.
+ *
+ * `res` (raw path) supplies the link rows, because only pgwt_compute_transitions
+ * applies the request filter; `win` supplies them on the aggregate path. The
+ * NODE rows always come from `win`, which on the raw path is the same
+ * accumulator fed with the loaded events — so a node-total divergence between
+ * the two paths cannot be a difference of implementation, only of the merge
+ * arithmetic, which is what tests/test_block_agg.c §6/§9 compares.
+ *
+ * That citation used to read tests/test_agg_raw_crosscheck.c, which is wrong
+ * and was the second of two places the same false claim appeared (the first is
+ * corrected in block_agg.h). That file is the per-second SUMMARY-vs-raw gate
+ * and does not link src/block_agg.c at all, so it cannot compare this merge
+ * arithmetic. Naming a test that never runs this code as its guard is worse
+ * than naming none: it tells a reader the arithmetic is covered when it is
+ * covered somewhere else entirely.
+ *
+ * Node total_ms is ONE division of an integer nanosecond sum. It used to be a
+ * per-record `double` ms accumulation in loader order, which made the emitted
+ * number depend on the order records arrived in — "the number changes when you
+ * resize the window", and it would have shown up as a spurious divergence
+ * against an aggregate that is otherwise bit-exact. Links were already summed
+ * as integers (struct trans_accum.total_ns is uint64) and are unchanged. */
+static void emit_transitions_response(struct pgwt_request *req,
+                                      enum pgwt_fidelity fid, int max_rows,
+                                      const struct pgwt_transitions_result *res,
+                                      int use_res,
+                                      const struct pgwt_block_agg *win,
+                                      int merged_blocks, int decoded_blocks)
+{
+    struct pgwt_block_agg_pair *pairs = NULL;
+    int n_pairs = 0;
+    if (!use_res &&
+        pgwt_block_agg_pairs_sorted(win, &pairs, &n_pairs) != PGWT_BAGG_OK) {
+        emit_transitions_compute_failed(req,
+            "could not read the transition link table");
+        return;
+    }
+    struct pgwt_block_agg_node *nodes_arr = NULL;
+    int n_nodes = 0;
+    if (pgwt_block_agg_nodes_sorted(win, &nodes_arr, &n_nodes)
+        != PGWT_BAGG_OK) {
+        free(pairs);
+        emit_transitions_compute_failed(req,
+            "could not read the transition node table");
+        return;
+    }
+
+    uint64_t total       = use_res ? res->total_transitions
+                                   : win->total_transitions;
+    int      total_links = use_res ? res->total_rows : n_pairs;
+    int      shown       = use_res ? res->num_rows
+                                   : (n_pairs < max_rows ? n_pairs : max_rows);
+
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(root, "id", (double)req->id);
+    cJSON_AddStringToObject(root, "fidelity", pgwt_fidelity_str(fid));
+    cjson_add_uint64(root, "total", total);
+    cJSON_AddNumberToObject(root, "link_count", shown);
+    cJSON_AddNumberToObject(root, "total_link_count", total_links);
+    cJSON_AddBoolToObject(root, "truncated", shown < total_links);
+    /* PROVENANCE, and OPT-IN. How the answer was produced — 0/0 is the raw
+     * path — so a reviewer or a test can tell the fast path actually ran
+     * instead of inferring it from a latency number.
+     *
+     * Behind an env var, like the curcache stats line, because provenance is
+     * DIAGNOSTICS and not data. Emitting it unconditionally made two
+     * numerically identical responses compare unequal: the
+     * current-trace-cache test deep-compares a cached read against an
+     * uncached one, and both had total=4404 with byte-identical links and
+     * nodes while differing in merged_blocks/decoded_blocks alone. A field
+     * that records HOW an answer was reached must never change WHETHER two
+     * answers are the same. */
+    static int provenance = -1;
+    if (provenance < 0) {
+        const char *env = getenv("PGWT_TRANSITIONS_PROVENANCE");
+        provenance = (env && env[0] && env[0] != '0') ? 1 : 0;
+    }
+    if (provenance) {
+        cJSON_AddNumberToObject(root, "merged_blocks", merged_blocks);
+        cJSON_AddNumberToObject(root, "decoded_blocks", decoded_blocks);
+    }
+
+    cJSON *nodes = cJSON_AddArrayToObject(root, "nodes");
+    for (int i = 0; i < n_nodes; i++) {
+        char name[64];
+        if (nodes_arr[i].event_id == 0)
+            snprintf(name, sizeof(name), "CPU*");
+        else
+            pgwt_event_full_name(nodes_arr[i].event_id, name, sizeof(name));
+        cJSON *node = cJSON_CreateObject();
+        cJSON_AddStringToObject(node, "name", name);
+        cJSON_AddNumberToObject(node, "total_ms",
+                                (double)nodes_arr[i].total_ns / 1e6);
+        /* U2 / P3 wire 5: the UI's DFG node click pivots on the event —
+         * emit the id the table is already keyed by (0 = CPU*). */
+        cJSON_AddNumberToObject(node, "event_id", nodes_arr[i].event_id);
+        const char *colon = strchr(name, ':');
+        if (colon) {
+            char cls[32];
+            int len = (int)(colon - name);
+            if (len > 31) len = 31;
+            memcpy(cls, name, (size_t)len);
+            cls[len] = '\0';
+            cJSON_AddStringToObject(node, "class", cls);
+        } else {
+            cJSON_AddStringToObject(node, "class", "cpu");
+        }
+        cJSON_AddItemToArray(nodes, node);
+    }
+
+    cJSON *links = cJSON_AddArrayToObject(root, "links");
+    for (int i = 0; i < shown; i++) {
+        uint32_t from_ev, to_ev;
+        uint64_t cnt, ns;
+        char from_name[64], to_name[64];
+        if (use_res) {
+            from_ev = res->rows[i].from_event;
+            to_ev   = res->rows[i].to_event;
+            cnt     = res->rows[i].count;
+            ns      = (uint64_t)res->rows[i].total_ns;
+            snprintf(from_name, sizeof(from_name), "%s", res->rows[i].from_name);
+            snprintf(to_name, sizeof(to_name), "%s", res->rows[i].to_name);
+        } else {
+            from_ev = pairs[i].from_event;
+            to_ev   = pairs[i].to_event;
+            cnt     = pairs[i].count;
+            ns      = pairs[i].total_ns;
+            pgwt_event_full_name(from_ev, from_name, sizeof(from_name));
+            pgwt_event_full_name(to_ev, to_name, sizeof(to_name));
+        }
+        cJSON *link = cJSON_CreateObject();
+        cJSON_AddStringToObject(link, "source", from_name);
+        cJSON_AddStringToObject(link, "target", to_name);
+        cJSON_AddNumberToObject(link, "value", (double)cnt);
+        cJSON_AddNumberToObject(link, "duration_ms", (double)ns / 1e6);
+        cJSON_AddItemToArray(links, link);
+    }
+
+    free(pairs);
+    free(nodes_arr);
+    emit_json(root);
+}
+
 /* ── Dispatch ─────────────────────────────────────────────── */
 
 static void handle_transitions(struct pgwt_server *srv, struct pgwt_request *req)
 {
+    int max_rows = req->num_buckets > 0 ? req->num_buckets : 50;
+
+    /* ── fast path: merge whole blocks, decode only the edges ──────────── */
+    coverage_refresh(srv);
+    uint64_t from_ns = req->from_ns ? req->from_ns : srv->earliest_wall_ns;
+    uint64_t to_ns   = req->to_ns   ? req->to_ns   : srv->latest_wall_ns;
+
+    if (bagg_window_eligible(srv, &req->filter, from_ns, to_ns)) {
+        struct pgwt_block_agg win;
+        uint64_t exact_in_window = 0;
+        int merged = 0, decoded = 0;
+        int rc = transitions_from_block_aggs(srv, from_ns, to_ns, &win,
+                                             &exact_in_window, &merged,
+                                             &decoded);
+        if (rc == PGWT_BAGG_OK) {
+            /* The current-trace cache stats line is a PER-REQUEST report, not
+             * a side effect of having called load_file_range_mono(). It used
+             * to be emitted only from the raw loader, so this fast path made
+             * the line vanish from `transitions` entirely — a diagnostic
+             * disappearing because an unrelated code path was bypassed.
+             *
+             * Emitted inside the OK branch, not before it: on a REFUSAL the
+             * raw loader runs and reports it itself (:2767), so emitting here
+             * too printed the line TWICE for one request and contradicted the
+             * "exactly once" this comment claims. read_curcache() in
+             * tests/test_data_current_trace_cache.py takes the LAST line, so
+             * the duplicate was invisible rather than harmless — a diagnostic
+             * whose contract is wrong is one nobody can reason about. Exactly
+             * once per request now, whichever path answers. */
+            cur_cache_report(&srv->cur);
+            /* Fidelity. has_samples is 0 because bagg_window_eligible()
+             * refuses any window a SAMPLES block touches. "Provably 0" is
+             * only as good as the block set this path inspects matching the
+             * file's, which is why that function now also refuses any window
+             * whose files sit in a generation with sampled coverage: without
+             * that, a window whose only admitted records are T2 phantom exits
+             * would be labelled "exact" with an empty graph here while raw
+             * refuses, because the raw loader sets has_transitions only for
+             * records that SURVIVE the phantom drop (:2909-2916).
+             *
+             * So the only remaining question is whether any exact record
+             * landed in the window — exactly the raw loader's
+             * has_transitions. */
+            struct pgwt_load_info ag_linfo = {0};
+            ag_linfo.has_transitions = exact_in_window > 0;
+            enum pgwt_fidelity ag_fid = load_fidelity(&ag_linfo);
+            if (pgwt_fidelity_unavailable(PGWT_REQ_EXACT, ag_fid)) {
+                pgwt_block_agg_free(&win);
+                emit_unavailable(req->id, ag_fid);
+                return;
+            }
+            emit_transitions_response(req, ag_fid, max_rows,
+                                      NULL, 0, &win, merged, decoded);
+            pgwt_block_agg_free(&win);
+            return;
+        }
+        /* Refused. Absence is never an answer: recompute from raw. */
+    }
+
+    /* ── raw path ──────────────────────────────────────────────────────── */
     int count;
     struct pgwt_load_info linfo = {0};
     struct pgwt_trace_event *events =
@@ -4845,91 +5481,31 @@ static void handle_transitions(struct pgwt_server *srv, struct pgwt_request *req
         return;
     }
 
-    int max_rows = req->num_buckets > 0 ? req->num_buckets : 50;
     struct pgwt_transitions_result res;
     pgwt_compute_transitions(events, count, &req->filter, max_rows, &res);
 
-    cJSON *root = cJSON_CreateObject();
-    cJSON_AddNumberToObject(root, "id", (double)req->id);
-    cJSON_AddStringToObject(root, "fidelity", pgwt_fidelity_str(fid));
-    cjson_add_uint64(root, "total", res.total_transitions);
-    cJSON_AddNumberToObject(root, "link_count", res.num_rows);
-    cJSON_AddNumberToObject(root, "total_link_count", res.total_rows);
-    cJSON_AddBoolToObject(root, "truncated", res.num_rows < res.total_rows);
-
-    /* Compute per-node total time directly from ALL events.
-     * Use a simple hash table keyed by event_id for O(1) lookup. */
-    #define NODE_HT_SIZE 1024
-    #define NODE_HT_MASK (NODE_HT_SIZE - 1)
-    struct { uint32_t event_id; int used; char name[64]; double total_ms; }
-        *node_ht = calloc(NODE_HT_SIZE, sizeof(*node_ht));
-    int num_nodes = 0;
-
-    for (int i = 0; i < count; i++) {
-        const struct pgwt_trace_event *ev = &events[i];
-        uint32_t eid = ev->old_event;
-        /* Transition-graph node totals: visibility view, keep ClientRead. */
-        if (pgwt_is_hidden_event(eid) || PGWT_IS_MARKER(eid))
-            continue;
-        double ms = ev->duration_ns / 1e6;
-        uint32_t h = (eid * 0x9e3779b9) & NODE_HT_MASK;
-        while (node_ht[h].used && node_ht[h].event_id != eid)
-            h = (h + 1) & NODE_HT_MASK;
-        if (node_ht[h].used) {
-            node_ht[h].total_ms += ms;
-        } else {
-            node_ht[h].used = 1;
-            node_ht[h].event_id = eid;
-            node_ht[h].total_ms = ms;
-            if (eid == 0)
-                snprintf(node_ht[h].name, 64, "CPU*");
-            else
-                pgwt_event_full_name(eid, node_ht[h].name, sizeof(node_ht[h].name));
-            num_nodes++;
-        }
+    /* Node totals go through the SAME accumulator the aggregate path uses
+     * (pgwt_block_agg_add_events), so the per-node numbers cannot drift
+     * between the two paths. The loader has already applied the window, hence
+     * the open interval here. A refusal means raw cannot answer either — emit
+     * nothing rather than a response with half a graph. */
+    struct pgwt_block_agg raw_nodes;
+    pgwt_block_agg_init_window(&raw_nodes);
+    if (pgwt_block_agg_add_events(&raw_nodes, events, count, 0, UINT64_MAX,
+                                  NULL) != PGWT_BAGG_OK) {
+        pgwt_block_agg_free(&raw_nodes);
+        free(events);
+        free(res.rows);
+        emit_transitions_compute_failed(req,
+            "could not accumulate transition node totals");
+        return;
     }
 
-    /* Nodes array */
-    cJSON *nodes = cJSON_AddArrayToObject(root, "nodes");
-    for (int i = 0; i < NODE_HT_SIZE; i++) {
-        if (!node_ht[i].used) continue;
-        cJSON *node = cJSON_CreateObject();
-        cJSON_AddStringToObject(node, "name", node_ht[i].name);
-        cJSON_AddNumberToObject(node, "total_ms", node_ht[i].total_ms);
-        /* U2 / P3 wire 5: the UI's DFG node click pivots on the event —
-         * emit the id the table is already keyed by (0 = CPU*). */
-        cJSON_AddNumberToObject(node, "event_id", node_ht[i].event_id);
-        /* Extract wait class for coloring */
-        const char *colon = strchr(node_ht[i].name, ':');
-        if (colon) {
-            char cls[32];
-            int len = colon - node_ht[i].name;
-            if (len > 31) len = 31;
-            memcpy(cls, node_ht[i].name, len);
-            cls[len] = '\0';
-            cJSON_AddStringToObject(node, "class", cls);
-        } else {
-            cJSON_AddStringToObject(node, "class", "cpu");
-        }
-        cJSON_AddItemToArray(nodes, node);
-    }
-    free(node_ht);
+    emit_transitions_response(req, fid, max_rows, &res, 1, &raw_nodes, 0, 0);
 
-    /* Links array */
-    cJSON *links = cJSON_AddArrayToObject(root, "links");
-    for (int i = 0; i < res.num_rows; i++) {
-        cJSON *link = cJSON_CreateObject();
-        cJSON_AddStringToObject(link, "source", res.rows[i].from_name);
-        cJSON_AddStringToObject(link, "target", res.rows[i].to_name);
-        cJSON_AddNumberToObject(link, "value", (double)res.rows[i].count);
-        cJSON_AddNumberToObject(link, "duration_ms",
-                                (double)res.rows[i].total_ns / 1e6);
-        cJSON_AddItemToArray(links, link);
-    }
-
+    pgwt_block_agg_free(&raw_nodes);
     free(events);
     free(res.rows);
-    emit_json(root);
 }
 
 static void handle_fingerprints(struct pgwt_server *srv, struct pgwt_request *req)

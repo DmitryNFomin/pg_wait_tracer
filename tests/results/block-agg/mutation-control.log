@@ -1,0 +1,35 @@
+test_block_agg — per-committed-block transition aggregate (Phase 1)
+=== §1 record predicate vs pgwt_compute_transitions ===
+    6 counted, 7 rejected, both predicates agreeing on all 13
+=== §2 build + merge against literal expected values ===
+=== §3 merge associativity + commutativity ===
+=== §4 straddle: a pair whose old_event began in an earlier block ===
+=== §5 plan(): exactly one of SKIP/MERGE/DECODE per block ===
+    plan outcomes over 378 windows: merge=553 decode=331 skip=1006
+=== §6 model: merged + decoded == raw, bit-exact, every window ===
+    378 windows compared, 170 of them at a merge/decode seam
+=== §6b the end-key bound: agreement with the loader, and the cost of getting it wrong ===
+=== §7 mutation probes: the comparator can see one count, one nanosecond, one pair ===
+    probe 0 (clean (control)         ) disagreements=0
+    probe 1 (+1 on one pair count    ) disagreements=2
+    probe 2 (+1 ns on one pair       ) disagreements=1
+    probe 3 (-1 ns on one pair       ) disagreements=1
+    probe 4 (an extra pair appears   ) disagreements=4
+    probe 5 (one pair disappears     ) disagreements=2
+    probe 6 (+1 ns on one node       ) disagreements=1
+    probe 7 (one node disappears     ) disagreements=2
+=== §8 bypass suite: a path that cannot see must refuse ===
+=== §9 on-disk: pgwt_block_agg_window_from_reader vs raw, twice ===
+    190 windows x 2 passes, 472 merges (236 in pass 2), 288 decodes, cache: 1520 lookups / 1486 hits / 64 stores
+=== §0 vacuity ledger ===
+    windows compared .................. 378
+    blocks MERGEd ..................... 553
+    blocks DECODEd .................... 331
+    blocks SKIPped .................... 1006
+    windows at a merge/decode seam .... 170
+    windows with positive total_ns .... 364
+    windows with >=1 merged pair ...... 364
+    mutation probes that went red ..... 7
+    refusals observed ................. 46
+PASS: test_block_agg
+WARN: cannot open /nonexistent/pgwt/no-such.trace: No such file or directory

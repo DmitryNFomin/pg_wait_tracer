@@ -235,6 +235,7 @@ int pgwt_reader_block_info(struct pgwt_event_reader *r, int block_idx,
     info->sample_period_ns  = bh.sample_period_ns;
     info->first_timestamp_ns = bh.first_timestamp_ns;
     info->last_timestamp_ns  = bh.last_timestamp_ns;
+    info->num_events         = bh.num_events;
     return 0;
 }
 
@@ -264,6 +265,7 @@ int pgwt_reader_decode_block_info(struct pgwt_event_reader *r, int block_idx,
         info->sample_period_ns  = bh.sample_period_ns;
         info->first_timestamp_ns = bh.first_timestamp_ns;
         info->last_timestamp_ns  = bh.last_timestamp_ns;
+        info->num_events         = bh.num_events;
     }
 
     /* Unknown block type (written by a NEWER build): skip the block rather

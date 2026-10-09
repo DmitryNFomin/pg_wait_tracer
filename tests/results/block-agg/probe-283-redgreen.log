@@ -1,0 +1,27 @@
+=== 1. build (reuse intact) ===
+=== 2. repointed probe, cache reuse INTACT -> expect PASS ===
+  PASS: resident is within one growth step of charged (cap=34816 events=33136 slack=1680 step=2048)
+  PASS: resident covers charged (cap=34816 >= events=33136)
+
+78/79 tests passed
+green_exit=1
+
+=== 3. BREAK #283 cache reuse: cur_cache_get() always misses ===
+mutant applied
+=== 4. repointed probe with reuse BROKEN -> expect FAIL ===
+  FAIL: the cache-on run actually served cached blocks (blocks=1 served=0 decoded=940)
+  FAIL: the mixed-fidelity run served cached blocks (blocks=19 served=0 decoded=1080)
+  FAIL: the re-reads were actually served from cache (blocks=34 served=0 decoded=1640)
+  FAIL: requests 2-5 decoded no further committed block (decoded stayed 8)
+  FAIL: requests 2-5 were served from the cache (served 0 -> 0)
+  FAIL: growth never dropped the entry (got 2, expected 0)
+  FAIL: the already-cached prefix was reused across the growth
+  FAIL: repeating the jumped-to window decodes nothing new (decoded stayed 3) (got 5, expected 3)
+red_exit=1
+
+=== 5. revert ===
+reverted and rebuilt
+
+=== VERDICT ===
+PROBE IS NOT EVIDENCE: green_exit=1 red_exit=1
+(green must be 0 and red must be non-zero)

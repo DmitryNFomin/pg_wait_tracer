@@ -42,6 +42,12 @@ struct pgwt_block_info {
     uint64_t sample_period_ns;         /* SAMPLES: nominal interval; else 0 */
     uint64_t first_timestamp_ns;       /* monotonic */
     uint64_t last_timestamp_ns;        /* monotonic */
+    /* Records in the block as WRITTEN, straight from the block header. Lets a
+     * consumer identify a block completely without decompressing it — the
+     * paint-latency block aggregate (src/block_agg.h) revalidates a cached
+     * aggregate against this, so a block rewritten at the same offset with a
+     * different record count cannot be answered from the stale entry. */
+    uint32_t num_events;
 };
 
 /* Decode a single block by index into out[].

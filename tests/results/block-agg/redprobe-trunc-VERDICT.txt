@@ -1,0 +1,102 @@
+RED PROBE for the repointed truncation assertion -- VERDICT: IT DOES NOT BITE
+=============================================================================
+
+Branch 504bf6d. Run on gate-1 (pgwt-gate, root@2.28.45.47,
+machine_id 2cd101b7f7984352bac6db55b1655c2e), after the gate run finished so
+the probe's build load could not perturb the live tier's timings.
+
+WHAT WAS ASKED
+--------------
+"Prove the assertion still goes RED when the property it guards is broken.
+If it cannot fail, it is decoration."
+
+The assertion:
+  tr.check_eq(canonical_body(after), canonical_body(ctl),
+              "the truncated read matches a fresh uncached read exactly")
+  -- tests/test_data_current_trace_cache.py:1036, after repointing :1029
+     from "transitions" to PROBE_CMD (session_timeline).
+
+The property it is supposed to guard, per cur_cache_sync's own comment
+(src/server.c:1185): "A cache that cannot prove what it holds must refuse to
+answer, never answer anyway."
+
+ATTEMPT 1 -- break one guard          (redprobe-trunc.sh / -M1-sync-noop.log)
+-----------------------------------------------------------------------------
+M1: cur_cache_sync() -> no-op (drops the path/header identity check, the
+    "file must still have at least the blocks we cached" shrink check, and the
+    per-block (first ts, file offset) agreement check).
+
+Result: 76/79, MUTATED_EXIT=1. Three FAILs -- ALL in the RESTART section:
+    FAIL: not one pre-restart pid survives into the post-restart answer
+          (got [1000, 1001, 1002, 1003], expected [])
+    FAIL: every post-restart session is from the new capture
+    FAIL: the identity check dropped the entry (resets 0 -> 0)
+
+The TRUNCATION section stayed fully GREEN, and `resets 0 -> 1` still fired:
+    curcache {... blocks 2, events 7578, resets 0}
+          -> {... blocks 0, events 0,    resets 1}
+
+So cur_cache_sync is NOT this assertion's lever. The entry is also dropped at
+src/server.c:2638 -- `if (!have_current) cur_cache_drop(&srv->cur)` -- when no
+valid current-trace coverage entry survives. Two independent guards defend the
+same property; breaking one leaves it held.
+
+ATTEMPT 2 -- break both guards     (redprobe-trunc2.sh / -M1M2-both-guards.log)
+-------------------------------------------------------------------------------
+M1 as above, plus
+M2: `if (!have_current) cur_cache_drop(...)` -> `if (0)`.
+
+Result: 75/79, MUTATED_EXIT=1. The cache now DOES retain the stale superset:
+    curcache {... blocks 2, events 7578, resets 0}
+          -> {... blocks 2, events 7578, resets 0, served 0}
+
+and yet, verbatim from the log:
+    PASS: a truncated current.trace refuses or returns FEWER events,
+          never the cached superset
+    FAIL: the vanished blocks were dropped from the entry (resets 0 -> 0)
+    PASS: the entry did not keep blocks the file no longer has (2 -> 2)
+    PASS: the truncated read matches a fresh uncached read exactly
+
+THREE FINDINGS
+--------------
+F1. THE EQUALITY ASSERTION IS VACUOUS IN THIS SCENARIO. Note `served: 0`: the
+    retained superset is never served. Truncating current.trace to a third of
+    its size makes the coverage layer refuse the file on BOTH servers, so both
+    answer empty ({"events": [], "fidelity": "none", "total_count": 0}) and
+    agree trivially. The assertion compares empty to empty. It is satisfied
+    without checking anything -- "the thing being checked is absent rather
+    than wrong".
+
+    This is NOT an argument for the adviser's alternative. With "transitions"
+    on both sides it was equally vacuous: both sides refused identically. The
+    repoint makes the assertion COHERENT (same command, so it can hold at all);
+    it does not make this scenario able to exercise the property.
+
+F2. "the entry did not keep blocks the file no longer has" PASSED at (2 -> 2)
+    while the entry kept both blocks the file no longer has. Its predicate is
+    `post["blocks"] <= pre["blocks"]`, which is satisfied by keeping all of
+    them -- it can only catch GROWTH, never retention, so it cannot fail in the
+    direction its own text describes. PRE-EXISTING: untouched by this branch
+    (not in any hunk of `git diff 8705412..HEAD -- <this file>`).
+
+F3. Only `resets` bites. It went red under M1 alone and under M1+M2, so the
+    section is not blind -- but the specific property "must not serve the stale
+    superset" is unprovable in this fixture, by either command.
+
+WHAT WOULD BITE (follow-up, not done here)
+------------------------------------------
+A truncation that leaves the file READABLE, so the coverage layer still accepts
+it and the cached server can actually serve blocks the file no longer has --
+e.g. lowering only the .meta committed count, or truncating to an exact block
+boundary. Then cached-vs-uncached would genuinely diverge and the equality
+would have something to see. That needs a new fixture shape; it is a task, not
+a nit, and it is NOT folded into this branch.
+
+HONEST LIMITS OF THIS PROBE
+---------------------------
+- Each failure mode exits with a distinct code rather than printing an
+  unearned red: missing anchor 98, build break 97, missing binary 96/95,
+  wrong tree 99. Both runs reported MUTATION(S) APPLIED and built clean.
+- It mutates src/server.c in a COPY at /root/pgwt-redprobe{,2}-ba, never the
+  gate tree at /root/pgwt-check/agent_block-transition-aggregate.
+- n=1 per mutation. These are deterministic guard removals, not timing tests.
