@@ -260,3 +260,43 @@ test_cross_validate_idle.sh
 #   not in this list because it recompiles the module 17 times (~16 s) and
 #   is evidence, not a gate.
 test_exec_index
+
+# Paint-latency plan Phase 3b: the per-execution STEP-SEQUENCE index
+# (src/variant_index.c). Phase 3's boundary index CANNOT serve `variants`:
+# handle_variants builds flow patterns from the ordered SEQUENCE of wait steps
+# between an execution's markers (pgwt_compute_variants), compresses adjacent
+# repetitions into loops and groups by the hash of that pattern -- a start/end
+# pair cannot produce that answer. This indexes the reduced per-execution
+# contribution once per committed block, with the PARTIAL SEQUENCE carried
+# across block boundaries, so a request costs O(chunks + executions in window)
+# instead of O(events in window).
+#   The safety argument is that one window query equals pgwt_compute_variants
+#   over the array src/server.c actually builds (every record in [from, to],
+#   selection INCLUSIVE at both ends) -- BIT-EXACTLY, on all 18 result fields
+#   including the raw bits of the avg_loop_n double, no epsilon. So this is a
+#   differential against the real function over block splits of 25 fixtures x
+#   windows x both phases (~38,000 quadruples): a one-block suite would never
+#   exercise carry-over at all, which is this phase's whole point, and
+#   PGWT_VARIANT_INDEX_ONE_BLOCK=1 demonstrates exactly that by re-running the
+#   sweeps with no cuts and requiring the carry-over counters to be ZERO (that
+#   mode never exits 0). Literal expectations pin the #222 double-EXEC_START
+#   discard, a 4-record loop sequence spread over 5 blocks, the CPU-only
+#   fill-in that makes avg_loop_n 0, an idle record and an
+#   impossible-duration record excluded by the ALL-ZERO filter (which is not a
+#   no-op), CMD_END NOT closing an exec here, ordering being significant, and
+#   the oracle's si-clamping quirk in the per-step averages.
+#   Bypass suite, because a sequence index's failure mode is answering
+#   "no variants" when it simply cannot see: an empty index, an unsealed one,
+#   an unknown version, a skipped or reordered block, an out-of-order record,
+#   a record outside its block's bounds, a window not CONTAINED in coverage
+#   (containment, not intersection), an inverted window, an unknown phase, a
+#   NULL filter, four kinds of non-empty filter and every injected allocation
+#   failure must each REFUSE with their own reason, produce no variants and
+#   POISON the counts to -1 with failed=1 -- plus a fixture with NO markers
+#   that must come back as 0 variants with refused=OK, the one encoding of a
+#   genuinely empty window.
+#   Companion: tests/variant_index_mutations.py injects the silent-wrong risks
+#   one at a time and requires this test to catch each; it is not in this list
+#   because it recompiles the module once per mutation and is evidence, not a
+#   gate.
+test_variant_index
