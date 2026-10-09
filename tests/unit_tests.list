@@ -171,3 +171,35 @@ test_agg_raw_crosscheck
 # only must still print a row; a missing/non-executable comparator and a
 # generator too old to reach the refusal path must fail, never skip.
 test_cross_validate_idle.sh
+# Paint-latency plan Phase 3: the EXECUTIONS INDEX (src/exec_index.c). Six
+# detail commands reload the full raw event window on every request at
+# ~0.68 s per million records; this indexes execution BOUNDARIES once per
+# committed block, with per-pid open-row state carried across block
+# boundaries, so a request costs O(chunks + executions in window).
+#   The whole safety argument is that one window query equals
+#   pgwt_compute_executions over the array src/server.c actually builds
+#   (markers-only prefix below `from` ++ every record in [from, to]) --
+#   BIT-EXACTLY, on ten boundary fields, no epsilon. So this is a
+#   differential against the real function over EVERY block split of 13
+#   fixtures (424 cut sets, 21,625 fixture/split/window triples): a
+#   one-block suite would never exercise carry-over at all, which is this
+#   phase's whole point. Literal expectations pin the #222 double-EXEC_START
+#   orphan closed by CMD_END, three orphans closed by one CMD_END, an
+#   execution spanning seven blocks, one open at capture end, a window that
+#   opens mid-execution, a zero-length execution, a plan discarded by
+#   CMD_END, a plan whose query_id does not match, and a query_id that
+#   arrives only on EXEC_END.
+#   Bypass suite, because a boundary index's failure mode is answering
+#   "no executions" when it simply cannot see: an empty index, an unsealed
+#   one, an unknown version, a skipped or reordered block, an out-of-order
+#   record, a record outside its block's bounds, a window not fully covered
+#   and every injected allocation failure must each REFUSE with their own
+#   reason and no rows -- plus a fixture with NO markers that must come back
+#   as 0 rows with refused=OK, the one encoding of a genuinely empty window.
+#   n_events/n_workers/matches_event_filter cannot come from a boundary
+#   index, so they are POISONED to -1 rather than left at 0.
+#   Companion: tests/exec_index_mutations.py injects all 16 silent-wrong
+#   risks one at a time and requires this test to catch each (16/16); it is
+#   not in this list because it recompiles the module 17 times (~16 s) and
+#   is evidence, not a gate.
+test_exec_index
