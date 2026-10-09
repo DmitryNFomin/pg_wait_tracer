@@ -152,6 +152,16 @@ already provisioned (`-i` is never re-run against a shared box's data —
 `psql -U postgres -d postgres -c 'select count(*) from pgbench_accounts'`
 first if unsure.
 
+**Run only this rehearsed command — do not improvise a higher-concurrency
+pileup on stage.** `pgbench -c 4 --rate=25` plus `live_loop_workload.py`'s
+persistent sessions is about 20 backends total. The interference table
+(`src/compute.c`, `PAIR_HT_SIZE` 4096 slots, keyed on an unordered PID pair)
+needs around 92 pairwise-overlapping backends to saturate its hash table
+(92×91/2 = 4186 > 4096), so this workload sits roughly 20x under that
+threshold. Something like `pgbench -c 100` is the one improvisation that
+would push past it and turn #327 (see §5) into a live demo freeze — the
+owner has confirmed the plan is the rehearsed script only.
+
 ### 2.4 `pgwt-server`
 
 Not started by hand — the bridge spawns it over ssh for you (§1, README.md
@@ -256,7 +266,16 @@ Visit the 11 tabs **in the order the UI lists them**
    same walk order and the same warning are already in
    `docs/DEMO_MAC_WALK_CHECKLIST.md` §2). From Sessions, click any session
    row; that row's Timeline is what renders.
-7. Transitions
+7. Transitions — **do not click "Load flow variants"** during the walk. The
+   button (`web/static/lib/builders/transitions.js:302`) is the only way to
+   trigger `pgwt_compute_variants`'s pattern hash table (`src/compute.c`,
+   `VARIANT_HT_SIZE` 4096 slots, keyed by `hash_pattern` over the step
+   sequence); its insert loop probes with no fullness check, and nobody has
+   bounded the distinct-pattern count for a long capture. The server is
+   single-threaded, so a saturated probe spins forever and freezes every tab
+   at once (see §5's hung-server recovery). It is not loaded with the tab
+   itself — only this explicit button triggers it — so leaving it unclicked
+   keeps it off the demo path entirely. Tracking: #327.
 8. Concurrency
 9. Waterfall
 10. Scatter
@@ -348,6 +367,33 @@ criteria doc is explicit that "inspection is not observation" here.
   it, the daemon is not actually running full mode; check `status` (§3.1).
 - If it's genuinely blank with no message: check the daemon and bridge are
   both still alive (§3.1, §3.3) and reload the tab.
+
+### A hung `pgwt-server` (spin, not a crash)
+
+Clicking Transitions' "Load flow variants" button (§4 item 7) or running a
+far larger workload than §2.3's rehearsed command (see that section's
+pileup warning) can saturate one of `pgwt-server`'s fixed-size hash tables.
+Because the server is single-threaded, the saturated probe loop spins
+forever on one core rather than crashing (#327) — this is a different
+failure mode from both of the others below:
+
+- **Recognise it**: every tab stops updating at the same moment (not just
+  one), the bridge shows no error chip or dropped connection (contrast
+  "The bridge drops mid-demo" above), and `top`/`htop` on `pgwt-stage` shows
+  `pgwt-server` pinned near 100% of one core with no change over time. A
+  slow query instead stalls one tab while others keep refreshing; a crash
+  instead produces the bridge's error chip.
+- **Recover it**: Ctrl-C the bridge on the Mac (§6) — this tears down the
+  ssh session and should end the remote `pgwt-server` child with it. Check
+  `pgrep pgwt-server` on `pgwt-stage`; if it's still running, `kill -9` it
+  directly (a tight probe loop may not act on a milder signal promptly).
+  Then restart the bridge (§2.5). The daemon and PostgreSQL are untouched,
+  so no capture data is lost.
+- **Timing**: there's no measured duration for this exact restart — budget
+  it like §2.5's startup (an ssh connect and a few seconds for tabs to
+  repaint), not a reprovision. Tell the audience you're reconnecting the
+  client rather than stopping; only stop the demo if tabs are still frozen
+  once the new bridge is up.
 
 ### The workload dies
 
