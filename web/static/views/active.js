@@ -1200,6 +1200,21 @@ function renderFidelityChip(model, ctx) {
             sampledSwatch + 'sampled</span>' +
             '<span style="display:inline-flex;align-items:center;gap:5px">' +
             mixedSwatch + 'mixed window</span>';
+        // PROTOTYPE (agent/mixed-window-prototype, issue #322 design question
+        // D4): when the server names the sampled sub-range(s) directly
+        // (model.shading.bands carries a 'sampled' kind band rather than one
+        // whole-window 'mixed' band — see buildFidelityShading), the band
+        // boundary IS the mode switch, so say so. Owner's framing: numbers
+        // reported are correct, but the window spans two capture modes and
+        // totals derived from each side may not line up. Not shown for the
+        // whole-window tint (no boundary = nothing to disclaim beyond the
+        // existing "mixed window" label above).
+        const hasSubRange = model.shading && model.shading.bands &&
+            model.shading.bands.some(b => b.kind === 'sampled');
+        if (hasSubRange) {
+            html += '<span style="color:#d9a441">totals may not fully ' +
+                'reconcile across the switch</span>';
+        }
     }
     if (model.escalation) {
         html += '<span style="color:' +

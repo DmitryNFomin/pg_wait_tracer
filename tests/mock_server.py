@@ -123,6 +123,25 @@ def _is_compare_baseline(msg):
     return req_to < _TO_NS
 
 
+def _prototype_mixed_fidelity_ranges(msg):
+    """PROTOTYPE ONLY -- see the PGWT_MOCK_FIDELITY_RANGES comment at its call
+    site. Splits the response's window in half: first half "exact", second
+    half "sampled" -- just enough shape for buildFidelityShading to draw a
+    sub-range band instead of tinting the whole window uniformly. Uses the
+    request's own from/to when the command carries them (e.g. "aas"); falls
+    back to the canned dataset's [_FROM_NS, _TO_NS] span for commands that
+    don't take a window (e.g. "transitions"). Not a measurement of anything
+    real -- illustrative only."""
+    from_ns, to_ns = msg.get("from"), msg.get("to")
+    if from_ns is None or to_ns is None:
+        from_ns, to_ns = _FROM_NS, _TO_NS
+    mid_ns = (from_ns + to_ns) // 2
+    return [
+        {"from": from_ns, "to": mid_ns, "fidelity": "exact"},
+        {"from": mid_ns, "to": to_ns, "fidelity": "sampled"},
+    ]
+
+
 def _baseline_rows(rows, value_key):
     """Deterministic B variants: real changes, one gone entity, one floor row."""
     out = []
@@ -564,6 +583,29 @@ _EXACT_VIEWS = {"heatmap", "transitions", "concurrency", "lock_chains",
 #                                            renderer separately) the mock
 #                                            cannot represent a window that is
 #                                            PART exact, part sampled.
+#   PGWT_MOCK_FIDELITY_RANGES=1               PROTOTYPE ONLY (branch agent/
+#                                            mixed-window-prototype, issue
+#                                            #322's design-decision work --
+#                                            NOT shipped, never default-on):
+#                                            makes a "mixed" window emit a
+#                                            "fidelity_ranges" sub-range array
+#                                            (first half exact, second half
+#                                            sampled) so fidelity.js's dead
+#                                            sub-range band renderer has
+#                                            something to draw. The mock
+#                                            LEADING the server -- forbidden
+#                                            everywhere else; see
+#                                            _prototype_mixed_fidelity_ranges.
+#   PGWT_MOCK_CPU_NODE_MODE=a|b               PROTOTYPE ONLY, same branch:
+#                                            over a "mixed" window, overrides
+#                                            the "transitions" CPU* node's
+#                                            total_ms to illustrate option A
+#                                            (excludes samples, reconciles
+#                                            with edges) vs option B
+#                                            (includes samples, edges don't
+#                                            explain the total). See the
+#                                            comment at the "transitions"
+#                                            handler.
 
 
 class FidelityConfig:
@@ -979,6 +1021,21 @@ def handle_request(msg):
         # add_fidelity's `info->has_samples && info->sample_period_ns` gate.
         if response_fidelity in ("sampled", "mixed") and cmd not in _EXACT_VIEWS:
             resp["sample_period_ns"] = _FID.sample_period_ns
+        # PROTOTYPE ONLY (agent/mixed-window-prototype, issue #322's design
+        # question — "what should a mixed window's CPU* node report, and how
+        # does the UI show the window spans two modes"). PGWT_MOCK_FIDELITY_
+        # RANGES=1 makes the mock emit "fidelity_ranges" for a "mixed" window
+        # so fidelity.js's buildFidelityShading sub-range band renderer
+        # (otherwise dead code -- #322, nothing in src/ or this mock has ever
+        # emitted the field) actually has something to draw. THIS IS THE MOCK
+        # LEADING THE SERVER, which tests/test_protocol_drift.py forbids in
+        # every other mode -- never wire this default-on, never let it leak
+        # into a non-prototype branch. See
+        # tests/results/mixed-window-prototype/index.html for the full
+        # disclaimer and the screenshots this exists to produce.
+        if (response_fidelity == "mixed" and
+                os.environ.get("PGWT_MOCK_FIDELITY_RANGES") == "1"):
+            resp["fidelity_ranges"] = _prototype_mixed_fidelity_ranges(msg)
     # FID-3 (T1): over a sampled-only window the real server gates the
     # latency columns — samples carry no real durations, so avg/percentiles
     # are null and the UI renders "—". Mirror it so the web tests exercise
@@ -1268,7 +1325,7 @@ def _handle_request_inner(cmd, req_id, msg):
         # link_count/total_link_count/truncated and the 5-link value SUM
         # (1670) are unchanged — test_matrix_view's "1,670 of 1,800" / "5 of
         # 8" note text depends only on those, not on which nodes carry them.
-        return {"id": req_id, "total": 1800, "link_count": 5,
+        trans_resp = {"id": req_id, "total": 1800, "link_count": 5,
                 "total_link_count": 8, "truncated": True, "nodes": [
             {"name": "CPU*", "total_ms": 4800, "class": "CPU", "event_id": 0},
             {"name": "Client:ClientRead", "total_ms": 9153, "class": "Client", "event_id": 0x06000000},
@@ -1281,6 +1338,32 @@ def _handle_request_inner(cmd, req_id, msg):
             {"source": "IO:DataFileRead", "target": "CPU*", "value": 80, "duration_ms": 320.0},
             {"source": "CPU*", "target": "LWLock:WALInsert", "value": 30, "duration_ms": 90.0},
         ]}
+        # PROTOTYPE ONLY (agent/mixed-window-prototype -- issue #322's design
+        # question: in a MIXED window, should the CPU* NODE total include the
+        # sampled sub-range's estimated CPU (option B), or only the exact
+        # sub-range's measured CPU (option A, today's real behaviour since
+        # the Phase 1 change)? PGWT_MOCK_CPU_NODE_MODE=a|b overrides ONLY the
+        # CPU* node's total_ms, and only when the window is "mixed" -- every
+        # other field, and the exact-mode default above, is untouched, so no
+        # existing test (none sets this var) is affected.
+        #   a = 5590ms: EXACTLY the sum of CPU*'s three OUTGOING edges above
+        #       (5000.0 + 500.0 + 90.0) -- the node total reconciles with the
+        #       graph, at the cost of excluding the mixed window's sampled-
+        #       tier CPU contribution (under-reports real CPU).
+        #   b = 8590ms (5590 + a flat 3000ms illustrative sampled-tier
+        #       estimate): the accurate total for the window, but the edges
+        #       still sum to the SAME 5590ms as (a) -- nothing in the graph
+        #       explains where the extra 3000ms came from.
+        # Neither number is a measurement; both are illustrative only (see
+        # the module docstring's mock-leads-server warning).
+        cpu_node_mode = os.environ.get("PGWT_MOCK_CPU_NODE_MODE")
+        if _FID.fidelity == "mixed" and cpu_node_mode in ("a", "b"):
+            cpu_ms = 5590.0 if cpu_node_mode == "a" else 8590.0
+            trans_resp["nodes"] = [
+                dict(n, total_ms=cpu_ms) if n["name"] == "CPU*" else n
+                for n in trans_resp["nodes"]
+            ]
+        return trans_resp
 
     if cmd == "lock_chains":
         return {"id": req_id, "chains": [
