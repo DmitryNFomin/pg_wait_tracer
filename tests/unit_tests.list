@@ -60,6 +60,25 @@ test_variants_p95
 # (assertion shapes and fixtures blind to the bug, pid 0, dense pid runs, and
 # allocation failures that must come back ABSENT rather than short).
 test_pid_cap
+# #327: six open-addressing tables in compute.c paired a FIXED power-of-two
+# array with a probe loop that had no fullness test, so the (size+1)-th
+# distinct key spun forever -- pgwt-server is single-threaded, so that hangs
+# every tab at once rather than returning a wrong number. The two summary
+# sites are the dangerous pair: SUMMARY_MAX_SESSIONS/QUERIES bound ONE
+# per-second record, not the window, and the summary paths never reach
+# reject_overload, so the 900 s UI default had nothing bounding it. All six
+# now grow (src/qid_index.h, src/pid_index.h) and refuse the whole result on
+# a real allocation failure. Also #347's shape: an accumulator used as the
+# occupancy test let a zero-duration record's slot be re-keyed and its
+# transitions inherited by the next key (measured: 1 + 2 transitions
+# reported as one row of 3). Pre-fix each section does not fail, it SPINS --
+# the red evidence is non-termination under a timeout
+# (tests/results/probe-bounds/redgreen-327.txt). Carries the bypass suite:
+# cap-sized and identical-duration fixtures that are green while broken, a
+# summary stub that delivers nothing or only part of the range, key 0, dense
+# key runs, and allocation failures at every new growth point that must come
+# back ABSENT rather than short.
+test_probe_bounds
 # #276: pgwt_compute_concurrency kept candidate intervals in a fixed
 # 100,000-entry array filled in ARRIVAL order, so the UI's default 900 s
 # window drew its first ~60 s and reported the other 825 s as max: 0 -- 8% of
