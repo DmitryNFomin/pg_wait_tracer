@@ -83,3 +83,48 @@ WHAT IS NOT HERE
   src/compute.c / src/server.c yet — those three files were held by another
   branch (the #316/#317/#318 re-cut) for the whole of this task. Phase 1 step
   1 is the standalone module and its proofs; step 2 is the wiring.
+
+────────────────────────────────────────────────────────────────────────────
+WIRING ATTEMPT 2 (commit c27e084) — box-check-c27e084-3failed.log
+────────────────────────────────────────────────────────────────────────────
+98/101 passed, 3 failed, live UI smoke PASS. The end-bound reconciliation
+worked: test_data_aas went 3/10 -> 10/10 and every accounting test that the
+half-open experiment had zeroed came back. NOTHING ELSE was wrong — the three
+remaining failures (five FAIL lines) map one-to-one onto fixes that are
+already committed, and that mapping is the useful part of this log:
+
+  1. "transitions: the answer came from MERGED blocks" (merged=0 decoded=5)
+     -> MY OWN new assertion, and it was wrong: a cold cache merges nothing.
+        Fixed in 8f2abdc — queries twice, asserts the WARM request merged and
+        that cold and warm answers are identical (strictly stronger).
+
+  2. "the window read from the RESTARTED run matches the uncached read"
+     -> deep-equality diff in merged_blocks/decoded_blocks ONLY; total=4404
+        and every link and node byte-identical. Fixed in 8f2abdc by making
+        those fields opt-in (PGWT_TRANSITIONS_PROVENANCE=1). A field that
+        records HOW an answer was reached must never change WHETHER two
+        answers are the same.
+
+  3. "[transitions] response schemas match" (protocol drift, real server vs
+     tests/mock_server.py)
+     -> SAME cause as 2, and an independent confirmation that gating was the
+        right call rather than a convenient one: the two provenance fields did
+        not exist in the mock. If they are ever made unconditional,
+        tests/mock_server.py must gain them in the same commit.
+
+  4. "the already-cached prefix was reused across the growth"
+  5. "the vanished blocks were dropped from the entry (resets 0 -> 0)"
+     -> #283's cache probe measuring through `transitions`, which the fast
+        path no longer routes through that cache. Addressed in 8a69e87 by
+        repointing the probe (see probe-283-redgreen.log for the proof that
+        the repointed probe still goes RED when reuse is deliberately broken).
+
+STILL OPEN at the time of writing: one assertion in the truncation section
+("the truncated read matches a fresh uncached read exactly"). Both sides now
+query session_timeline; the cached server returns {"events": [], "total_count":
+0} while a FRESH server on the truncated file emits full_fidelity_required, so
+session_timeline's fidelity gating reacts to truncation differently from
+transitions'. The safety property the section is about still holds (empty is
+not the cached superset, and resets now moves correctly); only the strict
+equality control disagrees. Closing it needs a SHAPE change to that assertion,
+which was reserved for the owner rather than folded in.
