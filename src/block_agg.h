@@ -138,15 +138,42 @@
  *     number moves, so a REFUSED_CLIP leaves *dst byte-identical and the
  *     downgrade to DECODE cannot double-count.
  *
- * C11. The per-event table is NOT maintained unless a window was declared.
- *     pgwt_block_agg_enable_events() is the declaration; without it every
- *     per-event and per-class readout REFUSES with
- *     PGWT_BAGG_REFUSED_UNAVAILABLE. A Phase-1 caller that only wants
- *     `transitions` therefore gets byte-identical behaviour to v1 (one more
- *     struct field, no extra table, no extra work), and a caller that forgot
- *     to declare a window gets a refusal rather than a plausible zero (C8).
+ * C11. In a MODE_WINDOW ACCUMULATOR the per-event table is NOT maintained
+ *     unless a window was declared. pgwt_block_agg_enable_events() is the
+ *     declaration; without it every per-event and per-class readout REFUSES
+ *     with PGWT_BAGG_REFUSED_UNAVAILABLE, and a caller that forgot to declare
+ *     a window gets a refusal rather than a plausible zero (C8).
  *     enable_events() itself refuses once anything has been folded in, so a
  *     window can never be retro-fitted onto a half-built accumulator.
+ *
+ *     SCOPE, narrowed because the earlier wording overstated it. This clause
+ *     said a Phase-1 `transitions` caller gets "no extra table, no extra
+ *     work", full stop. That is true of the ACCUMULATOR and false of the
+ *     BLOCK: pgwt_block_agg_build() sets events_on unconditionally and runs
+ *     one ev_observe() per record, because a block aggregate's per-event
+ *     table is window-independent (C10) and that is exactly what lets one
+ *     cached block serve any window containing it. So the honest statement
+ *     is:
+ *
+ *       - WARM path, unchanged: merge() with dst->events_on == 0 skips both
+ *         the clip pre-flight and the per-event fold, so merging cached
+ *         blocks costs what it cost in v1;
+ *       - COLD path, NOT free: every block decoded for the first time now
+ *         also builds its per-event table. The cost is confined to first
+ *         decode, so it can only show up as a slower FIRST request after a
+ *         restart, never the second.
+ *
+ *     That asymmetry is deliberate, but "no extra work" was the wrong way to
+ *     describe it, and a version's stated contract has to be true the moment
+ *     it ships (#315). The cold cost is measured rather than asserted — see
+ *     tests/results/block-agg-event-class/paint-coldwarm.txt.
+ *
+ *     Related, and stated here because it is the same struct: the `events`
+ *     table is NOT yet charged against src/server.c's cache budget
+ *     (bagg_entry_bytes() accounts pair_cap + node_cap + key_cap only), so a
+ *     cached entry costs more RSS than BAGG_CACHE_MAX_BYTES accounts for.
+ *     Known debt, fixed in the wiring step rather than here, because the fix
+ *     is in server.c and that file is owned by other work.
  *
  * C12. LATENCY COLUMNS ARE NEVER CLIPPED — faithfully, because
  *     pgwt_compute_top_events() does not clip them either: "a wait's latency
