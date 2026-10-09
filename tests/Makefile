@@ -28,6 +28,7 @@ TESTS     = test_wait_event test_cmdline test_spawn test_event_writer test_event
             test_concurrency_bounds \
             test_idle_accounting test_idle_summary \
             test_agg_raw_crosscheck \
+            test_exec_index \
             gen_test_traces gen_bench_traces test_concurrent_rw cross_validate \
             dump_markers wait_cpu_canary test_wait_cpu_canary \
             test_summary_tick_flush
@@ -443,5 +444,19 @@ test_agg_raw_crosscheck: test_agg_raw_crosscheck.c ../src/compute.c \
                    $(BUILD)/spawn.o $(BUILD)/cJSON.o
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -llz4 -lz -lm
 
+# test_exec_index: the EXECUTIONS INDEX (paint-latency plan, Phase 3,
+# src/exec_index.c). A differential against the real pgwt_compute_executions
+# over every block split of every fixture, asserting the ten boundary fields
+# BIT-EXACTLY, plus the bypass suite (an empty/unsealed/wrong-version index, a
+# skipped or reordered block, an out-of-order record, a window outside
+# coverage and every injected allocation failure must REFUSE, never answer)
+# and the measured O(executions in window) claim. Server build, no BPF, no
+# live PG; ~0.2 s.
+#
+test_exec_index: test_exec_index.c ../src/exec_index.c ../src/compute.c \
+                   $(BUILD)/wait_event.o $(BUILD)/idle_rule.o \
+                   $(BUILD)/spawn.o $(BUILD)/cJSON.o
+	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -lm
+
 clean:
-	rm -f $(TESTS) map_reader_core.o
+	rm -f $(TESTS) test_exec_index map_reader_core.o
