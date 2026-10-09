@@ -1,0 +1,55 @@
+=== self-test: the harness's own false-negative paths ===
+
+--- self-test case: compiler absent (127) (expect TOOL-MISSING) ---
+FAIL [self-test]: the compiler is missing or not executable (exit 127). Every mutant would be BUILD-FAILED, which is NOT a detection.
+cc not found: [Errno 2] No such file or directory: '/var/folders/tf/4mlc41nx3zsbx0v4x8wy4hl00000gn/T/pgwt-ii-selftest-ogi5y6rh/no-such-cc'
+  -> harness reports 1 failure(s), TOOL-MISSING=1 {'RED': 0, 'STAYED-GREEN': 0, 'BUILD-FAILED': 0, 'NOT-APPLIED': 0, 'TOOL-MISSING': 1, 'BASELINE-RED': 0}  PASS
+
+--- self-test case: compiler not executable (126) (expect TOOL-MISSING) ---
+FAIL [self-test]: the compiler is missing or not executable (exit 126). Every mutant would be BUILD-FAILED, which is NOT a detection.
+cc not executable: [Errno 13] Permission denied: '/var/folders/tf/4mlc41nx3zsbx0v4x8wy4hl00000gn/T/pgwt-ii-selftest-ogi5y6rh/noexec-cc'
+  -> harness reports 1 failure(s), TOOL-MISSING=1 {'RED': 0, 'STAYED-GREEN': 0, 'BUILD-FAILED': 0, 'NOT-APPLIED': 0, 'TOOL-MISSING': 1, 'BASELINE-RED': 0}  PASS
+
+--- self-test case: compiler exits 127 on every call (expect TOOL-MISSING) ---
+FAIL [self-test]: the compiler is missing or not executable (exit 127). Every mutant would be BUILD-FAILED, which is NOT a detection.
+
+  -> harness reports 1 failure(s), TOOL-MISSING=1 {'RED': 0, 'STAYED-GREEN': 0, 'BUILD-FAILED': 0, 'NOT-APPLIED': 0, 'TOOL-MISSING': 1, 'BASELINE-RED': 0}  PASS
+
+--- self-test case: test source missing (expect BASELINE-RED) ---
+FAIL [self-test]: pristine build failed — nothing below is evidence
+clang: error: no such file or directory: '/var/folders/tf/4mlc41nx3zsbx0v4x8wy4hl00000gn/T/pgwt-ii-selftest-ogi5y6rh/nope.c'
+
+  -> harness reports 1 failure(s), BASELINE-RED=1 {'RED': 0, 'STAYED-GREEN': 0, 'BUILD-FAILED': 0, 'NOT-APPLIED': 0, 'TOOL-MISSING': 0, 'BASELINE-RED': 1}  PASS
+
+--- self-test case: needle matches 0 times (expect NOT-APPLIED) ---
+FAIL  ZZ no such text: NOT-APPLIED — needle matched 0 times, must match exactly 1. A mutation that did not apply is the pristine module; its pass proves nothing.
+  -> harness reports 1 failure(s), NOT-APPLIED=1 {'RED': 0, 'STAYED-GREEN': 0, 'BUILD-FAILED': 0, 'NOT-APPLIED': 1, 'TOOL-MISSING': 0, 'BASELINE-RED': 0}  PASS
+
+--- self-test case: needle matches many times (expect NOT-APPLIED) ---
+FAIL  ZZ ambiguous needle: NOT-APPLIED — needle matched 11 times, must match exactly 1. A mutation that did not apply is the pristine module; its pass proves nothing.
+  -> harness reports 1 failure(s), NOT-APPLIED=1 {'RED': 0, 'STAYED-GREEN': 0, 'BUILD-FAILED': 0, 'NOT-APPLIED': 1, 'TOOL-MISSING': 0, 'BASELINE-RED': 0}  PASS
+
+--- self-test case: mutation the test cannot see (STAYED-GREEN) (expect STAYED-GREEN) ---
+FAIL  ZZ comment-only no-op: STAYED-GREEN — BLIND SPOT
+  -> harness reports 1 failure(s), STAYED-GREEN=1 {'RED': 0, 'STAYED-GREEN': 1, 'BUILD-FAILED': 0, 'NOT-APPLIED': 0, 'TOOL-MISSING': 0, 'BASELINE-RED': 0}  PASS
+
+--- self-test case: mutation that does not compile (expect BUILD-FAILED) ---
+FAIL  ZZ syntax error: BUILD-FAILED — a mutation that cannot compile is NOT a detection
+t is_unfiltered((((const struct pgwt_filter *f)
+      |                             ^
+      |                          int
+/var/folders/tf/4mlc41nx3zsbx0v4x8wy4hl00000gn/T/pgwt-interval-index-mutants/m01/interval_index.c:436:2: error: expected ')'
+  436 | }
+      |  ^
+/var/folders/tf/4mlc41nx3zsbx0v4x8wy4hl00000gn/T/pgwt-interval-index-mutants/m01/interval_index.c:261:25: note: to match this '('
+  261 | static int is_unfiltered((((const struct pgwt_filter *f)
+      |                         ^
+/var/folders/tf/4mlc41nx3zsbx0v4x8wy4hl00000gn/T/pgwt-interval-index-mutants/m01/interval_index.c:436:2: error: expected function body after function declarator
+  436 | }
+      |  ^
+5 errors generated.
+
+  -> harness reports 1 failure(s), BUILD-FAILED=1 {'RED': 0, 'STAYED-GREEN': 0, 'BUILD-FAILED': 1, 'NOT-APPLIED': 0, 'TOOL-MISSING': 0, 'BASELINE-RED': 0}  PASS
+
+8 self-test cases, 0 that the harness either APPROVED or refused for the wrong reason
+SELF-TEST PASSED

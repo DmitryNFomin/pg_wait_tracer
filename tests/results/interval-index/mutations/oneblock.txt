@@ -1,0 +1,24 @@
+=== test_interval_index: the concurrency interval index (Phase 4) ===
+index version under test: 1
+MODE: oneblock — DELIBERATE FALSIFICATION. Every fixture is fed as a SINGLE block, so the boundary ledger MUST go red. A green run here means the ledger cannot see.
+8 fixtures
+--- sweep: every block cut x every window x two resolutions ---
+  PASS: no disagreement in 8476 comparisons
+--- non-vacuity ledger: the interesting cases really ran ---
+  PASS: 802 block-cut sets were built
+  PASS: 8476 (cut, window, resolution) answers compared
+  PASS: 44266 intervals were actually compared (not 0 == 0)
+  FAIL(1339): 0 indexes had MORE THAN ONE block — a one-block suite never tests the boundary rule
+  FAIL(1342): 0 intervals straddled an INTERNAL block boundary — stored in a later block, started before it opened (the clipped-start detector)
+  PASS: 545 intervals started before the indexed coverage itself
+  PASS: 11362 intervals were excluded for ending past `to` (the raw path's exclusion, exercised)
+  PASS: 25388 intervals were excluded for ending before `from`
+  FAIL(1350): 0 answers had the SAME pid selected from two different blocks inside one bucket
+  PASS: 5286 answers had a bucket peak above 1
+  PASS: 6214 burst onsets were detected across the sweep
+  FAIL(1355): 0 answers contained a burst whose members live in TWO OR MORE blocks
+  PASS: 1148 windows selected nothing and REFUSED
+  FAIL(1359): the prefilter skipped a block 0 times across the sweep
+
+15 checks, 5 failed
+FAILED
