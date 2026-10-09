@@ -594,12 +594,24 @@ int pgwt_block_agg_nodes_sorted(const struct pgwt_block_agg *a,
  * readout below will refuse, and the caller must recompute from raw. */
 int pgwt_block_agg_events_available(const struct pgwt_block_agg *a);
 
-/* Point lookup. Returns 1 and fills *out when present, 0 when the event is
- * ABSENT or the table is unavailable — absence reported as absence, never as
- * a zeroed row (C8). `out` may be NULL to test presence only. */
+/* Point lookup, THREE-valued because there are three answers and v1's
+ * two-valued lookup convention can only carry two.
+ *
+ *   returns PGWT_BAGG_OK, *found = 1   -> present, *out filled
+ *   returns PGWT_BAGG_OK, *found = 0   -> ABSENT from a readable table
+ *   returns PGWT_BAGG_REFUSED_UNAVAILABLE -> THERE IS NO TABLE (C11)
+ *   returns PGWT_BAGG_REFUSED_INVALID     -> NULL a, or NULL found
+ *
+ * "absent" and "unavailable" are different facts: the first is about the
+ * data, the second about the reader, and collapsing them is exactly the
+ * absence-reads-as-zero failure C8 exists to forbid. A tri-state RETURN
+ * (1/0/-1) was rejected for it: `if (lookup(...))` would read -1 as present,
+ * because -1 is truthy in C. `found` is mandatory, not optional — pass NULL
+ * and the call refuses, so the three-valued answer cannot be discarded by
+ * accident. *out is untouched unless *found becomes 1. */
 int pgwt_block_agg_event_lookup(const struct pgwt_block_agg *a,
                                 uint32_t event_id,
-                                struct pgwt_block_agg_event *out);
+                                struct pgwt_block_agg_event *out, int *found);
 
 /* Deterministic readout: total_ns DESC, then event_id ASC — a TOTAL order, so
  * the bytes do not depend on merge order or hash layout. Refuses with
@@ -613,10 +625,21 @@ int pgwt_block_agg_events_sorted(const struct pgwt_block_agg *a,
 int pgwt_block_agg_classes_sorted(const struct pgwt_block_agg *a,
                                   struct pgwt_block_agg_class **out, int *n);
 
+/* Not a DB Time any window can have: ~584 years in nanoseconds. Written to
+ * *out by pgwt_block_agg_db_time_ns() on every refusal so that a caller which
+ * ignores the status gets an obviously impossible number instead of a
+ * believable one. It is NOT a value to test for — the status is — it is there
+ * to make the wrong usage loud. */
+#define PGWT_BAGG_DB_TIME_UNKNOWN UINT64_MAX
+
 /* The DB-Time denominator `top_events` reports its %DB against: the sum of
- * total_ns over NON-IDLE events only (pgwt_is_idle_event). Returns 0 and
- * PGWT_BAGG_REFUSED_UNAVAILABLE when the table is off — a caller must not
- * read the zero. Derived rather than stored for the same reason as C13. */
+ * total_ns over NON-IDLE events only (pgwt_is_idle_event). Derived rather
+ * than stored for the same reason as C13.
+ *
+ * On refusal (table off, or NULL) *out becomes PGWT_BAGG_DB_TIME_UNKNOWN,
+ * never 0. Zero is a perfectly ordinary DB Time for an idle window, so
+ * writing it on a refusal would let "I could not look" masquerade as "there
+ * was none" — a plausible number is worse than an absurd one. */
 int pgwt_block_agg_db_time_ns(const struct pgwt_block_agg *a, uint64_t *out);
 
 /* ── One trace file's contribution to a window ──────────────────────────── */

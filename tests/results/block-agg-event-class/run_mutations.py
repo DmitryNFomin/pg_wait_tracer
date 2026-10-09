@@ -468,9 +468,15 @@ def main_inner(want):
                      % (mid, target, why, catches, old.strip()[:200],
                         new.strip()[:200], rc, len(fails)))
             fh.write(out)
+        # A nonzero exit is only RED if the SUITE rejected the mutant. A
+        # build that never ran, or a compiler that does not exist, is not a
+        # caught mutation -- labelling either RED would be the driver taking
+        # credit for a hole it never probed.
         verdict = "RED" if rc != 0 else "GREEN-HOLE"
         if rc == 126:
             verdict = "BUILD-FAILED"
+        elif rc == 127:
+            verdict = "NO-COMPILER"
         rows.append((mid, verdict, catches,
                      "%d FAIL line(s); first: %s"
                      % (len(fails), fails[0][:140] if fails else "(none)")))

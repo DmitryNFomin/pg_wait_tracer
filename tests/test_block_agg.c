@@ -2502,8 +2502,12 @@ static void section9e_on_disk_events(void)
                       "%d oracle rows", from, to, ner, res.num_rows);
                 for (int k = 0; k < res.num_rows; k++) {
                     struct pgwt_block_agg_event mine;
-                    if (!pgwt_block_agg_event_lookup(&acc,
-                            res.rows[k].event_id, &mine)) {
+                    int mfound = 0;
+                    CHECK(pgwt_block_agg_event_lookup(&acc,
+                              res.rows[k].event_id, &mine, &mfound)
+                          == PGWT_BAGG_OK,
+                          "§9e the per-event table must be AVAILABLE");
+                    if (!mfound) {
                         CHECK(0, "§9e event %u missing from the aggregate",
                               res.rows[k].event_id);
                         continue;
@@ -2572,7 +2576,7 @@ static void section9e_on_disk_events(void)
  * unclipped per-block total differs from the clipped answer. §0's
  * ev_clipped_records and ev_merge_refused_clip count those, FAIL the run at
  * zero, and §10f falsifies them by re-running the whole comparison over a
- * fixture with every duration set to 1 ns and asserting both go to zero
+ * fixture with every duration set to ZERO and asserting both go to zero
  * there. A counter that cannot go to zero is not measuring the fixture.
  */
 
@@ -2881,7 +2885,16 @@ static void p2_compare_one_window(const struct fix_block *b, int nb,
     for (int i = 0; i < res.num_rows; i++) {
         const struct pgwt_event_row *o = &res.rows[i];
         struct pgwt_block_agg_event mine;
-        if (!pgwt_block_agg_event_lookup(&acc, o->event_id, &mine)) {
+        int mfound = 0;
+        /* The status and the presence flag are checked SEPARATELY: a readout
+         * that could not see (UNAVAILABLE) and an event that is genuinely
+         * absent are different facts, and a comparator that treated the
+         * first as the second would skip the row and call it agreement. */
+        CHECK(pgwt_block_agg_event_lookup(&acc, o->event_id, &mine, &mfound)
+              == PGWT_BAGG_OK,
+              "%s the per-event table must be AVAILABLE for the lookup",
+              tag);
+        if (!mfound) {
             CHECK(0, "%s window [%" PRIu64 ", %" PRIu64 "]: event %u is in "
                   "the oracle and ABSENT from the aggregate", tag, from, to,
                   o->event_id);
@@ -3209,7 +3222,7 @@ static void section10c_latency_ladder(void)
 }
 
 /* §10f FALSIFICATION of §0's clip counters. Same fixture, same boundary
- * generator, same comparison — with every duration flattened to 1 ns, so no
+ * generator, same comparison — with every duration flattened to ZERO, so no
  * wait can start before any boundary the fixture generates. Both clip
  * counters MUST read zero. A counter that reads nonzero here is counting
  * something other than what §0 claims it counts, and the §0 gate it feeds
@@ -3238,11 +3251,12 @@ static void section10f_falsify_counters(void)
     CHECK(seen.ev_windows_compared > before,
           "§10f compared no window — the falsification itself was vacuous");
     CHECK(st.clipped_records == 0,
-          "§10f a fixture with 1 ns durations still produced %ld clipped "
+          "§10f a fixture with ZERO-duration records still produced %ld "
+          "clipped "
           "record(s): ev_clipped_records does not measure straddling, so the "
           "§0 gate it feeds proves nothing", st.clipped_records);
     CHECK(st.clip_refusals == 0,
-          "§10f a fixture with 1 ns durations still produced %ld "
+          "§10f a fixture with ZERO-duration records still produced %ld "
           "REFUSED_CLIP(s): ev_merge_refused_clip does not measure the clip "
           "downgrade", st.clip_refusals);
     printf("    straddle-free fixture: clipped=%ld refusals=%ld (both must "
@@ -3301,8 +3315,41 @@ static void section11_bypass_v2(void)
         CHECK(pgwt_block_agg_db_time_ns(&w, &dbt) ==
               PGWT_BAGG_REFUSED_UNAVAILABLE,
               "§11 E1 db_time must refuse when the table is off");
-        CHECK(pgwt_block_agg_event_lookup(&w, E_IO1, NULL) == 0,
-              "§11 E1 event_lookup must report ABSENT when the table is off");
+        /* ...and must not leave a BELIEVABLE number behind. 0 ns of DB Time
+         * is an ordinary reading for an idle window, so writing 0 on a
+         * refusal would let "I could not look" pass for "there was none". */
+        CHECK(dbt == PGWT_BAGG_DB_TIME_UNKNOWN,
+              "§11 E1 a refused db_time must write the impossible sentinel, "
+              "got %" PRIu64, dbt);
+        CHECK(dbt != 0,
+              "§11 E1 a refused db_time must never read as zero");
+        /* THE THREE-STATE DISTINCTION. The first cut returned a bare 0 here,
+         * the same 0 it returns for an event that is genuinely absent, so a
+         * caller asking about an un-declared accumulator was told a fact
+         * about the DATA when the truth was a fact about the READER. The
+         * status must say UNAVAILABLE and `found` must stay 0. */
+        {
+            struct pgwt_block_agg_event probe;
+            memset(&probe, 0xAB, sizeof(probe));
+            struct pgwt_block_agg_event untouched = probe;
+            int pfound = 1;
+            CHECK(pgwt_block_agg_event_lookup(&w, E_IO1, &probe, &pfound)
+                  == PGWT_BAGG_REFUSED_UNAVAILABLE,
+                  "§11 E1 event_lookup must REFUSE when there is no table, "
+                  "not report the event absent");
+            CHECK(pfound == 0, "§11 E1 a refused lookup must not claim a hit");
+            CHECK(memcmp(&probe, &untouched, sizeof(probe)) == 0,
+                  "§11 E1 a refused lookup must leave no readable row behind");
+            /* `found` is mandatory: a caller cannot discard the third state. */
+            CHECK(pgwt_block_agg_event_lookup(&w, E_IO1, &probe, NULL)
+                  == PGWT_BAGG_REFUSED_INVALID,
+                  "§11 E1 a NULL `found` must refuse — otherwise the "
+                  "three-valued answer can be thrown away silently");
+            CHECK(pgwt_block_agg_event_lookup(NULL, E_IO1, &probe, &pfound)
+                  == PGWT_BAGG_REFUSED_INVALID,
+                  "§11 E1 a NULL aggregate must refuse");
+            seen.refusals_observed += 3;
+        }
         /* The transitions answer must be UNCHANGED by all of this — the v1
          * contract still holds for a Phase-1 caller. */
         CHECK(w.total_transitions > 0,
@@ -3605,8 +3652,9 @@ static void section11_bypass_v2(void)
             CHECK(pgwt_block_agg_add_event(&w, &c.ev[e]) == PGWT_BAGG_OK,
                   "§11 E12 add_event must accept a continuation fragment");
         struct pgwt_block_agg_event got;
-        CHECK(pgwt_block_agg_event_lookup(&w, E_IO1, &got) == 1,
-              "§11 E12 lookup");
+        int gfound = 0;
+        CHECK(pgwt_block_agg_event_lookup(&w, E_IO1, &got, &gfound)
+              == PGWT_BAGG_OK && gfound == 1, "§11 E12 lookup");
         /* Two records, one physical observation: the fragment adds duration
          * and does not bump the count. Compared against the oracle rather
          * than asserted as a literal. */
@@ -3653,7 +3701,9 @@ static void section11_bypass_v2(void)
               "fragment (got %d) — if it did not, the comparison below "
               "would be vacuous", lres.num_rows);
         struct pgwt_block_agg_event lone;
-        int present = pgwt_block_agg_event_lookup(&w2, E_IO1, &lone);
+        int present = 0;
+        CHECK(pgwt_block_agg_event_lookup(&w2, E_IO1, &lone, &present)
+              == PGWT_BAGG_OK, "§11 E12b lookup status");
         CHECK(present == 1,
               "§11 E12b a continuation fragment arriving FIRST must still "
               "create its row — without the `|| is_new` clause the slot "
@@ -3711,6 +3761,78 @@ static void section11_bypass_v2(void)
         pgwt_block_agg_free(&w);
     }
 
+    /* E14. #346 MUST NOT BE DUPLICATED HERE.
+     *
+     * #346 is pgwt_block_agg_window_from_reader()'s `to <= from` early
+     * return: it answers OK-with-nothing for a single-instant window, while
+     * C7 says `ts in [from, from]` is not empty. That is absence reading as
+     * zero, it is Phase-1 territory, and this branch deliberately does not
+     * touch it. What this branch must not do is add a SECOND instance of the
+     * same mistake on the v2 path.
+     *
+     * So: enable_events(from, from) must be ACCEPTED, and a record ending at
+     * exactly that instant must land in the table with the SAME numbers the
+     * raw path gives it (count 1, 0 ns -- event_window_ns clips the interval
+     * to nothing, and the oracle agrees because it IS the oracle). A path
+     * that silently emptied the window would pass a count check against
+     * nothing, so the comparison is against pgwt_compute_top_events and the
+     * oracle's own row count is asserted first. */
+    {
+        struct fix_block d;
+        memset(&d, 0, sizeof(d));
+        ev_set(&d, 1000000000ULL, 21, E_IO1, E_CPU, 400, 0);
+        fix_seal(&d, &TRACE_A, 11, 11264);
+        uint64_t t = d.ev[0].timestamp_ns;
+
+        struct pgwt_block_agg w;
+        pgwt_block_agg_init_window(&w);
+        CHECK(pgwt_block_agg_enable_events(&w, t, t) == PGWT_BAGG_OK,
+              "§11 E14 a single-instant window must be ACCEPTED, not "
+              "refused and not silently emptied");
+        CHECK(pgwt_block_agg_in_window(&d.ev[0], t, t) == 1,
+              "§11 E14 C7 says a record ending at `to == from` is IN");
+        CHECK(pgwt_block_agg_add_event(&w, &d.ev[0]) == PGWT_BAGG_OK,
+              "§11 E14 add");
+
+        struct pgwt_events_result res;
+        raw_top_events_of(d.ev, 1, NULL, 0, t, t, &res);
+        CHECK(res.num_rows == 1,
+              "§11 E14 the ORACLE emits %d row(s) for a single-instant "
+              "window -- if it emitted none this comparison would be vacuous "
+              "and #346 could be duplicated unnoticed", res.num_rows);
+        struct pgwt_block_agg_event got;
+        int f14 = 0;
+        CHECK(pgwt_block_agg_event_lookup(&w, E_IO1, &got, &f14)
+              == PGWT_BAGG_OK, "§11 E14 lookup status");
+        CHECK(f14 == 1,
+              "§11 E14 the record VANISHED from the v2 table -- that is a "
+              "second instance of #346 on the new path");
+        if (f14 && res.num_rows == 1) {
+            CHECK(got.count == res.rows[0].count,
+                  "§11 E14 count agg=%" PRIu64 " raw=%" PRIu64,
+                  got.count, res.rows[0].count);
+            CHECK((double)got.total_ns / 1e6 == res.rows[0].total_ms,
+                  "§11 E14 total agg=%" PRIu64 " ns raw=%.9f ms",
+                  got.total_ns, res.rows[0].total_ms);
+            CHECK(got.total_ns == 0,
+                  "§11 E14 a zero-width window clips the interval to "
+                  "nothing, so the time must be 0 ns while the COUNT stays 1 "
+                  "(#328); got %" PRIu64, got.total_ns);
+        }
+        free(res.rows);
+        pgwt_block_agg_free(&w);
+
+        /* The inverted neighbour is still a refusal, so E14 is not a blanket
+         * "accept anything" that would hide the E5 guard going missing. */
+        struct pgwt_block_agg wi;
+        pgwt_block_agg_init_window(&wi);
+        CHECK(pgwt_block_agg_enable_events(&wi, t, t - 1) ==
+              PGWT_BAGG_REFUSED_INVALID,
+              "§11 E14 one tick INVERTED must still refuse");
+        seen.refusals_observed++;
+        pgwt_block_agg_free(&wi);
+    }
+
     pgwt_block_agg_free(&blk);
 }
 
@@ -3749,7 +3871,9 @@ static void section12_v2_probes(void)
     int base_bad = 0;
     for (int i = 0; i < res.num_rows; i++) {
         struct pgwt_block_agg_event mine;
-        if (!pgwt_block_agg_event_lookup(&acc, res.rows[i].event_id, &mine)) {
+        int bfound = 0;
+        if (pgwt_block_agg_event_lookup(&acc, res.rows[i].event_id, &mine,
+                                        &bfound) != PGWT_BAGG_OK || !bfound) {
             base_bad++;
             continue;
         }
@@ -3771,9 +3895,10 @@ static void section12_v2_probes(void)
             int bad = 0;
             for (int i = 0; i < res.num_rows; i++) {
                 struct pgwt_block_agg_event mine;
+                int pf = 0;
                 if (pgwt_block_agg_event_lookup(&acc, res.rows[i].event_id,
-                                                &mine) &&
-                    mine.count != res.rows[i].count)
+                                                &mine, &pf) == PGWT_BAGG_OK &&
+                    pf && mine.count != res.rows[i].count)
                     bad++;
             }
             CHECK(bad > 0, "§12 P1 one extra observation went UNSEEN");
@@ -3791,9 +3916,10 @@ static void section12_v2_probes(void)
             int bad = 0;
             for (int i = 0; i < res.num_rows; i++) {
                 struct pgwt_block_agg_event mine;
+                int pf = 0;
                 if (pgwt_block_agg_event_lookup(&acc, res.rows[i].event_id,
-                                                &mine) &&
-                    (double)mine.total_ns / 1e6 != res.rows[i].total_ms)
+                                                &mine, &pf) == PGWT_BAGG_OK &&
+                    pf && (double)mine.total_ns / 1e6 != res.rows[i].total_ms)
                     bad++;
             }
             CHECK(bad > 0, "§12 P2 ONE nanosecond on one event total went "
@@ -3847,7 +3973,9 @@ static void section12_v2_probes(void)
         CHECK(pgwt_block_agg_db_time_ns(&acc, &before) == PGWT_BAGG_OK,
               "§12 P5 db_time");
         struct pgwt_block_agg_event idle;
-        CHECK(pgwt_block_agg_event_lookup(&acc, E_CLIR, &idle) == 1,
+        int ifound = 0;
+        CHECK(pgwt_block_agg_event_lookup(&acc, E_CLIR, &idle, &ifound)
+              == PGWT_BAGG_OK && ifound == 1,
               "§12 P5 the window must contain an idle-but-visible event, or "
               "the DB-Time exclusion is untested");
         CHECK(before > 0, "§12 P5 db_time must be positive");

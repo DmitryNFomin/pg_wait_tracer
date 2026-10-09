@@ -611,7 +611,18 @@ int pgwt_block_agg_enable_events(struct pgwt_block_agg *a,
         return PGWT_BAGG_REFUSED_VERSION;
     /* An inverted window would clip every record to zero and look like a
      * legitimately empty answer. Both ends nonzero and to < from is the only
-     * inverted case; a zero end means unbounded there, not an endpoint. */
+     * inverted case; a zero end means unbounded there, not an endpoint.
+     *
+     * `to == from` is ACCEPTED on purpose, and this is where #346 could have
+     * been duplicated. #346 is pgwt_block_agg_window_from_reader()'s
+     * `to <= from` early return, which answers OK-with-nothing for a
+     * single-instant window although C7 says `ts in [from, from]` is not
+     * empty — absence reading as zero. That line is Phase-1 territory and is
+     * NOT touched here. What this clause must not do is add a SECOND copy of
+     * it: refusing `to == from` would be defensible, but silently treating it
+     * as empty would not, and accepting it keeps this path agreeing with
+     * event_window_ns(), which gives such a record 0 ns and count 1 exactly
+     * as the raw path does. Pinned by tests/test_block_agg.c §11 E14. */
     if (from_mono_ns != 0 && to_mono_ns != 0 && to_mono_ns < from_mono_ns)
         return PGWT_BAGG_REFUSED_INVALID;
     /* Retro-fitting a window onto a half-built accumulator would clip the
@@ -1107,19 +1118,45 @@ int pgwt_block_agg_events_available(const struct pgwt_block_agg *a)
     return a->events_on ? 1 : 0;
 }
 
+/* THREE states, and v1's two-valued lookup convention cannot express them.
+ *
+ * The v1 pair/node lookups answer a yes/no question: is this key in the
+ * table? v2 adds a third answer — THERE IS NO TABLE (C11, events_on == 0) —
+ * and the first cut of this function collapsed it onto the same 0 as ABSENT.
+ * That is "absence reads as zero" in miniature: a caller asking about an
+ * un-declared accumulator was told the event is not there, which is a
+ * statement about the data when the truth is a statement about the reader.
+ *
+ * So the status is the return value, as everywhere else in this module, and
+ * presence is an explicit out-parameter. Deliberately NOT a tri-state return
+ * (1 present / 0 absent / -1 unavailable): `if (pgwt_..._lookup(...))` would
+ * then read UNAVAILABLE as PRESENT, because -1 is truthy in C — the exact
+ * trap Phase 3 hit. With a status return, the house-style `if (rc !=
+ * PGWT_BAGG_OK)` is correct and the lazy `if (rc)` fails CLOSED (it treats
+ * the OK case as falsy and so cannot mistake a refusal for a hit).
+ *
+ * On any refusal *found is 0 and *out is left untouched: a refused lookup
+ * leaves no readable row behind. */
 int pgwt_block_agg_event_lookup(const struct pgwt_block_agg *a,
                                 uint32_t event_id,
-                                struct pgwt_block_agg_event *out)
+                                struct pgwt_block_agg_event *out, int *found)
 {
-    if (!pgwt_block_agg_events_available(a) || a->ev_cap == 0)
-        return 0;
+    if (found)
+        *found = 0;
+    if (!a || !found)
+        return PGWT_BAGG_REFUSED_INVALID;
+    if (!pgwt_block_agg_events_available(a))
+        return PGWT_BAGG_REFUSED_UNAVAILABLE;
+    if (a->ev_cap == 0)
+        return PGWT_BAGG_OK;            /* available and empty: ABSENT */
     const struct pgwt_block_agg_event *s =
         ev_slot(a->events, a->ev_cap, event_id);
     if (s->count == 0)
-        return 0;                       /* ABSENT, not a zeroed row */
+        return PGWT_BAGG_OK;            /* ABSENT, not a zeroed row */
     if (out)
         *out = *s;
-    return 1;
+    *found = 1;
+    return PGWT_BAGG_OK;
 }
 
 static int cmp_event_total(const void *va, const void *vb)
@@ -1231,10 +1268,18 @@ int pgwt_block_agg_classes_sorted(const struct pgwt_block_agg *a,
     return PGWT_BAGG_OK;
 }
 
+/* A refusal here must not leave a BELIEVABLE number behind. The first cut
+ * wrote 0 before refusing, and 0 ns of DB Time is a perfectly ordinary
+ * reading for an idle window — so a caller that ignored the status would
+ * report "no DB Time" when the truth was "I could not look". Writing
+ * PGWT_BAGG_DB_TIME_UNKNOWN instead makes that mistake LOUD: it is not a
+ * quantity any window can have, so it shows up as an absurd number rather
+ * than a plausible one. The status is still the only correct thing to read;
+ * this just removes the quiet failure mode. */
 int pgwt_block_agg_db_time_ns(const struct pgwt_block_agg *a, uint64_t *out)
 {
     if (out)
-        *out = 0;
+        *out = PGWT_BAGG_DB_TIME_UNKNOWN;
     if (!a || !out)
         return PGWT_BAGG_REFUSED_INVALID;
     if (!pgwt_block_agg_events_available(a))
