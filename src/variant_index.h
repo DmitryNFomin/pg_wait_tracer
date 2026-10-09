@@ -121,6 +121,23 @@
  * injected allocation failure all REFUSE. Nothing is clamped or dropped to
  * make a tail fit.
  *
+ * FOR WHOEVER BUILDS THE SERVER-SIDE CACHE — ONE CANONICAL ORDERING OR A
+ * REFUSAL. Everything above rests on the index having been fed ONE
+ * timestamp-ordered stream, and on the tail continuing that same stream at
+ * cover_to_ns + 1. pgwt-server does not hand you one: server_load_events_fi()
+ * merges several per-generation trace files, each shifted by its own
+ * canonical offset, and sorts the result. So the cache MUST build the index
+ * and decode the tail from that same merged, offset-applied ordering. Feeding
+ * blocks in per-file order while the tail comes from the merged order is not
+ * a tail at all: the index's rows would sit in a different stream than the
+ * seam claims, close order across the seam would be wrong, and the answer
+ * would be plausible and unverifiable. add_block() catches the cases it can
+ * see (a decreasing timestamp, a record outside its block's bounds) and
+ * latches REFUSE_GAP, but it CANNOT see a record that the merge would have
+ * placed between two blocks it was never given. If a window's files cannot
+ * be reduced to one ordering cheaply, REFUSE that window and let raw answer
+ * it -- the same rule as everywhere else here.
+ *
  * ABSENCE NEVER READS AS ZERO, AND -1 IS TRUTHY IN C. Every refusal zeroes
  * out->res, then poisons res.num_variants and res.total_executions to
  * PGWT_VARIANT_INDEX_NOT_INDEXED (-1), sets res.failed = 1, and sets
