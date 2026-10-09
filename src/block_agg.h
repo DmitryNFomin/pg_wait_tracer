@@ -97,6 +97,81 @@
  *     REFUSAL (DECODE / negative status), never a zero. A caller that cannot
  *     see must fall back to raw.
  *
+ * ── THE v2 ADDITION (paint-latency Phase 2) ──────────────────────────────
+ * v2 adds a PER-EVENT table (keyed by old_event) carrying the columns a
+ * `top_events` row is built from, and a PER-CLASS readout folded from it.
+ * Every clause below is true of the code that ships this header.
+ *
+ * C9. The per-event table counts exactly the records
+ *     pgwt_block_agg_event_counts() accepts: not a marker, duration not
+ *     greater than its own end timestamp, old_event not hidden, and not
+ *     IO_WORKER-flagged. That is pgwt_compute_top_events()' own admission
+ *     test with a zeroed filter (pgwt_filter_matches + the hidden check + the
+ *     T2 io_worker exclusion), and tests/test_block_agg.c §10 pins the two
+ *     against each other by DIFFERENTIAL against the shipping function, not
+ *     against a restatement of it.
+ *
+ *     This is a THIRD predicate, distinct from C4 and C5 in both directions:
+ *     it keeps a record whose new_event is EXIT or hidden (C4 drops it) and
+ *     it keeps SAMPLE records (C4 and C5 both drop them), while dropping
+ *     IO_WORKER records that C4 and C5 keep.
+ *
+ * C10. PER-EVENT DURATIONS ARE CLIPPED, and that is the opposite of C6.
+ *     `transitions` does no window clipping; `top_events` does
+ *     (event_window_ns, src/compute.c). So:
+ *
+ *       - a MODE_BLOCK aggregate stores UNCLIPPED per-event totals (it has no
+ *         window) and additionally records ev_min_start_ns, the earliest
+ *         `timestamp_ns - duration_ns` over its C9 records;
+ *       - a MODE_WINDOW accumulator stores CLIPPED totals, and only once a
+ *         window has been declared with pgwt_block_agg_enable_events();
+ *       - merging a block aggregate into such an accumulator is sound ONLY
+ *         when that block needs no clipping, i.e. ev_min_start_ns >= from
+ *         (the `to` side cannot clip: plan() only MERGEs blocks whose every
+ *         record ends at or before `to`). A block that fails that test is
+ *         REFUSED with PGWT_BAGG_REFUSED_CLIP and
+ *         pgwt_block_agg_window_from_reader() then DECODEs it, where the clip
+ *         is applied per record. It is counted in `clip_decoded_blocks` so a
+ *         test can prove the path was taken rather than assume it.
+ *
+ *     The refusal is decided in merge()'s pre-flight block, before a single
+ *     number moves, so a REFUSED_CLIP leaves *dst byte-identical and the
+ *     downgrade to DECODE cannot double-count.
+ *
+ * C11. The per-event table is NOT maintained unless a window was declared.
+ *     pgwt_block_agg_enable_events() is the declaration; without it every
+ *     per-event and per-class readout REFUSES with
+ *     PGWT_BAGG_REFUSED_UNAVAILABLE. A Phase-1 caller that only wants
+ *     `transitions` therefore gets byte-identical behaviour to v1 (one more
+ *     struct field, no extra table, no extra work), and a caller that forgot
+ *     to declare a window gets a refusal rather than a plausible zero (C8).
+ *     enable_events() itself refuses once anything has been folded in, so a
+ *     window can never be retro-fitted onto a half-built accumulator.
+ *
+ * C12. LATENCY COLUMNS ARE NEVER CLIPPED — faithfully, because
+ *     pgwt_compute_top_events() does not clip them either: "a wait's latency
+ *     is a property of the wait, not of the window". exact_count,
+ *     exact_total_ns, max_ns and hist[] are built from FULL durations of
+ *     non-SAMPLE records only (FID-3). They are therefore window-independent
+ *     and merge unconditionally.
+ *
+ * C13. The PER-CLASS answer is FOLDED from the per-event table, not stored
+ *     beside it. A class index is a pure function of an event id
+ *     (pgwt_wait_class_index), so a second stored table could only ever
+ *     disagree with the first; there is nothing to keep in sync and no
+ *     divergence to test for. This is a deliberate simplification of the
+ *     plan's wording ("per-event counts/durations and per-class totals") and
+ *     loses nothing: the fold is exact.
+ *
+ * C14. SAMPLE / SAMPLE_CONT are handled by the shared helper even though a
+ *     MODE_BLOCK aggregate can never see them (C1 refuses SAMPLES blocks, so
+ *     a TRANSITIONS block holds no SAMPLE-flagged record). They are reachable
+ *     through pgwt_block_agg_add_event(), which src/server.c drives over
+ *     post-merge records that DO carry both flags, so the rule lives in one
+ *     place: a SAMPLE_CONT fragment adds its duration but does not bump
+ *     `count` unless it is the first record for that event — exactly
+ *     pgwt_compute_top_events()' `!(SAMPLE_CONT) || ht[h].count == 0`.
+ *
  * ── OPEN QUESTION, STILL OPEN AND NOW LARGER THAN IT LOOKED ──────────────
  * The raw `transitions` response in src/server.c builds its node totals from
  * ALL loaded records, including SAMPLE-flagged ones. This paragraph used to
@@ -143,7 +218,7 @@ struct pgwt_filter;
 
 /* Version of the aggregate FORMAT AND RULES (the contract above). Bump on any
  * change to which records are counted or how they are attributed. */
-#define PGWT_BLOCK_AGG_VERSION 1u
+#define PGWT_BLOCK_AGG_VERSION 2u
 
 /* Every refusal has its own code so a caller (and a test) can tell WHY the
  * fast path declined. 0 is the only success value. */
@@ -157,6 +232,8 @@ enum pgwt_bagg_status {
     PGWT_BAGG_REFUSED_NOMEM       = -6,  /* allocation failed — refuse, never short */
     PGWT_BAGG_REFUSED_MODE        = -7,  /* operation illegal for this aggregate */
     PGWT_BAGG_REFUSED_INVALID     = -8,  /* uninitialised / unresolvable identity */
+    PGWT_BAGG_REFUSED_CLIP        = -9,  /* block needs window clipping (C10) */
+    PGWT_BAGG_REFUSED_UNAVAILABLE = -10, /* per-event totals not maintained (C11) */
 };
 
 /* Identity of the TRACE FILE a block came from. A rotation produces a new file
@@ -202,6 +279,28 @@ struct pgwt_block_agg_pair {
 
 struct pgwt_block_agg_node {
     uint32_t event_id;
+    uint64_t count;
+    uint64_t total_ns;
+};
+
+/* One `top_events` row's accumulable state (C9/C10/C12). Everything a
+ * pgwt_event_row needs except the quantities derived from these numbers
+ * (avg/p50/p95/p99/pct_db), which the caller computes with compute.c's own
+ * helpers so there is exactly one percentile implementation in the tree. */
+struct pgwt_block_agg_event {
+    uint32_t event_id;
+    uint64_t count;            /* physical observations (C14) */
+    uint64_t total_ns;         /* DB time: CLIPPED in a window accumulator,
+                                * unclipped in a block aggregate (C10) */
+    uint64_t exact_count;      /* non-SAMPLE records only (C12) */
+    uint64_t exact_total_ns;   /* their FULL durations (C12) */
+    uint64_t max_ns;           /* their max FULL duration (C12) */
+    uint64_t hist[HISTOGRAM_BUCKETS];  /* their latency histogram (C12) */
+};
+
+/* The per-class fold (C13). Derived, never stored. */
+struct pgwt_block_agg_class {
+    int      class_index;      /* pgwt_wait_class_index() */
     uint64_t count;
     uint64_t total_ns;
 };
@@ -258,6 +357,38 @@ struct pgwt_block_agg {
     int node_cap, n_nodes;
     struct pgwt_block_agg_key  *keys;    /* flat, one per merged block */
     int key_cap, n_keys;
+
+    /* ── v2: the per-event table (C9-C14) ─────────────────────────────────
+     * `events_on` is the EXPLICIT boolean that makes this table readable. It
+     * is deliberately not inferred from any other field: a poison sentinel
+     * alone does not work in C (-1 is truthy), so absence is expressed as a
+     * separate flag that every readout tests first. */
+    int      events_on;
+    /* The window the CLIPPED totals were computed against (MODE_WINDOW only).
+     * 0 on either side means "unbounded on that side", exactly as
+     * event_window_ns (src/compute.c) reads it. */
+    uint64_t ev_from_ns, ev_to_ns;
+
+    struct pgwt_block_agg_event *events;  /* open-addressed, power-of-two */
+    int ev_cap, n_events;
+
+    /* Declared totals over the C9 record set. */
+    uint64_t ev_records;        /* sum of events[].count */
+    uint64_t ev_total_ns;       /* sum of events[].total_ns */
+
+    /* Earliest `timestamp_ns - duration_ns` over the C9 records folded in —
+     * the one number that decides whether this aggregate can be merged into a
+     * window without clipping (C10). `ev_min_start_set` is its explicit
+     * presence flag; 0 means "no C9 record contributed", which is NOT the
+     * same as "starts at 0". */
+    int      ev_min_start_set;
+    uint64_t ev_min_start_ns;
+
+    /* How many blocks merge() refused with PGWT_BAGG_REFUSED_CLIP and
+     * pgwt_block_agg_window_from_reader() therefore DECODEd instead. Exposed
+     * so a test can prove the downgrade happened rather than assume it; the
+     * signature of window_from_reader() is unchanged on purpose. */
+    int clip_decoded_blocks;
 };
 
 /* What to do with one block for a given window. Exactly one of the three for
@@ -288,8 +419,43 @@ int pgwt_block_agg_file_can_contribute(uint64_t mono_first, uint64_t mono_last,
                                        uint64_t from_mono_ns,
                                        uint64_t to_mono_ns);
 /* C3: can the aggregate answer a request carrying this filter? NULL = no
- * filter = yes. Any non-empty field = no. */
+ * filter = yes. Any non-empty field = no.
+ *
+ * NOTE what v2 does and does NOT change here. The per-event table carries an
+ * EVENT dimension, so a class- or event-filtered `top_events` is answerable
+ * from it by SELECTING rows — but that selection is the caller's, and this
+ * predicate still speaks only for the pair/node tables, which have no
+ * dimension at all. pgwt_block_agg_event_filter_supported() is the v2
+ * predicate for the per-event table. Keeping them separate is the point: one
+ * predicate answering for two tables with different dimensionality is how a
+ * filtered request would get an unfiltered answer. */
 int pgwt_block_agg_filter_supported(const struct pgwt_filter *f);
+
+/* C9/C13: can the PER-EVENT table answer a request carrying this filter? A
+ * class filter and an event filter are both pure selections on the table's
+ * own key, so both are supported. A pid or query_id filter is not: the table
+ * keeps no such dimension, and there is no way to select for it after the
+ * fact. NULL = no filter = yes. */
+int pgwt_block_agg_event_filter_supported(const struct pgwt_filter *f);
+
+/* C9: does this record contribute to its old_event's `top_events` row? */
+int pgwt_block_agg_event_counts(const struct pgwt_trace_event *ev);
+
+/* C10: the record's contribution to a window, clipped. THE single definition
+ * on this side, mirroring event_window_ns() (src/compute.c) clause for
+ * clause, including its `from == 0` / `to == 0` "unbounded on that side"
+ * reading and its refusal (0 ns) of a record whose duration exceeds its own
+ * end timestamp. Not hand-copied at call sites — the Phase-1 lesson. */
+uint64_t pgwt_block_agg_clip_ns(const struct pgwt_trace_event *ev,
+                                uint64_t from_ns, uint64_t to_ns);
+
+/* C12: the log2 latency bucket a FULL duration falls in, 0..HISTOGRAM_BUCKETS-1.
+ * The same ladder compute.c and map_reader.c use. tests/test_block_agg.c §10c
+ * pins every one of the 16 boundaries against edges LEARNED FROM
+ * pgwt_compute_top_events() rather than copied from compute.c, so a drift in
+ * either ladder is a red test and not a silent agreement between two copies
+ * of the same mistake. */
+uint32_t pgwt_block_agg_duration_bucket(uint64_t ns);
 
 /* Is this trace identity resolvable at all? An all-zero identity is not, and
  * must never compare equal to another (a gate that cannot see must refuse). */
@@ -297,9 +463,25 @@ int pgwt_trace_identity_resolvable(const struct pgwt_trace_identity *t);
 
 /* ── Lifecycle ─────────────────────────────────────────────────────────── */
 
-/* A request accumulator. Zeroes *a and sets MODE_WINDOW. */
+/* A request accumulator. Zeroes *a and sets MODE_WINDOW. Per-event totals are
+ * OFF until pgwt_block_agg_enable_events() declares a window (C11), so a
+ * Phase-1 `transitions` caller is unaffected by v2. */
 void pgwt_block_agg_init_window(struct pgwt_block_agg *a);
 void pgwt_block_agg_free(struct pgwt_block_agg *a);
+
+/* C11: declare the window the per-event totals are to be CLIPPED to, and turn
+ * the table on. MODE_WINDOW only. Must be called before anything has been
+ * folded in: a window retro-fitted onto a half-built accumulator would clip
+ * some records and not others, so that is PGWT_BAGG_REFUSED_MODE, not a
+ * best effort. `from`/`to` carry event_window_ns()' unbounded-on-zero
+ * reading; an inverted window (to < from, both nonzero) is
+ * PGWT_BAGG_REFUSED_INVALID.
+ *
+ * Idempotent only for the SAME window: a second call with different bounds on
+ * an untouched accumulator is accepted (nothing has been clipped yet), which
+ * is why the "nothing folded in" test is the real guard. */
+int pgwt_block_agg_enable_events(struct pgwt_block_agg *a,
+                                 uint64_t from_mono_ns, uint64_t to_mono_ns);
 
 /* Build the aggregate of ONE committed TRANSITIONS block from its decoded
  * records. Refuses per C1/C2 and on an unresolvable identity; on any refusal
@@ -405,6 +587,37 @@ int pgwt_block_agg_pairs_sorted(const struct pgwt_block_agg *a,
 /* total_ns DESC, then event_id ASC. Caller frees *out. */
 int pgwt_block_agg_nodes_sorted(const struct pgwt_block_agg *a,
                                 struct pgwt_block_agg_node **out, int *n);
+
+/* ── v2 readout: per-event and per-class ───────────────────────────────── */
+
+/* Is the per-event table readable at all (C11)? 0 means every per-event
+ * readout below will refuse, and the caller must recompute from raw. */
+int pgwt_block_agg_events_available(const struct pgwt_block_agg *a);
+
+/* Point lookup. Returns 1 and fills *out when present, 0 when the event is
+ * ABSENT or the table is unavailable — absence reported as absence, never as
+ * a zeroed row (C8). `out` may be NULL to test presence only. */
+int pgwt_block_agg_event_lookup(const struct pgwt_block_agg *a,
+                                uint32_t event_id,
+                                struct pgwt_block_agg_event *out);
+
+/* Deterministic readout: total_ns DESC, then event_id ASC — a TOTAL order, so
+ * the bytes do not depend on merge order or hash layout. Refuses with
+ * PGWT_BAGG_REFUSED_UNAVAILABLE when the table is off. Caller frees *out. */
+int pgwt_block_agg_events_sorted(const struct pgwt_block_agg *a,
+                                 struct pgwt_block_agg_event **out, int *n);
+
+/* C13: the per-class fold, total_ns DESC then class_index ASC. Refuses with
+ * PGWT_BAGG_REFUSED_UNAVAILABLE when the per-event table is off. Caller frees
+ * *out. */
+int pgwt_block_agg_classes_sorted(const struct pgwt_block_agg *a,
+                                  struct pgwt_block_agg_class **out, int *n);
+
+/* The DB-Time denominator `top_events` reports its %DB against: the sum of
+ * total_ns over NON-IDLE events only (pgwt_is_idle_event). Returns 0 and
+ * PGWT_BAGG_REFUSED_UNAVAILABLE when the table is off — a caller must not
+ * read the zero. Derived rather than stored for the same reason as C13. */
+int pgwt_block_agg_db_time_ns(const struct pgwt_block_agg *a, uint64_t *out);
 
 /* ── One trace file's contribution to a window ──────────────────────────── */
 

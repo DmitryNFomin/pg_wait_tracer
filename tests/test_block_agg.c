@@ -75,6 +75,7 @@
 #include "compute.h"
 #include "idle_rule.h"
 #include "summary_reader.h"
+#include "wait_event.h"      /* pgwt_class_name, for §10b's class filter */
 #include "event_reader.h"
 #include "event_writer.h"
 
@@ -129,6 +130,24 @@ static struct {
     long windows_with_nonzero_pairs;      /* (A3) */
     long mutation_probes_went_red;
     long refusals_observed;
+    /* Phase 2 (§10-§12). Each one FAILS the run at zero: the per-event path
+     * has three ways to look exercised while being untested — a fixture with
+     * no straddling wait (no clip), a fixture where every event is in its own
+     * class (the class fold is a relabelling), and an oracle that returned no
+     * rows (the row loop never ran). */
+    long ev_predicate_cases;
+    long ev_windows_compared;
+    long ev_windows_with_rows;
+    long ev_windows_at_seam;
+    long event_rows_compared;
+    long ev_filtered_rows_compared;
+    long class_rows_compared;
+    long class_rows_multi;          /* classes holding >= 2 distinct events */
+    long ev_clipped_records;        /* admitted records whose clip < duration */
+    long ev_merge_refused_clip;     /* REFUSED_CLIP -> DECODE downgrades */
+    long ev_filter_unselectable;    /* event_id 0: not selectable by filter */
+    long ev_bucket_pairs_checked;
+    long v2_probes_went_red;
 } seen;
 
 /* ── fixture plumbing ────────────────────────────────────────────────────── */
@@ -2241,6 +2260,63 @@ static void section9_on_disk(void)
             CHECK(e2 == 65, "§9 expected 65 admitted records, got %" PRIu64,
                   e2);
             pgwt_block_agg_free(&w2);
+
+            /* §9c-bis THE TRIPWIRE Phase 2 makes live, pinned here.
+             *
+             * The non-TRANSITIONS refusal inside
+             * pgwt_block_agg_window_from_reader() used to test overlap with a
+             * HALF-OPEN `bi.first_timestamp_ns < to_mono_ns` while C7 is
+             * INCLUSIVE at both ends. So a SAMPLES block whose FIRST record
+             * ends exactly at `to` was not "overlapping" and was silently
+             * SKIPPED — the aggregate answering a window the raw path would
+             * have labelled MIXED, with no refusal, no fidelity change and
+             * numbers short by the whole sampled contribution.
+             *
+             * It was unreachable in Phase 1 only because src/server.c's
+             * bagg_window_eligible() refused any window a SAMPLES block
+             * touched. Phase 2 is the work that lifts that refusal, which is
+             * exactly when an unreachable off-by-one becomes a shipped
+             * silent-wrong answer. The predicate is now the shared
+             * pgwt_block_agg_file_can_contribute(), and this is the case that
+             * tells the two readings apart: with `<` the call returns OK,
+             * with the inclusive rule it REFUSES.
+             *
+             * The SAMPLES block begins one tick after the last transition
+             * record, i.e. at f2 + PGWT_BLOCK_EVENTS * 1000. */
+            {
+                uint64_t samples_first =
+                    f2 + (uint64_t)PGWT_BLOCK_EVENTS * 1000ULL;
+                struct pgwt_block_agg w3;
+                pgwt_block_agg_init_window(&w3);
+                uint64_t e3 = 0; int m3 = 0, d3 = 0;
+                int rc3 = pgwt_block_agg_window_from_reader(&r, f2,
+                              samples_first, &w3, sec9_lookup_blind, NULL,
+                              NULL, NULL, &e3, &m3, &d3);
+                CHECK(rc3 == PGWT_BAGG_REFUSED_BLOCK_TYPE,
+                      "§9c-bis a SAMPLES block whose first record ends "
+                      "exactly at `to` must be REFUSED (C7 is inclusive), "
+                      "got rc=%d with %" PRIu64 " records admitted — a "
+                      "half-open `first < to` reading returns OK here and "
+                      "answers a MIXED window as if it were EXACT",
+                      rc3, e3);
+                pgwt_block_agg_free(&w3);
+                seen.refusals_observed++;
+                /* One tick earlier the SAMPLES block genuinely cannot
+                 * contribute, and the window must still ANSWER — otherwise
+                 * the fix above would be a blanket refusal wearing the shape
+                 * of a boundary rule. */
+                struct pgwt_block_agg w4;
+                pgwt_block_agg_init_window(&w4);
+                uint64_t e4 = 0; int m4 = 0, d4 = 0;
+                int rc4 = pgwt_block_agg_window_from_reader(&r, f2,
+                              samples_first - 1, &w4, sec9_lookup_blind, NULL,
+                              NULL, NULL, &e4, &m4, &d4);
+                CHECK(rc4 == PGWT_BAGG_OK,
+                      "§9c-bis one tick before the SAMPLES block the window "
+                      "must still answer, got rc=%d", rc4);
+                CHECK(e4 > 0, "§9c-bis that window admitted nothing");
+                pgwt_block_agg_free(&w4);
+            }
             pgwt_reader_close(&r);
         }
         if (system(srm) != 0) { }
@@ -2323,6 +2399,1245 @@ static void section9_on_disk(void)
     }
 }
 
+/* ══ §10 Phase 2: per-event and per-class totals ══════════════════════════
+ *
+ * The oracle is pgwt_compute_top_events() — the SHIPPING function the Events
+ * tab is drawn from — called on exactly the records a raw loader would have
+ * admitted for the window (C7, inclusive at both ends) with a zeroed filter.
+ * Not a restatement of it: a restatement would agree with a shared mistake,
+ * and C10's clip is precisely the kind of rule two copies get wrong the same
+ * way (it is the #316/#317 family).
+ *
+ * WHAT MAKES THIS NON-VACUOUS, stated before the code so it can be checked
+ * against it: the only interesting record for the clip is one whose wait
+ * STARTED before the window opened, because that is the only case where the
+ * unclipped per-block total differs from the clipped answer. §0's
+ * ev_clipped_records and ev_merge_refused_clip count those, FAIL the run at
+ * zero, and §10f falsifies them by re-running the whole comparison over a
+ * fixture with every duration set to 1 ns and asserting both go to zero
+ * there. A counter that cannot go to zero is not measuring the fixture.
+ */
+
+/* ── the Phase-2 fixture ──────────────────────────────────────────────────
+ * Deliberately NOT the model fixture of §5-§7: every duration there is around
+ * 100 ns, so no wait starts more than 200 ns before its own end and the
+ * window clip would fire only in a sliver nothing else reaches. This one
+ * carries, by construction:
+ *   - a 40 ms wait ending in block 1, so a window opening inside it makes a
+ *     block that is WHOLLY INSIDE by end timestamp still need clipping, which
+ *     is exactly the PGWT_BAGG_REFUSED_CLIP -> DECODE downgrade (C10);
+ *   - IO:1 and IO:2, two events in the SAME class, so the per-class fold is
+ *     not a relabelling of the per-event table (§0 class_rows_multi);
+ *   - an IO_WORKER record: C9 drops it, C4 and C5 keep it;
+ *   - a SAMPLE record with a POSITIVE duration: C9 keeps it, C4 and C5 drop
+ *     it, and C12 refuses it for the latency columns;
+ *   - Client:ClientRead, idle-but-visible, so db_time is not the row sum;
+ *   - a marker, a hidden endpoint and an EXIT;
+ *   - durations spread over 13 of the 16 latency buckets.
+ */
+#define E_TMO WEI(PG_WAIT_TIMEOUT, 1)
+
+static int build_p2_fixture(struct fix_block *b, int max_blocks, int flatten)
+{
+    assert(max_blocks >= 5);
+    memset(b, 0, sizeof(*b) * (size_t)max_blocks);
+    int nb = 0;
+    /* `flatten` is §10f's falsification lever: every duration becomes ZERO,
+     * so no record has an interval at all and nothing can straddle any
+     * window boundary. Same shape, same events, same timestamps, same
+     * boundary generator — only the one property the clip counters claim to
+     * measure is removed, and they must then read zero.
+     *
+     * NOT 1 ns, which was the first attempt and did not falsify anything:
+     * the boundary set contains every record's own END timestamp, so a
+     * window opening at `ts` clips a 1 ns record that ended at `ts` (its
+     * start is ts-1, before the window) and the counters stayed nonzero.
+     * That is the falsification working — it rejected a lever that did not
+     * remove the property — and it is why the lever is zero. */
+#define D(x) ((uint64_t)(flatten ? 0 : (x)))
+
+    /* Block 0: short waits across the bottom latency buckets. */
+    ev_set(&b[nb], 1000000000ULL, 11, E_CPU,  E_IO1,  D(500),   0);
+    ev_set(&b[nb], 1000002000ULL, 11, E_IO1,  E_CPU,  D(1500),  0);
+    ev_set(&b[nb], 1000010000ULL, 12, E_IO2,  E_CPU,  D(3000),  0);
+    ev_set(&b[nb], 1000050000ULL, 12, E_IO1,  E_HIDE, D(20000), 0);
+    ev_set(&b[nb], 1000060000ULL, 11, E_HIDE, E_CPU,  D(4000),  0);
+    fix_seal(&b[nb], &TRACE_A, 0, 1024); nb++;
+
+    /* Block 1: the long waits. The 40 ms one starts 970.3 ms into the trace,
+     * well before this block's own first record, which is the whole point. */
+    ev_set(&b[nb], 1010000000ULL, 13, E_LOCK1, E_CPU,   D(5000000),  0);
+    ev_set(&b[nb], 1010100000ULL, 13, E_CPU,   E_IO1,   D(300000),   0);
+    ev_set(&b[nb], 1010200000ULL, 14, E_CLIR,  E_CPU,   D(2000000),  0);
+    ev_set(&b[nb], 1010300000ULL, 15, E_IO2,   E_LOCK1, D(40000000), 0);
+    fix_seal(&b[nb], &TRACE_A, 1, 2048); nb++;
+
+    /* Block 2: a marker, an IO_WORKER record and a SAMPLE record — the three
+     * records where C9 and C4/C5 disagree. */
+    ev_set(&b[nb], 1020000000ULL, 11, PGWT_MARKER_EXEC_START,
+           PGWT_MARKER_EXEC_START, 0, 0);
+    ev_set(&b[nb], 1020010000ULL, 11, E_CPU, E_IO1, D(7000),
+           PGWT_EVENT_FLAG_IO_WORKER);
+    ev_set(&b[nb], 1020020000ULL, 11, E_IO1, E_CPU, D(12000),
+           PGWT_EVENT_FLAG_SAMPLE);
+    ev_set(&b[nb], 1020040000ULL, 16, E_LW1, E_LW1, D(60000), 0);
+    fix_seal(&b[nb], &TRACE_A, 2, 3072); nb++;
+
+    /* Block 3: one record, so a window can hold it whole or not at all. */
+    ev_set(&b[nb], 1030000000ULL, 17, E_CPU, E_IO1, D(100000), 0);
+    fix_seal(&b[nb], &TRACE_A, 3, 4096); nb++;
+
+    /* Block 4: two records at the same instant, an EXIT, and a Timeout event
+     * so a fifth class exists. */
+    ev_set(&b[nb], 1040000000ULL, 18, E_IO1, PGWT_EVENT_EXIT, D(900000),  0);
+    ev_set(&b[nb], 1040000000ULL, 19, E_IO1, E_CPU,           D(1100000), 0);
+    ev_set(&b[nb], 1040100000ULL, 18, E_CPU, E_IO2,           D(250000),  0);
+    ev_set(&b[nb], 1040200000ULL, 19, E_TMO, E_CPU,           D(16000000), 0);
+    fix_seal(&b[nb], &TRACE_A, 4, 5120); nb++;
+#undef D
+    return nb;
+}
+
+/* Window boundaries for the Phase-2 sweep. On top of §6's set (block bounds
+ * +-1 and every record timestamp) this adds every record's wait START +-1,
+ * because the clip fires at `from` crossing a wait's start and nowhere else:
+ * a boundary set built only from END timestamps would sweep sixty windows and
+ * never exercise the rule this section exists for. */
+static int p2_boundaries(const struct fix_block *b, int nb,
+                         uint64_t *out, int max_out)
+{
+    int n = 0;
+    for (int i = 0; i < nb; i++) {
+        uint64_t v[2] = { b[i].id.first_timestamp_ns,
+                          b[i].id.last_timestamp_ns };
+        for (int k = 0; k < 2; k++) {
+            for (int d = -1; d <= 1; d++) {
+                uint64_t c = v[k] + (uint64_t)(int64_t)d;
+                int dup = 0;
+                for (int j = 0; j < n; j++) if (out[j] == c) { dup = 1; break; }
+                if (!dup) { assert(n < max_out); out[n++] = c; }
+            }
+        }
+        for (int e = 0; e < b[i].n; e++) {
+            uint64_t ts = b[i].ev[e].timestamp_ns;
+            uint64_t st = ts - b[i].ev[e].duration_ns;
+            uint64_t c[4] = { ts, st - 1, st, st + 1 };
+            for (int k = 0; k < 4; k++) {
+                int dup = 0;
+                for (int j = 0; j < n; j++) if (out[j] == c[k]) { dup = 1; break; }
+                if (!dup) { assert(n < max_out); out[n++] = c[k]; }
+            }
+        }
+    }
+    for (int i = 1; i < n; i++)
+        for (int j = i; j > 0 && out[j - 1] > out[j]; j--) {
+            uint64_t t = out[j]; out[j] = out[j - 1]; out[j - 1] = t;
+        }
+    return n;
+}
+
+/* Build the window answer the PHASE-2 way: the same plan/merge/decode
+ * partition as answer_window_phase1(), plus the per-event window declaration
+ * and the REFUSED_CLIP -> DECODE downgrade that
+ * pgwt_block_agg_window_from_reader() performs. Mirrors the shipped function
+ * deliberately; §9e then drives the shipped one itself on a real file so this
+ * mirror cannot be the only thing tested. */
+static int answer_window_phase2(const struct fix_block *b, int nb,
+                                const struct pgwt_block_agg *per_block,
+                                const int *have_agg,
+                                uint64_t from, uint64_t to,
+                                struct pgwt_block_agg *out,
+                                int *n_merge, int *n_decode, int *n_clip)
+{
+    pgwt_block_agg_init_window(out);
+    int rc = pgwt_block_agg_enable_events(out, from, to);
+    if (rc != PGWT_BAGG_OK)
+        return rc;
+    *n_merge = *n_decode = *n_clip = 0;
+    for (int i = 0; i < nb; i++) {
+        enum pgwt_block_plan p =
+            pgwt_block_agg_plan(&b[i].id, have_agg[i], from, to);
+        if (p == PGWT_BLOCK_SKIP)
+            continue;
+        if (p == PGWT_BLOCK_MERGE) {
+            rc = pgwt_block_agg_merge(out, &per_block[i]);
+            if (rc == PGWT_BAGG_REFUSED_CLIP) {
+                (*n_clip)++;
+                p = PGWT_BLOCK_DECODE;      /* the downgrade, C10 */
+            } else if (rc != PGWT_BAGG_OK) {
+                return rc;
+            } else {
+                (*n_merge)++;
+                continue;
+            }
+        }
+        (*n_decode)++;
+        for (int e = 0; e < b[i].n; e++) {
+            if (!pgwt_block_agg_in_window(&b[i].ev[e], from, to))
+                continue;
+            rc = pgwt_block_agg_add_event(out, &b[i].ev[e]);
+            if (rc != PGWT_BAGG_OK)
+                return rc;
+        }
+    }
+    return PGWT_BAGG_OK;
+}
+
+/* The oracle. wall_ms only feeds `aas`, which nothing here compares. */
+static void raw_top_events_of(const struct pgwt_trace_event *ev, int n,
+                              const char *class_name, uint32_t event_id,
+                              uint64_t from, uint64_t to,
+                              struct pgwt_events_result *out)
+{
+    struct pgwt_filter f;
+    memset(&f, 0, sizeof(f));
+    if (class_name)
+        snprintf(f.class_name, sizeof(f.class_name), "%s", class_name);
+    f.event_id = event_id;
+    pgwt_compute_top_events(ev, n, &f, from, to, 1000.0, out);
+}
+
+/* §10a the C9 predicate, differentially against the shipping function.
+ * One record at a time: if pgwt_compute_top_events() emits a row for it, the
+ * record counts; if it emits none, it does not. No restatement anywhere. */
+static void section10a_event_predicate(void)
+{
+    printf("=== §10a the per-event predicate vs pgwt_compute_top_events ===\n");
+    struct { const char *what; uint32_t from, to; uint64_t ts, dur;
+             uint32_t flags; } cases[] = {
+        { "plain CPU->IO",            E_CPU,  E_IO1, 50000, 400, 0 },
+        { "IO->CPU",                  E_IO1,  E_CPU, 50000, 400, 0 },
+        { "hidden old_event",         E_HIDE, E_CPU, 50000, 400, 0 },
+        { "hidden new_event",         E_IO1,  E_HIDE,50000, 400, 0 },
+        { "new_event EXIT",           E_IO1,  PGWT_EVENT_EXIT, 50000, 400, 0 },
+        { "marker old_event",         PGWT_MARKER_EXEC_START,
+                                      PGWT_MARKER_EXEC_START, 50000, 0, 0 },
+        { "marker new_event only",    E_IO1,  PGWT_MARKER_EXEC_END, 50000,
+                                      400, 0 },
+        { "SAMPLE flagged",           E_IO1,  E_CPU, 50000, 400,
+                                      PGWT_EVENT_FLAG_SAMPLE },
+        { "SAMPLE_CONT flagged",      E_IO1,  E_CPU, 50000, 400,
+                                      PGWT_EVENT_FLAG_SAMPLE |
+                                      PGWT_EVENT_FLAG_SAMPLE_CONT },
+        { "IO_WORKER flagged",        E_IO1,  E_CPU, 50000, 400,
+                                      PGWT_EVENT_FLAG_IO_WORKER },
+        { "ClientRead (idle, visible)", E_CLIR, E_CPU, 50000, 400, 0 },
+        { "self edge",                E_LW1,  E_LW1, 50000, 400, 0 },
+        { "duration > own timestamp", E_IO1,  E_CPU, 400, 500, 0 },
+        { "duration == own timestamp",E_IO1,  E_CPU, 500, 500, 0 },
+        { "zero duration",            E_IO1,  E_CPU, 50000, 0, 0 },
+        { "marker CMD_END old_event", PGWT_MARKER_CMD_END, E_CPU, 50000,
+                                      0, 0 },
+        { "IO_WORKER + SAMPLE",       E_IO1,  E_CPU, 50000, 400,
+                                      PGWT_EVENT_FLAG_SAMPLE |
+                                      PGWT_EVENT_FLAG_IO_WORKER },
+    };
+    int n = (int)(sizeof(cases) / sizeof(cases[0]));
+    int disagreements = 0;
+    for (int i = 0; i < n; i++) {
+        struct fix_block b;
+        memset(&b, 0, sizeof(b));
+        ev_set(&b, cases[i].ts, 77, cases[i].from, cases[i].to,
+               cases[i].dur, cases[i].flags);
+        struct pgwt_events_result res;
+        raw_top_events_of(b.ev, 1, NULL, 0, 0, 0, &res);
+        int oracle_counts = res.num_rows > 0 ? 1 : 0;
+        if (oracle_counts)
+            CHECK(res.rows[0].event_id == cases[i].from,
+                  "§10a %s: the oracle keyed the row on %u, not old_event %u",
+                  cases[i].what, res.rows[0].event_id, cases[i].from);
+        int mine = pgwt_block_agg_event_counts(&b.ev[0]) ? 1 : 0;
+        if (mine != oracle_counts)
+            disagreements++;
+        CHECK(mine == oracle_counts,
+              "§10a %s: pgwt_block_agg_event_counts says %d, "
+              "pgwt_compute_top_events says %d", cases[i].what, mine,
+              oracle_counts);
+        free(res.rows);
+    }
+    CHECK(disagreements == 0, "§10a %d predicate disagreement(s)",
+          disagreements);
+    /* The comparison must have seen BOTH answers, or it is a constant. */
+    int yes = 0, no = 0;
+    for (int i = 0; i < n; i++) {
+        struct fix_block b;
+        memset(&b, 0, sizeof(b));
+        ev_set(&b, cases[i].ts, 77, cases[i].from, cases[i].to,
+               cases[i].dur, cases[i].flags);
+        if (pgwt_block_agg_event_counts(&b.ev[0])) yes++; else no++;
+    }
+    CHECK(yes >= 5 && no >= 5,
+          "§10a the case table must contain both answers (%d counted, "
+          "%d refused) or agreement is trivial", yes, no);
+    seen.ev_predicate_cases = n;
+}
+
+/* §10b THE MODEL: per-event rows, per-class fold, DB Time and the two
+ * filtered readouts, bit-exact against the shipping function over every
+ * window the fixture's boundaries generate. */
+#define P2_MAX_B 64
+#define P2_MAX_REC 64
+
+struct p2_window_stats { long clipped_records; long clip_refusals; };
+
+static void p2_compare_one_window(const struct fix_block *b, int nb,
+                                  const struct pgwt_block_agg *per_block,
+                                  const int *have_agg,
+                                  uint64_t from, uint64_t to,
+                                  struct p2_window_stats *st, const char *tag)
+{
+    struct pgwt_trace_event raw[P2_MAX_REC];
+    int nraw = collect_window(b, nb, from, to, 1, raw, P2_MAX_REC);
+
+    struct pgwt_block_agg acc;
+    int m = 0, d = 0, c = 0;
+    int rc = answer_window_phase2(b, nb, per_block, have_agg, from, to,
+                                  &acc, &m, &d, &c);
+    CHECK(rc == PGWT_BAGG_OK, "%s window [%" PRIu64 ", %" PRIu64
+          "] refused rc=%d", tag, from, to, rc);
+    if (rc != PGWT_BAGG_OK) { pgwt_block_agg_free(&acc); return; }
+    st->clip_refusals += c;
+
+    /* How many admitted records actually needed clipping. This is the one
+     * number that says the window is interesting at all. */
+    for (int i = 0; i < nraw; i++)
+        if (pgwt_block_agg_event_counts(&raw[i]) &&
+            pgwt_block_agg_clip_ns(&raw[i], from, to) != raw[i].duration_ns)
+            st->clipped_records++;
+
+    struct pgwt_events_result res;
+    raw_top_events_of(raw, nraw, NULL, 0, from, to, &res);
+
+    struct pgwt_block_agg_event *rows = NULL;
+    int nrows = 0;
+    int rrc = pgwt_block_agg_events_sorted(&acc, &rows, &nrows);
+    CHECK(rrc == PGWT_BAGG_OK,
+          "%s the per-event readout must be AVAILABLE, got %d (a refusal "
+          "read as 'nothing to compare' is how this gate goes blind)",
+          tag, rrc);
+
+    CHECK(nrows == res.num_rows,
+          "%s window [%" PRIu64 ", %" PRIu64 "]: %d aggregate rows vs %d "
+          "oracle rows", tag, from, to, nrows, res.num_rows);
+
+    for (int i = 0; i < res.num_rows; i++) {
+        const struct pgwt_event_row *o = &res.rows[i];
+        struct pgwt_block_agg_event mine;
+        if (!pgwt_block_agg_event_lookup(&acc, o->event_id, &mine)) {
+            CHECK(0, "%s window [%" PRIu64 ", %" PRIu64 "]: event %u is in "
+                  "the oracle and ABSENT from the aggregate", tag, from, to,
+                  o->event_id);
+            continue;
+        }
+        CHECK(mine.count == o->count,
+              "%s [%" PRIu64 ", %" PRIu64 "] event %u count agg=%" PRIu64
+              " raw=%" PRIu64, tag, from, to, o->event_id, mine.count,
+              o->count);
+        CHECK((double)mine.total_ns / 1e6 == o->total_ms,
+              "%s [%" PRIu64 ", %" PRIu64 "] event %u total agg=%" PRIu64
+              " ns (%.9f ms) raw=%.9f ms", tag, from, to, o->event_id,
+              mine.total_ns, (double)mine.total_ns / 1e6, o->total_ms);
+        CHECK(mine.exact_count == o->exact_count,
+              "%s [%" PRIu64 ", %" PRIu64 "] event %u exact_count agg=%"
+              PRIu64 " raw=%" PRIu64, tag, from, to, o->event_id,
+              mine.exact_count, o->exact_count);
+        CHECK((double)mine.max_ns / 1000.0 == o->max_us,
+              "%s [%" PRIu64 ", %" PRIu64 "] event %u max agg=%.6f us "
+              "raw=%.6f us", tag, from, to, o->event_id,
+              (double)mine.max_ns / 1000.0, o->max_us);
+        if (mine.exact_count > 0) {
+            double avg = (double)mine.exact_total_ns /
+                         (double)mine.exact_count / 1000.0;
+            CHECK(avg == o->avg_us,
+                  "%s [%" PRIu64 ", %" PRIu64 "] event %u avg agg=%.9f us "
+                  "raw=%.9f us", tag, from, to, o->event_id, avg, o->avg_us);
+        }
+        /* The histogram's population must equal the exact count it was built
+         * from, or the percentiles the wiring step derives are drawn from a
+         * different population than the row claims. */
+        uint64_t hpop = 0;
+        for (int k = 0; k < HISTOGRAM_BUCKETS; k++)
+            hpop += mine.hist[k];
+        CHECK(hpop == mine.exact_count,
+              "%s [%" PRIu64 ", %" PRIu64 "] event %u histogram population %"
+              PRIu64 " != exact_count %" PRIu64, tag, from, to, o->event_id,
+              hpop, mine.exact_count);
+        CHECK((hpop > 0) == (o->has_latency_dist != 0),
+              "%s [%" PRIu64 ", %" PRIu64 "] event %u has_latency_dist "
+              "agg=%d raw=%d", tag, from, to, o->event_id, hpop > 0,
+              o->has_latency_dist);
+
+        /* The EVENT-FILTERED readout, which is the Phase-2 claim itself: the
+         * aggregate can answer a request filtered to one event by SELECTING
+         * its row. Compared against the shipping function given that very
+         * filter, so the claim is tested rather than asserted.
+         *
+         * event_id 0 is EXCLUDED, and that is a property of the product, not
+         * a convenience: pgwt_filter_matches() reads `f->event_id != 0` as
+         * "no event filter", and 0 is the CPU event id. So an event filter
+         * CANNOT select CPU — a request filtered to CPU is an unfiltered
+         * request. Found by this differential returning two rows where one
+         * was expected. Skipping it keeps the comparison honest; pretending
+         * the oracle had filtered would compare an unfiltered answer against
+         * one row and call the agreement a pass. Reported as a finding. */
+        if (o->event_id == 0) {
+            seen.ev_filter_unselectable++;
+            seen.event_rows_compared++;
+            continue;
+        }
+        struct pgwt_events_result fres;
+        raw_top_events_of(raw, nraw, NULL, o->event_id, from, to, &fres);
+        CHECK(fres.num_rows == 1,
+              "%s event-filtered oracle returned %d rows for event %u",
+              tag, fres.num_rows, o->event_id);
+        if (fres.num_rows == 1) {
+            CHECK(fres.rows[0].count == mine.count &&
+                  fres.rows[0].total_ms == (double)mine.total_ns / 1e6,
+                  "%s [%" PRIu64 ", %" PRIu64 "] event-FILTERED event %u: "
+                  "raw count=%" PRIu64 " total=%.9f vs aggregate count=%"
+                  PRIu64 " total=%.9f", tag, from, to, o->event_id,
+                  fres.rows[0].count, fres.rows[0].total_ms, mine.count,
+                  (double)mine.total_ns / 1e6);
+            seen.ev_filtered_rows_compared++;
+        }
+        free(fres.rows);
+        seen.event_rows_compared++;
+    }
+
+    /* The documented TOTAL order of the readout: total_ns DESC, event_id ASC.
+     * Needed because the oracle's own comparator orders by total only, which
+     * is not a total order, so row-by-row byte equality is not meaningful
+     * against it — the readout's determinism is asserted directly instead. */
+    for (int i = 1; i < nrows; i++)
+        CHECK(rows[i - 1].total_ns > rows[i].total_ns ||
+              (rows[i - 1].total_ns == rows[i].total_ns &&
+               rows[i - 1].event_id < rows[i].event_id),
+              "%s per-event rows %d/%d violate (total_ns desc, event_id asc)",
+              tag, i - 1, i);
+
+    /* DB Time: the denominator %DB is reported against, which excludes
+     * idle-but-visible events. A fold that forgot that exclusion would still
+     * agree on every row above. */
+    uint64_t dbt = 0;
+    int drc = pgwt_block_agg_db_time_ns(&acc, &dbt);
+    CHECK(drc == PGWT_BAGG_OK, "%s db_time refused rc=%d", tag, drc);
+    CHECK((double)dbt / 1e6 == res.db_time_ms,
+          "%s [%" PRIu64 ", %" PRIu64 "] db_time agg=%" PRIu64 " ns (%.9f ms) "
+          "raw=%.9f ms", tag, from, to, dbt, (double)dbt / 1e6,
+          res.db_time_ms);
+
+    /* C13: the per-class fold, compared against the shipping function given
+     * a CLASS FILTER — the other half of the Phase-2 claim. */
+    struct pgwt_block_agg_class *cls = NULL;
+    int ncls = 0;
+    int crc = pgwt_block_agg_classes_sorted(&acc, &cls, &ncls);
+    CHECK(crc == PGWT_BAGG_OK, "%s class readout refused rc=%d", tag, crc);
+    for (int i = 0; i < ncls; i++) {
+        /* Name the class the way the filter does, from an event that is
+         * actually in it, so this test carries no index->name table of its
+         * own to drift. */
+        const char *cname = NULL;
+        int members = 0;
+        for (int j = 0; j < nrows; j++)
+            if (pgwt_wait_class_index(rows[j].event_id) == cls[i].class_index) {
+                if (!cname) cname = pgwt_class_name(rows[j].event_id);
+                members++;
+            }
+        CHECK(cname != NULL, "%s class row %d has no member event", tag, i);
+        if (!cname) continue;
+        if (members >= 2)
+            seen.class_rows_multi++;
+        struct pgwt_events_result cres;
+        raw_top_events_of(raw, nraw, cname, 0, from, to, &cres);
+        uint64_t rcount = 0;
+        double rtotal = 0;
+        for (int j = 0; j < cres.num_rows; j++) {
+            rcount += cres.rows[j].count;
+            rtotal += cres.rows[j].total_ms;
+        }
+        CHECK(rcount == cls[i].count,
+              "%s [%" PRIu64 ", %" PRIu64 "] class-FILTERED %s count agg=%"
+              PRIu64 " raw=%" PRIu64, tag, from, to, cname, cls[i].count,
+              rcount);
+        /* Summed in the same order the readout folds them (ascending event
+         * id within the class) so the double addition is the same addition;
+         * total_ns is exact in uint64 and only converted once. */
+        uint64_t agg_ns = 0;
+        for (int j = 0; j < nrows; j++)
+            if (pgwt_wait_class_index(rows[j].event_id) == cls[i].class_index)
+                agg_ns += rows[j].total_ns;
+        CHECK(agg_ns == cls[i].total_ns,
+              "%s class %s fold disagrees with its own rows: %" PRIu64
+              " vs %" PRIu64, tag, cname, agg_ns, cls[i].total_ns);
+        /* NOT compared as `(double)total_ns / 1e6 == rtotal`: rtotal is a
+         * sum of doubles in the oracle's own row order, so that comparison
+         * would be an assertion about float addition order, not about this
+         * fold. The class total is pinned EXACTLY instead, in integers and
+         * transitively: it equals the integer sum of its member rows
+         * (asserted just above), and every member row's total_ns was
+         * compared against the oracle bit-exactly in the per-event loop. */
+        (void)rtotal;
+        free(cres.rows);
+        seen.class_rows_compared++;
+    }
+    for (int i = 1; i < ncls; i++)
+        CHECK(cls[i - 1].total_ns > cls[i].total_ns ||
+              (cls[i - 1].total_ns == cls[i].total_ns &&
+               cls[i - 1].class_index < cls[i].class_index),
+              "%s class rows %d/%d violate (total_ns desc, index asc)",
+              tag, i - 1, i);
+
+    if (nrows > 0) seen.ev_windows_with_rows++;
+    if (m > 0 && d > 0) seen.ev_windows_at_seam++;
+    seen.ev_windows_compared++;
+
+    free(cls);
+    free(rows);
+    free(res.rows);
+    pgwt_block_agg_free(&acc);
+}
+
+static void section10b_model(void)
+{
+    printf("=== §10b model: per-event + per-class == pgwt_compute_top_events, "
+           "bit-exact, every window ===\n");
+    struct fix_block b[P2_MAX_B];
+    int nb = build_p2_fixture(b, P2_MAX_B, 0);
+
+    struct pgwt_block_agg per_block[P2_MAX_B];
+    int have_agg[P2_MAX_B];
+    for (int i = 0; i < nb; i++) {
+        int rc = pgwt_block_agg_build(&per_block[i], &b[i].id, b[i].type,
+                                      b[i].committed, b[i].ev, b[i].n);
+        CHECK(rc == PGWT_BAGG_OK, "§10b build block %d rc=%d", i, rc);
+        have_agg[i] = (rc == PGWT_BAGG_OK);
+    }
+
+    uint64_t bnd[512];
+    int nbnd = p2_boundaries(b, nb, bnd, 512);
+    CHECK(nbnd > 40, "§10b only %d boundaries — the sweep is too narrow",
+          nbnd);
+
+    struct p2_window_stats st = { 0, 0 };
+    for (int i = 0; i < nbnd; i++)
+        for (int j = i; j < nbnd; j++)
+            p2_compare_one_window(b, nb, per_block, have_agg, bnd[i], bnd[j],
+                                  &st, "§10b");
+
+    seen.ev_clipped_records = st.clipped_records;
+    seen.ev_merge_refused_clip = st.clip_refusals;
+    printf("    windows compared %ld, clipped records %ld, "
+           "clip refusals %ld\n", seen.ev_windows_compared,
+           st.clipped_records, st.clip_refusals);
+
+    for (int i = 0; i < nb; i++)
+        pgwt_block_agg_free(&per_block[i]);
+}
+
+/* §10c the latency ladder, pinned against edges LEARNED from the oracle.
+ *
+ * pgwt_block_agg_duration_bucket() is a third copy of compute.c's static
+ * compute_duration_to_bucket(); neither it nor map_reader.c's version is
+ * reachable from this link set. A third copy is only safe if something fails
+ * when it drifts, so this does not copy the edge table: for each probe
+ * duration it asks pgwt_compute_top_events() for a ONE-RECORD window and
+ * takes (p50_us, p50_overflow) as that duration's bucket SIGNATURE — two
+ * durations share a bucket in the product iff their signatures match (buckets
+ * 14 and 15 share an edge and are told apart by the overflow flag). Then it
+ * asserts the module's partition of the probe set is the SAME partition.
+ */
+static void section10c_latency_ladder(void)
+{
+    printf("=== §10c the latency ladder vs the oracle's own bucket edges "
+           "===\n");
+    static const uint64_t edges_us[HISTOGRAM_BUCKETS] = {
+        1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192,
+        16384, 32768,
+    };
+    uint64_t probe[4 * HISTOGRAM_BUCKETS + 4];
+    int np = 0;
+    probe[np++] = 0;
+    probe[np++] = 1;
+    probe[np++] = 999;
+    for (int i = 0; i < HISTOGRAM_BUCKETS; i++) {
+        uint64_t e = edges_us[i] * 1000ULL;
+        probe[np++] = e - 1;
+        probe[np++] = e;
+        probe[np++] = e + 1;
+    }
+    double sig_us[sizeof(probe) / sizeof(probe[0])];
+    int sig_ovf[sizeof(probe) / sizeof(probe[0])];
+    for (int i = 0; i < np; i++) {
+        struct fix_block one;
+        memset(&one, 0, sizeof(one));
+        ev_set(&one, 100000000000ULL, 55, E_IO1, E_CPU, probe[i], 0);
+        struct pgwt_events_result res;
+        raw_top_events_of(one.ev, 1, NULL, 0, 0, 0, &res);
+        CHECK(res.num_rows == 1,
+              "§10c the oracle must return one row for duration %" PRIu64
+              " (got %d) — a zero-row answer would make this partition "
+              "comparison vacuous", probe[i], res.num_rows);
+        if (res.num_rows == 1) {
+            sig_us[i] = res.rows[0].p50_us;
+            sig_ovf[i] = res.rows[0].p50_overflow;
+        } else {
+            sig_us[i] = -1; sig_ovf[i] = -1;
+        }
+        free(res.rows);
+    }
+    int same_pairs = 0, diff_pairs = 0, bad = 0;
+    for (int i = 0; i < np; i++)
+        for (int j = i + 1; j < np; j++) {
+            int oracle_same = (sig_us[i] == sig_us[j] &&
+                               sig_ovf[i] == sig_ovf[j]);
+            int mine_same = pgwt_block_agg_duration_bucket(probe[i]) ==
+                            pgwt_block_agg_duration_bucket(probe[j]);
+            if (oracle_same) same_pairs++; else diff_pairs++;
+            if (oracle_same != mine_same) {
+                bad++;
+                CHECK(0, "§10c durations %" PRIu64 " and %" PRIu64
+                      ": the product puts them %s, this module puts them %s "
+                      "(buckets %u/%u)", probe[i], probe[j],
+                      oracle_same ? "together" : "apart",
+                      mine_same ? "together" : "apart",
+                      pgwt_block_agg_duration_bucket(probe[i]),
+                      pgwt_block_agg_duration_bucket(probe[j]));
+            }
+        }
+    CHECK(same_pairs > 0 && diff_pairs > 0,
+          "§10c the probe set must contain both same-bucket and "
+          "different-bucket pairs (%d/%d)", same_pairs, diff_pairs);
+    CHECK(bad == 0, "§10c %d bucket-partition disagreement(s)", bad);
+    /* Monotonic, and it must actually reach both ends of the ladder. */
+    for (int i = 1; i < np; i++)
+        if (probe[i] > probe[i - 1])
+            CHECK(pgwt_block_agg_duration_bucket(probe[i]) >=
+                  pgwt_block_agg_duration_bucket(probe[i - 1]),
+                  "§10c the ladder is not monotonic at %" PRIu64, probe[i]);
+    CHECK(pgwt_block_agg_duration_bucket(0) == 0 &&
+          pgwt_block_agg_duration_bucket(100ULL * 1000 * 1000) ==
+          HISTOGRAM_BUCKETS - 1,
+          "§10c the ladder must span bucket 0 to bucket %d",
+          HISTOGRAM_BUCKETS - 1);
+    seen.ev_bucket_pairs_checked = same_pairs + diff_pairs;
+    printf("    %d probe durations, %d pairs partitioned identically\n",
+           np, same_pairs + diff_pairs);
+}
+
+/* §10f FALSIFICATION of §0's clip counters. Same fixture, same boundary
+ * generator, same comparison — with every duration flattened to 1 ns, so no
+ * wait can start before any boundary the fixture generates. Both clip
+ * counters MUST read zero. A counter that reads nonzero here is counting
+ * something other than what §0 claims it counts, and the §0 gate it feeds
+ * would then pass on any fixture at all. */
+static void section10f_falsify_counters(void)
+{
+    printf("=== §10f falsify the clip counters: a straddle-free fixture must "
+           "drive them to ZERO ===\n");
+    struct fix_block b[P2_MAX_B];
+    int nb = build_p2_fixture(b, P2_MAX_B, 1);
+    struct pgwt_block_agg per_block[P2_MAX_B];
+    int have_agg[P2_MAX_B];
+    for (int i = 0; i < nb; i++) {
+        int rc = pgwt_block_agg_build(&per_block[i], &b[i].id, b[i].type,
+                                      b[i].committed, b[i].ev, b[i].n);
+        have_agg[i] = (rc == PGWT_BAGG_OK);
+    }
+    uint64_t bnd[512];
+    int nbnd = p2_boundaries(b, nb, bnd, 512);
+    struct p2_window_stats st = { 0, 0 };
+    long before = seen.ev_windows_compared;
+    for (int i = 0; i < nbnd; i++)
+        for (int j = i; j < nbnd; j++)
+            p2_compare_one_window(b, nb, per_block, have_agg, bnd[i], bnd[j],
+                                  &st, "§10f");
+    CHECK(seen.ev_windows_compared > before,
+          "§10f compared no window — the falsification itself was vacuous");
+    CHECK(st.clipped_records == 0,
+          "§10f a fixture with 1 ns durations still produced %ld clipped "
+          "record(s): ev_clipped_records does not measure straddling, so the "
+          "§0 gate it feeds proves nothing", st.clipped_records);
+    CHECK(st.clip_refusals == 0,
+          "§10f a fixture with 1 ns durations still produced %ld "
+          "REFUSED_CLIP(s): ev_merge_refused_clip does not measure the clip "
+          "downgrade", st.clip_refusals);
+    printf("    straddle-free fixture: clipped=%ld refusals=%ld (both must "
+           "be 0)\n", st.clipped_records, st.clip_refusals);
+    for (int i = 0; i < nb; i++)
+        pgwt_block_agg_free(&per_block[i]);
+}
+
+/* ── §11 bypass suite for the v2 gates ──────────────────────────────────
+ * One case per way THIS phase's detection can be made unreachable. The
+ * true-positive path (the differential goes red when a number is wrong) is
+ * §12's job; these are the false negatives: a readout that answers zero
+ * instead of refusing, a guard satisfied without looking, a gate that cannot
+ * see and approves anyway. */
+static void section11_bypass_v2(void)
+{
+    printf("=== §11 bypass suite: the v2 readouts must REFUSE when they "
+           "cannot see ===\n");
+    struct fix_block b[P2_MAX_B];
+    int nb = build_p2_fixture(b, P2_MAX_B, 0);
+    struct pgwt_block_agg blk;
+    CHECK(pgwt_block_agg_build(&blk, &b[1].id, b[1].type, b[1].committed,
+                               b[1].ev, b[1].n) == PGWT_BAGG_OK,
+          "§11 build block 1");
+
+    /* E1. The table was never enabled. Every readout must REFUSE, and must
+     * not hand back an empty list that reads as "no events in this window". */
+    {
+        struct pgwt_block_agg w;
+        pgwt_block_agg_init_window(&w);
+        for (int e = 0; e < b[1].n; e++)
+            CHECK(pgwt_block_agg_add_event(&w, &b[1].ev[e]) == PGWT_BAGG_OK,
+                  "§11 E1 add");
+        CHECK(pgwt_block_agg_events_available(&w) == 0,
+              "§11 E1 an accumulator with no declared window must report the "
+              "per-event table UNAVAILABLE");
+        CHECK(w.n_events == 0,
+              "§11 E1 no per-event row may be built without a declared "
+              "window — %d were", w.n_events);
+        struct pgwt_block_agg_event *rows = (void *)0x1;
+        int n = -1;
+        CHECK(pgwt_block_agg_events_sorted(&w, &rows, &n) ==
+              PGWT_BAGG_REFUSED_UNAVAILABLE,
+              "§11 E1 events_sorted must refuse, not answer empty");
+        CHECK(rows == NULL && n == 0,
+              "§11 E1 a refused readout must leave no plausible output "
+              "behind (rows=%p n=%d)", (void *)rows, n);
+        struct pgwt_block_agg_class *cls = (void *)0x1;
+        int nc = -1;
+        CHECK(pgwt_block_agg_classes_sorted(&w, &cls, &nc) ==
+              PGWT_BAGG_REFUSED_UNAVAILABLE,
+              "§11 E1 classes_sorted must refuse");
+        CHECK(cls == NULL && nc == 0, "§11 E1 class refusal must not leave "
+              "output behind");
+        uint64_t dbt = 12345;
+        CHECK(pgwt_block_agg_db_time_ns(&w, &dbt) ==
+              PGWT_BAGG_REFUSED_UNAVAILABLE,
+              "§11 E1 db_time must refuse when the table is off");
+        CHECK(pgwt_block_agg_event_lookup(&w, E_IO1, NULL) == 0,
+              "§11 E1 event_lookup must report ABSENT when the table is off");
+        /* The transitions answer must be UNCHANGED by all of this — the v1
+         * contract still holds for a Phase-1 caller. */
+        CHECK(w.total_transitions > 0,
+              "§11 E1 the pair table must still have been built");
+        seen.refusals_observed += 5;
+        pgwt_block_agg_free(&w);
+    }
+
+    /* E2. A declared window, but NOTHING qualifies. This must be OK with zero
+     * rows — the "absent rather than wrong" case: an empty answer and a
+     * refusal are different facts and must stay distinguishable. */
+    {
+        struct pgwt_block_agg w;
+        pgwt_block_agg_init_window(&w);
+        CHECK(pgwt_block_agg_enable_events(&w, 1, 2) == PGWT_BAGG_OK,
+              "§11 E2 enable");
+        struct pgwt_block_agg_event *rows = (void *)0x1;
+        int n = -1;
+        CHECK(pgwt_block_agg_events_sorted(&w, &rows, &n) == PGWT_BAGG_OK,
+              "§11 E2 an empty-but-available table must be OK, not refused");
+        CHECK(rows == NULL && n == 0, "§11 E2 expected zero rows");
+        CHECK(pgwt_block_agg_events_available(&w) == 1,
+              "§11 E2 available must stay 1 for an empty table");
+        pgwt_block_agg_free(&w);
+    }
+
+    /* E3. enable_events() after records have been folded in: half the window
+     * would be clipped and half not. REFUSE. */
+    {
+        struct pgwt_block_agg w;
+        pgwt_block_agg_init_window(&w);
+        CHECK(pgwt_block_agg_add_event(&w, &b[1].ev[0]) == PGWT_BAGG_OK,
+              "§11 E3 add");
+        CHECK(pgwt_block_agg_enable_events(&w, 1000, 2000) ==
+              PGWT_BAGG_REFUSED_MODE,
+              "§11 E3 a window may not be retro-fitted onto a half-built "
+              "accumulator");
+        seen.refusals_observed++;
+        pgwt_block_agg_free(&w);
+    }
+
+    /* E4. enable_events() on a MODE_BLOCK aggregate, and on MODE_NONE. */
+    {
+        CHECK(pgwt_block_agg_enable_events(&blk, 1000, 2000) ==
+              PGWT_BAGG_REFUSED_MODE,
+              "§11 E4 a block aggregate has no window to declare");
+        struct pgwt_block_agg none;
+        memset(&none, 0, sizeof(none));
+        CHECK(pgwt_block_agg_enable_events(&none, 1000, 2000) ==
+              PGWT_BAGG_REFUSED_MODE,
+              "§11 E4 MODE_NONE must refuse");
+        CHECK(pgwt_block_agg_enable_events(NULL, 1000, 2000) ==
+              PGWT_BAGG_REFUSED_INVALID, "§11 E4 NULL must refuse");
+        CHECK(pgwt_block_agg_events_available(NULL) == 0,
+              "§11 E4 availability of NULL is 0");
+        CHECK(pgwt_block_agg_events_available(&none) == 0,
+              "§11 E4 availability of MODE_NONE is 0");
+        seen.refusals_observed += 3;
+    }
+
+    /* E5. An INVERTED window would clip every record to zero and look like a
+     * legitimately empty window. */
+    {
+        struct pgwt_block_agg w;
+        pgwt_block_agg_init_window(&w);
+        CHECK(pgwt_block_agg_enable_events(&w, 5000, 4000) ==
+              PGWT_BAGG_REFUSED_INVALID,
+              "§11 E5 an inverted window must refuse");
+        CHECK(pgwt_block_agg_events_available(&w) == 0,
+              "§11 E5 a refused enable must leave the table OFF");
+        seen.refusals_observed++;
+        pgwt_block_agg_free(&w);
+    }
+
+    /* E6. THE CLIP REFUSAL, and that it leaves dst byte-identical. Block 1's
+     * 40 ms wait starts at 970.3 ms, so any window opening after that needs
+     * clipping even though the block is wholly inside by end timestamp. */
+    {
+        struct pgwt_block_agg w;
+        pgwt_block_agg_init_window(&w);
+        CHECK(pgwt_block_agg_enable_events(&w, 1000000000ULL,
+                                           1050000000ULL) == PGWT_BAGG_OK,
+              "§11 E6 enable");
+        CHECK(pgwt_block_agg_plan(&b[1].id, 1, 1000000000ULL,
+                                  1050000000ULL) == PGWT_BLOCK_MERGE,
+              "§11 E6 the block must be MERGE-eligible by end timestamp, or "
+              "this case is not testing the clip refusal at all");
+        struct pgwt_block_agg snap = w;
+        int rc = pgwt_block_agg_merge(&w, &blk);
+        CHECK(rc == PGWT_BAGG_REFUSED_CLIP,
+              "§11 E6 a block holding a wait that started before `from` must "
+              "be REFUSED_CLIP, got %d", rc);
+        CHECK(w.n_events == snap.n_events && w.n_pairs == snap.n_pairs &&
+              w.n_keys == snap.n_keys && w.ev_total_ns == snap.ev_total_ns &&
+              w.pair_total_ns == snap.pair_total_ns &&
+              w.total_transitions == snap.total_transitions,
+              "§11 E6 a REFUSED_CLIP must leave the accumulator untouched — "
+              "the downgrade to DECODE would otherwise double-count");
+        seen.refusals_observed++;
+        pgwt_block_agg_free(&w);
+    }
+
+    /* E7. The same refusal from the OTHER end: a block holding a record that
+     * ends after `to`. plan() would not MERGE it, but merge() is public. */
+    {
+        struct pgwt_block_agg w;
+        pgwt_block_agg_init_window(&w);
+        CHECK(pgwt_block_agg_enable_events(&w, 1, 1010100000ULL) ==
+              PGWT_BAGG_OK, "§11 E7 enable");
+        CHECK(pgwt_block_agg_merge(&w, &blk) == PGWT_BAGG_REFUSED_CLIP,
+              "§11 E7 a block reaching past `to` must be REFUSED_CLIP");
+        seen.refusals_observed++;
+        pgwt_block_agg_free(&w);
+    }
+
+    /* E8. A source with the per-event table OFF must never contribute a
+     * silent zero to a destination that has it ON. Hand-built because
+     * build() always turns it on, which is exactly why the guard needs a
+     * test: it protects against a FUTURE caller, and a guard with no test is
+     * a guard that will be deleted as unreachable. */
+    {
+        struct pgwt_block_agg fake;
+        CHECK(pgwt_block_agg_build(&fake, &b[3].id, b[3].type, b[3].committed,
+                                   b[3].ev, b[3].n) == PGWT_BAGG_OK,
+              "§11 E8 build");
+        fake.events_on = 0;
+        struct pgwt_block_agg w;
+        pgwt_block_agg_init_window(&w);
+        CHECK(pgwt_block_agg_enable_events(&w, 1, 2000000000ULL) ==
+              PGWT_BAGG_OK, "§11 E8 enable");
+        CHECK(pgwt_block_agg_merge(&w, &fake) ==
+              PGWT_BAGG_REFUSED_UNAVAILABLE,
+              "§11 E8 a source with no per-event table must refuse, not "
+              "contribute nothing silently");
+        CHECK(w.n_pairs == 0 && w.total_transitions == 0,
+              "§11 E8 the refusal must be pre-flight");
+        seen.refusals_observed++;
+        pgwt_block_agg_free(&w);
+        pgwt_block_agg_free(&fake);
+    }
+
+    /* E9. A VERSION the module did not write. The per-event numbers were
+     * computed under a different rule, so they are unreadable, not
+     * approximately right. */
+    {
+        struct pgwt_block_agg old;
+        CHECK(pgwt_block_agg_build(&old, &b[3].id, b[3].type, b[3].committed,
+                                   b[3].ev, b[3].n) == PGWT_BAGG_OK,
+              "§11 E9 build");
+        old.version = PGWT_BLOCK_AGG_VERSION - 1;
+        CHECK(pgwt_block_agg_events_available(&old) == 0,
+              "§11 E9 a stale-version aggregate's per-event table must read "
+              "UNAVAILABLE, not be trusted");
+        struct pgwt_block_agg_event *rows = (void *)0x1;
+        int n = -1;
+        CHECK(pgwt_block_agg_events_sorted(&old, &rows, &n) ==
+              PGWT_BAGG_REFUSED_UNAVAILABLE, "§11 E9 readout must refuse");
+        struct pgwt_block_agg w;
+        pgwt_block_agg_init_window(&w);
+        CHECK(pgwt_block_agg_enable_events(&w, 1, 2000000000ULL) ==
+              PGWT_BAGG_OK, "§11 E9 enable");
+        CHECK(pgwt_block_agg_merge(&w, &old) == PGWT_BAGG_REFUSED_VERSION,
+              "§11 E9 merging a stale version must refuse");
+        CHECK(pgwt_block_agg_matches(&old, &b[3].id) == 0,
+              "§11 E9 a stale-version aggregate must not revalidate");
+        seen.refusals_observed += 3;
+        pgwt_block_agg_free(&w);
+        old.version = PGWT_BLOCK_AGG_VERSION;
+        pgwt_block_agg_free(&old);
+    }
+
+    /* E10. Allocation failure anywhere in the v2 paths is a REFUSAL, never a
+     * short answer. Each site is named, so a site that stopped being
+     * reachable shows up as a green CHECK on a refusal that never happened —
+     * which is why the return code is asserted rather than just "not OK". */
+    {
+        struct pgwt_block_agg w;
+        pgwt_block_agg_init_window(&w);
+        CHECK(pgwt_block_agg_enable_events(&w, 1, 2000000000ULL) ==
+              PGWT_BAGG_OK, "§11 E10 enable");
+        setenv("PGWT_TEST_ALLOC_FAIL", "block_agg_events_grow", 1);
+        int rc = pgwt_block_agg_add_event(&w, &b[0].ev[0]);
+        unsetenv("PGWT_TEST_ALLOC_FAIL");
+        CHECK(rc == PGWT_BAGG_REFUSED_NOMEM,
+              "§11 E10 a failed per-event table growth must refuse, got %d",
+              rc);
+        pgwt_block_agg_free(&w);
+
+        struct pgwt_block_agg w2;
+        pgwt_block_agg_init_window(&w2);
+        CHECK(pgwt_block_agg_enable_events(&w2, 1, 2000000000ULL) ==
+              PGWT_BAGG_OK, "§11 E10 enable 2");
+        for (int e = 0; e < b[0].n; e++)
+            (void)pgwt_block_agg_add_event(&w2, &b[0].ev[e]);
+        CHECK(w2.n_events > 0, "§11 E10 need rows for the readout to fail on");
+        struct pgwt_block_agg_event *rows = (void *)0x1;
+        int n = -1;
+        setenv("PGWT_TEST_ALLOC_FAIL", "block_agg_events_sorted", 1);
+        rc = pgwt_block_agg_events_sorted(&w2, &rows, &n);
+        unsetenv("PGWT_TEST_ALLOC_FAIL");
+        CHECK(rc == PGWT_BAGG_REFUSED_NOMEM,
+              "§11 E10 a failed readout allocation must refuse, got %d", rc);
+        CHECK(rows == NULL && n == 0,
+              "§11 E10 a NOMEM readout must leave no output behind");
+        struct pgwt_block_agg_class *cls = (void *)0x1;
+        int nc = -1;
+        setenv("PGWT_TEST_ALLOC_FAIL", "block_agg_classes_sorted", 1);
+        rc = pgwt_block_agg_classes_sorted(&w2, &cls, &nc);
+        unsetenv("PGWT_TEST_ALLOC_FAIL");
+        CHECK(rc == PGWT_BAGG_REFUSED_NOMEM,
+              "§11 E10 a failed class readout must refuse, got %d", rc);
+        CHECK(cls == NULL && nc == 0,
+              "§11 E10 a NOMEM class readout must leave no output behind");
+        seen.refusals_observed += 3;
+        pgwt_block_agg_free(&w2);
+
+        /* build() must refuse WHOLE on a per-event allocation failure, not
+         * return a block aggregate with pairs and no events. */
+        struct pgwt_block_agg partial;
+        setenv("PGWT_TEST_ALLOC_FAIL", "block_agg_events_grow", 1);
+        rc = pgwt_block_agg_build(&partial, &b[0].id, b[0].type,
+                                  b[0].committed, b[0].ev, b[0].n);
+        unsetenv("PGWT_TEST_ALLOC_FAIL");
+        CHECK(rc == PGWT_BAGG_REFUSED_NOMEM,
+              "§11 E10 build must refuse on a per-event NOMEM, got %d", rc);
+        CHECK(partial.mode == PGWT_BAGG_MODE_NONE,
+              "§11 E10 a refused build must leave MODE_NONE, not a usable "
+              "aggregate missing its per-event table");
+        seen.refusals_observed++;
+    }
+
+    /* E11. The FILTER predicate. A pid or query_id filter has no dimension in
+     * the table and must be refused; a class or event filter is a selection
+     * on the key and is supported. A predicate that said "yes" to everything
+     * would let a pid-filtered request read an unfiltered answer. */
+    {
+        struct pgwt_filter f;
+        memset(&f, 0, sizeof(f));
+        CHECK(pgwt_block_agg_event_filter_supported(NULL) == 1,
+              "§11 E11 no filter is supported");
+        CHECK(pgwt_block_agg_event_filter_supported(&f) == 1,
+              "§11 E11 an empty filter is supported");
+        memset(&f, 0, sizeof(f));
+        snprintf(f.class_name, sizeof(f.class_name), "IO");
+        CHECK(pgwt_block_agg_event_filter_supported(&f) == 1,
+              "§11 E11 a class filter selects on the key");
+        memset(&f, 0, sizeof(f));
+        f.event_id = E_IO1;
+        CHECK(pgwt_block_agg_event_filter_supported(&f) == 1,
+              "§11 E11 an event filter selects on the key");
+        memset(&f, 0, sizeof(f));
+        f.pid = 42;
+        CHECK(pgwt_block_agg_event_filter_supported(&f) == 0,
+              "§11 E11 a pid filter has NO dimension in the per-event table");
+        memset(&f, 0, sizeof(f));
+        f.query_id = 42;
+        CHECK(pgwt_block_agg_event_filter_supported(&f) == 0,
+              "§11 E11 a query_id filter has no dimension either");
+        /* And the v1 predicate must NOT have been widened by v2: the pair and
+         * node tables still have no dimension at all. */
+        memset(&f, 0, sizeof(f));
+        snprintf(f.class_name, sizeof(f.class_name), "IO");
+        CHECK(pgwt_block_agg_filter_supported(&f) == 0,
+              "§11 E11 the PAIR table must still refuse a class filter — "
+              "widening it would answer a filtered transitions request with "
+              "unfiltered numbers");
+        seen.refusals_observed += 3;
+    }
+
+    /* E12. A SAMPLE_CONT record in a BLOCK. pgwt_compute_top_events()' count
+     * rule ("first record for this event always counts") is ORDER-dependent,
+     * so a per-block table holding a continuation fragment could not be
+     * merged without risking a count that depends on block order. Such a
+     * record cannot reach a committed TRANSITIONS block (flags are
+     * reader-side annotations and C1 refuses SAMPLES blocks), but build() is
+     * public, so it REFUSES rather than relying on that argument. */
+    {
+        struct fix_block c;
+        memset(&c, 0, sizeof(c));
+        ev_set(&c, 1000000000ULL, 11, E_IO1, E_CPU, 400, 0);
+        ev_set(&c, 1000001000ULL, 11, E_IO1, E_CPU, 400,
+               PGWT_EVENT_FLAG_SAMPLE | PGWT_EVENT_FLAG_SAMPLE_CONT);
+        fix_seal(&c, &TRACE_A, 9, 9216);
+        struct pgwt_block_agg a;
+        CHECK(pgwt_block_agg_build(&a, &c.id, c.type, c.committed, c.ev, c.n)
+              == PGWT_BAGG_REFUSED_BLOCK_TYPE,
+              "§11 E12 a block holding a SAMPLE_CONT fragment must be "
+              "REFUSED — its per-event count is order-dependent");
+        CHECK(a.mode == PGWT_BAGG_MODE_NONE,
+              "§11 E12 the refused build must leave MODE_NONE");
+        seen.refusals_observed++;
+        /* ...and the SAME record through add_event() must be handled, not
+         * refused: that is the path src/server.c drives over post-merge
+         * records, where continuation fragments are real. */
+        struct pgwt_block_agg w;
+        pgwt_block_agg_init_window(&w);
+        CHECK(pgwt_block_agg_enable_events(&w, 1, 2000000000ULL) ==
+              PGWT_BAGG_OK, "§11 E12 enable");
+        for (int e = 0; e < c.n; e++)
+            CHECK(pgwt_block_agg_add_event(&w, &c.ev[e]) == PGWT_BAGG_OK,
+                  "§11 E12 add_event must accept a continuation fragment");
+        struct pgwt_block_agg_event got;
+        CHECK(pgwt_block_agg_event_lookup(&w, E_IO1, &got) == 1,
+              "§11 E12 lookup");
+        /* Two records, one physical observation: the fragment adds duration
+         * and does not bump the count. Compared against the oracle rather
+         * than asserted as a literal. */
+        struct pgwt_events_result res;
+        raw_top_events_of(c.ev, c.n, NULL, 0, 1, 2000000000ULL, &res);
+        CHECK(res.num_rows == 1, "§11 E12 oracle rows %d", res.num_rows);
+        if (res.num_rows == 1) {
+            CHECK(got.count == res.rows[0].count,
+                  "§11 E12 SAMPLE_CONT count agg=%" PRIu64 " raw=%" PRIu64,
+                  got.count, res.rows[0].count);
+            CHECK((double)got.total_ns / 1e6 == res.rows[0].total_ms,
+                  "§11 E12 SAMPLE_CONT total agg=%" PRIu64 " raw=%.9f",
+                  got.total_ns, res.rows[0].total_ms);
+            CHECK(res.rows[0].count == 1,
+                  "§11 E12 the fixture must produce exactly one physical "
+                  "observation from two records, or the rule is untested "
+                  "(got %" PRIu64 ")", res.rows[0].count);
+        }
+        free(res.rows);
+        pgwt_block_agg_free(&w);
+    }
+
+    /* E13. An out-of-range class index must refuse the whole fold rather than
+     * clamp into UNKNOWN and report somebody else's time under a name. The
+     * only way to reach it is a module-internal invariant, so what is tested
+     * here is the boundary itself: every event id the fixture produces maps
+     * inside [0, PGWT_NUM_CLASSES). */
+    {
+        struct pgwt_block_agg w;
+        pgwt_block_agg_init_window(&w);
+        CHECK(pgwt_block_agg_enable_events(&w, 1, 2000000000ULL) ==
+              PGWT_BAGG_OK, "§11 E13 enable");
+        for (int i = 0; i < nb; i++)
+            for (int e = 0; e < b[i].n; e++)
+                (void)pgwt_block_agg_add_event(&w, &b[i].ev[e]);
+        struct pgwt_block_agg_event *rows = NULL;
+        int n = 0;
+        CHECK(pgwt_block_agg_events_sorted(&w, &rows, &n) == PGWT_BAGG_OK,
+              "§11 E13 readout");
+        int in_range = 0;
+        for (int i = 0; i < n; i++) {
+            int c = pgwt_wait_class_index(rows[i].event_id);
+            CHECK(c >= 0 && c < PGWT_NUM_CLASSES,
+                  "§11 E13 event %u maps to class %d, outside [0, %d)",
+                  rows[i].event_id, c, PGWT_NUM_CLASSES);
+            if (c >= 0 && c < PGWT_NUM_CLASSES) in_range++;
+        }
+        CHECK(in_range >= 5,
+              "§11 E13 only %d event(s) checked — the fixture must reach at "
+              "least five classes for the fold to be worth testing",
+              in_range);
+        free(rows);
+        pgwt_block_agg_free(&w);
+    }
+
+    pgwt_block_agg_free(&blk);
+}
+
+/* ── §12 mutation probes: the v2 comparator can see one wrong number ────
+ * §10's comparator is the only thing between a wrong per-event number and a
+ * green run, so it is shown going red rather than assumed to. Each probe
+ * perturbs ONE field of an otherwise correct answer. */
+static void section12_v2_probes(void)
+{
+    printf("=== §12 mutation probes: the v2 comparator can see one count, "
+           "one ns, one row ===\n");
+    struct fix_block b[P2_MAX_B];
+    int nb = build_p2_fixture(b, P2_MAX_B, 0);
+    struct pgwt_block_agg per_block[P2_MAX_B];
+    int have_agg[P2_MAX_B];
+    for (int i = 0; i < nb; i++) {
+        int rc = pgwt_block_agg_build(&per_block[i], &b[i].id, b[i].type,
+                                      b[i].committed, b[i].ev, b[i].n);
+        have_agg[i] = (rc == PGWT_BAGG_OK);
+    }
+    uint64_t from = 1000000000ULL, to = 1040200000ULL;
+    struct pgwt_trace_event raw[P2_MAX_REC];
+    int nraw = collect_window(b, nb, from, to, 1, raw, P2_MAX_REC);
+    struct pgwt_events_result res;
+    raw_top_events_of(raw, nraw, NULL, 0, from, to, &res);
+    CHECK(res.num_rows >= 4,
+          "§12 the probe window must hold at least four rows, got %d",
+          res.num_rows);
+
+    struct pgwt_block_agg acc;
+    int m = 0, d = 0, c = 0;
+    CHECK(answer_window_phase2(b, nb, per_block, have_agg, from, to, &acc,
+                               &m, &d, &c) == PGWT_BAGG_OK, "§12 answer");
+
+    /* Control: the unperturbed answer agrees on every field. */
+    int base_bad = 0;
+    for (int i = 0; i < res.num_rows; i++) {
+        struct pgwt_block_agg_event mine;
+        if (!pgwt_block_agg_event_lookup(&acc, res.rows[i].event_id, &mine)) {
+            base_bad++;
+            continue;
+        }
+        if (mine.count != res.rows[i].count) base_bad++;
+        if ((double)mine.total_ns / 1e6 != res.rows[i].total_ms) base_bad++;
+        if (mine.exact_count != res.rows[i].exact_count) base_bad++;
+    }
+    CHECK(base_bad == 0, "§12 the control must agree (%d disagreements)",
+          base_bad);
+
+    /* P1: one count off by one. */
+    {
+        struct pgwt_block_agg_event *s = NULL;
+        for (int i = 0; i < acc.ev_cap; i++)
+            if (acc.events[i].count != 0) { s = &acc.events[i]; break; }
+        CHECK(s != NULL, "§12 P1 needs a row to perturb");
+        if (s) {
+            s->count++;
+            int bad = 0;
+            for (int i = 0; i < res.num_rows; i++) {
+                struct pgwt_block_agg_event mine;
+                if (pgwt_block_agg_event_lookup(&acc, res.rows[i].event_id,
+                                                &mine) &&
+                    mine.count != res.rows[i].count)
+                    bad++;
+            }
+            CHECK(bad > 0, "§12 P1 one extra observation went UNSEEN");
+            if (bad > 0) seen.v2_probes_went_red++;
+            s->count--;
+        }
+    }
+    /* P2: one nanosecond on one total. */
+    {
+        struct pgwt_block_agg_event *s = NULL;
+        for (int i = 0; i < acc.ev_cap; i++)
+            if (acc.events[i].count != 0) { s = &acc.events[i]; break; }
+        if (s) {
+            s->total_ns += 1;
+            int bad = 0;
+            for (int i = 0; i < res.num_rows; i++) {
+                struct pgwt_block_agg_event mine;
+                if (pgwt_block_agg_event_lookup(&acc, res.rows[i].event_id,
+                                                &mine) &&
+                    (double)mine.total_ns / 1e6 != res.rows[i].total_ms)
+                    bad++;
+            }
+            CHECK(bad > 0, "§12 P2 ONE nanosecond on one event total went "
+                  "UNSEEN — the comparison is not bit-exact");
+            if (bad > 0) seen.v2_probes_went_red++;
+            s->total_ns -= 1;
+        }
+    }
+    /* P3: a whole row removed. The row-count check must catch it. */
+    {
+        struct pgwt_block_agg_event *s = NULL;
+        for (int i = 0; i < acc.ev_cap; i++)
+            if (acc.events[i].count != 0) { s = &acc.events[i]; break; }
+        if (s) {
+            struct pgwt_block_agg_event keep = *s;
+            memset(s, 0, sizeof(*s));
+            acc.n_events--;
+            struct pgwt_block_agg_event *rows = NULL;
+            int n = 0;
+            CHECK(pgwt_block_agg_events_sorted(&acc, &rows, &n) ==
+                  PGWT_BAGG_OK, "§12 P3 readout");
+            CHECK(n != res.num_rows,
+                  "§12 P3 a MISSING row went unseen (%d == %d)", n,
+                  res.num_rows);
+            if (n != res.num_rows) seen.v2_probes_went_red++;
+            free(rows);
+            acc.n_events++;
+            *s = keep;
+        }
+    }
+    /* P4: one bucket moved inside a histogram — the population check must see
+     * a count that no longer matches its distribution. */
+    {
+        struct pgwt_block_agg_event *s = NULL;
+        for (int i = 0; i < acc.ev_cap; i++)
+            if (acc.events[i].exact_count > 0) { s = &acc.events[i]; break; }
+        CHECK(s != NULL, "§12 P4 needs a row with a histogram");
+        if (s) {
+            s->hist[HISTOGRAM_BUCKETS - 1]++;
+            uint64_t hpop = 0;
+            for (int k = 0; k < HISTOGRAM_BUCKETS; k++) hpop += s->hist[k];
+            CHECK(hpop != s->exact_count,
+                  "§12 P4 a fabricated histogram entry went UNSEEN");
+            if (hpop != s->exact_count) seen.v2_probes_went_red++;
+            s->hist[HISTOGRAM_BUCKETS - 1]--;
+        }
+    }
+    /* P5: DB Time must notice an idle event being charged to it. */
+    {
+        uint64_t before = 0;
+        CHECK(pgwt_block_agg_db_time_ns(&acc, &before) == PGWT_BAGG_OK,
+              "§12 P5 db_time");
+        struct pgwt_block_agg_event idle;
+        CHECK(pgwt_block_agg_event_lookup(&acc, E_CLIR, &idle) == 1,
+              "§12 P5 the window must contain an idle-but-visible event, or "
+              "the DB-Time exclusion is untested");
+        CHECK(before > 0, "§12 P5 db_time must be positive");
+        CHECK(idle.total_ns > 0, "§12 P5 the idle event must carry time");
+        CHECK(before != before + idle.total_ns,
+              "§12 P5 the exclusion is not observable");
+        CHECK((double)before / 1e6 == res.db_time_ms,
+              "§12 P5 db_time agg=%" PRIu64 " raw=%.9f", before,
+              res.db_time_ms);
+        /* And the exclusion is REAL: adding the idle row back would change
+         * the number, so a fold that forgot it would be red. */
+        CHECK((double)(before + idle.total_ns) / 1e6 != res.db_time_ms,
+              "§12 P5 including the idle event would give the SAME db_time, "
+              "so the exclusion is unexercised by this window");
+        seen.v2_probes_went_red++;
+    }
+
+    free(res.rows);
+    pgwt_block_agg_free(&acc);
+    for (int i = 0; i < nb; i++)
+        pgwt_block_agg_free(&per_block[i]);
+}
+
 /* ── main ───────────────────────────────────────────────────────────────── */
 
 int main(void)
@@ -2340,6 +3655,12 @@ int main(void)
     section7_mutation_probes();
     section8_bypass();
     section9_on_disk();
+    section10a_event_predicate();
+    section10b_model();
+    section10c_latency_ladder();
+    section10f_falsify_counters();
+    section11_bypass_v2();
+    section12_v2_probes();
 
     /* §0 the ledger. A green run that exercised nothing is not a pass. */
     printf("=== §0 vacuity ledger ===\n");
@@ -2378,6 +3699,71 @@ int main(void)
     CHECK(seen.refusals_observed > 25,
           "only %ld refusals observed — the bypass suite did not run",
           seen.refusals_observed);
+
+    /* Phase 2's own ledger (§10-§12). */
+    printf("    §2 predicate cases ................ %ld\n",
+           seen.ev_predicate_cases);
+    printf("    §2 windows compared ............... %ld\n",
+           seen.ev_windows_compared);
+    printf("    §2 windows with >=1 event row ..... %ld\n",
+           seen.ev_windows_with_rows);
+    printf("    §2 windows at a merge/decode seam . %ld\n",
+           seen.ev_windows_at_seam);
+    printf("    §2 event rows compared ............ %ld\n",
+           seen.event_rows_compared);
+    printf("    §2 event-FILTERED rows compared ... %ld\n",
+           seen.ev_filtered_rows_compared);
+    printf("    §2 class rows compared ............ %ld\n",
+           seen.class_rows_compared);
+    printf("    §2 class rows with >=2 events ..... %ld\n",
+           seen.class_rows_multi);
+    printf("    §2 records that needed clipping ... %ld\n",
+           seen.ev_clipped_records);
+    printf("    §2 REFUSED_CLIP -> DECODE ......... %ld\n",
+           seen.ev_merge_refused_clip);
+    printf("    §2 rows whose event is unfilterable %ld\n",
+           seen.ev_filter_unselectable);
+    printf("    §2 latency-bucket pairs checked ... %ld\n",
+           seen.ev_bucket_pairs_checked);
+    printf("    §2 v2 probes that went red ........ %ld\n",
+           seen.v2_probes_went_red);
+
+    CHECK(seen.ev_predicate_cases > 10,
+          "§10a ran %ld predicate cases", seen.ev_predicate_cases);
+    CHECK(seen.ev_windows_compared > 100,
+          "only %ld per-event windows compared", seen.ev_windows_compared);
+    CHECK(seen.ev_windows_with_rows > 50,
+          "only %ld windows produced an event row — comparing empty answers "
+          "proves nothing", seen.ev_windows_with_rows);
+    CHECK(seen.ev_windows_at_seam > 0,
+          "no window merged one block AND decoded another while the "
+          "per-event table was on — the seam was never tested");
+    CHECK(seen.event_rows_compared > 200,
+          "only %ld event rows compared", seen.event_rows_compared);
+    CHECK(seen.ev_filtered_rows_compared > 200,
+          "only %ld EVENT-FILTERED rows compared — the Phase-2 claim itself "
+          "was not exercised", seen.ev_filtered_rows_compared);
+    CHECK(seen.class_rows_compared > 100,
+          "only %ld class rows compared", seen.class_rows_compared);
+    CHECK(seen.class_rows_multi > 0,
+          "no compared class held two distinct events, so the per-class fold "
+          "was only ever a relabelling of the per-event table");
+    CHECK(seen.ev_clipped_records > 0,
+          "no admitted record ever needed CLIPPING, so C10 — the one rule "
+          "that makes per-event totals different from per-event sums — was "
+          "never exercised (see §10f, which falsifies this counter)");
+    CHECK(seen.ev_merge_refused_clip > 0,
+          "no block was ever REFUSED_CLIP and downgraded to DECODE, so the "
+          "C10 fallback path was never taken");
+    CHECK(seen.ev_filter_unselectable > 0,
+          "no compared row carried event id 0, so the product limitation "
+          "this suite documents (an event filter cannot select CPU) was "
+          "never actually reached and the skip above is unexercised");
+    CHECK(seen.ev_bucket_pairs_checked > 1000,
+          "only %ld latency-bucket pairs checked",
+          seen.ev_bucket_pairs_checked);
+    CHECK(seen.v2_probes_went_red == 5,
+          "expected 5 v2 probes to go red, got %ld", seen.v2_probes_went_red);
 
     if (failures) {
         printf("FAILED: %d check(s)\n", failures);

@@ -1,0 +1,34 @@
+Three adversarial questions, answered BEFORE the code was written
+(Phase 2: per-event totals + per-class fold on the block aggregate)
+
+Q1. What input makes this check pass while the product is broken?
+  (a) A fixture in which no wait STARTS before `from`. Then clipped total ==
+      unclipped total and the entire clip discipline is unexercised: deleting
+      the clip, and deleting merge()'s REFUSED_CLIP pre-flight, both stay
+      GREEN. PIN: the §0 counters ev_clipped_records and ev_merge_refused_clip
+      must both be nonzero at exit, and §0F falsifies them by re-running the
+      model over a straddle-free fixture and asserting they go to zero there.
+  (b) A fixture where every event id lands in a DISTINCT class. Then the
+      per-class fold is a relabelling of the per-event table and a fold that
+      dropped rows would still agree. PIN: §0 class_rows_multi (classes
+      holding >= 2 distinct events) must be nonzero.
+
+Q2. What single component failing makes this hang or skip, rather than fail?
+  pgwt_compute_top_events() returning zero rows -- its calloc failing, or
+  every fixture record refused by a predicate. A row-by-row comparison then
+  loops zero times and reports agreement. PIN: every comparison asserts
+  raw.num_rows >= 3 AND raw.num_rows == aggregate rows BEFORE comparing, and
+  §0 event_rows_compared must be nonzero. Second shape: if
+  pgwt_block_agg_enable_events() were never called, every readout REFUSES; a
+  comparator that treated a refusal as "nothing to compare" would pass. So
+  the model test asserts the readout returns PGWT_BAGG_OK, and §8 asserts
+  the refusal separately on a deliberately un-enabled accumulator.
+
+Q3. What here depends on timing or ordering, and what pins it?
+  No wall clock anywhere -- no sleep, no retry, no tolerance. Two ordering
+  dependencies: (i) the order blocks are merged in, and (ii) hash-table slot
+  order in the readout. Pinned by the documented total order
+  (total_ns DESC, event_id ASC / class_index ASC) asserted directly, plus an
+  all-6-permutations byte-identity check on three block aggregates. The
+  latency histogram's bucket boundaries are pinned by a +-1 ns sweep around
+  every edge against edges LEARNED FROM the shipping function, not copied.
