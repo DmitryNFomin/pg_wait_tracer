@@ -60,6 +60,35 @@ test_variants_p95
 # (assertion shapes and fixtures blind to the bug, pid 0, dense pid runs, and
 # allocation failures that must come back ABSENT rather than short).
 test_pid_cap
+# #324: handle_top_queries decorated each of its ~26 output rows by scanning
+# the ENTIRE loaded event window twice — query_context_for_events() for the
+# (databaseid, userid) query-text key, and an inline loop for the
+# synthesised-id flag. 2 x num_rows passes: on the 2026-10-08 demo capture
+# (900 s, 5,699,738 records, 48 B each) that is 52 passes over 274 MB =
+# 14.2 GB of memory traffic, measured at 1778 ms of a 4491 ms response — 40 %
+# of the slowest tab in the product. pgwt_compute_qrow_attrs answers every
+# row in ONE pass, and the only thing making that safe is that the answers
+# are IDENTICAL: so this is a differential against a verbatim copy of both
+# deleted loops over 216 fixture/rowset cases, plus hand-computed literals
+# for every verdict (unique / absent / ambiguous via each of the four
+# rejection causes), because an oracle and its subject can share a bug.
+# Bypass suite, because "context 0, no synth" is also what an empty window
+# legitimately returns and therefore what a function that looks at nothing
+# would return: non-vacuity is pinned first (the -1 verdict and has_synth
+# must actually be REACHED on the fixture), then an empty window, a NULL
+# array, a NULL query_id array, zero rows, a resolver that is absent or can
+# never answer (which must come back -1, never 1 and never 0), duplicate
+# query_ids (only the first index is in the hash), query_id 0 and pid 0 as
+# ordinary keys rather than empty-slot sentinels, the -1 verdict reached by
+# the first and by the last record, has_synth on an already-poisoned row,
+# 5000 distinct pids to exercise the memo's grow path, and every injected
+# allocation failure — fatal ones ABSENT (failed=1, rows NULL, num_rows 0),
+# degradable ones still bit-exact — plus an unknown injection point as the
+# control that injection is wired at all.
+# §5 mutates BOTH SIDES (3 on the new code, 2 on the oracle) and requires
+# each to be detected: a comparator that only reacts to the new code cannot
+# catch a bug the two share.
+test_qrow_attrs
 # #276: pgwt_compute_concurrency kept candidate intervals in a fixed
 # 100,000-entry array filled in ARRIVAL order, so the UI's default 900 s
 # window drew its first ~60 s and reported the other 825 s as max: 0 -- 8% of

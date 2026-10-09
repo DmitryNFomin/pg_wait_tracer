@@ -4355,6 +4355,261 @@ void pgwt_lifecycle_free(struct pgwt_lifecycle_result *r)
     memset(r, 0, sizeof(*r));
 }
 
+/* ── #324: per-row query attributes in ONE pass ───────────────────────── */
+
+/* Open-addressed map from a key to a row/slot index. Index arrays start at
+ * -1 so key 0 is an ORDINARY key: query_id 0 is a real Queries-tab row
+ * (unattributed time) and pid 0 is a real marker pid, and a "0 means empty"
+ * sentinel would have dropped both. */
+struct qa_ix {
+    uint64_t *keys;
+    int      *vals;      /* -1 = empty */
+    int       cap;       /* power of two */
+};
+
+static int qa_ix_init(struct qa_ix *ix, int n, const char *point)
+{
+    /* Callers pass a row count (bounded by the request's max_rows, and by
+     * SUMMARY_MAX_QUERIES on the summary path), so this is unreachable
+     * today. It is here because `cap < n * 4` would overflow and loop
+     * forever if it ever stopped being true, and a hang is the one failure
+     * mode with no diagnostic at all. */
+    if (n > (1 << 26)) {
+        ix->keys = NULL; ix->vals = NULL; ix->cap = 0;
+        return -1;
+    }
+    int cap = 16;
+    while (cap < n * 4) cap <<= 1;
+    ix->cap = cap;
+    ix->keys = pgwt_test_alloc_fail(point)
+             ? NULL : calloc((size_t)cap, sizeof(*ix->keys));
+    ix->vals = ix->keys ? malloc((size_t)cap * sizeof(*ix->vals)) : NULL;
+    if (!ix->keys || !ix->vals) {
+        free(ix->keys); free(ix->vals);
+        ix->keys = NULL; ix->vals = NULL; ix->cap = 0;
+        return -1;
+    }
+    for (int i = 0; i < cap; i++) ix->vals[i] = -1;
+    return 0;
+}
+
+static void qa_ix_free(struct qa_ix *ix)
+{
+    free(ix->keys); free(ix->vals);
+    ix->keys = NULL; ix->vals = NULL; ix->cap = 0;
+}
+
+static inline int qa_hash(uint64_t k, int cap)
+{
+    k *= 0x9E3779B97F4A7C15ULL;
+    k ^= k >> 29;
+    return (int)(k & (uint64_t)(cap - 1));
+}
+
+/* Index of `key`, or -1. */
+static int qa_ix_find(const struct qa_ix *ix, uint64_t key)
+{
+    if (!ix->cap) return -1;
+    int i = qa_hash(key, ix->cap);
+    for (int probe = 0; probe < ix->cap; probe++) {
+        if (ix->vals[i] < 0) return -1;
+        if (ix->keys[i] == key) return ix->vals[i];
+        i = (i + 1) & (ix->cap - 1);
+    }
+    return -1;
+}
+
+/* Insert `key`->`val` unless `key` is already present. The table is sized
+ * at >= 4x the key count up front, so the probe always terminates on a free
+ * slot and there is no "table full" branch to get wrong. */
+static void qa_ix_put_first(struct qa_ix *ix, uint64_t key, int val)
+{
+    int i = qa_hash(key, ix->cap);
+    for (int probe = 0; probe < ix->cap; probe++) {
+        if (ix->vals[i] < 0) {
+            ix->keys[i] = key;
+            ix->vals[i] = val;
+            return;
+        }
+        if (ix->keys[i] == key)
+            return;                 /* duplicate: one canonical index */
+        i = (i + 1) & (ix->cap - 1);
+    }
+}
+
+/* Memoised pid -> (databaseid, userid). The old code called the resolver
+ * once per matching record per row; the resolver is a pure function of pid
+ * for the duration of one request (the backend map is refreshed at
+ * handle_top_queries entry and not touched again), so memoising cannot
+ * change an answer. */
+struct qa_pid_memo {
+    struct qa_ix ix;
+    struct { uint32_t databaseid, userid; int ok; } *ent;
+    int n, cap_ent;
+    pgwt_pid_ctx_fn resolve;
+    void *ctx;
+    int failed;
+};
+
+static int qa_pid_ctx(struct qa_pid_memo *m, uint32_t pid,
+                      uint32_t *databaseid, uint32_t *userid)
+{
+    if (m->failed)
+        goto direct;        /* memo unusable: never retry the allocation */
+
+    int slot = qa_ix_find(&m->ix, (uint64_t)pid);
+    if (slot < 0) {
+        if (m->n >= m->cap_ent) {
+            int nc = m->cap_ent ? m->cap_ent * 2 : 128;
+            void *t = pgwt_test_alloc_fail("qrow_pid_memo")
+                    ? NULL : realloc(m->ent, (size_t)nc * sizeof(*m->ent));
+            if (!t) { m->failed = 1; goto direct; }
+            m->ent = t;
+            m->cap_ent = nc;
+        }
+        /* Grow the index BEFORE it can fill. qa_ix_put_first has no
+         * "table full" branch — it relies on a free slot always existing —
+         * so letting the load factor reach 1 would turn an insert into a
+         * silent no-op, and every later lookup for that pid would re-resolve
+         * and append another entry: unbounded growth, right answers, and no
+         * signal. Keeping load under 1/4 is what makes that unreachable. */
+        if ((m->n + 1) * 4 > m->ix.cap) {
+            struct qa_ix bigger;
+            if (qa_ix_init(&bigger, m->n * 2 + 8, "qrow_pid_index") != 0) {
+                m->failed = 1;
+                goto direct;
+            }
+            for (int i = 0; i < m->ix.cap; i++)
+                if (m->ix.vals[i] >= 0)
+                    qa_ix_put_first(&bigger, m->ix.keys[i], m->ix.vals[i]);
+            qa_ix_free(&m->ix);
+            m->ix = bigger;
+        }
+        slot = m->n++;
+        qa_ix_put_first(&m->ix, (uint64_t)pid, slot);
+        uint32_t db = 0, uid = 0;
+        m->ent[slot].ok = m->resolve ? m->resolve(m->ctx, pid, &db, &uid) : 0;
+        m->ent[slot].databaseid = m->ent[slot].ok ? db : 0;
+        m->ent[slot].userid     = m->ent[slot].ok ? uid : 0;
+    }
+    *databaseid = m->ent[slot].databaseid;
+    *userid     = m->ent[slot].userid;
+    return m->ent[slot].ok;
+
+direct:
+    /* Memo unavailable: ask the resolver. Slower, never different. */
+    *databaseid = 0; *userid = 0;
+    return m->resolve ? m->resolve(m->ctx, pid, databaseid, userid) : 0;
+}
+
+int pgwt_compute_qrow_attrs(const struct pgwt_trace_event *events, int count,
+                            const uint64_t *query_ids, int num_query_ids,
+                            pgwt_pid_ctx_fn resolve, void *resolve_ctx,
+                            struct pgwt_qrow_attr_result *out)
+{
+    memset(out, 0, sizeof(*out));
+    if (num_query_ids <= 0 || !query_ids)
+        return 0;                      /* nothing asked; nothing to answer */
+
+    out->rows = pgwt_test_alloc_fail("qrow_attrs")
+              ? NULL
+              : calloc((size_t)num_query_ids, sizeof(*out->rows));
+    if (!out->rows) {
+        out->failed = 1;
+        return -1;
+    }
+    out->num_rows = num_query_ids;
+    for (int i = 0; i < num_query_ids; i++)
+        out->rows[i].query_id = query_ids[i];
+
+    struct qa_ix qix;
+    if (qa_ix_init(&qix, num_query_ids, "qrow_qid_index") != 0)
+        goto oom;
+    for (int i = 0; i < num_query_ids; i++)
+        qa_ix_put_first(&qix, query_ids[i], i);
+
+    /* The pid memo is PURELY an optimisation: qa_pid_ctx falls back to
+     * calling the resolver directly, which is what the old per-row code did
+     * for every matching record anyway. So a failure here degrades speed and
+     * never an answer, and must NOT refuse the response — unlike the qid
+     * index above, without which no row could be found at all. */
+    struct qa_pid_memo memo = {0};
+    memo.resolve = resolve;
+    memo.ctx = resolve_ctx;
+    if (qa_ix_init(&memo.ix, 128, "qrow_pid_index") != 0)
+        memo.failed = 1;
+
+    for (int i = 0; events && i < count; i++) {
+        int ri = qa_ix_find(&qix, events[i].query_id);
+        if (ri < 0)
+            continue;
+        struct pgwt_qrow_attr *a = &out->rows[ri];
+
+        /* OR, independent of `context` — the old code computed the two with
+         * two separate scans, so a row poisoned to -1 still reported its
+         * synth flag correctly and must keep doing so. */
+        if (events[i].flags & PGWT_EVENT_FLAG_QUERY_SYNTH)
+            a->has_synth = 1;
+
+        if (a->context < 0)
+            continue;                  /* -1 is absorbing */
+
+        uint32_t db = 0, uid = 0;
+        if (!qa_pid_ctx(&memo, events[i].pid, &db, &uid)) {
+            a->context = -1;
+            a->databaseid = 0;
+            a->userid = 0;
+            continue;
+        }
+        if (a->context == 0) {
+            a->databaseid = db;
+            a->userid = uid;
+            a->context = 1;
+        } else if (a->databaseid != db || a->userid != uid) {
+            a->context = -1;
+            a->databaseid = 0;
+            a->userid = 0;
+        }
+    }
+
+    /* Duplicate query_ids: only the FIRST row index is in the map, so every
+     * later copy is still at its initial state. Give it the same answer the
+     * old per-row function would have computed for it. */
+    for (int i = 0; i < num_query_ids; i++) {
+        int first = qa_ix_find(&qix, out->rows[i].query_id);
+        if (first >= 0 && first != i)
+            out->rows[i] = out->rows[first];
+    }
+
+    int memo_failed = memo.failed;
+    qa_ix_free(&memo.ix);
+    free(memo.ent);
+    qa_ix_free(&qix);
+    /* A memo allocation that failed fell back to the resolver, so the
+     * ANSWERS are still right — but this path has never been measured, and
+     * a silently slow response is a demo hazard, so say so on stderr. It is
+     * not an error: nothing here is short or wrong. */
+    if (memo_failed)
+        fprintf(stderr, "INFO: query-row attribute pid memo unavailable; "
+                        "answers unchanged, response slower\n");
+    return 0;
+
+oom:
+    free(out->rows);
+    out->rows = NULL;
+    out->num_rows = 0;
+    out->failed = 1;
+    return -1;
+}
+
+void pgwt_qrow_attrs_free(struct pgwt_qrow_attr_result *r)
+{
+    if (!r)
+        return;
+    free(r->rows);
+    memset(r, 0, sizeof(*r));
+}
+
 /* Append one duration sample, keeping the written region contiguous. */
 static void lifecycle_sample(double **times, int *nsamples, int *cap,
                              double ms)

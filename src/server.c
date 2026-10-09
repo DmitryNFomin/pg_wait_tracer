@@ -870,34 +870,20 @@ static const struct bm_entry *bm_map_lookup(const struct pgwt_server *srv,
  * for on-disk compatibility, so a row is context-addressable only when every
  * contributing PID has metadata and agrees. Missing metadata is ambiguous:
  * accepting the one known contributor could expose its text on a mixed row. */
-static int query_context_for_events(const struct pgwt_server *srv,
-                                    const struct pgwt_trace_event *events,
-                                    int count, uint64_t query_id,
-                                    uint32_t *databaseid, uint32_t *userid)
+/* The per-pid half of what query_context_for_events used to do inline.
+ * #324 moved the SCAN into pgwt_compute_qrow_attrs (one pass for every row
+ * instead of one pass per row); this is the callback it resolves pids
+ * through, and the three rejections below are verbatim the old ones. */
+static int bm_pid_context_cb(void *ctx, uint32_t pid,
+                             uint32_t *databaseid, uint32_t *userid)
 {
-    *databaseid = 0;
-    *userid = 0;
-    bool found = false;
-    for (int i = 0; events && i < count; i++) {
-        if (events[i].query_id != query_id)
-            continue;
-        const struct bm_entry *bm = bm_map_lookup(srv, events[i].pid);
-        if (!bm || bm->context_ambiguous || !bm->databaseid || !bm->userid) {
-            *databaseid = 0;
-            *userid = 0;
-            return -1;
-        }
-        if (!found) {
-            *databaseid = bm->databaseid;
-            *userid = bm->userid;
-            found = true;
-        } else if (*databaseid != bm->databaseid || *userid != bm->userid) {
-            *databaseid = 0;
-            *userid = 0;
-            return -1;
-        }
-    }
-    return found ? 1 : 0;
+    const struct pgwt_server *srv = ctx;
+    const struct bm_entry *bm = bm_map_lookup(srv, pid);
+    if (!bm || bm->context_ambiguous || !bm->databaseid || !bm->userid)
+        return 0;
+    *databaseid = bm->databaseid;
+    *userid = bm->userid;
+    return 1;
 }
 
 static int cmp_backend_link_pid(const void *a, const void *b)
@@ -3855,6 +3841,46 @@ static void handle_top_queries(struct pgwt_server *srv, struct pgwt_request *req
         return;
     }
 
+    /* #324: the (databaseid, userid) context and the synthesised-id flag for
+     * EVERY row, in one pass over the window. These were two full scans of
+     * `all_events` PER ROW — 52 passes over 274 MB on the demo capture,
+     * 1778 ms of a 4491 ms response. Same answers; see compute.h for why the
+     * single pass is exactly equivalent rather than merely close. */
+    uint64_t *row_qids = res.num_rows > 0
+                       ? malloc((size_t)res.num_rows * sizeof(*row_qids))
+                       : NULL;
+    for (int i = 0; row_qids && i < res.num_rows; i++)
+        row_qids[i] = res.rows[i].query_id;
+    struct pgwt_qrow_attr_result qattrs = {0};
+    int qattrs_rc = (res.num_rows > 0 && !row_qids)
+                  ? -1
+                  : pgwt_compute_qrow_attrs(all_events, ecount,
+                                            row_qids, res.num_rows,
+                                            bm_pid_context_cb, srv, &qattrs);
+    /* Absence is never reported as zero (#346): a row whose context could not
+     * be computed must not be serialised as "no context, no synth", which is
+     * indistinguishable from a real answer. There is no poison value that
+     * helps here — "context 0" is a legitimate verdict — so the only honest
+     * outcome is to refuse the whole response. */
+    if (qattrs_rc != 0 || qattrs.num_rows != res.num_rows) {
+        free(row_qids);
+        pgwt_qrow_attrs_free(&qattrs);
+        pgwt_lifecycle_free(&lcres);
+        free(all_events);
+        free(res.rows);
+        cJSON *err = cJSON_CreateObject();
+        cJSON_AddNumberToObject(err, "id", (double)req->id);
+        cJSON_AddStringToObject(err, "error",
+                                "query row attribute compute failed");
+        cJSON_AddStringToObject(err, "code", "compute_failed");
+        cJSON_AddStringToObject(err, "hint", "narrow the time range and retry");
+        if (from_summaries) add_fidelity_window(err, &wfid);
+        else                add_fidelity(err, &linfo);
+        emit_json(err);
+        return;
+    }
+    free(row_qids);
+
     /* Helper: compute percentile from sorted array */
     #define PERCENTILE(arr, n, pct) ((n) > 0 ? (arr)[(int)((n) * (pct))] : 0)
 
@@ -3898,10 +3924,9 @@ static void handle_top_queries(struct pgwt_server *srv, struct pgwt_request *req
         }
 
         /* Add query text if available */
-        uint32_t query_databaseid = 0, query_userid = 0;
-        int have_context = query_context_for_events(
-            srv, all_events, ecount, res.rows[i].query_id,
-            &query_databaseid, &query_userid);
+        uint32_t query_databaseid = qattrs.rows[i].databaseid;
+        uint32_t query_userid     = qattrs.rows[i].userid;
+        int have_context          = qattrs.rows[i].context;
         const struct qt_entry *qt_entry = NULL;
         if (have_context > 0)
             qt_entry = qt_map_lookup_entry(srv, query_databaseid,
@@ -3912,11 +3937,10 @@ static void handle_top_queries(struct pgwt_server *srv, struct pgwt_request *req
                                            res.rows[i].query_id);
         cJSON_AddStringToObject(r, "text",
                                 qt_entry && qt_entry->text ? qt_entry->text : "");
-        bool synthetic_quality = qt_entry && qt_entry->source_priority == 2;
-        for (int e = 0; !synthetic_quality && all_events && e < ecount; e++)
-            if (all_events[e].query_id == res.rows[i].query_id &&
-                (all_events[e].flags & PGWT_EVENT_FLAG_QUERY_SYNTH))
-                synthetic_quality = true;
+        /* #324: the second of the two per-row full scans. Same OR over the
+         * same record set, precomputed above. */
+        bool synthetic_quality = (qt_entry && qt_entry->source_priority == 2)
+                              || qattrs.rows[i].has_synth;
         if (synthetic_quality)
             cJSON_AddStringToObject(r, "attribution_quality",
                                     "pg13-synth-v1");
@@ -4010,6 +4034,7 @@ static void handle_top_queries(struct pgwt_server *srv, struct pgwt_request *req
     cJSON_AddNumberToObject(root, "backfilled_ms", res.backfilled_ms);
     emit_json(root);
 
+    pgwt_qrow_attrs_free(&qattrs);
     pgwt_lifecycle_free(&lcres);
     free(all_events);
     free(res.rows);

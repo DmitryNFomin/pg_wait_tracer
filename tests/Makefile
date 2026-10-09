@@ -25,6 +25,7 @@ TESTS     = test_wait_event test_cmdline test_spawn test_event_writer test_event
             test_top_queries_percentile \
             test_variants_p95 \
             test_pid_cap \
+            test_qrow_attrs \
             test_concurrency_bounds \
             test_idle_accounting test_idle_summary \
             test_agg_raw_crosscheck \
@@ -154,6 +155,24 @@ test_pid_cap: test_pid_cap.c ../src/compute.c ../src/pid_index.h \
               ../src/percentile.h \
               $(BUILD)/wait_event.o $(BUILD)/idle_rule.o $(BUILD)/spawn.o $(BUILD)/cJSON.o
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ test_pid_cap.c ../src/compute.c \
+	    $(BUILD)/wait_event.o $(BUILD)/idle_rule.o $(BUILD)/spawn.o $(BUILD)/cJSON.o -lm
+
+# test_qrow_attrs: #324 — handle_top_queries decorated each of its ~26 rows
+# by scanning the WHOLE loaded event window twice (query_context_for_events
+# plus an inline synth-flag loop), i.e. 2 x num_rows passes over up to
+# millions of records: 1778 ms of a measured 4491 ms response on the
+# 2026-10-08 demo capture. pgwt_compute_qrow_attrs does it in one pass, and
+# the whole safety argument is bit-exact agreement, so this is a differential
+# against a VERBATIM COPY of the two deleted loops plus hand-computed
+# literals (an oracle and its subject can share a bug). Same link shape as
+# test_pid_cap (compute.c with -DPGWT_SERVER, pgwt_visit_summaries stubbed in
+# the test); allocation failures ride PGWT_TEST_ALLOC_FAIL
+# (src/test_alloc_fail.h) so the binary behaves identically on every
+# toolchain.
+test_qrow_attrs: test_qrow_attrs.c ../src/compute.c ../src/pid_index.h \
+              ../src/percentile.h ../src/test_alloc_fail.h \
+              $(BUILD)/wait_event.o $(BUILD)/idle_rule.o $(BUILD)/spawn.o $(BUILD)/cJSON.o
+	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ test_qrow_attrs.c ../src/compute.c \
 	    $(BUILD)/wait_event.o $(BUILD)/idle_rule.o $(BUILD)/spawn.o $(BUILD)/cJSON.o -lm
 
 # test_concurrency_bounds: #276 — pgwt_compute_concurrency materialised

@@ -758,6 +758,81 @@ pgwt_lifecycle_lookup(struct pgwt_lifecycle_result *r, uint64_t query_id);
 
 void pgwt_lifecycle_free(struct pgwt_lifecycle_result *r);
 
+/* ── Per-ROW query attributes (Queries tab) ───────────────────────
+ *
+ * #324. For each row handle_top_queries is about to serialise it needs two
+ * facts that only the raw event window holds: the (databaseid, userid) the
+ * query ran under — the key for the query-text map — and whether any record
+ * claiming that query_id carried a SYNTHESISED id (PG13's attribution
+ * fallback), which becomes "attribution_quality".
+ *
+ * Both used to be computed with a FULL SCAN OF THE WINDOW PER ROW, twice:
+ * query_context_for_events() walked every event looking for the row's
+ * query_id, and an inline loop walked it again looking for the synth flag.
+ * That is 2 x num_rows passes over the loaded array. On the 2026-10-08 demo
+ * capture (900 s, 5,699,738 events, 26 rows) that is 52 passes over 274 MB
+ * = 14.2 GB of memory traffic, measured at 1778 ms of a 4491 ms response —
+ * 40 % of the worst tab in the product, for 26 rows of output.
+ *
+ * ONE pass answers every row. The result is IDENTICAL, not approximate, and
+ * the equivalence is structural rather than empirical:
+ *
+ *   - `context` is an ABSORBING state machine. The old function returned -1
+ *     the instant it met a record whose pid had no usable context, or a
+ *     second record disagreeing with the first, and -1 can never become 1
+ *     again. So "any disagreement anywhere" is order-independent, and
+ *     reaching that verdict in one interleaved pass gives the same answer
+ *     as reaching it in a dedicated pass per row.
+ *   - `has_synth` is an OR over the same record set, which is likewise
+ *     order-independent. The old code only ran that scan when the
+ *     query-text entry had not already settled the question; folding it in
+ *     unconditionally costs nothing here and yields the same boolean.
+ *
+ * The pid -> context resolution is a CALLBACK because the backend-metadata
+ * map lives in src/server.c (struct pgwt_server). That also makes the
+ * resolver substitutable in tests, including the "resolver can never
+ * answer" case, which must come back as -1 (ambiguous) and never 1.
+ */
+struct pgwt_qrow_attr {
+    uint64_t query_id;
+    /* 1  = exactly one (databaseid, userid) claimed it; ids below valid.
+     * 0  = no record in the window claimed this query_id; ids are 0.
+     * -1 = ambiguous — a record's pid had no usable context, or two records
+     *      disagreed. ids are forced to 0, as the old function did. */
+    int      context;
+    uint32_t databaseid;
+    uint32_t userid;
+    int      has_synth;   /* a record claiming this id had QUERY_SYNTH */
+};
+
+struct pgwt_qrow_attr_result {
+    struct pgwt_qrow_attr *rows;   /* malloc'd, num_rows entries, ROW ORDER */
+    int num_rows;
+    /* Allocation failure. rows is NULL and num_rows 0, so a caller cannot
+     * read an absence as "context 0, no synth" — the shape #346 shipped.
+     * The caller MUST error out; a poison value alone does not stop it. */
+    int failed;
+};
+
+/* Resolve a pid's (databaseid, userid).
+ * Return 1 when BOTH are known and the pid's context is unambiguous (and
+ * then write them), 0 otherwise — 0 means "this record poisons the row",
+ * exactly as a NULL / ambiguous / zero-id backend entry did. */
+typedef int (*pgwt_pid_ctx_fn)(void *ctx, uint32_t pid,
+                               uint32_t *databaseid, uint32_t *userid);
+
+/* One pass over `events` answering every query_id in `query_ids` (row
+ * order; duplicates are allowed and every copy gets the same answer).
+ * Returns 0 on success, -1 on allocation failure (out->failed = 1).
+ * An empty or NULL event array is a successful "nothing claimed any of
+ * them": context 0, has_synth 0 — never an error, and never a 1. */
+int pgwt_compute_qrow_attrs(const struct pgwt_trace_event *events, int count,
+                            const uint64_t *query_ids, int num_query_ids,
+                            pgwt_pid_ctx_fn resolve, void *resolve_ctx,
+                            struct pgwt_qrow_attr_result *out);
+
+void pgwt_qrow_attrs_free(struct pgwt_qrow_attr_result *r);
+
 struct pgwt_variants_result {
     struct pgwt_variant *variants;  /* malloc'd, caller frees */
     int    num_variants;
