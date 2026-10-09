@@ -1,0 +1,9 @@
+run_mutations.py SELF-TEST -- the driver's own blind spots
+every case below must show the driver REFUSING rather than approving
+
+missing compiler (exit 127 dependency): exit=2 refused=True
+    COMPILER UNAVAILABLE (control): [Errno 2] No such file or directory: '/nonexistent/cc-127'
+absent anchor: driver exit=1 (must be nonzero)
+empty mutation set: driver exit=3 (must be nonzero)
+
+VERDICT: PASS

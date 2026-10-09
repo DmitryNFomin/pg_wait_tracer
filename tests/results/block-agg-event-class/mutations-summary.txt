@@ -3,7 +3,73 @@ control (unmutated tree): GREEN
 every mutation below must be RED; a GREEN one is a hole in the suite, not a passing build
 
 N1   RED          caught-by=sec9e/sec10b 10516 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2520: §9e [1700000000000000
+N2   RED          caught-by=sec9e/sec10b 6964 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2520: §9e [1700000000000000
+N3   RED          caught-by=sec11 E7     1 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3416: §11 E7 a block reachi
+N4   RED          caught-by=sec10a/sec10b 13768 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2813: §10a IO_WORKER flagge
+N5   RED          caught-by=sec10a/sec10b 11168 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2813: §10a SAMPLE flagged: 
+N6   RED          caught-by=sec11 E12    2 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3660: §11 E12b a continuati
+N7   RED          caught-by=sec11 E12    2 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3593: §11 E12 a block holdi
+N8   RED          caught-by=sec11 E1     5 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3281: §11 E1 an accumulator
+N9   RED          caught-by=sec11 E1     2 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3289: §11 E1 events_sorted 
+N10  RED          caught-by=sec11 E3     1 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3342: §11 E3 a window may n
+N11  RED          caught-by=sec11 E5     2 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3373: §11 E5 an inverted wi
+N12  RED          caught-by=sec9e        228 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2515: §9e [1700000000000000
+N13  RED          caught-by=sec9c-bis    1 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2303: §9c-bis a SAMPLES blo
+N14  RED          caught-by=sec11 E10    2 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3530: §11 E10 build must re
+N15  RED          caught-by=sec9e/sec10b/sec12 P5 1913 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2536: §9e [1700000000000000
+N16  RED          caught-by=sec10c       9 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3188: §10c durations 8000 a
+N17  RED          caught-by=sec10b       11458 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2922: §10b [970299999, 1000
+N18  RED          caught-by=sec9e/sec10b 13994 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2524: §9e event 167772161 e
+N19  RED          caught-by=sec10b       6510 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3061: §10b [970299999, 1000
+N20  RED          caught-by=sec9e/sec10b 10516 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2520: §9e [1700000000000000
+N21  RED          caught-by=sec9e/sec10b 10516 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2520: §9e [1700000000000000
+N22  RED          caught-by=sec10a/sec10b 13769 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2813: §10a IO_WORKER flagge
+N23  RED          caught-by=sec10c       9 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3188: §10c durations 8000 a
 
-1 mutation(s), 1 RED, 0 NOT RED
+23 mutation(s), 23 RED, 0 NOT RED
 
 N1 (src/block_agg.c): add_event(): the per-event duration is no longer CLIPPED to the declared window (C10), so a wait that started before `from` is counted in full -- the lock-pileup overcount event_window_ns exists to stop.
+
+N2 (src/block_agg.c): merge(): the START-side clip pre-flight is removed, so a block holding a wait that began before `from` is folded in with its UNCLIPPED total.
+
+N3 (src/block_agg.c): merge(): the END-side pre-flight is removed, so a block reaching past `to` can be folded whole.
+
+N4 (src/block_agg.c): C9: the T2 io_worker exclusion is dropped, so io_worker time enters the DB-Time-ranked event list and double-represents I/O already counted in the requesting backend.
+
+N5 (src/block_agg.c): C9 is narrowed to drop SAMPLE records, so a sampled window loses its DB time entirely (the latency columns already exclude them -- C12 -- and that is a different rule).
+
+N6 (src/block_agg.c): C14: the `|| is_new` clause of the SAMPLE_CONT count rule is removed, so a continuation fragment arriving first leaves the slot at count 0 and the whole row reads as absent.
+
+N7 (src/block_agg.c): build(): the SAMPLE_CONT refusal is removed, so a block whose per-event count is ORDER-DEPENDENT becomes mergeable.
+
+N8 (src/block_agg.c): FALSE NEGATIVE. events_available() ignores `events_on`, so an accumulator that never declared a window reports its (never built) per-event table as readable -- absence reading as an answer, C8/C11.
+
+N9 (src/block_agg.c): FALSE NEGATIVE. events_sorted() answers an EMPTY LIST instead of refusing when the table is unavailable -- indistinguishable from 'this window has no events', which is a different and possible fact.
+
+N10 (src/block_agg.c): FALSE NEGATIVE. enable_events() lets a window be retro-fitted onto a half-built accumulator, so some records are clipped and some are not and the total is silently short.
+
+N11 (src/block_agg.c): An INVERTED window is accepted, clipping every record to zero -- which looks exactly like a legitimately empty window.
+
+N12 (src/block_agg.c): FALSE NEGATIVE. window_from_reader() SKIPS a clip-refused block instead of DECODEing it, so its records vanish with no refusal. Reachable ONLY through the shipped builder, which is why sec9e exists: sec10b's mirror cannot catch this.
+
+N13 (src/block_agg.c): THE TRIPWIRE Phase 2 makes live, put back: the non-TRANSITIONS overlap test returns to a hand-written HALF-OPEN `first_timestamp_ns < to_mono_ns` while C7 is inclusive, so a SAMPLES block starting exactly at `to` is silently skipped instead of refused.
+
+N14 (src/block_agg.c): build() no longer refuses WHOLE on a per-event allocation failure: it returns an aggregate with pair/node tables and a short per-event one.
+
+N15 (src/block_agg.c): db_time_ns() charges idle-but-visible events to DB Time, so every %DB in the Events tab is computed against an inflated denominator.
+
+N16 (src/block_agg.c): The latency ladder is off by one at the 16 us edge, so a 16 us wait lands in the bucket below and every percentile drawn from it shifts.
+
+N17 (src/block_agg.c): ev_add_row(): the latency HISTOGRAM is not merged, so a merged block contributes counts with no distribution behind them and the percentiles the wiring step derives come from a different population than the row claims.
+
+N18 (src/block_agg.c): ev_add_row(): exact_count is not merged, so every merged row reports its latency columns as unavailable.
+
+N19 (src/block_agg.c): classes_sorted() emits only the FIRST class, dropping the rest. A comparison that only walked the rows it was GIVEN would not notice, which is why sec10b reconciles the class totals against the event totals AND against the oracle's own row sum.
+
+N20 (src/compute.c): ORACLE. pgwt_compute_top_events() stops clipping to the window and uses the full duration. If this stayed GREEN, the aggregate would be agreeing with an unclipped oracle -- i.e. not clipping either.
+
+N21 (src/compute.c): ORACLE. event_window_ns() loses its START clamp, so the oracle counts pre-window time. The shared-bug check for C10 from the other side.
+
+N22 (src/compute.c): ORACLE. the T2 io_worker exclusion is removed from pgwt_compute_top_events(), so the oracle emits a row the aggregate refuses. Pins C9 from the oracle's side.
+
+N23 (src/compute.c): ORACLE. compute.c's OWN latency ladder is moved at the 16 us edge. sec10c learns its edges from this function, so this proves sec10c is measuring the product rather than comparing two copies of one table.

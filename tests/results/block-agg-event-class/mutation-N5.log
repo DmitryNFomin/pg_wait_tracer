@@ -16,7 +16,7 @@ expected to be caught by: sec10a/sec10b
         return 0;
     if (pgwt_is_hidden_
 
-exit=1, 11166 FAIL line(s)
+exit=1, 11168 FAIL line(s)
 
 test_block_agg — per-committed-block transition aggregate (Phase 1)
 === §1 record predicate vs pgwt_compute_transitions ===
@@ -77,7 +77,7 @@ test_block_agg — per-committed-block transition aggregate (Phase 1)
     §2 rows whose event is unfilterable 3651
     §2 latency-bucket pairs checked ... 1275
     §2 v2 probes that went red ........ 5
-FAILED: 11166 check(s)
+FAILED: 11168 check(s)
 WARN: cannot open /nonexistent/pgwt/no-such.trace: No such file or directory
 FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2813: §10a SAMPLE flagged: pgwt_block_agg_event_counts says 0, pgwt_compute_top_events says 1
 FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2813: §10a SAMPLE_CONT flagged: pgwt_block_agg_event_counts says 0, pgwt_compute_top_events says 1
@@ -11243,5 +11243,7 @@ FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13
 FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3019: §10f [1020020000, 1040200001] class-FILTERED IO count agg=2 raw=3
 FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3061: §10f [1020020000, 1040200001] the class fold accounts for 6 observations, the ORACLE for 7 — a class was dropped or double-counted
 FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3622: §11 E12 SAMPLE_CONT total agg=400 raw=0.000800000
-FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3712: §12 the control must agree (2 disagreements)
-FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3810: §12 P5 db_time agg=34034500 raw=34.046500000
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3660: §11 E12b a continuation fragment arriving FIRST must still create its row — without the `|| is_new` clause the slot stays at count 0 and the whole row vanishes
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3675: §11 E12b 0 aggregate rows vs 1 oracle rows
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3761: §12 the control must agree (2 disagreements)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3859: §12 P5 db_time agg=34034500 raw=34.046500000

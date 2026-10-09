@@ -1982,4 +1982,4 @@ FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13
 FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2985: §10b [1010100000, 1040199999] db_time agg=2722000 ns (2.722000000 ms) raw=2.622000000 ms
 FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2985: §10b [1010100000, 1040200000] db_time agg=18722000 ns (18.722000000 ms) raw=18.622000000 ms
 FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2985: §10b [1010100000, 1040200001] db_time agg=18722000 ns (18.722000000 ms) raw=18.622000000 ms
-FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3810: §12 P5 db_time agg=36046500 raw=34.046500000
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3859: §12 P5 db_time agg=36046500 raw=34.046500000

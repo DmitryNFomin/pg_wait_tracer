@@ -5,7 +5,7 @@ expected to be caught by: sec11 E12
 --- if (!(ev->flags & PGWT_EVENT_FLAG_SAMPLE_CONT) || is_new) {
 +++ if (!(ev->flags & PGWT_EVENT_FLAG_SAMPLE_CONT)) {
 
-exit=0, 0 FAIL line(s)
+exit=1, 2 FAIL line(s)
 
 test_block_agg — per-committed-block transition aggregate (Phase 1)
 === §1 record predicate vs pgwt_compute_transitions ===
@@ -66,5 +66,7 @@ test_block_agg — per-committed-block transition aggregate (Phase 1)
     §2 rows whose event is unfilterable 3651
     §2 latency-bucket pairs checked ... 1275
     §2 v2 probes that went red ........ 5
-PASS: test_block_agg
+FAILED: 2 check(s)
 WARN: cannot open /nonexistent/pgwt/no-such.trace: No such file or directory
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3660: §11 E12b a continuation fragment arriving FIRST must still create its row — without the `|| is_new` clause the slot stays at count 0 and the whole row vanishes
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3675: §11 E12b 0 aggregate rows vs 1 oracle rows

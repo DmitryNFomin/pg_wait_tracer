@@ -13836,5 +13836,5 @@ FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13
 FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2901: §10f [1020010000, 1040200001] event 0 exact_count agg=3 raw=2
 FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3019: §10f [1020010000, 1040200001] class-FILTERED CPU count agg=3 raw=2
 FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3061: §10f [1020010000, 1040200001] the class fold accounts for 8 observations, the ORACLE for 7 — a class was dropped or double-counted
-FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3712: §12 the control must agree (3 disagreements)
-FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3810: §12 P5 db_time agg=34053500 raw=34.046500000
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3761: §12 the control must agree (3 disagreements)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3859: §12 P5 db_time agg=34053500 raw=34.046500000

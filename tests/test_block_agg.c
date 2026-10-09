@@ -3627,6 +3627,55 @@ static void section11_bypass_v2(void)
         }
         free(res.rows);
         pgwt_block_agg_free(&w);
+
+        /* ...and the OTHER order, which the case above does NOT reach and
+         * which is the whole reason the rule has an `|| is_new` clause: a
+         * continuation fragment arriving FIRST for its event. Without that
+         * clause the slot stays at count 0, reads as EMPTY, and the row
+         * disappears from the answer entirely — a missing row, not a
+         * count off by one.
+         *
+         * Added because mutation N6 (drop `|| is_new`) stayed GREEN on the
+         * first run: the case above feeds a plain record first, so the
+         * fragment is never the first record for IO:1 and the clause is
+         * never exercised. A mutant that survives is this suite failing,
+         * not a passing build. */
+        struct pgwt_block_agg w2;
+        pgwt_block_agg_init_window(&w2);
+        CHECK(pgwt_block_agg_enable_events(&w2, 1, 2000000000ULL) ==
+              PGWT_BAGG_OK, "§11 E12b enable");
+        CHECK(pgwt_block_agg_add_event(&w2, &c.ev[1]) == PGWT_BAGG_OK,
+              "§11 E12b add_event must accept a lone fragment");
+        struct pgwt_events_result lres;
+        raw_top_events_of(&c.ev[1], 1, NULL, 0, 1, 2000000000ULL, &lres);
+        CHECK(lres.num_rows == 1,
+              "§11 E12b the oracle must emit a row for a lone continuation "
+              "fragment (got %d) — if it did not, the comparison below "
+              "would be vacuous", lres.num_rows);
+        struct pgwt_block_agg_event lone;
+        int present = pgwt_block_agg_event_lookup(&w2, E_IO1, &lone);
+        CHECK(present == 1,
+              "§11 E12b a continuation fragment arriving FIRST must still "
+              "create its row — without the `|| is_new` clause the slot "
+              "stays at count 0 and the whole row vanishes");
+        if (present && lres.num_rows == 1) {
+            CHECK(lone.count == lres.rows[0].count,
+                  "§11 E12b lone-fragment count agg=%" PRIu64 " raw=%" PRIu64,
+                  lone.count, lres.rows[0].count);
+            CHECK(lres.rows[0].count == 1,
+                  "§11 E12b the oracle must count the lone fragment once, "
+                  "got %" PRIu64, lres.rows[0].count);
+        }
+        struct pgwt_block_agg_event *lrows = NULL;
+        int ln = 0;
+        CHECK(pgwt_block_agg_events_sorted(&w2, &lrows, &ln) ==
+              PGWT_BAGG_OK, "§11 E12b readout");
+        CHECK(ln == lres.num_rows,
+              "§11 E12b %d aggregate rows vs %d oracle rows", ln,
+              lres.num_rows);
+        free(lrows);
+        free(lres.rows);
+        pgwt_block_agg_free(&w2);
     }
 
     /* E13. An out-of-range class index must refuse the whole fold rather than

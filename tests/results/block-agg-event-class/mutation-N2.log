@@ -7030,7 +7030,7 @@ FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13
 FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2985: §10b [1040000000, 1040200001] db_time agg=18250000 ns (18.250000000 ms) raw=0.300000000 ms
 FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3397: §11 E6 a block holding a wait that started before `from` must be REFUSED_CLIP, got 0
 FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3403: §11 E6 a REFUSED_CLIP must leave the accumulator untouched — the downgrade to DECODE would otherwise double-count
-FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3712: §12 the control must agree (2 disagreements)
-FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3810: §12 P5 db_time agg=63747000 raw=34.046500000
-FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3946: no block was ever REFUSED_CLIP and downgraded to DECODE, so the C10 fallback path was never taken
-FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3953: the SHIPPED window builder never downgraded a clip-refused block to DECODE
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3761: §12 the control must agree (2 disagreements)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3859: §12 P5 db_time agg=63747000 raw=34.046500000
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3995: no block was ever REFUSED_CLIP and downgraded to DECODE, so the C10 fallback path was never taken
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:4002: the SHIPPED window builder never downgraded a clip-refused block to DECODE

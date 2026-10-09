@@ -10584,5 +10584,5 @@ FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13
 FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2897: §10b [1040200000, 1040200001] event 150994945 total agg=16000000 ns (16.000000000 ms) raw=0.000000000 ms
 FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2958: §10b [1040200000, 1040200001] event-FILTERED event 150994945: raw count=1 total=0.000000000 vs aggregate count=1 total=16.000000000
 FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2985: §10b [1040200000, 1040200001] db_time agg=16000000 ns (16.000000000 ms) raw=0.000000000 ms
-FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3712: §12 the control must agree (2 disagreements)
-FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3810: §12 P5 db_time agg=63747000 raw=34.046500000
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3761: §12 the control must agree (2 disagreements)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:3859: §12 P5 db_time agg=63747000 raw=34.046500000

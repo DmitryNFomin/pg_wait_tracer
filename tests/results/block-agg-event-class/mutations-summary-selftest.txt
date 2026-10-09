@@ -1,0 +1,6 @@
+tests/test_block_agg.c -- mutation / bypass results
+control (unmutated tree): GREEN
+every mutation below must be RED; a GREEN one is a hole in the suite, not a passing build
+
+
+0 mutation(s), 0 RED, 0 NOT RED

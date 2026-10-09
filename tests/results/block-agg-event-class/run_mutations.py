@@ -58,6 +58,8 @@ int pgwt_proc_close(struct pgwt_proc *p) { (void)p; return -1; }
 
 # (id, target source file, what guard is broken, which sections must catch
 #  it, (old, new))
+SUMMARY_NAME = "mutations-summary.txt"
+
 MUTATIONS = [
     # ── the v2 code itself ────────────────────────────────────────────────
     ("N1", "block_agg.c",
@@ -313,6 +315,8 @@ MUTATIONS = [
 
 def selftest():
     """The driver is itself a gate; these are the ways it could go blind."""
+    global SUMMARY_NAME
+    SUMMARY_NAME = "mutations-summary-selftest.txt"   # never clobber the real one
     out = []
     ok = True
 
@@ -407,7 +411,16 @@ def build_and_run(workdir, label, mutated=None):
         if os.path.isdir(extra):
             cmd += ["-L" + extra]
     cmd += ["-o", exe] + srcs + ["-llz4", "-lz", "-lm"]
-    b = subprocess.run(cmd, capture_output=True, text=True)
+    # A missing or non-executable compiler must be reported, not raised: an
+    # uncaught OSError here exits the driver with a traceback and no verdict,
+    # which reads as "the run broke" rather than "the driver could not see".
+    # Exit 127 is the shell's own "command not found", kept deliberately.
+    try:
+        b = subprocess.run(cmd, capture_output=True, text=True)
+    except OSError as e:
+        return 127, ("COMPILER UNAVAILABLE (%s): %s\n"
+                     "cannot build, therefore cannot judge -- refusing\n"
+                     % (label, e))
     if b.returncode != 0:
         return 126, "BUILD FAILED (%s)\n%s" % (label, b.stderr)
     r = subprocess.run([exe], capture_output=True, text=True)
@@ -420,11 +433,14 @@ def main_inner(want):
     # Control: the unmutated tree must be GREEN, or nothing below means anything.
     with tempfile.TemporaryDirectory() as wd:
         rc, out = build_and_run(wd, "control")
-    with open(os.path.join(HERE, "mutation-control.log"), "w") as fh:
+    with open(os.path.join(HERE, "mutation-control%s.log"
+                           % ("-selftest" if SUMMARY_NAME != "mutations-summary.txt"
+                              else "")), "w") as fh:
         fh.write(out)
     if rc != 0:
         print("CONTROL IS RED (exit %d) -- fix the tree before reading any "
               "mutation result" % rc)
+        print(out.strip().splitlines()[0] if out.strip() else "(no output)")
         return 2
     print("control: GREEN (exit 0)")
 
@@ -460,7 +476,7 @@ def main_inner(want):
                      % (len(fails), fails[0][:140] if fails else "(none)")))
         print("%-4s %-12s %s" % (mid, verdict, fails[0][:100] if fails else ""))
 
-    summary = os.path.join(HERE, "mutations-summary.txt")
+    summary = os.path.join(HERE, SUMMARY_NAME)
     holes = [r for r in rows if r[1] != "RED"]
     with open(summary, "w") as fh:
         fh.write("tests/test_block_agg.c -- mutation / bypass results\n")
