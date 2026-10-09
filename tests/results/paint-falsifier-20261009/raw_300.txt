@@ -1,0 +1,180 @@
+=== window=300 run=1 ===
+Fri Oct  9 04:58:06 PM UTC 2026
+ 16:58:06 up 12 days, 21:28, 10 users,  load average: 1.67, 1.95, 3.38
+pgwt-server: loaded event names from wait_event_names.json
+pgwt-server: 1 trace files, 4 CPUs, ~6955008 events
+pgwt-server: loaded 26 query texts
+pgwt-server: loaded 136 backend metadata entries
+pgwt-server: loaded 26 query texts
+pgwt-server: loaded 136 backend metadata entries
+INFO: 1 of 1 summary file(s) covering this window are not summary v5 -- recomputing from raw events
+INFO: 1 of 1 summary file(s) covering this window are not summary v5 -- recomputing from raw events
+INFO: 1 of 1 summary file(s) covering this window are not summary v5 -- recomputing from raw events
+INFO: 1 of 1 summary file(s) covering this window are not summary v5 -- recomputing from raw events
+INFO: 1 of 1 summary file(s) covering this window are not summary v5 -- recomputing from raw events
+INFO: 1 of 1 summary file(s) covering this window are not summary v5 -- recomputing from raw events
+trace      : /root/paint1_trace_r2_copy
+num_events : 6955008
+window     : 300.0 s  (from_ns=1791452804790910847 to_ns=1791453104790910847)
+
+command                    ms  notes
+------------------------------------------------------------------------
+variants                547.9  fidelity=exact
+transitions             225.8  fidelity=exact nodes=35 links=50
+top_queries             687.9  fidelity=exact rows=25
+concurrency             504.6  fidelity=exact
+executions             1105.6  fidelity=exact rows=100
+exec_scatter            860.9  fidelity=exact points=2000
+time_model              423.3  fidelity=exact rows=29
+aas                     418.7  fidelity=exact buckets=120
+top_events              424.9  fidelity=exact rows=35
+top_sessions            410.5  fidelity=exact rows=56
+heatmap                 419.5  fidelity=exact
+
+slowest: executions at 1106 ms
+sum of all commands: 6030 ms
+exit=0
+=== window=300 run=2 ===
+Fri Oct  9 04:58:12 PM UTC 2026
+ 16:58:12 up 12 days, 21:28, 10 users,  load average: 1.61, 1.93, 3.36
+pgwt-server: loaded event names from wait_event_names.json
+pgwt-server: 1 trace files, 4 CPUs, ~6955008 events
+pgwt-server: loaded 26 query texts
+pgwt-server: loaded 136 backend metadata entries
+pgwt-server: loaded 26 query texts
+pgwt-server: loaded 136 backend metadata entries
+INFO: 1 of 1 summary file(s) covering this window are not summary v5 -- recomputing from raw events
+INFO: 1 of 1 summary file(s) covering this window are not summary v5 -- recomputing from raw events
+INFO: 1 of 1 summary file(s) covering this window are not summary v5 -- recomputing from raw events
+INFO: 1 of 1 summary file(s) covering this window are not summary v5 -- recomputing from raw events
+INFO: 1 of 1 summary file(s) covering this window are not summary v5 -- recomputing from raw events
+INFO: 1 of 1 summary file(s) covering this window are not summary v5 -- recomputing from raw events
+trace      : /root/paint1_trace_r2_copy
+num_events : 6955008
+window     : 300.0 s  (from_ns=1791452804790910847 to_ns=1791453104790910847)
+
+command                    ms  notes
+------------------------------------------------------------------------
+variants                535.2  fidelity=exact
+transitions             235.9  fidelity=exact nodes=35 links=50
+top_queries             720.1  fidelity=exact rows=25
+concurrency             478.4  fidelity=exact
+executions             1112.9  fidelity=exact rows=100
+exec_scatter            849.8  fidelity=exact points=2000
+time_model              413.1  fidelity=exact rows=29
+aas                     422.1  fidelity=exact buckets=120
+top_events              433.1  fidelity=exact rows=35
+top_sessions            424.7  fidelity=exact rows=56
+heatmap                 418.5  fidelity=exact
+
+slowest: executions at 1113 ms
+sum of all commands: 6044 ms
+exit=0
+=== window=300 run=3 ===
+Fri Oct  9 04:58:18 PM UTC 2026
+ 16:58:18 up 12 days, 21:28, 10 users,  load average: 1.52, 1.90, 3.34
+pgwt-server: loaded event names from wait_event_names.json
+pgwt-server: 1 trace files, 4 CPUs, ~6955008 events
+pgwt-server: loaded 26 query texts
+pgwt-server: loaded 136 backend metadata entries
+pgwt-server: loaded 26 query texts
+pgwt-server: loaded 136 backend metadata entries
+INFO: 1 of 1 summary file(s) covering this window are not summary v5 -- recomputing from raw events
+INFO: 1 of 1 summary file(s) covering this window are not summary v5 -- recomputing from raw events
+INFO: 1 of 1 summary file(s) covering this window are not summary v5 -- recomputing from raw events
+INFO: 1 of 1 summary file(s) covering this window are not summary v5 -- recomputing from raw events
+INFO: 1 of 1 summary file(s) covering this window are not summary v5 -- recomputing from raw events
+INFO: 1 of 1 summary file(s) covering this window are not summary v5 -- recomputing from raw events
+trace      : /root/paint1_trace_r2_copy
+num_events : 6955008
+window     : 300.0 s  (from_ns=1791452804790910847 to_ns=1791453104790910847)
+
+command                    ms  notes
+------------------------------------------------------------------------
+variants                536.2  fidelity=exact
+transitions             222.2  fidelity=exact nodes=35 links=50
+top_queries             706.0  fidelity=exact rows=25
+concurrency             511.2  fidelity=exact
+executions             1130.9  fidelity=exact rows=100
+exec_scatter            844.2  fidelity=exact points=2000
+time_model              417.2  fidelity=exact rows=29
+aas                     422.9  fidelity=exact buckets=120
+top_events              432.3  fidelity=exact rows=35
+top_sessions            409.8  fidelity=exact rows=56
+heatmap                 408.8  fidelity=exact
+
+slowest: executions at 1131 ms
+sum of all commands: 6042 ms
+exit=0
+=== window=300 run=4 ===
+Fri Oct  9 04:58:24 PM UTC 2026
+ 16:58:24 up 12 days, 21:29, 10 users,  load average: 1.48, 1.88, 3.32
+pgwt-server: loaded event names from wait_event_names.json
+pgwt-server: 1 trace files, 4 CPUs, ~6955008 events
+pgwt-server: loaded 26 query texts
+pgwt-server: loaded 136 backend metadata entries
+pgwt-server: loaded 26 query texts
+pgwt-server: loaded 136 backend metadata entries
+INFO: 1 of 1 summary file(s) covering this window are not summary v5 -- recomputing from raw events
+INFO: 1 of 1 summary file(s) covering this window are not summary v5 -- recomputing from raw events
+INFO: 1 of 1 summary file(s) covering this window are not summary v5 -- recomputing from raw events
+INFO: 1 of 1 summary file(s) covering this window are not summary v5 -- recomputing from raw events
+INFO: 1 of 1 summary file(s) covering this window are not summary v5 -- recomputing from raw events
+INFO: 1 of 1 summary file(s) covering this window are not summary v5 -- recomputing from raw events
+trace      : /root/paint1_trace_r2_copy
+num_events : 6955008
+window     : 300.0 s  (from_ns=1791452804790910847 to_ns=1791453104790910847)
+
+command                    ms  notes
+------------------------------------------------------------------------
+variants                544.6  fidelity=exact
+transitions             230.9  fidelity=exact nodes=35 links=50
+top_queries             731.3  fidelity=exact rows=25
+concurrency             479.7  fidelity=exact
+executions             1088.5  fidelity=exact rows=100
+exec_scatter            848.0  fidelity=exact points=2000
+time_model              443.1  fidelity=exact rows=29
+aas                     423.6  fidelity=exact buckets=120
+top_events              418.9  fidelity=exact rows=35
+top_sessions            416.7  fidelity=exact rows=56
+heatmap                 392.9  fidelity=exact
+
+slowest: executions at 1089 ms
+sum of all commands: 6018 ms
+exit=0
+=== window=300 run=5 ===
+Fri Oct  9 04:58:30 PM UTC 2026
+ 16:58:30 up 12 days, 21:29, 10 users,  load average: 1.44, 1.87, 3.31
+pgwt-server: loaded event names from wait_event_names.json
+pgwt-server: 1 trace files, 4 CPUs, ~6955008 events
+pgwt-server: loaded 26 query texts
+pgwt-server: loaded 136 backend metadata entries
+pgwt-server: loaded 26 query texts
+pgwt-server: loaded 136 backend metadata entries
+INFO: 1 of 1 summary file(s) covering this window are not summary v5 -- recomputing from raw events
+INFO: 1 of 1 summary file(s) covering this window are not summary v5 -- recomputing from raw events
+INFO: 1 of 1 summary file(s) covering this window are not summary v5 -- recomputing from raw events
+INFO: 1 of 1 summary file(s) covering this window are not summary v5 -- recomputing from raw events
+INFO: 1 of 1 summary file(s) covering this window are not summary v5 -- recomputing from raw events
+INFO: 1 of 1 summary file(s) covering this window are not summary v5 -- recomputing from raw events
+trace      : /root/paint1_trace_r2_copy
+num_events : 6955008
+window     : 300.0 s  (from_ns=1791452804790910847 to_ns=1791453104790910847)
+
+command                    ms  notes
+------------------------------------------------------------------------
+variants                535.5  fidelity=exact
+transitions             226.5  fidelity=exact nodes=35 links=50
+top_queries             696.3  fidelity=exact rows=25
+concurrency             513.4  fidelity=exact
+executions             1095.9  fidelity=exact rows=100
+exec_scatter            816.5  fidelity=exact points=2000
+time_model              414.0  fidelity=exact rows=29
+aas                     415.7  fidelity=exact buckets=120
+top_events              430.2  fidelity=exact rows=35
+top_sessions            418.5  fidelity=exact rows=56
+heatmap                 410.2  fidelity=exact
+
+slowest: executions at 1096 ms
+sum of all commands: 5973 ms
+exit=0
