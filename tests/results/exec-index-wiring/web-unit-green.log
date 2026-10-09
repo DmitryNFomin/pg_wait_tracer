@@ -1,0 +1,18 @@
+✔ a not-indexed count never renders as "-1" (1.320708ms)
+✔ one poisoned field does not launder the other (0.070958ms)
+✔ real counts, including zero, still render as numbers (0.063209ms)
+✔ fmtExecutionCount accepts counts and refuses everything else (0.053417ms)
+✔ executionCountsKnown mirrors the C predicate (0.060083ms)
+✔ a poisoned row is not auto-selected even when plan_ms is set (0.047875ms)
+✔ a poisoned row loses to a real one in default selection (0.062709ms)
+✔ bypass: a fixture with real counts is BLIND to the defect (0.043458ms)
+✔ bypass: the column index is pinned by its header, not by position (0.066291ms)
+✔ bypass: an empty row set neither passes nor hides anything (0.061833ms)
+ℹ tests 10
+ℹ suites 0
+ℹ pass 10
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 60.707125

@@ -1,0 +1,37 @@
+baseline: pristine compute.c, test PASSED (29/29 tests passed)
+
+RED   G01 the predicate as it shipped: `!row->matches_event_filter`
+        -> 5 failing checks; first: FAIL(167): shipped predicate reports UNDECIDABLE (got 1)
+RED   G02 undecidable collapses to DROP (tab silently shortened)
+        -> 6 failing checks; first: FAIL(167): shipped predicate reports UNDECIDABLE (got 0)
+RED   G03 undecidable collapses to KEEP (tab silently unfiltered)
+        -> 5 failing checks; first: FAIL(167): shipped predicate reports UNDECIDABLE (got 1)
+RED   G04 poison test is `== -1`, so any other sentinel walks through
+        -> 2 failing checks; first: FAIL(266): any negative matches_event_filter is UNDECIDABLE, not just -1
+RED   G05 boundary dimensions checked AFTER the event one: a pid mismatch becomes undecidable, so a pid-filtered drill-down can never be served
+        -> 1 failing checks; first: FAIL(254): a decidable drop is reported even when the event dimension is undecidable
+RED   G06 a NULL row reads as KEEP
+        -> 1 failing checks; first: FAIL(294): a NULL row is never a KEEP
+RED   G07 counts_known needs BOTH fields poisoned (half-poisoned row passes)
+        -> 4 failing checks; first: FAIL(321): poisoned n_workers alone refuses (n_events was real)
+RED   G08 counts_known tests `!= -1` instead of `>= 0`
+        -> 2 failing checks; first: FAIL(333): n_events = -7 is not a count either (not just the -1 sentinel)
+RED   G09 counts_known always approves (a gate that cannot see, approving)
+        -> 6 failing checks; first: FAIL(314): a fully poisoned index row is not serialisable
+RED   G10 counts_known rejects the legitimate 0/0 row (refuses everything)
+        -> 1 failing checks; first: FAIL(307): 0/0 is a real pair of counts (an execution with no wait events)
+RED   G11 a NULL row reads as serialisable
+        -> 1 failing checks; first: FAIL(298): a NULL row has no known counts
+
+GREEN C01 a comment added inside the verdict function (control: a no-op must not go red)
+GREEN C02 `< 0` written as `<= -1` (identical on ints) (control: a no-op must not go red)
+
+--- self-test: the harness's own blind spots ---
+  ok      needle matches ZERO times
+  ok      needle matches SEVERAL times
+  ok      mutant does not COMPILE
+  ok      toolchain missing (exit 127)
+  ok      a dependency exiting 126 is observable
+
+11 mutations, 2 controls, 0 not detected
+PASSED

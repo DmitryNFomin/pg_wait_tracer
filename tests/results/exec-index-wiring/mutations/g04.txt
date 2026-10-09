@@ -1,0 +1,38 @@
+G04 poison test is `== -1`, so any other sentinel walks through
+
+=== test_exec_index_guards ===
+--- 1. the two poison sentinels agree ---
+  PASS: PGWT_EXEC_COUNT_UNKNOWN (-1) == PGWT_EXEC_INDEX_NOT_INDEXED (-1)
+  PASS: the sentinel is negative, so no count can collide with it
+--- 2. differential vs the predicate that shipped ---
+  PASS: deleted predicate KEPT a not-computed row under a class filter (returned 1) -- the defect this test exists for
+  PASS: shipped predicate reports UNDECIDABLE (got -1)
+  PASS: UNDECIDABLE is not collapsed to 'drop'
+  PASS: deleted predicate KEPT a not-computed row under an event_id filter
+  PASS: shipped predicate reports UNDECIDABLE for event_id too
+  PASS: class AND event_id together are still UNDECIDABLE
+--- 3. bypass suite: the guard made blind or unreachable ---
+  PASS: a genuinely non-matching row drops on BOTH predicates: this fixture is blind to the defect
+  PASS: an unfiltered request keeps the row on BOTH predicates: blind fixture, and the case that must not refuse
+  PASS: pid mismatch is a decidable DROP on a poisoned row
+  PASS: pid match with no event dimension is a decidable KEEP
+  PASS: query_id mismatch is a decidable DROP on a poisoned row
+  PASS: a decidable drop is reported even when the event dimension is undecidable
+  FAIL(266): any negative matches_event_filter is UNDECIDABLE, not just -1
+  FAIL(270): INT_MIN is UNDECIDABLE
+  PASS: a computed matching row is still KEPT
+  PASS: any positive verdict is a KEEP
+  PASS: a NULL row is never a KEEP
+  PASS: a NULL filter filters nothing
+  PASS: a NULL row has no known counts
+--- 4. the serialisation guard ---
+  PASS: 0/0 is a real pair of counts (an execution with no wait events)
+  PASS: 7/2 is known
+  PASS: a fully poisoned index row is not serialisable
+  PASS: poisoned n_workers alone refuses (n_events was real)
+  PASS: poisoned n_events alone refuses (n_workers was real)
+  PASS: n_events = -7 is not a count either (not just the -1 sentinel)
+  PASS: n_workers = INT_MIN is not a count
+  PASS: filter-decidable but not serialisable: the two guards are independent and both must be consulted
+
+27/29 tests passed

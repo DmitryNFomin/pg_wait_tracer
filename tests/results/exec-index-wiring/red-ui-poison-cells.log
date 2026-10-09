@@ -1,0 +1,102 @@
+✖ a not-indexed count never renders as "-1" (1.930625ms)
+✖ one poisoned field does not launder the other (0.120208ms)
+✔ real counts, including zero, still render as numbers (0.080875ms)
+✔ fmtExecutionCount accepts counts and refuses everything else (0.063167ms)
+✔ executionCountsKnown mirrors the C predicate (0.061917ms)
+✖ a poisoned row is not auto-selected even when plan_ms is set (0.074625ms)
+✔ a poisoned row loses to a real one in default selection (0.055ms)
+✔ bypass: a fixture with real counts is BLIND to the defect (0.047167ms)
+✖ bypass: the column index is pinned by its header, not by position (0.118666ms)
+✔ bypass: an empty row set neither passes nor hides anything (0.067833ms)
+ℹ tests 10
+ℹ suites 0
+ℹ pass 6
+ℹ fail 4
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 59.845333
+
+✖ failing tests:
+
+test at tests/web_unit/execution-counts.test.mjs:47:1
+✖ a not-indexed count never renders as "-1" (1.930625ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  
+  '-1' !== '—'
+  
+      at TestContext.<anonymous> (file:///Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a5cc34023ae4b488e/tests/web_unit/execution-counts.test.mjs:53:12)
+      at Test.runInAsyncScope (node:async_hooks:213:14)
+      at Test.run (node:internal/test_runner/test:1106:25)
+      at Test.start (node:internal/test_runner/test:1003:17)
+      at startSubtestAfterBootstrap (node:internal/test_runner/harness:358:17) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: '-1',
+    expected: '—',
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at tests/web_unit/execution-counts.test.mjs:59:1
+✖ one poisoned field does not launder the other (0.120208ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  
+  '-1' !== '—'
+  
+      at TestContext.<anonymous> (file:///Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a5cc34023ae4b488e/tests/web_unit/execution-counts.test.mjs:63:12)
+      at Test.runInAsyncScope (node:async_hooks:213:14)
+      at Test.run (node:internal/test_runner/test:1106:25)
+      at Test.processPendingSubtests (node:internal/test_runner/test:788:18)
+      at Test.postRun (node:internal/test_runner/test:1235:19)
+      at Test.run (node:internal/test_runner/test:1163:12)
+      at async startSubtestAfterBootstrap (node:internal/test_runner/harness:358:3) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: '-1',
+    expected: '—',
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at tests/web_unit/execution-counts.test.mjs:115:1
+✖ a poisoned row is not auto-selected even when plan_ms is set (0.074625ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  
+  true !== false
+  
+      at TestContext.<anonymous> (file:///Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a5cc34023ae4b488e/tests/web_unit/execution-counts.test.mjs:117:12)
+      at Test.runInAsyncScope (node:async_hooks:213:14)
+      at Test.run (node:internal/test_runner/test:1106:25)
+      at Test.processPendingSubtests (node:internal/test_runner/test:788:18)
+      at Test.postRun (node:internal/test_runner/test:1235:19)
+      at Test.run (node:internal/test_runner/test:1163:12)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:788:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: true,
+    expected: false,
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
+
+test at tests/web_unit/execution-counts.test.mjs:146:1
+✖ bypass: the column index is pinned by its header, not by position (0.118666ms)
+  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:
+  
+  '-1' !== '—'
+  
+      at TestContext.<anonymous> (file:///Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a5cc34023ae4b488e/tests/web_unit/execution-counts.test.mjs:154:12)
+      at Test.runInAsyncScope (node:async_hooks:213:14)
+      at Test.run (node:internal/test_runner/test:1106:25)
+      at Test.processPendingSubtests (node:internal/test_runner/test:788:18)
+      at Test.postRun (node:internal/test_runner/test:1235:19)
+      at Test.run (node:internal/test_runner/test:1163:12)
+      at async Test.processPendingSubtests (node:internal/test_runner/test:788:7) {
+    generatedMessage: true,
+    code: 'ERR_ASSERTION',
+    actual: '-1',
+    expected: '—',
+    operator: 'strictEqual',
+    diff: 'simple'
+  }
