@@ -1,0 +1,37 @@
+=== DEMONSTRATED RED for tests/results/interval-index/verify_table.py ===
+Each probe is a way the table could be wrong, or the checker blind.
+
+--- probe A: a STALE value put back into the table (the exact defect) ---
+ok    MISS  bit-exact answers compared     '8476 (cut, window, resolution)'     unit-test-mac.txt
+MISS  stale value '8412' is still in the TABLE (allowed only in the correction note)
+MISMATCH: table:bit-exact answers compared ('| 8476 |' not in the table); stale:8412
+  exit=1
+
+--- probe B: a value changed to one that is NEITHER right NOR stale ---
+    (this is the case the FIRST version of this script missed: it only
+     checked the log side, so a wrong table value still read 'verified')
+ok    MISS  intervals compared             '44266 intervals were actually'      unit-test-mac.txt
+MISMATCH: table:intervals compared ('| 44266 |' not in the table)
+  exit=1
+
+--- probe C: the timing pair flipped to read as a speedup ---
+ok    MISS  Mac timing (index SLOWER)      'index_us=1475.0 raw_us=1266.0'      unit-test-mac.txt
+MISMATCH: table:Mac timing (index SLOWER) ('| 1475.0 vs 1266.0 |' not in the table)
+  exit=1
+
+--- probe D: a cited log is MISSING ---
+REFUSE: cannot read unit-test-linux.txt ([Errno 2] No such file or directory: 'unit-test-linux.txt') — a checker that cannot see must refuse, never approve
+  exit=1
+
+--- probe E: a cited log is EMPTY (every claim vacuously unverifiable) ---
+REFUSE: mutations.txt is empty — every claim against it would be vacuously unverifiable
+  exit=1
+
+--- probe F: the table header is unparseable (checker cannot see) ---
+REFUSE: could not locate the correction note AND the table header in README.txt, in that order — without the split a stale value in the table is indistinguishable from one quoted in the note
+  exit=1
+
+--- control: the real evidence dir, unmodified ---
+31 claims; 0 log-side mismatches, 0 table-side mismatches, 0 stale values in the table
+VERIFIED
+  exit=0

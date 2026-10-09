@@ -1,6 +1,6 @@
 === interval_index mutations: 27 injected silent-wrong risks ===
 baseline: pristine module, test PASSED (121 checks, 0 failed)
-ledger falsification: `oneblock` exits 1 with 6 red ledger rows (first: FAIL(1339): 0 indexes had MORE THAN ONE block — a one-block suite never tests the boundary)
+ledger falsification: `oneblock` exits 1 with 5 red ledger rows (first: FAIL(1339): 0 indexes had MORE THAN ONE block — a one-block suite never tests the boundary)
 
 RED   M01 start_ns CLIPPED to the block start (the cardinal error)
         -> 12 failing checks; first: FAIL(575): fx_long: exactly 1 interval starts before its own block (got 0) — the clipped-start detector is live

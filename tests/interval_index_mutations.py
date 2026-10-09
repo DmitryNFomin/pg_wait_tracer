@@ -358,8 +358,11 @@ def run_suite(mutations, cc="cc", test_src=TEST_SRC, label="", verbose=True,
                             timeout=RUN_TIMEOUT)
     except subprocess.TimeoutExpired:
         ob = subprocess.CompletedProcess([], 124, "", "")
+    # startswith("FAIL") would also match the trailing "FAILED" verdict
+    # line, so the count would be one too high. "FAIL(" is the CHECK macro's
+    # own prefix and nothing else emits it.
     ob_fails = [l.strip() for l in ob.stdout.splitlines()
-                if l.strip().startswith("FAIL")]
+                if l.strip().startswith("FAIL(")]
     if ob.returncode == 0 or not ob_fails:
         tally["BASELINE-RED"] += 1
         print("FAIL%s: `test_interval_index oneblock` did NOT go red — the "
@@ -422,8 +425,11 @@ def run_suite(mutations, cc="cc", test_src=TEST_SRC, label="", verbose=True,
         if keep_outputs:
             with open(os.path.join(OUT, "m%02d.txt" % i), "w") as fh:
                 fh.write("%s\n\n%s" % (name, r.stdout))
+        # "FAIL(" is the CHECK macro's prefix; plain "FAIL" would also match
+        # the trailing "FAILED" verdict line. Only used for the one-line
+        # excerpt below — the verdict itself comes from `N checks, M failed`.
         fails = [l.strip() for l in r.stdout.splitlines()
-                 if l.strip().startswith("FAIL")]
+                 if l.strip().startswith("FAIL(")]
         tail = re.findall(r"^(\d+) checks, (\d+) failed", r.stdout, re.M)
         nfail = int(tail[0][1]) if tail else -1
         if r.returncode == 0 or nfail == 0:
@@ -451,8 +457,16 @@ def self_test():
     cases = []
     tmp = tempfile.mkdtemp(prefix="pgwt-ii-selftest-")
 
+    # Every case names the tally bucket that MUST come back as 1. Asserting
+    # only `failures > 0` is not enough: a case can be satisfied by the WRONG
+    # refusal and still look green. That is not hypothetical -- case 7, the
+    # ONLY one that exercises STAYED-GREEN (the single blind spot a mutation
+    # harness exists to find), silently degraded to NOT-APPLIED during
+    # development when its comment needle stopped matching, and still
+    # reported PASS.
+
     # 1. compiler missing (exit 127 equivalent).
-    cases.append(("compiler absent (127)",
+    cases.append(("compiler absent (127)", "TOOL-MISSING",
                   dict(cc=os.path.join(tmp, "no-such-cc"),
                        mutations=MUTATIONS[:1])))
 
@@ -461,7 +475,7 @@ def self_test():
     with open(noexec, "w") as fh:
         fh.write("#!/bin/sh\nexit 0\n")
     os.chmod(noexec, stat.S_IRUSR)
-    cases.append(("compiler not executable (126)",
+    cases.append(("compiler not executable (126)", "TOOL-MISSING",
                   dict(cc=noexec, mutations=MUTATIONS[:1])))
 
     # 3. a compiler that exits 127 itself on every invocation.
@@ -469,21 +483,21 @@ def self_test():
     with open(stub127, "w") as fh:
         fh.write("#!/bin/sh\nexit 127\n")
     os.chmod(stub127, 0o755)
-    cases.append(("compiler exits 127 on every call",
+    cases.append(("compiler exits 127 on every call", "TOOL-MISSING",
                   dict(cc=stub127, mutations=MUTATIONS[:1])))
 
     # 4. the test source is missing: the baseline cannot build.
-    cases.append(("test source missing",
+    cases.append(("test source missing", "BASELINE-RED",
                   dict(test_src=os.path.join(tmp, "nope.c"),
                        mutations=MUTATIONS[:1])))
 
     # 5. NOT-APPLIED: a needle that matches zero times.
-    cases.append(("needle matches 0 times",
+    cases.append(("needle matches 0 times", "NOT-APPLIED",
                   dict(mutations=[("ZZ no such text", "interval_index.c",
                                    "/* this text does not exist */", "x")])))
 
     # 6. NOT-APPLIED: a needle that matches more than once.
-    cases.append(("needle matches many times",
+    cases.append(("needle matches many times", "NOT-APPLIED",
                   dict(mutations=[("ZZ ambiguous needle", "interval_index.c",
                                    "return 0;", "return 0;")])))
 
@@ -492,36 +506,45 @@ def self_test():
     # it is reported as NOT-APPLIED and the STAYED-GREEN branch, the one
     # blind spot a mutation harness exists to find, is never exercised.
     cases.append(("mutation the test cannot see (STAYED-GREEN)",
+                  "STAYED-GREEN",
                   dict(mutations=[("ZZ comment-only no-op",
                                    "interval_index.c",
                                    "a half-built index must never answer",
                                    "a HALF-BUILT index must never answer")])))
 
     # 8. BUILD-FAILED: a mutation that does not compile.
-    cases.append(("mutation that does not compile",
+    cases.append(("mutation that does not compile", "BUILD-FAILED",
                   dict(mutations=[("ZZ syntax error", "interval_index.c",
                                    "static int is_unfiltered",
                                    "static int is_unfiltered(((")])))
 
     bad = 0
-    for name, kw in cases:
+    for name, want_bucket, kw in cases:
         kw.setdefault("mutations", MUTATIONS[:1])
-        print("\n--- self-test case: %s ---" % name)
+        print("\n--- self-test case: %s (expect %s) ---" % (name, want_bucket))
         try:
             failures, tally = run_suite(verbose=False, keep_outputs=False,
                                         label=" [self-test]", **kw)
         except Exception as e:       # noqa: BLE001 - any crash is a failure
             print("  harness raised %r — counted as a refusal" % e)
             failures, tally = 1, {}
-        ok = failures > 0
-        print("  -> harness reports %d failure(s) %s  %s"
-              % (failures, tally, "PASS" if ok else "FAIL (it approved!)"))
+        got = tally.get(want_bucket, 0)
+        ok = failures > 0 and got == 1
+        why = ""
+        if failures <= 0:
+            why = " — it APPROVED"
+        elif got != 1:
+            why = (" — it refused for the WRONG reason: %s is %d, not 1, so "
+                   "this path was never exercised" % (want_bucket, got))
+        print("  -> harness reports %d failure(s), %s=%d %s  %s%s"
+              % (failures, want_bucket, got, tally,
+                 "PASS" if ok else "FAIL", why))
         if not ok:
             bad += 1
 
     shutil.rmtree(tmp, ignore_errors=True)
-    print("\n%d self-test cases, %d of them the harness wrongly APPROVED"
-          % (len(cases), bad))
+    print("\n%d self-test cases, %d that the harness either APPROVED or "
+          "refused for the wrong reason" % (len(cases), bad))
     print("SELF-TEST PASSED" if bad == 0 else "SELF-TEST FAILED")
     return 1 if bad else 0
 

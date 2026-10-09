@@ -116,7 +116,7 @@ index version under test: 1
   PASS: materialised compaction: 1008000 bytes vs 2880048 raw bytes in window (2.9x)
   PASS: the chunk prefilter SKIPPED 19 of 40 blocks (not a no-op)
   PASS: measure: the fixture produced 589 burst onsets (not a vacuous comparison)
-  MEASURED n=1: records=120000 in_window=60001 index_rows=40000 index_bytes=960000 raw_bytes_total=5760000 intervals_used=21000 bytes_materialised=1008000 raw_bytes_in_window=2880048 blocks=40 scanned=21 index_us=761.0 raw_us=1045.0 (timings REPORTED, never asserted)
+  MEASURED n=1: records=120000 in_window=60001 index_rows=40000 index_bytes=960000 raw_bytes_total=5760000 intervals_used=21000 bytes_materialised=1008000 raw_bytes_in_window=2880048 blocks=40 scanned=21 index_us=789.0 raw_us=1073.0 (timings REPORTED, never asserted)
 --- non-vacuity ledger: the interesting cases really ran ---
   PASS: 802 block-cut sets were built
   PASS: 8476 (cut, window, resolution) answers compared

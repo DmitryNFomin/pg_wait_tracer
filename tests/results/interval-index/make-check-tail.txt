@@ -1,4 +1,24 @@
+make check (full) on this Mac — verdict line from scripts/check.sh.
 
 Ran 29, passed 29, failed 0 (10 test functions discovered)
 
-CHECK PASSED (full) — stamp df0e14331e20bd863f12495dc3ecb829948b9d9b
+CHECK PASSED (full)
+
+THE STAMP IS DELIBERATELY NOT QUOTED HERE. scripts/check.sh writes
+.pgwt-check.stamp = scripts/tree-hash.sh, a hash of the whole working tree,
+so ANY file written after the run — including this one, and including
+verify-table.txt — changes the tree and makes a quoted stamp stale by
+construction. A stale stamp in an evidence file is worse than no stamp: it
+reads as a verified figure for a tree it was never computed on, which is the
+"evidence gathered on a stale tree" failure this project has been bitten by.
+
+The authoritative check is therefore the one that cannot go stale: the push
+guard recomputes scripts/tree-hash.sh at push time and refuses a mismatch,
+and `make check` is run LAST on this branch, after every file is final, so
+that comparison is live rather than transcribed. The implementer's handback
+reports the final stamp; this file reports only the verdict, which does not
+change.
+
+Two full runs passed on this branch: one on the code commit 86ef537 and one
+on the final tree after the post-review evidence and mutation-harness
+changes. Both printed the line above.
