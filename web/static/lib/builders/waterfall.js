@@ -77,6 +77,40 @@ function durationCellHtml(r) {
     return '<span class="' + cls + '" title="' + esc(d.tooltip) + '">' + d.text + '</span>';
 }
 
+/* "Leader events" / "Workers" for one row.
+ *
+ * These two cells used to be String(r.n_events) verbatim. The server's
+ * boundary index (src/exec_index.h) poisons per-event counts it did not
+ * compute with -1 rather than leaving them at 0 (absence must never read as
+ * zero), and String(-1) is the string "-1" -- a poison value sitting in a
+ * column of counts, indistinguishable to a reader from a measurement. The
+ * server refuses such a response outright (serialize_execution_row), so this
+ * is the second of two independent guards, not the only one: a column whose
+ * correctness depends on a different process never having a bug is not
+ * guarded at all.
+ *
+ * Anything that is not a non-negative finite integer renders as the em dash
+ * -- including null and undefined, which is also what an older server that
+ * omits the field produces. */
+export function fmtExecutionCount(v) {
+    if (v == null) return '—';
+    const n = Number(v);
+    if (!Number.isFinite(n) || n < 0) return '—';
+    return String(n);
+}
+
+/* Are this row's per-event counts real numbers? The mirror of
+ * pgwt_execution_counts_known() in src/compute.c. */
+export function executionCountsKnown(row) {
+    if (!row) return false;
+    for (const v of [row.n_events, row.n_workers]) {
+        if (v == null) return false;
+        const n = Number(v);
+        if (!Number.isFinite(n) || n < 0) return false;
+    }
+    return true;
+}
+
 export const executionsConfig = {
     columns: [
         { key: 'start_ns', label: 'Start (UTC)', format: (r) =>
@@ -88,8 +122,10 @@ export const executionsConfig = {
             '<span class="query-id">' + esc(String(r.query_id || '0')) + '</span>' },
         { key: 'duration_ms', label: 'Duration', cls: 'num', format: durationCellHtml },
         { key: 'plan_ms', label: 'Plan', cls: 'num', format: (r) => fmtMs(r.plan_ms) },
-        { key: 'n_events', label: 'Leader events', cls: 'num', format: (r) => String(r.n_events) },
-        { key: 'n_workers', label: 'Workers', cls: 'num', format: (r) => String(r.n_workers) },
+        { key: 'n_events', label: 'Leader events', cls: 'num',
+          format: (r) => fmtExecutionCount(r.n_events) },
+        { key: 'n_workers', label: 'Workers', cls: 'num',
+          format: (r) => fmtExecutionCount(r.n_workers) },
     ],
     rowClass: (r) => 'clickable' + (r._selected ? ' selected-execution' : ''),
 };
@@ -224,6 +260,13 @@ function count(v) {
  */
 export function executionHasDetail(row) {
     if (!row) return false;
+    /* A row whose counts were never computed cannot answer "is there a
+     * waterfall here". count() maps -1 to -1 and plan_ms may still be
+     * non-null, so without this the selector would auto-open a panel on the
+     * strength of a poison value. Unknown is not "no detail" and not
+     * "detail": it is not selectable, which leaves the panel on its
+     * explicit empty state instead of a wrong chart. */
+    if (!executionCountsKnown(row)) return false;
     return count(row.n_events) > 0 || count(row.n_workers) > 0 ||
         row.plan_ms != null;
 }

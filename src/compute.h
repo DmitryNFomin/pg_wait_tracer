@@ -619,6 +619,50 @@ struct pgwt_executions_result {
     int failed;                   /* allocation failure; rows are unusable */
 };
 
+/* ── Rows whose per-event fields were never computed ───────────────────────
+ *
+ * pgwt_compute_executions fills every field of every row. A BOUNDARY index
+ * (src/exec_index.h) cannot: n_events, n_workers and matches_event_filter
+ * are per-event, per-filter, window-CLIPPED quantities, so the index writes
+ * PGWT_EXEC_INDEX_NOT_INDEXED (-1) into all three rather than leaving them
+ * at 0 ("absence must never read as zero").
+ *
+ * -1 IS TRUTHY IN C. `!row->matches_event_filter` therefore PASSES a
+ * not-computed row through an event filter, and `String(r.n_events)` renders
+ * it as the string "-1" in the Waterfall table. Both are silent-wrong
+ * answers: the first shows unfiltered rows on a filtered tab, the second
+ * puts a poison value on screen as if it were a count.
+ *
+ * So the tri-state is named here, once, with the two predicates every caller
+ * must go through. Not a hand-written `>= 0` at each site: the Phase 1
+ * lesson (three hand-written copies of one window comparison let an
+ * off-by-one ship twice) applies verbatim to three hand-written copies of
+ * one poison test. */
+#define PGWT_EXEC_COUNT_UNKNOWN (-1)
+
+/* Are this row's per-event counts (n_events, n_workers) real numbers?
+ * 0 means at least one of them was never computed, and the caller must
+ * REFUSE rather than serialise it. */
+int pgwt_execution_counts_known(const struct pgwt_execution *row);
+
+/* Does this row pass `f`? Tri-state, because the answer is not always
+ * knowable from the row:
+ *
+ *    1  keep       — every dimension of `f` the row can answer, it passes
+ *    0  drop       — some dimension of `f` positively excludes this row
+ *   -1  UNDECIDABLE — `f` carries a class/event dimension and this row's
+ *                     matches_event_filter was never computed
+ *
+ * A -1 is never a keep and never a drop: a caller that treats it as either
+ * is wrong in a way nobody can see (an empty tab, or an unfiltered one).
+ * It must fall back to a path that computes the counts.
+ *
+ * pid and query_id are BOUNDARY fields, so a mismatch on either is a
+ * decidable drop even when the counts are unknown — checked first, so the
+ * common "filter by pid on index rows" case does not refuse. */
+int pgwt_execution_filter_verdict(const struct pgwt_execution *row,
+                                  const struct pgwt_filter *f);
+
 /* Extract every execution overlapping [from_ns,to_ns], including an execution
  * whose EXEC_START precedes the window, pair it with a later EXEC_END from the
  * same PID when present, and retain unpaired starts explicitly.

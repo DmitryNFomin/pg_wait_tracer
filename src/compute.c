@@ -4109,6 +4109,42 @@ static int interval_overlaps(uint64_t event_end, uint64_t duration,
     return event_start < to_ns && event_end > from_ns;
 }
 
+/* The poison tri-state, in one place. See PGWT_EXEC_COUNT_UNKNOWN in
+ * compute.h for why these are functions and not an inline `>= 0`. */
+int pgwt_execution_counts_known(const struct pgwt_execution *row)
+{
+    if (!row)
+        return 0;
+    /* Any negative value, not just -1. A count is a cardinality; there is
+     * no negative one, so the predicate is "is this a count at all", which
+     * stays correct if a future source poisons with a different sentinel. */
+    return row->n_events >= 0 && row->n_workers >= 0;
+}
+
+int pgwt_execution_filter_verdict(const struct pgwt_execution *row,
+                                  const struct pgwt_filter *f)
+{
+    if (!row)
+        return 0;
+    if (!f)
+        return 1;
+    /* Boundary dimensions first: decidable from the row alone, so a pid- or
+     * query_id-filtered request over index rows is answered, not refused. */
+    if (f->pid && row->pid != f->pid)
+        return 0;
+    if (f->query_id && row->query_id != f->query_id)
+        return 0;
+    if (f->class_name[0] || f->event_id) {
+        /* The event dimension needs matches_event_filter, which a boundary
+         * index does not carry. UNDECIDABLE -- never "matches". */
+        if (row->matches_event_filter < 0)
+            return -1;
+        if (!row->matches_event_filter)
+            return 0;
+    }
+    return 1;
+}
+
 static int detail_worker_leader(const struct pgwt_backend_link *links,
                                 int n_links, uint32_t pid)
 {

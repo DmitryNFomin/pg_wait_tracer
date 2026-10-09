@@ -4350,22 +4350,58 @@ static int cmp_execution_duration_desc(const void *a, const void *b)
     return (eb->pid > ea->pid) - (eb->pid < ea->pid);
 }
 
+/* Tri-state, forwarded from pgwt_execution_filter_verdict(): 1 keep,
+ * 0 drop, -1 UNDECIDABLE.
+ *
+ * This used to be four hand-written lines ending in
+ * `!row->matches_event_filter`. That is a latent silent-wrong answer the
+ * moment any row reaches it from a boundary index (src/exec_index.h), which
+ * poisons matches_event_filter with -1: -1 is TRUTHY in C, so `!(-1)` is 0
+ * and the row PASSED the event filter it had never been tested against --
+ * a class-filtered Waterfall painting unfiltered executions, with nothing
+ * on screen to say so. A tri-state cannot be collapsed to a bool at the
+ * call site either, so every caller below handles -1 explicitly by
+ * refusing. */
 static int execution_matches_request(const struct pgwt_execution *row,
                                      const struct pgwt_request *req)
 {
-    if (req->filter.pid && row->pid != req->filter.pid)
-        return 0;
-    if (req->filter.query_id && row->query_id != req->filter.query_id)
-        return 0;
-    if ((req->filter.class_name[0] || req->filter.event_id) &&
-        !row->matches_event_filter)
-        return 0;
-    return 1;
+    return pgwt_execution_filter_verdict(row, &req->filter);
 }
 
-static void serialize_execution_row(cJSON *rows,
-                                    const struct pgwt_execution *row)
+/* The row set could not be filtered or serialised without inventing a
+ * number. Distinct `code` from compute_failed: nothing failed to compute,
+ * the rows simply arrived without the per-event fields this response has to
+ * publish, and a reader (human or test) must be able to tell those apart.
+ * Absence is never an answer: refuse loudly rather than emit a filtered or
+ * poisoned list. */
+static void emit_execution_incomplete(const struct pgwt_request *req,
+                                      const struct pgwt_load_info *info,
+                                      const char *what)
 {
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(root, "id", (double)req->id);
+    cJSON_AddStringToObject(root, "error", what);
+    cJSON_AddStringToObject(root, "code", "rows_incomplete");
+    cJSON_AddStringToObject(root, "hint", "retry without the event filter");
+    if (info)
+        add_fidelity(root, info);
+    emit_json(root);
+}
+
+/* 0 on success, -1 if this row carries no real per-event counts.
+ *
+ * n_events/n_workers are rendered verbatim as the Waterfall table's "Leader
+ * events" and "Workers" cells (web/static/lib/builders/waterfall.js), so a
+ * PGWT_EXEC_COUNT_UNKNOWN row would put the string "-1" on screen in a
+ * column of counts. The server refuses the whole response instead: a
+ * refusal is a thing an operator can act on, a -1 in a count column is a
+ * thing they will read as a count. Checked BEFORE any field is added, so a
+ * rejected row never half-populates the array. */
+static int serialize_execution_row(cJSON *rows,
+                                   const struct pgwt_execution *row)
+{
+    if (!pgwt_execution_counts_known(row))
+        return -1;
     cJSON *r = cJSON_CreateObject();
     cJSON_AddNumberToObject(r, "pid", row->pid);
     cjson_add_query_id_string(r, "query_id", row->query_id);
@@ -4397,6 +4433,7 @@ static void serialize_execution_row(cJSON *rows,
     cJSON_AddBoolToObject(r, "started_before_window",
                           row->started_before_window);
     cJSON_AddItemToArray(rows, r);
+    return 0;
 }
 
 static void emit_execution_compute_failed(const struct pgwt_request *req,
@@ -4499,9 +4536,21 @@ static void handle_executions(struct pgwt_server *srv,
         return;
 
     int kept = 0;
-    for (int i = 0; i < res.num_rows; i++)
-        if (execution_matches_request(&res.rows[i], req))
+    for (int i = 0; i < res.num_rows; i++) {
+        int v = execution_matches_request(&res.rows[i], req);
+        if (v < 0) {
+            /* UNDECIDABLE: this row has no matches_event_filter, so the
+             * event dimension of the filter was never applied to it.
+             * Dropping it would silently shorten the tab, keeping it would
+             * silently widen it. Refuse. */
+            free(res.rows);
+            emit_execution_incomplete(req, &linfo,
+                "execution rows cannot answer this event filter");
+            return;
+        }
+        if (v)
             res.rows[kept++] = res.rows[i];
+    }
     res.num_rows = kept;
     /* Wire default stays start_desc (backward-compatible for any caller that
      * omits `sort`); duration_desc is opt-in per request. #222: the Waterfall
@@ -4547,8 +4596,18 @@ static void handle_executions(struct pgwt_server *srv,
     cJSON_AddNumberToObject(root, "id", (double)req->id);
     add_fidelity(root, &linfo);
     cJSON *rows = cJSON_AddArrayToObject(root, "rows");
-    for (int i = 0; i < returned; i++)
-        serialize_execution_row(rows, &res.rows[i]);
+    for (int i = 0; i < returned; i++) {
+        if (serialize_execution_row(rows, &res.rows[i]) != 0) {
+            /* A row with no real counts must not be painted. The whole
+             * response goes, not just the row: a page silently one row
+             * short is the false negative this refuses to produce. */
+            cJSON_Delete(root);
+            emit_execution_incomplete(req, &linfo,
+                "execution rows carry no per-event counts");
+            free(res.rows);
+            return;
+        }
+    }
     cJSON_AddNumberToObject(root, "total_count", res.num_rows);
     cJSON_AddNumberToObject(root, "open_count", open_count);
     cJSON_AddNumberToObject(root, "completed_count", res.num_rows - open_count);
@@ -4826,9 +4885,17 @@ static void handle_exec_scatter(struct pgwt_server *srv,
     /* Open executions remain points too: their duration is explicit null,
      * never a fabricated window-edge duration. */
     int total = 0;
-    for (int i = 0; i < res.num_rows; i++)
-        if (execution_matches_request(&res.rows[i], req))
+    for (int i = 0; i < res.num_rows; i++) {
+        int v = execution_matches_request(&res.rows[i], req);
+        if (v < 0) {                    /* see handle_executions */
+            free(res.rows);
+            emit_execution_incomplete(req, &linfo,
+                "execution rows cannot answer this event filter");
+            return;
+        }
+        if (v)
             res.rows[total++] = res.rows[i];
+    }
     res.num_rows = total;
 
     int max_points = req->max_points > 0

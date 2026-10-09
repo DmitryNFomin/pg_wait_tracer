@@ -21,7 +21,7 @@ TESTS     = test_wait_event test_cmdline test_spawn test_event_writer test_event
             test_pg13_resolve test_discovery_pie test_discovery_nopie \
             test_replay_fidelity test_durability test_query_text \
             test_golden_fixture test_live_accum test_window_clip \
-            test_executions_attribution \
+            test_executions_attribution test_exec_index_guards \
             test_top_queries_percentile \
             test_variants_p95 \
             test_pid_cap \
@@ -114,6 +114,21 @@ test_executions_attribution: test_executions_attribution.c ../src/map_reader.c \
                              $(BUILD)/wait_event.o $(BUILD)/idle_rule.o $(BUILD)/spawn.o \
                              $(BUILD)/cJSON.o
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^
+
+# test_exec_index_guards: the two poison guards the executions index needs
+# before anything is wired onto it. src/exec_index.h writes -1 into
+# n_events / n_workers / matches_event_filter (a boundary index cannot carry
+# window-clipped per-event quantities, and absence must never read as zero),
+# and -1 is TRUTHY in C -- so server.c's old `!row->matches_event_filter`
+# passed a never-tested row through a class filter. Carries a verbatim copy
+# of that deleted predicate so the defect goes red on its own fixture, plus
+# the bypass suite (fixtures that are blind to it, other negative sentinels,
+# NULL inputs, and the decidable-drop cases that must NOT refuse). Same link
+# shape as test_window_clip; stubs pgwt_visit_summaries. Runs anywhere.
+test_exec_index_guards: test_exec_index_guards.c ../src/compute.c \
+                        $(BUILD)/wait_event.o $(BUILD)/idle_rule.o \
+                        $(BUILD)/spawn.o $(BUILD)/cJSON.o
+	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -lm
 
 # test_top_queries_percentile: #265 — the Queries tab's p95/p99 sort. The
 # O(n^2) exchange sort in handle_top_queries became qsort; the entire safety

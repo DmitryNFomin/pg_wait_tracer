@@ -10,6 +10,25 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+- **fix(executions): a row with no computed per-event counts can no longer
+  pass an event filter or reach the screen.** `src/exec_index.h` poisons
+  `n_events` / `n_workers` / `matches_event_filter` with `-1` for fields a
+  boundary index cannot carry, because absence must never read as zero — and
+  `-1` is truthy in C, so `pgwt-server`'s event-filter test
+  (`!row->matches_event_filter`) PASSED such a row, and the Waterfall table
+  rendered the two counts verbatim as the string `-1` in a column of counts.
+  Both are now explicit: `pgwt_execution_filter_verdict()` returns a
+  tri-state and an UNDECIDABLE verdict makes `executions` / `exec_scatter`
+  refuse with `code: "rows_incomplete"` rather than serve a silently
+  unfiltered (or silently shortened) list; `serialize_execution_row()`
+  refuses a row whose counts are not real numbers; and the Waterfall's two
+  count cells render an em dash for anything that is not a non-negative
+  finite count — which is also what an older server omitting the field now
+  produces, instead of `undefined`. **User-visible:** the "Leader events" and
+  "Workers" cells show `—` instead of a number only when the server could not
+  compute one; no response that was previously served changes, because the
+  raw path computes all three fields for every row.
+
 - **perf(paint-latency Phase 1): `transitions` answers from a per-block
   transition aggregate instead of loading the raw window.** A committed trace
   block is immutable, so its `(old_event, new_event)` count/duration table and
