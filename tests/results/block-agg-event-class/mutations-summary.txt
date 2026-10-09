@@ -1,0 +1,9 @@
+tests/test_block_agg.c -- mutation / bypass results
+control (unmutated tree): GREEN
+every mutation below must be RED; a GREEN one is a hole in the suite, not a passing build
+
+N1   RED          caught-by=sec9e/sec10b 10516 FAIL line(s); first: FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2520: §9e [1700000000000000
+
+1 mutation(s), 1 RED, 0 NOT RED
+
+N1 (src/block_agg.c): add_event(): the per-event duration is no longer CLIPPED to the declared window (C10), so a wait that started before `from` is counted in full -- the lock-pileup overcount event_window_ns exists to stop.

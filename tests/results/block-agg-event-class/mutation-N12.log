@@ -1,0 +1,306 @@
+mutation N12 (src/block_agg.c)
+broken guard: FALSE NEGATIVE. window_from_reader() SKIPS a clip-refused block instead of DECODEing it, so its records vanish with no refusal. Reachable ONLY through the shipped builder, which is why sec9e exists: sec10b's mirror cannot catch this.
+expected to be caught by: sec9e
+
+--- if (rc == PGWT_BAGG_REFUSED_CLIP) {
+                acc->clip_decoded_blocks++;
+                plan = PGWT_BLOCK_DECODE;
+                rc = PGWT_BAGG_OK;
+            } else if (rc != PGWT_BAGG_OK) 
++++ if (rc == PGWT_BAGG_REFUSED_CLIP) {
+                acc->clip_decoded_blocks++;
+                rc = PGWT_BAGG_OK;
+                continue;   /* MUTANT: the records are lost */
+            } else if 
+
+exit=1, 228 FAIL line(s)
+
+test_block_agg — per-committed-block transition aggregate (Phase 1)
+=== §1 record predicate vs pgwt_compute_transitions ===
+    6 counted, 7 rejected, both predicates agreeing on all 13
+=== §2 build + merge against literal expected values ===
+=== §3 merge associativity + commutativity ===
+=== §4 straddle: a pair whose old_event began in an earlier block ===
+=== §5 plan(): exactly one of SKIP/MERGE/DECODE per block ===
+    plan outcomes over 378 windows: merge=553 decode=331 skip=1006
+=== §6 model: merged + decoded == raw, bit-exact, every window ===
+    378 windows compared, 170 of them at a merge/decode seam
+=== §6b the end-key bound: agreement with the loader, and the cost of getting it wrong ===
+=== §7 mutation probes: the comparator can see one count, one nanosecond, one pair ===
+    probe 0 (clean (control)         ) disagreements=0
+    probe 1 (+1 on one pair count    ) disagreements=2
+    probe 2 (+1 ns on one pair       ) disagreements=1
+    probe 3 (-1 ns on one pair       ) disagreements=1
+    probe 4 (an extra pair appears   ) disagreements=4
+    probe 5 (one pair disappears     ) disagreements=2
+    probe 6 (+1 ns on one node       ) disagreements=1
+    probe 7 (one node disappears     ) disagreements=2
+=== §8 bypass suite: a path that cannot see must refuse ===
+=== §9 on-disk: pgwt_block_agg_window_from_reader vs raw, twice ===
+    190 windows x 2 passes, 472 merges (236 in pass 2), 288 decodes, cache: 1520 lookups / 1486 hits / 64 stores
+=== §9e on-disk: the SHIPPED window builder with per-event totals, vs pgwt_compute_top_events ===
+    merges=30 decodes=102 clip-downgrades=12 rows=432
+=== §10a the per-event predicate vs pgwt_compute_top_events ===
+=== §10b model: per-event + per-class == pgwt_compute_top_events, bit-exact, every window ===
+    windows compared 3741, clipped records 4224, clip refusals 1938
+=== §10c the latency ladder vs the oracle's own bucket edges ===
+    51 probe durations, 1275 pairs partitioned identically
+=== §10f falsify the clip counters: a straddle-free fixture must drive them to ZERO ===
+    straddle-free fixture: clipped=0 refusals=0 (both must be 0)
+=== §11 bypass suite: the v2 readouts must REFUSE when they cannot see ===
+=== §12 mutation probes: the v2 comparator can see one count, one ns, one row ===
+=== §0 vacuity ledger ===
+    windows compared .................. 378
+    blocks MERGEd ..................... 553
+    blocks DECODEd .................... 331
+    blocks SKIPped .................... 1006
+    windows at a merge/decode seam .... 170
+    windows with positive total_ns .... 364
+    windows with >=1 merged pair ...... 364
+    mutation probes that went red ..... 7
+    refusals observed ................. 71
+    §2 predicate cases ................ 17
+    §2 windows compared ............... 5067
+    §2 windows with >=1 event row ..... 4582
+    §2 windows at a merge/decode seam . 2173
+    §2 event rows compared ............ 17899
+    §2 event-FILTERED rows compared ... 14248
+    §2 class rows compared ............ 15235
+    §2 class rows with >=2 events ..... 2664
+    §2 records that needed clipping ... 4224
+    §2 REFUSED_CLIP -> DECODE ......... 1938
+    §2 SHIPPED-builder rows compared ... 432
+    §2 SHIPPED clip downgrades ........ 12
+    §2 rows whose event is unfilterable 3651
+    §2 latency-bucket pairs checked ... 1275
+    §2 v2 probes that went red ........ 5
+FAILED: 228 check(s)
+WARN: cannot open /nonexistent/pgwt/no-such.trace: No such file or directory
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2515: §9e [1700000000000000000, 1700000000004607625] event 167772161 count agg=101 raw=911
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2520: §9e [1700000000000000000, 1700000000004607625] event 167772161 total agg=325866 ns raw=1.854045000 ms
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2524: §9e event 167772161 exact_count agg=101 raw=911
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2515: §9e [1700000000000000000, 1700000000004607625] event 100663296 count agg=62 raw=553
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2520: §9e [1700000000000000000, 1700000000004607625] event 100663296 total agg=276510 ns raw=1.334721000 ms
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2524: §9e event 100663296 exact_count agg=62 raw=553
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2515: §9e [1700000000000000000, 1700000000004607625] event 50331649 count agg=62 raw=551
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2520: §9e [1700000000000000000, 1700000000004607625] event 50331649 total agg=276040 ns raw=1.330282000 ms
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2524: §9e event 50331649 exact_count agg=62 raw=551
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2515: §9e [1700000000000000000, 1700000000004607625] event 167772162 count agg=61 raw=553
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2520: §9e [1700000000000000000, 1700000000004607625] event 167772162 total agg=271852 ns raw=1.329454000 ms
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2524: §9e event 167772162 exact_count agg=61 raw=553
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2515: §9e [1700000000000000000, 1700000000004607625] event 16777217 count agg=61 raw=552
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2520: §9e [1700000000000000000, 1700000000004607625] event 16777217 total agg=271333 ns raw=1.325514000 ms
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2524: §9e event 16777217 exact_count agg=61 raw=552
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2515: §9e [1700000000000000000, 1700000000004607625] event 0 count agg=61 raw=553
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2520: §9e [1700000000000000000, 1700000000004607625] event 0 total agg=271529 ns raw=1.324938000 ms
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2524: §9e event 0 exact_count agg=61 raw=553
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2536: §9e [1700000000000000000, 1700000000004607625] db_time agg=1416620 raw=7.164233000 ms
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2515: §9e [1700000000000000000, 1700000000006143500] event 167772161 count agg=406 raw=1216
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2520: §9e [1700000000000000000, 1700000000006143500] event 167772161 total agg=1521690 ns raw=3.049869000 ms
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2524: §9e event 167772161 exact_count agg=406 raw=1216
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2515: §9e [1700000000000000000, 1700000000006143500] event 167772162 count agg=245 raw=737
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2520: §9e [1700000000000000000, 1700000000006143500] event 167772162 total agg=1280594 ns raw=2.338196000 ms
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2524: §9e event 167772162 exact_count agg=245 raw=737
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2515: §9e [1700000000000000000, 1700000000006143500] event 16777217 count agg=246 raw=737
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2520: §9e [1700000000000000000, 1700000000006143500] event 16777217 total agg=1283874 ns raw=2.338055000 ms
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2524: §9e event 16777217 exact_count agg=246 raw=737
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2515: §9e [1700000000000000000, 1700000000006143500] event 50331649 count agg=246 raw=735
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2520: §9e [1700000000000000000, 1700000000006143500] event 50331649 total agg=1283568 ns raw=2.337810000 ms
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2524: §9e event 50331649 exact_count agg=246 raw=735
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2515: §9e [1700000000000000000, 1700000000006143500] event 0 count agg=245 raw=737
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2520: §9e [1700000000000000000, 1700000000006143500] event 0 total agg=1278499 ns raw=2.331908000 ms
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2524: §9e event 0 exact_count agg=245 raw=737
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2515: §9e [1700000000000000000, 1700000000006143500] event 100663296 count agg=244 raw=735
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2520: §9e [1700000000000000000, 1700000000006143500] event 100663296 total agg=1273584 ns raw=2.331795000 ms
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2524: §9e event 100663296 exact_count agg=244 raw=735
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2536: §9e [1700000000000000000, 1700000000006143500] db_time agg=6648225 raw=12.395838000 ms
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2515: §9e [1700000000000000000, 1700000000007679375] event 167772161 count agg=709 raw=1519
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2520: §9e [1700000000000000000, 1700000000007679375] event 167772161 total agg=2986458 ns raw=4.514637000 ms
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2524: §9e event 167772161 exact_count agg=709 raw=1519
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2515: §9e [1700000000000000000, 1700000000007679375] event 100663296 count agg=429 raw=920
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2520: §9e [1700000000000000000, 1700000000007679375] event 100663296 total agg=2570781 ns raw=3.628992000 ms
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2524: §9e event 100663296 exact_count agg=429 raw=920
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2515: §9e [1700000000000000000, 1700000000007679375] event 167772162 count agg=429 raw=921
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2520: §9e [1700000000000000000, 1700000000007679375] event 167772162 total agg=2571276 ns raw=3.628878000 ms
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2524: §9e event 167772162 exact_count agg=429 raw=921
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2515: §9e [1700000000000000000, 1700000000007679375] event 50331649 count agg=430 raw=919
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2520: §9e [1700000000000000000, 1700000000007679375] event 50331649 total agg=2574464 ns raw=3.628706000 ms
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2524: §9e event 50331649 exact_count agg=430 raw=919
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2515: §9e [1700000000000000000, 1700000000007679375] event 16777217 count agg=430 raw=921
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2520: §9e [1700000000000000000, 1700000000007679375] event 16777217 total agg=2574016 ns raw=3.628197000 ms
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2524: §9e event 16777217 exact_count agg=430 raw=921
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2515: §9e [1700000000000000000, 1700000000007679375] event 0 count agg=429 raw=921
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2520: §9e [1700000000000000000, 1700000000007679375] event 0 total agg=2567379 ns raw=3.620788000 ms
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2524: §9e event 0 exact_count agg=429 raw=921
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2536: §9e [1700000000000000000, 1700000000007679375] db_time agg=13273593 raw=19.021206000 ms
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2515: §9e [1700000000000000000, 1700000000009215250] event 167772161 count agg=1012 raw=1822
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2520: §9e [1700000000000000000, 1700000000009215250] event 167772161 total agg=4684381 ns raw=6.212560000 ms
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2524: §9e event 167772161 exact_count agg=1012 raw=1822
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2515: §9e [1700000000000000000, 1700000000009215250] event 167772162 count agg=613 raw=1105
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2520: §9e [1700000000000000000, 1700000000009215250] event 167772162 total agg=4107164 ns raw=5.164766000 ms
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2524: §9e event 167772162 exact_count agg=613 raw=1105
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2515: §9e [1700000000000000000, 1700000000009215250] event 50331649 count agg=615 raw=1104
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2520: §9e [1700000000000000000, 1700000000009215250] event 50331649 total agg=4102062 ns raw=5.156304000 ms
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2524: §9e event 50331649 exact_count agg=615 raw=1104
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2515: §9e [1700000000000000000, 1700000000009215250] event 100663296 count agg=613 raw=1104
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2520: §9e [1700000000000000000, 1700000000009215250] event 100663296 total agg=4097876 ns raw=5.156087000 ms
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2524: §9e event 100663296 exact_count agg=613 raw=1104
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2515: §9e [1700000000000000000, 1700000000009215250] event 16777217 count agg=614 raw=1105
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2520: §9e [1700000000000000000, 1700000000009215250] event 16777217 total agg=4101715 ns raw=5.155896000 ms
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2524: §9e event 16777217 exact_count agg=614 raw=1105
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2515: §9e [1700000000000000000, 1700000000009215250] event 0 count agg=614 raw=1106
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2520: §9e [1700000000000000000, 1700000000009215250] event 0 total agg=4101627 ns raw=5.155036000 ms
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2524: §9e event 0 exact_count agg=614 raw=1106
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2536: §9e [1700000000000000000, 1700000000009215250] db_time agg=21096949 raw=26.844562000 ms
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2515: §9e [1700000000000000000, 1700000000010751125] event 167772161 count agg=1316 raw=2126
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2520: §9e [1700000000000000000, 1700000000010751125] event 167772161 total agg=5031147 ns raw=6.559326000 ms
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2524: §9e event 167772161 exact_count agg=1316 raw=2126
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2515: §9e [1700000000000000000, 1700000000010751125] event 167772162 count agg=797 raw=1289
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2520: §9e [1700000000000000000, 1700000000010751125] event 167772162 total agg=4274356 ns raw=5.331958000 ms
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2524: §9e event 167772162 exact_count agg=797 raw=1289
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2515: §9e [1700000000000000000, 1700000000010751125] event 50331649 count agg=799 raw=1288
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2520: §9e [1700000000000000000, 1700000000010751125] event 50331649 total agg=4271022 ns raw=5.325264000 ms
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2524: §9e event 50331649 exact_count agg=799 raw=1288
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2515: §9e [1700000000000000000, 1700000000010751125] event 100663296 count agg=798 raw=1289
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2520: §9e [1700000000000000000, 1700000000010751125] event 100663296 total agg=4266676 ns raw=5.324887000 ms
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2524: §9e event 100663296 exact_count agg=798 raw=1289
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2515: §9e [1700000000000000000, 1700000000010751125] event 16777217 count agg=798 raw=1289
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2520: §9e [1700000000000000000, 1700000000010751125] event 16777217 total agg=4269387 ns raw=5.323568000 ms
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2524: §9e event 16777217 exact_count agg=798 raw=1289
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2515: §9e [1700000000000000000, 1700000000010751125] event 0 count agg=798 raw=1290
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2520: §9e [1700000000000000000, 1700000000010751125] event 0 total agg=4269573 ns raw=5.322982000 ms
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2524: §9e event 0 exact_count agg=798 raw=1290
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2536: §9e [1700000000000000000, 1700000000010751125] db_time agg=22115485 raw=27.863098000 ms
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2515: §9e [1700000000000000000, 1700000000012287000] event 167772161 count agg=1621 raw=2431
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2520: §9e [1700000000000000000, 1700000000012287000] event 167772161 total agg=5663570 ns raw=7.191749000 ms
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2524: §9e event 167772161 exact_count agg=1621 raw=2431
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2515: §9e [1700000000000000000, 1700000000012287000] event 167772162 count agg=982 raw=1474
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2520: §9e [1700000000000000000, 1700000000012287000] event 167772162 total agg=4728107 ns raw=5.785709000 ms
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2524: §9e event 167772162 exact_count agg=982 raw=1474
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2515: §9e [1700000000000000000, 1700000000012287000] event 0 count agg=983 raw=1475
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2520: §9e [1700000000000000000, 1700000000012287000] event 0 total agg=4723011 ns raw=5.776420000 ms
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2524: §9e event 0 exact_count agg=983 raw=1475
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2515: §9e [1700000000000000000, 1700000000012287000] event 100663296 count agg=981 raw=1472
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2520: §9e [1700000000000000000, 1700000000012287000] event 100663296 total agg=4715086 ns raw=5.773297000 ms
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2524: §9e event 100663296 exact_count agg=981 raw=1472
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2515: §9e [1700000000000000000, 1700000000012287000] event 16777217 count agg=982 raw=1473
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2520: §9e [1700000000000000000, 1700000000012287000] event 16777217 total agg=4718993 ns raw=5.773174000 ms
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2524: §9e event 16777217 exact_count agg=982 raw=1473
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2515: §9e [1700000000000000000, 1700000000012287000] event 50331649 count agg=982 raw=1471
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2520: §9e [1700000000000000000, 1700000000012287000] event 50331649 total agg=4718685 ns raw=5.772927000 ms
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2524: §9e event 50331649 exact_count agg=982 raw=1471
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2536: §9e [1700000000000000000, 1700000000012287000] db_time agg=24552366 raw=30.299979000 ms
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2515: §9e [1700000000000000000, 1700000000004607625] event 167772161 count agg=101 raw=911
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2520: §9e [1700000000000000000, 1700000000004607625] event 167772161 total agg=325866 ns raw=1.854045000 ms
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2524: §9e event 167772161 exact_count agg=101 raw=911
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2515: §9e [1700000000000000000, 1700000000004607625] event 100663296 count agg=62 raw=553
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2520: §9e [1700000000000000000, 1700000000004607625] event 100663296 total agg=276510 ns raw=1.334721000 ms
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2524: §9e event 100663296 exact_count agg=62 raw=553
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2515: §9e [1700000000000000000, 1700000000004607625] event 50331649 count agg=62 raw=551
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2520: §9e [1700000000000000000, 1700000000004607625] event 50331649 total agg=276040 ns raw=1.330282000 ms
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2524: §9e event 50331649 exact_count agg=62 raw=551
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2515: §9e [1700000000000000000, 1700000000004607625] event 167772162 count agg=61 raw=553
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2520: §9e [1700000000000000000, 1700000000004607625] event 167772162 total agg=271852 ns raw=1.329454000 ms
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2524: §9e event 167772162 exact_count agg=61 raw=553
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2515: §9e [1700000000000000000, 1700000000004607625] event 16777217 count agg=61 raw=552
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2520: §9e [1700000000000000000, 1700000000004607625] event 16777217 total agg=271333 ns raw=1.325514000 ms
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2524: §9e event 16777217 exact_count agg=61 raw=552
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2515: §9e [1700000000000000000, 1700000000004607625] event 0 count agg=61 raw=553
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2520: §9e [1700000000000000000, 1700000000004607625] event 0 total agg=271529 ns raw=1.324938000 ms
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2524: §9e event 0 exact_count agg=61 raw=553
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2536: §9e [1700000000000000000, 1700000000004607625] db_time agg=1416620 raw=7.164233000 ms
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2515: §9e [1700000000000000000, 1700000000006143500] event 167772161 count agg=406 raw=1216
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2520: §9e [1700000000000000000, 1700000000006143500] event 167772161 total agg=1521690 ns raw=3.049869000 ms
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2524: §9e event 167772161 exact_count agg=406 raw=1216
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2515: §9e [1700000000000000000, 1700000000006143500] event 167772162 count agg=245 raw=737
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2520: §9e [1700000000000000000, 1700000000006143500] event 167772162 total agg=1280594 ns raw=2.338196000 ms
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2524: §9e event 167772162 exact_count agg=245 raw=737
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2515: §9e [1700000000000000000, 1700000000006143500] event 16777217 count agg=246 raw=737
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2520: §9e [1700000000000000000, 1700000000006143500] event 16777217 total agg=1283874 ns raw=2.338055000 ms
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2524: §9e event 16777217 exact_count agg=246 raw=737
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2515: §9e [1700000000000000000, 1700000000006143500] event 50331649 count agg=246 raw=735
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2520: §9e [1700000000000000000, 1700000000006143500] event 50331649 total agg=1283568 ns raw=2.337810000 ms
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2524: §9e event 50331649 exact_count agg=246 raw=735
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2515: §9e [1700000000000000000, 1700000000006143500] event 0 count agg=245 raw=737
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2520: §9e [1700000000000000000, 1700000000006143500] event 0 total agg=1278499 ns raw=2.331908000 ms
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2524: §9e event 0 exact_count agg=245 raw=737
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2515: §9e [1700000000000000000, 1700000000006143500] event 100663296 count agg=244 raw=735
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2520: §9e [1700000000000000000, 1700000000006143500] event 100663296 total agg=1273584 ns raw=2.331795000 ms
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2524: §9e event 100663296 exact_count agg=244 raw=735
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2536: §9e [1700000000000000000, 1700000000006143500] db_time agg=6648225 raw=12.395838000 ms
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2515: §9e [1700000000000000000, 1700000000007679375] event 167772161 count agg=709 raw=1519
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2520: §9e [1700000000000000000, 1700000000007679375] event 167772161 total agg=2986458 ns raw=4.514637000 ms
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2524: §9e event 167772161 exact_count agg=709 raw=1519
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2515: §9e [1700000000000000000, 1700000000007679375] event 100663296 count agg=429 raw=920
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2520: §9e [1700000000000000000, 1700000000007679375] event 100663296 total agg=2570781 ns raw=3.628992000 ms
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2524: §9e event 100663296 exact_count agg=429 raw=920
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2515: §9e [1700000000000000000, 1700000000007679375] event 167772162 count agg=429 raw=921
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2520: §9e [1700000000000000000, 1700000000007679375] event 167772162 total agg=2571276 ns raw=3.628878000 ms
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2524: §9e event 167772162 exact_count agg=429 raw=921
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2515: §9e [1700000000000000000, 1700000000007679375] event 50331649 count agg=430 raw=919
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2520: §9e [1700000000000000000, 1700000000007679375] event 50331649 total agg=2574464 ns raw=3.628706000 ms
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2524: §9e event 50331649 exact_count agg=430 raw=919
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2515: §9e [1700000000000000000, 1700000000007679375] event 16777217 count agg=430 raw=921
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2520: §9e [1700000000000000000, 1700000000007679375] event 16777217 total agg=2574016 ns raw=3.628197000 ms
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2524: §9e event 16777217 exact_count agg=430 raw=921
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2515: §9e [1700000000000000000, 1700000000007679375] event 0 count agg=429 raw=921
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2520: §9e [1700000000000000000, 1700000000007679375] event 0 total agg=2567379 ns raw=3.620788000 ms
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2524: §9e event 0 exact_count agg=429 raw=921
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2536: §9e [1700000000000000000, 1700000000007679375] db_time agg=13273593 raw=19.021206000 ms
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2515: §9e [1700000000000000000, 1700000000009215250] event 167772161 count agg=1012 raw=1822
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2520: §9e [1700000000000000000, 1700000000009215250] event 167772161 total agg=4684381 ns raw=6.212560000 ms
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2524: §9e event 167772161 exact_count agg=1012 raw=1822
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2515: §9e [1700000000000000000, 1700000000009215250] event 167772162 count agg=613 raw=1105
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2520: §9e [1700000000000000000, 1700000000009215250] event 167772162 total agg=4107164 ns raw=5.164766000 ms
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2524: §9e event 167772162 exact_count agg=613 raw=1105
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2515: §9e [1700000000000000000, 1700000000009215250] event 50331649 count agg=615 raw=1104
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2520: §9e [1700000000000000000, 1700000000009215250] event 50331649 total agg=4102062 ns raw=5.156304000 ms
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2524: §9e event 50331649 exact_count agg=615 raw=1104
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2515: §9e [1700000000000000000, 1700000000009215250] event 100663296 count agg=613 raw=1104
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2520: §9e [1700000000000000000, 1700000000009215250] event 100663296 total agg=4097876 ns raw=5.156087000 ms
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2524: §9e event 100663296 exact_count agg=613 raw=1104
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2515: §9e [1700000000000000000, 1700000000009215250] event 16777217 count agg=614 raw=1105
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2520: §9e [1700000000000000000, 1700000000009215250] event 16777217 total agg=4101715 ns raw=5.155896000 ms
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2524: §9e event 16777217 exact_count agg=614 raw=1105
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2515: §9e [1700000000000000000, 1700000000009215250] event 0 count agg=614 raw=1106
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2520: §9e [1700000000000000000, 1700000000009215250] event 0 total agg=4101627 ns raw=5.155036000 ms
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2524: §9e event 0 exact_count agg=614 raw=1106
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2536: §9e [1700000000000000000, 1700000000009215250] db_time agg=21096949 raw=26.844562000 ms
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2515: §9e [1700000000000000000, 1700000000010751125] event 167772161 count agg=1316 raw=2126
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2520: §9e [1700000000000000000, 1700000000010751125] event 167772161 total agg=5031147 ns raw=6.559326000 ms
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2524: §9e event 167772161 exact_count agg=1316 raw=2126
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2515: §9e [1700000000000000000, 1700000000010751125] event 167772162 count agg=797 raw=1289
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2520: §9e [1700000000000000000, 1700000000010751125] event 167772162 total agg=4274356 ns raw=5.331958000 ms
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2524: §9e event 167772162 exact_count agg=797 raw=1289
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2515: §9e [1700000000000000000, 1700000000010751125] event 50331649 count agg=799 raw=1288
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2520: §9e [1700000000000000000, 1700000000010751125] event 50331649 total agg=4271022 ns raw=5.325264000 ms
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2524: §9e event 50331649 exact_count agg=799 raw=1288
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2515: §9e [1700000000000000000, 1700000000010751125] event 100663296 count agg=798 raw=1289
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2520: §9e [1700000000000000000, 1700000000010751125] event 100663296 total agg=4266676 ns raw=5.324887000 ms
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2524: §9e event 100663296 exact_count agg=798 raw=1289
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2515: §9e [1700000000000000000, 1700000000010751125] event 16777217 count agg=798 raw=1289
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2520: §9e [1700000000000000000, 1700000000010751125] event 16777217 total agg=4269387 ns raw=5.323568000 ms
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2524: §9e event 16777217 exact_count agg=798 raw=1289
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2515: §9e [1700000000000000000, 1700000000010751125] event 0 count agg=798 raw=1290
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2520: §9e [1700000000000000000, 1700000000010751125] event 0 total agg=4269573 ns raw=5.322982000 ms
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2524: §9e event 0 exact_count agg=798 raw=1290
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2536: §9e [1700000000000000000, 1700000000010751125] db_time agg=22115485 raw=27.863098000 ms
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2515: §9e [1700000000000000000, 1700000000012287000] event 167772161 count agg=1621 raw=2431
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2520: §9e [1700000000000000000, 1700000000012287000] event 167772161 total agg=5663570 ns raw=7.191749000 ms
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2524: §9e event 167772161 exact_count agg=1621 raw=2431
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2515: §9e [1700000000000000000, 1700000000012287000] event 167772162 count agg=982 raw=1474
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2520: §9e [1700000000000000000, 1700000000012287000] event 167772162 total agg=4728107 ns raw=5.785709000 ms
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2524: §9e event 167772162 exact_count agg=982 raw=1474
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2515: §9e [1700000000000000000, 1700000000012287000] event 0 count agg=983 raw=1475
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2520: §9e [1700000000000000000, 1700000000012287000] event 0 total agg=4723011 ns raw=5.776420000 ms
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2524: §9e event 0 exact_count agg=983 raw=1475
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2515: §9e [1700000000000000000, 1700000000012287000] event 100663296 count agg=981 raw=1472
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2520: §9e [1700000000000000000, 1700000000012287000] event 100663296 total agg=4715086 ns raw=5.773297000 ms
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2524: §9e event 100663296 exact_count agg=981 raw=1472
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2515: §9e [1700000000000000000, 1700000000012287000] event 16777217 count agg=982 raw=1473
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2520: §9e [1700000000000000000, 1700000000012287000] event 16777217 total agg=4718993 ns raw=5.773174000 ms
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2524: §9e event 16777217 exact_count agg=982 raw=1473
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2515: §9e [1700000000000000000, 1700000000012287000] event 50331649 count agg=982 raw=1471
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2520: §9e [1700000000000000000, 1700000000012287000] event 50331649 total agg=4718685 ns raw=5.772927000 ms
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2524: §9e event 50331649 exact_count agg=982 raw=1471
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a36c4d13d603216d4/tests/test_block_agg.c:2536: §9e [1700000000000000000, 1700000000012287000] db_time agg=24552366 raw=30.299979000 ms

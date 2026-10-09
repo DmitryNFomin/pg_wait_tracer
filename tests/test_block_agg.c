@@ -145,6 +145,8 @@ static struct {
     long class_rows_multi;          /* classes holding >= 2 distinct events */
     long ev_clipped_records;        /* admitted records whose clip < duration */
     long ev_merge_refused_clip;     /* REFUSED_CLIP -> DECODE downgrades */
+    long ev_shipped_rows_compared;
+    long ev_shipped_clip_downgrades;
     long ev_filter_unselectable;    /* event_id 0: not selectable by filter */
     long ev_bucket_pairs_checked;
     long v2_probes_went_red;
@@ -2399,6 +2401,162 @@ static void section9_on_disk(void)
     }
 }
 
+
+/* §10's oracle wrapper, forward-declared: §9e (below) and §10 both call it,
+ * and it is defined with §10's other Phase-2 helpers. */
+static void raw_top_events_of(const struct pgwt_trace_event *ev, int n,
+                              const char *class_name, uint32_t event_id,
+                              uint64_t from, uint64_t to,
+                              struct pgwt_events_result *out);
+
+/* ── §9e ON-DISK, through the SHIPPED window builder, with the per-event
+ *      table ON ─────────────────────────────────────────────────────────────
+ *
+ * §10b drives answer_window_phase2(), which MIRRORS
+ * pgwt_block_agg_window_from_reader()'s REFUSED_CLIP -> DECODE downgrade.
+ * A mirror cannot pin the thing it mirrors: a change that made the shipped
+ * function SKIP a clip-refused block instead of decoding it would lose those
+ * records and §10b would stay green, because §10b never calls it. So this
+ * section drives the shipped function itself, over a real multi-block trace
+ * written by the real writer, and compares against pgwt_compute_top_events()
+ * over the same file's decoded records.
+ *
+ * The on-disk fixture's durations run to ~9.3 us against a 1 us record
+ * spacing, so most waits start several records before they end and the clip
+ * fires densely — which is why this is the fixture that proves the downgrade
+ * rather than a synthetic one built to make it fire once. */
+static void section9e_on_disk_events(void)
+{
+    printf("=== §9e on-disk: the SHIPPED window builder with per-event "
+           "totals, vs pgwt_compute_top_events ===\n");
+    char dir[256];
+    snprintf(dir, sizeof(dir), "/tmp/pgwt_bagg_sec9e_%d", (int)getpid());
+    char rm[320];
+    snprintf(rm, sizeof(rm), "rm -rf '%s'", dir);
+    if (system(rm) != 0) { }
+    if (mkdir(dir, 0700) != 0) { CHECK(0, "§9e mkdir"); return; }
+
+    uint64_t f0 = 0, l0 = 0;
+    if (sec9_write_trace(dir, 3, 0, &f0, &l0) != 0) {
+        CHECK(0, "§9e write");
+        if (system(rm) != 0) { }
+        return;
+    }
+    char path[512];
+    if (sec9_find_trace(dir, path, sizeof(path)) != 0) {
+        CHECK(0, "§9e find");
+        if (system(rm) != 0) { }
+        return;
+    }
+    struct pgwt_trace_event *all = NULL;
+    int nall = sec9_decode_all(path, &all);
+    CHECK(nall > 0, "§9e decoded %d records", nall);
+    if (nall <= 0) { free(all); if (system(rm) != 0) { } return; }
+
+    struct sec9_cache cache;
+    memset(&cache, 0, sizeof(cache));
+    long clip_blocks = 0, merges = 0, decodes = 0, rows = 0;
+    uint64_t span = l0 - f0;
+    /* Two passes so the second runs against a WARM cache and therefore
+     * actually reaches the merge path (and thus the clip pre-flight). */
+    for (int pass = 0; pass < 2; pass++) {
+        (void)pass;
+        for (int i = 0; i <= 8; i++) {
+            for (int j = i; j <= 8; j++) {
+                uint64_t from = f0 + span * (uint64_t)i / 8;
+                uint64_t to   = f0 + span * (uint64_t)j / 8;
+                if (to <= from)
+                    continue;
+                struct pgwt_event_reader r;
+                CHECK(pgwt_reader_open(&r, path) == 0, "§9e open");
+                struct pgwt_block_agg acc;
+                pgwt_block_agg_init_window(&acc);
+                CHECK(pgwt_block_agg_enable_events(&acc, from, to) ==
+                      PGWT_BAGG_OK, "§9e enable");
+                int m = 0, d = 0;
+                uint64_t ex = 0;
+                int rc = pgwt_block_agg_window_from_reader(
+                    &r, from, to, &acc, sec9_lookup, sec9_store, NULL,
+                    &cache, &ex, &m, &d);
+                CHECK(rc == PGWT_BAGG_OK, "§9e window refused rc=%d", rc);
+                merges += m;
+                decodes += d;
+                clip_blocks += acc.clip_decoded_blocks;
+
+                struct pgwt_trace_event *sel =
+                    calloc((size_t)nall, sizeof(*sel));
+                int nsel = 0;
+                for (int k = 0; k < nall; k++)
+                    if (all[k].timestamp_ns >= from &&
+                        all[k].timestamp_ns <= to)
+                        sel[nsel++] = all[k];
+                struct pgwt_events_result res;
+                raw_top_events_of(sel, nsel, NULL, 0, from, to, &res);
+
+                struct pgwt_block_agg_event *er = NULL;
+                int ner = 0;
+                int rrc = pgwt_block_agg_events_sorted(&acc, &er, &ner);
+                CHECK(rrc == PGWT_BAGG_OK, "§9e readout rc=%d", rrc);
+                CHECK(ner == res.num_rows,
+                      "§9e [%" PRIu64 ", %" PRIu64 "] %d aggregate rows vs "
+                      "%d oracle rows", from, to, ner, res.num_rows);
+                for (int k = 0; k < res.num_rows; k++) {
+                    struct pgwt_block_agg_event mine;
+                    if (!pgwt_block_agg_event_lookup(&acc,
+                            res.rows[k].event_id, &mine)) {
+                        CHECK(0, "§9e event %u missing from the aggregate",
+                              res.rows[k].event_id);
+                        continue;
+                    }
+                    CHECK(mine.count == res.rows[k].count,
+                          "§9e [%" PRIu64 ", %" PRIu64 "] event %u count "
+                          "agg=%" PRIu64 " raw=%" PRIu64, from, to,
+                          res.rows[k].event_id, mine.count,
+                          res.rows[k].count);
+                    CHECK((double)mine.total_ns / 1e6 == res.rows[k].total_ms,
+                          "§9e [%" PRIu64 ", %" PRIu64 "] event %u total "
+                          "agg=%" PRIu64 " ns raw=%.9f ms", from, to,
+                          res.rows[k].event_id, mine.total_ns,
+                          res.rows[k].total_ms);
+                    CHECK(mine.exact_count == res.rows[k].exact_count,
+                          "§9e event %u exact_count agg=%" PRIu64 " raw=%"
+                          PRIu64, res.rows[k].event_id, mine.exact_count,
+                          res.rows[k].exact_count);
+                    CHECK((double)mine.max_ns / 1000.0 == res.rows[k].max_us,
+                          "§9e event %u max agg=%.6f raw=%.6f",
+                          res.rows[k].event_id,
+                          (double)mine.max_ns / 1000.0, res.rows[k].max_us);
+                    rows++;
+                }
+                uint64_t dbt = 0;
+                CHECK(pgwt_block_agg_db_time_ns(&acc, &dbt) == PGWT_BAGG_OK,
+                      "§9e db_time");
+                CHECK((double)dbt / 1e6 == res.db_time_ms,
+                      "§9e [%" PRIu64 ", %" PRIu64 "] db_time agg=%" PRIu64
+                      " raw=%.9f ms", from, to, dbt, res.db_time_ms);
+                free(er);
+                free(res.rows);
+                free(sel);
+                pgwt_block_agg_free(&acc);
+                pgwt_reader_close(&r);
+            }
+        }
+    }
+    printf("    merges=%ld decodes=%ld clip-downgrades=%ld rows=%ld\n",
+           merges, decodes, clip_blocks, rows);
+    CHECK(merges > 0, "§9e the shipped builder never MERGEd a block, so the "
+          "clip pre-flight was never reached through it");
+    CHECK(clip_blocks > 0,
+          "§9e the shipped builder never downgraded a clip-refused block to "
+          "DECODE — the one path a mirror test cannot pin");
+    CHECK(rows > 400, "§9e only %ld rows compared", rows);
+    seen.ev_shipped_rows_compared = rows;
+    seen.ev_shipped_clip_downgrades = clip_blocks;
+    sec9_cache_free(&cache);
+    free(all);
+    if (system(rm) != 0) { }
+}
+
 /* ══ §10 Phase 2: per-event and per-class totals ══════════════════════════
  *
  * The oracle is pgwt_compute_top_events() — the SHIPPING function the Events
@@ -2879,6 +3037,32 @@ static void p2_compare_one_window(const struct fix_block *b, int nb,
         (void)rtotal;
         free(cres.rows);
         seen.class_rows_compared++;
+    }
+    /* CONSERVATION, with the two sides taken from DIFFERENT places on
+     * purpose. A fold that silently DROPPED a class would not be noticed by
+     * the per-class loop above, which only ever walks the rows it was given
+     * — that is the shape of a check that cannot fail. So the class rows are
+     * reconciled against (a) the ORACLE's own row-count sum, which this
+     * module did not produce, and (b) ev_total_ns, which is maintained
+     * per-record in ev_observe()/ev_add_row() and never derived from the
+     * class fold. */
+    {
+        uint64_t cls_count = 0, cls_ns = 0, oracle_count = 0;
+        for (int i = 0; i < ncls; i++) {
+            cls_count += cls[i].count;
+            cls_ns += cls[i].total_ns;
+        }
+        for (int i = 0; i < res.num_rows; i++)
+            oracle_count += res.rows[i].count;
+        CHECK(cls_count == oracle_count,
+              "%s [%" PRIu64 ", %" PRIu64 "] the class fold accounts for %"
+              PRIu64 " observations, the ORACLE for %" PRIu64
+              " — a class was dropped or double-counted", tag, from, to,
+              cls_count, oracle_count);
+        CHECK(cls_ns == acc.ev_total_ns,
+              "%s [%" PRIu64 ", %" PRIu64 "] the class fold accounts for %"
+              PRIu64 " ns, the per-record accumulator for %" PRIu64,
+              tag, from, to, cls_ns, acc.ev_total_ns);
     }
     for (int i = 1; i < ncls; i++)
         CHECK(cls[i - 1].total_ns > cls[i].total_ns ||
@@ -3655,6 +3839,7 @@ int main(void)
     section7_mutation_probes();
     section8_bypass();
     section9_on_disk();
+    section9e_on_disk_events();
     section10a_event_predicate();
     section10b_model();
     section10c_latency_ladder();
@@ -3721,6 +3906,10 @@ int main(void)
            seen.ev_clipped_records);
     printf("    §2 REFUSED_CLIP -> DECODE ......... %ld\n",
            seen.ev_merge_refused_clip);
+    printf("    §2 SHIPPED-builder rows compared ... %ld\n",
+           seen.ev_shipped_rows_compared);
+    printf("    §2 SHIPPED clip downgrades ........ %ld\n",
+           seen.ev_shipped_clip_downgrades);
     printf("    §2 rows whose event is unfilterable %ld\n",
            seen.ev_filter_unselectable);
     printf("    §2 latency-bucket pairs checked ... %ld\n",
@@ -3755,6 +3944,13 @@ int main(void)
     CHECK(seen.ev_merge_refused_clip > 0,
           "no block was ever REFUSED_CLIP and downgraded to DECODE, so the "
           "C10 fallback path was never taken");
+    CHECK(seen.ev_shipped_rows_compared > 400,
+          "only %ld rows compared through the SHIPPED window builder — "
+          "§10b's mirror cannot pin the function it mirrors",
+          seen.ev_shipped_rows_compared);
+    CHECK(seen.ev_shipped_clip_downgrades > 0,
+          "the SHIPPED window builder never downgraded a clip-refused block "
+          "to DECODE");
     CHECK(seen.ev_filter_unselectable > 0,
           "no compared row carried event id 0, so the product limitation "
           "this suite documents (an event filter cannot select CPU) was "
