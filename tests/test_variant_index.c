@@ -220,6 +220,15 @@ static void build_fixtures(void)
     fx_add(f, wt(BASE + 14 * MS, 101, WE_A, 5 * MS, 0));
     fx_add(f, mk(BASE + 16 * MS, 101, EE, 7));
 
+    f = new_fx("single A and AA (loop flag must be hashed)");
+    fx_add(f, mk(BASE + 0 * MS, 101, ES, 7));
+    fx_add(f, wt(BASE + 2 * MS, 101, WE_A, 1 * MS, 0));
+    fx_add(f, mk(BASE + 4 * MS, 101, EE, 7));
+    fx_add(f, mk(BASE + 6 * MS, 101, ES, 7));
+    fx_add(f, wt(BASE + 8 * MS, 101, WE_A, 1 * MS, 0));
+    fx_add(f, wt(BASE + 10 * MS, 101, WE_A, 1 * MS, 0));
+    fx_add(f, mk(BASE + 12 * MS, 101, EE, 7));
+
     f = new_fx("loop body of two ABAB");
     fx_add(f, mk(BASE + 0 * MS, 101, ES, 7));
     fx_add(f, wt(BASE + 2 * MS, 101, WE_A, 1 * MS, 0));
@@ -287,6 +296,31 @@ static void build_fixtures(void)
     fx_add(f, wt(BASE + 2 * MS, 101, WE_B, BASE * 2, 0));
     fx_add(f, wt(BASE + 4 * MS, 101, WE_A, 1 * MS, 0));
     fx_add(f, mk(BASE + 6 * MS, 101, EE, 7));
+
+    /* ZERO-LENGTH execution: the opening and closing markers share a
+     * timestamp. Found missing by variant_index_mutations.py M07, which
+     * narrowed the chunk prefilter to `max_close_ns <= from_ns` and stayed
+     * GREEN: that is wrong only for a row with start_ns == close_ns == from_ns,
+     * which no fixture had. */
+    f = new_fx("zero-length execution (start == close)");
+    fx_add(f, mk(BASE + 0 * MS, 101, ES, 7));
+    fx_add(f, mk(BASE + 0 * MS, 101, EE, 7));
+    fx_add(f, wt(BASE + 2 * MS, 101, WE_A, 1 * MS, 0));
+    fx_add(f, mk(BASE + 4 * MS, 101, ES, 7));
+    fx_add(f, wt(BASE + 6 * MS, 101, WE_B, 2 * MS, 0));
+    fx_add(f, mk(BASE + 8 * MS, 101, EE, 7));
+
+    /* An EXTRA closing marker after a COMPLETED execution, for a pid that
+     * already has builder state. Found missing by M11, which dropped the
+     * `&& pc->active` guard and stayed GREEN: the "EXEC_END with no start"
+     * fixture never creates state for that pid at all, so the guard was
+     * never reached. The trailing PLAN_END is the same shape cross-phase. */
+    f = new_fx("extra closing markers after a closed execution");
+    fx_add(f, mk(BASE + 0 * MS, 101, ES, 7));
+    fx_add(f, wt(BASE + 2 * MS, 101, WE_A, 1 * MS, 0));
+    fx_add(f, mk(BASE + 4 * MS, 101, EE, 7));
+    fx_add(f, mk(BASE + 6 * MS, 101, EE, 7));
+    fx_add(f, mk(BASE + 8 * MS, 101, PE, 7));
 
     f = new_fx("no markers at all");
     fx_add(f, wt(BASE + 0 * MS, 101, WE_A, 1 * MS, 0));
@@ -519,7 +553,7 @@ static long c_triples, c_splits, c_variants, c_execs, c_multistep,
             c_looped, c_cpuonly, c_crossing, c_steps_crossing, c_skipped,
             c_multipid, c_qid_from_inner, c_truncated_pattern,
             c_raw_capped, c_p95_sampled, c_two_phase, c_order_pairs,
-            c_prefilter_rows_saved;
+            c_prefilter_rows_saved, c_zero_len, c_extra_close;
 static long c_mismatch;
 static char g_first_mismatch[768];
 
@@ -567,6 +601,8 @@ static void ledger_from_index(const struct pgwt_variant_index *idx,
         }
         if (first >= 0 && last >= 0 && first != last)
             c_steps_crossing++;
+        if (e->start_ns == e->close_ns)
+            c_zero_len++;
         if (e->raw_len >= PGWT_VARIANT_INDEX_MAX_RAW)
             c_raw_capped++;
         if (e->num_steps >= PGWT_MAX_VARIANT_STEPS)
@@ -706,7 +742,9 @@ static int cut_sets(const struct fixture *f, unsigned *out, int cap)
     /* A spread sample, always including "no cuts" and "cut everywhere". */
     int n = 0;
     unsigned all = bits >= 31 ? 0x7FFFFFFFu : ((1u << bits) - 1u);
+    if (cap < 1) return 0;
     out[n++] = 0;
+    if (cap < 2) return n;
     out[n++] = all;
     for (int b = 0; b < bits && n < cap && n < 34; b++)
         out[n++] = 1u << (unsigned)b;
@@ -997,6 +1035,86 @@ static void literal_expectations(void)
         CHECK(pgwt_variant_index_open_at_end(&idx) == 1,
               "open at capture end: 1 sequence still open (got %d)",
               pgwt_variant_index_open_at_end(&idx));
+    }
+    pgwt_variant_index_query_free(&q);
+    pgwt_variant_index_free(&idx);
+
+    /* a zero-length execution: start == close, and it must survive both
+     * the chunk prefilter and the selection predicate at a window edge that
+     * sits exactly on it */
+    if (full_query("zero-length execution (start == close)", 4,
+                   PGWT_PHASE_EXEC, &idx, &q) == 0) {
+        CHECK(q.res.total_executions == 2, "zero-length: both executions "
+              "reported (got %d)", q.res.total_executions);
+        int zl = 0;
+        for (int r = 0; r < idx.n_rows; r++)
+            if (idx.rows[r].start_ns == idx.rows[r].close_ns) zl++;
+        CHECK(zl == 1, "zero-length: exactly one row has start == close "
+              "(got %d)", zl);
+        c_zero_len += zl;
+    }
+    pgwt_variant_index_query_free(&q);
+    pgwt_variant_index_free(&idx);
+    /* and queried with the window collapsed onto that single instant */
+    {
+        struct fixture *zf = fx_by_name("zero-length execution (start == close)");
+        if (zf && build_index(zf, 0x02, &idx, NULL) == 0) {
+            struct pgwt_filter z2;
+            memset(&z2, 0, sizeof(z2));
+            uint64_t at = zf->ev[0].timestamp_ns;
+            if (pgwt_variant_index_query(&idx, at, at, &z2, 20,
+                                         PGWT_PHASE_EXEC, &q) == 0) {
+                CHECK(q.res.total_executions == 1,
+                      "zero-length: a window collapsed onto the instant "
+                      "[t, t] still selects it (got %d)",
+                      q.res.total_executions);
+            } else {
+                CHECK(0, "zero-length: query refused for [t, t]");
+            }
+            pgwt_variant_index_query_free(&q);
+        }
+        pgwt_variant_index_free(&idx);
+    }
+
+    /* an extra closing marker for a pid that HAS builder state must be
+     * ignored, not turned into a second row */
+    if (full_query("extra closing markers after a closed execution", 3,
+                   PGWT_PHASE_EXEC, &idx, &q) == 0) {
+        CHECK(q.res.total_executions == 1, "extra EXEC_END: exactly 1 "
+              "execution, the surplus closing marker ignored (got %d)",
+              q.res.total_executions);
+        CHECK(idx.n_rows == 1, "extra EXEC_END: exactly 1 index row (got %d)",
+              idx.n_rows);
+        c_extra_close++;
+    }
+    pgwt_variant_index_query_free(&q);
+    pgwt_variant_index_free(&idx);
+    if (full_query("extra closing markers after a closed execution", 3,
+                   PGWT_PHASE_PLAN, &idx, &q) == 0) {
+        CHECK(q.res.total_executions == 0, "stray PLAN_END for a pid with "
+              "exec-only state: no plan execution invented (got %d)",
+              q.res.total_executions);
+    }
+    pgwt_variant_index_query_free(&q);
+    pgwt_variant_index_free(&idx);
+
+    /* the loop FLAG is part of the pattern identity: [A] and [A,A] have the
+     * same step list and differ only in is_loop, so a hash that drops the
+     * flag collapses them into one variant. */
+    if (full_query("single A and AA (loop flag must be hashed)", 3,
+                   PGWT_PHASE_EXEC, &idx, &q) == 0) {
+        CHECK(q.res.num_variants == 2, "loop flag hashed: [A] and [A,A] are "
+              "TWO variants despite an identical step list (got %d)",
+              q.res.num_variants);
+        if (q.res.num_variants == 2) {
+            CHECK(q.res.variants[0].steps[0].event_id ==
+                  q.res.variants[1].steps[0].event_id,
+                  "loop flag hashed: the two step lists really are identical");
+            CHECK(q.res.variants[0].steps[0].is_loop !=
+                  q.res.variants[1].steps[0].is_loop,
+                  "loop flag hashed: they differ only in is_loop");
+            c_order_pairs++;
+        }
     }
     pgwt_variant_index_query_free(&q);
     pgwt_variant_index_free(&idx);
@@ -1440,6 +1558,18 @@ static void measure_complexity(void)
           q.res.num_variants, q.res.total_executions);
 
     long work = q.rows_examined + q.steps_examined;
+    /* Pins the counters themselves: a work counter that stops counting would
+     * make the complexity assertion below vacuously true. Every chunk is
+     * scanned for a whole-coverage window, so every row is examined and every
+     * row is selected. */
+    CHECK(q.rows_examined == idx.n_rows,
+          "whole window: rows_examined == every index row (%ld vs %d)",
+          q.rows_examined, idx.n_rows);
+    CHECK(q.rows_selected == q.res.total_executions && q.rows_selected > 0,
+          "whole window: rows_selected == total_executions (%ld vs %d)",
+          q.rows_selected, q.res.total_executions);
+    CHECK(q.steps_examined > 0, "whole window: steps_examined > 0 (%ld)",
+          q.steps_examined);
     CHECK(q.res.total_executions == n_exec,
           "big trace: all %d executions selected (got %d)", n_exec,
           q.res.total_executions);
@@ -1513,6 +1643,9 @@ static struct ledger_row g_ledger[] = {
     { "prefilter chunk skips", &c_skipped, 1 },
     { "rows the prefilter kept out of the predicate", &c_prefilter_rows_saved, 1 },
     { "order-sensitive variant pairs proven distinct", &c_order_pairs, 1 },
+    { "ZERO-LENGTH executions (start == close) indexed", &c_zero_len, 1 },
+    { "surplus closing markers ignored for a pid WITH builder state",
+      &c_extra_close, 1 },
     { "query_id reaching a variant from an inner record", &c_qid_from_inner, 1 },
     { "both phases answered from one index", &c_two_phase, 1 },
 };
