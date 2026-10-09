@@ -1,0 +1,15 @@
+AAS home slots: A=1 B=1
+AAS series: 2
+  id=0x01000001 total_aas=0.000500000
+  id=0x01000201 total_aas=0.000250000
+
+FP colliding ids: qA=1 qB=326 slot=1509
+FP rows: 2
+  query_id=326 transitions=2
+  query_id=1 transitions=1
+EXPECTED: qB=326 with transitions=2 (qA contributed 0 ns and must not donate its transition)
+
+Sessions rows: 2
+  pid=0 db_time_ms=5.000000
+  pid=1024 db_time_ms=1.000000
+EXPECTED: pid 1024 with db_time_ms=1.0 (it must not inherit pid 0's 5.0 ms)
