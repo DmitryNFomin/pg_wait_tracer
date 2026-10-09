@@ -1,0 +1,94 @@
+box-check on gate-2 (pgwt-gate-2, root@142.132.191.18), OS=ubuntu PG=all
+tree    : c061d8c
+full log: tests/results/box-check-ubuntu-20261009-181336.log
+          (4953 lines; gitignored by .gitignore:76, so it stays in the
+           worktree for the reviewer rather than entering git history)
+lock    : acquired (waited_for_lock=no, lock_wait_ms=0) -- gate-2 was idle
+make    : exit 2
+
+Why this digest and not the whole log: the same reason the mutation logs
+were trimmed in de11ead. Everything a verdict rests on is below; the log
+itself is one `less` away in the worktree.
+
+=== run_all SUMMARY ===
+════════════════════════════════════════
+  Executed: 102 (passed 101, failed 1, known-failing 0 (0 xpass)), skipped 4, excluded 0, total 106
+  Mode:     --require-live (live-section skips counted as failures)
+
+
+=== THE ONE FAILURE: test_percentage -- issue #331, gate-2 specific,
+    not this branch. Not re-run for green; KNOWN_FAILING untouched. ===
+  test_percentage
+════════════════════════════════════════
+=== test_percentage (postmaster PID 1895007) ===
+--- Test 1: Controlled 50/50 split ---
+  PASS: DB Time found (keys: ['DB Time', 'CPU*', 'Off-CPU*', 'Timeout', 'Timeout:PgSleep', 'IO', 'IO:BufFileWrite', 'Activity'])
+  PASS: DB Time = 17257ms (expected > 1000ms)
+  PASS: CPU = 40.4% of DB Time (expected 20-80%)
+  PASS: Timeout = 49.9% of DB Time (expected 20-80%)
+  PASS: CPU + Timeout = 90.2% (expected > 50% of DB Time)
+  FAIL: system_event: PgSleep total = 0ms (> 2000ms)
+  PASS: system_event: CPU total = 7200ms (> 2000ms)
+
+6/7 tests passed
+
+
+=== live-UI smoke: the PRODUCT run ===
+  UI LIVE SMOKE SUMMARY
+════════════════════════════════════════
+  PASS overview
+  PASS events
+  PASS sessions
+  PASS queries
+  PASS histogram
+  PASS timeline
+  PASS transitions
+  PASS concurrency
+  PASS waterfall
+  PASS scatter
+  PASS matrix
+  summary: /root/pgwt-check/agent_block-agg-event-class-totals/tests/results/ui_live/summary.json
+  overall: PASS
+
+=== live-UI smoke: the INJECTED-BLINK SELF-TEST ===
+(the `FAIL sessions` here is the gate catching a blink deliberately
+ injected to prove it still can -- note SELF-TEST PASS on the last
+ line. It is not a product failure and is not the failure counted
+ above.)
+ui_live_smoke: self-test -- injecting a synthetic blink and confirming the gate still catches it
+=== sessions ===
+  FAIL [sessions] ticks=6 rendered={'ok': True, 'detail': '47 rows'}
+
+════════════════════════════════════════
+  UI LIVE SMOKE SUMMARY
+════════════════════════════════════════
+  FAIL sessions
+  summary: /root/pgwt-check/agent_block-agg-event-class-totals/tests/results/ui_live_self_test/summary.json
+  overall: FAIL (failed: sessions)
+  SELF-TEST PASS: the injected blink was caught and the tab verdict was 'FAIL' (self_test={'tick': 2, 'ratio': 0.199796126401631, 'measured': True, 'note': None, 'inject_blink_ms': 400, 'caught': True})
+
+Issue #266 (the self-test intermittently reporting ratio 0.0 /
+SELF-TEST FAIL) did NOT occur on this run:
+  ratio=0.199796126401631, measured=True, caught=True
+
+=== this branch's own test, on Linux ===
+  test_block_agg
+════════════════════════════════════════
+WARN: cannot open /nonexistent/pgwt/no-such.trace: No such file or directory
+test_block_agg — per-committed-block transition aggregate (Phase 1)
+=== §1 record predicate vs pgwt_compute_transitions ===
+    §2 event-FILTERED rows compared ... 14248
+    §2 class rows compared ............ 15235
+    §2 class rows with >=2 events ..... 2664
+    §2 records that needed clipping ... 4224
+    §2 REFUSED_CLIP -> DECODE ......... 1938
+    §2 SHIPPED-builder rows compared ... 432
+    §2 SHIPPED clip downgrades ........ 12
+    §2 rows whose event is unfilterable 3651
+    §2 latency-bucket pairs checked ... 1275
+    §2 v2 probes that went red ........ 5
+PASS: test_block_agg
+
+The Linux ledger matches the macOS run line for line except
+`refusals observed` (75 vs 71): the macOS capture predates the four
+refusals added by §11 E1's three-state cases and §11 E14.
