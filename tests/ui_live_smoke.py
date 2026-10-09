@@ -191,37 +191,55 @@ LEGEND_COLORS_JS = """() => {
 # issue #252 self-test: a synthetic overlay (a top horizontal slice of the
 # clip rect -- see DEFAULT_INJECT_BLINK_FRAC below, review round 1: a FULL-
 # panel overlay proves only that a GROSS blink is caught, 1000x over
-# BLINK_THRESHOLD), shown/hidden at absolute browser-clock times computed
-# the SAME way _capture_at_offset schedules its own waits (Date.now()-
-# relative deltas, never a flat sleep from whenever this evaluate() call
-# happens to execute -- so the overlay's actual on-screen window is exact
-# regardless of Python/CDP round-trip jitter before this call lands).
-# position:fixed + the clip rect's own viewport-relative x/y (the SAME
-# coordinate space page.screenshot(clip=...) uses) guarantees the overlay
-# is positioned within the region the sweep captures, independent of the
-# target element's own positioning context.
+# BLINK_THRESHOLD). position:fixed + the clip rect's own viewport-relative
+# x/y (the SAME coordinate space page.screenshot(clip=...) uses) guarantees
+# the overlay is positioned within the region the sweep captures,
+# independent of the target element's own positioning context.
+#
+# issue #266: this USED to be shown/hidden by a browser-side setTimeout
+# scheduled against an absolute time computed BEFORE the sweep even started
+# (mount_at_ms + 700/+1100) -- a GUESS at where the targeted sweep sample's
+# real capture would land. Measured: the 1000ms sample's achieved offset is
+# 1008-1014ms, and a single screenshot call itself costs 210-344ms (mostly
+# Playwright's own stability wait, which finishes near the END of that
+# window, not the start) -- so the real pixel-sampled instant can land as
+# late as ~1358ms, past the fixed window's 1100ms close, with as little as
+# ~87ms of margin against a call that can take 344ms. That raced about 1
+# run in 3 on identical code. A longer fixed window is the same guess with
+# a bigger number; it does not fix the guess. So there is no scheduled
+# show/hide here anymore: run_tab calls _SHOW_BLINK_OVERLAY_JS synchronously
+# immediately BEFORE the one sweep capture this is meant to land in, and
+# _HIDE_BLINK_OVERLAY_JS synchronously AFTER that capture call returns --
+# "centred on the achieved sample" taken to its limit: the overlay is shown
+# and hidden bracketing the ACTUAL capture, so it is guaranteed visible for
+# the real captured instant regardless of how long that one capture takes,
+# never guessed in advance.
 #
 # DEFAULT_INJECT_BLINK_FRAC: the overlay covers this fraction of the clip
 # rect's HEIGHT (full width, top-aligned) -- a slice comfortably above
 # BLINK_THRESHOLD (0.001) without stepping over it by three orders of
 # magnitude the way a full-panel overlay (frac=1.0) does.
 DEFAULT_INJECT_BLINK_FRAC = 0.2
-_INJECT_BLINK_OVERLAY_JS = """(p) => {
-    const now = Date.now();
-    const showDelay = Math.max(0, p.showAtMs - now);
-    const hideDelay = Math.max(0, p.hideAtMs - now);
-    setTimeout(() => {
-        const el = document.createElement('div');
-        el.id = '__pgwt_inject_blink_overlay';
-        el.style.cssText =
-            `position:fixed;left:${p.x}px;top:${p.y}px;width:${p.width}px;` +
-            `height:${p.height}px;background:#ff00ff;z-index:2147483647;`;
-        document.body.appendChild(el);
-    }, showDelay);
-    setTimeout(() => {
-        const el = document.getElementById('__pgwt_inject_blink_overlay');
-        if (el) el.remove();
-    }, hideDelay);
+# The sweep offset this self-test's overlay is meant to be caught at (issue
+# #252's original choice, unchanged by #266: it sits between the sweep's
+# 500ms and 1000ms samples by construction, see run_tab's own show/hide
+# bracket). Must be a member of lib.SWEEP_OFFSETS_MS.
+INJECT_BLINK_TARGET_OFFSET_MS = 1000
+assert INJECT_BLINK_TARGET_OFFSET_MS in lib.SWEEP_OFFSETS_MS, (
+    "INJECT_BLINK_TARGET_OFFSET_MS must be one of the sweep's own offsets "
+    "or the loop below's `offset == INJECT_BLINK_TARGET_OFFSET_MS` check "
+    "never fires and the self-test silently injects nothing")
+_SHOW_BLINK_OVERLAY_JS = """(p) => {
+    const el = document.createElement('div');
+    el.id = '__pgwt_inject_blink_overlay';
+    el.style.cssText =
+        `position:fixed;left:${p.x}px;top:${p.y}px;width:${p.width}px;` +
+        `height:${p.height}px;background:#ff00ff;z-index:2147483647;`;
+    document.body.appendChild(el);
+}"""
+_HIDE_BLINK_OVERLAY_JS = """() => {
+    const el = document.getElementById('__pgwt_inject_blink_overlay');
+    if (el) el.remove();
 }"""
 
 # Panel-specific "rendered" checks -- same idiom test_web_ui.py already uses
@@ -731,6 +749,50 @@ def _capture_at_offset(page, tab_id, base_ts_ms, offset_ms, clip):
     return frame, now_ms - base_ts_ms, capture_ms
 
 
+def _capture_sweep_offset(page, tab_id, base_ts_ms, offset_ms, clip, inject=None):
+    """_capture_at_offset, plus the issue #252 self-test's injected overlay
+    when `inject` is given: {"blink_ms", "x", "y", "width", "height"}.
+
+    issue #266: the overlay used to be scheduled via a browser-side
+    setTimeout against an absolute time guessed BEFORE the sweep even
+    started (mount_at_ms + 700) -- a bet that the targeted sample's capture
+    would land inside a fixed window. Measured: the achieved offset alone
+    (1008-1014ms) left only ~87ms of margin against a screenshot call that
+    itself costs 210-344ms (mostly Playwright's own stability wait, which
+    settles near the END of that call, not the start) -- so the real
+    pixel-sampled instant could land past the window's close, about 1 run
+    in 3. A wider window is the same guess with a bigger number.
+
+    So there is no guess here: the overlay is shown synchronously
+    immediately BEFORE this capture's call to _capture_at_offset, and
+    hidden synchronously AFTER it returns -- "centred on the achieved
+    sample" taken to its limit, since showing-before/hiding-after a call
+    makes the overlay visible for that call's ENTIRE real duration by
+    construction, regardless of how long it actually takes. Held open for
+    at least inject["blink_ms"] from the show (review round 1's "known
+    size/timing" property for the self-test) by sleeping any remainder
+    before hiding -- never less.
+
+    Returns (raw_png_or_None, achieved_offset_ms, capture_ms), same as
+    _capture_at_offset."""
+    show_ms = None
+    if inject is not None:
+        show_ms = page.evaluate("Date.now()")
+        page.evaluate(_SHOW_BLINK_OVERLAY_JS, {
+            "x": inject["x"], "y": inject["y"],
+            "width": inject["width"], "height": inject["height"],
+        })
+    frame, achieved, capture_ms = _capture_at_offset(
+        page, tab_id, base_ts_ms, offset_ms, clip)
+    if inject is not None:
+        now_ms = page.evaluate("Date.now()")
+        remaining_ms = inject["blink_ms"] - (now_ms - show_ms)
+        if remaining_ms > 0:
+            page.wait_for_timeout(remaining_ms)
+        page.evaluate(_HIDE_BLINK_OVERLAY_JS)
+    return frame, achieved, capture_ms
+
+
 def _view_mount(page):
     """Reads window.__pgwt.viewMount() (issue #193's mount chokepoint hook:
     web/static/lib/view-manager.js's ViewManager.lastMount, exposed by
@@ -906,12 +968,13 @@ def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
     demo_rehearsal.py -- passes, so this is a strict addition with no effect
     on a normal run): when both are set, a synthetic overlay covering the
     top `inject_blink_frac` fraction of the panel's own clip rect (full
-    width) is shown from this tab's `inject_tick`'th mount+700ms for
-    `inject_blink_ms` milliseconds -- deliberately landing between the
-    sweep's 500ms and 1000ms offsets, inside the 1000ms sample's real
-    capture window -- and the resulting sweep ratio/verdict is recorded on
-    the returned result as "self_test". This is the proof that a REAL
-    blink of known size and timing still fails the gate after a capture-
+    width) is shown/hidden bracketing this tick's
+    INJECT_BLINK_TARGET_OFFSET_MS sweep capture (issue #266: synchronously,
+    around the ACTUAL capture call, not a guessed absolute time -- see
+    INJECT_BLINK_TARGET_OFFSET_MS's own comment) for at least
+    `inject_blink_ms` milliseconds -- and the resulting sweep ratio/verdict
+    is recorded on the returned result as "self_test". This is the proof
+    that a REAL blink of known size still fails the gate after a capture-
     path change; the pure-function tests (test_ui_live_smoke_lib.py)
     exercise the verdict math in isolation but cannot see a capture
     resolution/region change, which is exactly the kind of change issue
@@ -1232,31 +1295,34 @@ def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
             # for why this is exact, not an approximation, for the ~2s a
             # sweep spans.
             sweep_clip, sweep_dims = _panel_clip_and_dims(page, tab_id)
-            # issue #252 self-test: schedule the overlay BEFORE the frame
-            # loop below starts sleeping toward its offsets, so its
-            # setTimeout has the whole sweep window to fire in. showAtMs
-            # sits between the 500ms and 1000ms targets; hideAtMs is
-            # inject_blink_ms later -- the 1000ms sample's real capture
-            # (typically later than its own target, see #252's whole
-            # premise) is where this is meant to land.
-            if (inject_blink_ms is not None and inject_tick is not None
-                    and i == inject_tick and sweep_clip is not None):
-                show_at_ms = mount_at_ms + 700
-                # review round 1: top SLICE of the clip rect, not the whole
-                # thing -- see DEFAULT_INJECT_BLINK_FRAC's own comment.
-                page.evaluate(_INJECT_BLINK_OVERLAY_JS, {
-                    "showAtMs": show_at_ms,
-                    "hideAtMs": show_at_ms + inject_blink_ms,
-                    "x": sweep_clip["x"], "y": sweep_clip["y"],
-                    "width": sweep_clip["width"],
-                    "height": sweep_clip["height"] * inject_blink_frac,
-                })
+            # issue #252 self-test, issue #266 fix: this tick's injection is
+            # armed only when a sweep clip exists to position it in -- the
+            # actual show/hide bracket happens synchronously inside the loop
+            # below, around the one capture it targets (never a scheduled
+            # guess, see INJECT_BLINK_TARGET_OFFSET_MS and
+            # _SHOW_BLINK_OVERLAY_JS's own comments).
+            inject_armed = (inject_blink_ms is not None and inject_tick is not None
+                             and i == inject_tick and sweep_clip is not None)
             sweep_raw_frames = []
             sweep_achieved_ms = []
             sweep_capture_ms = []
             for offset in sweep_offsets:
-                frame, achieved, capture_ms = _capture_at_offset(
-                    page, tab_id, mount_at_ms, offset, sweep_clip)
+                # issue #266: _capture_sweep_offset shows/hides the overlay
+                # bracketing its OWN capture call when `inject` is given --
+                # see that function's own docstring for why this needs no
+                # scheduled guess at all. review round 1: top SLICE of the
+                # clip rect, not the whole thing -- see
+                # DEFAULT_INJECT_BLINK_FRAC's own comment.
+                inject = None
+                if inject_armed and offset == INJECT_BLINK_TARGET_OFFSET_MS:
+                    inject = {
+                        "blink_ms": inject_blink_ms,
+                        "x": sweep_clip["x"], "y": sweep_clip["y"],
+                        "width": sweep_clip["width"],
+                        "height": sweep_clip["height"] * inject_blink_frac,
+                    }
+                frame, achieved, capture_ms = _capture_sweep_offset(
+                    page, tab_id, mount_at_ms, offset, sweep_clip, inject)
                 sweep_raw_frames.append(frame)
                 sweep_achieved_ms.append(achieved)
                 sweep_capture_ms.append(capture_ms)

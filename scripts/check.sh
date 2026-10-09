@@ -168,6 +168,12 @@ if [[ $FAST -eq 0 ]]; then
     # test_demo_workload_coverage.py's test_import_needs_no_playwright).
     step "ui_live_smoke navigation TTFP anchor (issue #245)"
     run python3 tests/test_ui_live_smoke_nav.py
+
+    # issue #266: _capture_sweep_offset's show/hide bracket for the #252
+    # self-test's injected overlay -- same Playwright-import reason as the
+    # TTFP test above, so it runs here too, not via tests/unit_tests.list.
+    step "ui_live_smoke injected-blink capture bracket (issue #266)"
+    run python3 tests/test_ui_live_smoke_inject.py
 fi
 
 if [[ $fail -ne 0 ]]; then
