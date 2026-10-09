@@ -9,9 +9,13 @@
 # tests/Makefile files, then points scripts/check-test-registration.sh at it
 # via its `[repo-dir]` argument.
 #
-# Wired into `make check` (scripts/check.sh) -- this guard is pure git, no
-# Linux/BPF/PG dependency, so unlike most of tests/unit_tests.list it runs
-# on the Mac, not just on the box.
+# NOT wired into `make check`, CI, or any Makefile target -- this is a
+# reviewer-run guard (see CLAUDE.md's "Two evidence guards" bullet): a
+# reviewer runs `scripts/check-test-registration.sh` by hand before
+# declaring READY. This self-test IS pure git with no Linux/BPF/PG
+# dependency and could run on the Mac tier, but is not invoked
+# automatically anywhere; run it by hand to verify the guard itself still
+# works, the same way the guard is itself run by hand.
 #
 # Usage: tests/test_check_test_registration.sh (run from anywhere)
 set -uo pipefail
@@ -231,6 +235,74 @@ write_fixture "$no_files_base" test_new
 git -C "$no_files_base" add -A
 git -C "$no_files_base" commit -q -m "introduce the test-registration files"
 expect_exit 0 "$no_files_base" "base predating these files entirely still passes (nothing to drop)"
+
+# Case 9 (RED, BSD-sed regression): an entry whose name ENDS IN "t" (e.g.
+# test_bucket, a real tests/unit_tests.list name) must survive
+# extract_unit_tests_list byte-for-byte. The bug this reproduces: BSD sed
+# (macOS's /usr/bin/sed -- the only sed this guard's "Mac-side, seconds, no
+# box" mode ever runs under, and this Mac has no gsed) parses the bracket
+# expression `[ \t]` as the three literal characters space, backslash, t --
+# not a tab escape -- so `sed -e 's/[ \t]*$//'` silently strips trailing
+# runs of ' ', '\\', 't' from every line, turning "test_bucket" into
+# "test_bucke". Two consequences a prior version of this self-test missed
+# entirely (its fixtures never used a name ending in "t"): the FAIL message
+# reports the wrong name, and -- worse -- a mangled name that happens to
+# collide with an unrelated surviving entry makes the guard pass silently.
+# This base has test_bucket in tests/unit_tests.list ONLY (NOT also in the
+# Makefile's TESTS list -- deliberately, so the unaffected awk-based
+# Makefile-TESTS check cannot report the correct "test_bucket" name
+# alongside it and mask a mangled "test_bucke" from the unit_tests.list
+# check in the combined output; that masking is exactly how an earlier
+# version of this very test passed against the broken sed). The branch
+# drops it for real, so the guard must both (a) still detect the drop and
+# (b) name the dropped entry EXACTLY as "test_bucket", not "test_bucke".
+base_endswith_t="$tmpdir/base_endswith_t"
+mkdir -p "$base_endswith_t/tests"
+git -C "$base_endswith_t" init -q -b master
+git -C "$base_endswith_t" config user.email test@example.com
+git -C "$base_endswith_t" config user.name "Test"
+{
+    echo "# unit_tests.list fixture"
+    echo "test_a"
+    echo "test_bucket"
+    echo "test_c"
+} > "$base_endswith_t/tests/unit_tests.list"
+{
+    echo "CC ?= gcc"
+    echo "TESTS = \\"
+    echo "    test_a \\"
+    echo "    test_c"
+    echo "all: \$(TESTS)"
+} > "$base_endswith_t/tests/Makefile"
+git -C "$base_endswith_t" add -A
+git -C "$base_endswith_t" commit -q -m "initial, unit_tests.list has an entry ending in t, Makefile does not"
+git -C "$base_endswith_t" checkout -q -b feature/drop-t-entry
+{
+    echo "# unit_tests.list fixture"
+    echo "test_a"
+    echo "test_c"
+} > "$base_endswith_t/tests/unit_tests.list"
+git -C "$base_endswith_t" add -A
+out=$("$GUARD" "$base_endswith_t" 2>&1); rc=$?
+if [[ "$rc" == "1" ]]; then
+    report true "dropping an entry ending in 't' (test_bucket) is still refused (exit 1)"
+else
+    report false "dropping test_bucket refused (wanted exit 1, got $rc; output: $out)"
+fi
+# Missing entries are printed one per line as "    <name>" (4-space indent,
+# nothing else) -- match that exact line, not a substring, so a mangled
+# "    test_bucke" (missing the trailing "t") cannot satisfy a loose
+# substring grep for "test_bucket".
+if grep -qx "    test_bucket" <<<"$out"; then
+    report true "failure names the dropped entry EXACTLY (test_bucket, not mangled to test_bucke)"
+else
+    report false "failure names test_bucket exactly (not mangled); output: $out"
+fi
+if grep -qx "    test_bucke" <<<"$out"; then
+    report false "BSD-sed mangling regression: guard reported the truncated 'test_bucke', not 'test_bucket'; output: $out"
+else
+    report true "no truncated 'test_bucke' name leaked into the output"
+fi
 
 echo
 echo "$tests_passed/$tests_run passed"

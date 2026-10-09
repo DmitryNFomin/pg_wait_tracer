@@ -54,9 +54,20 @@ base=$(resolve_base) || {
 
 # tests/unit_tests.list entries: one name per line, '#' comments and blank
 # lines stripped, trailing whitespace trimmed.
+#
+# NOT `sed -e 's/[ \t]*$//'`: that reads as a POSIX BASIC regex bracket
+# expression, where `\t` is the two literal characters backslash and `t`,
+# not a tab escape -- GNU sed accepts `\t` as a GNU extension, but macOS's
+# shipped /usr/bin/sed (BSD sed, the ONLY sed this guard's documented
+# "Mac-side, seconds, no box" mode ever runs under, and this Mac has no
+# `gsed`) takes it literally and silently strips trailing runs of the
+# characters ' ', '\', 't' -- e.g. "test_bucket" -> "test_bucke". Found by
+# review, reproduced directly: `echo test_bucket | sed -e 's/[ \t]*$//'`
+# mangles 5 of the 52 real entries in tests/unit_tests.list on this Mac.
+# `[[:space:]]` is the POSIX character class both seds actually support.
 extract_unit_tests_list() {
     local content="$1"
-    printf '%s\n' "$content" | sed -e 's/#.*$//' -e 's/[ \t]*$//' | sed '/^$/d'
+    printf '%s\n' "$content" | sed -e 's/#.*$//' -e 's/[[:space:]]*$//' | sed '/^$/d'
 }
 
 # tests/Makefile's TESTS = ... \ ... multi-line assignment, token per line.
@@ -116,6 +127,11 @@ check_one() {
         echo "FAIL: test-registration guard: $label entries present at base ($base) but" >&2
         echo "  missing on this tree:" >&2
         printf '%s\n' "$missing" | sed 's/^/    /' >&2
+        echo "  This guard matches by exact name, so an intentional rename or removal" >&2
+        echo "  reads as a drop too -- that is expected, not a bug. If the name above" >&2
+        echo "  was deliberately renamed or retired (not silently lost in a merge), say" >&2
+        echo "  so in the PR body and move on; this guard cannot tell the difference" >&2
+        echo "  from the outside, only a human reviewing the diff can." >&2
         fail=1
         missing_total=$((missing_total + $(printf '%s\n' "$missing" | sed '/^$/d' | wc -l)))
     fi
