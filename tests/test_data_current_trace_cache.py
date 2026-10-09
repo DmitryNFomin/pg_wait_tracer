@@ -51,6 +51,7 @@ Needs pgwt-server and tests/gen_test_traces built. No PG, no root, no network.
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -1290,6 +1291,204 @@ def bypass_stats_parser(tr):
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+class _ExitedServer:
+    """A pgwt-server that has already exited, with its stdin read end gone.
+
+    #348's EPIPE is a race BY CONSTRUCTION, not an intermittent fault:
+    server_init() prints `no trace files found in ...` and main() returns
+    before the stdin request loop is ever reached (src/server.c), so the
+    client's write always meets a process that is already going away. Which
+    side of that race a run lands on is pure scheduling, and a race cannot be
+    aimed from a test. So the losing side is stood in for here: a stdin whose
+    write (or flush) raises, which is exactly the input query() has to handle.
+    The winning side -- write succeeds, stdout already at EOF -- is the branch
+    the live refusal case in bypass_dependencies() walks.
+
+    `fail_on="none"` is a server that answers normally, used to show these
+    assertions are not merely accepting any exception at all.
+    """
+
+    class _Stdin:
+        def __init__(self, fail_on):
+            self.fail_on = fail_on
+            self.closed = False
+            self.written = []
+
+        def _boom(self, when):
+            if self.fail_on == when:
+                raise BrokenPipeError(32, "Broken pipe")
+            if self.fail_on == "other-" + when:
+                raise ValueError("I/O operation on closed file")
+
+        def write(self, data):
+            self._boom("write")
+            self.written.append(data)
+
+        def flush(self):
+            self._boom("flush")
+
+        def close(self):
+            self._boom("close")
+            self.closed = True
+
+    class _Stdout:
+        def __init__(self, line=""):
+            self.line = line
+
+        def readline(self):
+            return self.line
+
+    def __init__(self, fail_on="write", alive=False, answer=""):
+        self.stdin = self._Stdin(fail_on)
+        self.stdout = self._Stdout(answer)
+        self.stderr = None          # stderr went to a file, as #274 allows
+        self.alive = alive
+        self.waits = 0
+
+    def wait(self, timeout=None):
+        self.waits += 1
+        if self.alive:
+            raise subprocess.TimeoutExpired("pgwt-server", timeout)
+        return 1
+
+
+def _exited_harness(fail_on, stderr_text, alive=False, answer="",
+                    write_file=True):
+    """A ServerHarness wired to an already-exited server, with `stderr_text`
+    where its diagnostic would be. stderr_text=None means the file never
+    appeared at all."""
+    tmp = tempfile.mkdtemp(prefix="pgwt_cc_epipe_")
+    path = os.path.join(tmp, "refusal.err")
+    if write_file and stderr_text is not None:
+        with open(path, "w") as f:
+            f.write(stderr_text)
+    srv = ServerHarness(os.path.join(tmp, "no-such-trace-dir"),
+                        stderr_path=path)
+    srv.proc = _ExitedServer(fail_on=fail_on, alive=alive, answer=answer)
+    return srv, tmp
+
+
+REFUSAL = "pgwt-server: no trace files found in /tmp/empty\n"
+
+
+def bypass_refusal_reason_survives_broken_pipe(tr):
+    """#348: the refusal REASON must survive both sides of the startup race.
+
+    The assertion this protects is in bypass_dependencies() below --
+    `"no trace files" in why` -- and it was getting `[Errno 32] Broken pipe`
+    instead of the reason on some runs. The product is not at fault and is not
+    changed: server_init() does write the reason, and main()'s exit before the
+    stdin loop has been the ordering since 5a668df. Only the retrieval was
+    one-sided.
+
+    Each case below is a way this retrieval could stop retrieving. A reason
+    that cannot be read must come back SAID to be missing, never as an empty
+    or invented one, because `"no trace files" in ""` is the assertion going
+    red for the wrong reason -- and an invented one is it going green for the
+    wrong reason, which is worse."""
+    cases = [
+        # (label, fail_on, stderr_text, needle_expected)
+        ("EPIPE on the request write", "write", REFUSAL, True),
+        ("EPIPE on the request flush", "flush", REFUSAL, True),
+        ("stdout at EOF after the write landed", "none", REFUSAL, True),
+    ]
+    for label, fail_on, text, want in cases:
+        srv, tmp = _exited_harness(fail_on, text)
+        try:
+            raised = ""
+            try:
+                srv.query("transitions")
+            except Exception as exc:
+                raised = "%s: %s" % (type(exc).__name__, exc)
+            tr.check(("no trace files" in raised) is want,
+                     "%s still carries the reason (%r)" % (label, raised[:110]))
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    # ── and now every way the retrieval could go blind ──────────────────────
+    # A gate that cannot see must refuse. Each of these must raise, and must
+    # NOT contain the needle: the caller's assertion then goes red, which is
+    # the correct outcome when the reason is absent rather than wrong.
+    blind = [
+        ("an empty stderr file", "write", "", True),
+        ("a stderr file that never appeared", "write", None, False),
+        ("a different diagnostic entirely", "write",
+         "pgwt-server: unrelated complaint\n", True),
+    ]
+    for label, fail_on, text, write_file in blind:
+        srv, tmp = _exited_harness(fail_on, text, write_file=write_file)
+        try:
+            raised = ""
+            try:
+                srv.query("transitions")
+            except Exception as exc:
+                raised = "%s: %s" % (type(exc).__name__, exc)
+            tr.check(raised != "" and "no trace files" not in raised,
+                     "%s raises WITHOUT inventing the reason (%r)"
+                     % (label, raised[:110]))
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    # A server that is still running when the pipe broke: its stderr is
+    # incomplete by definition, so this refuses rather than asserting against
+    # half a line.
+    srv, tmp = _exited_harness("write", REFUSAL, alive=True)
+    try:
+        raised = ""
+        try:
+            srv.query("transitions")
+        except Exception as exc:
+            raised = type(exc).__name__
+        tr.check_eq(raised, "TimeoutExpired",
+                    "a server still running after EPIPE refuses, never "
+                    "reports a partial reason")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    # An error that is NOT a broken pipe must propagate as itself. Converting
+    # every write failure into a refusal-with-a-reason would make a harness
+    # bug read as a server refusal.
+    srv, tmp = _exited_harness("other-write", REFUSAL)
+    try:
+        raised = ""
+        try:
+            srv.query("transitions")
+        except Exception as exc:
+            raised = type(exc).__name__
+        tr.check_eq(raised, "ValueError",
+                    "a non-EPIPE write failure is not dressed up as a "
+                    "server refusal")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    # The other half of #348: __exit__ -> stop() closes stdin, close() flushes,
+    # and a flush into a dead pipe raises -- which would REPLACE the
+    # RuntimeError query() just raised, handing the caller the broken pipe
+    # after all.
+    srv, tmp = _exited_harness("close", REFUSAL)
+    try:
+        raised = ""
+        try:
+            srv.stop()
+        except Exception as exc:
+            raised = "%s: %s" % (type(exc).__name__, exc)
+        tr.check_eq(raised, "",
+                    "tearing down an exited server does not raise over the "
+                    "request it never sent")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    # And the harness must still be able to answer normally: if query() had
+    # been left unable to return a response, every case above would pass while
+    # the suite measured nothing.
+    srv, tmp = _exited_harness("none", REFUSAL, answer='{"id": 1, "ok": 1}\n')
+    try:
+        tr.check_eq(srv.query("transitions").get("ok"), 1,
+                    "a server that does answer is still answered")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def bypass_dependencies(tr):
     """A missing or non-executable generator must FAIL this test, never skip
     it. tests/run_all.sh treats exit 126/127 as a broken invocation for the
@@ -1353,6 +1552,7 @@ def bypass_dependencies(tr):
 
 def section_bypass(tr):
     print("\n### 5. bypass suite: ways this test could stop checking ###")
+    bypass_refusal_reason_survives_broken_pipe(tr)
     bypass_dependencies(tr)
     bypass_stats_parser(tr)
     trace_dir = generate_traces(busy_scenario(span_s=10, pids=2, per_pid=2000))

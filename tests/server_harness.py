@@ -81,12 +81,60 @@ class ServerHarness:
 
     def stop(self):
         if self.proc:
-            self.proc.stdin.close()
+            try:
+                self.proc.stdin.close()
+            except BrokenPipeError:
+                # Tearing down a server that already exited: close() flushes,
+                # and a flush into a pipe with no reader raises. This is the
+                # SECOND half of #348 -- raising here on the way out of a
+                # `with` block REPLACES whatever query() raised inside it, so
+                # a caller asserting on the refusal reason would receive
+                # "[Errno 32] Broken pipe" even after query() captured the
+                # reason correctly. The reason is already in that exception;
+                # the unsent request is of no interest to anyone.
+                pass
             self.proc.wait(timeout=5)
             self.proc = None
         if self._stderr_file:
             self._stderr_file.close()
             self._stderr_file = None
+
+    def captured_stderr(self):
+        """Everything pgwt-server wrote to stderr, however it was routed.
+
+        Both failure paths in query() need this, and they are the same event
+        seen from two sides: the server exited. A closed stdout is that seen
+        on the way back, a BrokenPipeError on the request write is that seen
+        on the way out, and the reason it exited is only ever on stderr.
+
+        "Nothing captured" is reported as such rather than as an empty
+        diagnostic: a caller asserting WHY the server refused must be able to
+        tell an absent reason from a wrong one, and "" reads as neither.
+        """
+        if self.proc is not None and self.proc.stderr is not None:
+            # A pipe: read() returns at EOF, i.e. when the server exits.
+            return self.proc.stderr.read() or "(nothing on stderr)"
+        if self._stderr_path:
+            if self._stderr_file:
+                self._stderr_file.flush()
+            try:
+                with open(self._stderr_path, errors="replace") as f:
+                    return f.read() or "(nothing on stderr)"
+            except OSError as exc:
+                return "(stderr file unreadable: %s)" % exc
+        return "(not captured)"
+
+    def _wait_for_exit(self):
+        """Bounded wait for the server to finish, so its stderr is complete.
+
+        stdio flushes at process exit, so a stderr FILE read before then can
+        hold a prefix of the diagnostic or none of it. Not a retry and not a
+        settle delay: it waits for the one event that completes the capture,
+        and a server still running after it raises TimeoutExpired rather than
+        letting the caller assert against half a reason.
+        """
+        if self.proc is not None:
+            self.proc.wait(timeout=5)
 
     def query(self, cmd, timeout=None, **kwargs):
         """Send a command and return parsed JSON response.
@@ -131,8 +179,24 @@ class ServerHarness:
             req["to"] = self._to_ns
 
         line = json.dumps(req) + "\n"
-        self.proc.stdin.write(line)
-        self.proc.stdin.flush()
+        try:
+            self.proc.stdin.write(line)
+            self.proc.stdin.flush()
+        except BrokenPipeError:
+            # #348: pgwt-server's startup refusal prints its reason
+            # (src/server.c server_init(): "no trace files found in ...") and
+            # main() returns before the stdin request loop is ever reached, so
+            # this write always races a process that is already exiting. Which
+            # side of that race we land on is pure scheduling: either the
+            # write succeeds and readline() returns "" below, or the write
+            # gets EPIPE here. The REASON is on stderr in both, so both must
+            # surface it -- otherwise a caller's assertion on the reason is
+            # decided by the scheduler. Unchanged since 5a668df; the ordering
+            # in server.c is deliberate and is not what this works around.
+            self._wait_for_exit()
+            raise RuntimeError(
+                f"pgwt-server closed stdin before reading '{cmd}' "
+                f"(id={req['id']}). stderr: {self.captured_stderr()}") from None
 
         start = time.monotonic()
         if timeout is not None:
@@ -145,16 +209,8 @@ class ServerHarness:
 
         resp_line = self.proc.stdout.readline()
         if not resp_line:
-            if self.proc.stderr is not None:
-                stderr = self.proc.stderr.read()
-            elif self._stderr_path:
-                if self._stderr_file:
-                    self._stderr_file.flush()
-                with open(self._stderr_path) as f:
-                    stderr = f.read()
-            else:
-                stderr = "(not captured)"
-            raise RuntimeError(f"pgwt-server closed stdout. stderr: {stderr}")
+            raise RuntimeError("pgwt-server closed stdout. stderr: %s"
+                               % self.captured_stderr())
 
         return json.loads(resp_line)
 
