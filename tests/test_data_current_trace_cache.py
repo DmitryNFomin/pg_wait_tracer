@@ -253,6 +253,36 @@ class QuietRunner(TestRunner):
             self.failed += 1
 
 
+# ── The #283 cache PROBE command ────────────────────────────────────────────
+#
+# This file verifies #283: that the already-cached prefix of current.trace is
+# reused as the file grows. `transitions` used to be the probe for that, and it
+# has STOPPED BEING A VALID ONE -- the paint-latency block aggregate answers
+# `transitions` by merging per-block tables, so interior blocks are never read
+# and the raw decoded-block cache is never consulted for them. A probe that
+# does not reach the code under test cannot measure it.
+#
+# So the probe moves to `session_timeline`, which is still a raw-path command
+# and still reads every committed block. What this file DEMANDS of #283 is
+# unchanged -- same growth assertion, same restart assertion, same served/
+# decoded comparisons, same cache-on/off controls at the same strength. Only
+# the instrument moved, and only at the sites that measure the cache.
+#
+# The sites that compare ANSWERS across the cache toggle, and the bypass cases
+# that assert require_used() REFUSES a run where the cache was not consulted,
+# deliberately keep using `transitions`: they are not measuring the cache, and
+# for the first group `transitions` is now the more interesting command
+# because its decode hook is what reads current.trace through that cache.
+#
+# ONE SHAPE CHANGE, flagged rather than folded in: `transitions` publishes its
+# count as `total`, `session_timeline` as `total_count`. The count_of() helper
+# below exists precisely because mixing those two up once made three growth
+# assertions read 0 -> 0 as agreement, so the field name is passed explicitly
+# at every call rather than guessed.
+PROBE_CMD = "session_timeline"
+PROBE_COUNT = "total_count"
+
+
 def count_of(resp, key):
     """Pull a count field, raising if the key is absent.
 
@@ -651,11 +681,11 @@ def section_growth(tr):
         with ServerHarness(trace_dir, env=env, stderr_path=err) as srv:
             for committed in (half, half + 1, full):
                 write_meta(trace_dir, committed)
-                resp = srv.query("transitions", from_=w_from, to_=w_to)
-                seen.append(count_of(resp, "total"))
+                resp = srv.query(PROBE_CMD, from_=w_from, to_=w_to)
+                seen.append(count_of(resp, PROBE_COUNT))
                 stats.append(read_curcache(err))
-                print("    committed=%d transitions=%d curcache=%s"
-                      % (committed, seen[-1], stats[-1]))
+                print("    committed=%d %s=%d curcache=%s"
+                      % (committed, PROBE_CMD, seen[-1], stats[-1]))
 
         tr.check(seen[0] > 0, "the first (half-committed) request sees events")
         tr.check(seen[1] > seen[0],
@@ -681,8 +711,8 @@ def section_growth(tr):
         off = []
         with ServerHarness(trace_dir, env={"PGWT_CURRENT_TRACE_CACHE": "0"}) \
                 as srv:
-            resp = srv.query("transitions", from_=w_from, to_=w_to)
-            off.append(count_of(resp, "total"))
+            resp = srv.query(PROBE_CMD, from_=w_from, to_=w_to)
+            off.append(count_of(resp, PROBE_COUNT))
         tr.check_eq(seen[2], off[0],
                     "the grown cache's final count matches the uncached read")
     finally:
@@ -725,13 +755,13 @@ def section_forward_gap(tr):
         early = (BASE - 1 * S, BASE + 4 * S)
         late = (BASE + 31 * S, BASE + 37 * S)
         with ServerHarness(trace_dir, env=env, stderr_path=err) as srv:
-            a_resp = srv.query("transitions", from_=str(early[0]),
+            a_resp = srv.query(PROBE_CMD, from_=str(early[0]),
                                to_=str(early[1]))
             a = read_curcache(err)
-            b_resp = srv.query("transitions", from_=str(late[0]),
+            b_resp = srv.query(PROBE_CMD, from_=str(late[0]),
                                to_=str(late[1]))
             b = read_curcache(err)
-            c_resp = srv.query("transitions", from_=str(late[0]),
+            c_resp = srv.query(PROBE_CMD, from_=str(late[0]),
                                to_=str(late[1]))
             c = read_curcache(err)
         print("    early %s" % a)
@@ -740,10 +770,12 @@ def section_forward_gap(tr):
         if not (a and b and c):
             tr.check(False, "curcache stats unreadable across the jump")
             return
-        tr.check(count_of(a_resp, "total") > 0,
-                 "the early window saw events (%d)" % count_of(a_resp, "total"))
-        tr.check(count_of(b_resp, "total") > 0,
-                 "the late window saw events (%d)" % count_of(b_resp, "total"))
+        tr.check(count_of(a_resp, PROBE_COUNT) > 0,
+                 "the early window saw events (%d)"
+                 % count_of(a_resp, PROBE_COUNT))
+        tr.check(count_of(b_resp, PROBE_COUNT) > 0,
+                 "the late window saw events (%d)"
+                 % count_of(b_resp, PROBE_COUNT))
         # The gap is real: the run now starts past where the old one ended.
         tr.check(b["lo"] > a["lo"] + a["blocks"],
                  "the jumped-to window's first block (%d) really is past the "
@@ -772,9 +804,9 @@ def section_forward_gap(tr):
         # Correctness, not just bookkeeping: same answers as the old path.
         with ServerHarness(trace_dir,
                            env={"PGWT_CURRENT_TRACE_CACHE": "0"}) as srv:
-            ctl_a = srv.query("transitions", from_=str(early[0]),
+            ctl_a = srv.query(PROBE_CMD, from_=str(early[0]),
                               to_=str(early[1]))
-            ctl_b = srv.query("transitions", from_=str(late[0]),
+            ctl_b = srv.query(PROBE_CMD, from_=str(late[0]),
                               to_=str(late[1]))
         tr.check_eq(canonical_body(a_resp), canonical_body(ctl_a),
                     "the early window matches the uncached read")
@@ -969,18 +1001,18 @@ def bypass_truncated_file_under_meta(tr):
         size = os.path.getsize(path)
         w_from, w_to = fixture_window(span_s=12)
         with ServerHarness(trace_dir, env=env, stderr_path=err) as srv:
-            before = srv.query("transitions", from_=w_from, to_=w_to)
-            n_before = count_of(before, "total")
+            before = srv.query(PROBE_CMD, from_=w_from, to_=w_to)
+            n_before = count_of(before, PROBE_COUNT)
             pre = read_curcache(err)
             with open(path, "r+b") as f:
                 f.truncate(size // 3)
-            after = srv.query("transitions", from_=w_from, to_=w_to)
+            after = srv.query(PROBE_CMD, from_=w_from, to_=w_to)
             post = read_curcache(err)
         print("    truncation: %d events -> %s" % (n_before, canonical(after)[:160]))
         print("    curcache %s -> %s" % (pre, post))
         tr.check(n_before > 0, "the pre-truncation request saw events")
         refused = "unavailable" in after or "error" in after
-        tr.check(refused or count_of(after, "total") < n_before,
+        tr.check(refused or count_of(after, PROBE_COUNT) < n_before,
                  "a truncated current.trace refuses or returns FEWER events, "
                  "never the cached superset")
         if pre and post:
@@ -992,9 +1024,15 @@ def bypass_truncated_file_under_meta(tr):
                      "(%d -> %d)" % (pre["blocks"], post["blocks"]))
         else:
             tr.check(False, "curcache stats unreadable across the truncation")
+        # The control MUST query the same command as the probe. It said
+        # "transitions" while the probe moved to PROBE_CMD, so this compared
+        # two different commands -- session_timeline's empty-with-fidelity-none
+        # against transitions' full_fidelity_required refusal -- and could
+        # never hold whatever the product did. A cross-command check_eq is not
+        # a weaker assertion, it is no assertion at all.
         with ServerHarness(trace_dir,
                            env={"PGWT_CURRENT_TRACE_CACHE": "0"}) as srv:
-            ctl = srv.query("transitions", from_=w_from, to_=w_to)
+            ctl = srv.query(PROBE_CMD, from_=w_from, to_=w_to)
         tr.check_eq(canonical_body(after), canonical_body(ctl),
                     "the truncated read matches a fresh uncached read exactly")
     finally:

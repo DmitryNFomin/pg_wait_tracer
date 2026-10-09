@@ -1,0 +1,63 @@
+mutation M17 (src/compute.c)
+broken guard: cmp_trans_desc(): back to count-only, so the raw path's tied rows are ordered by hash layout again and a row-by-row comparison against the aggregate's readout stops meaning anything.
+expected to be caught by: sec3c
+
+--- const struct trans_accum *x = a, *y = b;
+    if (x->count != y->count)
+        return x->count > y->count ? -1 : 1;
+    if (x->from_event != y->from_event)
+        return x->from_event < y->from_event
++++ uint64_t ca = ((const struct trans_accum *)a)->count;
+    uint64_t cb = ((const struct trans_accum *)b)->count;
+    return (cb > ca) - (cb < ca);   /* MUTANT: not a total order */
+
+exit=1, 13 FAIL line(s)
+
+test_block_agg — per-committed-block transition aggregate (Phase 1)
+=== §1 record predicate vs pgwt_compute_transitions ===
+    6 counted, 7 rejected, both predicates agreeing on all 13
+=== §2 build + merge against literal expected values ===
+=== §3 merge associativity + commutativity ===
+=== §4 straddle: a pair whose old_event began in an earlier block ===
+=== §5 plan(): exactly one of SKIP/MERGE/DECODE per block ===
+    plan outcomes over 378 windows: merge=553 decode=331 skip=1006
+=== §6 model: merged + decoded == raw, bit-exact, every window ===
+    378 windows compared, 170 of them at a merge/decode seam
+=== §6b the end-key bound: agreement with the loader, and the cost of getting it wrong ===
+=== §7 mutation probes: the comparator can see one count, one nanosecond, one pair ===
+    probe 0 (clean (control)         ) disagreements=0
+    probe 1 (+1 on one pair count    ) disagreements=2
+    probe 2 (+1 ns on one pair       ) disagreements=1
+    probe 3 (-1 ns on one pair       ) disagreements=1
+    probe 4 (an extra pair appears   ) disagreements=4
+    probe 5 (one pair disappears     ) disagreements=2
+    probe 6 (+1 ns on one node       ) disagreements=1
+    probe 7 (one node disappears     ) disagreements=2
+=== §8 bypass suite: a path that cannot see must refuse ===
+=== §9 on-disk: pgwt_block_agg_window_from_reader vs raw, twice ===
+    190 windows x 2 passes, 472 merges (236 in pass 2), 288 decodes, cache: 1520 lookups / 1486 hits / 64 stores
+=== §0 vacuity ledger ===
+    windows compared .................. 378
+    blocks MERGEd ..................... 553
+    blocks DECODEd .................... 331
+    blocks SKIPped .................... 1006
+    windows at a merge/decode seam .... 170
+    windows with positive total_ns .... 364
+    windows with >=1 merged pair ...... 364
+    mutation probes that went red ..... 7
+    refusals observed ................. 46
+FAILED: 13 check(s)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:840: §3c raw rows 0/1 violate (count desc, from asc, to asc): (167772161->0, 1) then (16777217->167772161, 1)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:840: §3c raw rows 3/4 violate (count desc, from asc, to asc): (167772162->167772161, 1) then (0->167772161, 1)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:840: §3c raw rows 6/7 violate (count desc, from asc, to asc): (167772162->0, 1) then (16777217->0, 1)
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:851: §3c row 0 differs: raw 167772161->0, aggregate 0->167772161
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:851: §3c row 1 differs: raw 16777217->167772161, aggregate 16777217->0
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:851: §3c row 2 differs: raw 50331649->167772161, aggregate 16777217->167772161
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:851: §3c row 3 differs: raw 167772162->167772161, aggregate 50331649->0
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:851: §3c row 4 differs: raw 0->167772161, aggregate 50331649->167772161
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:851: §3c row 5 differs: raw 100663296->167772161, aggregate 100663296->0
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:851: §3c row 6 differs: raw 167772162->0, aggregate 100663296->167772161
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:851: §3c row 7 differs: raw 16777217->0, aggregate 167772161->0
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:851: §3c row 8 differs: raw 50331649->0, aggregate 167772162->0
+FAIL /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a971448391a393e0f/tests/test_block_agg.c:851: §3c row 9 differs: raw 100663296->0, aggregate 167772162->167772161
+WARN: cannot open /nonexistent/pgwt/no-such.trace: No such file or directory

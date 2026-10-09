@@ -1,0 +1,110 @@
+
+### 1. cache on vs off: byte-identical responses ###
+  PASS: fixture publishes a current.trace.meta watermark
+  PASS: every request answered (cache on)
+  PASS: every request answered (cache off)
+  PASS: all 247 responses byte-identical across the toggle
+  PASS: the cache-on run actually served cached blocks (blocks=8 served=932 decoded=8)
+  PASS: PGWT_CURRENT_TRACE_CACHE=0 reports the cache off
+  PASS: the cache-off run served nothing from cache
+  PASS: responses carry real payload (7305298 bytes)
+  PASS: resident within one growth step of charged (cap=1048576 events=32320)
+
+### 1b. mixed exact+sampled trace: byte-identical responses ###
+  PASS: all 40 mixed-fidelity responses byte-identical across the toggle
+  PASS: the mixed-fidelity run served cached blocks (blocks=44 served=1036 decoded=44)
+  PASS: the fixture really is sampled/mixed (fidelity='mixed')
+  PASS: a sample period reached the response, so SAMPLES blocks contributed
+
+### 1c. second read of a window == first read ###
+  PASS: all 40 windows answer identically on the cached re-read
+  PASS: the re-reads were actually served from cache (blocks=34 served=1606 decoded=34)
+
+### 2. five identical requests: no committed block decoded twice ###
+    cache off decoded=[0, 0, 0, 0, 0] served=[0, 0, 0, 0, 0] rows=[160, 160, 160, 160, 160] ms=['5', '4', '3', '3', '3']
+    cache on  decoded=[8, 8, 8, 8, 8] served=[0, 8, 16, 24, 32] rows=[160, 160, 160, 160, 160] ms=['6', '3', '2', '2', '2']
+  PASS: the repeated request returns rows (not an empty window)
+  PASS: the same five requests return the same row count with the cache on and off
+  PASS: cache-on decode counter is observable
+  PASS: requests 2-5 decoded no further committed block (decoded stayed 8)
+  PASS: requests 2-5 were served from the cache (served 0 -> 32)
+  PASS: with the cache off nothing is retained at all
+    median ms: on=2 off=3 (reported, not asserted)
+
+### 3. blocks committing between requests ###
+  PASS: fixture has enough committed blocks to grow through (8)
+    committed=4 session_timeline=16040 curcache={'enabled': 1, 'lo': 0, 'blocks': 4, 'events': 16384, 'cap': 16384, 'decoded': 4, 'served': 0, 'resets': 0}
+    committed=5 session_timeline=20072 curcache={'enabled': 1, 'lo': 0, 'blocks': 5, 'events': 20480, 'cap': 1048576, 'decoded': 5, 'served': 4, 'resets': 0}
+    committed=8 session_timeline=31680 curcache={'enabled': 1, 'lo': 0, 'blocks': 8, 'events': 32320, 'cap': 1048576, 'decoded': 8, 'served': 9, 'resets': 0}
+  PASS: the first (half-committed) request sees events
+  PASS: one more committed block adds events (16040 -> 20072)
+  PASS: the rest of the blocks add more (20072 -> 31680)
+  PASS: the cache entry extended rather than being rebuilt (4 -> 8 blocks)
+  PASS: growth never dropped the entry
+  PASS: the already-cached prefix was reused across the growth
+  PASS: the grown cache's final count matches the uncached read
+
+### 3b. the window jumps forward past the cached run ###
+    early {'enabled': 1, 'lo': 0, 'blocks': 1, 'events': 4096, 'cap': 16384, 'decoded': 1, 'served': 0, 'resets': 0}
+    jump  {'enabled': 1, 'lo': 6, 'blocks': 2, 'events': 7744, 'cap': 16384, 'decoded': 3, 'served': 0, 'resets': 1}
+    again {'enabled': 1, 'lo': 6, 'blocks': 2, 'events': 7744, 'cap': 16384, 'decoded': 3, 'served': 2, 'resets': 1}
+  PASS: the early window saw events (3517)
+  PASS: the late window saw events (4404)
+  PASS: the jumped-to window's first block (6) really is past the old run's end (1) -- there was a gap to restart over
+  PASS: the run restarted ON the new blocks instead of freezing (lo 0 -> 6, blocks=2)
+  PASS: the gap dropped the stale run rather than keeping it for nothing (resets 0 -> 1)
+  PASS: repeating the jumped-to window decodes nothing new (decoded stayed 3)
+  PASS: repeating it is served from the restarted run (served 0 -> 2)
+  PASS: the early window matches the uncached read
+  PASS: the window read from the RESTARTED run matches the uncached read
+
+### 4. current.trace truncated and rewritten under a live server ###
+    pre pids=[1000, 1001, 1002, 1003] post pids=[7000, 7001, 7002, 7003]
+  PASS: pre-restart request returned sessions
+  PASS: post-restart request returned sessions
+  PASS: pre-restart sessions are the first capture's pids
+  PASS: not one pre-restart pid survives into the post-restart answer
+  PASS: every post-restart session is from the new capture
+  PASS: the identity check dropped the entry (resets 0 -> 1)
+
+### 5. bypass suite: ways this test could stop checking ###
+  PASS: pgwt-server exists and is executable
+  PASS: gen_test_traces exists and is executable
+  PASS: an empty scenario raises or produces no trace file at all (found none)
+  PASS: an empty trace dir is refused outright, never answered as an agreeing differential
+  PASS: and the refusal names the reason ('pgwt-server closed stdout. stderr: pgwt-server: no trace files found in /tmp/pgwt_cc_void_')
+  PASS: and it is REFUSED as cache evidence as well
+  PASS: a missing stderr file parses as None, not zeros
+  PASS: no stderr path at all parses as None
+  PASS: stderr with no curcache line parses as None
+  PASS: a curcache line missing fields parses as None
+  PASS: an unparseable field parses as None
+  PASS: a line with no cap= field parses as None, so the resident-memory assertions cannot be skipped silently
+  PASS: the LAST curcache line is the one reported
+  PASS: require_used refuses None
+  PASS: require_used refuses an all-zero entry
+  PASS: a run with the cache disabled is REFUSED as evidence, not counted as agreement
+  PASS: the rotated fixture leaves no current.trace
+  PASS: rotated-only data answers identically (it must)
+  PASS: a rotated-only trace dir is REFUSED as evidence for the current.trace cache
+  PASS: a current.trace with no meta answers identically across the toggle
+  PASS: the no-meta fixture actually returned counts
+  PASS: a garbage meta answers identically across the toggle
+  PASS: a over-long meta answers identically across the toggle
+    truncation: 7425 events -> {"events": [], "fidelity": "none", "id": 3, "pids": [], "total_count": 0, "truncated": false}
+    curcache {'enabled': 1, 'lo': 0, 'blocks': 2, 'events': 7578, 'cap': 16384, 'decoded': 2, 'served': 0, 'resets': 0} -> {'enabled': 1, 'lo': 0, 'blocks': 0, 'events': 0, 'cap': 0, 'decoded': 2, 'served': 0, 'resets': 1}
+  PASS: the pre-truncation request saw events
+  PASS: a truncated current.trace refuses or returns FEWER events, never the cached superset
+  PASS: the vanished blocks were dropped from the entry (resets 0 -> 1)
+  PASS: the entry did not keep blocks the file no longer has (2 -> 0)
+  FAIL: the truncated read matches a fresh uncached read exactly (got {"events": [], "fidelity": "none", "pids": [], "total_count": 0, "truncated": false}, expected {"code": "full_fidelity_required", "fidelity": "none", "hint": "capture an exact window (escalate) and retry", "unavailable": "requires full-fidelity data"})
+  PASS: an entry repeatedly dropped by its budget answers identically to the uncached path
+  PASS: the tight budget actually fired the drop path (resets=1)
+  PASS: the charged entry stayed inside its cap (events=3482)
+  PASS: resident is within one growth step of charged (cap=5000 events=3482 delta=1518, step=1048576; scale-blind here)
+    step=2048 charged=33136 resident=34816 slack=1680
+  PASS: a doubling WOULD be caught on this fixture: it would reach cap=65536 for 33136 events, overshooting by 32400 > step 2048
+  PASS: resident is within one growth step of charged (cap=34816 events=33136 slack=1680 step=2048)
+  PASS: resident covers charged (cap=34816 >= events=33136)
+
+78/79 tests passed
