@@ -1688,6 +1688,807 @@ static int ledger_falsification(void)
     return zero ? 2 : 1;
 }
 
+/* ── THE TAIL: "last N seconds ending at now" ─────────────── */
+
+/* The window the UI actually asks for ends at NOW, past the last committed
+ * block, so plain query() refuses it (REFUSE_RANGE) and `variants` would
+ * gain nothing live. pgwt_variant_index_query_tail() answers it from the
+ * index PLUS the caller's raw-decoded tail. Everything below is about the
+ * one thing that can go silently wrong there: CLOSE ORDER across the
+ * index/tail seam, which decides query_ids[0], which executions land in
+ * the bounded p95 sample, and the hash table's collision chains.
+ *
+ * A naive "append the tail" is not available here and the tests say so in
+ * the only way that counts: the mutation harness reverses the merge order
+ * (T01), drops the carry copy (T02) and truncates the crossing sequence
+ * (T03), and each of those must turn one of these checks RED. */
+
+static long c_tail_cmp, c_tail_beyond, c_tail_rows_sel, c_tail_crossing,
+            c_tail_empty, c_tail_tie_refused, c_tail_carries, c_tail_discard,
+            c_tail_only_window, c_tail_idem;
+
+/* Blocks a cut set produces. */
+static int count_blocks(const struct fixture *f, unsigned cuts)
+{
+    int blk = 0;
+    for (int e = 1; e <= f->n; e++)
+        if ((e == f->n) || ((cuts >> (unsigned)(e - 1)) & 1u))
+            blk++;
+    return blk;
+}
+
+/* Index the FIRST `k` blocks of the cut set; *tail_first receives the
+ * record where the un-indexed remainder (the caller's tail) begins. */
+static int build_index_prefix(const struct fixture *f, unsigned cuts, int k,
+                              struct pgwt_variant_index *idx, int *tail_first)
+{
+    pgwt_variant_index_init(idx);
+    int blk = 0, s = 0;
+    *tail_first = 0;
+    for (int e = 1; e <= f->n && blk < k; e++) {
+        int cut = (e == f->n) || ((cuts >> (unsigned)(e - 1)) & 1u);
+        if (!cut)
+            continue;
+        if (pgwt_variant_index_add_block(idx, blk, f->ev[s].timestamp_ns,
+                                         f->ev[e - 1].timestamp_ns,
+                                         &f->ev[s], e - s) != 0)
+            return -1;
+        blk++;
+        s = e;
+        *tail_first = e;
+    }
+    if (blk == 0)
+        return -1;      /* an index with no block at all cannot be queried */
+    return pgwt_variant_index_seal(idx);
+}
+
+/* One (fixture, cut set, indexed-block count, window, phase) comparison
+ * with the remainder handed over as the tail. Returns 0 on bit-exact
+ * agreement with pgwt_compute_variants for the same window. */
+static int compare_one_tail(const struct fixture *f, unsigned cuts, int k,
+                            uint64_t from, uint64_t to,
+                            enum pgwt_variant_phase phase, int max_variants)
+{
+    struct pgwt_variant_index idx;
+    int tail_first = 0;
+    if (build_index_prefix(f, cuts, k, &idx, &tail_first) != 0) {
+        printf("  FAIL: prefix build refused for %s cuts=0x%x k=%d (%s)\n",
+               f->name, cuts, k,
+               pgwt_variant_index_refusal_str(idx.build_refusal));
+        pgwt_variant_index_free(&idx);
+        return -1;
+    }
+
+    const struct pgwt_trace_event *tail = &f->ev[tail_first];
+    int tail_count = f->n - tail_first;
+    uint64_t last = f->ev[f->n - 1].timestamp_ns;
+    uint64_t seam = pgwt_variant_index_tail_from_ns(&idx);
+    /* What the caller decoded: everything after the index's coverage, up to
+     * at least the window end (that is what "ends at now" means). */
+    uint64_t tail_to = to > last ? to : last;
+
+    /* State that must be untouched: query_tail walks a COPY. */
+    int rows_before = idx.n_rows, steps_before = idx.n_steps;
+    int open_before = pgwt_variant_index_open_at_end(&idx);
+    int disc_before = pgwt_variant_index_discarded(&idx);
+
+    struct pgwt_filter zero;
+    memset(&zero, 0, sizeof(zero));
+    struct pgwt_variant_index_query_result q;
+    int rc = pgwt_variant_index_query_tail(&idx, from, to, &zero, max_variants,
+                                           phase, tail, tail_count, seam,
+                                           tail_to, &q);
+
+    /* The one shape this path refuses: the first tail record shares the
+     * last indexed record's timestamp, so their relative order in the
+     * loader's stable sort is not something the index can establish.
+     * Asserted as a REFUSAL, never skipped — a refusal that was not
+     * demanded is a refusal that could silently become an answer. */
+    int tie = tail_count > 0 && tail[0].timestamp_ns <= idx.cover_to_ns;
+    int bad = 0;
+
+    if (tie) {
+        if (!(rc == -1 && q.refused == PGWT_VARIANT_INDEX_REFUSE_TAIL_ORDER &&
+              q.res.failed == 1 && q.sequences_indexed == 0)) {
+            printf("  FAIL: seam TIE for %s cuts=0x%x k=%d must refuse "
+                   "(rc=%d %s)\n", f->name, cuts, k, rc,
+                   pgwt_variant_index_refusal_str(q.refused));
+            bad = 1;
+        }
+        c_tail_tie_refused++;
+        pgwt_variant_index_query_free(&q);
+        pgwt_variant_index_free(&idx);
+        return bad ? -1 : 0;
+    }
+
+    struct pgwt_variants_result oracle;
+    oracle_variants(f, from, to, max_variants, phase, &oracle, NULL);
+
+    if (rc != 0) {
+        printf("  FAIL: query_tail refused for %s cuts=0x%x k=%d "
+               "window=[+%llu,+%llu] (%s)\n", f->name, cuts, k,
+               (unsigned long long)(from - BASE) / MS,
+               (unsigned long long)(to - BASE) / MS,
+               pgwt_variant_index_refusal_str(q.refused));
+        bad = 1;
+    } else if (oracle.failed) {
+        printf("  FAIL: ORACLE failed for %s — comparison would be vacuous\n",
+               f->name);
+        bad = 1;
+    } else {
+        int row = -1;
+        int field = variants_diff(&q.res, &oracle, &row);
+        if (field >= 0) {
+            note_mismatch(f, cuts, from, to, phase, field, row);
+            printf("  FAIL: TAIL disagreement %s cuts=0x%x k=%d "
+                   "window=[+%llu,+%llu] field=%s row=%d\n", f->name, cuts, k,
+                   (unsigned long long)(from - BASE) / MS,
+                   (unsigned long long)(to - BASE) / MS,
+                   g_field_names[field], row);
+            bad = 1;
+        }
+        c_tail_cmp++;
+        if (to > idx.cover_to_ns) c_tail_beyond++;
+        if (tail_count == 0) c_tail_empty++;
+        c_tail_rows_sel += q.tail_rows_selected;
+        c_tail_crossing += q.tail_rows_crossing;
+        c_tail_carries += q.tail_carries_copied;
+        c_tail_discard += q.tail_discarded;
+        if (q.tail_rows_selected > 0 && q.rows_selected == 0)
+            c_tail_only_window++;
+
+        /* The index must be left exactly as it was: the carry state the
+         * tail walks is a COPY. A mutation that walks the real one shows up
+         * here and in the second call below. */
+        if (idx.n_rows != rows_before || idx.n_steps != steps_before ||
+            pgwt_variant_index_open_at_end(&idx) != open_before ||
+            pgwt_variant_index_discarded(&idx) != disc_before) {
+            printf("  FAIL: query_tail MUTATED the index for %s "
+                   "(rows %d->%d, steps %d->%d, open %d->%d, disc %d->%d)\n",
+                   f->name, rows_before, idx.n_rows, steps_before, idx.n_steps,
+                   open_before, pgwt_variant_index_open_at_end(&idx),
+                   disc_before, pgwt_variant_index_discarded(&idx));
+            bad = 1;
+        }
+
+        /* Idempotence: the same call twice must give the same bits. */
+        struct pgwt_variant_index_query_result q2;
+        int rc2 = pgwt_variant_index_query_tail(&idx, from, to, &zero,
+                                                max_variants, phase, tail,
+                                                tail_count, seam, tail_to, &q2);
+        int row2 = -1;
+        if (rc2 != 0 || variants_diff(&q.res, &q2.res, &row2) >= 0) {
+            printf("  FAIL: query_tail is not idempotent for %s cuts=0x%x "
+                   "k=%d\n", f->name, cuts, k);
+            bad = 1;
+        } else {
+            c_tail_idem++;
+        }
+        pgwt_variant_index_query_free(&q2);
+    }
+
+    pgwt_variant_index_query_free(&q);
+    free(oracle.variants);
+    pgwt_variant_index_free(&idx);
+    return bad ? -1 : 0;
+}
+
+/* ── sweep D: index prefix x tail x windows x both phases ─── */
+
+static void sweep_tail(void)
+{
+    printf("--- sweep D: index prefix + raw tail vs the oracle ---\n");
+    long bad = 0, n = 0;
+    for (int i = 0; i < g_nfx; i++) {
+        const struct fixture *f = &g_fx[i];
+        if (f->n < 2)
+            continue;
+        unsigned cuts[8];
+        int nc = cut_sets(f, cuts, 8);
+        uint64_t times[MAXEV];
+        int nt = fx_times_sparse(f, times);
+        uint64_t last = f->ev[f->n - 1].timestamp_ns;
+        for (int ci = 0; ci < nc; ci++) {
+            int nb = count_blocks(f, cuts[ci]);
+            int ks[3], nk = 0;
+            ks[nk++] = 1;
+            if (nb / 2 > 1) ks[nk++] = nb / 2;
+            if (nb > 1) ks[nk++] = nb;
+            for (int kk = 0; kk < nk; kk++) {
+                for (int a = 0; a < nt; a += 2) {
+                    /* The windows that matter: one ending past every record
+                     * ("ends at now"), one ending at the last record, and
+                     * one ending mid-stream. */
+                    uint64_t tos[3];
+                    tos[0] = last + 5 * MS;
+                    tos[1] = last;
+                    tos[2] = times[nt - 1 - (a % nt)];
+                    for (int b = 0; b < 3; b++) {
+                        if (tos[b] < times[a])
+                            continue;
+                        n++;
+                        for (int ph = 0; ph < 2; ph++)
+                            if (compare_one_tail(f, cuts[ci], ks[kk], times[a],
+                                                 tos[b],
+                                                 ph ? PGWT_PHASE_PLAN
+                                                    : PGWT_PHASE_EXEC, 20) != 0)
+                                bad++;
+                    }
+                }
+            }
+        }
+    }
+    CHECK(bad == 0, "sweep D: %ld disagreements over %ld (fixture, prefix, "
+          "window) triples x 2 phases", bad, n);
+    CHECK(c_tail_cmp >= 1000, "sweep D compared %ld index+tail answers "
+          "(need >= 1000, or this sweep proves nothing)", c_tail_cmp);
+    CHECK(c_tail_beyond >= 100, "sweep D: %ld of them had a window ENDING "
+          "PAST the indexed coverage — the shape plain query() refuses "
+          "(need >= 100)", c_tail_beyond);
+    CHECK(c_tail_rows_sel >= 100, "sweep D: %ld executions in the answers "
+          "closed in the TAIL (need >= 100)", c_tail_rows_sel);
+    CHECK(c_tail_crossing >= 10, "sweep D: %ld of those executions OPENED "
+          "before the seam, i.e. came out of the copied carry state "
+          "(need >= 10)", c_tail_crossing);
+    CHECK(c_tail_empty >= 10, "sweep D: %ld answers had an EMPTY tail — the "
+          "common live case, nothing written since the last block "
+          "(need >= 10)", c_tail_empty);
+    CHECK(c_tail_only_window >= 1, "sweep D: %ld answers came ENTIRELY from "
+          "the tail, with no indexed row selected (need >= 1)",
+          c_tail_only_window);
+    CHECK(c_tail_tie_refused >= 1, "sweep D: %ld seams where the first tail "
+          "record tied the last indexed timestamp REFUSED rather than "
+          "guessing the order (need >= 1)", c_tail_tie_refused);
+    CHECK(c_tail_idem == c_tail_cmp, "sweep D: all %ld answers were "
+          "reproducible from the unmodified index (idempotent: %ld)",
+          c_tail_cmp, c_tail_idem);
+}
+
+/* ── close order across the seam, three literal fixtures ──── */
+
+/* Two single-step patterns whose hashes land in the SAME hash-table slot
+ * (the FNV multiply only mixes upward, so two event ids sharing their low
+ * byte share the low 12 bits of the hash). Same slot, different hash: the
+ * second one probes to slot+1, so WHICH of them is merged first decides
+ * the slot-order collection into the output array. */
+#define WE_COLL1 ((PG_WAIT_LWLOCK << 24) | 9U)
+#define WE_COLL2 ((PG_WAIT_IO << 24) | 9U)
+
+/* Build an index over ev[0..split) and answer [from, to] with ev[split..n)
+ * as the tail. 0 on success. */
+static int tail_query(const struct pgwt_trace_event *ev, int n, int split,
+                      uint64_t from, uint64_t to, enum pgwt_variant_phase phase,
+                      int max_variants, struct pgwt_variant_index *idx,
+                      struct pgwt_variant_index_query_result *q)
+{
+    pgwt_variant_index_init(idx);
+    if (pgwt_variant_index_add_block(idx, 0, ev[0].timestamp_ns,
+                                     ev[split - 1].timestamp_ns, ev,
+                                     split) != 0)
+        return -1;
+    if (pgwt_variant_index_seal(idx) != 0)
+        return -1;
+    struct pgwt_filter zero;
+    memset(&zero, 0, sizeof(zero));
+    uint64_t seam = pgwt_variant_index_tail_from_ns(idx);
+    uint64_t tail_to = to > ev[n - 1].timestamp_ns ? to : ev[n - 1].timestamp_ns;
+    return pgwt_variant_index_query_tail(idx, from, to, &zero, max_variants,
+                                         phase, &ev[split], n - split, seam,
+                                         tail_to, q);
+}
+
+/* The oracle over a literal array (not a registered fixture). */
+static void oracle_array(const struct pgwt_trace_event *ev, int n,
+                         uint64_t from, uint64_t to, int max_variants,
+                         enum pgwt_variant_phase phase,
+                         struct pgwt_variants_result *out)
+{
+    struct pgwt_trace_event *sel = calloc((size_t)n, sizeof(*sel));
+    int m = 0;
+    for (int i = 0; i < n; i++)
+        if (ev[i].timestamp_ns >= from && ev[i].timestamp_ns <= to)
+            sel[m++] = ev[i];
+    struct pgwt_filter zero;
+    memset(&zero, 0, sizeof(zero));
+    pgwt_compute_variants(sel, m, &zero, max_variants, phase, out);
+    free(sel);
+}
+
+static void tail_close_order(void)
+{
+    printf("--- close order across the index/tail seam ---\n");
+
+    /* T1. query_ids[0] IS the order: variant.top_query_id is the FIRST
+     * distinct query_id the variant saw. One execution of the pattern is
+     * indexed (query_id 100), one closes in the tail (query_id 200). Merge
+     * the tail first and top_query_id becomes 200. */
+    {
+        struct pgwt_trace_event ev[6];
+        ev[0] = mk(BASE + 0 * MS, 101, ES, 100);
+        ev[1] = wt(BASE + 10 * MS, 101, WE_A, 5 * MS, 0);
+        ev[2] = mk(BASE + 20 * MS, 101, EE, 100);
+        ev[3] = mk(BASE + 30 * MS, 102, ES, 200);
+        ev[4] = wt(BASE + 40 * MS, 102, WE_A, 7 * MS, 0);
+        ev[5] = mk(BASE + 50 * MS, 102, EE, 200);
+
+        struct pgwt_variant_index idx;
+        struct pgwt_variant_index_query_result q;
+        int rc = tail_query(ev, 6, 3, BASE, BASE + 60 * MS, PGWT_PHASE_EXEC,
+                            20, &idx, &q);
+        CHECK(rc == 0, "T1 seam query_id: answered with the tail decoded "
+              "(rc=%d %s)", rc, pgwt_variant_index_refusal_str(q.refused));
+        const struct pgwt_variant *v = q.res.num_variants > 0
+                                     ? &q.res.variants[0] : NULL;
+        CHECK(q.res.total_executions == 2 && q.res.num_variants == 1,
+              "T1: both executions in ONE variant (execs=%d variants=%d)",
+              q.res.total_executions, q.res.num_variants);
+        CHECK(v && v->num_query_ids == 2,
+              "T1: the variant saw both query_ids (%d)",
+              v ? v->num_query_ids : -1);
+        CHECK(v && v->top_query_id == 100,
+              "T1: top_query_id is the INDEXED execution's 100, not the "
+              "tail's 200 — close order across the seam (got %llu)",
+              v ? (unsigned long long)v->top_query_id : 0ULL);
+        CHECK(q.tail_rows == 1 && q.tail_rows_selected == 1 &&
+              q.tail_rows_crossing == 0,
+              "T1: exactly one row came from the tail, opening after the "
+              "seam (rows=%ld selected=%ld crossing=%ld)",
+              q.tail_rows, q.tail_rows_selected, q.tail_rows_crossing);
+
+        struct pgwt_variants_result o;
+        oracle_array(ev, 6, BASE, BASE + 60 * MS, 20, PGWT_PHASE_EXEC, &o);
+        int row = -1;
+        CHECK(variants_diff(&q.res, &o, &row) < 0,
+              "T1: bit-exactly the oracle's answer");
+        free(o.variants);
+        pgwt_variant_index_query_free(&q);
+        pgwt_variant_index_free(&idx);
+    }
+
+    /* T2. An execution OPEN at the seam: its first wait is indexed, its
+     * second and its closing marker are in the tail. Without the carry
+     * copy the row is lost (0 executions) or truncated to [B] — and two
+     * different executions truncated the same way hash to the same
+     * "variant", which is the headline silent-wrong mode. */
+    {
+        struct pgwt_trace_event ev[4];
+        ev[0] = mk(BASE + 0 * MS, 101, ES, 7);
+        ev[1] = wt(BASE + 10 * MS, 101, WE_A, 5 * MS, 0);
+        ev[2] = wt(BASE + 20 * MS, 101, WE_B, 3 * MS, 0);
+        ev[3] = mk(BASE + 30 * MS, 101, EE, 7);
+
+        struct pgwt_variant_index idx;
+        struct pgwt_variant_index_query_result q;
+        int rc = tail_query(ev, 4, 2, BASE, BASE + 40 * MS, PGWT_PHASE_EXEC,
+                            20, &idx, &q);
+        CHECK(rc == 0, "T2 crossing execution: answered (rc=%d %s)", rc,
+              pgwt_variant_index_refusal_str(q.refused));
+        /* The shape is PROVEN, not assumed: the index itself has no row and
+         * one open carry at the seam. */
+        CHECK(idx.n_rows == 0 && pgwt_variant_index_open_at_end(&idx) == 1,
+              "T2: the index holds NO row and one open carry at the seam "
+              "(rows=%d open=%d)", idx.n_rows,
+              pgwt_variant_index_open_at_end(&idx));
+        CHECK(q.tail_carries_copied == 1 && q.tail_rows == 1 &&
+              q.tail_rows_crossing == 1,
+              "T2: the tail closed the carried sequence (carries=%ld rows=%ld "
+              "crossing=%ld)", q.tail_carries_copied, q.tail_rows,
+              q.tail_rows_crossing);
+        const struct pgwt_variant *v = q.res.num_variants > 0
+                                     ? &q.res.variants[0] : NULL;
+        CHECK(q.res.total_executions == 1 && q.res.num_variants == 1,
+              "T2: ONE execution, ONE variant (execs=%d variants=%d)",
+              q.res.total_executions, q.res.num_variants);
+        CHECK(v && v->num_steps == 2 && v->steps[0].event_id == WE_A &&
+              v->steps[1].event_id == WE_B,
+              "T2: the pattern is the WHOLE sequence [A,B], not the tail's "
+              "[B] (steps=%d)", v ? v->num_steps : -1);
+        CHECK(v && v->total_ns == 8 * MS,
+              "T2: total_ns spans both sides of the seam (got %llu ms)",
+              v ? (unsigned long long)(v->total_ns / MS) : 0ULL);
+
+        struct pgwt_variants_result o;
+        oracle_array(ev, 4, BASE, BASE + 40 * MS, 20, PGWT_PHASE_EXEC, &o);
+        int row = -1;
+        CHECK(variants_diff(&q.res, &o, &row) < 0,
+              "T2: bit-exactly the oracle's answer");
+        free(o.variants);
+        pgwt_variant_index_query_free(&q);
+        pgwt_variant_index_free(&idx);
+    }
+
+    /* T3. The hash table's COLLISION CHAIN. Two distinct patterns in the
+     * same slot with EQUAL total_ns: arrival order decides which occupies
+     * the slot and which probes to slot+1, and slot order is the output
+     * order (qsort by total time cannot reorder a tie). One is indexed,
+     * one closes in the tail. */
+    {
+        struct pgwt_trace_event ev[6];
+        ev[0] = mk(BASE + 0 * MS, 101, ES, 11);
+        ev[1] = wt(BASE + 10 * MS, 101, WE_COLL1, 5 * MS, 0);
+        ev[2] = mk(BASE + 20 * MS, 101, EE, 11);
+        ev[3] = mk(BASE + 30 * MS, 102, ES, 12);
+        ev[4] = wt(BASE + 40 * MS, 102, WE_COLL2, 5 * MS, 0);
+        ev[5] = mk(BASE + 50 * MS, 102, EE, 12);
+
+        struct pgwt_variant_index idx;
+        struct pgwt_variant_index_query_result q;
+        int rc = tail_query(ev, 6, 3, BASE, BASE + 60 * MS, PGWT_PHASE_EXEC,
+                            20, &idx, &q);
+        CHECK(rc == 0, "T3 collision chain: answered (rc=%d %s)", rc,
+              pgwt_variant_index_refusal_str(q.refused));
+        CHECK(q.res.num_variants == 2, "T3: two variants (got %d)",
+              q.res.num_variants);
+        if (q.res.num_variants == 2) {
+            uint64_t h0 = q.res.variants[0].hash, h1 = q.res.variants[1].hash;
+            CHECK(h0 != h1 &&
+                  (h0 & (PGWT_VARIANT_INDEX_HT_SIZE - 1)) ==
+                  (h1 & (PGWT_VARIANT_INDEX_HT_SIZE - 1)),
+                  "T3: the two patterns really do COLLIDE in one slot "
+                  "(slots %llu/%llu) — the fixture cannot go vacuous "
+                  "unnoticed",
+                  (unsigned long long)(h0 & (PGWT_VARIANT_INDEX_HT_SIZE - 1)),
+                  (unsigned long long)(h1 & (PGWT_VARIANT_INDEX_HT_SIZE - 1)));
+            CHECK(q.res.variants[0].total_ns == q.res.variants[1].total_ns,
+                  "T3: equal total_ns, so only ARRIVAL order can order them");
+            CHECK(h0 == idx.rows[0].hash,
+                  "T3: the INDEXED execution's variant is first — the tail "
+                  "was merged after it");
+        }
+        struct pgwt_variants_result o;
+        oracle_array(ev, 6, BASE, BASE + 60 * MS, 20, PGWT_PHASE_EXEC, &o);
+        int row = -1;
+        CHECK(variants_diff(&q.res, &o, &row) < 0,
+              "T3: bit-exactly the oracle's answer, collision order included");
+        free(o.variants);
+        pgwt_variant_index_query_free(&q);
+        pgwt_variant_index_free(&idx);
+    }
+}
+
+/* ── the bounded p95 sample is CLOSED before the tail ─────── */
+
+/* PGWT_VARIANT_MAX_SAMPLES executions of one pattern are indexed, then one
+ * more closes in the tail. The sample is full, so the tail's execution is
+ * counted and NOT sampled. Merge the tail first and it displaces the last
+ * indexed sample, moving the p95 by one slot — the only place where sample
+ * ORDER, not sample content, changes the answer. */
+static void tail_p95_sample_bound(void)
+{
+    printf("--- the bounded p95 sample is closed before the tail ---\n");
+    const int n_exec = PGWT_VARIANT_INDEX_MAX_SAMPLES + 1;
+    int n = n_exec * 3;
+    struct pgwt_trace_event *ev = calloc((size_t)n, sizeof(*ev));
+    if (!ev) { printf("  FAIL: out of memory\n"); tests_failed++; return; }
+
+    uint64_t t = BASE;
+    int w = 0;
+    for (int i = 0; i < n_exec; i++) {
+        /* The last execution (the tail's) waits 0 ns; the indexed ones wait
+         * 1..MAX ms, so displacing one of them shifts the percentile. */
+        uint64_t dur = (i == n_exec - 1) ? 0 : (uint64_t)(i + 1) * MS;
+        ev[w++] = mk(t, 101, ES, 42);
+        t += MS;
+        ev[w++] = wt(t, 101, WE_A, dur, 0);
+        t += MS;
+        ev[w++] = mk(t, 101, EE, 42);
+        t += MS;
+    }
+
+    /* Index every execution but the last, in 8 blocks; the last one's three
+     * records are the tail. */
+    int split = (n_exec - 1) * 3;
+    struct pgwt_variant_index idx;
+    pgwt_variant_index_init(&idx);
+    int per = split / 8;
+    int blk = 0;
+    for (int s = 0; s < split; s += per) {
+        int e = s + per < split ? s + per : split;
+        if (pgwt_variant_index_add_block(&idx, blk++, ev[s].timestamp_ns,
+                                         ev[e - 1].timestamp_ns, &ev[s],
+                                         e - s) != 0) {
+            printf("  FAIL: p95 index build refused\n");
+            tests_failed++;
+            pgwt_variant_index_free(&idx);
+            free(ev);
+            return;
+        }
+    }
+    pgwt_variant_index_seal(&idx);
+
+    struct pgwt_filter zero;
+    memset(&zero, 0, sizeof(zero));
+    uint64_t from = BASE, to = ev[n - 1].timestamp_ns + 5 * MS;
+    struct pgwt_variant_index_query_result q;
+    int rc = pgwt_variant_index_query_tail(&idx, from, to, &zero, 20,
+                                           PGWT_PHASE_EXEC, &ev[split],
+                                           n - split,
+                                           pgwt_variant_index_tail_from_ns(&idx),
+                                           to, &q);
+    CHECK(rc == 0, "p95: answered with the tail decoded (rc=%d %s)", rc,
+          pgwt_variant_index_refusal_str(q.refused));
+
+    /* The two candidate answers, computed here from the fixture alone. */
+    int si = (int)(PGWT_VARIANT_INDEX_MAX_SAMPLES * 0.95);
+    uint64_t want_correct = (uint64_t)(si + 1) * MS;   /* sample 1..MAX ms */
+    uint64_t want_naive = si == 0 ? 0 : (uint64_t)si * MS; /* 0 displaces one */
+    const struct pgwt_variant *v = q.res.num_variants > 0
+                                 ? &q.res.variants[0] : NULL;
+    CHECK(q.res.total_executions == n_exec && q.res.num_variants == 1,
+          "p95: all %d executions in one variant (execs=%d variants=%d)",
+          n_exec, q.res.total_executions, q.res.num_variants);
+    CHECK(v && v->exec_count == n_exec,
+          "p95: exec_count counts the tail's execution too (%d)",
+          v ? v->exec_count : -1);
+    CHECK(v && v->p95_sample_n == PGWT_VARIANT_INDEX_MAX_SAMPLES,
+          "p95: the sample is CLOSED at %d, so the tail's execution was "
+          "counted but not sampled (got %d)",
+          PGWT_VARIANT_INDEX_MAX_SAMPLES, v ? v->p95_sample_n : -1);
+    CHECK(want_correct != want_naive,
+          "p95: the two orders give DIFFERENT answers (%llu vs %llu ms), so "
+          "this check can fail", (unsigned long long)(want_correct / MS),
+          (unsigned long long)(want_naive / MS));
+    CHECK(v && v->p95_ns == want_correct,
+          "p95: %llu ms — the indexed samples', not the tail-first order's "
+          "%llu ms (got %llu)", (unsigned long long)(want_correct / MS),
+          (unsigned long long)(want_naive / MS),
+          v ? (unsigned long long)(v->p95_ns / MS) : 0ULL);
+
+    struct pgwt_variants_result o;
+    oracle_array(ev, n, from, to, 20, PGWT_PHASE_EXEC, &o);
+    int row = -1;
+    CHECK(!o.failed && variants_diff(&q.res, &o, &row) < 0,
+          "p95: bit-exactly the oracle's answer over the same window");
+    free(o.variants);
+    pgwt_variant_index_query_free(&q);
+    pgwt_variant_index_free(&idx);
+    free(ev);
+}
+
+/* ── bypass suite for the tail: a tail it cannot trust must refuse ── */
+
+static void expect_tail_refusal(const char *what,
+                                struct pgwt_variant_index *idx,
+                                uint64_t from, uint64_t to,
+                                const struct pgwt_filter *f, int max_variants,
+                                enum pgwt_variant_phase phase,
+                                const struct pgwt_trace_event *tail,
+                                int tail_count, uint64_t tail_from,
+                                uint64_t tail_to,
+                                enum pgwt_variant_index_refusal want)
+{
+    struct pgwt_variant_index_query_result q;
+    int rc = pgwt_variant_index_query_tail(idx, from, to, f, max_variants,
+                                           phase, tail, tail_count, tail_from,
+                                           tail_to, &q);
+    int ok = (rc == -1 && q.refused == want && q.res.variants == NULL &&
+              q.res.num_variants == PGWT_VARIANT_INDEX_NOT_INDEXED &&
+              q.res.total_executions == PGWT_VARIANT_INDEX_NOT_INDEXED &&
+              q.res.failed == 1 && q.sequences_indexed == 0);
+    CHECK(ok, "tail %s: REFUSES with %s, no variants, counts poisoned, "
+          "failed=1 (got rc=%d refused=%s nv=%d te=%d failed=%d si=%d)",
+          what, pgwt_variant_index_refusal_str(want), rc,
+          pgwt_variant_index_refusal_str(q.refused), q.res.num_variants,
+          q.res.total_executions, q.res.failed, q.sequences_indexed);
+    pgwt_variant_index_query_free(&q);
+}
+
+static void tail_bypass_suite(void)
+{
+    printf("--- bypass suite: a tail the index cannot trust must refuse ---\n");
+
+    /* A four-record stream: two records indexed, two in the tail. */
+    struct pgwt_trace_event ev[6];
+    ev[0] = mk(BASE + 0 * MS, 101, ES, 7);
+    ev[1] = wt(BASE + 10 * MS, 101, WE_A, 5 * MS, 0);
+    ev[2] = wt(BASE + 20 * MS, 101, WE_B, 3 * MS, 0);
+    ev[3] = mk(BASE + 30 * MS, 101, EE, 7);
+    ev[4] = mk(BASE + 40 * MS, 101, ES, 8);
+    ev[5] = mk(BASE + 50 * MS, 101, EE, 8);
+    const int split = 2;
+    uint64_t lo = BASE, hi = BASE + 60 * MS;
+
+    struct pgwt_filter zero;
+    memset(&zero, 0, sizeof(zero));
+
+    struct pgwt_variant_index idx;
+    pgwt_variant_index_init(&idx);
+    pgwt_variant_index_add_block(&idx, 0, ev[0].timestamp_ns,
+                                 ev[split - 1].timestamp_ns, ev, split);
+    pgwt_variant_index_seal(&idx);
+    uint64_t seam = pgwt_variant_index_tail_from_ns(&idx);
+    const struct pgwt_trace_event *tail = &ev[split];
+    int tn = 6 - split;
+
+    CHECK(seam == idx.cover_to_ns + 1,
+          "the seam is cover_to_ns + 1, from the one shared function "
+          "(%llu)", (unsigned long long)(seam - BASE) / MS);
+
+    /* 1. A NULL array with a positive count is never "an empty tail". */
+    expect_tail_refusal("count > 0 with a NULL array", &idx, lo, hi, &zero, 20,
+                        PGWT_PHASE_EXEC, NULL, tn, seam, hi,
+                        PGWT_VARIANT_INDEX_REFUSE_TAIL_NULL);
+    expect_tail_refusal("negative count", &idx, lo, hi, &zero, 20,
+                        PGWT_PHASE_EXEC, tail, -1, seam, hi,
+                        PGWT_VARIANT_INDEX_REFUSE_TAIL_NULL);
+
+    /* 2. The seam. A tail starting below it could re-feed an indexed
+     * record (double count); one starting above it leaves a hole. */
+    expect_tail_refusal("seam one ns LOW (overlaps the index)", &idx, lo, hi,
+                        &zero, 20, PGWT_PHASE_EXEC, tail, tn, seam - 1, hi,
+                        PGWT_VARIANT_INDEX_REFUSE_TAIL_SEAM);
+    expect_tail_refusal("seam one ns HIGH (a hole at the seam)", &idx, lo, hi,
+                        &zero, 20, PGWT_PHASE_EXEC, tail, tn, seam + 1, hi,
+                        PGWT_VARIANT_INDEX_REFUSE_TAIL_SEAM);
+    expect_tail_refusal("seam 0 (caller never computed one)", &idx, lo, hi,
+                        &zero, 20, PGWT_PHASE_EXEC, tail, tn, 0, hi,
+                        PGWT_VARIANT_INDEX_REFUSE_TAIL_SEAM);
+    expect_tail_refusal("declared tail ends BELOW the index's coverage",
+                        &idx, lo, hi, &zero, 20, PGWT_PHASE_EXEC, tail, tn,
+                        seam, idx.cover_to_ns - 1,
+                        PGWT_VARIANT_INDEX_REFUSE_TAIL_SEAM);
+
+    /* 3. Records that do not match the declared range, or go backwards. */
+    {
+        struct pgwt_trace_event bad[4];
+        memcpy(bad, tail, sizeof(*bad) * (size_t)tn);
+        bad[0].timestamp_ns = idx.cover_to_ns;      /* below the seam */
+        expect_tail_refusal("a record BELOW the seam (a tie the loader's "
+                            "stable order would decide, not the index)",
+                            &idx, lo, hi, &zero, 20, PGWT_PHASE_EXEC, bad, tn,
+                            seam, hi, PGWT_VARIANT_INDEX_REFUSE_TAIL_ORDER);
+        memcpy(bad, tail, sizeof(*bad) * (size_t)tn);
+        /* The window is INSIDE the declared tail range here, so the
+         * coverage guard cannot fire first and the record check is the one
+         * being exercised: a tail holding a record it did not declare. */
+        expect_tail_refusal("a record ABOVE the declared tail_to_ns",
+                            &idx, lo, bad[tn - 1].timestamp_ns - 1, &zero, 20,
+                            PGWT_PHASE_EXEC, bad, tn, seam,
+                            bad[tn - 1].timestamp_ns - 1,
+                            PGWT_VARIANT_INDEX_REFUSE_TAIL_ORDER);
+        memcpy(bad, tail, sizeof(*bad) * (size_t)tn);
+        uint64_t t0 = bad[0].timestamp_ns;
+        bad[0].timestamp_ns = bad[tn - 1].timestamp_ns;
+        bad[tn - 1].timestamp_ns = t0;
+        expect_tail_refusal("tail records OUT OF ORDER", &idx, lo, hi, &zero,
+                            20, PGWT_PHASE_EXEC, bad, tn, seam, hi,
+                            PGWT_VARIANT_INDEX_REFUSE_TAIL_ORDER);
+    }
+
+    /* 4. A tail that does not reach the window end cannot answer it. This
+     * is the gate's own blind spot if it is missing: the answer would be
+     * complete for the part somebody decoded and short by the rest. */
+    expect_tail_refusal("window ends past the DECLARED tail coverage",
+                        &idx, lo, hi, &zero, 20, PGWT_PHASE_EXEC, tail, tn,
+                        seam, hi - 1, PGWT_VARIANT_INDEX_REFUSE_RANGE);
+    expect_tail_refusal("window starts below the index's coverage",
+                        &idx, lo - 1, hi, &zero, 20, PGWT_PHASE_EXEC, tail, tn,
+                        seam, hi, PGWT_VARIANT_INDEX_REFUSE_RANGE);
+
+    /* 5. The filter gate is the same one plain query() has, and an all-zero
+     * filter is NOT a no-op, so NULL is a DIFFERENT oracle. */
+    expect_tail_refusal("NULL filter", &idx, lo, hi, NULL, 20, PGWT_PHASE_EXEC,
+                        tail, tn, seam, hi, PGWT_VARIANT_INDEX_REFUSE_FILTER);
+    {
+        struct pgwt_filter pidf;
+        memset(&pidf, 0, sizeof(pidf));
+        pidf.pid = 101;
+        expect_tail_refusal("filter with a pid set", &idx, lo, hi, &pidf, 20,
+                            PGWT_PHASE_EXEC, tail, tn, seam, hi,
+                            PGWT_VARIANT_INDEX_REFUSE_FILTER);
+        struct pgwt_filter clsf;
+        memset(&clsf, 0, sizeof(clsf));
+        snprintf(clsf.class_name, sizeof(clsf.class_name), "IO");
+        expect_tail_refusal("filter with a class set", &idx, lo, hi, &clsf, 20,
+                            PGWT_PHASE_EXEC, tail, tn, seam, hi,
+                            PGWT_VARIANT_INDEX_REFUSE_FILTER);
+    }
+
+    /* 6. Inverted window and unknown phase, through the tail entry point. */
+    expect_tail_refusal("inverted window", &idx, hi, lo, &zero, 20,
+                        PGWT_PHASE_EXEC, tail, tn, seam, hi,
+                        PGWT_VARIANT_INDEX_REFUSE_BAD_WINDOW);
+    expect_tail_refusal("unknown phase", &idx, lo, hi, &zero, 20,
+                        (enum pgwt_variant_phase)7, tail, tn, seam, hi,
+                        PGWT_VARIANT_INDEX_REFUSE_PHASE);
+
+    /* 7. No representable seam: cover_to_ns at UINT64_MAX. The helper says
+     * 0 and the query refuses whatever the caller passes. */
+    {
+        uint64_t keep = idx.cover_to_ns;
+        idx.cover_to_ns = UINT64_MAX;
+        CHECK(pgwt_variant_index_tail_from_ns(&idx) == 0,
+              "no representable seam at UINT64_MAX: the helper says 0");
+        expect_tail_refusal("coverage ending at UINT64_MAX", &idx, lo,
+                            UINT64_MAX, &zero, 20, PGWT_PHASE_EXEC, tail, tn,
+                            0, UINT64_MAX,
+                            PGWT_VARIANT_INDEX_REFUSE_TAIL_SEAM);
+        idx.cover_to_ns = keep;
+    }
+
+    /* 8. Every allocation failure on the tail path refuses, including the
+     * carry COPY — an index that cannot copy its carry state must not
+     * answer from a truncated one. */
+    {
+        const char *points[] = {
+            "variant_index_pidix", "variant_index_pids", "pid_index_grow",
+            "variant_index_rows", "variant_index_steps",
+            "variant_index_chunks", "variant_index_query_ht",
+            "variant_index_samples", "variant_index_query_out",
+        };
+        for (unsigned i = 0; i < sizeof(points) / sizeof(points[0]); i++) {
+            setenv("PGWT_TEST_ALLOC_FAIL", points[i], 1);
+            struct pgwt_variant_index_query_result q;
+            int rc = pgwt_variant_index_query_tail(&idx, lo, hi, &zero, 20,
+                                                   PGWT_PHASE_EXEC, tail, tn,
+                                                   seam, hi, &q);
+            unsetenv("PGWT_TEST_ALLOC_FAIL");
+            CHECK(rc == -1 && q.res.failed == 1 && q.sequences_indexed == 0 &&
+                  q.res.variants == NULL &&
+                  q.res.num_variants == PGWT_VARIANT_INDEX_NOT_INDEXED,
+                  "tail allocation failure at %s: REFUSES (refused=%s)",
+                  points[i], pgwt_variant_index_refusal_str(q.refused));
+            pgwt_variant_index_query_free(&q);
+        }
+    }
+
+    /* 9. A refusal must be distinguishable from an EMPTY ANSWER, and an
+     * empty answer must not look like "nothing to render": res.variants is
+     * non-NULL even at zero variants, so a caller branches on
+     * sequences_indexed / refused, never on the pointer. */
+    {
+        struct pgwt_variant_index_query_result q;
+        int rc = pgwt_variant_index_query_tail(&idx, lo, hi, &zero, 20,
+                                               PGWT_PHASE_PLAN, tail, tn, seam,
+                                               hi, &q);
+        CHECK(rc == 0 && q.refused == PGWT_VARIANT_INDEX_OK &&
+              q.res.num_variants == 0 && q.res.total_executions == 0 &&
+              q.res.failed == 0 && q.sequences_indexed == 1,
+              "a window with no PLAN execution: 0 variants, refused=OK, "
+              "failed=0, sequences_indexed=1 — not a refusal");
+        CHECK(q.res.variants != NULL,
+              "res.variants is NON-NULL at num_variants == 0, so a NULL "
+              "test can never be read as 'the index refused'");
+        pgwt_variant_index_query_free(&q);
+    }
+
+    /* 10. An EMPTY tail is legal and is the common live case: nothing has
+     * been written since the last block, and the window still ends at now.
+     * The thing being checked is ABSENT, not wrong, and the answer must
+     * still be the oracle's. */
+    {
+        struct pgwt_variant_index full;
+        pgwt_variant_index_init(&full);
+        pgwt_variant_index_add_block(&full, 0, ev[0].timestamp_ns,
+                                     ev[5].timestamp_ns, ev, 6);
+        pgwt_variant_index_seal(&full);
+        uint64_t now = ev[5].timestamp_ns + 5 * MS;
+        struct pgwt_variant_index_query_result q;
+        int rc = pgwt_variant_index_query_tail(&full, lo, now, &zero, 20,
+                                               PGWT_PHASE_EXEC, NULL, 0,
+                                               pgwt_variant_index_tail_from_ns(&full),
+                                               now, &q);
+        CHECK(rc == 0 && q.tail_records == 0 && q.tail_rows == 0,
+              "empty tail, window ending at NOW: answered (rc=%d %s)", rc,
+              pgwt_variant_index_refusal_str(q.refused));
+        struct pgwt_variants_result o;
+        oracle_array(ev, 6, lo, now, 20, PGWT_PHASE_EXEC, &o);
+        int row = -1;
+        CHECK(variants_diff(&q.res, &o, &row) < 0,
+              "empty tail: bit-exactly the oracle's answer");
+        /* And the SAME window through plain query() must refuse, which is
+         * the whole reason this entry point exists. */
+        expect_refusal("plain query() for the same ends-at-now window",
+                       &full, lo, now, &zero, 20, PGWT_PHASE_EXEC,
+                       PGWT_VARIANT_INDEX_REFUSE_RANGE);
+        free(o.variants);
+        pgwt_variant_index_query_free(&q);
+        pgwt_variant_index_free(&full);
+    }
+
+    pgwt_variant_index_free(&idx);
+}
+
 int main(void)
 {
     const char *ob = getenv("PGWT_VARIANT_INDEX_ONE_BLOCK");
@@ -1710,7 +2511,11 @@ int main(void)
     sweep_splits();
     sweep_windows();
     sweep_max_variants();
+    sweep_tail();
+    tail_close_order();
+    tail_p95_sample_bound();
     bypass_suite();
+    tail_bypass_suite();
     measure_complexity();
     non_vacuity();
 

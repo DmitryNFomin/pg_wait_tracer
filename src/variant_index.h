@@ -78,11 +78,48 @@
  * in [cover_from_ns, cover_to_ns] REFUSES (REFUSE_RANGE) rather than
  * answering for the part somebody indexed and silently dropping the rest.
  * Both bounds are public so a caller can see what it would have to decode.
- * Unlike Phase 3's row list, a variant table is NOT appendable by the
+ * Unlike Phase 3's row list, a variant TABLE is NOT appendable by the
  * caller (the p95 sample order, the hash-table collision chains and the
- * query_id sets all depend on close order), so in version 1 a window
- * reaching past cover_to_ns falls back to raw wholesale. See the OPEN
- * QUESTION note at the bottom.
+ * query_id sets all depend on close order), which is why
+ * pgwt_variant_index_query_tail() takes the caller's raw-decoded tail
+ * RECORDS and not a second variant table. See THE TAIL below.
+ *
+ * THE TAIL: HOW "ENDS AT NOW" IS SERVED (version 2). The common UI window
+ * ends at now, which reaches past the last committed block, so plain
+ * query() REFUSES it and `variants` would gain nothing live. query_tail()
+ * closes that gap exactly, with no merge of finished tables anywhere:
+ *
+ *   1. The caller raw-decodes the records the index has not seen and
+ *      declares the range it decoded, [tail_from_ns, tail_to_ns]. That
+ *      range must start exactly where the index stopped -- tail_from_ns ==
+ *      cover_to_ns + 1 (pgwt_variant_index_tail_from_ns()) -- or the call
+ *      REFUSES (REFUSE_TAIL_SEAM). A tail starting lower could re-feed an
+ *      indexed record (double count); one starting higher leaves a hole.
+ *   2. The tail records walk through a COPY of the builder's carry state,
+ *      through the SAME pgwt_variant_index_add_block() the build half uses
+ *      (not a second copy of the marker walk), so an execution that opened
+ *      in the indexed region and closes in the tail comes out as ONE
+ *      sequence with its original start_ns. The index itself is not
+ *      modified: two identical query_tail() calls return identical answers.
+ *   3. The tail's rows are accumulated AFTER the indexed rows, which is
+ *      exactly close order: every tail record is above cover_to_ns and
+ *      every indexed row closed at or below it, so concatenation preserves
+ *      the oracle's close order rather than approximating it. That is what
+ *      makes query_ids[0], the bounded p95 sample and the collision chains
+ *      come out identical instead of merely close.
+ *   4. Coverage for the containment test becomes [cover_from_ns,
+ *      max(cover_to_ns, tail_to_ns)]. A window still not contained in THAT
+ *      REFUSES (REFUSE_RANGE): a tail that does not reach to_ns is a tail
+ *      that cannot answer the window.
+ *
+ * The tail is trusted for exactly one thing -- being every record of the
+ * stream in [tail_from_ns, tail_to_ns], in stream order -- and every part
+ * of that a callee can check IS checked: a record below tail_from_ns or
+ * above tail_to_ns, a decreasing timestamp, a NULL array with a positive
+ * count, a negative count, an unsealed/failed/empty index, a non-empty or
+ * NULL filter, cover_to_ns at UINT64_MAX (no representable seam) and every
+ * injected allocation failure all REFUSE. Nothing is clamped or dropped to
+ * make a tail fit.
  *
  * ABSENCE NEVER READS AS ZERO, AND -1 IS TRUTHY IN C. Every refusal zeroes
  * out->res, then poisons res.num_variants and res.total_executions to
@@ -127,16 +164,6 @@
  * drift between the copies is a red test, not a wrong tab. Folding them
  * into one copy belongs to the wiring step that is allowed to touch
  * compute.c.
- *
- * OPEN QUESTION FOR THE WIRING STEP (not a defect of this module): the
- * common "ends at now" window reaches past the last committed block and so
- * REFUSES here. Serving it needs either a raw decode of the whole window
- * (no win) or a query that accepts the caller's raw-decoded tail records
- * and walks them through a COPY of the builder's carry state, appending
- * their rows after the indexed ones. The second is exact and cheap, but it
- * is an API addition with its own guards (the tail must provably cover
- * (cover_to_ns, to_ns] and start where the index stopped), so it is left
- * to the step that wires this in rather than shipped unexercised.
  */
 #ifndef PGWT_VARIANT_INDEX_H
 #define PGWT_VARIANT_INDEX_H
@@ -146,7 +173,7 @@
 
 #include <stdint.h>
 
-#define PGWT_VARIANT_INDEX_VERSION 1
+#define PGWT_VARIANT_INDEX_VERSION 2
 
 /* Poison written into every count the index could not establish. -1 is not
  * a plausible variant or execution count. It is NOT the guard on its own:
@@ -172,6 +199,11 @@ enum pgwt_variant_index_refusal {
     PGWT_VARIANT_INDEX_REFUSE_ALLOC,        /* query-side allocation failure */
     PGWT_VARIANT_INDEX_REFUSE_FILTER,       /* NULL or non-empty filter */
     PGWT_VARIANT_INDEX_REFUSE_PHASE,        /* phase outside EXEC/PLAN */
+    /* query_tail() only. Each one is a way the tail cannot be trusted to be
+     * every record of (cover_to_ns, tail_to_ns] in stream order. */
+    PGWT_VARIANT_INDEX_REFUSE_TAIL_NULL,    /* count > 0 with no array, or count < 0 */
+    PGWT_VARIANT_INDEX_REFUSE_TAIL_SEAM,    /* tail does not start at cover_to_ns + 1 */
+    PGWT_VARIANT_INDEX_REFUSE_TAIL_ORDER,   /* record out of the declared range or out of order */
 };
 
 const char *pgwt_variant_index_refusal_str(enum pgwt_variant_index_refusal r);
@@ -316,6 +348,14 @@ struct pgwt_variant_index_query_result {
      * are what replaces "events in the window". */
     long chunks_total, chunks_scanned, rows_examined, rows_selected,
          steps_examined;
+
+    /* query_tail() only, and 0 after plain query(). Reported so a test can
+     * PROVE the seam shapes happened instead of assuming them:
+     * tail_rows_selected > 0 means the answer really did contain an
+     * execution that closed in the tail, and tail_rows_crossing > 0 that
+     * one of those opened before the seam -- the carry-copy path. */
+    long tail_records, tail_rows, tail_rows_selected, tail_rows_crossing,
+         tail_carries_copied, tail_discarded;
 };
 
 /* The selection predicate, written once: an execution is in the answer
@@ -334,6 +374,37 @@ int pgwt_variant_index_query(const struct pgwt_variant_index *idx,
                              const struct pgwt_filter *f, int max_variants,
                              enum pgwt_variant_phase phase,
                              struct pgwt_variant_index_query_result *out);
+
+/* The one timestamp a tail may start at: cover_to_ns + 1. Written once and
+ * exported so the caller computes the seam the same way the guard checks
+ * it. Returns 0 when there is no representable seam (unusable index, no
+ * block ever added, or cover_to_ns == UINT64_MAX); query_tail() refuses
+ * every one of those, so a caller that passes 0 through gets a refusal
+ * rather than an answer built on a wrong seam. */
+uint64_t pgwt_variant_index_tail_from_ns(const struct pgwt_variant_index *idx);
+
+/* Answer one window from the index PLUS the caller's raw-decoded tail.
+ *
+ * `tail` must be every record of the stream whose timestamp lies in
+ * [tail_from_ns, tail_to_ns], in stream order, and tail_from_ns must equal
+ * pgwt_variant_index_tail_from_ns(idx). tail_count == 0 is legal and is the
+ * common live case ("nothing has been written since the last block"): it
+ * still extends the coverage used for the containment test to tail_to_ns,
+ * which is what lets a window ending at now be answered at all.
+ *
+ * The answer is bit-exactly pgwt_compute_variants' over the same window,
+ * the same way plain query() is. 0 on success, -1 on refusal; every
+ * refusal poisons the counts, sets res.failed and clears
+ * sequences_indexed, so the caller recomputes from raw. See THE TAIL in
+ * the header comment. */
+int pgwt_variant_index_query_tail(const struct pgwt_variant_index *idx,
+                                  uint64_t from_ns, uint64_t to_ns,
+                                  const struct pgwt_filter *f, int max_variants,
+                                  enum pgwt_variant_phase phase,
+                                  const struct pgwt_trace_event *tail,
+                                  int tail_count,
+                                  uint64_t tail_from_ns, uint64_t tail_to_ns,
+                                  struct pgwt_variant_index_query_result *out);
 
 void pgwt_variant_index_query_free(struct pgwt_variant_index_query_result *out);
 

@@ -497,6 +497,11 @@ bench_block_agg: bench_block_agg.c ../src/block_agg.c ../src/compute.c \
 # bounds, a window not contained in coverage, an inverted window, an unknown
 # phase, a NULL or non-empty filter and every injected allocation failure must
 # REFUSE, never answer) and the measured O(executions in window) claim.
+# Sweep D does the same differential for query_tail() -- index the first k
+# blocks, hand the remainder over as the caller's raw-decoded tail, which is
+# how the "ends at now" window is served -- with close order across the seam
+# pinned by top_query_id, a hash-slot collision chain and the bounded p95
+# sample, plus a bypass suite for every way a tail cannot be trusted.
 # PGWT_VARIANT_INDEX_ONE_BLOCK=1 re-runs the sweeps with no block cuts to
 # falsify the non-vacuity ledger; that mode never exits 0.
 # Server build, no BPF, no live PG; ~5 s (the oracle callocs a 4 MB hash

@@ -175,6 +175,9 @@ const char *pgwt_variant_index_refusal_str(enum pgwt_variant_index_refusal r)
     case PGWT_VARIANT_INDEX_REFUSE_ALLOC:       return "query-allocation-failed";
     case PGWT_VARIANT_INDEX_REFUSE_FILTER:      return "filter-not-indexable";
     case PGWT_VARIANT_INDEX_REFUSE_PHASE:       return "unknown-phase";
+    case PGWT_VARIANT_INDEX_REFUSE_TAIL_NULL:   return "tail-null";
+    case PGWT_VARIANT_INDEX_REFUSE_TAIL_SEAM:   return "tail-seam-mismatch";
+    case PGWT_VARIANT_INDEX_REFUSE_TAIL_ORDER:  return "tail-record-out-of-range";
     }
     return "unknown";
 }
@@ -648,150 +651,117 @@ void pgwt_variant_index_query_free(struct pgwt_variant_index_query_result *out)
     out->res.num_variants = 0;
 }
 
-int pgwt_variant_index_query(const struct pgwt_variant_index *idx,
-                             uint64_t from_ns, uint64_t to_ns,
-                             const struct pgwt_filter *f, int max_variants,
-                             enum pgwt_variant_phase phase,
-                             struct pgwt_variant_index_query_result *out)
+/* Merge one row source's selected rows into the hash table, IN ROW ORDER —
+ * which is close order on both sources: a row is appended at its closing
+ * marker, and every tail row closes above cover_to_ns while every indexed
+ * row closed at or below it. This is pgwt_compute_variants' marker_end
+ * branch from the hash insert down, over rows the build half already
+ * reduced, and it exists ONCE so the indexed rows and the tail's cannot
+ * drift apart. Returns 0, or -1 on an allocation failure the caller must
+ * turn into a refusal. */
+static int vi_merge_rows(struct vi_accum *ht,
+                         const struct pgwt_variant_index_entry *rows,
+                         const struct pgwt_variant_index_step *steps,
+                         int first, int n, uint64_t from_ns, uint64_t to_ns,
+                         enum pgwt_variant_phase phase, int is_tail,
+                         uint64_t seam_ns,
+                         struct pgwt_variant_index_query_result *out,
+                         int *total_execs)
 {
-    if (!out)
-        return -1;
-    memset(out, 0, sizeof(*out));
-    if (!idx)
-        return vi_query_refuse(out, PGWT_VARIANT_INDEX_REFUSE_NULL);
-    if (idx->version != PGWT_VARIANT_INDEX_VERSION)
-        return vi_query_refuse(out, PGWT_VARIANT_INDEX_REFUSE_VERSION);
-    if (idx->failed)
-        return vi_query_refuse(out, idx->build_refusal == PGWT_VARIANT_INDEX_OK
-                               ? PGWT_VARIANT_INDEX_REFUSE_BUILD_FAILED
-                               : idx->build_refusal);
-    if (!idx->sealed)
-        return vi_query_refuse(out, PGWT_VARIANT_INDEX_REFUSE_UNSEALED);
-    if (phase != PGWT_PHASE_EXEC && phase != PGWT_PHASE_PLAN)
-        return vi_query_refuse(out, PGWT_VARIANT_INDEX_REFUSE_PHASE);
-    if (!pgwt_variant_index_filter_ok(f))
-        return vi_query_refuse(out, PGWT_VARIANT_INDEX_REFUSE_FILTER);
-    if (from_ns > to_ns)
-        return vi_query_refuse(out, PGWT_VARIANT_INDEX_REFUSE_BAD_WINDOW);
-    if (idx->n_chunks == 0)
-        return vi_query_refuse(out, PGWT_VARIANT_INDEX_REFUSE_EMPTY);
-    /* Containment, not intersection. A window reaching past the indexed
-     * range must never be answered for its covered part only. */
-    if (from_ns < idx->cover_from_ns || to_ns > idx->cover_to_ns)
-        return vi_query_refuse(out, PGWT_VARIANT_INDEX_REFUSE_RANGE);
-
-    if (pgwt_test_alloc_fail("variant_index_query_ht"))
-        return vi_query_refuse(out, PGWT_VARIANT_INDEX_REFUSE_ALLOC);
-    struct vi_accum *ht = calloc(PGWT_VARIANT_INDEX_HT_SIZE, sizeof(*ht));
-    if (!ht)
-        return vi_query_refuse(out, PGWT_VARIANT_INDEX_REFUSE_ALLOC);
-
-    out->chunks_total = idx->n_chunks;
-    int total_execs = 0;
-    int alloc_failed = 0;
-
-    for (int c = 0; c < idx->n_chunks && !alloc_failed; c++) {
-        const struct pgwt_variant_index_chunk *ch = &idx->chunks[c];
-        /* Prefilter. No row in this chunk can satisfy the selection
-         * predicate when every close is below `from` or every start is
-         * above `to`. Inclusive comparisons, matching the predicate. */
-        if (ch->n_rows == 0 || ch->max_close_ns < from_ns ||
-            ch->min_start_ns > to_ns)
-            continue;
-        out->chunks_scanned++;
-
-        for (int r = ch->first_row; r < ch->first_row + ch->n_rows; r++) {
-            const struct pgwt_variant_index_entry *e = &idx->rows[r];
+    for (int r = first; r < first + n; r++) {
+        const struct pgwt_variant_index_entry *e = &rows[r];
+        if (!is_tail)
             out->rows_examined++;
-            if (e->phase != (uint8_t)phase)
-                continue;
-            if (!pgwt_variant_index_selects(e->start_ns, e->close_ns,
-                                            from_ns, to_ns))
-                continue;
+        if (e->phase != (uint8_t)phase)
+            continue;
+        if (!pgwt_variant_index_selects(e->start_ns, e->close_ns,
+                                        from_ns, to_ns))
+            continue;
+        if (is_tail) {
+            out->tail_rows_selected++;
+            /* Opened before the seam: this row only exists because the
+             * tail walked a COPY of the carry state. */
+            if (e->start_ns < seam_ns)
+                out->tail_rows_crossing++;
+        } else {
             out->rows_selected++;
-            total_execs++;
+        }
+        (*total_execs)++;
 
-            /* Rebuild the compressed pattern from the stored steps. */
-            struct vi_pattern cp;
-            memset(&cp, 0, sizeof(cp));
-            cp.num_steps = e->num_steps;
-            for (int s = 0; s < e->num_steps; s++) {
-                const struct pgwt_variant_index_step *st =
-                    &idx->steps[e->step_off + s];
-                cp.steps[s] = st->event_id;
-                cp.is_loop[s] = st->is_loop;
-                cp.loop_len[s] = st->loop_len;
+        /* Rebuild the compressed pattern from the stored steps. */
+        struct vi_pattern cp;
+        memset(&cp, 0, sizeof(cp));
+        cp.num_steps = e->num_steps;
+        for (int s = 0; s < e->num_steps; s++) {
+            const struct pgwt_variant_index_step *st = &steps[e->step_off + s];
+            cp.steps[s] = st->event_id;
+            cp.is_loop[s] = st->is_loop;
+            cp.loop_len[s] = st->loop_len;
+        }
+        out->steps_examined += e->num_steps;
+
+        double loop_n = 0;
+        if (e->raw_len > 1)
+            loop_n = cp.num_steps > 0 ? (double)e->raw_len / cp.num_steps : 1;
+
+        uint32_t slot = (uint32_t)(e->hash & (PGWT_VARIANT_INDEX_HT_SIZE - 1));
+        while (ht[slot].used && ht[slot].hash != e->hash)
+            slot = (slot + 1) & (PGWT_VARIANT_INDEX_HT_SIZE - 1);
+        struct vi_accum *va = &ht[slot];
+        if (!va->used) {
+            va->used = 1;
+            va->hash = e->hash;
+            va->pattern = cp;
+        }
+        va->exec_count++;
+        va->total_ns += e->total_ns;
+        va->loop_n_sum += loop_n;
+        va->loop_n_count++;
+        vi_accum_add_qid(va, e->query_id);
+
+        if (va->exec_times_n < PGWT_VARIANT_INDEX_MAX_SAMPLES) {
+            if (va->exec_times_n >= va->exec_times_cap) {
+                int newcap = va->exec_times_cap ? va->exec_times_cap * 2 : 64;
+                if (newcap > PGWT_VARIANT_INDEX_MAX_SAMPLES)
+                    newcap = PGWT_VARIANT_INDEX_MAX_SAMPLES;
+                uint64_t *tmp = pgwt_test_alloc_fail("variant_index_samples")
+                    ? NULL
+                    : realloc(va->exec_times, newcap * sizeof(uint64_t));
+                if (tmp) { va->exec_times = tmp; va->exec_times_cap = newcap; }
+                else return -1;
             }
-            out->steps_examined += e->num_steps;
+            if (va->exec_times && va->exec_times_n < va->exec_times_cap)
+                va->exec_times[va->exec_times_n++] = e->total_ns;
+        }
 
-            double loop_n = 0;
-            if (e->raw_len > 1)
-                loop_n = cp.num_steps > 0
-                       ? (double)e->raw_len / cp.num_steps : 1;
-
-            uint32_t slot = (uint32_t)(e->hash & (PGWT_VARIANT_INDEX_HT_SIZE - 1));
-            while (ht[slot].used && ht[slot].hash != e->hash)
-                slot = (slot + 1) & (PGWT_VARIANT_INDEX_HT_SIZE - 1);
-            struct vi_accum *va = &ht[slot];
-            if (!va->used) {
-                va->used = 1;
-                va->hash = e->hash;
-                va->pattern = cp;
-            }
-            va->exec_count++;
-            va->total_ns += e->total_ns;
-            va->loop_n_sum += loop_n;
-            va->loop_n_count++;
-            vi_accum_add_qid(va, e->query_id);
-
-            if (va->exec_times_n < PGWT_VARIANT_INDEX_MAX_SAMPLES) {
-                if (va->exec_times_n >= va->exec_times_cap) {
-                    int newcap = va->exec_times_cap ? va->exec_times_cap * 2 : 64;
-                    if (newcap > PGWT_VARIANT_INDEX_MAX_SAMPLES)
-                        newcap = PGWT_VARIANT_INDEX_MAX_SAMPLES;
-                    uint64_t *tmp = pgwt_test_alloc_fail("variant_index_samples")
-                        ? NULL
-                        : realloc(va->exec_times, newcap * sizeof(uint64_t));
-                    if (tmp) { va->exec_times = tmp; va->exec_times_cap = newcap; }
-                    else { alloc_failed = 1; break; }
-                }
-                if (va->exec_times && va->exec_times_n < va->exec_times_cap)
-                    va->exec_times[va->exec_times_n++] = e->total_ns;
-            }
-
-            for (int s = 0; s < e->num_steps && s < PGWT_MAX_VARIANT_STEPS; s++) {
-                const struct pgwt_variant_index_step *st =
-                    &idx->steps[e->step_off + s];
-                va->step_total_ns[s] += st->total_ns;
-                va->step_count[s] += st->count;
-            }
+        for (int s = 0; s < e->num_steps && s < PGWT_MAX_VARIANT_STEPS; s++) {
+            const struct pgwt_variant_index_step *st = &steps[e->step_off + s];
+            va->step_total_ns[s] += st->total_ns;
+            va->step_count[s] += st->count;
         }
     }
+    return 0;
+}
 
-    /* The oracle degrades here (it drops one p95 sample and carries on);
-     * this REFUSES, because an index that cannot establish the answer must
-     * never present a nearly-right one. The caller then recomputes from
-     * raw and gets the oracle's own behaviour. */
-    if (alloc_failed) {
-        for (int i = 0; i < PGWT_VARIANT_INDEX_HT_SIZE; i++)
-            free(ht[i].exec_times);
-        free(ht);
-        return vi_query_refuse(out, PGWT_VARIANT_INDEX_REFUSE_ALLOC);
-    }
-
+/* pgwt_compute_variants' phase 2: slot-order collection, qsort by total
+ * time, max_variants truncation. Returns 0, or -1 when the output array
+ * could not be allocated. */
+static int vi_emit_variants(struct vi_accum *ht, int max_variants,
+                            int total_execs,
+                            struct pgwt_variant_index_query_result *out)
+{
     int nv = 0;
     for (int i = 0; i < PGWT_VARIANT_INDEX_HT_SIZE; i++)
         if (ht[i].used) nv++;
 
+    /* calloc(1) for an EMPTY answer, never calloc(0): a caller that tests
+     * res.variants for NULL must not read "no variants" as "the index
+     * refused". The guard on that is res.failed / sequences_indexed. */
     struct pgwt_variant *variants =
         pgwt_test_alloc_fail("variant_index_query_out")
         ? NULL : calloc(nv ? (size_t)nv : 1, sizeof(*variants));
-    if (!variants) {
-        for (int i = 0; i < PGWT_VARIANT_INDEX_HT_SIZE; i++)
-            free(ht[i].exec_times);
-        free(ht);
-        return vi_query_refuse(out, PGWT_VARIANT_INDEX_REFUSE_ALLOC);
-    }
+    if (!variants)
+        return -1;
 
     int vi = 0;
     for (int i = 0; i < PGWT_VARIANT_INDEX_HT_SIZE && vi < nv; i++) {
@@ -828,8 +798,6 @@ int pgwt_variant_index_query(const struct pgwt_variant_index *idx,
             v->step_avg_ns[s] = va->step_count[s] > 0
                 ? va->step_total_ns[s] / va->step_count[s] : 0;
         }
-
-        free(va->exec_times);
     }
 
     qsort(variants, vi, sizeof(variants[0]), vi_cmp_variant_time_desc);
@@ -841,7 +809,231 @@ int pgwt_variant_index_query(const struct pgwt_variant_index *idx,
     out->res.failed = 0;
     out->sequences_indexed = 1;
     out->refused = PGWT_VARIANT_INDEX_OK;
-
-    free(ht);
     return 0;
+}
+
+uint64_t pgwt_variant_index_tail_from_ns(const struct pgwt_variant_index *idx)
+{
+    if (!idx || idx->failed || idx->version != PGWT_VARIANT_INDEX_VERSION)
+        return 0;
+    if (idx->n_chunks == 0 || idx->cover_to_ns == UINT64_MAX)
+        return 0;   /* no representable seam; query_tail refuses */
+    return idx->cover_to_ns + 1;
+}
+
+/* THE TAIL. Walk the caller's raw-decoded records through a COPY of the
+ * builder's carry state, producing the rows the index would have produced
+ * had those records been one more block. `work` must be a fresh index; on
+ * return it owns the tail's rows and steps and the caller frees it.
+ *
+ * Only ACTIVE carries are copied, and that is behaviour-identical rather
+ * than an optimisation: in add_block() a pid with no carry entry and a pid
+ * whose carry is inactive take exactly the same branches (every one is
+ * gated on pc->active). An execution mid-flight at the seam IS the reason
+ * this copy exists — without it that execution would be truncated at the
+ * seam or lost, and two different executions truncated the same way hash
+ * to the same "variant", the headline silent-wrong mode.
+ *
+ * Returns PGWT_VARIANT_INDEX_OK, or the refusal to report. */
+static enum pgwt_variant_index_refusal
+vi_build_tail(const struct pgwt_variant_index *idx,
+              const struct pgwt_trace_event *tail, int tail_count,
+              uint64_t tail_from_ns, uint64_t tail_to_ns,
+              struct pgwt_variant_index *work,
+              struct pgwt_variant_index_query_result *out)
+{
+    pgwt_variant_index_init(work);
+
+    for (int i = 0; i < idx->n_pids; i++) {
+        const struct vi_pid_carry *c =
+            &((const struct vi_pid_carry *)idx->pids)[i];
+        if (!c->ph[0].active && !c->ph[1].active)
+            continue;
+        struct vi_pid_carry *d = vi_pid(work, c->pid);
+        if (!d)
+            return PGWT_VARIANT_INDEX_REFUSE_ALLOC;
+        *d = *c;
+        out->tail_carries_copied++;
+    }
+
+    if (tail_count > 0) {
+        /* The same add_block() the build half uses — not a second copy of
+         * the marker walk. Its own guards do the per-record checking: a
+         * record below tail_from_ns or above tail_to_ns, or one whose
+         * timestamp goes backwards, latches REFUSE_GAP, which this
+         * reports as REFUSE_TAIL_ORDER (the caller's tail is wrong, not
+         * the index's own feed). */
+        if (pgwt_variant_index_add_block(work, 0, tail_from_ns, tail_to_ns,
+                                         tail, tail_count) != 0)
+            return work->build_refusal == PGWT_VARIANT_INDEX_REFUSE_GAP
+                 ? PGWT_VARIANT_INDEX_REFUSE_TAIL_ORDER
+                 : PGWT_VARIANT_INDEX_REFUSE_BUILD_FAILED;
+    }
+    if (pgwt_variant_index_seal(work) != 0)
+        return PGWT_VARIANT_INDEX_REFUSE_BUILD_FAILED;
+
+    out->tail_records = tail_count;
+    out->tail_rows = work->n_rows;
+    out->tail_discarded = work->n_discarded;
+    return PGWT_VARIANT_INDEX_OK;
+}
+
+/* The one query path. `have_tail` selects whether the caller's tail
+ * records extend coverage and contribute rows; plain query() is this with
+ * no tail, so the two entry points cannot answer differently for the part
+ * they share. */
+static int vi_query_core(const struct pgwt_variant_index *idx,
+                         uint64_t from_ns, uint64_t to_ns,
+                         const struct pgwt_filter *f, int max_variants,
+                         enum pgwt_variant_phase phase,
+                         int have_tail,
+                         const struct pgwt_trace_event *tail, int tail_count,
+                         uint64_t tail_from_ns, uint64_t tail_to_ns,
+                         struct pgwt_variant_index_query_result *out)
+{
+    if (!out)
+        return -1;
+    memset(out, 0, sizeof(*out));
+    if (!idx)
+        return vi_query_refuse(out, PGWT_VARIANT_INDEX_REFUSE_NULL);
+    if (idx->version != PGWT_VARIANT_INDEX_VERSION)
+        return vi_query_refuse(out, PGWT_VARIANT_INDEX_REFUSE_VERSION);
+    if (idx->failed)
+        return vi_query_refuse(out, idx->build_refusal == PGWT_VARIANT_INDEX_OK
+                               ? PGWT_VARIANT_INDEX_REFUSE_BUILD_FAILED
+                               : idx->build_refusal);
+    if (!idx->sealed)
+        return vi_query_refuse(out, PGWT_VARIANT_INDEX_REFUSE_UNSEALED);
+    if (phase != PGWT_PHASE_EXEC && phase != PGWT_PHASE_PLAN)
+        return vi_query_refuse(out, PGWT_VARIANT_INDEX_REFUSE_PHASE);
+    if (!pgwt_variant_index_filter_ok(f))
+        return vi_query_refuse(out, PGWT_VARIANT_INDEX_REFUSE_FILTER);
+    if (from_ns > to_ns)
+        return vi_query_refuse(out, PGWT_VARIANT_INDEX_REFUSE_BAD_WINDOW);
+    if (idx->n_chunks == 0)
+        return vi_query_refuse(out, PGWT_VARIANT_INDEX_REFUSE_EMPTY);
+
+    /* The tail's own guards, BEFORE the coverage test: an untrustworthy
+     * tail must not be able to widen the range this index will answer. */
+    uint64_t cover_to = idx->cover_to_ns;
+    if (have_tail) {
+        if (tail_count < 0 || (tail_count > 0 && !tail))
+            return vi_query_refuse(out, PGWT_VARIANT_INDEX_REFUSE_TAIL_NULL);
+        /* The seam, from the one shared function the caller is told to
+         * use. 0 means "no representable seam", which refuses. */
+        uint64_t seam = pgwt_variant_index_tail_from_ns(idx);
+        if (seam == 0 || tail_from_ns != seam)
+            return vi_query_refuse(out, PGWT_VARIANT_INDEX_REFUSE_TAIL_SEAM);
+        /* A declared tail range ending below the index's own coverage
+         * would SHRINK coverage. */
+        if (tail_to_ns < idx->cover_to_ns)
+            return vi_query_refuse(out, PGWT_VARIANT_INDEX_REFUSE_TAIL_SEAM);
+        if (tail_count > 0 && tail_to_ns < tail_from_ns)
+            return vi_query_refuse(out, PGWT_VARIANT_INDEX_REFUSE_TAIL_ORDER);
+        cover_to = tail_to_ns;
+    }
+
+    /* Containment, not intersection. A window reaching past the covered
+     * range must never be answered for its covered part only. With a tail
+     * the covered range ends at tail_to_ns — a tail that does not reach
+     * to_ns is a tail that cannot answer the window. */
+    if (from_ns < idx->cover_from_ns || to_ns > cover_to)
+        return vi_query_refuse(out, PGWT_VARIANT_INDEX_REFUSE_RANGE);
+
+    struct pgwt_variant_index work;
+    int have_work = 0;
+    if (have_tail) {
+        enum pgwt_variant_index_refusal why =
+            vi_build_tail(idx, tail, tail_count, tail_from_ns, tail_to_ns,
+                          &work, out);
+        have_work = 1;
+        if (why != PGWT_VARIANT_INDEX_OK) {
+            pgwt_variant_index_free(&work);
+            return vi_query_refuse(out, why);
+        }
+    }
+
+    if (pgwt_test_alloc_fail("variant_index_query_ht")) {
+        if (have_work) pgwt_variant_index_free(&work);
+        return vi_query_refuse(out, PGWT_VARIANT_INDEX_REFUSE_ALLOC);
+    }
+    struct vi_accum *ht = calloc(PGWT_VARIANT_INDEX_HT_SIZE, sizeof(*ht));
+    if (!ht) {
+        if (have_work) pgwt_variant_index_free(&work);
+        return vi_query_refuse(out, PGWT_VARIANT_INDEX_REFUSE_ALLOC);
+    }
+
+    out->chunks_total = idx->n_chunks;
+    int total_execs = 0;
+    int alloc_failed = 0;
+
+    for (int c = 0; c < idx->n_chunks && !alloc_failed; c++) {
+        const struct pgwt_variant_index_chunk *ch = &idx->chunks[c];
+        /* Prefilter. No row in this chunk can satisfy the selection
+         * predicate when every close is below `from` or every start is
+         * above `to`. Inclusive comparisons, matching the predicate. */
+        if (ch->n_rows == 0 || ch->max_close_ns < from_ns ||
+            ch->min_start_ns > to_ns)
+            continue;
+        out->chunks_scanned++;
+        if (vi_merge_rows(ht, idx->rows, idx->steps, ch->first_row, ch->n_rows,
+                          from_ns, to_ns, phase, 0, 0, out, &total_execs) != 0)
+            alloc_failed = 1;
+    }
+
+    /* THE TAIL GOES LAST, and that is the whole correctness argument for
+     * this path: every tail record is above cover_to_ns, so every tail
+     * execution closes after every indexed one, so appending its rows here
+     * reproduces the oracle's close order exactly — which is what makes
+     * query_ids[0], the bounded p95 sample and the collision chains come
+     * out identical rather than merely close. */
+    if (have_work && !alloc_failed && work.n_rows > 0) {
+        if (vi_merge_rows(ht, work.rows, work.steps, 0, work.n_rows,
+                          from_ns, to_ns, phase, 1, tail_from_ns, out,
+                          &total_execs) != 0)
+            alloc_failed = 1;
+    }
+
+    /* The oracle degrades here (it drops one p95 sample and carries on);
+     * this REFUSES, because an index that cannot establish the answer must
+     * never present a nearly-right one. The caller then recomputes from
+     * raw and gets the oracle's own behaviour. */
+    if (alloc_failed ||
+        vi_emit_variants(ht, max_variants, total_execs, out) != 0) {
+        for (int i = 0; i < PGWT_VARIANT_INDEX_HT_SIZE; i++)
+            free(ht[i].exec_times);
+        free(ht);
+        if (have_work) pgwt_variant_index_free(&work);
+        return vi_query_refuse(out, PGWT_VARIANT_INDEX_REFUSE_ALLOC);
+    }
+
+    for (int i = 0; i < PGWT_VARIANT_INDEX_HT_SIZE; i++)
+        free(ht[i].exec_times);
+    free(ht);
+    if (have_work)
+        pgwt_variant_index_free(&work);
+    return 0;
+}
+
+int pgwt_variant_index_query(const struct pgwt_variant_index *idx,
+                             uint64_t from_ns, uint64_t to_ns,
+                             const struct pgwt_filter *f, int max_variants,
+                             enum pgwt_variant_phase phase,
+                             struct pgwt_variant_index_query_result *out)
+{
+    return vi_query_core(idx, from_ns, to_ns, f, max_variants, phase,
+                         0, NULL, 0, 0, 0, out);
+}
+
+int pgwt_variant_index_query_tail(const struct pgwt_variant_index *idx,
+                                  uint64_t from_ns, uint64_t to_ns,
+                                  const struct pgwt_filter *f, int max_variants,
+                                  enum pgwt_variant_phase phase,
+                                  const struct pgwt_trace_event *tail,
+                                  int tail_count,
+                                  uint64_t tail_from_ns, uint64_t tail_to_ns,
+                                  struct pgwt_variant_index_query_result *out)
+{
+    return vi_query_core(idx, from_ns, to_ns, f, max_variants, phase,
+                         1, tail, tail_count, tail_from_ns, tail_to_ns, out);
 }

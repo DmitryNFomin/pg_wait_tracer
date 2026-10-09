@@ -295,6 +295,30 @@ test_exec_index
 #   POISON the counts to -1 with failed=1 -- plus a fixture with NO markers
 #   that must come back as 0 variants with refused=OK, the one encoding of a
 #   genuinely empty window.
+#   THE TAIL (the window the UI actually asks for). "Last N seconds ending
+#   at now" reaches past the last committed block, so the containment rule
+#   REFUSES it and `variants` would gain nothing live.
+#   pgwt_variant_index_query_tail() takes the caller's raw-decoded tail
+#   RECORDS -- never a second variant table, which is not mergeable -- walks
+#   them through a COPY of the carry state via the same add_block(), and
+#   merges their rows AFTER the indexed ones, which is exactly close order
+#   because every tail record is above cover_to_ns. Sweep D is the
+#   differential for it: index the first k blocks, hand the rest over as the
+#   tail, compare bit-exactly against pgwt_compute_variants, with counted
+#   proof that the shapes occurred (windows ending past coverage, executions
+#   closing in the tail, executions that OPENED before the seam, answers with
+#   an empty tail, answers entirely from the tail). Close order is pinned by
+#   three literal fixtures where a naive append changes the answer:
+#   top_query_id (the first distinct query_id wins), a hash-slot COLLISION
+#   CHAIN with equal total_ns (arrival order is output order), and the bounded
+#   p95 sample at PGWT_VARIANT_MAX_SAMPLES+1 executions (the tail's execution
+#   is counted but must NOT displace an indexed sample). The tail's own bypass
+#   suite refuses a NULL array with a positive count, a negative count, a seam
+#   off by one ns either way, a declared range that shrinks coverage, a record
+#   below the seam or above the declared range, records out of order, a window
+#   the tail does not reach, coverage ending at UINT64_MAX and every injected
+#   allocation failure including the carry copy -- and asserts the index is
+#   left UNMODIFIED and the same call twice gives the same bits.
 #   Companion: tests/variant_index_mutations.py injects the silent-wrong risks
 #   one at a time and requires this test to catch each; it is not in this list
 #   because it recompiles the module once per mutation and is evidence, not a

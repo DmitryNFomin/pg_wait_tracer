@@ -204,9 +204,9 @@ MUTATIONS = [
 
     ("M22 avg_loop_n pre-aggregated per variant instead of summed per "
      "execution in close order",
-     "            va->loop_n_sum += loop_n;\n            va->loop_n_count++;",
-     "            va->loop_n_sum = loop_n * (va->loop_n_count + 1);\n"
-     "            va->loop_n_count++;"),
+     "        va->loop_n_sum += loop_n;\n        va->loop_n_count++;",
+     "        va->loop_n_sum = loop_n * (va->loop_n_count + 1);\n"
+     "        va->loop_n_count++;"),
 
     ("M23 CMD_END closes an exec here (it does not, for variants)",
      "            if (PGWT_IS_MARKER(ev->old_event) || PGWT_IS_MARKER(ev->new_event))\n"
@@ -221,8 +221,8 @@ MUTATIONS = [
      "                continue;"),
 
     ("M24 phases conflated (an exec row answers a plan query)",
-     "            if (e->phase != (uint8_t)phase)\n                continue;",
-     "            /* mutant: phase ignored */"),
+     "        if (e->phase != (uint8_t)phase)\n            continue;",
+     "        /* mutant: phase ignored */"),
 
     ("M25 max_variants truncation dropped",
      "    int nr = vi < max_variants ? vi : max_variants;",
@@ -239,8 +239,8 @@ MUTATIONS = [
      "    }"),
 
     ("G02 coverage check is an INTERSECTION, not containment",
-     "    if (from_ns < idx->cover_from_ns || to_ns > idx->cover_to_ns)",
-     "    if (to_ns < idx->cover_from_ns || from_ns > idx->cover_to_ns)"),
+     "    if (from_ns < idx->cover_from_ns || to_ns > cover_to)",
+     "    if (to_ns < idx->cover_from_ns || from_ns > cover_to)"),
 
     ("G03 a refusal leaves the counts at 0 instead of poisoning them",
      "    out->res.num_variants = PGWT_VARIANT_INDEX_NOT_INDEXED;\n"
@@ -322,6 +322,110 @@ MUTATIONS = [
      "be distinguished from 'the counter is broken'",
      "    return vi_open_at_end(idx);",
      "    return 0;"),
+
+    # ── THE TAIL: every way the index/tail seam can go silently wrong ──
+    # query_tail() is what makes `variants` answerable for the window the UI
+    # actually asks for ("last N seconds ending at now"). Its one silent-wrong
+    # axis is CLOSE ORDER across the seam, which decides query_ids[0], the
+    # bounded p95 sample and the hash table's collision chains — so a naive
+    # append is injected here and must go RED.
+    ("T01 the tail's rows are merged BEFORE the indexed rows (the naive "
+     "append: close order across the seam inverted)",
+     "    for (int c = 0; c < idx->n_chunks && !alloc_failed; c++) {\n"
+     "        const struct pgwt_variant_index_chunk *ch = &idx->chunks[c];",
+     "    if (have_work && !alloc_failed && work.n_rows > 0) {\n"
+     "        if (vi_merge_rows(ht, work.rows, work.steps, 0, work.n_rows,\n"
+     "                          from_ns, to_ns, phase, 1, tail_from_ns, out,\n"
+     "                          &total_execs) != 0)\n"
+     "            alloc_failed = 1;\n"
+     "        work.n_rows = 0;\n"
+     "    }\n"
+     "    for (int c = 0; c < idx->n_chunks && !alloc_failed; c++) {\n"
+     "        const struct pgwt_variant_index_chunk *ch = &idx->chunks[c];"),
+
+    ("T02 the carry state is NOT copied, so an execution open at the seam "
+     "is lost instead of closed by the tail",
+     "        if (!c->ph[0].active && !c->ph[1].active)\n"
+     "            continue;",
+     "        if (1)\n"
+     "            continue;"),
+
+    ("T03 the carry is copied but EMPTIED, so a crossing execution comes "
+     "out truncated to the tail's steps (two different executions "
+     "truncated alike hash to one variant)",
+     "        *d = *c;",
+     "        *d = *c;\n"
+     "        d->ph[0].exec.len = 0; d->ph[0].exec.total_ns = 0;\n"
+     "        d->ph[1].exec.len = 0; d->ph[1].exec.total_ns = 0;"),
+
+    ("T04 the copied carry loses start_ns, so a crossing execution is "
+     "selected by the wrong opening timestamp",
+     "        *d = *c;",
+     "        *d = *c;\n"
+     "        d->ph[0].start_ns = 0; d->ph[1].start_ns = 0;"),
+
+    ("T05 the tail walks the REAL carry state instead of a copy (the index "
+     "is consumed: a second identical query answers differently)",
+     "        out->tail_carries_copied++;",
+     "        out->tail_carries_copied++;\n"
+     "        ((struct vi_pid_carry *)idx->pids)[i].ph[0].active = 0;\n"
+     "        ((struct vi_pid_carry *)idx->pids)[i].ph[1].active = 0;",),
+
+    ("T06 the seam is not checked, so a tail that overlaps the index or "
+     "leaves a hole is accepted",
+     "        if (seam == 0 || tail_from_ns != seam)\n"
+     "            return vi_query_refuse(out, PGWT_VARIANT_INDEX_REFUSE_TAIL_SEAM);",
+     "        if (0)\n"
+     "            return vi_query_refuse(out, PGWT_VARIANT_INDEX_REFUSE_TAIL_SEAM);"),
+
+    ("T07 the window is no longer required to fit inside the tail's "
+     "declared coverage (answers short, says nothing)",
+     "    if (from_ns < idx->cover_from_ns || to_ns > cover_to)",
+     "    if (from_ns < idx->cover_from_ns)"),
+
+    ("T08 a NULL tail array with a positive count, or a negative count, is "
+     "accepted as a tail",
+     "        if (tail_count < 0 || (tail_count > 0 && !tail))\n"
+     "            return vi_query_refuse(out, PGWT_VARIANT_INDEX_REFUSE_TAIL_NULL);",
+     "        if (0)\n"
+     "            return vi_query_refuse(out, PGWT_VARIANT_INDEX_REFUSE_TAIL_NULL);"),
+
+    ("T09 the tail's rows are merged against the INDEX's step arena, so "
+     "their patterns come from the wrong offsets",
+     "        if (vi_merge_rows(ht, work.rows, work.steps, 0, work.n_rows,",
+     "        if (vi_merge_rows(ht, work.rows, idx->steps, 0, work.n_rows,"),
+
+    ("T10 the tail's rows are never merged at all (the tail is decoded and "
+     "then dropped: a window ending at now answers only the indexed part)",
+     "    if (have_work && !alloc_failed && work.n_rows > 0) {",
+     "    if (0) {"),
+
+    ("T11 a tail the walk REJECTED is reported as OK (a refusal that "
+     "approves)",
+     "            return work->build_refusal == PGWT_VARIANT_INDEX_REFUSE_GAP\n"
+     "                 ? PGWT_VARIANT_INDEX_REFUSE_TAIL_ORDER\n"
+     "                 : PGWT_VARIANT_INDEX_REFUSE_BUILD_FAILED;",
+     "            return PGWT_VARIANT_INDEX_OK;"),
+
+    ("T12 a one-record tail is silently dropped",
+     "    if (tail_count > 0) {",
+     "    if (tail_count > 1) {"),
+
+    ("T13 GATE-BLINDING: tail_rows_crossing can never be driven, so "
+     "'an execution crossed the seam' cannot be proven",
+     "            if (e->start_ns < seam_ns)\n"
+     "                out->tail_rows_crossing++;",
+     "            /* mutant: crossing not counted */"),
+
+    ("T14 GATE-BLINDING: tail_rows_selected stays 0, so the tail sweep's "
+     "non-vacuity claim becomes unprovable",
+     "            out->tail_rows_selected++;",
+     "            /* mutant: tail rows not counted */"),
+
+    ("T15 GATE-BLINDING: the seam helper returns the index's own "
+     "cover_to_ns, so a caller that trusts it re-feeds one record",
+     "    return idx->cover_to_ns + 1;",
+     "    return idx->cover_to_ns;"),
 ]
 
 
