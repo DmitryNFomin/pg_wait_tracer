@@ -553,7 +553,8 @@ static long c_triples, c_splits, c_variants, c_execs, c_multistep,
             c_looped, c_cpuonly, c_crossing, c_steps_crossing, c_skipped,
             c_multipid, c_qid_from_inner, c_truncated_pattern,
             c_raw_capped, c_p95_sampled, c_two_phase, c_order_pairs,
-            c_prefilter_rows_saved, c_zero_len, c_extra_close;
+            c_prefilter_rows_saved, c_zero_len, c_extra_close,
+            c_sat_grown, c_sat_refused;
 static long c_mismatch;
 static char g_first_mismatch[768];
 
@@ -1623,6 +1624,253 @@ static void measure_complexity(void)
 
 /* ── non-vacuity ledger ───────────────────────────────────── */
 
+/* -- #327's SEVENTH site: the merge table at and past saturation --
+ *
+ * src/variant_index.c's merge table was a FIXED 4096-slot array probed with
+ * no fullness test, copied from pgwt_compute_variants. The 4097th distinct
+ * pattern hash made that probe loop spin forever: pgwt-server is
+ * single-threaded, so the request never answers and every tab stops at
+ * once. Six sibling sites in src/compute.c carry the same defect (#327).
+ *
+ * BEFORE THE FIX THIS SUITE DOES NOT FAIL -- IT HANGS. That is why the
+ * pre-fix evidence for it is an external `timeout` reporting exit 124 ("did
+ * not terminate") rather than a FAIL line, and why it is written as exact
+ * count assertions that can only be satisfied by an answer actually being
+ * produced.
+ *
+ * THE ORACLE CANNOT BE THE COMPARATOR HERE. pgwt_compute_variants is
+ * #327's sixth site and still carries the unbounded loop on this tree, so
+ * calling it on a 4097-pattern window would hang this test instead of
+ * answering it. The assertions are therefore against the GENERATOR's own
+ * construction -- a count the test knows independently of either
+ * implementation -- not against the oracle.
+ *
+ * WHAT WOULD MAKE THIS PASS WHILE THE PRODUCT IS BROKEN, and what stops it:
+ *  - fewer than 4097 genuinely distinct patterns (ids reused, a pair
+ *    compressing to a loop, two hashes colliding), so the table never
+ *    saturates and the unbounded loop is never reached. Stopped by
+ *    asserting num_variants == n EXACTLY at n = 4097 (a 4096-slot table
+ *    cannot hold 4097 keys, so the exact count IS the proof that the table
+ *    grew), by asserting every returned hash is distinct, and by building
+ *    the patterns as ordered pairs (a,b) with a != b over 65 ids, which
+ *    have no repeated body for detect_loop to fold.
+ *  - the query refusing for an unrelated reason and the suite accepting the
+ *    refusal as "handled". Stopped by requiring refused == OK, failed == 0
+ *    and sequences_indexed == 1 on the growth cases, and the SPECIFIC
+ *    refusal reason on the one case that must refuse.
+ *  - a key silently dropped to make the loop terminate -- the outcome #327
+ *    calls worse than the hang. Stopped by sum(exec_count) == n against the
+ *    generator's n, by every exec_count being 1, and by hash distinctness.
+ */
+#define SAT_IDS 65          /* 65 * 64 = 4160 ordered pairs, a != b */
+
+/* n_patterns executions, each EXEC_START / wait(a) / wait(b) / EXEC_END
+ * with (a, b) the n-th ordered pair of distinct synthetic IO event ids. */
+static struct pgwt_trace_event *sat_trace(int n_patterns, int *n_out)
+{
+    int n = n_patterns * 4;
+    struct pgwt_trace_event *ev = calloc((size_t)n, sizeof(*ev));
+    if (!ev) return NULL;
+    uint64_t t = BASE;
+    int k = 0, made = 0;
+    for (int a = 0; a < SAT_IDS && made < n_patterns; a++) {
+        for (int b = 0; b < SAT_IDS && made < n_patterns; b++) {
+            if (a == b) continue;          /* (x,x) folds into a LOOP step */
+            uint32_t ea = (PG_WAIT_IO << 24) | (uint32_t)(a + 1);
+            uint32_t eb = (PG_WAIT_IO << 24) | (uint32_t)(b + 1);
+            uint32_t pid = 3000 + (uint32_t)(made % 7);
+            ev[k++] = mk(t, pid, ES, 7); t += MS;
+            ev[k++] = wt(t, pid, ea, 1000 + (uint64_t)made, 0); t += MS;
+            ev[k++] = wt(t, pid, eb, 2000 + (uint64_t)made, 0); t += MS;
+            ev[k++] = mk(t, pid, EE, 7); t += MS;
+            made++;
+        }
+    }
+    if (made != n_patterns) { free(ev); return NULL; }
+    *n_out = k;
+    return ev;
+}
+
+static int cmp_u64(const void *a, const void *b)
+{
+    uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b;
+    return x < y ? -1 : (x > y ? 1 : 0);
+}
+
+/* Build an index over `ev` in `n_blocks` blocks. 0 on success. */
+static int sat_build(struct pgwt_variant_index *idx,
+                     const struct pgwt_trace_event *ev, int n, int n_blocks)
+{
+    pgwt_variant_index_init(idx);
+    for (int b = 0; b < n_blocks; b++) {
+        int s = (int)((long)n * b / n_blocks);
+        int e = (int)((long)n * (b + 1) / n_blocks);
+        if (e <= s) continue;
+        if (pgwt_variant_index_add_block(idx, b, ev[s].timestamp_ns,
+                                         ev[e - 1].timestamp_ns, &ev[s],
+                                         e - s) != 0)
+            return -1;
+    }
+    return pgwt_variant_index_seal(idx);
+}
+
+static void saturation_suite(void)
+{
+    printf("--- #327 seventh site: the merge table at and past saturation ---\n");
+    struct pgwt_filter zero;
+    memset(&zero, 0, sizeof(zero));
+
+    /* 4095 and 4096 TERMINATE even with the unbounded probe loop (a table
+     * that still has a free slot always stops); 4097 is the first count
+     * that cannot. All three are asserted, so the suite pins where the
+     * boundary is rather than only that something past it works. */
+    const int counts[] = { PGWT_VARIANT_INDEX_HT_SIZE - 1,
+                           PGWT_VARIANT_INDEX_HT_SIZE,
+                           PGWT_VARIANT_INDEX_HT_SIZE + 1 };
+    for (unsigned ci = 0; ci < sizeof(counts)/sizeof(counts[0]); ci++) {
+        int np = counts[ci], n = 0;
+        struct pgwt_trace_event *ev = sat_trace(np, &n);
+        if (!ev) { printf("  FAIL: sat_trace(%d) failed\n", np); tests_failed++; continue; }
+        struct pgwt_variant_index idx;
+        int built = sat_build(&idx, ev, n, 8);
+        CHECK(built == 0, "%d distinct patterns: index built over 8 blocks, "
+              "%d records", np, n);
+        struct pgwt_variant_index_query_result q;
+        int rc = pgwt_variant_index_query(&idx, ev[0].timestamp_ns,
+                                          ev[n - 1].timestamp_ns, &zero,
+                                          8192, PGWT_PHASE_EXEC, &q);
+        CHECK(rc == 0 && q.refused == PGWT_VARIANT_INDEX_OK &&
+              q.res.failed == 0 && q.sequences_indexed == 1,
+              "%d distinct patterns: ANSWERED, not refused (rc=%d refused=%s "
+              "failed=%d si=%d)", np, rc,
+              pgwt_variant_index_refusal_str(q.refused), q.res.failed,
+              q.sequences_indexed);
+        CHECK(q.res.num_variants == np,
+              "%d distinct patterns: num_variants == %d exactly -- a "
+              "%d-slot table cannot hold more, so this IS the proof the "
+              "table grew (got %d)", np, np,
+              PGWT_VARIANT_INDEX_HT_SIZE, q.res.num_variants);
+        CHECK(q.res.total_executions == np,
+              "%d distinct patterns: total_executions == %d (got %d)",
+              np, np, q.res.total_executions);
+        /* NEVER DROP A KEY. Summed against the GENERATOR's count, which
+         * neither side of the product computes, so the two sides of this
+         * conservation check cannot come from the same sum. */
+        long sum_exec = 0;
+        int bad_steps = 0, bad_count = 0, bad_p95 = 0;
+        uint64_t *hashes = calloc((size_t)(q.res.num_variants > 0
+                                           ? q.res.num_variants : 1),
+                                  sizeof(uint64_t));
+        for (int i = 0; i < q.res.num_variants; i++) {
+            const struct pgwt_variant *v = &q.res.variants[i];
+            sum_exec += v->exec_count;
+            if (v->num_steps != 2) bad_steps++;
+            if (v->exec_count != 1) bad_count++;
+            if (v->p95_sample_n != 1 || v->p95_ns != v->total_ns) bad_p95++;
+            if (hashes) hashes[i] = v->hash;
+        }
+        CHECK(sum_exec == np, "%d distinct patterns: sum of exec_count == %d "
+              "(the generator's own count, not the index's) -- no key dropped "
+              "(got %ld)", np, np, sum_exec);
+        CHECK(bad_steps == 0 && bad_count == 0 && bad_p95 == 0,
+              "%d distinct patterns: every variant is a 2-step pattern seen "
+              "once with its own p95 sample (%d/%d/%d bad)", np, bad_steps,
+              bad_count, bad_p95);
+        int dup = 0;
+        if (hashes && q.res.num_variants > 1) {
+            qsort(hashes, (size_t)q.res.num_variants, sizeof(*hashes), cmp_u64);
+            for (int i = 1; i < q.res.num_variants; i++)
+                if (hashes[i] == hashes[i - 1]) dup++;
+        }
+        CHECK(dup == 0, "%d distinct patterns: every returned hash is "
+              "distinct -- no two keys merged into one slot (%d duplicates)",
+              np, dup);
+        free(hashes);
+        if (q.res.num_variants > PGWT_VARIANT_INDEX_HT_SIZE)
+            c_sat_grown++;
+        pgwt_variant_index_query_free(&q);
+        pgwt_variant_index_free(&idx);
+        free(ev);
+    }
+
+    /* The growth path's own allocation point, and the two controls that
+     * stop a no-op injection from being what makes it pass. */
+    {
+        int np = PGWT_VARIANT_INDEX_HT_SIZE + 1, n = 0;
+        struct pgwt_trace_event *ev = sat_trace(np, &n);
+        /* `idx` is only ever touched when sat_build() has initialised it:
+         * freeing an uninitialised index would be undefined behaviour, and
+         * a test that crashes instead of failing is not a gate. */
+        struct pgwt_variant_index idx;
+        int ready = (ev != NULL && sat_build(&idx, ev, n, 8) == 0);
+        if (ready) {
+            uint64_t lo = ev[0].timestamp_ns, hi = ev[n - 1].timestamp_ns;
+
+            setenv("PGWT_TEST_ALLOC_FAIL", "variant_index_ht_grow", 1);
+            expect_refusal("growth allocation failure at saturation", &idx,
+                           lo, hi, &zero, 8192, PGWT_PHASE_EXEC,
+                           PGWT_VARIANT_INDEX_REFUSE_ALLOC);
+            unsetenv("PGWT_TEST_ALLOC_FAIL");
+            c_sat_refused++;
+
+            /* CONTROL 1 -- unknown injection point. A PGWT_TEST_ALLOC_FAIL
+             * value no call site checks must change nothing, so the
+             * refusal above cannot be "any injection refuses". */
+            setenv("PGWT_TEST_ALLOC_FAIL", "variant_index_ht_grow_NOT_A_POINT", 1);
+            struct pgwt_variant_index_query_result q;
+            int rc = pgwt_variant_index_query(&idx, lo, hi, &zero, 8192,
+                                              PGWT_PHASE_EXEC, &q);
+            unsetenv("PGWT_TEST_ALLOC_FAIL");
+            CHECK(rc == 0 && q.refused == PGWT_VARIANT_INDEX_OK &&
+                  q.res.failed == 0 && q.res.num_variants == np,
+                  "CONTROL: an UNKNOWN injection point is a no-op -- still "
+                  "%d variants, refused=%s, failed=%d", np,
+                  pgwt_variant_index_refusal_str(q.refused), q.res.failed);
+            pgwt_variant_index_query_free(&q);
+            pgwt_variant_index_free(&idx);
+        } else {
+            printf("  FAIL: saturating index could not be built for the "
+                   "allocation-failure cases\n");
+            tests_failed++;
+            if (ev != NULL)
+                pgwt_variant_index_free(&idx);
+        }
+        free(ev);
+    }
+
+    /* CONTROL 2 -- the point is on the GROWTH path only. Injected against a
+     * window that never saturates, it must NOT refuse; otherwise the
+     * refusal above would prove nothing about growth. */
+    {
+        struct fixture *f = fx_by_name("spread sequence, many pids and phases");
+        struct pgwt_variant_index idx;
+        /* build_index() initialises `idx` before it can fail, so it is
+         * safe to free after a failed build — but NOT when the fixture is
+         * missing and build_index() was never called at all. */
+        int ready = (f != NULL && build_index(f, 0x15, &idx, NULL) == 0);
+        if (ready) {
+            setenv("PGWT_TEST_ALLOC_FAIL", "variant_index_ht_grow", 1);
+            struct pgwt_variant_index_query_result q;
+            int rc = pgwt_variant_index_query(&idx, f->ev[0].timestamp_ns,
+                                              f->ev[f->n - 1].timestamp_ns,
+                                              &zero, 20, PGWT_PHASE_EXEC, &q);
+            unsetenv("PGWT_TEST_ALLOC_FAIL");
+            CHECK(rc == 0 && q.refused == PGWT_VARIANT_INDEX_OK &&
+                  q.res.failed == 0 && q.sequences_indexed == 1,
+                  "CONTROL: variant_index_ht_grow on a NON-saturating window "
+                  "does not refuse -- the point is on the growth path only "
+                  "(rc=%d refused=%s)", rc,
+                  pgwt_variant_index_refusal_str(q.refused));
+            pgwt_variant_index_query_free(&q);
+        } else {
+            printf("  FAIL: control fixture could not be built\n");
+            tests_failed++;
+        }
+        if (f != NULL)
+            pgwt_variant_index_free(&idx);
+    }
+}
+
 struct ledger_row { const char *what; long *val; long min; };
 
 static struct ledger_row g_ledger[] = {
@@ -1648,6 +1896,9 @@ static struct ledger_row g_ledger[] = {
       &c_extra_close, 1 },
     { "query_id reaching a variant from an inner record", &c_qid_from_inner, 1 },
     { "both phases answered from one index", &c_two_phase, 1 },
+    { "windows answered with MORE than the 4096-slot table's capacity "
+      "(#327: the table actually grew)", &c_sat_grown, 1 },
+    { "growth-allocation refusals observed at saturation", &c_sat_refused, 1 },
 };
 #define N_LEDGER ((int)(sizeof(g_ledger)/sizeof(g_ledger[0])))
 
@@ -1712,6 +1963,7 @@ int main(void)
     sweep_max_variants();
     bypass_suite();
     measure_complexity();
+    saturation_suite();
     non_vacuity();
 
     printf("\n%d checks, %d failed\n", tests_run, tests_failed);

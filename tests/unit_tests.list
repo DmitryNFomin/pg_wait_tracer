@@ -338,6 +338,19 @@ test_interval_index
 #   POISON the counts to -1 with failed=1 -- plus a fixture with NO markers
 #   that must come back as 0 variants with refused=OK, the one encoding of a
 #   genuinely empty window.
+#   Saturation (#327's SEVENTH probe site). The merge table was a FIXED
+#   4096-slot array probed with no fullness test, copied from
+#   pgwt_compute_variants, so the 4097th distinct pattern hash spun forever
+#   and froze every tab at once. It now GROWS -- never drops a key, and
+#   refuses the WHOLE result (counts poisoned AND failed=1) if the growth
+#   cannot allocate. Pinned at 4095 / 4096 / 4097 distinct two-step patterns
+#   with exact num_variants, exact total_executions, sum(exec_count) against
+#   the GENERATOR's own count and all hashes distinct; the oracle is NOT the
+#   comparator there, because it is the same defect's sixth site and would
+#   hang rather than answer. Two controls stop a no-op injection from being
+#   what makes the refusal pass: an unknown PGWT_TEST_ALLOC_FAIL point must
+#   change nothing, and the growth point injected on a NON-saturating window
+#   must not refuse.
 #   Companion: tests/variant_index_mutations.py injects the silent-wrong risks
 #   one at a time and requires this test to catch each; it is not in this list
 #   because it recompiles the module once per mutation and is evidence, not a

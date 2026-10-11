@@ -322,6 +322,29 @@ MUTATIONS = [
      "be distinguished from 'the counter is broken'",
      "    return vi_open_at_end(idx);",
      "    return 0;"),
+
+    # --- #327 seventh site: the merge table's growth path. ---------------
+    # Most ways to break this site produce a HANG rather than a wrong
+    # answer (that IS the defect), and this harness scores a hung mutant as
+    # a FAILURE, so a hanging mutation could never be listed here honestly.
+    # The three below are the ones that are WRONG WHILE STILL TERMINATING,
+    # which is exactly the class the saturation suite has to catch.
+    ("G17 the rehash DROPS half the keys to make room -- the silently short "
+     "total #327 calls worse than the hang",
+     "        nh[h] = old[i];",
+     "        if ((i & 1) == 0) continue;\n        nh[h] = old[i];"),
+
+    ("G18 the growth path's allocation-failure hook is renamed, so no test "
+     "can reach the refusal and 'every injected failure refuses' becomes "
+     "unverifiable",
+     'if (pgwt_test_alloc_fail("variant_index_ht_grow"))',
+     'if (pgwt_test_alloc_fail("variant_index_ht_grow_UNREACHABLE"))'),
+
+    ("G19 the rehash moves the accumulator but loses its p95 sample, so a "
+     "grown table answers with p95 = 0 and sample_n = 0",
+     "        nh[h] = old[i];",
+     "        nh[h] = old[i];\n        nh[h].exec_times = NULL;\n"
+     "        nh[h].exec_times_n = 0;\n        nh[h].exec_times_cap = 0;"),
 ]
 
 
