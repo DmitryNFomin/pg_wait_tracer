@@ -1,0 +1,22 @@
+pgwt-server: loaded event names from wait_event_names.json
+pgwt-server: 1 trace files, 10 CPUs, ~4308992 events
+pgwt-server: loaded 20 query texts
+pgwt-server: loaded 103 backend metadata entries
+loader records=4307056 total=2101990 categories=103 window=1790895946646458457..1790897797661724062
+decoded records=4307056 untagged=2146061 inversions=1070
+decode-order NULL cats=2101977 real cats=2101990
+category_difference index=73163 pid=1171232 timestamp=445012206910688 duration=1338512 old_raw=00000000 old_null=05ffffff old_real=00000000 new=09000007 flags_real=00000008
+category_difference index=213171 pid=1171253 timestamp=445072212566224 duration=1278840 old_raw=00000000 old_null=05ffffff old_real=00000000 new=0a000011 flags_real=00000008
+category_difference index=471177 pid=1171756 timestamp=445192271682018 duration=1266628 old_raw=00000000 old_null=05ffffff old_real=00000000 new=09000007 flags_real=00000008
+category_difference index=777310 pid=1176223 timestamp=445312327446751 duration=1743489 old_raw=00000000 old_null=05ffffff old_real=00000000 new=09000007 flags_real=00000008
+category_difference index=1048749 pid=1180624 timestamp=445432344095085 duration=1567109 old_raw=00000000 old_null=05ffffff old_real=00000000 new=09000007 flags_real=00000008
+category_difference index=1191142 pid=1182818 timestamp=445492351822347 duration=1334244 old_raw=00000000 old_null=05ffffff old_real=00000000 new=09000007 flags_real=00000008
+category_difference index=1480022 pid=1183284 timestamp=445612411660205 duration=1521173 old_raw=00000000 old_null=05ffffff old_real=00000000 new=09000007 flags_real=00000008
+category_difference index=2027111 pid=1184271 timestamp=445852493150166 duration=1843335 old_raw=00000000 old_null=05ffffff old_real=00000000 new=09000007 flags_real=00000008
+category_difference index=2721655 pid=1193747 timestamp=446152621657556 duration=1569553 old_raw=00000000 old_null=05ffffff old_real=00000000 new=09000007 flags_real=00000008
+category_difference index=2849134 pid=1194403 timestamp=446212625242495 duration=1309688 old_raw=00000000 old_null=05ffffff old_real=00000000 new=09000007 flags_real=00000008
+category_difference index=3275494 pid=1194457 timestamp=446392670670408 duration=1501717 old_raw=00000000 old_null=05ffffff old_real=00000000 new=09000007 flags_real=00000008
+category_difference index=3690227 pid=1196996 timestamp=446572811620588 duration=1635626 old_raw=00000000 old_null=05ffffff old_real=00000000 new=09000007 flags_real=00000008
+category_difference index=4103802 pid=1203192 timestamp=446752856839091 duration=2369690 old_raw=00000000 old_null=05ffffff old_real=00000000 new=09000007 flags_real=00000008
+category admission differences=13
+sorted NULL cats=2101977 real cats=2101990

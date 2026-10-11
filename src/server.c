@@ -5121,6 +5121,15 @@ static int bagg_window_eligible(struct pgwt_server *srv,
                                 const struct pgwt_filter *f,
                                 uint64_t from_wall_ns, uint64_t to_wall_ns)
 {
+    /* Safety refusal: bagg_decode_block supplies untagged records, while the
+     * raw loader calls pgwt_tag_events after merging the window. That pass can
+     * relabel CPU to PGWT_WEI_NONCMD_CPU, which the shared hidden/idle rules
+     * exclude. Command state carries across blocks, so tagging each block
+     * independently cannot fix this. Even exact-only windows are unsafe.
+     * Until that carry-over is implemented, always use the tagged raw path.
+     * This is a boolean gate: refusal is 0, never a truthy negative status. */
+    return 0;
+
     if (!pgwt_block_agg_filter_supported(f))
         return 0;
     if (to_wall_ns <= from_wall_ns)
