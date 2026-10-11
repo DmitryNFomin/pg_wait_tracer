@@ -20,5 +20,8 @@ RED  S6 block_extents answers on a file it could not read   (11 checks, 3 failed
      FAIL: a header with no block at all is refused, not parsed ()
      FAIL: a torn block header is refused, not parsed ()
      FAIL: a block payload cut short is refused, not parsed ()
+RED  S7 the #342 ordering request removed: does the test lean on the bug?   (11 checks, 2 failed)
+     FAIL: a byte-truncated current.trace serves a nonempty SMALLER prefix, never the cached superset (7425 -> 0)
+     FAIL: the truncated read matches a fresh uncached read exactly (got {"events": [], "fidelity": "none", "pids": [], "total_count": 0, "truncated": false}, expected {"events": [{"c": 1, "d": 2000000, "e
 ALL SABOTAGES WENT RED
 sabotage rc=0

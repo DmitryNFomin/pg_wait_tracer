@@ -23,15 +23,15 @@
   PASS: the re-reads were actually served from cache (blocks=34 served=1606 decoded=34)
 
 ### 2. five identical requests: no committed block decoded twice ###
-    cache off decoded=[0, 0, 0, 0, 0] served=[0, 0, 0, 0, 0] rows=[160, 160, 160, 160, 160] ms=['14', '8', '7', '7', '9']
-    cache on  decoded=[8, 8, 8, 8, 8] served=[0, 8, 16, 24, 32] rows=[160, 160, 160, 160, 160] ms=['17', '7', '5', '5', '5']
+    cache off decoded=[0, 0, 0, 0, 0] served=[0, 0, 0, 0, 0] rows=[160, 160, 160, 160, 160] ms=['14', '16', '9', '7', '14']
+    cache on  decoded=[8, 8, 8, 8, 8] served=[0, 8, 16, 24, 32] rows=[160, 160, 160, 160, 160] ms=['18', '5', '12', '8', '6']
   PASS: the repeated request returns rows (not an empty window)
   PASS: the same five requests return the same row count with the cache on and off
   PASS: cache-on decode counter is observable
   PASS: requests 2-5 decoded no further committed block (decoded stayed 8)
   PASS: requests 2-5 were served from the cache (served 0 -> 32)
   PASS: with the cache off nothing is retained at all
-    median ms: on=5 off=8 (reported, not asserted)
+    median ms: on=8 off=14 (reported, not asserted)
 
 ### 3. blocks committing between requests ###
   PASS: fixture has enough committed blocks to grow through (8)
@@ -86,15 +86,15 @@
   PASS: and a server that wrote NO reason yields none -- the retrieval cannot invent one: "RuntimeError: pgwt-server closed stdin before reading 'info' (id=1, [Errno 32] Broken pipe). stderr: "
   PASS: a real current.trace parses to contiguous blocks from byte 28 (2 blocks, last ends 2004, file 2040)
   PASS: a footerless file -- the shape a LIVE current.trace has -- parses to the same blocks (2 blocks)
-  PASS: an empty file is refused, not parsed (/tmp/pgwt_cc_extents_026m8_hq/victim.trace is shorter than a file head)
-  PASS: a file shorter than the header is refused, not parsed (/tmp/pgwt_cc_extents_026m8_hq/victim.trace is shorter than a file head)
-  PASS: a header with no block at all is refused, not parsed (/tmp/pgwt_cc_extents_026m8_hq/victim.trace holds no readable block at )
-  PASS: a wrong magic is refused, not parsed (/tmp/pgwt_cc_extents_026m8_hq/victim.trace is not a trace file (magic )
-  PASS: a torn block header is refused, not parsed (/tmp/pgwt_cc_extents_026m8_hq/victim.trace holds no readable block at )
-  PASS: a block payload cut short is refused, not parsed (/tmp/pgwt_cc_extents_026m8_hq/victim.trace holds no readable block at )
-  PASS: trailing bytes after the footer is refused, not parsed (/tmp/pgwt_cc_extents_026m8_hq/victim.trace: 40 unexplained bytes after)
-  PASS: a footer that counts one block too many is refused, not parsed (/tmp/pgwt_cc_extents_026m8_hq/victim.trace: footer counts 3 blocks, th)
-  PASS: a footer that puts block 0 somewhere else is refused, not parsed (/tmp/pgwt_cc_extents_026m8_hq/victim.trace: footer puts block 0 at 0, )
+  PASS: an empty file is refused, not parsed (/tmp/pgwt_cc_extents_6as9epjb/victim.trace is shorter than a file head)
+  PASS: a file shorter than the header is refused, not parsed (/tmp/pgwt_cc_extents_6as9epjb/victim.trace is shorter than a file head)
+  PASS: a header with no block at all is refused, not parsed (/tmp/pgwt_cc_extents_6as9epjb/victim.trace holds no readable block at )
+  PASS: a wrong magic is refused, not parsed (/tmp/pgwt_cc_extents_6as9epjb/victim.trace is not a trace file (magic )
+  PASS: a torn block header is refused, not parsed (/tmp/pgwt_cc_extents_6as9epjb/victim.trace holds no readable block at )
+  PASS: a block payload cut short is refused, not parsed (/tmp/pgwt_cc_extents_6as9epjb/victim.trace holds no readable block at )
+  PASS: trailing bytes after the footer is refused, not parsed (/tmp/pgwt_cc_extents_6as9epjb/victim.trace: 40 unexplained bytes after)
+  PASS: a footer that counts one block too many is refused, not parsed (/tmp/pgwt_cc_extents_6as9epjb/victim.trace: footer counts 3 blocks, th)
+  PASS: a footer that puts block 0 somewhere else is refused, not parsed (/tmp/pgwt_cc_extents_6as9epjb/victim.trace: footer puts block 0 at 0, )
   PASS: a missing stderr file parses as None, not zeros
   PASS: no stderr path at all parses as None
   PASS: stderr with no curcache line parses as None

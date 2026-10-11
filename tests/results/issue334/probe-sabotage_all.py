@@ -61,6 +61,15 @@ CASES = [
      ["a header with no block at all is refused",
       "a torn block header is refused",
       "a block payload cut short is refused"]),
+    # Does this test LEAN on #342 (the one request after a shrink answers
+    # empty), or merely order around it? Delete the interposed request and
+    # find out: if the assertion stayed green, #342 would be satisfying it.
+    ("S7 the #342 ordering request removed: does the test lean on the bug?",
+     "bypass_truncated_file_under_meta",
+     [('            srv.query("info")\n'
+       '            after = srv.query(PROBE_CMD, from_=w_from, to_=w_to)',
+       '            after = srv.query(PROBE_CMD, from_=w_from, to_=w_to)')],
+     ["a byte-truncated current.trace serves a nonempty SMALLER"]),
 ]
 
 

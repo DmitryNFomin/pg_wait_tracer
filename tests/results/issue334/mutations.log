@@ -10,5 +10,7 @@ RED  served stale superset: target assertion failed
     FAIL: the truncated read matches a fresh uncached read exactly (got {"events": [{"c": 1, "d": 2000000, "e": 167772184, "n": "IO:DataFileWrite", "p": 1000, "q": "100", "s": 10000000002800000}, {"c": 3, "d": 2000000, "e": 16777224, "n": "LWLo
 RED  refusal without a reason: target assertion failed
     FAIL: and the refusal names the reason ('pgwt-server closed stdout. stderr: pgwt-server: startup failed\n')
+RED  cached block served one event short: target assertion failed
+    FAIL: the repeated pre-truncation request answers identically (got {"events": [{"c": 1, "d": 2000000, "e": 167772184, "n": "IO:DataFileWrite", "p": 1000, "q": "100", "s": 10000000002800000}, {"c": 3, "d": 2000000, "e": 16777224, "n": "LWLoc
 PASSED: every mutant went red
 mutations rc=0
