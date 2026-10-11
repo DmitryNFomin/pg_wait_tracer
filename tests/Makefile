@@ -25,6 +25,7 @@ TESTS     = test_wait_event test_cmdline test_spawn test_event_writer test_event
             test_top_queries_percentile \
             test_variants_p95 \
             test_pid_cap \
+            test_probe_bounds \
             test_concurrency_bounds \
             test_idle_accounting test_idle_summary \
             test_agg_raw_crosscheck \
@@ -172,6 +173,25 @@ test_concurrency_bounds: test_concurrency_bounds.c ../src/compute.c \
               ../src/pid_index.h ../src/percentile.h \
               $(BUILD)/wait_event.o $(BUILD)/idle_rule.o $(BUILD)/spawn.o $(BUILD)/cJSON.o
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ test_concurrency_bounds.c ../src/compute.c \
+	    $(BUILD)/wait_event.o $(BUILD)/idle_rule.o $(BUILD)/spawn.o $(BUILD)/cJSON.o -lm
+
+# test_probe_bounds: #327 — six open-addressing tables in compute.c whose
+# probe loop had no fullness test, so the (size+1)-th distinct key made it
+# spin forever and hung every tab at once (top sessions raw + summary, top
+# queries raw + summary, fingerprints, variants). Plus #347's shape: an
+# accumulator used as the occupancy test, which let a zero-duration record's
+# slot be re-keyed and its transitions inherited by the next key.
+# Same link shape as test_pid_cap (compute.c with -DPGWT_SERVER), except that
+# pgwt_visit_summaries is a RECORD-SERVING stub here rather than a `return
+# -1` one — the two summary sites can only be reached through it, and a stub
+# that delivers nothing would make those sections vacuous. Allocation
+# failures ride PGWT_TEST_ALLOC_FAIL (src/test_alloc_fail.h), so the binary
+# behaves identically on every toolchain; no --wrap.
+test_probe_bounds: test_probe_bounds.c ../src/compute.c \
+              ../src/qid_index.h ../src/pid_index.h \
+              ../src/test_alloc_fail.h ../src/percentile.h \
+              $(BUILD)/wait_event.o $(BUILD)/idle_rule.o $(BUILD)/spawn.o $(BUILD)/cJSON.o
+	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ test_probe_bounds.c ../src/compute.c \
 	    $(BUILD)/wait_event.o $(BUILD)/idle_rule.o $(BUILD)/spawn.o $(BUILD)/cJSON.o -lm
 
 test_pg13_resolve: test_pg13_resolve.c ../src/discovery.c ../src/spawn.c \
