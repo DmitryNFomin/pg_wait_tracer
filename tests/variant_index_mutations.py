@@ -225,8 +225,8 @@ MUTATIONS = [
      "            /* mutant: phase ignored */"),
 
     ("M25 max_variants truncation dropped",
-     "    int nr = vi < max_variants ? vi : max_variants;",
-     "    int nr = vi;"),
+     "    int nr = nv < max_variants ? nv : max_variants;",
+     "    int nr = nv;"),
 
     # ── GATE-BLINDING: the gate cannot see rather than the module being wrong ──
     ("G01 an empty index answers 'no variants' instead of refusing",
@@ -345,6 +345,23 @@ MUTATIONS = [
      "        nh[h] = old[i];",
      "        nh[h] = old[i];\n        nh[h].exec_times = NULL;\n"
      "        nh[h].exec_times_n = 0;\n        nh[h].exec_times_cap = 0;"),
+
+    # --- the collection ORDER, which #358 made observable. ---------------
+    # The oracle's accumulator array became insertion-ordered in #358, and
+    # qsort() breaks equal-total_ns ties by input order, so an index that
+    # collects by SLOT answers with tied variants in a different order --
+    # the same set, the same totals, a different arrangement. That is the
+    # exact pre-reconciliation form of this code.
+    ("G20 variants collected in SLOT order instead of first-execution order, "
+     "so variants tied on total_ns come back in a different arrangement from "
+     "the oracle's",
+     "        struct pgwt_variant *v = &variants[va->seq];\n        vi++;",
+     "        struct pgwt_variant *v = &variants[vi++];"),
+
+    ("G21 the seq invariant is broken by one, which without the guard would "
+     "write one variant past the end of the result array",
+     "                va->seq = ht_n++;",
+     "                va->seq = ht_n++ + 1;"),
 ]
 
 

@@ -175,6 +175,7 @@ const char *pgwt_variant_index_refusal_str(enum pgwt_variant_index_refusal r)
     case PGWT_VARIANT_INDEX_REFUSE_ALLOC:       return "query-allocation-failed";
     case PGWT_VARIANT_INDEX_REFUSE_FILTER:      return "filter-not-indexable";
     case PGWT_VARIANT_INDEX_REFUSE_PHASE:       return "unknown-phase";
+    case PGWT_VARIANT_INDEX_REFUSE_INTERNAL:    return "internal-invariant";
     }
     return "unknown";
 }
@@ -597,6 +598,13 @@ int pgwt_variant_index_filter_ok(const struct pgwt_filter *f)
 struct vi_accum {
     uint64_t hash;
     int      used;
+    /* Position of this variant's FIRST execution in closing-marker order,
+     * assigned 0,1,2,... as keys are inserted. The oracle collects its own
+     * variants in exactly this order before sorting — its accumulator
+     * array became insertion-ordered in #358 — and qsort() breaks
+     * equal-total_ns ties by input order, so reproducing that order is part
+     * of being bit-exact, not a presentation detail. */
+    int      seq;
     struct vi_pattern pattern;
     int      exec_count;
     uint64_t total_ns;
@@ -646,28 +654,27 @@ static void vi_accum_add_qid(struct vi_accum *va, uint64_t qid)
  * sequences_indexed = 0 — the poison alone stops nothing, because -1 is
  * truthy in C.
  *
- * WHY THE TRIGGER HAS TWO REGIMES, and why that is not an arbitrary knob:
+ * THE TRIGGER IS A LOAD FACTOR, NOT FULLNESS. The table is kept at most 3/4
+ * full, because filling a linear-probe table to 100% costs O(cap^2) probes
+ * (~1.4e7 at cap 4096, ~1.9e10 at cap 131072 — tens of seconds), which
+ * would be a different freeze rather than a fix.
  *
- *  - At or below the oracle's own capacity the table grows only when it is
- *    genuinely FULL. So for every input pgwt_compute_variants can answer at
- *    all (at most 4096 distinct pattern hashes) this table has the oracle's
- *    capacity AND the oracle's slot layout, and therefore the oracle's slot
- *    ORDER. That order is load-bearing: the collection loop walks slots and
- *    qsort() breaks equal-total_ns ties by input order, so growing earlier
- *    would silently re-order tied variants relative to the function this
- *    module is a bit-exact differential against.
- *  - Above it there is no oracle to be exact with — it spins — so the table
- *    is kept at most 3/4 full. Filling a linear-probe table to 100% costs
- *    O(cap^2) probes (~1.4e7 at cap 4096, ~1.9e10 at cap 131072, i.e. tens
- *    of seconds), which would be a different freeze rather than a fix.
+ * CAPACITY IS NOT OBSERVABLE IN THE ANSWER, which is what makes the load
+ * factor free to pick. Variants are collected by vi_accum.seq —
+ * first-execution order — never by walking slots, so where a key lands
+ * and how often the table doubles cannot reorder variants tied on total_ns
+ * under qsort(). That independence is load-bearing rather than tidy: the
+ * oracle's own table became insertion-ordered and growable in #358, and an
+ * index whose order depended on its capacity could not stay bit-exact with
+ * it.
  *
  * Grow-only: no deletion, hence no tombstones and no probe-chain repair to
  * get wrong either. struct vi_accum is memcpy-movable — exec_times is owned
  * by exactly one slot and nothing aliases it — and no vi_accum pointer is
- * ever held across a grow. */
+ * ever held across a grow; seq moves with the struct. */
 static int vi_ht_grow_limit(int cap)
 {
-    return cap <= PGWT_VARIANT_INDEX_HT_SIZE ? cap : cap - (cap >> 2);
+    return cap - (cap >> 2);        /* grow above 3/4 load */
 }
 
 /* Double the table and rehash every occupied slot. 0 on success, -1 on
@@ -833,7 +840,8 @@ int pgwt_variant_index_query(const struct pgwt_variant_index *idx,
                 va->used = 1;
                 va->hash = e->hash;
                 va->pattern = cp;
-                ht_n++;
+                va->seq = ht_n++;   /* assigned HERE, next to the count it
+                                     * indexes, so the two cannot drift */
             }
             va->exec_count++;
             va->total_ns += e->total_ns;
@@ -876,9 +884,11 @@ int pgwt_variant_index_query(const struct pgwt_variant_index *idx,
         return vi_query_refuse(out, PGWT_VARIANT_INDEX_REFUSE_ALLOC);
     }
 
-    int nv = 0;
-    for (int i = 0; i < ht_cap; i++)
-        if (ht[i].used) nv++;
+    /* One variant per distinct pattern hash inserted. ht_n is the count the
+     * seq values index into, so it is the one used here: a separately
+     * recounted total could disagree with the seq range, and the indexed
+     * write below would then run off the end of the array. */
+    int nv = ht_n;
 
     struct pgwt_variant *variants =
         pgwt_test_alloc_fail("variant_index_query_out")
@@ -890,11 +900,16 @@ int pgwt_variant_index_query(const struct pgwt_variant_index *idx,
         return vi_query_refuse(out, PGWT_VARIANT_INDEX_REFUSE_ALLOC);
     }
 
-    int vi = 0;
-    for (int i = 0; i < ht_cap && vi < nv; i++) {
+    /* Collected by seq — the order the oracle's own accumulator array
+     * is in — so the qsort() below gets the same input order and returns
+     * the same order for variants tied on total_ns. */
+    int vi = 0, bad_seq = 0;
+    for (int i = 0; i < ht_cap; i++) {
         if (!ht[i].used) continue;
         struct vi_accum *va = &ht[i];
-        struct pgwt_variant *v = &variants[vi++];
+        if (va->seq < 0 || va->seq >= nv) { bad_seq = 1; break; }
+        struct pgwt_variant *v = &variants[va->seq];
+        vi++;
 
         v->hash = va->hash;
         v->exec_count = va->exec_count;
@@ -927,11 +942,28 @@ int pgwt_variant_index_query(const struct pgwt_variant_index *idx,
         }
 
         free(va->exec_times);
+        va->exec_times = NULL;      /* the refusal path below sweeps every
+                                     * slot again; a stale freed pointer
+                                     * left here would be a double free */
     }
 
-    qsort(variants, vi, sizeof(variants[0]), vi_cmp_variant_time_desc);
+    /* seq is dense in [0, nv) by construction. If it ever were not, the loop
+     * above would have written past `variants`, so it stops instead and the
+     * WHOLE result is refused — an out-of-range index is never clamped
+     * into a plausible-looking answer. vi != nv is the same invariant from
+     * the other side: every slot claiming to be used must have been
+     * collected exactly once. */
+    if (bad_seq || vi != nv) {
+        for (int i = 0; i < ht_cap; i++)
+            free(ht[i].exec_times);
+        free(ht);
+        free(variants);
+        return vi_query_refuse(out, PGWT_VARIANT_INDEX_REFUSE_INTERNAL);
+    }
 
-    int nr = vi < max_variants ? vi : max_variants;
+    qsort(variants, nv, sizeof(variants[0]), vi_cmp_variant_time_desc);
+
+    int nr = nv < max_variants ? nv : max_variants;
     out->res.variants = variants;
     out->res.num_variants = nr;
     out->res.total_executions = total_execs;

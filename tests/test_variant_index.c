@@ -554,7 +554,7 @@ static long c_triples, c_splits, c_variants, c_execs, c_multistep,
             c_multipid, c_qid_from_inner, c_truncated_pattern,
             c_raw_capped, c_p95_sampled, c_two_phase, c_order_pairs,
             c_prefilter_rows_saved, c_zero_len, c_extra_close,
-            c_sat_grown, c_sat_refused;
+            c_sat_grown, c_sat_refused, c_sat_oracle;
 static long c_mismatch;
 static char g_first_mismatch[768];
 
@@ -1634,16 +1634,19 @@ static void measure_complexity(void)
  *
  * BEFORE THE FIX THIS SUITE DOES NOT FAIL -- IT HANGS. That is why the
  * pre-fix evidence for it is an external `timeout` reporting exit 124 ("did
- * not terminate") rather than a FAIL line, and why it is written as exact
- * count assertions that can only be satisfied by an answer actually being
- * produced.
+ * not terminate") rather than a FAIL line.
  *
- * THE ORACLE CANNOT BE THE COMPARATOR HERE. pgwt_compute_variants is
- * #327's sixth site and still carries the unbounded loop on this tree, so
- * calling it on a 4097-pattern window would hang this test instead of
- * answering it. The assertions are therefore against the GENERATOR's own
- * construction -- a count the test knows independently of either
- * implementation -- not against the oracle.
+ * TWO INDEPENDENT COMPARATORS, because each covers the other's blind spot:
+ *  - the GENERATOR's own count. The suite knows how many distinct patterns
+ *    it built, independently of either implementation, so `num_variants ==
+ *    n` and `sum(exec_count) == n` cannot both be satisfied by two
+ *    implementations making the same mistake. This is the one that proves
+ *    the table GREW: a 4096-slot table cannot hold 4097 keys.
+ *  - pgwt_compute_variants itself, bit-exactly. The oracle was #327's sixth
+ *    site and used to spin on this very input; #358 fixed it, so it now
+ *    answers and can be compared here. A count-only assertion would miss a
+ *    p95, step-average or ordering difference that appears only past
+ *    saturation, which is exactly where the index's own table doubles.
  *
  * WHAT WOULD MAKE THIS PASS WHILE THE PRODUCT IS BROKEN, and what stops it:
  *  - fewer than 4097 genuinely distinct patterns (ids reused, a pair
@@ -1658,6 +1661,8 @@ static void measure_complexity(void)
  *    refusal as "handled". Stopped by requiring refused == OK, failed == 0
  *    and sequences_indexed == 1 on the growth cases, and the SPECIFIC
  *    refusal reason on the one case that must refuse.
+ *  - the two sides agreeing because the index copied the oracle's bug.
+ *    Stopped by the generator comparator above, which is neither side.
  *  - a key silently dropped to make the loop terminate -- the outcome #327
  *    calls worse than the hang. Stopped by sum(exec_count) == n against the
  *    generator's n, by every exec_count being 1, and by hash distinctness.
@@ -1786,6 +1791,24 @@ static void saturation_suite(void)
               "distinct -- no two keys merged into one slot (%d duplicates)",
               np, dup);
         free(hashes);
+
+        /* ...and the same window through pgwt_compute_variants, bit-exactly.
+         * Every record lies inside [from, to], so the oracle's input is the
+         * whole array -- the same array src/server.c would hand it. This
+         * comparison is only possible because #358 fixed the oracle's own
+         * copy of this probe loop; before that it spun on this input. */
+        struct pgwt_variants_result oracle;
+        memset(&oracle, 0, sizeof(oracle));
+        pgwt_compute_variants(ev, n, &zero, 8192, PGWT_PHASE_EXEC, &oracle);
+        int row = -1, fld = variants_diff(&q.res, &oracle, &row);
+        CHECK(!oracle.failed && fld == -1,
+              "%d distinct patterns: index == oracle BIT-EXACTLY past "
+              "saturation (oracle.failed=%d, first differing field=%d at "
+              "row=%d)", np, oracle.failed, fld, row);
+        if (np > PGWT_VARIANT_INDEX_HT_SIZE && !oracle.failed &&
+            oracle.num_variants == np)
+            c_sat_oracle++;
+        free(oracle.variants);
         if (q.res.num_variants > PGWT_VARIANT_INDEX_HT_SIZE)
             c_sat_grown++;
         pgwt_variant_index_query_free(&q);
@@ -1899,6 +1922,8 @@ static struct ledger_row g_ledger[] = {
     { "windows answered with MORE than the 4096-slot table's capacity "
       "(#327: the table actually grew)", &c_sat_grown, 1 },
     { "growth-allocation refusals observed at saturation", &c_sat_refused, 1 },
+    { "saturated windows the ORACLE also answered, compared bit-exactly "
+      "(#358 is what makes this comparison possible)", &c_sat_oracle, 1 },
 };
 #define N_LEDGER ((int)(sizeof(g_ledger)/sizeof(g_ledger[0])))
 

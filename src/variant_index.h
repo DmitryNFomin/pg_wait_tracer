@@ -154,7 +154,9 @@
  * a caller onto the raw path. */
 #define PGWT_VARIANT_INDEX_NOT_INDEXED (-1)
 
-/* The oracle's own limits, mirrored so the merge is bit-identical. */
+/* The oracle's own limits, mirrored so the merge is bit-identical. The merge
+ * table STARTS at this size and grows from there (#327): the oracle used to
+ * cap here and spin on the next distinct pattern. */
 #define PGWT_VARIANT_INDEX_HT_SIZE   4096
 #define PGWT_VARIANT_INDEX_MAX_RAW   128     /* raw_exec.events[] capacity */
 #define PGWT_VARIANT_INDEX_MAX_SAMPLES 10000 /* PGWT_VARIANT_MAX_SAMPLES */
@@ -172,6 +174,7 @@ enum pgwt_variant_index_refusal {
     PGWT_VARIANT_INDEX_REFUSE_ALLOC,        /* query-side allocation failure */
     PGWT_VARIANT_INDEX_REFUSE_FILTER,       /* NULL or non-empty filter */
     PGWT_VARIANT_INDEX_REFUSE_PHASE,        /* phase outside EXEC/PLAN */
+    PGWT_VARIANT_INDEX_REFUSE_INTERNAL,     /* a broken internal invariant */
 };
 
 const char *pgwt_variant_index_refusal_str(enum pgwt_variant_index_refusal r);
