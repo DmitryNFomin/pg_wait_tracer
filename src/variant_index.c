@@ -620,6 +620,89 @@ static void vi_accum_add_qid(struct vi_accum *va, uint64_t qid)
         va->query_ids[va->num_query_ids++] = qid;
 }
 
+/* ── the merge table: bounded by GROWING, never by dropping (#327) ──
+ *
+ * The probe loop below used to run over a FIXED PGWT_VARIANT_INDEX_HT_SIZE
+ * array with no fullness test, copied verbatim from pgwt_compute_variants
+ * (src/compute.c:4737):
+ *
+ *     while (ht[slot].used && ht[slot].hash != e->hash)
+ *         slot = (slot + 1) & (PGWT_VARIANT_INDEX_HT_SIZE - 1);
+ *
+ * Once the table holds 4096 distinct pattern hashes, the 4097th makes that
+ * loop spin forever. pgwt-server is single-threaded, so the request never
+ * answers, the connection never closes and every tab stops at once — not a
+ * wrong number, a hang. This is #327's SEVENTH site; the other six are in
+ * src/compute.c and were fixed the same way.
+ *
+ * THE RULE (#327, and #275/#276 before it): grow where growing is cheap,
+ * refuse the WHOLE result where growth is impractical, NEVER drop a key.
+ * Growing is cheap here — the table is this query's only large allocation
+ * and a rehash is one pass over it — so there is deliberately no "drop it"
+ * branch to get wrong: a silently short variant total is worse than a
+ * refusal, because nobody notices a number that is quietly short. A growth
+ * that cannot allocate sets alloc_failed, and the query then refuses
+ * through vi_query_refuse(), which poisons the counts AND sets res.failed /
+ * sequences_indexed = 0 — the poison alone stops nothing, because -1 is
+ * truthy in C.
+ *
+ * WHY THE TRIGGER HAS TWO REGIMES, and why that is not an arbitrary knob:
+ *
+ *  - At or below the oracle's own capacity the table grows only when it is
+ *    genuinely FULL. So for every input pgwt_compute_variants can answer at
+ *    all (at most 4096 distinct pattern hashes) this table has the oracle's
+ *    capacity AND the oracle's slot layout, and therefore the oracle's slot
+ *    ORDER. That order is load-bearing: the collection loop walks slots and
+ *    qsort() breaks equal-total_ns ties by input order, so growing earlier
+ *    would silently re-order tied variants relative to the function this
+ *    module is a bit-exact differential against.
+ *  - Above it there is no oracle to be exact with — it spins — so the table
+ *    is kept at most 3/4 full. Filling a linear-probe table to 100% costs
+ *    O(cap^2) probes (~1.4e7 at cap 4096, ~1.9e10 at cap 131072, i.e. tens
+ *    of seconds), which would be a different freeze rather than a fix.
+ *
+ * Grow-only: no deletion, hence no tombstones and no probe-chain repair to
+ * get wrong either. struct vi_accum is memcpy-movable — exec_times is owned
+ * by exactly one slot and nothing aliases it — and no vi_accum pointer is
+ * ever held across a grow. */
+static int vi_ht_grow_limit(int cap)
+{
+    return cap <= PGWT_VARIANT_INDEX_HT_SIZE ? cap : cap - (cap >> 2);
+}
+
+/* Double the table and rehash every occupied slot. 0 on success, -1 on
+ * allocation failure with the table left untouched and usable, so the
+ * caller can still free it on the refusal path. */
+static int vi_ht_grow(struct vi_accum **htp, int *capp)
+{
+    if (pgwt_test_alloc_fail("variant_index_ht_grow"))
+        return -1;
+    int cap = *capp;
+    if (cap > (1 << 29))
+        return -1;              /* refuse rather than overflow the capacity */
+    int newcap = cap ? cap * 2 : PGWT_VARIANT_INDEX_HT_SIZE;
+    struct vi_accum *nh = calloc((size_t)newcap, sizeof(*nh));
+    if (!nh)
+        return -1;
+    struct vi_accum *old = *htp;
+    uint32_t mask = (uint32_t)newcap - 1;
+    for (int i = 0; i < cap; i++) {
+        if (!old[i].used)
+            continue;
+        uint32_t h = (uint32_t)(old[i].hash & mask);
+        /* Terminates: newcap is strictly greater than the number of
+         * occupied slots being moved, so a free slot always exists. Keys in
+         * the old table are distinct, so no equality test is needed. */
+        while (nh[h].used)
+            h = (h + 1) & mask;
+        nh[h] = old[i];
+    }
+    free(old);
+    *htp = nh;
+    *capp = newcap;
+    return 0;
+}
+
 /* Every refusal goes through here: res zeroed, counts POISONED, failed set.
  * The poison is not the guard — -1 is truthy — res.failed and
  * sequences_indexed are. */
@@ -682,7 +765,8 @@ int pgwt_variant_index_query(const struct pgwt_variant_index *idx,
 
     if (pgwt_test_alloc_fail("variant_index_query_ht"))
         return vi_query_refuse(out, PGWT_VARIANT_INDEX_REFUSE_ALLOC);
-    struct vi_accum *ht = calloc(PGWT_VARIANT_INDEX_HT_SIZE, sizeof(*ht));
+    int ht_cap = PGWT_VARIANT_INDEX_HT_SIZE, ht_n = 0;
+    struct vi_accum *ht = calloc((size_t)ht_cap, sizeof(*ht));
     if (!ht)
         return vi_query_refuse(out, PGWT_VARIANT_INDEX_REFUSE_ALLOC);
 
@@ -729,14 +813,27 @@ int pgwt_variant_index_query(const struct pgwt_variant_index *idx,
                 loop_n = cp.num_steps > 0
                        ? (double)e->raw_len / cp.num_steps : 1;
 
-            uint32_t slot = (uint32_t)(e->hash & (PGWT_VARIANT_INDEX_HT_SIZE - 1));
+            /* #327: grow BEFORE probing, so the probe below always has a
+             * free slot to stop on. The loop itself is unchanged; the
+             * guarantee that it terminates is what is new. Growing
+             * unconditionally when the table is at its limit — rather than
+             * only for a key that turns out to be new — is deliberate: it
+             * costs one extra doubling in the worst case and removes the
+             * "is this key new?" question, which cannot be answered without
+             * the very probe being made safe. */
+            if (ht_n >= vi_ht_grow_limit(ht_cap)) {
+                if (vi_ht_grow(&ht, &ht_cap) != 0) { alloc_failed = 1; break; }
+            }
+            uint32_t ht_mask = (uint32_t)ht_cap - 1;
+            uint32_t slot = (uint32_t)(e->hash & ht_mask);
             while (ht[slot].used && ht[slot].hash != e->hash)
-                slot = (slot + 1) & (PGWT_VARIANT_INDEX_HT_SIZE - 1);
+                slot = (slot + 1) & ht_mask;
             struct vi_accum *va = &ht[slot];
             if (!va->used) {
                 va->used = 1;
                 va->hash = e->hash;
                 va->pattern = cp;
+                ht_n++;
             }
             va->exec_count++;
             va->total_ns += e->total_ns;
@@ -773,28 +870,28 @@ int pgwt_variant_index_query(const struct pgwt_variant_index *idx,
      * never present a nearly-right one. The caller then recomputes from
      * raw and gets the oracle's own behaviour. */
     if (alloc_failed) {
-        for (int i = 0; i < PGWT_VARIANT_INDEX_HT_SIZE; i++)
+        for (int i = 0; i < ht_cap; i++)
             free(ht[i].exec_times);
         free(ht);
         return vi_query_refuse(out, PGWT_VARIANT_INDEX_REFUSE_ALLOC);
     }
 
     int nv = 0;
-    for (int i = 0; i < PGWT_VARIANT_INDEX_HT_SIZE; i++)
+    for (int i = 0; i < ht_cap; i++)
         if (ht[i].used) nv++;
 
     struct pgwt_variant *variants =
         pgwt_test_alloc_fail("variant_index_query_out")
         ? NULL : calloc(nv ? (size_t)nv : 1, sizeof(*variants));
     if (!variants) {
-        for (int i = 0; i < PGWT_VARIANT_INDEX_HT_SIZE; i++)
+        for (int i = 0; i < ht_cap; i++)
             free(ht[i].exec_times);
         free(ht);
         return vi_query_refuse(out, PGWT_VARIANT_INDEX_REFUSE_ALLOC);
     }
 
     int vi = 0;
-    for (int i = 0; i < PGWT_VARIANT_INDEX_HT_SIZE && vi < nv; i++) {
+    for (int i = 0; i < ht_cap && vi < nv; i++) {
         if (!ht[i].used) continue;
         struct vi_accum *va = &ht[i];
         struct pgwt_variant *v = &variants[vi++];
