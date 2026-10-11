@@ -1,0 +1,15 @@
+=== test_variant_index: the step-sequence index (Phase 3b) ===
+index version under test: 1
+28 fixtures
+--- sweep A: block splits x windows x both phases ---
+  PASS: sweep A: 0 disagreements over 1238 (fixture,split,window,phase) quadruples
+--- sweep B: window bounds +/- 1 ns (seam inclusivity) ---
+  PASS: sweep B: 0 disagreements over 8282 more quadruples
+--- LEDGER FALSIFICATION (PGWT_VARIANT_INDEX_ONE_BLOCK=1) ---
+  sweeps ran with cuts=0 only; 28 splits
+  marker-pair crossings: 0   wait-record crossings: 0
+  FALSIFIED AS EXPECTED: with one block per fixture the carry-over counters are 0, so the ledger's >=1 requirement is a real gate that a one-block suite would fail.
+  this mode never exits 0 by design
+
+2 checks, 0 failed
+FALSIFICATION-OK (not a pass)

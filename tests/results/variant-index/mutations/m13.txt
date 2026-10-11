@@ -1,0 +1,192 @@
+M13 step ORDER folded out of the hash (so [A,B] and [B,A] collide)
+
+=== test_variant_index: the step-sequence index (Phase 3b) ===
+index version under test: 1
+28 fixtures
+--- literal expectations (not a re-derivation of the code) ---
+  PASS: one exec one wait: 1 execution (got 1)
+  PASS: one exec one wait: 1 variant (got 1)
+  PASS: one exec one wait: 1 step
+  PASS: one exec one wait: total 5 ms (got 5000000)
+  PASS: one exec one wait: step avg 5 ms
+  PASS: one exec one wait: exec_count 1
+  PASS: one exec one wait: query_id 7 from the start marker
+  PASS: one exec one wait: exactly 1 index row (no duplicate across the split) (got 1)
+  PASS: #222: exactly 1 execution, the first is discarded (got 1)
+  PASS: #222: exactly 1 index row (got 1)
+  PASS: #222: 1 partial sequence discarded (got 1)
+  PASS: #222: the surviving pattern is [B], not [A] or [A,B]
+  PASS: #222: total is the second sequence's 2 ms only (got 2000000)
+  PASS: unbalanced EXEC_END: 0 variants with refused=OK — the one encoding of a genuinely empty window
+  PASS: unbalanced EXEC_END: still a complete answer (sequences_indexed=1)
+  PASS: ABAB: fixture really was cut into >=4 blocks (got 5)
+  PASS: ABAB across blocks: 2 pattern steps, not 4 and not a truncated 1 (got 2)
+  PASS: ABAB across blocks: step 0 is a loop of body 2
+  PASS: ABAB across blocks: total 10 ms (1+2+3+4) (got 10000000)
+  PASS: ABAB across blocks: avg_loop_n 4/2 = 2 (got 2.000000)
+  PASS: ABAB across blocks: step avgs 1 ms and 3 ms — the oracle's si-clamping quirk reproduced, not corrected (got 1000000, 3000000)
+  PASS: cpu only: one step, event id 0
+  PASS: cpu only: step name CPU* (got CPU*)
+  PASS: cpu only: avg_loop_n 0, because the CPU fill-in sets raw_len=1 before loop_n is computed (got 0.000000)
+  PASS: cpu only: total 0 ns
+  PASS: idle dropped: [A,idle,A] compresses to one A loop, not 3 steps (got 1 steps)
+  PASS: idle dropped: total 3 ms, the 50 ms ClientRead excluded (got 3000000)
+  PASS: impossible duration: pattern is [A] only — an all-zero filter still rejects duration > timestamp
+  PASS: impossible duration: total 1 ms, not 2e12 (got 1000000)
+  PASS: CMD_END inside: still 1 execution
+  PASS: CMD_END inside: pattern [A,B] spans the CMD_END — pgwt_compute_variants ignores it (got 2 steps)
+  PASS: open at capture end: no execution reported
+  PASS: open at capture end: no index row
+  PASS: open at capture end: 1 sequence still open (got 1)
+  PASS: zero-length: both executions reported (got 2)
+  PASS: zero-length: exactly one row has start == close (got 1)
+  PASS: zero-length: a window collapsed onto the instant [t, t] still selects it (got 1)
+  PASS: extra EXEC_END: exactly 1 execution, the surplus closing marker ignored (got 1)
+  PASS: extra EXEC_END: exactly 1 index row (got 1)
+  PASS: stray PLAN_END for a pid with exec-only state: no plan execution invented (got 0)
+  PASS: loop flag hashed: [A] and [A,A] are TWO variants despite an identical step list (got 2)
+  PASS: loop flag hashed: the two step lists really are identical
+  PASS: loop flag hashed: they differ only in is_loop
+  FAIL(1127): order significant: [A,B] and [B,A] are TWO variants (got 1)
+  PASS: order significant: 2 executions
+  PASS: inner query_id 77 reaches the variant (got 77)
+  PASS: plan phase: pattern [A] only
+  PASS: exec phase from the same index: pattern [B,C]
+--- mutation probes: every compared field must be visible ---
+  PASS: probe baseline: two identical results compare equal
+  PASS: probe baseline: the probed result is non-empty (1 variants, 2 steps)
+  PASS: probe total_executions: comparator reports total_executions
+  PASS: probe failed: comparator reports failed
+  PASS: probe hash: comparator reports hash
+  PASS: probe exec_count: comparator reports exec_count
+  PASS: probe num_query_ids: comparator reports num_query_ids
+  PASS: probe avg_ns: comparator reports avg_ns
+  PASS: probe p95_ns: comparator reports p95_ns
+  PASS: probe p95_sample_n: comparator reports p95_sample_n
+  PASS: probe top_query_id: comparator reports top_query_id
+  PASS: probe step.event_id: comparator reports step.event_id
+  PASS: probe step.is_loop: comparator reports step.is_loop
+  PASS: probe step.loop_len: comparator reports step.loop_len
+  PASS: probe step.name: comparator reports step.name
+  PASS: probe step_avg_ns: comparator reports step_avg_ns
+  PASS: probe total_ns: comparator reports total_ns
+  PASS: probe num_steps: comparator reports num_steps
+  PASS: probe avg_loop_n: comparator reports avg_loop_n
+  PASS: probe num_variants: comparator reports num_variants
+  PASS: all 18 compared fields are visible to the comparator
+--- sweep A: block splits x windows x both phases ---
+  FAIL(785): sweep A: 1248 disagreements over 25254 (fixture,split,window,phase) quadruples
+--- sweep B: window bounds +/- 1 ns (seam inclusivity) ---
+  FAIL(821): sweep B: 622 disagreements over 16564 more quadruples
+--- sweep C: max_variants truncation (0, 1, 2, 1000) ---
+  FAIL(846): sweep C: 60 disagreements over 448 more quadruples
+--- bypass suite: a gate that cannot see must refuse ---
+  PASS: NULL index: REFUSES with null-argument, no variants, counts poisoned to -1, failed=1 (got rc=-1 refused=null-argument nv=-1 te=-1 failed=1 si=0)
+  PASS: empty index (no block ever added): REFUSES with empty-index, no variants, counts poisoned to -1, failed=1 (got rc=-1 refused=empty-index nv=-1 te=-1 failed=1 si=0)
+  PASS: unsealed index: REFUSES with unsealed, no variants, counts poisoned to -1, failed=1 (got rc=-1 refused=unsealed nv=-1 te=-1 failed=1 si=0)
+  PASS: unknown index version: REFUSES with version-mismatch, no variants, counts poisoned to -1, failed=1 (got rc=-1 refused=version-mismatch nv=-1 te=-1 failed=1 si=0)
+  PASS: feed: first block accepted
+  PASS: feed: a SKIPPED block index is rejected
+  PASS: skipped block: REFUSES with block-feed-gap, no variants, counts poisoned to -1, failed=1 (got rc=-1 refused=block-feed-gap nv=-1 te=-1 failed=1 si=0)
+  PASS: feed: a block whose bounds go BACKWARDS is rejected
+  PASS: reordered blocks: REFUSES with block-feed-gap, no variants, counts poisoned to -1, failed=1 (got rc=-1 refused=block-feed-gap nv=-1 te=-1 failed=1 si=0)
+  PASS: feed: a record whose timestamp goes BACKWARDS is rejected, never silently reordered
+  PASS: out-of-order record: REFUSES with block-feed-gap, no variants, counts poisoned to -1, failed=1 (got rc=-1 refused=block-feed-gap nv=-1 te=-1 failed=1 si=0)
+  PASS: feed: a record outside its block's bounds is rejected, never clamped
+  PASS: record outside block bounds: REFUSES with block-feed-gap, no variants, counts poisoned to -1, failed=1 (got rc=-1 refused=block-feed-gap nv=-1 te=-1 failed=1 si=0)
+  PASS: feed: add_block after seal is rejected
+  PASS: window past cover_to_ns (the 'ends at now' case): REFUSES with window-outside-coverage, no variants, counts poisoned to -1, failed=1 (got rc=-1 refused=window-outside-coverage nv=-1 te=-1 failed=1 si=0)
+  PASS: window starting before cover_from_ns: REFUSES with window-outside-coverage, no variants, counts poisoned to -1, failed=1 (got rc=-1 refused=window-outside-coverage nv=-1 te=-1 failed=1 si=0)
+  PASS: window entirely outside coverage: REFUSES with window-outside-coverage, no variants, counts poisoned to -1, failed=1 (got rc=-1 refused=window-outside-coverage nv=-1 te=-1 failed=1 si=0)
+  PASS: inverted window: REFUSES with inverted-window, no variants, counts poisoned to -1, failed=1 (got rc=-1 refused=inverted-window nv=-1 te=-1 failed=1 si=0)
+  PASS: unknown phase: REFUSES with unknown-phase, no variants, counts poisoned to -1, failed=1 (got rc=-1 refused=unknown-phase nv=-1 te=-1 failed=1 si=0)
+  PASS: NULL filter: REFUSES with filter-not-indexable, no variants, counts poisoned to -1, failed=1 (got rc=-1 refused=filter-not-indexable nv=-1 te=-1 failed=1 si=0)
+  PASS: pid filter: REFUSES with filter-not-indexable, no variants, counts poisoned to -1, failed=1 (got rc=-1 refused=filter-not-indexable nv=-1 te=-1 failed=1 si=0)
+  PASS: event filter: REFUSES with filter-not-indexable, no variants, counts poisoned to -1, failed=1 (got rc=-1 refused=filter-not-indexable nv=-1 te=-1 failed=1 si=0)
+  PASS: class filter: REFUSES with filter-not-indexable, no variants, counts poisoned to -1, failed=1 (got rc=-1 refused=filter-not-indexable nv=-1 te=-1 failed=1 si=0)
+  PASS: query_id filter: REFUSES with filter-not-indexable, no variants, counts poisoned to -1, failed=1 (got rc=-1 refused=filter-not-indexable nv=-1 te=-1 failed=1 si=0)
+  PASS: fixture with NO markers: 0 variants, refused=OK, failed=0 — distinguishable from every refusal above
+  PASS: build alloc failure at variant_index_rows: add_block/seal returns failure
+  PASS: build alloc failure at variant_index_rows: the index is permanently un-queryable (refused=build-failed)
+  PASS: build alloc failure at variant_index_steps: add_block/seal returns failure
+  PASS: build alloc failure at variant_index_steps: the index is permanently un-queryable (refused=build-failed)
+  PASS: build alloc failure at variant_index_chunks: add_block/seal returns failure
+  PASS: build alloc failure at variant_index_chunks: the index is permanently un-queryable (refused=build-failed)
+  PASS: build alloc failure at variant_index_pids: add_block/seal returns failure
+  PASS: build alloc failure at variant_index_pids: the index is permanently un-queryable (refused=build-failed)
+  PASS: build alloc failure at variant_index_pidix: add_block/seal returns failure
+  PASS: build alloc failure at variant_index_pidix: the index is permanently un-queryable (refused=build-failed)
+  PASS: build alloc failure at pid_index_grow: add_block/seal returns failure
+  PASS: build alloc failure at pid_index_grow: the index is permanently un-queryable (refused=build-failed)
+  PASS: query alloc failure at variant_index_query_ht: REFUSES with query-allocation-failed, no variants, counts poisoned to -1, failed=1 (got rc=-1 refused=query-allocation-failed nv=-1 te=-1 failed=1 si=0)
+  PASS: query alloc failure at variant_index_samples: REFUSES with query-allocation-failed, no variants, counts poisoned to -1, failed=1 (got rc=-1 refused=query-allocation-failed nv=-1 te=-1 failed=1 si=0)
+  PASS: query alloc failure at variant_index_query_out: REFUSES with query-allocation-failed, no variants, counts poisoned to -1, failed=1 (got rc=-1 refused=query-allocation-failed nv=-1 te=-1 failed=1 si=0)
+--- the falsifiable prediction, measured ---
+  PASS: big trace: index built over 40 blocks, 200000 records
+  FAIL(1559): big trace: index == oracle bit-exactly (5 variants, 4000 executions)
+  PASS: whole window: rows_examined == every index row (4000 vs 4000)
+  PASS: whole window: rows_selected == total_executions (4000 vs 4000)
+  PASS: whole window: steps_examined > 0 (4800)
+  PASS: big trace: all 4000 executions selected (got 4000)
+  PASS: PREDICTION: query work (rows 4000 + steps 4800 = 8800) is >=10x smaller than the 200000 records the oracle walks
+  REPORTED (not asserted): 200000 records / 4000 executions; build 1.9 ms once; query 0.272 ms vs raw 3.101 ms = 11.4x
+  REPORTED: chunks 40/40 scanned, rows_examined 4000, rows_selected 4000, steps_examined 4800
+  FAIL(1608): narrow window: index == oracle bit-exactly (8 executions)
+  PASS: narrow window: the prefilter SKIPPED chunks (1 of 40 scanned)
+  PASS: narrow window: the prefilter kept 3900 of 4000 rows out of the selection predicate
+--- #327 seventh site: the merge table at and past saturation ---
+  PASS: 4095 distinct patterns: index built over 8 blocks, 16380 records
+  PASS: 4095 distinct patterns: ANSWERED, not refused (rc=0 refused=ok failed=0 si=1)
+  FAIL(1757): 4095 distinct patterns: num_variants == 4095 exactly -- a 4096-slot table cannot hold more, so this IS the proof the table grew (got 126)
+  PASS: 4095 distinct patterns: total_executions == 4095 (got 4095)
+  PASS: 4095 distinct patterns: sum of exec_count == 4095 (the generator's own count, not the index's) -- no key dropped (got 4095)
+  FAIL(1783): 4095 distinct patterns: every variant is a 2-step pattern seen once with its own p95 sample (0/125/125 bad)
+  PASS: 4095 distinct patterns: every returned hash is distinct -- no two keys merged into one slot (0 duplicates)
+  FAIL(1807): 4095 distinct patterns: index == oracle BIT-EXACTLY past saturation (oracle.failed=0, first differing field=0 at row=-1)
+  PASS: 4096 distinct patterns: index built over 8 blocks, 16384 records
+  PASS: 4096 distinct patterns: ANSWERED, not refused (rc=0 refused=ok failed=0 si=1)
+  FAIL(1757): 4096 distinct patterns: num_variants == 4096 exactly -- a 4096-slot table cannot hold more, so this IS the proof the table grew (got 127)
+  PASS: 4096 distinct patterns: total_executions == 4096 (got 4096)
+  PASS: 4096 distinct patterns: sum of exec_count == 4096 (the generator's own count, not the index's) -- no key dropped (got 4096)
+  FAIL(1783): 4096 distinct patterns: every variant is a 2-step pattern seen once with its own p95 sample (0/125/125 bad)
+  PASS: 4096 distinct patterns: every returned hash is distinct -- no two keys merged into one slot (0 duplicates)
+  FAIL(1807): 4096 distinct patterns: index == oracle BIT-EXACTLY past saturation (oracle.failed=0, first differing field=0 at row=-1)
+  PASS: 4097 distinct patterns: index built over 8 blocks, 16388 records
+  PASS: 4097 distinct patterns: ANSWERED, not refused (rc=0 refused=ok failed=0 si=1)
+  FAIL(1757): 4097 distinct patterns: num_variants == 4097 exactly -- a 4096-slot table cannot hold more, so this IS the proof the table grew (got 127)
+  PASS: 4097 distinct patterns: total_executions == 4097 (got 4097)
+  PASS: 4097 distinct patterns: sum of exec_count == 4097 (the generator's own count, not the index's) -- no key dropped (got 4097)
+  FAIL(1783): 4097 distinct patterns: every variant is a 2-step pattern seen once with its own p95 sample (0/125/125 bad)
+  PASS: 4097 distinct patterns: every returned hash is distinct -- no two keys merged into one slot (0 duplicates)
+  FAIL(1807): 4097 distinct patterns: index == oracle BIT-EXACTLY past saturation (oracle.failed=0, first differing field=0 at row=-1)
+  FAIL(1270): growth allocation failure at saturation: REFUSES with query-allocation-failed, no variants, counts poisoned to -1, failed=1 (got rc=0 refused=ok nv=127 te=4097 failed=0 si=1)
+  FAIL(1851): CONTROL: an UNKNOWN injection point is a no-op -- still 4097 variants, refused=ok, failed=0
+  PASS: CONTROL: variant_index_ht_grow on a NON-saturating window does not refuse -- the point is on the growth path only (rc=0 refused=ok)
+--- non-vacuity ledger: the sweeps really saw these shapes ---
+  PASS: block splits used: 455 (need >= 2)
+  PASS: (fixture,split,window,phase) comparisons: 42266 (need >= 2000)
+  PASS: variants actually compared: 8228 (need >= 100)
+  PASS: executions actually selected: 43993 (need >= 100)
+  PASS: multi-step patterns: 1930 (need >= 1)
+  PASS: patterns containing a LOOP step: 1850 (need >= 1)
+  PASS: CPU-only patterns: 160 (need >= 1)
+  PASS: executions whose MARKER PAIR straddled a block boundary: 96860 (need >= 1)
+  PASS: executions whose WAIT RECORDS straddled a block boundary (partial-sequence carry-over): 25894 (need >= 1)
+  PASS: patterns truncated at PGWT_MAX_VARIANT_STEPS: 3476 (need >= 1)
+  PASS: sequences capped at 128 raw records: 3476 (need >= 1)
+  PASS: variants with a non-empty p95 sample: 8228 (need >= 1)
+  PASS: windows returning rows for more than one pid: 2454 (need >= 1)
+  PASS: prefilter chunk skips: 374529 (need >= 1)
+  PASS: rows the prefilter kept out of the predicate: 99606 (need >= 1)
+  PASS: order-sensitive variant pairs proven distinct: 1 (need >= 1)
+  PASS: ZERO-LENGTH executions (start == close) indexed: 1101 (need >= 1)
+  PASS: surplus closing markers ignored for a pid WITH builder state: 1 (need >= 1)
+  PASS: query_id reaching a variant from an inner record: 1 (need >= 1)
+  PASS: both phases answered from one index: 1 (need >= 1)
+  FAIL(1935): windows answered with MORE than the 4096-slot table's capacity (#327: the table actually grew): 0 (need >= 1)
+  PASS: growth-allocation refusals observed at saturation: 1 (need >= 1)
+  PASS: saturated windows the ORACLE also answered, compared bit-exactly (#358 is what makes this comparison possible): 1 (need >= 1)
+  FAIL(1938): no disagreement anywhere — first: order matters A,B vs B,A cuts=0x0 phase=exec window=[+0,+15]ms field=hash row=0
+
+173 checks, 19 failed
+FAILED

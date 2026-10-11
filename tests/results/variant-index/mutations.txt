@@ -1,0 +1,98 @@
+baseline: pristine module, test PASSED (174 checks, 0 failed)
+
+RED   M01 no partial-sequence carry-over (open sequences reset each block)
+        -> 57 failing checks; first: FAIL(899): one exec one wait: 1 execution (got 0)
+RED   M02 the partial sequence survives but its CONTENT is dropped at a block edge (truncation to the last block's steps only)
+        -> 24 failing checks; first: FAIL(904): one exec one wait: total 5 ms (got 0)
+RED   M03 a row is appended TWICE (duplication across blocks)
+        -> 38 failing checks; first: FAIL(899): one exec one wait: 1 execution (got 2)
+RED   M04 selection half-open at to_ns (an execution closing exactly at `to` is dropped)
+        -> 54 failing checks; first: FAIL(899): one exec one wait: 1 execution (got 0)
+RED   M05 selection half-open at from_ns (an execution starting exactly at `from` is dropped)
+        -> 54 failing checks; first: FAIL(899): one exec one wait: 1 execution (got 0)
+RED   M06 selection keyed on the CLOSE only, ignoring whether the opening marker was in the window
+        -> 3 failing checks; first: FAIL(785): sweep A: 5137 disagreements over 25254 (fixture,split,window,phase) quadruples
+RED   M07 chunk prefilter narrowed, so a chunk that could contribute is skipped
+        -> 5 failing checks; first: FAIL(1049): zero-length: both executions reported (got 1)
+RED   M08 prefilter bounds computed from the chunk's FIRST row only, so later rows in the same block are prefiltered away
+        -> 3 failing checks; first: FAIL(785): sweep A: 1934 disagreements over 25254 (fixture,split,window,phase) quadruples
+RED   M09 #222: a second opening marker CONTINUES the first sequence instead of discarding it
+        -> 6 failing checks; first: FAIL(927): #222: the surviving pattern is [B], not [A] or [A,B]
+RED   M10 start_ns kept STALE across executions of the same pid (the first opening marker's timestamp wins forever)
+        -> 4 failing checks; first: FAIL(785): sweep A: 3085 disagreements over 25254 (fixture,split,window,phase) quadruples
+RED   M11 a closing marker with nothing open emits a row anyway
+        -> 6 failing checks; first: FAIL(1086): extra EXEC_END: exactly 1 execution, the surplus closing marker ignored (got 2)
+RED   M12 an execution still open at a BLOCK EDGE is closed and emitted as a truncated row instead of being carried over
+        -> 41 failing checks; first: FAIL(904): one exec one wait: total 5 ms (got 0)
+RED   M13 step ORDER folded out of the hash (so [A,B] and [B,A] collide)
+        -> 19 failing checks; first: FAIL(1127): order significant: [A,B] and [B,A] are TWO variants (got 1)
+RED   M14 the loop flag is not folded into the hash
+        -> 7 failing checks; first: FAIL(1109): loop flag hashed: [A] and [A,A] are TWO variants despite an identical step list (got 1)
+RED   M15 rows merged in ROW order per chunk but chunks visited backwards (close order broken: collision chains, query_id sets, p95 sample)
+        -> 5 failing checks; first: FAIL(785): sweep A: 1501 disagreements over 25254 (fixture,split,window,phase) quadruples
+RED   M16 idle records enter the sequence
+        -> 6 failing checks; first: FAIL(998): idle dropped: [A,idle,A] compresses to one A loop, not 3 steps (got 3 steps)
+RED   M17 the all-zero filter treated as a no-op (an impossible duration enters the sequence)
+        -> 6 failing checks; first: FAIL(1012): impossible duration: pattern is [A] only — an all-zero filter still rejects duration > timestamp
+RED   M18 the raw cap set to 3, truncating longer sequences
+        -> 13 failing checks; first: FAIL(953): ABAB across blocks: 2 pattern steps, not 4 and not a truncated 1 (got 3)
+RED   M19 the CPU-only fill-in moved AFTER loop_n would see it (raw_len 0)
+        -> 7 failing checks; first: FAIL(980): cpu only: one step, event id 0
+RED   M20 per-step accumulators not clamped to the last step (the oracle's si quirk 'fixed')
+        -> 7 failing checks; first: FAIL(971): ABAB across blocks: step avgs 1 ms and 3 ms — the oracle's si-clamping quirk reproduced, not corrected (got 1000000, 2000000)
+RED   M21 query_id taken from the opening marker only, never from an inner record
+        -> 6 failing checks; first: FAIL(1144): inner query_id 77 reaches the variant (got 0)
+RED   M22 avg_loop_n pre-aggregated per variant instead of summed per execution in close order
+        -> 4 failing checks; first: FAIL(785): sweep A: 17 disagreements over 25254 (fixture,split,window,phase) quadruples
+RED   M23 CMD_END closes an exec here (it does not, for variants)
+        -> 5 failing checks; first: FAIL(1025): CMD_END inside: pattern [A,B] spans the CMD_END — pgwt_compute_variants ignores it (got 1 steps)
+RED   M24 phases conflated (an exec row answers a plan query)
+        -> 7 failing checks; first: FAIL(1097): stray PLAN_END for a pid with exec-only state: no plan execution invented (got 1)
+RED   M25 max_variants truncation dropped
+        -> 2 failing checks; first: FAIL(846): sweep C: 66 disagreements over 448 more quadruples
+RED   G01 an empty index answers 'no variants' instead of refusing
+        -> 1 failing checks; first: FAIL(1270): empty index (no block ever added): REFUSES with empty-index, no variants, counts poisoned to -1, failed=1 (got rc=0 refused=ok nv=0 te=0 failed=0 si
+RED   G02 coverage check is an INTERSECTION, not containment
+        -> 2 failing checks; first: FAIL(1270): window past cover_to_ns (the 'ends at now' case): REFUSES with window-outside-coverage, no variants, counts poisoned to -1, failed=1 (got rc=0 refus
+RED   G03 a refusal leaves the counts at 0 instead of poisoning them
+        -> 28 failing checks; first: FAIL(1270): NULL index: REFUSES with null-argument, no variants, counts poisoned to -1, failed=1 (got rc=-1 refused=null-argument nv=0 te=0 failed=0 si=0)
+RED   G04 a refusal poisons the counts but does NOT set failed/indexed (the '-1 is truthy' trap: the caller sails past it)
+        -> 28 failing checks; first: FAIL(1270): NULL index: REFUSES with null-argument, no variants, counts poisoned to -1, failed=1 (got rc=-1 refused=null-argument nv=-1 te=-1 failed=0 si=1)
+RED   G05 a build allocation failure does not make the index unusable
+        -> 4 failing checks; first: FAIL(1270): skipped block: REFUSES with block-feed-gap, no variants, counts poisoned to -1, failed=1 (got rc=-1 refused=window-outside-coverage nv=-1 te=-1 fail
+RED   G06 a skipped block in the feed is accepted
+        -> 2 failing checks; first: FAIL(1317): feed: a SKIPPED block index is rejected
+RED   G07 out-of-order records are accepted silently
+        -> 2 failing checks; first: FAIL(1346): feed: a record whose timestamp goes BACKWARDS is rejected, never silently reordered
+RED   G08 a record outside its block's bounds is clamped, not refused
+        -> 2 failing checks; first: FAIL(1358): feed: a record outside its block's bounds is rejected, never clamped
+RED   G09 the version stamp is not checked on query
+        -> 1 failing checks; first: FAIL(1270): unknown index version: REFUSES with version-mismatch, no variants, counts poisoned to -1, failed=1 (got rc=0 refused=ok nv=1 te=1 failed=0 si=1)
+RED   G10 an unsealed index is queried anyway (chunk bounds still UINT64_MAX/0)
+        -> 1 failing checks; first: FAIL(1270): unsealed index: REFUSES with unsealed, no variants, counts poisoned to -1, failed=1 (got rc=0 refused=ok nv=0 te=0 failed=0 si=1)
+RED   G11 a NON-EMPTY filter is answered from the unfiltered index
+        -> 5 failing checks; first: FAIL(1270): NULL filter: REFUSES with filter-not-indexable, no variants, counts poisoned to -1, failed=1 (got rc=0 refused=ok nv=1 te=1 failed=0 si=1)
+RED   G12 a NULL filter is accepted as 'no filter'
+        -> 1 failing checks; first: FAIL(1270): NULL filter: REFUSES with filter-not-indexable, no variants, counts poisoned to -1, failed=1 (got rc=0 refused=ok nv=1 te=1 failed=0 si=1)
+RED   G13 an inverted window is answered instead of refused
+        -> 1 failing checks; first: FAIL(1270): inverted window: REFUSES with inverted-window, no variants, counts poisoned to -1, failed=1 (got rc=0 refused=ok nv=0 te=0 failed=0 si=1)
+RED   G14 the ledger's carry-over counter cannot be driven: n_discarded is never incremented, so the #222 shape cannot be proven to have occurred
+        -> 1 failing checks; first: FAIL(925): #222: 1 partial sequence discarded (got 0)
+RED   G15 the measured-work counters stop counting, so the complexity claim becomes vacuously true
+        -> 1 failing checks; first: FAIL(1568): whole window: rows_examined == every index row (0 vs 4000)
+RED   G16 open_at_end always reports 0, so 'no sequence was left open' cannot be distinguished from 'the counter is broken'
+        -> 1 failing checks; first: FAIL(1038): open at capture end: 1 sequence still open (got 0)
+RED   G17 the rehash DROPS half the keys to make room -- the silently short total #327 calls worse than the hang
+        -> 17 failing checks; first: FAIL(1752): 4095 distinct patterns: ANSWERED, not refused (rc=-1 refused=internal-invariant failed=1 si=0)
+RED   G18 the growth path's allocation-failure hook is renamed, so no test can reach the refusal and 'every injected failure refuses' becomes unverifiable
+        -> 1 failing checks; first: FAIL(1270): growth allocation failure at saturation: REFUSES with query-allocation-failed, no variants, counts poisoned to -1, failed=1 (got rc=0 refused=ok nv=
+RED   G19 the rehash moves the accumulator but loses its p95 sample, so a grown table answers with p95 = 0 and sample_n = 0
+        -> 6 failing checks; first: FAIL(1783): 4095 distinct patterns: every variant is a 2-step pattern seen once with its own p95 sample (0/0/3072 bad)
+RED   G20 variants collected in SLOT order instead of first-execution order, so variants tied on total_ns come back in a different arrangement from the oracle's
+        -> 2 failing checks; first: FAIL(1559): big trace: index == oracle bit-exactly (5 variants, 4000 executions)
+RED   G21 the seq invariant is broken by one, which without the guard would write one variant past the end of the result array
+        -> 37 failing checks; first: FAIL(1073): zero-length: query refused for [t, t]
+
+46 mutations, 0 not detected
+PASSED
+HARNESS_EXIT=0
