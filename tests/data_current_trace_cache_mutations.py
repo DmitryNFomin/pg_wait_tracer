@@ -25,10 +25,12 @@ import tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# ── the two source sites the mutants replace ────────────────────────────────
+# ── the source sites the mutants replace ────────────────────────────────────
 SYNC_CALL = "    if (cc)\n        cur_cache_sync(cc, path, &reader);"
 REFUSAL_PRINT = ('        fprintf(stderr, "pgwt-server: no trace files found '
                  'in %s\\n", trace_dir);')
+SERVE_FROM_CACHE = ("            rec = cc->events + cb->start;\n"
+                    "            n = cb->count;")
 
 # ── assertion markers (substrings of the check names) ───────────────────────
 FEWER = "a byte-truncated current.trace serves a nonempty"
@@ -36,6 +38,7 @@ RETENTION = "the entry did not keep blocks the file no longer has"
 DIFFERENTIAL = "the truncated read matches a fresh uncached read exactly"
 HELD = "the cached entry held a block the file no longer has"
 SERVED = "the cache served the pre-truncation request"
+REPEAT = "the repeated pre-truncation request answers identically"
 REFUSED = "an empty trace dir is refused outright"
 REASON = "and the refusal names the reason"
 
@@ -67,6 +70,17 @@ SERVE_STALE = """    /* mutant: ignore the lower committed watermark for cached 
 # reason retrievable on both outcomes of that exit race; this proves the fix
 # did not replace the assertion with a formality -- an absent reason is red.
 SILENT_REFUSAL = '        fprintf(stderr, "pgwt-server: startup failed\\n");'
+
+# A cache that SERVES a block differently from the way the decode path read it.
+# One event short is the smallest version of the hazard, and it is invisible
+# to any single request: the first request decodes, only a repeat is served.
+# That is what the repeated-request check exists for, so that check -- and
+# only a check like it -- must go red here.
+SERVE_ONE_SHORT = ("            rec = cc->events + cb->start;\n"
+                   "            /* mutant: serve the cached block one event "
+                   "short */\n"
+                   "            n = cb->count > 1 ? cb->count - 1 "
+                   ": cb->count;")
 
 RUN_TMPL = (
     "import test_data_current_trace_cache as m; "
@@ -170,7 +184,7 @@ def main():
             build(base, generator=True)
             if not check_baseline("truncation", run_case(base, RUN_TRUNC),
                                   (FEWER, RETENTION, DIFFERENTIAL, HELD,
-                                   SERVED)):
+                                   SERVED, REPEAT)):
                 return 1
             if not check_baseline("refusal", run_case(base, RUN_DEPS),
                                   (REFUSED, REASON)):
@@ -183,6 +197,8 @@ def main():
                  (DIFFERENTIAL, FEWER), ()),
                 ("refusal without a reason", REFUSAL_PRINT, SILENT_REFUSAL,
                  RUN_DEPS, (REASON,), (REFUSED,)),
+                ("cached block served one event short", SERVE_FROM_CACHE,
+                 SERVE_ONE_SHORT, RUN_TRUNC, (REPEAT,), ()),
             )
             ok = True
             for i, (label, needle, mutation, run, red, green) in \

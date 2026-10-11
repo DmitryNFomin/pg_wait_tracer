@@ -361,6 +361,12 @@ BLOCK_HDR = struct.Struct("<QQIIIHHQ")
 # timestamp_ns, file_offset
 INDEX_ENTRY = struct.Struct("<QQ")
 FOOTER_COUNT = struct.Struct("<I")
+# src/event_writer.h: #define PGWT_BLOCK_EVENTS 4096 — the writer's per-block
+# event cap, and the same bound src/event_reader.c's committed-block scan
+# applies before trusting a block header. Named here for the same reason the
+# 28/40/16 sizes are asserted above: a silent divergence from the C side would
+# make this walk accept a header the product rejects, or stop at one it reads.
+BLOCK_EVENTS = 4096
 
 
 def block_extents(path):
@@ -402,7 +408,7 @@ def block_extents(path):
     off = TRACE_HDR.size
     while off + BLOCK_HDR.size <= size:
         _first, _last, num_events, csize = BLOCK_HDR.unpack_from(blob, off)[:4]
-        if num_events <= 0 or num_events > 4096 or csize <= 0:
+        if num_events <= 0 or num_events > BLOCK_EVENTS or csize <= 0:
             break
         end = off + BLOCK_HDR.size + csize
         if end > size:
@@ -1105,6 +1111,18 @@ def bypass_truncated_file_under_meta(tr):
 
     The meta is left alone: it still publishes the pre-truncation count, which
     is the scenario in the name.
+
+    IF THE SERVER IS EVER HARDENED TO REFUSE a current.trace whose meta claims
+    more blocks than the file holds, this test goes red -- and it must then be
+    REDESIGNED, NEVER RELAXED. Master's predecessor allowed "a loud refusal OR
+    fewer events", and that disjunction is exactly what made it vacuous: an
+    empty answer satisfied it on both sides of the differential, so a server
+    retaining AND serving the stale superset passed 5/5
+    (tests/results/issue334/vacuity-master.log). Requiring a nonempty smaller
+    prefix on BOTH sides is what gives the differential anything to compare.
+    So the fix for that hardening is a fixture where the cache holds blocks a
+    LEGAL file no longer has -- a rotation, or a restart that rewrites the file
+    -- not widening this assertion back to "or it refused".
     """
     trace_dir = generate_traces(busy_scenario(span_s=12, pids=3, per_pid=2500))
     tmp = tempfile.mkdtemp(prefix="pgwt_cc_err_")
@@ -1146,6 +1164,14 @@ def bypass_truncated_file_under_meta(tr):
             # the same blindness the byte-count cut had. The measured request
             # below is still ONE request, and a retained suffix in it still
             # fails.
+            #
+            # That blind request is issue #342 (an absence reported as zero),
+            # and this test does NOT lean on it: with this line deleted the
+            # measurement comes back empty and the assertion goes RED
+            # (measured, tests/results/issue334/sabotage.log case S7). So
+            # fixing #342 cannot satisfy this test by accident -- it would
+            # BREAK it, and the repair is then to delete this line and this
+            # comment, nothing else.
             srv.query("info")
             after = srv.query(PROBE_CMD, from_=w_from, to_=w_to)
             post = read_curcache(err)
@@ -1443,19 +1469,18 @@ def bypass_refusal_reason_survives_epipe(tr):
     for label, script, has_reason in (("names its reason", STUB_REFUSES, True),
                                       ("exits silently", STUB_SILENT, False)):
         d = tempfile.mkdtemp(prefix="pgwt_cc_epipe_")
-        saved_bin = server_harness.SERVER_BIN
         try:
             stub = os.path.join(d, "stub-server")
             with open(stub, "w") as f:
                 f.write(script)
             os.chmod(stub, 0o755)
-            server_harness.SERVER_BIN = stub
             err = os.path.join(d, "stub.err")
             srv = ServerHarness(d, stderr_path=err)
             # start() would send its own 'info' the instant the process is
-            # spawned, which is the race. Spawn it the same way start() does,
-            # then WAIT: with the reader gone, the next write is EPIPE by
-            # construction, on every machine and every run.
+            # spawned, which is the race. Spawn it the same way start() does
+            # -- directly, so server_harness.SERVER_BIN is deliberately left
+            # alone -- then WAIT: with the reader gone, the next write is
+            # EPIPE by construction, on every machine and every run.
             srv._stderr_file = open(err, "w")
             srv.proc = subprocess.Popen(
                 [stub, d], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -1466,8 +1491,18 @@ def bypass_refusal_reason_survives_epipe(tr):
                 srv.query("info")
             except Exception as exc:
                 raised = "%s: %s" % (type(exc).__name__, exc)
+            # Close what was opened by hand. ServerHarness.stop() is not
+            # usable here (its stdin.close() would raise on the very broken
+            # pipe this case exists to create), and this function runs twice
+            # per suite, so a leak here is two pipe pairs per run.
+            for handle in (srv.proc.stdin, srv.proc.stdout):
+                try:
+                    handle.close()
+                except OSError:
+                    pass
             srv._stderr_file.close()
             srv._stderr_file = None
+            srv.proc = None
             print("    stub %s -> %s" % (label, raised[:120]))
             tr.check(raised != "",
                      "a stub that exits before reading stdin still raises "
@@ -1485,7 +1520,6 @@ def bypass_refusal_reason_survives_epipe(tr):
                          "and a server that wrote NO reason yields none -- "
                          "the retrieval cannot invent one: %r" % raised[:110])
         finally:
-            server_harness.SERVER_BIN = saved_bin
             shutil.rmtree(d, ignore_errors=True)
 
 
