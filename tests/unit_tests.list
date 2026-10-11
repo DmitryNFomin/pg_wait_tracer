@@ -363,13 +363,21 @@ test_interval_index
 #   and froze every tab at once. It now GROWS -- never drops a key, and
 #   refuses the WHOLE result (counts poisoned AND failed=1) if the growth
 #   cannot allocate. Pinned at 4095 / 4096 / 4097 distinct two-step patterns
-#   with exact num_variants, exact total_executions, sum(exec_count) against
-#   the GENERATOR's own count and all hashes distinct; the oracle is NOT the
-#   comparator there, because it is the same defect's sixth site and would
-#   hang rather than answer. Two controls stop a no-op injection from being
-#   what makes the refusal pass: an unknown PGWT_TEST_ALLOC_FAIL point must
-#   change nothing, and the growth point injected on a NON-saturating window
-#   must not refuse.
+#   with TWO independent comparators: the GENERATOR's own count (exact
+#   num_variants, exact total_executions, sum(exec_count), all hashes
+#   distinct) -- the half neither implementation computes, so it catches both
+#   sides being wrong together, and num_variants == 4097 is itself the proof
+#   the table grew -- AND pgwt_compute_variants bit-exactly, which only became
+#   possible when #358 fixed the oracle's own copy of this probe loop; before
+#   that the oracle spun on the same input. Two controls stop a no-op
+#   injection from being what makes the growth refusal pass: an unknown
+#   PGWT_TEST_ALLOC_FAIL point must change nothing, and the growth point
+#   injected on a NON-saturating window must not refuse.
+#   Collection ORDER is pinned too (#358). The oracle's accumulator array is
+#   insertion-ordered, qsort() breaks equal-total_ns ties by input order, and
+#   tied variants are common, so the index collects by first-execution order
+#   rather than by walking hash slots. An out-of-range collection index
+#   refuses the whole result instead of writing past the array.
 #   Companion: tests/variant_index_mutations.py injects the silent-wrong risks
 #   one at a time and requires this test to catch each; it is not in this list
 #   because it recompiles the module once per mutation and is evidence, not a

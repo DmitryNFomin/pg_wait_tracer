@@ -540,12 +540,14 @@ test_interval_index: test_interval_index.c ../src/interval_index.c \
 # PGWT_VARIANT_INDEX_ONE_BLOCK=1 re-runs the sweeps with no block cuts to
 # falsify the non-vacuity ledger; that mode never exits 0.
 # Also pins #327's seventh probe site: 4095 / 4096 / 4097 distinct patterns
-# must all be ANSWERED with exact counts and no key dropped (the 4097th used
-# to spin forever in the 4096-slot merge table), the growth path's own
-# allocation failure must refuse the whole result, and an unknown injection
-# point must be a no-op.
-# Server build, no BPF, no live PG; ~17 s (the oracle callocs a 4 MB hash
-# table per call and the sweep calls it ~42,000 times).
+# must all be ANSWERED -- against the generator's own counts AND against
+# pgwt_compute_variants bit-exactly -- with no key dropped (the 4097th used to
+# spin forever in the 4096-slot merge table), the growth path's own allocation
+# failure must refuse the whole result, and an unknown injection point must be
+# a no-op. Collection order is pinned to the oracle's insertion order (#358).
+# Server build, no BPF, no live PG; ~8 s unloaded on an M-series Mac, ~17 s
+# with three agents on the box (the oracle callocs a hash table per call and
+# the sweep calls it ~42,000 times) -- reported, never asserted.
 #
 test_variant_index: test_variant_index.c ../src/variant_index.c ../src/compute.c \
                    $(BUILD)/wait_event.o $(BUILD)/idle_rule.o \
