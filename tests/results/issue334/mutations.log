@@ -1,0 +1,14 @@
+PASS baseline (truncation): 11 assertions green, all markers present
+PASS baseline (refusal): 6 assertions green, all markers present
+RED  retained stale blocks: target assertion failed
+    FAIL: the vanished blocks were dropped from the entry (resets 0 -> 0)
+    FAIL: the entry did not keep blocks the file no longer has (cached [0, 2), file keeps 1)
+RED  served stale superset: target assertion failed
+    FAIL: a byte-truncated current.trace serves a nonempty SMALLER prefix, never the cached superset (7425 -> 7425)
+    FAIL: the vanished blocks were dropped from the entry (resets 0 -> 0)
+    FAIL: the entry did not keep blocks the file no longer has (cached [0, 2), file keeps 1)
+    FAIL: the truncated read matches a fresh uncached read exactly (got {"events": [{"c": 1, "d": 2000000, "e": 167772184, "n": "IO:DataFileWrite", "p": 1000, "q": "100", "s": 10000000002800000}, {"c": 3, "d": 2000000, "e": 16777224, "n": "LWLo
+RED  refusal without a reason: target assertion failed
+    FAIL: and the refusal names the reason ('pgwt-server closed stdout. stderr: pgwt-server: startup failed\n')
+PASSED: every mutant went red
+mutations rc=0

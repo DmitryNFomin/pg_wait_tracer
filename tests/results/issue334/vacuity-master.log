@@ -1,0 +1,12 @@
+mutated
+    truncation: 7425 events -> {"events": [], "fidelity": "none", "id": 3, "pids": [], "total_count": 0, "truncated": false}
+    curcache {'enabled': 1, 'lo': 0, 'blocks': 2, 'events': 7578, 'cap': 16384, 'decoded': 2, 'served': 0, 'resets': 0} -> {'enabled': 1, 'lo': 0, 'blocks': 0, 'events': 0, 'cap': 0, 'decoded': 2, 'served': 0, 'resets': 1}
+  PASS: the pre-truncation request saw events
+  PASS: a truncated current.trace refuses or returns FEWER events, never the cached superset
+  PASS: the vanished blocks were dropped from the entry (resets 0 -> 1)
+  PASS: the entry did not keep blocks the file no longer has (2 -> 0)
+  PASS: the truncated read matches a fresh uncached read exactly
+
+5/5 tests passed
+VERDICT: master assertion PASSED (VACUOUS)
+vacuity rc=0
