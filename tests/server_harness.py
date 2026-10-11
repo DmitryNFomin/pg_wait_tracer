@@ -131,8 +131,24 @@ class ServerHarness:
             req["to"] = self._to_ns
 
         line = json.dumps(req) + "\n"
-        self.proc.stdin.write(line)
-        self.proc.stdin.flush()
+        try:
+            self.proc.stdin.write(line)
+            self.proc.stdin.flush()
+        except BrokenPipeError as exc:
+            # #348: pgwt-server writes its startup refusal reason
+            # ("no trace files found in ...") to stderr and exits BEFORE the
+            # stdin request loop runs (src/server.c), so this write always
+            # races an exiting process. Whether it lands in the pipe buffer
+            # (and the caller then sees "closed stdout" below) or raises EPIPE
+            # here is pure timing -- but the reason is on stderr in BOTH
+            # cases, so read it on both paths. A caller asserting on the
+            # reason then gets the same text either way; if stderr holds no
+            # reason, the raised message holds none either and that caller
+            # still fails.
+            raise RuntimeError(
+                f"pgwt-server closed stdin before reading '{cmd}' "
+                f"(id={req['id']}, {exc}). stderr: {self._read_stderr()}"
+            ) from exc
 
         start = time.monotonic()
         if timeout is not None:
@@ -145,18 +161,35 @@ class ServerHarness:
 
         resp_line = self.proc.stdout.readline()
         if not resp_line:
-            if self.proc.stderr is not None:
-                stderr = self.proc.stderr.read()
-            elif self._stderr_path:
-                if self._stderr_file:
-                    self._stderr_file.flush()
-                with open(self._stderr_path) as f:
-                    stderr = f.read()
-            else:
-                stderr = "(not captured)"
-            raise RuntimeError(f"pgwt-server closed stdout. stderr: {stderr}")
+            raise RuntimeError(
+                f"pgwt-server closed stdout. stderr: {self._read_stderr()}")
 
         return json.loads(resp_line)
+
+    def _read_stderr(self):
+        """Whatever pgwt-server has written to stderr, for a diagnostic the
+        caller is about to assert on.
+
+        The stderr-to-a-FILE case needs the process to be GONE first: the
+        reason is in the server's own stdio buffer until exit flushes it, and
+        this harness's write handle (`_stderr_file`) cannot flush someone
+        else's buffer. So wait for the exit we are already diagnosing --
+        bounded, and a server that does NOT exit still returns whatever is in
+        the file rather than hanging or changing the verdict. The pipe case
+        needs no wait: read() to EOF already implies the process let go.
+        """
+        if self.proc.stderr is not None:
+            return self.proc.stderr.read()
+        if self._stderr_path:
+            try:
+                self.proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
+            if self._stderr_file:
+                self._stderr_file.flush()
+            with open(self._stderr_path) as f:
+                return f.read()
+        return "(not captured)"
 
 
 def generate_traces(scenario, output_dir=None, wall_offset_ns=None, rotate=None):
