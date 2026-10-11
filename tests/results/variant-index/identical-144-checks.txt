@@ -1,0 +1,21 @@
+The 144 pre-existing checks are BYTE-IDENTICAL with and without the fix.
+
+Both binaries use the PARENT test file (tests/test_variant_index.c at the
+mutation-harness commit, i.e. before the saturation suite was added), so
+the only difference between them is src/variant_index.c:
+  t_base        = parent test + PARENT module
+  t_fix_oldtest = parent test + FIXED module
+
+$ diff <(grep -v REPORTED base.out) <(grep -v REPORTED fix_oldtest.out)
+(exit 0 -- no output above means no differences. The one excluded line
+ is the REPORTED wall-clock timing, which the test prints and never
+ asserts.)
+
+--- tail, PARENT module ---
+
+144 checks, 0 failed
+PASSED
+--- tail, FIXED module ---
+
+144 checks, 0 failed
+PASSED
