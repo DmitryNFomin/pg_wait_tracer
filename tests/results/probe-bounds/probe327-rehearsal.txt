@@ -1,0 +1,6 @@
+blocks: 1052
+transition events: 4307056  (samples skipped: 0)
+window: 444982076451411 .. 446833091717016 (1851.0 s)
+VARIANTS exec: num_variants=18 total_executions=323930 failed=0  (0.02s)
+VARIANTS plan: num_variants=2 total_executions=230918 failed=0  (0.01s)
+INTERFERENCE: num_rows=3  (0.00s)
