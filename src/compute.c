@@ -271,7 +271,7 @@ int pgwt_filter_matches(const struct pgwt_filter *f,
         if (strcasecmp(cls, f->class_name) != 0)
             return 0;
     }
-    if (f->event_id != 0 && ev->old_event != f->event_id)
+    if (f->has_event_filter && ev->old_event != f->event_id)
         return 0;
     if (f->pid != 0 && ev->pid != f->pid)
         return 0;
@@ -2048,7 +2048,7 @@ static int summary_event_matches_filter(const struct pgwt_filter *f,
         if (strcasecmp(cls, f->class_name) != 0)
             return 0;
     }
-    if (f->event_id != 0 && event_id != f->event_id)
+    if (f->has_event_filter && event_id != f->event_id)
         return 0;
     return 1;
 }
@@ -2177,7 +2177,7 @@ void pgwt_compute_aas_from_summaries(
         .bucket_ns = bucket_ns,
         .f = f,
         .has_class_filter = (f->class_name[0] != '\0'),
-        .has_event_filter = (f->event_id != 0),
+        .has_event_filter = f->has_event_filter,
         .has_pid_filter   = (f->pid != 0),
         .has_query_filter = (f->query_id != 0),
     };
@@ -2276,7 +2276,7 @@ static int tm_summary_visitor(const struct pgwt_summary_accum *rec, void *arg)
     }
 
     /* If no class/event filter: use class_ns directly */
-    int unfiltered = (f->class_name[0] == '\0' && f->event_id == 0);
+    int unfiltered = (f->class_name[0] == '\0' && !f->has_event_filter);
     if (unfiltered) {
         /* v3: rec->class_ns is load-only already -- see the note where
          * summary_clientread_ns used to be. */
@@ -2318,7 +2318,7 @@ static int tm_summary_visitor(const struct pgwt_summary_accum *rec, void *arg)
         int cls_idx = pgwt_wait_class_index(se->event_id);
 
         /* With filter: accumulate class totals from events */
-        if (f->class_name[0] != '\0' || f->event_id != 0) {
+        if (f->class_name[0] != '\0' || f->has_event_filter) {
             ctx->classes[cls_idx].total_ns += (double)se->total_ns;
             ctx->db_time_ns += (double)se->total_ns;
         }
@@ -2643,20 +2643,16 @@ struct ts_summary_ctx {
  *
  * So the real fix is upstream: handle_top_sessions forces the RAW path for a
  * class- or event-filtered request, the precedent handle_top_queries already
- * sets. This refusal is the fail-safe underneath it. Until it was added, the
+ * sets. The compute entry point refuses before visiting any records as a
+ * fail-safe underneath it. Until that guard was added, the
  * visitor read f->pid ONLY and silently returned UNFILTERED session numbers
  * while the UI said one wait class was selected -- plausible, wrong, and
- * labelled "fidelity":"exact". Returning no rows is visibly empty instead,
- * which is the house rule: a path that cannot see must refuse, never approve.
- * (Same shape as aas_summary_visitor's `if (ctx->has_pid_filter) return 0;`.)
+ * labelled "fidelity":"exact". A refusal sets failed and poisons num_rows;
+ * an unsupported dimension must not masquerade as a successful zero.
  */
 static int ts_summary_visitor(const struct pgwt_summary_accum *rec, void *arg)
 {
     struct ts_summary_ctx *ctx = arg;
-
-    if (ctx->f->class_name[0] != '\0' || ctx->f->event_id != 0 ||
-        ctx->f->query_id != 0)
-        return 0;
 
     for (int s = 0; s < SUMMARY_MAX_SESSIONS; s++) {
         const struct pgwt_summary_session *ss = &rec->sessions[s];
@@ -2695,6 +2691,14 @@ void pgwt_compute_top_sessions_from_summaries(
 {
     (void)wall_ms;
     memset(out, 0, sizeof(*out));
+
+    /* This format cannot answer these dimensions. Refuse even if no
+     * summary records exist; a missing answer must never look like zero. */
+    if (f->class_name[0] != '\0' || f->has_event_filter || f->query_id != 0) {
+        out->num_rows = -1;
+        out->failed = 1;
+        return;
+    }
 
     struct ts_summary_ctx ctx = {
         .ht = NULL,
@@ -2808,7 +2812,7 @@ static int tq_summary_visitor(const struct pgwt_summary_accum *rec, void *arg)
         uint32_t rec_top_wait_id = sq->top_wait_id;
         uint64_t rec_top_wait_ns = sq->top_wait_ns;
 
-        if (filter_cls >= 0 || ctx->f->event_id != 0) {
+        if (filter_cls >= 0 || ctx->f->has_event_filter) {
             /* Use top_events[] to compute class/event-filtered totals */
             effective_ns = 0;
             rec_top_wait_id = 0;
@@ -2832,7 +2836,7 @@ static int tq_summary_visitor(const struct pgwt_summary_accum *rec, void *arg)
                 if (filter_cls >= 0 && pgwt_wait_class_index(eid) != filter_cls)
                     continue;
                 /* Event filter */
-                if (ctx->f->event_id != 0 && eid != ctx->f->event_id)
+                if (ctx->f->has_event_filter && eid != ctx->f->event_id)
                     continue;
 
                 effective_ns += sq->top_events[j].total_ns;
@@ -2843,7 +2847,7 @@ static int tq_summary_visitor(const struct pgwt_summary_accum *rec, void *arg)
             }
 
             /* If top_events didn't cover this class, fall back to class_ns */
-            if (effective_ns == 0 && filter_cls >= 0 && ctx->f->event_id == 0) {
+            if (effective_ns == 0 && filter_cls >= 0 && !ctx->f->has_event_filter) {
                 int has_class_ns = 0;
                 for (int c = 0; c < PGWT_NUM_CLASSES; c++)
                     if (sq->class_ns[c] > 0) { has_class_ns = 1; break; }

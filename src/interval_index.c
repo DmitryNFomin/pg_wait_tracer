@@ -260,7 +260,7 @@ int pgwt_interval_index_seal(struct pgwt_interval_index *idx)
 
 static int is_unfiltered(const struct pgwt_filter *f)
 {
-    return f->class_name[0] == '\0' && f->event_id == 0 && f->pid == 0 &&
+    return f->class_name[0] == '\0' && !f->has_event_filter && f->pid == 0 &&
            f->query_id == 0;
 }
 

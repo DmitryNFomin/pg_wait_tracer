@@ -122,7 +122,7 @@ int pgwt_block_agg_filter_supported(const struct pgwt_filter *f)
         return 1;                       /* no filter at all */
     if (f->class_name[0] != '\0')
         return 0;
-    if (f->event_id != 0)
+    if (f->has_event_filter)
         return 0;
     if (f->pid != 0)
         return 0;

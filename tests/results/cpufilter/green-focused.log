@@ -1,0 +1,7 @@
+green-342.log:  / 21/21 tests passed
+green-345-block-agg.log:     refusals observed ................. 47 / PASS: test_block_agg
+green-345-executions.log:  / 37/37 tests passed
+green-345-filters.log:  / 16/16 tests passed
+green-345-interval.log: 122 checks, 0 failed / PASSED
+green-345-summary.log:  / 183 checks, 0 failed
+Full test_data_current_trace_cache.py: 112/112 tests passed

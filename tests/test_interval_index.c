@@ -1023,8 +1023,11 @@ static void bypass_suite(void)
         memset(&g, 0, sizeof(g)); g.pid = 20;
         expect_refusal("pid filter", &idx, &g, T(100), T(900), 8,
                        PGWT_INTERVAL_INDEX_REFUSE_FILTERED);
-        memset(&g, 0, sizeof(g)); g.event_id = EV_A;
+        memset(&g, 0, sizeof(g)); g.event_id = EV_A; g.has_event_filter = 1;
         expect_refusal("event filter", &idx, &g, T(100), T(900), 8,
+                       PGWT_INTERVAL_INDEX_REFUSE_FILTERED);
+        g.event_id = 0;
+        expect_refusal("CPU filter", &idx, &g, T(100), T(900), 8,
                        PGWT_INTERVAL_INDEX_REFUSE_FILTERED);
         memset(&g, 0, sizeof(g)); snprintf(g.class_name, sizeof(g.class_name), "IO");
         expect_refusal("class filter", &idx, &g, T(100), T(900), 8,

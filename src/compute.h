@@ -172,7 +172,8 @@ pgwt_fidelity_unavailable(enum pgwt_required_fidelity req, enum pgwt_fidelity fi
 
 struct pgwt_filter {
     char     class_name[32];   /* "" = no filter */
-    uint32_t event_id;         /* 0 = no filter */
+    uint32_t event_id;         /* 0 = CPU; meaningful when has_event_filter */
+    int      has_event_filter; /* explicit event filter, including CPU */
     uint32_t pid;              /* 0 = no filter */
     uint64_t query_id;         /* 0 = no filter */
 };
@@ -345,8 +346,8 @@ struct pgwt_session_row {
 struct pgwt_sessions_result {
     struct pgwt_session_row *rows;   /* malloc'd, caller frees */
     int num_rows;
-    /* #327: the per-pid table is unbounded now, so the only early exit is a
-     * real allocation failure. When it happens the caller MUST report an
+    /* Unsupported summary filters poison num_rows to -1. Allocation
+     * failures also set failed. The caller MUST report an
      * error — a session list that is short but looks complete is the defect
      * this field exists to prevent. Set by both the raw and the summary
      * path. */

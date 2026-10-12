@@ -1497,7 +1497,7 @@ static void section8_bypass(void)
         w.version = PGWT_BLOCK_AGG_VERSION;
         pgwt_block_agg_free(&w);
         pgwt_block_agg_free(&src);
-        seen.refusals_observed += 4;
+        seen.refusals_observed += 5;
     }
 
     /* B7 ROTATION: blocks from two different trace files. Their keys differ,
@@ -1681,8 +1681,10 @@ static void section8_bypass(void)
         CHECK(pgwt_block_agg_filter_supported(&f) == 1, "B11 empty filter");
         memset(&f, 0, sizeof(f)); f.pid = 42;
         CHECK(pgwt_block_agg_filter_supported(&f) == 0, "B11 pid filter");
-        memset(&f, 0, sizeof(f)); f.event_id = 7;
+        memset(&f, 0, sizeof(f)); f.event_id = 7; f.has_event_filter = 1;
         CHECK(pgwt_block_agg_filter_supported(&f) == 0, "B11 event filter");
+        f.event_id = 0;
+        CHECK(pgwt_block_agg_filter_supported(&f) == 0, "B11 explicit CPU filter");
         memset(&f, 0, sizeof(f)); f.query_id = 99;
         CHECK(pgwt_block_agg_filter_supported(&f) == 0, "B11 query filter");
         memset(&f, 0, sizeof(f)); snprintf(f.class_name, sizeof(f.class_name),

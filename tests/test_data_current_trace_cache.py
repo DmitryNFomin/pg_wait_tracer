@@ -825,6 +825,38 @@ def section_growth(tr):
         cleanup_traces(trace_dir)
 
 
+def section_watermark_shrink(tr):
+    """#342: a smaller committed prefix survives this request's compaction."""
+    print("\n### 3a. first request after a committed-watermark shrink ###")
+    trace_dir = generate_traces(busy_scenario(span_s=12, pids=3, per_pid=2500))
+    try:
+        full = read_meta(trace_dir)
+        half = full // 2
+        tr.check(0 < half < full, "shrink fixture retains whole committed blocks")
+        w_from, w_to = fixture_window(span_s=12)
+        write_meta(trace_dir, half)
+        with ServerHarness(trace_dir, env={"PGWT_CURRENT_TRACE_CACHE": "0"}) as fresh:
+            expected = fresh.query(PROBE_CMD, from_=w_from, to_=w_to)
+        tr.check(count_of(expected, PROBE_COUNT) > 0,
+                 "fresh half-watermark control contains data")
+        for cache in ("0", "1"):
+            write_meta(trace_dir, full)
+            with ServerHarness(trace_dir, env={"PGWT_CURRENT_TRACE_CACHE": cache}) as srv:
+                before = srv.query(PROBE_CMD, from_=w_from, to_=w_to)
+                tr.check(count_of(before, PROBE_COUNT) > count_of(expected, PROBE_COUNT),
+                         f"cache={cache}: full watermark contains more data")
+                write_meta(trace_dir, half)
+                after = srv.query(PROBE_CMD, from_=w_from, to_=w_to)
+                tr.check("error" not in after,
+                         f"cache={cache}: FIRST post-shrink request is not refused: {after.get('error')}")
+                tr.check(count_of(after, PROBE_COUNT) > 0,
+                         f"cache={cache}: FIRST post-shrink request contains data")
+                tr.check(canonical_body(after) == canonical_body(expected),
+                         f"cache={cache}: first response equals fresh prefix bit for bit")
+    finally:
+        cleanup_traces(trace_dir)
+
+
 # ── 3b. A window that jumps PAST the cached run ─────────────────────────────
 
 def section_forward_gap(tr):
@@ -1155,24 +1187,7 @@ def bypass_truncated_file_under_meta(tr):
             pre = read_curcache(err)
             with open(path, "r+b") as f:
                 f.truncate(cut)
-            # One unrelated request between the cut and the measurement, for
-            # ORDERING, not as a retry: cov_scan_file() sees the smaller block
-            # count, cov_reset()s the entry, and the entry is then dropped
-            # from the coverage array for the REST of that same request (it is
-            # rebuilt on the next one). A measurement taken on the
-            # dropped-entry request reads empty whatever the cache holds --
-            # the same blindness the byte-count cut had. The measured request
-            # below is still ONE request, and a retained suffix in it still
-            # fails.
-            #
-            # That blind request is issue #342 (an absence reported as zero),
-            # and this test does NOT lean on it: with this line deleted the
-            # measurement comes back empty and the assertion goes RED
-            # (measured, tests/results/issue334/sabotage.log case S7). So
-            # fixing #342 cannot satisfy this test by accident -- it would
-            # BREAK it, and the repair is then to delete this line and this
-            # comment, nothing else.
-            srv.query("info")
+            # #342: measure the FIRST request after the shrink.
             after = srv.query(PROBE_CMD, from_=w_from, to_=w_to)
             post = read_curcache(err)
         print("    blocks %d -> %d (%d -> %d bytes); events %d -> %s"
@@ -1627,6 +1642,7 @@ if __name__ == "__main__":
         section_self_consistency(t)
         section_repeat(t)
         section_growth(t)
+        section_watermark_shrink(t)
         section_forward_gap(t)
         section_restart(t)
         section_bypass(t)
