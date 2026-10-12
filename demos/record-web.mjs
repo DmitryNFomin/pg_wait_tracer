@@ -14,7 +14,7 @@
 
 import { chromium } from 'playwright';
 import { spawnSync } from 'node:child_process';
-import { mkdirSync, rmSync, readdirSync } from 'node:fs';
+import { mkdirSync, rmSync, readdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -33,50 +33,99 @@ const context = await browser.newContext({
     recordVideo: { dir: VIDEO_DIR, size: { width: 1500, height: 810 } },
 });
 const page = await context.newPage();
-
-console.log(`==> Loading ${URL}`);
-await page.goto(URL);
-await page.waitForSelector('.echarts-for-react, canvas, #aas-chart, [class*="aas"]', { timeout: 10000 }).catch(() => {});
-await page.waitForTimeout(2500);  // chart render
-
-console.log('==> Drag-zoom into the workload burst');
-// ECharts brush-zoom on the AAS chart. The chart sits roughly y=70..360.
-// Burst is centered around the middle on a 15-minute view.
-await page.mouse.move(580, 250);
-await page.mouse.down();
-await page.mouse.move(770, 250, { steps: 12 });
-await page.mouse.up();
-await page.waitForTimeout(1500);
-
-const tabs = ['Events', 'Sessions', 'Queries', 'Transitions'];
-for (const tab of tabs) {
-    console.log(`==> Click tab: ${tab}`);
-    await page.getByRole('tab', { name: tab }).or(page.getByText(tab, { exact: true })).first().click();
-    await page.waitForTimeout(1500);
-    if (tab === 'Transitions') {
-        // Drag simplify slider from ~20% down to ~0% to reveal full graph
-        await page.waitForTimeout(500);
-        const slider = await page.$('input[type="range"]');
-        if (slider) {
-            const box = await slider.boundingBox();
-            if (box) {
-                await page.mouse.move(box.x + box.width * 0.2, box.y + box.height / 2);
-                await page.mouse.down();
-                await page.mouse.move(box.x + 4, box.y + box.height / 2, { steps: 8 });
-                await page.mouse.up();
-                await page.waitForTimeout(1200);
-                // Scroll slightly to bring graph into view
-                await page.mouse.wheel(0, 200);
-                await page.waitForTimeout(1200);
-            }
-        }
+page.setDefaultTimeout(30000);
+const errors = [];
+page.on('pageerror', error => errors.push(error.message));
+const evidence = [];
+async function mountSeq() {
+    return page.evaluate(() => window.__pgwt?.viewMount()?.seq || 0);
+}
+async function waitMount(tab, after = 0) {
+    await page.waitForFunction(({ tab, after }) => {
+        const mount = window.__pgwt?.viewMount();
+        return mount?.id === tab && mount.seq > after;
+    }, { tab, after });
+    await page.locator('#status.connected').waitFor();
+    if (await page.locator('.pane-error, #version-skew:visible, #degraded-overlay:visible').count()) {
+        throw new Error('UI reports a pane error, version skew, or degraded connection');
     }
 }
+async function snapshot(name) {
+    await page.screenshot({ path: join(VIDEO_DIR, `${name}.png`) });
+    const state = await page.evaluate(() => ({
+        tab: window.__pgwt.activeTab,
+        from: window.__pgwt.timeRange.from,
+        to: window.__pgwt.timeRange.to,
+        rows: document.querySelectorAll('#table-container tbody tr').length,
+        status: document.querySelector('#status').textContent,
+        slider: document.querySelector('#dfg-slider')?.value,
+    }));
+    evidence.push({ name, ...state });
+    console.log(`==> Verified ${name}: ${JSON.stringify(state)}`);
+}
+try {
+    console.log(`==> Loading ${URL}`);
+    await page.goto(URL);
+    await waitMount('overview');
 
-await page.waitForTimeout(1000);
-console.log('==> Closing browser ...');
-await context.close();
-await browser.close();
+    // Fit the actual offline capture before brushing. A fixed middle-of-screen
+    // drag on the default 15-minute range used to select an empty window.
+    let seq = await mountSeq();
+    await page.locator('#time-range').click();
+    await page.locator('#time-picker button[data-range="0"]').click();
+    await waitMount('overview', seq);
+    await page.locator('#aas-chart-container canvas').first().waitFor();
+    await page.waitForTimeout(1500);
+    await snapshot('overview');
+
+    console.log('==> Drag-zoom into the workload burst');
+    const before = await page.evaluate(() => window.__pgwt.timeRange.to - window.__pgwt.timeRange.from);
+    seq = await mountSeq();
+    const plot = page.locator('#aas-chart-container .u-over');
+    const box = await (await plot.count() ? plot : page.locator('#aas-chart-container')).boundingBox();
+    if (!box) throw new Error('AAS plot has no visible bounds');
+    const y = box.y + box.height * 0.5;
+    await page.mouse.move(box.x + box.width * 0.25, y);
+    await page.mouse.down();
+    await page.mouse.move(box.x + box.width * 0.75, y, { steps: 12 });
+    await page.mouse.up();
+    await waitMount('overview', seq);
+    const after = await page.evaluate(() => window.__pgwt.timeRange.to - window.__pgwt.timeRange.from);
+    if (!(after > 0 && after < before * 0.8)) throw new Error('Drag did not zoom the trace window');
+    await page.waitForTimeout(1500);
+    await snapshot('zoom');
+
+    for (const tab of ['events', 'sessions', 'queries', 'transitions']) {
+        console.log(`==> Click tab: ${tab}`);
+        seq = await mountSeq();
+        await page.locator(`#tabs button[data-tab="${tab}"]`).click();
+        await waitMount(tab, seq);
+        if (tab !== 'transitions') {
+            await page.locator('#table-container tbody tr').first().waitFor();
+        } else {
+            await page.locator('#dfg-container canvas').waitFor();
+            const slider = page.locator('#dfg-slider');
+            await slider.focus();
+            await slider.press('Home');
+            await page.waitForFunction(() => document.querySelector('#dfg-slider')?.value === '0');
+        }
+        await page.waitForTimeout(1500);
+        await snapshot(tab);
+    }
+    // Keep the full graph visible as the final shot.
+    await page.mouse.wheel(0, 200);
+    await page.waitForTimeout(1500);
+    await snapshot('transitions-full');
+    if (errors.length) throw new Error(`Browser errors: ${errors.join('; ')}`);
+    writeFileSync(join(VIDEO_DIR, 'evidence.json'), JSON.stringify(evidence, null, 2));
+} catch (error) {
+    await page.screenshot({ path: join(VIDEO_DIR, 'failure.png') }).catch(() => {});
+    throw error;
+} finally {
+    console.log('==> Closing browser ...');
+    await context.close();
+    await browser.close();
+}
 
 // Find the video file (Playwright names it with a hash)
 const files = readdirSync(VIDEO_DIR).filter(f => f.endsWith('.webm'));
@@ -90,13 +139,16 @@ console.log(`==> Converting ${video} -> ${OUTPUT}`);
 // Two-pass palette for compact, high-quality gif
 const PALETTE = join(VIDEO_DIR, 'palette.png');
 const fps = process.env.GIF_FPS || '8';
+// Lossy WebM noise changes otherwise static pixels every frame and bloats
+// GIF deltas. Denoise it before quantization, at a README-friendly width.
+const filter = `fps=${fps},scale=1200:-1:flags=lanczos,hqdn3d=4:4:6:6`;
 const r1 = spawnSync('ffmpeg', ['-y', '-i', video, '-vf',
-    `fps=${fps},scale=1500:-1:flags=lanczos,palettegen=stats_mode=diff`,
-    PALETTE], { stdio: 'inherit' });
+    `${filter},palettegen=stats_mode=full`,
+    '-frames:v', '1', '-update', '1', PALETTE], { stdio: 'inherit' });
 if (r1.status !== 0) process.exit(r1.status || 1);
 
 const r2 = spawnSync('ffmpeg', ['-y', '-i', video, '-i', PALETTE, '-lavfi',
-    `fps=${fps},scale=1500:-1:flags=lanczos [x]; [x][1:v] paletteuse=dither=bayer:bayer_scale=4`,
+    `${filter} [x]; [x][1:v] paletteuse=dither=bayer:bayer_scale=4:diff_mode=rectangle`,
     OUTPUT], { stdio: 'inherit' });
 if (r2.status !== 0) process.exit(r2.status || 1);
 

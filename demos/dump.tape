@@ -1,29 +1,27 @@
 Output demos/dump.gif
 Set FontSize 14
 Set Width 1200
-Set Height 780
+Set Height 900
 Set Theme "Dracula"
-Set Shell "zsh"
+Set Shell "bash"
 Set TypingSpeed 25ms
 
 Hide
-Type "cd /tmp/pgwt-demo && setopt interactive_comments && export PATH=/Users/nik/github/pg_wait_tracer:$PATH"
-Enter
-Type "clear"
+Type "export PS1='$ ' && clear"
 Enter
 Show
 
 Type "# pg_wait_tracer — offline replay of a 60s pgbench trace"
 Enter
 Sleep 1500ms
-Type "# 7M wait-event transitions, captured via eBPF hardware watchpoint"
+Type "# Mixed waits: pgbench, table locks, and heavy reads"
 Enter
 Sleep 1500ms
-Type "ls traces/"
+Type `ls "$TRACE_DIR"`
 Enter
 Sleep 2500ms
 
-Type "pgwt-server --dump traces 2>/dev/null | head -60"
+Type `./pgwt-server --dump "$TRACE_DIR" 2>/dev/null | head -35`
 Enter
 Sleep 10s
 
@@ -34,6 +32,6 @@ Sleep 300ms
 Type "# Top sessions + top queries (by query_id)"
 Enter
 Sleep 1200ms
-Type "pgwt-server --dump traces 2>/dev/null | tail -40"
+Type `./pgwt-server --dump "$TRACE_DIR" 2>/dev/null | sed -n '/=== Top Sessions ===/,$p'`
 Enter
 Sleep 10s
