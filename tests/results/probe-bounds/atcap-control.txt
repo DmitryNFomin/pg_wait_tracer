@@ -1,0 +1,8 @@
+=== #327 CONTROL: parent compute.c, fixtures at EXACTLY cap (not cap+1) ===
+parent src: <origin-master-d84619e>/src
+  sessions           exit=0    RETURNED (expected): RETURNED num_rows=1024
+  sessions_summary   exit=0    RETURNED (expected): RETURNED num_rows=1024
+  queries            exit=0    RETURNED (expected): RETURNED num_rows=2048
+  queries_summary    exit=0    RETURNED (expected): RETURNED num_rows=2048
+  fingerprints       exit=0    RETURNED (expected): RETURNED num_rows=2048
+  variants           exit=0    RETURNED (expected): RETURNED num_variants=4096 total_executions=4096

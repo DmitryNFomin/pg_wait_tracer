@@ -1,0 +1,19 @@
++ cd /root/parent-harness/tests
++ python3 -c 
+import sys; sys.path.insert(0,'.')
+import test_data_current_trace_cache as m
+r = m.TestRunner('PARENT harness (no EPIPE branch) + the new bypass case')
+m.bypass_refusal_reason_survives_epipe(r)
+raise SystemExit(0 if r.summary() else 1)
+
+    stub names its reason -> BrokenPipeError: [Errno 32] Broken pipe
+  PASS: a stub that exits before reading stdin still raises (names its reason)
+  FAIL: and it is the EPIPE branch that answered (names its reason): 'BrokenPipeError: [Errno 32] Broken pipe'
+  FAIL: and the reason survives EPIPE: 'BrokenPipeError: [Errno 32] Broken pipe'
+    stub exits silently -> BrokenPipeError: [Errno 32] Broken pipe
+  PASS: a stub that exits before reading stdin still raises (exits silently)
+  FAIL: and it is the EPIPE branch that answered (exits silently): 'BrokenPipeError: [Errno 32] Broken pipe'
+  PASS: and a server that wrote NO reason yields none -- the retrieval cannot invent one: 'BrokenPipeError: [Errno 32] Broken pipe'
+
+3/6 tests passed
+parent-harness rc=1

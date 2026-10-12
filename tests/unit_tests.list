@@ -60,6 +60,25 @@ test_variants_p95
 # (assertion shapes and fixtures blind to the bug, pid 0, dense pid runs, and
 # allocation failures that must come back ABSENT rather than short).
 test_pid_cap
+# #327: six open-addressing tables in compute.c paired a FIXED power-of-two
+# array with a probe loop that had no fullness test, so the (size+1)-th
+# distinct key spun forever -- pgwt-server is single-threaded, so that hangs
+# every tab at once rather than returning a wrong number. The two summary
+# sites are the dangerous pair: SUMMARY_MAX_SESSIONS/QUERIES bound ONE
+# per-second record, not the window, and the summary paths never reach
+# reject_overload, so the 900 s UI default had nothing bounding it. All six
+# now grow (src/qid_index.h, src/pid_index.h) and refuse the whole result on
+# a real allocation failure. Also #347's shape: an accumulator used as the
+# occupancy test let a zero-duration record's slot be re-keyed and its
+# transitions inherited by the next key (measured: 1 + 2 transitions
+# reported as one row of 3). Pre-fix each section does not fail, it SPINS --
+# the red evidence is non-termination under a timeout
+# (tests/results/probe-bounds/redgreen-327.txt). Carries the bypass suite:
+# cap-sized and identical-duration fixtures that are green while broken, a
+# summary stub that delivers nothing or only part of the range, key 0, dense
+# key runs, and allocation failures at every new growth point that must come
+# back ABSENT rather than short.
+test_probe_bounds
 # #276: pgwt_compute_concurrency kept candidate intervals in a fixed
 # 100,000-entry array filled in ARRIVAL order, so the UI's default 900 s
 # window drew its first ~60 s and reported the other 825 s as max: 0 -- 8% of
@@ -260,3 +279,46 @@ test_cross_validate_idle.sh
 #   not in this list because it recompiles the module 17 times (~16 s) and
 #   is evidence, not a gate.
 test_exec_index
+
+# test_interval_index: the CONCURRENCY INTERVAL INDEX (paint-latency plan,
+#   Phase 4, src/interval_index.{c,h}). `concurrency` is the one detail view
+#   per-second summaries can never reconstruct: peak is max over
+#   (bucket, event) of |distinct pids|, and SETS UNION, THEY DO NOT ADD, so a
+#   per-block "peak per bucket" is unmergeable. The index therefore stores the
+#   wait INTERVALS themselves -- each one ONCE, in the block holding its END
+#   record, with its true start_ns UNCLIPPED -- and answers a window by
+#   calling the SHIPPING pgwt_compute_concurrency over the compacted set.
+#   This test is a differential against that same function over the full raw
+#   record array (what src/server.c handle_concurrency does), over EVERY block
+#   cut of every fixture x six windows x two bucket resolutions, asserting
+#   peak_sessions[], peak_event[], bursts_total, num_bursts and every burst's
+#   timestamp/event/name/session count/pid list bit-exactly. Comparing peaks
+#   alone is refused: two of the three silent-wrong modes are invisible in
+#   peaks.
+#   The three modes, each with its own literal expectation: a CLIPPED start_ns
+#   (lower peaks in earlier buckets, onsets shifted later, bursts vanish); an
+#   interval counted TWICE (peaks survive via pid dedup, but one pid
+#   double-counts toward the burst threshold); and silently "fixing" the raw
+#   path's exclusion of waits still open at `to`.
+#   Bypass suite, because this index's failure mode is answering "no
+#   concurrency" when it simply cannot see: a FILTERED request (version 1
+#   indexes the unfiltered set), an empty index, an unsealed one, an unknown
+#   version, a skipped or reordered block, an out-of-order record, a record
+#   outside its block's bounds, inverted block bounds, a hand-corrupted row
+#   order, a window not fully covered, an inverted window, num_buckets <= 0, a
+#   window selecting NOTHING, and every injected allocation failure must each
+#   REFUSE with their own reason and no result.
+#   Non-vacuity ledger: counters for cross-block intervals, intervals starting
+#   before coverage, same pid selected from two blocks inside one bucket,
+#   intervals excluded for ending past `to`, bursts whose members live in two
+#   or more blocks, and bursts_total each FAIL the test when zero.
+#   `./test_interval_index oneblock` feeds every fixture as a SINGLE block and
+#   MUST exit nonzero -- the ledger's own falsification. It is not a separate
+#   list entry because it is a deliberate failure, not a gate.
+#   Companion: tests/interval_index_mutations.py injects all 27 silent-wrong
+#   risks one at a time and requires this test to catch each (27/27), scoring
+#   BUILD-FAILED, NOT-APPLIED, TOOL-MISSING, BASELINE-RED and STAYED-GREEN as
+#   five distinct FAILURES; `--self-test` drives all five deliberately. Not in
+#   this list because it recompiles the module 28 times (~40 s) and is
+#   evidence, not a gate.
+test_interval_index
