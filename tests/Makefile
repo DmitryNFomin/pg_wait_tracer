@@ -31,6 +31,7 @@ TESTS     = test_wait_event test_cmdline test_spawn test_event_writer test_event
             test_agg_raw_crosscheck \
             test_exec_index \
             test_interval_index \
+            test_alloc_tune \
             gen_test_traces gen_bench_traces test_concurrent_rw cross_validate \
             dump_markers wait_cpu_canary test_wait_cpu_canary \
             test_summary_tick_flush \
@@ -397,6 +398,19 @@ dump_markers: dump_markers.c $(BUILD)/server_event_reader.o \
               $(BUILD)/server_event_writer.o $(BUILD)/server_wait_event.o $(BUILD)/server_idle_rule.o \
               $(BUILD)/server_spawn.o $(BUILD)/server_cJSON.o
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -llz4 -lz
+
+# test_alloc_tune: src/alloc_tune.h. Header-only, so this links nothing else.
+# The subject is an allocator property (a ~274 MB block served from the brk
+# heap, not returned on free, and re-touched without page faults), measured
+# against the same sequence run untuned in the same process -- the control is
+# what lets the test fail. Pre-tuned MALLOC_* in the environment, an
+# allocation too small to be mmap'd, or an unreadable sbrk() each REFUSE.
+# ../src/alloc_tune.h is an explicit prerequisite: this Makefile has no
+# auto-generated header dependencies, and a stale binary here would keep
+# reporting the previous tuning after the header changed -- a gate testing
+# code that is no longer in the tree.
+test_alloc_tune: test_alloc_tune.c ../src/alloc_tune.h
+	$(CC) $(CFLAGS) -o $@ $<
 
 # test_summary_tick_flush: #277 — the daemon tick flushed the IN-PROGRESS
 # second and left the accumulator's counters in place, so the rest of that
