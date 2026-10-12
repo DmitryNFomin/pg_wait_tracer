@@ -126,15 +126,105 @@ duration totals, plus the block's trace identity and time bounds.
 
 ### Phase 2 — block-level per-event and per-class totals
 Extends the block aggregate with per-event counts/durations and per-class totals,
-so `heatmap` and filtered `top_events` stop forcing raw.
+so filtered `top_events` stops forcing raw.
 - Prediction: removes the raw load for class/event-filtered requests.
 - Depends on Phase 1's format and merge machinery. Not parallel with it.
+- **Corrected 2026-10-09 — does NOT serve `heatmap` (Histogram), at any
+  wiring step.** Verified: `pgwt_compute_heatmap` (`src/compute.c:1824-1890`)
+  buckets each admitted event into a **(time bucket x latency bucket)** grid.
+  Phase 2's per-event table is one window-wide `hist[]` per event with no time
+  dimension, so no merge depth recovers "which time bucket". The latency axis
+  alone cannot be reused either: the heatmap's admission keeps `IO_WORKER`
+  (no `PGWT_EVENT_FLAG_IO_WORKER` check at `compute.c:1860`, unlike the
+  functions that drop it), while Phase 2's event/class admission rule drops
+  it; and the heatmap selects by timestamp half-open at `to`
+  (`ev_ts >= to_ns` excluded, `compute.c:1868`) while Phase 2 selection is
+  inclusive at both ends (rule 4 above). Three mismatched predicates, not one
+  extension — this needs its own structure. **No phase in this document
+  serves `heatmap` — but that does not mean Histogram is slow.** "No index
+  serves this tab" and "this tab is over budget" are different claims; a tab
+  only needs an index if it is actually over budget, and a direct measurement
+  (Phase 2b) shows this one is not, by a wide margin. See Phase 2b.
+
+### Phase 2b — time-bucketed latency grid [NOT NEEDED for the paint budget]
+Serving `heatmap` would need a separate mergeable structure: a per-block grid
+keyed by (time bucket, latency bucket), with its own half-open-at-`to`
+selection and its own admission predicate (keeping `IO_WORKER`, matching the
+heatmap's existing filter, rather than Phase 2's class/event rule). This would
+be a distinct phase, not an extension of Phase 2's per-event/per-class
+totals — that part of the analysis stands.
+
+**Corrected 2026-10-09 — measured, not scheduled because it is not needed.**
+Direct server-side timing of `pgwt_compute_heatmap` (the raw path, confirmed
+via `from_summaries=0`, not the indexed summaries fast path) against the
+~30.85 min demo-rehearsal trace (span 1,851.0 s, 4,308,992 raw wait-event
+samples), n=10 per window (5 reps x 2 independent process restarts):
+
+| window (s) | median ms |
+|---|---|
+| 60   | 10.57  |
+| 120  | 22.74  |
+| 300  | 52.81  |
+| 600  | 106.12 |
+| 900  | 164.65 |
+| 1800 | 316.82 |
+
+Every tested window, including 1800 s (essentially the whole trace), is
+comfortably under the 3,000 ms budget. At the UI's 900 s boot default,
+median is 164.65 ms — roughly 18x of headroom. No breakpoint was found at
+any window, and no hang occurred (the #327 probe-hang concern did not
+reproduce here). Full method, raw JSON and logs:
+`tests/results/histogram-window-budget/` (worktree `agent-ac8eaefc6668508c4`).
+
+Caveats, carried verbatim because they bound what this measurement can
+claim:
+- **Server request latency only, not end-to-end browser paint.** JSON parse,
+  compute, serialize and the pipe round-trip — not fetch, ECharts render or
+  DOM layout. The real in-budget window is at most what's shown above, and
+  is probably smaller once the browser side is counted.
+- **Measured on this Mac, not the Linux gate box** — different silicon, I/O
+  path and load, so treat this as shape-of-curve and order-of-magnitude, not
+  as gate evidence. The ~18x margin at the 900 s default is what makes the
+  conclusion robust to that difference.
+- **This trace's density (~2,328 events/s) may be lower than a busier demo
+  trace.** A denser trace costs more per window; these numbers do not
+  transfer to a different, denser trace unchanged.
+- The ~17,000 s (~4.7 h) figure a naive linear extrapolation from the 1800 s
+  point would suggest is **extrapolation beyond the measured range, not a
+  finding** — raw per-event compute need not stay linear past the tested
+  range (hash-probe behavior, issue #327). It is cited here only to flag that
+  it is not evidence of anything.
+
+So this phase is **not scheduled because the tab it would serve is not
+failing the budget** — naming the gap only records that no phase closes it,
+not that Histogram needs closing.
 
 ### Phase 3 — executions index
 Append-only execution rows (plan/exec marker boundaries) with open-execution
 carry-over across blocks.
-- Speeds up: `executions`, `exec_scatter`, `variants`, `waterfall`.
-- Prediction: O(events) -> O(executions in window).
+- Speeds up (row set): `executions`, `exec_scatter`, `variants`, `waterfall`.
+- Prediction: the ROW SET is O(events) -> O(executions in window). **Corrected
+  2026-10-09 — this does not make the whole command O(executions).**
+  `executions` computes a per-row `n_events` by definition (accrued per wait
+  event while a row is the attributable top of its pid's open-execution stack,
+  `src/compute.c:4061`), so its Leader-events/Workers columns stay
+  O(window events) regardless of how the row boundaries are found; no
+  boundary index changes that. What IS fully index-serveable is
+  `exec_scatter`, because its output — `t`, `duration_ms`, `pid`, `query_id`,
+  `in_progress` (`src/server.c:4859-4867`) — carries none of that per-row
+  event-carry state.
+- **Corrected 2026-10-09 — Phase 3's SERVE path is CANCELLED, not deferred.**
+  A seeded-prefix replay cannot be bit-exact: `pgwt_compute_executions` carries
+  a fourth cross-edge quantity beyond the three originally identified,
+  `top_attributable` (set at `src/compute.c:3796`, cleared at `:3806`) — a pop
+  clears it even when another row remains on the pid's open stack, so seeding
+  only the open rows at a boundary can credit a window's waits to whichever
+  execution replay leaves on top, which is not always what a full raw replay
+  from trace start credits. Phase 3 lands as **correctness guards only**
+  (cross-check coverage for the executions path), not as a serving fast path.
+  The wiring described for `executions`/`exec_scatter`/`waterfall`/`variants`
+  elsewhere in this document's "minimum shippable" section predates this
+  correction and is not reconciled here.
 - Largest phase; needs its own format decision. Independent of Phase 2.
 
 ### Phase 4 — concurrency interval index
@@ -152,9 +242,11 @@ where its record lives (its END — `concurrency` already qualifies by
 starting in block N and ending in N+1 then sits in N+1's list and overlaps N's
 buckets exactly as the raw path does today.
 
-**Honest size of the win:** this is a *compaction* — 16-byte waits-only records
-instead of 48-byte everything, and no filter pass — so roughly **3-6x**, NOT the
-O(blocks) jump Phases 1 and 2 get. Do not claim otherwise.
+**Honest size of the win:** this is a *compaction* — waits-only records instead
+of 48-byte everything, and no filter pass — NOT the O(blocks) jump Phases 1 and
+2 get. **Corrected 2026-10-09** — this previously estimated 16-byte records at
+roughly 3-6x; measured, rows are **24 bytes**, giving **6.0x** compaction. Do
+not claim otherwise.
 
 **Three silent-wrong modes, all of which under-report rather than error:**
 1. **Clipping `start_ns`** to the block start -> lower peaks in earlier buckets
@@ -220,26 +312,30 @@ request may still fall back to raw); it never flexes by dropping a tab. An earli
 draft of this section deferred `variants` and `exec_scatter` to "after"; that is
 withdrawn, because it meant two tabs staying slow.
 
-All eleven tabs must be inside the paint budget. The six currently over it are
-served by:
+All eleven tabs must be inside the paint budget. **Corrected 2026-10-09 —
+Histogram (`heatmap`) already is, measured, without any phase serving it**
+(see Phase 2b's measurement); no index is scheduled for it because none is
+needed. The genuinely over-budget tabs are served by:
 
 | phase | tabs it must bring inside budget |
 |---|---|
 | Phase 1 | `transitions`, `matrix` |
-| Phase 2 | `heatmap` (Histogram), filtered `top_events` (Events) |
-| Phase 3 | `waterfall`, `executions`, `exec_scatter` (see 3b for `variants`) |
+| Phase 2 | filtered `top_events` (Events) |
+| Phase 3 | `exec_scatter` (row set only; see 3b for `variants`) |
 | Phase 3b | `variants` — needs a per-execution STEP-SEQUENCE index, not boundaries |
 | Phase 4 | `concurrency` |
+| — | `waterfall`, `executions` — no phase currently serves these (Phase 3's cancellation note); unlike `heatmap`, these are not independently confirmed in-budget, so they stay listed as over-budget until measured or served |
 
 What may still flex, per phase, without leaving a tab behind:
 
 - **Phase 1:** unfiltered `transitions` merges block aggregates; class/event-
   filtered requests may fall back to raw in the first cut. Both tabs are served.
-- **Phase 2:** per-event totals before per-class totals. Histogram served either
-  way.
-- **Phase 3:** completed executions are indexed; an execution open at a window
-  edge may fall back to raw rather than be guessed. `waterfall`, `executions` and
-  `exec_scatter` served.
+- **Phase 2:** per-event totals before per-class totals; filtered `top_events`
+  served either way. Does not touch Histogram — see this phase's
+  2026-10-09 correction above.
+- **Phase 3:** row set only, and only for `exec_scatter` — see this phase's
+  2026-10-09 cancellation note above. `waterfall` and `executions` are not
+  served by it.
 - **Phase 3b:** `variants`. **Correction made 2026-10-09 by the Phase 3
   implementer, and it is a correction to this plan, not a shortfall in the work:**
   a boundary index cannot serve `variants`. `handle_variants` builds flow patterns
