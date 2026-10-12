@@ -43,6 +43,13 @@ test_executions_attribution
 # of the deleted sort, plus the (int)(a-b) comparator trap and a mutation
 # probe proving the differential can go red.
 test_top_queries_percentile
+# The loader's order restoration (src/event_sort.h): a fixed-width bottom-up
+# mergesort that copied all n records ceil(log2 n) times became an in-place
+# natural chain merge over the array's own runs. 29.88% of warm backend self
+# time, 1779-1955 ms per request on a real 5.7M-event window, now 36 ms. The
+# safety argument is bit-identical output, so the test is a differential
+# against a verbatim copy of the deleted sort plus a mutation probe.
+test_event_sort
 # #271 (correctness) + #269 (cost), the same four lines of
 # pgwt_compute_variants: the p95 was selected from exec_times slots that the
 # <= 10000 sampling guard never wrote (realloc does not zero), reported as a

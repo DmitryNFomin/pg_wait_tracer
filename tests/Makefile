@@ -23,6 +23,7 @@ TESTS     = test_wait_event test_cmdline test_spawn test_event_writer test_event
             test_golden_fixture test_live_accum test_window_clip \
             test_executions_attribution \
             test_top_queries_percentile \
+            test_event_sort \
             test_variants_p95 \
             test_pid_cap \
             test_probe_bounds \
@@ -127,6 +128,17 @@ test_executions_attribution: test_executions_attribution.c ../src/map_reader.c \
 # I/O, no clock — runs anywhere.
 test_top_queries_percentile: test_top_queries_percentile.c ../src/percentile.h
 	$(CC) $(CFLAGS) -o $@ test_top_queries_percentile.c
+
+# test_event_sort: the loader's order restoration (src/event_sort.h). The
+# fixed-width bottom-up mergesort was 29.88% of warm backend self time
+# (1779-1955 ms per request on a real 5.7M-event window); it is now an
+# in-place natural chain merge with an O(n log n) fallback. The whole safety
+# argument is that the output is BIT-IDENTICAL, so this is a differential
+# against a verbatim private copy of the deleted sort, plus an explicit tie
+# order, the fallback hand-off, and a false-negative suite with a five-way
+# mutation probe. Header-only subject, no link deps, no I/O, no clock.
+test_event_sort: test_event_sort.c ../src/event_sort.h ../src/pg_wait_tracer.h
+	$(CC) $(CFLAGS) -o $@ test_event_sort.c
 
 # test_variants_p95: #271 + #269 — pgwt_compute_variants sampled execution
 # times only while exec_count <= 10000 but read min(exec_count, cap) of a
