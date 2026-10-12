@@ -285,6 +285,15 @@ ssh_strict=""
 rsync_e="ssh"
 [[ -n "$ssh_strict" ]] && rsync_e="ssh $ssh_strict"
 
+# Record exactly what tree is about to be synced (the rsync two lines
+# below sends ./, the Mac-side working tree, as-is) -- recorded here,
+# immediately before that rsync, so nothing can change the tree in
+# between and make this drift from what was actually tested. Without
+# this a "box-check passed" log carries no commit id, so it can be true
+# of a tree that no longer exists (e.g. a branch rebased after its gate
+# run) and still look like evidence. A reviewer matches these two values
+# against the PR head and `scripts/tree-hash.sh` output.
+echo "box-check: commit=$(git rev-parse HEAD) tree-hash=$(scripts/tree-hash.sh)" | tee -a "$log"
 echo "box-check: target=$target OS=$OS PG=${PG:-all} EPHEMERAL=$EPHEMERAL -> $remote_dir (log: $log)" | tee -a "$log"
 ssh -o BatchMode=yes $ssh_strict "$target" \
     "mkdir -p '$remote_dir' && printf 'box-check: remote hostname=%s machine_id=%s\\n' \"\$(hostname -f 2>/dev/null || hostname)\" \"\$(cat /etc/machine-id 2>/dev/null || echo unavailable)\"" \
