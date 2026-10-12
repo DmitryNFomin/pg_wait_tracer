@@ -14,6 +14,11 @@ Scenario: 10 pids × 2,000 events = 20,000 events. Bound set to 5,000:
   - unfiltered query  → structured error (20,000 > 5,000);
   - pid-filtered query → succeeds (2,000 < 5,000) and its numbers are
     correct — proof the filter is applied DURING load, not after.
+
+Transitions must also refuse above the bound while the untagged block
+aggregate is unsafe (#357). With a sufficient bound, the tagged raw fallback
+must answer non-empty on both cold and warm requests, with zero aggregate
+provenance and identical links and nodes.
 """
 import os
 import sys
@@ -57,7 +62,7 @@ def main():
                                 # merged_blocks/decoded_blocks are opt-in
                                 # provenance (they must never change WHETHER
                                 # two answers compare equal), and the
-                                # `transitions` exemption below asserts on
+                                # `transitions` refusal below asserts on
                                 # them.
                                 "PGWT_TRANSITIONS_PROVENANCE": "1"}) as srv:
             # Unfiltered: 20k events > 5k bound → structured error.
@@ -88,43 +93,46 @@ def main():
                 t.check(resp.get("code") == "window_too_large",
                         f"{cmd}: structured error, not partial data")
 
-            # `transitions` is the ONE documented exception, and it is the
-            # point of the paint-latency block aggregate: it merges per-block
-            # (old_event, new_event) tables and never materialises the window,
-            # so the memory bound this test sets does not apply to it. It must
-            # ANSWER -- and the answer must be self-consistent, because above
-            # the bound there is no raw result left to compare against (the
-            # bit-exact comparison lives in tests/test_block_agg.c §6 and §9,
-            # at sizes the raw path can still compute).
-            # TWO requests, because the first cannot merge anything: a cold
-            # cache has no aggregates yet, so request 1 decodes every block
-            # and stores them (merged=0) and request 2 merges them. Asserting
-            # merged>0 on the FIRST request is simply wrong, and the gate said
-            # so (merged=0 decoded=5). What matters is that the cache delivers
-            # on the second look, and that both answers are IDENTICAL -- a
-            # cached aggregate that answered differently from a fresh decode
-            # would be the silent-wrong failure this whole phase is built
-            # against.
+            # #357: block aggregates see untagged CPU records and disagree
+            # with the tagged raw loader. Refuse rather than bypass its bound,
+            # on BOTH requests; a warm cache must not reopen the unsafe path.
+            for phase in ("cold", "warm"):
+                resp = srv.query("transitions")
+                t.check("error" in resp and
+                        resp.get("code") == "window_too_large",
+                        f"transitions: {phase} fast path refuses past the raw bound")
+                t.check_eq(resp.get("max_events"), 5_000,
+                           f"transitions: {phase} refusal carries the raw bound")
+                t.check("links" not in resp and "nodes" not in resp and
+                        "total" not in resp,
+                        f"transitions: {phase} refusal carries no partial graph")
+
+        # Same unfiltered exact-only window, now within an explicit raw bound.
+        # Do not add a filter to force fallback: this request must exercise
+        # the safety refusal even where the old aggregate path could serve.
+        with ServerHarness(trace_dir,
+                           env={"PGWT_LOAD_MAX_EVENTS": 25_000,
+                                "PGWT_TRANSITIONS_PROVENANCE": "1"}) as srv:
             first = srv.query("transitions")
             t.check("error" not in first,
-                    "transitions: answers past the raw bound (block aggregate)")
-            t.check(first.get("decoded_blocks", 0) > 0,
-                    "transitions: the cold request decoded blocks "
-                    "(merged=%s decoded=%s)" % (first.get("merged_blocks"),
-                                                first.get("decoded_blocks")))
+                    "transitions: cold raw fallback answers within the bound")
             resp = srv.query("transitions")
-            t.check("error" not in resp, "transitions: second request answers")
-            t.check(resp.get("merged_blocks", 0) > 0,
-                    "transitions: the warm request MERGED blocks, so the "
-                    "aggregate cache actually delivered (merged=%s "
-                    "decoded=%s)" % (resp.get("merged_blocks"),
-                                     resp.get("decoded_blocks")))
+            t.check("error" not in resp,
+                    "transitions: warm raw fallback answers within the bound")
+            for phase, answer in (("cold", first), ("warm", resp)):
+                # No default of zero: absent provenance is not proof of raw.
+                t.check_eq(answer.get("merged_blocks"), 0,
+                           f"transitions: {phase} fast path merged no blocks")
+                t.check_eq(answer.get("decoded_blocks"), 0,
+                           f"transitions: {phase} fast path decoded no blocks")
+                t.check_eq(answer.get("total"), NUM_PIDS * EVENTS_PER_PID,
+                           f"transitions: {phase} raw fallback counts the full fixture")
             t.check_eq(resp.get("total"), first.get("total"),
-                       "transitions: merged answer == freshly decoded answer "
+                       "transitions: warm raw answer == cold raw answer "
                        "(total)")
             t.check_eq(resp.get("total_link_count"),
                        first.get("total_link_count"),
-                       "transitions: merged answer == freshly decoded answer "
+                       "transitions: warm raw answer == cold raw answer "
                        "(distinct links)")
             # The two scalars above are NOT "identical answers": this fixture
             # has few enough distinct pairs that `total` and the link count can
@@ -132,10 +140,10 @@ def main():
             # Comparing the arrays costs nothing and is what the comment above
             # actually promises, so compare them.
             t.check_eq(resp.get("links"), first.get("links"),
-                       "transitions: merged answer == freshly decoded answer "
+                       "transitions: warm raw answer == cold raw answer "
                        "(every link, including duration_ms)")
             t.check_eq(resp.get("nodes"), first.get("nodes"),
-                       "transitions: merged answer == freshly decoded answer "
+                       "transitions: warm raw answer == cold raw answer "
                        "(every node, including total_ms and order)")
             # ...and the arrays must be non-empty, or the two check_eq calls
             # above are [] == [] and prove nothing. This fixture carries
@@ -155,7 +163,7 @@ def main():
                     % len(first.get("nodes") or []))
             links = resp.get("links", [])
             t.check(len(links) > 0 and resp.get("total", 0) > 0,
-                    "transitions: non-empty, so the exemption is not hiding "
+                    "transitions: non-empty, so the raw fallback is not hiding "
                     "an empty answer (total=%s links=%d)"
                     % (resp.get("total"), len(links)))
             t.check(resp.get("total_link_count", 0) >= len(links),
