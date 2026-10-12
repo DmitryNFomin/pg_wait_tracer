@@ -1,0 +1,15 @@
+Task start: 2026-10-12 09:28:39 UTC. Report deadline: 10:58:39 UTC (T+90m).
+Branch/source: agent/cx-live-validate, 75717896130e60f9518105577d5e4da01dc7c2ee.
+Initial checks at 09:28:49 UTC:
+  gate-1 root@2.28.45.47: load 1.10, 1.40, 2.51; lock occupied by paintcomb sweep and CI waiter.
+  gate-2 root@142.132.191.18: load 0.87, 1.60, 1.46; lock occupied by PG18 CI capture.
+Selected gate-2 for lower load and AMD EPYC Rome host. Queued with flock -w 2400 at approximately 09:30:39 UTC.
+An existing box-check waiter was ahead of this sweep; it acquired the lock approximately 09:36 UTC.
+No VM creation attempted. No other job signalled. Workload and build only start after lock acquisition.
+The existing pgbench and demo IO/partition fixtures are reused; no pgbench initialization or cluster reprovisioning.
+At 09:58:21 UTC both boxes checked again:
+  gate-1: load 1.15, 1.64, 1.82; earlier measurement finished; PG13 CI smoke lock holder already running 14 minutes; no other waiter visible.
+  gate-2: load 4.15, 9.28, 6.97; box-check still on test_multi_window with many live tests remaining.
+Moved the single queued sweep to gate-1 at approximately 09:59 UTC; cancelled only our identified gate-2 flock waiter PID 3586499 before it acquired the lock. Original dense static trace on gate-1 is /root/paint1_trace_r2. Rechecked required PG18 fixtures before capture.
+Gate-1 first lock acquired 09:58:58 UTC. The initial server hit a startup race: daemon socket was present but no trace file had a readable committed block yet. No timed command ran. The failed-startup daemon was identified and stopped; its short trace and measurement failure logs were retained on the box.
+Corrected readiness waits for nonempty current.trace before spawning the server. Corrected resume run acquired gate-1 lock 10:04:36 UTC and started all three workloads at ns 1791799477937285694. The 900s sweep requires committed end >= workload restart + 903s, so the entire measured 900s window contains the running rehearsed workload. This retry uses only the full 900s window; no 300s measurement was performed.

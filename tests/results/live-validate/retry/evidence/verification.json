@@ -1,0 +1,73 @@
+{
+  "verified": true,
+  "timed_calls": 168,
+  "cold_first_calls": 21,
+  "shared_process_sweeps": 3,
+  "window_s": 900,
+  "canaries": [
+    {
+      "phase": "live-900-pre",
+      "warm_ms": 27.1483675
+    },
+    {
+      "phase": "live-900-post",
+      "warm_ms": 22.725257
+    },
+    {
+      "phase": "frozen-900-pre",
+      "warm_ms": 24.1990295
+    },
+    {
+      "phase": "frozen-900-post",
+      "warm_ms": 28.538787499999998
+    },
+    {
+      "phase": "dense-900-pre",
+      "warm_ms": 26.105277
+    },
+    {
+      "phase": "dense-900-post",
+      "warm_ms": 22.379332499999997
+    }
+  ],
+  "live_warm_cache": {
+    "first": {
+      "lo": 68,
+      "blocks": 1231,
+      "events": 5042176,
+      "cap": 5242880,
+      "decoded": 2458,
+      "served": 1206,
+      "resets": 1
+    },
+    "last": {
+      "lo": 68,
+      "blocks": 1302,
+      "events": 5332992,
+      "cap": 6291456,
+      "decoded": 2529,
+      "served": 23401,
+      "resets": 1
+    },
+    "extra_decoded": 71,
+    "extra_cached_blocks": 71,
+    "extra_served": 22195,
+    "reset_counter_constant": 1
+  },
+  "health": [
+    {
+      "tag": "live-900",
+      "trace_events_written_total": 5304320,
+      "ringbuf_drops_total": 0,
+      "state_map_full_total": 0,
+      "seen_query_ids_full_total": 0
+    },
+    {
+      "tag": "final",
+      "trace_events_written_total": 8118272,
+      "ringbuf_drops_total": 0,
+      "state_map_full_total": 0,
+      "seen_query_ids_full_total": 0
+    }
+  ]
+}
