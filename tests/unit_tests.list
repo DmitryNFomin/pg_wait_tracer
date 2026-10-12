@@ -79,6 +79,9 @@ test_pid_cap
 # key runs, and allocation failures at every new growth point that must come
 # back ABSENT rather than short.
 test_probe_bounds
+# #359: interference returns exactly at 4096 pairs and past the old cap,
+# preserving every overlap; allocation failures refuse the whole result.
+test_interference_bounds
 # #276: pgwt_compute_concurrency kept candidate intervals in a fixed
 # 100,000-entry array filled in ARRIVAL order, so the UI's default 900 s
 # window drew its first ~60 s and reported the other 825 s as max: 0 -- 8% of
