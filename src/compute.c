@@ -2643,16 +2643,20 @@ struct ts_summary_ctx {
  *
  * So the real fix is upstream: handle_top_sessions forces the RAW path for a
  * class- or event-filtered request, the precedent handle_top_queries already
- * sets. The compute entry point refuses before visiting any records as a
- * fail-safe underneath it. Until that guard was added, the
+ * sets. This refusal is the fail-safe underneath it. Until it was added, the
  * visitor read f->pid ONLY and silently returned UNFILTERED session numbers
  * while the UI said one wait class was selected -- plausible, wrong, and
- * labelled "fidelity":"exact". A refusal sets failed and poisons num_rows;
- * an unsupported dimension must not masquerade as a successful zero.
+ * labelled "fidelity":"exact". Returning no rows is visibly empty instead,
+ * which is the house rule: a path that cannot see must refuse, never approve.
+ * (Same shape as aas_summary_visitor's `if (ctx->has_pid_filter) return 0;`.)
  */
 static int ts_summary_visitor(const struct pgwt_summary_accum *rec, void *arg)
 {
     struct ts_summary_ctx *ctx = arg;
+
+    if (ctx->f->class_name[0] != '\0' || ctx->f->has_event_filter ||
+        ctx->f->query_id != 0)
+        return 0;
 
     for (int s = 0; s < SUMMARY_MAX_SESSIONS; s++) {
         const struct pgwt_summary_session *ss = &rec->sessions[s];
@@ -2691,14 +2695,6 @@ void pgwt_compute_top_sessions_from_summaries(
 {
     (void)wall_ms;
     memset(out, 0, sizeof(*out));
-
-    /* This format cannot answer these dimensions. Refuse even if no
-     * summary records exist; a missing answer must never look like zero. */
-    if (f->class_name[0] != '\0' || f->has_event_filter || f->query_id != 0) {
-        out->num_rows = -1;
-        out->failed = 1;
-        return;
-    }
 
     struct ts_summary_ctx ctx = {
         .ht = NULL,

@@ -3750,8 +3750,8 @@ static void handle_top_sessions(struct pgwt_server *srv, struct pgwt_request *re
      * session numbers under a filtered label, marked "fidelity":"exact".
      * handle_top_queries (class_name / event_id) and handle_heatmap
      * (query_id) already force raw for filters they cannot serve; this is the
-     * same rule, stated once for all three filter kinds. The compute entry
-     * point refuses them too, as a fail-safe if this guard is ever edited away. */
+     * same rule, stated once for all three filter kinds. ts_summary_visitor
+     * refuses them too, as a fail-safe if this guard is ever edited away. */
     int sessions_filter_needs_raw = (req->filter.query_id != 0 ||
                                      req->filter.class_name[0] != '\0' ||
                                      req->filter.has_event_filter);

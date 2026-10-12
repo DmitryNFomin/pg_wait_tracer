@@ -2370,23 +2370,23 @@ static void div318_session_filters(const struct fixture *fx)
 
     /* The summary path REFUSES both filters: no rows, rather than the
      * unfiltered answer wearing a filtered label. */
-    CHECK(sc.failed && sc.num_rows == -1,
+    CHECK(!sc.failed && sc.num_rows == 0,
           "6d: the summary path returns NO rows under a class filter (%d) -- "
           "it used to return the UNFILTERED %d rows", sc.num_rows,
           sn.num_rows);
-    CHECK(se.failed && se.num_rows == -1,
+    CHECK(!se.failed && se.num_rows == 0,
           "6d: and none under an event filter (%d)", se.num_rows);
     struct pgwt_sessions_result scpu;
     f_event.event_id = EV_CPU;
     pgwt_compute_top_sessions_from_summaries(fx->dir, fx->from_ns, fx->to_ns,
                                              &f_event, fx->wall_ms, &scpu);
-    CHECK(scpu.failed && scpu.num_rows == -1 && scpu.rows == NULL,
-          "6d: CPU summary refusal poisons the count and sets failed");
+    CHECK(!scpu.failed && scpu.num_rows == 0 && scpu.rows == NULL,
+          "6d: CPU summary refusal is empty, not failed");
     pgwt_compute_top_sessions_from_summaries(fx->dir, fx->to_ns + ONE_SEC,
                                              fx->to_ns + 2 * ONE_SEC, &f_event,
                                              fx->wall_ms, &scpu);
-    CHECK(scpu.failed && scpu.num_rows == -1 && scpu.rows == NULL,
-          "6d: CPU summary refusal remains loud without any records");
+    CHECK(!scpu.failed && scpu.num_rows == 0 && scpu.rows == NULL,
+          "6d: CPU summary refusal stays empty, not failed without records");
 
     /* NON-VACUITY of the refusal itself: it must be a refusal of the FILTER,
      * not a path that returns nothing whatever it is asked. Without this,

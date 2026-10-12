@@ -19,8 +19,10 @@ characters; assertion outcomes and totals are retained.
   of the sole CPU execution. After: 37/37 passed.
 - #345, `test_agg_raw_crosscheck`: five failed assertions. Both raw and
   summary CPU totals were 11362.296ms instead of the independent fixture's
-  4053ms; Sessions summary refusals lacked poisoned counts and failure flags.
-  After: 183 checks, zero failures (includes an additional no-record refusal).
+  4053ms. The historical log also counted Sessions refusal assertions for an
+  erroneous contract change; those assertions have since been corrected to
+  preserve #318's empty-not-failed rule. After: 183 checks, zero failures
+  (includes an additional no-record refusal).
 - #345, `test_block_agg`: explicit CPU was accepted as aggregate-compatible.
   `test_interval_index`: CPU returned rc=0/have_result=1 instead of refusing
   a filtered request. After: both pass; interval suite 122 checks, zero failures.
@@ -51,7 +53,7 @@ All former presence checks are replaced:
 - compute.c: pgwt_filter_matches; summary_event_matches_filter;
   pgwt_compute_aas_from_summaries context; tm_summary_visitor's unfiltered
   decision and filtered class accumulation; the Top Sessions summary refusal
-  moved from ts_summary_visitor to pgwt_compute_top_sessions_from_summaries;
+  in ts_summary_visitor;
   tq_summary_visitor's filtered branch, per-event match and class-only fallback.
 - block_agg.c: pgwt_block_agg_filter_supported.
 - interval_index.c: is_unfiltered (both storing and querying use it).
@@ -61,8 +63,11 @@ and worker processing. Existing C fixtures assigning nonzero event IDs now
 set presence too. Event ID checks for CPU rendering and hash-table occupancy
 are event identity checks and retain their original behavior.
 
-Unsupported Sessions summary filters return failed=1, num_rows=-1 and
-rows=NULL even when no summaries exist. On supported paths the old arithmetic
+Unsupported Sessions summary filters preserve the #318 contract: failed=0,
+num_rows=0 and rows=NULL, including explicit CPU and windows without summaries.
+Master's house-rule comment and aas_summary_visitor establish this precedent;
+handle_top_sessions forces these filters to raw events in production.
+tests/test_probe_bounds.c is byte-identical to master. On supported paths the old arithmetic
 and ordering remain unchanged. No retry, sleep, tolerance, epsilon, or
 KNOWN_FAILING entry was added. The extra `info` request formerly bypassing
 #342 in the truncation fixture is removed.
