@@ -381,7 +381,7 @@ static void test_pacing_in_transitions_and_heatmap(void)
     const uint64_t HM_TO   = HM_FROM + 1000000000ULL;
     struct pgwt_filter hf;
     memset(&hf, 0, sizeof(hf));
-    hf.event_id = EV_CHECKPOINT_DELAY;
+    hf.event_id = EV_CHECKPOINT_DELAY; hf.has_event_filter = 1;
     struct pgwt_heatmap_result hm;
     pgwt_compute_heatmap(ev, n, &hf, HM_FROM, HM_TO, 8, &hm);
     CHECK(hm.total_events == 1,
@@ -392,7 +392,7 @@ static void test_pacing_in_transitions_and_heatmap(void)
     /* The contrast: the same request for the HIDDEN event must come back
      * empty, which is what makes the count above mean "visible". */
     memset(&hf, 0, sizeof(hf));
-    hf.event_id = EV_ACTIVITY;
+    hf.event_id = EV_ACTIVITY; hf.has_event_filter = 1;
     pgwt_compute_heatmap(ev, n, &hf, HM_FROM, HM_TO, 8, &hm);
     CHECK(hm.total_events == 0,
           "the hidden Activity event does NOT (%llu events)",
