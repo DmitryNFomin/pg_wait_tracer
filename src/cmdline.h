@@ -35,6 +35,11 @@ struct pgwt_metadata {
 /* Parse /proc/<pid>/cmdline and fill metadata. Returns 0 on success. */
 int pgwt_parse_cmdline(pid_t pid, struct pgwt_metadata *meta);
 
+/* Single-read eligibility for a queued lifecycle target. 1 = a live child
+ * of parent, 0 = positively retired/reaped or no longer that parent's child,
+ * -1 = unavailable/invalid (never treat -1 as a true/live result). */
+int pgwt_backend_target_live(pid_t pid, pid_t parent);
+
 /* Human-readable name for a backend type. */
 const char *pgwt_backend_type_name(enum pgwt_backend_type bt);
 
