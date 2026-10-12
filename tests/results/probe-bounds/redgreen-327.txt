@@ -1,0 +1,21 @@
+=== #327 red/green, timeout 30s per site ===
+parent binary: <scratch>/redprobe_parent
+fixed  binary: <scratch>/redprobe_fixed
+
+--- parent (<scratch>/redprobe_parent) ---
+  sessions           exit=124  RED: did not terminate in 30s (the probe loop spins)
+  sessions_summary   exit=124  RED: did not terminate in 30s (the probe loop spins)
+  queries            exit=124  RED: did not terminate in 30s (the probe loop spins)
+  queries_summary    exit=124  RED: did not terminate in 30s (the probe loop spins)
+  fingerprints       exit=124  RED: did not terminate in 30s (the probe loop spins)
+  variants           exit=124  RED: did not terminate in 30s (the probe loop spins)
+
+--- fixed (<scratch>/redprobe_fixed) ---
+  sessions           exit=0    GREEN: RETURNED num_rows=1025
+  sessions_summary   exit=0    GREEN: RETURNED num_rows=1025
+  queries            exit=0    GREEN: RETURNED num_rows=2049
+  queries_summary    exit=0    GREEN: RETURNED num_rows=2049
+  fingerprints       exit=0    GREEN: RETURNED num_rows=2049
+  variants           exit=0    GREEN: RETURNED num_variants=4097 total_executions=4097
+
+all six sites: parent RED (124), fixed GREEN (0, RETURNED).

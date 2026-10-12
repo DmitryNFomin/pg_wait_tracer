@@ -3765,6 +3765,24 @@ static void handle_top_sessions(struct pgwt_server *srv, struct pgwt_request *re
         free(events);
     }
 
+    /* #327: the per-pid table is unbounded now (it used to be 1024 slots
+     * with a probe loop that never terminated once full), so the only early
+     * exit is a real allocation failure. Report it instead of serialising a
+     * session list that is short but looks complete. A blank tab beats a
+     * hang; a silently short total is worse than both. */
+    if (res.failed) {
+        free(res.rows);
+        cJSON *err = cJSON_CreateObject();
+        cJSON_AddNumberToObject(err, "id", (double)req->id);
+        cJSON_AddStringToObject(err, "error", "top sessions compute failed");
+        cJSON_AddStringToObject(err, "code", "compute_failed");
+        cJSON_AddStringToObject(err, "hint", "narrow the time range and retry");
+        if (from_summaries) add_fidelity_window(err, &wfid);
+        else                add_fidelity(err, &linfo);
+        emit_json(err);
+        return;
+    }
+
     cJSON *root = cJSON_CreateObject();
     cJSON_AddNumberToObject(root, "id", (double)req->id);
     if (from_summaries) add_fidelity_window(root, &wfid);
@@ -3840,13 +3858,20 @@ static void handle_top_queries(struct pgwt_server *srv, struct pgwt_request *req
      * unit test exercises the real code. */
     struct pgwt_lifecycle_result lcres;
     pgwt_compute_query_lifecycle(all_events, ecount, &lcres);
-    if (lcres.failed) {
+    /* #327: `res.failed` joins this condition rather than adding a second
+     * arm — the per-query-id table in pgwt_compute_top_queries (and in the
+     * summary path) is unbounded now, and an allocation failure there fails
+     * the request for the same reason the lifecycle scan's does. */
+    if (lcres.failed || res.failed) {
         pgwt_lifecycle_free(&lcres);
         free(all_events);
         free(res.rows);
         cJSON *err = cJSON_CreateObject();
         cJSON_AddNumberToObject(err, "id", (double)req->id);
-        cJSON_AddStringToObject(err, "error", "query lifecycle compute failed");
+        cJSON_AddStringToObject(err, "error",
+                                lcres.failed
+                                    ? "query lifecycle compute failed"
+                                    : "top queries compute failed");
         cJSON_AddStringToObject(err, "code", "compute_failed");
         cJSON_AddStringToObject(err, "hint", "narrow the time range and retry");
         if (from_summaries) add_fidelity_window(err, &wfid);
@@ -5538,6 +5563,22 @@ static void handle_fingerprints(struct pgwt_server *srv, struct pgwt_request *re
     pgwt_compute_fingerprints(events, count, &req->filter, &res);
     free(events);
 
+    /* #327: the per-query-id table is unbounded now (2048 fixed slots with a
+     * probe loop that never terminated once full), so the only early exit is
+     * a real allocation failure. Report it rather than serialising a short
+     * fingerprint list that looks complete. */
+    if (res.failed) {
+        free(res.rows);
+        cJSON *err = cJSON_CreateObject();
+        cJSON_AddNumberToObject(err, "id", (double)req->id);
+        cJSON_AddStringToObject(err, "error", "fingerprints compute failed");
+        cJSON_AddStringToObject(err, "code", "compute_failed");
+        cJSON_AddStringToObject(err, "hint", "narrow the time range and retry");
+        add_fidelity(err, &linfo);
+        emit_json(err);
+        return;
+    }
+
     cJSON *root = cJSON_CreateObject();
     cJSON_AddNumberToObject(root, "id", (double)req->id);
     cJSON_AddStringToObject(root, "fidelity", pgwt_fidelity_str(fid));
@@ -6219,6 +6260,9 @@ static void dump_summary(struct pgwt_server *srv)
            "PID", "DB Time(ms)", "CPU%", "Wait%", "Top Wait");
     printf("  ─────────────────────────────────────────────────────────────────────────\n");
 
+    /* #327: a refusal must not read as "no sessions" in the text dump. */
+    if (sess.failed)
+        printf("  COMPUTE FAILED (allocation) — no session rows\n");
     n = sess.num_rows < 15 ? sess.num_rows : 15;
     for (int i = 0; i < n; i++) {
         struct pgwt_session_row *r = &sess.rows[i];
@@ -6236,6 +6280,8 @@ static void dump_summary(struct pgwt_server *srv)
            "query_id", "Waits", "Total (ms)", "% DB", "Top Wait");
     printf("  ─────────────────────────────────────────────────────────────────────────\n");
 
+    if (qry.failed)
+        printf("  COMPUTE FAILED (allocation) — no query rows\n");
     n = qry.num_rows < 15 ? qry.num_rows : 15;
     for (int i = 0; i < n; i++) {
         struct pgwt_query_row *r = &qry.rows[i];
