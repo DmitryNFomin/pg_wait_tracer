@@ -846,6 +846,24 @@ int pgwt_confirm_wait_offset(struct pgwt_daemon *d)
     return 0;
 }
 
+/* A queued FORK/INIT can outlive its process. Do not allocate or attach a
+ * stale target. Unknown eligibility is a refusal, not an expired target.
+ * Failed hardware attempts after this check remain counted without exception. */
+static int lifecycle_target(struct pgwt_daemon *d, pid_t pid)
+{
+    int live = pgwt_backend_target_live(pid, d->postmaster_pid);
+    if (live == 0) {
+        if (d->verbose)
+            fprintf(stderr, "INFO: queued lifecycle target PID %d retired before enrollment; no watchpoint attempted\n", pid);
+        pgwt_handle_exit(d, pid);
+    } else if (live < 0) {
+        int error = errno;
+        d->counters.wp_attach_failures_total++;
+        fprintf(stderr, "ERROR: cannot validate lifecycle target PID %d: %s; refusing enrollment\n", pid, strerror(error));
+    }
+    return live;
+}
+
 int pgwt_handle_fork(struct pgwt_daemon *d, pid_t child_pid)
 {
     if (pgwt_pgbs_exclusion_contains(&d->pgbs_validation_exclusions,
@@ -855,6 +873,9 @@ int pgwt_handle_fork(struct pgwt_daemon *d, pid_t child_pid)
                     "PID %d from fork capture enrollment\n", child_pid);
         return 0;
     }
+
+    int live = lifecycle_target(d, child_pid);
+    if (live <= 0) return live < 0 ? -1 : 0;
 
     /* Check for duplicate */
     if (pgwt_find_backend(&d->backends, child_pid))
@@ -937,6 +958,9 @@ int pgwt_handle_init(struct pgwt_daemon *d, pid_t pid, uint64_t addr)
 {
     if (pgwt_pgbs_exclusion_contains(&d->pgbs_validation_exclusions, pid))
         return 0;
+
+    int live = lifecycle_target(d, pid);
+    if (live <= 0) return live < 0 ? -1 : 0;
 
     struct pgwt_backend *be = pgwt_find_backend(&d->backends, pid);
     if (!be) {
@@ -1022,15 +1046,14 @@ int pgwt_handle_init(struct pgwt_daemon *d, pid_t pid, uint64_t addr)
 int pgwt_handle_exit(struct pgwt_daemon *d, pid_t pid)
 {
     struct pgwt_backend *be = pgwt_find_backend(&d->backends, pid);
-    if (!be) return 0;
-
-    /* Close watchpoint fds */
     uint64_t started_ns = pgwt_debug_block_begin(d);
-    pgwt_close_watchpoint(be->wp_fd);
-    be->wp_fd = -1;
-    pgwt_close_watchpoint(be->bootstrap_fd);
-    be->bootstrap_fd = -1;
-    pgwt_debug_block_end(d, "watchpoint_close", pid, started_ns);
+    if (be) {
+        pgwt_close_watchpoint(be->wp_fd);
+        be->wp_fd = -1;
+        pgwt_close_watchpoint(be->bootstrap_fd);
+        be->bootstrap_fd = -1;
+        pgwt_debug_block_end(d, "watchpoint_close", pid, started_ns);
+    }
 
     /* Delete BPF map entries for this PID */
     int state_fd = bpf_map__fd(d->skel->maps.state_map);
@@ -1043,6 +1066,9 @@ int pgwt_handle_exit(struct pgwt_daemon *d, pid_t pid)
     bpf_map_delete_elem(seed_fd, &key);
     pgwt_debug_block_end(d, "backend_state_delete", pid, started_ns);
 
+    /* BPF enrolls at fork, before a userspace registry entry exists. Even
+     * a retired-before-enrollment target must have those maps cleaned. */
+    if (!be) return 0;
     be->is_alive = false;
 
     if (d->verbose)

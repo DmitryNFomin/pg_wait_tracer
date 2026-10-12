@@ -385,3 +385,5 @@ test_interval_index
 # non-executable binary must each refuse rather than approve.
 test_alloc_tune
 test_server_alloc_tune.py
+
+test_backend_lifecycle

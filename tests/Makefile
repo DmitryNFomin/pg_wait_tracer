@@ -10,7 +10,7 @@ BUILD     = ../build
 # Rocky 8 / RHEL 8 where the bundled static libbpf is used instead.
 LIBBPF_LIB ?= -lbpf
 
-TESTS     = test_wait_event test_cmdline test_spawn test_event_writer test_event_reader \
+TESTS     = test_wait_event test_cmdline test_backend_lifecycle test_spawn test_event_writer test_event_reader \
             test_trace_v2 test_sampler test_anomaly test_escalation_budget \
             test_exact_probe \
             test_effective_cores \
@@ -61,6 +61,12 @@ check: all
 
 test_wait_event: test_wait_event.c $(BUILD)/wait_event.o $(BUILD)/idle_rule.o $(BUILD)/spawn.o $(BUILD)/cJSON.o
 	$(CC) $(CFLAGS) -o $@ $^
+
+# Exercise the production lifecycle functions, replacing only hardware opens
+# and map deletes. The capture objects exist after the required parent build.
+LIFECYCLE_OBJS = $(filter-out $(BUILD)/pg_wait_tracer.o $(BUILD)/pg_wait_tracer.bpf.o $(BUILD)/server_%.o,$(wildcard $(BUILD)/*.o))
+test_backend_lifecycle: test_backend_lifecycle.c $(LIFECYCLE_OBJS)
+	$(CC) $(CFLAGS) -o $@ $^ -Wl,--wrap=pgwt_open_watchpoint -Wl,--wrap=pgwt_open_watchpoint_disabled -Wl,--wrap=bpf_map_delete_elem $(LIBBPF_LIB) -lelf -lz -llz4 -pthread -lm
 
 test_cmdline: test_cmdline.c $(BUILD)/cmdline.o
 	$(CC) $(CFLAGS) -o $@ $^
