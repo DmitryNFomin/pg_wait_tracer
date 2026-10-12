@@ -3852,9 +3852,6 @@ struct pair_accum {
     uint64_t top_event_ns;
 };
 
-#define PAIR_HT_SIZE 4096
-#define PAIR_HT_MASK (PAIR_HT_SIZE - 1)
-
 static int cmp_interference_desc(const void *a, const void *b)
 {
     double sa = ((const struct pgwt_interference_row *)a)->score;
@@ -3870,7 +3867,15 @@ void pgwt_compute_interference(const struct pgwt_trace_event *events, int count,
 
     /* Build active intervals (non-CPU, non-idle wait events only) */
     int cap = count < 50000 ? count : 50000;
-    struct active_entry *active = malloc(cap * sizeof(*active));
+    if (cap <= 0) return;
+    struct pgwt_triple_map ix;
+    pgwt_triple_map_init(&ix);
+    struct pair_accum *ht = NULL;
+    struct pgwt_interference_row *rows = NULL;
+    int num_pairs = 0, cap_pairs = 0;
+    struct active_entry *active = pgwt_test_alloc_fail("interference_intervals")
+        ? NULL : malloc((size_t)cap * sizeof(*active));
+    if (!active) goto fail;
     int nactive = 0;
 
     for (int i = 0; i < count && nactive < cap; i++) {
@@ -3888,9 +3893,10 @@ void pgwt_compute_interference(const struct pgwt_trace_event *events, int count,
 
     qsort(active, nactive, sizeof(active[0]), cmp_active_by_start);
 
-    /* Find overlapping pairs on same event */
-    struct pair_accum *ht = calloc(PAIR_HT_SIZE, sizeof(*ht));
-    int num_pairs = 0;
+    /* #359: pairs accumulate across the window, so the interval cap does
+     * not bound distinct pairs. The old 4096-slot table spun forever on
+     * pair 4097. Index unordered pairs with the existing growing map and
+     * grow the accumulator as in #327; never drop a key. */
     uint64_t max_overlap = 0;
 
     for (int i = 0; i < nactive; i++) {
@@ -3915,16 +3921,19 @@ void pgwt_compute_interference(const struct pgwt_trace_event *events, int count,
             uint32_t pa = active[i].pid < active[j].pid ? active[i].pid : active[j].pid;
             uint32_t pb = active[i].pid < active[j].pid ? active[j].pid : active[i].pid;
 
-            /* Hash lookup */
-            uint32_t h = ((pa * 0x45d9f3b) ^ (pb * 0x9e3779b9)) & PAIR_HT_MASK;
-            while (ht[h].overlap_ns > 0 &&
-                   (ht[h].pid_a != pa || ht[h].pid_b != pb))
-                h = (h + 1) & PAIR_HT_MASK;
-
-            if (ht[h].overlap_ns == 0) {
+            int created;
+            int *slot = pgwt_triple_map_slot(&ix, pa, pb, 0, &created);
+            if (!slot) goto fail;
+            if (created) {
+                if (accum_grow((void **)&ht, &cap_pairs, num_pairs + 1,
+                               sizeof(*ht), "interference_entries") != 0)
+                    goto fail;
+                *slot = num_pairs++;
+            }
+            int h = *slot;
+            if (created) {
                 ht[h].pid_a = pa;
                 ht[h].pid_b = pb;
-                num_pairs++;
             }
             ht[h].overlap_ns += overlap;
             if (overlap > ht[h].top_event_ns) {
@@ -3937,13 +3946,15 @@ void pgwt_compute_interference(const struct pgwt_trace_event *events, int count,
     }
 
     free(active);
+    active = NULL;
 
     /* Build result rows */
-    struct pgwt_interference_row *rows = calloc(num_pairs, sizeof(*rows));
+    rows = num_pairs && !pgwt_test_alloc_fail("interference_rows")
+        ? calloc((size_t)num_pairs, sizeof(*rows)) : NULL;
+    if (num_pairs && !rows) goto fail;
     int nr = 0;
 
-    for (int i = 0; i < PAIR_HT_SIZE; i++) {
-        if (ht[i].overlap_ns == 0) continue;
+    for (int i = 0; i < num_pairs; i++) {
         rows[nr].pid_a = ht[i].pid_a;
         rows[nr].pid_b = ht[i].pid_b;
         rows[nr].score = max_overlap > 0
@@ -3956,11 +3967,22 @@ void pgwt_compute_interference(const struct pgwt_trace_event *events, int count,
     }
 
     free(ht);
-    qsort(rows, nr, sizeof(rows[0]), cmp_interference_desc);
+    pgwt_triple_map_free(&ix);
+    if (nr > 1)
+        qsort(rows, nr, sizeof(rows[0]), cmp_interference_desc);
 
     int n = nr < max_rows ? nr : max_rows;
     out->rows = rows;
     out->num_rows = n;
+    return;
+
+fail:
+    free(active);
+    free(ht);
+    free(rows);
+    pgwt_triple_map_free(&ix);
+    memset(out, 0, sizeof(*out));
+    out->failed = 1;
 }
 
 /* ── Variants ─────────────────────────────────────────────── */

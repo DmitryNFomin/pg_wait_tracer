@@ -5649,6 +5649,18 @@ static void handle_interference(struct pgwt_server *srv, struct pgwt_request *re
     pgwt_compute_interference(events, count, &req->filter, 30, &res);
     free(events);
 
+    if (res.failed) {
+        free(res.rows);
+        cJSON *err = cJSON_CreateObject();
+        cJSON_AddNumberToObject(err, "id", (double)req->id);
+        cJSON_AddStringToObject(err, "error", "interference compute failed");
+        cJSON_AddStringToObject(err, "code", "compute_failed");
+        cJSON_AddStringToObject(err, "hint", "narrow the time range and retry");
+        add_fidelity(err, &linfo);
+        emit_json(err);
+        return;
+    }
+
     cJSON *root = cJSON_CreateObject();
     cJSON_AddNumberToObject(root, "id", (double)req->id);
     cJSON_AddStringToObject(root, "fidelity", pgwt_fidelity_str(fid));

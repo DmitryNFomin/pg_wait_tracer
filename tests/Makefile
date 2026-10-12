@@ -28,6 +28,7 @@ TESTS     = test_wait_event test_cmdline test_spawn test_event_writer test_event
             test_variants_p95 \
             test_pid_cap \
             test_probe_bounds \
+            test_interference_bounds \
             test_concurrency_bounds \
             test_idle_accounting test_idle_summary \
             test_agg_raw_crosscheck \
@@ -216,6 +217,14 @@ test_probe_bounds: test_probe_bounds.c ../src/compute.c \
               ../src/test_alloc_fail.h ../src/percentile.h \
               $(BUILD)/wait_event.o $(BUILD)/idle_rule.o $(BUILD)/spawn.o $(BUILD)/cJSON.o
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ test_probe_bounds.c ../src/compute.c \
+	    $(BUILD)/wait_event.o $(BUILD)/idle_rule.o $(BUILD)/spawn.o $(BUILD)/cJSON.o -lm
+
+# #359: interference's former 4096-slot pair table must return at cap and
+# cap+1, with exact per-pair totals and whole-result allocation refusals.
+test_interference_bounds: test_interference_bounds.c ../src/compute.c \
+              ../src/triple_map.h ../src/test_alloc_fail.h \
+              $(BUILD)/wait_event.o $(BUILD)/idle_rule.o $(BUILD)/spawn.o $(BUILD)/cJSON.o
+	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ test_interference_bounds.c ../src/compute.c \
 	    $(BUILD)/wait_event.o $(BUILD)/idle_rule.o $(BUILD)/spawn.o $(BUILD)/cJSON.o -lm
 
 test_pg13_resolve: test_pg13_resolve.c ../src/discovery.c ../src/spawn.c \
