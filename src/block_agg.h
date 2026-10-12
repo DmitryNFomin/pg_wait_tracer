@@ -280,7 +280,7 @@ int pgwt_block_agg_node_counts(const struct pgwt_trace_event *ev);
  * wiring round and zeroed test_data_aas (Total AAS 4.0 -> 0). */
 int pgwt_block_agg_in_window(const struct pgwt_trace_event *ev,
                              uint64_t from_mono_ns, uint64_t to_mono_ns);
-/* C7 at FILE granularity: can a file spanning [mono_first, mono_last]
+/* C7 at FILE/BLOCK granularity: can bounds [mono_first, mono_last]
  * contribute to [from, to]? The same inclusive rule, shared rather than
  * hand-copied, because the hand-copied version drifted to `>=` and produced a
  * silently short answer. See the body in block_agg.c. */
@@ -452,6 +452,17 @@ typedef int (*pgwt_bagg_decode_fn)(void *ctx, struct pgwt_event_reader *r,
  * signal (see pgwt_block_agg_add_events). `*merged`/`*decoded` count blocks,
  * for callers that want to declare how an answer was produced. All three are
  * optional.
+ *
+ * Returns PGWT_BAGG_OK only on success. Equal or inverted endpoints are
+ * REFUSED_INVALID before any accumulator or counter changes: [from, from]
+ * can select records (C7), so the reader fast path must defer to raw rather
+ * than report zero. Any overlapping non-TRANSITIONS block is REFUSED_BLOCK_TYPE,
+ * including one starting exactly at `to_mono_ns`.
+ *
+ * On any refusal, discard the accumulator and counters and recompute from
+ * raw; earlier blocks may already have contributed. Set the caller's failure
+ * flag with `rc != PGWT_BAGG_OK`, never a truthiness test of rc (negative
+ * refusal codes are truthy in C).
  *
  */
 int pgwt_block_agg_window_from_reader(struct pgwt_event_reader *r,
