@@ -70,6 +70,48 @@ export function transitionsContext(data) {
     return { maxEdgeCount, nodeMap };
 }
 
+/* ECharts fits graphView to node centres, ignoring curved edges and symbol
+ * radii. Fit the whole drawing instead, then give it the corresponding node
+ * rectangle. Coordinates (including drag overrides) and metrics stay intact.
+ * Quadratic extrema use the same control point as the bundled ECharts. */
+function quadraticExtent(start, control, end) {
+    const values = [start, end];
+    const divisor = start - 2 * control + end;
+    const t = divisor === 0 ? 0 : (start - control) / divisor;
+    if (t > 0 && t < 1) {
+        values.push((1 - t) ** 2 * start + 2 * (1 - t) * t * control + t ** 2 * end);
+    }
+    return values;
+}
+
+export function transitionsViewport(nodes, links, dims) {
+    let minX = Math.min(...nodes.map(n => n.x)), maxX = Math.max(...nodes.map(n => n.x));
+    let minY = Math.min(...nodes.map(n => n.y)), maxY = Math.max(...nodes.map(n => n.y));
+    // graphView expands a degenerate axis by one unit on either side.
+    if (minX === maxX) { minX--; maxX++; }
+    if (minY === maxY) { minY--; maxY++; }
+    const xs = [minX, maxX], ys = [minY, maxY];
+    const byName = new Map(nodes.map(n => [n.name, n]));
+    for (const link of links) {
+        const a = byName.get(link.source), b = byName.get(link.target);
+        const curve = link.lineStyle.curveness;
+        xs.push(...quadraticExtent(a.x, (a.x + b.x) / 2 - (a.y - b.y) * curve, b.x));
+        ys.push(...quadraticExtent(a.y, (a.y + b.y) / 2 - (b.x - a.x) * curve, b.y));
+    }
+    const left = Math.min(...xs), right = Math.max(...xs);
+    const top = Math.min(...ys), bottom = Math.max(...ys);
+    // Space for the largest node, arrowheads, strokes, and below-node labels.
+    const padX = Math.min(80, dims.width / 4), padY = Math.min(100, dims.height / 4);
+    const scale = Math.min((dims.width - 2 * padX) / (right - left),
+        (dims.height - 2 * padY) / (bottom - top));
+    return {
+        left: (dims.width - (right - left) * scale) / 2 + (minX - left) * scale,
+        top: (dims.height - (bottom - top) * scale) / 2 + (minY - top) * scale,
+        width: (maxX - minX) * scale,
+        height: (maxY - minY) * scale,
+    };
+}
+
 /* PURE: data + threshold% + container dimensions -> ECharts graph option.
  *
  * `dims` = { width, height } of the DFG container (for the grid layout); the
@@ -177,6 +219,7 @@ export function buildTransitionsOption(data, threshold, dims, posOverrides, hide
         },
         series: [{
             type: 'graph', layout: 'none', roam: true, draggable: true,
+            ...transitionsViewport(ecNodes, ecLinks, { width: cW, height: cH }),
             data: ecNodes, links: ecLinks,
             edgeSymbol: ['none', 'arrow'], edgeSymbolSize: [0, 8],
             emphasis: { focus: 'adjacency', lineStyle: { width: 4, opacity: 1 } },

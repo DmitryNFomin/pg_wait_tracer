@@ -69,6 +69,31 @@ test('burst marker placed in the containing bucket', () => {
     assert.equal(mp[0].symbol, 'triangle');
 });
 
+test('dense burst markers stay compact; exact counts remain on hover and in the table', () => {
+    const d = data();
+    d.bursts = Array.from({ length: 100 }, (_, i) => ({
+        timestamp_ns: 2000 + i, timestamp_ms: 2,
+        sessions: 4 + i, event: 'Lock:<relation>', pids: [1, 2, 3, 4],
+    }));
+    const original = structuredClone(d);
+    const model = buildConcurrencyOption(d);
+    const markers = model.option.series[0].markPoint.data;
+    assert.equal(markers.length, d.bursts.length);
+    for (const [i, marker] of markers.entries()) {
+        assert.equal(marker.symbolSize, 8);
+        assert.equal(marker.label.show, false);
+        assert.equal(marker.emphasis.label.show, true);
+        assert.equal(marker.value, d.bursts[i].sessions);
+        assert.deepEqual(marker.coord, [1, 8]);
+        assert.equal(marker.tooltip.trigger, 'item');
+        assert.ok(marker.tooltip.formatter.includes(d.bursts[i].sessions + ' sessions'));
+        assert.ok(marker.tooltip.formatter.includes('Lock:&lt;relation&gt;'));
+    }
+    assert.deepEqual(model.bursts, original.bursts);
+    assert.ok(buildConcurrencyTables(model).includes('<b>103</b>'));
+    assert.deepEqual(d, original);
+});
+
 /* P6 regression: a burst inside the FINAL bucket has no peak with t >= ts, so
  * the old findIndex returned -1 and Math.max clamped the marker to bucket 0 —
  * a far-left triangle for exactly the burst you care about most (the latest). */

@@ -217,7 +217,7 @@ export const queriesConfig = {
           intent: (r) => ({ pivot: 'query-executions', filterKey: 'query_id',
               filterValue: r.query_id,
               label: r.text ? r.text.substring(0, 40) : 'Query ' + r.query_id }) },
-        { key: 'total_ms', label: 'DB Time', cls: 'num', format: (r) => fmtMs(r.total_ms) },
+        { key: 'total_ms', label: '<span title="Accumulated CPU and wait time across sessions for this query">DB Time</span>', cls: 'num', format: (r) => fmtMs(r.total_ms) },
         { key: 'pct', label: '%DB', cls: 'num', format: (r) => fmtPct(r.pct) },
         { key: 'classes', label: 'Wait Profile', format: (r) =>
             r.events ? eventStackedBar(r.events, r.total_ms, eventColor, fmtMs)
@@ -229,7 +229,7 @@ export const queriesConfig = {
         { key: 'plan_ratio', label: 'Plan%', cls: 'num', format: (r) =>
             (r.exec_count > 0 && r.plan_count != null)
                 ? (r.plan_count / r.exec_count * 100).toFixed(0) + '%' : '—' },
-        { key: 'avg_exec_ms', label: 'Avg Exec', cls: 'num', format: (r) =>
+        { key: 'avg_exec_ms', label: '<span title="Mean EXEC lifecycle-phase duration, measured separately from DB Time. Not end-to-end query latency or DB Time divided by Execs.">Avg Exec (phase)</span>', cls: 'num', format: (r) =>
             r.avg_exec_ms != null ? fmtMs(r.avg_exec_ms) : '—' },
         { key: 'p95_exec_ms', label: 'p95 Exec', cls: 'num', format: (r) =>
             r.p95_exec_ms != null ? fmtMs(r.p95_exec_ms) : '—' },

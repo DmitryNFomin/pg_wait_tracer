@@ -125,6 +125,53 @@ test('posOverrides (user-dragged coords, P5) beat the grid layout', () => {
     assert.equal(cpuMoved.y, cpuPlain.y);
 });
 
+test('viewport contains long upper/lower arcs, nodes and labels on wide and gallery canvases', () => {
+    const input = {
+        total: 1600,
+        nodes: Array.from({ length: 9 }, (_, i) => ({
+            name: 'N' + i, total_ms: 900 - i * 100, class: 'IO',
+        })),
+        links: Array.from({ length: 8 }, (_, i) => [
+            { source: 'N0', target: 'N' + (i + 1), value: 100, duration_ms: 5 },
+            { source: 'N' + (i + 1), target: 'N0', value: 100, duration_ms: 5 },
+        ]).flat(),
+    };
+    const original = structuredClone(input);
+    for (const dims of [{ width: 1710, height: 550 }, { width: 800, height: 550 },
+        { width: 620, height: 460 }]) {
+        const series = buildTransitionsOption(input, 20, dims).option.series[0];
+        const minX = Math.min(...series.data.map(n => n.x));
+        const maxX = Math.max(...series.data.map(n => n.x));
+        const minY = Math.min(...series.data.map(n => n.y));
+        const maxY = Math.max(...series.data.map(n => n.y));
+        const pixel = (x, y) => [series.left + (x - minX) * series.width / (maxX - minX),
+            series.top + (y - minY) * series.height / (maxY - minY)];
+        for (const node of series.data) {
+            const [x, y] = pixel(node.x, node.y);
+            assert.ok(x - node.symbolSize / 2 >= 0 && x + node.symbolSize / 2 <= dims.width);
+            assert.ok(y - node.symbolSize / 2 >= 0 && y + node.symbolSize / 2 + 38 <= dims.height);
+            assert.equal(node.value, input.nodes.find(n => n.name === node.name).total_ms);
+        }
+        for (const link of series.links) {
+            const a = series.data.find(n => n.name === link.source);
+            const b = series.data.find(n => n.name === link.target);
+            const c = link.lineStyle.curveness;
+            const cx = (a.x + b.x) / 2 - (a.y - b.y) * c;
+            const cy = (a.y + b.y) / 2 - (b.x - a.x) * c;
+            for (let i = 0; i <= 20; i++) {
+                const t = i / 20;
+                const [x, y] = pixel((1 - t) ** 2 * a.x + 2 * (1 - t) * t * cx + t ** 2 * b.x,
+                    (1 - t) ** 2 * a.y + 2 * (1 - t) * t * cy + t ** 2 * b.y);
+                assert.ok(x >= 0 && x <= dims.width && y >= 0 && y <= dims.height,
+                    'the complete curved edge must fit in the canvas');
+            }
+            assert.equal(link.value, 100);
+        }
+        assert.equal(series.links.length, input.links.length);
+    }
+    assert.deepEqual(input, original);
+});
+
 test('drag fallback preserves the node grab offset instead of snapping centre', () => {
     assert.deepEqual(
         applyDragOffset({ x: 100, y: 80 }, { x: 110, y: 75 }, { x: 150, y: 105 }),

@@ -65,6 +65,23 @@ test('descending sort by total_ms', () => {
     assert.deepEqual(m.table.rows.map(r => r.row.query_id), ['b', 'c', 'a']);
 });
 
+test('DB Time and EXEC phase timing explain the rehearsal pairing without changing values', () => {
+    const row = q({ total_ms: 719100, exec_count: 92, avg_exec_ms: 0.017 });
+    const original = structuredClone(row);
+    const model = buildQueriesModel({ rows: [row] }, null).table;
+    const db = model.headers.findIndex(h => h.key === 'total_ms');
+    const avg = model.headers.findIndex(h => h.key === 'avg_exec_ms');
+    const execs = model.headers.findIndex(h => h.key === 'exec_count');
+    assert.ok(model.headers[db].label.includes('Accumulated CPU and wait time'));
+    assert.ok(model.headers[avg].label.includes('Avg Exec (phase)'));
+    assert.ok(model.headers[avg].label.includes('EXEC lifecycle-phase duration'));
+    assert.ok(model.headers[avg].label.includes('Not end-to-end query latency or DB Time divided by Execs'));
+    assert.equal(model.rows[0].cells[db].html, '719.1s');
+    assert.equal(model.rows[0].cells[avg].html, '17µs');
+    assert.equal(model.rows[0].cells[execs].html, '92');
+    assert.deepEqual(row, original);
+});
+
 test('drill intent targets query_id (-> events); label is text prefix', () => {
     assert.deepEqual(
         queriesConfig.onClick(q({ query_id: '42', text: 'UPDATE pgbench_accounts SET x' })),

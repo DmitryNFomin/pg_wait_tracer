@@ -71,9 +71,14 @@ export function buildConcurrencyOption(data, opts) {
     const burstPoints = capturedBursts.map(({ b, at }) => ({
         coord: [at, peakData[at] || b.sessions],
         value: b.sessions, symbol: 'triangle',
-        symbolSize: Math.min(10 + b.sessions * 2, 30),
+        // A live window can carry a burst in nearly every bucket. Keep the
+        // markers small and expose counts on hover instead of piling up text.
+        symbolSize: 8,
         itemStyle: { color: '#f44' },
-        label: { show: true, formatter: b.sessions + '', color: '#fff', fontSize: 10 },
+        label: { show: false, formatter: b.sessions + '', color: '#fff', fontSize: 10 },
+        emphasis: { label: { show: true, position: 'top' } },
+        tooltip: { trigger: 'item', formatter: fmtTimeMs(b.timestamp_ms) +
+            '<br/>Burst: <b>' + b.sessions + ' sessions</b><br/>Event: ' + esc(b.event) },
     }));
 
     const option = {
