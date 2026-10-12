@@ -367,3 +367,17 @@ test_exec_index
 #   this list because it recompiles the module 28 times (~40 s) and is
 #   evidence, not a gate.
 test_interval_index
+# The allocator tuning pgwt-server applies at startup (src/alloc_tune.h): the
+# per-request ~274 MB event arrays stay on an already-faulted heap instead of
+# being mmap'd fresh (measured -15% top_queries / -35% executions / -20%
+# concurrency on a 6.96M-event 900 s window). test_alloc_tune proves the
+# property -- heap-served, not trimmed on free, second touch costs no faults --
+# always against an untuned control in the same process, and REFUSES when a
+# pre-tuned environment, too small an allocation, or an unreadable sbrk() would
+# make it blind. test_server_alloc_tune.py proves main() actually CALLS it (no
+# unit test can link server.c), requiring the default and PGWT_ALLOC_TUNE=0
+# masks to disagree, and carries stub binaries for every way that check could
+# fail to see: silent output, no line, an unparseable mask, exit 127 and a
+# non-executable binary must each refuse rather than approve.
+test_alloc_tune
+test_server_alloc_tune.py

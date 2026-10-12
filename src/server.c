@@ -14,6 +14,7 @@
 #include "percentile.h"
 #include "event_sort.h"
 #include "query_ctx_index.h"
+#include "alloc_tune.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -6269,6 +6270,15 @@ static void dump_summary(struct pgwt_server *srv)
 
 int main(int argc, char **argv)
 {
+    /* Before the first large allocation: keep the per-request ~274 MB event
+     * arrays on an already-faulted heap instead of fresh mmap'd zero pages
+     * (src/alloc_tune.h). PGWT_ALLOC_TUNE=0 disables; PGWT_ALLOC_TUNE_DEBUG=1
+     * reports what took effect, which is how tests/test_server_alloc_tune.py
+     * tells a server that applied the tuning from one that only linked it. */
+    int alloc_tuned = pgwt_tune_allocator();
+    if (getenv("PGWT_ALLOC_TUNE_DEBUG"))
+        fprintf(stderr, "alloc_tune: applied=0x%x\n", alloc_tuned);
+
     int dump_mode = 0;
     const char *trace_dir = NULL;
 
