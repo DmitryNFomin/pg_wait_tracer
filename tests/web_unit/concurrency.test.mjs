@@ -69,6 +69,50 @@ test('burst marker placed in the containing bucket', () => {
     assert.equal(mp[0].symbol, 'triangle');
 });
 
+test('dense bursts keep every count and coordinate, with compact markers and hover-only labels', () => {
+    const d = {
+        bucket_ns: 1_000,
+        peaks: Array.from({ length: 300 }, (_, i) =>
+            ({ t: 1000 + i * 1000, t_ms: i + 1, max: i < 20 ? 17 : 8, event: 'A' })),
+        bursts: Array.from({ length: 300 }, (_, i) =>
+            ({ timestamp_ns: 1500 + i * 1000, timestamp_ms: i + 1,
+                sessions: i < 20 ? 9 : 4, event: 'A', pids: [1, 2, 3, 4] })),
+    };
+    const original = structuredClone(d);
+    const model = buildConcurrencyOption(d);
+    const points = model.option.series[0].markPoint.data;
+    assert.equal(points.length, d.bursts.length, 'no bursts are thinned or combined');
+    points.forEach((point, i) => {
+        assert.deepEqual(point.coord, [i, d.peaks[i].max]);
+        assert.equal(point.value, d.bursts[i].sessions);
+        assert.ok(point.symbolSize <= 6, 'markers must not obscure neighbouring peaks');
+        assert.equal(point.label.show, false, 'resting chart has no overlapping counts');
+        assert.equal(point.emphasis.label.show, true);
+        assert.equal(point.label.formatter, String(d.bursts[i].sessions));
+    });
+    assert.deepEqual(model.option.series[0].data, d.peaks.map(p => p.max));
+    assert.deepEqual(model.bursts, d.bursts, 'tables retain every original burst');
+    assert.deepEqual(d, original, 'presentation must not mutate the response');
+});
+
+test('burst hover distinguishes the unchanged onset count from its bucket peak and escapes the event', () => {
+    const d = data();
+    d.bursts[0].sessions = 4;
+    d.bursts[0].event = 'Lock:<script>bad</script>';
+    const model = buildConcurrencyOption(d);
+    const marker = model.option.series[0].markPoint;
+    assert.equal(marker.tooltip.trigger, 'item');
+    const point = marker.data[0];
+    assert.deepEqual(point.coord, [1, 8]);
+    assert.equal(point.value, 4);
+    const tip = point.tooltip.formatter();
+    assert.ok(tip.includes('Burst onset: <b>4 sessions</b>'));
+    assert.ok(tip.includes('Bucket peak: <b>8 sessions</b>'));
+    assert.ok(tip.includes('Lock:&lt;script&gt;bad&lt;/script&gt;'));
+    assert.ok(!tip.includes('<script>'));
+    assert.ok(buildConcurrencyTables(model).includes('<b>4</b>'));
+});
+
 /* P6 regression: a burst inside the FINAL bucket has no peak with t >= ts, so
  * the old findIndex returned -1 and Math.max clamped the marker to bucket 0 —
  * a far-left triangle for exactly the burst you care about most (the latest). */

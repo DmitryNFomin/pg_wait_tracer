@@ -71,9 +71,19 @@ export function buildConcurrencyOption(data, opts) {
     const burstPoints = capturedBursts.map(({ b, at }) => ({
         coord: [at, peakData[at] || b.sessions],
         value: b.sessions, symbol: 'triangle',
-        symbolSize: Math.min(10 + b.sessions * 2, 30),
+        // Dense windows can have a burst in every bucket. Keep every marker,
+        // but reveal its count only on hover so adjacent labels cannot pile up.
+        symbolSize: 6,
         itemStyle: { color: '#f44' },
-        label: { show: true, formatter: b.sessions + '', color: '#fff', fontSize: 10 },
+        label: { show: false, position: 'top', formatter: b.sessions + '',
+            color: '#fff', fontSize: 10, backgroundColor: '#1e1e3a', padding: [2, 4] },
+        emphasis: { label: { show: true } },
+        // The onset count and bucket peak are distinct existing values. Name
+        // both explicitly without changing the marker's value or coordinates.
+        tooltip: { trigger: 'item', formatter: () =>
+            fmtTimeMs(b.timestamp_ms) + '<br/>Burst onset: <b>' + b.sessions +
+            ' sessions</b><br/>Event: ' + esc(b.event || 'none') +
+            '<br/>Bucket peak: <b>' + (peakData[at] || b.sessions) + ' sessions</b>' },
     }));
 
     const option = {
@@ -118,7 +128,8 @@ export function buildConcurrencyOption(data, opts) {
             areaStyle: { color: 'rgba(248,170,170,0.15)' },
             lineStyle: { color: '#f8a', width: 2 }, itemStyle: { color: '#f8a' },
             symbol: 'none',
-            markPoint: burstPoints.length > 0 ? { data: burstPoints } : undefined,
+            markPoint: burstPoints.length > 0
+                ? { data: burstPoints, tooltip: { trigger: 'item' } } : undefined,
             markArea: notCapturedCount > 0 ? {
                 silent: true,
                 label: { show: true, position: 'insideTop', color: '#999',
