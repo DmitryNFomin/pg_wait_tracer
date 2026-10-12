@@ -12,6 +12,9 @@
 #include "cmdline.h"
 #include "cJSON.h"
 #include "percentile.h"
+#include "event_sort.h"
+#include "query_ctx_index.h"
+#include "alloc_tune.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -866,38 +869,22 @@ static const struct bm_entry *bm_map_lookup(const struct pgwt_server *srv,
     return NULL;
 }
 
-/* Resolve the context represented by a qid row. top_queries aggregates by qid
- * for on-disk compatibility, so a row is context-addressable only when every
- * contributing PID has metadata and agrees. Missing metadata is ambiguous:
- * accepting the one known contributor could expose its text on a mixed row. */
-static int query_context_for_events(const struct pgwt_server *srv,
-                                    const struct pgwt_trace_event *events,
-                                    int count, uint64_t query_id,
-                                    uint32_t *databaseid, uint32_t *userid)
+/* The backend-metadata half of the rule that used to live in
+ * query_context_for_events (see src/query_ctx_index.h, which now owns the
+ * rule itself and its doc comment): a PID contributes a usable context only
+ * when its metadata exists, is unambiguous, and carries both ids. The
+ * predicate is transcribed verbatim from the deleted function — anything
+ * else is ambiguous, and ambiguous poisons the whole qid row. */
+static int srv_bm_context_resolver(void *ctx, uint32_t pid,
+                                   uint32_t *databaseid, uint32_t *userid)
 {
-    *databaseid = 0;
-    *userid = 0;
-    bool found = false;
-    for (int i = 0; events && i < count; i++) {
-        if (events[i].query_id != query_id)
-            continue;
-        const struct bm_entry *bm = bm_map_lookup(srv, events[i].pid);
-        if (!bm || bm->context_ambiguous || !bm->databaseid || !bm->userid) {
-            *databaseid = 0;
-            *userid = 0;
-            return -1;
-        }
-        if (!found) {
-            *databaseid = bm->databaseid;
-            *userid = bm->userid;
-            found = true;
-        } else if (*databaseid != bm->databaseid || *userid != bm->userid) {
-            *databaseid = 0;
-            *userid = 0;
-            return -1;
-        }
-    }
-    return found ? 1 : 0;
+    const struct pgwt_server *srv = (const struct pgwt_server *)ctx;
+    const struct bm_entry *bm = bm_map_lookup(srv, pid);
+    if (!bm || bm->context_ambiguous || !bm->databaseid || !bm->userid)
+        return 0;
+    *databaseid = bm->databaseid;
+    *userid = bm->userid;
+    return 1;
 }
 
 static int cmp_backend_link_pid(const void *a, const void *b)
@@ -2446,50 +2433,20 @@ static enum pgwt_merge_append_result merge_append_sample_part(
 }
 
 /* Clipping can move a delayed sample fragment before records that preceded
- * its physical block. Restore timestamp order without disturbing marker tie
- * order: lifecycle and timeline consumers rely on both properties. */
+ * its physical block, and per-CPU blocks interleave at their seams. Restore
+ * timestamp order without disturbing marker tie order: lifecycle and
+ * timeline consumers rely on both properties. The sort itself lives in
+ * src/event_sort.h (stable, in-place natural chain merge with an O(n log n)
+ * fallback) so tests/test_event_sort.c can reach it directly; the output is
+ * byte-identical to the fixed-width mergesort this replaced, because a
+ * stable sort on one key has exactly one answer. */
 static int stable_sort_events(struct pgwt_trace_event *events, int count)
 {
     if (count < 2)
         return 0;
     if (test_load_alloc_failure("sort"))
         return -1;
-    struct pgwt_trace_event *tmp =
-        malloc((size_t)count * sizeof(*tmp));
-    if (!tmp)
-        return -1;
-
-    struct pgwt_trace_event *src = events;
-    struct pgwt_trace_event *dst = tmp;
-    for (size_t width = 1; width < (size_t)count; width *= 2) {
-        for (size_t base = 0; base < (size_t)count; base += 2 * width) {
-            size_t left = base;
-            size_t mid = base + width < (size_t)count
-                       ? base + width : (size_t)count;
-            size_t right = mid;
-            size_t end = base + 2 * width < (size_t)count
-                       ? base + 2 * width : (size_t)count;
-            size_t out = base;
-            while (left < mid && right < end) {
-                /* Left wins ties: stable marker/event ordering. */
-                if (src[left].timestamp_ns <= src[right].timestamp_ns)
-                    dst[out++] = src[left++];
-                else
-                    dst[out++] = src[right++];
-            }
-            while (left < mid) dst[out++] = src[left++];
-            while (right < end) dst[out++] = src[right++];
-        }
-        struct pgwt_trace_event *swap = src;
-        src = dst;
-        dst = swap;
-        if (width > (size_t)count / 2)
-            break;
-    }
-    if (src != events)
-        memcpy(events, src, (size_t)count * sizeof(*events));
-    free(tmp);
-    return 0;
+    return pgwt_stable_sort_events(events, count, NULL);
 }
 
 static const struct pgwt_gen_cov *gen_cov_get(const struct pgwt_server *srv,
@@ -3858,12 +3815,28 @@ static void handle_top_queries(struct pgwt_server *srv, struct pgwt_request *req
      * unit test exercises the real code. */
     struct pgwt_lifecycle_result lcres;
     pgwt_compute_query_lifecycle(all_events, ecount, &lcres);
+
+    /* Per-query_id context + QUERY_SYNTH flag, in ONE pass over the same
+     * events (src/query_ctx_index.h). Both used to be resolved inside the
+     * row loop — query_context_for_events() plus an inline synth scan, two
+     * full passes over the window PER ROW: 26 rows x 2 x 5.7M events,
+     * measured at 1778 ms of the top_queries response. The table makes each
+     * row a lookup; the rule it implements is unchanged, and
+     * tests/test_top_queries_context.c is the bit-exact differential
+     * against a verbatim copy of the deleted function. */
+    struct pgwt_query_ctx_index qctx;
+    pgwt_query_ctx_index_build(&qctx, all_events, ecount,
+                               srv_bm_context_resolver, srv);
     /* #327: `res.failed` joins this condition rather than adding a second
      * arm — the per-query-id table in pgwt_compute_top_queries (and in the
      * summary path) is unbounded now, and an allocation failure there fails
-     * the request for the same reason the lifecycle scan's does. */
-    if (lcres.failed || res.failed) {
+     * the request for the same reason the lifecycle scan's does. `qctx` is
+     * here for the same reason, and because a half-built context table
+     * reports rows as context-less, which is exactly what a legitimately
+     * context-less row looks like: absence is never reported as zero. */
+    if (lcres.failed || res.failed || qctx.failed) {
         pgwt_lifecycle_free(&lcres);
+        pgwt_query_ctx_index_free(&qctx);
         free(all_events);
         free(res.rows);
         cJSON *err = cJSON_CreateObject();
@@ -3871,7 +3844,9 @@ static void handle_top_queries(struct pgwt_server *srv, struct pgwt_request *req
         cJSON_AddStringToObject(err, "error",
                                 lcres.failed
                                     ? "query lifecycle compute failed"
-                                    : "top queries compute failed");
+                                    : res.failed
+                                        ? "top queries compute failed"
+                                        : "query context index build failed");
         cJSON_AddStringToObject(err, "code", "compute_failed");
         cJSON_AddStringToObject(err, "hint", "narrow the time range and retry");
         if (from_summaries) add_fidelity_window(err, &wfid);
@@ -3924,9 +3899,15 @@ static void handle_top_queries(struct pgwt_server *srv, struct pgwt_request *req
 
         /* Add query text if available */
         uint32_t query_databaseid = 0, query_userid = 0;
-        int have_context = query_context_for_events(
-            srv, all_events, ecount, res.rows[i].query_id,
-            &query_databaseid, &query_userid);
+        const struct pgwt_query_ctx *qcrow =
+            pgwt_query_ctx_lookup(&qctx, res.rows[i].query_id);
+        /* No slot == no event in the window carried this id == the old
+         * function's `return found ? 1 : 0` with found == false. */
+        int have_context = qcrow ? qcrow->state : 0;
+        if (have_context > 0) {
+            query_databaseid = qcrow->databaseid;
+            query_userid = qcrow->userid;
+        }
         const struct qt_entry *qt_entry = NULL;
         if (have_context > 0)
             qt_entry = qt_map_lookup_entry(srv, query_databaseid,
@@ -3937,11 +3918,11 @@ static void handle_top_queries(struct pgwt_server *srv, struct pgwt_request *req
                                            res.rows[i].query_id);
         cJSON_AddStringToObject(r, "text",
                                 qt_entry && qt_entry->text ? qt_entry->text : "");
-        bool synthetic_quality = qt_entry && qt_entry->source_priority == 2;
-        for (int e = 0; !synthetic_quality && all_events && e < ecount; e++)
-            if (all_events[e].query_id == res.rows[i].query_id &&
-                (all_events[e].flags & PGWT_EVENT_FLAG_QUERY_SYNTH))
-                synthetic_quality = true;
+        /* Same disjunction as the deleted scan, which short-circuited on
+         * source_priority == 2 and otherwise looked for ONE synth-flagged
+         * event with this id anywhere in the window. */
+        bool synthetic_quality = (qt_entry && qt_entry->source_priority == 2) ||
+                                 (qcrow && qcrow->has_synth);
         if (synthetic_quality)
             cJSON_AddStringToObject(r, "attribution_quality",
                                     "pg13-synth-v1");
@@ -4036,6 +4017,7 @@ static void handle_top_queries(struct pgwt_server *srv, struct pgwt_request *req
     emit_json(root);
 
     pgwt_lifecycle_free(&lcres);
+    pgwt_query_ctx_index_free(&qctx);
     free(all_events);
     free(res.rows);
 }
@@ -6288,6 +6270,15 @@ static void dump_summary(struct pgwt_server *srv)
 
 int main(int argc, char **argv)
 {
+    /* Before the first large allocation: keep the per-request ~274 MB event
+     * arrays on an already-faulted heap instead of fresh mmap'd zero pages
+     * (src/alloc_tune.h). PGWT_ALLOC_TUNE=0 disables; PGWT_ALLOC_TUNE_DEBUG=1
+     * reports what took effect, which is how tests/test_server_alloc_tune.py
+     * tells a server that applied the tuning from one that only linked it. */
+    int alloc_tuned = pgwt_tune_allocator();
+    if (getenv("PGWT_ALLOC_TUNE_DEBUG"))
+        fprintf(stderr, "alloc_tune: applied=0x%x\n", alloc_tuned);
+
     int dump_mode = 0;
     const char *trace_dir = NULL;
 

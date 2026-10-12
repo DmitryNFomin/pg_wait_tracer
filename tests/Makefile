@@ -23,6 +23,8 @@ TESTS     = test_wait_event test_cmdline test_spawn test_event_writer test_event
             test_golden_fixture test_live_accum test_window_clip \
             test_executions_attribution \
             test_top_queries_percentile \
+            test_event_sort \
+            test_top_queries_context \
             test_variants_p95 \
             test_pid_cap \
             test_probe_bounds \
@@ -31,6 +33,7 @@ TESTS     = test_wait_event test_cmdline test_spawn test_event_writer test_event
             test_agg_raw_crosscheck \
             test_exec_index \
             test_interval_index \
+            test_alloc_tune \
             gen_test_traces gen_bench_traces test_concurrent_rw cross_validate \
             dump_markers wait_cpu_canary test_wait_cpu_canary \
             test_summary_tick_flush \
@@ -127,6 +130,27 @@ test_executions_attribution: test_executions_attribution.c ../src/map_reader.c \
 # I/O, no clock — runs anywhere.
 test_top_queries_percentile: test_top_queries_percentile.c ../src/percentile.h
 	$(CC) $(CFLAGS) -o $@ test_top_queries_percentile.c
+
+# test_event_sort: the loader's order restoration (src/event_sort.h). The
+# fixed-width bottom-up mergesort was 29.88% of warm backend self time
+# (1779-1955 ms per request on a real 5.7M-event window); it is now an
+# in-place natural chain merge with an O(n log n) fallback. The whole safety
+# argument is that the output is BIT-IDENTICAL, so this is a differential
+# against a verbatim private copy of the deleted sort, plus an explicit tie
+# order, the fallback hand-off, and a false-negative suite with a five-way
+# mutation probe. Header-only subject, no link deps, no I/O, no clock.
+test_event_sort: test_event_sort.c ../src/event_sort.h ../src/pg_wait_tracer.h
+	$(CC) $(CFLAGS) -o $@ test_event_sort.c
+
+# test_top_queries_context: the Queries tab's per-row CONTEXT resolution and
+# QUERY_SYNTH flag, which handle_top_queries resolved with TWO full passes
+# over the window PER ROW (1778 ms of the response at the 900 s default) and
+# now resolves in one. Header-only, like percentile.h above: pure in-memory
+# arrays, a verbatim copy of the deleted query_context_for_events as the
+# oracle, seven mutants, the bypass suite and a non-vacuity ledger.
+test_top_queries_context: test_top_queries_context.c ../src/query_ctx_index.h \
+                          ../src/qid_index.h ../src/pg_wait_tracer.h
+	$(CC) $(CFLAGS) -o $@ test_top_queries_context.c
 
 # test_variants_p95: #271 + #269 — pgwt_compute_variants sampled execution
 # times only while exec_count <= 10000 but read min(exec_count, cap) of a
@@ -397,6 +421,23 @@ dump_markers: dump_markers.c $(BUILD)/server_event_reader.o \
               $(BUILD)/server_event_writer.o $(BUILD)/server_wait_event.o $(BUILD)/server_idle_rule.o \
               $(BUILD)/server_spawn.o $(BUILD)/server_cJSON.o
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -llz4 -lz
+
+# test_alloc_tune: src/alloc_tune.h. Header-only, so this links nothing else.
+# The subject is an allocator property (a ~274 MB block served from the brk
+# heap, not returned on free, and re-touched without page faults), measured
+# against the same sequence run untuned in the same process -- the control is
+# what lets the test fail. Pre-tuned MALLOC_* in the environment, an
+# allocation too small to be mmap'd, or an unreadable sbrk() each REFUSE.
+#
+# ../src/alloc_tune.h IS a prerequisite, and has to be. The subject is a
+# header the test #includes, so without it here `make` reports the binary
+# up to date after the header changes and silently runs the STALE one: three
+# mutations of alloc_tune.h (M_MMAP_MAX not set, M_TRIM_THRESHOLD tiny,
+# success reported without calling mallopt) all stayed GREEN against a
+# pre-built tests/ directory before this line existed. Same shape as
+# test_event_sort and test_top_queries_context above.
+test_alloc_tune: test_alloc_tune.c ../src/alloc_tune.h
+	$(CC) $(CFLAGS) -o $@ $<
 
 # test_summary_tick_flush: #277 — the daemon tick flushed the IN-PROGRESS
 # second and left the accumulator's counters in place, so the rest of that
