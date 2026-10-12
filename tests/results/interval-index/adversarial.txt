@@ -1,0 +1,38 @@
+Phase 4 — concurrency interval index. Three adversarial answers, written
+BEFORE any code (worktree agent-adef9dba95a6b9b59, branch
+agent/concurrency-interval-index).
+
+Q1. What input makes this check pass while the product is broken?
+A fixture whose every wait begins and ends inside ONE block, and whose burst
+onsets never straddle a block boundary. Clipping start_ns to the block start
+is then a no-op, so silent-wrong mode 1 is invisible, and "index == oracle"
+is satisfied. Also: a fixture producing zero bursts makes every burst
+assertion 0 == 0. Pinned by (a) the sweep over EVERY block cut of every
+fixture, (b) a non-vacuity ledger whose counters -- cross-block intervals,
+same pid in two chunks in one bucket, intervals excluded for ending past
+`to`, bursts whose onsets straddle a cut, bursts_total>0, a peak>1 -- each
+FAIL the test when zero, and (c) a deliberate falsification mode
+(`./test_interval_index oneblock`) that feeds every fixture as a SINGLE block
+and must exit NONZERO on exactly those counters.
+
+Q2. What single component failing makes this hang or skip rather than fail?
+The mutation harness's compiler. If `cc` is missing or exits 126/127 every
+mutant "fails to build", which a naive harness scores as a catch. Pinned:
+interval_index_mutations.py classifies BUILD-FAILED / NOT-APPLIED /
+STAYED-GREEN as three distinct FAILURES, verifies the pristine baseline is
+GREEN first, requires each needle to match exactly once, passes an explicit
+timeout to every subprocess, and has a --self-test that injects a broken
+compiler and a missing test source and requires the harness itself to exit
+nonzero. The C test contains no sleep, no retry and no clock-dependent
+assertion.
+
+Q3. What depends on timing or ordering, and what pins it?
+Two orderings, both load-bearing for bit-exactness:
+ (1) peak tie-break -- pgwt_compute_concurrency gives a bucket to the FIRST
+     record that REACHES a count, so peak_event[] depends on the order of
+     the event array. The index stores rows in fed stream order and REFUSES
+     (REFUSE_GAP) a non-monotone record feed, a non-consecutive block_idx, or
+     rows that are not non-decreasing by end_ns at seal().
+ (2) burst selection -- compute re-sorts entries by (event_id, start_ns, pid),
+     a total order, so qsort instability cannot leak. Nothing in the module
+     reads a clock; the only timing number is REPORTED, never asserted.

@@ -1,0 +1,12 @@
++ hostname
++ uname -r
++ date -u
++ echo == host: pgwt-gate 6.8.0-139-generic Sun Oct 11 11:05:45 PM UTC 2026 ==
+== host: pgwt-gate 6.8.0-139-generic Sun Oct 11 11:05:45 PM UTC 2026 ==
++ echo == md5 of the files under test ==
+== md5 of the files under test ==
++ md5sum tests/test_data_current_trace_cache.py tests/server_harness.py tests/data_current_trace_cache_mutations.py src/server.c
+abcdedd17e3e1e95c9aeed044bda2d73  tests/test_data_current_trace_cache.py
+f3aacc0222f4fa0115108aeffae7ca75  tests/server_harness.py
+2eb10e68c63fbd1576fec244bd6ab4c8  tests/data_current_trace_cache_mutations.py
+0084cabcdc70e52174c2cf1d42202562  src/server.c

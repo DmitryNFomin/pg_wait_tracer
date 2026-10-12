@@ -1,0 +1,138 @@
+=== #327 evidence-gate BYPASS SUITE, 2026-10-11 ===
+
+Showing that these two scripts can go RED proves the true-positive path, and
+that was never the broken one. Every case below is a way their DETECTION
+could be made unreachable — a false negative — so each is run and each must
+REFUSE rather than print something that reads like a clean run.
+
+Scripts under test:
+  run_redgreen.sh      the six-site hang / no-hang evidence
+  run_atcap_control.sh the control that says the hang is the CAP's fault
+
+Summary of what must happen, and did:
+
+  #  case                                            expect   got
+  -- ----------------------------------------------  -------  --------
+  1  run_redgreen: parent slot handed the FIXED       exit 1   exit 1
+     binary, so there is no hang to see at all
+     (the thing being checked is ABSENT, not wrong)
+  2  run_redgreen: `timeout` missing from PATH        exit 1   exit 1
+     (dependency exits 127)
+  3  run_redgreen: fixed binary chmod -x              exit 1   exit 1
+     (dependency exits 126)
+  A  control: parent sources absent -> cannot build   exit 2   exit 2
+  B  control: the cap+1 -> cap edit silently does     exit 2   exit 2
+     not apply, so the "control" would be a second
+     copy of the cap+1 run and prove nothing
+  C  control: a tree that hangs AT cap too (forced    exit 1   exit 1
+     by SESSION_HT_SIZE 1024 -> 512), i.e. the
+     harness and not the cap is the cause
+  D  control: `timeout` missing from PATH             exit 1   exit 1
+
+Before the hardening, case 1, 2 and 3 all exited 0: run_redgreen.sh printed
+whatever it saw and returned success, so "ERROR: exit 127" six times was
+indistinguishable from a passing run by exit code. That is the defect this
+suite exists to prevent.
+
+The raw output of each case follows.
+
+
+--- case 1: run_redgreen, parent slot handed the FIXED binary, expect exit 1 ---
+=== #327 red/green, timeout 20s per site ===
+parent binary: <scratch>/pb/redprobe_fixed
+fixed  binary: <scratch>/pb/redprobe_fixed
+
+--- parent (<scratch>/pb/redprobe_fixed) ---
+  sessions           exit=0    NO RED: expected exit 124, got 0 — calling pgwt_compute_top_sessions with 1025 distinct pids (cap 1024)...
+RETURNED num_rows=1025
+  sessions_summary   exit=0    NO RED: expected exit 124, got 0 — calling pgwt_compute_top_sessions_from_summaries: 1025 pids across 2 records of <= 1024 (cap 1024)...
+RETURNED num_rows=1025
+  queries            exit=0    NO RED: expected exit 124, got 0 — calling pgwt_compute_top_queries with 2049 distinct query ids (cap 2048)...
+RETURNED num_rows=2049
+  queries_summary    exit=0    NO RED: expected exit 124, got 0 — calling pgwt_compute_top_queries_from_summaries: 2049 query ids across 2 records of <= 2048 (cap 2048)...
+RETURNED num_rows=2049
+  fingerprints       exit=0    NO RED: expected exit 124, got 0 — calling pgwt_compute_fingerprints with 2049 distinct query ids (cap 2048)...
+RETURNED num_rows=2049
+  variants           exit=0    NO RED: expected exit 124, got 0 — calling pgwt_compute_variants with 4097 distinct patterns (cap 4096)...
+RETURNED num_variants=4097 total_executions=4097
+
+--- fixed (<scratch>/pb/redprobe_fixed) ---
+  sessions           exit=0    GREEN: RETURNED num_rows=1025
+  sessions_summary   exit=0    GREEN: RETURNED num_rows=1025
+  queries            exit=0    GREEN: RETURNED num_rows=2049
+  queries_summary    exit=0    GREEN: RETURNED num_rows=2049
+  fingerprints       exit=0    GREEN: RETURNED num_rows=2049
+  variants           exit=0    GREEN: RETURNED num_variants=4097 total_executions=4097
+
+RED/GREEN EVIDENCE REFUSED: see the NO RED / NO GREEN lines above.
+--- case 2: run_redgreen, timeout missing from PATH (127), expect exit 1 ---
+=== #327 red/green, timeout 5s per site ===
+parent binary: <scratch>/pb/redprobe_parent
+fixed  binary: <scratch>/pb/redprobe_fixed
+
+--- parent (<scratch>/pb/redprobe_parent) ---
+  sessions           exit=127  NO RED: expected exit 124, got 127 — tests/results/probe-bounds/run_redgreen.sh: line 35: timeout: command not found
+  sessions_summary   exit=127  NO RED: expected exit 124, got 127 — tests/results/probe-bounds/run_redgreen.sh: line 35: timeout: command not found
+  queries            exit=127  NO RED: expected exit 124, got 127 — tests/results/probe-bounds/run_redgreen.sh: line 35: timeout: command not found
+  queries_summary    exit=127  NO RED: expected exit 124, got 127 — tests/results/probe-bounds/run_redgreen.sh: line 35: timeout: command not found
+  fingerprints       exit=127  NO RED: expected exit 124, got 127 — tests/results/probe-bounds/run_redgreen.sh: line 35: timeout: command not found
+  variants           exit=127  NO RED: expected exit 124, got 127 — tests/results/probe-bounds/run_redgreen.sh: line 35: timeout: command not found
+
+--- fixed (<scratch>/pb/redprobe_fixed) ---
+  sessions           exit=127  NO GREEN: expected exit 0 with a RETURNED line, got 127 — tests/results/probe-bounds/run_redgreen.sh: line 35: timeout: command not found
+  sessions_summary   exit=127  NO GREEN: expected exit 0 with a RETURNED line, got 127 — tests/results/probe-bounds/run_redgreen.sh: line 35: timeout: command not found
+  queries            exit=127  NO GREEN: expected exit 0 with a RETURNED line, got 127 — tests/results/probe-bounds/run_redgreen.sh: line 35: timeout: command not found
+  queries_summary    exit=127  NO GREEN: expected exit 0 with a RETURNED line, got 127 — tests/results/probe-bounds/run_redgreen.sh: line 35: timeout: command not found
+  fingerprints       exit=127  NO GREEN: expected exit 0 with a RETURNED line, got 127 — tests/results/probe-bounds/run_redgreen.sh: line 35: timeout: command not found
+  variants           exit=127  NO GREEN: expected exit 0 with a RETURNED line, got 127 — tests/results/probe-bounds/run_redgreen.sh: line 35: timeout: command not found
+
+RED/GREEN EVIDENCE REFUSED: see the NO RED / NO GREEN lines above.
+--- case 3: run_redgreen, fixed binary chmod -x (126), expect exit 1 ---
+=== #327 red/green, timeout 20s per site ===
+parent binary: <scratch>/pb/redprobe_parent
+fixed  binary: <scratch>/pb/noexec
+
+--- parent (<scratch>/pb/redprobe_parent) ---
+  sessions           exit=124  RED: did not terminate in 20s (the probe loop spins)
+  sessions_summary   exit=124  RED: did not terminate in 20s (the probe loop spins)
+  queries            exit=124  RED: did not terminate in 20s (the probe loop spins)
+  queries_summary    exit=124  RED: did not terminate in 20s (the probe loop spins)
+  fingerprints       exit=124  RED: did not terminate in 20s (the probe loop spins)
+  variants           exit=124  RED: did not terminate in 20s (the probe loop spins)
+
+--- fixed (<scratch>/pb/noexec) ---
+  sessions           exit=126  NO GREEN: expected exit 0 with a RETURNED line, got 126 — timeout: failed to run command ‘<scratch>/pb/noexec’: Permission denied
+  sessions_summary   exit=126  NO GREEN: expected exit 0 with a RETURNED line, got 126 — timeout: failed to run command ‘<scratch>/pb/noexec’: Permission denied
+  queries            exit=126  NO GREEN: expected exit 0 with a RETURNED line, got 126 — timeout: failed to run command ‘<scratch>/pb/noexec’: Permission denied
+  queries_summary    exit=126  NO GREEN: expected exit 0 with a RETURNED line, got 126 — timeout: failed to run command ‘<scratch>/pb/noexec’: Permission denied
+  fingerprints       exit=126  NO GREEN: expected exit 0 with a RETURNED line, got 126 — timeout: failed to run command ‘<scratch>/pb/noexec’: Permission denied
+  variants           exit=126  NO GREEN: expected exit 0 with a RETURNED line, got 126 — timeout: failed to run command ‘<scratch>/pb/noexec’: Permission denied
+
+RED/GREEN EVIDENCE REFUSED: see the NO RED / NO GREEN lines above.
+--- case A: control, parent sources absent (cannot build), expect exit 2 ---
+clang: error: no such file or directory: '<scratch>/nonexistent-src/compute.c'
+clang: error: no such file or directory: '<scratch>/nonexistent-src/wait_event.c'
+clang: error: no such file or directory: '<scratch>/nonexistent-src/idle_rule.c'
+clang: error: no such file or directory: '<scratch>/nonexistent-src/cJSON.c'
+CONTROL REFUSED: the at-cap control did not build
+--- case B: control, the at-cap edit did not apply, expect exit 2 ---
+CONTROL REFUSED: the cap+1 -> cap edit did not apply; this control
+would then be a second copy of the cap+1 run and prove nothing.
+--- case C: control, a tree that hangs AT cap too (SESSION_HT_SIZE 512), expect exit 1 ---
+=== #327 CONTROL: parent compute.c, fixtures at EXACTLY cap (not cap+1) ===
+parent src: <scratch>/shrunk/src
+  sessions           exit=124  CONTROL FAILED: hung at cap too -- the harness, not the cap, hangs
+  sessions_summary   exit=124  CONTROL FAILED: hung at cap too -- the harness, not the cap, hangs
+  queries            exit=0    RETURNED (expected): RETURNED num_rows=2048
+  queries_summary    exit=0    RETURNED (expected): RETURNED num_rows=2048
+  fingerprints       exit=0    RETURNED (expected): RETURNED num_rows=2048
+  variants           exit=0    RETURNED (expected): RETURNED num_variants=4096 total_executions=4096
+--- case D: control, timeout missing from PATH, expect exit 1 ---
+=== #327 CONTROL: parent compute.c, fixtures at EXACTLY cap (not cap+1) ===
+parent src: <scratch>/parent/src
+  sessions           exit=127  CONTROL FAILED: exit 127 -- tests/results/probe-bounds/run_atcap_control.sh: line 43: timeout: command not found
+  sessions_summary   exit=127  CONTROL FAILED: exit 127 -- tests/results/probe-bounds/run_atcap_control.sh: line 43: timeout: command not found
+  queries            exit=127  CONTROL FAILED: exit 127 -- tests/results/probe-bounds/run_atcap_control.sh: line 43: timeout: command not found
+  queries_summary    exit=127  CONTROL FAILED: exit 127 -- tests/results/probe-bounds/run_atcap_control.sh: line 43: timeout: command not found
+  fingerprints       exit=127  CONTROL FAILED: exit 127 -- tests/results/probe-bounds/run_atcap_control.sh: line 43: timeout: command not found
+  variants           exit=127  CONTROL FAILED: exit 127 -- tests/results/probe-bounds/run_atcap_control.sh: line 43: timeout: command not found
