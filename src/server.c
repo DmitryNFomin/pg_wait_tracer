@@ -12,6 +12,7 @@
 #include "cmdline.h"
 #include "cJSON.h"
 #include "percentile.h"
+#include "event_sort.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -2446,50 +2447,20 @@ static enum pgwt_merge_append_result merge_append_sample_part(
 }
 
 /* Clipping can move a delayed sample fragment before records that preceded
- * its physical block. Restore timestamp order without disturbing marker tie
- * order: lifecycle and timeline consumers rely on both properties. */
+ * its physical block, and per-CPU blocks interleave at their seams. Restore
+ * timestamp order without disturbing marker tie order: lifecycle and
+ * timeline consumers rely on both properties. The sort itself lives in
+ * src/event_sort.h (stable, in-place natural chain merge with an O(n log n)
+ * fallback) so tests/test_event_sort.c can reach it directly; the output is
+ * byte-identical to the fixed-width mergesort this replaced, because a
+ * stable sort on one key has exactly one answer. */
 static int stable_sort_events(struct pgwt_trace_event *events, int count)
 {
     if (count < 2)
         return 0;
     if (test_load_alloc_failure("sort"))
         return -1;
-    struct pgwt_trace_event *tmp =
-        malloc((size_t)count * sizeof(*tmp));
-    if (!tmp)
-        return -1;
-
-    struct pgwt_trace_event *src = events;
-    struct pgwt_trace_event *dst = tmp;
-    for (size_t width = 1; width < (size_t)count; width *= 2) {
-        for (size_t base = 0; base < (size_t)count; base += 2 * width) {
-            size_t left = base;
-            size_t mid = base + width < (size_t)count
-                       ? base + width : (size_t)count;
-            size_t right = mid;
-            size_t end = base + 2 * width < (size_t)count
-                       ? base + 2 * width : (size_t)count;
-            size_t out = base;
-            while (left < mid && right < end) {
-                /* Left wins ties: stable marker/event ordering. */
-                if (src[left].timestamp_ns <= src[right].timestamp_ns)
-                    dst[out++] = src[left++];
-                else
-                    dst[out++] = src[right++];
-            }
-            while (left < mid) dst[out++] = src[left++];
-            while (right < end) dst[out++] = src[right++];
-        }
-        struct pgwt_trace_event *swap = src;
-        src = dst;
-        dst = swap;
-        if (width > (size_t)count / 2)
-            break;
-    }
-    if (src != events)
-        memcpy(events, src, (size_t)count * sizeof(*events));
-    free(tmp);
-    return 0;
+    return pgwt_stable_sort_events(events, count, NULL);
 }
 
 static const struct pgwt_gen_cov *gen_cov_get(const struct pgwt_server *srv,
