@@ -283,6 +283,7 @@ test_agg_raw_crosscheck
 # transitions_from_block_aggs() is static, so no C unit can reach the call
 # site -- a re-hand-written comparison there would still ship green.
 test_block_agg
+test_transitions_loader
 # #294: cross_validate drops pgwt_is_idle_event() time from BOTH sides before
 # any share is computed, so when the sampled tier reads less CPU than the exact
 # tier the missing nanoseconds have no visible destination -- "it became
