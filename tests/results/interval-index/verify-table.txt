@@ -1,0 +1,34 @@
+ok    ok    unit test green (Mac)          '121 checks, 0 failed'               unit-test-mac.txt
+ok    ok    bit-exact answers compared     '8476 (cut, window, resolution)'     unit-test-mac.txt
+ok    ok    block-cut sets built           '802 block-cut sets'                 unit-test-mac.txt
+ok    ok    of them multi-block            '794 indexes had MORE THAN ONE'      unit-test-mac.txt
+ok    ok    intervals compared             '44266 intervals were actually'      unit-test-mac.txt
+ok    ok    cross-block intervals          '2714 intervals straddled'           unit-test-mac.txt
+ok    ok    intervals before coverage      '545 intervals started before'       unit-test-mac.txt
+ok    ok    open-past-`to` exclusions      '3052 intervals were excluded'       unit-test-mac.txt
+ok    ok    end-before-`from` exclusions   '4020 intervals were excluded'       unit-test-mac.txt
+ok    ok    same pid, 2 blocks, 1 bucket   '1058 answers had the SAME pid'      unit-test-mac.txt
+ok    ok    answers with peak > 1          '5286 answers had a bucket peak'     unit-test-mac.txt
+ok    ok    bursts spanning >= 2 blocks    '4694 answers contained a burst'     unit-test-mac.txt
+ok    ok    burst onsets detected          '6214 burst onsets'                  unit-test-mac.txt
+ok    ok    windows that selected nothing  '1148 windows selected nothing'      unit-test-mac.txt
+ok    ok    prefilter skips across sweep   'a block 20134 times'                unit-test-mac.txt
+ok    ok    storage compaction 6.0x        '960000 index bytes for 5760000'     unit-test-mac.txt
+ok    ok    materialised compaction 3.0x   '960048 bytes vs 2880048'            unit-test-mac.txt
+ok    ok    blocks prefiltered away        'SKIPPED 19 of 40'                   unit-test-mac.txt
+ok    ok    Mac timing (index SLOWER)      'index_us=1475.0 raw_us=1266.0'      unit-test-mac.txt
+ok    ok    GATE RED: ledger               '15 checks, 5 failed'                oneblock-falsification-mac.txt
+ok    ok    GATE RED: mutations 27/27      'detected (RED):   27'               mutations.txt
+ok    ok    mutations, no blind spot       'STAYED-GREEN:     0'                mutations.txt
+ok    ok    harness self-test green        'SELF-TEST PASSED'                   mutation-selftest.txt
+ok    ok    GATE RED: self-test assert     'SELF-TEST FAILED'                   selftest-assertion-red.txt
+ok    ok    ...for the right reason        'STAYED-GREEN is 0, not 1'           selftest-assertion-red.txt
+ok    ok    box-check live tier            'passed 102, failed 0'               box-check-summary.txt
+ok    ok    live UI smoke                  'overall=PASS'                       box-check-summary.txt
+ok    ok    unit test green (gate-1)       '121 checks, 0 failed'               unit-test-linux.txt
+ok    ok    gate-1 timing pair             'index_us=8887.9 raw_us=9340.0'      unit-test-linux.txt
+ok    ok    make check verdict             'CHECK PASSED (full)'                make-check-tail.txt
+ok    ok    29 of 29 python checks         'Ran 29, passed 29, failed 0'        make-check-tail.txt
+
+31 claims; 0 log-side mismatches, 0 table-side mismatches, 0 stale values in the table
+VERIFIED

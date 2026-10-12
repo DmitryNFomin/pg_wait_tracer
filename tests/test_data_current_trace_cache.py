@@ -30,8 +30,12 @@ restart — so the sections are, in order of what would hurt:
   5. BYPASS SUITE. Every way sections 1-4 could be satisfied without looking at
      anything: a differential run where the cache was never consulted, data
      that lives only in a rotated file, a missing/garbage/over-long meta, a
-     generator that did not run, a stats line that cannot be parsed, and the
-     over-budget drop. A gate that cannot see must refuse, never approve.
+     generator that did not run, a stats line that cannot be parsed, the
+     over-budget drop, a startup refusal whose reason the harness could not
+     retrieve because the request write hit EPIPE first (#348), and a
+     block-layout parse that could not account for the whole file — which is
+     what decides where the truncation case cuts (#334). A gate that cannot
+     see must refuse, never approve.
 
 WHAT THIS SUITE CANNOT GATE. The cached block descriptor carries the block's
 TYPE as well as its sample period, and the type is used for exactly one thing:
@@ -51,6 +55,8 @@ Needs pgwt-server and tests/gen_test_traces built. No PG, no root, no network.
 import json
 import os
 import shutil
+import struct
+import subprocess
 import sys
 import tempfile
 import time
@@ -336,6 +342,105 @@ def write_meta(trace_dir, committed):
         f.flush()
         os.fsync(f.fileno())
     os.rename(tmp, meta_path(trace_dir))
+
+
+# ── on-disk block layout (src/event_writer.h) ────────────────────────────────
+#
+# A trace file is a 28-byte packed file header followed, per block, by a
+# 40-byte packed block header and `compressed_size` payload bytes. After the
+# last block there is either nothing (the shape a LIVE current.trace has: the
+# daemon writes the block index only on rotation) or a footer of
+# num_blocks * 16-byte index entries followed by a uint32 count — which is
+# what tests/gen_test_traces writes even for current.trace.
+TRACE_MAGIC = 0x54574750
+# magic, version, flags, pg_version, start_time_ns, clock_offset_ns
+TRACE_HDR = struct.Struct("<IHHIQQ")
+# first_ts, last_ts, num_events, compressed_size, uncompressed_size,
+# block_type, reserved, sample_period_ns
+BLOCK_HDR = struct.Struct("<QQIIIHHQ")
+# timestamp_ns, file_offset
+INDEX_ENTRY = struct.Struct("<QQ")
+FOOTER_COUNT = struct.Struct("<I")
+# src/event_writer.h: #define PGWT_BLOCK_EVENTS 4096 — the writer's per-block
+# event cap, and the same bound src/event_reader.c's committed-block scan
+# applies before trusting a block header. Named here for the same reason the
+# 28/40/16 sizes are asserted above: a silent divergence from the C side would
+# make this walk accept a header the product rejects, or stop at one it reads.
+BLOCK_EVENTS = 4096
+
+
+def block_extents(path):
+    """[(offset, end_offset)] for every block physically present in `path`.
+
+    bypass_truncated_file_under_meta needs it to cut the file at a BLOCK
+    BOUNDARY. Cutting by byte count (`f.truncate(size // 3)`) lands inside
+    block 0, whose payload is then undecodable, so a server reads NO events
+    from the surviving prefix, both sides of the differential answer empty, and
+    the comparison is satisfied without checking anything (#334 — measured, a
+    cache deliberately retaining and serving the stale superset still passed).
+
+    EVERY BYTE MUST BE ACCOUNTED FOR, and the answer is cross-checked against
+    the file's own block index when one is present: the footer's offsets have
+    to be the offsets this walk computed. A parse that answered anyway on a
+    file it could not explain would hand back a cut offset that silently means
+    something else, and every assertion built on it would be measuring
+    something else — so each unexplained shape raises instead.
+    """
+    if TRACE_HDR.size != 28 or BLOCK_HDR.size != 40 or INDEX_ENTRY.size != 16:
+        raise AssertionError("header sizes moved: file=%d block=%d index=%d "
+                             "(src/event_writer.h says 28, 40 and 16)"
+                             % (TRACE_HDR.size, BLOCK_HDR.size,
+                                INDEX_ENTRY.size))
+    size = os.path.getsize(path)
+    with open(path, "rb") as f:
+        blob = f.read()
+    if len(blob) != size:
+        raise AssertionError("%s: read %d of %d bytes"
+                             % (path, len(blob), size))
+    if size < TRACE_HDR.size:
+        raise AssertionError("%s is shorter than a file header (%d bytes)"
+                             % (path, size))
+    magic = TRACE_HDR.unpack_from(blob, 0)[0]
+    if magic != TRACE_MAGIC:
+        raise AssertionError("%s is not a trace file (magic 0x%08x)"
+                             % (path, magic))
+    out = []
+    off = TRACE_HDR.size
+    while off + BLOCK_HDR.size <= size:
+        _first, _last, num_events, csize = BLOCK_HDR.unpack_from(blob, off)[:4]
+        if num_events <= 0 or num_events > BLOCK_EVENTS or csize <= 0:
+            break
+        end = off + BLOCK_HDR.size + csize
+        if end > size:
+            break
+        out.append((off, end))
+        off = end
+    if not out:
+        raise AssertionError("%s holds no readable block at all (%d bytes, "
+                             "stopped at %d)" % (path, size, off))
+    tail = size - off
+    if tail == 0:
+        return out                      # the live-daemon shape
+    # Otherwise the only thing the rest of the file is allowed to be is this
+    # file's own block index.
+    want = len(out) * INDEX_ENTRY.size + FOOTER_COUNT.size
+    if tail != want:
+        raise AssertionError(
+            "%s: %d unexplained bytes after the last block at %d — neither a "
+            "footer for %d blocks (%d bytes) nor nothing"
+            % (path, tail, off, len(out), want))
+    nb = FOOTER_COUNT.unpack_from(blob, size - FOOTER_COUNT.size)[0]
+    if nb != len(out):
+        raise AssertionError("%s: footer counts %d blocks, the walk found %d"
+                             % (path, nb, len(out)))
+    for i, (start_off, _end) in enumerate(out):
+        _ts, idx_off = INDEX_ENTRY.unpack_from(blob,
+                                               off + i * INDEX_ENTRY.size)
+        if idx_off != start_off:
+            raise AssertionError(
+                "%s: footer puts block %d at %d, the walk found it at %d"
+                % (path, i, idx_off, start_off))
+    return out
 
 
 def fixture_window(base=BASE, span_s=36, pad_s=2):
@@ -986,11 +1091,39 @@ def bypass_unparseable_meta(tr):
 
 
 def bypass_truncated_file_under_meta(tr):
-    """The meta claims N committed blocks but the file has been truncated below
-    them — the partial-range case, the one where the thing being checked is
-    ABSENT rather than wrong. A cache holding blocks that no longer exist must
-    drop them, and the answer must be whatever a fresh uncached server says:
-    a smaller count or a loud refusal, never the retained superset."""
+    """The meta claims N committed blocks but the file has been byte-truncated
+    below them -- the partial-range case, the one where the thing being checked
+    is ABSENT rather than wrong. A cache holding blocks that no longer exist
+    must drop them, and the answer must be whatever a fresh uncached server
+    says: a smaller NONEMPTY prefix, never the retained superset.
+
+    THE CUT LANDS ON A BLOCK BOUNDARY, and that is the whole of #334. The
+    byte-count cut this started as (`f.truncate(size // 3)`) landed inside
+    block 0: its payload was then undecodable, so the surviving prefix yielded
+    no events at all, both servers answered empty, and the assertion compared
+    empty to empty. Measured with cur_cache_sync() made a no-op and the reader
+    index extended from the cached descriptors -- a server that retained AND
+    served the stale superset -- this test still PASSED. Removing whole
+    trailing blocks instead leaves a readable prefix, so the answer is nonempty
+    and a retained suffix is visible in it. The suffix bytes are GONE from the
+    file, so a server that still answers them can only be answering them out
+    of the cache.
+
+    The meta is left alone: it still publishes the pre-truncation count, which
+    is the scenario in the name.
+
+    IF THE SERVER IS EVER HARDENED TO REFUSE a current.trace whose meta claims
+    more blocks than the file holds, this test goes red -- and it must then be
+    REDESIGNED, NEVER RELAXED. Master's predecessor allowed "a loud refusal OR
+    fewer events", and that disjunction is exactly what made it vacuous: an
+    empty answer satisfied it on both sides of the differential, so a server
+    retaining AND serving the stale superset passed 5/5
+    (tests/results/issue334/vacuity-master.log). Requiring a nonempty smaller
+    prefix on BOTH sides is what gives the differential anything to compare.
+    So the fix for that hardening is a fixture where the cache holds blocks a
+    LEGAL file no longer has -- a rotation, or a restart that rewrites the file
+    -- not widening this assertion back to "or it refused".
+    """
     trace_dir = generate_traces(busy_scenario(span_s=12, pids=3, per_pid=2500))
     tmp = tempfile.mkdtemp(prefix="pgwt_cc_err_")
     try:
@@ -998,30 +1131,82 @@ def bypass_truncated_file_under_meta(tr):
         env = dict(STATS_ENV)
         env["PGWT_CURRENT_TRACE_CACHE"] = "1"
         path = os.path.join(trace_dir, "current.trace")
-        size = os.path.getsize(path)
+        committed = read_meta(trace_dir)
+        extents = block_extents(path)
+        tr.check(committed > 1 and len(extents) == committed,
+                 "the fixture has whole blocks to remove (meta says %d "
+                 "committed, %d physically present)"
+                 % (committed, len(extents)))
+        if committed <= 1 or len(extents) != committed:
+            return
+        keep = committed - 1
+        cut = extents[keep - 1][1]
+        size_before = os.path.getsize(path)
         w_from, w_to = fixture_window(span_s=12)
         with ServerHarness(trace_dir, env=env, stderr_path=err) as srv:
             before = srv.query(PROBE_CMD, from_=w_from, to_=w_to)
             n_before = count_of(before, PROBE_COUNT)
+            # The second identical request is what makes `pre` evidence about
+            # a CACHE: the first one decodes and stores (served=0 however the
+            # cache behaves), only a repeat can be served from it. Without
+            # this, every assertion below would hold on a build where the
+            # cache is never consulted for PROBE_CMD at all.
+            again = srv.query(PROBE_CMD, from_=w_from, to_=w_to)
             pre = read_curcache(err)
             with open(path, "r+b") as f:
-                f.truncate(size // 3)
+                f.truncate(cut)
+            # One unrelated request between the cut and the measurement, for
+            # ORDERING, not as a retry: cov_scan_file() sees the smaller block
+            # count, cov_reset()s the entry, and the entry is then dropped
+            # from the coverage array for the REST of that same request (it is
+            # rebuilt on the next one). A measurement taken on the
+            # dropped-entry request reads empty whatever the cache holds --
+            # the same blindness the byte-count cut had. The measured request
+            # below is still ONE request, and a retained suffix in it still
+            # fails.
+            #
+            # That blind request is issue #342 (an absence reported as zero),
+            # and this test does NOT lean on it: with this line deleted the
+            # measurement comes back empty and the assertion goes RED
+            # (measured, tests/results/issue334/sabotage.log case S7). So
+            # fixing #342 cannot satisfy this test by accident -- it would
+            # BREAK it, and the repair is then to delete this line and this
+            # comment, nothing else.
+            srv.query("info")
             after = srv.query(PROBE_CMD, from_=w_from, to_=w_to)
             post = read_curcache(err)
-        print("    truncation: %d events -> %s" % (n_before, canonical(after)[:160]))
+        print("    blocks %d -> %d (%d -> %d bytes); events %d -> %s"
+              % (committed, keep, size_before, cut, n_before,
+                 canonical(after)[:160]))
         print("    curcache %s -> %s" % (pre, post))
+        tr.check(os.path.getsize(path) == cut < size_before,
+                 "the file really lost its trailing block (%d -> %d bytes, "
+                 "now %d)" % (size_before, cut, os.path.getsize(path)))
         tr.check(n_before > 0, "the pre-truncation request saw events")
+        tr.check_eq(canonical_body(before), canonical_body(again),
+                    "the repeated pre-truncation request answers identically")
+        # THE BLINDNESS GUARD: a run where the cache answered nothing is not
+        # evidence about what a cache retains.
+        require_used(tr, pre, "the cache served the pre-truncation request")
+        tr.check(pre is not None and pre["lo"] + pre["blocks"] > keep,
+                 "the cached entry held a block the file no longer has "
+                 "(cached [%s, %s), file keeps %d)"
+                 % (pre["lo"] if pre else "?",
+                    pre["lo"] + pre["blocks"] if pre else "?", keep))
         refused = "unavailable" in after or "error" in after
-        tr.check(refused or count_of(after, PROBE_COUNT) < n_before,
-                 "a truncated current.trace refuses or returns FEWER events, "
-                 "never the cached superset")
+        n_after = count_of(after, PROBE_COUNT) if not refused else 0
+        tr.check(not refused and 0 < n_after < n_before,
+                 "a byte-truncated current.trace serves a nonempty SMALLER "
+                 "prefix, never the cached superset (%d -> %d)"
+                 % (n_before, n_after))
         if pre and post:
             tr.check(post["resets"] > pre["resets"],
                      "the vanished blocks were dropped from the entry "
                      "(resets %d -> %d)" % (pre["resets"], post["resets"]))
-            tr.check(post["blocks"] <= pre["blocks"],
+            tr.check(post["lo"] + post["blocks"] <= keep,
                      "the entry did not keep blocks the file no longer has "
-                     "(%d -> %d)" % (pre["blocks"], post["blocks"]))
+                     "(cached [%d, %d), file keeps %d)"
+                     % (post["lo"], post["lo"] + post["blocks"], keep))
         else:
             tr.check(False, "curcache stats unreadable across the truncation")
         # The control MUST query the same command as the probe. It said
@@ -1033,6 +1218,11 @@ def bypass_truncated_file_under_meta(tr):
         with ServerHarness(trace_dir,
                            env={"PGWT_CURRENT_TRACE_CACHE": "0"}) as srv:
             ctl = srv.query(PROBE_CMD, from_=w_from, to_=w_to)
+        # ...and it must be nonempty, or the exact match below is empty ==
+        # empty again, on the uncached side this time.
+        tr.check("unavailable" not in ctl and "error" not in ctl and
+                 count_of(ctl, PROBE_COUNT) > 0,
+                 "the fresh uncached read of the truncated file is nonempty")
         tr.check_eq(canonical_body(after), canonical_body(ctl),
                     "the truncated read matches a fresh uncached read exactly")
     finally:
@@ -1249,9 +1439,171 @@ def bypass_dependencies(tr):
         shutil.rmtree(empty, ignore_errors=True)
 
 
+# A stand-in for pgwt-server's startup refusal: src/server.c's
+# pgwt_scan_trace_files() finds nothing, server_init() prints the reason to
+# stderr and returns -1, and main() returns 1 -- all BEFORE the
+# `while (fgets(line, ..., stdin))` request loop. The stub reproduces exactly
+# that shape, so the harness can be driven through the EPIPE branch on
+# purpose instead of waiting for the race to pick it.
+STUB_REFUSES = ('#!/bin/sh\n'
+                'echo "pgwt-server: no trace files found in $1" >&2\n'
+                'exit 1\n')
+# ...and the same exit with NO reason written. The gate must not survive this.
+STUB_SILENT = '#!/bin/sh\nexit 1\n'
+
+
+def bypass_refusal_reason_survives_epipe(tr):
+    """#348: the refusal reason must be retrievable on BOTH outcomes of the
+    startup race, and must still be absent when the server never wrote one.
+
+    pgwt-server exits before it ever reads stdin, so the harness's request
+    write races an exiting process: it either lands in the pipe buffer (the
+    caller then hits the closed-stdout branch) or raises EPIPE. Which one is
+    pure timing, which is why the real test's assertion was intermittently
+    red (79/79 green on one box, EPIPE elsewhere). Timing is pinned here
+    rather than tolerated: the stub is WAITED FOR, so the following write
+    cannot be anything but EPIPE, and the case where the reason is genuinely
+    missing is run as its own case so the retrieval cannot pass by inventing
+    one.
+    """
+    for label, script, has_reason in (("names its reason", STUB_REFUSES, True),
+                                      ("exits silently", STUB_SILENT, False)):
+        d = tempfile.mkdtemp(prefix="pgwt_cc_epipe_")
+        try:
+            stub = os.path.join(d, "stub-server")
+            with open(stub, "w") as f:
+                f.write(script)
+            os.chmod(stub, 0o755)
+            err = os.path.join(d, "stub.err")
+            srv = ServerHarness(d, stderr_path=err)
+            # start() would send its own 'info' the instant the process is
+            # spawned, which is the race. Spawn it the same way start() does
+            # -- directly, so server_harness.SERVER_BIN is deliberately left
+            # alone -- then WAIT: with the reader gone, the next write is
+            # EPIPE by construction, on every machine and every run.
+            srv._stderr_file = open(err, "w")
+            srv.proc = subprocess.Popen(
+                [stub, d], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=srv._stderr_file, text=True)
+            srv.proc.wait(timeout=10)
+            raised = ""
+            try:
+                srv.query("info")
+            except Exception as exc:
+                raised = "%s: %s" % (type(exc).__name__, exc)
+            # Close what was opened by hand. ServerHarness.stop() is not
+            # usable here (its stdin.close() would raise on the very broken
+            # pipe this case exists to create), and this function runs twice
+            # per suite, so a leak here is two pipe pairs per run.
+            for handle in (srv.proc.stdin, srv.proc.stdout):
+                try:
+                    handle.close()
+                except OSError:
+                    pass
+            srv._stderr_file.close()
+            srv._stderr_file = None
+            srv.proc = None
+            print("    stub %s -> %s" % (label, raised[:120]))
+            tr.check(raised != "",
+                     "a stub that exits before reading stdin still raises "
+                     "(%s)" % label)
+            # Without this the case could pass through the closed-stdout
+            # branch, leaving the EPIPE branch -- the whole fix -- unexercised.
+            tr.check("closed stdin before reading" in raised,
+                     "and it is the EPIPE branch that answered (%s): %r"
+                     % (label, raised[:100]))
+            if has_reason:
+                tr.check("no trace files" in raised,
+                         "and the reason survives EPIPE: %r" % raised[:110])
+            else:
+                tr.check("no trace files" not in raised,
+                         "and a server that wrote NO reason yields none -- "
+                         "the retrieval cannot invent one: %r" % raised[:110])
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+
+def bypass_block_extents_refuses(tr):
+    """block_extents() decides WHERE bypass_truncated_file_under_meta cuts.
+    A parse that answered anyway on a file it could not account for would hand
+    back an offset that silently means something else, and every assertion
+    built on it would be measuring something else. So every unexplained shape
+    must raise -- and each case is checked on its own rather than in a loop
+    one success could satisfy.
+
+    The one shape that must NOT raise is the live-daemon one: blocks and no
+    footer at all. gen_test_traces writes a footer even for current.trace, so
+    without that case this helper could demand a footer the real product never
+    writes and nobody would notice until a daemon file reached it."""
+    # Two blocks, not one: a one-block file has no second footer entry to
+    # falsify and no interior boundary to cut at.
+    good = generate_traces(busy_scenario(span_s=6, pids=2, per_pid=3000))
+    try:
+        path = os.path.join(good, "current.trace")
+        extents = block_extents(path)
+        size = os.path.getsize(path)
+        contiguous = all(extents[i][1] == extents[i + 1][0]
+                         for i in range(len(extents) - 1))
+        tr.check(len(extents) > 1 and extents[0][0] == 28 and contiguous and
+                 extents[-1][1] <= size,
+                 "a real current.trace parses to contiguous blocks from byte "
+                 "28 (%d blocks, last ends %d, file %d)"
+                 % (len(extents), extents[-1][1], size))
+        payload = open(path, "rb").read()
+        n = len(extents)
+        footerless = payload[:extents[-1][1]]
+        lying_count = (payload[:size - 4]
+                       + FOOTER_COUNT.pack(n + 1))
+        lying_offset = (payload[:extents[-1][1]]
+                        + INDEX_ENTRY.pack(0, 0)
+                        + payload[extents[-1][1] + INDEX_ENTRY.size:])
+        d = tempfile.mkdtemp(prefix="pgwt_cc_extents_")
+        try:
+            victim = os.path.join(d, "victim.trace")
+
+            def parse(blob):
+                """Returns ("", extents) when accepted, (why, None) when
+                refused."""
+                with open(victim, "wb") as f:
+                    f.write(blob)
+                try:
+                    return "", block_extents(victim)
+                except AssertionError as exc:
+                    return str(exc), None
+                except Exception as exc:          # noqa: BLE001
+                    return "%s: %s" % (type(exc).__name__, exc), None
+
+            why, got = parse(footerless)
+            tr.check(why == "" and got == extents,
+                     "a footerless file -- the shape a LIVE current.trace has "
+                     "-- parses to the same blocks (%s)"
+                     % (why[:70] if why else "%d blocks" % len(got or [])))
+            refused = (
+                ("an empty file", b""),
+                ("a file shorter than the header", payload[:20]),
+                ("a header with no block at all", payload[:28]),
+                ("a wrong magic", b"XXXX" + payload[4:]),
+                ("a torn block header", payload[:28 + 10]),
+                ("a block payload cut short", payload[:extents[0][1] - 16]),
+                ("trailing bytes after the footer", payload + b"junk"),
+                ("a footer that counts one block too many", lying_count),
+                ("a footer that puts block 0 somewhere else", lying_offset),
+            )
+            for label, blob in refused:
+                why, _ = parse(blob)
+                tr.check(why != "",
+                         "%s is refused, not parsed (%s)" % (label, why[:70]))
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+    finally:
+        cleanup_traces(good)
+
+
 def section_bypass(tr):
     print("\n### 5. bypass suite: ways this test could stop checking ###")
     bypass_dependencies(tr)
+    bypass_refusal_reason_survives_epipe(tr)
+    bypass_block_extents_refuses(tr)
     bypass_stats_parser(tr)
     trace_dir = generate_traces(busy_scenario(span_s=10, pids=2, per_pid=2000))
     try:

@@ -1,0 +1,8 @@
+events=4307056 window=1851.0 s
+WHOLE TRACE: distinct pids = 100  (cap at :1580/:2517 was 1024, 9.8%)
+  900 s window @ +     0 s: distinct pids =   55  (5.4% of 1024)
+  900 s window @ +   300 s: distinct pids =   56  (5.5% of 1024)
+  900 s window @ +   600 s: distinct pids =   55  (5.4% of 1024)
+  900 s window @ +   900 s: distinct pids =   55  (5.4% of 1024)
+  900 s window @ +  1200 s: distinct pids =   46  (4.5% of 1024)
+WORST 900 s WINDOW: 56 distinct pids @ +300 s (5.5% of the 1024 cap)
