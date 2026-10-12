@@ -23,6 +23,7 @@ TESTS     = test_wait_event test_cmdline test_spawn test_event_writer test_event
             test_golden_fixture test_live_accum test_window_clip \
             test_executions_attribution \
             test_top_queries_percentile \
+            test_top_queries_context \
             test_variants_p95 \
             test_pid_cap \
             test_probe_bounds \
@@ -127,6 +128,16 @@ test_executions_attribution: test_executions_attribution.c ../src/map_reader.c \
 # I/O, no clock — runs anywhere.
 test_top_queries_percentile: test_top_queries_percentile.c ../src/percentile.h
 	$(CC) $(CFLAGS) -o $@ test_top_queries_percentile.c
+
+# test_top_queries_context: the Queries tab's per-row CONTEXT resolution and
+# QUERY_SYNTH flag, which handle_top_queries resolved with TWO full passes
+# over the window PER ROW (1778 ms of the response at the 900 s default) and
+# now resolves in one. Header-only, like percentile.h above: pure in-memory
+# arrays, a verbatim copy of the deleted query_context_for_events as the
+# oracle, seven mutants, the bypass suite and a non-vacuity ledger.
+test_top_queries_context: test_top_queries_context.c ../src/query_ctx_index.h \
+                          ../src/qid_index.h ../src/pg_wait_tracer.h
+	$(CC) $(CFLAGS) -o $@ test_top_queries_context.c
 
 # test_variants_p95: #271 + #269 — pgwt_compute_variants sampled execution
 # times only while exec_count <= 10000 but read min(exec_count, cap) of a
