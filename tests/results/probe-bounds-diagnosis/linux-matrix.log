@@ -1,0 +1,16 @@
+current exit=0
+  ok: a class filter the summary records cannot honour yields NO rows (#318 refusal still intact)
+
+=== 87 checks, 0 failures ===
+pr358 exit=0
+  ok: a class filter the summary records cannot honour yields NO rows (#318 refusal still intact)
+
+=== 87 checks, 0 failures ===
+cx345-before exit=1
+  FAIL: a class filter the summary records cannot honour yields NO rows (#318 refusal still intact) (tests/test_probe_bounds.c:1018)
+
+=== 87 checks, 1 failures ===
+cx345-after exit=0
+  ok: a class filter the summary records cannot honour explicitly refuses with failed=1, num_rows=-1 and no rows (#318/#345)
+
+=== 87 checks, 0 failures ===
