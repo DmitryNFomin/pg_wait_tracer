@@ -50,6 +50,44 @@ test_top_queries_percentile
 # safety argument is bit-identical output, so the test is a differential
 # against a verbatim copy of the deleted sort plus a mutation probe.
 test_event_sort
+# The SAME handler, the other 40% of its cost: handle_top_queries resolved
+# each row's context (databaseid/userid/ambiguous) with a full scan of the
+# window via query_context_for_events, and then scanned the window AGAIN for
+# PGWT_EVENT_FLAG_QUERY_SYNTH -- 26 rows x 2 passes x 5.7M events, ~14 GB of
+# memory traffic, measured at 1778 ms. Both facts are per-query_id properties
+# of the same array and are now built in ONE pass (src/query_ctx_index.h).
+# The whole safety argument is bit-identical output, so this is a
+# differential against a VERBATIM copy of the deleted function plus the
+# deleted synth loop, over four event ORDERS per fixture (the one-pass form
+# is only equivalent because the rule is order-independent, which is
+# asserted separately on the oracle itself). Seven mutants -- first-wins,
+# latest-wins, resume-after-refusal, absent-reads-resolved,
+# missing-metadata-ignored, zero-userid-accepted, synth-from-first-event-only
+# -- must each be caught, and the deliberately BLIND fixtures (every pid
+# resolves and agrees; no synth flag anywhere) must stay blind, so the
+# suite's power is known to come from the adversarial fixtures.
+# Bypass suite, because this table's failure mode is "no context", which is
+# indistinguishable from a legitimately context-less row: a NULL resolver, a
+# NULL/empty/negative range, an allocation failure at each of the two growth
+# points, an injection point that is never reached, an unrelated injection
+# name that must NOT fail, a partial range that must change the verdict, a
+# comparator blind to one field, absent-vs-refused, and reuse after free.
+# Non-vacuity ledger: fourteen counters, each failing the test at zero.
+# Companion: tests/top_queries_context_mutations.py breaks one guard at a
+# time (12 product + 12 test + 4 combos) and requires this test to notice
+# each; the four COMBOS expect GREEN on purpose, because that is the only
+# way to show a refusal gate is the UNIQUE detector of its defect rather
+# than incidentally covered -- and the only way a weakened threshold
+# (`> 0` -> `>= 0`) can be tested at all, since alone it stays green and
+# proves nothing. `--self-test` drives the harness's own four failure modes
+# (anchor matches nothing, mutation does not compile, and a mismatch in
+# each direction) and requires all four to be REPORTED as failures. Not in
+# this list because it recompiles the test 29 times (~20 s) and is
+# evidence, not a gate. It earned its keep immediately: it found a
+# redundant per-field slot initialisation that made the real (memset)
+# initialisation untestable, and three mutations that were green because
+# the shape they removed was still covered elsewhere.
+test_top_queries_context
 # #271 (correctness) + #269 (cost), the same four lines of
 # pgwt_compute_variants: the p95 was selected from exec_times slots that the
 # <= 10000 sampling guard never wrote (realloc does not zero), reported as a

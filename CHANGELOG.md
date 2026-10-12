@@ -10,6 +10,31 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+- **perf: `top_queries` resolves each row's context and synth flag in ONE pass
+  over the window, not two passes per row.** `handle_top_queries` resolved two
+  facts inside its row loop, each with a full scan of the window's events:
+  `query_context_for_events()` looked for the row's `query_id` to derive
+  databaseid/userid/ambiguous, and an inline loop scanned again for
+  `PGWT_EVENT_FLAG_QUERY_SYNTH`. At the UI's default 900 s window on a dense
+  capture that is 26 rows x 2 passes x 5.7M events -- ~274 MB per pass, roughly
+  14 GB of memory traffic, **measured at 1778 ms, about 40% of the whole
+  response**. Both facts are per-`query_id` properties of the same array, so
+  `src/query_ctx_index.h` builds them once before the row loop and each row
+  becomes a lookup.
+  **Output is bit-identical by construction.** The deleted function returned
+  -1 at the FIRST unusable backend and otherwise kept the FIRST contributor's
+  ids, refusing on any later disagreement, so its answer is a pure function of
+  the contributing SET -- refused iff any contributor's metadata is
+  missing/ambiguous/incomplete or two contributors disagree, otherwise the
+  common ids, otherwise absent. That is what makes the accumulate-as-you-go
+  form equivalent in any event order, and the differential in
+  `tests/test_top_queries_context.c` compares against a VERBATIM copy of the
+  deleted function over four event orders per fixture. Absence is never
+  reported as zero: a growth failure sets `failed` and joins the same refusal
+  arm as #327, because a half-built table reports rows as context-less, which
+  is exactly what a legitimately context-less row looks like; a NULL resolver
+  refuses for the same reason.
+
 - **perf: the loader's order restoration is a natural chain merge, not a full
   mergesort.** `server_load_events_fi_mode()` concatenates one run per
   contributing trace file and then restores timestamp order; the array is
