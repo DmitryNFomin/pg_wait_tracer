@@ -178,7 +178,7 @@ test_idle_summary
 # mutation probes proving each comparator can see one nanosecond, one count,
 # one grid cell and one missing row.
 test_agg_raw_crosscheck
-# Paint-latency Phase 1 (docs/PAINT_LATENCY_PLAN.md): the per-committed-block
+# Paint-latency Phases 1 and 2 (docs/PAINT_LATENCY_PLAN.md): the per-committed-block
 # transition aggregate, src/block_agg.c. `transitions` loads the full raw event
 # window on every request (~0.68 s per million records) because a per-second
 # summary record cannot express WHICH event followed which. A committed block
@@ -234,6 +234,14 @@ test_agg_raw_crosscheck
 # Known limit, tracked as #339: M22 mutates the PREDICATE, and
 # transitions_from_block_aggs() is static, so no C unit can reach the call
 # site -- a re-hand-written comparison there would still ship green.
+# Phase 2 adds the per-event table and derived per-class fold, checked against
+# SHIPPING pgwt_compute_top_events(): 17,899 rows over 5,067 windows, including
+# clipped durations, event filters, sampled continuation records and idle time.
+# The shipped window builder is exercised too, including REFUSED_CLIP -> DECODE.
+# The v2 bypasses distinguish an unavailable table from an absent event and
+# poison refused DB-time readouts; a single-instant window retains its event.
+# tests/results/block-agg-event-class/run_mutations.py records 23 RED mutants,
+# including four ORACLE mutations, and refuses missing compilers or anchors.
 test_block_agg
 # #294: cross_validate drops pgwt_is_idle_event() time from BOTH sides before
 # any share is computed, so when the sampled tier reads less CPU than the exact

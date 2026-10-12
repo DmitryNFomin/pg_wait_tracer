@@ -91,3 +91,24 @@ HOW TO REPRODUCE
   sh  tests/results/block-agg-event-class/build.sh   # prints the binary path
   python3 tests/results/block-agg-event-class/run_mutations.py
   python3 tests/results/block-agg-event-class/run_mutations.py --selftest
+
+REVIEW QUESTION: THE LARGE MUTATION LOGS
+  The original commits deliberately kept machine-generated mutation output as
+  evidence, including the first sweep's N6 GREEN-HOLE. Much of the volume was
+  the same failed differential assertion repeated for different rows/windows.
+  Before this landing pass, de11ead (rebased as bb0b733) added an explicitly
+  labelled digest and ec30211 (rebased as ac64cc9) regenerated the logs through
+  it. Those commits already replaced the
+  bulk at the branch tip; this landing pass removes no evidence and does not
+  rewrite those historical commits to purge their full logs.
+
+  A reviewer can start with mutations-summary.txt, mutation-control.log,
+  unit-green-macos.txt, selftest.txt and mutations-run1-N6-GREEN-HOLE.log, then
+  inspect the per-mutant digests (especially N20-N23 for the oracle). Long-run
+  digests retain the original line/FAIL counts, assertion examples, first FAIL
+  lines and final non-vacuity ledger. They are summaries, not full transcripts.
+  Re-run the commands above to independently verify the claims on the current
+  tree; historical full transcripts remain accessible with git show at commits
+  preceding ac64cc9. The box-check digest is separately labelled and names its
+  full, gitignored log; that file's availability depends on the original
+  worktree, so a new box run is required for current-tree evidence.
