@@ -15,6 +15,9 @@ HERE := $(shell pwd)
 REPO := $(abspath $(HERE)/..)
 TRACE_DIR ?= $(HERE)/local-trace
 export TRACE_DIR
+# Pin all capture/replay/client binaries to the source commit being rendered.
+PGWT_BUILD_VERSION ?= $(shell git -C "$(REPO)" rev-parse HEAD)
+export PGWT_BUILD_VERSION
 # Recursive expansion reads metadata AFTER the trace recipe has written it.
 PGWT_DEMO_CPUS = $(shell cat "$(TRACE_DIR)/capture-cpus.txt" 2>/dev/null)
 export PGWT_DEMO_CPUS

@@ -13,7 +13,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
-BUILD_VERSION=$(git describe --tags --always --dirty 2>/dev/null || echo unknown)
+BUILD_VERSION="${PGWT_BUILD_VERSION:-$(git rev-parse HEAD)}"
 
 case "$(uname -s)" in
     Darwin)

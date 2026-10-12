@@ -31,6 +31,7 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DEMOS_DIR="$REPO_ROOT/demos"
 LOCAL_TRACE_DIR="${TRACE_DIR:-$DEMOS_DIR/local-trace}"
 VM_TYPE="${VM_TYPE:-cpx22}"
+BUILD_VERSION="${PGWT_BUILD_VERSION:-$(git -C "$REPO_ROOT" rev-parse HEAD)}"
 
 [[ -n "${HCLOUD_TOKEN:-}" ]] || {
     echo "FATAL: HCLOUD_TOKEN not set (export your Hetzner Cloud API token)" >&2
@@ -81,7 +82,7 @@ rsync -a --delete \
 
 $SSH "set -euo pipefail
     mkdir -p /root/pg_wait_tracer/include
-    cd /root/pg_wait_tracer && make 2>&1 | tee /tmp/pgwt-demo-build.log
+    cd /root/pg_wait_tracer && make PGWT_BUILD_VERSION='$BUILD_VERSION' 2>&1 | tee /tmp/pgwt-demo-build.log
     command -v tmux >/dev/null || dnf install -y tmux >/dev/null 2>&1
     mkdir -p /var/lib/pgwt/traces
 "
@@ -124,6 +125,7 @@ mkdir -p "$LOCAL_TRACE_DIR"
 rsync -a --delete -e "ssh -o StrictHostKeyChecking=no" \
     "root@$VM_IP:/var/lib/pgwt/traces/" "$LOCAL_TRACE_DIR/"
 $SSH "getconf _NPROCESSORS_ONLN" > "$LOCAL_TRACE_DIR/capture-cpus.txt"
+printf '%s\n' "$BUILD_VERSION" > "$LOCAL_TRACE_DIR/capture-source-sha.txt"
 ls -la "$LOCAL_TRACE_DIR"
 [[ -n "$(find "$LOCAL_TRACE_DIR" \( -name '*.trace.lz4' -o -name 'current.trace' \) -size +0c -print -quit)" ]] || {
     echo "FATAL: no nonempty trace files downloaded" >&2
