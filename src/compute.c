@@ -4754,14 +4754,19 @@ static int detect_loop(const uint32_t *events, int len, int pos)
     return 0;
 }
 
-/* Compress a raw event sequence: collapse loops */
-static void compress_exec(const struct raw_exec *raw, struct compressed_pattern *out)
+/* Compress a raw event sequence: collapse loops. Map each consumed raw
+ * event to its compressed step, and return the number consumed. The step
+ * cap can leave an unmapped raw tail; it must not be charged to the last
+ * represented step. */
+static int compress_exec(const struct raw_exec *raw, struct compressed_pattern *out,
+                         int *raw_steps)
 {
     out->num_steps = 0;
     int i = 0;
     while (i < raw->len && out->num_steps < PGWT_MAX_VARIANT_STEPS) {
         int body = detect_loop(raw->events, raw->len, i);
         if (body > 0 && out->num_steps + body < PGWT_MAX_VARIANT_STEPS) {
+            int loop_start = out->num_steps;
             /* Mark first step of loop */
             out->steps[out->num_steps] = raw->events[i];
             out->is_loop[out->num_steps] = 1;
@@ -4775,7 +4780,6 @@ static void compress_exec(const struct raw_exec *raw, struct compressed_pattern 
                 out->num_steps++;
             }
             /* Skip past all repetitions */
-            int reps = 0;
             int j = i;
             while (j + body <= raw->len) {
                 int match = 1;
@@ -4783,11 +4787,13 @@ static void compress_exec(const struct raw_exec *raw, struct compressed_pattern 
                     if (raw->events[i + k] != raw->events[j + k]) { match = 0; break; }
                 }
                 if (!match) break;
-                reps++;
+                for (int k = 0; k < body; k++)
+                    raw_steps[j + k] = loop_start + k;
                 j += body;
             }
             i = j;
         } else {
+            raw_steps[i] = out->num_steps;
             out->steps[out->num_steps] = raw->events[i];
             out->is_loop[out->num_steps] = 0;
             out->loop_len[out->num_steps] = 0;
@@ -4795,6 +4801,7 @@ static void compress_exec(const struct raw_exec *raw, struct compressed_pattern 
             i++;
         }
     }
+    return i;
 }
 
 /* Hash a compressed pattern */
@@ -4992,8 +4999,9 @@ void pgwt_compute_variants(const struct pgwt_trace_event *events, int count,
 
             /* Compress and hash */
             struct compressed_pattern cp;
+            int raw_steps[128];
             memset(&cp, 0, sizeof(cp));
-            compress_exec(re, &cp);
+            int num_mapped = compress_exec(re, &cp, raw_steps);
             uint64_t h = hash_pattern(&cp);
 
             /* Count loop iterations in raw data */
@@ -5046,18 +5054,18 @@ void pgwt_compute_variants(const struct pgwt_trace_event *events, int count,
                     va->exec_times[va->exec_times_n++] = re->total_ns;
             }
 
-            /* Accumulate per-step durations from raw data */
-            int si = 0;
-            for (int j = 0; j < re->len && si < cp.num_steps; j++) {
-                if (re->events[j] == cp.steps[si]) {
-                    va->step_total_ns[si] += re->durations[j];
-                    va->step_count[si]++;
-                    /* Advance through pattern steps (handle loops) */
-                    if (!cp.is_loop[si] || j + 1 >= re->len ||
-                        re->events[j + 1] != cp.steps[si])
-                        si++;
-                    if (si >= cp.num_steps) si = cp.num_steps - 1;
-                }
+            /* #343: use the compressor's mapping for every loop lap.
+             * Advancing by event id lost all but the first occurrence of
+             * earlier body steps (ABAB gave A=1ms instead of 2ms). The old
+             * clamp kept si in range, but also folded matching raw tails
+             * onto the last step. Bound both the mapped prefix and the
+             * step index instead, preserving the out-of-range guard. */
+            for (int j = 0; j < num_mapped; j++) {
+                int si = raw_steps[j];
+                if (si < 0 || si >= cp.num_steps)
+                    break;
+                va->step_total_ns[si] += re->durations[j];
+                va->step_count[si]++;
             }
 
             continue;

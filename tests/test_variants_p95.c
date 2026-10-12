@@ -1,4 +1,4 @@
-/* test_variants_p95.c — pgwt_compute_variants' p95 sample set and sort.
+/* test_variants_p95.c — pgwt_compute_variants' p95 and step averages.
  *
  * TWO DEFECTS, THE SAME FOUR LINES.
  *
@@ -517,6 +517,107 @@ static void section4_bypass(void)
     }
 }
 
+/* #343: explicit raw sequences, with durations (i + 1) ms. Expectations
+ * are per occurrence of each compressed step, including EVERY loop lap. */
+static void check_step_averages(const char *label, const uint32_t *sequence,
+                                int n, const uint32_t *steps, int ns,
+                                const uint64_t *avg_ms, const int *loop_len,
+                                enum pgwt_variant_phase phase)
+{
+    printf("\n  %s (%s)\n", label,
+           phase == PGWT_PHASE_EXEC ? "exec" : "plan");
+    struct pgwt_trace_event ev[130] = {0};
+    uint32_t start = phase == PGWT_PHASE_EXEC ? PGWT_MARKER_EXEC_START
+                                            : PGWT_MARKER_PLAN_START;
+    uint32_t end = phase == PGWT_PHASE_EXEC ? PGWT_MARKER_EXEC_END
+                                          : PGWT_MARKER_PLAN_END;
+    ev[0] = (struct pgwt_trace_event){
+        .pid = FIX_PID, .query_id = FIX_QID, .timestamp_ns = T0,
+        .old_event = start, .new_event = start,
+    };
+    uint64_t ts = T0;
+    for (int i = 0; i < n; i++) {
+        uint64_t duration = (uint64_t)(i + 1) * 1000000ULL;
+        ts += duration;
+        ev[i + 1] = (struct pgwt_trace_event){
+            .pid = FIX_PID, .query_id = FIX_QID, .timestamp_ns = ts,
+            .old_event = sequence[i], .duration_ns = duration,
+        };
+    }
+    ev[n + 1] = (struct pgwt_trace_event){
+        .pid = FIX_PID, .query_id = FIX_QID, .timestamp_ns = ts,
+        .old_event = end, .new_event = end,
+    };
+
+    struct pgwt_variants_result r;
+    pgwt_compute_variants(ev, n + 2, NULL, 64, phase, &r);
+    CHECK(!r.failed && r.num_variants == 1, "one complete variant");
+    CHECK_U64(r.total_executions, 1, "one execution");
+    if (!r.failed && r.num_variants == 1) {
+        struct pgwt_variant *v = &r.variants[0];
+        CHECK_U64(v->num_steps, ns, "compressed step count");
+        CHECK_U64(v->total_ns, (uint64_t)n * (n + 1) / 2 * 1000000ULL,
+                  "execution total includes all raw events");
+        for (int s = 0; s < ns && s < v->num_steps; s++) {
+            char msg[80];
+            snprintf(msg, sizeof(msg), "step %d event", s);
+            CHECK_U64(v->steps[s].event_id, steps[s], msg);
+            snprintf(msg, sizeof(msg), "step %d loop body length", s);
+            CHECK_U64(v->steps[s].loop_len, loop_len[s], msg);
+            snprintf(msg, sizeof(msg), "step %d loop flag", s);
+            CHECK_U64(v->steps[s].is_loop, loop_len[s] != 0, msg);
+            snprintf(msg, sizeof(msg), "step %d average ns", s);
+            CHECK_U64(v->step_avg_ns[s], avg_ms[s] * 1000000ULL, msg);
+        }
+    }
+    free(r.variants);
+}
+
+static void section5_step_averages(void)
+{
+    printf("\n[5] #343: loop step averages and the compressed-step bound\n");
+    const uint32_t a = IO_READ, b = EV(CLASS_IO, 24);
+    const uint32_t c = EV(CLASS_IO, 6), d = EV(CLASS_IO, 7);
+    const uint32_t abab[] = {a, b, a, b};
+    const uint32_t ab[] = {a, b};
+    const uint64_t ab_avg[] = {2, 3}; /* (1+3)/2, (2+4)/2 ms */
+    const int ab_loop[] = {2, 0};
+    const uint32_t mixed[] = {c, a, b, a, b, d, d, d, c};
+    const uint32_t mixed_steps[] = {c, a, b, d, c};
+    const uint64_t mixed_avg[] = {1, 3, 4, 7, 9};
+    const int mixed_loop[] = {0, 2, 0, 1, 0};
+    const uint32_t abcabc[] = {a, b, c, a, b, c, a, b, c};
+    const uint32_t abc[] = {a, b, c};
+    const uint64_t abc_avg[] = {4, 5, 6};
+    const int abc_loop[] = {3, 0, 0};
+    const uint64_t plain_avg[] = {1, 2, 3};
+    const int plain_loop[] = {0, 0, 0};
+
+    /* The 32-step representation cannot hold the final AA as a loop body:
+     * only its first A is represented. A matching raw tail must not be
+     * clamped onto that last step and contaminate its average. */
+    uint32_t capped[33], capped_steps[32];
+    uint64_t capped_avg[32];
+    int capped_loop[32] = {0};
+    for (int i = 0; i < 32; i++) {
+        capped[i] = capped_steps[i] = EV(CLASS_IO, 100 + i);
+        capped_avg[i] = i + 1;
+    }
+    capped[32] = capped[31];
+    for (int phase = PGWT_PHASE_EXEC; phase <= PGWT_PHASE_PLAN; phase++) {
+        check_step_averages("ABAB(1,2,3,4 ms)", abab, 4, ab, 2,
+                            ab_avg, ab_loop, phase);
+        check_step_averages("prefix, AB loop, D loop, suffix", mixed, 9,
+                            mixed_steps, 5, mixed_avg, mixed_loop, phase);
+        check_step_averages("three-step loop, three laps", abcabc, 9,
+                            abc, 3, abc_avg, abc_loop, phase);
+        check_step_averages("non-loop ABC", abc, 3, abc, 3,
+                            plain_avg, plain_loop, phase);
+        check_step_averages("32-step bound with matching raw tail", capped, 33,
+                            capped_steps, 32, capped_avg, capped_loop, phase);
+    }
+}
+
 int main(void)
 {
     printf("=== test_variants_p95 (#271 sample set, #269 sort) ===\n");
@@ -524,6 +625,7 @@ int main(void)
     section2_boundaries();
     section3_differential();
     section4_bypass();
+    section5_step_averages();
     printf("\n%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
 }
