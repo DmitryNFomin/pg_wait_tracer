@@ -1,0 +1,126 @@
+{
+  "trace": "/Users/dmitryfomin/work/git/pg_wait_tracer/tests/results/demo_rehearsal/trace",
+  "requests_per_process": 6,
+  "timing": "request write to complete JSON read, monotonic wall clock, macOS arm64 with temporary POSIX compilation shims",
+  "before": {
+    "cold_ms": 483.474833,
+    "warm_median_ms": 2.666417,
+    "requests": [
+      {
+        "ms": 483.474833,
+        "total": 2146061,
+        "cpu_client_read": 319023,
+        "cpu_node_ms": 82231.185078,
+        "link_count": 61,
+        "merged_blocks": 0,
+        "decoded_blocks": 1052
+      },
+      {
+        "ms": 3.172958,
+        "total": 2146061,
+        "cpu_client_read": 319023,
+        "cpu_node_ms": 82231.185078,
+        "link_count": 61,
+        "merged_blocks": 1052,
+        "decoded_blocks": 0
+      },
+      {
+        "ms": 2.744083,
+        "total": 2146061,
+        "cpu_client_read": 319023,
+        "cpu_node_ms": 82231.185078,
+        "link_count": 61,
+        "merged_blocks": 1052,
+        "decoded_blocks": 0
+      },
+      {
+        "ms": 2.666417,
+        "total": 2146061,
+        "cpu_client_read": 319023,
+        "cpu_node_ms": 82231.185078,
+        "link_count": 61,
+        "merged_blocks": 1052,
+        "decoded_blocks": 0
+      },
+      {
+        "ms": 2.425542,
+        "total": 2146061,
+        "cpu_client_read": 319023,
+        "cpu_node_ms": 82231.185078,
+        "link_count": 61,
+        "merged_blocks": 1052,
+        "decoded_blocks": 0
+      },
+      {
+        "ms": 2.438833,
+        "total": 2146061,
+        "cpu_client_read": 319023,
+        "cpu_node_ms": 82231.185078,
+        "link_count": 61,
+        "merged_blocks": 1052,
+        "decoded_blocks": 0
+      }
+    ]
+  },
+  "after": {
+    "cold_ms": 638.671,
+    "warm_median_ms": 377.649875,
+    "requests": [
+      {
+        "ms": 638.671,
+        "total": 2101990,
+        "cpu_client_read": 275072,
+        "cpu_node_ms": 78747.125323,
+        "link_count": 58,
+        "merged_blocks": 0,
+        "decoded_blocks": 0
+      },
+      {
+        "ms": 377.649875,
+        "total": 2101990,
+        "cpu_client_read": 275072,
+        "cpu_node_ms": 78747.125323,
+        "link_count": 58,
+        "merged_blocks": 0,
+        "decoded_blocks": 0
+      },
+      {
+        "ms": 375.155417,
+        "total": 2101990,
+        "cpu_client_read": 275072,
+        "cpu_node_ms": 78747.125323,
+        "link_count": 58,
+        "merged_blocks": 0,
+        "decoded_blocks": 0
+      },
+      {
+        "ms": 381.397084,
+        "total": 2101990,
+        "cpu_client_read": 275072,
+        "cpu_node_ms": 78747.125323,
+        "link_count": 58,
+        "merged_blocks": 0,
+        "decoded_blocks": 0
+      },
+      {
+        "ms": 366.04925,
+        "total": 2101990,
+        "cpu_client_read": 275072,
+        "cpu_node_ms": 78747.125323,
+        "link_count": 58,
+        "merged_blocks": 0,
+        "decoded_blocks": 0
+      },
+      {
+        "ms": 388.686833,
+        "total": 2101990,
+        "cpu_client_read": 275072,
+        "cpu_node_ms": 78747.125323,
+        "link_count": 58,
+        "merged_blocks": 0,
+        "decoded_blocks": 0
+      }
+    ]
+  },
+  "warm_slowdown": 141.63196341757498
+}

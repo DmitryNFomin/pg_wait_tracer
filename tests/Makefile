@@ -28,6 +28,7 @@ TESTS     = test_wait_event test_cmdline test_spawn test_event_writer test_event
             test_variants_p95 \
             test_pid_cap \
             test_probe_bounds \
+            test_interference_bounds \
             test_concurrency_bounds \
             test_idle_accounting test_idle_summary \
             test_agg_raw_crosscheck \
@@ -37,7 +38,7 @@ TESTS     = test_wait_event test_cmdline test_spawn test_event_writer test_event
             gen_test_traces gen_bench_traces test_concurrent_rw cross_validate \
             dump_markers wait_cpu_canary test_wait_cpu_canary \
             test_summary_tick_flush \
-            test_block_agg bench_block_agg
+            test_block_agg bench_block_agg test_transitions_loader
 
 .PHONY: all clean check
 
@@ -216,6 +217,14 @@ test_probe_bounds: test_probe_bounds.c ../src/compute.c \
               ../src/test_alloc_fail.h ../src/percentile.h \
               $(BUILD)/wait_event.o $(BUILD)/idle_rule.o $(BUILD)/spawn.o $(BUILD)/cJSON.o
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ test_probe_bounds.c ../src/compute.c \
+	    $(BUILD)/wait_event.o $(BUILD)/idle_rule.o $(BUILD)/spawn.o $(BUILD)/cJSON.o -lm
+
+# #359: interference's former 4096-slot pair table must return at cap and
+# cap+1, with exact per-pair totals and whole-result allocation refusals.
+test_interference_bounds: test_interference_bounds.c ../src/compute.c \
+              ../src/triple_map.h ../src/test_alloc_fail.h \
+              $(BUILD)/wait_event.o $(BUILD)/idle_rule.o $(BUILD)/spawn.o $(BUILD)/cJSON.o
+	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ test_interference_bounds.c ../src/compute.c \
 	    $(BUILD)/wait_event.o $(BUILD)/idle_rule.o $(BUILD)/spawn.o $(BUILD)/cJSON.o -lm
 
 test_pg13_resolve: test_pg13_resolve.c ../src/discovery.c ../src/spawn.c \
@@ -536,6 +545,14 @@ test_block_agg: test_block_agg.c ../src/block_agg.c ../src/compute.c \
                 $(BUILD)/wait_event.o $(BUILD)/idle_rule.o \
                 $(BUILD)/spawn.o $(BUILD)/cJSON.o
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -llz4 -lm
+
+# Exercise the actual server gate/loader/response against reader-decoded
+# block aggregates from the same two-block file (command state crosses blocks).
+TRANSITIONS_LOADER_OBJS = $(addprefix $(BUILD)/server_,compute.o block_agg.o \
+    event_reader.o event_writer.o summary_writer.o summary_reader.o \
+    wait_event.o idle_rule.o spawn.o cmdline.o backend_meta.o cJSON.o)
+test_transitions_loader: test_transitions_loader.c ../src/server.c $(TRANSITIONS_LOADER_OBJS)
+	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $< $(TRANSITIONS_LOADER_OBJS) -lz -llz4 -lm
 
 # bench_block_agg: the measurement behind Phase 1's falsifiable prediction
 # (O(events in window) -> O(blocks x distinct pairs)). Deliberately NOT in

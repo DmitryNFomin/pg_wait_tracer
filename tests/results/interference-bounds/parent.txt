@@ -1,0 +1,7 @@
+#359 parent 75717896130e60f9518105577d5e4da01dc7c2ee; SAME binary, only --pairs differs; timeout 30s
+CALL pairs=4096 intervals=24576 limit=4096
+RETURNED num_rows=4096 overlap_ns=50343936000000
+16387 checks, 0 failures
+pairs=4096 exit=0 CONTROL: RETURNED correctly
+CALL pairs=4097 intervals=24582 limit=4097
+pairs=4097 exit=124 RED: did not terminate in 30s

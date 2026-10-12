@@ -5128,6 +5128,15 @@ static int bagg_window_eligible(struct pgwt_server *srv,
                                 const struct pgwt_filter *f,
                                 uint64_t from_wall_ns, uint64_t to_wall_ns)
 {
+    /* Safety refusal: bagg_decode_block supplies untagged records, while the
+     * raw loader calls pgwt_tag_events after merging the window. That pass can
+     * relabel CPU to PGWT_WEI_NONCMD_CPU, which the shared hidden/idle rules
+     * exclude. Command state carries across blocks, so tagging each block
+     * independently cannot fix this. Even exact-only windows are unsafe.
+     * Until that carry-over is implemented, always use the tagged raw path.
+     * This is a boolean gate: refusal is 0, never a truthy negative status. */
+    return 0;
+
     if (!pgwt_block_agg_filter_supported(f))
         return 0;
     if (to_wall_ns <= from_wall_ns)
@@ -5648,6 +5657,18 @@ static void handle_interference(struct pgwt_server *srv, struct pgwt_request *re
     struct pgwt_interference_result res;
     pgwt_compute_interference(events, count, &req->filter, 30, &res);
     free(events);
+
+    if (res.failed) {
+        free(res.rows);
+        cJSON *err = cJSON_CreateObject();
+        cJSON_AddNumberToObject(err, "id", (double)req->id);
+        cJSON_AddStringToObject(err, "error", "interference compute failed");
+        cJSON_AddStringToObject(err, "code", "compute_failed");
+        cJSON_AddStringToObject(err, "hint", "narrow the time range and retry");
+        add_fidelity(err, &linfo);
+        emit_json(err);
+        return;
+    }
 
     cJSON *root = cJSON_CreateObject();
     cJSON_AddNumberToObject(root, "id", (double)req->id);
