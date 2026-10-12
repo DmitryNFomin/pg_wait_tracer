@@ -67,26 +67,6 @@ and ordering remain unchanged. No retry, sleep, tolerance, epsilon, or
 KNOWN_FAILING entry was added. The extra `info` request formerly bypassing
 #342 in the truncation fixture is removed.
 
-## PR #369 CI failure repair
-
-Run 38264692891, job 114863778264 built both the tracer/server and C tests
-successfully. `gh run view --job --log` refused while the overall run was
-still in progress; the completed job's `/actions/jobs/114863778264/logs` API
-returned the log. `ci-failure-excerpt.log` preserves the actual failure:
-`test_probe_bounds.c:1018` expected an unsupported class-filtered Sessions
-summary request to return an empty success (`!failed`, `num_rows=0`).
-
-The test now requires the full explicit refusal contract above, including
-`rows=NULL`. This strengthens the refusal assertion and preserves every
-test and fixture; no runtime implementation or build registration changed.
-The original test reproduced locally with 87 checks and one failure; the
-updated test passes all 87. The existing CPU-filter fixture still passes
-16/16, including exactly 21ms unfiltered and 3ms with explicit CPU=0.
-The execution lifecycle fixture passes 37/37: both table and scatter retain
-only the sole CPU execution from the three-execution fixture. Results are
-preserved in `ci-repair-focused.log` (C probe built with the same macOS
-objects and portability adapters described above).
-
 #342 restores present=1 immediately after the inline cov_reset in
 cov_scan_file. Deleted-file resets still clear presence. The first rebuilt
 response must equal a fresh uncached prefix bit for bit, excluding request ID.

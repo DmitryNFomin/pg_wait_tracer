@@ -997,11 +997,10 @@ static void s7_7_absent_not_wrong(void)
           "no events: variants empty, not failed");
     free(rv.variants);
 
-    /* A session present only on records the summary path refuses (a class
-     * filter the per-second data cannot honour) must come back as NO ROWS, not as
+    /* A query id present only on records the visitor refuses (a class filter
+     * the per-second data cannot honour) must come back as NO ROWS, not as
      * unfiltered numbers under a filtered label — the #318 rule, re-checked
-     * here because this commit rewrote that visitor's table. The refusal is
-     * explicit: failed=1 and a poisoned count, as required by #345. */
+     * here because this commit rewrote that visitor's table. */
     struct pgwt_summary_accum *a = rec_new(1000000000ULL);
     a->sessions[0].pid = BASE_PID;
     a->sessions[0].db_time_ns = 5 * MS;
@@ -1016,9 +1015,9 @@ static void s7_7_absent_not_wrong(void)
     snprintf(fc.class_name, sizeof(fc.class_name), "Lock");
     struct pgwt_sessions_result rsf;
     pgwt_compute_top_sessions_from_summaries("ignored", 0, 0, &fc, 0, &rsf);
-    CHECK(rsf.failed == 1 && rsf.num_rows == -1 && rsf.rows == NULL,
-          "a class filter the summary records cannot honour explicitly refuses "
-          "with failed=1, num_rows=-1 and no rows (#318/#345)");
+    CHECK(!rsf.failed && rsf.num_rows == 0,
+          "a class filter the summary records cannot honour yields NO rows "
+          "(#318 refusal still intact)");
     free(rsf.rows);
     free(a);
 }

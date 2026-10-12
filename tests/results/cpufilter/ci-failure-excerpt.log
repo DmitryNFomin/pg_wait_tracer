@@ -1,9 +1,0 @@
-2026-10-12T14:42:25.7878555Z 7.7 the thing being checked is ABSENT rather than wrong
-2026-10-12T14:42:25.7878805Z   ok: no events: sessions empty, not failed
-2026-10-12T14:42:25.7879075Z   ok: no events: queries empty, not failed
-2026-10-12T14:42:25.7879397Z   ok: no events: fingerprints empty, not failed
-2026-10-12T14:42:25.7879567Z   ok: no events: variants empty, not failed
-2026-10-12T14:42:25.7879867Z   FAIL: a class filter the summary records cannot honour yields NO rows (#318 refusal still intact) (test_probe_bounds.c:1018)
-2026-10-12T14:42:25.7880107Z 
-2026-10-12T14:42:25.7880162Z === 87 checks, 1 failures ===
-2026-10-12T14:42:25.7880305Z FAILED: test_probe_bounds
