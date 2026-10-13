@@ -1,0 +1,228 @@
+=== waiting for lock Tue Oct 13 04:40:22 PM UTC 2026 ===
+=== run start Tue Oct 13 04:40:22 PM UTC 2026 ===
+0f43f957c84b10dd26d318d25d5dd21b  /root/pgwt-hist-blink/tests/ui_live_smoke.py
+a095524458ef1c2f9779141dfb1c16c5  /root/pgwt-hist-blink/tests/ui_live_smoke_lib.py
+3644ed453d33d6d0dbd2bc6706b4b7fe  /root/pgwt-hist-blink/web/static/views/histogram.js
+00e89ec717776cb5c717357ab652269f  /root/pgwt-hist-blink/web/static/lib/builders/histogram.js
+=== setup start Tue Oct 13 04:40:23 PM UTC 2026 in /root/pgwt-hist-blink ===
+demo_rehearsal: postmaster PID 1883878
+demo_rehearsal: PGPORT=5418 (read from postmaster.pid for PID 1883878)
+demo_rehearsal: checking for provisioned pgbench tables
+demo_rehearsal: pgbench_accounts has 1000000 rows (provisioned) -- reusing
+demo_rehearsal: starting pgbench (4 clients, 600s, throttled)
+demo_rehearsal: starting looping lock/sleep workload
+demo_rehearsal: starting daemon (--mode full, trace dir /tmp/pgwt_demo_GRt9u9)
+demo_rehearsal: control socket ready
+demo_rehearsal: starting Go bridge on :8386 against root@localhost
+demo_rehearsal: bridge ready at http://localhost:8386/
+=== walk 1 (t+0.0 min) ===
+  walk 1: install -> {'ok': True, 'reason': 'installed'}
+  walk 1 tick 1: ratio=0.0 offsets=[210, 511, 1007, 1516, 2006] seq=3 diverging=[]
+  walk 1 tick 2: ratio=0.0 offsets=[211, 510, 1009, 1515, 2008] seq=4 diverging=[]
+  walk 1 tick 3: ratio=0.0 offsets=[210, 507, 1008, 1509, 2005] seq=5 diverging=[]
+  walk 1 tick 4: ratio=0.0 offsets=[215, 507, 1006, 1507, 2007] seq=6 diverging=[]
+  walk 1 tick 5: ratio=0.0 offsets=[217, 510, 1012, 1517, 2006] seq=7 diverging=[]
+  walk 1 tick 6: ratio=0.0 offsets=[214, 511, 1009, 1510, 2012] seq=8 diverging=[]
+=== walk 2 (t+0.6 min) ===
+  walk 2: install -> {'ok': True, 'reason': 'installed'}
+  walk 2 tick 1: ratio=0.0 offsets=[216, 511, 1018, 1507, 2010] seq=3 diverging=[]
+  walk 2 tick 2: ratio=0.0 offsets=[209, 505, 1007, 1509, 2006] seq=4 diverging=[]
+  walk 2 tick 3: ratio=0.0 offsets=[227, 515, 1015, 1506, 2014] seq=5 diverging=[]
+  walk 2 tick 4: ratio=0.0 offsets=[206, 516, 1008, 1508, 2008] seq=6 diverging=[]
+  walk 2 tick 5: ratio=0.0 offsets=[212, 524, 1025, 1507, 2003] seq=7 diverging=[]
+  walk 2 tick 6: ratio=0.0 offsets=[207, 514, 1015, 1509, 2010] seq=8 diverging=[]
+=== walk 3 (t+1.2 min) ===
+  walk 3: install -> {'ok': True, 'reason': 'installed'}
+  walk 3 tick 1: ratio=0.0 offsets=[208, 510, 1005, 1506, 2014] seq=3 diverging=[]
+  walk 3 tick 2: ratio=0.0 offsets=[214, 574, 1019, 1505, 2006] seq=4 diverging=[]
+  walk 3 tick 3: ratio=0.0 offsets=[246, 505, 1013, 1509, 2008] seq=5 diverging=[]
+  walk 3 tick 4: ratio=0.0 offsets=[205, 506, 1007, 1517, 2011] seq=6 diverging=[]
+  walk 3 tick 5: ratio=0.0 offsets=[216, 507, 1008, 1506, 2015] seq=7 diverging=[]
+  walk 3 tick 6: ratio=0.0 offsets=[211, 510, 1010, 1508, 2017] seq=8 diverging=[]
+=== walk 4 (t+1.7 min) ===
+  walk 4: install -> {'ok': True, 'reason': 'installed'}
+  walk 4 tick 1: ratio=0.0 offsets=[211, 510, 1009, 1507, 2008] seq=3 diverging=[]
+  walk 4 tick 2: ratio=0.0 offsets=[204, 507, 1017, 1505, 2008] seq=4 diverging=[]
+  walk 4 tick 3: ratio=0.0 offsets=[222, 523, 1014, 1507, 2010] seq=5 diverging=[]
+  walk 4 tick 4: ratio=0.0 offsets=[206, 510, 1006, 1511, 2008] seq=6 diverging=[]
+  walk 4 tick 5: ratio=0.0 offsets=[222, 515, 1009, 1507, 2010] seq=7 diverging=[]
+  walk 4 tick 6: ratio=0.0 offsets=[209, 510, 1013, 1508, 2010] seq=8 diverging=[]
+=== walk 5 (t+2.3 min) ===
+  walk 5: install -> {'ok': True, 'reason': 'installed'}
+  walk 5 tick 1: ratio=0.0 offsets=[206, 506, 1011, 1510, 2005] seq=3 diverging=[]
+  walk 5 tick 2: ratio=0.0 offsets=[216, 519, 1009, 1506, 2010] seq=4 diverging=[]
+  walk 5 tick 3: ratio=0.0 offsets=[211, 510, 1007, 1506, 2006] seq=5 diverging=[]
+  walk 5 tick 4: ratio=0.0 offsets=[214, 510, 1011, 1508, 2006] seq=6 diverging=[]
+  walk 5 tick 5: ratio=0.0 offsets=[213, 507, 1009, 1506, 2014] seq=7 diverging=[]
+  walk 5 tick 6: ratio=0.0 offsets=[206, 506, 1013, 1514, 2014] seq=8 diverging=[]
+=== walk 6 (t+2.9 min) ===
+  walk 6: install -> {'ok': True, 'reason': 'installed'}
+  walk 6 tick 1: ratio=0.0 offsets=[210, 520, 1012, 1509, 2013] seq=3 diverging=[]
+  walk 6 tick 2: ratio=0.0 offsets=[205, 514, 1012, 1514, 2008] seq=4 diverging=[]
+  walk 6 tick 3: ratio=0.0 offsets=[210, 518, 1011, 1510, 2007] seq=5 diverging=[]
+  walk 6 tick 4: ratio=0.0 offsets=[210, 507, 1012, 1505, 2012] seq=6 diverging=[]
+  walk 6 tick 5: ratio=0.0 offsets=[208, 513, 1008, 1510, 2008] seq=7 diverging=[]
+  walk 6 tick 6: ratio=0.0 offsets=[208, 508, 1005, 1510, 2006] seq=8 diverging=[]
+=== walk 7 (t+3.5 min) ===
+  walk 7: install -> {'ok': True, 'reason': 'installed'}
+  walk 7 tick 1: ratio=0.0 offsets=[208, 506, 1007, 1504, 2011] seq=3 diverging=[]
+  walk 7 tick 2: ratio=0.0 offsets=[206, 510, 1011, 1507, 2005] seq=4 diverging=[]
+  walk 7 tick 3: ratio=0.0 offsets=[213, 506, 1005, 1508, 2005] seq=5 diverging=[]
+  walk 7 tick 4: ratio=0.0 offsets=[228, 560, 1009, 1506, 2006] seq=6 diverging=[]
+  walk 7 tick 5: ratio=0.0 offsets=[208, 506, 1011, 1513, 2005] seq=7 diverging=[]
+  walk 7 tick 6: ratio=0.0 offsets=[210, 512, 1008, 1512, 2008] seq=8 diverging=[]
+=== walk 8 (t+4.1 min) ===
+  walk 8: install -> {'ok': True, 'reason': 'installed'}
+  walk 8 tick 1: ratio=0.0 offsets=[209, 504, 1012, 1511, 2013] seq=3 diverging=[]
+  walk 8 tick 2: ratio=0.0 offsets=[213, 505, 1011, 1509, 2013] seq=4 diverging=[]
+  walk 8 tick 3: ratio=0.0 offsets=[207, 507, 1005, 1507, 2010] seq=5 diverging=[]
+  walk 8 tick 4: ratio=0.0 offsets=[208, 508, 1007, 1507, 2015] seq=6 diverging=[]
+  walk 8 tick 5: ratio=0.0 offsets=[210, 511, 1011, 1506, 2007] seq=7 diverging=[]
+  walk 8 tick 6: ratio=0.0 offsets=[209, 513, 1006, 1520, 2015] seq=8 diverging=[]
+=== walk 9 (t+4.7 min) ===
+  walk 9: install -> {'ok': True, 'reason': 'installed'}
+  walk 9 tick 1: ratio=0.0 offsets=[205, 509, 1007, 1506, 2005] seq=3 diverging=[]
+  walk 9 tick 2: ratio=0.0 offsets=[207, 511, 1009, 1509, 2008] seq=4 diverging=[]
+  walk 9 tick 3: ratio=0.0 offsets=[208, 517, 1008, 1505, 2010] seq=5 diverging=[]
+  walk 9 tick 4: ratio=0.0 offsets=[209, 510, 1006, 1507, 2006] seq=6 diverging=[]
+  walk 9 tick 5: ratio=0.0 offsets=[214, 511, 1012, 1510, 2009] seq=7 diverging=[]
+  walk 9 tick 6: ratio=0.0 offsets=[215, 511, 1013, 1505, 2007] seq=8 diverging=[]
+=== walk 10 (t+5.2 min) ===
+  walk 10: install -> {'ok': True, 'reason': 'installed'}
+  walk 10 tick 1: ratio=0.0 offsets=[207, 507, 1007, 1506, 2006] seq=3 diverging=[]
+  walk 10 tick 2: ratio=0.0 offsets=[213, 505, 1008, 1516, 2012] seq=4 diverging=[]
+  walk 10 tick 3: ratio=0.0 offsets=[205, 507, 1013, 1511, 2012] seq=5 diverging=[]
+  walk 10 tick 4: ratio=0.0 offsets=[210, 507, 1017, 1509, 2020] seq=6 diverging=[]
+  walk 10 tick 5: ratio=0.0 offsets=[206, 519, 1012, 1516, 2010] seq=7 diverging=[]
+  walk 10 tick 6: ratio=0.0 offsets=[209, 504, 1006, 1517, 2006] seq=8 diverging=[]
+=== walk 11 (t+5.8 min) ===
+  walk 11: install -> {'ok': True, 'reason': 'installed'}
+  walk 11 tick 1: ratio=0.0 offsets=[211, 510, 1006, 1513, 2013] seq=3 diverging=[]
+  walk 11 tick 2: ratio=0.0 offsets=[216, 507, 1014, 1507, 2007] seq=4 diverging=[]
+  walk 11 tick 3: ratio=0.0 offsets=[215, 516, 1009, 1522, 2011] seq=5 diverging=[]
+  walk 11 tick 4: ratio=0.0 offsets=[209, 509, 1017, 1510, 2022] seq=6 diverging=[]
+  walk 11 tick 5: ratio=0.0 offsets=[207, 526, 1009, 1512, 2008] seq=7 diverging=[]
+  walk 11 tick 6: ratio=0.0 offsets=[206, 505, 1006, 1513, 2006] seq=8 diverging=[]
+=== walk 12 (t+6.4 min) ===
+  walk 12: install -> {'ok': True, 'reason': 'installed'}
+  walk 12 tick 1: ratio=0.0 offsets=[211, 506, 1010, 1507, 2013] seq=3 diverging=[]
+  walk 12 tick 2: ratio=0.0 offsets=[205, 507, 1009, 1510, 2007] seq=4 diverging=[]
+  walk 12 tick 3: ratio=0.0 offsets=[212, 505, 1006, 1508, 2006] seq=5 diverging=[]
+  walk 12 tick 4: ratio=0.0 offsets=[216, 524, 1012, 1507, 2017] seq=6 diverging=[]
+  walk 12 tick 5: ratio=0.0 offsets=[205, 508, 1008, 1506, 2006] seq=7 diverging=[]
+  walk 12 tick 6: ratio=0.0 offsets=[215, 505, 1016, 1520, 2008] seq=8 diverging=[]
+probe: max-min reached before walk 13
+probe: walks=12 reproduced_on=[]
+demo_rehearsal: daemon log tail:
+  INFO: PID 1854144 exited (autovac_worker)
+  INFO: fork detected PID 1855113, bootstrap watchpoint attached
+  INFO: PID 1855113 initialized (autovac_worker), real watchpoint at 0x7e1eb646bf08
+  INFO: PID 1855113 exited (autovac_worker)
+  INFO: fork PID 1856190 already initialized (fork->attach race) — attaching directly
+  INFO: PID 1856190 initialized (autovac_worker), real watchpoint at 0x7e1eb646c248
+  INFO: PID 1856190 exited (autovac_worker)
+  INFO: fork detected PID 1857013, bootstrap watchpoint attached
+  INFO: PID 1857013 initialized (autovac_worker), real watchpoint at 0x7e1eb646c588
+  INFO: PID 1857013 exited (autovac_worker)
+  INFO: fork detected PID 1858136, bootstrap watchpoint attached
+  INFO: PID 1858136 initialized (autovac_worker), real watchpoint at 0x7e1eb646c8c8
+  INFO: PID 1858136 exited (autovac_worker)
+  INFO: fork detected PID 1858855, bootstrap watchpoint attached
+  INFO: PID 1858855 initialized (client), real watchpoint at 0x7e1eb645e888
+  INFO: PID 1858855 exited (client)
+  INFO: fork detected PID 1859154, bootstrap watchpoint attached
+  INFO: PID 1859154 initialized (autovac_worker), real watchpoint at 0x7e1eb646cc08
+  INFO: PID 1859154 exited (autovac_worker)
+  INFO: fork detected PID 1860344, bootstrap watchpoint attached
+  INFO: PID 1860344 initialized (autovac_worker), real watchpoint at 0x7e1eb646cf48
+  INFO: PID 1860344 exited (autovac_worker)
+  INFO: PID 1837762 exited (client)
+  INFO: PID 1837761 exited (client)
+  INFO: PID 1837786 exited (client)
+  INFO: PID 1837760 exited (client)
+  INFO: PID 1837782 exited (client)
+  INFO: PID 1837784 exited (client)
+  INFO: PID 1837791 exited (client)
+  INFO: PID 1837783 exited (client)
+  INFO: PID 1837788 exited (client)
+  INFO: PID 1837785 exited (client)
+  INFO: PID 1837789 exited (client)
+  INFO: PID 1837793 exited (client)
+  INFO: PID 1837787 exited (client)
+  INFO: PID 1837792 exited (client)
+  INFO: PID 1837795 exited (client)
+  INFO: PID 1837790 exited (client)
+  INFO: PID 1837797 exited (client)
+  INFO: fork detected PID 1860698, bootstrap watchpoint attached
+  INFO: PID 1860698 initialized (client), real watchpoint at 0x7e1eb645e548
+  INFO: stored full query text for (5,10,-711063974255077935) pid=1860698
+  INFO: PID 1860698 exited (client)
+  INFO: fork detected PID 1860806, bootstrap watchpoint attached
+  INFO: PID 1860806 initialized (client), real watchpoint at 0x7e1eb645be48
+  INFO: stored full query text for (5,10,2588705548698581353) pid=1860806
+  INFO: PID 1860806 exited (client)
+  INFO: fork detected PID 1860808, bootstrap watchpoint attached
+  INFO: PID 1860808 initialized (client), real watchpoint at 0x7e1eb64605c8
+  INFO: stored full query text for (5,10,-1993609749443591117) pid=1860808
+  INFO: PID 1860808 exited (client)
+  INFO: PID 1837605 exited (client)
+  INFO: PID 1837608 exited (client)
+  INFO: PID 1837606 exited (client)
+  INFO: PID 1837607 exited (client)
+  
+  pg_wait_tracer: shutting down
+  INFO: query text capture: 25 unique queries captured
+  INFO: summary file closed: 436 records, 529608 bytes
+  INFO: trace file closed: 1677990 events, 11471066 bytes (5.3x compression)
+demo_rehearsal: bridge log tail:
+  pgwt-server: loaded 49 backend metadata entries
+  pgwt-server: loaded 22 query texts
+  pgwt-server: loaded 49 backend metadata entries
+  pgwt-server: loaded 22 query texts
+  pgwt-server: loaded 49 backend metadata entries
+  pgwt-server: loaded 22 query texts
+  pgwt-server: loaded 50 backend metadata entries
+  pgwt-server: loaded 22 query texts
+  pgwt-server: loaded 50 backend metadata entries
+  2026/10/13 16:46:20 Browser connected via WebSocket
+  pgwt-server: loaded 22 query texts
+  pgwt-server: loaded 50 backend metadata entries
+  pgwt-server: loaded 22 query texts
+  pgwt-server: loaded 50 backend metadata entries
+  pgwt-server: loaded 22 query texts
+  pgwt-server: loaded 51 backend metadata entries
+  pgwt-server: loaded 22 query texts
+  pgwt-server: loaded 51 backend metadata entries
+  pgwt-server: loaded 22 query texts
+  pgwt-server: loaded 51 backend metadata entries
+  pgwt-server: loaded 22 query texts
+  pgwt-server: loaded 51 backend metadata entries
+  pgwt-server: loaded 22 query texts
+  pgwt-server: loaded 52 backend metadata entries
+  2026/10/13 16:46:55 Browser connected via WebSocket
+  pgwt-server: loaded 22 query texts
+  pgwt-server: loaded 52 backend metadata entries
+  pgwt-server: loaded 22 query texts
+  pgwt-server: loaded 52 backend metadata entries
+  pgwt-server: loaded 22 query texts
+  pgwt-server: loaded 53 backend metadata entries
+  pgwt-server: loaded 22 query texts
+  pgwt-server: loaded 54 backend metadata entries
+  pgwt-server: loaded 22 query texts
+  pgwt-server: loaded 54 backend metadata entries
+  pgwt-server: loaded 22 query texts
+  pgwt-server: loaded 54 backend metadata entries
+  pgwt-server: loaded 22 query texts
+  pgwt-server: loaded 54 backend metadata entries
+  2026/10/13 16:47:42 Shutting down...
+demo_rehearsal: workload log tail:
+    PASS: workload: holder acquired AccessExclusiveLock (held='1')
+    PASS: workload: waiter blocked on _smoke_lock_wait (waiters='1')
+    PASS: workload: waiter blocked on _smoke_lock_wait (waiters='1')
+    PASS: workload: waiter blocked on _smoke_lock_wait (waiters='1')
+    PASS: workload: waiter blocked on _smoke_lock_wait (waiters='1')
+    PASS: workload: waiter blocked on _smoke_lock_wait (waiters='1')
+  pgbench (18.6 (Ubuntu 18.6-1.pgdg24.04+2))
+  starting vacuum...end.
+=== setup rc=0 Tue Oct 13 04:47:44 PM UTC 2026 ===
+=== done rc=0 Tue Oct 13 04:47:44 PM UTC 2026 ===

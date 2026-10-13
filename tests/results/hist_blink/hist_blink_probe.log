@@ -1,0 +1,184 @@
+=== waiting for lock Tue Oct 13 04:49:39 PM UTC 2026 ===
+=== run start Tue Oct 13 04:49:39 PM UTC 2026 ===
+0f43f957c84b10dd26d318d25d5dd21b  /root/pgwt-hist-blink22/tests/ui_live_smoke.py
+a095524458ef1c2f9779141dfb1c16c5  /root/pgwt-hist-blink22/tests/ui_live_smoke_lib.py
+3644ed453d33d6d0dbd2bc6706b4b7fe  /root/pgwt-hist-blink22/web/static/views/histogram.js
+00e89ec717776cb5c717357ab652269f  /root/pgwt-hist-blink22/web/static/lib/builders/histogram.js
+=== setup start Tue Oct 13 04:49:40 PM UTC 2026 in /root/pgwt-hist-blink22 ===
+demo_rehearsal: postmaster PID 1883878
+demo_rehearsal: PGPORT=5418 (read from postmaster.pid for PID 1883878)
+demo_rehearsal: checking for provisioned pgbench tables
+demo_rehearsal: pgbench_accounts has 1000000 rows (provisioned) -- reusing
+demo_rehearsal: starting pgbench (4 clients, 360s, throttled)
+demo_rehearsal: starting looping lock/sleep workload
+demo_rehearsal: starting daemon (--mode full, trace dir /tmp/pgwt_demo_R2ry24)
+demo_rehearsal: control socket ready
+demo_rehearsal: starting Go bridge on :8386 against root@localhost
+demo_rehearsal: bridge ready at http://localhost:8386/
+=== walk 1 (t+0.0 min) ===
+  walk 1: install -> {'ok': True, 'reason': 'installed'}
+  walk 1 tick 1: forced progressive -> {'ncells': 38, 'threshold': 1000000000, 'model_progressive': 400, 'model_threshold': 1000000000, 'at': 1791910193374}
+  walk 1 tick 1: ratio=0.0 offsets=[222, 508, 1007, 1509, 2010] seq=3 diverging=[]
+  walk 1 tick 2: forced progressive -> {'ncells': 64, 'threshold': 1000000000, 'model_progressive': 400, 'model_threshold': 1000000000, 'at': 1791910198450}
+  walk 1 tick 2: ratio=0.0 offsets=[228, 512, 1009, 1509, 2014] seq=4 diverging=[]
+  walk 1 tick 3: forced progressive -> {'ncells': 75, 'threshold': 1000000000, 'model_progressive': 400, 'model_threshold': 1000000000, 'at': 1791910203542}
+  walk 1 tick 3: ratio=0.0 offsets=[211, 507, 1008, 1507, 2008] seq=5 diverging=[]
+  walk 1 tick 4: forced progressive -> {'ncells': 101, 'threshold': 1000000000, 'model_progressive': 400, 'model_threshold': 1000000000, 'at': 1791910208646}
+  walk 1 tick 4: ratio=0.0 offsets=[213, 507, 1006, 1514, 2016] seq=6 diverging=[]
+  walk 1 tick 5: forced progressive -> {'ncells': 127, 'threshold': 1000000000, 'model_progressive': 400, 'model_threshold': 1000000000, 'at': 1791910213711}
+  walk 1 tick 5: ratio=0.0 offsets=[207, 507, 1009, 1514, 2008] seq=7 diverging=[]
+  walk 1 tick 6: forced progressive -> {'ncells': 140, 'threshold': 1000000000, 'model_progressive': 400, 'model_threshold': 1000000000, 'at': 1791910218859}
+  walk 1 tick 6: ratio=0.0 offsets=[210, 509, 1024, 1505, 2012] seq=8 diverging=[]
+=== walk 2 (t+0.6 min) ===
+  walk 2: install -> {'ok': True, 'reason': 'installed'}
+  walk 2 tick 1: forced progressive -> {'ncells': 176, 'threshold': 100, 'model_progressive': 400, 'model_threshold': 100, 'at': 1791910227852}
+  walk 2 tick 1: ratio=0.0 offsets=[249, 686, 1008, 1510, 2007] seq=3 diverging=[]
+  walk 2 tick 2: forced progressive -> {'ncells': 202, 'threshold': 100, 'model_progressive': 400, 'model_threshold': 100, 'at': 1791910232961}
+  walk 2 tick 2: ratio=0.0 offsets=[237, 534, 1022, 1508, 2005] seq=4 diverging=[]
+  walk 2 tick 3: forced progressive -> {'ncells': 212, 'threshold': 100, 'model_progressive': 400, 'model_threshold': 100, 'at': 1791910238010}
+  walk 2 tick 3: ratio=0.0 offsets=[207, 506, 1009, 1511, 2025] seq=5 diverging=[]
+  walk 2 tick 4: forced progressive -> {'ncells': 239, 'threshold': 100, 'model_progressive': 400, 'model_threshold': 100, 'at': 1791910243084}
+  walk 2 tick 4: ratio=0.0 offsets=[212, 506, 1008, 1506, 2008] seq=6 diverging=[]
+  walk 2 tick 5: forced progressive -> {'ncells': 262, 'threshold': 100, 'model_progressive': 400, 'model_threshold': 100, 'at': 1791910248204}
+  walk 2 tick 5: ratio=0.0 offsets=[213, 521, 1026, 1510, 2015] seq=7 diverging=[]
+  walk 2 tick 6: forced progressive -> {'ncells': 276, 'threshold': 100, 'model_progressive': 400, 'model_threshold': 100, 'at': 1791910253281}
+  walk 2 tick 6: ratio=0.0 offsets=[210, 507, 1009, 1505, 2012] seq=8 diverging=[]
+=== walk 3 (t+1.2 min) ===
+  walk 3: install -> {'ok': True, 'reason': 'installed'}
+  walk 3 tick 1: forced progressive -> {'ncells': 315, 'threshold': 1000000000, 'model_progressive': 400, 'model_threshold': 1000000000, 'at': 1791910262361}
+  walk 3 tick 1: ratio=0.0 offsets=[209, 510, 1005, 1508, 2006] seq=3 diverging=[]
+  walk 3 tick 2: forced progressive -> {'ncells': 341, 'threshold': 1000000000, 'model_progressive': 400, 'model_threshold': 1000000000, 'at': 1791910267436}
+  walk 3 tick 2: ratio=0.0 offsets=[211, 515, 1006, 1513, 2010] seq=4 diverging=[]
+  walk 3 tick 3: forced progressive -> {'ncells': 351, 'threshold': 1000000000, 'model_progressive': 400, 'model_threshold': 1000000000, 'at': 1791910272567}
+  walk 3 tick 3: ratio=0.0 offsets=[219, 508, 1007, 1520, 2012] seq=5 diverging=[]
+  walk 3 tick 4: forced progressive -> {'ncells': 380, 'threshold': 1000000000, 'model_progressive': 400, 'model_threshold': 1000000000, 'at': 1791910277656}
+  walk 3 tick 4: ratio=0.0 offsets=[217, 514, 1008, 1508, 2006] seq=6 diverging=[]
+  walk 3 tick 5: forced progressive -> {'ncells': 401, 'threshold': 1000000000, 'model_progressive': 400, 'model_threshold': 1000000000, 'at': 1791910282820}
+  walk 3 tick 5: ratio=0.0 offsets=[235, 510, 1007, 1509, 2011] seq=7 diverging=[]
+  walk 3 tick 6: forced progressive -> {'ncells': 414, 'threshold': 1000000000, 'model_progressive': 400, 'model_threshold': 1000000000, 'at': 1791910287875}
+  walk 3 tick 6: ratio=0.0 offsets=[210, 509, 1011, 1505, 2006] seq=8 diverging=[]
+=== walk 4 (t+1.7 min) ===
+  walk 4: install -> {'ok': True, 'reason': 'installed'}
+  walk 4 tick 1: forced progressive -> {'ncells': 454, 'threshold': 100, 'model_progressive': 400, 'model_threshold': 100, 'at': 1791910296778}
+  walk 4 tick 1: ratio=0.0 offsets=[289, 549, 1005, 1507, 2009] seq=3 diverging=[]
+  walk 4 tick 2: forced progressive -> {'ncells': 477, 'threshold': 100, 'model_progressive': 400, 'model_threshold': 100, 'at': 1791910301889}
+  walk 4 tick 2: ratio=0.0 offsets=[225, 519, 1009, 1515, 2011] seq=4 diverging=[]
+  walk 4 tick 3: forced progressive -> {'ncells': 487, 'threshold': 100, 'model_progressive': 400, 'model_threshold': 100, 'at': 1791910307042}
+  walk 4 tick 3: ratio=0.0 offsets=[212, 509, 1016, 1507, 2009] seq=5 diverging=[]
+  walk 4 tick 4: forced progressive -> {'ncells': 522, 'threshold': 100, 'model_progressive': 400, 'model_threshold': 100, 'at': 1791910312186}
+  walk 4 tick 4: ratio=0.0 offsets=[220, 517, 1012, 1505, 2008] seq=6 diverging=[]
+  walk 4 tick 5: forced progressive -> {'ncells': 529, 'threshold': 100, 'model_progressive': 400, 'model_threshold': 100, 'at': 1791910317342}
+  walk 4 tick 5: ratio=0.0 offsets=[208, 505, 1006, 1511, 2014] seq=7 diverging=[]
+  walk 4 tick 6: forced progressive -> {'ncells': 554, 'threshold': 100, 'model_progressive': 400, 'model_threshold': 100, 'at': 1791910322514}
+  walk 4 tick 6: ratio=0.0 offsets=[238, 512, 1007, 1507, 2008] seq=8 diverging=[]
+probe: walks=4 reproduced_on=[]
+demo_rehearsal: daemon log tail:
+  INFO: PID 1866155 initialized (autovac_worker), real watchpoint at 0x7e1eb646b548
+  INFO: PID 1866155 exited (autovac_worker)
+  INFO: stored full query text for (5,10,-6981478149691145874) pid=1863773
+  INFO: fork detected PID 1867349, bootstrap watchpoint attached
+  INFO: PID 1867349 initialized (autovac_worker), real watchpoint at 0x7e1eb646b888
+  INFO: PID 1867349 exited (autovac_worker)
+  INFO: fork detected PID 1868543, bootstrap watchpoint attached
+  INFO: PID 1868543 initialized (autovac_worker), real watchpoint at 0x7e1eb646bbc8
+  INFO: PID 1868543 exited (autovac_worker)
+  INFO: fork detected PID 1869418, bootstrap watchpoint attached
+  INFO: PID 1869418 initialized (client), real watchpoint at 0x7e1eb6461c88
+  INFO: stored full query text for (0,0,1833244227422168718) pid=1869418
+  INFO: PID 1869418 exited (client)
+  INFO: fork detected PID 1869803, bootstrap watchpoint attached
+  INFO: PID 1869803 initialized (autovac_worker), real watchpoint at 0x7e1eb646bf08
+  INFO: PID 1869803 exited (autovac_worker)
+  INFO: fork detected PID 1870943, bootstrap watchpoint attached
+  INFO: PID 1870943 initialized (autovac_worker), real watchpoint at 0x7e1eb646c248
+  INFO: PID 1870943 exited (autovac_worker)
+  INFO: fork detected PID 1872060, bootstrap watchpoint attached
+  INFO: PID 1872060 initialized (autovac_worker), real watchpoint at 0x7e1eb646c588
+  INFO: PID 1872060 exited (autovac_worker)
+  INFO: PID 1863753 exited (client)
+  INFO: PID 1863754 exited (client)
+  INFO: PID 1863777 exited (client)
+  INFO: PID 1863778 exited (client)
+  INFO: PID 1863755 exited (client)
+  INFO: PID 1863774 exited (client)
+  INFO: PID 1863773 exited (client)
+  INFO: PID 1863775 exited (client)
+  INFO: PID 1863782 exited (client)
+  INFO: PID 1863776 exited (client)
+  INFO: PID 1863785 exited (client)
+  INFO: PID 1863779 exited (client)
+  INFO: PID 1863781 exited (client)
+  INFO: PID 1863784 exited (client)
+  INFO: PID 1863786 exited (client)
+  INFO: PID 1863780 exited (client)
+  INFO: PID 1863788 exited (client)
+  INFO: fork detected PID 1872307, bootstrap watchpoint attached
+  INFO: PID 1872307 initialized (client), real watchpoint at 0x7e1eb645ae08
+  INFO: stored full query text for (5,10,-711063974255077935) pid=1872307
+  INFO: PID 1872307 exited (client)
+  INFO: fork detected PID 1872311, bootstrap watchpoint attached
+  INFO: PID 1872311 initialized (client), real watchpoint at 0x7e1eb6464a08
+  INFO: stored full query text for (5,10,2588705548698581353) pid=1872311
+  INFO: PID 1872311 exited (client)
+  INFO: fork detected PID 1872313, bootstrap watchpoint attached
+  INFO: PID 1872313 initialized (client), real watchpoint at 0x7e1eb645d508
+  INFO: stored full query text for (5,10,-1993609749443591117) pid=1872313
+  INFO: PID 1872313 exited (client)
+  INFO: PID 1863744 exited (client)
+  INFO: PID 1863745 exited (client)
+  INFO: PID 1863743 exited (client)
+  INFO: PID 1863742 exited (client)
+  
+  pg_wait_tracer: shutting down
+  INFO: query text capture: 26 unique queries captured
+  INFO: summary file closed: 149 records, 176334 bytes
+  INFO: trace file closed: 665322 events, 4721218 bytes (5.1x compression)
+demo_rehearsal: bridge log tail:
+  pgwt-server: loaded 33 backend metadata entries
+  pgwt-server: loaded 22 query texts
+  pgwt-server: loaded 33 backend metadata entries
+  pgwt-server: loaded 22 query texts
+  pgwt-server: loaded 33 backend metadata entries
+  pgwt-server: loaded 22 query texts
+  pgwt-server: loaded 33 backend metadata entries
+  pgwt-server: loaded 22 query texts
+  pgwt-server: loaded 34 backend metadata entries
+  2026/10/13 16:50:56 Browser connected via WebSocket
+  pgwt-server: loaded 22 query texts
+  pgwt-server: loaded 34 backend metadata entries
+  pgwt-server: loaded 22 query texts
+  pgwt-server: loaded 34 backend metadata entries
+  pgwt-server: loaded 22 query texts
+  pgwt-server: loaded 34 backend metadata entries
+  pgwt-server: loaded 22 query texts
+  pgwt-server: loaded 35 backend metadata entries
+  pgwt-server: loaded 22 query texts
+  pgwt-server: loaded 35 backend metadata entries
+  pgwt-server: loaded 22 query texts
+  pgwt-server: loaded 35 backend metadata entries
+  pgwt-server: loaded 23 query texts
+  pgwt-server: loaded 36 backend metadata entries
+  2026/10/13 16:51:31 Browser connected via WebSocket
+  pgwt-server: loaded 23 query texts
+  pgwt-server: loaded 37 backend metadata entries
+  pgwt-server: loaded 23 query texts
+  pgwt-server: loaded 37 backend metadata entries
+  pgwt-server: loaded 23 query texts
+  pgwt-server: loaded 37 backend metadata entries
+  pgwt-server: loaded 23 query texts
+  pgwt-server: loaded 37 backend metadata entries
+  pgwt-server: loaded 23 query texts
+  pgwt-server: loaded 38 backend metadata entries
+  pgwt-server: loaded 23 query texts
+  pgwt-server: loaded 38 backend metadata entries
+  pgwt-server: loaded 23 query texts
+  pgwt-server: loaded 38 backend metadata entries
+  2026/10/13 16:52:12 Shutting down...
+demo_rehearsal: workload log tail:
+    PASS: workload: holder acquired AccessExclusiveLock (held='1')
+    PASS: workload: waiter blocked on _smoke_lock_wait (waiters='1')
+    PASS: workload: waiter blocked on _smoke_lock_wait (waiters='1')
+  pgbench (18.6 (Ubuntu 18.6-1.pgdg24.04+2))
+  starting vacuum...end.
+=== setup rc=0 Tue Oct 13 04:52:14 PM UTC 2026 ===
+=== done rc=0 Tue Oct 13 04:52:14 PM UTC 2026 ===
