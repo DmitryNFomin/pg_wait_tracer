@@ -27,6 +27,23 @@ stop_pid() {
     done
     if kill -0 "$pid" 2>/dev/null; then
         kill -KILL "$pid" 2>/dev/null
+        # Bounded wait for the KILL to take effect. A process in
+        # uninterruptible sleep survives SIGKILL until its syscall returns,
+        # and the `wait` below is UNBOUNDED for a child -- so reaping without
+        # this poll turns a cleanup helper into a hang, which is the failure
+        # mode this file's own callers exist to avoid.
+        local k=0
+        while kill -0 "$pid" 2>/dev/null && [[ $k -lt 10 ]]; do
+            sleep 0.2
+            k=$((k + 1))
+        done
+    fi
+    if kill -0 "$pid" 2>/dev/null; then
+        # Survived SIGKILL. Report it rather than blocking on `wait`: every
+        # caller here runs under `set -uo pipefail` (no -e) and ignores this
+        # return, so a non-zero is safe, and a caller that cares can now see
+        # that the process is still there.
+        return 1
     fi
     wait "$pid" 2>/dev/null
     return 0

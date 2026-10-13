@@ -75,20 +75,52 @@ SRV_STARTED=0
 PIDDIR="$TMP/pids"
 mkdir -p "$PIDDIR"
 
+# Did the identification TOOLING itself fail? A tool that cannot answer is
+# "could not look", and the audit below must fail as unknowable rather than
+# read a tooling error as "not mine" / "nothing found". This is the same rule
+# the guard applies to an unreachable manifest; the audit's own tools are
+# exactly where it would be easiest to let that rule lapse.
+SCAN_ERRORS=()
+
 # is_ours PID -- positive identification, never "the pid is alive so it must
 # be mine". Pids are recycled; $TMP is unique to this run and appears in every
 # server's argv.
+#   0 = ours, 1 = definitely not ours, 2 = could not tell (ps failed)
 is_ours() {
-    local p="$1" cmd
-    cmd="$(ps -o command= -p "$p" 2>/dev/null)" || return 1
+    local p="$1" cmd rc
+    cmd="$(ps -o command= -p "$p" 2>/dev/null)"
+    rc=$?
+    # ps exits 1 for "no such process", which is a real answer (not ours, it
+    # is gone). Anything else is a tooling failure.
+    if [[ $rc -ne 0 && $rc -ne 1 ]]; then
+        SCAN_ERRORS+=("ps failed (rc=$rc) for pid $p")
+        return 2
+    fi
     [[ -n "$cmd" && "$cmd" == *"$TMP"* ]]
 }
 
 # Anything whose command line mentions this run's unique temp dir, whatever
 # the shell did or did not record. This is the authoritative survivor check:
 # it does not depend on the bookkeeping it is meant to audit.
+#
+# STATED LIMIT, not chased: a survivor whose argv no longer contains $TMP --
+# one that re-execed itself, or rewrote its own command line -- escapes this
+# scan, and the audit would then be relying on the pid bookkeeping alone.
+# Closing it needs a second identification mechanism (a marker fd, a process
+# group, a cgroup) and the cost of that exceeds the risk: every process this
+# suite spawns is a python server started with $TMP paths in argv and none of
+# them re-exec. Recorded here in the same spirit as the recycled-pid
+# residual, so the next person knows the boundary rather than discovering it.
 survivors_by_scan() {
-    pgrep -f "$TMP" 2>/dev/null | grep -v "^$$\$" || true
+    local out rc
+    out="$(pgrep -f "$TMP" 2>/dev/null)"
+    rc=$?
+    # pgrep: 0 = matches, 1 = no matches (a real answer), >=2 = error.
+    if [[ $rc -gt 1 ]]; then
+        SCAN_ERRORS+=("pgrep failed (rc=$rc) scanning for $TMP")
+        return 1
+    fi
+    grep -v "^$$\$" <<<"$out" || true
 }
 
 cleanup() {
@@ -610,6 +642,35 @@ SRV_ALL=("$forgotten_pid")       # restore the audit's expectations
 if is_ours "$forgotten_pid"; then ok=false; else ok=true; fi
 report "$ok" "the forgotten server is reaped by pid once the scan has named it"
 
+# 25/26. ROUND-6: the audit's OWN tooling must fail closed. If pgrep or ps
+#     errors, the audit cannot see, and "could not look" must not read as
+#     "nothing found" / "not mine" -- the same rule the guard applies to an
+#     unreachable manifest, applied to the auditor. Exercised with stub tools
+#     that exit 2, because the first implementation of this very check was a
+#     bad-substitution typo that silently evaluated to nothing and let the
+#     suite stay green.
+mkdir -p "$TMP/badbin"
+printf '#!/bin/sh\nexit 2\n' > "$TMP/badbin/pgrep"
+printf '#!/bin/sh\nexit 2\n' > "$TMP/badbin/ps"
+chmod +x "$TMP/badbin/pgrep" "$TMP/badbin/ps"
+
+SCAN_ERRORS=()
+_saved_path="$PATH"
+PATH="$TMP/badbin:$PATH"
+survivors_by_scan >/dev/null
+PATH="$_saved_path"
+if [[ -n "${SCAN_ERRORS[*]:-}" ]] && [[ "${SCAN_ERRORS[*]}" == *"pgrep failed"* ]]; then ok=true; else ok=false; fi
+report "$ok" "a failing pgrep is recorded as a scan error, not as 'no survivors' (${SCAN_ERRORS[*]:-none})"
+
+SCAN_ERRORS=()
+PATH="$TMP/badbin:$PATH"
+is_ours "$$"
+_rc=$?
+PATH="$_saved_path"
+if [[ "$_rc" -eq 2 ]] && [[ "${SCAN_ERRORS[*]:-}" == *"ps failed"* ]]; then ok=true; else ok=false; fi
+report "$ok" "a failing ps makes is_ours() answer 'could not tell' (rc=$_rc), not 'not mine'"
+SCAN_ERRORS=()
+
 # ── reachability: a guard nobody calls is the defect, not the fallback ──────
 wiring_ok() {   # $1 = script, $2 = the walk script that must be invoked AFTER
     local f="$1" walk="$2"
@@ -667,15 +728,32 @@ if [[ "$recorded" -ne "$SRV_STARTED" ]]; then
     leak_problems+=("recorded $recorded pid(s) but started $SRV_STARTED server(s): bookkeeping incomplete, survivors unknowable")
 fi
 leaked=()
+unknown=()
 for p in $(survivors_by_scan); do
-    is_ours "$p" && leaked+=("$p")
+    is_ours "$p"
+    case $? in
+        0) leaked+=("$p") ;;
+        2) unknown+=("$p") ;;
+    esac
 done
 for p in "${SRV_ALL[@]:-}"; do
     [[ -n "$p" ]] || continue
-    if is_ours "$p"; then
-        [[ " ${leaked[*]:-} " == *" $p "* ]] || leaked+=("$p")
-    fi
+    is_ours "$p"
+    case $? in
+        0) [[ " ${leaked[*]:-} " == *" $p "* ]] || leaked+=("$p") ;;
+        2) unknown+=("$p") ;;
+    esac
 done
+# A pid we could not classify is not a pid we cleared.
+[[ "${#unknown[@]}" -gt 0 ]] && leak_problems+=("could not classify pid(s): ${unknown[*]}")
+# ... and any tooling error at all makes the whole audit unknowable.
+# `${#SCAN_ERRORS[@]:-0}` is invalid bash: the first version of this line was
+# a "bad substitution" that printed to stderr and evaluated to nothing, so
+# the check was DEAD CODE and the suite still went green. Hence the two cases
+# below, which exercise this path instead of trusting it.
+if [[ -n "${SCAN_ERRORS[*]:-}" ]]; then
+    leak_problems+=("${SCAN_ERRORS[@]}")
+fi
 if [[ "${#leaked[@]}" -eq 0 && "${#leak_problems[@]}" -eq 0 ]]; then ok=true; else ok=false; fi
 report "$ok" "no test HTTP server outlived the run (started=$SRV_STARTED recorded=$recorded, survivors: ${leaked[*]:-none}${leak_problems:+; ${leak_problems[*]}})"
 
