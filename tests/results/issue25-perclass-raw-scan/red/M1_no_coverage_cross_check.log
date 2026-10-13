@@ -1,0 +1,25 @@
+$ SCAN_BIN=<mutant M1_no_coverage_cross_check> python3 test_wait_cpu_scan.py
+  ok   control_clean_is_reachable
+  ok   control_reports_per_event_max
+  ok   crossing_detected
+  ok   crossing_carries_full_identity
+  ok   empty_dir_refuses
+  ok   missing_dir_refuses
+  ok   truncated_trace_refuses
+  ok   unreadable_trace_file_refuses
+  ok   record_census_equals_block_headers
+  ok   unknown_cpu_is_unmeasured_not_clean
+  ok   unknown_cpu_counted_not_zeroed
+  ok   absent_class_is_unmeasured_not_clean
+  ok   census_mismatch_refuses
+  ok   sample_census_mismatch_refuses
+  FAIL no_expected_total_refuses: rc=0 refusals=[]
+  FAIL disabled_coverage_check_refuses: rc=0 refusals=[]
+  ok   unresolvable_name_refuses
+  ok   marker_only_trace_refuses
+  ok   census_dependency_missing_fails_harness
+  ok   census_dependency_nonexec_fails_harness
+
+18 passed, 2 failed
+  - no_expected_total_refuses: rc=0 refusals=[]
+  - disabled_coverage_check_refuses: rc=0 refusals=[]

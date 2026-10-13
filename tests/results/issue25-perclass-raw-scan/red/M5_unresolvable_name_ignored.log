@@ -1,0 +1,24 @@
+$ SCAN_BIN=<mutant M5_unresolvable_name_ignored> python3 test_wait_cpu_scan.py
+  ok   control_clean_is_reachable
+  ok   control_reports_per_event_max
+  ok   crossing_detected
+  ok   crossing_carries_full_identity
+  ok   empty_dir_refuses
+  ok   missing_dir_refuses
+  ok   truncated_trace_refuses
+  ok   unreadable_trace_file_refuses
+  ok   record_census_equals_block_headers
+  ok   unknown_cpu_is_unmeasured_not_clean
+  ok   unknown_cpu_counted_not_zeroed
+  ok   absent_class_is_unmeasured_not_clean
+  ok   census_mismatch_refuses
+  ok   sample_census_mismatch_refuses
+  ok   no_expected_total_refuses
+  ok   disabled_coverage_check_refuses
+  FAIL unresolvable_name_refuses: rc=0 refusals=[]
+  ok   marker_only_trace_refuses
+  ok   census_dependency_missing_fails_harness
+  ok   census_dependency_nonexec_fails_harness
+
+19 passed, 1 failed
+  - unresolvable_name_refuses: rc=0 refusals=[]

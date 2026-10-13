@@ -1,0 +1,8 @@
+M1_no_coverage_cross_check: RED as required — red cases: ['disabled_coverage_check_refuses', 'no_expected_total_refuses']
+M2_unknown_cpu_as_zero: RED as required — red cases: ['unknown_cpu_counted_not_zeroed', 'unknown_cpu_is_unmeasured_not_clean']
+M3_unmeasured_class_reads_clean: RED as required — red cases: ['absent_class_is_unmeasured_not_clean', 'unknown_cpu_is_unmeasured_not_clean']
+M4_decode_failure_ignored: RED as required — red cases: ['truncated_trace_refuses', 'unreadable_trace_file_refuses']
+M5_unresolvable_name_ignored: RED as required — red cases: ['unresolvable_name_refuses']
+M6_no_crossing_detection: RED as required — red cases: ['crossing_carries_full_identity', 'crossing_detected']
+M7_empty_input_reads_clean: RED as required — red cases: ['empty_dir_refuses', 'marker_only_trace_refuses']
+M8_partial_range_accepted: RED as required — red cases: ['census_mismatch_refuses', 'sample_census_mismatch_refuses']
