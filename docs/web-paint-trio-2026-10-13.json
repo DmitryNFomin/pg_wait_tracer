@@ -1,0 +1,181 @@
+{
+  "inspected_on": "2026-10-13",
+  "product_base": "6bfe7d3",
+  "source_checkout_head": "ee0cbed4031814568d6f75a08a3e7c4fccb0c26f",
+  "source_run_id": "1790685360",
+  "source_summary_sha256": "bec232f8f1ad77380b46356143cc99bb3fc520498634120a7b9d9e55a6273be2",
+  "source_is_counted_attempt": false,
+  "source_video_viewport": {
+    "width": 1280,
+    "height": 900,
+    "fps": 25
+  },
+  "product_patch": false,
+  "before_after_blink_ratio": null,
+  "timeline_paint_delta_ms": null,
+  "reason_no_delta": "No product change; source sweep offsets measure harness timing, not browser paint latency.",
+  "tabs": {
+    "queries": {
+      "early": {
+        "measured_ticks": 6,
+        "attempted_ticks": 6,
+        "blink_ratio": 0.0,
+        "threshold": 0.001,
+        "max_consecutive_ratio": 0.0,
+        "achieved_final_offsets_ms": [
+          2019,
+          2008,
+          2006,
+          2007,
+          2012,
+          2006
+        ]
+      },
+      "middle": {
+        "measured_ticks": 6,
+        "attempted_ticks": 6,
+        "blink_ratio": 0.0,
+        "threshold": 0.001,
+        "max_consecutive_ratio": 0.0,
+        "achieved_final_offsets_ms": [
+          2011,
+          2010,
+          2017,
+          2009,
+          2025,
+          2010
+        ]
+      },
+      "late": {
+        "measured_ticks": 6,
+        "attempted_ticks": 6,
+        "blink_ratio": 0.0,
+        "threshold": 0.001,
+        "max_consecutive_ratio": 0.0,
+        "achieved_final_offsets_ms": [
+          2019,
+          2016,
+          2014,
+          2006,
+          2013,
+          2008
+        ]
+      }
+    },
+    "transitions": {
+      "early": {
+        "measured_ticks": 6,
+        "attempted_ticks": 6,
+        "blink_ratio": 0.0,
+        "threshold": 0.001,
+        "max_consecutive_ratio": 0.0,
+        "achieved_final_offsets_ms": [
+          2007,
+          2009,
+          2011,
+          2011,
+          2013,
+          2012
+        ]
+      },
+      "middle": {
+        "measured_ticks": 6,
+        "attempted_ticks": 6,
+        "blink_ratio": 0.0,
+        "threshold": 0.001,
+        "max_consecutive_ratio": 0.0,
+        "achieved_final_offsets_ms": [
+          2070,
+          2012,
+          2017,
+          2013,
+          2033,
+          2006
+        ]
+      },
+      "late": {
+        "measured_ticks": 6,
+        "attempted_ticks": 6,
+        "blink_ratio": 0.0,
+        "threshold": 0.001,
+        "max_consecutive_ratio": 0.0,
+        "achieved_final_offsets_ms": [
+          2010,
+          2011,
+          2008,
+          2007,
+          2010,
+          2011
+        ]
+      }
+    },
+    "timeline": {
+      "early": {
+        "measured_ticks": 6,
+        "attempted_ticks": 6,
+        "blink_ratio": 0.0,
+        "threshold": 0.001,
+        "max_consecutive_ratio": 0.0,
+        "achieved_final_offsets_ms": [
+          2011,
+          2012,
+          2012,
+          2014,
+          2014,
+          2008
+        ]
+      },
+      "middle": {
+        "measured_ticks": 6,
+        "attempted_ticks": 6,
+        "blink_ratio": 0.0,
+        "threshold": 0.001,
+        "max_consecutive_ratio": 0.0,
+        "achieved_final_offsets_ms": [
+          2011,
+          2015,
+          2014,
+          2021,
+          2012,
+          2009
+        ]
+      },
+      "late": {
+        "measured_ticks": 6,
+        "attempted_ticks": 6,
+        "blink_ratio": 0.0,
+        "threshold": 0.001,
+        "max_consecutive_ratio": 0.0,
+        "achieved_final_offsets_ms": [
+          2012,
+          2008,
+          2010,
+          2011,
+          2006,
+          2011
+        ]
+      }
+    }
+  },
+  "inspected_video_samples": {
+    "queries": {
+      "path": "early/queries/queries.webm",
+      "sha256": "7b0d26d85faae5542691fe9c09e110339845f07e9fd1685a74cec13780f04b45",
+      "times_s": [
+        12,
+        18
+      ]
+    },
+    "transitions": {
+      "path": "early/transitions/transitions.webm",
+      "sha256": "0a6889dfa5ca5250af3f6a2f07b3d598c8dd4f5b8c5e9450f1b6d915fc2fd1ef",
+      "times_s": [
+        12,
+        15,
+        16.8,
+        17.2,
+        17.6
+      ]
+    }
+  }
+}
