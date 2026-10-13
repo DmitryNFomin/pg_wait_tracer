@@ -95,8 +95,15 @@ DURATION_MIN="${DURATION_MIN:-35}"
 DURATION_S=$(python3 -c "print(int(float(\"$DURATION_MIN\") * 60))")
 PORT="${PGWT_DEMO_PORT:-8385}"
 
-# Retention (docs/DEMO_DELIVERY_QUEUE.md item 2): OFF by default -- a
-# 40-minute --mode full trace is large, and the default path stays cheap.
+# Retention (docs/DEMO_DELIVERY_QUEUE.md item 2): ON by default since
+# issue #386. It used to default to 0 "because a 40-minute --mode full
+# trace is large" -- and then two rehearsals in a row destroyed the exact
+# artifacts needed to diagnose their own failures (the offcpu_cap failures
+# at 10.04% and 11.48% could not be investigated because the trace was
+# gone). A diagnostic that deletes its evidence is worse than no
+# diagnostic, and a re-run costs 35-45 minutes of box time plus a burned
+# rehearsal attempt, which is worth far more than the disk. RETAIN_TRACE=0
+# is still accepted as an explicit opt-out for a cheap mechanics run.
 # When "1", cleanup() below keeps TRACE_DIR (moved to
 # tests/results/demo_rehearsal/trace/, which scripts/demo-rehearsal.sh
 # already rsyncs back unmodified -- no new sync path needed) instead of
@@ -105,10 +112,29 @@ PORT="${PGWT_DEMO_PORT:-8385}"
 # python child (PGWT_RETAIN_TRACE) sees it regardless of whether the
 # caller set it (then it is already in the environment) or left it to
 # this script's own default.
-RETAIN_TRACE="${RETAIN_TRACE:-0}"
+RETAIN_TRACE="${RETAIN_TRACE:-1}"
 export RETAIN_TRACE
 export PGWT_RETAIN_TRACE="$RETAIN_TRACE"
 
+# ── kernel run_delay accounting (issue #386) ─────────────────────────────
+# /proc/<pid>/schedstat field 2 (run_delay: ns runnable but NOT on a CPU)
+# is the ONLY way to measure the run-queue component of the Off-CPU*
+# residual independently of our own instrumentation -- and the kernel only
+# accumulates it when this sysctl is 1. Measured 2026-10-13: it is 0 by
+# default on both gate boxes, so without this the counters sit at 0 forever
+# and the decomposition would credit the whole residual to "unexplained"
+# with no evidence. tests/schedstat_lib.py REFUSES in that state rather
+# than reporting a 0 (so a run that cannot enable it is visibly
+# unmeasured, never silently clean); this just makes the normal case
+# measurable. Restored to its original value in cleanup() -- it is a global
+# sysctl and leaving it flipped would change every later measurement taken
+# on a shared box.
+# Declared HERE (before cleanup() is defined and the EXIT trap armed)
+# because cleanup() reads both under `set -u`; the actual flip happens
+# right AFTER `trap cleanup EXIT` below, so the restore path is always
+# armed before the value is ever changed.
+SCHEDSTATS_PATH=/proc/sys/kernel/sched_schedstats
+SCHEDSTATS_ORIG=""
 TRACE_DIR=$(mktemp -d /tmp/pgwt_demo_XXXXXX)
 DAEMON_LOG=$(mktemp /tmp/pgwt_demo_daemon_XXXXXX.log)
 BRIDGE_LOG=$(mktemp /tmp/pgwt_demo_bridge_XXXXXX.log)
@@ -125,6 +151,16 @@ DEMO_RC=1
 # stop_pid: bounded wait (signal, poll, KILL) -- live_daemon_lib.sh. The
 # bridge gets SIGINT specifically (web/main.go only handles os.Interrupt).
 cleanup() {
+    # issue #386: put the global sysctl back exactly as it was, BEFORE
+    # anything else can exit early below.
+    if [[ -n "$SCHEDSTATS_ORIG" && "$SCHEDSTATS_ORIG" != "1" ]]; then
+        if sysctl -q -w "kernel.sched_schedstats=$SCHEDSTATS_ORIG" 2>/dev/null; then
+            echo "demo_rehearsal: restored kernel.sched_schedstats=$SCHEDSTATS_ORIG"
+        else
+            echo "demo_rehearsal: WARNING could not restore kernel.sched_schedstats=$SCHEDSTATS_ORIG -- it is still $(cat "$SCHEDSTATS_PATH" 2>/dev/null)" >&2
+        fi
+    fi
+
     stop_pid "$WORKLOAD_PID" 10
     stop_pid "$PGBENCH_PID" 10
     stop_pid "$BRIDGE_PID" 10 INT
@@ -186,6 +222,22 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+
+# issue #386: flip the kernel's run_delay accounting ON now that the
+# restore path (cleanup, above) is armed.
+if [[ -r "$SCHEDSTATS_PATH" ]]; then
+    SCHEDSTATS_ORIG="$(cat "$SCHEDSTATS_PATH" 2>/dev/null || true)"
+    if [[ "$SCHEDSTATS_ORIG" == "1" ]]; then
+        echo "demo_rehearsal: kernel.sched_schedstats already 1 -- run_delay is being accumulated"
+    elif sysctl -q -w kernel.sched_schedstats=1 2>/dev/null; then
+        echo "demo_rehearsal: kernel.sched_schedstats $SCHEDSTATS_ORIG -> 1 for this run (restored at teardown)"
+    else
+        echo "demo_rehearsal: WARNING could not set kernel.sched_schedstats=1 (was '$SCHEDSTATS_ORIG') -- the Off-CPU* decomposition will REFUSE every window instead of reporting an unmeasured 0" >&2
+    fi
+else
+    echo "demo_rehearsal: WARNING $SCHEDSTATS_PATH is not readable (no CONFIG_SCHEDSTATS?) -- the Off-CPU* decomposition will REFUSE every window" >&2
+fi
+
 
 # criteria doc (docs/DEMO_REHEARSAL_CRITERIA.md) §7: "no test anywhere in
 # the run exited 126 (not executable) or 127 (command not found)" -- that
@@ -298,7 +350,7 @@ python3 -u "$SCRIPT_DIR/demo_rehearsal.py" --url "$BASE_URL" \
     --trace-dir "$TRACE_DIR" --daemon-log "$DAEMON_LOG" \
     --duration-min "$DURATION_MIN" \
     --pgbench-pid "$PGBENCH_PID" --workload-pid "$WORKLOAD_PID" \
-    --daemon-pid "$TRACER_PID"
+    --daemon-pid "$TRACER_PID" --postmaster-pid "$PM_PID"
 DEMO_RC=$?
 
 exit "$DEMO_RC"

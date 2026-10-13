@@ -447,10 +447,16 @@ of a demo teardown.
 
 **UNKNOWN — needs owner input**: whether to delete `/var/lib/pgwt/traces`
 after each session or let `--trace-retention`/`--retention-gb` (README.md)
-age it out — no script in the repo makes this decision for a *demo* box
-(the rehearsal harness's `cleanup()` always deletes its own `mktemp`
-directory, but that's a throwaway-VM pattern, not necessarily right for a
-box meant to keep running).
+age it out — no script in the repo makes this decision for a *demo* box.
+(Corrected 2026-10-13, issue #386: the rehearsal harness's `cleanup()` no
+longer always deletes its own `mktemp` trace directory — `RETAIN_TRACE`
+now defaults to **1**, so it *moves* it to
+`tests/results/demo_rehearsal/trace/` and the existing rsync brings it
+back. That is a deliberate change: two rehearsals in a row deleted the
+artifacts needed to diagnose their own failures. `RETAIN_TRACE=0` restores
+the old delete-on-exit behaviour for a cheap mechanics run. Either way it
+says nothing about what a *demo* box should do with
+`/var/lib/pgwt/traces`.)
 
 ## 7. Known rough edges a presenter should not be surprised by
 
