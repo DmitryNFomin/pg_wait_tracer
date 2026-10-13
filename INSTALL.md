@@ -291,13 +291,16 @@ make pgwt-server
 
 ### Web Investigation Client (Go) — runs on your laptop
 
+From the repository root:
+
 ```bash
+make pgwt-client
 cd web
-go mod tidy    # downloads dependencies, generates go.sum
-go build -o pgwt .
 ```
 
-This produces the `pgwt` binary. Run it from your laptop:
+`make pgwt-client` passes version ldflags so client and server builds from the same checkout report matching versions without a false skew banner.
+
+This produces the `web/pgwt` binary. Run it from your laptop after `cd web`:
 
 ```bash
 # Connects to DB server over SSH, opens browser at localhost:8384
@@ -312,7 +315,7 @@ This produces the `pgwt` binary. Run it from your laptop:
 
 **Requirements:**
 
-- Go >= 1.21 on your laptop (build time only — the binary is self-contained)
+- Go >= 1.21 and Make on your laptop (build time only — the binary is self-contained)
 - SSH access to the DB server (uses your default SSH key)
 - `pgwt-server` binary on the DB server (either in PATH or specified with
   `--server-path`)
