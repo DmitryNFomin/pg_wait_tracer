@@ -103,6 +103,13 @@ class Capture:
                 dims = image.size
             if dims != (WIDTH, HEIGHT):
                 raise ValueError(f"screencast size {dims}, expected {(WIDTH, HEIGHT)}")
+            digest = hashlib.sha256(data).hexdigest()
+            # A cadence restart and a compositor update can deliver the same
+            # native frame twice. Acknowledge that exact duplicate, but never
+            # count it toward coverage or invent a later capture timestamp.
+            if (self.frames and timestamp == self.frames[-1]["timestamp_s"]
+                    and digest == self.frames[-1]["sha256"]):
+                return
             if self.frames and timestamp <= self.frames[-1]["timestamp_s"]:
                 raise ValueError("screencast timestamp missing, duplicated or regressed")
             index = len(self.frames)
@@ -110,7 +117,7 @@ class Capture:
             (self.root / path).write_bytes(data)
             self.frames.append({"index": index, "timestamp_s": timestamp, "path": path,
                                 "size": list(dims), "metadata": metadata,
-                                "sha256": hashlib.sha256(data).hexdigest()})
+                                "sha256": digest})
         except Exception as exc:
             self.capture_errors.append(str(exc))
         finally:
@@ -170,15 +177,22 @@ def navigate(page, tab, smoke, capture, timeout):
     capture.guard()
 
 
-def dwell(page, tab, seconds, smoke, capture):
+def dwell(page, tab, seconds, smoke, capture, inspect_path=None):
     observations = [observe(page, tab, smoke, capture)]
     start = page.evaluate("Date.now()/1000")
     deadline = time.monotonic()+seconds
+    began_dwell = time.monotonic()
     next_sample = time.monotonic()+1
     while time.monotonic() < deadline:
         began = time.monotonic()
+        if inspect_path:
+            x0, x1, y = inspect_path
+            progress = (began-began_dwell)/seconds
+            page.mouse.move(x0+(x1-x0)*progress, y)
         capture.pulse()
-        page.wait_for_timeout(max(1, min(deadline-time.monotonic(), 1/capture.fps-(time.monotonic()-began))*1000))
+        # Capture above the required minimum to cover DOM inspection overhead;
+        # the frame count and gap gates still use the requested fps unchanged.
+        page.wait_for_timeout(max(1, min(deadline-time.monotonic(), 1/(capture.fps*2)-(time.monotonic()-began))*1000))
         capture.guard()
         if time.monotonic() >= next_sample:
             observations.append(observe(page, tab, smoke, capture))
@@ -187,6 +201,7 @@ def dwell(page, tab, seconds, smoke, capture):
     observations.append(observe(page, tab, smoke, capture))
     checked = coverage(capture.frames, start, end, capture.fps)
     return {"tab": tab, "dwell": {"start_s": start, "end_s": end, "requested_s": seconds},
+            "inspection_path": inspect_path,
             "observations": observations, "console_errors": [], **checked}
 
 
@@ -236,7 +251,7 @@ def table_crop(page, keys, title_selector=None):
                 (key === '_executions' ? [...table.querySelectorAll('th')].find(e=>e.innerText==='Waterfall') : null);
             if (!th) throw new Error('missing table column: '+key);
             const r = th.getBoundingClientRect();
-            const widths = {name:340,text:450,ms:130,pct:260,aas:90,
+            const widths = {name:340,text:450,ms:130,aas:90,
                 p95_exec_ms:100,avg_exec_ms:100,_executions:120,
                 pid:110,query_id:260,duration_ms:140};
             const width = Math.min(Math.ceil(r.width), widths[key] || Math.ceil(r.width));
@@ -259,6 +274,11 @@ def duration_ms(text):
     return float(match[1])*{"ms":1,"µs":0.001,"us":0.001,"s":1000}[match[2]] if match else -1
 
 
+def aas_inspection_path(page):
+    box = page.locator('#aas-chart-container').bounding_box()
+    return [box['x']+80, box['x']+box['width']*0.80, box['y']+box['height']*0.70]
+
+
 def drill(page, smoke, capture, timeout):
     capture.current = "drill-setup"
     # Start the supplementary clip without the walk's session filter.
@@ -267,7 +287,7 @@ def drill(page, smoke, capture, timeout):
         navigate(page,"overview",smoke,capture,timeout)
     navigate(page, "queries", smoke, capture, timeout)
     start = page.evaluate("Date.now()/1000")
-    before = dwell(page, "queries", 2, smoke, capture)
+    before = dwell(page, "queries", 2, smoke, capture, aas_inspection_path(page))
     # Rank actual DOM p95 execution duration, then average, never aggregate DB Time.
     candidates = page.evaluate("""() => {
         const table=document.querySelector('#table-container table');
@@ -283,10 +303,11 @@ def drill(page, smoke, capture, timeout):
     selected = max(candidates, key=lambda r: (duration_ms(r["p95"] or ""), duration_ms(r["avg"] or "")))
     if max(duration_ms(selected["p95"] or ""), duration_ms(selected["avg"] or "")) <= 0:
         raise Refusal(2, "drill: no visible query execution duration to select a slow query")
-    query_crop = [table_crop(page, ["query_id", "text", "_executions", "p95_exec_ms", "avg_exec_ms"])]
+    query_crop = [[rect(page, "#aas-chart-container")],
+                  table_crop(page, ["query_id", "text", "_executions", "p95_exec_ms", "avg_exec_ms"])]
     row = page.locator("#table-container tbody tr.clickable").nth(selected["index"])
     row.locator(".query-executions-action").hover()
-    capture.pulse(); page.wait_for_timeout(100)
+    capture.pulse()
     at = page.evaluate("Date.now()*1.0")
     row.locator(".query-executions-action").click()
     capture.current = "drill-waterfall"
@@ -313,8 +334,10 @@ def drill(page, smoke, capture, timeout):
         const data=opt.series.flatMap(s=>s.data||[]);
         const wait=data.find(d=>Array.isArray(d) && typeof d[3]==='string' && d[3].includes(':'));
         if(!wait) return null;
-        const xy=c.convertToPixel({gridIndex:0},[(Number(wait[0])+Number(wait[1]))/2,wait[2]]);
-        const b=el.getBoundingClientRect();return {x:b.left+xy[0],y:b.top+xy[1],wait:wait[3]};
+        const pixel = t => c.convertToPixel({gridIndex:0},[t,wait[2]]);
+        const xy=pixel((Number(wait[0])+Number(wait[1]))/2);
+        const b=el.getBoundingClientRect();return {x:b.left+xy[0],y:b.top+xy[1],wait:wait[3],
+            x0:b.left+pixel(Number(wait[0]))[0],x1:b.left+pixel(Number(wait[1]))[0]};
     }""")
     if not point:
         raise Refusal(2, "drill: inspected execution has no specific drawable wait")
@@ -326,7 +349,9 @@ def drill(page, smoke, capture, timeout):
     execution_crop = [table_crop(page, ["pid", "query_id", "duration_ms"]),
                       [rect(page, "#waterfall-chart")], [rect(page, "#waterfall-readout")]]
     execution_crop[-1][0][2] = min(1000, execution_crop[-1][0][2])
-    after = dwell(page, "waterfall", 5, smoke, capture)
+    margin = (point["x1"]-point["x0"])*0.10
+    after = dwell(page, "waterfall", 5, smoke, capture,
+                  [point["x0"]+margin,point["x1"]-margin,point["y"]])
     end = page.evaluate("Date.now()/1000")
     checked = coverage(capture.frames, start, end, capture.fps)
     return {"start_s":start,"end_s":end,"landed_s":landed,
@@ -461,7 +486,8 @@ def record(args, staging):
                 if tab == "overview":
                     headline_crop = [[rect(page,"#aas-chart-container")],
                                      table_crop(page,["name","ms","pct","aas"])]
-                result = dwell(page,tab,dwells[tab],smoke,capture)
+                result = dwell(page,tab,dwells[tab],smoke,capture,
+                               aas_inspection_path(page) if tab == 'overview' else None)
                 walk["tabs"].append(result)
             print("Recording continuous Queries → execution → wait interaction",flush=True)
             interaction, query_crop, execution_crop = drill(page,smoke,capture,args.timeout)
@@ -474,13 +500,16 @@ def record(args, staging):
             if not any(mix(o) != mix(overview["observations"][0]) for o in overview["observations"][1:]):
                 raise Refusal(2,"Overview: inspected wait mix did not change during the recorded stretch")
             overview["chart_change"] = chart_change(staging,capture.frames,overview["frame_indices"],headline_crop[0][0])
-            first,last=overview["frame_indices"][0],overview["frame_indices"][-1]
+            # Five seconds of native crosshair inspection, including the live tick.
+            headline_frames = frame_indices(capture.frames,overview["dwell"]["start_s"]+0.3,
+                                            overview["dwell"]["start_s"]+5.3)
+            first,last=headline_frames[0],headline_frames[-1]
             landed_indices=frame_indices(capture.frames,interaction["landed_s"],interaction["end_s"])
             walk["gifs"]=[
                 {"name":"headline","path":"headline.gif","start_frame":first,"end_frame":last,
-                 "fps":4,"width":1000,"crop":headline_crop},
+                 "fps":10,"width":1000,"crop":headline_crop},
                 {"name":"drill-down","path":"drill-down.gif","start_frame":interaction["frame_indices"][0],
-                 "end_frame":interaction["frame_indices"][-1],"fps":4,"width":1000,"crop":query_crop,
+                 "end_frame":interaction["frame_indices"][-1],"fps":10,"width":1000,"crop":query_crop,
                  "crop_keyframes":[{"start_frame":landed_indices[0],"crop":execution_crop}]},
             ]
             print(f"Encoding {len(capture.frames)} timestamped frames in Chrome",flush=True)
@@ -539,7 +568,7 @@ def main():
     mode.add_argument("--recut",type=Path,help="edit walk.json GIF data, then re-cut without Chrome")
     parser.add_argument("--run-id",default=time.strftime("%Y%m%dT%H%M%SZ",time.gmtime())+f"-{os.getpid()}")
     parser.add_argument("--dwells",help="JSON object of all eleven per-tab durations, >=5 seconds each")
-    parser.add_argument("--fps",type=int,default=4,help="minimum capture cadence (1–8), default 4")
+    parser.add_argument("--fps",type=int,default=12,help="minimum capture cadence (1–16), default 12; GIFs use 10")
     parser.add_argument("--timeout",type=float,default=60,help="readiness timeout in seconds")
     parser.add_argument("--headed",action="store_true",help="show the dedicated Chrome window")
     args=parser.parse_args()
@@ -548,7 +577,7 @@ def main():
         if args.recut:
             walk,output=recut(args.recut)
         else:
-            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*",args.run_id) or not (1<=args.fps<=8) or not (0<args.timeout<=300):
+            if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*",args.run_id) or not (1<=args.fps<=16) or not (0<args.timeout<=300):
                 raise Refusal(6,"invalid run-id, fps or timeout")
             RESULTS.mkdir(parents=True,exist_ok=True)
             output=RESULTS/args.run_id
