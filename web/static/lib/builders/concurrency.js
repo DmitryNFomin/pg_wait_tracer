@@ -271,8 +271,10 @@ export function buildConcurrencyTables(model) {
     let html = '<h3 style="color:#ccc;margin:10px 0 5px">Top Peak Moments</h3>' +
         // #384: this table and the chart's line are ONE series; the caption
         // says so, so a reader who finds 13 here looks for 13 on the line
-        // instead of comparing it with a burst marker.
-        '<div class="chart-notes">' + esc(TOP_PEAKS_CAPTION) + '</div>' +
+        // instead of comparing it with a burst marker. .panel-caption, not
+        // .chart-notes: this explains a column, it does not declare a data
+        // limit, and the amber note style is for the latter only.
+        '<div class="panel-caption">' + esc(TOP_PEAKS_CAPTION) + '</div>' +
         '<table class="data-table"><thead><tr>' +
         '<th>Time</th><th>Wait Event</th><th>Simultaneous Sessions</th></tr></thead><tbody>';
     model.topPeaks.forEach(p => {
