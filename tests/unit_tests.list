@@ -170,6 +170,7 @@ test_unit_list_coverage.py
 # pure sleep, cpu_ns > duration_ns) and every way it could be satisfied
 # without looking at anything.
 test_wait_cpu_canary
+test_offcpu_decompose
 test_pg13_resolve
 test_discovery_pie
 test_discovery_nopie

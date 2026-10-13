@@ -1,0 +1,39 @@
+Off-CPU* residual decomposition -- how these files were produced
+================================================================
+
+Tool: tests/offcpu_decompose.c (built by tests/Makefile on Linux:
+`make pgwt-server && make -C tests offcpu_decompose`).
+
+On macOS the product's src/spawn.c does not compile (pipe2), so link
+tests/offcpu_decompose_stubs.c instead:
+
+  cc -O2 -std=gnu11 -DPGWT_SERVER -I src -I/opt/homebrew/include \
+     tests/offcpu_decompose.c tests/offcpu_decompose_stubs.c \
+     src/compute.c src/event_reader.c src/event_writer.c src/wait_event.c \
+     src/idle_rule.c src/cJSON.c src/summary_reader.c src/summary_writer.c \
+     -L/opt/homebrew/lib -llz4 -lz -lm -o offcpu_decompose
+
+Files
+-----
+oct02_series.txt
+    The retained 2026-10-02 demo-rehearsal trace (the first clean rehearsal,
+    PG18, gate box, BEFORE the 2026-10-07 "add more load" workload addition).
+    Copied from tests/results/demo_rehearsal/trace in the main checkout; the
+    copy itself (trace_1002/, 23 MB) is left UNTRACKED next to this file.
+    Off-CPU* 0.001-0.041% of DB Time over 60 s windows.
+
+box_gate1_postload_traces.txt
+    Three full-mode captures taken on gate-1 (root@2.28.45.47) AFTER the
+    2026-10-07 workload addition, analysed on gate-1 with the same tool:
+      /root/cx-live-validate-retry-20261012/retry-live   (2026-10-12, 1611 s)
+      /root/pgwt-check/agent_cx-night-pipeline/demos/local-trace (2026-10-12)
+      /root/paintcomb_a8/trace_sighted                   (2026-10-08, 1118 s)
+    None of these is the failing rehearsal's own trace: that run
+    (master ac515f6) did not set RETAIN_TRACE=1 and nothing of it survives on
+    gate-1 or on the Mac. These are independent captures of the same
+    post-10-07 workload class on the same box.
+
+Every window printed by the tool is reconciled against
+pgwt_compute_time_model()'s own offcpu_ms and the tool exits 3 on any
+mismatch, so these numbers are the product's numbers, decomposed -- not a
+reimplementation's.

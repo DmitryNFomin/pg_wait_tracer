@@ -39,6 +39,7 @@ TESTS     = test_wait_event test_cmdline test_backend_lifecycle test_spawn test_
             test_alloc_tune \
             gen_test_traces gen_bench_traces test_concurrent_rw cross_validate \
             dump_markers wait_cpu_canary test_wait_cpu_canary \
+            offcpu_decompose test_offcpu_decompose \
             test_summary_tick_flush \
             test_block_agg bench_block_agg test_transitions_loader
 
@@ -429,6 +430,41 @@ wait_cpu_canary: wait_cpu_canary.c $(BUILD)/server_event_reader.o \
                  $(BUILD)/server_summary_writer.o \
                  $(BUILD)/server_spawn.o $(BUILD)/server_cJSON.o
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -llz4 -lz
+
+# offcpu_decompose: what is INSIDE compute.c's Off-CPU* residual on a real
+# trace (per-gap cpu_ns deficit, split by reason / gap duration / pid / the
+# wait the gap enters). Reconciles its own sum against
+# pgwt_compute_time_model's offcpu_ms per window and refuses on a mismatch,
+# so it explains the product's number rather than one of its own. Server
+# build. (On macOS, link tests/offcpu_decompose_stubs.c in place of
+# src/spawn.c -- that file uses pipe2(); see the stub file's header.)
+offcpu_decompose: offcpu_decompose.c $(BUILD)/server_event_reader.o \
+                  $(BUILD)/server_event_writer.o $(BUILD)/server_wait_event.o \
+                  $(BUILD)/server_idle_rule.o $(BUILD)/server_compute.o \
+                  $(BUILD)/server_summary_reader.o \
+                  $(BUILD)/server_summary_writer.o \
+                  $(BUILD)/server_spawn.o $(BUILD)/server_cJSON.o
+	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -llz4 -lz -lm
+
+# test_offcpu_decompose: the decomposition's own decision logic plus the
+# reconciliation against the REAL pgwt_compute_time_model over a window that
+# cuts a gap in half -- the only assertion that can catch the decomposition
+# drifting away from the product. Includes offcpu_decompose.c with
+# -DOCD_NO_MAIN; no trace file, no BPF, runs anywhere.
+test_offcpu_decompose: test_offcpu_decompose.c offcpu_decompose.c \
+                       $(BUILD)/server_event_reader.o \
+                       $(BUILD)/server_event_writer.o \
+                       $(BUILD)/server_wait_event.o \
+                       $(BUILD)/server_idle_rule.o $(BUILD)/server_compute.o \
+                       $(BUILD)/server_summary_reader.o \
+                       $(BUILD)/server_summary_writer.o \
+                       $(BUILD)/server_spawn.o $(BUILD)/server_cJSON.o
+	$(CC) $(CFLAGS) -DPGWT_SERVER -DOCD_NO_MAIN -o $@ test_offcpu_decompose.c \
+	      $(BUILD)/server_event_reader.o $(BUILD)/server_event_writer.o \
+	      $(BUILD)/server_wait_event.o $(BUILD)/server_idle_rule.o \
+	      $(BUILD)/server_compute.o $(BUILD)/server_summary_reader.o \
+	      $(BUILD)/server_summary_writer.o \
+	      $(BUILD)/server_spawn.o $(BUILD)/server_cJSON.o -llz4 -lz -lm
 
 # test_wait_cpu_canary: the canary's own decision logic, including every way
 # it could be satisfied without looking at anything (no events, nothing

@@ -1,0 +1,43 @@
+trace=tests/results/offcpu-residual/trace_1002/current.trace pg_major=18 blocks=1052 idle_timeout_mask=0x29b
+events=4307056 samples_blocks=0 span=1851.0s pid_cats=103
+
+# series: trailing 60s windows, step 300s. offcpu_pct is the gate's own quantity.
+ end_off   db_time_ms  offcpu_ms   offcpu% zero_cpu%  partial%    n_gaps    gap_ms clamp_ms
+    60.0      80926.4       0.81     0.001    67.537    32.463     34386    2729.2    0.000
+   360.0      81176.1      24.80     0.031     4.126    95.874     37177    2670.3    0.000
+   660.0      80664.6       0.80     0.001    92.839     7.161     36694    2648.1    0.000
+   960.0      82456.0      26.56     0.032    11.879    88.121     35936    2517.5    0.000
+  1260.0      80915.0       0.75     0.001    91.159     8.841     26308    2227.7    0.000
+  1560.0      81682.6      31.17     0.038     3.233    96.767     36397    2650.4    0.000
+
+# worst window: end_off=1560.0s offcpu=0.038% of db_time (db_time=81682.6 ms, offcpu=31.17 ms, wait_gap_cpu=423.29 ms)
+  by reason:
+    cpu_ns UNKNOWN       resid=      0.00 ms (  0.00% of resid)  n=0
+    cpu_ns == 0          resid=      1.01 ms (  3.23% of resid)  n=3
+    0<cpu<dur            resid=     30.17 ms ( 96.77% of resid)  n=36394
+    cpu>=dur(clamped)    resid=      0.00 ms (  0.00% of resid)  n=0
+  by gap duration:
+    <10us        resid=      0.00 ms (  0.00%)  n=2794
+    10-100us     resid=      0.13 ms (  0.43%)  n=25013
+    100us-1ms    resid=     18.99 ms ( 60.91%)  n=8573
+    1-10ms       resid=      9.77 ms ( 31.33%)  n=16
+    10-100ms     resid=      2.29 ms (  7.33%)  n=1
+    >100ms       resid=      0.00 ms (  0.00%)  n=0
+  top pids by residual:
+    pid 1170989  resid=      8.47 ms gap=    422.78 ms n=3089
+    pid 1170991  resid=      7.41 ms gap=    418.33 ms n=3094
+    pid 1171013  resid=      6.67 ms gap=    900.95 ms n=20521
+    pid 1170990  resid=      4.53 ms gap=    423.58 ms n=3074
+    pid 1170992  resid=      3.05 ms gap=    412.83 ms n=3081
+    pid 1194708  resid=      0.43 ms gap=      4.49 ms n=3
+    pid 1195698  resid=      0.29 ms gap=      4.03 ms n=5
+    pid 1195739  resid=      0.28 ms gap=      7.02 ms n=10
+  top bordering wait (the event the gap ENTERS):
+    ClientRead                   resid=     19.35 ms gap=   1472.62 ms n=8866
+    BufFileWrite                 resid=      6.02 ms gap=    504.74 ms n=10254
+    WalWrite                     resid=      3.16 ms gap=    101.92 ms n=1533
+    RelationMapRead              resid=      1.01 ms gap=      2.24 ms n=6
+    DataFileRead                 resid=      0.80 ms gap=    116.86 ms n=493
+    BufFileRead                  resid=      0.65 ms gap=    381.38 ms n=10256
+    DataFileExtend               resid=      0.15 ms gap=      1.94 ms n=8
+    DataFileWrite                resid=      0.03 ms gap=     20.06 ms n=1252
