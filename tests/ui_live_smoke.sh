@@ -366,7 +366,11 @@ echo "ui_live_smoke: bridge ready at $BASE_URL"
 # Same guard as tests/demo_rehearsal.sh, same reason: web/main.go embeds
 # web/static into the bridge binary (`//go:embed static`), so a stale web/pgwt
 # serves the old UI and the walk below would grade the wrong assets while
-# reporting green. Refuse before the walk, naming the asset and both hashes
+# reporting green. Refuse before the walk, naming the asset and both hashes.
+# Precisely: before the CONTROLLED walk, not before every possible page load
+# -- web/main.go's startup calls openBrowser(), so on a desktop session a
+# browser may already have fetched the page by the time this runs. What the
+# walk grades is gated; a human's own tab is not.
 # (assert_served_ui_matches_tree in live_daemon_lib.sh: 1 = served bytes
 # differ, 2 = could not look at all, 3 = python3 missing -- all refuse).
 if ! assert_served_ui_matches_tree "$BASE_URL" "$PROJECT_DIR/web/static" "ui_live_smoke"; then

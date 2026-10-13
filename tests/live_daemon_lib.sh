@@ -67,22 +67,41 @@ PYEOF
 #   0  every asset on disk is served byte-identically, and there was at
 #      least one asset to check
 #   1  MISMATCH: at least one asset's served bytes differ from disk
-#   2  CANNOT VERIFY: an asset could not be fetched at all (404, refused
-#      connection, timeout), or there are no assets on disk, or STATIC_DIR
-#      does not exist. CANNOT VERIFY wins over MISMATCH when both occur --
-#      an incomplete look is never downgraded to a partial pass
+#   2  CANNOT VERIFY: anything that means "I did not actually compare every
+#      asset" -- an asset that could not be fetched at all (404, refused
+#      connection, timeout), an asset that could not be READ from disk, an
+#      error while WALKING the tree (os.walk swallows those by default, which
+#      would hand back a silently shorter asset list), no assets on disk, a
+#      STATIC_DIR that does not exist, or a malformed timeout override.
+#      CANNOT VERIFY wins over MISMATCH when both occur -- an incomplete look
+#      is never downgraded to a partial pass
 #   3  TOOLING: python3 is missing, so the check could not run at all
-# Every non-zero code names the asset and prints BOTH hashes (or the fetch
-# error), so the log says which file and in which direction.
+# Every non-zero code names the asset and prints BOTH hashes (or the error),
+# so the log says which file and in which direction. Nothing exits around
+# these three codes: a disk-read failure used to escape as a traceback, which
+# would have surfaced as rc=1 "the bytes differ" -- a wrong answer, not a
+# refusal.
+#
+# PGWT_SERVED_ASSET_TIMEOUT_S (default 15) exists so the timeout path can be
+# tested; a non-numeric or non-positive value refuses rather than silently
+# reverting to the default.
+#
+# What counts as "embeddable" was MEASURED against both toolchains (macOS
+# go1.26.0 and the box's go1.22.2, the one that builds the bridge for a
+# rehearsal) rather than read off the docs -- fixture and output in
+# tests/results/served_asset_guard/embed_semantics/. `//go:embed static`
+# (no `all:`) embeds neither a path component starting with "." or "_", nor a
+# SYMLINK to a regular file, nor anything inside a subtree that is its own
+# module (contains go.mod) -- but DOES embed "a.js#v". So this walk skips the
+# first three (including each of them would be a FALSE REFUSAL of a current
+# bridge, the expensive direction) and percent-quotes the URL for the last
+# (unquoted, "a.js#v" is fetched as "a.js" plus a fragment: the guard would
+# fetch one asset twice and never look at the other).
 #
 # Known limit, stated rather than implied: this enumerates the DISK tree, so
 # a stale binary that still serves a file deleted from disk since is not
-# detected. Any file added to or modified on disk is.
-#
-# Mirrors Go's `//go:embed static` pattern rules: a path component starting
-# with "." or "_" is NOT embedded (that needs `all:`), so those are skipped
-# here too -- otherwise a stray .DS_Store in a Mac-side tree would refuse a
-# perfectly current bridge.
+# detected. Any file added to or modified on disk is -- which is the failure
+# mode a stale `make pgwt-client` actually produces.
 assert_served_ui_matches_tree() {
     local base="$1" root="${2:-}" label="${3:-live}"
     if [[ -z "$root" ]]; then
@@ -97,6 +116,7 @@ import hashlib
 import os
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 
 base, root, label = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -108,46 +128,114 @@ def say(msg):
     print("%s: %s" % (label, msg), flush=True)
 
 
+# Fetch timeout, overridable so the timeout path itself is testable. A
+# malformed value REFUSES rather than silently falling back to the default --
+# a guard that quietly ignores its own configuration is a guard whose
+# behaviour nobody knows.
+raw_timeout = os.environ.get("PGWT_SERVED_ASSET_TIMEOUT_S", "15")
+try:
+    timeout_s = float(raw_timeout)
+    if not timeout_s > 0:
+        raise ValueError("must be > 0")
+except ValueError as e:
+    say("REFUSE served-asset check: CANNOT VERIFY -- PGWT_SERVED_ASSET_TIMEOUT_S=%r is not a "
+        "positive number (%s)" % (raw_timeout, e))
+    sys.exit(2)
+
 if not os.path.isdir(root):
     say("REFUSE served-asset check: CANNOT VERIFY -- static dir %r does not exist" % root)
     sys.exit(2)
 
-# Go's //go:embed dir rules: skip any component starting with '.' or '_'.
+# Enumerate what //go:embed would embed. MEASURED against both toolchains
+# (go1.26.0 darwin/arm64 and the box's go1.22.2 linux/amd64, which is the one
+# that builds the bridge for a rehearsal) -- see
+# tests/results/served_asset_guard/embed_semantics/:
+#   * a path component starting with "." or "_" is NOT embedded (needs `all:`)
+#   * a SYMLINK to a regular file is NOT embedded (embed takes regular files
+#     only), while os.path.isfile() follows it -- including it here would be a
+#     FALSE REFUSAL of a current bridge, the expensive direction
+#   * a subtree that is its own module (contains go.mod) is NOT embedded at
+#     all, so prune it whole
+#   * "a.js#v" IS embedded, which is why the URL below is percent-quoted
+unreadable, walk_errors = [], []
+
+
+def on_walk_error(err):
+    # os.walk swallows scandir/listdir errors by default, which would silently
+    # yield a SMALLER asset list and let the guard "pass" having looked at
+    # less than it thinks. A traversal error is "could not look".
+    walk_errors.append("%s: %s" % (type(err).__name__, err))
+
+
 rels = []
-for dirpath, dirnames, filenames in os.walk(root):
-    dirnames[:] = [d for d in dirnames if not d.startswith((".", "_"))]
+for dirpath, dirnames, filenames in os.walk(root, onerror=on_walk_error):
+    keep = []
+    for d in dirnames:
+        if d.startswith((".", "_")):
+            continue
+        full = os.path.join(dirpath, d)
+        if os.path.islink(full):
+            continue                      # embed does not follow symlinked dirs
+        if os.path.isfile(os.path.join(full, "go.mod")):
+            continue                      # nested module: excluded entirely
+        keep.append(d)
+    dirnames[:] = keep
     for fn in filenames:
         if fn.startswith((".", "_")):
             continue
         full = os.path.join(dirpath, fn)
-        if not os.path.isfile(full):
+        try:
+            if os.path.islink(full) or not os.path.isfile(full):
+                continue
+        except OSError as e:
+            # A stat that fails is not "not a file" -- it is a failure to look.
+            walk_errors.append("stat %s: %s: %s" % (full, type(e).__name__, e))
             continue
         rels.append(os.path.relpath(full, root))
 rels.sort()
+
+if walk_errors:
+    for w in walk_errors:
+        say("served-asset check: TRAVERSAL ERROR -- %s" % w)
+    say("REFUSE served-asset check: CANNOT VERIFY -- %d error(s) walking %s; the asset list is "
+        "incomplete, so a pass here would mean 'checked fewer files than intended'"
+        % (len(walk_errors), root))
+    sys.exit(2)
 
 if not rels:
     say("REFUSE served-asset check: CANNOT VERIFY -- no embeddable assets found under %s "
         "(an empty subject is never a pass)" % root)
     sys.exit(2)
 
-mismatch, unfetchable = [], []
+mismatch, unfetchable_list = [], []
 for rel in rels:
-    url = base + rel.replace(os.sep, "/")
-    with open(os.path.join(root, rel), "rb") as fh:
-        disk = fh.read()
+    # Percent-quote: an unquoted "a.js#v" is sent as "a.js" plus a fragment,
+    # so the guard would fetch a DIFFERENT asset twice and never look at that
+    # one -- and return 0 while the bridge served different bytes for it.
+    url = base + urllib.parse.quote(rel.replace(os.sep, "/"), safe="/")
     try:
-        with urllib.request.urlopen(url, timeout=15) as r:
+        with open(os.path.join(root, rel), "rb") as fh:
+            disk = fh.read()
+    except OSError as e:
+        # A disk read we cannot do is "could not look" (exit 2), never a
+        # mismatch and never an uncaught traceback -- the three exit codes are
+        # this function's contract and nothing may exit around them.
+        unreadable.append((rel, "%s: %s" % (type(e).__name__, e)))
+        continue
+    try:
+        with urllib.request.urlopen(url, timeout=timeout_s) as r:
             if r.status != 200:
-                unfetchable.append((rel, url, "HTTP %s" % r.status))
+                unfetchable_list.append((rel, url, "HTTP %s" % r.status))
                 continue
             served = r.read()
     except Exception as e:
-        unfetchable.append((rel, url, "%s: %s" % (type(e).__name__, e)))
+        unfetchable_list.append((rel, url, "%s: %s" % (type(e).__name__, e)))
         continue
     dh = hashlib.sha256(disk).hexdigest()
     sh = hashlib.sha256(served).hexdigest()
     if dh != sh:
         mismatch.append((rel, dh, len(disk), sh, len(served)))
+unfetchable = unfetchable_list
 
 for rel, url, err in unfetchable:
     say("served-asset check: COULD NOT FETCH %s (%s) -- %s" % (rel, url, err))
@@ -155,6 +243,13 @@ for rel, dh, dn, sh, sn in mismatch:
     say("served-asset check: MISMATCH %s -- disk sha256=%s (%d bytes), served sha256=%s (%d bytes)"
         % (rel, dh, dn, sh, sn))
 
+for rel, err in unreadable:
+    say("served-asset check: COULD NOT READ FROM DISK %s -- %s" % (rel, err))
+
+if unreadable:
+    say("REFUSE served-asset check: CANNOT VERIFY -- %d of %d assets could not be read from disk; "
+        "a file we cannot read is one we did not compare" % (len(unreadable), len(rels)))
+    sys.exit(2)
 if unfetchable:
     say("REFUSE served-asset check: CANNOT VERIFY -- %d of %d assets could not be fetched at all; "
         "an unfetchable asset is absence, not a match" % (len(unfetchable), len(rels)))

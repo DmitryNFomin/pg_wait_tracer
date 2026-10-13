@@ -27,8 +27,12 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# PGWT_SAG_LIB is a TEST-only override (nothing in the product reads it): it
+# lets this file be pointed at an older copy of live_daemon_lib.sh to show a
+# regression going RED against the pre-fix function, instead of asserting a
+# red that nobody has seen. Production code gets no such hook.
 # shellcheck disable=SC1091
-source "$SCRIPT_DIR/live_daemon_lib.sh"
+source "${PGWT_SAG_LIB:-$SCRIPT_DIR/live_daemon_lib.sh}"
 
 tests_run=0
 tests_passed=0
@@ -234,6 +238,146 @@ PYEOF
 )"
     if [[ "$RC" -eq 2 ]] && grep -q "of $n_real assets could not be fetched" <<<"$OUT"; then ok=true; else ok=false; fi
     report "$ok" "default STATIC_DIR resolves to this repo's web/static ($n_real files) and refuses an empty server (rc=$RC)"
+    stop_server
+fi
+
+# ── review round 1 blockers: the guard passing while BLIND ──────────────────
+# Each case below returned 0 (or a wrong code) before the fix; the pre-fix
+# reds are in tests/results/served_asset_guard/review1_red.log, produced by
+# running this same file with PGWT_SAG_LIB pointed at the old lib.
+
+# 15. A "#" in a filename. Go embeds "a.js#v" (MEASURED, see
+#     tests/results/served_asset_guard/embed_semantics/), but an UNQUOTED URL
+#     sends it as "a.js" plus a fragment: the guard fetches a.js twice, never
+#     looks at a.js#v, and returns 0 even though the bridge serves different
+#     bytes for it.
+#
+#     The fixture matters. The obvious one -- a.js and a.js#v with DIFFERENT
+#     disk bytes -- is passed by the pre-fix code too: it compares a.js's
+#     served bytes against a.js#v's disk bytes, which differ, so it reports a
+#     mismatch by accident, on the wrong asset. The discriminating fixture is
+#     this one: the two files are IDENTICAL on disk and only the SERVED
+#     a.js#v differs. Then fetching a.js twice matches twice and the pre-fix
+#     guard returns 0 while the bridge is serving something else entirely.
+HASHDISK="$TMP/hashdisk"
+HASHSERVED="$TMP/hashserved"
+mkdir -p "$HASHDISK" "$HASHSERVED"
+printf 'same\n' > "$HASHDISK/a.js";    printf 'same\n' > "$HASHSERVED/a.js"
+printf 'same\n' > "$HASHDISK/a.js#v"
+printf 'SERVED-DIFFERENT\n' > "$HASHSERVED/a.js#v"
+start_server "$HASHSERVED"
+run_guard "http://127.0.0.1:$SRV_PORT/" "$HASHDISK" "case15"
+if [[ "$RC" -eq 1 ]] && grep -q 'MISMATCH a.js#v' <<<"$OUT"; then ok=true; else ok=false; fi
+report "$ok" "a '#' in a filename is percent-quoted, so its mismatch is SEEN -> rc=1 (rc=$RC)"
+stop_server
+
+# 16/17. A traversal error and a disk-read error must both be rc=2. Both are
+#     simulated with chmod 000, which root bypasses -- so when this runs as
+#     root the cases are reported NOT APPLICABLE by name rather than silently
+#     skipped or quietly counted as passes. scripts/check.sh (where this test
+#     is registered) runs as the developer, never root, which is exactly
+#     where the regression is live.
+start_server "$SERVED"
+BASE="http://127.0.0.1:$SRV_PORT/"
+if [[ "$EUID" -ne 0 ]]; then
+    # 16: os.walk's default behaviour swallows the scandir error on an
+    # unreadable directory and yields a SHORTER list; everything it can still
+    # see matches, so the pre-fix guard returned 0 having checked 3 of 5.
+    chmod 000 "$DISK/lib"
+    run_guard "$BASE" "$DISK" "case16"
+    chmod 755 "$DISK/lib"
+    if [[ "$RC" -eq 2 ]] \
+       && grep -q "TRAVERSAL ERROR" <<<"$OUT" \
+       && grep -q "asset list is incomplete" <<<"$OUT"; then ok=true; else ok=false; fi
+    report "$ok" "unreadable subdir -> rc=2 TRAVERSAL ERROR, not a pass over fewer files (rc=$RC)"
+
+    # 17: an unreadable FILE used to escape as an OSError traceback, which the
+    # caller would have seen as rc=1 "the bytes differ" -- a wrong answer
+    # rather than a refusal.
+    chmod 000 "$DISK/app.js"
+    run_guard "$BASE" "$DISK" "case17"
+    chmod 644 "$DISK/app.js"
+    if [[ "$RC" -eq 2 ]] \
+       && grep -q "COULD NOT READ FROM DISK app.js" <<<"$OUT" \
+       && ! grep -q "Traceback" <<<"$OUT"; then ok=true; else ok=false; fi
+    report "$ok" "unreadable file -> rc=2 CANNOT VERIFY, no traceback, never rc=1 (rc=$RC)"
+else
+    echo "  NOT APPLICABLE as root (uid 0 bypasses chmod 000): cases 16 and 17" \
+         "-- they are live under scripts/check.sh, which runs as the developer"
+fi
+
+# 18. A server that ACCEPTS the connection and never answers. Without a
+#     working timeout the guard would hang forever (a stalled gate, not a
+#     failing one); with it, this is "could not fetch" = rc=2.
+python3 - "$TMP/stall.port" <<'PYEOF' &
+import os
+import socket
+import sys
+
+srv = socket.socket()
+srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+srv.bind(("127.0.0.1", 0))
+srv.listen(8)
+with open(sys.argv[1] + ".tmp", "w") as fh:
+    fh.write(str(srv.getsockname()[1]))
+os.rename(sys.argv[1] + ".tmp", sys.argv[1])
+held = []
+while True:
+    c, _ = srv.accept()
+    held.append(c)          # accepted, deliberately never answered
+PYEOF
+STALL_PID=$!
+n=0
+while [[ ! -s "$TMP/stall.port" && $n -lt 100 ]]; do sleep 0.05; n=$((n + 1)); done
+STALL_PORT="$(cat "$TMP/stall.port" 2>/dev/null)"
+t0=$SECONDS
+OUT="$(PGWT_SERVED_ASSET_TIMEOUT_S=1 assert_served_ui_matches_tree \
+        "http://127.0.0.1:$STALL_PORT/" "$DISK" "case18" 2>&1)"
+RC=$?
+elapsed=$((SECONDS - t0))
+kill "$STALL_PID" 2>/dev/null; wait "$STALL_PID" 2>/dev/null
+if [[ "$RC" -eq 2 ]] && grep -q "COULD NOT FETCH" <<<"$OUT" && [[ "$elapsed" -lt 60 ]]; then ok=true; else ok=false; fi
+report "$ok" "server accepts but never answers -> rc=2 within ${elapsed}s, a refusal not a hang (rc=$RC)"
+
+# 19. A malformed timeout override must refuse, not silently use the default:
+#     a guard that ignores its own configuration has unknown behaviour.
+OUT="$(PGWT_SERVED_ASSET_TIMEOUT_S=banana assert_served_ui_matches_tree "$BASE" "$DISK" "case19" 2>&1)"
+RC=$?
+if [[ "$RC" -eq 2 ]] && grep -q "not a positive number" <<<"$OUT"; then ok=true; else ok=false; fi
+report "$ok" "malformed PGWT_SERVED_ASSET_TIMEOUT_S -> rc=2, never a silent default (rc=$RC)"
+
+# 20. FALSE-REFUSAL regression (the expensive direction): a symlink to a
+#     regular file and a nested-module subtree exist on disk but are NOT
+#     embedded by Go -- measured on go1.26.0 and go1.22.2. Including them
+#     would make the guard refuse a perfectly current bridge, i.e. abort every
+#     live run. The served copy deliberately does NOT have them.
+ln -sf app.js "$DISK/link.js"
+mkdir -p "$DISK/mod"
+printf 'module nested\n\ngo 1.21\n' > "$DISK/mod/go.mod"
+printf 'nested\n' > "$DISK/mod/m.js"
+run_guard "$BASE" "$DISK" "case20"
+if [[ "$RC" -eq 0 ]] && grep -q "all 5 embeddable assets" <<<"$OUT"; then ok=true; else ok=false; fi
+report "$ok" "symlink + nested-module subtree are excluded like Go does -> still rc=0, no false refusal (rc=$RC)"
+rm -rf "$DISK/link.js" "$DISK/mod"
+stop_server
+
+# 21. FALSE-REFUSAL regression on the REAL tree. Cases 1-20 run on a 5-file
+#     fixture; this one points the guard at this repo's actual web/static (59
+#     assets, 1.8 MB, vendored minified JS, nested dirs) served byte-for-byte,
+#     and requires rc=0. If any of the enumeration rules (dot/underscore,
+#     symlink, nested module) or the percent-quoting were wrong for a real
+#     asset name, this is where it shows up as a refusal -- and a refusal here
+#     means every live-tier run aborts, so it is the expensive direction.
+#     NOTE on what this does NOT cover: served by python3, not by a Go bridge,
+#     so "the embedded set equals the disk set" is not re-proved here. That is
+#     covered by tests/results/served_asset_guard/embed_semantics/ (measured on
+#     both toolchains) and by the real-bridge log in the same directory.
+REAL_STATIC="$(cd "$SCRIPT_DIR/.." && pwd)/web/static"
+if [[ -d "$REAL_STATIC" ]]; then
+    start_server "$REAL_STATIC"
+    run_guard "http://127.0.0.1:$SRV_PORT/" "$REAL_STATIC" "case21"
+    if [[ "$RC" -eq 0 ]] && grep -qE "OK -- all [0-9]+ embeddable assets" <<<"$OUT"; then ok=true; else ok=false; fi
+    report "$ok" "the REAL web/static served byte-for-byte -> rc=0, no false refusal on any real asset name (rc=$RC)"
     stop_server
 fi
 

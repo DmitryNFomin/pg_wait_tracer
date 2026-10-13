@@ -304,7 +304,11 @@ echo "demo_rehearsal: bridge ready at $BASE_URL"
 # `//go:embed static`), so a web/pgwt built before a UI edit keeps serving the
 # old assets and this whole rehearsal would pass against the wrong UI with no
 # outward sign -- exactly the failure that cannot be detected afterwards from
-# the summary. Refuse here, before any walk, naming the asset and both hashes.
+# the summary. Refuse here, before the CONTROLLED walk, naming the asset and
+# both hashes. "Before the walk", not "before any page load": web/main.go's
+# startup calls openBrowser(), so on a desktop session a browser may already
+# have fetched the page -- what the rehearsal GRADES is gated, a human's own
+# tab is not.
 # See assert_served_ui_matches_tree in live_daemon_lib.sh for the exit-code
 # contract (1 = served bytes differ, 2 = could not look at all, 3 = python3
 # missing; every one of them refuses).
