@@ -1,0 +1,45 @@
+=== A2 (baseline, no tracer) start 2026-10-13T12:12:02+00:00 ===
+=== Warmup ===
+NOTICE:  extension "pg_prewarm" already exists, skipping
+CREATE EXTENSION
+ pg_prewarm 
+------------
+      19467
+(1 row)
+
+=== Starting mixed workload (60s, 8 clients) ===
+pgbench (18.6 (Ubuntu 18.6-1.pgdg24.04+2))
+starting vacuum...end.
+progress: 10.0 s, 2673.8 tps, lat 2.977 ms stddev 26.097, 0 failed
+progress: 20.0 s, 2774.4 tps, lat 2.877 ms stddev 25.422, 0 failed
+progress: 30.0 s, 2791.1 tps, lat 2.859 ms stddev 24.867, 0 failed
+progress: 40.0 s, 2783.0 tps, lat 2.867 ms stddev 25.911, 0 failed
+progress: 50.0 s, 2745.7 tps, lat 2.908 ms stddev 26.538, 0 failed
+progress: 60.0 s, 3267.1 tps, lat 2.441 ms stddev 0.920, 0 failed
+transaction type: <builtin: TPC-B (sort of)>
+scaling factor: 10
+query mode: simple
+number of clients: 8
+number of threads: 2
+maximum number of tries: 1
+duration: 60 s
+number of transactions actually processed: 170357
+number of failed transactions: 0 (0.000%)
+latency average = 2.809 ms
+latency stddev = 23.170 ms
+initial connection time = 27.408 ms
+tps = 2840.053177 (without initial connection time)
+statement latencies in milliseconds and failures:
+         0.001           0 \set aid random(1, 100000 * :scale)
+         0.000           0 \set bid random(1, 1 * :scale)
+         0.000           0 \set tid random(1, 10 * :scale)
+         0.000           0 \set delta random(-5000, 5000)
+         0.131           0 BEGIN;
+         0.233           0 UPDATE pgbench_accounts SET abalance = abalance + :delta WHERE aid = :aid;
+         0.259           0 SELECT abalance FROM pgbench_accounts WHERE aid = :aid;
+         0.308           0 UPDATE pgbench_tellers SET tbalance = tbalance + :delta WHERE tid = :tid;
+         0.851           0 UPDATE pgbench_branches SET bbalance = bbalance + :delta WHERE bid = :bid;
+         0.210           0 INSERT INTO pgbench_history (tid, bid, aid, delta, mtime) VALUES (:tid, :bid, :aid, :delta, CURRENT_TIMESTAMP);
+         0.816           0 END;
+=== Workload done ===
+=== A2 end 2026-10-13T12:13:02+00:00 ===
