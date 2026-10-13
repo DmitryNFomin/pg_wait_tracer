@@ -144,6 +144,15 @@ xpass=0
 # both charge measured and the remainder has its own row, so the legacy/PG13
 # tier is exact too. Leaving the entry in would have disarmed the only
 # live-PG test that can catch a regression of that contract.
+# test_io_worker_parity|376 was removed by the summary-v6 writer fix (#315,
+# #376), in the same branch that added the entry: io_worker records are now
+# excluded at the writer, both paths are invariant to them, and the test is
+# green on the real PG18 io_method=worker capture (Idle had been +23.36% on
+# the full span and +50.11% on a 900 s window ending at the capture end).
+# The entry had to go WITH the fix: a listed test fails the gate under
+# neither outcome, so keeping it would have disarmed the very gate the fix
+# exists to satisfy — and CI's build-and-unit job (make -C tests check)
+# ignores this table entirely, so it was never the thing keeping CI green.
 KNOWN_FAILING=()
 
 # known_failing_issue NAME — prints the tracking issue number and returns 0

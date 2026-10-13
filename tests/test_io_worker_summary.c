@@ -11,9 +11,37 @@
  * capture, +23.36% on the whole-capture Idle total / +308.16% on a window
  * containing the capture end (measured, tests/results/issue376-measurement).
  *
- * WHY THIS FILE EXISTS WHEN tests/test_agg_raw_crosscheck.c ALREADY COMPARES
- * THE TWO PATHS. That gate's fixture is deliberately io_worker-FREE (its hole
- * N7), precisely so that nobody closes #315 by pre-flagging a fixture event:
+ * DIVISION OF LABOUR WITH tests/test_io_worker_parity.c, which landed first
+ * as the EXPECTED-RED gate for the same two issues. That file owns the
+ * raw-vs-summary comparison itself: three windows, an acceptance tier over
+ * the real PG18 capture, handle_heatmap's two routes cell by cell, and the
+ * refusals that keep an unresolvable base from approving itself. Read it for
+ * the verdict on the numbers.
+ *
+ * THIS file owns the three things a comparison of compute outputs cannot see:
+ *   (1) the RECORDS -- that io_worker time is absent from each of class_ns,
+ *       idle_ns, events[] (with its histograms), sessions[] and queries[],
+ *       and that the writer COUNTED what it dropped. A read-side subtraction
+ *       or a half-exclusion can produce the same totals for one window and a
+ *       wrong per-event breakdown for the next;
+ *   (2) the PRODUCERS -- that src/event_stream.c and src/escalation.c
+ *       actually resolve a category before pushing (section 4). Every
+ *       writer-level test, including the parity gate, resolves the category
+ *       ITSELF and hands it to the writer, so a daemon producer passing 0
+ *       leaves all of them green. That is the gap the fix for #376 was
+ *       largely about: the resolve used to sit 65 lines BELOW the push;
+ *   (3) a synthetic CAPTURE-END FLUSH record, so the shape that carries the
+ *       bulk of the divergence is covered without the 26 MB capture.
+ * Section 2 keeps a small raw-vs-summary comparison of its own, as the
+ * non-vacuity anchor for (1) and (3) -- the same run shows agreement with a
+ * resolved category and divergence with cat_flag 0, which is what makes the
+ * record-level assertions above mean something. It is NOT the authority on
+ * parity; test_io_worker_parity is.
+ *
+ * WHY NEITHER OF THESE IS tests/test_agg_raw_crosscheck.c, WHICH ALSO
+ * COMPARES THE TWO PATHS: that gate's fixture is deliberately io_worker-FREE
+ * (its hole N7), precisely so that nobody closes #315 by pre-flagging an
+ * event:
  * `evt->flags` carries no category bit on any path that feeds the writer, so
  * a `flags & PGWT_EVENT_FLAG_IO_WORKER` check inside the writer is DEAD IN
  * THE DAEMON and a pre-flagged input greens it while testing an input shape
