@@ -470,11 +470,28 @@ checked first and independently:
   - **Per-class wait CPU, not a DB-Time fraction.** `Timeout:PgSleep` and
     `Lock:relation` are pure sleeps: a correct implementation records
     essentially no on-CPU time inside them (cpu/dur well under 0.01%,
-    bounded by at most a few deadlock-timeout wakeups). **A PgSleep or
-    Lock event carrying cpu_ns on the order of a millisecond is the
-    over-attribution signature** — a stale wait label, or an `on_cpu_ts`
-    that was never closed. That is the check; the per-class figure is the
-    discriminating quantity.
+    bounded by at most a few deadlock-timeout wakeups). **Restated
+    2026-10-13 — criteria change, measured before written (see the RESOLVED
+    paragraph below for the measurement that drove it):** the signature is
+    `cpu_ns` approaching `duration_ns`, not `cpu_ns` alone: a stale wait
+    label or an unclosed `on_cpu_ts` books most of the wait's wall time as
+    CPU. Flag a pure-sleep event only when BOTH hold — **`cpu_ns` >=
+    824,430 ns AND `cpu_ns`/`duration_ns` >= 50%**. Report per-event maxima
+    of both quantities separately; a class mean hides the outlier. **Why
+    the conjunction, not either half:** absolute-only fires on a benign
+    3.004 s sleep carrying 923,834 ns at **0.031%** of its own duration —
+    the event is just long, not over-attributed; ratio-only would
+    false-positive on a 0.159 ms uncontended advisory-lock acquisition
+    carrying 52,661 ns at **33.148%** — a real but tiny absolute cost, not
+    a stuck CPU clock. Worst observed ratio is 33.148%, giving ~1.8x
+    margin to the 50% line; the absolute threshold stays at 824,430 ns,
+    unmoved by this restatement. This is not a weakened bar: the previous
+    wording ("a PgSleep or Lock event carrying cpu_ns on the order of a
+    millisecond is the over-attribution signature") named no threshold at
+    all, and a literal reading of it would have flagged the 923,834 ns
+    event above while a genuine 33.148%-ratio event sat unremarked in the
+    same pair of captures — the restated test catches the real case and
+    correctly clears the benign one.
   - `cpu_clamped_ms` ≈ 0. Note its limit: the wait branch never clamps
     `cpu_ns > dur` (`src/compute.c:810`), so `cpu_clamped_ms = 0` vouches
     for CPU gaps only, never for wait events.
@@ -494,28 +511,74 @@ loose to gate on (~1.2 s for that run). Baselining the DB-Time fraction instead
 would be illegitimate: it is a property of the workload's IO mix, not of the
 implementation, so it cannot separate a defect from a change of mix.
 
-  Per-class wait CPU is not currently on the wire. **BLOCKED — method
-  mis-specified (owner, box access, review round 4), not a box-access
-  problem.** This paragraph used to say to settle it via
-  `tests/cross_validate.c` over "any full-mode gate-box trace". That method
-  cannot work: `tests/cross_validate.c`'s own header says it "reads a
-  **tiered-mode** trace directory that contains BOTH sampled blocks
-  (always-on) and transition blocks (escalation window)" and compares the
-  two over their overlap window — it needs SAMPLES blocks to compare
-  against. **Full mode produces none.** Run against the retained 35-minute
-  full-mode trace from the first clean rehearsal (below):
+  Per-class wait CPU is still not on the wire in the `time_model` response
+  — the measurement below is a direct offline raw-trace walk, run once, not
+  a check wired into `demo_rehearsal.py`. **RESOLVED 2026-10-13 — answered
+  by changing the instrument, not the bar.** This paragraph used to say to
+  settle it via `tests/cross_validate.c` over "any full-mode gate-box
+  trace"; that finding stands as the reason the original method could never
+  work, not as an open blocker: `tests/cross_validate.c`'s own header says
+  it "reads a **tiered-mode** trace directory that contains BOTH sampled
+  blocks (always-on) and transition blocks (escalation window)" and
+  compares the two over their overlap window — it needs SAMPLES blocks to
+  compare against, and **full mode produces none.** Confirmed against the
+  retained 35-minute full-mode trace from the first clean rehearsal:
   `pgwt-server --dump` on it reports `4432286 transitions, 0 samples,
   Fidelity: exact`; `cross_validate` on the same trace exits with `ERROR: no
   sample blocks — sampler produced nothing` (`tests/cross_validate.c`'s own
-  message, line ~149) — not a flaky run, a structural mismatch between the
-  tool's input contract and full mode's output. **What would actually
-  answer this:** either a per-event `cpu_ns` extraction tool for full-mode
-  traces, which does not exist today, or a deliberate `--mode tiered`
-  capture — which is then not the demo configuration (`--mode full`), so it
-  would answer a different question. **Not invented, not built here**: no
-  number is recorded for the max-`cpu_ns`-on-`Timeout:PgSleep` figure this
-  row originally asked for, and the tool is not written in this docs-only
-  commit.
+  message, line ~149) — a structural mismatch between the tool's input
+  contract and full mode's output, not fixable by re-running it against a
+  different full-mode trace.
+
+  **What actually answered it:** a per-event `cpu_ns` extractor that walks
+  a full-mode raw trace directly (not `cross_validate.c`), built and run on
+  `agent/cx-25-raw-perclass-cpu` @ `853cfc1`
+  (worktree `.claude/worktrees/agent-a98a1ee2ed1061c28`), evidence under
+  `tests/results/issue25-perclass-raw-scan/`. Two full-coverage walks, both
+  cross-verified against block headers *and* `pgwt-server --dump`, 0
+  unknown `cpu_ns` in either:
+  - **Oct-2 capture:** 4,307,056 / 4,307,056 records, 1052/1052 blocks.
+    `Timeout:PgSleep` 326 events, max 923,834 ns at **0.0308%** ratio.
+    `Lock:relation` 436 events, max ratio **0.0148%**.
+  - **Oct-13 current-workload capture:** 7,385,206 / 7,385,206 records,
+    1804/1804 blocks. `Lock:advisory` 179 events, max absolute 210,008 ns
+    on a 1.000 s hold (0.021%), max ratio **33.148%** on a 0.159 ms
+    acquisition (52,661 ns absolute). `Lock:relation` 392 events, max ratio
+    0.025%. `Lock:tuple` 1 event, 0.465%.
+
+  **Combined: 1,850 pure-sleep events, zero showing over-attribution** by
+  the restated test above. Contrast: 57 of 64 recorded threshold crossings
+  sit at ratio **≥50%** at millisecond scale, all in IO/Client classes
+  where CPU legitimately dominates — that is what the real signature looks
+  like, and it is visibly absent from every pure-sleep event measured.
+
+  **Measured envelope, recorded but not used to move the threshold:**
+  sleep-class p99 rose from 79-91 µs (Oct-2 capture) to 171-203 µs (Oct-13
+  capture) as the workload changed between the two captures. The unchanged
+  824,430 ns absolute threshold is therefore now **4.05x** the worst
+  sleep-class p99, down from 10x against the Oct-2 figures alone — the
+  envelope widened and the threshold held anyway; it was neither
+  retightened when the margin was 10x nor loosened now that it is 4x.
+
+  **Unmeasured, recorded as unmeasured rather than folded into "clean":**
+  `Lock:extend` had 0 events in the Oct-13 capture (2 in an earlier,
+  unretained capture — statistically empty, not evidence either way).
+  `Timeout:PgSleep` had 0 events in the Oct-13 capture because the workload
+  dropped `pg_sleep` on 2026-10-06 (§2 above); it is covered only by the
+  Oct-2 capture's 326 events above, not by current-workload data.
+
+  **This is a criteria change, made the legitimate way** (this document's
+  own rule: a criteria change is fine "by a commit that says so"). It does
+  not weaken the bar: a literal reading of the old wording ("cpu_ns on the
+  order of a millisecond") would have flagged the Oct-2 923,834 ns PgSleep
+  event — genuinely millisecond-scale in absolute terms — as the thing it
+  is defined to catch, while the real 33.148%-ratio advisory-lock event sat
+  in the same pair of captures unremarked by an absolute-only reading. The
+  restated conjunction clears the first and would catch the second. The
+  measurement preceded the restatement, not the reverse: both captures
+  above were walked first, the false-fire and false-negative were found,
+  and only then was the wording rewritten to name the mechanism it needs to
+  detect.
 
   **Related data point, same dump, corroborates the Off-CPU\* section
   above:** over the whole 1875.8 s capture, `CPU (waiting for a core)` was
@@ -945,7 +1008,7 @@ left to be discovered.
 | §2 AAS ≥ 1.15 on the recent window | yes (`aas_floor_ok`) — the gate enforces the settled **1.15** (`tests/demo_rehearsal_lib.py`'s `AAS_FLOOR`; the old `AAS_FLOOR_PROVISIONAL = 0.5` is gone) |
 | §2 all 11 tabs reached, daemon alive throughout | yes (`build_demo_summary`'s `expected_tabs_per_pass` floor; `_assert_daemon_alive`, mirrors the existing workload-alive fail-safe) |
 | §3 conservation identity | yes, sampled every ~5 minutes through the capture (`conservation_sample_interval_s`), every sample must pass — not once at the end |
-| §3 `wait_gap_cpu_ms` ≤ 0.1% | **removed, not implemented** — corrected 2026-09-27/28: this was never a valid over-attribution detector (the BPF measures on-CPU across the whole wait-start/wait-end span, so an IO wait is legitimately CPU-bearing; two live runs measured 0.376–0.392%, expected on a correct implementation). The real per-class signature (a `Timeout:PgSleep`/`Lock:relation` event carrying millisecond-scale `cpu_ns`) needs data not on the wire in the `time_model` response today — reported as a gap, not proxied from the aggregate |
+| §3 `wait_gap_cpu_ms` ≤ 0.1% | **removed, not implemented** — corrected 2026-09-27/28: this was never a valid over-attribution detector (the BPF measures on-CPU across the whole wait-start/wait-end span, so an IO wait is legitimately CPU-bearing; two live runs measured 0.376–0.392%, expected on a correct implementation). The real per-class signature (`cpu_ns` approaching `duration_ns` on a `Timeout:PgSleep`/`Lock:*` event) still has no field on this wire — **measured offline instead, 2026-10-13**, via a direct raw-trace walk, not through `time_model`: see §3's RESOLVED per-class paragraph above for the figures and the restated threshold (`cpu_ns` >= 824,430 ns AND ratio >= 50%, both required). Not a wired automatic gate inside `demo_rehearsal.py` |
 | §3 `cpu_clamped_ms` ≤ 0.1% | yes (`cpu_clamped_ok`), scope corrected in its own code comment: vouches for CPU-class gaps only, never wait events (`src/compute.c`'s wait branch never clamps `cpu_ns > dur`) |
 | §3 Off-CPU\* ≤ 10% | yes (`time_model_offcpu_cap_ok`), but the 10% is a **provisional catastrophic-loss tripwire**, not a calibrated bound — see §3's own corrected paragraph above: its cited "4.92 pp" derivation is a real sum but measures a different regime, unit, and quantity than the gate enforces; demo measured <0.1% (n=7, one run); kept at 10%, not tightened, on n=1 |
 | §4 zero known-failing tabs | yes (`build_demo_summary` uses raw `ok`, ignoring the exemption) |
