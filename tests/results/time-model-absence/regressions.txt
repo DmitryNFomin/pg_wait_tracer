@@ -1,0 +1,12 @@
+test_window_clip: exit_status=0
+test_idle_accounting: exit_status=0
+test_pid_cap: exit_status=0
+test_tag_refusal: exit_status=0
+test_concurrency_bounds: exit_status=0
+test_probe_bounds: exit_status=0
+test_interference_bounds: exit_status=0
+test_exec_index: exit_status=0
+test_interval_index: exit_status=0
+test_demo_rehearsal_lib.py: exit_status=0 (temporary venv; 189/189 assertions)
+test_unit_list_coverage.py: exit_status=0
+OK: test-registration guard (base ac515f6c812c2a45b2feab4b024cfd1ccaf22f10) — append-only invariant holds

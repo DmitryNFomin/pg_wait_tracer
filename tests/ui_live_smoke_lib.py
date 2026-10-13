@@ -770,6 +770,304 @@ def build_sweep_tick_record(achieved_offsets_ms, frames,
     }
 
 
+# ── per-frame DATA diagnostics for the blink sweep (issue #384) ──────────────
+#
+# The sweep could say "these two frames' PIXELS differ by ratio r" and
+# nothing else: it kept one tick-N.png per tick (the first frame only) and
+# no record of what the chart was actually rendering at each frame. So a
+# real divergence -- gate-1's histogram 200ms->500ms pair, ratios 0.0482 /
+# 0.0468 -- could not be attributed. "The data changed between the frames"
+# (the sweep is right, and the workload moved) and "the pixels changed with
+# identical data" (a product blink) produce the SAME number.
+#
+# These verdicts close that gap and are DIAGNOSTIC ONLY: nothing below is
+# read by build_tab_result, write_summary or any `ok` computation, and the
+# capture that feeds them is requested only by ui_live_smoke.py's
+# --diag-data path (the same precedent as #266's read_end_clock, which is
+# likewise paid for only on a self-test tick -- a gating tick must pay no
+# extra round trip).
+#
+# Fail-safe rule, applied the same way every other verdict in this module
+# applies it: a snapshot that cannot be read, cannot be parsed, or carries
+# no page-clock anchor is REFUSED (measured=False), never scored as
+# "identical". Scoring an unreadable probe as "no change" is exactly how a
+# diagnostic turns into a false "product bug" verdict -- the detector would
+# be blamed for a difference the harness never looked for.
+
+
+def data_snapshot_ok(snap):
+    """(ok, reason) for ONE per-frame data snapshot as read off the page by
+    ui_live_smoke.py's _panel_data_probe.
+
+    A usable snapshot is a dict with:
+      - no "error" key set (the page-side probe refusing: no chart
+        instance, a disposed instance, a non-chart tab, a JS throw),
+      - "truncated" false/absent (the probe caps how many numbers it ships;
+        a capped read is a PARTIAL read and must not be compared as if it
+        were whole),
+      - "cells": a NON-EMPTY list of finite numbers -- the series values the
+        chart is rendering, flattened. Empty is refused, not treated as
+        "no data, therefore unchanged": an empty array compares equal to
+        any other empty array, which would make every pair look identical
+        and every divergence look like a product bug.
+      - "at_ms": the page's own Date.now() at the read, so frames can be
+        ordered against workload events in ONE clock (#266's discipline).
+
+    Returns (True, None) or (False, "<why>")."""
+    if snap is None:
+        return False, "no data snapshot captured"
+    if not isinstance(snap, dict):
+        return False, f"data snapshot is {type(snap).__name__}, not a dict"
+    err = snap.get("error")
+    if err:
+        return False, f"page-side probe refused: {err}"
+    if snap.get("truncated"):
+        return False, (f"probe truncated the series at {snap.get('cell_count')!r} "
+                       "values -- a partial read, not comparable")
+    if snap.get("at_ms") is None:
+        return False, "snapshot carries no page-clock anchor (at_ms)"
+    cells = snap.get("cells")
+    if cells is None:
+        return False, "snapshot carries no `cells` array"
+    if not isinstance(cells, (list, tuple)):
+        return False, f"`cells` is {type(cells).__name__}, not a list"
+    if len(cells) == 0:
+        return False, "`cells` is empty -- nothing to compare"
+    for i, v in enumerate(cells):
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            return False, f"`cells`[{i}] is not a number ({v!r})"
+        if v != v or v in (float("inf"), float("-inf")):
+            return False, f"`cells`[{i}] is not finite ({v!r})"
+    return True, None
+
+
+def _unmeasured_diff(reason):
+    return {
+        "measured": False, "identical": None, "shape_changed": None,
+        "reason": reason, "cells_compared": 0, "cells_differing": None,
+        "first_differing_index": None, "max_abs_delta": None,
+        "sum_abs_delta": None, "sum_a": None, "sum_b": None, "dt_ms": None,
+    }
+
+
+def data_snapshot_diff(a, b):
+    """Compares two per-frame data snapshots bin-for-bin.
+
+    Returns a dict; the two fields a caller must branch on first are
+    `measured` (False = this pair proves NOTHING, see `reason`) and, when
+    measured, `identical`.
+
+    A cell-count change is a measured, non-identical result (the chart's
+    series itself changed shape -- a genuine content change), with
+    `shape_changed` True and the per-cell deltas left None because there is
+    no cell-to-cell correspondence to take them over. Reporting that as
+    "unmeasured" would hide the loudest kind of real change."""
+    ok_a, why_a = data_snapshot_ok(a)
+    if not ok_a:
+        return _unmeasured_diff(f"frame A: {why_a}")
+    ok_b, why_b = data_snapshot_ok(b)
+    if not ok_b:
+        return _unmeasured_diff(f"frame B: {why_b}")
+    ca, cb = list(a["cells"]), list(b["cells"])
+    dt_ms = b["at_ms"] - a["at_ms"]
+    if len(ca) != len(cb):
+        return {
+            "measured": True, "identical": False, "shape_changed": True,
+            "reason": f"cell count changed {len(ca)} -> {len(cb)}",
+            "cells_compared": 0, "cells_differing": None,
+            "first_differing_index": None, "max_abs_delta": None,
+            "sum_abs_delta": None, "sum_a": float(sum(ca)),
+            "sum_b": float(sum(cb)), "dt_ms": dt_ms,
+        }
+    deltas = [float(y) - float(x) for x, y in zip(ca, cb)]
+    differing = [i for i, d in enumerate(deltas) if d != 0.0]
+    return {
+        "measured": True, "identical": not differing, "shape_changed": False,
+        "reason": None, "cells_compared": len(ca),
+        "cells_differing": len(differing),
+        "first_differing_index": differing[0] if differing else None,
+        "max_abs_delta": max((abs(d) for d in deltas), default=0.0),
+        "sum_abs_delta": float(sum(abs(d) for d in deltas)),
+        "sum_a": float(sum(ca)), "sum_b": float(sum(cb)), "dt_ms": dt_ms,
+    }
+
+
+def frame_data_certified(before, after):
+    """(snapshot_or_None, reason) -- the data a frame was rendering at its
+    own (unknown) raster instant.
+
+    A screenshot's raster instant lies somewhere inside the capture call, so
+    the probe brackets it: one read before the call, one after, both in the
+    page clock, ordered by causality (each CDP call happens-after the
+    previous one) -- exactly #266's geometry argument for read_end_clock.
+    The frame's data is CERTIFIED only when those two reads agree; if they
+    differ, a mount landed inside this frame's own capture window and the
+    frame cannot be attributed to either value. Refusing there is the whole
+    point: an uncertified frame compared against its neighbour would
+    manufacture a verdict about where the change landed."""
+    d = data_snapshot_diff(before, after)
+    if not d["measured"]:
+        return None, f"bracketing probes not comparable ({d['reason']})"
+    if not d["identical"]:
+        return None, ("data changed DURING this frame's own capture "
+                      f"({d['cells_differing']} cells, "
+                      f"sum {d['sum_a']} -> {d['sum_b']})"
+                      if not d["shape_changed"] else
+                      f"data changed DURING this frame's own capture ({d['reason']})")
+    return before, None
+
+
+# Verdict labels sweep_data_pair_reports assigns. Named constants so the
+# report consumer and the tests agree on the exact strings.
+PAIR_CLEAN = "clean"
+PAIR_CONTENT_CHANGE = "content-change"
+PAIR_PRODUCT_BUG = "pixels-differ-data-identical"
+PAIR_DATA_ONLY = "data-changed-pixels-stable"
+PAIR_UNDETERMINED = "undetermined"
+
+
+def sweep_data_pair_reports(frame_records, pair_ratios,
+                            threshold=BLINK_THRESHOLD):
+    """One report per CONSECUTIVE frame pair of a tick's sweep: the image
+    ratio the gate already computes, next to the data verdict for the same
+    pair -- the thing that answers "did the data change between these two
+    frames?".
+
+    frame_records: one dict per sweep frame, in order, as recorded by
+    ui_live_smoke.py's --diag-data path:
+      {"probe_before": <snap|None>, "probe_after": <snap|None>,
+       "achieved_ms": float|None, "window_ms": (start, end)|None}
+    pair_ratios: the image ratios from sweep_consecutive_diff_ratios(),
+    i.e. len(frames)-1 entries, same order. A ratio of None means the image
+    side was not measured.
+
+    verdict per pair:
+      undetermined       -- either frame's data is uncertified, or the image
+                            ratio is missing. The pair proves nothing.
+      content-change     -- pixels differ (> threshold) AND the data differ:
+                            the sweep is RIGHT, a real change landed between
+                            the frames.
+      pixels-differ-data-identical -- pixels differ (> threshold) with
+                            bin-identical data: a product blink.
+      data-changed-pixels-stable -- the data moved but the pixels did not
+                            exceed the threshold (a sub-threshold repaint).
+      clean              -- neither moved.
+
+    Pure: no page access, no file access. Diagnostic only -- no caller feeds
+    this into a tab's `ok`."""
+    reports = []
+    n_pairs = max(len(frame_records) - 1, 0)
+    for i in range(n_pairs):
+        a, b = frame_records[i], frame_records[i + 1]
+        ratio = pair_ratios[i] if i < len(pair_ratios) else None
+        snap_a, why_a = frame_data_certified(a.get("probe_before"),
+                                             a.get("probe_after"))
+        snap_b, why_b = frame_data_certified(b.get("probe_before"),
+                                             b.get("probe_after"))
+        rec = {
+            "pair_index": i,
+            "frame_a_achieved_ms": a.get("achieved_ms"),
+            "frame_b_achieved_ms": b.get("achieved_ms"),
+            "frame_a_window_ms": a.get("window_ms"),
+            "frame_b_window_ms": b.get("window_ms"),
+            "image_ratio": ratio,
+            "image_over_threshold": (None if ratio is None
+                                     else bool(ratio > threshold)),
+        }
+        if snap_a is None or snap_b is None:
+            rec["data"] = _unmeasured_diff(
+                f"frame {i}: {why_a}" if snap_a is None
+                else f"frame {i + 1}: {why_b}")
+            rec["verdict"] = PAIR_UNDETERMINED
+            reports.append(rec)
+            continue
+        diff = data_snapshot_diff(snap_a, snap_b)
+        rec["data"] = diff
+        if ratio is None or not diff["measured"]:
+            rec["verdict"] = PAIR_UNDETERMINED
+        elif ratio > threshold:
+            rec["verdict"] = (PAIR_CONTENT_CHANGE if not diff["identical"]
+                              else PAIR_PRODUCT_BUG)
+        else:
+            rec["verdict"] = (PAIR_DATA_ONLY if not diff["identical"]
+                              else PAIR_CLEAN)
+        reports.append(rec)
+    return reports
+
+
+def diag_verdict(pair_reports):
+    """Rolls a run's per-pair reports (every tick, flattened) into the ONE
+    sentence the investigation needs, as (verdict, detail).
+
+    Only pairs whose IMAGE side actually diverged (image_over_threshold) are
+    the question; everything else is background. Among those:
+      - any undetermined diverging pair  -> "undetermined" (and says how
+        many, with the first reason): a verdict must not be read off the
+        subset that happened to be measurable.
+      - all diverging pairs content-change -> "content-change"
+      - any pixels-differ-data-identical  -> "product-bug"
+      - no diverging pair at all          -> "no-divergence"
+
+    product-bug wins over content-change when both appear: one frame pair
+    with identical data and visibly different pixels is a finding, however
+    many other pairs legitimately changed."""
+    diverged = [r for r in pair_reports if r.get("image_over_threshold")]
+    unknown = [r for r in pair_reports
+               if r.get("image_over_threshold") is None]
+    if not diverged:
+        if unknown:
+            return "undetermined", (
+                f"no pair's image ratio exceeded the threshold, but "
+                f"{len(unknown)} pair(s) had no image ratio at all")
+        return "no-divergence", "no frame pair's image ratio exceeded the threshold"
+    und = [r for r in diverged if r["verdict"] == PAIR_UNDETERMINED]
+    bugs = [r for r in diverged if r["verdict"] == PAIR_PRODUCT_BUG]
+    if und:
+        return "undetermined", (
+            f"{len(und)}/{len(diverged)} diverging pair(s) could not be "
+            f"attributed; first: {und[0]['data']['reason']}")
+    if bugs:
+        return "product-bug", (
+            f"{len(bugs)}/{len(diverged)} diverging pair(s) show "
+            "bin-identical data with pixels over the threshold")
+    return "content-change", (
+        f"all {len(diverged)} diverging pair(s) had genuinely different data")
+
+
+def diag_out_dir_ok(only_tabs, out_dir, gating_dir):
+    """(ok, reason) -- refuses a PARTIAL walk that would write the GATING
+    results directory.
+
+    --diag-data drives a subset of tabs (the whole point: reach the
+    histogram's late phase without paying an 11-tab walk), and
+    write_summary's `ok` is computed over whatever tabs are in the results
+    list. A one-tab walk landing in tests/results/ui_live would therefore
+    leave a summary.json that says PASS while ten tabs were never visited,
+    and tests/run_all.sh reads exactly that file. So a tab subset must go to
+    its own --out-dir. only_tabs None/empty (every real gating invocation)
+    is always allowed.
+
+    gating_dir is REQUIRED and must be resolvable: a None/empty gating_dir
+    (or a None out_dir) means this guard cannot tell whether it is looking
+    at the gating directory, so it REFUSES. A guard that cannot resolve its
+    base must never approve -- that is the exact shape of the history-guard
+    false negative this repo already paid for once."""
+    if not only_tabs:
+        return True, None
+    if not gating_dir or not out_dir:
+        return False, (
+            f"cannot resolve the gating results dir (gating_dir={gating_dir!r}, "
+            f"out_dir={out_dir!r}) -- refusing a partial walk rather than "
+            "guessing it is safe")
+    gate = gating_dir
+    if os.path.abspath(out_dir) == os.path.abspath(gate):
+        return False, (
+            f"--tabs restricts the walk to {list(only_tabs)} but --out-dir is "
+            f"the GATING results dir ({gate}); a partial walk must not write "
+            "the file tests/run_all.sh grades -- pass a separate --out-dir")
+    return True, None
+
+
 def capture_budget_ok(blink_sweep_ticks, bound_ms=CAPTURE_MS_BOUND_MS):
     """Reporting-only (this issue demoted it out of build_tab_result's
     `ok` -- see CAPTURE_MS_BOUND_MS's own comment for why: the bound was

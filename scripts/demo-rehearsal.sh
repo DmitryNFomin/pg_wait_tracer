@@ -115,16 +115,20 @@
 #                  target, refuses loudly and exits non-zero if not, and
 #                  records both the requested and the confirmed version in
 #                  the final verdict.
-#   RETAIN_TRACE   docs/DEMO_DELIVERY_QUEUE.md item 2 -- opt-in, OFF (0) by
-#                  default: normal runs delete the trace dir as before. Set
-#                  to 1 to keep it (synced back to tests/results/
-#                  demo_rehearsal/trace/, alongside the raw aas/time_model
-#                  responses saved to .../raw/) instead of deleting it at
-#                  teardown -- unblocks an offline read (criteria doc §3's
-#                  per-class wait-CPU number, or any future check) without
-#                  paying for a whole new 30-45 minute capture. A 40-minute
-#                  --mode full trace is large, which is why this is never
-#                  the default.
+#   RETAIN_TRACE   docs/DEMO_DELIVERY_QUEUE.md item 2 -- ON (1) by default
+#                  since issue #386: the trace dir is kept (synced back to
+#                  tests/results/demo_rehearsal/trace/, alongside the raw
+#                  aas/time_model responses in .../raw/ and the per-window
+#                  offcpu_decomposition.jsonl) instead of being deleted at
+#                  teardown, so a failing run can actually be diagnosed
+#                  offline instead of costing another 30-45 minute capture
+#                  -- and an offline read (criteria doc §3's per-class
+#                  wait-CPU scan, tests/wait_cpu_scan.c) needs that trace.
+#                  It used to default to 0 because a 40-minute --mode full
+#                  trace is large; two rehearsals then destroyed the
+#                  artifacts needed to diagnose their own failures, which
+#                  costs far more than the disk. Set RETAIN_TRACE=0 to opt
+#                  out for a cheap mechanics run.
 #   TAG            the git tag this attempt ran against (docs/
 #                  DEMO_REHEARSAL_CRITERIA.md "a counted attempt names the
 #                  tag it ran against"). Env var, not a flag, matching
@@ -153,13 +157,14 @@ MODE="launch"
 DURATION_MIN="${DURATION_MIN:-35}"
 KEEP="${KEEP:-0}"
 PG="${PG:-18}"
-# docs/DEMO_DELIVERY_QUEUE.md item 2: opt-in, OFF by default -- keeps the
-# trace dir + raw aas/time_model responses (tests/demo_rehearsal.sh) instead
-# of deleting them, so they land in the already-rsynced tests/results/
-# demo_rehearsal/ with no separate sync path. Threaded through to the
-# detached remote job exactly like DURATION_MIN/PG below (positional arg to
-# scripts/demo-rehearsal-remote-run.sh).
-RETAIN_TRACE="${RETAIN_TRACE:-0}"
+# docs/DEMO_DELIVERY_QUEUE.md item 2: ON by default since issue #386 --
+# keeps the trace dir + raw aas/time_model responses + the per-window
+# offcpu_decomposition.jsonl (tests/demo_rehearsal.sh) instead of deleting
+# them, so they land in the already-rsynced tests/results/demo_rehearsal/
+# with no separate sync path. RETAIN_TRACE=0 opts out. Threaded through to
+# the detached remote job exactly like DURATION_MIN/PG below (positional
+# arg to scripts/demo-rehearsal-remote-run.sh).
+RETAIN_TRACE="${RETAIN_TRACE:-1}"
 # The git tag this attempt ran against (docs/DEMO_REHEARSAL_CRITERIA.md "a
 # counted attempt names the tag it ran against") -- empty by default (ad-hoc/
 # uncounted run), threaded through to the detached remote job as a 5th

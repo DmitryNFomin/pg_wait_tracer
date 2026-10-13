@@ -1,0 +1,34 @@
+$ SCAN_BIN=<mutant M2_unknown_cpu_as_zero> python3 test_wait_cpu_scan.py
+  ok   control_clean_is_reachable
+  ok   control_reports_per_event_max
+  ok   crossing_detected
+  ok   crossing_carries_full_identity
+  ok   benign_long_sleep_is_not_a_crossing
+  ok   absolute_only_count_stays_visible
+  ok   signature_is_declared_in_the_output
+  ok   ratio_without_absolute_is_not_a_crossing
+  ok   zero_duration_cpu_is_not_cleared_by_the_ratio_half
+  ok   unreachable_min_ratio_refuses
+  ok   nan_min_ratio_refuses
+  ok   unparseable_min_ratio_refuses
+  ok   detection_survives_the_refusal_cases
+  ok   empty_dir_refuses
+  ok   missing_dir_refuses
+  ok   truncated_trace_refuses
+  ok   unreadable_trace_file_refuses
+  ok   record_census_equals_block_headers
+  FAIL unknown_cpu_is_unmeasured_not_clean: rc=3 unmeasured=set()
+  FAIL unknown_cpu_counted_not_zeroed: {'name': 'Timeout:PgSleep', 'event_id': 150994946, 'pure_sleep': True, 'count': 5, 'measured': 5, 'cpu_unknown': 0, 'zero_duration': 0, 'sum_duration_ns': 15000000000, 'sum_cpu_ns': 0, 'mean_cpu_ns': 0.0, 'max_cpu_ns': 18446744073709551615, 'median_cpu_ns': 18446744073709551615, 'p95_cpu_ns': 18446744073709551615, 'p99_cpu_ns': 18446744073709551615, 'mean_cpu_over_dur': 6148914691.236517, 'max_cpu_over_dur': 6148914691.236517, 'agg_cpu_over_dur': 0.0, 'over_threshold': 5, 'over_threshold_abs_only': 5, 'max_cpu_event': {'name': 'Timeout:PgSleep', 'pid': 4242, 'ts_wall_ns': 1788506088973482000, 'ts_mono_ns': 1000000000, 'duration_ns': 3000000000, 'cpu_ns': 18446744073709551615, 'query_id': 777, 'file_idx': 0, 'block': 0, 'record': 0}, 'max_ratio_event': {'name': 'Timeout:PgSleep', 'pid': 4242, 'ts_wall_ns': 1788506088973482000, 'ts_mono_ns': 1000000000, 'duration_ns': 3000000000, 'cpu_ns': 18446744073709551615, 'query_id': 777, 'file_idx': 0, 'block': 0, 'record': 0}}
+  ok   absent_class_is_unmeasured_not_clean
+  ok   census_mismatch_refuses
+  ok   sample_census_mismatch_refuses
+  ok   no_expected_total_refuses
+  ok   disabled_coverage_check_refuses
+  ok   unresolvable_name_refuses
+  ok   marker_only_trace_refuses
+  ok   census_dependency_missing_fails_harness
+  ok   census_dependency_nonexec_fails_harness
+
+27 passed, 2 failed
+  - unknown_cpu_is_unmeasured_not_clean: rc=3 unmeasured=set()
+  - unknown_cpu_counted_not_zeroed: {'name': 'Timeout:PgSleep', 'event_id': 150994946, 'pure_sleep': True, 'count': 5, 'measured': 5, 'cpu_unknown': 0, 'zero_duration': 0, 'sum_duration_ns': 15000000000, 'sum_cpu_ns': 0, 'mean_cpu_ns': 0.0, 'max_cpu_ns': 18446744073709551615, 'median_cpu_ns': 18446744073709551615, 'p95_cpu_ns': 18446744073709551615, 'p99_cpu_ns': 18446744073709551615, 'mean_cpu_over_dur': 6148914691.236517, 'max_cpu_over_dur': 6148914691.236517, 'agg_cpu_over_dur': 0.0, 'over_threshold': 5, 'over_threshold_abs_only': 5, 'max_cpu_event': {'name': 'Timeout:PgSleep', 'pid': 4242, 'ts_wall_ns': 1788506088973482000, 'ts_mono_ns': 1000000000, 'duration_ns': 3000000000, 'cpu_ns': 18446744073709551615, 'query_id': 777, 'file_idx': 0, 'block': 0, 'record': 0}, 'max_ratio_event': {'name': 'Timeout:PgSleep', 'pid': 4242, 'ts_wall_ns': 1788506088973482000, 'ts_mono_ns': 1000000000, 'duration_ns': 3000000000, 'cpu_ns': 18446744073709551615, 'query_id': 777, 'file_idx': 0, 'block': 0, 'record': 0}}

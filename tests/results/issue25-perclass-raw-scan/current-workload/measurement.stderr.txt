@@ -1,0 +1,1 @@
+wait_cpu_scan: UNMEASURED (exit 4) — records=7385206 waits=1821251 blocks=1804/1804 refusals=0 sleep_crossings=0 (abs-only 0) unmeasured=1

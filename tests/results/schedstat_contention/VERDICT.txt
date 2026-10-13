@@ -1,0 +1,54 @@
+tests/schedstat_contention_check.sh — run 2026-10-13 on pgwt-gate-2
+(root@142.132.191.18, nproc=4, 10 s per leg, original
+kernel.sched_schedstats=0, held under /tmp/pgwt-box-check.lock so it could
+not race a CI job on the same box).
+
+Why this run exists: the refusal paths in tests/schedstat_lib.py detect
+BLINDNESS (schedstats off, no samples, vanished pid, partial coverage). They
+cannot detect a counter that is readable but STUCK — a wrong field offset or
+a wrong backend enumeration would yield a plausible Sigma run_delay that is
+simply wrong, no refusal would fire, and every window would report a
+confident unexplained remainder. This is the only artifact that shows the
+reading actually MOVES with run-queue contention.
+
+Console output of that run, verbatim:
+
+  === schedstat contention check (nproc=4, 10s per leg, original kernel.sched_schedstats=0) ===
+  --- leg disabled (children=4 mode=busy sched_schedstats=0) probe rc=2
+      samples=10 refused=True run_delay_ms=None reason=schedstats not enabled for the whole window: kernel.sched_schedstats=0 -- the kernel is not accumulating run_delay, so every /proc/<pid>/schedstat field 2 is pinned at 0; enable with `sysctl -w kernel.sched_schedstats=1`
+      pids=None max_runnable=9 mean_load1=0.346
+  --- leg idle (children=4 mode=sleep sched_schedstats=1) probe rc=0
+      samples=10 refused=False run_delay_ms=0.0 reason=None
+      pids={'joined': 0, 'reset': 0, 'single': 0, 'tracked': 4, 'transient': 0, 'vanished': 0} max_runnable=1 mean_load1=0.5549999999999999
+  --- leg contended (children=16 mode=busy sched_schedstats=1) probe rc=0
+      samples=10 refused=False run_delay_ms=111775.654063 reason=None
+      pids={'joined': 0, 'reset': 0, 'single': 0, 'tracked': 16, 'transient': 0, 'vanished': 0} max_runnable=17 mean_load1=2.854
+  PASS leg 1: schedstats=0 REFUSED (probe rc=2): schedstats not enabled for the whole window: kernel.sched_schedstats=0 -- the kernel is no
+  idle Sigma run_delay   = 0.0 ms
+  contended Sigma run_delay = 111775.7 ms
+  PASS: the reading MOVES -- 111776x idle
+  VERDICT: PASS
+  schedstat_contention: exit 0 (artifacts in /root/pgwt-schedstat/out)
+  schedstat_contention: restored kernel.sched_schedstats=0
+
+The three JSONs beside this file are the probe's own machine-written output
+for the three legs and are the primary record; the block above is the
+script's stdout as captured from that session. Read them, not this prose:
+each carries samples, refused, run_delay_ms, the reason string, pid_counts
+and the load series.
+
+What it establishes, and what it does not:
+  - ESTABLISHES that at schedstats=0 the probe refuses (rc=2, run_delay_ms
+    null) instead of reporting 0 ms, and that with schedstats=1 the same
+    enumeration path reads 0.0 ms for four sleeping children and
+    111,775.654 ms for sixteen spinning ones on four vCPUs — 111,776x. A
+    stuck or mis-offset counter cannot produce that spread.
+  - DOES NOT establish the ACCURACY of run_delay against an independent
+    oracle, only its responsiveness and its sign. The rehearsal's
+    decomposition remains reporting-only for that reason; no bound is
+    registered on the unexplained remainder (see
+    docs/DEMO_REHEARSAL_CRITERIA.md section 3).
+  - Is a one-shot instrument, not a gate: it flips a GLOBAL sysctl and needs
+    root plus a quiet box, so it is not wired into tests/run_all.sh. Re-run
+    it by hand when schedstat_probe.py's enumeration or field parsing
+    changes.

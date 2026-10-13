@@ -1,0 +1,9 @@
+/Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a98a1ee2ed1061c28/src/server.c:4095:52: warning: suspicious concatenation of string literals in an array initialization; did you mean to separate the elements with a comma? [-Wstring-concatenation]
+ 4095 |         "2-4ms", "4-8ms", "8-16ms", "\xe2\x89\xa5" "16ms"
+      |                                                    ^
+      |                                                   ,
+/Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a98a1ee2ed1061c28/src/server.c:4095:37: note: place parentheses around the string literal to silence warning
+ 4095 |         "2-4ms", "4-8ms", "8-16ms", "\xe2\x89\xa5" "16ms"
+      |                                     ^
+1 warning generated.
+built: /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a98a1ee2ed1061c28/tests/results/issue25-perclass-raw-scan/bin/wait_cpu_scan /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a98a1ee2ed1061c28/tests/results/issue25-perclass-raw-scan/bin/make_fixture /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a98a1ee2ed1061c28/tests/results/issue25-perclass-raw-scan/bin/pgwt-server

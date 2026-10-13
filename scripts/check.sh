@@ -94,6 +94,23 @@ run python3 tests/test_demo_workload_coverage.py
 step "python: demo-rehearsal bypass-suite unit tests"
 run python3 tests/test_demo_rehearsal_lib.py
 
+# #384: the --diag-data per-frame panel-data probe exists in
+# tests/ui_live_smoke.py and is reached from tests/ui_live_smoke.sh, but
+# tests/demo_rehearsal.py has its OWN run_tab call site -- so the instrument
+# could be complete and still produce nothing during a rehearsal. Asserts the
+# whole thread (CLI flag -> _run_passes -> every run_tab call) with run_tab
+# replaced by a recorder: no browser, no network, milliseconds.
+step "python: rehearsal --diag-data wiring (#384)"
+run python3 tests/test_demo_rehearsal_diag.py
+
+# #386: the Off-CPU* residual decomposition's parsers, window aggregation
+# and refusal paths (tests/schedstat_lib.py) plus the /proc reader driven
+# against a FIXTURE /proc tree -- pure Python, no Linux, no root, no live
+# box, so it belongs in this tier rather than waiting for a 35-minute
+# rehearsal. Same reasoning as the bypass-suite step above.
+step "python: Off-CPU* run_delay decomposition unit + bypass suite (#386)"
+run python3 tests/test_schedstat_lib.py
+
 # #243: Workload.fire()'s verify flag and live_loop_workload.py's periodic
 # verify cadence -- pure Python, fakes psql/sessions, no Linux/root/live-DB
 # needed. Belongs in the fast deterministic tier for the same reason as the

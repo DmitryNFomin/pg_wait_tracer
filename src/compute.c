@@ -1231,7 +1231,9 @@ void pgwt_compute_time_model(const struct pgwt_trace_event *events, int count,
                 double m = (double)ev->cpu_ns * frac;
                 if (m > dur_ns) { cpu_clamped_ns += m - dur_ns; m = dur_ns; }
                 cpu_measured_ns += m;
-                has_measured_cpu = 1;
+                /* A measured zero is a signal; zero overlap is absence. */
+                if (frac > 0.0)
+                    has_measured_cpu = 1;
             } else {
                 /* UNKNOWN: sampled/v2/legacy — never measured. Gap-inference:
                  * the whole gap is CPU*, and no Off-CPU* for this window. */
@@ -1253,7 +1255,8 @@ void pgwt_compute_time_model(const struct pgwt_trace_event *events, int count,
                 ev_ht[slot].total_ns += dur_ns;
             if (ev->cpu_ns != PGWT_CPU_NS_UNKNOWN) {
                 wait_gap_cpu_ns += (double)ev->cpu_ns * frac; /* observability only */
-                has_measured_cpu = 1;
+                if (frac > 0.0)
+                    has_measured_cpu = 1;
             }
         }
     }
