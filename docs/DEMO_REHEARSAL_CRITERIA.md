@@ -450,14 +450,10 @@ checked first and independently:
   why no worktree in this repo's local clone had a matching `summary.json`:
   the nearest candidate found (`aas-agreement-and-retention` worktree,
   `derived=2.3617 time_model=2.3624`, `ok: False`) is a different, older,
-  failing run, not this one. **Doc vs. code,
-  deliberately not closed here**: this branch is docs-only, so
-  `tests/demo_rehearsal_lib.py`'s `AAS_FLOOR_PROVISIONAL = 0.5` constant is
-  untouched — the gate itself still enforces 0.5 today. Per this project's
-  own rule ("if a document and the code disagree, the document changes
-  here; a code change is a separate branch"), moving the enforced floor to
-  1.15 is a follow-up code change on its own branch, not part of this
-  commit.
+  failing run, not this one. **Doc vs. code, now settled**:
+  `tests/demo_rehearsal_lib.py`'s enforced `AAS_FLOOR` constant is **1.15**
+  (the `AAS_FLOOR_PROVISIONAL = 0.5` name and value are gone) — the gate
+  enforces exactly the floor this doc states.
 - all 11 tabs reached and rendered;
 - the daemon process alive for the whole window.
 
@@ -882,11 +878,19 @@ substitute one family for the other.
   were dropped", never "nothing was missed". Closing this needs `src/` work and
   is scheduled after the demo.
 - "The daemon was alive" is not "the daemon captured everything".
-- One-time pre-demo overhead envelope: n=3 paired A/B pgbench TPS runs with
-  and without the tracer, in full mode with the demo workload on the demo box;
-  record the result and envelope before counted attempt one. The audience will
-  ask for this number; a rehearsal capture runs only the with-tracer arm and
-  cannot produce it.
+- **One-time pre-demo overhead envelope: DONE, measured 2026-10-13 on
+  gate-1, PG18.** n=3 paired A/B, interleaved, `--mode full`: pgbench +
+  `tests/live_loop_workload.py` **unthrottled at 4 clients** (the criteria's
+  own client count) gave **30.31% ± 0.58pp**, inside the registered
+  ~28-32% band below. `--rate=25` was **deliberately dropped** for this
+  measurement: under a rate cap both arms are held to the same TPS ceiling
+  by the cap itself, not by the tracer, so TPS-based overhead degenerates
+  toward zero regardless of the real cost — this result is the demo
+  workload's client count but not its throttle, and is labelled that way.
+  A separate n=3 A/B at 8 clients with `demos/workload.sh` (the saturated
+  regime, §3 above) gave 39.41% on gate-1 / 34.63% on gate-2 — kept as
+  secondary context only, not compared directly to the 30.31% figure.
+  Full untailed logs: `tests/results/overhead-envelope/ENVELOPE.md`.
 - **Overhead band, current levels accepted (owner, 2026-09-30): "ok current
   level is accepted, we will work on that afterwards".** This records the
   measured band rather than setting a target the demo must hit — it does not
@@ -938,7 +942,7 @@ left to be discovered.
 | §1 run.id asserted against staleness | yes — not by this branch directly: `agent/rehearsal-bypass-suite` built its own `verdict_is_fresh` gate, then found at rebase time that master's `tests/demo_rehearsal_orchestrator_lib.validate_results_dir` (#176) already covers the identical concern, more thoroughly (also checks run.id's numeric format and summary.json's required keys) — removed the redundant duplicate rather than keep two |
 | §2 samples > 0, DB Time > 0 | yes (`capture_has_events_ok`, `time_model_conservation`'s `MIN_DB_TIME_MS` floor, checked before any ratio) |
 | §2 `Lock:relation` + `Lock:advisory` present (was `Timeout:PgSleep`; changed 2026-10-06, see §2 above) | yes (`workload_signature_present_ok`) |
-| §2 AAS ≥ 0.5 on the recent window | yes (`aas_floor_ok`), but **the gate still enforces the OLD provisional 0.5** — the doc's own floor is now settled at 1.15 (see §2's own paragraph above), `tests/demo_rehearsal_lib.py`'s `AAS_FLOOR_PROVISIONAL` constant is deliberately untouched by this docs-only commit, and moving it to 1.15 is a follow-up code change on a separate branch |
+| §2 AAS ≥ 1.15 on the recent window | yes (`aas_floor_ok`) — the gate enforces the settled **1.15** (`tests/demo_rehearsal_lib.py`'s `AAS_FLOOR`; the old `AAS_FLOOR_PROVISIONAL = 0.5` is gone) |
 | §2 all 11 tabs reached, daemon alive throughout | yes (`build_demo_summary`'s `expected_tabs_per_pass` floor; `_assert_daemon_alive`, mirrors the existing workload-alive fail-safe) |
 | §3 conservation identity | yes, sampled every ~5 minutes through the capture (`conservation_sample_interval_s`), every sample must pass — not once at the end |
 | §3 `wait_gap_cpu_ms` ≤ 0.1% | **removed, not implemented** — corrected 2026-09-27/28: this was never a valid over-attribution detector (the BPF measures on-CPU across the whole wait-start/wait-end span, so an IO wait is legitimately CPU-bearing; two live runs measured 0.376–0.392%, expected on a correct implementation). The real per-class signature (a `Timeout:PgSleep`/`Lock:relation` event carrying millisecond-scale `cpu_ns`) needs data not on the wire in the `time_model` response today — reported as a gap, not proxied from the aggregate |
@@ -948,7 +952,7 @@ left to be discovered.
 | §4 blink measured fraction ≥ 0.5 | yes — landed via `agent/blink-anchor-mount-seq` (#209, merged to master), inherited automatically once `agent/rehearsal-bypass-suite` rebased: `demo_rehearsal.py` has no independent blink-measurement code, it fully delegates to `ui_live_smoke.py:run_tab()`, which now calls `blink_sweep_gate_verdict` itself. Pinned with a regression test using real measured numbers (`tests/test_demo_rehearsal_lib.py`, run.id 1790574871: scatter 0.1305, transitions 0.0072–0.0172) |
 | §4 time to first paint, pinned viewport | **SETTLED** (review round 6): bound 3000 ms, global, **≈3.4x margin** (worst observed: transitions at 893 ms) — re-measured after PR #268 (#265) replaced `handle_top_queries`'s O(n^2) bubble sorts with `qsort`; supersedes the pre-#268 figure of queries at 2432 ms / ≈1.2x margin, which is now wrong. Measured ≥3 navigations/tab, real Chrome 154 on the Mac, live full-mode capture on the demo topology, satisfying this criterion's own requirement in full. The bound itself (3000 ms) is unchanged and was neither widened when the margin was thin nor tightened now that it is comfortable — same reasoning both times. `top_queries` latency is separately window-dependent (391 ms at the demo's planned 15-minute window, rising toward 1237 ms at full-capture range on a 2583 s capture) — see the window-dependence finding below this bullet; that is a server-side cost, not a UI paint regression, and is unrelated to the ≈3.4x margin above. Timeline not yet measured by this method (instrumentation gap: bare click, not Sessions-row drill-down — recorded as unmeasured, not a pass). `ttfp_ms` (merged `master`, `fa20067`, issue #245/PR #257) remains measurement-only and gates nothing automatically — `build_tab_result` never reads it into `ok`; the bound above is enforced only by a human reading this document during a counted attempt. Mac-side checklist: still manual sign-off, **deliberately stays qualitative** (paints without a visible spinner) — it has no stopwatch, so it does not independently check the 3000 ms number either; this round's measurement was a one-off script, not the checklist itself. Retracted: the 2026-09-29 contended walk's 30 s Timeline finding measured the "select a session" prompt from a bare tab click, not paint after a Sessions-row drill-down — the same trap this round's Timeline gap repeats at the instrumentation level, not the product level |
 | §5 cross-tab agreement, freshness | partial — VM-side freshness: yes (`freshness_ok`, `info`'s `now_ns` vs `to_ns`); Mac-side visible freshness: manual checklist and human sign-off. Cross-tab agreement: DB-Time leg yes (`cross_tab_db_time_agreement_ok`, `time_model` vs `top_events` for the identical window); AAS leg yes (`bucket_weighted_aas_ok`, `agent/aas-agreement-and-retention`) — a bucket-weighted re-derivation from the `aas` endpoint's own `bucket_ns` over the identical window, compared against `time_model.aas`, wired into `extra_checks["cross_tab_aas_agreement"]` alongside the DB-Time leg. Retracted: the earlier walk's 0.0000% came from an unweighted mean of buckets, which was not that comparison and established no agreement; see `tests/demo_rehearsal_lib.bucket_weighted_aas_ok`'s own comment for why the two formulas diverge whenever the window does not divide the endpoint's `bucket_ns` evenly (the common case) |
-| §6 lost-event counters, overhead envelope | partial — lost-event counters: yes (`daemon_integrity_ok`: `ringbuf_drops_total`/`state_map_full_total`/`seen_query_ids_full_total`, already on the wire via pgwt-server's control proxy, no `src/` change needed; blind spot stated in the code comment: a lost LIFECYCLE event is silent, no counter increments). Overhead envelope: **not yet measured for the demo workload on the demo box**. Correction: the earlier claim that nothing measures full mode was wrong. Every box-check runs `tests/test_overhead.sh --quick` (~10 minutes) via `tests/run_all.sh`; its paired baseline/tracer A/B uses the default pgbench load, pins `--mode full`, and appends to `tests/results/overhead_trend.csv` on the box. The tracked CSV has only a header because `tests/results/` is excluded from box-check's up-rsync; box-generated rows are not synced back or committed. The ~70-minute sweep is the same script without `--quick`; `sampled_overhead_gate.py --mode sampled` runs only for `src/` changes. Retracted: the quick sweep is not a per-attempt requirement or a substitute for measuring the demo workload. Do n=3 paired full-mode A/B TPS runs with the demo workload on the demo box and record the envelope before counted attempt one; the 40-minute rehearsal retained neither an A/B baseline nor even its with-tracer `tps =` line (cleanup tailed 20 lines and deleted the full log) |
+| §6 lost-event counters, overhead envelope | lost-event counters: yes (`daemon_integrity_ok`: `ringbuf_drops_total`/`state_map_full_total`/`seen_query_ids_full_total`, already on the wire via pgwt-server's control proxy, no `src/` change needed; blind spot stated in the code comment: a lost LIFECYCLE event is silent, no counter increments). Overhead envelope: **measured 2026-10-13** — 30.31% ± 0.58pp (n=3, 4 clients, unthrottled, gate-1, inside the registered band), see §6's own paragraph above and `tests/results/overhead-envelope/ENVELOPE.md`. Every box-check also still runs `tests/test_overhead.sh --quick` (~10 minutes) via `tests/run_all.sh` as an ongoing regression check (default pgbench load, `--mode full`, appends to `tests/results/overhead_trend.csv` on the box, not synced back or committed) — that is a different, continuous measurement and does not substitute for this one-time demo-workload figure, which is now recorded separately |
 | §7 no test exited 126/127 | **partial, and this is a human-readable aid, not an automated gate**: `tests/demo_rehearsal.sh`'s `report_early_exit` labels a dead subprocess's 126/127 exit code in the log for a human reading it afterward. It does NOT change the script's own exit code (every call site already `exit 1` regardless of the labeled reason) and has no test coverage of its own — reviewer finding, 2026-09-28. Do not read this row as "126/127 fails the gate automatically"; it already did, via the pre-existing `kill -0` + `exit 1` checks, which is why this addition changes nothing observable except the log's wording |
 | §8 known-failing lines read by hand | manual by construction; not applicable to `demo_rehearsal.py` itself, which grants zero known-failing exemptions (§4 row above) -- nothing here for a human to hand-verify against an issue |
 
