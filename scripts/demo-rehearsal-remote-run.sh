@@ -53,7 +53,7 @@ RETAIN_TRACE="${4:-1}"
 # demo_rehearsal.sh is given no --tag, so demo_rehearsal.py's own `args.tag
 # or _detect_git_tag()` falls through to auto-detection on this copy --
 # which cannot find one anyway since scripts/demo-rehearsal.sh's rsync
-# excludes .git, so summary.json's tag field honestly stays null rather
+# transfers a .git-free snapshot, so summary.json's tag field stays null rather
 # than acquiring one.
 TAG="${5:-}"
 

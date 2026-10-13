@@ -138,6 +138,10 @@ run python3 tests/test_workload_verify_flag.py
 step "python: demo-rehearsal orchestrator unit tests"
 run python3 tests/test_demo_rehearsal_orchestrator_lib.py
 
+# Hermetic launcher fixtures belong in the same local tier as its orchestrator.
+step "python: demo-rehearsal launcher provenance unit tests (scripts/test-demo-rehearsal-provenance.py)"
+run python3 scripts/test-demo-rehearsal-provenance.py
+
 # tag_cli_args (tests/live_daemon_lib.sh) threads a counted rehearsal's
 # --tag through scripts/demo-rehearsal.sh -> ...-remote-run.sh ->
 # tests/demo_rehearsal.sh -> demo_rehearsal.py --tag (docs/

@@ -138,12 +138,13 @@
 #                  (ad-hoc/uncounted run): demo_rehearsal.py's `args.tag or
 #                  _detect_git_tag()` would normally try to auto-detect via
 #                  `git describe`, but that can never work on the copy
-#                  this script rsyncs to the target (--exclude .git below),
+#                  this script rsyncs to the target (a .git-free snapshot),
 #                  so an attempt run without TAG set honestly records
 #                  tag: null in summary.json rather than inventing one or
 #                  falling back to a commit sha dressed up as a tag. A
-#                  counted attempt MUST set this, e.g.
-#                  `make demo-rehearsal PGWT_BOX=... TAG=v1.0.0`.
+#                  pre-tag counted attempt records its candidate sha and
+#                  tree hash in launcher_provenance instead; leave TAG
+#                  unset until a tag actually exists.
 #
 # Needs the Hetzner token in the macOS Keychain (same as box-check.sh) for
 # the throwaway-VM path (PGWT_BOX unset); not needed when PGWT_BOX is set:
@@ -226,6 +227,235 @@ synced_back=0
 results_collection_refused=0
 outcome_rc=1
 PG_VERSION_CONFIRMED=""
+PROVENANCE_FILE=""
+BOX_LOCK_QUEUE_LINE=""
+
+# Keep the launcher's checkout identity outside the remote Python result:
+# the rsynced tree has no .git, and --collect may run from another checkout.
+# The state file names this sidecar so collection never re-identifies a run
+# using the collecting invocation's HEAD. Uptime probes are observations,
+# not new gates; failed probes are stored as null, never a measured zero.
+# The post-transfer tree hash IS a gate: an unverified tree cannot launch.
+record_launcher_start() {
+    local candidate_sha tree_hash git_status box_uptime box_hostname
+    local -a provenance_ssh_options=(-o BatchMode=yes -o ConnectTimeout=10)
+    [[ "$PERSISTENT" != "1" ]] && provenance_ssh_options+=(-o StrictHostKeyChecking=no)
+    candidate_sha=$(git rev-parse HEAD) || return 1
+    tree_hash=$(scripts/tree-hash.sh) || return 1
+    git_status=$(git status --porcelain) || return 1
+    box_uptime=$(ssh "${provenance_ssh_options[@]}" \
+        "$target" uptime 2>>"$log") || box_uptime=""
+    box_hostname=$(ssh "${provenance_ssh_options[@]}" \
+        "$target" hostname 2>>"$log") || box_hostname=""
+    python3 - "$PROVENANCE_FILE" "$demo_rehearsal_start_epoch" \
+        "$candidate_sha" "$tree_hash" "$git_status" "$(pwd -P)" \
+        "$target" "$box_hostname" "$server_id" "$server_name" \
+        "$box_uptime" "$log" <<'PY'
+import json
+import os
+import sys
+
+(path, run_id, sha, tree, status, worktree, target, hostname, server_id,
+ server_name, uptime, log) = sys.argv[1:]
+record = {
+    "run_id": run_id,
+    "launch_provenance_available": True,
+    "candidate_sha": sha,
+    "tree_hash": tree,
+    "remote_tree_hash": None,
+    "tree_hash_verification": "unavailable",
+    "git_status_porcelain_empty": status == "",
+    "worktree": worktree,
+    "box_target": target,
+    "box_hostname": hostname or None,
+    "server_id": server_id,
+    "server_name": server_name if server_id != "persistent" else None,
+    "box_uptime_start": uptime or None,
+    "box_uptime_end": None,
+    "uptime_observation_scope": "launcher start / collection, including queue time",
+    "box_lock_queue_line": None,
+    "launcher_log": log,
+}
+with open(path + ".tmp", "w") as f:
+    json.dump(record, f, indent=2, sort_keys=True)
+    f.write("\n")
+os.replace(path + ".tmp", path)
+PY
+}
+
+sync_launcher_tree() {
+    local tree_hash snapshot sync_rc=0
+    local -a junk_excludes
+    # macOS junk that cannot be a source file, excluded from the up-rsync so it
+    # never reaches the box. Motivation: tests/live_daemon_lib.sh's served-asset
+    # guard compares the bridge's embedded asset list against the web/static tree
+    # and refuses on ANY difference, applying no exclusion rules of its own (an
+    # earlier version replicated Go's //go:embed rules and that replica caused
+    # three silent passes). So a stray .DS_Store created under web/static by the
+    # Finder on this Mac is rsynced to the box and aborts the live run there --
+    # costing a counted demo-rehearsal slot for a file Go would never have
+    # embedded.
+    #
+    # Each pattern is a name macOS RESERVES; none can be a legitimate repo file,
+    # and that was checked rather than assumed (no path in `git ls-files`, 1193
+    # files, matches any of them):
+    #   .DS_Store        Finder per-directory view metadata
+    #   ._*              AppleDouble sidecars written beside real files on
+    #                    filesystems without native resource-fork support
+    #   .Spotlight-V100  Spotlight index directory
+    #   .Trashes         per-volume trash directory
+    #   .fseventsd       FSEvents journal directory
+    #   .AppleDouble     AppleDouble metadata directory
+    # Deliberately NOT broad (no *.swp, no .*, no *~): a pattern that matched a
+    # real file would silently shrink what the box tests, which is the same
+    # failure class the served-asset guard exists to prevent, one layer further
+    # out.
+    # An ARRAY, with every pattern quoted: an unquoted string expansion would be
+    # glob-expanded by the shell, so `._*` could be replaced by a matching
+    # filename in the current directory before rsync ever saw the pattern.
+    junk_excludes=(
+        --exclude '.DS_Store'
+        --exclude '._*'
+        --exclude '.Spotlight-V100'
+        --exclude '.Trashes'
+        --exclude '.fseventsd'
+        --exclude '.AppleDouble'
+    )
+    tree_hash=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["tree_hash"])' \
+        "$PROVENANCE_FILE") || return 1
+    snapshot=$(mktemp -d) || return 1
+    # Transfer the actual hashed snapshot, including tracked results. The old
+    # blanket tests/results exclude silently omitted files present in the hash.
+    # Exporting also keeps ignored build products and launcher state out of it.
+    if git archive "$tree_hash" | tar -x -C "$snapshot"; then
+        rsync -az --delete -e "ssh $ssh_strict" \
+            "${junk_excludes[@]}" \
+            "$snapshot/" "$target:$remote_dir/" || sync_rc=$?
+    else
+        sync_rc=1
+    fi
+    rm -rf "$snapshot"
+    [[ "$sync_rc" == 0 ]] || return "$sync_rc"
+    verify_remote_tree_hash
+}
+
+verify_remote_tree_hash() {
+    local remote_tree_hash probe_rc=0 verification_rc=0
+    local -a provenance_ssh_options=(-o BatchMode=yes -o ConnectTimeout=10)
+    [[ "$PERSISTENT" != "1" ]] && provenance_ssh_options+=(-o StrictHostKeyChecking=no)
+    # Use the local verifier via stdin: an omitted or damaged remote script
+    # must not decide whether its own transfer matched. No .git is needed there.
+    # shellcheck disable=SC2029
+    remote_tree_hash=$(ssh "${provenance_ssh_options[@]}" "$target" \
+        "bash -s -- '$remote_dir'" < scripts/hash-synced-tree.sh 2>>"$log") || probe_rc=$?
+    python3 - "$PROVENANCE_FILE" "$remote_tree_hash" "$probe_rc" <<'PY' || verification_rc=$?
+import json
+import os
+import re
+import sys
+
+path, remote_hash, probe_rc = sys.argv[1:]
+with open(path) as f:
+    record = json.load(f)
+available = probe_rc == "0" and re.fullmatch(r"[0-9a-f]{40}", remote_hash) is not None
+record["remote_tree_hash"] = remote_hash if available else None
+record["tree_hash_verification"] = (
+    "match" if remote_hash == record["tree_hash"] else "mismatch"
+) if available else "unavailable"
+with open(path + ".tmp", "w") as f:
+    json.dump(record, f, indent=2, sort_keys=True)
+    f.write("\n")
+os.replace(path + ".tmp", path)
+if record["tree_hash_verification"] != "match":
+    print("demo-rehearsal: remote tree hash " + record["tree_hash_verification"] +
+          " -- refusing to launch with unverified provenance", file=sys.stderr)
+    sys.exit(1)
+PY
+    log_launcher_provenance
+    return "$verification_rc"
+}
+
+log_launcher_provenance() {
+    if [[ -f "$PROVENANCE_FILE" ]]; then
+        echo "demo-rehearsal: launcher provenance ($PROVENANCE_FILE):" | tee -a "$log"
+        cat "$PROVENANCE_FILE" | tee -a "$log"
+    else
+        echo "demo-rehearsal: launch provenance unavailable (no saved sidecar); not substituting this collector's checkout" | tee -a "$log"
+    fi
+}
+
+record_box_queue() {
+    local started_epoch="$1" queued_for_s
+    queued_for_s=$(( started_epoch - demo_rehearsal_start_epoch ))
+    BOX_LOCK_QUEUE_LINE="demo-rehearsal: capture actually started at epoch $started_epoch (queued ${queued_for_s}s behind the box lock) -- recomputing the real remaining budget from that instant"
+    echo "$BOX_LOCK_QUEUE_LINE" | tee -a "$log"
+}
+
+record_launcher_end() {
+    local box_uptime started_epoch
+    local -a provenance_ssh_options=(-o BatchMode=yes -o ConnectTimeout=10)
+    [[ "$PERSISTENT" != "1" ]] && provenance_ssh_options+=(-o StrictHostKeyChecking=no)
+    box_uptime=$(ssh "${provenance_ssh_options[@]}" \
+        "$target" uptime 2>>"$log") || box_uptime=""
+    # A finished run on the first probe also needs a queue line; it never
+    # visits the wait loop's running/queued branch below.
+    # remote_dir is deliberately expanded here by the launcher.
+    # shellcheck disable=SC2029
+    started_epoch=$(ssh "${provenance_ssh_options[@]}" \
+        "$target" "cat '$remote_dir/rehearsal.started' 2>/dev/null" 2>>"$log") || started_epoch=""
+    if [[ "$started_epoch" =~ ^[0-9]+$ ]]; then
+        record_box_queue "$started_epoch"
+    elif [[ -z "$BOX_LOCK_QUEUE_LINE" ]]; then
+        BOX_LOCK_QUEUE_LINE="demo-rehearsal: box-lock queue duration unavailable (capture start not observed)"
+        echo "$BOX_LOCK_QUEUE_LINE" | tee -a "$log"
+    fi
+    python3 - "$PROVENANCE_FILE" "$demo_rehearsal_start_epoch" \
+        "$target" "$box_uptime" "$BOX_LOCK_QUEUE_LINE" <<'PY'
+import json
+import os
+import sys
+
+path, run_id, target, uptime, queue_line = sys.argv[1:]
+if path and os.path.isfile(path):
+    with open(path) as f:
+        record = json.load(f)
+    if record["run_id"] != run_id:
+        raise ValueError("launcher provenance run_id does not match this run")
+else:
+    # Older state files have no launch provenance: report absence honestly.
+    path = path or "tests/results/.demo-rehearsal-provenance-" + run_id + ".json"
+    record = dict.fromkeys(("candidate_sha", "tree_hash", "remote_tree_hash",
+                           "git_status_porcelain_empty", "worktree",
+                           "box_hostname", "server_id", "server_name",
+                           "box_uptime_start", "launcher_log"))
+    record.update(run_id=run_id, box_target=target,
+                  launch_provenance_available=False, tree_hash_verification="unavailable")
+record.update(box_uptime_end=uptime or None, box_lock_queue_line=queue_line,
+              uptime_observation_scope="launcher start / collection, including queue time")
+with open(path + ".tmp", "w") as f:
+    json.dump(record, f, indent=2, sort_keys=True)
+    f.write("\n")
+os.replace(path + ".tmp", path)
+PY
+}
+
+attach_launcher_provenance() {
+    python3 - "$1/summary.json" "$PROVENANCE_FILE" <<'PY'
+import json
+import os
+import sys
+
+summary_path, provenance_path = sys.argv[1:]
+with open(summary_path) as f:
+    summary = json.load(f)
+with open(provenance_path) as f:
+    summary["launcher_provenance"] = json.load(f)
+with open(summary_path + ".tmp", "w") as f:
+    json.dump(summary, f, indent=2, sort_keys=True)
+    f.write("\n")
+os.replace(summary_path + ".tmp", summary_path)
+PY
+}
 
 # ── --collect: reattach to a run an earlier (possibly killed) launcher
 # started -- this is the whole point of issue #176: a killed launcher must
@@ -246,7 +476,7 @@ if [[ "$MODE" == "collect" ]]; then
     # reads BEFORE sourcing so the file's own content (or its absence) is
     # the only thing that can set them -- the ambient environment must
     # never leak into a --collect reattach.
-    unset PERSISTENT PG_VERSION_REQUESTED PG_VERSION_CONFIRMED TARGET REHEARSAL_STARTED_EPOCH
+    unset PERSISTENT PG_VERSION_REQUESTED PG_VERSION_CONFIRMED TARGET REHEARSAL_STARTED_EPOCH PROVENANCE_FILE
     # shellcheck disable=SC1090
     source "$STATE_FILE"
     : "${SERVER_ID:?state file missing SERVER_ID}"
@@ -274,6 +504,8 @@ if [[ "$MODE" == "collect" ]]; then
     target="${TARGET:-root@$server_ip}"
     PG="${PG_VERSION_REQUESTED:-$PG}"
     PG_VERSION_CONFIRMED="${PG_VERSION_CONFIRMED:-}"
+    PROVENANCE_FILE="${PROVENANCE_FILE:-}"
+    log_launcher_provenance
     echo "demo-rehearsal --collect: reattaching to $target (persistent=$PERSISTENT, server id=$server_id, remote_dir=$remote_dir, PG=$PG, capture_started=${REHEARSAL_STARTED_EPOCH:-not yet known}, launched $(date -r "$demo_rehearsal_start_epoch" 2>/dev/null || echo "@$demo_rehearsal_start_epoch"))" | tee -a "$log"
 fi
 
@@ -302,11 +534,20 @@ collect_results() {
     [[ -z "$target" || -z "$remote_dir" ]] && return
 
     results_ok=0
+
     local staging="tests/results/.demo_rehearsal_staging"
     if ! refuse_previous_results || ! refuse_previous_results "$staging"; then
         results_collection_refused=1
         return 1
     fi
+    if ! record_launcher_end; then
+        results_collection_refused=1
+        echo "demo-rehearsal: could not save launcher end provenance -- collection incomplete" | tee -a "$log" >&2
+        return 1
+    fi
+    PROVENANCE_FILE="${PROVENANCE_FILE:-tests/results/.demo-rehearsal-provenance-$demo_rehearsal_start_epoch.json}"
+    log_launcher_provenance
+
     mkdir -p "$staging"
     # A persistent box's host key is expected already known -- only a
     # fresh throwaway VM's (a new IP every run) needs StrictHostKeyChecking
@@ -320,7 +561,8 @@ collect_results() {
 
     local reason
     if [[ $rsync_rc -eq 0 ]] && reason=$(python3 tests/demo_rehearsal_orchestrator_lib.py \
-            validate-results "$staging" "$demo_rehearsal_start_epoch" 2>>"$log"); then
+            validate-results "$staging" "$demo_rehearsal_start_epoch" 2>>"$log") && \
+            attach_launcher_provenance "$staging" 2>>"$log"; then
         if ! python3 tests/demo_rehearsal_orchestrator_lib.py publish-results \
                 "$staging" tests/results/demo_rehearsal 2>>"$log"; then
             results_collection_refused=1
@@ -472,6 +714,7 @@ if [[ "$MODE" == "launch" ]]; then
     fi
 
     demo_rehearsal_start_epoch=$(date +%s)
+    PROVENANCE_FILE="$(pwd -P)/tests/results/.demo-rehearsal-provenance-$demo_rehearsal_start_epoch.json"
     ssh_strict="-o StrictHostKeyChecking=no"
 
     if [[ "$PERSISTENT" == "1" ]]; then
@@ -544,6 +787,7 @@ PG_VERSION_REQUESTED=$PG
 PG_VERSION_CONFIRMED=
 REHEARSAL_STARTED_EPOCH=
 EOF
+    printf 'PROVENANCE_FILE=%q\n' "$PROVENANCE_FILE" >> "$STATE_FILE"
     echo "demo-rehearsal: state saved to $STATE_FILE (before provisioning) -- a killed launcher, or a provisioning/rsync failure, still leaves a guard so a next launch refuses to create a second VM/target" | tee -a "$log"
 
     if [[ "$PERSISTENT" != "1" ]]; then
@@ -560,49 +804,9 @@ EOF
 
     echo "demo-rehearsal: $target  DURATION_MIN=$DURATION_MIN PG=$PG RETAIN_TRACE=$RETAIN_TRACE TAG=${TAG:-(none)} -> $remote_dir  (log: $log)"
     ssh -o BatchMode=yes $ssh_strict "$target" "mkdir -p '$remote_dir'" || exit 1
-    # macOS junk that cannot be a source file, excluded from the up-rsync so it
-    # never reaches the box. Motivation: tests/live_daemon_lib.sh's served-asset
-    # guard compares the bridge's embedded asset list against the web/static tree
-    # and refuses on ANY difference, applying no exclusion rules of its own (an
-    # earlier version replicated Go's //go:embed rules and that replica caused
-    # three silent passes). So a stray .DS_Store created under web/static by the
-    # Finder on this Mac is rsynced to the box and aborts the live run there --
-    # costing a counted demo-rehearsal slot for a file Go would never have
-    # embedded.
-    #
-    # Each pattern is a name macOS RESERVES; none can be a legitimate repo file,
-    # and that was checked rather than assumed (no path in `git ls-files`, 1193
-    # files, matches any of them):
-    #   .DS_Store        Finder per-directory view metadata
-    #   ._*              AppleDouble sidecars written beside real files on
-    #                    filesystems without native resource-fork support
-    #   .Spotlight-V100  Spotlight index directory
-    #   .Trashes         per-volume trash directory
-    #   .fseventsd       FSEvents journal directory
-    #   .AppleDouble     AppleDouble metadata directory
-    # Deliberately NOT broad (no *.swp, no .*, no *~): a pattern that matched a
-    # real file would silently shrink what the box tests, which is the same
-    # failure class the served-asset guard exists to prevent, one layer further
-    # out.
-    # An ARRAY, with every pattern quoted: an unquoted string expansion would be
-    # glob-expanded by the shell, so `._*` could be replaced by a matching
-    # filename in the current directory before rsync ever saw the pattern.
-    junk_excludes=(
-        --exclude '.DS_Store'
-        --exclude '._*'
-        --exclude '.Spotlight-V100'
-        --exclude '.Trashes'
-        --exclude '.fseventsd'
-        --exclude '.AppleDouble'
-    )
-    rsync -az --delete -e "ssh $ssh_strict" \
-        --exclude .git --exclude /build \
-        --exclude '/pgwt-server' --exclude '/pgwt-server-asan' \
-        --exclude '/pg_wait_tracer' --exclude '/pg_wait_tracer-asan' \
-        --exclude 'tests/results' --exclude 'web/pgwt' --exclude '__pycache__' \
-        --exclude '.pgwt-check.stamp' \
-        "${junk_excludes[@]}" \
-        ./ "$target:$remote_dir/" || exit 1
+    record_launcher_start || exit 1
+    log_launcher_provenance
+    sync_launcher_tree || exit 1
 
     # ── PG-version gate: refuse LOUDLY here, before the long capture ever
     # starts, rather than discovering 35+ minutes later that the run could
@@ -855,8 +1059,7 @@ while true; do
     rehearsal_started_epoch=$(remote_started_epoch)
     if [[ -n "$rehearsal_started_epoch" ]]; then
         remember_started_epoch
-        queued_for_s=$(( rehearsal_started_epoch - demo_rehearsal_start_epoch ))
-        echo "demo-rehearsal: capture actually started at epoch $rehearsal_started_epoch (queued ${queued_for_s}s behind the box lock) -- recomputing the real remaining budget from that instant" | tee -a "$log"
+        record_box_queue "$rehearsal_started_epoch"
         queue_sleep_s=$(python3 tests/demo_rehearsal_orchestrator_lib.py queue-wait-sleep-s \
             "$rehearsal_started_epoch" "$demo_rehearsal_start_epoch" "$(date +%s)" "$DURATION_MIN" "$QUEUE_ROUND_MIN_SLEEP_S")
         if [[ "$queue_sleep_s" -gt 0 ]]; then
