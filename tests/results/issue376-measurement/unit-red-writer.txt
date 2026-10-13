@@ -1,0 +1,33 @@
+1117:    bool io_worker = false;   /* REVERTED for the red run */
+WARN: summary /tmp/pgwt_iw_12511/v5/current.summary is version 5, this build computes only from version 6 (older files use the pre-2026-10-06 idle accounting) -- recomputing from raw events instead
+=== io_worker exclusion on the SUMMARY path (#315, #376) ===
+--- 0. the input carries NO category bit (the N7 trap) ---
+--- 1. writer: class_ns, idle_ns, events[], sessions[], queries[] ---
+  FAIL(line 398): the writer COUNTED the drops: 0 events (expected 300)
+  FAIL(line 401): ...and their ns: 0.000 ms (expected 7500.000)
+  FAIL(line 409): class_ns[IO] == 0 (got 1500.000 ms): the io_worker's busy time is the only IO-class event here
+  FAIL(line 425): idle_ns carries ClientRead AND the background pid's BgwriterMain: 14250.000 ms (expected 8250.000 = 150 x (25 + 30) ms), i.e. the io_worker's 6000.000 ms of IoWorkerMain is NOT in it and the background pid's 4500.000 ms IS
+  FAIL(line 430): events[] has no IoWorkerMain (6000.000 ms) and no io_worker DataFileRead (1500.000 ms) -- events[] carries the HISTOGRAMS, so this is also what governs the summary heatmap
+  FAIL(line 440): sessions[] has no row for pid 102
+  FAIL(line 446): ...and exactly 2 session rows per second (450): the client's and the background pid's
+  FAIL(line 451): Σ events[].histogram counts the 4 non-io_worker intervals per second (900, expected 600) -- the io_worker's 2 are gone from the grid and nothing else is
+  FAIL(line 514): an over-broad exclusion is VISIBLE: Lock 4800.000 ms (correct 4800.000), idle_ns 14250.000 ms (correct 8250.000), background session row present -- so the assertions above distinguish the io_worker bit from any non-zero category
+--- 2. raw vs summary: time model AND heatmap ---
+  FAIL(line 623): DB Time agrees (delta +1500.000 ms)
+  FAIL(line 624): Idle agrees (delta +6000.000 ms)
+  FAIL(line 627): the heatmap agrees cell-for-cell (delta +150 records) -- both handle_heatmap routes answer the same question
+--- 3. the capture-end flush record (escalation.c's producer) ---
+  FAIL(line 685): the flush record is excluded too (0 drops, expected 301)
+  FAIL(line 689): idle_ns is still the client's 8250.000 ms (got 164250.000) -- the 150 000 ms flush record did not land in the closing second
+--- 4. both daemon producers resolve a category ---
+--- 5. bypass suite (a gate that cannot see must refuse) ---
+  REFUSE: no summary records in /tmp/pgwt_iw_12511/no-such-dir -- every delta would be computed against an empty side
+  REFUSE: no summary records in /tmp/pgwt_iw_12511/empty-writer -- every delta would be computed against an empty side
+--- 0. the input carries NO category bit (the N7 trap) ---
+  red-as-designed(line 366): the fixture HAS io_worker records (0)
+  red-as-designed(line 370): ...both BUSY (0) and IDLE (0): the raw path treats them differently (busy -> cat_ms[io_worker], idle -> dropped), so one alone would pass a half-exclusion
+  red-as-designed(line 378): and it has a NON-io_worker background pid with both busy (0) and idle (0) records -- the control for an OVER-BROAD exclusion. src/compute.c special-cases only the io_worker bit, so background and maintenance time stays in raw DB Time and raw Idle; a writer excluding on `cat_flag != 0` would delete it from every >= 120 s window and no fixture without such a pid could tell
+--- 0. the input carries NO category bit (the N7 trap) ---
+  red-as-designed(line 365): no fixture event pre-sets a category flag (300 did) -- a pre-flagged event greens a writer check that is DEAD in the daemon, which is how this bug was 'fixed' once before (hole N7)
+
+63 checks, 14 failed

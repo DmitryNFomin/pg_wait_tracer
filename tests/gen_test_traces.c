@@ -459,7 +459,7 @@ static int write_traces(const char *dir, struct scenario *sc,
         return -1;
     }
     #define PUSH_SUMMARY(evp) do { \
-        pgwt_summary_push_event(&sw, (evp)); \
+        pgwt_summary_push_event(&sw, (evp), 0); \
         if (!summary_anchored) { \
             anchor_summary_clock(&sw, anchor_mono, wall_offset_ns); \
             summary_anchored = 1; \

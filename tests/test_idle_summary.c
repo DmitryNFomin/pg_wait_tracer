@@ -240,7 +240,7 @@ static void write_summaries(const char *dir, const struct pgwt_trace_event *ev,
         tests_failed++; free(w); return;
     }
     for (int i = 0; i < n; i++)
-        pgwt_summary_push_event(w, &ev[i]);
+        pgwt_summary_push_event(w, &ev[i], 0);
     pgwt_summary_flush(w);          /* close the last, still-open second */
     pgwt_summary_close(w);
     pgwt_summary_destroy(w);
@@ -274,7 +274,7 @@ static void test_failed_rotation_discards_the_second(void)
     e.new_event = EV_IO; e.cpu_ns = PGWT_CPU_NS_UNKNOWN; e.pid = 970;
     e.timestamp_ns = mono_origin() + 100 * MS;
     e.old_event = EV_LOCK; e.duration_ns = 10 * MS;
-    pgwt_summary_push_event(w, &e);
+    pgwt_summary_push_event(w, &e, 0);
     CHECK(w->accum_active, "a second is open before the rotation");
 
     /* Force the rotation AND make its flush refuse. */
@@ -961,7 +961,8 @@ static void test_version_preflight(void)
     uint64_t from = 0, to = 0;
     int records = 0;
     CHECK(window_from_records(dir, &from, &to, &records) == 1 &&
-          records == SLICES, "v3 records present (%d)", records);
+          records == SLICES, "v%d records present (%d)",
+          PGWT_SUMMARY_VERSION, records);
 
     int considered = -1, unusable = -1;
     CHECK(pgwt_summaries_window_current(dir, from, to, &considered,
@@ -972,7 +973,44 @@ static void test_version_preflight(void)
           "would also have returned 1", considered);
     CHECK(unusable == 0, "no unusable files (got %d)", unusable);
 
-    /* THE DANGEROUS ONE FIRST: version 3.
+    /* THE IMMEDIATELY PRECEDING VERSION FIRST: v5 (the io_worker accounting
+     * change, #315/#376, bumped v5 -> v6). A v5 second COUNTS io_worker time
+     * and a v6 second does not, so a window holding both reports a DB Time
+     * and an Idle that is neither. The byte layout is identical, which is
+     * exactly why this case matters: nothing would fail to parse, so without
+     * the header check the blend would be silent and plausible. */
+    int t5 = set_version(dir, 5);
+    CHECK(t5 > 0, "rewrote %d header(s) to version 5", t5);
+    CHECK(pgwt_summaries_window_current(dir, from, to, &considered,
+                                        &unusable) == 0,
+          "a v5 window is REFUSED -- its io_worker accounting differs even "
+          "though its bytes parse fine");
+    CHECK(unusable == t5, "all %d v5 file(s) reported unusable (got %d)",
+          t5, unusable);
+    {
+        struct rec_ctx c5;
+        memset(&c5, 0, sizeof(c5));
+        pgwt_visit_summaries(dir, 0, 0, rec_visitor, &c5);
+        CHECK(c5.records == 0,
+              "...and the reader returns 0 records for it, got %d", c5.records);
+        struct pgwt_filter f5;
+        memset(&f5, 0, sizeof(f5));
+        struct pgwt_tm_result tm5;
+        pgwt_compute_time_model_from_summaries(dir, from, to, &f5, 1000.0, &tm5);
+        CHECK(tm5.db_time_ms == 0.0 && tm5.idle_time_ms == 0.0,
+              "...so the summary answer over that window is 0.000/0.000 "
+              "(got %.3f/%.3f) -- which is why the REFUSAL has to reach the "
+              "server and become a RAW recompute, not an answer",
+              tm5.db_time_ms, tm5.idle_time_ms);
+        free(tm5.rows);
+    }
+    CHECK(set_version(dir, PGWT_SUMMARY_VERSION) == t5, "restore to v%d",
+          PGWT_SUMMARY_VERSION);
+    CHECK(pgwt_summaries_window_current(dir, from, to, &considered,
+                                        &unusable) == 1,
+          "the restored v%d window is current again", PGWT_SUMMARY_VERSION);
+
+    /* THE DANGEROUS ONE: version 3.
      *
      * v3 was shipped by an earlier build of this branch with a DIFFERENT
      * layout -- no per-query idle_ns and no record trailer. Keeping the same
@@ -1044,13 +1082,13 @@ static void test_version_preflight(void)
           "preflight prevents by routing to raw", tm.db_time_ms);
     free(tm.rows);
 
-    /* Back to v3: the preflight must APPROVE again, so it is reacting to the
-     * version and not permanently stuck. */
+    /* Back to the current version: the preflight must APPROVE again, so it is
+     * reacting to the version and not permanently stuck. */
     CHECK(set_version(dir, PGWT_SUMMARY_VERSION) == touched,
           "restored headers to v%d", PGWT_SUMMARY_VERSION);
     CHECK(pgwt_summaries_window_current(dir, from, to, &considered,
                                         &unusable) == 1,
-          "the restored v3 window is current again");
+          "the restored v%d window is current again", PGWT_SUMMARY_VERSION);
     memset(&c, 0, sizeof(c));
     pgwt_visit_summaries(dir, 0, 0, rec_visitor, &c);
     CHECK(c.records == SLICES,
@@ -1128,13 +1166,13 @@ static void test_bounded_tables(void)
                 e.timestamp_ns = sec + 100 * MS + (uint64_t)(k + 1) * MS;
                 e.old_event = WEI(PG_WAIT_IPC, k);   /* 8 distinct IPC events */
                 e.duration_ns = 1 * MS;
-                pgwt_summary_push_event(w, &e);
+                pgwt_summary_push_event(w, &e, 0);
             }
             /* the 9th distinct event: a pacing sleep, 40 ms */
             e.timestamp_ns = sec + 100 * MS + 9 * MS;
             e.old_event = EV_CHECKPOINT_DELAY;
             e.duration_ns = 40 * MS;
-            pgwt_summary_push_event(w, &e);
+            pgwt_summary_push_event(w, &e, 0);
         }
         if (w) { pgwt_summary_flush(w); pgwt_summary_close(w);
                  pgwt_summary_destroy(w); free(w); }
@@ -1198,14 +1236,14 @@ static void test_bounded_tables(void)
             e.timestamp_ns = sec + 100 * MS;
             e.old_event = WEI(PG_WAIT_EXTENSION, k);
             e.duration_ns = 1000;
-            pgwt_summary_push_event(w, &e);
+            pgwt_summary_push_event(w, &e, 0);
         }
         /* plus a pacing sleep, which may or may not get a slot */
         if (w) {
             e.timestamp_ns = sec + 200 * MS;
             e.old_event = EV_CHECKPOINT_DELAY;
             e.duration_ns = 50 * MS;
-            pgwt_summary_push_event(w, &e);
+            pgwt_summary_push_event(w, &e, 0);
             pgwt_summary_flush(w); pgwt_summary_close(w);
             pgwt_summary_destroy(w); free(w);
         }
@@ -1488,7 +1526,7 @@ static void test_old_layout_is_incompatible(void)
             e.timestamp_ns = sec + 100 * MS + (uint64_t)(i + 1) * MS;
             e.pid = slice[i].pid; e.old_event = slice[i].ev;
             e.duration_ns = slice[i].ms * MS; e.query_id = slice[i].qid;
-            pgwt_summary_push_event(w, &e);
+            pgwt_summary_push_event(w, &e, 0);
         }
         /* Snapshot the live accumulator before it is flushed away. */
         memcpy(acc, &w->accum, sizeof(*acc));
@@ -1616,7 +1654,7 @@ static void test_zero_parent_excess_is_detected(void)
             e.new_event = EV_IO; e.cpu_ns = PGWT_CPU_NS_UNKNOWN; e.pid = 950;
             e.timestamp_ns = origin + (uint64_t)s2 * ONE_SEC + 100 * MS;
             e.old_event = EV_CHECKPOINT_DELAY; e.duration_ns = 40 * MS;
-            pgwt_summary_push_event(w, &e);
+            pgwt_summary_push_event(w, &e, 0);
         }
         if (w) { pgwt_summary_flush(w); pgwt_summary_close(w);
                  pgwt_summary_destroy(w); free(w); }
@@ -1708,7 +1746,7 @@ static void test_refused_serialize_is_counted(void)
     e.new_event = EV_IO; e.cpu_ns = PGWT_CPU_NS_UNKNOWN; e.pid = 960;
     e.timestamp_ns = origin + 100 * MS;
     e.old_event = EV_LOCK; e.duration_ns = 10 * MS;
-    pgwt_summary_push_event(w, &e);
+    pgwt_summary_push_event(w, &e, 0);
     CHECK(w->accum_active, "a second is open");
 
     /* Mark this second as having dropped events, so the retry below also
@@ -1892,10 +1930,10 @@ static void test_bypass_suite(void)
             e.new_event = EV_IO; e.cpu_ns = PGWT_CPU_NS_UNKNOWN;
             e.timestamp_ns = sec + 1 * MS; e.pid = 101;
             e.old_event = EV_LOCK; e.duration_ns = 20 * MS;
-            pgwt_summary_push_event(ww, &e);
+            pgwt_summary_push_event(ww, &e, 0);
             e.timestamp_ns = sec + 2 * MS;
             e.old_event = EV_CLIENTREAD; e.duration_ns = 25 * MS;
-            pgwt_summary_push_event(ww, &e);
+            pgwt_summary_push_event(ww, &e, 0);
         }
         if (ww) { pgwt_summary_flush(ww); pgwt_summary_close(ww);
                   pgwt_summary_destroy(ww); free(ww); }

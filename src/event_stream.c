@@ -87,19 +87,43 @@ int pgwt_handle_trace_event(void *ctx, void *data, size_t data_sz)
                              stage_started_ns);
     }
 
+    uint32_t we = evt->old_event;
+    uint64_t dur = evt->duration_ns;
+
+    /* T2 CATEGORY, RESOLVED HERE because the summary writer needs it (v6,
+     * #315/#376): io_worker time is outside DB Time and outside Idle, and the
+     * summary writer has to be TOLD which pid is an io_worker -- nothing on
+     * this path sets PGWT_EVENT_FLAG_IO_WORKER in evt->flags. The resolve used
+     * to sit ~65 lines below the push, so the summary got no category at all
+     * and counted io_worker time the raw paths exclude: measured +23.36% on
+     * the whole-capture Idle total of the PG18 demo capture
+     * (tests/results/issue376-measurement).
+     *
+     * NOT for markers. Escalation markers are pid-less (query_id packs the
+     * reason) and every marker is dropped by the writer anyway, so running
+     * pgwt_get_or_create_pid for one would consume an accumulator slot for a
+     * pid that does not exist. The marker branch below keeps its own lookup.
+     *
+     * The pair is computed ONCE and reused by the accumulation below -- two
+     * resolves could disagree (the cache fills between them) and the slot
+     * lookup is not free. */
+    struct pgwt_pid_accum *pa = NULL;
+    uint32_t cat_flag = 0;
+    if (!PGWT_IS_MARKER(we)) {
+        pa = pgwt_get_or_create_pid(acc, evt->pid);
+        cat_flag = pgwt_live_pid_cat_flag(d, pa, evt->pid);
+    }
+
     /* Write to summary file if recording is enabled. Markers pass through
      * here too, but the summary writer's accum_event filters them (FID-4):
      * they must land in the trace (variants / lifecycle / escalation
      * coverage need them) while never entering wait accounting. */
     if (d->summary_writer) {
         stage_started_ns = pgwt_debug_block_begin(d);
-        pgwt_summary_push_event(d->summary_writer, evt);
+        pgwt_summary_push_event(d->summary_writer, evt, cat_flag);
         pgwt_debug_block_end(d, "event_callback_summary_writer", evt->pid,
                              stage_started_ns);
     }
-
-    uint32_t we = evt->old_event;
-    uint64_t dur = evt->duration_ns;
 
     /* Query text is now captured by BPF uprobe (debug_query_string)
      * and delivered via lifecycle_rb, not from /proc/pid/mem here. */
@@ -157,8 +181,8 @@ int pgwt_handle_trace_event(void *ctx, void *data, size_t data_sz)
      * non-command and ~83% of pgbench's CPU vanished from live DB Time. The
      * emission flag remains only the fallback for a full accumulator. */
     stage_started_ns = pgwt_debug_block_begin(d);
-    struct pgwt_pid_accum *pa = pgwt_get_or_create_pid(acc, evt->pid);
-    uint32_t cat_flag = pgwt_live_pid_cat_flag(d, pa, evt->pid);
+    /* pa / cat_flag were resolved above the summary push (v6) -- the same
+     * values, not a second lookup. */
     uint64_t t1 = evt->timestamp_ns;
     uint64_t t0 = t1 >= dur ? t1 - dur : 0;
     bool in_cmd = false;
