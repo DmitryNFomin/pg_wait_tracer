@@ -528,15 +528,21 @@ def workload_signature_present_ok(rows, required=REQUIRED_WORKLOAD_EVENTS):
     return ok, detail
 
 
-# PROVISIONAL (criteria doc §2): its only job is to be non-vacuous -- reject
-# an AAS reading of ~0 the same way MIN_DB_TIME_MS rejects a ~0 db_time_ms.
-# Replaced by half of the first clean rehearsal's own measured AAS, recorded
-# in docs/DEMO_REHEARSAL_CRITERIA.md by a commit that says so, before the
-# sequence is claimed -- never silently tightened or loosened here.
-AAS_FLOOR_PROVISIONAL = 0.5
+# Settled (criteria doc §2, owner / box access / review round 4,
+# docs/DEMO_REHEARSAL_CRITERIA.md's "AAS >= 1.15 on the 60 s recent window"
+# bullet): half of the first clean rehearsal's own measured AAS on that
+# window -- `cross_tab_aas_agreement`'s `derived=2.3033 time_model=2.3033`
+# (run.id 1790869219) -- which is 1.1517, recorded in the doc as 1.15. Was
+# AAS_FLOOR_PROVISIONAL = 0.5 (non-vacuous-only: reject an AAS reading of ~0
+# the same way MIN_DB_TIME_MS rejects a ~0 db_time_ms) until that rehearsal
+# landed; per the doc, replacing the provisional value is this code change,
+# not a further docs commit. Like WATERFALL_QUERY_THRESHOLD_S above, this is
+# not read from an env var: a flaky box must not get a looser gate than the
+# one the doc states.
+AAS_FLOOR = 1.15
 
 
-def aas_floor_ok(aas, floor=AAS_FLOOR_PROVISIONAL):
+def aas_floor_ok(aas, floor=AAS_FLOOR):
     ok = isinstance(aas, (int, float)) and not isinstance(aas, bool) and aas >= floor
     detail = f"aas={aas!r} (floor {floor})"
     return ok, detail

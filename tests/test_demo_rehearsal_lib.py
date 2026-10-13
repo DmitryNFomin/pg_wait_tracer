@@ -398,19 +398,31 @@ def test_workload_signature_empty_rows_fails():
 
 def test_aas_floor_ok_above_floor():
     ok, detail = lib.aas_floor_ok(1.2)
-    check(ok, f"aas=1.2 clears the 0.5 floor ({detail})")
+    check(ok, f"aas=1.2 clears the settled 1.15 floor ({detail})")
 
 
 def test_aas_floor_below_floor_fails():
     # BYPASS-SUITE CASE: an AAS reading near zero is void the same way a
     # near-zero db_time_ms is.
     ok, detail = lib.aas_floor_ok(0.1)
-    check(not ok, f"aas=0.1 is below the provisional 0.5 floor ({detail})")
+    check(not ok, f"aas=0.1 is below the settled 1.15 floor ({detail})")
 
 
 def test_aas_floor_none_fails():
     ok, detail = lib.aas_floor_ok(None)
     check(not ok, f"a missing aas value fails, is not treated as fine ({detail})")
+
+
+def test_aas_floor_rejects_value_the_old_provisional_floor_passed():
+    # BYPASS-SUITE CASE (issue 2.4): aas=0.8 cleared the old
+    # AAS_FLOOR_PROVISIONAL = 0.5 but must fail the settled
+    # AAS_FLOOR = 1.15 (docs/DEMO_REHEARSAL_CRITERIA.md section 2,
+    # run.id 1790869219) -- a gate still reading 0.5 would wrongly pass
+    # this. Confirms the enforced constant was actually bumped, not just
+    # its name or comment.
+    ok, detail = lib.aas_floor_ok(0.8)
+    check(not ok, f"aas=0.8 clears 0.5 but must fail the settled 1.15 floor ({detail})")
+    check(lib.AAS_FLOOR == 1.15, f"AAS_FLOOR constant is the settled 1.15, not 0.5 ({lib.AAS_FLOOR})")
 
 
 # ── evaluate_time_model_window with the criteria-doc #2 extra floors ─────
