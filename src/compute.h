@@ -585,6 +585,7 @@ struct pgwt_interference_row {
 struct pgwt_interference_result {
     struct pgwt_interference_row *rows;  /* malloc'd, caller frees */
     int    num_rows;
+    int    failed;          /* allocation failure: rows and count are cleared */
 };
 
 /* Score cross-session interference: find PID pairs that frequently wait

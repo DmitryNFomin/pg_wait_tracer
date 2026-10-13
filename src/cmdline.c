@@ -6,6 +6,8 @@
 #include <stdlib.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <errno.h>
+#include <limits.h>
 
 static const char *bt_names[] = {
     [PGWT_BT_CLIENT]           = "client",
@@ -145,4 +147,33 @@ int pgwt_parse_cmdline(pid_t pid, struct pgwt_metadata *meta)
     }
 
     return 0;
+}
+
+int pgwt_backend_target_live(pid_t pid, pid_t parent)
+{
+    if (pid <= 0 || parent <= 0) { errno = EINVAL; return -1; }
+    char path[64], line[512];
+    snprintf(path, sizeof(path), "/proc/%d/stat", pid);
+    FILE *file = fopen(path, "r");
+    if (!file)
+        return errno == ENOENT || errno == ESRCH ? 0 : -1;
+    if (!fgets(line, sizeof(line), file)) {
+        int error = ferror(file) ? errno : EIO;
+        fclose(file);
+        errno = error;
+        return -1;
+    }
+    fclose(file);
+    char *end = strrchr(line, ')');
+    char state;
+    long ppid;
+    if (!end || sscanf(end + 1, " %c %ld", &state, &ppid) != 2 ||
+        ppid < 0 || ppid > INT_MAX) {
+        errno = EINVAL;
+        return -1;
+    }
+    if (ppid != parent || state == 'Z' || state == 'X' || state == 'x')
+        return 0;
+    if (!strchr("RSDTtWIP", state)) { errno = EINVAL; return -1; }
+    return 1;
 }

@@ -43,6 +43,51 @@ test_executions_attribution
 # of the deleted sort, plus the (int)(a-b) comparator trap and a mutation
 # probe proving the differential can go red.
 test_top_queries_percentile
+# The loader's order restoration (src/event_sort.h): a fixed-width bottom-up
+# mergesort that copied all n records ceil(log2 n) times became an in-place
+# natural chain merge over the array's own runs. 29.88% of warm backend self
+# time, 1779-1955 ms per request on a real 5.7M-event window, now 36 ms. The
+# safety argument is bit-identical output, so the test is a differential
+# against a verbatim copy of the deleted sort plus a mutation probe.
+test_event_sort
+# The SAME handler, the other 40% of its cost: handle_top_queries resolved
+# each row's context (databaseid/userid/ambiguous) with a full scan of the
+# window via query_context_for_events, and then scanned the window AGAIN for
+# PGWT_EVENT_FLAG_QUERY_SYNTH -- 26 rows x 2 passes x 5.7M events, ~14 GB of
+# memory traffic, measured at 1778 ms. Both facts are per-query_id properties
+# of the same array and are now built in ONE pass (src/query_ctx_index.h).
+# The whole safety argument is bit-identical output, so this is a
+# differential against a VERBATIM copy of the deleted function plus the
+# deleted synth loop, over four event ORDERS per fixture (the one-pass form
+# is only equivalent because the rule is order-independent, which is
+# asserted separately on the oracle itself). Seven mutants -- first-wins,
+# latest-wins, resume-after-refusal, absent-reads-resolved,
+# missing-metadata-ignored, zero-userid-accepted, synth-from-first-event-only
+# -- must each be caught, and the deliberately BLIND fixtures (every pid
+# resolves and agrees; no synth flag anywhere) must stay blind, so the
+# suite's power is known to come from the adversarial fixtures.
+# Bypass suite, because this table's failure mode is "no context", which is
+# indistinguishable from a legitimately context-less row: a NULL resolver, a
+# NULL/empty/negative range, an allocation failure at each of the two growth
+# points, an injection point that is never reached, an unrelated injection
+# name that must NOT fail, a partial range that must change the verdict, a
+# comparator blind to one field, absent-vs-refused, and reuse after free.
+# Non-vacuity ledger: fourteen counters, each failing the test at zero.
+# Companion: tests/top_queries_context_mutations.py breaks one guard at a
+# time (12 product + 12 test + 4 combos) and requires this test to notice
+# each; the four COMBOS expect GREEN on purpose, because that is the only
+# way to show a refusal gate is the UNIQUE detector of its defect rather
+# than incidentally covered -- and the only way a weakened threshold
+# (`> 0` -> `>= 0`) can be tested at all, since alone it stays green and
+# proves nothing. `--self-test` drives the harness's own four failure modes
+# (anchor matches nothing, mutation does not compile, and a mismatch in
+# each direction) and requires all four to be REPORTED as failures. Not in
+# this list because it recompiles the test 29 times (~20 s) and is
+# evidence, not a gate. It earned its keep immediately: it found a
+# redundant per-field slot initialisation that made the real (memset)
+# initialisation untestable, and three mutations that were green because
+# the shape they removed was still covered elsewhere.
+test_top_queries_context
 # #271 (correctness) + #269 (cost), the same four lines of
 # pgwt_compute_variants: the p95 was selected from exec_times slots that the
 # <= 10000 sampling guard never wrote (realloc does not zero), reported as a
@@ -79,6 +124,9 @@ test_pid_cap
 # key runs, and allocation failures at every new growth point that must come
 # back ABSENT rather than short.
 test_probe_bounds
+# #359: interference returns exactly at 4096 pairs and past the old cap,
+# preserving every overlap; allocation failures refuse the whole result.
+test_interference_bounds
 # #276: pgwt_compute_concurrency kept candidate intervals in a fixed
 # 100,000-entry array filled in ARRIVAL order, so the UI's default 900 s
 # window drew its first ~60 s and reported the other 825 s as max: 0 -- 8% of
@@ -235,6 +283,7 @@ test_agg_raw_crosscheck
 # transitions_from_block_aggs() is static, so no C unit can reach the call
 # site -- a re-hand-written comparison there would still ship green.
 test_block_agg
+test_transitions_loader
 # #294: cross_validate drops pgwt_is_idle_event() time from BOTH sides before
 # any share is computed, so when the sampled tier reads less CPU than the exact
 # tier the missing nanoseconds have no visible destination -- "it became
@@ -322,3 +371,19 @@ test_exec_index
 #   this list because it recompiles the module 28 times (~40 s) and is
 #   evidence, not a gate.
 test_interval_index
+# The allocator tuning pgwt-server applies at startup (src/alloc_tune.h): the
+# per-request ~274 MB event arrays stay on an already-faulted heap instead of
+# being mmap'd fresh (measured -15% top_queries / -35% executions / -20%
+# concurrency on a 6.96M-event 900 s window). test_alloc_tune proves the
+# property -- heap-served, not trimmed on free, second touch costs no faults --
+# always against an untuned control in the same process, and REFUSES when a
+# pre-tuned environment, too small an allocation, or an unreadable sbrk() would
+# make it blind. test_server_alloc_tune.py proves main() actually CALLS it (no
+# unit test can link server.c), requiring the default and PGWT_ALLOC_TUNE=0
+# masks to disagree, and carries stub binaries for every way that check could
+# fail to see: silent output, no line, an unparseable mask, exit 127 and a
+# non-executable binary must each refuse rather than approve.
+test_alloc_tune
+test_server_alloc_tune.py
+
+test_backend_lifecycle

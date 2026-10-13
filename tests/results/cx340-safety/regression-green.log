@@ -1,0 +1,4 @@
+pgwt-server: no usable wait_event_names.json in /tmp/pgwt_transitions_loader_zafCg2 -- falling back to the PG180000 tables recorded in the trace header. Names are this build's static tables, not the ones the trace was written with.
+pgwt-server: 1 trace files, 10 CPUs, ~8192 events
+decoded CPU->ClientRead=2; tagged oracle=1; served=1; failed=0
+PASS: decoded-block candidate refused; response matches tagged loader

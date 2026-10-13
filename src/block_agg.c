@@ -592,10 +592,8 @@ enum pgwt_block_plan pgwt_block_agg_plan(const struct pgwt_block_identity *id,
                                          uint64_t from_mono_ns,
                                          uint64_t to_mono_ns)
 {
-    /* Nothing to say about a block we cannot describe, and an empty or
-     * inverted window selects nothing. Both are SKIP, which is safe: SKIP
-     * contributes no records, so a wrong SKIP shows up as a missing record in
-     * the cross-check, never as a double-counted one. */
+    /* An inverted window selects nothing; equal endpoints can still select
+     * records (C7). A block without an identity cannot be planned here. */
     if (!id)
         return PGWT_BLOCK_SKIP;
     if (to_mono_ns < from_mono_ns)
@@ -605,9 +603,9 @@ enum pgwt_block_plan pgwt_block_agg_plan(const struct pgwt_block_identity *id,
 
     /* Inclusive-at-both-ends against the block's header bounds (C7): a block
      * is out only if it cannot hold a record in [from, to]. */
-    if (id->last_timestamp_ns < from_mono_ns)
-        return PGWT_BLOCK_SKIP;
-    if (id->first_timestamp_ns > to_mono_ns)
+    if (!pgwt_block_agg_file_can_contribute(id->first_timestamp_ns,
+                                            id->last_timestamp_ns,
+                                            from_mono_ns, to_mono_ns))
         return PGWT_BLOCK_SKIP;
 
     /* C8: no usable aggregate means recompute, never approximate. */
@@ -756,7 +754,7 @@ int pgwt_block_agg_window_from_reader(struct pgwt_event_reader *r,
     if (!r || !acc || acc->mode != PGWT_BAGG_MODE_WINDOW)
         return PGWT_BAGG_REFUSED_MODE;
     if (to_mono_ns <= from_mono_ns)
-        return PGWT_BAGG_OK;            /* selects nothing, and that is a fact */
+        return PGWT_BAGG_REFUSED_INVALID; /* C7/C8: raw must answer [from, from] */
 
     struct pgwt_trace_identity tr;
     pgwt_trace_identity_of_reader(r, &tr);
@@ -775,8 +773,9 @@ int pgwt_block_agg_window_from_reader(struct pgwt_event_reader *r,
             break;
         }
 
-        int overlaps = bi.last_timestamp_ns >= from_mono_ns &&
-                       bi.first_timestamp_ns < to_mono_ns;
+        int overlaps = pgwt_block_agg_file_can_contribute(
+            bi.first_timestamp_ns, bi.last_timestamp_ns,
+            from_mono_ns, to_mono_ns);
         if (bi.block_type != PGWT_BLOCK_TRANSITIONS) {
             if (overlaps) {
                 rc = PGWT_BAGG_REFUSED_BLOCK_TYPE;

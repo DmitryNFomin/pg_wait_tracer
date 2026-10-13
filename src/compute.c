@@ -3852,9 +3852,6 @@ struct pair_accum {
     uint64_t top_event_ns;
 };
 
-#define PAIR_HT_SIZE 4096
-#define PAIR_HT_MASK (PAIR_HT_SIZE - 1)
-
 static int cmp_interference_desc(const void *a, const void *b)
 {
     double sa = ((const struct pgwt_interference_row *)a)->score;
@@ -3870,7 +3867,15 @@ void pgwt_compute_interference(const struct pgwt_trace_event *events, int count,
 
     /* Build active intervals (non-CPU, non-idle wait events only) */
     int cap = count < 50000 ? count : 50000;
-    struct active_entry *active = malloc(cap * sizeof(*active));
+    if (cap <= 0) return;
+    struct pgwt_triple_map ix;
+    pgwt_triple_map_init(&ix);
+    struct pair_accum *ht = NULL;
+    struct pgwt_interference_row *rows = NULL;
+    int num_pairs = 0, cap_pairs = 0;
+    struct active_entry *active = pgwt_test_alloc_fail("interference_intervals")
+        ? NULL : malloc((size_t)cap * sizeof(*active));
+    if (!active) goto fail;
     int nactive = 0;
 
     for (int i = 0; i < count && nactive < cap; i++) {
@@ -3888,9 +3893,10 @@ void pgwt_compute_interference(const struct pgwt_trace_event *events, int count,
 
     qsort(active, nactive, sizeof(active[0]), cmp_active_by_start);
 
-    /* Find overlapping pairs on same event */
-    struct pair_accum *ht = calloc(PAIR_HT_SIZE, sizeof(*ht));
-    int num_pairs = 0;
+    /* #359: pairs accumulate across the window, so the interval cap does
+     * not bound distinct pairs. The old 4096-slot table spun forever on
+     * pair 4097. Index unordered pairs with the existing growing map and
+     * grow the accumulator as in #327; never drop a key. */
     uint64_t max_overlap = 0;
 
     for (int i = 0; i < nactive; i++) {
@@ -3915,16 +3921,19 @@ void pgwt_compute_interference(const struct pgwt_trace_event *events, int count,
             uint32_t pa = active[i].pid < active[j].pid ? active[i].pid : active[j].pid;
             uint32_t pb = active[i].pid < active[j].pid ? active[j].pid : active[i].pid;
 
-            /* Hash lookup */
-            uint32_t h = ((pa * 0x45d9f3b) ^ (pb * 0x9e3779b9)) & PAIR_HT_MASK;
-            while (ht[h].overlap_ns > 0 &&
-                   (ht[h].pid_a != pa || ht[h].pid_b != pb))
-                h = (h + 1) & PAIR_HT_MASK;
-
-            if (ht[h].overlap_ns == 0) {
+            int created;
+            int *slot = pgwt_triple_map_slot(&ix, pa, pb, 0, &created);
+            if (!slot) goto fail;
+            if (created) {
+                if (accum_grow((void **)&ht, &cap_pairs, num_pairs + 1,
+                               sizeof(*ht), "interference_entries") != 0)
+                    goto fail;
+                *slot = num_pairs++;
+            }
+            int h = *slot;
+            if (created) {
                 ht[h].pid_a = pa;
                 ht[h].pid_b = pb;
-                num_pairs++;
             }
             ht[h].overlap_ns += overlap;
             if (overlap > ht[h].top_event_ns) {
@@ -3937,13 +3946,15 @@ void pgwt_compute_interference(const struct pgwt_trace_event *events, int count,
     }
 
     free(active);
+    active = NULL;
 
     /* Build result rows */
-    struct pgwt_interference_row *rows = calloc(num_pairs, sizeof(*rows));
+    rows = num_pairs && !pgwt_test_alloc_fail("interference_rows")
+        ? calloc((size_t)num_pairs, sizeof(*rows)) : NULL;
+    if (num_pairs && !rows) goto fail;
     int nr = 0;
 
-    for (int i = 0; i < PAIR_HT_SIZE; i++) {
-        if (ht[i].overlap_ns == 0) continue;
+    for (int i = 0; i < num_pairs; i++) {
         rows[nr].pid_a = ht[i].pid_a;
         rows[nr].pid_b = ht[i].pid_b;
         rows[nr].score = max_overlap > 0
@@ -3956,11 +3967,22 @@ void pgwt_compute_interference(const struct pgwt_trace_event *events, int count,
     }
 
     free(ht);
-    qsort(rows, nr, sizeof(rows[0]), cmp_interference_desc);
+    pgwt_triple_map_free(&ix);
+    if (nr > 1)
+        qsort(rows, nr, sizeof(rows[0]), cmp_interference_desc);
 
     int n = nr < max_rows ? nr : max_rows;
     out->rows = rows;
     out->num_rows = n;
+    return;
+
+fail:
+    free(active);
+    free(ht);
+    free(rows);
+    pgwt_triple_map_free(&ix);
+    memset(out, 0, sizeof(*out));
+    out->failed = 1;
 }
 
 /* ── Variants ─────────────────────────────────────────────── */
@@ -4754,14 +4776,19 @@ static int detect_loop(const uint32_t *events, int len, int pos)
     return 0;
 }
 
-/* Compress a raw event sequence: collapse loops */
-static void compress_exec(const struct raw_exec *raw, struct compressed_pattern *out)
+/* Compress a raw event sequence: collapse loops. Map each consumed raw
+ * event to its compressed step, and return the number consumed. The step
+ * cap can leave an unmapped raw tail; it must not be charged to the last
+ * represented step. */
+static int compress_exec(const struct raw_exec *raw, struct compressed_pattern *out,
+                         int *raw_steps)
 {
     out->num_steps = 0;
     int i = 0;
     while (i < raw->len && out->num_steps < PGWT_MAX_VARIANT_STEPS) {
         int body = detect_loop(raw->events, raw->len, i);
         if (body > 0 && out->num_steps + body < PGWT_MAX_VARIANT_STEPS) {
+            int loop_start = out->num_steps;
             /* Mark first step of loop */
             out->steps[out->num_steps] = raw->events[i];
             out->is_loop[out->num_steps] = 1;
@@ -4775,7 +4802,6 @@ static void compress_exec(const struct raw_exec *raw, struct compressed_pattern 
                 out->num_steps++;
             }
             /* Skip past all repetitions */
-            int reps = 0;
             int j = i;
             while (j + body <= raw->len) {
                 int match = 1;
@@ -4783,11 +4809,13 @@ static void compress_exec(const struct raw_exec *raw, struct compressed_pattern 
                     if (raw->events[i + k] != raw->events[j + k]) { match = 0; break; }
                 }
                 if (!match) break;
-                reps++;
+                for (int k = 0; k < body; k++)
+                    raw_steps[j + k] = loop_start + k;
                 j += body;
             }
             i = j;
         } else {
+            raw_steps[i] = out->num_steps;
             out->steps[out->num_steps] = raw->events[i];
             out->is_loop[out->num_steps] = 0;
             out->loop_len[out->num_steps] = 0;
@@ -4795,6 +4823,7 @@ static void compress_exec(const struct raw_exec *raw, struct compressed_pattern 
             i++;
         }
     }
+    return i;
 }
 
 /* Hash a compressed pattern */
@@ -4992,8 +5021,9 @@ void pgwt_compute_variants(const struct pgwt_trace_event *events, int count,
 
             /* Compress and hash */
             struct compressed_pattern cp;
+            int raw_steps[128];
             memset(&cp, 0, sizeof(cp));
-            compress_exec(re, &cp);
+            int num_mapped = compress_exec(re, &cp, raw_steps);
             uint64_t h = hash_pattern(&cp);
 
             /* Count loop iterations in raw data */
@@ -5046,18 +5076,18 @@ void pgwt_compute_variants(const struct pgwt_trace_event *events, int count,
                     va->exec_times[va->exec_times_n++] = re->total_ns;
             }
 
-            /* Accumulate per-step durations from raw data */
-            int si = 0;
-            for (int j = 0; j < re->len && si < cp.num_steps; j++) {
-                if (re->events[j] == cp.steps[si]) {
-                    va->step_total_ns[si] += re->durations[j];
-                    va->step_count[si]++;
-                    /* Advance through pattern steps (handle loops) */
-                    if (!cp.is_loop[si] || j + 1 >= re->len ||
-                        re->events[j + 1] != cp.steps[si])
-                        si++;
-                    if (si >= cp.num_steps) si = cp.num_steps - 1;
-                }
+            /* #343: use the compressor's mapping for every loop lap.
+             * Advancing by event id lost all but the first occurrence of
+             * earlier body steps (ABAB gave A=1ms instead of 2ms). The old
+             * clamp kept si in range, but also folded matching raw tails
+             * onto the last step. Bound both the mapped prefix and the
+             * step index instead, preserving the out-of-range guard. */
+            for (int j = 0; j < num_mapped; j++) {
+                int si = raw_steps[j];
+                if (si < 0 || si >= cp.num_steps)
+                    break;
+                va->step_total_ns[si] += re->durations[j];
+                va->step_count[si]++;
             }
 
             continue;

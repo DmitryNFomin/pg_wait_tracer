@@ -13,6 +13,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
+BUILD_VERSION="${PGWT_BUILD_VERSION:-$(git rev-parse HEAD)}"
 
 case "$(uname -s)" in
     Darwin)
@@ -22,13 +23,16 @@ case "$(uname -s)" in
             exit 1
         }
         echo "==> Building pgwt-server (Darwin, brew prefix $BREW_PREFIX) ..."
-        make pgwt-server \
-            CFLAGS="-g -O2 -Wall -Wextra -Wno-unused-parameter -I$BREW_PREFIX/include -Iinclude -Isrc" \
+        # Keep Linux APIs out of the macOS replay build. Force rebuilding so
+        # compiler flags and the embedded version cannot be stale.
+        make -B pgwt-server \
+            CFLAGS="-g -O2 -Wall -Wextra -Wno-unused-parameter -include $REPO_ROOT/demos/replay-compat.h -DPGWT_BUILD_VERSION='\"$BUILD_VERSION\"' -I$BREW_PREFIX/include -Iinclude -Isrc" \
             SERVER_LDFLAGS="-L$BREW_PREFIX/lib -lz -llz4 -lm"
         ;;
     Linux)
         echo "==> Building pgwt-server (Linux) ..."
-        make pgwt-server
+        make -B pgwt-server \
+            CFLAGS="-g -O2 -Wall -Wextra -Wno-unused-parameter -include $REPO_ROOT/demos/replay-compat.h -DPGWT_BUILD_VERSION='\"$BUILD_VERSION\"' -Iinclude -Isrc"
         ;;
     *)
         echo "FATAL: unsupported OS: $(uname -s)" >&2

@@ -10,6 +10,115 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+- **perf: `pgwt-server` keeps the per-request event arrays on an
+  already-faulted heap.** Every analysis request builds 3-4 transient arrays of
+  the whole window's events (~274 MB each on a 6.96M-event, 900 s window: the
+  `cache->events` copy in `server_load_events_fi_mode()`, the exact-wins merge
+  array, and -- before the chain merge below -- the loader's sort scratch).
+  glibc serves blocks that large with `mmap`, which returns fresh zero pages,
+  so EVERY request paid kernel page-zeroing plus one first-touch fault per
+  4 KB page and then walked those cold pages in `memcpy` (`clear_page_erms`
+  4.06%, `do_user_addr_fault` 4.05% in a perf profile of the shared path).
+  `mallopt(M_MMAP_MAX, 0)` keeps the blocks on the brk heap and a large
+  `M_TRIM_THRESHOLD` stops `free()` handing the heap back, so the next request
+  reuses pages that are already faulted in. Applied in `main()` before the
+  first large allocation, since `mallopt()` changes how subsequent allocations
+  are served and does not migrate existing ones. glibc-only (`#ifdef
+  __GLIBC__`: `mallopt`/`M_MMAP_MAX` are glibc extensions and parts of the tree
+  build on macOS) and **`pgwt-server` only** -- `src/server.c` is the sole
+  includer and appears only in `SERVER_SRCS`, so the daemon is untouched.
+  `PGWT_ALLOC_TUNE=0` turns it off at startup without a rebuild.
+  **The cost is retained RSS**: the process stops returning memory to the OS,
+  so steady-state RSS becomes the high-water mark of any one request -- 1180 MB
+  flat on the dense window below, against 374-519 MB steady / 790-925 MB peak
+  unmodified. It plateaus after the first heavy request rather than climbing
+  (`rss == hwm` across 5 calls x 6 commands in every sweep), and
+  `PGWT_ALLOC_TUNE=0` is the escape hatch for a memory-constrained host.
+
+- **perf (combined effect of the three changes above).** Measured on the
+  COMBINED build, which is the only number that counts: the three overlap by
+  roughly 0.4 s per request, because removing the loader's full sort also
+  removes its 274 MB temp buffer, whose fresh-`mmap` page faults are part of
+  what the allocator change fixes. Summing the three single-branch deltas
+  overstates the result and is not done here.
+  Dense capture (6,955,008 events; 5,699,738 inside the window), 900 s window,
+  warm median of 4 consecutive calls in one server process, two interleaved
+  master/combined rounds on `pgwt-gate` (cx33, Intel Skylake), under the box
+  flock, with a 1 s-window `time_model` canary at 20-56 ms throughout:
+
+  | request | master `638b77c` | combined | cold (fresh process, 1 call) |
+  |---|---|---|---|
+  | `top_queries`  | 4853 / 4904 ms | **794 / 756 ms**   | 4759 -> **1000 ms** |
+  | `executions`   | 3846 / 3714 ms | **1007 / 1007 ms** | 4330 -> **1475 ms** |
+  | `concurrency`  | 3576 / 3386 ms | **1184 / 1152 ms** | 3442 -> **1281 ms** |
+  | `variants`     | 2942 / 2998 ms | **686 / 708 ms**   | 2995 -> **801 ms**  |
+  | `exec_scatter` | 3690 / 3719 ms | **970 / 950 ms**   | 4634 -> **1427 ms** |
+  | `transitions`  | 23 / 30 ms     | 28 / 28 ms         | 1293 -> 1187 ms     |
+
+  `transitions` is unchanged within noise because it never calls the loader
+  (it answers from the per-block transition aggregate). The same sweep on
+  `pgwt-gate-2` (cx33, AMD EPYC-Rome, byte-identical trace) is ~2.5x faster in
+  absolute terms with the same ratios -- `top_queries` 1937 -> 316 ms -- so the
+  absolute paint budget depends on which silicon the server runs on.
+  **Verified as bytes, not as totals**: 60 full JSON responses byte-identical
+  across all six requests x {900 s, 300 s} x {no filter, pid, query_id, event
+  class, event id}, on both boxes, plus 36 paired response hashes from the
+  timing sweeps and a live-capture pair.
+
+- **perf: `top_queries` resolves each row's context and synth flag in ONE pass
+  over the window, not two passes per row.** `handle_top_queries` resolved two
+  facts inside its row loop, each with a full scan of the window's events:
+  `query_context_for_events()` looked for the row's `query_id` to derive
+  databaseid/userid/ambiguous, and an inline loop scanned again for
+  `PGWT_EVENT_FLAG_QUERY_SYNTH`. At the UI's default 900 s window on a dense
+  capture that is 26 rows x 2 passes x 5.7M events -- ~274 MB per pass, roughly
+  14 GB of memory traffic, **measured at 1778 ms, about 40% of the whole
+  response**. Both facts are per-`query_id` properties of the same array, so
+  `src/query_ctx_index.h` builds them once before the row loop and each row
+  becomes a lookup.
+  **Output is bit-identical by construction.** The deleted function returned
+  -1 at the FIRST unusable backend and otherwise kept the FIRST contributor's
+  ids, refusing on any later disagreement, so its answer is a pure function of
+  the contributing SET -- refused iff any contributor's metadata is
+  missing/ambiguous/incomplete or two contributors disagree, otherwise the
+  common ids, otherwise absent. That is what makes the accumulate-as-you-go
+  form equivalent in any event order, and the differential in
+  `tests/test_top_queries_context.c` compares against a VERBATIM copy of the
+  deleted function over four event orders per fixture. Absence is never
+  reported as zero: a growth failure sets `failed` and joins the same refusal
+  arm as #327, because a half-built table reports rows as context-less, which
+  is exactly what a legitimately context-less row looks like; a NULL resolver
+  refuses for the same reason.
+
+- **perf: the loader's order restoration is a natural chain merge, not a full
+  mergesort.** `server_load_events_fi_mode()` concatenates one run per
+  contributing trace file and then restores timestamp order; the array is
+  genuinely unordered (per-CPU blocks interleave at their seams, and sample
+  clipping moves delayed fragments), so the existing O(n) already-ordered
+  fast path does not fire and the sort ran on every heavy request. It was a
+  fixed-width bottom-up mergesort: ceil(log2 n) passes, each copying all n
+  48-byte records. Measured on a real 900 s window of a dense capture
+  (5,699,738 events, one trace file): **1779-1955 ms per request, 29.88% of
+  warm backend self time**. The same window holds 11,790 maximal
+  non-decreasing runs (mean length 483) and only 11,801 displaced records
+  (0.207%), so the sort is now an in-place merge of each run against the
+  prefix tail it actually overlaps -- 36 ms, 23,853 record moves (0.004n),
+  and the scratch buffer shrank from n records to the deepest single overlap.
+  A reversed array would make a chain merge quadratic, so the chain phase
+  carries a work budget of n and hands over to the old fixed-width pass on
+  exceeding it; the whole function stays O(n log n).
+  **Output is byte-identical, which is the entire safety argument**: a stable
+  sort on one key is a function, not a choice, and both passes are stable
+  merges on `timestamp_ns` with the left side winning ties. Verified as
+  bytes, not as totals -- 60 of 60 full JSON responses identical across
+  `top_queries`/`executions`/`concurrency`/`variants`/`exec_scatter`/
+  `transitions`, at 900 s and 300 s, unfiltered and under pid/query_id/class/
+  event_id filters. Warm effect on the same box, median of 8 calls:
+  top_queries 4950 -> 3150 ms, executions 4040 -> 1960, concurrency 3600 ->
+  1730, variants 3030 -> 1240, exec_scatter 3930 -> 1930, time_model 3070 ->
+  1170; `transitions` unchanged at 24-26 ms because it never calls the loader
+  (`tests/test_event_sort.c`, `src/event_sort.h`).
+
 - **perf(paint-latency Phase 1): `transitions` answers from a per-block
   transition aggregate instead of loading the raw window.** A committed trace
   block is immutable, so its `(old_event, new_event)` count/duration table and

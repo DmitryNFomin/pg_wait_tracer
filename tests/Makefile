@@ -10,7 +10,7 @@ BUILD     = ../build
 # Rocky 8 / RHEL 8 where the bundled static libbpf is used instead.
 LIBBPF_LIB ?= -lbpf
 
-TESTS     = test_wait_event test_cmdline test_spawn test_event_writer test_event_reader \
+TESTS     = test_wait_event test_cmdline test_backend_lifecycle test_spawn test_event_writer test_event_reader \
             test_trace_v2 test_sampler test_anomaly test_escalation_budget \
             test_exact_probe \
             test_effective_cores \
@@ -23,18 +23,22 @@ TESTS     = test_wait_event test_cmdline test_spawn test_event_writer test_event
             test_golden_fixture test_live_accum test_window_clip \
             test_executions_attribution \
             test_top_queries_percentile \
+            test_event_sort \
+            test_top_queries_context \
             test_variants_p95 \
             test_pid_cap \
             test_probe_bounds \
+            test_interference_bounds \
             test_concurrency_bounds \
             test_idle_accounting test_idle_summary \
             test_agg_raw_crosscheck \
             test_exec_index \
             test_interval_index \
+            test_alloc_tune \
             gen_test_traces gen_bench_traces test_concurrent_rw cross_validate \
             dump_markers wait_cpu_canary test_wait_cpu_canary \
             test_summary_tick_flush \
-            test_block_agg bench_block_agg
+            test_block_agg bench_block_agg test_transitions_loader
 
 .PHONY: all clean check
 
@@ -57,6 +61,12 @@ check: all
 
 test_wait_event: test_wait_event.c $(BUILD)/wait_event.o $(BUILD)/idle_rule.o $(BUILD)/spawn.o $(BUILD)/cJSON.o
 	$(CC) $(CFLAGS) -o $@ $^
+
+# Exercise the production lifecycle functions, replacing only hardware opens
+# and map deletes. The capture objects exist after the required parent build.
+LIFECYCLE_OBJS = $(filter-out $(BUILD)/pg_wait_tracer.o $(BUILD)/pg_wait_tracer.bpf.o $(BUILD)/server_%.o,$(wildcard $(BUILD)/*.o))
+test_backend_lifecycle: test_backend_lifecycle.c $(LIFECYCLE_OBJS)
+	$(CC) $(CFLAGS) -o $@ $^ -Wl,--wrap=pgwt_open_watchpoint -Wl,--wrap=pgwt_open_watchpoint_disabled -Wl,--wrap=bpf_map_delete_elem $(LIBBPF_LIB) -lelf -lz -llz4 -pthread -lm
 
 test_cmdline: test_cmdline.c $(BUILD)/cmdline.o
 	$(CC) $(CFLAGS) -o $@ $^
@@ -128,6 +138,27 @@ test_executions_attribution: test_executions_attribution.c ../src/map_reader.c \
 test_top_queries_percentile: test_top_queries_percentile.c ../src/percentile.h
 	$(CC) $(CFLAGS) -o $@ test_top_queries_percentile.c
 
+# test_event_sort: the loader's order restoration (src/event_sort.h). The
+# fixed-width bottom-up mergesort was 29.88% of warm backend self time
+# (1779-1955 ms per request on a real 5.7M-event window); it is now an
+# in-place natural chain merge with an O(n log n) fallback. The whole safety
+# argument is that the output is BIT-IDENTICAL, so this is a differential
+# against a verbatim private copy of the deleted sort, plus an explicit tie
+# order, the fallback hand-off, and a false-negative suite with a five-way
+# mutation probe. Header-only subject, no link deps, no I/O, no clock.
+test_event_sort: test_event_sort.c ../src/event_sort.h ../src/pg_wait_tracer.h
+	$(CC) $(CFLAGS) -o $@ test_event_sort.c
+
+# test_top_queries_context: the Queries tab's per-row CONTEXT resolution and
+# QUERY_SYNTH flag, which handle_top_queries resolved with TWO full passes
+# over the window PER ROW (1778 ms of the response at the 900 s default) and
+# now resolves in one. Header-only, like percentile.h above: pure in-memory
+# arrays, a verbatim copy of the deleted query_context_for_events as the
+# oracle, seven mutants, the bypass suite and a non-vacuity ledger.
+test_top_queries_context: test_top_queries_context.c ../src/query_ctx_index.h \
+                          ../src/qid_index.h ../src/pg_wait_tracer.h
+	$(CC) $(CFLAGS) -o $@ test_top_queries_context.c
+
 # test_variants_p95: #271 + #269 — pgwt_compute_variants sampled execution
 # times only while exec_count <= 10000 but read min(exec_count, cap) of a
 # realloc'd (never zeroed) array, so the p95 came out of slots that were
@@ -192,6 +223,14 @@ test_probe_bounds: test_probe_bounds.c ../src/compute.c \
               ../src/test_alloc_fail.h ../src/percentile.h \
               $(BUILD)/wait_event.o $(BUILD)/idle_rule.o $(BUILD)/spawn.o $(BUILD)/cJSON.o
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ test_probe_bounds.c ../src/compute.c \
+	    $(BUILD)/wait_event.o $(BUILD)/idle_rule.o $(BUILD)/spawn.o $(BUILD)/cJSON.o -lm
+
+# #359: interference's former 4096-slot pair table must return at cap and
+# cap+1, with exact per-pair totals and whole-result allocation refusals.
+test_interference_bounds: test_interference_bounds.c ../src/compute.c \
+              ../src/triple_map.h ../src/test_alloc_fail.h \
+              $(BUILD)/wait_event.o $(BUILD)/idle_rule.o $(BUILD)/spawn.o $(BUILD)/cJSON.o
+	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ test_interference_bounds.c ../src/compute.c \
 	    $(BUILD)/wait_event.o $(BUILD)/idle_rule.o $(BUILD)/spawn.o $(BUILD)/cJSON.o -lm
 
 test_pg13_resolve: test_pg13_resolve.c ../src/discovery.c ../src/spawn.c \
@@ -398,6 +437,23 @@ dump_markers: dump_markers.c $(BUILD)/server_event_reader.o \
               $(BUILD)/server_spawn.o $(BUILD)/server_cJSON.o
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -llz4 -lz
 
+# test_alloc_tune: src/alloc_tune.h. Header-only, so this links nothing else.
+# The subject is an allocator property (a ~274 MB block served from the brk
+# heap, not returned on free, and re-touched without page faults), measured
+# against the same sequence run untuned in the same process -- the control is
+# what lets the test fail. Pre-tuned MALLOC_* in the environment, an
+# allocation too small to be mmap'd, or an unreadable sbrk() each REFUSE.
+#
+# ../src/alloc_tune.h IS a prerequisite, and has to be. The subject is a
+# header the test #includes, so without it here `make` reports the binary
+# up to date after the header changes and silently runs the STALE one: three
+# mutations of alloc_tune.h (M_MMAP_MAX not set, M_TRIM_THRESHOLD tiny,
+# success reported without calling mallopt) all stayed GREEN against a
+# pre-built tests/ directory before this line existed. Same shape as
+# test_event_sort and test_top_queries_context above.
+test_alloc_tune: test_alloc_tune.c ../src/alloc_tune.h
+	$(CC) $(CFLAGS) -o $@ $<
+
 # test_summary_tick_flush: #277 — the daemon tick flushed the IN-PROGRESS
 # second and left the accumulator's counters in place, so the rest of that
 # second was written again as a superset and pgwt_visit_summaries summed both
@@ -495,6 +551,14 @@ test_block_agg: test_block_agg.c ../src/block_agg.c ../src/compute.c \
                 $(BUILD)/wait_event.o $(BUILD)/idle_rule.o \
                 $(BUILD)/spawn.o $(BUILD)/cJSON.o
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -llz4 -lm
+
+# Exercise the actual server gate/loader/response against reader-decoded
+# block aggregates from the same two-block file (command state crosses blocks).
+TRANSITIONS_LOADER_OBJS = $(addprefix $(BUILD)/server_,compute.o block_agg.o \
+    event_reader.o event_writer.o summary_writer.o summary_reader.o \
+    wait_event.o idle_rule.o spawn.o cmdline.o backend_meta.o cJSON.o)
+test_transitions_loader: test_transitions_loader.c ../src/server.c $(TRANSITIONS_LOADER_OBJS)
+	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $< $(TRANSITIONS_LOADER_OBJS) -lz -llz4 -lm
 
 # bench_block_agg: the measurement behind Phase 1's falsifiable prediction
 # (O(events in window) -> O(blocks x distinct pairs)). Deliberately NOT in

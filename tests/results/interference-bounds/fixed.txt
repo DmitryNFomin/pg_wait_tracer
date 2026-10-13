@@ -1,0 +1,11 @@
+CALL pairs=4096 intervals=24576 limit=4096
+RETURNED num_rows=4096 overlap_ns=50343936000000
+CALL pairs=4097 intervals=24582 limit=4097
+RETURNED num_rows=4097 overlap_ns=50368518000000
+CALL pairs=4097 intervals=24582 limit=30
+RETURNED num_rows=30 overlap_ns=734850000000
+REFUSAL point=interference_intervals failed=1 num_rows=0
+REFUSAL point=triple_map_grow failed=1 num_rows=0
+REFUSAL point=interference_entries failed=1 num_rows=0
+REFUSAL point=interference_rows failed=1 num_rows=0
+32917 checks, 0 failures
