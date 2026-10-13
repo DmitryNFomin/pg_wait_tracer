@@ -60,9 +60,11 @@ MUTANTS = {
           '/* MUTANT: an unnameable class is silently bucketed */ (void)0;')],
         ["unresolvable_name_refuses"]),
     "M6_no_crossing_detection": (
-        [('if (e->cpu_ns >= threshold) {',
+        [('if (over_abs && ratio_met) {',
           'if (0) {  /* MUTANT: crossing detection removed */')],
-        ["crossing_detected", "crossing_carries_full_identity"]),
+        ["crossing_detected", "crossing_carries_full_identity",
+         "zero_duration_cpu_is_not_cleared_by_the_ratio_half",
+         "detection_survives_the_refusal_cases"]),
     "M7_empty_input_reads_clean": (
         [('REFUSE("no_trace_files");', '/* MUTANT */ (void)0;'),
          ('if (records_walked == 0) REFUSE("no_records_walked");',
@@ -80,6 +82,16 @@ MUTANTS = {
           '                   samples, expect_samples);',
           'else if (0) (void)0;  /* MUTANT */')],
         ["census_mismatch_refuses", "sample_census_mismatch_refuses"]),
+    # The §3 conjunction's own two blinding paths (added with it).
+    "M9_zero_duration_cleared": (
+        [('                    : e->cpu_ns > 0;',
+          '                    : 0;  /* MUTANT: no ratio -> treated clean */')],
+        ["zero_duration_cpu_is_not_cleared_by_the_ratio_half"]),
+    "M10_unreachable_ratio_accepted": (
+        [('if (!(min_ratio_pct >= 0.0 && min_ratio_pct <= 100.0))\n'
+          '        REFUSE("min_ratio_unreachable:%g", min_ratio_pct);',
+          '/* MUTANT: a bar no record can reach is accepted */ (void)0;')],
+        ["unreachable_min_ratio_refuses", "nan_min_ratio_refuses"]),
 }
 
 
@@ -91,6 +103,12 @@ def main():
         tmp = tempfile.mkdtemp(prefix=f"mutant_{name}_")
         mutated = original
         for old, new in edits:
+            # Already here, and load-bearing for the conjunction change
+            # below: M6's old anchor (`if (e->cpu_ns >= threshold) {`) no
+            # longer exists, and without this assert that mutant would have
+            # silently become the UNMUTATED scanner -- a red log proving
+            # nothing. Verified by running a copy of this file with the
+            # stale anchor: AssertionError, exit 1, no log written.
             assert old in mutated, f"{name}: anchor not found:\n{old}"
             mutated = mutated.replace(old, new, 1)
         msrc = os.path.join(tmp, "wait_cpu_scan.c")
