@@ -98,6 +98,98 @@ test('option root disables animation (U0: no replayed draw-in on refresh)', () =
     assert.equal(buildHeatmapOption(heatmap()).option.animation, false);
 });
 
+/* ── The Histogram-blink gate (single-frame paint) ──────────────────────────
+ *
+ * ECharts' GLOBAL defaults are progressive: 400 / progressiveThreshold: 3000
+ * (vendor echarts.min.js 5.6.0: `progressive:400` + `progressiveThreshold:3e3`
+ * in the global default block, and Scheduler.restorePipelines sets
+ * `progressiveEnabled: seriesModel.getProgressive() && ...`). So a heatmap
+ * series that does NOT pin `progressive` paints a >=3000-cell grid in
+ * ceil(n/400) chunks, one per animation frame, and the view's mount() hands
+ * the sweep anchor out after chunk 1 — the panel is still filling for several
+ * hundred ms after the frame the gate treats as settled. A demo-length window
+ * reaches ~4500-5000 cells, so this is the normal regime, not an edge case.
+ *
+ * `progressive: 0` disables chunking: one setOption -> one paint.
+ *
+ * REFUSAL, not approval: this gate's subject is the heatmap-typed series that
+ * actually carries cells. assertSinglePassPaint throws when there is no such
+ * series (empty/absent response, or a reorder that drops it), so the check can
+ * never be satisfied by the thing it checks being ABSENT rather than right --
+ * which is what a bare `if (option) ...` or a truthiness assertion
+ * (`assert(!series.progressive)`, true for undefined) would do. The two tests
+ * after this one exercise exactly those bypasses. */
+function assertSinglePassPaint(res, label) {
+    assert.equal(res.hasData, true, label + ': expected a built option, got hasData=' + res.hasData);
+    assert.ok(res.option && Array.isArray(res.option.series), label + ': no series array to check');
+    const withCells = res.option.series.filter(
+        s => s.type === 'heatmap' && Array.isArray(s.data) && s.data.length > 0);
+    assert.equal(withCells.length, 1, label + ': expected exactly 1 cell-carrying heatmap series, got ' + withCells.length);
+    for (const s of withCells) {
+        // strictEqual, not truthiness: `undefined` (the ECharts default, i.e.
+        // progressive: 400) must FAIL here, and it is the only value this bug
+        // ever had.
+        assert.strictEqual(s.progressive, 0,
+            label + ': heatmap series must pin progressive: 0, got ' + String(s.progressive));
+    }
+    return withCells[0];
+}
+
+/* A grid past ECharts' own progressiveThreshold (3000), i.e. the regime the
+ * blink was measured in -- not a 3-cell toy that would never chunk anyway. */
+function bigHeatmap(ncells = 3500) {
+    const cells = [];
+    for (let i = 0; i < ncells; i++) cells.push([i % 700, i % 5, (i % 97) + 1]);
+    return { bucket_ns: 1_000_000_000, max_count: 97,
+        times: Array.from({ length: 700 }, (_, i) => 1000 + i),
+        labels: ['<1', '1-2', '2-4', '4-8', '8-16'], cells };
+}
+
+test('heatmap pins progressive: 0 so a >3000-cell grid lands in ONE frame (blink fix)', () => {
+    const res = buildHeatmapOption(bigHeatmap(3500));
+    const s = assertSinglePassPaint(res, '3500 cells');
+    assert.equal(res.option.series[0].type, 'heatmap');   // index-0 contract (#105)
+    assert.equal(s.data.length, 3500);                    // past progressiveThreshold
+    // and the small-grid case, which must not be special-cased away
+    assertSinglePassPaint(buildHeatmapOption(heatmap()), '3 cells');
+});
+
+test('blink gate still finds the heatmap series when the "not captured" series rides along', () => {
+    // #105 appends a second (dataless) series. The gate must grade the series
+    // that carries CELLS, not whatever sits at index 0 -- a reorder would
+    // otherwise let an unpinned heatmap through.
+    const data = bigHeatmap(3200);
+    const res = buildHeatmapOption(data, { captureFromNs: 1000 + 50 });
+    assert.equal(res.notCapturedCount, 50);
+    assert.equal(res.option.series.length, 2);
+    const s = assertSinglePassPaint(res, 'with annotation series');
+    assert.equal(s.data.length, 3200);
+});
+
+test('blink gate REFUSES an absent heatmap instead of approving it', () => {
+    // Bypass 1: empty/absent response -> option null. A conditional assertion
+    // would pass vacuously here; this one must throw.
+    assert.throws(() => assertSinglePassPaint(buildHeatmapOption(null), 'null'),
+        /expected a built option/);
+    assert.throws(() => assertSinglePassPaint(buildHeatmapOption({ cells: [] }), 'empty'),
+        /expected a built option/);
+    // Bypass 2: the series is there but carries no cells (nothing to chunk,
+    // nothing to grade) -> also a refusal, never a pass.
+    assert.throws(() => assertSinglePassPaint(
+        { hasData: true, option: { series: [{ type: 'heatmap', data: [] }] } }, 'no cells'),
+        /expected exactly 1 cell-carrying heatmap series/);
+    // Bypass 3: cells present, progressive left at the ECharts default
+    // (undefined -> 400). This is the pre-fix product, and it must be RED.
+    assert.throws(() => assertSinglePassPaint(
+        { hasData: true, option: { series: [{ type: 'heatmap', data: [[0, 0, 0, 1]] }] } }, 'default'),
+        /must pin progressive: 0, got undefined/);
+    // Bypass 4: a non-zero progressive (someone "tunes" it instead of
+    // disabling it) is still chunked rendering -> still RED.
+    assert.throws(() => assertSinglePassPaint(
+        { hasData: true, option: { series: [{ type: 'heatmap', data: [[0, 0, 0, 1]], progressive: 400 }] } }, '400'),
+        /must pin progressive: 0, got 400/);
+});
+
 test('heatmap empty / absent -> hasData false, no option', () => {
     assert.equal(buildHeatmapOption(null).hasData, false);
     assert.equal(buildHeatmapOption({ cells: [] }).hasData, false);
