@@ -252,6 +252,17 @@ def test_offcpu_cap_not_applicable_without_measured_cpu():
     check(ok, f"legacy/sampled tier (no measured CPU) reports ok, labeled not applicable ({detail})")
     check("not applicable" in detail or "no Off-CPU*" in detail,
           f"detail says WHY it is vacuously ok, not just ok ({detail})")
+    # #387: an empty exact-data window is also absence, not a measured zero
+    # or a defect. Its scalar 0 must never hide the unavailable signal.
+    empty_ok, empty_detail = lib.time_model_offcpu_cap_ok(
+        offcpu_ms=0.0, db_time_ms=0.0, has_measured_cpu=False)
+    clean_ok, clean_detail = lib.time_model_offcpu_cap_ok(
+        offcpu_ms=0.0, db_time_ms=10000.0, has_measured_cpu=True)
+    check(empty_ok, f"empty window reports absence without failing ({empty_detail})")
+    check("no Off-CPU* signal to check" in empty_detail,
+          f"empty window explicitly reports no signal ({empty_detail})")
+    check(clean_ok and "cap" in clean_detail and empty_detail != clean_detail,
+          f"checked clean is distinguishable from absence ({clean_detail})")
 
 
 # ── evaluate_time_model_window ────────────────────────────────────────────

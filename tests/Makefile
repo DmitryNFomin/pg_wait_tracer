@@ -20,7 +20,7 @@ TESTS     = test_wait_event test_cmdline test_backend_lifecycle test_spawn test_
             test_pgss_resolver \
             test_pg13_resolve test_discovery_pie test_discovery_nopie \
             test_replay_fidelity test_durability test_query_text \
-            test_golden_fixture test_live_accum test_window_clip \
+            test_golden_fixture test_live_accum test_window_clip test_time_model_absence \
             test_executions_attribution \
             test_top_queries_percentile \
             test_event_sort \
@@ -108,6 +108,12 @@ test_live_accum: test_live_accum.c ../src/map_reader.c ../src/snapshot.c \
 # test_live_accum: compute.c compiled directly with -DPGWT_SERVER, its only
 # foreign symbol (pgwt_visit_summaries) stubbed in the test. Runs anywhere.
 test_window_clip: test_window_clip.c ../src/compute.c \
+                  $(BUILD)/wait_event.o $(BUILD)/idle_rule.o $(BUILD)/spawn.o $(BUILD)/cJSON.o
+	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -lm
+
+# #387: out-of-window / zero-duration CPU records cannot supply a measured
+# signal. Same BPF-free build and summary visitor stub as test_window_clip.
+test_time_model_absence: test_time_model_absence.c ../src/compute.c \
                   $(BUILD)/wait_event.o $(BUILD)/idle_rule.o $(BUILD)/spawn.o $(BUILD)/cJSON.o
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -lm
 

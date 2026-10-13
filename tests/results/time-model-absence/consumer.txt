@@ -1,0 +1,6 @@
+--- test_offcpu_cap_not_applicable_without_measured_cpu ---
+  PASS: legacy/sampled tier (no measured CPU) reports ok, labeled not applicable (has_measured_cpu=False (legacy/sampled tier -- no Off-CPU* signal to check))
+  PASS: detail says WHY it is vacuously ok, not just ok (has_measured_cpu=False (legacy/sampled tier -- no Off-CPU* signal to check))
+  PASS: empty window reports absence without failing (has_measured_cpu=False (legacy/sampled tier -- no Off-CPU* signal to check))
+  PASS: empty window explicitly reports no signal (has_measured_cpu=False (legacy/sampled tier -- no Off-CPU* signal to check))
+  PASS: checked clean is distinguishable from absence (offcpu_ms=0.00 (0.00% of db_time_ms), cap 10.0%)

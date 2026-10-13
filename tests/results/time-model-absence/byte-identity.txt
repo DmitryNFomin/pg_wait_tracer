@@ -1,0 +1,4 @@
+9 nonempty time-model results, all scalars and rows: cmp exit_status=0
+bytes=5016
+before_sha256=27aacf29f78d00c663f9c0ae7c898424a8a0dd314c299a8c6586b0a4d5f04f8f
+after_sha256=27aacf29f78d00c663f9c0ae7c898424a8a0dd314c299a8c6586b0a4d5f04f8f
