@@ -125,6 +125,18 @@ run python3 tests/test_demo_rehearsal_orchestrator_lib.py
 step "bash: tag_cli_args plumbing unit tests"
 run bash tests/test_tag_cli_args.sh
 
+# assert_served_ui_matches_tree (tests/live_daemon_lib.sh) refuses a live-tier
+# run whose Go bridge serves a web/static OTHER than the tree under test --
+# web/main.go embeds the UI into the binary, so a stale web/pgwt would let a
+# walk (or a counted demo rehearsal) pass against the wrong UI and report
+# green. Hermetic: a throwaway tree plus a python3 http.server, no Go build,
+# no PostgreSQL, no root -- so, like the step above, its unit tests do not
+# live only in the box tier. The cases are weighted toward FALSE negatives:
+# 404, dead server, empty tree, missing dir and missing python3 must each
+# REFUSE ("cannot verify"), never pass.
+step "bash: served-asset guard unit tests (stale bridge refusal)"
+run bash tests/test_served_asset_guard.sh
+
 step "python: gallery provenance and tiered output unit tests"
 run python3 tests/test_evidence_output.py
 

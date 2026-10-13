@@ -363,6 +363,17 @@ if ! url_ready "${BASE_URL}session"; then
 fi
 echo "ui_live_smoke: bridge ready at $BASE_URL"
 
+# Same guard as tests/demo_rehearsal.sh, same reason: web/main.go embeds
+# web/static into the bridge binary (`//go:embed static`), so a stale web/pgwt
+# serves the old UI and the walk below would grade the wrong assets while
+# reporting green. Refuse before the walk, naming the asset and both hashes
+# (assert_served_ui_matches_tree in live_daemon_lib.sh: 1 = served bytes
+# differ, 2 = could not look at all, 3 = python3 missing -- all refuse).
+if ! assert_served_ui_matches_tree "$BASE_URL" "$PROJECT_DIR/web/static" "ui_live_smoke"; then
+    echo "ERROR: the bridge is not serving this tree's web/static -- rebuild with 'make pgwt-client' and rerun"
+    exit 1
+fi
+
 # ── 4. The walk ───────────────────────────────────────────────────────────────
 python3 "$SCRIPT_DIR/ui_live_smoke.py" --url "$BASE_URL" \
     --pgbench-pid "$PGBENCH_PID" --workload-pid "$WORKLOAD_PID"

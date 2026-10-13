@@ -46,6 +46,130 @@ except Exception:
 PYEOF
 }
 
+# assert_served_ui_matches_tree BASE_URL [STATIC_DIR] [LABEL]
+# Refuses when the Go bridge is serving a DIFFERENT web/static than the tree
+# under test. web/main.go embeds web/static into the binary (`//go:embed
+# static`), so a bridge built before a UI edit keeps serving the old assets
+# with no outward sign: a live-tier walk -- or a counted demo rehearsal --
+# then passes against the wrong UI and reports green. Nothing else in the
+# live tier can see that; `make pgwt-client` succeeding says only that SOME
+# binary exists.
+#
+# Check: sha256 of every asset on disk vs the bytes the bridge actually
+# serves for the same path. Not one sampled file -- the whole tree, so the
+# guard is meaningful for ANY web/static change, not just the one that
+# prompted it. ~59 files / 1.8 MB over localhost, well under a second.
+#
+# Exit codes are deliberately distinct, because "served bytes differ" and
+# "could not look" are different failures and the second must never be
+# reported as a match (that is the bug this guard exists to prevent, one
+# level up):
+#   0  every asset on disk is served byte-identically, and there was at
+#      least one asset to check
+#   1  MISMATCH: at least one asset's served bytes differ from disk
+#   2  CANNOT VERIFY: an asset could not be fetched at all (404, refused
+#      connection, timeout), or there are no assets on disk, or STATIC_DIR
+#      does not exist. CANNOT VERIFY wins over MISMATCH when both occur --
+#      an incomplete look is never downgraded to a partial pass
+#   3  TOOLING: python3 is missing, so the check could not run at all
+# Every non-zero code names the asset and prints BOTH hashes (or the fetch
+# error), so the log says which file and in which direction.
+#
+# Known limit, stated rather than implied: this enumerates the DISK tree, so
+# a stale binary that still serves a file deleted from disk since is not
+# detected. Any file added to or modified on disk is.
+#
+# Mirrors Go's `//go:embed static` pattern rules: a path component starting
+# with "." or "_" is NOT embedded (that needs `all:`), so those are skipped
+# here too -- otherwise a stray .DS_Store in a Mac-side tree would refuse a
+# perfectly current bridge.
+assert_served_ui_matches_tree() {
+    local base="$1" root="${2:-}" label="${3:-live}"
+    if [[ -z "$root" ]]; then
+        root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/web/static"
+    fi
+    if ! command -v python3 >/dev/null 2>&1; then
+        echo "$label: REFUSE served-asset check: TOOLING -- python3 not found, cannot verify the bridge serves this tree's UI" >&2
+        return 3
+    fi
+    python3 - "$base" "$root" "$label" <<'PYEOF'
+import hashlib
+import os
+import sys
+import urllib.error
+import urllib.request
+
+base, root, label = sys.argv[1], sys.argv[2], sys.argv[3]
+if not base.endswith("/"):
+    base += "/"
+
+
+def say(msg):
+    print("%s: %s" % (label, msg), flush=True)
+
+
+if not os.path.isdir(root):
+    say("REFUSE served-asset check: CANNOT VERIFY -- static dir %r does not exist" % root)
+    sys.exit(2)
+
+# Go's //go:embed dir rules: skip any component starting with '.' or '_'.
+rels = []
+for dirpath, dirnames, filenames in os.walk(root):
+    dirnames[:] = [d for d in dirnames if not d.startswith((".", "_"))]
+    for fn in filenames:
+        if fn.startswith((".", "_")):
+            continue
+        full = os.path.join(dirpath, fn)
+        if not os.path.isfile(full):
+            continue
+        rels.append(os.path.relpath(full, root))
+rels.sort()
+
+if not rels:
+    say("REFUSE served-asset check: CANNOT VERIFY -- no embeddable assets found under %s "
+        "(an empty subject is never a pass)" % root)
+    sys.exit(2)
+
+mismatch, unfetchable = [], []
+for rel in rels:
+    url = base + rel.replace(os.sep, "/")
+    with open(os.path.join(root, rel), "rb") as fh:
+        disk = fh.read()
+    try:
+        with urllib.request.urlopen(url, timeout=15) as r:
+            if r.status != 200:
+                unfetchable.append((rel, url, "HTTP %s" % r.status))
+                continue
+            served = r.read()
+    except Exception as e:
+        unfetchable.append((rel, url, "%s: %s" % (type(e).__name__, e)))
+        continue
+    dh = hashlib.sha256(disk).hexdigest()
+    sh = hashlib.sha256(served).hexdigest()
+    if dh != sh:
+        mismatch.append((rel, dh, len(disk), sh, len(served)))
+
+for rel, url, err in unfetchable:
+    say("served-asset check: COULD NOT FETCH %s (%s) -- %s" % (rel, url, err))
+for rel, dh, dn, sh, sn in mismatch:
+    say("served-asset check: MISMATCH %s -- disk sha256=%s (%d bytes), served sha256=%s (%d bytes)"
+        % (rel, dh, dn, sh, sn))
+
+if unfetchable:
+    say("REFUSE served-asset check: CANNOT VERIFY -- %d of %d assets could not be fetched at all; "
+        "an unfetchable asset is absence, not a match" % (len(unfetchable), len(rels)))
+    sys.exit(2)
+if mismatch:
+    say("REFUSE served-asset check: MISMATCH -- %d of %d assets differ; the bridge binary was built "
+        "from a different web/static than this tree (rebuild: make pgwt-client)"
+        % (len(mismatch), len(rels)))
+    sys.exit(1)
+say("served-asset check: OK -- all %d embeddable assets under %s are served byte-identically"
+    % (len(rels), root))
+sys.exit(0)
+PYEOF
+}
+
 # derive_pgport PM_PID [PG_MAJOR] [LABEL]
 # Sets and exports PGPORT for postmaster PM_PID. Three tiers, in order:
 #   1. PGWT_PGPORT: explicit caller override, always wins.

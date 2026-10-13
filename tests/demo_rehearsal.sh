@@ -300,6 +300,19 @@ if ! url_ready "${BASE_URL}session"; then
 fi
 echo "demo_rehearsal: bridge ready at $BASE_URL"
 
+# The bridge serves web/static from INSIDE its own binary (web/main.go
+# `//go:embed static`), so a web/pgwt built before a UI edit keeps serving the
+# old assets and this whole rehearsal would pass against the wrong UI with no
+# outward sign -- exactly the failure that cannot be detected afterwards from
+# the summary. Refuse here, before any walk, naming the asset and both hashes.
+# See assert_served_ui_matches_tree in live_daemon_lib.sh for the exit-code
+# contract (1 = served bytes differ, 2 = could not look at all, 3 = python3
+# missing; every one of them refuses).
+if ! assert_served_ui_matches_tree "$BASE_URL" "$PROJECT_DIR/web/static" "demo_rehearsal"; then
+    echo "ERROR: the bridge is not serving this tree's web/static -- rebuild with 'make pgwt-client' and rerun"
+    exit 1
+fi
+
 # ── 4. The rehearsal: repeated walk + end-of-capture checks ─────────────────
 # Daemon and bridge stay UP through this whole call (including the
 # end-of-capture pgwt-server queries tests/demo_rehearsal.py issues
