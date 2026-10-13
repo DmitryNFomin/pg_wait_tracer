@@ -13,6 +13,7 @@ optionally decoding a PNG already on disk (load_png_array / compare_png_files)
 import base64
 import io
 import json
+import math
 import os
 import shutil
 
@@ -76,6 +77,9 @@ SWEEP_OFFSETS_MS = (200, 500, 1000, 1500, 2000)
 # untouched.
 MIN_MEASURED_FRACTION = 0.5
 
+# docs/DEMO_REHEARSAL_CRITERIA.md §4: settled global per-tab bound.
+FIRST_PAINT_BOUND_MS = 3000
+
 # issue #252 review round 1 finding 1 introduced CAPTURE_MS_BOUND_MS/
 # capture_budget_ok as a GATE on raw capture_ms_total_ms wall-clock time
 # (merged 44812c9). It was mis-specified: its own comment cited "~600ms/
@@ -92,9 +96,9 @@ MIN_MEASURED_FRACTION = 0.5
 # number a human skims against, but capture_budget_ok's result is no
 # longer read into build_tab_result's `ok`. What raw capture time was
 # actually trying to protect -- "did the sweep stop landing where
-# SWEEP_OFFSETS_MS says it should" -- is now gated directly by
-# frame_spacing_ok (achieved-vs-target drift) and frame_dims_ok (decoded
-# frame size vs the clip's own CSS dims), below. Do not re-add this to
+# SWEEP_OFFSETS_MS says it should" -- is now diagnosed directly by
+# frame_spacing_ok (reported achieved-vs-target drift) and gated by
+# frame_dims_ok (decoded frame size vs the clip's own CSS dims), below. Do not re-add this to
 # `ok`: a slow-but-correctly-sized, correctly-spaced capture is not the
 # defect either of those two exists to catch, and this bound's own
 # calibration history (above) is why guessing a wall-clock number instead
@@ -1074,17 +1078,18 @@ def capture_budget_ok(blink_sweep_ticks, bound_ms=CAPTURE_MS_BOUND_MS):
     calibrated against the wrong regime and was red on unmodified, healthy
     master). Still computed and still carried into summary.json's
     capture_budget.ok/detail so the raw number stays visible to a human
-    skimming the artifact; frame_dims_ok/frame_spacing_ok below are what
-    actually gate now. blink_sweep_ticks: a tab's blink_sweep.ticks list
+    skimming the artifact; frame_dims_ok gates decoded size, while
+    frame_spacing_ok also remains reporting-only. blink_sweep_ticks is a
+    tab's blink_sweep.ticks list
     (one build_sweep_tick_record() dict per tick).
 
     Every tick whose capture_ms_total_ms was actually measured (its
     capture_ms list is non-empty -- build_sweep_tick_record's own "[]
     means not measured" contract) must stay at/under bound_ms. A tick that
     never measured capture_ms is SKIPPED, not counted as a violation --
-    this check has power only where there is something to check, same
-    idiom as measured_ok's own "zero attempted ticks trivially passes"
-    above. Zero MEASURED ticks (every caller/test before #252, or a tab
+    a missing cost is not a budget measurement. The independent
+    measured-fraction gate refuses zero attempted ticks. Zero MEASURED
+    ticks (every caller/test before #252, or a tab
     that discarded every tick as not-measured -- already failing via
     measured_ok, never given a second, unrelated reason to look wrong)
     trivially passes for the same reason.
@@ -1677,12 +1682,9 @@ def build_tab_result(tab_id, rendered_ok, rendered_detail, ticks_observed,
     capture_ms_bound_ms: see capture_budget_ok/CAPTURE_MS_BOUND_MS's own
     comments -- capture_budget is REPORTING ONLY now (this issue demoted
     it out of `ok`: it was mis-specified against the wrong regime and was
-    red on healthy master). frame_dims_ok and frame_spacing_ok (below) are
-    what now close the escape path where a capture-cost regression stays
-    invisible as long as it still fits inside one live tick -- the former
-    catches the regression's cause (decoded frame size vs requested clip)
-    directly, the latter catches its effect on the sweep's own sampling
-    schedule.
+    red on healthy master). frame_dims_ok gates decoded frame size vs
+    requested clip. frame_spacing_ok reports sampling drift; its diagnostic
+    bound also does not gate acceptance (see the owner-approved demotion).
 
     ttfp_ms (issue #245, time-to-first-paint): elapsed milliseconds from
     THIS navigation's own landing click (ui_live_smoke._navigate_to_tab's
@@ -1693,15 +1695,9 @@ def build_tab_result(tab_id, rendered_ok, rendered_detail, ticks_observed,
     demo_rehearsal.py's early/middle/late passes) gets one build_tab_result
     call, and therefore one ttfp_ms, per navigation -- the per-tab
     distribution lives across those separate results, not inside this
-    function. None when not measured (build_failed_tab_result, or an older
-    caller that hasn't been updated) -- reporting only, never read here to
-    compute `ok` (unlike dims_ok/spacing_ok just below, which DO gate `ok`
-    -- ttfp_ms is a different field with a different contract and must
-    never follow them in there, the same way it was never allowed to
-    follow capture_ok in there before this issue demoted capture_ok out),
-    so a missing/None value never silently passes or fails the tab; it is
-    a measurement, not a gate (the issue is explicit that this branch adds
-    measurement only)."""
+    function. None when not measured. The registered 3000 ms bound gates
+    each navigation separately; absence refuses rather than reading as zero.
+    This VM regression detector does not replace the manual Mac walk."""
     clean_ok = len(console_errors) == 0
     blink_ok = no_blink_ok(blink_ratio, blink_threshold)
     leak_ok = leak_probe_ok(leak_before) and leak_probe_ok(leak_after)
@@ -1710,7 +1706,7 @@ def build_tab_result(tab_id, rendered_ok, rendered_detail, ticks_observed,
     attempted_count = len(blink_pair_offsets_ms)
     not_measured_count = len(blink_not_measured)
     measured_count = attempted_count - not_measured_count
-    measured_ok = (attempted_count == 0 or
+    measured_ok = (attempted_count > 0 and
                    (measured_count / attempted_count) >= min_measured_fraction)
     # Reporting only (see capture_ms_bound_ms above) -- deliberately NOT
     # ANDed into `ok`.
@@ -1724,8 +1720,13 @@ def build_tab_result(tab_id, rendered_ok, rendered_detail, ticks_observed,
     # built to catch is caught deterministically by dims_ok on every tab.
     # Do not re-add it to `ok` without the successor check (issues #303/#304).
     spacing_ok, spacing_detail = frame_spacing_ok(blink_sweep_ticks)
+    paint_ok = (isinstance(ttfp_ms, (int, float)) and not isinstance(ttfp_ms, bool)
+                and math.isfinite(ttfp_ms) and 0 <= ttfp_ms <= FIRST_PAINT_BOUND_MS)
+    paint_detail = (f"{tab_id}: ttfp_ms={ttfp_ms!r}ms; "
+                    f"registered bound <= {FIRST_PAINT_BOUND_MS}ms"
+                    + ("" if paint_ok else " -- absent/invalid or over bound"))
     ok = (rendered_ok and clean_ok and blink_ok and measured_ok and leak_ok and
-          color_ok and ticks_ok and dims_ok)
+          color_ok and ticks_ok and dims_ok and paint_ok)
     result = {
         "tab": tab_id,
         "ok": ok,
@@ -1756,6 +1757,8 @@ def build_tab_result(tab_id, rendered_ok, rendered_detail, ticks_observed,
         "artifacts": artifacts,
         "pre_mount_diagnostic": list(pre_mount_diagnostics),
         "ttfp_ms": ttfp_ms,
+        "first_paint": {"ok": paint_ok, "bound_ms": FIRST_PAINT_BOUND_MS,
+                        "detail": paint_detail},
     }
     return _apply_known_failing(result)
 
@@ -1799,6 +1802,8 @@ def build_failed_tab_result(tab_id, reason, ticks_observed=0, artifacts=None,
         "artifacts": artifacts or {},
         "pre_mount_diagnostic": [],
         "ttfp_ms": ttfp_ms,
+        "first_paint": {"ok": False, "bound_ms": FIRST_PAINT_BOUND_MS,
+                        "detail": f"{tab_id}: ttfp_ms={ttfp_ms!r}ms; {reason}"},
     }
     return _apply_known_failing(result)
 

@@ -506,7 +506,7 @@ def test_build_tab_result_capture_budget_reported_but_does_not_gate_ok():
         "sessions", True, "6 rows", 6, [], 0.0, [],
         {"charts": 0, "uplots": 0, "pending": 0},
         {"charts": 0, "uplots": 0, "pending": 0}, {},
-        blink_pair_offsets_ms=[10] * 6, blink_sweep_ticks=[tick_pass] * 6)
+        blink_pair_offsets_ms=[10] * 6, blink_sweep_ticks=[tick_pass] * 6, ttfp_ms=842)
     check(result["capture_budget"]["ok"] is True,
           f"under-bound capture cost reports True ({result['capture_budget']})")
     check(result["ok"] is True,
@@ -536,7 +536,7 @@ def test_build_tab_result_capture_budget_over_bound_no_longer_fails_tab():
         {"charts": 0, "uplots": 0, "pending": 0},
         {"charts": 0, "uplots": 0, "pending": 0}, {},
         blink_pair_offsets_ms=[10] * 6, blink_sweep_ticks=[tick_over] * 6,
-        capture_ms_bound_ms=400.0)
+        capture_ms_bound_ms=400.0, ttfp_ms=842)
     check(result["capture_budget"]["ok"] is False,
           f"605ms > 400ms bound is still FLAGGED in the report ({result['capture_budget']})")
     check(result["frame_dims"]["ok"] is True and result["frame_spacing"]["ok"] is True,
@@ -661,7 +661,7 @@ def test_build_tab_result_frame_dims_gates_ok():
         "sessions", True, "6 rows", 6, [], 0.0, [],
         {"charts": 0, "uplots": 0, "pending": 0},
         {"charts": 0, "uplots": 0, "pending": 0}, {},
-        blink_pair_offsets_ms=[10] * 6, blink_sweep_ticks=[tick] * 6)
+        blink_pair_offsets_ms=[10] * 6, blink_sweep_ticks=[tick] * 6, ttfp_ms=842)
     check(result["frame_dims"]["ok"] is True,
           f"matching decoded dims pass ({result['frame_dims']})")
     check(result["ok"] is True, "a clean tab with matching frame dims passes overall")
@@ -681,7 +681,7 @@ def test_build_tab_result_frame_dims_2x_regression_fails_tab():
         "sessions", True, "6 rows", 6, [], 0.0, [],
         {"charts": 0, "uplots": 0, "pending": 0},
         {"charts": 0, "uplots": 0, "pending": 0}, {},
-        blink_pair_offsets_ms=[10] * 6, blink_sweep_ticks=[tick] * 6)
+        blink_pair_offsets_ms=[10] * 6, blink_sweep_ticks=[tick] * 6, ttfp_ms=842)
     check(result["frame_dims"]["ok"] is False,
           f"2x-dims frames must be flagged ({result['frame_dims']})")
     check(result["ok"] is False,
@@ -885,39 +885,16 @@ def test_frame_spacing_ok_no_ticks_at_all_trivially_passes():
     check(detail is None, "no detail text for the trivial case")
 
 
-def test_frame_spacing_vacuous_pass_is_a_KNOWN_unclosed_blind_spot():
-    """PINS a false negative rather than claiming it is fixed.
-
-    frame_spacing_ok([]) passes vacuously (above), and so do frame_dims_ok([])
-    and measured_ok at zero attempted ticks. So a tab that claims
-    ticks_observed=6 while recording NO sweep records at all is reported
-    ok=True -- the gate is not wrong, it is BLIND, which is the worse of the
-    two. This issue makes frame_spacing carry more weight (tick 1's frame 2 is
-    now gated), so the hole is worth naming precisely.
-
-    NOT closed here, for a checked reason rather than an assumed one: the
-    obvious guard ("ticks_observed >= MIN_TICKS implies blink_sweep_ticks is
-    non-empty") would turn tests/test_demo_rehearsal_lib.py's
-    test_blink_gate_clean_trace_still_passes red -- it calls build_tab_result
-    with blink_pair_offsets_ms=[100]*6 and no blink_sweep_ticks and asserts
-    ok is True. That file and tests/demo_rehearsal_lib.py belong to another
-    in-flight branch, so the guard is filed as its own issue instead of being
-    smuggled in here.
-
-    This test exists so the hole cannot be closed BY ACCIDENT without someone
-    reading this comment: if a future change makes the no-sweep-records case
-    fail, this test goes red and points at the issue."""
+def test_zero_attempts_closes_the_vacuous_frame_spacing_pass():
     r = lib.build_tab_result(
         "scatter", True, "rendered", 6, [], 0.0, [],
         {"charts": 1, "uplots": 1, "pending": 0},
         {"charts": 1, "uplots": 1, "pending": 0}, {},
-        blink_pair_offsets_ms=[], blink_sweep_ticks=[])
+        ttfp_ms=842, blink_pair_offsets_ms=[], blink_sweep_ticks=[])
     check(r["frame_spacing"]["ok"] is True,
-          "frame_spacing passes vacuously with no sweep records (documented)")
-    check(r["ok"] is True,
-          "KNOWN GAP: ticks_observed=6 with zero sweep records is still ok=True "
-          "-- if this went False, the blind spot was closed; update this test "
-          "and its issue rather than deleting it")
+          "frame spacing remains reporting-only with no sweep records")
+    check(r["no_blink"]["measured"]["ok"] is False and r["ok"] is False,
+          "six observed ticks with zero attempts refuse the tab")
 
 
 def test_build_tab_result_frame_spacing_reported_but_does_not_gate_ok():
@@ -930,7 +907,7 @@ def test_build_tab_result_frame_spacing_reported_but_does_not_gate_ok():
         "sessions", True, "6 rows", 6, [], 0.0, [],
         {"charts": 0, "uplots": 0, "pending": 0},
         {"charts": 0, "uplots": 0, "pending": 0}, {},
-        blink_pair_offsets_ms=[10] * 6, blink_sweep_ticks=ticks)
+        blink_pair_offsets_ms=[10] * 6, blink_sweep_ticks=ticks, ttfp_ms=842)
     check(result["frame_spacing"]["ok"] is True,
           f"well-spaced frames pass ({result['frame_spacing']})")
     check(result["frame_dims"]["ok"] is True,
@@ -958,7 +935,7 @@ def test_build_tab_result_frame_spacing_over_bound_no_longer_fails_tab():
         "sessions", True, "6 rows", 6, [], 0.0, [],
         {"charts": 0, "uplots": 0, "pending": 0},
         {"charts": 0, "uplots": 0, "pending": 0}, {},
-        blink_pair_offsets_ms=[10] * 6, blink_sweep_ticks=ticks)
+        blink_pair_offsets_ms=[10] * 6, blink_sweep_ticks=ticks, ttfp_ms=842)
     check(result["frame_spacing"]["ok"] is False,
           f"400ms drift at tick 2 frame 2 is still FLAGGED ({result['frame_spacing']})")
     check(result["frame_spacing"]["detail"] is not None
@@ -1514,7 +1491,7 @@ def test_build_tab_result_all_green():
         blink_ratio=0.0001, color_violations=[],
         leak_before={"charts": 1, "uplots": 1, "pending": 0},
         leak_after={"charts": 1, "uplots": 1, "pending": 0},
-        artifacts={"frames": ["tick-1.png"], "video": "overview.webm"})
+        artifacts={"frames": ["tick-1.png"], "video": "overview.webm"}, ttfp_ms=842, blink_pair_offsets_ms=[200] * 6)
     check(r["ok"] is True, "all-green tab result is ok=True")
     check(r["tab"] == "overview", "tab id carried through")
 
@@ -1525,7 +1502,7 @@ def test_build_tab_result_flags_blink():
         blink_ratio=0.05, color_violations=[],
         leak_before={"charts": 1, "uplots": 1, "pending": 0},
         leak_after={"charts": 1, "uplots": 1, "pending": 0},
-        artifacts={})
+        artifacts={}, ttfp_ms=842, blink_pair_offsets_ms=[200] * 6)
     check(r["ok"] is False and r["no_blink"]["ok"] is False,
           "a 5% blink ratio fails the tab even though everything else is clean")
 
@@ -1536,7 +1513,7 @@ def test_build_tab_result_flags_insufficient_ticks():
         blink_ratio=0.0, color_violations=[],
         leak_before={"charts": 1, "uplots": 1, "pending": 0},
         leak_after={"charts": 1, "uplots": 1, "pending": 0},
-        artifacts={})
+        artifacts={}, ttfp_ms=842, blink_pair_offsets_ms=[200] * 6)
     check(r["ok"] is False,
           "fewer than MIN_TICKS ticks observed fails the tab (never silently short)")
 
@@ -1550,7 +1527,7 @@ def test_build_tab_result_records_pgwt_errors_without_failing():
         blink_ratio=0.0, color_violations=[],
         leak_before={"charts": 1, "uplots": 1, "pending": 0},
         leak_after={"charts": 1, "uplots": 1, "pending": 0},
-        artifacts={}, pgwt_console_errors=["console: [pgwt] view build failed: x"])
+        artifacts={}, pgwt_console_errors=["console: [pgwt] view build failed: x"], ttfp_ms=842, blink_pair_offsets_ms=[200] * 6)
     check(r["ok"] is True and r["clean"]["ok"] is True,
           f"a [pgwt] error alone does not fail the tab ({r['clean']})")
     check(r["clean"]["pgwt_errors"] == ["console: [pgwt] view build failed: x"],
@@ -1563,7 +1540,7 @@ def test_build_tab_result_records_leak_settle_duration():
         blink_ratio=0.0, color_violations=[],
         leak_before={"charts": 1, "uplots": 1, "pending": 0},
         leak_after={"charts": 1, "uplots": 1, "pending": 0},
-        artifacts={}, leak_before_settle_s=0.4, leak_after_settle_s=25.3)
+        artifacts={}, leak_before_settle_s=0.4, leak_after_settle_s=25.3, ttfp_ms=842, blink_pair_offsets_ms=[200] * 6)
     check(r["no_leak"]["settle_s"] == {"before": 0.4, "after": 25.3},
           f"leak-probe settle durations are recorded per tab ({r['no_leak']['settle_s']})")
 
@@ -1577,7 +1554,7 @@ def test_build_tab_result_records_blink_pair_offsets():
         blink_ratio=0.0, color_violations=[],
         leak_before={"charts": 1, "uplots": 1, "pending": 0},
         leak_after={"charts": 1, "uplots": 1, "pending": 0},
-        artifacts={}, blink_pair_offsets_ms=[1201, 1198, 1350, 1199, 1205, 1200])
+        artifacts={}, blink_pair_offsets_ms=[1201, 1198, 1350, 1199, 1205, 1200], ttfp_ms=842)
     check(r["no_blink"]["pair_offsets_ms"] == [1201, 1198, 1350, 1199, 1205, 1200],
           f"per-tick achieved blink-pair offsets recorded ({r['no_blink']['pair_offsets_ms']})")
     check(r["ok"] is True,
@@ -1590,7 +1567,7 @@ def test_build_tab_result_blink_pair_offsets_default_empty():
         blink_ratio=0.0, color_violations=[],
         leak_before={"charts": 1, "uplots": 1, "pending": 0},
         leak_after={"charts": 1, "uplots": 1, "pending": 0},
-        artifacts={})
+        artifacts={}, ttfp_ms=842)
     check(r["no_blink"]["pair_offsets_ms"] == [],
           "blink_pair_offsets_ms defaults to an empty list, not missing/None")
 
@@ -1611,7 +1588,7 @@ def test_build_tab_result_records_not_measured_ticks():
         leak_after={"charts": 1, "uplots": 1, "pending": 0},
         artifacts={},
         blink_pair_offsets_ms=[5100, 1200, 3400, 5200, 5150, 5180],  # 6 attempted
-        blink_not_measured=[{"tick": 3, "reason": "mount sequence advanced mid-capture"}])
+        blink_not_measured=[{"tick": 3, "reason": "mount sequence advanced mid-capture"}], ttfp_ms=842)
     check(r["no_blink"]["not_measured"] ==
           [{"tick": 3, "reason": "mount sequence advanced mid-capture"}],
           f"not-measured ticks are visible in summary.json, not dropped ({r['no_blink']})")
@@ -1636,7 +1613,7 @@ def test_build_tab_result_mostly_not_measured_fails_even_with_a_perfect_ratio():
         leak_after={"charts": 1, "uplots": 1, "pending": 0},
         artifacts={},
         blink_pair_offsets_ms=[5100, 1200, 3400, 5200, 5150, 5180],  # 6 attempted
-        blink_not_measured=[{"tick": i, "reason": "mid-sweep advance"} for i in (1, 3, 4, 5, 6)])
+        blink_not_measured=[{"tick": i, "reason": "mid-sweep advance"} for i in (1, 3, 4, 5, 6)], ttfp_ms=842)
     check(r["no_blink"]["ok"] is True,
           "the ratio itself is clean (0.0 < threshold) -- this is NOT a blink failure")
     check(r["no_blink"]["measured"]["ok"] is False,
@@ -1654,7 +1631,7 @@ def test_build_tab_result_measured_fraction_exactly_at_the_floor_passes():
         leak_after={"charts": 1, "uplots": 1, "pending": 0},
         artifacts={},
         blink_pair_offsets_ms=[5100, 1200, 3400, 5200, 5150, 5180],  # 6 attempted
-        blink_not_measured=[{"tick": i, "reason": "mid-sweep advance"} for i in (1, 2, 3)])
+        blink_not_measured=[{"tick": i, "reason": "mid-sweep advance"} for i in (1, 2, 3)], ttfp_ms=842)
     check(r["no_blink"]["measured"] ==
           {"ok": True, "measured_count": 3, "attempted_count": 6, "min_fraction": 0.5},
           f"exactly 50% measured clears the floor (>=, not >) ({r['no_blink']['measured']})")
@@ -1669,26 +1646,21 @@ def test_build_tab_result_measured_fraction_just_below_the_floor_fails():
         leak_after={"charts": 1, "uplots": 1, "pending": 0},
         artifacts={},
         blink_pair_offsets_ms=[5100, 1200, 3400, 5200, 5150, 5180, 5090],  # 7 attempted
-        blink_not_measured=[{"tick": i, "reason": "mid-sweep advance"} for i in (1, 2, 3, 4)])
+        blink_not_measured=[{"tick": i, "reason": "mid-sweep advance"} for i in (1, 2, 3, 4)], ttfp_ms=842)
     check(r["no_blink"]["measured"]["ok"] is False,
           f"3 of 7 (~42.9%) is just below the 50% floor ({r['no_blink']['measured']})")
     check(r["ok"] is False, "and the tab fails")
 
 
-def test_build_tab_result_zero_attempted_ticks_does_not_fail_on_coverage_alone():
-    # A caller that doesn't populate blink_pair_offsets_ms at all (existing
-    # tests, or a code path that never reached the tick loop) must not be
-    # penalised by measured_ok -- ticks_ok already fails that case for
-    # having no ticks, so this must not become a SECOND, contradictory
-    # reason a legitimately-untested result looks wrong.
+def test_build_tab_result_zero_attempted_ticks_refuses_coverage():
     r = lib.build_tab_result(
         "overview", True, "ok:8", ticks_observed=0, console_errors=[],
-        blink_ratio=None, color_violations=[],
+        blink_ratio=None, color_violations=[], blink_pair_offsets_ms=[],
         leak_before={"charts": 1, "uplots": 1, "pending": 0},
-        leak_after={"charts": 1, "uplots": 1, "pending": 0}, artifacts={})
-    check(r["no_blink"]["measured"]["ok"] is True,
-          "zero attempted ticks trivially satisfies measured_ok")
-    check(r["ok"] is False, "but the tab still fails, via ticks_ok/blink_ok, not double-counted")
+        leak_after={"charts": 1, "uplots": 1, "pending": 0}, artifacts={}, ttfp_ms=842)
+    check(r["no_blink"]["measured"]["ok"] is False,
+          "zero attempted ticks refuses measured coverage")
+    check(r["ok"] is False, "an untested tab cannot pass")
 
 
 def test_build_tab_result_not_measured_defaults_empty():
@@ -1696,7 +1668,7 @@ def test_build_tab_result_not_measured_defaults_empty():
         "overview", True, "ok:8", ticks_observed=6, console_errors=[],
         blink_ratio=0.0, color_violations=[],
         leak_before={"charts": 1, "uplots": 1, "pending": 0},
-        leak_after={"charts": 1, "uplots": 1, "pending": 0}, artifacts={})
+        leak_after={"charts": 1, "uplots": 1, "pending": 0}, artifacts={}, ttfp_ms=842, blink_pair_offsets_ms=[200] * 6)
     check(r["no_blink"]["not_measured"] == [],
           "blink_not_measured defaults to an empty list, not missing/None")
 
@@ -1715,7 +1687,7 @@ def test_build_tab_result_all_ticks_not_measured_fails_the_gate():
         leak_after={"charts": 1, "uplots": 1, "pending": 0},
         artifacts={},
         blink_not_measured=[{"tick": i, "reason": "mid-capture advance"}
-                            for i in range(1, 7)])
+                            for i in range(1, 7)], ttfp_ms=842, blink_pair_offsets_ms=[200] * 6)
     check(r["no_blink"]["ok"] is False,
           "an all-not-measured tab's no_blink check is False, never an implicit pass")
     check(r["ok"] is False,
@@ -1738,7 +1710,7 @@ def test_build_tab_result_records_pre_mount_diagnostic():
         blink_ratio=0.0, color_violations=[],
         leak_before={"charts": 1, "uplots": 1, "pending": 0},
         leak_after={"charts": 1, "uplots": 1, "pending": 0},
-        artifacts={}, pre_mount_diagnostics=entries)
+        artifacts={}, pre_mount_diagnostics=entries, ttfp_ms=842, blink_pair_offsets_ms=[200] * 6)
     check(r["pre_mount_diagnostic"] == entries,
           f"pre-mount diagnostic entries carried through unchanged ({r['pre_mount_diagnostic']})")
     check(r["ok"] is True,
@@ -1750,7 +1722,7 @@ def test_build_tab_result_pre_mount_diagnostic_defaults_empty():
         "overview", True, "ok:8", ticks_observed=6, console_errors=[],
         blink_ratio=0.0, color_violations=[],
         leak_before={"charts": 1, "uplots": 1, "pending": 0},
-        leak_after={"charts": 1, "uplots": 1, "pending": 0}, artifacts={})
+        leak_after={"charts": 1, "uplots": 1, "pending": 0}, artifacts={}, ttfp_ms=842, blink_pair_offsets_ms=[200] * 6)
     check(r["pre_mount_diagnostic"] == [],
           "pre_mount_diagnostics defaults to an empty list for every non-timeline tab")
 
@@ -1776,7 +1748,7 @@ def test_build_tab_result_records_blink_sweep():
         blink_ratio=0.0, color_violations=[],
         leak_before={"charts": 1, "uplots": 1, "pending": 0},
         leak_after={"charts": 1, "uplots": 1, "pending": 0},
-        artifacts={}, blink_sweep_ticks=[tick_rec])
+        artifacts={}, blink_sweep_ticks=[tick_rec], ttfp_ms=842, blink_pair_offsets_ms=[200] * 6)
     check(r["blink_sweep"]["offsets_ms"] == [200, 500, 1000, 1500, 2000],
           f"blink_sweep records the nominal target offsets ({r['blink_sweep']})")
     check(r["blink_sweep"]["ticks"] == [tick_rec],
@@ -1791,7 +1763,7 @@ def test_build_tab_result_blink_sweep_default_empty():
         blink_ratio=0.0, color_violations=[],
         leak_before={"charts": 1, "uplots": 1, "pending": 0},
         leak_after={"charts": 1, "uplots": 1, "pending": 0},
-        artifacts={})
+        artifacts={}, ttfp_ms=842, blink_pair_offsets_ms=[200] * 6)
     check(r["blink_sweep"] == {"offsets_ms": [200, 500, 1000, 1500, 2000], "ticks": []},
           f"blink_sweep_ticks defaults to an empty tick list, not missing ({r['blink_sweep']})")
 
@@ -1814,11 +1786,11 @@ def test_build_summary_ok_requires_every_tab():
     good = lib.build_tab_result(
         "overview", True, "ok:1", 6, [], 0.0, [],
         {"charts": 1, "uplots": 1, "pending": 0},
-        {"charts": 1, "uplots": 1, "pending": 0}, {})
+        {"charts": 1, "uplots": 1, "pending": 0}, {}, ttfp_ms=842, blink_pair_offsets_ms=[200] * 6)
     bad = lib.build_tab_result(
         "events", False, "no rows", 6, [], 0.0, [],
         {"charts": 1, "uplots": 1, "pending": 0},
-        {"charts": 1, "uplots": 1, "pending": 0}, {})
+        {"charts": 1, "uplots": 1, "pending": 0}, {}, ttfp_ms=842, blink_pair_offsets_ms=[200] * 6)
     s = lib.build_summary([good, bad])
     check(s["ok"] is False and s["failed_tabs"] == ["events"],
           f"one failing tab fails the whole summary ({s['failed_tabs']})")
@@ -1859,7 +1831,7 @@ def test_build_tab_result_carries_ttfp_ms_through_unaveraged():
         blink_ratio=0.0001, color_violations=[],
         leak_before={"charts": 1, "uplots": 1, "pending": 0},
         leak_after={"charts": 1, "uplots": 1, "pending": 0},
-        artifacts={}, ttfp_ms=842)
+        artifacts={}, ttfp_ms=842, blink_pair_offsets_ms=[200] * 6)
     check(r["ttfp_ms"] == 842,
           f"the exact measured ttfp_ms (842) reaches the tab result, got {r['ttfp_ms']!r}")
 
@@ -1874,46 +1846,23 @@ def test_build_tab_result_ttfp_ms_defaults_to_none():
         blink_ratio=0.0001, color_violations=[],
         leak_before={"charts": 1, "uplots": 1, "pending": 0},
         leak_after={"charts": 1, "uplots": 1, "pending": 0},
-        artifacts={})
+        artifacts={}, ttfp_ms=None, blink_pair_offsets_ms=[200] * 6)
     check(r["ttfp_ms"] is None, "ttfp_ms defaults to None when the caller gives none")
 
 
-def test_build_tab_result_ttfp_ms_never_gates_ok():
-    """This branch adds measurement only (no bound, no gate, per the
-    issue): an extreme ttfp_ms must never flip `ok` by itself.
-
-    Two rebases landed new terms into `ok` right next to ttfp_ms in the
-    source (issue #255/#252: capture_ok, from capture_budget_ok/
-    CAPTURE_MS_BOUND_MS; issue #259 then demoted capture_ok OUT of `ok`
-    and replaced it with dims_ok/spacing_ok, from frame_dims_ok/
-    frame_spacing_ok) -- a single "ok is True" assertion alone would keep
-    passing even if a merge had accidentally routed ttfp_ms into one of
-    those terms instead of keeping it out of `ok` entirely, as long as
-    that term's own trivial default (empty blink_sweep_ticks --
-    frame_dims_ok([])/frame_spacing_ok([]) both trivially pass, same idiom
-    as capture_budget_ok before them) still came out True. So this also
-    directly compares two calls identical in EVERY OTHER argument, one
-    with ttfp_ms=None and one with ttfp_ms=60000, and asserts `ok` is
-    identical between them -- proof by construction that ttfp_ms's value
-    cannot be what determined either result, not just that one arbitrary
-    value happened to still pass. This mechanism does not name which
-    fields currently gate `ok` -- it stays valid across a future rebase
-    that changes them again, same as it survived #259."""
+def test_build_tab_result_ttfp_ms_gates_at_the_registered_bound():
     kwargs = dict(
         tab_id="overview", rendered_ok=True, rendered_detail="ok:8",
         ticks_observed=6, console_errors=[], blink_ratio=0.0001,
-        color_violations=[],
+        color_violations=[], blink_pair_offsets_ms=[200] * 6,
         leak_before={"charts": 1, "uplots": 1, "pending": 0},
         leak_after={"charts": 1, "uplots": 1, "pending": 0}, artifacts={})
-    good = lib.build_tab_result(**kwargs, ttfp_ms=60000)
-    check(good["ok"] is True,
-          "a huge ttfp_ms (60000ms) does not fail an otherwise-clean tab -- "
-          "this branch adds measurement, never a gate")
-    baseline = lib.build_tab_result(**kwargs, ttfp_ms=None)
-    check(baseline["ok"] == good["ok"],
-          "an otherwise-identical call differing ONLY in ttfp_ms (None vs "
-          "60000) produces the SAME `ok` -- ttfp_ms cannot be the thing "
-          "deciding it either way")
+    check(lib.build_tab_result(**kwargs, ttfp_ms=3000)["ok"] is True,
+          "the registered 3000 ms boundary passes")
+    for value in (None, 3001, 60000):
+        result = lib.build_tab_result(**kwargs, ttfp_ms=value)
+        check(result["ok"] is False and result["first_paint"]["ok"] is False,
+              f"absent/over-bound first paint refuses: {value!r}")
 
 
 def test_build_failed_tab_result_ttfp_ms_default_and_override():
@@ -1974,7 +1923,7 @@ def test_build_tab_result_known_failing_does_not_fail_summary():
         r = lib.build_tab_result(
             "faketab", True, "ok:1", 6, [], 0.05, [],  # 5% blink -> raw fail
             {"charts": 1, "uplots": 1, "pending": 0},
-            {"charts": 1, "uplots": 1, "pending": 0}, {})
+            {"charts": 1, "uplots": 1, "pending": 0}, {}, ttfp_ms=842, blink_pair_offsets_ms=[200] * 6)
         check(r["ok"] is False, "the raw per-tab result still says what really happened")
         check(r["known_failing"] is True and r["xpass"] is False,
               f"a real failure on a listed tab is known_failing, not xpass ({r})")
@@ -1994,7 +1943,7 @@ def test_build_tab_result_xpass_does_not_fail_summary_either():
         r = lib.build_tab_result(
             "faketab", True, "ok:1", 6, [], 0.0, [],
             {"charts": 1, "uplots": 1, "pending": 0},
-            {"charts": 1, "uplots": 1, "pending": 0}, {})
+            {"charts": 1, "uplots": 1, "pending": 0}, {}, ttfp_ms=842, blink_pair_offsets_ms=[200] * 6)
         check(r["ok"] is True and r["xpass"] is True and r["known_failing"] is False,
               f"a real pass on a listed tab is xpass, not known_failing ({r})")
         s = lib.build_summary([r])
@@ -2047,7 +1996,7 @@ def test_known_failing_does_not_affect_unlisted_tabs():
     r = lib.build_tab_result(
         "overview", True, "ok:1", 6, [], 0.0, [],
         {"charts": 1, "uplots": 1, "pending": 0},
-        {"charts": 1, "uplots": 1, "pending": 0}, {})
+        {"charts": 1, "uplots": 1, "pending": 0}, {}, ttfp_ms=842, blink_pair_offsets_ms=[200] * 6)
     check(r["known_failing"] is False and r["xpass"] is False,
           "an unlisted tab always has known_failing=False, xpass=False")
 
@@ -2099,7 +2048,7 @@ def test_write_summary_roundtrip():
         good = lib.build_tab_result(
             "overview", True, "ok:1", 6, [], 0.0, [],
             {"charts": 1, "uplots": 1, "pending": 0},
-            {"charts": 1, "uplots": 1, "pending": 0}, {})
+            {"charts": 1, "uplots": 1, "pending": 0}, {}, ttfp_ms=842, blink_pair_offsets_ms=[200] * 6)
         path = os.path.join(d, "nested", "summary.json")
         written = lib.write_summary(path, [good])
         with open(path) as f:

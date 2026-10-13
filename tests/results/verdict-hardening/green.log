@@ -1,0 +1,18 @@
+test_collect_names_and_refuses_previous_unarchived_run (__main__.ArtifactSurvival) ... ok
+test_launch_refuses_before_contacting_the_box (__main__.ArtifactSurvival) ... ok
+test_publication_preserves_all_evidence_and_refuses_a_racing_destination (__main__.ArtifactSurvival) ... ok
+test_rehearsal_trace_retention_defaults_on_at_every_launcher (__main__.ArtifactSurvival) ... ok
+test_degraded_warning_refuses_attempt (__main__.VerdictRefusals) ... ok
+test_first_paint_absence_refuses (__main__.VerdictRefusals) ... ok
+test_first_paint_boundary_and_per_tab_failure_detail (__main__.VerdictRefusals) ... ok
+test_first_sample_at_500_or_later_refuses_attempt (__main__.VerdictRefusals) ... ok
+test_missing_early_window_measurement_refuses (__main__.VerdictRefusals) ... ok
+test_missing_sample_offcpu_availability_refuses (__main__.VerdictRefusals) ... ok
+test_offcpu_absence_refuses_each_sample_not_measured_zero (__main__.VerdictRefusals) ... ok
+test_query_never_fabricates_an_absent_offcpu_measurement (__main__.VerdictRefusals) ... ok
+test_zero_attempted_ticks_refuses (__main__.VerdictRefusals) ... ok
+
+----------------------------------------------------------------------
+Ran 13 tests in 0.026s
+
+OK

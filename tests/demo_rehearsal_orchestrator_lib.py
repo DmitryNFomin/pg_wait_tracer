@@ -30,6 +30,8 @@ being buried in shell string-parsing:
     a COMPLETE, FRESH result for THIS invocation, or something that must
     never be allowed to overwrite a previous good run (an empty dir, a
     truncated transfer, someone else's stale run.id)?
+  - publish_results_dir: exclusively reserve a destination and preserve both
+    runs on a collision; never overwrite unarchived evidence.
   - decide_outcome: combine remote lifecycle state + wrapper exit code +
     results validity into the launcher's own exit code and verdict line.
 
@@ -42,6 +44,7 @@ Usage (CLI, called from scripts/demo-rehearsal.sh):
   python3 tests/demo_rehearsal_orchestrator_lib.py wait-budget START NOW DURATION_MIN
   python3 tests/demo_rehearsal_orchestrator_lib.py queue-wait-sleep-s STARTED_OR_- LAUNCH NOW DURATION_MIN FLOOR_S
   python3 tests/demo_rehearsal_orchestrator_lib.py validate-results DIR EXPECTED_RUN_ID
+  python3 tests/demo_rehearsal_orchestrator_lib.py publish-results STAGING DESTINATION
   python3 tests/demo_rehearsal_orchestrator_lib.py decide-outcome STATE RC RESULTS_OK
   python3 tests/demo_rehearsal_orchestrator_lib.py parse-pg-probe "PG_CONFIRMED=..."
   python3 tests/demo_rehearsal_orchestrator_lib.py pg-version-verdict REQUESTED CONFIRMED PID
@@ -195,6 +198,28 @@ def validate_results_dir(path, expected_run_id):
     return True, "complete"
 
 
+def publish_results_dir(staging, destination):
+    """Publish validated evidence without replacing any previous run.
+
+    mkdir exclusively reserves the destination, including against a collector
+    racing this one. Partial evidence survives errors and refuses the next run.
+    """
+    try:
+        os.mkdir(destination)
+    except FileExistsError:
+        run_id = "unknown (run.id absent)"
+        try:
+            with open(os.path.join(destination, "run.id")) as f:
+                run_id = f.read().strip()
+        except OSError:
+            pass
+        raise OrchestratorError(
+            f"REFUSING previous unarchived run {destination} (run.id={run_id}); archive it first")
+    for entry in os.scandir(staging):
+        os.rename(entry.path, os.path.join(destination, entry.name))
+    os.rmdir(staging)
+
+
 def decide_outcome(state, rc, results_ok):
     """Combine the remote lifecycle state (see parse_state_line), the
     wrapper's exit code (None unless state == 'finished'), and whether
@@ -323,6 +348,10 @@ def _cli():
             ok, reason = validate_results_dir(path, expected_run_id)
             print(reason)
             return 0 if ok else 1
+        if cmd == "publish-results":
+            staging, destination = rest
+            publish_results_dir(staging, destination)
+            return 0
         if cmd == "decide-outcome":
             state, rc_raw, results_ok_raw = rest
             rc = None if rc_raw == "-" else int(rc_raw)
@@ -348,7 +377,7 @@ def _cli():
     except OrchestratorError as e:
         print(f"error: {e}", file=sys.stderr)
         return 2
-    except (TypeError, ValueError) as e:
+    except (TypeError, ValueError, OSError) as e:
         print(f"bad arguments for {cmd}: {e}", file=sys.stderr)
         return 2
 

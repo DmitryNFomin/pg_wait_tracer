@@ -192,6 +192,13 @@ def _run_passes(browser, url, out_dir, ticks, passes, first_data_timeout,
             live_smoke._assert_workload_alive(
                 pgbench_pid, workload_pid, f"pass {name!r} tab {tab_id!r}")
             _assert_daemon_alive(daemon_pid, f"pass {name!r} tab {tab_id!r}")
+            # Coverage is required independently of the measured blink ratio:
+            # absence and first samples at/past 500 ms refuse the attempt.
+            coverage = drlib.summarize_sweep_offset_coverage(
+                tab_id, name, result.get("blink_sweep", {}).get("ticks"))
+            sweep_coverage.append(coverage)
+            result["sweep_offset_coverage"] = coverage
+            result["ok"] = bool(result["ok"] and coverage["ok"])
             kf_line = lib.known_failing_report_line(tab_id, result["ok"])
             # A KNOWN-FAILING line would be misleading here -- this harness
             # grants no such exemption (issue #157) -- so a listed tab's
@@ -207,15 +214,9 @@ def _run_passes(browser, url, out_dir, ticks, passes, first_data_timeout,
                 status = "PASS" if result["ok"] else "FAIL"
             print(f"    {status} [{name}/{tab_id}] "
                   f"ticks={result['ticks_observed']} "
-                  f"rendered={result['rendered']}")
-            # Sweep-offset coverage (owner finding, 2026-09-28): report,
-            # never gate, whether the blink-sweep's samples actually landed
-            # near their targets -- a late mount can silently push the
-            # WHOLE sweep past the early window where a real transient
-            # lives (see summarize_sweep_offset_coverage's own comment).
-            coverage = drlib.summarize_sweep_offset_coverage(
-                tab_id, name, result.get("blink_sweep", {}).get("ticks"))
-            sweep_coverage.append(coverage)
+                  f"rendered={result['rendered']} "
+                  f"first_paint={result.get('first_paint')} "
+                  f"early_window={coverage['detail']}")
             for tick_i, tick_drift in enumerate(coverage["ticks"], start=1):
                 fd = tick_drift["first_drift_ms"]
                 if fd is not None and fd > 0:
@@ -273,7 +274,7 @@ def _query_time_model_window(srv, from_ns, to_ns, label, gate_on_raw_path,
     result = drlib.evaluate_time_model_window(
         rows, db_time_ms,
         cpu_clamped_ms=tm.get("cpu_clamped_ms", 0.0),
-        offcpu_ms=tm.get("offcpu_ms", 0.0),
+        offcpu_ms=tm.get("offcpu_ms"),
         has_measured_cpu=tm.get("has_measured_cpu", False),
         used_raw_path=used_raw_path if gate_on_raw_path else True,
         aas=tm.get("aas"),
@@ -286,7 +287,7 @@ def _query_time_model_window(srv, from_ns, to_ns, label, gate_on_raw_path,
     # against an independently measured Sigma run_delay for the same
     # window. Reporting only -- evaluate_time_model_window above has
     # already decided `ok` and nothing below may change it.
-    result["offcpu_ms"] = tm.get("offcpu_ms")
+    result["offcpu_ms"] = result["offcpu"]["offcpu_ms"]
     result["has_measured_cpu"] = tm.get("has_measured_cpu", False)
     return result
 
@@ -833,12 +834,12 @@ def main():
     # deciding whether two attempts count as consecutive, not a pass/fail
     # criterion this harness enforces itself.
     summary["tag"] = drlib.resolve_tag(args.tag, _detect_git_tag)
-    # Reporting only (owner finding, 2026-09-28) -- never gates `ok`. See
-    # summarize_sweep_offset_coverage's own comment.
+    # Each record gates its tab in _run_passes. Retain raw drift and the
+    # early-window refusal detail alongside the overall verdict.
     summary["sweep_offset_coverage"] = sweep_coverage
     # issue #386, REPORTING ONLY -- deliberately NOT in extra_checks (which
     # build_demo_summary gates on unconditionally) and never folded into
-    # `ok`, the same pattern as sweep_offset_coverage above. The same
+    # `ok`; physical magnitude has no registered correctness cap. The same
     # per-window records are also appended to offcpu_decomposition.jsonl as
     # the run goes, so a killed run keeps them.
     summary["offcpu_decomposition"] = offcpu_decomposition
