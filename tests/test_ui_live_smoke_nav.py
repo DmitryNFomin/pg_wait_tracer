@@ -385,6 +385,167 @@ def test_run_tab_reads_the_tick_it_waited_for_by_index_not_last():
           "a baseline/i it cannot address instead of clamping")
 
 
+# ── _BlinkInjector ordering (issue #266) ────────────────────────────────────
+#
+# The determinism claim in #266's fix is ORDERING, not timing: the overlay is
+# appended after frame target-1's screenshot has returned and removed after
+# frame target's screenshot has returned, so no clock reading decides which
+# frames can have seen it. These tests pin that order against a fake page --
+# a future "optimisation" that moves either evaluate() outside its bracket
+# (e.g. back to a setTimeout scheduled before the loop, which is exactly
+# what #266 replaced) breaks them.
+
+
+class _FakeInjectPage:
+    """Logs every evaluate()/screenshot() in ONE ordered list, and hands back
+    a page clock that advances a fixed amount per call so the recorded
+    stimulus timestamps are checkable."""
+
+    def __init__(self, show_result=None, hide_result=None, step_ms=10):
+        self.calls = []
+        self.clock = 1_000_000
+        self.step_ms = step_ms
+        self._show = show_result
+        self._hide = hide_result
+
+    def _tick(self):
+        self.clock += self.step_ms
+        return self.clock
+
+    def evaluate(self, js, arg=None):
+        if js is smoke._INJECT_BLINK_SHOW_JS:
+            self.calls.append("show")
+            req = self._tick()
+            painted = self._tick()
+            return (self._show if self._show is not None else
+                    {"requestedAtMs": req, "paintedAtMs": painted})
+        if js is smoke._INJECT_BLINK_HIDE_JS:
+            self.calls.append(("hide", arg.get("minUntilMs")))
+            req = self._tick()
+            cleared = self._tick()
+            return (self._hide if self._hide is not None else
+                    {"requestedAtMs": req, "clearedAtMs": cleared,
+                     "wasPresent": True})
+        self.calls.append(("evaluate", js))
+        return self._tick()
+
+    def screenshot(self, **kw):
+        self.calls.append(("screenshot", len([c for c in self.calls
+                                              if isinstance(c, tuple)
+                                              and c[0] == "screenshot"])))
+        self._tick()
+        return b"png"
+
+
+_CLIP = {"x": 0, "y": 0, "width": 100, "height": 200}
+
+
+def _drive(page, target_index, frames=5, blink_ms=400):
+    """The same before_frame/capture/after_frame sequence run_tab's sweep
+    loop runs, without the rest of run_tab."""
+    inj = smoke._BlinkInjector(page, "sessions", _CLIP, 0.2, blink_ms,
+                               target_index)
+    for i in range(frames):
+        inj.before_frame(i)
+        page.screenshot(clip=_CLIP)
+        inj.after_frame(i)
+    return inj
+
+
+def test_blink_injector_shows_and_hides_around_the_target_frame_only():
+    page = _FakeInjectPage()
+    _drive(page, 2)
+    kinds = [c if isinstance(c, str) else c[0] for c in page.calls]
+    check(kinds == ["screenshot", "screenshot", "show", "screenshot", "hide",
+                    "screenshot", "screenshot"],
+          f"show/hide bracket exactly the target frame's screenshot: {kinds}")
+    check(kinds.count("show") == 1 and kinds.count("hide") == 1,
+          "the overlay is shown once and hidden once, never per frame")
+
+
+def test_blink_injector_bracket_moves_with_the_target_index():
+    for target in (1, 3, 4):
+        page = _FakeInjectPage()
+        _drive(page, target)
+        kinds = [c if isinstance(c, str) else c[0] for c in page.calls]
+        show_at = kinds.index("show")
+        hide_at = kinds.index("hide")
+        shots_before_show = kinds[:show_at].count("screenshot")
+        shots_before_hide = kinds[:hide_at].count("screenshot")
+        check(shots_before_show == target,
+              f"target {target}: overlay appended after exactly {target} "
+              f"screenshots (got {shots_before_show})")
+        check(shots_before_hide == target + 1,
+              f"target {target}: overlay removed after the target's own "
+              f"screenshot (got {shots_before_hide})")
+
+
+def test_blink_injector_records_the_four_bounding_timestamps():
+    page = _FakeInjectPage()
+    inj = _drive(page, 2)
+    s = inj.stimulus
+    check(all(isinstance(s[k], (int, float)) for k in
+              ("shown_requested_ms", "shown_painted_ms",
+               "hidden_requested_ms", "hidden_cleared_ms")),
+          "all four bounding timestamps recorded")
+    check(s["shown_requested_ms"] <= s["shown_painted_ms"]
+          <= s["hidden_requested_ms"] <= s["hidden_cleared_ms"],
+          "the recorded bounds are monotonic")
+    check(s["was_present_at_removal"] is True,
+          "the page reports the overlay was still present at removal")
+    check(s["target_frame_index"] == 2 and s["min_dwell_ms"] == 400,
+          "the record carries the target index and the configured dwell")
+
+
+def test_blink_injector_min_dwell_is_measured_from_the_painted_frame():
+    page = _FakeInjectPage()
+    inj = _drive(page, 2, blink_ms=400)
+    hide_args = [c[1] for c in page.calls
+                 if isinstance(c, tuple) and c[0] == "hide"]
+    check(hide_args == [inj.stimulus["shown_painted_ms"] + 400],
+          f"the hide waits until painted+400ms, not until a wall-clock "
+          f"deadline chosen before the sweep ({hide_args})")
+
+
+def test_blink_injector_leaves_nones_when_the_show_handshake_fails():
+    """"The thing being checked is absent, not wrong": a show whose
+    handshake returned nothing must leave the record EMPTY so
+    inject_stimulus_verdict refuses -- never silently look like a stimulus
+    that was on screen, and never make the hide wait on a bogus deadline."""
+    page = _FakeInjectPage(show_result={})
+    inj = _drive(page, 2)
+    check(inj.stimulus["shown_requested_ms"] is None
+          and inj.stimulus["shown_painted_ms"] is None,
+          "an empty show result leaves both show timestamps None")
+    hide_args = [c[1] for c in page.calls
+                 if isinstance(c, tuple) and c[0] == "hide"]
+    check(hide_args == [0],
+          f"with no painted time the hide removes immediately rather than "
+          f"waiting painted+dwell on a None ({hide_args})")
+    ok, reason = lib.inject_stimulus_verdict(
+        inj.stimulus, [(1, 2)] * 5, 2)
+    check(not ok, "the verdict refuses on the half-filled record")
+
+
+def test_blink_injector_record_feeds_a_proven_verdict():
+    """End-to-end on the fake page: the timestamps the injector actually
+    records, against frame windows laid out the way the bracket produces
+    them, must be PROVABLE -- otherwise the live self-test would refuse on
+    every run."""
+    page = _FakeInjectPage()
+    inj = smoke._BlinkInjector(page, "sessions", _CLIP, 0.2, 400, 2)
+    windows = []
+    for i in range(5):
+        inj.before_frame(i)
+        start = page.clock
+        page.screenshot(clip=_CLIP)
+        end = page.clock
+        inj.after_frame(i)
+        windows.append((start, end))
+    ok, reason = lib.inject_stimulus_verdict(inj.stimulus, windows, 2)
+    check(ok, f"the injector's own bracket is provable ({reason})")
+
+
 def _discover_tests():
     found = [obj for name, obj in list(globals().items())
              if name.startswith("test_") and inspect.isfunction(obj)]

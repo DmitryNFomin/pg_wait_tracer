@@ -446,6 +446,117 @@ def pre_mount_diagnostic_verdict(pre_mount_frame, sweep_first_frame,
     return frame_diff_signature(pre_mount_frame, sweep_first_frame)
 
 
+# issue #266: which SWEEP_OFFSETS_MS frame the self-test's synthetic
+# overlay is made visible for. Must be >= 1: the self-test grades the
+# consecutive PAIR that the stimulus's own appearance creates, so there has
+# to be a preceding clean frame to pair the target frame with.
+INJECT_FRAME_INDEX = 2   # the 1000ms entry of SWEEP_OFFSETS_MS
+
+
+def _interval_ok(w):
+    return (isinstance(w, (tuple, list)) and len(w) == 2
+            and all(isinstance(v, (int, float)) for v in w)
+            and w[0] <= w[1])
+
+
+def inject_stimulus_verdict(stimulus, frame_windows_ms, target_index):
+    """issue #266. Did the self-test's synthetic overlay PROVABLY cover the
+    target sweep frame's whole capture interval, and provably none of the
+    others? Returns (ok: bool, reason: str | None) -- ok=True only when the
+    geometry is proven; every unprovable case REFUSES (ok=False with a
+    reason), never approves.
+
+    Why this function exists: before it, the self-test asserted "the
+    injected blink was caught" without ever establishing that the blink was
+    on screen while any frame was being taken. The overlay was scheduled
+    for a fixed wall-clock window ([mount+700, mount+1100]) and the frames
+    were captured at their own, independently drifting times, so a miss was
+    indistinguishable from a detector that had stopped detecting -- and the
+    gate went red ~1 run in 3 on identical code (issue #266: the 1000ms
+    frame's capture call starts at mount+1008..1014 and takes 210-344ms, so
+    whether its raster instant fell before the window's 1100ms close was
+    decided by capture latency the harness does not control). A self-test
+    that cannot tell "the stimulus never appeared where a frame could see
+    it" from "the detector is broken" is not evidence about the detector.
+
+    stimulus: the dict tests/ui_live_smoke.py's _BlinkInjector records, in
+    the page's OWN clock (Date.now(), same clock as the frame windows):
+
+      shown_requested_ms  -- read immediately BEFORE the overlay is
+                             appended. The overlay cannot be on screen
+                             before this: a DOM mutation can only be
+                             presented in a LATER frame.
+      shown_painted_ms    -- read after two requestAnimationFrame hops
+                             following the append, i.e. a time by which the
+                             appended overlay HAS been presented.
+      hidden_requested_ms -- read immediately BEFORE the overlay is
+                             removed. The overlay is still on screen at
+                             this instant, for the same reason.
+      hidden_cleared_ms   -- read after two rAF hops following the removal:
+                             a time by which the overlay is GONE.
+
+    So [shown_painted_ms, hidden_requested_ms] is a window during which the
+    overlay was DEFINITELY on screen, and the two outer values bound the
+    window outside which it definitely was NOT. Both are conservative in
+    the safe direction, and neither assumes anything about where inside a
+    page.screenshot() call the browser's raster instant falls -- which is
+    exactly the unmeasured assumption #266's flake came from.
+
+    frame_windows_ms: one (call_start_ms, call_end_ms) pair per sweep frame,
+    in the same page clock, or None for a frame that was not captured. A
+    frame's raster instant is unknown but necessarily inside its own pair,
+    so "the whole pair is inside the definitely-on window" proves the frame
+    saw the overlay, and "the pair is wholly outside the definitely-off
+    bounds" proves it did not.
+
+    A missing frame anywhere in the sweep refuses: sweep_consecutive_diff_
+    ratios scores a missing frame as ratio 1.0, so a self-test that
+    tolerated one would report "caught" from a FAILED CAPTURE rather than
+    from a detected blink."""
+    if not isinstance(frame_windows_ms, (list, tuple)) or not frame_windows_ms:
+        return False, "no sweep frame capture windows recorded -- cannot prove the stimulus was ever on screen"
+    if not isinstance(target_index, int) or target_index < 1:
+        return False, (f"inject target frame index {target_index!r} has no preceding frame "
+                       "to pair against -- the stimulus could not create a consecutive-pair diff")
+    if target_index >= len(frame_windows_ms):
+        return False, (f"inject target frame index {target_index} is outside the "
+                       f"{len(frame_windows_ms)}-frame sweep")
+    if not isinstance(stimulus, dict):
+        return False, "no stimulus record -- the overlay was never injected"
+    keys = ("shown_requested_ms", "shown_painted_ms",
+            "hidden_requested_ms", "hidden_cleared_ms")
+    missing = [k for k in keys
+               if not isinstance(stimulus.get(k), (int, float))]
+    if missing:
+        return False, ("stimulus never completed its show/hide handshake "
+                       f"(missing/unparseable: {', '.join(missing)}) -- the overlay "
+                       "cannot be assumed to have been on screen")
+    req, painted, hide_req, cleared = (stimulus[k] for k in keys)
+    if not (req <= painted <= hide_req <= cleared):
+        return False, ("stimulus timestamps are not monotonic "
+                       f"({req}, {painted}, {hide_req}, {cleared}) -- "
+                       "the on-screen window cannot be bounded")
+    bad = [i for i, w in enumerate(frame_windows_ms) if not _interval_ok(w)]
+    if bad:
+        return False, (f"sweep frame(s) {bad} have no capture window (not captured, or "
+                       "unparseable) -- a missing frame scores ratio 1.0 on its own, so "
+                       "the self-test cannot attribute a diff to the stimulus")
+    t_start, t_end = frame_windows_ms[target_index]
+    if not (painted <= t_start and hide_req >= t_end):
+        return False, (f"the stimulus was only provably on screen for "
+                       f"[{painted}, {hide_req}], which does not cover target frame "
+                       f"{target_index}'s whole capture interval [{t_start}, {t_end}] -- "
+                       "whether that frame saw it is unproven")
+    for i, (s, e) in enumerate(frame_windows_ms):
+        if i == target_index:
+            continue
+        if not (e <= req or s >= cleared):
+            return False, (f"frame {i}'s capture interval [{s}, {e}] overlaps the window in "
+                           f"which the stimulus may have been on screen [{req}, {cleared}] -- "
+                           "it is not provably a clean reference frame")
+    return True, None
+
+
 def sweep_consecutive_diff_ratios(frames):
     """Companion to blink_check() for the offset sweep (issue #119): frames
     is a list of (H, W, 3) uint8 arrays, or None where a capture failed

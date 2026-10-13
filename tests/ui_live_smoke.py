@@ -191,11 +191,7 @@ LEGEND_COLORS_JS = """() => {
 # issue #252 self-test: a synthetic overlay (a top horizontal slice of the
 # clip rect -- see DEFAULT_INJECT_BLINK_FRAC below, review round 1: a FULL-
 # panel overlay proves only that a GROSS blink is caught, 1000x over
-# BLINK_THRESHOLD), shown/hidden at absolute browser-clock times computed
-# the SAME way _capture_at_offset schedules its own waits (Date.now()-
-# relative deltas, never a flat sleep from whenever this evaluate() call
-# happens to execute -- so the overlay's actual on-screen window is exact
-# regardless of Python/CDP round-trip jitter before this call lands).
+# BLINK_THRESHOLD).
 # position:fixed + the clip rect's own viewport-relative x/y (the SAME
 # coordinate space page.screenshot(clip=...) uses) guarantees the overlay
 # is positioned within the region the sweep captures, independent of the
@@ -205,23 +201,88 @@ LEGEND_COLORS_JS = """() => {
 # rect's HEIGHT (full width, top-aligned) -- a slice comfortably above
 # BLINK_THRESHOLD (0.001) without stepping over it by three orders of
 # magnitude the way a full-panel overlay (frac=1.0) does.
+#
+# issue #266: the show/hide used to be two setTimeout calls at absolute
+# browser-clock times ([mount+700, mount+1100]), chosen so that "the 1000ms
+# sample's real capture window" would land inside them. That placement was
+# an ASSUMPTION about a quantity nothing measures: a page.screenshot()
+# call's raster instant is known only to lie somewhere inside the call, and
+# on the gate box the 1000ms frame's call starts at mount+1008..1014 and
+# runs 210-344ms -- straddling the 1100ms close with ~90ms of margin. So
+# whether the stimulus was on screen when the frame was taken came down to
+# capture latency, the self-test went red ~1 run in 3 on identical code
+# (three box-check runs on commit 278023b: ratio 0.1998 / 0.0 / 0.1998),
+# and a red could not be told apart from a detector that had stopped
+# detecting.
+#
+# Now the stimulus is sequenced against the sweep's own frame loop
+# (_BlinkInjector): shown after the preceding frame's capture has RETURNED,
+# removed after the target frame's capture has RETURNED. Program order, not
+# clock arithmetic, is what keeps the overlay out of the neighbouring
+# frames, and each transition reports the two timestamps that bound it
+# (before the DOM mutation, and after two requestAnimationFrame hops
+# confirm the mutation has been presented) -- so
+# ui_live_smoke_lib.inject_stimulus_verdict can PROVE, from measured times
+# only, that the overlay covered the target frame's whole capture interval
+# and no other frame's. Nothing here assumes where in a capture call the
+# raster lands; an unprovable geometry refuses instead of passing.
 DEFAULT_INJECT_BLINK_FRAC = 0.2
-_INJECT_BLINK_OVERLAY_JS = """(p) => {
-    const now = Date.now();
-    const showDelay = Math.max(0, p.showAtMs - now);
-    const hideDelay = Math.max(0, p.hideAtMs - now);
+
+# Minimum on-screen dwell, measured from the overlay's own first presented
+# frame (NOT from whenever the evaluate() call happened to land): --inject-
+# blink-ms. The overlay is removed at the later of that deadline and the
+# target frame's capture returning, so the configured blink duration is a
+# FLOOR on a real, measured on-screen window rather than a wall-clock
+# window the frames may or may not have intersected. On the gate box the
+# bracket is the binding term (210-344ms of capture inside a ~400-840ms
+# bracket); the floor only matters if a capture ever returns faster than
+# --inject-blink-ms.
+_INJECT_BLINK_SHOW_JS = """(p) => {
+    const requestedAtMs = Date.now();
+    const el = document.createElement('div');
+    el.id = '__pgwt_inject_blink_overlay';
+    el.style.cssText =
+        `position:fixed;left:${p.x}px;top:${p.y}px;width:${p.width}px;` +
+        `height:${p.height}px;background:#ff00ff;z-index:2147483647;`;
+    document.body.appendChild(el);
+    // Safety net ONLY (never the timing mechanism): if the Python side dies
+    // between show and hide, the overlay must not survive into later ticks.
+    // Generous on purpose -- if this ever fires first it would shorten the
+    // stimulus, and the verdict would then refuse rather than approve.
     setTimeout(() => {
-        const el = document.createElement('div');
-        el.id = '__pgwt_inject_blink_overlay';
-        el.style.cssText =
-            `position:fixed;left:${p.x}px;top:${p.y}px;width:${p.width}px;` +
-            `height:${p.height}px;background:#ff00ff;z-index:2147483647;`;
-        document.body.appendChild(el);
-    }, showDelay);
-    setTimeout(() => {
+        const e = document.getElementById('__pgwt_inject_blink_overlay');
+        if (e) e.remove();
+    }, p.safetyMs);
+    // Two rAF hops: the first callback runs BEFORE the frame containing
+    // this mutation is presented, the second after it -- so the resolved
+    // time is one by which the overlay IS on screen.
+    return new Promise(resolve => {
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve({
+            requestedAtMs: requestedAtMs,
+            paintedAtMs: Date.now(),
+        })));
+    });
+}"""
+
+_INJECT_BLINK_HIDE_JS = """(p) => {
+    const fire = (resolve) => {
+        // Read the clock BEFORE the removal: the overlay is still on screen
+        // at this instant, because a removal can only be presented later.
+        const requestedAtMs = Date.now();
         const el = document.getElementById('__pgwt_inject_blink_overlay');
+        const wasPresent = !!el;
         if (el) el.remove();
-    }, hideDelay);
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve({
+            requestedAtMs: requestedAtMs,
+            clearedAtMs: Date.now(),
+            wasPresent: wasPresent,
+        })));
+    };
+    return new Promise(resolve => {
+        const remaining = p.minUntilMs - Date.now();
+        if (remaining > 0) setTimeout(() => fire(resolve), remaining);
+        else fire(resolve);
+    });
 }"""
 
 # Panel-specific "rendered" checks -- same idiom test_web_ui.py already uses
@@ -708,13 +769,101 @@ def _atomic_panel_snapshot(page, tab_id):
     return page.evaluate(_ATOMIC_PANEL_SNAPSHOT_JS, _PANEL_ELEMENT_SELECTOR[tab_id])
 
 
-def _capture_at_offset(page, tab_id, base_ts_ms, offset_ms, clip):
+class _BlinkInjector:
+    """issue #266: sequences the self-test's synthetic overlay against the
+    sweep's own frame loop instead of against the wall clock.
+
+    `before_frame(i)` / `after_frame(i)` are called by the sweep loop around
+    every frame; only the target index does anything. The overlay is
+    appended after frame i-1's capture call has RETURNED and removed after
+    frame i's capture call has RETURNED, so the neighbouring frames are kept
+    clean by PROGRAM ORDER -- no assumption about where in a capture call
+    the browser's raster instant falls, which is the assumption #266's
+    ~1-in-3 flake came from (see _INJECT_BLINK_SHOW_JS's own comment).
+
+    Records `stimulus`, the four page-clock timestamps that bound the
+    overlay's on-screen window, for ui_live_smoke_lib.inject_stimulus_verdict
+    to grade against the frames' own capture windows. Every field starts as
+    None and only a completed handshake fills it in: a show or hide that
+    never ran leaves Nones behind, and the verdict REFUSES on a None rather
+    than assuming the stimulus was there (an un-run injection must never
+    read as a pass, and must never be blamed on the detector either).
+
+    min_dwell_ms (--inject-blink-ms) is a FLOOR on the overlay's measured
+    on-screen time, not a window placed on the clock -- see
+    _INJECT_BLINK_SHOW_JS's comment."""
+
+    # Safety-net margin added to min_dwell_ms for the page-side auto-remove
+    # (see _INJECT_BLINK_SHOW_JS): must comfortably exceed one frame's
+    # capture cost so it never truncates the stimulus during a healthy run.
+    SAFETY_MARGIN_MS = 5000
+
+    def __init__(self, page, tab_id, clip, frac, min_dwell_ms, target_index):
+        self.page = page
+        self.tab_id = tab_id
+        self.clip = clip
+        self.frac = frac
+        self.min_dwell_ms = min_dwell_ms
+        self.target_index = target_index
+        self.stimulus = {
+            "target_frame_index": target_index,
+            "min_dwell_ms": min_dwell_ms,
+            "shown_requested_ms": None,
+            "shown_painted_ms": None,
+            "hidden_requested_ms": None,
+            "hidden_cleared_ms": None,
+            "was_present_at_removal": None,
+        }
+
+    def before_frame(self, index):
+        if index != self.target_index:
+            return
+        res = self.page.evaluate(_INJECT_BLINK_SHOW_JS, {
+            "x": self.clip["x"], "y": self.clip["y"],
+            "width": self.clip["width"],
+            "height": self.clip["height"] * self.frac,
+            "safetyMs": self.min_dwell_ms + self.SAFETY_MARGIN_MS,
+        }) or {}
+        self.stimulus["shown_requested_ms"] = res.get("requestedAtMs")
+        self.stimulus["shown_painted_ms"] = res.get("paintedAtMs")
+
+    def after_frame(self, index):
+        if index != self.target_index:
+            return
+        painted = self.stimulus["shown_painted_ms"]
+        # No painted time means the show handshake never completed; remove
+        # whatever may be on screen immediately (min_until in the past) and
+        # let the verdict refuse on the missing field.
+        min_until = (painted + self.min_dwell_ms) if painted is not None else 0
+        res = self.page.evaluate(_INJECT_BLINK_HIDE_JS,
+                                 {"minUntilMs": min_until}) or {}
+        self.stimulus["hidden_requested_ms"] = res.get("requestedAtMs")
+        self.stimulus["hidden_cleared_ms"] = res.get("clearedAtMs")
+        self.stimulus["was_present_at_removal"] = res.get("wasPresent")
+
+
+def _capture_at_offset(page, tab_id, base_ts_ms, offset_ms, clip,
+                       read_end_clock=False):
     """Sleeps only the remainder to base_ts_ms+offset_ms (never a flat sleep
     from wherever this is called) and screenshots the panel at the given,
     already-computed clip (issue #252: one clip per TICK, shared by every
     frame of that tick's sweep -- see _panel_clip_and_dims). Returns
-    (raw_png_or_None, achieved_offset_ms, capture_ms) -- the achieved offset
-    can exceed offset_ms if prior work already ran past the target.
+    (raw_png_or_None, achieved_offset_ms, capture_ms, end_clock_ms) -- the
+    achieved offset can exceed offset_ms if prior work already ran past the
+    target.
+
+    read_end_clock (issue #266): when True, reads the PAGE's clock once more
+    after the screenshot returns and returns it as end_clock_ms, so the
+    frame's whole capture interval is expressed in a SINGLE clock -- the
+    same Date.now() the injected-stimulus timestamps use. Deriving the
+    interval's end as start + capture_ms instead mixes the page clock with
+    Python's time.monotonic(); measured on the Mac, that left the
+    stimulus-vs-frame boundary margins at 1.7ms and 2.7ms, i.e. a clock
+    comparison that could go either way, which is precisely the class of
+    unmeasured assumption #266 exists to remove. Costs one extra CDP round
+    trip per frame, so it is requested ONLY on a self-test tick (the
+    injected tick of a --inject-blink-ms run); every gating tick calls this
+    exactly as before and gets end_clock_ms=None.
     base_ts_ms is the mount event's own timestamp (issue #193 round 2), not
     the tick's AAS-request send -- see _wait_for_mount_at_or_after.
     capture_ms (issue #197 evidence) is the wall-clock time the screenshot
@@ -728,7 +877,8 @@ def _capture_at_offset(page, tab_id, base_ts_ms, offset_ms, clip):
     t0 = time.monotonic()
     frame = _capture_with_clip(page, clip)
     capture_ms = (time.monotonic() - t0) * 1000.0
-    return frame, now_ms - base_ts_ms, capture_ms
+    end_clock_ms = page.evaluate("Date.now()") if read_end_clock else None
+    return frame, now_ms - base_ts_ms, capture_ms, end_clock_ms
 
 
 def _view_mount(page):
@@ -900,22 +1050,38 @@ def _assert_workload_alive(pgbench_pid, workload_pid, where):
 def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
             blink_threshold, viewport=None, device_scale_factor=None,
             inject_blink_ms=None, inject_tick=None,
-            inject_blink_frac=DEFAULT_INJECT_BLINK_FRAC):
+            inject_blink_frac=DEFAULT_INJECT_BLINK_FRAC,
+            inject_frame_index=lib.INJECT_FRAME_INDEX):
     """inject_blink_ms/inject_tick (issue #252 self-test, off by default --
     None/None, the value every real gating caller -- tests/ui_live_smoke.sh,
     demo_rehearsal.py -- passes, so this is a strict addition with no effect
     on a normal run): when both are set, a synthetic overlay covering the
     top `inject_blink_frac` fraction of the panel's own clip rect (full
-    width) is shown from this tab's `inject_tick`'th mount+700ms for
-    `inject_blink_ms` milliseconds -- deliberately landing between the
-    sweep's 500ms and 1000ms offsets, inside the 1000ms sample's real
-    capture window -- and the resulting sweep ratio/verdict is recorded on
-    the returned result as "self_test". This is the proof that a REAL
-    blink of known size and timing still fails the gate after a capture-
-    path change; the pure-function tests (test_ui_live_smoke_lib.py)
-    exercise the verdict math in isolation but cannot see a capture
-    resolution/region change, which is exactly the kind of change issue
-    #252 makes.
+    width) is made visible for exactly ONE frame of this tab's
+    `inject_tick`'th sweep -- frame `inject_frame_index` (issue #266: shown
+    after frame index-1's capture returns, removed after frame index's
+    capture returns, so program order, not clock arithmetic, keeps it out of
+    the neighbouring frames; see _BlinkInjector) -- and the resulting sweep
+    ratio/verdict is recorded on the returned result as "self_test". This is
+    the proof that a REAL blink of known size still fails the gate after a
+    capture-path change; the pure-function tests
+    (test_ui_live_smoke_lib.py) exercise the verdict math in isolation but
+    cannot see a capture resolution/region change, which is exactly the kind
+    of change issue #252 makes.
+
+    The self_test record carries the stimulus's own measured on-screen
+    bounds and every frame's capture window, and
+    lib.inject_stimulus_verdict grades the GEOMETRY separately from the
+    detection: `stimulus_ok` says the overlay provably covered the target
+    frame's whole capture interval and no other frame's, and `caught` is
+    then read from the consecutive PAIRS the stimulus itself created
+    (index-1,index) and (index,index+1) -- not from the sweep's max ratio,
+    which any unrelated diff or failed capture elsewhere in the sweep could
+    satisfy on its own. Before #266 the self-test asserted only "the max
+    ratio cleared the threshold" against a wall-clock overlay window
+    nothing verified, so a red meant either a broken detector OR a stimulus
+    that was never on screen when a frame was taken -- and on the gate box
+    it meant the second ~1 run in 3.
 
     inject_blink_frac (review round 1): a FULL-panel overlay produces
     ratio~1.0, three orders of magnitude above BLINK_THRESHOLD (0.001) --
@@ -1232,34 +1398,52 @@ def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
             # for why this is exact, not an approximation, for the ~2s a
             # sweep spans.
             sweep_clip, sweep_dims = _panel_clip_and_dims(page, tab_id)
-            # issue #252 self-test: schedule the overlay BEFORE the frame
-            # loop below starts sleeping toward its offsets, so its
-            # setTimeout has the whole sweep window to fire in. showAtMs
-            # sits between the 500ms and 1000ms targets; hideAtMs is
-            # inject_blink_ms later -- the 1000ms sample's real capture
-            # (typically later than its own target, see #252's whole
-            # premise) is where this is meant to land.
+            # issue #252 self-test, re-sequenced for issue #266: the
+            # overlay is shown and hidden by _BlinkInjector from INSIDE the
+            # frame loop below (after frame target-1 returns, and after
+            # frame target returns), not scheduled on the wall clock here.
+            # See _BlinkInjector / _INJECT_BLINK_SHOW_JS for why: the old
+            # [mount+700, mount+1100] window relied on an unmeasured
+            # assumption about where inside a page.screenshot() call the
+            # raster instant falls, and went red ~1 run in 3 on identical
+            # code when it fell the other way.
+            injector = None
             if (inject_blink_ms is not None and inject_tick is not None
                     and i == inject_tick and sweep_clip is not None):
-                show_at_ms = mount_at_ms + 700
                 # review round 1: top SLICE of the clip rect, not the whole
                 # thing -- see DEFAULT_INJECT_BLINK_FRAC's own comment.
-                page.evaluate(_INJECT_BLINK_OVERLAY_JS, {
-                    "showAtMs": show_at_ms,
-                    "hideAtMs": show_at_ms + inject_blink_ms,
-                    "x": sweep_clip["x"], "y": sweep_clip["y"],
-                    "width": sweep_clip["width"],
-                    "height": sweep_clip["height"] * inject_blink_frac,
-                })
+                injector = _BlinkInjector(page, tab_id, sweep_clip,
+                                          inject_blink_frac, inject_blink_ms,
+                                          inject_frame_index)
             sweep_raw_frames = []
             sweep_achieved_ms = []
             sweep_capture_ms = []
-            for offset in sweep_offsets:
-                frame, achieved, capture_ms = _capture_at_offset(
-                    page, tab_id, mount_at_ms, offset, sweep_clip)
+            # (call_start_ms, call_end_ms) per frame in the PAGE's own clock
+            # -- the interval the frame's unknown raster instant must lie
+            # in. BOTH ends are page-clock reads taken by
+            # _capture_at_offset (read_end_clock=True), never a page start
+            # plus a Python-measured duration: the stimulus timestamps are
+            # page-clock too, so every comparison in
+            # inject_stimulus_verdict is within one clock and ordered by
+            # causality (each read happens-after the previous CDP call),
+            # which is what makes the geometry proof hold by construction
+            # instead of by margin. Only recorded on a self-test tick;
+            # [] on every gating tick, which pays no extra round trip.
+            sweep_frame_windows_ms = []
+            for frame_index, offset in enumerate(sweep_offsets):
+                if injector is not None:
+                    injector.before_frame(frame_index)
+                frame, achieved, capture_ms, end_clock_ms = _capture_at_offset(
+                    page, tab_id, mount_at_ms, offset, sweep_clip,
+                    read_end_clock=injector is not None)
+                if injector is not None:
+                    injector.after_frame(frame_index)
                 sweep_raw_frames.append(frame)
                 sweep_achieved_ms.append(achieved)
                 sweep_capture_ms.append(capture_ms)
+                sweep_frame_windows_ms.append(
+                    None if frame is None or end_clock_ms is None else
+                    (mount_at_ms + achieved, end_clock_ms))
             after_sweep = _view_mount(page)
             seq_after_sweep = after_sweep["seq"] if after_sweep is not None else None
 
@@ -1290,9 +1474,36 @@ def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
 
             if (inject_blink_ms is not None and inject_tick is not None
                     and i == inject_tick):
+                # issue #266: grade the geometry and the detection
+                # separately, and read detection off the PAIRS the stimulus
+                # itself created rather than off the sweep's max ratio --
+                # max() is satisfied by any diff anywhere in the sweep,
+                # including a failed capture (scored 1.0 by
+                # sweep_consecutive_diff_ratios), so a self-test built on it
+                # can report "caught" without the stimulus having been seen.
+                stimulus = injector.stimulus if injector is not None else None
+                stimulus_ok, stimulus_reason = lib.inject_stimulus_verdict(
+                    stimulus, sweep_frame_windows_ms, inject_frame_index)
+                pair_ratios = [r for r, _n in
+                               lib.sweep_consecutive_diff_ratios(sweep_arrays)]
+                # The stimulus appears between frames index-1 and index and
+                # disappears between index and index+1, so BOTH boundary
+                # pairs must see it (the second only exists when the target
+                # is not the sweep's last frame).
+                boundary = [j for j in (inject_frame_index - 1, inject_frame_index)
+                            if 0 <= j < len(pair_ratios)]
+                boundary_ratios = [pair_ratios[j] for j in boundary]
                 self_test_result = {
                     "tick": i, "ratio": ratio, "measured": ratio is not None,
                     "note": blink_note, "inject_blink_ms": inject_blink_ms,
+                    "inject_frame_index": inject_frame_index,
+                    "stimulus": stimulus,
+                    "stimulus_ok": stimulus_ok,
+                    "stimulus_reason": stimulus_reason,
+                    "frame_windows_ms": sweep_frame_windows_ms,
+                    "pair_ratios": pair_ratios,
+                    "boundary_pair_indices": boundary,
+                    "boundary_pair_ratios": boundary_ratios,
                     # review round 1: this used to hardcode >= 0.5, so
                     # raising BLINK_THRESHOLD toward 0.5 (e.g. to 0.4) would
                     # leave the self-test reporting PASS while the gate it
@@ -1302,7 +1513,9 @@ def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
                     # against the same blink_threshold the tab's own
                     # no_blink verdict uses, so the self-test tracks
                     # whatever this run was actually configured to detect.
-                    "caught": ratio is not None and ratio >= blink_threshold,
+                    "caught": (ratio is not None and bool(boundary_ratios)
+                               and all(r >= blink_threshold
+                                       for r in boundary_ratios)),
                 }
 
             blink_sweep_ticks.append(
@@ -1431,7 +1644,16 @@ def main():
                     "demo_rehearsal.py). Overlays --inject-tab's panel for "
                     "this many ms during its --inject-tick'th sweep and "
                     "asserts the gate still catches it -- proof a capture-"
-                    "path change did not blind the gate to a real blink.")
+                    "path change did not blind the gate to a real blink. "
+                    "issue #266: this is the MINIMUM measured on-screen "
+                    "dwell, counted from the overlay's own first presented "
+                    "frame; the overlay is removed at the later of that "
+                    "deadline and --inject-frame's capture call returning. "
+                    "Keep it below the gap to the NEXT sweep offset (500ms "
+                    "for the default offsets): a dwell that runs into the "
+                    "next frame's capture makes the geometry unprovable, "
+                    "and inject_stimulus_verdict then refuses -- loudly, "
+                    "with the overlapping frame named.")
     ap.add_argument("--inject-tab", default="sessions",
                     help="which tab's sweep gets the synthetic blink "
                     "(default sessions -- issue #252's own subject); "
@@ -1440,6 +1662,17 @@ def main():
                     help="which 1-based tick of --inject-tab gets the "
                     "synthetic blink (default 2); ignored unless "
                     "--inject-blink-ms is set")
+    ap.add_argument("--inject-frame", type=int,
+                    default=lib.INJECT_FRAME_INDEX,
+                    help="issue #266: which 0-based frame of the injected "
+                    "tick's offset sweep the synthetic overlay is made "
+                    "visible for (default "
+                    f"{lib.INJECT_FRAME_INDEX}, the "
+                    f"{lib.SWEEP_OFFSETS_MS[lib.INJECT_FRAME_INDEX]}ms "
+                    "offset). Must be >= 1: the self-test grades the "
+                    "consecutive pair the stimulus's own appearance "
+                    "creates, so a preceding clean frame has to exist; "
+                    "ignored unless --inject-blink-ms is set")
     ap.add_argument("--inject-blink-frac", type=float,
                     default=DEFAULT_INJECT_BLINK_FRAC,
                     help="review round 1: fraction of --inject-tab's panel "
@@ -1524,7 +1757,8 @@ def main():
                                                       if inject_here else None),
                                      inject_tick=(args.inject_tick
                                                   if inject_here else None),
-                                     inject_blink_frac=args.inject_blink_frac)
+                                     inject_blink_frac=args.inject_blink_frac,
+                                     inject_frame_index=args.inject_frame)
                     results.append(result)
                     _assert_workload_alive(args.pgbench_pid, args.workload_pid,
                                            f"after tab {tab_id!r}")
@@ -1597,13 +1831,29 @@ def main():
         # verdict (not just the image-diff helper in isolation).
         tab_ok = (summary["tabs"].get(args.inject_tab) or {}).get("ok")
         caught = self_test is not None and self_test.get("caught")
-        self_test_ok = bool(caught) and tab_ok is False
+        # issue #266: the stimulus geometry is its own, separately reported
+        # gate. A self-test can only speak about the DETECTOR when the
+        # overlay provably covered exactly one sweep frame; when it did not,
+        # this REFUSES (exit 1 with the reason) instead of either passing on
+        # an unverified premise or blaming the detector for a blink that was
+        # never on screen. Both conditions must hold -- stimulus_ok alone is
+        # a harness check, caught alone is the old unverified assertion.
+        stimulus_ok = self_test is not None and self_test.get("stimulus_ok")
+        stimulus_reason = (self_test or {}).get("stimulus_reason")
+        self_test_ok = bool(caught) and bool(stimulus_ok) and tab_ok is False
         detail = (f"self_test={self_test}" if self_test is not None else
                   f"self_test never recorded -- --inject-tick={args.inject_tick} "
                   f"was never reached on tab {args.inject_tab!r} "
                   f"(ticks={args.ticks})")
         print(f"  SELF-TEST {'PASS' if self_test_ok else 'FAIL'}: "
-              f"the injected blink was {'caught' if caught else 'NOT caught'} "
+              f"the stimulus geometry was "
+              f"{'PROVEN' if stimulus_ok else 'NOT proven'}"
+              + (f" ({stimulus_reason})" if not stimulus_ok and stimulus_reason
+                 else "")
+              + f", the injected blink was "
+              f"{'caught' if caught else 'NOT caught'} "
+              f"on pairs {(self_test or {}).get('boundary_pair_indices')} "
+              f"(ratios {(self_test or {}).get('boundary_pair_ratios')}) "
               f"and the tab verdict was {'FAIL' if tab_ok is False else tab_ok!r} "
               f"({detail})")
         return 0 if self_test_ok else 1
