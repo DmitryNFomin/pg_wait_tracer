@@ -1,0 +1,112 @@
+Histogram no_blink: local repro attempts, 2026-10-13, tree ac515f6 (unmodified).
+Mac, chromium via playwright 1.60.0, viewport 1710x981 DPR2 (the pinned demo
+client), tests/ui_live_smoke.py run_tab() unmodified -- same SWEEP_OFFSETS_MS,
+same blink_sweep_gate_verdict, same BLINK_THRESHOLD=0.001.
+
+"first"   = stock navigation (one visit to the tab, what ui_live_smoke/
+            demo_rehearsal actually do -- run_tab opens a NEW browser context
+            per (pass, tab), so a demo_rehearsal pass is a fresh page load,
+            not a DOM-level revisit).
+"revisit" = visit histogram, leave to the events tab, come back, THEN measure.
+
+================================================================
+RUN 1  canned mock heatmap (60 buckets, 20 populated columns)
+  PGWT_TESTS_DIR=$PWD/tests python3 repro_blink.py histogram 6
+----------------------------------------------------------------
+### first    histogram ok=True no_blink.ok=True ratio=0.0 thr=0.001
+   tick 1 seq=3 ratios=[0.0, 0.0, 0.0, 0.0] ach=[201, 502, 1006, 1504, 2004] dims={'box_width': 1670, 'box_height': 350, 'clip_width': 1670, 'clip_height': 350} []
+   tick 2 seq=4 ratios=[0.0, 0.0, 0.0, 0.0] ach=[203, 505, 1004, 1505, 2004] dims={'box_width': 1670, 'box_height': 350, 'clip_width': 1670, 'clip_height': 350} []
+   tick 3 seq=5 ratios=[0.0, 0.0, 0.0, 0.0] ach=[202, 503, 1003, 1506, 2003] dims={'box_width': 1670, 'box_height': 350, 'clip_width': 1670, 'clip_height': 350} []
+   tick 4 seq=6 ratios=[0.0, 0.0, 0.0, 0.0] ach=[201, 503, 1003, 1504, 2004] dims={'box_width': 1670, 'box_height': 350, 'clip_width': 1670, 'clip_height': 350} []
+   tick 5 seq=7 ratios=[0.0, 0.0, 0.0, 0.0] ach=[202, 503, 1002, 1506, 2007] dims={'box_width': 1670, 'box_height': 350, 'clip_width': 1670, 'clip_height': 350} []
+   tick 6 seq=8 ratios=[0.0, 0.0, 0.0, 0.0] ach=[201, 503, 1005, 1503, 2004] dims={'box_width': 1670, 'box_height': 350, 'clip_width': 1670, 'clip_height': 350} []
+
+### revisit  histogram ok=True no_blink.ok=True ratio=0.0 thr=0.001
+   tick 1 seq=5 ratios=[0.0, 0.0, 0.0, 0.0] ach=[202, 501, 1005, 1506, 2002] dims={'box_width': 1670, 'box_height': 350, 'clip_width': 1670, 'clip_height': 350} []
+   tick 2 seq=6 ratios=[0.0, 0.0, 0.0, 0.0] ach=[201, 503, 1005, 1505, 2003] dims={'box_width': 1670, 'box_height': 350, 'clip_width': 1670, 'clip_height': 350} []
+   tick 3 seq=7 ratios=[0.0, 0.0, 0.0, 0.0] ach=[202, 504, 1006, 1503, 2003] dims={'box_width': 1670, 'box_height': 350, 'clip_width': 1670, 'clip_height': 350} []
+   tick 4 seq=8 ratios=[0.0, 0.0, 0.0, 0.0] ach=[201, 505, 1005, 1506, 2006] dims={'box_width': 1670, 'box_height': 350, 'clip_width': 1670, 'clip_height': 350} []
+   tick 5 seq=9 ratios=[0.0, 0.0, 0.0, 0.0] ach=[201, 504, 1003, 1505, 2005] dims={'box_width': 1670, 'box_height': 350, 'clip_width': 1670, 'clip_height': 350} []
+   tick 6 seq=10 ratios=[0.0, 0.0, 0.0, 0.0] ach=[202, 502, 1002, 1506, 2004] dims={'box_width': 1670, 'box_height': 350, 'clip_width': 1670, 'clip_height': 350} []
+
+================================================================
+RUN 2  realistic heatmap: 285 time buckets x 16 bands, dense (big_mock.py),
+       which is what BUCKETS() asks for at the 1710px demo viewport
+  PGWT_BIG_MOCK=1 ... python3 repro_blink.py histogram 6
+----------------------------------------------------------------
+### first    histogram ok=True no_blink.ok=True ratio=0.0 thr=0.001
+   tick 1 seq=3 ratios=[0.0, 0.0, 0.0, 0.0] ach=[219, 502, 1007, 1503, 2006] dims={'box_width': 1670, 'box_height': 350, 'clip_width': 1670, 'clip_height': 350} []
+   tick 2 seq=4 ratios=[0.0, 0.0, 0.0, 0.0] ach=[202, 503, 1004, 1502, 2006] dims={'box_width': 1670, 'box_height': 350, 'clip_width': 1670, 'clip_height': 350} []
+   tick 3 seq=5 ratios=[0.0, 0.0, 0.0, 0.0] ach=[201, 505, 1003, 1505, 2004] dims={'box_width': 1670, 'box_height': 350, 'clip_width': 1670, 'clip_height': 350} []
+   tick 4 seq=6 ratios=[0.0, 0.0, 0.0, 0.0] ach=[202, 502, 1005, 1505, 2003] dims={'box_width': 1670, 'box_height': 350, 'clip_width': 1670, 'clip_height': 350} []
+   tick 5 seq=7 ratios=[0.0, 0.0, 0.0, 0.0] ach=[202, 504, 1006, 1501, 2005] dims={'box_width': 1670, 'box_height': 350, 'clip_width': 1670, 'clip_height': 350} []
+   tick 6 seq=8 ratios=[0.0, 0.0, 0.0, 0.0] ach=[203, 505, 1006, 1506, 2004] dims={'box_width': 1670, 'box_height': 350, 'clip_width': 1670, 'clip_height': 350} []
+
+### revisit  histogram ok=True no_blink.ok=True ratio=0.0 thr=0.001
+   tick 1 seq=5 ratios=[0.0, 0.0, 0.0, 0.0] ach=[202, 501, 1003, 1507, 2002] dims={'box_width': 1670, 'box_height': 350, 'clip_width': 1670, 'clip_height': 350} []
+   tick 2 seq=6 ratios=[0.0, 0.0, 0.0, 0.0] ach=[201, 504, 1003, 1505, 2006] dims={'box_width': 1670, 'box_height': 350, 'clip_width': 1670, 'clip_height': 350} []
+   tick 3 seq=7 ratios=[0.0, 0.0, 0.0, 0.0] ach=[202, 503, 1006, 1504, 2003] dims={'box_width': 1670, 'box_height': 350, 'clip_width': 1670, 'clip_height': 350} []
+   tick 4 seq=8 ratios=[0.0, 0.0, 0.0, 0.0] ach=[204, 503, 1004, 1506, 2003] dims={'box_width': 1670, 'box_height': 350, 'clip_width': 1670, 'clip_height': 350} []
+   tick 5 seq=9 ratios=[0.0, 0.0, 0.0, 0.0] ach=[201, 504, 1003, 1506, 2006] dims={'box_width': 1670, 'box_height': 350, 'clip_width': 1670, 'clip_height': 350} []
+   tick 6 seq=10 ratios=[0.0, 0.0, 0.0, 0.0] ach=[202, 505, 1003, 1502, 2005] dims={'box_width': 1670, 'box_height': 350, 'clip_width': 1670, 'clip_height': 350} []
+
+================================================================
+RUN 3  dense heatmap + chaos transport, AAS response ALWAYS ~1s late, so the
+       AAS pane above the panel repaints INSIDE the sweep window (the one
+       page-level repaint that is NOT bracketed by vm.lastMount.seq, since
+       app.js refresh() runs refreshActive() and vm.refresh() concurrently)
+  PGWT_BIG_MOCK=1 PGWT_CHAOS=1 PGWT_CHAOS_LATE_CMDS=aas PGWT_CHAOS_LATE_MS=900 ...
+----------------------------------------------------------------
+### first    histogram ok=True no_blink.ok=True ratio=0.0 thr=0.001
+   tick 1 seq=3 ratios=[0.0, 0.0, 0.0, 0.0] ach=[203, 502, 1005, 1506, 2003] dims={'box_width': 1670, 'box_height': 350, 'clip_width': 1670, 'clip_height': 350} []
+   tick 2 seq=4 ratios=[0.0, 0.0, 0.0, 0.0] ach=[204, 502, 1004, 1505, 2005] dims={'box_width': 1670, 'box_height': 350, 'clip_width': 1670, 'clip_height': 350} []
+   tick 3 seq=5 ratios=[0.0, 0.0, 0.0, 0.0] ach=[204, 505, 1006, 1504, 2006] dims={'box_width': 1670, 'box_height': 350, 'clip_width': 1670, 'clip_height': 350} []
+   tick 4 seq=6 ratios=[0.0, 0.0, 0.0, 0.0] ach=[202, 505, 1004, 1506, 2005] dims={'box_width': 1670, 'box_height': 350, 'clip_width': 1670, 'clip_height': 350} []
+   tick 5 seq=7 ratios=[0.0, 0.0, 0.0, 0.0] ach=[204, 505, 1005, 1504, 2004] dims={'box_width': 1670, 'box_height': 350, 'clip_width': 1670, 'clip_height': 350} []
+   tick 6 seq=8 ratios=[0.0, 0.0, 0.0, 0.0] ach=[204, 504, 1005, 1505, 2004] dims={'box_width': 1670, 'box_height': 350, 'clip_width': 1670, 'clip_height': 350} []
+
+### revisit  histogram ok=True no_blink.ok=True ratio=0.0 thr=0.001
+   tick 1 seq=5 ratios=[0.0, 0.0, 0.0, 0.0] ach=[202, 504, 1004, 1506, 2004] dims={'box_width': 1670, 'box_height': 350, 'clip_width': 1670, 'clip_height': 350} []
+   tick 2 seq=6 ratios=[0.0, 0.0, 0.0, 0.0] ach=[204, 502, 1002, 1503, 2003] dims={'box_width': 1670, 'box_height': 350, 'clip_width': 1670, 'clip_height': 350} []
+   tick 3 seq=7 ratios=[0.0, 0.0, 0.0, 0.0] ach=[203, 503, 1004, 1504, 2006] dims={'box_width': 1670, 'box_height': 350, 'clip_width': 1670, 'clip_height': 350} []
+   tick 4 seq=8 ratios=[0.0, 0.0, 0.0, 0.0] ach=[203, 506, 1004, 1504, 2005] dims={'box_width': 1670, 'box_height': 350, 'clip_width': 1670, 'clip_height': 350} []
+   tick 5 seq=9 ratios=[0.0, 0.0, 0.0, 0.0] ach=[205, 503, 1003, 1504, 2003] dims={'box_width': 1670, 'box_height': 350, 'clip_width': 1670, 'clip_height': 350} []
+   tick 6 seq=10 ratios=[0.0, 0.0, 0.0, 0.0] ach=[204, 505, 1004, 1506, 2004] dims={'box_width': 1670, 'box_height': 350, 'clip_width': 1670, 'clip_height': 350} []
+
+Totals: 3 configurations x 2 scenarios x 6 ticks x 4 consecutive pairs
+        = 144 graded pairs, every one 0.0, none NOT MEASURED.
+        Target to beat: 0.0495 (middle) / 0.0492 (late) on the box.
+
+================================================================
+RUN 4  lifecycle_probe.py -- the brief's first question, measured
+  PGWT_BIG_MOCK=1 ... python3 lifecycle_probe.py
+----------------------------------------------------------------
+--- FIRST VISIT   lastMount={"id": "histogram", "seq": 2, "at": 1791899185658}
+    init id=ec_1791899185419 el=heatmap-container mountSeq=1
+    setOption id=ec_1791899185419 el=heatmap-container mountSeq=1
+--- LEAVE to events   lastMount={"id": "events", "seq": 3, "at": 1791899187231}
+    dispose id=ec_1791899185419 el=heatmap-container mountSeq=2
+--- REVISIT   lastMount={"id": "histogram", "seq": 4, "at": 1791899187793}
+    init id=ec_1791899185420 el=heatmap-container mountSeq=3
+    setOption id=ec_1791899185420 el=heatmap-container mountSeq=3
+--- post-mount canvas sweep (revisit) seq 4 -> 5
+    + 200ms  119938:oIAC0wr8fwAAAP///RR/ZAAAAAZJREFUAwDQl+zwJxwyfgAAAABJRU5ErkJggg==
+    + 500ms  119938:oIAC0wr8fwAAAP///RR/ZAAAAAZJREFUAwDQl+zwJxwyfgAAAABJRU5ErkJggg==
+    +1000ms  119938:oIAC0wr8fwAAAP///RR/ZAAAAAZJREFUAwDQl+zwJxwyfgAAAABJRU5ErkJggg==
+    +1500ms  119938:oIAC0wr8fwAAAP///RR/ZAAAAAZJREFUAwDQl+zwJxwyfgAAAABJRU5ErkJggg==
+    +2000ms  119938:oIAC0wr8fwAAAP///RR/ZAAAAAZJREFUAwDQl+zwJxwyfgAAAABJRU5ErkJggg==
+    all identical: True
+
+ANSWER to "is the chart reused and updated, or disposed and recreated?":
+DISPOSED AND RECREATED -- a different instance id after the revisit
+(ec_...419 -> ec_...420), disposed in leave(), re-init'ed in renderHeatmap().
+BUT every one of those calls carries mountSeq = N-1: the dispose, the init and
+the setOption all complete INSIDE ViewManager.refresh()'s synchronous
+view.mount() call, i.e. BEFORE _mountSeq++ sets lastMount to seq N. The blink
+sweep's zero point is that seq-N event and its first frame is +200ms. So the
+teardown/rebuild the brief suspects is invisible to no_blink BY CONSTRUCTION
+and cannot produce a 0.0495 ratio.
+(Caveat on the canvas sweep: seq advanced 4->5 during it, i.e. a live tick's
+mount landed mid-sweep -- on the real gate that tick reads NOT MEASURED. The
+bytes stayed identical only because the mock's payload is constant; this part
+is weak evidence and the init/dispose timing above is the load-bearing result.)
