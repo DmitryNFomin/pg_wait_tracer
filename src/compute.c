@@ -2046,6 +2046,18 @@ void pgwt_compute_heatmap(const struct pgwt_trace_event *events, int count,
          * from normalized sample periods is fabricated (FID-3). */
         if (ev->flags & PGWT_EVENT_FLAG_SAMPLE)
             continue;
+        /* T2 (summary v6, #315/#376): io_workers are outside the model here
+         * too. This is NOT an independent judgement about latency grids — it
+         * is the half that keeps handle_heatmap's two routes answering the
+         * same question. The summary writer now drops io_worker records, and
+         * events[].histogram is what pgwt_compute_heatmap_from_summaries
+         * reads, so without this line a >= 120 s window (summaries) and a
+         * shorter one (raw) would disagree cell for cell on exactly the
+         * records the rest of the model already excludes. The two changes
+         * have to land together; see hole N7 in
+         * tests/test_agg_raw_crosscheck.c. */
+        if (ev->flags & PGWT_EVENT_FLAG_IO_WORKER)
+            continue;
 
         uint64_t ev_ts = ev->timestamp_ns;
         if (ev_ts < from_ns || ev_ts >= to_ns)

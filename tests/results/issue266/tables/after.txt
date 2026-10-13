@@ -1,0 +1,21 @@
+AFTER -- the stimulus is bracketed around one frame's capture call and reports its own bounds (page clock).
+ run  proven  caught          pairs  prev_end->show  painted->start  end->hide  cleared->next   dwell
+ui_live_self_test_1 NO SELF-TEST RECORD ({'detail': 'WebSocket never reached #status.connected within 60s', 'ok': False})
+   2    True    True     [0.2, 0.2]              +8            +220        +12           +302     407
+   3    True    True [0.19959058341862845, 0.19959058341862845]             +14            +278         +4           +200     509
+   4    True    True [0.199796126401631, 0.199796126401631]              +6            +302         +5           +380     432
+   5    True    True [0.199796126401631, 0.199796126401631]              +3            +288         +6           +341     449
+   6    True    True [0.199796126401631, 0.199796126401631]              +5            +295         +4           +264     464
+   7    True    True [0.199796126401631, 0.199796126401631]              +3            +298        +10           +309     435
+   8    True    True [0.199796126401631, 0.199796126401631]              +3            +285         +6           +315     421
+   9    True    True [0.199796126401631, 0.199796126401631]              +2            +340         +3           +383     452
+  10    True    True [0.199796126401631, 0.199796126401631]             +10            +337         +4           +351     475
+  11    True    True [0.199796126401631, 0.199796126401631]              +4            +299         +2           +370     424
+  12    True    True [0.199796126401631, 0.199796126401631]             +11            +287         +4           +341     410
+  13    True    True [0.199796126401631, 0.199796126401631]              +4            +317         +3           +344     435
+  14    True    True [0.199796126401631, 0.199796126401631]             +13            +299         +4           +358     430
+  prev frame capture end -> overlay append requested: min +2 median +5 max +14 ms (n=13)
+  overlay presented -> target capture call start: min +220 median +298 max +340 ms (n=13)
+  target capture end -> overlay removal requested: min +2 median +4 max +12 ms (n=13)
+  overlay gone -> next frame capture call start: min +200 median +341 max +383 ms (n=13)
+  measured on-screen dwell (presented -> removal requested): min +407 median +435 max +509 ms (n=13)

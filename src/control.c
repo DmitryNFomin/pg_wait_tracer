@@ -418,6 +418,21 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
      * no time: treat this as a rate signal, not an exact event count. */
     cjson_add_uint64(root, "summary_late_events_folded_total",
                      d->summary_writer ? d->summary_writer->late_events_folded_total : 0);
+    /* v6 (#315/#376): records the summary dropped because their pid is an
+     * io_worker, and their ns. The raw paths exclude the same records, so
+     * these two are how the agreement is CHECKED in production rather than
+     * assumed: compare them against the raw io_worker total for the same
+     * window (time_model's cat_ms[io_worker] plus the Activity:IoWorkerMain
+     * idle the raw path drops). A shortfall is the known residual --
+     * pgwt_live_pid_cat_flag answers "foreground" until a pid's metadata is
+     * parsed, so an io_worker's earliest records are accumulated, while the
+     * server tags them post hoc from backends.jsonl and excludes them. */
+    cjson_add_uint64(root, "summary_io_worker_events_excluded_total",
+                     d->summary_writer
+                         ? d->summary_writer->io_worker_events_excluded_total : 0);
+    cjson_add_uint64(root, "summary_io_worker_ns_excluded_total",
+                     d->summary_writer
+                         ? d->summary_writer->io_worker_ns_excluded_total : 0);
 
     cjson_add_uint64(root, "io_worker_samples_total",
                      ctr->io_worker_samples_total);

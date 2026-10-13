@@ -1,0 +1,49 @@
+CONTROL: the one non-passing after-run is NOT caused by the fix
+===============================================================
+
+after/ui_live_self_test_1 failed before reaching any tick:
+
+  FAIL [sessions]: WebSocket never reached #status.connected within 60s
+  SELF-TEST FAIL ... self_test never recorded -- --inject-tick=2 was never
+  reached on tab 'sessions' (ticks=6)        [exit 1]
+
+It is the FIRST iteration after the stack comes up, and it reproduces on the
+PARENT commit's code. Control run, same VM, same driver, with
+tests/ui_live_smoke.py and tests/ui_live_smoke_lib.py replaced by
+`git show 6bfe7d3:` versions, PGWT_SELFTEST_REPEAT=2:
+
+  === SELFTEST RUN 1/2 ===
+    FAIL [sessions]: WebSocket never reached #status.connected within 60s
+    SELF-TEST FAIL ... self_test never recorded          [rc=1]
+  === SELFTEST RUN 2/2 ===
+    SELF-TEST PASS: the injected blink was caught ... ratio 0.19952  [rc=0]
+
+So: parent code, first iteration -> same failure; parent code, second
+iteration -> pass. The first batch of the day (before/, on a freshly booted
+VM) did not hit it at all; every later batch did, on both code versions.
+
+Why it is an artifact of THIS driver and not of the gate: the real
+tests/ui_live_smoke.sh runs the full 11-tab walk BEFORE the self-test, so by
+the time the self-test's browser connects, the daemon/bridge/server path has
+been exercised for minutes. The repeat driver skips that walk (it is not what
+is being measured), which removes the warm-up. Not hardened against, not
+retried, and nothing in the fix touches the pre-tick path -- reported here
+because the raw count "13 of 14" otherwise looks like a property of the fix.
+
+Note also what the harness does with it: it FAILS, loudly, naming the
+missing record. A stack that never connects does not read as a pass and does
+not read as a skip.
+
+Additional after-runs (4 more iterations, same VM, fix in place), logs only
+-- their summary.json files were destroyed by the control run's own cleanup
+before they could be archived:
+
+  === SELFTEST RUN 1 rc=1 ===   (the same first-iteration WS timeout)
+  === SELFTEST RUN 2 rc=0 ===   geometry PROVEN, caught, ratios [0.2, 0.2]
+  === SELFTEST RUN 3 rc=0 ===   geometry PROVEN, caught, ratios [0.19978, 0.19978]
+  === SELFTEST RUN 4 rc=0 ===   geometry PROVEN, caught, ratios [0.19980, 0.19980]
+
+Running total on the fix: 16 iterations reached the injected tick, 16 proved
+the stimulus geometry and caught the blink on both boundary pairs; 2
+iterations never reached a tick, both of them a first-iteration WS timeout
+that the parent code reproduces.

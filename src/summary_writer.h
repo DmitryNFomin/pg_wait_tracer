@@ -110,7 +110,70 @@
  * No migration is possible or needed: a v4 record simply does not contain the
  * per-query CPU entry, and the raw trace already holds what is required to
  * recompute it. */
-#define PGWT_SUMMARY_VERSION  5
+/* v6 (2026-10-13, issues #315 and #376): io_worker records are EXCLUDED at
+ * the writer, from every accumulator -- class_ns, idle_ns, events[]
+ * (histograms included), sessions[] and queries[]. ONE content change, no
+ * layout change.
+ *
+ * WHY: docs/AAS_SEMANTICS_DECISION.md records that io_worker time is outside
+ * DB Time and outside Idle (it is surfaced as an io_worker busy %, because
+ * the requesting backend already shows AioIoCompletion for the same logical
+ * I/O). src/compute.c implements that on the raw paths. The summary writer
+ * did not, so the same window answered differently depending on which path
+ * served it: +400% on DB Time on a synthetic probe (#315), and on the PG18
+ * demo capture (tests/results/demo_rehearsal/trace, 1851 s, 3 io_workers)
+ * summary Idle ran +5,549,649.64 ms over raw -- +23.36% on the whole
+ * capture, +308.16% on a 150 s window containing the capture end, +2.43% on
+ * the same window one second earlier -- because each io_worker's
+ * Activity:IoWorkerMain interval closes at capture end and is bucketed whole
+ * into that second. (#376's issue text quotes a different pair,
+ * 406,476.45 vs 528,770.62 ms; that window could not be reconstructed, so
+ * the numbers here are the ones this branch measured, with the harness kept
+ * in tests/results/issue376-measurement.)
+ *
+ * WHY THE VERSION HAS TO MOVE even though the byte layout is identical: the
+ * version is what tells a reader which ACCOUNTING RULE the precomputed
+ * per-second totals were written under -- the same reason v3, v4 and v5
+ * exist. A v5 second counts io_worker time and a v6 second does not, so a
+ * window holding both reports a DB Time and an Idle that is neither. The
+ * existing machinery handles files already on disk and is NOT changed here:
+ * pgwt_summary_reader_open refuses a non-current version with a WARN, and
+ * pgwt-server preflights the window (should_use_summaries ->
+ * pgwt_summaries_window_current) so a refusal becomes a RAW recompute rather
+ * than a plausible partial answer; startup recovery still archives an intact
+ * older file instead of calling it corrupt. A v5 capture therefore stays
+ * fully readable, from its raw events, which are the source of truth and
+ * already carry the pid categories (pgwt_tag_events + backends.jsonl).
+ *
+ * HOW the writer knows: it is TOLD. `cat_flag` is a parameter of
+ * pgwt_summary_push_event, resolved by the producer before the push
+ * (src/event_stream.c hoists pgwt_live_pid_cat_flag above it;
+ * src/escalation.c resolves in flush_open_intervals). `evt->flags` is EMPTY
+ * of category bits on the live path, so a flags-only check inside the writer
+ * would be dead code in the daemon -- see hole N7 in
+ * tests/test_agg_raw_crosscheck.c.
+ *
+ * RESIDUAL, stated because it is real and small: pgwt_live_pid_cat_flag
+ * returns 0 (foreground) while a pid's metadata is still unparsed, so an
+ * io_worker's earliest records can be written as foreground, while the raw
+ * path tags them post hoc from backends.jsonl and excludes them. That window
+ * is bounded by discovery's first metadata parse for that pid. MEASURED on
+ * the demo capture: 0 ms of 5,553,133.69 ms of io_worker time (no io_worker
+ * record closes inside the capture's first second) -- small there, but not
+ * zero by construction. The writer counts what it excluded
+ * (io_worker_events_excluded_total / io_worker_ns_excluded_total, exported by
+ * the control socket) so the residual stays observable rather than assumed.
+ *
+ * NOT fixed by v6: the summary path still reports no io_worker BUSY total
+ * (cat_ms[]/io_worker_busy_pct are raw-path-only, hole N1 -- they were 0 on
+ * the summary path before this change too, so nothing was lost), and the
+ * writer still buckets a long idle interval WHOLE into the second in which
+ * it closes while the raw path clips it to the requested window
+ * (event_window_ns). That straddler mechanism is general -- a long
+ * Client:ClientRead behaves the same way -- so "the summary equals raw on
+ * any window" is NOT what this version claims; it claims the io_worker
+ * accounting rule now matches. */
+#define PGWT_SUMMARY_VERSION  6
 
 /* #277: how long after a second ends it is treated as complete by the
  * periodic flush. The daemon's timer handler runs BEFORE the event-ring
@@ -308,6 +371,17 @@ struct pgwt_summary_writer {
     uint64_t      events_overflow_total;
     uint64_t      total_records_written;
     uint64_t      total_bytes_written;
+    /* v6 (#315/#376): records dropped because their pid is an io_worker, and
+     * their wall ns. Not a diagnostic afterthought: it is the only way to see
+     * the pgwt_live_pid_cat_flag residual in production (a pid whose metadata
+     * is not parsed yet resolves to foreground, so its earliest records are
+     * accumulated while the raw path -- tagging post hoc from backends.jsonl
+     * -- excludes them). Compare against the raw io_worker total for the same
+     * capture: the difference IS the residual. Exported by the control socket
+     * as summary_io_worker_events_excluded_total /
+     * summary_io_worker_ns_excluded_total. */
+    uint64_t      io_worker_events_excluded_total;
+    uint64_t      io_worker_ns_excluded_total;
 
     /* #128 deferred per-query attribution (query_attr.h), per pid; heap
      * (SUMMARY_QATTR_SLOTS entries, open addressing, reclaimed on backend
@@ -328,9 +402,25 @@ int  pgwt_summary_writer_init(struct pgwt_summary_writer *w,
                                int retention_hours,
                                const char *group_name);
 
-/* Push a raw trace event. Handles second-boundary detection and flushing. */
+/* Push a raw trace event. Handles second-boundary detection and flushing.
+ *
+ * `cat_flag` is the pid's T2 category, as the PRODUCER resolved it: 0 =
+ * foreground/unresolved, else PGWT_EVENT_FLAG_IO_WORKER / _MAINT /
+ * _BACKGROUND (the values pgwt_live_pid_cat_flag and the server's
+ * bm_type_to_cat_flag return). v6: an io_worker record is excluded from
+ * every accumulator, matching the raw paths in src/compute.c.
+ *
+ * It is a PARAMETER rather than a check on evt->flags because evt->flags
+ * carries no category bits on the live path -- the daemon never sets
+ * PGWT_EVENT_FLAG_IO_WORKER, the server applies it at raw LOAD time via
+ * pgwt_tag_events. A flags-only check in the writer is therefore dead in the
+ * daemon (hole N7, tests/test_agg_raw_crosscheck.c). Making it an argument
+ * also means no caller can inherit the wrong answer silently: every producer
+ * must say what it resolved. Pass 0 for a pid-less marker (the writer drops
+ * markers anyway, and resolving a category for pid 0 would be meaningless). */
 int  pgwt_summary_push_event(struct pgwt_summary_writer *w,
-                              const struct pgwt_trace_event *evt);
+                              const struct pgwt_trace_event *evt,
+                              uint32_t cat_flag);
 
 /* Force-flush the current accumulator whatever its state (rotation, close,
  * and offline generators that drive the writer with synthetic timestamps).

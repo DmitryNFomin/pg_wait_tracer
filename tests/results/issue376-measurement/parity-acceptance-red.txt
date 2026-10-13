@@ -1,0 +1,115 @@
+1117:    bool io_worker = false;   /* REVERTED for the red run */
+=== test_io_worker_parity: raw vs summary Idle/DB Time (#376, #315) ===
+--- 0. the io_worker resolver chain (production functions) ---
+  ok: pgwt_backend_type_name(PGWT_BT_IO_WORKER) is the exact backends.jsonl string src/server.c's bm_type_to_cat_flag keys on ("io_worker")
+  ok: that string maps back to PGWT_BT_IO_WORKER -- the type src/cmdline.c's pgwt_parse_cmdline resolves from "postgres: io worker"
+  ok: pgwt_backend_type_flag(PGWT_BT_IO_WORKER) is PGWT_EVENT_FLAG_IO_WORKER -- the daemon-side resolver pgwt_live_pid_cat_flag uses this same function
+  ok: a client backend resolves to NO category flag, so the fixture's foreground pid is foreground for the same production reason
+--- 2. the companion fixture is complete, in order and un-pre-flagged ---
+  ok: every second was committed (130 == 130)
+  ok: the fixture pushed io_worker records (198) -- 0 would make every comparison below vacuous
+  FAIL(line 791): the committed blocks hold every pushed NON-io_worker event (588 + 198 == 588): the io_worker records are excluded at the writer (summary v6), nothing else is lost, and the two sides are still the same events rather than two samples
+  ok: NO event handed to the writer carries a category flag (0): a `evt->flags & PGWT_EVENT_FLAG_IO_WORKER` guard in the writer is dead in the daemon, so a pre-flagged fixture could certify a fix that does nothing (commit 8705412)
+  ok: the stream is pushed in strict timestamp order, so the writer's late-arrival rule (#277) cannot fold a record into another second
+  ok: pgwt_tag_events stamped PGWT_EVENT_FLAG_IO_WORKER on every record of the registry's io_worker pids (198) -- the production resolver produced the property, not the fixture
+  ok: and on none of the client backend's records (0)
+  ok: the registry resolved 3 io_worker pids through pgwt_backend_type_flag
+  ok: total accumulated ns (195575000000) stays below 2^53, so integer-valued double sums are exact regardless of addition order -- which is why the assertion is `==` and not a tolerance
+--- 3. raw vs summary Idle and DB Time, three windows ---
+    A. excludes the final second       Idle raw        1419.000  summary        1419.000  (  +0.00%)
+                                       DBTm raw        1548.000  summary        2124.000  ( +37.21%)   [io_worker busy raw 576.000 ms, 129 records]
+  ok: A. excludes the final second: the comparison was possible
+  ok: A. excludes the final second: Idle agrees (raw 1419.000 ms vs summary 1419.000 ms, +0.00%)
+  FAIL(line 503): A. excludes the final second: DB Time agrees (raw 1548.000 ms vs summary 2124.000 ms, +37.21%)
+    B. 61 s ending AT capture end      Idle raw         671.000  summary      192671.000  (+28614.01%)
+                                       DBTm raw         732.000  summary        1281.000  ( +75.00%)   [io_worker busy raw 549.000 ms, 61 records]
+  ok: B. 61 s ending AT capture end: the comparison was possible
+  FAIL(line 500): B. 61 s ending AT capture end: Idle agrees (raw 671.000 ms vs summary 192671.000 ms, +28614.01%)
+  FAIL(line 503): B. 61 s ending AT capture end: DB Time agrees (raw 732.000 ms vs summary 1281.000 ms, +75.00%)
+    C. full span                       Idle raw        1430.000  summary      193430.000  (+13426.57%)
+                                       DBTm raw        1560.000  summary        2145.000  ( +37.50%)   [io_worker busy raw 585.000 ms, 130 records]
+  ok: C. full span: the comparison was possible
+  FAIL(line 500): C. full span: Idle agrees (raw 1430.000 ms vs summary 193430.000 ms, +13426.57%)
+  FAIL(line 503): C. full span: DB Time agrees (raw 1560.000 ms vs summary 2145.000 ms, +37.50%)
+--- 3b. the assertion is REACHABLE: a writer that withholds io_worker records ---
+  ok: the simulated fix withholds 198 io_worker records and keeps 390
+    A'. excludes the final second      Idle raw        1419.000  summary        1419.000  (  +0.00%)
+                                       DBTm raw        1548.000  summary        1548.000  (  +0.00%)   [io_worker busy raw 576.000 ms, 129 records]
+  ok: A'. excludes the final second: the comparison was possible
+  ok: A'. excludes the final second: Idle agrees (raw 1419.000 ms vs summary 1419.000 ms, +0.00%)
+  ok: A'. excludes the final second: DB Time agrees (raw 1548.000 ms vs summary 1548.000 ms, +0.00%)
+    B'. 61 s ending AT capture end     Idle raw         671.000  summary         671.000  (  +0.00%)
+                                       DBTm raw         732.000  summary         732.000  (  +0.00%)   [io_worker busy raw 549.000 ms, 61 records]
+  ok: B'. 61 s ending AT capture end: the comparison was possible
+  ok: B'. 61 s ending AT capture end: Idle agrees (raw 671.000 ms vs summary 671.000 ms, +0.00%)
+  ok: B'. 61 s ending AT capture end: DB Time agrees (raw 732.000 ms vs summary 732.000 ms, +0.00%)
+    C'. full span                      Idle raw        1430.000  summary        1430.000  (  +0.00%)
+                                       DBTm raw        1560.000  summary        1560.000  (  +0.00%)   [io_worker busy raw 585.000 ms, 130 records]
+  ok: C'. full span: the comparison was possible
+  ok: C'. full span: Idle agrees (raw 1430.000 ms vs summary 1430.000 ms, +0.00%)
+  ok: C'. full span: DB Time agrees (raw 1560.000 ms vs summary 1560.000 ms, +0.00%)
+--- 4. handle_heatmap's two routes agree cell by cell ---
+  ok: both routes have events to compare (raw 390, summary 585) -- a zero grid would satisfy every cell comparison below
+  ok: same grid shape (130 == 130 buckets)
+  FAIL(line 1007): every one of 2080 latency cells matches (65 mismatched): if a fix excludes io_workers from events[]/the writer it must exclude them from pgwt_compute_heatmap in the SAME commit, or a >= 120 s and a < 120 s window report different grids
+  FAIL(line 1011): and the two routes count the same events (390 == 585)
+--- 5. the comparator sees a one-nanosecond difference ---
+  ok: the probe has a real comparison to perturb
+  ok: an agreeing pair is judged as agreement
+  ok: one nanosecond of Idle (0.000001000 ms) is a disagreement -- no epsilon anywhere in this file
+  ok: one nanosecond of DB Time is a disagreement
+--- 6. the bypass suite: a gate that cannot see must refuse ---
+  ok: an empty summary dir answers Idle 0.000 / DB Time 0.000 ms -- which a comparison against an equally empty raw side would read as AGREEMENT
+  ok: 6a. an empty summary directory is REFUSED: the production summary preflight (pgwt_summaries_window_current) refuses this window (verdict 1, 0 files considered, 0 unusable): missing, unreadable or wrong-version summary files
+  ok: 6b. a missing summary directory is REFUSED: the production summary preflight (pgwt_summaries_window_current) refuses this window (verdict 0, 0 files considered, 0 unusable): missing, unreadable or wrong-version summary files
+  ok: 6c. a window overlapping no record is REFUSED: the window holds 0 ns of io_worker time (busy or idle)
+  ok: 6d. a summary file with no readable header is REFUSED: the production summary preflight (pgwt_summaries_window_current) refuses this window (verdict 0, 1 files considered, 1 unusable): missing, unreadable or wrong-version summary files
+  ok: 6d'. a summary file truncated to half its blocks is never read as AGREEMENT (verdict DIVERGE): a partial read can only shrink the summary side
+  FAIL(line 1178): with NO registry the UNREGISTERED RAW side counts io_worker idle the v6 summary already excluded (193430.000 vs 193430.000 ms), so the verdict is a false DIVERGE -- pre-v6 the same loss produced a false AGREE. Either way an unresolvable base makes this gate's answer meaningless, which is why it must refuse
+  ok: 6e. an absent/unresolvable registry is REFUSED: the backend registry resolved no io_worker pid, so both paths would agree for want of the thing being checked
+  ok: 6e'. a registry resolving no io_worker is REFUSED: the backend registry resolved no io_worker pid, so both paths would agree for want of the thing being checked
+  ok: 6f. a raw side with no io_worker record is REFUSED: pgwt_tag_events stamped PGWT_EVENT_FLAG_IO_WORKER on no record -- the property is ABSENT, not wrong
+  ok: 6g. a pre-flagged fixture is REFUSED: an event pushed into the writer already carried a category flag (the 8705412 pre-flagged-fixture trap)
+  ok: 6h. an empty raw side is REFUSED: the raw side holds no events
+  ok: an io_worker-free window AGREES (Idle 704.000 == 704.000, DB Time 768.000 == 768.000) -- which is why it must be refused rather than counted as parity
+  ok: 6i. a window with 0 ns of io_worker time is REFUSED: the window holds 0 ns of io_worker time (busy or idle)
+--- 7. the RESIDUAL straddler mechanism (measured, not asserted) ---
+    a 100 s Client:ClientRead closing in the final second, 10 s window:
+      Idle raw 10020.000 ms, summary 292110.000 ms (+2815.27%) -- the writer buckets the record WHOLE,
+      the raw path clips it. Independent of io_workers; NOT covered by section 3.
+  ok: the residual measurement is non-vacuous (both sides positive)
+--- 8. ACCEPTANCE TIER: /Users/dmitryfomin/work/git/pg_wait_tracer/tests/results/demo_rehearsal/trace ---
+  ok: the capture's own backends.jsonl was read (168 entries)
+  ok: and it resolves 3 io_worker pid(s) through pgwt_backend_type_flag -- a capture with none cannot test this
+  ok: the trace holds 1052 blocks
+  ok: the capture is exact-tier only (0 SAMPLES blocks): the sampled phantom-EXIT rule in src/server.c's loader is not reproduced here, so a sampled capture must be refused, not compared
+  ok: decoded 4307056 raw records
+    (raw stream was sorted by timestamp on disk)
+  ok: NO record on disk carries a category flag (0) -- the daemon never wrote one, which is precisely why a writer-side `evt->flags` test could not have filtered io_workers
+  ok: the real writer accepted every one of the capture's 4307056 records (4307056)
+  ok: and committed 1852 per-second records
+  ok: pgwt_tag_events stamped PGWT_EVENT_FLAG_IO_WORKER on 3 records from the registry's io_worker pids
+    span 1852 s, 1852 summary records, 4307056 raw records
+  ok: the capture carries io_worker records to remove (3 of 4307056) -- 0 would make the invariance assertion below vacuous
+  ok: the writer accepted every one of the 4307053 non-io_worker records (4307053)
+  ok: the io_worker-free run committed records on the SAME wall base (1852 records, base 1791885695954764000 == 1791885695954764000) -- a different base would compare two different windows
+    900 s, ends 1 s before the end     Idle raw    11461087.113  summary    11478724.878  (  +0.15%)
+                                       DBTm raw     2020966.499  summary     2024293.395  (  +0.16%)   [io_worker busy raw 0.000 ms, 900 records]
+  ok: 900 s, ends 1 s before the end: the comparison was possible
+  ok: 900 s, ends 1 s before the end: the SUMMARY path is bit-identical with the io_worker records removed (Idle 11478724.878 == 11478724.878, DB Time 2024293.395 == 2024293.395) -- so it counted none of their 0.000 ms
+  ok: 900 s, ends 1 s before the end: and so is the RAW path (Idle 11461087.113 == 11461087.113, DB Time 2020966.499 == 2020966.499) -- both paths are invariant to io_worker records, which is the parity this gate exists for
+                                       residual raw-vs-summary after io_workers: Idle +17637.765 ms (+0.1539%), DB Time +3326.896 ms (+0.1646%) -- the straddler + NONCMD_CPU mechanisms, NOT io_worker time; measured, not asserted (section 7)
+    900 s, ends AT capture end         Idle raw    11449487.682  summary    17186608.469  ( +50.11%)
+                                       DBTm raw     2018024.514  summary     2022423.181  (  +0.22%)   [io_worker busy raw 0.000 ms, 900 records]
+  ok: 900 s, ends AT capture end: the comparison was possible
+  FAIL(line 1560): 900 s, ends AT capture end: the SUMMARY path is bit-identical with the io_worker records removed (Idle 11633474.774 == 17186608.469, DB Time 2022423.181 == 2022423.181) -- so it counted none of their 0.000 ms
+  ok: 900 s, ends AT capture end: and so is the RAW path (Idle 11449487.682 == 11449487.682, DB Time 2018024.514 == 2018024.514) -- both paths are invariant to io_worker records, which is the parity this gate exists for
+                                       residual raw-vs-summary after io_workers: Idle +5737120.786 ms (+50.1081%), DB Time +4398.666 ms (+0.2180%) -- the straddler + NONCMD_CPU mechanisms, NOT io_worker time; measured, not asserted (section 7)
+    full span                          Idle raw    23753121.505  summary    29302771.140  ( +23.36%)
+                                       DBTm raw     3994167.789  summary     3997651.848  (  +0.09%)   [io_worker busy raw 0.000 ms, 1852 records]
+  ok: full span: the comparison was possible
+  FAIL(line 1560): full span: the SUMMARY path is bit-identical with the io_worker records removed (Idle 23749637.445 == 29302771.140, DB Time 3997651.848 == 3997651.848) -- so it counted none of their 0.000 ms
+  ok: full span: and so is the RAW path (Idle 23753121.505 == 23753121.505, DB Time 3994167.789 == 3994167.789) -- both paths are invariant to io_worker records, which is the parity this gate exists for
+                                       residual raw-vs-summary after io_workers: Idle +5549649.635 ms (+23.3639%), DB Time +3484.060 ms (+0.0872%) -- the straddler + NONCMD_CPU mechanisms, NOT io_worker time; measured, not asserted (section 7)
+
+76 checks, 11 failed

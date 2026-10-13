@@ -794,7 +794,7 @@ static void test_summary_recovery(void)
             struct pgwt_trace_event ev =
                 mk_event(1000000000000ULL + (uint64_t)s * 1000000000ULL
                          + i * 1000000, 1000 + i % 3, 0x0A000001, 500000, 9);
-            pgwt_summary_push_event(w, &ev);
+            pgwt_summary_push_event(w, &ev, 0);
         }
         pgwt_summary_flush(w);
     }
@@ -846,7 +846,7 @@ static void qattr_push(struct pgwt_summary_writer *w, uint64_t ts,
         mk_event(ts, pid, WEI(PG_WAIT_LOCK, 0), 1000000, 0);
     if (exit)
         ev.new_event = PGWT_EVENT_EXIT;
-    pgwt_summary_push_event(w, &ev);
+    pgwt_summary_push_event(w, &ev, 0);
 }
 
 static void test_summary_qattr_reclaim(void)

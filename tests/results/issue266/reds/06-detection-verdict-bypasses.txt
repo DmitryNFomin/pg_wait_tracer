@@ -1,0 +1,26 @@
+NEW GATE, RED 5 (review round 1) -- the `caught` arithmetic now has its own
+tests, including the bypass it was written to close
+===========================================================================
+
+The boundary-pair math moved out of run_tab into
+lib.inject_detection_verdict so it is testable. The bypass it closes, now a
+test rather than a comment:
+
+  pair_ratios = [1.0, 0.0, 0.0, 1.0]   # a FAILED CAPTURE at each end --
+                                       # sweep_consecutive_diff_ratios
+                                       # scores a missing frame 1.0 by itself
+  max(pair_ratios) = 1.0               # the OLD basis for `caught` -> PASS
+  inject_detection_verdict(...)        # -> caught=False, ratios [0.0, 0.0]
+
+Also covered: a not-measured tick (sweep_ratio None) never reads as caught;
+either boundary pair blind => not caught; a slackened threshold (0.5 against
+the 0.2 stimulus) => not caught, so a gate widened toward the stimulus size
+fails its own self-test; a target index with no pair, an absent/unparseable
+pair list, and an unparseable ratio all refuse.
+
+One of these cases found a real defect in the first draft of the function:
+a None/str target_index raised TypeError instead of refusing. Fixed, with
+the isinstance check before the arithmetic rather than inside the
+comprehension.
+
+Against the pre-review lib every case here is an AttributeError.

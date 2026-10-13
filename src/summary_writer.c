@@ -249,16 +249,21 @@ static void accum_query_add(struct pgwt_summary_accum *acc, uint64_t query_id,
 }
 
 /* Accumulate a single trace event into the per-second snapshot. `query_id`
- * is the id its per-query part is filed under (0 = none / deferred). */
-static void accum_event(struct pgwt_summary_accum *acc,
-                         const struct pgwt_trace_event *evt,
-                         uint64_t query_id)
+ * is the id its per-query part is filed under (0 = none / deferred).
+ * `io_worker` is the producer's resolved verdict on the pid's category
+ * (pgwt_summary_push_event's cat_flag) -- see the v6 note in summary_writer.h.
+ * Returns 1 if the record was dropped BECAUSE it belongs to an io_worker, so
+ * the caller can count it; 0 otherwise (accumulated, or dropped as a
+ * marker/EXIT, which have their own long-standing reasons). */
+static int accum_event(struct pgwt_summary_accum *acc,
+                        const struct pgwt_trace_event *evt,
+                        uint64_t query_id, bool io_worker)
 {
     uint32_t old_ev = evt->old_event;
     uint64_t dur = evt->duration_ns;
 
     if (old_ev == PGWT_EVENT_EXIT)
-        return;
+        return 0;
 
     /* Markers must never be accumulated (FID-4): exec/plan markers inflate
      * per-query counts (skewing avg low) and escalation markers insert
@@ -266,7 +271,26 @@ static void accum_event(struct pgwt_summary_accum *acc,
      * event_stream pushes every record (markers included, so they land in
      * the trace) before its own marker check. */
     if (PGWT_IS_MARKER(old_ev))
-        return;
+        return 0;
+
+    /* v6 (#315, #376): io_worker records are OUTSIDE the model, exactly as on
+     * the raw paths (src/compute.c: the time model drops their idle time and
+     * files their busy time under PGWT_CAT_IO_WORKER; Top Events, Top
+     * Sessions, Top Queries and the AAS loop skip them outright).
+     *
+     * ALL FIVE accumulators, deliberately: class_ns, idle_ns, events[],
+     * sessions[] and queries[]. A partial exclusion does not fix the
+     * divergence, it relocates it -- events[] is where every read path gets
+     * the per-event rows and the HISTOGRAMS from, so leaving it in would move
+     * the disagreement to the Events tab and to the heatmap
+     * (pgwt_compute_heatmap_from_summaries reads se->histogram; the matching
+     * raw-side exclusion in pgwt_compute_heatmap ships with this change,
+     * because handle_heatmap routes both ways).
+     *
+     * This is the one and only place the drop happens, so there is no second
+     * copy of the rule to drift. */
+    if (io_worker)
+        return 1;
 
     acc->total_events++;
 
@@ -340,6 +364,7 @@ static void accum_event(struct pgwt_summary_accum *acc,
 
     /* Per-query stats */
     accum_query_add(acc, query_id, old_ev, 1, dur, dur);
+    return 0;
 }
 
 /* ── #128: deferred per-query attribution (query_attr.h) ──────────────────
@@ -1069,9 +1094,27 @@ int pgwt_summary_writer_init(struct pgwt_summary_writer *w,
 }
 
 int pgwt_summary_push_event(struct pgwt_summary_writer *w,
-                              const struct pgwt_trace_event *evt)
+                              const struct pgwt_trace_event *evt,
+                              uint32_t cat_flag)
 {
     if (!w->enabled) return 0;
+
+    /* v6 (#315, #376): the producer's verdict on this pid's category. The
+     * drop itself stays in accum_event -- the one write-side chokepoint,
+     * where markers are dropped too -- so there is no second copy of the
+     * rule, and the guard is on the path every io_worker record takes
+     * instead of being short-circuited here where only a test could reach
+     * it.
+     *
+     * evt->flags is deliberately NOT consulted: nothing that feeds this
+     * writer sets a category bit (the daemon does not, and the server's
+     * pgwt_tag_events runs at raw LOAD time, long after), so a flags check
+     * here would be DEAD in every producer that exists -- which is the N7
+     * trap in tests/test_agg_raw_crosscheck.c, where a pre-flagged fixture
+     * greens a guard that does nothing in production. An offline producer
+     * that does tag its events passes `evt->flags & PGWT_EVENT_FLAG_IO_WORKER`
+     * as cat_flag at the call site, where it is visible. */
+    bool io_worker = (cat_flag & PGWT_EVENT_FLAG_IO_WORKER) != 0;
 
     /* Lazy file open on first event */
     if (!w->fp) {
@@ -1117,9 +1160,36 @@ int pgwt_summary_push_event(struct pgwt_summary_writer *w,
     }
 
     /* #128: the per-query part may be deferred until the pid's command
-     * reports its id (see summary_qattr_step). */
-    uint64_t qid = w->qattr ? summary_qattr_step(w, evt) : evt->query_id;
-    accum_event(&w->accum, evt, qid);
+     * reports its id (see summary_qattr_step).
+     *
+     * v6: an io_worker record skips the deferral entirely. io_workers are
+     * structurally query-less (src/compute.c says so where it skips them in
+     * Top Queries), and the deferral is a SECOND route into queries[]:
+     * pgwt_qattr_defer parks the time on the pid and summary_qattr_emit
+     * files it with accum_query_add later, which would walk straight past
+     * the exclusion in accum_event. Excluding in one accumulator and not the
+     * other is how a partial fix relocates a divergence. */
+    uint64_t qid = evt->query_id;
+    if (w->qattr && !io_worker) {
+        qid = summary_qattr_step(w, evt);
+    } else if (w->qattr && io_worker && evt->new_event == PGWT_EVENT_EXIT) {
+        /* LIFECYCLE, not accounting. Skipping summary_qattr_step also skips
+         * its EXIT-time qattr_slot_free, so a slot this pid created BEFORE
+         * its metadata resolved (the pgwt_live_pid_cat_flag residual: an
+         * io_worker reads as foreground until discovery parses it) would
+         * never be reclaimed. Dropping the parked time is right -- io_workers
+         * are query-less -- but the slot must still go, or pid reuse inside
+         * one writer lifetime hands a client backend a stale entry and it
+         * emits the parked io_worker time into queries[] on its first
+         * CMD_START. Free it without resolving anything. */
+        struct pgwt_summary_qattr_slot *s = qattr_slot(w, evt->pid);
+        if (s)
+            qattr_slot_free(w, s);
+    }
+    if (accum_event(&w->accum, evt, qid, io_worker)) {
+        w->io_worker_events_excluded_total++;
+        w->io_worker_ns_excluded_total += evt->duration_ns;
+    }
     return 0;
 }
 

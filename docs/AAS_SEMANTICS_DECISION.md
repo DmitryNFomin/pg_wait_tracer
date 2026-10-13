@@ -433,15 +433,51 @@ accounting rule and not about the byte layout:
   carrying only part of the window. Layout is byte-identical to v4; the bump
   exists for the rule, not for the bytes.
 
-**v5 says nothing about io_workers.** The summary records still COUNT
-io_worker time, so the exclusion described above holds on the raw paths only —
-tracked as issue #315, with the reason the obvious one-line writer fix does
-not work recorded in `tests/test_agg_raw_crosscheck.c` (hole N7): nothing on
-the live path sets `PGWT_EVENT_FLAG_IO_WORKER`, so a check on `evt->flags`
-inside the summary writer is dead in the daemon. Note also that
-`pgwt_compute_heatmap` does not exclude io_workers either, so both heatmap
-paths currently agree by counting them; excluding them at the writer alone
-would move the divergence to the latency grid rather than remove it.
+- **v6** (#315, #376) excludes io_worker records at the writer, from all five
+  accumulators — `class_ns`, `idle_ns`, `events[]` (histograms included),
+  `sessions[]` and `queries[]` — so the exclusion described above finally
+  holds on the summary path too. Layout is byte-identical to v5; the bump
+  exists for the rule.
+
+  **The writer is TOLD, it does not guess.** `pgwt_summary_push_event` takes a
+  `cat_flag` resolved by the producer: `src/event_stream.c` hoists
+  `pgwt_live_pid_cat_flag` above the push, and `src/escalation.c` resolves in
+  `flush_open_intervals` (its capture-end flush is a second producer that
+  never passes through the event-stream callback — and it is where the
+  divergence peaked, because an io_worker spends the whole capture in one
+  `Activity:IoWorkerMain` wait whose only record is the one that flush
+  synthesizes). A check on `evt->flags` would have been dead in the daemon:
+  nothing on the live path sets `PGWT_EVENT_FLAG_IO_WORKER` (hole N7 in
+  `tests/test_agg_raw_crosscheck.c`), which is why the writer reads the
+  argument and never the flag.
+
+  `pgwt_compute_heatmap` gained the matching raw-side exclusion in the same
+  commit: `events[]` carries the histograms the summary heatmap is built from
+  and `handle_heatmap` routes both ways, so excluding at the writer alone
+  would have moved the divergence to the latency grid instead of removing it.
+
+  Measured on `tests/results/demo_rehearsal/trace` (PG18, `io_method=worker`,
+  1851 s, 3 io_workers), summary minus raw on Idle: whole capture
+  **+5,549,649.64 ms (+23.36%) → -3,484.06 ms (-0.0147%)**; a 150 s window
+  containing the capture end **+5,768,521.72 ms (+308.16%) → +215,388.03 ms
+  (+11.51%)**. The capture-end remainder is NOT io_worker time: it is the
+  general straddler mechanism (the writer buckets a long interval whole into
+  the second in which it closes, while the raw path clips it to the window —
+  a long `Client:ClientRead` behaves identically), unchanged by v6 and
+  unchanged at +2.43% one second earlier. The summary path still reports no
+  io_worker BUSY total (`cat_ms[]` / `io_worker_busy_pct` are raw-path-only,
+  hole N1), as it did before v6.
+
+  **Residual, measured not assumed:** `pgwt_live_pid_cat_flag` returns 0
+  (foreground) while a pid's metadata is unparsed, so an io_worker's earliest
+  records can still be written as foreground, while the raw path tags them
+  post hoc from `backends.jsonl`. On this capture that residual is **0 ms of
+  5,553,133.69 ms** (no io_worker record closes in the capture's first
+  second). The writer counts what it excluded
+  (`summary_io_worker_events_excluded_total` /
+  `summary_io_worker_ns_excluded_total` on the control socket) so the residual
+  stays observable in production rather than assumed.
+
 Startup recovery still archives an intact older file instead of calling it
 corrupt.
 

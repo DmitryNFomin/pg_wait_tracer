@@ -1,0 +1,28 @@
+1117:    bool io_worker = cat_flag != 0;   /* OVER-BROAD MUTANT */
+=== test_io_worker_summary under the over-broad mutant ===
+  FAIL(line 398): the writer COUNTED the drops: 600 events (expected 300)
+  FAIL(line 401): ...and their ns: 13800.000 ms (expected 7500.000)
+  FAIL(line 418): ...while the client's AND the background pid's Lock time are untouched: 3000.000 ms (expected 4800.000 = 150 x (20 + 12) ms) -- the exclusion is the io_worker bit, not any non-zero category
+  FAIL(line 425): idle_ns carries ClientRead AND the background pid's BgwriterMain: 3750.000 ms (expected 8250.000 = 150 x (25 + 30) ms), i.e. the io_worker's 6000.000 ms of IoWorkerMain is NOT in it and the background pid's 4500.000 ms IS
+  FAIL(line 438): ...while the client's two events (3000.000, 3750.000 ms) and the BACKGROUND pid's idle event (0.000 ms, expected 4500.000) are all still there -- IoWorkerMain and BgwriterMain are both Activity-class idle events, so only the pid's category can tell them apart
+  FAIL(line 443): ...but it DOES have one for the background pid 104: an over-broad exclusion would drop that row too
+  FAIL(line 446): ...and exactly 2 session rows per second (150): the client's and the background pid's
+  FAIL(line 451): Σ events[].histogram counts the 4 non-io_worker intervals per second (300, expected 600) -- the io_worker's 2 are gone from the grid and nothing else is
+  FAIL(line 623): DB Time agrees (delta -1800.000 ms)
+  FAIL(line 624): Idle agrees (delta -4500.000 ms)
+  FAIL(line 627): the heatmap agrees cell-for-cell (delta -150 records) -- both handle_heatmap routes answer the same question
+  FAIL(line 685): the flush record is excluded too (601 drops, expected 301)
+  FAIL(line 689): idle_ns is still the client's 8250.000 ms (got 3750.000) -- the 150 000 ms flush record did not land in the closing second
+63 checks, 13 failed
+=== test_io_worker_parity (unit tier) under the over-broad mutant ===
+  FAIL(line 830): the committed blocks hold every pushed NON-io_worker event (390 + 198 == 848): the io_worker records are excluded at the writer (summary v6), nothing else is lost, and the two sides are still the same events rather than two samples
+  FAIL(line 512): A. excludes the final second: Idle agrees (raw 2580.000 ms vs summary 1419.000 ms, -45.00%)
+  FAIL(line 515): A. excludes the final second: DB Time agrees (raw 2064.000 ms vs summary 1548.000 ms, -25.00%)
+  FAIL(line 512): B. 61 s ending AT capture end: Idle agrees (raw 1220.000 ms vs summary 671.000 ms, -45.00%)
+  FAIL(line 515): B. 61 s ending AT capture end: DB Time agrees (raw 976.000 ms vs summary 732.000 ms, -25.00%)
+  FAIL(line 512): C. full span: Idle agrees (raw 2600.000 ms vs summary 1430.000 ms, -45.00%)
+  FAIL(line 515): C. full span: DB Time agrees (raw 2080.000 ms vs summary 1560.000 ms, -25.00%)
+  FAIL(line 1077): every one of 2080 latency cells matches (130 mismatched): if a fix excludes io_workers from events[]/the writer it must exclude them from pgwt_compute_heatmap in the SAME commit, or a >= 120 s and a < 120 s window report different grids
+  FAIL(line 1081): and the two routes count the same events (520 == 390)
+  FAIL(line 1331): an io_worker-free window AGREES (Idle 1280.000 == 704.000, DB Time 1024.000 == 768.000) -- which is why it must be refused rather than counted as parity
+58 checks, 10 failed
