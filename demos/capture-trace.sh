@@ -33,11 +33,6 @@ LOCAL_TRACE_DIR="${TRACE_DIR:-$DEMOS_DIR/local-trace}"
 VM_TYPE="${VM_TYPE:-cpx22}"
 BUILD_VERSION="${PGWT_BUILD_VERSION:-$(git -C "$REPO_ROOT" rev-parse HEAD)}"
 
-[[ -n "${HCLOUD_TOKEN:-}" ]] || {
-    echo "FATAL: HCLOUD_TOKEN not set (export your Hetzner Cloud API token)" >&2
-    exit 1
-}
-
 # --- 1. Provision (or reuse) ---
 if [[ -n "${REUSE_VM_IP:-}" ]]; then
     VM_IP="$REUSE_VM_IP"
@@ -45,6 +40,13 @@ if [[ -n "${REUSE_VM_IP:-}" ]]; then
 else
     [[ ! -f "$DEMOS_DIR/.vm-id" ]] || {
         echo "FATAL: demos/.vm-id already exists — run 'make clean-vm' first" >&2
+        exit 1
+    }
+    # Only provisioning needs the token: the REUSE_VM_IP path never calls
+    # hetzner-vm.sh. Checking it up front made a re-cut on an already
+    # provisioned VM impossible for a caller that cannot materialise it.
+    [[ -n "${HCLOUD_TOKEN:-}" ]] || {
+        echo "FATAL: HCLOUD_TOKEN not set (export your Hetzner Cloud API token)" >&2
         exit 1
     }
     echo "==> Provisioning Hetzner VM ($VM_TYPE) ..."
