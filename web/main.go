@@ -15,6 +15,7 @@ import (
 	"os/signal"
 	"runtime"
 	"runtime/debug"
+	"sort"
 )
 
 //go:embed static
@@ -128,7 +129,70 @@ func main() {
 	})
 
 	// Serve embedded static files.
-	sub, _ := fs.Sub(staticFiles, "static")
+	sub, err := fs.Sub(staticFiles, "static")
+	if err != nil {
+		// Can only happen if the //go:embed directive above is broken, which
+		// is a build-time certainty rather than a runtime risk -- but serving
+		// a UI-less bridge is worse than refusing to start.
+		log.Fatalf("embedded static FS unavailable: %v", err)
+	}
+
+	// Embedded-asset manifest: the paths this BINARY actually carries.
+	//
+	// Why it exists: web/static is compiled into this binary, so a bridge
+	// built before a UI edit serves the old assets with no outward sign, and
+	// a live-UI-smoke walk or a counted demo rehearsal then grades the wrong
+	// UI and reports green. tests/live_daemon_lib.sh's
+	// assert_served_ui_matches_tree compares what is served against the tree
+	// under test -- and to do that it has to know WHICH files the binary was
+	// built with. Deriving that list by re-implementing Go's //go:embed
+	// exclusion rules in the test (dot/underscore prefixes, symlinks, nested
+	// modules, go.mod as a file vs a directory, dangling symlinks) produced
+	// three separate silent passes in review, each one a gap between the
+	// replica and the real rules. So the binary answers for itself.
+	//
+	// Paths only. No contents (the FileServer below already serves those),
+	// no filesystem outside the embedded FS -- embed.FS cannot reference
+	// anything else, so there is no traversal to guard against. Not
+	// token-gated, because it discloses nothing new: http.FileServer already
+	// serves a directory listing for every embedded directory without an
+	// index.html (measured: GET /lib/ returns an HTML index of camera.js,
+	// control.js, format.js, ...), so the path set is already enumerable by
+	// anyone who can reach this port. This endpoint only saves the guard from
+	// scraping those listings.
+	//
+	// Deliberately NOT behind a build tag or a flag: a guard that works only
+	// in a special build is a guard that will not run when it matters, and
+	// the one thing it must catch is the case where someone forgot a step.
+	http.HandleFunc("/embedded-assets", func(w http.ResponseWriter, r *http.Request) {
+		paths := []string{}
+		err := fs.WalkDir(sub, ".", func(p string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if !d.IsDir() {
+				paths = append(paths, p)
+			}
+			return nil
+		})
+		if err != nil {
+			// A partial list would be worse than none: the guard treats a
+			// failed fetch as "cannot verify" and refuses, which is correct,
+			// whereas a short list would look like a smaller tree.
+			http.Error(w, "walking embedded FS: "+err.Error(),
+				http.StatusInternalServerError)
+			return
+		}
+		sort.Strings(paths)
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"paths":          paths,
+			"count":          len(paths),
+			"client_version": version,
+		})
+	})
+
 	http.Handle("/", http.FileServer(http.FS(sub)))
 
 	addr := fmt.Sprintf("localhost:%d", *port)

@@ -47,80 +47,65 @@ PYEOF
 }
 
 # assert_served_ui_matches_tree BASE_URL [STATIC_DIR] [LABEL]
-# Refuses when the Go bridge is serving a DIFFERENT web/static than the tree
-# under test. web/main.go embeds web/static into the binary (`//go:embed
-# static`), so a bridge built before a UI edit keeps serving the old assets
-# with no outward sign: a live-tier walk -- or a counted demo rehearsal --
-# then passes against the wrong UI and reports green. Nothing else in the
-# live tier can see that; `make pgwt-client` succeeding says only that SOME
-# binary exists.
+# Refuses when the Go bridge is not serving the web/static of the tree under
+# test. web/main.go compiles web/static into the binary (`//go:embed static`),
+# so a bridge built before a UI edit serves the OLD assets with no outward
+# sign: a live-UI-smoke walk -- or a counted demo rehearsal -- then grades the
+# wrong UI and reports green, and nothing in the summary afterwards can tell.
+# `make pgwt-client` succeeding says only that some binary exists.
 #
-# Check: sha256 of every asset on disk vs the bytes the bridge actually
-# serves for the same path. Not one sampled file -- the whole tree, so the
-# guard is meaningful for ANY web/static change, not just the one that
-# prompted it. ~59 files / 1.8 MB over localhost, well under a second.
+# THE ASSET LIST COMES FROM THE BINARY, not from a reimplementation of Go's
+# rules. Earlier versions of this function derived "what should be embedded"
+# by replicating //go:embed's exclusions in Python -- dot/underscore prefixes,
+# symlinks, nested modules, go.mod as a file versus a directory -- and every
+# gap between the replica and the real rules was a SILENT PASS. Three
+# distinct ones were found in review, the last being a dangling
+# `static/mod/go.mod` symlink: lstat() succeeded, the replica pruned `mod/` as
+# a nested module, Go embedded `mod/x.js` anyway, and the guard reported
+# success over a shrunken denominator. No invariant computed after an
+# exclusion can see what the exclusion removed. So the replica is gone:
+# GET $BASE_URL/embedded-assets returns the paths the running binary actually
+# carries (web/main.go), and this function compares that set against the disk
+# tree and hashes exactly those paths.
 #
-# Exit codes are deliberately distinct, because "served bytes differ" and
-# "could not look" are different failures and the second must never be
-# reported as a match (that is the bug this guard exists to prevent, one
-# level up):
-#   0  enumerated == compared == matched, and enumerated > 0. Nothing less
-#      earns a pass: the COUNT INVARIANT is the contract, not "no errors were
-#      noticed"
-#   1  MISMATCH: at least one asset's served bytes differ from disk
-#   2  CANNOT VERIFY: anything meaning "I did not actually compare every asset
-#      I enumerated" -- an asset that could not be fetched (404, refused
-#      connection, timeout), one that could not be READ from disk, an error
-#      while WALKING or STATTING the tree, no assets on disk, a STATIC_DIR
-#      that does not exist, a malformed timeout override, a count mismatch, or
-#      any unanticipated exception at all. CANNOT VERIFY wins over MISMATCH
-#      when both occur -- an incomplete look is never downgraded to a partial
-#      pass
+# Consequences worth stating plainly:
+#   * the round-1 "known limit" is CLOSED. A file deleted from disk that the
+#     stale binary still serves is now a visible asymmetric difference, not an
+#     invisible one.
+#   * the disk walk applies NO exclusion rules at all. Any path present on
+#     one side and not the other refuses, including a file Go would not embed
+#     (a stray .DS_Store, a symlink, a nested module). That is deliberate: the
+#     alternative is re-introducing the replica that caused three silent
+#     passes. The refusal names the paths and says to remove the file or
+#     rebuild, which is loud and fixable -- and the live tier runs on Linux
+#     boxes where such files do not appear.
+#
+# Exit codes, derived ONCE at the end from state:
+#   0  the binary's set and the disk set are identical, and
+#      embedded == compared == matched with embedded > 0
+#   1  MISMATCH: a path present in BOTH sets has different bytes
+#   2  CANNOT VERIFY: the manifest could not be fetched or parsed (an older
+#      bridge with no /embedded-assets endpoint lands here -- that is "could
+#      not look", never a pass), the two sets differ either way, an asset
+#      could not be fetched or read, the walk or a stat failed, the manifest
+#      is empty, STATIC_DIR is missing, the timeout override is malformed, a
+#      count invariant fails, or anything unanticipated raises
 #   3  TOOLING: python3 is missing, so the check could not run at all
-# Every non-zero code names the asset and prints BOTH hashes (or the error),
-# so the log says which file and in which direction.
+# CANNOT VERIFY always wins over MISMATCH: an incomplete look is never
+# downgraded to a partial pass.
 #
-# FAIL-CLOSED BY CONSTRUCTION, after three rounds of the same defect. Twice
-# the fix was "catch the error at THIS call", and twice another uncaught call
-# was found -- the third being os.path.isfile()/islink(), which report "I
-# could not look" as a plain False, so a chmod-444 directory produced rc=0
-# over 1 of 2 assets. The structure is now:
-#   * every failure, from any source, lands in ONE blocked[] list;
-#   * stat is os.lstat(), which raises -- os.path.isfile()/islink() are not
-#     used anywhere in this function;
-#   * the exit code is derived ONCE at the end from state (blocked[] plus the
-#     three counts), never at the point of failure;
-#   * the body runs under a catch-all that turns any unanticipated exception
-#     into 2 -- python exits 1 on an uncaught exception, which is this
-#     function's MISMATCH code, so a crash could otherwise masquerade as a
-#     wrong answer instead of a refusal.
-# Adding a new `continue` to the comparison loop without appending to
-# blocked[] does not create a silent pass: the compared != enumerated branch
-# refuses.
+# FAIL-CLOSED BY CONSTRUCTION: every failure from any source lands in one
+# append-only blocked[] list; stat is os.lstat(), which raises, never
+# os.path.isfile()/islink()/isdir(), which report "I could not look" as a
+# plain False; the exit code is computed from blocked[] plus the counts at the
+# end, never at the point of failure; and the body runs under a catch-all that
+# turns any unanticipated exception into 2 (python exits 1 on an uncaught
+# exception, which is this function's MISMATCH code, so a crash must not be
+# allowed to masquerade as a wrong answer).
 #
 # PGWT_SERVED_ASSET_TIMEOUT_S (default 15) exists so the timeout path can be
 # tested; a non-numeric or non-positive value refuses rather than silently
 # reverting to the default.
-#
-# What counts as "embeddable" was MEASURED against both toolchains (macOS
-# go1.26.0 and the box's go1.22.2, the one that builds the bridge for a
-# rehearsal) rather than read off the docs -- fixture and output in
-# tests/results/served_asset_guard/embed_semantics/. `//go:embed static`
-# (no `all:`) embeds neither a path component starting with "." or "_", nor a
-# SYMLINK to a regular file, nor anything inside a subtree that is its own
-# module -- where "contains go.mod" means a go.mod FILE **or DIRECTORY** of
-# that name (measured; an isfile()-only test missed the directory case and
-# would enumerate assets the bridge does not serve) -- but DOES embed
-# "a.js#v". So this walk skips the
-# first three (including each of them would be a FALSE REFUSAL of a current
-# bridge, the expensive direction) and percent-quotes the URL for the last
-# (unquoted, "a.js#v" is fetched as "a.js" plus a fragment: the guard would
-# fetch one asset twice and never look at the other).
-#
-# Known limit, stated rather than implied: this enumerates the DISK tree, so
-# a stale binary that still serves a file deleted from disk since is not
-# detected. Any file added to or modified on disk is -- which is the failure
-# mode a stale `make pgwt-client` actually produces.
 assert_served_ui_matches_tree() {
     local base="$1" root="${2:-}" label="${3:-live}"
     if [[ -z "$root" ]]; then
@@ -132,6 +117,7 @@ assert_served_ui_matches_tree() {
     fi
     python3 - "$base" "$root" "$label" <<'PYEOF'
 import hashlib
+import json
 import os
 import stat
 import sys
@@ -143,31 +129,13 @@ base, root, label = sys.argv[1], sys.argv[2], sys.argv[3]
 if not base.endswith("/"):
     base += "/"
 
+MANIFEST = "embedded-assets"
+
+blocked = []
+
 
 def say(msg):
     print("%s: %s" % (label, msg), flush=True)
-
-
-# FAIL-CLOSED BY CONSTRUCTION (review round 2).
-#
-# Rounds 1 and 2 each fixed one call that swallowed an error, and round 2
-# found a third: os.path.isfile()/islink() return False on OSError, so a
-# readable-but-not-searchable directory (chmod 444) dropped its asset from the
-# list and the function returned 0 having compared one of two. Patching the
-# next call site would have been the same mistake a third time, so the shape
-# changed instead:
-#
-#   * blocked[] collects EVERY reason this run could not fully verify --
-#     traversal, lstat, disk read, fetch, whatever raised, wherever;
-#   * stat is done with os.lstat(), which RAISES, never with os.path.isfile()
-#     or islink(), which answer False for "I could not look";
-#   * the exit code is computed ONCE at the end from state, never at the point
-#     of failure, and rc 0 requires blocked to be empty AND
-#     enumerated == compared == matched. A guard that cannot say how many
-#     assets it compared has no business saying they all matched;
-#   * the whole body runs under a catch-all that turns any unanticipated
-#     exception into 2. Nothing can exit 0 or 1 by accident.
-blocked = []
 
 
 def block(kind, where, exc):
@@ -185,10 +153,8 @@ def run():
             "is not a positive number (%s)" % (raw_timeout, e))
         return 2
 
-    # os.stat, not os.path.isdir: isdir() returns False for "missing" AND for
-    # "I was not allowed to look", and those deserve different sentences. The
-    # verdict is 2 either way, but a log that says "does not exist" about a
-    # permission error sends the next person to the wrong place.
+    # os.stat, not os.path.isdir: isdir() returns False both for "missing" and
+    # for "I was not allowed to look", and those deserve different sentences.
     try:
         root_st = os.stat(root)
     except FileNotFoundError:
@@ -202,80 +168,94 @@ def run():
         say("REFUSE served-asset check: CANNOT VERIFY -- static dir %r is not a directory" % root)
         return 2
 
-    # ── enumerate what //go:embed would embed ────────────────────────────────
-    def is_nested_module(d):
-        # Go excludes a subtree that is its own module. MEASURED: this holds
-        # whether go.mod is a FILE or a DIRECTORY (go1.26.0; the earlier
-        # os.path.isfile() test missed the directory case, a false-refusal
-        # risk). os.lstat raises rather than guessing.
-        try:
-            os.lstat(os.path.join(d, "go.mod"))
-            return True
-        except FileNotFoundError:
-            return False
-        except OSError as e:
-            block("STAT", os.path.join(d, "go.mod"), e)
-            return True        # unknown -> exclude, and blocked[] forces rc 2
+    # ── 1. what the BINARY says it carries ───────────────────────────────────
+    url = base + MANIFEST
+    try:
+        with urllib.request.urlopen(url, timeout=timeout_s) as r:
+            if r.status != 200:
+                say("REFUSE served-asset check: CANNOT VERIFY -- %s returned HTTP %s; this "
+                    "bridge cannot say which assets it embeds (a bridge built before the "
+                    "/%s endpoint existed lands here -- rebuild: make pgwt-client)"
+                    % (url, r.status, MANIFEST))
+                return 2
+            raw = r.read()
+    except urllib.error.HTTPError as e:
+        # Caught separately and BEFORE the generic handler: urllib RAISES on
+        # 404 rather than returning it, so the "older bridge, rebuild" hint --
+        # the single most likely reason this check ever fires -- would
+        # otherwise be reported as a generic fetch failure.
+        say("REFUSE served-asset check: CANNOT VERIFY -- %s returned HTTP %s; this bridge "
+            "cannot say which assets it embeds (a bridge built before the /%s endpoint "
+            "existed lands here -- rebuild: make pgwt-client)" % (url, e.code, MANIFEST))
+        return 2
+    except Exception as e:
+        say("REFUSE served-asset check: CANNOT VERIFY -- could not fetch %s: %s: %s; without "
+            "the binary's own asset list there is nothing to compare against"
+            % (url, type(e).__name__, e))
+        return 2
+    try:
+        doc = json.loads(raw.decode("utf-8"))
+        embedded = sorted(doc["paths"])
+        if not isinstance(embedded, list) or not all(isinstance(p, str) for p in embedded):
+            raise ValueError("paths is not a list of strings")
+    except Exception as e:
+        say("REFUSE served-asset check: CANNOT VERIFY -- %s did not return a usable asset "
+            "list (%s: %s); an unparseable manifest is not an empty one"
+            % (url, type(e).__name__, e))
+        return 2
+    if not embedded:
+        say("REFUSE served-asset check: CANNOT VERIFY -- %s reports ZERO embedded assets; "
+            "an empty subject is never a pass" % url)
+        return 2
+    if doc.get("count") is not None and doc["count"] != len(embedded):
+        say("REFUSE served-asset check: CANNOT VERIFY -- %s reports count=%s but listed %d "
+            "paths; the manifest contradicts itself"
+            % (url, doc["count"], len(embedded)))
+        return 2
 
-    rels = []
-
+    # ── 2. what is on DISK -- no exclusion rules, by design ──────────────────
     def on_walk_error(err):
         block("TRAVERSAL", getattr(err, "filename", root) or root, err)
 
+    on_disk = []
     for dirpath, dirnames, filenames in os.walk(root, onerror=on_walk_error):
-        keep = []
-        for d in dirnames:
-            if d.startswith((".", "_")):
-                continue
-            full = os.path.join(dirpath, d)
-            try:
-                st = os.lstat(full)
-            except OSError as e:
-                block("LSTAT", full, e)
-                continue
-            if stat.S_ISLNK(st.st_mode):
-                continue                      # embed does not follow symlinks
-            if is_nested_module(full):
-                continue
-            keep.append(d)
-        dirnames[:] = keep
         for fn in filenames:
-            if fn.startswith((".", "_")):
-                continue
             full = os.path.join(dirpath, fn)
             try:
-                st = os.lstat(full)
+                os.lstat(full)
             except OSError as e:
-                # The round-2 bug: os.path.isfile() answered False here and
-                # the asset vanished from the list without a trace.
+                # A stat that fails is a failure to look, not a "no".
                 block("LSTAT", full, e)
                 continue
-            if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
-                continue                      # embed takes regular files only
-            rels.append(os.path.relpath(full, root))
-    rels.sort()
-    enumerated = len(rels)
+            on_disk.append(os.path.relpath(full, root).replace(os.sep, "/"))
+    on_disk_set = set(on_disk)
+    embedded_set = set(embedded)
 
-    # ── compare ──────────────────────────────────────────────────────────────
+    only_disk = sorted(on_disk_set - embedded_set)
+    only_binary = sorted(embedded_set - on_disk_set)
+
+    # ── 3. hash exactly what the binary says it has ──────────────────────────
     compared = 0
     matched = 0
     mismatch = []
-    for rel in rels:
-        url = base + urllib.parse.quote(rel.replace(os.sep, "/"), safe="/")
+    for rel in embedded:
+        if rel in only_binary:
+            continue            # already recorded as an asymmetric difference
+        asset_url = base + urllib.parse.quote(rel, safe="/")
         try:
-            with open(os.path.join(root, rel), "rb") as fh:
+            with open(os.path.join(root, *rel.split("/")), "rb") as fh:
                 disk = fh.read()
         except OSError as e:
             block("DISK READ", rel, e)
             continue
         try:
-            with urllib.request.urlopen(url, timeout=timeout_s) as r:
+            with urllib.request.urlopen(asset_url, timeout=timeout_s) as r:
                 if r.status != 200:
-                    blocked.append("FETCH %s (%s): HTTP %s" % (rel, url, r.status))
+                    blocked.append("FETCH %s (%s): HTTP %s" % (rel, asset_url, r.status))
                     continue
                 served = r.read()
         except Exception as e:
-            block("FETCH", "%s (%s)" % (rel, url), e)
+            block("FETCH", "%s (%s)" % (rel, asset_url), e)
             continue
         compared += 1
         dh = hashlib.sha256(disk).hexdigest()
@@ -288,41 +268,45 @@ def run():
     for rel, dh, dn, sh, sn in mismatch:
         say("served-asset check: MISMATCH %s -- disk sha256=%s (%d bytes), "
             "served sha256=%s (%d bytes)" % (rel, dh, dn, sh, sn))
+    for p in only_binary:
+        say("served-asset check: IN BINARY, NOT ON DISK -- %s (the bridge still carries a "
+            "file this tree no longer has)" % p)
+    for p in only_disk:
+        say("served-asset check: ON DISK, NOT IN BINARY -- %s (the bridge predates this "
+            "file, or Go does not embed it -- remove it from web/static or rebuild)" % p)
     for b in blocked:
         say("served-asset check: COULD NOT CHECK -- %s" % b)
 
-    # ── one place decides, from state ────────────────────────────────────────
+    # ── 4. one place decides, from state ─────────────────────────────────────
     if blocked:
-        # Deliberately NOT phrased as "N of M assets": a traversal or stat
-        # failure means some assets were never even enumerated, so the honest
-        # report is the number of problems plus both counts.
         say("REFUSE served-asset check: CANNOT VERIFY -- %d problem(s) prevented a complete "
-            "check (enumerated=%d, compared=%d); an incomplete look is never a pass"
-            % (len(blocked), enumerated, compared))
+            "check (embedded=%d, compared=%d); an incomplete look is never a pass"
+            % (len(blocked), len(embedded), compared))
         return 2
-    if enumerated == 0:
-        say("REFUSE served-asset check: CANNOT VERIFY -- no embeddable assets found under %s "
-            "(an empty subject is never a pass)" % root)
+    if only_binary or only_disk:
+        say("REFUSE served-asset check: CANNOT VERIFY -- the binary's asset set and this "
+            "tree's differ: %d only in the binary, %d only on disk (embedded=%d, "
+            "on_disk=%d). Rebuild with 'make pgwt-client'; if a listed path is one Go does "
+            "not embed, remove it from web/static"
+            % (len(only_binary), len(only_disk), len(embedded), len(on_disk_set)))
         return 2
-    if compared != enumerated:
-        # Backstop for a future edit that skips a comparison without recording
-        # a reason. Unreachable while every `continue` above calls block().
-        say("REFUSE served-asset check: CANNOT VERIFY -- compared %d of %d enumerated assets "
+    if compared != len(embedded):
+        say("REFUSE served-asset check: CANNOT VERIFY -- compared %d of %d embedded assets "
             "with nothing recorded as blocked; the count invariant failed"
-            % (compared, enumerated))
+            % (compared, len(embedded)))
         return 2
     if mismatch:
         say("REFUSE served-asset check: MISMATCH -- %d of %d assets differ; the bridge binary "
             "was built from a different web/static than this tree (rebuild: make pgwt-client)"
-            % (len(mismatch), enumerated))
+            % (len(mismatch), len(embedded)))
         return 1
-    if matched != enumerated:
-        say("REFUSE served-asset check: CANNOT VERIFY -- %d matched but %d enumerated and no "
-            "mismatch recorded; the count invariant failed" % (matched, enumerated))
+    if matched != len(embedded):
+        say("REFUSE served-asset check: CANNOT VERIFY -- %d matched but %d embedded and no "
+            "mismatch recorded; the count invariant failed" % (matched, len(embedded)))
         return 2
-    say("served-asset check: OK -- enumerated=%d compared=%d matched=%d, all %d embeddable "
-        "assets under %s are served byte-identically"
-        % (enumerated, compared, matched, enumerated, root))
+    say("served-asset check: OK -- embedded=%d compared=%d matched=%d (asset list taken from "
+        "the binary's own /%s), all served byte-identically from %s"
+        % (len(embedded), compared, matched, MANIFEST, root))
     return 0
 
 
@@ -331,9 +315,6 @@ try:
 except SystemExit:
     raise
 except BaseException as e:
-    # A guard that crashes must refuse, not hand back whatever exit code the
-    # interpreter picks (python exits 1 on an uncaught exception -- which is
-    # this function's MISMATCH code, i.e. a wrong answer).
     say("REFUSE served-asset check: CANNOT VERIFY -- unexpected error: %s: %s"
         % (type(e).__name__, e))
     code = 2
