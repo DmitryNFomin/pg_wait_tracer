@@ -329,25 +329,49 @@ static struct tag_pid_state *tag_pid_get(struct tag_pid_state *ht, uint32_t pid)
         }
         h = (h + 1) & TAG_HT_MASK;
     }
-    return NULL;   /* table full — untagged records stay foreground */
+    /* #363: table full — this pid CANNOT be tracked. The caller refuses the
+     * whole array; it used to leave the surplus pids' records foreground and
+     * return normally, which is a wrong answer and not a smaller one. */
+    return NULL;
 }
 
-void pgwt_tag_events(struct pgwt_trace_event *events, int count,
-                     const struct pgwt_pid_cat *cats, int n_cats)
+/* Test-only allocation injection. Same env-var shape as src/server.c's
+ * test_load_alloc_failure (no --wrap, so the binary behaves identically on
+ * every toolchain) and the same variable, because this pass runs inside the
+ * raw LOADER. An unknown point name must fail nothing. */
+static int tag_alloc_fail(const char *point)
 {
-    struct tag_pid_state *ht = calloc(TAG_HT_SIZE, sizeof(*ht));
+    const char *fail = getenv("PGWT_TEST_LOAD_ALLOC_FAIL");
+    return fail && strcmp(fail, point) == 0;
+}
+
+int pgwt_tag_events(struct pgwt_trace_event *events, int count,
+                    const struct pgwt_pid_cat *cats, int n_cats)
+{
+    /* An absent window is not a failure: there is nothing to tag, so the
+     * result is complete. Refusing here would turn every empty window into
+     * an allocation error. */
+    if (count <= 0)
+        return 1;
+    struct tag_pid_state *ht = tag_alloc_fail("tag_ht")
+                             ? NULL : calloc(TAG_HT_SIZE, sizeof(*ht));
     if (!ht)
-        return;   /* untagged: everything foreground, CPU stays CPU */
+        return 0;   /* refused before touching a single record */
     /* #128: per-record cmd_qid at the record's time (rule 2 fallback for
-     * the backward pass). NULL on allocation failure → no back-fill, the
-     * records keep their emission-time id exactly as before. */
-    uint64_t *fwd = count > 0 ? calloc((size_t)count, sizeof(*fwd)) : NULL;
+     * the backward pass). #363: the back-fill is part of the tagged result,
+     * not an optional extra — without it a foreground record keeps its
+     * emission-time query_id and is attributed to the wrong statement, so a
+     * failure here refuses too instead of silently skipping the pass. */
+    uint64_t *fwd = tag_alloc_fail("tag_fwd")
+                  ? NULL : calloc((size_t)count, sizeof(*fwd));
+    if (!fwd)
+        goto refused;   /* also before touching a single record */
 
     for (int i = 0; i < count; i++) {
         struct pgwt_trace_event *ev = &events[i];
         struct tag_pid_state *st = tag_pid_get(ht, ev->pid);
         if (!st)
-            continue;
+            goto refused;   /* #363: PID-table exhausted mid-array */
 
         /* Markers drive the per-pid windows and are otherwise left alone. */
         if (PGWT_IS_MARKER(ev->old_event)) {
@@ -481,13 +505,24 @@ void pgwt_tag_events(struct pgwt_trace_event *events, int count,
      * command (rule 2, fwd[]), else it is UNATTRIBUTED — flagged so
      * top_queries counts it instead of dropping it. Boundaries mirror the
      * live consumers: CMD_START (and an idle sample) end the command in
-     * both directions; CMD_END and an idle exact record end rule 1 only. */
+     * both directions; CMD_END and an idle exact record end rule 1 only.
+     *
+     * #363: fwd is non-NULL here BY CONSTRUCTION — the allocation above now
+     * refuses instead of carrying on without it. This stays a block rather
+     * than becoming unconditional only so the change is one line instead of
+     * re-indenting the whole pass; the condition is an invariant, not a
+     * fallback, and must never be read as "back-fill is optional". */
     if (fwd) {
         for (int i = count - 1; i >= 0; i--) {
             struct pgwt_trace_event *ev = &events[i];
             struct tag_pid_state *st = tag_pid_get(ht, ev->pid);
             if (!st)
-                continue;
+                goto refused;   /* unreachable: the forward pass above
+                                 * inserted every pid in the array or
+                                 * refused first. Kept because the fail-safe
+                                 * direction of this branch is refusal, and a
+                                 * `continue` here would be a silent skip if
+                                 * that invariant ever changed. */
             if (PGWT_IS_MARKER(ev->old_event)) {
                 if (ev->old_event == PGWT_MARKER_ESCALATE_START ||
                     ev->old_event == PGWT_MARKER_ESCALATE_END)
@@ -533,6 +568,17 @@ void pgwt_tag_events(struct pgwt_trace_event *events, int count,
     }
     free(fwd);
     free(ht);
+    return 1;
+
+refused:
+    /* The array may already be PARTLY rewritten (old_event relabelled,
+     * query_id back-filled) for the records before the failure. That is
+     * precisely why the caller must discard it rather than use what is
+     * there: a partly tagged array is indistinguishable from a complete
+     * one by inspection. */
+    free(fwd);
+    free(ht);
+    return 0;
 }
 
 int pgwt_event_category(const struct pgwt_trace_event *ev)

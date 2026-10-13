@@ -1242,7 +1242,11 @@ static void test_cross_check_tag_events(void)
     /* Server side. */
     struct pgwt_trace_event *srv = calloc(n, sizeof(*srv));
     memcpy(srv, ev, n * sizeof(*ev));
-    pgwt_tag_events(srv, n, NULL, 0);
+    /* #363: a refused tagging pass leaves an UNTAGGED array, and comparing
+     * the live sweep against one is a vacuous pass, not a cross-check. */
+    CHECK(pgwt_tag_events(srv, n, NULL, 0),
+          "server-side tagging completed (a refusal would make the "
+          "cross-check below compare against an untagged array)");
 
     /* Live side: the same stream through the sweep, record by record. */
     struct pgwt_live_cmd_gate gates[NPIDS];
@@ -1561,7 +1565,9 @@ static void test_cross_check_query_attr(void)
      * records — the query rows top_queries / the query drill are built from. */
     struct pgwt_trace_event *srv = calloc(n, sizeof(*srv));
     memcpy(srv, ev, n * sizeof(*ev));
-    pgwt_tag_events(srv, n, NULL, 0);
+    CHECK(pgwt_tag_events(srv, n, NULL, 0),
+          "server-side tagging completed (#363: a refusal would compare "
+          "the live deferral against an un-back-filled array)");
     struct pgwt_accumulator *sacc = calloc(1, sizeof(*sacc));
     pgwt_accum_init(sacc);
     uint64_t srv_unattributed = 0, srv_backfilled = 0, srv_total = 0;
@@ -1727,7 +1733,8 @@ static void test_query_attr_sampled(void)
         ev[i] = (struct pgwt_trace_event){ .timestamp_ns = MS(1000) + (uint64_t)i * P,
             .pid = seq[i].pid, .old_event = seq[i].we, .new_event = seq[i].we,
             .flags = PGWT_EVENT_FLAG_SAMPLE, .duration_ns = P, .query_id = seq[i].qid };
-    pgwt_tag_events(ev, n, NULL, 0);
+    CHECK(pgwt_tag_events(ev, n, NULL, 0),
+          "server-side tagging completed (#363)");
     uint64_t sq = 0, s0 = 0, sr = 0, un = 0, bf = 0;
     for (int i = 0; i < n; i++) {
         if (pgwt_is_idle_event(ev[i].old_event)) continue;

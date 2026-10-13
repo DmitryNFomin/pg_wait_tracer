@@ -90,9 +90,25 @@ struct pgwt_pid_cat {
  *     (or earlier) — FLAG_QUERY_BACKFILL — else FLAG_QUERY_UNATTRIB, so
  *     top_queries reports it as unattributed_ms instead of dropping it.
  *     The live consumers apply the same rule record by record.
- * cats may be NULL/empty (no metadata: everything is foreground). */
-void pgwt_tag_events(struct pgwt_trace_event *events, int count,
-                     const struct pgwt_pid_cat *cats, int n_cats);
+ * cats may be NULL/empty (no metadata: everything is foreground).
+ *
+ * #363 — RETURN VALUE. 1 when every record in the array was tagged, 0 when
+ * the pass refused (working-allocation failure, or more distinct pids than
+ * the per-pid table can hold). This array IS the oracle every raw estimator
+ * reads (docs/AAS_SEMANTICS_DECISION.md), so a pass that completed only
+ * partway is a CONFIDENTLY WRONG answer, not a degraded one: the records it
+ * did not reach keep old_event 0 instead of PGWT_WEI_NONCMD_CPU (counted as
+ * CPU, which the contract excludes) and keep their emission-time query_id.
+ * On 0 the array may already be partly rewritten and MUST be discarded, not
+ * consumed — there is no "how far did it get" to recover. An empty array
+ * (count <= 0) is a complete success, not a refusal.
+ *
+ * warn_unused_result on purpose: the `void` form this replaces is exactly
+ * how the failure stayed invisible, so dropping the result is now a
+ * compile-time warning rather than a silent wrong number. */
+int pgwt_tag_events(struct pgwt_trace_event *events, int count,
+                    const struct pgwt_pid_cat *cats, int n_cats)
+    __attribute__((warn_unused_result));
 
 /* Category of a tagged record: 0..PGWT_NUM_CATS-1, or -1 for idle. */
 int pgwt_event_category(const struct pgwt_trace_event *ev);
