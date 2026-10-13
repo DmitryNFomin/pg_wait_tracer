@@ -113,6 +113,14 @@ def test_lifecycle_and_detail(t):
                     limited.get("total_count") == 3,
                     "table truncation reports the full filtered count")
 
+            for cmd, key in (("executions", "rows"), ("exec_scatter", "points")):
+                cpu_only = srv.query(cmd, filters={"event_id": CPU})
+                t.check_eq(cpu_only.get("total_count"), 1,
+                           f"{cmd}: CPU filter excludes IO-only executions")
+                start_key = "start_ns" if key == "rows" else "t"
+                t.check_eq([r[start_key] for r in cpu_only.get(key, [])],
+                           [str(BASE)], f"{cmd}: only the CPU execution remains")
+
             filtered = srv.query("executions", query_id="200")
             t.check_eq(filtered.get("total_count"), 1,
                        "top-level decimal-string query_id filter works")

@@ -1,0 +1,42 @@
+=== red-345-filters.log ===
+  FAIL: CPU DB Time with {} = 3.0ms (got 21, expected 3.0)
+  FAIL: CPU DB Time with {'pid': 1000} = 2.0ms (got 9, expected 2.0)
+  FAIL: CPU DB Time with {'query_id': '200'} = 1.0ms (got 11, expected 1.0)
+  FAIL: CPU filter returns only the CPU event (got [167772181, 167772238, 50331648, 0], expected [0])
+  FAIL: top_sessions routes wide CPU requests to raw data (got 21, expected 3.0)
+  FAIL: top_queries routes wide CPU requests to raw data (got 21, expected 3.0)
+10/16 tests passed
+
+=== red-345-executions.log ===
+  FAIL: executions: CPU filter excludes IO-only executions (got 3, expected 1)
+  FAIL: executions: only the CPU execution remains (got ['10000000050000000', '10000000030000000', '10000000000000000'], expected ['10000000000000000'])
+  FAIL: exec_scatter: CPU filter excludes IO-only executions (got 3, expected 1)
+  FAIL: exec_scatter: only the CPU execution remains (got ['10000000000000000', '10000000030000000', '10000000050000000'], expected ['10000000000000000'])
+33/37 tests passed
+
+=== red-345-summary.log ===
+  FAIL(line 1429): raw CPU DB Time 11362.296000 == fixture 4053.000000
+  FAIL(line 1431): summary CPU DB Time 11362.296000 == fixture 4053.000000
+  FAIL(line 2373): 6d: the summary path returns NO rows under a class filter (0) -- it used to return the UNFILTERED 6 rows
+  FAIL(line 2375): 6d: and none under an event filter (0)
+  FAIL(line 2381): 6d: CPU summary refusal poisons the count and sets failed
+182 checks, 5 failed
+
+=== red-345-block-agg.log ===
+FAIL tests/test_block_agg.c:1687: B11 explicit CPU filter
+FAILED: 1 check(s)
+
+=== red-345-interval.log ===
+  FAIL(990): CPU filter: REFUSES with filtered-request and no result (rc=0 got=ok have=1)
+122 checks, 1 failed
+FAILED
+
+=== red-342.log ===
+  FAIL: cache=0: FIRST post-shrink request contains data
+  FAIL: cache=0: first response equals fresh prefix bit for bit
+  FAIL: cache=1: FIRST post-shrink request contains data
+  FAIL: cache=1: first response equals fresh prefix bit for bit
+  FAIL: a byte-truncated current.trace serves a nonempty SMALLER prefix, never the cached superset (7425 -> 0)
+  FAIL: the truncated read matches a fresh uncached read exactly (got {"events": [], "fidelity": "none", "pids": [], "total_count": 0, "truncated": false}, expected {"events": [{"c": 1, "d": 2000000, "e": 167772184, "n": "IO:DataFileWrite", "p": 1000, "q": "100", "s": 10000000002800000}, {"c": 3, "d": 2000000, "e": 16777224, "n": "LWLock:WALWrite", "p": 1001, "q": "101", "s": 10000000004000000}, {"c": 6, "d": 2000000, "e": 150994946, "n": "Timeout:PgSleep", "p": 1002, "q": "102", "s": 1000000000 [response excerpt truncated]
+15/21 tests passed
+

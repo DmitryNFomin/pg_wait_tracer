@@ -1369,6 +1369,7 @@ static void test_matrix(const struct fixture *fx)
     memset(&f_query, 0, sizeof(f_query));
     snprintf(f_class.class_name, sizeof(f_class.class_name), "io");
     f_event.event_id = EV_LOCK_A;
+    f_event.has_event_filter = 1;
     f_query.query_id = QID_A;
 
     for (int j = 0; j < NPAIRS; j++) {
@@ -1376,8 +1377,12 @@ static void test_matrix(const struct fixture *fx)
             PAIRS[j].run("unfiltered", fx, &f_none);
         if (PAIRS[j].filters & F_CLASS)
             PAIRS[j].run("class=io", fx, &f_class);
-        if (PAIRS[j].filters & F_EVENT)
+        if (PAIRS[j].filters & F_EVENT) {
             PAIRS[j].run("event=Lock[0]", fx, &f_event);
+            f_event.event_id = 0;
+            PAIRS[j].run("event=CPU", fx, &f_event);
+            f_event.event_id = EV_LOCK_A;
+        }
         if (PAIRS[j].filters & F_QUERY)
             PAIRS[j].run("query=A", fx, &f_query);
     }
@@ -1409,6 +1414,24 @@ static void test_against_the_fixture(const struct fixture *fx)
           "summary Idle %.6f == fixture %.6f ms", sum.idle_time_ms,
           fx->exp_idle_ms);
     free_tm(&raw); free_tm(&sum);
+
+    f.has_event_filter = 1;
+    uint64_t cpu_ns = 0;
+    for (int s = 0; s < SECS; s++)
+        for (int i = 0; i < SLICE_N; i++)
+            if (slice[i].ev == EV_CPU) cpu_ns += spec_dur_ns(i, s);
+    double cpu_ms = (double)cpu_ns / 1e6;
+    pgwt_compute_time_model(fx->wall, fx->n, &f, fx->from_ns, fx->to_ns,
+                            fx->wall_ms, &raw);
+    pgwt_compute_time_model_from_summaries(fx->dir, fx->from_ns, fx->to_ns, &f,
+                                           fx->wall_ms, &sum);
+    CHECK(cpu_ms > 0 && cpu_ms < fx->exp_db_ms, "CPU fixture changes the total");
+    CHECK(raw.db_time_ms == cpu_ms, "raw CPU DB Time %.6f == fixture %.6f",
+          raw.db_time_ms, cpu_ms);
+    CHECK(sum.db_time_ms == cpu_ms, "summary CPU DB Time %.6f == fixture %.6f",
+          sum.db_time_ms, cpu_ms);
+    free_tm(&raw); free_tm(&sum);
+    memset(&f, 0, sizeof(f));
 
     struct pgwt_heatmap_result hraw, hsum;
     pgwt_compute_heatmap(fx->wall, fx->n, &f, fx->from_ns, fx->to_ns,
@@ -1939,6 +1962,7 @@ static void bypass_absent_not_wrong(const struct fixture *fx)
     struct pgwt_filter f;
     memset(&f, 0, sizeof(f));
     f.event_id = WEI(PG_WAIT_EXTENSION, 4242);   /* not in the fixture */
+    f.has_event_filter = 1;
     struct pgwt_events_result raw, sum;
     pgwt_compute_top_events(fx->wall, fx->n, &f, fx->from_ns, fx->to_ns,
                             fx->wall_ms, &raw);
@@ -2317,6 +2341,7 @@ static void div318_session_filters(const struct fixture *fx)
     memset(&f_event, 0, sizeof(f_event));
     snprintf(f_class.class_name, sizeof(f_class.class_name), "io");
     f_event.event_id = EV_LOCK_A;
+    f_event.has_event_filter = 1;
 
     struct pgwt_sessions_result rn, rc_, re, sn, sc, se;
     pgwt_compute_top_sessions(fx->wall, fx->n, &f_none, fx->from_ns, fx->to_ns,
@@ -2345,12 +2370,23 @@ static void div318_session_filters(const struct fixture *fx)
 
     /* The summary path REFUSES both filters: no rows, rather than the
      * unfiltered answer wearing a filtered label. */
-    CHECK(sc.num_rows == 0,
+    CHECK(!sc.failed && sc.num_rows == 0,
           "6d: the summary path returns NO rows under a class filter (%d) -- "
           "it used to return the UNFILTERED %d rows", sc.num_rows,
           sn.num_rows);
-    CHECK(se.num_rows == 0,
+    CHECK(!se.failed && se.num_rows == 0,
           "6d: and none under an event filter (%d)", se.num_rows);
+    struct pgwt_sessions_result scpu;
+    f_event.event_id = EV_CPU;
+    pgwt_compute_top_sessions_from_summaries(fx->dir, fx->from_ns, fx->to_ns,
+                                             &f_event, fx->wall_ms, &scpu);
+    CHECK(!scpu.failed && scpu.num_rows == 0 && scpu.rows == NULL,
+          "6d: CPU summary refusal is empty, not failed");
+    pgwt_compute_top_sessions_from_summaries(fx->dir, fx->to_ns + ONE_SEC,
+                                             fx->to_ns + 2 * ONE_SEC, &f_event,
+                                             fx->wall_ms, &scpu);
+    CHECK(!scpu.failed && scpu.num_rows == 0 && scpu.rows == NULL,
+          "6d: CPU summary refusal stays empty, not failed without records");
 
     /* NON-VACUITY of the refusal itself: it must be a refusal of the FILTER,
      * not a path that returns nothing whatever it is asked. Without this,

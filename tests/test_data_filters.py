@@ -89,6 +89,30 @@ def main():
             print("--- Unfiltered ---")
             t.check_approx(total, 21.0, 0.001, "Total DB Time = 21ms")
 
+            # #345: an explicit zero is CPU, not an absent event filter.
+            print("--- Filter: event_id=CPU (0) ---")
+            for extra, expected in (({}, 3.0), ({"pid": 1000}, 2.0),
+                                    ({"query_id": "200"}, 1.0)):
+                resp = srv.query("time_model", filters={"event_id": CPU, **extra})
+                t.check_eq(get_db_time(resp), expected,
+                           f"CPU DB Time with {extra} = {expected}ms")
+            resp = srv.query("top_events", filters={"event_id": CPU})
+            t.check_eq([r["event_id"] for r in resp.get("rows", [])], [CPU],
+                       "CPU filter returns only the CPU event")
+            # Wide windows exercise routing away from summaries that lack
+            # the requested dimension; this fixture contains no summaries.
+            for cmd in ("top_sessions", "top_queries"):
+                resp = srv.query(cmd, from_=BASE_TS - 60_000_000_000,
+                                 to_=BASE_TS + 180_000_000_000,
+                                 filters={"event_id": CPU})
+                db_time = (sum(r["db_time_ms"] for r in resp.get("rows", []))
+                           if cmd == "top_sessions" else resp.get("db_time_ms"))
+                t.check_eq(db_time, 3.0,
+                           f"{cmd} routes wide CPU requests to raw data")
+            resp = srv.query("time_model")
+            t.check_eq(get_db_time(resp), total,
+                       "absent event filter still returns the original total")
+
             # Filter by class: IO = 3+5+6 = 14ms
             print("--- Filter: class=io ---")
             resp = srv.query("time_model", filters={"class": "io"})

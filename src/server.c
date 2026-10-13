@@ -492,8 +492,10 @@ static void parse_filters(cJSON *root, struct pgwt_filter *f)
         snprintf(f->class_name, sizeof(f->class_name), "%s", cls->valuestring);
 
     cJSON *eid = cJSON_GetObjectItem(filters, "event_id");
-    if (cJSON_IsNumber(eid))
+    if (cJSON_IsNumber(eid)) {
         f->event_id = (uint32_t)eid->valuedouble;
+        f->has_event_filter = 1;
+    }
 
     cJSON *pid = cJSON_GetObjectItem(filters, "pid");
     if (cJSON_IsNumber(pid))
@@ -1941,6 +1943,9 @@ static void cov_scan_file(struct pgwt_server *srv, struct pgwt_file_cov *fc)
          fc->hdr_mono_ns != reader.header.clock_offset_ns ||
          reader.num_blocks < fc->blocks_scanned)) {
         cov_reset(srv, fc);
+        /* The file is still in this refresh's scan. Reset discards its old
+         * contents, not its presence; keep the rebuilt entry at compaction. */
+        fc->present = 1;
         fc->is_current = is_current_trace(fc->path);
         /* Paint-latency Phase 1: this file's blocks are gone, and any cached
          * aggregate for them can never match a live block again (the trace
@@ -3707,7 +3712,7 @@ static void handle_top_sessions(struct pgwt_server *srv, struct pgwt_request *re
      * refuses them too, as a fail-safe if this guard is ever edited away. */
     int sessions_filter_needs_raw = (req->filter.query_id != 0 ||
                                      req->filter.class_name[0] != '\0' ||
-                                     req->filter.event_id != 0);
+                                     req->filter.has_event_filter);
     if (should_use_summaries(srv, req, &wfid) && !sessions_filter_needs_raw) {
         pgwt_compute_top_sessions_from_summaries(srv->trace_dir, from, to,
                                                   &req->filter, wall_ms, &res);
@@ -3779,7 +3784,7 @@ static void handle_top_queries(struct pgwt_server *srv, struct pgwt_request *req
 
     /* Force raw events when class/event filter active (need per-event breakdown) */
     int has_event_filter = (req->filter.class_name[0] != '\0' ||
-                            req->filter.event_id != 0);
+                            req->filter.has_event_filter);
 
     /* Load events once — used for both top_queries and lifecycle stats */
     int ecount = 0;
@@ -4372,7 +4377,7 @@ static int execution_matches_request(const struct pgwt_execution *row,
         return 0;
     if (req->filter.query_id && row->query_id != req->filter.query_id)
         return 0;
-    if ((req->filter.class_name[0] || req->filter.event_id) &&
+    if ((req->filter.class_name[0] || req->filter.has_event_filter) &&
         !row->matches_event_filter)
         return 0;
     return 1;
