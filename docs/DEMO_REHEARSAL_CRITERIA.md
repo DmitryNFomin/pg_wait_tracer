@@ -581,85 +581,74 @@ implementation, so it cannot separate a defect from a change of mix.
   and only then was the wording rewritten to name the mechanism it needs to
   detect.
 
-  **Related data point, same dump, corroborates the Off-CPU\* section
-  above:** over the whole 1875.8 s capture, `CPU (waiting for a core)` was
-  **746.5 ms against 4,170,804.2 ms of DB Time — 0.018%**
-  (746.5 / 4170804.2 × 100, checked). That is the real-world size of the
-  quantity the 10% cap gates, on the demo workload, over a full run, not
-  just the per-5-minute-window figures above — consistent with, not a
-  substitute for, the <0.1% (n=7, one run) already recorded there.
+  **Related historical data point, same dump:** over the whole 1875.8 s
+  capture, `CPU (waiting for a core)` was **746.5 ms against 4,170,804.2 ms
+  of DB Time — 0.018%** (746.5 / 4170804.2 × 100). This predates the
+  2026-10-07 load addition; it does not calibrate the current workload.
 
-- Off-CPU\* ≤ 10% of DB Time on a box where clients ≤ cores. **RETRACTION (this
-  commit, review round 3):** an earlier version of this paragraph said the
-  gate comment's "4.92 pp" was unverifiable because it does not appear as a
-  literal string anywhere on `agent/observer-bias-study` or its four
-  predecessor branches. That check was real but its conclusion was wrong: the
-  figure **is** derivable, just not as a literal substring. **4.92 pp IS
-  the sum of two cells `docs/OBSERVER_BIAS.md` writes down explicitly** (that
-  branch, ~lines 185-188; data in `tests/results/issue115_xtab/`): run-queue
-  delay while still marked as **waiting** (+2.53 pp) plus run-queue delay
-  while marked **idle**/`ClientRead` (+2.39 pp) = **4.92 pp**, exactly what
-  `tests/demo_rehearsal_lib.py`'s gate comment calls "the measured run-queue
-  (waiting-for-a-core) share". Retracting "confirmed unverifiable" — it was
-  not invented, it is a sum, and the sum is correct.
+- **Off-CPU\* is reported, not gated (replacement for #386, 2026-10-13).**
+  `evaluate_time_model_window` now retains an `offcpu` diagnostic containing
+  physical `offcpu_ms`, `db_time_ms`, and percentage, with `ok: null` and
+  `gating: false`; it has no `offcpu_cap` pass/fail sub-check. The existing
+  conservation, raw-path, nonzero-DB-Time, CPU-clamp, workload-signature and
+  AAS gates remain. This criteria change resets the clean-attempt counter;
+  the reported figures below are calibration evidence, not counted attempts.
 
-  **The real flaw is sharper than provenance, and it is three separate
-  problems, not one:**
-  1. **Regime.** Those two cells come from a **saturated** run — 8 pgbench
-     clients on a 4-vCPU box (`docs/OBSERVER_BIAS.md`'s own "Eight backends
-     only" caveat) — while the gate's own comment scopes the bound to
-     "clients ≤ cores". The same study's unsaturated analogue ("2.72 pp
-     definitional", which bounds the run-queue-specific cells from above) is
-     **≤2.72 pp, not 4.92**. The number is measured on the opposite regime
-     from the one it gates.
-  2. **Unit.** The 4.92 pp is percentage points of **backend wall-time** — a
-     kernel-vs-our-exact-tier CPU-or-runnable share (the study's 67.99% vs.
-     62.27% headline) — **not percentage points of DB Time**, which is what
-     `time_model_offcpu_cap_ok` actually divides by. The gate comment's own
-     phrase "4.92 percentage points of DB Time" names the wrong denominator
-     for the number it cites.
-  3. **Quantity — the serious one.** Neither cell flows into Off-CPU\* at
-     all. `src/compute.c`'s Off-CPU\* is the residual `DB Time − CPU\* − Σ
-     waits` — time inside DB Time, actively executing, attributable to no
-     known wait class. Run-queue delay while a backend is already marked
-     **waiting** is booked under that open wait event (inside Σ waits, not
-     the residual); run-queue delay while marked **idle**/`ClientRead` is
-     outside DB Time entirely (DB Time only counts active execution). The
-     four-cell decomposition this number comes from never measures run-queue
-     delay in the one state Off-CPU\* actually represents: active,
-     non-waiting, but off a core. **The citation bounds a different quantity
-     than the one the gate enforces**, not merely the wrong regime.
+  **Settled decomposition and provenance:** [#386's “SOLVED by offline
+  decomposition” comment](https://github.com/DmitryNFomin/pg_wait_tracer/issues/386#issuecomment-6151275012),
+  with tool and transcript under `tests/results/offcpu_decomposition/` on
+  `agent/offcpu-run-delay-decomposition`. On the retained **gate-1, 1834 s**
+  capture, **96.1%** of Off-CPU\* is the eight-session
+  `_smoke_lockmgr_fanout` `SELECT count(*)` tick (96.3% on round-2):
+  **186 bursts**, about **1.1 s every 10 s**, eight runnable backends on
+  **four shared vCPUs**. Between bursts Off-CPU is effectively zero.
+  This is physical contention introduced by the 2026-10-07 workload addition,
+  outside the former clients ≤ cores premise.
 
-  **Honest statement of what this gate is:** the Off-CPU\* cap catches a
-  dropped wait class worth ≥10% of DB Time. The demo configuration measured
-  **<0.1%** (n=7 samples, one run). The 10% has **no measured basis in the
-  gated quantity** — only a loose upper bound borrowed from a saturated
-  run-queue figure that measures something else. **What it does not catch,
-  concretely:** a dropped class smaller than 10% of DB Time passes green,
-  and this demo's own workload contains such classes —
-  `LWLock:WALWrite` ≈3.7%, `Lock:tuple` ≈1.5% — either could silently vanish
-  from capture and this check would still read `ok`.
+  The gate's own **60 s window at all 1775 placements** across that clean
+  run gives **min 5.08%, median 8.96%, p95 11.25%, max 13.52%**.
+  **405/1775 (22.8%)** exceed 10%; the old bound lies near p77 and the
+  estimated probability of seven consecutive passing windows is **0.16**.
+  Window phase determines the verdict; this is not a product-health signal.
 
-  **Non-gating, worth recording, not fixing here:** the whole-window
-  diagnostic reports `has_measured_cpu=False` (no Off-CPU\* signal at that
-  granularity) while the same response is labelled `fidelity: exact` — its
-  Off-CPU\* check is vacuous at exactly the point it claims exact fidelity.
-  Noted for whoever next touches this response shape; out of scope here.
+  **Whole-capture alternative, with measured derivation:** burst-magnitude
+  CV **0.42** and **6.09 bursts/window** predict window CV
+  `0.42 / sqrt(6.09) ≈ 0.170` (unrounded decomposition prediction **0.169**,
+  observed **0.177**). Across **186 bursts**, expected CV is
+  `0.42 / sqrt(186) = 0.0308` (**3.08%**); scaling the observed window CV
+  gives `0.177 × sqrt(6.09/186) = 0.0320` (**3.20%**).
+  Starting from that capture's measured **8.405%** whole-capture share,
+  a candidate mean + three-CV upper envelope is
+  `8.405% × (1 + 3 × 0.0308) = 9.18%` (9.21% using observed CV).
+  **This is a model-based contention envelope, not a calibrated probability
+  or a correctness bound; it is not enforced.** Aggregation reduces phase
+  noise but does not separate a defect from contention: round-2's
+  whole-capture share was **2.779%**, versus gate-1's **8.405%**.
 
-  **Do not tighten the cap.** A 1-2% bound would have 25-50x headroom over
-  today's measured 0.04%, but this is **one run** — no second measurement
-  shows cx33 run-queue noise reliably stays under a tighter number, and
-  changing a gating constant on n=1 hours before the tag is exactly the move
-  this project has refused all week. **Keep `OFFCPU_CAP_PCT = 10.0`**,
-  labelled honestly as a provisional catastrophic-loss tripwire rather than
-  a calibrated bound, per the code comment's own existing "FIRST bound, not
-  a permanent one" framing.
+  **Concurrency alternative:** instantaneous runnable count tracks this
+  mechanism (passing window samples max **2**, other windows mean
+  **3.33–4.50**, max **7–15**), but still measures the box, not attribution
+  correctness. Neither alternative can usefully gate product correctness
+  here. **No replacement correctness cap is registered.** This deliberate
+  reporting-only decision replaces the unsupported 10% placeholder; the
+  previous 4.92 pp citation was a real sum (2.53 + 2.39 pp), but measured
+  another regime, denominator and quantity. **The recorded owner decision
+  that #115 (`agent/observer-bias-study`) is not landing before the tag
+  remains unchanged.**
 
-  **Owner decision (recorded, not an open question): #115
-  (`agent/observer-bias-study`) is NOT landing before the tag.** It would not
-  even validate the clients ≤ cores premise this gate needs — problem 1
-  above is a different box regime that #115 does not re-measure — and it is
-  a large, late change this close to the tag.
+  **What the replacement does NOT detect:** a dropped wait label moves wall
+  time from a wait into a CPU gap and **raises Off-CPU\*** while the
+  accounting still closes. The separate **per-class wait-CPU scan (queue
+  item 2.5, resolved above)** supplies the attribution evidence; Off-CPU
+  magnitude is not a dropped-label detector.
+
+  Each raw window's physical magnitude stays in the saved conservation
+  samples. The whole-capture **summary path has no Off-CPU signal**, even
+  when labelled `fidelity: exact`; legacy/sampled data is also unavailable.
+  Both report `available: false` and null magnitude/percentage, not measured
+  zero or PASS. Below the DB-Time floor the percentage is null and the
+  independent conservation gate still fails. Sparse trailing windows are
+  not averaged and presented as a whole-capture measurement.
 
 **Known, unreproduced item: #202** (owner, 2026-09-30 — recorded, not closed).
 `test_multi_window.py`'s own conservation check once measured class rows
@@ -803,7 +792,8 @@ substitute one family for the other.
   on the strength of it.** Moving a gating constant in either direction on
   n=3, hours before a tag, is exactly the kind of after-the-fact adjustment
   this whole document exists to prevent — the same reasoning that kept
-  `OFFCPU_CAP_PCT` at 10% in §3 above and kept this bound at 3000 ms when
+  the old 10% Off-CPU placeholder (now superseded by §3’s reporting-only
+  decision) and kept this bound at 3000 ms when
   the margin was thin. A future reader should see 3000 ms as a deliberate,
   unchanged choice, not something nobody revisited. Transitions' own spread
   (697–893 ms, a 196 ms range across 3 runs) is now comfortably inside the
@@ -1011,7 +1001,7 @@ left to be discovered.
 | §3 conservation identity | yes, sampled every ~5 minutes through the capture (`conservation_sample_interval_s`), every sample must pass — not once at the end |
 | §3 `wait_gap_cpu_ms` ≤ 0.1% | **removed, not implemented** — corrected 2026-09-27/28: this was never a valid over-attribution detector (the BPF measures on-CPU across the whole wait-start/wait-end span, so an IO wait is legitimately CPU-bearing; two live runs measured 0.376–0.392%, expected on a correct implementation). The real per-class signature (`cpu_ns` approaching `duration_ns` on a `Timeout:PgSleep`/`Lock:*` event) still has no field on this wire — **measured offline instead, 2026-10-13**, via a direct raw-trace walk, not through `time_model`: see §3's RESOLVED per-class paragraph above for the figures and the restated threshold (`cpu_ns` >= 824,430 ns AND ratio >= 50%, both required). Not a wired automatic gate inside `demo_rehearsal.py` |
 | §3 `cpu_clamped_ms` ≤ 0.1% | yes (`cpu_clamped_ok`), scope corrected in its own code comment: vouches for CPU-class gaps only, never wait events (`src/compute.c`'s wait branch never clamps `cpu_ns > dur`) |
-| §3 Off-CPU\* ≤ 10% | yes (`time_model_offcpu_cap_ok`), but the 10% is a **provisional catastrophic-loss tripwire**, not a calibrated bound — see §3's own corrected paragraph above: its cited "4.92 pp" derivation is a real sum but measures a different regime, unit, and quantity than the gate enforces; demo measured <0.1% (n=7, one run); kept at 10%, not tightened, on n=1 |
+| §3 Off-CPU\* physical magnitude | **reported, not gated** (`time_model_offcpu_diagnostic`, `offcpu.ok: null`, `gating: false`) — #386’s settled decomposition and all 1775 clean-run window placements invalidate the 10% cap. Expected whole-capture CV 3.08–3.20%; candidate 9.18% envelope is contention context only, not a correctness bound. Raw samples retain ms and percentage; unavailable summary/tier data is null, not zero. The independent accounting gates remain |
 | §4 zero known-failing tabs | yes (`build_demo_summary` uses raw `ok`, ignoring the exemption) |
 | §4 blink measured fraction ≥ 0.5 | yes — landed via `agent/blink-anchor-mount-seq` (#209, merged to master), inherited automatically once `agent/rehearsal-bypass-suite` rebased: `demo_rehearsal.py` has no independent blink-measurement code, it fully delegates to `ui_live_smoke.py:run_tab()`, which now calls `blink_sweep_gate_verdict` itself. Pinned with a regression test using real measured numbers (`tests/test_demo_rehearsal_lib.py`, run.id 1790574871: scatter 0.1305, transitions 0.0072–0.0172) |
 | §4 time to first paint, pinned viewport | **SETTLED** (review round 6): bound 3000 ms, global, **≈3.4x margin** (worst observed: transitions at 893 ms) — re-measured after PR #268 (#265) replaced `handle_top_queries`'s O(n^2) bubble sorts with `qsort`; supersedes the pre-#268 figure of queries at 2432 ms / ≈1.2x margin, which is now wrong. Measured ≥3 navigations/tab, real Chrome 154 on the Mac, live full-mode capture on the demo topology, satisfying this criterion's own requirement in full. The bound itself (3000 ms) is unchanged and was neither widened when the margin was thin nor tightened now that it is comfortable — same reasoning both times. `top_queries` latency is separately window-dependent (391 ms at the demo's planned 15-minute window, rising toward 1237 ms at full-capture range on a 2583 s capture) — see the window-dependence finding below this bullet; that is a server-side cost, not a UI paint regression, and is unrelated to the ≈3.4x margin above. Timeline not yet measured by this method (instrumentation gap: bare click, not Sessions-row drill-down — recorded as unmeasured, not a pass). `ttfp_ms` (merged `master`, `fa20067`, issue #245/PR #257) remains measurement-only and gates nothing automatically — `build_tab_result` never reads it into `ok`; the bound above is enforced only by a human reading this document during a counted attempt. Mac-side checklist: still manual sign-off, **deliberately stays qualitative** (paints without a visible spinner) — it has no stopwatch, so it does not independently check the 3000 ms number either; this round's measurement was a one-off script, not the checklist itself. Retracted: the 2026-09-29 contended walk's 30 s Timeline finding measured the "select a session" prompt from a bare tab click, not paint after a Sessions-row drill-down — the same trap this round's Timeline gap repeats at the instrumentation level, not the product level |
