@@ -66,21 +66,31 @@ one reviewed criteria commit, and that commit must precede the tag.
 | 4.2 | Two uninterrupted Mac sign-off windows | OWNER | the walk needs the real display, real Chrome, normal memory pressure, and no agents on that Mac |
 | 4.3 | Any unresolved demo-bound decision | OWNER | must be settled before the criteria commit, not after |
 
-## 5. The tag, then the counted sequence
+## 5. The counted sequence, then the tag
+
+**Amended 2026-10-13 (owner): "tag after rehersals/walks and gif" —
+supersedes the tag-first ordering this section previously stated; see
+`docs/DEMO_REHEARSAL_CRITERIA.md`'s "The sequence, and what stops it from
+being rolled" for the full amendment and why the tag-first rule's
+substantive requirement (one immutable reference both attempts and the GIF
+share) still holds, now named by a sha instead of a tag until step 6.
 
 1. Criteria commit (section 2) lands and is reviewed.
-2. **Tag** the reviewed master commit. Build the counted-rehearsal target from
-   that tag — per 4.1 (owner, 2026-10-13), `pgwt-gate` serves as the stage box
-   for these counted attempts; a separately provisioned `pgwt-stage` machine
-   is for the real demo itself, built before that event, not before the tag.
-3. Capture-side attempt 1 + signed Mac walk 1 — **against the tag**, from a
-   worktree checked out at it.
-4. Capture-side attempt 2 + signed Mac walk 2 — **same tag**.
+2. Capture-side attempt 1 + signed Mac walk 1, against the **candidate
+   master commit's sha** — per 4.1 (owner, 2026-10-13), `pgwt-gate` serves as
+   the stage box for these counted attempts; a separately provisioned
+   `pgwt-stage` machine is for the real demo itself, built before that
+   event, not before the tag.
+3. Capture-side attempt 2 + signed Mac walk 2 — **same sha**.
+4. **Owner's sign-off.**
+5. GIF cut, from that same sha's rehearsal/walk material.
+6. **Owner tags** the rehearsed sha.
 
-Master keeps moving throughout; this is a tag, not a code freeze (owner rule).
-Landing a fix into the demo build requires a **new tag and resets both counters
-to zero**. Report as "capture-side k of N, Mac-side m of M" — never merged into
-one number, and Mac-side means signed manual walks.
+Master keeps moving throughout; this is a sha-then-tag, not a code freeze
+(owner rule). Landing a fix after attempt 1 is a **new candidate sha and
+resets both counters to zero**, exactly as a re-tag used to. Report as
+"capture-side k of N, Mac-side m of M" — never merged into one number, and
+Mac-side means signed manual walks.
 
 ## Parallelism rules
 

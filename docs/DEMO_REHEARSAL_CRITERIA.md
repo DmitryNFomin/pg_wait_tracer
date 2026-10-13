@@ -113,8 +113,9 @@ number) — measured once, on today's 4-vCPU `cx33`, with a comfortable 9.00-
 vs-4 margin; a future box-class change moves this gate's difficulty, so
 treat that as a deliberate decision, not a surprise discovered mid-rehearsal.
 
-A rehearsal run on a different workload, client count, PG version, box class or
-**tag** (see "The sequence, and what stops it from being rolled" below) is a
+A rehearsal run on a different workload, client count, PG version, box class,
+**sha, or tag** (see "The sequence, and what stops it from being rolled"
+below — sha pre-tag, tag once one is cut, per the 2026-10-13 amendment) is a
 different experiment and does not count toward the sequence.
 
 ## The demo configuration (owner, 2026-09-28)
@@ -1043,27 +1044,59 @@ that captured nothing used to score clean) is now FIXED on
   happened by then, the result is "not clean" and that is what the owner is
   told. Re-rolling until two land in a row is the same after-the-fact selection
   this document exists to prevent.
-- **The two clean runs must be on the same tag, not merely the same tree.**
-  Owner, 2026-09-28: "instead of code freeze we will make a tag on master when
-  it will be demo ready and will continue development" -- a tag pins the tree
-  the way "same commit, no commit in between" used to, without requiring
-  master itself to stop moving:
-  - When master is judged demo-ready it is **tagged**; the demo machine is
-    built from that tag, and every counted rehearsal runs **against that
-    tag**, from a worktree checked out at it — never from master HEAD, which
-    keeps moving.
-  - A counted attempt **names the tag it ran against**, alongside the box
-    class, PG version, pgbench parameters, and the display identity and
-    Chrome/macOS versions already recorded in the verdict.
+- **AMENDMENT (owner, 2026-10-13): rehearsals and the GIF come BEFORE the tag,
+  superseding the tag-first ordering this bullet originally stated.** The
+  owner ruled this twice, explicitly — "tag after rehersals/walks and gif",
+  and earlier chose the same ordering when offered both. Per this file's own
+  rule (above: "changed by a commit that says so and the attempt counter
+  resets"), this is a correction, not a reinterpretation, and the
+  clean-attempt counter resets with it.
+
+  **Why the original rule existed, and what carries over.** The tag-first
+  rule existed so two counted attempts could not be attributed to a moving
+  target — master keeps changing, so "two clean attempts" is meaningless
+  without an immutable reference both attempts (and the GIF) can be pinned to
+  and shown to share. **That requirement does not go away.** Only the timing
+  of *naming* the immutable reference moves: from a tag cut before the first
+  attempt to a commit sha recorded as each attempt runs, before any tag
+  exists.
+
+  **The new sequence:**
+  1. Demo-blocking fixes land on master.
+  2. Two clean rehearsals run against the **same candidate master commit**
+     — pinned by its **sha**, not a tag (none exists yet) — from a worktree
+     checked out at that sha, never from a moving master HEAD.
+  3. The Mac-side video walk and its analysis, against that same sha.
+  4. **Owner's sign-off.**
+  5. GIF cut, from that same sha's rehearsal/walk material.
+  6. **Owner tags** the rehearsed commit — naming, after the fact, the sha
+     that already passed steps 2-5, not before it.
+
+  **Provenance, restated against a sha instead of a tag:**
+  - A counted attempt **names the commit sha it ran against**, alongside the
+    box class, PG version, pgbench parameters, and the display identity and
+    Chrome/macOS versions already recorded in the verdict. The `--tag` CLI
+    flag and `summary["tag"]` field (`tests/demo_rehearsal_lib.resolve_tag`,
+    landed on `agent/round3-demo-fixes`) already exist for this: when a tag
+    exists it is recorded there, but under this ordering no tag will exist
+    yet, so `resolve_tag` correctly returns `None` for `summary["tag"]` — per
+    its own docstring, it is never invented or substituted with a sha in
+    that field. **A null `tag` with the sha recorded elsewhere in the
+    attempt's record (e.g. the run's own `git rev-parse HEAD`, logged
+    alongside the verdict) is the correct, honest state pre-tag — it is not
+    a gap to be papered over.**
   - Two clean attempts count as consecutive **only if they ran on the same
-    tag**.
-  - **Landing a fix and re-tagging resets the clean-attempt counter to
-    zero.** An early or hopeful tag costs the whole sequence, so the tag is
-    cut when the tree is genuinely ready, not to start the clock.
-  - Development continues on master in parallel and does not disturb an
-    in-flight sequence — that is the point of the tag, and it removes the
-    objection that with several branches in flight no two runs could ever
-    share a tree.
+    sha** — the identical requirement as "only if they ran on the same tag"
+    before, with sha standing in until a tag exists.
+  - **Any further merge to master after attempt 1 invalidates both attempts
+    and resets the clean-attempt counter to zero**, exactly as landing a fix
+    and re-tagging did under the old ordering: a new sha is a new candidate.
+  - Once the owner tags the rehearsed sha (step 6 above), that tag is a
+    second, permanent name for the commit that already passed — tagging does
+    not itself trigger a new rehearsal requirement.
+
+  **Caps are unchanged**: at most 4 counted attempts, at most 2 voided (both
+  stated below, unmodified by this amendment).
 
 ## Provenance
 
