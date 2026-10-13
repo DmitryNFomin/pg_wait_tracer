@@ -203,7 +203,7 @@ static void push_n(struct pgwt_summary_writer *w, uint64_t first_ts,
     for (int i = 0; i < n; i++) {
         struct pgwt_trace_event ev =
             mk_event(first_ts + (uint64_t)i * step_ns, 1000, EV_ID, EV_DUR);
-        pgwt_summary_push_event(w, &ev);
+        pgwt_summary_push_event(w, &ev, 0);
     }
 }
 

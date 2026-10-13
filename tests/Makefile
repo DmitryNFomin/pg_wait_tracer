@@ -32,7 +32,7 @@ TESTS     = test_wait_event test_cmdline test_backend_lifecycle test_spawn test_
             test_interference_bounds \
             test_concurrency_bounds \
             test_idle_accounting test_idle_summary \
-            test_agg_raw_crosscheck \
+            test_agg_raw_crosscheck test_io_worker_summary \
             test_exec_index \
             test_interval_index \
             test_alloc_tune \
@@ -533,6 +533,20 @@ test_idle_summary: test_idle_summary.c ../src/compute.c \
 # difference, and a bypass suite for every way the comparison can be starved
 # into "0 == 0". Server build, no BPF, no live PG; ~0.1 s.
 test_agg_raw_crosscheck: test_agg_raw_crosscheck.c ../src/compute.c \
+                   $(BUILD)/server_summary_writer.o \
+                   $(BUILD)/server_summary_reader.o \
+                   $(BUILD)/server_event_writer.o \
+                   $(BUILD)/wait_event.o $(BUILD)/idle_rule.o \
+                   $(BUILD)/spawn.o $(BUILD)/cJSON.o
+	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -llz4 -lz -lm
+
+# test_io_worker_summary: io_workers must be outside the SUMMARY model too
+# (#315, #376; summary v6). Same build shape as test_idle_summary -- the real
+# writer, the real reader and compute.c, server build, no BPF, no live PG.
+# Section 4 reads ../src/event_stream.c and ../src/escalation.c as TEXT (the
+# daemon needs libbpf and a BPF skeleton, so its two summary producers cannot
+# be linked here), which is why the recipe needs no daemon objects.
+test_io_worker_summary: test_io_worker_summary.c ../src/compute.c \
                    $(BUILD)/server_summary_writer.o \
                    $(BUILD)/server_summary_reader.o \
                    $(BUILD)/server_event_writer.o \

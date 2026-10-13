@@ -161,48 +161,46 @@
  *      histogram in the records, so query_id is ignored. Also reachable. See
  *      FINDING 3.
  *
- *  N7. events carrying PGWT_EVENT_FLAG_IO_WORKER are absent from the
- *      fixture, and the summary records still COUNT io_worker time. OPEN:
- *      issue #315. The raw paths exclude io_worker records from DB Time, Top
- *      Events, Top Sessions, Top Queries and AAS (src/compute.c:1077, 1440,
- *      1575, 1685 and the AAS loop); src/summary_writer.c has no io_worker
- *      check anywhere, so they enter class_ns, idle_ns, events[], sessions[]
- *      and queries[]. MEASURED on a 130 s probe with one io_worker at
- *      40 ms/s: raw DB Time 1300.000 ms vs summary 6500.000 ms (+400%), plus
- *      an io_worker Top Sessions row (5200.000 ms) and a Top Events row that
- *      exist only on the summary side. REACHABLE: no handler guards it.
- *      There is no fix-proof invariant to assert -- one path counts the time
- *      and the other does not -- so the fixture stays io_worker-free
- *      (asserted in assert_fixture_live, so the hole cannot be quietly
- *      widened) and the divergence is reported rather than hidden inside a
- *      tolerance.
+ *  N7. io_worker time — FIXED (#315, #376; summary format v6), and this
+ *      fixture still carries no io_worker record, for a NEW reason.
  *
- *      WHY THE ONE-LINE WRITER FIX DOES NOT WORK, recorded here so the fix
- *      branch does not rediscover it: `evt->flags` is EMPTY of category bits
- *      on the live path. The only producers of PGWT_EVENT_FLAG_IO_WORKER are
- *      src/server.c's bm_type_to_cat_flag (applied by pgwt_tag_events at raw
- *      LOAD time, server-side, long after the summary was written) and
- *      src/sampler.c (whose events never reach the summary writer). Nothing
- *      in src/event_stream.c or src/escalation.c sets it. So a
- *      `evt->flags & PGWT_EVENT_FLAG_IO_WORKER` test inside
- *      pgwt_summary_push_event is DEAD IN THE DAEMON, and a fixture that
- *      pre-sets the bit greens it while testing an input shape production
- *      never produces -- which is exactly what happened on the first attempt
- *      at this. The daemon-side resolver is pgwt_live_pid_cat_flag
- *      (src/map_reader.c), and using it needs real work: the summary push at
- *      event_stream.c:96 runs BEFORE the resolve at :161, and the resolver
- *      returns 0 for a pid whose metadata is not yet parsed, so an
- *      io_worker's first events slip through regardless. Any test for the
- *      fix must push UNFLAGGED events from an io_worker pid through the
- *      daemon-side path.
+ *      What it was: the raw paths exclude io_worker records from DB Time,
+ *      Top Events, Top Sessions, Top Queries and AAS, while
+ *      src/summary_writer.c had no io_worker check anywhere, so they entered
+ *      class_ns, idle_ns, events[], sessions[] and queries[] — raw DB Time
+ *      1300.000 ms vs summary 6500.000 ms (+400%) on a 130 s probe with one
+ *      io_worker at 40 ms/s, and on the real PG18 capture +23.36% on
+ *      whole-capture Idle / +308.16% on a window containing the capture end.
  *
- *      NOTE for whoever takes #315: pgwt_compute_heatmap does NOT exclude
- *      io_workers, so both heatmap paths currently agree by counting them.
- *      Excluding them at the writer alone therefore MOVES the divergence to
- *      the latency grid instead of removing it -- and handle_heatmap really
- *      does route both ways (summary at src/server.c:3984, raw at :4001), so
- *      a >= 120 s and a < 120 s window would disagree. The two changes have
- *      to land together.
+ *      What fixed it: the writer is now TOLD. pgwt_summary_push_event takes a
+ *      `cat_flag` that the PRODUCER resolves — src/event_stream.c hoists
+ *      pgwt_live_pid_cat_flag above the push, src/escalation.c resolves in
+ *      flush_open_intervals — and accum_event drops the record from all five
+ *      accumulators. pgwt_compute_heatmap gained the matching raw-side
+ *      exclusion in the same commit, because events[] carries the histograms
+ *      the summary heatmap is built from and handle_heatmap routes both ways.
+ *
+ *      WHY NOT A FLAGS CHECK, kept because it is the trap: `evt->flags` is
+ *      EMPTY of category bits on every path that feeds the writer. The only
+ *      producers of PGWT_EVENT_FLAG_IO_WORKER are src/server.c's
+ *      bm_type_to_cat_flag (applied by pgwt_tag_events at raw LOAD time, long
+ *      after the summary was written) and src/sampler.c (whose events never
+ *      reach the summary writer). So a `evt->flags & PGWT_EVENT_FLAG_IO_WORKER`
+ *      test inside the writer would be DEAD IN THE DAEMON, and a fixture that
+ *      pre-sets the bit would green it while testing an input shape production
+ *      never produces — which is what happened on the first attempt at this.
+ *      The writer therefore reads cat_flag and NEVER evt->flags.
+ *
+ *      WHY THIS FIXTURE STAYS io_worker-FREE (assert_fixture_live still
+ *      checks it): this file drives the writer DIRECTLY, with no producer, so
+ *      its pushes pass cat_flag 0. A flagged event here would be excluded by
+ *      the raw path (pgwt_tag_events is not even involved — the flag is
+ *      preset) and counted by the summary path, i.e. red for a reason about
+ *      this fixture rather than about the product. The io_worker differential
+ *      lives in tests/test_io_worker_summary.c, which pushes UNFLAGGED events
+ *      with a resolved category — the only shape that can distinguish the fix
+ *      from a dead guard — and also reads both producers' source, since the
+ *      daemon cannot be linked into a BPF-free unit test.
  *  N8. the WINDOW END BOUND — FIXED (#316). pgwt_visit_summaries used to
  *      drop a record only when `rec_ns > to_wall_ns`, so the record whose
  *      second starts exactly AT the window end was included in full while
@@ -536,7 +534,7 @@ static long write_summaries(const char *dir, const struct pgwt_trace_event *ev,
     if (pgwt_summary_writer_init(w, dir, 24, NULL) != 0) { free(w); return -1; }
     long pushed = 0;
     for (int i = 0; i < n; i++) {
-        if (pgwt_summary_push_event(w, &ev[i]) != 0) {
+        if (pgwt_summary_push_event(w, &ev[i], 0) != 0) {
             printf("  FAIL: writer refused event %d\n", i);
             tests_failed++;
             break;
@@ -659,21 +657,22 @@ static void assert_fixture_live(const struct fixture *fx)
           "each committed second holds many distinct events (%d), sessions "
           "(%d) and queries (%d)",
           fx->max_events, fx->max_sessions, fx->max_queries);
-    /* N7's premise, checked rather than trusted. The fixture must stay
-     * io_worker-free: src/summary_writer.c has no io_worker check, so such a
-     * record enters class_ns / idle_ns / events[] / sessions[] / queries[]
-     * while every raw path except the heatmap excludes it -- measured +400%
-     * on summary DB Time against raw for a 130 s stream with one io_worker.
-     * Adding one here would not reveal that; it would just make every
-     * comparison below red and invite someone to loosen them.
+    /* N7's premise, checked rather than trusted, and still required AFTER
+     * #315/#376 were fixed (summary v6) -- for a different reason.
      *
-     * It is ALSO what stops #315 being "fixed" by a fixture rather than by
-     * the product. A pre-flagged io_worker event greens a
-     * `evt->flags & PGWT_EVENT_FLAG_IO_WORKER` guard in the writer that is
-     * DEAD IN THE DAEMON (nothing on the live path sets that bit -- see N7),
-     * so a fixture allowed to set it can certify a fix that does nothing.
-     * The exclusion is the named hole; this is what stops it from being
-     * quietly widened OR quietly closed. */
+     * The writer now excludes io_worker records, but it learns the category
+     * from the `cat_flag` ARGUMENT its producer resolves, never from
+     * evt->flags (which is empty of category bits on every path that feeds
+     * it -- see N7). This file drives the writer directly, with no producer,
+     * so its pushes pass cat_flag 0. A pre-flagged record here would be
+     * dropped by the raw paths and counted by the summary path: red for a
+     * reason about this fixture, not about the product, which is exactly the
+     * shape that invites someone to loosen the comparisons.
+     *
+     * It is also what still stops the fix being certified by a fixture: a
+     * pre-set flag cannot green the writer's guard at all now, and the real
+     * differential (unflagged events, resolved category, both producers'
+     * wiring) lives in tests/test_io_worker_summary.c. */
     int io_worker_events = 0;
     for (int i = 0; i < fx->n; i++)
         if (fx->mono[i].flags & PGWT_EVENT_FLAG_IO_WORKER) io_worker_events++;

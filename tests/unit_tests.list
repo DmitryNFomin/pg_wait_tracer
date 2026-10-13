@@ -251,6 +251,32 @@ test_idle_summary
 # mutation probes proving each comparator can see one nanosecond, one count,
 # one grid cell and one missing row.
 test_agg_raw_crosscheck
+# io_workers on the SUMMARY path (#315, #376; summary format v6). The raw paths
+# put io_worker time outside DB Time AND outside Idle
+# (docs/AAS_SEMANTICS_DECISION.md: the requesting backend already shows
+# AioIoCompletion for the same logical I/O); src/summary_writer.c counted it,
+# so one window gave two answers -- measured +23.36% on the whole-capture Idle
+# of the PG18 demo capture and +308.16% on a window containing the capture end,
+# where an io_worker's single Activity:IoWorkerMain interval closes.
+# test_agg_raw_crosscheck CANNOT see this: its fixture is deliberately
+# io_worker-free (hole N7), because a PRE-FLAGGED fixture event greens a writer
+# check on evt->flags that is dead in the daemon -- nothing on the live path
+# sets that bit. So this file pushes UNFLAGGED events and lets the producer's
+# resolved category be the only cause: all five accumulators (class_ns,
+# idle_ns, events[] with its histograms, sessions[], queries[]), busy AND idle
+# io_worker records, the capture-end flush record src/escalation.c synthesizes
+# by a path that never touches src/event_stream.c, and raw-vs-summary agreement
+# on the time model AND the heatmap (events[] feeds the summary heatmap, so the
+# matching pgwt_compute_heatmap exclusion has to agree or a >= 120 s window and
+# a shorter one disagree cell for cell).
+# It also reads both producers' SOURCE: the daemon needs BPF and cannot be
+# linked here, and the one thing a writer-level test cannot see is a producer
+# that passes 0. Bypass suite: a missing summary dir, a writer that wrote
+# nothing, an io_worker-FREE fixture, a PRE-FLAGGED fixture, a v5 file in the
+# window, and -- for the source gate -- a missing file, absent symbols, a
+# literal 0 argument, a resolve placed after the push, and an unexpected
+# producer count. Each must REFUSE; a gate that cannot see must never approve.
+test_io_worker_summary
 # Paint-latency Phase 1 (docs/PAINT_LATENCY_PLAN.md): the per-committed-block
 # transition aggregate, src/block_agg.c. `transitions` loads the full raw event
 # window on every request (~0.68 s per million records) because a per-second

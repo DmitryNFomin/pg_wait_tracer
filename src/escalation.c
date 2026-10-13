@@ -64,8 +64,11 @@ static void write_marker_at(struct pgwt_daemon *d, uint32_t marker_type,
         .query_id     = PGWT_ESC_PACK(window_s, reason),
     };
     pgwt_writer_push_event(d->event_writer, &ev);
+    /* cat_flag 0: this record is pid-LESS (pid = 0) and a marker, which the
+     * writer drops in accum_event. Resolving a T2 category for pid 0 would
+     * be meaningless and would scan the backend registry for nothing. */
     if (d->summary_writer)
-        pgwt_summary_push_event(d->summary_writer, &ev);
+        pgwt_summary_push_event(d->summary_writer, &ev, 0);
 }
 
 static void write_pid_marker_at(struct pgwt_daemon *d, pid_t pid,
@@ -85,8 +88,10 @@ static void write_pid_marker_at(struct pgwt_daemon *d, pid_t pid,
         .query_id = query_id,
     };
     pgwt_writer_push_event(d->event_writer, &ev);
+    /* cat_flag 0: a MARKER (CMD/PLAN/EXEC), dropped by the writer whatever
+     * its pid's category is. Carrying no time, it cannot misaccount any. */
     if (d->summary_writer)
-        pgwt_summary_push_event(d->summary_writer, &ev);
+        pgwt_summary_push_event(d->summary_writer, &ev, 0);
 }
 
 /* ── Budget accounting (rolling hour) ─────────────────────────────────── */
@@ -265,8 +270,24 @@ static void flush_open_intervals(struct pgwt_daemon *d, uint64_t now)
             .cpu_ns       = cpu_ns,
         };
         pgwt_writer_push_event(d->event_writer, &ev);
+        /* v6 (#315/#376): THE path where the io_worker divergence peaked. An
+         * io_worker sits in one Activity:IoWorkerMain wait for the whole
+         * capture, so its only record is the one THIS loop synthesizes at
+         * capture end. Measured on the PG18 demo capture
+         * (tests/results/issue376-measurement): a 150 s window containing
+         * that second had summary Idle +308.16% against raw; the SAME window
+         * one second earlier, +2.43%. A fix wired only into
+         * src/event_stream.c would therefore have missed the main symptom
+         * entirely: these pushes bypass that callback.
+         *
+         * Resolved from the registry rather than from a pid accumulator (pa =
+         * NULL): we hold `be` already, this runs once per backend per capture
+         * end, and at that point be->meta is long since parsed. Same function
+         * the live path uses, so the two producers cannot drift apart. */
         if (d->summary_writer)
-            pgwt_summary_push_event(d->summary_writer, &ev);
+            pgwt_summary_push_event(d->summary_writer, &ev,
+                                    pgwt_live_pid_cat_flag(d, NULL,
+                                                           (uint32_t)be->pid));
         /* T8: flush records bypass the ringbuf/event_stream funnel, so fold
          * their measured CPU into the lifetime counters here — a pure-CPU
          * command straddling capture end contributes its cpu_ns_total from
