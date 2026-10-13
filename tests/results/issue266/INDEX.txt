@@ -86,20 +86,44 @@ passing or skipping. It is reported, not hardened against. before/ did not
 hit it; a follow-up batch of 4 more after-runs is in after-extra/ if it
 completed in time.
 
-Deliberate reds (the gate can fail, and fails for the right reason)
--------------------------------------------------------------------
-  * old code, window moved 700 -> 600 ms and nothing else changed (the same
-    ~100 ms shift the gate box's extra capture latency causes):
-    ratio 0.0, "NOT caught", exit 1 -- a healthy detector reported as a
-    failure. tables/red-old-design-shifted-window.txt
-  * new code, --inject-frame 0 (a target frame with no preceding frame):
-    REFUSES with "has no preceding frame to pair against", exit 1 -- even
-    though a pair diff of 0.2018 was available to approve on.
-  * new code, --inject-blink-frac 0.0 (an overlay that is in the DOM but
-    covers no pixels -- the stimulus being absent rather than wrong):
-    geometry PROVEN, "NOT caught", exit 1.
-  * the new unit tests against the parent tree: AttributeError on
-    inject_stimulus_verdict / _BlinkInjector.
+Deliberate reds, in reds/ -- every file here is a NON-ZERO exit
+---------------------------------------------------------------
+  01  old code, window moved 700 -> 600 ms and nothing else changed (the
+      same ~100 ms shift the gate box's extra capture latency causes):
+      ratio 0.0, "NOT caught", exit 1 -- a healthy detector reported as a
+      failure.
+  02  new code, --inject-frame 0 (a target frame with no preceding frame):
+      REFUSES with "has no preceding frame to pair against", exit 1 -- even
+      though a pair diff of 0.2018 was available to approve on.
+  03  new code, --inject-blink-frac 0.0 (an overlay that is in the DOM but
+      covers no pixels -- the stimulus being absent rather than wrong):
+      geometry PROVEN, "NOT caught", exit 1.
+  05  the new unit tests against the parent tree: AttributeError on
+      inject_stimulus_verdict / _BlinkInjector.
+  (reds/ has no 04: that run is GREEN and lives in controls/ -- see below.)
+
+Controls, in controls/ -- these are GREEN (exit 0) or prove a failure is
+NOT ours, and are filed apart from the reds so this index cannot misstate
+its own contents
+-----------------------------------------------------------------------
+  01  new code, --inject-frame 4 (the sweep's LAST frame as the target):
+      geometry PROVEN, caught on pair [3], exit 0. The point is that the
+      stimulus follows whichever FRAME is targeted instead of a clock
+      window -- a green run, deliberately, not a red.
+  02  the one non-passing after-run reproduces on the PARENT commit's own
+      code as the first iteration after stack start-up, so it is a property
+      of the repeat driver (which skips ui_live_smoke.sh's 11-tab warm-up
+      walk), not of the fix.
+
+Review round 1 added one more refusal, with its own unit tests and its own
+red: inject_stimulus_verdict now also refuses when the page reports the
+overlay was ALREADY GONE at removal (was_present_at_removal is not True).
+Without it, an overlay removed by something else -- the page-side safety net
+at dwell+5s, a view rebuild -- still records hidden_requested_ms, so the
+geometry would read PROVEN while the boundary pairs scored 0.0, and the run
+would go red blaming the detector: the same misattribution, reintroduced
+through the back door. Against the pre-review lib the new cases fail 11
+assertions (AttributeError for inject_detection_verdict's own cases).
 
 Not done here
 -------------

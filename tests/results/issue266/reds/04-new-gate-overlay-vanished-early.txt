@@ -1,0 +1,31 @@
+NEW GATE, RED 4 (review round 1) -- an overlay removed by something else must
+not be blamed on the detector
+==============================================================================
+
+hidden_requested_ms is recorded whether or not the overlay was still on
+screen when the removal ran. So if anything else removed it first -- the
+page-side safety net (_BlinkInjector.SAFETY_MARGIN_MS, dwell + 5s), a view
+rebuild, a stray DOM reset -- the four timestamps look exactly like a healthy
+run: geometry PROVEN, boundary pairs 0.0, run red, detector blamed. That is
+the misattribution this whole fix exists to remove, re-entering through the
+back door.
+
+inject_stimulus_verdict now refuses on was_present_at_removal is not True.
+
+Red against the PRE-REVIEW lib (HEAD before this commit), same test file:
+
+  $ python3 test_ui_live_smoke_lib.py        # with ui_live_smoke_lib.py from HEAD~
+  FAIL: was_present_at_removal=False refuses
+  FAIL: the refusal says the overlay was already gone, not that nothing blinked
+  FAIL: was_present_at_removal=None refuses
+  FAIL: the refusal says the overlay was already gone, not that nothing blinked
+  FAIL: was_present_at_removal='yes' refuses
+  FAIL: the refusal says the overlay was already gone, not that nothing blinked
+  ... 11 failing assertions in total, then
+  AttributeError: module 'ui_live_smoke_lib' has no attribute
+  'inject_detection_verdict'
+
+On the fixed lib: Ran 360, passed 360, failed 0.
+
+The control line in the same test asserts the otherwise-identical record IS
+accepted, so the new refusal cannot pass by rejecting everything.

@@ -44,7 +44,7 @@ from whatever `tests/ui_live_smoke.sh` says at the time.
 
 `tables/` holds the output of exactly those two commands.
 
-## 3. The deliberate reds
+## 3. The deliberate reds (and the one green control)
 
 Mac, `--mock` (the same `ui_live_smoke.py`, against `tests/mock_server.py`):
 
@@ -58,7 +58,8 @@ Mac, `--mock` (the same `ui_live_smoke.py`, against `tests/mock_server.py`):
     # new design: an overlay that covers no pixels -> geometry proven, NOT caught
     python3 tests/ui_live_smoke.py --mock --inject-blink-ms 400 --inject-blink-frac 0.0
 
-    # new design: the last sweep frame as the target -> still proven, still caught
+    # CONTROL, not a red: the last sweep frame as the target -> still proven,
+    # still caught, exit 0 (controls/01-new-gate-green-on-a-different-target-frame.txt)
     python3 tests/ui_live_smoke.py --mock --inject-blink-ms 400 --inject-frame 4
 
 And the unit tests against the parent tree, where both new names are absent:
