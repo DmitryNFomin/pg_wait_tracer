@@ -14,6 +14,7 @@
 #include "percentile.h"
 #include "event_sort.h"
 #include "query_ctx_index.h"
+#include "pid_index.h"
 #include "alloc_tune.h"
 
 #include <stdio.h>
@@ -2905,8 +2906,29 @@ server_load_events_fi_mode(struct pgwt_server *srv,
      * backends.jsonl) and the PLAN/EXEC/CMD marker windows; classify exact
      * we==0 intervals against the command gate. One pass feeding every raw
      * estimator (docs/AAS_SEMANTICS_DECISION.md). */
-    if (!markers_only)
-        pgwt_tag_events(events, total, srv->pid_cats, srv->n_pid_cats);
+    if (!markers_only &&
+        !pgwt_tag_events(events, total, srv->pid_cats, srv->n_pid_cats)) {
+        /* #363: the tagged array is the oracle, so a pass that stopped
+         * partway is a wrong answer, not a short one. Route it through this
+         * loader's EXISTING degradation channel — every raw consumer reads
+         * it via reject_overload, and dump_summary reads the flag directly,
+         * so a second flag would have left that route serving
+         * partially-tagged records with nothing red.
+         *
+         * SET, never assign from the result: an earlier stage's failure
+         * (initial malloc, per-file read, merge, sort) must not be cleared
+         * by a later tagging success.
+         *
+         * Invalidate the result as well as flagging it, in exactly the
+         * shape the initial-malloc failure above already uses (NULL array,
+         * count 0, flag set), so a partial tag cannot be consumed as if it
+         * were complete by any caller that reaches the array before the
+         * flag. */
+        allocation_failed = 1;
+        free(events);
+        events = NULL;
+        total = 0;
+    }
 
     if (info) {
         info->has_transitions = has_transitions;
@@ -4112,7 +4134,6 @@ static void handle_heatmap(struct pgwt_server *srv, struct pgwt_request *req)
 /* ── Session Timeline ─────────────────────────────────────── */
 
 #define TIMELINE_MAX_EVENTS 5000
-#define TIMELINE_MAX_PIDS   256
 
 static void handle_session_timeline(struct pgwt_server *srv, struct pgwt_request *req)
 {
@@ -4124,7 +4145,18 @@ static void handle_session_timeline(struct pgwt_server *srv, struct pgwt_request
     if (reject_overload(srv, req, events, &linfo)) return;
 
     /* First pass: count matching events and collect unique PIDs */
-    uint32_t pids[TIMELINE_MAX_PIDS];
+    struct timeline_pending {
+        uint32_t pid;
+        uint64_t start_ns;
+        uint64_t end_ns;
+        uint32_t event_id;
+        int      class_idx;
+        uint64_t query_id;
+        int      active;
+    } *pending = NULL;
+    int pending_cap = 0;
+    struct pgwt_pid_index pid_ix;
+    pgwt_pid_index_init(&pid_ix);
     int num_pids = 0;
     int total_matching = 0;
 
@@ -4137,13 +4169,30 @@ static void handle_session_timeline(struct pgwt_server *srv, struct pgwt_request
             continue;
         total_matching++;
 
-        /* Collect unique PIDs (linear scan is fine for ≤256 PIDs) */
-        int found = 0;
-        for (int p = 0; p < num_pids; p++) {
-            if (pids[p] == ev->pid) { found = 1; break; }
+        /* #278/#360: grow BOTH per-PID state and the lookup table. A query
+         * drill-down spans backend churn, not just concurrent sessions.
+         * Keep first-seen order without a fixed cap or a full-hash spin. */
+        if (pgwt_pid_index_find(&pid_ix, ev->pid) >= 0)
+            continue;
+        if (num_pids == pending_cap) {
+            int newcap = pending_cap ?
+                (pending_cap > INT_MAX / 2 ? INT_MAX : pending_cap * 2) : 128;
+            if (newcap <= pending_cap ||
+                (size_t)newcap > SIZE_MAX / sizeof(*pending))
+                goto allocation_failed;
+            struct timeline_pending *tmp =
+                pgwt_test_alloc_fail("timeline_pending_grow") ||
+                (pending_cap && pgwt_test_alloc_fail("timeline_pending_regrow"))
+                ? NULL : realloc(pending, (size_t)newcap * sizeof(*tmp));
+            if (!tmp)
+                goto allocation_failed;
+            pending = tmp;
+            pending_cap = newcap;
         }
-        if (!found && num_pids < TIMELINE_MAX_PIDS)
-            pids[num_pids++] = ev->pid;
+        if (pgwt_pid_index_put(&pid_ix, ev->pid, num_pids) != 0)
+            goto allocation_failed;
+        memset(&pending[num_pids], 0, sizeof(*pending));
+        pending[num_pids++].pid = ev->pid;
     }
 
     /* Compute coalesce gap: if too many events, merge adjacent same-class
@@ -4172,22 +4221,11 @@ static void handle_session_timeline(struct pgwt_server *srv, struct pgwt_request
 
     cJSON *pids_arr = cJSON_AddArrayToObject(root, "pids");
     for (int p = 0; p < num_pids; p++)
-        cJSON_AddItemToArray(pids_arr, cJSON_CreateNumber(pids[p]));
+        cJSON_AddItemToArray(pids_arr, cJSON_CreateNumber(pending[p].pid));
 
     cJSON *events_arr = cJSON_AddArrayToObject(root, "events");
 
     /* Second pass: emit events with coalescing */
-    struct {
-        uint32_t pid;
-        uint64_t start_ns;
-        uint64_t end_ns;
-        uint32_t event_id;
-        int      class_idx;
-        uint64_t query_id;
-        int      active;
-    } pending[TIMELINE_MAX_PIDS];
-    memset(pending, 0, sizeof(pending));
-
     int nr = 0;
 
     /* Flush a pending bar to the events array */
@@ -4214,16 +4252,6 @@ static void handle_session_timeline(struct pgwt_server *srv, struct pgwt_request
         } \
     } while(0)
 
-    /* Build PID→index hash table for O(1) lookup in second pass */
-    int pid_idx_ht[1024];  /* hash table: slot → pids[] index, -1 = empty */
-    memset(pid_idx_ht, -1, sizeof(pid_idx_ht));
-    for (int p = 0; p < num_pids; p++) {
-        uint32_t slot = (pids[p] * 0x45d9f3b) & 1023;
-        while (pid_idx_ht[slot] >= 0)
-            slot = (slot + 1) & 1023;
-        pid_idx_ht[slot] = p;
-    }
-
     for (int i = 0; i < count; i++) {
         const struct pgwt_trace_event *ev = &events[i];
         if (!pgwt_filter_matches(&req->filter, ev))
@@ -4233,17 +4261,9 @@ static void handle_session_timeline(struct pgwt_server *srv, struct pgwt_request
             continue;
 
         /* O(1) PID index lookup */
-        int pidx = -1;
-        {
-            uint32_t slot = (ev->pid * 0x45d9f3b) & 1023;
-            while (pid_idx_ht[slot] >= 0) {
-                if (pids[pid_idx_ht[slot]] == ev->pid) {
-                    pidx = pid_idx_ht[slot];
-                    break;
-                }
-                slot = (slot + 1) & 1023;
-            }
-        }
+        int pidx = pgwt_pid_index_find(&pid_ix, ev->pid);
+        /* Unreachable by construction: both passes use the same filters.
+         * A silently dropped bar is preferable to a corrupted heap. */
         if (pidx < 0) continue;
 
         int cls = pgwt_wait_class_index(ev->old_event);
@@ -4284,7 +4304,16 @@ static void handle_session_timeline(struct pgwt_server *srv, struct pgwt_request
     cJSON_AddNumberToObject(root, "total_count", total_matching);
     emit_json(root);
 
+    free(pending);
+    pgwt_pid_index_free(&pid_ix);
     free(events);
+    return;
+
+allocation_failed:
+    free(pending);
+    pgwt_pid_index_free(&pid_ix);
+    linfo.allocation_failed = 1;
+    reject_overload(srv, req, events, &linfo);
 }
 
 /* ── Execution waterfall / scatter (U3/B6) ─────────────────────── */

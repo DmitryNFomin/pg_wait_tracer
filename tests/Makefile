@@ -27,6 +27,7 @@ TESTS     = test_wait_event test_cmdline test_backend_lifecycle test_spawn test_
             test_top_queries_context \
             test_variants_p95 \
             test_pid_cap \
+            test_tag_refusal \
             test_probe_bounds \
             test_interference_bounds \
             test_concurrency_bounds \
@@ -187,6 +188,23 @@ test_pid_cap: test_pid_cap.c ../src/compute.c ../src/pid_index.h \
               ../src/percentile.h \
               $(BUILD)/wait_event.o $(BUILD)/idle_rule.o $(BUILD)/spawn.o $(BUILD)/cJSON.o
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ test_pid_cap.c ../src/compute.c \
+	    $(BUILD)/wait_event.o $(BUILD)/idle_rule.o $(BUILD)/spawn.o $(BUILD)/cJSON.o -lm
+
+# test_tag_refusal: #363 — pgwt_tag_events was declared `void` and had two
+# ways to stop partway (a working-allocation failure, or more distinct pids
+# than its 4096-slot per-pid table holds), each leaving the records it never
+# reached with their raw old_event/query_id while returning normally. That
+# array is the oracle, so the result was confidently wrong, not short. Same
+# link shape as test_pid_cap (compute.c with -DPGWT_SERVER,
+# pgwt_visit_summaries stubbed in the test). Allocation failures ride
+# PGWT_TEST_LOAD_ALLOC_FAIL — the LOADER's injection variable, not
+# PGWT_TEST_ALLOC_FAIL, because this pass runs inside the raw loader and
+# tests/test_data_tag_refusal.py drives the same two points through the real
+# pgwt-server binary with the same variable.
+test_tag_refusal: test_tag_refusal.c ../src/compute.c ../src/pid_index.h \
+              ../src/percentile.h \
+              $(BUILD)/wait_event.o $(BUILD)/idle_rule.o $(BUILD)/spawn.o $(BUILD)/cJSON.o
+	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ test_tag_refusal.c ../src/compute.c \
 	    $(BUILD)/wait_event.o $(BUILD)/idle_rule.o $(BUILD)/spawn.o $(BUILD)/cJSON.o -lm
 
 # test_concurrency_bounds: #276 — pgwt_compute_concurrency materialised

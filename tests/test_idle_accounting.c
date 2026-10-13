@@ -722,7 +722,11 @@ static void test_cpu_on_and_adjacent_to_pacing(void)
  */
 static void tag_seq(struct pgwt_trace_event *ev, int n)
 {
-    pgwt_tag_events(ev, n, NULL, 0);
+    /* #363: pgwt_tag_events refuses rather than tagging part of the array.
+     * Every expectation below is about the TAGGED stream, so a refusal here
+     * must fail loudly instead of leaving the raw records in place. */
+    CHECK(pgwt_tag_events(ev, n, NULL, 0),
+          "tagging pass completed for this fixture");
 }
 
 /* The record that carries the parse-phase lock, after tagging. */

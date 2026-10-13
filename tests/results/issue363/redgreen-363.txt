@@ -1,0 +1,311 @@
+redgreen-363.txt — tests/test_tag_refusal.c against the fix and against four reverts
+Host: Darwin 24.6.0 arm64 (Darwin: pgwt-server does not build here, so the
+  test_data_tag_refusal.py half of the evidence is NOT in this file —
+  it needs a Linux box-check.)
+Tree: 8a52a51 + working tree; 2026-10-13T07:25:55Z
+Build: cc -g -O2 -Wall -I../src -I../include -DPGWT_SERVER test_tag_refusal.c
+       ../src/compute.c <wait_event|idle_rule|cJSON>.o <spawn stub: pipe2 is Linux-only>
+
+=================== GREEN: the fix as committed ===================
+=== test_tag_refusal (#363) ===
+--- 1. success: returns 1 and the tagging actually happened ---
+  ok: a taggable window returns 1 (complete)
+  ok: one we==0 record per pid became NONCMD_CPU (the relabel the untagged array gets wrong, in the direction of more CPU) (3)
+  ok: two records per pid were re-attributed to the command's id (6)
+  ok: in-command records carry FLAG_CMD_OPEN
+  ok: no in-command record was relabelled (the count above is the right records, not just the right number of them) (0)
+--- 1b. success: category flags come from the pid table ---
+  ok: tagging with a pid->category table returns 1
+  ok: the autovacuum pid's records carry FLAG_MAINT
+  ok: only the FOREGROUND pid's we==0 record was relabelled (1)
+--- 2. the FORWARD query-id array fails to allocate ---
+  ok: tag_fwd: returns 0 (refused)
+  ok: tag_fwd: the array is byte-identical to the input
+  ok: tag_fwd: nothing was relabelled (0)
+--- 3. the PER-PID STATE TABLE fails to allocate ---
+  ok: tag_ht: returns 0 (refused)
+  ok: tag_ht: the array is byte-identical to the input
+  ok: tag_ht: nothing was relabelled (0)
+--- 4. the per-pid table fills up (no injection) ---
+  (bound located: 4096 pids tag completely, 8192 refuse)
+  ok: a pid count just under the bound still tags COMPLETELY, so the refusal is a bound and not an unconditional 0
+  ok: more distinct pids than the table holds returns 0
+  ok: the refused array IS partly rewritten — which is why the caller must discard it rather than use what it got
+  ok: the partial rewrite covers SOME pids and not all: this is the silently-wrong array the pre-fix code handed back
+  ok: the back-fill pass did not run at all, so the surviving query ids are emission-time ids (the wrong statement) (0)
+--- 5. empty / absent input ---
+  ok: an empty window (NULL, 0) is a complete success
+  ok: a non-NULL array with count 0 is a complete success
+  ok: a negative count does not crash and is not reported as a tagging failure
+  ok: neither call touched the array (0)
+--- 6a. an unknown injection point must not refuse ---
+  ok: an unknown injection point returns 1 (name-matched, so sections 2/3 refused because of the NAMED allocation)
+  ok: and the pass did its full work under it (3)
+--- 6b. an empty injection value must not refuse ---
+  ok: an empty injection value returns 1
+--- 6c. an injection point set but never reached ---
+  ok: an empty window is complete even with both injections armed (the allocations never happen, so there is nothing to fail)
+--- 6d. nothing to tag (absent) vs could not tag (refused) ---
+  ok: a fixture with no command markers tags COMPLETELY
+  ok: and relabels nothing — there is no command window to be outside of (absent, not wrong) (0)
+  ok: the same fixture under an injected failure REFUSES, even though it had no tagging work to do: the refusal is not contingent on the fixture mattering
+  ok: both arrays look identical afterwards — the return value is the ONLY signal, which is why `void` was the bug (0)
+--- 6e. a refusal does not persist into the next call ---
+  ok: the call after a refused one succeeds
+  ok: with the full tag count, so no case here is reading another's leftovers (3)
+--- non-vacuity ledger ---
+  ok: the success path relabelled records somewhere in this file
+  ok: the success path back-filled query ids somewhere in this file
+  ok: the success path stamped category flags somewhere in this file
+  ok: both injected allocation failures, and the no-work fixture, actually produced refusals
+  ok: the REAL pid-table bound produced a refusal with no test hook
+  ok: a refused array was observed partly rewritten (the reason the caller must invalidate the count, not just flag it)
+  ok: an armed-but-unreachable injection point was exercised
+
+=== 40 checks, 0 failures ===
+green exit=0
+
+=================== RED R4 — the FULL pre-fix exhaustion behaviour: both tag_pid_get NULL sites back to 'continue' ===================
+(eval):21: no such file or directory: /tmp/tt_R4_both
+=== test_tag_refusal (#363) ===
+--- 1. success: returns 1 and the tagging actually happened ---
+  ok: a taggable window returns 1 (complete)
+  ok: one we==0 record per pid became NONCMD_CPU (the relabel the untagged array gets wrong, in the direction of more CPU) (3)
+  ok: two records per pid were re-attributed to the command's id (6)
+  ok: in-command records carry FLAG_CMD_OPEN
+  ok: no in-command record was relabelled (the count above is the right records, not just the right number of them) (0)
+--- 1b. success: category flags come from the pid table ---
+  ok: tagging with a pid->category table returns 1
+  ok: the autovacuum pid's records carry FLAG_MAINT
+  ok: only the FOREGROUND pid's we==0 record was relabelled (1)
+--- 2. the FORWARD query-id array fails to allocate ---
+  ok: tag_fwd: returns 0 (refused)
+  ok: tag_fwd: the array is byte-identical to the input
+  ok: tag_fwd: nothing was relabelled (0)
+--- 3. the PER-PID STATE TABLE fails to allocate ---
+  ok: tag_ht: returns 0 (refused)
+  ok: tag_ht: the array is byte-identical to the input
+  ok: tag_ht: nothing was relabelled (0)
+--- 4. the per-pid table fills up (no injection) ---
+  FAIL: REFUSE — no distinct-pid count up to 131072 made the tagging pass refuse, so this case cannot see the defect it exists for. Either the per-pid table is now unbounded (delete this section and say so) or the refusal was lost.
+--- 5. empty / absent input ---
+  ok: an empty window (NULL, 0) is a complete success
+  ok: a non-NULL array with count 0 is a complete success
+  ok: a negative count does not crash and is not reported as a tagging failure
+  ok: neither call touched the array (0)
+--- 6a. an unknown injection point must not refuse ---
+  ok: an unknown injection point returns 1 (name-matched, so sections 2/3 refused because of the NAMED allocation)
+  ok: and the pass did its full work under it (3)
+--- 6b. an empty injection value must not refuse ---
+  ok: an empty injection value returns 1
+--- 6c. an injection point set but never reached ---
+  ok: an empty window is complete even with both injections armed (the allocations never happen, so there is nothing to fail)
+--- 6d. nothing to tag (absent) vs could not tag (refused) ---
+  ok: a fixture with no command markers tags COMPLETELY
+  ok: and relabels nothing — there is no command window to be outside of (absent, not wrong) (0)
+  ok: the same fixture under an injected failure REFUSES, even though it had no tagging work to do: the refusal is not contingent on the fixture mattering
+  ok: both arrays look identical afterwards — the return value is the ONLY signal, which is why `void` was the bug (0)
+--- 6e. a refusal does not persist into the next call ---
+  ok: the call after a refused one succeeds
+  ok: with the full tag count, so no case here is reading another's leftovers (3)
+--- non-vacuity ledger ---
+  ok: the success path relabelled records somewhere in this file
+  ok: the success path back-filled query ids somewhere in this file
+  ok: the success path stamped category flags somewhere in this file
+  ok: both injected allocation failures, and the no-work fixture, actually produced refusals
+  FAIL: the REAL pid-table bound produced a refusal with no test hook (test_tag_refusal.c:529)
+  FAIL: a refused array was observed partly rewritten (the reason the caller must invalidate the count, not just flag it) (test_tag_refusal.c:532)
+  ok: an armed-but-unreachable injection point was exercised
+
+=== 36 checks, 3 failures ===
+exit=1
+
+=================== RED R2 — the forward-array refusal reverted (if (!fwd) goto refused -> dropped, old 'if (fwd)' guards left in place) ===================
+=== test_tag_refusal (#363) ===
+--- 1. success: returns 1 and the tagging actually happened ---
+  ok: a taggable window returns 1 (complete)
+  ok: one we==0 record per pid became NONCMD_CPU (the relabel the untagged array gets wrong, in the direction of more CPU) (3)
+  ok: two records per pid were re-attributed to the command's id (6)
+  ok: in-command records carry FLAG_CMD_OPEN
+  ok: no in-command record was relabelled (the count above is the right records, not just the right number of them) (0)
+--- 1b. success: category flags come from the pid table ---
+  ok: tagging with a pid->category table returns 1
+  ok: the autovacuum pid's records carry FLAG_MAINT
+  ok: only the FOREGROUND pid's we==0 record was relabelled (1)
+--- 2. the FORWARD query-id array fails to allocate ---
+  FAIL: tag_fwd: returns 0 (refused) (test_tag_refusal.c:293)
+  FAIL: tag_fwd: the array is byte-identical to the input (test_tag_refusal.c:297)
+  FAIL: tag_fwd: nothing was relabelled — got 3, want 0 (test_tag_refusal.c:299)
+--- 3. the PER-PID STATE TABLE fails to allocate ---
+  ok: tag_ht: returns 0 (refused)
+  ok: tag_ht: the array is byte-identical to the input
+  ok: tag_ht: nothing was relabelled (0)
+--- 4. the per-pid table fills up (no injection) ---
+  (bound located: 4096 pids tag completely, 8192 refuse)
+  ok: a pid count just under the bound still tags COMPLETELY, so the refusal is a bound and not an unconditional 0
+  ok: more distinct pids than the table holds returns 0
+  ok: the refused array IS partly rewritten — which is why the caller must discard it rather than use what it got
+  ok: the partial rewrite covers SOME pids and not all: this is the silently-wrong array the pre-fix code handed back
+  ok: the back-fill pass did not run at all, so the surviving query ids are emission-time ids (the wrong statement) (0)
+--- 5. empty / absent input ---
+  ok: an empty window (NULL, 0) is a complete success
+  ok: a non-NULL array with count 0 is a complete success
+  ok: a negative count does not crash and is not reported as a tagging failure
+  ok: neither call touched the array (0)
+--- 6a. an unknown injection point must not refuse ---
+  ok: an unknown injection point returns 1 (name-matched, so sections 2/3 refused because of the NAMED allocation)
+  ok: and the pass did its full work under it (3)
+--- 6b. an empty injection value must not refuse ---
+  ok: an empty injection value returns 1
+--- 6c. an injection point set but never reached ---
+  ok: an empty window is complete even with both injections armed (the allocations never happen, so there is nothing to fail)
+--- 6d. nothing to tag (absent) vs could not tag (refused) ---
+  ok: a fixture with no command markers tags COMPLETELY
+  ok: and relabels nothing — there is no command window to be outside of (absent, not wrong) (0)
+  FAIL: the same fixture under an injected failure REFUSES, even though it had no tagging work to do: the refusal is not contingent on the fixture mattering (test_tag_refusal.c:487)
+  ok: both arrays look identical afterwards — the return value is the ONLY signal, which is why `void` was the bug (0)
+--- 6e. a refusal does not persist into the next call ---
+  ok: the call after a refused one succeeds
+  ok: with the full tag count, so no case here is reading another's leftovers (3)
+--- non-vacuity ledger ---
+  ok: the success path relabelled records somewhere in this file
+  ok: the success path back-filled query ids somewhere in this file
+  ok: the success path stamped category flags somewhere in this file
+  FAIL: both injected allocation failures, and the no-work fixture, actually produced refusals (test_tag_refusal.c:527)
+  ok: the REAL pid-table bound produced a refusal with no test hook
+  ok: a refused array was observed partly rewritten (the reason the caller must invalidate the count, not just flag it)
+  ok: an armed-but-unreachable injection point was exercised
+
+=== 40 checks, 5 failures ===
+exit=1
+
+=================== RED R3 — the per-pid-table refusal reverted (if (!ht) return 0 -> return 1) ===================
+=== test_tag_refusal (#363) ===
+--- 1. success: returns 1 and the tagging actually happened ---
+  ok: a taggable window returns 1 (complete)
+  ok: one we==0 record per pid became NONCMD_CPU (the relabel the untagged array gets wrong, in the direction of more CPU) (3)
+  ok: two records per pid were re-attributed to the command's id (6)
+  ok: in-command records carry FLAG_CMD_OPEN
+  ok: no in-command record was relabelled (the count above is the right records, not just the right number of them) (0)
+--- 1b. success: category flags come from the pid table ---
+  ok: tagging with a pid->category table returns 1
+  ok: the autovacuum pid's records carry FLAG_MAINT
+  ok: only the FOREGROUND pid's we==0 record was relabelled (1)
+--- 2. the FORWARD query-id array fails to allocate ---
+  ok: tag_fwd: returns 0 (refused)
+  ok: tag_fwd: the array is byte-identical to the input
+  ok: tag_fwd: nothing was relabelled (0)
+--- 3. the PER-PID STATE TABLE fails to allocate ---
+  FAIL: tag_ht: returns 0 (refused) (test_tag_refusal.c:293)
+  ok: tag_ht: the array is byte-identical to the input
+  ok: tag_ht: nothing was relabelled (0)
+--- 4. the per-pid table fills up (no injection) ---
+  (bound located: 4096 pids tag completely, 8192 refuse)
+  ok: a pid count just under the bound still tags COMPLETELY, so the refusal is a bound and not an unconditional 0
+  ok: more distinct pids than the table holds returns 0
+  ok: the refused array IS partly rewritten — which is why the caller must discard it rather than use what it got
+  ok: the partial rewrite covers SOME pids and not all: this is the silently-wrong array the pre-fix code handed back
+  ok: the back-fill pass did not run at all, so the surviving query ids are emission-time ids (the wrong statement) (0)
+--- 5. empty / absent input ---
+  ok: an empty window (NULL, 0) is a complete success
+  ok: a non-NULL array with count 0 is a complete success
+  ok: a negative count does not crash and is not reported as a tagging failure
+  ok: neither call touched the array (0)
+--- 6a. an unknown injection point must not refuse ---
+  ok: an unknown injection point returns 1 (name-matched, so sections 2/3 refused because of the NAMED allocation)
+  ok: and the pass did its full work under it (3)
+--- 6b. an empty injection value must not refuse ---
+  ok: an empty injection value returns 1
+--- 6c. an injection point set but never reached ---
+  ok: an empty window is complete even with both injections armed (the allocations never happen, so there is nothing to fail)
+--- 6d. nothing to tag (absent) vs could not tag (refused) ---
+  ok: a fixture with no command markers tags COMPLETELY
+  ok: and relabels nothing — there is no command window to be outside of (absent, not wrong) (0)
+  ok: the same fixture under an injected failure REFUSES, even though it had no tagging work to do: the refusal is not contingent on the fixture mattering
+  ok: both arrays look identical afterwards — the return value is the ONLY signal, which is why `void` was the bug (0)
+--- 6e. a refusal does not persist into the next call ---
+  ok: the call after a refused one succeeds
+  ok: with the full tag count, so no case here is reading another's leftovers (3)
+--- non-vacuity ledger ---
+  ok: the success path relabelled records somewhere in this file
+  ok: the success path back-filled query ids somewhere in this file
+  ok: the success path stamped category flags somewhere in this file
+  FAIL: both injected allocation failures, and the no-work fixture, actually produced refusals (test_tag_refusal.c:527)
+  ok: the REAL pid-table bound produced a refusal with no test hook
+  ok: a refused array was observed partly rewritten (the reason the caller must invalidate the count, not just flag it)
+  ok: an armed-but-unreachable injection point was exercised
+
+=== 40 checks, 2 failures ===
+exit=1
+
+=================== GREEN-ON-PURPOSE R1 — only the FORWARD pass's refusal reverted. Still returns 0, because the backward pass's tag_pid_get also refuses. Recorded because it is the one mutant this suite does NOT catch, and it does not need to: the observable contract (return 0, caller discards) is unchanged. R4 is the real revert. ===================
+=== test_tag_refusal (#363) ===
+--- 1. success: returns 1 and the tagging actually happened ---
+  ok: a taggable window returns 1 (complete)
+  ok: one we==0 record per pid became NONCMD_CPU (the relabel the untagged array gets wrong, in the direction of more CPU) (3)
+  ok: two records per pid were re-attributed to the command's id (6)
+  ok: in-command records carry FLAG_CMD_OPEN
+  ok: no in-command record was relabelled (the count above is the right records, not just the right number of them) (0)
+--- 1b. success: category flags come from the pid table ---
+  ok: tagging with a pid->category table returns 1
+  ok: the autovacuum pid's records carry FLAG_MAINT
+  ok: only the FOREGROUND pid's we==0 record was relabelled (1)
+--- 2. the FORWARD query-id array fails to allocate ---
+  ok: tag_fwd: returns 0 (refused)
+  ok: tag_fwd: the array is byte-identical to the input
+  ok: tag_fwd: nothing was relabelled (0)
+--- 3. the PER-PID STATE TABLE fails to allocate ---
+  ok: tag_ht: returns 0 (refused)
+  ok: tag_ht: the array is byte-identical to the input
+  ok: tag_ht: nothing was relabelled (0)
+--- 4. the per-pid table fills up (no injection) ---
+  (bound located: 4096 pids tag completely, 8192 refuse)
+  ok: a pid count just under the bound still tags COMPLETELY, so the refusal is a bound and not an unconditional 0
+  ok: more distinct pids than the table holds returns 0
+  ok: the refused array IS partly rewritten — which is why the caller must discard it rather than use what it got
+  ok: the partial rewrite covers SOME pids and not all: this is the silently-wrong array the pre-fix code handed back
+  ok: the back-fill pass did not run at all, so the surviving query ids are emission-time ids (the wrong statement) (0)
+--- 5. empty / absent input ---
+  ok: an empty window (NULL, 0) is a complete success
+  ok: a non-NULL array with count 0 is a complete success
+  ok: a negative count does not crash and is not reported as a tagging failure
+  ok: neither call touched the array (0)
+--- 6a. an unknown injection point must not refuse ---
+  ok: an unknown injection point returns 1 (name-matched, so sections 2/3 refused because of the NAMED allocation)
+  ok: and the pass did its full work under it (3)
+--- 6b. an empty injection value must not refuse ---
+  ok: an empty injection value returns 1
+--- 6c. an injection point set but never reached ---
+  ok: an empty window is complete even with both injections armed (the allocations never happen, so there is nothing to fail)
+--- 6d. nothing to tag (absent) vs could not tag (refused) ---
+  ok: a fixture with no command markers tags COMPLETELY
+  ok: and relabels nothing — there is no command window to be outside of (absent, not wrong) (0)
+  ok: the same fixture under an injected failure REFUSES, even though it had no tagging work to do: the refusal is not contingent on the fixture mattering
+  ok: both arrays look identical afterwards — the return value is the ONLY signal, which is why `void` was the bug (0)
+--- 6e. a refusal does not persist into the next call ---
+  ok: the call after a refused one succeeds
+  ok: with the full tag count, so no case here is reading another's leftovers (3)
+--- non-vacuity ledger ---
+  ok: the success path relabelled records somewhere in this file
+  ok: the success path back-filled query ids somewhere in this file
+  ok: the success path stamped category flags somewhere in this file
+  ok: both injected allocation failures, and the no-work fixture, actually produced refusals
+  ok: the REAL pid-table bound produced a refusal with no test hook
+  ok: a refused array was observed partly rewritten (the reason the caller must invalidate the count, not just flag it)
+  ok: an armed-but-unreachable injection point was exercised
+
+=== 40 checks, 0 failures ===
+exit=0
+
+=================== RED R0 — the PARENT TREE (origin/master 8a52a51): pgwt_tag_events is `void` ===================
+$ cc ... test_tag_refusal.c <parent compute.c/.h>
+test_tag_refusal.c:221:43: error: invalid operands to binary expression ('void' and 'int')
+test_tag_refusal.c:265:43: error: invalid operands to binary expression ('void' and 'int')
+test_tag_refusal.c:288:9: error: initializing 'int' with an expression of incompatible type 'void'
+test_tag_refusal.c:336:13: error: initializing 'int' with an expression of incompatible type 'void'
+test_tag_refusal.c:363:9: error: initializing 'int' with an expression of incompatible type 'void'
+test_tag_refusal.c:389:45: error: invalid operands to binary expression ('void' and 'int')
+test_tag_refusal.c:394:43: error: invalid operands to binary expression ('void' and 'int')
+test_tag_refusal.c:396:44: error: invalid operands to binary expression ('void' and 'int')
+cc exit=
+(the parent tree cannot even BUILD this test: the contract it asserts does not exist there)

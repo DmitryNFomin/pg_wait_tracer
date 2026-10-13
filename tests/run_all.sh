@@ -294,6 +294,9 @@ if [[ -x "$PROJECT_DIR/pgwt-server" ]] && [[ -x "$SCRIPT_DIR/gen_test_traces" ]]
     run_test "test_data_executions" python3 "$SCRIPT_DIR/test_data_executions.py"
     run_test "test_data_categories" python3 "$SCRIPT_DIR/test_data_categories.py"
     run_test "test_data_window_bound" python3 "$SCRIPT_DIR/test_data_window_bound.py"
+    # #363: a refused tagging pass must reach BOTH loader consumers --
+    # reject_overload and dump_summary, which reads allocation_failed itself.
+    run_test "test_data_tag_refusal" python3 "$SCRIPT_DIR/test_data_tag_refusal.py"
     run_test "test_current_trace" python3 "$SCRIPT_DIR/test_current_trace.py"
     # #283: current.trace's committed blocks are cached between requests. The
     # differential (cache on vs PGWT_CURRENT_TRACE_CACHE=0) is the gate — a
