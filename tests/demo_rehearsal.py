@@ -152,7 +152,7 @@ def _assert_daemon_alive(daemon_pid, where):
 
 def _run_passes(browser, url, out_dir, ticks, passes, first_data_timeout,
                 pgbench_pid, workload_pid, daemon_pid, t0,
-                viewport, device_scale_factor):
+                viewport, device_scale_factor, diag_data=False):
     pass_results = []
     sweep_coverage = []
     for name, target_offset_s in passes:
@@ -182,7 +182,8 @@ def _run_passes(browser, url, out_dir, ticks, passes, first_data_timeout,
                                         ticks, first_data_timeout,
                                         lib.BLINK_THRESHOLD,
                                         viewport=viewport,
-                                        device_scale_factor=device_scale_factor)
+                                        device_scale_factor=device_scale_factor,
+                                        diag_data=diag_data)
             tab_results[tab_id] = result
             live_smoke._assert_workload_alive(
                 pgbench_pid, workload_pid, f"pass {name!r} tab {tab_id!r}")
@@ -395,7 +396,11 @@ def _daemon_log_check(daemon_log_path):
             "degraded_warnings": degraded_warnings}
 
 
-def main():
+def build_arg_parser():
+    """The CLI surface, separated from main() so a unit test can assert what
+    the flags actually do without starting a browser (issue #384's
+    --diag-data has to be provably reachable from a rehearsal, not just
+    present in ui_live_smoke.py)."""
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--url", required=True, help="the Go bridge's page URL")
@@ -445,7 +450,19 @@ def main():
                     default=DEMO_DEVICE_SCALE_FACTOR,
                     help="issue #223: pinned device scale factor / effective "
                     f"zoom proxy (default {DEMO_DEVICE_SCALE_FACTOR})")
-    args = ap.parse_args()
+    ap.add_argument("--diag-data", action="store_true",
+                    help="issue #384: record WHAT THE CHART WAS RENDERING at "
+                    "each compared frame (ui_live_smoke.py's per-frame panel "
+                    "data probe) into <pass>/<tab>/diag/. Diagnostic only -- "
+                    "it adds round trips per tick and changes no verdict, so "
+                    "it is OFF for a counted attempt and exists so a blink "
+                    "seen during a rehearsal can be traced to the data "
+                    "behind the frame instead of being re-guessed")
+    return ap
+
+
+def main():
+    args = build_arg_parser().parse_args()
 
     duration_s = args.duration_min * 60.0
     ticks, passes = drlib.plan_passes(duration_s)
@@ -522,7 +539,8 @@ def main():
                 args.workload_pid, args.daemon_pid, t0,
                 viewport={"width": args.viewport_width,
                           "height": args.viewport_height},
-                device_scale_factor=args.device_scale_factor)
+                device_scale_factor=args.device_scale_factor,
+                diag_data=args.diag_data)
         finally:
             browser.close()
 

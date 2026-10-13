@@ -127,6 +127,22 @@ RETAIN_TRACE="${RETAIN_TRACE:-1}"
 export RETAIN_TRACE
 export PGWT_RETAIN_TRACE="$RETAIN_TRACE"
 
+# issue #384 diagnostic, OFF by default: DIAG_DATA=1 adds --diag-data to the
+# python child, which records WHAT THE CHART WAS RENDERING at each compared
+# frame (one PNG + one JSON per tick under <pass>/<tab>/diag/). It costs
+# extra round trips per tick and changes no verdict, so a counted attempt
+# leaves it off; it exists so a blink observed during a rehearsal can be
+# traced to the data behind the frame instead of being re-guessed from a
+# screenshot. tests/test_demo_rehearsal_diag.py pins the whole thread.
+DIAG_DATA="${DIAG_DATA:-0}"
+DIAG_CLI_ARGS=()
+if [[ "$DIAG_DATA" == 1 ]]; then
+    # An `[[ ... ]] && assign` one-liner here would be a non-zero final
+    # status under `set -e`: the default (DIAG_DATA=0) path would abort the
+    # whole rehearsal before it started.
+    DIAG_CLI_ARGS=(--diag-data)
+fi
+
 # ── kernel run_delay accounting (issue #386) ─────────────────────────────
 # /proc/<pid>/schedstat field 2 (run_delay: ns runnable but NOT on a CPU)
 # is the ONLY way to measure the run-queue component of the Off-CPU*
@@ -363,7 +379,7 @@ python3 -u "$SCRIPT_DIR/demo_rehearsal.py" --url "$BASE_URL" \
     --duration-min "$DURATION_MIN" \
     --pgbench-pid "$PGBENCH_PID" --workload-pid "$WORKLOAD_PID" \
     --daemon-pid "$TRACER_PID" --postmaster-pid "$PM_PID" \
-    "${TAG_CLI_ARGS[@]}"
+    "${DIAG_CLI_ARGS[@]+${DIAG_CLI_ARGS[@]}}" "${TAG_CLI_ARGS[@]}"
 DEMO_RC=$?
 
 exit "$DEMO_RC"
