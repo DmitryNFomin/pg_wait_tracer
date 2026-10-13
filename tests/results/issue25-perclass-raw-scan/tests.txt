@@ -2,6 +2,15 @@
   ok   control_reports_per_event_max
   ok   crossing_detected
   ok   crossing_carries_full_identity
+  ok   benign_long_sleep_is_not_a_crossing
+  ok   absolute_only_count_stays_visible
+  ok   signature_is_declared_in_the_output
+  ok   ratio_without_absolute_is_not_a_crossing
+  ok   zero_duration_cpu_is_not_cleared_by_the_ratio_half
+  ok   unreachable_min_ratio_refuses
+  ok   nan_min_ratio_refuses
+  ok   unparseable_min_ratio_refuses
+  ok   detection_survives_the_refusal_cases
   ok   empty_dir_refuses
   ok   missing_dir_refuses
   ok   truncated_trace_refuses
@@ -19,4 +28,4 @@
   ok   census_dependency_missing_fails_harness
   ok   census_dependency_nonexec_fails_harness
 
-20 passed, 0 failed
+29 passed, 0 failed

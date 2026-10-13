@@ -3,6 +3,15 @@ $ SCAN_BIN=<mutant M6_no_crossing_detection> python3 test_wait_cpu_scan.py
   ok   control_reports_per_event_max
   FAIL crossing_detected: rc=0 crossings=[]
   FAIL crossing_carries_full_identity: identity incomplete
+  ok   benign_long_sleep_is_not_a_crossing
+  ok   absolute_only_count_stays_visible
+  ok   signature_is_declared_in_the_output
+  ok   ratio_without_absolute_is_not_a_crossing
+  FAIL zero_duration_cpu_is_not_cleared_by_the_ratio_half: rc=0 verdict=CLEAN crossings=0
+  ok   unreachable_min_ratio_refuses
+  ok   nan_min_ratio_refuses
+  ok   unparseable_min_ratio_refuses
+  FAIL detection_survives_the_refusal_cases: rc=0 verdict=CLEAN
   ok   empty_dir_refuses
   ok   missing_dir_refuses
   ok   truncated_trace_refuses
@@ -20,6 +29,8 @@ $ SCAN_BIN=<mutant M6_no_crossing_detection> python3 test_wait_cpu_scan.py
   ok   census_dependency_missing_fails_harness
   ok   census_dependency_nonexec_fails_harness
 
-18 passed, 2 failed
+25 passed, 4 failed
   - crossing_detected: rc=0 crossings=[]
   - crossing_carries_full_identity: identity incomplete
+  - zero_duration_cpu_is_not_cleared_by_the_ratio_half: rc=0 verdict=CLEAN crossings=0
+  - detection_survives_the_refusal_cases: rc=0 verdict=CLEAN

@@ -1,10 +1,10 @@
-verdict: CROSSING exit 3 threshold_ns 824430
+verdict: UNMEASURED exit 4 threshold_ns 824430
 coverage: {'files_found': 1, 'files_opened': 1, 'files_failed': 0, 'blocks_total': 1052, 'blocks_decoded': 1052, 'blocks_failed': 0, 'records_walked': 4307056, 'header_records': 4307056, 'transitions': 4307056, 'markers': 2126146, 'samples': 0, 'wait_records': 1090417, 'cpu_gap_records': 1090493, 'cpu_gap_cpu_unknown': 0, 'unresolved_records': 0, 'expect_transitions': 4307056, 'expect_samples': 0}
 refusals: [] unmeasured: ['Lock:advisory']
 
 PURE-SLEEP SET (doc §3 names + the workload's advisory substitute)
 class                      n measured unknown  max_cpu_us mean_cpu_us median_us   p99_us  max_cpu/dur% mean_cpu/dur% >thr
-Timeout:PgSleep          326      326       0     923.834      37.931    33.491   78.799      0.030753      0.002776    1
+Timeout:PgSleep          326      326       0     923.834      37.931    33.491   78.799      0.030753      0.002776    0
 Lock:relation            436      436       0     148.026      52.606    51.165   90.922      0.014799      0.003598    0
 Lock:advisory              0        0       0  UNMEASURED           -         -        -             -             -    -
 Lock:transactionid       590      590       0     112.622      37.597    30.556   81.521    100.000000      4.149202    0
@@ -19,11 +19,11 @@ sleep-class boundary-CPU envelope at full coverage (us):
 
 ALL CLASSES
 class                                    n    meas   unk  max_cpu_us mean_cpu_us  max_cpu/dur% >thr
-Client:ClientRead                   319033  319033     0    2965.182      21.027    100.000000   13
+Client:ClientRead                   319033  319033     0    2965.182      21.027    100.000000   11
 IO:BufFileRead                      282040  282040     0     383.457       6.673    100.000000    0
 IO:BufFileWrite                     281985  281985     0    2851.630      10.744    100.000000    2
 IO:WalWrite                          46978   46978     0    1248.935      37.354    100.000000    1
-IO:WalSync                           46919   46919     0    3372.463      82.628     86.880747    3
+IO:WalSync                           46919   46919     0    3372.463      82.628     86.880747    2
 IO:DataFileWrite                     35152   35152     0     336.038      23.271    100.000000    0
 IO:DataFileFlush                     26031   26031     0     884.204      13.971    100.000000    1
 IO:DataFileRead                      16654   16654     0     182.972      25.253    100.000000    0
@@ -33,7 +33,7 @@ Activity:WalWriterMain                7847    7847     0     297.766      34.152
 LWLock:WALWrite                       1186    1186     0      94.678      23.346    100.000000    0
 Lock:transactionid                     590     590     0     112.622      37.597    100.000000    0
 Lock:relation                          436     436     0     148.026      52.606      0.014799    0
-Timeout:PgSleep                        326     326     0     923.834      37.931      0.030753    1
+Timeout:PgSleep                        326     326     0     923.834      37.931      0.030753    0
 IO:DataFileExtend                      300     300     0     152.736      42.854    100.000000    0
 Activity:BgwriterHibernate             209     209     0      75.021      38.342      2.596942    0
 Activity:AutovacuumMain                186     186     0      96.652      41.395     29.033769    0
@@ -57,7 +57,7 @@ LWLock:PgStatsData                       1       1     0       4.789       4.789
 LWLock:DynamicSharedMemoryControl        1       1     0       4.669       4.669    100.000000    0
 LWLock:SInvalWrite                       1       1     0       4.339       4.339    100.000000    0
 
-pure-sleep crossings: 1  all-class crossings: 21
+pure-sleep crossings: 0  all-class crossings: 17
   other class: Client:ClientRead pid=1170992 cpu_ns=1700006 dur_ns=1920068 ratio=88.538843% ts_wall_ns=1790895987354329003 query_id=4854991825702068830 block=22 record=1627
   other class: Client:ClientRead pid=1170992 cpu_ns=2547331 dur_ns=2547331 ratio=100.000000% ts_wall_ns=1790896131162416889 query_id=-6796648778530205384 block=104 record=2985
   other class: IO:WalSync pid=1170990 cpu_ns=998477 dur_ns=1685671 ratio=59.233207% ts_wall_ns=1790896169466544902 query_id=6097083398544187049 block=125 record=3286
@@ -65,17 +65,13 @@ pure-sleep crossings: 1  all-class crossings: 21
   other class: IO:WalSync pid=1170990 cpu_ns=3372463 dur_ns=3881715 ratio=86.880747% ts_wall_ns=1790896395659281204 query_id=6097083398544187049 block=255 record=1443
   other class: IO:BufFileWrite pid=1171013 cpu_ns=1114733 dur_ns=1114733 ratio=100.000000% ts_wall_ns=1790896566670596509 query_id=-2095014956446912358 block=351 record=2607
   other class: IO:DataFileFlush pid=22530 cpu_ns=884204 dur_ns=884204 ratio=100.000000% ts_wall_ns=1790896701835886430 query_id=0 block=427 record=3710
-  other class: Client:ClientRead pid=1170990 cpu_ns=845590 dur_ns=263310565 ratio=0.321138% ts_wall_ns=1790896707279760646 query_id=6097083398544187049 block=434 record=3138
   other class: Client:ClientRead pid=1170991 cpu_ns=2965182 dur_ns=3061763 ratio=96.845576% ts_wall_ns=1790896725364644232 query_id=4854991825702068830 block=442 record=242
   other class: Client:ClientRead pid=1170992 cpu_ns=1513469 dur_ns=1547212 ratio=97.819109% ts_wall_ns=1790896777288381182 query_id=-6796648778530205384 block=473 record=501
   other class: Client:ClientRead pid=1170992 cpu_ns=916834 dur_ns=1143477 ratio=80.179488% ts_wall_ns=1790897046849827457 query_id=4854991825702068830 block=625 record=1382
   other class: Client:ClientRead pid=1170989 cpu_ns=1057265 dur_ns=1109243 ratio=95.314102% ts_wall_ns=1790897220917818620 query_id=-1980831870093258527 block=723 record=3846
-  other class: IO:WalSync pid=22533 cpu_ns=2177339 dur_ns=4354931 ratio=49.997095% ts_wall_ns=1790897224581682081 query_id=0 block=725 record=2434
-  SLEEP CROSSING: Timeout:PgSleep pid=1171002 cpu_ns=923834 dur_ns=3004037354 ratio=0.030753% ts_wall_ns=1790897314543859529 query_id=-8886085649470066503 block=777 record=3734
   other class: Client:ClientRead pid=1170989 cpu_ns=856771 dur_ns=957489 ratio=89.481028% ts_wall_ns=1790897331414225032 query_id=286264995346867541 block=784 record=655
   other class: IO:WalWrite pid=1170989 cpu_ns=1248935 dur_ns=1248935 ratio=100.000000% ts_wall_ns=1790897482289612604 query_id=6097083398544187049 block=867 record=2346
   other class: Client:ClientRead pid=1170992 cpu_ns=1300141 dur_ns=1407762 ratio=92.355171% ts_wall_ns=1790897493657062027 query_id=4854991825702068830 block=877 record=742
   other class: Client:ClientRead pid=1170991 cpu_ns=1924397 dur_ns=3031237 ratio=63.485534% ts_wall_ns=1790897537427897989 query_id=4854991825702068830 block=900 record=3851
   other class: Client:ClientRead pid=1170989 cpu_ns=1151323 dur_ns=1228187 ratio=93.741670% ts_wall_ns=1790897617229810559 query_id=286264995346867541 block=944 record=3626
   other class: Client:ClientRead pid=1170991 cpu_ns=966277 dur_ns=1042259 ratio=92.709873% ts_wall_ns=1790897627477840246 query_id=5409612748292285639 block=953 record=3362
-  other class: Client:ClientRead pid=1170992 cpu_ns=2035765 dur_ns=240357284 ratio=0.846975% ts_wall_ns=1790897739600968623 query_id=6097083398544187049 block=1016 record=1297

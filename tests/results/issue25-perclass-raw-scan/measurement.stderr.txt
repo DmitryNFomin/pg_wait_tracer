@@ -1,1 +1,1 @@
-wait_cpu_scan: CROSSING (exit 3) — records=4307056 waits=1090417 blocks=1052/1052 refusals=0 sleep_crossings=1 unmeasured=1
+wait_cpu_scan: UNMEASURED (exit 4) — records=4307056 waits=1090417 blocks=1052/1052 refusals=0 sleep_crossings=0 (abs-only 1) unmeasured=1
