@@ -74,6 +74,31 @@ export function buildHeatmapOption(data, opts) {
 
     const series = [{
         type: 'heatmap', data: hmData,
+        // Single-pass paint, so the mount anchor can never be published
+        // mid-fill. This is a GUARANTEE, not the cure for an observed live
+        // blink: no live pixel divergence was ever measured against it (see
+        // below).
+        //
+        // ECharts' GLOBAL defaults are progressive: 400 /
+        // progressiveThreshold: 3000 (vendor echarts.min.js 5.6.0; heatmap
+        // overrides neither), so past 3000 cells the heatmap renders
+        // incrementally, 400 cells per animation frame. view-manager.js
+        // records lastMount.at AFTER view.mount() returns, i.e. after chunk 1
+        // of N — every later chunk paints AFTER the anchor the live-UI-smoke
+        // sweep is anchored on. Measured in a browser against this builder
+        // (tests/results/hist_blink/mech_check.py): without this line, 3500
+        // cells -> getProgressive()=400, 9 paints, 8 of them after setOption
+        // returned, at +33..+119 ms; 4600 cells (a demo-length window) -> 12
+        // paints, the last at +168 ms. With it: getProgressive()=0, exactly
+        // 1 paint, at +35 ms.
+        //
+        // That window stayed under the sweep's first 200 ms frame on the
+        // hardware we could measure (gate-2, ~3200 cells: 16/16 ticks clean
+        // on both builders), so this change fixes no blink anyone has seen in
+        // pixels. It removes the multi-frame window itself, which is cheap:
+        // ~5k plain rects paint in one frame (35 ms above), and animation is
+        // already off.
+        progressive: 0,
         emphasis: { itemStyle: { borderColor: '#fff', borderWidth: 1 } },
         itemStyle: { borderWidth: 0 },
     }];
