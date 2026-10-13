@@ -1,0 +1,11 @@
+OLD DESIGN, RED: tests/ui_live_smoke.py at 6bfe7d3 with the overlay window
+moved from mount+700 to mount+600 (a ~100ms shift of the SAME fixed window --
+the gate box's extra 100-200ms of capture latency moves the frames by the same
+amount relative to it). --mock, Mac, nothing else changed:
+
+SELF-TEST FAIL: the injected blink was NOT caught and the tab verdict was True (self_test={'tick': 2, 'ratio': 0.0, 'measured': True, 'note': None, 'inject_blink_ms': 400, 'caught': False})
+
+exit code: 1
+
+The unmodified same tree, same machine, same command, window at +700:
+SELF-TEST PASS: the injected blink was caught and the tab verdict was 'FAIL' (self_test={'tick': 2, 'ratio': 0.20175438596491227, 'measured': True, 'note': None, 'inject_blink_ms': 400, 'caught': True})

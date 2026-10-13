@@ -1,0 +1,7 @@
+NEW GATE, RED 1 -- it refuses when it cannot prove the geometry.
+--inject-frame 0: a target frame with no preceding frame to pair against.
+Note the pair diff of 0.2018 WAS available: the gate declines to approve on it.
+
+SELF-TEST FAIL: the stimulus geometry was NOT proven (inject target frame index 0 has no preceding frame to pair against -- the stimulus could not create a consecutive-pair diff), the injected blink was caught on pairs [0] (ratios [0.20175438596491227]) and the tab verdict was 'FAIL' (self_test={'tick': 2, 'ratio': 0.20175438596491227, 'measured': True, 'note': None, 'inject_blink_ms': 400, 'injec
+
+exit code: 1

@@ -2161,6 +2161,270 @@ def test_viewport_mismatch_reason_reports_every_mismatched_field():
           "combined reason still names zoom/DPR")
 
 
+# ── inject_stimulus_verdict (issue #266) ─────────────────────────────────────
+#
+# Bypass suite: each case below is a way the geometry proof could be made
+# UNREACHABLE -- the failure mode that matters here is a FALSE NEGATIVE, a
+# self-test that reports "the detector works" when nothing was ever on
+# screen for it to detect. Every one of these must REFUSE (ok=False), not
+# approve. The one positive case is last.
+
+def _frame_windows(n=5, start=1000, call=300, gap=500):
+    """n frames whose capture intervals are [start+k*gap, +call]."""
+    return [(start + k * gap, start + k * gap + call) for k in range(n)]
+
+
+def _stimulus(req, painted, hide_req, cleared, present=True):
+    return {"shown_requested_ms": req, "shown_painted_ms": painted,
+            "hidden_requested_ms": hide_req, "hidden_cleared_ms": cleared,
+            "was_present_at_removal": present}
+
+
+def test_inject_stimulus_verdict_refuses_without_frame_windows():
+    for windows in (None, [], (), "nope"):
+        ok, reason = lib.inject_stimulus_verdict(
+            _stimulus(900, 950, 2000, 2050), windows, 2)
+        check(not ok, f"no frame windows ({windows!r}) refuses")
+        check(reason is not None and "cannot prove" in reason,
+              "the refusal says the stimulus presence could not be proven")
+
+
+def test_inject_stimulus_verdict_refuses_when_stimulus_absent():
+    windows = _frame_windows()
+    for stim in (None, {}, "nope", 7):
+        ok, reason = lib.inject_stimulus_verdict(stim, windows, 2)
+        check(not ok, f"absent stimulus record ({stim!r}) refuses")
+    ok, reason = lib.inject_stimulus_verdict(None, windows, 2)
+    check("never injected" in (reason or ""),
+          "a None stimulus is reported as never injected, not as a miss")
+
+
+def test_inject_stimulus_verdict_refuses_on_each_missing_timestamp():
+    windows = _frame_windows()
+    full = _stimulus(1900, 1950, 2300, 2350)
+    for key in ("shown_requested_ms", "shown_painted_ms",
+                "hidden_requested_ms", "hidden_cleared_ms"):
+        for bad in (None, "x", float("nan") if False else "1950"):
+            stim = dict(full)
+            stim[key] = bad
+            ok, reason = lib.inject_stimulus_verdict(stim, windows, 2)
+            check(not ok, f"missing/unparseable {key}={bad!r} refuses")
+            check(key in (reason or ""), f"the refusal names {key}")
+
+
+def test_inject_stimulus_verdict_refuses_when_show_never_painted():
+    """The show handshake that never resolved is the "thing being checked is
+    absent, not wrong" case: the overlay may never have reached the screen
+    at all, so neither a pass nor a detector-blaming fail is honest."""
+    windows = _frame_windows()
+    stim = _stimulus(1900, None, 2300, 2350)
+    ok, reason = lib.inject_stimulus_verdict(stim, windows, 2)
+    check(not ok, "a show that never reported a painted frame refuses")
+    check("on screen" in (reason or ""),
+          "the refusal says the overlay cannot be assumed to have been on screen")
+
+
+def test_inject_stimulus_verdict_refuses_non_monotonic_timestamps():
+    windows = _frame_windows()
+    ok, reason = lib.inject_stimulus_verdict(
+        _stimulus(2400, 1950, 2300, 2350), windows, 2)
+    check(not ok, "paint before the append request refuses")
+    check("monotonic" in (reason or ""), "the refusal says why: not monotonic")
+
+
+def test_inject_stimulus_verdict_refuses_target_index_without_predecessor():
+    windows = _frame_windows()
+    stim = _stimulus(0, 10, 5000, 5010)   # covers everything
+    for idx in (0, -1, None, "2"):
+        ok, reason = lib.inject_stimulus_verdict(stim, windows, idx)
+        check(not ok, f"target index {idx!r} refuses (no preceding frame)")
+
+
+def test_inject_stimulus_verdict_refuses_target_index_past_the_sweep():
+    windows = _frame_windows(n=5)
+    stim = _stimulus(0, 10, 5000, 5010)
+    ok, reason = lib.inject_stimulus_verdict(stim, windows, 5)
+    check(not ok, "a target index past the last frame refuses")
+    check("outside" in (reason or ""), "the refusal says it is outside the sweep")
+
+
+def test_inject_stimulus_verdict_refuses_missing_frame_in_the_sweep():
+    """A frame that was never captured scores ratio 1.0 all by itself
+    (sweep_consecutive_diff_ratios), so a self-test that accepted one could
+    report "caught" from a FAILED CAPTURE."""
+    windows = _frame_windows()
+    target = windows[2]
+    stim = _stimulus(target[0] - 100, target[0] - 50,
+                     target[1] + 50, target[1] + 100)
+    for bad_index in range(5):
+        broken = list(windows)
+        broken[bad_index] = None
+        ok, reason = lib.inject_stimulus_verdict(stim, broken, 2)
+        check(not ok, f"frame {bad_index} missing from the sweep refuses")
+        check("missing frame" in (reason or ""),
+              "the refusal explains a missing frame cannot be attributed")
+    broken = list(windows)
+    broken[1] = (500, 400)    # end before start: unparseable interval
+    ok, reason = lib.inject_stimulus_verdict(stim, broken, 2)
+    check(not ok, "an inverted capture interval refuses")
+
+
+def test_inject_stimulus_verdict_refuses_partial_coverage_of_the_target():
+    """#266's own mechanism: the stimulus overlapped the target frame's
+    capture interval but did not cover it, so whether the frame's unknown
+    raster instant fell inside is exactly what cannot be concluded."""
+    windows = _frame_windows()
+    t_start, t_end = windows[2]
+    late_paint = _stimulus(t_start + 10, t_start + 50, t_end + 50, t_end + 100)
+    ok, reason = lib.inject_stimulus_verdict(late_paint, windows, 2)
+    check(not ok, "a stimulus painted after the capture call started refuses")
+    check("does not cover" in (reason or ""), "the refusal says coverage, not detection")
+    early_hide = _stimulus(t_start - 100, t_start - 50, t_end - 1, t_end + 50)
+    ok, reason = lib.inject_stimulus_verdict(early_hide, windows, 2)
+    check(not ok, "a stimulus removed before the capture call returned refuses")
+
+
+def test_inject_stimulus_verdict_refuses_when_a_neighbour_may_have_seen_it():
+    """If the overlay MAY have been up while a neighbouring frame was taken,
+    that frame is not a clean reference and the pair diff proves nothing."""
+    windows = _frame_windows()
+    t_start, t_end = windows[2]
+    prev_end = windows[1][1]
+    stim = _stimulus(prev_end - 1, t_start - 10, t_end + 10, t_end + 60)
+    ok, reason = lib.inject_stimulus_verdict(stim, windows, 2)
+    check(not ok, "an append request inside the previous frame's capture refuses")
+    check("not provably a clean reference frame" in (reason or ""),
+          "the refusal names the contaminated reference frame")
+    next_start = windows[3][0]
+    stim = _stimulus(t_start - 100, t_start - 50, t_end + 10, next_start + 1)
+    ok, reason = lib.inject_stimulus_verdict(stim, windows, 2)
+    check(not ok, "a clearance that may land inside the next frame refuses")
+
+
+def test_inject_stimulus_verdict_refuses_when_the_overlay_vanished_early():
+    """Review should-fix: hidden_requested_ms is recorded whether or not the
+    overlay was still there, so without this check an overlay removed by
+    something else (the page-side safety net, a view rebuild) would report
+    the geometry PROVEN, score 0.0 on the boundary pairs, and go red BLAMING
+    THE DETECTOR -- the exact misattribution this verdict exists to stop."""
+    windows = _frame_windows()
+    t_start, t_end = windows[2]
+    good = dict(_stimulus(windows[1][1], t_start - 1, t_end + 1, windows[3][0] - 1))
+    ok, _reason = lib.inject_stimulus_verdict(good, windows, 2)
+    check(ok, "the otherwise-identical record is accepted (control)")
+    for present in (False, None, "yes", 1, 0):
+        stim = dict(good)
+        stim["was_present_at_removal"] = present
+        ok, reason = lib.inject_stimulus_verdict(stim, windows, 2)
+        check(not ok, f"was_present_at_removal={present!r} refuses")
+        check("already gone" in (reason or ""),
+              "the refusal says the overlay was already gone, not that nothing blinked")
+    stim = dict(good)
+    del stim["was_present_at_removal"]
+    ok, reason = lib.inject_stimulus_verdict(stim, windows, 2)
+    check(not ok, "a record with no presence field at all refuses")
+
+
+# ── inject_detection_verdict (issue #266, review round 1) ───────────────────
+
+def test_inject_detection_verdict_grades_only_the_boundary_pairs():
+    pairs = [0.0, 0.2, 0.2, 0.0]
+    caught, idx, ratios = lib.inject_detection_verdict(0.2, pairs, 2, 0.001)
+    check(caught, "both boundary pairs over threshold => caught")
+    check(idx == [1, 2], f"the graded pairs are (target-1, target) = [1, 2] (got {idx})")
+    check(ratios == [0.2, 0.2], f"the reported ratios are those pairs' ({ratios})")
+
+
+def test_inject_detection_verdict_ignores_a_diff_in_a_non_boundary_pair():
+    """The bypass this replaces: max(pair_ratios) is satisfied by any diff
+    anywhere in the sweep -- including a FAILED CAPTURE, which
+    sweep_consecutive_diff_ratios scores 1.0 by itself."""
+    pairs = [1.0, 0.0, 0.0, 1.0]        # missing frames at both ends
+    caught, idx, ratios = lib.inject_detection_verdict(1.0, pairs, 2, 0.001)
+    check(not caught,
+          "a 1.0 somewhere else in the sweep does not count as catching the stimulus")
+    check(ratios == [0.0, 0.0], f"only the boundary pairs are reported ({ratios})")
+
+
+def test_inject_detection_verdict_needs_both_boundary_pairs():
+    for pairs, label in (([0.0, 0.2, 0.2, 0.0], "entering pair blind"),
+                         ([0.0, 0.2, 0.2, 0.0], "leaving pair blind")):
+        p = list(pairs)
+        p[1 if label.startswith("entering") else 2] = 0.0
+        caught, idx, ratios = lib.inject_detection_verdict(0.2, p, 2, 0.001)
+        check(not caught, f"{label} => not caught ({ratios})")
+
+
+def test_inject_detection_verdict_tracks_the_configured_threshold():
+    pairs = [0.0, 0.2, 0.2, 0.0]
+    check(lib.inject_detection_verdict(0.2, pairs, 2, 0.001)[0],
+          "0.2 clears the real 0.001 threshold")
+    check(not lib.inject_detection_verdict(0.2, pairs, 2, 0.5)[0],
+          "the same 0.2 does NOT clear a slackened 0.5 threshold -- a gate "
+          "widened toward the stimulus size fails its own self-test")
+
+
+def test_inject_detection_verdict_refuses_a_not_measured_tick():
+    pairs = [0.0, 0.2, 0.2, 0.0]
+    caught, idx, ratios = lib.inject_detection_verdict(None, pairs, 2, 0.001)
+    check(not caught,
+          "sweep_ratio None (a mount landed mid-sweep: NOT MEASURED) never reads as caught")
+    check(idx == [1, 2] and ratios == [0.2, 0.2],
+          "the pairs are still reported, so the artifact shows what was discarded")
+
+
+def test_inject_detection_verdict_last_frame_target_has_one_boundary_pair():
+    pairs = [0.0, 0.0, 0.0, 0.2]
+    caught, idx, ratios = lib.inject_detection_verdict(0.2, pairs, 4, 0.001)
+    check(caught and idx == [3],
+          f"target 4 grades only the entering pair [3] (got {idx}, caught={caught})")
+
+
+def test_inject_detection_verdict_refuses_indices_with_no_pair():
+    pairs = [0.0, 0.2, 0.2, 0.0]
+    for bad in (0, -1, 9, None, "2"):
+        caught, idx, ratios = lib.inject_detection_verdict(0.2, pairs, bad, 0.001)
+        if bad == 0:
+            check(not caught and idx == [0],
+                  "target 0 has only the (target, target+1) pair and cannot be caught "
+                  "on an appearance it never created")
+        else:
+            check(not caught, f"target index {bad!r} => not caught (pairs {idx})")
+
+
+def test_inject_detection_verdict_refuses_absent_or_unparseable_pairs():
+    for pairs in (None, "0.2", 0.2):
+        caught, idx, ratios = lib.inject_detection_verdict(0.2, pairs, 2, 0.001)
+        check(not caught and idx == [] and ratios == [],
+              f"pair_ratios={pairs!r} => not caught, nothing reported")
+    caught, _i, _r = lib.inject_detection_verdict(0.2, [], 2, 0.001)
+    check(not caught, "an empty pair list (fewer than 2 frames) never reads as caught")
+    caught, _i, _r = lib.inject_detection_verdict(0.2, [0.0, None, "x", 0.0], 2, 0.001)
+    check(not caught, "an unparseable pair ratio never reads as caught")
+
+
+def test_inject_stimulus_verdict_accepts_a_proven_bracket():
+    windows = _frame_windows()
+    t_start, t_end = windows[2]
+    stim = _stimulus(windows[1][1] + 1, t_start - 1, t_end + 1, windows[3][0] - 1)
+    ok, reason = lib.inject_stimulus_verdict(stim, windows, 2)
+    check(ok, "a stimulus covering the whole target interval and no other is accepted")
+    check(reason is None, "an accepted geometry carries no reason")
+    # exact touching bounds are still proof: on-screen from <= call start,
+    # still on screen at >= call end, neighbours end at/before the request.
+    stim = _stimulus(windows[1][1], t_start, t_end, windows[3][0])
+    ok, reason = lib.inject_stimulus_verdict(stim, windows, 2)
+    check(ok, f"touching-but-sufficient bounds are accepted ({reason})")
+
+
+def test_inject_stimulus_verdict_accepts_the_last_frame_as_target():
+    windows = _frame_windows()
+    t_start, t_end = windows[4]
+    stim = _stimulus(windows[3][1] + 1, t_start - 1, t_end + 1, t_end + 50)
+    ok, reason = lib.inject_stimulus_verdict(stim, windows, 4)
+    check(ok, f"the sweep's last frame is a valid target ({reason})")
+
+
 def _discover_tests():
     """Every callable named test_* defined at module level, in declaration
     order (by source line). Replaces a hand-maintained TESTS list (issue #93

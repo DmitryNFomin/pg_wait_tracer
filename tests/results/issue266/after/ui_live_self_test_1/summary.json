@@ -1,0 +1,85 @@
+{
+  "failed_tabs": [
+    "sessions"
+  ],
+  "known_failing_tabs": [],
+  "ok": false,
+  "self_test": null,
+  "tabs": {
+    "sessions": {
+      "artifacts": {
+        "frames": [],
+        "video": "/root/pgwt-266/tests/results/ui_live_self_test_1/sessions/sessions.webm"
+      },
+      "blink_sweep": {
+        "offsets_ms": [
+          200,
+          500,
+          1000,
+          1500,
+          2000
+        ],
+        "ticks": []
+      },
+      "capture_budget": {
+        "bound_ms": 800.0,
+        "detail": null,
+        "ok": null
+      },
+      "clean": {
+        "console_errors": [],
+        "ok": null,
+        "pgwt_errors": []
+      },
+      "color_stability": {
+        "ok": null,
+        "violations": []
+      },
+      "error": "WebSocket never reached #status.connected within 60s",
+      "frame_dims": {
+        "detail": null,
+        "ok": null,
+        "tolerance_px": 1.0
+      },
+      "frame_spacing": {
+        "bound_ms": 150.0,
+        "detail": null,
+        "ok": null
+      },
+      "known_failing": false,
+      "no_blink": {
+        "measured": {
+          "attempted_count": 0,
+          "measured_count": 0,
+          "min_fraction": 0.5,
+          "ok": null
+        },
+        "not_measured": [],
+        "ok": null,
+        "pair_offsets_ms": [],
+        "ratio": null,
+        "threshold": 0.001
+      },
+      "no_leak": {
+        "after": null,
+        "before": null,
+        "ok": null,
+        "settle_s": {
+          "after": null,
+          "before": null
+        }
+      },
+      "ok": false,
+      "pre_mount_diagnostic": [],
+      "rendered": {
+        "detail": "WebSocket never reached #status.connected within 60s",
+        "ok": false
+      },
+      "tab": "sessions",
+      "ticks_observed": 0,
+      "ttfp_ms": null,
+      "xpass": false
+    }
+  },
+  "xpass_tabs": []
+}

@@ -1,0 +1,7 @@
+NEW GATE, RED 2 -- the detection assertion is live.
+--inject-blink-frac 0.0: an overlay that is in the DOM but covers no pixels
+(the stimulus ABSENT rather than wrong). Geometry proven, nothing detected:
+
+SELF-TEST FAIL: the stimulus geometry was PROVEN, the injected blink was NOT caught on pairs [1, 2] (ratios [0.0, 0.0]) and the tab verdict was True (self_test={'tick': 2, 'ratio': 0.0, 'measured': True, 'note': None, 'inject_blink_ms': 400, 'inject_frame_index': 2, 'stimulus': {'target_frame_index'
+
+exit code: 1

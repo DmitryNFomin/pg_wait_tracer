@@ -1,0 +1,6 @@
+NEW GATE, GREEN on a different target frame -- the stimulus follows the FRAME,
+not a clock window. --inject-frame 4 (the sweep's last frame, 2000ms offset):
+
+SELF-TEST PASS: the stimulus geometry was PROVEN, the injected blink was caught on pairs [3] (ratios [0.20175438596491227]) and the tab verdict was 'FAIL' (self_test={'tick': 2, 'ratio': 0.20175438596491227, 'measured': True, 'note': None, 'inject_blink_ms': 400, 'inject_frame_index': 4, 'stimulus':
+
+exit code: 0
