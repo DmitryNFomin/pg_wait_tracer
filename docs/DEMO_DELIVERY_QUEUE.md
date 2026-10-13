@@ -53,6 +53,11 @@ one reviewed criteria commit, and that commit must precede the tag.
 
 ## 3. Dry runs (uncounted)
 
+Declare the pre-attempt dry run **uncounted before it starts**. Any product or
+harness failure it exposes blocks counted attempts until fixed; it is not a
+re-roll. Record infrastructure failures under the criteria doc's attribution
+rules. See its pre-registered attempt-record requirements before attempt 1.
+
 | # | Item | Status | Depends on |
 |---|---|---|---|
 | 3.1 | Uncontended dry run on the demo candidate tree, demo topology | READY (section 1 is now entirely DONE — see above) | 2.4's number came from the first clean rehearsal (review round 4); 2.1's number came from a separate real-Chrome-on-Mac measurement (review round 6) — neither still depends on this dry run, but it remains useful for Timeline's still-missing real-Chrome-on-Mac navigation (2.1's one open gap — see above) |
@@ -86,11 +91,14 @@ share) still holds, now named by a sha instead of a tag until step 6.
 5. GIF cut, from that same sha's rehearsal/walk material.
 6. **Owner tags** the rehearsed sha.
 
-Master keeps moving throughout; this is a sha-then-tag, not a code freeze
-(owner rule). Landing a fix after attempt 1 is a **new candidate sha and
-resets both counters to zero**, exactly as a re-tag used to. Report as
-"capture-side k of N, Mac-side m of M" — never merged into one number, and
-Mac-side means signed manual walks.
+Master keeps moving **only until attempt 1 starts**; after that, **no merge
+lands until the tag**. The tree tagged must be the tree rehearsed twice.
+Any further merge to master after attempt 1 invalidates both attempts and
+resets both counters to zero: a new sha is a new candidate, as the criteria
+doc's strict rule requires. Each capture attempt is paired with its own
+signed Mac walk, recorded as "capture-side N of M, Mac-side N of M"; one
+later video cannot advance both Mac counts. Mac-side means signed manual
+walks, and the two verdicts remain separate.
 
 ## Parallelism rules
 
