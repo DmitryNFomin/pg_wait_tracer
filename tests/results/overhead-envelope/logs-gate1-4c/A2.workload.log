@@ -1,0 +1,3 @@
+  PASS: workload: holder acquired AccessExclusiveLock (held='1')
+  PASS: workload: waiter blocked on _smoke_lock_wait (waiters='1')
+pgbench_rc=0 workload_rc=0

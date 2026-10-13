@@ -1,5 +1,26 @@
 # §6 overhead envelope — demo workload, full mode
 
+Two separate measurement rounds live in this file, answering two different
+questions — **do not conflate them**:
+
+1. **8 unthrottled clients, `demos/workload.sh`** (original round, below):
+   not the criteria's experiment — §3 of
+   `docs/DEMO_REHEARSAL_CRITERIA.md` explicitly disowns the saturated
+   8-client regime on a 4-vCPU box, and §6's accepted band ("~28-32% at 4
+   clients") isn't comparable to an 8-client number. Kept for the hardware
+   range it documents (see "Side by side" below), not as the criteria's
+   answer.
+2. **4 clients, unthrottled, pgbench + `tests/live_loop_workload.py`**
+   (added 2026-10-13, see "## gate-1, 4 clients unthrottled" below): the
+   client count the criteria actually specify
+   (`docs/DEMO_REHEARSAL_CRITERIA.md:14-15` names `tests/demo_rehearsal.sh`:
+   pgbench 4 clients, `--rate=25`, plus `live_loop_workload.py`). This round
+   drops `--rate=25` deliberately — see that section's note — so it is an
+   **approximation** of the demo workload (same client count and session
+   mix, no rate cap), not the demo workload itself.
+
+## Part 1 — 8 unthrottled clients, `demos/workload.sh`
+
 Satisfies `docs/DEMO_REHEARSAL_CRITERIA.md` §6's pre-demo-attempt-one
 precondition: n=3 paired A/B TPS runs with the **demo workload**
 (`demos/workload.sh`), in `--mode full`, on the demo box.
@@ -15,8 +36,9 @@ comparable (gate-2 has ~2.8x gate-1's memory bandwidth; gate-1 runs
 single point estimate, and independently documents that asymmetry on a
 real workload.
 
-**The number to quote for the demo box is gate-1's: 39.41% (±1.49pp,
-n=3).**
+**The number to quote for the demo box (8-client regime) is gate-1's:
+39.41% (±1.49pp, n=3).** For the 4-client regime the criteria actually
+specify, see Part 2 below: **30.31% (±0.58pp, n=3)**.
 
 ## Common setup (same method on both boxes)
 
@@ -187,7 +209,7 @@ present identically on both boxes and not specific to this measurement).
   and 1.49pp vs a 4.8pp difference between boxes), so the two figures are
   not noise-indistinguishable from each other.
 
-## Cleanup
+## Cleanup (Part 1)
 
 Both boxes' build trees (`~/overhead-envelope-20261013/src-tree`,
 `~binaries`) and large per-run trace directories (`trace_B{1,2,3}`, ~75MB
@@ -198,8 +220,129 @@ each) were deleted after logs were copied back. Only
 was created on either box — both are the persistent gate boxes, and
 nothing was left running on either.
 
+## Part 2 — gate-1, 4 clients unthrottled (approximation of the demo workload)
+
+Owner-approved re-run (2026-10-13), requested after two advisers
+independently found Part 1's 8-client `demos/workload.sh` run does not
+answer the question `docs/DEMO_REHEARSAL_CRITERIA.md` §6 actually asks.
+Measured on **`pgwt-gate` (gate-1, `root@2.28.45.47`) only** — the demo
+box and the only box issue #237 accepts for decisive evidence. Checked
+free first (`uptime` showed load average 0.22/0.59/1.32; `fuser
+/tmp/pgwt-box-check.lock` returned nothing; no `ci_smoke`/`box-check`/
+`pgbench` process running) before starting.
+
+**Why unthrottled, not `--rate=25`:** under a rate cap both arms hit the
+same throughput ceiling, so a TPS-based overhead collapses toward zero and
+measures nothing. Unthrottled at 4 clients keeps TPS meaningful and
+comparable to the registered ~28-32% band. **This is an approximation of
+the demo workload, not the demo workload** — `--rate=25` is dropped
+deliberately, and `tests/demo_rehearsal.sh` is not run (no walk, no
+time-model check, no 35-minute window).
+
+**Workload:** `tests/live_loop_workload.py <duration>` (unmodified, driven
+standalone — importable from `tests/` with only stdlib + `testutil`, no
+extra install) run concurrently with `pgbench -U postgres -d postgres -c 4
+-T 60` (unthrottled — `demos/workload.sh`'s `-j`/`-P`/`-r` flags dropped
+along with `--rate=25`; this is plain pgbench, not that script). Both
+processes are started together and run for the same 60s window per arm;
+the pgbench TPS line is the measurement. Confirmed to run standalone
+end-to-end in a dry run before the counted runs (both `PASS` lines from
+`Workload`'s own internal checks, clean exit).
+
+**PostgreSQL:** 18.6 (Ubuntu 18.6-1.pgdg24.04+2), port 5418, same
+already-provisioned `postgres` database as Part 1 (`pgbench_accounts`
+scale 10, 1,000,000 rows, not re-initialized). `pg_stat_activity` showed
+only the 8 baseline background-worker rows (no query) before and after
+the whole sequence.
+
+**Daemon build:** from `origin/master` at commit `ac515f6` (same commit
+Part 1's gate-1 run used, and the commit the task named as current
+master), built with `make PGWT_BUILD_VERSION=ac515f6` from a clean `git
+archive ac515f6` export (no `.git` in the export, so `git describe`
+cannot recover the sha from the box; the local worktree's `git describe
+ac515f6` = `v0.13-464-gac515f6` confirms the commit independent of the
+box-side build).
+
+**Daemon invocation (B arm):** identical to Part 1 — `./pg_wait_tracer
+--daemon --pid <PM_PID> -i 1 -T <trace_dir> --mode full -v`, control
+socket confirmed present before the workload starts, `kill` + `wait` at
+the end of that run.
+
+**Pairing:** interleaved A,B,A,B,A,B — exact start times are in each
+run's `logs-gate1-4c/*.log` banner lines and `results_raw_gate1_4c.csv`.
+
+**Full logs preserved** (not tailed) under `logs-gate1-4c/`: `A{1,2,3}.log`
+(banner + pgbench output appended), `A{1,2,3}.pgbench.log` /
+`A{1,2,3}.workload.log` (each process's own stdout/stderr), `B{1,2,3}.log`,
+`B{1,2,3}.pgbench.log`, `B{1,2,3}.workload.log`, `B{1,2,3}.daemon.log`
+(tracer stderr: attach, probe counts, shutdown summary — e.g. B1: "trace
+file closed: 4509518 events, 46594845 bytes"). `grep -il error
+logs-gate1-4c/*.log` matches nothing on any of the 18 files.
+
+Driver script: `run_envelope_4c.sh` in this directory, run under `flock
+/tmp/pgwt-box-check.lock`. It reuses Part 1's `run_envelope.sh` pattern
+of a `tee`'d banner line inside a command-substituted function, so
+`results_raw_gate1_4c.csv` has the identical cosmetic bug (each banner
+line captured into the CSV alongside the TPS value) — preserved unedited
+for provenance, same as Part 1. `results_gate1_4c.csv` is the corrected
+version, independently re-extracted straight from the untouched per-run
+`.pgbench.log` files (`grep -oP 'tps = \K[\d.]+' logs-gate1-4c/{A,B}N.pgbench.log
+| tail -1`); its six values are what the table above and all arithmetic
+below are computed from.
+
+| run | arm | TPS |
+|---|---|---|
+| 1 | A (baseline) | 1536.848009 |
+| 1 | B (full-mode tracer) | 1073.654740 |
+| 2 | A (baseline) | 1547.019100 |
+| 2 | B (full-mode tracer) | 1068.032553 |
+| 3 | A (baseline) | 1527.019222 |
+| 3 | B (full-mode tracer) | 1071.360724 |
+
+- Baseline (A): mean = 1536.96 TPS, sample stddev = 10.00 (n=3)
+- With tracer (B): mean = 1071.02 TPS, sample stddev = 2.83 (n=3)
+- Overhead per pair: 30.14%, 30.96%, 29.84% — **mean 30.31%, sample
+  stddev 0.58 percentage points (n=3)**
+
+### Comparison to the registered band and to the 8-client figure
+
+- **30.31% (±0.58pp) falls inside the registered ~28-32% band** at 4
+  clients (`docs/DEMO_REHEARSAL_CRITERIA.md` §6) — unlike the 8-client
+  39.41%, which is outside it and was the reason this re-run was
+  requested.
+- It is **9.1 percentage points below** the 8-client gate-1 figure
+  (39.41% vs 30.31%), consistent with the 8-client regime being the
+  saturated one §3 disowns: more concurrent clients competing for the same
+  4 vCPUs gives the watchpoint tier relatively more contention to add
+  overhead to, on top of the baseline already being more saturated.
+- Both gate-1 figures (this one and Part 1's) are measured on the same
+  box and the same `ac515f6` daemon build, so this comparison, unlike
+  Part 1's gate-1-vs-gate-2 one, is a controlled single-box, single-build
+  before/after on client count and throttling alone.
+
+### Did including `live_loop_workload.py` matter here?
+
+Yes — it was run standalone successfully (plan B was "pgbench alone,
+labelled as such" if this failed; it did not fail), so this round, unlike
+Part 1, uses the actual workload the criteria name
+(`tests/demo_rehearsal.sh`'s own two components, run directly instead of
+through that script's 35-minute walk/checks).
+
+## Cleanup (Part 2)
+
+The build tree (`/root/overhead-envelope-20261013-4c`, archive + binary +
+three ~45MB trace dirs) and the uploaded source tarball
+(`/root/src-ac515f6.tar.gz`) were deleted from gate-1 after logs were
+copied back (`du -sh /root/* | grep overhead` → no match; no stray
+`pg_wait_tracer`/`pgbench`/`live_loop_workload.py` process from this run
+left running). No VM was created. A second, unrelated process
+(`/root/pgwt-demo-rehearsal-HEAD/...`) appeared on the box immediately
+after this run finished — a different agent's job, in a different
+directory, untouched by this cleanup.
+
 ## Not done (explicitly out of scope per the task)
 
 - No `make box-check` run (not required for this task).
-- No demo rehearsal run.
-- No change to `src/`, `demos/`, or any test.
+- No demo rehearsal run (`tests/demo_rehearsal.sh` itself was not
+  invoked in either part — Part 2 runs its two components directly).
+- No change to `src/`, `demos/`, `docs/`, or any test.

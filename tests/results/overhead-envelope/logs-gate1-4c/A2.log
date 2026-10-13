@@ -1,0 +1,16 @@
+=== A2 (baseline, no tracer) start 2026-10-13T13:15:30+00:00 ===
+=== A2 end 2026-10-13T13:16:42+00:00 ===
+pgbench (18.6 (Ubuntu 18.6-1.pgdg24.04+2))
+starting vacuum...end.
+transaction type: <builtin: TPC-B (sort of)>
+scaling factor: 10
+query mode: simple
+number of clients: 4
+number of threads: 1
+maximum number of tries: 1
+duration: 60 s
+number of transactions actually processed: 92728
+number of failed transactions: 0 (0.000%)
+latency average = 2.586 ms
+initial connection time = 63.184 ms
+tps = 1547.019100 (without initial connection time)
