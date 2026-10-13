@@ -713,7 +713,7 @@ def main():
     # gates `ok` -- a missing tag is a fact about provenance for a human
     # deciding whether two attempts count as consecutive, not a pass/fail
     # criterion this harness enforces itself.
-    summary["tag"] = args.tag or _detect_git_tag()
+    summary["tag"] = drlib.resolve_tag(args.tag, _detect_git_tag)
     # Reporting only (owner finding, 2026-09-28) -- never gates `ok`. See
     # summarize_sweep_offset_coverage's own comment.
     summary["sweep_offset_coverage"] = sweep_coverage

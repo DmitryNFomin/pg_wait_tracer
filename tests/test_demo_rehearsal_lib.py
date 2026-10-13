@@ -1187,6 +1187,56 @@ def test_blink_gate_clean_trace_still_passes():
     check(result["ok"], f"a genuinely clean sweep still passes ({result})")
 
 
+# ── resolve_tag: --tag plumbing (docs/DEMO_REHEARSAL_CRITERIA.md "a
+# counted attempt names the tag it ran against, ... same tag, not merely
+# the same tree") ────────────────────────────────────────────────────────
+
+def test_resolve_tag_uses_cli_value_when_given():
+    auto_detect_calls = []
+    def auto_detect():
+        auto_detect_calls.append(1)
+        return "should-not-be-used"
+    tag = lib.resolve_tag("v1.0.0", auto_detect)
+    check(tag == "v1.0.0", f"a passed --tag reaches the result unchanged ({tag!r})")
+    check(not auto_detect_calls,
+          "a non-empty CLI tag short-circuits auto-detection entirely "
+          "(never even calls it)")
+
+
+def test_resolve_tag_falls_back_to_autodetect_when_absent():
+    # BYPASS-SUITE CASE: "absent" must mean None is a live possibility, not
+    # a gate that can never fire (auto_detect_fn genuinely gets called and
+    # its real answer -- including a found tag -- is used).
+    tag = lib.resolve_tag(None, lambda: "auto-detected-tag")
+    check(tag == "auto-detected-tag",
+          f"no CLI tag -> the auto-detected tag is used ({tag!r})")
+
+
+def test_resolve_tag_falls_back_to_autodetect_when_empty_string():
+    # A shell layer threading an unset env var through (TAG="${5:-}") can
+    # produce "" rather than Python's argparse default of None -- both must
+    # be treated as "not given", never recorded as a literal "" tag.
+    tag = lib.resolve_tag("", lambda: "auto-detected-tag")
+    check(tag == "auto-detected-tag",
+          f"an empty-string CLI tag also falls through to auto-detect ({tag!r})")
+
+
+def test_resolve_tag_null_when_nothing_available():
+    # The honest-absence case this whole mechanism exists to preserve:
+    # docs/DEMO_REHEARSAL_CRITERIA.md's _detect_git_tag() docstring is
+    # explicit that failing to find an exact tag is "the correct, honest
+    # answer", not an error -- an attempt run from a non-tagged tree (or
+    # where .git is unavailable, e.g. the remote copy scripts/
+    # demo-rehearsal.sh rsyncs with --exclude .git) must still record
+    # tag: null, never a commit sha or any other invented substitute.
+    tag = lib.resolve_tag(None, lambda: None)
+    check(tag is None,
+          f"no CLI tag and no auto-detected tag -> null, not invented ({tag!r})")
+    tag = lib.resolve_tag("", lambda: None)
+    check(tag is None,
+          f"empty CLI tag and no auto-detected tag -> still null ({tag!r})")
+
+
 def main():
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

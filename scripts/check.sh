@@ -115,6 +115,16 @@ run python3 tests/test_workload_verify_flag.py
 step "python: demo-rehearsal orchestrator unit tests"
 run python3 tests/test_demo_rehearsal_orchestrator_lib.py
 
+# tag_cli_args (tests/live_daemon_lib.sh) threads a counted rehearsal's
+# --tag through scripts/demo-rehearsal.sh -> ...-remote-run.sh ->
+# tests/demo_rehearsal.sh -> demo_rehearsal.py --tag (docs/
+# DEMO_REHEARSAL_CRITERIA.md "a counted attempt names the tag it ran
+# against"). Pure bash, no Linux/root/live-PostgreSQL needed -- same
+# "Mac-side script's unit tests must not live only in the box tier"
+# reasoning as the orchestrator step above.
+step "bash: tag_cli_args plumbing unit tests"
+run bash tests/test_tag_cli_args.sh
+
 step "python: gallery provenance and tiered output unit tests"
 run python3 tests/test_evidence_output.py
 

@@ -40,7 +40,7 @@
 # cleanup() below already detects a leaked child and exits 1 but does NOT
 # kill it, exactly like tests/ui_live_smoke.sh's own cleanup() documents.
 #
-# Usage: tests/demo_rehearsal.sh [--pid POSTMASTER_PID] [--pg-version N]
+# Usage: tests/demo_rehearsal.sh [--pid POSTMASTER_PID] [--pg-version N] [--tag TAG]
 # Env: DURATION_MIN (default 35), PGWT_DEMO_PORT (default 8385)
 set -uo pipefail
 
@@ -55,11 +55,22 @@ BRIDGE="$PROJECT_DIR/web/pgwt"
 
 PM_PID=""
 PG_MAJOR=""
+# --tag: the git tag this attempt ran against (docs/DEMO_REHEARSAL_
+# CRITERIA.md "a counted attempt names the tag it ran against"), passed
+# down from scripts/demo-rehearsal-remote-run.sh -- forwarded to
+# demo_rehearsal.py's own --tag below via tag_cli_args(). Left empty
+# (the default) means "let demo_rehearsal.py auto-detect via `git
+# describe`", which cannot work on THIS copy anyway since
+# scripts/demo-rehearsal.sh's rsync excludes .git -- so an uncounted or
+# ad-hoc run (no --tag given) still honestly records tag: null, never a
+# guessed value.
+TAG=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --pid) PM_PID="$2"; shift 2 ;;
         --pg-version) PG_MAJOR="$2"; shift 2 ;;
-        *) echo "Usage: $0 [--pid POSTMASTER_PID] [--pg-version N]"; exit 1 ;;
+        --tag) TAG="$2"; shift 2 ;;
+        *) echo "Usage: $0 [--pid POSTMASTER_PID] [--pg-version N] [--tag TAG]"; exit 1 ;;
     esac
 done
 
@@ -294,11 +305,12 @@ echo "demo_rehearsal: bridge ready at $BASE_URL"
 # end-of-capture pgwt-server queries tests/demo_rehearsal.py issues
 # directly against $TRACE_DIR) -- teardown only happens in cleanup() above,
 # after this returns, same ordering as tests/ui_live_smoke.sh.
+mapfile -t TAG_CLI_ARGS < <(tag_cli_args "$TAG")
 python3 -u "$SCRIPT_DIR/demo_rehearsal.py" --url "$BASE_URL" \
     --trace-dir "$TRACE_DIR" --daemon-log "$DAEMON_LOG" \
     --duration-min "$DURATION_MIN" \
     --pgbench-pid "$PGBENCH_PID" --workload-pid "$WORKLOAD_PID" \
-    --daemon-pid "$TRACER_PID"
+    --daemon-pid "$TRACER_PID" "${TAG_CLI_ARGS[@]}"
 DEMO_RC=$?
 
 exit "$DEMO_RC"

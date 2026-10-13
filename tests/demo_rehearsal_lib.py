@@ -993,3 +993,29 @@ def verdict_line(summary):
     if summary["ok"]:
         return "DEMO REHEARSAL: PASS"
     return f"DEMO REHEARSAL: FAIL (failed: {', '.join(summary['failed'])})"
+
+
+def resolve_tag(cli_tag, auto_detect_fn):
+    """The value for summary.json's "tag" field (docs/DEMO_REHEARSAL_
+    CRITERIA.md "a counted attempt names the tag it ran against, ... same
+    tag, not merely the same tree"): the --tag CLI value when the caller
+    gave a non-empty one, else whatever auto_detect_fn() returns.
+
+    auto_detect_fn is injected (never called directly here) so this stays
+    a pure function testable without a real git checkout --
+    demo_rehearsal.py passes its own _detect_git_tag (`git describe --tags
+    --exact-match` against this checkout, None if it is not exactly on a
+    tag or .git is unavailable -- e.g. scripts/demo-rehearsal.sh's rsync
+    excludes .git on the remote target this actually runs on).
+
+    An empty string is treated the same as no CLI value (falls through to
+    auto_detect_fn) rather than being recorded as a literal "" tag --
+    argparse's own default is None, but a caller threading a shell
+    variable through (scripts/demo-rehearsal-remote-run.sh's TAG="${5:-}")
+    can just as easily produce "" for "not given".
+
+    Returns None (never a commit sha or any other invented substitute) when
+    neither the CLI value nor auto_detect_fn() yields one -- an
+    unattributed attempt must read as unattributed, not silently uncounted
+    under a value that looks like a real tag."""
+    return cli_tag or auto_detect_fn()
