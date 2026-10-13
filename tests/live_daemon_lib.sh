@@ -77,8 +77,16 @@ PYEOF
 #     (a stray .DS_Store, a symlink, a nested module). That is deliberate: the
 #     alternative is re-introducing the replica that caused three silent
 #     passes. The refusal names the paths and says to remove the file or
-#     rebuild, which is loud and fixable -- and the live tier runs on Linux
-#     boxes where such files do not appear.
+#     rebuild.
+#     STATED PLAINLY, because an earlier version of this comment called it a
+#     Mac-only annoyance and that was wrong: scripts/box-check.sh's rsync
+#     excludes .git, /build, the binaries, tests/results, web/pgwt,
+#     __pycache__ and .pgwt-check.stamp -- NOT .DS_Store and not other junk.
+#     So a stray file created under web/static on a developer's Mac IS copied
+#     to the box and WILL abort the live run there until it is removed. The
+#     failure is loud and names the file, but it is a real way to lose a run,
+#     and the cheap mitigation (adding junk patterns to that rsync) belongs in
+#     scripts/box-check.sh rather than here.
 #
 # Exit codes, derived ONCE at the end from state:
 #   0  the binary's set and the disk set are identical, and
@@ -195,22 +203,47 @@ def run():
         return 2
     try:
         doc = json.loads(raw.decode("utf-8"))
-        embedded = sorted(doc["paths"])
-        if not isinstance(embedded, list) or not all(isinstance(p, str) for p in embedded):
+        listed = doc["paths"]
+        if not isinstance(listed, list) or not all(isinstance(p, str) for p in listed):
             raise ValueError("paths is not a list of strings")
+        listed = sorted(listed)
     except Exception as e:
         say("REFUSE served-asset check: CANNOT VERIFY -- %s did not return a usable asset "
             "list (%s: %s); an unparseable manifest is not an empty one"
             % (url, type(e).__name__, e))
         return 2
-    if not embedded:
+    if not listed:
         say("REFUSE served-asset check: CANNOT VERIFY -- %s reports ZERO embedded assets; "
             "an empty subject is never a pass" % url)
         return 2
-    if doc.get("count") is not None and doc["count"] != len(embedded):
+    if doc.get("count") is not None and doc["count"] != len(listed):
         say("REFUSE served-asset check: CANNOT VERIFY -- %s reports count=%s but listed %d "
             "paths; the manifest contradicts itself"
-            % (url, doc["count"], len(embedded)))
+            % (url, doc["count"], len(listed)))
+        return 2
+    # DUPLICATES. Measured, after I argued from the code that they could not
+    # produce a false pass and was wrong: a manifest listing one path twice
+    # gave "OK -- embedded=4 compared=4 matched=4" over THREE distinct files.
+    # The count invariant was satisfied by counting the same file twice, so
+    # every number the guard reported was false. Refuse by name, and derive
+    # all three counts from DISTINCT paths below so a count can never again be
+    # inflated by repetition.
+    embedded = sorted(set(listed))
+    if len(embedded) != len(listed):
+        dups = sorted({p for p in listed if listed.count(p) > 1})
+        say("REFUSE served-asset check: CANNOT VERIFY -- %s lists %d paths but only %d are "
+            "distinct; duplicated: %s. A manifest that repeats a path cannot be used to "
+            "count what was checked" % (url, len(listed), len(embedded), ", ".join(dups)))
+        return 2
+    # The manifest endpoint SHADOWS any embedded file of the same name: the
+    # ServeMux pattern wins, so GET /embedded-assets returns JSON and that
+    # file's real bytes are unreachable and therefore unverifiable. Refuse
+    # rather than compare the handler's output against a file (which would
+    # PASS whenever the two happened to be equal, stale contents and all).
+    if MANIFEST in embedded:
+        say("REFUSE served-asset check: CANNOT VERIFY -- web/static contains a file named %r, "
+            "which the manifest endpoint shadows: its served bytes can never be read, so it "
+            "cannot be verified. Rename it." % MANIFEST)
         return 2
 
     # ── 2. what is on DISK -- no exclusion rules, by design ──────────────────

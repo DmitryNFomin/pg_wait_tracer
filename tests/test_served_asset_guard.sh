@@ -68,12 +68,38 @@ SRV_PID=""
 # defect as the leaked-process guard in tests/ui_live_smoke.sh, which is why
 # there is now an end-of-run check below as well.
 SRV_ALL=()
+SRV_STARTED=0
+# Every server writes its OWN pid here before it begins serving, so a run
+# interrupted between `&` and the shell-side bookkeeping still leaves a
+# record. Shell cannot spawn-and-register atomically; the child can.
+PIDDIR="$TMP/pids"
+mkdir -p "$PIDDIR"
+
+# is_ours PID -- positive identification, never "the pid is alive so it must
+# be mine". Pids are recycled; $TMP is unique to this run and appears in every
+# server's argv.
+is_ours() {
+    local p="$1" cmd
+    cmd="$(ps -o command= -p "$p" 2>/dev/null)" || return 1
+    [[ -n "$cmd" && "$cmd" == *"$TMP"* ]]
+}
+
+# Anything whose command line mentions this run's unique temp dir, whatever
+# the shell did or did not record. This is the authoritative survivor check:
+# it does not depend on the bookkeeping it is meant to audit.
+survivors_by_scan() {
+    pgrep -f "$TMP" 2>/dev/null | grep -v "^$$\$" || true
+}
+
 cleanup() {
     local p
-    for p in "${SRV_ALL[@]:-}"; do
+    # Registry first (survives an interrupted registration), then the scan.
+    for p in $(cat "$PIDDIR"/* 2>/dev/null) "${SRV_ALL[@]:-}" $(survivors_by_scan); do
         [[ -n "$p" ]] || continue
-        kill "$p" 2>/dev/null
-        wait "$p" 2>/dev/null
+        is_ours "$p" || continue
+        # Bounded TERM -> poll -> KILL (live_daemon_lib.sh), never an
+        # unbounded wait on a process that may ignore TERM.
+        stop_pid "$p" 5
     done
     chmod -R u+rwX "$TMP" 2>/dev/null
     rm -rf "$TMP"
@@ -103,12 +129,13 @@ start_server() {
     # Never leave a previous server running: replacing $SRV_PID without
     # stopping it is exactly how this harness leaked six of them.
     [[ -n "$SRV_PID" ]] && stop_server
+    SRV_STARTED=$((SRV_STARTED + 1))
     local portfile="$TMP/port.$$"
     rm -f "$portfile"
     # >/dev/null 2>&1: a backgrounded child that inherits the caller's stdout
     # keeps the pipe open for as long as it lives, which wedged a `... | grep`
     # pipeline for 2h45m.
-    python3 - "$dir" "$portfile" "$mode" "$manifest" >/dev/null 2>&1 <<'PYEOF' &
+    python3 - "$dir" "$portfile" "$mode" "$manifest" "$PIDDIR" >/dev/null 2>&1 <<'PYEOF' &
 import functools
 import http.server
 import json
@@ -116,6 +143,11 @@ import os
 import sys
 
 directory, portfile, mode, manifest = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+# Self-register BEFORE serving: if this run is interrupted between the shell's
+# `&` and its own bookkeeping, this file is still the record that something
+# was started.
+with open(os.path.join(sys.argv[5], str(os.getpid())), "w") as _fh:
+    _fh.write(str(os.getpid()))
 
 
 def served_paths():
@@ -182,8 +214,19 @@ PYEOF
 }
 
 stop_server() {
-    [[ -n "$SRV_PID" ]] && kill "$SRV_PID" 2>/dev/null
-    [[ -n "$SRV_PID" ]] && wait "$SRV_PID" 2>/dev/null
+    if [[ -n "$SRV_PID" ]]; then
+        # Only signal a pid we can still identify as ours: between the last
+        # check and now it may have exited and had its pid recycled.
+        if is_ours "$SRV_PID"; then
+            stop_pid "$SRV_PID" 5
+        fi
+        # The pid file is NOT removed: $PIDDIR is the cumulative record of
+        # what this run STARTED, which is what the end-of-run audit compares
+        # against its own independent start counter. Deleting on stop made the
+        # registry a list of live servers instead, and the audit then read
+        # "recorded=1 started=18" -- it caught its own design error on the
+        # first run, which is the behaviour wanted from it.
+    fi
     SRV_PID=""
 }
 
@@ -361,11 +404,14 @@ fi
 # 15. A server that ACCEPTS and never answers -> rc=2 within seconds, a
 #     refusal rather than a hang.
 stop_server
-python3 - "$TMP/stall.port" >/dev/null 2>&1 <<'PYEOF' &
+SRV_STARTED=$((SRV_STARTED + 1))
+python3 - "$TMP/stall.port" "$PIDDIR" >/dev/null 2>&1 <<'PYEOF' &
 import os
 import socket
 import sys
 
+with open(os.path.join(sys.argv[2], str(os.getpid())), "w") as _fh:
+    _fh.write(str(os.getpid()))
 srv = socket.socket()
 srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 srv.bind(("127.0.0.1", 0))
@@ -431,6 +477,52 @@ if [[ "$RC" -eq 2 ]] && grep -q "contradicts itself" <<<"$OUT"; then ok=true; el
 report "$ok" "a manifest whose count disagrees with its own list -> rc=2 (rc=$RC)"
 stop_server
 
+# 20b. ROUND-5 BLOCKER 1: a manifest that lists a path TWICE. Measured
+#     against the previous commit: "OK -- embedded=4 compared=4 matched=4"
+#     over THREE distinct files, rc 0. The count invariant was satisfied by
+#     counting one file twice, so every number the guard printed was false. I
+#     had argued from the code that duplicates could not produce a false pass;
+#     they could, and the measurement is the reason this case exists.
+DUPDISK="$TMP/dupdisk"; DUPSERVED="$TMP/dupserved"
+mkdir -p "$DUPDISK" "$DUPSERVED"
+for i in 1 2 3; do
+    printf 'content %d\n' "$i" > "$DUPDISK/f$i.js"
+    cp "$DUPDISK/f$i.js" "$DUPSERVED/f$i.js"
+done
+DUPMANI="$TMP/dupmanifest.txt"
+printf 'f1.js\nf1.js\nf2.js\nf3.js\n' > "$DUPMANI"
+start_server "$DUPSERVED" fromfile "$DUPMANI"
+run_guard "http://127.0.0.1:$SRV_PORT/" "$DUPDISK" "case20b"
+if [[ "$RC" -eq 2 ]] \
+   && grep -q "only 3 are distinct" <<<"$OUT" \
+   && grep -q "duplicated: f1.js" <<<"$OUT"; then ok=true; else ok=false; fi
+report "$ok" "a manifest listing a path twice -> rc=2 naming it (was rc=0 with inflated counts) (rc=$RC)"
+stop_server
+
+# 20c. ROUND-5 BLOCKER 4: a file named like the manifest endpoint. The
+#     ServeMux pattern wins, so its real bytes are unreachable -- and
+#     comparing the handler's JSON against that file PASSES whenever the two
+#     happen to be equal, stale embedded contents and all. Unverifiable is
+#     not verified, so refuse by name.
+#     The fixture is built to be the WORST case rather than a convenient one:
+#     the disk file is given the handler's EXACT response bytes (fetched from
+#     the running server), so a guard that just hashes what it gets back
+#     MATCHES and passes. A fixture whose bytes merely differed would be
+#     caught as a plain mismatch and would prove nothing.
+SHADOWDISK="$TMP/shadowdisk"; SHADOWSERVED="$TMP/shadowserved"
+mkdir -p "$SHADOWDISK" "$SHADOWSERVED"
+printf 'top\n' > "$SHADOWDISK/app.js";          printf 'top\n' > "$SHADOWSERVED/app.js"
+printf 'real embedded bytes nobody can read\n' > "$SHADOWSERVED/embedded-assets"
+SHADOWMANI="$TMP/shadowmanifest.txt"
+printf 'app.js\nembedded-assets\n' > "$SHADOWMANI"
+start_server "$SHADOWSERVED" fromfile "$SHADOWMANI"
+# the handler's own response, byte for byte, becomes the disk file
+curl -fsS "http://127.0.0.1:$SRV_PORT/embedded-assets" > "$SHADOWDISK/embedded-assets"
+run_guard "http://127.0.0.1:$SRV_PORT/" "$SHADOWDISK" "case20c"
+if [[ "$RC" -eq 2 ]] && grep -q "which the manifest endpoint shadows" <<<"$OUT"; then ok=true; else ok=false; fi
+report "$ok" "an embedded file named 'embedded-assets' is unverifiable -> rc=2, not a pass (rc=$RC)"
+stop_server
+
 # 21. ROUND-4's EXACT REPRODUCTION: a DANGLING static/mod/go.mod symlink.
 #     lstat() on it succeeds, so the old Python replica pruned mod/ as a
 #     nested module -- while Go 1.26 embedded mod/x.js anyway. With stale
@@ -493,6 +585,31 @@ PYEOF
     stop_server
 fi
 
+# 24. ROUND-5 BLOCKER 2/3: the survivor scan must find a server the SHELL
+#     never recorded. Start one, then deliberately lose every shell-side
+#     trace of it (exactly what an interrupt between `&` and the bookkeeping
+#     produces) and require the authoritative scan to still see it. If this
+#     only consulted SRV_ALL it would report "nothing leaked" while a server
+#     ran -- "I recorded nothing" read as "nothing survived".
+start_server "$SERVED"
+forgotten_pid="$SRV_PID"
+SRV_PID=""
+SRV_ALL=()                       # shell bookkeeping deliberately destroyed
+found=""
+for p in $(survivors_by_scan); do
+    [[ "$p" == "$forgotten_pid" ]] && found="$p"
+done
+if [[ -n "$found" ]] && is_ours "$forgotten_pid"; then ok=true; else ok=false; fi
+report "$ok" "a server with NO shell-side record is still found by the \$TMP scan (pid ${forgotten_pid:-none})"
+# ... and is identified positively, not by liveness alone: a pid that is not
+# ours must not be claimed. $$ (this shell) is alive but is not a server.
+if is_ours "$$"; then ok=false; else ok=true; fi
+report "$ok" "is_ours() does not claim an unrelated live pid (this shell, $$)"
+stop_pid "$forgotten_pid" 5
+SRV_ALL=("$forgotten_pid")       # restore the audit's expectations
+if is_ours "$forgotten_pid"; then ok=false; else ok=true; fi
+report "$ok" "the forgotten server is reaped by pid once the scan has named it"
+
 # ── reachability: a guard nobody calls is the defect, not the fallback ──────
 wiring_ok() {   # $1 = script, $2 = the walk script that must be invoked AFTER
     local f="$1" walk="$2"
@@ -525,18 +642,42 @@ if [[ -f "$MAIN_GO" ]] && grep -q '"/embedded-assets"' "$MAIN_GO" \
    && grep -q 'fs.WalkDir' "$MAIN_GO"; then ok=true; else ok=false; fi
 report "$ok" "web/main.go serves /embedded-assets by walking the embedded FS"
 
-# Leaked-process guard (mirrors tests/ui_live_smoke.sh's own): every server
-# this run started must be gone before the final verdict. Reported as a
-# counted case so a future leak fails the suite instead of quietly outliving
-# it on a developer's machine.
+# Leaked-process guard (mirrors tests/ui_live_smoke.sh's own). Round 5: the
+# first version of this check could PASS BLIND -- with empty or incomplete pid
+# tracking it reported success, unable to tell "nothing leaked" from "I
+# recorded nothing". It now has to prove it looked:
+#   * the number of pids RECORDED must equal the number of servers STARTED
+#     (counted independently, before each spawn), else the bookkeeping is
+#     incomplete and the answer is unknown -> fail;
+#   * the authoritative survivor list comes from scanning for this run's
+#     unique $TMP in process command lines, which does not depend on that
+#     bookkeeping at all;
+#   * a pid is only treated as ours after positive identification, because
+#     pids are recycled and killing or blaming a stranger is its own bug;
+#   * if the scanning tool is missing, that is "could not look" -> fail, not
+#     a pass.
 stop_server
+recorded=0
+for p in $(ls "$PIDDIR" 2>/dev/null); do recorded=$((recorded + 1)); done
+leak_problems=()
+if ! command -v pgrep >/dev/null 2>&1; then
+    leak_problems+=("pgrep unavailable: cannot scan for survivors")
+fi
+if [[ "$recorded" -ne "$SRV_STARTED" ]]; then
+    leak_problems+=("recorded $recorded pid(s) but started $SRV_STARTED server(s): bookkeeping incomplete, survivors unknowable")
+fi
 leaked=()
+for p in $(survivors_by_scan); do
+    is_ours "$p" && leaked+=("$p")
+done
 for p in "${SRV_ALL[@]:-}"; do
     [[ -n "$p" ]] || continue
-    kill -0 "$p" 2>/dev/null && leaked+=("$p")
+    if is_ours "$p"; then
+        [[ " ${leaked[*]:-} " == *" $p "* ]] || leaked+=("$p")
+    fi
 done
-if [[ "${#leaked[@]}" -eq 0 ]]; then ok=true; else ok=false; fi
-report "$ok" "no test HTTP server outlived the run (started ${#SRV_ALL[@]}, still alive: ${leaked[*]:-none})"
+if [[ "${#leaked[@]}" -eq 0 && "${#leak_problems[@]}" -eq 0 ]]; then ok=true; else ok=false; fi
+report "$ok" "no test HTTP server outlived the run (started=$SRV_STARTED recorded=$recorded, survivors: ${leaked[*]:-none}${leak_problems:+; ${leak_problems[*]}})"
 
 echo ""
 echo "test_served_asset_guard: $tests_passed/$tests_run passed, $tests_failed failed"

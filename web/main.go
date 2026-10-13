@@ -153,13 +153,20 @@ func main() {
 	//
 	// Paths only. No contents (the FileServer below already serves those),
 	// no filesystem outside the embedded FS -- embed.FS cannot reference
-	// anything else, so there is no traversal to guard against. Not
-	// token-gated, because it discloses nothing new: http.FileServer already
-	// serves a directory listing for every embedded directory without an
-	// index.html (measured: GET /lib/ returns an HTML index of camera.js,
-	// control.js, format.js, ...), so the path set is already enumerable by
-	// anyone who can reach this port. This endpoint only saves the guard from
-	// scraping those listings.
+	// anything else, so there is no traversal to guard against.
+	//
+	// Not token-gated. An earlier version of this comment claimed it
+	// "discloses nothing new"; that was overstated and is corrected here.
+	// http.FileServer does serve an HTML directory index for every embedded
+	// directory that has no index.html (measured: GET /lib/ lists camera.js,
+	// control.js, format.js, ...), so most of the path set is already
+	// enumerable -- but a directory CONTAINING an index.html is served that
+	// file instead, so its sibling names are not listed. This endpoint
+	// therefore does disclose a little more than the listings do. It is still
+	// paths only, no contents, on a localhost port with exactly the same
+	// reachability as the UI those paths belong to, and the alternative --
+	// the guard scraping and parsing HTML indexes -- is more code for less
+	// certainty.
 	//
 	// Deliberately NOT behind a build tag or a flag: a guard that works only
 	// in a special build is a guard that will not run when it matters, and
