@@ -135,8 +135,8 @@ run_guard() {   # prints output to $OUT, sets RC
 # 1. Identical trees -> PASS, and it says how many assets it actually looked
 #    at (a count of 0 with a pass would be the vacuous case).
 run_guard "$BASE" "$DISK" "case1"
-if [[ "$RC" -eq 0 ]] && grep -q "OK -- all 5 embeddable assets" <<<"$OUT"; then ok=true; else ok=false; fi
-report "$ok" "identical trees -> rc=0 and the verdict names all 5 assets (rc=$RC)"
+if [[ "$RC" -eq 0 ]] && grep -q "OK -- enumerated=5 compared=5 matched=5" <<<"$OUT"; then ok=true; else ok=false; fi
+report "$ok" "identical trees -> rc=0 and the verdict states enumerated=compared=matched=5 (rc=$RC)"
 
 # 2. A LATER file differs (zzz_last.js sorts last) -> MISMATCH with both
 #    hashes. Catches a guard that short-circuits on the first match.
@@ -162,7 +162,7 @@ cp "$DISK/app.js" "$SERVED/app.js"
 rm -f "$SERVED/vendor/echarts.min.js"
 run_guard "$BASE" "$DISK" "case4"
 if [[ "$RC" -eq 2 ]] \
-   && grep -q "COULD NOT FETCH vendor/echarts.min.js" <<<"$OUT" \
+   && grep -q "COULD NOT CHECK -- FETCH vendor/echarts.min.js" <<<"$OUT" \
    && grep -q "CANNOT VERIFY" <<<"$OUT"; then ok=true; else ok=false; fi
 report "$ok" "asset 404s -> rc=2 CANNOT VERIFY, reported as absence not a match (rc=$RC)"
 
@@ -173,7 +173,7 @@ printf 'different\n' > "$SERVED/style.css"
 run_guard "$BASE" "$DISK" "case5"
 if [[ "$RC" -eq 2 ]] \
    && grep -q "MISMATCH style.css" <<<"$OUT" \
-   && grep -q "COULD NOT FETCH vendor/echarts.min.js" <<<"$OUT"; then ok=true; else ok=false; fi
+   && grep -q "COULD NOT CHECK -- FETCH vendor/echarts.min.js" <<<"$OUT"; then ok=true; else ok=false; fi
 report "$ok" "404 + mismatch together -> rc=2 (cannot-verify wins) and both are printed (rc=$RC)"
 cp "$DISK/style.css" "$SERVED/style.css"
 cp "$DISK/vendor/echarts.min.js" "$SERVED/vendor/echarts.min.js"
@@ -191,7 +191,7 @@ rm -rf "$DISK/.DS_Store" "$DISK/_notes.txt" "$DISK/.cache"
 # 7. The server is GONE (connection refused) -> CANNOT VERIFY, never a pass.
 stop_server
 run_guard "$BASE" "$DISK" "case7"
-if [[ "$RC" -eq 2 ]] && grep -q "CANNOT VERIFY" <<<"$OUT" && grep -q "COULD NOT FETCH" <<<"$OUT"; then ok=true; else ok=false; fi
+if [[ "$RC" -eq 2 ]] && grep -q "CANNOT VERIFY" <<<"$OUT" && grep -q "COULD NOT CHECK -- FETCH" <<<"$OUT"; then ok=true; else ok=false; fi
 report "$ok" "server down -> rc=2 CANNOT VERIFY (rc=$RC)"
 
 # 8. No assets on disk at all -> refuse. An empty subject is the classic
@@ -236,7 +236,8 @@ for dirpath, dirnames, filenames in os.walk(root):
 print(n)
 PYEOF
 )"
-    if [[ "$RC" -eq 2 ]] && grep -q "of $n_real assets could not be fetched" <<<"$OUT"; then ok=true; else ok=false; fi
+    if [[ "$RC" -eq 2 ]] \
+       && grep -q "$n_real problem(s) prevented a complete check (enumerated=$n_real, compared=0)" <<<"$OUT"; then ok=true; else ok=false; fi
     report "$ok" "default STATIC_DIR resolves to this repo's web/static ($n_real files) and refuses an empty server (rc=$RC)"
     stop_server
 fi
@@ -287,8 +288,8 @@ if [[ "$EUID" -ne 0 ]]; then
     run_guard "$BASE" "$DISK" "case16"
     chmod 755 "$DISK/lib"
     if [[ "$RC" -eq 2 ]] \
-       && grep -q "TRAVERSAL ERROR" <<<"$OUT" \
-       && grep -q "asset list is incomplete" <<<"$OUT"; then ok=true; else ok=false; fi
+       && grep -qE "COULD NOT CHECK -- (TRAVERSAL|LSTAT|STAT|DISK READ)" <<<"$OUT" \
+       && grep -q "prevented a complete check" <<<"$OUT"; then ok=true; else ok=false; fi
     report "$ok" "unreadable subdir -> rc=2 TRAVERSAL ERROR, not a pass over fewer files (rc=$RC)"
 
     # 17: an unreadable FILE used to escape as an OSError traceback, which the
@@ -298,13 +299,59 @@ if [[ "$EUID" -ne 0 ]]; then
     run_guard "$BASE" "$DISK" "case17"
     chmod 644 "$DISK/app.js"
     if [[ "$RC" -eq 2 ]] \
-       && grep -q "COULD NOT READ FROM DISK app.js" <<<"$OUT" \
+       && grep -qE "COULD NOT CHECK -- (DISK READ|LSTAT) app.js" <<<"$OUT" \
+       && grep -q "prevented a complete check" <<<"$OUT" \
        && ! grep -q "Traceback" <<<"$OUT"; then ok=true; else ok=false; fi
     report "$ok" "unreadable file -> rc=2 CANNOT VERIFY, no traceback, never rc=1 (rc=$RC)"
 else
     echo "  NOT APPLICABLE as root (uid 0 bypasses chmod 000): cases 16 and 17" \
          "-- they are live under scripts/check.sh, which runs as the developer"
 fi
+
+# 22. REVIEW ROUND 2's EXACT REPRODUCTION: a subdirectory that is READABLE
+#     but not SEARCHABLE (chmod 444). scandir() lists it fine, so os.walk's
+#     onerror never fires -- but every stat inside it raises EACCES, and
+#     os.path.isfile()/islink() answer that by returning False. The asset
+#     silently left the list and the guard returned 0 having compared 1 of 2.
+#     Two rounds of per-call patches did not catch this; the fix is structural
+#     (os.lstat, which raises, plus one blocked[] list and a count invariant),
+#     so this case is the one that proves the structure, not the patch.
+if [[ "$EUID" -ne 0 ]]; then
+    NONSEARCH="$TMP/nonsearch"
+    NONSEARCH_SRV="$TMP/nonsearch_srv"
+    mkdir -p "$NONSEARCH/lib" "$NONSEARCH_SRV/lib"
+    printf 'top\n' > "$NONSEARCH/app.js";      printf 'top\n' > "$NONSEARCH_SRV/app.js"
+    printf 'inner\n' > "$NONSEARCH/lib/in.js"; printf 'inner\n' > "$NONSEARCH_SRV/lib/in.js"
+    start_server "$NONSEARCH_SRV"
+    chmod 444 "$NONSEARCH/lib"
+    run_guard "http://127.0.0.1:$SRV_PORT/" "$NONSEARCH" "case22"
+    chmod 755 "$NONSEARCH/lib"
+    stop_server
+    if [[ "$RC" -eq 2 ]] && grep -q "prevented a complete check" <<<"$OUT"; then ok=true; else ok=false; fi
+    report "$ok" "readable-but-not-searchable subdir (chmod 444, every other asset matching) -> rc=2 (rc=$RC)"
+else
+    echo "  NOT APPLICABLE as root (uid 0 bypasses chmod 444): case 22" \
+         "-- live under scripts/check.sh, which runs as the developer"
+fi
+
+# 23. go.mod as a DIRECTORY. MEASURED (go1.26.0, fixture in
+#     tests/results/served_asset_guard/embed_semantics/): Go excludes the
+#     subtree whether go.mod is a file or a directory, so an isfile()-only
+#     test would enumerate assets the bridge does not serve -- a FALSE
+#     REFUSAL. The served copy deliberately lacks the subtree.
+MODDIR="$TMP/moddir_disk"
+mkdir -p "$MODDIR/mod/go.mod"
+printf 'top\n' > "$MODDIR/app.js"
+printf 'nested\n' > "$MODDIR/mod/x.js"
+printf 'inner\n' > "$MODDIR/mod/go.mod/inner.txt"
+MODSRV="$TMP/moddir_srv"
+mkdir -p "$MODSRV"
+printf 'top\n' > "$MODSRV/app.js"
+start_server "$MODSRV"
+run_guard "http://127.0.0.1:$SRV_PORT/" "$MODDIR" "case23"
+stop_server
+if [[ "$RC" -eq 0 ]] && grep -q "enumerated=1 compared=1 matched=1" <<<"$OUT"; then ok=true; else ok=false; fi
+report "$ok" "a go.mod DIRECTORY excludes its subtree like Go does -> rc=0, no false refusal (rc=$RC)"
 
 # 18. A server that ACCEPTS the connection and never answers. Without a
 #     working timeout the guard would hang forever (a stalled gate, not a
@@ -336,7 +383,7 @@ OUT="$(PGWT_SERVED_ASSET_TIMEOUT_S=1 assert_served_ui_matches_tree \
 RC=$?
 elapsed=$((SECONDS - t0))
 kill "$STALL_PID" 2>/dev/null; wait "$STALL_PID" 2>/dev/null
-if [[ "$RC" -eq 2 ]] && grep -q "COULD NOT FETCH" <<<"$OUT" && [[ "$elapsed" -lt 60 ]]; then ok=true; else ok=false; fi
+if [[ "$RC" -eq 2 ]] && grep -q "COULD NOT CHECK -- FETCH" <<<"$OUT" && [[ "$elapsed" -lt 60 ]]; then ok=true; else ok=false; fi
 report "$ok" "server accepts but never answers -> rc=2 within ${elapsed}s, a refusal not a hang (rc=$RC)"
 
 # 19. A malformed timeout override must refuse, not silently use the default:
@@ -376,8 +423,20 @@ REAL_STATIC="$(cd "$SCRIPT_DIR/.." && pwd)/web/static"
 if [[ -d "$REAL_STATIC" ]]; then
     start_server "$REAL_STATIC"
     run_guard "http://127.0.0.1:$SRV_PORT/" "$REAL_STATIC" "case21"
-    if [[ "$RC" -eq 0 ]] && grep -qE "OK -- all [0-9]+ embeddable assets" <<<"$OUT"; then ok=true; else ok=false; fi
-    report "$ok" "the REAL web/static served byte-for-byte -> rc=0, no false refusal on any real asset name (rc=$RC)"
+    n_real2="$(python3 - "$REAL_STATIC" <<'PYEOF'
+import os
+import sys
+root = sys.argv[1]
+n = 0
+for dirpath, dirnames, filenames in os.walk(root):
+    dirnames[:] = [d for d in dirnames if not d.startswith((".", "_"))]
+    n += len([f for f in filenames if not f.startswith((".", "_"))])
+print(n)
+PYEOF
+)"
+    if [[ "$RC" -eq 0 ]] \
+       && grep -q "OK -- enumerated=$n_real2 compared=$n_real2 matched=$n_real2" <<<"$OUT"; then ok=true; else ok=false; fi
+    report "$ok" "the REAL web/static ($n_real2 assets) served byte-for-byte -> rc=0 with enumerated=compared=matched (rc=$RC)"
     stop_server
 fi
 
