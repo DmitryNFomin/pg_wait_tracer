@@ -10,6 +10,40 @@ The format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ## [Unreleased]
 
+- **fix + ON-DISK FORMAT BUMP: summary records exclude io_worker time
+  (summary v5 -> v6, #315/#376).** The raw paths put io_worker time outside
+  DB Time and outside Idle (`docs/AAS_SEMANTICS_DECISION.md`: the requesting
+  backend already shows `AioIoCompletion` for the same logical I/O), but the
+  per-second summary writer counted it, so one window answered two ways
+  depending on which path served it — and the summary path is what every
+  request of 120 s or more takes. Measured on a real PG18 `io_method=worker`
+  capture (1852 s, 3 io_workers): summary Idle was **+23.36%** over raw on the
+  full span and **+50.11%** on a 900 s window ending at the capture end (an
+  io_worker spends the whole capture in one `Activity:IoWorkerMain` wait whose
+  only record is the one the capture-end flush synthesises), now −0.01% and
+  +1.61%. The writer is now TOLD the pid's category by its producer
+  (`pgwt_summary_push_event` takes a `cat_flag`; `src/event_stream.c` and
+  `src/escalation.c`'s capture-end flush both resolve it) and excludes the
+  record from `class_ns`, `idle_ns`, `events[]`, `sessions[]` and `queries[]`;
+  `pgwt_compute_heatmap` gained the matching raw-side exclusion so
+  `handle_heatmap`'s two routes still agree cell for cell.
+  **UPGRADE NOTE — older summaries are REFUSED, not reinterpreted.** The byte
+  layout is identical to v5; the version states the accounting rule, and a
+  window mixing v5 and v6 seconds would report a DB Time and an Idle that is
+  neither. `pgwt_summary_reader_open` refuses any non-current version with a
+  WARN and `pgwt-server` preflights the window
+  (`pgwt_summaries_window_current`), so an existing capture stays fully
+  readable — it is recomputed from its raw events, which are the source of
+  truth — just without the summary fast path. Nothing is deleted: startup
+  recovery still archives an intact older `current.summary`. New counters
+  `summary_io_worker_events_excluded_total` /
+  `summary_io_worker_ns_excluded_total` on the control socket.
+  **Not fixed by this change:** the summary path still reports no io_worker
+  *busy* total (raw-path-only, as before), and the writer still buckets a long
+  idle record whole into its closing second while the raw path clips it to the
+  window — a long `Client:ClientRead` diverges by the same mechanism, which is
+  measured and reported but not asserted.
+
 - **perf: `pgwt-server` keeps the per-request event arrays on an
   already-faulted heap.** Every analysis request builds 3-4 transient arrays of
   the whole window's events (~274 MB each on a 6.96M-event, 900 s window: the

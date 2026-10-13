@@ -1169,8 +1169,23 @@ int pgwt_summary_push_event(struct pgwt_summary_writer *w,
      * files it with accum_query_add later, which would walk straight past
      * the exclusion in accum_event. Excluding in one accumulator and not the
      * other is how a partial fix relocates a divergence. */
-    uint64_t qid = (w->qattr && !io_worker) ? summary_qattr_step(w, evt)
-                                            : evt->query_id;
+    uint64_t qid = evt->query_id;
+    if (w->qattr && !io_worker) {
+        qid = summary_qattr_step(w, evt);
+    } else if (w->qattr && io_worker && evt->new_event == PGWT_EVENT_EXIT) {
+        /* LIFECYCLE, not accounting. Skipping summary_qattr_step also skips
+         * its EXIT-time qattr_slot_free, so a slot this pid created BEFORE
+         * its metadata resolved (the pgwt_live_pid_cat_flag residual: an
+         * io_worker reads as foreground until discovery parses it) would
+         * never be reclaimed. Dropping the parked time is right -- io_workers
+         * are query-less -- but the slot must still go, or pid reuse inside
+         * one writer lifetime hands a client backend a stale entry and it
+         * emits the parked io_worker time into queries[] on its first
+         * CMD_START. Free it without resolving anything. */
+        struct pgwt_summary_qattr_slot *s = qattr_slot(w, evt->pid);
+        if (s)
+            qattr_slot_free(w, s);
+    }
     if (accum_event(&w->accum, evt, qid, io_worker)) {
         w->io_worker_events_excluded_total++;
         w->io_worker_ns_excluded_total += evt->duration_ns;

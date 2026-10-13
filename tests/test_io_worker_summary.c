@@ -129,9 +129,11 @@ static int expect_fail;
 #define EV_CLIENTREAD  WEI(PG_WAIT_CLIENT, 0)     /* idle, visible */
 #define EV_IOWORKERMAIN WEI(PG_WAIT_ACTIVITY, 6)  /* io_worker's own idle wait */
 #define EV_DATAFILEREAD WEI(PG_WAIT_IO, 21)       /* io_worker BUSY time */
+#define EV_BGWRITERMAIN WEI(PG_WAIT_ACTIVITY, 3)  /* a BACKGROUND pid's idle */
 
 #define PID_CLIENT    101
 #define PID_IO_WORKER 102
+#define PID_BG        104         /* bgwriter: BACKGROUND, NOT excluded */
 #define QID_A 0x1111111111111111ULL
 
 #define SECS 150        /* > the 120 s floor should_use_summaries applies */
@@ -162,6 +164,15 @@ static uint64_t mono_origin(void)
 static const struct pgwt_pid_cat CATS[] = {
     { PID_CLIENT,    0 },
     { PID_IO_WORKER, PGWT_EVENT_FLAG_IO_WORKER },
+    /* THE OVER-BROAD-EXCLUSION CONTROL. src/compute.c special-cases ONLY
+     * PGWT_EVENT_FLAG_IO_WORKER: a checkpointer/walwriter/bgwriter/autovacuum
+     * record keeps its time in DB Time and in Idle on every raw path. So a
+     * writer that excluded on `cat_flag != 0` instead of on the io_worker bit
+     * would silently delete all maintenance and background time from every
+     * window served from summaries -- the demo's default 900 s Overview --
+     * while raw kept it. With no such pid in the fixture that mutation is
+     * invisible (measured: 58/0 green). This pid is here so it is not. */
+    { PID_BG,        PGWT_EVENT_FLAG_BACKGROUND },
 };
 #define N_CATS ((int)(sizeof(CATS)/sizeof(CATS[0])))
 
@@ -179,24 +190,42 @@ static uint32_t cat_of(uint32_t pid)
  *
  *   pid 101 client    Lock            20 ms   DB Time
  *   pid 101 client    ClientRead      25 ms   Idle
+ *   pid 104 bgwriter  Lock            12 ms   DB Time  -> MUST SURVIVE
+ *   pid 104 bgwriter  BgwriterMain    30 ms   Idle     -> MUST SURVIVE
  *   pid 102 io_worker IoWorkerMain    40 ms   io_worker IDLE  -> excluded
  *   pid 102 io_worker IO:DataFileRead 10 ms   io_worker BUSY  -> excluded
  *
- * per second: DB Time 20 ms, Idle 25 ms, io_worker 50 ms
- * over 150 s: DB Time 3000 ms, Idle 3750 ms, io_worker 7500 ms
+ * per second: DB Time 32 ms, Idle 55 ms, io_worker 50 ms
+ * over 150 s: DB Time 4800 ms, Idle 8250 ms, io_worker 7500 ms
+ *
+ * The background pid is the control for an OVER-BROAD exclusion (see CATS):
+ * its two records carry one busy and one idle event through the same five
+ * accumulators the io_worker records are removed from, and every assertion
+ * below checks them PRESENT in the same breath as it checks the io_worker's
+ * absent. "Excluded" and "excluded too much" are different bugs and this
+ * fixture can tell them apart.
  */
 struct spec { uint32_t pid; uint32_t ev; uint64_t ms; uint64_t qid; };
 static const struct spec SLICE[] = {
     { PID_CLIENT,    EV_LOCK,         20, QID_A },
     { PID_CLIENT,    EV_CLIENTREAD,   25, QID_A },
+    { PID_BG,        EV_LOCK,         12, 0     },
+    { PID_BG,        EV_BGWRITERMAIN, 30, 0     },
     { PID_IO_WORKER, EV_IOWORKERMAIN, 40, 0     },
     { PID_IO_WORKER, EV_DATAFILEREAD, 10, 0     },
 };
 #define SLICE_N ((int)(sizeof(SLICE)/sizeof(SLICE[0])))
 #define MAX_EV  (SECS * SLICE_N + 8)
 
-#define EXP_DB_MS   (SECS * 20.0)
-#define EXP_IDLE_MS (SECS * 25.0)
+/* Kept records per second (everything but the two io_worker ones) and the
+ * distinct sessions they come from. */
+#define KEPT_PER_SEC 4
+#define SESSIONS_PER_SEC 2
+
+#define EXP_LOCK_MS (SECS * (20.0 + 12.0))   /* client + background */
+#define EXP_DB_MS   (SECS * (20.0 + 12.0))
+#define EXP_IDLE_MS (SECS * (25.0 + 30.0))   /* ClientRead + BgwriterMain */
+#define EXP_BG_IDLE_MS (SECS * 30.0)
 #define EXP_IW_MS   (SECS * 50.0)
 
 static int build_stream(struct pgwt_trace_event *out, uint64_t base)
@@ -261,13 +290,18 @@ struct rec_ctx {
     uint64_t idle_ns;
     uint64_t ev_ns[8];            /* parallel to EV_PROBE below */
     int      saw_io_worker_session;
+    int      saw_bg_session;      /* the over-broad-exclusion control */
     int      sessions;
     uint64_t hist_cells;          /* Σ events[].histogram -- the heatmap source */
 };
 
+/* 0..3 are the events whose presence/absence the exclusion decides; index 4
+ * is the BACKGROUND pid's idle event, which must ALWAYS be present. */
 static const uint32_t EV_PROBE[8] = {
-    EV_LOCK, EV_CLIENTREAD, EV_IOWORKERMAIN, EV_DATAFILEREAD, 0, 0, 0, 0
+    EV_LOCK, EV_CLIENTREAD, EV_IOWORKERMAIN, EV_DATAFILEREAD,
+    EV_BGWRITERMAIN, 0, 0, 0
 };
+#define EV_PROBE_N 5
 
 static int rec_visitor(const struct pgwt_summary_accum *rec, void *vctx)
 {
@@ -283,7 +317,7 @@ static int rec_visitor(const struct pgwt_summary_accum *rec, void *vctx)
     for (int e = 0; e < SUMMARY_MAX_EVENTS; e++) {
         const struct pgwt_summary_event *se = &rec->events[e];
         if (se->count == 0) continue;
-        for (int k = 0; k < 4; k++)
+        for (int k = 0; k < EV_PROBE_N; k++)
             if (se->event_id == EV_PROBE[k]) c->ev_ns[k] += se->total_ns;
         for (int b = 0; b < HISTOGRAM_BUCKETS; b++)
             c->hist_cells += se->histogram[b];
@@ -293,6 +327,8 @@ static int rec_visitor(const struct pgwt_summary_accum *rec, void *vctx)
         c->sessions++;
         if (rec->sessions[s].pid == PID_IO_WORKER)
             c->saw_io_worker_session = 1;
+        if (rec->sessions[s].pid == PID_BG)
+            c->saw_bg_session = 1;
     }
     return 0;
 }
@@ -310,11 +346,16 @@ static void test_fixture_is_unflagged(const struct pgwt_trace_event *ev, int n)
 {
     printf("--- 0. the input carries NO category bit (the N7 trap) ---\n");
     int flagged = 0, iw_recs = 0, iw_busy = 0, iw_idle = 0;
+    int bg_busy = 0, bg_idle = 0;
     for (int i = 0; i < n; i++) {
         if (ev[i].flags & (PGWT_EVENT_FLAG_IO_WORKER | PGWT_EVENT_FLAG_MAINT
                            | PGWT_EVENT_FLAG_BACKGROUND))
             flagged++;
-        if (cat_of(ev[i].pid) != PGWT_EVENT_FLAG_IO_WORKER) continue;
+        uint32_t cat = cat_of(ev[i].pid);
+        if (cat == PGWT_EVENT_FLAG_BACKGROUND) {
+            if (pgwt_is_idle_event(ev[i].old_event)) bg_idle++; else bg_busy++;
+        }
+        if (cat != PGWT_EVENT_FLAG_IO_WORKER) continue;
         iw_recs++;
         if (pgwt_is_idle_event(ev[i].old_event)) iw_idle++; else iw_busy++;
     }
@@ -327,6 +368,14 @@ static void test_fixture_is_unflagged(const struct pgwt_trace_event *ev, int n)
           "...both BUSY (%d) and IDLE (%d): the raw path treats them "
           "differently (busy -> cat_ms[io_worker], idle -> dropped), so one "
           "alone would pass a half-exclusion", iw_busy, iw_idle);
+    CHECK(bg_busy > 0 && bg_idle > 0,
+          "and it has a NON-io_worker background pid with both busy (%d) and "
+          "idle (%d) records -- the control for an OVER-BROAD exclusion. "
+          "src/compute.c special-cases only the io_worker bit, so background "
+          "and maintenance time stays in raw DB Time and raw Idle; a writer "
+          "excluding on `cat_flag != 0` would delete it from every >= 120 s "
+          "window and no fixture without such a pid could tell",
+          bg_busy, bg_idle);
 }
 
 /* ── 1. THE WRITER DROPS THEM FROM ALL FIVE ACCUMULATORS ───────────────── */
@@ -358,31 +407,48 @@ static void test_writer_exclusion(const struct pgwt_trace_event *ev, int n)
     CHECK(c.class_ns[PGWT_CLASS_IO] == 0,
           "class_ns[IO] == 0 (got %.3f ms): the io_worker's busy time is the "
           "only IO-class event here", (double)c.class_ns[PGWT_CLASS_IO] / 1e6);
-    CHECK(NEAR_MS((double)c.class_ns[PGWT_CLASS_LOCK] / 1e6, EXP_DB_MS),
-          "...while the client's Lock time is untouched: %.3f ms (expected "
-          "%.3f) -- the exclusion is narrow, not a blanket drop",
-          (double)c.class_ns[PGWT_CLASS_LOCK] / 1e6, EXP_DB_MS);
+    /* THE OVER-BROAD HALF of the same assertion: the Lock class carries the
+     * client's 20 ms AND the background pid's 12 ms per second. A writer
+     * excluding every non-zero cat_flag would be 12 ms/s short here while
+     * every io_worker check above still passed. */
+    CHECK(NEAR_MS((double)c.class_ns[PGWT_CLASS_LOCK] / 1e6, EXP_LOCK_MS),
+          "...while the client's AND the background pid's Lock time are "
+          "untouched: %.3f ms (expected %.3f = %d x (20 + 12) ms) -- the "
+          "exclusion is the io_worker bit, not any non-zero category",
+          (double)c.class_ns[PGWT_CLASS_LOCK] / 1e6, EXP_LOCK_MS, SECS);
     CHECK(NEAR_MS((double)c.idle_ns / 1e6, EXP_IDLE_MS),
-          "idle_ns carries ClientRead only: %.3f ms (expected %.3f, i.e. the "
-          "io_worker's %.3f ms of IoWorkerMain is NOT in it)",
-          (double)c.idle_ns / 1e6, EXP_IDLE_MS, (double)(SECS * 40));
+          "idle_ns carries ClientRead AND the background pid's BgwriterMain: "
+          "%.3f ms (expected %.3f = %d x (25 + 30) ms), i.e. the io_worker's "
+          "%.3f ms of IoWorkerMain is NOT in it and the background pid's "
+          "%.3f ms IS",
+          (double)c.idle_ns / 1e6, EXP_IDLE_MS, SECS, (double)(SECS * 40),
+          EXP_BG_IDLE_MS);
     CHECK(c.ev_ns[2] == 0 && c.ev_ns[3] == 0,
           "events[] has no IoWorkerMain (%.3f ms) and no io_worker "
           "DataFileRead (%.3f ms) -- events[] carries the HISTOGRAMS, so this "
           "is also what governs the summary heatmap",
           (double)c.ev_ns[2] / 1e6, (double)c.ev_ns[3] / 1e6);
-    CHECK(c.ev_ns[0] > 0 && c.ev_ns[1] > 0,
-          "...while the client's two events are still there (%.3f, %.3f ms)",
-          (double)c.ev_ns[0] / 1e6, (double)c.ev_ns[1] / 1e6);
+    CHECK(c.ev_ns[0] > 0 && c.ev_ns[1] > 0
+          && NEAR_MS((double)c.ev_ns[4] / 1e6, EXP_BG_IDLE_MS),
+          "...while the client's two events (%.3f, %.3f ms) and the "
+          "BACKGROUND pid's idle event (%.3f ms, expected %.3f) are all still "
+          "there -- IoWorkerMain and BgwriterMain are both Activity-class idle "
+          "events, so only the pid's category can tell them apart",
+          (double)c.ev_ns[0] / 1e6, (double)c.ev_ns[1] / 1e6,
+          (double)c.ev_ns[4] / 1e6, EXP_BG_IDLE_MS);
     CHECK(!c.saw_io_worker_session,
           "sessions[] has no row for pid %d", PID_IO_WORKER);
-    CHECK(c.sessions == SECS,
-          "...and exactly one session row per second (%d): the client's",
-          c.sessions);
-    CHECK(c.hist_cells == (uint64_t)(SECS * 2),
-          "Σ events[].histogram counts the 2 client intervals per second "
-          "(%llu, expected %d) -- the io_worker's 2 are gone from the grid",
-          (unsigned long long)c.hist_cells, SECS * 2);
+    CHECK(c.saw_bg_session,
+          "...but it DOES have one for the background pid %d: an over-broad "
+          "exclusion would drop that row too", PID_BG);
+    CHECK(c.sessions == SECS * SESSIONS_PER_SEC,
+          "...and exactly %d session rows per second (%d): the client's and "
+          "the background pid's", SESSIONS_PER_SEC, c.sessions);
+    CHECK(c.hist_cells == (uint64_t)(SECS * KEPT_PER_SEC),
+          "Σ events[].histogram counts the %d non-io_worker intervals per "
+          "second (%llu, expected %d) -- the io_worker's 2 are gone from the "
+          "grid and nothing else is", KEPT_PER_SEC,
+          (unsigned long long)c.hist_cells, SECS * KEPT_PER_SEC);
 
     /* MUTATION PROBE: the same stream, same assertions, with the producer
      * passing 0 -- the pre-v6 writer. Everything above must flip, or the
@@ -407,10 +473,45 @@ static void test_writer_exclusion(const struct pgwt_trace_event *ev, int n)
     CHECK(c0.saw_io_worker_session && c0.ev_ns[2] > 0 && c0.ev_ns[3] > 0,
           "cat_flag 0: the io_worker has a sessions[] row and both events[] "
           "entries (#315's Top Sessions / Top Events rows)");
-    CHECK(c0.hist_cells == (uint64_t)(SECS * 4),
-          "cat_flag 0: the histogram grid carries all 4 intervals per second "
-          "(%llu) -- the heatmap half of the divergence",
+    CHECK(c0.hist_cells == (uint64_t)(SECS * SLICE_N),
+          "cat_flag 0: the histogram grid carries all %d intervals per second "
+          "(%llu) -- the heatmap half of the divergence", SLICE_N,
           (unsigned long long)c0.hist_cells);
+
+    /* THE OTHER DIRECTION, and the one a fixture without a background pid
+     * cannot probe at all: an OVER-BROAD exclusion. Driven by handing the
+     * writer PGWT_EVENT_FLAG_IO_WORKER for every pid, which is what
+     * `cat_flag != 0` in accum_event would effectively do to this stream --
+     * the background pid's records vanish from class_ns, idle_ns, events[]
+     * and sessions[] while every io_worker assertion above stays green.
+     * Pinned here so the difference between "excluded" and "excluded too
+     * much" is observable inside one run. */
+    const char *dirx = fresh_dir("excl-overbroad");
+    {
+        struct pgwt_summary_writer *w = calloc(1, sizeof(*w));
+        if (w && pgwt_summary_writer_init(w, dirx, 24, NULL) == 0) {
+            for (int i = 0; i < n; i++)
+                pgwt_summary_push_event(w, &ev[i],
+                                        PGWT_EVENT_FLAG_IO_WORKER);
+            pgwt_summary_flush(w);
+            pgwt_summary_close(w);
+            pgwt_summary_destroy(w);
+        }
+        free(w);
+    }
+    struct rec_ctx cx;
+    read_records(dirx, &cx);
+    CHECK(cx.records > 0
+          && !NEAR_MS((double)cx.class_ns[PGWT_CLASS_LOCK] / 1e6, EXP_LOCK_MS)
+          && !NEAR_MS((double)cx.idle_ns / 1e6, EXP_IDLE_MS)
+          && !cx.saw_bg_session,
+          "an over-broad exclusion is VISIBLE: Lock %.3f ms (correct %.3f), "
+          "idle_ns %.3f ms (correct %.3f), background session row %s -- so "
+          "the assertions above distinguish the io_worker bit from any "
+          "non-zero category",
+          (double)cx.class_ns[PGWT_CLASS_LOCK] / 1e6, EXP_LOCK_MS,
+          (double)cx.idle_ns / 1e6, EXP_IDLE_MS,
+          cx.saw_bg_session ? "present" : "gone");
 }
 
 /* ── 2. RAW vs SUMMARY: time model AND heatmap ─────────────────────────── */
@@ -451,7 +552,18 @@ static int compare_paths(const char *dir, const struct pgwt_trace_event *ev,
         tag[i] = ev[i];
         tag[i].timestamp_ns = ev[i].timestamp_ns + shift;
     }
-    pgwt_tag_events(tag, n, CATS, N_CATS);
+    /* #363: a REFUSED tagging pass leaves this array -- the raw side of the
+     * comparison below -- partly rewritten, with the records it never reached
+     * keeping old_event 0 instead of PGWT_WEI_NONCMD_CPU. Comparing against
+     * a half-built oracle would produce a confident number from nothing, so
+     * refuse. */
+    if (!pgwt_tag_events(tag, n, CATS, N_CATS)) {
+        printf("  REFUSE: pgwt_tag_events REFUSED (#363) -- the raw oracle is "
+               "partly rewritten and must be discarded, not compared\n");
+        tests_failed++;
+        free(tag);
+        return 0;
+    }
     int tagged_iw = 0;
     for (int i = 0; i < n; i++)
         if (tag[i].flags & PGWT_EVENT_FLAG_IO_WORKER) tagged_iw++;

@@ -1,0 +1,37 @@
+pid categories=168 io_worker pids=3
+trace files=1 events=4307056 (transitions=4307056 samples=0)
+io_worker records in input=3  ns=5553133694839 (idle 5553133694839)  in final second=5553133 ms
+RESIDUAL upper bounds: first-record ns=5553133694839 (100.000000% of io_worker ns)  first-capture-second records=0 ns=0 (0.000000%)
+capture span = 1851.015 s
+
+=== run: cat_flag RESOLVED per pid  [AFTER] (1852 records, 1852.0 s span) ===
+  writer excluded io_worker: 3 records, 5553133694839 ns
+  [whole capture      ] DB Time raw     3994167.79  sum     3997651.85      +3484.06 ms ( +0.0872%)
+  [whole capture      ] Idle    raw    23753121.50  sum    23749637.44      -3484.06 ms ( -0.0147%)
+  [whole capture      ] heatmap raw        2119423  sum        2163529        +44106    ( +2.0810%)
+  [last 150 s (end)   ] DB Time raw      345061.81  sum      349952.79      +4890.98 ms ( +1.4174%)
+  [last 150 s (end)   ] Idle    raw     1871929.39  sum     2087317.41    +215388.03 ms (+11.5062%)
+  [last 150 s (end)   ] heatmap raw         185444  sum         189112         +3668    ( +1.9780%)
+  [last 150 s minus 1s] DB Time raw      347017.54  sum      350835.52      +3817.99 ms ( +1.1002%)
+  [last 150 s minus 1s] Idle    raw     1884515.07  sum     1930253.93     +45738.86 ms ( +2.4271%)
+  [last 150 s minus 1s] heatmap raw         185962  sum         189655         +3693    ( +1.9859%)
+  [middle 150 s       ] DB Time raw      353369.14  sum      351205.98      -2163.16 ms ( -0.6122%)
+  [middle 150 s       ] Idle    raw     1896696.47  sum     1933184.45     +36487.98 ms ( +1.9238%)
+  [middle 150 s       ] heatmap raw         164079  sum         167754         +3675    ( +2.2398%)
+
+=== run: cat_flag always 0  [BEFORE = pre-v6 writer] (1852 records, 1852.0 s span) ===
+  writer excluded io_worker: 0 records, 0 ns
+  [whole capture      ] DB Time raw     3994167.79  sum     3997651.85      +3484.06 ms ( +0.0872%)
+  [whole capture      ] Idle    raw    23753121.50  sum    29302771.14   +5549649.64 ms (+23.3639%)
+  [whole capture      ] heatmap raw        2119423  sum        2163529        +44106    ( +2.0810%)
+  [last 150 s (end)   ] DB Time raw      345061.81  sum      349952.79      +4890.98 ms ( +1.4174%)
+  [last 150 s (end)   ] Idle    raw     1871929.39  sum     7640451.11   +5768521.72 ms (+308.1592%)
+  [last 150 s (end)   ] heatmap raw         185444  sum         189112         +3668    ( +1.9780%)
+  [last 150 s minus 1s] DB Time raw      347017.54  sum      350835.52      +3817.99 ms ( +1.1002%)
+  [last 150 s minus 1s] Idle    raw     1884515.07  sum     1930253.93     +45738.86 ms ( +2.4271%)
+  [last 150 s minus 1s] heatmap raw         185962  sum         189655         +3693    ( +1.9859%)
+  [middle 150 s       ] DB Time raw      353369.14  sum      351205.98      -2163.16 ms ( -0.6122%)
+  [middle 150 s       ] Idle    raw     1896696.47  sum     1933184.45     +36487.98 ms ( +1.9238%)
+  [middle 150 s       ] heatmap raw         164079  sum         167754         +3675    ( +2.2398%)
+
+measurement complete

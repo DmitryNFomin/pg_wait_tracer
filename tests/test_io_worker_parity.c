@@ -81,6 +81,18 @@
  *      not supplied the tier says so in one line and asserts nothing; when it
  *      IS supplied and cannot be read, it FAILS — never skips.
  *
+ *      IT NEVER RUNS IN ANY GATE, and that has to be said plainly rather than
+ *      left to be discovered: tests/run_all.sh and CI invoke this binary with
+ *      no argument and no PGWT_PARITY_TRACE, and tests/results/demo_rehearsal/
+ *      is gitignored, so box-check and CI exercise tier A only. Tier B is run
+ *      BY HAND against a capture on the machine that has one, and its output
+ *      is pasted into the PR as evidence (this branch:
+ *      tests/results/issue376-measurement/parity-acceptance-{green,red}.txt).
+ *      Honest by design -- a 26 MB capture cannot live in the repo and a tier
+ *      that silently skipped would be worse -- but it means a regression of
+ *      the real-capture numbers is caught by a human re-running it, not by
+ *      the gate.
+ *
  * WINDOW CASES — WHY ONE WINDOW WOULD HAVE MISSED IT
  * ─────────────────────────────────────────────────────────────────────────
  * The divergence is window-sensitive, because an io_worker emits ONE
@@ -526,6 +538,16 @@ static void parity_assert(const char *label, const struct parity *p)
 
 #define SECS 130
 #define PID_CLIENT 301u
+/* THE OVER-BROAD-EXCLUSION CONTROL (added with the v6 fix). src/compute.c
+ * special-cases ONLY PGWT_EVENT_FLAG_IO_WORKER, so a checkpointer's or
+ * bgwriter's time stays in raw DB Time and raw Idle. A writer that excluded
+ * on `cat_flag != 0` rather than on the io_worker bit would delete every
+ * maintenance and background record from the summary side of any >= 120 s
+ * window -- and with no such pid in this fixture that mutation left this file
+ * at 76/1, the 1 being an unrelated wall-base artefact rather than a
+ * detection. These records are counted by BOTH paths, so the mutation now
+ * breaks section 3's equality directly. */
+#define PID_BG     302u
 static const uint32_t IOW_PIDS[] = { 22527u, 22528u, 22529u };
 #define N_IOW ((int)(sizeof(IOW_PIDS) / sizeof(IOW_PIDS[0])))
 /* The io_workers start at second 65, so the first 65 seconds hold an
@@ -590,6 +612,12 @@ static int build_stream(struct pgwt_trace_event *out, uint64_t base,
         push_ev(out, &n, sec + 500 * MS, PID_CLIENT, EV_LOCK_A,   5 * MS, QID_A);
         push_ev(out, &n, sec + 501 * MS, PID_CLIENT, EV_CPU,      7 * MS, QID_A);
         push_ev(out, &n, sec + 502 * MS, PID_CLIENT, EV_CLIENT_0, 11 * MS, 0);
+        /* The BACKGROUND pid (see PID_BG): one busy Lock and one idle
+         * Activity record per second, both of which must survive on BOTH
+         * paths -- the control that tells "excluded" from "excluded too
+         * much". */
+        push_ev(out, &n, sec + 504 * MS, PID_BG, EV_LOCK_A,    4 * MS, 0);
+        push_ev(out, &n, sec + 505 * MS, PID_BG, EV_ACTIVITY_4, 9 * MS, 0);
         if (s < IOW_FROM_SEC)
             continue;
         for (int w = 0; w < N_IOW; w++)
@@ -611,7 +639,7 @@ static int build_stream(struct pgwt_trace_event *out, uint64_t base,
     return n;
 }
 
-#define MAX_EV (SECS * (3 + N_IOW) + N_IOW + 2)
+#define MAX_EV (SECS * (5 + N_IOW) + N_IOW + 2)
 
 static char g_base[300];
 
@@ -711,6 +739,9 @@ static int fixture_build(struct fixture *fx, const char *dirname,
         if (!rf)
             return -1;
         fprintf(rf, "{\"pid\":%u,\"type\":\"client\"}\n", PID_CLIENT);
+        /* bgwriter -> PGWT_EVENT_FLAG_BACKGROUND via pgwt_backend_type_flag:
+         * a non-zero category that must NOT be excluded anywhere. */
+        fprintf(rf, "{\"pid\":%u,\"type\":\"bgwriter\"}\n", PID_BG);
         for (int w = 0; w < N_IOW; w++)
             fprintf(rf, "{\"pid\":%u,\"type\":\"io_worker\"}\n", IOW_PIDS[w]);
         fclose(rf);
@@ -742,7 +773,15 @@ static int fixture_build(struct fixture *fx, const char *dirname,
     memcpy(fx->tagged, fx->pushed, (size_t)fx->n * sizeof(*fx->tagged));
     for (int i = 0; i < fx->n; i++)
         fx->tagged[i].timestamp_ns += shift;
-    pgwt_tag_events(fx->tagged, fx->n, fx->reg.cats, fx->reg.n);
+    /* #363: a REFUSED tagging pass (working-allocation failure, or more
+     * distinct pids than its per-pid table holds) leaves this array PARTLY
+     * rewritten, and this array is the whole raw side of every comparison
+     * below. Consuming it would make the gate print a confident agreement or
+     * divergence computed from a half-built oracle -- the silent-wrong-answer
+     * class this file exists to catch, inside the file itself. The fixture
+     * cannot be built from it, so fail the build of the fixture. */
+    if (!pgwt_tag_events(fx->tagged, fx->n, fx->reg.cats, fx->reg.n))
+        return -1;
     return 0;
 }
 
@@ -825,6 +864,29 @@ static void assert_fixture_live(const struct fixture *fx)
           "produced the property, not the fixture", iow_tagged);
     CHECK(client_tagged == 0,
           "and on none of the client backend's records (%d)", client_tagged);
+
+    /* THE OVER-BROAD-EXCLUSION CONTROL (see PID_BG). The background pid's
+     * records must be present on BOTH sides and carry NO io_worker bit: the
+     * raw path keeps background time in DB Time and Idle, so a writer that
+     * excluded every non-zero category would break section 3's equality.
+     * Asserted here as a premise, so the detection is named rather than
+     * incidental. */
+    int bg_pushed = 0, bg_tagged_iow = 0, bg_in_blocks;
+    for (int i = 0; i < fx->n; i++) {
+        if (fx->pushed[i].pid != PID_BG) continue;
+        bg_pushed++;
+        if (fx->tagged[i].flags & PGWT_EVENT_FLAG_IO_WORKER) bg_tagged_iow++;
+    }
+    bg_in_blocks = bg_pushed;   /* every non-io_worker record is committed */
+    CHECK(bg_pushed == SECS * 2 && bg_tagged_iow == 0,
+          "the fixture carries a BACKGROUND pid (%d records, %d wrongly "
+          "flagged io_worker) whose time both paths must KEEP -- without it, "
+          "a writer excluding on `cat_flag != 0` instead of the io_worker bit "
+          "deletes all maintenance/background time from every >= 120 s window "
+          "and nothing here notices", bg_pushed, bg_tagged_iow);
+    CHECK(fx->block_events >= (uint64_t)bg_in_blocks,
+          "and the committed blocks are large enough to hold them (%llu >= "
+          "%d)", (unsigned long long)fx->block_events, bg_in_blocks);
     CHECK(fx->reg.n_io_workers == N_IOW,
           "the registry resolved %d io_worker pids through "
           "pgwt_backend_type_flag", fx->reg.n_io_workers);
@@ -932,7 +994,15 @@ static void test_fix_is_reachable(const struct fixture *fx)
     uint64_t shift = rc.min_sec - fx->origin;
     for (int i = 0; i < fx->n; i++)
         tagged[i].timestamp_ns += shift;
-    pgwt_tag_events(tagged, fx->n, fx->reg.cats, fx->reg.n);
+    /* #363: a refused pass leaves a partly-rewritten oracle; discard it
+     * rather than comparing against it (see fixture_build). */
+    if (!pgwt_tag_events(tagged, fx->n, fx->reg.cats, fx->reg.n)) {
+        CHECK(0, "pgwt_tag_events REFUSED the simulated-fix oracle (#363): "
+                 "the raw side is partly rewritten and must be discarded, "
+                 "so this reachability probe cannot be run");
+        free(kept); free(tagged);
+        return;
+    }
 
     struct { const char *label; uint64_t from, to; } w[] = {
         { "A'. excludes the final second", rc.min_sec, rc.max_sec },
@@ -1160,7 +1230,19 @@ static void bypass_suite(const struct fixture *fx)
         uint64_t shift = fx->first_sec - fx->origin;
         for (int i = 0; i < fx->n; i++)
             untagged[i].timestamp_ns += shift;
-        pgwt_tag_events(untagged, fx->n, NULL, 0);   /* no registry at all */
+        /* No registry at all. #363: still check the result -- with cats
+         * absent the pass has nothing to look up, so it can only refuse on
+         * its own working allocation, and a partly-rewritten array would
+         * make the magnitude printed below meaningless. */
+        int tag_ok = pgwt_tag_events(untagged, fx->n, NULL, 0);
+        CHECK(tag_ok,
+              "the registry-less tagging pass completed (#363): a refusal "
+              "leaves the array partly rewritten, so the numbers below would "
+              "describe a half-built oracle");
+        if (!tag_ok) {
+            free(untagged);
+            goto skip_no_registry;
+        }
         struct pgwt_tm_result r0, s0;
         memset(&r0, 0, sizeof(r0)); memset(&s0, 0, sizeof(s0));
         double wall = (double)(fx->last_sec + ONE_SEC - fx->first_sec) / 1e6;
@@ -1193,6 +1275,7 @@ static void bypass_suite(const struct fixture *fx)
         registry_free(&fg);
         free(untagged);
     }
+skip_no_registry:
 
     /* 6f. the THING IS ABSENT rather than wrong: a capture with no io_worker
      * records at all. Both paths agree, and that agreement means nothing. */
@@ -1447,7 +1530,21 @@ static int acceptance_tier(const char *dir)
     for (int i = 0; i < n; i++)
         evw[i].timestamp_ns += shift;
 
-    pgwt_tag_events(evw, n, reg.cats, reg.n);
+    /* #363, and THE case that matters most: this is the 4.3M-record oracle
+     * the acceptance numbers are computed from, and its pid count is whatever
+     * the capture had. A refusal (working-allocation failure, or more
+     * distinct pids than the per-pid table holds) leaves it partly rewritten
+     * -- records the pass never reached keep old_event 0 instead of
+     * PGWT_WEI_NONCMD_CPU and keep their emission-time query_id -- so the
+     * tier must REFUSE and report, never compare. */
+    if (!pgwt_tag_events(evw, n, reg.cats, reg.n)) {
+        CHECK(0, "pgwt_tag_events REFUSED the capture's %d records (#363): "
+                 "the raw oracle is partly rewritten and must be discarded, "
+                 "so no acceptance number can be computed from it", n);
+        free(ev); free(evw);
+        registry_free(&reg);
+        return 1;
+    }
     int tagged = 0;
     for (int i = 0; i < n; i++)
         if (evw[i].flags & PGWT_EVENT_FLAG_IO_WORKER) tagged++;
@@ -1505,9 +1602,19 @@ static int acceptance_tier(const char *dir)
         return 1;
     }
     int m = 0;
+    struct pgwt_trace_event *removed = calloc((size_t)n + 1, sizeof(*removed));
+    int n_removed = 0;
+    if (!removed) {
+        CHECK(0, "could not allocate the removed-record list");
+        free(ev); free(evw); free(ev_no); free(evw_no);
+        registry_free(&reg);
+        return 1;
+    }
     for (int i = 0; i < n; i++) {
-        if (producer_cat_flag(&reg, ev[i].pid) == PGWT_EVENT_FLAG_IO_WORKER)
+        if (producer_cat_flag(&reg, ev[i].pid) == PGWT_EVENT_FLAG_IO_WORKER) {
+            removed[n_removed++] = evw[i];   /* wall base, for the windows */
             continue;
+        }
         ev_no[m]  = ev[i];
         evw_no[m] = evw[i];
         m++;
@@ -1530,6 +1637,7 @@ static int acceptance_tier(const char *dir)
           "two different windows", rc_no.records,
           (unsigned long long)rc_no.min_sec, (unsigned long long)rc.min_sec);
 
+    int iw_sum_windows = 0;
     for (int i = 0; i < 3; i++) {
         uint64_t from = w[i].from < rc.min_sec ? rc.min_sec : w[i].from;
         /* `ev` is verbatim what went into the writer, so R1 inspects the real
@@ -1543,6 +1651,50 @@ static int acceptance_tier(const char *dir)
         if (p.v == V_REFUSED)
             continue;
 
+        /* PER-WINDOW NON-VACUITY, and it is NOT a record count. Two
+         * different quantities decide whether each side can see anything:
+         *
+         *   iw_raw_ms  the io_worker time the RAW path would have counted in
+         *              this window = Σ overlap([ts-dur, ts), [from, to))
+         *              (event_window_ns' rule), so a capture-end straddler
+         *              contributes to EVERY earlier window too;
+         *   iw_sum_ms  what the SUMMARY side buckets INTO this window = the
+         *              full duration of each record whose CLOSING SECOND
+         *              falls inside it, because the writer files a record
+         *              whole into the second in which it closes.
+         *
+         * Only iw_sum_ms can make the summary-invariance check bite, and on
+         * a real capture every io_worker record closes at capture end -- so
+         * a window ending earlier has iw_sum_ms == 0 and its summary check
+         * passes no matter what the writer does. Counting records would have
+         * hidden that (all three windows "have" 3 records). Reported per
+         * window, and at least one window must have iw_sum_ms > 0 or the
+         * whole tier is vacuous (checked after the loop). */
+        double iw_raw_ms = 0, iw_sum_ms = 0;
+        for (int r = 0; r < n_removed; r++) {
+            uint64_t ts  = removed[r].timestamp_ns;
+            uint64_t dur = removed[r].duration_ns;
+            uint64_t st  = ts > dur ? ts - dur : 0;
+            uint64_t lo  = st > from ? st : from;
+            uint64_t hi  = ts < w[i].to ? ts : w[i].to;
+            if (hi > lo) iw_raw_ms += (double)(hi - lo) / 1e6;
+            uint64_t close_sec = (ts / ONE_SEC) * ONE_SEC;
+            if (close_sec >= from && close_sec < w[i].to)
+                iw_sum_ms += (double)dur / 1e6;
+        }
+        printf("    %-34s io_worker time in window: raw-clipped %.3f ms, "
+               "summary-bucketed %.3f ms%s\n", "", iw_raw_ms, iw_sum_ms,
+               iw_sum_ms == 0.0
+                 ? "  <- the summary side cannot see it here, so only the RAW "
+                   "invariance check bites in this window"
+                 : "");
+        CHECK(iw_raw_ms > 0.0 || iw_sum_ms > 0.0,
+              "%s: the window actually contains io_worker time (raw %.3f ms, "
+              "summary %.3f ms) -- a window containing none would make both "
+              "invariance checks below pass on nothing",
+              w[i].label, iw_raw_ms, iw_sum_ms);
+        if (iw_sum_ms > 0.0) iw_sum_windows++;
+
         struct pgwt_filter f;
         memset(&f, 0, sizeof(f));
         double wall = (double)(w[i].to - from) / 1e6;
@@ -1555,9 +1707,9 @@ static int acceptance_tier(const char *dir)
               && sn.db_time_ms == p.sum_db_ms,
               "%s: the SUMMARY path is bit-identical with the io_worker "
               "records removed (Idle %.3f == %.3f, DB Time %.3f == %.3f) -- "
-              "so it counted none of their %.3f ms",
-              w[i].label, sn.idle_time_ms, p.sum_idle_ms,
-              sn.db_time_ms, p.sum_db_ms, p.raw_io_worker_ms);
+              "so it counted none of the %.3f ms this window would have "
+              "bucketed", w[i].label, sn.idle_time_ms, p.sum_idle_ms,
+              sn.db_time_ms, p.sum_db_ms, iw_sum_ms);
         CHECK(rn.idle_time_ms == p.raw_idle_ms
               && rn.db_time_ms == p.raw_db_ms,
               "%s: and so is the RAW path (Idle %.3f == %.3f, DB Time "
@@ -1574,10 +1726,23 @@ static int acceptance_tier(const char *dir)
         free(rn.rows); free(sn.rows);
     }
 
+    /* The tier as a whole has to contain at least one window in which the
+     * SUMMARY side buckets io_worker time, or every summary-invariance check
+     * above was satisfied by a window that could not see the thing being
+     * checked. On a real capture that is the window containing the final
+     * second, where flush_open_intervals closes the io_workers' only
+     * records. */
+    CHECK(iw_sum_windows > 0,
+          "at least one of the three windows buckets io_worker time on the "
+          "SUMMARY side (%d do) -- otherwise the summary-invariance checks "
+          "above are vacuous no matter how many io_worker RECORDS the capture "
+          "holds", iw_sum_windows);
+
     free(ev);
     free(evw);
     free(ev_no);
     free(evw_no);
+    free(removed);
     registry_free(&reg);
     return 0;
 }

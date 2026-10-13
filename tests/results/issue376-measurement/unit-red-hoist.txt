@@ -1,0 +1,21 @@
+117:        pgwt_summary_push_event(d->summary_writer, evt, 0);
+179:    uint32_t cat_flag = pgwt_live_pid_cat_flag(d, pa, evt->pid);
+WARN: summary /tmp/pgwt_iw_12695/v5/current.summary is version 5, this build computes only from version 6 (older files use the pre-2026-10-06 idle accounting) -- recomputing from raw events instead
+=== io_worker exclusion on the SUMMARY path (#315, #376) ===
+--- 0. the input carries NO category bit (the N7 trap) ---
+--- 1. writer: class_ns, idle_ns, events[], sessions[], queries[] ---
+--- 2. raw vs summary: time model AND heatmap ---
+--- 3. the capture-end flush record (escalation.c's producer) ---
+--- 4. both daemon producers resolve a category ---
+  FAIL(line 828): src/event_stream.c hoists the resolve above the summary push and passes it: the category is resolved 3610 bytes AFTER the summary push -- the writer is told nothing
+--- 5. bypass suite (a gate that cannot see must refuse) ---
+  REFUSE: no summary records in /tmp/pgwt_iw_12695/no-such-dir -- every delta would be computed against an empty side
+  REFUSE: no summary records in /tmp/pgwt_iw_12695/empty-writer -- every delta would be computed against an empty side
+--- 0. the input carries NO category bit (the N7 trap) ---
+  red-as-designed(line 366): the fixture HAS io_worker records (0)
+  red-as-designed(line 370): ...both BUSY (0) and IDLE (0): the raw path treats them differently (busy -> cat_ms[io_worker], idle -> dropped), so one alone would pass a half-exclusion
+  red-as-designed(line 378): and it has a NON-io_worker background pid with both busy (0) and idle (0) records -- the control for an OVER-BROAD exclusion. src/compute.c special-cases only the io_worker bit, so background and maintenance time stays in raw DB Time and raw Idle; a writer excluding on `cat_flag != 0` would delete it from every >= 120 s window and no fixture without such a pid could tell
+--- 0. the input carries NO category bit (the N7 trap) ---
+  red-as-designed(line 365): no fixture event pre-sets a category flag (300 did) -- a pre-flagged event greens a writer check that is DEAD in the daemon, which is how this bug was 'fixed' once before (hole N7)
+
+63 checks, 1 failed

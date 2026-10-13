@@ -88,8 +88,13 @@ static void write_pid_marker_at(struct pgwt_daemon *d, pid_t pid,
         .query_id = query_id,
     };
     pgwt_writer_push_event(d->event_writer, &ev);
-    /* cat_flag 0: a MARKER (CMD/PLAN/EXEC), dropped by the writer whatever
-     * its pid's category is. Carrying no time, it cannot misaccount any. */
+    /* cat_flag 0, and NOT just because accum_event drops markers: a marker
+     * still drives summary_qattr_step, the #128 deferred per-query
+     * attribution, and v6 SKIPS that step for an io_worker cat_flag. So
+     * resolving a real category here would silently disable marker-driven
+     * attribution for any pid that resolved as io_worker -- a correctness
+     * change dressed as a cleanup. Markers carry no duration, so 0 cannot
+     * misaccount any time; this argument is about the qattr side effect. */
     if (d->summary_writer)
         pgwt_summary_push_event(d->summary_writer, &ev, 0);
 }
