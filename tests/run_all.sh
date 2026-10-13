@@ -144,7 +144,16 @@ xpass=0
 # both charge measured and the remainder has its own row, so the legacy/PG13
 # tier is exact too. Leaving the entry in would have disarmed the only
 # live-PG test that can catch a regression of that contract.
-KNOWN_FAILING=()
+# test_io_worker_parity reproduces #376 (and its DB-Time half, #315): the raw
+# time model excludes io_worker records while src/summary_writer.c's
+# accum_event counts their time, so the same window reports two different Idle
+# and DB Time totals. A filed product bug with the fix landing in src/ — the
+# only thing this table is for. Measured on a real PG18 io_method=worker
+# capture: Idle +23.36% full span, +50.11% on a 900 s window ending at the
+# capture end. REMOVE THIS ENTRY in the commit that fixes the writer: the
+# "UNEXPECTED PASS" line is the signal that the fix landed, not a reason to
+# keep the entry.
+KNOWN_FAILING=("test_io_worker_parity|376")
 
 # known_failing_issue NAME — prints the tracking issue number and returns 0
 # if NAME is listed in KNOWN_FAILING, else returns 1 with no output.

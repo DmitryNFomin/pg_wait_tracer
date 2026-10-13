@@ -226,6 +226,40 @@ test_idle_summary
 # mutation probes proving each comparator can see one nanosecond, one count,
 # one grid cell and one missing row.
 test_agg_raw_crosscheck
+# #376 + #315: the RAW-vs-SUMMARY parity gate for io_worker time, and the one
+# entry in this list that is EXPECTED RED until the writer is fixed. It is
+# registered here rather than withheld because a gate nobody runs is not a
+# gate.
+# pgwt_compute_time_model skips a record carrying PGWT_EVENT_FLAG_IO_WORKER --
+# io_worker time is in neither DB Time nor Idle, the decision
+# docs/AAS_SEMANTICS_DECISION.md records -- while accum_event in
+# src/summary_writer.c has no io_worker test at all, so the same window
+# answers Idle and DB Time two different ways. Measured on a real PG18
+# io_method=worker capture (1852 s): Idle +23.36% over the full span, +50.11%
+# on a 900 s window ending AT the capture end, +0.15% on the same width ending
+# one second earlier -- which is why three window cases are reported and why a
+# single interior window would have read as agreement.
+# The io_worker property is produced the way PRODUCTION produces it: unflagged
+# events into the real pgwt_summary_push_event (exactly as src/event_stream.c
+# pushes them, before any category is resolved) and pgwt_tag_events against a
+# backends.jsonl registry resolved through pgwt_backend_type_flag (exactly as
+# src/server.c tags every raw window). It never pre-sets the flag bit -- the
+# trap commit 8705412 records, where a fixture that set it greened a writer
+# guard DEAD IN THE DAEMON -- and a pre-flagged stream is REFUSED outright.
+# Scope, deliberately narrow: green here would NOT mean "summary equals raw on
+# any window". The writer buckets every record whole into its closing second
+# while the raw path clips to the window, so a long NON-io_worker idle record
+# diverges by the same mechanism; section 7 measures that residual and does
+# not assert it.
+# Also pins handle_heatmap's two routes against each other cell by cell (the
+# one raw aggregate that still counts io_workers, and the one an earlier
+# attempt broke into disagreement), plus the bypass suite: an empty, missing
+# or header-less summary dir, a non-overlapping window, a partial commit
+# range, an absent or unresolvable registry, a registry resolving no
+# io_worker, a raw side with no io_worker record, a window with no io_worker
+# time, and a pre-flagged fixture must each REFUSE -- every one of them is a
+# shape in which both paths agree while the product is broken.
+test_io_worker_parity
 # Paint-latency Phase 1 (docs/PAINT_LATENCY_PLAN.md): the per-committed-block
 # transition aggregate, src/block_agg.c. `transitions` loads the full raw event
 # window on every request (~0.68 s per million records) because a per-second

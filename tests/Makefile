@@ -32,6 +32,7 @@ TESTS     = test_wait_event test_cmdline test_backend_lifecycle test_spawn test_
             test_concurrency_bounds \
             test_idle_accounting test_idle_summary \
             test_agg_raw_crosscheck \
+            test_io_worker_parity \
             test_exec_index \
             test_interval_index \
             test_alloc_tune \
@@ -518,6 +519,33 @@ test_agg_raw_crosscheck: test_agg_raw_crosscheck.c ../src/compute.c \
                    $(BUILD)/server_summary_writer.o \
                    $(BUILD)/server_summary_reader.o \
                    $(BUILD)/server_event_writer.o \
+                   $(BUILD)/wait_event.o $(BUILD)/idle_rule.o \
+                   $(BUILD)/spawn.o $(BUILD)/cJSON.o
+	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -llz4 -lz -lm
+
+# test_io_worker_parity: the RAW-vs-SUMMARY parity gate for io_worker time
+# (#376 + #315). The raw path drops io_worker records from the time model
+# while the summary writer's accum_event adds their time to idle_ns and to the
+# DB-Time classes, so the same window answers Idle and DB Time two ways. RED
+# until the writer agrees. The io_worker property is produced the way
+# production produces it -- unflagged events into the REAL
+# pgwt_summary_push_event (as src/event_stream.c pushes them) and
+# pgwt_tag_events against a backends.jsonl registry resolved through
+# pgwt_backend_type_flag (as src/server.c tags every raw window) -- never by
+# pre-setting PGWT_EVENT_FLAG_IO_WORKER, which is the trap commit 8705412
+# records. Three window cases (excluding the capture's final second,
+# including it, the full span), handle_heatmap's two routes pinned against
+# each other, mutation probes, and a bypass suite in which every way the
+# comparison can be starved must REFUSE. An ACCEPTANCE TIER runs against a
+# real PG18 io_method=worker capture when one is named
+# (PGWT_PARITY_TRACE=<trace dir> or argv[1]). Server build, no BPF, no live
+# PG; ~0.3 s for the unit tier.
+test_io_worker_parity: test_io_worker_parity.c ../src/compute.c \
+                   $(BUILD)/server_summary_writer.o \
+                   $(BUILD)/server_summary_reader.o \
+                   $(BUILD)/server_event_writer.o \
+                   $(BUILD)/server_event_reader.o \
+                   $(BUILD)/server_cmdline.o \
                    $(BUILD)/wait_event.o $(BUILD)/idle_rule.o \
                    $(BUILD)/spawn.o $(BUILD)/cJSON.o
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -llz4 -lz -lm
