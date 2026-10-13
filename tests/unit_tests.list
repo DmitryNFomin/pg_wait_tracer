@@ -182,6 +182,17 @@ test_ui_live_smoke_lib.py
 # MANUFACTURED positive excess inside that check (+13.3% on the fixture).
 test_multi_window_lib.py
 test_demo_rehearsal_lib.py
+# #386: the Off-CPU* residual decomposition (tests/schedstat_lib.py +
+# tests/schedstat_probe.py's /proc reader, driven against a fixture /proc
+# tree). The hazard is a FALSE NEGATIVE, not a false alarm: run_delay only
+# accumulates when kernel.sched_schedstats=1, which is 0 by default on both
+# gate boxes, and a reader that reports 0 in that state credits the entire
+# residual to "unexplained" on no evidence. Every blinding path -- sysctl
+# off/unknown/toggled mid-window, no samples, one sample, no backends,
+# missing /proc, unparseable field, vanished pid, reused pid, partial
+# window coverage, mismatched clock domain -- must refuse, and the suite
+# also pins that NOTHING here gates a rehearsal verdict.
+test_schedstat_lib.py
 test_demo_rehearsal_orchestrator_lib.py
 test_workload_verify_flag.py
 # #214: per-tab "is this populated" checkers for tests/demo_workload_coverage.py

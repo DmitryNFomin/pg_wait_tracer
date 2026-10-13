@@ -588,6 +588,54 @@ implementation, so it cannot separate a defect from a change of mix.
   just the per-5-minute-window figures above — consistent with, not a
   substitute for, the <0.1% (n=7, one run) already recorded there.
 
+- **Instrument added 2026-10-13 (issue #386), bound deliberately NOT
+  changed.** Two rehearsal windows failed this cap at **10.04%** and
+  **11.48%**, and the stated cause — "contention from the 2026-10-07 load
+  increase" — was an *inference*, never a measurement: run-queue delay and
+  uninstrumented in-execution blocking (major faults, writeback) produce
+  the identical residual, and the failing run's trace had already been
+  deleted. The rehearsal now measures the run-queue component
+  **independently of our own instrumentation**: per-PG-backend
+  `/proc/<pid>/schedstat` **field 2** (`run_delay` — cumulative ns a task
+  spent runnable but not on a CPU), sampled every 5 s across the capture
+  and differenced over the *same* window each `offcpu_cap` sample uses, so
+  each window records three figures — `offcpu_ms`, `run_delay_ms`, and the
+  **unexplained remainder** `offcpu_ms − run_delay_ms` — plus the daemon's
+  own `%CPU` and the box's load/run-queue length (an adviser's point: a
+  "regime step" part-way into a long capture could be the *observer*
+  getting heavier as the trace grows rather than the workload getting
+  contended; those two series separate the cases).
+  **How the remainder may be read (the asymmetry is the point).**
+  Σ`run_delay` over the backends is an **upper bound** on the run-queue
+  share that could be *inside* Off-CPU\*, not an exact match: the kernel
+  counter also accrues while a backend is idle, in `ClientRead`, or already
+  inside another wait event, and none of that time is in Off-CPU\* (same
+  distinction this section's point 3 already draws). So a **positive**
+  unexplained remainder is the strong reading — even the upper bound of
+  run-queue delay fails to cover the residual, so an instrumentation gap
+  must account for the difference — while a **non-positive** one only says
+  run-queue delay *could* explain it. A bound belongs on the positive
+  direction. The remainder is therefore reported signed, never clamped at
+  0: clamping would erase the very overlap that tells a reader which of the
+  two readings they are in.
+  `tests/demo_rehearsal_lib.py` is untouched: no new check, no changed
+  tolerance, `OFFCPU_CAP_PCT` still 10.0. **The bound on the unexplained
+  remainder is not registered here**, because registering a bound in the
+  same change that first measures it is exactly what this document exists
+  to prevent — it gets its own reviewed commit once the distribution over a
+  full run is known. Why it is the bound worth having: the unexplained
+  remainder is workload-independent, so unlike today's percentage-of-DB-Time
+  cap it survives a load change, while the current cap is in part a proxy
+  for how contended the box happens to be.
+  **Blind spot, stated:** `run_delay` only accumulates when
+  `kernel.sched_schedstats` is 1, and it is **0 by default on both gate
+  boxes** (measured 2026-10-13). `tests/demo_rehearsal.sh` now enables it
+  for the duration of a run and restores it at teardown; when it cannot,
+  every window records an explicit **refusal** instead of a 0 —
+  a 0 there would credit the whole residual to "unexplained" with no
+  evidence at all (`tests/schedstat_lib.py`, bypass suite in
+  `tests/test_schedstat_lib.py`).
+
 - Off-CPU\* ≤ 10% of DB Time on a box where clients ≤ cores. **RETRACTION (this
   commit, review round 3):** an earlier version of this paragraph said the
   gate comment's "4.92 pp" was unverifiable because it does not appear as a

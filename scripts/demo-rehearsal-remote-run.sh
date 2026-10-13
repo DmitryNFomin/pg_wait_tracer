@@ -44,8 +44,9 @@ DURATION_MIN="${1:?Usage: demo-rehearsal-remote-run.sh DURATION_MIN RUN_MARKER P
 RUN_MARKER="${2:?Usage: demo-rehearsal-remote-run.sh DURATION_MIN RUN_MARKER PG_VERSION [RETAIN_TRACE] [TAG]}"
 PG_VERSION="${3:?Usage: demo-rehearsal-remote-run.sh DURATION_MIN RUN_MARKER PG_VERSION [RETAIN_TRACE] [TAG]}"
 # Optional 4th arg (docs/DEMO_DELIVERY_QUEUE.md item 2) -- absent (older
-# caller) means "0", same as tests/demo_rehearsal.sh's own default.
-RETAIN_TRACE="${4:-0}"
+# caller) means "1", same as tests/demo_rehearsal.sh's own default since
+# issue #386: retain by default so a failing run can be diagnosed.
+RETAIN_TRACE="${4:-1}"
 # Optional 5th arg: the git tag this attempt ran against (docs/
 # DEMO_REHEARSAL_CRITERIA.md "a counted attempt names the tag it ran
 # against"). Absent/empty (an uncounted or ad-hoc run) means tests/
