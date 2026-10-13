@@ -42,11 +42,11 @@ export const NOT_CAPTURED_BORDER = 'rgba(136, 136, 136, 0.45)';
  * enough to name both measures, short enough to fit a narrow gallery cell. */
 export const BURST_MARKER_LEGEND =
     'Line = peak simultaneous sessions per bucket\n' +
-    '▲ = burst onset, a different count (sessions entering one wait ' +
-    'within 10 ms) — listed under Burst Events below';
+    'Red marker = burst onset, a different count (sessions entering one ' +
+    'wait within 10 ms), listed under Burst Events below';
 export const TOP_PEAKS_CAPTION =
-    'The highest points of the line above, ranked — peak simultaneous ' +
-    'sessions in a single bucket. The ▲ markers on the chart count ' +
+    'The highest points of the line above, ranked: peak simultaneous ' +
+    'sessions in a single bucket. The red markers on the chart count ' +
     'something else and are listed separately under Burst Events.';
 
 /* data: concurrency response { peaks[], bursts[], bucket_ns }
@@ -156,7 +156,7 @@ export function buildConcurrencyOption(data, opts) {
                  * the line's value. */
                 const br = burstByBucket.get(idx);
                 if (br) {
-                    out += '<br/>▲ Burst: <b>' + br.sessions + ' sessions</b>' +
+                    out += '<br/>Burst: <b>' + br.sessions + ' sessions</b>' +
                         ' entered ' + esc(br.event || '') + ' within 10 ms';
                 }
                 return out;
@@ -261,7 +261,13 @@ function zoomAttrs(tsNs, bucketNs) {
     if (!(pad > 0) || !(tsNs > 0)) return '';
     return ' class="row-zoom" data-from="' + (tsNs - pad) + '" data-to="' +
         (tsNs + pad) + '" style="cursor:pointer"' +
-        ' title="Zoom to ±5 buckets around this moment"';
+        /* #388: ASCII only in text the UI renders. "±" here was harmless (a
+         * title attribute is painted by the browser chrome, not laid out in
+         * the page) but it is the one non-ASCII string left in what this
+         * builder emits, and an exemption list is how the ASCII gate in
+         * tests/web_unit/concurrency_ascii.test.mjs would stop covering the
+         * case that actually bit: #384's panel text, laid out in-page. */
+        ' title="Zoom to +/-5 buckets around this moment"';
 }
 
 /* PURE: the two HTML tables under the chart. Exported for testing — same
