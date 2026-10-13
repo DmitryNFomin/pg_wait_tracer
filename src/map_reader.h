@@ -218,6 +218,35 @@ uint64_t pgwt_live_closed_cpu_ns(uint64_t dur_ns, uint64_t cpu_ns,
  * observed to be in the past yet has no measurable age: 0. */
 uint64_t pgwt_live_open_ns(uint64_t now_ns, uint64_t last_ts_ns);
 
+/* Must the pid's still-OPEN [last_ts, now) stretch of `we` be accounted?
+ * Returns 0 only when there is nothing open (open_ns == 0).
+ *
+ * `pa` and `we` are parameters because the answer USED to depend on them,
+ * and the point of this function is that it no longer does — the live
+ * `has_closed_data` guard (#51, made CPU-only in v0.13; the WAIT half parked
+ * in the ROADMAP future list) dropped a repeated wait's ENTIRE open stretch
+ * whenever the same (pid, wait_event) had also closed inside the same
+ * interval. That is an all-or-nothing UNDER-count, not a de-duplication: BPF
+ * stamps `st->last_ts = now` in the same handler that emits the closed record
+ * (src/bpf/pg_wait_tracer.bpf.c), so every closed record for (pid, we) ends
+ * at or before last_ts and the open stretch [last_ts, now) is DISJOINT from
+ * all of them — purely additive for a wait exactly as it already was for
+ * on-CPU (we == 0).
+ *
+ * #393 is what the suppression looks like on screen: a backend in a
+ * 10-second pg_sleep straddling the interval edge, with one short earlier
+ * PgSleep chunk closed inside the same interval, lost the whole open
+ * stretch — the live time model printed `Timeout` at 0.0% of DB Time and a
+ * DB Time short by that backend's entire contribution (8634 ms where the
+ * same workload reads 17283 ms), while the per-event row and the class row
+ * AGREED, both missing it. pgwt_accum_add_interval feeds the raw row and the
+ * class total from one call, so the two can never disagree about an
+ * interval; what diverges is an interval that was never offered to either.
+ *
+ * tests/test_live_accum.c test_open_stretch_repeated_wait pins all of it. */
+int pgwt_live_account_open_stretch(const struct pgwt_pid_accum *pa,
+                                   uint32_t we, uint64_t open_ns);
+
 /* ── Live-view interval accounting (issues #97, #98) ─────────────────────
  *
  * The live accumulators are fed from TWO paths that must classify an

@@ -319,6 +319,102 @@ static struct pgwt_live_interval closed_cpu(uint32_t pid, uint64_t wall,
 }
 
 /* ── 3b. #202: the ONE measured-vs-gap rule both live paths use ─────── */
+/* ── #393: a repeated wait's OPEN stretch at the interval edge ─────────
+ *
+ * The live time model read `Timeout` = 0.0% of DB Time while the same
+ * workload's raw view showed Timeout:PgSleep at 8608 ms. Fixture, not a live
+ * reproduction: one pid, one short CLOSED PgSleep inside the interval, then
+ * the same pid still inside a LONGER PgSleep at the interval edge — the
+ * shape pg_sleep(10) produces when the 10-second WaitLatch straddles the
+ * edge. pgwt_read_state_map's old guard dropped the open stretch whole
+ * because a closed record for the same (pid, we) existed.
+ *
+ * Every assertion below reads the two sides from DIFFERENT structs — the raw
+ * per-event row from acc->system_events[], the class total and DB Time from
+ * acc->tm — so it cannot be satisfied by comparing one sum with itself. */
+static void test_open_stretch_repeated_wait(void)
+{
+    printf("--- #393: repeated wait, open stretch at the interval edge ---\n");
+    const uint32_t PGSLEEP = WEI(PG_WAIT_TIMEOUT, 2);   /* PG18 Timeout:PgSleep */
+    CHECK(!pgwt_is_idle_event(PGSLEEP),
+          "precondition: PG18 Timeout:PgSleep is DB Time, not pacing");
+
+    struct pgwt_accumulator *acc = calloc(1, sizeof(*acc));
+    pgwt_accum_init(acc);
+
+    /* The short chunk that closed inside this interval. */
+    struct pgwt_live_interval closed = closed_fg(400, PGSLEEP, MS(5), 1, 0x9);
+    pgwt_accum_add_interval(acc, &closed);
+    struct pgwt_pid_accum *pa = pgwt_find_pid_accum(acc, 400);
+    CHECK(pa != NULL, "the closed chunk created the pid accumulator");
+
+    /* The stretch still open at the edge: 8600 ms of the same wait, same pid.
+     * This is the decision pgwt_read_state_map makes per state_map entry. */
+    CHECK(pgwt_live_account_open_stretch(pa, PGSLEEP, MS(8600)) == 1,
+          "an open wait stretch is accounted even though the same (pid, we) "
+          "already closed in this interval");
+    if (pgwt_live_account_open_stretch(pa, PGSLEEP, MS(8600))) {
+        struct pgwt_live_interval open_edge = {
+            .pid = 400, .we = PGSLEEP, .wall_ns = MS(8600), .cpu_ns = 0,
+            .query_id = 0x9, .cat_flag = 0,
+            .cmd_gate_active = true, .cmd_open = true, .closed = false,
+            .pa = pa,
+        };
+        pgwt_accum_add_interval(acc, &open_edge);
+    }
+
+    /* The three numbers #393 is about, from three different places. */
+    CHECK(sys_row(acc, PGSLEEP) == MS(8605),
+          "raw per-event row = 8605 ms (got %llu ms)",
+          (unsigned long long)(sys_row(acc, PGSLEEP) / 1000000ULL));
+    CHECK(acc->tm.timeout_time_ns == MS(8605),
+          "Timeout class total = 8605 ms (got %llu ms)",
+          (unsigned long long)(acc->tm.timeout_time_ns / 1000000ULL));
+    CHECK(acc->tm.db_time_ns == MS(8605),
+          "DB Time = 8605 ms (got %llu ms)",
+          (unsigned long long)(acc->tm.db_time_ns / 1000000ULL));
+    CHECK(pct_db(sys_row(acc, PGSLEEP), acc->tm.db_time_ns) > 15.0,
+          "the Timeout row is not 0.0%% of DB Time (got %.1f%%)",
+          pct_db(sys_row(acc, PGSLEEP), acc->tm.db_time_ns));
+    CHECK(acc->tm.activity_time_ns == 0,
+          "the dropped stretch did not land in Activity either");
+
+    /* The fix must not assume the pair is present: the same open stretch on a
+     * pid with NO closed record of that wait is accounted identically. */
+    struct pgwt_accumulator *lone = calloc(1, sizeof(*lone));
+    pgwt_accum_init(lone);
+    CHECK(pgwt_live_account_open_stretch(NULL, PGSLEEP, MS(8600)) == 1,
+          "no pid accumulator at all (full/first sight): still accounted");
+    struct pgwt_live_interval only_open = {
+        .pid = 401, .we = PGSLEEP, .wall_ns = MS(8600), .cpu_ns = 0,
+        .query_id = 0x9, .cat_flag = 0,
+        .cmd_gate_active = true, .cmd_open = true, .closed = false,
+    };
+    pgwt_accum_add_interval(lone, &only_open);
+    CHECK(sys_row(lone, PGSLEEP) == MS(8600) &&
+          lone->tm.timeout_time_ns == MS(8600),
+          "lone open stretch: raw row and class total both 8600 ms");
+
+    /* A gate that cannot see must refuse, never approve: nothing open is
+     * ABSENCE, and must not be accounted as zero-length time. */
+    CHECK(pgwt_live_account_open_stretch(pa, PGSLEEP, 0) == 0,
+          "open_ns == 0 is nothing open, not a zero-length wait");
+    CHECK(pgwt_live_account_open_stretch(NULL, 0, 0) == 0,
+          "…including with no accumulator and no event");
+
+    /* #51 regression: on-CPU was already exempt from the guard and must stay
+     * so — a fork-caught compute backend's closed startup we==0 segment must
+     * not suppress its ongoing on-CPU loop. */
+    struct pgwt_live_interval cpu_closed = closed_fg(402, 0, MS(2), 1, 0xA);
+    pgwt_accum_add_interval(acc, &cpu_closed);
+    struct pgwt_pid_accum *pc = pgwt_find_pid_accum(acc, 402);
+    CHECK(pc && pgwt_live_account_open_stretch(pc, 0, MS(500)) == 1,
+          "#51: on-CPU open stretch still accounted after a closed we==0");
+
+    free(acc);
+    free(lone);
+}
+
 static void test_closed_cpu_ns_rule(void)
 {
     printf("--- closed-record CPU rule (#202) ---\n");
@@ -2031,6 +2127,7 @@ int main(void)
     test_effective_event();
     test_closed_noncmd_cpu_row();
     test_open_interval();
+    test_open_stretch_repeated_wait();
     test_closed_cpu_ns_rule();
     test_ring_delta();
     test_ring_delta_cpu_close();
