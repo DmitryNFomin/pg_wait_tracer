@@ -1489,10 +1489,11 @@ def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
                 # The stimulus appears between frames index-1 and index and
                 # disappears between index and index+1, so BOTH boundary
                 # pairs must see it (the second only exists when the target
-                # is not the sweep's last frame).
-                boundary = [j for j in (inject_frame_index - 1, inject_frame_index)
-                            if 0 <= j < len(pair_ratios)]
-                boundary_ratios = [pair_ratios[j] for j in boundary]
+                # is not the sweep's last frame). Review round 1: the
+                # arithmetic lives in lib.inject_detection_verdict so it has
+                # its own unit tests, like every other verdict here.
+                caught, boundary, boundary_ratios = lib.inject_detection_verdict(
+                    ratio, pair_ratios, inject_frame_index, blink_threshold)
                 self_test_result = {
                     "tick": i, "ratio": ratio, "measured": ratio is not None,
                     "note": blink_note, "inject_blink_ms": inject_blink_ms,
@@ -1504,18 +1505,13 @@ def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
                     "pair_ratios": pair_ratios,
                     "boundary_pair_indices": boundary,
                     "boundary_pair_ratios": boundary_ratios,
-                    # review round 1: this used to hardcode >= 0.5, so
+                    # #252 review round 1: this used to hardcode >= 0.5, so
                     # raising BLINK_THRESHOLD toward 0.5 (e.g. to 0.4) would
                     # leave the self-test reporting PASS while the gate it
-                    # is supposed to defend had gone slack -- it certified
-                    # only that a GROSS blink is caught, not that the
-                    # actual configured threshold still works. Compare
-                    # against the same blink_threshold the tab's own
-                    # no_blink verdict uses, so the self-test tracks
-                    # whatever this run was actually configured to detect.
-                    "caught": (ratio is not None and bool(boundary_ratios)
-                               and all(r >= blink_threshold
-                                       for r in boundary_ratios)),
+                    # is supposed to defend had gone slack. The threshold is
+                    # the tab's own blink_threshold -- see
+                    # lib.inject_detection_verdict.
+                    "caught": caught,
                 }
 
             blink_sweep_ticks.append(

@@ -2174,9 +2174,10 @@ def _frame_windows(n=5, start=1000, call=300, gap=500):
     return [(start + k * gap, start + k * gap + call) for k in range(n)]
 
 
-def _stimulus(req, painted, hide_req, cleared):
+def _stimulus(req, painted, hide_req, cleared, present=True):
     return {"shown_requested_ms": req, "shown_painted_ms": painted,
-            "hidden_requested_ms": hide_req, "hidden_cleared_ms": cleared}
+            "hidden_requested_ms": hide_req, "hidden_cleared_ms": cleared,
+            "was_present_at_removal": present}
 
 
 def test_inject_stimulus_verdict_refuses_without_frame_windows():
@@ -2298,6 +2299,108 @@ def test_inject_stimulus_verdict_refuses_when_a_neighbour_may_have_seen_it():
     stim = _stimulus(t_start - 100, t_start - 50, t_end + 10, next_start + 1)
     ok, reason = lib.inject_stimulus_verdict(stim, windows, 2)
     check(not ok, "a clearance that may land inside the next frame refuses")
+
+
+def test_inject_stimulus_verdict_refuses_when_the_overlay_vanished_early():
+    """Review should-fix: hidden_requested_ms is recorded whether or not the
+    overlay was still there, so without this check an overlay removed by
+    something else (the page-side safety net, a view rebuild) would report
+    the geometry PROVEN, score 0.0 on the boundary pairs, and go red BLAMING
+    THE DETECTOR -- the exact misattribution this verdict exists to stop."""
+    windows = _frame_windows()
+    t_start, t_end = windows[2]
+    good = dict(_stimulus(windows[1][1], t_start - 1, t_end + 1, windows[3][0] - 1))
+    ok, _reason = lib.inject_stimulus_verdict(good, windows, 2)
+    check(ok, "the otherwise-identical record is accepted (control)")
+    for present in (False, None, "yes", 1, 0):
+        stim = dict(good)
+        stim["was_present_at_removal"] = present
+        ok, reason = lib.inject_stimulus_verdict(stim, windows, 2)
+        check(not ok, f"was_present_at_removal={present!r} refuses")
+        check("already gone" in (reason or ""),
+              "the refusal says the overlay was already gone, not that nothing blinked")
+    stim = dict(good)
+    del stim["was_present_at_removal"]
+    ok, reason = lib.inject_stimulus_verdict(stim, windows, 2)
+    check(not ok, "a record with no presence field at all refuses")
+
+
+# ── inject_detection_verdict (issue #266, review round 1) ───────────────────
+
+def test_inject_detection_verdict_grades_only_the_boundary_pairs():
+    pairs = [0.0, 0.2, 0.2, 0.0]
+    caught, idx, ratios = lib.inject_detection_verdict(0.2, pairs, 2, 0.001)
+    check(caught, "both boundary pairs over threshold => caught")
+    check(idx == [1, 2], f"the graded pairs are (target-1, target) = [1, 2] (got {idx})")
+    check(ratios == [0.2, 0.2], f"the reported ratios are those pairs' ({ratios})")
+
+
+def test_inject_detection_verdict_ignores_a_diff_in_a_non_boundary_pair():
+    """The bypass this replaces: max(pair_ratios) is satisfied by any diff
+    anywhere in the sweep -- including a FAILED CAPTURE, which
+    sweep_consecutive_diff_ratios scores 1.0 by itself."""
+    pairs = [1.0, 0.0, 0.0, 1.0]        # missing frames at both ends
+    caught, idx, ratios = lib.inject_detection_verdict(1.0, pairs, 2, 0.001)
+    check(not caught,
+          "a 1.0 somewhere else in the sweep does not count as catching the stimulus")
+    check(ratios == [0.0, 0.0], f"only the boundary pairs are reported ({ratios})")
+
+
+def test_inject_detection_verdict_needs_both_boundary_pairs():
+    for pairs, label in (([0.0, 0.2, 0.2, 0.0], "entering pair blind"),
+                         ([0.0, 0.2, 0.2, 0.0], "leaving pair blind")):
+        p = list(pairs)
+        p[1 if label.startswith("entering") else 2] = 0.0
+        caught, idx, ratios = lib.inject_detection_verdict(0.2, p, 2, 0.001)
+        check(not caught, f"{label} => not caught ({ratios})")
+
+
+def test_inject_detection_verdict_tracks_the_configured_threshold():
+    pairs = [0.0, 0.2, 0.2, 0.0]
+    check(lib.inject_detection_verdict(0.2, pairs, 2, 0.001)[0],
+          "0.2 clears the real 0.001 threshold")
+    check(not lib.inject_detection_verdict(0.2, pairs, 2, 0.5)[0],
+          "the same 0.2 does NOT clear a slackened 0.5 threshold -- a gate "
+          "widened toward the stimulus size fails its own self-test")
+
+
+def test_inject_detection_verdict_refuses_a_not_measured_tick():
+    pairs = [0.0, 0.2, 0.2, 0.0]
+    caught, idx, ratios = lib.inject_detection_verdict(None, pairs, 2, 0.001)
+    check(not caught,
+          "sweep_ratio None (a mount landed mid-sweep: NOT MEASURED) never reads as caught")
+    check(idx == [1, 2] and ratios == [0.2, 0.2],
+          "the pairs are still reported, so the artifact shows what was discarded")
+
+
+def test_inject_detection_verdict_last_frame_target_has_one_boundary_pair():
+    pairs = [0.0, 0.0, 0.0, 0.2]
+    caught, idx, ratios = lib.inject_detection_verdict(0.2, pairs, 4, 0.001)
+    check(caught and idx == [3],
+          f"target 4 grades only the entering pair [3] (got {idx}, caught={caught})")
+
+
+def test_inject_detection_verdict_refuses_indices_with_no_pair():
+    pairs = [0.0, 0.2, 0.2, 0.0]
+    for bad in (0, -1, 9, None, "2"):
+        caught, idx, ratios = lib.inject_detection_verdict(0.2, pairs, bad, 0.001)
+        if bad == 0:
+            check(not caught and idx == [0],
+                  "target 0 has only the (target, target+1) pair and cannot be caught "
+                  "on an appearance it never created")
+        else:
+            check(not caught, f"target index {bad!r} => not caught (pairs {idx})")
+
+
+def test_inject_detection_verdict_refuses_absent_or_unparseable_pairs():
+    for pairs in (None, "0.2", 0.2):
+        caught, idx, ratios = lib.inject_detection_verdict(0.2, pairs, 2, 0.001)
+        check(not caught and idx == [] and ratios == [],
+              f"pair_ratios={pairs!r} => not caught, nothing reported")
+    caught, _i, _r = lib.inject_detection_verdict(0.2, [], 2, 0.001)
+    check(not caught, "an empty pair list (fewer than 2 frames) never reads as caught")
+    caught, _i, _r = lib.inject_detection_verdict(0.2, [0.0, None, "x", 0.0], 2, 0.001)
+    check(not caught, "an unparseable pair ratio never reads as caught")
 
 
 def test_inject_stimulus_verdict_accepts_a_proven_bracket():

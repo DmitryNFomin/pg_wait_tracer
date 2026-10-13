@@ -536,6 +536,23 @@ def inject_stimulus_verdict(stimulus, frame_windows_ms, target_index):
         return False, ("stimulus timestamps are not monotonic "
                        f"({req}, {painted}, {hide_req}, {cleared}) -- "
                        "the on-screen window cannot be bounded")
+    # Review should-fix: the four timestamps bound the window the overlay was
+    # on screen for ONLY if the overlay was still there when the removal ran.
+    # If anything else removed it first -- the page-side safety net
+    # (_BlinkInjector.SAFETY_MARGIN_MS), a view rebuild, a stray DOM reset --
+    # hidden_requested_ms is recorded exactly as on a healthy run, so the
+    # geometry would read PROVEN, the boundary pairs would score 0.0, and the
+    # run would go red BLAMING THE DETECTOR. That misattribution is the whole
+    # thing this function exists to prevent, so the page reports whether the
+    # element was still present at removal and an early disappearance refuses.
+    # Improbable (the safety net is dwell + 5s) -- so was the old wall-clock
+    # window's margin, right up to the run it decided.
+    present = stimulus.get("was_present_at_removal")
+    if present is not True:
+        return False, (f"the overlay was already gone when the removal ran "
+                       f"(was_present_at_removal={present!r}) -- something else "
+                       "removed it, so the recorded window does not bound the time "
+                       "it was actually on screen")
     bad = [i for i, w in enumerate(frame_windows_ms) if not _interval_ok(w)]
     if bad:
         return False, (f"sweep frame(s) {bad} have no capture window (not captured, or "
@@ -641,6 +658,49 @@ def blink_sweep_gate_verdict(frames, seq_before_sweep, seq_after_sweep):
     ratios = [r for r, _n in pairs]
     notes = [n for _r, n in pairs if n]
     return max(ratios), ("; ".join(notes) if notes else None)
+
+
+def inject_detection_verdict(sweep_ratio, pair_ratios, target_index, threshold):
+    """issue #266 (review round 1): the self-test's DETECTION half, extracted
+    from tests/ui_live_smoke.py's tick loop so the boundary-pair arithmetic
+    has its own tests. Returns (caught: bool, indices: list, ratios: list).
+
+    The stimulus appears between frames target-1 and target and disappears
+    between target and target+1, so exactly those two consecutive pairs must
+    see it; the second does not exist when target is the sweep's last frame.
+    Graded against `threshold`, the same BLINK_THRESHOLD the tab's own
+    no_blink verdict uses, so the self-test tracks whatever this run was
+    configured to detect rather than certifying a gross blink.
+
+    Deliberately NOT max(pair_ratios): the sweep's worst pair is satisfied by
+    any diff anywhere in the sweep -- including a capture that failed, which
+    sweep_consecutive_diff_ratios scores 1.0 all by itself -- so a self-test
+    built on it can report "caught" without the stimulus having been seen by
+    anything.
+
+    sweep_ratio is blink_sweep_gate_verdict's own ratio, None when the tick
+    was NOT MEASURED (a mount landed mid-sweep). None refuses: the gate
+    declined to measure that tick, so nothing about detection follows from
+    it, and no pair ratio computed across that boundary means anything.
+
+    An out-of-range target_index yields no boundary pairs at all, and
+    caught=False -- an index the sweep cannot create a pair for must never
+    read as caught (inject_stimulus_verdict refuses it separately, for its
+    own reason)."""
+    if not isinstance(pair_ratios, (list, tuple)):
+        return False, [], []
+    # isinstance before the arithmetic, not inside the comprehension: a
+    # None/str target_index must refuse, never raise (found by this
+    # function's own test).
+    if not isinstance(target_index, int) or isinstance(target_index, bool):
+        return False, [], []
+    indices = [j for j in (target_index - 1, target_index)
+               if 0 <= j < len(pair_ratios)]
+    ratios = [pair_ratios[j] for j in indices]
+    caught = (sweep_ratio is not None and bool(ratios)
+              and all(isinstance(r, (int, float)) and r >= threshold
+                      for r in ratios))
+    return caught, indices, ratios
 
 
 def build_sweep_tick_record(achieved_offsets_ms, frames,
