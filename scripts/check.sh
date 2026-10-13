@@ -76,6 +76,9 @@ run python3 -m py_compile tests/*.py
 step "python: free_ports self-test"
 run python3 tests/test_free_ports.py
 
+step "python: demo-walk recorder refusal/coverage/crop tests"
+run python3 tests/test_demo_walk_recorder.py
+
 # Issue #214: tests/demo_workload_coverage.py's per-tab *_populated()
 # checkers are pure (no browser, no network, no PG) -- same reasoning as
 # the demo-rehearsal bypass-suite step below, run in the fast tier rather
