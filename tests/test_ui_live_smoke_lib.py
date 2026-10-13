@@ -2425,6 +2425,264 @@ def test_inject_stimulus_verdict_accepts_the_last_frame_as_target():
     check(ok, f"the sweep's last frame is a valid target ({reason})")
 
 
+# ── issue #384: per-frame DATA diagnostics for the blink sweep ───────────────
+#
+# What these grade: the sweep can now answer "did the data change between
+# these two frames?". The TRUE-POSITIVE direction (a changed bin is seen) is
+# the easy half and was never the broken one -- every bypass below is a way
+# the detection could become UNREACHABLE and quietly report "identical", i.e.
+# a false negative that turns a legitimate content change into a fabricated
+# "product bug" verdict. One test per way.
+
+
+def _snap(cells, at_ms=1000, **extra):
+    s = {"cells": list(cells), "at_ms": at_ms, "cell_count": len(cells),
+         "truncated": False, "series_count": 1, "series_names": ["heatmap:"]}
+    s.update(extra)
+    return s
+
+
+def _frame(before, after=None, achieved_ms=200.0, window=(1000.0, 1150.0)):
+    return {"probe_before": before,
+            "probe_after": after if after is not None else before,
+            "achieved_ms": achieved_ms, "window_ms": window}
+
+
+def test_data_snapshot_diff_sees_one_changed_bin():
+    a = _snap([0, 0, 1.0, 1], at_ms=1000)
+    b = _snap([0, 0, 1.6094379, 4], at_ms=1300)
+    d = lib.data_snapshot_diff(a, b)
+    check(d["measured"] is True, "a readable pair is measured")
+    check(d["identical"] is False, "a changed bin is NOT identical")
+    check(d["cells_differing"] == 2,
+          f"both changed cells counted (got {d['cells_differing']})")
+    check(d["first_differing_index"] == 2,
+          f"first differing index reported (got {d['first_differing_index']})")
+    check(abs(d["max_abs_delta"] - 3.0) < 1e-9,
+          f"max abs delta = 3 (count 1 -> 4), got {d['max_abs_delta']}")
+    check(d["sum_a"] == 2.0 and abs(d["sum_b"] - 5.6094379) < 1e-6,
+          f"both sums reported ({d['sum_a']} -> {d['sum_b']})")
+    check(d["dt_ms"] == 300, f"page-clock gap carried through ({d['dt_ms']})")
+
+
+def test_data_snapshot_diff_identical_is_identical():
+    a = _snap([1, 2, 3], at_ms=10)
+    b = _snap([1, 2, 3], at_ms=510)
+    d = lib.data_snapshot_diff(a, b)
+    check(d["measured"] and d["identical"], "bin-identical data reads identical")
+    check(d["cells_differing"] == 0 and d["max_abs_delta"] == 0.0,
+          "no cells differ, max delta 0")
+
+
+def test_data_snapshot_diff_cell_count_change_is_measured_not_refused():
+    # A series that gains a bucket IS a content change, and the loudest kind.
+    # Reporting it as "unmeasured" would hide it behind a refusal.
+    d = lib.data_snapshot_diff(_snap([1, 2, 3]), _snap([1, 2, 3, 4]))
+    check(d["measured"] is True, "a cell-count change is MEASURED")
+    check(d["identical"] is False and d["shape_changed"] is True,
+          "a cell-count change is a non-identical, shape-changed result")
+
+
+def test_pair_report_content_change_when_pixels_and_data_both_moved():
+    frames = [_frame(_snap([1, 1], at_ms=100), achieved_ms=200.0),
+              _frame(_snap([1, 5], at_ms=500), achieved_ms=500.0)]
+    r = lib.sweep_data_pair_reports(frames, [0.0482], threshold=0.001)[0]
+    check(r["verdict"] == lib.PAIR_CONTENT_CHANGE,
+          f"pixels over threshold + different data = content-change ({r['verdict']})")
+    check(r["image_over_threshold"] is True, "the image side is flagged over threshold")
+    check(r["data"]["cells_differing"] == 1, "the differing bin is counted")
+
+
+def test_pair_report_product_bug_when_pixels_moved_with_identical_data():
+    # This is the shape an overlay/flash has: bin-identical data, visibly
+    # different pixels. It must NOT be labelled content-change.
+    frames = [_frame(_snap([1, 1], at_ms=100), achieved_ms=200.0),
+              _frame(_snap([1, 1], at_ms=500), achieved_ms=500.0)]
+    r = lib.sweep_data_pair_reports(frames, [0.0482], threshold=0.001)[0]
+    check(r["verdict"] == lib.PAIR_PRODUCT_BUG,
+          f"pixels over threshold + identical data = product bug ({r['verdict']})")
+
+
+def test_pair_report_separates_subthreshold_repaint_from_clean():
+    frames = [_frame(_snap([1, 1], at_ms=100)),
+              _frame(_snap([1, 2], at_ms=500))]
+    r = lib.sweep_data_pair_reports(frames, [0.0], threshold=0.001)[0]
+    check(r["verdict"] == lib.PAIR_DATA_ONLY,
+          f"data moved, pixels did not = data-changed-pixels-stable ({r['verdict']})")
+    frames2 = [_frame(_snap([1, 1], at_ms=100)), _frame(_snap([1, 1], at_ms=500))]
+    r2 = lib.sweep_data_pair_reports(frames2, [0.0], threshold=0.001)[0]
+    check(r2["verdict"] == lib.PAIR_CLEAN, f"neither moved = clean ({r2['verdict']})")
+
+
+def test_diag_verdict_rolls_up_content_change_and_prefers_a_product_bug():
+    content = {"image_over_threshold": True, "verdict": lib.PAIR_CONTENT_CHANGE,
+               "data": {"reason": None}}
+    bug = {"image_over_threshold": True, "verdict": lib.PAIR_PRODUCT_BUG,
+           "data": {"reason": None}}
+    clean = {"image_over_threshold": False, "verdict": lib.PAIR_CLEAN,
+             "data": {"reason": None}}
+    v, detail = lib.diag_verdict([content, content, clean])
+    check(v == "content-change", f"all diverging pairs explained by data ({v}: {detail})")
+    v2, detail2 = lib.diag_verdict([content, bug, clean])
+    check(v2 == "product-bug",
+          f"ONE identical-data divergence outweighs any number of explained "
+          f"ones ({v2}: {detail2})")
+    v3, _ = lib.diag_verdict([clean, clean])
+    check(v3 == "no-divergence", f"nothing diverged ({v3})")
+
+
+# ── bypass suite: every way the data side could stop being able to see ──────
+
+
+def test_bypass_empty_cells_refuses_instead_of_reading_identical():
+    # Two empty arrays compare equal. If an empty probe were accepted, EVERY
+    # pair would look identical and every real divergence would be reported
+    # as a product bug.
+    ok, why = lib.data_snapshot_ok(_snap([]))
+    check(not ok, f"an empty `cells` array is REFUSED ({why})")
+    d = lib.data_snapshot_diff(_snap([]), _snap([]))
+    check(d["measured"] is False and d["identical"] is None,
+          f"two empty snapshots are unmeasured, NOT identical ({d['reason']})")
+
+
+def test_bypass_missing_echarts_tool_refuses():
+    # The "missing tool" case: window.echarts (or getInstanceByDom) absent.
+    snap = {"at_ms": 5, "error": "window.echarts.getInstanceByDom is missing"}
+    ok, why = lib.data_snapshot_ok(snap)
+    check(not ok and "getInstanceByDom" in why,
+          f"a probe that could not find its tool is REFUSED ({why})")
+    d = lib.data_snapshot_diff(snap, _snap([1, 2]))
+    check(d["measured"] is False, "and the pair is unmeasured")
+
+
+def test_bypass_probe_call_failure_refuses():
+    # The 126/127 analogue: the probe could not be executed at all
+    # (_panel_data_probe's own except branch -- a dead page, a closed
+    # context). No at_ms either.
+    snap = {"at_ms": None, "error": "probe call failed: Target closed"}
+    ok, why = lib.data_snapshot_ok(snap)
+    check(not ok, f"a probe that never ran is REFUSED ({why})")
+
+
+def test_bypass_absent_chart_refuses_rather_than_approving():
+    # "The thing being checked is ABSENT rather than wrong": the chart was
+    # disposed, so there is no data to read. Must not read as unchanged.
+    snap = {"at_ms": 5, "error": "no ECharts instance on #heatmap-container "
+                                 "or its descendants"}
+    ok, why = lib.data_snapshot_ok(snap)
+    check(not ok, f"an absent chart instance is REFUSED ({why})")
+    frames = [_frame(snap, achieved_ms=200.0), _frame(snap, achieved_ms=500.0)]
+    r = lib.sweep_data_pair_reports(frames, [0.0482], threshold=0.001)[0]
+    check(r["verdict"] == lib.PAIR_UNDETERMINED,
+          f"a diverging pair with no readable data is UNDETERMINED, never a "
+          f"product bug ({r['verdict']})")
+
+
+def test_bypass_truncated_probe_is_a_partial_read_and_refuses():
+    # The "partial range" case: the probe capped the series. A prefix
+    # comparing equal says nothing about the tail.
+    ok, why = lib.data_snapshot_ok(_snap([1, 2, 3], truncated=True,
+                                         cell_count=60000))
+    check(not ok and "truncat" in why,
+          f"a capped/partial series read is REFUSED ({why})")
+
+
+def test_bypass_unparseable_cell_refuses():
+    # NaN/Infinity cross JSON as null; a non-numeric entry means the probe
+    # found something it could not express as a number.
+    for bad in ([1, None, 3], [1, "7", 3], [1, True, 3],
+                [1, float("nan"), 3], [1, float("inf"), 3]):
+        ok, why = lib.data_snapshot_ok(_snap(bad))
+        check(not ok, f"cells {bad!r} refused ({why})")
+    ok, why = lib.data_snapshot_ok({"cells": [1, 2], "at_ms": None})
+    check(not ok and "at_ms" in why,
+          f"a snapshot with no page-clock anchor is REFUSED ({why})")
+    ok, why = lib.data_snapshot_ok({"at_ms": 1})
+    check(not ok, f"a snapshot with no `cells` at all is REFUSED ({why})")
+    ok, why = lib.data_snapshot_ok(None)
+    check(not ok, f"a missing snapshot is REFUSED ({why})")
+
+
+def test_bypass_frame_whose_brackets_disagree_is_not_attributed():
+    # A mount landing INSIDE a frame's own capture call: the frame cannot be
+    # attributed to either value, so the pair must not be scored at all.
+    moving = _frame(_snap([1, 1], at_ms=100), _snap([1, 9], at_ms=160),
+                    achieved_ms=200.0)
+    stable = _frame(_snap([1, 9], at_ms=500), achieved_ms=500.0)
+    snap, why = lib.frame_data_certified(moving["probe_before"],
+                                         moving["probe_after"])
+    check(snap is None and "DURING" in why,
+          f"a frame whose brackets disagree is NOT certified ({why})")
+    r = lib.sweep_data_pair_reports([moving, stable], [0.0482], threshold=0.001)[0]
+    check(r["verdict"] == lib.PAIR_UNDETERMINED,
+          f"and its pair is undetermined, not content-change ({r['verdict']})")
+    both_still = lib.frame_data_certified(_snap([1, 1], at_ms=1),
+                                          _snap([1, 1], at_ms=90))
+    check(both_still[0] is not None,
+          "a frame whose brackets agree IS certified (the check still passes "
+          "when it should)")
+
+
+def test_bypass_missing_image_ratio_is_undetermined_not_clean():
+    frames = [_frame(_snap([1, 1])), _frame(_snap([1, 1]))]
+    r = lib.sweep_data_pair_reports(frames, [None], threshold=0.001)[0]
+    check(r["verdict"] == lib.PAIR_UNDETERMINED,
+          f"no image ratio = undetermined, not clean ({r['verdict']})")
+    r2 = lib.sweep_data_pair_reports(frames, [], threshold=0.001)[0]
+    check(r2["verdict"] == lib.PAIR_UNDETERMINED,
+          f"a MISSING ratio entry is undetermined too ({r2['verdict']})")
+
+
+def test_bypass_verdict_is_not_read_off_the_measurable_subset():
+    # The "history guard passed because SOME entry changed" shape: one
+    # diverging pair explained by data must not license a verdict while
+    # another diverging pair could not be attributed at all.
+    content = {"image_over_threshold": True, "verdict": lib.PAIR_CONTENT_CHANGE,
+               "data": {"reason": None}}
+    und = {"image_over_threshold": True, "verdict": lib.PAIR_UNDETERMINED,
+           "data": {"reason": "frame 1: page-side probe refused: ..."}}
+    v, detail = lib.diag_verdict([content, und])
+    check(v == "undetermined",
+          f"one unattributable divergence makes the RUN undetermined ({v}: {detail})")
+    v2, detail2 = lib.diag_verdict(
+        [{"image_over_threshold": None, "verdict": lib.PAIR_UNDETERMINED,
+          "data": {"reason": "no ratio"}}])
+    check(v2 == "undetermined",
+          f"a run with no image ratios at all is undetermined, not "
+          f"no-divergence ({v2}: {detail2})")
+    check(lib.diag_verdict([])[0] == "no-divergence",
+          "an empty report list says no-divergence (nothing was captured to "
+          "diverge) -- and diag_verdict's caller prints pairs_examined=0 "
+          "alongside it")
+
+
+def test_bypass_partial_walk_may_not_write_the_gating_dir():
+    gate = "/x/tests/results/ui_live"
+    ok, why = lib.diag_out_dir_ok(["histogram"], gate, gate)
+    check(not ok and "GATING" in why,
+          f"a one-tab walk aimed at the gating dir is REFUSED ({why})")
+    ok2, _ = lib.diag_out_dir_ok(["histogram"], gate + "/", gate)
+    check(not ok2, "a trailing slash does not get past the guard")
+    ok3, _ = lib.diag_out_dir_ok(["histogram"], gate + "/../ui_live", gate)
+    check(not ok3, "nor does a path that normalises to the gating dir")
+    ok4, _ = lib.diag_out_dir_ok(["histogram"], "/x/tests/results/ui_live_diag", gate)
+    check(ok4, "a separate out-dir is allowed (the guard is not vacuous)")
+    ok5, _ = lib.diag_out_dir_ok(None, gate, gate)
+    check(ok5, "a FULL walk into the gating dir is exactly what gating does")
+
+
+def test_bypass_guard_with_no_resolvable_base_refuses():
+    # "Absent or unresolvable base": if the guard cannot tell what the
+    # gating dir is, it must refuse, never approve.
+    ok, why = lib.diag_out_dir_ok(["histogram"], "/x/out", None)
+    check(not ok and "resolve" in why,
+          f"an unresolvable gating dir refuses the partial walk ({why})")
+    ok2, why2 = lib.diag_out_dir_ok(["histogram"], None, "/x/gate")
+    check(not ok2, f"a missing out-dir refuses too ({why2})")
+    ok3, _ = lib.diag_out_dir_ok(["histogram"], "/x/out", "")
+    check(not ok3, "an empty gating dir refuses")
+
+
 def _discover_tests():
     """Every callable named test_* defined at module level, in declaration
     order (by source line). Replaces a hand-maintained TESTS list (issue #93

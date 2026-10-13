@@ -100,13 +100,36 @@ BRIDGE="$PROJECT_DIR/web/pgwt"
 
 PM_PID=""
 PG_MAJOR=""
+# issue #384 DIAGNOSTIC MODE (--diag-tabs): instead of the gating 11-tab walk
+# + self-test, run ONE diagnostic walk over the named tabs with
+# --diag-data, into its OWN results dir (results/ui_live_diag). It exists
+# because the histogram divergence lives in the "late" phase, i.e. it needs
+# ~12 ticks -- paying that on eleven tabs is ~35 minutes of gate-box time
+# for ten tabs nobody is asking about.
+#
+# It cannot be mistaken for a gating pass, by two independent mechanisms:
+#   1. it writes results/ui_live_diag, never results/ui_live, so the file
+#      tests/run_all.sh greps is not even touched (and run_all.sh's own
+#      $PGWT_RUN_MARKER / run.id check would reject a stale one anyway);
+#   2. ui_live_smoke.py REFUSES a --tabs subset pointed at the gating dir
+#      (ui_live_smoke_lib.diag_out_dir_ok), before deleting anything.
+# tests/run_all.sh passes only --pid/--pg-version, so the gating path never
+# reaches this branch.
+DIAG_TABS=""
+DIAG_TICKS=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --pid) PM_PID="$2"; shift 2 ;;
         --pg-version) PG_MAJOR="$2"; shift 2 ;;
-        *) echo "Usage: $0 [--pid POSTMASTER_PID] [--pg-version N]"; exit 1 ;;
+        --diag-tabs) DIAG_TABS="$2"; shift 2 ;;
+        --diag-ticks) DIAG_TICKS="$2"; shift 2 ;;
+        *) echo "Usage: $0 [--pid POSTMASTER_PID] [--pg-version N] [--diag-tabs LIST [--diag-ticks N]]"; exit 1 ;;
     esac
 done
+if [[ -z "$DIAG_TABS" && -n "$DIAG_TICKS" ]]; then
+    echo "ERROR: --diag-ticks has no meaning without --diag-tabs"
+    exit 1
+fi
 
 if [[ -z "$PM_PID" ]]; then
     if [[ -n "$PG_MAJOR" ]]; then
@@ -364,6 +387,19 @@ fi
 echo "ui_live_smoke: bridge ready at $BASE_URL"
 
 # ── 4. The walk ───────────────────────────────────────────────────────────────
+if [[ -n "$DIAG_TABS" ]]; then
+    echo "ui_live_smoke: ════ DIAGNOSTIC MODE (issue #384) -- this run DOES NOT GATE ════"
+    echo "ui_live_smoke: diagnostic walk over [$DIAG_TABS] with per-frame data probes"
+    diag_args=(--url "$BASE_URL" --pgbench-pid "$PGBENCH_PID"
+               --workload-pid "$WORKLOAD_PID" --diag-data --tabs "$DIAG_TABS"
+               --out-dir "$SCRIPT_DIR/results/ui_live_diag")
+    [[ -n "$DIAG_TICKS" ]] && diag_args+=(--ticks "$DIAG_TICKS")
+    python3 "$SCRIPT_DIR/ui_live_smoke.py" "${diag_args[@]}"
+    DIAG_RC=$?
+    echo "ui_live_smoke: diagnostic walk rc=$DIAG_RC (artifacts: $SCRIPT_DIR/results/ui_live_diag)"
+    exit "$DIAG_RC"
+fi
+
 python3 "$SCRIPT_DIR/ui_live_smoke.py" --url "$BASE_URL" \
     --pgbench-pid "$PGBENCH_PID" --workload-pid "$WORKLOAD_PID"
 SMOKE_RC=$?
