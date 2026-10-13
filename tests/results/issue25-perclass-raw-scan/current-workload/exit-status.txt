@@ -1,0 +1,2 @@
+dump_exit=0
+scan_exit=4

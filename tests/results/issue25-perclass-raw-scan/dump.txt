@@ -1,0 +1,96 @@
+════════════════════════════════════════════════════════════════════════════════
+pgwt-server — Summary    Events: 4307056 (4307056 transitions, 0 samples)    Duration: 1851.0s
+Fidelity: exact
+════════════════════════════════════════════════════════════════════════════════
+
+  === Time Model ===
+
+  AAS: 1.35    DB Time: 2495785.0 ms    Idle: 25251504.3 ms
+
+  DB Time                           2495785.0 ms   100.0%
+    Lock                            1631026.2 ms    65.4%
+      Lock:relation                 1412702.0 ms    56.6%
+      Lock:transactionid             218324.0 ms     8.7%
+      Lock:extend                         0.1 ms     0.0%
+    Timeout                          746520.3 ms    29.9%
+      Timeout:PgSleep                746520.3 ms    29.9%
+    CPU (running)                     78252.5 ms     3.1%
+    CPU (waiting for a core)            494.6 ms     0.0%
+    IO                                38829.7 ms     1.6%
+      IO:WalSync                      30222.2 ms     1.2%
+      IO:BufFileWrite                  3043.3 ms     0.1%
+      IO:BufFileRead                   1885.5 ms     0.1%
+      IO:WalWrite                      1762.7 ms     0.1%
+      IO:DataFileWrite                  825.7 ms     0.0%
+    LWLock                              661.6 ms     0.0%
+      LWLock:WALWrite                   661.1 ms     0.0%
+      LWLock:XidGen                       0.3 ms     0.0%
+      LWLock:BufferContent                0.1 ms     0.0%
+      LWLock:LockManager                  0.1 ms     0.0%
+      LWLock:WALInsert                    0.0 ms     0.0%
+  Idle                             25251504.3 ms     0.0%
+      Client:ClientRead            15995348.6 ms     0.0%
+      Timeout:CheckpointWriteDelay  1498150.9 ms     0.0%
+      Timeout:VacuumDelay               232.0 ms     0.0%
+      Other (background)            7757772.9 ms     0.0%
+
+  === Top Events ===
+
+  Wait Event                        Waits   Total (ms)   Avg (us)     % DB
+  ─────────────────────────────────────────────────────────────────────────
+  Client:ClientRead                319033   15995348.6    50137.0      —
+  Timeout:CheckpointWriteDelay      14951    1498150.9   100204.1      —
+  Lock:relation                       436    1412702.0  3240142.3    56.6%
+  Timeout:PgSleep                     326     746520.3  2289939.5    29.9%
+  Lock:transactionid                  590     218324.0   370040.7     8.7%
+  CPU*                            1046387      78747.1       75.3     3.2%
+  IO:WalSync                        46919      30222.2      644.1     1.2%
+  IO:BufFileWrite                  281985       3043.3       10.8     0.1%
+  IO:BufFileRead                   282040       1885.5        6.7     0.1%
+  IO:WalWrite                       46978       1762.7       37.5     0.1%
+  IO:DataFileWrite                  35152        825.7       23.5     0.0%
+  LWLock:WALWrite                    1186        661.1      557.4     0.0%
+  IO:DataFileRead                   16654        652.5       39.2     0.0%
+  IO:DataFileFlush                  26031        398.2       15.3     0.0%
+  Timeout:VacuumDelay                 101        232.0     2296.7      —
+
+  === Top Sessions ===
+
+      PID  DB Time(ms)    CPU%   Wait%  Top Wait            
+  ─────────────────────────────────────────────────────────────────────────
+  1171000    1412772.7    0.0%  100.0%  Lock:relation       
+  1171002     654688.5    0.0%  100.0%  Timeout:PgSleep     
+  1171010     218382.4    0.0%  100.0%  Lock:transactionid  
+  1171013     121138.9   20.1%   79.9%  Timeout:PgSleep     
+  1170992      21221.4   61.1%   38.9%  IO:WalSync          
+  1170990      21189.4   61.2%   38.8%  IO:WalSync          
+  1170991      21130.3   61.3%   38.7%  IO:WalSync          
+  1170989      21062.8   61.5%   38.5%  IO:WalSync          
+    22530       2016.7   46.0%   54.0%  IO:DataFileWrite    
+    22531        394.9   58.7%   41.3%  IO:DataFileWrite    
+    22533        344.3   40.1%   59.9%  IO:WalSync          
+  1171012        277.9   46.1%   53.9%  IO:WalSync          
+  1171001        236.0   39.4%   60.6%  IO:WalSync          
+  1203192         63.1   97.0%    3.0%  IO:WalSync          
+  1196996         57.5   96.7%    3.3%  IO:WalSync          
+
+  === Top Queries ===
+
+              query_id      Waits   Total (ms)     % DB  Top Wait            
+  ─────────────────────────────────────────────────────────────────────────
+  -2168435987477574922       1088    1412772.7    56.7%  Lock:relation       
+  -8886085649470066503        637     654688.5    26.3%  Timeout:PgSleep     
+  -8013378961575804280       1988     218442.4     8.8%  Lock:transactionid  
+  -1083471212722993583        161      70281.6     2.8%  Timeout:PgSleep     
+   6097083398544187049     196912      35843.1     1.4%  IO:WalSync          
+  -2095014956446912358    1128105      29193.4     1.2%  CPU*                
+  -3516437505845767255        161      21642.0     0.9%  Timeout:PgSleep     
+  -6796648778530205384      77812      14564.9     0.6%  CPU*                
+   3886912043147135675      45053       7949.4     0.3%  CPU*                
+  -1980831870093258527      44701       7706.6     0.3%  CPU*                
+   5409612748292285639      44396       7294.7     0.3%  CPU*                
+    286264995346867541      45146       6467.0     0.3%  CPU*                
+   4854991825702068830      41773       5208.5     0.2%  CPU*                
+   1833244227422168718         22         34.8     0.0%  CPU*                
+  -2261656709340334765        213         23.6     0.0%  CPU*                
+

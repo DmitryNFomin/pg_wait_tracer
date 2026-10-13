@@ -1,0 +1,25 @@
+$ SCAN_BIN=<mutant M6_no_crossing_detection> python3 test_wait_cpu_scan.py
+  ok   control_clean_is_reachable
+  ok   control_reports_per_event_max
+  FAIL crossing_detected: rc=0 crossings=[]
+  FAIL crossing_carries_full_identity: identity incomplete
+  ok   empty_dir_refuses
+  ok   missing_dir_refuses
+  ok   truncated_trace_refuses
+  ok   unreadable_trace_file_refuses
+  ok   record_census_equals_block_headers
+  ok   unknown_cpu_is_unmeasured_not_clean
+  ok   unknown_cpu_counted_not_zeroed
+  ok   absent_class_is_unmeasured_not_clean
+  ok   census_mismatch_refuses
+  ok   sample_census_mismatch_refuses
+  ok   no_expected_total_refuses
+  ok   disabled_coverage_check_refuses
+  ok   unresolvable_name_refuses
+  ok   marker_only_trace_refuses
+  ok   census_dependency_missing_fails_harness
+  ok   census_dependency_nonexec_fails_harness
+
+18 passed, 2 failed
+  - crossing_detected: rc=0 crossings=[]
+  - crossing_carries_full_identity: identity incomplete

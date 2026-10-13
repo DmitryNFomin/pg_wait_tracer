@@ -1,0 +1,1 @@
+f9033ac45970951afa395d75f9854cb596c34991e3a94c06939966a21d2bbdc3  /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a3906538351ab35ea/tests/results/demo_rehearsal/trace/current.trace
