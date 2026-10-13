@@ -1,0 +1,5 @@
+test_empty_window complete
+test_zero_fraction_records complete (8 individual cases + combined)
+test_nonempty_windows complete (9 nonempty snapshots)
+PASS: test_time_model_absence (0 failures)
+exit_status=0

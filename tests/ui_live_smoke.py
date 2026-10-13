@@ -86,13 +86,36 @@ import traceback
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ui_live_smoke_lib as lib
 
+PLAYWRIGHT_HINT = "ERROR: pip install playwright && playwright install chromium"
 try:
     from playwright.sync_api import (sync_playwright, TimeoutError as PWTimeoutError,
                                      Error as PWError)
 except ImportError:
-    print("ERROR: pip install playwright && playwright install chromium",
-          file=sys.stderr)
-    sys.exit(1)
+    # issue #221 (tests/test_unit_import_guard.py): a module a LISTED unit test
+    # imports must be importable with Playwright unavailable. This used to
+    # sys.exit(1) at import time, which made any importer un-unit-testable --
+    # tests/demo_rehearsal.py, and through it tests/test_demo_rehearsal_diag.py.
+    # Nothing is silently degraded: the single place that opens a browser calls
+    # _require_playwright() below and refuses with the same message, and the
+    # placeholder exception classes are never raised by anything, so an
+    # `except PWTimeoutError` simply cannot match in a build without the
+    # package -- where no browser code runs in the first place.
+    sync_playwright = None
+
+    class PWTimeoutError(Exception):
+        pass
+
+    class PWError(Exception):
+        pass
+
+
+def _require_playwright():
+    """Refuse, loudly and at the point of use, when a browser is needed and
+    Playwright is not installed. Never a skip: a live walk that cannot start
+    is a failure, not a pass."""
+    if sync_playwright is None:
+        print(PLAYWRIGHT_HINT, file=sys.stderr)
+        sys.exit(1)
 
 RESULTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                            "results", "ui_live")
@@ -769,6 +792,98 @@ def _atomic_panel_snapshot(page, tab_id):
     return page.evaluate(_ATOMIC_PANEL_SNAPSHOT_JS, _PANEL_ELEMENT_SELECTOR[tab_id])
 
 
+# ── per-frame DATA probe (issue #384, --diag-data only) ──────────────────────
+#
+# The blink sweep measures PIXELS. When a pair diverges it cannot say
+# whether the chart's own data moved between the two frames or the UI
+# flashed with identical data, because nothing recorded the data. This reads
+# it straight off the rendered chart -- window.echarts' instance for the
+# panel, its CURRENT option's series values -- so it is what the frame was
+# painting, not a re-fetch (a re-fetch answers a different question: what
+# the server would say now).
+#
+# OFF the gating path, by the #266 precedent (read_end_clock): called only
+# when --diag-data was passed, so a gating tick pays exactly the round trips
+# it paid before.
+#
+# Refuses rather than guesses: a missing panel, a missing window.echarts, no
+# instance (a non-chart tab, or a disposed chart), a throw, or a series
+# larger than DATA_PROBE_CELL_CAP all come back as {"error": ...} /
+# {"truncated": true} and ui_live_smoke_lib.data_snapshot_ok turns them into
+# a REFUSAL. Nothing here may be read as "no data, therefore unchanged".
+DATA_PROBE_CELL_CAP = 60000
+
+_DATA_PROBE_JS = """([sel, cap]) => {
+    const atMs = Date.now();
+    const out = {at_ms: atMs, selector: sel};
+    try {
+        const host = document.querySelector(sel);
+        if (!host) { out.error = 'panel element ' + sel + ' not in the DOM'; return out; }
+        const ec = window.echarts;
+        if (!ec || typeof ec.getInstanceByDom !== 'function') {
+            out.error = 'window.echarts.getInstanceByDom is missing'; return out;
+        }
+        let inst = ec.getInstanceByDom(host);
+        if (!inst) {
+            for (const k of host.querySelectorAll('div')) {
+                const i2 = ec.getInstanceByDom(k);
+                if (i2) { inst = i2; break; }
+            }
+        }
+        if (!inst) {
+            out.error = 'no ECharts instance on ' + sel + ' or its descendants '
+                      + '(non-chart panel, or the chart is disposed)';
+            return out;
+        }
+        const opt = inst.getOption();
+        const series = (opt && opt.series) || [];
+        const cells = [];
+        const names = [];
+        let truncated = false;
+        const push = (v) => { cells.push(typeof v === 'number' ? v : NaN); };
+        for (const s of series) {
+            names.push((s.type || '?') + ':' + (s.name == null ? '' : s.name));
+            for (const d of (s.data || [])) {
+                if (cells.length >= cap) { truncated = true; break; }
+                if (Array.isArray(d)) { for (const v of d) push(v); }
+                else if (typeof d === 'number') { push(d); }
+                else if (d && typeof d === 'object' && Array.isArray(d.value)) {
+                    for (const v of d.value) push(v);
+                } else if (d && typeof d === 'object') { push(d.value); }
+                else { push(NaN); }
+            }
+            if (truncated) break;
+        }
+        out.series_count = series.length;
+        out.series_names = names;
+        out.cell_count = cells.length;
+        out.truncated = truncated;
+        out.cells = cells;
+        out.read_ms = Date.now() - atMs;
+        return out;
+    } catch (e) {
+        out.error = 'probe threw: ' + (e && e.message ? e.message : String(e));
+        return out;
+    }
+}"""
+
+
+def _panel_data_probe(page, tab_id):
+    """One read of what the panel's chart is CURRENTLY rendering, plus the
+    page's own Date.now() at the read (the wall-clock anchor every frame
+    needs to be ordered against workload events in a single clock).
+
+    Never raises: a Playwright-level failure is returned as an {"error":
+    ...} snapshot so the diagnostic keeps a record of the refusal instead of
+    aborting the tick it was only observing. ui_live_smoke_lib.
+    data_snapshot_ok is what decides whether the record is usable."""
+    try:
+        return page.evaluate(_DATA_PROBE_JS,
+                             [_PANEL_ELEMENT_SELECTOR[tab_id], DATA_PROBE_CELL_CAP])
+    except Exception as e:
+        return {"at_ms": None, "error": f"probe call failed: {e}"}
+
+
 class _BlinkInjector:
     """issue #266: sequences the self-test's synthetic overlay against the
     sweep's own frame loop instead of against the wall clock.
@@ -1051,7 +1166,7 @@ def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
             blink_threshold, viewport=None, device_scale_factor=None,
             inject_blink_ms=None, inject_tick=None,
             inject_blink_frac=DEFAULT_INJECT_BLINK_FRAC,
-            inject_frame_index=lib.INJECT_FRAME_INDEX):
+            inject_frame_index=lib.INJECT_FRAME_INDEX, diag_data=False):
     """inject_blink_ms/inject_tick (issue #252 self-test, off by default --
     None/None, the value every real gating caller -- tests/ui_live_smoke.sh,
     demo_rehearsal.py -- passes, so this is a strict addition with no effect
@@ -1145,6 +1260,12 @@ def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
     req_dsf = device_scale_factor if device_scale_factor is not None else 1
     tab_dir = os.path.join(out_dir, tab_id)
     os.makedirs(tab_dir, exist_ok=True)
+    # issue #384: per-frame diagnostic artifacts (one PNG per COMPARED frame
+    # + one JSON per tick). Created only on a --diag-data run, so a gating
+    # run's artifact tree is byte-for-byte what it was.
+    diag_dir = os.path.join(tab_dir, "diag")
+    if diag_data:
+        os.makedirs(diag_dir, exist_ok=True)
     context = browser.new_context(
         viewport={"width": req_width, "height": req_height},
         device_scale_factor=req_dsf,
@@ -1260,6 +1381,12 @@ def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
         # why. Empty for every other tab; never read by build_tab_result's
         # `ok` computation.
         pre_mount_diagnostics = []
+        # issue #384 (--diag-data only): one entry per tick, each with every
+        # frame's bracketing data probes, its page-clock capture window and
+        # its own PNG, plus lib.sweep_data_pair_reports' per-pair verdict.
+        # Empty on every gating run; written to <tab_dir>/diag/ and never
+        # read by build_tab_result.
+        diag_ticks = []
         render_ok, render_detail = False, "never checked"
         for i in range(1, ticks + 1):
             if not _wait_for_tick(page, tick_baseline + i, TICK_TIMEOUT_S):
@@ -1430,20 +1557,52 @@ def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
             # instead of by margin. Only recorded on a self-test tick;
             # [] on every gating tick, which pays no extra round trip.
             sweep_frame_windows_ms = []
+            # issue #384 (--diag-data only): one record per frame.
+            diag_frames = []
             for frame_index, offset in enumerate(sweep_offsets):
                 if injector is not None:
                     injector.before_frame(frame_index)
+                # issue #384: the data probe BRACKETS the capture call -- one
+                # read before it, one after -- because a screenshot's raster
+                # instant lies somewhere inside the call. Program order plus
+                # CDP's own ordering is what makes that a bracket, the same
+                # argument #266 makes for read_end_clock; only when both
+                # reads agree is the frame's data certified (see
+                # lib.frame_data_certified). Both reads are skipped entirely
+                # unless --diag-data asked for them.
+                probe_before = _panel_data_probe(page, tab_id) if diag_data else None
                 frame, achieved, capture_ms, end_clock_ms = _capture_at_offset(
                     page, tab_id, mount_at_ms, offset, sweep_clip,
-                    read_end_clock=injector is not None)
+                    read_end_clock=injector is not None or diag_data)
+                probe_after = _panel_data_probe(page, tab_id) if diag_data else None
                 if injector is not None:
                     injector.after_frame(frame_index)
                 sweep_raw_frames.append(frame)
                 sweep_achieved_ms.append(achieved)
                 sweep_capture_ms.append(capture_ms)
-                sweep_frame_windows_ms.append(
-                    None if frame is None or end_clock_ms is None else
-                    (mount_at_ms + achieved, end_clock_ms))
+                window = (None if frame is None or end_clock_ms is None else
+                          (mount_at_ms + achieved, end_clock_ms))
+                sweep_frame_windows_ms.append(window)
+                if diag_data:
+                    # Every COMPARED frame keeps its own PNG, not just the
+                    # tick's first one: a pair verdict is unusable without
+                    # both images of the pair it is about.
+                    frame_png = None
+                    if frame is not None:
+                        frame_png = os.path.join(
+                            diag_dir, f"tick-{i}-frame-{frame_index}.png")
+                        with open(frame_png, "wb") as fh:
+                            fh.write(frame)
+                    diag_frames.append({
+                        "frame_index": frame_index,
+                        "target_offset_ms": offset,
+                        "achieved_ms": achieved,
+                        "capture_ms": capture_ms,
+                        "window_ms": window,
+                        "png": frame_png,
+                        "probe_before": probe_before,
+                        "probe_after": probe_after,
+                    })
             after_sweep = _view_mount(page)
             seq_after_sweep = after_sweep["seq"] if after_sweep is not None else None
 
@@ -1514,6 +1673,39 @@ def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
                     "caught": caught,
                 }
 
+            if diag_data:
+                pair_ratios_diag = [r for r, _n in
+                                    lib.sweep_consecutive_diff_ratios(sweep_arrays)]
+                diag_rec = {
+                    "tick": i,
+                    "tab": tab_id,
+                    "mount_seq": mount["seq"],
+                    "mount_at_ms": mount_at_ms,
+                    "tick_ts_ms": tick_ts_ms,
+                    "seq_before_sweep": seq_before_sweep,
+                    "seq_after_sweep": seq_after_sweep,
+                    "sweep_ratio": ratio,
+                    "sweep_note": blink_note,
+                    "frames": diag_frames,
+                    "pairs": lib.sweep_data_pair_reports(
+                        diag_frames, pair_ratios_diag,
+                        threshold=blink_threshold),
+                }
+                diag_ticks.append({k: v for k, v in diag_rec.items()
+                                   if k != "frames"})
+                with open(os.path.join(diag_dir, f"tick-{i}.json"), "w") as fh:
+                    json.dump(diag_rec, fh, indent=1, sort_keys=True)
+                    fh.write("\n")
+                for pr in diag_rec["pairs"]:
+                    print(f"  diag [{tab_id}] tick {i} pair {pr['pair_index']} "
+                          f"({pr['frame_a_achieved_ms']:.0f}->"
+                          f"{pr['frame_b_achieved_ms']:.0f}ms): "
+                          f"ratio={pr['image_ratio']} "
+                          f"verdict={pr['verdict']} "
+                          f"data={pr['data'].get('reason') or ''}"
+                          f"cells_differing={pr['data'].get('cells_differing')} "
+                          f"sum {pr['data'].get('sum_a')}->{pr['data'].get('sum_b')}")
+
             blink_sweep_ticks.append(
                 lib.build_sweep_tick_record(sweep_achieved_ms, sweep_arrays,
                                             target_offsets_ms=sweep_offsets,
@@ -1570,6 +1762,8 @@ def run_tab(browser, tab_id, url, out_dir, ticks, first_data_timeout,
             blink_not_measured=blink_not_measured,
             pre_mount_diagnostics=pre_mount_diagnostics,
             ttfp_ms=ttfp_ms)
+        if diag_data:
+            result["diag_data"] = diag_ticks
         if self_test_result is not None:
             result["self_test"] = self_test_result
     except SmokeFailure as e:
@@ -1677,6 +1871,29 @@ def main():
                     "panel, frac=1.0, only proves a GROSS blink is caught, "
                     "1000x over BLINK_THRESHOLD); ignored unless "
                     "--inject-blink-ms is set")
+    # issue #384 -- the blink-sweep DATA diagnostic. Two flags, both
+    # strictly additive and both OFF for every gating caller
+    # (tests/ui_live_smoke.sh, demo_rehearsal.py pass neither):
+    #
+    #   --diag-data: bracket every sweep frame with a read of what the
+    #     panel's chart is actually rendering (_panel_data_probe), keep EVERY
+    #     compared frame's PNG, and write <tab>/diag/tick-N.json with
+    #     lib.sweep_data_pair_reports' per-pair verdict. This is what makes
+    #     "did the data change between these two frames?" answerable at all;
+    #     without it the harness kept one PNG per tick and no data.
+    #   --tabs: walk only the named tabs. The histogram divergence is in the
+    #     "late" phase, so it needs ~12 ticks -- on ONE tab, not on eleven.
+    #     Guarded by lib.diag_out_dir_ok: a tab subset may not write the
+    #     GATING results dir, because write_summary's `ok` is computed over
+    #     whatever tabs are present and tests/run_all.sh reads that file.
+    ap.add_argument("--diag-data", action="store_true",
+                    help="diagnostic: record each sweep frame's underlying "
+                         "chart data (bracketing probes), its page-clock "
+                         "window and its own PNG; off by default, costs two "
+                         "extra round trips per frame")
+    ap.add_argument("--tabs", default=None,
+                    help="diagnostic: comma-separated subset of tabs to walk "
+                         "(requires a non-gating --out-dir)")
     ap.add_argument("--viewport-width", type=int, default=DEMO_VIEWPORT_WIDTH,
                     help="issue #252: this CI-tier walk now defaults to the "
                     "SAME viewport demo_rehearsal.py pins, so a PR gate "
@@ -1702,6 +1919,20 @@ def main():
         url = args.url
 
     out_dir = args.out_dir or (MOCK_RESULTS_DIR if args.mock else RESULTS_DIR)
+
+    # issue #384: validated BEFORE reset_output_dir() deletes anything -- a
+    # refused invocation must not have already wiped the gating directory it
+    # was being refused permission to write.
+    only_tabs = [t.strip() for t in args.tabs.split(",") if t.strip()] if args.tabs else []
+    unknown = [t for t in only_tabs if t not in lib.TABS]
+    if unknown:
+        print(f"--tabs names unknown tab(s) {unknown}; known: {list(lib.TABS)}",
+              file=sys.stderr)
+        return 2
+    ok_dir, why_dir = lib.diag_out_dir_ok(only_tabs, out_dir, RESULTS_DIR)
+    if not ok_dir:
+        print(why_dir, file=sys.stderr)
+        return 2
 
     # Every artifact under out_dir must belong to THIS run -- delete and
     # recreate it fresh before any tab runs, so a stale tick-N.png from an
@@ -1735,6 +1966,9 @@ def main():
     # walked in full there.
     tabs_to_walk = ([args.inject_tab] if args.inject_blink_ms is not None
                     else lib.TABS)
+    if only_tabs:
+        tabs_to_walk = only_tabs
+    _require_playwright()
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch()
@@ -1754,7 +1988,8 @@ def main():
                                      inject_tick=(args.inject_tick
                                                   if inject_here else None),
                                      inject_blink_frac=args.inject_blink_frac,
-                                     inject_frame_index=args.inject_frame)
+                                     inject_frame_index=args.inject_frame,
+                                     diag_data=args.diag_data)
                     results.append(result)
                     _assert_workload_alive(args.pgbench_pid, args.workload_pid,
                                            f"after tab {tab_id!r}")
@@ -1796,6 +2031,23 @@ def main():
         with open(summary_path, "w") as f:
             json.dump(summary, f, indent=2, sort_keys=True)
             f.write("\n")
+
+    # issue #384: roll every tick's per-pair reports into the one sentence
+    # the investigation needs. Reporting only -- summary["ok"] is untouched,
+    # and main()'s exit code below never reads it.
+    if args.diag_data:
+        all_pairs = []
+        for tab_id in tabs_to_walk:
+            for tick in ((summary["tabs"].get(tab_id) or {}).get("diag_data") or []):
+                all_pairs.extend(tick.get("pairs") or [])
+        diag_v, diag_detail = lib.diag_verdict(all_pairs)
+        summary["diag_verdict"] = {"verdict": diag_v, "detail": diag_detail,
+                                   "pairs_examined": len(all_pairs)}
+        with open(summary_path, "w") as f:
+            json.dump(summary, f, indent=2, sort_keys=True)
+            f.write("\n")
+        print(f"  DIAG VERDICT: {diag_v} -- {diag_detail} "
+              f"({len(all_pairs)} pairs examined)")
 
     print()
     print("════════════════════════════════════════")

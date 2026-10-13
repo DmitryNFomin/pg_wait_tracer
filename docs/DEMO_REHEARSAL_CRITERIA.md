@@ -586,6 +586,74 @@ implementation, so it cannot separate a defect from a change of mix.
   of DB Time — 0.018%** (746.5 / 4170804.2 × 100). This predates the
   2026-10-07 load addition; it does not calibrate the current workload.
 
+- **Instrument added 2026-10-13 (issue #386), bound deliberately NOT
+  changed by it.** Two rehearsal windows failed the then-current 10% cap at
+  **10.04%** and **11.48%**, and the stated cause — "contention from the 2026-10-07 load
+  increase" — was an *inference*, never a measurement: run-queue delay and
+  uninstrumented in-execution blocking (major faults, writeback) produce
+  the identical residual, and the failing run's trace had already been
+  deleted. The rehearsal now measures the run-queue component
+  **independently of our own instrumentation**: per-PG-backend
+  `/proc/<pid>/schedstat` **field 2** (`run_delay` — cumulative ns a task
+  spent runnable but not on a CPU), sampled every 5 s across the capture
+  and differenced over the *same* window each `offcpu_cap` sample uses, so
+  each window records three figures — `offcpu_ms`, `run_delay_ms`, and the
+  **unexplained remainder** `offcpu_ms − run_delay_ms` — plus the daemon's
+  own `%CPU` and the box's load/run-queue length (an adviser's point: a
+  "regime step" part-way into a long capture could be the *observer*
+  getting heavier as the trace grows rather than the workload getting
+  contended; those two series separate the cases).
+  **How the remainder may be read (the asymmetry is the point).**
+  Σ`run_delay` over the backends is an **upper bound** on the run-queue
+  share that could be *inside* Off-CPU\*, not an exact match: the kernel
+  counter also accrues while a backend is idle, in `ClientRead`, or already
+  inside another wait event, and none of that time is in Off-CPU\* (same
+  distinction this section's point 3 already draws). So a **positive**
+  unexplained remainder is the strong reading — even the upper bound of
+  run-queue delay fails to cover the residual, so an instrumentation gap
+  must account for the difference — while a **non-positive** one only says
+  run-queue delay *could* explain it. A bound belongs on the positive
+  direction. The remainder is therefore reported signed, never clamped at
+  0: clamping would erase the very overlap that tells a reader which of the
+  two readings they are in.
+  `tests/demo_rehearsal_lib.py` gained no check and no changed tolerance
+  from this instrument (it was written while `OFFCPU_CAP_PCT` was still
+  10.0; the cap itself was removed by the "reported, not gated" bullet
+  below, which this instrument neither anticipated nor depends on — it
+  measures `run_delay` whether or not anything gates on the residual).
+  **The bound on the unexplained
+  remainder is not registered here**, because registering a bound in the
+  same change that first measures it is exactly what this document exists
+  to prevent — it gets its own reviewed commit once the distribution over a
+  full run is known. Why it is the bound worth having: the unexplained
+  remainder is workload-independent, so unlike a percentage-of-DB-Time cap
+  it would survive a load change, whereas the 10% cap that used to sit here
+  was in part a proxy for how contended the box happened to be — one of the
+  reasons it was removed rather than retuned.
+  **Blind spot, stated:** `run_delay` only accumulates when
+  `kernel.sched_schedstats` is 1, and it is **0 by default on both gate
+  boxes** (measured 2026-10-13). `tests/demo_rehearsal.sh` now enables it
+  for the duration of a run and restores it at teardown; when it cannot,
+  every window records an explicit **refusal** instead of a 0 —
+  a 0 there would credit the whole residual to "unexplained" with no
+  evidence at all (`tests/schedstat_lib.py`, bypass suite in
+  `tests/test_schedstat_lib.py`). That sysctl is **global**, so two runs on
+  one box can reset it under each other; the result is refusals, not wrong
+  numbers, and the lock is the remedy.
+  **Second blind spot, now closed by measurement:** those refusal paths
+  detect *blindness*, never a counter that is readable but **stuck** — a
+  wrong field offset or a wrong backend enumeration would produce a
+  plausible Σ`run_delay` with no refusal at all. So the reading's
+  responsiveness was measured directly, once, on gate-2
+  (`tests/schedstat_contention_check.sh`, artifacts and verdict in
+  `tests/results/schedstat_contention/`, 2026-10-13, nproc=4, 10 s per leg):
+  schedstats=0 **refused** (rc=2, `run_delay_ms` null, not 0 ms); four
+  sleeping children read **0.0 ms**; sixteen spinning children on four vCPUs
+  read **111,775.654 ms** — a **111,776×** spread no stuck counter can
+  produce. This establishes responsiveness and sign, **not accuracy against
+  an independent oracle**, which is a further reason the decomposition stays
+  reporting-only and no bound on the unexplained remainder is registered.
+
 - **Off-CPU\* is reported, not gated (replacement for #386, 2026-10-13).**
   `evaluate_time_model_window` now retains an `offcpu` diagnostic containing
   physical `offcpu_ms`, `db_time_ms`, and percentage, with `ok: null` and

@@ -1,0 +1,4 @@
+pgwt-server: loaded event names from wait_event_names.json
+pgwt-server: 1 trace files, 10 CPUs, ~4308992 events
+pgwt-server: loaded 20 query texts
+pgwt-server: loaded 103 backend metadata entries

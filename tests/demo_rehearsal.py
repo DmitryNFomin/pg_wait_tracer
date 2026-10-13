@@ -28,6 +28,18 @@ workload first, exactly like tests/ui_live_smoke.sh does (issue #157:
 shell scripts share tests/live_daemon_lib.sh and
 tests/live_loop_workload.py for that setup).
 
+Issue #386 adds one more thing, and it is DELIBERATELY NOT A CHECK: the
+Off-CPU* residual's decomposition. For every in-capture conservation
+sample this now also records, for the SAME window, the kernel's own
+Sigma run_delay (per-backend /proc/<pid>/schedstat field 2 deltas, via
+tests/schedstat_probe.py), the unexplained remainder Off-CPU* -
+Sigma run_delay, the daemon's own %CPU, and the box's load/run-queue
+length. Nothing gates on any of it (the bound gets registered by a
+separate, reviewed commit once its distribution is known) -- it is written
+to <out_dir>/offcpu_decomposition.jsonl as it goes, and into summary.json
+under "offcpu_decomposition", so a reader sees the decomposition instead
+of a verdict.
+
 Usage:
     python3 tests/demo_rehearsal.py --url http://localhost:8384/ \\
         --trace-dir /tmp/pgwt_demo_XXXXXX --daemon-log /tmp/daemon.log \\
@@ -46,9 +58,15 @@ import ui_live_smoke as live_smoke
 import ui_live_smoke_lib as lib
 import demo_rehearsal_lib as drlib
 import demo_workload_coverage as cov
+import schedstat_lib as sslib
+import schedstat_probe as sspr
 from server_harness import ServerHarness
 
-from playwright.sync_api import sync_playwright
+# Playwright is imported where the browser is actually opened, not here:
+# tests/test_demo_rehearsal_diag.py is a LISTED unit test that imports this
+# module, and tests/test_unit_import_guard.py (issue #221) requires every
+# listed test to import with Playwright unavailable. live_smoke already
+# refuses loudly at the point of use (live_smoke._require_playwright).
 
 RESULTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                            "results", "demo_rehearsal")
@@ -138,7 +156,7 @@ def _assert_daemon_alive(daemon_pid, where):
 
 def _run_passes(browser, url, out_dir, ticks, passes, first_data_timeout,
                 pgbench_pid, workload_pid, daemon_pid, t0,
-                viewport, device_scale_factor):
+                viewport, device_scale_factor, diag_data=False):
     pass_results = []
     sweep_coverage = []
     for name, target_offset_s in passes:
@@ -168,7 +186,8 @@ def _run_passes(browser, url, out_dir, ticks, passes, first_data_timeout,
                                         ticks, first_data_timeout,
                                         lib.BLINK_THRESHOLD,
                                         viewport=viewport,
-                                        device_scale_factor=device_scale_factor)
+                                        device_scale_factor=device_scale_factor,
+                                        diag_data=diag_data)
             tab_results[tab_id] = result
             live_smoke._assert_workload_alive(
                 pgbench_pid, workload_pid, f"pass {name!r} tab {tab_id!r}")
@@ -263,10 +282,17 @@ def _query_time_model_window(srv, from_ns, to_ns, label, gate_on_raw_path,
     result["fidelity"] = tm.get("fidelity")
     result["db_time_ms"] = db_time_ms
     result["observed_raw_path"] = used_raw_path
+    # issue #386: carried out so the caller can decompose the residual
+    # against an independently measured Sigma run_delay for the same
+    # window. Reporting only -- evaluate_time_model_window above has
+    # already decided `ok` and nothing below may change it.
+    result["offcpu_ms"] = tm.get("offcpu_ms")
+    result["has_measured_cpu"] = tm.get("has_measured_cpu", False)
     return result
 
 
-def _sample_recent_window(srv, offset_s):
+def _sample_recent_window(srv, offset_s, schedstat_sampler=None,
+                          decomp_path=None):
     """One in-capture conservation sample: query the RECENT_WINDOW_S
     trailing window (the only one that forces the raw/exact compute path,
     see demo_rehearsal_lib.RECENT_WINDOW_S) against pgwt-server's CURRENT
@@ -275,6 +301,9 @@ def _sample_recent_window(srv, offset_s):
     floors are stated against) the two extra floors."""
     try:
         info = srv.query("info", timeout=drlib.TIME_MODEL_QUERY_TIMEOUT_S)
+        # Read OUR clock right after the response so the two timestamps
+        # describe the same moment (schedstat_lib.clock_domain_ok).
+        wall_now_ns = time.time_ns()
     except Exception as e:
         return {"ok": False, "offset_s": offset_s, "detail": f"info query failed: {e!r}"}
     from_ns = int(info.get("from_ns", 0))
@@ -287,10 +316,18 @@ def _sample_recent_window(srv, offset_s):
     except Exception as e:
         return {"ok": False, "offset_s": offset_s, "detail": f"time_model query failed: {e!r}"}
     result["offset_s"] = offset_s
+    # issue #386, strictly additive: `ok` is already decided above and this
+    # only attaches a recorded measurement next to it.
+    if schedstat_sampler is not None:
+        result["offcpu_decomposition"] = sspr.record_window(
+            schedstat_sampler, recent_from_ns, to_ns,
+            result.get("offcpu_ms"), result.get("has_measured_cpu", False),
+            info.get("now_ns"), wall_now_ns, offset_s, decomp_path)
     return result
 
 
-def _conservation_sampler_loop(trace_dir, interval_s, stop_event, samples, t0):
+def _conservation_sampler_loop(trace_dir, interval_s, stop_event, samples, t0,
+                               schedstat_sampler=None, decomp_path=None):
     """Runs in a background thread for the whole duration of the walk,
     sampling the recent-window conservation gate every interval_s (owner
     finding, 2026-09-27: 'the audience watches the whole run, not the last
@@ -306,7 +343,8 @@ def _conservation_sampler_loop(trace_dir, interval_s, stop_event, samples, t0):
         offset_s = time.monotonic() - t0
         try:
             with ServerHarness(trace_dir) as srv:
-                result = _sample_recent_window(srv, offset_s)
+                result = _sample_recent_window(srv, offset_s,
+                                               schedstat_sampler, decomp_path)
         except Exception as e:
             result = {"ok": False, "offset_s": offset_s,
                       "detail": f"sampler iteration crashed: {e!r}"}
@@ -362,7 +400,11 @@ def _daemon_log_check(daemon_log_path):
             "degraded_warnings": degraded_warnings}
 
 
-def main():
+def build_arg_parser():
+    """The CLI surface, separated from main() so a unit test can assert what
+    the flags actually do without starting a browser (issue #384's
+    --diag-data has to be provably reachable from a rehearsal, not just
+    present in ui_live_smoke.py)."""
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--url", required=True, help="the Go bridge's page URL")
@@ -389,6 +431,15 @@ def main():
                     default=lib.FIRST_DATA_TIMEOUT_S)
     ap.add_argument("--pgbench-pid", type=int, default=None)
     ap.add_argument("--workload-pid", type=int, default=None)
+    ap.add_argument("--postmaster-pid", type=int, default=None,
+                    help="issue #386: the PostgreSQL postmaster's PID. Its "
+                    "direct children are the backends whose "
+                    "/proc/<pid>/schedstat field 2 (run_delay) is sampled "
+                    "through the capture, so the Off-CPU* residual can be "
+                    "decomposed against an INDEPENDENTLY measured "
+                    "runnable-but-not-running time. Omitted -> the "
+                    "decomposition is not attempted and the run says so "
+                    "(it never reports a 0 it did not measure)")
     ap.add_argument("--daemon-pid", type=int, default=None,
                     help="the pg_wait_tracer daemon's own PID (criteria doc "
                     "#157/§2 'the daemon process alive for the whole window')")
@@ -403,7 +454,19 @@ def main():
                     default=DEMO_DEVICE_SCALE_FACTOR,
                     help="issue #223: pinned device scale factor / effective "
                     f"zoom proxy (default {DEMO_DEVICE_SCALE_FACTOR})")
-    args = ap.parse_args()
+    ap.add_argument("--diag-data", action="store_true",
+                    help="issue #384: record WHAT THE CHART WAS RENDERING at "
+                    "each compared frame (ui_live_smoke.py's per-frame panel "
+                    "data probe) into <pass>/<tab>/diag/. Diagnostic only -- "
+                    "it adds round trips per tick and changes no verdict, so "
+                    "it is OFF for a counted attempt and exists so a blink "
+                    "seen during a rehearsal can be traced to the data "
+                    "behind the frame instead of being re-guessed")
+    return ap
+
+
+def main():
+    args = build_arg_parser().parse_args()
 
     duration_s = args.duration_min * 60.0
     ticks, passes = drlib.plan_passes(duration_s)
@@ -429,16 +492,50 @@ def main():
     conservation_samples = []
     sampler_stop = threading.Event()
 
+    # issue #386: the run_delay sampler. Started BEFORE the walk and left
+    # running for the whole capture at a 5 s cadence, so every 60 s
+    # Off-CPU* window the conservation sampler asks about is already
+    # bracketed by samples -- a window it cannot bracket REFUSES
+    # (schedstat_lib.MIN_WINDOW_COVERAGE_PCT) instead of being reported
+    # against a span it never covered. Reporting only; nothing gates on it.
+    decomp_path = os.path.join(out_dir, "offcpu_decomposition.jsonl")
+    schedstat_sampler = None
+    if args.postmaster_pid:
+        schedstat_sampler = sspr.SchedstatSampler(
+            args.postmaster_pid, daemon_pid=args.daemon_pid,
+            interval_s=sspr.DEFAULT_INTERVAL_S)
+        schedstat_sampler.start()
+        probe0 = schedstat_sampler.sample_once() or {}
+        print(f"demo_rehearsal: run_delay sampler started for postmaster "
+              f"{args.postmaster_pid} (every {sspr.DEFAULT_INTERVAL_S:.0f}s): "
+              f"schedstats_enabled={probe0.get('schedstats_enabled')!r} "
+              f"({probe0.get('schedstats_reason') or 'ok'}), "
+              f"backends_enumerated={probe0.get('backends_enumerated')}")
+        if probe0.get("schedstats_enabled") is not True:
+            # Loud, and deliberately NOT fatal: the rehearsal's own checks
+            # are unaffected. Every window then records a refusal carrying
+            # this reason instead of a 0 that would look measured.
+            print("demo_rehearsal: WARNING the kernel is not accumulating "
+                  "run_delay -- every Off-CPU* decomposition this run will "
+                  "REFUSE rather than report a 0 it did not measure. "
+                  "tests/demo_rehearsal.sh enables it via sysctl for the "
+                  "duration of the run; a run started by hand must too.")
+    else:
+        print("demo_rehearsal: --postmaster-pid not given -- no Off-CPU* "
+              "decomposition this run (issue #386)")
+
     t0 = time.monotonic()
     sampler_thread = threading.Thread(
         target=_conservation_sampler_loop,
         args=(args.trace_dir, sample_interval_s, sampler_stop,
-              conservation_samples, t0),
+              conservation_samples, t0, schedstat_sampler, decomp_path),
         daemon=True)
     sampler_thread.start()
     print(f"demo_rehearsal: conservation sampler started "
           f"(every {sample_interval_s:.0f}s through the capture)")
 
+    live_smoke._require_playwright()
+    from playwright.sync_api import sync_playwright
     with sync_playwright() as p:
         browser = p.chromium.launch()
         try:
@@ -448,7 +545,8 @@ def main():
                 args.workload_pid, args.daemon_pid, t0,
                 viewport={"width": args.viewport_width,
                           "height": args.viewport_height},
-                device_scale_factor=args.device_scale_factor)
+                device_scale_factor=args.device_scale_factor,
+                diag_data=args.diag_data)
         finally:
             browser.close()
 
@@ -552,7 +650,8 @@ def main():
         # One final sample right at the true end of the capture -- the
         # sampler thread's own last periodic sample can land up to
         # sample_interval_s early, so this always covers the tail.
-        final_sample = _sample_recent_window(srv, time.monotonic() - t0)
+        final_sample = _sample_recent_window(srv, time.monotonic() - t0,
+                                             schedstat_sampler, decomp_path)
         conservation_samples.append(final_sample)
 
         full_window_result = _query_time_model_window(
@@ -703,6 +802,25 @@ def main():
 
     extra_checks["daemon_log_clean"] = _daemon_log_check(args.daemon_log)
 
+    # issue #386: collected AFTER the end-of-capture window above has been
+    # decomposed, so the last window is in the series too.
+    offcpu_decomposition = [c["offcpu_decomposition"]
+                            for c in conservation_samples
+                            if isinstance(c, dict) and "offcpu_decomposition" in c]
+    if schedstat_sampler is not None:
+        schedstat_sampler.stop()
+        schedstat_sampler.join(timeout=sspr.DEFAULT_INTERVAL_S * 2 + 5)
+        if schedstat_sampler.errors:
+            print(f"demo_rehearsal: run_delay sampler recorded "
+                  f"{len(schedstat_sampler.errors)} error(s): "
+                  f"{schedstat_sampler.errors[:3]}")
+        measured = [d for d in offcpu_decomposition
+                    if not d["decomposition"]["refused"]]
+        print(f"demo_rehearsal: offcpu_decomposition: "
+              f"{len(measured)}/{len(offcpu_decomposition)} window(s) "
+              f"decomposed (the rest REFUSED -- see each window's reason); "
+              f"per-window records in {decomp_path}")
+
     summary = drlib.build_demo_summary(pass_results, extra_checks,
                                        expected_tabs_per_pass=len(lib.TABS))
     summary["duration_min"] = args.duration_min
@@ -718,6 +836,12 @@ def main():
     # Reporting only (owner finding, 2026-09-28) -- never gates `ok`. See
     # summarize_sweep_offset_coverage's own comment.
     summary["sweep_offset_coverage"] = sweep_coverage
+    # issue #386, REPORTING ONLY -- deliberately NOT in extra_checks (which
+    # build_demo_summary gates on unconditionally) and never folded into
+    # `ok`, the same pattern as sweep_offset_coverage above. The same
+    # per-window records are also appended to offcpu_decomposition.jsonl as
+    # the run goes, so a killed run keeps them.
+    summary["offcpu_decomposition"] = offcpu_decomposition
 
     summary_path = os.path.join(out_dir, "summary.json")
     with open(summary_path, "w") as f:

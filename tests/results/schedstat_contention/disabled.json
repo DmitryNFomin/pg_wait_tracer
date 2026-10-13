@@ -1,0 +1,105 @@
+{
+  "duration_s": 10.006750148,
+  "from_ns": 1791924453097396412,
+  "interval_s": 1.0,
+  "label": "disabled",
+  "load": {
+    "max_runnable": 9,
+    "mean_load1": 0.346,
+    "points": [
+      {
+        "load1": 0.0,
+        "load15": 0.97,
+        "load5": 0.11,
+        "runnable": 9,
+        "t_ns": 1791924453098113663,
+        "total_tasks": 221
+      },
+      {
+        "load1": 0.0,
+        "load15": 0.97,
+        "load5": 0.11,
+        "runnable": 5,
+        "t_ns": 1791924454107351872,
+        "total_tasks": 220
+      },
+      {
+        "load1": 0.32,
+        "load15": 0.99,
+        "load5": 0.17,
+        "runnable": 7,
+        "t_ns": 1791924455118067902,
+        "total_tasks": 221
+      },
+      {
+        "load1": 0.32,
+        "load15": 0.99,
+        "load5": 0.17,
+        "runnable": 5,
+        "t_ns": 1791924456130779743,
+        "total_tasks": 220
+      },
+      {
+        "load1": 0.32,
+        "load15": 0.99,
+        "load5": 0.17,
+        "runnable": 5,
+        "t_ns": 1791924457141383542,
+        "total_tasks": 220
+      },
+      {
+        "load1": 0.32,
+        "load15": 0.99,
+        "load5": 0.17,
+        "runnable": 5,
+        "t_ns": 1791924458152060629,
+        "total_tasks": 220
+      },
+      {
+        "load1": 0.32,
+        "load15": 0.99,
+        "load5": 0.17,
+        "runnable": 5,
+        "t_ns": 1791924459159635898,
+        "total_tasks": 220
+      },
+      {
+        "load1": 0.62,
+        "load15": 1.0,
+        "load5": 0.24,
+        "runnable": 5,
+        "t_ns": 1791924460175060809,
+        "total_tasks": 220
+      },
+      {
+        "load1": 0.62,
+        "load15": 1.0,
+        "load5": 0.24,
+        "runnable": 5,
+        "t_ns": 1791924461186348695,
+        "total_tasks": 220
+      },
+      {
+        "load1": 0.62,
+        "load15": 1.0,
+        "load5": 0.24,
+        "runnable": 5,
+        "t_ns": 1791924462195510378,
+        "total_tasks": 220
+      }
+    ],
+    "reason": null
+  },
+  "parent_pid": 2792835,
+  "run_delay": {
+    "reason": "schedstats not enabled for the whole window: kernel.sched_schedstats=0 -- the kernel is not accumulating run_delay, so every /proc/<pid>/schedstat field 2 is pinned at 0; enable with `sysctl -w kernel.sched_schedstats=1`",
+    "refused": true,
+    "run_delay_ms": null,
+    "schedstats_states": [
+      "False"
+    ]
+  },
+  "sampler_errors": [],
+  "samples": 10,
+  "to_ns": 1791924463104146560
+}
