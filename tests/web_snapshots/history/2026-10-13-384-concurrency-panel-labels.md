@@ -91,9 +91,11 @@ something else is changing row height.
 
 ## No #122 neighbour drift, and the check behind that claim
 
-A full 47-cell compare of this regeneration's artifact against the committed
-tree shows **exactly ten** cells differing: the three above, and the seven
-of **#263**. Nothing else moved, so the +26 px cell re-wrapped nothing.
+A full 47-cell compare of this regeneration's artifact against the tree as it
+stood **before** this commit shows **exactly ten** cells differing: the three
+above, and the seven of **#263**. Nothing else moved, so the +26 px cell
+re-wrapped nothing. (Against the tree *after* this commit the same compare
+shows seven, the three adopted cells now being identical to the artifact.)
 
 Consistent with the mechanism being gone rather than merely quiet: #122's
 follow-up gave each gallery cell its own `?isolate=<cellId>` page, so a
@@ -103,11 +105,18 @@ are not gallery cells at all.
 
 ## Seven cells untouched — still #263, measured not assumed
 
-The same seven cells the #222 entry flagged, with the **same 68x8 px
-rectangle** — the "4 CPUs" overlay chip — and the same counts, so this is
-#263's pre-#213 staleness carried forward, not new drift:
+The same seven cells the #222 entry flagged, differing in the **same 68x8 px
+rectangle** — the "4 CPUs" overlay chip — at the **same bounding boxes that
+entry tabulated**, so this is #263's pre-#213 staleness carried forward, not
+new drift.
 
-| cell | differing px | bbox | own gate |
+The pixel *counts* below are not #222's numbers and must not be read as
+matching them: #222 counted any non-zero difference (300/321), these count at
+a per-channel threshold of >2 (298/318). Same pixel set, two thresholds — the
+two or three pixels between them are differences of 1 or 2 levels. Compared
+cell by cell:
+
+| cell | differing px (>2/channel) | bbox | own gate |
 |---|---|---|---|
 | `aas_chart_overview` | 298 | (1164,88)-(1232,95) | 0.02 |
 | `fidelity_sampled_shading` | 298 | (1164,88)-(1232,95) | 0.02 |
