@@ -336,7 +336,10 @@ def main():
               f"rc={rc} refusals={data and data['refusals']}")
 
         # --- bypass 10: the census dependency cannot run (126/127) ----------
-        # run_evidence.sh must fail, never fall back to a coverage-free scan.
+        # wait_cpu_run_evidence.sh must fail, never fall back to a
+        # coverage-free scan. It lives in tests/, not in the evidence dir:
+        # box-check excludes tests/results from its rsync, so these two
+        # cases exited 127 on the gate box while it sat there.
         for code, mode in ((127, "missing"), (126, "nonexec")):
             fake = tempfile.mkdtemp(dir=tmp)
             binsdir = os.path.join(fake, "bin")
@@ -350,7 +353,7 @@ def main():
             trace, _ = fixture(tmp, f"{PGSLEEP}:5:3000000000:30000,"
                                     f"{RELATION}:4:200000000:25000")
             proc = subprocess.run(
-                ["bash", os.path.join(EVIDENCE, "run_evidence.sh"), trace,
+                ["bash", os.path.join(HERE, "wait_cpu_run_evidence.sh"), trace,
                  os.path.join(fake, "out")],
                 capture_output=True, text=True,
                 env={**os.environ, "PGWT_SCAN_BIN_DIR": binsdir,

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Reproduce the raw per-class wait-CPU scan (criteria item 2.5).
 #
-#   bash tests/results/issue25-perclass-raw-scan/run_evidence.sh TRACE_DIR [OUT_DIR]
+#   bash tests/wait_cpu_run_evidence.sh TRACE_DIR [OUT_DIR]
 #
 # Exit status is the scanner's: 0 CLEAN, 2 REFUSED, 3 CROSSING, 4 UNMEASURED.
 # The independent record census comes from `pgwt-server --dump`; if that
@@ -9,18 +9,39 @@
 # line cannot be parsed, this script FAILS. It never falls back to running the
 # scan with the completeness check switched off — a dependency that cannot be
 # executed is exactly how a coverage gate ends up approving without looking.
+#
+# LIVES IN tests/, NOT IN tests/results/: box-check.sh's up-rsync excludes
+# `tests/results` (scripts/box-check.sh), so while this script sat in the
+# evidence directory it did not exist on the gate box at all -- and the two
+# cases of tests/test_wait_cpu_scan.py that drive it failed there with exit
+# 127, "No such file or directory". That is the broken-invocation failure
+# CLAUDE.md calls out, not the 126/127 census behaviour those cases exist to
+# prove. The evidence directory holds artifacts; a script a registered test
+# depends on has to ship with the tree.
 set -uo pipefail
-ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
-HERE="$ROOT/tests/results/issue25-perclass-raw-scan"
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# Artifacts and the prebuilt binaries still default into the evidence dir;
+# only this script moved.
+EVIDENCE="$ROOT/tests/results/issue25-perclass-raw-scan"
 TRACE="${1:?provide the retained trace directory}"
-OUT="${2:-$HERE}"
-BIN="${PGWT_SCAN_BIN_DIR:-$HERE/bin}"
+OUT="${2:-$EVIDENCE}"
+BIN="${PGWT_SCAN_BIN_DIR:-$EVIDENCE/bin}"
 THRESHOLD_NS="${THRESHOLD_NS:-824430}"   # 10x the measured sleep-class p99
 PURE_SLEEP="${PURE_SLEEP:-Timeout:PgSleep,Lock:relation,Lock:advisory}"
 mkdir -p "$OUT"
 
 if [[ "${PGWT_SKIP_BUILD:-0}" != 1 ]]; then
-    bash "$HERE/build.sh" "$BIN" > "$OUT/build.log" 2>&1 || {
+    # Refuse clearly rather than reporting a build failure that is really an
+    # absent builder: the evidence dir is not synced to the gate box, so a
+    # build has to be asked for where it can actually happen.
+    if [[ ! -r "$EVIDENCE/build.sh" ]]; then
+        echo "cannot build: $EVIDENCE/build.sh is not present (tests/results is" >&2
+        echo "excluded from box-check's rsync). Pass PGWT_SKIP_BUILD=1 with" >&2
+        echo "PGWT_SCAN_BIN_DIR pointing at prebuilt binaries, or run this" >&2
+        echo "from a full checkout." >&2
+        exit 2
+    fi
+    bash "$EVIDENCE/build.sh" "$BIN" > "$OUT/build.log" 2>&1 || {
         echo "build failed; see $OUT/build.log" >&2; exit 2; }
 fi
 
