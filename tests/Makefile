@@ -22,6 +22,7 @@ TESTS     = test_wait_event test_cmdline test_backend_lifecycle test_spawn test_
             test_replay_fidelity test_durability test_query_text \
             test_golden_fixture test_live_accum test_window_clip \
             test_executions_attribution \
+            test_execution_pid_index \
             test_top_queries_percentile \
             test_event_sort \
             test_top_queries_context \
@@ -535,6 +536,15 @@ test_exec_index: test_exec_index.c ../src/exec_index.c ../src/compute.c \
                    $(BUILD)/wait_event.o $(BUILD)/idle_rule.o \
                    $(BUILD)/spawn.o $(BUILD)/cJSON.o
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -lm
+
+# #356: byte-exact differential against the frozen linear PID scan, plus
+# direct assertions on the production helper's map and allocation refusal.
+test_execution_pid_index: test_execution_pid_index.c executions_linear_oracle.h \
+                         ../src/compute.c ../src/pid_index.h ../src/test_alloc_fail.h \
+                         $(BUILD)/wait_event.o $(BUILD)/idle_rule.o \
+                         $(BUILD)/spawn.o $(BUILD)/cJSON.o
+	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $< \
+	      $(BUILD)/wait_event.o $(BUILD)/idle_rule.o $(BUILD)/spawn.o $(BUILD)/cJSON.o -lm
 
 # test_block_agg: paint-latency Phase 1 — the per-committed-block transition
 # aggregate (src/block_agg.c). The oracle is the SHIPPING raw implementation,

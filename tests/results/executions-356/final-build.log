@@ -1,0 +1,169 @@
+make: Entering directory '/root/cx-executions-356/final'
+  VMLINUX  include/vmlinux.h
+  CC       build/server_server.o (server)
+  CC       build/server_compute.o (server)
+  CC       build/server_block_agg.o (server)
+In file included from src/block_agg.c:10:
+src/compute.h:65:20: warning: ‘pgwt_cat_names’ defined but not used [-Wunused-variable]
+   65 | static const char *pgwt_cat_names[PGWT_NUM_CATS] = {
+      |                    ^~~~~~~~~~~~~~
+src/compute.h:37:20: warning: ‘pgwt_class_display’ defined but not used [-Wunused-variable]
+   37 | static const char *pgwt_class_display[PGWT_NUM_CLASSES] = {
+      |                    ^~~~~~~~~~~~~~~~~~
+src/compute.h:31:20: warning: ‘pgwt_class_names’ defined but not used [-Wunused-variable]
+   31 | static const char *pgwt_class_names[PGWT_NUM_CLASSES] = {
+      |                    ^~~~~~~~~~~~~~~~
+In file included from src/server.c:10:
+src/compute.h:37:20: warning: ‘pgwt_class_display’ defined but not used [-Wunused-variable]
+   37 | static const char *pgwt_class_display[PGWT_NUM_CLASSES] = {
+      |                    ^~~~~~~~~~~~~~~~~~
+In file included from src/compute.c:6:
+src/compute.h:65:20: warning: ‘pgwt_cat_names’ defined but not used [-Wunused-variable]
+   65 | static const char *pgwt_cat_names[PGWT_NUM_CATS] = {
+      |                    ^~~~~~~~~~~~~~
+  CC       build/server_event_reader.o (server)
+  CC       build/server_event_writer.o (server)
+src/event_writer.c: In function ‘pgwt_writer_init’:
+src/event_writer.c:604:9: warning: ignoring return value of ‘chown’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
+  604 |         chown(w->trace_dir, (uid_t)-1, w->trace_gid);
+      |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+src/event_writer.c: In function ‘open_trace_file’:
+src/event_writer.c:386:9: warning: ignoring return value of ‘fchown’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
+  386 |         fchown(fileno(w->fp), (uid_t)-1, w->trace_gid);
+      |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  CC       build/server_summary_writer.o (server)
+src/summary_writer.c: In function ‘open_summary_file’:
+src/summary_writer.c:846:9: warning: ignoring return value of ‘fchown’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
+  846 |         fchown(fileno(w->fp), (uid_t)-1, w->trace_gid);
+      |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  CC       build/server_summary_reader.o (server)
+  CC       build/server_wait_event.o (server)
+  CC       build/server_idle_rule.o (server)
+  CC       build/server_spawn.o (server)
+src/server.c: In function ‘coverage_refresh’:
+src/server.c:1700:43: warning: ‘%s’ directive output may be truncated writing up to 137215 bytes into a region of size 512 [-Wformat-truncation=]
+ 1700 |     snprintf(fc->path, sizeof(fc->path), "%s", path);
+      |                                           ^~
+In file included from /usr/include/stdio.h:980,
+                 from src/event_writer.h:10,
+                 from src/block_agg.h:135,
+                 from src/server.c:7:
+In function ‘snprintf’,
+    inlined from ‘cov_find_or_add’ at src/server.c:1700:5,
+    inlined from ‘coverage_refresh’ at src/server.c:2203:36:
+/usr/include/x86_64-linux-gnu/bits/stdio2.h:54:10: note: ‘__builtin_snprintf’ output between 1 and 137216 bytes into a destination of size 512
+   54 |   return __builtin___snprintf_chk (__s, __n, __USE_FORTIFY_LEVEL - 1,
+      |          ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+   55 |                                    __glibc_objsize (__s), __fmt,
+      |                                    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+   56 |                                    __va_arg_pack ());
+      |                                    ~~~~~~~~~~~~~~~~~
+  CC       build/server_cmdline.o (server)
+  CC       build/server_backend_meta.o (server)
+  CC       build/server_cJSON.o (server)
+  BPF      build/pg_wait_tracer.bpf.o
+src/compute.c: In function ‘pgwt_compute_transitions’:
+src/compute.c:3154:40: warning: argument 1 range [18446744071562067968, 18446744073709551615] exceeds maximum object size 9223372036854775807 [-Walloc-size-larger-than=]
+ 3154 |     struct pgwt_transition_row *rows = calloc(nr, sizeof(*rows));
+      |                                        ^~~~~~~~~~~~~~~~~~~~~~~~~
+In file included from src/percentile.h:32,
+                 from src/compute.c:12:
+/usr/include/stdlib.h:675:14: note: in a call to allocation function ‘calloc’ declared here
+  675 | extern void *calloc (size_t __nmemb, size_t __size)
+      |              ^~~~~~
+  SKEL     include/pg_wait_tracer.skel.h
+  CC       build/pg_wait_tracer.o
+  CC       build/daemon.o
+  CC       build/control.o
+  CC       build/effective_cores.o
+In file included from src/control.c:8:
+src/sampler.h:216:42: warning: "/*" within comment [-Wcomment]
+  216 |  * read (writing *cmd_open, and *query_id/*query_id_valid when it has them) and
+      |
+  CC       build/provider_full.o
+  CC       build/provider_coop.o
+  CC       build/sampler.o
+  CC       build/exact_probe.o
+In file included from src/sampler.c:16:
+src/sampler.h:216:42: warning: "/*" within comment [-Wcomment]
+  216 |  * read (writing *cmd_open, and *query_id/*query_id_valid when it has them) and
+      |
+  CC       build/escalation.o
+In file included from src/exact_probe.c:178:
+src/sampler.h:216:42: warning: "/*" within comment [-Wcomment]
+  216 |  * read (writing *cmd_open, and *query_id/*query_id_valid when it has them) and
+      |
+  CC       build/escalation_budget.o
+  CC       build/anomaly.o
+In file included from src/anomaly.c:442:
+src/sampler.h:216:42: warning: "/*" within comment [-Wcomment]
+  216 |  * read (writing *cmd_open, and *query_id/*query_id_valid when it has them) and
+      |
+  CC       build/backend.o
+  CC       build/discovery.o
+  CC       build/backend_status_layout.o
+  CC       build/synthetic_query.o
+  CC       build/map_reader.o
+src/discovery.c: In function ‘pgwt_discover’:
+src/discovery.c:947:51: warning: ‘/postmaster.pid’ directive output may be truncated writing 15 bytes into a region of size between 1 and 512 [-Wformat-truncation=]
+  947 |             snprintf(pidpath, sizeof(pidpath), "%s/postmaster.pid", d->pgdata);
+      |                                                   ^~~~~~~~~~~~~~~
+In file included from /usr/include/stdio.h:980,
+                 from src/discovery.c:6:
+In function ‘snprintf’,
+    inlined from ‘pgwt_discover’ at src/discovery.c:947:13:
+/usr/include/x86_64-linux-gnu/bits/stdio2.h:54:10: note: ‘__builtin___snprintf_chk’ output between 16 and 527 bytes into a destination of size 512
+   54 |   return __builtin___snprintf_chk (__s, __n, __USE_FORTIFY_LEVEL - 1,
+      |          ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+   55 |                                    __glibc_objsize (__s), __fmt,
+      |                                    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+   56 |                                    __va_arg_pack ());
+      |                                    ~~~~~~~~~~~~~~~~~
+In file included from src/map_reader.c:21:
+src/sampler.h:216:42: warning: "/*" within comment [-Wcomment]
+  216 |  * read (writing *cmd_open, and *query_id/*query_id_valid when it has them) and
+      |
+  CC       build/event_stream.o
+  CC       build/output.o
+  CC       build/wait_event.o
+  CC       build/idle_rule.o
+  CC       build/spawn.o
+  CC       build/perf_event.o
+  CC       build/cmdline.o
+  CC       build/snapshot.o
+  CC       build/event_writer.o
+  CC       build/event_reader.o
+src/event_writer.c: In function ‘pgwt_writer_init’:
+src/event_writer.c:604:9: warning: ignoring return value of ‘chown’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
+  604 |         chown(w->trace_dir, (uid_t)-1, w->trace_gid);
+      |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+src/event_writer.c: In function ‘open_trace_file’:
+src/event_writer.c:386:9: warning: ignoring return value of ‘fchown’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
+  386 |         fchown(fileno(w->fp), (uid_t)-1, w->trace_gid);
+      |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  CC       build/replay.o
+  CC       build/summary_writer.o
+  CC       build/query_text.o
+src/summary_writer.c: In function ‘open_summary_file’:
+src/summary_writer.c:846:9: warning: ignoring return value of ‘fchown’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
+  846 |         fchown(fileno(w->fp), (uid_t)-1, w->trace_gid);
+      |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  CC       build/pgss_resolver.o
+src/query_text.c: In function ‘pgwt_qt_init’:
+src/query_text.c:625:13: warning: ignoring return value of ‘fchown’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
+  625 |             fchown(fileno(qt->fp), (uid_t)-1, qt->trace_gid);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+src/query_text.c:629:13: warning: ignoring return value of ‘fchown’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
+  629 |             fchown(fileno(qt->quality_fp), (uid_t)-1, qt->trace_gid);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+src/query_text.c: In function ‘compact_quality_locked’:
+src/query_text.c:444:9: warning: ignoring return value of ‘fchown’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
+  444 |         fchown(fileno(out), (uid_t)-1, qt->trace_gid);
+      |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  CC       build/backend_meta.o
+  CC       build/cJSON.o
+  LINK     pgwt-server
+  DONE     pgwt-server
+  LINK     pg_wait_tracer
+  DONE     pg_wait_tracer
+make: Leaving directory '/root/cx-executions-356/final'

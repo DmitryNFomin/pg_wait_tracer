@@ -1,0 +1,79 @@
+{
+  "before_executions": {
+    "n": 6,
+    "median_ms": 591.4626680314541,
+    "min_ms": 563.6533629149199,
+    "max_ms": 597.1219050697982
+  },
+  "before_transitions": {
+    "n": 3,
+    "median_ms": 379.23637917265296,
+    "min_ms": 373.1988661456853,
+    "max_ms": 382.1532209403813
+  },
+  "before_paint": {
+    "n": 6,
+    "median_ms": 767.0,
+    "min_ms": 746,
+    "max_ms": 815
+  },
+  "before_browser_requests": {
+    "info": 1,
+    "control": 1,
+    "aas": 16,
+    "top_queries": 8,
+    "executions": 7,
+    "execution_detail": 7
+  },
+  "before_cache": {
+    "decoded": 1239,
+    "resets": 0,
+    "warm_served": [
+      1239,
+      2478,
+      3717,
+      4956,
+      6195,
+      7434
+    ]
+  },
+  "after_executions": {
+    "n": 6,
+    "median_ms": 444.320265436545,
+    "min_ms": 435.15964900143445,
+    "max_ms": 493.847216013819
+  },
+  "after_transitions": {
+    "n": 3,
+    "median_ms": 364.8256058804691,
+    "min_ms": 364.07344904728234,
+    "max_ms": 367.5355711020529
+  },
+  "after_paint": {
+    "n": 6,
+    "median_ms": 671.0,
+    "min_ms": 629,
+    "max_ms": 697
+  },
+  "after_browser_requests": {
+    "info": 1,
+    "control": 1,
+    "aas": 16,
+    "top_queries": 8,
+    "executions": 7,
+    "execution_detail": 7
+  },
+  "after_cache": {
+    "decoded": 1239,
+    "resets": 0,
+    "warm_served": [
+      1239,
+      2478,
+      3717,
+      4956,
+      6195,
+      7434
+    ]
+  },
+  "wire_identical_calls": 7
+}

@@ -1,0 +1,226 @@
+
+### marker pairing, plan, raw clipping, and worker lane ###
+  PASS: executions carries exact fidelity
+  PASS: three EXEC_START markers become three rows
+  PASS: unlimited table is not truncated
+  PASS: execution rows are latest-first
+  PASS: execution query IDs and starts are strings
+  PASS: every execution end is a string or explicit null
+  PASS: EXEC_END pairs with the matching start
+  PASS: preceding PLAN_START/END supplies plan_ms
+  PASS: leader event count excludes markers and worker events
+  PASS: leader_pid metadata attaches the active worker
+  PASS: execution without plan markers reports plan_ms null
+  PASS: unpaired start is in-progress with no invented end/duration
+  PASS: limit bounds rows
+  PASS: table truncation reports the full filtered count
+  PASS: executions: CPU filter excludes IO-only executions
+  PASS: executions: only the CPU execution remains
+  PASS: exec_scatter: CPU filter excludes IO-only executions
+  PASS: exec_scatter: only the CPU execution remains
+  PASS: top-level decimal-string query_id filter works
+  PASS: query filter returns the requested execution
+  PASS: scatter includes every marker-started execution
+  PASS: open scatter point has null, never an invented duration
+  PASS: execution_detail carries exact fidelity
+  PASS: root query_id is a decimal string
+  PASS: leader query_id is a decimal string
+  PASS: leader waterfall has two events
+  PASS: overlapping event preserves its pre-window raw start
+  PASS: waterfall duration is a nanosecond string
+  PASS: measured cpu_ns is a string
+  PASS: all leader event ns fields are strings
+  PASS: parallel worker is attached as its own lane
+  PASS: unmeasured worker cpu_ns is explicit null
+  PASS: worker event ns values are strings
+  PASS: detail carries the plan start before execution
+  PASS: detail plan end is a string
+  PASS: detail reports honest aggregate event retention
+  PASS: detail without a planning phase reports plan null
+
+### scatter reservoir keeps per-bucket maxima ###
+  PASS: scatter carries exact fidelity
+  PASS: scatter reports raw execution count
+  PASS: scatter reports honest bounded downsampling
+  PASS: 100ms outlier survives server-side downsampling
+  PASS: scatter timestamp and query IDs are strings
+  PASS: scatter points are chronological
+
+### window-straddling rows and exact detail identity ###
+  PASS: window includes the execution that started before it
+  PASS: straddling row preserves its real start and labels it
+  PASS: in-window start is explicitly not a straddling row
+  PASS: scatter includes the same straddling execution
+  PASS: scatter retains the pre-window execution identity
+  PASS: unmatched start_ns is a structured not_found refusal
+  PASS: unmatched start_ns never fabricates a waterfall payload
+
+### class/event filters reach all execution commands ###
+  PASS: executions applies class through event matching
+  PASS: exec_scatter applies class through event matching
+  PASS: executions applies event_id through event matching
+  PASS: exec_scatter applies event_id through event matching
+  PASS: execution_detail applies class to leader+worker lanes
+  PASS: class filter removes nonmatching leader events
+  PASS: class filter retains the matching worker event
+  PASS: execution_detail applies event_id
+  PASS: event_id detail contains only the requested event
+  PASS: event_id detail omits nonmatching worker lanes
+
+### #222: sort=duration_desc orders by duration (in_progress ranked by elapsed-so-far, never last-by-default); omitted/unrecognized sort falls back to start_desc ###
+  PASS: duration_desc: a long-running in_progress row outranks short closed ones, and an elapsed-so-far tie against a closed row is broken by start_ns desc, not left to insertion order ([2003, 2004, 2005, 2002, 2000, 2001])
+  PASS: sort omitted: falls back to start_desc, not some other order and not a refusal ([2005, 2004, 2003, 2002, 2001, 2000])
+  PASS: unrecognized sort: falls back to start_desc, not some other order and not a refusal ([2005, 2004, 2003, 2002, 2001, 2000])
+
+### #222 cheap check + #101 budget at tens-of-thousands scale ###
+  PASS: fixture reaches tens-of-thousands of executions (25000 fast + 32 slow)
+  PASS: cheap check: the slow query is genuinely captured (present under a query_id filter)
+  PASS: characterizes the bug: the unsorted default 100-row page is the fast-only recency tail, crowding the slow query out (pid 6000 absent)
+  PASS: sort=duration_desc surfaces the slow query in the default-sized page instead of the recency tail
+  PASS: start_desc (default) executions query: 0.01s over ~25032 executions (threshold 10.0s)
+  PASS: duration_desc executions query: 0.01s over ~25032 executions (threshold 10.0s)
+
+### #222 review: an errored/cancelled statement's row does not survive its pid's next CMD_END -- closes with a real measured duration, so 100 cumulative zombies no longer crowd a genuinely slow execution off the duration_desc page ###
+  PASS: fixture carries 100 zombies + 1 genuinely slow execution
+  PASS: every zombie row closed at its own CMD_END -- none left in_progress (open_count=0, not 100)
+  PASS: every zombie plus the slow execution is now a closed row
+  PASS: zombie pid 20095 is closed, not in_progress ({'pid': 20095, 'query_id': '314159265', 'start_ns': '10000000095000000', 'end_ns': '10000000097000000', 'duration_ms': 2, 'plan_ms': None, 'n_events': 0, 'n_workers': 0, 'in_progress': False, 'end_inferred': True, 'started_before_window': False})
+  PASS: zombie pid 20095 carries its REAL ~2ms duration, not one fabricated from the ~100s window bound ({'pid': 20095, 'query_id': '314159265', 'start_ns': '10000000095000000', 'end_ns': '10000000097000000', 'duration_ms': 2, 'plan_ms': None, 'n_events': 0, 'n_workers': 0, 'in_progress': False, 'end_inferred': True, 'started_before_window': False})
+  PASS: zombie pid 20095 is flagged end_inferred -- closed at CMD_END, never a real EXEC_END ({'pid': 20095, 'query_id': '314159265', 'start_ns': '10000000095000000', 'end_ns': '10000000097000000', 'duration_ms': 2, 'plan_ms': None, 'n_events': 0, 'n_workers': 0, 'in_progress': False, 'end_inferred': True, 'started_before_window': False})
+  PASS: zombie pid 20096 is closed, not in_progress ({'pid': 20096, 'query_id': '314159265', 'start_ns': '10000000096000000', 'end_ns': '10000000098000000', 'duration_ms': 2, 'plan_ms': None, 'n_events': 0, 'n_workers': 0, 'in_progress': False, 'end_inferred': True, 'started_before_window': False})
+  PASS: zombie pid 20096 carries its REAL ~2ms duration, not one fabricated from the ~100s window bound ({'pid': 20096, 'query_id': '314159265', 'start_ns': '10000000096000000', 'end_ns': '10000000098000000', 'duration_ms': 2, 'plan_ms': None, 'n_events': 0, 'n_workers': 0, 'in_progress': False, 'end_inferred': True, 'started_before_window': False})
+  PASS: zombie pid 20096 is flagged end_inferred -- closed at CMD_END, never a real EXEC_END ({'pid': 20096, 'query_id': '314159265', 'start_ns': '10000000096000000', 'end_ns': '10000000098000000', 'duration_ms': 2, 'plan_ms': None, 'n_events': 0, 'n_workers': 0, 'in_progress': False, 'end_inferred': True, 'started_before_window': False})
+  PASS: zombie pid 20097 is closed, not in_progress ({'pid': 20097, 'query_id': '314159265', 'start_ns': '10000000097000000', 'end_ns': '10000000099000000', 'duration_ms': 2, 'plan_ms': None, 'n_events': 0, 'n_workers': 0, 'in_progress': False, 'end_inferred': True, 'started_before_window': False})
+  PASS: zombie pid 20097 carries its REAL ~2ms duration, not one fabricated from the ~100s window bound ({'pid': 20097, 'query_id': '314159265', 'start_ns': '10000000097000000', 'end_ns': '10000000099000000', 'duration_ms': 2, 'plan_ms': None, 'n_events': 0, 'n_workers': 0, 'in_progress': False, 'end_inferred': True, 'started_before_window': False})
+  PASS: zombie pid 20097 is flagged end_inferred -- closed at CMD_END, never a real EXEC_END ({'pid': 20097, 'query_id': '314159265', 'start_ns': '10000000097000000', 'end_ns': '10000000099000000', 'duration_ms': 2, 'plan_ms': None, 'n_events': 0, 'n_workers': 0, 'in_progress': False, 'end_inferred': True, 'started_before_window': False})
+  PASS: zombie pid 20098 is closed, not in_progress ({'pid': 20098, 'query_id': '314159265', 'start_ns': '10000000098000000', 'end_ns': '10000000100000000', 'duration_ms': 2, 'plan_ms': None, 'n_events': 0, 'n_workers': 0, 'in_progress': False, 'end_inferred': True, 'started_before_window': False})
+  PASS: zombie pid 20098 carries its REAL ~2ms duration, not one fabricated from the ~100s window bound ({'pid': 20098, 'query_id': '314159265', 'start_ns': '10000000098000000', 'end_ns': '10000000100000000', 'duration_ms': 2, 'plan_ms': None, 'n_events': 0, 'n_workers': 0, 'in_progress': False, 'end_inferred': True, 'started_before_window': False})
+  PASS: zombie pid 20098 is flagged end_inferred -- closed at CMD_END, never a real EXEC_END ({'pid': 20098, 'query_id': '314159265', 'start_ns': '10000000098000000', 'end_ns': '10000000100000000', 'duration_ms': 2, 'plan_ms': None, 'n_events': 0, 'n_workers': 0, 'in_progress': False, 'end_inferred': True, 'started_before_window': False})
+  PASS: zombie pid 20099 is closed, not in_progress ({'pid': 20099, 'query_id': '314159265', 'start_ns': '10000000099000000', 'end_ns': '10000000101000000', 'duration_ms': 2, 'plan_ms': None, 'n_events': 0, 'n_workers': 0, 'in_progress': False, 'end_inferred': True, 'started_before_window': False})
+  PASS: zombie pid 20099 carries its REAL ~2ms duration, not one fabricated from the ~100s window bound ({'pid': 20099, 'query_id': '314159265', 'start_ns': '10000000099000000', 'end_ns': '10000000101000000', 'duration_ms': 2, 'plan_ms': None, 'n_events': 0, 'n_workers': 0, 'in_progress': False, 'end_inferred': True, 'started_before_window': False})
+  PASS: zombie pid 20099 is flagged end_inferred -- closed at CMD_END, never a real EXEC_END ({'pid': 20099, 'query_id': '314159265', 'start_ns': '10000000099000000', 'end_ns': '10000000101000000', 'duration_ms': 2, 'plan_ms': None, 'n_events': 0, 'n_workers': 0, 'in_progress': False, 'end_inferred': True, 'started_before_window': False})
+  PASS: FIXED (would have been crowded out before this round's fix): the genuinely slow 500ms execution is on the duration_desc page, not pushed off by 100 zombie rows each now carrying a real ~2ms duration instead of a fabricated one
+  PASS: the genuinely slow execution's real EXEC_END is NOT flagged end_inferred -- a measured completion still reads as measured
+  PASS: the genuinely slow execution sorts FIRST, ahead of every closed zombie ([30000, 20099, 20098, 20097, 20096]...)
+
+### #222 review (adviser gap): sequential errors on ONE pid each close at their OWN CMD_END -- a second EXEC_START does not orphan the first row beyond CMD_END's reach ###
+  PASS: 5 errored + 1 successful execution, all on one pid, all present (6)
+  PASS: RED before the adviser's fix: a second EXEC_START used to orphan the FIRST error's row beyond CMD_END's reach, leaving it permanently in_progress -- none are, now (open_count=0)
+  PASS: all 5 errors closed with their real ~2ms span, none left open ([2, 1, 1, 1, 1])
+  PASS: every errored row is flagged end_inferred
+  PASS: NOTHING on this pid is in_progress -- the n=1 case alone (any single one of these 5) already proves a single presenter cancel does not pin a row ([False, False, False, False, False, False])
+  PASS: the final successful 500ms execution closed via its own real EXEC_END, not inferred ({'pid': 60000, 'query_id': '271828182', 'start_ns': '10000000006000000', 'end_ns': '10000000506000000', 'duration_ms': 500, 'plan_ms': None, 'n_events': 0, 'n_workers': 0, 'in_progress': False, 'end_inferred': False, 'started_before_window': False})
+  PASS: the successful execution sorts FIRST, ahead of every errored one on the same pid ({'pid': 60000, 'query_id': '271828182', 'start_ns': '10000000006000000', 'end_ns': '10000000506000000', 'duration_ms': 500, 'plan_ms': None, 'n_events': 0, 'n_workers': 0, 'in_progress': False, 'end_inferred': False, 'started_before_window': False})
+
+### #222 review: a legitimately nested execution is not cut short or dropped -- CMD_END closes ONLY what is still open, and only once the backend has actually gone idle ###
+  PASS: both outer and inner rows are present, neither dropped ([{'pid': 80000, 'query_id': '200', 'start_ns': '10000000005000000', 'end_ns': '10000000015000000', 'duration_ms': 10, 'plan_ms': None, 'n_events': 0, 'n_workers': 0, 'in_progress': False, 'end_inferred': False, 'started_before_window': False}, {'pid': 80000, 'query_id': '100', 'start_ns': '10000000000000000', 'end_ns': '10000000030000000', 'duration_ms': 30, 'plan_ms': None, 'n_events': 0, 'n_workers': 0, 'in_progress': False, 'end_inferred': False, 'started_before_window': False}])
+  PASS: outer execution closed normally via its own real EXEC_END, not truncated by the inner one ({'pid': 80000, 'query_id': '100', 'start_ns': '10000000000000000', 'end_ns': '10000000030000000', 'duration_ms': 30, 'plan_ms': None, 'n_events': 0, 'n_workers': 0, 'in_progress': False, 'end_inferred': False, 'started_before_window': False})
+  PASS: inner execution closed normally via its own real EXEC_END ({'pid': 80000, 'query_id': '200', 'start_ns': '10000000005000000', 'end_ns': '10000000015000000', 'duration_ms': 10, 'plan_ms': None, 'n_events': 0, 'n_workers': 0, 'in_progress': False, 'end_inferred': False, 'started_before_window': False})
+  PASS: outer duration is its OWN full span (30ms, expected 30.0ms) -- not clipped to the inner's span
+  PASS: inner duration is its OWN span (10ms, expected 10.0ms) -- not stretched to the outer's span
+
+### #222 review: a wait event after an inner EXEC_END pops the stack is credited to NEITHER the exposed orphan NOR the closed inner row -- not silently mis-attributed to whichever row the pop happened to reveal ###
+  PASS: both A and B rows are present ([{'pid': 70000, 'query_id': '555222', 'start_ns': '10000000005000000', 'end_ns': '10000000008000000', 'duration_ms': 3, 'plan_ms': None, 'n_events': 1, 'n_workers': 0, 'in_progress': False, 'end_inferred': False, 'started_before_window': False}, {'pid': 70000, 'query_id': '555111', 'start_ns': '10000000000000000', 'end_ns': '10000000020000000', 'duration_ms': 20, 'plan_ms': None, 'n_events': 1, 'n_workers': 0, 'in_progress': False, 'end_inferred': True, 'started_before_window': False}])
+  PASS: A ends with exactly its OWN one genuine event -- the post-B-EXEC_END event must NOT land on the reopened orphan (RED before the fix: this reads 2)
+  PASS: B keeps exactly its own one genuine event
+  PASS: A closes via CMD_END, inferred, not left open ({'pid': 70000, 'query_id': '555111', 'start_ns': '10000000000000000', 'end_ns': '10000000020000000', 'duration_ms': 20, 'plan_ms': None, 'n_events': 1, 'n_workers': 0, 'in_progress': False, 'end_inferred': True, 'started_before_window': False})
+
+### detail bound is window-local and still enforced ###
+  PASS: unrelated full-trace volume does not refuse tiny detail
+  PASS: bounded pid-pushed marker pre-scan avoids full-trace overload
+  PASS: execution_detail still refuses an actually oversized window
+  PASS: detail bound reports the configured event cap
+  PASS: overload refusal carries freshly-derived exact fidelity
+
+### clustered scatter redistributes empty-bucket quota ###
+  PASS: clustered fixture exposes all executions before sampling
+  PASS: unused bucket quota is redistributed to fill the budget
+  PASS: far-bucket maximum remains guaranteed
+  PASS: redistributed reservoir remains deterministic
+
+### per-lane waterfall cap is explicit ###
+  PASS: leader lane is capped at 2000 events
+  PASS: lane reports its uncapped event count
+  PASS: lane and root both report truncation
+  PASS: root reports the exact retained event count
+
+### exact-required commands refuse sampled-only data ###
+  PASS: executions: refusal carries sampled fidelity
+  PASS: executions: refusal carries stable code
+  PASS: executions: refusal is explicit, not empty success
+  PASS: executions: refusal has a hint and no fabricated payload
+  PASS: exec_scatter: refusal carries sampled fidelity
+  PASS: exec_scatter: refusal carries stable code
+  PASS: exec_scatter: refusal is explicit, not empty success
+  PASS: exec_scatter: refusal has a hint and no fabricated payload
+  PASS: execution_detail: refusal carries sampled fidelity
+  PASS: execution_detail: refusal carries stable code
+  PASS: execution_detail: refusal is explicit, not empty success
+  PASS: execution_detail: refusal has a hint and no fabricated payload
+
+131/131 tests passed
+=== exec prefix index (#274) ===
+
+### 1. index vs full decode: identical JSON, four windows ###
+  PASS: the index run reported a prefix path for every request
+  PASS: the legacy run reported a prefix path for every request
+  PASS: index run really used the index (got ['index', 'index', 'index', 'index', 'index', 'index', 'index', 'index'])
+  PASS: legacy run really used the full decode (got ['legacy', 'legacy', 'legacy', 'legacy', 'legacy', 'legacy', 'legacy', 'legacy'])
+  PASS: the prefix is non-empty in every window (markers [2413, 2415, 2416, 1810, 2413, 2415, 2416, 1810]) — a zero prefix cannot fail
+  PASS: both paths read the SAME number of prefix markers
+  PASS: executions[mid]: index output identical to the full decode
+  PASS: executions[late]: index output identical to the full decode
+  PASS: executions[short]: index output identical to the full decode
+  PASS: executions[wide]: index output identical to the full decode
+  PASS: exec_scatter[mid]: index output identical to the full decode
+  PASS: exec_scatter[late]: index output identical to the full decode
+  PASS: exec_scatter[short]: index output identical to the full decode
+  PASS: exec_scatter[wide]: index output identical to the full decode
+  PASS: the compared window has started_before_window rows
+  PASS: the compared window has an in-progress (zombie) row
+  PASS: the compared window has a row whose plan completed pre-window
+  PASS: the zombie closed by a PRE-WINDOW CMD_END does not leak in as still running
+
+### 2. a window starting at trace start has no prefix ###
+  PASS: zero prefix markers — this window cannot see the defect (lines: [])
+
+### 3. the incremental decode is stable across requests ###
+  PASS: all three requests read the same prefix marker count
+  PASS: three identical requests give three identical answers
+
+### 4. an index that cannot see everything REFUSES ###
+  PASS: the reference answers came from the full decode
+  PASS: allocation failure makes the index refuse (got ['legacy', 'legacy'])
+  PASS: executions: the refusal still returns the exact answer
+  PASS: exec_scatter: the refusal still returns the exact answer
+  PASS: a budget the markers overflow makes the index refuse (got ['legacy', 'legacy'])
+  PASS: executions: the budget refusal still returns the exact answer
+  PASS: exec_scatter: the budget refusal still returns the exact answer
+  PASS: a budget the markers fit in does NOT refuse (got ['index', 'index'])
+
+### 5. markers spanning two trace files ###
+  PASS: two-file dir: the index served the request
+  PASS: two-file dir: the prefix is non-empty (markers [2413, 2413])
+  PASS: executions across a rotation: identical to the full decode
+  PASS: exec_scatter across a rotation: identical to the full decode
+
+### 6. the byte budget is RELEASED when a file is dropped ###
+  PASS: two prefix path lines (got [('index', 2413), ('index', 2413)])
+  PASS: the first request fits the budget and uses the index
+  PASS: after the rotation the budget is credited back and the index is still used
+  PASS: the rebuilt index holds the same marker count
+  PASS: the answer is unchanged across the rotation
+
+### 7. the budget bounds BYTES HELD, not just when it latches ###
+  PASS: a prefix line per request (got 2)
+  PASS: pgwt-server is using the budget under test ([30000, 30000])
+  PASS: peak retained bytes were reported (got 30000)
+  PASS: peak retained-marker bytes 30000 <= budget 30000
+  PASS: the growth was CLAMPED to the remaining budget, not refused at the first block (peak 30000 > 24576)
+  PASS: and once full the index refuses (['legacy', 'legacy'])
+  PASS: executions: the bounded refusal still returns the exact answer
+  PASS: exec_scatter: the bounded refusal still returns the exact answer
+  PASS: a budget the markers fit in does not refuse (['index', 'index'])
+  PASS: ...and still holds within it ([98304, 98304] <= 67108864)
+
+48/48 tests passed

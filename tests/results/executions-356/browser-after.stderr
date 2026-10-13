@@ -1,0 +1,59 @@
+EXSERVER pid=1511932
+pgwt-server: loaded event names from wait_event_names.json
+pgwt-server: 1 trace files, 4 CPUs, ~9199616 events
+pgwt-server: loaded 29 query texts
+pgwt-server: loaded 168 backend metadata entries
+pgwt-server: loaded 29 query texts
+pgwt-server: loaded 168 backend metadata entries
+pgwt-server: loaded 29 query texts
+pgwt-server: loaded 168 backend metadata entries
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1239 served=0 resets=0
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1239 served=1239 resets=0
+EXSTATES states=147 rows=859930 events=6726385
+EXPHASE id=8 window=5072061 prefix=1654324 load=521.922 prefix_ms=21.529 combine_links=74.098 compute=66.164
+EXEMIT id=8 rows=501398 returned=100 rank=160.152 serialize=0.318
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1239 served=1241 resets=0
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1951 served=2066 resets=0
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1951 served=3305 resets=0
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1951 served=4544 resets=0
+EXSTATES states=147 rows=859930 events=6726385
+EXPHASE id=13 window=5072061 prefix=1654324 load=197.485 prefix_ms=19.491 combine_links=44.739 compute=70.462
+EXEMIT id=13 rows=501398 returned=100 rank=155.214 serialize=0.315
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1951 served=4546 resets=0
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=2663 served=5371 resets=0
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=2663 served=6610 resets=0
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=2663 served=7849 resets=0
+EXSTATES states=147 rows=859930 events=6726385
+EXPHASE id=18 window=5072061 prefix=1654324 load=196.455 prefix_ms=20.019 combine_links=41.347 compute=60.381
+EXEMIT id=18 rows=501398 returned=100 rank=138.245 serialize=0.300
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=2663 served=7851 resets=0
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=3375 served=8676 resets=0
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=3375 served=9915 resets=0
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=3375 served=11154 resets=0
+EXSTATES states=147 rows=859930 events=6726385
+EXPHASE id=23 window=5072061 prefix=1654324 load=202.841 prefix_ms=28.321 combine_links=42.198 compute=73.012
+EXEMIT id=23 rows=501398 returned=100 rank=155.607 serialize=0.316
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=3375 served=11156 resets=0
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=4087 served=11981 resets=0
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=4087 served=13220 resets=0
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=4087 served=14459 resets=0
+EXSTATES states=147 rows=859930 events=6726385
+EXPHASE id=28 window=5072061 prefix=1654324 load=196.852 prefix_ms=17.625 combine_links=39.938 compute=60.955
+EXEMIT id=28 rows=501398 returned=100 rank=140.760 serialize=0.339
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=4087 served=14461 resets=0
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=4799 served=15286 resets=0
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=4799 served=16525 resets=0
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=4799 served=17764 resets=0
+EXSTATES states=147 rows=859930 events=6726385
+EXPHASE id=33 window=5072061 prefix=1654324 load=196.085 prefix_ms=17.124 combine_links=41.976 compute=64.144
+EXEMIT id=33 rows=501398 returned=100 rank=161.854 serialize=0.310
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=4799 served=17766 resets=0
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=5511 served=18591 resets=0
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=5511 served=19830 resets=0
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=5511 served=21069 resets=0
+EXSTATES states=147 rows=859930 events=6726385
+EXPHASE id=38 window=5072061 prefix=1654324 load=212.265 prefix_ms=17.299 combine_links=42.271 compute=63.723
+EXEMIT id=38 rows=501398 returned=100 rank=172.377 serialize=0.344
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=5511 served=21071 resets=0
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=6223 served=21896 resets=0
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=6223 served=23135 resets=0

@@ -1,0 +1,5 @@
+control PASS
+linear_fallback CAUGHT
+truncated_pid CAUGHT
+wrong_slot CAUGHT
+ignored_allocation_failure CAUGHT

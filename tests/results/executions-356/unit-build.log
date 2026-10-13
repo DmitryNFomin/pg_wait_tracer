@@ -1,0 +1,818 @@
+make: Entering directory '/root/cx-executions-356/final/tests'
+cc -g -O2 -Wall -I../src -I../include -o test_wait_event test_wait_event.c ../build/wait_event.o ../build/idle_rule.o ../build/spawn.o ../build/cJSON.o
+cc -g -O2 -Wall -I../src -I../include -o test_cmdline test_cmdline.c ../build/cmdline.o
+cc -g -O2 -Wall -I../src -I../include -o test_backend_lifecycle test_backend_lifecycle.c ../build/anomaly.o ../build/backend_meta.o ../build/backend.o ../build/backend_status_layout.o ../build/cJSON.o ../build/cmdline.o ../build/control.o ../build/daemon.o ../build/discovery.o ../build/effective_cores.o ../build/escalation_budget.o ../build/escalation.o ../build/event_reader.o ../build/event_stream.o ../build/event_writer.o ../build/exact_probe.o ../build/idle_rule.o ../build/map_reader.o ../build/output.o ../build/perf_event.o ../build/pgss_resolver.o ../build/provider_coop.o ../build/provider_full.o ../build/query_text.o ../build/replay.o ../build/sampler.o ../build/snapshot.o ../build/spawn.o ../build/summary_writer.o ../build/synthetic_query.o ../build/wait_event.o -Wl,--wrap=pgwt_open_watchpoint -Wl,--wrap=pgwt_open_watchpoint_disabled -Wl,--wrap=bpf_map_delete_elem -lbpf -lelf -lz -llz4 -pthread -lm
+cc -g -O2 -Wall -I../src -I../include -o test_spawn test_spawn.c ../src/spawn.c
+cc -g -O2 -Wall -I../src -I../include -o test_event_writer test_event_writer.c ../build/event_writer.o -llz4
+cc -g -O2 -Wall -I../src -I../include -o test_event_reader test_event_reader.c ../build/event_reader.o ../build/event_writer.o ../build/map_reader.o ../build/wait_event.o ../build/idle_rule.o ../build/spawn.o ../build/cJSON.o ../build/discovery.o ../build/backend_status_layout.o -llz4 -lbpf -lelf -lz
+cc -g -O2 -Wall -I../src -I../include -DPGWT_SERVER -o test_trace_v2 test_trace_v2.c ../build/server_event_writer.o ../build/server_event_reader.o -llz4
+test_event_reader.c: In function ‘cleanup_test_dir’:
+test_event_reader.c:37:5: warning: ignoring return value of ‘system’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
+   37 |     system(cmd);
+      |     ^~~~~~~~~~~
+cc -g -O2 -Wall -I../src -I../include -DPGWT_SERVER -o test_sampler test_sampler.c ../src/sampler.c ../src/anomaly.c ../src/idle_rule.c
+In file included from test_sampler.c:21:
+../src/sampler.h:216:42: warning: "/*" within comment [-Wcomment]
+  216 |  * read (writing *cmd_open, and *query_id/*query_id_valid when it has them) and
+      |
+cc -g -O2 -Wall -I../src -I../include -DPGWT_SERVER -o test_anomaly test_anomaly.c ../src/anomaly.c ../build/wait_event.o ../build/idle_rule.o ../build/spawn.o ../build/cJSON.o
+cc -g -O2 -Wall -I../src -I../include -o test_escalation_budget test_escalation_budget.c ../src/escalation_budget.c
+cc -g -O2 -Wall -I../src -I../include -DPGWT_SERVER -o test_exact_probe test_exact_probe.c ../src/exact_probe.c ../src/backend_status_layout.c ../src/spawn.c ../src/cmdline.c ../src/backend_meta.c ../src/cJSON.c
+test_exact_probe.c: In function ‘test_straddler_context_persistence’:
+test_exact_probe.c:276:11: warning: ignoring return value of ‘system’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
+  276 |     (void)system("rm -rf /tmp/pgwt_exact_context_test");
+      |           ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+test_exact_probe.c:292:15: warning: ignoring return value of ‘fgets’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
+  292 |         (void)fgets(line, sizeof(line), fp);
+      |               ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+test_exact_probe.c:298:11: warning: ignoring return value of ‘system’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
+  298 |     (void)system("rm -rf /tmp/pgwt_exact_context_test");
+      |           ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+In file included from ../src/sampler.c:16:
+../src/sampler.h:216:42: warning: "/*" within comment [-Wcomment]
+  216 |  * read (writing *cmd_open, and *query_id/*query_id_valid when it has them) and
+      |
+cc -g -O2 -Wall -I../src -I../include -o test_effective_cores test_effective_cores.c ../src/effective_cores.c
+cc -g -O2 -Wall -I../src -I../include -DPGWT_SERVER -o test_coop test_coop.c ../src/provider_coop.c
+cc -g -O2 -Wall -I../src -I../include -o test_bucket test_bucket.c
+cc -g -O2 -Wall -I../src -I../include -o test_backend_status_layout test_backend_status_layout.c ../src/backend_status_layout.c ../src/spawn.c
+cc -g -O2 -Wall -I../src -I../include -o test_synthetic_query test_synthetic_query.c ../src/synthetic_query.c
+cc -g -O2 -Wall -I../src -I../include -DPGWT_TEST -o test_pgss_resolver test_pgss_resolver.c ../src/pgss_resolver.c ../src/query_text.c ../src/synthetic_query.c ../src/spawn.c -pthread
+test_pgss_resolver.c: In function ‘main’:
+test_pgss_resolver.c:78:11: warning: ignoring return value of ‘system’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
+   78 |     (void)system("rm -rf /tmp/pgwt_pgss_resolver_test");
+      |           ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+test_pgss_resolver.c:207:11: warning: ignoring return value of ‘system’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
+  207 |     (void)system("rm -rf /tmp/pgwt_pgss_resolver_test");
+      |           ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+cc -g -O2 -Wall -I../src -I../include -o test_pg13_resolve test_pg13_resolve.c ../src/discovery.c ../src/spawn.c ../src/backend_status_layout.c ../build/wait_event.o ../build/idle_rule.o ../build/cJSON.o -lelf -lz
+../src/query_text.c: In function ‘pgwt_qt_init’:
+../src/query_text.c:625:13: warning: ignoring return value of ‘fchown’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
+  625 |             fchown(fileno(qt->fp), (uid_t)-1, qt->trace_gid);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+../src/query_text.c:629:13: warning: ignoring return value of ‘fchown’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
+  629 |             fchown(fileno(qt->quality_fp), (uid_t)-1, qt->trace_gid);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+../src/query_text.c: In function ‘compact_quality_locked’:
+../src/query_text.c:444:9: warning: ignoring return value of ‘fchown’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
+  444 |         fchown(fileno(out), (uid_t)-1, qt->trace_gid);
+      |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+../src/discovery.c: In function ‘pgwt_discover’:
+../src/discovery.c:947:51: warning: ‘/postmaster.pid’ directive output may be truncated writing 15 bytes into a region of size between 1 and 512 [-Wformat-truncation=]
+  947 |             snprintf(pidpath, sizeof(pidpath), "%s/postmaster.pid", d->pgdata);
+      |                                                   ^~~~~~~~~~~~~~~
+In file included from /usr/include/stdio.h:980,
+                 from ../src/discovery.c:6:
+In function ‘snprintf’,
+    inlined from ‘pgwt_discover’ at ../src/discovery.c:947:13:
+/usr/include/x86_64-linux-gnu/bits/stdio2.h:54:10: note: ‘__builtin___snprintf_chk’ output between 16 and 527 bytes into a destination of size 512
+   54 |   return __builtin___snprintf_chk (__s, __n, __USE_FORTIFY_LEVEL - 1,
+      |          ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+   55 |                                    __glibc_objsize (__s), __fmt,
+      |                                    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+   56 |                                    __va_arg_pack ());
+      |                                    ~~~~~~~~~~~~~~~~~
+cc -g -O2 -Wall -I../src -I../include -DPGWT_TEST_EXPECT_PIE=1 -fPIE -pie -o test_discovery_pie test_discovery.c ../src/discovery.c ../src/spawn.c ../src/backend_status_layout.c ../src/wait_event.c ../src/idle_rule.c ../src/cJSON.c -lelf -lz
+cc -g -O2 -Wall -I../src -I../include -DPGWT_TEST_EXPECT_PIE=0 -fno-pie -no-pie -o test_discovery_nopie test_discovery.c ../src/discovery.c ../src/spawn.c ../src/backend_status_layout.c ../src/wait_event.c ../src/idle_rule.c ../src/cJSON.c -lelf -lz
+cc -g -O2 -Wall -I../src -I../include -DPGWT_SERVER -c -o map_reader_core.o ../src/map_reader.c
+../src/discovery.c: In function ‘pgwt_discover’:
+../src/discovery.c:947:51: warning: ‘/postmaster.pid’ directive output may be truncated writing 15 bytes into a region of size between 1 and 512 [-Wformat-truncation=]
+  947 |             snprintf(pidpath, sizeof(pidpath), "%s/postmaster.pid", d->pgdata);
+      |                                                   ^~~~~~~~~~~~~~~
+In file included from /usr/include/stdio.h:980,
+                 from ../src/discovery.c:6:
+In function ‘snprintf’,
+    inlined from ‘pgwt_discover’ at ../src/discovery.c:947:13:
+/usr/include/x86_64-linux-gnu/bits/stdio2.h:54:10: note: ‘__builtin___snprintf_chk’ output between 16 and 527 bytes into a destination of size 512
+   54 |   return __builtin___snprintf_chk (__s, __n, __USE_FORTIFY_LEVEL - 1,
+      |          ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+   55 |                                    __glibc_objsize (__s), __fmt,
+      |                                    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+   56 |                                    __va_arg_pack ());
+      |                                    ~~~~~~~~~~~~~~~~~
+cc -g -O2 -Wall -I../src -I../include -DPGWT_SERVER -o test_durability test_durability.c ../build/server_event_writer.o ../build/server_event_reader.o ../build/server_summary_writer.o ../build/server_summary_reader.o ../build/server_wait_event.o ../build/server_idle_rule.o ../build/server_spawn.o ../build/server_cJSON.o -llz4 -lz
+cc -g -O2 -Wall -I../src -I../include -DPGWT_TEST -o test_query_text test_query_text.c ../src/query_text.c ../src/synthetic_query.c -pthread
+../src/discovery.c: In function ‘pgwt_discover’:
+../src/discovery.c:947:51: warning: ‘/postmaster.pid’ directive output may be truncated writing 15 bytes into a region of size between 1 and 512 [-Wformat-truncation=]
+  947 |             snprintf(pidpath, sizeof(pidpath), "%s/postmaster.pid", d->pgdata);
+      |                                                   ^~~~~~~~~~~~~~~
+In file included from /usr/include/stdio.h:980,
+                 from ../src/discovery.c:6:
+In function ‘snprintf’,
+    inlined from ‘pgwt_discover’ at ../src/discovery.c:947:13:
+/usr/include/x86_64-linux-gnu/bits/stdio2.h:54:10: note: ‘__builtin___snprintf_chk’ output between 16 and 527 bytes into a destination of size 512
+   54 |   return __builtin___snprintf_chk (__s, __n, __USE_FORTIFY_LEVEL - 1,
+      |          ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+   55 |                                    __glibc_objsize (__s), __fmt,
+      |                                    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+   56 |                                    __va_arg_pack ());
+      |                                    ~~~~~~~~~~~~~~~~~
+../src/query_text.c: In function ‘pgwt_qt_init’:
+../src/query_text.c:625:13: warning: ignoring return value of ‘fchown’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
+  625 |             fchown(fileno(qt->fp), (uid_t)-1, qt->trace_gid);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+../src/query_text.c:629:13: warning: ignoring return value of ‘fchown’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
+  629 |             fchown(fileno(qt->quality_fp), (uid_t)-1, qt->trace_gid);
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+../src/query_text.c: In function ‘compact_quality_locked’:
+../src/query_text.c:444:9: warning: ignoring return value of ‘fchown’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
+  444 |         fchown(fileno(out), (uid_t)-1, qt->trace_gid);
+      |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+cc -g -O2 -Wall -I../src -I../include -DPGWT_SERVER -o test_golden_fixture test_golden_fixture.c ../build/server_event_reader.o ../build/server_event_writer.o -llz4 -lz
+cc -g -O2 -Wall -I../src -I../include -DPGWT_SERVER -o test_live_accum test_live_accum.c ../src/map_reader.c ../src/snapshot.c ../src/compute.c ../build/wait_event.o ../build/idle_rule.o ../build/spawn.o ../build/cJSON.o
+In file included from test_live_accum.c:26:
+../src/compute.h:65:20: warning: ‘pgwt_cat_names’ defined but not used [-Wunused-variable]
+   65 | static const char *pgwt_cat_names[PGWT_NUM_CATS] = {
+      |                    ^~~~~~~~~~~~~~
+../src/compute.h:37:20: warning: ‘pgwt_class_display’ defined but not used [-Wunused-variable]
+   37 | static const char *pgwt_class_display[PGWT_NUM_CLASSES] = {
+      |                    ^~~~~~~~~~~~~~~~~~
+../src/compute.h:31:20: warning: ‘pgwt_class_names’ defined but not used [-Wunused-variable]
+   31 | static const char *pgwt_class_names[PGWT_NUM_CLASSES] = {
+      |                    ^~~~~~~~~~~~~~~~
+cc -g -O2 -Wall -I../src -I../include -DPGWT_SERVER -o test_window_clip test_window_clip.c ../src/compute.c ../build/wait_event.o ../build/idle_rule.o ../build/spawn.o ../build/cJSON.o -lm
+In file included from test_window_clip.c:37:
+../src/compute.h:65:20: warning: ‘pgwt_cat_names’ defined but not used [-Wunused-variable]
+   65 | static const char *pgwt_cat_names[PGWT_NUM_CATS] = {
+      |                    ^~~~~~~~~~~~~~
+../src/compute.h:37:20: warning: ‘pgwt_class_display’ defined but not used [-Wunused-variable]
+   37 | static const char *pgwt_class_display[PGWT_NUM_CLASSES] = {
+      |                    ^~~~~~~~~~~~~~~~~~
+../src/compute.h:31:20: warning: ‘pgwt_class_names’ defined but not used [-Wunused-variable]
+   31 | static const char *pgwt_class_names[PGWT_NUM_CLASSES] = {
+      |                    ^~~~~~~~~~~~~~~~
+In file included from ../src/compute.c:6:
+../src/compute.h:65:20: warning: ‘pgwt_cat_names’ defined but not used [-Wunused-variable]
+   65 | static const char *pgwt_cat_names[PGWT_NUM_CATS] = {
+      |                    ^~~~~~~~~~~~~~
+cc -g -O2 -Wall -I../src -I../include -DPGWT_SERVER -o test_executions_attribution test_executions_attribution.c ../src/map_reader.c ../src/snapshot.c ../src/compute.c ../build/wait_event.o ../build/idle_rule.o ../build/spawn.o ../build/cJSON.o
+In file included from test_executions_attribution.c:24:
+../src/compute.h:65:20: warning: ‘pgwt_cat_names’ defined but not used [-Wunused-variable]
+   65 | static const char *pgwt_cat_names[PGWT_NUM_CATS] = {
+      |                    ^~~~~~~~~~~~~~
+../src/compute.h:37:20: warning: ‘pgwt_class_display’ defined but not used [-Wunused-variable]
+   37 | static const char *pgwt_class_display[PGWT_NUM_CLASSES] = {
+      |                    ^~~~~~~~~~~~~~~~~~
+../src/compute.h:31:20: warning: ‘pgwt_class_names’ defined but not used [-Wunused-variable]
+   31 | static const char *pgwt_class_names[PGWT_NUM_CLASSES] = {
+      |                    ^~~~~~~~~~~~~~~~
+In file included from ../src/compute.c:6:
+../src/compute.h:65:20: warning: ‘pgwt_cat_names’ defined but not used [-Wunused-variable]
+   65 | static const char *pgwt_cat_names[PGWT_NUM_CATS] = {
+      |                    ^~~~~~~~~~~~~~
+cc -g -O2 -Wall -I../src -I../include -DPGWT_SERVER -o test_execution_pid_index test_execution_pid_index.c \
+      ../build/wait_event.o ../build/idle_rule.o ../build/spawn.o ../build/cJSON.o -lm
+test_execution_pid_index.c: In function ‘main’:
+test_execution_pid_index.c:126:36: warning: missing braces around initializer [-Wmissing-braces]
+  126 |     struct pgwt_filter filters[] = {{0}, {.pid = 128}, {.query_id = 2},
+      |                                    ^
+      |                                      {}
+test_execution_pid_index.c:126:36: warning: missing braces around initializer [-Wmissing-braces]
+  126 |     struct pgwt_filter filters[] = {{0}, {.pid = 128}, {.query_id = 2},
+      |                                    ^
+      |                                      {}
+test_execution_pid_index.c:126:36: warning: missing braces around initializer [-Wmissing-braces]
+  126 |     struct pgwt_filter filters[] = {{0}, {.pid = 128}, {.query_id = 2},
+      |                                    ^
+      |                                      {}
+test_execution_pid_index.c:126:36: warning: missing braces around initializer [-Wmissing-braces]
+  126 |     struct pgwt_filter filters[] = {{0}, {.pid = 128}, {.query_id = 2},
+      |                                    ^
+      |                                      {}
+test_execution_pid_index.c:126:36: warning: missing braces around initializer [-Wmissing-braces]
+  126 |     struct pgwt_filter filters[] = {{0}, {.pid = 128}, {.query_id = 2},
+      |                                    ^
+      |                                      {}
+In file included from ../src/compute.c:6,
+                 from test_execution_pid_index.c:5:
+../src/compute.h: At top level:
+../src/compute.h:65:20: warning: ‘pgwt_cat_names’ defined but not used [-Wunused-variable]
+   65 | static const char *pgwt_cat_names[PGWT_NUM_CATS] = {
+      |                    ^~~~~~~~~~~~~~
+../src/compute.c: In function ‘pgwt_compute_transitions’:
+../src/compute.c:3154:40: warning: argument 1 range [18446744071562067968, 18446744073709551615] exceeds maximum object size 9223372036854775807 [-Walloc-size-larger-than=]
+ 3154 |     struct pgwt_transition_row *rows = calloc(nr, sizeof(*rows));
+      |                                        ^~~~~~~~~~~~~~~~~~~~~~~~~
+In file included from ../src/percentile.h:32,
+                 from ../src/compute.c:12:
+/usr/include/stdlib.h:675:14: note: in a call to allocation function ‘calloc’ declared here
+  675 | extern void *calloc (size_t __nmemb, size_t __size)
+      |              ^~~~~~
+In file included from ../src/compute.c:6:
+../src/compute.h:65:20: warning: ‘pgwt_cat_names’ defined but not used [-Wunused-variable]
+   65 | static const char *pgwt_cat_names[PGWT_NUM_CATS] = {
+      |                    ^~~~~~~~~~~~~~
+cc -g -O2 -Wall -I../src -I../include -o test_top_queries_percentile test_top_queries_percentile.c
+../src/compute.c: In function ‘pgwt_compute_top_events_from_summaries’:
+../src/compute.c:2555:12: warning: array subscript 0 is outside array bounds of ‘struct pgwt_event_row[0]’ [-Warray-bounds=]
+ 2555 |         row->event_id = ctx.ht[i].event_id;
+      |            ^~
+../src/compute.c: In function ‘pgwt_compute_transitions’:
+../src/compute.c:2548:35: note: object of size 0 allocated by ‘calloc’
+ 2548 |     struct pgwt_event_row *rows = calloc(ctx.num_entries, sizeof(*rows));
+      |                                   ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+../src/compute.c:3154:40: warning: argument 1 range [18446744071562067968, 18446744073709551615] exceeds maximum object size 9223372036854775807 [-Walloc-size-larger-than=]
+ 3154 |     struct pgwt_transition_row *rows = calloc(nr, sizeof(*rows));
+      |                                        ^~~~~~~~~~~~~~~~~~~~~~~~~
+In file included from ../src/percentile.h:32,
+                 from ../src/compute.c:12:
+/usr/include/stdlib.h:675:14: note: in a call to allocation function ‘calloc’ declared here
+  675 | extern void *calloc (size_t __nmemb, size_t __size)
+      |              ^~~~~~
+../src/compute.c:2556:12: warning: array subscript 0 is outside array bounds of ‘struct pgwt_event_row[0]’ [-Warray-bounds=]
+ 2556 |         row->count    = ctx.ht[i].count;
+      |            ^~
+../src/compute.c:2548:35: note: object of size 0 allocated by ‘calloc’
+ 2548 |     struct pgwt_event_row *rows = calloc(ctx.num_entries, sizeof(*rows));
+      |                                   ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+../src/compute.c:2557:12: warning: array subscript 0 is outside array bounds of ‘struct pgwt_event_row[0]’ [-Warray-bounds=]
+ 2557 |         row->total_ms = (double)ctx.ht[i].total_ns / 1e6;
+      |            ^~
+../src/compute.c:2548:35: note: object of size 0 allocated by ‘calloc’
+ 2548 |     struct pgwt_event_row *rows = calloc(ctx.num_entries, sizeof(*rows));
+      |                                   ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+../src/compute.c:2558:12: warning: array subscript 0 is outside array bounds of ‘struct pgwt_event_row[0]’ [-Warray-bounds=]
+ 2558 |         row->exact_count = ctx.ht[i].exact_count;
+      |            ^~
+../src/compute.c:2548:35: note: object of size 0 allocated by ‘calloc’
+ 2548 |     struct pgwt_event_row *rows = calloc(ctx.num_entries, sizeof(*rows));
+      |                                   ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+../src/compute.c:2559:12: warning: array subscript 0 is outside array bounds of ‘struct pgwt_event_row[0]’ [-Warray-bounds=]
+ 2559 |         row->avg_us   = ctx.ht[i].exact_count > 0
+      |            ^~
+../src/compute.c:2548:35: note: object of size 0 allocated by ‘calloc’
+ 2548 |     struct pgwt_event_row *rows = calloc(ctx.num_entries, sizeof(*rows));
+      |                                   ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+../src/compute.c:2568:12: warning: array subscript 0 is outside array bounds of ‘struct pgwt_event_row[0]’ [-Warray-bounds=]
+ 2568 |         row->has_latency_dist = hpop > 0;
+      |            ^~
+../src/compute.c:2548:35: note: object of size 0 allocated by ‘calloc’
+ 2548 |     struct pgwt_event_row *rows = calloc(ctx.num_entries, sizeof(*rows));
+      |                                   ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+../src/compute.c:2569:12: warning: array subscript 0 is outside array bounds of ‘struct pgwt_event_row[0]’ [-Warray-bounds=]
+ 2569 |         row->max_us   = (double)ctx.ht[i].max_ns / 1000.0;
+      |            ^~
+../src/compute.c:2548:35: note: object of size 0 allocated by ‘calloc’
+ 2548 |     struct pgwt_event_row *rows = calloc(ctx.num_entries, sizeof(*rows));
+      |                                   ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+../src/compute.c:2571:27: warning: array subscript 0 is outside array bounds of ‘struct pgwt_event_row[0]’ [-Warray-bounds=]
+ 2571 |             row->p50_us = hist_percentile(ctx.ht[i].hist, hpop, 0.50,
+      |                           ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+ 2572 |                                           &row->p50_overflow);
+      |                                           ~~~~~~~~~~~~~~~~~~~
+../src/compute.c:2548:35: note: object of size 0 allocated by ‘calloc’
+ 2548 |     struct pgwt_event_row *rows = calloc(ctx.num_entries, sizeof(*rows));
+      |                                   ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+In function ‘hist_percentile’,
+    inlined from ‘pgwt_compute_top_events_from_summaries’ at ../src/compute.c:2571:27:
+../src/compute.c:1461:29: warning: array subscript 36 is outside array bounds of ‘struct pgwt_event_row[0]’ [-Warray-bounds=]
+ 1461 |     if (overflow) *overflow = 0;
+      |                   ~~~~~~~~~~^~~
+../src/compute.c: In function ‘pgwt_compute_top_events_from_summaries’:
+../src/compute.c:2548:35: note: at offset 144 into object of size 0 allocated by ‘calloc’
+ 2548 |     struct pgwt_event_row *rows = calloc(ctx.num_entries, sizeof(*rows));
+      |                                   ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+../src/compute.c:2571:16: warning: array subscript 0 is outside array bounds of ‘struct pgwt_event_row[0]’ [-Warray-bounds=]
+ 2571 |             row->p50_us = hist_percentile(ctx.ht[i].hist, hpop, 0.50,
+      |                ^~
+../src/compute.c:2548:35: note: object of size 0 allocated by ‘calloc’
+ 2548 |     struct pgwt_event_row *rows = calloc(ctx.num_entries, sizeof(*rows));
+      |                                   ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+../src/compute.c:2573:27: warning: array subscript 0 is outside array bounds of ‘struct pgwt_event_row[0]’ [-Warray-bounds=]
+ 2573 |             row->p95_us = hist_percentile(ctx.ht[i].hist, hpop, 0.95,
+      |                           ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+ 2574 |                                           &row->p95_overflow);
+      |                                           ~~~~~~~~~~~~~~~~~~~
+../src/compute.c:2548:35: note: object of size 0 allocated by ‘calloc’
+ 2548 |     struct pgwt_event_row *rows = calloc(ctx.num_entries, sizeof(*rows));
+      |                                   ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+In function ‘hist_percentile’,
+    inlined from ‘pgwt_compute_top_events_from_summaries’ at ../src/compute.c:2573:27:
+../src/compute.c:1461:29: warning: array subscript 37 is outside array bounds of ‘struct pgwt_event_row[0]’ [-Warray-bounds=]
+ 1461 |     if (overflow) *overflow = 0;
+      |                   ~~~~~~~~~~^~~
+../src/compute.c: In function ‘pgwt_compute_top_events_from_summaries’:
+../src/compute.c:2548:35: note: at offset 148 into object of size 0 allocated by ‘calloc’
+ 2548 |     struct pgwt_event_row *rows = calloc(ctx.num_entries, sizeof(*rows));
+      |                                   ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+../src/compute.c:2573:16: warning: array subscript 0 is outside array bounds of ‘struct pgwt_event_row[0]’ [-Warray-bounds=]
+ 2573 |             row->p95_us = hist_percentile(ctx.ht[i].hist, hpop, 0.95,
+      |                ^~
+../src/compute.c:2548:35: note: object of size 0 allocated by ‘calloc’
+ 2548 |     struct pgwt_event_row *rows = calloc(ctx.num_entries, sizeof(*rows));
+      |                                   ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+../src/compute.c:2575:27: warning: array subscript 0 is outside array bounds of ‘struct pgwt_event_row[0]’ [-Warray-bounds=]
+ 2575 |             row->p99_us = hist_percentile(ctx.ht[i].hist, hpop, 0.99,
+      |                           ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+ 2576 |                                           &row->p99_overflow);
+      |                                           ~~~~~~~~~~~~~~~~~~~
+../src/compute.c:2548:35: note: object of size 0 allocated by ‘calloc’
+ 2548 |     struct pgwt_event_row *rows = calloc(ctx.num_entries, sizeof(*rows));
+      |                                   ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+In function ‘hist_percentile’,
+    inlined from ‘pgwt_compute_top_events_from_summaries’ at ../src/compute.c:2575:27:
+../src/compute.c:1461:29: warning: array subscript 38 is outside array bounds of ‘struct pgwt_event_row[0]’ [-Warray-bounds=]
+ 1461 |     if (overflow) *overflow = 0;
+      |                   ~~~~~~~~~~^~~
+../src/compute.c: In function ‘pgwt_compute_top_events_from_summaries’:
+../src/compute.c:2548:35: note: at offset 152 into object of size 0 allocated by ‘calloc’
+ 2548 |     struct pgwt_event_row *rows = calloc(ctx.num_entries, sizeof(*rows));
+      |                                   ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+../src/compute.c:2575:16: warning: array subscript 0 is outside array bounds of ‘struct pgwt_event_row[0]’ [-Warray-bounds=]
+ 2575 |             row->p99_us = hist_percentile(ctx.ht[i].hist, hpop, 0.99,
+      |                ^~
+../src/compute.c:2548:35: note: object of size 0 allocated by ‘calloc’
+ 2548 |     struct pgwt_event_row *rows = calloc(ctx.num_entries, sizeof(*rows));
+      |                                   ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+../src/compute.c:2583:16: warning: array subscript 0 is outside array bounds of ‘struct pgwt_event_row[0]’ [-Warray-bounds=]
+ 2583 |             row->pct_db = db_time_ms > 0 ? row->total_ms / db_time_ms * 100.0 : 0;
+      |                ^~
+../src/compute.c:2548:35: note: object of size 0 allocated by ‘calloc’
+ 2548 |     struct pgwt_event_row *rows = calloc(ctx.num_entries, sizeof(*rows));
+      |                                   ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+../src/compute.c:2581:16: warning: array subscript 0 is outside array bounds of ‘struct pgwt_event_row[0]’ [-Warray-bounds=]
+ 2581 |             row->pct_db = PGWT_PCT_DB_IDLE;
+      |                ^~
+../src/compute.c:2548:35: note: object of size 0 allocated by ‘calloc’
+ 2548 |     struct pgwt_event_row *rows = calloc(ctx.num_entries, sizeof(*rows));
+      |                                   ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+../src/compute.c:2584:42: warning: array subscript 0 is outside array bounds of ‘struct pgwt_event_row[0]’ [-Warray-bounds=]
+ 2584 |         row->aas      = wall_ms > 0 ? row->total_ms / wall_ms : 0;
+      |                                          ^~
+../src/compute.c:2548:35: note: object of size 0 allocated by ‘calloc’
+ 2548 |     struct pgwt_event_row *rows = calloc(ctx.num_entries, sizeof(*rows));
+      |                                   ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+../src/compute.c:2584:12: warning: array subscript 0 is outside array bounds of ‘struct pgwt_event_row[0]’ [-Warray-bounds=]
+ 2584 |         row->aas      = wall_ms > 0 ? row->total_ms / wall_ms : 0;
+      |            ^~
+../src/compute.c:2548:35: note: object of size 0 allocated by ‘calloc’
+ 2548 |     struct pgwt_event_row *rows = calloc(ctx.num_entries, sizeof(*rows));
+      |                                   ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+../src/compute.c:2589:57: warning: array subscript 0 is outside array bounds of ‘struct pgwt_event_row[0]’ [-Warray-bounds=]
+ 2589 |             pgwt_event_full_name(ctx.ht[i].event_id, row->name, sizeof(row->name));
+      |                                                      ~~~^~~~~~
+../src/compute.c:2548:35: note: object of size 0 allocated by ‘calloc’
+ 2548 |     struct pgwt_event_row *rows = calloc(ctx.num_entries, sizeof(*rows));
+      |                                   ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+../src/compute.c:2587:25: warning: array subscript 0 is outside array bounds of ‘struct pgwt_event_row[0]’ [-Warray-bounds=]
+ 2587 |             snprintf(row->name, sizeof(row->name), "CPU*");
+      |                      ~~~^~~~~~
+../src/compute.c:2548:35: note: object of size 0 allocated by ‘calloc’
+ 2548 |     struct pgwt_event_row *rows = calloc(ctx.num_entries, sizeof(*rows));
+      |                                   ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+../src/compute.c:2587:53: warning: ‘CPU*’ directive output truncated writing 4 bytes into a region of size 0 [-Wformat-truncation=]
+ 2587 |             snprintf(row->name, sizeof(row->name), "CPU*");
+      |                                                     ^~~~
+In file included from /usr/include/stdio.h:980,
+                 from ../src/summary_writer.h:37,
+                 from ../src/compute.c:9:
+In function ‘snprintf’,
+    inlined from ‘pgwt_compute_top_events_from_summaries’ at ../src/compute.c:2587:13:
+/usr/include/x86_64-linux-gnu/bits/stdio2.h:54:10: note: ‘__builtin___snprintf_chk’ output 5 bytes into a destination of size 0
+   54 |   return __builtin___snprintf_chk (__s, __n, __USE_FORTIFY_LEVEL - 1,
+      |          ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+   55 |                                    __glibc_objsize (__s), __fmt,
+      |                                    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+   56 |                                    __va_arg_pack ());
+      |                                    ~~~~~~~~~~~~~~~~~
+../src/compute.c: In function ‘pgwt_compute_top_sessions_from_summaries’:
+../src/compute.c:2750:5: warning: argument 1 null where non-null expected [-Wnonnull]
+ 2750 |     qsort(rows, nr, sizeof(rows[0]), cmp_session_row_desc);
+      |     ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+In file included from ../src/percentile.h:32,
+                 from ../src/compute.c:12:
+/usr/include/stdlib.h:970:13: note: in a call to function ‘qsort’ declared ‘nonnull’
+  970 | extern void qsort (void *__base, size_t __nmemb, size_t __size,
+      |             ^~~~~
+../src/compute.c: In function ‘pgwt_compute_top_queries_from_summaries’:
+../src/compute.c:2965:5: warning: argument 1 null where non-null expected [-Wnonnull]
+ 2965 |     qsort(rows, nr, sizeof(rows[0]), cmp_query_row_desc);
+      |     ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/usr/include/stdlib.h:970:13: note: in a call to function ‘qsort’ declared ‘nonnull’
+  970 | extern void qsort (void *__base, size_t __nmemb, size_t __size,
+      |             ^~~~~
+../src/compute.c: In function ‘pgwt_compute_transitions’:
+../src/compute.c:3154:40: warning: argument 1 range [18446744071562067968, 18446744073709551615] exceeds maximum object size 9223372036854775807 [-Walloc-size-larger-than=]
+ 3154 |     struct pgwt_transition_row *rows = calloc(nr, sizeof(*rows));
+      |                                        ^~~~~~~~~~~~~~~~~~~~~~~~~
+/usr/include/stdlib.h:675:14: note: in a call to allocation function ‘calloc’ declared here
+  675 | extern void *calloc (size_t __nmemb, size_t __size)
+      |              ^~~~~~
+cc -g -O2 -Wall -I../src -I../include -o test_event_sort test_event_sort.c
+../src/compute.c: In function ‘pgwt_compute_transitions’:
+../src/compute.c:3154:40: warning: argument 1 range [18446744071562067968, 18446744073709551615] exceeds maximum object size 9223372036854775807 [-Walloc-size-larger-than=]
+ 3154 |     struct pgwt_transition_row *rows = calloc(nr, sizeof(*rows));
+      |                                        ^~~~~~~~~~~~~~~~~~~~~~~~~
+In file included from ../src/percentile.h:32,
+                 from ../src/compute.c:12:
+/usr/include/stdlib.h:675:14: note: in a call to allocation function ‘calloc’ declared here
+  675 | extern void *calloc (size_t __nmemb, size_t __size)
+      |              ^~~~~~
+cc -g -O2 -Wall -I../src -I../include -o test_top_queries_context test_top_queries_context.c
+cc -g -O2 -Wall -I../src -I../include -DPGWT_SERVER -o test_variants_p95 test_variants_p95.c ../src/compute.c \
+    ../build/wait_event.o ../build/idle_rule.o ../build/spawn.o ../build/cJSON.o \
+    -Wl,--wrap=realloc -lm
+In file included from test_variants_p95.c:43:
+../src/compute.h:65:20: warning: ‘pgwt_cat_names’ defined but not used [-Wunused-variable]
+   65 | static const char *pgwt_cat_names[PGWT_NUM_CATS] = {
+      |                    ^~~~~~~~~~~~~~
+../src/compute.h:37:20: warning: ‘pgwt_class_display’ defined but not used [-Wunused-variable]
+   37 | static const char *pgwt_class_display[PGWT_NUM_CLASSES] = {
+      |                    ^~~~~~~~~~~~~~~~~~
+../src/compute.h:31:20: warning: ‘pgwt_class_names’ defined but not used [-Wunused-variable]
+   31 | static const char *pgwt_class_names[PGWT_NUM_CLASSES] = {
+      |                    ^~~~~~~~~~~~~~~~
+cc -g -O2 -Wall -I../src -I../include -DPGWT_SERVER -o test_pid_cap test_pid_cap.c ../src/compute.c \
+    ../build/wait_event.o ../build/idle_rule.o ../build/spawn.o ../build/cJSON.o -lm
+cc -g -O2 -Wall -I../src -I../include -DPGWT_SERVER -o test_probe_bounds test_probe_bounds.c ../src/compute.c \
+    ../build/wait_event.o ../build/idle_rule.o ../build/spawn.o ../build/cJSON.o -lm
+In file included from test_pid_cap.c:43:
+../src/compute.h:65:20: warning: ‘pgwt_cat_names’ defined but not used [-Wunused-variable]
+   65 | static const char *pgwt_cat_names[PGWT_NUM_CATS] = {
+      |                    ^~~~~~~~~~~~~~
+../src/compute.h:37:20: warning: ‘pgwt_class_display’ defined but not used [-Wunused-variable]
+   37 | static const char *pgwt_class_display[PGWT_NUM_CLASSES] = {
+      |                    ^~~~~~~~~~~~~~~~~~
+../src/compute.h:31:20: warning: ‘pgwt_class_names’ defined but not used [-Wunused-variable]
+   31 | static const char *pgwt_class_names[PGWT_NUM_CLASSES] = {
+      |                    ^~~~~~~~~~~~~~~~
+In file included from test_probe_bounds.c:70:
+../src/compute.h:65:20: warning: ‘pgwt_cat_names’ defined but not used [-Wunused-variable]
+   65 | static const char *pgwt_cat_names[PGWT_NUM_CATS] = {
+      |                    ^~~~~~~~~~~~~~
+../src/compute.h:37:20: warning: ‘pgwt_class_display’ defined but not used [-Wunused-variable]
+   37 | static const char *pgwt_class_display[PGWT_NUM_CLASSES] = {
+      |                    ^~~~~~~~~~~~~~~~~~
+../src/compute.h:31:20: warning: ‘pgwt_class_names’ defined but not used [-Wunused-variable]
+   31 | static const char *pgwt_class_names[PGWT_NUM_CLASSES] = {
+      |                    ^~~~~~~~~~~~~~~~
+In file included from ../src/compute.c:6:
+../src/compute.h:65:20: warning: ‘pgwt_cat_names’ defined but not used [-Wunused-variable]
+   65 | static const char *pgwt_cat_names[PGWT_NUM_CATS] = {
+      |                    ^~~~~~~~~~~~~~
+In file included from ../src/compute.c:6:
+../src/compute.h:65:20: warning: ‘pgwt_cat_names’ defined but not used [-Wunused-variable]
+   65 | static const char *pgwt_cat_names[PGWT_NUM_CATS] = {
+      |                    ^~~~~~~~~~~~~~
+cc -g -O2 -Wall -I../src -I../include -DPGWT_SERVER -o test_interference_bounds test_interference_bounds.c ../src/compute.c \
+    ../build/wait_event.o ../build/idle_rule.o ../build/spawn.o ../build/cJSON.o -lm
+In file included from test_interference_bounds.c:8:
+../src/compute.h:65:20: warning: ‘pgwt_cat_names’ defined but not used [-Wunused-variable]
+   65 | static const char *pgwt_cat_names[PGWT_NUM_CATS] = {
+      |                    ^~~~~~~~~~~~~~
+../src/compute.h:37:20: warning: ‘pgwt_class_display’ defined but not used [-Wunused-variable]
+   37 | static const char *pgwt_class_display[PGWT_NUM_CLASSES] = {
+      |                    ^~~~~~~~~~~~~~~~~~
+../src/compute.h:31:20: warning: ‘pgwt_class_names’ defined but not used [-Wunused-variable]
+   31 | static const char *pgwt_class_names[PGWT_NUM_CLASSES] = {
+      |                    ^~~~~~~~~~~~~~~~
+In file included from ../src/compute.c:6:
+../src/compute.h:65:20: warning: ‘pgwt_cat_names’ defined but not used [-Wunused-variable]
+   65 | static const char *pgwt_cat_names[PGWT_NUM_CATS] = {
+      |                    ^~~~~~~~~~~~~~
+In file included from ../src/compute.c:6:
+../src/compute.h:65:20: warning: ‘pgwt_cat_names’ defined but not used [-Wunused-variable]
+   65 | static const char *pgwt_cat_names[PGWT_NUM_CATS] = {
+      |                    ^~~~~~~~~~~~~~
+../src/compute.c: In function ‘pgwt_compute_transitions’:
+../src/compute.c:3154:40: warning: argument 1 range [18446744071562067968, 18446744073709551615] exceeds maximum object size 9223372036854775807 [-Walloc-size-larger-than=]
+ 3154 |     struct pgwt_transition_row *rows = calloc(nr, sizeof(*rows));
+      |                                        ^~~~~~~~~~~~~~~~~~~~~~~~~
+In file included from ../src/percentile.h:32,
+                 from ../src/compute.c:12:
+/usr/include/stdlib.h:675:14: note: in a call to allocation function ‘calloc’ declared here
+  675 | extern void *calloc (size_t __nmemb, size_t __size)
+      |              ^~~~~~
+../src/compute.c: In function ‘pgwt_compute_transitions’:
+../src/compute.c:3154:40: warning: argument 1 range [18446744071562067968, 18446744073709551615] exceeds maximum object size 9223372036854775807 [-Walloc-size-larger-than=]
+ 3154 |     struct pgwt_transition_row *rows = calloc(nr, sizeof(*rows));
+      |                                        ^~~~~~~~~~~~~~~~~~~~~~~~~
+In file included from ../src/percentile.h:32,
+                 from ../src/compute.c:12:
+/usr/include/stdlib.h:675:14: note: in a call to allocation function ‘calloc’ declared here
+  675 | extern void *calloc (size_t __nmemb, size_t __size)
+      |              ^~~~~~
+../src/compute.c: In function ‘pgwt_compute_transitions’:
+../src/compute.c:3154:40: warning: argument 1 range [18446744071562067968, 18446744073709551615] exceeds maximum object size 9223372036854775807 [-Walloc-size-larger-than=]
+ 3154 |     struct pgwt_transition_row *rows = calloc(nr, sizeof(*rows));
+      |                                        ^~~~~~~~~~~~~~~~~~~~~~~~~
+In file included from ../src/percentile.h:32,
+                 from ../src/compute.c:12:
+/usr/include/stdlib.h:675:14: note: in a call to allocation function ‘calloc’ declared here
+  675 | extern void *calloc (size_t __nmemb, size_t __size)
+      |              ^~~~~~
+../src/compute.c: In function ‘pgwt_compute_transitions’:
+../src/compute.c:3154:40: warning: argument 1 range [18446744071562067968, 18446744073709551615] exceeds maximum object size 9223372036854775807 [-Walloc-size-larger-than=]
+ 3154 |     struct pgwt_transition_row *rows = calloc(nr, sizeof(*rows));
+      |                                        ^~~~~~~~~~~~~~~~~~~~~~~~~
+In file included from ../src/percentile.h:32,
+                 from ../src/compute.c:12:
+/usr/include/stdlib.h:675:14: note: in a call to allocation function ‘calloc’ declared here
+  675 | extern void *calloc (size_t __nmemb, size_t __size)
+      |              ^~~~~~
+cc -g -O2 -Wall -I../src -I../include -DPGWT_SERVER -o test_concurrency_bounds test_concurrency_bounds.c ../src/compute.c \
+    ../build/wait_event.o ../build/idle_rule.o ../build/spawn.o ../build/cJSON.o -lm
+In file included from test_concurrency_bounds.c:48:
+../src/compute.h:65:20: warning: ‘pgwt_cat_names’ defined but not used [-Wunused-variable]
+   65 | static const char *pgwt_cat_names[PGWT_NUM_CATS] = {
+      |                    ^~~~~~~~~~~~~~
+../src/compute.h:37:20: warning: ‘pgwt_class_display’ defined but not used [-Wunused-variable]
+   37 | static const char *pgwt_class_display[PGWT_NUM_CLASSES] = {
+      |                    ^~~~~~~~~~~~~~~~~~
+../src/compute.h:31:20: warning: ‘pgwt_class_names’ defined but not used [-Wunused-variable]
+   31 | static const char *pgwt_class_names[PGWT_NUM_CLASSES] = {
+      |                    ^~~~~~~~~~~~~~~~
+cc -g -O2 -Wall -I../src -I../include -DPGWT_SERVER -o test_idle_accounting test_idle_accounting.c ../src/compute.c ../build/wait_event.o ../build/idle_rule.o ../build/spawn.o ../build/cJSON.o -lm
+In file included from test_idle_accounting.c:61:
+../src/compute.h:65:20: warning: ‘pgwt_cat_names’ defined but not used [-Wunused-variable]
+   65 | static const char *pgwt_cat_names[PGWT_NUM_CATS] = {
+      |                    ^~~~~~~~~~~~~~
+../src/compute.h:37:20: warning: ‘pgwt_class_display’ defined but not used [-Wunused-variable]
+   37 | static const char *pgwt_class_display[PGWT_NUM_CLASSES] = {
+      |                    ^~~~~~~~~~~~~~~~~~
+../src/compute.h:31:20: warning: ‘pgwt_class_names’ defined but not used [-Wunused-variable]
+   31 | static const char *pgwt_class_names[PGWT_NUM_CLASSES] = {
+      |                    ^~~~~~~~~~~~~~~~
+cc -g -O2 -Wall -I../src -I../include -DPGWT_SERVER -o test_idle_summary test_idle_summary.c ../src/compute.c ../build/server_summary_writer.o ../build/server_summary_reader.o ../build/server_event_writer.o ../build/wait_event.o ../build/idle_rule.o ../build/spawn.o ../build/cJSON.o -llz4 -lz -lm
+In file included from test_idle_summary.c:52:
+../src/compute.h:65:20: warning: ‘pgwt_cat_names’ defined but not used [-Wunused-variable]
+   65 | static const char *pgwt_cat_names[PGWT_NUM_CATS] = {
+      |                    ^~~~~~~~~~~~~~
+../src/compute.h:37:20: warning: ‘pgwt_class_display’ defined but not used [-Wunused-variable]
+   37 | static const char *pgwt_class_display[PGWT_NUM_CLASSES] = {
+      |                    ^~~~~~~~~~~~~~~~~~
+../src/compute.h:31:20: warning: ‘pgwt_class_names’ defined but not used [-Wunused-variable]
+   31 | static const char *pgwt_class_names[PGWT_NUM_CLASSES] = {
+      |                    ^~~~~~~~~~~~~~~~
+cc -g -O2 -Wall -I../src -I../include -DPGWT_SERVER -o test_agg_raw_crosscheck test_agg_raw_crosscheck.c ../src/compute.c ../build/server_summary_writer.o ../build/server_summary_reader.o ../build/server_event_writer.o ../build/wait_event.o ../build/idle_rule.o ../build/spawn.o ../build/cJSON.o -llz4 -lz -lm
+In file included from ../src/compute.c:6:
+../src/compute.h:65:20: warning: ‘pgwt_cat_names’ defined but not used [-Wunused-variable]
+   65 | static const char *pgwt_cat_names[PGWT_NUM_CATS] = {
+      |                    ^~~~~~~~~~~~~~
+In file included from test_agg_raw_crosscheck.c:312:
+../src/compute.h:65:20: warning: ‘pgwt_cat_names’ defined but not used [-Wunused-variable]
+   65 | static const char *pgwt_cat_names[PGWT_NUM_CATS] = {
+      |                    ^~~~~~~~~~~~~~
+../src/compute.h:37:20: warning: ‘pgwt_class_display’ defined but not used [-Wunused-variable]
+   37 | static const char *pgwt_class_display[PGWT_NUM_CLASSES] = {
+      |                    ^~~~~~~~~~~~~~~~~~
+In file included from ../src/compute.c:6:
+../src/compute.h:65:20: warning: ‘pgwt_cat_names’ defined but not used [-Wunused-variable]
+   65 | static const char *pgwt_cat_names[PGWT_NUM_CATS] = {
+      |                    ^~~~~~~~~~~~~~
+In file included from ../src/compute.c:6:
+../src/compute.h:65:20: warning: ‘pgwt_cat_names’ defined but not used [-Wunused-variable]
+   65 | static const char *pgwt_cat_names[PGWT_NUM_CATS] = {
+      |                    ^~~~~~~~~~~~~~
+In file included from ../src/compute.c:6:
+../src/compute.h:65:20: warning: ‘pgwt_cat_names’ defined but not used [-Wunused-variable]
+   65 | static const char *pgwt_cat_names[PGWT_NUM_CATS] = {
+      |                    ^~~~~~~~~~~~~~
+../src/compute.c: In function ‘pgwt_compute_transitions’:
+../src/compute.c:3154:40: warning: argument 1 range [18446744071562067968, 18446744073709551615] exceeds maximum object size 9223372036854775807 [-Walloc-size-larger-than=]
+ 3154 |     struct pgwt_transition_row *rows = calloc(nr, sizeof(*rows));
+      |                                        ^~~~~~~~~~~~~~~~~~~~~~~~~
+In file included from ../src/percentile.h:32,
+                 from ../src/compute.c:12:
+/usr/include/stdlib.h:675:14: note: in a call to allocation function ‘calloc’ declared here
+  675 | extern void *calloc (size_t __nmemb, size_t __size)
+      |              ^~~~~~
+../src/compute.c: In function ‘pgwt_compute_transitions’:
+../src/compute.c:3154:40: warning: argument 1 range [18446744071562067968, 18446744073709551615] exceeds maximum object size 9223372036854775807 [-Walloc-size-larger-than=]
+ 3154 |     struct pgwt_transition_row *rows = calloc(nr, sizeof(*rows));
+      |                                        ^~~~~~~~~~~~~~~~~~~~~~~~~
+In file included from ../src/percentile.h:32,
+                 from ../src/compute.c:12:
+/usr/include/stdlib.h:675:14: note: in a call to allocation function ‘calloc’ declared here
+  675 | extern void *calloc (size_t __nmemb, size_t __size)
+      |              ^~~~~~
+cc -g -O2 -Wall -I../src -I../include -DPGWT_SERVER -o test_exec_index test_exec_index.c ../src/exec_index.c ../src/compute.c ../build/wait_event.o ../build/idle_rule.o ../build/spawn.o ../build/cJSON.o -lm
+In file included from ../src/exec_index.h:87,
+                 from test_exec_index.c:61:
+../src/compute.h:65:20: warning: ‘pgwt_cat_names’ defined but not used [-Wunused-variable]
+   65 | static const char *pgwt_cat_names[PGWT_NUM_CATS] = {
+      |                    ^~~~~~~~~~~~~~
+../src/compute.h:37:20: warning: ‘pgwt_class_display’ defined but not used [-Wunused-variable]
+   37 | static const char *pgwt_class_display[PGWT_NUM_CLASSES] = {
+      |                    ^~~~~~~~~~~~~~~~~~
+../src/compute.h:31:20: warning: ‘pgwt_class_names’ defined but not used [-Wunused-variable]
+   31 | static const char *pgwt_class_names[PGWT_NUM_CLASSES] = {
+      |                    ^~~~~~~~~~~~~~~~
+../src/compute.c: In function ‘pgwt_compute_transitions’:
+../src/compute.c:3154:40: warning: argument 1 range [18446744071562067968, 18446744073709551615] exceeds maximum object size 9223372036854775807 [-Walloc-size-larger-than=]
+ 3154 |     struct pgwt_transition_row *rows = calloc(nr, sizeof(*rows));
+      |                                        ^~~~~~~~~~~~~~~~~~~~~~~~~
+In file included from ../src/percentile.h:32,
+                 from ../src/compute.c:12:
+/usr/include/stdlib.h:675:14: note: in a call to allocation function ‘calloc’ declared here
+  675 | extern void *calloc (size_t __nmemb, size_t __size)
+      |              ^~~~~~
+cc -g -O2 -Wall -I../src -I../include -DPGWT_SERVER -o test_interval_index test_interval_index.c ../src/interval_index.c ../src/compute.c ../build/wait_event.o ../build/idle_rule.o ../build/spawn.o ../build/cJSON.o -lm
+In file included from ../src/interval_index.h:121,
+                 from test_interval_index.c:81:
+../src/compute.h:65:20: warning: ‘pgwt_cat_names’ defined but not used [-Wunused-variable]
+   65 | static const char *pgwt_cat_names[PGWT_NUM_CATS] = {
+      |                    ^~~~~~~~~~~~~~
+../src/compute.h:37:20: warning: ‘pgwt_class_display’ defined but not used [-Wunused-variable]
+   37 | static const char *pgwt_class_display[PGWT_NUM_CLASSES] = {
+      |                    ^~~~~~~~~~~~~~~~~~
+../src/compute.h:31:20: warning: ‘pgwt_class_names’ defined but not used [-Wunused-variable]
+   31 | static const char *pgwt_class_names[PGWT_NUM_CLASSES] = {
+      |                    ^~~~~~~~~~~~~~~~
+../src/compute.c: In function ‘pgwt_compute_transitions’:
+../src/compute.c:3154:40: warning: argument 1 range [18446744071562067968, 18446744073709551615] exceeds maximum object size 9223372036854775807 [-Walloc-size-larger-than=]
+ 3154 |     struct pgwt_transition_row *rows = calloc(nr, sizeof(*rows));
+      |                                        ^~~~~~~~~~~~~~~~~~~~~~~~~
+In file included from ../src/percentile.h:32,
+                 from ../src/compute.c:12:
+/usr/include/stdlib.h:675:14: note: in a call to allocation function ‘calloc’ declared here
+  675 | extern void *calloc (size_t __nmemb, size_t __size)
+      |              ^~~~~~
+In file included from ../src/exec_index.h:87,
+                 from ../src/exec_index.c:36:
+../src/compute.h:65:20: warning: ‘pgwt_cat_names’ defined but not used [-Wunused-variable]
+   65 | static const char *pgwt_cat_names[PGWT_NUM_CATS] = {
+      |                    ^~~~~~~~~~~~~~
+../src/compute.h:37:20: warning: ‘pgwt_class_display’ defined but not used [-Wunused-variable]
+   37 | static const char *pgwt_class_display[PGWT_NUM_CLASSES] = {
+      |                    ^~~~~~~~~~~~~~~~~~
+../src/compute.h:31:20: warning: ‘pgwt_class_names’ defined but not used [-Wunused-variable]
+   31 | static const char *pgwt_class_names[PGWT_NUM_CLASSES] = {
+      |                    ^~~~~~~~~~~~~~~~
+cc -g -O2 -Wall -I../src -I../include -o test_alloc_tune test_alloc_tune.c
+In file included from ../src/compute.c:6:
+../src/compute.h:65:20: warning: ‘pgwt_cat_names’ defined but not used [-Wunused-variable]
+   65 | static const char *pgwt_cat_names[PGWT_NUM_CATS] = {
+      |                    ^~~~~~~~~~~~~~
+cc -g -O2 -Wall -I../src -I../include -DPGWT_SERVER -o gen_test_traces gen_test_traces.c ../build/server_event_writer.o ../build/server_summary_writer.o ../build/server_wait_event.o ../build/server_idle_rule.o ../build/server_spawn.o ../build/server_cJSON.o -llz4
+gen_test_traces.c: In function ‘rotate_output’:
+gen_test_traces.c:601:5: warning: implicit declaration of function ‘unlink’ [-Wimplicit-function-declaration]
+  601 |     unlink(oldp);
+      |     ^~~~~~
+gen_test_traces.c: In function ‘read_file’:
+gen_test_traces.c:348:5: warning: ignoring return value of ‘fread’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
+  348 |     fread(buf, 1, sz, f);
+      |     ^~~~~~~~~~~~~~~~~~~~
+In file included from ../src/interval_index.h:121,
+                 from ../src/interval_index.c:15:
+../src/compute.h:65:20: warning: ‘pgwt_cat_names’ defined but not used [-Wunused-variable]
+   65 | static const char *pgwt_cat_names[PGWT_NUM_CATS] = {
+      |                    ^~~~~~~~~~~~~~
+../src/compute.h:37:20: warning: ‘pgwt_class_display’ defined but not used [-Wunused-variable]
+   37 | static const char *pgwt_class_display[PGWT_NUM_CLASSES] = {
+      |                    ^~~~~~~~~~~~~~~~~~
+../src/compute.h:31:20: warning: ‘pgwt_class_names’ defined but not used [-Wunused-variable]
+   31 | static const char *pgwt_class_names[PGWT_NUM_CLASSES] = {
+      |                    ^~~~~~~~~~~~~~~~
+cc -g -O2 -Wall -I../src -I../include -DPGWT_SERVER -o gen_bench_traces gen_bench_traces.c ../build/server_event_writer.o ../build/server_summary_writer.o ../build/server_wait_event.o ../build/server_idle_rule.o ../build/server_spawn.o ../build/server_cJSON.o -llz4
+cc -g -O2 -Wall -I../src -I../include -o test_concurrent_rw test_concurrent_rw.c ../build/event_reader.o ../build/event_writer.o ../build/map_reader.o ../build/wait_event.o ../build/idle_rule.o ../build/spawn.o ../build/cJSON.o ../build/discovery.o ../build/backend_status_layout.o -llz4 -lbpf -lelf -lz
+cc -g -O2 -Wall -I../src -I../include -DPGWT_SERVER -o cross_validate cross_validate.c ../build/server_event_reader.o ../build/server_event_writer.o ../build/server_wait_event.o ../build/server_idle_rule.o ../build/server_spawn.o ../build/server_cJSON.o -llz4 -lz
+test_concurrent_rw.c: In function ‘main’:
+test_concurrent_rw.c:188:5: warning: ignoring return value of ‘system’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
+  188 |     system(cmd);
+      |     ^~~~~~~~~~~
+test_concurrent_rw.c:262:5: warning: ignoring return value of ‘system’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
+  262 |     system(cmd);
+      |     ^~~~~~~~~~~
+In file included from ../src/compute.c:6:
+../src/compute.h:65:20: warning: ‘pgwt_cat_names’ defined but not used [-Wunused-variable]
+   65 | static const char *pgwt_cat_names[PGWT_NUM_CATS] = {
+      |                    ^~~~~~~~~~~~~~
+cc -g -O2 -Wall -I../src -I../include -DPGWT_SERVER -o dump_markers dump_markers.c ../build/server_event_reader.o ../build/server_event_writer.o ../build/server_wait_event.o ../build/server_idle_rule.o ../build/server_spawn.o ../build/server_cJSON.o -llz4 -lz
+cc -g -O2 -Wall -I../src -I../include -DPGWT_SERVER -o wait_cpu_canary wait_cpu_canary.c ../build/server_event_reader.o ../build/server_event_writer.o ../build/server_wait_event.o ../build/server_idle_rule.o ../build/server_compute.o ../build/server_summary_reader.o ../build/server_summary_writer.o ../build/server_spawn.o ../build/server_cJSON.o -llz4 -lz
+In file included from wait_cpu_canary.c:57:
+../src/compute.h:65:20: warning: ‘pgwt_cat_names’ defined but not used [-Wunused-variable]
+   65 | static const char *pgwt_cat_names[PGWT_NUM_CATS] = {
+      |                    ^~~~~~~~~~~~~~
+../src/compute.h:31:20: warning: ‘pgwt_class_names’ defined but not used [-Wunused-variable]
+   31 | static const char *pgwt_class_names[PGWT_NUM_CLASSES] = {
+      |                    ^~~~~~~~~~~~~~~~
+cc -g -O2 -Wall -I../src -I../include -DPGWT_SERVER -DWCC_NO_MAIN -o test_wait_cpu_canary test_wait_cpu_canary.c \
+      ../build/server_event_reader.o ../build/server_event_writer.o \
+      ../build/server_wait_event.o ../build/server_idle_rule.o ../build/server_compute.o \
+      ../build/server_summary_reader.o ../build/server_summary_writer.o \
+      ../build/server_spawn.o ../build/server_cJSON.o -llz4 -lz
+In file included from wait_cpu_canary.c:57,
+                 from test_wait_cpu_canary.c:19:
+../src/compute.h:65:20: warning: ‘pgwt_cat_names’ defined but not used [-Wunused-variable]
+   65 | static const char *pgwt_cat_names[PGWT_NUM_CATS] = {
+      |                    ^~~~~~~~~~~~~~
+../src/compute.h:37:20: warning: ‘pgwt_class_display’ defined but not used [-Wunused-variable]
+   37 | static const char *pgwt_class_display[PGWT_NUM_CLASSES] = {
+      |                    ^~~~~~~~~~~~~~~~~~
+../src/compute.h:31:20: warning: ‘pgwt_class_names’ defined but not used [-Wunused-variable]
+   31 | static const char *pgwt_class_names[PGWT_NUM_CLASSES] = {
+      |                    ^~~~~~~~~~~~~~~~
+cc -g -O2 -Wall -I../src -I../include -DPGWT_SERVER -o test_summary_tick_flush test_summary_tick_flush.c ../build/server_summary_writer.o ../build/server_summary_reader.o ../build/server_event_writer.o ../build/server_wait_event.o ../build/server_idle_rule.o ../build/server_spawn.o ../build/server_cJSON.o -llz4 -lz
+cc -g -O2 -Wall -I../src -I../include -DPGWT_SERVER -o test_block_agg test_block_agg.c ../src/block_agg.c ../src/compute.c ../build/server_event_reader.o ../build/server_event_writer.o ../build/wait_event.o ../build/idle_rule.o ../build/spawn.o ../build/cJSON.o -llz4 -lm
+In file included from test_block_agg.c:75:
+../src/compute.h:65:20: warning: ‘pgwt_cat_names’ defined but not used [-Wunused-variable]
+   65 | static const char *pgwt_cat_names[PGWT_NUM_CATS] = {
+      |                    ^~~~~~~~~~~~~~
+../src/compute.h:37:20: warning: ‘pgwt_class_display’ defined but not used [-Wunused-variable]
+   37 | static const char *pgwt_class_display[PGWT_NUM_CLASSES] = {
+      |                    ^~~~~~~~~~~~~~~~~~
+../src/compute.h:31:20: warning: ‘pgwt_class_names’ defined but not used [-Wunused-variable]
+   31 | static const char *pgwt_class_names[PGWT_NUM_CLASSES] = {
+      |                    ^~~~~~~~~~~~~~~~
+cc -g -O2 -Wall -I../src -I../include -DPGWT_SERVER -o bench_block_agg bench_block_agg.c ../src/block_agg.c ../src/compute.c ../build/server_event_reader.o ../build/server_event_writer.o ../build/wait_event.o ../build/idle_rule.o ../build/spawn.o ../build/cJSON.o -llz4 -lm
+In file included from bench_block_agg.c:20:
+../src/compute.h:65:20: warning: ‘pgwt_cat_names’ defined but not used [-Wunused-variable]
+   65 | static const char *pgwt_cat_names[PGWT_NUM_CATS] = {
+      |                    ^~~~~~~~~~~~~~
+../src/compute.h:37:20: warning: ‘pgwt_class_display’ defined but not used [-Wunused-variable]
+   37 | static const char *pgwt_class_display[PGWT_NUM_CLASSES] = {
+      |                    ^~~~~~~~~~~~~~~~~~
+../src/compute.h:31:20: warning: ‘pgwt_class_names’ defined but not used [-Wunused-variable]
+   31 | static const char *pgwt_class_names[PGWT_NUM_CLASSES] = {
+      |                    ^~~~~~~~~~~~~~~~
+../src/compute.c: In function ‘pgwt_compute_transitions’:
+../src/compute.c:3154:40: warning: argument 1 range [18446744071562067968, 18446744073709551615] exceeds maximum object size 9223372036854775807 [-Walloc-size-larger-than=]
+ 3154 |     struct pgwt_transition_row *rows = calloc(nr, sizeof(*rows));
+      |                                        ^~~~~~~~~~~~~~~~~~~~~~~~~
+In file included from ../src/percentile.h:32,
+                 from ../src/compute.c:12:
+/usr/include/stdlib.h:675:14: note: in a call to allocation function ‘calloc’ declared here
+  675 | extern void *calloc (size_t __nmemb, size_t __size)
+      |              ^~~~~~
+In file included from ../src/block_agg.c:10:
+../src/compute.h:65:20: warning: ‘pgwt_cat_names’ defined but not used [-Wunused-variable]
+   65 | static const char *pgwt_cat_names[PGWT_NUM_CATS] = {
+      |                    ^~~~~~~~~~~~~~
+../src/compute.h:37:20: warning: ‘pgwt_class_display’ defined but not used [-Wunused-variable]
+   37 | static const char *pgwt_class_display[PGWT_NUM_CLASSES] = {
+      |                    ^~~~~~~~~~~~~~~~~~
+../src/compute.h:31:20: warning: ‘pgwt_class_names’ defined but not used [-Wunused-variable]
+   31 | static const char *pgwt_class_names[PGWT_NUM_CLASSES] = {
+      |                    ^~~~~~~~~~~~~~~~
+../src/compute.c: In function ‘pgwt_compute_transitions’:
+../src/compute.c:3154:40: warning: argument 1 range [18446744071562067968, 18446744073709551615] exceeds maximum object size 9223372036854775807 [-Walloc-size-larger-than=]
+ 3154 |     struct pgwt_transition_row *rows = calloc(nr, sizeof(*rows));
+      |                                        ^~~~~~~~~~~~~~~~~~~~~~~~~
+In file included from ../src/percentile.h:32,
+                 from ../src/compute.c:12:
+/usr/include/stdlib.h:675:14: note: in a call to allocation function ‘calloc’ declared here
+  675 | extern void *calloc (size_t __nmemb, size_t __size)
+      |              ^~~~~~
+In file included from ../src/compute.c:6:
+../src/compute.h:65:20: warning: ‘pgwt_cat_names’ defined but not used [-Wunused-variable]
+   65 | static const char *pgwt_cat_names[PGWT_NUM_CATS] = {
+      |                    ^~~~~~~~~~~~~~
+cc -g -O2 -Wall -I../src -I../include -DPGWT_SERVER -o test_transitions_loader test_transitions_loader.c ../build/server_compute.o ../build/server_block_agg.o ../build/server_event_reader.o ../build/server_event_writer.o ../build/server_summary_writer.o ../build/server_summary_reader.o ../build/server_wait_event.o ../build/server_idle_rule.o ../build/server_spawn.o ../build/server_cmdline.o ../build/server_backend_meta.o ../build/server_cJSON.o -lz -llz4 -lm
+In file included from ../src/block_agg.c:10:
+../src/compute.h:65:20: warning: ‘pgwt_cat_names’ defined but not used [-Wunused-variable]
+   65 | static const char *pgwt_cat_names[PGWT_NUM_CATS] = {
+      |                    ^~~~~~~~~~~~~~
+../src/compute.h:37:20: warning: ‘pgwt_class_display’ defined but not used [-Wunused-variable]
+   37 | static const char *pgwt_class_display[PGWT_NUM_CLASSES] = {
+      |                    ^~~~~~~~~~~~~~~~~~
+../src/compute.h:31:20: warning: ‘pgwt_class_names’ defined but not used [-Wunused-variable]
+   31 | static const char *pgwt_class_names[PGWT_NUM_CLASSES] = {
+      |                    ^~~~~~~~~~~~~~~~
+In file included from ../src/server.c:10,
+                 from test_transitions_loader.c:9:
+../src/compute.h:37:20: warning: ‘pgwt_class_display’ defined but not used [-Wunused-variable]
+   37 | static const char *pgwt_class_display[PGWT_NUM_CLASSES] = {
+      |                    ^~~~~~~~~~~~~~~~~~
+cc -g -O2 -Wall -I../src -I../include -o test_replay_fidelity test_replay_fidelity.c ../src/event_reader.c map_reader_core.o ../build/server_event_writer.o ../build/server_wait_event.o ../build/server_idle_rule.o ../build/server_spawn.o ../build/server_cJSON.o -llz4 -lz
+In file included from ../src/compute.c:6:
+../src/compute.h:65:20: warning: ‘pgwt_cat_names’ defined but not used [-Wunused-variable]
+   65 | static const char *pgwt_cat_names[PGWT_NUM_CATS] = {
+      |                    ^~~~~~~~~~~~~~
+../src/compute.c: In function ‘pgwt_compute_transitions’:
+../src/compute.c:3154:40: warning: argument 1 range [18446744071562067968, 18446744073709551615] exceeds maximum object size 9223372036854775807 [-Walloc-size-larger-than=]
+ 3154 |     struct pgwt_transition_row *rows = calloc(nr, sizeof(*rows));
+      |                                        ^~~~~~~~~~~~~~~~~~~~~~~~~
+In file included from ../src/percentile.h:32,
+                 from ../src/compute.c:12:
+/usr/include/stdlib.h:675:14: note: in a call to allocation function ‘calloc’ declared here
+  675 | extern void *calloc (size_t __nmemb, size_t __size)
+      |              ^~~~~~
+../src/server.c: In function ‘coverage_refresh’:
+../src/server.c:1700:43: warning: ‘%s’ directive output may be truncated writing up to 137215 bytes into a region of size 512 [-Wformat-truncation=]
+ 1700 |     snprintf(fc->path, sizeof(fc->path), "%s", path);
+      |                                           ^~
+In file included from /usr/include/stdio.h:980,
+                 from ../src/event_writer.h:10,
+                 from ../src/block_agg.h:135,
+                 from ../src/server.c:7:
+In function ‘snprintf’,
+    inlined from ‘cov_find_or_add’ at ../src/server.c:1700:5,
+    inlined from ‘coverage_refresh’ at ../src/server.c:2203:36:
+/usr/include/x86_64-linux-gnu/bits/stdio2.h:54:10: note: ‘__builtin_snprintf’ output between 1 and 137216 bytes into a destination of size 512
+   54 |   return __builtin___snprintf_chk (__s, __n, __USE_FORTIFY_LEVEL - 1,
+      |          ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+   55 |                                    __glibc_objsize (__s), __fmt,
+      |                                    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+   56 |                                    __va_arg_pack ());
+      |                                    ~~~~~~~~~~~~~~~~~
+../src/compute.c: In function ‘pgwt_compute_transitions’:
+../src/compute.c:3154:40: warning: argument 1 range [18446744071562067968, 18446744073709551615] exceeds maximum object size 9223372036854775807 [-Walloc-size-larger-than=]
+ 3154 |     struct pgwt_transition_row *rows = calloc(nr, sizeof(*rows));
+      |                                        ^~~~~~~~~~~~~~~~~~~~~~~~~
+In file included from ../src/percentile.h:32,
+                 from ../src/compute.c:12:
+/usr/include/stdlib.h:675:14: note: in a call to allocation function ‘calloc’ declared here
+  675 | extern void *calloc (size_t __nmemb, size_t __size)
+      |              ^~~~~~
+make: Leaving directory '/root/cx-executions-356/final/tests'

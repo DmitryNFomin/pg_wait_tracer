@@ -1,0 +1,50 @@
+EXREQUEST {"id": 1, "cmd": "info"}
+pgwt-server: loaded event names from wait_event_names.json
+pgwt-server: 1 trace files, 4 CPUs, ~9199616 events
+pgwt-server: loaded 29 query texts
+pgwt-server: loaded 168 backend metadata entries
+pgwt-server: loaded 29 query texts
+pgwt-server: loaded 168 backend metadata entries
+EXREQUEST {"id": 2, "cmd": "executions", "from": 1791800864284323682, "to": 1791801764284323682, "filters": {}, "limit": 100, "sort": "duration_desc"}
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1239 served=0 resets=0
+EXSTATES states=147 rows=859930 events=6726385
+EXPHASE id=2 window=5072061 prefix=1654324 load=1146.518 prefix_ms=19.707 combine_links=50.276 compute=195.586
+EXEMIT id=2 rows=501398 returned=100 rank=175.067 serialize=0.314
+EXREQUEST {"id": 3, "cmd": "executions", "from": 1791800864284323682, "to": 1791801764284323682, "filters": {}, "limit": 100, "sort": "duration_desc"}
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1239 served=1239 resets=0
+EXSTATES states=147 rows=859930 events=6726385
+EXPHASE id=3 window=5072061 prefix=1654324 load=219.566 prefix_ms=18.164 combine_links=15.767 compute=177.877
+EXEMIT id=3 rows=501398 returned=100 rank=165.171 serialize=0.377
+EXREQUEST {"id": 4, "cmd": "executions", "from": 1791800864284323682, "to": 1791801764284323682, "filters": {}, "limit": 100, "sort": "duration_desc"}
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1239 served=2478 resets=0
+EXSTATES states=147 rows=859930 events=6726385
+EXPHASE id=4 window=5072061 prefix=1654324 load=210.980 prefix_ms=17.985 combine_links=15.846 compute=167.782
+EXEMIT id=4 rows=501398 returned=100 rank=150.577 serialize=0.301
+EXREQUEST {"id": 5, "cmd": "executions", "from": 1791800864284323682, "to": 1791801764284323682, "filters": {}, "limit": 100, "sort": "duration_desc"}
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1239 served=3717 resets=0
+EXSTATES states=147 rows=859930 events=6726385
+EXPHASE id=5 window=5072061 prefix=1654324 load=213.012 prefix_ms=18.044 combine_links=15.501 compute=173.270
+EXEMIT id=5 rows=501398 returned=100 rank=144.195 serialize=0.315
+EXREQUEST {"id": 6, "cmd": "executions", "from": 1791800864284323682, "to": 1791801764284323682, "filters": {}, "limit": 100, "sort": "duration_desc"}
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1239 served=4956 resets=0
+EXSTATES states=147 rows=859930 events=6726385
+EXPHASE id=6 window=5072061 prefix=1654324 load=222.571 prefix_ms=18.059 combine_links=16.255 compute=186.788
+EXEMIT id=6 rows=501398 returned=100 rank=148.483 serialize=0.359
+EXREQUEST {"id": 7, "cmd": "executions", "from": 1791800864284323682, "to": 1791801764284323682, "filters": {}, "limit": 100, "sort": "duration_desc"}
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1239 served=6195 resets=0
+EXSTATES states=147 rows=859930 events=6726385
+EXPHASE id=7 window=5072061 prefix=1654324 load=217.303 prefix_ms=18.436 combine_links=17.853 compute=193.594
+EXEMIT id=7 rows=501398 returned=100 rank=148.028 serialize=0.339
+EXREQUEST {"id": 8, "cmd": "executions", "from": 1791800864284323682, "to": 1791801764284323682, "filters": {}, "limit": 100, "sort": "duration_desc"}
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1239 served=7434 resets=0
+EXSTATES states=147 rows=859930 events=6726385
+EXPHASE id=8 window=5072061 prefix=1654324 load=226.065 prefix_ms=22.417 combine_links=15.277 compute=169.990
+EXEMIT id=8 rows=501398 returned=100 rank=155.901 serialize=0.309
+EXREQUEST {"id": 9, "cmd": "transitions", "from": 1791800864284323682, "to": 1791801764284323682, "filters": {}}
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1239 served=8673 resets=0
+EXREQUEST {"id": 10, "cmd": "transitions", "from": 1791800864284323682, "to": 1791801764284323682, "filters": {}}
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1239 served=9912 resets=0
+EXREQUEST {"id": 11, "cmd": "transitions", "from": 1791800864284323682, "to": 1791801764284323682, "filters": {}}
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1239 served=11151 resets=0
+EXREQUEST {"id": 12, "cmd": "transitions", "from": 1791800864284323682, "to": 1791801764284323682, "filters": {}}
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1239 served=12390 resets=0

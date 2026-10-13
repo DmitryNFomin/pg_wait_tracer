@@ -4033,11 +4033,14 @@ struct exec_pid_state {
 };
 
 static int exec_pid_state_get(struct exec_pid_state **states, int *n_states,
-                              int *cap_states, uint32_t pid)
+                              int *cap_states, struct pgwt_pid_index *ix,
+                              uint32_t pid)
 {
-    for (int i = 0; i < *n_states; i++)
-        if ((*states)[i].pid == pid)
-            return i;
+    /* Store slots, not pointers: growing states must not invalidate the map.
+     * Connection churn otherwise makes every event scan all historical pids. */
+    int found = pgwt_pid_index_find(ix, pid);
+    if (found >= 0)
+        return found;
 
     if (*n_states >= *cap_states) {
         int new_cap = *cap_states ? *cap_states * 2 : 64;
@@ -4049,7 +4052,10 @@ static int exec_pid_state_get(struct exec_pid_state **states, int *n_states,
         *cap_states = new_cap;
     }
 
-    int idx = (*n_states)++;
+    int idx = *n_states;
+    if (pgwt_pid_index_put(ix, pid, idx) != 0)
+        return -1;
+    (*n_states)++;
     memset(&(*states)[idx], 0, sizeof((*states)[idx]));
     (*states)[idx].pid = pid;
     return idx;
@@ -4147,6 +4153,8 @@ void pgwt_compute_executions(const struct pgwt_trace_event *events, int count,
     int n_rows = 0, cap_rows = 0;
     struct exec_pid_state *states = NULL;
     int n_states = 0, cap_states = 0;
+    struct pgwt_pid_index pid_ix;
+    pgwt_pid_index_init(&pid_ix);
     int *worker_last_row = NULL;
     if (n_links > 0) {
         worker_last_row = malloc(n_links * sizeof(*worker_last_row));
@@ -4159,7 +4167,8 @@ void pgwt_compute_executions(const struct pgwt_trace_event *events, int count,
 
     for (int i = 0; i < count; i++) {
         const struct pgwt_trace_event *ev = &events[i];
-        int si = exec_pid_state_get(&states, &n_states, &cap_states, ev->pid);
+        int si = exec_pid_state_get(&states, &n_states, &cap_states,
+                                    &pid_ix, ev->pid);
         if (si < 0) {
             out->failed = 1;
             break;
@@ -4341,7 +4350,7 @@ void pgwt_compute_executions(const struct pgwt_trace_event *events, int count,
                ? worker_link_index(links, n_links, ev->pid) : -1;
         if (wi >= 0) {
             int li = exec_pid_state_get(&states, &n_states, &cap_states,
-                                        links[wi].leader_pid);
+                                        &pid_ix, links[wi].leader_pid);
             if (li < 0) {
                 out->failed = 1;
                 break;
@@ -4361,6 +4370,7 @@ void pgwt_compute_executions(const struct pgwt_trace_event *events, int count,
     for (int i = 0; i < n_states; i++)
         free(states[i].open_rows);
     free(states);
+    pgwt_pid_index_free(&pid_ix);
     if (out->failed) {
         free(rows);
     } else {

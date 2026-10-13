@@ -1,0 +1,7 @@
+{"arm": "before", "call": 0, "excluded_cold": true, "ttfp_ms": 1219, "state": {"from": 1791800864284323600, "to": 1791801764284323600, "live": false}}
+{"arm": "before", "call": 1, "excluded_cold": false, "ttfp_ms": 757, "state": {"from": 1791800864284323600, "to": 1791801764284323600, "live": false}}
+{"arm": "before", "call": 2, "excluded_cold": false, "ttfp_ms": 800, "state": {"from": 1791800864284323600, "to": 1791801764284323600, "live": false}}
+{"arm": "before", "call": 3, "excluded_cold": false, "ttfp_ms": 746, "state": {"from": 1791800864284323600, "to": 1791801764284323600, "live": false}}
+{"arm": "before", "call": 4, "excluded_cold": false, "ttfp_ms": 766, "state": {"from": 1791800864284323600, "to": 1791801764284323600, "live": false}}
+{"arm": "before", "call": 5, "excluded_cold": false, "ttfp_ms": 815, "state": {"from": 1791800864284323600, "to": 1791801764284323600, "live": false}}
+{"arm": "before", "call": 6, "excluded_cold": false, "ttfp_ms": 768, "state": {"from": 1791800864284323600, "to": 1791801764284323600, "live": false}}
