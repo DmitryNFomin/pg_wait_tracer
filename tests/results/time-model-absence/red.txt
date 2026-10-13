@@ -1,0 +1,14 @@
+test_empty_window complete
+test_zero_fraction_records complete (8 individual cases + combined)
+test_nonempty_windows complete (9 nonempty snapshots)
+FAIL: test_time_model_absence (9 failures)
+FAIL: !tm.has_measured_cpu (test_time_model_absence.c:69)
+FAIL: !tm.has_measured_cpu (test_time_model_absence.c:69)
+FAIL: !tm.has_measured_cpu (test_time_model_absence.c:69)
+FAIL: !tm.has_measured_cpu (test_time_model_absence.c:69)
+FAIL: !tm.has_measured_cpu (test_time_model_absence.c:69)
+FAIL: !tm.has_measured_cpu (test_time_model_absence.c:69)
+FAIL: !tm.has_measured_cpu (test_time_model_absence.c:69)
+FAIL: !tm.has_measured_cpu (test_time_model_absence.c:69)
+FAIL: !tm.has_measured_cpu (test_time_model_absence.c:78)
+exit_status=1

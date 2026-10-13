@@ -258,6 +258,68 @@ def test_offcpu_diagnostic_unavailable_without_measured_cpu():
           "unavailable Off-CPU is not reported as a measured zero")
 
 
+# #387 x the reporting-only diagnostic (merge of agent/cx-387-absence into
+# the branch that replaced time_model_offcpu_cap_ok with
+# time_model_offcpu_diagnostic). src/compute.c now only sets
+# has_measured_cpu when a record has a NON-ZERO in-window fraction, so an
+# empty window -- records selected by end timestamp but with no overlap --
+# arrives here as has_measured_cpu=False while every scalar is 0.0. The two
+# changes have to compose into THREE distinguishable readings, because a
+# scalar 0.0 is a legitimate measurement in one of them:
+#   absence       has_measured_cpu=False -> available False, pct None
+#   no denominator exact data, db_time below the floor -> available False,
+#                 pct None, but a DIFFERENT reason string
+#   checked clean exact data, real db_time, 0.0 residual -> available True,
+#                 pct 0.0 (a measured zero, not None)
+# Asserted with `is None` / `== 0.0` rather than truthiness: `not pct`
+# holds for both None and 0.0, which is exactly the conflation #387 exists
+# to prevent.
+def test_offcpu_diagnostic_empty_window_absence_vs_measured_zero():
+    absent = lib.time_model_offcpu_diagnostic(
+        offcpu_ms=0.0, db_time_ms=0.0, has_measured_cpu=False)
+    no_denom = lib.time_model_offcpu_diagnostic(
+        offcpu_ms=0.0, db_time_ms=0.0, has_measured_cpu=True)
+    clean = lib.time_model_offcpu_diagnostic(
+        offcpu_ms=0.0, db_time_ms=10000.0, has_measured_cpu=True)
+    check(absent["available"] is False and absent["pct"] is None
+          and absent["offcpu_ms"] is None,
+          f"an empty window reports absence, not a measured zero ({absent})")
+    check(absent["ok"] is None and absent["gating"] is False,
+          f"absence is not a verdict either way ({absent})")
+    check("unavailable, not zero" in absent["detail"],
+          f"the absence reason is spelled out for a reader ({absent['detail']})")
+    check(no_denom["available"] is False and no_denom["pct"] is None
+          and no_denom["detail"] != absent["detail"],
+          f"exact data with no DB Time is its own reason, not the absence one "
+          f"({no_denom['detail']})")
+    check(clean["available"] is True and clean["pct"] == 0.0
+          and clean["offcpu_ms"] == 0.0,
+          f"checked-and-clean keeps its measured zero ({clean})")
+    check(clean["detail"] != absent["detail"]
+          and clean["available"] != absent["available"],
+          f"'checked and clean' is distinguishable from 'not applicable' "
+          f"({clean['detail']} vs {absent['detail']})")
+
+
+def test_evaluate_window_empty_window_offcpu_is_absent_not_clean():
+    """The same combination through the full per-window evaluator: an empty
+    window must not produce an `offcpu` block that reads as a measured,
+    clean 0%. Conservation's own nonzero-DB-Time floor is what fails the
+    window; the diagnostic's job is only to stay honest about absence."""
+    result = lib.evaluate_time_model_window(
+        [], db_time_ms=0.0, cpu_clamped_ms=0.0, offcpu_ms=0.0,
+        has_measured_cpu=False, used_raw_path=True)
+    off = result["offcpu"]
+    check(off["available"] is False and off["pct"] is None,
+          f"empty window's offcpu block reports absence ({off})")
+    check(off["ok"] is None and off["gating"] is False,
+          f"the diagnostic stays outside the verdict ({off})")
+    check(not result["ok"],
+          f"the window still fails -- on the floor, not on Off-CPU ({result})")
+    check("offcpu_cap" not in result,
+          f"no resurrected cap sub-check ({sorted(result)})")
+
+
 # ── evaluate_time_model_window ────────────────────────────────────────────
 
 def test_evaluate_window_clean_trace_ok():

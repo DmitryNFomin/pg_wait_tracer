@@ -1,0 +1,15 @@
+make: `test_time_model_absence' is up to date.
+make: `test_window_clip' is up to date.
+make: `test_idle_accounting' is up to date.
+cc -g -O2 -Wall -I../src -I../include -DPGWT_SERVER -o test_pid_cap test_pid_cap.c ../src/compute.c \
+	    /tmp/pgwt-387-build/wait_event.o /tmp/pgwt-387-build/idle_rule.o /tmp/pgwt-387-build/spawn.o /tmp/pgwt-387-build/cJSON.o -lm
+cc -g -O2 -Wall -I../src -I../include -DPGWT_SERVER -o test_tag_refusal test_tag_refusal.c ../src/compute.c \
+	    /tmp/pgwt-387-build/wait_event.o /tmp/pgwt-387-build/idle_rule.o /tmp/pgwt-387-build/spawn.o /tmp/pgwt-387-build/cJSON.o -lm
+cc -g -O2 -Wall -I../src -I../include -DPGWT_SERVER -o test_concurrency_bounds test_concurrency_bounds.c ../src/compute.c \
+	    /tmp/pgwt-387-build/wait_event.o /tmp/pgwt-387-build/idle_rule.o /tmp/pgwt-387-build/spawn.o /tmp/pgwt-387-build/cJSON.o -lm
+cc -g -O2 -Wall -I../src -I../include -DPGWT_SERVER -o test_probe_bounds test_probe_bounds.c ../src/compute.c \
+	    /tmp/pgwt-387-build/wait_event.o /tmp/pgwt-387-build/idle_rule.o /tmp/pgwt-387-build/spawn.o /tmp/pgwt-387-build/cJSON.o -lm
+cc -g -O2 -Wall -I../src -I../include -DPGWT_SERVER -o test_interference_bounds test_interference_bounds.c ../src/compute.c \
+	    /tmp/pgwt-387-build/wait_event.o /tmp/pgwt-387-build/idle_rule.o /tmp/pgwt-387-build/spawn.o /tmp/pgwt-387-build/cJSON.o -lm
+cc -g -O2 -Wall -I../src -I../include -DPGWT_SERVER -o test_exec_index test_exec_index.c ../src/exec_index.c ../src/compute.c /tmp/pgwt-387-build/wait_event.o /tmp/pgwt-387-build/idle_rule.o /tmp/pgwt-387-build/spawn.o /tmp/pgwt-387-build/cJSON.o -lm
+cc -g -O2 -Wall -I../src -I../include -DPGWT_SERVER -o test_interval_index test_interval_index.c ../src/interval_index.c ../src/compute.c /tmp/pgwt-387-build/wait_event.o /tmp/pgwt-387-build/idle_rule.o /tmp/pgwt-387-build/spawn.o /tmp/pgwt-387-build/cJSON.o -lm

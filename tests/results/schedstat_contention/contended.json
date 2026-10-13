@@ -1,0 +1,122 @@
+{
+  "duration_s": 10.020588848,
+  "from_ns": 1791924475403468540,
+  "interval_s": 1.0,
+  "label": "contended",
+  "load": {
+    "max_runnable": 17,
+    "mean_load1": 2.854,
+    "points": [
+      {
+        "load1": 2.08,
+        "load15": 1.09,
+        "load5": 0.56,
+        "runnable": 17,
+        "t_ns": 1791924475411185045,
+        "total_tasks": 233
+      },
+      {
+        "load1": 2.08,
+        "load15": 1.09,
+        "load5": 0.56,
+        "runnable": 17,
+        "t_ns": 1791924476438073149,
+        "total_tasks": 233
+      },
+      {
+        "load1": 2.08,
+        "load15": 1.09,
+        "load5": 0.56,
+        "runnable": 17,
+        "t_ns": 1791924477468066098,
+        "total_tasks": 233
+      },
+      {
+        "load1": 2.08,
+        "load15": 1.09,
+        "load5": 0.56,
+        "runnable": 17,
+        "t_ns": 1791924478499062722,
+        "total_tasks": 233
+      },
+      {
+        "load1": 3.2,
+        "load15": 1.17,
+        "load5": 0.81,
+        "runnable": 17,
+        "t_ns": 1791924479542060891,
+        "total_tasks": 233
+      },
+      {
+        "load1": 3.2,
+        "load15": 1.17,
+        "load5": 0.81,
+        "runnable": 17,
+        "t_ns": 1791924480568752798,
+        "total_tasks": 234
+      },
+      {
+        "load1": 3.2,
+        "load15": 1.17,
+        "load5": 0.81,
+        "runnable": 17,
+        "t_ns": 1791924481601062837,
+        "total_tasks": 233
+      },
+      {
+        "load1": 3.2,
+        "load15": 1.17,
+        "load5": 0.81,
+        "runnable": 17,
+        "t_ns": 1791924482633068537,
+        "total_tasks": 233
+      },
+      {
+        "load1": 3.2,
+        "load15": 1.17,
+        "load5": 0.81,
+        "runnable": 17,
+        "t_ns": 1791924483663864454,
+        "total_tasks": 233
+      },
+      {
+        "load1": 4.22,
+        "load15": 1.25,
+        "load5": 1.07,
+        "runnable": 17,
+        "t_ns": 1791924484694062084,
+        "total_tasks": 235
+      }
+    ],
+    "reason": null
+  },
+  "parent_pid": 2793357,
+  "run_delay": {
+    "contrib_ms": {
+      "joined": 0.0,
+      "tracked": 111775.654063,
+      "transient": 0.0,
+      "vanished": 0.0
+    },
+    "coverage_pct": 92.63803933890334,
+    "covered_s": 9.282877039,
+    "pid_counts": {
+      "joined": 0,
+      "reset": 0,
+      "single": 0,
+      "tracked": 16,
+      "transient": 0,
+      "vanished": 0
+    },
+    "pids_counted": 16,
+    "reason": null,
+    "refused": false,
+    "requested_s": 10.020588848,
+    "run_delay_ms": 111775.654063,
+    "samples_in_window": 10,
+    "unreadable_reads": {}
+  },
+  "sampler_errors": [],
+  "samples": 10,
+  "to_ns": 1791924485424057388
+}
