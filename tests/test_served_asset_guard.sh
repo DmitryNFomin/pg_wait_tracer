@@ -60,9 +60,21 @@ report() {
 
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/pgwt_sag_XXXXXX")"
 SRV_PID=""
+# EVERY server this file has started, not just the current one. The first
+# version of this harness tracked only $SRV_PID, so a start_server that
+# replaced a running server orphaned the old one: six of them were found
+# alive two hours after the fact, reparented to init. One had inherited the
+# caller's stdout and held a shell pipeline open for 2h45m. Same class of
+# defect as the leaked-process guard in tests/ui_live_smoke.sh, which is why
+# there is now an end-of-run check below as well.
+SRV_ALL=()
 cleanup() {
-    [[ -n "$SRV_PID" ]] && kill "$SRV_PID" 2>/dev/null
-    [[ -n "$SRV_PID" ]] && wait "$SRV_PID" 2>/dev/null
+    local p
+    for p in "${SRV_ALL[@]:-}"; do
+        [[ -n "$p" ]] || continue
+        kill "$p" 2>/dev/null
+        wait "$p" 2>/dev/null
+    done
     chmod -R u+rwX "$TMP" 2>/dev/null
     rm -rf "$TMP"
 }
@@ -88,9 +100,15 @@ mk_disk() {
 #         line -- lets a manifest claim a path the server cannot serve)
 start_server() {
     local dir="$1" mode="${2:-normal}" manifest="${3:-}"
+    # Never leave a previous server running: replacing $SRV_PID without
+    # stopping it is exactly how this harness leaked six of them.
+    [[ -n "$SRV_PID" ]] && stop_server
     local portfile="$TMP/port.$$"
     rm -f "$portfile"
-    python3 - "$dir" "$portfile" "$mode" "$manifest" <<'PYEOF' &
+    # >/dev/null 2>&1: a backgrounded child that inherits the caller's stdout
+    # keeps the pipe open for as long as it lives, which wedged a `... | grep`
+    # pipeline for 2h45m.
+    python3 - "$dir" "$portfile" "$mode" "$manifest" >/dev/null 2>&1 <<'PYEOF' &
 import functools
 import http.server
 import json
@@ -148,6 +166,7 @@ os.rename(portfile + ".tmp", portfile)
 srv.serve_forever()
 PYEOF
     SRV_PID=$!
+    SRV_ALL+=("$SRV_PID")
     local n=0
     while [[ ! -s "$portfile" && $n -lt 100 ]]; do
         sleep 0.05
@@ -342,7 +361,7 @@ fi
 # 15. A server that ACCEPTS and never answers -> rc=2 within seconds, a
 #     refusal rather than a hang.
 stop_server
-python3 - "$TMP/stall.port" <<'PYEOF' &
+python3 - "$TMP/stall.port" >/dev/null 2>&1 <<'PYEOF' &
 import os
 import socket
 import sys
@@ -360,6 +379,7 @@ while True:
     held.append(c)
 PYEOF
 STALL_PID=$!
+SRV_ALL+=("$STALL_PID")
 n=0
 while [[ ! -s "$TMP/stall.port" && $n -lt 100 ]]; do sleep 0.05; n=$((n + 1)); done
 STALL_PORT="$(cat "$TMP/stall.port" 2>/dev/null)"
@@ -504,6 +524,19 @@ MAIN_GO="$(cd "$SCRIPT_DIR/.." && pwd)/web/main.go"
 if [[ -f "$MAIN_GO" ]] && grep -q '"/embedded-assets"' "$MAIN_GO" \
    && grep -q 'fs.WalkDir' "$MAIN_GO"; then ok=true; else ok=false; fi
 report "$ok" "web/main.go serves /embedded-assets by walking the embedded FS"
+
+# Leaked-process guard (mirrors tests/ui_live_smoke.sh's own): every server
+# this run started must be gone before the final verdict. Reported as a
+# counted case so a future leak fails the suite instead of quietly outliving
+# it on a developer's machine.
+stop_server
+leaked=()
+for p in "${SRV_ALL[@]:-}"; do
+    [[ -n "$p" ]] || continue
+    kill -0 "$p" 2>/dev/null && leaked+=("$p")
+done
+if [[ "${#leaked[@]}" -eq 0 ]]; then ok=true; else ok=false; fi
+report "$ok" "no test HTTP server outlived the run (started ${#SRV_ALL[@]}, still alive: ${leaked[*]:-none})"
 
 echo ""
 echo "test_served_asset_guard: $tests_passed/$tests_run passed, $tests_failed failed"
