@@ -1,0 +1,100 @@
+[
+  {
+    "cmd": "executions",
+    "args": {
+      "from_": "1790897518867330077",
+      "to_": "1790897519869476027",
+      "limit": 500
+    },
+    "response": {
+      "id": 246,
+      "fidelity": "exact",
+      "rows": [
+        {
+          "pid": 1171010,
+          "query_id": "-8013378961575804280",
+          "start_ns": "1790897518868268053",
+          "end_ns": "1790897519869250515",
+          "duration_ms": 1000.982462,
+          "plan_ms": null,
+          "n_events": 4,
+          "n_workers": 0,
+          "in_progress": false,
+          "end_inferred": false,
+          "started_before_window": false
+        },
+        {
+          "pid": 1171010,
+          "query_id": "-8013378961575804280",
+          "start_ns": "1790897518868267011",
+          "end_ns": "1790897519869254202",
+          "duration_ms": 1000.987191,
+          "plan_ms": 0.059912,
+          "n_events": 0,
+          "n_workers": 0,
+          "in_progress": false,
+          "end_inferred": false,
+          "started_before_window": false
+        }
+      ],
+      "total_count": 2,
+      "open_count": 0,
+      "completed_count": 2,
+      "truncated": false
+    }
+  },
+  {
+    "cmd": "execution_detail",
+    "args": {
+      "pid": 1171010,
+      "start_ns": "1790897518868268053",
+      "end_ns": "1790897519869250515"
+    },
+    "response": {
+      "id": 247,
+      "fidelity": "exact",
+      "query_id": "-8013378961575804280",
+      "leader": {
+        "pid": 1171010,
+        "query_id": "-8013378961575804280",
+        "events": [
+          {
+            "we": 0,
+            "name": "CPU*",
+            "start_ns": "1790897518868088847",
+            "dur_ns": "241230",
+            "cpu_ns": "241230"
+          },
+          {
+            "we": 50331653,
+            "name": "Lock:transactionid",
+            "start_ns": "1790897518868330077",
+            "dur_ns": "1000145950",
+            "cpu_ns": "112622"
+          },
+          {
+            "we": 0,
+            "name": "CPU*",
+            "start_ns": "1790897519868476027",
+            "dur_ns": "13986",
+            "cpu_ns": "13986"
+          },
+          {
+            "we": 50331653,
+            "name": "Lock:transactionid",
+            "start_ns": "1790897519868490013",
+            "dur_ns": "689489",
+            "cpu_ns": "27020"
+          }
+        ],
+        "total_count": 4,
+        "truncated": false
+      },
+      "workers": [],
+      "plan": null,
+      "total_count": 4,
+      "kept_count": 4,
+      "truncated": false
+    }
+  }
+]

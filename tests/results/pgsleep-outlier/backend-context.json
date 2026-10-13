@@ -1,0 +1,280 @@
+{
+  "queries": [
+    {
+      "q": "3886912043147135675",
+      "d": 5,
+      "u": 10,
+      "s": "full",
+      "t": "UPDATE pgbench_branches SET bbalance = bbalance + 1875 WHERE bid = 5;",
+      "ts": 1790895947228809973
+    },
+    {
+      "q": "286264995346867541",
+      "d": 5,
+      "u": 10,
+      "s": "full",
+      "t": "INSERT INTO pgbench_history (tid, bid, aid, delta, mtime) VALUES (35, 5, 440528, 1875, CURRENT_TIMESTAMP);",
+      "ts": 1790895947228832685
+    },
+    {
+      "q": "-8886085649470066503",
+      "d": 5,
+      "u": 10,
+      "s": "full",
+      "t": "SELECT pg_sleep(3);",
+      "ts": 1790895947229361303
+    },
+    {
+      "q": "-8013378961575804280",
+      "d": 5,
+      "u": 10,
+      "s": "full",
+      "t": "UPDATE _smoke_row_lock_wait SET v = v + 1 WHERE id = 1;",
+      "ts": 1790895948906224589
+    }
+  ],
+  "backends": [
+    {
+      "pid": 1170989,
+      "type": "client",
+      "user": "postgres",
+      "db": "postgres",
+      "addr": "[local]"
+    },
+    {
+      "pid": 1170990,
+      "type": "client",
+      "user": "postgres",
+      "db": "postgres",
+      "addr": "[local]"
+    },
+    {
+      "pid": 1170991,
+      "type": "client",
+      "user": "postgres",
+      "db": "postgres",
+      "addr": "[local]"
+    },
+    {
+      "pid": 1171002,
+      "type": "client",
+      "user": "postgres",
+      "db": "postgres",
+      "addr": "[local]"
+    },
+    {
+      "pid": 1171010,
+      "type": "client",
+      "user": "postgres",
+      "db": "postgres",
+      "addr": "[local]"
+    },
+    {
+      "pid": 1170991,
+      "type": "client",
+      "user": "postgres",
+      "db": "postgres",
+      "addr": "[local]",
+      "dbid": 5,
+      "userid": 10
+    },
+    {
+      "pid": 1170991,
+      "type": "client",
+      "user": "postgres",
+      "db": "postgres",
+      "addr": "[local]",
+      "dbid": 5,
+      "userid": 10
+    },
+    {
+      "pid": 1170991,
+      "type": "client",
+      "user": "postgres",
+      "db": "postgres",
+      "addr": "[local]",
+      "dbid": 5,
+      "userid": 10
+    },
+    {
+      "pid": 1170991,
+      "type": "client",
+      "user": "postgres",
+      "db": "postgres",
+      "addr": "[local]",
+      "dbid": 5,
+      "userid": 10
+    },
+    {
+      "pid": 1170991,
+      "type": "client",
+      "user": "postgres",
+      "db": "postgres",
+      "addr": "[local]",
+      "dbid": 5,
+      "userid": 10
+    },
+    {
+      "pid": 1170991,
+      "type": "client",
+      "user": "postgres",
+      "db": "postgres",
+      "addr": "[local]",
+      "dbid": 5,
+      "userid": 10
+    },
+    {
+      "pid": 1170991,
+      "type": "client",
+      "user": "postgres",
+      "db": "postgres",
+      "addr": "[local]",
+      "dbid": 5,
+      "userid": 10
+    },
+    {
+      "pid": 1170989,
+      "type": "client",
+      "user": "postgres",
+      "db": "postgres",
+      "addr": "[local]",
+      "dbid": 5,
+      "userid": 10
+    },
+    {
+      "pid": 1170989,
+      "type": "client",
+      "user": "postgres",
+      "db": "postgres",
+      "addr": "[local]",
+      "dbid": 5,
+      "userid": 10
+    },
+    {
+      "pid": 1170989,
+      "type": "client",
+      "user": "postgres",
+      "db": "postgres",
+      "addr": "[local]",
+      "dbid": 5,
+      "userid": 10
+    },
+    {
+      "pid": 1170989,
+      "type": "client",
+      "user": "postgres",
+      "db": "postgres",
+      "addr": "[local]",
+      "dbid": 5,
+      "userid": 10
+    },
+    {
+      "pid": 1170989,
+      "type": "client",
+      "user": "postgres",
+      "db": "postgres",
+      "addr": "[local]",
+      "dbid": 5,
+      "userid": 10
+    },
+    {
+      "pid": 1170989,
+      "type": "client",
+      "user": "postgres",
+      "db": "postgres",
+      "addr": "[local]",
+      "dbid": 5,
+      "userid": 10
+    },
+    {
+      "pid": 1170989,
+      "type": "client",
+      "user": "postgres",
+      "db": "postgres",
+      "addr": "[local]",
+      "dbid": 5,
+      "userid": 10
+    },
+    {
+      "pid": 1170990,
+      "type": "client",
+      "user": "postgres",
+      "db": "postgres",
+      "addr": "[local]",
+      "dbid": 5,
+      "userid": 10
+    },
+    {
+      "pid": 1170990,
+      "type": "client",
+      "user": "postgres",
+      "db": "postgres",
+      "addr": "[local]",
+      "dbid": 5,
+      "userid": 10
+    },
+    {
+      "pid": 1170990,
+      "type": "client",
+      "user": "postgres",
+      "db": "postgres",
+      "addr": "[local]",
+      "dbid": 5,
+      "userid": 10
+    },
+    {
+      "pid": 1170990,
+      "type": "client",
+      "user": "postgres",
+      "db": "postgres",
+      "addr": "[local]",
+      "dbid": 5,
+      "userid": 10
+    },
+    {
+      "pid": 1170990,
+      "type": "client",
+      "user": "postgres",
+      "db": "postgres",
+      "addr": "[local]",
+      "dbid": 5,
+      "userid": 10
+    },
+    {
+      "pid": 1170990,
+      "type": "client",
+      "user": "postgres",
+      "db": "postgres",
+      "addr": "[local]",
+      "dbid": 5,
+      "userid": 10
+    },
+    {
+      "pid": 1170990,
+      "type": "client",
+      "user": "postgres",
+      "db": "postgres",
+      "addr": "[local]",
+      "dbid": 5,
+      "userid": 10
+    },
+    {
+      "pid": 1171002,
+      "type": "client",
+      "user": "postgres",
+      "db": "postgres",
+      "addr": "[local]",
+      "dbid": 5,
+      "userid": 10
+    },
+    {
+      "pid": 1171010,
+      "type": "client",
+      "user": "postgres",
+      "db": "postgres",
+      "addr": "[local]",
+      "dbid": 5,
+      "userid": 10
+    }
+  ]
+}

@@ -1,0 +1,44 @@
+{
+  "pgsleep": {
+    "we": 150994946,
+    "name": "Timeout:PgSleep",
+    "start_ns": "1790897311539822175",
+    "dur_ns": "3004037354",
+    "cpu_ns": "923834"
+  },
+  "transactionid-cpu": {
+    "we": 50331653,
+    "name": "Lock:transactionid",
+    "start_ns": "1790897518868330077",
+    "dur_ns": "1000145950",
+    "cpu_ns": "112622"
+  },
+  "transactionid-ratio-1": {
+    "we": 50331653,
+    "name": "Lock:transactionid",
+    "start_ns": "1790896365871005376",
+    "dur_ns": "12974",
+    "cpu_ns": "12974"
+  },
+  "transactionid-ratio-2": {
+    "we": 50331653,
+    "name": "Lock:transactionid",
+    "start_ns": "1790896467430891351",
+    "dur_ns": "4909",
+    "cpu_ns": "4909"
+  },
+  "extend-1": {
+    "we": 50331649,
+    "name": "Lock:extend",
+    "start_ns": "1790896554571596265",
+    "dur_ns": "62917",
+    "cpu_ns": "20118"
+  },
+  "extend-2": {
+    "we": 50331649,
+    "name": "Lock:extend",
+    "start_ns": "1790896874975270119",
+    "dur_ns": "75692",
+    "cpu_ns": "22122"
+  }
+}

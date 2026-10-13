@@ -1,0 +1,45 @@
+{
+  "outlier": {
+    "block": 777,
+    "record": 3734,
+    "pid": 1171002,
+    "start_ns": "1790897311539822175",
+    "end_ns": "1790897314543859529",
+    "old_event": 150994946,
+    "new_event": 0,
+    "flags": 0,
+    "duration_ns": "3004037354",
+    "cpu_ns": "923834",
+    "query_id": "-8886085649470066503"
+  },
+  "previous": {
+    "block": 769,
+    "record": 2269,
+    "pid": 1171002,
+    "start_ns": "1790897303898682160",
+    "end_ns": "1790897306901747177",
+    "old_event": 150994946,
+    "new_event": 0,
+    "flags": 0,
+    "duration_ns": "3003065017",
+    "cpu_ns": "35908",
+    "query_id": "-8886085649470066503"
+  },
+  "following": {
+    "block": 781,
+    "record": 1421,
+    "pid": 1171002,
+    "start_ns": "1790897320641214617",
+    "end_ns": "1790897323644288130",
+    "old_event": 150994946,
+    "new_event": 0,
+    "flags": 0,
+    "duration_ns": "3003073513",
+    "cpu_ns": "31589",
+    "query_id": "-8886085649470066503"
+  },
+  "cpu_duration_percent": 0.030753079643629493,
+  "extra_wall_vs_following_ns": 963841,
+  "extra_cpu_vs_following_ns": 892245,
+  "remaining_extra_offcpu_ns": 71596
+}

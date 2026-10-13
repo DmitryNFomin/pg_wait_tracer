@@ -1,0 +1,258 @@
+[
+  {
+    "cmd": "executions",
+    "args": {
+      "from_": "1790896554570596265",
+      "to_": "1790896554572659182",
+      "limit": 500
+    },
+    "response": {
+      "id": 253,
+      "fidelity": "exact",
+      "rows": [
+        {
+          "pid": 1170990,
+          "query_id": "6097083398544187049",
+          "start_ns": "1790896554571803862",
+          "end_ns": "1790896554571806608",
+          "duration_ms": 0.002746,
+          "plan_ms": null,
+          "n_events": 0,
+          "n_workers": 0,
+          "in_progress": false,
+          "end_inferred": false,
+          "started_before_window": false
+        },
+        {
+          "pid": 1170990,
+          "query_id": "286264995346867541",
+          "start_ns": "1790896554571533488",
+          "end_ns": "1790896554571711280",
+          "duration_ms": 0.177792,
+          "plan_ms": null,
+          "n_events": 6,
+          "n_workers": 0,
+          "in_progress": false,
+          "end_inferred": false,
+          "started_before_window": false
+        },
+        {
+          "pid": 1170990,
+          "query_id": "286264995346867541",
+          "start_ns": "1790896554571532686",
+          "end_ns": "1790896554571712692",
+          "duration_ms": 0.180006,
+          "plan_ms": 0.014317,
+          "n_events": 0,
+          "n_workers": 0,
+          "in_progress": false,
+          "end_inferred": false,
+          "started_before_window": false
+        },
+        {
+          "pid": 1170990,
+          "query_id": "3886912043147135675",
+          "start_ns": "1790896554571312183",
+          "end_ns": "1790896554571351136",
+          "duration_ms": 0.038953,
+          "plan_ms": null,
+          "n_events": 0,
+          "n_workers": 0,
+          "in_progress": false,
+          "end_inferred": false,
+          "started_before_window": false
+        },
+        {
+          "pid": 1170990,
+          "query_id": "3886912043147135675",
+          "start_ns": "1790896554571311432",
+          "end_ns": "1790896554571352338",
+          "duration_ms": 0.040906,
+          "plan_ms": 0.030035,
+          "n_events": 0,
+          "n_workers": 0,
+          "in_progress": false,
+          "end_inferred": false,
+          "started_before_window": false
+        },
+        {
+          "pid": 1170990,
+          "query_id": "-1980831870093258527",
+          "start_ns": "1790896554571077816",
+          "end_ns": "1790896554571118051",
+          "duration_ms": 0.040235,
+          "plan_ms": null,
+          "n_events": 0,
+          "n_workers": 0,
+          "in_progress": false,
+          "end_inferred": false,
+          "started_before_window": false
+        },
+        {
+          "pid": 1170990,
+          "query_id": "-1980831870093258527",
+          "start_ns": "1790896554571076623",
+          "end_ns": "1790896554571119454",
+          "duration_ms": 0.042831,
+          "plan_ms": 0.029535,
+          "n_events": 0,
+          "n_workers": 0,
+          "in_progress": false,
+          "end_inferred": false,
+          "started_before_window": false
+        },
+        {
+          "pid": 1170990,
+          "query_id": "5409612748292285639",
+          "start_ns": "1790896554570867613",
+          "end_ns": "1790896554570879545",
+          "duration_ms": 0.011932,
+          "plan_ms": 0.024996,
+          "n_events": 0,
+          "n_workers": 0,
+          "in_progress": false,
+          "end_inferred": false,
+          "started_before_window": false
+        },
+        {
+          "pid": 1170990,
+          "query_id": "-6796648778530205384",
+          "start_ns": "1790896554570575066",
+          "end_ns": "1790896554570694840",
+          "duration_ms": 0.119774,
+          "plan_ms": null,
+          "n_events": 2,
+          "n_workers": 0,
+          "in_progress": false,
+          "end_inferred": false,
+          "started_before_window": true
+        },
+        {
+          "pid": 1170990,
+          "query_id": "-6796648778530205384",
+          "start_ns": "1790896554570574105",
+          "end_ns": "1790896554570696253",
+          "duration_ms": 0.122148,
+          "plan_ms": 0.100007,
+          "n_events": 0,
+          "n_workers": 0,
+          "in_progress": false,
+          "end_inferred": false,
+          "started_before_window": true
+        }
+      ],
+      "total_count": 10,
+      "open_count": 0,
+      "completed_count": 10,
+      "truncated": false
+    }
+  },
+  {
+    "cmd": "execution_detail",
+    "args": {
+      "pid": 1170990,
+      "start_ns": "1790896554571533488",
+      "end_ns": "1790896554571711280"
+    },
+    "response": {
+      "id": 254,
+      "fidelity": "exact",
+      "query_id": "286264995346867541",
+      "leader": {
+        "pid": 1170990,
+        "query_id": "286264995346867541",
+        "events": [
+          {
+            "we": 0,
+            "name": "CPU*",
+            "start_ns": "1790896554571446886",
+            "dur_ns": "123450",
+            "cpu_ns": "123450"
+          },
+          {
+            "we": 16777283,
+            "name": "LWLock:LockManager",
+            "start_ns": "1790896554571570336",
+            "dur_ns": "6162",
+            "cpu_ns": "6162"
+          },
+          {
+            "we": 0,
+            "name": "CPU*",
+            "start_ns": "1790896554571576498",
+            "dur_ns": "19767",
+            "cpu_ns": "19767"
+          },
+          {
+            "we": 50331649,
+            "name": "Lock:extend",
+            "start_ns": "1790896554571596265",
+            "dur_ns": "62917",
+            "cpu_ns": "20118"
+          },
+          {
+            "we": 0,
+            "name": "CPU*",
+            "start_ns": "1790896554571659182",
+            "dur_ns": "8997",
+            "cpu_ns": "8997"
+          },
+          {
+            "we": 167772177,
+            "name": "IO:DataFileExtend",
+            "start_ns": "1790896554571668179",
+            "dur_ns": "29666",
+            "cpu_ns": "29666"
+          }
+        ],
+        "total_count": 6,
+        "truncated": false
+      },
+      "workers": [],
+      "plan": null,
+      "total_count": 6,
+      "kept_count": 6,
+      "truncated": false
+    }
+  },
+  {
+    "cmd": "execution_detail",
+    "args": {
+      "pid": 1170990,
+      "start_ns": "1790896554570575066",
+      "end_ns": "1790896554570694840"
+    },
+    "response": {
+      "id": 255,
+      "fidelity": "exact",
+      "query_id": "-6796648778530205384",
+      "leader": {
+        "pid": 1170990,
+        "query_id": "-6796648778530205384",
+        "events": [
+          {
+            "we": 0,
+            "name": "CPU*",
+            "start_ns": "1790896554570382085",
+            "dur_ns": "251360",
+            "cpu_ns": "251360"
+          },
+          {
+            "we": 167772181,
+            "name": "IO:DataFileRead",
+            "start_ns": "1790896554570633445",
+            "dur_ns": "19185",
+            "cpu_ns": "19185"
+          }
+        ],
+        "total_count": 2,
+        "truncated": false
+      },
+      "workers": [],
+      "plan": null,
+      "total_count": 2,
+      "kept_count": 2,
+      "truncated": false
+    }
+  }
+]

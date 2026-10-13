@@ -1,0 +1,243 @@
+[
+  {
+    "cmd": "executions",
+    "args": {
+      "from_": "1790896467429891351",
+      "to_": "1790896467431896260",
+      "limit": 500
+    },
+    "response": {
+      "id": 250,
+      "fidelity": "exact",
+      "rows": [
+        {
+          "pid": 1170991,
+          "query_id": "6097083398544187049",
+          "start_ns": "1790896467431232028",
+          "end_ns": "1790896467431235935",
+          "duration_ms": 0.003907,
+          "plan_ms": null,
+          "n_events": 0,
+          "n_workers": 0,
+          "in_progress": false,
+          "end_inferred": false,
+          "started_before_window": false
+        },
+        {
+          "pid": 1170991,
+          "query_id": "286264995346867541",
+          "start_ns": "1790896467431076868",
+          "end_ns": "1790896467431100612",
+          "duration_ms": 0.023744,
+          "plan_ms": null,
+          "n_events": 0,
+          "n_workers": 0,
+          "in_progress": false,
+          "end_inferred": false,
+          "started_before_window": false
+        },
+        {
+          "pid": 1170991,
+          "query_id": "286264995346867541",
+          "start_ns": "1790896467431075826",
+          "end_ns": "1790896467431102185",
+          "duration_ms": 0.026359,
+          "plan_ms": 0.014026,
+          "n_events": 0,
+          "n_workers": 0,
+          "in_progress": false,
+          "end_inferred": false,
+          "started_before_window": false
+        },
+        {
+          "pid": 1170991,
+          "query_id": "3886912043147135675",
+          "start_ns": "1790896467430840236",
+          "end_ns": "1790896467430918051",
+          "duration_ms": 0.077815,
+          "plan_ms": null,
+          "n_events": 2,
+          "n_workers": 0,
+          "in_progress": false,
+          "end_inferred": false,
+          "started_before_window": false
+        },
+        {
+          "pid": 1170991,
+          "query_id": "3886912043147135675",
+          "start_ns": "1790896467430839094",
+          "end_ns": "1790896467430919824",
+          "duration_ms": 0.08073,
+          "plan_ms": 0.028533,
+          "n_events": 0,
+          "n_workers": 0,
+          "in_progress": false,
+          "end_inferred": false,
+          "started_before_window": false
+        },
+        {
+          "pid": 1170991,
+          "query_id": "-1980831870093258527",
+          "start_ns": "1790896467430627809",
+          "end_ns": "1790896467430678624",
+          "duration_ms": 0.050815,
+          "plan_ms": null,
+          "n_events": 0,
+          "n_workers": 0,
+          "in_progress": false,
+          "end_inferred": false,
+          "started_before_window": false
+        },
+        {
+          "pid": 1170991,
+          "query_id": "-1980831870093258527",
+          "start_ns": "1790896467430627097",
+          "end_ns": "1790896467430680457",
+          "duration_ms": 0.05336,
+          "plan_ms": 0.031619,
+          "n_events": 0,
+          "n_workers": 0,
+          "in_progress": false,
+          "end_inferred": false,
+          "started_before_window": false
+        },
+        {
+          "pid": 1170991,
+          "query_id": "5409612748292285639",
+          "start_ns": "1790896467430405252",
+          "end_ns": "1790896467430418046",
+          "duration_ms": 0.012794,
+          "plan_ms": 0.022853,
+          "n_events": 0,
+          "n_workers": 0,
+          "in_progress": false,
+          "end_inferred": false,
+          "started_before_window": false
+        },
+        {
+          "pid": 1170991,
+          "query_id": "-6796648778530205384",
+          "start_ns": "1790896467430174251",
+          "end_ns": "1790896467430256424",
+          "duration_ms": 0.082173,
+          "plan_ms": null,
+          "n_events": 2,
+          "n_workers": 0,
+          "in_progress": false,
+          "end_inferred": false,
+          "started_before_window": false
+        },
+        {
+          "pid": 1170991,
+          "query_id": "-6796648778530205384",
+          "start_ns": "1790896467430173309",
+          "end_ns": "1790896467430257737",
+          "duration_ms": 0.084428,
+          "plan_ms": 0.035297,
+          "n_events": 0,
+          "n_workers": 0,
+          "in_progress": false,
+          "end_inferred": false,
+          "started_before_window": false
+        },
+        {
+          "pid": 1170991,
+          "query_id": "4854991825702068830",
+          "start_ns": "1790896467429973576",
+          "end_ns": "1790896467429978075",
+          "duration_ms": 0.004499,
+          "plan_ms": null,
+          "n_events": 0,
+          "n_workers": 0,
+          "in_progress": false,
+          "end_inferred": false,
+          "started_before_window": false
+        }
+      ],
+      "total_count": 11,
+      "open_count": 0,
+      "completed_count": 11,
+      "truncated": false
+    }
+  },
+  {
+    "cmd": "execution_detail",
+    "args": {
+      "pid": 1170991,
+      "start_ns": "1790896467430840236",
+      "end_ns": "1790896467430918051"
+    },
+    "response": {
+      "id": 251,
+      "fidelity": "exact",
+      "query_id": "3886912043147135675",
+      "leader": {
+        "pid": 1170991,
+        "query_id": "3886912043147135675",
+        "events": [
+          {
+            "we": 0,
+            "name": "CPU*",
+            "start_ns": "1790896467430757902",
+            "dur_ns": "133449",
+            "cpu_ns": "133449"
+          },
+          {
+            "we": 50331653,
+            "name": "Lock:transactionid",
+            "start_ns": "1790896467430891351",
+            "dur_ns": "4909",
+            "cpu_ns": "4909"
+          }
+        ],
+        "total_count": 2,
+        "truncated": false
+      },
+      "workers": [],
+      "plan": null,
+      "total_count": 2,
+      "kept_count": 2,
+      "truncated": false
+    }
+  },
+  {
+    "cmd": "execution_detail",
+    "args": {
+      "pid": 1170991,
+      "start_ns": "1790896467430174251",
+      "end_ns": "1790896467430256424"
+    },
+    "response": {
+      "id": 252,
+      "fidelity": "exact",
+      "query_id": "-6796648778530205384",
+      "leader": {
+        "pid": 1170991,
+        "query_id": "-6796648778530205384",
+        "events": [
+          {
+            "we": 0,
+            "name": "CPU*",
+            "start_ns": "1790896467430067772",
+            "dur_ns": "151162",
+            "cpu_ns": "151162"
+          },
+          {
+            "we": 167772181,
+            "name": "IO:DataFileRead",
+            "start_ns": "1790896467430218934",
+            "dur_ns": "11952",
+            "cpu_ns": "11952"
+          }
+        ],
+        "total_count": 2,
+        "truncated": false
+      },
+      "workers": [],
+      "plan": null,
+      "total_count": 2,
+      "kept_count": 2,
+      "truncated": false
+    }
+  }
+]

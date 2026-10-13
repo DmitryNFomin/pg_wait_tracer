@@ -479,6 +479,22 @@ checked first and independently:
     over-attribution signature** — a stale wait label, or an `on_cpu_ts`
     that was never closed. That is the check; the per-class figure is the
     discriminating quantity.
+    **Measured allowance requiring investigation (2026-10-13):** the retained
+    October 2 PG18 capture contains a 3.004037354 s `SELECT pg_sleep(3)`
+    interval with **923.834 µs** of CPU (0.030753% of its duration), versus
+    31.589–35.908 µs in its immediate same-backend neighbours. Its entry and
+    exit CPU intervals are separate, and the sleep closes before `EXEC_END`;
+    compared with the next identical sleep, 892.245 µs of additional CPU
+    accompanies 963.841 µs of additional wall time. This supports benign
+    CPU inside the wait boundary, rather than a label spanning another
+    execution. The criterion therefore needs a stated allowance for
+    entry/exit and wakeup CPU: **0.923834 ms observed in this capture**,
+    with the exact wakeup cause and CPU split unresolved. This is an observed
+    combined allowance, not a universal per-wakeup budget or a raised pass
+    threshold. The millisecond signature remains an investigation trigger;
+    the outlier remains in the measurement and exceeds its unchanged
+    824430 ns diagnostic threshold. No rehearsal is certified by this
+    annotation. See [the event evidence](../tests/results/pgsleep-outlier/NOTES.md).
   - `cpu_clamped_ms` ≈ 0. Note its limit: the wait branch never clamps
     `cpu_ns > dur` (`src/compute.c:810`), so `cpu_clamped_ms = 0` vouches
     for CPU gaps only, never for wait events.

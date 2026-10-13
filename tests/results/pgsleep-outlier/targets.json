@@ -1,0 +1,80 @@
+{
+  "pgsleep": {
+    "block": 777,
+    "record": 3734,
+    "pid": 1171002,
+    "start_ns": "1790897311539822175",
+    "end_ns": "1790897314543859529",
+    "old_event": 150994946,
+    "new_event": 0,
+    "flags": 0,
+    "duration_ns": "3004037354",
+    "cpu_ns": "923834",
+    "query_id": "-8886085649470066503"
+  },
+  "transactionid-cpu": {
+    "block": 893,
+    "record": 1984,
+    "pid": 1171010,
+    "start_ns": "1790897518868330077",
+    "end_ns": "1790897519868476027",
+    "old_event": 50331653,
+    "new_event": 0,
+    "flags": 0,
+    "duration_ns": "1000145950",
+    "cpu_ns": "112622",
+    "query_id": "-8013378961575804280"
+  },
+  "transactionid-ratio-1": {
+    "block": 242,
+    "record": 3667,
+    "pid": 1170989,
+    "start_ns": "1790896365871005376",
+    "end_ns": "1790896365871018350",
+    "old_event": 50331653,
+    "new_event": 0,
+    "flags": 0,
+    "duration_ns": "12974",
+    "cpu_ns": "12974",
+    "query_id": "3886912043147135675"
+  },
+  "transactionid-ratio-2": {
+    "block": 300,
+    "record": 410,
+    "pid": 1170991,
+    "start_ns": "1790896467430891351",
+    "end_ns": "1790896467430896260",
+    "old_event": 50331653,
+    "new_event": 0,
+    "flags": 0,
+    "duration_ns": "4909",
+    "cpu_ns": "4909",
+    "query_id": "3886912043147135675"
+  },
+  "extend-1": {
+    "block": 346,
+    "record": 119,
+    "pid": 1170990,
+    "start_ns": "1790896554571596265",
+    "end_ns": "1790896554571659182",
+    "old_event": 50331649,
+    "new_event": 0,
+    "flags": 0,
+    "duration_ns": "62917",
+    "cpu_ns": "20118",
+    "query_id": "286264995346867541"
+  },
+  "extend-2": {
+    "block": 528,
+    "record": 1614,
+    "pid": 1170990,
+    "start_ns": "1790896874975270119",
+    "end_ns": "1790896874975345811",
+    "old_event": 50331649,
+    "new_event": 0,
+    "flags": 0,
+    "duration_ns": "75692",
+    "cpu_ns": "22122",
+    "query_id": "286264995346867541"
+  }
+}

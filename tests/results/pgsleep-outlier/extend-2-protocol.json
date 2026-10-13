@@ -1,0 +1,244 @@
+[
+  {
+    "cmd": "executions",
+    "args": {
+      "from_": "1790896874974270119",
+      "to_": "1790896874976345811",
+      "limit": 500
+    },
+    "response": {
+      "id": 256,
+      "fidelity": "exact",
+      "rows": [
+        {
+          "pid": 1170990,
+          "query_id": "6097083398544187049",
+          "start_ns": "1790896874975486493",
+          "end_ns": "1790896874975489459",
+          "duration_ms": 0.002966,
+          "plan_ms": null,
+          "n_events": 0,
+          "n_workers": 0,
+          "in_progress": false,
+          "end_inferred": false,
+          "started_before_window": false
+        },
+        {
+          "pid": 1170990,
+          "query_id": "286264995346867541",
+          "start_ns": "1790896874975233521",
+          "end_ns": "1790896874975398369",
+          "duration_ms": 0.164848,
+          "plan_ms": null,
+          "n_events": 4,
+          "n_workers": 0,
+          "in_progress": false,
+          "end_inferred": false,
+          "started_before_window": false
+        },
+        {
+          "pid": 1170990,
+          "query_id": "286264995346867541",
+          "start_ns": "1790896874975232449",
+          "end_ns": "1790896874975399821",
+          "duration_ms": 0.167372,
+          "plan_ms": 0.013486,
+          "n_events": 0,
+          "n_workers": 0,
+          "in_progress": false,
+          "end_inferred": false,
+          "started_before_window": false
+        },
+        {
+          "pid": 1170990,
+          "query_id": "3886912043147135675",
+          "start_ns": "1790896874975000646",
+          "end_ns": "1790896874975079793",
+          "duration_ms": 0.079147,
+          "plan_ms": null,
+          "n_events": 0,
+          "n_workers": 0,
+          "in_progress": false,
+          "end_inferred": false,
+          "started_before_window": false
+        },
+        {
+          "pid": 1170990,
+          "query_id": "3886912043147135675",
+          "start_ns": "1790896874974999673",
+          "end_ns": "1790896874975081666",
+          "duration_ms": 0.081993,
+          "plan_ms": 0.028102,
+          "n_events": 0,
+          "n_workers": 0,
+          "in_progress": false,
+          "end_inferred": false,
+          "started_before_window": false
+        },
+        {
+          "pid": 1170990,
+          "query_id": "-1980831870093258527",
+          "start_ns": "1790896874974833583",
+          "end_ns": "1790896874974872526",
+          "duration_ms": 0.038943,
+          "plan_ms": null,
+          "n_events": 0,
+          "n_workers": 0,
+          "in_progress": false,
+          "end_inferred": false,
+          "started_before_window": false
+        },
+        {
+          "pid": 1170990,
+          "query_id": "-1980831870093258527",
+          "start_ns": "1790896874974832601",
+          "end_ns": "1790896874974873849",
+          "duration_ms": 0.041248,
+          "plan_ms": 0.027761,
+          "n_events": 0,
+          "n_workers": 0,
+          "in_progress": false,
+          "end_inferred": false,
+          "started_before_window": false
+        },
+        {
+          "pid": 1170990,
+          "query_id": "5409612748292285639",
+          "start_ns": "1790896874974678663",
+          "end_ns": "1790896874974690736",
+          "duration_ms": 0.012073,
+          "plan_ms": 0.028554,
+          "n_events": 0,
+          "n_workers": 0,
+          "in_progress": false,
+          "end_inferred": false,
+          "started_before_window": false
+        },
+        {
+          "pid": 1170990,
+          "query_id": "-6796648778530205384",
+          "start_ns": "1790896874974350219",
+          "end_ns": "1790896874974491664",
+          "duration_ms": 0.141445,
+          "plan_ms": null,
+          "n_events": 2,
+          "n_workers": 0,
+          "in_progress": false,
+          "end_inferred": false,
+          "started_before_window": false
+        },
+        {
+          "pid": 1170990,
+          "query_id": "-6796648778530205384",
+          "start_ns": "1790896874974349087",
+          "end_ns": "1790896874974493427",
+          "duration_ms": 0.14434,
+          "plan_ms": 0.065753,
+          "n_events": 0,
+          "n_workers": 0,
+          "in_progress": false,
+          "end_inferred": false,
+          "started_before_window": false
+        }
+      ],
+      "total_count": 10,
+      "open_count": 0,
+      "completed_count": 10,
+      "truncated": false
+    }
+  },
+  {
+    "cmd": "execution_detail",
+    "args": {
+      "pid": 1170990,
+      "start_ns": "1790896874975233521",
+      "end_ns": "1790896874975398369"
+    },
+    "response": {
+      "id": 257,
+      "fidelity": "exact",
+      "query_id": "286264995346867541",
+      "leader": {
+        "pid": 1170990,
+        "query_id": "286264995346867541",
+        "events": [
+          {
+            "we": 0,
+            "name": "CPU*",
+            "start_ns": "1790896874975158480",
+            "dur_ns": "111639",
+            "cpu_ns": "111639"
+          },
+          {
+            "we": 50331649,
+            "name": "Lock:extend",
+            "start_ns": "1790896874975270119",
+            "dur_ns": "75692",
+            "cpu_ns": "22122"
+          },
+          {
+            "we": 0,
+            "name": "CPU*",
+            "start_ns": "1790896874975345811",
+            "dur_ns": "9948",
+            "cpu_ns": "9948"
+          },
+          {
+            "we": 167772177,
+            "name": "IO:DataFileExtend",
+            "start_ns": "1790896874975355759",
+            "dur_ns": "27171",
+            "cpu_ns": "27171"
+          }
+        ],
+        "total_count": 4,
+        "truncated": false
+      },
+      "workers": [],
+      "plan": null,
+      "total_count": 4,
+      "kept_count": 4,
+      "truncated": false
+    }
+  },
+  {
+    "cmd": "execution_detail",
+    "args": {
+      "pid": 1170990,
+      "start_ns": "1790896874974350219",
+      "end_ns": "1790896874974491664"
+    },
+    "response": {
+      "id": 258,
+      "fidelity": "exact",
+      "query_id": "-6796648778530205384",
+      "leader": {
+        "pid": 1170990,
+        "query_id": "-6796648778530205384",
+        "events": [
+          {
+            "we": 0,
+            "name": "CPU*",
+            "start_ns": "1790896874974214777",
+            "dur_ns": "207487",
+            "cpu_ns": "207487"
+          },
+          {
+            "we": 16777219,
+            "name": "LWLock:XidGen",
+            "start_ns": "1790896874974422264",
+            "dur_ns": "52668",
+            "cpu_ns": "22832"
+          }
+        ],
+        "total_count": 2,
+        "truncated": false
+      },
+      "workers": [],
+      "plan": null,
+      "total_count": 2,
+      "kept_count": 2,
+      "truncated": false
+    }
+  }
+]

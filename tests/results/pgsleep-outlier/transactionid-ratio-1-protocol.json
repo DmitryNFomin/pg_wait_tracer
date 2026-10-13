@@ -1,0 +1,203 @@
+[
+  {
+    "cmd": "executions",
+    "args": {
+      "from_": "1790896365870005376",
+      "to_": "1790896365872018350",
+      "limit": 500
+    },
+    "response": {
+      "id": 248,
+      "fidelity": "exact",
+      "rows": [
+        {
+          "pid": 1170989,
+          "query_id": "6097083398544187049",
+          "start_ns": "1790896365871314784",
+          "end_ns": "1790896365871317740",
+          "duration_ms": 0.002956,
+          "plan_ms": null,
+          "n_events": 0,
+          "n_workers": 0,
+          "in_progress": false,
+          "end_inferred": false,
+          "started_before_window": false
+        },
+        {
+          "pid": 1170989,
+          "query_id": "286264995346867541",
+          "start_ns": "1790896365871194490",
+          "end_ns": "1790896365871219645",
+          "duration_ms": 0.025155,
+          "plan_ms": null,
+          "n_events": 0,
+          "n_workers": 0,
+          "in_progress": false,
+          "end_inferred": false,
+          "started_before_window": false
+        },
+        {
+          "pid": 1170989,
+          "query_id": "286264995346867541",
+          "start_ns": "1790896365871193548",
+          "end_ns": "1790896365871220928",
+          "duration_ms": 0.02738,
+          "plan_ms": 0.012854,
+          "n_events": 0,
+          "n_workers": 0,
+          "in_progress": false,
+          "end_inferred": false,
+          "started_before_window": false
+        },
+        {
+          "pid": 1170989,
+          "query_id": "3886912043147135675",
+          "start_ns": "1790896365870952477",
+          "end_ns": "1790896365871065458",
+          "duration_ms": 0.112981,
+          "plan_ms": null,
+          "n_events": 2,
+          "n_workers": 0,
+          "in_progress": false,
+          "end_inferred": false,
+          "started_before_window": false
+        },
+        {
+          "pid": 1170989,
+          "query_id": "3886912043147135675",
+          "start_ns": "1790896365870951515",
+          "end_ns": "1790896365871067361",
+          "duration_ms": 0.115846,
+          "plan_ms": 0.030707,
+          "n_events": 0,
+          "n_workers": 0,
+          "in_progress": false,
+          "end_inferred": false,
+          "started_before_window": false
+        },
+        {
+          "pid": 1170989,
+          "query_id": "-1980831870093258527",
+          "start_ns": "1790896365870723759",
+          "end_ns": "1790896365870766058",
+          "duration_ms": 0.042299,
+          "plan_ms": null,
+          "n_events": 0,
+          "n_workers": 0,
+          "in_progress": false,
+          "end_inferred": false,
+          "started_before_window": false
+        },
+        {
+          "pid": 1170989,
+          "query_id": "-1980831870093258527",
+          "start_ns": "1790896365870722797",
+          "end_ns": "1790896365870767782",
+          "duration_ms": 0.044985,
+          "plan_ms": 0.032941,
+          "n_events": 0,
+          "n_workers": 0,
+          "in_progress": false,
+          "end_inferred": false,
+          "started_before_window": false
+        },
+        {
+          "pid": 1170989,
+          "query_id": "5409612748292285639",
+          "start_ns": "1790896365870525177",
+          "end_ns": "1790896365870538322",
+          "duration_ms": 0.013145,
+          "plan_ms": 0.030056,
+          "n_events": 0,
+          "n_workers": 0,
+          "in_progress": false,
+          "end_inferred": false,
+          "started_before_window": false
+        },
+        {
+          "pid": 1170989,
+          "query_id": "-6796648778530205384",
+          "start_ns": "1790896365870331687",
+          "end_ns": "1790896365870394564",
+          "duration_ms": 0.062877,
+          "plan_ms": null,
+          "n_events": 0,
+          "n_workers": 0,
+          "in_progress": false,
+          "end_inferred": false,
+          "started_before_window": false
+        },
+        {
+          "pid": 1170989,
+          "query_id": "-6796648778530205384",
+          "start_ns": "1790896365870330635",
+          "end_ns": "1790896365870396497",
+          "duration_ms": 0.065862,
+          "plan_ms": 0.041899,
+          "n_events": 0,
+          "n_workers": 0,
+          "in_progress": false,
+          "end_inferred": false,
+          "started_before_window": false
+        },
+        {
+          "pid": 1170989,
+          "query_id": "4854991825702068830",
+          "start_ns": "1790896365870148374",
+          "end_ns": "1790896365870153413",
+          "duration_ms": 0.005039,
+          "plan_ms": null,
+          "n_events": 0,
+          "n_workers": 0,
+          "in_progress": false,
+          "end_inferred": false,
+          "started_before_window": false
+        }
+      ],
+      "total_count": 11,
+      "open_count": 0,
+      "completed_count": 11,
+      "truncated": false
+    }
+  },
+  {
+    "cmd": "execution_detail",
+    "args": {
+      "pid": 1170989,
+      "start_ns": "1790896365870952477",
+      "end_ns": "1790896365871065458"
+    },
+    "response": {
+      "id": 249,
+      "fidelity": "exact",
+      "query_id": "3886912043147135675",
+      "leader": {
+        "pid": 1170989,
+        "query_id": "3886912043147135675",
+        "events": [
+          {
+            "we": 0,
+            "name": "CPU*",
+            "start_ns": "1790896365870869030",
+            "dur_ns": "136346",
+            "cpu_ns": "136346"
+          },
+          {
+            "we": 50331653,
+            "name": "Lock:transactionid",
+            "start_ns": "1790896365871005376",
+            "dur_ns": "12974",
+            "cpu_ns": "12974"
+          }
+        ],
+        "total_count": 2,
+        "truncated": false
+      },
+      "workers": [],
+      "plan": null,
+      "total_count": 2,
+      "kept_count": 2,
+      "truncated": false
+    }
+  }
+]

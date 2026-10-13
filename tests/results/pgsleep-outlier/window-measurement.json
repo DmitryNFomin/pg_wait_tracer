@@ -1,0 +1,203 @@
+{
+  "status": "REFUSED",
+  "scope": "execution-associated original wait events",
+  "window": {
+    "from_ns": "1790897300000000000",
+    "to_ns": "1790897325000000000"
+  },
+  "threshold_ns": 824430,
+  "executions_found": 6582,
+  "counts": {
+    "cpu_gap_events": 1211,
+    "duplicate_execution_rows": 10,
+    "eventful_executions": 209,
+    "eventless_executions": 6373,
+    "execution_detail_requests": 209,
+    "executions_requests": 31,
+    "inferred_execution_ends": 0,
+    "open_execution_rows": 0,
+    "split_execution_pages": 15,
+    "top_events_requests": 1,
+    "unique_lane_events": 2422
+  },
+  "refusals": {
+    "window_empty": 0,
+    "no_executions": 0,
+    "execution_pages_incomplete": 0,
+    "truncated_lanes": 1,
+    "omitted_lane_events": 18510,
+    "lane_count_mismatch": 0,
+    "detail_count_mismatch": 0,
+    "null_cpu_events": 0,
+    "invalid_events": 0,
+    "execution_event_shortfall": 0,
+    "empty_eventful_executions": 0,
+    "detail_errors": 0,
+    "nonexact_responses": 0,
+    "execution_count_mismatch": 0,
+    "no_pure_sleep_events": 0,
+    "server_errors": 0,
+    "census_errors": 0,
+    "pure_sleep_events_unrepresented": 6,
+    "pure_sleep_count_inconsistent": 0
+  },
+  "classes": {
+    "IO:BufFileWrite": {
+      "count": 1000,
+      "pure_sleep": false,
+      "cpu_ns_total": 10072650,
+      "duration_ns_total": 10072650,
+      "cpu_ns_mean": 10072.65,
+      "cpu_ns_max": 37761,
+      "cpu_ns_p50": 8746,
+      "cpu_ns_p95": 16220,
+      "cpu_ns_p99": 22332,
+      "cpu_dur_mean": 1.0,
+      "cpu_dur_max": 1.0,
+      "cpu_dur_weighted": 1.0,
+      "above_threshold": 0,
+      "max_cpu_event": {
+        "pid": 1171013,
+        "start_ns": "1790897313068021411",
+        "duration_ns": 37761,
+        "cpu_ns": 37761
+      }
+    },
+    "IO:DataFileExtend": {
+      "count": 4,
+      "pure_sleep": false,
+      "cpu_ns_total": 176720,
+      "duration_ns_total": 176720,
+      "cpu_ns_mean": 44180.0,
+      "cpu_ns_max": 60071,
+      "cpu_ns_p50": 39183,
+      "cpu_ns_p95": 60071,
+      "cpu_ns_p99": 60071,
+      "cpu_dur_mean": 1.0,
+      "cpu_dur_max": 1.0,
+      "cpu_dur_weighted": 1.0,
+      "above_threshold": 0,
+      "max_cpu_event": {
+        "pid": 1170989,
+        "start_ns": "1790897319278984621",
+        "duration_ns": 60071,
+        "cpu_ns": 60071
+      }
+    },
+    "IO:DataFileRead": {
+      "count": 197,
+      "pure_sleep": false,
+      "cpu_ns_total": 4095458,
+      "duration_ns_total": 4645186,
+      "cpu_ns_mean": 20789.1269035533,
+      "cpu_ns_max": 90959,
+      "cpu_ns_p50": 16861,
+      "cpu_ns_p95": 34515,
+      "cpu_ns_p99": 71824,
+      "cpu_dur_mean": 0.9920255834235461,
+      "cpu_dur_max": 1.0,
+      "cpu_dur_weighted": 0.8816564072999445,
+      "above_threshold": 0,
+      "max_cpu_event": {
+        "pid": 1170992,
+        "start_ns": "1790897307757571762",
+        "duration_ns": 411007,
+        "cpu_ns": 90959
+      }
+    },
+    "Lock:transactionid": {
+      "count": 6,
+      "pure_sleep": true,
+      "cpu_ns_total": 259605,
+      "duration_ns_total": 3001485753,
+      "cpu_ns_mean": 43267.5,
+      "cpu_ns_max": 75812,
+      "cpu_ns_p50": 29686,
+      "cpu_ns_p95": 75812,
+      "cpu_ns_p99": 75812,
+      "cpu_dur_mean": 0.03228654445249766,
+      "cpu_dur_max": 0.07610307094952347,
+      "cpu_dur_weighted": 8.649216466895554e-05,
+      "above_threshold": 0,
+      "max_cpu_event": {
+        "pid": 1171010,
+        "start_ns": "1790897323442001905",
+        "duration_ns": 1000089974,
+        "cpu_ns": 75812
+      }
+    },
+    "Timeout:PgSleep": {
+      "count": 4,
+      "pure_sleep": true,
+      "cpu_ns_total": 1017549,
+      "duration_ns_total": 9410635916,
+      "cpu_ns_mean": 254387.25,
+      "cpu_ns_max": 923834,
+      "cpu_ns_p50": 31589,
+      "cpu_ns_p95": 923834,
+      "cpu_ns_p99": 923834,
+      "cpu_dur_mean": 9.886912703357897e-05,
+      "cpu_dur_max": 0.00030753079643629493,
+      "cpu_dur_weighted": 0.00010812754941140154,
+      "above_threshold": 1,
+      "max_cpu_event": {
+        "pid": 1171002,
+        "start_ns": "1790897311539822175",
+        "duration_ns": 3004037354,
+        "cpu_ns": 923834
+      }
+    }
+  },
+  "pure_sleep_exceedances": 1,
+  "capture_wait_census": {
+    "Client:ClientRead": 4204,
+    "Timeout:CheckpointWriteDelay": 170,
+    "Lock:relation": 6,
+    "Timeout:PgSleep": 4,
+    "Lock:transactionid": 6,
+    "IO:WalSync": 604,
+    "IO:BufFileWrite": 5127,
+    "IO:BufFileRead": 5128,
+    "IO:WalWrite": 605,
+    "LWLock:WALWrite": 15,
+    "IO:DataFileWrite": 300,
+    "IO:DataFileRead": 197,
+    "IO:DataFileSync": 11,
+    "IO:DataFileFlush": 212,
+    "IO:ControlFileSyncUpdate": 1,
+    "IO:DataFileExtend": 4,
+    "IO:SlruFlushSync": 1,
+    "IO:SlruWrite": 2,
+    "IO:RelationMapRead": 2,
+    "IO:ControlFileWriteUpdate": 1
+  },
+  "pure_sleep_coverage": {
+    "Lock:relation": {
+      "capture_events": 6,
+      "measured_events": 0
+    },
+    "Lock:transactionid": {
+      "capture_events": 6,
+      "measured_events": 6
+    },
+    "Timeout:PgSleep": {
+      "capture_events": 4,
+      "measured_events": 4
+    }
+  },
+  "PgSleep_events": 4,
+  "server_info": {
+    "id": 2,
+    "from_ns": 1790895946646458457,
+    "to_ns": 1790897797661724062,
+    "num_events": 4308992,
+    "num_cpus": 10,
+    "server_version": "b15e8340a74ca7a9f7e5744bf0d34eb35d1d5aa0",
+    "protocol": 1,
+    "now_ns": 1791903279973070000
+  },
+  "trace_dir": "/Users/dmitryfomin/work/git/pg_wait_tracer/tests/results/demo_rehearsal/trace",
+  "trace_sha256": {
+    "current.trace": "52d2dbd03c88c753589dedc6e674bb48c2b309f22a22646431278c57a5eca214"
+  }
+}

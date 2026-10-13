@@ -1,0 +1,76 @@
+[
+  {
+    "cmd": "executions",
+    "args": {
+      "from_": "1790897311538822175",
+      "to_": "1790897314544859529",
+      "limit": 500
+    },
+    "response": {
+      "id": 244,
+      "fidelity": "exact",
+      "rows": [
+        {
+          "pid": 1171002,
+          "query_id": "-8886085649470066503",
+          "start_ns": "1790897311539810433",
+          "end_ns": "1790897314543881321",
+          "duration_ms": 3004.070888,
+          "plan_ms": 0.032691,
+          "n_events": 2,
+          "n_workers": 0,
+          "in_progress": false,
+          "end_inferred": false,
+          "started_before_window": false
+        }
+      ],
+      "total_count": 1,
+      "open_count": 0,
+      "completed_count": 1,
+      "truncated": false
+    }
+  },
+  {
+    "cmd": "execution_detail",
+    "args": {
+      "pid": 1171002,
+      "start_ns": "1790897311539810433",
+      "end_ns": "1790897314543881321"
+    },
+    "response": {
+      "id": 245,
+      "fidelity": "exact",
+      "query_id": "-8886085649470066503",
+      "leader": {
+        "pid": 1171002,
+        "query_id": "-8886085649470066503",
+        "events": [
+          {
+            "we": 0,
+            "name": "CPU*",
+            "start_ns": "1790897311539638842",
+            "dur_ns": "183333",
+            "cpu_ns": "183333"
+          },
+          {
+            "we": 150994946,
+            "name": "Timeout:PgSleep",
+            "start_ns": "1790897311539822175",
+            "dur_ns": "3004037354",
+            "cpu_ns": "923834"
+          }
+        ],
+        "total_count": 2,
+        "truncated": false
+      },
+      "workers": [],
+      "plan": {
+        "start_ns": "1790897311539758416",
+        "end_ns": "1790897311539791107"
+      },
+      "total_count": 2,
+      "kept_count": 2,
+      "truncated": false
+    }
+  }
+]

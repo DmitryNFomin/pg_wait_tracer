@@ -1,0 +1,1 @@
+Verified 6 targeted records against unchanged Measurement; window REFUSED, one PgSleep exceedance remains.
