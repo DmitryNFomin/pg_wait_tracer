@@ -1,0 +1,50 @@
+MXSERVER pid=1451043
+pgwt-server: loaded event names from wait_event_names.json
+pgwt-server: 1 trace files, 4 CPUs, ~9199616 events
+pgwt-server: loaded 29 query texts
+pgwt-server: loaded 168 backend metadata entries
+pgwt-server: loaded 29 query texts
+pgwt-server: loaded 168 backend metadata entries
+pgwt-server: loaded 29 query texts
+pgwt-server: loaded 168 backend metadata entries
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1239 served=0 resets=0
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1239 served=1239 resets=0
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1239 served=2478 resets=0
+MXPHASE id=10 count=5072061 load=221.024 links=32.244 nodes=121.105 emit=0.257
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1239 served=3717 resets=0
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1239 served=4956 resets=0
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1239 served=4958 resets=0
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1951 served=5783 resets=0
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1951 served=7022 resets=0
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1951 served=8261 resets=0
+MXPHASE id=19 count=5072061 load=197.154 links=31.838 nodes=113.211 emit=0.215
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1951 served=9500 resets=0
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1951 served=10739 resets=0
+MXPHASE id=23 count=5072061 load=192.806 links=30.055 nodes=109.053 emit=0.221
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1951 served=11978 resets=0
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1951 served=13217 resets=0
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1951 served=13219 resets=0
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=2663 served=14044 resets=0
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=2663 served=15283 resets=0
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=2663 served=16522 resets=0
+MXPHASE id=32 count=5072061 load=193.376 links=31.019 nodes=112.274 emit=0.216
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=2663 served=17761 resets=0
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=2663 served=19000 resets=0
+MXPHASE id=36 count=5072061 load=198.115 links=30.962 nodes=123.166 emit=0.314
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=2663 served=20239 resets=0
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=2663 served=21478 resets=0
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=2663 served=21480 resets=0
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=3375 served=22305 resets=0
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=3375 served=23544 resets=0
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=3375 served=24783 resets=0
+MXPHASE id=45 count=5072061 load=191.440 links=31.813 nodes=111.387 emit=0.207
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=3375 served=26022 resets=0
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=3375 served=27261 resets=0
+MXPHASE id=49 count=5072061 load=203.638 links=30.558 nodes=117.725 emit=0.198
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=3375 served=28500 resets=0
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=3375 served=29739 resets=0
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=3375 served=29741 resets=0
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=4087 served=30566 resets=0
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=4087 served=31805 resets=0
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=4087 served=33044 resets=0
+MXPHASE id=58 count=5072061 load=197.259 links=31.165 nodes=117.272 emit=0.257

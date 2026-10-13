@@ -1,0 +1,28 @@
+{
+  "pre": {
+    "base_commit": "b907ec0",
+    "changed_source_files": [],
+    "server_sha256": "de490c22d36c39e89c0cbb4b079268ea2f9d5411f9e4ba1de548f2772be634c4"
+  },
+  "final": {
+    "base_commit": "612bd98",
+    "changed_source_files": [
+      "server.c"
+    ],
+    "server_sha256": "1053e6983385ca5ace78dda88096bd19682497d45201a1f22d45bc247bb6ec4d"
+  },
+  "aggregate": {
+    "base_commit": "612bd98",
+    "changed_source_files": [
+      "server.c"
+    ],
+    "server_sha256": "87226ba7465661712c3f982bd5aa90134aed32a3ccaf586ae3c38da0aa465a06"
+  },
+  "oldsort": {
+    "base_commit": "612bd98",
+    "changed_source_files": [
+      "server.c"
+    ],
+    "server_sha256": "8d0fe6dddfa6b251faae2379f80948d42fa4409a2ec806617f0af1423ec36c00"
+  }
+}

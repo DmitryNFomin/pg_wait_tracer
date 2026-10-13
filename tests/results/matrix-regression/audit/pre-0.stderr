@@ -1,0 +1,75 @@
+MXREQUEST {"id": 1, "cmd": "info"}
+pgwt-server: loaded event names from wait_event_names.json
+pgwt-server: 1 trace files, 4 CPUs, ~9199616 events
+pgwt-server: loaded 29 query texts
+pgwt-server: loaded 168 backend metadata entries
+pgwt-server: loaded 29 query texts
+pgwt-server: loaded 168 backend metadata entries
+MXREQUEST {"id": 2, "cmd": "variants", "from": 1791800864284323682, "to": 1791801764284323682, "buckets": 200, "filters": {}}
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1239 served=0 resets=0
+MXREQUEST {"id": 3, "cmd": "transitions", "from": 1791800864284323682, "to": 1791801764284323682, "buckets": 200, "filters": {}}
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1239 served=1239 resets=0
+MXREQUEST {"id": 4, "cmd": "time_model", "from": 1791801759284323682, "to": 1791801764284323682}
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1239 served=1241 resets=0
+MXREQUEST {"id": 5, "cmd": "time_model", "from": 1791801759284323682, "to": 1791801764284323682}
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1239 served=1243 resets=0
+MXREQUEST {"id": 6, "cmd": "time_model", "from": 1791801759284323682, "to": 1791801764284323682}
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1239 served=1245 resets=0
+MXREQUEST {"id": 7, "cmd": "transitions", "from": 1791800864284323682, "to": 1791801764284323682, "buckets": 200, "filters": {}}
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1239 served=1247 resets=0
+MXREQUEST {"id": 8, "cmd": "transitions", "from": 1791800864284323682, "to": 1791801764284323682, "buckets": 200, "filters": {}}
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1239 served=1249 resets=0
+MXREQUEST {"id": 9, "cmd": "transitions", "from": 1791800864284323682, "to": 1791801764284323682, "buckets": 200, "filters": {}}
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1239 served=1251 resets=0
+MXREQUEST {"id": 10, "cmd": "transitions", "from": 1791800864284323682, "to": 1791801764284323682, "buckets": 200, "filters": {}}
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1239 served=1253 resets=0
+MXREQUEST {"id": 11, "cmd": "transitions", "from": 1791800864284323682, "to": 1791801764284323682, "buckets": 200, "filters": {}}
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1239 served=1255 resets=0
+MXREQUEST {"id": 12, "cmd": "transitions", "from": 1791800864284323682, "to": 1791801764284323682, "buckets": 200, "filters": {}}
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1239 served=1257 resets=0
+MXREQUEST {"id": 13, "cmd": "time_model", "from": 1791801759284323682, "to": 1791801764284323682}
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1239 served=1259 resets=0
+MXREQUEST {"id": 14, "cmd": "time_model", "from": 1791801759284323682, "to": 1791801764284323682}
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1239 served=1261 resets=0
+MXREQUEST {"id": 15, "cmd": "time_model", "from": 1791801759284323682, "to": 1791801764284323682}
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1239 served=1263 resets=0
+MXREQUEST {"id": 16, "cmd": "top_queries", "from": 1791800864284323682, "to": 1791801764284323682, "buckets": 200, "filters": {}}
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1239 served=2502 resets=0
+MXREQUEST {"id": 17, "cmd": "top_queries", "from": 1791800864284323682, "to": 1791801764284323682, "buckets": 200, "filters": {}}
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1239 served=3741 resets=0
+MXREQUEST {"id": 18, "cmd": "top_queries", "from": 1791800864284323682, "to": 1791801764284323682, "buckets": 200, "filters": {}}
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1239 served=4980 resets=0
+MXREQUEST {"id": 19, "cmd": "top_queries", "from": 1791800864284323682, "to": 1791801764284323682, "buckets": 200, "filters": {}}
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1239 served=6219 resets=0
+MXREQUEST {"id": 20, "cmd": "top_queries", "from": 1791800864284323682, "to": 1791801764284323682, "buckets": 200, "filters": {}}
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1239 served=7458 resets=0
+MXREQUEST {"id": 21, "cmd": "executions", "from": 1791800864284323682, "to": 1791801764284323682, "buckets": 200, "filters": {}, "limit": 100, "sort": "duration_desc"}
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1239 served=8697 resets=0
+MXREQUEST {"id": 22, "cmd": "executions", "from": 1791800864284323682, "to": 1791801764284323682, "buckets": 200, "filters": {}, "limit": 100, "sort": "duration_desc"}
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1239 served=9936 resets=0
+MXREQUEST {"id": 23, "cmd": "executions", "from": 1791800864284323682, "to": 1791801764284323682, "buckets": 200, "filters": {}, "limit": 100, "sort": "duration_desc"}
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1239 served=11175 resets=0
+MXREQUEST {"id": 24, "cmd": "executions", "from": 1791800864284323682, "to": 1791801764284323682, "buckets": 200, "filters": {}, "limit": 100, "sort": "duration_desc"}
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1239 served=12414 resets=0
+MXREQUEST {"id": 25, "cmd": "executions", "from": 1791800864284323682, "to": 1791801764284323682, "buckets": 200, "filters": {}, "limit": 100, "sort": "duration_desc"}
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1239 served=13653 resets=0
+MXREQUEST {"id": 26, "cmd": "exec_scatter", "from": 1791800864284323682, "to": 1791801764284323682, "buckets": 200, "filters": {}, "max_points": 2000}
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1239 served=14892 resets=0
+MXREQUEST {"id": 27, "cmd": "exec_scatter", "from": 1791800864284323682, "to": 1791801764284323682, "buckets": 200, "filters": {}, "max_points": 2000}
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1239 served=16131 resets=0
+MXREQUEST {"id": 28, "cmd": "exec_scatter", "from": 1791800864284323682, "to": 1791801764284323682, "buckets": 200, "filters": {}, "max_points": 2000}
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1239 served=17370 resets=0
+MXREQUEST {"id": 29, "cmd": "exec_scatter", "from": 1791800864284323682, "to": 1791801764284323682, "buckets": 200, "filters": {}, "max_points": 2000}
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1239 served=18609 resets=0
+MXREQUEST {"id": 30, "cmd": "exec_scatter", "from": 1791800864284323682, "to": 1791801764284323682, "buckets": 200, "filters": {}, "max_points": 2000}
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1239 served=19848 resets=0
+MXREQUEST {"id": 31, "cmd": "concurrency", "from": 1791800864284323682, "to": 1791801764284323682, "buckets": 300, "filters": {}}
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1239 served=21087 resets=0
+MXREQUEST {"id": 32, "cmd": "concurrency", "from": 1791800864284323682, "to": 1791801764284323682, "buckets": 300, "filters": {}}
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1239 served=22326 resets=0
+MXREQUEST {"id": 33, "cmd": "concurrency", "from": 1791800864284323682, "to": 1791801764284323682, "buckets": 300, "filters": {}}
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1239 served=23565 resets=0
+MXREQUEST {"id": 34, "cmd": "concurrency", "from": 1791800864284323682, "to": 1791801764284323682, "buckets": 300, "filters": {}}
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1239 served=24804 resets=0
+MXREQUEST {"id": 35, "cmd": "concurrency", "from": 1791800864284323682, "to": 1791801764284323682, "buckets": 300, "filters": {}}
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1239 served=26043 resets=0

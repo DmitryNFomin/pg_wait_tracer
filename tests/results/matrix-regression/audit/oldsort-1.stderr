@@ -1,0 +1,43 @@
+MXREQUEST {"id": 1, "cmd": "info"}
+alloc_tune: applied=0x7
+pgwt-server: loaded event names from wait_event_names.json
+pgwt-server: 1 trace files, 4 CPUs, ~9199616 events
+pgwt-server: loaded 29 query texts
+pgwt-server: loaded 168 backend metadata entries
+pgwt-server: loaded 29 query texts
+pgwt-server: loaded 168 backend metadata entries
+MXREQUEST {"id": 2, "cmd": "variants", "from": 1791800864284323682, "to": 1791801764284323682, "buckets": 200, "filters": {}}
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1239 served=0 resets=0
+MXREQUEST {"id": 3, "cmd": "transitions", "from": 1791800864284323682, "to": 1791801764284323682, "buckets": 200, "filters": {}}
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1239 served=1239 resets=0
+MXPHASE id=3 count=5072061 load=767.396 links=36.082 nodes=116.178 emit=0.200
+MXREQUEST {"id": 4, "cmd": "time_model", "from": 1791801759284323682, "to": 1791801764284323682}
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1239 served=1241 resets=0
+MXREQUEST {"id": 5, "cmd": "time_model", "from": 1791801759284323682, "to": 1791801764284323682}
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1239 served=1243 resets=0
+MXREQUEST {"id": 6, "cmd": "time_model", "from": 1791801759284323682, "to": 1791801764284323682}
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1239 served=1245 resets=0
+MXREQUEST {"id": 7, "cmd": "transitions", "from": 1791800864284323682, "to": 1791801764284323682, "buckets": 200, "filters": {}}
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1239 served=2484 resets=0
+MXPHASE id=7 count=5072061 load=713.462 links=32.361 nodes=117.664 emit=0.236
+MXREQUEST {"id": 8, "cmd": "transitions", "from": 1791800864284323682, "to": 1791801764284323682, "buckets": 200, "filters": {}}
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1239 served=3723 resets=0
+MXPHASE id=8 count=5072061 load=720.101 links=33.978 nodes=118.123 emit=0.212
+MXREQUEST {"id": 9, "cmd": "transitions", "from": 1791800864284323682, "to": 1791801764284323682, "buckets": 200, "filters": {}}
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1239 served=4962 resets=0
+MXPHASE id=9 count=5072061 load=729.452 links=34.680 nodes=119.509 emit=0.293
+MXREQUEST {"id": 10, "cmd": "transitions", "from": 1791800864284323682, "to": 1791801764284323682, "buckets": 200, "filters": {}}
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1239 served=6201 resets=0
+MXPHASE id=10 count=5072061 load=730.687 links=37.587 nodes=119.598 emit=0.196
+MXREQUEST {"id": 11, "cmd": "transitions", "from": 1791800864284323682, "to": 1791801764284323682, "buckets": 200, "filters": {}}
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1239 served=7440 resets=0
+MXPHASE id=11 count=5072061 load=732.800 links=32.576 nodes=135.108 emit=0.208
+MXREQUEST {"id": 12, "cmd": "transitions", "from": 1791800864284323682, "to": 1791801764284323682, "buckets": 200, "filters": {}}
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1239 served=8679 resets=0
+MXPHASE id=12 count=5072061 load=732.689 links=33.184 nodes=111.823 emit=0.215
+MXREQUEST {"id": 13, "cmd": "time_model", "from": 1791801759284323682, "to": 1791801764284323682}
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1239 served=8681 resets=0
+MXREQUEST {"id": 14, "cmd": "time_model", "from": 1791801759284323682, "to": 1791801764284323682}
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1239 served=8683 resets=0
+MXREQUEST {"id": 15, "cmd": "time_model", "from": 1791801759284323682, "to": 1791801764284323682}
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1239 served=8685 resets=0

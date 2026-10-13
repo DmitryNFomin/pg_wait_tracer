@@ -1,0 +1,5414 @@
+{
+  "endpoint": [
+    {
+      "arm": "before329",
+      "rep": 0,
+      "command": "transitions",
+      "warm_ms": [
+        997.787,
+        1008.954,
+        974.661,
+        988.766,
+        996.1,
+        1011.155
+      ],
+      "median_ms": 996.944,
+      "decoded": [
+        1239,
+        1239,
+        1239,
+        1239,
+        1239,
+        1239
+      ],
+      "served": [
+        2484,
+        3723,
+        4962,
+        6201,
+        7440,
+        8679
+      ],
+      "total": 2621830,
+      "hash": "1cc6a02931f43f7568f652aeb6d2ea7c566d863e2770182d31ab2d938bad25d4",
+      "phases": [
+        null,
+        null,
+        null,
+        null,
+        null,
+        null
+      ]
+    },
+    {
+      "arm": "after329",
+      "rep": 0,
+      "command": "transitions",
+      "warm_ms": [
+        993.056,
+        962.242,
+        1003.806,
+        1014.285,
+        1009.714,
+        965.875
+      ],
+      "median_ms": 998.431,
+      "decoded": [
+        1239,
+        1239,
+        1239,
+        1239,
+        1239,
+        1239
+      ],
+      "served": [
+        2484,
+        3723,
+        4962,
+        6201,
+        7440,
+        8679
+      ],
+      "total": 2621830,
+      "hash": "1cc6a02931f43f7568f652aeb6d2ea7c566d863e2770182d31ab2d938bad25d4",
+      "phases": [
+        null,
+        null,
+        null,
+        null,
+        null,
+        null
+      ]
+    },
+    {
+      "arm": "after340",
+      "rep": 0,
+      "command": "transitions",
+      "warm_ms": [
+        8.032,
+        7.723,
+        7.626,
+        7.189,
+        7.179,
+        7.0
+      ],
+      "median_ms": 7.408,
+      "decoded": [
+        1239,
+        1239,
+        1239,
+        1239,
+        1239,
+        1239
+      ],
+      "served": [
+        1247,
+        1249,
+        1251,
+        1253,
+        1255,
+        1257
+      ],
+      "total": 2763992,
+      "hash": "d49b5f90bbefc42906a3436c576922570d7af0c12802ab33f2e53a05282a280c",
+      "phases": [
+        null,
+        null,
+        null,
+        null,
+        null,
+        null
+      ]
+    },
+    {
+      "arm": "pre",
+      "rep": 0,
+      "command": "transitions",
+      "warm_ms": [
+        6.792,
+        7.44,
+        7.954,
+        7.466,
+        8.518,
+        7.083
+      ],
+      "median_ms": 7.453,
+      "decoded": [
+        1239,
+        1239,
+        1239,
+        1239,
+        1239,
+        1239
+      ],
+      "served": [
+        1247,
+        1249,
+        1251,
+        1253,
+        1255,
+        1257
+      ],
+      "total": 2763992,
+      "hash": "d49b5f90bbefc42906a3436c576922570d7af0c12802ab33f2e53a05282a280c",
+      "phases": [
+        null,
+        null,
+        null,
+        null,
+        null,
+        null
+      ]
+    },
+    {
+      "arm": "pre",
+      "rep": 0,
+      "command": "top_queries",
+      "warm_ms": [
+        1743.053,
+        1701.75,
+        1722.898,
+        1676.311
+      ],
+      "median_ms": 1712.324,
+      "decoded": [
+        1239,
+        1239,
+        1239,
+        1239
+      ],
+      "served": [
+        3741,
+        4980,
+        6219,
+        7458
+      ],
+      "total": null,
+      "hash": "920e022cd2411200721a5becb8df2a045665a029e1e7f7bb47f6384decefb5f9",
+      "phases": [
+        null,
+        null,
+        null,
+        null
+      ]
+    },
+    {
+      "arm": "pre",
+      "rep": 0,
+      "command": "executions",
+      "warm_ms": [
+        1643.143,
+        1705.712,
+        1664.405,
+        1637.483
+      ],
+      "median_ms": 1653.774,
+      "decoded": [
+        1239,
+        1239,
+        1239,
+        1239
+      ],
+      "served": [
+        9936,
+        11175,
+        12414,
+        13653
+      ],
+      "total": null,
+      "hash": "70f512326b30e8f38a22883f039dbe347b4ef9ec5b1296e6e5b9ec029e1e8d09",
+      "phases": [
+        null,
+        null,
+        null,
+        null
+      ]
+    },
+    {
+      "arm": "pre",
+      "rep": 0,
+      "command": "exec_scatter",
+      "warm_ms": [
+        1533.753,
+        1558.984,
+        1585.854,
+        1593.73
+      ],
+      "median_ms": 1572.419,
+      "decoded": [
+        1239,
+        1239,
+        1239,
+        1239
+      ],
+      "served": [
+        16131,
+        17370,
+        18609,
+        19848
+      ],
+      "total": null,
+      "hash": "072703bf9ca62b8bee3017281711ce8d0084db6270014adaaaa4523fb123dfe7",
+      "phases": [
+        null,
+        null,
+        null,
+        null
+      ]
+    },
+    {
+      "arm": "pre",
+      "rep": 0,
+      "command": "concurrency",
+      "warm_ms": [
+        1172.801,
+        1180.474,
+        1182.298,
+        1163.352
+      ],
+      "median_ms": 1176.637,
+      "decoded": [
+        1239,
+        1239,
+        1239,
+        1239
+      ],
+      "served": [
+        22326,
+        23565,
+        24804,
+        26043
+      ],
+      "total": null,
+      "hash": "735ea658c99f8eb395ebb1f4578076253b1682671c05c7e06618f670b7f3230b",
+      "phases": [
+        null,
+        null,
+        null,
+        null
+      ]
+    },
+    {
+      "arm": "after365",
+      "rep": 0,
+      "command": "transitions",
+      "warm_ms": [
+        7.501,
+        7.297,
+        7.225,
+        7.698,
+        6.859,
+        6.687
+      ],
+      "median_ms": 7.261,
+      "decoded": [
+        1239,
+        1239,
+        1239,
+        1239,
+        1239,
+        1239
+      ],
+      "served": [
+        1247,
+        1249,
+        1251,
+        1253,
+        1255,
+        1257
+      ],
+      "total": 2763992,
+      "hash": "d49b5f90bbefc42906a3436c576922570d7af0c12802ab33f2e53a05282a280c",
+      "phases": [
+        null,
+        null,
+        null,
+        null,
+        null,
+        null
+      ]
+    },
+    {
+      "arm": "before_refusal",
+      "rep": 0,
+      "command": "transitions",
+      "warm_ms": [
+        7.505,
+        8.36,
+        7.824,
+        7.579,
+        8.478,
+        8.066
+      ],
+      "median_ms": 7.945,
+      "decoded": [
+        1239,
+        1239,
+        1239,
+        1239,
+        1239,
+        1239
+      ],
+      "served": [
+        1247,
+        1249,
+        1251,
+        1253,
+        1255,
+        1257
+      ],
+      "total": 2763992,
+      "hash": "d49b5f90bbefc42906a3436c576922570d7af0c12802ab33f2e53a05282a280c",
+      "phases": [
+        null,
+        null,
+        null,
+        null,
+        null,
+        null
+      ]
+    },
+    {
+      "arm": "after_refusal",
+      "rep": 0,
+      "command": "transitions",
+      "warm_ms": [
+        400.819,
+        382.052,
+        380.113,
+        362.272,
+        396.451,
+        366.452
+      ],
+      "median_ms": 381.082,
+      "decoded": [
+        1239,
+        1239,
+        1239,
+        1239,
+        1239,
+        1239
+      ],
+      "served": [
+        2484,
+        3723,
+        4962,
+        6201,
+        7440,
+        8679
+      ],
+      "total": 2621830,
+      "hash": "6ae4a793c32f6c87bd272070a7f2330d8a7bb58c83928b6410bcb95e82616695",
+      "phases": [
+        null,
+        null,
+        null,
+        null,
+        null,
+        null
+      ]
+    },
+    {
+      "arm": "aggregate",
+      "rep": 0,
+      "command": "transitions",
+      "warm_ms": [
+        13.045,
+        13.085,
+        12.056,
+        8.859,
+        8.663,
+        8.594
+      ],
+      "median_ms": 10.457,
+      "decoded": [
+        1239,
+        1239,
+        1239,
+        1239,
+        1239,
+        1239
+      ],
+      "served": [
+        1247,
+        1249,
+        1251,
+        1253,
+        1255,
+        1257
+      ],
+      "total": 2763992,
+      "hash": "d49b5f90bbefc42906a3436c576922570d7af0c12802ab33f2e53a05282a280c",
+      "phases": [
+        null,
+        null,
+        null,
+        null,
+        null,
+        null
+      ]
+    },
+    {
+      "arm": "aggregate",
+      "rep": 0,
+      "command": "top_queries",
+      "warm_ms": [
+        316.29,
+        316.184,
+        320.249,
+        323.461
+      ],
+      "median_ms": 318.269,
+      "decoded": [
+        1239,
+        1239,
+        1239,
+        1239
+      ],
+      "served": [
+        3741,
+        4980,
+        6219,
+        7458
+      ],
+      "total": null,
+      "hash": "920e022cd2411200721a5becb8df2a045665a029e1e7f7bb47f6384decefb5f9",
+      "phases": [
+        null,
+        null,
+        null,
+        null
+      ]
+    },
+    {
+      "arm": "aggregate",
+      "rep": 0,
+      "command": "executions",
+      "warm_ms": [
+        583.041,
+        578.204,
+        571.04,
+        612.347
+      ],
+      "median_ms": 580.622,
+      "decoded": [
+        1239,
+        1239,
+        1239,
+        1239
+      ],
+      "served": [
+        9936,
+        11175,
+        12414,
+        13653
+      ],
+      "total": null,
+      "hash": "70f512326b30e8f38a22883f039dbe347b4ef9ec5b1296e6e5b9ec029e1e8d09",
+      "phases": [
+        null,
+        null,
+        null,
+        null
+      ]
+    },
+    {
+      "arm": "aggregate",
+      "rep": 0,
+      "command": "exec_scatter",
+      "warm_ms": [
+        475.235,
+        461.112,
+        441.472,
+        469.421
+      ],
+      "median_ms": 465.267,
+      "decoded": [
+        1239,
+        1239,
+        1239,
+        1239
+      ],
+      "served": [
+        16131,
+        17370,
+        18609,
+        19848
+      ],
+      "total": null,
+      "hash": "072703bf9ca62b8bee3017281711ce8d0084db6270014adaaaa4523fb123dfe7",
+      "phases": [
+        null,
+        null,
+        null,
+        null
+      ]
+    },
+    {
+      "arm": "aggregate",
+      "rep": 0,
+      "command": "concurrency",
+      "warm_ms": [
+        410.557,
+        416.339,
+        426.11,
+        409.349
+      ],
+      "median_ms": 413.448,
+      "decoded": [
+        1239,
+        1239,
+        1239,
+        1239
+      ],
+      "served": [
+        22326,
+        23565,
+        24804,
+        26043
+      ],
+      "total": null,
+      "hash": "735ea658c99f8eb395ebb1f4578076253b1682671c05c7e06618f670b7f3230b",
+      "phases": [
+        null,
+        null,
+        null,
+        null
+      ]
+    },
+    {
+      "arm": "final",
+      "rep": 0,
+      "command": "transitions",
+      "warm_ms": [
+        370.917,
+        387.468,
+        391.321,
+        375.115,
+        372.863,
+        379.079
+      ],
+      "median_ms": 377.097,
+      "decoded": [
+        1239,
+        1239,
+        1239,
+        1239,
+        1239,
+        1239
+      ],
+      "served": [
+        2484,
+        3723,
+        4962,
+        6201,
+        7440,
+        8679
+      ],
+      "total": 2621830,
+      "hash": "6ae4a793c32f6c87bd272070a7f2330d8a7bb58c83928b6410bcb95e82616695",
+      "phases": [
+        {
+          "id": 7.0,
+          "count": 5072061.0,
+          "load": 224.131,
+          "links": 31.361,
+          "nodes": 114.992,
+          "emit": 0.233
+        },
+        {
+          "id": 8.0,
+          "count": 5072061.0,
+          "load": 237.075,
+          "links": 32.581,
+          "nodes": 117.403,
+          "emit": 0.229
+        },
+        {
+          "id": 9.0,
+          "count": 5072061.0,
+          "load": 231.825,
+          "links": 35.298,
+          "nodes": 123.752,
+          "emit": 0.25
+        },
+        {
+          "id": 10.0,
+          "count": 5072061.0,
+          "load": 231.747,
+          "links": 30.983,
+          "nodes": 112.036,
+          "emit": 0.202
+        },
+        {
+          "id": 11.0,
+          "count": 5072061.0,
+          "load": 224.862,
+          "links": 32.0,
+          "nodes": 115.503,
+          "emit": 0.299
+        },
+        {
+          "id": 12.0,
+          "count": 5072061.0,
+          "load": 230.978,
+          "links": 33.824,
+          "nodes": 113.901,
+          "emit": 0.206
+        }
+      ]
+    },
+    {
+      "arm": "final",
+      "rep": 0,
+      "command": "top_queries",
+      "warm_ms": [
+        320.51,
+        312.024,
+        322.728,
+        312.844
+      ],
+      "median_ms": 316.677,
+      "decoded": [
+        1239,
+        1239,
+        1239,
+        1239
+      ],
+      "served": [
+        11163,
+        12402,
+        13641,
+        14880
+      ],
+      "total": null,
+      "hash": "920e022cd2411200721a5becb8df2a045665a029e1e7f7bb47f6384decefb5f9",
+      "phases": [
+        null,
+        null,
+        null,
+        null
+      ]
+    },
+    {
+      "arm": "final",
+      "rep": 0,
+      "command": "executions",
+      "warm_ms": [
+        591.977,
+        605.24,
+        636.588,
+        572.422
+      ],
+      "median_ms": 598.609,
+      "decoded": [
+        1239,
+        1239,
+        1239,
+        1239
+      ],
+      "served": [
+        17358,
+        18597,
+        19836,
+        21075
+      ],
+      "total": null,
+      "hash": "70f512326b30e8f38a22883f039dbe347b4ef9ec5b1296e6e5b9ec029e1e8d09",
+      "phases": [
+        null,
+        null,
+        null,
+        null
+      ]
+    },
+    {
+      "arm": "final",
+      "rep": 0,
+      "command": "exec_scatter",
+      "warm_ms": [
+        436.133,
+        445.172,
+        436.588,
+        517.897
+      ],
+      "median_ms": 440.88,
+      "decoded": [
+        1239,
+        1239,
+        1239,
+        1239
+      ],
+      "served": [
+        23553,
+        24792,
+        26031,
+        27270
+      ],
+      "total": null,
+      "hash": "072703bf9ca62b8bee3017281711ce8d0084db6270014adaaaa4523fb123dfe7",
+      "phases": [
+        null,
+        null,
+        null,
+        null
+      ]
+    },
+    {
+      "arm": "final",
+      "rep": 0,
+      "command": "concurrency",
+      "warm_ms": [
+        413.455,
+        413.03,
+        419.43,
+        420.289
+      ],
+      "median_ms": 416.442,
+      "decoded": [
+        1239,
+        1239,
+        1239,
+        1239
+      ],
+      "served": [
+        29748,
+        30987,
+        32226,
+        33465
+      ],
+      "total": null,
+      "hash": "735ea658c99f8eb395ebb1f4578076253b1682671c05c7e06618f670b7f3230b",
+      "phases": [
+        null,
+        null,
+        null,
+        null
+      ]
+    },
+    {
+      "arm": "oldsort",
+      "rep": 0,
+      "command": "transitions",
+      "warm_ms": [
+        895.203,
+        871.757,
+        874.014,
+        891.629,
+        893.955,
+        894.914
+      ],
+      "median_ms": 892.792,
+      "decoded": [
+        1239,
+        1239,
+        1239,
+        1239,
+        1239,
+        1239
+      ],
+      "served": [
+        2484,
+        3723,
+        4962,
+        6201,
+        7440,
+        8679
+      ],
+      "total": 2621830,
+      "hash": "6ae4a793c32f6c87bd272070a7f2330d8a7bb58c83928b6410bcb95e82616695",
+      "phases": [
+        {
+          "id": 7.0,
+          "count": 5072061.0,
+          "load": 746.007,
+          "links": 33.085,
+          "nodes": 115.731,
+          "emit": 0.215
+        },
+        {
+          "id": 8.0,
+          "count": 5072061.0,
+          "load": 721.496,
+          "links": 34.069,
+          "nodes": 115.831,
+          "emit": 0.208
+        },
+        {
+          "id": 9.0,
+          "count": 5072061.0,
+          "load": 716.039,
+          "links": 35.401,
+          "nodes": 122.208,
+          "emit": 0.217
+        },
+        {
+          "id": 10.0,
+          "count": 5072061.0,
+          "load": 740.199,
+          "links": 33.807,
+          "nodes": 117.222,
+          "emit": 0.204
+        },
+        {
+          "id": 11.0,
+          "count": 5072061.0,
+          "load": 748.747,
+          "links": 32.777,
+          "nodes": 112.067,
+          "emit": 0.202
+        },
+        {
+          "id": 12.0,
+          "count": 5072061.0,
+          "load": 719.616,
+          "links": 33.063,
+          "nodes": 141.732,
+          "emit": 0.262
+        }
+      ]
+    },
+    {
+      "arm": "untuned",
+      "rep": 0,
+      "command": "transitions",
+      "warm_ms": [
+        488.355,
+        486.151,
+        481.094,
+        489.476,
+        480.537,
+        484.333
+      ],
+      "median_ms": 485.242,
+      "decoded": [
+        1239,
+        1239,
+        1239,
+        1239,
+        1239,
+        1239
+      ],
+      "served": [
+        2484,
+        3723,
+        4962,
+        6201,
+        7440,
+        8679
+      ],
+      "total": 2621830,
+      "hash": "6ae4a793c32f6c87bd272070a7f2330d8a7bb58c83928b6410bcb95e82616695",
+      "phases": [
+        {
+          "id": 7.0,
+          "count": 5072061.0,
+          "load": 343.702,
+          "links": 30.639,
+          "nodes": 112.039,
+          "emit": 0.204
+        },
+        {
+          "id": 8.0,
+          "count": 5072061.0,
+          "load": 325.64,
+          "links": 31.798,
+          "nodes": 114.321,
+          "emit": 0.202
+        },
+        {
+          "id": 9.0,
+          "count": 5072061.0,
+          "load": 321.172,
+          "links": 30.482,
+          "nodes": 115.634,
+          "emit": 0.316
+        },
+        {
+          "id": 10.0,
+          "count": 5072061.0,
+          "load": 327.656,
+          "links": 33.113,
+          "nodes": 115.955,
+          "emit": 0.203
+        },
+        {
+          "id": 11.0,
+          "count": 5072061.0,
+          "load": 326.355,
+          "links": 30.909,
+          "nodes": 111.285,
+          "emit": 0.203
+        },
+        {
+          "id": 12.0,
+          "count": 5072061.0,
+          "load": 329.474,
+          "links": 31.618,
+          "nodes": 111.43,
+          "emit": 0.209
+        }
+      ]
+    },
+    {
+      "arm": "untuned",
+      "rep": 1,
+      "command": "transitions",
+      "warm_ms": [
+        465.346,
+        480.222,
+        490.672,
+        468.514,
+        478.298,
+        486.694
+      ],
+      "median_ms": 479.26,
+      "decoded": [
+        1239,
+        1239,
+        1239,
+        1239,
+        1239,
+        1239
+      ],
+      "served": [
+        2484,
+        3723,
+        4962,
+        6201,
+        7440,
+        8679
+      ],
+      "total": 2621830,
+      "hash": "6ae4a793c32f6c87bd272070a7f2330d8a7bb58c83928b6410bcb95e82616695",
+      "phases": [
+        {
+          "id": 7.0,
+          "count": 5072061.0,
+          "load": 320.883,
+          "links": 31.712,
+          "nodes": 112.38,
+          "emit": 0.218
+        },
+        {
+          "id": 8.0,
+          "count": 5072061.0,
+          "load": 320.678,
+          "links": 31.853,
+          "nodes": 115.748,
+          "emit": 0.208
+        },
+        {
+          "id": 9.0,
+          "count": 5072061.0,
+          "load": 335.943,
+          "links": 33.437,
+          "nodes": 108.308,
+          "emit": 0.226
+        },
+        {
+          "id": 10.0,
+          "count": 5072061.0,
+          "load": 315.496,
+          "links": 30.668,
+          "nodes": 110.925,
+          "emit": 0.202
+        },
+        {
+          "id": 11.0,
+          "count": 5072061.0,
+          "load": 322.831,
+          "links": 31.29,
+          "nodes": 112.344,
+          "emit": 0.199
+        },
+        {
+          "id": 12.0,
+          "count": 5072061.0,
+          "load": 331.707,
+          "links": 31.958,
+          "nodes": 111.743,
+          "emit": 0.207
+        }
+      ]
+    },
+    {
+      "arm": "oldsort",
+      "rep": 1,
+      "command": "transitions",
+      "warm_ms": [
+        863.883,
+        872.573,
+        884.13,
+        888.186,
+        900.846,
+        878.036
+      ],
+      "median_ms": 881.083,
+      "decoded": [
+        1239,
+        1239,
+        1239,
+        1239,
+        1239,
+        1239
+      ],
+      "served": [
+        2484,
+        3723,
+        4962,
+        6201,
+        7440,
+        8679
+      ],
+      "total": 2621830,
+      "hash": "6ae4a793c32f6c87bd272070a7f2330d8a7bb58c83928b6410bcb95e82616695",
+      "phases": [
+        {
+          "id": 7.0,
+          "count": 5072061.0,
+          "load": 713.462,
+          "links": 32.361,
+          "nodes": 117.664,
+          "emit": 0.236
+        },
+        {
+          "id": 8.0,
+          "count": 5072061.0,
+          "load": 720.101,
+          "links": 33.978,
+          "nodes": 118.123,
+          "emit": 0.212
+        },
+        {
+          "id": 9.0,
+          "count": 5072061.0,
+          "load": 729.452,
+          "links": 34.68,
+          "nodes": 119.509,
+          "emit": 0.293
+        },
+        {
+          "id": 10.0,
+          "count": 5072061.0,
+          "load": 730.687,
+          "links": 37.587,
+          "nodes": 119.598,
+          "emit": 0.196
+        },
+        {
+          "id": 11.0,
+          "count": 5072061.0,
+          "load": 732.8,
+          "links": 32.576,
+          "nodes": 135.108,
+          "emit": 0.208
+        },
+        {
+          "id": 12.0,
+          "count": 5072061.0,
+          "load": 732.689,
+          "links": 33.184,
+          "nodes": 111.823,
+          "emit": 0.215
+        }
+      ]
+    },
+    {
+      "arm": "final",
+      "rep": 1,
+      "command": "transitions",
+      "warm_ms": [
+        392.264,
+        378.026,
+        378.178,
+        368.181,
+        390.94,
+        383.54
+      ],
+      "median_ms": 380.859,
+      "decoded": [
+        1239,
+        1239,
+        1239,
+        1239,
+        1239,
+        1239
+      ],
+      "served": [
+        2484,
+        3723,
+        4962,
+        6201,
+        7440,
+        8679
+      ],
+      "total": 2621830,
+      "hash": "6ae4a793c32f6c87bd272070a7f2330d8a7bb58c83928b6410bcb95e82616695",
+      "phases": [
+        {
+          "id": 7.0,
+          "count": 5072061.0,
+          "load": 237.594,
+          "links": 34.638,
+          "nodes": 119.71,
+          "emit": 0.194
+        },
+        {
+          "id": 8.0,
+          "count": 5072061.0,
+          "load": 229.631,
+          "links": 34.693,
+          "nodes": 113.346,
+          "emit": 0.275
+        },
+        {
+          "id": 9.0,
+          "count": 5072061.0,
+          "load": 234.643,
+          "links": 30.459,
+          "nodes": 112.676,
+          "emit": 0.244
+        },
+        {
+          "id": 10.0,
+          "count": 5072061.0,
+          "load": 223.17,
+          "links": 32.27,
+          "nodes": 112.369,
+          "emit": 0.215
+        },
+        {
+          "id": 11.0,
+          "count": 5072061.0,
+          "load": 230.155,
+          "links": 30.639,
+          "nodes": 129.743,
+          "emit": 0.206
+        },
+        {
+          "id": 12.0,
+          "count": 5072061.0,
+          "load": 230.33,
+          "links": 31.844,
+          "nodes": 120.947,
+          "emit": 0.204
+        }
+      ]
+    },
+    {
+      "arm": "final",
+      "rep": 1,
+      "command": "top_queries",
+      "warm_ms": [
+        314.584,
+        305.569,
+        312.119,
+        327.047
+      ],
+      "median_ms": 313.351,
+      "decoded": [
+        1239,
+        1239,
+        1239,
+        1239
+      ],
+      "served": [
+        11163,
+        12402,
+        13641,
+        14880
+      ],
+      "total": null,
+      "hash": "920e022cd2411200721a5becb8df2a045665a029e1e7f7bb47f6384decefb5f9",
+      "phases": [
+        null,
+        null,
+        null,
+        null
+      ]
+    },
+    {
+      "arm": "final",
+      "rep": 1,
+      "command": "executions",
+      "warm_ms": [
+        559.219,
+        556.402,
+        573.363,
+        585.345
+      ],
+      "median_ms": 566.291,
+      "decoded": [
+        1239,
+        1239,
+        1239,
+        1239
+      ],
+      "served": [
+        17358,
+        18597,
+        19836,
+        21075
+      ],
+      "total": null,
+      "hash": "70f512326b30e8f38a22883f039dbe347b4ef9ec5b1296e6e5b9ec029e1e8d09",
+      "phases": [
+        null,
+        null,
+        null,
+        null
+      ]
+    },
+    {
+      "arm": "final",
+      "rep": 1,
+      "command": "exec_scatter",
+      "warm_ms": [
+        444.227,
+        444.262,
+        442.851,
+        437.167
+      ],
+      "median_ms": 443.539,
+      "decoded": [
+        1239,
+        1239,
+        1239,
+        1239
+      ],
+      "served": [
+        23553,
+        24792,
+        26031,
+        27270
+      ],
+      "total": null,
+      "hash": "072703bf9ca62b8bee3017281711ce8d0084db6270014adaaaa4523fb123dfe7",
+      "phases": [
+        null,
+        null,
+        null,
+        null
+      ]
+    },
+    {
+      "arm": "final",
+      "rep": 1,
+      "command": "concurrency",
+      "warm_ms": [
+        420.376,
+        400.732,
+        400.212,
+        417.553
+      ],
+      "median_ms": 409.143,
+      "decoded": [
+        1239,
+        1239,
+        1239,
+        1239
+      ],
+      "served": [
+        29748,
+        30987,
+        32226,
+        33465
+      ],
+      "total": null,
+      "hash": "735ea658c99f8eb395ebb1f4578076253b1682671c05c7e06618f670b7f3230b",
+      "phases": [
+        null,
+        null,
+        null,
+        null
+      ]
+    },
+    {
+      "arm": "aggregate",
+      "rep": 1,
+      "command": "transitions",
+      "warm_ms": [
+        7.817,
+        7.34,
+        7.122,
+        7.343,
+        7.222,
+        7.619
+      ],
+      "median_ms": 7.341,
+      "decoded": [
+        1239,
+        1239,
+        1239,
+        1239,
+        1239,
+        1239
+      ],
+      "served": [
+        1247,
+        1249,
+        1251,
+        1253,
+        1255,
+        1257
+      ],
+      "total": 2763992,
+      "hash": "d49b5f90bbefc42906a3436c576922570d7af0c12802ab33f2e53a05282a280c",
+      "phases": [
+        null,
+        null,
+        null,
+        null,
+        null,
+        null
+      ]
+    },
+    {
+      "arm": "aggregate",
+      "rep": 1,
+      "command": "top_queries",
+      "warm_ms": [
+        312.916,
+        309.24,
+        307.708,
+        306.317
+      ],
+      "median_ms": 308.474,
+      "decoded": [
+        1239,
+        1239,
+        1239,
+        1239
+      ],
+      "served": [
+        3741,
+        4980,
+        6219,
+        7458
+      ],
+      "total": null,
+      "hash": "920e022cd2411200721a5becb8df2a045665a029e1e7f7bb47f6384decefb5f9",
+      "phases": [
+        null,
+        null,
+        null,
+        null
+      ]
+    },
+    {
+      "arm": "aggregate",
+      "rep": 1,
+      "command": "executions",
+      "warm_ms": [
+        611.1,
+        640.913,
+        573.047,
+        594.445
+      ],
+      "median_ms": 602.773,
+      "decoded": [
+        1239,
+        1239,
+        1239,
+        1239
+      ],
+      "served": [
+        9936,
+        11175,
+        12414,
+        13653
+      ],
+      "total": null,
+      "hash": "70f512326b30e8f38a22883f039dbe347b4ef9ec5b1296e6e5b9ec029e1e8d09",
+      "phases": [
+        null,
+        null,
+        null,
+        null
+      ]
+    },
+    {
+      "arm": "aggregate",
+      "rep": 1,
+      "command": "exec_scatter",
+      "warm_ms": [
+        473.566,
+        448.108,
+        449.41,
+        450.28
+      ],
+      "median_ms": 449.845,
+      "decoded": [
+        1239,
+        1239,
+        1239,
+        1239
+      ],
+      "served": [
+        16131,
+        17370,
+        18609,
+        19848
+      ],
+      "total": null,
+      "hash": "072703bf9ca62b8bee3017281711ce8d0084db6270014adaaaa4523fb123dfe7",
+      "phases": [
+        null,
+        null,
+        null,
+        null
+      ]
+    },
+    {
+      "arm": "aggregate",
+      "rep": 1,
+      "command": "concurrency",
+      "warm_ms": [
+        404.947,
+        408.422,
+        404.432,
+        410.199
+      ],
+      "median_ms": 406.685,
+      "decoded": [
+        1239,
+        1239,
+        1239,
+        1239
+      ],
+      "served": [
+        22326,
+        23565,
+        24804,
+        26043
+      ],
+      "total": null,
+      "hash": "735ea658c99f8eb395ebb1f4578076253b1682671c05c7e06618f670b7f3230b",
+      "phases": [
+        null,
+        null,
+        null,
+        null
+      ]
+    },
+    {
+      "arm": "after_refusal",
+      "rep": 1,
+      "command": "transitions",
+      "warm_ms": [
+        393.202,
+        372.739,
+        380.869,
+        364.178,
+        377.89,
+        373.022
+      ],
+      "median_ms": 375.456,
+      "decoded": [
+        1239,
+        1239,
+        1239,
+        1239,
+        1239,
+        1239
+      ],
+      "served": [
+        2484,
+        3723,
+        4962,
+        6201,
+        7440,
+        8679
+      ],
+      "total": 2621830,
+      "hash": "6ae4a793c32f6c87bd272070a7f2330d8a7bb58c83928b6410bcb95e82616695",
+      "phases": [
+        null,
+        null,
+        null,
+        null,
+        null,
+        null
+      ]
+    },
+    {
+      "arm": "before_refusal",
+      "rep": 1,
+      "command": "transitions",
+      "warm_ms": [
+        9.063,
+        8.419,
+        10.061,
+        8.094,
+        7.476,
+        7.623
+      ],
+      "median_ms": 8.256,
+      "decoded": [
+        1239,
+        1239,
+        1239,
+        1239,
+        1239,
+        1239
+      ],
+      "served": [
+        1247,
+        1249,
+        1251,
+        1253,
+        1255,
+        1257
+      ],
+      "total": 2763992,
+      "hash": "d49b5f90bbefc42906a3436c576922570d7af0c12802ab33f2e53a05282a280c",
+      "phases": [
+        null,
+        null,
+        null,
+        null,
+        null,
+        null
+      ]
+    },
+    {
+      "arm": "after365",
+      "rep": 1,
+      "command": "transitions",
+      "warm_ms": [
+        7.329,
+        7.679,
+        7.662,
+        7.704,
+        7.32,
+        7.593
+      ],
+      "median_ms": 7.627,
+      "decoded": [
+        1239,
+        1239,
+        1239,
+        1239,
+        1239,
+        1239
+      ],
+      "served": [
+        1247,
+        1249,
+        1251,
+        1253,
+        1255,
+        1257
+      ],
+      "total": 2763992,
+      "hash": "d49b5f90bbefc42906a3436c576922570d7af0c12802ab33f2e53a05282a280c",
+      "phases": [
+        null,
+        null,
+        null,
+        null,
+        null,
+        null
+      ]
+    },
+    {
+      "arm": "pre",
+      "rep": 1,
+      "command": "transitions",
+      "warm_ms": [
+        6.995,
+        8.924,
+        8.643,
+        9.288,
+        9.043,
+        7.843
+      ],
+      "median_ms": 8.784,
+      "decoded": [
+        1239,
+        1239,
+        1239,
+        1239,
+        1239,
+        1239
+      ],
+      "served": [
+        1247,
+        1249,
+        1251,
+        1253,
+        1255,
+        1257
+      ],
+      "total": 2763992,
+      "hash": "d49b5f90bbefc42906a3436c576922570d7af0c12802ab33f2e53a05282a280c",
+      "phases": [
+        null,
+        null,
+        null,
+        null,
+        null,
+        null
+      ]
+    },
+    {
+      "arm": "pre",
+      "rep": 1,
+      "command": "top_queries",
+      "warm_ms": [
+        1754.309,
+        1784.692,
+        1718.618,
+        1749.536
+      ],
+      "median_ms": 1751.923,
+      "decoded": [
+        1239,
+        1239,
+        1239,
+        1239
+      ],
+      "served": [
+        3741,
+        4980,
+        6219,
+        7458
+      ],
+      "total": null,
+      "hash": "920e022cd2411200721a5becb8df2a045665a029e1e7f7bb47f6384decefb5f9",
+      "phases": [
+        null,
+        null,
+        null,
+        null
+      ]
+    },
+    {
+      "arm": "pre",
+      "rep": 1,
+      "command": "executions",
+      "warm_ms": [
+        1685.932,
+        1732.567,
+        1631.241,
+        1668.835
+      ],
+      "median_ms": 1677.383,
+      "decoded": [
+        1239,
+        1239,
+        1239,
+        1239
+      ],
+      "served": [
+        9936,
+        11175,
+        12414,
+        13653
+      ],
+      "total": null,
+      "hash": "70f512326b30e8f38a22883f039dbe347b4ef9ec5b1296e6e5b9ec029e1e8d09",
+      "phases": [
+        null,
+        null,
+        null,
+        null
+      ]
+    },
+    {
+      "arm": "pre",
+      "rep": 1,
+      "command": "exec_scatter",
+      "warm_ms": [
+        1671.428,
+        1601.559,
+        1538.127,
+        1530.937
+      ],
+      "median_ms": 1569.843,
+      "decoded": [
+        1239,
+        1239,
+        1239,
+        1239
+      ],
+      "served": [
+        16131,
+        17370,
+        18609,
+        19848
+      ],
+      "total": null,
+      "hash": "072703bf9ca62b8bee3017281711ce8d0084db6270014adaaaa4523fb123dfe7",
+      "phases": [
+        null,
+        null,
+        null,
+        null
+      ]
+    },
+    {
+      "arm": "pre",
+      "rep": 1,
+      "command": "concurrency",
+      "warm_ms": [
+        1221.868,
+        1172.47,
+        1164.408,
+        1156.096
+      ],
+      "median_ms": 1168.439,
+      "decoded": [
+        1239,
+        1239,
+        1239,
+        1239
+      ],
+      "served": [
+        22326,
+        23565,
+        24804,
+        26043
+      ],
+      "total": null,
+      "hash": "735ea658c99f8eb395ebb1f4578076253b1682671c05c7e06618f670b7f3230b",
+      "phases": [
+        null,
+        null,
+        null,
+        null
+      ]
+    },
+    {
+      "arm": "after340",
+      "rep": 1,
+      "command": "transitions",
+      "warm_ms": [
+        7.012,
+        6.802,
+        7.075,
+        7.256,
+        6.893,
+        6.695
+      ],
+      "median_ms": 6.952,
+      "decoded": [
+        1239,
+        1239,
+        1239,
+        1239,
+        1239,
+        1239
+      ],
+      "served": [
+        1247,
+        1249,
+        1251,
+        1253,
+        1255,
+        1257
+      ],
+      "total": 2763992,
+      "hash": "d49b5f90bbefc42906a3436c576922570d7af0c12802ab33f2e53a05282a280c",
+      "phases": [
+        null,
+        null,
+        null,
+        null,
+        null,
+        null
+      ]
+    },
+    {
+      "arm": "after329",
+      "rep": 1,
+      "command": "transitions",
+      "warm_ms": [
+        978.41,
+        977.694,
+        1001.414,
+        969.731,
+        997.053,
+        977.63
+      ],
+      "median_ms": 978.052,
+      "decoded": [
+        1239,
+        1239,
+        1239,
+        1239,
+        1239,
+        1239
+      ],
+      "served": [
+        2484,
+        3723,
+        4962,
+        6201,
+        7440,
+        8679
+      ],
+      "total": 2621830,
+      "hash": "1cc6a02931f43f7568f652aeb6d2ea7c566d863e2770182d31ab2d938bad25d4",
+      "phases": [
+        null,
+        null,
+        null,
+        null,
+        null,
+        null
+      ]
+    },
+    {
+      "arm": "before329",
+      "rep": 1,
+      "command": "transitions",
+      "warm_ms": [
+        963.057,
+        975.406,
+        961.093,
+        972.051,
+        962.878,
+        958.711
+      ],
+      "median_ms": 962.967,
+      "decoded": [
+        1239,
+        1239,
+        1239,
+        1239,
+        1239,
+        1239
+      ],
+      "served": [
+        2484,
+        3723,
+        4962,
+        6201,
+        7440,
+        8679
+      ],
+      "total": 2621830,
+      "hash": "1cc6a02931f43f7568f652aeb6d2ea7c566d863e2770182d31ab2d938bad25d4",
+      "phases": [
+        null,
+        null,
+        null,
+        null,
+        null,
+        null
+      ]
+    }
+  ],
+  "canary_5s_warm_ms": [
+    5.358,
+    5.438,
+    5.837,
+    5.388,
+    5.261,
+    5.257,
+    6.338,
+    6.185,
+    5.835,
+    5.713,
+    4.903,
+    4.955,
+    6.156,
+    5.876,
+    5.509,
+    5.698,
+    6.231,
+    5.776,
+    4.841,
+    4.844,
+    5.91,
+    5.875,
+    6.301,
+    5.749,
+    7.013,
+    6.576,
+    5.847,
+    5.587,
+    6.566,
+    10.65,
+    7.061,
+    7.668,
+    5.461,
+    5.321,
+    5.995,
+    5.853,
+    6.227,
+    5.451,
+    8.44,
+    7.94,
+    6.101,
+    7.961,
+    5.761,
+    5.147,
+    5.443,
+    5.365,
+    6.264,
+    5.329,
+    5.885,
+    5.717,
+    5.755,
+    6.114,
+    6.283,
+    8.683,
+    5.427,
+    5.298,
+    6.612,
+    6.747,
+    5.2,
+    5.147,
+    6.042,
+    5.588,
+    5.534,
+    5.584,
+    6.236,
+    6.461,
+    5.919,
+    5.202,
+    5.487,
+    5.176,
+    5.197,
+    5.594,
+    6.198,
+    5.525,
+    5.245,
+    5.793,
+    6.025,
+    5.459,
+    5.513,
+    5.085,
+    6.016,
+    5.722,
+    6.016,
+    5.69,
+    6.032,
+    5.617,
+    5.546,
+    5.746
+  ],
+  "browser": [
+    {
+      "arm": "pre",
+      "rep": 0,
+      "tab": "queries",
+      "warm_ttfp_ms": [
+        1751,
+        1781,
+        1759
+      ],
+      "median_ms": 1759
+    },
+    {
+      "arm": "pre",
+      "rep": 0,
+      "tab": "transitions",
+      "warm_ttfp_ms": [
+        152,
+        131,
+        154
+      ],
+      "median_ms": 152
+    },
+    {
+      "arm": "pre",
+      "rep": 0,
+      "tab": "concurrency",
+      "warm_ttfp_ms": [
+        1242,
+        1279,
+        1197
+      ],
+      "median_ms": 1242
+    },
+    {
+      "arm": "pre",
+      "rep": 0,
+      "tab": "waterfall",
+      "warm_ttfp_ms": [
+        1870,
+        1855,
+        1930
+      ],
+      "median_ms": 1870
+    },
+    {
+      "arm": "pre",
+      "rep": 0,
+      "tab": "scatter",
+      "warm_ttfp_ms": [
+        1662,
+        1595,
+        1587
+      ],
+      "median_ms": 1595
+    },
+    {
+      "arm": "pre",
+      "rep": 0,
+      "tab": "matrix",
+      "warm_ttfp_ms": [
+        158,
+        157,
+        126
+      ],
+      "median_ms": 157
+    },
+    {
+      "arm": "aggregate",
+      "rep": 0,
+      "tab": "queries",
+      "warm_ttfp_ms": [
+        357,
+        347,
+        374
+      ],
+      "median_ms": 357
+    },
+    {
+      "arm": "aggregate",
+      "rep": 0,
+      "tab": "transitions",
+      "warm_ttfp_ms": [
+        156,
+        142,
+        140
+      ],
+      "median_ms": 142
+    },
+    {
+      "arm": "aggregate",
+      "rep": 0,
+      "tab": "concurrency",
+      "warm_ttfp_ms": [
+        520,
+        508,
+        510
+      ],
+      "median_ms": 510
+    },
+    {
+      "arm": "aggregate",
+      "rep": 0,
+      "tab": "waterfall",
+      "warm_ttfp_ms": [
+        793,
+        804,
+        769
+      ],
+      "median_ms": 793
+    },
+    {
+      "arm": "aggregate",
+      "rep": 0,
+      "tab": "scatter",
+      "warm_ttfp_ms": [
+        570,
+        540,
+        530
+      ],
+      "median_ms": 540
+    },
+    {
+      "arm": "aggregate",
+      "rep": 0,
+      "tab": "matrix",
+      "warm_ttfp_ms": [
+        141,
+        131,
+        142
+      ],
+      "median_ms": 141
+    },
+    {
+      "arm": "final",
+      "rep": 0,
+      "tab": "queries",
+      "warm_ttfp_ms": [
+        362,
+        358,
+        352
+      ],
+      "median_ms": 358
+    },
+    {
+      "arm": "final",
+      "rep": 0,
+      "tab": "transitions",
+      "warm_ttfp_ms": [
+        415,
+        425,
+        420
+      ],
+      "median_ms": 420
+    },
+    {
+      "arm": "final",
+      "rep": 0,
+      "tab": "concurrency",
+      "warm_ttfp_ms": [
+        496,
+        503,
+        500
+      ],
+      "median_ms": 500
+    },
+    {
+      "arm": "final",
+      "rep": 0,
+      "tab": "waterfall",
+      "warm_ttfp_ms": [
+        774,
+        767,
+        753
+      ],
+      "median_ms": 767
+    },
+    {
+      "arm": "final",
+      "rep": 0,
+      "tab": "scatter",
+      "warm_ttfp_ms": [
+        558,
+        549,
+        511
+      ],
+      "median_ms": 549
+    },
+    {
+      "arm": "final",
+      "rep": 0,
+      "tab": "matrix",
+      "warm_ttfp_ms": [
+        410,
+        395,
+        425
+      ],
+      "median_ms": 410
+    },
+    {
+      "arm": "final",
+      "rep": 1,
+      "tab": "queries",
+      "warm_ttfp_ms": [
+        358,
+        358,
+        343
+      ],
+      "median_ms": 358
+    },
+    {
+      "arm": "final",
+      "rep": 1,
+      "tab": "transitions",
+      "warm_ttfp_ms": [
+        441,
+        429,
+        420
+      ],
+      "median_ms": 429
+    },
+    {
+      "arm": "final",
+      "rep": 1,
+      "tab": "concurrency",
+      "warm_ttfp_ms": [
+        515,
+        526,
+        502
+      ],
+      "median_ms": 515
+    },
+    {
+      "arm": "final",
+      "rep": 1,
+      "tab": "waterfall",
+      "warm_ttfp_ms": [
+        758,
+        777,
+        766
+      ],
+      "median_ms": 766
+    },
+    {
+      "arm": "final",
+      "rep": 1,
+      "tab": "scatter",
+      "warm_ttfp_ms": [
+        537,
+        542,
+        544
+      ],
+      "median_ms": 542
+    },
+    {
+      "arm": "final",
+      "rep": 1,
+      "tab": "matrix",
+      "warm_ttfp_ms": [
+        437,
+        460,
+        464
+      ],
+      "median_ms": 460
+    },
+    {
+      "arm": "aggregate",
+      "rep": 1,
+      "tab": "queries",
+      "warm_ttfp_ms": [
+        337,
+        347,
+        371
+      ],
+      "median_ms": 347
+    },
+    {
+      "arm": "aggregate",
+      "rep": 1,
+      "tab": "transitions",
+      "warm_ttfp_ms": [
+        149,
+        146,
+        128
+      ],
+      "median_ms": 146
+    },
+    {
+      "arm": "aggregate",
+      "rep": 1,
+      "tab": "concurrency",
+      "warm_ttfp_ms": [
+        570,
+        515,
+        547
+      ],
+      "median_ms": 547
+    },
+    {
+      "arm": "aggregate",
+      "rep": 1,
+      "tab": "waterfall",
+      "warm_ttfp_ms": [
+        756,
+        759,
+        785
+      ],
+      "median_ms": 759
+    },
+    {
+      "arm": "aggregate",
+      "rep": 1,
+      "tab": "scatter",
+      "warm_ttfp_ms": [
+        552,
+        630,
+        527
+      ],
+      "median_ms": 552
+    },
+    {
+      "arm": "aggregate",
+      "rep": 1,
+      "tab": "matrix",
+      "warm_ttfp_ms": [
+        150,
+        176,
+        129
+      ],
+      "median_ms": 150
+    },
+    {
+      "arm": "pre",
+      "rep": 1,
+      "tab": "queries",
+      "warm_ttfp_ms": [
+        1770,
+        1888,
+        1829
+      ],
+      "median_ms": 1829
+    },
+    {
+      "arm": "pre",
+      "rep": 1,
+      "tab": "transitions",
+      "warm_ttfp_ms": [
+        134,
+        135,
+        158
+      ],
+      "median_ms": 135
+    },
+    {
+      "arm": "pre",
+      "rep": 1,
+      "tab": "concurrency",
+      "warm_ttfp_ms": [
+        1258,
+        1231,
+        1218
+      ],
+      "median_ms": 1231
+    },
+    {
+      "arm": "pre",
+      "rep": 1,
+      "tab": "waterfall",
+      "warm_ttfp_ms": [
+        1833,
+        1896,
+        1827
+      ],
+      "median_ms": 1833
+    },
+    {
+      "arm": "pre",
+      "rep": 1,
+      "tab": "scatter",
+      "warm_ttfp_ms": [
+        1568,
+        1642,
+        1559
+      ],
+      "median_ms": 1568
+    },
+    {
+      "arm": "pre",
+      "rep": 1,
+      "tab": "matrix",
+      "warm_ttfp_ms": [
+        141,
+        138,
+        154
+      ],
+      "median_ms": 141
+    }
+  ],
+  "browser_cache": [
+    {
+      "log": "browser-server-aggregate-0.stderr",
+      "reports": [
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 1239,
+          "served": 0,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 1239,
+          "served": 1239,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 1239,
+          "served": 2478,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 1239,
+          "served": 3717,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 1239,
+          "served": 4956,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 1239,
+          "served": 4958,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 1951,
+          "served": 5783,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 1951,
+          "served": 7022,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 1951,
+          "served": 7024,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 1951,
+          "served": 8263,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 1951,
+          "served": 8265,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 1951,
+          "served": 9504,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 1951,
+          "served": 10743,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 1951,
+          "served": 10745,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 2663,
+          "served": 11570,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 2663,
+          "served": 12809,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 2663,
+          "served": 12811,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 2663,
+          "served": 14050,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 2663,
+          "served": 14052,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 2663,
+          "served": 15291,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 2663,
+          "served": 16530,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 2663,
+          "served": 16532,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 3375,
+          "served": 17357,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 3375,
+          "served": 18596,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 3375,
+          "served": 18598,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 3375,
+          "served": 19837,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 3375,
+          "served": 19839,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 3375,
+          "served": 21078,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 3375,
+          "served": 22317,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 3375,
+          "served": 22319,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 4087,
+          "served": 23144,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 4087,
+          "served": 24383,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 4087,
+          "served": 24385,
+          "resets": 0
+        }
+      ],
+      "detail_context_decode_delta": [
+        712,
+        712,
+        712,
+        712
+      ]
+    },
+    {
+      "log": "browser-server-aggregate-1.stderr",
+      "reports": [
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 1239,
+          "served": 0,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 1239,
+          "served": 1239,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 1239,
+          "served": 2478,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 1239,
+          "served": 3717,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 1239,
+          "served": 4956,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 1239,
+          "served": 4958,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 1951,
+          "served": 5783,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 1951,
+          "served": 7022,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 1951,
+          "served": 7024,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 1951,
+          "served": 8263,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 1951,
+          "served": 8265,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 1951,
+          "served": 9504,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 1951,
+          "served": 10743,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 1951,
+          "served": 10745,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 2663,
+          "served": 11570,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 2663,
+          "served": 12809,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 2663,
+          "served": 12811,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 2663,
+          "served": 14050,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 2663,
+          "served": 14052,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 2663,
+          "served": 15291,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 2663,
+          "served": 16530,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 2663,
+          "served": 16532,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 3375,
+          "served": 17357,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 3375,
+          "served": 18596,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 3375,
+          "served": 18598,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 3375,
+          "served": 19837,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 3375,
+          "served": 19839,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 3375,
+          "served": 21078,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 3375,
+          "served": 22317,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 3375,
+          "served": 22319,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 4087,
+          "served": 23144,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 4087,
+          "served": 24383,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 4087,
+          "served": 24385,
+          "resets": 0
+        }
+      ],
+      "detail_context_decode_delta": [
+        712,
+        712,
+        712,
+        712
+      ]
+    },
+    {
+      "log": "browser-server-final-0.stderr",
+      "reports": [
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 1239,
+          "served": 0,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 1239,
+          "served": 1239,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 1239,
+          "served": 2478,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 1239,
+          "served": 3717,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 1239,
+          "served": 4956,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 1239,
+          "served": 4958,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 1951,
+          "served": 5783,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 1951,
+          "served": 7022,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 1951,
+          "served": 8261,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 1951,
+          "served": 9500,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 1951,
+          "served": 10739,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 1951,
+          "served": 11978,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 1951,
+          "served": 13217,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 1951,
+          "served": 13219,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 2663,
+          "served": 14044,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 2663,
+          "served": 15283,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 2663,
+          "served": 16522,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 2663,
+          "served": 17761,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 2663,
+          "served": 19000,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 2663,
+          "served": 20239,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 2663,
+          "served": 21478,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 2663,
+          "served": 21480,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 3375,
+          "served": 22305,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 3375,
+          "served": 23544,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 3375,
+          "served": 24783,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 3375,
+          "served": 26022,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 3375,
+          "served": 27261,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 3375,
+          "served": 28500,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 3375,
+          "served": 29739,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 3375,
+          "served": 29741,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 4087,
+          "served": 30566,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 4087,
+          "served": 31805,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 4087,
+          "served": 33044,
+          "resets": 0
+        }
+      ],
+      "detail_context_decode_delta": [
+        712,
+        712,
+        712,
+        712
+      ]
+    },
+    {
+      "log": "browser-server-final-1.stderr",
+      "reports": [
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 1239,
+          "served": 0,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 1239,
+          "served": 1239,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 1239,
+          "served": 2478,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 1239,
+          "served": 3717,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 1239,
+          "served": 4956,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 1239,
+          "served": 4958,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 1951,
+          "served": 5783,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 1951,
+          "served": 7022,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 1951,
+          "served": 8261,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 1951,
+          "served": 9500,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 1951,
+          "served": 10739,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 1951,
+          "served": 11978,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 1951,
+          "served": 13217,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 1951,
+          "served": 13219,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 2663,
+          "served": 14044,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 2663,
+          "served": 15283,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 2663,
+          "served": 16522,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 2663,
+          "served": 17761,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 2663,
+          "served": 19000,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 2663,
+          "served": 20239,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 2663,
+          "served": 21478,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 2663,
+          "served": 21480,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 3375,
+          "served": 22305,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 3375,
+          "served": 23544,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 3375,
+          "served": 24783,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 3375,
+          "served": 26022,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 3375,
+          "served": 27261,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 3375,
+          "served": 28500,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 3375,
+          "served": 29739,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 3375,
+          "served": 29741,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 4087,
+          "served": 30566,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 4087,
+          "served": 31805,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 4087,
+          "served": 33044,
+          "resets": 0
+        }
+      ],
+      "detail_context_decode_delta": [
+        712,
+        712,
+        712,
+        712
+      ]
+    },
+    {
+      "log": "browser-server-pre-0.stderr",
+      "reports": [
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 1239,
+          "served": 0,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 1239,
+          "served": 1239,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 1239,
+          "served": 2478,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 1239,
+          "served": 3717,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 1239,
+          "served": 4956,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 1239,
+          "served": 4958,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 1951,
+          "served": 5783,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 1951,
+          "served": 7022,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 1951,
+          "served": 7024,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 1951,
+          "served": 8263,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 1951,
+          "served": 8265,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 1951,
+          "served": 9504,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 1951,
+          "served": 10743,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 1951,
+          "served": 10745,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 2663,
+          "served": 11570,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 2663,
+          "served": 12809,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 2663,
+          "served": 12811,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 2663,
+          "served": 14050,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 2663,
+          "served": 14052,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 2663,
+          "served": 15291,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 2663,
+          "served": 16530,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 2663,
+          "served": 16532,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 3375,
+          "served": 17357,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 3375,
+          "served": 18596,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 3375,
+          "served": 18598,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 3375,
+          "served": 19837,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 3375,
+          "served": 19839,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 3375,
+          "served": 21078,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 3375,
+          "served": 22317,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 3375,
+          "served": 22319,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 4087,
+          "served": 23144,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 4087,
+          "served": 24383,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 4087,
+          "served": 24385,
+          "resets": 0
+        }
+      ],
+      "detail_context_decode_delta": [
+        712,
+        712,
+        712,
+        712
+      ]
+    },
+    {
+      "log": "browser-server-pre-1.stderr",
+      "reports": [
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 1239,
+          "served": 0,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 1239,
+          "served": 1239,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 1239,
+          "served": 2478,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 1239,
+          "served": 3717,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 1239,
+          "served": 4956,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 1239,
+          "served": 4958,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 1951,
+          "served": 5783,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 1951,
+          "served": 7022,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 1951,
+          "served": 7024,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 1951,
+          "served": 8263,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 1951,
+          "served": 8265,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 1951,
+          "served": 9504,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 1951,
+          "served": 10743,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 1951,
+          "served": 10745,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 2663,
+          "served": 11570,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 2663,
+          "served": 12809,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 2663,
+          "served": 12811,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 2663,
+          "served": 14050,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 2663,
+          "served": 14052,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 2663,
+          "served": 15291,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 2663,
+          "served": 16530,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 2663,
+          "served": 16532,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 3375,
+          "served": 17357,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 3375,
+          "served": 18596,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 3375,
+          "served": 18598,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 3375,
+          "served": 19837,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 3375,
+          "served": 19839,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 3375,
+          "served": 21078,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 3375,
+          "served": 22317,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 3375,
+          "served": 22319,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 4087,
+          "served": 23144,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 4087,
+          "served": 24383,
+          "resets": 0
+        },
+        {
+          "enabled": 1,
+          "lo": 1007,
+          "blocks": 1239,
+          "events": 5074864,
+          "cap": 5242880,
+          "decoded": 4087,
+          "served": 24385,
+          "resets": 0
+        }
+      ],
+      "detail_context_decode_delta": [
+        712,
+        712,
+        712,
+        712
+      ]
+    }
+  ],
+  "sequence": [
+    {
+      "arm": "pre",
+      "rep": 0,
+      "name": "transitions_first",
+      "request": {
+        "id": 2,
+        "cmd": "transitions",
+        "from": 1791800513880240400,
+        "to": 1791801413880240400,
+        "buckets": 200,
+        "filters": {}
+      },
+      "ms": 641.953,
+      "merged_blocks": 0,
+      "decoded_blocks": 1539,
+      "total": 3751701,
+      "curcache": {
+        "enabled": 1,
+        "lo": 307,
+        "blocks": 1539,
+        "events": 6303744,
+        "cap": 7340032,
+        "decoded": 1539,
+        "served": 1539,
+        "resets": 0
+      }
+    },
+    {
+      "arm": "pre",
+      "rep": 0,
+      "name": "transitions_repeat1",
+      "request": {
+        "id": 3,
+        "cmd": "transitions",
+        "from": 1791800513880240400,
+        "to": 1791801413880240400,
+        "buckets": 200,
+        "filters": {}
+      },
+      "ms": 8.81,
+      "merged_blocks": 1537,
+      "decoded_blocks": 2,
+      "total": 3751701,
+      "curcache": {
+        "enabled": 1,
+        "lo": 307,
+        "blocks": 1539,
+        "events": 6303744,
+        "cap": 7340032,
+        "decoded": 1539,
+        "served": 1541,
+        "resets": 0
+      }
+    },
+    {
+      "arm": "pre",
+      "rep": 0,
+      "name": "transitions_repeat2",
+      "request": {
+        "id": 4,
+        "cmd": "transitions",
+        "from": 1791800513880240400,
+        "to": 1791801413880240400,
+        "buckets": 200,
+        "filters": {}
+      },
+      "ms": 7.465,
+      "merged_blocks": 1537,
+      "decoded_blocks": 2,
+      "total": 3751701,
+      "curcache": {
+        "enabled": 1,
+        "lo": 307,
+        "blocks": 1539,
+        "events": 6303744,
+        "cap": 7340032,
+        "decoded": 1539,
+        "served": 1543,
+        "resets": 0
+      }
+    },
+    {
+      "arm": "pre",
+      "rep": 0,
+      "name": "matrix_later1",
+      "request": {
+        "id": 5,
+        "cmd": "transitions",
+        "from": 1791800683210846700,
+        "to": 1791801583210846700,
+        "buckets": 200,
+        "filters": {}
+      },
+      "ms": 93.015,
+      "merged_blocks": 1089,
+      "decoded_blocks": 160,
+      "total": 2797730,
+      "curcache": {
+        "enabled": 1,
+        "lo": 307,
+        "blocks": 1698,
+        "events": 6955008,
+        "cap": 7340032,
+        "decoded": 1698,
+        "served": 1544,
+        "resets": 0
+      }
+    },
+    {
+      "arm": "pre",
+      "rep": 0,
+      "name": "matrix_later2",
+      "request": {
+        "id": 6,
+        "cmd": "transitions",
+        "from": 1791800683210846700,
+        "to": 1791801583210846700,
+        "buckets": 200,
+        "filters": {}
+      },
+      "ms": 8.653,
+      "merged_blocks": 1247,
+      "decoded_blocks": 2,
+      "total": 2797730,
+      "curcache": {
+        "enabled": 1,
+        "lo": 307,
+        "blocks": 1698,
+        "events": 6955008,
+        "cap": 7340032,
+        "decoded": 1698,
+        "served": 1546,
+        "resets": 0
+      }
+    },
+    {
+      "arm": "pre",
+      "rep": 0,
+      "name": "matrix_later3",
+      "request": {
+        "id": 7,
+        "cmd": "transitions",
+        "from": 1791800683210846700,
+        "to": 1791801583210846700,
+        "buckets": 200,
+        "filters": {}
+      },
+      "ms": 8.171,
+      "merged_blocks": 1247,
+      "decoded_blocks": 2,
+      "total": 2797730,
+      "curcache": {
+        "enabled": 1,
+        "lo": 307,
+        "blocks": 1698,
+        "events": 6955008,
+        "cap": 7340032,
+        "decoded": 1698,
+        "served": 1548,
+        "resets": 0
+      }
+    },
+    {
+      "arm": "aggregate",
+      "rep": 0,
+      "name": "transitions_first",
+      "request": {
+        "id": 2,
+        "cmd": "transitions",
+        "from": 1791800513880240400,
+        "to": 1791801413880240400,
+        "buckets": 200,
+        "filters": {}
+      },
+      "ms": 635.181,
+      "merged_blocks": 0,
+      "decoded_blocks": 1539,
+      "total": 3751701,
+      "curcache": {
+        "enabled": 1,
+        "lo": 307,
+        "blocks": 1539,
+        "events": 6303744,
+        "cap": 7340032,
+        "decoded": 1539,
+        "served": 1539,
+        "resets": 0
+      }
+    },
+    {
+      "arm": "aggregate",
+      "rep": 0,
+      "name": "transitions_repeat1",
+      "request": {
+        "id": 3,
+        "cmd": "transitions",
+        "from": 1791800513880240400,
+        "to": 1791801413880240400,
+        "buckets": 200,
+        "filters": {}
+      },
+      "ms": 9.375,
+      "merged_blocks": 1537,
+      "decoded_blocks": 2,
+      "total": 3751701,
+      "curcache": {
+        "enabled": 1,
+        "lo": 307,
+        "blocks": 1539,
+        "events": 6303744,
+        "cap": 7340032,
+        "decoded": 1539,
+        "served": 1541,
+        "resets": 0
+      }
+    },
+    {
+      "arm": "aggregate",
+      "rep": 0,
+      "name": "transitions_repeat2",
+      "request": {
+        "id": 4,
+        "cmd": "transitions",
+        "from": 1791800513880240400,
+        "to": 1791801413880240400,
+        "buckets": 200,
+        "filters": {}
+      },
+      "ms": 9.555,
+      "merged_blocks": 1537,
+      "decoded_blocks": 2,
+      "total": 3751701,
+      "curcache": {
+        "enabled": 1,
+        "lo": 307,
+        "blocks": 1539,
+        "events": 6303744,
+        "cap": 7340032,
+        "decoded": 1539,
+        "served": 1543,
+        "resets": 0
+      }
+    },
+    {
+      "arm": "aggregate",
+      "rep": 0,
+      "name": "matrix_later1",
+      "request": {
+        "id": 5,
+        "cmd": "transitions",
+        "from": 1791800683210846700,
+        "to": 1791801583210846700,
+        "buckets": 200,
+        "filters": {}
+      },
+      "ms": 89.217,
+      "merged_blocks": 1089,
+      "decoded_blocks": 160,
+      "total": 2797730,
+      "curcache": {
+        "enabled": 1,
+        "lo": 307,
+        "blocks": 1698,
+        "events": 6955008,
+        "cap": 7340032,
+        "decoded": 1698,
+        "served": 1544,
+        "resets": 0
+      }
+    },
+    {
+      "arm": "aggregate",
+      "rep": 0,
+      "name": "matrix_later2",
+      "request": {
+        "id": 6,
+        "cmd": "transitions",
+        "from": 1791800683210846700,
+        "to": 1791801583210846700,
+        "buckets": 200,
+        "filters": {}
+      },
+      "ms": 10.615,
+      "merged_blocks": 1247,
+      "decoded_blocks": 2,
+      "total": 2797730,
+      "curcache": {
+        "enabled": 1,
+        "lo": 307,
+        "blocks": 1698,
+        "events": 6955008,
+        "cap": 7340032,
+        "decoded": 1698,
+        "served": 1546,
+        "resets": 0
+      }
+    },
+    {
+      "arm": "aggregate",
+      "rep": 0,
+      "name": "matrix_later3",
+      "request": {
+        "id": 7,
+        "cmd": "transitions",
+        "from": 1791800683210846700,
+        "to": 1791801583210846700,
+        "buckets": 200,
+        "filters": {}
+      },
+      "ms": 8.477,
+      "merged_blocks": 1247,
+      "decoded_blocks": 2,
+      "total": 2797730,
+      "curcache": {
+        "enabled": 1,
+        "lo": 307,
+        "blocks": 1698,
+        "events": 6955008,
+        "cap": 7340032,
+        "decoded": 1698,
+        "served": 1548,
+        "resets": 0
+      }
+    },
+    {
+      "arm": "final",
+      "rep": 0,
+      "name": "transitions_first",
+      "request": {
+        "id": 2,
+        "cmd": "transitions",
+        "from": 1791800513880240400,
+        "to": 1791801413880240400,
+        "buckets": 200,
+        "filters": {}
+      },
+      "ms": 422.203,
+      "merged_blocks": 0,
+      "decoded_blocks": 0,
+      "total": 3592101,
+      "curcache": {
+        "enabled": 1,
+        "lo": 307,
+        "blocks": 1539,
+        "events": 6303744,
+        "cap": 7340032,
+        "decoded": 1539,
+        "served": 1539,
+        "resets": 0
+      }
+    },
+    {
+      "arm": "final",
+      "rep": 0,
+      "name": "transitions_repeat1",
+      "request": {
+        "id": 3,
+        "cmd": "transitions",
+        "from": 1791800513880240400,
+        "to": 1791801413880240400,
+        "buckets": 200,
+        "filters": {}
+      },
+      "ms": 390.869,
+      "merged_blocks": 0,
+      "decoded_blocks": 0,
+      "total": 3592101,
+      "curcache": {
+        "enabled": 1,
+        "lo": 307,
+        "blocks": 1539,
+        "events": 6303744,
+        "cap": 7340032,
+        "decoded": 1539,
+        "served": 3078,
+        "resets": 0
+      }
+    },
+    {
+      "arm": "final",
+      "rep": 0,
+      "name": "transitions_repeat2",
+      "request": {
+        "id": 4,
+        "cmd": "transitions",
+        "from": 1791800513880240400,
+        "to": 1791801413880240400,
+        "buckets": 200,
+        "filters": {}
+      },
+      "ms": 391.845,
+      "merged_blocks": 0,
+      "decoded_blocks": 0,
+      "total": 3592101,
+      "curcache": {
+        "enabled": 1,
+        "lo": 307,
+        "blocks": 1539,
+        "events": 6303744,
+        "cap": 7340032,
+        "decoded": 1539,
+        "served": 4617,
+        "resets": 0
+      }
+    },
+    {
+      "arm": "final",
+      "rep": 0,
+      "name": "matrix_later1",
+      "request": {
+        "id": 5,
+        "cmd": "transitions",
+        "from": 1791800683210846700,
+        "to": 1791801583210846700,
+        "buckets": 200,
+        "filters": {}
+      },
+      "ms": 325.561,
+      "merged_blocks": 0,
+      "decoded_blocks": 0,
+      "total": 2651219,
+      "curcache": {
+        "enabled": 1,
+        "lo": 307,
+        "blocks": 1698,
+        "events": 6955008,
+        "cap": 7340032,
+        "decoded": 1698,
+        "served": 5707,
+        "resets": 0
+      }
+    },
+    {
+      "arm": "final",
+      "rep": 0,
+      "name": "matrix_later2",
+      "request": {
+        "id": 6,
+        "cmd": "transitions",
+        "from": 1791800683210846700,
+        "to": 1791801583210846700,
+        "buckets": 200,
+        "filters": {}
+      },
+      "ms": 317.02,
+      "merged_blocks": 0,
+      "decoded_blocks": 0,
+      "total": 2651219,
+      "curcache": {
+        "enabled": 1,
+        "lo": 307,
+        "blocks": 1698,
+        "events": 6955008,
+        "cap": 7340032,
+        "decoded": 1698,
+        "served": 6956,
+        "resets": 0
+      }
+    },
+    {
+      "arm": "final",
+      "rep": 0,
+      "name": "matrix_later3",
+      "request": {
+        "id": 7,
+        "cmd": "transitions",
+        "from": 1791800683210846700,
+        "to": 1791801583210846700,
+        "buckets": 200,
+        "filters": {}
+      },
+      "ms": 305.693,
+      "merged_blocks": 0,
+      "decoded_blocks": 0,
+      "total": 2651219,
+      "curcache": {
+        "enabled": 1,
+        "lo": 307,
+        "blocks": 1698,
+        "events": 6955008,
+        "cap": 7340032,
+        "decoded": 1698,
+        "served": 8205,
+        "resets": 0
+      }
+    },
+    {
+      "arm": "final",
+      "rep": 1,
+      "name": "transitions_first",
+      "request": {
+        "id": 2,
+        "cmd": "transitions",
+        "from": 1791800513880240400,
+        "to": 1791801413880240400,
+        "buckets": 200,
+        "filters": {}
+      },
+      "ms": 437.013,
+      "merged_blocks": 0,
+      "decoded_blocks": 0,
+      "total": 3592101,
+      "curcache": {
+        "enabled": 1,
+        "lo": 307,
+        "blocks": 1539,
+        "events": 6303744,
+        "cap": 7340032,
+        "decoded": 1539,
+        "served": 1539,
+        "resets": 0
+      }
+    },
+    {
+      "arm": "final",
+      "rep": 1,
+      "name": "transitions_repeat1",
+      "request": {
+        "id": 3,
+        "cmd": "transitions",
+        "from": 1791800513880240400,
+        "to": 1791801413880240400,
+        "buckets": 200,
+        "filters": {}
+      },
+      "ms": 391.176,
+      "merged_blocks": 0,
+      "decoded_blocks": 0,
+      "total": 3592101,
+      "curcache": {
+        "enabled": 1,
+        "lo": 307,
+        "blocks": 1539,
+        "events": 6303744,
+        "cap": 7340032,
+        "decoded": 1539,
+        "served": 3078,
+        "resets": 0
+      }
+    },
+    {
+      "arm": "final",
+      "rep": 1,
+      "name": "transitions_repeat2",
+      "request": {
+        "id": 4,
+        "cmd": "transitions",
+        "from": 1791800513880240400,
+        "to": 1791801413880240400,
+        "buckets": 200,
+        "filters": {}
+      },
+      "ms": 398.863,
+      "merged_blocks": 0,
+      "decoded_blocks": 0,
+      "total": 3592101,
+      "curcache": {
+        "enabled": 1,
+        "lo": 307,
+        "blocks": 1539,
+        "events": 6303744,
+        "cap": 7340032,
+        "decoded": 1539,
+        "served": 4617,
+        "resets": 0
+      }
+    },
+    {
+      "arm": "final",
+      "rep": 1,
+      "name": "matrix_later1",
+      "request": {
+        "id": 5,
+        "cmd": "transitions",
+        "from": 1791800683210846700,
+        "to": 1791801583210846700,
+        "buckets": 200,
+        "filters": {}
+      },
+      "ms": 332.042,
+      "merged_blocks": 0,
+      "decoded_blocks": 0,
+      "total": 2651219,
+      "curcache": {
+        "enabled": 1,
+        "lo": 307,
+        "blocks": 1698,
+        "events": 6955008,
+        "cap": 7340032,
+        "decoded": 1698,
+        "served": 5707,
+        "resets": 0
+      }
+    },
+    {
+      "arm": "final",
+      "rep": 1,
+      "name": "matrix_later2",
+      "request": {
+        "id": 6,
+        "cmd": "transitions",
+        "from": 1791800683210846700,
+        "to": 1791801583210846700,
+        "buckets": 200,
+        "filters": {}
+      },
+      "ms": 343.532,
+      "merged_blocks": 0,
+      "decoded_blocks": 0,
+      "total": 2651219,
+      "curcache": {
+        "enabled": 1,
+        "lo": 307,
+        "blocks": 1698,
+        "events": 6955008,
+        "cap": 7340032,
+        "decoded": 1698,
+        "served": 6956,
+        "resets": 0
+      }
+    },
+    {
+      "arm": "final",
+      "rep": 1,
+      "name": "matrix_later3",
+      "request": {
+        "id": 7,
+        "cmd": "transitions",
+        "from": 1791800683210846700,
+        "to": 1791801583210846700,
+        "buckets": 200,
+        "filters": {}
+      },
+      "ms": 309.991,
+      "merged_blocks": 0,
+      "decoded_blocks": 0,
+      "total": 2651219,
+      "curcache": {
+        "enabled": 1,
+        "lo": 307,
+        "blocks": 1698,
+        "events": 6955008,
+        "cap": 7340032,
+        "decoded": 1698,
+        "served": 8205,
+        "resets": 0
+      }
+    },
+    {
+      "arm": "aggregate",
+      "rep": 1,
+      "name": "transitions_first",
+      "request": {
+        "id": 2,
+        "cmd": "transitions",
+        "from": 1791800513880240400,
+        "to": 1791801413880240400,
+        "buckets": 200,
+        "filters": {}
+      },
+      "ms": 615.116,
+      "merged_blocks": 0,
+      "decoded_blocks": 1539,
+      "total": 3751701,
+      "curcache": {
+        "enabled": 1,
+        "lo": 307,
+        "blocks": 1539,
+        "events": 6303744,
+        "cap": 7340032,
+        "decoded": 1539,
+        "served": 1539,
+        "resets": 0
+      }
+    },
+    {
+      "arm": "aggregate",
+      "rep": 1,
+      "name": "transitions_repeat1",
+      "request": {
+        "id": 3,
+        "cmd": "transitions",
+        "from": 1791800513880240400,
+        "to": 1791801413880240400,
+        "buckets": 200,
+        "filters": {}
+      },
+      "ms": 9.242,
+      "merged_blocks": 1537,
+      "decoded_blocks": 2,
+      "total": 3751701,
+      "curcache": {
+        "enabled": 1,
+        "lo": 307,
+        "blocks": 1539,
+        "events": 6303744,
+        "cap": 7340032,
+        "decoded": 1539,
+        "served": 1541,
+        "resets": 0
+      }
+    },
+    {
+      "arm": "aggregate",
+      "rep": 1,
+      "name": "transitions_repeat2",
+      "request": {
+        "id": 4,
+        "cmd": "transitions",
+        "from": 1791800513880240400,
+        "to": 1791801413880240400,
+        "buckets": 200,
+        "filters": {}
+      },
+      "ms": 8.004,
+      "merged_blocks": 1537,
+      "decoded_blocks": 2,
+      "total": 3751701,
+      "curcache": {
+        "enabled": 1,
+        "lo": 307,
+        "blocks": 1539,
+        "events": 6303744,
+        "cap": 7340032,
+        "decoded": 1539,
+        "served": 1543,
+        "resets": 0
+      }
+    },
+    {
+      "arm": "aggregate",
+      "rep": 1,
+      "name": "matrix_later1",
+      "request": {
+        "id": 5,
+        "cmd": "transitions",
+        "from": 1791800683210846700,
+        "to": 1791801583210846700,
+        "buckets": 200,
+        "filters": {}
+      },
+      "ms": 92.884,
+      "merged_blocks": 1089,
+      "decoded_blocks": 160,
+      "total": 2797730,
+      "curcache": {
+        "enabled": 1,
+        "lo": 307,
+        "blocks": 1698,
+        "events": 6955008,
+        "cap": 7340032,
+        "decoded": 1698,
+        "served": 1544,
+        "resets": 0
+      }
+    },
+    {
+      "arm": "aggregate",
+      "rep": 1,
+      "name": "matrix_later2",
+      "request": {
+        "id": 6,
+        "cmd": "transitions",
+        "from": 1791800683210846700,
+        "to": 1791801583210846700,
+        "buckets": 200,
+        "filters": {}
+      },
+      "ms": 8.749,
+      "merged_blocks": 1247,
+      "decoded_blocks": 2,
+      "total": 2797730,
+      "curcache": {
+        "enabled": 1,
+        "lo": 307,
+        "blocks": 1698,
+        "events": 6955008,
+        "cap": 7340032,
+        "decoded": 1698,
+        "served": 1546,
+        "resets": 0
+      }
+    },
+    {
+      "arm": "aggregate",
+      "rep": 1,
+      "name": "matrix_later3",
+      "request": {
+        "id": 7,
+        "cmd": "transitions",
+        "from": 1791800683210846700,
+        "to": 1791801583210846700,
+        "buckets": 200,
+        "filters": {}
+      },
+      "ms": 7.667,
+      "merged_blocks": 1247,
+      "decoded_blocks": 2,
+      "total": 2797730,
+      "curcache": {
+        "enabled": 1,
+        "lo": 307,
+        "blocks": 1698,
+        "events": 6955008,
+        "cap": 7340032,
+        "decoded": 1698,
+        "served": 1548,
+        "resets": 0
+      }
+    },
+    {
+      "arm": "pre",
+      "rep": 1,
+      "name": "transitions_first",
+      "request": {
+        "id": 2,
+        "cmd": "transitions",
+        "from": 1791800513880240400,
+        "to": 1791801413880240400,
+        "buckets": 200,
+        "filters": {}
+      },
+      "ms": 645.656,
+      "merged_blocks": 0,
+      "decoded_blocks": 1539,
+      "total": 3751701,
+      "curcache": {
+        "enabled": 1,
+        "lo": 307,
+        "blocks": 1539,
+        "events": 6303744,
+        "cap": 7340032,
+        "decoded": 1539,
+        "served": 1539,
+        "resets": 0
+      }
+    },
+    {
+      "arm": "pre",
+      "rep": 1,
+      "name": "transitions_repeat1",
+      "request": {
+        "id": 3,
+        "cmd": "transitions",
+        "from": 1791800513880240400,
+        "to": 1791801413880240400,
+        "buckets": 200,
+        "filters": {}
+      },
+      "ms": 13.274,
+      "merged_blocks": 1537,
+      "decoded_blocks": 2,
+      "total": 3751701,
+      "curcache": {
+        "enabled": 1,
+        "lo": 307,
+        "blocks": 1539,
+        "events": 6303744,
+        "cap": 7340032,
+        "decoded": 1539,
+        "served": 1541,
+        "resets": 0
+      }
+    },
+    {
+      "arm": "pre",
+      "rep": 1,
+      "name": "transitions_repeat2",
+      "request": {
+        "id": 4,
+        "cmd": "transitions",
+        "from": 1791800513880240400,
+        "to": 1791801413880240400,
+        "buckets": 200,
+        "filters": {}
+      },
+      "ms": 10.528,
+      "merged_blocks": 1537,
+      "decoded_blocks": 2,
+      "total": 3751701,
+      "curcache": {
+        "enabled": 1,
+        "lo": 307,
+        "blocks": 1539,
+        "events": 6303744,
+        "cap": 7340032,
+        "decoded": 1539,
+        "served": 1543,
+        "resets": 0
+      }
+    },
+    {
+      "arm": "pre",
+      "rep": 1,
+      "name": "matrix_later1",
+      "request": {
+        "id": 5,
+        "cmd": "transitions",
+        "from": 1791800683210846700,
+        "to": 1791801583210846700,
+        "buckets": 200,
+        "filters": {}
+      },
+      "ms": 101.673,
+      "merged_blocks": 1089,
+      "decoded_blocks": 160,
+      "total": 2797730,
+      "curcache": {
+        "enabled": 1,
+        "lo": 307,
+        "blocks": 1698,
+        "events": 6955008,
+        "cap": 7340032,
+        "decoded": 1698,
+        "served": 1544,
+        "resets": 0
+      }
+    },
+    {
+      "arm": "pre",
+      "rep": 1,
+      "name": "matrix_later2",
+      "request": {
+        "id": 6,
+        "cmd": "transitions",
+        "from": 1791800683210846700,
+        "to": 1791801583210846700,
+        "buckets": 200,
+        "filters": {}
+      },
+      "ms": 9.441,
+      "merged_blocks": 1247,
+      "decoded_blocks": 2,
+      "total": 2797730,
+      "curcache": {
+        "enabled": 1,
+        "lo": 307,
+        "blocks": 1698,
+        "events": 6955008,
+        "cap": 7340032,
+        "decoded": 1698,
+        "served": 1546,
+        "resets": 0
+      }
+    },
+    {
+      "arm": "pre",
+      "rep": 1,
+      "name": "matrix_later3",
+      "request": {
+        "id": 7,
+        "cmd": "transitions",
+        "from": 1791800683210846700,
+        "to": 1791801583210846700,
+        "buckets": 200,
+        "filters": {}
+      },
+      "ms": 7.908,
+      "merged_blocks": 1247,
+      "decoded_blocks": 2,
+      "total": 2797730,
+      "curcache": {
+        "enabled": 1,
+        "lo": 307,
+        "blocks": 1698,
+        "events": 6955008,
+        "cap": 7340032,
+        "decoded": 1698,
+        "served": 1548,
+        "resets": 0
+      }
+    }
+  ]
+}

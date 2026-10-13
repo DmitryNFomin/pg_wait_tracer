@@ -1,0 +1,8 @@
+alloc_tune: applied=0x7
+pgwt-server: loaded event names from wait_event_names.json
+pgwt-server: 1 trace files, 4 CPUs, ~9199616 events
+pgwt-server: loaded 29 query texts
+pgwt-server: loaded 168 backend metadata entries
+MXPHASE id=1 count=6300918 load=231.298 links=39.811 nodes=151.078 emit=0.215
+MXPHASE id=2 count=6300918 load=198.246 links=42.911 nodes=150.452 emit=0.234
+MXPHASE id=3 count=5114672 load=177.461 links=30.384 nodes=112.354 emit=0.220

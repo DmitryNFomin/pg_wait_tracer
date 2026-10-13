@@ -1,0 +1,1594 @@
+[
+  {
+    "kind": "request",
+    "request": {
+      "id": 1,
+      "cmd": "info"
+    }
+  },
+  {
+    "kind": "response",
+    "request": {
+      "id": 1,
+      "cmd": "info"
+    },
+    "rtt_ms": 6.98,
+    "bytes": 169,
+    "error": null,
+    "total": null,
+    "merged_blocks": null,
+    "decoded_blocks": null
+  },
+  {
+    "kind": "request",
+    "request": {
+      "id": 2,
+      "cmd": "control",
+      "request": {
+        "cmd": "status"
+      }
+    }
+  },
+  {
+    "kind": "response",
+    "request": {
+      "id": 2,
+      "cmd": "control",
+      "request": {
+        "cmd": "status"
+      }
+    },
+    "rtt_ms": 13.985,
+    "bytes": 37,
+    "error": "daemon not running",
+    "total": null,
+    "merged_blocks": null,
+    "decoded_blocks": null
+  },
+  {
+    "kind": "request",
+    "request": {
+      "id": 3,
+      "cmd": "aas",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "buckets": 300,
+      "filters": {}
+    }
+  },
+  {
+    "kind": "request",
+    "request": {
+      "id": 4,
+      "cmd": "top_queries",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "filters": {}
+    }
+  },
+  {
+    "kind": "response",
+    "request": {
+      "id": 3,
+      "cmd": "aas",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "buckets": 300,
+      "filters": {}
+    },
+    "rtt_ms": 44.736,
+    "bytes": 65448,
+    "error": null,
+    "total": null,
+    "merged_blocks": null,
+    "decoded_blocks": null
+  },
+  {
+    "kind": "request",
+    "request": {
+      "id": 5,
+      "cmd": "aas",
+      "from": 1791799962208567300,
+      "to": 1791802665890480000,
+      "buckets": 1259,
+      "filters": {}
+    }
+  },
+  {
+    "kind": "response",
+    "request": {
+      "id": 4,
+      "cmd": "top_queries",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "filters": {}
+    },
+    "rtt_ms": 905.07,
+    "bytes": 15363,
+    "error": null,
+    "total": null,
+    "merged_blocks": null,
+    "decoded_blocks": null
+  },
+  {
+    "kind": "response",
+    "request": {
+      "id": 5,
+      "cmd": "aas",
+      "from": 1791799962208567300,
+      "to": 1791802665890480000,
+      "buckets": 1259,
+      "filters": {}
+    },
+    "rtt_ms": 921.744,
+    "bytes": 242874,
+    "error": null,
+    "total": null,
+    "merged_blocks": null,
+    "decoded_blocks": null
+  },
+  {
+    "kind": "request",
+    "request": {
+      "id": 6,
+      "cmd": "aas",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "buckets": 300,
+      "filters": {}
+    }
+  },
+  {
+    "kind": "response",
+    "request": {
+      "id": 6,
+      "cmd": "aas",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "buckets": 300,
+      "filters": {}
+    },
+    "rtt_ms": 34.849,
+    "bytes": 65448,
+    "error": null,
+    "total": null,
+    "merged_blocks": null,
+    "decoded_blocks": null
+  },
+  {
+    "kind": "request",
+    "request": {
+      "id": 7,
+      "cmd": "top_queries",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "filters": {}
+    }
+  },
+  {
+    "kind": "response",
+    "request": {
+      "id": 7,
+      "cmd": "top_queries",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "filters": {}
+    },
+    "rtt_ms": 311.394,
+    "bytes": 15363,
+    "error": null,
+    "total": null,
+    "merged_blocks": null,
+    "decoded_blocks": null
+  },
+  {
+    "kind": "request",
+    "request": {
+      "id": 8,
+      "cmd": "aas",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "buckets": 300,
+      "filters": {}
+    }
+  },
+  {
+    "kind": "response",
+    "request": {
+      "id": 8,
+      "cmd": "aas",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "buckets": 300,
+      "filters": {}
+    },
+    "rtt_ms": 31.191,
+    "bytes": 65448,
+    "error": null,
+    "total": null,
+    "merged_blocks": null,
+    "decoded_blocks": null
+  },
+  {
+    "kind": "request",
+    "request": {
+      "id": 9,
+      "cmd": "transitions",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "filters": {},
+      "buckets": 200
+    }
+  },
+  {
+    "kind": "response",
+    "request": {
+      "id": 9,
+      "cmd": "transitions",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "filters": {},
+      "buckets": 200
+    },
+    "rtt_ms": 408.186,
+    "bytes": 9069,
+    "error": null,
+    "total": 2621830,
+    "merged_blocks": 0,
+    "decoded_blocks": 0
+  },
+  {
+    "kind": "request",
+    "request": {
+      "id": 10,
+      "cmd": "aas",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "buckets": 300,
+      "filters": {}
+    }
+  },
+  {
+    "kind": "response",
+    "request": {
+      "id": 10,
+      "cmd": "aas",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "buckets": 300,
+      "filters": {}
+    },
+    "rtt_ms": 38.914,
+    "bytes": 65449,
+    "error": null,
+    "total": null,
+    "merged_blocks": null,
+    "decoded_blocks": null
+  },
+  {
+    "kind": "request",
+    "request": {
+      "id": 11,
+      "cmd": "concurrency",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "buckets": 300,
+      "filters": {}
+    }
+  },
+  {
+    "kind": "response",
+    "request": {
+      "id": 11,
+      "cmd": "concurrency",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "buckets": 300,
+      "filters": {}
+    },
+    "rtt_ms": 522.168,
+    "bytes": 50119,
+    "error": null,
+    "total": null,
+    "merged_blocks": null,
+    "decoded_blocks": null
+  },
+  {
+    "kind": "request",
+    "request": {
+      "id": 12,
+      "cmd": "aas",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "buckets": 300,
+      "filters": {}
+    }
+  },
+  {
+    "kind": "response",
+    "request": {
+      "id": 12,
+      "cmd": "aas",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "buckets": 300,
+      "filters": {}
+    },
+    "rtt_ms": 34.244,
+    "bytes": 65449,
+    "error": null,
+    "total": null,
+    "merged_blocks": null,
+    "decoded_blocks": null
+  },
+  {
+    "kind": "request",
+    "request": {
+      "id": 13,
+      "cmd": "executions",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "limit": 100,
+      "sort": "duration_desc",
+      "filters": {}
+    }
+  },
+  {
+    "kind": "response",
+    "request": {
+      "id": 13,
+      "cmd": "executions",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "limit": 100,
+      "sort": "duration_desc",
+      "filters": {}
+    },
+    "rtt_ms": 953.749,
+    "bytes": 25628,
+    "error": null,
+    "total": null,
+    "merged_blocks": null,
+    "decoded_blocks": null
+  },
+  {
+    "kind": "request",
+    "request": {
+      "id": 14,
+      "cmd": "execution_detail",
+      "filters": {
+        "pid": 3684296
+      },
+      "start_ns": "1791801398681861304",
+      "end_ns": "1791801401683268562"
+    }
+  },
+  {
+    "kind": "response",
+    "request": {
+      "id": 14,
+      "cmd": "execution_detail",
+      "filters": {
+        "pid": 3684296
+      },
+      "start_ns": "1791801398681861304",
+      "end_ns": "1791801401683268562"
+    },
+    "rtt_ms": 131.668,
+    "bytes": 705,
+    "error": null,
+    "total": null,
+    "merged_blocks": null,
+    "decoded_blocks": null
+  },
+  {
+    "kind": "request",
+    "request": {
+      "id": 15,
+      "cmd": "aas",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "buckets": 300,
+      "filters": {}
+    }
+  },
+  {
+    "kind": "response",
+    "request": {
+      "id": 15,
+      "cmd": "aas",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "buckets": 300,
+      "filters": {}
+    },
+    "rtt_ms": 27.508,
+    "bytes": 65449,
+    "error": null,
+    "total": null,
+    "merged_blocks": null,
+    "decoded_blocks": null
+  },
+  {
+    "kind": "request",
+    "request": {
+      "id": 16,
+      "cmd": "exec_scatter",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "max_points": 2000,
+      "filters": {}
+    }
+  },
+  {
+    "kind": "response",
+    "request": {
+      "id": 16,
+      "cmd": "exec_scatter",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "max_points": 2000,
+      "filters": {}
+    },
+    "rtt_ms": 488.673,
+    "bytes": 237546,
+    "error": null,
+    "total": null,
+    "merged_blocks": null,
+    "decoded_blocks": null
+  },
+  {
+    "kind": "request",
+    "request": {
+      "id": 17,
+      "cmd": "aas",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "buckets": 300,
+      "filters": {}
+    }
+  },
+  {
+    "kind": "response",
+    "request": {
+      "id": 17,
+      "cmd": "aas",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "buckets": 300,
+      "filters": {}
+    },
+    "rtt_ms": 32.958,
+    "bytes": 65449,
+    "error": null,
+    "total": null,
+    "merged_blocks": null,
+    "decoded_blocks": null
+  },
+  {
+    "kind": "request",
+    "request": {
+      "id": 18,
+      "cmd": "transitions",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "filters": {},
+      "buckets": 200
+    }
+  },
+  {
+    "kind": "response",
+    "request": {
+      "id": 18,
+      "cmd": "transitions",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "filters": {},
+      "buckets": 200
+    },
+    "rtt_ms": 388.542,
+    "bytes": 9070,
+    "error": null,
+    "total": 2621830,
+    "merged_blocks": 0,
+    "decoded_blocks": 0
+  },
+  {
+    "kind": "request",
+    "request": {
+      "id": 19,
+      "cmd": "aas",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "buckets": 300,
+      "filters": {}
+    }
+  },
+  {
+    "kind": "response",
+    "request": {
+      "id": 19,
+      "cmd": "aas",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "buckets": 300,
+      "filters": {}
+    },
+    "rtt_ms": 50.453,
+    "bytes": 65449,
+    "error": null,
+    "total": null,
+    "merged_blocks": null,
+    "decoded_blocks": null
+  },
+  {
+    "kind": "request",
+    "request": {
+      "id": 20,
+      "cmd": "top_queries",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "filters": {}
+    }
+  },
+  {
+    "kind": "response",
+    "request": {
+      "id": 20,
+      "cmd": "top_queries",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "filters": {}
+    },
+    "rtt_ms": 277.138,
+    "bytes": 15364,
+    "error": null,
+    "total": null,
+    "merged_blocks": null,
+    "decoded_blocks": null
+  },
+  {
+    "kind": "request",
+    "request": {
+      "id": 21,
+      "cmd": "aas",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "buckets": 300,
+      "filters": {}
+    }
+  },
+  {
+    "kind": "response",
+    "request": {
+      "id": 21,
+      "cmd": "aas",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "buckets": 300,
+      "filters": {}
+    },
+    "rtt_ms": 34.29,
+    "bytes": 65449,
+    "error": null,
+    "total": null,
+    "merged_blocks": null,
+    "decoded_blocks": null
+  },
+  {
+    "kind": "request",
+    "request": {
+      "id": 22,
+      "cmd": "transitions",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "filters": {},
+      "buckets": 200
+    }
+  },
+  {
+    "kind": "response",
+    "request": {
+      "id": 22,
+      "cmd": "transitions",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "filters": {},
+      "buckets": 200
+    },
+    "rtt_ms": 377.942,
+    "bytes": 9070,
+    "error": null,
+    "total": 2621830,
+    "merged_blocks": 0,
+    "decoded_blocks": 0
+  },
+  {
+    "kind": "request",
+    "request": {
+      "id": 23,
+      "cmd": "aas",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "buckets": 300,
+      "filters": {}
+    }
+  },
+  {
+    "kind": "response",
+    "request": {
+      "id": 23,
+      "cmd": "aas",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "buckets": 300,
+      "filters": {}
+    },
+    "rtt_ms": 37.895,
+    "bytes": 65449,
+    "error": null,
+    "total": null,
+    "merged_blocks": null,
+    "decoded_blocks": null
+  },
+  {
+    "kind": "request",
+    "request": {
+      "id": 24,
+      "cmd": "concurrency",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "buckets": 300,
+      "filters": {}
+    }
+  },
+  {
+    "kind": "response",
+    "request": {
+      "id": 24,
+      "cmd": "concurrency",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "buckets": 300,
+      "filters": {}
+    },
+    "rtt_ms": 447.517,
+    "bytes": 50119,
+    "error": null,
+    "total": null,
+    "merged_blocks": null,
+    "decoded_blocks": null
+  },
+  {
+    "kind": "request",
+    "request": {
+      "id": 25,
+      "cmd": "aas",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "buckets": 300,
+      "filters": {}
+    }
+  },
+  {
+    "kind": "response",
+    "request": {
+      "id": 25,
+      "cmd": "aas",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "buckets": 300,
+      "filters": {}
+    },
+    "rtt_ms": 31.261,
+    "bytes": 65449,
+    "error": null,
+    "total": null,
+    "merged_blocks": null,
+    "decoded_blocks": null
+  },
+  {
+    "kind": "request",
+    "request": {
+      "id": 26,
+      "cmd": "executions",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "limit": 100,
+      "sort": "duration_desc",
+      "filters": {}
+    }
+  },
+  {
+    "kind": "response",
+    "request": {
+      "id": 26,
+      "cmd": "executions",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "limit": 100,
+      "sort": "duration_desc",
+      "filters": {}
+    },
+    "rtt_ms": 571.655,
+    "bytes": 25628,
+    "error": null,
+    "total": null,
+    "merged_blocks": null,
+    "decoded_blocks": null
+  },
+  {
+    "kind": "request",
+    "request": {
+      "id": 27,
+      "cmd": "execution_detail",
+      "filters": {
+        "pid": 3684296
+      },
+      "start_ns": "1791801398681861304",
+      "end_ns": "1791801401683268562"
+    }
+  },
+  {
+    "kind": "response",
+    "request": {
+      "id": 27,
+      "cmd": "execution_detail",
+      "filters": {
+        "pid": 3684296
+      },
+      "start_ns": "1791801398681861304",
+      "end_ns": "1791801401683268562"
+    },
+    "rtt_ms": 121.739,
+    "bytes": 705,
+    "error": null,
+    "total": null,
+    "merged_blocks": null,
+    "decoded_blocks": null
+  },
+  {
+    "kind": "request",
+    "request": {
+      "id": 28,
+      "cmd": "aas",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "buckets": 300,
+      "filters": {}
+    }
+  },
+  {
+    "kind": "response",
+    "request": {
+      "id": 28,
+      "cmd": "aas",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "buckets": 300,
+      "filters": {}
+    },
+    "rtt_ms": 37.971,
+    "bytes": 65449,
+    "error": null,
+    "total": null,
+    "merged_blocks": null,
+    "decoded_blocks": null
+  },
+  {
+    "kind": "request",
+    "request": {
+      "id": 29,
+      "cmd": "exec_scatter",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "max_points": 2000,
+      "filters": {}
+    }
+  },
+  {
+    "kind": "response",
+    "request": {
+      "id": 29,
+      "cmd": "exec_scatter",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "max_points": 2000,
+      "filters": {}
+    },
+    "rtt_ms": 479.689,
+    "bytes": 237546,
+    "error": null,
+    "total": null,
+    "merged_blocks": null,
+    "decoded_blocks": null
+  },
+  {
+    "kind": "request",
+    "request": {
+      "id": 30,
+      "cmd": "aas",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "buckets": 300,
+      "filters": {}
+    }
+  },
+  {
+    "kind": "response",
+    "request": {
+      "id": 30,
+      "cmd": "aas",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "buckets": 300,
+      "filters": {}
+    },
+    "rtt_ms": 28.759,
+    "bytes": 65449,
+    "error": null,
+    "total": null,
+    "merged_blocks": null,
+    "decoded_blocks": null
+  },
+  {
+    "kind": "request",
+    "request": {
+      "id": 31,
+      "cmd": "transitions",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "filters": {},
+      "buckets": 200
+    }
+  },
+  {
+    "kind": "response",
+    "request": {
+      "id": 31,
+      "cmd": "transitions",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "filters": {},
+      "buckets": 200
+    },
+    "rtt_ms": 381.507,
+    "bytes": 9070,
+    "error": null,
+    "total": 2621830,
+    "merged_blocks": 0,
+    "decoded_blocks": 0
+  },
+  {
+    "kind": "request",
+    "request": {
+      "id": 32,
+      "cmd": "aas",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "buckets": 300,
+      "filters": {}
+    }
+  },
+  {
+    "kind": "response",
+    "request": {
+      "id": 32,
+      "cmd": "aas",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "buckets": 300,
+      "filters": {}
+    },
+    "rtt_ms": 33.82,
+    "bytes": 65449,
+    "error": null,
+    "total": null,
+    "merged_blocks": null,
+    "decoded_blocks": null
+  },
+  {
+    "kind": "request",
+    "request": {
+      "id": 33,
+      "cmd": "top_queries",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "filters": {}
+    }
+  },
+  {
+    "kind": "response",
+    "request": {
+      "id": 33,
+      "cmd": "top_queries",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "filters": {}
+    },
+    "rtt_ms": 296.863,
+    "bytes": 15364,
+    "error": null,
+    "total": null,
+    "merged_blocks": null,
+    "decoded_blocks": null
+  },
+  {
+    "kind": "request",
+    "request": {
+      "id": 34,
+      "cmd": "aas",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "buckets": 300,
+      "filters": {}
+    }
+  },
+  {
+    "kind": "response",
+    "request": {
+      "id": 34,
+      "cmd": "aas",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "buckets": 300,
+      "filters": {}
+    },
+    "rtt_ms": 33.744,
+    "bytes": 65449,
+    "error": null,
+    "total": null,
+    "merged_blocks": null,
+    "decoded_blocks": null
+  },
+  {
+    "kind": "request",
+    "request": {
+      "id": 35,
+      "cmd": "transitions",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "filters": {},
+      "buckets": 200
+    }
+  },
+  {
+    "kind": "response",
+    "request": {
+      "id": 35,
+      "cmd": "transitions",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "filters": {},
+      "buckets": 200
+    },
+    "rtt_ms": 368.434,
+    "bytes": 9070,
+    "error": null,
+    "total": 2621830,
+    "merged_blocks": 0,
+    "decoded_blocks": 0
+  },
+  {
+    "kind": "request",
+    "request": {
+      "id": 36,
+      "cmd": "aas",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "buckets": 300,
+      "filters": {}
+    }
+  },
+  {
+    "kind": "response",
+    "request": {
+      "id": 36,
+      "cmd": "aas",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "buckets": 300,
+      "filters": {}
+    },
+    "rtt_ms": 47.238,
+    "bytes": 65449,
+    "error": null,
+    "total": null,
+    "merged_blocks": null,
+    "decoded_blocks": null
+  },
+  {
+    "kind": "request",
+    "request": {
+      "id": 37,
+      "cmd": "concurrency",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "buckets": 300,
+      "filters": {}
+    }
+  },
+  {
+    "kind": "response",
+    "request": {
+      "id": 37,
+      "cmd": "concurrency",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "buckets": 300,
+      "filters": {}
+    },
+    "rtt_ms": 454.067,
+    "bytes": 50119,
+    "error": null,
+    "total": null,
+    "merged_blocks": null,
+    "decoded_blocks": null
+  },
+  {
+    "kind": "request",
+    "request": {
+      "id": 38,
+      "cmd": "aas",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "buckets": 300,
+      "filters": {}
+    }
+  },
+  {
+    "kind": "response",
+    "request": {
+      "id": 38,
+      "cmd": "aas",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "buckets": 300,
+      "filters": {}
+    },
+    "rtt_ms": 31.268,
+    "bytes": 65449,
+    "error": null,
+    "total": null,
+    "merged_blocks": null,
+    "decoded_blocks": null
+  },
+  {
+    "kind": "request",
+    "request": {
+      "id": 39,
+      "cmd": "executions",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "limit": 100,
+      "sort": "duration_desc",
+      "filters": {}
+    }
+  },
+  {
+    "kind": "response",
+    "request": {
+      "id": 39,
+      "cmd": "executions",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "limit": 100,
+      "sort": "duration_desc",
+      "filters": {}
+    },
+    "rtt_ms": 601.023,
+    "bytes": 25628,
+    "error": null,
+    "total": null,
+    "merged_blocks": null,
+    "decoded_blocks": null
+  },
+  {
+    "kind": "request",
+    "request": {
+      "id": 40,
+      "cmd": "execution_detail",
+      "filters": {
+        "pid": 3684296
+      },
+      "start_ns": "1791801398681861304",
+      "end_ns": "1791801401683268562"
+    }
+  },
+  {
+    "kind": "response",
+    "request": {
+      "id": 40,
+      "cmd": "execution_detail",
+      "filters": {
+        "pid": 3684296
+      },
+      "start_ns": "1791801398681861304",
+      "end_ns": "1791801401683268562"
+    },
+    "rtt_ms": 112.498,
+    "bytes": 705,
+    "error": null,
+    "total": null,
+    "merged_blocks": null,
+    "decoded_blocks": null
+  },
+  {
+    "kind": "request",
+    "request": {
+      "id": 41,
+      "cmd": "aas",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "buckets": 300,
+      "filters": {}
+    }
+  },
+  {
+    "kind": "response",
+    "request": {
+      "id": 41,
+      "cmd": "aas",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "buckets": 300,
+      "filters": {}
+    },
+    "rtt_ms": 32.972,
+    "bytes": 65449,
+    "error": null,
+    "total": null,
+    "merged_blocks": null,
+    "decoded_blocks": null
+  },
+  {
+    "kind": "request",
+    "request": {
+      "id": 42,
+      "cmd": "exec_scatter",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "max_points": 2000,
+      "filters": {}
+    }
+  },
+  {
+    "kind": "response",
+    "request": {
+      "id": 42,
+      "cmd": "exec_scatter",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "max_points": 2000,
+      "filters": {}
+    },
+    "rtt_ms": 489.473,
+    "bytes": 237546,
+    "error": null,
+    "total": null,
+    "merged_blocks": null,
+    "decoded_blocks": null
+  },
+  {
+    "kind": "request",
+    "request": {
+      "id": 43,
+      "cmd": "aas",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "buckets": 300,
+      "filters": {}
+    }
+  },
+  {
+    "kind": "response",
+    "request": {
+      "id": 43,
+      "cmd": "aas",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "buckets": 300,
+      "filters": {}
+    },
+    "rtt_ms": 30.743,
+    "bytes": 65449,
+    "error": null,
+    "total": null,
+    "merged_blocks": null,
+    "decoded_blocks": null
+  },
+  {
+    "kind": "request",
+    "request": {
+      "id": 44,
+      "cmd": "transitions",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "filters": {},
+      "buckets": 200
+    }
+  },
+  {
+    "kind": "response",
+    "request": {
+      "id": 44,
+      "cmd": "transitions",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "filters": {},
+      "buckets": 200
+    },
+    "rtt_ms": 395.452,
+    "bytes": 9070,
+    "error": null,
+    "total": 2621830,
+    "merged_blocks": 0,
+    "decoded_blocks": 0
+  },
+  {
+    "kind": "request",
+    "request": {
+      "id": 45,
+      "cmd": "aas",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "buckets": 300,
+      "filters": {}
+    }
+  },
+  {
+    "kind": "response",
+    "request": {
+      "id": 45,
+      "cmd": "aas",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "buckets": 300,
+      "filters": {}
+    },
+    "rtt_ms": 29.316,
+    "bytes": 65449,
+    "error": null,
+    "total": null,
+    "merged_blocks": null,
+    "decoded_blocks": null
+  },
+  {
+    "kind": "request",
+    "request": {
+      "id": 46,
+      "cmd": "top_queries",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "filters": {}
+    }
+  },
+  {
+    "kind": "response",
+    "request": {
+      "id": 46,
+      "cmd": "top_queries",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "filters": {}
+    },
+    "rtt_ms": 287.19,
+    "bytes": 15364,
+    "error": null,
+    "total": null,
+    "merged_blocks": null,
+    "decoded_blocks": null
+  },
+  {
+    "kind": "request",
+    "request": {
+      "id": 47,
+      "cmd": "aas",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "buckets": 300,
+      "filters": {}
+    }
+  },
+  {
+    "kind": "response",
+    "request": {
+      "id": 47,
+      "cmd": "aas",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "buckets": 300,
+      "filters": {}
+    },
+    "rtt_ms": 36.701,
+    "bytes": 65449,
+    "error": null,
+    "total": null,
+    "merged_blocks": null,
+    "decoded_blocks": null
+  },
+  {
+    "kind": "request",
+    "request": {
+      "id": 48,
+      "cmd": "transitions",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "filters": {},
+      "buckets": 200
+    }
+  },
+  {
+    "kind": "response",
+    "request": {
+      "id": 48,
+      "cmd": "transitions",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "filters": {},
+      "buckets": 200
+    },
+    "rtt_ms": 369.303,
+    "bytes": 9070,
+    "error": null,
+    "total": 2621830,
+    "merged_blocks": 0,
+    "decoded_blocks": 0
+  },
+  {
+    "kind": "request",
+    "request": {
+      "id": 49,
+      "cmd": "aas",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "buckets": 300,
+      "filters": {}
+    }
+  },
+  {
+    "kind": "response",
+    "request": {
+      "id": 49,
+      "cmd": "aas",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "buckets": 300,
+      "filters": {}
+    },
+    "rtt_ms": 33.63,
+    "bytes": 65449,
+    "error": null,
+    "total": null,
+    "merged_blocks": null,
+    "decoded_blocks": null
+  },
+  {
+    "kind": "request",
+    "request": {
+      "id": 50,
+      "cmd": "concurrency",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "buckets": 300,
+      "filters": {}
+    }
+  },
+  {
+    "kind": "response",
+    "request": {
+      "id": 50,
+      "cmd": "concurrency",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "buckets": 300,
+      "filters": {}
+    },
+    "rtt_ms": 439.111,
+    "bytes": 50119,
+    "error": null,
+    "total": null,
+    "merged_blocks": null,
+    "decoded_blocks": null
+  },
+  {
+    "kind": "request",
+    "request": {
+      "id": 51,
+      "cmd": "aas",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "buckets": 300,
+      "filters": {}
+    }
+  },
+  {
+    "kind": "response",
+    "request": {
+      "id": 51,
+      "cmd": "aas",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "buckets": 300,
+      "filters": {}
+    },
+    "rtt_ms": 33.927,
+    "bytes": 65449,
+    "error": null,
+    "total": null,
+    "merged_blocks": null,
+    "decoded_blocks": null
+  },
+  {
+    "kind": "request",
+    "request": {
+      "id": 52,
+      "cmd": "executions",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "limit": 100,
+      "sort": "duration_desc",
+      "filters": {}
+    }
+  },
+  {
+    "kind": "response",
+    "request": {
+      "id": 52,
+      "cmd": "executions",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "limit": 100,
+      "sort": "duration_desc",
+      "filters": {}
+    },
+    "rtt_ms": 564.196,
+    "bytes": 25628,
+    "error": null,
+    "total": null,
+    "merged_blocks": null,
+    "decoded_blocks": null
+  },
+  {
+    "kind": "request",
+    "request": {
+      "id": 53,
+      "cmd": "execution_detail",
+      "filters": {
+        "pid": 3684296
+      },
+      "start_ns": "1791801398681861304",
+      "end_ns": "1791801401683268562"
+    }
+  },
+  {
+    "kind": "response",
+    "request": {
+      "id": 53,
+      "cmd": "execution_detail",
+      "filters": {
+        "pid": 3684296
+      },
+      "start_ns": "1791801398681861304",
+      "end_ns": "1791801401683268562"
+    },
+    "rtt_ms": 136.665,
+    "bytes": 705,
+    "error": null,
+    "total": null,
+    "merged_blocks": null,
+    "decoded_blocks": null
+  },
+  {
+    "kind": "request",
+    "request": {
+      "id": 54,
+      "cmd": "aas",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "buckets": 300,
+      "filters": {}
+    }
+  },
+  {
+    "kind": "response",
+    "request": {
+      "id": 54,
+      "cmd": "aas",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "buckets": 300,
+      "filters": {}
+    },
+    "rtt_ms": 37.081,
+    "bytes": 65449,
+    "error": null,
+    "total": null,
+    "merged_blocks": null,
+    "decoded_blocks": null
+  },
+  {
+    "kind": "request",
+    "request": {
+      "id": 55,
+      "cmd": "exec_scatter",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "max_points": 2000,
+      "filters": {}
+    }
+  },
+  {
+    "kind": "response",
+    "request": {
+      "id": 55,
+      "cmd": "exec_scatter",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "max_points": 2000,
+      "filters": {}
+    },
+    "rtt_ms": 478.922,
+    "bytes": 237546,
+    "error": null,
+    "total": null,
+    "merged_blocks": null,
+    "decoded_blocks": null
+  },
+  {
+    "kind": "request",
+    "request": {
+      "id": 56,
+      "cmd": "aas",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "buckets": 300,
+      "filters": {}
+    }
+  },
+  {
+    "kind": "response",
+    "request": {
+      "id": 56,
+      "cmd": "aas",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "buckets": 300,
+      "filters": {}
+    },
+    "rtt_ms": 37.89,
+    "bytes": 65449,
+    "error": null,
+    "total": null,
+    "merged_blocks": null,
+    "decoded_blocks": null
+  },
+  {
+    "kind": "request",
+    "request": {
+      "id": 57,
+      "cmd": "transitions",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "filters": {},
+      "buckets": 200
+    }
+  },
+  {
+    "kind": "response",
+    "request": {
+      "id": 57,
+      "cmd": "transitions",
+      "from": 1791800864284323600,
+      "to": 1791801764284323600,
+      "filters": {},
+      "buckets": 200
+    },
+    "rtt_ms": 390.774,
+    "bytes": 9070,
+    "error": null,
+    "total": 2621830,
+    "merged_blocks": 0,
+    "decoded_blocks": 0
+  }
+]

@@ -1,0 +1,42 @@
+MXSERVER pid=1451883
+pgwt-server: loaded event names from wait_event_names.json
+pgwt-server: 1 trace files, 4 CPUs, ~9199616 events
+pgwt-server: loaded 29 query texts
+pgwt-server: loaded 168 backend metadata entries
+pgwt-server: loaded 29 query texts
+pgwt-server: loaded 168 backend metadata entries
+pgwt-server: loaded 29 query texts
+pgwt-server: loaded 168 backend metadata entries
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1239 served=0 resets=0
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1239 served=1239 resets=0
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1239 served=2478 resets=0
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1239 served=3717 resets=0
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1239 served=4956 resets=0
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1239 served=4958 resets=0
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1951 served=5783 resets=0
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1951 served=7022 resets=0
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1951 served=7024 resets=0
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1951 served=8263 resets=0
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1951 served=8265 resets=0
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1951 served=9504 resets=0
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1951 served=10743 resets=0
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=1951 served=10745 resets=0
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=2663 served=11570 resets=0
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=2663 served=12809 resets=0
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=2663 served=12811 resets=0
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=2663 served=14050 resets=0
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=2663 served=14052 resets=0
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=2663 served=15291 resets=0
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=2663 served=16530 resets=0
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=2663 served=16532 resets=0
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=3375 served=17357 resets=0
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=3375 served=18596 resets=0
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=3375 served=18598 resets=0
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=3375 served=19837 resets=0
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=3375 served=19839 resets=0
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=3375 served=21078 resets=0
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=3375 served=22317 resets=0
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=3375 served=22319 resets=0
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=4087 served=23144 resets=0
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=4087 served=24383 resets=0
+pgwt-server: curcache enabled=1 lo=1007 blocks=1239 events=5074864 cap=5242880 decoded=4087 served=24385 resets=0

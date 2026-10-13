@@ -1,0 +1,63 @@
+make: Entering directory '/root/cx-matrix-regression/before329'
+  CC       build/server_server.o (server)
+  CC       build/server_compute.o (server)
+  CC       build/server_event_reader.o (server)
+  CC       build/server_event_writer.o (server)
+src/event_writer.c: In function ‘pgwt_writer_init’:
+src/event_writer.c:604:9: warning: ignoring return value of ‘chown’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
+  604 |         chown(w->trace_dir, (uid_t)-1, w->trace_gid);
+      |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+src/event_writer.c: In function ‘open_trace_file’:
+src/event_writer.c:386:9: warning: ignoring return value of ‘fchown’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
+  386 |         fchown(fileno(w->fp), (uid_t)-1, w->trace_gid);
+      |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+In file included from src/compute.c:6:
+src/compute.h:65:20: warning: ‘pgwt_cat_names’ defined but not used [-Wunused-variable]
+   65 | static const char *pgwt_cat_names[PGWT_NUM_CATS] = {
+      |                    ^~~~~~~~~~~~~~
+In file included from src/server.c:9:
+src/compute.h:37:20: warning: ‘pgwt_class_display’ defined but not used [-Wunused-variable]
+   37 | static const char *pgwt_class_display[PGWT_NUM_CLASSES] = {
+      |                    ^~~~~~~~~~~~~~~~~~
+  CC       build/server_summary_writer.o (server)
+  CC       build/server_summary_reader.o (server)
+src/summary_writer.c: In function ‘open_summary_file’:
+src/summary_writer.c:846:9: warning: ignoring return value of ‘fchown’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
+  846 |         fchown(fileno(w->fp), (uid_t)-1, w->trace_gid);
+      |         ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  CC       build/server_wait_event.o (server)
+  CC       build/server_idle_rule.o (server)
+  CC       build/server_spawn.o (server)
+src/server.c: In function ‘coverage_refresh’:
+  CC       build/server_cmdline.o (server)
+src/server.c:1677:43: warning: ‘%s’ directive output may be truncated writing up to 137215 bytes into a region of size 512 [-Wformat-truncation=]
+ 1677 |     snprintf(fc->path, sizeof(fc->path), "%s", path);
+      |                                           ^~
+In file included from /usr/include/stdio.h:980,
+                 from src/event_writer.h:10,
+                 from src/event_reader.h:5,
+                 from src/server.c:7:
+In function ‘snprintf’,
+    inlined from ‘cov_find_or_add’ at src/server.c:1677:5,
+    inlined from ‘coverage_refresh’ at src/server.c:2172:36:
+/usr/include/x86_64-linux-gnu/bits/stdio2.h:54:10: note: ‘__builtin_snprintf’ output between 1 and 137216 bytes into a destination of size 512
+   54 |   return __builtin___snprintf_chk (__s, __n, __USE_FORTIFY_LEVEL - 1,
+      |          ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+   55 |                                    __glibc_objsize (__s), __fmt,
+      |                                    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+   56 |                                    __va_arg_pack ());
+      |                                    ~~~~~~~~~~~~~~~~~
+  CC       build/server_backend_meta.o (server)
+  CC       build/server_cJSON.o (server)
+src/compute.c: In function ‘pgwt_compute_transitions’:
+src/compute.c:2924:40: warning: argument 1 range [18446744071562067968, 18446744073709551615] exceeds maximum object size 9223372036854775807 [-Walloc-size-larger-than=]
+ 2924 |     struct pgwt_transition_row *rows = calloc(nr, sizeof(*rows));
+      |                                        ^~~~~~~~~~~~~~~~~~~~~~~~~
+In file included from src/percentile.h:32,
+                 from src/compute.c:12:
+/usr/include/stdlib.h:675:14: note: in a call to allocation function ‘calloc’ declared here
+  675 | extern void *calloc (size_t __nmemb, size_t __size)
+      |              ^~~~~~
+  LINK     pgwt-server
+  DONE     pgwt-server
+make: Leaving directory '/root/cx-matrix-regression/before329'

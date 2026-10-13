@@ -1,0 +1,17 @@
+{
+  "box": "root@142.132.191.18",
+  "trace": "/tmp/pgwt_cx_rehearsal_tqWPfm",
+  "source_manifest": "source-manifest.json",
+  "browser_source_tree_before": "3e9b0c3d912db185f3f07472e974400d549d202a",
+  "browser_source_tree_final": "3e9b0c3d912db185f3f07472e974400d549d202a",
+  "old_28ms_benchmark": {
+    "commit": "9e59ef8",
+    "source": "scratchpad/pc/evtable.md",
+    "description": "Static dense 900s warm transitions benchmark of the combined #365 arm, before #370 refusal integration"
+  },
+  "comparison_protocol": "Same box, same compiler/optimization flags, same frozen trace/window; one excluded raw variants warmup and one excluded first transition followed by six warm requests per process; two reversed-order rounds; explicit PGWT_CURRENT_TRACE_CACHE_STATS=1; 5s time_model canaries only.",
+  "historical_paints": "PRE gate-2 versus final VM 169962399; no ratios or server-time subtraction used for causal attribution.",
+  "prior_attempt": "Sources and historical browser logs retained; prior timing sweeps did not set PGWT_CURRENT_TRACE_CACHE_STATS and are superseded by audit/.",
+  "excluded_probe": "audit/edge-first/ started with aggregate edges before raw priming; explicit cache statistics exposed suffix-only retention and subsequent repeated raw decoding. Superseded by raw-primed audit/measure.jsonl; used for no reported performance claim.",
+  "browser_cache_observation": "Every arm has the identical 33-report decoded-counter pattern: 1239 cached window blocks; only Waterfall detail planning-marker lookback decodes another 712 older blocks per cycle. No Matrix or other 900s window request decodes new blocks. Full paints include this actual product behaviour."
+}

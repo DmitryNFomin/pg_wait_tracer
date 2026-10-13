@@ -1,0 +1,83 @@
+Validated warm calls, explicit cache statistics, 5s canaries, stable responses, and complete browser paints.
+before329 0 transitions [997.787, 1008.954, 974.661, 988.766, 996.1, 1011.155] median 996.944
+after329 0 transitions [993.056, 962.242, 1003.806, 1014.285, 1009.714, 965.875] median 998.431
+after340 0 transitions [8.032, 7.723, 7.626, 7.189, 7.179, 7.0] median 7.408
+pre 0 transitions [6.792, 7.44, 7.954, 7.466, 8.518, 7.083] median 7.453
+pre 0 top_queries [1743.053, 1701.75, 1722.898, 1676.311] median 1712.324
+pre 0 executions [1643.143, 1705.712, 1664.405, 1637.483] median 1653.774
+pre 0 exec_scatter [1533.753, 1558.984, 1585.854, 1593.73] median 1572.419
+pre 0 concurrency [1172.801, 1180.474, 1182.298, 1163.352] median 1176.637
+after365 0 transitions [7.501, 7.297, 7.225, 7.698, 6.859, 6.687] median 7.261
+before_refusal 0 transitions [7.505, 8.36, 7.824, 7.579, 8.478, 8.066] median 7.945
+after_refusal 0 transitions [400.819, 382.052, 380.113, 362.272, 396.451, 366.452] median 381.082
+aggregate 0 transitions [13.045, 13.085, 12.056, 8.859, 8.663, 8.594] median 10.457
+aggregate 0 top_queries [316.29, 316.184, 320.249, 323.461] median 318.269
+aggregate 0 executions [583.041, 578.204, 571.04, 612.347] median 580.622
+aggregate 0 exec_scatter [475.235, 461.112, 441.472, 469.421] median 465.267
+aggregate 0 concurrency [410.557, 416.339, 426.11, 409.349] median 413.448
+final 0 transitions [370.917, 387.468, 391.321, 375.115, 372.863, 379.079] median 377.097
+final 0 top_queries [320.51, 312.024, 322.728, 312.844] median 316.677
+final 0 executions [591.977, 605.24, 636.588, 572.422] median 598.609
+final 0 exec_scatter [436.133, 445.172, 436.588, 517.897] median 440.88
+final 0 concurrency [413.455, 413.03, 419.43, 420.289] median 416.442
+oldsort 0 transitions [895.203, 871.757, 874.014, 891.629, 893.955, 894.914] median 892.792
+untuned 0 transitions [488.355, 486.151, 481.094, 489.476, 480.537, 484.333] median 485.242
+untuned 1 transitions [465.346, 480.222, 490.672, 468.514, 478.298, 486.694] median 479.26
+oldsort 1 transitions [863.883, 872.573, 884.13, 888.186, 900.846, 878.036] median 881.083
+final 1 transitions [392.264, 378.026, 378.178, 368.181, 390.94, 383.54] median 380.859
+final 1 top_queries [314.584, 305.569, 312.119, 327.047] median 313.351
+final 1 executions [559.219, 556.402, 573.363, 585.345] median 566.291
+final 1 exec_scatter [444.227, 444.262, 442.851, 437.167] median 443.539
+final 1 concurrency [420.376, 400.732, 400.212, 417.553] median 409.143
+aggregate 1 transitions [7.817, 7.34, 7.122, 7.343, 7.222, 7.619] median 7.341
+aggregate 1 top_queries [312.916, 309.24, 307.708, 306.317] median 308.474
+aggregate 1 executions [611.1, 640.913, 573.047, 594.445] median 602.773
+aggregate 1 exec_scatter [473.566, 448.108, 449.41, 450.28] median 449.845
+aggregate 1 concurrency [404.947, 408.422, 404.432, 410.199] median 406.685
+after_refusal 1 transitions [393.202, 372.739, 380.869, 364.178, 377.89, 373.022] median 375.456
+before_refusal 1 transitions [9.063, 8.419, 10.061, 8.094, 7.476, 7.623] median 8.256
+after365 1 transitions [7.329, 7.679, 7.662, 7.704, 7.32, 7.593] median 7.627
+pre 1 transitions [6.995, 8.924, 8.643, 9.288, 9.043, 7.843] median 8.784
+pre 1 top_queries [1754.309, 1784.692, 1718.618, 1749.536] median 1751.923
+pre 1 executions [1685.932, 1732.567, 1631.241, 1668.835] median 1677.383
+pre 1 exec_scatter [1671.428, 1601.559, 1538.127, 1530.937] median 1569.843
+pre 1 concurrency [1221.868, 1172.47, 1164.408, 1156.096] median 1168.439
+after340 1 transitions [7.012, 6.802, 7.075, 7.256, 6.893, 6.695] median 6.952
+after329 1 transitions [978.41, 977.694, 1001.414, 969.731, 997.053, 977.63] median 978.052
+before329 1 transitions [963.057, 975.406, 961.093, 972.051, 962.878, 958.711] median 962.967
+paint pre 0 queries [1751, 1781, 1759]
+paint pre 0 transitions [152, 131, 154]
+paint pre 0 concurrency [1242, 1279, 1197]
+paint pre 0 waterfall [1870, 1855, 1930]
+paint pre 0 scatter [1662, 1595, 1587]
+paint pre 0 matrix [158, 157, 126]
+paint aggregate 0 queries [357, 347, 374]
+paint aggregate 0 transitions [156, 142, 140]
+paint aggregate 0 concurrency [520, 508, 510]
+paint aggregate 0 waterfall [793, 804, 769]
+paint aggregate 0 scatter [570, 540, 530]
+paint aggregate 0 matrix [141, 131, 142]
+paint final 0 queries [362, 358, 352]
+paint final 0 transitions [415, 425, 420]
+paint final 0 concurrency [496, 503, 500]
+paint final 0 waterfall [774, 767, 753]
+paint final 0 scatter [558, 549, 511]
+paint final 0 matrix [410, 395, 425]
+paint final 1 queries [358, 358, 343]
+paint final 1 transitions [441, 429, 420]
+paint final 1 concurrency [515, 526, 502]
+paint final 1 waterfall [758, 777, 766]
+paint final 1 scatter [537, 542, 544]
+paint final 1 matrix [437, 460, 464]
+paint aggregate 1 queries [337, 347, 371]
+paint aggregate 1 transitions [149, 146, 128]
+paint aggregate 1 concurrency [570, 515, 547]
+paint aggregate 1 waterfall [756, 759, 785]
+paint aggregate 1 scatter [552, 630, 527]
+paint aggregate 1 matrix [150, 176, 129]
+paint pre 1 queries [1770, 1888, 1829]
+paint pre 1 transitions [134, 135, 158]
+paint pre 1 concurrency [1258, 1231, 1218]
+paint pre 1 waterfall [1833, 1896, 1827]
+paint pre 1 scatter [1568, 1642, 1559]
+paint pre 1 matrix [141, 138, 154]

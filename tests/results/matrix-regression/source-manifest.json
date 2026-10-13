@@ -1,0 +1,42 @@
+{
+  "before329": {
+    "commit": "c52a892cf0b31c0066a9c950f51ff37b70a830ad",
+    "server_sha256": "7a1228e8f9b31ef7cd11d42f14c963bc67713fb65c4e3a692566f1cf978760d3"
+  },
+  "after329": {
+    "commit": "b6cb1ecb5307959b3a0369c79aeddc0e08350d7c",
+    "server_sha256": "7a1228e8f9b31ef7cd11d42f14c963bc67713fb65c4e3a692566f1cf978760d3"
+  },
+  "after340": {
+    "commit": "f78ab4ca0747d5da7284f8dc08c796ae866778c8",
+    "server_sha256": "fbb57f8cbf9e49a954909cc87105195eb7200be30ad37269fe7650f0b1079554"
+  },
+  "after365": {
+    "commit": "2b2147f14894fbcf30f280a62c759c04363ded8c",
+    "server_sha256": "0ec3fed25baef5046ae50a7ee8201d3c92af129a3106e727afac40e0b9df4581"
+  },
+  "before_refusal": {
+    "commit": "f5a856e884742e20a31534ece7c8deed9f3c18b2",
+    "server_sha256": "073a85925db9498dd2cdd1e99e10dd8f73e31e17971375169039328ad6edff50"
+  },
+  "after_refusal": {
+    "commit": "831102f6a116bd9646dc946b317464eec2201aa2",
+    "server_sha256": "401fcf5c69d97fedeb38d78c5131993583e396db34c010025ef2de49b6c81bb8"
+  },
+  "pre": {
+    "commit": "b907ec0",
+    "server_sha256": "de490c22d36c39e89c0cbb4b079268ea2f9d5411f9e4ba1de548f2772be634c4"
+  },
+  "final": {
+    "commit": "612bd98",
+    "server_sha256": "1053e6983385ca5ace78dda88096bd19682497d45201a1f22d45bc247bb6ec4d"
+  },
+  "aggregate": {
+    "commit": "612bd98",
+    "server_sha256": "87226ba7465661712c3f982bd5aa90134aed32a3ccaf586ae3c38da0aa465a06"
+  },
+  "oldsort": {
+    "commit": "612bd98",
+    "server_sha256": "8d0fe6dddfa6b251faae2379f80948d42fa4409a2ec806617f0af1423ec36c00"
+  }
+}
