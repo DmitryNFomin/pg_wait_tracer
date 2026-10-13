@@ -1,0 +1,8 @@
+{"records":1,"filter":"class","failed":0,"num_rows":0,"rows_null":true}
+{"records":1,"filter":"event","failed":0,"num_rows":0,"rows_null":true}
+{"records":1,"filter":"cpu","failed":0,"num_rows":1,"rows_null":false}
+{"records":1,"filter":"query","failed":0,"num_rows":0,"rows_null":true}
+{"records":0,"filter":"class","failed":0,"num_rows":0,"rows_null":true}
+{"records":0,"filter":"event","failed":0,"num_rows":0,"rows_null":true}
+{"records":0,"filter":"cpu","failed":0,"num_rows":0,"rows_null":true}
+{"records":0,"filter":"query","failed":0,"num_rows":0,"rows_null":true}

@@ -1,0 +1,3 @@
+{"id": 3, "cmd": "top_sessions", "from": 9990000000000, "to": 10310000000000, "filters": {"class": "IO"}}
+{"id": 4, "cmd": "top_sessions", "from": 9990000000000, "to": 10310000000000, "filters": {"event_id": 167772181}}
+{"id": 5, "cmd": "top_sessions", "from": 9990000000000, "to": 10310000000000, "filters": {"query_id": "100"}}

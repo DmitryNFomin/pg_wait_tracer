@@ -1,0 +1,292 @@
+[
+  {
+    "text": "PIDBackendUserDatabaseDB TimeCPU%Wait%Top Wait1000clientud150.0s0.0%100.0%IO:DataFileRead",
+    "html": "<table><thead><tr><th class=\"\" data-sort=\"pid\">PID</th><th class=\"\" data-sort=\"type\">Backend</th><th class=\"\" data-sort=\"user\">User</th><th class=\"\" data-sort=\"db\">Database</th><th class=\"num\" data-sort=\"db_time_ms\">DB Time</th><th class=\"num\" data-sort=\"cpu_pct\">CPU%</th><th class=\"num\" data-sort=\"wait_pct\">Wait%</th><th class=\"\" data-sort=\"top_wait\">Top Wait</th></tr></thead><tbody><tr class=\"clickable\" data-row=\"0\"><td class=\"\">1000</td><td class=\"\">client</td><td class=\"\">u</td><td class=\"\">d</td><td class=\"num\">150.0s</td><td class=\"num\"><div class=\"pct-bar\"><div class=\"pct-fill\" style=\"width:0.0%;background:rgb(28,120,62)\"></div><span>0.0%</span></div></td><td class=\"num\"><div class=\"pct-bar\"><div class=\"pct-fill\" style=\"width:100.0%;background:rgb(30,100,255)\"></div><span>100.0%</span></div></td><td class=\"\"><span class=\"class-dot\" style=\"background:rgb(30,100,255)\"></span>IO:DataFileRead</td></tr></tbody></table>",
+    "rows": 1,
+    "error_cards": 0,
+    "retry_buttons": 0,
+    "empty_placeholder": false,
+    "revision": "master",
+    "case": "production-class",
+    "replayed_response": {
+      "id": 3,
+      "fidelity": "exact",
+      "rows": [
+        {
+          "pid": 1000,
+          "db_time_ms": 150000,
+          "cpu_pct": 0,
+          "wait_pct": 100,
+          "top_wait": "IO:DataFileRead",
+          "top_wait_id": 167772181,
+          "type": "client",
+          "user": "u",
+          "db": "d"
+        }
+      ]
+    },
+    "sessions_requests": [
+      {
+        "id": 7,
+        "cmd": "top_sessions",
+        "from": 1773999100000000000,
+        "to": 1774000000000000000,
+        "filters": {}
+      }
+    ]
+  },
+  {
+    "text": "PIDBackendUserDatabaseDB TimeCPU%Wait%Top Wait1000clientud300.0s50.0%50.0%IO:DataFileRead",
+    "html": "<table><thead><tr><th class=\"\" data-sort=\"pid\">PID</th><th class=\"\" data-sort=\"type\">Backend</th><th class=\"\" data-sort=\"user\">User</th><th class=\"\" data-sort=\"db\">Database</th><th class=\"num\" data-sort=\"db_time_ms\">DB Time</th><th class=\"num\" data-sort=\"cpu_pct\">CPU%</th><th class=\"num\" data-sort=\"wait_pct\">Wait%</th><th class=\"\" data-sort=\"top_wait\">Top Wait</th></tr></thead><tbody><tr class=\"clickable\" data-row=\"0\"><td class=\"\">1000</td><td class=\"\">client</td><td class=\"\">u</td><td class=\"\">d</td><td class=\"num\">300.0s</td><td class=\"num\"><div class=\"pct-bar\"><div class=\"pct-fill\" style=\"width:50.0%;background:rgb(28,120,62)\"></div><span>50.0%</span></div></td><td class=\"num\"><div class=\"pct-bar\"><div class=\"pct-fill\" style=\"width:50.0%;background:rgb(30,100,255)\"></div><span>50.0%</span></div></td><td class=\"\"><span class=\"class-dot\" style=\"background:rgb(30,100,255)\"></span>IO:DataFileRead</td></tr></tbody></table>",
+    "rows": 1,
+    "error_cards": 0,
+    "retry_buttons": 0,
+    "empty_placeholder": false,
+    "revision": "master",
+    "case": "production-cpu",
+    "replayed_response": {
+      "id": 6,
+      "fidelity": "exact",
+      "rows": [
+        {
+          "pid": 1000,
+          "db_time_ms": 300000,
+          "cpu_pct": 50,
+          "wait_pct": 50,
+          "top_wait": "IO:DataFileRead",
+          "top_wait_id": 167772181,
+          "type": "client",
+          "user": "u",
+          "db": "d"
+        }
+      ]
+    },
+    "sessions_requests": [
+      {
+        "id": 7,
+        "cmd": "top_sessions",
+        "from": 1773999100000000000,
+        "to": 1774000000000000000,
+        "filters": {}
+      }
+    ]
+  },
+  {
+    "text": "No data for selected range",
+    "html": "<div class=\"loading\">No data for selected range</div>",
+    "rows": 0,
+    "error_cards": 0,
+    "retry_buttons": 0,
+    "empty_placeholder": true,
+    "revision": "master",
+    "case": "production-invalid-class",
+    "replayed_response": {
+      "id": 8,
+      "fidelity": "exact",
+      "rows": []
+    },
+    "sessions_requests": [
+      {
+        "id": 7,
+        "cmd": "top_sessions",
+        "from": 1773999100000000000,
+        "to": 1774000000000000000,
+        "filters": {}
+      }
+    ]
+  },
+  {
+    "text": "No data for selected range",
+    "html": "<div class=\"loading\">No data for selected range</div>",
+    "rows": 0,
+    "error_cards": 0,
+    "retry_buttons": 0,
+    "empty_placeholder": true,
+    "revision": "master",
+    "case": "production-empty-window",
+    "replayed_response": {
+      "id": 10,
+      "fidelity": "none",
+      "rows": []
+    },
+    "sessions_requests": [
+      {
+        "id": 7,
+        "cmd": "top_sessions",
+        "from": 1773999100000000000,
+        "to": 1774000000000000000,
+        "filters": {}
+      }
+    ]
+  },
+  {
+    "text": "No data for selected range",
+    "html": "<div class=\"loading\">No data for selected range</div>",
+    "rows": 0,
+    "error_cards": 0,
+    "retry_buttons": 0,
+    "empty_placeholder": true,
+    "revision": "master",
+    "case": "forced-summary-class",
+    "replayed_response": {
+      "id": 3,
+      "fidelity": "exact",
+      "rows": []
+    },
+    "sessions_requests": [
+      {
+        "id": 7,
+        "cmd": "top_sessions",
+        "from": 1773999100000000000,
+        "to": 1774000000000000000,
+        "filters": {}
+      }
+    ]
+  },
+  {
+    "text": "PIDBackendUserDatabaseDB TimeCPU%Wait%Top Wait1000clientud150.0s0.0%100.0%IO:DataFileRead",
+    "html": "<table><thead><tr><th class=\"\" data-sort=\"pid\">PID</th><th class=\"\" data-sort=\"type\">Backend</th><th class=\"\" data-sort=\"user\">User</th><th class=\"\" data-sort=\"db\">Database</th><th class=\"num\" data-sort=\"db_time_ms\">DB Time</th><th class=\"num\" data-sort=\"cpu_pct\">CPU%</th><th class=\"num\" data-sort=\"wait_pct\">Wait%</th><th class=\"\" data-sort=\"top_wait\">Top Wait</th></tr></thead><tbody><tr class=\"clickable\" data-row=\"0\"><td class=\"\">1000</td><td class=\"\">client</td><td class=\"\">u</td><td class=\"\">d</td><td class=\"num\">150.0s</td><td class=\"num\"><div class=\"pct-bar\"><div class=\"pct-fill\" style=\"width:0.0%;background:rgb(28,120,62)\"></div><span>0.0%</span></div></td><td class=\"num\"><div class=\"pct-bar\"><div class=\"pct-fill\" style=\"width:100.0%;background:rgb(30,100,255)\"></div><span>100.0%</span></div></td><td class=\"\"><span class=\"class-dot\" style=\"background:rgb(30,100,255)\"></span>IO:DataFileRead</td></tr></tbody></table>",
+    "rows": 1,
+    "error_cards": 0,
+    "retry_buttons": 0,
+    "empty_placeholder": false,
+    "revision": "d231d18",
+    "case": "production-class",
+    "replayed_response": {
+      "id": 3,
+      "fidelity": "exact",
+      "rows": [
+        {
+          "pid": 1000,
+          "db_time_ms": 150000,
+          "cpu_pct": 0,
+          "wait_pct": 100,
+          "top_wait": "IO:DataFileRead",
+          "top_wait_id": 167772181,
+          "type": "client",
+          "user": "u",
+          "db": "d"
+        }
+      ]
+    },
+    "sessions_requests": [
+      {
+        "id": 7,
+        "cmd": "top_sessions",
+        "from": 1773999100000000000,
+        "to": 1774000000000000000,
+        "filters": {}
+      }
+    ]
+  },
+  {
+    "text": "PIDBackendUserDatabaseDB TimeCPU%Wait%Top Wait1000clientud150.0s100.0%0.0%CPU*",
+    "html": "<table><thead><tr><th class=\"\" data-sort=\"pid\">PID</th><th class=\"\" data-sort=\"type\">Backend</th><th class=\"\" data-sort=\"user\">User</th><th class=\"\" data-sort=\"db\">Database</th><th class=\"num\" data-sort=\"db_time_ms\">DB Time</th><th class=\"num\" data-sort=\"cpu_pct\">CPU%</th><th class=\"num\" data-sort=\"wait_pct\">Wait%</th><th class=\"\" data-sort=\"top_wait\">Top Wait</th></tr></thead><tbody><tr class=\"clickable\" data-row=\"0\"><td class=\"\">1000</td><td class=\"\">client</td><td class=\"\">u</td><td class=\"\">d</td><td class=\"num\">150.0s</td><td class=\"num\"><div class=\"pct-bar\"><div class=\"pct-fill\" style=\"width:100.0%;background:rgb(28,120,62)\"></div><span>100.0%</span></div></td><td class=\"num\"><div class=\"pct-bar\"><div class=\"pct-fill\" style=\"width:0.0%;background:rgb(28,120,62)\"></div><span>0.0%</span></div></td><td class=\"\"><span class=\"class-dot\" style=\"background:rgb(28,120,62)\"></span>CPU*</td></tr></tbody></table>",
+    "rows": 1,
+    "error_cards": 0,
+    "retry_buttons": 0,
+    "empty_placeholder": false,
+    "revision": "d231d18",
+    "case": "production-cpu",
+    "replayed_response": {
+      "id": 6,
+      "fidelity": "exact",
+      "rows": [
+        {
+          "pid": 1000,
+          "db_time_ms": 150000,
+          "cpu_pct": 100,
+          "wait_pct": 0,
+          "top_wait": "CPU*",
+          "top_wait_id": 0,
+          "type": "client",
+          "user": "u",
+          "db": "d"
+        }
+      ]
+    },
+    "sessions_requests": [
+      {
+        "id": 7,
+        "cmd": "top_sessions",
+        "from": 1773999100000000000,
+        "to": 1774000000000000000,
+        "filters": {}
+      }
+    ]
+  },
+  {
+    "text": "No data for selected range",
+    "html": "<div class=\"loading\">No data for selected range</div>",
+    "rows": 0,
+    "error_cards": 0,
+    "retry_buttons": 0,
+    "empty_placeholder": true,
+    "revision": "d231d18",
+    "case": "production-invalid-class",
+    "replayed_response": {
+      "id": 8,
+      "fidelity": "exact",
+      "rows": []
+    },
+    "sessions_requests": [
+      {
+        "id": 7,
+        "cmd": "top_sessions",
+        "from": 1773999100000000000,
+        "to": 1774000000000000000,
+        "filters": {}
+      }
+    ]
+  },
+  {
+    "text": "No data for selected range",
+    "html": "<div class=\"loading\">No data for selected range</div>",
+    "rows": 0,
+    "error_cards": 0,
+    "retry_buttons": 0,
+    "empty_placeholder": true,
+    "revision": "d231d18",
+    "case": "production-empty-window",
+    "replayed_response": {
+      "id": 10,
+      "fidelity": "none",
+      "rows": []
+    },
+    "sessions_requests": [
+      {
+        "id": 7,
+        "cmd": "top_sessions",
+        "from": 1773999100000000000,
+        "to": 1774000000000000000,
+        "filters": {}
+      }
+    ]
+  },
+  {
+    "text": "\u26a0 top sessions compute failedview: sessions \u00b7 command: top_sessions \u00b7 code: compute_failednarrow the time range and retryRetry",
+    "html": "<div class=\"pane-error\"><div class=\"pane-error-title\">\u26a0 top sessions compute failed</div><div class=\"pane-error-detail\">view: sessions \u00b7 command: top_sessions \u00b7 code: compute_failed</div><div class=\"pane-error-hint\">narrow the time range and retry</div><button class=\"pane-error-retry\">Retry</button></div>",
+    "rows": 0,
+    "error_cards": 1,
+    "retry_buttons": 1,
+    "empty_placeholder": false,
+    "revision": "d231d18",
+    "case": "forced-summary-class",
+    "replayed_response": {
+      "id": 3,
+      "error": "top sessions compute failed",
+      "code": "compute_failed",
+      "hint": "narrow the time range and retry",
+      "fidelity": "exact"
+    },
+    "sessions_requests": [
+      {
+        "id": 7,
+        "cmd": "top_sessions",
+        "from": 1773999100000000000,
+        "to": 1774000000000000000,
+        "filters": {}
+      }
+    ]
+  }
+]

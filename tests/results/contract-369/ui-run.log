@@ -1,0 +1,10 @@
+master production-class {'rows': 1, 'error_cards': 0, 'empty_placeholder': False}
+master production-cpu {'rows': 1, 'error_cards': 0, 'empty_placeholder': False}
+master production-invalid-class {'rows': 0, 'error_cards': 0, 'empty_placeholder': True}
+master production-empty-window {'rows': 0, 'error_cards': 0, 'empty_placeholder': True}
+master forced-summary-class {'rows': 0, 'error_cards': 0, 'empty_placeholder': True}
+d231d18 production-class {'rows': 1, 'error_cards': 0, 'empty_placeholder': False}
+d231d18 production-cpu {'rows': 1, 'error_cards': 0, 'empty_placeholder': False}
+d231d18 production-invalid-class {'rows': 0, 'error_cards': 0, 'empty_placeholder': True}
+d231d18 production-empty-window {'rows': 0, 'error_cards': 0, 'empty_placeholder': True}
+d231d18 forced-summary-class {'rows': 0, 'error_cards': 1, 'empty_placeholder': False}

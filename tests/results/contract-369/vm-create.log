@@ -1,0 +1,20 @@
+  Resolving --image-snapshot latest (label pgwt=gate-snapshot) ...
+  Resolved image id: 433799516
+=== Creating Hetzner VM ===
+  Name:       pgwt-contract-369-20261013
+  Type:       cx33
+  Image:      433799516
+  Locations:  fsn1 nbg1 hel1
+  Cloud-init: /private/tmp/claude-501/-Users-dmitryfomin-work-git-pg-wait-tracer/258d73f0-4867-4c95-9aca-9a7966648e2b/wt-369test/tests/cloud-init-ubuntu-minimal.yaml
+  SSH key ID: 130098089
+  Trying location: fsn1 ...
+
+  Server ID: 170030058
+  Server IP: 2.28.132.229
+
+  Waiting for SSH ...
+  SSH ready!
+  Waiting for cloud-init ...
+    cloud-init: running (attempt 1/30)
+  Cloud-init done!
+  Refreshing root's own localhost/127.0.0.1 known_hosts (issue #174) ...

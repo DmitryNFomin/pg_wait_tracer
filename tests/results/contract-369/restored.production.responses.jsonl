@@ -1,0 +1,15 @@
+{"id":1,"from_ns":10001000000000,"to_ns":10300000000000,"num_events":4096,"num_cpus":4,"server_version":"6a5154ff0601179c50aa85b1711fabbcfeb8630d","protocol":1,"now_ns":1791873984218979693}
+{"id":2,"fidelity":"exact","rows":[{"pid":1000,"db_time_ms":300000,"cpu_pct":50,"wait_pct":50,"top_wait":"IO:DataFileRead","top_wait_id":167772181,"type":"client","user":"u","db":"d"}]}
+{"id":3,"fidelity":"exact","rows":[{"pid":1000,"db_time_ms":150000,"cpu_pct":0,"wait_pct":100,"top_wait":"IO:DataFileRead","top_wait_id":167772181,"type":"client","user":"u","db":"d"}]}
+{"id":4,"fidelity":"exact","rows":[{"pid":1000,"db_time_ms":150000,"cpu_pct":0,"wait_pct":100,"top_wait":"IO:DataFileRead","top_wait_id":167772181,"type":"client","user":"u","db":"d"}]}
+{"id":5,"fidelity":"exact","rows":[{"pid":1000,"db_time_ms":300000,"cpu_pct":50,"wait_pct":50,"top_wait":"IO:DataFileRead","top_wait_id":167772181,"type":"client","user":"u","db":"d"}]}
+{"id":6,"fidelity":"exact","rows":[{"pid":1000,"db_time_ms":150000,"cpu_pct":100,"wait_pct":0,"top_wait":"CPU*","top_wait_id":0,"type":"client","user":"u","db":"d"}]}
+{"id":7,"fidelity":"exact","rows":[{"pid":1000,"db_time_ms":300000,"cpu_pct":50,"wait_pct":50,"top_wait":"IO:DataFileRead","top_wait_id":167772181,"type":"client","user":"u","db":"d"}]}
+{"id":8,"fidelity":"exact","rows":[]}
+{"id":9,"fidelity":"none","rows":[]}
+{"id":10,"fidelity":"none","rows":[]}
+{"id":11,"fidelity":"none","rows":[]}
+{"id":12,"fidelity":"none","rows":[]}
+{"id":13,"fidelity":"none","rows":[]}
+{"id":14,"fidelity":"none","rows":[]}
+{"id":15,"fidelity":"none","rows":[]}

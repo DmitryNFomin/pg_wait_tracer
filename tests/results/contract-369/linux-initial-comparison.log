@@ -1,0 +1,11 @@
+LOCK_ACQUIRED
+170030058
+Building master
+Building d231d18
+Traceback (most recent call last):
+  File "/root/pgwt-contract-369-20261013/experiment_369.py", line 222, in <module>
+    main()
+  File "/root/pgwt-contract-369-20261013/experiment_369.py", line 181, in main
+    assert measured == clean, 'instrumentation changed the JSON'
+           ^^^^^^^^^^^^^^^^^
+AssertionError: instrumentation changed the JSON

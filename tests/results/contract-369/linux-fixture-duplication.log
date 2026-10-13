@@ -1,0 +1,11 @@
+LOCK_ACQUIRED
+170030058
+Building master
+Building d231d18
+Traceback (most recent call last):
+  File "/root/pgwt-contract-369-20261013/experiment_369.py", line 225, in <module>
+    main()
+  File "/root/pgwt-contract-369-20261013/experiment_369.py", line 189, in main
+    assert sum(r['db_time_ms'] for r in clean[2]['rows']) == 150000
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AssertionError

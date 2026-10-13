@@ -1,0 +1,70 @@
+LOCK_ACQUIRED
+170030058
+Building master
+Building d231d18
+{
+  "master": {
+    "revision": "8a52a510e47c8592fd2315b99e8094258c83fe0c",
+    "routes": {
+      "control": "summary",
+      "class": "raw",
+      "event": "raw",
+      "query": "raw",
+      "cpu": "summary",
+      "pid": "raw",
+      "invalid-class": "raw"
+    },
+    "empty_window_routes": {
+      "control": "summary",
+      "class": "raw",
+      "event": "raw",
+      "query": "raw",
+      "cpu": "summary",
+      "pid": "raw",
+      "invalid-class": "raw"
+    },
+    "cpu_work_ms": [
+      21,
+      21
+    ],
+    "execution_counts": [
+      3,
+      3,
+      3
+    ],
+    "pinned_exit": 0,
+    "instrumented_json_matches_unmodified": true
+  },
+  "d231d18": {
+    "revision": "d231d189da237d0b51e2e13301a9524e315b678a",
+    "routes": {
+      "control": "summary",
+      "class": "raw",
+      "event": "raw",
+      "query": "raw",
+      "cpu": "raw",
+      "pid": "raw",
+      "invalid-class": "raw"
+    },
+    "empty_window_routes": {
+      "control": "summary",
+      "class": "raw",
+      "event": "raw",
+      "query": "raw",
+      "cpu": "raw",
+      "pid": "raw",
+      "invalid-class": "raw"
+    },
+    "cpu_work_ms": [
+      21,
+      3
+    ],
+    "execution_counts": [
+      3,
+      1,
+      1
+    ],
+    "pinned_exit": 1,
+    "instrumented_json_matches_unmodified": true
+  }
+}

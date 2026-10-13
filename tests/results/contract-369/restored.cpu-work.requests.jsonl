@@ -1,0 +1,2 @@
+{"id": 1, "cmd": "time_model", "filters": {}}
+{"id": 2, "cmd": "time_model", "filters": {"event_id": 0}}

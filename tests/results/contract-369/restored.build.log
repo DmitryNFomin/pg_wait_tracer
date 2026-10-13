@@ -1,0 +1,18 @@
+  CC       build/server_server.o (server)
+  CC       build/server_compute.o (server)
+  CC       build/server_block_agg.o (server)
+  CC       build/server_event_reader.o (server)
+  CC       build/server_event_writer.o (server)
+  CC       build/server_summary_writer.o (server)
+  CC       build/server_summary_reader.o (server)
+  CC       build/server_wait_event.o (server)
+  CC       build/server_idle_rule.o (server)
+  CC       build/server_spawn.o (server)
+  CC       build/server_cmdline.o (server)
+  CC       build/server_backend_meta.o (server)
+  CC       build/server_cJSON.o (server)
+  LINK     pgwt-server
+  DONE     pgwt-server
+make: Entering directory '/root/pgwt-contract-369-20261013/restored/tests'
+cc -g -O2 -Wall -I../src -I../include -DPGWT_SERVER -o gen_test_traces gen_test_traces.c ../build/server_event_writer.o ../build/server_summary_writer.o ../build/server_wait_event.o ../build/server_idle_rule.o ../build/server_spawn.o ../build/server_cJSON.o -llz4
+make: Leaving directory '/root/pgwt-contract-369-20261013/restored/tests'

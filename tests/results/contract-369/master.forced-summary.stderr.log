@@ -1,0 +1,10 @@
+pgwt-server: no usable wait_event_names.json in /root/pgwt-contract-369-20261013/evidence/long.trace-dir -- falling back to the PG18 tables recorded in the trace header. Names are this build's static tables, not the ones the trace was written with.
+pgwt-server: 1 trace files, 4 CPUs, ~4096 events
+pgwt-server: loaded 1 query texts
+pgwt-server: loaded 1 backend metadata entries
+CONTRACT_ROUTE forced-summary
+CONTRACT_RESULT failed=0 num_rows=0 rows_null=1
+CONTRACT_ROUTE forced-summary
+CONTRACT_RESULT failed=0 num_rows=0 rows_null=1
+CONTRACT_ROUTE forced-summary
+CONTRACT_RESULT failed=0 num_rows=0 rows_null=1

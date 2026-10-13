@@ -1,0 +1,124 @@
+=== test_probe_bounds (#327, #347) ===
+fixtures: sessions 1025 (cap 1024), queries 2049 (cap 2048), variants 4097 (cap 4096)
+
+1. pgwt_compute_top_sessions: 1025 distinct pids (cap was 1024)
+  ok: top sessions did not fail
+  ok: every distinct pid got a row (1025)
+  ok: summed DB time accounts for every pid's waits (1577475.000000 ms)
+  ok: the 1025th distinct pid is present
+  ok: ...with its own exact DB time (3075.000000 ms)
+
+2. pgwt_compute_top_sessions_from_summaries: 1025 pids over 2 records of <= 1024 (the per-second cap is NOT a window bound)
+  ok: the visitor saw BOTH records (positive control: the stub delivered) (2)
+  ok: summary top sessions did not fail
+  ok: every pid across the two records got a row (1025)
+  ok: summed DB time accounts for both records (525832.000000 ms)
+  ok: the 1025th pid — which arrived in the SECOND record — is present
+  ok: ...with its own exact DB time (1025.000000 ms)
+  ok: pid seen in both records is present once
+  ok: ...with its two records SUMMED, not replaced (8.000000 ms)
+
+3. pgwt_compute_top_queries: 2049 distinct query ids (cap was 2048)
+  ok: top queries did not fail
+  ok: every distinct query id got a row (2049)
+  ok: db_time_ms accounts for every query id (6300675.000000 ms)
+  ok: the 2049th distinct query id is present
+  ok: ...with its exact observation count (3)
+  ok: ...and its exact total (6147.000000 ms)
+
+4. pgwt_compute_top_queries_from_summaries: 2049 query ids over 2 records of <= 2048
+  ok: the visitor saw BOTH records (positive control: the stub delivered) (2)
+  ok: summary top queries did not fail
+  ok: every query id across the two records got a row (2049)
+  ok: db_time_ms accounts for both records (2100225.000000 ms)
+  ok: the 2049th query id — in the SECOND record — is present
+  ok: ...with its exact total (2049.000000 ms)
+
+5a. pgwt_compute_fingerprints: 2049 distinct query ids (cap was 2048)
+  ok: fingerprints did not fail
+  ok: every distinct query id got a row (2049)
+  ok: every transition is accounted for exactly once (6147)
+  ok: the 2049th query id is present
+  ok: ...with its own transition count (3)
+
+5b. pgwt_compute_variants: 4097 distinct flow patterns (cap was 4096)
+  ok: variants did not fail
+  ok: every execution was walked (4097)
+  ok: every distinct pattern got its own variant row (4097)
+  ok: the variant rows account for every execution (4097)
+
+6.1 #347's shape where it is REAL: a zero-duration event used to donate its transitions to the next query id
+  ok: found two query ids colliding in the pre-fix table
+      qa=1 qb=326 both hash to slot 1509
+  ok: fingerprints did not fail
+  ok: both query ids have their own row (2)
+  ok: the zero-duration query id is present, not absorbed
+  ok: the colliding query id is present
+  ok: zero-duration id keeps its OWN single transition (1)
+  ok: colliding id reports 2, not the inherited 3 (2)
+
+6.2 #347's shape in top sessions: pid 0 used to donate its DB time to the next pid that probed to slot 0
+  ok: top sessions did not fail
+  ok: pid 0 and pid 1024 each have a row (2)
+  ok: pid 0 is a key like any other, not a free sentinel
+  ok: pid 0 keeps its own 5 ms (5.000000 ms)
+  ok: pid 1024 is present
+  ok: pid 1024 reports 1 ms, not the inherited 6 ms (1.000000 ms)
+
+6.3 #347's NAMED site (AAS per-event, compute.c:638) is immune — the proposed one-line guard is a no-op
+  ok: the two ids share a home slot (1)
+  ok: two distinct event series (2)
+  ok: both ids kept their own series
+  ok: the zero-duration id's series holds exactly its own 2 ms
+  ok: the colliding id's series holds exactly its own 1 ms, not 3 ms
+
+7.1 a fixture AT the cap cannot see the defect (pinned blind)
+  ok: `num_rows > 0` holds for BOTH — a blind assertion shape
+  ok: a spot-checked row is IDENTICAL in both — also blind
+  ok: the cap-sized answer is unchanged by the fix (1024)
+  ok: the exact-count assertion this file uses DOES separate them
+  ok: ...and so does the summed total
+  ok: the cap-sized total is exactly the pre-fix value (1574400.000000 ms)
+
+7.2 identical durations: no per-row assertion can see a dropped key
+  ok: with equal durations EVERY row is 3 ms — a per-row check passes whatever got dropped, which is why sections 1-5 use distinct ones
+  ok: the count assertion still separates them (1025)
+
+7.3 a summary stream that delivers NOTHING must read as empty, never as success
+  ok: no records: empty, not failed, and NOT mistakable for cap+1 rows
+  ok: ...and the control reports 0 records seen (0)
+  ok: same for top queries from summaries
+
+7.4 a PARTIAL record range must not reach cap+1 — the overflow assertion depends on both records arriving
+  ok: one record delivered (1)
+  ok: one record yields exactly the cap, never cap+1 (1024)
+
+7.5 key 0 and a dense consecutive key run (probe clustering)
+  ok: 1500 consecutive pids including 0 all present (1500)
+  ok: 1500 consecutive query ids all present (1500)
+  ok: 1500 consecutive query ids: fingerprint rows (1500)
+
+7.6 allocation failure at every new growth point: ABSENT, never short-but-complete
+  ok: sessions: sessions_entries failure sets failed=1 and yields no rows
+  ok: sessions: pid_index_grow failure sets failed=1 and yields no rows
+  ok: queries: queries_entries failure sets failed=1 and yields no rows
+  ok: queries: qid_index_grow failure sets failed=1 and yields no rows
+  ok: fingerprints: fingerprint_entries failure sets failed=1, no rows
+  ok: variants: variant_entries failure sets failed=1, no variant list
+  ok: summary sessions: ts_summary_entries failure sets failed=1, no rows
+  ok: summary queries: tq_summary_entries failure sets failed=1, no rows
+  ok: unknown injection point: sessions still complete
+  ok: unknown injection point: queries still complete
+  ok: unknown injection point: fingerprints still complete
+  ok: unknown injection point: variants still complete
+  ok: unknown injection point: summary sessions still complete
+  ok: unknown injection point: summary queries still complete
+
+7.7 the thing being checked is ABSENT rather than wrong
+  ok: no events: sessions empty, not failed
+  ok: no events: queries empty, not failed
+  ok: no events: fingerprints empty, not failed
+  ok: no events: variants empty, not failed
+  ok: a class filter the summary records cannot honour yields NO rows (#318 refusal still intact)
+
+=== 87 checks, 0 failures ===

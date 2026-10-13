@@ -1,0 +1,26 @@
+LOCK_ACQUIRED
+170030058
+Building master
+Traceback (most recent call last):
+  File "/root/pgwt-contract-369-20261013/experiment_369.py", line 218, in <module>
+    main()
+  File "/root/pgwt-contract-369-20261013/experiment_369.py", line 122, in main
+    buildlog += run(['make', '-C', 'tests', '-j2', 'gen_test_traces',
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/pgwt-contract-369-20261013/experiment_369.py", line 89, in run
+    raise RuntimeError(f"{cmd}: {p.returncode}\n{p.stdout}\n{p.stderr}")
+RuntimeError: ['make', '-C', 'tests', '-j2', 'gen_test_traces', 'test_probe_bounds']: 2
+make: Entering directory '/root/pgwt-contract-369-20261013/master/tests'
+cc -g -O2 -Wall -I../src -I../include -DPGWT_SERVER -o gen_test_traces gen_test_traces.c ../build/server_event_writer.o ../build/server_summary_writer.o ../build/server_wait_event.o ../build/server_idle_rule.o ../build/server_spawn.o ../build/server_cJSON.o -llz4
+make: Leaving directory '/root/pgwt-contract-369-20261013/master/tests'
+
+make: *** No rule to make target '../build/wait_event.o', needed by 'test_probe_bounds'.  Stop.
+make: *** Waiting for unfinished jobs....
+gen_test_traces.c: In function ‘rotate_output’:
+gen_test_traces.c:601:5: warning: implicit declaration of function ‘unlink’ [-Wimplicit-function-declaration]
+  601 |     unlink(oldp);
+      |     ^~~~~~
+gen_test_traces.c: In function ‘read_file’:
+gen_test_traces.c:348:5: warning: ignoring return value of ‘fread’ declared with attribute ‘warn_unused_result’ [-Wunused-result]
+  348 |     fread(buf, 1, sz, f);
+      |     ^~~~~~~~~~~~~~~~~~~~

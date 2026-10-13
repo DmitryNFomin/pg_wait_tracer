@@ -1,0 +1,15 @@
+{"id": 1, "cmd": "info"}
+{"id": 2, "cmd": "top_sessions", "from": 9990000000000, "to": 10310000000000, "filters": {}}
+{"id": 3, "cmd": "top_sessions", "from": 9990000000000, "to": 10310000000000, "filters": {"class": "IO"}}
+{"id": 4, "cmd": "top_sessions", "from": 9990000000000, "to": 10310000000000, "filters": {"event_id": 167772181}}
+{"id": 5, "cmd": "top_sessions", "from": 9990000000000, "to": 10310000000000, "filters": {"query_id": "100"}}
+{"id": 6, "cmd": "top_sessions", "from": 9990000000000, "to": 10310000000000, "filters": {"event_id": 0}}
+{"id": 7, "cmd": "top_sessions", "from": 9990000000000, "to": 10310000000000, "filters": {"pid": 1000}}
+{"id": 8, "cmd": "top_sessions", "from": 9990000000000, "to": 10310000000000, "filters": {"class": "NotAClass"}}
+{"id": 9, "cmd": "top_sessions", "from": 11300000000000, "to": 11500000000000, "filters": {}}
+{"id": 10, "cmd": "top_sessions", "from": 11300000000000, "to": 11500000000000, "filters": {"class": "IO"}}
+{"id": 11, "cmd": "top_sessions", "from": 11300000000000, "to": 11500000000000, "filters": {"event_id": 167772181}}
+{"id": 12, "cmd": "top_sessions", "from": 11300000000000, "to": 11500000000000, "filters": {"query_id": "100"}}
+{"id": 13, "cmd": "top_sessions", "from": 11300000000000, "to": 11500000000000, "filters": {"event_id": 0}}
+{"id": 14, "cmd": "top_sessions", "from": 11300000000000, "to": 11500000000000, "filters": {"pid": 1000}}
+{"id": 15, "cmd": "top_sessions", "from": 11300000000000, "to": 11500000000000, "filters": {"class": "NotAClass"}}
