@@ -243,6 +243,8 @@ test_agg_raw_crosscheck
 # tests/results/block-agg-event-class/run_mutations.py records 23 RED mutants,
 # including four ORACLE mutations, and refuses missing compilers or anchors.
 test_block_agg
+# #355: all owned aggregate table capacities must count toward cache admission.
+test_bagg_cache
 # #294: cross_validate drops pgwt_is_idle_event() time from BOTH sides before
 # any share is computed, so when the sampled tier reads less CPU than the exact
 # tier the missing nanoseconds have no visible destination -- "it became

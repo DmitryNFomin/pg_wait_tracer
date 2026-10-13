@@ -4928,9 +4928,11 @@ static void handle_exec_scatter(struct pgwt_server *srv,
 
 static size_t bagg_entry_bytes(const struct pgwt_block_agg *a)
 {
+    /* Charge every owned table's allocated capacity, including empty slots. */
     return (size_t)a->pair_cap * sizeof(*a->pairs) +
            (size_t)a->node_cap * sizeof(*a->nodes) +
-           (size_t)a->key_cap * sizeof(*a->keys);
+           (size_t)a->key_cap * sizeof(*a->keys) +
+           (size_t)a->ev_cap * sizeof(*a->events);
 }
 
 static uint32_t bagg_key_hash(uint64_t start_time_ns, uint32_t block_index)

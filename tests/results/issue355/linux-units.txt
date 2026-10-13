@@ -1,0 +1,47 @@
+PASS test_wait_event
+PASS test_cmdline
+PASS test_spawn
+PASS test_bucket
+PASS test_event_writer
+PASS test_event_reader
+PASS test_trace_v2
+PASS test_sampler
+PASS test_anomaly
+PASS test_escalation_budget
+PASS test_exact_probe
+PASS test_effective_cores
+PASS test_backend_status_layout
+PASS test_synthetic_query
+PASS test_pgss_resolver
+PASS test_coop
+PASS test_concurrent_rw
+PASS test_durability
+PASS test_query_text
+PASS test_golden_fixture
+PASS test_live_accum
+PASS test_window_clip
+PASS test_executions_attribution
+PASS test_top_queries_percentile
+PASS test_variants_p95
+PASS test_pid_cap
+PASS test_probe_bounds
+PASS test_concurrency_bounds
+PASS test_wait_cpu_canary
+PASS test_pg13_resolve
+PASS test_discovery_pie
+PASS test_discovery_nopie
+PASS test_replay_fidelity
+PASS test_hetzner_sweep.sh
+PASS test_summary_tick_flush
+PASS test_idle_accounting
+PASS test_idle_summary
+PASS test_agg_raw_crosscheck
+PASS test_block_agg
+PASS test_bagg_cache
+PASS test_cross_validate_idle.sh
+PASS test_exec_index
+PASS test_interval_index
+C unit suite: 43 passed, 0 failed
+4096 records, 8 events, 64 slots/table: pairs+nodes=3072, events=11264, total=14336 bytes
+4096 records, 45 events, 128 slots/table: pairs+nodes=6144, events=22528, total=28672 bytes
+PASS: test_bagg_cache (0 failures)

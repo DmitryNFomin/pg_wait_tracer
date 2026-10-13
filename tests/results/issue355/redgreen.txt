@@ -1,0 +1,17 @@
+FAIL test_bagg_cache.c:126: all four capacities must be charged even with zero live rows
+FAIL test_bagg_cache.c:67: 8-event block: expected 14336 bytes, got 3072 (events: 11264)
+FAIL test_bagg_cache.c:83: budget exceeded by one byte must refuse, keeping caller ownership
+FAIL test_bagg_cache.c:85: refusal must leave byte counter unchanged
+FAIL test_bagg_cache.c:96: admission must charge every allocated byte: got 67097600
+FAIL test_bagg_cache.c:67: 45-event block: expected 28672 bytes, got 6144 (events: 22528)
+FAIL test_bagg_cache.c:83: budget exceeded by one byte must refuse, keeping caller ownership
+FAIL test_bagg_cache.c:85: refusal must leave byte counter unchanged
+FAIL test_bagg_cache.c:96: admission must charge every allocated byte: got 67086336
+4096 records, 8 events, 64 slots/table: pairs+nodes=3072, events=11264, total=14336 bytes
+4096 records, 45 events, 128 slots/table: pairs+nodes=6144, events=22528, total=28672 bytes
+FAIL: test_bagg_cache (9 failures)
+Dropped event-capacity term: exit 1 (required: 1)
+4096 records, 8 events, 64 slots/table: pairs+nodes=3072, events=11264, total=14336 bytes
+4096 records, 45 events, 128 slots/table: pairs+nodes=6144, events=22528, total=28672 bytes
+PASS: test_bagg_cache (0 failures)
+Restored event-capacity term: exit 0
