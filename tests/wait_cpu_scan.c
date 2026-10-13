@@ -23,13 +23,32 @@
  *           a record census that disagrees with the server's own total, an
  *           unresolvable wait-event name, no measured wait records at all,
  *           or no external total supplied to check against)
- *   exit 3  CROSSING: a pure-sleep record carries cpu_ns >= threshold
+ *   exit 3  CROSSING: a pure-sleep record satisfies the §3 signature
  *   exit 4  UNMEASURED: coverage fine, but a requested pure-sleep class has
  *           no events, or none with measured CPU. Unmeasured is never clean.
+ *
+ * THE SIGNATURE IS A CONJUNCTION (docs/DEMO_REHEARSAL_CRITERIA.md §3, as
+ * restated by 256ec82): flag a record only when BOTH
+ *     cpu_ns >= --threshold-ns   AND   cpu_ns/duration_ns >= --min-ratio-pct
+ * hold. Absolute-only (what this tool enforced when it was first written)
+ * fires on the Oct-2 capture's benign 3.004 s PgSleep carrying 923,834 ns at
+ * 0.031% of its own duration — a long sleep, not a stale wait label — which
+ * is exactly the false positive the doc's restatement cites, and is why the
+ * first committed run of this tool reported CROSSING on a capture the doc
+ * calls clean. Ratio-only would fire on a 0.159 ms advisory-lock acquisition
+ * at 33.148%. Neither half alone is the test.
+ * The absolute-only count is still reported per class
+ * (`over_threshold_abs_only`) so the looser number stays visible; it has no
+ * effect on the verdict. duration_ns == 0 with measured cpu_ns > 0 has an
+ * undefined (infinite) ratio and is treated as satisfying the ratio half:
+ * CPU inside a wait of no duration is never evidence of cleanliness.
  *
  * Usage:
  *   wait_cpu_scan --trace-dir DIR --threshold-ns N
  *                 --expect-transitions N --expect-samples N
+ *                 [--min-ratio-pct 50]  (§3's second half; >100 is refused —
+ *                                        an unreachable bar is a disabled
+ *                                        check, not a strict one)
  *                 [--pure-sleep "Timeout:PgSleep,Lock:relation,Lock:advisory"]
  *                 [--output FILE] [--max-crossings N]
  *                 [--no-expect-check]   (always refuses; for the bypass tests)
@@ -38,6 +57,7 @@
 #include "wait_event.h"
 
 #include <inttypes.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -71,7 +91,8 @@ struct key_stats {
     uint64_t sum_cpu;        /* measured records only */
     double   sum_ratio;      /* Σ per-event cpu/dur, measured & dur>0 */
     uint64_t ratio_n;
-    uint64_t over_threshold;
+    uint64_t over_threshold;         /* the §3 CONJUNCTION: abs AND ratio */
+    uint64_t over_threshold_abs;     /* absolute half alone (reported only) */
     struct ident max_cpu;
     struct ident max_ratio;
     double   max_ratio_val;
@@ -160,6 +181,9 @@ int main(int argc, char **argv)
     const char *trace_dir = NULL, *out_path = NULL;
     const char *pure_sleep = "Timeout:PgSleep,Lock:relation,Lock:advisory";
     uint64_t threshold = 0;
+    /* §3's second half. Default is the doc's own 50%; not a tunable knob for
+     * a run that wants a quieter answer -- see the refusal below. */
+    double min_ratio_pct = 50.0;
     long long expect_transitions = -1, expect_samples = -1;
     int no_expect_check = 0, max_crossings = 64;
 
@@ -169,6 +193,15 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--pure-sleep") && i + 1 < argc) pure_sleep = argv[++i];
         else if (!strcmp(argv[i], "--threshold-ns") && i + 1 < argc)
             threshold = strtoull(argv[++i], NULL, 10);
+        else if (!strcmp(argv[i], "--min-ratio-pct") && i + 1 < argc) {
+            char *end = NULL;
+            const char *raw = argv[++i];
+            min_ratio_pct = strtod(raw, &end);
+            if (end == raw || *end) {      /* unparseable: never a default */
+                fprintf(stderr, "--min-ratio-pct: cannot parse %s\n", raw);
+                return 2;
+            }
+        }
         else if (!strcmp(argv[i], "--expect-transitions") && i + 1 < argc)
             expect_transitions = strtoll(argv[++i], NULL, 10);
         else if (!strcmp(argv[i], "--expect-samples") && i + 1 < argc)
@@ -191,6 +224,14 @@ int main(int argc, char **argv)
         if (num_refusals < 16) \
             snprintf(refusals[num_refusals++], 128, __VA_ARGS__); \
     } while (0)
+
+    /* A ratio bar outside [0,100] cannot be met by a record whose cpu_ns is
+     * at most its duration, so the conjunction could never fire: the check
+     * would be DISABLED while still printing a verdict. NaN fails this test
+     * too (every comparison with NaN is false), which is the point -- an
+     * unparseable-but-numeric-looking bar is refused, never defaulted. */
+    if (!(min_ratio_pct >= 0.0 && min_ratio_pct <= 100.0))
+        REFUSE("min_ratio_unreachable:%g", min_ratio_pct);
 
     struct pgwt_trace_file_entry files[MAX_FILES];
     int num_files = pgwt_scan_trace_files(trace_dir, files, MAX_FILES);
@@ -310,7 +351,18 @@ int main(int argc, char **argv)
                         k->max_ratio = id;
                     }
                 }
-                if (e->cpu_ns >= threshold) {
+                /* docs/DEMO_REHEARSAL_CRITERIA.md §3: BOTH halves, or it is
+                 * not the over-attribution signature. Integer-scaled
+                 * comparison (cpu*100 >= pct*dur) so no division happens and
+                 * duration_ns == 0 cannot produce a NaN that silently clears
+                 * the record -- that case is handled explicitly. */
+                int over_abs = e->cpu_ns >= threshold;
+                int ratio_met = e->duration_ns
+                    ? (double)e->cpu_ns * 100.0
+                          >= min_ratio_pct * (double)e->duration_ns
+                    : e->cpu_ns > 0;
+                if (over_abs) k->over_threshold_abs++;
+                if (over_abs && ratio_met) {
                     k->over_threshold++;
                     if (num_crossings < max_crossings) crossings[num_crossings++] = id;
                 }
@@ -372,9 +424,14 @@ int main(int argc, char **argv)
 
     uint64_t total_crossings = 0;
     uint64_t sleep_crossings = 0;
+    uint64_t total_abs_only = 0, sleep_abs_only = 0;
     for (int i = 0; i < num_keys; i++) {
         total_crossings += keys[i].over_threshold;
-        if (keys[i].pure_sleep) sleep_crossings += keys[i].over_threshold;
+        total_abs_only += keys[i].over_threshold_abs;
+        if (keys[i].pure_sleep) {
+            sleep_crossings += keys[i].over_threshold;
+            sleep_abs_only += keys[i].over_threshold_abs;
+        }
     }
 
     const char *verdict;
@@ -392,6 +449,15 @@ int main(int argc, char **argv)
     fprintf(f, "{\n  \"verdict\":\"%s\",\n  \"exit_code\":%d,\n", verdict, rc);
     fprintf(f, "  \"trace_dir\":\"%s\",\n  \"threshold_ns\":%" PRIu64 ",\n",
             trace_dir, threshold);
+    /* A non-finite bar is refused above; it must not be printed as a bare
+     * `nan`, which is not JSON -- a consumer that cannot parse the refusal
+     * learns nothing from it. Null plus the refusal string keeps it legible. */
+    if (isfinite(min_ratio_pct))
+        fprintf(f, "  \"min_ratio_pct\":%.6f,\n", min_ratio_pct);
+    else
+        fprintf(f, "  \"min_ratio_pct\":null,\n");
+    fprintf(f, "  \"signature\":\"cpu_ns >= threshold_ns AND "
+               "cpu_ns/duration_ns >= min_ratio_pct (both required)\",\n");
     fprintf(f, "  \"pure_sleep_requested\":\"%s\",\n", pure_sleep);
     fprintf(f, "  \"names_major\":%d,\n  \"header_major\":%d,\n",
             names_major, header_major);
@@ -422,6 +488,11 @@ int main(int argc, char **argv)
 
     fprintf(f, "  \"pure_sleep_crossings\":%" PRIu64 ",\n", sleep_crossings);
     fprintf(f, "  \"all_class_crossings\":%" PRIu64 ",\n", total_crossings);
+    /* The absolute-only counts: what this tool used to call a crossing.
+     * Reported so the looser number is never lost, but the verdict above is
+     * the conjunction's. */
+    fprintf(f, "  \"pure_sleep_abs_only_crossings\":%" PRIu64 ",\n", sleep_abs_only);
+    fprintf(f, "  \"all_class_abs_only_crossings\":%" PRIu64 ",\n", total_abs_only);
     fprintf(f, "  \"crossing_events\":[");
     for (int i = 0; i < num_crossings; i++) {
         fprintf(f, "%s{", i ? "," : "");
@@ -444,7 +515,8 @@ int main(int argc, char **argv)
                    "\"median_cpu_ns\":%" PRIu64 ",\"p95_cpu_ns\":%" PRIu64 ","
                    "\"p99_cpu_ns\":%" PRIu64 ",\"mean_cpu_over_dur\":%.9f,"
                    "\"max_cpu_over_dur\":%.9f,\"agg_cpu_over_dur\":%.9f,"
-                   "\"over_threshold\":%" PRIu64 ",",
+                   "\"over_threshold\":%" PRIu64 ","
+                   "\"over_threshold_abs_only\":%" PRIu64 ",",
                 k->name, k->event_id, k->pure_sleep ? "true" : "false",
                 k->count, k->measured, k->unknown, k->zero_dur,
                 k->sum_dur, k->sum_cpu, mean_cpu,
@@ -452,7 +524,7 @@ int main(int argc, char **argv)
                 pct(k->cpu, k->n_cpu, 50), pct(k->cpu, k->n_cpu, 95),
                 pct(k->cpu, k->n_cpu, 99), mean_ratio,
                 k->ratio_n ? k->max_ratio_val : 0.0, agg_ratio,
-                k->over_threshold);
+                k->over_threshold, k->over_threshold_abs);
         json_ident(f, "max_cpu_event", &k->max_cpu);
         fprintf(f, ",");
         json_ident(f, "max_ratio_event", &k->max_ratio);
@@ -463,9 +535,11 @@ int main(int argc, char **argv)
 
     fprintf(stderr, "wait_cpu_scan: %s (exit %d) — records=%" PRIu64
                     " waits=%" PRIu64 " blocks=%d/%d refusals=%d"
-                    " sleep_crossings=%" PRIu64 " unmeasured=%d\n",
+                    " sleep_crossings=%" PRIu64 " (abs-only %" PRIu64 ")"
+                    " unmeasured=%d\n",
             verdict, rc, records_walked, wait_records, blocks_decoded,
-            blocks_total, num_refusals, sleep_crossings, num_unmeasured);
+            blocks_total, num_refusals, sleep_crossings, sleep_abs_only,
+            num_unmeasured);
     for (int i = 0; i < num_keys; i++) free(keys[i].cpu);
     return rc;
 }

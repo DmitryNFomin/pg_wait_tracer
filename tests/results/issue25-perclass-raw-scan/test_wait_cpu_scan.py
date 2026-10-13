@@ -14,6 +14,16 @@ reporting a clean verdict:
   at all, and the census dependency being unavailable (`pgwt-server --dump`
   exiting 126/127) so the completeness check cannot run.
 
+Added with the §3 CONJUNCTION (cpu_ns >= threshold AND ratio >= min-ratio):
+a ratio bar that no record can reach (150%, and `nan`, which parses as a
+double and makes every comparison false) must REFUSE rather than print CLEAN
+from a check that cannot fire; an unparseable bar must not fall back to the
+default; a record whose duration_ns is 0 has no ratio and must not be cleared
+by the new half; and the planted true positive is re-asserted afterwards so
+the refusals cannot be hiding a dead detector. The two false-positive cases
+the doc names (high absolute at 0.031% ratio; 33.1% ratio at 52,661 ns) are
+asserted CLEAN -- a detector that fires on everything is also unusable.
+
 Run:  python3 tests/results/issue25-perclass-raw-scan/test_wait_cpu_scan.py
 Env:  SCAN_BIN / FIXTURE_BIN override the binaries (used to drive mutants of
       the scanner and show each assertion red).
@@ -94,9 +104,11 @@ def main():
                   for c in data["classes"]) if data else False,
               "per-class max cpu_ns missing")
 
-        # --- true positive: a planted millisecond-scale sleep CPU ------------
+        # --- true positive: a stale wait label books most of a 2 ms sleep's
+        # wall time as CPU -- 1.2 ms of 2 ms = 60%, so BOTH halves of the §3
+        # signature hold (criteria doc: cpu_ns >= 824,430 AND ratio >= 50%).
         d, n = fixture(tmp, f"{PGSLEEP}:4:3000000000:30000,"
-                            f"{PGSLEEP}:1:3000000000:1200000,"
+                            f"{PGSLEEP}:1:2000000:1200000,"
                             f"{RELATION}:4:200000000:25000")
         rc, data = scan(d, expect_transitions=n)
         ids = [c["event"]["cpu_ns"] for c in data["crossing_events"]] if data else []
@@ -105,8 +117,88 @@ def main():
         check("crossing_carries_full_identity",
               bool(data) and data["crossing_events"]
               and data["crossing_events"][0]["event"]["pid"] > 0
-              and data["crossing_events"][0]["event"]["duration_ns"] == 3000000000,
+              and data["crossing_events"][0]["event"]["duration_ns"] == 2000000,
               "identity incomplete")
+
+        # --- the signature is a CONJUNCTION, not either half ----------------
+        # Absolute-only (what this tool enforced before) flags the Oct-2
+        # capture's real benign event: a 3.004 s PgSleep carrying 923,834 ns,
+        # 0.031% of its own duration. The doc calls that clean and names it as
+        # the false positive the restatement exists to prevent.
+        d, n = fixture(tmp, f"{PGSLEEP}:1:3004000000:923834,"
+                            f"{RELATION}:4:200000000:25000")
+        rc, data = scan(d, expect_transitions=n)
+        check("benign_long_sleep_is_not_a_crossing",
+              rc == 0 and bool(data) and data["verdict"] == "CLEAN"
+              and data["pure_sleep_crossings"] == 0,
+              f"rc={rc} verdict={data and data['verdict']} "
+              f"crossings={data and data['pure_sleep_crossings']}")
+        check("absolute_only_count_stays_visible",
+              bool(data) and data.get("pure_sleep_abs_only_crossings") == 1
+              and any(c["name"] == "Timeout:PgSleep"
+                      and c.get("over_threshold_abs_only") == 1
+                      and c["over_threshold"] == 0 for c in data["classes"]),
+              f"abs-only={data and data.get('pure_sleep_abs_only_crossings')}")
+        check("signature_is_declared_in_the_output",
+              bool(data) and data.get("min_ratio_pct") == 50.0
+              and "AND" in data.get("signature", ""),
+              f"min_ratio_pct={data and data.get('min_ratio_pct')}")
+
+        # The other half alone: a 0.159 ms advisory-style acquisition at
+        # 33.1% ratio but only 52,661 ns absolute -- real, tiny, not a stuck
+        # CPU clock. Ratio-only would fire here.
+        d, n = fixture(tmp, f"{PGSLEEP}:5:3000000000:30000,"
+                            f"{RELATION}:1:159000:52661")
+        rc, data = scan(d, expect_transitions=n)
+        check("ratio_without_absolute_is_not_a_crossing",
+              rc == 0 and bool(data) and data["pure_sleep_crossings"] == 0
+              and any(c["name"] == "Lock:relation"
+                      and c["max_cpu_over_dur"] > 0.33 for c in data["classes"]),
+              f"rc={rc} data={data and data['pure_sleep_crossings']}")
+
+        # --- bypass: ratio UNDEFINED (duration_ns == 0) ---------------------
+        # cpu_ns inside a wait of no duration has no ratio. Dividing would
+        # give NaN and NaN >= x is false, which would CLEAR the record: the
+        # conjunction's one chance to lose a detection it previously had.
+        d, n = fixture(tmp, f"{PGSLEEP}:1:0:1200000,"
+                            f"{RELATION}:4:200000000:25000")
+        rc, data = scan(d, expect_transitions=n)
+        check("zero_duration_cpu_is_not_cleared_by_the_ratio_half",
+              rc == 3 and bool(data) and data["verdict"] == "CROSSING"
+              and data["pure_sleep_crossings"] == 1,
+              f"rc={rc} verdict={data and data['verdict']} "
+              f"crossings={data and data.get('pure_sleep_crossings')}")
+
+        # --- bypass: an UNREACHABLE ratio bar disables the conjunction ------
+        # cpu_ns/duration_ns >= 150% can only be met by a record whose CPU
+        # exceeds its own duration, so a run with this bar is a check that
+        # cannot fire. It must refuse, not print CLEAN.
+        d, n = fixture(tmp, f"{PGSLEEP}:1:2000000:1200000,"
+                            f"{RELATION}:4:200000000:25000")
+        rc, data = scan(d, "--min-ratio-pct", "150", expect_transitions=n)
+        check("unreachable_min_ratio_refuses",
+              rc == 2 and bool(data)
+              and any(r.startswith("min_ratio_unreachable")
+                      for r in data["refusals"]),
+              f"rc={rc} refusals={data and data['refusals']}")
+        # "nan" parses as a double and makes EVERY comparison false -- the
+        # same disabled check wearing a numeric costume.
+        rc, data = scan(d, "--min-ratio-pct", "nan", expect_transitions=n)
+        check("nan_min_ratio_refuses",
+              rc == 2 and bool(data)
+              and any(r.startswith("min_ratio_unreachable")
+                      for r in data["refusals"]),
+              f"rc={rc} refusals={data and data['refusals']}")
+        # An unparseable bar must not fall back to the default and report a
+        # verdict as though the requested bar had been honoured.
+        rc, data = scan(d, "--min-ratio-pct", "fifty", expect_transitions=n)
+        check("unparseable_min_ratio_refuses", rc == 2 and data is None,
+              f"rc={rc} data={data}")
+        # And the planted crossing above must STILL be found at the default
+        # bar, so the three refusals are not hiding a dead detector.
+        rc, data = scan(d, expect_transitions=n)
+        check("detection_survives_the_refusal_cases", rc == 3,
+              f"rc={rc} verdict={data and data['verdict']}")
 
         # --- bypass 1: empty input ------------------------------------------
         empty = tempfile.mkdtemp(dir=tmp)
