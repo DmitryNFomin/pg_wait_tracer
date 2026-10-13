@@ -173,6 +173,15 @@ test_unit_list_coverage.py
 # pure sleep, cpu_ns > duration_ns) and every way it could be satisfied
 # without looking at anything.
 test_wait_cpu_canary
+# Criteria item 2.5's raw per-class wait-CPU scan (tests/wait_cpu_scan.c) and
+# its 29-case bypass suite. Registered here after review found the suite
+# parked under tests/results/, where neither this list nor the registration
+# guard could see it -- an instrument no runner builds is one nobody notices
+# rotting, and this one's mutant anchor had already gone stale once. The tool
+# and its fixture generator are built by tests/Makefile (wait_cpu_scan,
+# wait_cpu_fixture); the suite REFUSES with exit 1 if either is missing
+# rather than passing vacuously.
+test_wait_cpu_scan.py
 test_pg13_resolve
 test_discovery_pie
 test_discovery_nopie

@@ -29,7 +29,7 @@ LIST = os.path.join(TEST_DIR, "unit_tests.list")
 
 # Built by tests/Makefile but deliberately not standalone unit tests: trace
 # generators and helper tools other tests invoke.
-NOT_A_UNIT_TEST_PREFIX = ("gen_", "dump_", "cross_", "wait_cpu_canary")
+NOT_A_UNIT_TEST_PREFIX = ("gen_", "dump_", "cross_", "wait_cpu_")
 
 
 def parse_make_tests(text):

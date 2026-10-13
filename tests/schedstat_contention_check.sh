@@ -22,6 +22,22 @@
 # happens (it is a global sysctl, and leaving it flipped on a shared box
 # would change every later measurement taken there).
 #
+# CONCURRENCY: kernel.sched_schedstats is GLOBAL, so two runs on one box --
+# this script and a rehearsal, or two rehearsals -- can have the first
+# teardown reset it under the second. The consequence is refusals, never
+# wrong data (tests/schedstat_lib.py requires the sysctl to have been 1 for
+# the WHOLE window and refuses otherwise), so the fail-safe holds; but take
+# /tmp/pgwt-box-check.lock around this script on a shared box, as the run
+# recorded below did, rather than relying on that.
+#
+# NOT WIRED INTO A RUNNER, deliberately: it needs root, a global sysctl flip
+# and a quiet box. It is a one-shot instrument, re-run by hand whenever
+# schedstat_probe.py's enumeration or field parsing changes.
+# RECORDED RUN: tests/results/schedstat_contention/ (2026-10-13, pgwt-gate-2,
+# nproc=4) -- refusal at schedstats=0, 0.0 ms idle, 111,775.654 ms contended,
+# 111,776x. See that directory's VERDICT.txt for what it does and does not
+# establish.
+#
 # Usage (as root, on a Linux box):
 #   tests/schedstat_contention_check.sh [SECONDS_PER_LEG] [OUT_DIR]
 set -uo pipefail

@@ -24,7 +24,7 @@ the refusals cannot be hiding a dead detector. The two false-positive cases
 the doc names (high absolute at 0.031% ratio; 33.1% ratio at 52,661 ns) are
 asserted CLEAN -- a detector that fires on everything is also unusable.
 
-Run:  python3 tests/results/issue25-perclass-raw-scan/test_wait_cpu_scan.py
+Run:  python3 tests/test_wait_cpu_scan.py   (registered in tests/unit_tests.list)
 Env:  SCAN_BIN / FIXTURE_BIN override the binaries (used to drive mutants of
       the scanner and show each assertion red).
 """
@@ -35,11 +35,28 @@ import subprocess
 import sys
 import tempfile
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.abspath(os.path.join(HERE, "..", "..", ".."))
-SCAN = os.environ.get("SCAN_BIN", os.path.join(HERE, "bin", "wait_cpu_scan"))
-FIXTURE = os.environ.get("FIXTURE_BIN", os.path.join(HERE, "bin", "make_fixture"))
+HERE = os.path.dirname(os.path.abspath(__file__))          # tests/
+ROOT = os.path.abspath(os.path.join(HERE, ".."))
+EVIDENCE = os.path.join(HERE, "results", "issue25-perclass-raw-scan")
+# Built by tests/Makefile (`make -C tests`, which tests/run_all.sh runs before
+# the unit list) -- the same tool+test shape as wait_cpu_canary. SCAN_BIN /
+# FIXTURE_BIN override them, which is how show_red.py drives mutants.
+SCAN = os.environ.get("SCAN_BIN", os.path.join(HERE, "wait_cpu_scan"))
+FIXTURE = os.environ.get("FIXTURE_BIN", os.path.join(HERE, "wait_cpu_fixture"))
 THRESHOLD = "824430"
+
+
+def _require_binaries():
+    """A suite that cannot see its own subject must refuse, not pass. Missing
+    binaries would otherwise surface as a FileNotFoundError traceback from the
+    first fixture call, or -- worse, if a future case guarded that -- as a
+    skip."""
+    missing = [p for p in (SCAN, FIXTURE) if not os.access(p, os.X_OK)]
+    if missing:
+        print("REFUSED: not built: " + ", ".join(missing), file=sys.stderr)
+        print("Build them with: make -C tests wait_cpu_scan wait_cpu_fixture",
+              file=sys.stderr)
+        sys.exit(1)
 
 PGSLEEP = 150994946        # (0x09 << 24) | 2   Timeout:PgSleep
 RELATION = 50331648        # (0x03 << 24) | 0   Lock:relation
@@ -90,6 +107,7 @@ def scan(trace_dir, *extra, expect_transitions=None, expect_samples=0,
 
 
 def main():
+    _require_binaries()
     tmp = tempfile.mkdtemp(prefix="wait_cpu_scan_tests_")
     try:
         # --- control: the CLEAN verdict has to be reachable at all, else every
@@ -324,7 +342,7 @@ def main():
             binsdir = os.path.join(fake, "bin")
             os.makedirs(binsdir)
             shutil.copy(SCAN, os.path.join(binsdir, "wait_cpu_scan"))
-            shutil.copy(FIXTURE, os.path.join(binsdir, "make_fixture"))
+            shutil.copy(FIXTURE, os.path.join(binsdir, "wait_cpu_fixture"))
             if mode == "nonexec":
                 with open(os.path.join(binsdir, "pgwt-server"), "w") as f:
                     f.write("#!/bin/sh\nexit 0\n")
@@ -332,7 +350,7 @@ def main():
             trace, _ = fixture(tmp, f"{PGSLEEP}:5:3000000000:30000,"
                                     f"{RELATION}:4:200000000:25000")
             proc = subprocess.run(
-                ["bash", os.path.join(HERE, "run_evidence.sh"), trace,
+                ["bash", os.path.join(EVIDENCE, "run_evidence.sh"), trace,
                  os.path.join(fake, "out")],
                 capture_output=True, text=True,
                 env={**os.environ, "PGWT_SCAN_BIN_DIR": binsdir,

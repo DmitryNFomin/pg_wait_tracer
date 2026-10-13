@@ -39,6 +39,7 @@ TESTS     = test_wait_event test_cmdline test_backend_lifecycle test_spawn test_
             test_alloc_tune \
             gen_test_traces gen_bench_traces test_concurrent_rw cross_validate \
             dump_markers wait_cpu_canary test_wait_cpu_canary \
+            wait_cpu_scan wait_cpu_fixture \
             test_summary_tick_flush \
             test_block_agg bench_block_agg test_transitions_loader
 
@@ -453,6 +454,26 @@ test_wait_cpu_canary: test_wait_cpu_canary.c wait_cpu_canary.c \
 	      $(BUILD)/server_wait_event.o $(BUILD)/server_idle_rule.o $(BUILD)/server_compute.o \
 	      $(BUILD)/server_summary_reader.o $(BUILD)/server_summary_writer.o \
 	      $(BUILD)/server_spawn.o $(BUILD)/server_cJSON.o -llz4 -lz
+
+# wait_cpu_scan / wait_cpu_fixture: criteria item 2.5's per-class wait-CPU
+# scan over a FULL raw walk of a trace dir, and the synthetic-trace generator
+# its bypass suite drives it with. Same tool+test shape as wait_cpu_canary
+# above: both are helpers invoked by test_wait_cpu_scan.py (in
+# unit_tests.list), so test_unit_list_coverage.py exempts them by the
+# `wait_cpu_` prefix rather than demanding they be listed as tests.
+# Registered here deliberately: an instrument nothing builds is an
+# instrument nothing notices rotting -- this one's mutant anchor already
+# went stale once (M6, fixed in show_red.py) between two commits.
+wait_cpu_scan: wait_cpu_scan.c $(BUILD)/server_event_reader.o \
+               $(BUILD)/server_event_writer.o \
+               $(BUILD)/server_wait_event.o $(BUILD)/server_idle_rule.o \
+               $(BUILD)/server_cJSON.o $(BUILD)/server_spawn.o
+	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -llz4 -lz -lm
+
+wait_cpu_fixture: wait_cpu_fixture.c $(BUILD)/server_event_writer.o \
+                  $(BUILD)/server_wait_event.o $(BUILD)/server_idle_rule.o \
+                  $(BUILD)/server_cJSON.o $(BUILD)/server_spawn.o
+	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -llz4 -lz -lm
 
 # dump_markers: A5 helper — decode escalation-window markers (reason + length)
 # from a trace dir. Used by the live anomaly test to prove an ANOMALY-reason

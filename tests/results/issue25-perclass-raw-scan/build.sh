@@ -36,10 +36,10 @@ cc "${CFLAGS[@]}" "${EXTRA[@]}" \
    -lz -llz4 -lm -o "$OUT/wait_cpu_scan"
 
 cc "${CFLAGS[@]}" "${EXTRA[@]}" \
-   "$ROOT/tests/results/issue25-perclass-raw-scan/make_fixture.c" \
+   "$ROOT/tests/wait_cpu_fixture.c" \
    "$ROOT/src/event_writer.c" "$ROOT/src/wait_event.c" \
    "$ROOT/src/idle_rule.c" "$ROOT/src/cJSON.c" "$TMP_BUILD/proc_stub.c" \
-   -lz -llz4 -lm -o "$OUT/make_fixture"
+   -lz -llz4 -lm -o "$OUT/wait_cpu_fixture"
 
 # The replay server: only used to produce the independent event census the
 # scanner is checked against.
@@ -52,4 +52,4 @@ cc -O2 -g -Wall -Wextra -Wno-unused-parameter -DPGWT_SERVER \
    -include "$ROOT/demos/replay-compat.h" -I"$ROOT/src" \
    "${EXTRA[@]}" "${FILES[@]}" "$TMP_BUILD/proc_stub.c" \
    -lz -llz4 -lm -o "$OUT/pgwt-server"
-echo "built: $OUT/wait_cpu_scan $OUT/make_fixture $OUT/pgwt-server"
+echo "built: $OUT/wait_cpu_scan $OUT/wait_cpu_fixture $OUT/pgwt-server"

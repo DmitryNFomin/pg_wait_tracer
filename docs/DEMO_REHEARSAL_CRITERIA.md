@@ -637,7 +637,22 @@ implementation, so it cannot separate a defect from a change of mix.
   every window records an explicit **refusal** instead of a 0 —
   a 0 there would credit the whole residual to "unexplained" with no
   evidence at all (`tests/schedstat_lib.py`, bypass suite in
-  `tests/test_schedstat_lib.py`).
+  `tests/test_schedstat_lib.py`). That sysctl is **global**, so two runs on
+  one box can reset it under each other; the result is refusals, not wrong
+  numbers, and the lock is the remedy.
+  **Second blind spot, now closed by measurement:** those refusal paths
+  detect *blindness*, never a counter that is readable but **stuck** — a
+  wrong field offset or a wrong backend enumeration would produce a
+  plausible Σ`run_delay` with no refusal at all. So the reading's
+  responsiveness was measured directly, once, on gate-2
+  (`tests/schedstat_contention_check.sh`, artifacts and verdict in
+  `tests/results/schedstat_contention/`, 2026-10-13, nproc=4, 10 s per leg):
+  schedstats=0 **refused** (rc=2, `run_delay_ms` null, not 0 ms); four
+  sleeping children read **0.0 ms**; sixteen spinning children on four vCPUs
+  read **111,775.654 ms** — a **111,776×** spread no stuck counter can
+  produce. This establishes responsiveness and sign, **not accuracy against
+  an independent oracle**, which is a further reason the decomposition stays
+  reporting-only and no bound on the unexplained remainder is registered.
 
 - **Off-CPU\* is reported, not gated (replacement for #386, 2026-10-13).**
   `evaluate_time_model_window` now retains an `offcpu` diagnostic containing

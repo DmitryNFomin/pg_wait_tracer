@@ -135,9 +135,11 @@ def main():
             overall = 1
             continue
         run = subprocess.run(
-            [sys.executable, os.path.join(HERE, "test_wait_cpu_scan.py")],
+            [sys.executable, os.path.join(ROOT, "tests", "test_wait_cpu_scan.py")],
             capture_output=True, text=True,
-            env={**os.environ, "SCAN_BIN": os.path.join(tmp, "wait_cpu_scan")})
+            env={**os.environ, "SCAN_BIN": os.path.join(tmp, "wait_cpu_scan"),
+                 "FIXTURE_BIN": os.environ.get(
+                     "FIXTURE_BIN", os.path.join(HERE, "bin", "wait_cpu_fixture"))})
         log = os.path.join(RED, f"{name}.log")
         with open(log, "w") as f:
             f.write(f"$ SCAN_BIN=<mutant {name}> python3 test_wait_cpu_scan.py\n")
