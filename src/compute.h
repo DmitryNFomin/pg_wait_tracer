@@ -172,7 +172,8 @@ pgwt_fidelity_unavailable(enum pgwt_required_fidelity req, enum pgwt_fidelity fi
 
 struct pgwt_filter {
     char     class_name[32];   /* "" = no filter */
-    uint32_t event_id;         /* 0 = no filter */
+    uint32_t event_id;         /* 0 = CPU; meaningful when has_event_filter */
+    int      has_event_filter; /* explicit event filter, including CPU */
     uint32_t pid;              /* 0 = no filter */
     uint64_t query_id;         /* 0 = no filter */
 };
