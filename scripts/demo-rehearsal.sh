@@ -524,12 +524,48 @@ EOF
 
     echo "demo-rehearsal: $target  DURATION_MIN=$DURATION_MIN PG=$PG RETAIN_TRACE=$RETAIN_TRACE TAG=${TAG:-(none)} -> $remote_dir  (log: $log)"
     ssh -o BatchMode=yes $ssh_strict "$target" "mkdir -p '$remote_dir'" || exit 1
+    # macOS junk that cannot be a source file, excluded from the up-rsync so it
+    # never reaches the box. Motivation: tests/live_daemon_lib.sh's served-asset
+    # guard compares the bridge's embedded asset list against the web/static tree
+    # and refuses on ANY difference, applying no exclusion rules of its own (an
+    # earlier version replicated Go's //go:embed rules and that replica caused
+    # three silent passes). So a stray .DS_Store created under web/static by the
+    # Finder on this Mac is rsynced to the box and aborts the live run there --
+    # costing a counted demo-rehearsal slot for a file Go would never have
+    # embedded.
+    #
+    # Each pattern is a name macOS RESERVES; none can be a legitimate repo file,
+    # and that was checked rather than assumed (no path in `git ls-files`, 1193
+    # files, matches any of them):
+    #   .DS_Store        Finder per-directory view metadata
+    #   ._*              AppleDouble sidecars written beside real files on
+    #                    filesystems without native resource-fork support
+    #   .Spotlight-V100  Spotlight index directory
+    #   .Trashes         per-volume trash directory
+    #   .fseventsd       FSEvents journal directory
+    #   .AppleDouble     AppleDouble metadata directory
+    # Deliberately NOT broad (no *.swp, no .*, no *~): a pattern that matched a
+    # real file would silently shrink what the box tests, which is the same
+    # failure class the served-asset guard exists to prevent, one layer further
+    # out.
+    # An ARRAY, with every pattern quoted: an unquoted string expansion would be
+    # glob-expanded by the shell, so `._*` could be replaced by a matching
+    # filename in the current directory before rsync ever saw the pattern.
+    junk_excludes=(
+        --exclude '.DS_Store'
+        --exclude '._*'
+        --exclude '.Spotlight-V100'
+        --exclude '.Trashes'
+        --exclude '.fseventsd'
+        --exclude '.AppleDouble'
+    )
     rsync -az --delete -e "ssh $ssh_strict" \
         --exclude .git --exclude /build \
         --exclude '/pgwt-server' --exclude '/pgwt-server-asan' \
         --exclude '/pg_wait_tracer' --exclude '/pg_wait_tracer-asan' \
         --exclude 'tests/results' --exclude 'web/pgwt' --exclude '__pycache__' \
         --exclude '.pgwt-check.stamp' \
+        "${junk_excludes[@]}" \
         ./ "$target:$remote_dir/" || exit 1
 
     # ── PG-version gate: refuse LOUDLY here, before the long capture ever
