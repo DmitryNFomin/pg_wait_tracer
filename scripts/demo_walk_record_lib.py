@@ -7,6 +7,9 @@ from pathlib import Path
 from PIL import Image, ImageChops
 
 GIF_LIMIT = 10_000_000  # Deliberately decimal MB, strictly less than this.
+GIF_MIN_SECONDS = 4
+MOTION_LEVEL = 24  # Ignore JPEG/quantization noise below this luminance delta.
+MOTION_FLOOR = 0.001  # At least 0.1% of the output canvas must visibly change.
 
 
 class Refusal(Exception):
@@ -47,6 +50,10 @@ def sample_indices(frames, definition):
         j = bisect.bisect_left(times, at, lo, hi + 1)
         candidates = [i for i in (j - 1, j) if lo <= i <= hi]
         out.append(min(candidates, key=lambda i: abs(times[i] - at)))
+    # Inclusive cuts must retain the final recorded state, even when the last
+    # regular sampling instant falls just before a live update.
+    if out:
+        out[-1] = hi
     return out
 
 
@@ -79,8 +86,34 @@ def compose(image, crop, width):
     return result
 
 
+def motion_gate(pictures, name, stage):
+    def delta(a, b):
+        hist = ImageChops.difference(a.convert("RGB"), b.convert("RGB")).convert("L").histogram()
+        return sum(hist[MOTION_LEVEL:]) / (a.width * a.height)
+    endpoint = delta(pictures[0], pictures[-1])
+    consecutive = [delta(a, b) for a, b in zip(pictures, pictures[1:])]
+    for pair, value in [("first/last", endpoint)] + [
+            (f"consecutive {n}/{n+1}", value) for n, value in enumerate(consecutive)]:
+        if value < MOTION_FLOOR:
+            raise Refusal(8, f"{name}: motion gate ({stage}, {pair}): "
+                          f"{value:.6%} changed pixels, need >= {MOTION_FLOOR:.3%} "
+                          f"at luminance delta >= {MOTION_LEVEL}")
+    return {"first_last_changed_fraction": endpoint,
+            "minimum_consecutive_changed_fraction": min(consecutive),
+            "consecutive_changed_fractions": consecutive,
+            "pixel_fraction_floor": MOTION_FLOOR, "luminance_delta_floor": MOTION_LEVEL}
+
+
 def write_gif(root, frames, definition):
+    if not 8 <= definition["fps"] <= 12:
+        raise Refusal(6, "GIF fps must be between 8 and 12")
     indices = sample_indices(frames, definition)
+    span = frames[definition["end_frame"]]["timestamp_s"] - frames[definition["start_frame"]]["timestamp_s"]
+    minimum = max(math.ceil(GIF_MIN_SECONDS * definition["fps"]),
+                  math.ceil(span * definition["fps"]))
+    if len(indices) < minimum:
+        raise Refusal(7, f"{definition['path']}: frame count gate: {len(indices)} sampled frames, "
+                      f"need {minimum} for >= {GIF_MIN_SECONDS}s at {definition['fps']} fps")
     keyframes = definition.get("crop_keyframes", [])
     pictures = []
     for i in indices:
@@ -96,11 +129,14 @@ def write_gif(root, frames, definition):
     for n in range(min(8, len(pictures))):
         palette_source.paste(pictures[n*(len(pictures)-1)//max(1,min(8,len(pictures))-1)], (0, n*height))
     palette = palette_source.quantize(colors=256)
-    quantized = []
+    canvases = []
     for picture in pictures:
         canvas = Image.new("RGB", (definition["width"], height), (30, 30, 58))
         canvas.paste(picture, (0, 0))
-        quantized.append(canvas.quantize(palette=palette, dither=Image.Dither.NONE))
+        canvases.append(canvas)
+    source_motion = motion_gate(canvases, definition["path"], "sampled crop")
+    quantized = [canvas.quantize(palette=palette, dither=Image.Dither.NONE) for canvas in canvases]
+    palette_motion = motion_gate(quantized, definition["path"], "palette")
     path = root / definition["path"]
     if path.parent != root or path.suffix != ".gif":
         raise Refusal(6, "GIF path must be a .gif filename within the run")
@@ -110,13 +146,25 @@ def write_gif(root, frames, definition):
     size = path.stat().st_size
     if size >= GIF_LIMIT:
         raise Refusal(6, f"{path.name}: {size} bytes exceeds strict <10 MB limit")
-    with Image.open(path) as check:
-        if check.n_frames < 2:
-            raise Refusal(6, f"{path.name}: no visible animation")
-        for n in range(check.n_frames):
-            check.seek(n); check.load()
+    try:
+        with Image.open(path) as check:
+            if check.n_frames < minimum:
+                raise Refusal(7, f"{path.name}: frame count gate after encoding: "
+                              f"{check.n_frames} decoded frames, need {minimum}")
+            decoded, durations = [], []
+            for n in range(check.n_frames):
+                check.seek(n); check.load()
+                decoded.append(check.convert("RGB"))
+                durations.append(check.info["duration"])
+        decoded_motion = motion_gate(decoded, path.name, "decoded GIF")
+    except Exception:
+        path.unlink()
+        raise
     definition.update(bytes=size, sampled_frame_indices=indices,
-                      rendered_size=[definition["width"], height])
+                      rendered_size=[definition["width"], height], source_span_s=span,
+                      minimum_frame_count=minimum, decoded_frame_count=len(decoded),
+                      playback_span_s=sum(durations)/1000, encoded_fps=1000/durations[0],
+                      motion={"sampled":source_motion,"palette":palette_motion,"decoded":decoded_motion})
 
 
 def chart_change(root, frames, indices, rectangle):
