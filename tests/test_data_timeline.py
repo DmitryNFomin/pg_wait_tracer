@@ -25,8 +25,10 @@ WINDOW_END = BASE_TS + 900_000 * MS
 
 
 def build_many_pids(n):
-    # These collide in the former 1024-slot hash. Two interleaved passes
-    # exercise both lookup and pending-state preservation across growth.
+    # PIDs spaced by 1024 collide in both the former hash and the current
+    # low-bit hash, clustering into a few home slots even as it grows and
+    # forcing O(n^2) probing. Two interleaved passes exercise lookup and
+    # pending-state preservation across growth.
     pids = [1000 + i * 1024 for i in range(n)]
     events = []
     for round_, event in enumerate((IO_DATA_FILE_READ, LOCK_RELATION)):

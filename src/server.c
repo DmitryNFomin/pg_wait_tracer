@@ -4236,6 +4236,9 @@ static void handle_session_timeline(struct pgwt_server *srv, struct pgwt_request
 
         /* O(1) PID index lookup */
         int pidx = pgwt_pid_index_find(&pid_ix, ev->pid);
+        /* Unreachable by construction: both passes use the same filters.
+         * A silently dropped bar is preferable to a corrupted heap. */
+        if (pidx < 0) continue;
 
         int cls = pgwt_wait_class_index(ev->old_event);
 
@@ -4283,10 +4286,6 @@ static void handle_session_timeline(struct pgwt_server *srv, struct pgwt_request
 allocation_failed:
     free(pending);
     pgwt_pid_index_free(&pid_ix);
-    /* Refuse the whole result: poison counts AND flag the failure. Never
-     * use a negative count as a boolean success/failure test (-1 is true).
-     * No success arrays or counts have been serialized at this point. */
-    count = num_pids = total_matching = -1;
     linfo.allocation_failed = 1;
     reject_overload(srv, req, events, &linfo);
 }
