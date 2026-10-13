@@ -5259,6 +5259,26 @@ static int transitions_from_block_aggs(struct pgwt_server *srv,
     return PGWT_BAGG_OK;
 }
 
+#ifdef PGWT_TEST_BLOCK_AGGS
+/* Test-only entry point: bypass the production safety gate, never fall back
+ * to raw. Equality is only valid for fixtures whose transition inputs are
+ * unchanged by tagging (notably, no CPU-source records). This symbol is
+ * absent from production builds; bagg_window_eligible remains authoritative. */
+int pgwt_test_transitions_from_block_aggs(struct pgwt_server *srv,
+                                         uint64_t from_wall_ns,
+                                         uint64_t to_wall_ns,
+                                         struct pgwt_block_agg *out,
+                                         uint64_t *exact_in_window,
+                                         int *merged_blocks,
+                                         int *decoded_blocks)
+{
+    coverage_refresh(srv);
+    return transitions_from_block_aggs(srv, from_wall_ns, to_wall_ns, out,
+                                       exact_in_window, merged_blocks,
+                                       decoded_blocks);
+}
+#endif
+
 /* The one refusal this view can emit that is not a fidelity verdict: the node
  * or link table could not be read out (allocation failure). Refuse loudly
  * rather than ship a response with half a graph — a partial DFG is

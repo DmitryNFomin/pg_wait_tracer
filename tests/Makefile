@@ -553,7 +553,8 @@ test_block_agg: test_block_agg.c ../src/block_agg.c ../src/compute.c \
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -llz4 -lm
 
 # Exercise the actual server gate/loader/response against reader-decoded
-# block aggregates from the same two-block file (command state crosses blocks).
+# block aggregates: a CPU fixture pins the refusal across command boundaries;
+# a no-CPU three-file fixture pins exact equality and file/window boundaries.
 TRANSITIONS_LOADER_OBJS = $(addprefix $(BUILD)/server_,compute.o block_agg.o \
     event_reader.o event_writer.o summary_writer.o summary_reader.o \
     wait_event.o idle_rule.o spawn.o cmdline.o backend_meta.o cJSON.o)

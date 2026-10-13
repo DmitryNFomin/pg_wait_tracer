@@ -1,0 +1,67 @@
+GREEN baseline
+pgwt-server: no usable wait_event_names.json in /tmp/pgwt_transitions_nocpu_N0qYSM -- falling back to the PG180000 tables recorded in the trace header. Names are this build's static tables, not the ones the trace was written with.
+pgwt-server: 3 trace files, 4 CPUs, ~24576 events
+cold full: aggregate=24576 raw=24576 exact=24576 merged_blocks=0 decoded_blocks=6
+warm full: aggregate=24576 raw=24576 exact=24576 merged_blocks=6 decoded_blocks=0
+file first == to: aggregate=8193 raw=8193 exact=8193 merged_blocks=2 decoded_blocks=1
+file first > to: aggregate=8192 raw=8192 exact=8192 merged_blocks=2 decoded_blocks=0
+file first < to: aggregate=8194 raw=8194 exact=8194 merged_blocks=2 decoded_blocks=1
+file last == from: aggregate=16385 raw=16385 exact=16385 merged_blocks=4 decoded_blocks=1
+both window edges partial: aggregate=24531 raw=24531 exact=24531 merged_blocks=4 decoded_blocks=2
+block first == to: aggregate=4097 raw=4097 exact=4097 merged_blocks=1 decoded_blocks=1
+block last == from: aggregate=20481 raw=20481 exact=20481 merged_blocks=5 decoded_blocks=1
+pgwt-server: no usable wait_event_names.json in /tmp/pgwt_transitions_loader_WamphL -- falling back to the PG180000 tables recorded in the trace header. Names are this build's static tables, not the ones the trace was written with.
+pgwt-server: 1 trace files, 4 CPUs, ~8192 events
+PASS: no-CPU-source multi-file equality; 8 warm windows merged blocks
+production cold/warm: merged_blocks=0 decoded_blocks=0
+decoded CPU->ClientRead=2; tagged oracle=1; served=1; failed=0
+PASS: decoded-block candidate refused; response matches tagged loader
+RED call-site >=
+pgwt-server: no usable wait_event_names.json in /tmp/pgwt_transitions_nocpu_iXHAiA -- falling back to the PG180000 tables recorded in the trace header. Names are this build's static tables, not the ones the trace was written with.
+pgwt-server: 3 trace files, 4 CPUs, ~24576 events
+cold full: aggregate=24576 raw=24576 exact=24576 merged_blocks=0 decoded_blocks=6
+warm full: aggregate=24576 raw=24576 exact=24576 merged_blocks=6 decoded_blocks=0
+file first == to: aggregate=8192 raw=8193 exact=8192 merged_blocks=2 decoded_blocks=0
+FAIL test_transitions_loader.c:233: agg.total_transitions == oracle.total_transitions
+GREEN restored after RED call-site >=
+pgwt-server: no usable wait_event_names.json in /tmp/pgwt_transitions_nocpu_WFCyeZ -- falling back to the PG180000 tables recorded in the trace header. Names are this build's static tables, not the ones the trace was written with.
+pgwt-server: 3 trace files, 4 CPUs, ~24576 events
+cold full: aggregate=24576 raw=24576 exact=24576 merged_blocks=0 decoded_blocks=6
+warm full: aggregate=24576 raw=24576 exact=24576 merged_blocks=6 decoded_blocks=0
+file first == to: aggregate=8193 raw=8193 exact=8193 merged_blocks=2 decoded_blocks=1
+file first > to: aggregate=8192 raw=8192 exact=8192 merged_blocks=2 decoded_blocks=0
+file first < to: aggregate=8194 raw=8194 exact=8194 merged_blocks=2 decoded_blocks=1
+file last == from: aggregate=16385 raw=16385 exact=16385 merged_blocks=4 decoded_blocks=1
+both window edges partial: aggregate=24531 raw=24531 exact=24531 merged_blocks=4 decoded_blocks=2
+block first == to: aggregate=4097 raw=4097 exact=4097 merged_blocks=1 decoded_blocks=1
+block last == from: aggregate=20481 raw=20481 exact=20481 merged_blocks=5 decoded_blocks=1
+pgwt-server: no usable wait_event_names.json in /tmp/pgwt_transitions_loader_keFqu2 -- falling back to the PG180000 tables recorded in the trace header. Names are this build's static tables, not the ones the trace was written with.
+pgwt-server: 1 trace files, 4 CPUs, ~8192 events
+PASS: no-CPU-source multi-file equality; 8 warm windows merged blocks
+production cold/warm: merged_blocks=0 decoded_blocks=0
+decoded CPU->ClientRead=2; tagged oracle=1; served=1; failed=0
+PASS: decoded-block candidate refused; response matches tagged loader
+RED production refusal removed
+pgwt-server: no usable wait_event_names.json in /tmp/pgwt_transitions_nocpu_HVFUmw -- falling back to the PG180000 tables recorded in the trace header. Names are this build's static tables, not the ones the trace was written with.
+pgwt-server: 3 trace files, 4 CPUs, ~24576 events
+cold full: aggregate=24576 raw=24576 exact=24576 merged_blocks=0 decoded_blocks=6
+FAIL test_transitions_loader.c:77: cJSON_IsNumber(value) && value->valuedouble == expected
+GREEN restored after RED production refusal removed
+pgwt-server: no usable wait_event_names.json in /tmp/pgwt_transitions_nocpu_bjowhu -- falling back to the PG180000 tables recorded in the trace header. Names are this build's static tables, not the ones the trace was written with.
+pgwt-server: 3 trace files, 4 CPUs, ~24576 events
+cold full: aggregate=24576 raw=24576 exact=24576 merged_blocks=0 decoded_blocks=6
+warm full: aggregate=24576 raw=24576 exact=24576 merged_blocks=6 decoded_blocks=0
+file first == to: aggregate=8193 raw=8193 exact=8193 merged_blocks=2 decoded_blocks=1
+file first > to: aggregate=8192 raw=8192 exact=8192 merged_blocks=2 decoded_blocks=0
+file first < to: aggregate=8194 raw=8194 exact=8194 merged_blocks=2 decoded_blocks=1
+file last == from: aggregate=16385 raw=16385 exact=16385 merged_blocks=4 decoded_blocks=1
+both window edges partial: aggregate=24531 raw=24531 exact=24531 merged_blocks=4 decoded_blocks=2
+block first == to: aggregate=4097 raw=4097 exact=4097 merged_blocks=1 decoded_blocks=1
+block last == from: aggregate=20481 raw=20481 exact=20481 merged_blocks=5 decoded_blocks=1
+pgwt-server: no usable wait_event_names.json in /tmp/pgwt_transitions_loader_T68135 -- falling back to the PG180000 tables recorded in the trace header. Names are this build's static tables, not the ones the trace was written with.
+pgwt-server: 1 trace files, 4 CPUs, ~8192 events
+PASS: no-CPU-source multi-file equality; 8 warm windows merged blocks
+production cold/warm: merged_blocks=0 decoded_blocks=0
+decoded CPU->ClientRead=2; tagged oracle=1; served=1; failed=0
+PASS: decoded-block candidate refused; response matches tagged loader
+PASS: both mutations failed the intended assertions; restored source is green

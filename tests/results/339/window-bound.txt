@@ -1,0 +1,45 @@
+  PASS: unfiltered long window returns error
+  PASS: error carries the window_too_large code
+  PASS: error carries the bound
+  PASS: no partial data rendered alongside the error
+  PASS: pid-filtered query under the bound succeeds (pushdown, not post-filter)
+  PASS: pid-filtered IO time exact (2000)
+  PASS: aas: structured error, not partial data
+  PASS: top_events: structured error, not partial data
+  PASS: top_sessions: structured error, not partial data
+  PASS: top_queries: structured error, not partial data
+  PASS: heatmap: structured error, not partial data
+  PASS: session_timeline: structured error, not partial data
+  PASS: fingerprints: structured error, not partial data
+  PASS: lock_chains: structured error, not partial data
+  PASS: interference: structured error, not partial data
+  PASS: concurrency: structured error, not partial data
+  PASS: variants: structured error, not partial data
+  PASS: transitions: cold fast path refuses past the raw bound
+  PASS: transitions: cold refusal carries the raw bound
+  PASS: transitions: cold refusal carries no partial graph
+  PASS: transitions: warm fast path refuses past the raw bound
+  PASS: transitions: warm refusal carries the raw bound
+  PASS: transitions: warm refusal carries no partial graph
+  PASS: transitions: cold raw fallback answers within the bound
+  PASS: transitions: warm raw fallback answers within the bound
+  PASS: transitions: cold fast path merged no blocks
+  PASS: transitions: cold fast path decoded no blocks
+  PASS: transitions: cold raw fallback counts the full fixture
+  PASS: transitions: warm fast path merged no blocks
+  PASS: transitions: warm fast path decoded no blocks
+  PASS: transitions: warm raw fallback counts the full fixture
+  PASS: transitions: warm raw answer == cold raw answer (total)
+  PASS: transitions: warm raw answer == cold raw answer (distinct links)
+  PASS: transitions: warm raw answer == cold raw answer (every link, including duration_ms)
+  PASS: transitions: warm raw answer == cold raw answer (every node, including total_ms and order)
+  PASS: transitions: the cold answer carries at least one link, so the array comparison is not [] == [] (1)
+  PASS: transitions: the cold answer carries at least one node, so the array comparison is not [] == [] (1)
+  PASS: transitions: non-empty, so the raw fallback is not hiding an empty answer (total=20000 links=1)
+  PASS: transitions: total_link_count >= the rows emitted
+  PASS: transitions: the emitted rows' counts cannot exceed the declared total (truncation is a cap, not an invention)
+  PASS: default bound loads the full window
+  PASS: merge malloc failure has a distinct error code
+  PASS: allocation failure is neither a range refusal nor partial data
+
+43/43 tests passed
