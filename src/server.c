@@ -2906,8 +2906,29 @@ server_load_events_fi_mode(struct pgwt_server *srv,
      * backends.jsonl) and the PLAN/EXEC/CMD marker windows; classify exact
      * we==0 intervals against the command gate. One pass feeding every raw
      * estimator (docs/AAS_SEMANTICS_DECISION.md). */
-    if (!markers_only)
-        pgwt_tag_events(events, total, srv->pid_cats, srv->n_pid_cats);
+    if (!markers_only &&
+        !pgwt_tag_events(events, total, srv->pid_cats, srv->n_pid_cats)) {
+        /* #363: the tagged array is the oracle, so a pass that stopped
+         * partway is a wrong answer, not a short one. Route it through this
+         * loader's EXISTING degradation channel — every raw consumer reads
+         * it via reject_overload, and dump_summary reads the flag directly,
+         * so a second flag would have left that route serving
+         * partially-tagged records with nothing red.
+         *
+         * SET, never assign from the result: an earlier stage's failure
+         * (initial malloc, per-file read, merge, sort) must not be cleared
+         * by a later tagging success.
+         *
+         * Invalidate the result as well as flagging it, in exactly the
+         * shape the initial-malloc failure above already uses (NULL array,
+         * count 0, flag set), so a partial tag cannot be consumed as if it
+         * were complete by any caller that reaches the array before the
+         * flag. */
+        allocation_failed = 1;
+        free(events);
+        events = NULL;
+        total = 0;
+    }
 
     if (info) {
         info->has_transitions = has_transitions;

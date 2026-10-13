@@ -105,6 +105,31 @@ test_variants_p95
 # (assertion shapes and fixtures blind to the bug, pid 0, dense pid runs, and
 # allocation failures that must come back ABSENT rather than short).
 test_pid_cap
+# #363: pgwt_tag_events was `void` and could stop partway — a working
+# allocation failure, or a window with more distinct pids than its per-pid
+# table holds — leaving every record it never reached with the raw
+# old_event/query_id it came off disk with, and returning as if it had
+# finished. That array IS the oracle (#357: aggregates reconcile to it,
+# never the reverse): the pass rewrites we==0 outside a command to
+# NONCMD_CPU, which the contract EXCLUDES from DB Time, and back-fills
+# query_id. So a partial pass reports more CPU attributed to the wrong
+# statement — confidently wrong, not short (on the demo trace the relabel
+# moves 44,119 records and one link by 16%). It now returns 1/0 and the
+# loader routes 0 into its existing info->allocation_failed channel,
+# discarding the array, because dump_summary reads that flag directly and a
+# second flag would have left that route serving half-tagged records.
+# Bypass suite, because "refuse always" satisfies every refusal assertion
+# and "never refuse" satisfies every success one: the success path is pinned
+# by literal tag counts, the REAL pid bound is located by search (so growing
+# the table finds a bigger bound and REMOVING it fails loudly instead of
+# silently becoming a success-path test), and an unknown injection name, an
+# empty one, an injection armed but unreachable (count 0), an empty window,
+# a negative count, a fixture with nothing to tag, and leakage between cases
+# each have their own case. Non-vacuity ledger: seven counters, each failing
+# the test at zero. The call site is in server.c, which no C unit can link —
+# tests/test_data_tag_refusal.py covers it through the real binary, on both
+# the reject_overload and dump_summary routes.
+test_tag_refusal
 # #327: six open-addressing tables in compute.c paired a FIXED power-of-two
 # array with a probe loop that had no fullness test, so the (size+1)-th
 # distinct key spun forever -- pgwt-server is single-threaded, so that hangs
