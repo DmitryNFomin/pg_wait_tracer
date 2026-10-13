@@ -46,10 +46,10 @@ one reviewed criteria commit, and that commit must precede the tag.
 |---|---|---|---|---|
 | 2.1 | Time-to-first-paint bound | **DONE** (review round 6, re-measured post-#268 — the owner ran ≥3 navigations/tab, real Chrome on the Mac, live full-mode capture, satisfying this row's own requirement) | Bound: **3000 ms, global, SETTLED**, recorded in `docs/DEMO_REHEARSAL_CRITERIA.md` §4. Margin **≈3.4x** (worst: transitions 893 ms), re-measured after PR #268 (#265) replaced `handle_top_queries`'s O(n^2) bubble sorts with `qsort`; supersedes the pre-#268 figure of queries 2432 ms / ≈1.2x, now wrong. The bound itself is unchanged — not widened when the margin was thin, not tightened now that it's comfortable. **Timeline not measured** by this method (instrumentation clicked the bare tab, not a Sessions-row drill-down) — flagged as unmeasured, not passing. Earlier VM/headless-Chromium data (worst case ≈2.5x margin, transitions 1211 ms) is superseded, kept for context only. An earlier Mac-side attempt against a *retained* trace produced a worthless >15x margin (empty-panel paint, never written into the doc) — recorded as a methodological warning | — |
 | 2.2 | AAS cross-tab agreement (bucket-weighted) | **DONE** (corrected, review round 2 — was stale READY; #254/`c69c84d` already shipped and wired this in) | `bucket_weighted_aas_ok` runs automatically inside `demo_rehearsal.py`'s `extra_checks["cross_tab_aas_agreement"]` — nothing left to dispatch | — |
-| 2.3 | Overhead envelope, n=3 paired full-mode A/B | BLOCKED → 4.1 | the rehearsal runs only the tracer-on arm, so this needs its own paired runs on the demo box. Owner decision recorded separately (criteria §6): current band is accepted as not-a-regression, which does not substitute for this specific demo-workload A/B | 4.1 |
-| 2.4 | §2 AAS floor — still PROVISIONAL | **DOC DONE, CODE BLOCKED** (review round 4 — the first clean rehearsal landed, settling the number) | Doc floor settled at **1.15** (half of the clean run's 60s-recent-window AAS, 2.3033) in `docs/DEMO_REHEARSAL_CRITERIA.md` §2, `run.id` **1790869219**, read directly off the throwaway VM (`root@46.225.4.87`, `/root/pgwt-demo-rehearsal-master/tests/results/demo_rehearsal/`) before the launcher's rsync ran — no synced local artifact exists yet, provenance stated in the criteria doc. `tests/demo_rehearsal_lib.py`'s `AAS_FLOOR_PROVISIONAL = 0.5` constant is deliberately untouched (docs-only branch) — bumping the enforced gate to 1.15 is a follow-up code change, separate branch | — |
-| 2.5 | §3 per-class wait CPU | **BLOCKED — method mis-specified** (review round 4, owner ran it on the box — not a box-access problem) | `tests/cross_validate.c` requires a **tiered-mode** trace (sampled blocks + transition blocks, compared over their overlap); full mode produces zero sample blocks. Confirmed against the retained 35-minute full-mode trace: `pgwt-server --dump` → `4432286 transitions, 0 samples`; `cross_validate` → `ERROR: no sample blocks`. What would actually answer this: a per-event `cpu_ns` extractor for full-mode traces (does not exist), or a `--mode tiered` capture (then not the demo configuration). No number invented, no tool built here | — |
-| 2.6 | §3 Off-CPU ≤10% placeholder | **DONE** (reworded, review round 3 — retracts round 2's "unverifiable", which was itself wrong) | **Round 2 was wrong**: "4.92 pp" IS a derivable sum (2.53 + 2.39 pp, `docs/OBSERVER_BIAS.md` ~185-188 on `agent/observer-bias-study`) — not invented, not untraceable. The real flaw, now written into the criteria doc: that sum is measured on the **wrong regime** (saturated 8-client/4-vCPU, vs. the gate's own clients≤cores scope, whose analogue is ≤2.72 pp), the **wrong unit** (backend wall-time, not DB Time), and the **wrong quantity** (neither cell flows into Off-CPU\* — one is booked under its open wait event, the other is outside DB Time entirely). Reworded as an honestly-labelled provisional catastrophic-loss tripwire rather than a calibrated bound; demo measured <0.1% (n=7, one run) against it. **Owner decision recorded: #115 is not landing before the tag** (it wouldn't validate the clients≤cores regime this gate needs either) — closes the row via the "reword" branch of this item's original next action, not the "commit the artifact" branch | — |
+| 2.3 | Overhead envelope, n=3 paired full-mode A/B | **DONE** (measured 2026-10-13, gate-1, PG18) | **30.31% ± 0.58pp** (n=3, interleaved A/B, pgbench + `tests/live_loop_workload.py` unthrottled, 4 clients, `--mode full`) — inside the registered ~28-32% band. This is the demo workload's **client count** (4) but deliberately **not its throttle**: `--rate=25` was dropped because under a rate cap both arms hit the same TPS ceiling and TPS-based overhead degenerates to noise. The earlier 8-client `demos/workload.sh` A/B (39.41% gate-1 / 34.63% gate-2) is kept as secondary context only — that regime is the saturated one §3 of the criteria doc disowns, not comparable to this band. Evidence: `tests/results/overhead-envelope/ENVELOPE.md` | — |
+| 2.4 | §2 AAS floor (settled 1.15, was PROVISIONAL 0.5) | **DONE** (doc + code) | Floor settled at **1.15** (half of the clean run's 60s-recent-window AAS, 2.3033) in `docs/DEMO_REHEARSAL_CRITERIA.md` §2, `run.id` **1790869219**. `tests/demo_rehearsal_lib.py`'s enforced `AAS_FLOOR` constant now reads **1.15** (was `AAS_FLOOR_PROVISIONAL = 0.5`) — the gate enforces what the doc states | — |
+| 2.5 | §3 per-class wait CPU | **RESOLVED 2026-10-13** — answered by changing the instrument, not the bar | The BLOCKED finding stood: `tests/cross_validate.c` requires a **tiered-mode** trace (sampled blocks + transition blocks, compared over their overlap); full mode — the demo configuration — produces zero sample blocks (`pgwt-server --dump` on the retained 35-minute trace → `4432286 transitions, 0 samples`; `cross_validate` → `ERROR: no sample blocks`), so that tool could never answer this regardless of which trace it was pointed at. Answered instead by a **direct raw trace walk** (a per-event `cpu_ns` extractor built and run on `agent/cx-25-raw-perclass-cpu` @ `853cfc1`, worktree `.claude/worktrees/agent-a98a1ee2ed1061c28`, evidence under `tests/results/issue25-perclass-raw-scan/`), covering two full-coverage captures (4,307,056 and 7,385,206 records, cross-verified against block headers and `--dump`, 0 unknown `cpu_ns`). Combined 1,850 pure-sleep events (`Timeout:PgSleep`, `Lock:relation`, `Lock:advisory`, `Lock:tuple`), zero over-attribution by the restated §3 test (`docs/DEMO_REHEARSAL_CRITERIA.md` §3: `cpu_ns` >= 824,430 ns AND ratio >= 50%, both held required — the measurement drove that restatement, see §3). `Lock:extend` (0 events this capture, 2 in an earlier one) stays recorded as unmeasured, not folded into "clean" | — |
+| 2.6 | §3 Off-CPU physical magnitude (#386) | **DONE** (2026-10-13 — explicitly reported, not gated) | Replaced `offcpu_cap` with `offcpu` diagnostics (`ok: null`, `gating: false`, physical ms and DB-Time percentage). [Settled offline decomposition](https://github.com/DmitryNFomin/pg_wait_tracer/issues/386#issuecomment-6151275012): 96.1% on gate-1 is the eight-session fan-out tick, 186 ~1.1 s bursts in 1834 s on four shared vCPUs. All 1775 clean-run 60 s placements: min/median/p95/max **5.08/8.96/11.25/13.52%**, **405/1775 (22.8%)** above 10%. Whole-capture CV derives as **0.42/√186 = 3.08%** (observed-window scaling 3.20%); **8.405% × (1 + 3 × 0.0308) = 9.18%** is a candidate contention envelope, **not enforced**. Neither aggregate magnitude nor runnable concurrency distinguishes contention from attribution defects, so no correctness cap is registered. A dropped wait label raises Off-CPU while accounting still closes; separate attribution evidence is row 2.5. Summary/tier absence reports null, not zero. This criteria replacement resets the clean-attempt counter and precedes counted attempt one | — |
 
 ## 3. Dry runs (uncounted)
 
@@ -62,22 +62,35 @@ one reviewed criteria commit, and that commit must precede the tag.
 
 | # | Item | Status | Why it cannot be delegated |
 |---|---|---|---|
-| 4.1 | Provision **`pgwt-stage`** | OWNER | owner rule 2026-09-28: he says when, a couple of days ahead. **Needed EARLIER than the tag** — 2.3's overhead A/B requires it |
+| 4.1 | Provision **`pgwt-stage`** | **DECIDED** (owner, 2026-10-13) | `pgwt-gate` serves as the stage box for the counted rehearsals; a fresh dedicated machine will be provisioned before the real demo. Known cost of this choice: a counted attempt takes `/tmp/pgwt-box-check.lock`, so CI (and any other `box-check`/`demo-rehearsal` run targeting `pgwt-gate`) stalls for the attempt's whole duration (30-45 min) | — |
 | 4.2 | Two uninterrupted Mac sign-off windows | OWNER | the walk needs the real display, real Chrome, normal memory pressure, and no agents on that Mac |
 | 4.3 | Any unresolved demo-bound decision | OWNER | must be settled before the criteria commit, not after |
 
-## 5. The tag, then the counted sequence
+## 5. The counted sequence, then the tag
+
+**Amended 2026-10-13 (owner): "tag after rehersals/walks and gif" —
+supersedes the tag-first ordering this section previously stated; see
+`docs/DEMO_REHEARSAL_CRITERIA.md`'s "The sequence, and what stops it from
+being rolled" for the full amendment and why the tag-first rule's
+substantive requirement (one immutable reference both attempts and the GIF
+share) still holds, now named by a sha instead of a tag until step 6.
 
 1. Criteria commit (section 2) lands and is reviewed.
-2. **Tag** the reviewed master commit. Build `pgwt-stage` from that tag.
-3. Capture-side attempt 1 + signed Mac walk 1 — **against the tag**, from a
-   worktree checked out at it.
-4. Capture-side attempt 2 + signed Mac walk 2 — **same tag**.
+2. Capture-side attempt 1 + signed Mac walk 1, against the **candidate
+   master commit's sha** — per 4.1 (owner, 2026-10-13), `pgwt-gate` serves as
+   the stage box for these counted attempts; a separately provisioned
+   `pgwt-stage` machine is for the real demo itself, built before that
+   event, not before the tag.
+3. Capture-side attempt 2 + signed Mac walk 2 — **same sha**.
+4. **Owner's sign-off.**
+5. GIF cut, from that same sha's rehearsal/walk material.
+6. **Owner tags** the rehearsed sha.
 
-Master keeps moving throughout; this is a tag, not a code freeze (owner rule).
-Landing a fix into the demo build requires a **new tag and resets both counters
-to zero**. Report as "capture-side k of N, Mac-side m of M" — never merged into
-one number, and Mac-side means signed manual walks.
+Master keeps moving throughout; this is a sha-then-tag, not a code freeze
+(owner rule). Landing a fix after attempt 1 is a **new candidate sha and
+resets both counters to zero**, exactly as a re-tag used to. Report as
+"capture-side k of N, Mac-side m of M" — never merged into one number, and
+Mac-side means signed manual walks.
 
 ## Parallelism rules
 

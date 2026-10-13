@@ -125,6 +125,21 @@
 #                  paying for a whole new 30-45 minute capture. A 40-minute
 #                  --mode full trace is large, which is why this is never
 #                  the default.
+#   TAG            the git tag this attempt ran against (docs/
+#                  DEMO_REHEARSAL_CRITERIA.md "a counted attempt names the
+#                  tag it ran against"). Env var, not a flag, matching
+#                  DURATION_MIN/PG/RETAIN_TRACE above -- same positional
+#                  thread through scripts/demo-rehearsal-remote-run.sh to
+#                  tests/demo_rehearsal.sh's own --tag. Empty by default
+#                  (ad-hoc/uncounted run): demo_rehearsal.py's `args.tag or
+#                  _detect_git_tag()` would normally try to auto-detect via
+#                  `git describe`, but that can never work on the copy
+#                  this script rsyncs to the target (--exclude .git below),
+#                  so an attempt run without TAG set honestly records
+#                  tag: null in summary.json rather than inventing one or
+#                  falling back to a commit sha dressed up as a tag. A
+#                  counted attempt MUST set this, e.g.
+#                  `make demo-rehearsal PGWT_BOX=... TAG=v1.0.0`.
 #
 # Needs the Hetzner token in the macOS Keychain (same as box-check.sh) for
 # the throwaway-VM path (PGWT_BOX unset); not needed when PGWT_BOX is set:
@@ -145,6 +160,13 @@ PG="${PG:-18}"
 # detached remote job exactly like DURATION_MIN/PG below (positional arg to
 # scripts/demo-rehearsal-remote-run.sh).
 RETAIN_TRACE="${RETAIN_TRACE:-0}"
+# The git tag this attempt ran against (docs/DEMO_REHEARSAL_CRITERIA.md "a
+# counted attempt names the tag it ran against") -- empty by default (ad-hoc/
+# uncounted run), threaded through to the detached remote job as a 5th
+# positional arg to scripts/demo-rehearsal-remote-run.sh, same as
+# DURATION_MIN/PG/RETAIN_TRACE above. See the Env comment block for why
+# "unset" must stay honest rather than falling back to a commit sha.
+TAG="${TAG:-}"
 STATE_FILE="${DEMO_REHEARSAL_STATE_FILE:-tests/results/.demo-rehearsal-state.sh}"
 
 # PERSISTENT=1 when PGWT_BOX names a persistent box (pgwt-gate/pgwt-gate-2)
@@ -500,7 +522,7 @@ EOF
         fi
     fi
 
-    echo "demo-rehearsal: $target  DURATION_MIN=$DURATION_MIN PG=$PG RETAIN_TRACE=$RETAIN_TRACE -> $remote_dir  (log: $log)"
+    echo "demo-rehearsal: $target  DURATION_MIN=$DURATION_MIN PG=$PG RETAIN_TRACE=$RETAIN_TRACE TAG=${TAG:-(none)} -> $remote_dir  (log: $log)"
     ssh -o BatchMode=yes $ssh_strict "$target" "mkdir -p '$remote_dir'" || exit 1
     rsync -az --delete -e "ssh $ssh_strict" \
         --exclude .git --exclude /build \
@@ -564,7 +586,7 @@ EOF
     # backgrounded.
     launch_out=$(ssh -o BatchMode=yes $ssh_strict "$target" \
         "cd '$remote_dir' && rm -f rehearsal.done rehearsal.rc rehearsal.pid rehearsal.out rehearsal.started; \
-         nohup setsid -w bash scripts/demo-rehearsal-remote-run.sh '$DURATION_MIN' '$demo_rehearsal_start_epoch' '$PG' '$RETAIN_TRACE' </dev/null >/dev/null 2>&1 & \
+         nohup setsid -w bash scripts/demo-rehearsal-remote-run.sh '$DURATION_MIN' '$demo_rehearsal_start_epoch' '$PG' '$RETAIN_TRACE' '$TAG' </dev/null >/dev/null 2>&1 & \
          echo \$! > rehearsal.pid; disown; \
          sleep 1; \
          if [[ -s rehearsal.pid ]] && kill -0 \$(cat rehearsal.pid) 2>/dev/null; then echo LAUNCHED=1; else echo LAUNCHED=0; fi" \
@@ -800,6 +822,12 @@ while true; do
 done
 
 echo
-echo "demo-rehearsal (DURATION_MIN=$DURATION_MIN PG=$PG RETAIN_TRACE=$RETAIN_TRACE target=${target:-unknown} persistent=$PERSISTENT pg_confirmed=${PG_VERSION_CONFIRMED:-not verified} rehearsal_started=${rehearsal_started_epoch:-never confirmed}) verdict: $outcome_verdict (exit=$outcome_rc) -- summary:"
+# TAG here reflects THIS invocation's env only -- a --collect reattach
+# does not know the launcher's TAG (not persisted to STATE_FILE, since the
+# remote job already baked it into summary.json at launch time, which is
+# what this verdict's own summary dump below actually reads) -- read the
+# synced summary.json's own "tag" field as the source of truth, never this
+# log line, for a --collect run.
+echo "demo-rehearsal (DURATION_MIN=$DURATION_MIN PG=$PG RETAIN_TRACE=$RETAIN_TRACE TAG=${TAG:-(none)} target=${target:-unknown} persistent=$PERSISTENT pg_confirmed=${PG_VERSION_CONFIRMED:-not verified} rehearsal_started=${rehearsal_started_epoch:-never confirmed}) verdict: $outcome_verdict (exit=$outcome_rc) -- summary:"
 tail -n 30 "$log" | sed 's/^/  /'
 exit "$outcome_rc"

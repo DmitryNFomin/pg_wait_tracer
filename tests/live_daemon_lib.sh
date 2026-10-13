@@ -110,3 +110,28 @@ check_pgbench_provisioned() {
     fi
     echo "$label: pgbench_accounts has $rows rows (provisioned) -- reusing"
 }
+
+# tag_cli_args TAG -- the `--tag` CLI arguments to forward onto the next
+# command in the demo-rehearsal chain (scripts/demo-rehearsal.sh ->
+# scripts/demo-rehearsal-remote-run.sh -> tests/demo_rehearsal.sh ->
+# tests/demo_rehearsal.py --tag), one argument per output line so a caller
+# can `mapfile -t ARR < <(tag_cli_args "$TAG")` and splice "${ARR[@]}" into
+# a command line. Prints NOTHING when TAG is empty/unset: the caller must
+# never synthesize a flag out of an absent tag, because
+# demo_rehearsal.py's own `args.tag or _detect_git_tag()` already treats
+# "no --tag given" as "try to auto-detect, else record null" -- the
+# correct, honest answer (docs/DEMO_REHEARSAL_CRITERIA.md "same tag, not
+# merely the same tree") -- and `_detect_git_tag()` cannot even run
+# remotely (scripts/demo-rehearsal.sh's rsync excludes .git), so an
+# attempt with no tag supplied must still reach summary.json as tag: null,
+# not silently acquire one.
+#
+# Pure function, no Linux/root/live-PostgreSQL dependency unlike the rest
+# of this file -- testable directly on the Mac, see
+# tests/test_tag_cli_args.sh.
+tag_cli_args() {
+    local tag="${1:-}"
+    if [[ -n "$tag" ]]; then
+        printf '%s\n%s\n' "--tag" "$tag"
+    fi
+}

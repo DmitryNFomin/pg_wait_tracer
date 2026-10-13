@@ -9,8 +9,13 @@
  * Mapping matches the old legacy adapter in app.js (render), except the burst
  * markers (fixed in U0, see below):
  *   - line series of per-bucket peak max, area fill, x = bucket time
- *   - burst markers placed in the CONTAINING bucket (arithmetic, clamped)
- *   - top-peaks table: peaks with max>1, sorted desc, top 10
+ *   - burst markers placed in the CONTAINING bucket (arithmetic, clamped),
+ *     drawn as an unlabelled annotation ABOVE the line (#384 — see
+ *     burstPoints: the marker used to print its own, different count on top
+ *     of the line's peak)
+ *   - top-peaks table: peaks with max>1, sorted desc, top 10 — the SAME
+ *     series the line plots, which is why the two are pinned against each
+ *     other in tests/web_unit/concurrency_panels.test.mjs
  *   - bursts table: every burst (4+ sessions within 10ms)
  */
 
@@ -25,6 +30,24 @@ import { fmtTime, fmtTimeMs, esc } from '../format.js';
  * all"). */
 export const NOT_CAPTURED_BAND_COLOR = 'rgba(136, 136, 136, 0.10)';
 export const NOT_CAPTURED_BORDER = 'rgba(136, 136, 136, 0.45)';
+
+/* #384: the panel shows TWO measures and used to name neither. The line is
+ * peak simultaneous sessions per bucket (and the "Top Peak Moments" table is
+ * that same series, ranked); the triangles are burst ONSETS, a count of pids
+ * entering one wait event inside 10 ms — a different question over a 10 ms
+ * window, not the bucket. Both sentences are exported so the chart subtitle
+ * and the table caption cannot drift apart from each other.
+ *
+ * The legend is two short lines (an ECharts subtext does not wrap): long
+ * enough to name both measures, short enough to fit a narrow gallery cell. */
+export const BURST_MARKER_LEGEND =
+    'Line = peak simultaneous sessions per bucket\n' +
+    'Red marker = burst onset, a different count (sessions entering one ' +
+    'wait within 10 ms), listed under Burst Events below';
+export const TOP_PEAKS_CAPTION =
+    'The highest points of the line above, ranked: peak simultaneous ' +
+    'sessions in a single bucket. The red markers on the chart count ' +
+    'something else and are listed separately under Burst Events.';
 
 /* data: concurrency response { peaks[], bursts[], bucket_ns }
  * opts.captureFromNs (optional): the server's earliest captured timestamp
@@ -68,19 +91,53 @@ export function buildConcurrencyOption(data, opts) {
     // captured" band, or a Burst Events row for a moment the chart says has
     // no data). Drop it from BOTH the markPoint and the table below.
     const capturedBursts = burstsWithBucket.filter(({ at }) => at >= notCapturedCount);
+    /* #384: the burst marker is an ANNOTATION on the line, never a second
+     * value drawn in the line's own place.
+     *
+     * What it used to do, and why it read as a contradiction: the marker was
+     * planted AT the bucket's peak (coord y = the line's value) and labeled
+     * with `b.sessions` — a DIFFERENT quantity (pids entering one wait inside
+     * 10 ms) — in white, on an opaque triangle up to 30 px tall. On the live
+     * 15-minute walk the tallest bucket was 13 simultaneous sessions and the
+     * triangle sitting on its apex read "6": measured on
+     * shots_unfiltered/tab_concurrency_UNFILTERED.png, the triangle spanned
+     * y-values 13.5 down to 8.3 — it covered the apex AND 5 units of the line
+     * under it, so the only number legible at that peak was the burst's. The
+     * "Top Peak Moments" table below, which reads the SAME peaks array, said
+     * 13. Two numbers, one pixel, different units.
+     *
+     * So: no numeric label on the chart (the count lives in the tooltip and
+     * in the Burst Events table, both of which name its unit), a small
+     * down-pointing triangle floated ABOVE the data point rather than over
+     * it, and y taken strictly from the plotted series — never `|| b.sessions`,
+     * which planted a burst COUNT at a line COORDINATE whenever the bucket's
+     * peak was 0. */
     const burstPoints = capturedBursts.map(({ b, at }) => ({
-        coord: [at, peakData[at] || b.sessions],
-        value: b.sessions, symbol: 'triangle',
-        symbolSize: Math.min(10 + b.sessions * 2, 30),
+        coord: [at, peakData[at]],
+        value: b.sessions, symbol: 'triangle', symbolRotate: 180,
+        symbolSize: Math.min(8 + b.sessions, 18),
+        symbolOffset: [0, -12],
         itemStyle: { color: '#f44' },
-        label: { show: true, formatter: b.sessions + '', color: '#fff', fontSize: 10 },
+        label: { show: false },
     }));
+    /* Bucket -> the burst to describe in that bucket's tooltip (the largest,
+     * matching the server's one-per-bucket selection). */
+    const burstByBucket = new Map();
+    capturedBursts.forEach(({ b, at }) => {
+        const cur = burstByBucket.get(at);
+        if (!cur || b.sessions > cur.sessions) burstByBucket.set(at, b);
+    });
 
     const option = {
         animation: false,
         title: {
             text: 'Peak Concurrent Sessions per Wait Event', left: 'center',
             textStyle: { color: '#ccc', fontSize: 14 },
+            /* #384: the panel draws two different measures; say which is
+             * which, in the panel, rather than leaving a red triangle to be
+             * read as a point on the line. */
+            subtext: BURST_MARKER_LEGEND,
+            subtextStyle: { color: '#888', fontSize: 11 },
         },
         tooltip: {
             trigger: 'axis', axisPointer: { type: 'cross' },
@@ -92,8 +149,17 @@ export function buildConcurrencyOption(data, opts) {
                 const time = fmtTime(params[0].axisValue, bns);
                 if (idx < notCapturedCount) return time + '<br/>Not yet captured';
                 const ev = peakEvents[idx] || 'none';
-                return time + '<br/>' +
+                let out = time + '<br/>' +
                     'Peak: <b>' + params[0].value + ' sessions</b><br/>Event: ' + esc(ev);
+                /* #384: the burst count the marker used to print as a bare
+                 * number, restored here WITH its unit so it cannot be read as
+                 * the line's value. */
+                const br = burstByBucket.get(idx);
+                if (br) {
+                    out += '<br/>Burst: <b>' + br.sessions + ' sessions</b>' +
+                        ' entered ' + esc(br.event || '') + ' within 10 ms';
+                }
+                return out;
             },
         },
         // #105: nameLocation 'middle' + a wider left margin (the matrix fix,
@@ -101,7 +167,9 @@ export function buildConcurrencyOption(data, opts) {
         // extended PAST the canvas left edge at 1280px, clipping the leading
         // "S" of "Simultaneous". A vertical strip inside grid.left never
         // collides with the tick-label column.
-        grid: { left: 66, right: 20, top: 50, bottom: 40 },
+        /* top 80 (was 50): the title now carries a two-line legend (#384) and
+         * the plot must start below it, not under it. */
+        grid: { left: 66, right: 20, top: 80, bottom: 40 },
         xAxis: {
             type: 'category', data: times,
             axisLabel: { color: '#888', fontSize: 10, formatter: (v) => fmtTime(v, bns) },
@@ -193,7 +261,13 @@ function zoomAttrs(tsNs, bucketNs) {
     if (!(pad > 0) || !(tsNs > 0)) return '';
     return ' class="row-zoom" data-from="' + (tsNs - pad) + '" data-to="' +
         (tsNs + pad) + '" style="cursor:pointer"' +
-        ' title="Zoom to ±5 buckets around this moment"';
+        /* #388: ASCII only in text the UI renders. "±" here was harmless (a
+         * title attribute is painted by the browser chrome, not laid out in
+         * the page) but it is the one non-ASCII string left in what this
+         * builder emits, and an exemption list is how the ASCII gate in
+         * tests/web_unit/concurrency_ascii.test.mjs would stop covering the
+         * case that actually bit: #384's panel text, laid out in-page. */
+        ' title="Zoom to +/-5 buckets around this moment"';
 }
 
 /* PURE: the two HTML tables under the chart. Exported for testing — same
@@ -201,6 +275,12 @@ function zoomAttrs(tsNs, bucketNs) {
  * on every peak/burst row. */
 export function buildConcurrencyTables(model) {
     let html = '<h3 style="color:#ccc;margin:10px 0 5px">Top Peak Moments</h3>' +
+        // #384: this table and the chart's line are ONE series; the caption
+        // says so, so a reader who finds 13 here looks for 13 on the line
+        // instead of comparing it with a burst marker. .panel-caption, not
+        // .chart-notes: this explains a column, it does not declare a data
+        // limit, and the amber note style is for the latter only.
+        '<div class="panel-caption">' + esc(TOP_PEAKS_CAPTION) + '</div>' +
         '<table class="data-table"><thead><tr>' +
         '<th>Time</th><th>Wait Event</th><th>Simultaneous Sessions</th></tr></thead><tbody>';
     model.topPeaks.forEach(p => {

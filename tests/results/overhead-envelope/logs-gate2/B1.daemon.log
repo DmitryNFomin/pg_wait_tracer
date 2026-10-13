@@ -1,0 +1,131 @@
+INFO: inferred PGDATA: /var/lib/postgresql/18/main
+INFO: postgres binary: /usr/lib/postgresql/18/bin/postgres
+INFO: detected PostgreSQL 18
+INFO: loaded dynamic event names from PG18
+INFO: my_wait_event_info VA: 0x5c170d91c308
+INFO: my_wait_event_info value (postmaster): 0x5c170d922b40
+INFO: MyBEEntry VA: 0x5c170d922508
+INFO: PgBackendStatus layout PG18 source=hard-table arch=x86_64 ptr=8 abi=sysv-lp64 size=440 activity_buf=1024 validation=validated pid=1917564 enums=RUNNING:3,FASTPATH:5,max:7
+INFO: PgBackendStatus fields: st_changecount=0/4(validated) st_procpid=4/4(validated) st_databaseid=48/4(validated) st_userid=52/4(validated) st_state=232/4(validated) st_activity_raw=248/8(validated) st_query_id=424/8(validated)[signed]
+INFO: PgBackendStatus validation detail: controlled backend retired before capture; idle/active state, activity markers and varying query IDs validated
+INFO: PgBackendStatus st_state/st_query_id plus db/user context are authoritative for sampled attribution; idle query_id is normalized to 0
+INFO: st_query_id offset: 424 (PG18)
+INFO: st_activity_raw offset: 248 (PG18)
+WARN: target effective CPU capacity unknown
+INFO: RLIMIT_NOFILE raised 1024 -> 2560
+INFO: debug_query_string at 0x5c170d922510 (runtime VA)
+INFO: CPU accounting: MEASURED (sched_switch)
+INFO: full exact probe bundle attached from startup
+WARN: group 'dba' not found — trace files will be readable by root only
+INFO: trace writer: /root/overhead-envelope-20261013/trace_B1 (retention 24h)
+INFO: query text capture enabled
+INFO: sampled pgss query-text resolver started asynchronously
+INFO: backend metadata writer enabled
+INFO: attached to PID 1895008 (io_worker), watchpoint at 0x7a30646716c8
+INFO: attached to PID 1895009 (io_worker), watchpoint at 0x7a3064671a08
+INFO: attached to PID 1895010 (io_worker), watchpoint at 0x7a3064671d48
+INFO: attached to PID 1895011 (checkpointer), watchpoint at 0x7a3064672088
+INFO: attached to PID 1895012 (bgwriter), watchpoint at 0x7a30646723c8
+INFO: attached to PID 1895014 (walwriter), watchpoint at 0x7a3064672708
+INFO: attached to PID 1895015 (autovac_launcher), watchpoint at 0x7a306466a1c8
+INFO: attached to PID 1895016 (logical_launcher), watchpoint at 0x7a306466dc48
+INFO: attached to 8 existing backends
+INFO: control socket: /root/overhead-envelope-20261013/trace_B1/pgwt.sock
+INFO: capture provider: full (exact fidelity)
+INFO: fork detected PID 1917587, bootstrap watchpoint attached
+INFO: PID 1917587 initialized (client), real watchpoint at 0x7a306465be48
+INFO: stored full query text for (5,10,7074108094920397506) pid=1917587
+INFO: stored full query text for (5,10,1320628026364753299) pid=1917587
+INFO: fork detected PID 1917639, bootstrap watchpoint attached
+INFO: PID 1917587 exited (client)
+INFO: fork detected PID 1917640, bootstrap watchpoint attached
+INFO: PID 1917639 initialized (client), real watchpoint at 0x7a3064667e08
+INFO: PID 1917640 initialized (client), real watchpoint at 0x7a3064656008
+INFO: stored full query text for (5,10,529815254086806538) pid=1917639
+INFO: stored full query text for (5,10,2906267967483132965) pid=1917640
+INFO: stored full query text for (5,10,3596707314037099198) pid=1917639
+INFO: fork PID 1917641 already initialized (fork->attach race) — attaching directly
+INFO: PID 1917641 initialized (parallel_worker), real watchpoint at 0x7a306466f308
+INFO: fork detected PID 1917642, bootstrap watchpoint attached
+INFO: PID 1917642 initialized (parallel_worker), real watchpoint at 0x7a306466e608
+INFO: stored full query text for (5,10,-9189359825543653111) pid=1917639
+INFO: stored full query text for (5,10,8952345708235324496) pid=1917639
+INFO: stored full query text for (5,10,-2067751485102627314) pid=1917639
+INFO: PID 1917639 exited (client)
+INFO: fork detected PID 1917644, bootstrap watchpoint attached
+INFO: fork detected PID 1917645, bootstrap watchpoint attached
+INFO: PID 1917645 initialized (client), real watchpoint at 0x7a3064666408
+INFO: PID 1917644 initialized (client), real watchpoint at 0x7a30646639c8
+INFO: fork detected PID 1917646, bootstrap watchpoint attached
+INFO: fork detected PID 1917647, bootstrap watchpoint attached
+INFO: PID 1917646 initialized (client), real watchpoint at 0x7a3064665a48
+INFO: PID 1917647 initialized (client), real watchpoint at 0x7a30646694c8
+INFO: fork detected PID 1917648, bootstrap watchpoint attached
+INFO: fork detected PID 1917649, bootstrap watchpoint attached
+INFO: PID 1917648 initialized (client), real watchpoint at 0x7a3064659a88
+INFO: PID 1917649 initialized (client), real watchpoint at 0x7a3064669808
+INFO: fork detected PID 1917650, bootstrap watchpoint attached
+INFO: fork detected PID 1917651, bootstrap watchpoint attached
+INFO: PID 1917650 initialized (client), real watchpoint at 0x7a3064669e88
+INFO: PID 1917651 initialized (client), real watchpoint at 0x7a3064660908
+INFO: stored full query text for (5,10,4854991825702068830) pid=1917650
+INFO: stored full query text for (5,10,-6796648778530205384) pid=1917651
+INFO: stored full query text for (5,10,5409612748292285639) pid=1917649
+INFO: stored full query text for (5,10,-1980831870093258527) pid=1917644
+INFO: stored full query text for (5,10,3886912043147135675) pid=1917644
+INFO: stored full query text for (5,10,286264995346867541) pid=1917644
+INFO: stored full query text for (5,10,6097083398544187049) pid=1917651
+INFO: PID 1917642 exited (parallel_worker)
+INFO: PID 1917641 exited (parallel_worker)
+INFO: fork detected PID 1917653, bootstrap watchpoint attached
+INFO: PID 1917640 exited (client)
+INFO: PID 1917653 initialized (client), real watchpoint at 0x7a306465ef08
+INFO: fork detected PID 1917654, bootstrap watchpoint attached
+INFO: fork detected PID 1917655, bootstrap watchpoint attached
+INFO: PID 1917655 initialized (parallel_worker), real watchpoint at 0x7a306466ec88
+INFO: PID 1917654 initialized (parallel_worker), real watchpoint at 0x7a306466efc8
+INFO: PID 1917655 exited (parallel_worker)
+INFO: PID 1917654 exited (parallel_worker)
+INFO: fork detected PID 1917657, bootstrap watchpoint attached
+INFO: PID 1917653 exited (client)
+INFO: PID 1917657 initialized (client), real watchpoint at 0x7a3064669188
+INFO: fork detected PID 1917658, bootstrap watchpoint attached
+INFO: fork detected PID 1917659, bootstrap watchpoint attached
+INFO: PID 1917658 initialized (parallel_worker), real watchpoint at 0x7a306466df88
+INFO: PID 1917659 initialized (parallel_worker), real watchpoint at 0x7a306466e2c8
+INFO: PID 1917659 exited (parallel_worker)
+INFO: PID 1917658 exited (parallel_worker)
+INFO: PID 1917657 exited (client)
+INFO: fork detected PID 1917808, bootstrap watchpoint attached
+INFO: PID 1917808 initialized (client), real watchpoint at 0x7a306465b7c8
+INFO: stored full query text for (5,10,-6403657805664847344) pid=1917808
+INFO: stored full query text for (5,10,-3931178515167673200) pid=1917808
+INFO: stored full query text for (5,10,6523976577614373293) pid=1917808
+INFO: stored full query text for (5,10,6543260012267554505) pid=1917808
+INFO: PID 1917808 exited (client)
+INFO: fork detected PID 1917910, bootstrap watchpoint attached
+INFO: PID 1917910 initialized (autovac_worker), real watchpoint at 0x7a306466a508
+INFO: PID 1917910 exited (autovac_worker)
+INFO: fork detected PID 1917963, bootstrap watchpoint attached
+INFO: PID 1917963 initialized (client), real watchpoint at 0x7a306465dec8
+INFO: PID 1917963 exited (client)
+INFO: fork detected PID 1918440, bootstrap watchpoint attached
+INFO: PID 1918440 initialized (client), real watchpoint at 0x7a3064660c48
+INFO: PID 1918440 exited (client)
+INFO: fork detected PID 1918555, bootstrap watchpoint attached
+INFO: PID 1918555 initialized (client), real watchpoint at 0x7a306465cb48
+INFO: fork detected PID 1918556, bootstrap watchpoint attached
+INFO: PID 1918556 initialized (autovac_worker), real watchpoint at 0x7a306466a848
+INFO: PID 1918556 exited (autovac_worker)
+INFO: PID 1918555 exited (client)
+INFO: fork detected PID 1918784, bootstrap watchpoint attached
+INFO: PID 1918784 initialized (client), real watchpoint at 0x7a306465f8c8
+INFO: PID 1918784 exited (client)
+INFO: fork detected PID 1919125, bootstrap watchpoint attached
+INFO: PID 1919125 initialized (autovac_worker), real watchpoint at 0x7a306466ab88
+INFO: PID 1919125 exited (autovac_worker)
+
+pg_wait_tracer: shutting down
+INFO: query text capture: 19 unique queries captured
+INFO: summary file closed: 62 records, 114646 bytes
+INFO: trace file closed: 8207107 events, 78697407 bytes (3.8x compression)

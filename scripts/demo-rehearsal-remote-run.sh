@@ -27,7 +27,7 @@
 # touches it there), so it is taken unconditionally rather than needing a
 # second code path.
 #
-# Usage: scripts/demo-rehearsal-remote-run.sh DURATION_MIN RUN_MARKER PG_VERSION [RETAIN_TRACE]
+# Usage: scripts/demo-rehearsal-remote-run.sh DURATION_MIN RUN_MARKER PG_VERSION [RETAIN_TRACE] [TAG]
 # Run from the repo root on the target (the launcher cd's there first).
 # Writes, relative to cwd:
 #   rehearsal.out    combined stdout/stderr of the whole run
@@ -40,12 +40,21 @@
 #        itself failed (see tests/results/demo_rehearsal/summary.json)
 #   2    the build (make / make -C tests / make pgwt-client) failed
 set -u
-DURATION_MIN="${1:?Usage: demo-rehearsal-remote-run.sh DURATION_MIN RUN_MARKER PG_VERSION [RETAIN_TRACE]}"
-RUN_MARKER="${2:?Usage: demo-rehearsal-remote-run.sh DURATION_MIN RUN_MARKER PG_VERSION [RETAIN_TRACE]}"
-PG_VERSION="${3:?Usage: demo-rehearsal-remote-run.sh DURATION_MIN RUN_MARKER PG_VERSION [RETAIN_TRACE]}"
+DURATION_MIN="${1:?Usage: demo-rehearsal-remote-run.sh DURATION_MIN RUN_MARKER PG_VERSION [RETAIN_TRACE] [TAG]}"
+RUN_MARKER="${2:?Usage: demo-rehearsal-remote-run.sh DURATION_MIN RUN_MARKER PG_VERSION [RETAIN_TRACE] [TAG]}"
+PG_VERSION="${3:?Usage: demo-rehearsal-remote-run.sh DURATION_MIN RUN_MARKER PG_VERSION [RETAIN_TRACE] [TAG]}"
 # Optional 4th arg (docs/DEMO_DELIVERY_QUEUE.md item 2) -- absent (older
 # caller) means "0", same as tests/demo_rehearsal.sh's own default.
 RETAIN_TRACE="${4:-0}"
+# Optional 5th arg: the git tag this attempt ran against (docs/
+# DEMO_REHEARSAL_CRITERIA.md "a counted attempt names the tag it ran
+# against"). Absent/empty (an uncounted or ad-hoc run) means tests/
+# demo_rehearsal.sh is given no --tag, so demo_rehearsal.py's own `args.tag
+# or _detect_git_tag()` falls through to auto-detection on this copy --
+# which cannot find one anyway since scripts/demo-rehearsal.sh's rsync
+# excludes .git, so summary.json's tag field honestly stays null rather
+# than acquiring one.
+TAG="${5:-}"
 
 [ -w /tmp/pgwt-box-check.lock ] || { touch /tmp/pgwt-box-check.lock 2>/dev/null && chmod 0666 /tmp/pgwt-box-check.lock 2>/dev/null; }
 exec 200>/tmp/pgwt-box-check.lock
@@ -70,7 +79,7 @@ mv -f rehearsal.started.tmp rehearsal.started
 
 exec >rehearsal.out 2>&1
 
-echo "demo-rehearsal-remote-run: flock acquired, DURATION_MIN=$DURATION_MIN PG_VERSION=$PG_VERSION"
+echo "demo-rehearsal-remote-run: flock acquired, DURATION_MIN=$DURATION_MIN PG_VERSION=$PG_VERSION TAG=${TAG:-(none)}"
 
 rc=1
 
@@ -102,7 +111,16 @@ else
     # Harmless when this script only holds the lock for build+capture; the
     # risk is specifically fd inheritance surviving past THIS script's own
     # teardown via an orphaned grandchild.
-    sudo DURATION_MIN="$DURATION_MIN" PGWT_RUN_MARKER="$RUN_MARKER" RETAIN_TRACE="$RETAIN_TRACE" tests/demo_rehearsal.sh --pg-version "$PG_VERSION" 200>&-
+    #
+    # --tag: tag_cli_args (tests/live_daemon_lib.sh, shared with tests/
+    # demo_rehearsal.sh's own forwarding to demo_rehearsal.py) builds the
+    # --tag flag only when TAG is non-empty, so an uncounted/ad-hoc run
+    # (TAG empty) passes tests/demo_rehearsal.sh no --tag at all rather
+    # than a synthesized empty one.
+    # shellcheck disable=SC1091
+    source tests/live_daemon_lib.sh
+    mapfile -t tag_cli_args_out < <(tag_cli_args "$TAG")
+    sudo DURATION_MIN="$DURATION_MIN" PGWT_RUN_MARKER="$RUN_MARKER" RETAIN_TRACE="$RETAIN_TRACE" tests/demo_rehearsal.sh --pg-version "$PG_VERSION" "${tag_cli_args_out[@]}" 200>&-
     rc=$?
 fi
 

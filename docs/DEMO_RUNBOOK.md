@@ -82,21 +82,26 @@ executions query needs, are gated on --mode full only"*).
 sudo ./pg_wait_tracer --daemon -T /var/lib/pgwt/traces --mode full -v
 ```
 
-> **START ON AN EMPTY TRACE DIRECTORY.** Summary files moved to v4 on
-> 2026-10-07 (the timer-sleep accounting change). The per-second records
-> precompute DB Time at WRITE time, so v2 and v3 seconds in one directory
-> would blend two accounting rules inside one window — `pgwt-server`
-> therefore refuses the summary fast path for any window that overlaps a
-> pre-v4 file and recomputes that window from RAW events instead
-> (`should_use_summaries` / `pgwt_summaries_window_current`).
+> **START ON AN EMPTY TRACE DIRECTORY.** Summary files are now **v6**
+> (`PGWT_SUMMARY_VERSION`, `src/summary_writer.h`) — most recently bumped
+> 2026-10-13, when the writer was fixed to exclude io_worker time from
+> idle/DB-Time accounting, matching the raw path (issues #315/#376). Each
+> bump (v3's idle-event exclusion, v4's exact idle scalars, v5's missing
+> CPU* row, v6's io_worker exclusion) changed the accounting rule the
+> per-second records precompute at WRITE time, so a directory holding
+> seconds from two different versions would blend two accounting rules
+> inside one window — `pgwt-server` therefore **refuses** the summary fast
+> path for any window overlapping a non-current-version file and recomputes
+> that window from RAW events instead (`should_use_summaries` /
+> `pgwt_summaries_window_current`).
 >
 > The answer is still correct, but the 900 s Overview window is exactly the
 > request that fast path exists for: taking the raw path for it costs the
 > paint latency this project spent a week reducing, live, on stage. If
-> `/var/lib/pgwt/traces` holds anything from before the upgrade, move it
-> aside (`mv traces traces.pre-v4`) before starting the daemon. A fresh
-> `mktemp -d` directory, as `tests/demo_rehearsal.sh` uses, is never
-> affected.
+> `/var/lib/pgwt/traces` holds anything written before today's v6 upgrade
+> (or any earlier version), move it aside (`mv traces traces.pre-v6`)
+> before starting the daemon. A fresh `mktemp -d` directory, as
+> `tests/demo_rehearsal.sh` uses, is never affected.
 
 (`-T`/`--trace-dir` enables recording and picks the directory, README.md
 "Trace Recording"; `-v`/`--verbose` prints diagnostics to stderr, README.md;
@@ -133,11 +138,17 @@ left to retention.
 ### 2.3 The workload
 
 The demo's realism comes from `tests/live_loop_workload.py` (five
-persistent sessions producing `Lock:relation`, `Timeout:PgSleep`,
+persistent sessions producing `Lock:relation`, `Lock:advisory`,
 `Lock:transactionid`, and query-id/duration variety across Queries,
 Histogram, Waterfall and Scatter — `docs/DEMO_REHEARSAL_CRITERIA.md` "The
 workload the criteria are written against") plus throttled pgbench, exactly
-as `tests/demo_rehearsal.sh` starts them:
+as `tests/demo_rehearsal.sh` starts them. **Not `Timeout:PgSleep`**: the
+workload dropped server-side `pg_sleep` on 2026-10-06 (a DBA watching the
+demo would read a literal `pg_sleep(1.3)` in Top Queries as a faked
+workload) and replaced it with a four-shape `pg_advisory_lock` hold
+(0.1/0.3/1.0/3.0s), which is where `Lock:advisory` comes from —
+`docs/DEMO_REHEARSAL_CRITERIA.md` records the same change at its §2
+workload-signature check.
 
 ```bash
 pgbench -U postgres -d postgres -c 4 -T <duration_s> --rate=25 &
@@ -235,7 +246,9 @@ catch.
    sessions and top queries are non-empty straight from the trace files —
    the same floors `docs/DEMO_REHEARSAL_CRITERIA.md` §2 checks
    automatically (samples > 0, DB Time > 0, both `Lock:relation` and
-   `Timeout:PgSleep` present).
+   `Lock:advisory` present — this check used to name `Timeout:PgSleep`
+   instead of `Lock:advisory`, until the workload dropped `pg_sleep` on
+   2026-10-06; see §2.3).
 3. **Bridge**: `curl -s http://localhost:8384/session` should return 200
    (this is the exact readiness probe `tests/demo_rehearsal.sh` and
    `tests/live_daemon_lib.sh`'s `url_ready` use before starting the walk).
@@ -411,15 +424,15 @@ open row's elapsed time keeps growing for as long as it's shown. **Click
 "Show latest first"** (the sort toggle above the executions table) to fall
 back to recency ordering and get the orphaned row out of the way.
 
-This depends on the default-slice / orphan-row fix tracked in issue #222
-(`web/static/lib/builders/waterfall.js`, `executionsSortToggleLabel` — the
-toggle's states are "Show latest first" / "Show longest running first").
-**As of this writing that fix is on `agent/waterfall-slowest`, not yet
-merged to `master`** (`docs/DEMO_DELIVERY_QUEUE.md` §1.2, status READY —
-listed as a demo blocker that must merge before the tag). Confirm it has
-landed before relying on this recovery step; on current `master` there is
-no sort toggle at all and Waterfall only ever shows the latest 100
-executions by start time (issue #222's own description).
+This depends on the default-slice / orphan-row fix tracked in issue #222,
+**merged to `master` as #262/`8c1eb93`** (closed; confirmed via `gh issue
+view 222` and `docs/DEMO_DELIVERY_QUEUE.md` §1.2). The sort toggle exists
+on current `master`: `web/static/lib/builders/waterfall.js` exports
+`executionsSortToggleLabel`, and the executions table's **default is now
+`duration_desc`** ("longest running first", `EXECUTIONS_SORT_DEFAULT`) —
+not the latest-100-by-start-time default issue #222 was filed against.
+That default is exactly why an orphaned row pins to the top and why the
+toggle above is the recovery step.
 
 ## 6. Shutdown
 
@@ -454,14 +467,12 @@ box meant to keep running).
 
 ## 7. Known rough edges a presenter should not be surprised by
 
-From `gh issue list` (2026-09-30), filtered to ones with a symptom visible
-during the walk above, not test-only findings:
+Re-checked against `gh issue list` and master's code on 2026-10-13, filtered
+to ones with a symptom visible during the walk above, not test-only
+findings. (#222, which used to have an entry here about Waterfall's default
+view, is CLOSED and fixed — merged as #262/`8c1eb93`; see §5's orphan-row
+recovery for what that fix changed and the residual it introduces.)
 
-- **#222** — Waterfall's default view is the latest 100 executions by
-  start time, not the slowest, so a slow query can be invisible on a busy
-  system unless you know to pivot from Queries → click a row → Waterfall.
-  See §5's orphan-row recovery for the same issue's fix and its merge
-  status.
 - **#172** — Transitions tab reproducibly exceeds the UI test suite's blink
   threshold by a small margin (ratio ~0.0018–0.0024 vs. a 0.001 gate). On
   stage this reads as a faint, brief flicker on that one tab, not a broken
@@ -488,7 +499,18 @@ during the walk above, not test-only findings:
   Sessions 139-145 ms. Timeline has no real-Chrome-on-Mac measurement yet
   (the probe that produced the rest of these numbers clicked the bare tab
   rather than drilling in from a Sessions row, the same #242 trap below) —
-  don't assume it is fast or slow from this round's data.
+  don't assume it is fast or slow from this round's data. **Naming caveat,
+  not a retraction of the numbers above:** issue #197 is OPEN, rescoped
+  2026-10-13 after its own VM-harness figures turned out to be measuring
+  the harness, not the product. In the course of that, the owner recorded
+  that what this project calls "paint latency" — `lastMount.at`, read right
+  after `view.mount()` returns (`web/static/lib/builders/view-manager.js`)
+  — is actually **mount** completion, taken before ECharts has actually
+  painted; `ttfp_ms` (`tests/ui_live_smoke.py`) uses the same hook. The
+  numbers above come from that same instrument, so they likely understate
+  true visual paint time by some amount; #197 is now specifically about
+  measuring real paint, in Safari, on the demo machine, and is not closed
+  on it yet.
   - **Separately, `top_queries` (the server-side endpoint behind the
     Queries tab) has latency that tracks the requested window, not a fixed
     constant** — 14 ms at 60 s, 70 ms at 5 min, 391 ms at the demo's
@@ -504,8 +526,21 @@ during the walk above, not test-only findings:
 - **#242** — A previous diagnostic walk's claim that Timeline itself takes
   30 s to paint is **retracted**: the probe was timing the "select a
   session" prompt from a bare tab click (see §4), not a chart. There is no
-  known Timeline paint defect. The same issue's Waterfall-coverage finding
-  is explained by the same #222 recency-slice bug, not a missing capture.
+  known Timeline paint defect. **Correction to an earlier version of this
+  entry:** the same walk's Waterfall-coverage finding (slowest completed
+  execution 0.326 ms, under the 500 ms floor) is **not** the #222
+  recency-slice bug — #222's own text says sorting by duration doesn't
+  help when nothing in the window is slow. #242 is now CLOSED, fixed by
+  giving the workload a genuinely slow statement (`c0ab0e0`) — **but that
+  fix is in `demos/workload.sh`**, the script `demos/capture-trace.sh` uses
+  to record the README GIFs, **not** `tests/live_loop_workload.py`, the
+  script this runbook's §2.3 actually runs for the live walk. Whether the
+  live walk's Waterfall tab clears the 500 ms floor therefore still rests
+  on `live_loop_workload.py`'s own `pg_advisory_lock` hold shapes (up to
+  3.0 s, added 2026-10-07 specifically to restore duration spread for
+  Waterfall/Histogram) — plausible, but **not verified in this repo** for
+  this specific floor. Flagging rather than asserting either way; watch
+  Waterfall during §4 step 9 rather than assuming it from this issue.
 
 ## Open questions for the owner (collected)
 

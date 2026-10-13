@@ -519,6 +519,14 @@ tr.selected-execution td { background: #173653; }
   padding: 6px 14px; color: #ffd166; font-size: 11px; background: #312b18;
 }
 .chart-notes:empty { display: none; }
+/* #384: a panel caption that says what a column MEANS is not an honesty note
+ * about incomplete data — amber is reserved for the latter, and spending it
+ * on permanent explanatory text is how an amber bar stops being read. Quiet
+ * gray, same metrics, no background. */
+.panel-caption {
+  padding: 2px 14px 8px; color: #8a8a9e; font-size: 11px; line-height: 1.4;
+}
+.panel-caption:empty { display: none; }
 .scatter-shell > .chart-notes, .matrix-shell > .chart-notes {
   position: absolute; top: 37px; right: 20px; z-index: 4;
   max-width: 520px; border-radius: 3px; background: rgba(49,43,24,0.92);

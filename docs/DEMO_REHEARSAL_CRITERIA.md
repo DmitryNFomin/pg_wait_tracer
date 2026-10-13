@@ -113,8 +113,9 @@ number) — measured once, on today's 4-vCPU `cx33`, with a comfortable 9.00-
 vs-4 margin; a future box-class change moves this gate's difficulty, so
 treat that as a deliberate decision, not a surprise discovered mid-rehearsal.
 
-A rehearsal run on a different workload, client count, PG version, box class or
-**tag** (see "The sequence, and what stops it from being rolled" below) is a
+A rehearsal run on a different workload, client count, PG version, box class,
+**sha, or tag** (see "The sequence, and what stops it from being rolled"
+below — sha pre-tag, tag once one is cut, per the 2026-10-13 amendment) is a
 different experiment and does not count toward the sequence.
 
 ## The demo configuration (owner, 2026-09-28)
@@ -450,14 +451,10 @@ checked first and independently:
   why no worktree in this repo's local clone had a matching `summary.json`:
   the nearest candidate found (`aas-agreement-and-retention` worktree,
   `derived=2.3617 time_model=2.3624`, `ok: False`) is a different, older,
-  failing run, not this one. **Doc vs. code,
-  deliberately not closed here**: this branch is docs-only, so
-  `tests/demo_rehearsal_lib.py`'s `AAS_FLOOR_PROVISIONAL = 0.5` constant is
-  untouched — the gate itself still enforces 0.5 today. Per this project's
-  own rule ("if a document and the code disagree, the document changes
-  here; a code change is a separate branch"), moving the enforced floor to
-  1.15 is a follow-up code change on its own branch, not part of this
-  commit.
+  failing run, not this one. **Doc vs. code, now settled**:
+  `tests/demo_rehearsal_lib.py`'s enforced `AAS_FLOOR` constant is **1.15**
+  (the `AAS_FLOOR_PROVISIONAL = 0.5` name and value are gone) — the gate
+  enforces exactly the floor this doc states.
 - all 11 tabs reached and rendered;
 - the daemon process alive for the whole window.
 
@@ -474,11 +471,28 @@ checked first and independently:
   - **Per-class wait CPU, not a DB-Time fraction.** `Timeout:PgSleep` and
     `Lock:relation` are pure sleeps: a correct implementation records
     essentially no on-CPU time inside them (cpu/dur well under 0.01%,
-    bounded by at most a few deadlock-timeout wakeups). **A PgSleep or
-    Lock event carrying cpu_ns on the order of a millisecond is the
-    over-attribution signature** — a stale wait label, or an `on_cpu_ts`
-    that was never closed. That is the check; the per-class figure is the
-    discriminating quantity.
+    bounded by at most a few deadlock-timeout wakeups). **Restated
+    2026-10-13 — criteria change, measured before written (see the RESOLVED
+    paragraph below for the measurement that drove it):** the signature is
+    `cpu_ns` approaching `duration_ns`, not `cpu_ns` alone: a stale wait
+    label or an unclosed `on_cpu_ts` books most of the wait's wall time as
+    CPU. Flag a pure-sleep event only when BOTH hold — **`cpu_ns` >=
+    824,430 ns AND `cpu_ns`/`duration_ns` >= 50%**. Report per-event maxima
+    of both quantities separately; a class mean hides the outlier. **Why
+    the conjunction, not either half:** absolute-only fires on a benign
+    3.004 s sleep carrying 923,834 ns at **0.031%** of its own duration —
+    the event is just long, not over-attributed; ratio-only would
+    false-positive on a 0.159 ms uncontended advisory-lock acquisition
+    carrying 52,661 ns at **33.148%** — a real but tiny absolute cost, not
+    a stuck CPU clock. Worst observed ratio is 33.148%, giving ~1.8x
+    margin to the 50% line; the absolute threshold stays at 824,430 ns,
+    unmoved by this restatement. This is not a weakened bar: the previous
+    wording ("a PgSleep or Lock event carrying cpu_ns on the order of a
+    millisecond is the over-attribution signature") named no threshold at
+    all, and a literal reading of it would have flagged the 923,834 ns
+    event above while a genuine 33.148%-ratio event sat unremarked in the
+    same pair of captures — the restated test catches the real case and
+    correctly clears the benign one.
   - `cpu_clamped_ms` ≈ 0. Note its limit: the wait branch never clamps
     `cpu_ns > dur` (`src/compute.c:810`), so `cpu_clamped_ms = 0` vouches
     for CPU gaps only, never for wait events.
@@ -498,108 +512,143 @@ loose to gate on (~1.2 s for that run). Baselining the DB-Time fraction instead
 would be illegitimate: it is a property of the workload's IO mix, not of the
 implementation, so it cannot separate a defect from a change of mix.
 
-  Per-class wait CPU is not currently on the wire. **BLOCKED — method
-  mis-specified (owner, box access, review round 4), not a box-access
-  problem.** This paragraph used to say to settle it via
-  `tests/cross_validate.c` over "any full-mode gate-box trace". That method
-  cannot work: `tests/cross_validate.c`'s own header says it "reads a
-  **tiered-mode** trace directory that contains BOTH sampled blocks
-  (always-on) and transition blocks (escalation window)" and compares the
-  two over their overlap window — it needs SAMPLES blocks to compare
-  against. **Full mode produces none.** Run against the retained 35-minute
-  full-mode trace from the first clean rehearsal (below):
+  Per-class wait CPU is still not on the wire in the `time_model` response
+  — the measurement below is a direct offline raw-trace walk, run once, not
+  a check wired into `demo_rehearsal.py`. **RESOLVED 2026-10-13 — answered
+  by changing the instrument, not the bar.** This paragraph used to say to
+  settle it via `tests/cross_validate.c` over "any full-mode gate-box
+  trace"; that finding stands as the reason the original method could never
+  work, not as an open blocker: `tests/cross_validate.c`'s own header says
+  it "reads a **tiered-mode** trace directory that contains BOTH sampled
+  blocks (always-on) and transition blocks (escalation window)" and
+  compares the two over their overlap window — it needs SAMPLES blocks to
+  compare against, and **full mode produces none.** Confirmed against the
+  retained 35-minute full-mode trace from the first clean rehearsal:
   `pgwt-server --dump` on it reports `4432286 transitions, 0 samples,
   Fidelity: exact`; `cross_validate` on the same trace exits with `ERROR: no
   sample blocks — sampler produced nothing` (`tests/cross_validate.c`'s own
-  message, line ~149) — not a flaky run, a structural mismatch between the
-  tool's input contract and full mode's output. **What would actually
-  answer this:** either a per-event `cpu_ns` extraction tool for full-mode
-  traces, which does not exist today, or a deliberate `--mode tiered`
-  capture — which is then not the demo configuration (`--mode full`), so it
-  would answer a different question. **Not invented, not built here**: no
-  number is recorded for the max-`cpu_ns`-on-`Timeout:PgSleep` figure this
-  row originally asked for, and the tool is not written in this docs-only
-  commit.
+  message, line ~149) — a structural mismatch between the tool's input
+  contract and full mode's output, not fixable by re-running it against a
+  different full-mode trace.
 
-  **Related data point, same dump, corroborates the Off-CPU\* section
-  above:** over the whole 1875.8 s capture, `CPU (waiting for a core)` was
-  **746.5 ms against 4,170,804.2 ms of DB Time — 0.018%**
-  (746.5 / 4170804.2 × 100, checked). That is the real-world size of the
-  quantity the 10% cap gates, on the demo workload, over a full run, not
-  just the per-5-minute-window figures above — consistent with, not a
-  substitute for, the <0.1% (n=7, one run) already recorded there.
+  **What actually answered it:** a per-event `cpu_ns` extractor that walks
+  a full-mode raw trace directly (not `cross_validate.c`), built and run on
+  `agent/cx-25-raw-perclass-cpu` @ `853cfc1`
+  (worktree `.claude/worktrees/agent-a98a1ee2ed1061c28`), evidence under
+  `tests/results/issue25-perclass-raw-scan/`. Two full-coverage walks, both
+  cross-verified against block headers *and* `pgwt-server --dump`, 0
+  unknown `cpu_ns` in either:
+  - **Oct-2 capture:** 4,307,056 / 4,307,056 records, 1052/1052 blocks.
+    `Timeout:PgSleep` 326 events, max 923,834 ns at **0.0308%** ratio.
+    `Lock:relation` 436 events, max ratio **0.0148%**.
+  - **Oct-13 current-workload capture:** 7,385,206 / 7,385,206 records,
+    1804/1804 blocks. `Lock:advisory` 179 events, max absolute 210,008 ns
+    on a 1.000 s hold (0.021%), max ratio **33.148%** on a 0.159 ms
+    acquisition (52,661 ns absolute). `Lock:relation` 392 events, max ratio
+    0.025%. `Lock:tuple` 1 event, 0.465%.
 
-- Off-CPU\* ≤ 10% of DB Time on a box where clients ≤ cores. **RETRACTION (this
-  commit, review round 3):** an earlier version of this paragraph said the
-  gate comment's "4.92 pp" was unverifiable because it does not appear as a
-  literal string anywhere on `agent/observer-bias-study` or its four
-  predecessor branches. That check was real but its conclusion was wrong: the
-  figure **is** derivable, just not as a literal substring. **4.92 pp IS
-  the sum of two cells `docs/OBSERVER_BIAS.md` writes down explicitly** (that
-  branch, ~lines 185-188; data in `tests/results/issue115_xtab/`): run-queue
-  delay while still marked as **waiting** (+2.53 pp) plus run-queue delay
-  while marked **idle**/`ClientRead` (+2.39 pp) = **4.92 pp**, exactly what
-  `tests/demo_rehearsal_lib.py`'s gate comment calls "the measured run-queue
-  (waiting-for-a-core) share". Retracting "confirmed unverifiable" — it was
-  not invented, it is a sum, and the sum is correct.
+  **Combined: 1,850 pure-sleep events, zero showing over-attribution** by
+  the restated test above. Contrast: 57 of 64 recorded threshold crossings
+  sit at ratio **≥50%** at millisecond scale, all in IO/Client classes
+  where CPU legitimately dominates — that is what the real signature looks
+  like, and it is visibly absent from every pure-sleep event measured.
 
-  **The real flaw is sharper than provenance, and it is three separate
-  problems, not one:**
-  1. **Regime.** Those two cells come from a **saturated** run — 8 pgbench
-     clients on a 4-vCPU box (`docs/OBSERVER_BIAS.md`'s own "Eight backends
-     only" caveat) — while the gate's own comment scopes the bound to
-     "clients ≤ cores". The same study's unsaturated analogue ("2.72 pp
-     definitional", which bounds the run-queue-specific cells from above) is
-     **≤2.72 pp, not 4.92**. The number is measured on the opposite regime
-     from the one it gates.
-  2. **Unit.** The 4.92 pp is percentage points of **backend wall-time** — a
-     kernel-vs-our-exact-tier CPU-or-runnable share (the study's 67.99% vs.
-     62.27% headline) — **not percentage points of DB Time**, which is what
-     `time_model_offcpu_cap_ok` actually divides by. The gate comment's own
-     phrase "4.92 percentage points of DB Time" names the wrong denominator
-     for the number it cites.
-  3. **Quantity — the serious one.** Neither cell flows into Off-CPU\* at
-     all. `src/compute.c`'s Off-CPU\* is the residual `DB Time − CPU\* − Σ
-     waits` — time inside DB Time, actively executing, attributable to no
-     known wait class. Run-queue delay while a backend is already marked
-     **waiting** is booked under that open wait event (inside Σ waits, not
-     the residual); run-queue delay while marked **idle**/`ClientRead` is
-     outside DB Time entirely (DB Time only counts active execution). The
-     four-cell decomposition this number comes from never measures run-queue
-     delay in the one state Off-CPU\* actually represents: active,
-     non-waiting, but off a core. **The citation bounds a different quantity
-     than the one the gate enforces**, not merely the wrong regime.
+  **Measured envelope, recorded but not used to move the threshold:**
+  sleep-class p99 rose from 79-91 µs (Oct-2 capture) to 171-203 µs (Oct-13
+  capture) as the workload changed between the two captures. The unchanged
+  824,430 ns absolute threshold is therefore now **4.05x** the worst
+  sleep-class p99, down from 10x against the Oct-2 figures alone — the
+  envelope widened and the threshold held anyway; it was neither
+  retightened when the margin was 10x nor loosened now that it is 4x.
 
-  **Honest statement of what this gate is:** the Off-CPU\* cap catches a
-  dropped wait class worth ≥10% of DB Time. The demo configuration measured
-  **<0.1%** (n=7 samples, one run). The 10% has **no measured basis in the
-  gated quantity** — only a loose upper bound borrowed from a saturated
-  run-queue figure that measures something else. **What it does not catch,
-  concretely:** a dropped class smaller than 10% of DB Time passes green,
-  and this demo's own workload contains such classes —
-  `LWLock:WALWrite` ≈3.7%, `Lock:tuple` ≈1.5% — either could silently vanish
-  from capture and this check would still read `ok`.
+  **Unmeasured, recorded as unmeasured rather than folded into "clean":**
+  `Lock:extend` had 0 events in the Oct-13 capture (2 in an earlier,
+  unretained capture — statistically empty, not evidence either way).
+  `Timeout:PgSleep` had 0 events in the Oct-13 capture because the workload
+  dropped `pg_sleep` on 2026-10-06 (§2 above); it is covered only by the
+  Oct-2 capture's 326 events above, not by current-workload data.
 
-  **Non-gating, worth recording, not fixing here:** the whole-window
-  diagnostic reports `has_measured_cpu=False` (no Off-CPU\* signal at that
-  granularity) while the same response is labelled `fidelity: exact` — its
-  Off-CPU\* check is vacuous at exactly the point it claims exact fidelity.
-  Noted for whoever next touches this response shape; out of scope here.
+  **This is a criteria change, made the legitimate way** (this document's
+  own rule: a criteria change is fine "by a commit that says so"). It does
+  not weaken the bar: a literal reading of the old wording ("cpu_ns on the
+  order of a millisecond") would have flagged the Oct-2 923,834 ns PgSleep
+  event — genuinely millisecond-scale in absolute terms — as the thing it
+  is defined to catch, while the real 33.148%-ratio advisory-lock event sat
+  in the same pair of captures unremarked by an absolute-only reading. The
+  restated conjunction clears the first and would catch the second. The
+  measurement preceded the restatement, not the reverse: both captures
+  above were walked first, the false-fire and false-negative were found,
+  and only then was the wording rewritten to name the mechanism it needs to
+  detect.
 
-  **Do not tighten the cap.** A 1-2% bound would have 25-50x headroom over
-  today's measured 0.04%, but this is **one run** — no second measurement
-  shows cx33 run-queue noise reliably stays under a tighter number, and
-  changing a gating constant on n=1 hours before the tag is exactly the move
-  this project has refused all week. **Keep `OFFCPU_CAP_PCT = 10.0`**,
-  labelled honestly as a provisional catastrophic-loss tripwire rather than
-  a calibrated bound, per the code comment's own existing "FIRST bound, not
-  a permanent one" framing.
+  **Related historical data point, same dump:** over the whole 1875.8 s
+  capture, `CPU (waiting for a core)` was **746.5 ms against 4,170,804.2 ms
+  of DB Time — 0.018%** (746.5 / 4170804.2 × 100). This predates the
+  2026-10-07 load addition; it does not calibrate the current workload.
 
-  **Owner decision (recorded, not an open question): #115
-  (`agent/observer-bias-study`) is NOT landing before the tag.** It would not
-  even validate the clients ≤ cores premise this gate needs — problem 1
-  above is a different box regime that #115 does not re-measure — and it is
-  a large, late change this close to the tag.
+- **Off-CPU\* is reported, not gated (replacement for #386, 2026-10-13).**
+  `evaluate_time_model_window` now retains an `offcpu` diagnostic containing
+  physical `offcpu_ms`, `db_time_ms`, and percentage, with `ok: null` and
+  `gating: false`; it has no `offcpu_cap` pass/fail sub-check. The existing
+  conservation, raw-path, nonzero-DB-Time, CPU-clamp, workload-signature and
+  AAS gates remain. This criteria change resets the clean-attempt counter;
+  the reported figures below are calibration evidence, not counted attempts.
+
+  **Settled decomposition and provenance:** [#386's “SOLVED by offline
+  decomposition” comment](https://github.com/DmitryNFomin/pg_wait_tracer/issues/386#issuecomment-6151275012),
+  with tool and transcript under `tests/results/offcpu_decomposition/` on
+  `agent/offcpu-run-delay-decomposition`. On the retained **gate-1, 1834 s**
+  capture, **96.1%** of Off-CPU\* is the eight-session
+  `_smoke_lockmgr_fanout` `SELECT count(*)` tick (96.3% on round-2):
+  **186 bursts**, about **1.1 s every 10 s**, eight runnable backends on
+  **four shared vCPUs**. Between bursts Off-CPU is effectively zero.
+  This is physical contention introduced by the 2026-10-07 workload addition,
+  outside the former clients ≤ cores premise.
+
+  The gate's own **60 s window at all 1775 placements** across that clean
+  run gives **min 5.08%, median 8.96%, p95 11.25%, max 13.52%**.
+  **405/1775 (22.8%)** exceed 10%; the old bound lies near p77 and the
+  estimated probability of seven consecutive passing windows is **0.16**.
+  Window phase determines the verdict; this is not a product-health signal.
+
+  **Whole-capture alternative, with measured derivation:** burst-magnitude
+  CV **0.42** and **6.09 bursts/window** predict window CV
+  `0.42 / sqrt(6.09) ≈ 0.170` (unrounded decomposition prediction **0.169**,
+  observed **0.177**). Across **186 bursts**, expected CV is
+  `0.42 / sqrt(186) = 0.0308` (**3.08%**); scaling the observed window CV
+  gives `0.177 × sqrt(6.09/186) = 0.0320` (**3.20%**).
+  Starting from that capture's measured **8.405%** whole-capture share,
+  a candidate mean + three-CV upper envelope is
+  `8.405% × (1 + 3 × 0.0308) = 9.18%` (9.21% using observed CV).
+  **This is a model-based contention envelope, not a calibrated probability
+  or a correctness bound; it is not enforced.** Aggregation reduces phase
+  noise but does not separate a defect from contention: round-2's
+  whole-capture share was **2.779%**, versus gate-1's **8.405%**.
+
+  **Concurrency alternative:** instantaneous runnable count tracks this
+  mechanism (passing window samples max **2**, other windows mean
+  **3.33–4.50**, max **7–15**), but still measures the box, not attribution
+  correctness. Neither alternative can usefully gate product correctness
+  here. **No replacement correctness cap is registered.** This deliberate
+  reporting-only decision replaces the unsupported 10% placeholder; the
+  previous 4.92 pp citation was a real sum (2.53 + 2.39 pp), but measured
+  another regime, denominator and quantity. **The recorded owner decision
+  that #115 (`agent/observer-bias-study`) is not landing before the tag
+  remains unchanged.**
+
+  **What the replacement does NOT detect:** a dropped wait label moves wall
+  time from a wait into a CPU gap and **raises Off-CPU\*** while the
+  accounting still closes. The separate **per-class wait-CPU scan (queue
+  item 2.5, resolved above)** supplies the attribution evidence; Off-CPU
+  magnitude is not a dropped-label detector.
+
+  Each raw window's physical magnitude stays in the saved conservation
+  samples. The whole-capture **summary path has no Off-CPU signal**, even
+  when labelled `fidelity: exact`; legacy/sampled data is also unavailable.
+  Both report `available: false` and null magnitude/percentage, not measured
+  zero or PASS. Below the DB-Time floor the percentage is null and the
+  independent conservation gate still fails. Sparse trailing windows are
+  not averaged and presented as a whole-capture measurement.
 
 **Known, unreproduced item: #202** (owner, 2026-09-30 — recorded, not closed).
 `test_multi_window.py`'s own conservation check once measured class rows
@@ -743,7 +792,8 @@ substitute one family for the other.
   on the strength of it.** Moving a gating constant in either direction on
   n=3, hours before a tag, is exactly the kind of after-the-fact adjustment
   this whole document exists to prevent — the same reasoning that kept
-  `OFFCPU_CAP_PCT` at 10% in §3 above and kept this bound at 3000 ms when
+  the old 10% Off-CPU placeholder (now superseded by §3’s reporting-only
+  decision) and kept this bound at 3000 ms when
   the margin was thin. A future reader should see 3000 ms as a deliberate,
   unchanged choice, not something nobody revisited. Transitions' own spread
   (697–893 ms, a 196 ms range across 3 runs) is now comfortably inside the
@@ -882,11 +932,19 @@ substitute one family for the other.
   were dropped", never "nothing was missed". Closing this needs `src/` work and
   is scheduled after the demo.
 - "The daemon was alive" is not "the daemon captured everything".
-- One-time pre-demo overhead envelope: n=3 paired A/B pgbench TPS runs with
-  and without the tracer, in full mode with the demo workload on the demo box;
-  record the result and envelope before counted attempt one. The audience will
-  ask for this number; a rehearsal capture runs only the with-tracer arm and
-  cannot produce it.
+- **One-time pre-demo overhead envelope: DONE, measured 2026-10-13 on
+  gate-1, PG18.** n=3 paired A/B, interleaved, `--mode full`: pgbench +
+  `tests/live_loop_workload.py` **unthrottled at 4 clients** (the criteria's
+  own client count) gave **30.31% ± 0.58pp**, inside the registered
+  ~28-32% band below. `--rate=25` was **deliberately dropped** for this
+  measurement: under a rate cap both arms are held to the same TPS ceiling
+  by the cap itself, not by the tracer, so TPS-based overhead degenerates
+  toward zero regardless of the real cost — this result is the demo
+  workload's client count but not its throttle, and is labelled that way.
+  A separate n=3 A/B at 8 clients with `demos/workload.sh` (the saturated
+  regime, §3 above) gave 39.41% on gate-1 / 34.63% on gate-2 — kept as
+  secondary context only, not compared directly to the 30.31% figure.
+  Full untailed logs: `tests/results/overhead-envelope/ENVELOPE.md`.
 - **Overhead band, current levels accepted (owner, 2026-09-30): "ok current
   level is accepted, we will work on that afterwards".** This records the
   measured band rather than setting a target the demo must hit — it does not
@@ -938,17 +996,17 @@ left to be discovered.
 | §1 run.id asserted against staleness | yes — not by this branch directly: `agent/rehearsal-bypass-suite` built its own `verdict_is_fresh` gate, then found at rebase time that master's `tests/demo_rehearsal_orchestrator_lib.validate_results_dir` (#176) already covers the identical concern, more thoroughly (also checks run.id's numeric format and summary.json's required keys) — removed the redundant duplicate rather than keep two |
 | §2 samples > 0, DB Time > 0 | yes (`capture_has_events_ok`, `time_model_conservation`'s `MIN_DB_TIME_MS` floor, checked before any ratio) |
 | §2 `Lock:relation` + `Lock:advisory` present (was `Timeout:PgSleep`; changed 2026-10-06, see §2 above) | yes (`workload_signature_present_ok`) |
-| §2 AAS ≥ 0.5 on the recent window | yes (`aas_floor_ok`), but **the gate still enforces the OLD provisional 0.5** — the doc's own floor is now settled at 1.15 (see §2's own paragraph above), `tests/demo_rehearsal_lib.py`'s `AAS_FLOOR_PROVISIONAL` constant is deliberately untouched by this docs-only commit, and moving it to 1.15 is a follow-up code change on a separate branch |
+| §2 AAS ≥ 1.15 on the recent window | yes (`aas_floor_ok`) — the gate enforces the settled **1.15** (`tests/demo_rehearsal_lib.py`'s `AAS_FLOOR`; the old `AAS_FLOOR_PROVISIONAL = 0.5` is gone) |
 | §2 all 11 tabs reached, daemon alive throughout | yes (`build_demo_summary`'s `expected_tabs_per_pass` floor; `_assert_daemon_alive`, mirrors the existing workload-alive fail-safe) |
 | §3 conservation identity | yes, sampled every ~5 minutes through the capture (`conservation_sample_interval_s`), every sample must pass — not once at the end |
-| §3 `wait_gap_cpu_ms` ≤ 0.1% | **removed, not implemented** — corrected 2026-09-27/28: this was never a valid over-attribution detector (the BPF measures on-CPU across the whole wait-start/wait-end span, so an IO wait is legitimately CPU-bearing; two live runs measured 0.376–0.392%, expected on a correct implementation). The real per-class signature (a `Timeout:PgSleep`/`Lock:relation` event carrying millisecond-scale `cpu_ns`) needs data not on the wire in the `time_model` response today — reported as a gap, not proxied from the aggregate |
+| §3 `wait_gap_cpu_ms` ≤ 0.1% | **removed, not implemented** — corrected 2026-09-27/28: this was never a valid over-attribution detector (the BPF measures on-CPU across the whole wait-start/wait-end span, so an IO wait is legitimately CPU-bearing; two live runs measured 0.376–0.392%, expected on a correct implementation). The real per-class signature (`cpu_ns` approaching `duration_ns` on a `Timeout:PgSleep`/`Lock:*` event) still has no field on this wire — **measured offline instead, 2026-10-13**, via a direct raw-trace walk, not through `time_model`: see §3's RESOLVED per-class paragraph above for the figures and the restated threshold (`cpu_ns` >= 824,430 ns AND ratio >= 50%, both required). Not a wired automatic gate inside `demo_rehearsal.py` |
 | §3 `cpu_clamped_ms` ≤ 0.1% | yes (`cpu_clamped_ok`), scope corrected in its own code comment: vouches for CPU-class gaps only, never wait events (`src/compute.c`'s wait branch never clamps `cpu_ns > dur`) |
-| §3 Off-CPU\* ≤ 10% | yes (`time_model_offcpu_cap_ok`), but the 10% is a **provisional catastrophic-loss tripwire**, not a calibrated bound — see §3's own corrected paragraph above: its cited "4.92 pp" derivation is a real sum but measures a different regime, unit, and quantity than the gate enforces; demo measured <0.1% (n=7, one run); kept at 10%, not tightened, on n=1 |
+| §3 Off-CPU\* physical magnitude | **reported, not gated** (`time_model_offcpu_diagnostic`, `offcpu.ok: null`, `gating: false`) — #386’s settled decomposition and all 1775 clean-run window placements invalidate the 10% cap. Expected whole-capture CV 3.08–3.20%; candidate 9.18% envelope is contention context only, not a correctness bound. Raw samples retain ms and percentage; unavailable summary/tier data is null, not zero. The independent accounting gates remain |
 | §4 zero known-failing tabs | yes (`build_demo_summary` uses raw `ok`, ignoring the exemption) |
 | §4 blink measured fraction ≥ 0.5 | yes — landed via `agent/blink-anchor-mount-seq` (#209, merged to master), inherited automatically once `agent/rehearsal-bypass-suite` rebased: `demo_rehearsal.py` has no independent blink-measurement code, it fully delegates to `ui_live_smoke.py:run_tab()`, which now calls `blink_sweep_gate_verdict` itself. Pinned with a regression test using real measured numbers (`tests/test_demo_rehearsal_lib.py`, run.id 1790574871: scatter 0.1305, transitions 0.0072–0.0172) |
 | §4 time to first paint, pinned viewport | **SETTLED** (review round 6): bound 3000 ms, global, **≈3.4x margin** (worst observed: transitions at 893 ms) — re-measured after PR #268 (#265) replaced `handle_top_queries`'s O(n^2) bubble sorts with `qsort`; supersedes the pre-#268 figure of queries at 2432 ms / ≈1.2x margin, which is now wrong. Measured ≥3 navigations/tab, real Chrome 154 on the Mac, live full-mode capture on the demo topology, satisfying this criterion's own requirement in full. The bound itself (3000 ms) is unchanged and was neither widened when the margin was thin nor tightened now that it is comfortable — same reasoning both times. `top_queries` latency is separately window-dependent (391 ms at the demo's planned 15-minute window, rising toward 1237 ms at full-capture range on a 2583 s capture) — see the window-dependence finding below this bullet; that is a server-side cost, not a UI paint regression, and is unrelated to the ≈3.4x margin above. Timeline not yet measured by this method (instrumentation gap: bare click, not Sessions-row drill-down — recorded as unmeasured, not a pass). `ttfp_ms` (merged `master`, `fa20067`, issue #245/PR #257) remains measurement-only and gates nothing automatically — `build_tab_result` never reads it into `ok`; the bound above is enforced only by a human reading this document during a counted attempt. Mac-side checklist: still manual sign-off, **deliberately stays qualitative** (paints without a visible spinner) — it has no stopwatch, so it does not independently check the 3000 ms number either; this round's measurement was a one-off script, not the checklist itself. Retracted: the 2026-09-29 contended walk's 30 s Timeline finding measured the "select a session" prompt from a bare tab click, not paint after a Sessions-row drill-down — the same trap this round's Timeline gap repeats at the instrumentation level, not the product level |
 | §5 cross-tab agreement, freshness | partial — VM-side freshness: yes (`freshness_ok`, `info`'s `now_ns` vs `to_ns`); Mac-side visible freshness: manual checklist and human sign-off. Cross-tab agreement: DB-Time leg yes (`cross_tab_db_time_agreement_ok`, `time_model` vs `top_events` for the identical window); AAS leg yes (`bucket_weighted_aas_ok`, `agent/aas-agreement-and-retention`) — a bucket-weighted re-derivation from the `aas` endpoint's own `bucket_ns` over the identical window, compared against `time_model.aas`, wired into `extra_checks["cross_tab_aas_agreement"]` alongside the DB-Time leg. Retracted: the earlier walk's 0.0000% came from an unweighted mean of buckets, which was not that comparison and established no agreement; see `tests/demo_rehearsal_lib.bucket_weighted_aas_ok`'s own comment for why the two formulas diverge whenever the window does not divide the endpoint's `bucket_ns` evenly (the common case) |
-| §6 lost-event counters, overhead envelope | partial — lost-event counters: yes (`daemon_integrity_ok`: `ringbuf_drops_total`/`state_map_full_total`/`seen_query_ids_full_total`, already on the wire via pgwt-server's control proxy, no `src/` change needed; blind spot stated in the code comment: a lost LIFECYCLE event is silent, no counter increments). Overhead envelope: **not yet measured for the demo workload on the demo box**. Correction: the earlier claim that nothing measures full mode was wrong. Every box-check runs `tests/test_overhead.sh --quick` (~10 minutes) via `tests/run_all.sh`; its paired baseline/tracer A/B uses the default pgbench load, pins `--mode full`, and appends to `tests/results/overhead_trend.csv` on the box. The tracked CSV has only a header because `tests/results/` is excluded from box-check's up-rsync; box-generated rows are not synced back or committed. The ~70-minute sweep is the same script without `--quick`; `sampled_overhead_gate.py --mode sampled` runs only for `src/` changes. Retracted: the quick sweep is not a per-attempt requirement or a substitute for measuring the demo workload. Do n=3 paired full-mode A/B TPS runs with the demo workload on the demo box and record the envelope before counted attempt one; the 40-minute rehearsal retained neither an A/B baseline nor even its with-tracer `tps =` line (cleanup tailed 20 lines and deleted the full log) |
+| §6 lost-event counters, overhead envelope | lost-event counters: yes (`daemon_integrity_ok`: `ringbuf_drops_total`/`state_map_full_total`/`seen_query_ids_full_total`, already on the wire via pgwt-server's control proxy, no `src/` change needed; blind spot stated in the code comment: a lost LIFECYCLE event is silent, no counter increments). Overhead envelope: **measured 2026-10-13** — 30.31% ± 0.58pp (n=3, 4 clients, unthrottled, gate-1, inside the registered band), see §6's own paragraph above and `tests/results/overhead-envelope/ENVELOPE.md`. Every box-check also still runs `tests/test_overhead.sh --quick` (~10 minutes) via `tests/run_all.sh` as an ongoing regression check (default pgbench load, `--mode full`, appends to `tests/results/overhead_trend.csv` on the box, not synced back or committed) — that is a different, continuous measurement and does not substitute for this one-time demo-workload figure, which is now recorded separately |
 | §7 no test exited 126/127 | **partial, and this is a human-readable aid, not an automated gate**: `tests/demo_rehearsal.sh`'s `report_early_exit` labels a dead subprocess's 126/127 exit code in the log for a human reading it afterward. It does NOT change the script's own exit code (every call site already `exit 1` regardless of the labeled reason) and has no test coverage of its own — reviewer finding, 2026-09-28. Do not read this row as "126/127 fails the gate automatically"; it already did, via the pre-existing `kill -0` + `exit 1` checks, which is why this addition changes nothing observable except the log's wording |
 | §8 known-failing lines read by hand | manual by construction; not applicable to `demo_rehearsal.py` itself, which grants zero known-failing exemptions (§4 row above) -- nothing here for a human to hand-verify against an issue |
 
@@ -976,27 +1034,59 @@ that captured nothing used to score clean) is now FIXED on
   happened by then, the result is "not clean" and that is what the owner is
   told. Re-rolling until two land in a row is the same after-the-fact selection
   this document exists to prevent.
-- **The two clean runs must be on the same tag, not merely the same tree.**
-  Owner, 2026-09-28: "instead of code freeze we will make a tag on master when
-  it will be demo ready and will continue development" -- a tag pins the tree
-  the way "same commit, no commit in between" used to, without requiring
-  master itself to stop moving:
-  - When master is judged demo-ready it is **tagged**; the demo machine is
-    built from that tag, and every counted rehearsal runs **against that
-    tag**, from a worktree checked out at it — never from master HEAD, which
-    keeps moving.
-  - A counted attempt **names the tag it ran against**, alongside the box
-    class, PG version, pgbench parameters, and the display identity and
-    Chrome/macOS versions already recorded in the verdict.
+- **AMENDMENT (owner, 2026-10-13): rehearsals and the GIF come BEFORE the tag,
+  superseding the tag-first ordering this bullet originally stated.** The
+  owner ruled this twice, explicitly — "tag after rehersals/walks and gif",
+  and earlier chose the same ordering when offered both. Per this file's own
+  rule (above: "changed by a commit that says so and the attempt counter
+  resets"), this is a correction, not a reinterpretation, and the
+  clean-attempt counter resets with it.
+
+  **Why the original rule existed, and what carries over.** The tag-first
+  rule existed so two counted attempts could not be attributed to a moving
+  target — master keeps changing, so "two clean attempts" is meaningless
+  without an immutable reference both attempts (and the GIF) can be pinned to
+  and shown to share. **That requirement does not go away.** Only the timing
+  of *naming* the immutable reference moves: from a tag cut before the first
+  attempt to a commit sha recorded as each attempt runs, before any tag
+  exists.
+
+  **The new sequence:**
+  1. Demo-blocking fixes land on master.
+  2. Two clean rehearsals run against the **same candidate master commit**
+     — pinned by its **sha**, not a tag (none exists yet) — from a worktree
+     checked out at that sha, never from a moving master HEAD.
+  3. The Mac-side video walk and its analysis, against that same sha.
+  4. **Owner's sign-off.**
+  5. GIF cut, from that same sha's rehearsal/walk material.
+  6. **Owner tags** the rehearsed commit — naming, after the fact, the sha
+     that already passed steps 2-5, not before it.
+
+  **Provenance, restated against a sha instead of a tag:**
+  - A counted attempt **names the commit sha it ran against**, alongside the
+    box class, PG version, pgbench parameters, and the display identity and
+    Chrome/macOS versions already recorded in the verdict. The `--tag` CLI
+    flag and `summary["tag"]` field (`tests/demo_rehearsal_lib.resolve_tag`,
+    landed on `agent/round3-demo-fixes`) already exist for this: when a tag
+    exists it is recorded there, but under this ordering no tag will exist
+    yet, so `resolve_tag` correctly returns `None` for `summary["tag"]` — per
+    its own docstring, it is never invented or substituted with a sha in
+    that field. **A null `tag` with the sha recorded elsewhere in the
+    attempt's record (e.g. the run's own `git rev-parse HEAD`, logged
+    alongside the verdict) is the correct, honest state pre-tag — it is not
+    a gap to be papered over.**
   - Two clean attempts count as consecutive **only if they ran on the same
-    tag**.
-  - **Landing a fix and re-tagging resets the clean-attempt counter to
-    zero.** An early or hopeful tag costs the whole sequence, so the tag is
-    cut when the tree is genuinely ready, not to start the clock.
-  - Development continues on master in parallel and does not disturb an
-    in-flight sequence — that is the point of the tag, and it removes the
-    objection that with several branches in flight no two runs could ever
-    share a tree.
+    sha** — the identical requirement as "only if they ran on the same tag"
+    before, with sha standing in until a tag exists.
+  - **Any further merge to master after attempt 1 invalidates both attempts
+    and resets the clean-attempt counter to zero**, exactly as landing a fix
+    and re-tagging did under the old ordering: a new sha is a new candidate.
+  - Once the owner tags the rehearsed sha (step 6 above), that tag is a
+    second, permanent name for the commit that already passed — tagging does
+    not itself trigger a new rehearsal requirement.
+
+  **Caps are unchanged**: at most 4 counted attempts, at most 2 voided (both
+  stated below, unmodified by this amendment).
 
 ## Provenance
 

@@ -1,0 +1,13 @@
+run,arm,tps
+1,A,=== A1 (baseline, no tracer) start 2026-10-13T12:20:41+00:00 ===
+1745.361915
+1,B,=== B1 (with tracer --mode full) start 2026-10-13T12:21:41+00:00 ===
+1044.169656
+2,A,=== A2 (baseline, no tracer) start 2026-10-13T12:22:43+00:00 ===
+1717.156381
+2,B,=== B2 (with tracer --mode full) start 2026-10-13T12:23:43+00:00 ===
+1024.187341
+3,A,=== A3 (baseline, no tracer) start 2026-10-13T12:24:46+00:00 ===
+1678.180426
+3,B,=== B3 (with tracer --mode full) start 2026-10-13T12:25:46+00:00 ===
+1045.625230
