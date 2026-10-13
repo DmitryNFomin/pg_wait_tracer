@@ -52,9 +52,9 @@ WATERFALL_QUERY_THRESHOLD_S = 10.0
 # never attributed to its own class row, that time is silently absorbed
 # into Off-CPU* and the sum still closes to within this tolerance. A
 # dropped wait class is INVISIBLE to this check alone (see
-# time_model_over_attribution_ok / time_model_offcpu_cap_ok below for the
-# checks that actually have power against that bug class). This identity
-# only catches OVER-attribution large enough to drive the residual
+# the per-class wait-CPU scan in criteria section 3 / queue item 2.5 for
+# the separate attribution evidence; Off-CPU magnitude cannot gate it).
+# This identity only catches OVER-attribution large enough to drive the residual
 # negative past the clamp, or a genuinely corrupted rows array.
 TIME_MODEL_TOLERANCE_PCT = 1.0
 
@@ -322,49 +322,64 @@ def cpu_clamped_ok(cpu_clamped_ms, db_time_ms,
     return ok, detail
 
 
-# Off-CPU* ("CPU (waiting for a core)" -- issue #190's recolour) is ITSELF
-# a residual: a dropped wait class's time flows INTO it, not out of the
-# identity above, so an anomalously large Off-CPU* is the closest thing to
-# a direct under-attribution detector available without new instrumentation.
+# Off-CPU*: deliberately REPORTED, NOT GATED (#386, 2026-10-13).
+# Provenance ("SOLVED by offline decomposition"):
+# https://github.com/DmitryNFomin/pg_wait_tracer/issues/386#issuecomment-6151275012
+# Gate-1 retained capture, 1834s; tests/results/offcpu_decomposition/ on
+# agent/offcpu-run-delay-decomposition. The settled measurement attributes
+# 96.1% of Off-CPU* to _smoke_lockmgr_fanout SELECT count(*): 186 bursts,
+# ~1.1s every ~10s, eight runnable backends on four shared vCPUs.
+# All 1775 placements of the gate's own 60s window give min/median/p95/max
+# 5.08/8.96/11.25/13.52%; 405 (22.8%) exceed the former 10% cap.
 #
-# CORRECTED, review round 3 (#264): this used to claim the bound was double
-# a "4.92 percentage points of DB Time" run-queue share measured where
-# "pgbench clients <= physical cores". Both clauses were wrong. The 4.92 pp
-# figure is real -- it is the sum of two cells docs/OBSERVER_BIAS.md writes
-# down on the unmerged agent/observer-bias-study branch (run-queue delay
-# while waiting, 2.53 pp, plus run-queue delay while idle/ClientRead,
-# 2.39 pp) -- but it is measured on a SATURATED box (8 clients on 4 vCPUs,
-# the opposite regime from "clients <= cores" this gate actually scopes
-# itself to), it is a percentage of BACKEND WALL-TIME, not DB Time, and
-# NEITHER cell ever flows into Off-CPU*: run-queue delay while already
-# marked waiting is booked under that wait event, not this residual;
-# run-queue delay while idle/ClientRead is outside DB Time entirely. So
-# 10% is not a calibrated 2x margin over a measured, comparable quantity --
-# it is a provisional catastrophic-loss tripwire: it catches a dropped wait
-# class worth >= 10% of DB Time (the demo's own workload has classes well
-# under that, e.g. LWLock:WALWrite ~3.7%, Lock:tuple ~1.5%, that could
-# silently vanish and still pass) and nothing finer. See
-# docs/DEMO_REHEARSAL_CRITERIA.md section 3 for the full derivation. This
-# is a FIRST bound, not a permanent one -- replace with a comparison
-# against the AAS "CPU (waiting for a core)" band integral once that
-# plumbing exists, measured on a clients<=cores box.
-OFFCPU_CAP_PCT = 10.0
+# Considered whole-capture bound, derived from THAT capture (not old 10%):
+# burst-magnitude CV = 0.42; 6.09 bursts/window predict 0.42/sqrt(6.09)
+# = 0.170 window CV (decomposition's unrounded prediction 0.169, observed
+# 0.177). Over 186 bursts expected CV = 0.42/sqrt(186) = 0.0308 (3.08%).
+# Using observed window CV instead gives 0.177*sqrt(6.09/186) = 0.0320.
+# A candidate mean + 3*CV envelope is 8.405%*(1+3*0.0308) = 9.18% for
+# that whole capture. This is a model-based contention envelope, NOT a
+# correctness bound or a calibrated probability; no 9.18% cap is enforced.
+# Aggregation reduces phase noise but cannot separate physical contention
+# from incorrect attribution (round-2's whole-capture share is 2.779%).
+# Runnable concurrency tracks contention too (passing window max 2 versus
+# other windows' mean 3.33-4.50, max 7-15), not tracer correctness.
+# Conclusion: neither quantity can usefully gate product correctness here;
+# retain each raw window's physical ms and DB-Time percentage as diagnostics.
+# The whole-capture summary path has no Off-CPU* signal; do not report its
+# default zero as a physical measurement or average the sparse windows as
+# though they covered the full capture.
+#
+# What this replacement does NOT detect: a dropped wait label moves wall
+# time from a wait into a CPU gap and RAISES Off-CPU*, while the accounting
+# still closes. The separate per-class wait-CPU scan (criteria / queue 2.5)
+# covers attribution evidence; this diagnostic is not a dropped-label test.
 
 
-def time_model_offcpu_cap_ok(offcpu_ms, db_time_ms, has_measured_cpu,
-                             cap_pct=OFFCPU_CAP_PCT):
-    """Only meaningful when has_measured_cpu (v3 exact-CPU data) -- the
-    legacy/sampled tier never computes a real Off-CPU* value (compute.h:
-    "there is NO Off-CPU* row... the quantity is unavailable, not zero"),
-    so this check is vacuously ok there -- REPORTED as such, not silently
-    skipped, so a reader can tell the difference between "checked and
-    clean" and "not applicable this tier"."""
+def time_model_offcpu_diagnostic(offcpu_ms, db_time_ms, has_measured_cpu):
+    """Report the physical residual without any pass/fail verdict.
+
+    Legacy/sampled data and the whole-capture summary path have no measured
+    Off-CPU* signal. A void DB-Time reading has no usable percentage either;
+    conservation's existing floor still rejects that window independently.
+    """
+    available = has_measured_cpu and db_time_ms >= MIN_DB_TIME_MS
+    pct = offcpu_ms / db_time_ms * 100.0 if available else None
     if not has_measured_cpu:
-        return True, "has_measured_cpu=False (legacy/sampled tier -- no Off-CPU* signal to check)"
-    pct = (offcpu_ms / db_time_ms * 100.0) if db_time_ms > 0 else 0.0
-    ok = pct <= cap_pct
-    detail = f"offcpu_ms={offcpu_ms:.2f} ({pct:.2f}% of db_time_ms), cap {cap_pct}%"
-    return ok, detail
+        detail = "has_measured_cpu=False -- no Off-CPU* signal (unavailable, not zero)"
+    elif not available:
+        detail = "db_time_ms below the nonzero-DB-Time floor -- Off-CPU* percentage unavailable"
+    else:
+        detail = f"offcpu_ms={offcpu_ms:.2f} ({pct:.2f}% of db_time_ms)"
+    return {
+        "ok": None,
+        "gating": False,
+        "available": bool(available),
+        "offcpu_ms": offcpu_ms if has_measured_cpu else None,
+        "db_time_ms": db_time_ms,
+        "pct": pct,
+        "detail": detail + "; reported, not gated -- physical contention, not attribution correctness",
+    }
 
 
 def evaluate_time_model_window(rows, db_time_ms, cpu_clamped_ms,
@@ -374,7 +389,7 @@ def evaluate_time_model_window(rows, db_time_ms, cpu_clamped_ms,
     """The full per-window gate for one time_model response: the identity
     conservation check (with its own nonzero-DB-Time floor), the raw/exact
     compute path requirement, the cpu_clamped_ms self-check (CPU-class
-    gaps only -- see its own comment), the Off-CPU* cap, and (when
+    gaps only -- see its own comment), and (when
     requested) the criteria-doc #2 floors -- the workload's own signature
     events present with real time, and a non-vacuous AAS reading. ALL
     requested checks must hold, checked in that order (raw floors before
@@ -385,7 +400,8 @@ def evaluate_time_model_window(rows, db_time_ms, cpu_clamped_ms,
     gating -- see RECENT_WINDOW_S's comment; the caller leaves
     check_workload_signature/check_aas_floor False there since a 35-45 min
     whole-window AAS average is not "the 60s recent window" the criteria
-    doc's floor is stated against).
+    doc's floor is stated against). Off-CPU* is retained as an explicitly
+    non-gating diagnostic, with ok=None, outside the verdict conjunction.
 
     NOTE (owner correction, 2026-09-27): this used to also gate on
     `wait_gap_cpu_ms <= 0.1% of db_time_ms` -- dropped entirely, see
@@ -397,22 +413,18 @@ def evaluate_time_model_window(rows, db_time_ms, cpu_clamped_ms,
     cons_ok, cons_detail = time_model_conservation(rows, db_time_ms)
     if db_time_ms >= MIN_DB_TIME_MS:
         clamped_ok, clamped_detail = cpu_clamped_ok(cpu_clamped_ms, db_time_ms)
-        off_ok, off_detail = time_model_offcpu_cap_ok(
-            offcpu_ms, db_time_ms, has_measured_cpu)
     else:
         clamped_ok, clamped_detail = False, (
             "db_time_ms below the nonzero-DB-Time floor -- cpu_clamped_ms "
             "check skipped, not vacuously ok")
-        off_ok, off_detail = False, (
-            "db_time_ms below the nonzero-DB-Time floor -- Off-CPU* cap "
-            "check skipped, not vacuously ok")
-    ok = bool(cons_ok and used_raw_path and clamped_ok and off_ok)
+    ok = bool(cons_ok and used_raw_path and clamped_ok)
     result = {
         "ok": ok,
         "compute_path": "raw" if used_raw_path else "summary",
         "conservation": {"ok": cons_ok, "detail": cons_detail},
         "cpu_clamped": {"ok": clamped_ok, "detail": clamped_detail},
-        "offcpu_cap": {"ok": off_ok, "detail": off_detail},
+        "offcpu": time_model_offcpu_diagnostic(
+            offcpu_ms, db_time_ms, has_measured_cpu),
     }
     if check_workload_signature:
         sig_ok, sig_detail = workload_signature_present_ok(rows)

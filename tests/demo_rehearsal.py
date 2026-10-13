@@ -249,8 +249,9 @@ def _query_time_model_window(srv, from_ns, to_ns, label, gate_on_raw_path,
     """One time_model query, evaluated through
     demo_rehearsal_lib.evaluate_time_model_window (identity conservation +
     raw-path check [only when gate_on_raw_path] + the cpu_clamped_ms
-    self-check + the Off-CPU* cap + [when check_criteria_floors] the
-    criteria-doc #2 workload-signature and AAS floors). Returns that dict,
+    self-check + [when check_criteria_floors] the criteria-doc #2
+    workload-signature and AAS floors, plus reported-not-gated Off-CPU*
+    diagnostics). Returns that dict,
     or an ok=False stand-in on a server-side error / a malformed response --
     a gate that cannot see the fields it needs must refuse, never assume
     they were fine."""

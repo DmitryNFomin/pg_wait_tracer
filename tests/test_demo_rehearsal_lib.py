@@ -202,7 +202,7 @@ def test_conservation_just_above_floor_is_evaluated_normally():
     check(ok, f"db_time_ms clearing the floor is evaluated by the normal ratio ({detail})")
 
 
-# ── cpu_clamped_ok / time_model_offcpu_cap_ok ─────────────────────────────
+# ── cpu_clamped_ok / time_model_offcpu_diagnostic ─────────────────────────
 #
 # time_model_over_attribution_ok (wait_gap_cpu_ms as a fraction of DB Time)
 # was REMOVED (owner correction, 2026-09-27): IO waits are legitimately
@@ -229,40 +229,95 @@ def test_cpu_clamped_ok_states_its_narrow_scope():
           f"detail states the check's narrow scope (CPU-class gaps only) ({detail})")
 
 
-def test_offcpu_cap_ok_under_cap():
-    ok, detail = lib.time_model_offcpu_cap_ok(
+def test_offcpu_diagnostic_reports_physical_magnitude():
+    result = lib.time_model_offcpu_diagnostic(
         offcpu_ms=400.0, db_time_ms=10000.0, has_measured_cpu=True)
-    check(ok, f"4% Off-CPU* is under the 10% cap ({detail})")
+    check(result["available"], "exact CPU data supplies a physical residual")
+    check(result["offcpu_ms"] == 400.0 and result["pct"] == 4.0,
+          f"physical ms and DB-Time percentage remain reported ({result})")
+    check(result["ok"] is None and result["gating"] is False,
+          "a diagnostic has no pass/fail verdict and explicitly does not gate")
 
 
-def test_offcpu_cap_fails_over_cap():
-    # BYPASS-SUITE CASE (the harder finding): a dropped wait class's time
-    # is absorbed into the Off-CPU* residual by construction (src/compute.c
-    # -- see time_model_conservation's own docstring), so it is
-    # over-sized rather than making the identity fail. This is the check
-    # with real detection power against that bug class.
-    ok, detail = lib.time_model_offcpu_cap_ok(
+def test_offcpu_diagnostic_large_residual_is_reported_not_gated():
+    result = lib.time_model_offcpu_diagnostic(
         offcpu_ms=4000.0, db_time_ms=10000.0, has_measured_cpu=True)
-    check(not ok, f"40% Off-CPU* (a dropped-class-sized residual) fails the 10% cap ({detail})")
+    check(result["pct"] == 40.0, f"even a large residual stays visible ({result})")
+    check(result["ok"] is None and not result["gating"],
+          "large physical Off-CPU has no attribution-correctness verdict")
+    check("reported, not gated" in result["detail"],
+          "the reporting-only decision is explicit in the human-readable detail")
 
 
-def test_offcpu_cap_not_applicable_without_measured_cpu():
-    ok, detail = lib.time_model_offcpu_cap_ok(
+def test_offcpu_diagnostic_unavailable_without_measured_cpu():
+    result = lib.time_model_offcpu_diagnostic(
         offcpu_ms=9999.0, db_time_ms=10000.0, has_measured_cpu=False)
-    check(ok, f"legacy/sampled tier (no measured CPU) reports ok, labeled not applicable ({detail})")
-    check("not applicable" in detail or "no Off-CPU*" in detail,
-          f"detail says WHY it is vacuously ok, not just ok ({detail})")
-    # #387: an empty exact-data window is also absence, not a measured zero
-    # or a defect. Its scalar 0 must never hide the unavailable signal.
-    empty_ok, empty_detail = lib.time_model_offcpu_cap_ok(
+    check(not result["available"] and result["ok"] is None,
+          "legacy/sampled or summary data is unavailable, never a passing reading")
+    check(result["offcpu_ms"] is None and result["pct"] is None,
+          "unavailable Off-CPU is not reported as a measured zero")
+
+
+# #387 x the reporting-only diagnostic (merge of agent/cx-387-absence into
+# the branch that replaced time_model_offcpu_cap_ok with
+# time_model_offcpu_diagnostic). src/compute.c now only sets
+# has_measured_cpu when a record has a NON-ZERO in-window fraction, so an
+# empty window -- records selected by end timestamp but with no overlap --
+# arrives here as has_measured_cpu=False while every scalar is 0.0. The two
+# changes have to compose into THREE distinguishable readings, because a
+# scalar 0.0 is a legitimate measurement in one of them:
+#   absence       has_measured_cpu=False -> available False, pct None
+#   no denominator exact data, db_time below the floor -> available False,
+#                 pct None, but a DIFFERENT reason string
+#   checked clean exact data, real db_time, 0.0 residual -> available True,
+#                 pct 0.0 (a measured zero, not None)
+# Asserted with `is None` / `== 0.0` rather than truthiness: `not pct`
+# holds for both None and 0.0, which is exactly the conflation #387 exists
+# to prevent.
+def test_offcpu_diagnostic_empty_window_absence_vs_measured_zero():
+    absent = lib.time_model_offcpu_diagnostic(
         offcpu_ms=0.0, db_time_ms=0.0, has_measured_cpu=False)
-    clean_ok, clean_detail = lib.time_model_offcpu_cap_ok(
+    no_denom = lib.time_model_offcpu_diagnostic(
+        offcpu_ms=0.0, db_time_ms=0.0, has_measured_cpu=True)
+    clean = lib.time_model_offcpu_diagnostic(
         offcpu_ms=0.0, db_time_ms=10000.0, has_measured_cpu=True)
-    check(empty_ok, f"empty window reports absence without failing ({empty_detail})")
-    check("no Off-CPU* signal to check" in empty_detail,
-          f"empty window explicitly reports no signal ({empty_detail})")
-    check(clean_ok and "cap" in clean_detail and empty_detail != clean_detail,
-          f"checked clean is distinguishable from absence ({clean_detail})")
+    check(absent["available"] is False and absent["pct"] is None
+          and absent["offcpu_ms"] is None,
+          f"an empty window reports absence, not a measured zero ({absent})")
+    check(absent["ok"] is None and absent["gating"] is False,
+          f"absence is not a verdict either way ({absent})")
+    check("unavailable, not zero" in absent["detail"],
+          f"the absence reason is spelled out for a reader ({absent['detail']})")
+    check(no_denom["available"] is False and no_denom["pct"] is None
+          and no_denom["detail"] != absent["detail"],
+          f"exact data with no DB Time is its own reason, not the absence one "
+          f"({no_denom['detail']})")
+    check(clean["available"] is True and clean["pct"] == 0.0
+          and clean["offcpu_ms"] == 0.0,
+          f"checked-and-clean keeps its measured zero ({clean})")
+    check(clean["detail"] != absent["detail"]
+          and clean["available"] != absent["available"],
+          f"'checked and clean' is distinguishable from 'not applicable' "
+          f"({clean['detail']} vs {absent['detail']})")
+
+
+def test_evaluate_window_empty_window_offcpu_is_absent_not_clean():
+    """The same combination through the full per-window evaluator: an empty
+    window must not produce an `offcpu` block that reads as a measured,
+    clean 0%. Conservation's own nonzero-DB-Time floor is what fails the
+    window; the diagnostic's job is only to stay honest about absence."""
+    result = lib.evaluate_time_model_window(
+        [], db_time_ms=0.0, cpu_clamped_ms=0.0, offcpu_ms=0.0,
+        has_measured_cpu=False, used_raw_path=True)
+    off = result["offcpu"]
+    check(off["available"] is False and off["pct"] is None,
+          f"empty window's offcpu block reports absence ({off})")
+    check(off["ok"] is None and off["gating"] is False,
+          f"the diagnostic stays outside the verdict ({off})")
+    check(not result["ok"],
+          f"the window still fails -- on the floor, not on Off-CPU ({result})")
+    check("offcpu_cap" not in result,
+          f"no resurrected cap sub-check ({sorted(result)})")
 
 
 # ── evaluate_time_model_window ────────────────────────────────────────────
@@ -279,12 +334,12 @@ def test_evaluate_window_clean_trace_ok():
     check(result["ok"], f"a clean, fully-attributed trace passes every sub-check ({result})")
 
 
-def test_evaluate_window_dropped_wait_class_caught_by_offcpu_cap():
-    # BYPASS-SUITE CASE (the reason this task exists): an entire wait class
-    # (Lock, ~3000ms) is dropped from `rows`; src/compute.c's residual
+def test_evaluate_window_dropped_wait_class_is_not_detected_by_residual():
+    # An entire wait class (Lock, ~3000ms) is dropped from rows; the residual
     # definition means its time is absorbed into Off-CPU* and the identity
     # still closes EXACTLY. The identity sub-check alone says ok=True; the
-    # combined gate must still say ok=False via the Off-CPU* cap.
+    # combined accounting check cannot detect this either. Keep this blind
+    # spot explicit; per-class attribution evidence is a separate scan.
     rows = [
         {"name": "CPU (running)", "ms": 3000.0, "indent": 1},
         {"name": "IO", "ms": 3000.0, "indent": 1},
@@ -295,9 +350,43 @@ def test_evaluate_window_dropped_wait_class_caught_by_offcpu_cap():
         offcpu_ms=4000.0, has_measured_cpu=True, used_raw_path=True)
     check(result["conservation"]["ok"],
           f"the identity alone still closes exactly for this dropped-class case ({result})")
-    check(not result["ok"],
-          f"the combined gate still fails via the Off-CPU* cap ({result})")
-    check(not result["offcpu_cap"]["ok"], "offcpu_cap sub-check is the one that failed")
+    check(result["ok"],
+          f"accounting closes despite the dropped label; no correctness cap is inferred ({result})")
+    check(result["offcpu"]["pct"] == 40.0 and result["offcpu"]["ok"] is None,
+          "the raised residual is visible as diagnostic data, not an attribution verdict")
+
+
+def test_evaluate_window_clean_burst_phases_do_not_fail_conservation():
+    # #386's 1775-placement clean-run distribution: min, median, p95, max.
+    samples = []
+    for offset, pct in enumerate((5.08, 8.96, 11.25, 13.52)):
+        offcpu_ms = pct * 100.0
+        rows = [{"name": "CPU (running)", "ms": 10000.0 - offcpu_ms, "indent": 1},
+                {"name": "CPU (waiting for a core)", "ms": offcpu_ms, "indent": 1}]
+        result = lib.evaluate_time_model_window(
+            rows, db_time_ms=10000.0, cpu_clamped_ms=0.0,
+            offcpu_ms=offcpu_ms, has_measured_cpu=True, used_raw_path=True)
+        check(result["ok"], f"clean burst phase at {pct}% does not fail accounting")
+        check(round(result["offcpu"]["pct"], 2) == pct,
+              "each sampled physical percentage is retained at the measured precision")
+        samples.append(dict(result, offset_s=offset * 300.0))
+    aggregate = lib.build_demo_conservation_check(samples, {"ok": True})
+    summary = lib.build_demo_summary(
+        [{"pass": "early", "tabs": {"overview": {"ok": True}}}],
+        {"time_model_conserves": aggregate})
+    check(summary["ok"], "non-gating diagnostics cannot fail the final rehearsal verdict")
+    check(aggregate["samples"][-1]["offcpu"]["pct"] == 13.52,
+          "the high phase remains auditable in the saved conservation samples")
+
+
+def test_evaluate_window_cpu_clamp_still_fails_with_large_offcpu():
+    rows = [{"name": "CPU (running)", "ms": 6000.0, "indent": 1},
+            {"name": "CPU (waiting for a core)", "ms": 4000.0, "indent": 1}]
+    result = lib.evaluate_time_model_window(
+        rows, db_time_ms=10000.0, cpu_clamped_ms=50.0,
+        offcpu_ms=4000.0, has_measured_cpu=True, used_raw_path=True)
+    check(not result["ok"] and not result["cpu_clamped"]["ok"],
+          "reporting Off-CPU does not weaken the independent CPU-clamp gate")
 
 
 def test_evaluate_window_not_raw_path_fails_loudly():
@@ -310,15 +399,26 @@ def test_evaluate_window_not_raw_path_fails_loudly():
     check(result["compute_path"] == "summary", "compute_path reported accurately")
 
 
-def test_evaluate_window_zero_db_time_fails_every_subcheck():
+def test_evaluate_window_zero_db_time_fails_and_offcpu_is_unavailable():
     result = lib.evaluate_time_model_window(
         [], db_time_ms=0.0, cpu_clamped_ms=0.0,
         offcpu_ms=0.0, has_measured_cpu=False, used_raw_path=True)
     check(not result["ok"], f"a zero-DB-Time window fails the combined gate ({result})")
     check(not result["cpu_clamped"]["ok"],
           "cpu_clamped is not vacuously ok below the DB-Time floor")
-    check(not result["offcpu_cap"]["ok"],
-          "offcpu_cap is not vacuously ok below the DB-Time floor")
+    check(result["offcpu"]["ok"] is None and not result["offcpu"]["available"],
+          "Off-CPU is explicitly unavailable below the DB-Time floor")
+    check(result["offcpu"]["pct"] is None,
+          "a void window is not reported as measured 0% Off-CPU")
+
+
+def test_offcpu_diagnostic_void_measured_window_has_no_percentage():
+    result = lib.time_model_offcpu_diagnostic(
+        offcpu_ms=0.2, db_time_ms=0.5, has_measured_cpu=True)
+    check(result["offcpu_ms"] == 0.2 and result["pct"] is None,
+          "retain the measured residual but do not divide by a void DB-Time reading")
+    check(not result["available"] and result["ok"] is None,
+          "a near-empty measured window has no usable Off-CPU percentage")
 
 
 # ── conservation_sample_interval_s / build_demo_conservation_check ───────
