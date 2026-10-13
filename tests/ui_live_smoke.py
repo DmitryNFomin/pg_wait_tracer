@@ -86,13 +86,36 @@ import traceback
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import ui_live_smoke_lib as lib
 
+PLAYWRIGHT_HINT = "ERROR: pip install playwright && playwright install chromium"
 try:
     from playwright.sync_api import (sync_playwright, TimeoutError as PWTimeoutError,
                                      Error as PWError)
 except ImportError:
-    print("ERROR: pip install playwright && playwright install chromium",
-          file=sys.stderr)
-    sys.exit(1)
+    # issue #221 (tests/test_unit_import_guard.py): a module a LISTED unit test
+    # imports must be importable with Playwright unavailable. This used to
+    # sys.exit(1) at import time, which made any importer un-unit-testable --
+    # tests/demo_rehearsal.py, and through it tests/test_demo_rehearsal_diag.py.
+    # Nothing is silently degraded: the single place that opens a browser calls
+    # _require_playwright() below and refuses with the same message, and the
+    # placeholder exception classes are never raised by anything, so an
+    # `except PWTimeoutError` simply cannot match in a build without the
+    # package -- where no browser code runs in the first place.
+    sync_playwright = None
+
+    class PWTimeoutError(Exception):
+        pass
+
+    class PWError(Exception):
+        pass
+
+
+def _require_playwright():
+    """Refuse, loudly and at the point of use, when a browser is needed and
+    Playwright is not installed. Never a skip: a live walk that cannot start
+    is a failure, not a pass."""
+    if sync_playwright is None:
+        print(PLAYWRIGHT_HINT, file=sys.stderr)
+        sys.exit(1)
 
 RESULTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                            "results", "ui_live")
@@ -1945,6 +1968,7 @@ def main():
                     else lib.TABS)
     if only_tabs:
         tabs_to_walk = only_tabs
+    _require_playwright()
     try:
         with sync_playwright() as p:
             browser = p.chromium.launch()

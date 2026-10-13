@@ -62,7 +62,11 @@ import schedstat_lib as sslib
 import schedstat_probe as sspr
 from server_harness import ServerHarness
 
-from playwright.sync_api import sync_playwright
+# Playwright is imported where the browser is actually opened, not here:
+# tests/test_demo_rehearsal_diag.py is a LISTED unit test that imports this
+# module, and tests/test_unit_import_guard.py (issue #221) requires every
+# listed test to import with Playwright unavailable. live_smoke already
+# refuses loudly at the point of use (live_smoke._require_playwright).
 
 RESULTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                            "results", "demo_rehearsal")
@@ -530,6 +534,8 @@ def main():
     print(f"demo_rehearsal: conservation sampler started "
           f"(every {sample_interval_s:.0f}s through the capture)")
 
+    live_smoke._require_playwright()
+    from playwright.sync_api import sync_playwright
     with sync_playwright() as p:
         browser = p.chromium.launch()
         try:
