@@ -1,0 +1,20 @@
+test_absent_pgsleep_is_explicit (__main__.ProtocolTests.test_absent_pgsleep_is_explicit) ... ok
+test_calibration_is_not_a_clean_verdict (__main__.ProtocolTests.test_calibration_is_not_a_clean_verdict) ... ok
+test_dedup_nested_execution_and_workers (__main__.ProtocolTests.test_dedup_nested_execution_and_workers) ... ok
+test_empty_eventful_execution_refuses (__main__.ProtocolTests.test_empty_eventful_execution_refuses) ... ok
+test_eventful_zero_span_refuses (__main__.ProtocolTests.test_eventful_zero_span_refuses) ... ok
+test_eventless_rows_counted_without_detail (__main__.ProtocolTests.test_eventless_rows_counted_without_detail) ... ok
+test_inconsistent_counts_refuse (__main__.ProtocolTests.test_inconsistent_counts_refuse) ... ok
+test_missing_start_and_sampled_fidelity_refuse (__main__.ProtocolTests.test_missing_start_and_sampled_fidelity_refuse) ... ok
+test_no_executions_and_empty_window_refuse (__main__.ProtocolTests.test_no_executions_and_empty_window_refuse) ... ok
+test_null_wait_and_cpu_gap_refuse (__main__.ProtocolTests.test_null_wait_and_cpu_gap_refuse) ... ok
+test_outlier_not_hidden_by_average (__main__.ProtocolTests.test_outlier_not_hidden_by_average) ... ok
+test_recovered_page_truncation_deduplicates (__main__.ProtocolTests.test_recovered_page_truncation_deduplicates) ... ok
+test_truncated_worker_refuses_with_omitted_count (__main__.ProtocolTests.test_truncated_worker_refuses_with_omitted_count) ... ok
+test_unrecoverable_page_truncation_refuses (__main__.ProtocolTests.test_unrecoverable_page_truncation_refuses) ... ok
+test_wait_without_execution_start_is_counted_refusal (__main__.ProtocolTests.test_wait_without_execution_start_is_counted_refusal) ... ok
+
+----------------------------------------------------------------------
+Ran 15 tests in 0.003s
+
+OK

@@ -1,0 +1,322 @@
+{
+  "status": "REFUSED",
+  "scope": "execution-associated original wait events",
+  "window": {
+    "from_ns": "1790895946646458457",
+    "to_ns": "1790897797661724062"
+  },
+  "threshold_ns": 824430,
+  "executions_found": 508210,
+  "counts": {
+    "cpu_gap_events": 72894,
+    "duplicate_execution_rows": 1047,
+    "eventful_executions": 17664,
+    "eventless_executions": 490546,
+    "execution_detail_requests": 17664,
+    "executions_requests": 3067,
+    "inferred_execution_ends": 0,
+    "open_execution_rows": 0,
+    "split_execution_pages": 1518,
+    "top_events_requests": 1,
+    "unique_lane_events": 145788
+  },
+  "refusals": {
+    "window_empty": 0,
+    "no_executions": 0,
+    "execution_pages_incomplete": 0,
+    "truncated_lanes": 55,
+    "omitted_lane_events": 1018050,
+    "lane_count_mismatch": 0,
+    "detail_count_mismatch": 0,
+    "null_cpu_events": 0,
+    "invalid_events": 0,
+    "execution_event_shortfall": 0,
+    "empty_eventful_executions": 0,
+    "detail_errors": 0,
+    "nonexact_responses": 0,
+    "execution_count_mismatch": 0,
+    "no_pure_sleep_events": 0,
+    "server_errors": 0,
+    "census_errors": 0,
+    "pure_sleep_events_unrepresented": 436,
+    "pure_sleep_count_inconsistent": 0
+  },
+  "classes": {
+    "IO:BufFileWrite": {
+      "count": 55000,
+      "pure_sleep": false,
+      "cpu_ns_total": 619171491,
+      "duration_ns_total": 627398321,
+      "cpu_ns_mean": 11257.663472727272,
+      "cpu_ns_max": 1114733,
+      "cpu_ns_p50": 9618,
+      "cpu_ns_p95": 18613,
+      "cpu_ns_p99": 29284,
+      "cpu_dur_mean": 0.9996700032595137,
+      "cpu_dur_max": 1.0,
+      "cpu_dur_weighted": 0.9868873891997553,
+      "above_threshold": 1,
+      "max_cpu_event": {
+        "pid": 1171013,
+        "start_ns": "1790896566669481776",
+        "duration_ns": 1114733,
+        "cpu_ns": 1114733
+      }
+    },
+    "IO:DataFileExtend": {
+      "count": 297,
+      "pure_sleep": false,
+      "cpu_ns_total": 12764305,
+      "duration_ns_total": 12764305,
+      "cpu_ns_mean": 42977.45791245791,
+      "cpu_ns_max": 152736,
+      "cpu_ns_p50": 40487,
+      "cpu_ns_p95": 66164,
+      "cpu_ns_p99": 104185,
+      "cpu_dur_mean": 1.0,
+      "cpu_dur_max": 1.0,
+      "cpu_dur_weighted": 1.0,
+      "above_threshold": 0,
+      "max_cpu_event": {
+        "pid": 1170989,
+        "start_ns": "1790896488010887223",
+        "duration_ns": 152736,
+        "cpu_ns": 152736
+      }
+    },
+    "IO:DataFileRead": {
+      "count": 16623,
+      "pure_sleep": false,
+      "cpu_ns_total": 418965991,
+      "duration_ns_total": 644884203,
+      "cpu_ns_mean": 25203.993924081093,
+      "cpu_ns_max": 182972,
+      "cpu_ns_p50": 22422,
+      "cpu_ns_p95": 54622,
+      "cpu_ns_p99": 97433,
+      "cpu_dur_mean": 0.9695565346478476,
+      "cpu_dur_max": 1.0,
+      "cpu_dur_weighted": 0.6496763125084644,
+      "above_threshold": 0,
+      "max_cpu_event": {
+        "pid": 1170990,
+        "start_ns": "1790897478166621281",
+        "duration_ns": 182972,
+        "cpu_ns": 182972
+      }
+    },
+    "LWLock:BufferContent": {
+      "count": 17,
+      "pure_sleep": false,
+      "cpu_ns_total": 125455,
+      "duration_ns_total": 125455,
+      "cpu_ns_mean": 7379.705882352941,
+      "cpu_ns_max": 10860,
+      "cpu_ns_p50": 6863,
+      "cpu_ns_p95": 10860,
+      "cpu_ns_p99": 10860,
+      "cpu_dur_mean": 1.0,
+      "cpu_dur_max": 1.0,
+      "cpu_dur_weighted": 1.0,
+      "above_threshold": 0,
+      "max_cpu_event": {
+        "pid": 1170990,
+        "start_ns": "1790897750746241316",
+        "duration_ns": 10860,
+        "cpu_ns": 10860
+      }
+    },
+    "LWLock:LockManager": {
+      "count": 4,
+      "pure_sleep": false,
+      "cpu_ns_total": 40793,
+      "duration_ns_total": 93303,
+      "cpu_ns_mean": 10198.25,
+      "cpu_ns_max": 15828,
+      "cpu_ns_p50": 7183,
+      "cpu_ns_p95": 15828,
+      "cpu_ns_p99": 15828,
+      "cpu_dur_mean": 0.7367888481461842,
+      "cpu_dur_max": 1.0,
+      "cpu_dur_weighted": 0.4372099503767296,
+      "above_threshold": 0,
+      "max_cpu_event": {
+        "pid": 1170991,
+        "start_ns": "1790897442637787251",
+        "duration_ns": 63288,
+        "cpu_ns": 15828
+      }
+    },
+    "LWLock:XactSLRU": {
+      "count": 1,
+      "pure_sleep": false,
+      "cpu_ns_total": 6122,
+      "duration_ns_total": 6122,
+      "cpu_ns_mean": 6122.0,
+      "cpu_ns_max": 6122,
+      "cpu_ns_p50": 6122,
+      "cpu_ns_p95": 6122,
+      "cpu_ns_p99": 6122,
+      "cpu_dur_mean": 1.0,
+      "cpu_dur_max": 1.0,
+      "cpu_dur_weighted": 1.0,
+      "above_threshold": 0,
+      "max_cpu_event": {
+        "pid": 1170990,
+        "start_ns": "1790897227358787646",
+        "duration_ns": 6122,
+        "cpu_ns": 6122
+      }
+    },
+    "LWLock:XidGen": {
+      "count": 34,
+      "pure_sleep": false,
+      "cpu_ns_total": 249110,
+      "duration_ns_total": 291590,
+      "cpu_ns_mean": 7326.764705882353,
+      "cpu_ns_max": 22832,
+      "cpu_ns_p50": 6201,
+      "cpu_ns_p95": 21801,
+      "cpu_ns_p99": 22832,
+      "cpu_dur_mean": 0.9725420606499924,
+      "cpu_dur_max": 1.0,
+      "cpu_dur_weighted": 0.8543159916320862,
+      "above_threshold": 0,
+      "max_cpu_event": {
+        "pid": 1170990,
+        "start_ns": "1790896874974422264",
+        "duration_ns": 52668,
+        "cpu_ns": 22832
+      }
+    },
+    "Lock:extend": {
+      "count": 2,
+      "pure_sleep": true,
+      "cpu_ns_total": 42240,
+      "duration_ns_total": 138609,
+      "cpu_ns_mean": 21120.0,
+      "cpu_ns_max": 22122,
+      "cpu_ns_p50": 20118,
+      "cpu_ns_p95": 22122,
+      "cpu_ns_p99": 22122,
+      "cpu_dur_mean": 0.3060089902555606,
+      "cpu_dur_max": 0.3197545973266367,
+      "cpu_dur_weighted": 0.3047421163127935,
+      "above_threshold": 0,
+      "max_cpu_event": {
+        "pid": 1170990,
+        "start_ns": "1790896874975270119",
+        "duration_ns": 75692,
+        "cpu_ns": 22122
+      }
+    },
+    "Lock:transactionid": {
+      "count": 590,
+      "pure_sleep": true,
+      "cpu_ns_total": 22182006,
+      "duration_ns_total": 218324000468,
+      "cpu_ns_mean": 37596.62033898305,
+      "cpu_ns_max": 112622,
+      "cpu_ns_p50": 30527,
+      "cpu_ns_p95": 65834,
+      "cpu_ns_p99": 82443,
+      "cpu_dur_mean": 0.04149202381691572,
+      "cpu_dur_max": 1.0,
+      "cpu_dur_weighted": 0.00010160131709042791,
+      "above_threshold": 0,
+      "max_cpu_event": {
+        "pid": 1171010,
+        "start_ns": "1790897518868330077",
+        "duration_ns": 1000145950,
+        "cpu_ns": 112622
+      }
+    },
+    "Timeout:PgSleep": {
+      "count": 326,
+      "pure_sleep": true,
+      "cpu_ns_total": 12365609,
+      "duration_ns_total": 746520282508,
+      "cpu_ns_mean": 37931.315950920245,
+      "cpu_ns_max": 923834,
+      "cpu_ns_p50": 33463,
+      "cpu_ns_p95": 52910,
+      "cpu_ns_p99": 78799,
+      "cpu_dur_mean": 2.7762951493946027e-05,
+      "cpu_dur_max": 0.00030753079643629493,
+      "cpu_dur_weighted": 1.656433092274018e-05,
+      "above_threshold": 1,
+      "max_cpu_event": {
+        "pid": 1171002,
+        "start_ns": "1790897311539822175",
+        "duration_ns": 3004037354,
+        "cpu_ns": 923834
+      }
+    }
+  },
+  "pure_sleep_exceedances": 1,
+  "capture_wait_census": {
+    "Client:ClientRead": 319033,
+    "Timeout:CheckpointWriteDelay": 14951,
+    "Lock:relation": 436,
+    "Timeout:PgSleep": 326,
+    "Lock:transactionid": 590,
+    "IO:WalSync": 46919,
+    "IO:BufFileWrite": 281985,
+    "IO:BufFileRead": 282040,
+    "IO:WalWrite": 46978,
+    "IO:DataFileWrite": 35152,
+    "LWLock:WALWrite": 1186,
+    "IO:DataFileRead": 16654,
+    "IO:DataFileFlush": 26031,
+    "Timeout:VacuumDelay": 101,
+    "IO:DataFileSync": 87,
+    "IO:DataFileExtend": 300,
+    "IO:ControlFileSyncUpdate": 5,
+    "IO:RelationMapRead": 158,
+    "IO:SlruWrite": 28,
+    "IO:SlruFlushSync": 5,
+    "LWLock:XidGen": 34,
+    "Lock:extend": 2,
+    "LWLock:BufferContent": 17,
+    "IO:ControlFileWriteUpdate": 5,
+    "LWLock:LockManager": 5,
+    "LWLock:WALInsert": 4,
+    "LWLock:XactSLRU": 1,
+    "LWLock:PgStatsData": 1,
+    "LWLock:DynamicSharedMemoryControl": 1,
+    "LWLock:SInvalWrite": 1
+  },
+  "pure_sleep_coverage": {
+    "Lock:extend": {
+      "capture_events": 2,
+      "measured_events": 2
+    },
+    "Lock:relation": {
+      "capture_events": 436,
+      "measured_events": 0
+    },
+    "Lock:transactionid": {
+      "capture_events": 590,
+      "measured_events": 590
+    },
+    "Timeout:PgSleep": {
+      "capture_events": 326,
+      "measured_events": 326
+    }
+  },
+  "PgSleep_events": 326,
+  "server_info": {
+    "id": 2,
+    "from_ns": 1790895946646458457,
+    "to_ns": 1790897797661724062,
+    "num_events": 4308992,
+    "num_cpus": 10,
+    "server_version": "ac515f6c812c2a45b2feab4b024cfd1ccaf22f10",
+    "protocol": 1,
+    "now_ns": 1791901316867161000
+  },
+  "trace_dir": "/Users/dmitryfomin/work/git/pg_wait_tracer/tests/results/demo_rehearsal/trace",
+  "trace_sha256": {
+    "current.trace": "52d2dbd03c88c753589dedc6e674bb48c2b309f22a22646431278c57a5eca214"
+  }
+}

@@ -1,0 +1,40 @@
+{
+  "status": "REFUSED",
+  "scope": "execution-associated original wait events",
+  "window": {
+    "from_ns": "0",
+    "to_ns": "0"
+  },
+  "threshold_ns": 824430,
+  "executions_found": 0,
+  "counts": {},
+  "refusals": {
+    "window_empty": 0,
+    "no_executions": 0,
+    "execution_pages_incomplete": 0,
+    "truncated_lanes": 0,
+    "omitted_lane_events": 0,
+    "lane_count_mismatch": 0,
+    "detail_count_mismatch": 0,
+    "null_cpu_events": 0,
+    "invalid_events": 0,
+    "execution_event_shortfall": 0,
+    "empty_eventful_executions": 0,
+    "detail_errors": 0,
+    "nonexact_responses": 0,
+    "execution_count_mismatch": 0,
+    "no_pure_sleep_events": 0,
+    "server_errors": 1,
+    "census_errors": 0,
+    "pure_sleep_events_unrepresented": 0,
+    "pure_sleep_count_inconsistent": 0
+  },
+  "classes": {},
+  "pure_sleep_exceedances": 0,
+  "capture_wait_census": {},
+  "pure_sleep_coverage": {},
+  "PgSleep_events": 0,
+  "error": "pgwt-server closed stdout. stderr: pgwt-server: no trace files found in /tmp/perclass-trace-that-does-not-exist\n",
+  "trace_dir": "/private/tmp/perclass-trace-that-does-not-exist",
+  "trace_sha256": {}
+}

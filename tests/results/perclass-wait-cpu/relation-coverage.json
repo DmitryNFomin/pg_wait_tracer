@@ -1,0 +1,35 @@
+{
+  "top_events": {
+    "id": 2,
+    "fidelity": "exact",
+    "rows": [
+      {
+        "event_id": 50331648,
+        "name": "Lock:relation",
+        "class": "Lock",
+        "count": 436,
+        "total_ms": 1412702.033192,
+        "avg_us": 3240142.2779633026,
+        "p50_us": 16384,
+        "p95_us": 16384,
+        "p99_us": 16384,
+        "max_us": 6107844.127,
+        "p50_overflow": true,
+        "p95_overflow": true,
+        "p99_overflow": true,
+        "pct": 100,
+        "aas": 0.7632038802933705
+      }
+    ],
+    "db_time_ms": 1412702.033192
+  },
+  "executions": {
+    "id": 3,
+    "fidelity": "exact",
+    "rows": [],
+    "total_count": 0,
+    "open_count": 0,
+    "completed_count": 0,
+    "truncated": false
+  }
+}

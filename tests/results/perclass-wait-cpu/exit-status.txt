@@ -1,0 +1,4 @@
+focused_tests_exit=0
+measurement_exit=2
+empty_window_exit=2
+missing_trace_exit=2

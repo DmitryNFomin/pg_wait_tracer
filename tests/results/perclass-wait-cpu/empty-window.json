@@ -1,0 +1,55 @@
+{
+  "status": "REFUSED",
+  "scope": "execution-associated original wait events",
+  "window": {
+    "from_ns": "1790897797661725062",
+    "to_ns": "1790897797661726062"
+  },
+  "threshold_ns": 824430,
+  "executions_found": 0,
+  "counts": {
+    "error:full_fidelity_required": 1,
+    "executions_requests": 1,
+    "top_events_requests": 1
+  },
+  "refusals": {
+    "window_empty": 1,
+    "no_executions": 1,
+    "execution_pages_incomplete": 1,
+    "truncated_lanes": 0,
+    "omitted_lane_events": 0,
+    "lane_count_mismatch": 0,
+    "detail_count_mismatch": 0,
+    "null_cpu_events": 0,
+    "invalid_events": 0,
+    "execution_event_shortfall": 0,
+    "empty_eventful_executions": 0,
+    "detail_errors": 0,
+    "nonexact_responses": 1,
+    "execution_count_mismatch": 0,
+    "no_pure_sleep_events": 1,
+    "server_errors": 0,
+    "census_errors": 1,
+    "pure_sleep_events_unrepresented": 0,
+    "pure_sleep_count_inconsistent": 0
+  },
+  "classes": {},
+  "pure_sleep_exceedances": 0,
+  "capture_wait_census": {},
+  "pure_sleep_coverage": {},
+  "PgSleep_events": 0,
+  "server_info": {
+    "id": 2,
+    "from_ns": 1790895946646458457,
+    "to_ns": 1790897797661724062,
+    "num_events": 4308992,
+    "num_cpus": 10,
+    "server_version": "ac515f6c812c2a45b2feab4b024cfd1ccaf22f10",
+    "protocol": 1,
+    "now_ns": 1791901689563887000
+  },
+  "trace_dir": "/Users/dmitryfomin/work/git/pg_wait_tracer/tests/results/demo_rehearsal/trace",
+  "trace_sha256": {
+    "current.trace": "52d2dbd03c88c753589dedc6e674bb48c2b309f22a22646431278c57a5eca214"
+  }
+}
