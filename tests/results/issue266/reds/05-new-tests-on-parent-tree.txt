@@ -1,0 +1,9 @@
+The new assertions against the PARENT tree (6bfe7d3), where neither name exists:
+
+$ python3 tests/test_ui_live_smoke_lib.py
+AttributeError: module 'ui_live_smoke_lib' has no attribute 'inject_stimulus_verdict'
+  (test_inject_stimulus_verdict_refuses_without_frame_windows)
+
+$ python3 tests/test_ui_live_smoke_nav.py
+AttributeError: module 'ui_live_smoke' has no attribute '_BlinkInjector'
+  (test_blink_injector_shows_and_hides_around_the_target_frame_only)

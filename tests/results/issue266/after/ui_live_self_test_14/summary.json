@@ -1,0 +1,578 @@
+{
+  "failed_tabs": [
+    "sessions"
+  ],
+  "known_failing_tabs": [],
+  "ok": false,
+  "self_test": {
+    "boundary_pair_indices": [
+      1,
+      2
+    ],
+    "boundary_pair_ratios": [
+      0.199796126401631,
+      0.199796126401631
+    ],
+    "caught": true,
+    "frame_windows_ms": [
+      [
+        1791883891892,
+        1791883892066
+      ],
+      [
+        1791883892185,
+        1791883892344
+      ],
+      [
+        1791883892688,
+        1791883892815
+      ],
+      [
+        1791883893185,
+        1791883893342
+      ],
+      [
+        1791883893686,
+        1791883893852
+      ]
+    ],
+    "inject_blink_ms": 400,
+    "inject_frame_index": 2,
+    "measured": true,
+    "note": null,
+    "pair_ratios": [
+      0.0,
+      0.199796126401631,
+      0.199796126401631,
+      0.0
+    ],
+    "ratio": 0.199796126401631,
+    "stimulus": {
+      "hidden_cleared_ms": 1791883892827,
+      "hidden_requested_ms": 1791883892819,
+      "min_dwell_ms": 400,
+      "shown_painted_ms": 1791883892389,
+      "shown_requested_ms": 1791883892357,
+      "target_frame_index": 2,
+      "was_present_at_removal": true
+    },
+    "stimulus_ok": true,
+    "stimulus_reason": null,
+    "tick": 2
+  },
+  "tabs": {
+    "sessions": {
+      "artifacts": {
+        "frames": [
+          "/root/pgwt-266/tests/results/ui_live_self_test_14/sessions/tick-1.png",
+          "/root/pgwt-266/tests/results/ui_live_self_test_14/sessions/tick-2.png",
+          "/root/pgwt-266/tests/results/ui_live_self_test_14/sessions/tick-3.png",
+          "/root/pgwt-266/tests/results/ui_live_self_test_14/sessions/tick-4.png",
+          "/root/pgwt-266/tests/results/ui_live_self_test_14/sessions/tick-5.png",
+          "/root/pgwt-266/tests/results/ui_live_self_test_14/sessions/tick-6.png"
+        ],
+        "video": "/root/pgwt-266/tests/results/ui_live_self_test_14/sessions/sessions.webm"
+      },
+      "blink_sweep": {
+        "offsets_ms": [
+          200,
+          500,
+          1000,
+          1500,
+          2000
+        ],
+        "ticks": [
+          {
+            "achieved_offsets_ms": [
+              205,
+              507,
+              1010,
+              1520,
+              2015
+            ],
+            "capture_ms": [
+              150.23670200002925,
+              165.88817899992137,
+              144.94682699978512,
+              138.7886449999769,
+              162.41578699987258
+            ],
+            "capture_ms_total_ms": 762.2761399995852,
+            "frame_dims_px": [
+              {
+                "height": 981.0,
+                "width": 1710.0
+              },
+              {
+                "height": 981.0,
+                "width": 1710.0
+              },
+              {
+                "height": 981.0,
+                "width": 1710.0
+              },
+              {
+                "height": 981.0,
+                "width": 1710.0
+              },
+              {
+                "height": 981.0,
+                "width": 1710.0
+              }
+            ],
+            "mount_seq": 3,
+            "notes": [],
+            "panel_dims": {
+              "box_height": 1397,
+              "box_width": 1710,
+              "clip_height": 981.0,
+              "clip_width": 1710.0
+            },
+            "ratios": [
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "target_offsets_ms": [
+              200,
+              500,
+              1000,
+              1500,
+              2000
+            ]
+          },
+          {
+            "achieved_offsets_ms": [
+              212,
+              505,
+              1008,
+              1505,
+              2006
+            ],
+            "capture_ms": [
+              171.03926100003264,
+              150.52587099989978,
+              124.66839600006097,
+              153.16221299985955,
+              161.86061500002324
+            ],
+            "capture_ms_total_ms": 761.2563559998762,
+            "frame_dims_px": [
+              {
+                "height": 981.0,
+                "width": 1710.0
+              },
+              {
+                "height": 981.0,
+                "width": 1710.0
+              },
+              {
+                "height": 981.0,
+                "width": 1710.0
+              },
+              {
+                "height": 981.0,
+                "width": 1710.0
+              },
+              {
+                "height": 981.0,
+                "width": 1710.0
+              }
+            ],
+            "mount_seq": 4,
+            "notes": [],
+            "panel_dims": {
+              "box_height": 1397,
+              "box_width": 1710,
+              "clip_height": 981.0,
+              "clip_width": 1710.0
+            },
+            "ratios": [
+              0.0,
+              0.199796126401631,
+              0.199796126401631,
+              0.0
+            ],
+            "target_offsets_ms": [
+              200,
+              500,
+              1000,
+              1500,
+              2000
+            ]
+          },
+          {
+            "achieved_offsets_ms": [
+              205,
+              505,
+              1008,
+              1517,
+              2007
+            ],
+            "capture_ms": [
+              146.28704699998707,
+              130.3053589999763,
+              149.72290900004737,
+              162.9696420000073,
+              164.87998800016612
+            ],
+            "capture_ms_total_ms": 754.1649450001842,
+            "frame_dims_px": [
+              {
+                "height": 981.0,
+                "width": 1710.0
+              },
+              {
+                "height": 981.0,
+                "width": 1710.0
+              },
+              {
+                "height": 981.0,
+                "width": 1710.0
+              },
+              {
+                "height": 981.0,
+                "width": 1710.0
+              },
+              {
+                "height": 981.0,
+                "width": 1710.0
+              }
+            ],
+            "mount_seq": 5,
+            "notes": [],
+            "panel_dims": {
+              "box_height": 1397,
+              "box_width": 1710,
+              "clip_height": 981.0,
+              "clip_width": 1710.0
+            },
+            "ratios": [
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "target_offsets_ms": [
+              200,
+              500,
+              1000,
+              1500,
+              2000
+            ]
+          },
+          {
+            "achieved_offsets_ms": [
+              204,
+              508,
+              1004,
+              1510,
+              2007
+            ],
+            "capture_ms": [
+              130.92038000013417,
+              134.96132099999159,
+              143.75940000013543,
+              137.94052499997633,
+              169.29922700001043
+            ],
+            "capture_ms_total_ms": 716.880853000248,
+            "frame_dims_px": [
+              {
+                "height": 981.0,
+                "width": 1710.0
+              },
+              {
+                "height": 981.0,
+                "width": 1710.0
+              },
+              {
+                "height": 981.0,
+                "width": 1710.0
+              },
+              {
+                "height": 981.0,
+                "width": 1710.0
+              },
+              {
+                "height": 981.0,
+                "width": 1710.0
+              }
+            ],
+            "mount_seq": 6,
+            "notes": [],
+            "panel_dims": {
+              "box_height": 1425,
+              "box_width": 1710,
+              "clip_height": 981.0,
+              "clip_width": 1710.0
+            },
+            "ratios": [
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "target_offsets_ms": [
+              200,
+              500,
+              1000,
+              1500,
+              2000
+            ]
+          },
+          {
+            "achieved_offsets_ms": [
+              206,
+              505,
+              1007,
+              1515,
+              2006
+            ],
+            "capture_ms": [
+              146.63692599992828,
+              126.92189399990639,
+              152.88994299999104,
+              136.27862299995286,
+              137.60064100006275
+            ],
+            "capture_ms_total_ms": 700.3280269998413,
+            "frame_dims_px": [
+              {
+                "height": 981.0,
+                "width": 1710.0
+              },
+              {
+                "height": 981.0,
+                "width": 1710.0
+              },
+              {
+                "height": 981.0,
+                "width": 1710.0
+              },
+              {
+                "height": 981.0,
+                "width": 1710.0
+              },
+              {
+                "height": 981.0,
+                "width": 1710.0
+              }
+            ],
+            "mount_seq": 7,
+            "notes": [],
+            "panel_dims": {
+              "box_height": 1425,
+              "box_width": 1710,
+              "clip_height": 981.0,
+              "clip_width": 1710.0
+            },
+            "ratios": [
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "target_offsets_ms": [
+              200,
+              500,
+              1000,
+              1500,
+              2000
+            ]
+          },
+          {
+            "achieved_offsets_ms": [
+              206,
+              504,
+              1008,
+              1507,
+              2006
+            ],
+            "capture_ms": [
+              148.43158600001516,
+              138.04263599990918,
+              138.86996499991255,
+              158.51358000008986,
+              133.6401770001885
+            ],
+            "capture_ms_total_ms": 717.4979440001152,
+            "frame_dims_px": [
+              {
+                "height": 981.0,
+                "width": 1710.0
+              },
+              {
+                "height": 981.0,
+                "width": 1710.0
+              },
+              {
+                "height": 981.0,
+                "width": 1710.0
+              },
+              {
+                "height": 981.0,
+                "width": 1710.0
+              },
+              {
+                "height": 981.0,
+                "width": 1710.0
+              }
+            ],
+            "mount_seq": 8,
+            "notes": [],
+            "panel_dims": {
+              "box_height": 1425,
+              "box_width": 1710,
+              "clip_height": 981.0,
+              "clip_width": 1710.0
+            },
+            "ratios": [
+              0.0,
+              0.0,
+              0.0,
+              0.0
+            ],
+            "target_offsets_ms": [
+              200,
+              500,
+              1000,
+              1500,
+              2000
+            ]
+          }
+        ]
+      },
+      "capture_budget": {
+        "bound_ms": 800.0,
+        "detail": null,
+        "ok": true
+      },
+      "clean": {
+        "console_errors": [],
+        "ok": true,
+        "pgwt_errors": []
+      },
+      "color_stability": {
+        "ok": true,
+        "violations": []
+      },
+      "frame_dims": {
+        "detail": null,
+        "ok": true,
+        "tolerance_px": 1.0
+      },
+      "frame_spacing": {
+        "bound_ms": 150.0,
+        "detail": null,
+        "ok": true
+      },
+      "known_failing": false,
+      "no_blink": {
+        "measured": {
+          "attempted_count": 6,
+          "measured_count": 6,
+          "min_fraction": 0.5,
+          "ok": true
+        },
+        "not_measured": [],
+        "ok": false,
+        "pair_offsets_ms": [
+          149,
+          124,
+          139,
+          175,
+          142,
+          108
+        ],
+        "ratio": 0.199796126401631,
+        "threshold": 0.001
+      },
+      "no_leak": {
+        "after": {
+          "charts": 0,
+          "pending": 0,
+          "uplots": 1
+        },
+        "before": {
+          "charts": 0,
+          "pending": 0,
+          "uplots": 1
+        },
+        "ok": true,
+        "settle_s": {
+          "after": 0.004291574000035325,
+          "before": 0.009744680000039807
+        }
+      },
+      "ok": false,
+      "pre_mount_diagnostic": [],
+      "rendered": {
+        "detail": "49 rows",
+        "ok": true
+      },
+      "self_test": {
+        "boundary_pair_indices": [
+          1,
+          2
+        ],
+        "boundary_pair_ratios": [
+          0.199796126401631,
+          0.199796126401631
+        ],
+        "caught": true,
+        "frame_windows_ms": [
+          [
+            1791883891892,
+            1791883892066
+          ],
+          [
+            1791883892185,
+            1791883892344
+          ],
+          [
+            1791883892688,
+            1791883892815
+          ],
+          [
+            1791883893185,
+            1791883893342
+          ],
+          [
+            1791883893686,
+            1791883893852
+          ]
+        ],
+        "inject_blink_ms": 400,
+        "inject_frame_index": 2,
+        "measured": true,
+        "note": null,
+        "pair_ratios": [
+          0.0,
+          0.199796126401631,
+          0.199796126401631,
+          0.0
+        ],
+        "ratio": 0.199796126401631,
+        "stimulus": {
+          "hidden_cleared_ms": 1791883892827,
+          "hidden_requested_ms": 1791883892819,
+          "min_dwell_ms": 400,
+          "shown_painted_ms": 1791883892389,
+          "shown_requested_ms": 1791883892357,
+          "target_frame_index": 2,
+          "was_present_at_removal": true
+        },
+        "stimulus_ok": true,
+        "stimulus_reason": null,
+        "tick": 2
+      },
+      "tab": "sessions",
+      "ticks_observed": 6,
+      "ttfp_ms": 203,
+      "xpass": false
+    }
+  },
+  "xpass_tabs": []
+}

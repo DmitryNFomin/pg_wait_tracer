@@ -1,0 +1,19 @@
+BEFORE -- old fixed window [mount+700, mount+1100]; the overlay's on-screen window was never measured.
+ run rc/caught   ratio  f2_end-700  f3_start-1100  f3_end-1100    cap f2/f3
+   1      True  0.2003         +53            +89          -66    136/155   
+   2      True  0.1997         +23            +92          -18    171/110   
+   3      True  0.1995         +15            +91          -33    174/124   
+   4      True  0.1998         +39            +92          -57    149/149   
+   5      True  0.2002         +33            +89          -37    161/126   
+   6      True  0.1996         +38            +90          -68    151/158   
+   7      True  0.1998          +1            +89         -116    191/205   
+   8      True  0.1998         +72            +92          -48    120/140   
+   9      True  0.1998         +44            +94          -53    149/147   
+  10      True  0.1998         +67            +94          -60    128/154   
+  11      True  0.1998         +66            +87          -54    128/141   
+  12      True  0.1998         +46            +94          -50    147/144   
+  13      True  0.1998         +60            +92          -37    136/129   
+  14      True  0.1998         +68            +92          -55    121/147   
+  margin before the window OPENS (700 - frame2 capture end): min +1 median +45 max +72 ms   <=0 would mean the clean reference frame may also have contained the overlay
+  margin before the window CLOSES (1100 - frame3 capture start): min +87 median +92 max +94 ms
+  margin before the window CLOSES (1100 - frame3 capture END):   min -116 median -54 max -18 ms   negative => the target frame's raster instant MAY have fallen outside the window; nothing measured which

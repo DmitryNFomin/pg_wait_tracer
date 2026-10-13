@@ -1,0 +1,25 @@
+367,369c367
+< python3 "$SCRIPT_DIR/ui_live_smoke.py" --url "$BASE_URL" \
+<     --pgbench-pid "$PGBENCH_PID" --workload-pid "$WORKLOAD_PID"
+< SMOKE_RC=$?
+---
+> SMOKE_RC=0   # REPEAT DRIVER: main 11-tab walk skipped on purpose
+388c386,390
+< python3 "$SCRIPT_DIR/ui_live_smoke.py" --url "$BASE_URL" \
+---
+> REPEAT="${PGWT_SELFTEST_REPEAT:-1}"
+> SELF_TEST_RC=0
+> for _n in $(seq 1 "$REPEAT"); do
+>   echo "=== SELFTEST RUN $_n/$REPEAT ==="
+>   python3 "$SCRIPT_DIR/ui_live_smoke.py" --url "$BASE_URL" \
+390c392
+<     --out-dir "$SCRIPT_DIR/results/ui_live_self_test" \
+---
+>     --out-dir "$SCRIPT_DIR/results/ui_live_self_test_$_n" \
+392c394,397
+< SELF_TEST_RC=$?
+---
+>   _rc=$?
+>   echo "=== SELFTEST RUN $_n rc=$_rc ==="
+>   if [[ "$_rc" -ne 0 ]]; then SELF_TEST_RC=$_rc; fi
+> done

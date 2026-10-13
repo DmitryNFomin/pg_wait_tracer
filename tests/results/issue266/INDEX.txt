@@ -1,0 +1,115 @@
+issue #266 -- ui_live_smoke blink self-test: evidence
+=====================================================
+
+The question
+------------
+The self-test injects a synthetic overlay and asserts the blink gate catches
+it. On `pgwt-gate` it returned ratio 0.1998 / 0.0 / 0.1998 across three
+box-check runs of the SAME commit (278023b). Was the detector unreliable, or
+was the stimulus never on screen when a frame was taken?
+
+What was measured, and where
+----------------------------
+Hardware: a throwaway Hetzner cx33 ("pgwt-266-blink", id 170060361, deleted
+at the end of the run -- both persistent gate boxes were holding
+/tmp/pgwt-box-check.lock for CI at the time, loads 4.64 and 1.16). PG 17,
+the real daemon + Go bridge, i.e. the same live tier `make box-check` runs,
+driven by a box-local copy of tests/ui_live_smoke.sh with its self-test
+invocation wrapped in a loop (PGWT_SELFTEST_REPEAT) and the 11-tab walk
+skipped -- the stack setup is byte-identical, see scripts/regen.md.
+
+before/  14 consecutive self-test runs on 6bfe7d3 (parent of the fix)
+after/   14 consecutive self-test runs on the fix
+tables/  the two tables below, regenerable with scripts/extract.py
+
+The finding: the OLD self-test's outcome was decided by a quantity nothing
+measured
+--------------------------------------------------------------------------
+The overlay was shown for a fixed wall-clock window, [mount+700,
+mount+1100]. Only the sweep's 1000ms frame can land in it. A frame's raster
+instant is known only to lie somewhere inside its own page.screenshot()
+call, and in before/, over 14 runs:
+
+  * the 1000ms frame's capture call STARTS 87..94 ms before the window
+    closes, and
+  * RETURNS 18..116 ms AFTER it has closed.
+
+So in 14 of 14 runs the capture call straddled the window's close, and
+whether the frame contained the overlay came down to where inside a
+103-264 ms call the browser happened to rasterise. On `pgwt-gate`, where
+capture costs 210-344 ms (issue #266's own numbers), that lands on the wrong
+side about one run in three. All 14 runs here passed -- this VM is faster --
+which is exactly why a pass count on healthy hardware was never evidence
+about this bug.
+
+The same tick had a second, independent cliff: the 500ms frame (the "clean"
+reference the pair diff is graded against) returned as little as **1 ms**
+before the window OPENED. One slower frame and both frames of the graded
+pair would have contained the overlay, scoring 0.0 with a perfectly healthy
+detector.
+
+The fix, and why the new numbers are proof rather than luck
+-----------------------------------------------------------
+The stimulus is now bracketed around ONE frame's capture call in program
+order (shown after the previous frame's capture returns, removed after the
+target frame's returns) and reports the four timestamps that bound its
+on-screen window; every frame's capture interval is recorded with both ends
+read from the page's own clock. ui_live_smoke_lib.inject_stimulus_verdict
+then proves the containment per run, or refuses.
+
+In after/ (13 measured runs; run 1 never reached a tick, see below), the
+geometry was PROVEN in every run, both boundary pairs scored 0.1996-0.2000
+against a 0.001 threshold, and the margins are no longer a gamble:
+
+  * overlay presented -> target capture call start: +220..+340 ms (median 298)
+  * overlay gone      -> next frame's call start:   +200..+383 ms (median 341)
+  * measured on-screen dwell:                       407..509 ms, i.e. the
+    configured 400 ms is now a floor on MEASURED time, not a window nothing
+    checked
+
+The two remaining tight margins -- previous capture end -> append request
+(+2..+14 ms) and target capture end -> removal request (+2..+12 ms) -- are
+tight BY CONSTRUCTION and cannot go negative: each is the gap between two
+consecutive CDP calls read from one clock in causal order, not two
+independent clock readings being compared. (Before the read_end_clock change
+they WERE a cross-clock comparison -- page Date.now() against a Python
+time.monotonic() duration -- and measured 1.7 ms and 2.7 ms on the Mac, i.e.
+a new coin flip replacing the old one. That is why the frame windows are now
+read entirely in the page's clock.)
+
+Run 1 of after/ failed before reaching any tick: "WebSocket never reached
+#status.connected within 60s", the first iteration after the stack came up.
+That is start-up noise in the harness around the self-test, not the blink
+path -- and note what it does: the self-test exits 1 and says "self_test
+never recorded", i.e. a stack that never connects FAILS rather than silently
+passing or skipping. It is reported, not hardened against. before/ did not
+hit it; a follow-up batch of 4 more after-runs is in after-extra/ if it
+completed in time.
+
+Deliberate reds (the gate can fail, and fails for the right reason)
+-------------------------------------------------------------------
+  * old code, window moved 700 -> 600 ms and nothing else changed (the same
+    ~100 ms shift the gate box's extra capture latency causes):
+    ratio 0.0, "NOT caught", exit 1 -- a healthy detector reported as a
+    failure. tables/red-old-design-shifted-window.txt
+  * new code, --inject-frame 0 (a target frame with no preceding frame):
+    REFUSES with "has no preceding frame to pair against", exit 1 -- even
+    though a pair diff of 0.2018 was available to approve on.
+  * new code, --inject-blink-frac 0.0 (an overlay that is in the DOM but
+    covers no pixels -- the stimulus being absent rather than wrong):
+    geometry PROVEN, "NOT caught", exit 1.
+  * the new unit tests against the parent tree: AttributeError on
+    inject_stimulus_verdict / _BlinkInjector.
+
+Not done here
+-------------
+Nothing was widened, retried, slept on, or excused: BLINK_THRESHOLD (0.001),
+SWEEP_OFFSETS_MS, the 5 frames, the 6 ticks and --inject-blink-ms's 400 ms
+default are unchanged, and no tab is listed in KNOWN_FAILING_TABS.
+
+Residual, filed separately, NOT fixed here: the sweep's own coverage (#303)
+-- its intended frame gaps (300/500/500/500 ms) are wider than the 400 ms
+transient the self-test injects, so the sweep genuinely can miss a real
+400 ms blink that lands in a gap. That is a property of the GATE, not of the
+self-test, and #303 is its named successor. This issue only stops the
+self-test from mistaking it for a broken detector.
