@@ -227,11 +227,18 @@ uint64_t pgwt_live_open_ns(uint64_t now_ns, uint64_t last_ts_ns);
  * in the ROADMAP future list) dropped a repeated wait's ENTIRE open stretch
  * whenever the same (pid, wait_event) had also closed inside the same
  * interval. That is an all-or-nothing UNDER-count, not a de-duplication: BPF
- * stamps `st->last_ts = now` in the same handler that emits the closed record
- * (src/bpf/pg_wait_tracer.bpf.c), so every closed record for (pid, we) ends
- * at or before last_ts and the open stretch [last_ts, now) is DISJOINT from
- * all of them — purely additive for a wait exactly as it already was for
- * on-CPU (we == 0).
+ * stamps `st->last_ts = now` in the same handler that accounts the closed
+ * interval — on_watchpoint after every emitted transition, and on_exit after
+ * the exit record (src/bpf/pg_wait_tracer.bpf.c) — so every closed record for
+ * (pid, we) ends at or before last_ts and the open stretch [last_ts, now) is
+ * DISJOINT from all of them, purely additive for a wait exactly as it already
+ * was for on-CPU (we == 0). The invariant holds on EVERY path; if you add a
+ * place that accounts [last_ts, now), stamp last_ts there too rather than
+ * writing a fourth exception into this comment. on_exit was that exception
+ * until 2026-10-14 and it was reachable: it does not delete the state_map
+ * entry (userspace does, off the lifecycle ringbuf), so a timer tick could
+ * read the surviving entry and add the same range the exit record already
+ * covered. See the block comment at that stamp for the full ordering.
  *
  * #393 is what the suppression looks like on screen: a backend in a
  * 10-second pg_sleep straddling the interval edge, with one short earlier

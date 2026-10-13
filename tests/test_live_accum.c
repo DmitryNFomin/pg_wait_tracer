@@ -378,6 +378,14 @@ static void test_open_stretch_repeated_wait(void)
           pct_db(sys_row(acc, PGSLEEP), acc->tm.db_time_ns));
     CHECK(acc->tm.activity_time_ns == 0,
           "the dropped stretch did not land in Activity either");
+    /* The raw row's COUNT for one logical sleep read as two occurrences
+     * (the closed chunk + the open stretch). That is pre-existing semantics
+     * for every open stretch, not something this fix changed — pinned here
+     * so a later change cannot move it silently in either direction. */
+    CHECK(sys_count(acc, PGSLEEP) == 2,
+          "raw row count = 2 for one logical sleep (closed chunk + open "
+          "stretch), the pre-existing open-stretch semantics (got %llu)",
+          (unsigned long long)sys_count(acc, PGSLEEP));
 
     /* The fix must not assume the pair is present: the same open stretch on a
      * pid with NO closed record of that wait is accounted identically. */
@@ -413,6 +421,81 @@ static void test_open_stretch_repeated_wait(void)
 
     free(acc);
     free(lone);
+}
+
+/* ── The invariant the fix above rests on, at the exit boundary ────────
+ *
+ * on_exit emits a closing record for [last_ts, now) and does NOT delete the
+ * state_map entry — userspace does, off a separate ringbuf — so a timer tick
+ * can read the surviving entry before the exit is consumed. Whether that
+ * double-counts is decided by ONE value: the last_ts the BPF exit path
+ * leaves behind. That stamp lives in src/bpf/pg_wait_tracer.bpf.c, which
+ * this pure test cannot link, so the stamp is the test's INPUT: both
+ * candidate values are fed through the same reader arithmetic the daemon
+ * uses (pgwt_live_open_ns -> pgwt_live_account_open_stretch ->
+ * pgwt_accum_add_interval) and the totals compared against the elapsed wall.
+ * The conservation assertion is what bites: with last_ts advanced the total
+ * is the true 8601 ms, with it un-advanced the same input yields 17201 ms —
+ * the wait counted twice. */
+static void test_exit_record_then_open_stretch(void)
+{
+    printf("--- #393: exit record + surviving state entry must not double-count ---\n");
+    const uint32_t PGSLEEP = WEI(PG_WAIT_TIMEOUT, 2);
+    /* One timeline: wait opens at T, backend exits 8600 ms later, the timer
+     * tick reads state_map 1 ms after that. Elapsed wall = 8601 ms. */
+    const uint64_t T        = MS(1000000);
+    const uint64_t EXIT_NS  = T + MS(8600);
+    const uint64_t SCAN_NS  = EXIT_NS + MS(1);
+
+    /* The two candidate last_ts values the exit path can leave behind. */
+    uint64_t stamped   = EXIT_NS;   /* fixed: stamped with the exit record */
+    uint64_t unstamped = T;         /* the bug: still the wait's start */
+
+    CHECK(pgwt_live_open_ns(SCAN_NS, stamped) == MS(1),
+          "stamped: the surviving entry has 1 ms open, not the whole wait");
+    CHECK(pgwt_live_open_ns(SCAN_NS, unstamped) == MS(8601),
+          "un-stamped: the same entry re-offers the whole 8601 ms "
+          "(the input that must not reach the accumulator)");
+
+    /* Both orders through the real accumulator, from the exit record first. */
+    for (int variant = 0; variant < 2; variant++) {
+        uint64_t last_ts = variant == 0 ? stamped : unstamped;
+        struct pgwt_accumulator *acc = calloc(1, sizeof(*acc));
+        pgwt_accum_init(acc);
+
+        struct pgwt_live_interval exit_rec =
+            closed_fg(500, PGSLEEP, EXIT_NS - T, 1, 0xB);
+        pgwt_accum_add_interval(acc, &exit_rec);
+
+        uint64_t open_ns = pgwt_live_open_ns(SCAN_NS, last_ts);
+        if (pgwt_live_account_open_stretch(pgwt_find_pid_accum(acc, 500),
+                                           PGSLEEP, open_ns)) {
+            struct pgwt_live_interval iv = {
+                .pid = 500, .we = PGSLEEP, .wall_ns = open_ns, .cpu_ns = 0,
+                .query_id = 0xB, .cat_flag = 0,
+                .cmd_gate_active = true, .cmd_open = true, .closed = false,
+            };
+            pgwt_accum_add_interval(acc, &iv);
+        }
+
+        uint64_t elapsed = SCAN_NS - T;
+        if (variant == 0) {
+            CHECK(acc->tm.db_time_ns == elapsed &&
+                  acc->tm.timeout_time_ns == elapsed &&
+                  sys_row(acc, PGSLEEP) == elapsed,
+                  "stamped: DB Time, class total and raw row all = the "
+                  "elapsed 8601 ms (got %llu ms)",
+                  (unsigned long long)(acc->tm.db_time_ns / 1000000ULL));
+        } else {
+            /* Not an assertion of desired behaviour — a statement of what the
+             * un-stamped input costs, so the number is on the record. */
+            CHECK(acc->tm.db_time_ns > elapsed,
+                  "un-stamped: DB Time %llu ms EXCEEDS the elapsed 8601 ms — "
+                  "over-attribution, which is why the stamp is in the BPF",
+                  (unsigned long long)(acc->tm.db_time_ns / 1000000ULL));
+        }
+        free(acc);
+    }
 }
 
 static void test_closed_cpu_ns_rule(void)
@@ -2128,6 +2211,7 @@ int main(void)
     test_closed_noncmd_cpu_row();
     test_open_interval();
     test_open_stretch_repeated_wait();
+    test_exit_record_then_open_stretch();
     test_closed_cpu_ns_rule();
     test_ring_delta();
     test_ring_delta_cpu_close();
