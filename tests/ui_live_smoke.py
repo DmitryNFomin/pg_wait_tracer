@@ -1629,7 +1629,7 @@ def main():
                     help="TEST-ONLY override for the deliberate-failure demo "
                     "(issue #93 phase-1 validation step). Gating runs "
                     "(tests/ui_live_smoke.sh) never pass this -- the default "
-                    f"is the issue's stated 0.1% ({lib.BLINK_THRESHOLD}).")
+                    f"is the issue's stated 0.1%% ({lib.BLINK_THRESHOLD}).")
     ap.add_argument("--pgbench-pid", type=int, default=None,
                     help="PID of the background pgbench process (from "
                     "tests/ui_live_smoke.sh); checked alive at every tab "
