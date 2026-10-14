@@ -200,7 +200,7 @@ refuse_previous_results() {
         return 1
     fi
 }
-if ! refuse_previous_results; then
+if ! refuse_previous_results || ! refuse_previous_results "tests/results/.demo_rehearsal_staging"; then
     exit 3
 fi
 
@@ -338,11 +338,17 @@ collect_results() {
 # See the top-of-file comment: same guarantee shape as
 # scripts/box-check.sh's ephemeral_cleanup (issue #141).
 ephemeral_cleanup() {
-    # A refused collection has not secured THIS run's evidence locally.
-    # Preserve both the remote artifacts and the reattachment state.
-    [[ "${results_collection_refused:-0}" == "1" ]] && return
     [[ "$cleanup_done" -eq 1 ]] && return
     cleanup_done=1
+    # A refused collection has not secured THIS run's evidence locally.
+    # Preserve both the remote artifacts and the reattachment state.
+    if [[ "${results_collection_refused:-0}" == "1" ]]; then
+        if [[ "$PERSISTENT" != "1" && -n "$server_id" ]]; then
+            echo "demo-rehearsal: collection refused -- leaving $server_name (id=$server_id, ip=$server_ip) up with remote evidence and $STATE_FILE; collect/archive the evidence before deleting it yourself:" | tee -a "$log" >&2
+            echo "  HCLOUD_TOKEN=\"\$(security find-generic-password -s hcloud -a claude_token -w)\" tests/hetzner-vm.sh delete $server_id" | tee -a "$log" >&2
+        fi
+        return
+    fi
 
     # A persistent box (PGWT_BOX) is never created or deleted by this
     # script -- it is shared, always-on infrastructure. KEEP is a no-op

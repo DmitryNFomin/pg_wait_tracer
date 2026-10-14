@@ -886,6 +886,7 @@ def test_frame_spacing_ok_no_ticks_at_all_trivially_passes():
 
 
 def test_zero_attempts_closes_the_vacuous_frame_spacing_pass():
+    """#301: six observed ticks with zero sweep attempts used to pass blindly."""
     r = lib.build_tab_result(
         "scatter", True, "rendered", 6, [], 0.0, [],
         {"charts": 1, "uplots": 1, "pending": 0},

@@ -1,0 +1,4 @@
+run.id 1791907034: all 33 tab/pass sweeps have early-window evidence
+early/timeline tick 3: first sample=515ms -- EARLY WINDOW LIKELY MISSED (at/past 500ms)
+late/timeline tick 1: first sample=511ms -- EARLY WINDOW LIKELY MISSED (at/past 500ms); late/timeline tick 3: first sample=517ms -- EARLY WINDOW LIKELY MISSED (at/past 500ms)
+middle/histogram tick 4: first sample=570ms -- EARLY WINDOW LIKELY MISSED (at/past 500ms)

@@ -194,6 +194,7 @@ test_ui_live_smoke_lib.py
 # MANUFACTURED positive excess inside that check (+13.3% on the fixture).
 test_multi_window_lib.py
 test_demo_rehearsal_lib.py
+test_rehearsal_verdict_hardening.py
 # #384: the per-frame panel-data probe (--diag-data) is reached FROM the
 # rehearsal's own run_tab call site, not merely present in ui_live_smoke.py.
 # The hazard is an instrument that exists, is documented, and is called by

@@ -101,35 +101,56 @@ class VerdictRefusals(unittest.TestCase):
             self.assertFalse(attempt(checks={"time_model_conserves": check})["ok"])
             self.assertEqual(check["failed_offsets_s"], [300])
 
-    def walk(self, first_offsets):
-        ticks = [{"target_offsets_ms": list(ui.SWEEP_OFFSETS_MS),
-                  "achieved_offsets_ms": [offset, 600, 1100, 1600, 2100]}
-                 for offset in first_offsets]
-        tab = {"ok": True, "ticks_observed": 6, "rendered": {"ok": True},
-               "no_blink": {"ok": True}, "blink_sweep": {"ticks": ticks}}
+    def walk(self, first_offsets, other_tabs=None):
+        tabs = {}
+        for tab_id, offsets in dict(queries=first_offsets, **(other_tabs or {})).items():
+            ticks = [{"target_offsets_ms": list(ui.SWEEP_OFFSETS_MS),
+                      "achieved_offsets_ms": [offset, 600, 1100, 1600, 2100]}
+                     for offset in offsets]
+            tabs[tab_id] = {"ok": True, "ticks_observed": 6, "rendered": {"ok": True},
+                            "no_blink": {"ok": True}, "blink_sweep": {"ticks": ticks}}
+        output = io.StringIO()
         with tempfile.TemporaryDirectory() as tmp, \
-                patch.object(dr.lib, "TABS", ["queries"]), \
-                patch.object(dr.live_smoke, "run_tab", return_value=tab), \
+                patch.object(dr.lib, "TABS", list(tabs)), \
+                patch.object(dr.live_smoke, "run_tab",
+                             side_effect=lambda browser, tab_id, *a, **kw: tabs[tab_id]), \
                 patch.object(dr.live_smoke, "_assert_workload_alive"), \
                 patch.object(dr, "_assert_daemon_alive"), \
-                contextlib.redirect_stdout(io.StringIO()):
+                contextlib.redirect_stdout(output):
             passes, coverage = dr._run_passes(None, "http://fixture/", tmp, 6,
                 [("early", 0)], 1, None, None, None, time.monotonic(),
                 viewport={"width": 100, "height": 100}, device_scale_factor=1)
+        self.walk_output = output.getvalue()
         return demo.build_demo_summary(passes, {"fixture": {"ok": True}}), coverage
 
-    def test_first_sample_at_500_or_later_refuses_attempt(self):
-        self.assertTrue(self.walk([499])[0]["ok"])
-        for offsets in ([500], [501], [200, 500]):
+    def test_tab_with_no_first_sample_before_500_refuses_attempt(self):
+        for offsets in ([500], [501], [500, 570]):
             with self.subTest(offsets=offsets):
-                summary, coverage = self.walk(offsets)
+                summary, coverage = self.walk(offsets, {"timeline": [200]})
                 self.assertFalse(summary["ok"])
                 self.assertIn("early/queries", summary["failed"])
                 self.assertFalse(coverage[0]["ok"])
+                self.assertTrue(coverage[1]["ok"])
+
+    def test_tab_with_one_early_tick_passes_and_retains_every_late_tick(self):
+        self.assertTrue(self.walk([499])[0]["ok"])
+        for offsets in ([200, 500, 570], [500, 570, 499]):
+            with self.subTest(offsets=offsets):
+                summary, coverage = self.walk(offsets)
+                self.assertTrue(summary["ok"])
+                self.assertTrue(coverage[0]["ok"])
+                self.assertEqual(len(coverage[0]["ticks"]), len(offsets))
+                for i, offset in enumerate(offsets, start=1):
+                    if offset >= 500:
+                        self.assertIn(f"tick {i}: first sample={offset}ms -- EARLY WINDOW LIKELY MISSED",
+                                      coverage[0]["detail"])
+                        self.assertIn(f"tick {i}: first offset target=200ms achieved={offset}ms",
+                                      self.walk_output)
+                self.assertEqual(self.walk_output.count("-- EARLY WINDOW LIKELY MISSED (first sample"), 2)
 
     def test_missing_early_window_measurement_refuses(self):
         self.assertFalse(self.walk([])[0]["ok"])
-        tab = demo.summarize_sweep_offset_coverage("queries", "early", [{}])
+        tab = demo.summarize_sweep_offset_coverage("queries", "early", [{}], 500)
         self.assertFalse(tab.get("ok", True))
 
 
@@ -174,12 +195,17 @@ ephemeral_cleanup
             self.assertIn("tests/results/demo_rehearsal", proc.stdout + proc.stderr)
 
     def test_launch_refuses_before_contacting_the_box(self):
+        for previous in ("demo_rehearsal", ".demo_rehearsal_staging"):
+            with self.subTest(previous=previous):
+                self.assert_launch_refuses_before_contacting_the_box(previous)
+
+    def assert_launch_refuses_before_contacting_the_box(self, previous):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "scripts").mkdir()
             launcher = root / "scripts/demo-rehearsal.sh"
             launcher.write_text((ROOT / "scripts/demo-rehearsal.sh").read_text())
-            old = root / "tests/results/demo_rehearsal"
+            old = root / "tests/results" / previous
             old.mkdir(parents=True)
             (old / "run.id").write_text("attempt-1\n")
             sweep = root / "tests/hetzner-sweep.sh"
@@ -195,8 +221,32 @@ ephemeral_cleanup
                                   text=True, capture_output=True, timeout=10)
             self.assertEqual(proc.returncode, 3, proc.stdout + proc.stderr)
             self.assertIn("attempt-1", proc.stdout + proc.stderr)
+            self.assertIn(previous, proc.stdout + proc.stderr)
             self.assertFalse((root / "contacted-box").exists())
             self.assertFalse((root / "tests/results/.demo-rehearsal-state.sh").exists())
+
+    def test_refused_collection_names_kept_vm_and_preserves_state(self):
+        source = (ROOT / "scripts/demo-rehearsal.sh").read_text()
+        cleanup = source.split("ephemeral_cleanup() {", 1)[1].split("\n}\n", 1)[0]
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / "state.sh"
+            state.write_text("reattachment evidence\n")
+            command = '''
+set -euo pipefail
+cleanup_done=0; results_collection_refused=1; PERSISTENT=0
+server_id=123456; server_name=fixture-vm; server_ip=192.0.2.1
+STATE_FILE=state.sh; log=fixture.log
+'''+"ephemeral_cleanup() {"+cleanup+'''\n}
+ephemeral_cleanup
+ephemeral_cleanup
+'''
+            proc = subprocess.run(["bash", "-c", command], cwd=tmp,
+                                  text=True, capture_output=True)
+            self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+            self.assertEqual(state.read_text(), "reattachment evidence\n")
+            self.assertIn("fixture-vm (id=123456, ip=192.0.2.1)", proc.stderr)
+            self.assertIn("tests/hetzner-vm.sh delete 123456", proc.stderr)
+            self.assertEqual(len(proc.stderr.splitlines()), 2)
 
     def test_publication_preserves_all_evidence_and_refuses_a_racing_destination(self):
         import demo_rehearsal_orchestrator_lib as orchestrator

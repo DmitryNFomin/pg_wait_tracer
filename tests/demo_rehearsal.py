@@ -192,10 +192,12 @@ def _run_passes(browser, url, out_dir, ticks, passes, first_data_timeout,
             live_smoke._assert_workload_alive(
                 pgbench_pid, workload_pid, f"pass {name!r} tab {tab_id!r}")
             _assert_daemon_alive(daemon_pid, f"pass {name!r} tab {tab_id!r}")
-            # Coverage is required independently of the measured blink ratio:
-            # absence and first samples at/past 500 ms refuse the attempt.
+            # Each tab sweep needs early-window evidence from at least one
+            # tick; isolated late ticks remain visible (scheduling tail #397).
+            second_target_ms = lib.SWEEP_OFFSETS_MS[1]
             coverage = drlib.summarize_sweep_offset_coverage(
-                tab_id, name, result.get("blink_sweep", {}).get("ticks"))
+                tab_id, name, result.get("blink_sweep", {}).get("ticks"),
+                second_target_ms)
             sweep_coverage.append(coverage)
             result["sweep_offset_coverage"] = coverage
             result["ok"] = bool(result["ok"] and coverage["ok"])
@@ -222,12 +224,10 @@ def _run_passes(browser, url, out_dir, ticks, passes, first_data_timeout,
                 if fd is not None and fd > 0:
                     target1 = tick_drift["target_offsets_ms"][0]
                     achieved1 = tick_drift["first_achieved_ms"]
-                    target2 = (tick_drift["target_offsets_ms"][1]
-                              if len(tick_drift["target_offsets_ms"]) > 1 else None)
                     note = ""
-                    if target2 is not None and achieved1 is not None and achieved1 >= target2:
+                    if achieved1 is not None and achieved1 >= second_target_ms:
                         note = (" -- EARLY WINDOW LIKELY MISSED (first sample "
-                               f"landed at/past the {target2}ms target)")
+                               f"landed at/past the {second_target_ms}ms target)")
                     print(f"    sweep coverage [{name}/{tab_id}] tick {tick_i}: "
                           f"first offset target={target1}ms achieved={achieved1}ms "
                           f"drift=+{fd}ms{note}")

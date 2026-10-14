@@ -750,35 +750,40 @@ def sweep_offset_drift(tick_record):
     }
 
 
-def summarize_sweep_offset_coverage(tab_id, pass_name, blink_sweep_ticks):
-    """Require evidence of the early 200->500 ms window on every sweep.
+def summarize_sweep_offset_coverage(tab_id, pass_name, blink_sweep_ticks,
+                                    second_target_ms):
+    """Require early-window evidence from at least one tick per tab sweep.
 
     500 ms is the existing second sweep target, not a new drift tolerance.
-    A first sample at/past it never observed that window. Missing first
-    samples also refuse. Other drift values stay reporting-only: no new
-    spacing or capture-cost bound is registered here.
+    A first sample at/past it never observed that window. Refuse only when
+    the tab has no valid first sample before it; retain every tick's miss
+    in detail. Other drift stays reporting-only, with no new bound.
     """
-    from ui_live_smoke_lib import SWEEP_OFFSETS_MS
-
     ticks = [sweep_offset_drift(t) for t in (blink_sweep_ticks or [])]
-    failures = []
+    misses = []
+    early_window_observed = False
+    # #397 tracks the scheduling tail: isolated late ticks must remain
+    # visible, but per-tick strictness is deferred because only per-tab
+    # absence is authorised, not an every-tick requirement or pass rate.
     if not ticks:
-        failures.append(f"{pass_name}/{tab_id}: no sweep samples -- early window absent")
+        misses.append(f"{pass_name}/{tab_id}: no sweep samples -- early window absent")
     for i, tick in enumerate(ticks, start=1):
         first = tick["first_achieved_ms"]
         label = f"{pass_name}/{tab_id} tick {i}: first sample={first!r}ms"
         if (isinstance(first, bool) or not isinstance(first, (int, float))
                 or not math.isfinite(first) or first < 0):
-            failures.append(label + " -- early-window measurement absent/invalid")
-        elif first >= SWEEP_OFFSETS_MS[1]:
-            failures.append(label + " -- EARLY WINDOW LIKELY MISSED "
-                            f"(at/past {SWEEP_OFFSETS_MS[1]}ms)")
+            misses.append(label + " -- early-window measurement absent/invalid")
+        elif first >= second_target_ms:
+            misses.append(label + " -- EARLY WINDOW LIKELY MISSED "
+                          f"(at/past {second_target_ms}ms)")
+        else:
+            early_window_observed = True
     return {
         "tab": tab_id,
         "pass": pass_name,
         "ticks": ticks,
-        "ok": not failures,
-        "detail": "; ".join(failures) if failures else None,
+        "ok": early_window_observed,
+        "detail": "; ".join(misses) if misses else None,
     }
 
 

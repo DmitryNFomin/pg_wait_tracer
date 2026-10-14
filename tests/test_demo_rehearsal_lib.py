@@ -830,7 +830,7 @@ def test_summarize_sweep_offset_coverage_joins_tab_and_pass():
         {"target_offsets_ms": [200, 500], "achieved_offsets_ms": [205, 510]},
         {"target_offsets_ms": [200, 500], "achieved_offsets_ms": [669, 985]},
     ]
-    summary = lib.summarize_sweep_offset_coverage("scatter", "early", ticks)
+    summary = lib.summarize_sweep_offset_coverage("scatter", "early", ticks, 500)
     check(summary["tab"] == "scatter" and summary["pass"] == "early",
           "tab/pass identity carried through")
     check(len(summary["ticks"]) == 2, "one drift record per input tick")
@@ -839,9 +839,9 @@ def test_summarize_sweep_offset_coverage_joins_tab_and_pass():
 
 
 def test_summarize_sweep_offset_coverage_empty_ticks():
-    summary = lib.summarize_sweep_offset_coverage("overview", "early", [])
+    summary = lib.summarize_sweep_offset_coverage("overview", "early", [], 500)
     check(summary["ticks"] == [], "no ticks -> empty list, not a crash")
-    summary_none = lib.summarize_sweep_offset_coverage("overview", "early", None)
+    summary_none = lib.summarize_sweep_offset_coverage("overview", "early", None, 500)
     check(summary_none["ticks"] == [], "None ticks -> empty list, not a crash")
 
 
