@@ -534,7 +534,7 @@ static long write_summaries(const char *dir, const struct pgwt_trace_event *ev,
     if (pgwt_summary_writer_init(w, dir, 24, NULL) != 0) { free(w); return -1; }
     long pushed = 0;
     for (int i = 0; i < n; i++) {
-        if (pgwt_summary_push_event(w, &ev[i], 0) != 0) {
+        if (pgwt_summary_push_event(w, &ev[i], 0, ev[i].old_event) != 0) {
             printf("  FAIL: writer refused event %d\n", i);
             tests_failed++;
             break;

@@ -173,7 +173,99 @@
  * Client:ClientRead behaves the same way -- so "the summary equals raw on
  * any window" is NOT what this version claims; it claims the io_worker
  * accounting rule now matches. */
-#define PGWT_SUMMARY_VERSION  6
+/* v7 (2026-10-14, issue #408): the per-second record now carries the
+ * MEASURED-CPU SPLIT, and the writer applies the non-command-CPU relabel the
+ * raw paths apply. Two content changes, one layout change (a 40-byte record
+ * trailer).
+ *
+ * WHAT WAS WRONG, measured on the PG18 demo capture run.id 1791973533
+ * (1929 s, 7,416,121 records; harness and output in
+ * tests/results/issue408-measurement):
+ *
+ *   1. THE SPLIT WAS NOT IN THE FILE. The raw time model reports CPU as two
+ *      rows -- "CPU (running)" (the conserved sum of each interval's measured
+ *      cpu_ns) and "CPU (waiting for a core)" (the runqueue residual
+ *      DB - CPU* - Sigma waits) -- whenever any record carried a measured
+ *      cpu_ns. The summary record stored neither quantity, so
+ *      pgwt_compute_time_model_from_summaries could only report
+ *      has_measured_cpu = 0 and emit ONE combined "CPU*" row. At the full
+ *      span that is 340,625.997 + 225,927.106 ms shown as one 586,586.148 ms
+ *      row: the runqueue-wait signal -- the subject of #386's whole Off-CPU
+ *      investigation -- simply disappears from the Overview on every window
+ *      of 120 s or more, which is every window the demo shows.
+ *
+ *   2. THE NON-COMMAND RELABEL WAS NOT APPLIED. A foreground backend's
+ *      we == 0 interval OUTSIDE a command is post/between-command idle time,
+ *      not CPU (docs/AAS_SEMANTICS_DECISION.md). Both raw paths file it under
+ *      PGWT_WEI_NONCMD_CPU: the server's tagging pass (pgwt_tag_events) and
+ *      the live accumulators (pgwt_live_effective_event, issue #97). The
+ *      writer never did -- it saw the raw ringbuf id, and the daemon resolved
+ *      the command gate ~65 lines BELOW the summary push -- so that time sat
+ *      in the summary's CPU class and therefore inside DB Time, while raw
+ *      counts it as Idle. MEASURED: +20,033.044 ms on the full span, which is
+ *      the WHOLE of the DB Time divergence there (raw 4,210,812.782 vs
+ *      summary 4,230,845.827 = +20,033.044, and Idle is low by exactly the
+ *      same -20,033.044) -- +3.54% on the CPU row itself. The identity holds
+ *      to three decimals, which is why this is not a pid-categorisation
+ *      effect: no other mechanism contributes at the full span.
+ *
+ * HOW the writer knows, both times: it is TOLD, the same way v6 is told a
+ * pid's category. pgwt_summary_push_event takes `eff_event` -- the wait id
+ * the PRODUCER resolved through the shared classifier
+ * (pgwt_live_effective_event in src/event_stream.c, which now runs the
+ * command-gate sweep ABOVE the push; pgwt_tag_events' output for offline
+ * producers). A flags- or gate-only check inside the writer would be dead
+ * code in the daemon, exactly as hole N7 in tests/test_agg_raw_crosscheck.c
+ * records for the category bits. PGWT_SUMMARY_EFF_UNRESOLVED means "the
+ * producer did not resolve one": the writer then uses evt->old_event (the v6
+ * behaviour) and COUNTS it (eff_unresolved_events_total), so the residual is
+ * observable rather than assumed. An eff_event that is neither
+ * evt->old_event nor PGWT_WEI_NONCMD_CPU is refused the same way
+ * (eff_rejected_events_total) -- the relabel is the only rewrite this
+ * parameter may express.
+ *
+ * WHY THE VERSION HAS TO MOVE: both changes are ACCOUNTING-RULE changes, the
+ * same reason v3, v4, v5 and v6 exist. A v6 second charges non-command CPU to
+ * DB Time and a v7 second charges it to Idle, so a window holding both
+ * reports a DB Time that is neither; and a v6 second cannot answer "what was
+ * measured CPU" at all, so a mixed window would emit the two-row split
+ * carrying only part of its span. The layout also grows, which makes the bump
+ * mandatory rather than conventional: a v6 record ends after the 12-byte v4
+ * trailer, so a reader expecting the v7 trailer mis-parses it.
+ *
+ * FILES ALREADY ON DISK are handled by machinery that exists and is unchanged
+ * here: pgwt_summary_reader_open refuses any file whose version is not
+ * PGWT_SUMMARY_VERSION (with a WARN naming both), and pgwt-server preflights
+ * the window (should_use_summaries -> pgwt_summaries_window_current) so a
+ * refusal becomes a RAW RECOMPUTE, never a plausible partial answer. Since
+ * #403 that fallback is correct rather than a silent zero. Startup recovery
+ * still finalizes and archives an intact older file instead of calling it
+ * corrupt. A v6 capture therefore stays fully readable from its raw events,
+ * which carry cpu_ns and the CMD markers and are the source of truth for
+ * both rules. No migration is possible: the measured-CPU scalars are simply
+ * not in a v6 record.
+ *
+ * SCOPE, stated because it is easy to over-read:
+ *   - The split is reported on the UNFILTERED window only. The stored
+ *     scalars are record-wide, which IS the unfiltered population; a
+ *     class/event/query-filtered request asks about a different population
+ *     the file cannot answer, so that path keeps has_measured_cpu = 0 and the
+ *     single "CPU*" row (the v6 behaviour, honest about what it cannot
+ *     split). Per-query and per-session CPU are unchanged.
+ *   - v7 says NOTHING about #379: the writer still charges a long interval
+ *     WHOLE to the second in which it closes, while the raw path clips it to
+ *     the window. On the capture above that is +4,699 ms of the +14,153 ms
+ *     DB Time divergence at a 900 s window (the rest being the relabel) and
+ *     most of the Idle divergence there. "The summary equals raw on any
+ *     window" is NOT what this version claims; at the FULL span, where no
+ *     record straddles an edge, the two paths now agree to 0.000 ms. */
+#define PGWT_SUMMARY_VERSION  7
+
+/* `eff_event` sentinel: the producer resolved no effective wait id, so the
+ * writer uses evt->old_event and counts the push. Not 0 -- 0 is a valid id
+ * (the on-CPU gap), which is exactly the id this parameter exists to
+ * reclassify. */
+#define PGWT_SUMMARY_EFF_UNRESOLVED  0xFFFFFFFFu
 
 /* #277: how long after a second ends it is treated as complete by the
  * periodic flush. The daemon's timer handler runs BEFORE the event-ring
@@ -205,6 +297,7 @@
  *   queries    SUMMARY_MAX_QUERIES  * (36 + PGWT_NUM_CLASSES*8 + 1
  *                                      + SUMMARY_QUERY_TOP_EVENTS*20 + 8)
  *   trailer    8 (idle_ns) + 4 (events_overflow)
+ *              + v7: 5 * 8 (the measured-CPU scalars)
  */
 #define PGWT_SUMMARY_SERIALIZE_MAX                                            \
     ((size_t)(PGWT_NUM_CLASSES * 8)                                           \
@@ -212,7 +305,7 @@
      + (size_t)SUMMARY_MAX_SESSIONS * 32                                      \
      + (size_t)SUMMARY_MAX_QUERIES  * (36 + PGWT_NUM_CLASSES * 8 + 1          \
                                        + SUMMARY_QUERY_TOP_EVENTS * 20 + 8)   \
-     + 12)
+     + 12 + 40)
 
 /* ── Per-second accumulator ───────────────────────────────── */
 
@@ -283,6 +376,28 @@ struct pgwt_summary_accum {
      * Timeout pacing sleeps), accumulated at the writer independently of
      * events[] so it survives a full table. */
     uint64_t idle_ns;
+
+    /* v7 (#408): the MEASURED-CPU SPLIT for this second, i.e. everything
+     * pgwt_compute_time_model derives its two CPU rows from. Without these
+     * the summary path could only report has_measured_cpu = 0 and one
+     * combined "CPU*" row -- see the v7 note above.
+     *
+     * The CPU* total is cpu_measured_ns + cpu_unknown_ns, exactly as the raw
+     * path's single cpu_measured_ns accumulator holds both tiers; the
+     * runqueue row is then the residual DB - CPU* - Sigma waits, computed by
+     * the reader from these and class_ns (the same leak-immune arithmetic the
+     * raw path uses -- never a per-interval wall-minus-cpu split, because
+     * se.sum_exec_runtime is only current at a tick or a context switch).
+     *
+     * cpu_measured_records is NOT derivable from the sums: a MEASURED ZERO is
+     * a signal ("this window can separate running from waiting, and nothing
+     * ran") while an absent measurement is not, and the raw path distinguishes
+     * them by counting records, not nanoseconds. */
+    uint64_t cpu_measured_ns;       /* Sigma clamped cpu_ns over we==0 gaps   */
+    uint64_t cpu_unknown_ns;        /* Sigma wall over UNKNOWN we==0 gaps     */
+    uint64_t cpu_clamped_ns;        /* Sigma (cpu_ns - wall) clamped away     */
+    uint64_t wait_gap_cpu_ns;       /* Sigma cpu_ns on WAIT records (obs.)    */
+    uint64_t cpu_measured_records;  /* records with cpu_ns != UNKNOWN         */
 
     /* Per-session hash table (open addressing) */
     struct pgwt_summary_session sessions[SUMMARY_MAX_SESSIONS];
@@ -382,6 +497,20 @@ struct pgwt_summary_writer {
      * summary_io_worker_ns_excluded_total. */
     uint64_t      io_worker_events_excluded_total;
     uint64_t      io_worker_ns_excluded_total;
+    /* v7 (#408): pushes whose producer resolved no effective wait id
+     * (PGWT_SUMMARY_EFF_UNRESOLVED -- the record keeps evt->old_event, i.e.
+     * the v6 behaviour), and pushes whose eff_event was neither
+     * evt->old_event nor PGWT_WEI_NONCMD_CPU and was therefore REFUSED. Both
+     * are the non-command relabel's residual made observable, the same role
+     * io_worker_*_excluded_total play for v6: a non-zero
+     * eff_unresolved_events_total means some of this file's we==0 time is
+     * classified the pre-v7 way, and eff_rejected_events_total should be 0 in
+     * any build (it means a producer is passing an id the rule does not
+     * allow). Exported by the control socket as
+     * summary_eff_unresolved_events_total /
+     * summary_eff_rejected_events_total. */
+    uint64_t      eff_unresolved_events_total;
+    uint64_t      eff_rejected_events_total;
 
     /* #128 deferred per-query attribution (query_attr.h), per pid; heap
      * (SUMMARY_QATTR_SLOTS entries, open addressing, reclaimed on backend
@@ -417,10 +546,26 @@ int  pgwt_summary_writer_init(struct pgwt_summary_writer *w,
  * daemon (hole N7, tests/test_agg_raw_crosscheck.c). Making it an argument
  * also means no caller can inherit the wrong answer silently: every producer
  * must say what it resolved. Pass 0 for a pid-less marker (the writer drops
- * markers anyway, and resolving a category for pid 0 would be meaningless). */
+ * markers anyway, and resolving a category for pid 0 would be meaningless).
+ *
+ * `eff_event` (v7, #408) is the EFFECTIVE wait id the producer resolved
+ * through the shared classifier -- pgwt_live_effective_event() on the live
+ * path, pgwt_tag_events()' rewrite offline. Its only legal value other than
+ * evt->old_event is PGWT_WEI_NONCMD_CPU: a foreground we==0 interval outside
+ * a command is post/between-command IDLE time, not CPU, and both raw paths
+ * file it that way (docs/AAS_SEMANTICS_DECISION.md, issues #97 and #408). It
+ * is a PARAMETER for the same reason cat_flag is: the command gate lives in
+ * the producer's per-pid accumulator, and a writer-side guess would be a
+ * second copy of the rule that could drift from the one the raw paths use.
+ * PGWT_SUMMARY_EFF_UNRESOLVED means "not resolved" -- the writer uses
+ * evt->old_event and counts the push (eff_unresolved_events_total), so a
+ * producer that cannot resolve degrades to the v6 behaviour VISIBLY instead
+ * of silently. Anything else is refused and counted
+ * (eff_rejected_events_total). */
 int  pgwt_summary_push_event(struct pgwt_summary_writer *w,
                               const struct pgwt_trace_event *evt,
-                              uint32_t cat_flag);
+                              uint32_t cat_flag,
+                              uint32_t eff_event);
 
 /* Force-flush the current accumulator whatever its state (rotation, close,
  * and offline generators that drive the writer with synthetic timestamps).

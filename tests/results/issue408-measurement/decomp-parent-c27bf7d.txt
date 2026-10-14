@@ -1,0 +1,33 @@
+    /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a2b6408d6b33daab4/tests/results/demo_rehearsal-1791973533/trace/2026-10-14_10.trace.lz4: 1810 blocks
+    /Users/dmitryfomin/work/git/pg_wait_tracer/.claude/worktrees/agent-a2b6408d6b33daab4/tests/results/demo_rehearsal-1791973533/trace/current.trace: 1 blocks
+registry: 223 entries, 3 io_workers
+raw: 7416121 records, 0 SAMPLES blocks
+summary: pushed 7416121 of 7416121 into /tmp/cpudecomp-out/summaries (format v6)
+summary: visit=1929 records=1929 span=1929 s
+
+=== 900 s ending at capture end (900 s) ===
+  raw   DB     2020256.840  Idle    21328324.822  CPU(run)    156835.790  CPU(wait)    109972.261  CPU*        -1.000
+  summ  DB     2034409.955  Idle    22519370.134  CPU(run)        -1.000  CPU(wait)        -1.000  CPU*    276262.171
+  delta DB      +14153.115 (+0.701%)  Idle    +1191045.312 (+5.584%)
+  raw has_measured_cpu=1 offcpu_ms=109972.261 cpu_ms=156835.790 clamped=0.000 waitgap=20927.786
+  summ has_measured_cpu=0 offcpu_ms=0.000 cpu_ms=0.000
+  MECHANISM A (measured split): gap 266808.052 ms = measured 156835.790 + unknown 0.000, 761294 measured records
+  MECHANISM B (non-command relabel, raw moves to Idle): 9454.120 ms
+
+=== 900 s ending 1 s short (900 s) ===
+  raw   DB     2025174.156  Idle    21345829.950  CPU(run)    157911.076  CPU(wait)    112436.796  CPU*        -1.000
+  summ  DB     2038346.324  Idle    22389674.105  CPU(run)        -1.000  CPU(wait)        -1.000  CPU*    279821.044
+  delta DB      +13172.168 (+0.650%)  Idle    +1043844.154 (+4.890%)
+  raw has_measured_cpu=1 offcpu_ms=112436.796 cpu_ms=157911.076 clamped=0.000 waitgap=20972.916
+  summ has_measured_cpu=0 offcpu_ms=0.000 cpu_ms=0.000
+  MECHANISM A (measured split): gap 270347.871 ms = measured 157911.076 + unknown 0.000, 762570 measured records
+  MECHANISM B (non-command relabel, raw moves to Idle): 9473.169 ms
+
+=== full span (1929 s) ===
+  raw   DB     4210812.782  Idle    45871975.503  CPU(run)    340625.997  CPU(wait)    225927.106  CPU*        -1.000
+  summ  DB     4230845.827  Idle    45851942.459  CPU(run)        -1.000  CPU(wait)        -1.000  CPU*    586586.148
+  delta DB      +20033.044 (+0.476%)  Idle      -20033.044 (-0.044%)
+  raw has_measured_cpu=1 offcpu_ms=225927.106 cpu_ms=340625.997 clamped=0.000 waitgap=45820.757
+  summ has_measured_cpu=0 offcpu_ms=0.000 cpu_ms=0.000
+  MECHANISM A (measured split): gap 566553.103 ms = measured 340625.997 + unknown 0.000, 1646240 measured records
+  MECHANISM B (non-command relabel, raw moves to Idle): 20033.044 ms

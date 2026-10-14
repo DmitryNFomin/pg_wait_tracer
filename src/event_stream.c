@@ -114,13 +114,58 @@ int pgwt_handle_trace_event(void *ctx, void *data, size_t data_sz)
         cat_flag = pgwt_live_pid_cat_flag(d, pa, evt->pid);
     }
 
+    /* THE COMMAND GATE, RESOLVED HERE for the same reason the category above
+     * is (summary v7, #408): a foreground we == 0 interval OUTSIDE a command
+     * is post/between-command idle time, not CPU, and the summary writer has
+     * to be TOLD -- the gate lives in this pid's accumulator, and nothing in
+     * evt says whether BPF's emission-time flag can be trusted (it cannot:
+     * PostgreSQL reports STATE_IDLE before the post-command ClientRead, which
+     * is why the majority rule over the record's own span exists).
+     *
+     * This sweep used to sit ~65 lines below the summary push, so the writer
+     * classified that time as CPU while both raw paths classified it as Idle:
+     * +20,033.044 ms on the PG18 demo capture's full span, which was the
+     * ENTIRE DB Time divergence there and +3.54% on the CPU row
+     * (tests/results/issue408-measurement). It is computed ONCE and reused by
+     * the accumulation below -- pgwt_live_cmd_gate_classify CONSUMES the
+     * pid's marker sweep up to t1, so calling it twice would advance the
+     * sweep twice and the two answers could differ.
+     *
+     * Markers are excluded exactly as above: they carry no wait time, the
+     * writer drops them, and the CMD_START/CMD_END pair feeds the gate in the
+     * marker branch below rather than being classified by it. They push with
+     * PGWT_SUMMARY_EFF_UNRESOLVED, which keeps evt->old_event -- the writer
+     * then drops them as markers, as it always has. */
+    uint64_t t1 = evt->timestamp_ns;
+    uint64_t t0 = t1 >= dur ? t1 - dur : 0;
+    bool in_cmd = false;
+    bool by_markers = false;
+    uint32_t eff_event = PGWT_SUMMARY_EFF_UNRESOLVED;
+    if (!PGWT_IS_MARKER(we)) {
+        by_markers = pgwt_live_cmd_gate_classify(
+            pa ? &pa->cmd_gate : NULL, true, t0, t1,
+            (evt->flags & PGWT_EVENT_FLAG_CMD_OPEN) != 0, &in_cmd);
+        if (!by_markers && we == 0 && cat_flag == 0 && d->cmd_gate_active) {
+            /* Not decided by markers: say so (metrics), never silently. */
+            if (pa)
+                d->counters.live_cpu_unmarked_ns_total += dur;
+            else
+                d->counters.live_cpu_gate_fallback_total++;
+        }
+        /* The ONE classifier both live accumulators use (map_reader.c), so
+         * the summary file and the live view can never disagree about which
+         * id an interval was filed under. */
+        eff_event = pgwt_live_effective_event(we, cat_flag,
+                                              d->cmd_gate_active, in_cmd);
+    }
+
     /* Write to summary file if recording is enabled. Markers pass through
      * here too, but the summary writer's accum_event filters them (FID-4):
      * they must land in the trace (variants / lifecycle / escalation
      * coverage need them) while never entering wait accounting. */
     if (d->summary_writer) {
         stage_started_ns = pgwt_debug_block_begin(d);
-        pgwt_summary_push_event(d->summary_writer, evt, cat_flag);
+        pgwt_summary_push_event(d->summary_writer, evt, cat_flag, eff_event);
         pgwt_debug_block_end(d, "event_callback_summary_writer", evt->pid,
                              stage_started_ns);
     }
@@ -181,21 +226,11 @@ int pgwt_handle_trace_event(void *ctx, void *data, size_t data_sz)
      * non-command and ~83% of pgbench's CPU vanished from live DB Time. The
      * emission flag remains only the fallback for a full accumulator. */
     stage_started_ns = pgwt_debug_block_begin(d);
-    /* pa / cat_flag were resolved above the summary push (v6) -- the same
-     * values, not a second lookup. */
-    uint64_t t1 = evt->timestamp_ns;
-    uint64_t t0 = t1 >= dur ? t1 - dur : 0;
-    bool in_cmd = false;
-    bool by_markers = pgwt_live_cmd_gate_classify(
-        pa ? &pa->cmd_gate : NULL, true, t0, t1,
-        (evt->flags & PGWT_EVENT_FLAG_CMD_OPEN) != 0, &in_cmd);
-    if (!by_markers && we == 0 && cat_flag == 0 && d->cmd_gate_active) {
-        /* Not decided by markers: say so (metrics), never silently. */
-        if (pa)
-            d->counters.live_cpu_unmarked_ns_total += dur;
-        else
-            d->counters.live_cpu_gate_fallback_total++;
-    }
+    /* pa / cat_flag (v6) and in_cmd / by_markers (v7, #408) were all resolved
+     * above the summary push -- the SAME values, not a second lookup and not
+     * a second marker sweep. `by_markers` is read by nothing below; it is
+     * consumed where it is produced, with the unmarked-CPU metrics. */
+    (void)by_markers;
     struct pgwt_live_interval iv = {
         .pid             = evt->pid,
         .we              = we,

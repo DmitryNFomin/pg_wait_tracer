@@ -2194,6 +2194,29 @@ static int aas_summary_visitor(const struct pgwt_summary_accum *rec, void *arg)
             if (c == PGWT_CLASS_ACTIVITY) continue;
             ctx->buckets[bi].class_aas[c] += (double)rec->class_ns[c];
         }
+        /* v7 (#408): the SAME two-band split the raw AAS loop computes, from
+         * the record's measured-CPU scalars. Without this the chart's "cpu"
+         * band carried the runqueue time inside it and the "offcpu" band was
+         * flat zero on every window of 120 s or more -- so the Overview would
+         * have shown the two CPU rows in its table (above) and one band in
+         * the chart beside it, disagreeing on the same page.
+         *
+         * The CPU band becomes CPU* (measured + gap-inferred) and the
+         * remainder of the we == 0 wall goes to the Off-CPU* band, which is
+         * the per-bucket form of the raw path's residual: there,
+         * off = DB - CPU* - Sigma waits per bucket, and DB - Sigma waits for
+         * these records IS class_ns[CPU]. UNKNOWN-only seconds contribute
+         * cpu_unknown == class_ns[CPU] and therefore 0 to the band, which is
+         * the raw behaviour too (gap-inference has no residual).
+         *
+         * `offcpu_aas` holds nanoseconds until the normalize pass below, the
+         * same two-phase shape pgwt_compute_aas uses. */
+        double cpu_total = (double)rec->cpu_measured_ns
+                         + (double)rec->cpu_unknown_ns;
+        double gap = (double)rec->class_ns[PGWT_CLASS_CPU];
+        if (cpu_total > gap) cpu_total = gap;
+        ctx->buckets[bi].class_aas[PGWT_CLASS_CPU] -= gap - cpu_total;
+        ctx->buckets[bi].offcpu_aas += gap - cpu_total;
     } else {
         for (int e = 0; e < SUMMARY_MAX_EVENTS; e++) {
             const struct pgwt_summary_event *se = &rec->events[e];
@@ -2245,7 +2268,11 @@ void pgwt_compute_aas_from_summaries(
 
     pgwt_visit_summaries(trace_dir, from_ns, to_ns, aas_summary_visitor, &ctx);
 
-    /* Convert ns → AAS */
+    /* Convert ns → AAS. v7 (#408): offcpu_aas is normalized and counted in
+     * the total exactly as pgwt_compute_aas does -- Off-CPU* is part of
+     * active DB Time, so a window whose runqueue band is non-zero must not
+     * report a smaller max_aas here than the raw path does for the same
+     * window. */
     double max_aas = 0.0;
     for (int i = 0; i < actual_buckets; i++) {
         double total = 0.0;
@@ -2253,6 +2280,8 @@ void pgwt_compute_aas_from_summaries(
             buckets[i].class_aas[c] /= (double)bucket_ns;
             total += buckets[i].class_aas[c];
         }
+        buckets[i].offcpu_aas /= (double)bucket_ns;
+        total += buckets[i].offcpu_aas;
         if (total > max_aas) max_aas = total;
     }
 
@@ -2273,6 +2302,22 @@ struct tm_summary_ctx {
     struct idle_accum idle_ev[MAX_IDLE_EV];
     int    n_idle_ev;
     const struct pgwt_filter *f;
+    /* T8 measured-CPU split, summary v7 (#408). Read from the per-second
+     * record's own scalars (the writer accumulates them with the same
+     * per-record arithmetic the raw path uses), so this path can emit the
+     * same two CPU rows instead of one combined "CPU*".
+     *
+     * UNFILTERED ONLY, deliberately: the scalars are record-wide, which IS
+     * the unfiltered population. A class/event/query filter asks about a
+     * subset the file cannot describe -- there is no per-event cpu_ns in the
+     * record -- so those requests leave has_measured_cpu at 0 and keep the
+     * single "CPU*" row, which is honest about what cannot be split rather
+     * than a split computed from the wrong population. */
+    double cpu_measured_ns;      /* Sigma measured cpu_ns (clamped at write) */
+    double cpu_unknown_ns;       /* Sigma wall of UNKNOWN we==0 gaps         */
+    double cpu_clamped_ns;
+    double wait_gap_cpu_ns;
+    int    has_measured_cpu;
 };
 _Static_assert(sizeof(((struct tm_summary_ctx *)0)->idle_ev) /
                    sizeof(struct idle_accum) == MAX_IDLE_EV,
@@ -2351,6 +2396,22 @@ static int tm_summary_visitor(const struct pgwt_summary_accum *rec, void *arg)
          * is the only per-event idle source, so summing it would under-report
          * Idle while DB Time stayed right. */
         ctx->idle_time_ns += (double)rec->idle_ns;
+        /* v7 (#408): the measured-CPU split for this second. cpu_measured +
+         * cpu_unknown is the CPU* total (exactly what the raw path's single
+         * cpu_measured_ns accumulator holds, both tiers in one number); the
+         * runqueue row is derived after the visit as the residual
+         * DB - CPU* - Sigma waits, from these exact totals.
+         *
+         * has_measured_cpu follows the RECORD COUNT, never the nanoseconds: a
+         * measured zero is a signal (this window can separate running from
+         * waiting, and nothing ran) while an absent measurement is not, and
+         * summing to zero cannot tell the two apart. */
+        ctx->cpu_measured_ns  += (double)rec->cpu_measured_ns;
+        ctx->cpu_unknown_ns   += (double)rec->cpu_unknown_ns;
+        ctx->cpu_clamped_ns   += (double)rec->cpu_clamped_ns;
+        ctx->wait_gap_cpu_ns  += (double)rec->wait_gap_cpu_ns;
+        if (rec->cpu_measured_records > 0)
+            ctx->has_measured_cpu = 1;
     }
 
     /* Per-event stats: iterate event entries */
@@ -2426,8 +2487,43 @@ void pgwt_compute_time_model_from_summaries(
     double db_time_ms = ctx.db_time_ns / 1e6;
     double idle_ms    = ctx.idle_time_ns / 1e6;
 
-    /* Build result rows (same format as raw compute) */
-    int max_rows = 1 + PGWT_NUM_CLASSES * 6 + IDLE_ROWS_RESERVED;
+    /* T8 measured-CPU split, summary v7 (#408) -- the same two steps the raw
+     * path takes, over the same quantities, so the two paths emit the same
+     * rows for the same window.
+     *
+     * STEP 1: the CPU class row becomes CPU* = measured + gap-inferred, which
+     * is normally SMALLER than rec->class_ns[CPU] (that is the full wall of
+     * every we == 0 gap). The difference is the runqueue time, which step 2
+     * recovers as a residual -- so DB Time does not move: it is still built
+     * from class_ns, and CPU* + Off-CPU* adds back up to the gap total.
+     *
+     * STEP 2: Off-CPU* = DB - CPU* - Sigma waits, from exact totals rather
+     * than a per-interval wall-minus-cpu split, because sum_exec_runtime is
+     * only current at a tick or a context switch and a per-interval split
+     * double-counts the sub-ms burst that leaks into the next interval. A
+     * negative residual is a measurement inconsistency: clamp at 0 and count
+     * the clamp, exactly as raw does.
+     *
+     * Order matters: this runs BEFORE the qsort below, because the classes
+     * array is sorted by total and the CPU total changes here. */
+    double offcpu_ns = 0.0;
+    double cpu_clamped_ns = ctx.cpu_clamped_ns;
+    if (ctx.has_measured_cpu) {
+        double cpu_total_ns = ctx.cpu_measured_ns + ctx.cpu_unknown_ns;
+        ctx.classes[PGWT_CLASS_CPU].total_ns = cpu_total_ns;
+        double wait_total_ns = 0.0;
+        for (int c = 0; c < PGWT_NUM_CLASSES; c++)
+            if (c != PGWT_CLASS_CPU)
+                wait_total_ns += ctx.classes[c].total_ns;
+        double resid = ctx.db_time_ns - cpu_total_ns - wait_total_ns;
+        if (resid < 0) { cpu_clamped_ns += -resid; resid = 0.0; }
+        offcpu_ns = resid;
+    }
+
+    /* Build result rows (same format as raw compute). The row budget matches
+     * the raw path's: 2 fixed rows (DB Time, and the Off-CPU* sibling the
+     * split adds) + 6 per class + the idle block. */
+    int max_rows = 2 + PGWT_NUM_CLASSES * 6 + IDLE_ROWS_RESERVED;
     struct pgwt_tm_row *rows = calloc(max_rows, sizeof(*rows));
     int nr = 0;
 
@@ -2454,8 +2550,14 @@ void pgwt_compute_time_model_from_summaries(
                 break;
             }
         }
+        /* T8 / v7 (#408): the two-row CPU split, same labels and same rule
+         * as the raw path -- "CPU (running)" + "CPU (waiting for a core)"
+         * where the record carried a measurement, the combined "CPU*" (whose
+         * asterisk footnote also covers "this window cannot separate running
+         * from waiting") where it did not. */
         if (strcasecmp(ctx.classes[c].name, "cpu") == 0)
-            snprintf(rows[nr].name, sizeof(rows[nr].name), "CPU*");
+            snprintf(rows[nr].name, sizeof(rows[nr].name), "%s",
+                     ctx.has_measured_cpu ? "CPU (running)" : "CPU*");
         else
             snprintf(rows[nr].name, sizeof(rows[nr].name), "%.31s", display2);
         rows[nr].time_ms     = cls_ms;
@@ -2463,6 +2565,18 @@ void pgwt_compute_time_model_from_summaries(
         rows[nr].aas         = wall_ms > 0 ? cls_ms / wall_ms : 0;
         rows[nr].indent      = 1;
         nr++;
+
+        if (strcasecmp(ctx.classes[c].name, "cpu") == 0
+            && ctx.has_measured_cpu) {
+            double off_ms = offcpu_ns / 1e6;
+            snprintf(rows[nr].name, sizeof(rows[nr].name),
+                     "CPU (waiting for a core)");
+            rows[nr].time_ms     = off_ms;
+            rows[nr].pct_db_time = db_time_ms > 0 ? off_ms / db_time_ms * 100.0 : 0;
+            rows[nr].aas         = wall_ms > 0 ? off_ms / wall_ms : 0;
+            rows[nr].indent      = 1;
+            nr++;
+        }
 
         if (strcasecmp(ctx.classes[c].name, "cpu") == 0) continue;
 
@@ -2506,6 +2620,19 @@ void pgwt_compute_time_model_from_summaries(
     out->db_time_ms   = db_time_ms;
     out->idle_time_ms = idle_ms;
     out->aas          = wall_ms > 0 ? db_time_ms / wall_ms : 0;
+    /* T8 measured-CPU decomposition + self-checks (v7, #408) -- the same
+     * scalars the raw path exports, so every consumer that reads them
+     * (src/server.c's time_model response, the rehearsal's Off-CPU
+     * diagnostic) gets a real answer on a summary-served window instead of
+     * has_measured_cpu = false and zeros. */
+    /* cpu_ms is the CPU* ROW, i.e. both tiers, exactly as the raw path's
+     * single cpu_measured_ns accumulator holds measured and gap-inferred
+     * time together. */
+    out->cpu_ms           = (ctx.cpu_measured_ns + ctx.cpu_unknown_ns) / 1e6;
+    out->offcpu_ms        = offcpu_ns / 1e6;
+    out->has_measured_cpu = ctx.has_measured_cpu;
+    out->cpu_clamped_ms   = cpu_clamped_ns / 1e6;
+    out->wait_gap_cpu_ms  = ctx.wait_gap_cpu_ns / 1e6;
 }
 
 /* ── Top Events from summaries ────────────────────────────── */
