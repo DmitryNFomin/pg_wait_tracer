@@ -702,6 +702,11 @@ int on_exit(struct trace_event_raw_sched_process_template *ctx)
      * defect 2: every pgbench disconnect back-filled ~120 s of phantom CPU
      * into the trace. The sampled tier's data is the SAMPLES stream; there
      * is no exact interval to close. */
+    /* Set once the interval [last_ts, now) has actually been ACCOUNTED
+     * somewhere (the accum map in lightweight mode, a trace record in full
+     * mode). Only then may last_ts advance — see the stamp below. */
+    bool closed_accounted = false;
+
     if (st->wp_live && exact_admission_open()) {
         u64 duration = now - st->last_ts;
 
@@ -715,6 +720,7 @@ int on_exit(struct trace_event_raw_sched_process_template *ctx)
 
         if (lightweight_mode) {
             accum_add(st->last_event, duration);
+            closed_accounted = true;
         } else {
             u64 query_id = 0;
             u16 cmd_open = 0;
@@ -733,10 +739,46 @@ int on_exit(struct trace_event_raw_sched_process_template *ctx)
                 .query_id = query_id,
                 .cpu_ns = cpu_delta,
             };
-            if (exact_admission_open())
+            if (exact_admission_open()) {
                 emit_event(&evt);
+                closed_accounted = true;
+            }
         }
     }
+
+    /* Advance last_ts past the interval just accounted — the SAME stamp
+     * on_watchpoint does after every emitted transition, and the invariant
+     * src/map_reader.h pgwt_live_account_open_stretch() rests on: every
+     * closed record for (pid, we) ends at or before last_ts, so the still-open
+     * [last_ts, now) stretch is disjoint from all of them.
+     *
+     * This path was the one exception, and it was load-bearing. on_exit does
+     * NOT delete the state_map entry — userspace does, from the separate
+     * lifecycle ringbuf (pgwt_handle_exit, src/backend.c), and the stale-state
+     * sweep deliberately leaves it alone ("the exit path owns the entry"). The
+     * trace ringbuf is drained at the end of the same loop iteration, so the
+     * exit record is already in event_accum; both fds can be ready in one
+     * epoll_wait batch and dispatch follows kernel ready order, so a timer
+     * tick can read the surviving entry BEFORE the lifecycle event is
+     * consumed. With last_ts un-advanced, that tick added [last_ts, now) a
+     * second time, on top of the exit record covering the same range —
+     * DB Time inflated by a whole wait. (Before #393 the has_closed_data
+     * guard hid this for we != 0 by accident; removing that guard is what
+     * made it reachable, so it is fixed here rather than documented as an
+     * exception. Over-attribution is the worse direction: a lost wait shows
+     * up as a suspicious zero, an invented one just looks plausible.)
+     *
+     * Conditional on the interval actually having been accounted: when
+     * wp_live is 0 (a sampled-tier seed — nothing to close) or admission
+     * closed between the two checks above, no record exists and advancing
+     * last_ts would DELETE that time from the only account of it left.
+     *
+     * last_cpu_ns is deliberately NOT advanced: the live reader clamps an
+     * open stretch's CPU to its wall (map_reader.c cpu_open), so once
+     * last_ts is correct the residual is bounded by a sub-tick wall gap, and
+     * leaving it alone keeps CPU accounting byte-identical. */
+    if (closed_accounted)
+        st->last_ts = now;
 
     /* Notify daemon */
     struct pgwt_lifecycle_event *ev;

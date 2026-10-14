@@ -94,6 +94,23 @@ def parse_system_events(output):
     return events
 
 
+def print_time_model_on_failure(output, failed_before):
+    """#393: on FAIL, print the time_model text the checks were parsed from.
+
+    Diagnosing the 0.0%-Timeout failure took two box runs because this
+    capture's output was discarded and only the parsed KEYS survived in the
+    log — the row values, and with them the fact that DB Time itself was
+    short by a whole backend, were gone. The system_event capture below has
+    always printed its raw output; this is the same for the first one, on
+    failure only so passing runs stay short.
+    """
+    if tests_failed == failed_before:
+        return
+    print("  --- time_model raw tracer output begin (FAIL) ---")
+    print(output, end='\n')
+    print("  --- time_model raw tracer output end ---", flush=True)
+
+
 def start_system_event_client(command, application_name):
     """Keep client stderr off a pipe so a chatty psql cannot block the workload."""
     stderr_file = tempfile.TemporaryFile()
@@ -259,10 +276,12 @@ def test_percentage_split(pm_pid):
     time.sleep(1)
 
     model = parse_time_model(output)
+    failed_before_model = tests_failed
 
     check('DB Time' in model,
           f"DB Time found (keys: {list(model.keys())})")
     if 'DB Time' not in model:
+        print_time_model_on_failure(output, failed_before_model)
         return
 
     db_time = model['DB Time']
@@ -288,6 +307,8 @@ def test_percentage_split(pm_pid):
         combined = cpu_pct + timeout_pct
         check(combined > 50,
               f"CPU + Timeout = {combined:.1f}% (expected > 50% of DB Time)")
+
+    print_time_model_on_failure(output, failed_before_model)
 
     # Also check system_event view
     probe_tracer = subprocess.Popen(
