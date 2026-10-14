@@ -349,6 +349,32 @@ test_io_worker_summary
 # time, and a pre-flagged fixture must each REFUSE -- every one of them is a
 # shape in which both paths agree while the product is broken.
 test_io_worker_parity
+# #408: the RAW-vs-SUMMARY parity gate for the CPU ROWS, and the gate for
+# summary v7. Two defects, both writer-side, both visible on any unfiltered
+# window of 120 s or more -- which is every window the demo shows. (1) The
+# per-second record stored no measured-CPU scalars, so the summary path
+# reported has_measured_cpu = 0 and collapsed "CPU (running)" +
+# "CPU (waiting for a core)" into one "CPU*": the runqueue signal #386 is
+# about simply disappeared. (2) The writer never applied the non-command
+# relabel -- a foreground we == 0 interval outside a command is idle, not CPU,
+# and both raw paths file it under PGWT_WEI_NONCMD_CPU -- so that time sat
+# inside the summary's DB Time. Measured on the PG18 demo capture run.id
+# 1791973533: at the full span raw CPU 340,625.997 + 225,927.106 against one
+# summary row of 586,586.148, DB Time +20,033.044 ms, which is mechanism (2)
+# to three decimals; after v7 the two paths agree to 0.000 ms
+# (tests/results/issue408-measurement).
+# Neither property is pre-cooked into the fixture (the 8705412 trap): the
+# relabel is resolved by the production classifier on both sides, and the
+# fixture's per-pid intervals are CONTIGUOUS because both command gates bank
+# command-open time onto the next record -- a gapped fixture makes every
+# interval look in-command and the relabel never fires, which section 2
+# refuses. Bypass suite: an all-UNKNOWN-cpu_ns fixture, a fixture with
+# nothing to relabel, a producer that resolves NOTHING (the reachability
+# probe: it must go RED, or the eff_event parameter is dead code in the
+# daemon), a window holding no records, a deleted summary dir, a v6 file in
+# the window, a truncated v7 record, and an illegal eff_event. Each must
+# refuse or diverge; a gate that cannot see must never approve.
+test_cpu_split_parity
 # Paint-latency Phase 1 (docs/PAINT_LATENCY_PLAN.md): the per-committed-block
 # transition aggregate, src/block_agg.c. `transitions` loads the full raw event
 # window on every request (~0.68 s per million records) because a per-second

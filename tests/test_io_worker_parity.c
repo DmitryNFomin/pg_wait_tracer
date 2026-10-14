@@ -702,7 +702,8 @@ static long write_summaries(const char *dir, const struct pgwt_trace_event *ev,
     long pushed = 0;
     for (int i = 0; i < n; i++) {
         if (pgwt_summary_push_event(w, &ev[i],
-                                    producer_cat_flag(reg, ev[i].pid)) != 0)
+                                    producer_cat_flag(reg, ev[i].pid),
+                                    ev[i].old_event) != 0)
             break;
         pushed++;
     }

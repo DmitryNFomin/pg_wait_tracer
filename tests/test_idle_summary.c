@@ -254,7 +254,7 @@ static void write_summaries(const char *dir, const struct pgwt_trace_event *ev,
         tests_failed++; free(w); return;
     }
     for (int i = 0; i < n; i++)
-        pgwt_summary_push_event(w, &ev[i], 0);
+        pgwt_summary_push_event(w, &ev[i], 0, ev[i].old_event);
     pgwt_summary_flush(w);          /* close the last, still-open second */
     pgwt_summary_close(w);
     pgwt_summary_destroy(w);
@@ -288,7 +288,7 @@ static void test_failed_rotation_discards_the_second(void)
     e.new_event = EV_IO; e.cpu_ns = PGWT_CPU_NS_UNKNOWN; e.pid = 970;
     e.timestamp_ns = mono_origin() + 100 * MS;
     e.old_event = EV_LOCK; e.duration_ns = 10 * MS;
-    pgwt_summary_push_event(w, &e, 0);
+    pgwt_summary_push_event(w, &e, 0, e.old_event);
     CHECK(w->accum_active, "a second is open before the rotation");
 
     /* Force the rotation AND make its flush refuse. */
@@ -1180,13 +1180,13 @@ static void test_bounded_tables(void)
                 e.timestamp_ns = sec + 100 * MS + (uint64_t)(k + 1) * MS;
                 e.old_event = WEI(PG_WAIT_IPC, k);   /* 8 distinct IPC events */
                 e.duration_ns = 1 * MS;
-                pgwt_summary_push_event(w, &e, 0);
+                pgwt_summary_push_event(w, &e, 0, e.old_event);
             }
             /* the 9th distinct event: a pacing sleep, 40 ms */
             e.timestamp_ns = sec + 100 * MS + 9 * MS;
             e.old_event = EV_CHECKPOINT_DELAY;
             e.duration_ns = 40 * MS;
-            pgwt_summary_push_event(w, &e, 0);
+            pgwt_summary_push_event(w, &e, 0, e.old_event);
         }
         if (w) { pgwt_summary_flush(w); pgwt_summary_close(w);
                  pgwt_summary_destroy(w); free(w); }
@@ -1250,14 +1250,14 @@ static void test_bounded_tables(void)
             e.timestamp_ns = sec + 100 * MS;
             e.old_event = WEI(PG_WAIT_EXTENSION, k);
             e.duration_ns = 1000;
-            pgwt_summary_push_event(w, &e, 0);
+            pgwt_summary_push_event(w, &e, 0, e.old_event);
         }
         /* plus a pacing sleep, which may or may not get a slot */
         if (w) {
             e.timestamp_ns = sec + 200 * MS;
             e.old_event = EV_CHECKPOINT_DELAY;
             e.duration_ns = 50 * MS;
-            pgwt_summary_push_event(w, &e, 0);
+            pgwt_summary_push_event(w, &e, 0, e.old_event);
             pgwt_summary_flush(w); pgwt_summary_close(w);
             pgwt_summary_destroy(w); free(w);
         }
@@ -1514,6 +1514,13 @@ static size_t strip_v4_additions(const uint8_t *in, size_t in_size,
         p += 8;                          /* DROP the v4 per-query idle_ns */
     }
     p += 12;                             /* DROP the v4 record trailer */
+    /* v7 (#408) added a SECOND record trailer (the measured-CPU scalars),
+     * also appended last. This helper's job is to reconstruct the layout as
+     * it was BEFORE round 2, so every trailer the writer appends after that
+     * point has to come off -- otherwise the size delta below counts v7's 40
+     * bytes as part of round 2's addition and the assertion reads 68 where
+     * it means 28. */
+    p += 40;                             /* DROP the v7 record trailer */
     (void)in_size;
     return (size_t)(o - out);
 }
@@ -1540,7 +1547,7 @@ static void test_old_layout_is_incompatible(void)
             e.timestamp_ns = sec + 100 * MS + (uint64_t)(i + 1) * MS;
             e.pid = slice[i].pid; e.old_event = slice[i].ev;
             e.duration_ns = slice[i].ms * MS; e.query_id = slice[i].qid;
-            pgwt_summary_push_event(w, &e, 0);
+            pgwt_summary_push_event(w, &e, 0, e.old_event);
         }
         /* Snapshot the live accumulator before it is flushed away. */
         memcpy(acc, &w->accum, sizeof(*acc));
@@ -1559,14 +1566,14 @@ static void test_old_layout_is_incompatible(void)
     CHECK(v4_size > 0, "v4 serialize produced %zu bytes", v4_size);
     size_t old_size = strip_v4_additions(v4, v4_size, acc, old);
 
-    /* The layouts differ by exactly (8 per query + 12). */
+    /* The layouts differ by exactly (8 per query + 12 + v7's 40). */
     int nq = 0;
     for (int i = 0; i < SUMMARY_MAX_QUERIES; i++)
         if (!(acc->queries[i].query_id == 0 && acc->queries[i].count == 0)) nq++;
     CHECK(nq > 0, "the record has %d query entries", nq);
-    CHECK(v4_size - old_size == (size_t)nq * 8 + 12,
-          "the round-2 payload is %zu bytes shorter = %d queries x 8 + 12",
-          v4_size - old_size, nq);
+    CHECK(v4_size - old_size == (size_t)nq * 8 + 12 + 40,
+          "the round-2 payload is %zu bytes shorter = %d queries x 8 + 12 "
+          "(+ 40 for v7's measured-CPU trailer)", v4_size - old_size, nq);
 
     /* 9a. v4 bytes round-trip exactly -- the control, without which a
      * mismatch below could just mean the parser is broken for everything. */
@@ -1668,7 +1675,7 @@ static void test_zero_parent_excess_is_detected(void)
             e.new_event = EV_IO; e.cpu_ns = PGWT_CPU_NS_UNKNOWN; e.pid = 950;
             e.timestamp_ns = origin + (uint64_t)s2 * ONE_SEC + 100 * MS;
             e.old_event = EV_CHECKPOINT_DELAY; e.duration_ns = 40 * MS;
-            pgwt_summary_push_event(w, &e, 0);
+            pgwt_summary_push_event(w, &e, 0, e.old_event);
         }
         if (w) { pgwt_summary_flush(w); pgwt_summary_close(w);
                  pgwt_summary_destroy(w); free(w); }
@@ -1760,7 +1767,7 @@ static void test_refused_serialize_is_counted(void)
     e.new_event = EV_IO; e.cpu_ns = PGWT_CPU_NS_UNKNOWN; e.pid = 960;
     e.timestamp_ns = origin + 100 * MS;
     e.old_event = EV_LOCK; e.duration_ns = 10 * MS;
-    pgwt_summary_push_event(w, &e, 0);
+    pgwt_summary_push_event(w, &e, 0, e.old_event);
     CHECK(w->accum_active, "a second is open");
 
     /* Mark this second as having dropped events, so the retry below also
@@ -1951,10 +1958,10 @@ static void test_bypass_suite(void)
             e.new_event = EV_IO; e.cpu_ns = PGWT_CPU_NS_UNKNOWN;
             e.timestamp_ns = sec + 1 * MS; e.pid = 101;
             e.old_event = EV_LOCK; e.duration_ns = 20 * MS;
-            pgwt_summary_push_event(ww, &e, 0);
+            pgwt_summary_push_event(ww, &e, 0, e.old_event);
             e.timestamp_ns = sec + 2 * MS;
             e.old_event = EV_CLIENTREAD; e.duration_ns = 25 * MS;
-            pgwt_summary_push_event(ww, &e, 0);
+            pgwt_summary_push_event(ww, &e, 0, e.old_event);
         }
         if (ww) { pgwt_summary_flush(ww); pgwt_summary_close(ww);
                   pgwt_summary_destroy(ww); free(ww); }

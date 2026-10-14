@@ -257,9 +257,17 @@ static void accum_query_add(struct pgwt_summary_accum *acc, uint64_t query_id,
  * marker/EXIT, which have their own long-standing reasons). */
 static int accum_event(struct pgwt_summary_accum *acc,
                         const struct pgwt_trace_event *evt,
-                        uint64_t query_id, bool io_worker)
+                        uint64_t query_id, bool io_worker, uint32_t eff_event)
 {
-    uint32_t old_ev = evt->old_event;
+    /* v7 (#408): the EFFECTIVE id, as the producer resolved it (validated by
+     * pgwt_summary_push_event, which is also where an unresolved or illegal
+     * value is counted). It replaces evt->old_event for EVERY accumulator
+     * below -- class_ns, idle_ns, events[], sessions[] and queries[] -- for
+     * the same reason v6's io_worker drop covers all five: the raw paths
+     * REWRITE the record's old_event (pgwt_tag_events) so every row and
+     * bucket downstream sees the relabel, and a partial application here
+     * would not fix the divergence, it would relocate it. */
+    uint32_t old_ev = eff_event;
     uint64_t dur = evt->duration_ns;
 
     if (old_ev == PGWT_EVENT_EXIT)
@@ -317,6 +325,48 @@ static int accum_event(struct pgwt_summary_accum *acc,
      * event table cannot under-report it (see acc->events_overflow). */
     if (ev_idle)
         acc->idle_ns += dur;
+
+    /* v7 (#408): the measured-CPU split, accumulated with the SAME arithmetic
+     * pgwt_compute_time_model applies per record, so the reader can reproduce
+     * its two CPU rows from these scalars instead of reporting
+     * has_measured_cpu = 0 and one combined row.
+     *
+     * The clamp is per-record and therefore has to happen HERE: cpu_ns comes
+     * from sum_exec_runtime, which is only current at a tick or a context
+     * switch, so a sub-ms burst can leak into the following interval's delta
+     * and make one record's cpu_ns exceed its own wall. Raw clamps each
+     * record to its wall and counts the excess (cpu_clamped_ms); clamping a
+     * whole second's SUM instead would hide a per-record inconsistency behind
+     * the other records' headroom. Idle records are excluded above by the
+     * same `ev_idle` rule the raw path applies before its CPU branch -- a
+     * relabelled non-command gap (PGWT_WEI_NONCMD_CPU, v7's other half) is
+     * idle, so it contributes to neither CPU scalar, exactly as on raw. */
+    if (!ev_idle) {
+        if (cls == PGWT_CLASS_CPU) {
+            if (evt->cpu_ns != PGWT_CPU_NS_UNKNOWN) {
+                uint64_t m = evt->cpu_ns;
+                if (m > dur) {
+                    acc->cpu_clamped_ns += m - dur;
+                    m = dur;
+                }
+                acc->cpu_measured_ns += m;
+                acc->cpu_measured_records++;
+            } else {
+                /* UNKNOWN (sampled / v2 / no CPU capability): gap-inference,
+                 * the whole gap is CPU* and there is no runqueue residual for
+                 * it. Kept SEPARATE from cpu_measured_ns so a window mixing
+                 * the two tiers still reports the measured part honestly. */
+                acc->cpu_unknown_ns += dur;
+            }
+        } else if (evt->cpu_ns != PGWT_CPU_NS_UNKNOWN) {
+            /* A wait's measured on-CPU spin keeps its WAIT label (the label
+             * is the diagnostic); raw counts it only as an observability sum
+             * and as evidence that this window CAN split CPU. Both of those
+             * are reproduced here. */
+            acc->wait_gap_cpu_ns += evt->cpu_ns;
+            acc->cpu_measured_records++;
+        }
+    }
 
     /* Per-event stats */
     struct pgwt_summary_event *se = find_or_insert_event(acc, old_ev);
@@ -566,6 +616,17 @@ size_t pgwt_summary_serialize(const struct pgwt_summary_accum *acc,
     memcpy(p, &acc->idle_ns, 8);          p += 8;
     memcpy(p, &acc->events_overflow, 4);  p += 4;
 
+    /* v7 (#408) measured-CPU trailer, after the v4 one for the same reason:
+     * every older reader stops before it, and the version gate (the reader
+     * refuses any file that is not PGWT_SUMMARY_VERSION) is what keeps a v6
+     * record -- which ends 40 bytes earlier -- from being read as if these
+     * fields were there. */
+    memcpy(p, &acc->cpu_measured_ns, 8);      p += 8;
+    memcpy(p, &acc->cpu_unknown_ns, 8);       p += 8;
+    memcpy(p, &acc->cpu_clamped_ns, 8);       p += 8;
+    memcpy(p, &acc->wait_gap_cpu_ns, 8);      p += 8;
+    memcpy(p, &acc->cpu_measured_records, 8); p += 8;
+
     return (size_t)(p - out);
 }
 
@@ -677,6 +738,22 @@ int pgwt_summary_deserialize(const uint8_t *in, size_t in_size,
         if (p + 12 > end) return -1;
         memcpy(&acc->idle_ns, p, 8);          p += 8;
         memcpy(&acc->events_overflow, p, 4);  p += 4;
+    }
+
+    /* v7 (#408): REFUSE a short record rather than leaving the measured-CPU
+     * scalars at 0. A zero here is not neutral -- it is the exact shape of
+     * the bug this version fixes (cpu_measured_records == 0 reads as "this
+     * window cannot split CPU" and the reader emits one combined CPU* row),
+     * so a truncated block must fail to decode and be skipped as a decode
+     * error, not silently answer with the v6 behaviour for part of a
+     * window. */
+    if (version >= 7) {
+        if (p + 40 > end) return -1;
+        memcpy(&acc->cpu_measured_ns, p, 8);      p += 8;
+        memcpy(&acc->cpu_unknown_ns, p, 8);       p += 8;
+        memcpy(&acc->cpu_clamped_ns, p, 8);       p += 8;
+        memcpy(&acc->wait_gap_cpu_ns, p, 8);      p += 8;
+        memcpy(&acc->cpu_measured_records, p, 8); p += 8;
     }
 
     return 0;
@@ -1095,9 +1172,28 @@ int pgwt_summary_writer_init(struct pgwt_summary_writer *w,
 
 int pgwt_summary_push_event(struct pgwt_summary_writer *w,
                               const struct pgwt_trace_event *evt,
-                              uint32_t cat_flag)
+                              uint32_t cat_flag, uint32_t eff_event)
 {
     if (!w->enabled) return 0;
+
+    /* v7 (#408): VALIDATE the producer's effective id before anything uses
+     * it. The parameter may express exactly one rewrite -- a foreground
+     * we == 0 interval outside a command becomes PGWT_WEI_NONCMD_CPU, which
+     * is what both raw paths do (pgwt_tag_events, pgwt_live_effective_event)
+     * -- so anything else is a producer bug, and accepting it would let a
+     * caller refile arbitrary time into an arbitrary class through a
+     * parameter that looks like plumbing. Both degradations keep the v6
+     * behaviour (evt->old_event) and are COUNTED, because "the writer quietly
+     * classified this the old way" is precisely the kind of silence #408 was:
+     * the resolve existed 65 lines below the push and nothing said so. */
+    uint32_t eff = eff_event;
+    if (eff == PGWT_SUMMARY_EFF_UNRESOLVED) {
+        eff = evt->old_event;
+        w->eff_unresolved_events_total++;
+    } else if (eff != evt->old_event && eff != PGWT_WEI_NONCMD_CPU) {
+        eff = evt->old_event;
+        w->eff_rejected_events_total++;
+    }
 
     /* v6 (#315, #376): the producer's verdict on this pid's category. The
      * drop itself stays in accum_event -- the one write-side chokepoint,
@@ -1186,7 +1282,7 @@ int pgwt_summary_push_event(struct pgwt_summary_writer *w,
         if (s)
             qattr_slot_free(w, s);
     }
-    if (accum_event(&w->accum, evt, qid, io_worker)) {
+    if (accum_event(&w->accum, evt, qid, io_worker, eff)) {
         w->io_worker_events_excluded_total++;
         w->io_worker_ns_excluded_total += evt->duration_ns;
     }

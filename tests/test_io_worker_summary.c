@@ -268,8 +268,8 @@ static int write_stream(const char *dir, const struct pgwt_trace_event *ev,
     }
     int rejected = 0;
     for (int i = 0; i < n; i++)
-        if (pgwt_summary_push_event(w, &ev[i], resolve ? cat_of(ev[i].pid) : 0)
-            != 0)
+        if (pgwt_summary_push_event(w, &ev[i], resolve ? cat_of(ev[i].pid) : 0,
+                                    ev[i].old_event) != 0)
             rejected++;
     pgwt_summary_flush(w);
     pgwt_summary_close(w);
@@ -492,7 +492,8 @@ static void test_writer_exclusion(const struct pgwt_trace_event *ev, int n)
         if (w && pgwt_summary_writer_init(w, dirx, 24, NULL) == 0) {
             for (int i = 0; i < n; i++)
                 pgwt_summary_push_event(w, &ev[i],
-                                        PGWT_EVENT_FLAG_IO_WORKER);
+                                        PGWT_EVENT_FLAG_IO_WORKER,
+                                        ev[i].old_event);
             pgwt_summary_flush(w);
             pgwt_summary_close(w);
             pgwt_summary_destroy(w);
@@ -803,10 +804,26 @@ static int check_escalation_src(const char *path, char *why, size_t wsz)
         const char *end = strchr(last, ';');
         if (!end) { snprintf(why, wsz, "unparseable push call"); rc = 4; }
         else {
-            size_t span = (size_t)(end - last);
-            char call[512];
+            /* The window starts BEFORE the call, not at it (summary v7,
+             * #408): the capture-end flush now needs the resolved category
+             * TWICE -- once as cat_flag and once to feed
+             * pgwt_live_effective_event for the non-command relabel -- and
+             * resolving twice is exactly what the v6 comment in
+             * src/event_stream.c forbids, because two lookups can disagree
+             * once the per-pid cache fills between them. So the resolve is
+             * hoisted into a local in the same statement block. The
+             * requirement is unchanged in substance -- a resolve must be
+             * ADJACENT to the push, in the same few lines -- and the bypass
+             * cases in section 5 still go red: a push with no resolve
+             * anywhere near it, and a resolve that appears only far away
+             * (after it, or outside this window), both fail. */
+            size_t back = (size_t)(last - src) < 600 ? (size_t)(last - src)
+                                                     : 600;
+            const char *from = last - back;
+            size_t span = (size_t)(end - from);
+            char call[1024];
             if (span >= sizeof(call)) span = sizeof(call) - 1;
-            memcpy(call, last, span);
+            memcpy(call, from, span);
             call[span] = 0;
             if (!strstr(call, RESOLVE)) {
                 snprintf(why, wsz, "the capture-end flush push does not "

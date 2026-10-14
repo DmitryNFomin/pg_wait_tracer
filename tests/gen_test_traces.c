@@ -458,8 +458,14 @@ static int write_traces(const char *dir, struct scenario *sc,
         pgwt_writer_destroy(&ew);
         return -1;
     }
+    /* v7 (#408): eff_event = the record's own id. This generator synthesizes
+     * its scenarios directly and runs no command gate, so it resolves NO
+     * relabel -- passing the id says exactly that, and (unlike
+     * PGWT_SUMMARY_EFF_UNRESOLVED) does not inflate the writer's
+     * eff_unresolved_events_total, which is the production residual signal
+     * for "some of this file's we == 0 time was classified the pre-v7 way". */
     #define PUSH_SUMMARY(evp) do { \
-        pgwt_summary_push_event(&sw, (evp), 0); \
+        pgwt_summary_push_event(&sw, (evp), 0, (evp)->old_event); \
         if (!summary_anchored) { \
             anchor_summary_clock(&sw, anchor_mono, wall_offset_ns); \
             summary_anchored = 1; \
