@@ -37,6 +37,20 @@
  *      pgwt_visit_summaries SKIPS a file it cannot open, so a mixed window
  *      would come back as a plausible PARTIAL answer. The preflight must
  *      refuse, and refusing must mean "recompute from raw", not "empty".
+ *  13. THE ROUTING DECISION ITSELF (#402, #403). Sections 1-5 all assume the
+ *      request reached the summary path with files in front of it. The two
+ *      bugs that produced a confident, specific, completely wrong screen were
+ *      upstream of that: an archived file whose hour label was written with
+ *      localtime_r on the capture box and re-derived with mktime() on the
+ *      reader (displaced by the TZ delta, so every archive was excluded), and
+ *      a preflight that APPROVED a window in which it had examined no file at
+ *      all (so the response was built from zero records and labelled exact).
+ *      13a refuses an unexamined window in the three shapes it occurs in,
+ *      including nfiles == 2 with considered == 0, which is how it actually
+ *      happened and which an `nfiles == 0` guard would approve; 13b pins TZ
+ *      independence with the reader 5.5 h from the writer; 13c pins that a
+ *      file the scanner can place NEITHER by header nor by name is refused
+ *      rather than silently dropped from the overlap set.
  *   5. FALSE NEGATIVES. Section 1's agreement check is satisfied by 0 == 0,
  *      so every way the comparison can be starved gets its own case: no
  *      summary directory, a writer that wrote nothing, an unreadable file, a
@@ -1827,16 +1841,21 @@ static void test_bypass_suite(void)
                                         &unusable) == 0,
           "a missing trace dir is REFUSED, not approved");
 
-    /* 5b. AN EMPTY DIRECTORY. Genuinely different from 5a: there is nothing to
-     * blend, so approving is correct — but *considered must be 0 so the caller
-     * can tell "all good" from "nothing there". Without that counter a gate
-     * that silently looked at no files would be indistinguishable from a
-     * passing one, which is the defect shape this project keeps finding. */
+    /* 5b. AN EMPTY DIRECTORY. Genuinely different from 5a — nothing here is
+     * unreadable, there is simply nothing at all — but the VERDICT is the
+     * same, and that is #403. This case used to assert the opposite ("nothing
+     * to blend, so approving is correct"), which is precisely how the bug
+     * stayed invisible: approving kept the caller on the summary path, where
+     * zero files produce 0.0 ms labelled "exact". "No summary file covers
+     * this window" means the summary path CANNOT ANSWER, so it refuses and
+     * the caller recomputes from raw. considered stays 0 so a refusal for
+     * "I examined nothing" is still distinguishable from one for "I found
+     * something broken". */
     const char *empty = fresh_dir("empty");
     considered = -1; unusable = -1;
     CHECK(pgwt_summaries_window_current(empty, 1, 2, &considered,
-                                        &unusable) == 1,
-          "an empty dir has nothing to blend: approved");
+                                        &unusable) == 0,
+          "an empty dir cannot answer the window: REFUSED (#403)");
     CHECK(considered == 0 && unusable == 0,
           "...and it reports considered=%d so the caller can see it examined "
           "nothing", considered);
@@ -1892,10 +1911,11 @@ static void test_bypass_suite(void)
           "a truncated-header file is REFUSED");
     CHECK(unusable > 0, "...and reported as unusable (got %d)", unusable);
 
-    /* 5e. A WINDOW WITH NO OVERLAP. Healthy v3 files, but the requested window
-     * is somewhere else entirely. Approving is right (nothing to blend) and
-     * considered must be 0 — otherwise the gate would be claiming to have
-     * checked files it never opened. */
+    /* 5e. A WINDOW WITH NO OVERLAP. Healthy files on disk, but the requested
+     * window is somewhere else entirely — the shape #402's timezone offset
+     * manufactured out of a perfectly good archive. considered must be 0
+     * (otherwise the gate would be claiming to have checked files it never
+     * opened) and a verdict reached that way is a REFUSAL. */
     const char *ok = fresh_dir("overlap");
     n = build_stream(ev, mono_origin());
     write_summaries(ok, ev, n);
@@ -1904,11 +1924,12 @@ static void test_bypass_suite(void)
     /* Two hours before anything was written: the file's hour cannot overlap. */
     uint64_t far_to = (from > 7200ULL * ONE_SEC) ? from - 7200ULL * ONE_SEC : 1;
     CHECK(pgwt_summaries_window_current(ok, far_to - 1000, far_to,
-                                        &considered, &unusable) == 1,
-          "a window with no overlapping file is approved");
+                                        &considered, &unusable) == 0,
+          "a window with no overlapping file is REFUSED (#403: it used to be "
+          "approved, and the summary path then answered it with 0.0 ms)");
     CHECK(considered == 0,
-          "...with considered=%d, so 'approved' cannot be confused with "
-          "'checked the data'", considered);
+          "...with considered=%d, which is WHY it refuses: a verdict reached "
+          "without examining one file is not a verdict", considered);
 
     /* 5f. THE THING BEING CHECKED IS ABSENT. A stream with no Timeout events
      * at all makes every "pacing is excluded" assertion in sections 1-3
@@ -1987,6 +2008,462 @@ static void test_bypass_suite(void)
     free(ev);
 }
 
+/* ══ 13. THE ROUTING GATE (#402, #403) ════════════════════════════════════
+ * Two silent-wrong-number bugs lived on this path and NO gate could see
+ * either one; both were found by a one-off measurement. They compose:
+ *
+ *   #402  an archived YYYY-MM-DD_HH.summary.lz4 file was named with
+ *         localtime_r ON THE CAPTURE BOX and its start re-derived with
+ *         mktime() ON THE READER, so every archived file was displaced by the
+ *         TZ delta and summary_file_in_window() excluded it. A 1928 s replay
+ *         on a CEST laptop answered 240.1 ms instead of 2,612,758.3 ms.
+ *   #403  pgwt_summaries_window_current() approved a window in which it had
+ *         examined NOTHING, so the caller stayed on the summary path and the
+ *         response was built from zero records: 0.0 ms, "fidelity": "exact",
+ *         on 14 of 14 consecutive 130 s windows whose raw value was ~170 s.
+ *
+ * The unit level cannot see the JSON label (server.c does not link into a
+ * unit test), so what is pinned here is the routing decision plus the number
+ * the summary path would otherwise have served: a zero over a window that
+ * demonstrably holds 9000 ms. `considered` is asserted beside every verdict,
+ * because "approved" and "approved without looking at a single file" are the
+ * two outcomes this function spent four versions confusing. */
+
+static int read_summary_hdr(const char *path,
+                            struct pgwt_trace_file_header *hdr)
+{
+    FILE *fp = fopen(path, "rb");
+    if (!fp) return 0;
+    int ok = (fread(hdr, sizeof(*hdr), 1, fp) == 1 &&
+              hdr->magic == PGWT_SUMMARY_MAGIC);
+    fclose(fp);
+    return ok;
+}
+
+/* Archive dir/current.summary exactly as the writer's rotation does -- a
+ * plain rename() -- but with the hour label formatted in a timezone WE pick
+ * (gmtime_r here, i.e. a UTC capture box) rather than the reader's. That is
+ * the only difference between this fixture and production, and it is the
+ * whole of #402. Returns 1 and fills `out` with the new basename. */
+static int archive_current_as_utc(const char *dir, uint64_t start_ns,
+                                  char *out, size_t outsz)
+{
+    time_t sec = (time_t)(start_ns / ONE_SEC);
+    struct tm g;
+    if (!gmtime_r(&sec, &g)) return 0;
+    char name[64];
+    snprintf(name, sizeof(name), "%04d-%02d-%02d_%02d.summary.lz4",
+             g.tm_year + 1900, g.tm_mon + 1, g.tm_mday, g.tm_hour);
+    char from[700], to[700];
+    snprintf(from, sizeof(from), "%s/current.summary", dir);
+    snprintf(to, sizeof(to), "%s/%s", dir, name);
+    if (rename(from, to) != 0) return 0;
+    snprintf(out, outsz, "%s", name);
+    return 1;
+}
+
+/* The start pgwt_scan_summary_files USED to derive: the name read in the
+ * READER's current timezone. Kept here so the fixture can prove it really is
+ * displaced -- without this the TZ case could pass with a 0 h offset and
+ * assert nothing at all. */
+static uint64_t name_start_ns_in_local_tz(const char *basename)
+{
+    int y = 0, mo = 0, d = 0, h = 0;
+    if (sscanf(basename, "%4d-%2d-%2d_%2d.summary.lz4", &y, &mo, &d, &h) != 4)
+        return 0;
+    struct tm tm;
+    memset(&tm, 0, sizeof(tm));
+    tm.tm_year = y - 1900;
+    tm.tm_mon  = mo - 1;
+    tm.tm_mday = d;
+    tm.tm_hour = h;
+    tm.tm_isdst = -1;
+    time_t t = mktime(&tm);
+    if (t == (time_t)-1) return 0;
+    return (uint64_t)t * ONE_SEC;
+}
+
+static int count_summary_files(const char *dir)
+{
+    DIR *d = opendir(dir);
+    if (!d) return -1;
+    struct dirent *e;
+    int n = 0;
+    while ((e = readdir(d))) {
+        size_t len = strlen(e->d_name);
+        if ((len >= 8 && strcmp(e->d_name + len - 8, ".summary") == 0) ||
+            (len >= 12 && strcmp(e->d_name + len - 12, ".summary.lz4") == 0))
+            n++;
+    }
+    closedir(d);
+    return n;
+}
+
+static int unlink_summary_files(const char *dir)
+{
+    DIR *d = opendir(dir);
+    if (!d) return -1;
+    struct dirent *e;
+    int n = 0;
+    while ((e = readdir(d))) {
+        size_t len = strlen(e->d_name);
+        if ((len >= 8 && strcmp(e->d_name + len - 8, ".summary") == 0) ||
+            (len >= 12 && strcmp(e->d_name + len - 12, ".summary.lz4") == 0)) {
+            char p[700];
+            snprintf(p, sizeof(p), "%s/%s", dir, e->d_name);
+            if (unlink(p) == 0) n++;
+        }
+    }
+    closedir(d);
+    return n;
+}
+
+static double summary_db_time(const char *dir, uint64_t from, uint64_t to)
+{
+    struct pgwt_filter f;
+    memset(&f, 0, sizeof(f));
+    struct pgwt_tm_result tm;
+    double wall_ms = (to > from) ? (double)(to - from) / 1e6 : 1000.0;
+    pgwt_compute_time_model_from_summaries(dir, from, to, &f, wall_ms, &tm);
+    double v = tm.db_time_ms;
+    free(tm.rows);
+    return v;
+}
+
+/* 13a. #403: a window the summary path examined NO file for must be refused,
+ * in all three shapes it occurs in -- and the obvious `nfiles == 0` fix
+ * covers only one of them. */
+static void test_routing_refuses_an_unexamined_window(void)
+{
+    printf("--- 13a. a window with no examined file is REFUSED (#403) ---\n");
+
+    /* fresh_dir() hands back a STATIC buffer, and this case keeps THREE
+     * fixtures alive at once -- copy each path or they all alias the last
+     * one, which silently turns every assertion below into a statement about
+     * a different directory. */
+    char dir[600];
+    snprintf(dir, sizeof(dir), "%s", fresh_dir("routing_unexamined"));
+    struct pgwt_trace_event *ev = malloc(sizeof(*ev) * MAX_EV);
+    if (!ev) { printf("  FAIL: malloc\n"); tests_failed++; return; }
+    int n = build_stream(ev, mono_origin());
+    write_summaries(dir, ev, n);
+
+    uint64_t from = 0, to = 0;
+    int records = 0;
+    int considered = -1, unusable = -1;
+
+    /* NON-VACUITY FIRST. Everything below compares against this dir, so if
+     * the writer had failed the refusals would all be trivially true. */
+    CHECK(window_from_records(dir, &from, &to, &records) == 1 &&
+          records == SLICES,
+          "fixture holds %d seconds of records (expected %d)", records,
+          SLICES);
+    CHECK(pgwt_summaries_window_current(dir, from, to, &considered,
+                                        &unusable) == 1 && considered > 0 &&
+          unusable == 0,
+          "control: the records' own window is APPROVED after examining %d "
+          "file(s), %d unusable", considered, unusable);
+    CHECK(NEAR_MS(summary_db_time(dir, from, to), PER_SEC_DB_MS * SLICES),
+          "control: the summary path answers %.1f ms over it (expected %.1f) "
+          "-- so a 0.0 below is a WRONG number, not an empty capture",
+          summary_db_time(dir, from, to), PER_SEC_DB_MS * SLICES);
+
+    /* 13a-1. THE SHAPE THAT WAS MEASURED: files on disk, none of them
+     * resolving into the requested window. This is the case #402 produced
+     * (a TZ-displaced archive) and the one `nfiles == 0` does NOT cover. */
+    /* 48 h, not 2 h: a reader TZ offset of exactly N hours displaces an
+     * archive's name-derived start by N hours, so a window "2 h before the
+     * data" lands ON the displaced file on a UTC+2 host and the case stops
+     * being about an unexamined window at all. 48 h clears every real UTC
+     * offset (max 14 h). */
+    uint64_t far_to = (from > 48ULL * 3600 * ONE_SEC)
+                        ? from - 48ULL * 3600 * ONE_SEC : 1;
+    uint64_t far_from = far_to - 1000;
+    considered = -1; unusable = -1;
+    CHECK(pgwt_summaries_window_current(dir, far_from, far_to, &considered,
+                                        &unusable) == 0,
+          "a window no file resolves into is REFUSED, so the caller "
+          "recomputes from RAW");
+    CHECK(considered == 0,
+          "...and it says so: considered=%d (the refusal is 'I examined "
+          "nothing', not 'I found something broken')", considered);
+    CHECK(summary_db_time(dir, far_from, far_to) == 0.0,
+          "...and the answer it would otherwise have served is 0.0 ms "
+          "(got %.3f) over a directory holding %.1f ms -- the silent wrong "
+          "number, which only the refusal above prevents",
+          summary_db_time(dir, far_from, far_to), PER_SEC_DB_MS * SLICES);
+
+    /* 13a-2. THE WRONG FIX, MADE UNREACHABLE. `nfiles == 0 -> return 0` is
+     * the obvious guard and it would approve this: TWO files are listed and
+     * NEITHER is examined, which is exactly what #402 + #403 did in
+     * production (nfiles == 2, considered == 0, answer 240.1 ms of a
+     * 2,612,758.3 ms window, labelled exact). The guard has to key on
+     * `considered`, so this case exists to keep anyone from "simplifying" it
+     * back to a file count. */
+    char two[600];
+    snprintf(two, sizeof(two), "%s", fresh_dir("routing_two_files"));
+    write_summaries(two, ev, n);
+    struct pgwt_trace_file_header hdr;
+    char cur[700], arch[64];
+    snprintf(cur, sizeof(cur), "%s/current.summary", two);
+    CHECK(read_summary_hdr(cur, &hdr) == 1, "two-file fixture: header read");
+    CHECK(archive_current_as_utc(two, hdr.start_time_ns, arch,
+                                 sizeof(arch)) == 1,
+          "two-file fixture: archived as %s", arch);
+    write_summaries(two, ev, n);           /* a second, current file */
+    struct pgwt_summary_file_entry ents[8];
+    int nfiles = pgwt_scan_summary_files(two, ents, 8);
+    CHECK(count_summary_files(two) == 2 && nfiles == 2,
+          "two-file fixture: %d file(s) on disk, scanner lists %d -- so an "
+          "`nfiles == 0` guard could not fire here",
+          count_summary_files(two), nfiles);
+    considered = -1; unusable = -1;
+    CHECK(pgwt_summaries_window_current(two, far_from, far_to, &considered,
+                                        &unusable) == 0,
+          "nfiles=2 with considered=0 is still REFUSED");
+    CHECK(considered == 0, "...considered=%d", considered);
+
+    /* 13a-3. NO FILE AT ALL, with a real window. #403's own reproduction was
+     * "delete both summary files from disk and the answer is still
+     * db_time_ms=0, path=summary, exact". */
+    CHECK(unlink_summary_files(dir) == 1,
+          "deleted the fixture's summary file(s)");
+    considered = -1; unusable = -1;
+    CHECK(pgwt_summaries_window_current(dir, from, to, &considered,
+                                        &unusable) == 0,
+          "an EMPTIED trace dir is REFUSED over the very window it used to "
+          "answer (the shape #403 was reported with)");
+    CHECK(considered == 0, "...considered=%d", considered);
+
+    /* 13a-4. WHAT THIS GUARD STILL CANNOT SEE, asserted so that the comment
+     * in src/summary_reader.c is a decision and not a hope: a GAP BETWEEN two
+     * in-window files. Both files are examined, both are the current version,
+     * so the window is approved -- and the hour between them contributes
+     * nothing, silently. Only a record- or coverage-level check can catch
+     * that; `considered` cannot. */
+    char gap[600];
+    snprintf(gap, sizeof(gap), "%s", fresh_dir("routing_gap"));
+    write_summaries(gap, ev, n);
+    snprintf(cur, sizeof(cur), "%s/current.summary", gap);
+    CHECK(read_summary_hdr(cur, &hdr) == 1, "gap fixture: header read");
+    uint64_t old_start = hdr.start_time_ns - 7200ULL * ONE_SEC;
+    {
+        FILE *fp = fopen(cur, "r+b");
+        struct pgwt_trace_file_header h2 = hdr;
+        h2.start_time_ns = old_start;
+        CHECK(fp != NULL && fwrite(&h2, sizeof(h2), 1, fp) == 1,
+              "gap fixture: backdated one file's header by 2 h");
+        if (fp) fclose(fp);
+    }
+    CHECK(archive_current_as_utc(gap, old_start, arch, sizeof(arch)) == 1,
+          "gap fixture: archived the backdated file as %s", arch);
+    write_summaries(gap, ev, n);           /* the current hour */
+    /* The window is derived from the two headers, not from the other
+     * fixture's records: it must hold both files whatever order the cases in
+     * this file run in and however long they take. */
+    uint64_t gap_to = hdr.start_time_ns + 3600ULL * ONE_SEC;
+    considered = -1; unusable = -1;
+    CHECK(pgwt_summaries_window_current(gap, old_start, gap_to, &considered,
+                                        &unusable) == 1 && considered == 2,
+          "KNOWN BLIND SPOT: two in-window files with a missing hour BETWEEN "
+          "them is approved (considered=%d) -- this guard proves it looked at "
+          "something, never that the window is covered", considered);
+
+    free(ev);
+}
+
+/* 13b. #402: an archived file must be found in its window on a reader whose
+ * timezone is not the capture box's. */
+static void test_archived_file_is_timezone_independent(void)
+{
+    printf("--- 13b. an archived file is found in any reader TZ (#402) ---\n");
+
+    const char *dir = fresh_dir("routing_tz");
+    struct pgwt_trace_event *ev = malloc(sizeof(*ev) * MAX_EV);
+    if (!ev) { printf("  FAIL: malloc\n"); tests_failed++; return; }
+    int n = build_stream(ev, mono_origin());
+    write_summaries(dir, ev, n);
+
+    /* The window comes from the records while the file is still
+     * current.summary -- that path reads the HEADER and was never affected by
+     * #402, so the fixture can state its own window even on the broken tree.
+     * Deriving it after the rename would have been impossible: the broken
+     * scanner excludes the archive, the visitor returns 0 records, and the
+     * test would have had no window to assert about. */
+    uint64_t from = 0, to = 0;
+    int records = 0;
+    CHECK(window_from_records(dir, &from, &to, &records) == 1 &&
+          records == SLICES, "TZ fixture holds %d seconds (expected %d)",
+          records, SLICES);
+
+    struct pgwt_trace_file_header hdr;
+    char cur[700], arch[64];
+    snprintf(cur, sizeof(cur), "%s/current.summary", dir);
+    CHECK(read_summary_hdr(cur, &hdr) == 1 && hdr.start_time_ns > 0,
+          "the uncompressed header carries start_time_ns -- the fix's whole "
+          "premise, and an archived file is a plain rename() of this file");
+    CHECK(archive_current_as_utc(dir, hdr.start_time_ns, arch,
+                                 sizeof(arch)) == 1,
+          "archived with a UTC hour label (as the capture box does): %s",
+          arch);
+    CHECK(count_summary_files(dir) == 1,
+          "exactly one summary file, and it is the ARCHIVED one -- without "
+          "this, a surviving current.summary would answer the window and the "
+          "assertions below would say nothing about archives");
+
+    /* The reader is now in a timezone 5.5 h from the writer's. */
+    char *saved_tz = getenv("TZ");
+    char saved_copy[128] = "";
+    int had_tz = (saved_tz != NULL);
+    if (had_tz) snprintf(saved_copy, sizeof(saved_copy), "%s", saved_tz);
+    setenv("TZ", "Asia/Kolkata", 1);
+    tzset();
+
+    /* NON-VACUITY OF THE TZ ITSELF. If the offset were 0 (reader == writer,
+     * which is the configuration under which three clean rehearsals missed
+     * this bug) the old code would have passed too. Assert the precise
+     * condition that made summary_file_in_window() exclude the file: the
+     * NAME-derived hour, read in this timezone, ends before the window
+     * starts. If this fails the fixture cannot detect #402 and must say so
+     * rather than report a pass. */
+    uint64_t name_start = name_start_ns_in_local_tz(arch);
+    CHECK(name_start > 0, "the archived name parses as an hour (%s)", arch);
+    CHECK(name_start + 3600ULL * ONE_SEC < from,
+          "under TZ=Asia/Kolkata the NAME-derived window ends %.1f s before "
+          "the records begin -- which is why the old scanner excluded this "
+          "file; a 0 h offset here would make this test vacuous",
+          (double)((int64_t)from - (int64_t)(name_start + 3600ULL * ONE_SEC))
+              / 1e9);
+
+    struct pgwt_summary_file_entry ents[8];
+    int nfiles = pgwt_scan_summary_files(dir, ents, 8);
+    CHECK(nfiles == 1, "the scanner lists the archived file (%d)", nfiles);
+    CHECK(nfiles == 1 && ents[0].start_wall_ns == hdr.start_time_ns,
+          "...with start_wall_ns taken from its HEADER: scanner says %llu, "
+          "header says %llu, the name read in this TZ says %llu",
+          nfiles == 1 ? (unsigned long long)ents[0].start_wall_ns : 0ULL,
+          (unsigned long long)hdr.start_time_ns,
+          (unsigned long long)name_start);
+
+    int considered = -1, unusable = -1;
+    CHECK(pgwt_summaries_window_current(dir, from, to, &considered,
+                                        &unusable) == 1 && considered == 1 &&
+          unusable == 0,
+          "the archived file is IN WINDOW on a reader 5.5 h from the writer "
+          "(considered=%d, unusable=%d)", considered, unusable);
+
+    struct rec_ctx c;
+    memset(&c, 0, sizeof(c));
+    pgwt_visit_summaries(dir, from, to, rec_visitor, &c);
+    CHECK(c.records == SLICES,
+          "and the visitor reads all %d seconds out of it (got %d) -- the "
+          "cross-TZ replay that answered 240.1 ms read 0 here", SLICES,
+          c.records);
+    CHECK(NEAR_MS(summary_db_time(dir, from, to), PER_SEC_DB_MS * SLICES),
+          "DB Time over the archived window is %.1f ms, expected %.1f",
+          summary_db_time(dir, from, to), PER_SEC_DB_MS * SLICES);
+
+    /* THE FALLBACK MUST STILL LIST A FILE IT CANNOT READ. The preflight's
+     * ability to refuse depends on a rotated file being LISTED even when its
+     * contents are unusable; deriving the start from the header must not turn
+     * a bad header into an INVISIBLE file, which would be a silent partial
+     * window instead of a refusal. Checked with TZ=UTC, matching the name, so
+     * the file is genuinely in window and the verdict is about the header. */
+    setenv("TZ", "UTC", 1);
+    tzset();
+    {
+        char path[800];
+        snprintf(path, sizeof(path), "%s/%s", dir, arch);
+        CHECK(truncate(path, 8) == 0, "truncated %s to 8 bytes", arch);
+        nfiles = pgwt_scan_summary_files(dir, ents, 8);
+        CHECK(nfiles == 1,
+              "a header-less archive is STILL LISTED via its name (%d) -- "
+              "dropping it would hide it from the preflight", nfiles);
+        considered = -1; unusable = -1;
+        CHECK(pgwt_summaries_window_current(dir, from, to, &considered,
+                                            &unusable) == 0,
+              "...and the window is REFUSED");
+        CHECK(considered == 1 && unusable == 1,
+              "...as UNUSABLE (considered=%d unusable=%d), not as absent",
+              considered, unusable);
+    }
+
+    if (had_tz) setenv("TZ", saved_copy, 1);
+    else unsetenv("TZ");
+    tzset();
+    free(ev);
+}
+
+/* 13c. A FILE THE SCANNER CANNOT PLACE AT ALL. The start now comes from the
+ * header with the name as a fallback, so a file whose header is unreadable AND
+ * whose name mktime() cannot place has NO derivable start. The dangerous
+ * outcome is not "refused" but "silently excluded from every window": a
+ * garbage start lands the file in the year 0 or the year 9999, the overlap
+ * test drops it, and neither the preflight nor the visitor ever sees it --
+ * which is a silent partial window, the exact shape of #402. Unknown coverage
+ * must count against every window. */
+static void test_unplaceable_archive_is_refused(void)
+{
+    printf("--- 13c. an archive with no derivable start is REFUSED ---\n");
+
+    char dir[600];
+    snprintf(dir, sizeof(dir), "%s", fresh_dir("routing_unplaceable"));
+    struct pgwt_trace_event *ev = malloc(sizeof(*ev) * MAX_EV);
+    if (!ev) { printf("  FAIL: malloc\n"); tests_failed++; return; }
+    int n = build_stream(ev, mono_origin());
+    write_summaries(dir, ev, n);
+
+    uint64_t from = 0, to = 0;
+    int records = 0;
+    CHECK(window_from_records(dir, &from, &to, &records) == 1 &&
+          records == SLICES, "fixture holds %d seconds (expected %d)",
+          records, SLICES);
+    struct pgwt_trace_file_header hdr;
+    char cur[700], arch[64];
+    snprintf(cur, sizeof(cur), "%s/current.summary", dir);
+    CHECK(read_summary_hdr(cur, &hdr) == 1, "header read");
+    CHECK(archive_current_as_utc(dir, hdr.start_time_ns, arch,
+                                 sizeof(arch)) == 1, "archived as %s", arch);
+
+    /* A matching NAME the clock cannot place, with no readable header. */
+    char junk[700];
+    snprintf(junk, sizeof(junk), "%s/0000-00-00_00.summary.lz4", dir);
+    {
+        FILE *fp = fopen(junk, "wb");
+        CHECK(fp != NULL && fwrite("12345678", 1, 8, fp) == 8,
+              "wrote an unplaceable, header-less archive");
+        if (fp) fclose(fp);
+    }
+
+    struct pgwt_summary_file_entry ents[8];
+    int nfiles = pgwt_scan_summary_files(dir, ents, 8);
+    CHECK(nfiles == 2,
+          "the scanner lists BOTH files (%d) -- a file it cannot place must "
+          "not simply vanish from the listing", nfiles);
+    int considered = -1, unusable = -1;
+    CHECK(pgwt_summaries_window_current(dir, from, to, &considered,
+                                        &unusable) == 0,
+          "the window is REFUSED while that file is present");
+    CHECK(considered == 2 && unusable == 1,
+          "...because the unplaceable file was EXAMINED and found unusable "
+          "(considered=%d unusable=%d), not quietly dropped from the overlap "
+          "set", considered, unusable);
+
+    /* CONTROL: remove it and the same window is approved again, so the
+     * refusal above is about that file and not a function stuck at 0. */
+    CHECK(unlink(junk) == 0, "removed the unplaceable file");
+    considered = -1; unusable = -1;
+    CHECK(pgwt_summaries_window_current(dir, from, to, &considered,
+                                        &unusable) == 1 && considered == 1 &&
+          unusable == 0,
+          "the archived file alone is APPROVED again (considered=%d "
+          "unusable=%d)", considered, unusable);
+    CHECK(NEAR_MS(summary_db_time(dir, from, to), PER_SEC_DB_MS * SLICES),
+          "...and answers %.1f ms, expected %.1f",
+          summary_db_time(dir, from, to), PER_SEC_DB_MS * SLICES);
+    free(ev);
+}
+
 int main(void)
 {
     printf("=== test_idle_summary ===\n");
@@ -2018,6 +2495,9 @@ int main(void)
     test_refused_serialize_is_counted();
     test_failed_rotation_discards_the_second();
     test_bypass_suite();
+    test_routing_refuses_an_unexamined_window();
+    test_archived_file_is_timezone_independent();
+    test_unplaceable_archive_is_refused();
 
     snprintf(cmd, sizeof(cmd), "rm -rf '%s'", g_base);
     if (system(cmd) != 0) { /* ignore */ }

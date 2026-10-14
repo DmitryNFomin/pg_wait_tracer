@@ -290,14 +290,70 @@ int pgwt_scan_summary_files(const char *trace_dir,
             sscanf(ent->d_name, "%4d-%2d-%2d_%2d.summary.lz4",
                    &e->year, &e->month, &e->day, &e->hour) == 4) {
             snprintf(e->path, sizeof(e->path), "%s/%s", trace_dir, ent->d_name);
-            struct tm tm = {0};
-            tm.tm_year = e->year - 1900;
-            tm.tm_mon  = e->month - 1;
-            tm.tm_mday = e->day;
-            tm.tm_hour = e->hour;
-            tm.tm_isdst = -1;
-            time_t t = mktime(&tm);
-            e->start_wall_ns = (uint64_t)t * 1000000000ULL;
+
+            /* THE FILE'S OWN HEADER IS THE START, NOT ITS NAME (#402).
+             *
+             * An archived summary file is a plain rename() of
+             * current.summary (summary_writer.c rotation and startup
+             * recovery), so it still carries that file's UNCOMPRESSED header
+             * at offset 0, whose start_time_ns was taken from CLOCK_REALTIME
+             * when the file was opened. The archive NAME is derived from that
+             * very number -- through localtime_r ON THE CAPTURE BOX.
+             *
+             * Re-deriving the start with mktime() here read that name in the
+             * READER's timezone, so every archived file was displaced by the
+             * TZ delta between the two hosts and summary_file_in_window()
+             * excluded it: a 1928 s replay on a CEST laptop answered 240.1 ms
+             * instead of 2,612,758.3 ms, with the wrong class rows and
+             * labelled "fidelity": "exact". Reading the header skips the round
+             * trip through two local timezones entirely -- the same value the
+             * writer wrote, meaning the same instant on every host -- and
+             * needs no rename, no migration and no version bump: files
+             * already on disk work as soon as the reader is fixed.
+             *
+             * It is also exact to the nanosecond rather than truncated to the
+             * hour, so [start, start + 1 h) can now extend past the next hour
+             * boundary. That only ever WIDENS the file-level overlap test,
+             * which is an optimisation; pgwt_visit_summaries' per-record
+             * filter is the authority on the window.
+             *
+             * NAME-PARSING STAYS AS THE FALLBACK, and not only for exotic
+             * files: pgwt_summaries_window_current depends on a rotated file
+             * being LISTED even when its contents are unreadable, so that it
+             * can count it unusable and refuse. Dropping the entry on a bad
+             * header (as the current.summary branch below does, deliberately)
+             * would make such a file invisible to the preflight AND to the
+             * visitor -- a silent partial window instead of a refusal. */
+            uint64_t hdr_start_ns = 0;
+            FILE *fp = fopen(e->path, "rb");
+            if (fp) {
+                struct pgwt_trace_file_header hdr;
+                if (fread(&hdr, sizeof(hdr), 1, fp) == 1 &&
+                    hdr.magic == PGWT_SUMMARY_MAGIC)
+                    hdr_start_ns = hdr.start_time_ns;
+                fclose(fp);
+            }
+            if (hdr_start_ns > 0) {
+                e->start_wall_ns = hdr_start_ns;
+            } else {
+                struct tm tm = {0};
+                tm.tm_year = e->year - 1900;
+                tm.tm_mon  = e->month - 1;
+                tm.tm_mday = e->day;
+                tm.tm_hour = e->hour;
+                tm.tm_isdst = -1;
+                time_t t = mktime(&tm);
+                /* UNKNOWN (0), never a wrapped value: an unreadable header
+                 * plus a name mktime() cannot place (0000-00-00_00, 9999-…)
+                 * used to produce a garbage start that landed the file far
+                 * outside every window -- invisible to the preflight as well
+                 * as to the visitor, which is the one outcome this function
+                 * must never produce. summary_file_in_window() reads 0 as
+                 * "coverage unknown, so it overlaps everything": the file is
+                 * then examined, found unusable, and the window is refused. */
+                e->start_wall_ns = (t == (time_t)-1 || t <= 0)
+                                     ? 0 : (uint64_t)t * 1000000000ULL;
+            }
             n++;
         } else if (strcmp(ent->d_name, "current.summary") == 0) {
             snprintf(e->path, sizeof(e->path), "%s/%s", trace_dir, ent->d_name);
@@ -342,6 +398,12 @@ int pgwt_scan_summary_files(const char *trace_dir,
 static int summary_file_in_window(const struct pgwt_summary_file_entry *e,
                                   uint64_t from_wall_ns, uint64_t to_wall_ns)
 {
+    /* start_wall_ns == 0 means the scanner could place the file NEITHER by
+     * its header nor by its name. Unknown coverage counts against every
+     * window rather than none, so the preflight sees it and refuses; the
+     * visitor will fail to open it and skip it, as it already does. */
+    if (e->start_wall_ns == 0)
+        return 1;
     uint64_t file_end_ns = e->start_wall_ns + 3600ULL * 1000000000ULL;
     if (to_wall_ns > 0 && e->start_wall_ns > to_wall_ns)
         return 0;
@@ -361,8 +423,9 @@ int pgwt_summaries_window_current(const char *trace_dir,
     int nfiles = pgwt_scan_summary_files(trace_dir, files, 256);
     /* A scan error (-1) is NOT "nothing to worry about": it means this
      * function could not see the directory it was asked to vouch for, so it
-     * REFUSES. nfiles == 0 is different and genuinely fine -- there are no
-     * summaries, the caller will read raw, and there is nothing to blend. */
+     * REFUSES. nfiles == 0 is refused too, by the `considered == 0` guard at
+     * the bottom -- no summary file is "the summary path cannot answer this
+     * window", never "the answer is zero" (#403). */
     if (nfiles < 0)
         return 0;
 
@@ -388,10 +451,10 @@ int pgwt_summaries_window_current(const char *trace_dir,
     /* THE SCANNER'S BLIND SPOT, which is why this is not just a loop over
      * pgwt_scan_summary_files.
      *
-     * A rotated YYYY-MM-DD_HH.summary.lz4 file derives its start from its NAME,
-     * so the scanner lists it even when its contents are unreadable and the
-     * loop above sees it. `current.summary` is different: the scanner reads its
-     * START FROM ITS HEADER and DROPS the entry when that read fails
+     * A rotated YYYY-MM-DD_HH.summary.lz4 file falls back to its NAME when its
+     * header cannot be read, so the scanner lists it even when its contents are
+     * unreadable and the loop above sees it. `current.summary` is different:
+     * the scanner has only its HEADER and DROPS the entry when that read fails
      * (`if (e->start_wall_ns > 0) n++`). So a current.summary with a short,
      * corrupt or older-version header is invisible to the scanner -- and
      * therefore invisible to pgwt_visit_summaries, which silently answers the
@@ -426,6 +489,34 @@ int pgwt_summaries_window_current(const char *trace_dir,
 
     if (out_considered) *out_considered = considered;
     if (out_unusable)   *out_unusable = unusable;
+
+    /* A VERDICT REACHED WITHOUT EXAMINING ONE FILE IS NOT A VERDICT (#403).
+     *
+     * This used to approve `considered == 0`, on the reasoning that there was
+     * nothing to blend. But the caller does not ask "is anything broken", it
+     * asks "can the summary path answer this window" -- and with no file in
+     * the window the answer is no. Approving kept the request on the summary
+     * path, pgwt_visit_summaries visited nothing, and the response was built
+     * from zero records: db_time_ms 0.0, "fidelity": "exact", measured on 14
+     * of 14 consecutive 130 s windows whose raw value was ~170,000 ms each.
+     * Refusing makes it a RAW recompute, which is the source of truth and is
+     * always complete (and refuses out loud if it is too large).
+     *
+     * The guard keys on `considered`, NOT on nfiles: the failure as it
+     * actually occurred had nfiles == 2 and considered == 0, because #402's
+     * timezone offset put both files outside the window the loop tests. An
+     * `nfiles == 0` guard would have approved exactly the window that was
+     * wrong.
+     *
+     * WHAT IT STILL CANNOT SEE: a GAP BETWEEN two in-window files -- hours A
+     * and C present, B missing. That is considered == 2, unusable == 0, and
+     * it is approved; the missing hour contributes nothing and nothing here
+     * notices. This function proves only that it LOOKED AT SOMETHING, never
+     * that the window is covered; covering that needs record- or
+     * coverage-level accounting, not a file count. */
+    if (considered == 0)
+        return 0;
+
     return unusable == 0;
 }
 

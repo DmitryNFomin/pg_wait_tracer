@@ -3300,9 +3300,17 @@ static int should_use_summaries(struct pgwt_server *srv,
     int considered = 0, unusable = 0;
     if (!pgwt_summaries_window_current(srv->trace_dir, from, to,
                                        &considered, &unusable)) {
-        fprintf(stderr, "INFO: %d of %d summary file(s) covering this window "
-                "are not summary v%d -- recomputing from raw events\n",
-                unusable, considered, PGWT_SUMMARY_VERSION);
+        /* Two different refusals, and conflating them is how #403 read as
+         * normal operation: "0 of 0 files are not v6" describes an empty
+         * overlap set as a version problem. No file in the window means the
+         * summary path cannot answer it at all. */
+        if (considered == 0)
+            fprintf(stderr, "INFO: no summary file covers this window "
+                    "-- recomputing from raw events\n");
+        else
+            fprintf(stderr, "INFO: %d of %d summary file(s) covering this "
+                    "window are not summary v%d -- recomputing from raw "
+                    "events\n", unusable, considered, PGWT_SUMMARY_VERSION);
         return 0;
     }
     return 1;
