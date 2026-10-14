@@ -94,6 +94,12 @@ run python3 tests/test_demo_workload_coverage.py
 step "python: demo-rehearsal bypass-suite unit tests"
 run python3 tests/test_demo_rehearsal_lib.py
 
+step "python: rehearsal verdict refusal tests"
+run python3 tests/test_rehearsal_verdict_hardening.py
+
+step "python: live-smoke verdict unit tests"
+run python3 tests/test_ui_live_smoke_lib.py
+
 # #384: the --diag-data per-frame panel-data probe exists in
 # tests/ui_live_smoke.py and is reached from tests/ui_live_smoke.sh, but
 # tests/demo_rehearsal.py has its OWN run_tab call site -- so the instrument

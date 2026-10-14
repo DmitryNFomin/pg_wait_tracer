@@ -190,6 +190,20 @@ hcloud_token() {
     security find-generic-password -s hcloud -a claude_token -w 2>/dev/null
 }
 
+# A run is evidence until the owner archives it. Refuse before contacting
+# the box, and again at collection in case a previous run appeared meanwhile.
+refuse_previous_results() {
+    local previous="${1:-tests/results/demo_rehearsal}" previous_id="unknown (run.id absent)"
+    if [[ -e "$previous" || -L "$previous" ]]; then
+        [[ -f "$previous/run.id" ]] && previous_id=$(cat "$previous/run.id")
+        echo "demo-rehearsal: REFUSING previous unarchived run $previous (run.id=$previous_id) -- archive it under a distinct name before launching or collecting another attempt" >&2
+        return 1
+    fi
+}
+if ! refuse_previous_results || ! refuse_previous_results "tests/results/.demo_rehearsal_staging"; then
+    exit 3
+fi
+
 # Sweep first, always -- best-effort, catches a VM an earlier run leaked
 # (crash, kill -9, laptop sleep mid-run).
 if ! tests/hetzner-sweep.sh 2>&1 | tee -a "$log"; then
@@ -209,6 +223,7 @@ remote_dir=""
 demo_rehearsal_start_epoch=""
 cleanup_done=0
 synced_back=0
+results_collection_refused=0
 outcome_rc=1
 PG_VERSION_CONFIRMED=""
 
@@ -286,8 +301,12 @@ collect_results() {
     synced_back=1
     [[ -z "$target" || -z "$remote_dir" ]] && return
 
+    results_ok=0
     local staging="tests/results/.demo_rehearsal_staging"
-    rm -rf "$staging"
+    if ! refuse_previous_results || ! refuse_previous_results "$staging"; then
+        results_collection_refused=1
+        return 1
+    fi
     mkdir -p "$staging"
     # A persistent box's host key is expected already known -- only a
     # fresh throwaway VM's (a new IP every run) needs StrictHostKeyChecking
@@ -302,10 +321,13 @@ collect_results() {
     local reason
     if [[ $rsync_rc -eq 0 ]] && reason=$(python3 tests/demo_rehearsal_orchestrator_lib.py \
             validate-results "$staging" "$demo_rehearsal_start_epoch" 2>>"$log"); then
+        if ! python3 tests/demo_rehearsal_orchestrator_lib.py publish-results \
+                "$staging" tests/results/demo_rehearsal 2>>"$log"; then
+            results_collection_refused=1
+            echo "demo-rehearsal: REFUSING to replace results -- keeping staged evidence at $staging and the remote run/state; see $log" | tee -a "$log" >&2
+            return 1
+        fi
         results_ok=1
-        mkdir -p tests/results
-        rm -rf tests/results/demo_rehearsal
-        mv "$staging" tests/results/demo_rehearsal
         echo "demo-rehearsal: tests/results/demo_rehearsal/ synced back from $target -- validated complete ($reason), run.id matches this invocation ($demo_rehearsal_start_epoch)" | tee -a "$log"
     else
         results_ok=0
@@ -318,6 +340,15 @@ collect_results() {
 ephemeral_cleanup() {
     [[ "$cleanup_done" -eq 1 ]] && return
     cleanup_done=1
+    # A refused collection has not secured THIS run's evidence locally.
+    # Preserve both the remote artifacts and the reattachment state.
+    if [[ "${results_collection_refused:-0}" == "1" ]]; then
+        if [[ "$PERSISTENT" != "1" && -n "$server_id" ]]; then
+            echo "demo-rehearsal: collection refused -- leaving $server_name (id=$server_id, ip=$server_ip) up with remote evidence and $STATE_FILE; collect/archive the evidence before deleting it yourself:" | tee -a "$log" >&2
+            echo "  HCLOUD_TOKEN=\"\$(security find-generic-password -s hcloud -a claude_token -w)\" tests/hetzner-vm.sh delete $server_id" | tee -a "$log" >&2
+        fi
+        return
+    fi
 
     # A persistent box (PGWT_BOX) is never created or deleted by this
     # script -- it is shared, always-on infrastructure. KEEP is a no-op

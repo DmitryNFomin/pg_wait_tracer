@@ -10,6 +10,7 @@ out from ui_live_smoke.py: a fast, browser-free, network-free unit test
 Nothing in this module touches a browser, a socket, a subprocess, or the
 filesystem -- plain data in, plain data out.
 """
+import math
 
 # ── Waterfall query-latency threshold ────────────────────────────────────
 #
@@ -363,10 +364,15 @@ def time_model_offcpu_diagnostic(offcpu_ms, db_time_ms, has_measured_cpu):
     Off-CPU* signal. A void DB-Time reading has no usable percentage either;
     conservation's existing floor still rejects that window independently.
     """
-    available = has_measured_cpu and db_time_ms >= MIN_DB_TIME_MS
+    measured = (has_measured_cpu is True
+                and isinstance(offcpu_ms, (int, float)) and not isinstance(offcpu_ms, bool)
+                and math.isfinite(offcpu_ms) and offcpu_ms >= 0)
+    available = measured and db_time_ms >= MIN_DB_TIME_MS
     pct = offcpu_ms / db_time_ms * 100.0 if available else None
     if not has_measured_cpu:
         detail = "has_measured_cpu=False -- no Off-CPU* signal (unavailable, not zero)"
+    elif not measured:
+        detail = "Off-CPU* magnitude absent/invalid -- unavailable, not zero"
     elif not available:
         detail = "db_time_ms below the nonzero-DB-Time floor -- Off-CPU* percentage unavailable"
     else:
@@ -375,10 +381,10 @@ def time_model_offcpu_diagnostic(offcpu_ms, db_time_ms, has_measured_cpu):
         "ok": None,
         "gating": False,
         "available": bool(available),
-        "offcpu_ms": offcpu_ms if has_measured_cpu else None,
+        "offcpu_ms": offcpu_ms if measured else None,
         "db_time_ms": db_time_ms,
         "pct": pct,
-        "detail": detail + "; reported, not gated -- physical contention, not attribution correctness",
+        "detail": detail + "; magnitude reported, not gated -- physical contention, not attribution correctness",
     }
 
 
@@ -401,7 +407,8 @@ def evaluate_time_model_window(rows, db_time_ms, cpu_clamped_ms,
     check_workload_signature/check_aas_floor False there since a 35-45 min
     whole-window AAS average is not "the 60s recent window" the criteria
     doc's floor is stated against). Off-CPU* is retained as an explicitly
-    non-gating diagnostic, with ok=None, outside the verdict conjunction.
+    magnitude diagnostic, with ok=None. Its availability is required; no
+    physical magnitude bound is registered.
 
     NOTE (owner correction, 2026-09-27): this used to also gate on
     `wait_gap_cpu_ms <= 0.1% of db_time_ms` -- dropped entirely, see
@@ -417,14 +424,16 @@ def evaluate_time_model_window(rows, db_time_ms, cpu_clamped_ms,
         clamped_ok, clamped_detail = False, (
             "db_time_ms below the nonzero-DB-Time floor -- cpu_clamped_ms "
             "check skipped, not vacuously ok")
-    ok = bool(cons_ok and used_raw_path and clamped_ok)
+    offcpu = time_model_offcpu_diagnostic(offcpu_ms, db_time_ms, has_measured_cpu)
+    # No physical magnitude cap is registered (§3): only signal availability
+    # gates. Legacy/summary absence must never count as a measured zero.
+    ok = bool(cons_ok and used_raw_path and clamped_ok and offcpu["available"])
     result = {
         "ok": ok,
         "compute_path": "raw" if used_raw_path else "summary",
         "conservation": {"ok": cons_ok, "detail": cons_detail},
         "cpu_clamped": {"ok": clamped_ok, "detail": clamped_detail},
-        "offcpu": time_model_offcpu_diagnostic(
-            offcpu_ms, db_time_ms, has_measured_cpu),
+        "offcpu": offcpu,
     }
     if check_workload_signature:
         sig_ok, sig_detail = workload_signature_present_ok(rows)
@@ -470,9 +479,12 @@ def build_demo_conservation_check(samples, full_window_result):
     what full_window_result says. full_window_result is the whole-capture-
     window query, kept purely as a labeled, non-gating diagnostic (see
     RECENT_WINDOW_S / evaluate_time_model_window's docstring)."""
-    ok = len(samples) > 0 and all(s.get("ok") for s in samples)
+    def sample_ok(sample):
+        return sample.get("ok") and sample.get("offcpu", {}).get("available") is True
+
+    ok = len(samples) > 0 and all(sample_ok(s) for s in samples)
     failed_offsets = [round(s.get("offset_s", -1), 1) for s in samples
-                      if not s.get("ok")]
+                      if not sample_ok(s)]
     return {
         "ok": ok,
         "num_samples": len(samples),
@@ -696,9 +708,9 @@ def freshness_ok(now_ns, to_ns, tick_s=FRESHNESS_TICK_S,
 # early window entirely, which is exactly where scatter's and transitions'
 # real transients live (0.1305 and 0.0072-0.0172 respectively, both at the
 # 200->500ms pair, invisible to a sweep whose first sample never got near
-# 200ms). This is reporting only (owner instruction, 2026-09-28: "report
-# the drift; do not try to fix the scheduling in this branch") -- it never
-# gates `ok`. Un-caught coverage loss here would be the NEXT version of
+# 200ms). Drift remains reported; absent early-window coverage now
+# refuses a rehearsal. Scheduling is unchanged. Un-caught coverage loss
+# here would be the NEXT version of
 # the same blindness this whole bypass suite exists to close: a gate that
 # silently never looks at the interval where the defect lives.
 def sweep_offset_drift(tick_record):
@@ -738,18 +750,40 @@ def sweep_offset_drift(tick_record):
     }
 
 
-def summarize_sweep_offset_coverage(tab_id, pass_name, blink_sweep_ticks):
-    """blink_sweep_ticks: a tab result's blink_sweep.ticks list (one
-    build_sweep_tick_record() dict per attempted tick). Returns
-    {"tab", "pass", "ticks": [sweep_offset_drift(...) per tick]} -- a
-    reporting-only summary, joined at the call site into
-    summary.json/print output so a human never has to hand-diff
-    target_offsets_ms against achieved_offsets_ms across every tick of
-    every tab to notice a coverage gap."""
+def summarize_sweep_offset_coverage(tab_id, pass_name, blink_sweep_ticks,
+                                    second_target_ms):
+    """Require early-window evidence from at least one tick per tab sweep.
+
+    500 ms is the existing second sweep target, not a new drift tolerance.
+    A first sample at/past it never observed that window. Refuse only when
+    the tab has no valid first sample before it; retain every tick's miss
+    in detail. Other drift stays reporting-only, with no new bound.
+    """
+    ticks = [sweep_offset_drift(t) for t in (blink_sweep_ticks or [])]
+    misses = []
+    early_window_observed = False
+    # #397 tracks the scheduling tail: isolated late ticks must remain
+    # visible, but per-tick strictness is deferred because only per-tab
+    # absence is authorised, not an every-tick requirement or pass rate.
+    if not ticks:
+        misses.append(f"{pass_name}/{tab_id}: no sweep samples -- early window absent")
+    for i, tick in enumerate(ticks, start=1):
+        first = tick["first_achieved_ms"]
+        label = f"{pass_name}/{tab_id} tick {i}: first sample={first!r}ms"
+        if (isinstance(first, bool) or not isinstance(first, (int, float))
+                or not math.isfinite(first) or first < 0):
+            misses.append(label + " -- early-window measurement absent/invalid")
+        elif first >= second_target_ms:
+            misses.append(label + " -- EARLY WINDOW LIKELY MISSED "
+                          f"(at/past {second_target_ms}ms)")
+        else:
+            early_window_observed = True
     return {
         "tab": tab_id,
         "pass": pass_name,
-        "ticks": [sweep_offset_drift(t) for t in (blink_sweep_ticks or [])],
+        "ticks": ticks,
+        "ok": early_window_observed,
+        "detail": "; ".join(misses) if misses else None,
     }
 
 
@@ -860,10 +894,8 @@ _DAEMON_ERROR_PREFIXES = ("ERROR:", "FATAL:")
 
 # WARN lines that indicate a degraded capture path (backend-status-layout
 # auth-free fallback, CPU-accounting legacy gap-inference, escalation
-# engine unavailable, etc. -- see src/daemon.c). These do not fail the
-# check by themselves (they ARE logged, so a degrade here is announced, not
-# silent -- the issue's actual requirement) but must never be silently
-# dropped from the report either.
+# engine unavailable, etc. -- see src/daemon.c). These refuse a full-mode
+# rehearsal even when announced, and stay visible in the report.
 _DEGRADED_TIER_MARKERS = (
     "fallback", "fallbacks", "degraded", "LEGACY gap-inference",
     "cannot load", "unavailable",
@@ -875,11 +907,9 @@ def daemon_log_clean(log_text):
     DAEMON_LOG) for the daemon's own ERROR:/FATAL: lines and for WARN lines
     naming a degraded-tier fallback.
 
-    Returns (ok, error_lines, degraded_warnings). ok is False iff any
-    ERROR:/FATAL: line is present -- a degraded-tier WARN alone does not
-    fail the check (it was logged, i.e. announced, which is exactly what
-    issue #157 asks for), but is still returned so the summary never hides
-    it."""
+    Returns (ok, error_lines, degraded_warnings). Both lists must be empty:
+    a fallback/LEGACY tier is announced absence, never a clean full-mode
+    rehearsal. Unrelated WARN lines remain informational."""
     error_lines = []
     degraded_warnings = []
     for line in log_text.splitlines():
@@ -889,7 +919,7 @@ def daemon_log_clean(log_text):
         elif stripped.startswith("WARN:") and any(
                 marker in stripped for marker in _DEGRADED_TIER_MARKERS):
             degraded_warnings.append(stripped)
-    return (len(error_lines) == 0, error_lines, degraded_warnings)
+    return (not error_lines and not degraded_warnings, error_lines, degraded_warnings)
 
 
 def tab_coverage_check_ok(results, expected_tabs=None):

@@ -828,7 +828,7 @@ def test_decomposition_does_not_gate_the_rehearsal_verdict():
     A later change that quietly wires the decomposition into the verdict
     has to fail this test first."""
     clean_sample = {
-        "ok": True, "offset_s": 10.0,
+        "ok": True, "offset_s": 10.0, "offcpu": {"available": True},
         "offcpu_decomposition": {
             "offcpu_ms": 5000.0, "run_delay_ms": 1.0,
             "unexplained_ms": 4999.0, "explained_pct": 0.02,

@@ -454,9 +454,9 @@ def test_conservation_samples_empty_list_is_void():
 
 def test_conservation_samples_one_bad_sample_fails_even_if_others_pass():
     samples = [
-        {"offset_s": 0.0, "ok": True},
-        {"offset_s": 300.0, "ok": False},
-        {"offset_s": 600.0, "ok": True},
+        {"offset_s": 0.0, "ok": True, "offcpu": {"available": True}},
+        {"offset_s": 300.0, "ok": False, "offcpu": {"available": True}},
+        {"offset_s": 600.0, "ok": True, "offcpu": {"available": True}},
     ]
     result = lib.build_demo_conservation_check(samples, {"ok": True})
     check(not result["ok"],
@@ -466,7 +466,7 @@ def test_conservation_samples_one_bad_sample_fails_even_if_others_pass():
 
 
 def test_conservation_samples_all_pass():
-    samples = [{"offset_s": 0.0, "ok": True}, {"offset_s": 300.0, "ok": True}]
+    samples = [{"offset_s": 0.0, "ok": True, "offcpu": {"available": True}}, {"offset_s": 300.0, "ok": True, "offcpu": {"available": True}}]
     result = lib.build_demo_conservation_check(samples, {"ok": True})
     check(result["ok"], "every sample passing -> ok")
     check(result["num_samples"] == 2, "num_samples reported")
@@ -830,7 +830,7 @@ def test_summarize_sweep_offset_coverage_joins_tab_and_pass():
         {"target_offsets_ms": [200, 500], "achieved_offsets_ms": [205, 510]},
         {"target_offsets_ms": [200, 500], "achieved_offsets_ms": [669, 985]},
     ]
-    summary = lib.summarize_sweep_offset_coverage("scatter", "early", ticks)
+    summary = lib.summarize_sweep_offset_coverage("scatter", "early", ticks, 500)
     check(summary["tab"] == "scatter" and summary["pass"] == "early",
           "tab/pass identity carried through")
     check(len(summary["ticks"]) == 2, "one drift record per input tick")
@@ -839,9 +839,9 @@ def test_summarize_sweep_offset_coverage_joins_tab_and_pass():
 
 
 def test_summarize_sweep_offset_coverage_empty_ticks():
-    summary = lib.summarize_sweep_offset_coverage("overview", "early", [])
+    summary = lib.summarize_sweep_offset_coverage("overview", "early", [], 500)
     check(summary["ticks"] == [], "no ticks -> empty list, not a crash")
-    summary_none = lib.summarize_sweep_offset_coverage("overview", "early", None)
+    summary_none = lib.summarize_sweep_offset_coverage("overview", "early", None, 500)
     check(summary_none["ticks"] == [], "None ticks -> empty list, not a crash")
 
 
@@ -997,10 +997,10 @@ def test_daemon_log_clean_fatal_fails():
     check(not ok, "a FATAL: line fails the check")
 
 
-def test_daemon_log_clean_degraded_warn_announced_not_failed():
+def test_daemon_log_clean_degraded_warn_refuses():
     log = "WARN: CPU accounting: LEGACY gap-inference -- degraded mode\n"
     ok, errors, warnings = lib.daemon_log_clean(log)
-    check(ok, "a degraded-tier WARN alone does not fail the check (it was logged)")
+    check(not ok, "an announced degraded tier refuses a full-mode rehearsal")
     check(len(warnings) == 1, f"but it IS captured for the report (got {warnings})")
 
 
@@ -1228,7 +1228,7 @@ def test_build_demo_summary_some_tabs_reached_is_fine():
 # changes build_tab_result's grading formula, fails HERE -- in `make
 # check` -- rather than silently only on a 30-45 minute rehearsal.
 _BLINK_GATE_COMMON_KWARGS = dict(
-    rendered_ok=True, rendered_detail="ok", ticks_observed=6,
+    rendered_ok=True, rendered_detail="ok", ticks_observed=6, ttfp_ms=842,
     console_errors=[], color_violations=[],
     leak_before={"pending": 0}, leak_after={"pending": 0}, artifacts={},
 )

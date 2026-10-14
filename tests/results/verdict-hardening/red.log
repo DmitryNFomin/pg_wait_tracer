@@ -1,0 +1,168 @@
+Base origin/master: 819353d7c4933ed8a6470066a2af4433db0c6e91
+Exit: 1
+test_collect_names_and_refuses_previous_unarchived_run (__main__.ArtifactSurvival) ... FAIL
+test_launch_refuses_before_contacting_the_box (__main__.ArtifactSurvival) ... FAIL
+test_publication_preserves_all_evidence_and_refuses_a_racing_destination (__main__.ArtifactSurvival) ... ERROR
+test_rehearsal_trace_retention_defaults_on_at_every_launcher (__main__.ArtifactSurvival) ... ok
+test_degraded_warning_refuses_attempt (__main__.VerdictRefusals) ... test_first_paint_absence_refuses (__main__.VerdictRefusals) ... test_first_paint_boundary_and_per_tab_failure_detail (__main__.VerdictRefusals) ... FAIL
+test_first_sample_at_500_or_later_refuses_attempt (__main__.VerdictRefusals) ... test_missing_early_window_measurement_refuses (__main__.VerdictRefusals) ... FAIL
+test_missing_sample_offcpu_availability_refuses (__main__.VerdictRefusals) ... FAIL
+test_offcpu_absence_refuses_each_sample_not_measured_zero (__main__.VerdictRefusals) ... FAIL
+test_query_never_fabricates_an_absent_offcpu_measurement (__main__.VerdictRefusals) ... FAIL
+test_zero_attempted_ticks_refuses (__main__.VerdictRefusals) ... FAIL
+
+======================================================================
+ERROR: test_publication_preserves_all_evidence_and_refuses_a_racing_destination (__main__.ArtifactSurvival)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/var/folders/tf/4mlc41nx3zsbx0v4x8wy4hl00000gn/T/rehearsal-verdict-base-yvs9cc2o/tests/test_rehearsal_verdict_hardening.py", line 211, in test_publication_preserves_all_evidence_and_refuses_a_racing_destination
+    orchestrator.publish_results_dir(staging, destination)
+AttributeError: module 'demo_rehearsal_orchestrator_lib' has no attribute 'publish_results_dir'
+
+======================================================================
+FAIL: test_collect_names_and_refuses_previous_unarchived_run (__main__.ArtifactSurvival)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/var/folders/tf/4mlc41nx3zsbx0v4x8wy4hl00000gn/T/rehearsal-verdict-base-yvs9cc2o/tests/test_rehearsal_verdict_hardening.py", line 170, in test_collect_names_and_refuses_previous_unarchived_run
+    self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+AssertionError: 1 != 0 : demo-rehearsal: tests/results/demo_rehearsal/ synced back from fixture -- validated complete (complete fixture), run.id matches this invocation (attempt-2)
+demo-rehearsal: target fixture is a persistent box (PGWT_BOX) -- never deleted; run's fate is known (state=finished), clearing state.sh so the next launch is not blocked
+
+
+======================================================================
+FAIL: test_launch_refuses_before_contacting_the_box (__main__.ArtifactSurvival)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/var/folders/tf/4mlc41nx3zsbx0v4x8wy4hl00000gn/T/rehearsal-verdict-base-yvs9cc2o/tests/test_rehearsal_verdict_hardening.py", line 196, in test_launch_refuses_before_contacting_the_box
+    self.assertEqual(proc.returncode, 3, proc.stdout + proc.stderr)
+AssertionError: 1 != 3 : demo-rehearsal: targeting persistent box fixture (PGWT_BOX) -- remote_dir=pgwt-demo-rehearsal-detached, sharing box-check.sh's own flock (/tmp/pgwt-box-check.lock) so this queues behind CI/other agents rather than colliding
+demo-rehearsal: state saved to tests/results/.demo-rehearsal-state.sh (before provisioning) -- a killed launcher, or a provisioning/rsync failure, still leaves a guard so a next launch refuses to create a second VM/target
+demo-rehearsal: fixture  DURATION_MIN=35 PG=18 RETAIN_TRACE=1 TAG=(none) -> pgwt-demo-rehearsal-detached  (log: tests/results/demo-rehearsal-20261014-012303.log)
+demo-rehearsal: target fixture is a persistent box (PGWT_BOX) -- never deleted; run's fate is known (state=never started), clearing tests/results/.demo-rehearsal-state.sh so the next launch is not blocked
+demo-rehearsal: hetzner-sweep.sh reported a problem (non-fatal, continuing)
+
+
+======================================================================
+FAIL: test_degraded_warning_refuses_attempt (__main__.VerdictRefusals) (marker='fallback')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/var/folders/tf/4mlc41nx3zsbx0v4x8wy4hl00000gn/T/rehearsal-verdict-base-yvs9cc2o/tests/test_rehearsal_verdict_hardening.py", line 69, in test_degraded_warning_refuses_attempt
+    self.assertFalse(result["ok"])
+AssertionError: True is not false
+
+======================================================================
+FAIL: test_degraded_warning_refuses_attempt (__main__.VerdictRefusals) (marker='LEGACY gap-inference')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/var/folders/tf/4mlc41nx3zsbx0v4x8wy4hl00000gn/T/rehearsal-verdict-base-yvs9cc2o/tests/test_rehearsal_verdict_hardening.py", line 69, in test_degraded_warning_refuses_attempt
+    self.assertFalse(result["ok"])
+AssertionError: True is not false
+
+======================================================================
+FAIL: test_degraded_warning_refuses_attempt (__main__.VerdictRefusals) (marker='unavailable')
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/var/folders/tf/4mlc41nx3zsbx0v4x8wy4hl00000gn/T/rehearsal-verdict-base-yvs9cc2o/tests/test_rehearsal_verdict_hardening.py", line 69, in test_degraded_warning_refuses_attempt
+    self.assertFalse(result["ok"])
+AssertionError: True is not false
+
+======================================================================
+FAIL: test_first_paint_absence_refuses (__main__.VerdictRefusals) (value=None)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/var/folders/tf/4mlc41nx3zsbx0v4x8wy4hl00000gn/T/rehearsal-verdict-base-yvs9cc2o/tests/test_rehearsal_verdict_hardening.py", line 53, in test_first_paint_absence_refuses
+    self.assertFalse(attempt(clean_tab(ttfp_ms=value))["ok"])
+AssertionError: True is not false
+
+======================================================================
+FAIL: test_first_paint_absence_refuses (__main__.VerdictRefusals) (value=nan)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/var/folders/tf/4mlc41nx3zsbx0v4x8wy4hl00000gn/T/rehearsal-verdict-base-yvs9cc2o/tests/test_rehearsal_verdict_hardening.py", line 53, in test_first_paint_absence_refuses
+    self.assertFalse(attempt(clean_tab(ttfp_ms=value))["ok"])
+AssertionError: True is not false
+
+======================================================================
+FAIL: test_first_paint_absence_refuses (__main__.VerdictRefusals) (value=inf)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/var/folders/tf/4mlc41nx3zsbx0v4x8wy4hl00000gn/T/rehearsal-verdict-base-yvs9cc2o/tests/test_rehearsal_verdict_hardening.py", line 53, in test_first_paint_absence_refuses
+    self.assertFalse(attempt(clean_tab(ttfp_ms=value))["ok"])
+AssertionError: True is not false
+
+======================================================================
+FAIL: test_first_paint_boundary_and_per_tab_failure_detail (__main__.VerdictRefusals)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/var/folders/tf/4mlc41nx3zsbx0v4x8wy4hl00000gn/T/rehearsal-verdict-base-yvs9cc2o/tests/test_rehearsal_verdict_hardening.py", line 44, in test_first_paint_boundary_and_per_tab_failure_detail
+    self.assertFalse(attempt(bad)["ok"])
+AssertionError: True is not false
+
+======================================================================
+FAIL: test_first_sample_at_500_or_later_refuses_attempt (__main__.VerdictRefusals) (offsets=[500])
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/var/folders/tf/4mlc41nx3zsbx0v4x8wy4hl00000gn/T/rehearsal-verdict-base-yvs9cc2o/tests/test_rehearsal_verdict_hardening.py", line 126, in test_first_sample_at_500_or_later_refuses_attempt
+    self.assertFalse(summary["ok"])
+AssertionError: True is not false
+
+======================================================================
+FAIL: test_first_sample_at_500_or_later_refuses_attempt (__main__.VerdictRefusals) (offsets=[501])
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/var/folders/tf/4mlc41nx3zsbx0v4x8wy4hl00000gn/T/rehearsal-verdict-base-yvs9cc2o/tests/test_rehearsal_verdict_hardening.py", line 126, in test_first_sample_at_500_or_later_refuses_attempt
+    self.assertFalse(summary["ok"])
+AssertionError: True is not false
+
+======================================================================
+FAIL: test_first_sample_at_500_or_later_refuses_attempt (__main__.VerdictRefusals) (offsets=[200, 500])
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/var/folders/tf/4mlc41nx3zsbx0v4x8wy4hl00000gn/T/rehearsal-verdict-base-yvs9cc2o/tests/test_rehearsal_verdict_hardening.py", line 126, in test_first_sample_at_500_or_later_refuses_attempt
+    self.assertFalse(summary["ok"])
+AssertionError: True is not false
+
+======================================================================
+FAIL: test_missing_early_window_measurement_refuses (__main__.VerdictRefusals)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/var/folders/tf/4mlc41nx3zsbx0v4x8wy4hl00000gn/T/rehearsal-verdict-base-yvs9cc2o/tests/test_rehearsal_verdict_hardening.py", line 131, in test_missing_early_window_measurement_refuses
+    self.assertFalse(self.walk([])[0]["ok"])
+AssertionError: True is not false
+
+======================================================================
+FAIL: test_missing_sample_offcpu_availability_refuses (__main__.VerdictRefusals)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/var/folders/tf/4mlc41nx3zsbx0v4x8wy4hl00000gn/T/rehearsal-verdict-base-yvs9cc2o/tests/test_rehearsal_verdict_hardening.py", line 101, in test_missing_sample_offcpu_availability_refuses
+    self.assertFalse(attempt(checks={"time_model_conserves": check})["ok"])
+AssertionError: True is not false
+
+======================================================================
+FAIL: test_offcpu_absence_refuses_each_sample_not_measured_zero (__main__.VerdictRefusals)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/var/folders/tf/4mlc41nx3zsbx0v4x8wy4hl00000gn/T/rehearsal-verdict-base-yvs9cc2o/tests/test_rehearsal_verdict_hardening.py", line 80, in test_offcpu_absence_refuses_each_sample_not_measured_zero
+    self.assertEqual(attempt(checks={"time_model_conserves": check})["ok"], measured)
+AssertionError: True != False
+
+======================================================================
+FAIL: test_query_never_fabricates_an_absent_offcpu_measurement (__main__.VerdictRefusals)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/var/folders/tf/4mlc41nx3zsbx0v4x8wy4hl00000gn/T/rehearsal-verdict-base-yvs9cc2o/tests/test_rehearsal_verdict_hardening.py", line 92, in test_query_never_fabricates_an_absent_offcpu_measurement
+    self.assertFalse(result["ok"])
+AssertionError: True is not false
+
+======================================================================
+FAIL: test_zero_attempted_ticks_refuses (__main__.VerdictRefusals)
+----------------------------------------------------------------------
+Traceback (most recent call last):
+  File "/var/folders/tf/4mlc41nx3zsbx0v4x8wy4hl00000gn/T/rehearsal-verdict-base-yvs9cc2o/tests/test_rehearsal_verdict_hardening.py", line 57, in test_zero_attempted_ticks_refuses
+    self.assertFalse(bad["no_blink"]["measured"]["ok"])
+AssertionError: True is not false
+
+----------------------------------------------------------------------
+Ran 13 tests in 0.549s
+
+FAILED (failures=17, errors=1)

@@ -1,0 +1,18 @@
+  PASS: test_unit_list_coverage.py imports without Playwright
+  PASS: test_wait_cpu_scan.py imports without Playwright
+  PASS: test_sampled_overhead_gate.py imports without Playwright
+  PASS: test_data_query_text_context.py imports without Playwright
+  PASS: test_ui_live_smoke_lib.py imports without Playwright
+  PASS: test_multi_window_lib.py imports without Playwright
+  PASS: test_demo_rehearsal_lib.py imports without Playwright
+  PASS: test_rehearsal_verdict_hardening.py imports without Playwright
+  PASS: test_demo_rehearsal_diag.py imports without Playwright
+  PASS: test_schedstat_lib.py imports without Playwright
+  PASS: test_demo_rehearsal_orchestrator_lib.py imports without Playwright
+  PASS: test_workload_verify_flag.py imports without Playwright
+  PASS: test_demo_workload_coverage.py imports without Playwright
+  PASS: test_timeline_window_probe.py imports without Playwright
+  PASS: test_unit_import_guard.py imports without Playwright
+  PASS: test_push_guard.py imports without Playwright
+  PASS: test_server_alloc_tune.py imports without Playwright
+test_unit_import_guard: 17 Python imports checked; 52 shell/C entries skipped
