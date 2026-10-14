@@ -295,6 +295,10 @@ if [[ -x "$PROJECT_DIR/pgwt-server" ]] && [[ -x "$SCRIPT_DIR/gen_test_traces" ]]
     run_test "test_data_fidelity" python3 "$SCRIPT_DIR/test_data_fidelity.py"
     run_test "test_data_esc_coverage" python3 "$SCRIPT_DIR/test_data_esc_coverage.py"
     run_test "test_data_summary_honesty" python3 "$SCRIPT_DIR/test_data_summary_honesty.py"
+    # PGWT_SUMMARY_DISABLE (raw-only): proves the ROUTE changes, not just
+    # that a variable was read -- fidelity source on a covered-but-empty
+    # window, plus the raw loader's refusal under a tiny budget.
+    run_test "test_data_raw_only" python3 "$SCRIPT_DIR/test_data_raw_only.py"
     run_test "test_data_markers" python3 "$SCRIPT_DIR/test_data_markers.py"
     # #274: executions/exec_scatter read the pre-window marker prefix from
     # the retained index; this is the differential proving it is the SAME

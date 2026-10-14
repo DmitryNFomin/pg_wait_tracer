@@ -3251,6 +3251,68 @@ static int server_init(struct pgwt_server *srv, const char *trace_dir)
     return 0;
 }
 
+/* RAW-ONLY MODE (PGWT_SUMMARY_DISABLE) -- process-wide, read once.
+ *
+ * The summary fast path is an acceleration, not the source of truth: it
+ * answers from per-second records precomputed at WRITE time, while the raw
+ * path recomputes from the recorded events. Measured against the raw path on
+ * one real capture (run.id 1791973533), the summary route differs on an
+ * unfiltered 15-minute window: DB Time and AAS +1.14%, the CPU class +3.54%
+ * AND collapsed from two rows to one so "CPU (waiting for a core)"
+ * disappears (#408), Lock:relation +4414.5 ms, Idle/ClientRead/Other
+ * +5.3-5.6%, Sessions' "Top Wait" wrong on 26 of 81 rows (#319), and
+ * Queries' ranks 7 and 8 swapped (#379). Below the 120 s routing floor the
+ * two paths agree to 0.000000000 ms, so the ROUTE is the only variable.
+ *
+ * Fixing those defects properly is 1-2 engineering weeks. This switch is the
+ * small, boring alternative for anyone who needs the source of truth now
+ * (the demo, a correctness investigation, a cross-check): set
+ * PGWT_SUMMARY_DISABLE and every request takes the raw path.
+ *
+ * It is NOT free and must not be set by accident, which is why startup
+ * announces it on stderr (main()): raw loads are materially slower at wide
+ * windows, and a window too large to load is REFUSED out loud
+ * (reject_overload -> "window_too_large"), never partially answered.
+ *
+ * Value rule: unset, empty, or exactly "0" means OFF (summaries allowed).
+ * Any other value means ON. An unrecognised value is deliberately treated
+ * as ON rather than ignored -- the fail-safe direction here is the source of
+ * truth, and a typo'd VALUE must never leave the operator believing raw-only
+ * is active while the summary route answers. (A typo'd NAME cannot be
+ * caught here; the startup line is what makes its absence visible.)
+ *
+ * Read once and cached: a single process must not answer half its requests
+ * from one route and half from the other. */
+static int summaries_disabled(void)
+{
+    static int cached = -1;
+    if (cached >= 0)
+        return cached;
+    const char *env = getenv("PGWT_SUMMARY_DISABLE");
+    cached = (env && env[0] != '\0' && strcmp(env, "0") != 0) ? 1 : 0;
+    return cached;
+}
+
+/* The startup line for raw-only mode. Printed before any request is served
+ * so a transcript can always be attributed to a route. */
+static void announce_raw_only(void)
+{
+    if (!summaries_disabled())
+        return;
+    fprintf(stderr,
+        "pgwt-server: RAW-ONLY MODE (PGWT_SUMMARY_DISABLE is set) -- the "
+        "per-second summary fast path is DECLINED for every request; every "
+        "answer is computed from the recorded raw events.\n"
+        "pgwt-server: why: the summary route has quantified correctness "
+        "defects on wide unfiltered windows -- Sessions' top wait (#319), "
+        "query ranking (#379), and a collapsed CPU class that hides "
+        "\"CPU (waiting for a core)\" (#408); DB Time/AAS differ by ~1.1%% "
+        "and the CPU class by ~3.5%% (run.id 1791973533).\n"
+        "pgwt-server: cost: wide windows are slower to answer, and a window "
+        "too large to load is refused (\"window_too_large\") rather than "
+        "partially answered.\n");
+}
+
 /* ── Summary threshold (coverage-aware — FID-2) ───────────── */
 
 /* Use the summary fast path for ranges >= 120 s (instant response, ~300KB
@@ -3272,6 +3334,13 @@ static int should_use_summaries(struct pgwt_server *srv,
     uint64_t from = req->from_ns ? req->from_ns : srv->earliest_wall_ns;
     uint64_t to   = req->to_ns   ? req->to_ns   : srv->latest_wall_ns;
     *wf = window_fidelity(srv, from, to);
+
+    /* Raw-only mode declines the summary route for EVERY request (and only
+     * after *wf is filled, so the caller's fidelity label is unaffected by
+     * the route). See summaries_disabled() above for why and what it
+     * costs. */
+    if (summaries_disabled())
+        return 0;
 
     if (req->filter.pid != 0)
         return 0;
@@ -6353,9 +6422,29 @@ int main(int argc, char **argv)
     }
 
     if (!trace_dir) {
-        fprintf(stderr, "Usage: pgwt-server [--dump] <trace-dir>\n");
+        fprintf(stderr,
+            "Usage: pgwt-server [--dump] <trace-dir>\n"
+            "\n"
+            "Environment:\n"
+            "  PGWT_SUMMARY_DISABLE   raw-only mode: decline the per-second\n"
+            "                         summary fast path for every request and\n"
+            "                         answer from the recorded raw events (the\n"
+            "                         source of truth). Set it for a demo or a\n"
+            "                         correctness investigation: the summary\n"
+            "                         route has quantified defects on wide\n"
+            "                         unfiltered windows (#319, #379, #408).\n"
+            "                         Unset/empty/\"0\" = off; any other value\n"
+            "                         = on. Costs: wide windows are slower, and\n"
+            "                         one too large to load is refused\n"
+            "                         (\"window_too_large\"), never partially\n"
+            "                         answered. Startup prints a line on stderr\n"
+            "                         whenever it is active.\n");
         return 1;
     }
+
+    /* Before anything is served, so no transcript is ambiguous about which
+     * route produced its numbers. */
+    announce_raw_only();
 
     /* Line-buffered stdout is critical for SSH pipe */
     setvbuf(stdout, NULL, _IOLBF, 0);

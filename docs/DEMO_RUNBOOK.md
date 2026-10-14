@@ -181,12 +181,64 @@ know its path for `--server-path` below): `which pgwt-server` or
 `ls /usr/local/bin/pgwt-server` (INSTALL.md "Web Investigation Client"
 shows `scp pgwt-server root@db-server:/usr/local/bin/`).
 
+#### Run the demo in RAW-ONLY mode (`PGWT_SUMMARY_DISABLE=1`) — required
+
+Every figure on stage must come from the source of truth. `pgwt-server`
+routes any unfiltered window of 120 s or more to the per-second **summary**
+fast path, and the demo's Overview window is ~15 minutes — so by default the
+demo is answered from that path. Measured against the raw path on one real
+capture (run.id 1791973533), the summary route differs on exactly that
+window: DB Time and AAS **+1.14%**, the CPU class **+3.54%** *and* collapsed
+from two rows to one so "CPU (waiting for a core)" disappears entirely
+(#408), `Lock:relation` +4,414.5 ms, Idle/ClientRead/Other +5.3-5.6%,
+Sessions' "Top Wait" wrong on **26 of 81 rows** (#319), and Queries' ranks 7
+and 8 swapped (#379). Below 120 s the two paths agree to 0.000000000 ms, so
+the route is the only variable.
+
+Set `PGWT_SUMMARY_DISABLE=1` for the server the bridge spawns and every
+request is computed from the recorded raw events instead (`--server-path`
+is passed through a remote shell, so the assignment goes in front of the
+binary — §2.5):
+
+```bash
+--server-path "PGWT_SUMMARY_DISABLE=1 pgwt-server"
+```
+
+The server prints a `RAW-ONLY MODE` line on stderr at startup (visible in
+the bridge's log), naming the variable and the reason. **If that line is
+absent, the switch did not take** — check the spelling; `pgwt-server` cannot
+detect a typo'd variable *name*, only report the mode it is actually in.
+Unset, empty, or exactly `0` means off; any other value means on.
+
+**Say this out loud when a number is questioned:** *"these figures are
+computed from the recorded raw events, with summary acceleration disabled
+because we found and quantified correctness defects in that path."*
+
+What it costs, so neither surprise lands live:
+
+- Wide windows are **slower** — the raw path recomputes from events instead
+  of reading precomputed per-second records, which eats into the per-tab
+  time-to-first-paint bound of 3000 ms (`docs/DEMO_REHEARSAL_CRITERIA.md`
+  §4). Do not widen the window beyond the rehearsed one on stage in this
+  mode: the margin was measured at the rehearsed width only.
+- A window too large to load is **refused out loud** ("window too large" /
+  `window_too_large`), never partially answered. Narrow the range or add a
+  pid/query filter if you ever see it; nothing silently under-reports.
+- The hour-rotation pause described in §4 is paid on every tick in this
+  mode, not just the first after a rotation.
+
 ### 2.5 The Go bridge — **run this on the Mac**
 
 ```bash
-./pgwt --trace-dir /var/lib/pgwt/traces --server-path pgwt-server \
+./pgwt --trace-dir /var/lib/pgwt/traces \
+       --server-path "PGWT_SUMMARY_DISABLE=1 pgwt-server" \
        root@pgwt-stage
 ```
+
+(The `PGWT_SUMMARY_DISABLE=1` prefix is **required for the demo** — see
+§2.4 "Run the demo in RAW-ONLY mode" for what it does and why. The bridge
+runs `ssh <target> <server-path> <trace-dir>`, which the remote shell
+expands, so an environment assignment placed here reaches `pgwt-server`.)
 
 (README.md "Web Investigation Client (pgwt)"; flags table: `--trace-dir`
 and `--server-path` name the *remote* directory/binary, not anything local;
