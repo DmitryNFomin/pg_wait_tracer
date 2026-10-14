@@ -375,6 +375,32 @@ test_io_worker_parity
 # the window, a truncated v7 record, and an illegal eff_event. Each must
 # refuse or diverge; a gate that cannot see must never approve.
 test_cpu_split_parity
+# #379 / summary v8: the writer charged a wait's WHOLE duration to the second
+# it closed in, while the raw path clips every record to the requested window
+# (event_window_ns). A window holding a long record's closing second but not
+# its span therefore over-reported by the outside part, and a window holding
+# the span but not the closing second reported none of it: on the #410 parity
+# fixture, a 130 s window straddling a 100 s Client:ClientRead's close read
+# DB Time +60,000 ms = +23.80% across 29 fields; dragging the time range over
+# that boundary moves DB Time by a quarter with the workload unchanged.
+# v8 spreads the DURATION across the seconds the interval occupied, by
+# WATERMARK: the producer notes what each pid has open (the daemon from
+# state_map, src/map_reader.c) and the writer credits each second's share as
+# that second is written, the closing record contributing only the remainder.
+# This test asserts placement (ten seconds, 1 s each), CONSERVATION (exactly
+# the duration, ONCE -- never 1+2+...+10, which is what the live view's
+# open-stretch rule gives a persistent writer), that count/histogram/max_ns
+# stay whole and once at close, both tick/close orders, and the two
+# deliberate refusals: queries[] (open-interval query attribution is
+# unresolved at credit time; Queries raw-loads, #324) and an on-CPU gap
+# (no cpu_ns exists until close, so spreading its wall would clamp v7's
+# measured split to zero -- the residual #379 leaves open, counted as
+# cpu_open_uncredited_ns_total). Bypass suite: NO producer notes (the
+# reachability probe -- it must fall back to v7, or the credit path is dead
+# code), a stale note, an exit, a mismatched note, an io_worker pid, a full
+# table, a missing trace dir (the read-back must REFUSE, not agree with
+# nothing) and a late first note. A gate that cannot see must never approve.
+test_straddler_accounting
 # Paint-latency Phase 1 (docs/PAINT_LATENCY_PLAN.md): the per-committed-block
 # transition aggregate, src/block_agg.c. `transitions` loads the full raw event
 # window on every request (~0.68 s per million records) because a per-second

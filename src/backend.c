@@ -1066,6 +1066,16 @@ int pgwt_handle_exit(struct pgwt_daemon *d, pid_t pid)
     bpf_map_delete_elem(seed_fd, &key);
     pgwt_debug_block_end(d, "backend_state_delete", pid, started_ns);
 
+    /* #379: the pid's state_map entry is gone, so pgwt_read_state_map will
+     * never refresh its open-interval note again. Retire it HERE, exactly,
+     * rather than leaving it to the writer's staleness fail-safe — which
+     * would keep crediting this pid's last open interval for up to
+     * PGWT_SUMMARY_OPEN_STALE_NS after it died. Placed above the `if (!be)`
+     * return because BPF enrolls at fork: a pid that exits before a registry
+     * entry exists still reached the state map, and still has a note. */
+    if (d->summary_writer)
+        pgwt_summary_forget_open(d->summary_writer, (uint32_t)pid);
+
     /* BPF enrolls at fork, before a userspace registry entry exists. Even
      * a retired-before-enrollment target must have those maps cleaned. */
     if (!be) return 0;
