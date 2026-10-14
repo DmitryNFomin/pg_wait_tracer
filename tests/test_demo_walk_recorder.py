@@ -270,14 +270,47 @@ class RecorderTests(unittest.TestCase):
     def test_changed_wait_mix_passes_a_live_walk(self):
         first = {"table_rows": [["CPU*", "x", "50.0%"], ["IO", "x", "50.0%"]]}
         second = {"table_rows": [["CPU*", "x", "40.0%"], ["IO", "x", "60.0%"]]}
-        driver.check_overview_wait_mix([first, second], archived=False)  # must not raise
+        result = driver.check_overview_wait_mix([first, second], archived=False)
+        self.assertEqual(result, driver.WAIT_MIX_CHECKED_LIVE)
 
     def test_unchanged_wait_mix_is_expected_and_allowed_when_archived(self):
         # An archived walk's window is pinned to the trace's own fixed span
         # (reassert_archived_window) -- nothing in it advances, so the same
-        # input that refuses a live walk above must NOT refuse here.
+        # input that refuses a live walk above must NOT refuse here. The
+        # skip must also be RECORDED (not merely "not raise"), so a reader
+        # of walk.json/analysis.md never mistakes it for a check that ran.
         same = {"table_rows": [["CPU*", "x", "50.0%"], ["IO", "x", "50.0%"]]}
-        driver.check_overview_wait_mix([same, dict(same)], archived=True)  # must not raise
+        result = driver.check_overview_wait_mix([same, dict(same)], archived=True)
+        self.assertEqual(result, driver.WAIT_MIX_SKIPPED_ARCHIVED)
+        self.assertIn("skipped", result)
+        self.assertIn("archived", result)
+
+    def test_write_analysis_states_a_skipped_wait_mix_check_explicitly(self):
+        # A skipped assertion that reads like a passed one is the defect
+        # class this project has hit repeatedly. The overview tab's
+        # recorded "wait_mix_check" marker must appear verbatim in
+        # analysis.md, not be inferable only from the window mode or from
+        # "stayed unchanged" (which also describes a genuinely-live walk
+        # that happened to sample two identical ticks).
+        walk = self._minimal_walk({"mode": "archived-full-span", "from_ns": 10,
+                                    "to_ns": 2_600_000_010, "span_s": 2.6})
+        walk["tabs"][0]["wait_mix_check"] = driver.WAIT_MIX_SKIPPED_ARCHIVED
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            lib.write_analysis(root, walk)
+            text = (root/"analysis.md").read_text()
+            self.assertIn(driver.WAIT_MIX_SKIPPED_ARCHIVED, text)
+
+    def test_write_analysis_omits_wait_mix_line_when_absent(self):
+        # Backward compatibility: an older walk.json with no wait_mix_check
+        # key (or a live walk where nothing stored one) must not grow a
+        # phantom line.
+        walk = self._minimal_walk(None)
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            lib.write_analysis(root, walk)
+            text = (root/"analysis.md").read_text()
+            self.assertNotIn("wait-mix assertion", text)
 
     def test_observed_empty_is_distinct_from_failed_observation(self):
         class Capture:

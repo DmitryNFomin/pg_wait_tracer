@@ -219,6 +219,8 @@ def write_analysis(root, walk):
             text += "Visible panel text: " + "; ".join(first["readouts"]) + ". "
         changed = any(o["table_rows"] != first["table_rows"] for o in observations[1:])
         text += f"Visible table values {'changed' if changed else 'stayed unchanged'} across DOM samples. "
+        if tab.get("wait_mix_check"):
+            text += f"{tab['wait_mix_check']}. "
         text += f"Console errors: {len(tab['console_errors'])}."
         if tab.get("chart_change"):
             change = tab["chart_change"]

@@ -35,6 +35,15 @@ content, headline numbers, `walk.json`), never for recording its demo GIFs.
 Record real GIFs against a capture a daemon is still writing to (no
 `--archived`).
 
+For the same reason, `check_overview_wait_mix()` skips (never fakes passing)
+the live-only "Overview's visible wait mix must change" assertion under
+`--archived`. The skip is never silent: it is recorded verbatim on the
+Overview tab (`walk["tabs"][0]["wait_mix_check"]`) and in `analysis.md` as
+`"wait-mix assertion skipped: archived window (fixed span, nothing
+advances)"` — a live walk instead records `"wait-mix assertion: changed
+across the dwell"`. A skipped check that reads like a passed one is a defect
+class this project has hit repeatedly; this one says so in the artifact.
+
 `--headed` displays the dedicated window. Browser content is always 1710×981
 CSS pixels at deviceScaleFactor 2; two DOM geometry readings must agree.
 Screencast images are Chrome's native CSS-resolution compositor frames,

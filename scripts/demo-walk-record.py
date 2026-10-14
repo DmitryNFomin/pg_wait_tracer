@@ -195,6 +195,10 @@ def navigate(page, tab, smoke, capture, timeout, archived=False):
     capture.guard()
 
 
+WAIT_MIX_SKIPPED_ARCHIVED = "wait-mix assertion skipped: archived window (fixed span, nothing advances)"
+WAIT_MIX_CHECKED_LIVE = "wait-mix assertion: changed across the dwell"
+
+
 def check_overview_wait_mix(observations, archived):
     """Overview's visible wait mix changing across the dwell is proof the
     recording is watching a LIVE, moving window, not a frozen screenshot --
@@ -208,14 +212,21 @@ def check_overview_wait_mix(observations, archived):
     trips chart_change()'s AAS-chart motion gate a few steps later (no data
     means no visible pixel change either), and that gate is deliberately
     left refusing -- --archived is for inspecting a retained capture, never
-    for producing a GIF of one."""
+    for producing a GIF of one.
+
+    Returns a short string recording what happened (skipped vs checked),
+    stored on the Overview tab's result so a SKIPPED assertion never reads
+    like a passed one in walk.json/analysis.md -- a skipped check that looks
+    like a checked one is a defect class this project has hit repeatedly,
+    including inside its own verification code."""
     def mix(observation):
         return [(r[0], r[2]) for r in observation["table_rows"] if len(r) > 2
                 and r[0] in ("CPU (running)", "CPU (waiting for a core)", "CPU*", "IO", "Lock", "LWLock")]
     if archived:
-        return
+        return WAIT_MIX_SKIPPED_ARCHIVED
     if not any(mix(o) != mix(observations[0]) for o in observations[1:]):
         raise Refusal(2, "Overview: inspected wait mix did not change during the recorded stretch")
+    return WAIT_MIX_CHECKED_LIVE
 
 
 def dwell(page, tab, seconds, smoke, capture, inspect_path=None):
@@ -554,7 +565,7 @@ def record(args, staging):
             walk["drill"] = interaction
             capture.stop(); capture.guard()
             overview = walk["tabs"][0]
-            check_overview_wait_mix(overview["observations"], args.archived)
+            overview["wait_mix_check"] = check_overview_wait_mix(overview["observations"], args.archived)
             overview["chart_change"] = chart_change(staging,capture.frames,overview["frame_indices"],headline_crop[0][0])
             # Five seconds of native crosshair inspection, including the live tick.
             headline_frames = frame_indices(capture.frames,overview["dwell"]["start_s"]+0.3,
