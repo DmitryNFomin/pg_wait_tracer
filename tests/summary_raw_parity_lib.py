@@ -316,8 +316,11 @@ def compare(raw_fields, summary_fields, expected):
             if exp:
                 findings.append(Finding(
                     field, rv, sv, XPASS, issue=iss,
-                    note="recorded as divergent, now agrees -- if #%s is "
-                         "fixed, delete this entry" % iss))
+                    note="recorded as divergent, now AGREES -- if #%s is "
+                         "fixed, delete this entry from "
+                         "tests/summary_raw_parity_expected.json. Removing "
+                         "the pin is the last step of landing that fix, not "
+                         "an edit to be nervous about" % iss))
             else:
                 findings.append(Finding(field, rv, sv, AGREE))
             continue

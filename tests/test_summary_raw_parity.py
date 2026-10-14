@@ -205,9 +205,17 @@ def ask(trace_dir, frm, to, stderr_path):
 #          closes in; raw clips it to the window.
 #   #319 — `top_wait` means "largest total" on raw and "longest single wait"
 #          on the summary path.
-#   UNFILED:* — a divergence this gate found that no open issue covers. It is
-#          recorded so the gate is green on master, named so it is visible,
-#          and listed in the branch report for an issue number.
+#   #410 — the four divergences THIS gate found on its first run: max_aas
+#          (peak over seconds vs over buckets), backfilled_ms and
+#          unattributed_available (no unattributed accounting on the summary
+#          path) and io_worker_busy_pct (absent there).
+#
+# DELETING AN ENTRY IS PART OF LANDING THE FIX. When #408, #379, #319 or #410
+# is fixed, its pinned fields start agreeing and this gate reports them as
+# `xpass ... delete this entry` and still passes. Removing those lines from
+# tests/summary_raw_parity_expected.json is the last step of that fix, not an
+# edit to be nervous about: leaving a stale entry behind only costs the gate
+# its grip on that field.
 # PGWT_PARITY_EXPECTED points the gate at a different expected-divergence
 # table. It exists for this gate's OWN red demonstrations (an entry with a
 # perturbed magnitude must report CHANGED-DIVERGENCE; an empty table must make
@@ -230,22 +238,20 @@ def load_expected():
         return json.load(f)
 
 
-# Divergences this gate FOUND that no open issue covers. Named and recorded
-# so the gate is green on master, visible so they are not mistaken for
-# accepted behaviour, and reported in the branch report for issue numbers.
-UNFILED = {
-    "aas/max_aas":
-        "UNFILED-max_aas-definition: the summary path's peak is the max over "
-        "SECONDS, the raw path's is the max over the requested buckets",
-    "queries/backfilled_ms":
-        "UNFILED-no-unattributed-accounting: the summary path reports no "
-        "backfilled time",
-    "queries/unattributed_available":
-        "UNFILED-no-unattributed-accounting: the summary path cannot offer "
-        "unattributed time at all",
-    "time_model/io_worker_busy_pct":
-        "UNFILED-io_worker_busy_pct-absent: the summary path omits the "
-        "io_worker busy diagnostic",
+# Divergences this gate FOUND on its first run, filed together as #410:
+#   * aas/max_aas — the summary path's peak is the max over SECONDS, the raw
+#     path's is the max over the requested buckets. The same
+#     two-meanings-one-field shape as #319.
+#   * queries/backfilled_ms, queries/unattributed_available — the summary
+#     path has no unattributed/backfilled accounting to offer.
+#   * time_model/io_worker_busy_pct — absent from the summary response.
+# Listed here rather than falling through to the per-window rules so that a
+# NEW divergence in one of these endpoints cannot inherit #410 by accident.
+FOUND_BY_THIS_GATE = {
+    "aas/max_aas": 410,
+    "queries/backfilled_ms": 410,
+    "queries/unattributed_available": 410,
+    "time_model/io_worker_busy_pct": 410,
 }
 
 CPU_SCALARS = ("time_model/has_measured_cpu", "time_model/cpu_ms",
@@ -259,8 +265,8 @@ def issue_for(field, window):
     Attribution is by rule rather than by hand so that a NEW field appearing
     in a window cannot inherit an issue number just by sitting next to one.
     """
-    if field in UNFILED:
-        return UNFILED[field]
+    if field in FOUND_BY_THIS_GATE:
+        return FOUND_BY_THIS_GATE[field]
     if field.endswith("/top_wait") or field.endswith("/top_wait_id"):
         return 319                      # two definitions of one column
     if "CPU" in field or field in CPU_SCALARS:

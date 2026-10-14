@@ -299,8 +299,8 @@ def main():
           "§13 a top_wait field is attributed to #319")
     check(G.issue_for("time_model/row/Client/ms", "straddle_130s") == 379,
           "§13 a straddle-window class row is attributed to #379")
-    check(str(G.issue_for("aas/max_aas", "interior_160s")).startswith("UNFILED"),
-          "§13 a found-but-unfiled divergence is tagged UNFILED, not guessed")
+    check(G.issue_for("aas/max_aas", "interior_160s") == 410,
+          "§13 a divergence this gate found is attributed to #410")
     check(G.issue_for("time_model/row/Client/ms", "interior_160s")
           == "UNEXPLAINED",
           "§13 an interior-window class-row divergence is UNEXPLAINED "
