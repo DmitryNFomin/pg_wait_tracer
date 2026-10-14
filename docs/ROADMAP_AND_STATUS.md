@@ -166,8 +166,18 @@
 - ~~Multi-window `%DB` drift (cosmetic — visible parents sum 106–110% under load).~~
   Fixed (#97): it was non-command CPU in the `CPU*` row, not drift — see the
   detailed entry below.
-- Live view: account the *open* interval of a repeated **wait** (`has_closed_data`
-  guard, now CPU-only, still suppresses ongoing waits).
+- ~~Live view: account the *open* interval of a repeated **wait**
+  (`has_closed_data` guard, now CPU-only, still suppresses ongoing waits).~~
+  Fixed (#393): the guard is gone for waits too — the open stretch
+  `[last_ts, now)` is disjoint from every closed record of the same
+  `(pid, we)` (BPF stamps `last_ts` in the handler that emits the record), so
+  suppressing it only ever dropped time, all of it rather than an overlap.
+  One pid in a 10 s `pg_sleep` straddling the interval edge, with one short
+  earlier `PgSleep` chunk closed inside the same interval, made the live time
+  model print `Timeout` at 0.0% of DB Time and a DB Time short by that
+  backend's whole contribution. The decision is now
+  `pgwt_live_account_open_stretch()` (`src/map_reader.c`), pinned by
+  `tests/test_live_accum.c test_open_stretch_repeated_wait`.
 - Within-wait **on-CPU-spin vs off-CPU-blocked** split (keeps the label).
 - **Off-CPU analysis** (voluntary/involuntary switches, runqueue latency).
 - **Sampler feed** from the exact CPU accumulator (tighten sampled-tier CPU).

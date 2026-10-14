@@ -473,6 +473,15 @@ bool pgwt_live_qattr_sample(struct pgwt_accumulator *acc,
     return false;
 }
 
+/* #393 — see the contract on map_reader.h. */
+int pgwt_live_account_open_stretch(const struct pgwt_pid_accum *pa,
+                                   uint32_t we, uint64_t open_ns)
+{
+    (void)pa;                     /* deliberately unused: see map_reader.h */
+    (void)we;
+    return open_ns != 0;          /* nothing open is absence, not 0 ns */
+}
+
 uint32_t pgwt_duration_to_bucket(uint64_t ns)
 {
     uint64_t us = ns / 1000;
@@ -549,7 +558,6 @@ void pgwt_read_state_map(struct pgwt_daemon *d)
     int we_nonzero = 0;
     int open_zero = 0;
     int skipped_not_live = 0;
-    int skipped_closed = 0;
     static int dbg_scan = -1;
     int next_rc;
 
@@ -558,9 +566,9 @@ void pgwt_read_state_map(struct pgwt_daemon *d)
     if (dbg_scan)
         fprintf(stderr, "STATEDUMP-SCAN: entries=%d we0_open=%d "
                 "lookup_failed=%d we_nonzero=%d open_zero=%d "
-                "skipped_not_live=%d skipped_closed=%d\n",
+                "skipped_not_live=%d\n",
                 entries, we0_open, lookup_failed, we_nonzero, open_zero,
-                skipped_not_live, skipped_closed);
+                skipped_not_live);
 
     errno = 0;
     next_rc = bpf_map_get_next_key(state_fd, &skey, &snext);
@@ -606,15 +614,19 @@ void pgwt_read_state_map(struct pgwt_daemon *d)
                 pa_cur->current_wait_ns = open_ns;
             }
 
-            /* Skip the open interval if d->accum already has closed data for
-             * this (PID, event) — EXCEPT for on-CPU (we==0), see below.
+            /* #393: the open interval is accounted whatever else this (PID,
+             * event) did in this interval — pgwt_live_account_open_stretch()
+             * is the one place that decides, and src/map_reader.h carries the
+             * disjointness argument and the measured symptom.
              *
-             * The guard exists to avoid double-counting a WAIT that the live
-             * open-interval read and a same-window closed record could both
-             * represent; wait accounting has shipped on it and is asserted by
-             * test_deterministic, so it is preserved unchanged.
+             * What used to be here: skip the open interval if d->accum
+             * already has closed data for this (PID, event) — EXCEPT for
+             * on-CPU (we==0), see below. It was meant to avoid double-counting
+             * a WAIT that the live open-interval read and a same-window closed
+             * record could both represent, but the two ranges never overlap,
+             * so it only ever dropped time (all of it, not the overlap).
              *
-             * On-CPU (we==0) MUST bypass it. The open [last_ts, now] stretch is
+             * On-CPU (we==0) already bypassed it. The open [last_ts, now] stretch is
              * the backend's current, not-yet-closed on-CPU run; last_ts is
              * stamped by BPF on every transition, and event_accum holds only
              * CLOSED transitions, so the two are disjoint and the open on-CPU
@@ -625,22 +637,9 @@ void pgwt_read_state_map(struct pgwt_daemon *d)
              * suppressed — the pinned query read ~0 CPU live, while a
              * scan-caught backend (no prior we==0) read the full amount. The
              * measured-CPU feature (S3) depends on this open on-CPU read, so
-             * we==0 is always accounted. (The analogous ongoing-repeated-WAIT
-             * under-count is tracked in docs/ROADMAP_AND_STATUS.md.) */
-            bool has_closed_data = false;
-            if (we != 0 && pa_cur) {
-                for (int i = 0; i < pa_cur->num_events; i++) {
-                    if (pa_cur->events[i].wait_event == we &&
-                        pa_cur->events[i].count > 0) {
-                        has_closed_data = true;
-                        break;
-                    }
-                }
-            }
-            if (has_closed_data)
-                skipped_closed++;
-
-            if (open_ns > 0 && !has_closed_data) {
+             * we==0 is always accounted. The analogous ongoing-repeated-WAIT
+             * under-count (ROADMAP future list) is #393, fixed here. */
+            if (pgwt_live_account_open_stretch(pa_cur, we, open_ns)) {
                 /* T8 symptom #3: for an on-CPU (we==0) in-progress interval,
                  * the CPU quantity is the MEASURED schedstat delta since the
                  * seeded base, not the full wall gap — a backend preempted or
@@ -733,10 +732,10 @@ void pgwt_read_state_map(struct pgwt_daemon *d)
     if (dbg_scan) {
         fprintf(stderr, "STATEDUMP-SCAN: entries=%d we0_open=%d "
                 "lookup_failed=%d we_nonzero=%d open_zero=%d "
-                "skipped_not_live=%d skipped_closed=%d "
+                "skipped_not_live=%d "
                 "state_fd=%d mode=%d cpu_acct=%d\n",
                 entries, we0_open, lookup_failed, we_nonzero, open_zero,
-                skipped_not_live, skipped_closed, state_fd, (int)d->mode,
+                skipped_not_live, state_fd, (int)d->mode,
                 d->cpu_accounting ? 1 : 0);
 
         int registry_pids = 0;
