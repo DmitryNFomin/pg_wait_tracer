@@ -128,6 +128,15 @@ func main() {
 		})
 	})
 
+	// #401: Chrome issues an implicit GET /favicon.ico on every navigation.
+	// With no route here it 404s, which is cosmetic for a human but refuses
+	// tab 1 of every automated walk whose console-error gate whitelists
+	// nothing (scripts/demo-walk-record.py). A 204 is simplest: it needs no
+	// embedded asset, so it carries none of #396's served-asset-manifest risk
+	// (manifest vs disk tree must agree in both directions) and there is no
+	// filesystem path to guard against traversal on.
+	http.HandleFunc("/favicon.ico", faviconHandler)
+
 	// Serve embedded static files.
 	sub, err := fs.Sub(staticFiles, "static")
 	if err != nil {
@@ -219,6 +228,12 @@ func main() {
 	if err := http.ListenAndServe(addr, nil); err != nil {
 		log.Fatal(err)
 	}
+}
+
+// faviconHandler answers /favicon.ico with 204 No Content (#401). Extracted
+// so it is unit-testable without standing up the whole bridge.
+func faviconHandler(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func newSessionToken() string {

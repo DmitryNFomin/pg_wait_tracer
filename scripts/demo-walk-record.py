@@ -161,7 +161,23 @@ def observe(page, tab, smoke, capture):
     return result
 
 
-def navigate(page, tab, smoke, capture, timeout):
+def reassert_archived_window(page):
+    """--archived: smoke._navigate_to_tab resumes live mode on every tab
+    switch that landed paused (the SAME helper the live-demo walk relies on
+    to keep the rolling window moving). Live resume re-anchors to the
+    server's real wall-clock NOW (app.js initLiveMode: timeRange.anchorLive),
+    which for an archived capture is far outside the trace's own data --
+    exactly the empty-panel symptom this flag exists to avoid. Re-click the
+    "All" quick-range after every navigation to restore the trace's own
+    [server.fromNs, server.toNs) span: that path (app.js initTimePicker,
+    secs===0) uses the ALREADY-CACHED server.fromNs/toNs from the initial
+    connection, never a fresh NOW, so it is stable across repeated clicks."""
+    page.locator("#time-range").click()
+    page.locator('#time-picker button[data-range="0"]').click()
+    page.wait_for_timeout(200)
+
+
+def navigate(page, tab, smoke, capture, timeout, archived=False):
     capture.current = tab
     try:
         smoke._navigate_to_tab(page, tab, timeout)
@@ -174,7 +190,32 @@ def navigate(page, tab, smoke, capture, timeout):
             if not ok:
                 raise Refusal(2, f"{tab}: inspected mounted panel was empty: {detail}") from exc
         raise Refusal(3, f"{tab}: never became ready: {exc}") from exc
+    if archived:
+        reassert_archived_window(page)
     capture.guard()
+
+
+def check_overview_wait_mix(observations, archived):
+    """Overview's visible wait mix changing across the dwell is proof the
+    recording is watching a LIVE, moving window, not a frozen screenshot --
+    that only makes sense for the live path. --archived pins the window to
+    the trace's own fixed [from_ns,to_ns) span (reassert_archived_window),
+    so nothing in that span advances; an UNCHANGING mix is then the correct,
+    expected state, not evidence of a stale connection. Demanding a live
+    walk's behavior from an archived replay would refuse every archived walk
+    unconditionally, so skip the assertion rather than fake movement. This
+    does NOT make an archived walk succeed overall: the SAME stillness still
+    trips chart_change()'s AAS-chart motion gate a few steps later (no data
+    means no visible pixel change either), and that gate is deliberately
+    left refusing -- --archived is for inspecting a retained capture, never
+    for producing a GIF of one."""
+    def mix(observation):
+        return [(r[0], r[2]) for r in observation["table_rows"] if len(r) > 2
+                and r[0] in ("CPU (running)", "CPU (waiting for a core)", "CPU*", "IO", "Lock", "LWLock")]
+    if archived:
+        return
+    if not any(mix(o) != mix(observations[0]) for o in observations[1:]):
+        raise Refusal(2, "Overview: inspected wait mix did not change during the recorded stretch")
 
 
 def dwell(page, tab, seconds, smoke, capture, inspect_path=None):
@@ -279,13 +320,13 @@ def aas_inspection_path(page):
     return [box['x']+80, box['x']+box['width']*0.80, box['y']+box['height']*0.70]
 
 
-def drill(page, smoke, capture, timeout):
+def drill(page, smoke, capture, timeout, archived=False):
     capture.current = "drill-setup"
     # Start the supplementary clip without the walk's session filter.
     if page.locator("#breadcrumb .crumb-clear").count():
         page.locator("#breadcrumb .crumb-clear").click()
-        navigate(page,"overview",smoke,capture,timeout)
-    navigate(page, "queries", smoke, capture, timeout)
+        navigate(page,"overview",smoke,capture,timeout,archived)
+    navigate(page, "queries", smoke, capture, timeout, archived)
     start = page.evaluate("Date.now()/1000")
     before = dwell(page, "queries", 2, smoke, capture, aas_inspection_path(page))
     # Rank actual DOM p95 execution duration, then average, never aggregate DB Time.
@@ -463,18 +504,37 @@ def record(args, staging):
                 if reason:
                     raise Refusal(3, f"pinned viewport not achieved: {reason}")
                 geometry.append(actual); page.wait_for_timeout(200)
-            # Keep the runbook's 15-minute range, with compare off.
+            # Default: keep the runbook's 15-minute LIVE range, compare off.
+            # --archived (default off): for a capture that is already older
+            # than 15 minutes relative to Mac wall-clock, the stock live
+            # quick-range shows every panel empty -- the trace's own data
+            # ends before that window starts. The "All" quick-range
+            # (data-range="0") instead sets the window to the trace's own
+            # [server.fromNs, server.toNs) span. This is NOT the live-demo
+            # gesture; walk["window"] records which one ran and
+            # write_analysis() states the distinction explicitly so a reader
+            # never mistakes a full-capture-span recording for a live one.
             page.locator("#time-range").click()
-            page.locator('#time-picker button[data-range="900"]').click()
+            page.locator(f'#time-picker button[data-range="{0 if args.archived else 900}"]').click()
             if page.evaluate("Boolean(window.__pgwt?.compareSnapshot()?.enabled)"):
                 raise Refusal(3,"compare mode must be off")
-            if page.evaluate("window.__pgwt.timeRange.to-window.__pgwt.timeRange.from") != 900_000_000_000:
+            window_info = {"mode": "archived-full-span" if args.archived else "live-15min"}
+            if args.archived:
+                span_ok = page.evaluate(
+                    "Math.abs((window.__pgwt.timeRange.to-window.__pgwt.timeRange.from)"
+                    " - (window.__pgwt.server.toNs-window.__pgwt.server.fromNs)) < 1024")
+                if not span_ok:
+                    raise Refusal(3,"full trace-span range was not achieved")
+                window_info["from_ns"] = page.evaluate("window.__pgwt.server.fromNs")
+                window_info["to_ns"] = page.evaluate("window.__pgwt.server.toNs")
+                window_info["span_s"] = (window_info["to_ns"]-window_info["from_ns"])/1e9
+            elif page.evaluate("window.__pgwt.timeRange.to-window.__pgwt.timeRange.from") != 900_000_000_000:
                 raise Refusal(3,"15-minute range was not achieved")
             capture.pulse()
             walk = {"schema_version":1,"complete":False,"run_id":args.run_id,
                 "source":"mock_server.py with changing Overview fixture" if args.mock else "real bridge",
                 "url":url,"sha":subprocess.check_output(["git","rev-parse","HEAD"],cwd=ROOT,text=True).strip(),
-                "browser_version":browser.version,"geometry_readings":geometry,
+                "browser_version":browser.version,"geometry_readings":geometry,"window":window_info,
                 "capture":{"method":"CDP Page.startScreencast","clock":"UTC epoch seconds; CDP metadata.timestamp and DOM Date.now()/1000",
                            "fps_min":args.fps,"still_frame_policy":"restart screencast on cadence; retain actual timestamps; never pad missing frames",
                            "resolution":[WIDTH,HEIGHT],"device_scale_factor":DPR},
@@ -482,7 +542,7 @@ def record(args, staging):
             headline_crop = None
             for tab in smoke.lib.TABS:
                 print(f"Recording {tab}: {dwells[tab]:g}s",flush=True)
-                navigate(page,tab,smoke,capture,args.timeout)
+                navigate(page,tab,smoke,capture,args.timeout,args.archived)
                 if tab == "overview":
                     headline_crop = [[rect(page,"#aas-chart-container")],
                                      table_crop(page,["name","ms","pct","aas"])]
@@ -490,15 +550,11 @@ def record(args, staging):
                                aas_inspection_path(page) if tab == 'overview' else None)
                 walk["tabs"].append(result)
             print("Recording continuous Queries → execution → wait interaction",flush=True)
-            interaction, query_crop, execution_crop = drill(page,smoke,capture,args.timeout)
+            interaction, query_crop, execution_crop = drill(page,smoke,capture,args.timeout,args.archived)
             walk["drill"] = interaction
             capture.stop(); capture.guard()
             overview = walk["tabs"][0]
-            def mix(observation):
-                return [(r[0],r[2]) for r in observation["table_rows"] if len(r)>2
-                        and r[0] in ("CPU (running)","CPU (waiting for a core)","CPU*","IO","Lock","LWLock")]
-            if not any(mix(o) != mix(overview["observations"][0]) for o in overview["observations"][1:]):
-                raise Refusal(2,"Overview: inspected wait mix did not change during the recorded stretch")
+            check_overview_wait_mix(overview["observations"], args.archived)
             overview["chart_change"] = chart_change(staging,capture.frames,overview["frame_indices"],headline_crop[0][0])
             # Five seconds of native crosshair inspection, including the live tick.
             headline_frames = frame_indices(capture.frames,overview["dwell"]["start_s"]+0.3,
@@ -571,6 +627,16 @@ def main():
     parser.add_argument("--fps",type=int,default=12,help="minimum capture cadence (1–16), default 12; GIFs use 10")
     parser.add_argument("--timeout",type=float,default=60,help="readiness timeout in seconds")
     parser.add_argument("--headed",action="store_true",help="show the dedicated Chrome window")
+    parser.add_argument("--archived",action="store_true",
+                         help="window = the served trace's own [from_ns,to_ns) span (data-range=\"0\", "
+                              "\"All\"), not the live 15-minute quick-range. For a capture that is "
+                              "already older than 15 minutes relative to wall-clock, where the stock "
+                              "live gesture would show every panel empty. Default off: unchanged live "
+                              "path. LIMITATION: this is for INSPECTING a retained capture, not for "
+                              "producing GIFs -- the window is the trace's own fixed span, so nothing "
+                              "in it advances, so the Overview AAS chart cannot visibly change, so the "
+                              "walk will always refuse at that motion gate before ever cutting a GIF. "
+                              "Record real demo GIFs against a LIVE capture (no --archived).")
     args=parser.parse_args()
     staging=None
     try:
@@ -579,6 +645,9 @@ def main():
         else:
             if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*",args.run_id) or not (1<=args.fps<=16) or not (0<args.timeout<=300):
                 raise Refusal(6,"invalid run-id, fps or timeout")
+            if args.archived and not args.url:
+                raise Refusal(6,"--archived only makes sense against a real bridge (--url); "
+                                "--mock already serves data anchored to wall-clock \"now\"")
             RESULTS.mkdir(parents=True,exist_ok=True)
             output=RESULTS/args.run_id
             if output.exists():

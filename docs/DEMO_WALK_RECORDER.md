@@ -7,7 +7,33 @@ the recorder always launches `chromium` with `channel="chrome"`.
 ```sh
 python3 scripts/demo-walk-record.py --mock --run-id mock-review
 python3 scripts/demo-walk-record.py --url http://localhost:8384/ --run-id pre-tag-SHA
+python3 scripts/demo-walk-record.py --url http://localhost:8384/ --archived --run-id mac-walk-of-archived-capture
 ```
+
+`--archived` (default off, `--url` only): sets the window to the served
+trace's own `[from_ns, to_ns)` span (the "All" quick-range, `data-range="0"`)
+instead of the live 15-minute quick-range. For a capture already older than
+15 minutes relative to Mac wall-clock — e.g. replaying a retained capture
+whose box-side bridge was torn down — the stock live gesture shows every
+panel empty, because the trace's data ends before the live window starts.
+This is not the live-demo gesture; `walk["window"]` records which one ran,
+and `analysis.md` says so explicitly so a reader cannot mistake a full-span
+archived recording for a recording of the live rolling-window gesture.
+`--mock` always serves data anchored to wall-clock "now", so `--archived`
+with `--mock` is refused rather than silently doing nothing useful.
+
+**`--archived` cannot produce a GIF, by design.** The trace's own span is
+fixed, so nothing in the window advances: the Overview AAS chart's pixels
+never visibly change, and `chart_change()`'s motion gate (the same gate a
+live walk relies on as animation evidence) correctly refuses before any GIF
+is cut. Confirmed end to end against a real archived capture (2026-10-14,
+`tests/results/demo_walk/dryrun-401-e2e.refusal.json`): every one of the
+eleven tabs is recorded and the continuous Queries → Waterfall drill-down
+completes with zero console errors, then the walk refuses at exactly this
+motion gate — `--archived` is for *inspecting* a retained capture (panel
+content, headline numbers, `walk.json`), never for recording its demo GIFs.
+Record real GIFs against a capture a daemon is still writing to (no
+`--archived`).
 
 `--headed` displays the dedicated window. Browser content is always 1710×981
 CSS pixels at deviceScaleFactor 2; two DOM geometry readings must agree.
@@ -83,7 +109,8 @@ serves its unchanged UI, and changes the CPU/IO mix on successive Overview
 requests and aligns the first session PID with the execution fixture. Both the
 JSON and analysis explicitly label this **mock evidence**;
 it does not validate the final real bridge, workload or pre-tag SHA. The mock
-also answers Chrome's implicit favicon request with 204 instead of a 404.
+also answers Chrome's implicit favicon request with 204, matching the real
+bridge's `/favicon.ico` route (#401) rather than diverging from it.
 
 [Pillow writes the GIFs](https://pillow.readthedocs.io/en/stable/handbook/image-file-formats.html#gif).
 Each must be strictly below 10,000,000 bytes and pass both refusal gates

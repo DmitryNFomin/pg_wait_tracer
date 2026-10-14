@@ -191,6 +191,17 @@ def chart_change(root, frames, indices, rectangle):
 def write_analysis(root, walk):
     lines = ["# Recorded demo walk", "", f"Source: {walk['source']}. "
              "Numbers below are visible DOM text; chart counts are readiness probes, not OCR.", ""]
+    window = walk.get("window") or {}
+    if window.get("mode") == "archived-full-span":
+        span_s = window.get("span_s")
+        lines += [f"Window: this walk serves an ARCHIVED capture with the time window set to the "
+                  f"trace's own full span ({span_s:.1f}s, from_ns={window.get('from_ns')} to "
+                  f"to_ns={window.get('to_ns')}), via the \"All\" quick-range. This is NOT the live "
+                  "demo gesture: a live walk shows a rolling recent window (the 15-minute live "
+                  "quick-range) that keeps advancing with wall-clock; this one shows the whole "
+                  "capture, fixed, because the capture ended well before this walk ran. Treat this "
+                  "as evidence of what the UI renders for that data, not as a recording of the live "
+                  "rolling-window gesture.", ""]
     for tab in walk["tabs"]:
         observations = tab["observations"]
         first, last = observations[0], observations[-1]
