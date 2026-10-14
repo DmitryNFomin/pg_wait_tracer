@@ -34,6 +34,7 @@ TESTS     = test_wait_event test_cmdline test_backend_lifecycle test_spawn test_
             test_idle_accounting test_idle_summary \
             test_agg_raw_crosscheck \
             test_io_worker_summary test_io_worker_parity \
+            test_cpu_split_parity \
             test_exec_index \
             test_interval_index \
             test_alloc_tune \
@@ -600,6 +601,34 @@ test_io_worker_summary: test_io_worker_summary.c ../src/compute.c \
 # (PGWT_PARITY_TRACE=<trace dir> or argv[1]). Server build, no BPF, no live
 # PG; ~0.3 s for the unit tier.
 test_io_worker_parity: test_io_worker_parity.c ../src/compute.c \
+                   $(BUILD)/server_summary_writer.o \
+                   $(BUILD)/server_summary_reader.o \
+                   $(BUILD)/server_event_writer.o \
+                   $(BUILD)/server_event_reader.o \
+                   $(BUILD)/server_cmdline.o \
+                   $(BUILD)/wait_event.o $(BUILD)/idle_rule.o \
+                   $(BUILD)/spawn.o $(BUILD)/cJSON.o
+	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -llz4 -lz -lm
+
+# test_cpu_split_parity: the RAW-vs-SUMMARY parity gate for the CPU ROWS
+# (#408, summary v7). The raw time model emits "CPU (running)" +
+# "CPU (waiting for a core)" wherever a record carried a measured cpu_ns, and
+# charges a foreground we==0 interval outside a command to Idle
+# (PGWT_WEI_NONCMD_CPU). The summary record stored neither the measurement nor
+# the relabel, so the same window answered with ONE "CPU*" row that was also
+# 3.54% too large -- the runqueue signal disappeared from the Overview on
+# every window of 120 s or more. Neither property is written into the
+# fixture: the relabel comes from the production classifier on BOTH sides
+# (pgwt_tag_events for the raw oracle, the producer's eff_event for the
+# writer), and the fixture's intervals are contiguous because both command
+# gates bank command-open time onto the pid's next record. Bypass suite: an
+# all-UNKNOWN fixture, a fixture with nothing to relabel, a producer that
+# resolves NOTHING (the reachability probe -- it must go RED, or eff_event is
+# dead code), a window holding no records, a deleted summary dir, a v6 file in
+# the window, a truncated v7 record (the scalars are the LAST bytes, so a
+# short block is exactly what would silently restore the v6 behaviour) and an
+# illegal eff_event. Server build, no BPF, no live PG; ~0.2 s.
+test_cpu_split_parity: test_cpu_split_parity.c ../src/compute.c \
                    $(BUILD)/server_summary_writer.o \
                    $(BUILD)/server_summary_reader.o \
                    $(BUILD)/server_event_writer.o \
