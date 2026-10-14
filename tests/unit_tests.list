@@ -254,7 +254,14 @@ test_summary_tick_flush
 #   takes -- a predicate-only change would have left it reporting the old
 #   number. Raw-vs-summary agreement under three filters, the writer-side v3
 #   exclusion, and the accounting-version preflight that turns a refused v2 file
-#   into a raw recompute instead of a plausible EMPTY window.
+#   into a raw recompute instead of a plausible EMPTY window. Section 13 adds
+#   the ROUTING gate (#402, #403): a window no summary file resolves into is
+#   refused rather than answered with 0.0 ms labelled exact (keyed on
+#   `considered`, because the failure as it occurred had nfiles == 2 and
+#   considered == 0, so an `nfiles == 0` guard would have approved it), and an
+#   archived file is found in its window on a reader whose timezone is not the
+#   capture box's -- a file label parsed with mktime() where it was written
+#   with localtime_r answered 240.1 ms of a 2,612,758.3 ms window.
 # Both carry a bypass suite: "time was excluded" is satisfied by 0 == 0, so the
 # empty fixture, the absent-rather-than-wrong event, the clipped window, the
 # starved summary read and an empty pacing mask each have their own case.

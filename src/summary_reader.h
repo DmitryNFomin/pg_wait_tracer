@@ -41,10 +41,17 @@ struct pgwt_summary_reader {
  * from raw events or report an error", never "there is no data".
  *
  * It refuses (returns 0) whenever it could not establish the answer: a failed
- * directory scan, a file it cannot open, a short or unparseable header. An
- * EMPTY overlap set returns 1 with *out_considered == 0 -- there are no
- * summaries to blend, which is a legitimately clean answer, and the caller
- * still gets the count so it can tell "all good" from "nothing there".
+ * directory scan, a file it cannot open, a short or unparseable header -- and
+ * an EMPTY OVERLAP SET, *out_considered == 0, which is #403. "No summary file
+ * covers this window" is "the summary path cannot answer", not "the answer is
+ * zero": approving it made the server build a response from zero records and
+ * label the 0.0 ms "exact". The caller still gets the counts, so a refusal
+ * for "I examined nothing" stays distinguishable from one for "I found
+ * something I cannot compute from".
+ *
+ * It does NOT verify that the window is COVERED: two in-window files with a
+ * missing hour between them are approved. A 1 means "the files I can see for
+ * this window are all computable", never "nothing is missing".
  *
  * out_considered / out_unusable may be NULL. */
 int pgwt_summaries_window_current(const char *trace_dir,
