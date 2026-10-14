@@ -589,23 +589,20 @@ def drill(page, smoke, capture, timeout, archived=False):
     readout = page.locator("#waterfall-readout").inner_text().strip()
     if point["wait"] not in readout or "PID" not in readout or "Duration" not in readout:
         raise Refusal(3, f"drill: could not read the selected wait from DOM: {readout}")
-    chart_rect = rect(page, "#waterfall-chart")
-    # drill-down composition fix: ECharts' item-hover tooltip (trigger:'item',
-    # web/static/lib/builders/waterfall.js) is not confined to its chart's
-    # own bounding box. Measured live: a tooltip anchored on this single-lane
-    # chart's bar (chart height is a fixed 240px for one lane --
-    # buildWaterfallOption's chartHeight) extended ~27-40px above the chart's
-    # own top edge; a crop limited to the chart's own rect clipped it
-    # mid-word. Pad the TOP of the chart band by a fixed, measured margin
-    # (not dynamic per-frame tooltip tracking, which the single-crop-per-span
-    # GIF format does not support) so the tooltip's rendered position stays
-    # inside the crop whichever moment of the sweep below gets sampled.
-    TOOLTIP_TOP_MARGIN = 60
-    chart_top = max(0, chart_rect[1]-TOOLTIP_TOP_MARGIN)
-    chart_crop = [chart_rect[0], chart_top, chart_rect[2], chart_rect[1]+chart_rect[3]-chart_top]
-    execution_crop = [table_crop(page, ["pid", "query_id", "duration_ms"]),
-                      [chart_crop], [rect(page, "#waterfall-readout")]]
-    execution_crop[-1][0][2] = min(1000, execution_crop[-1][0][2])
+    # drill-down composition fix: the GIF's job is "drill into one execution
+    # and see what it waited on" -- the lane, its tooltip, and the readout
+    # line, as ONE coherent region. The previous crop additionally carried
+    # the executions table (needed only to SELECT the row, not to keep
+    # watching afterward) and a fixed top margin that, measured live, pulled
+    # in that table's own trailing rows and the ".waterfall-banner" text
+    # above the chart -- three unrelated things sliced into one frame.
+    # web/static/views/waterfall.js's ensureShell() renders banner,
+    # truncation notice, chart and readout as ONE contiguous DOM section
+    # (<section class="waterfall-pane">); crop THAT, not the individual
+    # pieces, so there is one natural boundary instead of hand-picked
+    # margins, and the executions table is not in this band at all.
+    execution_crop = rect(page, ".waterfall-pane")
+    execution_crop[2] = min(1000, execution_crop[2])
     # Sweep only the CENTER of the bar, not its own edges -- hovering near an
     # edge is what produced the clipped tooltip in the first place (closer to
     # the chart's y-axis label column, which pushes the tooltip further left).
