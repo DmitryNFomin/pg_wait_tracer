@@ -1100,6 +1100,16 @@ that captured nothing used to score clean) is now FIXED on
 
 ## The sequence, and what stops it from being rolled
 
+- **Pre-attempt dry run:** declare it **uncounted before it starts** and
+  record that declaration with its result. Any non-infrastructure failure
+  (product or harness) blocks counted attempts until fixed. An uncounted dry
+  run is not a re-roll past a known failure; infrastructure failures retain
+  their recorded attribution under the rules above.
+- **One capture, one signed Mac walk:** each capture attempt is paired with
+  its own signed Mac walk against the same candidate sha and tree, with the
+  attempt identity on both records. Report the pair as **"capture-side N of
+  M, Mac-side N of M"**, alongside each side's separate clean verdict and
+  consecutive-clean count. One later video cannot advance both Mac counts.
 - **Clean is reported as "k consecutive clean of N attempted", never as "two
   clean rehearsals".** N is always stated.
 - Every attempt is logged and reported, including the failures, each classified
@@ -1135,10 +1145,12 @@ that captured nothing used to score clean) is now FIXED on
 
   **The new sequence:**
   1. Demo-blocking fixes land on master.
-  2. Two clean rehearsals run against the **same candidate master commit**
+  2. Two clean rehearsals, each paired with its own signed Mac walk, run
+     against the **same candidate master commit**
      — pinned by its **sha**, not a tag (none exists yet) — from a worktree
      checked out at that sha, never from a moving master HEAD.
-  3. The Mac-side video walk and its analysis, against that same sha.
+  3. The two paired Mac-side video walks and their analyses are signed off
+     against that same sha; a single later walk cannot cover both attempts.
   4. **Owner's sign-off.**
   5. GIF cut, from that same sha's rehearsal/walk material.
   6. **Owner tags** the rehearsed commit — naming, after the fact, the sha
@@ -1163,12 +1175,55 @@ that captured nothing used to score clean) is now FIXED on
   - **Any further merge to master after attempt 1 invalidates both attempts
     and resets the clean-attempt counter to zero**, exactly as landing a fix
     and re-tagging did under the old ordering: a new sha is a new candidate.
+    Master may keep moving only until attempt 1 starts; after that no merge
+    lands until the tag. The tree tagged must be the tree rehearsed twice,
+    with matching candidate sha and working-tree hash on both records.
   - Once the owner tags the rehearsed sha (step 6 above), that tag is a
     second, permanent name for the commit that already passed — tagging does
     not itself trigger a new rehearsal requirement.
 
   **Caps are unchanged**: at most 4 counted attempts, at most 2 voided (both
   stated below, unmodified by this amendment).
+
+### Attempt record, pre-registered before attempt 1
+
+Every attempt record includes:
+
+- The **candidate sha** (`git rev-parse HEAD`) and **working-tree hash**
+  (`scripts/tree-hash.sh`), and whether `git status --porcelain` was empty.
+  Record the checkout path so a dirty or wrong worktree is visible. The
+  launcher preserves these launch-time values across `--collect` and writes
+  them into its log and collected `summary.json` as `launcher_provenance`;
+  the collector's current checkout must never substitute for the launched
+  tree. After rsync, the launcher hashes the received source tree on the box
+  and records `remote_tree_hash` and `tree_hash_verification` beside the local
+  `tree_hash`. A mismatch or unavailable remote hash refuses the launch;
+  absence is never recorded as a verified match. `tag` remains null before
+  a tag exists.
+- This explicit statement: **"Under c778d90, Off-CPU\* is reported, not
+  gated; the counter started at zero. Earlier verdicts used different
+  criteria and cannot be pooled with this sequence."**
+- **All seven sample Off-CPU\* percentages**, each with its sample identity
+  and beside the registered **gate-1 band 5.08–13.52%** (§3). This is a
+  reporting band, not a correctness gate: an out-of-band magnitude is green
+  by code and must still be reported. Unavailable data is absence, not a
+  measured zero or an in-band value; the independent availability and
+  accounting checks still apply.
+- **Which box it ran on**, including the exact SSH target and box identity
+  (gate-1 / gate-2, or the ephemeral server name and id). Gate-1 and gate-2
+  are not comparable (#366); do not present one box's percentages as evidence
+  against the other's calibration. Include the launcher's **box uptime at
+  start and end** and its **box-lock queue line** in the log and result JSON,
+  with missing observations explicitly unavailable. These uptime readings
+  bracket launch and collection, including queue time; they are not claimed
+  as the remote capture's exact start and finish times.
+- The predeclared counted/uncounted status, attempt identity, paired signed
+  Mac checklist/video and sign-off, separate verdicts, and all failures with
+  their product / harness / infrastructure classification.
+
+The statement, seven-sample comparison and signed Mac pairing are required
+in the attempt record; launcher provenance alone does not supply them or
+advance either counter.
 
 ## Provenance
 
