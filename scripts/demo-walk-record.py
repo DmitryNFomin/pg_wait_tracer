@@ -19,8 +19,9 @@ import time
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tests"))
 
-from demo_walk_record_lib import (Refusal, chart_change, coverage, frame_indices, save_walk,
-                                  write_analysis, write_gif)
+from demo_walk_record_lib import (Refusal, chart_change, compose, coverage, frame_indices,
+                                  MOTION_LEVEL, sample_indices, save_walk, write_analysis, write_gif)
+from PIL import Image, ImageChops
 
 WIDTH, HEIGHT, DPR = 1710, 981, 2
 RESULTS = ROOT / "tests/results/demo_walk"
@@ -257,6 +258,84 @@ def dwell(page, tab, seconds, smoke, capture, inspect_path=None):
             "observations": observations, "console_errors": [], **checked}
 
 
+def _frame_delta(a, b):
+    """The SAME pixel-change metric motion_gate() uses internally (not
+    reimplemented differently): fraction of pixels whose luminance delta is
+    >= MOTION_LEVEL between two already-composed/cropped RGB canvases."""
+    hist = ImageChops.difference(a.convert("RGB"), b.convert("RGB")).convert("L").histogram()
+    return sum(hist[MOTION_LEVEL:]) / (a.width * a.height)
+
+
+def best_headline_window(staging, frames, pool_indices, fps, crop, width, window_s):
+    """Scan every real-frame-anchored [start, start+window_s] span inside
+    `pool_indices` (the Overview tab's full recorded dwell, not just a
+    fixed early slice of it) for the one that best satisfies motion_gate()
+    -- at the exact crop/fps/width the real headline GIF will use --
+    instead of a single fixed offset from the dwell start.
+
+    issue #409 follow-up, #411 follow-up: three live runs refused the
+    headline GIF's motion gate at a fixed 0.3-5.3s offset, while
+    chart_change() -- a much looser check (best single later frame vs.
+    frame 0 >= 1%, not the clip-level checks below) -- had already passed
+    on the SAME dwell. That gap means the Overview's AAS crop does move
+    enough somewhere in the dwell; a fixed early window just wasn't looking
+    at it. This picks the best-positioned window instead of a hardcoded
+    one -- the gate itself (motion_gate(), called unchanged by write_gif()
+    on whatever window this returns) is not touched or loosened: if even
+    the best window in the whole recording still can't clear the floor,
+    write_gif() still refuses, honestly, with the best number this function
+    could find.
+
+    The score matches motion_gate()'s OWN two required checks exactly
+    (first/last AND the best single consecutive step, both required,
+    neither an average) -- not just one of them: a window is only as good
+    as its WORSE check, so this maximizes min(endpoint, best_step), never
+    either alone. An earlier version of this function optimized the
+    MINIMUM consecutive-pair delta instead, which matched the OLD
+    per-consecutive-pair gate this file no longer uses; left unchanged
+    after #411 re-expressed the gate, it could pick a window with a strong
+    middle transition but a small end-to-end difference, correctly refused
+    by motion_gate() on "first/last" -- observed live, issue #411 follow-up.
+
+    Returns (start_frame, end_frame, score) for the best candidate found,
+    or (pool_indices[0], pool_indices[-1], None) if the pool is shorter
+    than window_s -- there is nothing to slide across."""
+    times = [frames[i]["timestamp_s"] for i in pool_indices]
+    if len(pool_indices) < 2 or times[-1] - times[0] < window_s:
+        return pool_indices[0], pool_indices[-1], None
+
+    cache = {}
+
+    def canvas_for(i):
+        if i not in cache:
+            with Image.open(staging / frames[i]["path"]) as im:
+                picture = compose(im.convert("RGB"), crop, width)
+            canvas = Image.new("RGB", (width, picture.height), (30, 30, 58))
+            canvas.paste(picture, (0, 0))
+            cache[i] = canvas
+        return cache[i]
+
+    best_score, best_start, best_end = None, pool_indices[0], pool_indices[-1]
+    for start_i in pool_indices:
+        start_t = frames[start_i]["timestamp_s"]
+        if start_t + window_s > times[-1] + 1e-9:
+            break
+        end_candidates = [i for i in pool_indices if frames[i]["timestamp_s"] <= start_t + window_s]
+        if not end_candidates or end_candidates[-1] <= start_i:
+            continue
+        end_i = end_candidates[-1]
+        indices = sample_indices(frames, {"start_frame": start_i, "end_frame": end_i, "fps": fps})
+        if len(indices) < 2:
+            continue
+        canvases = [canvas_for(i) for i in indices]
+        endpoint = _frame_delta(canvases[0], canvases[-1])
+        best_step = max(_frame_delta(a, b) for a, b in zip(canvases, canvases[1:]))
+        score = min(endpoint, best_step)
+        if best_score is None or score > best_score:
+            best_score, best_start, best_end = score, start_i, end_i
+    return best_start, best_end, best_score
+
+
 def verify_compositor(page, session, timeout):
     """Chrome's outer window can clip CDP while innerHeight remains correct.
 
@@ -314,11 +393,25 @@ def table_crop(page, keys, title_selector=None):
 
 
 def rect(page, selector):
+    """issue #413: a negative width/height used to be CONSTRUCTIBLE here
+    (min(WIDTH-x, ...) or min(HEIGHT-y, ...) goes negative once x or y is
+    itself past the viewport edge) and only surfaced three steps downstream,
+    in compose(), as an opaque "crop outside captured frame" with no element
+    name. Refuse HERE instead, naming the element and its position relative
+    to the viewport, so a caller that forgot to scroll an off-screen element
+    into view first (as drill() now does for #waterfall-readout) fails at
+    the point the bad geometry is actually produced."""
     box = page.locator(selector).bounding_box()
     if not box:
         raise Refusal(3, f"could not inspect bounds of {selector}")
     x, y = max(0, math.floor(box["x"])), max(0, math.floor(box["y"]))
-    return [x, y, min(WIDTH-x, math.ceil(box["width"])), min(HEIGHT-y, math.ceil(box["height"]))]
+    width, height = min(WIDTH-x, math.ceil(box["width"])), min(HEIGHT-y, math.ceil(box["height"]))
+    if width <= 0 or height <= 0:
+        raise Refusal(3, f"{selector}: bounding box {box} leaves a {width}x{height} crop within "
+                      f"the {WIDTH}x{HEIGHT} captured viewport -- element is off-screen "
+                      f"(top={box['y']:.0f}, left={box['x']:.0f}); scroll it into view before "
+                      "measuring")
+    return [x, y, width, height]
 
 
 def duration_ms(text):
@@ -326,9 +419,87 @@ def duration_ms(text):
     return float(match[1])*{"ms":1,"µs":0.001,"us":0.001,"s":1000}[match[2]] if match else -1
 
 
+# drill-down composition fix: pick a query whose EXECUTIONS actually vary, not just the
+# single slowest one. The old rule (max p95, tie-break avg) deterministically
+# picked this workload's fixed-duration pg_advisory_lock(id) holds (each an
+# exact 0.1/0.3/1.0/3.0s shape by design -- tests/live_loop_workload.py), so
+# the drilled executions table showed ten identical rows: technically
+# honest, visually "nothing varies here" -- the opposite of the point.
+VARYING_SPREAD_RATIO = 0.2  # p95 must exceed avg by at least this fraction of avg.
+
+
+def select_varying_query(candidates):
+    """Rank by the ABSOLUTE spread between p95 and average (ms) -- the same
+    two numbers already visible in the DOM, never a server-side aggregate --
+    among candidates whose spread is at least VARYING_SPREAD_RATIO of their
+    own average: a conservative floor that rejects noise-level jitter but
+    clears a genuinely variable query easily (measured live: this workload's
+    row-lock-wait UPDATE clears it at ~2x). If nothing clears that floor,
+    every visible candidate really is fixed-duration right now -- raises
+    distinctly rather than silently falling back to "pick the biggest
+    number", which is exactly the complaint this replaces. The caller can
+    report that refusal as a workload-variety question, not a recorder bug."""
+    varying = [r for r in candidates
+               if duration_ms(r["avg"] or "") > 0
+               and duration_ms(r["p95"] or "") - duration_ms(r["avg"] or "")
+                   >= VARYING_SPREAD_RATIO * duration_ms(r["avg"] or "")]
+    if not varying:
+        raise Refusal(2, "drill: no query with visibly varying execution durations (every "
+                      "candidate's p95 is within 20% of its average) -- the workload has "
+                      "nothing worth drilling into right now")
+    return max(varying, key=lambda r: duration_ms(r["p95"] or "") - duration_ms(r["avg"] or ""))
+
+
 def aas_inspection_path(page):
     box = page.locator('#aas-chart-container').bounding_box()
     return [box['x']+80, box['x']+box['width']*0.80, box['y']+box['height']*0.70]
+
+
+def pulsing_wait(page, capture, predicate, timeout_s):
+    """Poll `predicate()` while pulsing the capture at dwell()'s own cadence
+    (>= 2x the minimum frame-gap rate), instead of a single pulse before a
+    blocking wait and then nothing until it resolves.
+
+    issue #409: drill()'s span (unlike per-tab navigate()+dwell(), whose
+    waits are never wrapped in a coverage() check -- only dwell()'s OWN
+    start/end is) is checked by ONE coverage() call across its entire
+    continuous recording, start to end. A live run against a REAL remote
+    bridge (not the mock, not localhost) measured a consecutive-pair gap of
+    ~0.48s during the Waterfall mount wait -- twice in a row, same
+    magnitude -- because that wait (like Playwright's own
+    `wait_for_selector`) polls the condition but never asks the capture for
+    a fresh compositor frame while it does, so a genuinely network-bound
+    wait (real SSH/WS round trip to the bridge, not CDP-local) can sit
+    there with no new screencast frame for longer than the 2/fps gap limit.
+    The mock cannot reproduce this: it has no such latency to begin with.
+
+    predicate() returning a truthy value ends the wait and that value is
+    returned. predicate() is expected to raise on an actually-unrecoverable
+    condition (e.g. _view_mount's missing-hook case) rather than return
+    falsy for it -- that still propagates immediately, exactly like the
+    direct calls this replaces."""
+    interval_s = 1.0 / (capture.fps * 2)
+    deadline = time.monotonic() + timeout_s
+    while True:
+        capture.pulse()
+        capture.guard()
+        result = predicate()
+        if result:
+            return result
+        if time.monotonic() >= deadline:
+            raise TimeoutError(f"condition not met within {timeout_s}s")
+        page.wait_for_timeout(interval_s * 1000)
+
+
+def _fresh_mount(smoke, page, tab_id, tick_ts_ms, min_seq):
+    """predicate for pulsing_wait: the SAME chokepoint/comparison
+    _wait_for_mount_at_or_after uses (reused, not reimplemented -- only the
+    polling shell is local here so it can be pulsed), returning the mount
+    dict once fresh, else None/falsy so pulsing_wait keeps polling. A
+    missing viewMount hook still raises immediately from _view_mount, same
+    as before."""
+    mount = smoke._view_mount(page)
+    return mount if smoke.lib.mount_is_fresh(mount, tab_id, tick_ts_ms, min_seq) else None
 
 
 def drill(page, smoke, capture, timeout, archived=False):
@@ -352,9 +523,7 @@ def drill(page, smoke, capture, timeout, archived=False):
     }""")
     if not candidates:
         raise Refusal(2, "drill: inspected Queries had no clickable rows")
-    selected = max(candidates, key=lambda r: (duration_ms(r["p95"] or ""), duration_ms(r["avg"] or "")))
-    if max(duration_ms(selected["p95"] or ""), duration_ms(selected["avg"] or "")) <= 0:
-        raise Refusal(2, "drill: no visible query execution duration to select a slow query")
+    selected = select_varying_query(candidates)
     query_crop = [[rect(page, "#aas-chart-container")],
                   table_crop(page, ["query_id", "text", "_executions", "p95_exec_ms", "avg_exec_ms"])]
     row = page.locator("#table-container tbody tr.clickable").nth(selected["index"])
@@ -363,12 +532,14 @@ def drill(page, smoke, capture, timeout, archived=False):
     at = page.evaluate("Date.now()*1.0")
     row.locator(".query-executions-action").click()
     capture.current = "drill-waterfall"
+    selector = smoke._READY_SELECTOR["waterfall"]
     try:
-        page.wait_for_selector(smoke._READY_SELECTOR["waterfall"], timeout=timeout*1000)
-        smoke._wait_for_mount_at_or_after(page, "waterfall", at, timeout)
+        pulsing_wait(page, capture, lambda: page.locator(selector).count() > 0, timeout)
+        pulsing_wait(page, capture, lambda: _fresh_mount(smoke, page, "waterfall", at, None), timeout)
     except Exception as exc:
         capture.guard()
         raise Refusal(3, f"drill: per-execution Waterfall never became ready: {exc}") from exc
+    capture.pulse()
     observe(page, "waterfall", smoke, capture)
     landed = page.evaluate("Date.now()/1000")
     selection = page.locator("#executions-table tr.selected-execution")
@@ -377,7 +548,27 @@ def drill(page, smoke, capture, timeout, archived=False):
     mount = smoke._view_mount(page)
     selected_at = page.evaluate("Date.now()*1.0")
     selection.click()  # Explicit selection is visible in the continuous recording.
-    smoke._wait_for_mount_at_or_after(page,"waterfall",selected_at,timeout,min_seq=mount["seq"])
+    capture.pulse()
+    try:
+        pulsing_wait(page, capture,
+                     lambda: _fresh_mount(smoke, page, "waterfall", selected_at, mount["seq"]), timeout)
+    except Exception as exc:
+        capture.guard()
+        raise Refusal(3, f"drill: execution selection's Waterfall refresh never became ready: {exc}") from exc
+    # issue #413: the drilled Waterfall view's own content (executions table +
+    # chart + readout) is taller than the pinned 981px viewport at this
+    # execution's row count -- #waterfall-readout alone sits ~67px below the
+    # fold. Scroll it into view BEFORE computing anything pixel-based below
+    # (the wait-bar click point, the crosshair sweep, and execution_crop's
+    # rect()s all read CURRENT on-screen position) so every one of them is
+    # computed in the SAME final scroll position, rather than some before a
+    # scroll and some after -- a mix that would point later video frames at
+    # the wrong part of the page. Measured live: this one scroll already
+    # brings BOTH #waterfall-chart and #waterfall-readout fully into the
+    # viewport simultaneously (scrollY 0 -> 121, the page's one and only
+    # overflow amount here), so no second scroll target is needed.
+    page.locator("#waterfall-readout").scroll_into_view_if_needed()
+    capture.pulse()
     execution_row = selection.locator("td").all_inner_texts()
     # Click an actual drawn non-CPU wait bar, rather than asserting from payload.
     point = page.evaluate("""() => {
@@ -398,12 +589,29 @@ def drill(page, smoke, capture, timeout, archived=False):
     readout = page.locator("#waterfall-readout").inner_text().strip()
     if point["wait"] not in readout or "PID" not in readout or "Duration" not in readout:
         raise Refusal(3, f"drill: could not read the selected wait from DOM: {readout}")
+    chart_rect = rect(page, "#waterfall-chart")
+    # drill-down composition fix: ECharts' item-hover tooltip (trigger:'item',
+    # web/static/lib/builders/waterfall.js) is not confined to its chart's
+    # own bounding box. Measured live: a tooltip anchored on this single-lane
+    # chart's bar (chart height is a fixed 240px for one lane --
+    # buildWaterfallOption's chartHeight) extended ~27-40px above the chart's
+    # own top edge; a crop limited to the chart's own rect clipped it
+    # mid-word. Pad the TOP of the chart band by a fixed, measured margin
+    # (not dynamic per-frame tooltip tracking, which the single-crop-per-span
+    # GIF format does not support) so the tooltip's rendered position stays
+    # inside the crop whichever moment of the sweep below gets sampled.
+    TOOLTIP_TOP_MARGIN = 60
+    chart_top = max(0, chart_rect[1]-TOOLTIP_TOP_MARGIN)
+    chart_crop = [chart_rect[0], chart_top, chart_rect[2], chart_rect[1]+chart_rect[3]-chart_top]
     execution_crop = [table_crop(page, ["pid", "query_id", "duration_ms"]),
-                      [rect(page, "#waterfall-chart")], [rect(page, "#waterfall-readout")]]
+                      [chart_crop], [rect(page, "#waterfall-readout")]]
     execution_crop[-1][0][2] = min(1000, execution_crop[-1][0][2])
-    margin = (point["x1"]-point["x0"])*0.10
+    # Sweep only the CENTER of the bar, not its own edges -- hovering near an
+    # edge is what produced the clipped tooltip in the first place (closer to
+    # the chart's y-axis label column, which pushes the tooltip further left).
+    sweep_margin = (point["x1"]-point["x0"]) * 0.3
     after = dwell(page, "waterfall", 5, smoke, capture,
-                  [point["x0"]+margin,point["x1"]-margin,point["y"]])
+                  [point["x0"]+sweep_margin, point["x1"]-sweep_margin, point["y"]])
     end = page.evaluate("Date.now()/1000")
     checked = coverage(capture.frames, start, end, capture.fps)
     return {"start_s":start,"end_s":end,"landed_s":landed,
@@ -567,10 +775,13 @@ def record(args, staging):
             overview = walk["tabs"][0]
             overview["wait_mix_check"] = check_overview_wait_mix(overview["observations"], args.archived)
             overview["chart_change"] = chart_change(staging,capture.frames,overview["frame_indices"],headline_crop[0][0])
-            # Five seconds of native crosshair inspection, including the live tick.
-            headline_frames = frame_indices(capture.frames,overview["dwell"]["start_s"]+0.3,
-                                            overview["dwell"]["start_s"]+5.3)
-            first,last=headline_frames[0],headline_frames[-1]
+            # Five seconds of native crosshair inspection, including the live tick --
+            # from wherever in the WHOLE recorded Overview dwell actually moves the
+            # most (issue #409 follow-up), not a fixed offset from the dwell start.
+            first,last,headline_motion = best_headline_window(
+                staging,capture.frames,overview["frame_indices"],10,headline_crop,1000,5.0)
+            overview["headline_window_scan"] = {"start_frame":first,"end_frame":last,
+                "limiting_motion_gate_score":headline_motion}
             landed_indices=frame_indices(capture.frames,interaction["landed_s"],interaction["end_s"])
             walk["gifs"]=[
                 {"name":"headline","path":"headline.gif","start_frame":first,"end_frame":last,

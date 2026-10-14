@@ -6,20 +6,41 @@ matches the execution fixture so the literal Sessions drill remains populated.
 All served UI assets come from mock_server.py. This is mock evidence only.
 """
 import copy
+import time
 
 import mock_server
 
 original = mock_server.handle_request
 tick = 0
 phase = 0
+_last_tick_at = None
+
+# issue #411/#409: the real product only advances what the Overview shows
+# once per live tick (app.js startAutoRefresh's setTimeout(.., 5000) --
+# exactly 5 real seconds), but this mock used to flip `phase` on EVERY
+# "aas" request regardless of how much wall-clock time had passed. A
+# recording walk can legitimately issue more than one "aas" request within
+# a single real 5s window (e.g. a cache-fill alongside the periodic poll),
+# and each one used to toggle the mock's induced swing again -- producing
+# smoother, MORE FREQUENT motion than the real daemon+bridge ever can. A
+# gate calibrated only against that smoother mock is calibrated wrong, the
+# same mock-versus-real gap that produced #409's frame starvation (the mock
+# has no network latency either). Throttling the flip to real wall-clock
+# time makes repeat requests inside one tick window return the SAME
+# phase -- exactly like the real backend's per-second accounting does not
+# change just because the UI happened to ask twice quickly.
+TICK_INTERVAL_S = 5.0
 
 
 def handle_request(msg):
-    global tick, phase
+    global tick, phase, _last_tick_at
     response = copy.deepcopy(original(msg))
     if msg.get("cmd") == "aas" and response.get("buckets"):
-        phase = tick % 2
-        tick += 1
+        now = time.monotonic()
+        if _last_tick_at is None or now - _last_tick_at >= TICK_INTERVAL_S:
+            phase = tick % 2
+            tick += 1
+            _last_tick_at = now
         factors = {"cpu": 1.6 if phase else 0.65, "io": 0.4 if phase else 1.5}
         for bucket in response["buckets"]:
             for key, factor in factors.items():
