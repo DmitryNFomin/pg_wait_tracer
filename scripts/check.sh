@@ -120,6 +120,18 @@ run python3 tests/test_demo_rehearsal_diag.py
 step "python: Off-CPU* run_delay decomposition unit + bypass suite (#386)"
 run python3 tests/test_schedstat_lib.py
 
+# The summary-vs-raw parity gate's comparison core and its false-negative
+# suite (tests/summary_raw_parity_lib.py). The LIVE half needs pgwt-server
+# answering a generated capture on both routes, so it runs in
+# tests/run_all.sh's synthetic-data tier; this half is pure Python and is
+# where that gate would fail SILENTLY -- both sides taking the same route,
+# two empty answers agreeing, an absent field read as equal, an empty
+# expected-divergence table approving everything. Same reasoning as the
+# bypass-suite steps above: a regression in the gate's own logic must not
+# need a box run to surface.
+step "python: summary-vs-raw parity comparison core + bypass suite (#408/#379/#319)"
+run python3 tests/test_summary_raw_parity_lib.py
+
 # #243: Workload.fire()'s verify flag and live_loop_workload.py's periodic
 # verify cadence -- pure Python, fakes psql/sessions, no Linux/root/live-DB
 # needed. Belongs in the fast deterministic tier for the same reason as the

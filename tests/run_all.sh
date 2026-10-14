@@ -295,6 +295,16 @@ if [[ -x "$PROJECT_DIR/pgwt-server" ]] && [[ -x "$SCRIPT_DIR/gen_test_traces" ]]
     run_test "test_data_fidelity" python3 "$SCRIPT_DIR/test_data_fidelity.py"
     run_test "test_data_esc_coverage" python3 "$SCRIPT_DIR/test_data_esc_coverage.py"
     run_test "test_data_summary_honesty" python3 "$SCRIPT_DIR/test_data_summary_honesty.py"
+    # THE SUMMARY-vs-RAW PARITY GATE. Nothing had ever compared the two
+    # answers pgwt-server gives for the SAME window (raw events below 120 s,
+    # per-second summaries above it) -- which is why #402, #403, #408, #379
+    # and #319 all survived three clean rehearsals: the rehearsal's
+    # conservation checks use a 60 s window and therefore only ever exercise
+    # the raw path. Belongs in THIS tier (not unit_tests.list) because it
+    # needs the real pgwt-server binary answering a generated capture twice,
+    # once per route; its pure comparison core is gated separately in
+    # `make check` and below as test_summary_raw_parity_lib.py.
+    run_test "test_summary_raw_parity" python3 "$SCRIPT_DIR/test_summary_raw_parity.py"
     run_test "test_data_markers" python3 "$SCRIPT_DIR/test_data_markers.py"
     # #274: executions/exec_scatter read the pre-window marker prefix from
     # the retained index; this is the differential proving it is the SAME

@@ -510,3 +510,20 @@ test_alloc_tune
 test_server_alloc_tune.py
 
 test_backend_lifecycle
+
+# THE SUMMARY-vs-RAW PARITY GATE's pure comparison core (#408, #379, #319).
+# pgwt-server answers an unfiltered window >= 120 s from per-second summaries
+# and everything shorter from raw events, and nothing had ever compared the
+# two answers on the SAME window -- the single reason those three, plus #402
+# and #403, survived three clean rehearsals whose conservation checks use a
+# 60 s window (raw path only). The live half needs the server binary and runs
+# in tests/run_all.sh's synthetic-data tier; THIS entry is the false-negative
+# suite over tests/summary_raw_parity_lib.py, which is where that gate can
+# actually fail silently: both sides taking the same route (including via a
+# summary accounting-version refusal, the v6->v7 case), an oracle that never
+# took effect, two empty answers agreeing, an absent field read as equal, an
+# unparseable field, a missing/non-executable dependency (126/127), an empty
+# expected-divergence table approving everything, and a known divergence
+# whose magnitude changed. Pure Python, milliseconds -- so a regression in
+# the gate's own logic does not need a 40-minute box run to surface.
+test_summary_raw_parity_lib.py
