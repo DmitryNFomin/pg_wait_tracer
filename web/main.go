@@ -200,7 +200,19 @@ func main() {
 		})
 	})
 
-	http.Handle("/", http.FileServer(http.FS(sub)))
+	// #401: Chrome issues an implicit GET /favicon.ico on every navigation.
+	// With no route here it 404s, which is cosmetic for a human but refuses
+	// tab 1 of every automated walk whose console-error gate whitelists
+	// nothing (scripts/demo-walk-record.py). A 204 is simplest: it needs no
+	// embedded asset, so it carries none of #396's served-asset-manifest risk
+	// (manifest vs disk tree must agree in both directions) and there is no
+	// filesystem path to guard against traversal on. Registered together
+	// with "/" via staticRoutes so a test can exercise real dispatch through
+	// a ServeMux, not just call faviconHandler directly -- a handler wired
+	// to answer 204 for EVERY path would pass a direct-call test while
+	// breaking the whole UI; routing it through a real mux is what catches
+	// that.
+	staticRoutes(http.DefaultServeMux, sub)
 
 	addr := fmt.Sprintf("localhost:%d", *port)
 	log.Printf("Open http://%s in your browser", addr)
@@ -219,6 +231,23 @@ func main() {
 	if err := http.ListenAndServe(addr, nil); err != nil {
 		log.Fatal(err)
 	}
+}
+
+// faviconHandler answers /favicon.ico with 204 No Content (#401). Extracted
+// so it is unit-testable without standing up the whole bridge.
+func faviconHandler(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// staticRoutes registers the favicon route and the embedded-UI file server
+// on mux. Factored out of main() so a test can register both on a FRESH
+// http.ServeMux and make real HTTP requests through it (net/http/httptest),
+// exercising actual route dispatch -- not just calling faviconHandler
+// in isolation, which would equally pass a handler mistakenly wired to
+// answer 204 for every path.
+func staticRoutes(mux *http.ServeMux, sub fs.FS) {
+	mux.HandleFunc("/favicon.ico", faviconHandler)
+	mux.Handle("/", http.FileServer(http.FS(sub)))
 }
 
 func newSessionToken() string {
