@@ -77,6 +77,64 @@ function durationCellHtml(r) {
     return '<span class="' + cls + '" title="' + esc(d.tooltip) + '">' + d.text + '</span>';
 }
 
+/* #415: at the pinned demo viewport (1710x981) the drilled Waterfall's own
+ * readout line sits BELOW the fold -- measured 67 px over on a real capture
+ * (and 101 px with a taller, multi-lane chart), because the executions list
+ * above it is capped at a FIXED 310 px that knows nothing about how much
+ * room the pane below it needs. Anyone drilling into an execution then has
+ * to scroll to read what the bar they just clicked actually was, and the
+ * demo recorder had to paper over it with an instant scroll jump.
+ *
+ * The honest fix is for the list to yield: it is ALREADY a scroll region
+ * (style.css `.execution-list { overflow: auto }`), so capping it lower
+ * hides no data -- every row stays reachable by scrolling the list itself,
+ * which is what a list in a fixed-height pane is for -- while the chart and
+ * its readout, which have no scroll of their own, become reachable without
+ * one. Shrinking the list moves the pane UP without changing its height, so
+ * ONE pass settles the layout; no measure-set-remeasure loop.
+ *
+ * EXECUTION_LIST_MAX_PX keeps the previous fixed cap as the UPPER bound, so
+ * a viewport with room to spare renders exactly as it did before (no
+ * snapshot moves for the short-table case); EXECUTION_LIST_MIN_PX keeps the
+ * list usable (header + ~3 rows) when there is not enough room for both,
+ * which is a genuinely-does-not-fit layout, NOT something to hide by
+ * collapsing the list to nothing. FOLD_MARGIN_PX keeps the pane's bottom
+ * edge off the fold itself: at devicePixelRatio 2 a sub-pixel rounding in
+ * either direction must not be what decides whether a scrollbar appears.
+ *
+ * Returns null when the geometry cannot be read (no numbers, nonsense
+ * numbers). The caller then leaves the CSS cap in place rather than writing
+ * a made-up height -- and the demo recorder's own fold check
+ * (check_drilled_view_fits in scripts/demo-walk-record.py) still REFUSES on
+ * a readout below the fold, so an unreadable layout fails there instead of
+ * being silently approved here. */
+export const EXECUTION_LIST_MAX_PX = 310;
+export const EXECUTION_LIST_MIN_PX = 120;
+export const EXECUTION_LIST_FOLD_MARGIN_PX = 8;
+
+export function executionListMaxHeight(geometry) {
+    const g = geometry || {};
+    const ok = (v) => typeof v === 'number' && Number.isFinite(v);
+    if (!ok(g.viewportHeight) || !ok(g.listTop) || !ok(g.paneHeight)) return null;
+    if (g.viewportHeight <= 0 || g.listTop < 0 || g.paneHeight <= 0) return null;
+    /* trailingBelowPane: whatever still sits below the pane in the
+     * scrollable page (measured 20 px -- #table-container's own
+     * padding-bottom). Counting it is what makes the page not scrollable at
+     * all, rather than merely putting the readout above the fold while the
+     * document is still 12 px taller than the viewport: a page that can be
+     * scrolled still shows a scrollbar and can still be scrolled away from
+     * the readout. It is stable under this computation -- shrinking the list
+     * moves the pane and that trailing space up together -- so there is
+     * still no measure-set-remeasure loop. Unreadable/absent -> 0, i.e. the
+     * previous behaviour, never a guess. */
+    const trailing = ok(g.trailingBelowPane) && g.trailingBelowPane > 0
+        ? g.trailingBelowPane : 0;
+    const available = g.viewportHeight - g.listTop - g.paneHeight - trailing
+        - EXECUTION_LIST_FOLD_MARGIN_PX;
+    return Math.max(EXECUTION_LIST_MIN_PX,
+        Math.min(EXECUTION_LIST_MAX_PX, Math.floor(available)));
+}
+
 export const executionsConfig = {
     columns: [
         { key: 'start_ns', label: 'Start (UTC)', format: (r) =>

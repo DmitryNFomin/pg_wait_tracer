@@ -3,6 +3,7 @@
 
 import {
     buildExecutionsModel, buildWaterfallOption, buildWaterfallReadout,
+    executionListMaxHeight,
     executionsConfig, pickDefaultExecution, EXECUTIONS_SORT_DEFAULT,
     executionsSortLabel, executionsSortToggleLabel, executionsSortToggleTarget,
     executionsStatusLabel,
@@ -118,6 +119,28 @@ export function createWaterfallView() {
             '<span>Start ' + esc(r.start) + '</span>' +
             '<span>Duration ' + esc(r.duration) + '</span>' +
             (r.cpu == null ? '' : '<span>Measured CPU ' + esc(r.cpu) + '</span>');
+    }
+
+    /* #415: give the executions list exactly the height left over once the
+     * waterfall pane below it is fully on screen -- see
+     * executionListMaxHeight() in lib/builders/waterfall.js for why the
+     * list is the part that yields and why one pass is enough. Runs after
+     * renderDetail(), because the pane's height is the chart's height and
+     * that is only known once the chart has been sized for this
+     * execution's lane count. */
+    function fitExecutionList() {
+        const list = document.querySelector('.execution-list');
+        const pane = document.querySelector('.waterfall-pane');
+        if (!list || !pane || pane.style.display === 'none') return;
+        const paneBox = pane.getBoundingClientRect();
+        const px = executionListMaxHeight({
+            viewportHeight: window.innerHeight,
+            listTop: list.getBoundingClientRect().top,
+            paneHeight: paneBox.height,
+            trailingBelowPane: document.documentElement.scrollHeight
+                - (paneBox.bottom + window.scrollY),
+        });
+        list.style.maxHeight = px == null ? '' : px + 'px';
     }
 
     function updateZoomLabel(model) {
@@ -288,6 +311,7 @@ export function createWaterfallView() {
             document.getElementById('waterfall-truncation').className = lines.length
                 ? 'honesty-note' : '';
             renderDetail(model.waterfall.fullFrom, model.waterfall.fullTo);
+            fitExecutionList();
         },
 
         enter(ctx) { ctxRef = ctx; },
@@ -296,7 +320,7 @@ export function createWaterfallView() {
             axisOriginRef = null;
             pendingSelection = null; selected = null;
         },
-        resize() { if (chart) chart.resize(); },
+        resize() { if (chart) chart.resize(); fitExecutionList(); },
     };
     return view;
 }
