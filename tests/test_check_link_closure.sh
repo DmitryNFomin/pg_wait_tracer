@@ -115,7 +115,96 @@ rc=$( (cd "$repo" && ROOT="$repo" TU=src/broken.c ANCHOR=_tu_anchor \
 [[ $rc -eq 2 ]] && ok=true || ok=false
 report "$ok" "a base revision that will not compile REFUSES (rc=$rc)"
 
-# ── 5. and the guard must still be wired to the REAL tree ───────────────
+# ── 5. the ALLOWLIST, and the four ways it could become a rubber stamp ──
+#
+# A new dependency is not automatically a break: if the object providing it is
+# already linked by every target that consumes the TU, nothing fails. That is
+# declarable in scripts/link-closure-allow.txt — and the declaration is
+# CHECKED against tests/Makefile, which is the only reason it is not an
+# escape hatch. These cases are the check checking itself.
+mkdir -p "$repo/tests" "$repo/scripts"
+cat > "$repo/tests/Makefile" <<'EOF'
+BUILD = ../build
+
+test_a: test_a.c $(BUILD)/tu.o $(BUILD)/prov.o
+	$(CC) -o $@ $^
+
+test_b: test_b.c $(BUILD)/tu.o \
+        $(BUILD)/prov.o
+	$(CC) -o $@ $^
+
+# A -DPGWT_SERVER build of the same source: the daemon half is compiled out,
+# so this target is NOT a consumer of the dependency and must never be named.
+tu_core.o: ../src/tu.c
+	$(CC) -DPGWT_SERVER -c -o $@ $<
+
+test_c: test_c.c tu_core.o
+	$(CC) -o $@ $^
+EOF
+cat > "$repo/scripts/link-closure-allow.txt" <<'EOF'
+# symbol provider  # why
+some_daemon_symbol  prov   # provided by prov.o, linked by every consumer
+EOF
+git -C "$repo" add -A; git -C "$repo" commit -qm makefile
+
+# Back to the TU that references the external symbol.
+cat > "$repo/src/tu.c" <<'EOF'
+extern int some_daemon_symbol(int);
+int tu_anchor(int x) { return some_daemon_symbol(x) + 1; }
+EOF
+git -C "$repo" commit -qam dep
+
+out=$(run "$base"); rc=$(rc_of "$base")
+[[ $rc -eq 0 ]] && ok=true || ok=false
+report "$ok" "a declared dependency whose provider IS linked everywhere passes (rc=$rc)"
+grep -q 'ALLOWED: ' <<<"$out" && ok=true || ok=false
+report "$ok" "the acceptance is PRINTED, not silent"
+grep -q 'tu_core\|test_c' <<<"$out" && ok=false || ok=true
+report "$ok" "a -DPGWT_SERVER consumer of the same source is not implicated"
+
+# (a) the provider named does not exist in any link line.
+sed -i.bak 's/^some_daemon_symbol  prov/some_daemon_symbol  somethingelse/' \
+    "$repo/scripts/link-closure-allow.txt"
+out=$(run "$base"); rc=$(rc_of "$base")
+[[ $rc -eq 1 ]] && ok=true || ok=false
+report "$ok" "an entry naming a provider nobody links FAILS (rc=$rc)"
+grep -q 'test_a' <<<"$out" && ok=true || ok=false
+report "$ok" "...and NAMES the target that would not link"
+mv "$repo/scripts/link-closure-allow.txt.bak" "$repo/scripts/link-closure-allow.txt"
+
+# (b) the entry is right, but a target drops the provider. This is the case
+#     that makes the allowlist a check rather than a promise.
+sed -i.bak 's|test_a: test_a.c $(BUILD)/tu.o $(BUILD)/prov.o|test_a: test_a.c $(BUILD)/tu.o|' \
+    "$repo/tests/Makefile"
+out=$(run "$base"); rc=$(rc_of "$base")
+[[ $rc -eq 1 ]] && ok=true || ok=false
+report "$ok" "a target that drops the provider FAILS even with the entry present (rc=$rc)"
+grep -q 'test_a' <<<"$out" && ok=true || ok=false
+report "$ok" "...and NAMES that target"
+mv "$repo/tests/Makefile.bak" "$repo/tests/Makefile"
+
+# (c) no allowlist at all: the dependency is undeclared, which is the
+#     original failure, not a pass.
+rm -f "$repo/scripts/link-closure-allow.txt"
+[[ $(rc_of "$base") -eq 1 ]] && ok=true || ok=false
+report "$ok" "with no allowlist the dependency is UNDECLARED and fails"
+cat > "$repo/scripts/link-closure-allow.txt" <<'EOF'
+some_daemon_symbol  prov
+EOF
+
+# (d) no Makefile to check the claim against: refuse, do not take its word.
+mv "$repo/tests/Makefile" "$repo/tests/Makefile.hidden"
+[[ $(rc_of "$base") -eq 2 ]] && ok=true || ok=false
+report "$ok" "with no Makefile to verify against, an entry REFUSES (rc=$(rc_of "$base"))"
+mv "$repo/tests/Makefile.hidden" "$repo/tests/Makefile"
+
+# restore the clean TU for the remaining cases
+cat > "$repo/src/tu.c" <<'EOF'
+int tu_anchor(int x) { return x + 1; }
+EOF
+git -C "$repo" commit -qam restore
+
+# ── 6. and the guard must still be wired to the REAL tree ───────────────
 #    (a self-test that only ever exercises a synthetic repo would pass
 #     happily while the production invocation pointed at nothing)
 real=$(scripts/check-link-closure.sh 2>&1); rc=$?

@@ -1,0 +1,31 @@
+# link-closure-allow.txt — new link-time dependencies that are ALREADY
+# satisfied everywhere the translation unit is linked.
+#
+# scripts/check-link-closure.sh fails when a TU references a symbol it did not
+# reference at the merge base. Most of the time that is the defect it was
+# written for. Sometimes the dependency is deliberate AND harmless, because
+# the object that provides it is already a mandatory companion of the TU's
+# object in every target that links it. This file is where that case is
+# declared — and the declaration is CHECKED, not trusted: for each entry the
+# guard reads tests/Makefile and requires every target linking the TU's object
+# to link the provider's object too. An entry naming the wrong provider, or a
+# provider that some target does not link, FAILS exactly as an undeclared
+# symbol does.
+#
+# That is what keeps this from being the usual escape hatch. You cannot
+# silence the guard by editing this file; you can only record which object
+# supplies the symbol, and the Makefile has to agree.
+#
+# Format:  <symbol>  <provider-object-basename>   # justification
+# (symbol as `nm` prints it, with the platform's leading underscore or
+#  without — both spellings are accepted, so one file works on macOS and
+#  Linux.)
+
+# summary v9 (#424). The live loop in src/map_reader.c is the daemon's only
+# open-interval source, so the producer call that lets an open on-CPU gap be
+# credited per second has to live there; moving it out would mean a second
+# copy of the classification and measured-CPU plumbing, which is the drift
+# this whole change exists to prevent. summary_writer.o has been a mandatory
+# companion of map_reader.o since #379 (tests/Makefile says so above
+# test_event_reader), so nothing has to change in any link line.
+pgwt_summary_note_open_ex  summary_writer  # v9 producer; summary_writer.o is already linked wherever map_reader.o is

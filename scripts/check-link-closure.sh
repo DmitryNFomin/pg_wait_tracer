@@ -175,9 +175,156 @@ if [[ -z "$added" ]]; then
     echo "OK: $(basename "$TU") references no symbol it did not reference at base"
     exit 0
 fi
-echo "FAIL: $(basename "$TU") gained link-time dependencies:"
-echo "$added" | sed 's/^/    /'
-echo "  every target that links $(basename "${TU%.c}").o must now supply these."
-echo "  Either move the caller into its own translation unit (what #424 did"
-echo "  with src/open_snapshot.c) or add the objects to each target."
-exit 1
+
+# ── A new symbol is not automatically a break ────────────────────────────
+# The question the guard actually answers is "will every target that links
+# this TU's object still link?". A dependency on an object those targets
+# ALREADY link is fine — summary_writer.o has been a mandatory companion of
+# map_reader.o since #379, for example. So a new symbol may be declared in
+# scripts/link-closure-allow.txt together with the object that provides it,
+# and the declaration is then CHECKED against tests/Makefile rather than
+# believed. The base cannot be moved to silence this, and the allowlist
+# cannot silence it either: the Makefile has to agree.
+ALLOW=${ALLOW:-scripts/link-closure-allow.txt}
+obj="$(basename "${TU%.c}").o"
+mk=${LINK_MAKEFILE:-tests/Makefile}
+# The Makefile is needed only to VERIFY an allowlist entry. An undeclared
+# symbol fails whatever it says, so requiring it up front converted a plain
+# failure into a refusal — caught by this guard's own self-test, which has no
+# Makefile at that point.
+
+# Logical Makefile lines: continuations joined, recipe attached, so a target
+# split over four lines is one record. target|prereqs|recipe
+mk_records() {
+    awk '
+        { line = $0
+          while (sub(/\\$/, "", line) && (getline nxt) > 0) line = line " " nxt
+          if (line ~ /^[A-Za-z0-9_.\/$(){}%-]+:[^=]/) {
+              if (target != "") print target "|" prereqs "|" recipe
+              split(line, a, ":"); target = a[1]
+              prereqs = substr(line, index(line, ":") + 1); recipe = ""
+          } else if (line ~ /^\t/ && target != "") {
+              recipe = recipe " " line
+          } else if (line ~ /^[[:space:]]*$/ && target != "") {
+              print target "|" prereqs "|" recipe; target = ""; prereqs = ""; recipe = ""
+          }
+        }
+        END { if (target != "") print target "|" prereqs "|" recipe }
+    ' "$1"
+}
+
+# Targets that consume this TU: by OBJECT (they must link the provider) or by
+# SOURCE (they compile the TU themselves; -DPGWT_SERVER excludes the daemon
+# half, so those are only at risk without it).
+records=""
+targets_scanned=0
+scan_targets() {            # lazily, and only when an entry must be checked
+    [[ $targets_scanned -eq 1 ]] && return 0
+    if [[ ! -f "$mk" ]]; then
+        echo "CANNOT VERIFY: $mk not found, so an allowlist entry cannot be" >&2
+        echo "  checked against the targets that consume $obj" >&2
+        exit 2
+    fi
+    records=$(mk_records "$mk")
+    scan_targets_body
+    targets_scanned=1
+}
+
+scan_targets_body() {
+# TOKEN comparison, not a regex search. `map_reader.o` as a regex matches
+# `map_reader_core.o` (the dot matches the underscore), and map_reader_core.o
+# is the -DPGWT_SERVER build — the BPF-free half, which contains none of this
+# code. Matching it dragged two innocent targets into the failure the first
+# time this ran. Prerequisites are whitespace-separated, so compare whole
+# tokens.
+has_token() {   # has_token <field> <token>
+    local f=" $1 " t=" $2 "
+    [[ "${f//$'\t'/ }" == *"$t"* ]]
+}
+obj_targets=""
+src_targets=""
+while IFS='|' read -r t pre rec; do
+    [[ -z "$t" ]] && continue
+    if has_token "$pre" "\$(BUILD)/$obj"; then
+        obj_targets="$obj_targets $t"
+    elif has_token "$pre" "../src/$(basename "$TU")" && \
+         [[ "$rec$pre" != *PGWT_SERVER* ]]; then
+        # Compiles the TU itself, daemon half included.
+        src_targets="$src_targets $t"
+    fi
+done <<<"$records"
+if [[ -z "$obj_targets" && -z "$src_targets" ]]; then
+    echo "CANNOT VERIFY: no target in $mk consumes $obj or $(basename "$TU")," >&2
+    echo "  so 'the provider is already linked everywhere' cannot be checked" >&2
+    exit 2
+fi
+}
+
+allow_provider() {   # allow_provider <symbol> -> provider or empty
+    local sym=$1 bare=${1#_}
+    [[ -f "$ALLOW" ]] || return 0
+    awk -v s="$sym" -v b="$bare" '
+        /^[[:space:]]*#/ || /^[[:space:]]*$/ { next }
+        { gsub(/#.*/, ""); if (NF < 2) next
+          n = $1; sub(/^_/, "", n)
+          if ($1 == s || $1 == b || n == b) { print $2; exit } }
+    ' "$ALLOW"
+}
+
+fail=0
+accepted=0
+while read -r sym; do
+    [[ -z "$sym" ]] && continue
+    case "$sym" in ___*|_memcpy|_memset|_memmove|_strlen|_snprintf*|___snprintf*|_malloc|_free|_realloc|_calloc)
+        # libc/compiler builtins: every link has them.
+        continue ;;
+    esac
+    provider=$(allow_provider "$sym")
+    if [[ -n "$provider" ]]; then
+        scan_targets
+    fi
+    if [[ -z "$provider" ]]; then
+        echo "FAIL: $(basename "$TU") gained an undeclared link-time dependency:"
+        echo "    $sym"
+        echo "  Every target that links $obj must supply it. Either move the"
+        echo "  caller into its own translation unit (what #424 did with"
+        echo "  src/open_snapshot.c), or — if the providing object is already"
+        echo "  linked by every such target — declare it in $ALLOW, where the"
+        echo "  claim is checked against $mk."
+        fail=1
+        continue
+    fi
+    missing=""
+    while IFS='|' read -r t pre rec; do
+        [[ -z "$t" ]] && continue
+        case " $obj_targets " in
+            *" $t "*)
+                has_token "$pre" "\$(BUILD)/$provider.o" || missing="$missing $t" ;;
+        esac
+        case " $src_targets " in
+            *" $t "*)
+                # A source-compiling target may satisfy it from either the
+                # object or the provider's source.
+                has_token "$pre" "\$(BUILD)/$provider.o" || \
+                has_token "$pre" "../src/$provider.c" || \
+                missing="$missing $t" ;;
+        esac
+    done <<<"$records"
+    if [[ -n "$missing" ]]; then
+        echo "FAIL: $sym is declared in $ALLOW as provided by $provider.o,"
+        echo "  but these targets consume $obj WITHOUT linking it:$missing"
+        echo "  The declaration is wrong, or those targets need the object."
+        fail=1
+    else
+        echo "ALLOWED: $sym (provided by $provider.o, which every target"
+        echo "  consuming $obj already links — verified against $mk)"
+        accepted=$((accepted + 1))
+    fi
+done <<<"$added"
+
+if [[ $fail -ne 0 ]]; then
+    exit 1
+fi
+echo "OK: $(basename "$TU") gained $accepted declared dependency/ies, each"
+echo "  already satisfied in every target that consumes $obj"
+exit 0
