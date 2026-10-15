@@ -20,7 +20,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "tests"))
 
 from demo_walk_record_lib import (Refusal, chart_change, compose, coverage, frame_indices,
-                                  MOTION_LEVEL, sample_indices, save_walk, write_analysis, write_gif)
+                                  MOTION_FLOOR, MOTION_LEVEL, sample_indices, save_walk,
+                                  write_analysis, write_gif)
 from PIL import Image, ImageChops
 
 WIDTH, HEIGHT, DPR = 1710, 981, 2
@@ -53,6 +54,106 @@ VERIFY_MIN_MS = 10_000
 
 def video_verify_timeout_ms(duration_ms):
     return max(VERIFY_MIN_MS, VERIFY_MS_PER_VIDEO_SECOND * duration_ms / 1000)
+
+
+# GIF composition (issue "the deliverable GIFs are not postable"). These are
+# SELECTION numbers -- which window of a recording gets published -- never
+# gate thresholds: demo_walk_record_lib's MOTION_FLOOR / DECODED_MIN_FPS /
+# GIF_MIN_SECONDS are untouched, and every clip chosen here is still handed
+# to the same unchanged write_gif()/motion_gate() to pass or refuse on its
+# own merits.
+#
+# LIVE_WINDOW_S is the runbook's live quick-range (the 900s button clicked in
+# record()), repeated here as a number so the coverage check below can say
+# what fraction of the chart would be blank.
+LIVE_WINDOW_S = 900.0
+# A 15-minute chart of a capture that has only been running nine minutes is
+# ~40% blank on its left half -- measured on the pre-tag recording at
+# 304a772, which was numerically correct and still unpostable for exactly
+# this reason. CAPTURE_COVERAGE_SLACK_S tolerates only the handful of
+# seconds between the server's own from_ns and the window edge that a
+# just-long-enough capture legitimately shows (clock granularity, the
+# quick-range click landing a moment after the window was computed), not a
+# visibly empty chart.
+CAPTURE_COVERAGE_SLACK_S = 5.0
+# The live UI ticks every 5s (app.js startAutoRefresh). A 5s headline clip
+# therefore contains exactly ONE tick: 47 of 48 frame pairs identical and a
+# single step, which is what made the pre-tag headline read as a still
+# image. 20s is four tick intervals, so the published clip shows the chart
+# advancing repeatedly rather than once. Not 15: measured on the retained
+# pre-tag footage, only ONE tick in its whole 9.97s Overview dwell moved the
+# headline crop by >= MOTION_FLOOR (a 9s window scores 1 update, same as a
+# 5s one), i.e. about one visible update per ~10s rather than per 5s. A 15s
+# window would be sized for the cadence the code hopes for; 20s is sized for
+# the one the footage actually shows.
+HEADLINE_WINDOW_S = 20.0
+# How many SEPARATE visible updates the chosen window must contain (see
+# count_visible_updates: runs of above-floor pairs, so one tick's redraw
+# straddling two sampled frames still counts once). Two is the smallest
+# number that cannot be satisfied by the single-step clip this replaces.
+HEADLINE_MIN_UPDATES = 2
+# Room for best_headline_window to slide the window within the dwell instead
+# of being pinned to its start: two further tick intervals of candidate
+# positions, so "the best-positioned window" is a real choice.
+HEADLINE_SLIDE_S = 10.0
+DEFAULT_DWELL_S = 10.0
+OVERVIEW_DWELL_S = HEADLINE_WINDOW_S + HEADLINE_SLIDE_S
+
+
+def _as_number(value):
+    """A JS-evaluated numeric reading, or None if it is not a finite number.
+    Strings are accepted because the bridge carries ns as strings in places
+    (BigInt-safety); bools are not numbers here, and None/absent stays None
+    so a MISSING reading is never silently read as 0."""
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value) if math.isfinite(value) else None
+    if isinstance(value, str):
+        try:
+            number = float(value.strip())
+        except ValueError:
+            return None
+        return number if math.isfinite(number) else None
+    return None
+
+
+def window_capture_coverage(reading, window_s=LIVE_WINDOW_S):
+    """Refuse a headline recording whose time window reaches back to before
+    the capture existed -- the "~45% empty chart" half of the composition
+    problem. The window is the runbook's rolling 15 minutes; if the daemon
+    has only been capturing for nine of them, the chart's left half is blank
+    and no clip selection can fix that, because the missing pixels are
+    missing data. Waiting is the fix, so this refuses with the number of
+    seconds left to wait.
+
+    Both bounds are read from the page: `window_from_ns` is the client's own
+    window start and `capture_from_ns` is the SERVER-declared earliest
+    timestamp in the trace (lib/state.js ServerInfo.fromNs, fed by the
+    backend's `info`) -- deliberately not two numbers derived from the same
+    client-side clock, which would agree with each other no matter how
+    little data existed. A missing, non-numeric or zero capture bound means
+    this check cannot see the capture's extent at all: it refuses (code 3)
+    rather than approving, because ServerInfo's own pre-handshake default is
+    0 and treating that as "capture began at the epoch" would pass every
+    window ever."""
+    reading = reading or {}
+    window_from = _as_number(reading.get("window_from_ns"))
+    capture_from = _as_number(reading.get("capture_from_ns"))
+    if window_from is None or capture_from is None or capture_from <= 0:
+        raise Refusal(3, "could not read the window/capture bounds needed to tell "
+                      "whether the headline chart is full: window_from_ns="
+                      f"{reading.get('window_from_ns')!r}, capture_from_ns="
+                      f"{reading.get('capture_from_ns')!r}")
+    empty_lead_s = (capture_from - window_from) / 1e9
+    if empty_lead_s > CAPTURE_COVERAGE_SLACK_S:
+        raise Refusal(2, f"the {window_s:.0f}s headline window starts {empty_lead_s:.0f}s "
+                      f"before the capture began, so {empty_lead_s/window_s:.0%} of the "
+                      "chart would be blank. Let the capture run for at least "
+                      f"{window_s:.0f}s (another {empty_lead_s:.0f}s) and record again.")
+    return {"window_s": window_s, "window_from_ns": window_from,
+            "capture_from_ns": capture_from, "empty_lead_s": max(0.0, empty_lead_s),
+            "slack_s": CAPTURE_COVERAGE_SLACK_S}
 
 
 AMBIGUITIES = [
@@ -97,7 +198,12 @@ def runbook_plan(tabs, overrides):
     # Do not silently substitute our defaults if the runbook later gains timings.
     if re.search(r"\bdwell\b|\b\d+\s*(?:seconds?|secs?)\s+(?:on|per|each)\b", section, re.I):
         raise Refusal(6, "runbook has new dwell instructions: update timing data explicitly")
-    dwells = {tab: 10.0 for tab in tabs}
+    dwells = {tab: DEFAULT_DWELL_S for tab in tabs}
+    # The Overview dwell is the material the headline GIF is cut from, so it
+    # is the one dwell that cannot be the generic default: a 10s dwell can
+    # only hold a 5s-ish clip, i.e. one live tick, which is exactly the
+    # single-step headline this replaces.
+    dwells["overview"] = OVERVIEW_DWELL_S
     if overrides:
         supplied = json.loads(Path(overrides).read_text())
         if set(supplied) != set(tabs):
@@ -105,6 +211,15 @@ def runbook_plan(tabs, overrides):
         dwells = {k: float(v) for k, v in supplied.items()}
     if any(not math.isfinite(v) or v < 5 for v in dwells.values()):
         raise Refusal(6, "every dwell must be finite and at least five seconds")
+    # Checked for the supplied AND default case alike, before a browser
+    # opens: an Overview dwell too short to contain the headline window
+    # would otherwise be discovered eleven dwells later, as a window scan
+    # with nothing to scan.
+    needed = HEADLINE_WINDOW_S + HEADLINE_SLIDE_S
+    if dwells.get("overview", 0.0) < needed:
+        raise Refusal(6, f"overview dwell must be at least {needed:g}s so the headline clip can "
+                      f"span {HEADLINE_WINDOW_S:g}s of live ticks with room to position it; "
+                      f"got {dwells.get('overview', 0.0):g}s")
     return dwells, {"path": "docs/DEMO_RUNBOOK.md", "sha256": hashlib.sha256(body.encode()).hexdigest(),
                    "tab_order": listed, "dwell_seconds": dwells, "ambiguities": AMBIGUITIES}
 
@@ -296,6 +411,31 @@ def _frame_delta(a, b):
     return sum(hist[MOTION_LEVEL:]) / (a.width * a.height)
 
 
+def count_visible_updates(deltas, floor=MOTION_FLOOR):
+    """How many SEPARATE visible updates a clip contains: maximal RUNS of
+    consecutive-pair deltas at or above `floor`, not the number of pairs
+    above it.
+
+    The distinction is the whole point. A live tick repaints the chart
+    between two sampled frames, but a repaint that lands mid-sample shows up
+    as TWO adjacent above-floor pairs for ONE update; counting pairs would
+    let the single-step clip this change exists to replace report "2 updates"
+    and sail through a "several ticks" requirement. Counting runs reports it
+    as the one update it is (test_one_tick_straddling_two_frames_counts_once).
+
+    `floor` defaults to the gate's own MOTION_FLOOR -- read, never modified --
+    so "visible" here means the same thing it means to motion_gate()."""
+    updates, inside = 0, False
+    for delta in deltas:
+        if delta >= floor:
+            if not inside:
+                updates += 1
+            inside = True
+        else:
+            inside = False
+    return updates
+
+
 def best_headline_window(staging, frames, pool_indices, fps, crop, width, window_s):
     """Scan every real-frame-anchored [start, start+window_s] span inside
     `pool_indices` (the Overview tab's full recorded dwell, not just a
@@ -327,14 +467,38 @@ def best_headline_window(staging, frames, pool_indices, fps, crop, width, window
     middle transition but a small end-to-end difference, correctly refused
     by motion_gate() on "first/last" -- observed live, issue #411 follow-up.
 
-    Returns (start_frame, end_frame, score) for the best candidate found,
-    or (pool_indices[0], pool_indices[-1], None) if the pool is shorter
-    than window_s -- there is nothing to slide across."""
+    Composition fix on top of that: among windows, MORE SEPARATE VISIBLE
+    UPDATES wins first (count_visible_updates), and only then the
+    motion_gate score above. A 5s window can only ever contain one live
+    tick, so the published headline was 47 identical frame pairs and one
+    step -- correct data, unwatchable clip. Ranking updates first picks the
+    stretch of the dwell where the chart moved repeatedly, which is what
+    "the chart is alive" looks like; the gate's own thresholds are still
+    whatever they were, and the tie-break is still min(endpoint, best_step)
+    so a many-updates window with a weak end-to-end difference cannot win
+    over a strictly better one.
+
+    Returns a dict describing the chosen window. `visible_updates` and
+    `limiting_motion_gate_score` are None when the pool is shorter than
+    window_s -- there is nothing to slide across and nothing was measured,
+    which the caller treats as a refusal rather than as a zero."""
     times = [frames[i]["timestamp_s"] for i in pool_indices]
     if len(pool_indices) < 2 or times[-1] - times[0] < window_s:
-        return pool_indices[0], pool_indices[-1], None
+        return {"start_frame": pool_indices[0], "end_frame": pool_indices[-1],
+                "limiting_motion_gate_score": None, "visible_updates": None,
+                "window_s": window_s, "scanned_candidates": 0,
+                "pool_span_s": times[-1] - times[0] if times else 0.0}
 
-    cache = {}
+    cache, deltas_cache = {}, {}
+
+    def delta_for(a, b):
+        # Candidate windows overlap heavily (one new start frame at a time),
+        # so without this the same adjacent pair is re-differenced once per
+        # candidate: ~120 candidates x ~200 pairs for a 20s window inside a
+        # 30s dwell, against only a few hundred DISTINCT pairs.
+        if (a, b) not in deltas_cache:
+            deltas_cache[(a, b)] = _frame_delta(canvas_for(a), canvas_for(b))
+        return deltas_cache[(a, b)]
 
     def canvas_for(i):
         if i not in cache:
@@ -345,7 +509,7 @@ def best_headline_window(staging, frames, pool_indices, fps, crop, width, window
             cache[i] = canvas
         return cache[i]
 
-    best_score, best_start, best_end = None, pool_indices[0], pool_indices[-1]
+    best, scanned = None, 0
     for start_i in pool_indices:
         start_t = frames[start_i]["timestamp_s"]
         if start_t + window_s > times[-1] + 1e-9:
@@ -357,13 +521,35 @@ def best_headline_window(staging, frames, pool_indices, fps, crop, width, window
         indices = sample_indices(frames, {"start_frame": start_i, "end_frame": end_i, "fps": fps})
         if len(indices) < 2:
             continue
-        canvases = [canvas_for(i) for i in indices]
-        endpoint = _frame_delta(canvases[0], canvases[-1])
-        best_step = max(_frame_delta(a, b) for a, b in zip(canvases, canvases[1:]))
-        score = min(endpoint, best_step)
-        if best_score is None or score > best_score:
-            best_score, best_start, best_end = score, start_i, end_i
-    return best_start, best_end, best_score
+        endpoint = delta_for(indices[0], indices[-1])
+        deltas = [delta_for(a, b) for a, b in zip(indices, indices[1:])]
+        score = min(endpoint, max(deltas))
+        updates = count_visible_updates(deltas)
+        scanned += 1
+        # Rank: a window the gate would ACCEPT beats one it would refuse,
+        # then more separate visible updates, then the gate score itself.
+        # The gate leg comes first deliberately -- ranking updates above it
+        # could pick a window with two mid-clip steps that returns to its
+        # starting state (first/last ~0), which motion_gate() then refuses
+        # while a perfectly publishable window existed in the same dwell.
+        # That is the #411-follow-up mistake (optimising a metric the gate
+        # does not use) in a new costume, so it is ruled out here.
+        key = (score >= MOTION_FLOOR, updates, score)
+        if best is None or key > best["_rank"]:
+            best = {"start_frame": start_i, "end_frame": end_i, "_rank": key,
+                    "limiting_motion_gate_score": score, "visible_updates": updates,
+                    "first_last_changed_fraction": endpoint,
+                    "best_consecutive_changed_fraction": max(deltas),
+                    "clears_motion_floor": key[0]}
+    if best is None:
+        return {"start_frame": pool_indices[0], "end_frame": pool_indices[-1],
+                "limiting_motion_gate_score": None, "visible_updates": None,
+                "window_s": window_s, "scanned_candidates": 0,
+                "pool_span_s": times[-1] - times[0]}
+    best.pop("_rank")
+    best.update(window_s=window_s, scanned_candidates=scanned,
+                pool_span_s=times[-1] - times[0])
+    return best
 
 
 def verify_compositor(page, session, timeout):
@@ -526,7 +712,7 @@ def duration_ms(text):
 VARYING_SPREAD_RATIO = 0.2  # p95 must exceed avg by at least this fraction of avg.
 
 
-def select_varying_query(candidates):
+def rank_varying_queries(candidates):
     """Rank by the ABSOLUTE spread between p95 and average (ms) -- the same
     two numbers already visible in the DOM, never a server-side aggregate --
     among candidates whose spread is at least VARYING_SPREAD_RATIO of their
@@ -545,7 +731,135 @@ def select_varying_query(candidates):
         raise Refusal(2, "drill: no query with visibly varying execution durations (every "
                       "candidate's p95 is within 20% of its average) -- the workload has "
                       "nothing worth drilling into right now")
-    return max(varying, key=lambda r: duration_ms(r["p95"] or "") - duration_ms(r["avg"] or ""))
+    return sorted(varying, key=lambda r: duration_ms(r["p95"] or "") - duration_ms(r["avg"] or ""),
+                  reverse=True)
+
+
+def select_varying_query(candidates):
+    """The best-spread query: rank_varying_queries()' own first choice."""
+    return rank_varying_queries(candidates)[0]
+
+
+# drill-down composition fix, second half: the published clip was ONE flat
+# bar -- a single 1.0s Lock:transactionid in a single lane, spanning the
+# whole width. Honest, and a demonstration of nothing. The Queries-level
+# select_varying_query() above picks a query whose DURATIONS vary; this picks
+# an EXECUTION of it whose WAITS vary, by the same discipline: rank on
+# numbers already visible in the DOM (the executions table's own "Leader
+# events" and "Workers" columns), then VERIFY against what the chart
+# actually drew, and refuse rather than fall back to "whatever was selected
+# by default".
+DRILL_MIN_WAIT_BARS = 2
+# How many ranked executions to actually open before giving up. The table's
+# event/worker counts are a promise about the drawn chart, not the chart
+# itself (events can be CPU-only, and a worker lane can carry no wait at
+# all), so a candidate can rank well and still draw poorly -- try the next
+# one instead of refusing on the first disappointment. Bounded, because each
+# attempt is a real click, a real server round trip and real recorded
+# footage.
+DRILL_EXECUTION_ATTEMPTS = 3
+
+
+def execution_row_key(row):
+    """Identity of an executions-table row as the DOM shows it: its start
+    time and leader PID cells. Indices are not identity -- the table is
+    re-rendered on every live tick and a new execution can appear above the
+    one just ranked, so a click by index can land on a different row than
+    the one scored (and did, for the by-index selection this replaces)."""
+    cells = row.get("cells") or []
+    return (cells[0] if len(cells) > 0 else None, cells[1] if len(cells) > 1 else None)
+
+
+def rank_rich_executions(rows):
+    """Executions worth drilling into, best first: more worker lanes beats
+    more leader events, because a second lane is the thing a single-lane
+    flat bar cannot show at all.
+
+    The floor is deliberately low and structural -- at least two leader
+    events, or at least one worker -- because this ranks the TABLE's
+    promise; the real decision is check_drilled_richness() on the drawn
+    chart. A row whose counts are unreadable (em dash, blank, a renamed
+    column) scores as nothing rather than as zero-and-still-eligible: it is
+    dropped from the ranking, never silently ranked first by a 0 that was
+    actually a missing field."""
+    scored = []
+    for row in rows:
+        events = _as_number(row.get("n_events"))
+        workers = _as_number(row.get("n_workers"))
+        if events is None or workers is None:
+            continue
+        if events < DRILL_MIN_WAIT_BARS and workers < 1:
+            continue
+        scored.append((workers, events, row))
+    scored.sort(key=lambda t: (t[0], t[1]), reverse=True)
+    return [row for _, _, row in scored]
+
+
+def waterfall_richness(bars):
+    """What the drilled waterfall chart actually DREW, from its own ECharts
+    series data. A "wait" is a named event whose name carries a ':' -- the
+    same test drill() already uses to find a clickable wait bar, so this
+    counts exactly the bars a viewer can click, not payload rows."""
+    tuples = [b for b in (bars or []) if isinstance(b, list) and len(b) > 3]
+    waits = [b for b in tuples if isinstance(b[3], str) and ":" in b[3]]
+    return {"bars": len(tuples), "wait_bars": len(waits),
+            "wait_lanes": len({b[2] for b in waits}),
+            "wait_names": sorted({b[3] for b in waits}),
+            "lanes": len({b[2] for b in tuples})}
+
+
+def check_drilled_richness(richness):
+    """None when this drilled execution is worth publishing, else the reason
+    it is not. "Several distinct waits across more than one lane": at least
+    DRILL_MIN_WAIT_BARS drawn wait bars, and more than one DISTINCT thing
+    among them -- more than one lane (a parallel execution's workers) or
+    more than one wait class. One 1.0s bar in one lane fails both, which is
+    the clip this exists to stop publishing."""
+    if richness["wait_bars"] < DRILL_MIN_WAIT_BARS:
+        return (f"{richness['wait_bars']} drawn wait bar(s), need "
+                f"{DRILL_MIN_WAIT_BARS}")
+    if richness["wait_lanes"] < 2 and len(richness["wait_names"]) < 2:
+        return (f"{richness['wait_bars']} wait bars but all of one class "
+                f"({richness['wait_names']}) in one lane")
+    return None
+
+
+def check_drilled_view_fits(reading):
+    """#415/#413: the drilled Waterfall's readout line must be ON SCREEN at
+    the pinned viewport, with the page not scrolled.
+
+    The recorder used to reach it with an instant scroll jump at the moment
+    of the wait-bar click -- a jump in the published clip, and a crop
+    measured in a scroll position the earlier frames were not in. The UI
+    now sizes the executions list so the pane fits
+    (executionListMaxHeight, web/static/lib/builders/waterfall.js), so this
+    is a CHECK, not a workaround: if the layout ever stops fitting, the
+    recording refuses with the overflow in pixels instead of quietly
+    scrolling and publishing a jump.
+
+    Refuses when a reading is missing or non-numeric: an unmeasurable
+    layout is not a passing one."""
+    reading = reading or {}
+    values = {key: _as_number(reading.get(key)) for key in
+              ("readout_bottom", "viewport_height", "scroll_y", "document_height")}
+    missing = sorted(k for k, v in values.items() if v is None)
+    if missing:
+        raise Refusal(3, "could not measure whether the drilled Waterfall readout is "
+                      f"on screen; unreadable: {', '.join(missing)} (got {reading!r})")
+    if values["viewport_height"] <= 0:
+        raise Refusal(3, f"nonsensical viewport height {values['viewport_height']}")
+    overflow = values["readout_bottom"] - values["viewport_height"]
+    if overflow > 0:
+        raise Refusal(2, f"#415: the drilled Waterfall readout's bottom sits {overflow:.0f}px "
+                      f"below the {values['viewport_height']:.0f}px fold -- the published clip "
+                      "would need a scroll jump to show what the clicked bar was")
+    if values["scroll_y"] != 0:
+        raise Refusal(2, f"the drilled view is scrolled to y={values['scroll_y']:.0f}; the clip "
+                      "must be recorded at the top of the page, not at a scroll offset")
+    return {"readout_bottom": values["readout_bottom"],
+            "viewport_height": values["viewport_height"],
+            "readout_px_above_fold": -overflow,
+            "document_height": values["document_height"]}
 
 
 def aas_inspection_path(page):
@@ -600,6 +914,26 @@ def _fresh_mount(smoke, page, tab_id, tick_ts_ms, min_seq):
     return mount if smoke.lib.mount_is_fresh(mount, tab_id, tick_ts_ms, min_seq) else None
 
 
+EXECUTIONS_LISTING_JS = """() => {
+    const table = document.querySelector('#executions-table table');
+    if (!table) return {headers: [], rows: []};
+    const headers = [...table.querySelectorAll('th')].map(e => e.innerText.trim());
+    const events = headers.indexOf('Leader events'), workers = headers.indexOf('Workers');
+    return {headers, rows: [...table.querySelectorAll('tbody tr.clickable')].map((r, i) => ({
+        index: i,
+        n_events: events < 0 ? null : (r.cells[events]?.innerText ?? '').trim(),
+        n_workers: workers < 0 ? null : (r.cells[workers]?.innerText ?? '').trim(),
+        cells: [...r.cells].map(e => e.innerText.trim())}))};
+}"""
+
+WATERFALL_BARS_JS = """() => {
+    const el = document.querySelector('#waterfall-chart');
+    const chart = el && echarts.getInstanceByDom(el);
+    if (!chart) return null;
+    return chart.getOption().series.flatMap(s => s.data || []);
+}"""
+
+
 def drill(page, smoke, capture, timeout, archived=False):
     capture.current = "drill-setup"
     # Start the supplementary clip without the walk's session filter.
@@ -621,7 +955,8 @@ def drill(page, smoke, capture, timeout, archived=False):
     }""")
     if not candidates:
         raise Refusal(2, "drill: inspected Queries had no clickable rows")
-    selected = select_varying_query(candidates)
+    ranked_queries = rank_varying_queries(candidates)
+    selected = ranked_queries[0]
     query_crop = [[rect(page, "#aas-chart-container")],
                   table_crop(page, ["query_id", "text", "_executions", "p95_exec_ms", "avg_exec_ms"])]
     row = page.locator("#table-container tbody tr.clickable").nth(selected["index"])
@@ -640,32 +975,84 @@ def drill(page, smoke, capture, timeout, archived=False):
     capture.pulse()
     observe(page, "waterfall", smoke, capture)
     landed = page.evaluate("Date.now()/1000")
-    selection = page.locator("#executions-table tr.selected-execution")
-    if selection.count() != 1:
-        raise Refusal(3, "drill: could not identify one selected execution")
-    mount = smoke._view_mount(page)
-    selected_at = page.evaluate("Date.now()*1.0")
-    selection.click()  # Explicit selection is visible in the continuous recording.
-    capture.pulse()
-    try:
-        pulsing_wait(page, capture,
-                     lambda: _fresh_mount(smoke, page, "waterfall", selected_at, mount["seq"]), timeout)
-    except Exception as exc:
-        capture.guard()
-        raise Refusal(3, f"drill: execution selection's Waterfall refresh never became ready: {exc}") from exc
-    # issue #413: the drilled Waterfall view's own content (executions table +
-    # chart + readout) is taller than the pinned 981px viewport at this
-    # execution's row count -- #waterfall-readout alone sits ~67px below the
-    # fold. Scroll it into view BEFORE computing anything pixel-based below
-    # (the wait-bar click point, the crosshair sweep, and execution_crop's
-    # rect()s all read CURRENT on-screen position) so every one of them is
-    # computed in the SAME final scroll position, rather than some before a
-    # scroll and some after -- a mix that would point later video frames at
-    # the wrong part of the page. Measured live: this one scroll already
-    # brings BOTH #waterfall-chart and #waterfall-readout fully into the
-    # viewport simultaneously (scrollY 0 -> 121, the page's one and only
-    # overflow amount here), so no second scroll target is needed.
-    page.locator("#waterfall-readout").scroll_into_view_if_needed()
+    # drill-down composition fix: choose WHICH execution to publish instead
+    # of keeping whichever one the view selected by default (which produced
+    # the single flat 1.0s bar). Ranked on the table's own visible columns,
+    # then verified against the chart the click actually drew -- see
+    # rank_rich_executions()/check_drilled_richness().
+    listing = page.evaluate(EXECUTIONS_LISTING_JS)
+    for column in ("Leader events", "Workers"):
+        if column not in (listing.get("headers") or []):
+            raise Refusal(3, f"drill: the executions table has no '{column}' column "
+                          f"(headers: {listing.get('headers')}), so this cannot tell which "
+                          "execution has several waits -- refusing rather than publishing "
+                          "an unexamined one")
+    ranked = rank_rich_executions(listing.get("rows") or [])
+    attempts, chosen, richness, selection = [], None, None, None
+    for candidate in ranked[:DRILL_EXECUTION_ATTEMPTS]:
+        key = execution_row_key(candidate)
+        # Re-resolve the row by its (start, PID) identity immediately before
+        # clicking: a live tick re-renders this table and can insert a newer
+        # execution above the ranked one, which would make a click by index
+        # land on a different row than the one scored.
+        current = (page.evaluate(EXECUTIONS_LISTING_JS).get("rows") or [])
+        index = next((row["index"] for row in current
+                      if execution_row_key(row) == key), None)
+        if index is None:
+            attempts.append({"row": list(key), "reason": "row left the table before it "
+                             "could be opened"})
+            continue
+        mount = smoke._view_mount(page)
+        selected_at = page.evaluate("Date.now()*1.0")
+        # Explicit selection is visible in the continuous recording.
+        page.locator("#executions-table tbody tr.clickable").nth(index).click()
+        capture.pulse()
+        try:
+            pulsing_wait(page, capture,
+                         lambda: _fresh_mount(smoke, page, "waterfall", selected_at, mount["seq"]), timeout)
+        except Exception as exc:
+            capture.guard()
+            raise Refusal(3, f"drill: execution selection's Waterfall refresh never became ready: {exc}") from exc
+        selection = page.locator("#executions-table tr.selected-execution")
+        if selection.count() != 1:
+            raise Refusal(3, "drill: could not identify one selected execution")
+        landed_cells = [text.strip() for text in selection.locator("td").all_inner_texts()]
+        if tuple(landed_cells[:2]) != key:
+            raise Refusal(3, f"drill: clicked execution {list(key)} but the view selected "
+                          f"{landed_cells[:2]}")
+        measured = waterfall_richness(page.evaluate(WATERFALL_BARS_JS))
+        reason = check_drilled_richness(measured)
+        attempts.append({"row": list(key), "reason": reason, **measured})
+        if reason is None:
+            chosen, richness = candidate, measured
+            break
+    if chosen is None:
+        raise Refusal(2, "drill: no execution of the drilled query shows several distinct "
+                      "waits across more than one lane, so the clip would again be one flat "
+                      f"bar. Ranked {len(ranked)} candidate(s), opened "
+                      f"{len([a for a in attempts if 'wait_bars' in a])}: "
+                      + json.dumps(attempts))
+    # issue #413/#415: the drilled Waterfall view used to be TALLER than the
+    # pinned 981px viewport at a real capture's row count -- #waterfall-readout
+    # sat 68px below the fold (measured at 304a772, reproduced in
+    # tests/web_unit/waterfall_fit.test.mjs' geometry) -- and the recorder
+    # scrolled it into view here, which is both a jump in the published clip
+    # and a layout change AFTER earlier frames were captured. The UI now sizes
+    # the executions list so the pane fits, and everything pixel-based below
+    # (the wait-bar click point, the crosshair sweep, execution_crop's rect())
+    # is measured in the one and only scroll position there is: the top.
+    # #415/#413: the readout must already BE on screen -- the UI now sizes
+    # the executions list so the whole pane fits this viewport
+    # (executionListMaxHeight). This verifies it rather than scrolling:
+    # the scroll_into_view_if_needed() that used to sit here was an instant
+    # jump inside the published clip, and it moved the page AFTER earlier
+    # frames had been captured at a different offset.
+    fold = check_drilled_view_fits(page.evaluate("""() => {
+        const el = document.querySelector('#waterfall-readout');
+        const box = el ? el.getBoundingClientRect() : null;
+        return {readout_bottom: box ? box.bottom : null, viewport_height: innerHeight,
+                scroll_y: scrollY, document_height: document.documentElement.scrollHeight};
+    }"""))
     capture.pulse()
     execution_row = selection.locator("td").all_inner_texts()
     # Click an actual drawn non-CPU wait bar, rather than asserting from payload.
@@ -765,7 +1152,9 @@ def drill(page, smoke, capture, timeout, archived=False):
             "actions":[{"action":"query-executions click","timestamp_s":at/1000},
                        {"action":"execution selection","timestamp_s":selected_at/1000},
                        {"action":"wait bar click","timestamp_s":wait_at,"wait":point["wait"]}],
-            "wait_readout":readout, "before":before,"after":after, **checked}, query_crop, execution_crop
+            "wait_readout":readout, "before":before,"after":after,
+            "execution_attempts":attempts, "execution_richness":richness,
+            "fold":fold, **checked}, query_crop, execution_crop
 
 
 def encode_video(context, root, frames):
@@ -896,6 +1285,13 @@ def record(args, staging):
                 window_info["span_s"] = (window_info["to_ns"]-window_info["from_ns"])/1e9
             elif page.evaluate("window.__pgwt.timeRange.to-window.__pgwt.timeRange.from") != 900_000_000_000:
                 raise Refusal(3,"15-minute range was not achieved")
+            if not args.archived:
+                # The headline chart must be FULL: refuse now, before eleven
+                # dwells of recording, if this window reaches back to before
+                # the capture existed.
+                window_info["capture_coverage"] = window_capture_coverage(page.evaluate(
+                    """() => ({window_from_ns: window.__pgwt?.timeRange?.from,
+                               capture_from_ns: window.__pgwt?.server?.fromNs})"""))
             capture.pulse()
             walk = {"schema_version":1,"complete":False,"run_id":args.run_id,
                 "source":"mock_server.py with changing Overview fixture" if args.mock else "real bridge",
@@ -922,13 +1318,25 @@ def record(args, staging):
             overview = walk["tabs"][0]
             overview["wait_mix_check"] = check_overview_wait_mix(overview["observations"], args.archived)
             overview["chart_change"] = chart_change(staging,capture.frames,overview["frame_indices"],headline_crop[0][0])
-            # Five seconds of native crosshair inspection, including the live tick --
-            # from wherever in the WHOLE recorded Overview dwell actually moves the
-            # most (issue #409 follow-up), not a fixed offset from the dwell start.
-            first,last,headline_motion = best_headline_window(
-                staging,capture.frames,overview["frame_indices"],10,headline_crop,1000,5.0)
-            overview["headline_window_scan"] = {"start_frame":first,"end_frame":last,
-                "limiting_motion_gate_score":headline_motion}
+            # HEADLINE_WINDOW_S of native crosshair inspection spanning SEVERAL
+            # live ticks -- from wherever in the WHOLE recorded Overview dwell
+            # the chart updated most often (issue #409 follow-up for the
+            # position, the composition fix for the length and the ranking),
+            # not a fixed offset from the dwell start and not a single tick.
+            scan = best_headline_window(
+                staging,capture.frames,overview["frame_indices"],10,headline_crop,1000,
+                HEADLINE_WINDOW_S)
+            overview["headline_window_scan"] = scan
+            if scan["visible_updates"] is None:
+                raise Refusal(2, f"the recorded Overview dwell ({scan['pool_span_s']:.1f}s of "
+                              f"frames) is shorter than the {HEADLINE_WINDOW_S:g}s headline "
+                              "window, so no clip spanning several live ticks could be cut")
+            if scan["visible_updates"] < HEADLINE_MIN_UPDATES:
+                raise Refusal(2, f"the best {HEADLINE_WINDOW_S:g}s window in the recorded "
+                              f"Overview dwell contains {scan['visible_updates']} visible "
+                              f"update(s), need {HEADLINE_MIN_UPDATES}: the published clip "
+                              "would be a still image with one step in it")
+            first,last = scan["start_frame"],scan["end_frame"]
             # drill-down composition fix: ONE crop for the clip's ENTIRE span
             # (from clip_start_s, where the page is already scrolled to its
             # final position -- see drill()'s own comment) instead of the
@@ -940,8 +1348,16 @@ def record(args, staging):
             walk["gifs"]=[
                 {"name":"headline","path":"headline.gif","start_frame":first,"end_frame":last,
                  "fps":10,"width":1000,"crop":headline_crop},
+                # Width = the waterfall pane's OWN captured width, not a fixed
+                # 1000: the pane is ~1670px wide, so publishing it at 1000
+                # shrank every label and number in it to 60% of the size the
+                # browser rendered -- the one thing compose() exists to avoid
+                # ("joining DOM-derived column crops without shrinking text").
+                # Clamped to the captured frame's width, which rect() already
+                # guarantees the crop is inside.
                 {"name":"drill-down","path":"drill-down.gif","start_frame":drill_indices[0],
-                 "end_frame":drill_indices[-1],"fps":10,"width":1000,"crop":execution_crop},
+                 "end_frame":drill_indices[-1],"fps":10,
+                 "width":min(execution_crop[2],WIDTH),"crop":execution_crop},
             ]
             print(f"Encoding {len(capture.frames)} timestamped frames in Chrome",flush=True)
             try:

@@ -581,9 +581,11 @@ class RecorderTests(unittest.TestCase):
                 path = f"frames/{i:06d}.jpg"
                 Image.new("RGB",(20,20),color).save(root/path, format="JPEG")
                 frames.append({"index": i, "timestamp_s": float(i), "path": path})
-            start, end, score = driver.best_headline_window(
+            scan = driver.best_headline_window(
                 root, frames, list(range(len(frames))), fps=1, crop=[0,0,20,20],
                 width=20, window_s=3.0)
+            start, end, score = (scan["start_frame"], scan["end_frame"],
+                                 scan["limiting_motion_gate_score"])
             # A window entirely inside the flat run (any span within 0-3) has
             # first==last and every consecutive pair identical -- score 0.0.
             self.assertGreater(score, 0.5)
@@ -600,10 +602,13 @@ class RecorderTests(unittest.TestCase):
                 path = f"frames/{i:06d}.jpg"
                 Image.new("RGB",(10,10),"red").save(root/path, format="JPEG")
                 frames.append({"index": i, "timestamp_s": float(i)*0.5, "path": path})
-            start, end, worst = driver.best_headline_window(
+            scan = driver.best_headline_window(
                 root, frames, [0,1,2], fps=1, crop=[0,0,10,10], width=10, window_s=5.0)
-            self.assertIsNone(worst)
-            self.assertEqual((start, end), (0, 2))
+            self.assertIsNone(scan["limiting_motion_gate_score"])
+            # Nothing was measured, so the update count is None too -- never
+            # a 0 that a caller could read as "measured, and it was zero".
+            self.assertIsNone(scan["visible_updates"])
+            self.assertEqual((scan["start_frame"], scan["end_frame"]), (0, 2))
 
     def test_best_headline_window_rejects_a_spike_that_returns_to_start(self):
         """issue #411 follow-up, found live: an earlier version of this
@@ -633,11 +638,360 @@ class RecorderTests(unittest.TestCase):
             # real headline's own fps=10) so each candidate's sampled
             # sequence actually contains the spike frame, not just the
             # window's two endpoints.
-            start, end, score = driver.best_headline_window(
+            scan = driver.best_headline_window(
                 root, frames, list(range(len(frames))), fps=10, crop=[0,0,20,20],
                 width=20, window_s=3.0)
+            start, end, score = (scan["start_frame"], scan["end_frame"],
+                                 scan["limiting_motion_gate_score"])
             self.assertGreater(score, 0.5)
             self.assertFalse(start == 0 and end == 3, "picked the spike-and-return window")
+
+
+    # ── GIF composition: a full headline chart ──────────────────────────────
+
+    def test_capture_coverage_passes_when_the_capture_covers_the_window(self):
+        """A capture that started before the window did: the chart is full,
+        nothing to refuse."""
+        info = driver.window_capture_coverage(
+            {"window_from_ns": 1_000_000_000_000_000_000,
+             "capture_from_ns": 1_000_000_000_000_000_000 - 60_000_000_000})
+        self.assertEqual(info["empty_lead_s"], 0.0)
+        self.assertEqual(info["window_s"], driver.LIVE_WINDOW_S)
+
+    def test_capture_coverage_refuses_a_window_older_than_the_capture(self):
+        """The pre-tag recording, as it actually happened: a 900s window over
+        a capture that had been running ~9 minutes, so the chart's left
+        ~45% was blank. Numerically correct, unpostable -- and no clip
+        selection can fix missing data, so this refuses with how long is
+        left to wait."""
+        window_from = 1_000_000_000_000_000_000
+        with self.assertRaises(lib.Refusal) as failed:
+            driver.window_capture_coverage(
+                {"window_from_ns": window_from,
+                 "capture_from_ns": window_from + 400_000_000_000})  # 400s short
+        self.assertEqual(failed.exception.code, 2)
+        self.assertIn("400s before the capture began", str(failed.exception))
+        self.assertIn("44%", str(failed.exception))
+
+    def test_capture_coverage_accepts_the_slack_but_not_more(self):
+        """A just-long-enough capture legitimately reads a few seconds short
+        (clock granularity, the quick-range click landing after the window
+        was computed). One second past the slack is a refusal -- the
+        boundary is a real boundary, not a soft preference."""
+        window_from = 1_000_000_000_000_000_000
+        ok = driver.window_capture_coverage(
+            {"window_from_ns": window_from,
+             "capture_from_ns": window_from + int(driver.CAPTURE_COVERAGE_SLACK_S * 1e9)})
+        self.assertAlmostEqual(ok["empty_lead_s"], driver.CAPTURE_COVERAGE_SLACK_S, places=3)
+        with self.assertRaises(lib.Refusal):
+            driver.window_capture_coverage(
+                {"window_from_ns": window_from,
+                 "capture_from_ns": window_from + int((driver.CAPTURE_COVERAGE_SLACK_S + 1) * 1e9)})
+
+    def test_capture_coverage_refuses_when_it_cannot_see_the_capture(self):
+        """Bypass suite: every way this check can be blinded must REFUSE,
+        not approve. ServerInfo's own pre-handshake default is 0 (lib/
+        state.js), so a 0 read as a real capture start would pass every
+        window ever recorded -- that is the false negative to kill. Same for
+        an absent hook (renamed __pgwt, older bridge), a null, a NaN, a
+        non-numeric string and a bool."""
+        window_from = 1_000_000_000_000_000_000
+        for name, reading in [
+            ("no reading at all", None),
+            ("empty reading", {}),
+            ("absent capture bound", {"window_from_ns": window_from}),
+            ("absent window bound", {"capture_from_ns": window_from}),
+            ("pre-handshake zero", {"window_from_ns": window_from, "capture_from_ns": 0}),
+            ("null capture bound", {"window_from_ns": window_from, "capture_from_ns": None}),
+            ("NaN", {"window_from_ns": window_from, "capture_from_ns": float("nan")}),
+            ("infinite", {"window_from_ns": window_from, "capture_from_ns": float("inf")}),
+            ("unparseable string", {"window_from_ns": window_from, "capture_from_ns": "unknown"}),
+            ("bool", {"window_from_ns": window_from, "capture_from_ns": True}),
+            ("negative", {"window_from_ns": window_from, "capture_from_ns": -5}),
+        ]:
+            with self.subTest(name):
+                with self.assertRaises(lib.Refusal) as failed:
+                    driver.window_capture_coverage(reading)
+                self.assertEqual(failed.exception.code, 3)
+                self.assertIn("could not read", str(failed.exception))
+
+    def test_capture_coverage_reads_ns_carried_as_strings(self):
+        """The bridge carries ns as strings in places (BigInt safety); a
+        string that IS a number must be read, not refused."""
+        info = driver.window_capture_coverage(
+            {"window_from_ns": "1000000000000000000", "capture_from_ns": "900000000000000000"})
+        self.assertEqual(info["empty_lead_s"], 0.0)
+
+    # ── GIF composition: motion distributed over several ticks ─────────────
+
+    def test_visible_updates_counts_updates_not_pairs(self):
+        floor = lib.MOTION_FLOOR
+        self.assertEqual(driver.count_visible_updates([]), 0)
+        self.assertEqual(driver.count_visible_updates([0.0, 0.0, 0.0]), 0)
+        # The pre-tag headline, as recorded: 48 pairs at ~0.02% and one at
+        # 1.9%. One update -- which is exactly why it read as a still image.
+        pretag = [0.0002] * 20 + [0.019] + [0.0002] * 27
+        self.assertEqual(driver.count_visible_updates(pretag), 1)
+        self.assertEqual(driver.count_visible_updates(
+            [0.0002] * 5 + [floor] + [0.0002] * 5 + [floor] + [0.0002] * 5), 2)
+
+    def test_one_tick_straddling_two_frames_counts_once(self):
+        """The false negative this counting exists to avoid: a single tick
+        whose repaint lands between two sampled frames shows up as TWO
+        adjacent above-floor pairs. Counting PAIRS would report 2 updates
+        for one visible change and let the one-step clip this replaces pass
+        a "several ticks" requirement; counting RUNS reports 1."""
+        deltas = [0.0002] * 10 + [0.012, 0.011] + [0.0002] * 10
+        self.assertEqual(sum(1 for d in deltas if d >= lib.MOTION_FLOOR), 2)  # naive
+        self.assertEqual(driver.count_visible_updates(deltas), 1)             # honest
+
+    def test_visible_updates_uses_the_gates_own_floor_unmodified(self):
+        """This selection reads MOTION_FLOOR; it must not carry a second,
+        softer idea of "visible" that could disagree with the gate."""
+        self.assertEqual(driver.count_visible_updates([lib.MOTION_FLOOR]), 1)
+        self.assertEqual(driver.count_visible_updates([lib.MOTION_FLOOR * 0.999]), 0)
+
+    def test_headline_window_prefers_several_updates_over_one_big_step(self):
+        """The composition fix, end to end on real pixels: given a dwell
+        where one span changes ONCE (a big single step, exactly the pre-tag
+        clip's shape) and another changes repeatedly, the scan must pick
+        the repeatedly-changing one -- even though the single-step span's
+        min(first/last, best-step) score is the larger of the two."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); (root/"frames").mkdir()
+            # Window 0-4 samples black,black,black,white: ONE update, a
+            # perfect score (first/last and best-step both 100%) -- the
+            # pre-tag clip's exact shape. Window 4-8 samples
+            # white,black,black,red: TWO separated updates and an equally
+            # perfect score. Same gate verdict, so the update count decides.
+            colors = ["black","black","black","black","white","black","black","black","red"]
+            frames = []
+            for i, color in enumerate(colors):
+                path = f"frames/{i:06d}.jpg"
+                Image.new("RGB",(20,20),color).save(root/path, format="JPEG")
+                frames.append({"index": i, "timestamp_s": float(i), "path": path})
+            scan = driver.best_headline_window(
+                root, frames, list(range(len(colors))), fps=1, crop=[0,0,20,20],
+                width=20, window_s=4.0)
+            self.assertEqual(scan["visible_updates"], 2)
+            self.assertEqual((scan["start_frame"], scan["end_frame"]), (4, 8))
+            self.assertTrue(scan["clears_motion_floor"])
+            self.assertEqual(scan["window_s"], 4.0)
+            self.assertGreater(scan["scanned_candidates"], 1)
+
+    def test_more_updates_never_beats_a_window_the_gate_would_accept(self):
+        """Bypass suite for the new ranking: optimising "updates" ALONE
+        would pick a window that steps twice and returns to its starting
+        state (first/last ~0, which motion_gate() refuses) over a window
+        that genuinely changes end to end -- the #411-follow-up mistake
+        (ranking on a metric the gate does not use) in a new costume, and
+        it would turn a recordable dwell into a refusal. The gate leg
+        ranks first, so the single-update window that PASSES wins over the
+        two-update window that would not."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp); (root/"frames").mkdir()
+            # Window 0-4 samples black,black,black,white: 1 update, passes.
+            # Window 4-8 samples white,black,black,white: 2 updates, but
+            # first/last is 0% -- motion_gate() would refuse it.
+            colors = ["black","black","black","black","white","black","black","black","white"]
+            frames = []
+            for i, color in enumerate(colors):
+                path = f"frames/{i:06d}.jpg"
+                Image.new("RGB",(20,20),color).save(root/path, format="JPEG")
+                frames.append({"index": i, "timestamp_s": float(i), "path": path})
+            scan = driver.best_headline_window(
+                root, frames, list(range(len(colors))), fps=1, crop=[0,0,20,20],
+                width=20, window_s=4.0)
+            self.assertEqual((scan["start_frame"], scan["end_frame"]), (0, 4))
+            self.assertEqual(scan["visible_updates"], 1)
+            self.assertTrue(scan["clears_motion_floor"])
+
+    def test_overview_dwell_must_be_able_to_hold_the_headline_window(self):
+        """A 10s Overview dwell can only hold a one-tick clip -- the defect.
+        Refused before a browser opens, for a --dwells override just as much
+        as for the default, and the default itself must satisfy it."""
+        import re as _re
+        body = (ROOT/"docs/DEMO_RUNBOOK.md").read_text()
+        section = body.split("## 4. The walk itself",1)[1].split("## 5.",1)[0]
+        tabs = [t.lower() for t in _re.findall(r"^\d+\. (?:\*\*)?([A-Z][a-z]+)", section, _re.M)]
+        dwells, _ = driver.runbook_plan(tabs, None)
+        self.assertGreaterEqual(dwells["overview"],
+                                driver.HEADLINE_WINDOW_S + driver.HEADLINE_SLIDE_S)
+        with tempfile.TemporaryDirectory() as temp:
+            short = Path(temp)/"dwells.json"
+            short.write_text(json.dumps({tab: 10.0 for tab in tabs}))
+            with self.assertRaises(lib.Refusal) as failed:
+                driver.runbook_plan(tabs, str(short))
+            self.assertEqual(failed.exception.code, 6)
+            self.assertIn("overview dwell", str(failed.exception))
+            enough = Path(temp)/"ok.json"
+            allowed = driver.HEADLINE_WINDOW_S + driver.HEADLINE_SLIDE_S
+            enough.write_text(json.dumps(
+                {tab: (allowed if tab == "overview" else 6.0) for tab in tabs}))
+            plan, _ = driver.runbook_plan(tabs, str(enough))
+            self.assertEqual(plan["overview"], allowed)
+
+    # ── GIF composition: an execution worth drilling into ──────────────────
+
+    def test_rank_varying_queries_keeps_select_varying_query_first(self):
+        candidates = [
+            {"index": 0, "p95": "3.0s", "avg": "3.0s"},
+            {"index": 1, "p95": "1.0s", "avg": "500.7ms"},
+            {"index": 2, "p95": "400ms", "avg": "100.3ms"},
+        ]
+        ranked = driver.rank_varying_queries(candidates)
+        self.assertEqual([r["index"] for r in ranked], [1, 2])
+        self.assertEqual(driver.select_varying_query(candidates)["index"], ranked[0]["index"])
+
+    def test_rank_rich_executions_prefers_lanes_then_events(self):
+        """More worker lanes beats more leader events: a second lane is the
+        thing a single-lane flat bar cannot show at all."""
+        rows = [
+            {"index": 0, "n_events": "9", "n_workers": "0", "cells": ["t0", "1"]},
+            {"index": 1, "n_events": "4", "n_workers": "2", "cells": ["t1", "2"]},
+            {"index": 2, "n_events": "5", "n_workers": "2", "cells": ["t2", "3"]},
+            {"index": 3, "n_events": "1", "n_workers": "0", "cells": ["t3", "4"]},
+        ]
+        self.assertEqual([r["index"] for r in driver.rank_rich_executions(rows)], [2, 1, 0])
+
+    def test_rank_rich_executions_drops_rows_it_cannot_read(self):
+        """Bypass suite: a row whose counts are blank, an em dash, or missing
+        (renamed column) must be DROPPED, never ranked as if its counts were
+        zero -- a 0 that is really "unknown" would otherwise sort into the
+        list and could be opened and published unexamined."""
+        rows = [
+            {"index": 0, "n_events": "", "n_workers": "", "cells": ["t0", "1"]},
+            {"index": 1, "n_events": "\u2014", "n_workers": "0", "cells": ["t1", "2"]},
+            {"index": 2, "n_events": None, "n_workers": None, "cells": ["t2", "3"]},
+            {"index": 3, "n_events": "3", "n_workers": "0", "cells": ["t3", "4"]},
+        ]
+        self.assertEqual([r["index"] for r in driver.rank_rich_executions(rows)], [3])
+        self.assertEqual(driver.rank_rich_executions([]), [])
+
+    def test_execution_row_key_is_identity_not_position(self):
+        rows = [{"index": 0, "cells": ["15:09:50.218", "2087544", "-80133"]},
+                {"index": 1, "cells": ["15:09:51.001", "2087544", "-80133"]}]
+        self.assertEqual(driver.execution_row_key(rows[0]), ("15:09:50.218", "2087544"))
+        self.assertNotEqual(driver.execution_row_key(rows[0]), driver.execution_row_key(rows[1]))
+        self.assertEqual(driver.execution_row_key({}), (None, None))
+
+    def test_flat_single_bar_execution_is_refused_as_a_clip(self):
+        """The drill-down GIF as actually published: ONE 1.0s
+        Lock:transactionid bar in ONE lane, spanning the full width. Both
+        legs of the richness check fail on it."""
+        flat = driver.waterfall_richness([
+            [0, 1_000_000_000, 0, "Lock:transactionid", "e1"],
+            [0, 10_000, 0, "CPU*", None],
+        ])
+        self.assertEqual(flat["wait_bars"], 1)
+        self.assertEqual(flat["wait_lanes"], 1)
+        self.assertIsNotNone(driver.check_drilled_richness(flat))
+
+    def test_several_waits_across_lanes_is_accepted(self):
+        across_lanes = driver.waterfall_richness([
+            [0, 10_000_000, 0, "IO:DataFileRead", "e1"],
+            [0, 10_000_000, 1, "IO:DataFileRead", "e2"],
+            [0, 10_000_000, 2, "IO:DataFileRead", "e3"],
+            [0, 5_000_000, 0, "CPU*", None],
+        ])
+        self.assertEqual((across_lanes["wait_bars"], across_lanes["wait_lanes"]), (3, 3))
+        self.assertIsNone(driver.check_drilled_richness(across_lanes))
+        several_classes = driver.waterfall_richness([
+            [0, 10_000_000, 0, "IO:DataFileRead", "e1"],
+            [0, 10_000_000, 0, "Lock:advisory", "e2"],
+        ])
+        self.assertIsNone(driver.check_drilled_richness(several_classes))
+
+    def test_one_wait_class_repeated_in_one_lane_is_still_refused(self):
+        """Several BARS of the same wait in the same lane is a striped
+        single lane, not "several distinct waits across more than one
+        lane" -- the check must not be satisfiable by repetition alone."""
+        striped = driver.waterfall_richness([
+            [0, 1_000_000, 0, "Lock:transactionid", "e1"],
+            [2_000_000, 3_000_000, 0, "Lock:transactionid", "e2"],
+            [4_000_000, 5_000_000, 0, "Lock:transactionid", "e3"],
+        ])
+        self.assertEqual(striped["wait_bars"], 3)
+        self.assertIsNotNone(driver.check_drilled_richness(striped))
+
+    def test_richness_of_an_unreadable_chart_is_not_a_pass(self):
+        """Bypass suite: no chart instance (None), an empty option, CPU-only
+        bars, and malformed tuples must all come out as "not rich" -- an
+        unreadable chart is never published as a rich one."""
+        for name, bars in [("no chart", None), ("empty", []),
+                           ("cpu only", [[0, 1, 0, "CPU*", None], [2, 3, 1, "CPU*", None]]),
+                           ("plan only", [[0, 1, 0, "Plan phase", None]]),
+                           ("malformed", [[0, 1], "junk", None, {}]),
+                           ("unnamed", [[0, 1, 0, None, None], [0, 1, 1, 5, None]])]:
+            with self.subTest(name):
+                richness = driver.waterfall_richness(bars)
+                self.assertEqual(richness["wait_bars"], 0)
+                self.assertIsNotNone(driver.check_drilled_richness(richness))
+
+    # ── #415/#413: the drilled readout is on screen, with no scroll jump ───
+
+    def test_drilled_view_fits_at_the_measured_demo_geometry(self):
+        """Measured in Chrome at 1710x981 after the UI fix: readout bottom
+        945, document 981, no scroll."""
+        fits = driver.check_drilled_view_fits(
+            {"readout_bottom": 945, "viewport_height": 981, "scroll_y": 0,
+             "document_height": 981})
+        self.assertEqual(fits["readout_px_above_fold"], 36)
+
+    def test_drilled_view_below_the_fold_is_refused_not_scrolled(self):
+        """#415 as measured on the parent tree (304a772): readout bottom
+        1049 in a 981px viewport -- 68px below the fold. The recorder used
+        to scroll to it (an instant jump inside the published clip); it now
+        refuses and names the overflow."""
+        with self.assertRaises(lib.Refusal) as failed:
+            driver.check_drilled_view_fits(
+                {"readout_bottom": 1049, "viewport_height": 981, "scroll_y": 0,
+                 "document_height": 1069})
+        self.assertEqual(failed.exception.code, 2)
+        self.assertIn("68px", str(failed.exception))
+        # One pixel over is still over: the fold is a boundary, not a hint.
+        with self.assertRaises(lib.Refusal):
+            driver.check_drilled_view_fits(
+                {"readout_bottom": 982, "viewport_height": 981, "scroll_y": 0,
+                 "document_height": 1000})
+        self.assertEqual(driver.check_drilled_view_fits(
+            {"readout_bottom": 981, "viewport_height": 981, "scroll_y": 0,
+             "document_height": 981})["readout_px_above_fold"], 0)
+
+    def test_a_scrolled_drilled_view_is_refused_even_though_it_fits(self):
+        """The readout being visible BECAUSE the page was scrolled is the
+        very workaround this replaces: every pixel measurement in drill()
+        reads current on-screen position, so a clip recorded at a scroll
+        offset mixes two layouts. Visible-at-an-offset must not pass."""
+        with self.assertRaises(lib.Refusal) as failed:
+            driver.check_drilled_view_fits(
+                {"readout_bottom": 928, "viewport_height": 981, "scroll_y": 121,
+                 "document_height": 1069})
+        self.assertEqual(failed.exception.code, 2)
+        self.assertIn("scrolled", str(failed.exception))
+
+    def test_drilled_fold_check_refuses_what_it_cannot_measure(self):
+        """Bypass suite: a missing #waterfall-readout (the element renamed,
+        the pane hidden, the mount replaced by an unavailable panel) gives a
+        null bottom; a detached document gives 0 for innerHeight. Neither
+        may be approved -- an unmeasurable layout is not a passing one."""
+        base = {"readout_bottom": 900, "viewport_height": 981, "scroll_y": 0,
+                "document_height": 981}
+        for name, reading in [
+            ("nothing", None),
+            ("empty", {}),
+            ("absent readout", dict(base, readout_bottom=None)),
+            ("absent viewport", dict(base, viewport_height=None)),
+            ("absent scroll", dict(base, scroll_y=None)),
+            ("absent document height", dict(base, document_height=None)),
+            ("NaN", dict(base, readout_bottom=float("nan"))),
+            ("string", dict(base, readout_bottom="below")),
+            ("zero viewport", dict(base, viewport_height=0)),
+        ]:
+            with self.subTest(name):
+                with self.assertRaises(lib.Refusal) as failed:
+                    driver.check_drilled_view_fits(reading)
+                self.assertEqual(failed.exception.code, 3)
 
     def test_observed_empty_is_distinct_from_failed_observation(self):
         class Capture:

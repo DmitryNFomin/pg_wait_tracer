@@ -52,8 +52,13 @@ the measured compositor clipping difference, without changing content geometry.
 
 The runbook's numbered order is parsed and checked against the smoke library's
 tab list. It contains **no dwell times**. The explicit fallback is ten seconds
-per tab (two live tick intervals). `--dwells durations.json` accepts an object
-with all eleven lowercase tab names and durations of at least five seconds.
+per tab (two live tick intervals) — except **Overview, which defaults to 30
+seconds**, because the headline GIF is cut from that dwell and a 10-second
+dwell can only hold a one-tick clip (`OVERVIEW_DWELL_S` =
+`HEADLINE_WINDOW_S` + `HEADLINE_SLIDE_S`). `--dwells durations.json` accepts
+an object with all eleven lowercase tab names and durations of at least five
+seconds; an Overview dwell shorter than the headline window plus its slide
+room is refused (code 6) before any browser opens.
 The order never changes. Timeline returns to Sessions and clicks a session;
 flow variants are never loaded. Range stays 15 minutes and compare stays off.
 The existing smoke navigator resumes live after tab entry/drills. Filters from
@@ -101,14 +106,27 @@ and unhandled rejections. No error is whitelisted.
 
 After the eleven tabs, supplementary setup clears the previous session filter.
 The continuous clip opens Queries, ranks
-rows by visible p95 execution duration (average breaks ties), clicks the
-visible `Executions →` cell, selects the execution row, then clicks a drawn
-wait bar. The wait name, PID and duration must appear in the DOM readout.
+rows by the visible spread between p95 and average execution duration
+(`rank_varying_queries`), clicks the visible `Executions →` cell, then
+**chooses which execution to publish** instead of keeping the view's default
+selection: candidates are ranked on the executions table's own `Workers` and
+`Leader events` columns (`rank_rich_executions`, worker lanes first), opened
+one at a time (at most `DRILL_EXECUTION_ATTEMPTS`), and each one's DRAWN
+chart is checked for **several distinct waits across more than one lane** —
+at least two wait bars, in more than one lane or of more than one wait class
+(`waterfall_richness` / `check_drilled_richness`). One 1.0s bar in one lane,
+the clip this replaces, fails both legs; if no candidate qualifies the walk
+refuses (code 2) with every attempt's measured counts, which is a
+workload-variety finding, not a recorder bug. Rows are re-resolved by their
+(start, leader PID) cells immediately before each click, never by index: a
+live tick re-renders that table. Then it clicks a drawn wait bar; the wait
+name, PID and duration must appear in the DOM readout.
 This uses the real cell pivot; ordinary query-row clicks open Events.
 Overview must visibly change table values during its dwell for GIF 1 to pass.
 During Overview the walk also sweeps the native AAS crosshair across buckets,
-showing the UI's time, wait and AAS readout. The headline takes about five
-seconds of that inspection, including a live tick. Before the query pivot the
+showing the UI's time, wait and AAS readout. The headline takes
+`HEADLINE_WINDOW_S` (20 seconds) of that inspection, spanning several live
+ticks — see "a full chart and several ticks" below. Before the query pivot the
 walk inspects AAS, then sweeps across the clicked Waterfall wait bar to show
 its native tooltip. These are recorded mouse gestures, with the normal
 five-second live polling unchanged. The JSON records the inspection paths.
@@ -176,6 +194,40 @@ recorded Overview dwell for the best-positioned 5-second window
 real tick in a given dwell can land anywhere in it; the motion gate itself
 is unchanged by this and still decides on its own terms.
 
+### A full chart and several ticks (composition, not thresholds)
+
+Two selection rules exist because a recording can be numerically correct and
+still unpostable. Neither touches a gate threshold; both decide what gets
+published, and both refuse rather than publish something thin.
+
+1. **The chart must be full.** Before the walk starts,
+   `window_capture_coverage()` compares the client's window start against the
+   SERVER-declared earliest timestamp in the trace (`ServerInfo.fromNs`, fed
+   by the backend's `info` — deliberately not a second number from the same
+   client clock). A 15-minute window over a capture that has only been
+   running nine minutes leaves the chart's left ~45% blank, which is missing
+   data, not a framing choice: the walk refuses (code 2) and says how many
+   more seconds the capture needs. A missing, zero or non-numeric capture
+   bound refuses too (code 3) — `ServerInfo`'s pre-handshake default is 0,
+   and reading that as "the capture began at the epoch" would pass every
+   window ever recorded.
+2. **The clip must move more than once.** `best_headline_window()` scans the
+   Overview dwell for a `HEADLINE_WINDOW_S`-long window and ranks candidates
+   by (a) whether the motion gate would accept it at all, then (b) how many
+   SEPARATE visible updates it contains, then (c) the gate score itself. The
+   gate leg ranks first on purpose: ranking updates above it could pick a
+   window that steps twice and returns to its starting state, which
+   `motion_gate()` then refuses while a publishable window existed in the
+   same dwell. `count_visible_updates()` counts maximal RUNS of above-floor
+   consecutive pairs, not pairs: one tick's repaint landing between two
+   sampled frames is one update, and counting pairs would let a one-step clip
+   claim two. The chosen window must contain at least `HEADLINE_MIN_UPDATES`
+   (2) updates or the walk refuses (code 2). Measured on the retained pre-tag
+   footage, its whole 9.97-second Overview dwell contains exactly one such
+   update at any window length — which is why the window is 20 seconds (four
+   tick intervals) rather than 15, and why that footage cannot be re-cut into
+   a postable headline without re-recording at the longer dwell.
+
 Pillow coalesces identical frames even with optimization disabled. The old
 4 fps cuts sampled identical crops across long five-second polling holds and
 missed the final Overview change; Pillow merged the headline to two frames
@@ -208,13 +260,28 @@ is not changing then, so more captures only produce more duplicates Pillow
 would coalesce right back out; both would be buying a pass, not fixing a
 gate.
 Inclusive cuts now always retain the last recorded frame at the final sample.
-GIFs use a 1000-pixel canvas. Their data definitions include inclusive source
+The headline GIF uses a 1000-pixel canvas; the drill-down GIF uses the
+waterfall pane's **own captured width** (~1670 px), because publishing a
+1670-px-wide pane at 1000 shrank every label in it to 60% of the size the
+browser rendered — the one thing `compose()` exists to avoid. Measured on the
+retained pre-tag frames: the same clip is 182 px tall and 282,642 bytes at
+width 1000, versus 304 px tall and 621,127 bytes at 1670, with the gate's own
+numbers essentially unchanged (first/last 2.76% → 2.51%, best step 2.76% →
+2.51%). Their data definitions include inclusive source
 frame bounds, fps, output width and crops in CSS pixels. Crops can be a single
 `[x,y,width,height]` rectangle, or bands of rectangles: rectangles within a
 band join horizontally; bands stack vertically. This keeps relevant table
 columns at their recorded text size while the whole AAS chart fits the width.
-The drill clip's crop keyframe changes framing at its recorded Waterfall
-landing. No text is drawn onto frames. Inspect readability at the destination
+The drill clip is ONE crop of the `.waterfall-pane` section for its whole
+span, measured at the top of the page. The recorder no longer scrolls the
+readout into view (issue #415/#413: it used to, which put an instant scroll
+jump inside the published clip and measured the crop in a scroll position
+earlier frames were not in). The UI now sizes the executions list so the pane
+fits the pinned viewport (`executionListMaxHeight()`,
+`web/static/lib/builders/waterfall.js`), and `check_drilled_view_fits()`
+VERIFIES it: a readout below the fold, or a page scrolled away from the top,
+refuses (code 2) with the overflow in pixels, and an unmeasurable layout
+refuses (code 3) rather than passing. No text is drawn onto frames. Inspect readability at the destination
 GitHub width before owner sign-off; byte counts alone cannot establish it.
 Overview's `%DB Time` column is preserved in full: the small blue rectangle
 beside IO's `5.0s` was the cropped tail of its real `.pct-fill` percentage bar
