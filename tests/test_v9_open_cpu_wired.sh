@@ -222,17 +222,46 @@ echo "  summary_open_cpu_credited_ns   = $CRED"
 echo "  summary_open_cpu_refused_total = ${REFUSED:-n/a}"
 echo "  summary_cpu_open_uncredited_ns_total = ${UNCRED:-n/a}"
 
+# THREE ZEROS HAVE TWO MEANINGS, and this script originally reported only
+# one of them. agent/424-daemon (dc23287) found the fourth outcome by
+# reading the writer: crediting happens only in writer_seal_through(),
+# whose first statement is `if (!w->fp) return;` and whose only callers are
+# pgwt_summary_push_event and pgwt_summary_flush_completed. A capture whose
+# in-flight statements are pure CPU emits no wait boundaries, so nothing is
+# pushed, nothing seals, and credited/refused/uncredited all stay 0 even
+# with a perfectly wired producer. "The producer never ran" is what I read
+# three zeros as, and it was not established.
+#
+# summary_open_credited_ns_total -- the v8 WAIT crediting, which goes
+# through the same seal -- is the discriminator, so this script now reports
+# it instead of leaving the next reader to make the same inference.
+V8CRED=$(num "$M1" summary_open_credited_ns_total)
+echo "  summary_open_credited_ns_total = ${V8CRED:-n/a}  (the discriminator)"
+
 if [[ "$CRED" -gt 0 ]]; then
     echo "  ok: the v9 open-CPU producer IS wired (credited $CRED ns)"
     echo "=== test_v9_open_cpu_wired: PASS ==="
     exit 0
 fi
 
+if [[ -n "$V8CRED" ]] && [[ "$V8CRED" -eq 0 ]]; then
+    echo "  REFUSE: summary_open_cpu_credited_ns is 0, but so is"
+    echo "          summary_open_credited_ns_total -- NOTHING sealed in this"
+    echo "          capture, so the open-CPU path was never reached and this"
+    echo "          says nothing about whether the producer is wired. Fix the"
+    echo "          seal trigger (writer_seal_through is only called from"
+    echo "          push_event and flush_completed, and returns immediately"
+    echo "          while w->fp is NULL) before reading this check again."
+    echo "=== test_v9_open_cpu_wired: REFUSE ==="
+    exit 2
+fi
+
 echo "  FAIL: summary_open_cpu_credited_ns is 0 on a capture whose CPU"
-echo "        statement is proven, in tier=exact, with the v9 keys present."
-echo "        That is the signature of a v9 writer nobody feeds: the"
-echo "        accounting silently falls back to v8 while every other test"
-echo "        passes. refused_total=${REFUSED:-n/a}"
+echo "        statement is proven, with the v9 keys present, AND with"
+echo "        summary_open_credited_ns_total = ${V8CRED:-n/a} proving seconds"
+echo "        really were sealed. So the open-CPU path was reached and"
+echo "        credited nothing: the producer is not wired, and the"
+echo "        accounting falls back to v8. refused_total=${REFUSED:-n/a}"
 echo "        uncredited_ns=${UNCRED:-n/a} is what it cost."
 echo "=== test_v9_open_cpu_wired: FAIL ==="
 exit 1

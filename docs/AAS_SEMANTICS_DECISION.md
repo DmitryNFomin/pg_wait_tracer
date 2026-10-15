@@ -508,6 +508,19 @@ accounting rule and not about the byte layout:
   combined CPU* row, which is the v8 symptom one layer up. Layout is
   byte-identical to v8; the bump exists for the rule.
 
+  **AND THE BUMP IS NOT YET EARNED — read this before re-wiring.** With no
+  producer, v9 credits nothing, so v9's only semantic difference from v8
+  (the widened `cpu_measured_records`) never materialises: a file written
+  by today's build is a v8 file wearing a 9. The version exists to stop a
+  window blending two accounting rules, and as things stand **9 would name
+  two of them** — "dormant, v8 semantics" and, after the producer is wired,
+  "open CPU credited per second". `pgwt_summaries_window_current` compares
+  the number and would see no mismatch between them. So the re-wiring
+  commit must either bump to **10**, or the constant should sit at 8 until
+  that commit bumps it to 9. What must NOT happen is wiring the producer
+  and leaving the constant at 9, which is the default path and the unsafe
+  one.
+
   **Claimed is not wired.** `summary_open_cpu_credited_ns` on the control
   socket is the check: on a capture with an in-flight CPU statement it must
   be non-zero. Measured on gate-2 at integration HEAD, watchpoints attached,

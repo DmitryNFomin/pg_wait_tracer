@@ -419,18 +419,14 @@ LIVE_TESTS=(
     "test_idle_exclusion|python3|test_idle_exclusion.py"
     "test_daemon_server|python3|test_daemon_server.py"
     "test_control|bash|test_control.sh"
-    # #424 / summary v9: the writer can be in the build, all seven control
-    # keys present and numeric, every other live test green, and the
-    # PRODUCER never fed -- in which case the accounting silently falls back
-    # to v8. This is the only check that can tell those apart, so it runs
-    # HERE in the live tier and not in ci_smoke.sh, which run_all.sh does
-    # not invoke at all (that mistake is how it scored 134/134 without this
-    # gate having executed once). It starts its own --mode full daemon and
-    # REFUSES (exit 2, a failure under --require-live) rather than passing
-    # when it cannot establish what it measures: tier != exact, no control
-    # socket, a missing v9 key, or a CPU stimulus it cannot prove moved
-    # cpu_ns_total.
-    "test_v9_open_cpu_wired|bash|test_v9_open_cpu_wired.sh"
+    # NOT registered: test_v9_open_cpu_wired.sh. The v9 open-CPU producer
+    # was REVERTED (agent/424-daemon fc7d7f5) once its counters showed it
+    # was never wired, so the check would be permanently red against a
+    # capability nobody invokes -- which is neither a product bug being
+    # fixed in src/ (the only thing KNOWN_FAILING is for) nor a gate worth
+    # 40 minutes a run. The script stays in tests/ as the ACCEPTANCE test
+    # for whoever re-wires it: run it by hand, and re-add this line in the
+    # same commit that makes it pass.
     "test_escalation|bash|test_escalation.sh"
     # Tiered-capture live tests (were built for A4/A5 but wired into
     # nothing — TST-7). test_cross_validate_tiered is the test that
