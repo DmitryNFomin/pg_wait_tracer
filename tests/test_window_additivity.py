@@ -120,6 +120,13 @@ WIN_FROM_NS = BASE + 100 * S + 500 * MS
 WIN_TO_NS = BASE + 400 * S + 500 * MS
 PARTS = (1, 2, 4, 8)
 
+# A pgwt-server that never answers must FAIL this gate, not hang the
+# box run: tests/run_all.sh wraps nothing in a timeout, so an
+# unbounded readline() here would stall the whole synthetic tier. The
+# value is far above any measured response for a capture this size
+# (whole runs take seconds), so it can only fire on a real stall.
+Q_TIMEOUT_S = int(os.environ.get("PGWT_ADDITIVITY_TIMEOUT_S", "120"))
+
 failures = []
 log = []
 
@@ -441,9 +448,9 @@ def section_b(raw_dir):
     require_raw_oracle(raw_dir, "top_events", frm, to)
 
     with ServerHarness(raw_dir) as srv:
-        whole = require_raw(srv.query("time_model", from_=frm, to_=to),
+        whole = require_raw(srv.query("time_model", timeout=Q_TIMEOUT_S, from_=frm, to_=to),
                             "the whole-window time_model")
-        whole_ev = answer(srv.query("top_events", from_=frm, to_=to,
+        whole_ev = answer(srv.query("top_events", timeout=Q_TIMEOUT_S, from_=frm, to_=to,
                                     limit=100),
                           "the whole-window top_events")
 
@@ -481,10 +488,10 @@ def section_b(raw_dir):
             sum_counts = {}
             for i in range(n):
                 pf, pt = en[i], en[i + 1]
-                tm = require_raw(srv.query("time_model", from_=pf, to_=pt),
+                tm = require_raw(srv.query("time_model", timeout=Q_TIMEOUT_S, from_=pf, to_=pt),
                                  "part %d/%d of the time_model partition"
                                  % (i + 1, n))
-                te = answer(srv.query("top_events", from_=pf, to_=pt,
+                te = answer(srv.query("top_events", timeout=Q_TIMEOUT_S, from_=pf, to_=pt,
                                       limit=100),
                             "part %d/%d of the top_events partition"
                             % (i + 1, n))
@@ -543,7 +550,7 @@ def section_b(raw_dir):
         parts, whole_c = {}, {}
         for lo, hi, into in ((a, cut, parts), (cut, b, parts),
                              (a, b, whole_c)):
-            te = answer(srv.query("top_events", from_=BASE + lo * S,
+            te = answer(srv.query("top_events", timeout=Q_TIMEOUT_S, from_=BASE + lo * S,
                                   to_=BASE + hi * S, limit=100),
                         "shared-edge window [%d,%d]" % (lo, hi))
             for r in te.get("rows", []):
@@ -615,7 +622,7 @@ def section_c():
         with ServerHarness(raw_dir) as srv:
             for name, a, b, want, _red in cases:
                 resp = require_raw(
-                    srv.query("time_model", from_=BASE + a * S,
+                    srv.query("time_model", timeout=Q_TIMEOUT_S, from_=BASE + a * S,
                               to_=BASE + b * S, filters=filt),
                     "parity-fixture window %s" % name)
                 got = db_time_ms(resp)
@@ -643,7 +650,7 @@ def section_d(raw_dir):
         # gate's own window is not such a window — i.e. that the numbers
         # compared in B are large, not zero.
         empty = require_raw(
-            srv.query("time_model", from_=BASE + (LAST_CLOSE + 100) * S,
+            srv.query("time_model", timeout=Q_TIMEOUT_S, from_=BASE + (LAST_CLOSE + 100) * S,
                       to_=BASE + (LAST_CLOSE + 160) * S),
             "the empty-window control")
         if db_time_ms(empty) != 0.0:
@@ -651,7 +658,7 @@ def section_d(raw_dir):
                  % db_time_ms(empty))
         else:
             ok("empty control window is 0.0 ms — conservation there is vacuous")
-        busy = require_raw(srv.query("time_model", from_=frm, to_=to),
+        busy = require_raw(srv.query("time_model", timeout=Q_TIMEOUT_S, from_=frm, to_=to),
                            "the non-vacuous control")
         if db_time_ms(busy) < 100_000.0:
             fail("the measured window is nearly empty (%.1f ms); section B "
@@ -666,12 +673,12 @@ def section_d(raw_dir):
         holes = [FIRST_CLOSE + PERIOD * i for i in (8, 16, 24)]
         s = 0.0
         for a, b in zip(holes, holes[1:]):
-            r = require_raw(srv.query("time_model", from_=BASE + a * S,
+            r = require_raw(srv.query("time_model", timeout=Q_TIMEOUT_S, from_=BASE + a * S,
                                       to_=BASE + b * S),
                             "aligned-boundary part [%d,%d]" % (a, b))
             s += db_time_ms(r)
         whole_aligned = db_time_ms(require_raw(
-            srv.query("time_model", from_=BASE + holes[0] * S,
+            srv.query("time_model", timeout=Q_TIMEOUT_S, from_=BASE + holes[0] * S,
                       to_=BASE + holes[-1] * S), "aligned-boundary whole"))
         if abs(s - whole_aligned) > 1e-6:
             fail("control: a partition cut ON record closes should conserve "
@@ -683,7 +690,7 @@ def section_d(raw_dir):
 
         # D3. The unbounded request (no from/to) must be untouched by any
         # admission change: every record is in.
-        unb = require_raw(srv.query("time_model", from_=0, to_=0),
+        unb = require_raw(srv.query("time_model", timeout=Q_TIMEOUT_S, from_=0, to_=0),
                           "the unbounded request")
         want_unb = sum(cl - st for st, cl in intervals()) * 1000.0
         if abs(db_time_ms(unb) - want_unb) > 1e-6:
@@ -695,7 +702,7 @@ def section_d(raw_dir):
                % db_time_ms(unb))
 
         # D4. A zero-width window: a real zero, not an unexamined one.
-        zw = require_raw(srv.query("time_model", from_=frm, to_=frm),
+        zw = require_raw(srv.query("time_model", timeout=Q_TIMEOUT_S, from_=frm, to_=frm),
                          "the zero-width window")
         if db_time_ms(zw) != 0.0:
             fail("zero-width window is not 0: %.1f ms" % db_time_ms(zw))
@@ -774,8 +781,12 @@ def main():
         report["B"] = section_b(raw_dir)
         section_c()
         section_d(raw_dir)
-    except Refuse as e:
-        say("REFUSE", str(e))
+    except (Refuse, TimeoutError, RuntimeError, OSError) as e:
+        # A stall, a dead server or an unreadable pipe is a REFUSAL, never a
+        # pass and never a traceback: the harness could not see what it is
+        # gating. Demonstrated with PGWT_ADDITIVITY_TIMEOUT_S=0, which makes
+        # every query time out and the gate exit 2.
+        say("REFUSE", "%s: %s" % (type(e).__name__, e))
         report["refused"] = str(e)
         _write(report)
         print("=== test_window_additivity: REFUSE ===")
