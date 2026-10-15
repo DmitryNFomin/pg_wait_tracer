@@ -470,16 +470,29 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
      * 0 -> 23.7 s, credited, refused AND uncredited all read zero, which
      * says the writer was never asked rather than that it declined.
      *
-     * THE ONE MEASUREMENT THAT TELLS THE REMAINING CAUSES APART, for
-     * whoever finishes this on a box: read summary_open_credited_ns_total
-     * (the v8 WAIT crediting, published just above) in the same capture.
-     *   non-zero  -> pgwt_read_state_map runs and notes intervals, so the
-     *                plumbing is live and the gap is that the capture had no
-     *                on-CPU open interval to note (workload or tier), not
-     *                missing code;
-     *   zero      -> the note path itself is not running (read_state_map not
-     *                reached in that daemon configuration, or summary_writer
-     *                NULL), and the producer call is not the thing to fix.
+     * THE FOURTH OUTCOME, found by reading the writer rather than by
+     * reasoning from the counters: a note can be ACCEPTED and then credited
+     * by nobody, moving no counter at all.
+     *   - crediting happens only in writer_seal_through()
+     *     (src/summary_writer.c:1510), whose first statement is
+     *     `if (!w->fp) return;`;
+     *   - its only two callers are pgwt_summary_push_event() and
+     *     pgwt_summary_flush_completed();
+     *   - w->fp is NULL before the first record opens the file lazily, and
+     *     again after every rotation (:2094).
+     * So on a capture whose in-flight statements are pure CPU — emitting no
+     * wait boundaries, hence no pushed records — the open interval is noted,
+     * nothing seals, and credited/refused/uncredited all stay 0. That is
+     * NOT "the producer never ran", which is what three zeros look like.
+     *
+     * The reading that separates them, and this code predicts its value:
+     * summary_open_credited_ns_total (the v8 WAIT crediting, above) in the
+     * same capture.
+     *   zero too  -> nothing sealed at all; the seal trigger is the bug and
+     *                re-wiring the producer will not move a single counter;
+     *   non-zero  -> seconds were sealed, so the CPU path really was asked
+     *                and declined somewhere, and THEN the producer is worth
+     *                looking at.
      * Neither is distinguishable without a live capture, which is why the
      * wiring was reverted rather than guessed at.
      *
