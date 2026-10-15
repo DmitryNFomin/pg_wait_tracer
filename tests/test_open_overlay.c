@@ -508,12 +508,34 @@ static void test_build_clipping(void)
     CHECK(pgwt_overlay_total_wall_ns(&ov) == 0, "a historical window contributed time");
     pgwt_overlay_free(&ov);
 
-    /* A window entirely after the snapshot contributes nothing either. */
+    /* A window entirely after the snapshot is UNKNOWN, not empty: the daemon
+     * never looked at it. Returning an included overlay with no spans would
+     * read as "nothing was in flight". */
     req = base_req();
     req.from_wall_ns = SNAP_WALL + 1;
     req.to_wall_ns   = SNAP_WALL + 60000000000ULL;
     build_from(&f, &req, &rec, &ov);
-    CHECK(ov.count == 0, "a window past the snapshot synthesized %zu spans", ov.count);
+    CHECK(ov.status != PGWT_OVERLAY_INCLUDED,
+          "a window past the snapshot was answered as an empty overlay");
+    CHECK(strstr(ov.reason, "predates") != NULL, "reason: %s", ov.reason);
+    assert_absent_not_zero(&ov, "window past the snapshot");
+    pgwt_overlay_free(&ov);
+
+    /* The boundary: a window starting exactly at the snapshot is still zero
+     * coverage. One nanosecond earlier is covered. */
+    req = base_req();
+    req.from_wall_ns = SNAP_WALL;
+    req.to_wall_ns   = SNAP_WALL + 1000;
+    build_from(&f, &req, &rec, &ov);
+    CHECK(ov.status != PGWT_OVERLAY_INCLUDED, "from == snapshot was accepted as covered");
+    pgwt_overlay_free(&ov);
+
+    req = base_req();
+    req.from_wall_ns = SNAP_WALL - 1;
+    req.to_wall_ns   = SNAP_WALL + 1000;
+    build_from(&f, &req, &rec, &ov);
+    CHECK(ov.status == PGWT_OVERLAY_INCLUDED && ov.count == 1 && ov.spans[0].wall_ns == 1,
+          "a 1 ns covered sliver was lost");
     pgwt_overlay_free(&ov);
 }
 
@@ -778,6 +800,61 @@ static void test_build_bypass(void)
     assert_absent_not_zero(&ov, "overlapping same-pid intervals");
     pgwt_overlay_free(&ov);
     pgwt_open_snapshot_free(&snap);
+}
+
+static int reject_all(const struct pgwt_overlay_span *s, void *user)
+{
+    (void)s;
+    (*(int *)user)++;
+    return 0;
+}
+
+static int accept_pid(const struct pgwt_overlay_span *s, void *user)
+{
+    return s->pid == *(uint32_t *)user;
+}
+
+static void test_filters(void)
+{
+    struct fx f = base_fx();
+    struct pgwt_overlay_records rec = no_records();
+    struct pgwt_overlay ov;
+
+    /* A filtered window that received unfiltered in-flight time would inflate
+     * exactly the view the user narrowed down. Wiring the filter in is
+     * therefore mandatory, and forgetting it degrades the pane visibly. */
+    struct pgwt_overlay_request req = base_req();
+    req.filters_active = 1;
+    build_from(&f, &req, &rec, &ov);
+    CHECK(ov.status != PGWT_OVERLAY_INCLUDED,
+          "a filtered request got unfiltered in-flight time");
+    assert_absent_not_zero(&ov, "filtered request with no filter callback");
+    pgwt_overlay_free(&ov);
+
+    int calls = 0;
+    req = base_req();
+    req.filters_active = 1;
+    req.accept = reject_all;
+    req.accept_user = &calls;
+    build_from(&f, &req, &rec, &ov);
+    CHECK(ov.status == PGWT_OVERLAY_INCLUDED, "a filtered build degraded: %s", ov.reason);
+    CHECK(calls == 1, "the filter was consulted %d times, expected 1", calls);
+    CHECK(ov.count == 0, "a rejected span was credited anyway");
+    pgwt_overlay_free(&ov);
+
+    uint32_t want = 4242;
+    req = base_req();
+    req.filters_active = 1;
+    req.accept = accept_pid;
+    req.accept_user = &want;
+    build_from(&f, &req, &rec, &ov);
+    CHECK(ov.count == 1 && ov.spans[0].pid == 4242, "the matching span was dropped");
+    pgwt_overlay_free(&ov);
+
+    want = 1;      /* no such backend */
+    build_from(&f, &req, &rec, &ov);
+    CHECK(ov.count == 0, "a non-matching span survived the filter");
+    pgwt_overlay_free(&ov);
 }
 
 static void test_classification(void)
@@ -1058,6 +1135,7 @@ int main(void)
     test_precedence();
     test_precedence_callback();
     test_build_bypass();
+    test_filters();
     test_classification();
     test_transport();
 

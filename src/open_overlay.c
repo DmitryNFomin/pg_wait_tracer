@@ -684,6 +684,13 @@ int pgwt_overlay_build(struct pgwt_overlay *ov,
                                                          : "daemon snapshot unusable");
         return -1;
     }
+    if (req->filters_active && !req->accept) {
+        /* A filtered window with unfiltered in-flight time added to it would
+         * inflate precisely the view the user narrowed. Refuse visibly. */
+        pgwt_overlay_unavailable(ov,
+            "the request is filtered but no span filter was supplied");
+        return -1;
+    }
     if (!rec || (rec->n > 0 && !rec->events)) {
         /* Without the admitted records the precedence rule cannot run, and a
          * span that a real closing record already covers would double count.
@@ -707,6 +714,17 @@ int pgwt_overlay_build(struct pgwt_overlay *ov,
     ov->snapshot_wall_ns = snapshot_wall;
     ov->committed_through_wall_ns = committed_wall;
     ov->daemon_generation = snap->daemon_generation;
+
+    /* The window starts at or after the observation: the daemon's snapshot
+     * says nothing about it. An empty overlay here would read as "nothing was
+     * in flight" when the truth is "we did not look". Stale snapshot, reused
+     * snapshot, clock skew — all of them land here, and all of them are
+     * absence, not zero. */
+    if (req->from_wall_ns >= snapshot_wall) {
+        pgwt_overlay_unavailable(ov,
+            "the daemon snapshot predates the window (stale snapshot or clock skew)");
+        return -1;
+    }
 
     /* Never credit past the observation: the right edge is the window's `to`
      * or the snapshot, whichever is earlier (contract §4b). */
@@ -811,6 +829,11 @@ int pgwt_overlay_build(struct pgwt_overlay *ov,
         sp->cpu_ns = (cpu_full == PGWT_CPU_NS_UNKNOWN)
                    ? PGWT_CPU_NS_UNKNOWN
                    : prorate(cpu_full, sp->wall_ns, s_to - s_from);
+
+        /* The request's own filter predicate, applied to the fully built span
+         * so it can test event, category, query and pid alike. */
+        if (req->accept && !req->accept(sp, req->accept_user))
+            continue;
 
         /* Two live intervals for one pid must never overlap in time: that
          * would be one backend counted twice. PID reuse makes this reachable

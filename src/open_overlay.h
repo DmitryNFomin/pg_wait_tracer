@@ -202,6 +202,16 @@ struct pgwt_overlay_request {
     enum pgwt_overlay_route route;
     enum pgwt_overlay_tier  tier;
     uint64_t expect_generation;      /* 0 = accept any daemon generation */
+
+    /* FILTERS. A filtered window must not receive unfiltered in-flight time:
+     * that would inflate exactly the view a user narrowed down. So the two
+     * fields below are a contract, not a convenience — when filters_active is
+     * set, accept() is MANDATORY and pgwt_overlay_build() refuses without it.
+     * Forgetting to wire the filter in therefore degrades the pane visibly
+     * instead of quietly adding time that the filter excluded. */
+    int   filters_active;
+    int (*accept)(const struct pgwt_overlay_span *span, void *user);
+    void *accept_user;
 };
 
 /* The admitted record array — the one the time reducers are about to read.
@@ -239,9 +249,17 @@ int  pgwt_overlay_fetch(const char *trace_dir, int timeout_ms,
 int  pgwt_overlay_parse(const char *json, struct pgwt_open_snapshot *snap);
 void pgwt_open_snapshot_free(struct pgwt_open_snapshot *snap);
 
-/* Build the request-scoped overlay. Pure. Enforces, in this order:
+/* Build the request-scoped overlay. Pure. ov must have been through
+ * pgwt_overlay_init() first (build frees whatever spans it holds). Enforces,
+ * in this order:
  *   - route/tier refusal (even when snap is a perfectly good INCLUDED reply),
  *   - snapshot status and daemon generation,
+ *   - the window must actually be covered by the observation: a window that
+ *     starts at or after the snapshot is UNKNOWN territory, not empty, and is
+ *     refused rather than returned as an included overlay with no spans. (The
+ *     other side — a `to` past the snapshot — is clipped, and the response's
+ *     snapshot_wall_ns is what tells a consumer where knowledge ends.)
+ *   - a filtered request with no accept() callback,
  *   - committed_through coverage of every span's open start,
  *   - the uniform precedence rule: drop a pid's span when ANY admitted
  *     non-marker record for that pid has ts > open_start — that record IS the
