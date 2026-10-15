@@ -21,11 +21,9 @@
 #  without — both spellings are accepted, so one file works on macOS and
 #  Linux.)
 
-# summary v9 (#424). The live loop in src/map_reader.c is the daemon's only
-# open-interval source, so the producer call that lets an open on-CPU gap be
-# credited per second has to live there; moving it out would mean a second
-# copy of the classification and measured-CPU plumbing, which is the drift
-# this whole change exists to prevent. summary_writer.o has been a mandatory
-# companion of map_reader.o since #379 (tests/Makefile says so above
-# test_event_reader), so nothing has to change in any link line.
-pgwt_summary_note_open_ex  summary_writer  # v9 producer; summary_writer.o is already linked wherever map_reader.o is
+# (No entries. The v9 producer call that needed one was reverted — see the
+# note at pgwt_summary_note_open in src/map_reader.c — and an entry for a
+# symbol nothing references is exactly the kind of rot this guard exists to
+# prevent. The mechanism is exercised by tests/test_check_link_closure.sh
+# against a synthetic repo, so it does not depend on a live entry to stay
+# honest.)

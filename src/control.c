@@ -462,10 +462,26 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
                      d->summary_writer
                          ? d->summary_writer->cpu_open_uncredited_ns_total : 0);
 #if PGWT_SUMMARY_VERSION >= 9
-    /* v9 (#424). summary_open_cpu_credited_ns is THE verification for the
-     * producer side: on a capture containing an in-flight CPU statement it
-     * must be non-zero. Zero there means the live loop is not feeding
-     * observations while every test still passes.
+    /* v9 (#424). THE CAPABILITY IS DORMANT: no producer feeds the writer an
+     * open-CPU observation, deliberately (see the note at the v8
+     * pgwt_summary_note_open call in src/map_reader.c). These counters are
+     * published anyway, because they are what MADE that visible — on a
+     * gate-2 capture with watchpoints attached and cpu_ns_total moving
+     * 0 -> 23.7 s, credited, refused AND uncredited all read zero, which
+     * says the writer was never asked rather than that it declined.
+     *
+     * THE ONE MEASUREMENT THAT TELLS THE REMAINING CAUSES APART, for
+     * whoever finishes this on a box: read summary_open_credited_ns_total
+     * (the v8 WAIT crediting, published just above) in the same capture.
+     *   non-zero  -> pgwt_read_state_map runs and notes intervals, so the
+     *                plumbing is live and the gap is that the capture had no
+     *                on-CPU open interval to note (workload or tier), not
+     *                missing code;
+     *   zero      -> the note path itself is not running (read_state_map not
+     *                reached in that daemon configuration, or summary_writer
+     *                NULL), and the producer call is not the thing to fix.
+     * Neither is distinguishable without a live capture, which is why the
+     * wiring was reverted rather than guessed at.
      *
      * The rest are the writer's own self-checks: eff_rejected_total should
      * read 0 in any build (the producer passes a classification the writer
@@ -478,7 +494,9 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
      * with the v9 writer, which is on another branch; the conditional exists
      * only so this branch builds and box-checks on its own, and the
      * integration agent DELETES it when v9 folds in. At that moment add these
-     * seven keys to tests/test_control.sh's required-key list, by name:
+     * seven keys to tests/test_control.sh's required-key list, by name
+     * (they report a dormant capability honestly — zeros that mean "nobody
+     * asked", not "nothing happened"):
      *
      *     summary_open_cpu_credited_ns
      *     summary_open_cpu_measured_ns
