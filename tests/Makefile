@@ -48,7 +48,8 @@ TESTS     = test_wait_event test_cmdline test_backend_lifecycle test_spawn test_
             test_top_wait_backfill \
             test_window_overlap \
             test_open_overlay \
-            test_replay_window
+            test_replay_window \
+            test_open_cpu_accounting
 
 .PHONY: all clean check
 
