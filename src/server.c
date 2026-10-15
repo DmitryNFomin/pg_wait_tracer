@@ -1607,82 +1607,18 @@ static int straddle_max_blocks(void)
     return PGWT_STRADDLE_MAX_BLOCKS_DEFAULT;
 }
 
-/* ── #429: block candidacy, header-only ──────────────────────────────────
+/* #429 block candidacy lives in ONE place: pgwt_reader_block_candidate()
+ * in src/event_reader.c (agent E, 05bc852), used by both pgwt_replay_file
+ * and load_file_range_mono below. The server carried a second copy of the
+ * same primitive while the two halves were separate branches; it is gone.
+ * The reasoning for the primitive -- why "binary-search block_index[], then
+ * iterate forward until a block starts past the right edge" is unsound
+ * twice over (the index is in COMMIT order and nothing checks it is sorted;
+ * and blocks OVERLAP in time, so a block two positions back can still reach
+ * into the window) -- is in src/event_reader.h above the declaration.
  *
- * Can block `bi` hold a record overlapping [from_mono_ns, to_mono_ns]?
- * Returns 1 = possible (decode it), 0 = provably not, -1 = the header could
- * not be read. **-1 IS NOT "no"**: a caller that cannot see must pay for the
- * decode or report the loss, never silently drop the block.
- *
- * This replaces "binary-search block_index[], then iterate forward until a
- * block starts after the right edge", which load_file_range_mono did and
- * which is unsound twice over:
- *
- *   - block_index[] is appended in COMMIT order (one entry per flushed
- *     block) and nothing sorts it or checks that it is sorted, so the binary
- *     search has no precondition. Commit order and timestamp order disagree
- *     whenever the ring drain lags the sampler — a loaded `--mode full`
- *     capture by design — and then the search returns an ARBITRARY block,
- *     not an off-by-one. Agent E measured an index of [1000 ms, 6000 ms,
- *     1100 ms] written through the public writer API.
- *   - even on a sorted index, `lo - 1` assumes only the immediately
- *     preceding block can reach into the window. Blocks OVERLAP in time (a
- *     SAMPLES block batches ~1 s of ticks across several TRANSITIONS
- *     blocks), so a block two or more positions back can still be inside it.
- *
- * Why it belongs to #424 and not to a follow-up: a straddler in a block the
- * scan never visits is invisible to the answer AND to
- * right_edge_truncated — the window is silently short while reporting
- * itself complete, which is the one property this whole change set exists to
- * remove. A guarantee to "say when it could not" is only as sound as the
- * lookup underneath it.
- *
- * INTERFACE NOTE, deliberately not a second design: agent E's #429 commit
- * (05bc852 on agent/424-replay) lands exactly this primitive in the reader
- * as `pgwt_reader_block_candidate()`, with the same 1 / 0 / -1 contract and
- * the same `right_open` out-parameter, and rebuilds `pgwt_replay_file` on
- * it. This function is the SERVER side of the same seam, written against
- * `pgwt_reader_block_info()` (which already exists and already reads a
- * header without decompressing) so that this branch compiles and gates on
- * its own instead of waiting on a merge. When the two trees combine, the
- * body below collapses onto E's function: call it with `scan_to_ns` as its
- * `to_mono_ns`, and compute `only_straddlers` at the call site from the
- * `*info` it hands back. Same returns, same meaning, no behaviour change —
- * and do not keep two implementations after that.
- *
- * TWO right edges, which is why there are two `to` arguments and not one:
- *   scan_to_ns   — the widest edge this load may look at (the sample
- *                  lookahead or the #424 straddler horizon, whichever is
- *                  further). CANDIDACY is decided against this.
- *   window_to_ns — the request's own right edge. A block whose records all
- *                  close after it can only contribute still-running
- *                  straddlers, which is where the lookahead BUDGET applies.
- * Collapsing them would either refuse straddler blocks or spend the
- * straddler budget on the pre-existing sample lookahead. */
-static int server_block_candidate(struct pgwt_event_reader *r, int bi,
-                                  uint64_t from_mono_ns, uint64_t scan_to_ns,
-                                  uint64_t window_to_ns,
-                                  struct pgwt_block_info *info,
-                                  int *only_straddlers)
-{
-    struct pgwt_block_info local;
-    struct pgwt_block_info *hdr = info ? info : &local;
-    if (only_straddlers)
-        *only_straddlers = 0;
-    if (pgwt_reader_block_info(r, bi, hdr) != 0)
-        return -1;                      /* cannot see — never "no" */
-    /* Every record in a block lies within [first, last] per its header, so
-     * the block can only matter if that span reaches the window. 0 means
-     * unbounded on that side. */
-    if (scan_to_ns != 0 && hdr->first_timestamp_ns > scan_to_ns)
-        return 0;
-    if (from_mono_ns != 0 && hdr->last_timestamp_ns < from_mono_ns)
-        return 0;
-    if (only_straddlers && window_to_ns != 0 &&
-        hdr->first_timestamp_ns > window_to_ns)
-        *only_straddlers = 1;
-    return 1;
-}
+ * The server needs TWO right edges and the shared function takes one, so
+ * the second is applied at the call site; see the comment there. */
 
 /* Is this file SKIPPED WITHOUT BEING LOOKED AT, in a way that could hide a
  * straddler's close?
@@ -1806,11 +1742,36 @@ static void load_file_range_mono(struct pgwt_server *srv,
             cand = !(first_ts > scan_to || last_ts < from_mono);
             only_straddlers = first_ts > sample_to_mono;
         } else {
-            cand = server_block_candidate(&reader, b, from_mono, scan_to,
-                                          sample_to_mono, &bi,
-                                          &only_straddlers);
+            /* #429: ONE implementation of this primitive, agent E's in
+             * src/event_reader.c. The server used to carry a second copy
+             * (server_block_candidate) only so its branch could compile
+             * before the reader half merged; two bodies deciding block
+             * candidacy is how the two halves drift apart silently.
+             *
+             * The seam needs TWO right edges and the shared function takes
+             * one, so the second is computed HERE rather than pushed into
+             * the reader:
+             *   - `scan_to` is passed as E's `to_mono_ns`. For this caller
+             *     it is a HARD horizon -- the widest edge the load may look
+             *     at -- so E's `right_open` ("every record closes after
+             *     to_mono_ns, your budget decides") becomes a rejection.
+             *     Without that line a block beginning past the horizon
+             *     would be decoded, which is the opposite of what the
+             *     horizon is for.
+             *   - `sample_to_mono` is the BUDGETED edge, and
+             *     `only_straddlers` is derived from the header E hands
+             *     back. Collapsing the two into one argument would either
+             *     refuse straddler blocks outright or spend the straddler
+             *     budget on the pre-existing sample lookahead. */
+            int past_scan_edge = 0;
+            cand = pgwt_reader_block_candidate(&reader, b, from_mono,
+                                               scan_to, &bi,
+                                               &past_scan_edge);
+            if (cand > 0 && past_scan_edge)
+                cand = 0;
             first_ts = (cand >= 0) ? bi.first_timestamp_ns : 0;
             last_ts  = (cand >= 0) ? bi.last_timestamp_ns : 0;
+            only_straddlers = (cand > 0) && first_ts > sample_to_mono;
         }
 
         if (cand == 0) {

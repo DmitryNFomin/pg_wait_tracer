@@ -205,6 +205,13 @@ else
             python3 "$SCRIPT_DIR/test_capture_smoke.py" --mode full --pid "$PM_PID"
         run_section "deterministic accuracy: exact counts/durations (--mode full)" \
             python3 "$SCRIPT_DIR/test_deterministic.py" --pid "$PM_PID"
+        # #424 / summary v9: the writer can be present and the producer
+        # never fed, in which case every other section here still passes.
+        # Belongs in the WP==yes branch because the producer runs only
+        # where watchpoint intervals exist; the script REFUSES (exit 2)
+        # rather than passing if it lands anywhere else.
+        run_section "summary v9 open-CPU producer is wired (--mode full)" \
+            bash "$SCRIPT_DIR/test_v9_open_cpu_wired.sh" --pid "$PM_PID"
     else
         summary "### WARNING: full-mode watchpoint assertions SKIPPED"
         summary "perf hardware breakpoints are unavailable in this environment"

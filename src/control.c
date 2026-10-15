@@ -461,7 +461,6 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
     cjson_add_uint64(root, "summary_cpu_open_uncredited_ns_total",
                      d->summary_writer
                          ? d->summary_writer->cpu_open_uncredited_ns_total : 0);
-#if PGWT_SUMMARY_VERSION >= 9
     /* v9 (#424). summary_open_cpu_credited_ns is THE verification for the
      * producer side: on a capture containing an in-flight CPU statement it
      * must be non-zero. Zero there means the live loop is not feeding
@@ -514,7 +513,6 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
     cjson_add_uint64(root, "summary_open_cpu_overcredit_ns",
                      d->summary_writer
                          ? d->summary_writer->open_cpu_overcredit_ns_total : 0);
-#endif
 
     cjson_add_uint64(root, "io_worker_samples_total",
                      ctr->io_worker_samples_total);

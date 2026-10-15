@@ -767,7 +767,15 @@ void pgwt_read_state_map(struct pgwt_daemon *d)
                  * accounting rule, which is correct for it rather than merely
                  * unchanged. */
                 if (d->summary_writer) {
-#if PGWT_SUMMARY_VERSION >= 9
+                    /* The `#if PGWT_SUMMARY_VERSION >= 9` that used to
+                     * wrap this, and the v8 fallback under its #else,
+                     * are gone: v9's writer is in this tree, so the
+                     * conditional could only ever hide the producer
+                     * again if the constant moved. The verification
+                     * that it is actually wired is
+                     * summary_open_cpu_credited_ns on the control
+                     * socket, non-zero on a capture with an in-flight
+                     * CPU statement. */
                     /* v9 (#424): the OBSERVATION is what lets an on-CPU gap
                      * be spread at all. cpu_open is the measured on-CPU ns of
                      * [last_ts, now) already clamped to that wall, and
@@ -781,19 +789,9 @@ void pgwt_read_state_map(struct pgwt_daemon *d)
                      * an UNKNOWN record. For a WAIT the observation is
                      * ignored by the writer, so one call covers both.
                      *
-                     * TEMPORARY GUARD, not a supported configuration. The
-                     * #if exists ONLY because the v9 writer API lands on
-                     * another branch: this file must compile, build and be
-                     * box-checked on its own, and against the v8 writer the
-                     * honest behaviour is today's — a refusal the writer
-                     * COUNTS (open_cpu_refused_total,
-                     * cpu_open_uncredited_ns_total, both published by
-                     * src/control.c), so an unwired producer is auditable
-                     * rather than quietly wrong. Delete the conditional the
-                     * moment v9's summary_writer is in the same tree; the
-                     * seven control-socket keys to add to
-                     * tests/test_control.sh at that point are listed at the
-                     * matching #if in src/control.c. */
+                     * The keys this feeds are published unconditionally
+                     * by src/control.c and asserted by name in
+                     * tests/test_control.sh. */
                     struct pgwt_summary_open_cpu obs = {
                         .eff_we = pgwt_live_effective_event(
                                       we, iv.cat_flag, d->cmd_gate_active,
@@ -804,11 +802,6 @@ void pgwt_read_state_map(struct pgwt_daemon *d)
                     pgwt_summary_note_open_ex(d->summary_writer, snext, we,
                                               sval.last_ts, iv.cat_flag, now,
                                               &obs);
-#else
-                    (void)cpu_measured;
-                    pgwt_summary_note_open(d->summary_writer, snext, we,
-                                           sval.last_ts, iv.cat_flag, now);
-#endif
                 }
             }
         } else if (dbg_scan) {

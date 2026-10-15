@@ -21,31 +21,30 @@ include/pg_wait_tracer.skel.h
 # `make -C tests`. That is what broke the pairing of demo-rehearsal counted
 # attempt 2 (hash c47f9d0f vs attempt 1's d645b0ee).
 #
-# The discriminator is the filename SUFFIX, not a name list: a build product
-# has none (tests/test_foo), every source file has one (tests/test_foo.c,
-# .py, .sh, .mjs, .list). So `!tests/*.*` keeps every source tracked while the
-# class patterns above it swallow the binaries, and a NEW test cannot
-# reintroduce the drift by being forgotten here. `tests/*.o` is restated AFTER
-# the negation because the last matching pattern wins and object files do have
-# a suffix.
+# The rule is the FILENAME SUFFIX, so state it as one instead of guessing
+# prefixes. `tests/*` catches every direct child; the negations give back
+# the two kinds that are real content -- anything with a suffix
+# (tests/foo.c, .py, .sh, .mjs, .list) and every subdirectory
+# (tests/fixtures/, tests/web_unit/, ...). What stays ignored is exactly
+# "a direct child of tests/ with no suffix", which is what a linker emits.
 #
-# Anything added to tests/ in future that is BOTH suffix-less AND meant to be
-# tracked (tests/Makefile is the only one today, and it matches none of these
-# patterns) needs its own `!` line.
-tests/test_*
-tests/wait_cpu_*
-tests/gen_*
-tests/bench_*
-tests/dump_markers
-tests/cross_validate
+# Prefix classes were the first attempt and they drifted within one merge:
+# tests/open_ckpt_stub and tests/trace_closure_probe arrived from
+# agent/424-durability matching none of test_*, wait_cpu_*, gen_*, bench_*.
+# tests/test_gitignore_build_products.sh caught it, which is the whole
+# reason that test exists.
+#
+# tests/Makefile is the only suffix-less file in tests/ that is TRACKED, so
+# it is the only negation that has to name something. Add a `!` line for any
+# future one; the guard above will tell you, by name, the moment there is.
+tests/*
 !tests/*.*
+!tests/*/
+!tests/Makefile
+# ...and back on the ignore side, the two shapes the negations overreach to:
+# object files and the macOS debug bundle a test binary is built with both
+# carry a suffix.
 tests/*.o
-# ...and the macOS debug bundle a test binary gets alongside it. It is the one
-# build product whose NAME CARRIES A SUFFIX, so `!tests/*.*` above would hand
-# it straight back; agent/424-durability hit this and listed
-# tests/test_open_interval.dSYM/ by hand. Restated as a class for the same
-# reason the binaries are: the next test to be built with debug info must not
-# need a new line here.
 tests/*.dSYM/
 # Python bytecode, at ANY depth. It used to be anchored to tests/, which left
 # tests/results/**/__pycache__/*.pyc untracked-but-not-ignored and therefore
