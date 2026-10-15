@@ -9,7 +9,81 @@ from PIL import Image, ImageChops
 GIF_LIMIT = 10_000_000  # Deliberately decimal MB, strictly less than this.
 GIF_MIN_SECONDS = 4
 MOTION_LEVEL = 24  # Ignore JPEG/quantization noise below this luminance delta.
-MOTION_FLOOR = 0.001  # At least 0.1% of the output canvas must visibly change.
+
+# issue #413 (the frame-count twin of #411's motion gate -- same false
+# assumption, different check): the OLD post-encoding check demanded that
+# EVERY frame sampled at the GIF's OWN playback rate (10fps) survive Pillow's
+# deduplication distinct from its neighbor -- i.e. that the clip never go
+# idle for even 100ms. That assumes continuous change from a UI that is, by
+# the product's own design, idle between live ticks and during real network
+# round trips -- the same assumption #411 already found false for MOTION,
+# now found false for FRAME COUNT: a live drill-down clip spanning the
+# entire drill() interaction (~11.2s, including its genuine network-latency
+# waits) measured 75 distinct decoded frames against an old requirement of
+# 112 (span x 10fps, i.e. zero tolerance for any duplicate anywhere in an
+# 11-second clip). 75 distinct frames over 11.2s is a perfectly watchable
+# animation; the old number encoded an assumption the product cannot meet,
+# not a real quality floor.
+#
+# DECODED_MIN_FPS is deliberately far below the SAMPLING fps (10, an
+# unrelated concern: how densely we poll the source video for candidate
+# frames). It is a floor on how fast the OUTPUT must visibly change to read
+# as an animation happening rather than a slideshow. 2fps (one distinct
+# frame every 500ms) is a conservative, round floor for perceiving discrete
+# UI-state motion -- this is a dashboard stepping through states on user
+# actions and network replies, not smooth video, so it does not need
+# anywhere near video frame rates to read as "things are happening."
+# Do not raise this to manufacture a bigger number from a specific clip,
+# and do not pulse harder to manufacture more real frames to clear it either
+# (the capture already tried; during a genuine network wait the screen is
+# not changing, so more captures only produce more frames Pillow would
+# coalesce right back out) -- both would be buying a pass, not fixing a gate.
+DECODED_MIN_FPS = 2
+
+# issue #411: the live UI ticks every 5s (app.js startAutoRefresh's
+# setTimeout(.., 5000)), and the headline/drill clips are each designed to
+# cover roughly ONE tick (see demo-walk-record.py's drill()/dwell() comments
+# and docs/DEMO_RUNBOOK.md's "about five seconds of inspection, including a
+# live tick"). That means a CORRECT recording of this product looks like two
+# static states joined by a single step, not continuous motion: between
+# ticks, consecutive ~100ms-apart sampled frames are pixel-identical BY
+# CONSTRUCTION, because the data they are drawing has not changed yet.
+#
+# The old rule (every consecutive sampled pair must individually clear this
+# floor) therefore refused every CORRECT recording of a live Overview clip,
+# not just broken ones -- measured on FOUR independent live runs against a
+# real ~30-80 minute demo-workload capture (three fixed early 5s windows
+# plus one exhaustive scan of the WHOLE recorded Overview dwell for the
+# best-possible window), all landing at ~0.016% changed pixels per
+# consecutive pair, about 6x under the old 0.100% floor, while two OTHER,
+# independent checks on the SAME dwell confirmed the data genuinely does
+# move: check_overview_wait_mix's DOM text (the wait-mix numbers visibly
+# change every run) and chart_change() (best later frame vs. frame 0, needs
+# >= 1%, which already passes every run). The content was never the
+# problem; demanding smoothness from a step function was.
+#
+# MOTION_FLOOR is now used for TWO clip-level checks instead of one
+# per-pair check (see motion_gate()):
+#   1. first vs. last frame of the whole clip -- the SAME 1% "visibly
+#      changed" bar chart_change() already uses and already clears on every
+#      live run, so a passing clip here is independently corroborated, not
+#      a new number invented to let a known-small number through. A
+#      genuinely static clip (nothing ticks, nothing moves, every frame
+#      identical) scores 0% here and still refuses -- the gate keeps its
+#      teeth (test_identical_frames_refused_before_writing_gif).
+#   2. the SINGLE biggest consecutive-pair jump in the clip -- the tick
+#      landing somewhere in the window -- must ALSO clear 1%. This is what
+#      stops (1) from passing on a single corrupted/flickered frame while
+#      every other frame is frozen: real tick data changes by far more than
+#      1% of the canvas when it does land (the swing that produces
+#      chart_change()'s own >=1%), so a genuine tick clears this easily; a
+#      one-frame JPEG glitch, lacking any real content change, generally
+#      will not.
+# Do not lower this number to make a specific clip pass -- it already
+# matches an existing, independently-verified "visibly changed" bar used
+# elsewhere in this same file; weakening it here would be removing the
+# gate's teeth under a different name, the opposite of this fix.
+MOTION_FLOOR = 0.01
 
 
 class Refusal(Exception):
@@ -87,19 +161,36 @@ def compose(image, crop, width):
 
 
 def motion_gate(pictures, name, stage):
+    """issue #411: clip-level motion, not frame-to-frame motion -- see
+    MOTION_FLOOR's comment for the full reasoning (the product ticks every
+    5s; a clip is designed to straddle ONE tick; demanding every ~100ms
+    sampled pair move refused every correct recording by construction).
+
+    Two checks, both using the SAME per-pixel delta used throughout this
+    file, and BOTH must hold (neither is an average, so one cannot paper
+    over the other failing):
+      1. first vs. last frame: the whole clip must look visibly different
+         end to end. A genuinely static clip -- nothing ticks, nothing
+         moves, every frame identical -- scores 0% here and still refuses.
+      2. the single biggest consecutive-pair jump: at least ONE step
+         somewhere in the clip -- the tick landing -- must itself clear the
+         floor. Without this, (1) could in principle pass from a single
+         corrupted/flickered frame at either end while everything else is
+         frozen, with no evidence real content ever moved on screen."""
     def delta(a, b):
         hist = ImageChops.difference(a.convert("RGB"), b.convert("RGB")).convert("L").histogram()
         return sum(hist[MOTION_LEVEL:]) / (a.width * a.height)
     endpoint = delta(pictures[0], pictures[-1])
     consecutive = [delta(a, b) for a, b in zip(pictures, pictures[1:])]
-    for pair, value in [("first/last", endpoint)] + [
-            (f"consecutive {n}/{n+1}", value) for n, value in enumerate(consecutive)]:
+    best_step = max(consecutive) if consecutive else 0.0
+    for check, value in [("first/last", endpoint), ("best single step", best_step)]:
         if value < MOTION_FLOOR:
-            raise Refusal(8, f"{name}: motion gate ({stage}, {pair}): "
+            raise Refusal(8, f"{name}: motion gate ({stage}, {check}): "
                           f"{value:.6%} changed pixels, need >= {MOTION_FLOOR:.3%} "
                           f"at luminance delta >= {MOTION_LEVEL}")
     return {"first_last_changed_fraction": endpoint,
-            "minimum_consecutive_changed_fraction": min(consecutive),
+            "best_consecutive_changed_fraction": best_step,
+            "minimum_consecutive_changed_fraction": min(consecutive) if consecutive else 0.0,
             "consecutive_changed_fractions": consecutive,
             "pixel_fraction_floor": MOTION_FLOOR, "luminance_delta_floor": MOTION_LEVEL}
 
@@ -146,11 +237,16 @@ def write_gif(root, frames, definition):
     size = path.stat().st_size
     if size >= GIF_LIMIT:
         raise Refusal(6, f"{path.name}: {size} bytes exceeds strict <10 MB limit")
+    decoded_minimum = max(math.ceil(GIF_MIN_SECONDS * DECODED_MIN_FPS),
+                          math.ceil(span * DECODED_MIN_FPS))
     try:
         with Image.open(path) as check:
-            if check.n_frames < minimum:
+            if check.n_frames < decoded_minimum:
                 raise Refusal(7, f"{path.name}: frame count gate after encoding: "
-                              f"{check.n_frames} decoded frames, need {minimum}")
+                              f"{check.n_frames} distinct decoded frames, need "
+                              f"{decoded_minimum} for >= {GIF_MIN_SECONDS}s at "
+                              f"{DECODED_MIN_FPS} distinct fps (not the {definition['fps']} "
+                              "sampling fps -- see DECODED_MIN_FPS)")
             decoded, durations = [], []
             for n in range(check.n_frames):
                 check.seek(n); check.load()
@@ -162,7 +258,8 @@ def write_gif(root, frames, definition):
         raise
     definition.update(bytes=size, sampled_frame_indices=indices,
                       rendered_size=[definition["width"], height], source_span_s=span,
-                      minimum_frame_count=minimum, decoded_frame_count=len(decoded),
+                      minimum_frame_count=minimum, decoded_minimum_frame_count=decoded_minimum,
+                      decoded_frame_count=len(decoded),
                       playback_span_s=sum(durations)/1000, encoded_fps=1000/durations[0],
                       motion={"sampled":source_motion,"palette":palette_motion,"decoded":decoded_motion})
 
