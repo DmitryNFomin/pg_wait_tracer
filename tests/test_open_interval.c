@@ -601,6 +601,66 @@ static void test_full_house(void)
     free(s);
 }
 
+/* The invariant the consumer relies on — pids present == status included ==
+ * complete — is ENFORCED by the serialiser, not just documented. Both ways of
+ * breaking it are a producer bug, and both must land on the degraded side:
+ * an optimistic reading of a producer bug is how an inflated total ships. */
+static void test_status_invariant(void)
+{
+    printf("test_status_invariant\n");
+
+    /* (a) included + complete false (e.g. a future partial mode wired in
+     *     carelessly) must serialise as unavailable WITHOUT rows. */
+    struct pgwt_open_snapshot *s = new_snapshot();
+    add_row(s, 301, 0, MS(9));
+    s->complete = false;
+    pgwt_open_snapshot_set_reason(s, "ring backlogged after the drain bound");
+    char *str = NULL;
+    cJSON *root = json_of(s, PGWT_OPEN_INTERVALS_REPLY_MAX, &str);
+    cJSON *p = str ? cJSON_Parse(str) : NULL;
+    CHECK(p != NULL, "invariant case (a) did not serialise");
+    if (p) {
+        CHECK(strcmp(cJSON_GetObjectItem(p, "status")->valuestring,
+                     "unavailable") == 0,
+              "included+incomplete must be downgraded to unavailable");
+        CHECK(cJSON_GetObjectItem(p, "pids") == NULL,
+              "included+incomplete must not ship its rows");
+        CHECK(cJSON_IsFalse(cJSON_GetObjectItem(p, "complete")),
+              "the downgraded reply must be complete:false");
+        cJSON *rs = cJSON_GetObjectItem(p, "reason");
+        CHECK(rs && strstr(rs->valuestring, "backlog") != NULL,
+              "the producer's own reason must survive the downgrade");
+        cJSON_Delete(p);
+    }
+    free(str);
+    cJSON_Delete(root);
+    free(s);
+
+    /* (b) a degraded status whose `complete` was left true must still be
+     *     reported incomplete on the wire. */
+    s = new_snapshot();
+    add_row(s, 302, 0, MS(9));
+    s->status = PGWT_OPEN_SNAP_REFUSED;
+    s->complete = true;                     /* the producer bug */
+    pgwt_open_snapshot_set_reason(s, "sampled tier: no watchpoints armed");
+    str = NULL;
+    root = json_of(s, PGWT_OPEN_INTERVALS_REPLY_MAX, &str);
+    p = str ? cJSON_Parse(str) : NULL;
+    CHECK(p != NULL, "invariant case (b) did not serialise");
+    if (p) {
+        CHECK(cJSON_IsFalse(cJSON_GetObjectItem(p, "complete")),
+              "a refused reply can never be complete:true");
+        CHECK(cJSON_GetObjectItem(p, "pids") == NULL,
+              "a refused reply can never carry rows");
+        CHECK(cJSON_IsFalse(cJSON_GetObjectItem(p, "ok")),
+              "a refused reply is not ok");
+        cJSON_Delete(p);
+    }
+    free(str);
+    cJSON_Delete(root);
+    free(s);
+}
+
 /* A snapshot whose anchor was never filled must not fabricate a wall clock. */
 static void test_anchor_absent(void)
 {
@@ -783,6 +843,7 @@ int main(void)
     test_json_shape();
     test_empty_but_included();
     test_degraded_statuses();
+    test_status_invariant();
     test_full_house();
     test_anchor_absent();
     test_transport_queue();

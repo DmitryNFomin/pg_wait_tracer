@@ -1073,10 +1073,22 @@ void pgwt_collect_open_intervals(struct pgwt_daemon *d,
     s->committed_through_ns = degraded
         ? pgwt_writer_committed_through_ns(d->event_writer)
         : publish_from;
-    s->status = PGWT_OPEN_SNAP_INCLUDED;
-    s->complete = degraded == NULL;
-    if (degraded)
+    if (degraded) {
+        /* The rows themselves are fine, but the CLOSED prefix they must be
+         * reconciled against is not known to the needed precision — and a
+         * consumer handed spans plus complete:false has to decide what that
+         * means. It does not get to decide: the invariant is
+         * `pids present == status included == complete`, so a degraded answer
+         * drops the rows and the pane is labelled. Under-reporting with a
+         * visible label beats a number nobody can audit. */
+        s->status = PGWT_OPEN_SNAP_UNAVAILABLE;
+        s->complete = false;
+        s->n_rows = 0;
         pgwt_open_snapshot_set_reason(s, degraded);
+        return;
+    }
+    s->status = PGWT_OPEN_SNAP_INCLUDED;
+    s->complete = true;
 }
 
 #endif /* !PGWT_SERVER */

@@ -23,7 +23,18 @@
  * ABSENT — not an empty array, not zeros — so the consumer reports the
  * in-flight contribution as absent and labels the closed-record totals as
  * excluding in-flight time. An incomplete total is never advertised as
- * complete. */
+ * complete.
+ *
+ * THE INVARIANT a consumer may rely on:
+ *
+ *     pids present  ==  status "included"  ==  complete true
+ *
+ * There is deliberately no fourth combination: a half-trustworthy answer is
+ * the shape in which an under-count travels unnoticed. `complete` is still a
+ * separate field because the contract names it and because a future partial
+ * mode must announce itself rather than quietly reuse "included". An EMPTY
+ * pids array under status "included" is a measurement — nothing is open —
+ * and is not degraded. */
 #ifndef PGWT_OPEN_SNAPSHOT_H
 #define PGWT_OPEN_SNAPSHOT_H
 
@@ -156,10 +167,19 @@ static inline void pgwt_json_u64(cJSON *o, const char *k, uint64_t v)
  * replaced WHOLE by status unavailable + reason — never truncated, because a
  * truncated JSON reply read by a consumer is indistinguishable from a short
  * honest one until it fails to parse, and a partial answer that DOES parse is
- * worse still. */
-static inline cJSON *pgwt_open_snapshot_to_json(
-    const struct pgwt_open_snapshot *s, size_t reply_max)
+ * worse still.
+ *
+ * The status invariant is enforced HERE, not merely documented: the writer of
+ * a snapshot cannot emit "included" with complete false, and cannot attach
+ * rows to a degraded status, however it filled the struct. A convention that
+ * lives only in a comment is one careless producer away from an inflated
+ * total. */
+static inline cJSON *pgwt_open_snapshot_json_as(
+    const struct pgwt_open_snapshot *s,
+    enum pgwt_open_snapshot_status status, const char *reason,
+    size_t reply_max, int depth)
 {
+    bool included = status == PGWT_OPEN_SNAP_INCLUDED;
     cJSON *root = cJSON_CreateObject();
     if (!root)
         return NULL;
@@ -167,12 +187,12 @@ static inline cJSON *pgwt_open_snapshot_to_json(
      * is usable. A daemon too old to know the command replies
      * {"ok":false,"error":"unknown command"} — the consumer maps that to
      * unavailable itself. */
-    cJSON_AddBoolToObject(root, "ok", s->status == PGWT_OPEN_SNAP_INCLUDED);
+    cJSON_AddBoolToObject(root, "ok", included);
     cJSON_AddStringToObject(root, "cmd", PGWT_OPEN_INTERVALS_CMD);
     cJSON_AddStringToObject(root, "status",
-                            pgwt_open_snapshot_status_str(s->status));
-    cJSON_AddStringToObject(root, "reason", s->reason);
-    cJSON_AddBoolToObject(root, "complete", s->complete);
+                            pgwt_open_snapshot_status_str(status));
+    cJSON_AddStringToObject(root, "reason", reason ? reason : "");
+    cJSON_AddBoolToObject(root, "complete", included);
     pgwt_json_u64(root, "snapshot_ns", s->snapshot_ns);
     pgwt_json_u64(root, "snapshot_wall_ns", s->snapshot_wall_ns);
     pgwt_json_u64(root, "now_mono_ns", s->now_mono_ns);
@@ -190,7 +210,7 @@ static inline cJSON *pgwt_open_snapshot_to_json(
 
     /* pids is present ONLY for a trustworthy answer. Absent beats empty: an
      * empty array says "nothing is open", which is a measurement. */
-    if (s->status == PGWT_OPEN_SNAP_INCLUDED) {
+    if (included) {
         cJSON *arr = cJSON_AddArrayToObject(root, "pids");
         if (!arr) {
             cJSON_Delete(root);
@@ -243,19 +263,32 @@ static inline cJSON *pgwt_open_snapshot_to_json(
         return root;
 
     cJSON_Delete(root);
-    struct pgwt_open_snapshot cut = *s;
-    cut.status = PGWT_OPEN_SNAP_UNAVAILABLE;
-    cut.complete = false;
-    cut.n_rows = 0;
-    snprintf(cut.reason, sizeof(cut.reason),
+    /* Over cap. One retry, rows dropped; if THAT does not fit (an absurd cap)
+     * refuse with NULL rather than emit anything a consumer could read as a
+     * successful empty answer. */
+    if (depth > 0)
+        return NULL;
+    char why[128];
+    snprintf(why, sizeof(why),
              "reply too large: %d open intervals serialise to %zu bytes, "
              "cap %zu", s->open_count, len + 1, reply_max);
-    /* One level of recursion at most: the rows are gone, so the replacement
-     * cannot itself be over-cap unless the cap is absurdly small, in which
-     * case this returns NULL and the caller reports a send failure. */
-    if (cut.status == s->status)
-        return NULL;
-    return pgwt_open_snapshot_to_json(&cut, reply_max);
+    return pgwt_open_snapshot_json_as(s, PGWT_OPEN_SNAP_UNAVAILABLE, why,
+                                      reply_max, depth + 1);
+}
+
+static inline cJSON *pgwt_open_snapshot_to_json(
+    const struct pgwt_open_snapshot *s, size_t reply_max)
+{
+    /* An "included" snapshot that its own producer marked incomplete is a
+     * producer bug, and the fail-safe answer to a producer bug is the
+     * degraded one — never the optimistic one. */
+    if (s->status == PGWT_OPEN_SNAP_INCLUDED && !s->complete)
+        return pgwt_open_snapshot_json_as(
+            s, PGWT_OPEN_SNAP_UNAVAILABLE,
+            s->reason[0] ? s->reason
+                         : "internal: snapshot marked included but incomplete",
+            reply_max, 0);
+    return pgwt_open_snapshot_json_as(s, s->status, s->reason, reply_max, 0);
 }
 
 #endif /* PGWT_OPEN_SNAPSHOT_H */
