@@ -46,7 +46,8 @@ TESTS     = test_wait_event test_cmdline test_backend_lifecycle test_spawn test_
             test_block_agg bench_block_agg test_transitions_loader \
             test_top_wait_backfill \
             test_open_interval \
-            test_trace_closure
+            test_trace_closure \
+            test_open_ckpt
 
 .PHONY: all clean check
 
@@ -393,6 +394,12 @@ test_replay_fidelity: test_replay_fidelity.c ../src/event_reader.c \
 # close vs rotation vs crash recovery vs legacy, plus the bypass suite (a
 # gate that cannot read the file must refuse, never approve). Server build.
 test_trace_closure: test_trace_closure.c $(BUILD)/server_event_writer.o
+	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -llz4
+
+# test_open_ckpt: #424 deliverable 2 — open-interval checkpoints as one
+# contract (identity, durable publication, recovery, suppression), with the
+# bypass suite for a sidecar that cannot be validated. Server build.
+test_open_ckpt: test_open_ckpt.c $(BUILD)/server_event_writer.o
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -llz4
 
 test_durability: test_durability.c $(BUILD)/server_event_writer.o \

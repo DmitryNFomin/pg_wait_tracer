@@ -4,6 +4,7 @@
 
 #include "pg_wait_tracer.h"
 #include "trace_closure.h"
+#include "open_ckpt.h"
 
 #include <stdint.h>
 #include <stddef.h>
@@ -165,6 +166,12 @@ struct pgwt_event_writer {
      * clock does not restart, and the live snapshot compares against it). */
     uint64_t      committed_through_ns;
 
+    /* #424 deliverable 2: open-interval checkpoint sequence within the
+     * CURRENT file. Reset on every file open, because the checkpoint's
+     * identity is the file's start stamps — a seq from a previous file could
+     * never be compared against this one's. */
+    uint64_t      ckpt_seq;
+
     /* Stats */
     uint64_t      total_events_written;
     uint64_t      total_bytes_written;
@@ -196,6 +203,50 @@ int  pgwt_writer_push_samples(struct pgwt_event_writer *w,
  * success, -1 if a block write failed. Safe (no-op) before the first event. */
 int  pgwt_writer_publish(struct pgwt_event_writer *w);
 uint64_t pgwt_writer_committed_through_ns(const struct pgwt_event_writer *w);
+
+/* #424 deliverable 2: checkpoint the intervals that are open RIGHT NOW, so a
+ * crash leaves evidence of them instead of nothing.
+ *
+ * `recs` are the closing records the shutdown flush WOULD write at
+ * `now_mono_ns` — build them with pgwt_build_open_stretch (src/open_interval.h),
+ * never by hand: the skip rules and the measured-CPU arithmetic live there,
+ * and a second copy of them is how the live screen and the trace drift apart.
+ * `count` may be 0, and a 0-record checkpoint is NOT a no-op: it is what
+ * supersedes an older checkpoint whose intervals have since closed. Skipping
+ * it would leave a stale claim behind for recovery to find, which is the
+ * double-count this contract exists to prevent.
+ *
+ * The call publishes the writer's own buffers FIRST (so the watermark the
+ * checkpoint records is one the trace actually reached), then writes the
+ * sidecar atomically: tmp → fsync → rename → fsync(dir).
+ *
+ * Returns 0 on success; -1 without writing anything if there is no open trace
+ * file (a checkpoint with no file to name has no identity and must never be
+ * written), if `count` exceeds PGWT_OPEN_CKPT_MAX_RECORDS, if a record is
+ * self-inconsistent (duration longer than its own timestamp), or if the
+ * publish or any file step failed. */
+int  pgwt_writer_checkpoint_open(struct pgwt_event_writer *w,
+                                 uint64_t now_mono_ns,
+                                 const struct pgwt_open_ckpt_record *recs,
+                                 int count);
+
+/* Read and validate a checkpoint sidecar.
+ *
+ * `path` is the sidecar (`<archive>.trace.lz4.open`, or
+ * `<dir>/current.trace.open` for a live capture). `expect` is the identity of
+ * the trace file the caller intends to apply it to — pass NULL ONLY to
+ * inspect, never to count. On PGWT_OPEN_CKPT_OK, *out describes the records
+ * and `*buf_out` owns the memory they point into (free() it). On any other
+ * return nothing is allocated and *out is zeroed: a checkpoint that cannot be
+ * validated is not used, and the reason is named (pgwt_open_ckpt_rc_name).
+ *
+ * Reminder the caller may not skip: these durations are LOWER BOUNDS, and a
+ * record must be dropped when the trace already holds the closing record for
+ * the same stretch — pgwt_open_ckpt_suppressed_by() in src/open_ckpt.h. */
+enum pgwt_open_ckpt_rc
+pgwt_open_ckpt_load(const char *path,
+                    const struct pgwt_open_ckpt_identity *expect,
+                    struct pgwt_open_ckpt_view *out, void **buf_out);
 
 /* #424: how the trace file at `path` ended — see src/trace_closure.h for the
  * verdicts and the rules behind them. Returns 0 when the header was read and

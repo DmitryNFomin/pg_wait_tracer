@@ -618,3 +618,17 @@ test_open_interval
 # wrong magic with every bit set, a directory, and a capture that never
 # opened a file at all. A gate that cannot see must refuse, never approve.
 test_trace_closure
+
+# test_open_ckpt (#424 deliverable 2): the open-interval checkpoint as ONE
+# contract -- identity, durable publication, recovery, suppression. Covers the
+# standard CRC-32 check value (a sidecar must validate for any reader), every
+# named refusal reason, the suppression predicate on inputs where it must say
+# yes AND no (with an exact recovered-ns total, so "suppress everything" and
+# "suppress nothing" both fail), publish-before-watermark, a crash carrying the
+# sidecar to its archive, a clean close and a rotation DROPPING it (both would
+# double count against real closing records), an uncertified close KEEPING it,
+# and the bypass suite: a sidecar from another file, a flipped bit, a chopped
+# record array, an insane count, a text file, no sidecar at all, an empty
+# checkpoint superseding a non-empty one, and retention taking the sidecar with
+# its archive.
+test_open_ckpt

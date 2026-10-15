@@ -203,6 +203,182 @@ static int write_header_flags(FILE *fp, uint16_t flags)
     return 0;
 }
 
+/* ── Open-interval checkpoints (#424 deliverable 2) ───────── */
+
+static void ckpt_paths(const char *dir, char *live, size_t live_sz,
+                       char *tmp, size_t tmp_sz)
+{
+    if (live) snprintf(live, live_sz, "%s/%s", dir, PGWT_OPEN_CKPT_NAME);
+    if (tmp)  snprintf(tmp,  tmp_sz,  "%s/%s", dir, PGWT_OPEN_CKPT_TMP);
+}
+
+/* Drop the live sidecar (and any torn tmp). Called whenever the checkpoint it
+ * holds has become redundant or unattributable:
+ *
+ *   - a CLEAN close already wrote the real closing records for every open
+ *     interval, so keeping the checkpoint would double count observed time;
+ *   - a ROTATION continues the capture in the next file, where those same
+ *     intervals get real closing records — same double count;
+ *   - a new file has a new identity, so the old sidecar can describe nothing.
+ *
+ * This is the other half of suppression, applied at the only moment when it
+ * can be decided locally and with certainty. */
+static void ckpt_discard(const char *dir, const char *why, bool verbose)
+{
+    char live[700], tmp[700];
+    ckpt_paths(dir, live, sizeof(live), tmp, sizeof(tmp));
+    unlink(tmp);
+    if (unlink(live) == 0 && verbose)
+        fprintf(stderr, "INFO: dropped the open-interval checkpoint (%s)\n",
+                why);
+}
+
+enum pgwt_open_ckpt_rc
+pgwt_open_ckpt_load(const char *path,
+                    const struct pgwt_open_ckpt_identity *expect,
+                    struct pgwt_open_ckpt_view *out, void **buf_out)
+{
+    if (buf_out)
+        *buf_out = NULL;
+    if (out) {
+        memset(&out->header, 0, sizeof(out->header));
+        out->records = NULL;
+        out->count = 0;
+    }
+    if (!path)
+        return PGWT_OPEN_CKPT_TOO_SHORT;
+
+    FILE *fp = fopen(path, "rb");
+    if (!fp)
+        return PGWT_OPEN_CKPT_TOO_SHORT;   /* no sidecar is not a valid one */
+
+    /* Bound the read by the format's own cap before allocating anything: a
+     * sidecar claiming a huge size must not be able to spend our memory. */
+    struct stat st;
+    if (fstat(fileno(fp), &st) != 0 || !S_ISREG(st.st_mode)) {
+        fclose(fp);
+        return PGWT_OPEN_CKPT_TOO_SHORT;
+    }
+    size_t max = sizeof(struct pgwt_open_ckpt_header) +
+        (size_t)PGWT_OPEN_CKPT_MAX_RECORDS *
+        sizeof(struct pgwt_open_ckpt_record);
+    if ((size_t)st.st_size > max || (size_t)st.st_size <
+        sizeof(struct pgwt_open_ckpt_header)) {
+        fclose(fp);
+        return (size_t)st.st_size > max ? PGWT_OPEN_CKPT_COUNT_INSANE
+                                        : PGWT_OPEN_CKPT_TOO_SHORT;
+    }
+
+    size_t len = (size_t)st.st_size;
+    void *buf = malloc(len);
+    if (!buf) {
+        fclose(fp);
+        return PGWT_OPEN_CKPT_TOO_SHORT;
+    }
+    size_t got = fread(buf, 1, len, fp);
+    fclose(fp);
+
+    struct pgwt_open_ckpt_view view;
+    enum pgwt_open_ckpt_rc rc = pgwt_open_ckpt_parse(buf, got, expect, &view);
+    if (rc != PGWT_OPEN_CKPT_OK) {
+        free(buf);
+        return rc;
+    }
+    if (out)
+        *out = view;
+    if (buf_out)
+        *buf_out = buf;
+    else
+        free(buf);          /* caller only wanted the verdict */
+    return PGWT_OPEN_CKPT_OK;
+}
+
+int pgwt_writer_checkpoint_open(struct pgwt_event_writer *w,
+                                uint64_t now_mono_ns,
+                                const struct pgwt_open_ckpt_record *recs,
+                                int count)
+{
+    if (!w || count < 0 || (count > 0 && !recs))
+        return -1;
+    /* No file, no identity. A checkpoint that cannot name the trace it
+     * describes is exactly the stale-sidecar hazard, so it is never written. */
+    if (!w->enabled || !w->fp)
+        return -1;
+    if (count > PGWT_OPEN_CKPT_MAX_RECORDS) {
+        fprintf(stderr, "WARN: refusing an open-interval checkpoint of %d "
+                "records (cap %d)\n", count, PGWT_OPEN_CKPT_MAX_RECORDS);
+        return -1;
+    }
+    for (int i = 0; i < count; i++) {
+        /* An interval cannot have started before the clock did. A record that
+         * fails this would decode to a start in the far future via unsigned
+         * wraparound, and be counted. */
+        if (recs[i].duration_ns > recs[i].timestamp_ns) {
+            fprintf(stderr, "WARN: refusing an open-interval checkpoint: "
+                    "record %d has duration > timestamp\n", i);
+            return -1;
+        }
+    }
+
+    /* DURABLE PUBLICATION, in order: the closed-record prefix first, so the
+     * watermark this checkpoint reports is one the trace really reached. */
+    if (pgwt_writer_publish(w) != 0) {
+        fprintf(stderr, "WARN: not writing an open-interval checkpoint: the "
+                "trace publish failed, so its watermark would be a claim\n");
+        return -1;
+    }
+
+    char live[700], tmp[700];
+    ckpt_paths(w->trace_dir, live, sizeof(live), tmp, sizeof(tmp));
+
+    struct pgwt_open_ckpt_header h = {
+        .magic = PGWT_OPEN_CKPT_MAGIC,
+        .version = PGWT_OPEN_CKPT_VERSION,
+        .flags = 0,
+        .trace_start_wall_ns = w->file_start_wall_ns,
+        .trace_start_mono_ns = w->file_start_mono_ns,
+        .seq = ++w->ckpt_seq,
+        .checkpoint_mono_ns = now_mono_ns,
+        .committed_through_ns = w->committed_through_ns,
+        .num_records = (uint32_t)count,
+        .checksum = pgwt_open_ckpt_crc32(recs, (size_t)count * sizeof(*recs)),
+    };
+
+    FILE *f = fopen(tmp, "wbe");
+    if (!f) {
+        fprintf(stderr, "WARN: cannot write %s: %s\n", tmp, strerror(errno));
+        return -1;
+    }
+    if (w->trace_gid != (gid_t)-1) {
+        fchown(fileno(f), (uid_t)-1, w->trace_gid);
+        fchmod(fileno(f), 0640);
+    }
+    int ok = fwrite(&h, sizeof(h), 1, f) == 1;
+    if (ok && count > 0)
+        ok = fwrite(recs, sizeof(*recs), (size_t)count, f) == (size_t)count;
+    if (ok && fflush(f) != 0)
+        ok = 0;
+    if (ok && fsync(fileno(f)) != 0)
+        ok = 0;
+    fclose(f);
+    if (!ok) {
+        unlink(tmp);
+        fprintf(stderr, "WARN: open-interval checkpoint %llu not written "
+                "durably (%s) — the previous one stands\n",
+                (unsigned long long)h.seq, strerror(errno));
+        return -1;
+    }
+    /* Atomic swap: a crash either leaves the previous checkpoint or this one,
+     * never a half-written mixture of the two. */
+    if (rename(tmp, live) != 0) {
+        unlink(tmp);
+        fprintf(stderr, "WARN: cannot install %s: %s\n", live, strerror(errno));
+        return -1;
+    }
+    pgwt_fsync_dir(w->trace_dir);
+    return 0;
+}
+
 int pgwt_trace_file_closure(const char *path, enum pgwt_closure_status *out)
 {
     if (out)
@@ -248,6 +424,10 @@ static void recover_current_trace(struct pgwt_event_writer *w)
     struct stat st;
     if (stat(cur, &st) != 0) {
         unlink(meta);   /* meta without a current file is an orphan */
+        /* A checkpoint whose trace file is gone can never be attributed to
+         * anything — keeping it only risks a later misattribution. */
+        ckpt_discard(w->trace_dir, "no current.trace to attribute it to",
+                     w->verbose);
         return;
     }
 
@@ -285,6 +465,9 @@ static void recover_current_trace(struct pgwt_event_writer *w)
             fprintf(stderr, "WARN: %s has an unreadable header — preserved "
                     "as %s\n", cur, aside);
         unlink(meta);
+        /* Unreadable header = no identity to check a checkpoint against. */
+        ckpt_discard(w->trace_dir, "its trace file has an unreadable header",
+                     w->verbose);
         pgwt_fsync_dir(w->trace_dir);
         return;
     }
@@ -345,6 +528,10 @@ static void recover_current_trace(struct pgwt_event_writer *w)
             unlink(cur);   /* header-only file: nothing to preserve */
         }
         unlink(meta);
+        /* No complete block means no archive a reader would ever open, so
+         * there is nothing for a checkpoint to be attached to. */
+        ckpt_discard(w->trace_dir, "its trace file has no complete block",
+                     w->verbose);
         pgwt_fsync_dir(w->trace_dir);
         return;
     }
@@ -421,6 +608,52 @@ static void recover_current_trace(struct pgwt_event_writer *w)
         return;
     }
     unlink(meta);
+
+    /* #424 deliverable 2, RECOVERY. The crashed daemon may have left an
+     * open-interval checkpoint. Validate it against the identity of the file
+     * we just archived and carry it next to that archive; otherwise delete it
+     * and say why. It is deliberately NOT merged into the trace stream: the
+     * block layout has no field that could mark a record as reconstructed, so
+     * merging would turn a lower bound into indistinguishable observed time.
+     *
+     * The identity check is what stops the sidecar of one file being read as
+     * evidence about another — a stale sidecar is otherwise indistinguishable
+     * from a fresh one, and would add time to a capture it never described. */
+    {
+        char live[700], sidecar[700];
+        ckpt_paths(w->trace_dir, live, sizeof(live), NULL, 0);
+        snprintf(sidecar, sizeof(sidecar), "%s%s", dest,
+                 PGWT_OPEN_CKPT_SUFFIX);
+        struct pgwt_open_ckpt_identity id = {
+            .trace_start_wall_ns = hdr.start_time_ns,
+            .trace_start_mono_ns = hdr.clock_offset_ns,
+        };
+        struct pgwt_open_ckpt_view view;
+        enum pgwt_open_ckpt_rc crc =
+            pgwt_open_ckpt_load(live, &id, &view, NULL);
+        if (crc == PGWT_OPEN_CKPT_OK) {
+            if (rename(live, sidecar) == 0)
+                fprintf(stderr, "INFO: carried open-interval checkpoint %llu "
+                        "(%d intervals open at the crash) -> %s\n",
+                        (unsigned long long)view.header.seq, view.count,
+                        sidecar);
+            else {
+                fprintf(stderr, "WARN: cannot keep the open-interval "
+                        "checkpoint as %s: %s — dropping it\n", sidecar,
+                        strerror(errno));
+                unlink(live);
+            }
+        } else if (access(live, F_OK) == 0) {
+            fprintf(stderr, "WARN: refused the open-interval checkpoint "
+                    "next to %s (%s) — dropping it\n", dest,
+                    pgwt_open_ckpt_rc_name(crc));
+            unlink(live);
+        }
+        char tmp[700];
+        ckpt_paths(w->trace_dir, NULL, 0, tmp, sizeof(tmp));
+        unlink(tmp);      /* a torn checkpoint write is always stale */
+    }
+
     pgwt_fsync_dir(w->trace_dir);
     fprintf(stderr, "INFO: recovered previous current.trace: %d blocks, "
             "%llu events -> %s\n", nidx, (unsigned long long)nevents, dest);
@@ -500,6 +733,15 @@ static int open_trace_file(struct pgwt_event_writer *w, uint64_t first_mono_ns)
     }
 
     w->num_blocks = 0;
+
+    /* #424: a new file has a new identity, so any checkpoint still sitting
+     * under the live name describes a file that no longer exists here.
+     * Recovery has already carried the valid ones next to their archives, so
+     * whatever is left is unattributable. Sequence numbers restart with the
+     * file for the same reason. */
+    w->ckpt_seq = 0;
+    ckpt_discard(w->trace_dir, "a new trace file started", w->verbose);
+
     return 0;
 }
 
@@ -950,6 +1192,12 @@ int pgwt_writer_check_rotation(struct pgwt_event_writer *w)
                  w->trace_dir);
         unlink(meta_path);
     }
+    /* #424 SUPPRESSION at rotation: the intervals this checkpoint describes
+     * are still open and will get REAL closing records in the next file.
+     * Keeping the checkpoint beside the rotated archive would count the same
+     * nanoseconds twice. */
+    ckpt_discard(w->trace_dir, "rotation: those intervals continue in the "
+                 "next file", w->verbose);
     pgwt_fsync_dir(w->trace_dir);
 
     /* Reset stats for next file */
@@ -969,7 +1217,20 @@ int pgwt_writer_close(struct pgwt_event_writer *w)
      * never set over data that is not on disk. If it fails the file simply
      * stays uncertified — a reader then says "open intervals may be
      * missing", which is the truth. */
-    finalize_current_file(w, PGWT_FLAG_CLOSED_CLEAN);
+    int certified = finalize_current_file(w, PGWT_FLAG_CLOSED_CLEAN) == 0;
+
+    /* #424 SUPPRESSION at shutdown. A clean close means the daemon's
+     * open-interval flush (pgwt_flush_open_intervals, called before this —
+     * src/daemon.c) already wrote a REAL closing record for every open
+     * interval, so the checkpoint describes the same nanoseconds and must go.
+     *
+     * If the close could NOT be certified, the opposite holds: those real
+     * records may not have reached the disk, so the checkpoint is the only
+     * surviving evidence and is left for the next start's recovery to
+     * validate and carry. */
+    if (certified)
+        ckpt_discard(w->trace_dir, "a clean close flushed those intervals as "
+                     "real records", w->verbose);
 
     if (w->verbose) {
         double ratio = w->total_events_written > 0
@@ -1026,7 +1287,29 @@ static enum retn_kind retn_classify(const char *dir, const char *name)
                  (int)(strlen(name) - 5), name);
         return access(live, F_OK) == 0 ? RETN_SKIP : RETN_ORPHAN_META;
     }
+    /* #424 open-interval checkpoint sidecars. A torn tmp is always stale. A
+     * sidecar is live state while the file it describes exists (the live
+     * current.trace, or the archive it was carried next to) and an orphan
+     * once that file is gone — otherwise every deleted archive would leave
+     * one behind for good. */
+    if (has_suffix(name, PGWT_OPEN_CKPT_SUFFIX ".tmp"))
+        return RETN_ORPHAN_META;
+    if (has_suffix(name, PGWT_OPEN_CKPT_SUFFIX)) {
+        char base[600];
+        snprintf(base, sizeof(base), "%s/%.*s", dir,
+                 (int)(strlen(name) - strlen(PGWT_OPEN_CKPT_SUFFIX)), name);
+        return access(base, F_OK) == 0 ? RETN_SKIP : RETN_ORPHAN_META;
+    }
     return RETN_SKIP;
+}
+
+/* Delete an archive's checkpoint sidecar along with the archive: the sidecar
+ * is evidence ABOUT that file and means nothing without it. */
+static void retn_unlink_sidecar(const char *archive_path)
+{
+    char s[700];
+    snprintf(s, sizeof(s), "%s%s", archive_path, PGWT_OPEN_CKPT_SUFFIX);
+    unlink(s);
 }
 
 /* Archive age: from the YYYY-MM-DD_HH name when parseable (recovered
@@ -1102,6 +1385,7 @@ int pgwt_writer_cleanup_old_files(struct pgwt_event_writer *w)
         time_t ftime = retn_file_time(ent->d_name, st.st_mtime);
         if (cutoff && ftime < cutoff) {
             if (unlink(path) == 0) {
+                retn_unlink_sidecar(path);
                 if (w->verbose)
                     fprintf(stderr, "INFO: deleted old file %s\n",
                             ent->d_name);
@@ -1139,6 +1423,7 @@ int pgwt_writer_cleanup_old_files(struct pgwt_event_writer *w)
             char path[600];
             snprintf(path, sizeof(path), "%s/%s", w->trace_dir, kept[i].name);
             if (unlink(path) == 0) {
+                retn_unlink_sidecar(path);
                 total_bytes -= kept[i].size;
                 if (w->verbose)
                     fprintf(stderr, "INFO: size cap: deleted %s (%llu bytes)\n",
