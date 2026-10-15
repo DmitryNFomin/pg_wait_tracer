@@ -47,7 +47,8 @@ TESTS     = test_wait_event test_cmdline test_backend_lifecycle test_spawn test_
             test_top_wait_backfill \
             test_open_interval \
             test_trace_closure \
-            test_open_ckpt
+            test_open_ckpt \
+            trace_closure_probe
 
 .PHONY: all clean check
 
@@ -400,6 +401,13 @@ test_trace_closure: test_trace_closure.c $(BUILD)/server_event_writer.o
 # contract (identity, durable publication, recovery, suppression), with the
 # bypass suite for a sidecar that cannot be validated. Server build.
 test_open_ckpt: test_open_ckpt.c $(BUILD)/server_event_writer.o
+	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -llz4
+
+# trace_closure_probe: prints a trace file's closure verdict and the
+# checkpoint beside it, using the production functions. A tool for
+# tests/crash_scenarios.sh, not a test — it is in TESTS (so it gets built)
+# and deliberately NOT in unit_tests.list (there is nothing to assert).
+trace_closure_probe: trace_closure_probe.c $(BUILD)/server_event_writer.o
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -llz4
 
 test_durability: test_durability.c $(BUILD)/server_event_writer.o \
