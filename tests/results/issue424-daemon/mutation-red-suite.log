@@ -1,60 +1,60 @@
 RED    A: shared CPU helper's underflow floor removed (src/open_interval.h)
         FAIL(249): shared builder differs from the pre-#424 loop body in 192 of 6912 cases
         FAIL(276): mutation A (CPU underflow guard removed) was NOT detected — the differential cannot see cpu_ns
-        148 checks, 2 failed
+        180 checks, 2 failed
 RED    B: builder drops the PG13 QUERY_SYNTH flag (src/open_interval.h)
         FAIL(249): shared builder differs from the pre-#424 loop body in 288 of 6912 cases
         FAIL(264): no case set QUERY_SYNTH
         FAIL(279): mutation B (QUERY_SYNTH flag dropped) was NOT detected — the differential cannot see flags
-        148 checks, 3 failed
+        180 checks, 3 failed
 RED    C: builder stops skipping markers (src/open_interval.h)
         FAIL(249): shared builder differs from the pre-#424 loop body in 864 of 6912 cases
         FAIL(258): no case hit the marker skip
-        148 checks, 2 failed
+        180 checks, 2 failed
 RED    D: a degraded reply leaks its rows (src/open_snapshot.h)
-        FAIL(589): refused/lightweight: pids must be ABSENT (not empty, not partial) when the answer is not trustworthy
-        FAIL(589): refused/sampled: pids must be ABSENT (not empty, not partial) when the answer is not trustworthy
-        FAIL(589): unavailable/with rows: pids must be ABSENT (not empty, not partial) when the answer is not trustworthy
-        FAIL(850): included+incomplete must not ship its rows
+        FAIL(643): refused/lightweight: pids must be ABSENT (not empty, not partial) when the answer is not trustworthy
+        FAIL(643): refused/sampled: pids must be ABSENT (not empty, not partial) when the answer is not trustworthy
+        FAIL(643): unavailable/with rows: pids must be ABSENT (not empty, not partial) when the answer is not trustworthy
+        FAIL(904): included+incomplete must not ship its rows
 RED    E: the over-cap reply is sent anyway, truncated (src/open_snapshot.h)
-        FAIL(660): an over-cap reply must report unavailable
-        FAIL(662): an over-cap reply must carry NO pids
-        FAIL(664): an over-cap reply is not complete
-        FAIL(669): the replacement must itself fit the cap
+        FAIL(714): an over-cap reply must report unavailable
+        FAIL(716): an over-cap reply must carry NO pids
+        FAIL(718): an over-cap reply is not complete
+        FAIL(723): the replacement must itself fit the cap
 RED    F: unmeasured cpu_ns serialised as a number (src/open_snapshot.h)
-        FAIL(520): an unmeasured cpu_ns must be ABSENT, never serialised
-        148 checks, 1 failed
+        FAIL(575): an unmeasured cpu_ns must be ABSENT, never serialised
+        180 checks, 1 failed
 RED    G: the output queue drops on EAGAIN, as before #424 (src/ctrl_outq.h)
-        FAIL(1005): a partially-written reply must report 'more to do' (0), got -1
-        FAIL(1011): the queue must eventually drain, got -1 after 0 rounds
-        FAIL(1013): every byte must arrive: 16384 of 562563
-        FAIL(1015): the delivered bytes must be identical to the reply
+        FAIL(1090): a partially-written reply must report 'more to do' (0), got -1
+        FAIL(1096): the queue must eventually drain, got -1 after 0 rounds
+        FAIL(1098): every byte must arrive: 16384 of 587147
+        FAIL(1100): the delivered bytes must be identical to the reply
 RED    H: the backlog cap is removed (src/ctrl_outq.h)
-        FAIL(1064): the backlog cap must eventually refuse
-        FAIL(1065): an over-cap queue must be marked unrecoverable
-        FAIL(1067): the backlog must stay under the cap
-        FAIL(1071): an overflowed queue must keep refusing: a later short reply would be a partial answer
+        FAIL(1149): the backlog cap must eventually refuse
+        FAIL(1150): an over-cap queue must be marked unrecoverable
+        FAIL(1152): the backlog must stay under the cap
+        FAIL(1156): an overflowed queue must keep refusing: a later short reply would be a partial answer
 RED    I: wall-ns fields emitted as JSON numbers, not strings (src/open_snapshot.h)
-        FAIL(500): snapshot_wall_ns must be a decimal STRING (a JSON number is rounded to a double by the consumer's parser)
-        FAIL(500): now_wall_ns must be a decimal STRING (a JSON number is rounded to a double by the consumer's parser)
-        FAIL(500): committed_through_wall_ns must be a decimal STRING (a JSON number is rounded to a double by the consumer's parser)
-        FAIL(500): daemon_start_wall_ns must be a decimal STRING (a JSON number is rounded to a double by the consumer's parser)
+        FAIL(442): top-level uint64 snapshot_ns must be a decimal STRING (a JSON number is rounded to a double by the consumer's parser)
+        FAIL(442): top-level uint64 snapshot_wall_ns must be a decimal STRING (a JSON number is rounded to a double by the consumer's parser)
+        FAIL(442): top-level uint64 now_mono_ns must be a decimal STRING (a JSON number is rounded to a double by the consumer's parser)
+        FAIL(442): top-level uint64 now_wall_ns must be a decimal STRING (a JSON number is rounded to a double by the consumer's parser)
 RED    K: an unresolved wait category ships as "" (src/open_snapshot.h)
-        FAIL(813): an unresolved category must make the reply unavailable
-        FAIL(815): the refusal must carry no rows
-        FAIL(819): the reason must name the offending pid, got ''
-        148 checks, 3 failed
+        FAIL(867): an unresolved category must make the reply unavailable
+        FAIL(869): the refusal must carry no rows
+        FAIL(873): the reason must name the offending pid, got ''
+        180 checks, 3 failed
 RED    L: the command-gate peek stops clamping to the stretch wall (src/map_reader.c)
-        FAIL(787): the formula open_snapshot.h gives the server half differs from pgwt_live_cmd_gate_peek in 19 of 96 cases
-        148 checks, 1 failed
+        FAIL(841): the formula open_snapshot.h gives the server half differs from pgwt_live_cmd_gate_peek in 19 of 96 cases
+        180 checks, 1 failed
 RED    M: the peek stops short-circuiting an unmarked pid (src/map_reader.c)
-        FAIL(787): the formula open_snapshot.h gives the server half differs from pgwt_live_cmd_gate_peek in 40 of 96 cases
-        FAIL(789): the majority rule differs in 32 of 96 cases
-        148 checks, 2 failed
+        FAIL(841): the formula open_snapshot.h gives the server half differs from pgwt_live_cmd_gate_peek in 40 of 96 cases
+        FAIL(843): the majority rule differs in 32 of 96 cases
+        180 checks, 2 failed
 RED    J: the included+incomplete downgrade removed (src/open_snapshot.h)
-        FAIL(848): included+incomplete must be downgraded to unavailable
-        FAIL(850): included+incomplete must not ship its rows
-        FAIL(852): the downgraded reply must be complete:false
-        148 checks, 3 failed
+        FAIL(902): included+incomplete must be downgraded to unavailable
+        FAIL(904): included+incomplete must not ship its rows
+        FAIL(906): the downgraded reply must be complete:false
+        180 checks, 3 failed
 
-restored tree: 148 checks, 0 failed  exit=0
+restored tree: 180 checks, 0 failed  exit=0

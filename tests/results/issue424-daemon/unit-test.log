@@ -11,10 +11,10 @@ test_cmd_gate_formula
 test_missing_category_refuses
 test_open_cpu_prefix
 test_full_house
-  1024 backends serialise to 565829 bytes (cap 1048576, 64 KB would be TRUNCATED)
+  1024 backends serialise to 589729 bytes (cap 1048576, 64 KB would be TRUNCATED)
 test_anchor_absent
 test_transport_queue
-  legacy sender: 16384 of 562563 bytes before EAGAIN (truncated)
-  queued sender: 562563 bytes delivered in 34 flushes
-  backlog cap: 3 replies (562563 bytes each) queued, then refused
-156 checks, 0 failed
+  legacy sender: 16384 of 587147 bytes before EAGAIN (truncated)
+  queued sender: 587147 bytes delivered in 35 flushes
+  backlog cap: 3 replies (587147 bytes each) queued, then refused
+180 checks, 0 failed

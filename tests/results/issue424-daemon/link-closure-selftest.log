@@ -1,0 +1,13 @@
+  PASS: an unchanged TU passes (rc=0)
+  PASS: a NEW link-time dependency fails the guard (rc=1)
+  PASS: the failure NAMES the symbol that was added
+  PASS: a cosmetic edit does not fail the guard
+  PASS: an unresolvable base ref REFUSES (rc=2)
+  PASS: a ref that is not a commit REFUSES
+  PASS: a missing compiler REFUSES rather than passing (rc=2)
+  PASS: a TU absent at base REFUSES (rc=2)
+  PASS: a TU that does not define the anchor REFUSES (rc=2)
+  PASS: a base revision that will not compile REFUSES (rc=2)
+  PASS: the real invocation (src/map_reader.c, no args) passes: OK: map_reader.c references no symbol it did not reference at base
+  PASS: the real invocation confirmed its anchor, so it compiled the right TU
+12 passed, 0 failed

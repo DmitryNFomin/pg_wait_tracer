@@ -1,3 +1,3 @@
 base 304a772   TU src/map_reader.c
-base references       18 symbols, head       18; anchor _pgwt_read_state_map present
+base references 18 symbols, head 18; anchor _pgwt_read_state_map present in both
 OK: map_reader.c references no symbol it did not reference at base
