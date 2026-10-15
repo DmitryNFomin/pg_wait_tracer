@@ -414,6 +414,35 @@ def rect(page, selector):
     return [x, y, width, height]
 
 
+def _tooltip_bbox(page):
+    """The native ECharts item-hover tooltip's own bounding box, or None if
+    not currently shown. Matched by its distinctive 'Lane:' text
+    (waterfallTooltipFormatter's own second line, web/static/lib/builders/
+    waterfall.js) since the tooltip is not confined to -- or even a
+    descendant of -- its chart's own container, so it cannot be found via a
+    CSS selector scoped to the chart."""
+    return page.evaluate("""() => {
+        let found = null;
+        document.querySelectorAll('div').forEach(el => {
+            const s = getComputedStyle(el);
+            if (s.position === 'absolute' && el.innerText && el.innerText.includes('Lane:')) {
+                const r = el.getBoundingClientRect();
+                found = {top:r.top, left:r.left, right:r.right, bottom:r.bottom};
+            }
+        });
+        return found;
+    }""")
+
+
+def _rect_contains(outer, inner):
+    """outer=[x,y,w,h] (a rect() result); inner={top,left,right,bottom} (a
+    _tooltip_bbox() result). True iff inner is fully within the region
+    outer's own crop will actually capture."""
+    x, y, w, h = outer
+    return (inner["left"] >= x and inner["top"] >= y
+            and inner["right"] <= x+w and inner["bottom"] <= y+h)
+
+
 def duration_ms(text):
     match = re.fullmatch(r"\s*([\d.]+)\s*(ms|µs|us|s)\s*", text)
     return float(match[1])*{"ms":1,"µs":0.001,"us":0.001,"s":1000}[match[2]] if match else -1
@@ -601,17 +630,69 @@ def drill(page, smoke, capture, timeout, archived=False):
     # (<section class="waterfall-pane">); crop THAT, not the individual
     # pieces, so there is one natural boundary instead of hand-picked
     # margins, and the executions table is not in this band at all.
+    # rect() already clamps to the captured viewport's own bounds (never
+    # wider than the 1710px frame compose() crops from); no separate
+    # min(1000, ...) clamp here -- that copied a safeguard from an OLD,
+    # narrower readout-only band and, applied to the whole (~1670px-wide)
+    # pane, was truncating real content before compose() ever got the
+    # chance to resize it down to the 1000px output width. Measured live:
+    # that self-inflicted truncation is what made a tooltip "not fit" even
+    # though it was fully within the pane's own true extent.
     execution_crop = rect(page, ".waterfall-pane")
-    execution_crop[2] = min(1000, execution_crop[2])
-    # Sweep only the CENTER of the bar, not its own edges -- hovering near an
-    # edge is what produced the clipped tooltip in the first place (closer to
-    # the chart's y-axis label column, which pushes the tooltip further left).
+    # drill-down composition fix: the published clip is just "here is what
+    # this execution waited on" -- the query/execution SELECTION that got us
+    # here (the table click) is not part of that story, and keeping it in
+    # the clip forced a shared canvas height with the much taller query/
+    # executions tables, leaving most of the frame as unused background
+    # below the short waterfall pane. Mark the clip's start HERE, right
+    # after measuring execution_crop, not earlier (right after the scroll
+    # call): a frame captured BEFORE the page's post-scroll layout had
+    # genuinely settled -- measured live, this crop applied to a frame that
+    # early still showed table rows bleeding in at the top -- would be
+    # cropped with geometry that did not describe it yet. Anchoring the
+    # clip's own start to the SAME moment the crop was measured means every
+    # captured frame in [clip_start_s, end_s) is guaranteed to postdate the
+    # layout execution_crop actually describes.
+    clip_start_s = page.evaluate("Date.now()/1000")
+    # ECharts' item-hover tooltip is not confined to its chart's own bounding
+    # box, and measured live it can clip at EITHER edge of the crop
+    # depending on where the cursor lands -- left when hovering near the
+    # bar's own start, right when hovering near its end (an earlier "sweep
+    # the center 40%" fix narrowed this but did not eliminate it: frame 55
+    # of 63 in a live run still clipped on the right). Rather than guess a
+    # "safe enough" sweep range, measure the tooltip that is ALREADY showing
+    # (from the click above, anchored at the bar's own center) and verify it
+    # fits the crop -- refuse rather than publish a sliced tooltip if even
+    # the center doesn't fit. A center that doesn't fit is a finding of the
+    # same family as #415 (the drilled Waterfall's layout not fitting this
+    # viewport), not something a crop or sweep choice can paper over.
+    tooltip = _tooltip_bbox(page)
+    if tooltip and not _rect_contains(execution_crop, tooltip):
+        raise Refusal(2, f"drill: the clicked wait's native tooltip ({tooltip}) does not "
+                      f"fit within the waterfall pane's own crop ({execution_crop}) even "
+                      "centered on the bar")
+    # Prefer a sweep across the center 40% of the bar -- real motion, not
+    # just the one-time click/tooltip transition, matters for the frame-
+    # count and motion gates -- but only where the tooltip is PROVEN to fit
+    # at both ends; otherwise hold the cursor at the bar's center (already
+    # verified safe above) rather than risk the edge-clipping this replaces.
+    def _tooltip_fits_at(x):
+        page.mouse.move(x, point["y"])
+        capture.pulse()
+        page.wait_for_timeout(80)
+        capture.guard()
+        box = _tooltip_bbox(page)
+        return box is None or _rect_contains(execution_crop, box)
     sweep_margin = (point["x1"]-point["x0"]) * 0.3
-    after = dwell(page, "waterfall", 5, smoke, capture,
-                  [point["x0"]+sweep_margin, point["x1"]-sweep_margin, point["y"]])
+    lo, hi = point["x0"]+sweep_margin, point["x1"]-sweep_margin
+    inspect_path = [lo, hi, point["y"]] if (_tooltip_fits_at(lo) and _tooltip_fits_at(hi)) else None
+    if inspect_path is None:
+        page.mouse.move(point["x"], point["y"])  # back to the verified-safe center
+        capture.pulse()
+    after = dwell(page, "waterfall", 5, smoke, capture, inspect_path)
     end = page.evaluate("Date.now()/1000")
     checked = coverage(capture.frames, start, end, capture.fps)
-    return {"start_s":start,"end_s":end,"landed_s":landed,
+    return {"start_s":start,"end_s":end,"landed_s":landed,"clip_start_s":clip_start_s,
             "query_row":selected["cells"], "execution_row":execution_row,
             "actions":[{"action":"query-executions click","timestamp_s":at/1000},
                        {"action":"execution selection","timestamp_s":selected_at/1000},
@@ -779,13 +860,19 @@ def record(args, staging):
                 staging,capture.frames,overview["frame_indices"],10,headline_crop,1000,5.0)
             overview["headline_window_scan"] = {"start_frame":first,"end_frame":last,
                 "limiting_motion_gate_score":headline_motion}
-            landed_indices=frame_indices(capture.frames,interaction["landed_s"],interaction["end_s"])
+            # drill-down composition fix: ONE crop for the clip's ENTIRE span
+            # (from clip_start_s, where the page is already scrolled to its
+            # final position -- see drill()'s own comment) instead of the
+            # pre-landing query_crop plus a crop_keyframes switch to
+            # execution_crop. One crop means one shared canvas height that
+            # actually matches this clip's own content, not the much taller
+            # query/executions tables the clip no longer shows.
+            drill_indices=frame_indices(capture.frames,interaction["clip_start_s"],interaction["end_s"])
             walk["gifs"]=[
                 {"name":"headline","path":"headline.gif","start_frame":first,"end_frame":last,
                  "fps":10,"width":1000,"crop":headline_crop},
-                {"name":"drill-down","path":"drill-down.gif","start_frame":interaction["frame_indices"][0],
-                 "end_frame":interaction["frame_indices"][-1],"fps":10,"width":1000,"crop":query_crop,
-                 "crop_keyframes":[{"start_frame":landed_indices[0],"crop":execution_crop}]},
+                {"name":"drill-down","path":"drill-down.gif","start_frame":drill_indices[0],
+                 "end_frame":drill_indices[-1],"fps":10,"width":1000,"crop":execution_crop},
             ]
             print(f"Encoding {len(capture.frames)} timestamped frames in Chrome",flush=True)
             try:

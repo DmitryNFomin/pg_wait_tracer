@@ -134,6 +134,25 @@ class RecorderTests(unittest.TestCase):
         self.assertEqual(failed.exception.code, 2)
         self.assertIn("varying", str(failed.exception))
 
+    def test_rect_contains_tooltip_fully_inside(self):
+        outer = [100, 100, 500, 300]  # x,y,w,h -> right=600, bottom=400
+        inner = {"top": 150, "left": 150, "right": 550, "bottom": 350}
+        self.assertTrue(driver._rect_contains(outer, inner))
+
+    def test_rect_contains_refuses_right_edge_clip(self):
+        """issue found live: the tooltip clipped on the RIGHT when the sweep
+        reached the end of its range -- the clip moved, it did not go away.
+        A tooltip whose right edge is past the crop's own right edge must
+        be detected, regardless of how well it fits on the left/top."""
+        outer = [100, 100, 500, 300]  # right edge at 600
+        inner = {"top": 150, "left": 550, "right": 650, "bottom": 350}
+        self.assertFalse(driver._rect_contains(outer, inner))
+
+    def test_rect_contains_refuses_left_edge_clip(self):
+        outer = [100, 100, 500, 300]  # left edge at 100
+        inner = {"top": 150, "left": 50, "right": 300, "bottom": 350}
+        self.assertFalse(driver._rect_contains(outer, inner))
+
     def test_gif_animation_and_strict_byte_limit(self):
         with tempfile.TemporaryDirectory() as temp:
             root=Path(temp);(root/"frames").mkdir()
