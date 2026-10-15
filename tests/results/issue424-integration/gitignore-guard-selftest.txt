@@ -1,0 +1,21 @@
+=== test_gitignore_build_products ===
+--- 1. this repository ---
+    64 build products, 1062 tracked files under tests/
+  ok: every tests/Makefile build product is ignored, and no tracked file under tests/ is
+--- 2. the tree-hash consequence, measured ---
+  ok: a stand-in binary at tests/test_* does not move the tree hash (f04e4330de976b7ba29ad4df90ae54cf7bb0ab30)
+  ok: and the hash is unchanged after removing it (no side effect on the tree)
+  ok: a SOURCE file at tests/test_*.c does move it (339eeda80fc5869d7da6b42566aab45ec4d8997a) -- the hash is not a constant
+--- 3. self-test: the guard must refuse rather than approve ---
+  ok: 3a. class pattern + source negation is CLEAN (rc=0)
+  ok: 3b. three products missing from a per-file list is RED (rc=1)
+  ok: 3c. a pattern that also ignores tests/*.c is RED (rc=1)
+  ok: 3d. a directory that is not a git work tree REFUSES (rc=2)
+  ok: 3e. a missing directory REFUSES (rc=2)
+  ok: 3f. a repo with no tests/Makefile REFUSES (rc=2)
+  ok: 3g. an unparseable $(TESTS) REFUSES instead of passing on an empty list (rc=2)
+  ok: 3h. a two-entry $(TESTS) is below the plausibility floor and REFUSES (rc=2)
+  ok: 3i. a repo with nothing tracked under tests/ REFUSES (rc=2)
+  ok: 3j. an unusable git REFUSES (rc=2), it does not approve
+
+14 checks, 0 failures

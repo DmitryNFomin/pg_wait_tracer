@@ -1,0 +1,21 @@
+  test_data_aas
+════════════════════════════════════════
+=== test_data_aas ===
+--- AAS total ---
+  PASS: Got 1 AAS bucket(s)
+  PASS: Total AAS = 4.0 (4 active sessions) (4)
+  PASS: bucket carries the T2 category decomposition
+  PASS: category AAS total = class AAS total (4)
+  PASS: no io_worker AAS in a client-only scenario (0)
+--- time_model AAS ---
+  PASS: time_model DB Time AAS = 4.0 (4)
+  PASS: CPU AAS = 1.0 (1)
+  PASS: IO AAS = 1.0 (1)
+  PASS: Lock AAS = 1.0 (1)
+  PASS: LWLock AAS = 1.0 (1)
+
+10/10 tests passed
+
+════════════════════════════════════════
+  test_data_events
+════════════════════════════════════════

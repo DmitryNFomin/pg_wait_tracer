@@ -1,0 +1,14 @@
+# box-check round 2 -- gate-2 (pgwt-gate-2), commit 1369ff09, tree-hash 01ad04bf
+
+hetzner-sweep: skipping pgwt-dev-1792086593-22557 (id=170603088, age=672s) — younger than the 900s protected-age floor (issue #162), never swept regardless of cutoff
+hetzner-sweep: done (deleted=0 warned=0 dry_run=0 cutoff=6h force_all=0)
+box-check: commit=1369ff09b985c9cefccf164bc9056d398f7ee3ca tree-hash=01ad04bf6a0b2953cf50e24b57542faa3fe6acfa
+box-check: target=root@142.132.191.18 OS=ubuntu PG=all EPHEMERAL=0 -> pgwt-check/agent_424-integration (log: tests/results/box-check-ubuntu-20261015-200105.log)
+box-check: remote hostname=pgwt-gate-2 machine_id=2743fea0132c42349f4d0b52443a5fec
+box-check: lock acquired (waited_for_lock=no, lock_wait_ms=0)
+
+## SUMMARY
+  SUMMARY
+════════════════════════════════════════
+  Executed: 129 (passed 126, failed 3, known-failing 0 (0 xpass)), skipped 4, excluded 0, total 133
+  Mode:     --require-live (live-section skips counted as failures)

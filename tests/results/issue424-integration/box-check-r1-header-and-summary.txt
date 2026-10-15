@@ -1,0 +1,12 @@
+# box-check round 1 -- gate-2, historical a9b5c98 + gate d7e6f81 (no live branch)
+hetzner-sweep: done (deleted=0 warned=0 dry_run=0 cutoff=6h force_all=0)
+box-check: commit=8abc7bb694b7b867766c284e7946e4c969a19ad8 tree-hash=771f85babc8b36436def161bb0d0c0b886909fb9
+box-check: target=root@142.132.191.18 OS=ubuntu PG=all EPHEMERAL=0 -> pgwt-check/agent_424-integration (log: tests/results/box-check-ubuntu-20261015-190842.log)
+box-check: remote hostname=pgwt-gate-2 machine_id=2743fea0132c42349f4d0b52443a5fec
+box-check: lock acquired (waited_for_lock=no, lock_wait_ms=0)
+  VMLINUX  include/vmlinux.h
+
+  SUMMARY
+════════════════════════════════════════
+  Executed: 127 (passed 125, failed 2, known-failing 0 (0 xpass)), skipped 4, excluded 0, total 131
+  Mode:     --require-live (live-section skips counted as failures)
