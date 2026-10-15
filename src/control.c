@@ -7,6 +7,7 @@
 #include "escalation.h"
 #include "sampler.h"
 #include "map_reader.h"
+#include "open_snapshot.h"
 #include "cJSON.h"
 
 #include <stdio.h>
@@ -566,6 +567,38 @@ static cJSON *build_deescalate(struct pgwt_daemon *d)
     return root;
 }
 
+/* {"cmd":"open_intervals"} → every live backend's still-OPEN stretch, plus the
+ * clock anchor and the publication watermark the consumer needs to reconcile
+ * them against the trace (#424). See src/open_snapshot.h for the frozen field
+ * shape and why a degraded answer is a STATUS rather than a short array.
+ *
+ * The snapshot is ~400 KB at MAX_BACKENDS, so it is heap-allocated and sent
+ * through the client's output queue; it never touches the 4 KB request
+ * buffer. */
+static cJSON *build_open_intervals(struct pgwt_daemon *d)
+{
+    struct pgwt_open_snapshot *s =
+        (struct pgwt_open_snapshot *)calloc(1, sizeof(*s));
+    if (!s) {
+        /* Out of memory is UNAVAILABLE, not an empty success: the caller must
+         * label the pane, not silently drop in-flight time. */
+        cJSON *root = cJSON_CreateObject();
+        cJSON_AddBoolToObject(root, "ok", 0);
+        cJSON_AddStringToObject(root, "cmd", PGWT_OPEN_INTERVALS_CMD);
+        cJSON_AddStringToObject(root, "status", "unavailable");
+        cJSON_AddStringToObject(root, "reason",
+                                "daemon out of memory for the snapshot");
+        cJSON_AddBoolToObject(root, "complete", 0);
+        return root;
+    }
+    pgwt_collect_open_intervals(d, s);
+    cJSON *root = pgwt_open_snapshot_to_json(s, PGWT_OPEN_INTERVALS_REPLY_MAX);
+    free(s);
+    if (!root)
+        root = build_error("open_intervals: response serialisation failed");
+    return root;
+}
+
 /* ── Client handling ──────────────────────────────────────── */
 
 static void client_drop(struct pgwt_control *c, struct pgwt_control_client *cl)
@@ -576,12 +609,58 @@ static void client_drop(struct pgwt_control *c, struct pgwt_control_client *cl)
     close(cl->fd);
     cl->fd = -1;
     cl->len = 0;
+    cl->want_write = false;
+    pgwt_outq_reset(&cl->out);
 }
 
-/* Send one JSON object + '\n'. Returns 0 on success, -1 on failure
- * (caller drops the client). MSG_NOSIGNAL: a client that disconnects
- * mid-response must not SIGPIPE the daemon. */
-static int client_send_json(struct pgwt_control_client *cl, cJSON *root)
+/* Register/deregister EPOLLOUT for a client with pending output. Level-
+ * triggered epoll: leaving EPOLLOUT armed on a drained queue would spin the
+ * daemon loop, so it is armed only while bytes are actually waiting. */
+static int client_arm_write(struct pgwt_control *c,
+                            struct pgwt_control_client *cl, bool want)
+{
+    if (cl->fd < 0 || cl->want_write == want)
+        return 0;
+    struct epoll_event ev;
+    ev.events = EPOLLIN | (want ? EPOLLOUT : 0);
+    ev.data.fd = cl->fd;
+    if (epoll_ctl(c->epoll_fd, EPOLL_CTL_MOD, cl->fd, &ev) != 0)
+        return -1;
+    cl->want_write = want;
+    return 0;
+}
+
+static ssize_t client_write_cb(void *ctx, const char *p, size_t n)
+{
+    int fd = *(int *)ctx;
+    return send(fd, p, n, MSG_NOSIGNAL);
+}
+
+/* Push whatever the socket will take. Returns -1 if the client must be
+ * dropped. */
+static int client_pump(struct pgwt_control *c, struct pgwt_control_client *cl)
+{
+    if (cl->fd < 0)
+        return -1;
+    int rc = pgwt_outq_flush(&cl->out, client_write_cb, &cl->fd);
+    if (rc < 0)
+        return -1;
+    return client_arm_write(c, cl, rc == 0);
+}
+
+/* Queue one JSON object + '\n' and push as much as the socket takes. Returns
+ * 0 on success, -1 on failure (caller drops the client). MSG_NOSIGNAL: a
+ * client that disconnects mid-response must not SIGPIPE the daemon.
+ *
+ * #424: this used to loop on send() and treat EAGAIN as "the client stopped
+ * reading", dropping it. That was adequate while every reply fit one socket
+ * buffer and is wrong for a reply of hundreds of KB, where a short write is
+ * the NORMAL case — the client would see a truncated JSON line, i.e. a
+ * partial answer presented as data. The remainder is now queued and finished
+ * on EPOLLOUT; only a hard write error or a client that stops reading until
+ * the backlog cap is hit gets dropped. */
+static int client_send_json(struct pgwt_control *c,
+                            struct pgwt_control_client *cl, cJSON *root)
 {
     char *str = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
@@ -590,22 +669,11 @@ static int client_send_json(struct pgwt_control_client *cl, cJSON *root)
 
     size_t len = strlen(str);
     str[len] = '\n';  /* overwrite NUL — cJSON allocates len+1 */
-    size_t off = 0;
-    int rc = 0;
-    while (off < len + 1) {
-        ssize_t w = send(cl->fd, str + off, len + 1 - off, MSG_NOSIGNAL);
-        if (w < 0) {
-            if (errno == EINTR)
-                continue;
-            /* EAGAIN on a <4KB response means the client stopped
-             * reading — drop it rather than block the daemon. */
-            rc = -1;
-            break;
-        }
-        off += (size_t)w;
-    }
+    int rc = pgwt_outq_append(&cl->out, str, len + 1);
     free(str);
-    return rc;
+    if (rc != 0)
+        return -1;      /* backlog cap: a correct reply can no longer be sent */
+    return client_pump(c, cl);
 }
 
 /* Handle one complete request line. Returns 0 on success, -1 if the
@@ -615,7 +683,7 @@ static int handle_request(struct pgwt_control *c,
 {
     cJSON *req = cJSON_Parse(line);
     if (!req)
-        return client_send_json(cl, build_error("invalid json"));
+        return client_send_json(c, cl, build_error("invalid json"));
 
     cJSON *cmd = cJSON_GetObjectItem(req, "cmd");
     cJSON *resp;
@@ -629,11 +697,13 @@ static int handle_request(struct pgwt_control *c,
         resp = build_escalate(c->d, req);
     else if (strcmp(cmd->valuestring, "deescalate") == 0)
         resp = build_deescalate(c->d);
+    else if (strcmp(cmd->valuestring, PGWT_OPEN_INTERVALS_CMD) == 0)
+        resp = build_open_intervals(c->d);
     else
         resp = build_error("unknown command");
 
     cJSON_Delete(req);
-    return client_send_json(cl, resp);
+    return client_send_json(c, cl, resp);
 }
 
 static void handle_client_readable(struct pgwt_control *c,
@@ -642,7 +712,7 @@ static void handle_client_readable(struct pgwt_control *c,
     for (;;) {
         if (cl->len >= sizeof(cl->buf) - 1) {
             /* No newline within buffer — protocol violation */
-            client_send_json(cl, build_error("request too long"));
+            client_send_json(c, cl, build_error("request too long"));
             client_drop(c, cl);
             return;
         }
@@ -710,6 +780,8 @@ static void handle_accept(struct pgwt_control *c)
 
         cl->fd = fd;
         cl->len = 0;
+        cl->want_write = false;
+        pgwt_outq_init(&cl->out);
 
         struct epoll_event ev;
         ev.events = EPOLLIN;
@@ -830,7 +902,16 @@ int pgwt_control_handle_fd(struct pgwt_control *c, int fd)
     }
     for (int i = 0; i < PGWT_CTRL_MAX_CLIENTS; i++) {
         if (c->clients[i].fd == fd) {
-            handle_client_readable(c, &c->clients[i]);
+            struct pgwt_control_client *cl = &c->clients[i];
+            /* The caller does not say WHICH event fired, so finish any
+             * pending write first (#424) and then try to read: a
+             * writable-only wakeup just finds EAGAIN on the read and
+             * returns. */
+            if (pgwt_outq_pending(&cl->out) > 0 && client_pump(c, cl) != 0) {
+                client_drop(c, cl);
+                return 1;
+            }
+            handle_client_readable(c, cl);
             return 1;
         }
     }

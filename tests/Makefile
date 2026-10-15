@@ -44,7 +44,8 @@ TESTS     = test_wait_event test_cmdline test_backend_lifecycle test_spawn test_
             wait_cpu_scan wait_cpu_fixture \
             test_summary_tick_flush \
             test_block_agg bench_block_agg test_transitions_loader \
-            test_top_wait_backfill
+            test_top_wait_backfill \
+            test_open_interval
 
 .PHONY: all clean check
 
@@ -706,6 +707,23 @@ TRANSITIONS_LOADER_OBJS = $(addprefix $(BUILD)/server_,compute.o block_agg.o \
     wait_event.o idle_rule.o spawn.o cmdline.o backend_meta.o cJSON.o)
 test_transitions_loader: test_transitions_loader.c ../src/server.c $(TRANSITIONS_LOADER_OBJS)
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $< $(TRANSITIONS_LOADER_OBJS) -lz -llz4 -lm
+
+
+# test_open_interval: #424's daemon half — the ONE open-stretch arithmetic
+# (src/open_interval.h) differenced against a verbatim copy of the pre-#424
+# flush_open_intervals loop body, the frozen {"cmd":"open_intervals"} wire
+# shape (src/open_snapshot.h), and the control socket's queued-write
+# transport (src/ctrl_outq.h) including the truncation the old
+# drop-on-EAGAIN sender produced. Sources compiled directly, no BPF, no
+# daemon: runs anywhere, Mac included.
+# The three headers ARE the module under test, so they are prerequisites:
+# without them an incremental build silently reruns a stale binary (found
+# by this test's own bypass suite, which scored 9 green mutations until
+# the dependency was added).
+test_open_interval: test_open_interval.c ../src/cJSON.c \
+                    ../src/open_interval.h ../src/open_snapshot.h \
+                    ../src/ctrl_outq.h
+	$(CC) $(CFLAGS) -o $@ test_open_interval.c ../src/cJSON.c
 
 # test_top_wait_backfill: #319 — handle_top_sessions' and handle_top_queries'
 # raw backfill of top_wait over the summary-derived page. Same server.c-

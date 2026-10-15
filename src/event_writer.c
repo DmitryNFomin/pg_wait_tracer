@@ -498,6 +498,19 @@ static int write_typed_block(struct pgwt_event_writer *w,
     w->total_events_written += count;
     w->total_bytes_written += sizeof(bh) + compressed_size;
 
+    /* #424: the publication high-watermark. Every record in this block is now
+     * in the file (fflush + the meta count below), so the LAST TRANSITIONS
+     * timestamp committed is a floor the live snapshot can report as
+     * committed_through_ns — the point below which a gap means "still open",
+     * not "closed but not yet visible". TRANSITIONS only: a SAMPLES block
+     * running ahead says nothing about whether the closed-record prefix is
+     * published, and taking the max over both would OVERSTATE it. */
+    if (block_type == PGWT_BLOCK_TRANSITIONS) {
+        uint64_t last = events[count - 1].timestamp_ns;
+        if (last > w->committed_through_ns)
+            w->committed_through_ns = last;
+    }
+
     /* Flush to OS page cache so concurrent readers can see this block */
     fflush(w->fp);
 
@@ -717,6 +730,27 @@ int pgwt_writer_push_samples(struct pgwt_event_writer *w,
         return flush_samples(w);
 
     return 0;
+}
+
+/* #424: flush both pending buffers, in the order that keeps the block index
+ * sorted (flush_block writes an older sample batch first). After this returns
+ * 0 every record the writer has been handed is in the file and counted in the
+ * meta high-watermark, so a reader scanning the trace can see it. */
+int pgwt_writer_publish(struct pgwt_event_writer *w)
+{
+    if (!w->enabled || !w->fp)
+        return 0;                 /* nothing opened yet: nothing unpublished */
+    int rc = 0;
+    if (flush_block(w) != 0)
+        rc = -1;
+    if (flush_sample_buf(w) != 0)
+        rc = -1;
+    return rc;
+}
+
+uint64_t pgwt_writer_committed_through_ns(const struct pgwt_event_writer *w)
+{
+    return w->committed_through_ns;
 }
 
 int pgwt_writer_check_rotation(struct pgwt_event_writer *w)

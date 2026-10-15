@@ -590,3 +590,16 @@ test_backend_lifecycle
 # whose magnitude changed. Pure Python, milliseconds -- so a regression in
 # the gate's own logic does not need a 40-minute box run to surface.
 test_summary_raw_parity_lib.py
+
+# #424 daemon half: the live open-interval snapshot. Pins (a) that the
+# per-pid open-stretch arithmetic shared by the de-escalation flush, the
+# shutdown flush and the new {"cmd":"open_intervals"} command is byte-for-byte
+# the pre-refactor arithmetic -- a differential against a verbatim copy of the
+# deleted loop body, with a coverage assertion so the comparison cannot be
+# vacuous and two mutation probes proving it can go red; (b) the frozen wire
+# shape the live server half codes against, including an unmeasured cpu_ns
+# being ABSENT rather than 0 and a degraded status carrying NO pids array;
+# (c) the transport -- 1024 backends serialise to ~390 KB, so the superseded
+# 64 KB buffer is demonstrably insufficient, and the old drop-on-EAGAIN
+# sender truncates a reply the queued sender delivers whole.
+test_open_interval

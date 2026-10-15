@@ -6,6 +6,14 @@
  *   {"cmd":"metrics"} → self-observability counters (stable snake_case
  *                       names with units: *_total, *_per_sec, *_bytes —
  *                       a future Prometheus exporter consumes these)
+ *   {"cmd":"open_intervals"} → every live backend's still-OPEN wait/on-CPU
+ *                       stretch, with the clock anchor and the publication
+ *                       watermark needed to reconcile them against the
+ *                       trace (#424). Shape and degraded contract:
+ *                       src/open_snapshot.h. Replies here are far larger
+ *                       than one socket buffer, which is why responses are
+ *                       QUEUED (src/ctrl_outq.h) instead of dropped on
+ *                       EAGAIN.
  *
  * Note on ringbuf drops: the BPF ringbuf does not expose a drop
  * counter to userspace, and A0 makes no BPF changes. A2 (provider
@@ -15,6 +23,9 @@
 #ifndef PGWT_CONTROL_H
 #define PGWT_CONTROL_H
 
+#include "ctrl_outq.h"
+
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -28,6 +39,12 @@ struct pgwt_control_client {
     int    fd;                       /* -1 = free slot */
     size_t len;                      /* bytes buffered (no '\n' yet) */
     char   buf[PGWT_CTRL_BUF_SIZE];
+    /* #424: unsent response bytes. The open-intervals snapshot is far larger
+     * than one socket buffer, so EAGAIN is normal and must mean "finish this
+     * later" (EPOLLOUT) rather than "drop the client" — dropping mid-reply
+     * produces truncated JSON, the one failure mode the contract forbids. */
+    struct pgwt_ctrl_outq out;
+    bool   want_write;               /* EPOLLOUT is currently registered */
 };
 
 struct pgwt_control {

@@ -152,6 +152,11 @@ struct pgwt_event_writer {
     uint8_t      *compress_buf;
     size_t        compress_buf_size;
 
+    /* #424 publication high-watermark: the largest TRANSITIONS timestamp
+     * actually written to the file. Monotonic; never reset by rotation (the
+     * clock does not restart, and the live snapshot compares against it). */
+    uint64_t      committed_through_ns;
+
     /* Stats */
     uint64_t      total_events_written;
     uint64_t      total_bytes_written;
@@ -177,6 +182,12 @@ int  pgwt_writer_push_event(struct pgwt_event_writer *w,
 int  pgwt_writer_push_samples(struct pgwt_event_writer *w,
                               const struct pgwt_trace_event *samples,
                               int count, uint64_t sample_period_ns);
+
+/* #424: flush every pending buffer so the closed-record prefix is visible to
+ * a concurrent reader, and report the high-watermark it reached. Returns 0 on
+ * success, -1 if a block write failed. Safe (no-op) before the first event. */
+int  pgwt_writer_publish(struct pgwt_event_writer *w);
+uint64_t pgwt_writer_committed_through_ns(const struct pgwt_event_writer *w);
 
 int  pgwt_writer_check_rotation(struct pgwt_event_writer *w);
 int  pgwt_writer_close(struct pgwt_event_writer *w);
