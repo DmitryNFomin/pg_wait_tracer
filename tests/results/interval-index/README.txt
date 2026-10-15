@@ -1,8 +1,28 @@
 tests/results/interval-index/ — raw evidence for paint-latency Phase 4
 (concurrency interval index, src/interval_index.{c,h}).
 
+*** RE-RUN FOR INDEX VERSION 2 (#424), branch agent/424-index, commit
+*** 6e78861. Overlap admission with clipped time replaced version 1's
+*** select-on-end-timestamp rule, so every count below moved: the unit test
+*** is 164 checks (was 121) and the mutation suite is 36 mutants (was 27).
+*** The four Mac text files here — unit-test-mac.txt,
+*** oneblock-falsification-mac.txt, mutations.txt, mutation-selftest.txt —
+*** and every file under mutations/ are the VERSION 2 runs.
+***
+*** NOT re-run, and therefore describing VERSION 1: unit-test-linux.txt,
+*** box-check-summary.txt, make-check-tail.txt, verify-table*.txt,
+*** selftest-assertion-red.txt and adversarial.txt. No gate box was
+*** reachable from the agent that made the version-2 change ($PGWT_BOX
+*** unset), so the Linux tier has NOT been re-run against version 2. Read
+*** those files as the version-1 record, not as current evidence.
+***
+*** The version-2 narrative, its EVIDENCE table and the demonstrated-red
+*** runs for the new rule live in tests/results/issue424-index/.
+
 Branch agent/concurrency-interval-index, commit 86ef537 (module + test +
 mutation harness + build wiring). Mac = darwin 24.6.0 / Apple clang.
+The counts in the FILES list below are the ORIGINAL version-1 ones; see the
+banner above for what the files now contain.
 
 FILES
   adversarial.txt                  the three adversarial questions, answered
