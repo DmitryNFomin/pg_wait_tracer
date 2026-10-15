@@ -58,6 +58,19 @@ if [[ $FAST -eq 0 ]] && ! "$py" -c 'import playwright' 2>/dev/null; then
     exit 2
 fi
 
+# Same family as the snapshot-history guard: both protect the integrity of
+# the .pgwt-check.stamp this script writes at the end. A build product that
+# .gitignore does not cover is untracked-but-unignored, so scripts/tree-hash.sh
+# counts it and the stamp stops matching the moment anyone runs
+# `make -C tests` -- which is how demo-rehearsal counted attempt 2 lost its
+# pairing. Lives HERE and not in tests/unit_tests.list on purpose: box-check
+# rsyncs the tree WITHOUT .git, so on the box this guard could only refuse for
+# an environmental reason, and a gate that is red for the wrong reason gets
+# switched off. This Mac and CI are the places it is both meaningful and able
+# to run.
+step "bash: .gitignore covers every tests/ build product (tree-hash integrity)"
+run bash tests/test_gitignore_build_products.sh
+
 step "snapshot-history guard self-test"
 run tests/test_check_snapshot_history.sh
 

@@ -13,38 +13,33 @@ pg_wait_tracer-asan
 include/vmlinux.h
 include/pg_wait_tracer.skel.h
 
-# Test binaries
-tests/test_wait_event
-tests/test_cmdline
-tests/test_bucket
-tests/test_event_writer
-tests/test_event_reader
-tests/test_trace_v2
-tests/test_sampler
-tests/test_anomaly
-tests/test_escalation_budget
-tests/test_effective_cores
-tests/test_coop
-tests/test_pg13_resolve
-tests/test_discovery_pie
-tests/test_discovery_nopie
+# Built C test binaries and helpers (tests/Makefile $(TESTS) + its object
+# targets). Listed as a CLASS, not one line per test: the per-file list had
+# drifted by 33 of the 64 products tests/Makefile builds, and because
+# scripts/tree-hash.sh hashes tracked PLUS untracked-but-unignored files, each
+# missing name silently changed the tree hash as soon as anyone ran
+# `make -C tests`. That is what broke the pairing of demo-rehearsal counted
+# attempt 2 (hash c47f9d0f vs attempt 1's d645b0ee).
+#
+# The discriminator is the filename SUFFIX, not a name list: a build product
+# has none (tests/test_foo), every source file has one (tests/test_foo.c,
+# .py, .sh, .mjs, .list). So `!tests/*.*` keeps every source tracked while the
+# class patterns above it swallow the binaries, and a NEW test cannot
+# reintroduce the drift by being forgotten here. `tests/*.o` is restated AFTER
+# the negation because the last matching pattern wins and object files do have
+# a suffix.
+#
+# Anything added to tests/ in future that is BOTH suffix-less AND meant to be
+# tracked (tests/Makefile is the only one today, and it matches none of these
+# patterns) needs its own `!` line.
+tests/test_*
+tests/wait_cpu_*
+tests/gen_*
+tests/bench_*
 tests/dump_markers
-tests/gen_test_traces
-tests/gen_bench_traces
 tests/cross_validate
-tests/test_concurrent_rw
-tests/test_replay_fidelity
-tests/test_durability
-tests/test_query_text
-tests/test_golden_fixture
-tests/test_window_clip
-tests/test_top_queries_percentile
-tests/test_top_queries_context
-tests/test_exec_index
-tests/test_block_agg
-tests/test_transitions_loader
-tests/bench_block_agg
-tests/map_reader_core.o
+!tests/*.*
+tests/*.o
 # Python bytecode, at ANY depth. It used to be anchored to tests/, which left
 # tests/results/**/__pycache__/*.pyc untracked-but-not-ignored and therefore
 # INSIDE scripts/tree-hash.sh's scope: check.sh's py_compile step generated it,
