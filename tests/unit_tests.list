@@ -31,7 +31,18 @@ test_live_accum
 # Windowed aggregates (time model / top events / sessions / queries) must
 # count only each event's in-window part, exactly as the AAS chart does --
 # the cross-tab disagreement that failed a 35-minute rehearsal at 1.28%.
+# Section 6 adds the RIGHT edge (#424): time is selected by overlap and
+# clipped, occurrences are selected by the record's own close timestamp.
 test_window_clip
+# #424's overlap-admission unit test, landed on agent/424-historical with
+# its tests/Makefile rule. Registered HERE because unit_tests.list is owned
+# by the gate branch and this version is the one kept when the two branches
+# are combined -- without the entry the binary is built by CI and run by
+# nothing, which is the TST-3 false negative this list exists to prevent.
+# NOTE: this branch must be COMBINED with agent/424-historical before any
+# box-check or merge. Alone, the C tier exits 127 on a binary that does not
+# exist yet -- correctly: a listed test that cannot run fails the gate.
+test_window_overlap
 # #387: absence is distinct from measured zero, including records selected
 # by end timestamp that have no in-window overlap.
 test_time_model_absence

@@ -608,7 +608,33 @@ def section_c():
     say("", "=== C. the parity fixture with a right edge inside a wait ===")
     import test_summary_raw_parity as P                           # noqa: E402
 
-    trace_dir = generate_traces(P.build_capture())
+    scenario = P.build_capture()
+
+    def spans():
+        """(start_s, close_s) for every record in the parity fixture,
+        read off its own scenario array — not re-derived by hand."""
+        return [((e["ts"] - BASE - e["dur"]) / 1e9, (e["ts"] - BASE) / 1e9)
+                for e in scenario["events"]]
+
+    def crossing(t_s):
+        return [(st, cl) for st, cl in spans() if st < t_s < cl]
+
+    # C0. THE FIXTURE SELF-CHECK. The parity gate's five windows each place
+    # BOTH edges in a QUIET hole on purpose, so none of them has a record
+    # open across its right edge and none of them can see #424. Reported as
+    # an inventory, computed from the scenario array with no server running.
+    # It is a statement about that gate's coverage, not a product failure,
+    # so it does not fail here — but the windows THIS section measures must
+    # have a non-empty right-edge straddler set, and that DOES fail, because
+    # otherwise every assertion below would be measuring a hole.
+    blind = [w for w, (f_ns, t_ns) in sorted(P.WINDOWS.items())
+             if not crossing((t_ns - BASE) / 1e9)]
+    say("DECLARED",
+        "parity gate's own windows with an EMPTY right-edge straddler set "
+        "(structurally blind to #424): %d of %d — %s"
+        % (len(blind), len(P.WINDOWS), ", ".join(blind) or "none"))
+
+    trace_dir = generate_traces(scenario)
     raw_dir = None
     try:
         raw_dir = raw_only_copy(trace_dir)
@@ -619,6 +645,16 @@ def section_c():
             ("contains_close_260", 100, 260, 40_000.0, False),
             ("spans_whole_window", 205, 235, 30_000.0, True),
         ]
+        for name, a, b, want, red in cases:
+            if red and not crossing(b):
+                raise Refuse("window %s [%ds,%ds] has no record open across "
+                             "its right edge; it cannot see #424 and its "
+                             "expectation of %.1f ms would be measuring a "
+                             "hole" % (name, a, b, want))
+        ok("every cut window below really has a record open across its right "
+           "edge (%s)"
+           % "; ".join("%s: %s" % (n, crossing(b))
+                       for n, _a, b, _w, r in cases if r))
         with ServerHarness(raw_dir) as srv:
             for name, a, b, want, _red in cases:
                 resp = require_raw(
