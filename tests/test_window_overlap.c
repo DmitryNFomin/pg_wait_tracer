@@ -1199,6 +1199,144 @@ static void test_instant_two_bounds(void)
     free(qres.rows);
 }
 
+/* ── 15. A TIERED capture: the straddler budget is for TRANSITIONS ────
+ *
+ * `only_straddlers` was `first_ts > sample_to_mono` with no block-type
+ * test, so a SAMPLES block anywhere in the straddler horizon (up to 300 s
+ * past `to`) was charged against PGWT_STRADDLE_MAX_BLOCKS — even though the
+ * record loop discards every record in it, because the sample lookahead has
+ * its own, narrower edge.
+ *
+ * On a tiered capture, where SAMPLES blocks dominate, that is not a
+ * slowdown: the budget is spent on blocks that CANNOT hold a straddler,
+ * right_edge_truncated fires falsely, and the TRANSITIONS blocks that do
+ * hold straddlers are skipped. The answer is short AND the honest-truncation
+ * signal is consumed by blocks that were never candidates — #424 defeated
+ * while reporting itself as a clean refusal.
+ *
+ * THE FIXTURE MUST BE TIERED OR IT PROVES NOTHING. Three SAMPLES blocks sit
+ * between the window and the TRANSITIONS block holding the straddler, and
+ * the budget is set to 2 — fewer than the SAMPLES blocks in the way. A
+ * fixture with no SAMPLES blocks in the horizon passes while the defect is
+ * live, so §15a asserts the fixture really is tiered before anything else.
+ */
+#define TIER_PERIOD   (100 * MS)
+#define TIER_TICKS    12
+#define TIER_STRAD_PID 901
+
+static void build_tiered_fixture(const char *dir, uint64_t base)
+{
+    struct pgwt_event_writer writer;
+    if (pgwt_writer_init(&writer, dir, 180000, 0, NULL) != 0) {
+        printf("  FAIL: trace writer init (tiered)\n");
+        tests_failed++;
+        return;
+    }
+    /* ANCHOR, and it is load-bearing: run_bypass() derives the window
+     * origin as `earliest_wall_ns - 10 ms`, so a fixture whose first record
+     * is anywhere else silently shifts every window this section asks for.
+     * The first version of this fixture started at base + 10 s, which moved
+     * the window on top of the SAMPLES blocks — where they are inside the
+     * sample edge, are never charged to the straddler budget, and the
+     * section passed on the UNFIXED tree. A gate that cannot reach the
+     * defect is worse than no gate; this one line is what reaches it. */
+    push(&writer, base + 10 * MS, FILLER_PID, 0, EV_IO, 1 * MS);
+
+    /* Transitions inside the window. */
+    for (int i = 0; i < 20; i++)
+        push(&writer, base + 10 * ONE_SEC + (uint64_t)i * MS,
+             FILLER_PID, 0, EV_IO, 1 * MS);
+
+    /* Three SAMPLES blocks at 20 s, 22 s, 24 s -- inside the straddler
+     * horizon, past the sample edge, holding nothing this window can use.
+     * The first push also flushes the pending TRANSITIONS buffer (older
+     * first timestamp), which is what commits the block above. */
+    for (int round = 0; round < 3; round++) {
+        struct pgwt_trace_event smp[TIER_TICKS];
+        for (int i = 0; i < TIER_TICKS; i++) {
+            memset(&smp[i], 0, sizeof(smp[i]));
+            smp[i].timestamp_ns = base + 20 * ONE_SEC
+                                + (uint64_t)round * 2 * ONE_SEC
+                                + (uint64_t)i * TIER_PERIOD;
+            smp[i].pid = FILLER_PID;
+            smp[i].old_event = 0;
+            smp[i].new_event = EV_IO;
+            smp[i].cpu_ns = PGWT_CPU_NS_UNKNOWN;
+        }
+        if (pgwt_writer_push_samples(&writer, smp, TIER_TICKS,
+                                     TIER_PERIOD) != 0) {
+            printf("  FAIL: push_samples (tiered)\n");
+            tests_failed++;
+            break;
+        }
+    }
+    /* The straddler, BEHIND all three SAMPLES blocks: closes at 30 s after
+     * running 20 s, so it covers the window at [10.5, 12]. */
+    push(&writer, base + 30 * ONE_SEC, TIER_STRAD_PID,
+         EV_LOCK, EV_IO, 20 * ONE_SEC);
+    pgwt_writer_close(&writer);
+}
+
+/* How many SAMPLES blocks sit strictly between two mono timestamps. */
+static int count_sample_blocks_between(const char *dir, uint64_t lo,
+                                       uint64_t hi, int *n_blocks)
+{
+    struct pgwt_trace_file_entry files[16];
+    int nf = pgwt_scan_trace_files(dir, files, 16);
+    if (nf <= 0) return -1;
+    struct pgwt_event_reader r;
+    if (pgwt_reader_open(&r, files[0].path) != 0) return -1;
+    if (n_blocks) *n_blocks = r.num_blocks;
+    int n = 0;
+    for (int b = 0; b < r.num_blocks; b++) {
+        struct pgwt_block_info bi;
+        if (pgwt_reader_block_info(&r, b, &bi) != 0) continue;
+        if (bi.block_type == PGWT_BLOCK_SAMPLES &&
+            bi.first_timestamp_ns > lo && bi.first_timestamp_ns < hi)
+            n++;
+    }
+    pgwt_reader_close(&r);
+    return n;
+}
+
+static void test_tiered_budget(const char *dir_t, uint64_t base)
+{
+    printf("--- 15. a tiered capture: SAMPLES blocks must not spend the "
+           "straddler budget ---\n");
+
+    /* 15a. PRECONDITION: the fixture really is tiered, with more SAMPLES
+     * blocks in the way than the budget allows. */
+    int nb = 0;
+    int ns_blocks = count_sample_blocks_between(dir_t, base + 15 * ONE_SEC,
+                                                base + 29 * ONE_SEC, &nb);
+    CHECK(ns_blocks >= 3,
+          "15a. %d SAMPLES blocks sit between the window and the "
+          "straddler's block (%d blocks total), more than the 2-block "
+          "budget below -- without this the section would pass on a "
+          "capture that never exercises the defect", ns_blocks, nb);
+    if (ns_blocks < 3) return;
+
+    struct bypass_result r;
+    /* Budget 2, i.e. fewer than the SAMPLES blocks in the way. Before the
+     * fix they ate it; now only TRANSITIONS blocks can. */
+    if (run_bypass(dir_t, 0, "PGWT_STRADDLE_MAX_BLOCKS", "2",
+                   &r, 10, 12) == 0) {
+        CHECK(r.admitted == 1,
+              "15b. the straddler BEHIND three SAMPLES blocks is still "
+              "found with a 2-block budget (admitted=%d) -- the budget is "
+              "for blocks that could hold one", r.admitted);
+        CHECK(r.truncated == 0,
+              "15c. and nothing is reported truncated (%d): skipping "
+              "SAMPLES blocks costs this window nothing, so claiming a cut "
+              "right edge would be a false alarm on every tiered capture",
+              r.truncated);
+        CHECK(r.lock_row_present && r.lock_total_ms > 1000.0,
+              "15d. its time arrives too (%.1f ms of Lock) -- admitted "
+              "without contributing would be the same loss with a "
+              "different counter", r.lock_total_ms);
+    } else { CHECK(0, "15. bypass child failed"); }
+}
+
 int main(void)
 {
     printf("=== test_window_overlap (#424) ===\n");
@@ -1251,6 +1389,14 @@ int main(void)
     build_interleaved_fixture(dir_il, base);
     test_block_lookup(dir_il, dir);
     test_instant_two_bounds();
+
+    char dir_t[] = "/tmp/pgwt_wovl_tier_XXXXXX";
+    if (!mkdtemp(dir_t)) {
+        printf("FAIL: mkdtemp (section 15)\n");
+        return 1;
+    }
+    build_tiered_fixture(dir_t, base);
+    test_tiered_budget(dir_t, base);
 
     printf("\n%d checks, %d failed\n", tests_run, tests_failed);
     return tests_failed ? 1 : 0;
