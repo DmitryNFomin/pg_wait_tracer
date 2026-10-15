@@ -590,3 +590,27 @@ test_backend_lifecycle
 # whose magnitude changed. Pure Python, milliseconds -- so a regression in
 # the gate's own logic does not need a 40-minute box run to surface.
 test_summary_raw_parity_lib.py
+
+# #424 live half: the request-scoped OPEN-INTERVAL OVERLAY (src/open_overlay.c)
+# -- the client of the daemon's {"cmd":"open_intervals"} snapshot, the span
+# arithmetic ([max(open_start, from), min(to, T_snap)] through the daemon's own
+# (now_mono, now_wall) anchor), the uniform precedence rule (any admitted
+# non-marker record for that pid past the open stamp IS the close, so a
+# historical window empties itself with no near-now heuristic), the RAW-route
+# and EXACT-tier refusals (summary v8 already credits open waits per sealed
+# second, so synthesizing there double counts), and the degraded contract: when
+# the overlay is unavailable the in-flight contribution is ABSENT and labelled,
+# never a zero. Positive numbers come from a hand-computed oracle, not from a
+# second call of the code under test; additivity is deliberately not the
+# primary assertion because it accepts an all-zero overlay.
+test_open_overlay
+# The false-negative suite over the entry above: 17 mutations of
+# src/open_overlay.c, each of which must turn test_open_overlay RED, plus a
+# comment-only control that must leave it GREEN (otherwise "every edit fails"
+# would look exactly like "every guard works"). A mutation that does not
+# apply, does not compile, or HANGS is a failure, and a missing compiler
+# refuses instead of skipping. It found two blind spots in the unit test
+# itself before either was committed: an unmeasured-CPU sentinel that survived
+# the arithmetic by accident, and a wall stamp that happened to be exactly
+# representable as a double.
+test_open_overlay_mutations.sh
