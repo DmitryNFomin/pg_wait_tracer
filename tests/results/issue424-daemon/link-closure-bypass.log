@@ -1,0 +1,11 @@
+BASELINE (clean tree, real base)      exit=0  OK: map_reader.c references no symbol it did not reference at base
+T1 the exact_probe dependency re-added exit=1  RED
+        FAIL: map_reader.c gained link-time dependencies:
+        _pgwt_exact_resolve_attr
+B1 unresolvable base ref              exit=2  CANNOT VERIFY: cannot resolve a base commit (tried 'definitely-not-a-ref')
+B2 a ref that is not a commit         exit=2  CANNOT VERIFY: cannot resolve a base commit (tried '304a772^{tree}')
+B3 compiler missing (exit 127 class)  exit=2  CANNOT VERIFY: compiler '/nonexistent-compiler' not found
+B4 wrong TU (anchor absent)           exit=2  CANNOT VERIFY: src/cJSON.c's anchor symbol _pgwt_read_state_map is not defined in the
+B5 TU absent at base                  exit=2  CANNOT VERIFY: src/does_not_exist.c does not exist at base 304a772
+B6 base TU does not compile           exit=2  /var/folders/tf/4mlc41nx3zsbx0v4x8wy4hl00000gn/T/tmp.ZjS9FFzJWe/base_map_reader.c:82:46: error: no member named 'wait_stats' in 'struct pg_wait_tracer_bpf::(unnamed at /var/folders/tf/4mlc41nx3zsbx0v4x8wy4hl00000gn/T/tmp.ZjS9FFzJWe/inc/pg_wait_tracer.skel.h:5:5)'
+RESTORED                              exit=0  OK: map_reader.c references no symbol it did not reference at base

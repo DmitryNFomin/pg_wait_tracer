@@ -9,6 +9,7 @@ test_status_invariant
 test_cmd_gate_formula
   96 gate cases, 40 nonzero, verdicts false/true=64/32, 0 peek diffs, 0 majority diffs
 test_missing_category_refuses
+test_open_cpu_prefix
 test_full_house
   1024 backends serialise to 565829 bytes (cap 1048576, 64 KB would be TRUNCATED)
 test_anchor_absent
@@ -16,4 +17,4 @@ test_transport_queue
   legacy sender: 16384 of 562563 bytes before EAGAIN (truncated)
   queued sender: 562563 bytes delivered in 34 flushes
   backlog cap: 3 replies (562563 bytes each) queued, then refused
-148 checks, 0 failed
+156 checks, 0 failed
