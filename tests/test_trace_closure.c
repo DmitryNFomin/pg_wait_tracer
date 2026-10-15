@@ -223,6 +223,37 @@ static void test_mapping(void)
           PGWT_CLOSURE_CLEAN,
           "an unknown spare bit must not change a CLEAN verdict");
 
+    /* ── The case we actually hit this week ───────────────────────────
+     *
+     * A crashed capture read WITHOUT a daemon restart: RECOVERED is stamped
+     * only by recover_current_trace, so a trace dir copied off a server as-is
+     * reads IN_PROGRESS. If liveness were inferred from the file's name —
+     * which is still "current.trace" in that copy — the warning would be
+     * suppressed for exactly the capture that lost intervals. is_live means
+     * "a daemon is writing to this RIGHT NOW and the caller knows it", and
+     * for a copied file that is false. */
+    CHECK(pgwt_closure_open_intervals_may_be_missing(
+              PGWT_CLOSURE_IN_PROGRESS, false),
+          "a copied, un-recovered capture must warn");
+    CHECK(pgwt_closure_warning(PGWT_CLOSURE_IN_PROGRESS, false) != NULL &&
+          strcmp(pgwt_closure_warning(PGWT_CLOSURE_IN_PROGRESS, false),
+                 pgwt_closure_warning(PGWT_CLOSURE_UNCLEAN, false)) == 0,
+          "and it must say the SAME thing as an unclean capture — for a file "
+          "nobody is writing to, they are the same hazard");
+    CHECK(pgwt_closure_warning(PGWT_CLOSURE_IN_PROGRESS, true) == NULL,
+          "while a genuinely live capture is not warned about");
+    CHECK(pgwt_closure_warning(PGWT_CLOSURE_CLEAN, false) == NULL &&
+          pgwt_closure_warning(PGWT_CLOSURE_ROTATED, false) == NULL,
+          "clean and rotated carry no warning");
+    {
+        const char *unk = pgwt_closure_warning(PGWT_CLOSURE_UNKNOWN, false);
+        CHECK(unk != NULL && strstr(unk, "unknown") != NULL,
+              "a legacy file is warned about as UNKNOWN, not as a crash "
+              "(got '%s')", unk ? unk : "(null)");
+        CHECK(pgwt_closure_warning(PGWT_CLOSURE_UNKNOWN, true) == NULL,
+              "...except while a daemon is demonstrably writing it");
+    }
+
     /* The name surface the API/UI will serialize. */
     CHECK(strcmp(pgwt_closure_name(PGWT_CLOSURE_UNKNOWN), "unknown") == 0 &&
           strcmp(pgwt_closure_name(PGWT_CLOSURE_UNCLEAN), "unclean") == 0 &&

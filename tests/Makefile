@@ -48,7 +48,8 @@ TESTS     = test_wait_event test_cmdline test_backend_lifecycle test_spawn test_
             test_open_interval \
             test_trace_closure \
             test_open_ckpt \
-            trace_closure_probe
+            trace_closure_probe \
+            open_ckpt_stub
 
 .PHONY: all clean check
 
@@ -408,6 +409,12 @@ test_open_ckpt: test_open_ckpt.c $(BUILD)/server_event_writer.o
 # tests/crash_scenarios.sh, not a test — it is in TESTS (so it gets built)
 # and deliberately NOT in unit_tests.list (there is nothing to assert).
 trace_closure_probe: trace_closure_probe.c $(BUILD)/server_event_writer.o
+	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -llz4
+
+# open_ckpt_stub: writes a valid checkpoint beside a LIVE capture, standing in
+# for the daemon producer that is not wired yet, so the crash-scenario script
+# can assert checkpoint survival end to end. Built, not in unit_tests.list.
+open_ckpt_stub: open_ckpt_stub.c $(BUILD)/server_event_writer.o
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -llz4
 
 test_durability: test_durability.c $(BUILD)/server_event_writer.o \

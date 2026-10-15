@@ -221,19 +221,38 @@ uint64_t pgwt_writer_committed_through_ns(const struct pgwt_event_writer *w);
  * it would leave a stale claim behind for recovery to find, which is the
  * double-count this contract exists to prevent.
  *
- * The call publishes the writer's own buffers FIRST (so the watermark the
- * checkpoint records is one the trace actually reached), then writes the
- * sidecar atomically: tmp → fsync → rename → fsync(dir).
+ * The call does NOT flush the writer's buffers. It records the watermark the
+ * writer has already reached, which is by construction a point the trace
+ * really contains. Flushing here would cut a block boundary on every call —
+ * at a one-second tick that changes block layout, footer index size and the
+ * block-aggregate's cost — so the decision belongs to the caller, which can
+ * call pgwt_writer_publish() at whatever cadence it has MEASURED. The sidecar
+ * itself is written atomically and durably: tmp → fsync → rename → fsync(dir).
  *
  * Returns 0 on success; -1 without writing anything if there is no open trace
  * file (a checkpoint with no file to name has no identity and must never be
  * written), if `count` exceeds PGWT_OPEN_CKPT_MAX_RECORDS, if a record is
- * self-inconsistent (duration longer than its own timestamp), or if the
- * publish or any file step failed. */
+ * self-inconsistent (duration longer than its own timestamp), or if any file
+ * step failed. */
 int  pgwt_writer_checkpoint_open(struct pgwt_event_writer *w,
                                  uint64_t now_mono_ns,
                                  const struct pgwt_open_ckpt_record *recs,
                                  int count);
+
+/* Write a checkpoint for the trace identified by `id` into `dir`, with the
+ * same atomic, durable sequence pgwt_writer_checkpoint_open uses (tmp →
+ * fsync → rename → fsync dir). Exposed because the writer-bound entry point
+ * needs an open file, and two callers legitimately have an identity without
+ * one: a tool importing or repairing a capture, and the test stub that
+ * stands in for the daemon's not-yet-wired producer. Sharing this function
+ * is what keeps the stub from becoming a second, drifting implementation of
+ * the format. Returns 0, or -1 on a refusal or any file step failing. */
+int  pgwt_open_ckpt_write(const char *dir,
+                          const struct pgwt_open_ckpt_identity *id,
+                          uint64_t seq, uint64_t now_mono_ns,
+                          uint64_t committed_through_ns,
+                          const struct pgwt_open_ckpt_record *recs, int count,
+                          gid_t trace_gid);
 
 /* Read and validate a checkpoint sidecar.
  *
@@ -281,8 +300,13 @@ void pgwt_writer_destroy(struct pgwt_event_writer *w);
 int pgwt_archive_path_nonclobber(const char *dir, const struct tm *tm,
                                  const char *ext, char *out, size_t out_size);
 
-/* fsync a directory so a just-renamed file survives power loss (DUR-5). */
-void pgwt_fsync_dir(const char *dir);
+/* fsync a directory so a just-renamed file survives power loss (DUR-5).
+ * Returns 0, or -1 if the directory could not be opened or fsynced — a
+ * failure a caller must report rather than swallow (#424 review): the rename
+ * is visible to this kernel either way, so it does not invalidate the
+ * process-death guarantee, but it does mean the name may not survive a power
+ * cut, and silence there is how an unmet durability claim survives. */
+int pgwt_fsync_dir(const char *dir);
 
 /* ── Exposed for unit testing ─────────────────────────────── */
 

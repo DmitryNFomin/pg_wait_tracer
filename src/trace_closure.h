@@ -31,6 +31,7 @@
 #define PGWT_TRACE_CLOSURE_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 /* ── Header flag bits (struct pgwt_trace_file_header.flags) ──
@@ -107,10 +108,18 @@ static inline enum pgwt_closure_status pgwt_closure_from_flags(uint16_t flags)
 
 /* "Intervals open at the end of this file may be missing from it."
  *
- * `is_live` is true only for the file a daemon is currently appending to
- * (current.trace): there, pending open intervals are not lost, they simply
- * have not happened yet, and the live path has committed_through_ns for that.
- * For every archived file, anything not positively certified CLEAN or ROTATED
+ * `is_live` means "a daemon is appending to this file RIGHT NOW, and this
+ * caller knows it" — the daemon's own live path, or a reader that has
+ * verified a running writer. It must NEVER be inferred from the file's name.
+ * A capture copied off a server keeps the name `current.trace` and is not
+ * live, and it is precisely the case we hit when a retained capture is pulled
+ * to a laptop: a crashed daemon's file read without a restart has no
+ * RECOVERED bit (that is stamped only by recover_current_trace), so it reads
+ * IN_PROGRESS. With is_live=false it therefore warns exactly like UNCLEAN,
+ * which is the honest answer — the capture did stop mid-interval, whoever
+ * has not yet run recovery.
+ *
+ * For every non-live file, anything not positively certified CLEAN or ROTATED
  * answers true — including UNKNOWN. */
 static inline bool
 pgwt_closure_open_intervals_may_be_missing(enum pgwt_closure_status s,
@@ -121,12 +130,33 @@ pgwt_closure_open_intervals_may_be_missing(enum pgwt_closure_status s,
     case PGWT_CLOSURE_ROTATED:
         return false;
     case PGWT_CLOSURE_IN_PROGRESS:
-        return !is_live;
     case PGWT_CLOSURE_UNKNOWN:
+        /* Both mean "we cannot say how this ends". While a writer is
+         * VERIFIABLY running, there is no end yet and nothing is missing; the
+         * moment nobody is writing, both are the same hazard as UNCLEAN. A
+         * legacy file is no exception: not tracking closure does not make a
+         * running capture incomplete. */
+        return !is_live;
     case PGWT_CLOSURE_UNCLEAN:
     default:
         return true;
     }
+}
+
+/* The sentence a reader must be shown, or NULL when there is nothing to warn
+ * about. One function so the API and the UI cannot word it differently, and
+ * so the two cases that mean "we do not know what we are missing" cannot
+ * drift apart: an unclean capture and an unfinalized one say the SAME thing,
+ * because for a file nobody is writing to they are the same hazard. */
+static inline const char *
+pgwt_closure_warning(enum pgwt_closure_status s, bool is_live)
+{
+    if (!pgwt_closure_open_intervals_may_be_missing(s, is_live))
+        return NULL;
+    if (s == PGWT_CLOSURE_UNKNOWN)
+        return "Closure unknown; open intervals may be missing.";
+    return "This capture ended uncleanly; intervals open at the end may be "
+           "missing.";
 }
 
 /* Stable machine-readable token for the API/UI surface. */

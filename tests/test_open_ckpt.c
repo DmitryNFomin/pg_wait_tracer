@@ -13,11 +13,15 @@
  *      must say yes AND inputs where it must say no — a rule that suppresses
  *      everything, or nothing, fails here.
  *   B. the writer: identity taken from the file it describes, a sequence that
- *      advances, a watermark that is published BEFORE it is recorded, and
- *      refusals that leave the previous checkpoint standing.
- *   C. recovery and the lifecycle: a crash carries the checkpoint next to its
- *      archive; a clean close and a rotation DELETE it (both would otherwise
- *      double count against real closing records); a new file discards it.
+ *      advances, a watermark that never overstates what is in the file, a
+ *      call that cuts NO block boundary, and refusals that leave the
+ *      previous checkpoint standing.
+ *   C. recovery, rotation and the two HANDOVER WINDOWS: a crash carries the
+ *      checkpoint next to its archive; rotation carries it too (deleting it
+ *      before a successor exists loses it to a kill in that window); a clean
+ *      close DELETES it, because the shutdown flush wrote the real records;
+ *      and a SIGKILL inside either handover, injected at a named crash point,
+ *      must leave a state the next start resolves into a complete pair.
  *   D. bypass suite: a stale sidecar from another file, a corrupt one, a
  *      truncated one, one with an insane count, one whose trace file is
  *      absent entirely, and an empty checkpoint that must SUPERSEDE a
@@ -28,6 +32,7 @@
  */
 #include "event_writer.h"
 #include "open_ckpt.h"
+#include "crash_point.h"
 #include "pg_wait_tracer.h"
 
 #include <stdio.h>
@@ -105,6 +110,62 @@ static struct pgwt_open_ckpt_record mkrec(uint32_t pid, uint64_t ts,
         .reserved = 0,
     };
     return r;
+}
+
+static int count_archives(const char *dir)
+{
+    int n = 0;
+    DIR *d = opendir(dir);
+    if (!d) return 0;
+    struct dirent *de;
+    while ((de = readdir(d))) {
+        size_t l = strlen(de->d_name);
+        if (l >= 10 && strcmp(de->d_name + l - 10, ".trace.lz4") == 0)
+            n++;
+    }
+    closedir(d);
+    return n;
+}
+
+/* Any "<something>.trace.lz4.open" in dir (there is at most one per archive
+ * in these tests). Used to inspect the INTERMEDIATE state a crash leaves
+ * between the two renames — the state the whole handover ordering exists to
+ * make resolvable. */
+static const char *any_sidecar(const char *dir)
+{
+    static char found[800];
+    found[0] = '\0';
+    DIR *d = opendir(dir);
+    if (!d) return NULL;
+    struct dirent *de;
+    while ((de = readdir(d))) {
+        size_t n = strlen(de->d_name);
+        size_t s = strlen(PGWT_OPEN_CKPT_SUFFIX);
+        if (n > s && strcmp(de->d_name + n - s, PGWT_OPEN_CKPT_SUFFIX) == 0 &&
+            strcmp(de->d_name, PGWT_OPEN_CKPT_NAME) != 0)
+            snprintf(found, sizeof(found), "%s/%s", dir, de->d_name);
+    }
+    closedir(d);
+    return found[0] ? found : NULL;
+}
+
+/* Load a sidecar without an identity check and report its record count and
+ * total open ns, so a test can assert CONTENT and not merely existence. */
+static int sidecar_contents(const char *path, int *count, uint64_t *open_ns,
+                            uint64_t *seq)
+{
+    void *buf = NULL;
+    struct pgwt_open_ckpt_view v;
+    if (pgwt_open_ckpt_load(path, NULL, &v, &buf) != PGWT_OPEN_CKPT_OK)
+        return -1;
+    uint64_t sum = 0;
+    for (int i = 0; i < v.count; i++)
+        sum += v.records[i].duration_ns;
+    if (count)   *count = v.count;
+    if (open_ns) *open_ns = sum;
+    if (seq)     *seq = v.header.seq;
+    free(buf);
+    return 0;
 }
 
 static const char *newest_archive(const char *dir)
@@ -362,12 +423,15 @@ static void test_writer_identity_and_publication(void)
     CHECK(pgwt_writer_checkpoint_open(&w, last_ts + 1000, recs, 2) == 0,
           "checkpoint");
 
-    /* DURABLE PUBLICATION: the pending block went out BEFORE the checkpoint
-     * recorded a watermark, so the watermark is a value the trace reached. */
-    CHECK(pgwt_writer_committed_through_ns(&w) == last_ts,
-          "the checkpoint must publish first: watermark %llu, expected %llu",
-          (unsigned long long)pgwt_writer_committed_through_ns(&w),
-          (unsigned long long)last_ts);
+    /* DURABLE PUBLICATION, and the half of it that is NOT a flush: the
+     * checkpoint must not publish on the caller's behalf (that would cut a
+     * block boundary per call — see [C7]), and the watermark it records must
+     * therefore still be 0 here, because nothing has been written yet. A
+     * watermark that advanced without a block being written would be the
+     * dishonest case: a value the trace does not contain. */
+    CHECK(pgwt_writer_committed_through_ns(&w) == 0,
+          "the checkpoint must not flush: watermark %llu, expected 0",
+          (unsigned long long)pgwt_writer_committed_through_ns(&w));
 
     void *buf = NULL;
     struct pgwt_open_ckpt_view v;
@@ -388,20 +452,41 @@ static void test_writer_identity_and_publication(void)
               "the records must round-trip");
         CHECK(v.records[0].flags == PGWT_EVENT_FLAG_CMD_OPEN,
               "the sidecar preserves flags the trace block layout drops");
-        CHECK(v.header.committed_through_ns == last_ts,
-              "the recorded watermark must be the published one");
+        CHECK(v.header.committed_through_ns == 0,
+              "an unpublished writer's checkpoint records watermark 0, not "
+              "the pending tail (got %llu)",
+              (unsigned long long)v.header.committed_through_ns);
     }
     free(buf);
 
-    /* Sequence advances; a refused checkpoint leaves the previous standing. */
-    CHECK(pgwt_writer_checkpoint_open(&w, last_ts + 2000, recs, 2) == 0, "ckpt 2");
+    /* After the caller publishes, the next checkpoint reports the real
+     * watermark — so the field tracks the file, not the clock. */
+    CHECK(pgwt_writer_publish(&w) == 0, "caller publishes");
+    CHECK(pgwt_writer_committed_through_ns(&w) == last_ts,
+          "publishing advances the watermark to the last written record");
+    CHECK(pgwt_writer_checkpoint_open(&w, last_ts + 2000, recs, 2) == 0,
+          "checkpoint after publish");
+    buf = NULL;
+    rc = pgwt_open_ckpt_load(pathcat(dir, PGWT_OPEN_CKPT_NAME), &id, &v, &buf);
+    CHECK(rc == PGWT_OPEN_CKPT_OK && v.header.committed_through_ns == last_ts,
+          "and the checkpoint now records it (%llu, expected %llu)",
+          rc == PGWT_OPEN_CKPT_OK
+              ? (unsigned long long)v.header.committed_through_ns : 0,
+          (unsigned long long)last_ts);
+    free(buf);
+
+    /* Sequence advances; a refused checkpoint leaves the previous standing.
+     * Two have been written above, so the survivor must be seq 2 — a
+     * refusal must not renumber, truncate or blank what is already there. */
     struct pgwt_open_ckpt_record badrec = mkrec(7, 100, 500);  /* dur > ts */
     CHECK(pgwt_writer_checkpoint_open(&w, last_ts + 3000, &badrec, 1) == -1,
           "a self-inconsistent record must be refused");
     rc = pgwt_open_ckpt_load(pathcat(dir, PGWT_OPEN_CKPT_NAME), &id, &v, &buf);
-    CHECK(rc == PGWT_OPEN_CKPT_OK && v.header.seq == 2,
-          "the refused write must leave checkpoint 2 in place (seq=%llu)",
-          rc == PGWT_OPEN_CKPT_OK ? (unsigned long long)v.header.seq : 0);
+    CHECK(rc == PGWT_OPEN_CKPT_OK && v.header.seq == 2 && v.count == 2,
+          "the refused write must leave the last good checkpoint intact "
+          "(seq=%llu, records=%d)",
+          rc == PGWT_OPEN_CKPT_OK ? (unsigned long long)v.header.seq : 0,
+          rc == PGWT_OPEN_CKPT_OK ? v.count : -1);
     free(buf);
     CHECK(access(pathcat(dir, PGWT_OPEN_CKPT_TMP), F_OK) != 0,
           "a refused write must leave no tmp behind");
@@ -420,6 +505,12 @@ static pid_t crash_with_ckpt(const char *dir, int n_ckpt, uint64_t t0)
     struct pgwt_event_writer w;
     if (pgwt_writer_init(&w, dir, 16, 0, NULL) != 0) _exit(2);
     push_n(&w, 60, t0);
+    /* The daemon publishes on its own cadence; the checkpoint deliberately
+     * does not flush (it would cut a block boundary per call). Without this
+     * the file would hold no complete block and recovery would have nothing
+     * to archive — which is itself the proof that the checkpoint no longer
+     * flushes behind the caller's back. */
+    if (pgwt_writer_publish(&w) != 0) _exit(6);
     struct pgwt_open_ckpt_record recs[4];
     for (int i = 0; i < n_ckpt && i < 4; i++)
         recs[i] = mkrec(2000 + (uint32_t)i, t0 + 100000000ULL,
@@ -519,9 +610,13 @@ static void test_clean_close_drops_checkpoint(void)
     }
     rm_rf(dir);
 
-    /* Rotation: the same intervals continue into the NEXT file, where they
-     * get real closing records. Keeping the checkpoint double counts. */
-    dir = fresh_dir("rotdrop");
+    /* Rotation CARRIES it to the rotated archive (review finding). It used
+     * to be deleted here, on the argument that the open intervals continue
+     * into the next file and get real closing records there — true only if
+     * the daemon survives to write them. Deleting evidence before a
+     * successor exists means a kill in that window loses the open intervals
+     * outright. The overlap is suppression's job, not deletion's. */
+    dir = fresh_dir("rotcarry");
     struct pgwt_event_writer w3;
     CHECK(pgwt_writer_init(&w3, dir, 16, 0, NULL) == 0, "init");
     push_n(&w3, 40, 13000000000ULL);
@@ -530,17 +625,245 @@ static void test_clean_close_drops_checkpoint(void)
     w3.current_hour = -99;                 /* force the hour check, no sleep */
     CHECK(pgwt_writer_check_rotation(&w3) == 0, "rotate");
     CHECK(access(pathcat(dir, PGWT_OPEN_CKPT_NAME), F_OK) != 0,
-          "rotation must drop the checkpoint");
+          "the live name is free again after rotation");
     const char *rarch = newest_archive(dir);
+    CHECK(rarch != NULL, "rotation produced an archive");
     if (rarch) {
         char side[800];
         snprintf(side, sizeof(side), "%s%s", rarch, PGWT_OPEN_CKPT_SUFFIX);
-        CHECK(access(side, F_OK) != 0,
-              "a rotated archive must have no checkpoint beside it");
+        int n = -1; uint64_t ns = 0;
+        CHECK(sidecar_contents(side, &n, &ns, NULL) == 0,
+              "the rotated archive must KEEP its checkpoint at %s", side);
+        CHECK(n == 1 && ns == 2000000,
+              "...with its records intact (got %d records, %llu ns)",
+              n, (unsigned long long)ns);
     }
     pgwt_writer_close(&w3);
     pgwt_writer_destroy(&w3);
     rm_rf(dir);
+}
+
+/* ── C4/C5. the two handover windows, with a real SIGKILL inside them ── */
+
+static void test_kill_during_rotation(void)
+{
+    printf("\n[C4] killed INSIDE the rotation handover\n");
+    const char *dir = fresh_dir("killrot");
+
+    /* The child dies between the sidecar rename and the trace rename — the
+     * window an external kill -9 could never hit reliably. */
+    pid_t pid = fork();
+    CHECK(pid >= 0, "fork");
+    if (pid == 0) {
+        setenv("PGWT_CRASH_AT", PGWT_CRASH_ROTATE_AFTER_CKPT, 1);
+        struct pgwt_event_writer w;
+        if (pgwt_writer_init(&w, dir, 16, 0, NULL) != 0) _exit(2);
+        push_n(&w, 60, 20000000000ULL);
+        struct pgwt_open_ckpt_record recs[2] = {
+            mkrec(5001, 20100000000ULL, 4000000),
+            mkrec(5002, 20100000000ULL, 6000000),
+        };
+        if (pgwt_writer_checkpoint_open(&w, 20100000000ULL, recs, 2) != 0)
+            _exit(4);
+        w.current_hour = -99;
+        pgwt_writer_check_rotation(&w);
+        _exit(5);              /* must not be reached: the crash point kills */
+    }
+    CHECK(reap_killed(pid), "the child died inside the rotation handover");
+
+    /* The intermediate state: trace NOT yet renamed, sidecar already moved.
+     * This is the state the ordering is designed to produce — the reverse
+     * (trace moved, sidecar still live) is the one that loses evidence. */
+    CHECK(access(pathcat(dir, "current.trace"), F_OK) == 0,
+          "the trace has not been renamed yet");
+    const char *stranded = any_sidecar(dir);
+    CHECK(stranded != NULL,
+          "the checkpoint moved first, so it is already at its destination");
+    CHECK(count_archives(dir) == 0, "and no archive exists yet");
+
+    /* The next start must resolve it into a complete pair, losing nothing. */
+    struct pgwt_event_writer w;
+    CHECK(pgwt_writer_init(&w, dir, 16, 0, NULL) == 0, "restart");
+    const char *arch = newest_archive(dir);
+    CHECK(arch != NULL, "recovery archived the trace");
+    if (arch) {
+        char side[800];
+        snprintf(side, sizeof(side), "%s%s", arch, PGWT_OPEN_CKPT_SUFFIX);
+        int n = -1; uint64_t ns = 0;
+        /* The property is that the PAIR is complete: the stranded sidecar
+         * was left in place for this archive rather than deleted. (The
+         * adoption branch earns its keep on the other side of the same
+         * decision — removing one that does NOT fit, see [C6].) */
+        CHECK(sidecar_contents(side, &n, &ns, NULL) == 0,
+              "the stranded checkpoint and its archive are a complete pair");
+        CHECK(n == 2 && ns == 10000000,
+              "and both open intervals survived intact (got %d, %llu ns; "
+              "0 records or a missing file means the window loses evidence)",
+              n, (unsigned long long)ns);
+    }
+    pgwt_writer_destroy(&w);
+    rm_rf(dir);
+}
+
+static void test_kill_between_recovery_renames(void)
+{
+    printf("\n[C5] killed BETWEEN recovery's two renames\n");
+    const char *dir = fresh_dir("killrec");
+
+    /* 1. an ordinary crash, leaving a trace and a live checkpoint */
+    CHECK(reap_killed(crash_with_ckpt(dir, 3, 21000000000ULL)),
+          "first child killed");
+    CHECK(access(pathcat(dir, PGWT_OPEN_CKPT_NAME), F_OK) == 0,
+          "it left a live checkpoint");
+
+    /* 2. a recovery that itself dies inside the handover window */
+    pid_t pid = fork();
+    CHECK(pid >= 0, "fork");
+    if (pid == 0) {
+        setenv("PGWT_CRASH_AT", PGWT_CRASH_RECOVER_AFTER_CKPT, 1);
+        struct pgwt_event_writer w;
+        pgwt_writer_init(&w, dir, 16, 0, NULL);   /* recovery runs in init */
+        _exit(5);              /* must not be reached */
+    }
+    CHECK(reap_killed(pid), "the recovering child died inside the window");
+    CHECK(access(pathcat(dir, "current.trace"), F_OK) == 0,
+          "the trace is still unarchived");
+    CHECK(access(pathcat(dir, PGWT_OPEN_CKPT_NAME), F_OK) != 0,
+          "the live checkpoint has already moved");
+    CHECK(any_sidecar(dir) != NULL,
+          "...to its destination, where it waits for the trace");
+
+    /* 3. the next start completes the pair */
+    struct pgwt_event_writer w;
+    CHECK(pgwt_writer_init(&w, dir, 16, 0, NULL) == 0, "restart");
+    const char *arch = newest_archive(dir);
+    CHECK(arch != NULL, "recovery archived the trace");
+    if (arch) {
+        char side[800];
+        snprintf(side, sizeof(side), "%s%s", arch, PGWT_OPEN_CKPT_SUFFIX);
+        int n = -1; uint64_t ns = 0;
+        CHECK(sidecar_contents(side, &n, &ns, NULL) == 0,
+              "the interrupted handover was completed, not discarded "
+              "(the pre-fix code deleted this file as having no "
+              "current.trace to attribute it to)");
+        CHECK(n == 3 && ns == 6000000,
+              "and all three open intervals survived (got %d, %llu ns)",
+              n, (unsigned long long)ns);
+    }
+    pgwt_writer_destroy(&w);
+    rm_rf(dir);
+}
+
+static void test_adoption_requires_identity(void)
+{
+    printf("\n[C6] a sidecar at the destination is adopted ONLY if it fits\n");
+    const char *dir = fresh_dir("adopt");
+
+    CHECK(reap_killed(crash_with_ckpt(dir, 2, 22000000000ULL)), "child killed");
+    pid_t pid = fork();
+    if (pid == 0) {
+        setenv("PGWT_CRASH_AT", PGWT_CRASH_RECOVER_AFTER_CKPT, 1);
+        struct pgwt_event_writer w;
+        pgwt_writer_init(&w, dir, 16, 0, NULL);
+        _exit(5);
+    }
+    CHECK(reap_killed(pid), "recovery died mid-handover");
+
+    /* Rewrite the stranded sidecar's identity: now it describes a DIFFERENT
+     * file. Adoption must refuse it — "there is a file at the right name" is
+     * not evidence that it is the right file. */
+    const char *stranded = any_sidecar(dir);
+    CHECK(stranded != NULL, "a sidecar is stranded at the destination");
+    char strandedcopy[800] = "";
+    if (stranded) {
+        snprintf(strandedcopy, sizeof(strandedcopy), "%s", stranded);
+        void *buf = NULL;
+        struct pgwt_open_ckpt_view v;
+        CHECK(pgwt_open_ckpt_load(strandedcopy, NULL, &v, &buf) ==
+              PGWT_OPEN_CKPT_OK, "read it back");
+        struct pgwt_open_ckpt_header h = v.header;
+        struct pgwt_open_ckpt_record recs[4];
+        int n = v.count;
+        memcpy(recs, v.records, (size_t)n * sizeof(recs[0]));
+        free(buf);
+        h.trace_start_wall_ns ^= 0x1234;
+        CHECK(write_ckpt_file(strandedcopy, h, recs, n, 1) == 0, "re-stamp it");
+    }
+
+    struct pgwt_event_writer w;
+    CHECK(pgwt_writer_init(&w, dir, 16, 0, NULL) == 0, "restart");
+    CHECK(strandedcopy[0] && access(strandedcopy, F_OK) != 0,
+          "a sidecar that does not describe this trace must be REMOVED, not "
+          "left sitting beside an archive it is not about");
+    const char *arch = newest_archive(dir);
+    CHECK(arch != NULL, "the trace is still archived");
+    pgwt_writer_destroy(&w);
+    rm_rf(dir);
+}
+
+static void test_checkpoint_forces_no_block_boundary(void)
+{
+    printf("\n[C7] a checkpoint cuts no block and never overstates\n");
+    const char *dir = fresh_dir("noflush");
+    struct pgwt_event_writer w;
+    CHECK(pgwt_writer_init(&w, dir, 16, 0, NULL) == 0, "init");
+
+    push_n(&w, 100, 23000000000ULL);
+    CHECK(pgwt_writer_publish(&w) == 0, "publish once");
+    int blocks_after_publish = w.num_blocks;
+    uint64_t wm = pgwt_writer_committed_through_ns(&w);
+    CHECK(blocks_after_publish == 1 && wm > 0, "one block is on disk");
+
+    /* More events, left PENDING, then ten checkpoints. A checkpoint that
+     * flushed would cut ten more blocks — at the daemon's one-second tick
+     * that is a block boundary every second, which changes block layout,
+     * footer size and the block-aggregate's cost. */
+    push_n(&w, 50, 24000000000ULL);
+    for (int i = 0; i < 10; i++) {
+        struct pgwt_open_ckpt_record r = mkrec(6001, 24100000000ULL + i, 1000);
+        CHECK(pgwt_writer_checkpoint_open(&w, 24100000000ULL + i, &r, 1) == 0,
+              "checkpoint %d", i);
+    }
+    CHECK(w.num_blocks == blocks_after_publish,
+          "ten checkpoints must cut no block (blocks %d -> %d)",
+          blocks_after_publish, w.num_blocks);
+
+    /* And the watermark they record must be what is really in the file, not
+     * the pending events' timestamps. */
+    void *buf = NULL;
+    struct pgwt_open_ckpt_view v;
+    CHECK(pgwt_open_ckpt_load(pathcat(dir, PGWT_OPEN_CKPT_NAME), NULL, &v,
+                              &buf) == PGWT_OPEN_CKPT_OK, "load");
+    CHECK(v.header.committed_through_ns == wm,
+          "the recorded watermark must equal what is published (%llu), not "
+          "the pending tail (%llu)",
+          (unsigned long long)wm,
+          (unsigned long long)v.header.committed_through_ns);
+    CHECK(v.header.seq == 10, "ten checkpoints, seq 10, got %llu",
+          (unsigned long long)v.header.seq);
+    free(buf);
+    pgwt_writer_destroy(&w);
+    rm_rf(dir);
+}
+
+static void test_sidecar_path_rule(void)
+{
+    printf("\n[C8] both sidecar names, including the un-recovered one\n");
+    char out[64];
+    CHECK(pgwt_open_ckpt_path_for("/t/2026-10-15_18.trace.lz4", out,
+                                  sizeof(out)) == 0 &&
+          strcmp(out, "/t/2026-10-15_18.trace.lz4.open") == 0,
+          "archive sidecar name, got '%s'", out);
+    /* The case a consumer that only knows the archive name gets wrong: a
+     * trace dir copied off a server before any daemon recovered it. */
+    CHECK(pgwt_open_ckpt_path_for("/t/current.trace", out, sizeof(out)) == 0 &&
+          strcmp(out, "/t/" PGWT_OPEN_CKPT_NAME) == 0,
+          "live sidecar name, got '%s'", out);
+    char tiny[8];
+    CHECK(pgwt_open_ckpt_path_for("/t/current.trace", tiny, sizeof(tiny)) == -1,
+          "a path that does not fit must refuse, not truncate");
+    CHECK(pgwt_open_ckpt_path_for(NULL, out, sizeof(out)) == -1,
+          "NULL must refuse");
 }
 
 static void test_uncertified_close_keeps_checkpoint(void)
@@ -692,6 +1015,7 @@ static void test_empty_checkpoint_supersedes(void)
         struct pgwt_event_writer w;
         if (pgwt_writer_init(&w, dir, 16, 0, NULL) != 0) _exit(2);
         push_n(&w, 60, 17000000000ULL);
+        if (pgwt_writer_publish(&w) != 0) _exit(6);
         struct pgwt_open_ckpt_record r = mkrec(4001, 17100000000ULL, 5000000);
         if (pgwt_writer_checkpoint_open(&w, 17100000000ULL, &r, 1) != 0) _exit(4);
         if (pgwt_writer_checkpoint_open(&w, 17200000000ULL, NULL, 0) != 0) _exit(5);
@@ -851,6 +1175,11 @@ int main(void)
     test_writer_identity_and_publication();
     test_recovery_carries_checkpoint();
     test_clean_close_drops_checkpoint();
+    test_kill_during_rotation();
+    test_kill_between_recovery_renames();
+    test_adoption_requires_identity();
+    test_checkpoint_forces_no_block_boundary();
+    test_sidecar_path_rule();
     test_uncertified_close_keeps_checkpoint();
     test_stale_sidecar_refused();
     test_corrupt_and_truncated_sidecars_refused();

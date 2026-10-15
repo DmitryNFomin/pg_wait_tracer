@@ -40,8 +40,35 @@
  *
  * What a checkpoint is NOT: a complete record. Its duration is a LOWER BOUND
  * — the interval was open at least from start to the checkpoint instant, and
- * however much longer it ran before the crash is unobservable. A consumer
- * must present it as such.
+ * however much longer it ran before the crash is unobservable.
+ *
+ * ── The rule a consumer may not bend ──────────────────────────────────
+ *
+ * Reconstructed time is SHOWN, never ADDED. It does not enter DB Time, a
+ * per-class total, AAS, a percentage, an average or a CPU residual. All of
+ * those are derived in compute.c, so time entering anywhere is inherited
+ * silently by everything downstream — and a percentage does not inherit a
+ * lower-bound guarantee just because its numerator was labelled one. It
+ * surfaces as its own field beside the unclean badge, clipped to the window
+ * and after suppression, e.g.
+ *
+ *     reconstructed_open: { pids, lower_bound_ms, snapshot }
+ *     "Checkpoint reconstruction: >= 412 ms through 14:03:11;
+ *      excluded from totals"
+ *
+ * and the recorded totals are marked POTENTIALLY INCOMPLETE whenever the
+ * closure status is not clean. The gate for this is an equality, not a
+ * judgement: totals must be byte-identical with and without the sidecar
+ * present. Adding it for real would need separately named recorded and
+ * reconstructed components carried through every aggregation and export —
+ * a much larger change, deliberately not this one.
+ *
+ * Do NOT reason by analogy from the live open-intervals overlay, which looks
+ * the same shape and does the opposite: the overlay's in-flight time IS added
+ * to totals, because it is a daemon MEASUREMENT of state at the snapshot
+ * instant. A checkpoint is a RECONSTRUCTION from the last surviving snapshot
+ * before a crash, with an unknown remainder after it. Same shape, different
+ * epistemic status; that is the whole distinction.
  */
 #ifndef PGWT_OPEN_CKPT_H
 #define PGWT_OPEN_CKPT_H
@@ -67,6 +94,28 @@
 #define PGWT_OPEN_CKPT_NAME     "current.trace.open"
 #define PGWT_OPEN_CKPT_TMP      "current.trace.open.tmp"
 #define PGWT_OPEN_CKPT_SUFFIX   ".open"
+
+/* Where the checkpoint for a given trace file lives.
+ *
+ * Two names, and a consumer that knows only one of them is broken for the
+ * case we actually hit: an ARCHIVE carries "<archive>.open", while a capture
+ * that no daemon has recovered yet — the state a trace dir is in when it is
+ * copied off a server as-is — carries "current.trace.open" beside the live
+ * name. Centralised here so no caller has to remember that.
+ *
+ * Returns 0 on success, -1 if the path does not fit. */
+static inline int pgwt_open_ckpt_path_for(const char *trace_path,
+                                          char *out, size_t out_size)
+{
+    if (!trace_path || !out || out_size == 0)
+        return -1;
+    size_t n = strlen(trace_path);
+    if (n + sizeof(PGWT_OPEN_CKPT_SUFFIX) > out_size)
+        return -1;
+    memcpy(out, trace_path, n);
+    memcpy(out + n, PGWT_OPEN_CKPT_SUFFIX, sizeof(PGWT_OPEN_CKPT_SUFFIX));
+    return 0;    /* "<dir>/current.trace" + ".open" is the live name too */
+}
 
 /* One checkpointed open interval: byte-for-byte the closing record the
  * shutdown flush would have written, plus the in-memory flags the trace

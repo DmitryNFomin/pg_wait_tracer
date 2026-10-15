@@ -21,11 +21,25 @@
 #   early          kill before any block was committed (nothing to archive)
 #   repeated       kill, restart, kill again, restart again
 #   graceful       let the daemon exit NORMALLY — the control case
+#   ckpt_survives  an open-interval CHECKPOINT beside a live capture must
+#                  survive the kill and be carried to the archive, with its
+#                  records intact — closure labels alone cannot see this,
+#                  which is how two handover bugs survived a "15/15 PASS"
+#   ckpt_clean     the other side of that rule: a graceful shutdown DROPS the
+#                  checkpoint, because the real closing records were written
+#   ckpt_window    a daemon killed INSIDE recovery's handover (named crash
+#                  point) must leave a state the next start completes
 #
-# `graceful` is not decoration: without it, a script that printed "unclean" for
-# everything, or one whose probe always said so, would pass. The run FAILS if
-# graceful does not come back `clean`, which is only possible if the probe can
-# actually distinguish the two.
+# `graceful` and `ckpt_clean` are not decoration: without them, a script that
+# printed "unclean" for everything, or one that kept every checkpoint
+# unconditionally, would pass. The run FAILS if graceful does not come back
+# `clean` and if ckpt_clean does not come back `none`, which is only possible
+# if the product distinguishes the cases.
+#
+# The checkpoint producer is NOT wired into the daemon yet, so those three
+# scenarios use tests/open_ckpt_stub to place a validly-identified checkpoint
+# beside the live capture. Everything after that — kill, recovery, handover,
+# retention — is the real product.
 #
 # Usage: sudo tests/crash_scenarios.sh --pid <postmaster-pid> --psql "<psql cmd>"
 #                                      [--out DIR]
@@ -65,6 +79,8 @@ refuse() { echo "REFUSED: $*" >&2; exit 2; }
 [[ -x "$PROJECT_DIR/pg_wait_tracer" ]] || refuse "pg_wait_tracer is not built"
 PROBE="$PROJECT_DIR/tests/trace_closure_probe"
 [[ -x "$PROBE" ]] || refuse "tests/trace_closure_probe is not built (make -C tests trace_closure_probe)"
+STUB="$PROJECT_DIR/tests/open_ckpt_stub"
+[[ -x "$STUB" ]] || refuse "tests/open_ckpt_stub is not built (make -C tests open_ckpt_stub) — without it this script can only check closure labels, which is how two handover bugs survived a 15/15 run"
 kill -0 "$PM_PID" 2>/dev/null || refuse "no process $PM_PID (postmaster)"
 $PSQL -tAc "SELECT 1" >/dev/null 2>&1 || refuse "psql command does not work: $PSQL"
 
@@ -307,6 +323,164 @@ scenario_graceful() {
     summary="${summary}graceful=$(field "$dir/current.trace" closure) "
 }
 
+scenario_checkpoint_survives_kill() {
+    # The gate the closure-label scenarios cannot be: does the open-interval
+    # CHECKPOINT survive a kill, with its records intact?
+    #
+    # The daemon has no checkpoint producer yet (pgwt_writer_checkpoint_open
+    # has no caller in src/), so the stub writes one beside the live capture,
+    # with the identity read from that capture's own header. Everything after
+    # that — the kill, the recovery, the handover — is the real product.
+    local dir="$OUT/ckpt_survives"
+    rm -rf "$dir"; mkdir -p "$dir"
+    note ""
+    note "[ckpt_survives] checkpoint beside a live capture → SIGKILL → restart"
+
+    start_daemon "$dir" 120
+    local dpid=$DPID
+    sleep 2
+    ( $PSQL -c "SELECT pg_sleep(20)" >/dev/null 2>&1 ) &
+    local wpid=$!
+    if ! wait_for_block "$dir" 25; then
+        note "  FAIL: [ckpt_survives] no block committed"
+        failures=$((failures + 1))
+        kill -9 "$dpid" "$wpid" 2>/dev/null; wait "$dpid" 2>/dev/null
+        return
+    fi
+
+    local stub_out
+    stub_out=$("$STUB" "$dir" 3 91000 2000000 2>&1)
+    local stub_rc=$?
+    note "  stub: $stub_out"
+    if [[ $stub_rc -ne 0 ]]; then
+        note "  FAIL: [ckpt_survives] could not write a checkpoint ($stub_rc)"
+        failures=$((failures + 1))
+        kill -9 "$dpid" "$wpid" 2>/dev/null; wait "$dpid" 2>/dev/null
+        return
+    fi
+    # 2 + 4 + 6 ms, from the stub's own arithmetic.
+    local want_ns=12000000
+
+    check "[ckpt_survives] the live capture reports its checkpoint" \
+          "seq=1,intervals=3,open_ns=$want_ns" \
+          "$(field "$dir/current.trace" checkpoint)"
+
+    kill -9 "$dpid" 2>/dev/null; wait "$dpid" 2>/dev/null
+    kill -9 "$wpid" 2>/dev/null; wait "$wpid" 2>/dev/null
+    check "[ckpt_survives] it is still there after the kill" \
+          "seq=1,intervals=3,open_ns=$want_ns" \
+          "$(field "$dir/current.trace" checkpoint)"
+
+    recover_once "$dir" || return
+    local arch
+    arch=$(ls -1 "$dir"/*.trace.lz4 2>/dev/null | head -1)
+    if [[ -z "$arch" ]]; then
+        note "  FAIL: [ckpt_survives] recovery produced no archive"
+        failures=$((failures + 1)); return
+    fi
+    note "  archive: $(probe "$arch")"
+    check "[ckpt_survives] recovery carried it to the archive, intact" \
+          "seq=1,intervals=3,open_ns=$want_ns" "$(field "$arch" checkpoint)"
+    check "[ckpt_survives] and the archive is still labelled unclean" \
+          "unclean" "$(field "$arch" closure)"
+    summary="${summary}ckpt_survives=$(field "$arch" checkpoint) "
+}
+
+scenario_checkpoint_dropped_on_clean_close() {
+    # The other side of the same rule, so "carried" cannot be satisfied by
+    # keeping it unconditionally: a clean shutdown flushes the open intervals
+    # as REAL records, and the checkpoint must then be gone.
+    local dir="$OUT/ckpt_clean"
+    rm -rf "$dir"; mkdir -p "$dir"
+    note ""
+    note "[ckpt_clean] checkpoint + graceful shutdown → it must be dropped"
+
+    start_daemon "$dir" 120
+    local dpid=$DPID
+    sleep 2
+    ( $PSQL -c "SELECT pg_sleep(12)" >/dev/null 2>&1 ) &
+    local wpid=$!
+    if ! wait_for_block "$dir" 25; then
+        note "  FAIL: [ckpt_clean] no block committed"
+        failures=$((failures + 1))
+        kill -9 "$dpid" "$wpid" 2>/dev/null; wait "$dpid" 2>/dev/null
+        return
+    fi
+    "$STUB" "$dir" 2 92000 3000000 >/dev/null 2>&1 ||
+        { note "  FAIL: [ckpt_clean] stub failed"; failures=$((failures + 1)); }
+    check "[ckpt_clean] the checkpoint is there before the shutdown" \
+          "seq=1,intervals=2,open_ns=9000000" \
+          "$(field "$dir/current.trace" checkpoint)"
+
+    kill -TERM "$dpid" 2>/dev/null; wait "$dpid" 2>/dev/null
+    kill -9 "$wpid" 2>/dev/null; wait "$wpid" 2>/dev/null
+
+    check "[ckpt_clean] a clean close drops it" \
+          "none" "$(field "$dir/current.trace" checkpoint)"
+    check "[ckpt_clean] and the file is clean" \
+          "clean" "$(field "$dir/current.trace" closure)"
+    summary="${summary}ckpt_clean=$(field "$dir/current.trace" checkpoint) "
+}
+
+scenario_kill_inside_recovery_handover() {
+    # The handover window, with the REAL daemon: a recovery that dies between
+    # moving the checkpoint and moving the trace must leave a state the next
+    # start completes, not one it cleans up.
+    local dir="$OUT/ckpt_window"
+    rm -rf "$dir"; mkdir -p "$dir"
+    note ""
+    note "[ckpt_window] daemon killed INSIDE recovery's handover"
+
+    start_daemon "$dir" 120
+    local dpid=$DPID
+    sleep 2
+    ( $PSQL -c "SELECT pg_sleep(20)" >/dev/null 2>&1 ) &
+    local wpid=$!
+    if ! wait_for_block "$dir" 25; then
+        note "  FAIL: [ckpt_window] no block committed"
+        failures=$((failures + 1))
+        kill -9 "$dpid" "$wpid" 2>/dev/null; wait "$dpid" 2>/dev/null
+        return
+    fi
+    "$STUB" "$dir" 2 93000 5000000 >/dev/null 2>&1 ||
+        { note "  FAIL: [ckpt_window] stub failed"; failures=$((failures + 1)); }
+    kill -9 "$dpid" 2>/dev/null; wait "$dpid" 2>/dev/null
+    kill -9 "$wpid" 2>/dev/null; wait "$wpid" 2>/dev/null
+
+    # A recovery that dies in the window. PGWT_CRASH_AT is inert without this
+    # variable, so only this one process is affected.
+    PGWT_CRASH_AT=recover_after_ckpt "$PROJECT_DIR/pg_wait_tracer" \
+        --mode tiered --pid "$PM_PID" --trace-dir "$dir" --duration 4 --quiet \
+        >>"$LOG" 2>&1
+    local rc=$?
+    note "  recovering daemon exit=$rc (137 = SIGKILL at the crash point)"
+    if [[ $rc -ne 137 ]]; then
+        note "  FAIL: [ckpt_window] the crash point did not fire (exit $rc) — "
+        note "        this scenario proves nothing unless it does"
+        failures=$((failures + 1))
+        return
+    fi
+
+    local stranded
+    stranded=$(ls -1 "$dir"/*.trace.lz4.open 2>/dev/null | head -1)
+    check "[ckpt_window] the checkpoint moved first and waits for its trace" \
+          "yes" "$([[ -n "$stranded" ]] && echo yes || echo no)"
+    check "[ckpt_window] the trace is not archived yet" \
+          "yes" "$([[ -f "$dir/current.trace" ]] && echo yes || echo no)"
+
+    recover_once "$dir" || return
+    local arch
+    arch=$(ls -1 "$dir"/*.trace.lz4 2>/dev/null | head -1)
+    if [[ -z "$arch" ]]; then
+        note "  FAIL: [ckpt_window] no archive after the second start"
+        failures=$((failures + 1)); return
+    fi
+    note "  archive: $(probe "$arch")"
+    check "[ckpt_window] the interrupted handover completed, evidence intact" \
+          "seq=1,intervals=2,open_ns=15000000" "$(field "$arch" checkpoint)"
+    summary="${summary}ckpt_window=$(field "$arch" checkpoint) "
+}
+
 note "#424 crash scenarios — daemon=$PROJECT_DIR/pg_wait_tracer pm_pid=$PM_PID"
 if [[ -z "$COMMIT" ]]; then
     COMMIT=$(cd "$PROJECT_DIR" && git rev-parse HEAD 2>/dev/null)
@@ -322,6 +496,9 @@ scenario_kill publication "SELECT count(*) FROM generate_series(1, 50000000)"
 scenario_early
 scenario_repeated
 scenario_graceful
+scenario_checkpoint_survives_kill
+scenario_checkpoint_dropped_on_clean_close
+scenario_kill_inside_recovery_handover
 
 note ""
 note "summary: $summary"

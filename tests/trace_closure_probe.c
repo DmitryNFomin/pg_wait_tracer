@@ -5,12 +5,18 @@
  * point — a second copy of the rule in a test harness is how a harness starts
  * approving things the product would refuse.
  *
- * Usage: trace_closure_probe <file.trace[.lz4]> ...
+ * Usage: trace_closure_probe [--live] <file.trace[.lz4]> ...
  * Prints one line per file:
  *   <path> closure=<unknown|in_progress|rotated|clean|unclean> \
  *          may_lose_open_intervals=<0|1> checkpoint=<none|refused:<reason>| \
- *          seq=<n>,intervals=<n>,open_ns=<sum>>
+ *          seq=<n>,intervals=<n>,open_ns=<sum>> warning=<"..."|->
  * Exit status: 0 if every file was readable, 1 otherwise.
+ *
+ * `--live` is OPT-IN and off by default, deliberately. The first version of
+ * this tool decided liveness by checking whether the file was named
+ * "current.trace" — which is wrong in the one case that matters: a capture
+ * copied off a server keeps that name, is not live, and would have had its
+ * warning suppressed. A file name is not evidence that a daemon is running.
  */
 #include "event_writer.h"
 #include "open_ckpt.h"
@@ -28,25 +34,22 @@ int main(int argc, char **argv)
         return 2;
     }
     int rc = 0;
+    bool live = false;
     for (int i = 1; i < argc; i++) {
         const char *path = argv[i];
+        if (strcmp(path, "--live") == 0) { live = true; continue; }
         enum pgwt_closure_status st;
         int ok = pgwt_trace_file_closure(path, &st) == 0;
         if (!ok)
             rc = 1;
 
-        /* "live" only for the file a daemon is appending to right now. */
-        const char *base = strrchr(path, '/');
-        base = base ? base + 1 : path;
-        bool live = strcmp(base, "current.trace") == 0;
-
         char ck[160];
         char side[1024];
-        snprintf(side, sizeof(side), "%s%s", path, PGWT_OPEN_CKPT_SUFFIX);
-        if (live)
-            snprintf(side, sizeof(side), "%.*s/%s",
-                     (int)(base - path > 0 ? base - path - 1 : 1), path,
-                     PGWT_OPEN_CKPT_NAME);
+        if (pgwt_open_ckpt_path_for(path, side, sizeof(side)) != 0) {
+            fprintf(stderr, "path too long: %s\n", path);
+            rc = 1;
+            continue;
+        }
         if (access(side, F_OK) != 0) {
             snprintf(ck, sizeof(ck), "none");
         } else {
@@ -68,11 +71,13 @@ int main(int argc, char **argv)
             free(buf);
         }
 
-        printf("%s closure=%s may_lose_open_intervals=%d checkpoint=%s\n",
+        enum pgwt_closure_status eff = ok ? st : PGWT_CLOSURE_UNKNOWN;
+        const char *warn = pgwt_closure_warning(eff, live);
+        printf("%s closure=%s may_lose_open_intervals=%d checkpoint=%s "
+               "warning=%s%s%s\n",
                path, ok ? pgwt_closure_name(st) : "unreadable",
-               pgwt_closure_open_intervals_may_be_missing(
-                   ok ? st : PGWT_CLOSURE_UNKNOWN, live) ? 1 : 0,
-               ck);
+               pgwt_closure_open_intervals_may_be_missing(eff, live) ? 1 : 0,
+               ck, warn ? "\"" : "-", warn ? warn : "", warn ? "\"" : "");
     }
     return rc;
 }
