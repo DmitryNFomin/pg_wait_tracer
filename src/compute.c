@@ -422,6 +422,14 @@ static int tag_alloc_fail(const char *point)
 int pgwt_tag_events(struct pgwt_trace_event *events, int count,
                     const struct pgwt_pid_cat *cats, int n_cats)
 {
+    /* No right edge: the pre-#424 behaviour, bit for bit. */
+    return pgwt_tag_events_window(events, count, cats, n_cats, 0);
+}
+
+int pgwt_tag_events_window(struct pgwt_trace_event *events, int count,
+                           const struct pgwt_pid_cat *cats, int n_cats,
+                           uint64_t to_ns)
+{
     /* An absent window is not a failure: there is nothing to tag, so the
      * result is complete. Refusing here would turn every empty window into
      * an allocation error. */
@@ -540,6 +548,21 @@ int pgwt_tag_events(struct pgwt_trace_event *events, int count,
         if (st->exec_open) ev->flags |= PGWT_EVENT_FLAG_EXEC;
 
         if (st->seen_cmd) {
+            /* #424: for a record admitted by OVERLAP that closes after the
+             * window, the majority rule is applied to the portion INSIDE
+             * the window. Everything past `to` belongs to a window this
+             * answer is not reporting on, and the markers that would have
+             * ended the command out there were never loaded, so judging the
+             * record by them is judging it by data we do not have.
+             *
+             * Only the DECISION uses the clipped view. The per-pid state
+             * machine below (banked_ns, cmd_anchor) still advances to the
+             * real t1 — it is reconstructing the backend's command timeline,
+             * which does not stop at the window edge. */
+            uint64_t eff_t1 = (to_ns && (ev->flags & PGWT_EVENT_FLAG_RIGHT_OPEN)
+                               && t1 > to_ns && to_ns > t0) ? to_ns : t1;
+            uint64_t eff_dur = eff_t1 > t0 ? eff_t1 - t0 : 0;
+
             /* Command-open ns inside this interval: the banked closed runs
              * plus the currently-open run clipped to the interval. Records
              * for one pid are contiguous in an exact span, so banked time
@@ -547,9 +570,14 @@ int pgwt_tag_events(struct pgwt_trace_event *events, int count,
             uint64_t open_ns = st->banked_ns;
             if (st->cmd_open) {
                 uint64_t a = st->cmd_anchor > t0 ? st->cmd_anchor : t0;
-                if (t1 > a)
-                    open_ns += t1 - a;
+                if (eff_t1 > a)
+                    open_ns += eff_t1 - a;
             }
+            /* Banked time was accrued over the whole interval; against a
+             * clipped denominator it could exceed it and turn the majority
+             * into a tautology. Clamp — a share cannot exceed its whole. */
+            if (open_ns > eff_dur)
+                open_ns = eff_dur;
             st->banked_ns = 0;
             if (st->cmd_open)
                 st->cmd_anchor = t1;
@@ -558,30 +586,25 @@ int pgwt_tag_events(struct pgwt_trace_event *events, int count,
              * window is in-command (bounded by one interval's length —
              * we==0 intervals are µs-ms vs multi-second buckets).
              *
-             * #424 LIMITATION, LABELLED NOT FIXED: for a record admitted by
-             * overlap that CLOSES AFTER the window (PGWT_EVENT_FLAG_RIGHT_OPEN),
-             * the majority is still taken over the record's FULL duration,
-             * while the CMD_END that would have closed its command lies past
-             * `to` and was never loaded. So a right-open we==0 interval can
-             * be tagged in-command when its in-window part was not, or the
-             * reverse. It affects only the straddler's own label (its time
-             * is clipped either way), it cannot double-count, and fixing it
-             * needs the window threaded into this function — which would
-             * change a signature a dozen tests call. Tracked with #424's
-             * follow-ups; do not silently "correct" it without that test
-             * sweep.
+             * #424: for a right-open record the denominator is the CLIPPED
+             * duration (eff_dur above), not the full one. This is a
+             * CORRECTNESS fix, not a cosmetic one: `in_cmd == 0` on a we==0
+             * record rewrites old_event to PGWT_WEI_NONCMD_CPU, which the
+             * idle rules drop from DB Time, so a majority decided on time
+             * outside the window moves the DB Time headline.
              *
-             * The #128 BACKWARD pass below has the same shape: it can give a
-             * right-open record the query id reported later in its command,
-             * and a right-open record can be the carrier that supplies an id
-             * to a NEIGHBOURING real record. Both are provisional for the
-             * same reason — the markers past `to` were never loaded. Same
-             * verdict: labelled, not fixed tonight. A right-open record's
-             * wait WALL is stable; its class, cpu and query attribution are
-             * not. */
-            int in_cmd = ev->duration_ns == 0
+             * STILL PROVISIONAL, and not claimed otherwise: the #128
+             * BACKWARD pass below can hand a right-open record the query id
+             * its command reports later, and a right-open record can itself
+             * be the carrier that supplies an id to a neighbouring real
+             * record — both depend on markers past `to` that were never
+             * loaded. Those move time BETWEEN queries, never into or out of
+             * DB Time, which is why they are labelled where the majority
+             * rule is fixed. A right-open record's wait WALL is stable; its
+             * query attribution and its measured CPU are not. */
+            int in_cmd = eff_dur == 0
                        ? st->cmd_open
-                       : (open_ns * 2 >= ev->duration_ns);
+                       : (open_ns * 2 >= eff_dur);
             if (in_cmd)
                 ev->flags |= PGWT_EVENT_FLAG_CMD_OPEN;
 
@@ -3784,11 +3807,26 @@ static inline int concurrency_qualifies(const struct pgwt_trace_event *ev,
         return 0;
     if (ev->old_event == 0)
         return 0;        /* on-CPU: not a wait, never part of a burst */
-    /* #424: this close-timestamp test is ALSO the right-open gate — a
-     * record admitted by overlap that closes after `to` fails it here, so
-     * concurrency needed no change. Do not relax it into an overlap test
-     * without re-deciding which of its outputs are per-occurrence. */
-    if (ev->timestamp_ns < from_ns || ev->timestamp_ns > to_ns)
+    /* #424: OVERLAP, not close-in-window. Concurrent session occupancy is an
+     * INTERVAL quantity — "how many sessions were waiting on this event at
+     * this instant" — and a session still waiting at `to` was occupying the
+     * resource for every bucket it covers. Selecting it by its close dropped
+     * exactly the longest waits from the peak, which is the shape the burst
+     * view exists to show. Counting DISTINCT SESSIONS does not make it
+     * per-occurrence: the thing being counted is occupancy during a bucket,
+     * and the per-bucket loop below already computes the overlap and clamps
+     * b_hi to the last bucket, so a close past `to` contributes to the
+     * buckets it really covers and to no others.
+     *
+     * `close >= from` still applies (a wait that ended before the window
+     * occupies none of it). The second half is `start <= to`; duration is
+     * trusted here because pgwt_filter_matches has already refused a record
+     * whose duration exceeds its own timestamp (the FID-4 chokepoint named
+     * above). */
+    if (ev->timestamp_ns < from_ns)
+        return 0;
+    if (ev->timestamp_ns > to_ns &&
+        ev->timestamp_ns - ev->duration_ns > to_ns)
         return 0;
     return 1;
 }
@@ -3857,9 +3895,16 @@ void pgwt_compute_concurrency(const struct pgwt_trace_event *events, int count,
         uint64_t end_ns = ev->timestamp_ns;
         uint64_t start_ns = end_ns - ev->duration_ns;
 
-        /* Buckets overlapped: start < bucket_end && end > bucket_start. The
-         * window filter above guarantees end_ns <= to_ns and end_ns >= from_ns;
-         * end_ns == from_ns overlaps no bucket. */
+        /* Buckets overlapped: start < bucket_end && end > bucket_start.
+         * The window filter above guarantees end_ns >= from_ns; end_ns ==
+         * from_ns overlaps no bucket.
+         *
+         * #424: end_ns is NO LONGER guaranteed <= to_ns — a wait still
+         * running at the right edge is admitted now. The b_hi clamp below
+         * already did the clipping this needs (it predates the change and
+         * existed for the num_buckets rounding), so a straddler occupies
+         * every bucket up to the last and none beyond it. Do not "simplify"
+         * the clamp away. */
         if (end_ns > from_ns) {
             uint64_t into = end_ns - from_ns;
             int b_hi = (int)((into - 1) / bucket_ns);

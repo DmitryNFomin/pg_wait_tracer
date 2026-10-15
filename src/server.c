@@ -384,6 +384,10 @@ struct pgwt_load_info {
      *                          makes it audible. */
     int      straddlers_admitted;
     int      right_edge_truncated;
+    /* How far past `to` the scan was allowed to look, in ns, when it was
+     * cut. Reported with the flag so "incomplete" comes with the bound that
+     * made it incomplete instead of leaving the caller to guess. */
+    uint64_t right_edge_scan_ns;
 };
 
 struct pgwt_server {
@@ -1596,6 +1600,32 @@ static int straddle_max_blocks(void)
             return (int)v;             /* 0 = disabled, deliberately */
     }
     return PGWT_STRADDLE_MAX_BLOCKS_DEFAULT;
+}
+
+/* Is this file SKIPPED WITHOUT BEING LOOKED AT, in a way that could hide a
+ * straddler's close?
+ *
+ * The per-file gate rejects a file before it is ever opened, so the
+ * record-level truncation flag inside load_file_range_mono can never fire
+ * for it — a gate that cannot see. A file beginning past the scan edge is
+ * exactly the rotated-capture case: the wait was still running at `to` and
+ * its closing record lives in the NEXT hourly file, out past the horizon.
+ *
+ * A separate function, not an inline condition, so the bypass can be tested
+ * directly: building a second trace file in a unit test means writing an
+ * LZ4-compressed `YYYY-MM-DD_HH.trace.lz4` that the hourly rotation produces
+ * from wall-clock time, which a test cannot provoke deterministically.
+ * tests/test_window_overlap.c §8d calls this predicate with the numbers that
+ * case produces. */
+static int straddle_file_unseen(int enabled, uint64_t mono_first,
+                                uint64_t mono_last, uint64_t from_m,
+                                uint64_t scan_to_m)
+{
+    if (!enabled)
+        return 0;                      /* no right edge: nothing to miss */
+    if (mono_last < from_m)
+        return 0;                      /* entirely before the window */
+    return mono_first > scan_to_m;     /* begins past where we looked */
 }
 
 /* The per-load straddler bookkeeping, passed down into every admission site
@@ -2832,8 +2862,19 @@ server_load_events_fi_mode(struct pgwt_server *srv,
         uint64_t scan_to_m = straddle_to_m > sample_to_m ? straddle_to_m
                                                          : sample_to_m;
 
-        if (fc->mono_first > scan_to_m || fc->mono_last < from_m)
+        if (fc->mono_first > scan_to_m || fc->mono_last < from_m) {
+            /* #424 BYPASS CLOSED: a file skipped here is a file whose
+             * records were never examined, so if it begins past the scan
+             * edge it may hold the close of a wait that was still running
+             * at `to` — and the record-level truncation flag inside
+             * load_file_range_mono can never fire for a file that is never
+             * opened. Flag it HERE or the budget's one honest signal is
+             * silently unreachable for a rotated capture. */
+            if (straddle_file_unseen(ss.enabled, fc->mono_first,
+                                     fc->mono_last, from_m, scan_to_m))
+                ss.truncated = 1;
             continue;
+        }
 
         if (fc->sample_period_ns)
             sample_period_ns = fc->sample_period_ns;
@@ -3141,7 +3182,16 @@ server_load_events_fi_mode(struct pgwt_server *srv,
      * we==0 intervals against the command gate. One pass feeding every raw
      * estimator (docs/AAS_SEMANTICS_DECISION.md). */
     if (!markers_only &&
-        !pgwt_tag_events(events, total, srv->pid_cats, srv->n_pid_cats)) {
+        !pgwt_tag_events_window(events, total, srv->pid_cats, srv->n_pid_cats,
+                                /* #424: the request's right edge, in the
+                                 * WALL domain the merge above re-anchored
+                                 * the array to. 0 when the caller asked for
+                                 * no right edge, which is the pre-#424 call.
+                                 * Passing it is what lets the in-command
+                                 * majority judge a straddler on its
+                                 * in-window portion instead of on data this
+                                 * window never loaded. */
+                                ss.enabled ? to_wall_ns : 0)) {
         /* #363: the tagged array is the oracle, so a pass that stopped
          * partway is a wrong answer, not a short one. Route it through this
          * loader's EXISTING degradation channel — every raw consumer reads
@@ -3172,6 +3222,7 @@ server_load_events_fi_mode(struct pgwt_server *srv,
         info->allocation_failed = allocation_failed;
         info->straddlers_admitted = ss.admitted;
         info->right_edge_truncated = ss.truncated;
+        info->right_edge_scan_ns = ss.enabled ? ss.lookahead_ns : 0;
     }
     if (overloaded)
         fprintf(stderr, "ERROR: window too large: the requested range holds "
@@ -3568,6 +3619,38 @@ static void add_fidelity(cJSON *root, const struct pgwt_load_info *info)
     cJSON_AddStringToObject(root, "fidelity", pgwt_fidelity_str(fid));
     if (info->has_samples && info->sample_period_ns)
         cjson_add_uint64(root, "sample_period_ns", info->sample_period_ns);
+    /* #424: the right-edge straddler scan is BUDGETED (there is no header
+     * bound on how long an interval in a later block may be), so it can stop
+     * before it can prove no wait still running at `to` closes later. When
+     * that happens the window's time totals are a LOWER BOUND, and the
+     * caller is told — in the response, not only in a struct nobody reads.
+     * A budgeted scan that stops quietly is the exact defect class this
+     * change exists to remove; shipping the flag only into pgwt_load_info
+     * would have reproduced it one layer up.
+     *
+     * Emitted ONLY when true, so every complete answer is byte-identical to
+     * before and no client has to learn a new field to stay correct. The
+     * horizon that cut the scan is emitted with it: "may be missing a wait
+     * longer than N ns", which is actionable (raise
+     * PGWT_STRADDLE_LOOKAHEAD_NS) in a way a bare boolean is not. */
+    if (info->right_edge_truncated) {
+        cJSON_AddBoolToObject(root, "right_edge_truncated", 1);
+        cjson_add_uint64(root, "right_edge_scan_ns", info->right_edge_scan_ns);
+    }
+}
+
+/* The same note for the handlers that write the fidelity string themselves
+ * instead of calling add_fidelity (they derive `fid` from their own linfo
+ * and add view-specific fields around it). Factored rather than copied so
+ * there is ONE definition of how an incomplete right edge is reported; a
+ * handler that forgets to call it is visible as a missing call, not as a
+ * subtly different field name. */
+static void add_right_edge_note(cJSON *root, const struct pgwt_load_info *info)
+{
+    if (!info || !info->right_edge_truncated)
+        return;
+    cJSON_AddBoolToObject(root, "right_edge_truncated", 1);
+    cjson_add_uint64(root, "right_edge_scan_ns", info->right_edge_scan_ns);
 }
 
 /* Label for a summary-path response: derived from coverage, never
@@ -5728,7 +5811,8 @@ static void emit_transitions_response(struct pgwt_request *req,
                                       const struct pgwt_transitions_result *res,
                                       int use_res,
                                       const struct pgwt_block_agg *win,
-                                      int merged_blocks, int decoded_blocks)
+                                      int merged_blocks, int decoded_blocks,
+                                      const struct pgwt_load_info *linfo)
 {
     struct pgwt_block_agg_pair *pairs = NULL;
     int n_pairs = 0;
@@ -5757,6 +5841,7 @@ static void emit_transitions_response(struct pgwt_request *req,
     cJSON *root = cJSON_CreateObject();
     cJSON_AddNumberToObject(root, "id", (double)req->id);
     cJSON_AddStringToObject(root, "fidelity", pgwt_fidelity_str(fid));
+    add_right_edge_note(root, linfo);
     cjson_add_uint64(root, "total", total);
     cJSON_AddNumberToObject(root, "link_count", shown);
     cJSON_AddNumberToObject(root, "total_link_count", total_links);
@@ -5900,7 +5985,8 @@ static void handle_transitions(struct pgwt_server *srv, struct pgwt_request *req
                 return;
             }
             emit_transitions_response(req, ag_fid, max_rows,
-                                      NULL, 0, &win, merged, decoded);
+                                      NULL, 0, &win, merged, decoded,
+                                      &ag_linfo);
             pgwt_block_agg_free(&win);
             return;
         }
@@ -5928,12 +6014,26 @@ static void handle_transitions(struct pgwt_server *srv, struct pgwt_request *req
 
     /* Node totals go through the SAME accumulator the aggregate path uses
      * (pgwt_block_agg_add_events), so the per-node numbers cannot drift
-     * between the two paths. The loader has already applied the window, hence
-     * the open interval here. A refusal means raw cannot answer either — emit
-     * nothing rather than a response with half a graph. */
+     * between the two paths. A refusal means raw cannot answer either — emit
+     * nothing rather than a response with half a graph.
+     *
+     * #424: the bounds used to be `0, UINT64_MAX` ("the loader has already
+     * applied the window"). That stopped being true the moment admission
+     * widened: a record admitted by OVERLAP closes after `to`, and a node
+     * total is a sum of FULL durations keyed by close (block_agg.h C6/C7),
+     * so an open interval here credited the whole 30 s of a straddler to its
+     * node while pgwt_compute_transitions correctly refused its edge —
+     * right edges, wrong node bars, in the same response. Passing the
+     * request's own window re-applies block_agg's inclusive close test,
+     * which is exactly the INSTANT selector; for every record that is not
+     * right-open it is a no-op, because the loader applied the identical
+     * rule. A whole-capture request (0) stays unbounded. */
+    uint64_t node_from = req->from_ns;
+    uint64_t node_to   = req->to_ns ? req->to_ns : UINT64_MAX;
     struct pgwt_block_agg raw_nodes;
     pgwt_block_agg_init_window(&raw_nodes);
-    if (pgwt_block_agg_add_events(&raw_nodes, events, count, 0, UINT64_MAX,
+    if (pgwt_block_agg_add_events(&raw_nodes, events, count,
+                                  node_from, node_to,
                                   NULL) != PGWT_BAGG_OK) {
         pgwt_block_agg_free(&raw_nodes);
         free(events);
@@ -5943,7 +6043,8 @@ static void handle_transitions(struct pgwt_server *srv, struct pgwt_request *req
         return;
     }
 
-    emit_transitions_response(req, fid, max_rows, &res, 1, &raw_nodes, 0, 0);
+    emit_transitions_response(req, fid, max_rows, &res, 1, &raw_nodes, 0, 0,
+                              &linfo);
 
     pgwt_block_agg_free(&raw_nodes);
     free(events);
@@ -5990,6 +6091,7 @@ static void handle_fingerprints(struct pgwt_server *srv, struct pgwt_request *re
     cJSON *root = cJSON_CreateObject();
     cJSON_AddNumberToObject(root, "id", (double)req->id);
     cJSON_AddStringToObject(root, "fidelity", pgwt_fidelity_str(fid));
+    add_right_edge_note(root, &linfo);
 
     cJSON *rows = cJSON_AddArrayToObject(root, "rows");
     for (int i = 0; i < res.num_rows; i++) {
@@ -6046,6 +6148,7 @@ static void handle_lock_chains(struct pgwt_server *srv, struct pgwt_request *req
     cJSON *root = cJSON_CreateObject();
     cJSON_AddNumberToObject(root, "id", (double)req->id);
     cJSON_AddStringToObject(root, "fidelity", pgwt_fidelity_str(fid));
+    add_right_edge_note(root, &linfo);
 
     cJSON *chains = cJSON_AddArrayToObject(root, "chains");
     for (int i = 0; i < res.num_links; i++) {
@@ -6099,6 +6202,7 @@ static void handle_interference(struct pgwt_server *srv, struct pgwt_request *re
     cJSON *root = cJSON_CreateObject();
     cJSON_AddNumberToObject(root, "id", (double)req->id);
     cJSON_AddStringToObject(root, "fidelity", pgwt_fidelity_str(fid));
+    add_right_edge_note(root, &linfo);
 
     cJSON *rows = cJSON_AddArrayToObject(root, "rows");
     for (int i = 0; i < res.num_rows; i++) {
@@ -6165,6 +6269,7 @@ static void handle_concurrency(struct pgwt_server *srv, struct pgwt_request *req
     cJSON *root = cJSON_CreateObject();
     cJSON_AddNumberToObject(root, "id", (double)req->id);
     cJSON_AddStringToObject(root, "fidelity", pgwt_fidelity_str(fid));
+    add_right_edge_note(root, &linfo);
     cjson_add_uint64(root, "bucket_ns", res.bucket_ns);
 
     /* Peak concurrency per bucket */
@@ -6333,6 +6438,7 @@ static void handle_variants(struct pgwt_server *srv, struct pgwt_request *req)
     cJSON *root = cJSON_CreateObject();
     cJSON_AddNumberToObject(root, "id", (double)req->id);
     cJSON_AddStringToObject(root, "fidelity", pgwt_fidelity_str(fid));
+    add_right_edge_note(root, &linfo);
 
     /* Execution */
     cJSON *exec_obj = cJSON_AddObjectToObject(root, "exec");

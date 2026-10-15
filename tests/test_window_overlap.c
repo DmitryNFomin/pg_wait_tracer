@@ -48,6 +48,8 @@
 #include "../src/server.c"
 #undef main
 #include "idle_rule.h"
+#include "output.h"   /* pgwt_row_is_empty: the row-suppression rule both
+                        surfaces share (section 12) */
 
 #include <sys/wait.h>
 #include <unistd.h>
@@ -498,6 +500,349 @@ static void test_derived_without_flag(void)
     free(res.rows);
 }
 
+/* ── Handler plumbing for sections 8-10 (the response, not the compute) ── */
+typedef void (*handler_fn)(struct pgwt_server *, struct pgwt_request *);
+
+static cJSON *call_handler(handler_fn fn, struct pgwt_server *srv,
+                           struct pgwt_request *req)
+{
+    FILE *capture = tmpfile();
+    if (!capture) return NULL;
+    fflush(stdout);
+    int saved = dup(STDOUT_FILENO);
+    dup2(fileno(capture), STDOUT_FILENO);
+    fn(srv, req);
+    fflush(stdout);
+    dup2(saved, STDOUT_FILENO);
+    close(saved);
+    fseek(capture, 0, SEEK_END);
+    long size = ftell(capture);
+    rewind(capture);
+    char *json = calloc((size_t)size + 1, 1);
+    size_t rd = fread(json, 1, (size_t)size, capture);
+    (void)rd;
+    fclose(capture);
+    cJSON *out = cJSON_Parse(json);
+    free(json);
+    return out;
+}
+
+/* ── 8. An incomplete scan is VISIBLE IN THE RESPONSE ─────────────────
+ *
+ * The budget can miss a straddler longer than the horizon. Storing that fact
+ * in a struct nobody serialises would reproduce, one layer up, the very
+ * defect #424 exists to remove: a quietly short answer. The caller must be
+ * able to tell a complete answer from a bounded one. */
+static void test_truncation_surfaced(const char *dir)
+{
+    printf("--- 8. a budget-limited scan is reported in the RESPONSE ---\n");
+    int fds[2];
+    if (pipe(fds) != 0) { CHECK(0, "8. pipe"); return; }
+    pid_t pid = fork();
+    if (pid < 0) { CHECK(0, "8. fork"); return; }
+    if (pid == 0) {
+        close(fds[0]);
+        /* A 1 s horizon cannot reach a close 15.5 s past the edge. */
+        setenv("PGWT_STRADDLE_LOOKAHEAD_NS", "1000000000", 1);
+        struct pgwt_server *srv = calloc(1, sizeof(*srv));
+        int r[3] = {0, 0, 0};
+        if (srv && server_init(srv, dir) == 0) {
+            uint64_t w0 = srv->earliest_wall_ns - 10 * MS;
+            struct pgwt_request req;
+            memset(&req, 0, sizeof(req));
+            req.id = 1;
+            req.from_ns = w0 + 10 * ONE_SEC;
+            req.to_ns   = w0 + 20 * ONE_SEC;
+            cJSON *out = call_handler(handle_top_events, srv, &req);
+            cJSON *t = out ? cJSON_GetObjectItem(out, "right_edge_truncated")
+                           : NULL;
+            cJSON *s = out ? cJSON_GetObjectItem(out, "right_edge_scan_ns")
+                           : NULL;
+            r[0] = t && cJSON_IsTrue(t);
+            r[1] = s != NULL;
+            cJSON_Delete(out);
+
+            /* And the complete answer must NOT carry the field, so a client
+             * sees "bounded" only when it really is. */
+            unsetenv("PGWT_STRADDLE_LOOKAHEAD_NS");
+            cJSON *ok = call_handler(handle_top_events, srv, &req);
+            r[2] = ok && cJSON_GetObjectItem(ok, "right_edge_truncated") == NULL;
+            cJSON_Delete(ok);
+        }
+        ssize_t n = write(fds[1], r, sizeof(r));
+        (void)n;
+        close(fds[1]);
+        _exit(0);
+    }
+    close(fds[1]);
+    int r[3] = {-1, -1, -1};
+    ssize_t got = read(fds[0], r, sizeof(r));
+    close(fds[0]);
+    int status = 0;
+    waitpid(pid, &status, 0);
+    if (got != (ssize_t)sizeof(r)) { CHECK(0, "8. child failed"); return; }
+    CHECK(r[0] == 1,
+          "8a. the response carries right_edge_truncated=true (%d) -- the "
+          "flag reaches the CALLER, not just pgwt_load_info", r[0]);
+    CHECK(r[1] == 1,
+          "8b. and right_edge_scan_ns, so \"incomplete\" arrives with the "
+          "bound that made it incomplete (%d)", r[1]);
+    CHECK(r[2] == 1,
+          "8c. a COMPLETE answer omits the field entirely (%d) -- otherwise "
+          "the signal is noise and clients learn to ignore it", r[2]);
+}
+
+/* ── 8d. The skipped-FILE bypass ──────────────────────────────────────
+ *
+ * A file whose records all close past the horizon is rejected by the
+ * per-file gate BEFORE IT IS OPENED, so the record-level truncation flag
+ * inside load_file_range_mono can never fire for it. That is a gate that
+ * cannot see: in a rotated capture the straddler's close lives in the next
+ * hourly file, out past the horizon, and without this the window returns
+ * short with nothing said. straddle_file_unseen() is the predicate the
+ * per-file loop now calls.
+ *
+ * Tested as a predicate rather than through a two-file fixture, and the
+ * reason is stated rather than hidden: a second trace file only exists
+ * after the daemon's HOURLY rotation writes an LZ4-compressed
+ * `YYYY-MM-DD_HH.trace.lz4`, which is keyed to wall-clock time and cannot
+ * be provoked deterministically from a unit test. What is gated here is the
+ * decision; its call site is one line at the per-file `continue`. This is
+ * NOT end-to-end coverage of a rotated capture.
+ */
+static void test_skipped_file_bypass(void)
+{
+    printf("--- 8d. a file skipped past the horizon must REFUSE ---\n");
+    uint64_t from = 10 * ONE_SEC, scan_to = 320 * ONE_SEC;
+
+    CHECK(straddle_file_unseen(1, 7200 * ONE_SEC, 7260 * ONE_SEC,
+                               from, scan_to) == 1,
+          "8d. the next hourly file starts 2 h past a 320 s scan edge: "
+          "UNSEEN, so the load is marked truncated -- the one case where "
+          "the record-level flag is structurally unreachable");
+    CHECK(straddle_file_unseen(1, 0, 400 * ONE_SEC, from, scan_to) == 0,
+          "8d. a file the scan actually covers is not flagged -- otherwise "
+          "every ordinary window would claim to be incomplete and the "
+          "signal would be noise");
+    CHECK(straddle_file_unseen(1, 0, 5 * ONE_SEC, from, scan_to) == 0,
+          "8d. a file entirely BEFORE the window is not flagged: nothing "
+          "that closed before `from` can overlap it");
+    CHECK(straddle_file_unseen(0, 7200 * ONE_SEC, 7260 * ONE_SEC,
+                               from, scan_to) == 0,
+          "8d. and an unbounded request flags nothing -- there is no right "
+          "edge for a wait to be open at");
+}
+
+
+/* ── 9. Concurrency is an INTERVAL quantity ───────────────────────────── */
+static void test_concurrency_overlap(struct pgwt_server *srv, uint64_t w0)
+{
+    printf("--- 9. concurrent occupancy counts a session still waiting ---\n");
+    int count;
+    struct pgwt_load_info linfo = {0};
+    uint64_t from = w0 + 10 * ONE_SEC, to = w0 + 20 * ONE_SEC;
+    struct pgwt_trace_event *events =
+        server_load_events_fi(srv, from, to, 0, &count, &linfo);
+    struct pgwt_filter f;
+    memset(&f, 0, sizeof(f));
+    struct pgwt_concurrency_result res;
+    pgwt_compute_concurrency(events, count, &f, from, to, 10,
+                             ONE_SEC, 2, &res);
+    int lock_buckets = 0;
+    for (int b = 0; b < res.num_buckets; b++)
+        if (res.peak_event[b] == EV_LOCK && res.peak_sessions[b] >= 1)
+            lock_buckets++;
+    CHECK(lock_buckets >= 9,
+          "a session that is STILL waiting at `to` occupies the buckets it "
+          "covers: %d of %d buckets show a Lock waiter. Selecting occupancy "
+          "by the wait's CLOSE dropped exactly the longest waits from the "
+          "peak -- the opposite of what the burst view is for",
+          lock_buckets, res.num_buckets);
+    free(res.peak_sessions);
+    free(res.peak_event);
+    free(res.bursts);
+    free(events);
+}
+
+/* ── 10. Transition NODE totals must match the edges ──────────────────── */
+static void test_node_totals(struct pgwt_server *srv, uint64_t w0)
+{
+    printf("--- 10. node bars exclude the straddler, as its edges do ---\n");
+    struct pgwt_request req;
+    memset(&req, 0, sizeof(req));
+    req.id = 2;
+    req.from_ns = w0 + 10 * ONE_SEC;
+    req.to_ns   = w0 + 20 * ONE_SEC;
+    req.limit = 50;
+    cJSON *out = call_handler(handle_transitions, srv, &req);
+    CHECK(out != NULL, "handle_transitions produced parseable JSON");
+    if (!out) return;
+    double lock_ms = -1.0;
+    cJSON *nodes = cJSON_GetObjectItem(out, "nodes");
+    cJSON *n;
+    cJSON_ArrayForEach(n, nodes) {
+        cJSON *id = cJSON_GetObjectItem(n, "event_id");
+        if (id && (uint32_t)id->valuedouble == EV_LOCK) {
+            cJSON *ms = cJSON_GetObjectItem(n, "total_ms");
+            lock_ms = ms ? ms->valuedouble : -1.0;
+        }
+    }
+    CHECK(near_ms(lock_ms, 1000.0),
+          "the Lock node bar is %.1f ms, expected 1000.0 -- node totals are "
+          "FULL durations keyed by close (block_agg C6/C7), so feeding the "
+          "accumulator unbounded credited the straddler's whole 30 s to a "
+          "node whose EDGE the same response correctly refused", lock_ms);
+    cJSON_Delete(out);
+}
+
+/* ── 11. The clipped majority is a DB TIME fix, not a label fix ────────
+ *
+ * pid 701 runs one command that ENDS 1 s into a 30 s on-CPU stretch which
+ * closes long after the window. Judged on the full duration the stretch is
+ * 1/30 in-command -> relabelled PGWT_WEI_NONCMD_CPU -> dropped from DB Time.
+ * Judged on its in-window portion ([t0, to] = 2 s) it is 1/2 in-command ->
+ * stays CPU -> counted. The window's DB Time differs by the clipped 2 s,
+ * which is a headline number, not a tag. */
+#define CMD_PID 701
+static void build_cmd_fixture(const char *dir, uint64_t base)
+{
+    struct pgwt_event_writer writer;
+    if (pgwt_writer_init(&writer, dir, 180000, 0, NULL) != 0) {
+        printf("  FAIL: trace writer init (cmd)\n"); tests_failed++; return;
+    }
+    for (int s = 0; s < 60; s++)
+        push(&writer, base + (uint64_t)s * ONE_SEC + 10 * MS,
+             FILLER_PID, 0, EV_IO, 1 * MS);
+    /* Command opens at 10.2 s and closes at 11.2 s — BOTH inside the
+     * window, so the loader sees the whole command run and the majority
+     * rule has something to divide. (A CMD_START before `from` is not
+     * admitted at all, and then neither rule fires: that version of this
+     * fixture tested nothing, which is why the numbers are spelled out.) */
+    push(&writer, base + 10 * ONE_SEC + 200 * MS, CMD_PID,
+         PGWT_MARKER_CMD_START, PGWT_MARKER_CMD_START, 0);
+    push(&writer, base + 11 * ONE_SEC + 200 * MS, CMD_PID,
+         PGWT_MARKER_CMD_END, PGWT_MARKER_CMD_END, 0);
+    /* On-CPU stretch [10, 40]: closes at 40 s, 30 s long. Window is
+     * [10, 12], so its in-window part is 2 s of which 1 s is in-command. */
+    push(&writer, base + 40 * ONE_SEC, CMD_PID, 0, EV_IO, 30 * ONE_SEC);
+    pgwt_writer_close(&writer);
+}
+
+static void test_clipped_majority_moves_db_time(const char *dir)
+{
+    printf("--- 11. a straddler's in-command majority is judged on the "
+           "in-window portion ---\n");
+    struct pgwt_server *srv = calloc(1, sizeof(*srv));
+    if (!srv || server_init(srv, dir) != 0) {
+        CHECK(0, "11. server_init on the command fixture");
+        return;
+    }
+    uint64_t w0 = srv->earliest_wall_ns - 10 * MS;
+    int count;
+    struct pgwt_load_info linfo = {0};
+    uint64_t from = w0 + 10 * ONE_SEC, to = w0 + 12 * ONE_SEC;
+    struct pgwt_trace_event *events =
+        server_load_events_fi(srv, from, to, 0, &count, &linfo);
+    CHECK(linfo.straddlers_admitted == 1,
+          "11a. the on-CPU stretch is admitted by overlap (%d) -- without "
+          "that there is no majority to decide and this section is vacuous",
+          linfo.straddlers_admitted);
+
+    int relabelled = 0, kept_cpu = 0;
+    for (int i = 0; i < count; i++) {
+        if (events[i].pid != CMD_PID) continue;
+        if (!(events[i].flags & PGWT_EVENT_FLAG_RIGHT_OPEN)) continue;
+        if (events[i].old_event == PGWT_WEI_NONCMD_CPU) relabelled++;
+        if (events[i].old_event == 0) kept_cpu++;
+    }
+    CHECK(kept_cpu == 1 && relabelled == 0,
+          "11b. the straddler keeps its CPU label (kept=%d relabelled=%d): "
+          "1 s of its in-window 2 s was in-command. The full-duration rule "
+          "saw 1 s of 30 s, relabelled it PGWT_WEI_NONCMD_CPU and took its "
+          "time OUT of DB Time -- a wrong headline, not a wrong tag",
+          kept_cpu, relabelled);
+
+    struct pgwt_filter f;
+    memset(&f, 0, sizeof(f));
+    struct pgwt_tm_result tm;
+    pgwt_compute_time_model(events, count, &f, from, to, 2000.0, &tm);
+    CHECK(tm.db_time_ms > 1900.0,
+          "11c. and DB Time for the window is %.1f ms, i.e. it contains the "
+          "straddler's clipped 2 s. The relabel would have left ~0",
+          tm.db_time_ms);
+    free(tm.rows);
+    free(events);
+    server_destroy(srv);
+    free(srv);
+}
+
+/* ── 12. A time-positive, count-zero row must be VISIBLE ──────────────
+ *
+ * The side effect the repair itself creates. Once admission is overlap, an
+ * event whose whole in-window time belongs to a wait still running at `to`
+ * has milliseconds and zero completed occurrences. Every table in
+ * src/output.c suppressed rows on `count == 0`, so that time would land in
+ * DB Time and the Time Model with no row to explain it — a total that moves
+ * with a breakdown that cannot account for it.
+ *
+ * 12a gates the shared predicate both surfaces now use. 12b gates the
+ * SERVER response end to end (what the web UI consumes): the row is
+ * emitted, with its time and with count 0. The TUI print functions take a
+ * fully built `struct pgwt_daemon` and live in the daemon link set, not
+ * this test's, so their seven call sites are gated through the predicate
+ * rather than through rendered output — stated plainly, not implied. */
+static void test_count_zero_row_visible(struct pgwt_server *srv, uint64_t w0)
+{
+    printf("--- 12. a row with time and no completed occurrence is shown "
+           "---\n");
+
+    CHECK(pgwt_row_is_empty(0, 0) == 1,
+          "12a. a row with neither time nor occurrences is still suppressed "
+          "-- the fix is 'empty in BOTH senses', not 'show everything'");
+    CHECK(pgwt_row_is_empty(0, 5 * ONE_SEC) == 0,
+          "12a. a row with 5 s of right-open time and count 0 is SHOWN -- "
+          "its milliseconds are already in DB Time, so suppressing it makes "
+          "the breakdown unable to explain the total");
+    CHECK(pgwt_row_is_empty(3, 0) == 0,
+          "12a. and a row with occurrences but no time is shown too (the "
+          "zero-duration transition case that #347 was about)");
+
+    /* [20,30] of the main fixture: the straddler covers it end to end and
+     * closes at 35.5, so Lock has 10 s and no completed wait at all. */
+    struct pgwt_request req;
+    memset(&req, 0, sizeof(req));
+    req.id = 3;
+    req.from_ns = w0 + 20 * ONE_SEC;
+    req.to_ns   = w0 + 30 * ONE_SEC;
+    req.limit = 20;
+    cJSON *out = call_handler(handle_top_events, srv, &req);
+    CHECK(out != NULL, "12b. handle_top_events produced parseable JSON");
+    if (!out) return;
+    cJSON *rows = cJSON_GetObjectItem(out, "rows");
+    cJSON *row, *found = NULL;
+    cJSON_ArrayForEach(row, rows) {
+        cJSON *id = cJSON_GetObjectItem(row, "event_id");
+        if (id && (uint32_t)id->valuedouble == EV_LOCK)
+            found = row;
+    }
+    CHECK(found != NULL,
+          "12b. the served response HAS a Lock row for a window whose only "
+          "Lock time is a wait still running at both edges -- without it "
+          "the UI shows DB Time it cannot break down");
+    if (found) {
+        cJSON *c = cJSON_GetObjectItem(found, "count");
+        cJSON *ms = cJSON_GetObjectItem(found, "total_ms");
+        CHECK(c && c->valuedouble == 0,
+              "12b. and its count is 0, PRESENT not omitted (%.0f) -- the "
+              "occurrence belongs to the window where it closes",
+              c ? c->valuedouble : -1.0);
+        CHECK(ms && near_ms(ms->valuedouble, 10000.0),
+              "12b. and its time is the clipped 10000.0 ms (got %.1f)",
+              ms ? ms->valuedouble : -1.0);
+    }
+    cJSON_Delete(out);
+}
+
 int main(void)
 {
     printf("=== test_window_overlap (#424) ===\n");
@@ -528,6 +873,19 @@ int main(void)
     test_unbounded_identical(srv);
     test_bypass(dir, dir2);
     test_derived_without_flag();
+    test_truncation_surfaced(dir);
+
+    char dirc[] = "/tmp/pgwt_wovl_cmd_XXXXXX";
+    if (!mkdtemp(dirc)) {
+        printf("FAIL: mkdtemp (section 11)\n");
+        return 1;
+    }
+    build_cmd_fixture(dirc, base);
+    test_skipped_file_bypass();
+    test_concurrency_overlap(srv, w0);
+    test_node_totals(srv, w0);
+    test_clipped_majority_moves_db_time(dirc);
+    test_count_zero_row_visible(srv, w0);
 
     printf("\n%d checks, %d failed\n", tests_run, tests_failed);
     return tests_failed ? 1 : 0;
