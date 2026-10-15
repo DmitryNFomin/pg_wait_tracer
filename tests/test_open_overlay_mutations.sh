@@ -110,6 +110,7 @@ entry-validation-skipped	s@if \(bad\) \{@if (0 \&\& bad) {@
 record-view-optional	s@if \(!rec \|\| \(rec->n > 0 && !rec->events\)\) \{@if (0) {@
 u64-string-through-double	s@unsigned long long v = strtoull\(s, &end, 10\);@unsigned long long v = (unsigned long long)(double)strtoull(s, &end, 10);@
 same-pid-overlap-allowed	s@if \(spans\[j\].from_wall_ns < sp->to_wall_ns &&@if (0 \&\&@
+attach-queries-on-refusal	s@    if \(!pgwt_overlay_wanted\(req, why, sizeof\(why\)\)\) \{\n        /\* Refuse BEFORE any I/O@    if (0) {\n        /* Refuse BEFORE any I/O@
 stale-snapshot-accepted	s@if \(req->from_wall_ns >= snapshot_wall\) \{@if (0) {@
 filtered-request-unfiltered	s@if \(req->filters_active && !req->accept\) \{@if (0) {@
 filter-callback-ignored	s@if \(req->accept && !req->accept\(sp, req->accept_user\)\)@if (0)@

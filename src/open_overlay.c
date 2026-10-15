@@ -861,6 +861,33 @@ int pgwt_overlay_build(struct pgwt_overlay *ov,
     return 0;
 }
 
+/* ── the loader-level entry point ──────────────────────────── */
+
+int pgwt_overlay_attach(struct pgwt_overlay *ov, const char *trace_dir,
+                        int timeout_ms,
+                        const struct pgwt_overlay_request *req,
+                        const struct pgwt_overlay_records *rec)
+{
+    if (!ov)
+        return -1;
+    pgwt_overlay_init(ov);
+
+    char why[192];
+    if (!pgwt_overlay_wanted(req, why, sizeof(why))) {
+        /* Refuse BEFORE any I/O: a summary-route or non-exact-tier request
+         * must not pay for a wedged daemon, and must never reach a code path
+         * where a reply could be credited. */
+        pgwt_overlay_refuse(ov, why);
+        return -1;
+    }
+
+    struct pgwt_open_snapshot snap;
+    pgwt_overlay_fetch(trace_dir, timeout_ms, &snap);
+    int rc = pgwt_overlay_build(ov, &snap, req, rec);
+    pgwt_open_snapshot_free(&snap);
+    return rc;
+}
+
 /* ── span arithmetic for the time reducers ─────────────────── */
 
 uint64_t pgwt_overlay_span_overlap_ns(const struct pgwt_overlay_span *s,

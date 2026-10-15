@@ -272,6 +272,23 @@ int  pgwt_overlay_build(struct pgwt_overlay *ov,
                         const struct pgwt_overlay_request *req,
                         const struct pgwt_overlay_records *rec);
 
+/* THE LOADER-LEVEL ENTRY POINT — wanted → fetch → build, in one call.
+ *
+ * Attach the overlay ONCE where the raw window is loaded, and let every
+ * raw-route consumer inherit it. Attaching per endpoint is the trap: it would
+ * correct `time_model` while Sessions and Top Events — which take the same raw
+ * route below 120 s — stayed silently short, i.e. the headline number right
+ * and the drill-downs wrong, which is the shape of the bug being repaired.
+ *
+ * The route/tier refusal is evaluated BEFORE any I/O, so a summary-route or
+ * non-exact-tier request never opens the socket; a wedged daemon cannot cost
+ * those requests a millisecond. Always sets ov->status (ov is initialised
+ * here); returns 0 only when the result is INCLUDED. */
+int pgwt_overlay_attach(struct pgwt_overlay *ov, const char *trace_dir,
+                        int timeout_ms,
+                        const struct pgwt_overlay_request *req,
+                        const struct pgwt_overlay_records *rec);
+
 /* ns of this span inside [from, to) — for AAS buckets and any sub-window. */
 uint64_t pgwt_overlay_span_overlap_ns(const struct pgwt_overlay_span *s,
                                       uint64_t from_wall_ns, uint64_t to_wall_ns);

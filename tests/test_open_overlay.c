@@ -1120,6 +1120,62 @@ static void test_transport(void)
     run_transport_case(REPLY_TRUNCATED, "a truncated reply",         0, 2000, 0);
     run_transport_case(REPLY_GARBAGE,   "a garbage reply",           0, 2000, 0);
 
+    /* pgwt_overlay_attach(): the ONE call the loader makes, so that every
+     * raw-route consumer inherits the same overlay. Per-endpoint attachment
+     * would correct time_model while Sessions and Top Events under 120 s --
+     * the same raw route -- stayed silently short. */
+    {
+        int lfd = listen_sock();
+        pid_t child = spawn_daemon(lfd, REPLY_OK);
+        struct pgwt_overlay ov;
+        struct pgwt_overlay_request req = base_req();
+        struct pgwt_overlay_records rec = no_records();
+        int rc = pgwt_overlay_attach(&ov, tmpdir, 300, &req, &rec);
+        kill(child, SIGKILL);
+        waitpid(child, NULL, 0);
+        close(lfd);
+        unlink(sockpath);
+        CHECK(rc == 0 && ov.status == PGWT_OVERLAY_INCLUDED,
+              "attach did not include the overlay (%s)", ov.reason);
+        CHECK(ov.count == 1 && ov.spans[0].wall_ns == 4000000000ULL,
+              "attach produced %zu spans", ov.count);
+        pgwt_overlay_free(&ov);
+    }
+
+    /* A refused route must not touch the socket at all. The fixture daemon
+     * here accepts and then says nothing for five seconds: if attach talked
+     * to it, this case could not finish in single-digit milliseconds. */
+    {
+        int lfd = listen_sock();
+        pid_t child = spawn_daemon(lfd, REPLY_SILENT);
+        struct pgwt_overlay ov;
+        struct pgwt_overlay_request req = base_req();
+        req.route = PGWT_OVERLAY_ROUTE_SUMMARY;
+        struct pgwt_overlay_records rec = no_records();
+        long t0 = ms_now();
+        pgwt_overlay_attach(&ov, tmpdir, 300, &req, &rec);
+        long dt = ms_now() - t0;
+        kill(child, SIGKILL);
+        waitpid(child, NULL, 0);
+        close(lfd);
+        unlink(sockpath);
+        CHECK(ov.status == PGWT_OVERLAY_REFUSED, "attach on the summary route: %s", ov.reason);
+        CHECK(dt < 100, "attach queried the daemon on a refused route (%ld ms)", dt);
+        assert_absent_not_zero(&ov, "attach on the summary route");
+        pgwt_overlay_free(&ov);
+    }
+
+    /* No daemon at all, through the same single call: absent and labelled. */
+    {
+        struct pgwt_overlay ov;
+        struct pgwt_overlay_request req = base_req();
+        struct pgwt_overlay_records rec = no_records();
+        CHECK(pgwt_overlay_attach(&ov, tmpdir, 300, &req, &rec) != 0,
+              "attach with no daemon reported success");
+        assert_absent_not_zero(&ov, "attach with no daemon");
+        pgwt_overlay_free(&ov);
+    }
+
     rmdir(tmpdir);
 }
 
