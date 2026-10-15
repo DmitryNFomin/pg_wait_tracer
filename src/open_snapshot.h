@@ -222,26 +222,36 @@ pgwt_open_snapshot_wall_of(const struct pgwt_open_snapshot *s, uint64_t mono)
     return w > 0 ? (uint64_t)w : 0;
 }
 
-static inline void pgwt_json_u64(cJSON *o, const char *k, uint64_t v)
+/* uint32: a JSON number is exact and stays one. */
+static inline void pgwt_json_u32(cJSON *o, const char *k, uint32_t v)
 {
-    char buf[32];
-    snprintf(buf, sizeof(buf), "%llu", (unsigned long long)v);
-    cJSON_AddRawToObject(o, k, buf);
+    cJSON_AddNumberToObject(o, k, (double)v);
 }
 
-/* WALL-clock nanoseconds go out as a decimal STRING, and this is a
- * correctness fix rather than a style choice.
+/* THE TYPE RULE FOR THIS RESPONSE, and it is a correctness rule rather than a
+ * style choice:
  *
- * Emitting the exact digits as a raw JSON NUMBER is not enough: the consumer
- * parses with cJSON, which stores every number in a double, so a wall value
- * near 1.76e18 is rounded to the nearest representable multiple of 256 ns on
- * the way IN. Producer-side care is defeated at the parser. A string crosses
- * the boundary byte-for-byte and the consumer calls strtoull.
+ *     every uint64 field is a decimal STRING; uint32 fields are JSON numbers.
  *
- * Monotonic fields stay numbers (the consumer already parses them that way)
- * and are exact while the clock is below 2^53 ns — ~104 days of uptime. That
- * is a real ceiling, not a comfortable one; see the report. */
-static inline void pgwt_json_u64_str(cJSON *o, const char *k, uint64_t v)
+ * Emitting the exact digits as a raw JSON number is not enough. The consumer
+ * parses with cJSON, which stores every number in a double, so anything above
+ * 2^53 is rounded on the way IN — producer-side care defeated at the parser.
+ * Three different fields here cross that line:
+ *
+ *   - WALL nanoseconds (~1.76e18) round to the nearest 256 ns, so a timestamp
+ *     comes back a quarter-microsecond off;
+ *   - QUERY_ID is a 64-bit hash and routinely exceeds 2^53 — rounding it does
+ *     not blur a number, it names a DIFFERENT QUERY, silently;
+ *   - MONOTONIC nanoseconds are exact only below 2^53 ns ≈ 104 days of
+ *     uptime. These boxes run for months (gate-1 was at 28 days when this was
+ *     written), so that is a cliff a capture walks off three months in, with
+ *     no symptom before and no warning at it.
+ *
+ * uint32 fields (pid, event ids, flags, category id, counts) cannot reach
+ * 2^53 and stay numbers, so the rule is checkable by type rather than by
+ * remembering which field is big today. */
+/* uint64: a decimal string, always. */
+static inline void pgwt_json_u64(cJSON *o, const char *k, uint64_t v)
 {
     char buf[32];
     snprintf(buf, sizeof(buf), "%llu", (unsigned long long)v);
@@ -284,15 +294,15 @@ static inline cJSON *pgwt_open_snapshot_json_as(
     cJSON_AddStringToObject(root, "reason", reason ? reason : "");
     cJSON_AddBoolToObject(root, "complete", included);
     pgwt_json_u64(root, "snapshot_ns", s->snapshot_ns);
-    pgwt_json_u64_str(root, "snapshot_wall_ns", s->snapshot_wall_ns);
+    pgwt_json_u64(root, "snapshot_wall_ns", s->snapshot_wall_ns);
     pgwt_json_u64(root, "now_mono_ns", s->now_mono_ns);
-    pgwt_json_u64_str(root, "now_wall_ns", s->now_wall_ns);
+    pgwt_json_u64(root, "now_wall_ns", s->now_wall_ns);
     pgwt_json_u64(root, "committed_through_ns", s->committed_through_ns);
-    pgwt_json_u64_str(root, "committed_through_wall_ns",
-                      pgwt_open_snapshot_wall_of(s, s->committed_through_ns));
+    pgwt_json_u64(root, "committed_through_wall_ns",
+                  pgwt_open_snapshot_wall_of(s, s->committed_through_ns));
     pgwt_json_u64(root, "daemon_generation", s->daemon_generation);
-    pgwt_json_u64_str(root, "daemon_start_wall_ns", s->daemon_start_wall_ns);
-    pgwt_json_u64(root, "daemon_pid", s->daemon_pid);
+    pgwt_json_u64(root, "daemon_start_wall_ns", s->daemon_start_wall_ns);
+    pgwt_json_u32(root, "daemon_pid", s->daemon_pid);
     cJSON_AddStringToObject(root, "tier", s->tier);
     cJSON_AddBoolToObject(root, "cpu_accounting", s->cpu_accounting);
     cJSON_AddBoolToObject(root, "cmd_gate_active", s->cmd_gate_active);
@@ -331,13 +341,13 @@ static inline cJSON *pgwt_open_snapshot_json_as(
                 return NULL;
             }
             cJSON_AddItemToArray(arr, o);
-            pgwt_json_u64(o, "pid", r->pid);
+            pgwt_json_u32(o, "pid", r->pid);
             pgwt_json_u64(o, "incarnation", r->incarnation);
             pgwt_json_u64(o, "generation", r->generation);
-            pgwt_json_u64(o, "event_id", r->event_id);
-            pgwt_json_u64(o, "cat_flag", r->cat_flag);
-            pgwt_json_u64(o, "eff_event", r->eff_event);
-            pgwt_json_u64(o, "flags", r->flags);
+            pgwt_json_u32(o, "event_id", r->event_id);
+            pgwt_json_u32(o, "cat_flag", r->cat_flag);
+            pgwt_json_u32(o, "eff_event", r->eff_event);
+            pgwt_json_u32(o, "flags", r->flags);
             pgwt_json_u64(o, "open_start_ns", r->open_start_ns);
             pgwt_json_u64(o, "duration_ns", r->duration_ns);
             /* UNKNOWN is ABSENT, never 0: an unmeasured CPU stretch and a
@@ -348,9 +358,9 @@ static inline cJSON *pgwt_open_snapshot_json_as(
             pgwt_json_u64(o, "on_cpu_ts", r->on_cpu_ts);
             pgwt_json_u64(o, "last_cpu_ns", r->last_cpu_ns);
             pgwt_json_u64(o, "query_id", r->query_id);
-            pgwt_json_u64(o, "query_quality", r->query_quality);
+            pgwt_json_u32(o, "query_quality", r->query_quality);
             cJSON_AddStringToObject(o, "category", r->category);
-            pgwt_json_u64(o, "category_id", r->category_id);
+            pgwt_json_u32(o, "category_id", r->category_id);
             pgwt_json_u64(o, "cmd_open_ns", r->cmd_open_ns);
             pgwt_json_u64(o, "cmd_banked_ns", r->cmd_banked_ns);
             pgwt_json_u64(o, "cmd_anchor_ns", r->cmd_anchor_ns);

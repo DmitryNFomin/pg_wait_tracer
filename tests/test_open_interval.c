@@ -379,6 +379,18 @@ static uint64_t raw_u64(const char *json, const char *key, bool *found)
     return strtoull(p, NULL, 10);
 }
 
+/* uint64 fields cross the wire as decimal STRINGS (see the type rule in
+ * src/open_snapshot.h). Reading one as a cJSON number would both fail and
+ * hide the reason, so read the string and convert. */
+static uint64_t str_u64(cJSON *o, const char *k, bool *found)
+{
+    cJSON *it = cJSON_GetObjectItem(o, k);
+    *found = it != NULL && cJSON_IsString(it) && it->valuestring != NULL;
+    if (!*found)
+        return 0;
+    return strtoull(it->valuestring, NULL, 10);
+}
+
 static uint64_t u64_of(cJSON *o, const char *k, bool *found)
 {
     cJSON *it = cJSON_GetObjectItem(o, k);
@@ -412,21 +424,33 @@ static void test_json_shape(void)
     CHECK(cJSON_IsTrue(cJSON_GetObjectItem(parsed, "complete")),
           "complete must be true");
     /* Every top-level field the consumer cannot repair if it is missing. */
-    /* Numeric top-level fields. The wall-ns ones are checked separately
-     * below: they are decimal STRINGS on purpose. */
-    const char *req[] = { "snapshot_ns", "now_mono_ns",
-                          "committed_through_ns", "daemon_generation",
-                          "daemon_pid", "open_count" };
-    for (size_t i = 0; i < sizeof(req) / sizeof(*req); i++) {
-        u64_of(parsed, req[i], &f);
-        CHECK(f, "top-level field %s missing", req[i]);
+    /* THE TYPE RULE: every uint64 is a decimal string, every uint32 a JSON
+     * number. Checked by type and not merely by presence, because a u64 that
+     * slipped back to a number still parses — it is only WRONG, by up to
+     * 256 ns for a wall stamp and by a whole different query for a
+     * query_id. */
+    const char *u64_top[] = { "snapshot_ns", "snapshot_wall_ns",
+                              "now_mono_ns", "now_wall_ns",
+                              "committed_through_ns",
+                              "committed_through_wall_ns",
+                              "daemon_generation", "daemon_start_wall_ns" };
+    for (size_t i = 0; i < sizeof(u64_top) / sizeof(*u64_top); i++) {
+        cJSON *it = cJSON_GetObjectItem(parsed, u64_top[i]);
+        CHECK(it != NULL, "top-level field %s missing", u64_top[i]);
+        CHECK(it && cJSON_IsString(it),
+              "top-level uint64 %s must be a decimal STRING (a JSON number "
+              "is rounded to a double by the consumer's parser)", u64_top[i]);
     }
+    const char *u32_top[] = { "daemon_pid", "open_count" };
+    for (size_t i = 0; i < sizeof(u32_top) / sizeof(*u32_top); i++)
+        CHECK(cJSON_IsNumber(cJSON_GetObjectItem(parsed, u32_top[i])),
+              "top-level uint32 %s must stay a JSON number", u32_top[i]);
     CHECK(cJSON_GetObjectItem(parsed, "tier") != NULL, "tier missing");
     CHECK(cJSON_GetObjectItem(parsed, "reason") != NULL, "reason missing");
-    CHECK(u64_of(parsed, "snapshot_ns", &f) == s->snapshot_ns,
+    CHECK(str_u64(parsed, "snapshot_ns", &f) == s->snapshot_ns,
           "snapshot_ns wrong");
-    CHECK(u64_of(parsed, "committed_through_ns", &f) >=
-          u64_of(parsed, "snapshot_ns", &f),
+    CHECK(str_u64(parsed, "committed_through_ns", &f) >=
+          str_u64(parsed, "snapshot_ns", &f),
           "committed_through_ns must not precede snapshot_ns: the state map "
           "is read BEFORE publication");
     /* The anchor must convert, and must not be the server's per-file
@@ -450,16 +474,21 @@ static void test_json_shape(void)
     CHECK(cJSON_GetArraySize(pids) == 3, "expected 3 rows, got %d",
           cJSON_GetArraySize(pids));
     cJSON *r0 = cJSON_GetArrayItem(pids, 0);
-    const char *rowreq[] = { "pid", "incarnation", "generation", "event_id",
-                             "cat_flag", "category_id", "eff_event", "flags",
-                             "open_start_ns", "duration_ns", "cpu_ns_total",
-                             "on_cpu_ts", "last_cpu_ns", "query_id",
-                             "query_quality", "cmd_open_ns", "cmd_banked_ns",
-                             "cmd_anchor_ns" };
-    for (size_t i = 0; i < sizeof(rowreq) / sizeof(*rowreq); i++) {
-        u64_of(r0, rowreq[i], &f);
-        CHECK(f, "row field %s missing", rowreq[i]);
+    const char *row_u64f[] = { "incarnation", "generation", "open_start_ns",
+                               "duration_ns", "cpu_ns_total", "on_cpu_ts",
+                               "last_cpu_ns", "query_id", "cmd_open_ns",
+                               "cmd_banked_ns", "cmd_anchor_ns" };
+    for (size_t i = 0; i < sizeof(row_u64f) / sizeof(*row_u64f); i++) {
+        cJSON *it = cJSON_GetObjectItem(r0, row_u64f[i]);
+        CHECK(it != NULL, "row field %s missing", row_u64f[i]);
+        CHECK(it && cJSON_IsString(it),
+              "row uint64 %s must be a decimal STRING", row_u64f[i]);
     }
+    const char *row_u32f[] = { "pid", "event_id", "cat_flag", "eff_event",
+                               "flags", "category_id", "query_quality" };
+    for (size_t i = 0; i < sizeof(row_u32f) / sizeof(*row_u32f); i++)
+        CHECK(cJSON_IsNumber(cJSON_GetObjectItem(r0, row_u32f[i])),
+              "row uint32 %s must stay a JSON number", row_u32f[i]);
     CHECK(cJSON_GetObjectItem(r0, "cmd_open") != NULL, "cmd_open missing");
     CHECK(cJSON_GetObjectItem(r0, "cmd_in_window") != NULL,
           "cmd_in_window missing");
@@ -485,20 +514,31 @@ static void test_json_shape(void)
           cat1 && cat1->valuestring ? cat1->valuestring : "(none)");
     CHECK(u64_of(r0, "query_quality", &f) == PGWT_QUERY_QUALITY_REAL,
           "query_quality must travel as its own field");
+    /* The sharpest case for the string rule, and the one a reviewer should
+     * look at first: a query_id is a 64-bit HASH. Rounded through a double
+     * it does not come back blurred, it comes back as a DIFFERENT query. */
+    CHECK(str_u64(r0, "query_id", &f) == 0xDEADBEEFULL, "query_id wrong");
+    {
+        uint64_t big = 10313739733847959536ULL;   /* a real pgss queryid */
+        CHECK((uint64_t)(double)big != big,
+              "the query_id precision argument is vacuous on this platform");
+        struct pgwt_open_snapshot *q = new_snapshot();
+        add_row(q, 777, 0, MS(1));
+        q->rows[0].query_id = big;
+        char *qs = NULL;
+        cJSON *qr = json_of(q, PGWT_OPEN_INTERVALS_REPLY_MAX, &qs);
+        cJSON *qp = qs ? cJSON_Parse(qs) : NULL;
+        bool qf = false;
+        CHECK(qp && str_u64(cJSON_GetArrayItem(
+                  cJSON_GetObjectItem(qp, "pids"), 0), "query_id", &qf) == big,
+              "a 64-bit query_id must round-trip EXACTLY");
+        cJSON_Delete(qp); free(qs); cJSON_Delete(qr); free(q);
+    }
 
     /* WALL-ns fields cross the wire as decimal STRINGS. A raw JSON number
      * with the exact digits is NOT enough: the consumer parses with cJSON,
      * which stores a number as a double, and near 1.76e18 that rounds to the
      * nearest 256 ns. The ...123 fixture is what makes this detectable. */
-    const char *wallreq[] = { "snapshot_wall_ns", "now_wall_ns",
-                              "committed_through_wall_ns",
-                              "daemon_start_wall_ns" };
-    for (size_t i = 0; i < sizeof(wallreq) / sizeof(*wallreq); i++) {
-        cJSON *w = cJSON_GetObjectItem(parsed, wallreq[i]);
-        CHECK(cJSON_IsString(w),
-              "%s must be a decimal STRING (a JSON number is rounded to a "
-              "double by the consumer's parser)", wallreq[i]);
-    }
     CHECK((uint64_t)(double)s->now_wall_ns != s->now_wall_ns,
           "the precision fixture is vacuous: this wall value survives a "
           "double, so the string requirement would not be detectable");
@@ -506,12 +546,27 @@ static void test_json_shape(void)
     CHECK(nw && cJSON_IsString(nw) &&
           strtoull(nw->valuestring, NULL, 10) == s->now_wall_ns,
           "now_wall_ns must round-trip EXACTLY through the string form");
-    /* Monotonic fields stay numbers — the consumer already parses them that
-     * way, and they are exact below 2^53 ns (~104 days of uptime). */
-    CHECK(cJSON_IsNumber(cJSON_GetObjectItem(parsed, "snapshot_ns")),
-          "snapshot_ns must stay a JSON number");
-    CHECK(u64_of(r0, "duration_ns", &f) == S(2), "duration_ns wrong");
-    CHECK(u64_of(r0, "cpu_ns", &f) == MS(37), "measured cpu_ns wrong");
+    /* MONOTONIC fields are strings too, as of the type rule: exact as a
+     * double only below 2^53 ns, which is ~104 days of uptime on a box that
+     * runs for months. The cliff is silent on both sides of it. */
+    CHECK(cJSON_IsString(cJSON_GetObjectItem(parsed, "snapshot_ns")),
+          "snapshot_ns must be a decimal STRING");
+    {
+        uint64_t long_uptime = 1ULL << 54;   /* ~208 days of monotonic ns */
+        CHECK((uint64_t)(double)(long_uptime + 1) != long_uptime + 1,
+              "the mono-ns precision argument is vacuous on this platform");
+        struct pgwt_open_snapshot *u = new_snapshot();
+        u->snapshot_ns = long_uptime + 1;
+        char *us = NULL;
+        cJSON *ur = json_of(u, PGWT_OPEN_INTERVALS_REPLY_MAX, &us);
+        cJSON *up = us ? cJSON_Parse(us) : NULL;
+        bool uf = false;
+        CHECK(up && str_u64(up, "snapshot_ns", &uf) == long_uptime + 1,
+              "a 208-day monotonic clock must round-trip EXACTLY");
+        cJSON_Delete(up); free(us); cJSON_Delete(ur); free(u);
+    }
+    CHECK(str_u64(r0, "duration_ns", &f) == S(2), "duration_ns wrong");
+    CHECK(str_u64(r0, "cpu_ns", &f) == MS(37), "measured cpu_ns wrong");
 
     /* UNKNOWN is ABSENT, not zero — a consumer must be able to tell "no CPU
      * measurement" from "measured no CPU". */
@@ -519,8 +574,7 @@ static void test_json_shape(void)
     CHECK(cJSON_GetObjectItem(r1, "cpu_ns") == NULL,
           "an unmeasured cpu_ns must be ABSENT, never serialised");
     cJSON *r2 = cJSON_GetArrayItem(pids, 2);
-    u64_of(r2, "cpu_ns", &f);
-    CHECK(f && u64_of(r2, "cpu_ns", &f) == 0,
+    CHECK(str_u64(r2, "cpu_ns", &f) == 0 && f,
           "a measured-zero cpu_ns must be PRESENT and 0");
 
     cJSON_Delete(parsed);

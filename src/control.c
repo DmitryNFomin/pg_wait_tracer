@@ -474,10 +474,24 @@ static cJSON *build_metrics(const struct pgwt_daemon *d)
      * counts a measurement tier that changed mid-interval, and overcredit_ns
      * counts credit the per-second cap had to refuse.
      *
-     * Guarded for the same reason as the call site in src/map_reader.c: these
-     * fields arrive with the v9 writer, on another branch. Delete the
-     * conditional when it lands, and add these seven keys to
-     * tests/test_control.sh's required list at the same time. */
+     * TEMPORARY GUARD, not a supported configuration. These fields arrive
+     * with the v9 writer, which is on another branch; the conditional exists
+     * only so this branch builds and box-checks on its own, and the
+     * integration agent DELETES it when v9 folds in. At that moment add these
+     * seven keys to tests/test_control.sh's required-key list, by name:
+     *
+     *     summary_open_cpu_credited_ns
+     *     summary_open_cpu_measured_ns
+     *     summary_open_cpu_unknown_ns
+     *     summary_open_cpu_eff_rejected_total
+     *     summary_open_cpu_class_divergent_ns
+     *     summary_open_cpu_tier_mismatch_total
+     *     summary_open_cpu_overcredit_ns
+     *
+     * (that file is a live-tier test shared with other branches, which is why
+     * this branch does not edit it). Until then the keys are absent and the
+     * daemon reports the v8 refusal in summary_open_cpu_refused_total /
+     * summary_cpu_open_uncredited_ns_total above — visible, never silent. */
     cjson_add_uint64(root, "summary_open_cpu_credited_ns",
                      d->summary_writer
                          ? d->summary_writer->open_cpu_credited_ns_total : 0);

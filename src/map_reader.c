@@ -781,15 +781,19 @@ void pgwt_read_state_map(struct pgwt_daemon *d)
                      * an UNKNOWN record. For a WAIT the observation is
                      * ignored by the writer, so one call covers both.
                      *
-                     * The #if exists ONLY because the v9 writer API lands on
+                     * TEMPORARY GUARD, not a supported configuration. The
+                     * #if exists ONLY because the v9 writer API lands on
                      * another branch: this file must compile, build and be
                      * box-checked on its own, and against the v8 writer the
                      * honest behaviour is today's — a refusal the writer
                      * COUNTS (open_cpu_refused_total,
-                     * cpu_open_uncredited_ns_total), so an unwired producer
-                     * is auditable rather than quietly wrong. Delete the
-                     * conditional the moment v9's summary_writer is in the
-                     * same tree; do not leave it as a permanent switch. */
+                     * cpu_open_uncredited_ns_total, both published by
+                     * src/control.c), so an unwired producer is auditable
+                     * rather than quietly wrong. Delete the conditional the
+                     * moment v9's summary_writer is in the same tree; the
+                     * seven control-socket keys to add to
+                     * tests/test_control.sh at that point are listed at the
+                     * matching #if in src/control.c. */
                     struct pgwt_summary_open_cpu obs = {
                         .eff_we = pgwt_live_effective_event(
                                       we, iv.cat_flag, d->cmd_gate_active,
