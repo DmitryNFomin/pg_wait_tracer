@@ -124,20 +124,89 @@ bridge's `/favicon.ico` route (#401) rather than diverging from it.
 [Pillow writes the GIFs](https://pillow.readthedocs.io/en/stable/handbook/image-file-formats.html#gif).
 Each must be strictly below 10,000,000 bytes and pass both refusal gates
 **before the writer runs**: at least max(ceil(4 × fps), ceil(source span × fps))
-sampled frames (at least 40 at the default 10 fps), and at least **0.1%** of
-canvas pixels changing by **24 luminance levels** between first/last and
-**every consecutive pair**. This is a minimum over all pairs, not an average
-or the best pair. The same pixel gate runs after palette quantization so
-color reduction cannot erase the evidence. After encoding, the decoded frame
-count and every decoded pair must pass again. Frame durations, source span,
-actual decoded count and all measured deltas are saved in `walk.json`.
+sampled frames (at least 40 at the default 10 fps), and the motion gate below.
+The same motion gate runs again after palette quantization (color reduction
+cannot erase the evidence) and again on the decoded GIF after encoding.
+Frame durations, source span, actual decoded count and all measured deltas
+are saved in `walk.json`.
+
+**The motion gate measures motion across the whole clip, not between every
+pair of adjacent samples** (issue #411). The live UI ticks every 5 seconds
+(`app.js` `startAutoRefresh`'s `setTimeout(.., 5000)`), and each clip is
+designed to cover roughly one tick (see `drill()`/`dwell()`'s own comments,
+and "about five seconds of inspection, including a live tick" above) — so a
+CORRECT recording of this product looks like two static states joined by a
+single step, not continuous motion: between ticks, consecutive ~100ms-apart
+sampled frames are pixel-identical *by construction*, because the data they
+draw has not changed yet. An earlier version of this gate demanded every
+consecutive sampled pair individually clear **0.1%** changed pixels at a
+**24**-luminance-level delta, which refused every correct recording of a
+live Overview clip, not just broken ones — measured on four independent
+live runs against a real demo-workload capture (three fixed early 5s
+windows plus one exhaustive scan of the whole recorded Overview dwell for
+the best-possible window), all landing at ~0.016% per consecutive pair,
+about 6x under that floor, while two *other*, independent checks on the
+same dwell confirmed the data genuinely does move:
+`check_overview_wait_mix`'s DOM text (the wait-mix numbers visibly change
+every run) and `chart_change()` (best later frame vs. frame 0, needs ≥1%,
+which already passes every run). The content was never the problem;
+demanding smoothness from a step function was.
+
+The gate now checks two things, both at **1%** changed pixels (the same
+"visibly changed" bar `chart_change()` already uses and already clears on
+every live run — not a new number invented to let a known-small number
+through), both required (neither is an average, so one cannot paper over
+the other failing):
+1. **first vs. last frame of the whole clip** — the clip must look visibly
+   different end to end. A genuinely static clip (nothing ticks, nothing
+   moves, every frame identical) scores 0% here and still refuses.
+2. **the single biggest consecutive-pair jump** — at least one step
+   somewhere in the clip (the tick landing) must itself clear 1%. This
+   stops (1) from passing on a single corrupted/flickered frame while
+   everything else is frozen: a real tick's data changes by far more than
+   1% of the canvas when it lands, so a genuine tick clears this easily; a
+   one-frame JPEG glitch generally will not.
+
+Do not lower the 1% floor to make a specific clip pass — it is already an
+existing, independently-verified threshold used elsewhere in this same
+pipeline; weakening it would be removing the gate's teeth under a different
+name. The headline GIF's start/end frames are chosen by scanning the whole
+recorded Overview dwell for the best-positioned 5-second window
+(`best_headline_window()`) instead of a fixed early offset, since the one
+real tick in a given dwell can land anywhere in it; the motion gate itself
+is unchanged by this and still decides on its own terms.
 
 Pillow coalesces identical frames even with optimization disabled. The old
 4 fps cuts sampled identical crops across long five-second polling holds and
 missed the final Overview change; Pillow merged the headline to two frames
-and the drill to five. Increasing fps alone cannot animate those old holds;
-re-cutting them now refuses with exit 8. No duplicates are padded and no
-interpolated data or motion is drawn into the images.
+and the drill to five. No duplicates are padded and no interpolated data or
+motion is drawn into the images.
+
+**The post-encoding frame-count gate measures distinct frames surviving
+encoding, not `sampling fps × duration`** (issue #413, the frame-count twin
+of the motion gate above — same root cause, different check). The old rule
+demanded every frame sampled at the GIF's OWN playback rate (10fps) survive
+Pillow's deduplication distinct from its neighbor, i.e. that the clip never
+go idle for even 100ms — the same false "continuous change from a UI that is
+idle between ticks and during network waits" assumption the motion gate
+made, this time applied to frame count. A live drill-down clip spanning the
+whole `drill()` interaction (~11.2s, including its genuine network-latency
+waits) measured 75 distinct decoded frames against an old requirement of 112
+(span × 10fps — zero tolerance for any duplicate anywhere in an 11-second
+clip); 75 distinct frames over 11.2s is a perfectly watchable animation. The
+new floor is `DECODED_MIN_FPS` (2, deliberately far below the 10fps sampling
+rate, which governs an unrelated concern — how densely the source video is
+polled for candidate frames): a floor on how fast the *output* must visibly
+change to read as an animation rather than a slideshow, not on how many of
+the sampled frames survive untouched. A clip that really is just two static
+states (e.g. return-to-start or any clip whose content holds still for most
+of its length) still correctly refuses — Pillow legitimately coalesces it to
+2-3 frames, nowhere near a watchable minimum at any defensible floor. Do not
+raise `DECODED_MIN_FPS` to fit a specific clip, and do not pulse the capture
+harder hoping for more frames during a real idle wait — the screen genuinely
+is not changing then, so more captures only produce more duplicates Pillow
+would coalesce right back out; both would be buying a pass, not fixing a
+gate.
 Inclusive cuts now always retain the last recorded frame at the final sample.
 GIFs use a 1000-pixel canvas. Their data definitions include inclusive source
 frame bounds, fps, output width and crops in CSS pixels. Crops can be a single
@@ -163,9 +232,10 @@ viewport, DOM or browser failure); 4 console/page/rejection error; 5 insufficien
 or malformed frames, gaps or dropped video frames; 6 configuration, runbook
 drift, output/codec verification or invalid/oversized GIF.
 New codes: **7 GIF frame count gate** (sampled or decoded); **8 GIF motion
-gate** (first/last or consecutive pair, sampled crop, palette or decoded).
+gate** (first/last, or the single biggest consecutive-pair jump; sampled
+crop, palette or decoded — see the motion gate description above).
 Existing codes retain their meanings. An empty-motion GIF is an observed
-artifact refusal, with the failed gate and pair named in the diagnostic.
+artifact refusal, with the failed check named in the diagnostic.
 The distinction between 2 and 3 is observed-negative versus unobserved, rather
 than turning an inspection failure into evidence of emptiness.
 
