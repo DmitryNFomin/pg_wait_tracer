@@ -1,0 +1,12 @@
+fixture: /var/folders/tf/4mlc41nx3zsbx0v4x8wy4hl00000gn/T/pgwt_test__0rskvoq
+window:  [BASE-1s, BASE+4s]   command: session_timeline   n=7 warm queries
+
+horizon           cold ms   warm ms md    decoded     events    resets
+1 ms                  4.5          3.9          1       4096         0
+1 s                   4.3          3.9          2       8192         0
+300 s (default)        5.5          3.9          8      32320         0
+
+decode amplification, default vs 1 ms horizon: 8.0x blocks (1 -> 8), 7.89x events charged (4096 -> 32320)
+cold query delta: +1.0 ms;  warm median delta: +0.0 ms
+
+BOUND: cur_cache_store() charges against the SHARED budget before allocating (src/server.c: cache_total_events + n > CACHE_MAX_EVENTS || cc->count + n > cur_cache_max_events() -> drop/decline), so the lookahead raises cache PRESSURE but cannot exceed the cap that was already there. The per-load decode bound is PGWT_STRADDLE_MAX_BLOCKS (256) and the time bound is PGWT_STRADDLE_LOOKAHEAD_NS (300 s).

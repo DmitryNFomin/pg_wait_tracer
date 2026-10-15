@@ -140,6 +140,40 @@ static inline int event_right_open_flagged(const struct pgwt_trace_event *ev)
     return (ev->flags & PGWT_EVENT_FLAG_RIGHT_OPEN) != 0;
 }
 
+/* INSTANT selection, BOTH bounds: is this record's own close inside
+ * [from_ns, to_ns]?
+ *
+ * The rule above has always said `timestamp_ns in [from, to]`, but the first
+ * implementation only tested the upper half — `!event_right_open(...)` — so
+ * a record closing BEFORE `from` passed the per-occurrence gate and was
+ * counted. It showed up three ways in tests/test_window_clip.c section 6 (a
+ * compute-level suite that builds its arrays by hand): a sweep counted one
+ * occurrence twice, a zero-width window reported one occurrence, and a
+ * record wholly before `from` reported one.
+ *
+ * Why the server-driven gates did not see it: the raw loader supplies the
+ * lower bound before compute ever runs (src/server.c rejects `ts < from_m`,
+ * and overlap admission cannot admit a record that closes before `from`
+ * because it does not overlap). So it is not reachable through the server
+ * today — but compute's documented contract is `[from, to]`, a caller is
+ * entitled to rely on it, and the bound costs one comparison.
+ *
+ * INCLUSIVE at both ends, deliberately. `timestamp_ns == to_ns` is one
+ * occurrence, not zero: a trace event's timestamp is when the wait ENDED, so
+ * an event ending exactly at `to` lies wholly inside the window (block_agg.h
+ * C7, and the reason test_data_aas once went to zero). Making this half-open
+ * is the deferred #427 migration and must not arrive here as a side effect.
+ *
+ * `from_ns == 0` / `to_ns == 0` mean unbounded on that side, as everywhere
+ * else in this file, so the whole-capture path is unchanged. */
+static inline int event_instant_in_window(const struct pgwt_trace_event *ev,
+                                          uint64_t from_ns, uint64_t to_ns)
+{
+    if (from_ns != 0 && ev->timestamp_ns < from_ns)
+        return 0;
+    return !event_right_open(ev, to_ns);
+}
+
 /* pgwt_duration_to_bucket: log2 latency bucket for heatmap.
  * In daemon build this comes from map_reader.c; inline it here for server. */
 #ifdef PGWT_SERVER
@@ -1688,7 +1722,10 @@ void pgwt_compute_top_events(const struct pgwt_trace_event *events, int count,
          * property of the wait, not of the window — clipping it would report
          * a p99 no wait ever had). */
         uint64_t clip_u = event_window_ns(ev, from_ns, to_ns);
-        int right_open = event_right_open(ev, to_ns);
+        /* Per-occurrence selection needs BOTH bounds, not just the right
+         * one: a record closing before `from` is no more an observation of
+         * this window than one closing after `to`. */
+        int instant_here = event_instant_in_window(ev, from_ns, to_ns);
 
         /* Idle-but-visible events (Client:ClientRead) appear in the list
          * but are excluded from DB Time. Their time is not part of the
@@ -1713,8 +1750,10 @@ void pgwt_compute_top_events(const struct pgwt_trace_event *events, int count,
         /* #424: everything from here down is INSTANT-selected -- one
          * completed observation. A record admitted by overlap that closes
          * after `to` has not been observed yet in THIS window; the window it
-         * closes in counts it. Its time above is already in. */
-        if (right_open)
+         * closes in counts it. One that closed before `from` was already
+         * counted by an earlier window. Either way its clipped time above
+         * stays in. */
+        if (!instant_here)
             continue;
 
         /* Exact-window subtraction can split one delayed sampled observation
@@ -1991,7 +2030,8 @@ void pgwt_compute_top_queries(const struct pgwt_trace_event *events, int count,
              * an id is reported, not dropped. */
             if (ev->flags & PGWT_EVENT_FLAG_QUERY_UNATTRIB) {
                 unattributed_ns += clip_u;        /* INTERVAL */
-                if (!event_right_open(ev, to_ns)) /* INSTANT (#424) */
+                /* INSTANT (#424), both bounds */
+                if (event_instant_in_window(ev, from_ns, to_ns))
                     unattributed_count++;
             }
             continue;
@@ -2020,7 +2060,7 @@ void pgwt_compute_top_queries(const struct pgwt_trace_event *events, int count,
          * #424: `count` and `full_ns` are INSTANT-selected (an observation
          * and its latency); a record that closes after `to` supplies neither
          * to this window. Its clipped time, below, is still real. */
-        if (!event_right_open(ev, to_ns) &&
+        if (event_instant_in_window(ev, from_ns, to_ns) &&
             (!(ev->flags & PGWT_EVENT_FLAG_SAMPLE_CONT) || ht[h].count == 0)) {
             ht[h].count++;
             ht[h].full_ns  += ev->duration_ns;

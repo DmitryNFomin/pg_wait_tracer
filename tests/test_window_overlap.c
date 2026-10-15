@@ -843,6 +843,362 @@ static void test_count_zero_row_visible(struct pgwt_server *srv, uint64_t w0)
     cJSON_Delete(out);
 }
 
+/* ── 13. The block LOOKUP, where the truncation flag was bypassed (#429)
+ *
+ * `block_index[]` is appended one entry per flushed block, in COMMIT order,
+ * and nothing sorts it or checks that it is sorted. The loader
+ * binary-searched it for a scan start and then iterated forward until a
+ * block began after the right edge. Both halves are unsound: the search has
+ * no precondition on commit-ordered data, and `lo - 1` assumes blocks do not
+ * overlap in time — a SAMPLES block batches ~1 s of ticks across several
+ * TRANSITIONS blocks, so a block two or more positions back can still be
+ * inside the window.
+ *
+ * This is in #424's scope rather than a follow-up because it is a FALSE
+ * NEGATIVE for right_edge_truncated: a straddler in a block the scan never
+ * visits is missing from the answer AND unflagged, so the window is short
+ * while reporting itself complete. "Must say when it could not" is only as
+ * sound as the lookup underneath it.
+ *
+ * REACH, not overstated: the inversion needs two streams in one file plus a
+ * drain lag longer than the ~1 s sample batch (tiered/escalating, or full
+ * mode with the sampler, under load). It has NOT been observed on a live
+ * capture — only in a writer-API reproduction, which is what this fixture
+ * is. Severity when it does occur is total: an empty window with no flag.
+ *
+ * THE FIXTURE ASSERTS ITS OWN PROPERTY FIRST (§13a). A fixture where commit
+ * order and timestamp order coincide passes while the code is broken, and if
+ * the writer is ever changed to sort, §13a goes RED and says so instead of
+ * the gate quietly losing its teeth. §13e is the sorted control: the same
+ * assertions on the ordinary fixture, where the property is absent.
+ */
+#define IL_SAMPLE_TICKS 12
+#define IL_PERIOD       (100 * MS)
+#define IL_STRAD_PID    801
+
+/* Transitions lag the sampler, which is what a loaded capture does: the
+ * writer flushes whichever pending buffer holds the OLDER first timestamp,
+ * so each round commits [TRANSITIONS at ~base+10 s, SAMPLES at base+60 s+],
+ * and the next round's TRANSITIONS block commits after a SAMPLES block whose
+ * first timestamp is 50 s in its future. */
+static void build_interleaved_fixture(const char *dir, uint64_t base)
+{
+    struct pgwt_event_writer writer;
+    if (pgwt_writer_init(&writer, dir, 180000, 0, NULL) != 0) {
+        printf("  FAIL: trace writer init (interleaved)\n");
+        tests_failed++;
+        return;
+    }
+    for (int round = 0; round < 3; round++) {
+        if (round == 0) {
+            for (int i = 0; i < 20; i++)
+                push(&writer, base + 10 * ONE_SEC + (uint64_t)i * MS,
+                     FILLER_PID, 0, EV_IO, 1 * MS);
+        } else if (round == 1) {
+            for (int i = 0; i < 20; i++)
+                push(&writer, base + 11 * ONE_SEC + (uint64_t)i * MS,
+                     FILLER_PID, 0, EV_IO, 1 * MS);
+        } else {
+            /* The straddler: closes at 13 s after running 2 s, so it is
+             * inside a window ending at 12 s — and it lives in a block
+             * committed after two far-future SAMPLES blocks. */
+            push(&writer, base + 13 * ONE_SEC, IL_STRAD_PID,
+                 EV_LOCK, EV_IO, 2 * ONE_SEC);
+        }
+        struct pgwt_trace_event smp[IL_SAMPLE_TICKS];
+        for (int i = 0; i < IL_SAMPLE_TICKS; i++) {
+            memset(&smp[i], 0, sizeof(smp[i]));
+            smp[i].timestamp_ns = base + 60 * ONE_SEC
+                                + (uint64_t)round * 2 * ONE_SEC
+                                + (uint64_t)i * IL_PERIOD;
+            smp[i].pid = FILLER_PID;
+            smp[i].old_event = 0;
+            smp[i].new_event = EV_IO;
+            smp[i].cpu_ns = PGWT_CPU_NS_UNKNOWN;
+        }
+        if (pgwt_writer_push_samples(&writer, smp, IL_SAMPLE_TICKS,
+                                     IL_PERIOD) != 0) {
+            printf("  FAIL: push_samples (interleaved)\n");
+            tests_failed++;
+            break;
+        }
+    }
+    pgwt_writer_close(&writer);
+}
+
+/* The fixture's own property: is block_index[] ascending in first
+ * timestamp? Returns the first inversion index, or -1 when sorted. */
+static int first_index_inversion(const char *dir, int *n_blocks)
+{
+    struct pgwt_trace_file_entry files[16];
+    int nf = pgwt_scan_trace_files(dir, files, 16);
+    if (nf <= 0) return -2;
+    struct pgwt_event_reader r;
+    if (pgwt_reader_open(&r, files[0].path) != 0) return -2;
+    if (n_blocks) *n_blocks = r.num_blocks;
+    int inv = -1;
+    for (int b = 1; b < r.num_blocks; b++)
+        if (r.block_index[b].timestamp_ns < r.block_index[b - 1].timestamp_ns) {
+            inv = b;
+            break;
+        }
+    pgwt_reader_close(&r);
+    return inv;
+}
+
+static void test_block_lookup(const char *dir_il, const char *dir_sorted)
+{
+    printf("--- 13. the block lookup must not skip a block (#429) ---\n");
+
+    /* 13a. PRECONDITION. Without this the rest of the section could pass on
+     * a fixture whose two orders agree, i.e. while the defect is live. */
+    int nb = 0;
+    int inv = first_index_inversion(dir_il, &nb);
+    CHECK(inv >= 1,
+          "13a. the fixture's block index is NOT ascending: %d blocks, "
+          "first inversion at block %d. Commit order and timestamp order "
+          "genuinely disagree -- if the writer is ever changed to sort, "
+          "THIS check goes red rather than the gate going quiet",
+          nb, inv);
+    int inv_sorted = first_index_inversion(dir_sorted, NULL);
+    CHECK(inv_sorted == -1,
+          "13a. and the ordinary fixture IS ascending (inversion=%d), so "
+          "the property above is a property of the fixture, not of the "
+          "reader", inv_sorted);
+    if (inv < 1) return;
+
+    struct pgwt_server *srv = calloc(1, sizeof(*srv));
+    if (!srv || server_init(srv, dir_il) != 0) {
+        CHECK(0, "13. server_init on the interleaved fixture");
+        return;
+    }
+    uint64_t w0 = srv->earliest_wall_ns - 10 * ONE_SEC;
+
+    /* 13b. The sampled region lives in ONE block, which sits BEFORE the
+     * block a binary search over this index lands on. */
+    struct win s;
+    win_load(srv, &s, w0 + 60 * ONE_SEC, w0 + 61 * ONE_SEC);
+    int n_sampled = 0;
+    for (int i = 0; i < s.count; i++)
+        if (s.events[i].flags & PGWT_EVENT_FLAG_SAMPLE)
+            n_sampled++;
+    CHECK(n_sampled > 0,
+          "13b. a window over the sampled region returns its ticks (%d of "
+          "%d records) -- the binary search landed past this block and the "
+          "old scan answered the window with NOTHING",
+          n_sampled, s.count);
+    /* The pair is the point. On the old scan this window came back EMPTY
+     * with right_edge_truncated == 0: short, and SILENT about it. Here the
+     * answer is complete, so the same 0 means "nothing was cut". Read the
+     * two checks together in the red log — that is the false negative. */
+    CHECK(!s.info.right_edge_truncated,
+          "13b. and it is not flagged truncated (%d) -- which on the old "
+          "scan was a LIE about an empty window, and here is the truth "
+          "about a complete one", s.info.right_edge_truncated);
+    win_free(&s);
+
+    /* 13c. The straddler sits in a block committed AFTER a SAMPLES block
+     * whose first timestamp is far in the future. With a 1 s horizon the
+     * scan edge is below that SAMPLES block, so the old loop BROKE there and
+     * threw away the in-window blocks behind it. */
+    int fds[2];
+    if (pipe(fds) != 0) { CHECK(0, "13c. pipe"); goto out; }
+    pid_t pid = fork();
+    if (pid < 0) { CHECK(0, "13c. fork"); goto out; }
+    if (pid == 0) {
+        close(fds[0]);
+        setenv("PGWT_STRADDLE_LOOKAHEAD_NS", "2000000000", 1);  /* 2 s */
+        struct pgwt_server *c = calloc(1, sizeof(*c));
+        int r[2] = {0, 0};
+        if (c && server_init(c, dir_il) == 0) {
+            uint64_t cw0 = c->earliest_wall_ns - 10 * ONE_SEC;
+            struct win w;
+            win_load(c, &w, cw0 + 11 * ONE_SEC, cw0 + 12 * ONE_SEC);
+            r[0] = w.info.straddlers_admitted;
+            r[1] = w.info.right_edge_truncated;
+            win_free(&w);
+        }
+        ssize_t n = write(fds[1], r, sizeof(r));
+        (void)n;
+        close(fds[1]);
+        _exit(0);
+    }
+    close(fds[1]);
+    int r[2] = {-1, -1};
+    ssize_t got = read(fds[0], r, sizeof(r));
+    close(fds[0]);
+    int status = 0;
+    waitpid(pid, &status, 0);
+    if (got == (ssize_t)sizeof(r)) {
+        CHECK(r[0] == 1,
+              "13c. the straddler in a late-committed block IS found "
+              "(admitted=%d) even though a far-future SAMPLES block sits "
+              "between it and the window -- a block that cannot matter says "
+              "nothing about the blocks after it", r[0]);
+    } else { CHECK(0, "13c. child failed"); }
+
+    /* 13d. And when the straddler genuinely cannot be reached, the flag
+     * fires -- the bypass this section exists to close. A 1 ms horizon
+     * cannot reach a close 1 s past the edge. */
+    int fds2[2];
+    if (pipe(fds2) != 0) { CHECK(0, "13d. pipe"); goto out; }
+    pid_t pid2 = fork();
+    if (pid2 < 0) { CHECK(0, "13d. fork"); goto out; }
+    if (pid2 == 0) {
+        close(fds2[0]);
+        setenv("PGWT_STRADDLE_LOOKAHEAD_NS", "1000000", 1);     /* 1 ms */
+        struct pgwt_server *c = calloc(1, sizeof(*c));
+        int r2[2] = {0, 0};
+        if (c && server_init(c, dir_il) == 0) {
+            uint64_t cw0 = c->earliest_wall_ns - 10 * ONE_SEC;
+            struct win w;
+            win_load(c, &w, cw0 + 11 * ONE_SEC, cw0 + 12 * ONE_SEC);
+            r2[0] = w.info.straddlers_admitted;
+            r2[1] = w.info.right_edge_truncated;
+            win_free(&w);
+        }
+        ssize_t n = write(fds2[1], r2, sizeof(r2));
+        (void)n;
+        close(fds2[1]);
+        _exit(0);
+    }
+    close(fds2[1]);
+    int r2[2] = {-1, -1};
+    ssize_t got2 = read(fds2[0], r2, sizeof(r2));
+    close(fds2[0]);
+    waitpid(pid2, &status, 0);
+    if (got2 == (ssize_t)sizeof(r2)) {
+        CHECK(r2[0] == 0 && r2[1] == 1,
+              "13d. with a 1 ms horizon the straddler is out of reach "
+              "(admitted=%d) and the load SAYS SO (truncated=%d) -- on the "
+              "old scan this came back short with 0 flags, which is the "
+              "false negative #429 is about", r2[0], r2[1]);
+    } else { CHECK(0, "13d. child failed"); }
+
+out:
+    server_destroy(srv);
+    free(srv);
+}
+
+/* ── 14. INSTANT selection has TWO bounds ─────────────────────────────
+ *
+ * The first cut of the per-occurrence gate implemented only the upper half
+ * (`!event_right_open(...)`), so a record whose close lies BEFORE `from`
+ * still passed it and was counted. The rule had always been stated as
+ * `timestamp_ns in [from, to]`; only half of it was code.
+ *
+ * Every section above went through the loader, which rejects `ts < from_m`
+ * before compute ever sees the array — so the server path covered for the
+ * missing bound and this suite could not see it. tests/test_window_clip.c
+ * section 6 calls pgwt_compute_top_events() DIRECTLY with hand-built
+ * arrays, and failed three ways on the Linux box (a sweep counting one
+ * record twice, a zero-width window reporting one occurrence, and a record
+ * wholly before `from` reporting one). This section builds its arrays the
+ * same way, so the two suites now assert the same contract instead of one
+ * covering for the other.
+ *
+ * 14d is the counterweight: INCLUSIVE at `to` must survive the fix. Making
+ * selection half-open at the end is the deferred #427 migration, and it
+ * must not arrive as a side effect of adding a lower bound. */
+static void test_instant_two_bounds(void)
+{
+    printf("--- 14. per-occurrence selection is [from, to], both ends ---\n");
+    struct pgwt_filter f;
+    memset(&f, 0, sizeof(f));
+
+    /* One record, closing at 15 s after a 1 s wait. No RIGHT_OPEN flag and
+     * no loader anywhere: compute must gate on its own. */
+    struct pgwt_trace_event ev;
+    memset(&ev, 0, sizeof(ev));
+    ev.timestamp_ns = 15 * ONE_SEC;
+    ev.pid = INSIDE_PID;
+    ev.old_event = EV_LOCK;
+    ev.new_event = EV_IO;
+    ev.duration_ns = 1 * ONE_SEC;
+    ev.query_id = 0x4242;
+    ev.cpu_ns = PGWT_CPU_NS_UNKNOWN;
+
+    struct pgwt_events_result res;
+    const struct pgwt_event_row *row;
+
+    /* 14a. A window that OPENS AFTER the record closed. */
+    pgwt_compute_top_events(&ev, 1, &f, 20 * ONE_SEC, 30 * ONE_SEC,
+                            10000.0, &res);
+    row = row_for(&res, EV_LOCK);
+    CHECK(row == NULL || row->count == 0,
+          "14a. a record closing 5 s BEFORE `from` is not an occurrence of "
+          "this window (count=%llu) -- the upper-bound-only gate counted it",
+          (unsigned long long)(row ? row->count : 0));
+    free(res.rows);
+
+    /* 14b. The sweep: two adjacent windows, one record, one occurrence
+     * TOTAL. The record is strictly interior to the first window, so this
+     * is not a shared-boundary question. */
+    uint64_t total = 0;
+    pgwt_compute_top_events(&ev, 1, &f, 10 * ONE_SEC, 16 * ONE_SEC,
+                            6000.0, &res);
+    row = row_for(&res, EV_LOCK);
+    total += row ? row->count : 0;
+    free(res.rows);
+    pgwt_compute_top_events(&ev, 1, &f, 16 * ONE_SEC, 22 * ONE_SEC,
+                            6000.0, &res);
+    row = row_for(&res, EV_LOCK);
+    total += row ? row->count : 0;
+    free(res.rows);
+    CHECK(total == 1,
+          "14b. one record swept by two adjacent windows is counted ONCE "
+          "(got %llu) -- 2 is the same defect seen as a double count",
+          (unsigned long long)total);
+
+    /* 14c. A zero-width window after the close. */
+    pgwt_compute_top_events(&ev, 1, &f, 20 * ONE_SEC, 20 * ONE_SEC,
+                            0.0, &res);
+    row = row_for(&res, EV_LOCK);
+    CHECK(row == NULL || row->count == 0,
+          "14c. a zero-width window at 20 s holds no occurrence of a record "
+          "that closed at 15 s (count=%llu)",
+          (unsigned long long)(row ? row->count : 0));
+    free(res.rows);
+
+    /* 14d. INCLUSIVE at `to`, unchanged. A record closing exactly at the
+     * right edge lies wholly inside the window and is ONE occurrence. */
+    pgwt_compute_top_events(&ev, 1, &f, 10 * ONE_SEC, 15 * ONE_SEC,
+                            5000.0, &res);
+    row = row_for(&res, EV_LOCK);
+    CHECK(row && row->count == 1,
+          "14d. a record closing exactly AT `to` is still one occurrence "
+          "(count=%llu) -- adding the lower bound must not quietly make "
+          "selection half-open at the end (that is #427, deferred)",
+          (unsigned long long)(row ? row->count : 0));
+    free(res.rows);
+
+    /* 14e. And exactly AT `from` too — the bound is >=, not >. */
+    pgwt_compute_top_events(&ev, 1, &f, 15 * ONE_SEC, 25 * ONE_SEC,
+                            10000.0, &res);
+    row = row_for(&res, EV_LOCK);
+    CHECK(row && row->count == 1,
+          "14e. a record closing exactly AT `from` is one occurrence "
+          "(count=%llu) -- the new bound is inclusive, not an off-by-one "
+          "that drops the boundary record",
+          (unsigned long long)(row ? row->count : 0));
+    free(res.rows);
+
+    /* 14f. The SECOND gated site: top_queries keeps its own count and
+     * full_ns, so it needs its own leg rather than inheriting trust. */
+    struct pgwt_queries_result qres;
+    pgwt_compute_top_queries(&ev, 1, &f, 20 * ONE_SEC, 30 * ONE_SEC,
+                             10000.0, &qres);
+    uint64_t qcount = 0;
+    for (int i = 0; i < qres.num_rows; i++)
+        if (qres.rows[i].query_id == 0x4242)
+            qcount = qres.rows[i].count;
+    CHECK(qcount == 0,
+          "14f. top_queries applies the same lower bound (count=%llu for a "
+          "query whose only record closed before `from`)",
+          (unsigned long long)qcount);
+    free(qres.rows);
+}
+
 int main(void)
 {
     printf("=== test_window_overlap (#424) ===\n");
@@ -886,6 +1242,15 @@ int main(void)
     test_node_totals(srv, w0);
     test_clipped_majority_moves_db_time(dirc);
     test_count_zero_row_visible(srv, w0);
+
+    char dir_il[] = "/tmp/pgwt_wovl_il_XXXXXX";
+    if (!mkdtemp(dir_il)) {
+        printf("FAIL: mkdtemp (section 13)\n");
+        return 1;
+    }
+    build_interleaved_fixture(dir_il, base);
+    test_block_lookup(dir_il, dir);
+    test_instant_two_bounds();
 
     printf("\n%d checks, %d failed\n", tests_run, tests_failed);
     return tests_failed ? 1 : 0;
