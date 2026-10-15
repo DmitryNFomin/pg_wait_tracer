@@ -1,0 +1,19 @@
+BASELINE (clean tree): exit=0  PROBE PASSED: both #if branches compile, each confirmed
+P1           exit=1  RED
+             FAIL src/map_reader.c (v9)
+             PROBE FAILED
+P2           exit=1  RED
+             FAIL src/control.c (v9)
+             PROBE FAILED
+P3           exit=1  RED
+             FAIL src/map_reader.c (v8): the v8 branch was NOT compiled (note_open_ex present) — wrong header won
+             PROBE FAILED
+P4           exit=1  RED
+             FAIL src/map_reader.c (v9): the v9 branch was NOT compiled (no note_open_ex in the preprocessed TU) — the probe cannot see
+             PROBE FAILED
+P7           exit=1  RED
+             FAIL src/control.c (v9): the v9 metrics block was NOT compiled
+             PROBE FAILED
+P5 missing v9 worktree        exit=2  CANNOT VERIFY: v9 header not found at /nonexistent-worktree/src/summary_writer.h
+P6 header is v8, not v9       exit=2  CANNOT VERIFY: /tmp/pgwtv8fake/src/summary_writer.h declares PGWT_SUMMARY_VERSION='8', not 9 —
+RESTORED: exit=0  PROBE PASSED: both #if branches compile, each confirmed

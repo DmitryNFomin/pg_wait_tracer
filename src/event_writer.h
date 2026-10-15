@@ -3,6 +3,8 @@
 #define PGWT_EVENT_WRITER_H
 
 #include "pg_wait_tracer.h"
+#include "trace_closure.h"
+#include "open_ckpt.h"
 
 #include <stdint.h>
 #include <stddef.h>
@@ -21,6 +23,11 @@
  * back to gap-inference. See docs/TRACE_FORMAT.md. */
 #define PGWT_TRACE_VERSION    3
 #define PGWT_FLAG_LZ4         0x0001
+/* The remaining bits of the header `flags` field carry the closure status
+ * (#424 deliverable 1): PGWT_FLAG_CLOSURE_TRACKED / _CLOSED_CLEAN / _ROTATED
+ * / _RECOVERED, defined with their reading rules in src/trace_closure.h. No
+ * layout change and no version bump — a pre-#424 reader ignores the field's
+ * spare bits, and a pre-#424 FILE reads back as "unknown", never as clean. */
 
 #define PGWT_BLOCK_EVENTS     4096         /* events per block */
 
@@ -74,7 +81,9 @@ enum pgwt_block_type {
 struct pgwt_trace_file_header {
     uint32_t magic;
     uint16_t version;
-    uint16_t flags;
+    uint16_t flags;              /* PGWT_FLAG_LZ4 | closure bits (trace_closure.h).
+                                  * Rewritten in place at offset 6, once, when
+                                  * the file is finalized. */
     uint32_t pg_version;
     uint64_t start_time_ns;      /* CLOCK_REALTIME at file creation */
     uint64_t clock_offset_ns;    /* CLOCK_MONOTONIC at file creation */
@@ -126,6 +135,11 @@ struct pgwt_event_writer {
     bool          force_rotate;           /* block cap reached — rotate now */
     uint64_t      file_start_wall_ns;
     uint64_t      file_start_mono_ns;
+    /* #424: the header `flags` value as last written for THIS file. The
+     * finalize path ORs its terminal bit into this instead of rebuilding the
+     * field from scratch, so a bit a future writer sets at creation cannot be
+     * erased by a close. */
+    uint16_t      file_flags;
 
     /* Block index (written as footer) */
     struct pgwt_block_index_entry *block_index;
@@ -151,6 +165,17 @@ struct pgwt_event_writer {
     size_t        encode_buf_size;
     uint8_t      *compress_buf;
     size_t        compress_buf_size;
+
+    /* #424 publication high-watermark: the largest TRANSITIONS timestamp
+     * actually written to the file. Monotonic; never reset by rotation (the
+     * clock does not restart, and the live snapshot compares against it). */
+    uint64_t      committed_through_ns;
+
+    /* #424 deliverable 2: open-interval checkpoint sequence within the
+     * CURRENT file. Reset on every file open, because the checkpoint's
+     * identity is the file's start stamps — a seq from a previous file could
+     * never be compared against this one's. */
+    uint64_t      ckpt_seq;
 
     /* Stats */
     uint64_t      total_events_written;
@@ -178,6 +203,82 @@ int  pgwt_writer_push_samples(struct pgwt_event_writer *w,
                               const struct pgwt_trace_event *samples,
                               int count, uint64_t sample_period_ns);
 
+/* #424: flush every pending buffer so the closed-record prefix is visible to
+ * a concurrent reader, and report the high-watermark it reached. Returns 0 on
+ * success, -1 if a block write failed. Safe (no-op) before the first event. */
+int  pgwt_writer_publish(struct pgwt_event_writer *w);
+uint64_t pgwt_writer_committed_through_ns(const struct pgwt_event_writer *w);
+
+/* #424 deliverable 2: checkpoint the intervals that are open RIGHT NOW, so a
+ * crash leaves evidence of them instead of nothing.
+ *
+ * `recs` are the closing records the shutdown flush WOULD write at
+ * `now_mono_ns` — build them with pgwt_build_open_stretch (src/open_interval.h),
+ * never by hand: the skip rules and the measured-CPU arithmetic live there,
+ * and a second copy of them is how the live screen and the trace drift apart.
+ * `count` may be 0, and a 0-record checkpoint is NOT a no-op: it is what
+ * supersedes an older checkpoint whose intervals have since closed. Skipping
+ * it would leave a stale claim behind for recovery to find, which is the
+ * double-count this contract exists to prevent.
+ *
+ * The call does NOT flush the writer's buffers. It records the watermark the
+ * writer has already reached, which is by construction a point the trace
+ * really contains. Flushing here would cut a block boundary on every call —
+ * at a one-second tick that changes block layout, footer index size and the
+ * block-aggregate's cost — so the decision belongs to the caller, which can
+ * call pgwt_writer_publish() at whatever cadence it has MEASURED. The sidecar
+ * itself is written atomically and durably: tmp → fsync → rename → fsync(dir).
+ *
+ * Returns 0 on success; -1 without writing anything if there is no open trace
+ * file (a checkpoint with no file to name has no identity and must never be
+ * written), if `count` exceeds PGWT_OPEN_CKPT_MAX_RECORDS, if a record is
+ * self-inconsistent (duration longer than its own timestamp), or if any file
+ * step failed. */
+int  pgwt_writer_checkpoint_open(struct pgwt_event_writer *w,
+                                 uint64_t now_mono_ns,
+                                 const struct pgwt_open_ckpt_record *recs,
+                                 int count);
+
+/* Write a checkpoint for the trace identified by `id` into `dir`, with the
+ * same atomic, durable sequence pgwt_writer_checkpoint_open uses (tmp →
+ * fsync → rename → fsync dir). Exposed because the writer-bound entry point
+ * needs an open file, and two callers legitimately have an identity without
+ * one: a tool importing or repairing a capture, and the test stub that
+ * stands in for the daemon's not-yet-wired producer. Sharing this function
+ * is what keeps the stub from becoming a second, drifting implementation of
+ * the format. Returns 0, or -1 on a refusal or any file step failing. */
+int  pgwt_open_ckpt_write(const char *dir,
+                          const struct pgwt_open_ckpt_identity *id,
+                          uint64_t seq, uint64_t now_mono_ns,
+                          uint64_t committed_through_ns,
+                          const struct pgwt_open_ckpt_record *recs, int count,
+                          gid_t trace_gid);
+
+/* Read and validate a checkpoint sidecar.
+ *
+ * `path` is the sidecar (`<archive>.trace.lz4.open`, or
+ * `<dir>/current.trace.open` for a live capture). `expect` is the identity of
+ * the trace file the caller intends to apply it to — pass NULL ONLY to
+ * inspect, never to count. On PGWT_OPEN_CKPT_OK, *out describes the records
+ * and `*buf_out` owns the memory they point into (free() it). On any other
+ * return nothing is allocated and *out is zeroed: a checkpoint that cannot be
+ * validated is not used, and the reason is named (pgwt_open_ckpt_rc_name).
+ *
+ * Reminder the caller may not skip: these durations are LOWER BOUNDS, and a
+ * record must be dropped when the trace already holds the closing record for
+ * the same stretch — pgwt_open_ckpt_suppressed_by() in src/open_ckpt.h. */
+enum pgwt_open_ckpt_rc
+pgwt_open_ckpt_load(const char *path,
+                    const struct pgwt_open_ckpt_identity *expect,
+                    struct pgwt_open_ckpt_view *out, void **buf_out);
+
+/* #424: how the trace file at `path` ended — see src/trace_closure.h for the
+ * verdicts and the rules behind them. Returns 0 when the header was read and
+ * *out holds the verdict; -1 when the file could not be opened or is not a
+ * trace file, in which case *out is PGWT_CLOSURE_UNKNOWN (a file we cannot
+ * inspect is never reported clean). */
+int  pgwt_trace_file_closure(const char *path, enum pgwt_closure_status *out);
+
 int  pgwt_writer_check_rotation(struct pgwt_event_writer *w);
 int  pgwt_writer_close(struct pgwt_event_writer *w);
 
@@ -199,8 +300,13 @@ void pgwt_writer_destroy(struct pgwt_event_writer *w);
 int pgwt_archive_path_nonclobber(const char *dir, const struct tm *tm,
                                  const char *ext, char *out, size_t out_size);
 
-/* fsync a directory so a just-renamed file survives power loss (DUR-5). */
-void pgwt_fsync_dir(const char *dir);
+/* fsync a directory so a just-renamed file survives power loss (DUR-5).
+ * Returns 0, or -1 if the directory could not be opened or fsynced — a
+ * failure a caller must report rather than swallow (#424 review): the rename
+ * is visible to this kernel either way, so it does not invalidate the
+ * process-death guarantee, but it does mean the name may not survive a power
+ * cut, and silence there is how an unmet durability claim survives. */
+int pgwt_fsync_dir(const char *dir);
 
 /* ── Exposed for unit testing ─────────────────────────────── */
 

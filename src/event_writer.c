@@ -3,9 +3,11 @@
  * Buffers events in blocks of 4096, encodes column-wise, LZ4-compresses,
  * writes to hourly-rotating trace files with a block index footer. */
 #include "event_writer.h"
+#include "crash_point.h"
 
 #include <string.h>
 #include <stdlib.h>
+#include <stddef.h>
 #include <errno.h>
 #include <time.h>
 #include <sys/stat.h>
@@ -143,13 +145,14 @@ size_t pgwt_encode_sample_block(const struct pgwt_trace_event *events, int count
 
 /* ── Shared file-lifecycle helpers (DUR-1/2/5) ────────────── */
 
-void pgwt_fsync_dir(const char *dir)
+int pgwt_fsync_dir(const char *dir)
 {
     int fd = open(dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-    if (fd >= 0) {
-        fsync(fd);
-        close(fd);
-    }
+    if (fd < 0)
+        return -1;
+    int rc = fsync(fd);
+    close(fd);
+    return rc == 0 ? 0 : -1;
 }
 
 int pgwt_archive_path_nonclobber(const char *dir, const struct tm *tm,
@@ -173,6 +176,373 @@ int pgwt_archive_path_nonclobber(const char *dir, const struct tm *tm,
             return 0;
     }
     return -1;
+}
+
+/* ── Closure status (#424 deliverable 1) ──────────────────── */
+
+/* Rewrite the header's `flags` field in place and make the new value durable.
+ *
+ * Called only AFTER the file's data is already on stable storage, so the
+ * ordering is: data fsync → flag write → flag fsync. A reader can therefore
+ * never see a clean/rotated bit for data that is not there; the reverse
+ * (data durable, bit missing) is the safe direction and reads as "not
+ * finalized".
+ *
+ * pwrite, not fseek+fwrite: it leaves the stream's append position alone, so
+ * a caller that keeps writing (nobody does today, but a future one might)
+ * cannot be silently corrupted by this. Returns 0 only if both the write and
+ * the fsync succeeded. */
+static int write_header_flags(FILE *fp, uint16_t flags)
+{
+    if (fflush(fp) != 0)
+        return -1;
+    int fd = fileno(fp);
+    off_t off = (off_t)offsetof(struct pgwt_trace_file_header, flags);
+    if (pwrite(fd, &flags, sizeof(flags), off) != (ssize_t)sizeof(flags))
+        return -1;
+    if (fsync(fd) != 0)
+        return -1;
+    return 0;
+}
+
+/* ── Open-interval checkpoints (#424 deliverable 2) ───────── */
+
+static void ckpt_paths(const char *dir, char *live, size_t live_sz,
+                       char *tmp, size_t tmp_sz)
+{
+    if (live) snprintf(live, live_sz, "%s/%s", dir, PGWT_OPEN_CKPT_NAME);
+    if (tmp)  snprintf(tmp,  tmp_sz,  "%s/%s", dir, PGWT_OPEN_CKPT_TMP);
+}
+
+/* Drop the live sidecar (and any torn tmp). Called whenever the checkpoint it
+ * holds has become redundant or unattributable:
+ *
+ *   - a CLEAN close already wrote the real closing records for every open
+ *     interval, so keeping the checkpoint would double count observed time;
+ *   - a ROTATION continues the capture in the next file, where those same
+ *     intervals get real closing records — same double count;
+ *   - a new file has a new identity, so the old sidecar can describe nothing.
+ *
+ * This is the other half of suppression, applied at the only moment when it
+ * can be decided locally and with certainty. */
+static void ckpt_discard(const char *dir, const char *why, bool verbose)
+{
+    char live[700], tmp[700];
+    ckpt_paths(dir, live, sizeof(live), tmp, sizeof(tmp));
+    unlink(tmp);
+    if (unlink(live) == 0 && verbose)
+        fprintf(stderr, "INFO: dropped the open-interval checkpoint (%s)\n",
+                why);
+}
+
+enum pgwt_open_ckpt_rc
+pgwt_open_ckpt_load(const char *path,
+                    const struct pgwt_open_ckpt_identity *expect,
+                    struct pgwt_open_ckpt_view *out, void **buf_out)
+{
+    if (buf_out)
+        *buf_out = NULL;
+    if (out) {
+        memset(&out->header, 0, sizeof(out->header));
+        out->records = NULL;
+        out->count = 0;
+    }
+    if (!path)
+        return PGWT_OPEN_CKPT_ABSENT;
+
+    FILE *fp = fopen(path, "rb");
+    if (!fp)
+        return PGWT_OPEN_CKPT_ABSENT;   /* no sidecar is not a bad sidecar */
+
+    /* Bound the read by the format's own cap before allocating anything: a
+     * sidecar claiming a huge size must not be able to spend our memory. */
+    struct stat st;
+    if (fstat(fileno(fp), &st) != 0 || !S_ISREG(st.st_mode)) {
+        fclose(fp);
+        return PGWT_OPEN_CKPT_ABSENT;   /* a directory is not a checkpoint */
+    }
+    size_t max = sizeof(struct pgwt_open_ckpt_header) +
+        (size_t)PGWT_OPEN_CKPT_MAX_RECORDS *
+        sizeof(struct pgwt_open_ckpt_record);
+    if ((size_t)st.st_size > max || (size_t)st.st_size <
+        sizeof(struct pgwt_open_ckpt_header)) {
+        fclose(fp);
+        return (size_t)st.st_size > max ? PGWT_OPEN_CKPT_COUNT_INSANE
+                                        : PGWT_OPEN_CKPT_TOO_SHORT;
+    }
+
+    size_t len = (size_t)st.st_size;
+    void *buf = malloc(len);
+    if (!buf) {
+        fclose(fp);
+        return PGWT_OPEN_CKPT_IO;
+    }
+    size_t got = fread(buf, 1, len, fp);
+    fclose(fp);
+
+    struct pgwt_open_ckpt_view view;
+    enum pgwt_open_ckpt_rc rc = pgwt_open_ckpt_parse(buf, got, expect, &view);
+    if (rc != PGWT_OPEN_CKPT_OK) {
+        free(buf);
+        return rc;
+    }
+    if (out)
+        *out = view;
+    if (buf_out)
+        *buf_out = buf;
+    else
+        free(buf);          /* caller only wanted the verdict */
+    return PGWT_OPEN_CKPT_OK;
+}
+
+/* Hand the live checkpoint over to the archive the trace is ABOUT to become
+ * (#424 review finding: both handovers must be restartable).
+ *
+ * The rule the review asked for: the sidecar's fate is decided by the
+ * TRACE's fate, not alongside it. So the sidecar is renamed FIRST and the
+ * caller renames the trace afterwards. Every state a crash can leave is then
+ * resolvable without discarding evidence:
+ *
+ *   (current.trace, current.trace.open)   nothing done yet — the next start
+ *                                         recovers both, arriving here again
+ *   (current.trace, <dest>.open)          crashed inside the window: the next
+ *                                         start recovers the SAME file, picks
+ *                                         the SAME dest (nothing claimed the
+ *                                         name), and ADOPTS the stranded
+ *                                         sidecar after re-checking identity
+ *   (<dest>, <dest>.open)                 done
+ *
+ * The one state that must never exist is (<dest>, current.trace.open): a
+ * sidecar whose trace has already been archived, which the next start sees as
+ * a sidecar with no current.trace and deletes. That was the bug — renaming
+ * the trace first made it the normal intermediate state.
+ *
+ * Adoption is NOT "whatever is lying there": the stranded sidecar is parsed
+ * and checked against the same identity as a live one. A foreign file at that
+ * name is deleted, because a wrong sidecar beside a right archive is worse
+ * than none.
+ *
+ * Returns 1 if a validated checkpoint now sits at <dest>.open, 0 if there is
+ * none (absent, or refused and removed). */
+static int ckpt_handover(const char *dir, const char *dest,
+                         const struct pgwt_open_ckpt_identity *id,
+                         bool verbose)
+{
+    char live[700], tmp[700], sidecar[800];
+    ckpt_paths(dir, live, sizeof(live), tmp, sizeof(tmp));
+    snprintf(sidecar, sizeof(sidecar), "%s%s", dest, PGWT_OPEN_CKPT_SUFFIX);
+    unlink(tmp);          /* a torn checkpoint write is always stale */
+
+    struct pgwt_open_ckpt_view view;
+    enum pgwt_open_ckpt_rc rc = pgwt_open_ckpt_load(live, id, &view, NULL);
+
+    if (rc == PGWT_OPEN_CKPT_OK) {
+        if (rename(live, sidecar) != 0) {
+            fprintf(stderr, "WARN: cannot keep the open-interval checkpoint "
+                    "as %s: %s — dropping it\n", sidecar, strerror(errno));
+            unlink(live);
+            return 0;
+        }
+        if (pgwt_fsync_dir(dir) != 0)
+            fprintf(stderr, "WARN: could not fsync %s after installing %s — "
+                    "the rename is visible now but may not survive a power "
+                    "cut\n", dir, sidecar);
+        if (verbose)
+            fprintf(stderr, "INFO: carried open-interval checkpoint %llu "
+                    "(%d open intervals) -> %s\n",
+                    (unsigned long long)view.header.seq, view.count, sidecar);
+        return 1;
+    }
+
+    if (rc != PGWT_OPEN_CKPT_ABSENT) {
+        /* Something IS there and cannot be trusted. "absent" and "damaged"
+         * are different facts; name which, and remove it so the next start
+         * does not retry the same unusable file. */
+        fprintf(stderr, "WARN: refused the open-interval checkpoint for %s "
+                "(%s) — dropping it\n", dest, pgwt_open_ckpt_rc_name(rc));
+        unlink(live);
+        return 0;
+    }
+
+    /* No live sidecar. One may already sit at the destination from a handover
+     * that was interrupted after this rename and before the trace's — the
+     * state the ordering above is designed to make recoverable. */
+    if (access(sidecar, F_OK) != 0)
+        return 0;
+    rc = pgwt_open_ckpt_load(sidecar, id, &view, NULL);
+    if (rc == PGWT_OPEN_CKPT_OK) {
+        if (verbose)
+            fprintf(stderr, "INFO: adopted the open-interval checkpoint "
+                    "already at %s (seq %llu, %d open intervals) — a previous "
+                    "handover was interrupted\n", sidecar,
+                    (unsigned long long)view.header.seq, view.count);
+        return 1;
+    }
+    fprintf(stderr, "WARN: %s does not describe this trace (%s) — removing "
+            "it rather than leaving it beside an archive it is not about\n",
+            sidecar, pgwt_open_ckpt_rc_name(rc));
+    unlink(sidecar);
+    return 0;
+}
+
+int pgwt_open_ckpt_write(const char *dir,
+                         const struct pgwt_open_ckpt_identity *id,
+                         uint64_t seq, uint64_t now_mono_ns,
+                         uint64_t committed_through_ns,
+                         const struct pgwt_open_ckpt_record *recs, int count,
+                         gid_t trace_gid)
+{
+    if (!dir || !id || count < 0 || (count > 0 && !recs))
+        return -1;
+    if (count > PGWT_OPEN_CKPT_MAX_RECORDS) {
+        fprintf(stderr, "WARN: refusing an open-interval checkpoint of %d "
+                "records (cap %d)\n", count, PGWT_OPEN_CKPT_MAX_RECORDS);
+        return -1;
+    }
+    for (int i = 0; i < count; i++) {
+        /* An interval cannot have started before the clock did. A record
+         * failing this would decode to a start in the far future via
+         * unsigned wraparound, and be counted. */
+        if (recs[i].duration_ns > recs[i].timestamp_ns) {
+            fprintf(stderr, "WARN: refusing an open-interval checkpoint: "
+                    "record %d has duration > timestamp\n", i);
+            return -1;
+        }
+    }
+
+    char live[700], tmp[700];
+    ckpt_paths(dir, live, sizeof(live), tmp, sizeof(tmp));
+
+    struct pgwt_open_ckpt_header h = {
+        .magic = PGWT_OPEN_CKPT_MAGIC,
+        .version = PGWT_OPEN_CKPT_VERSION,
+        .flags = 0,
+        .trace_start_wall_ns = id->trace_start_wall_ns,
+        .trace_start_mono_ns = id->trace_start_mono_ns,
+        .seq = seq,
+        .checkpoint_mono_ns = now_mono_ns,
+        .committed_through_ns = committed_through_ns,
+        .num_records = (uint32_t)count,
+        .checksum = pgwt_open_ckpt_crc32(recs, (size_t)count * sizeof(*recs)),
+    };
+
+    FILE *f = fopen(tmp, "wbe");
+    if (!f) {
+        fprintf(stderr, "WARN: cannot write %s: %s\n", tmp, strerror(errno));
+        return -1;
+    }
+    if (trace_gid != (gid_t)-1) {
+        if (fchown(fileno(f), (uid_t)-1, trace_gid) != 0 ||
+            fchmod(fileno(f), 0640) != 0)
+            fprintf(stderr, "WARN: cannot set ownership on %s: %s\n",
+                    tmp, strerror(errno));
+    }
+    int ok = fwrite(&h, sizeof(h), 1, f) == 1;
+    if (ok && count > 0)
+        ok = fwrite(recs, sizeof(*recs), (size_t)count, f) == (size_t)count;
+    if (ok && fflush(f) != 0)
+        ok = 0;
+    if (ok && fsync(fileno(f)) != 0)
+        ok = 0;
+    fclose(f);
+    if (!ok) {
+        unlink(tmp);
+        fprintf(stderr, "WARN: open-interval checkpoint %llu not written "
+                "durably (%s) — the previous one stands\n",
+                (unsigned long long)seq, strerror(errno));
+        return -1;
+    }
+    /* Atomic swap: a crash leaves either the previous checkpoint or this
+     * one, never a half-written mixture of the two. */
+    if (rename(tmp, live) != 0) {
+        unlink(tmp);
+        fprintf(stderr, "WARN: cannot install %s: %s\n", live,
+                strerror(errno));
+        return -1;
+    }
+    if (pgwt_fsync_dir(dir) != 0)
+        fprintf(stderr, "WARN: could not fsync %s after installing the "
+                "open-interval checkpoint — it is in place for this kernel "
+                "but the name may not survive a power cut\n", dir);
+    return 0;
+}
+
+int pgwt_writer_checkpoint_open(struct pgwt_event_writer *w,
+                                uint64_t now_mono_ns,
+                                const struct pgwt_open_ckpt_record *recs,
+                                int count)
+{
+    if (!w || count < 0 || (count > 0 && !recs))
+        return -1;
+    /* No file, no identity. A checkpoint that cannot name the trace it
+     * describes is exactly the stale-sidecar hazard, so it is never written. */
+    if (!w->enabled || !w->fp)
+        return -1;
+    if (count > PGWT_OPEN_CKPT_MAX_RECORDS) {
+        fprintf(stderr, "WARN: refusing an open-interval checkpoint of %d "
+                "records (cap %d)\n", count, PGWT_OPEN_CKPT_MAX_RECORDS);
+        return -1;
+    }
+    for (int i = 0; i < count; i++) {
+        /* An interval cannot have started before the clock did. A record that
+         * fails this would decode to a start in the far future via unsigned
+         * wraparound, and be counted. */
+        if (recs[i].duration_ns > recs[i].timestamp_ns) {
+            fprintf(stderr, "WARN: refusing an open-interval checkpoint: "
+                    "record %d has duration > timestamp\n", i);
+            return -1;
+        }
+    }
+
+    /* DURABLE PUBLICATION — and deliberately NOT a flush.
+     *
+     * This used to call pgwt_writer_publish() first, so the watermark would
+     * be as fresh as possible. A reviewer costed that: publish runs
+     * flush_block, so a checkpoint on the daemon's one-second tick would cut
+     * a block boundary every second, changing block layout, footer index
+     * size and the block-aggregate's cost. That is a real price for an
+     * unmeasured benefit, and a library must not impose it on its caller by
+     * accident.
+     *
+     * The truthfulness the contract needs does not require the flush: the
+     * value recorded below is the watermark the writer has ALREADY reached,
+     * so it is by construction a point the trace really contains, never a
+     * promise. Records still pending in the writer's buffers are simply not
+     * covered by it — which is exactly right, since a crash loses them and
+     * the checkpoint is what speaks for the intervals they would have
+     * closed.
+     *
+     * A caller that wants the closed-record prefix on disk calls
+     * pgwt_writer_publish() itself, at whatever cadence it has measured. */
+
+    return pgwt_open_ckpt_write(w->trace_dir,
+                                &(struct pgwt_open_ckpt_identity){
+                                    .trace_start_wall_ns = w->file_start_wall_ns,
+                                    .trace_start_mono_ns = w->file_start_mono_ns,
+                                },
+                                ++w->ckpt_seq, now_mono_ns,
+                                w->committed_through_ns,
+                                recs, count, w->trace_gid);
+}
+
+int pgwt_trace_file_closure(const char *path, enum pgwt_closure_status *out)
+{
+    if (out)
+        *out = PGWT_CLOSURE_UNKNOWN;   /* a file we cannot read is never clean */
+    if (!path)
+        return -1;
+    FILE *fp = fopen(path, "rb");
+    if (!fp)
+        return -1;
+    struct pgwt_trace_file_header hdr;
+    int ok = (fread(&hdr, sizeof(hdr), 1, fp) == 1) &&
+             hdr.magic == PGWT_TRACE_MAGIC;
+    fclose(fp);
+    if (!ok)
+        return -1;
+    if (out)
+        *out = pgwt_closure_from_flags(hdr.flags);
+    return 0;
 }
 
 /* ── Startup recovery (DUR-1) ─────────────────────────────── */
@@ -200,6 +570,10 @@ static void recover_current_trace(struct pgwt_event_writer *w)
     struct stat st;
     if (stat(cur, &st) != 0) {
         unlink(meta);   /* meta without a current file is an orphan */
+        /* A checkpoint whose trace file is gone can never be attributed to
+         * anything — keeping it only risks a later misattribution. */
+        ckpt_discard(w->trace_dir, "no current.trace to attribute it to",
+                     w->verbose);
         return;
     }
 
@@ -237,7 +611,11 @@ static void recover_current_trace(struct pgwt_event_writer *w)
             fprintf(stderr, "WARN: %s has an unreadable header — preserved "
                     "as %s\n", cur, aside);
         unlink(meta);
-        pgwt_fsync_dir(w->trace_dir);
+        /* Unreadable header = no identity to check a checkpoint against. */
+        ckpt_discard(w->trace_dir, "its trace file has an unreadable header",
+                     w->verbose);
+        if (pgwt_fsync_dir(w->trace_dir) != 0)
+            fprintf(stderr, "WARN: could not fsync %s\n", w->trace_dir);
         return;
     }
 
@@ -297,7 +675,12 @@ static void recover_current_trace(struct pgwt_event_writer *w)
             unlink(cur);   /* header-only file: nothing to preserve */
         }
         unlink(meta);
-        pgwt_fsync_dir(w->trace_dir);
+        /* No complete block means no archive a reader would ever open, so
+         * there is nothing for a checkpoint to be attached to. */
+        ckpt_discard(w->trace_dir, "its trace file has no complete block",
+                     w->verbose);
+        if (pgwt_fsync_dir(w->trace_dir) != 0)
+            fprintf(stderr, "WARN: could not fsync %s\n", w->trace_dir);
         return;
     }
 
@@ -317,8 +700,48 @@ static void recover_current_trace(struct pgwt_event_writer *w)
     } else {
         finalize_failed = 1;
     }
-    fflush(fp);
-    fsync(fileno(fp));
+    /* The recovered file's data must be on stable storage BEFORE the header
+     * says anything about how it ended. Both calls are checked: a failure
+     * here means the footer we just wrote may not be there, so the file must
+     * not then be labelled (#424 review: no unchecked flush/fsync). */
+    if (fflush(fp) != 0 || fsync(fileno(fp)) != 0) {
+        finalize_failed = 1;
+        fprintf(stderr, "WARN: could not flush recovered %s to stable "
+                "storage (%s) — it will read as an unfinished capture\n",
+                cur, strerror(errno));
+    }
+
+    /* #424: record how this file ENDED, now that its data is durable.
+     *
+     *   - legacy file (no CLOSURE_TRACKED): left exactly as it is. A
+     *     pre-#424 daemon left no trace of whether it shut down or died, so
+     *     the file reads as UNKNOWN. Stamping RECOVERED on it would be
+     *     inventing evidence in the other direction — just as wrong as
+     *     calling it clean.
+     *   - already CLEAN or ROTATED: preserved. Finding such a file here is
+     *     normal: a clean close leaves current.trace in place with its
+     *     footer, and it is THIS path that archives it on the next start.
+     *     Recovery must not relabel that as a crash.
+     *   - tracked but never finalized: the previous daemon died without
+     *     closing. RECOVERED — intervals open at the end are missing.
+     *   - tracked, says CLEAN, but the scan found FEWER blocks than the meta
+     *     high-watermark says were committed: the close bit contradicts the
+     *     file. RECOVERED wins (trace_closure.h rule 2a) — a "clean" label
+     *     over missing committed data is exactly the false clean this whole
+     *     deliverable exists to prevent. */
+    int tracked = (hdr.flags & PGWT_FLAG_CLOSURE_TRACKED) != 0;
+    int finalized = (hdr.flags & (PGWT_FLAG_CLOSED_CLEAN |
+                                  PGWT_FLAG_ROTATED)) != 0;
+    int lost_committed = (committed > nidx);
+    if (!finalize_failed && tracked && (!finalized || lost_committed) &&
+        !(hdr.flags & PGWT_FLAG_RECOVERED)) {
+        uint16_t newf = (uint16_t)(hdr.flags | PGWT_FLAG_RECOVERED);
+        if (write_header_flags(fp, newf) != 0)
+            fprintf(stderr, "WARN: could not mark recovered %s as uncleanly "
+                    "ended (%s) — it will read as an unfinished capture\n",
+                    cur, strerror(errno));
+    }
+
     fclose(fp);
     free(idx);
     if (finalize_failed)
@@ -333,15 +756,43 @@ static void recover_current_trace(struct pgwt_event_writer *w)
     localtime_r(&start_sec, &tm);
     char dest[512];
     if (pgwt_archive_path_nonclobber(w->trace_dir, &tm, ".trace.lz4",
-                                     dest, sizeof(dest)) != 0 ||
-        rename(cur, dest) != 0) {
-        fprintf(stderr, "WARN: cannot archive recovered %s: %s "
-                "(leaving it in place; it will NOT be truncated)\n",
-                cur, strerror(errno));
+                                     dest, sizeof(dest)) != 0) {
+        fprintf(stderr, "WARN: no free archive name for recovered %s "
+                "(leaving it in place; it will NOT be truncated)\n", cur);
         return;
     }
+
+    /* #424 deliverable 2, RECOVERY — the checkpoint moves FIRST.
+     *
+     * The crashed daemon may have left an open-interval checkpoint. It is
+     * validated against the identity of the file we are about to archive and
+     * carried next to it; see ckpt_handover for why the order matters (a
+     * crash between the two renames must not strand evidence that the next
+     * start then deletes). It is deliberately NOT merged into the trace
+     * stream: the block layout has no field that could mark a record as
+     * reconstructed, and a lower bound that looks like an observation is
+     * worse than no record at all. */
+    struct pgwt_open_ckpt_identity id = {
+        .trace_start_wall_ns = hdr.start_time_ns,
+        .trace_start_mono_ns = hdr.clock_offset_ns,
+    };
+    ckpt_handover(w->trace_dir, dest, &id, true);
+    pgwt_crash_point(PGWT_CRASH_RECOVER_AFTER_CKPT);
+
+    if (rename(cur, dest) != 0) {
+        fprintf(stderr, "WARN: cannot archive recovered %s: %s "
+                "(leaving it in place; it will NOT be truncated — the next "
+                "start will adopt the checkpoint already at %s%s)\n",
+                cur, strerror(errno), dest, PGWT_OPEN_CKPT_SUFFIX);
+        return;
+    }
+    pgwt_crash_point(PGWT_CRASH_RECOVER_AFTER_TRACE);
     unlink(meta);
-    pgwt_fsync_dir(w->trace_dir);
+
+    if (pgwt_fsync_dir(w->trace_dir) != 0)
+        fprintf(stderr, "WARN: could not fsync %s after archiving %s — the "
+                "archive is visible now but the name may not survive a power "
+                "cut\n", w->trace_dir, dest);
     fprintf(stderr, "INFO: recovered previous current.trace: %d blocks, "
             "%llu events -> %s\n", nidx, (unsigned long long)nevents, dest);
 }
@@ -401,10 +852,14 @@ static int open_trace_file(struct pgwt_event_writer *w, uint64_t first_mono_ns)
     w->current_hour = tm.tm_yday * 24 + tm.tm_hour;
 
     /* Write file header */
+    w->file_flags = (uint16_t)(PGWT_FLAG_LZ4 | PGWT_FLAG_CLOSURE_TRACKED);
     struct pgwt_trace_file_header hdr = {
         .magic = PGWT_TRACE_MAGIC,
         .version = PGWT_TRACE_VERSION,
-        .flags = PGWT_FLAG_LZ4,
+        /* CLOSURE_TRACKED from byte one: it is the capability bit that makes
+         * the absence of a terminal bit MEAN something later (#424). A file
+         * without it is a legacy file and reads as "unknown", never clean. */
+        .flags = w->file_flags,
         .pg_version = (uint32_t)w->pg_version,
         .start_time_ns = w->file_start_wall_ns,
         .clock_offset_ns = w->file_start_mono_ns,
@@ -417,6 +872,15 @@ static int open_trace_file(struct pgwt_event_writer *w, uint64_t first_mono_ns)
     }
 
     w->num_blocks = 0;
+
+    /* #424: a new file has a new identity, so any checkpoint still sitting
+     * under the live name describes a file that no longer exists here.
+     * Recovery has already carried the valid ones next to their archives, so
+     * whatever is left is unattributable. Sequence numbers restart with the
+     * file for the same reason. */
+    w->ckpt_seq = 0;
+    ckpt_discard(w->trace_dir, "a new trace file started", w->verbose);
+
     return 0;
 }
 
@@ -498,8 +962,29 @@ static int write_typed_block(struct pgwt_event_writer *w,
     w->total_events_written += count;
     w->total_bytes_written += sizeof(bh) + compressed_size;
 
-    /* Flush to OS page cache so concurrent readers can see this block */
-    fflush(w->fp);
+    /* #424: the publication high-watermark. Every record in this block is now
+     * in the file (fflush + the meta count below), so the LAST TRANSITIONS
+     * timestamp committed is a floor the live snapshot can report as
+     * committed_through_ns — the point below which a gap means "still open",
+     * not "closed but not yet visible". TRANSITIONS only: a SAMPLES block
+     * running ahead says nothing about whether the closed-record prefix is
+     * published, and taking the max over both would OVERSTATE it. */
+    if (block_type == PGWT_BLOCK_TRANSITIONS) {
+        uint64_t last = events[count - 1].timestamp_ns;
+        if (last > w->committed_through_ns)
+            w->committed_through_ns = last;
+    }
+
+    /* Flush to OS page cache so concurrent readers can see this block. A
+     * failure here means the block is NOT visible, so the committed-block
+     * watermark below must not advertise it: say so and stop advertising
+     * (#424 review: no unchecked flush). */
+    if (fflush(w->fp) != 0) {
+        fprintf(stderr, "WARN: trace flush failed (%s) — block %d is not "
+                "visible to readers and is not being advertised\n",
+                strerror(errno), w->num_blocks);
+        return -1;
+    }
 
     /* Write committed block count atomically (Kafka-style high watermark).
      * Readers use this instead of scanning/guessing block count. */
@@ -571,6 +1056,58 @@ static int flush_samples(struct pgwt_event_writer *w)
             return -1;
     }
     return flush_sample_buf(w);
+}
+
+/* Finalize the current file and record WHY it ended (#424 deliverable 1).
+ *
+ * `terminal_flag` is PGWT_FLAG_CLOSED_CLEAN (shutdown) or PGWT_FLAG_ROTATED
+ * (hour / block-cap rotation). The bit is written only when the whole chain
+ * succeeded: both pending buffers flushed, the footer written, the data
+ * fsynced. Every one of those is CHECKED — before #424 all of those return
+ * values were discarded, which is exactly how a file with a truncated tail
+ * ended up indistinguishable from a complete one.
+ *
+ * Returns 0 if the file now carries that bit, -1 if anything in the chain
+ * failed. On -1 the file keeps NO terminal bit and reads back as
+ * IN_PROGRESS, which for an archived file means "open intervals may be
+ * missing" — the safe direction. The caller still rotates/closes: refusing
+ * to would only stall the capture and lose more. */
+static int finalize_current_file(struct pgwt_event_writer *w,
+                                 uint16_t terminal_flag)
+{
+    if (!w->fp)
+        return -1;
+
+    int ok = 1;
+    if (flush_block(w) != 0)
+        ok = 0;
+    if (flush_samples(w) != 0)
+        ok = 0;
+    if (write_footer(w) != 0)
+        ok = 0;
+    if (fflush(w->fp) != 0)
+        ok = 0;
+    if (fsync(fileno(w->fp)) != 0)
+        ok = 0;
+
+    if (!ok) {
+        fprintf(stderr, "WARN: could not finalize %s durably — it will read "
+                "as an unfinished capture (open intervals may be missing)\n",
+                w->current_path);
+        return -1;
+    }
+
+    /* OR into what this file's header actually holds, so the terminal bit is
+     * added rather than the field rebuilt — a creation-time bit added later
+     * must not be erased here. */
+    w->file_flags |= terminal_flag;
+    if (write_header_flags(w->fp, w->file_flags) != 0) {
+        fprintf(stderr, "WARN: could not record the closure status of %s "
+                "(%s) — it will read as an unfinished capture\n",
+                w->current_path, strerror(errno));
+        return -1;
+    }
+    return 0;
 }
 
 /* ── Public API ───────────────────────────────────────────── */
@@ -719,6 +1256,27 @@ int pgwt_writer_push_samples(struct pgwt_event_writer *w,
     return 0;
 }
 
+/* #424: flush both pending buffers, in the order that keeps the block index
+ * sorted (flush_block writes an older sample batch first). After this returns
+ * 0 every record the writer has been handed is in the file and counted in the
+ * meta high-watermark, so a reader scanning the trace can see it. */
+int pgwt_writer_publish(struct pgwt_event_writer *w)
+{
+    if (!w->enabled || !w->fp)
+        return 0;                 /* nothing opened yet: nothing unpublished */
+    int rc = 0;
+    if (flush_block(w) != 0)
+        rc = -1;
+    if (flush_sample_buf(w) != 0)
+        rc = -1;
+    return rc;
+}
+
+uint64_t pgwt_writer_committed_through_ns(const struct pgwt_event_writer *w)
+{
+    return w->committed_through_ns;
+}
+
 int pgwt_writer_check_rotation(struct pgwt_event_writer *w)
 {
     if (!w->enabled || !w->fp) return 0;
@@ -733,10 +1291,12 @@ int pgwt_writer_check_rotation(struct pgwt_event_writer *w)
     if (current_hour == w->current_hour && !w->force_rotate)
         return 0;
 
-    /* Hour changed (or the block cap forced it) — rotate */
-    flush_block(w);
-    flush_samples(w);
-    write_footer(w);
+    /* Hour changed (or the block cap forced it) — rotate. #424: ROTATED, not
+     * CLOSED_CLEAN. The capture did NOT end here, so an interval open across
+     * the boundary is not lost — it closes in the next file, and a reader
+     * must not be warned about it. That distinction is the whole reason the
+     * footer alone could not certify anything. */
+    finalize_current_file(w, PGWT_FLAG_ROTATED);
 
     if (w->verbose) {
         double ratio = w->total_events_written > 0
@@ -749,9 +1309,14 @@ int pgwt_writer_check_rotation(struct pgwt_event_writer *w)
     }
 
     /* DUR-5: an archive is durable once rotated — flush it to stable
-     * storage before it gets its final name. */
-    fflush(w->fp);
-    fsync(fileno(w->fp));
+     * storage before it gets its final name. finalize_current_file already
+     * did this as a CHECKED chain; repeat it only to catch anything written
+     * since, and report a failure rather than discarding it (#424 review:
+     * no unchecked flush/fsync anywhere on this path). */
+    if (fflush(w->fp) != 0 || fsync(fileno(w->fp)) != 0)
+        fprintf(stderr, "WARN: final flush of %s before rotation failed "
+                "(%s) — it is archived uncertified\n",
+                w->current_path, strerror(errno));
     fclose(w->fp);
     w->fp = NULL;
 
@@ -767,12 +1332,41 @@ int pgwt_writer_check_rotation(struct pgwt_event_writer *w)
     localtime_r(&file_start_sec, &file_tm);
     char new_path[512];
     if (pgwt_archive_path_nonclobber(w->trace_dir, &file_tm, ".trace.lz4",
-                                     new_path, sizeof(new_path)) == 0)
-        rename(w->current_path, new_path);
-    else
+                                     new_path, sizeof(new_path)) != 0) {
         fprintf(stderr, "WARN: no free archive name for %s — leaving it as "
                 "current.trace (it will be recovered on next start)\n",
                 w->current_path);
+    } else {
+        /* #424 review finding: the checkpoint is CARRIED to the rotated
+         * archive, and it moves BEFORE the trace does (see ckpt_handover).
+         *
+         * It used to be deleted here, on the argument that the open
+         * intervals continue into the next file and get real closing records
+         * there. That argument holds only if the daemon survives to write
+         * them. Deleting the evidence before any successor exists means a
+         * SIGKILL in this window loses the open intervals completely — the
+         * one outcome this work exists to prevent — so the deletion was
+         * trading a certainty for a convenience.
+         *
+         * The overlap with the next file's real records is not a reason to
+         * destroy evidence; it is what pgwt_open_ckpt_suppressed_by() is
+         * for, and the carried records are a lower bound presented next to
+         * the archive, never added to totals. */
+        struct pgwt_open_ckpt_identity id = {
+            .trace_start_wall_ns = w->file_start_wall_ns,
+            .trace_start_mono_ns = w->file_start_mono_ns,
+        };
+        ckpt_handover(w->trace_dir, new_path, &id, w->verbose);
+        pgwt_crash_point(PGWT_CRASH_ROTATE_AFTER_CKPT);
+
+        if (rename(w->current_path, new_path) != 0)
+            fprintf(stderr, "WARN: cannot rename %s to %s: %s (it will be "
+                    "recovered on the next start, which adopts the "
+                    "checkpoint already at %s%s)\n", w->current_path,
+                    new_path, strerror(errno), new_path,
+                    PGWT_OPEN_CKPT_SUFFIX);
+        pgwt_crash_point(PGWT_CRASH_ROTATE_AFTER_TRACE);
+    }
 
     /* Remove meta file — the rotated .trace.lz4 has a real footer */
     {
@@ -781,7 +1375,10 @@ int pgwt_writer_check_rotation(struct pgwt_event_writer *w)
                  w->trace_dir);
         unlink(meta_path);
     }
-    pgwt_fsync_dir(w->trace_dir);
+    if (pgwt_fsync_dir(w->trace_dir) != 0)
+        fprintf(stderr, "WARN: could not fsync %s after rotation — the "
+                "rename is visible now but may not survive a power cut\n",
+                w->trace_dir);
 
     /* Reset stats for next file */
     w->total_events_written = 0;
@@ -795,9 +1392,25 @@ int pgwt_writer_close(struct pgwt_event_writer *w)
 {
     if (!w->fp) return 0;
 
-    flush_block(w);
-    flush_samples(w);
-    write_footer(w);
+    /* #424: the ONLY place a file is certified clean. finalize_current_file
+     * checks every step and fsyncs the data BEFORE the bit, so the bit is
+     * never set over data that is not on disk. If it fails the file simply
+     * stays uncertified — a reader then says "open intervals may be
+     * missing", which is the truth. */
+    int certified = finalize_current_file(w, PGWT_FLAG_CLOSED_CLEAN) == 0;
+
+    /* #424 SUPPRESSION at shutdown. A clean close means the daemon's
+     * open-interval flush (pgwt_flush_open_intervals, called before this —
+     * src/daemon.c) already wrote a REAL closing record for every open
+     * interval, so the checkpoint describes the same nanoseconds and must go.
+     *
+     * If the close could NOT be certified, the opposite holds: those real
+     * records may not have reached the disk, so the checkpoint is the only
+     * surviving evidence and is left for the next start's recovery to
+     * validate and carry. */
+    if (certified)
+        ckpt_discard(w->trace_dir, "a clean close flushed those intervals as "
+                     "real records", w->verbose);
 
     if (w->verbose) {
         double ratio = w->total_events_written > 0
@@ -810,9 +1423,13 @@ int pgwt_writer_close(struct pgwt_event_writer *w)
     }
 
     /* DUR-5: a cleanly closed file is durable (it is archived on the next
-     * daemon start by recovery, footer intact). */
-    fflush(w->fp);
-    fsync(fileno(w->fp));
+     * daemon start by recovery, footer intact). finalize_current_file ran
+     * this as a checked chain; repeat it for anything written since, and
+     * report rather than discard a failure (#424 review). */
+    if (fflush(w->fp) != 0 || fsync(fileno(w->fp)) != 0)
+        fprintf(stderr, "WARN: final flush of %s failed (%s) — the file is "
+                "closed but its tail may not be on disk\n",
+                w->current_path, strerror(errno));
     fclose(w->fp);
     w->fp = NULL;
     return 0;
@@ -854,7 +1471,29 @@ static enum retn_kind retn_classify(const char *dir, const char *name)
                  (int)(strlen(name) - 5), name);
         return access(live, F_OK) == 0 ? RETN_SKIP : RETN_ORPHAN_META;
     }
+    /* #424 open-interval checkpoint sidecars. A torn tmp is always stale. A
+     * sidecar is live state while the file it describes exists (the live
+     * current.trace, or the archive it was carried next to) and an orphan
+     * once that file is gone — otherwise every deleted archive would leave
+     * one behind for good. */
+    if (has_suffix(name, PGWT_OPEN_CKPT_SUFFIX ".tmp"))
+        return RETN_ORPHAN_META;
+    if (has_suffix(name, PGWT_OPEN_CKPT_SUFFIX)) {
+        char base[600];
+        snprintf(base, sizeof(base), "%s/%.*s", dir,
+                 (int)(strlen(name) - strlen(PGWT_OPEN_CKPT_SUFFIX)), name);
+        return access(base, F_OK) == 0 ? RETN_SKIP : RETN_ORPHAN_META;
+    }
     return RETN_SKIP;
+}
+
+/* Delete an archive's checkpoint sidecar along with the archive: the sidecar
+ * is evidence ABOUT that file and means nothing without it. */
+static void retn_unlink_sidecar(const char *archive_path)
+{
+    char s[700];
+    snprintf(s, sizeof(s), "%s%s", archive_path, PGWT_OPEN_CKPT_SUFFIX);
+    unlink(s);
 }
 
 /* Archive age: from the YYYY-MM-DD_HH name when parseable (recovered
@@ -930,6 +1569,7 @@ int pgwt_writer_cleanup_old_files(struct pgwt_event_writer *w)
         time_t ftime = retn_file_time(ent->d_name, st.st_mtime);
         if (cutoff && ftime < cutoff) {
             if (unlink(path) == 0) {
+                retn_unlink_sidecar(path);
                 if (w->verbose)
                     fprintf(stderr, "INFO: deleted old file %s\n",
                             ent->d_name);
@@ -967,6 +1607,7 @@ int pgwt_writer_cleanup_old_files(struct pgwt_event_writer *w)
             char path[600];
             snprintf(path, sizeof(path), "%s/%s", w->trace_dir, kept[i].name);
             if (unlink(path) == 0) {
+                retn_unlink_sidecar(path);
                 total_bytes -= kept[i].size;
                 if (w->verbose)
                     fprintf(stderr, "INFO: size cap: deleted %s (%llu bytes)\n",

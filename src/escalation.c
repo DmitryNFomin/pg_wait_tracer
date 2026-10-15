@@ -8,6 +8,7 @@
  */
 #include "escalation.h"
 #include "escalation_budget.h"
+#include "open_interval.h"
 #include "daemon.h"
 #include "backend.h"
 #include "discovery.h"
@@ -249,41 +250,35 @@ static void flush_open_intervals(struct pgwt_daemon *d, uint64_t now)
         struct pgwt_pid_state st;
         if (bpf_map_lookup_elem(state_fd, &key, &st) != 0)
             continue;
-        if (!st.wp_live)
-            continue;               /* a seed entry — no interval to close */
-        if (now <= st.last_ts)
-            continue;               /* zero/negative duration — nothing open */
-        uint32_t we = st.last_event;
-        if (PGWT_IS_MARKER(we))
-            continue;               /* never a real wait */
-        /* S3: close the open stretch with its exact MEASURED CPU — the
-         * straddling command's on-CPU ns the watchpoint never emitted (no wait
-         * boundary fired). exact-on-CPU-now = cpu_ns_total + current open
-         * stretch (on_cpu_ts != 0 iff running); subtract the seeded base.
-         * `now` is CLOCK_MONOTONIC == bpf_ktime. */
-        uint64_t cpu_ns = PGWT_CPU_NS_UNKNOWN;
-        if (d->cpu_accounting) {
-            uint64_t exact = st.cpu_ns_total;
-            if (st.on_cpu_ts && now >= st.on_cpu_ts)
-                exact += now - st.on_cpu_ts;
-            cpu_ns = (exact >= st.last_cpu_ns) ? exact - st.last_cpu_ns : 0;
-        }
+        /* #424: the skip rules (seed entry / nothing open / marker) and the S3
+         * measured-CPU arithmetic that used to be written out here now live in
+         * ONE pure builder (src/open_interval.h), shared with the live
+         * {"cmd":"open_intervals"} snapshot. `now` is CLOCK_MONOTONIC ==
+         * bpf_ktime. The attribution stays resolved HERE, from the registry
+         * entry we already hold, and is passed in — the builder is pure.
+         * tests/test_open_interval.c pins the refactor against a verbatim copy
+         * of the pre-#424 loop body.
+         *
+         * The gate runs BEFORE pgwt_exact_resolve_attr so a skipped backend
+         * still costs zero attribution map reads, exactly as it did when the
+         * three `continue`s were written out above the resolve call. The
+         * builder re-applies it: the gate is an optimisation, never a second
+         * copy of the rule. */
+        if (pgwt_open_stretch_gate(&st, now) != PGWT_OPEN_STRETCH_BUILT)
+            continue;
         uint64_t query_id = 0;
         uint16_t cmd_open = 0, quality = PGWT_QUERY_QUALITY_NONE;
         pgwt_exact_resolve_attr(d, be->pid, &query_id, &cmd_open,
                                 &quality, NULL, NULL, NULL);
-        struct pgwt_trace_event ev = {
-            .timestamp_ns = now,
-            .pid          = (uint32_t)be->pid,
-            .old_event    = we,     /* the interval that was open ends here */
-            .new_event    = we,
-            .flags        = (cmd_open ? PGWT_EVENT_FLAG_CMD_OPEN : 0) |
-                (quality == PGWT_QUERY_QUALITY_PG13_SYNTH
-                    ? PGWT_EVENT_FLAG_QUERY_SYNTH : 0),
-            .duration_ns  = now - st.last_ts,
-            .query_id     = query_id,
-            .cpu_ns       = cpu_ns,
+        struct pgwt_open_stretch_attr attr = {
+            .query_id = query_id, .cmd_open = cmd_open, .quality = quality,
         };
+        struct pgwt_trace_event ev;
+        if (pgwt_build_open_stretch((uint32_t)be->pid, &st, now,
+                                    d->cpu_accounting, &attr, &ev)
+            != PGWT_OPEN_STRETCH_BUILT)
+            continue;
+        uint32_t we = ev.old_event;
         pgwt_writer_push_event(d->event_writer, &ev);
         /* v6 (#315/#376): THE path where the io_worker divergence peaked. An
          * io_worker sits in one Activity:IoWorkerMain wait for the whole

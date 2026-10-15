@@ -40,6 +40,13 @@ tests/dump_markers
 tests/cross_validate
 !tests/*.*
 tests/*.o
+# ...and the macOS debug bundle a test binary gets alongside it. It is the one
+# build product whose NAME CARRIES A SUFFIX, so `!tests/*.*` above would hand
+# it straight back; agent/424-durability hit this and listed
+# tests/test_open_interval.dSYM/ by hand. Restated as a class for the same
+# reason the binaries are: the next test to be built with debug info must not
+# need a new line here.
+tests/*.dSYM/
 # Python bytecode, at ANY depth. It used to be anchored to tests/, which left
 # tests/results/**/__pycache__/*.pyc untracked-but-not-ignored and therefore
 # INSIDE scripts/tree-hash.sh's scope: check.sh's py_compile step generated it,

@@ -709,3 +709,44 @@ test_open_overlay_mutations.sh
 # that they do before asserting anything else -- a fixture where the two
 # orders coincide passes while the code is broken.
 test_replay_window
+# #424 daemon half: the live open-interval snapshot. Pins (a) that the
+# per-pid open-stretch arithmetic shared by the de-escalation flush, the
+# shutdown flush and the new {"cmd":"open_intervals"} command is byte-for-byte
+# the pre-refactor arithmetic -- a differential against a verbatim copy of the
+# deleted loop body, with a coverage assertion so the comparison cannot be
+# vacuous and two mutation probes proving it can go red; (b) the frozen wire
+# shape the live server half codes against, including an unmeasured cpu_ns
+# being ABSENT rather than 0 and a degraded status carrying NO pids array;
+# (c) the transport -- 1024 backends serialise to ~390 KB, so the superseded
+# 64 KB buffer is demonstrably insufficient, and the old drop-on-EAGAIN
+# sender truncates a reply the queued sender delivers whole.
+test_open_interval
+
+# test_trace_closure (#424 deliverable 1): can a reader tell that a capture
+# ended uncleanly? A footer could never answer that -- rotation, crash
+# recovery and a clean close all write one -- so the writer now records WHY a
+# file ended in spare header flag bits. Three groups: the pure bit->verdict
+# mapping (a legacy file reads UNKNOWN, never clean; contradictory bits
+# resolve to UNCLEAN); the real lifecycle on real files (clean close,
+# rotation, mid-capture, SIGKILL + recovery, SIGKILL twice, a clean label
+# surviving the recovery that archives it, a CLEAN label contradicted by the
+# committed watermark, and a close whose flush was made to FAIL -- which is
+# the only case that distinguishes "checked and durable" from "always set the
+# bit"); and the bypass suite -- missing file, empty file, truncated header,
+# wrong magic with every bit set, a directory, and a capture that never
+# opened a file at all. A gate that cannot see must refuse, never approve.
+test_trace_closure
+
+# test_open_ckpt (#424 deliverable 2): the open-interval checkpoint as ONE
+# contract -- identity, durable publication, recovery, suppression. Covers the
+# standard CRC-32 check value (a sidecar must validate for any reader), every
+# named refusal reason, the suppression predicate on inputs where it must say
+# yes AND no (with an exact recovered-ns total, so "suppress everything" and
+# "suppress nothing" both fail), publish-before-watermark, a crash carrying the
+# sidecar to its archive, a clean close and a rotation DROPPING it (both would
+# double count against real closing records), an uncertified close KEEPING it,
+# and the bypass suite: a sidecar from another file, a flipped bit, a chopped
+# record array, an insane count, a text file, no sidecar at all, an empty
+# checkpoint superseding a non-empty one, and retention taking the sidecar with
+# its archive.
+test_open_ckpt
