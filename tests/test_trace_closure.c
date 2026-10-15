@@ -257,6 +257,26 @@ static void test_clean_close(void)
           "the LZ4 codec bit must survive the flags rewrite");
     pgwt_writer_destroy(&w);
     rm_rf(dir);
+
+    /* The finalize path must ADD its terminal bit, not rebuild the field. No
+     * other creation-time bit exists today, so stand one in: a bit the writer
+     * believes it wrote at creation must still be there after the close, or
+     * the next flag anyone adds to this header is silently erased by every
+     * shutdown. */
+    dir = fresh_dir("clean_or");
+    struct pgwt_event_writer w2;
+    CHECK(pgwt_writer_init(&w2, dir, 16, 0, NULL) == 0, "init");
+    push_n(&w2, 20, 2000000000ULL);
+    w2.file_flags |= 0x8000;              /* a future creation-time bit */
+    pgwt_writer_close(&w2);
+    long f = raw_flags(cur_path(dir));
+    CHECK((f & 0x8000) != 0,
+          "finalize must OR its bit in, preserving the rest (flags 0x%04lx)",
+          f);
+    CHECK((f & PGWT_FLAG_CLOSED_CLEAN) != 0 && (f & PGWT_FLAG_LZ4) != 0,
+          "...and still record the clean close (flags 0x%04lx)", f);
+    pgwt_writer_destroy(&w2);
+    rm_rf(dir);
 }
 
 static void test_rotation_is_not_a_clean_close(void)

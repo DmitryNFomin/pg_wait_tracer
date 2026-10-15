@@ -135,6 +135,11 @@ struct pgwt_event_writer {
     bool          force_rotate;           /* block cap reached — rotate now */
     uint64_t      file_start_wall_ns;
     uint64_t      file_start_mono_ns;
+    /* #424: the header `flags` value as last written for THIS file. The
+     * finalize path ORs its terminal bit into this instead of rebuilding the
+     * field from scratch, so a bit a future writer sets at creation cannot be
+     * erased by a close. */
+    uint16_t      file_flags;
 
     /* Block index (written as footer) */
     struct pgwt_block_index_entry *block_index;

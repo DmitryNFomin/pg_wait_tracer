@@ -737,13 +737,16 @@ static void test_absent_checkpoint_is_not_evidence(void)
     v.count = 5;
     enum pgwt_open_ckpt_rc rc =
         pgwt_open_ckpt_load(pathcat(dir, "nope.open"), NULL, &v, &buf);
-    CHECK(rc != PGWT_OPEN_CKPT_OK && v.count == 0 && buf == NULL,
-          "a missing sidecar must refuse and clear its outputs (rc=%s)",
+    /* ABSENT, specifically: "nobody checkpointed" and "somebody did and it is
+     * damaged" are different facts, and collapsing them is how a log stops
+     * telling an operator which one happened. */
+    CHECK(rc == PGWT_OPEN_CKPT_ABSENT && v.count == 0 && buf == NULL,
+          "a missing sidecar must report ABSENT and clear its outputs (rc=%s)",
           pgwt_open_ckpt_rc_name(rc));
-    CHECK(pgwt_open_ckpt_load(NULL, NULL, &v, &buf) != PGWT_OPEN_CKPT_OK,
-          "a NULL path must refuse");
-    CHECK(pgwt_open_ckpt_load(dir, NULL, &v, &buf) != PGWT_OPEN_CKPT_OK,
-          "a directory must refuse");
+    CHECK(pgwt_open_ckpt_load(NULL, NULL, &v, &buf) == PGWT_OPEN_CKPT_ABSENT,
+          "a NULL path must refuse as absent");
+    CHECK(pgwt_open_ckpt_load(dir, NULL, &v, &buf) == PGWT_OPEN_CKPT_ABSENT,
+          "a directory is not a checkpoint");
 
     /* An empty file is not an empty checkpoint: one is evidence, the other is
      * the absence of it. */

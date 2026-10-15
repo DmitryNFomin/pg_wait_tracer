@@ -110,6 +110,13 @@ struct pgwt_open_ckpt_identity {
  * fine" branch — a checkpoint that cannot be validated is not used. */
 enum pgwt_open_ckpt_rc {
     PGWT_OPEN_CKPT_OK = 0,
+    /* There is no checkpoint here at all. Kept distinct from every "there is
+     * one but it is wrong" verdict below, because the two are different facts
+     * and an operator reading a log must not have to guess which happened:
+     * absent means nobody checkpointed, damaged means somebody did and we
+     * cannot trust it. */
+    PGWT_OPEN_CKPT_ABSENT,
+    PGWT_OPEN_CKPT_IO,             /* present, could not be read into memory */
     PGWT_OPEN_CKPT_TOO_SHORT,      /* fewer bytes than a header */
     PGWT_OPEN_CKPT_BAD_MAGIC,
     PGWT_OPEN_CKPT_BAD_VERSION,
@@ -123,6 +130,8 @@ static inline const char *pgwt_open_ckpt_rc_name(enum pgwt_open_ckpt_rc rc)
 {
     switch (rc) {
     case PGWT_OPEN_CKPT_OK:                return "ok";
+    case PGWT_OPEN_CKPT_ABSENT:            return "absent";
+    case PGWT_OPEN_CKPT_IO:                return "unreadable";
     case PGWT_OPEN_CKPT_TOO_SHORT:         return "too-short";
     case PGWT_OPEN_CKPT_BAD_MAGIC:         return "bad-magic";
     case PGWT_OPEN_CKPT_BAD_VERSION:       return "bad-version";

@@ -246,18 +246,18 @@ pgwt_open_ckpt_load(const char *path,
         out->count = 0;
     }
     if (!path)
-        return PGWT_OPEN_CKPT_TOO_SHORT;
+        return PGWT_OPEN_CKPT_ABSENT;
 
     FILE *fp = fopen(path, "rb");
     if (!fp)
-        return PGWT_OPEN_CKPT_TOO_SHORT;   /* no sidecar is not a valid one */
+        return PGWT_OPEN_CKPT_ABSENT;   /* no sidecar is not a bad sidecar */
 
     /* Bound the read by the format's own cap before allocating anything: a
      * sidecar claiming a huge size must not be able to spend our memory. */
     struct stat st;
     if (fstat(fileno(fp), &st) != 0 || !S_ISREG(st.st_mode)) {
         fclose(fp);
-        return PGWT_OPEN_CKPT_TOO_SHORT;
+        return PGWT_OPEN_CKPT_ABSENT;   /* a directory is not a checkpoint */
     }
     size_t max = sizeof(struct pgwt_open_ckpt_header) +
         (size_t)PGWT_OPEN_CKPT_MAX_RECORDS *
@@ -273,7 +273,7 @@ pgwt_open_ckpt_load(const char *path,
     void *buf = malloc(len);
     if (!buf) {
         fclose(fp);
-        return PGWT_OPEN_CKPT_TOO_SHORT;
+        return PGWT_OPEN_CKPT_IO;
     }
     size_t got = fread(buf, 1, len, fp);
     fclose(fp);
@@ -643,7 +643,11 @@ static void recover_current_trace(struct pgwt_event_writer *w)
                         strerror(errno));
                 unlink(live);
             }
-        } else if (access(live, F_OK) == 0) {
+        } else if (crc != PGWT_OPEN_CKPT_ABSENT) {
+            /* Something IS there and it cannot be trusted. Say which of the
+             * named reasons applied — "absent" and "damaged" are different
+             * facts and an operator must not have to guess — and remove it so
+             * the next restart does not retry the same unusable file. */
             fprintf(stderr, "WARN: refused the open-interval checkpoint "
                     "next to %s (%s) — dropping it\n", dest,
                     pgwt_open_ckpt_rc_name(crc));
@@ -714,13 +718,14 @@ static int open_trace_file(struct pgwt_event_writer *w, uint64_t first_mono_ns)
     w->current_hour = tm.tm_yday * 24 + tm.tm_hour;
 
     /* Write file header */
+    w->file_flags = (uint16_t)(PGWT_FLAG_LZ4 | PGWT_FLAG_CLOSURE_TRACKED);
     struct pgwt_trace_file_header hdr = {
         .magic = PGWT_TRACE_MAGIC,
         .version = PGWT_TRACE_VERSION,
         /* CLOSURE_TRACKED from byte one: it is the capability bit that makes
          * the absence of a terminal bit MEAN something later (#424). A file
          * without it is a legacy file and reads as "unknown", never clean. */
-        .flags = PGWT_FLAG_LZ4 | PGWT_FLAG_CLOSURE_TRACKED,
+        .flags = w->file_flags,
         .pg_version = (uint32_t)w->pg_version,
         .start_time_ns = w->file_start_wall_ns,
         .clock_offset_ns = w->file_start_mono_ns,
@@ -950,9 +955,11 @@ static int finalize_current_file(struct pgwt_event_writer *w,
         return -1;
     }
 
-    uint16_t flags = (uint16_t)(PGWT_FLAG_LZ4 | PGWT_FLAG_CLOSURE_TRACKED |
-                                terminal_flag);
-    if (write_header_flags(w->fp, flags) != 0) {
+    /* OR into what this file's header actually holds, so the terminal bit is
+     * added rather than the field rebuilt — a creation-time bit added later
+     * must not be erased here. */
+    w->file_flags |= terminal_flag;
+    if (write_header_flags(w->fp, w->file_flags) != 0) {
         fprintf(stderr, "WARN: could not record the closure status of %s "
                 "(%s) — it will read as an unfinished capture\n",
                 w->current_path, strerror(errno));
