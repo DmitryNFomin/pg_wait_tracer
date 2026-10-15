@@ -680,6 +680,9 @@ static void test_anchor_absent(void)
 
 /* ── 3. Transport: queued writes with backpressure ─────────────────────── */
 
+/* Heap-allocated, one at a time: six of these as locals would be ~7 MB of
+ * stack, which is a flaky test on a default 8 MB thread rather than a real
+ * finding. */
 struct fake_sock {
     char    got[1200000];
     size_t  n;
@@ -710,6 +713,21 @@ static ssize_t fake_write(void *ctx, const char *p, size_t n)
     memcpy(f->got + f->n, p, take);
     f->n += take;
     return (ssize_t)take;
+}
+
+static struct fake_sock *sock_new(size_t chunk, int eagain_every, int fail_at,
+                                  int zero_at)
+{
+    struct fake_sock *f = (struct fake_sock *)calloc(1, sizeof(*f));
+    if (!f) {
+        printf("  FATAL: out of memory\n");
+        exit(2);
+    }
+    f->chunk = chunk;
+    f->eagain_every = eagain_every;
+    f->fail_at = fail_at;
+    f->zero_at = zero_at;
+    return f;
 }
 
 /* The pre-#424 sender, verbatim in behaviour: loop on send, give up (and the
@@ -746,8 +764,8 @@ static void test_transport_queue(void)
 
     /* (a) The old sender on a socket that takes 16 KB then says EAGAIN:
      *     TRUNCATED. This is the defect, reproduced. */
-    struct fake_sock legacy = { .chunk = 16384, .eagain_every = 2 };
-    size_t sent = legacy_send(&legacy, str, total);
+    struct fake_sock *legacy = sock_new(16384, 2, 0, 0);
+    size_t sent = legacy_send(legacy, str, total);
     CHECK(sent < total, "the legacy sender must truncate here, else this test "
                         "proves nothing (sent %zu of %zu)", sent, total);
     printf("  legacy sender: %zu of %zu bytes before EAGAIN (truncated)\n",
@@ -757,51 +775,51 @@ static void test_transport_queue(void)
      *     not finished so the caller arms EPOLLOUT. */
     struct pgwt_ctrl_outq q;
     pgwt_outq_init(&q);
-    struct fake_sock sock = { .chunk = 16384, .eagain_every = 2 };
+    struct fake_sock *sock = sock_new(16384, 2, 0, 0);
     CHECK(pgwt_outq_append(&q, str, total) == 0, "append failed");
-    int rc = pgwt_outq_flush(&q, fake_write, &sock);
+    int rc = pgwt_outq_flush(&q, fake_write, sock);
     CHECK(rc == 0, "a partially-written reply must report 'more to do' (0), "
                    "got %d", rc);
     CHECK(pgwt_outq_pending(&q) > 0, "bytes must remain queued");
     int rounds = 0;
     while (rc == 0 && rounds++ < 10000)
-        rc = pgwt_outq_flush(&q, fake_write, &sock);
+        rc = pgwt_outq_flush(&q, fake_write, sock);
     CHECK(rc == 1, "the queue must eventually drain, got %d after %d rounds",
           rc, rounds);
-    CHECK(sock.n == total, "every byte must arrive: %zu of %zu", sock.n,
+    CHECK(sock->n == total, "every byte must arrive: %zu of %zu", sock->n,
           total);
-    CHECK(memcmp(sock.got, str, total) == 0,
+    CHECK(memcmp(sock->got, str, total) == 0,
           "the delivered bytes must be identical to the reply");
-    printf("  queued sender: %zu bytes delivered in %d flushes\n", sock.n,
+    printf("  queued sender: %zu bytes delivered in %d flushes\n", sock->n,
            rounds);
 
     /* (c) One byte at a time — the most fragmented reply there is. */
     pgwt_outq_reset(&q);
     pgwt_outq_init(&q);
-    struct fake_sock drip = { .chunk = 1 };
+    struct fake_sock *drip = sock_new(1, 0, 0, 0);
     CHECK(pgwt_outq_append(&q, str, total) == 0, "append failed");
     rc = 0; rounds = 0;
     while (rc == 0 && rounds++ < 2000000)
-        rc = pgwt_outq_flush(&q, fake_write, &drip);
-    CHECK(rc == 1 && drip.n == total && memcmp(drip.got, str, total) == 0,
+        rc = pgwt_outq_flush(&q, fake_write, drip);
+    CHECK(rc == 1 && drip->n == total && memcmp(drip->got, str, total) == 0,
           "a 1-byte-per-write socket must still deliver the whole reply");
 
     /* (d) A zero-byte write is "would block", not an infinite loop. */
     pgwt_outq_reset(&q);
     pgwt_outq_init(&q);
-    struct fake_sock stall = { .chunk = 4096, .zero_at = 1 };
+    struct fake_sock *stall = sock_new(4096, 0, 0, 1);
     CHECK(pgwt_outq_append(&q, str, total) == 0, "append failed");
-    rc = pgwt_outq_flush(&q, fake_write, &stall);
-    CHECK(rc == 0 && stall.calls == 1,
+    rc = pgwt_outq_flush(&q, fake_write, stall);
+    CHECK(rc == 0 && stall->calls == 1,
           "a zero-byte write must return control immediately (rc=%d calls=%d)",
-          rc, stall.calls);
+          rc, stall->calls);
 
     /* (e) A hard error is fatal — the client is dropped, not left half-fed. */
     pgwt_outq_reset(&q);
     pgwt_outq_init(&q);
-    struct fake_sock broken = { .chunk = 4096, .fail_at = 3 };
+    struct fake_sock *broken = sock_new(4096, 0, 3, 0);
     CHECK(pgwt_outq_append(&q, str, total) == 0, "append failed");
-    rc = pgwt_outq_flush(&q, fake_write, &broken);
+    rc = pgwt_outq_flush(&q, fake_write, broken);
     CHECK(rc == -1, "a hard write error must be fatal, got %d", rc);
 
     /* (f) A client that never reads: the backlog is CAPPED and the append
@@ -809,12 +827,12 @@ static void test_transport_queue(void)
      *     shortened reply. */
     pgwt_outq_reset(&q);
     pgwt_outq_init(&q);
-    struct fake_sock deaf = { .eagain_every = 1 };
+    struct fake_sock *deaf = sock_new(0, 1, 0, 0);
     int appended = 0, refused = 0;
     for (int i = 0; i < 64; i++) {
         if (pgwt_outq_append(&q, str, total) == 0) {
             appended++;
-            pgwt_outq_flush(&q, fake_write, &deaf);
+            pgwt_outq_flush(&q, fake_write, deaf);
         } else {
             refused++;
             break;
@@ -824,7 +842,7 @@ static void test_transport_queue(void)
     CHECK(q.overflow, "an over-cap queue must be marked unrecoverable");
     CHECK(pgwt_outq_pending(&q) <= PGWT_CTRL_OUTQ_MAX,
           "the backlog must stay under the cap");
-    CHECK(deaf.n == 0, "nothing can be delivered to a client that never reads");
+    CHECK(deaf->n == 0, "nothing can be delivered to a client that never reads");
     CHECK(pgwt_outq_append(&q, "x", 1) == -1,
           "an overflowed queue must keep refusing: a later short reply would "
           "be a partial answer");
@@ -832,6 +850,8 @@ static void test_transport_queue(void)
            appended, total);
 
     pgwt_outq_reset(&q);
+    free(legacy); free(sock); free(drip); free(stall); free(broken);
+    free(deaf);
     free(str);
     cJSON_Delete(root);
 }
