@@ -82,12 +82,13 @@ executions query needs, are gated on --mode full only"*).
 sudo ./pg_wait_tracer --daemon -T /var/lib/pgwt/traces --mode full -v
 ```
 
-> **START ON AN EMPTY TRACE DIRECTORY.** Summary files are now **v6**
+> **START ON AN EMPTY TRACE DIRECTORY.** Summary files are now **v8**
 > (`PGWT_SUMMARY_VERSION`, `src/summary_writer.h`) — most recently bumped
-> 2026-10-13, when the writer was fixed to exclude io_worker time from
-> idle/DB-Time accounting, matching the raw path (issues #315/#376). Each
-> bump (v3's idle-event exclusion, v4's exact idle scalars, v5's missing
-> CPU* row, v6's io_worker exclusion) changed the accounting rule the
+> 2026-10-15, when the writer began spreading a long interval across the
+> seconds it covers instead of charging its closing second (issue #379).
+> Each bump (v3's idle-event exclusion, v4's exact idle scalars, v5's
+> missing CPU* row, v6's io_worker exclusion, v7's measured-CPU split,
+> v8's long-interval spread) changed the accounting rule the
 > per-second records precompute at WRITE time, so a directory holding
 > seconds from two different versions would blend two accounting rules
 > inside one window — `pgwt-server` therefore **refuses** the summary fast
@@ -98,8 +99,8 @@ sudo ./pg_wait_tracer --daemon -T /var/lib/pgwt/traces --mode full -v
 > The answer is still correct, but the 900 s Overview window is exactly the
 > request that fast path exists for: taking the raw path for it costs the
 > paint latency this project spent a week reducing, live, on stage. If
-> `/var/lib/pgwt/traces` holds anything written before today's v6 upgrade
-> (or any earlier version), move it aside (`mv traces traces.pre-v6`)
+> `/var/lib/pgwt/traces` holds anything written before today's v8 upgrade
+> (or any earlier version), move it aside (`mv traces traces.pre-v8`)
 > before starting the daemon. A fresh `mktemp -d` directory, as
 > `tests/demo_rehearsal.sh` uses, is never affected.
 

@@ -478,6 +478,29 @@ accounting rule and not about the byte layout:
   `summary_io_worker_ns_excluded_total` on the control socket) so the residual
   stays observable in production rather than assumed.
 
+- **v7** (#408) stores the MEASURED-CPU SPLIT in each per-second record, and
+  resolves the command gate before the push rather than after it. Unlike v5
+  and v6 this one DID change the layout — the record grew a trailer, so a
+  reader expecting the pre-v7 shape mis-parses a v7 file rather than merely
+  disagreeing with it. See the `v7` notes in `src/summary_writer.h`.
+
+- **v8** (#379) spreads a long interval across the seconds it covers instead
+  of charging the whole duration to the second in which it closes. A v7
+  second holds the whole duration and a v8 second holds one second of it, so
+  a window mixing the two double-counts the overlap. Layout is byte-identical
+  to v7; the bump exists for the rule. The writer never infers an open
+  interval from the record stream — it credits only what a producer
+  explicitly noted, and only while that note is fresh
+  (`PGWT_SUMMARY_OPEN_STALE_NS`), so a producer that notes nothing degrades
+  exactly to v7. Three residuals (a long on-CPU gap, up-to-one-tick
+  attribution at an interval boundary, and a second that completed before the
+  pid had a note) are listed and COUNTED in `src/summary_writer.h`.
+
+This list is kept in step with `PGWT_SUMMARY_VERSION` in
+`src/summary_writer.h`, which is **8** as of 2026-10-15. It stopped at v6 for
+two bumps; a version list that trails the constant is worse than no list,
+because it reads as "nothing has changed since".
+
 Startup recovery still archives an intact older file instead of calling it
 corrupt.
 
