@@ -16,6 +16,8 @@
 #include "query_ctx_index.h"
 #include "pid_index.h"
 #include "alloc_tune.h"
+#include "open_overlay.h"
+#include "time_window.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -98,9 +100,25 @@ static cJSON *cjson_create_uint64(uint64_t val)
     return cJSON_CreateRaw(buf);
 }
 
+/* #424: the open-interval overlay belonging to the raw TIME window the
+ * current request is serving, or NULL when it is not serving one.
+ *
+ * It lives HERE, next to emit_json(), and not in each handler, because the
+ * label is the thing a handler must not be able to forget: a degraded
+ * overlay that is not rendered is a short answer presented as a complete
+ * one. server_load_window_fi() sets it, server_window_free() clears it, and
+ * the dispatcher clears it again before every request so a handler that
+ * leaks one cannot label the NEXT response with it. Every response emitted
+ * while it is set carries `open_intervals` — including the error responses
+ * reject_overload() emits, where the overlay is a refusal and saying so is
+ * exactly right. */
+static const struct pgwt_overlay *g_response_overlay = NULL;
+
 /* Print cJSON to stdout as a single line and clean up */
 static void emit_json(cJSON *root)
 {
+    if (g_response_overlay)
+        pgwt_overlay_add_json(g_response_overlay, root);
     char *str = cJSON_PrintUnformatted(root);
     if (str) {
         puts(str);
@@ -3343,6 +3361,186 @@ server_load_events_fi(struct pgwt_server *srv,
                                       out_count, info);
 }
 
+/* ── #424: THE RAW TIME WINDOW ────────────────────────────────────────────
+ *
+ * The six handlers that need LIVE time (AAS, time model, top events, raw top
+ * sessions, raw top queries, concurrency occupancy) must not reduce over a
+ * bare record array: a window whose right edge is at/near now is short by
+ * every wait still in progress. They take a `struct pgwt_window` instead,
+ * and this is the ONLY function in the server that builds one — which is
+ * what makes "did this handler get the overlay?" a question with one answer
+ * instead of six.
+ *
+ * WHY HERE AND NOT AT THE HANDLER. The tier comes from linfo.has_samples /
+ * has_transitions, which only exists once the load has finished, and the
+ * precedence rule (drop a pid's synthesized span when an admitted record for
+ * that pid closes after the open start) needs the ADMITTED array — after the
+ * merge, after tagging. Both are facts of the loader tail, not of the
+ * handler.
+ *
+ * wall_of = NULL AND offset_ns = 0, deliberately: merge_append_event has
+ * already applied each segment's canonical offset by the time the array is
+ * returned, so the records are already wall-ns. Applying a canonical offset
+ * again here would double-convert every timestamp and the precedence rule
+ * would compare wall spans against twice-shifted records.
+ *
+ * NEVER on a failed or overloaded load, and never on a marker scan. A
+ * partial array cannot support the precedence rule: a pid whose closing
+ * record fell outside the truncated array would keep a span that is already
+ * closed, i.e. double counting.
+ */
+/* Any filter at all. The overlay's filter contract is all-or-nothing here:
+ * there is no accept() callback yet, so an active filter means the overlay
+ * REFUSES rather than contributing unfiltered in-flight time. */
+static int filter_is_active(const struct pgwt_filter *f)
+{
+    return f->class_name[0] != '\0' || f->has_event_filter ||
+           f->pid != 0 || f->query_id != 0;
+}
+
+struct pgwt_raw_window {
+    struct pgwt_trace_event *events;   /* owned — server_window_free() frees */
+    int    count;
+    struct pgwt_overlay overlay;       /* always initialised, never NULL */
+    struct pgwt_window  w;             /* what the reducers take */
+};
+
+static void server_window_free(struct pgwt_raw_window *rw)
+{
+    if (!rw)
+        return;
+    if (g_response_overlay == &rw->overlay)
+        g_response_overlay = NULL;
+    free(rw->events);
+    rw->events = NULL;
+    rw->count = 0;
+    pgwt_overlay_free(&rw->overlay);
+    memset(&rw->w, 0, sizeof(rw->w));
+}
+
+/* THE TIER, stated rather than inferred.
+ *
+ * An EMPTY window establishes nothing: has_transitions and has_samples are
+ * both 0 for "the daemon is running in full mode and nothing waited" and for
+ * "there is no coverage here at all". Inferring EXACT from emptiness would
+ * let the overlay synthesize in-flight time over a window the server has no
+ * exact coverage for; inferring SAMPLED would silently suppress it over a
+ * genuinely idle exact window. So emptiness and MIXED both REFUSE, with the
+ * reason in the response.
+ *
+ * Returns 1 and writes *tier when the tier is established; 0 and writes the
+ * reason otherwise. */
+static int window_overlay_tier(const struct pgwt_load_info *info,
+                               enum pgwt_overlay_tier *tier,
+                               char *reason, size_t reason_sz)
+{
+    if (info->has_transitions && info->has_samples) {
+        snprintf(reason, reason_sz,
+                 "mixed fidelity: sampled coverage already observes waits in "
+                 "progress, so a synthesized span would double count");
+        return 0;
+    }
+    if (info->has_samples) {
+        snprintf(reason, reason_sz,
+                 "sampled tier has no watchpoint intervals to report");
+        return 0;
+    }
+    if (!info->has_transitions) {
+        snprintf(reason, reason_sz,
+                 "window fidelity not established (no transition and no "
+                 "sampled coverage contributed) — the tier is unknown, not "
+                 "exact");
+        return 0;
+    }
+    *tier = PGWT_OVERLAY_TIER_EXACT;
+    return 1;
+}
+
+/* Load the window AND its overlay. `route` is the route the HANDLER has
+ * chosen for this response: a summary-route load (Sessions' top_wait
+ * backfill, Queries' lifecycle load under the summary branch) passes
+ * PGWT_OVERLAY_ROUTE_SUMMARY and the overlay refuses before any I/O —
+ * summary v8 already credits open waits per sealed second, so synthesizing
+ * there would double count.
+ *
+ * Returns the record array (also in rw->events) so the caller can keep using
+ * reject_overload() unchanged; the caller must call server_window_free(). */
+static void server_load_window_fi(struct pgwt_server *srv,
+                                  uint64_t from_wall_ns, uint64_t to_wall_ns,
+                                  uint32_t pid,
+                                  enum pgwt_overlay_route route,
+                                  int filters_active,
+                                  struct pgwt_raw_window *rw,
+                                  struct pgwt_load_info *info)
+{
+    memset(rw, 0, sizeof(*rw));
+    pgwt_overlay_init(&rw->overlay);        /* fail-closed from this line on */
+
+    rw->events = server_load_events_fi_mode(srv, from_wall_ns, to_wall_ns,
+                                            pid, 0, &rw->count, info);
+
+    /* The window is bound in EVERY case, including the failures below, so a
+     * caller that ignores the load_info still gets a window the reducers
+     * refuse rather than a NULL one they would crash on. */
+    if (info->overloaded || info->allocation_failed) {
+        pgwt_overlay_unavailable(&rw->overlay,
+                                 "the record load failed or overflowed, so "
+                                 "the precedence rule cannot be applied");
+    } else {
+        uint64_t from = from_wall_ns ? from_wall_ns : srv->earliest_wall_ns;
+        uint64_t to   = to_wall_ns   ? to_wall_ns   : srv->latest_wall_ns;
+
+        char reason[192];
+        enum pgwt_overlay_tier tier = PGWT_OVERLAY_TIER_LIGHTWEIGHT;
+        if (!window_overlay_tier(info, &tier, reason, sizeof(reason))) {
+            pgwt_overlay_refuse(&rw->overlay, reason);
+        } else {
+            struct pgwt_overlay_request r = {
+                .from_wall_ns = from,
+                .to_wall_ns   = to,
+                .route        = route,
+                .tier         = tier,
+                .expect_generation = 0,
+                /* A FILTERED request must not gain UNFILTERED in-flight
+                 * time: that inflates exactly the pane a user narrowed
+                 * down. No accept() callback is supplied, and
+                 * pgwt_overlay_build() refuses a filtered request without
+                 * one — so a filtered pane degrades visibly (closed totals,
+                 * labelled as excluding in-flight time) instead of quietly
+                 * adding time the filter excludes. */
+                .filters_active = filters_active,
+                .accept       = NULL,
+                .accept_user  = NULL,
+            };
+            struct pgwt_overlay_records rec = {
+                .events    = rw->events,
+                .n         = (size_t)(rw->count > 0 ? rw->count : 0),
+                .offset_ns = 0,      /* already wall-ns: see the block above */
+                .wall_of   = NULL,
+                .user      = NULL,
+            };
+            (void)pgwt_overlay_attach(&rw->overlay, srv->trace_dir,
+                                      PGWT_OVERLAY_TIMEOUT_MS, &r, &rec);
+        }
+    }
+
+    if (pgwt_window_bind(&rw->w, rw->events, rw->count, &rw->overlay) != 0) {
+        /* Unreachable with a non-NULL overlay and a non-negative count;
+         * leave the window invalid so every reducer reports absence. */
+        memset(&rw->w, 0, sizeof(rw->w));
+    }
+
+    /* LABEL THE RAW ROUTE ONLY. A summary-route response is not short of
+     * in-flight time — summary v8 credits open waits per sealed second — so
+     * there is nothing to declare, and adding a key would break the
+     * "a >= 120 s unfiltered EXACT window is bit-identical to today" rule
+     * that keeps the two mechanisms from being compared across a format
+     * change. The raw route is the one that can be short, and every raw
+     * response carries the status whether or not the handler remembers. */
+    if (route == PGWT_OVERLAY_ROUTE_RAW)
+        g_response_overlay = &rw->overlay;
+}
+
 /* Lifecycle context is sparse but can span a long capture. Retain only
  * structural markers so row extraction can find a pre-window EXEC_START
  * without making ordinary waits consume the raw-load event budget. */
@@ -3773,6 +3971,24 @@ static void emit_unavailable(uint64_t req_id, enum pgwt_fidelity fid)
     emit_json(root);
 }
 
+/* #424: a reducer that was handed an invalid window, or could not allocate,
+ * returns `failed` — an ABSENT answer, never an empty one that reads as a
+ * measured zero. One emitter so every such refusal has the same shape as the
+ * `compute_failed` the sessions / queries / concurrency handlers already
+ * emit. */
+static void emit_compute_failed(uint64_t req_id, const char *what,
+                                const struct pgwt_load_info *info)
+{
+    cJSON *err = cJSON_CreateObject();
+    cJSON_AddNumberToObject(err, "id", (double)req_id);
+    cJSON_AddStringToObject(err, "error", what);
+    cJSON_AddStringToObject(err, "code", "compute_failed");
+    cJSON_AddStringToObject(err, "hint", "narrow the time range and retry");
+    if (info)
+        add_fidelity(err, info);
+    emit_json(err);
+}
+
 /* A raw-load bound or allocation failure leaves a partial/unavailable array.
  * Rendering it would silently under-report. Emit distinct structured errors
  * so OOM is never mislabeled as a request that exceeded max_events. */
@@ -3869,6 +4085,11 @@ static void handle_aas(struct pgwt_server *srv, struct pgwt_request *req)
     struct pgwt_load_info linfo = {0};
     struct pgwt_wfid wfid = {0};
     int from_summaries = 0;
+    /* Hoisted out of the raw branch: the window must outlive emit_json(),
+     * which renders the overlay's status on every response. Zeroed here so
+     * server_window_free() is a no-op on the summary path. */
+    struct pgwt_raw_window rw;
+    memset(&rw, 0, sizeof(rw));
 
     /* Event-detail mode always uses raw events (no summary path yet) */
     if (!detail_events && should_use_summaries(srv, req, &wfid)) {
@@ -3876,14 +4097,23 @@ static void handle_aas(struct pgwt_server *srv, struct pgwt_request *req)
                                          &req->filter, num_buckets, &aas);
         from_summaries = 1;
     } else {
-        int count;
-        struct pgwt_trace_event *events =
-            server_load_events_fi(srv, req->from_ns, req->to_ns,
-                                  req->filter.pid, &count, &linfo);
-        if (reject_overload(srv, req, events, &linfo)) return;
-        pgwt_compute_aas(events, count, &req->filter, from, to, num_buckets,
+        server_load_window_fi(srv, req->from_ns, req->to_ns,
+                              req->filter.pid, PGWT_OVERLAY_ROUTE_RAW,
+                              filter_is_active(&req->filter), &rw, &linfo);
+        if (reject_overload(srv, req, rw.events, &linfo)) {
+            rw.events = NULL;      /* reject_overload freed it */
+            server_window_free(&rw);
+            return;
+        }
+        pgwt_compute_aas(&rw.w, &req->filter, from, to, num_buckets,
                          detail_events, AAS_MAX_EVENT_SERIES, &aas);
-        free(events);
+        if (aas.failed) {
+            free(aas.buckets);
+            free(aas.event_aas);
+            emit_compute_failed(req->id, "aas compute failed", &linfo);
+            server_window_free(&rw);
+            return;
+        }
     }
 
     cJSON *root = cJSON_CreateObject();
@@ -3947,6 +4177,7 @@ static void handle_aas(struct pgwt_server *srv, struct pgwt_request *req)
     cjson_add_uint64(root, "bucket_ns", aas.bucket_ns);
     emit_json(root);
 
+    server_window_free(&rw);
     free(aas.buckets);
 }
 
@@ -3960,20 +4191,33 @@ static void handle_time_model(struct pgwt_server *srv, struct pgwt_request *req)
     struct pgwt_load_info linfo = {0};
     struct pgwt_wfid wfid = {0};
     int from_summaries = 0;
+    /* Hoisted out of the raw branch: the window must outlive emit_json(),
+     * which renders the overlay's status on every response. Zeroed here so
+     * server_window_free() is a no-op on the summary path. */
+    struct pgwt_raw_window rw;
+    memset(&rw, 0, sizeof(rw));
 
     if (should_use_summaries(srv, req, &wfid)) {
         pgwt_compute_time_model_from_summaries(srv->trace_dir, from, to,
                                                 &req->filter, wall_ms, &tm);
         from_summaries = 1;
     } else {
-        int count;
-        struct pgwt_trace_event *events =
-            server_load_events_fi(srv, req->from_ns, req->to_ns,
-                                  req->filter.pid, &count, &linfo);
-        if (reject_overload(srv, req, events, &linfo)) return;
-        pgwt_compute_time_model(events, count, &req->filter,
+        server_load_window_fi(srv, req->from_ns, req->to_ns,
+                              req->filter.pid, PGWT_OVERLAY_ROUTE_RAW,
+                              filter_is_active(&req->filter), &rw, &linfo);
+        if (reject_overload(srv, req, rw.events, &linfo)) {
+            rw.events = NULL;
+            server_window_free(&rw);
+            return;
+        }
+        pgwt_compute_time_model(&rw.w, &req->filter,
                                 req->from_ns, req->to_ns, wall_ms, &tm);
-        free(events);
+        if (tm.failed) {
+            free(tm.rows);
+            emit_compute_failed(req->id, "time model compute failed", &linfo);
+            server_window_free(&rw);
+            return;
+        }
     }
 
     cJSON *root = cJSON_CreateObject();
@@ -4035,6 +4279,7 @@ static void handle_time_model(struct pgwt_server *srv, struct pgwt_request *req)
     }
     emit_json(root);
 
+    server_window_free(&rw);
     free(tm.rows);
 }
 
@@ -4048,20 +4293,33 @@ static void handle_top_events(struct pgwt_server *srv, struct pgwt_request *req)
     struct pgwt_load_info linfo = {0};
     struct pgwt_wfid wfid = {0};
     int from_summaries = 0;
+    /* Hoisted out of the raw branch: the window must outlive emit_json(),
+     * which renders the overlay's status on every response. Zeroed here so
+     * server_window_free() is a no-op on the summary path. */
+    struct pgwt_raw_window rw;
+    memset(&rw, 0, sizeof(rw));
 
     if (should_use_summaries(srv, req, &wfid)) {
         pgwt_compute_top_events_from_summaries(srv->trace_dir, from, to,
                                                 &req->filter, wall_ms, &res);
         from_summaries = 1;
     } else {
-        int count;
-        struct pgwt_trace_event *events =
-            server_load_events_fi(srv, req->from_ns, req->to_ns,
-                                  req->filter.pid, &count, &linfo);
-        if (reject_overload(srv, req, events, &linfo)) return;
-        pgwt_compute_top_events(events, count, &req->filter,
+        server_load_window_fi(srv, req->from_ns, req->to_ns,
+                              req->filter.pid, PGWT_OVERLAY_ROUTE_RAW,
+                              filter_is_active(&req->filter), &rw, &linfo);
+        if (reject_overload(srv, req, rw.events, &linfo)) {
+            rw.events = NULL;
+            server_window_free(&rw);
+            return;
+        }
+        pgwt_compute_top_events(&rw.w, &req->filter,
                                 req->from_ns, req->to_ns, wall_ms, &res);
-        free(events);
+        if (res.failed) {
+            free(res.rows);
+            emit_compute_failed(req->id, "top events compute failed", &linfo);
+            server_window_free(&rw);
+            return;
+        }
     }
 
     cJSON *root = cJSON_CreateObject();
@@ -4127,6 +4385,7 @@ static void handle_top_events(struct pgwt_server *srv, struct pgwt_request *req)
     cJSON_AddNumberToObject(root, "db_time_ms", res.db_time_ms);
     emit_json(root);
 
+    server_window_free(&rw);
     free(res.rows);
 }
 
@@ -4142,6 +4401,12 @@ static void handle_top_sessions(struct pgwt_server *srv, struct pgwt_request *re
     int from_summaries = 0;
     int top_wait_unavailable = 0;
     const char *top_wait_unavailable_reason = NULL;
+    /* Hoisted: the window must outlive emit_json(), which renders the
+     * overlay status. Zeroed so server_window_free() is a no-op on the
+     * branch that never loads. */
+    struct pgwt_raw_window rw, rrw;
+    memset(&rw, 0, sizeof(rw));
+    memset(&rrw, 0, sizeof(rrw));
 
     /* The per-second records carry NO per-session breakdown by query, wait
      * class or wait event -- struct pgwt_summary_session is {pid, db_time_ns,
@@ -4189,27 +4454,35 @@ static void handle_top_sessions(struct pgwt_server *srv, struct pgwt_request *re
         from_summaries = 1;
 
         if (!res.failed && res.num_rows > 0) {
-            int rcount = 0;
             struct pgwt_load_info rinfo = {0};
-            struct pgwt_trace_event *revents =
-                server_load_events_fi(srv, req->from_ns, req->to_ns,
-                                      req->filter.pid, &rcount, &rinfo);
+            /* #424 DECISION, stated: this backfill stays on the SUMMARY
+             * route, so the overlay refuses before any socket I/O. Summary
+             * v8 already credits open waits per sealed second; synthesizing
+             * spans here would double count, and the field being backfilled
+             * (top_wait) is an argmax over CLOSED per-event totals by
+             * definition. The refusal is rendered on the response like any
+             * other, so the exclusion is labelled rather than assumed. */
+            server_load_window_fi(srv, req->from_ns, req->to_ns,
+                                  req->filter.pid,
+                                  PGWT_OVERLAY_ROUTE_SUMMARY,
+                                  filter_is_active(&req->filter),
+                                  &rrw, &rinfo);
             if (rinfo.overloaded || rinfo.allocation_failed) {
                 /* Absence with a reason, never the summary path's
                  * single-longest-wait value passed off as the raw answer
                  * (that IS the #319 defect) and never a silent blank. The
                  * rest of the row (db_time_ms etc.) is still the correct,
                  * cheap summary answer -- only top_wait degrades. */
-                free(revents);
+                server_window_free(&rrw);
                 top_wait_unavailable = 1;
                 top_wait_unavailable_reason = rinfo.allocation_failed
                     ? "allocation_failed" : "window_too_large";
             } else {
                 struct pgwt_sessions_result raw_res;
-                pgwt_compute_top_sessions(revents, rcount, &req->filter,
+                pgwt_compute_top_sessions(&rrw.w, &req->filter,
                                           req->from_ns, req->to_ns, wall_ms,
                                           &raw_res);
-                free(revents);
+                server_window_free(&rrw);
                 if (raw_res.failed) {
                     top_wait_unavailable = 1;
                     top_wait_unavailable_reason = "compute_failed";
@@ -4230,14 +4503,16 @@ static void handle_top_sessions(struct pgwt_server *srv, struct pgwt_request *re
             }
         }
     } else {
-        int count;
-        struct pgwt_trace_event *events =
-            server_load_events_fi(srv, req->from_ns, req->to_ns,
-                                  req->filter.pid, &count, &linfo);
-        if (reject_overload(srv, req, events, &linfo)) return;
-        pgwt_compute_top_sessions(events, count, &req->filter,
+        server_load_window_fi(srv, req->from_ns, req->to_ns,
+                              req->filter.pid, PGWT_OVERLAY_ROUTE_RAW,
+                              filter_is_active(&req->filter), &rw, &linfo);
+        if (reject_overload(srv, req, rw.events, &linfo)) {
+            rw.events = NULL;
+            server_window_free(&rw);
+            return;
+        }
+        pgwt_compute_top_sessions(&rw.w, &req->filter,
                                   req->from_ns, req->to_ns, wall_ms, &res);
-        free(events);
     }
 
     /* #327: the per-pid table is unbounded now (it used to be 1024 slots
@@ -4255,6 +4530,8 @@ static void handle_top_sessions(struct pgwt_server *srv, struct pgwt_request *re
         if (from_summaries) add_fidelity_window(err, &wfid);
         else                add_fidelity(err, &linfo);
         emit_json(err);
+        server_window_free(&rw);
+        server_window_free(&rrw);
         return;
     }
 
@@ -4297,6 +4574,8 @@ static void handle_top_sessions(struct pgwt_server *srv, struct pgwt_request *re
 
     emit_json(root);
 
+    server_window_free(&rw);
+    server_window_free(&rrw);
     free(res.rows);
 }
 
@@ -4329,10 +4608,29 @@ static void handle_top_queries(struct pgwt_server *srv, struct pgwt_request *req
      * memory bounded by cache_max_events() rather than by this call.
      * No pid pushdown: the lifecycle stats below read exec/plan markers
      * across ALL pids (markers never pass the uniform filter). */
-    all_events = server_load_events_fi(srv, req->from_ns, req->to_ns, 0,
-                                       &ecount, &linfo);
-    if (reject_overload(srv, req, all_events, &linfo)) return;
-    if (!has_event_filter && should_use_summaries(srv, req, &wfid)) {
+    /* #424 ROUTE SELECTION, decided BEFORE the load rather than after it.
+     * This one load feeds two different answers — the raw class breakdown
+     * and (above 120 s) the summary path's top_wait backfill — and the
+     * overlay's route contract differs between them. The route is therefore
+     * chosen from the same predicate the branch below uses, so the overlay
+     * can refuse the summary route before it opens a socket instead of
+     * being built for a response that must not carry it. */
+    int use_summaries = (!has_event_filter &&
+                         should_use_summaries(srv, req, &wfid));
+    struct pgwt_raw_window rw;
+    server_load_window_fi(srv, req->from_ns, req->to_ns, 0,
+                          use_summaries ? PGWT_OVERLAY_ROUTE_SUMMARY
+                                        : PGWT_OVERLAY_ROUTE_RAW,
+                          filter_is_active(&req->filter), &rw, &linfo);
+    all_events = rw.events;
+    ecount = rw.count;
+    if (reject_overload(srv, req, all_events, &linfo)) {
+        rw.events = NULL;      /* reject_overload freed it */
+        all_events = NULL;
+        server_window_free(&rw);
+        return;
+    }
+    if (use_summaries) {
         pgwt_compute_top_queries_from_summaries(srv->trace_dir, from, to,
                                                  &req->filter, wall_ms, &res);
         from_summaries = 1;
@@ -4349,7 +4647,7 @@ static void handle_top_queries(struct pgwt_server *srv, struct pgwt_request *req
          * question from raw's per-event-TOTAL argmax the same way. */
         if (!res.failed && res.num_rows > 0) {
             struct pgwt_queries_result raw_res;
-            pgwt_compute_top_queries(all_events, ecount, &req->filter,
+            pgwt_compute_top_queries(&rw.w, &req->filter,
                                      req->from_ns, req->to_ns, wall_ms,
                                      &raw_res);
             if (raw_res.failed) {
@@ -4370,7 +4668,7 @@ static void handle_top_queries(struct pgwt_server *srv, struct pgwt_request *req
             free(raw_res.rows);
         }
     } else {
-        pgwt_compute_top_queries(all_events, ecount, &req->filter,
+        pgwt_compute_top_queries(&rw.w, &req->filter,
                                  req->from_ns, req->to_ns, wall_ms, &res);
     }
 
@@ -4404,7 +4702,8 @@ static void handle_top_queries(struct pgwt_server *srv, struct pgwt_request *req
     if (lcres.failed || res.failed || qctx.failed) {
         pgwt_lifecycle_free(&lcres);
         pgwt_query_ctx_index_free(&qctx);
-        free(all_events);
+        server_window_free(&rw);
+        all_events = NULL;
         free(res.rows);
         cJSON *err = cJSON_CreateObject();
         cJSON_AddNumberToObject(err, "id", (double)req->id);
@@ -4602,7 +4901,8 @@ static void handle_top_queries(struct pgwt_server *srv, struct pgwt_request *req
 
     pgwt_lifecycle_free(&lcres);
     pgwt_query_ctx_index_free(&qctx);
-    free(all_events);
+    server_window_free(&rw);
+    all_events = NULL;
     free(res.rows);
 }
 
@@ -6318,18 +6618,22 @@ static void handle_interference(struct pgwt_server *srv, struct pgwt_request *re
 
 static void handle_concurrency(struct pgwt_server *srv, struct pgwt_request *req)
 {
-    int count;
     struct pgwt_load_info linfo = {0};
-    struct pgwt_trace_event *events =
-        server_load_events_fi(srv, req->from_ns, req->to_ns,
-                              req->filter.pid, &count, &linfo);
-    if (reject_overload(srv, req, events, &linfo)) return;
+    struct pgwt_raw_window rw;
+    server_load_window_fi(srv, req->from_ns, req->to_ns,
+                          req->filter.pid, PGWT_OVERLAY_ROUTE_RAW,
+                          filter_is_active(&req->filter), &rw, &linfo);
+    if (reject_overload(srv, req, rw.events, &linfo)) {
+        rw.events = NULL;      /* reject_overload freed it */
+        server_window_free(&rw);
+        return;
+    }
 
     /* Burst detection needs real simultaneous-wait intervals: EXACT. */
     enum pgwt_fidelity fid = load_fidelity(&linfo);
     if (pgwt_fidelity_unavailable(PGWT_REQ_EXACT, fid)) {
-        free(events);
         emit_unavailable(req->id, fid);
+        server_window_free(&rw);
         return;
     }
 
@@ -6338,12 +6642,11 @@ static void handle_concurrency(struct pgwt_server *srv, struct pgwt_request *req
     int num_buckets = req->num_buckets > 0 ? req->num_buckets : 60;
 
     struct pgwt_concurrency_result res;
-    pgwt_compute_concurrency(events, count, &req->filter,
+    pgwt_compute_concurrency(&rw.w, &req->filter,
                               from, to, num_buckets,
                               10000000ULL,  /* 10ms burst window */
                               4,            /* 4+ sessions = burst */
                               &res);
-    free(events);
 
     /* #276: the distinct-pid tables grow with the window, so an allocation
      * failure is possible where a fixed array could only drop data. The
@@ -6359,6 +6662,7 @@ static void handle_concurrency(struct pgwt_server *srv, struct pgwt_request *req
         cJSON_AddStringToObject(err, "hint", "narrow the time range and retry");
         add_fidelity(err, &linfo);
         emit_json(err);
+        server_window_free(&rw);
         return;
     }
 
@@ -6425,6 +6729,7 @@ static void handle_concurrency(struct pgwt_server *srv, struct pgwt_request *req
     free(res.peak_event);
     free(res.bursts);
     emit_json(root);
+    server_window_free(&rw);
 }
 
 static cJSON *serialize_variants(struct pgwt_server *srv,
@@ -6811,6 +7116,24 @@ static void dump_summary(struct pgwt_server *srv)
 
     enum pgwt_fidelity fid = load_fidelity(&linfo);
 
+    /* #424 DECISION, stated rather than defaulted: dump_summary is
+     * CAPTURED RECORDS ONLY. It is an offline, whole-capture text dump —
+     * run against a copied trace directory as often as against a live one,
+     * with from/to deliberately 0/0 (unbounded), so there is no "right edge
+     * at now" to be short of and frequently no daemon to ask. It therefore
+     * binds an explicitly REFUSED overlay rather than attaching one, and
+     * says so below: the exclusion is printed, not assumed. If this dump is
+     * ever pointed at a live window with a bounded right edge, the printed
+     * line is what tells the reader the totals exclude in-flight time. */
+    struct pgwt_overlay dump_ov;
+    pgwt_overlay_init(&dump_ov);
+    pgwt_overlay_refuse(&dump_ov,
+                        "dump_summary is a whole-capture dump of captured "
+                        "records: no open-interval overlay is requested");
+    struct pgwt_window dump_w;
+    if (pgwt_window_bind(&dump_w, events, count, &dump_ov) != 0)
+        memset(&dump_w, 0, sizeof(dump_w));
+
     printf("════════════════════════════════════════════════════════════════════════════════\n");
     printf("pgwt-server — Summary    Events: %d (%d transitions, %d samples)    Duration: %.1fs\n",
            n_transitions + n_samples, n_transitions, n_samples,
@@ -6824,12 +7147,14 @@ static void dump_summary(struct pgwt_server *srv)
     if (fid == PGWT_FIDELITY_SAMPLED)
         printf("Note: histogram / transitions / lock chains / interference / variants "
                "require full-fidelity data and are unavailable for this window.\n");
+    printf("Open intervals: %s — %s\n",
+           pgwt_overlay_status_name(dump_ov.status), dump_ov.reason);
     printf("════════════════════════════════════════════════════════════════════════════════\n");
 
     /* Time Model */
     struct pgwt_tm_result tm;
     /* dump_summary is whole-capture: 0/0 = unbounded, no clipping. */
-    pgwt_compute_time_model(events, count, &filt, 0, 0, wall_ms, &tm);
+    pgwt_compute_time_model(&dump_w, &filt, 0, 0, wall_ms, &tm);
 
     printf("\n  === Time Model ===\n\n");
     printf("  AAS: %.2f    DB Time: %.1f ms    Idle: %.1f ms\n\n",
@@ -6848,7 +7173,7 @@ static void dump_summary(struct pgwt_server *srv)
 
     /* Top Events */
     struct pgwt_events_result ev;
-    pgwt_compute_top_events(events, count, &filt, 0, 0, wall_ms, &ev);
+    pgwt_compute_top_events(&dump_w, &filt, 0, 0, wall_ms, &ev);
 
     printf("\n  === Top Events ===\n\n");
     printf("  %-28s %10s %12s %10s %8s\n", "Wait Event", "Waits", "Total (ms)", "Avg (us)", "% DB");
@@ -6875,7 +7200,7 @@ static void dump_summary(struct pgwt_server *srv)
 
     /* Top Sessions */
     struct pgwt_sessions_result sess;
-    pgwt_compute_top_sessions(events, count, &filt, 0, 0, wall_ms, &sess);
+    pgwt_compute_top_sessions(&dump_w, &filt, 0, 0, wall_ms, &sess);
 
     printf("\n  === Top Sessions ===\n\n");
     printf("  %7s %12s %7s %7s  %-20s\n",
@@ -6895,7 +7220,7 @@ static void dump_summary(struct pgwt_server *srv)
 
     /* Top Queries */
     struct pgwt_queries_result qry;
-    pgwt_compute_top_queries(events, count, &filt, 0, 0, wall_ms, &qry);
+    pgwt_compute_top_queries(&dump_w, &filt, 0, 0, wall_ms, &qry);
 
     printf("\n  === Top Queries ===\n\n");
     printf("  %20s %10s %12s %8s  %-20s\n",
@@ -6913,6 +7238,7 @@ static void dump_summary(struct pgwt_server *srv)
     }
     free(qry.rows);
 
+    pgwt_overlay_free(&dump_ov);
     free(events);
     printf("\n");
 }

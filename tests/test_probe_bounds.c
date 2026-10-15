@@ -77,6 +77,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include "test_window.h"
 
 static int failures = 0;
 static int checks   = 0;
@@ -267,7 +268,7 @@ static void section1_sessions_raw(void)
     struct pgwt_filter f;
     memset(&f, 0, sizeof(f));
     struct pgwt_sessions_result r;
-    pgwt_compute_top_sessions(fx.ev, fx.n, &f, 0, 0, 0, &r);
+    pgwt_compute_top_sessions(TW(fx.ev, fx.n), &f, 0, 0, 0, &r);
 
     CHECK(!r.failed, "top sessions did not fail");
     CHECK_INT(r.num_rows, N_SESSIONS, "every distinct pid got a row");
@@ -385,7 +386,7 @@ static void section3_queries_raw(void)
     struct pgwt_filter f;
     memset(&f, 0, sizeof(f));
     struct pgwt_queries_result r;
-    pgwt_compute_top_queries(fx.ev, fx.n, &f, 0, 0, 0, &r);
+    pgwt_compute_top_queries(TW(fx.ev, fx.n), &f, 0, 0, 0, &r);
 
     CHECK(!r.failed, "top queries did not fail");
     CHECK_INT(r.num_rows, N_QUERIES, "every distinct query id got a row");
@@ -617,7 +618,7 @@ static void section6_2_session_pid_zero_rekey(void)
     struct pgwt_filter f;
     memset(&f, 0, sizeof(f));
     struct pgwt_sessions_result r;
-    pgwt_compute_top_sessions(fx.ev, fx.n, &f, 0, 0, 0, &r);
+    pgwt_compute_top_sessions(TW(fx.ev, fx.n), &f, 0, 0, 0, &r);
 
     CHECK(!r.failed, "top sessions did not fail");
     CHECK_INT(r.num_rows, 2, "pid 0 and pid 1024 each have a row");
@@ -659,7 +660,7 @@ static void section6_3_aas_is_immune(void)
     memset(&f, 0, sizeof(f));
     struct pgwt_aas_result aas;
     /* A 4 s window so each series' total_aas is time/4 s. */
-    pgwt_compute_aas(fx.ev, fx.n, &f, TS_BASE - MS, TS_BASE + 3999 * MS,
+    pgwt_compute_aas(TW(fx.ev, fx.n), &f, TS_BASE - MS, TS_BASE + 3999 * MS,
                      4, 1, 10, &aas);
 
     CHECK_INT(aas.num_event_series, 2, "two distinct event series");
@@ -694,8 +695,8 @@ static void s7_1_cap_sized_fixture_is_blind(void)
     struct pgwt_filter f;
     memset(&f, 0, sizeof(f));
     struct pgwt_sessions_result rc, ro;
-    pgwt_compute_top_sessions(capped.ev, capped.n, &f, 0, 0, 0, &rc);
-    pgwt_compute_top_sessions(over.ev, over.n, &f, 0, 0, 0, &ro);
+    pgwt_compute_top_sessions(TW(capped.ev, capped.n), &f, 0, 0, 0, &rc);
+    pgwt_compute_top_sessions(TW(over.ev, over.n), &f, 0, 0, 0, &ro);
 
     CHECK(rc.num_rows > 0 && ro.num_rows > 0,
           "`num_rows > 0` holds for BOTH — a blind assertion shape");
@@ -728,7 +729,7 @@ static void s7_2_identical_durations_are_blind_per_row(void)
     struct pgwt_filter f;
     memset(&f, 0, sizeof(f));
     struct pgwt_sessions_result r;
-    pgwt_compute_top_sessions(same.ev, same.n, &f, 0, 0, 0, &r);
+    pgwt_compute_top_sessions(TW(same.ev, same.n), &f, 0, 0, 0, &r);
 
     int all_equal = 1;
     for (int i = 0; i < r.num_rows; i++)
@@ -817,12 +818,12 @@ static void s7_5_dense_consecutive_keys(void)
     struct pgwt_filter f;
     memset(&f, 0, sizeof(f));
     struct pgwt_sessions_result rs;
-    pgwt_compute_top_sessions(fx.ev, fx.n, &f, 0, 0, 0, &rs);
+    pgwt_compute_top_sessions(TW(fx.ev, fx.n), &f, 0, 0, 0, &rs);
     CHECK_INT(rs.num_rows, N, "1500 consecutive pids including 0 all present");
     free(rs.rows);
 
     struct pgwt_queries_result rq;
-    pgwt_compute_top_queries(fx.ev, fx.n, &f, 0, 0, 0, &rq);
+    pgwt_compute_top_queries(TW(fx.ev, fx.n), &f, 0, 0, 0, &rq);
     CHECK_INT(rq.num_rows, N, "1500 consecutive query ids all present");
     free(rq.rows);
 
@@ -848,7 +849,7 @@ static void s7_6_alloc_failure_refuses(void)
     for (unsigned c = 0; c < 2; c++) {
         setenv("PGWT_TEST_ALLOC_FAIL", sess_points[c], 1);
         struct pgwt_sessions_result r;
-        pgwt_compute_top_sessions(sfx.ev, sfx.n, &f, 0, 0, 0, &r);
+        pgwt_compute_top_sessions(TW(sfx.ev, sfx.n), &f, 0, 0, 0, &r);
         unsetenv("PGWT_TEST_ALLOC_FAIL");
         char msg[200];
         snprintf(msg, sizeof(msg),
@@ -864,7 +865,7 @@ static void s7_6_alloc_failure_refuses(void)
     for (unsigned c = 0; c < 2; c++) {
         setenv("PGWT_TEST_ALLOC_FAIL", qry_points[c], 1);
         struct pgwt_queries_result r;
-        pgwt_compute_top_queries(qfx.ev, qfx.n, &f, 0, 0, 0, &r);
+        pgwt_compute_top_queries(TW(qfx.ev, qfx.n), &f, 0, 0, 0, &r);
         unsetenv("PGWT_TEST_ALLOC_FAIL");
         char msg[200];
         snprintf(msg, sizeof(msg),
@@ -935,9 +936,9 @@ static void s7_6_alloc_failure_refuses(void)
      *     reason (a missing env var, a typo, a compiled-out hook). --- */
     setenv("PGWT_TEST_ALLOC_FAIL", "a_point_that_does_not_exist", 1);
     struct pgwt_sessions_result ok1;
-    pgwt_compute_top_sessions(sfx.ev, sfx.n, &f, 0, 0, 0, &ok1);
+    pgwt_compute_top_sessions(TW(sfx.ev, sfx.n), &f, 0, 0, 0, &ok1);
     struct pgwt_queries_result ok2;
-    pgwt_compute_top_queries(qfx.ev, qfx.n, &f, 0, 0, 0, &ok2);
+    pgwt_compute_top_queries(TW(qfx.ev, qfx.n), &f, 0, 0, 0, &ok2);
     struct pgwt_fingerprint_result ok3;
     pgwt_compute_fingerprints(qfx.ev, qfx.n, &f, &ok3);
     struct pgwt_variants_result ok4;
@@ -974,13 +975,13 @@ static void s7_7_absent_not_wrong(void)
     memset(&f, 0, sizeof(f));
 
     struct pgwt_sessions_result rs;
-    pgwt_compute_top_sessions(NULL, 0, &f, 0, 0, 0, &rs);
+    pgwt_compute_top_sessions(TW(NULL, 0), &f, 0, 0, 0, &rs);
     CHECK(!rs.failed && rs.num_rows == 0,
           "no events: sessions empty, not failed");
     free(rs.rows);
 
     struct pgwt_queries_result rq;
-    pgwt_compute_top_queries(NULL, 0, &f, 0, 0, 0, &rq);
+    pgwt_compute_top_queries(TW(NULL, 0), &f, 0, 0, 0, &rq);
     CHECK(!rq.failed && rq.num_rows == 0,
           "no events: queries empty, not failed");
     free(rq.rows);

@@ -3,6 +3,7 @@
 #define PGWT_COMPUTE_H
 
 #include "pg_wait_tracer.h"
+#include "time_window.h"
 #include <stdint.h>
 
 /* Sentinel for %DB of idle-but-visible events (e.g. Client:ClientRead).
@@ -257,9 +258,16 @@ struct pgwt_aas_result {
     int      num_event_series;   /* 0 = class mode (default) */
     struct pgwt_aas_event_series event_series[AAS_MAX_EVENT_SERIES];
     double  *event_aas;          /* malloc'd [num_buckets * num_event_series] */
+    /* #424: the window handed in was NULL or uninitialised, or the
+     * reducer could not allocate. The answer is ABSENT, not zero — the
+     * caller must report it instead of serialising an empty result that
+     * reads as a measured zero. */
+    int      failed;
 };
 
-void pgwt_compute_aas(const struct pgwt_trace_event *events, int count,
+/* #424: takes the WINDOW, not a record array. The records-only form is gone
+ * on purpose — see src/time_window.h. */
+void pgwt_compute_aas(const struct pgwt_window *w,
                       const struct pgwt_filter *f,
                       uint64_t from_ns, uint64_t to_ns, int num_buckets,
                       int detail_events, int max_series,
@@ -309,6 +317,11 @@ struct pgwt_tm_result {
      * because that divergence is exactly the thing worth hearing about.
      * Always 0 in a healthy window; asserted 0 by tests/test_idle_*.c. */
     double idle_children_excess_ms;
+    /* #424: the window handed in was NULL or uninitialised, or the
+     * reducer could not allocate. The answer is ABSENT, not zero — the
+     * caller must report it instead of serialising an empty result that
+     * reads as a measured zero. */
+    int      failed;
 };
 
 
@@ -321,7 +334,7 @@ struct pgwt_tm_result {
  * therefore gets bit-identical pre-fix numbers. Latency columns (avg/max/
  * percentiles) are deliberately NOT clipped — a wait's latency is a property
  * of the wait, not of the window; only the time-in-window columns are. */
-void pgwt_compute_time_model(const struct pgwt_trace_event *events, int count,
+void pgwt_compute_time_model(const struct pgwt_window *w,
                              const struct pgwt_filter *f,
                              uint64_t from_ns, uint64_t to_ns, double wall_ms,
                              struct pgwt_tm_result *out);
@@ -367,9 +380,14 @@ struct pgwt_events_result {
     struct pgwt_event_row *rows;   /* malloc'd, caller frees */
     int    num_rows;
     double db_time_ms;
+    /* #424: the window handed in was NULL or uninitialised, or the
+     * reducer could not allocate. The answer is ABSENT, not zero — the
+     * caller must report it instead of serialising an empty result that
+     * reads as a measured zero. */
+    int      failed;
 };
 
-void pgwt_compute_top_events(const struct pgwt_trace_event *events, int count,
+void pgwt_compute_top_events(const struct pgwt_window *w,
                              const struct pgwt_filter *f,
                              uint64_t from_ns, uint64_t to_ns, double wall_ms,
                              struct pgwt_events_result *out);
@@ -396,7 +414,7 @@ struct pgwt_sessions_result {
     int failed;
 };
 
-void pgwt_compute_top_sessions(const struct pgwt_trace_event *events, int count,
+void pgwt_compute_top_sessions(const struct pgwt_window *w,
                                const struct pgwt_filter *f,
                                uint64_t from_ns, uint64_t to_ns, double wall_ms,
                                struct pgwt_sessions_result *out);
@@ -438,7 +456,7 @@ struct pgwt_queries_result {
     int      failed;
 };
 
-void pgwt_compute_top_queries(const struct pgwt_trace_event *events, int count,
+void pgwt_compute_top_queries(const struct pgwt_window *w,
                               const struct pgwt_filter *f,
                               uint64_t from_ns, uint64_t to_ns, double wall_ms,
                               struct pgwt_queries_result *out);
@@ -583,7 +601,7 @@ struct pgwt_concurrency_result {
 /* Detect concurrency peaks and burst events.
  * burst_window_ns: time window for burst detection (e.g. 10ms = 10000000).
  * burst_threshold: minimum sessions to count as burst (e.g. 4). */
-void pgwt_compute_concurrency(const struct pgwt_trace_event *events, int count,
+void pgwt_compute_concurrency(const struct pgwt_window *w,
                                const struct pgwt_filter *f,
                                uint64_t from_ns, uint64_t to_ns,
                                int num_buckets,

@@ -769,13 +769,23 @@ static int cmp_aas_event_series(const void *a, const void *b)
     return (db > da) - (db < da);
 }
 
-void pgwt_compute_aas(const struct pgwt_trace_event *events, int count,
+void pgwt_compute_aas(const struct pgwt_window *w,
                       const struct pgwt_filter *f,
                       uint64_t from_ns, uint64_t to_ns, int num_buckets,
                       int detail_events, int max_series,
                       struct pgwt_aas_result *out)
 {
     memset(out, 0, sizeof(*out));
+
+    /* #424: the window is the ONLY way records reach this reducer, and an
+     * invalid one is refused in production, not under an assert. Zero rows
+     * with failed=0 would read as a measured zero. */
+    if (!pgwt_window_valid(w)) {
+        out->failed = 1;
+        return;
+    }
+    const struct pgwt_trace_event *events = pgwt_window_events(w);
+    const int count = pgwt_window_count(w);
 
     uint64_t range_ns = to_ns - from_ns;
     if (range_ns == 0 || num_buckets <= 0) {
@@ -1287,13 +1297,23 @@ static int cmp_event_desc(const void *a, const void *b)
     return (db > da) - (db < da);
 }
 
-void pgwt_compute_time_model(const struct pgwt_trace_event *events, int count,
+void pgwt_compute_time_model(const struct pgwt_window *w,
                              const struct pgwt_filter *f,
                              uint64_t from_ns, uint64_t to_ns, double wall_ms,
                              struct pgwt_tm_result *out)
 {
     memset(out, 0, sizeof(*out));
     out->wall_ms = wall_ms;
+
+    /* #424: the window is the ONLY way records reach this reducer, and an
+     * invalid one is refused in production, not under an assert. Zero rows
+     * with failed=0 would read as a measured zero. */
+    if (!pgwt_window_valid(w)) {
+        out->failed = 1;
+        return;
+    }
+    const struct pgwt_trace_event *events = pgwt_window_events(w);
+    const int count = pgwt_window_count(w);
 
     /* Phase 1: accumulate per-class and per-(class, event) totals */
     struct class_accum classes[PGWT_NUM_CLASSES];
@@ -1694,12 +1714,22 @@ static int cmp_event_row_desc(const void *a, const void *b)
     return (db > da) - (db < da);
 }
 
-void pgwt_compute_top_events(const struct pgwt_trace_event *events, int count,
+void pgwt_compute_top_events(const struct pgwt_window *w,
                              const struct pgwt_filter *f,
                              uint64_t from_ns, uint64_t to_ns, double wall_ms,
                              struct pgwt_events_result *out)
 {
     memset(out, 0, sizeof(*out));
+
+    /* #424: the window is the ONLY way records reach this reducer, and an
+     * invalid one is refused in production, not under an assert. Zero rows
+     * with failed=0 would read as a measured zero. */
+    if (!pgwt_window_valid(w)) {
+        out->failed = 1;
+        return;
+    }
+    const struct pgwt_trace_event *events = pgwt_window_events(w);
+    const int count = pgwt_window_count(w);
 
     /* Hash table: open addressing, linear probe */
     struct top_event_accum *ht = calloc(EVENT_HT_SIZE, sizeof(*ht));
@@ -1851,13 +1881,23 @@ static int cmp_session_row_desc(const void *a, const void *b)
     return (db > da) - (db < da);
 }
 
-void pgwt_compute_top_sessions(const struct pgwt_trace_event *events, int count,
+void pgwt_compute_top_sessions(const struct pgwt_window *w,
                                const struct pgwt_filter *f,
                                uint64_t from_ns, uint64_t to_ns, double wall_ms,
                                struct pgwt_sessions_result *out)
 {
     (void)wall_ms;
     memset(out, 0, sizeof(*out));
+
+    /* #424: the window is the ONLY way records reach this reducer, and an
+     * invalid one is refused in production, not under an assert. Zero rows
+     * with failed=0 would read as a measured zero. */
+    if (!pgwt_window_valid(w)) {
+        out->failed = 1;
+        return;
+    }
+    const struct pgwt_trace_event *events = pgwt_window_events(w);
+    const int count = pgwt_window_count(w);
 
     /* #327: this was a FIXED `calloc(SESSION_HT_SIZE, ...)` (1024 slots)
      * probed with `while (ht[h].pid != 0 && ht[h].pid != ev->pid)
@@ -1994,13 +2034,23 @@ static int cmp_query_row_desc(const void *a, const void *b)
     return (db > da) - (db < da);
 }
 
-void pgwt_compute_top_queries(const struct pgwt_trace_event *events, int count,
+void pgwt_compute_top_queries(const struct pgwt_window *w,
                               const struct pgwt_filter *f,
                               uint64_t from_ns, uint64_t to_ns, double wall_ms,
                               struct pgwt_queries_result *out)
 {
     (void)wall_ms;
     memset(out, 0, sizeof(*out));
+
+    /* #424: the window is the ONLY way records reach this reducer, and an
+     * invalid one is refused in production, not under an assert. Zero rows
+     * with failed=0 would read as a measured zero. */
+    if (!pgwt_window_valid(w)) {
+        out->failed = 1;
+        return;
+    }
+    const struct pgwt_trace_event *events = pgwt_window_events(w);
+    const int count = pgwt_window_count(w);
 
     /* #327: this was a FIXED `calloc(QUERY_HT_SIZE, ...)` (2048 slots)
      * probed with `while (ht[h].count > 0 && ht[h].query_id != ev->query_id)
@@ -3871,7 +3921,7 @@ static inline int concurrency_qualifies(const struct pgwt_trace_event *ev,
     return 1;
 }
 
-void pgwt_compute_concurrency(const struct pgwt_trace_event *events, int count,
+void pgwt_compute_concurrency(const struct pgwt_window *w,
                                const struct pgwt_filter *f,
                                uint64_t from_ns, uint64_t to_ns,
                                int num_buckets,
@@ -3879,6 +3929,16 @@ void pgwt_compute_concurrency(const struct pgwt_trace_event *events, int count,
                                struct pgwt_concurrency_result *out)
 {
     memset(out, 0, sizeof(*out));
+
+    /* #424: the window is the ONLY way records reach this reducer, and an
+     * invalid one is refused in production, not under an assert. Zero rows
+     * with failed=0 would read as a measured zero. */
+    if (!pgwt_window_valid(w)) {
+        out->failed = 1;
+        return;
+    }
+    const struct pgwt_trace_event *events = pgwt_window_events(w);
+    const int count = pgwt_window_count(w);
 
     if (count == 0 || from_ns >= to_ns || num_buckets <= 0)
         return;

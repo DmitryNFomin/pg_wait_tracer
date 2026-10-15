@@ -147,6 +147,7 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include <time.h>
+#include "test_window.h"
 
 static int tests_run = 0;
 static int tests_failed = 0;
@@ -455,7 +456,7 @@ static struct parity parity_run(const char *dir,
     struct pgwt_tm_result raw, sum;
     memset(&raw, 0, sizeof(raw));
     memset(&sum, 0, sizeof(sum));
-    pgwt_compute_time_model(tagged, n_tagged, &f, from_ns, to_ns, wall_ms, &raw);
+    pgwt_compute_time_model(TW(tagged, n_tagged), &f, from_ns, to_ns, wall_ms, &raw);
     pgwt_compute_time_model_from_summaries(dir, from_ns, to_ns, &f, wall_ms,
                                            &sum);
 
@@ -1247,7 +1248,7 @@ static void bypass_suite(const struct fixture *fx)
         struct pgwt_tm_result r0, s0;
         memset(&r0, 0, sizeof(r0)); memset(&s0, 0, sizeof(s0));
         double wall = (double)(fx->last_sec + ONE_SEC - fx->first_sec) / 1e6;
-        pgwt_compute_time_model(untagged, fx->n, &f, fx->first_sec,
+        pgwt_compute_time_model(TW(untagged, fx->n), &f, fx->first_sec,
                                 fx->last_sec + ONE_SEC, wall, &r0);
         pgwt_compute_time_model_from_summaries(fx->dir, fx->first_sec,
                                                fx->last_sec + ONE_SEC, &f,
@@ -1323,7 +1324,7 @@ skip_no_registry:
     struct pgwt_tm_result r1, s1;
     memset(&r1, 0, sizeof(r1)); memset(&s1, 0, sizeof(s1));
     double w1 = (double)(q_to - q_from) / 1e6;
-    pgwt_compute_time_model(fx->tagged, fx->n, &f, q_from, q_to, w1, &r1);
+    pgwt_compute_time_model(TW(fx->tagged, fx->n), &f, q_from, q_to, w1, &r1);
     pgwt_compute_time_model_from_summaries(fx->dir, q_from, q_to, &f, w1, &s1);
     CHECK(r1.idle_time_ms == s1.idle_time_ms && r1.db_time_ms == s1.db_time_ms,
           "an io_worker-free window AGREES (Idle %.3f == %.3f, DB Time "
@@ -1365,7 +1366,7 @@ static void measure_residual_straddler(void)
     double wall = (double)(to - from) / 1e6;
     struct pgwt_tm_result raw, sum;
     memset(&raw, 0, sizeof(raw)); memset(&sum, 0, sizeof(sum));
-    pgwt_compute_time_model(fx.tagged, fx.n, &f, from, to, wall, &raw);
+    pgwt_compute_time_model(TW(fx.tagged, fx.n), &f, from, to, wall, &raw);
     pgwt_compute_time_model_from_summaries(fx.dir, from, to, &f, wall, &sum);
     printf("    a 100 s Client:ClientRead closing in the final second, "
            "10 s window:\n"
@@ -1701,7 +1702,7 @@ static int acceptance_tier(const char *dir)
         double wall = (double)(w[i].to - from) / 1e6;
         struct pgwt_tm_result rn, sn;
         memset(&rn, 0, sizeof(rn)); memset(&sn, 0, sizeof(sn));
-        pgwt_compute_time_model(evw_no, m, &f, from, w[i].to, wall, &rn);
+        pgwt_compute_time_model(TW(evw_no, m), &f, from, w[i].to, wall, &rn);
         pgwt_compute_time_model_from_summaries(sdir_no, from, w[i].to, &f,
                                                wall, &sn);
         CHECK(sn.idle_time_ms == p.sum_idle_ms

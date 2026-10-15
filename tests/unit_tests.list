@@ -750,3 +750,9 @@ test_trace_closure
 # checkpoint superseding a non-empty one, and retention taking the sidecar with
 # its archive.
 test_open_ckpt
+# #424 wiring: the raw TIME reducers take a window (records + open-interval
+# overlay). test_overlay_wiring covers the run-time guard (an invalid or
+# degraded window produces an ABSENT answer); test_window_signature.sh covers
+# the COMPILE-time half — the records-only signature must not come back.
+test_overlay_wiring
+test_window_signature.sh

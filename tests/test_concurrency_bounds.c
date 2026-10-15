@@ -54,6 +54,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include "test_window.h"
 
 static int failures = 0;
 static int checks   = 0;
@@ -292,7 +293,7 @@ int main(void)
     CHECK(big.n > 100000, "fixture exceeds the old 100,000-interval cap");
 
     struct pgwt_concurrency_result res;
-    pgwt_compute_concurrency(big.ev, big.n, &f, BASE_NS, to_ns, U_BUCKETS,
+    pgwt_compute_concurrency(TW(big.ev, big.n), &f, BASE_NS, to_ns, U_BUCKETS,
                              BURST_W_NS, BURST_MIN, &res);
     CHECK_INT(res.failed, 0, "complete answer, not a refusal");
     CHECK_INT(res.num_buckets, U_BUCKETS, "bucket count");
@@ -374,7 +375,7 @@ int main(void)
     /* ...and the fix must agree with itself on that shape: every bucket sees
      * every pid, because every interval overlaps every bucket. */
     struct pgwt_concurrency_result sres;
-    pgwt_compute_concurrency(spanning.ev, spanning.n, &f, BASE_NS, to_ns,
+    pgwt_compute_concurrency(TW(spanning.ev, spanning.n), &f, BASE_NS, to_ns,
                              U_BUCKETS, BURST_W_NS, BURST_MIN, &sres);
     /* Every interval covers every bucket, so each bucket's peak is the widest
      * pid set either event ever uses anywhere in the window. */
@@ -406,7 +407,7 @@ int main(void)
                  BASE_NS + 1000000ULL + (uint64_t)(n * 70 + p) * 1000ULL, DUR_NS);
     }
     struct pgwt_concurrency_result mres;
-    pgwt_compute_concurrency(many_ev.ev, many_ev.n, &f, BASE_NS, one_bucket_to,
+    pgwt_compute_concurrency(TW(many_ev.ev, many_ev.n), &f, BASE_NS, one_bucket_to,
                              1, BURST_W_NS, BURST_MIN, &mres);
     CHECK_INT(mres.peak_sessions[0], 5, "3.1 the 65th+ distinct event is counted");
     CHECK_INT((long)mres.peak_event[0], (long)(0x01000000u + 64),
@@ -422,7 +423,7 @@ int main(void)
         push(&many_pid, 4000 + (uint32_t)p, EV1,
              BASE_NS + 1000000ULL + (uint64_t)p * 1000ULL, DUR_NS);
     struct pgwt_concurrency_result pres;
-    pgwt_compute_concurrency(many_pid.ev, many_pid.n, &f, BASE_NS,
+    pgwt_compute_concurrency(TW(many_pid.ev, many_pid.n), &f, BASE_NS,
                              one_bucket_to, 1, BURST_W_NS, BURST_MIN, &pres);
     CHECK_INT(pres.peak_sessions[0], 200, "3.2 all 200 distinct pids counted");
     legacy_peaks(many_pid.ev, many_pid.n, &f, BASE_NS, one_bucket_to, 1, lp, le);
@@ -447,7 +448,7 @@ int main(void)
     struct evbuf wide = {0};
     build_uniform(&wide, 300, 4, 0);
     struct pgwt_concurrency_result wres;
-    pgwt_compute_concurrency(wide.ev, wide.n, &f, BASE_NS, to_ns, 300,
+    pgwt_compute_concurrency(TW(wide.ev, wide.n), &f, BASE_NS, to_ns, 300,
                              BURST_W_NS, BURST_MIN, &wres);
     CHECK_INT(wres.num_bursts, 300, "3.5 more than 256 bursts are reported");
     CHECK_INT(wres.bursts_total, 300 * 4, "3.5 onsets counted across the window");
@@ -463,18 +464,18 @@ int main(void)
     printf("\n4. Refusals and blind spots\n");
 
     struct pgwt_concurrency_result nres;
-    pgwt_compute_concurrency(big.ev, 0, &f, BASE_NS, to_ns, U_BUCKETS,
+    pgwt_compute_concurrency(TW(big.ev, 0), &f, BASE_NS, to_ns, U_BUCKETS,
                              BURST_W_NS, BURST_MIN, &nres);
     CHECK_INT(nres.num_buckets, 0, "4.1 no events: no buckets claimed");
     CHECK_INT(nres.num_bursts, 0, "4.1 no events: no bursts claimed");
     CHECK_INT(nres.failed, 0, "4.1 no events is not a failure");
     free_result(&nres);
 
-    pgwt_compute_concurrency(big.ev, big.n, &f, to_ns, BASE_NS, U_BUCKETS,
+    pgwt_compute_concurrency(TW(big.ev, big.n), &f, to_ns, BASE_NS, U_BUCKETS,
                              BURST_W_NS, BURST_MIN, &nres);
     CHECK_INT(nres.num_buckets, 0, "4.2 inverted window: nothing claimed");
     free_result(&nres);
-    pgwt_compute_concurrency(big.ev, big.n, &f, BASE_NS, to_ns, 0,
+    pgwt_compute_concurrency(TW(big.ev, big.n), &f, BASE_NS, to_ns, 0,
                              BURST_W_NS, BURST_MIN, &nres);
     CHECK_INT(nres.num_buckets, 0, "4.3 zero buckets: nothing claimed");
     free_result(&nres);
@@ -491,7 +492,7 @@ int main(void)
             push(&idle, 5000 + (uint32_t)p, 0x05000001u, t, DUR_NS); /* Activity */
             push(&idle, 5000 + (uint32_t)p, 0u, t + 2000, DUR_NS);   /* on CPU */
         }
-    pgwt_compute_concurrency(idle.ev, idle.n, &f, BASE_NS, to_ns, U_BUCKETS,
+    pgwt_compute_concurrency(TW(idle.ev, idle.n), &f, BASE_NS, to_ns, U_BUCKETS,
                              BURST_W_NS, BURST_MIN, &nres);
     int idle_empty = 0;
     for (int b = 0; b < U_BUCKETS; b++) if (nres.peak_sessions[b] == 0) idle_empty++;
@@ -506,13 +507,13 @@ int main(void)
      * ABSENT (failed=1), never short. These paths are unreachable otherwise,
      * and an unreachable refusal is indistinguishable from one that approves. */
     setenv("PGWT_TEST_ALLOC_FAIL", "triple_map_grow", 1);
-    pgwt_compute_concurrency(big.ev, big.n, &f, BASE_NS, to_ns, U_BUCKETS,
+    pgwt_compute_concurrency(TW(big.ev, big.n), &f, BASE_NS, to_ns, U_BUCKETS,
                              BURST_W_NS, BURST_MIN, &nres);
     CHECK_INT(nres.failed, 1, "4.5 distinct-pid table OOM -> failed, not short");
     free_result(&nres);
 
     setenv("PGWT_TEST_ALLOC_FAIL", "concurrency_entries", 1);
-    pgwt_compute_concurrency(big.ev, big.n, &f, BASE_NS, to_ns, U_BUCKETS,
+    pgwt_compute_concurrency(TW(big.ev, big.n), &f, BASE_NS, to_ns, U_BUCKETS,
                              BURST_W_NS, BURST_MIN, &nres);
     CHECK_INT(nres.failed, 1, "4.6 burst-entry array OOM -> failed, not short");
     free_result(&nres);
@@ -520,7 +521,7 @@ int main(void)
     /* 4.7 An UNKNOWN injection point must change nothing — otherwise 4.5/4.6
      * could be passing because the hook fails everything, or nothing. */
     setenv("PGWT_TEST_ALLOC_FAIL", "no_such_allocation_point", 1);
-    pgwt_compute_concurrency(big.ev, big.n, &f, BASE_NS, to_ns, U_BUCKETS,
+    pgwt_compute_concurrency(TW(big.ev, big.n), &f, BASE_NS, to_ns, U_BUCKETS,
                              BURST_W_NS, BURST_MIN, &nres);
     CHECK_INT(nres.failed, 0, "4.7 unknown injection point: answer is complete");
     int inj_wrong = 0;
@@ -533,7 +534,7 @@ int main(void)
     /* ── 5. Determinism (qsort is not stable) ───────────────────────── */
     printf("\n5. Determinism\n");
     struct pgwt_concurrency_result again;
-    pgwt_compute_concurrency(big.ev, big.n, &f, BASE_NS, to_ns, U_BUCKETS,
+    pgwt_compute_concurrency(TW(big.ev, big.n), &f, BASE_NS, to_ns, U_BUCKETS,
                              BURST_W_NS, BURST_MIN, &again);
     CHECK(memcmp(again.peak_sessions, res.peak_sessions,
                  U_BUCKETS * sizeof(int)) == 0, "5.1 peaks reproduce exactly");

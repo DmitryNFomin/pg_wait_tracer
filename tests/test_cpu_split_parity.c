@@ -78,6 +78,7 @@
 #include "cmdline.h"
 #include "sampler.h"
 #include "pg_wait_tracer.h"
+#include "test_window.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -477,7 +478,7 @@ static struct parity parity_run(const struct fixture *fx,
     struct pgwt_tm_result raw, sum;
     memset(&raw, 0, sizeof(raw));
     memset(&sum, 0, sizeof(sum));
-    pgwt_compute_time_model(fx->tagged, fx->n, &f, from_ns, to_ns, wall_ms,
+    pgwt_compute_time_model(TW(fx->tagged, fx->n), &f, from_ns, to_ns, wall_ms,
                             &raw);
     pgwt_compute_time_model_from_summaries(fx->dir, from_ns, to_ns, &f,
                                            wall_ms, &sum);

@@ -78,6 +78,7 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include <dirent.h>
+#include "test_window.h"
 #include <time.h>
 
 static int tests_run = 0;
@@ -426,7 +427,7 @@ static void cmp_time_model(const char *label, const char *dir,
                            double want_db_ms)
 {
     struct pgwt_tm_result raw, sum;
-    pgwt_compute_time_model(ev, n, f, 0, 0, wall_ms, &raw);
+    pgwt_compute_time_model(TW(ev, n), f, 0, 0, wall_ms, &raw);
     pgwt_compute_time_model_from_summaries(dir, from, to, f, wall_ms, &sum);
 
     /* NON-VACUITY: both sides must be non-trivial before "they agree" means
@@ -544,7 +545,7 @@ static void test_raw_vs_summary(void)
     uint64_t raw_to   = g_origin + (uint64_t)SLICES * ONE_SEC;
     for (int i = 0; i < 3; i++) {
         struct pgwt_aas_result ra, sa;
-        pgwt_compute_aas(ev, n, &aas_filters[i], raw_from, raw_to, SLICES, 0, 0,
+        pgwt_compute_aas(TW(ev, n), &aas_filters[i], raw_from, raw_to, SLICES, 0, 0,
                          &ra);
         pgwt_compute_aas_from_summaries(dir, from, to, &aas_filters[i], SLICES,
                                         &sa);
@@ -564,7 +565,7 @@ static void test_raw_vs_summary(void)
      * summary path, with their full time and the idle %DB sentinel. */
     memset(&f, 0, sizeof(f));
     struct pgwt_events_result re, se;
-    pgwt_compute_top_events(ev, n, &f, 0, 0, wall_ms, &re);
+    pgwt_compute_top_events(TW(ev, n), &f, 0, 0, wall_ms, &re);
     pgwt_compute_top_events_from_summaries(dir, from, to, &f, wall_ms, &se);
     for (int p = 0; p < PROBE_N; p++) {
         const struct pgwt_event_row *a = ev_row(&re, probe[p]);
@@ -600,7 +601,7 @@ static void test_raw_vs_summary(void)
      * but Activity, so both must show zero DB Time. pid 101 and 102 must
      * agree between the paths. */
     struct pgwt_sessions_result rs, ss;
-    pgwt_compute_top_sessions(ev, n, &f, 0, 0, wall_ms, &rs);
+    pgwt_compute_top_sessions(TW(ev, n), &f, 0, 0, wall_ms, &rs);
     pgwt_compute_top_sessions_from_summaries(dir, from, to, &f, wall_ms, &ss);
     for (uint32_t pid = 101; pid <= 104; pid++) {
         double v1 = 0, v2 = 0;
@@ -625,7 +626,7 @@ static void test_raw_vs_summary(void)
      * path and exclude it on the raw path, so the SAME query reported a
      * different total depending on which path answered. */
     struct pgwt_queries_result rq, sq;
-    pgwt_compute_top_queries(ev, n, &f, 0, 0, wall_ms, &rq);
+    pgwt_compute_top_queries(TW(ev, n), &f, 0, 0, wall_ms, &rq);
     pgwt_compute_top_queries_from_summaries(dir, from, to, &f, wall_ms, &sq);
     uint64_t qids[2] = { QID_A, QID_B };
     double want_q[2] = { 30.0 * SLICES, 30.0 * SLICES };
@@ -800,7 +801,7 @@ static void test_summary_idle_rows(void)
      * is the one thing agreement alone cannot see, which is why the expected
      * values are written out above rather than taken from `rawtm_u`. */
     struct pgwt_tm_result rawtm_u;
-    pgwt_compute_time_model(ev, n, &f, 0, 0, wall_ms, &rawtm_u);
+    pgwt_compute_time_model(TW(ev, n), &f, 0, 0, wall_ms, &rawtm_u);
 
     double sum_aas = 0.0, sum_ms = 0.0;
     int aas_found = 0, aas_kids = 0;
@@ -915,7 +916,7 @@ static void test_summary_idle_rows(void)
     memset(&f, 0, sizeof(f));
     snprintf(f.class_name, sizeof(f.class_name), "timeout");
     struct pgwt_tm_result rawtm;
-    pgwt_compute_time_model(ev, n, &f, 0, 0, wall_ms, &rawtm);
+    pgwt_compute_time_model(TW(ev, n), &f, 0, 0, wall_ms, &rawtm);
     pgwt_compute_time_model_from_summaries(dir, from, to, &f, wall_ms, &tm);
     CHECK(NEAR_MS(tm.idle_time_ms, 55.0 * SLICES),
           "class=timeout: summary Idle = %.1f expected %.1f",
@@ -1306,7 +1307,7 @@ static void test_top_queries_filtered_excludes_idle(void)
     memset(&f, 0, sizeof(f));
     snprintf(f.class_name, sizeof(f.class_name), "client");
     struct pgwt_queries_result rq, sq;
-    pgwt_compute_top_queries(ev, n, &f, 0, 0, wall_ms, &rq);
+    pgwt_compute_top_queries(TW(ev, n), &f, 0, 0, wall_ms, &rq);
     pgwt_compute_top_queries_from_summaries(dir, from, to, &f, wall_ms, &sq);
 
     double raw_a = 0, sum_a = 0;
@@ -1440,7 +1441,7 @@ static void test_idle_children_sum_exactly(void)
 
         memset(&f, 0, sizeof(f));
         struct pgwt_tm_result rt;
-        pgwt_compute_time_model(tiny, 2, &f, 0, 0, 1000.0, &rt);
+        pgwt_compute_time_model(TW(tiny, 2), &f, 0, 0, 1000.0, &rt);
         CHECK(rt.idle_time_ms > 0, "fixture has idle time (%.6f ms)",
               rt.idle_time_ms);
         const struct pgwt_tm_row *oth = row_at(&rt, "Other (background)", 2);

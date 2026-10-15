@@ -273,6 +273,7 @@ while read -r t <&3; do
     case "$t" in ''|\#*) continue ;; esac
     case "$t" in
         *.py) run_test "$t" python3 "$t" ;;
+        *.sh) run_test "$t" sh "$t" ;;
         *)    run_test "$t" ./"$t" ;;
     esac
 done 3< "unit_tests.list"

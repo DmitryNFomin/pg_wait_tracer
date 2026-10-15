@@ -53,6 +53,7 @@
 
 #include <sys/wait.h>
 #include <unistd.h>
+#include "test_window.h"
 
 static int tests_run = 0;
 static int tests_failed = 0;
@@ -154,7 +155,7 @@ static void win_load(struct pgwt_server *srv, struct win *w,
     struct pgwt_filter f;
     memset(&f, 0, sizeof(f));
     double wall_ms = (double)(to_wall - from_wall) / 1e6;
-    pgwt_compute_top_events(w->events, w->count, &f, from_wall, to_wall,
+    pgwt_compute_top_events(TW(w->events, w->count), &f, from_wall, to_wall,
                             wall_ms, &w->ev);
     pgwt_compute_transitions(w->events, w->count, &f, 64, &w->tr);
 }
@@ -486,7 +487,7 @@ static void test_derived_without_flag(void)
     struct pgwt_filter f;
     memset(&f, 0, sizeof(f));
     struct pgwt_events_result res;
-    pgwt_compute_top_events(ev, 2, &f, 10 * ONE_SEC, 20 * ONE_SEC,
+    pgwt_compute_top_events(TW(ev, 2), &f, 10 * ONE_SEC, 20 * ONE_SEC,
                             10000.0, &res);
     const struct pgwt_event_row *lock = row_for(&res, EV_LOCK);
     CHECK(lock && lock->count == 1,
@@ -646,7 +647,7 @@ static void test_concurrency_overlap(struct pgwt_server *srv, uint64_t w0)
     struct pgwt_filter f;
     memset(&f, 0, sizeof(f));
     struct pgwt_concurrency_result res;
-    pgwt_compute_concurrency(events, count, &f, from, to, 10,
+    pgwt_compute_concurrency(TW(events, count), &f, from, to, 10,
                              ONE_SEC, 2, &res);
     int lock_buckets = 0;
     for (int b = 0; b < res.num_buckets; b++)
@@ -765,7 +766,7 @@ static void test_clipped_majority_moves_db_time(const char *dir)
     struct pgwt_filter f;
     memset(&f, 0, sizeof(f));
     struct pgwt_tm_result tm;
-    pgwt_compute_time_model(events, count, &f, from, to, 2000.0, &tm);
+    pgwt_compute_time_model(TW(events, count), &f, from, to, 2000.0, &tm);
     CHECK(tm.db_time_ms > 1900.0,
           "11c. and DB Time for the window is %.1f ms, i.e. it contains the "
           "straddler's clipped 2 s. The relabel would have left ~0",
@@ -1122,7 +1123,7 @@ static void test_instant_two_bounds(void)
     const struct pgwt_event_row *row;
 
     /* 14a. A window that OPENS AFTER the record closed. */
-    pgwt_compute_top_events(&ev, 1, &f, 20 * ONE_SEC, 30 * ONE_SEC,
+    pgwt_compute_top_events(TW(&ev, 1), &f, 20 * ONE_SEC, 30 * ONE_SEC,
                             10000.0, &res);
     row = row_for(&res, EV_LOCK);
     CHECK(row == NULL || row->count == 0,
@@ -1135,12 +1136,12 @@ static void test_instant_two_bounds(void)
      * TOTAL. The record is strictly interior to the first window, so this
      * is not a shared-boundary question. */
     uint64_t total = 0;
-    pgwt_compute_top_events(&ev, 1, &f, 10 * ONE_SEC, 16 * ONE_SEC,
+    pgwt_compute_top_events(TW(&ev, 1), &f, 10 * ONE_SEC, 16 * ONE_SEC,
                             6000.0, &res);
     row = row_for(&res, EV_LOCK);
     total += row ? row->count : 0;
     free(res.rows);
-    pgwt_compute_top_events(&ev, 1, &f, 16 * ONE_SEC, 22 * ONE_SEC,
+    pgwt_compute_top_events(TW(&ev, 1), &f, 16 * ONE_SEC, 22 * ONE_SEC,
                             6000.0, &res);
     row = row_for(&res, EV_LOCK);
     total += row ? row->count : 0;
@@ -1151,7 +1152,7 @@ static void test_instant_two_bounds(void)
           (unsigned long long)total);
 
     /* 14c. A zero-width window after the close. */
-    pgwt_compute_top_events(&ev, 1, &f, 20 * ONE_SEC, 20 * ONE_SEC,
+    pgwt_compute_top_events(TW(&ev, 1), &f, 20 * ONE_SEC, 20 * ONE_SEC,
                             0.0, &res);
     row = row_for(&res, EV_LOCK);
     CHECK(row == NULL || row->count == 0,
@@ -1162,7 +1163,7 @@ static void test_instant_two_bounds(void)
 
     /* 14d. INCLUSIVE at `to`, unchanged. A record closing exactly at the
      * right edge lies wholly inside the window and is ONE occurrence. */
-    pgwt_compute_top_events(&ev, 1, &f, 10 * ONE_SEC, 15 * ONE_SEC,
+    pgwt_compute_top_events(TW(&ev, 1), &f, 10 * ONE_SEC, 15 * ONE_SEC,
                             5000.0, &res);
     row = row_for(&res, EV_LOCK);
     CHECK(row && row->count == 1,
@@ -1173,7 +1174,7 @@ static void test_instant_two_bounds(void)
     free(res.rows);
 
     /* 14e. And exactly AT `from` too — the bound is >=, not >. */
-    pgwt_compute_top_events(&ev, 1, &f, 15 * ONE_SEC, 25 * ONE_SEC,
+    pgwt_compute_top_events(TW(&ev, 1), &f, 15 * ONE_SEC, 25 * ONE_SEC,
                             10000.0, &res);
     row = row_for(&res, EV_LOCK);
     CHECK(row && row->count == 1,
@@ -1186,7 +1187,7 @@ static void test_instant_two_bounds(void)
     /* 14f. The SECOND gated site: top_queries keeps its own count and
      * full_ns, so it needs its own leg rather than inheriting trust. */
     struct pgwt_queries_result qres;
-    pgwt_compute_top_queries(&ev, 1, &f, 20 * ONE_SEC, 30 * ONE_SEC,
+    pgwt_compute_top_queries(TW(&ev, 1), &f, 20 * ONE_SEC, 30 * ONE_SEC,
                              10000.0, &qres);
     uint64_t qcount = 0;
     for (int i = 0; i < qres.num_rows; i++)

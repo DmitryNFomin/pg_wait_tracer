@@ -204,6 +204,12 @@ enum pgwt_interval_index_refusal {
     PGWT_INTERVAL_INDEX_REFUSE_FILTERED,      /* filtered request: use raw */
     PGWT_INTERVAL_INDEX_REFUSE_NO_INTERVALS,  /* nothing selected: use raw */
     PGWT_INTERVAL_INDEX_REFUSE_COMPUTE,       /* compute_concurrency failed */
+    /* #424: no open-interval overlay was handed in. The index is built from
+     * CLOSED records, so a near-now window answered from it is short by
+     * exactly the in-flight time the overlay carries. Refuse rather than
+     * answer with a silent fail-closed overlay of our own: that would make
+     * this path the one place the wiring can be bypassed. */
+    PGWT_INTERVAL_INDEX_REFUSE_NO_OVERLAY,
 };
 
 const char *pgwt_interval_index_refusal_str(enum pgwt_interval_index_refusal r);
@@ -375,6 +381,7 @@ struct pgwt_interval_index_query_result {
  * 0 on success, -1 on refusal (out->refused says which, out->have_result is
  * 0 and the result struct is zeroed). */
 int pgwt_interval_index_query(const struct pgwt_interval_index *idx,
+                              const struct pgwt_overlay *ov,
                               const struct pgwt_filter *f,
                               uint64_t from_ns, uint64_t to_ns,
                               int num_buckets,

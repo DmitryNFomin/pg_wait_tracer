@@ -324,6 +324,7 @@
 #include <dirent.h>
 #include <time.h>
 #include <ctype.h>
+#include "test_window.h"
 
 static int tests_run = 0;
 static int tests_failed = 0;
@@ -1072,7 +1073,7 @@ static void run_time_model(const char *lbl, const struct fixture *fx,
                            const struct pgwt_filter *f)
 {
     struct pgwt_tm_result raw, sum;
-    pgwt_compute_time_model(fx->wall, fx->n, f, fx->from_ns, fx->to_ns,
+    pgwt_compute_time_model(TW(fx->wall, fx->n), f, fx->from_ns, fx->to_ns,
                             fx->wall_ms, &raw);
     pgwt_compute_time_model_from_summaries(fx->dir, fx->from_ns, fx->to_ns, f,
                                            fx->wall_ms, &sum);
@@ -1087,7 +1088,7 @@ static void run_top_events(const char *lbl, const struct fixture *fx,
                            const struct pgwt_filter *f)
 {
     struct pgwt_events_result raw, sum;
-    pgwt_compute_top_events(fx->wall, fx->n, f, fx->from_ns, fx->to_ns,
+    pgwt_compute_top_events(TW(fx->wall, fx->n), f, fx->from_ns, fx->to_ns,
                             fx->wall_ms, &raw);
     pgwt_compute_top_events_from_summaries(fx->dir, fx->from_ns, fx->to_ns, f,
                                            fx->wall_ms, &sum);
@@ -1109,7 +1110,7 @@ static void check_session_top_wait(const struct fixture *fx,
         memset(&pf, 0, sizeof(pf));
         pf.pid = b->pid;
         struct pgwt_events_result er;
-        pgwt_compute_top_events(fx->wall, fx->n, &pf, fx->from_ns, fx->to_ns,
+        pgwt_compute_top_events(TW(fx->wall, fx->n), &pf, fx->from_ns, fx->to_ns,
                                 fx->wall_ms, &er);
         const struct pgwt_event_row *r = ev_find(&er, b->top_wait_id);
         CHECK(r != NULL && r->total_ms > 0,
@@ -1131,7 +1132,7 @@ static void run_top_sessions(const char *lbl, const struct fixture *fx,
                              const struct pgwt_filter *f)
 {
     struct pgwt_sessions_result raw, sum;
-    pgwt_compute_top_sessions(fx->wall, fx->n, f, fx->from_ns, fx->to_ns,
+    pgwt_compute_top_sessions(TW(fx->wall, fx->n), f, fx->from_ns, fx->to_ns,
                               fx->wall_ms, &raw);
     pgwt_compute_top_sessions_from_summaries(fx->dir, fx->from_ns, fx->to_ns, f,
                                              fx->wall_ms, &sum);
@@ -1145,7 +1146,7 @@ static void run_top_queries(const char *lbl, const struct fixture *fx,
                             const struct pgwt_filter *f)
 {
     struct pgwt_queries_result raw, sum;
-    pgwt_compute_top_queries(fx->wall, fx->n, f, fx->from_ns, fx->to_ns,
+    pgwt_compute_top_queries(TW(fx->wall, fx->n), f, fx->from_ns, fx->to_ns,
                              fx->wall_ms, &raw);
     pgwt_compute_top_queries_from_summaries(fx->dir, fx->from_ns, fx->to_ns, f,
                                             fx->wall_ms, &sum);
@@ -1158,7 +1159,7 @@ static void run_aas(const char *lbl, const struct fixture *fx,
                     const struct pgwt_filter *f)
 {
     struct pgwt_aas_result raw, sum;
-    pgwt_compute_aas(fx->wall, fx->n, f, fx->from_ns, fx->to_ns, AAS_BUCKETS,
+    pgwt_compute_aas(TW(fx->wall, fx->n), f, fx->from_ns, fx->to_ns, AAS_BUCKETS,
                      0, AAS_MAX_EVENT_SERIES, &raw);
     pgwt_compute_aas_from_summaries(fx->dir, fx->from_ns, fx->to_ns, f,
                                     AAS_BUCKETS, &sum);
@@ -1397,7 +1398,7 @@ static void test_against_the_fixture(const struct fixture *fx)
     struct pgwt_filter f;
     memset(&f, 0, sizeof(f));
     struct pgwt_tm_result raw, sum;
-    pgwt_compute_time_model(fx->wall, fx->n, &f, fx->from_ns, fx->to_ns,
+    pgwt_compute_time_model(TW(fx->wall, fx->n), &f, fx->from_ns, fx->to_ns,
                             fx->wall_ms, &raw);
     pgwt_compute_time_model_from_summaries(fx->dir, fx->from_ns, fx->to_ns, &f,
                                            fx->wall_ms, &sum);
@@ -1420,7 +1421,7 @@ static void test_against_the_fixture(const struct fixture *fx)
         for (int i = 0; i < SLICE_N; i++)
             if (slice[i].ev == EV_CPU) cpu_ns += spec_dur_ns(i, s);
     double cpu_ms = (double)cpu_ns / 1e6;
-    pgwt_compute_time_model(fx->wall, fx->n, &f, fx->from_ns, fx->to_ns,
+    pgwt_compute_time_model(TW(fx->wall, fx->n), &f, fx->from_ns, fx->to_ns,
                             fx->wall_ms, &raw);
     pgwt_compute_time_model_from_summaries(fx->dir, fx->from_ns, fx->to_ns, &f,
                                            fx->wall_ms, &sum);
@@ -1472,7 +1473,7 @@ static void test_mutation_probes(const struct fixture *fx)
     /* 4a. time_model: one nanosecond of DB Time, and a deleted row. */
     {
         struct pgwt_tm_result raw, sum;
-        pgwt_compute_time_model(fx->wall, fx->n, &f, fx->from_ns, fx->to_ns,
+        pgwt_compute_time_model(TW(fx->wall, fx->n), &f, fx->from_ns, fx->to_ns,
                                 fx->wall_ms, &raw);
         pgwt_compute_time_model_from_summaries(fx->dir, fx->from_ns, fx->to_ns,
                                                &f, fx->wall_ms, &sum);
@@ -1509,7 +1510,7 @@ static void test_mutation_probes(const struct fixture *fx)
     /* 4b. top_events: count, total, percentile bucket, overflow flag. */
     {
         struct pgwt_events_result raw, sum;
-        pgwt_compute_top_events(fx->wall, fx->n, &f, fx->from_ns, fx->to_ns,
+        pgwt_compute_top_events(TW(fx->wall, fx->n), &f, fx->from_ns, fx->to_ns,
                                 fx->wall_ms, &raw);
         pgwt_compute_top_events_from_summaries(fx->dir, fx->from_ns, fx->to_ns,
                                                &f, fx->wall_ms, &sum);
@@ -1544,7 +1545,7 @@ static void test_mutation_probes(const struct fixture *fx)
     /* 4c. top_sessions. */
     {
         struct pgwt_sessions_result raw, sum;
-        pgwt_compute_top_sessions(fx->wall, fx->n, &f, fx->from_ns, fx->to_ns,
+        pgwt_compute_top_sessions(TW(fx->wall, fx->n), &f, fx->from_ns, fx->to_ns,
                                   fx->wall_ms, &raw);
         pgwt_compute_top_sessions_from_summaries(fx->dir, fx->from_ns,
                                                  fx->to_ns, &f, fx->wall_ms,
@@ -1585,7 +1586,7 @@ static void test_mutation_probes(const struct fixture *fx)
     /* 4d. top_queries. */
     {
         struct pgwt_queries_result raw, sum;
-        pgwt_compute_top_queries(fx->wall, fx->n, &f, fx->from_ns, fx->to_ns,
+        pgwt_compute_top_queries(TW(fx->wall, fx->n), &f, fx->from_ns, fx->to_ns,
                                  fx->wall_ms, &raw);
         pgwt_compute_top_queries_from_summaries(fx->dir, fx->from_ns, fx->to_ns,
                                                 &f, fx->wall_ms, &sum);
@@ -1616,7 +1617,7 @@ static void test_mutation_probes(const struct fixture *fx)
     /* 4e. aas. */
     {
         struct pgwt_aas_result raw, sum;
-        pgwt_compute_aas(fx->wall, fx->n, &f, fx->from_ns, fx->to_ns,
+        pgwt_compute_aas(TW(fx->wall, fx->n), &f, fx->from_ns, fx->to_ns,
                          AAS_BUCKETS, 0, AAS_MAX_EVENT_SERIES, &raw);
         pgwt_compute_aas_from_summaries(fx->dir, fx->from_ns, fx->to_ns, &f,
                                         AAS_BUCKETS, &sum);
@@ -1694,7 +1695,7 @@ static void bypass_empty_dir(void)
     struct pgwt_tm_result raw, sum;
     struct pgwt_trace_event none;
     memset(&none, 0, sizeof(none));
-    pgwt_compute_time_model(&none, 0, &f, from, to, 130000.0, &raw);
+    pgwt_compute_time_model(TW(&none, 0), &f, from, to, 130000.0, &raw);
     pgwt_compute_time_model_from_summaries(dir, from, to, &f, 130000.0, &sum);
 
     /* FIRST, show the vacuous pass is real: both sides ARE equal here. */
@@ -1735,7 +1736,7 @@ static void bypass_missing_dir(void)
     struct pgwt_events_result raw, sum;
     struct pgwt_trace_event none;
     memset(&none, 0, sizeof(none));
-    pgwt_compute_top_events(&none, 0, &f, 0, 0, 1.0, &raw);
+    pgwt_compute_top_events(TW(&none, 0), &f, 0, 0, 1.0, &raw);
     pgwt_compute_top_events_from_summaries(dir, 1, 2, &f, 1.0, &sum);
     CHECK(diff_top_events("absent", &raw, &sum, 0) > 0,
           "5b: the comparator refuses a missing directory");
@@ -1759,7 +1760,7 @@ static void bypass_window_no_overlap(const struct fixture *fx)
     CHECK(rc.records == 0, "the window sees no records (%d)", rc.records);
 
     struct pgwt_tm_result raw, sum;
-    pgwt_compute_time_model(fx->wall, fx->n, &f, from, to, fx->wall_ms, &raw);
+    pgwt_compute_time_model(TW(fx->wall, fx->n), &f, from, to, fx->wall_ms, &raw);
     pgwt_compute_time_model_from_summaries(fx->dir, from, to, &f, fx->wall_ms,
                                            &sum);
     CHECK(diff_time_model("no-overlap", &raw, &sum, 0) > 0,
@@ -1809,7 +1810,7 @@ static void bypass_unreadable_file(const struct fixture *fx)
     struct pgwt_filter f;
     memset(&f, 0, sizeof(f));
     struct pgwt_tm_result raw, sum;
-    pgwt_compute_time_model(fx->wall, fx->n, &f, fx->from_ns, fx->to_ns,
+    pgwt_compute_time_model(TW(fx->wall, fx->n), &f, fx->from_ns, fx->to_ns,
                             fx->wall_ms, &raw);
     pgwt_compute_time_model_from_summaries(dir, fx->from_ns, fx->to_ns, &f,
                                            fx->wall_ms, &sum);
@@ -1838,7 +1839,7 @@ static void bypass_one_second_window(const struct fixture *fx)
     uint64_t from = fx->to_ns - ONE_SEC;
     uint64_t to   = fx->to_ns;
     struct pgwt_tm_result raw, sum;
-    pgwt_compute_time_model(fx->wall, fx->n, &f, from, to, 1000.0, &raw);
+    pgwt_compute_time_model(TW(fx->wall, fx->n), &f, from, to, 1000.0, &raw);
     pgwt_compute_time_model_from_summaries(fx->dir, from, to, &f, 1000.0, &sum);
     int d = diff_time_model("1 s window", &raw, &sum, 1);
     CHECK(d == 0, "5e: a 1 s window agrees too (%d disagreeing field(s))", d);
@@ -1895,7 +1896,7 @@ static void bypass_end_bound(const struct fixture *fx)
           (unsigned long long)next_ns);
 
     struct pgwt_tm_result raw, sum;
-    pgwt_compute_time_model(fx->wall, fx->n, &f, from, to, 1000.0, &raw);
+    pgwt_compute_time_model(TW(fx->wall, fx->n), &f, from, to, 1000.0, &raw);
     pgwt_compute_time_model_from_summaries(fx->dir, from, to, &f, 1000.0, &sum);
 
     double want_half_open = (double)in_ns / 1e6;
@@ -1963,7 +1964,7 @@ static void bypass_absent_not_wrong(const struct fixture *fx)
     f.event_id = WEI(PG_WAIT_EXTENSION, 4242);   /* not in the fixture */
     f.has_event_filter = 1;
     struct pgwt_events_result raw, sum;
-    pgwt_compute_top_events(fx->wall, fx->n, &f, fx->from_ns, fx->to_ns,
+    pgwt_compute_top_events(TW(fx->wall, fx->n), &f, fx->from_ns, fx->to_ns,
                             fx->wall_ms, &raw);
     pgwt_compute_top_events_from_summaries(fx->dir, fx->from_ns, fx->to_ns, &f,
                                            fx->wall_ms, &sum);
@@ -2122,7 +2123,7 @@ static void div316_half_open(const struct fixture *fx)
     uint64_t from = fx->from_ns + (uint64_t)K * ONE_SEC;
     uint64_t to   = from + ONE_SEC;
     struct pgwt_tm_result raw, sum;
-    pgwt_compute_time_model(fx->wall, fx->n, &f, from, to, 1000.0, &raw);
+    pgwt_compute_time_model(TW(fx->wall, fx->n), &f, from, to, 1000.0, &raw);
     pgwt_compute_time_model_from_summaries(fx->dir, from, to, &f, 1000.0, &sum);
     CHECK(raw.db_time_ms == (double)in_ns / 1e6,
           "6a: the raw path answers slice %d exactly (%.6f == %.6f ms)", K,
@@ -2149,7 +2150,7 @@ static void div316_half_open(const struct fixture *fx)
           (unsigned long long)all_but_last);
     uint64_t to2 = fx->from_ns + (uint64_t)(SECS - 1) * ONE_SEC;
     double wall2 = (double)(to2 - fx->from_ns) / 1e6;
-    pgwt_compute_time_model(fx->wall, fx->n, &f, fx->from_ns, to2, wall2, &raw);
+    pgwt_compute_time_model(TW(fx->wall, fx->n), &f, fx->from_ns, to2, wall2, &raw);
     pgwt_compute_time_model_from_summaries(fx->dir, fx->from_ns, to2, &f,
                                            wall2, &sum);
     CHECK(sum.db_time_ms == (double)all_but_last / 1e6,
@@ -2221,7 +2222,7 @@ static void div317_query_cpu(const struct fixture *fx)
     f.query_id = QID_A;
 
     struct pgwt_events_result raw, sum;
-    pgwt_compute_top_events(fx->wall, fx->n, &f, fx->from_ns, fx->to_ns,
+    pgwt_compute_top_events(TW(fx->wall, fx->n), &f, fx->from_ns, fx->to_ns,
                             fx->wall_ms, &raw);
     pgwt_compute_top_events_from_summaries(fx->dir, fx->from_ns, fx->to_ns, &f,
                                            fx->wall_ms, &sum);
@@ -2343,11 +2344,11 @@ static void div318_session_filters(const struct fixture *fx)
     f_event.has_event_filter = 1;
 
     struct pgwt_sessions_result rn, rc_, re, sn, sc, se;
-    pgwt_compute_top_sessions(fx->wall, fx->n, &f_none, fx->from_ns, fx->to_ns,
+    pgwt_compute_top_sessions(TW(fx->wall, fx->n), &f_none, fx->from_ns, fx->to_ns,
                               fx->wall_ms, &rn);
-    pgwt_compute_top_sessions(fx->wall, fx->n, &f_class, fx->from_ns,
+    pgwt_compute_top_sessions(TW(fx->wall, fx->n), &f_class, fx->from_ns,
                               fx->to_ns, fx->wall_ms, &rc_);
-    pgwt_compute_top_sessions(fx->wall, fx->n, &f_event, fx->from_ns,
+    pgwt_compute_top_sessions(TW(fx->wall, fx->n), &f_event, fx->from_ns,
                               fx->to_ns, fx->wall_ms, &re);
     pgwt_compute_top_sessions_from_summaries(fx->dir, fx->from_ns, fx->to_ns,
                                              &f_none, fx->wall_ms, &sn);
@@ -2524,7 +2525,7 @@ static void div319_top_wait(uint64_t origin)
     struct pgwt_filter f;
     memset(&f, 0, sizeof(f));
     struct pgwt_sessions_result raw, sum;
-    pgwt_compute_top_sessions(m.wall, m.n, &f, m.from_ns, m.to_ns, m.wall_ms,
+    pgwt_compute_top_sessions(TW(m.wall, m.n), &f, m.from_ns, m.to_ns, m.wall_ms,
                               &raw);
     pgwt_compute_top_sessions_from_summaries(m.dir, m.from_ns, m.to_ns, &f,
                                              m.wall_ms, &sum);

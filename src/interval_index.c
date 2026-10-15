@@ -36,6 +36,7 @@ const char *pgwt_interval_index_refusal_str(enum pgwt_interval_index_refusal r)
     case PGWT_INTERVAL_INDEX_REFUSE_FILTERED:   return "filtered-request";
     case PGWT_INTERVAL_INDEX_REFUSE_NO_INTERVALS: return "no-intervals-selected";
     case PGWT_INTERVAL_INDEX_REFUSE_COMPUTE:    return "compute-failed";
+    case PGWT_INTERVAL_INDEX_REFUSE_NO_OVERLAY: return "no-overlay";
     }
     return "unknown";
 }
@@ -453,6 +454,7 @@ static int query_refuse(struct pgwt_interval_index_query_result *out,
 }
 
 int pgwt_interval_index_query(const struct pgwt_interval_index *idx,
+                              const struct pgwt_overlay *ov,
                               const struct pgwt_filter *f,
                               uint64_t from_ns, uint64_t to_ns,
                               int num_buckets,
@@ -464,6 +466,11 @@ int pgwt_interval_index_query(const struct pgwt_interval_index *idx,
     memset(out, 0, sizeof(*out));
     if (!idx || !f)
         return query_refuse(out, PGWT_INTERVAL_INDEX_REFUSE_NULL);
+    /* #424: refuse EARLY, before any walk or materialisation — an index
+     * answer with no overlay is short by the in-flight time, and the cheapest
+     * place to say so is before the work. */
+    if (!ov)
+        return query_refuse(out, PGWT_INTERVAL_INDEX_REFUSE_NO_OVERLAY);
     if (idx->version != PGWT_INTERVAL_INDEX_VERSION)
         return query_refuse(out, PGWT_INTERVAL_INDEX_REFUSE_VERSION);
     if (idx->failed)
@@ -518,7 +525,12 @@ int pgwt_interval_index_query(const struct pgwt_interval_index *idx,
     out->bytes_materialised = (long)((size_t)nsel * sizeof(*arr));
 
     /* THE SHIPPING COMPUTATION. Not a copy of it. */
-    pgwt_compute_concurrency(arr, (int)nsel, f, from_ns, to_ns, num_buckets,
+    struct pgwt_window w;
+    if (pgwt_window_bind(&w, arr, (int)nsel, ov) != 0) {
+        free(arr);
+        return query_refuse(out, PGWT_INTERVAL_INDEX_REFUSE_NO_OVERLAY);
+    }
+    pgwt_compute_concurrency(&w, f, from_ns, to_ns, num_buckets,
                              burst_window_ns, burst_threshold, &out->result);
     free(arr);
 

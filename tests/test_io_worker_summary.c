@@ -100,6 +100,7 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include <time.h>
+#include "test_window.h"
 
 static int tests_run, tests_failed;
 /* Section 5 runs the real checks against crafted bad inputs and asserts they
@@ -580,7 +581,7 @@ static int compare_paths(const char *dir, const struct pgwt_trace_event *ev,
     struct pgwt_filter f;
     memset(&f, 0, sizeof(f));
     struct pgwt_tm_result rtm, stm;
-    pgwt_compute_time_model(tag, n, &f, from, to, wall_ms, &rtm);
+    pgwt_compute_time_model(TW(tag, n), &f, from, to, wall_ms, &rtm);
     pgwt_compute_time_model_from_summaries(dir, from, to, &f, wall_ms, &stm);
     struct pgwt_heatmap_result rhm, shm;
     pgwt_compute_heatmap(tag, n, &f, from, to, SECS, &rhm);

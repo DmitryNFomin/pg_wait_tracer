@@ -44,6 +44,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <math.h>
+#include "test_window.h"
 
 static int failures = 0;
 static int checks   = 0;
@@ -228,26 +229,26 @@ static void test_straddler_leading_edge(void)
           "fixture really straddles `from` (4 s wait, 1 s inside)");
 
     struct pgwt_tm_result tm;
-    pgwt_compute_time_model(evs, 1, &f, WFROM, WTO, 10000.0, &tm);
+    pgwt_compute_time_model(TW(evs, 1), &f, WFROM, WTO, 10000.0, &tm);
     CHECK_MS(tm.db_time_ms, 1000.0, "time_model DB Time = in-window 1 s");
     CHECK_MS(tm_class_ms(&tm, "Lock"), 1000.0, "time_model Lock row = 1 s");
     CHECK_NUM(tm.aas, 0.1, "time_model AAS = 1 s / 10 s window (dimensionless)");
     free(tm.rows);
 
     struct pgwt_events_result te;
-    pgwt_compute_top_events(evs, 1, &f, WFROM, WTO, 10000.0, &te);
+    pgwt_compute_top_events(TW(evs, 1), &f, WFROM, WTO, 10000.0, &te);
     CHECK_MS(te.db_time_ms, 1000.0, "top_events DB Time = 1 s");
     CHECK_MS(ev_total_ms(&te, LOCK_RELATION), 1000.0,
              "top_events Lock:relation total = 1 s");
     free(te.rows);
 
     struct pgwt_sessions_result ts;
-    pgwt_compute_top_sessions(evs, 1, &f, WFROM, WTO, 10000.0, &ts);
+    pgwt_compute_top_sessions(TW(evs, 1), &f, WFROM, WTO, 10000.0, &ts);
     CHECK_MS(sess_ms(&ts, 4242), 1000.0, "top_sessions pid 4242 = 1 s");
     free(ts.rows);
 
     struct pgwt_queries_result tq;
-    pgwt_compute_top_queries(evs, 1, &f, WFROM, WTO, 10000.0, &tq);
+    pgwt_compute_top_queries(TW(evs, 1), &f, WFROM, WTO, 10000.0, &tq);
     const struct pgwt_query_row *q = qrow(&tq, 77);
     CHECK(q != NULL, "top_queries has the query row");
     if (q) CHECK_MS(q->total_ms, 1000.0, "top_queries query 77 total = 1 s");
@@ -268,7 +269,7 @@ static void test_straddler_trailing_edge(void)
     memset(&f, 0, sizeof(f));
 
     struct pgwt_tm_result tm;
-    pgwt_compute_time_model(evs, 1, &f, WFROM, WTO, 10000.0, &tm);
+    pgwt_compute_time_model(TW(evs, 1), &f, WFROM, WTO, 10000.0, &tm);
     /* starts at WTO-2s, window ends at WTO → 2 s inside */
     CHECK_MS(tm.db_time_ms, 2000.0, "time_model counts 2 s of an 8 s wait");
     free(tm.rows);
@@ -311,7 +312,7 @@ static void test_cross_tab_agreement(void)
     const double expect_db_ms = 9000.0;
 
     struct pgwt_tm_result tm;
-    pgwt_compute_time_model(evs, n, &f, WFROM, WTO, 10000.0, &tm);
+    pgwt_compute_time_model(TW(evs, n), &f, WFROM, WTO, 10000.0, &tm);
     CHECK_MS(tm.db_time_ms, expect_db_ms, "time_model DB Time (hand-computed)");
     CHECK_MS(tm.idle_time_ms, 2000.0,
              "idle time is clipped too (3 s Client:ClientRead, 2 s inside)");
@@ -324,7 +325,7 @@ static void test_cross_tab_agreement(void)
     int bucket_counts[] = {1, 10, 60, 120};
     for (int k = 0; k < 4; k++) {
         struct pgwt_aas_result aas;
-        pgwt_compute_aas(evs, n, &f, WFROM, WTO, bucket_counts[k], 0, 0, &aas);
+        pgwt_compute_aas(TW(evs, n), &f, WFROM, WTO, bucket_counts[k], 0, 0, &aas);
         char msg[160];
         /* pgwt_compute_aas rounds bucket_ns UP, so its last bucket can end
          * past `to` by (num_buckets · bucket_ns − range) ns and sweep up that
@@ -370,24 +371,24 @@ static void test_unbounded_window_unchanged(void)
     memset(&f, 0, sizeof(f));
 
     struct pgwt_tm_result tm;
-    pgwt_compute_time_model(evs, n, &f, 0, 0, 10000.0, &tm);
+    pgwt_compute_time_model(TW(evs, n), &f, 0, 0, 10000.0, &tm);
     CHECK_MS(tm.db_time_ms, 7000.0, "unbounded: 4 s + 2 s + 1 s in full");
     CHECK_MS(tm.cpu_ms, 400.0, "unbounded: measured CPU is not scaled");
     free(tm.rows);
 
     struct pgwt_events_result te;
-    pgwt_compute_top_events(evs, n, &f, 0, 0, 10000.0, &te);
+    pgwt_compute_top_events(TW(evs, n), &f, 0, 0, 10000.0, &te);
     CHECK_MS(ev_total_ms(&te, LOCK_RELATION), 4000.0,
              "unbounded: top_events keeps the full 4 s");
     free(te.rows);
 
     struct pgwt_sessions_result ts;
-    pgwt_compute_top_sessions(evs, n, &f, 0, 0, 10000.0, &ts);
+    pgwt_compute_top_sessions(TW(evs, n), &f, 0, 0, 10000.0, &ts);
     CHECK_MS(sess_ms(&ts, 1), 4000.0, "unbounded: top_sessions keeps 4 s");
     free(ts.rows);
 
     struct pgwt_queries_result tq;
-    pgwt_compute_top_queries(evs, n, &f, 0, 0, 10000.0, &tq);
+    pgwt_compute_top_queries(TW(evs, n), &f, 0, 0, 10000.0, &tq);
     const struct pgwt_query_row *q = qrow(&tq, 11);
     if (q) CHECK_MS(q->total_ms, 4000.0, "unbounded: top_queries keeps 4 s");
     else   CHECK(0, "unbounded: top_queries has the query row");
@@ -395,10 +396,10 @@ static void test_unbounded_window_unchanged(void)
 
     /* Half-bounded windows: only the given side clips. */
     struct pgwt_tm_result lo, hi;
-    pgwt_compute_time_model(evs, 1, &f, WFROM, 0, 10000.0, &lo);
+    pgwt_compute_time_model(TW(evs, 1), &f, WFROM, 0, 10000.0, &lo);
     CHECK_MS(lo.db_time_ms, 1000.0, "from set / to unbounded clips the start");
     free(lo.rows);
-    pgwt_compute_time_model(evs, 1, &f, 0, WTO, 10000.0, &hi);
+    pgwt_compute_time_model(TW(evs, 1), &f, 0, WTO, 10000.0, &hi);
     CHECK_MS(hi.db_time_ms, 4000.0, "to set / from unbounded leaves it whole");
     free(hi.rows);
 }
@@ -417,13 +418,13 @@ static void test_bypass_paths(void)
      * straddler oracle above is NOT zero, so "everything is 0" cannot pass
      * section 1. */
     struct pgwt_tm_result tm0;
-    pgwt_compute_time_model(NULL, 0, &f, WFROM, WTO, 10000.0, &tm0);
+    pgwt_compute_time_model(TW(NULL, 0), &f, WFROM, WTO, 10000.0, &tm0);
     CHECK_MS(tm0.db_time_ms, 0.0, "empty input yields 0 ms, not garbage");
     CHECK(tm0.num_rows >= 1, "empty input still emits the DB Time row");
     free(tm0.rows);
 
     struct pgwt_aas_result aas0;
-    pgwt_compute_aas(NULL, 0, &f, WFROM, WTO, 10, 0, 0, &aas0);
+    pgwt_compute_aas(TW(NULL, 0), &f, WFROM, WTO, 10, 0, 0, &aas0);
     CHECK(aas0.num_buckets == 10, "empty input still lays out its buckets");
     CHECK_MS(aas_db_ns(&aas0) / 1e6, 0.0, "empty input: AAS total 0");
     free(aas0.buckets);
@@ -435,7 +436,7 @@ static void test_bypass_paths(void)
     struct pgwt_trace_event interior =
         mk(1, LOCK_RELATION, WFROM + S(5), S(2), 11, PGWT_CPU_NS_UNKNOWN);
     struct pgwt_tm_result tmi;
-    pgwt_compute_time_model(&interior, 1, &f, WFROM, WTO, 10000.0, &tmi);
+    pgwt_compute_time_model(TW(&interior, 1), &f, WFROM, WTO, 10000.0, &tmi);
     CHECK_MS(tmi.db_time_ms, 2000.0, "interior event is not clipped");
     free(tmi.rows);
 
@@ -444,7 +445,7 @@ static void test_bypass_paths(void)
     struct pgwt_trace_event before =
         mk(1, LOCK_RELATION, WFROM - S(1), S(2), 11, PGWT_CPU_NS_UNKNOWN);
     struct pgwt_tm_result tmb;
-    pgwt_compute_time_model(&before, 1, &f, WFROM, WTO, 10000.0, &tmb);
+    pgwt_compute_time_model(TW(&before, 1), &f, WFROM, WTO, 10000.0, &tmb);
     CHECK_MS(tmb.db_time_ms, 0.0, "event ending before `from` contributes 0");
     free(tmb.rows);
 
@@ -452,7 +453,7 @@ static void test_bypass_paths(void)
     struct pgwt_trace_event after =
         mk(1, LOCK_RELATION, WTO + S(3), S(1), 11, PGWT_CPU_NS_UNKNOWN);
     struct pgwt_tm_result tma;
-    pgwt_compute_time_model(&after, 1, &f, WFROM, WTO, 10000.0, &tma);
+    pgwt_compute_time_model(TW(&after, 1), &f, WFROM, WTO, 10000.0, &tma);
     CHECK_MS(tma.db_time_ms, 0.0, "event starting after `to` contributes 0");
     free(tma.rows);
 
@@ -463,7 +464,7 @@ static void test_bypass_paths(void)
         mk(2, CPU_GAP,       WFROM + S(1), S(2), 12, S(1)),
     };
     struct pgwt_tm_result tmz;
-    pgwt_compute_time_model(mixed, 2, &f, WFROM, WFROM, 0.0, &tmz);
+    pgwt_compute_time_model(TW(mixed, 2), &f, WFROM, WFROM, 0.0, &tmz);
     CHECK_MS(tmz.db_time_ms, 0.0, "zero-width window yields 0 ms");
     CHECK_MS(tmz.cpu_ms, 0.0, "zero-width window yields 0 CPU*");
     free(tmz.rows);
@@ -473,7 +474,7 @@ static void test_bypass_paths(void)
     struct pgwt_trace_event zero =
         mk(1, CPU_GAP, WFROM + S(2), 0, 11, 0);
     struct pgwt_tm_result tmzd;
-    pgwt_compute_time_model(&zero, 1, &f, WFROM, WTO, 10000.0, &tmzd);
+    pgwt_compute_time_model(TW(&zero, 1), &f, WFROM, WTO, 10000.0, &tmzd);
     CHECK_MS(tmzd.db_time_ms, 0.0, "zero-duration record adds 0 ms");
     CHECK(!isnan(tmzd.cpu_ms) && tmzd.cpu_ms == 0.0,
           "zero-duration record leaves CPU* a real 0, not NaN");
@@ -496,13 +497,13 @@ static void test_bypass_paths(void)
         mk(1, LOCK_RELATION, WFROM + S(1), WFROM + S(1) + S(5), 11,
            PGWT_CPU_NS_UNKNOWN);
     struct pgwt_tm_result tmc;
-    pgwt_compute_time_model(&corrupt, 1, &f, WFROM, WTO, 10000.0, &tmc);
+    pgwt_compute_time_model(TW(&corrupt, 1), &f, WFROM, WTO, 10000.0, &tmc);
     CHECK_MS(tmc.db_time_ms, 0.0,
              "duration > timestamp is refused, not clamped to a 1 s window");
     free(tmc.rows);
 
     struct pgwt_tm_result tmcu;
-    pgwt_compute_time_model(&corrupt, 1, &f, 0, 0, 10000.0, &tmcu);
+    pgwt_compute_time_model(TW(&corrupt, 1), &f, 0, 0, 10000.0, &tmcu);
     CHECK_MS(tmcu.db_time_ms, 0.0,
              "...refused on the UNBOUNDED path too, not counted as timestamp_ns");
     free(tmcu.rows);
@@ -517,11 +518,11 @@ static void test_bypass_paths(void)
         corrupt,
     };
     struct pgwt_tm_result tmmc;
-    pgwt_compute_time_model(mixed_corrupt, 2, &f, WFROM, WTO, 10000.0, &tmmc);
+    pgwt_compute_time_model(TW(mixed_corrupt, 2), &f, WFROM, WTO, 10000.0, &tmmc);
     CHECK_MS(tmmc.db_time_ms, 2000.0,
              "an impossible record does not disturb the valid one beside it");
     struct pgwt_aas_result aasc;
-    pgwt_compute_aas(mixed_corrupt, 2, &f, WFROM, WTO, 10, 0, 0, &aasc);
+    pgwt_compute_aas(TW(mixed_corrupt, 2), &f, WFROM, WTO, 10, 0, 0, &aasc);
     CHECK_MS(aas_db_ns(&aasc) / 1e6, tmmc.db_time_ms,
              "AAS and time_model agree on an array containing garbage");
     free(aasc.buckets);
@@ -535,11 +536,11 @@ static void test_bypass_paths(void)
     memset(&fp, 0, sizeof(fp));
     fp.pid = 999999;
     struct pgwt_tm_result tmf;
-    pgwt_compute_time_model(mixed, 2, &fp, WFROM, WTO, 10000.0, &tmf);
+    pgwt_compute_time_model(TW(mixed, 2), &fp, WFROM, WTO, 10000.0, &tmf);
     CHECK_MS(tmf.db_time_ms, 0.0, "non-matching filter yields 0, vacuously");
     free(tmf.rows);
     struct pgwt_tm_result tmn;
-    pgwt_compute_time_model(mixed, 2, &f, WFROM, WTO, 10000.0, &tmn);
+    pgwt_compute_time_model(TW(mixed, 2), &f, WFROM, WTO, 10000.0, &tmn);
     CHECK(tmn.db_time_ms > 0.0,
           "...and the SAME events without the filter are non-zero");
     free(tmn.rows);
@@ -558,7 +559,7 @@ static void test_latency_columns_keep_full_duration(void)
     memset(&f, 0, sizeof(f));
 
     struct pgwt_events_result te;
-    pgwt_compute_top_events(evs, 1, &f, WFROM, WTO, 10000.0, &te);
+    pgwt_compute_top_events(TW(evs, 1), &f, WFROM, WTO, 10000.0, &te);
     const struct pgwt_event_row *r = ev_row(&te, LOCK_RELATION);
     CHECK(r != NULL, "top_events has the Lock:relation row");
     if (r) {
@@ -572,7 +573,7 @@ static void test_latency_columns_keep_full_duration(void)
     free(te.rows);
 
     struct pgwt_queries_result tq;
-    pgwt_compute_top_queries(evs, 1, &f, WFROM, WTO, 10000.0, &tq);
+    pgwt_compute_top_queries(TW(evs, 1), &f, WFROM, WTO, 10000.0, &tq);
     const struct pgwt_query_row *q = qrow(&tq, 11);
     CHECK(q != NULL, "top_queries has the query row");
     if (q) {
@@ -642,7 +643,7 @@ static void test_right_edge_open_wait(void)
           "fixture really crosses `to` (closes 2 s after the window ends)");
 
     struct pgwt_tm_result tm;
-    pgwt_compute_time_model(evs, 2, &f, RA_FROM, RA_TO, 18000.0, &tm);
+    pgwt_compute_time_model(TW(evs, 2), &f, RA_FROM, RA_TO, 18000.0, &tm);
     /* TIME legs — green on 304a772 at this layer, red through the loader. */
     CHECK_MS(tm.db_time_ms, 11000.0,
              "time_model DB Time = 8 s clipped straddler + 3 s interior");
@@ -650,7 +651,7 @@ static void test_right_edge_open_wait(void)
     free(tm.rows);
 
     struct pgwt_events_result te;
-    pgwt_compute_top_events(evs, 2, &f, RA_FROM, RA_TO, 18000.0, &te);
+    pgwt_compute_top_events(TW(evs, 2), &f, RA_FROM, RA_TO, 18000.0, &te);
     CHECK_MS(ev_total_ms(&te, LOCK_RELATION), 11000.0,
              "top_events Lock:relation time = 11 s");
     /* OCCURRENCE legs — RED on 304a772: count 2, exact_count 2, max 10 s. */
@@ -674,12 +675,12 @@ static void test_right_edge_open_wait(void)
     free(te.rows);
 
     struct pgwt_sessions_result ts;
-    pgwt_compute_top_sessions(evs, 2, &f, RA_FROM, RA_TO, 18000.0, &ts);
+    pgwt_compute_top_sessions(TW(evs, 2), &f, RA_FROM, RA_TO, 18000.0, &ts);
     CHECK_MS(sess_ms(&ts, 5001), 11000.0, "top_sessions pid 5001 = 11 s");
     free(ts.rows);
 
     struct pgwt_queries_result tq;
-    pgwt_compute_top_queries(evs, 2, &f, RA_FROM, RA_TO, 18000.0, &tq);
+    pgwt_compute_top_queries(TW(evs, 2), &f, RA_FROM, RA_TO, 18000.0, &tq);
     const struct pgwt_query_row *q = qrow(&tq, 88);
     CHECK(q != NULL, "top_queries has the query row");
     if (q) {
@@ -707,7 +708,7 @@ static void test_right_edge_counted_window(void)
     memset(&f, 0, sizeof(f));
 
     struct pgwt_events_result te;
-    pgwt_compute_top_events(evs, 2, &f, RA_FROM, RT + S(1), 21000.0, &te);
+    pgwt_compute_top_events(TW(evs, 2), &f, RA_FROM, RT + S(1), 21000.0, &te);
     CHECK_MS(ev_total_ms(&te, LOCK_RELATION), 13000.0,
              "both waits whole: 10 s + 3 s");
     CHECK_U64(ev_count(&te, LOCK_RELATION), 2,
@@ -746,13 +747,13 @@ static void test_right_edge_whole_window_spanner(void)
           "fixture really spans the whole window on both sides");
 
     struct pgwt_tm_result tm;
-    pgwt_compute_time_model(evs, 1, &f, RA_FROM, RA_TO, 18000.0, &tm);
+    pgwt_compute_time_model(TW(evs, 1), &f, RA_FROM, RA_TO, 18000.0, &tm);
     CHECK_MS(tm.db_time_ms, 18000.0, "spanner fills the window: 18 s");
     CHECK_MS(tm_class_ms(&tm, "Timeout"), 18000.0, "…on the Timeout row");
     free(tm.rows);
 
     struct pgwt_events_result te;
-    pgwt_compute_top_events(evs, 1, &f, RA_FROM, RA_TO, 18000.0, &te);
+    pgwt_compute_top_events(TW(evs, 1), &f, RA_FROM, RA_TO, 18000.0, &te);
     CHECK_MS(te.db_time_ms, 18000.0,
              "top_events still REPORTS the 18 s (independent accumulator)");
     CHECK_U64(ev_count(&te, TIMEOUT_PGSLEEP), 0,
@@ -760,7 +761,7 @@ static void test_right_edge_whole_window_spanner(void)
     free(te.rows);
 
     struct pgwt_sessions_result ts;
-    pgwt_compute_top_sessions(evs, 1, &f, RA_FROM, RA_TO, 18000.0, &ts);
+    pgwt_compute_top_sessions(TW(evs, 1), &f, RA_FROM, RA_TO, 18000.0, &ts);
     CHECK_MS(sess_ms(&ts, 5002), 18000.0, "top_sessions pid 5002 = 18 s");
     free(ts.rows);
 }
@@ -792,7 +793,7 @@ static void test_right_edge_adjacent_sweep(void)
     int owning_window = -1;
     for (int i = 0; i < nwin; i++) {
         struct pgwt_events_result te;
-        pgwt_compute_top_events(evs, 1, &f, edges[i], edges[i + 1],
+        pgwt_compute_top_events(TW(evs, 1), &f, edges[i], edges[i + 1],
                                 (double)(edges[i + 1] - edges[i]) / 1e6, &te);
         double  ms = ev_total_ms(&te, LOCK_RELATION);
         uint64_t c = ev_count(&te, LOCK_RELATION);
@@ -825,7 +826,7 @@ static void test_right_edge_bypass(void)
     /* 6e-1. UNBOUNDED (to_ns == 0) must be BIT-IDENTICAL to today: no
      * admission rule applies, every record is whole, every record counts. */
     struct pgwt_events_result tu;
-    pgwt_compute_top_events(evs, 3, &f, 0, 0, 170000.0, &tu);
+    pgwt_compute_top_events(TW(evs, 3), &f, 0, 0, 170000.0, &tu);
     CHECK_MS(ev_total_ms(&tu, LOCK_RELATION), 13000.0,
              "unbounded: Lock keeps 10 s + 3 s");
     CHECK_U64(ev_count(&tu, LOCK_RELATION), 2,
@@ -839,7 +840,7 @@ static void test_right_edge_bypass(void)
     /* 6e-2. A fixture that does NOT straddle must produce a NON-ZERO value,
      * so none of section 6 can pass by looking at nothing. */
     struct pgwt_events_result tn;
-    pgwt_compute_top_events(&evs[1], 1, &f, RA_FROM, RA_TO, 18000.0, &tn);
+    pgwt_compute_top_events(TW(&evs[1], 1), &f, RA_FROM, RA_TO, 18000.0, &tn);
     CHECK_MS(ev_total_ms(&tn, LOCK_RELATION), 3000.0,
              "non-straddling fixture is non-zero (3 s), so 0 is a real answer");
     CHECK_U64(ev_count(&tn, LOCK_RELATION), 1,
@@ -849,7 +850,7 @@ static void test_right_edge_bypass(void)
     /* 6e-3. Zero-width window at a point no record closes in: no time, no
      * occurrence — and no divide-by-zero in the in-window fraction. */
     struct pgwt_events_result tz;
-    pgwt_compute_top_events(evs, 3, &f, RT - S(3), RT - S(3), 0.0, &tz);
+    pgwt_compute_top_events(TW(evs, 3), &f, RT - S(3), RT - S(3), 0.0, &tz);
     CHECK_MS(tz.db_time_ms, 0.0, "zero-width window: 0 ms");
     CHECK_U64(ev_count(&tz, LOCK_RELATION), 0,
               "zero-width window: 0 occurrences");
@@ -859,7 +860,7 @@ static void test_right_edge_bypass(void)
      * IS an occurrence — "instant" is the whole point of the rule. */
     struct pgwt_trace_event instant = mk(5003, LOCK_RELATION, RA_TO, 0, 88, 0);
     struct pgwt_events_result ti;
-    pgwt_compute_top_events(&instant, 1, &f, RA_FROM, RA_TO, 18000.0, &ti);
+    pgwt_compute_top_events(TW(&instant, 1), &f, RA_FROM, RA_TO, 18000.0, &ti);
     CHECK_MS(ev_total_ms(&ti, LOCK_RELATION), 0.0,
              "zero-duration record at `to`: 0 ms of time");
     CHECK_U64(ev_count(&ti, LOCK_RELATION), 1,
@@ -872,7 +873,7 @@ static void test_right_edge_bypass(void)
     struct pgwt_trace_event past =
         mk(5004, LOCK_RELATION, RT + S(30), S(2), 88, PGWT_CPU_NS_UNKNOWN);
     struct pgwt_events_result tp;
-    pgwt_compute_top_events(&past, 1, &f, RA_FROM, RA_TO, 18000.0, &tp);
+    pgwt_compute_top_events(TW(&past, 1), &f, RA_FROM, RA_TO, 18000.0, &tp);
     CHECK_MS(tp.db_time_ms, 0.0, "record wholly past `to`: 0 ms");
     CHECK_U64(ev_count(&tp, LOCK_RELATION), 0,
               "record wholly past `to`: 0 occurrences");
@@ -882,7 +883,7 @@ static void test_right_edge_bypass(void)
     struct pgwt_trace_event before =
         mk(5005, LOCK_RELATION, RA_FROM - S(1), S(2), 88, PGWT_CPU_NS_UNKNOWN);
     struct pgwt_events_result tb;
-    pgwt_compute_top_events(&before, 1, &f, RA_FROM, RA_TO, 18000.0, &tb);
+    pgwt_compute_top_events(TW(&before, 1), &f, RA_FROM, RA_TO, 18000.0, &tb);
     CHECK_MS(tb.db_time_ms, 0.0, "record wholly before `from`: 0 ms");
     CHECK_U64(ev_count(&tb, LOCK_RELATION), 0,
               "record wholly before `from`: 0 occurrences");
@@ -891,7 +892,7 @@ static void test_right_edge_bypass(void)
     /* 6e-7. Empty input: a real zero, not an unexamined one. Paired with
      * 6e-2 above, which proves the same call is non-zero on real data. */
     struct pgwt_events_result t0;
-    pgwt_compute_top_events(NULL, 0, &f, RA_FROM, RA_TO, 18000.0, &t0);
+    pgwt_compute_top_events(TW(NULL, 0), &f, RA_FROM, RA_TO, 18000.0, &t0);
     CHECK_MS(t0.db_time_ms, 0.0, "empty input: 0 ms");
     CHECK_U64(t0.num_rows, 0, "empty input: no rows");
     free(t0.rows);

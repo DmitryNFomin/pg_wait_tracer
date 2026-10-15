@@ -53,6 +53,7 @@ TESTS     = test_wait_event test_cmdline test_backend_lifecycle test_spawn test_
             test_trace_closure \
             test_open_ckpt \
             trace_closure_probe \
+            test_overlay_wiring \
             open_ckpt_stub
 
 .PHONY: all clean check
@@ -69,6 +70,7 @@ check: all
 	    echo "=== $$t ==="; \
 	    case "$$t" in \
 	        *.py) python3 "$$t" ;; \
+	        *.sh) sh "$$t" ;; \
 	        *) ./"$$t" ;; \
 	    esac || { echo "FAILED: $$t"; fail=1; }; \
 	done < unit_tests.list; \
@@ -125,6 +127,15 @@ test_live_accum: test_live_accum.c ../src/map_reader.c ../src/snapshot.c \
 # test_live_accum: compute.c compiled directly with -DPGWT_SERVER, its only
 # foreign symbol (pgwt_visit_summaries) stubbed in the test. Runs anywhere.
 test_window_clip: test_window_clip.c ../src/compute.c \
+                  $(BUILD)/wait_event.o $(BUILD)/idle_rule.o $(BUILD)/spawn.o $(BUILD)/cJSON.o
+	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -lm
+
+# test_overlay_wiring: #424 — the raw TIME reducers take a `struct
+# pgwt_window` (records + open-interval overlay), and an invalid or degraded
+# one must produce an ABSENT answer. Same BPF-free link shape as
+# test_window_clip: compute.c with -DPGWT_SERVER and the summary visitor
+# stubbed in the test. Runs anywhere, including a developer Mac.
+test_overlay_wiring: test_overlay_wiring.c ../src/compute.c \
                   $(BUILD)/wait_event.o $(BUILD)/idle_rule.o $(BUILD)/spawn.o $(BUILD)/cJSON.o
 	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -lm
 

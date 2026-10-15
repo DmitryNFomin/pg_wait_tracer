@@ -107,6 +107,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <time.h>
+#include "test_window.h"
 
 static int tests_run = 0;
 static int tests_failed = 0;
@@ -467,7 +468,7 @@ static void oracle(const struct fixture *fx, const struct pgwt_filter *f,
 {
     struct pgwt_trace_event ev[MAXEV];
     corrected_loader_clip(fx->ev, fx->n, to_ns, ev);
-    pgwt_compute_concurrency(ev, fx->n, f, from_ns, to_ns, nb,
+    pgwt_compute_concurrency(TW(ev, fx->n), f, from_ns, to_ns, nb,
                              BURST_WIN, BURST_THRESH, out);
 }
 
@@ -681,7 +682,7 @@ static void literal_expectations(void)
     CHECK(idx.n_cross_block == 1,
           "fx_long: exactly 1 interval starts before its own block "
           "(got %ld) — the clipped-start detector is live", idx.n_cross_block);
-    CHECK(pgwt_interval_index_query(&idx, &f, T(100), T(900), 8,
+    CHECK(pgwt_interval_index_query(&idx, &pgwt_test_no_overlay__, &f, T(100), T(900), 8,
                                     BURST_WIN, BURST_THRESH, &q) == 0,
           "fx_long: query answered (%s)",
           pgwt_interval_index_refusal_str(q.refused));
@@ -712,7 +713,7 @@ static void literal_expectations(void)
     const struct fixture *fp = &g_fx[FX_PIDREPEAT];
     CHECK(build_index(fp, 0x7u, 0, &idx) == 0,
           "fx_pidrepeat: index built with every record in its own block");
-    CHECK(pgwt_interval_index_query(&idx, &f, T(100), T(900), 8,
+    CHECK(pgwt_interval_index_query(&idx, &pgwt_test_no_overlay__, &f, T(100), T(900), 8,
                                     BURST_WIN, BURST_THRESH, &q) == 0,
           "fx_pidrepeat: query answered");
     if (q.have_result)
@@ -730,7 +731,7 @@ static void literal_expectations(void)
     CHECK(build_index(fm, burst_cuts, 1, &idx) == 0,
           "fx_main: index built with the burst's 4 ends in 4 blocks "
           "(+ a trailing EMPTY block)");
-    CHECK(pgwt_interval_index_query(&idx, &f, T(100), T(900), 8,
+    CHECK(pgwt_interval_index_query(&idx, &pgwt_test_no_overlay__, &f, T(100), T(900), 8,
                                     BURST_WIN, BURST_THRESH, &q) == 0,
           "fx_main: query answered (%s)",
           pgwt_interval_index_refusal_str(q.refused));
@@ -794,7 +795,7 @@ static void literal_expectations(void)
     const struct fixture *fo = &g_fx[FX_ORDER];
     CHECK(build_index(fo, 0x1Fu, 0, &idx) == 0,
           "fx_order: index built with each record in its own block");
-    CHECK(pgwt_interval_index_query(&idx, &f, T(100), T(900), 8,
+    CHECK(pgwt_interval_index_query(&idx, &pgwt_test_no_overlay__, &f, T(100), T(900), 8,
                                     BURST_WIN, BURST_THRESH, &q) == 0,
           "fx_order: query answered (%s)",
           pgwt_interval_index_refusal_str(q.refused));
@@ -838,7 +839,7 @@ static void literal_expectations(void)
      * be produced. The thing being checked is ABSENT here, not wrong — a
      * counter that is never 0 is not measuring anything. */
     CHECK(build_index(fo, 0x1Fu, 0, &idx) == 0, "fx_order: rebuilt");
-    CHECK(pgwt_interval_index_query(&idx, &f, T(100), T(1000), 9,
+    CHECK(pgwt_interval_index_query(&idx, &pgwt_test_no_overlay__, &f, T(100), T(1000), 9,
                                     BURST_WIN, BURST_THRESH, &q) == 0,
           "fx_order: wider window answered");
     if (q.have_result)
@@ -857,7 +858,7 @@ static void literal_expectations(void)
      * without any row-level test ever running. The counter below is what
      * says the overlap-aware chunk bound was the thing that saved it. */
     CHECK(build_index(fo, 0x1Fu, 0, &idx) == 0, "fx_order: rebuilt for trap");
-    CHECK(pgwt_interval_index_query(&idx, &f, T(100), T(900), 8,
+    CHECK(pgwt_interval_index_query(&idx, &pgwt_test_no_overlay__, &f, T(100), T(900), 8,
                                     BURST_WIN, BURST_THRESH, &q) == 0,
           "fx_order: trap window answered");
     if (q.have_result)
@@ -875,7 +876,7 @@ static void literal_expectations(void)
     const struct fixture *fe = &g_fx[FX_EDGE];
     CHECK(build_index(fe, 0x7u, 0, &idx) == 0,
           "fx_edge: index built with each record in its own block");
-    CHECK(pgwt_interval_index_query(&idx, &f, T(100), T(900), 8,
+    CHECK(pgwt_interval_index_query(&idx, &pgwt_test_no_overlay__, &f, T(100), T(900), 8,
                                     BURST_WIN, BURST_THRESH, &q) == 0,
           "fx_edge: query answered");
     if (q.have_result) {
@@ -910,7 +911,7 @@ static void literal_expectations(void)
     const struct fixture *ff = &g_fx[FX_FAREDGE];
     CHECK(build_index(ff, 0x7u, 0, &idx) == 0,
           "fx_faredge: index built with each record in its own block");
-    CHECK(pgwt_interval_index_query(&idx, &f, T(100), T(900), 8,
+    CHECK(pgwt_interval_index_query(&idx, &pgwt_test_no_overlay__, &f, T(100), T(900), 8,
                                     BURST_WIN, BURST_THRESH, &q) == 0,
           "fx_faredge: query answered (%s)",
           pgwt_interval_index_refusal_str(q.refused));
@@ -955,7 +956,7 @@ static void literal_expectations(void)
     CHECK(idx.n_start_before_cover == 4,
           "fx_cover: all 4 intervals start before the indexed coverage "
           "(got %ld)", idx.n_start_before_cover);
-    CHECK(pgwt_interval_index_query(&idx, &f, T(100), T(900), 8,
+    CHECK(pgwt_interval_index_query(&idx, &pgwt_test_no_overlay__, &f, T(100), T(900), 8,
                                     BURST_WIN, BURST_THRESH, &q) == 0,
           "fx_cover: query answered");
     if (q.have_result) {
@@ -1079,7 +1080,7 @@ static void sweep_cuts(void)
                     oracle(fx, &f, from, to, nb, &ref);
 
                     struct pgwt_interval_index_query_result q;
-                    int rc = pgwt_interval_index_query(&idx, &f, from, to, nb,
+                    int rc = pgwt_interval_index_query(&idx, &pgwt_test_no_overlay__, &f, from, to, nb,
                                                        BURST_WIN,
                                                        BURST_THRESH, &q);
                     if (rc != 0) {
@@ -1225,7 +1226,7 @@ static void expect_refusal(const char *label,
                            enum pgwt_interval_index_refusal want)
 {
     struct pgwt_interval_index_query_result q;
-    int rc = pgwt_interval_index_query(idx, f, from, to, nb, BURST_WIN,
+    int rc = pgwt_interval_index_query(idx, &pgwt_test_no_overlay__, f, from, to, nb, BURST_WIN,
                                        BURST_THRESH, &q);
     CHECK(rc == -1 && q.refused == want && q.have_result == 0 &&
           q.result.num_buckets == 0 && q.result.peak_sessions == NULL &&
@@ -1255,7 +1256,7 @@ static void bypass_suite(void)
      * module refusing unconditionally. */
     {
         struct pgwt_interval_index_query_result q;
-        CHECK(pgwt_interval_index_query(&idx, &f, T(100), T(900), 8,
+        CHECK(pgwt_interval_index_query(&idx, &pgwt_test_no_overlay__, &f, T(100), T(900), 8,
                                         BURST_WIN, BURST_THRESH, &q) == 0 &&
               q.have_result && q.result.num_buckets == 8,
               "control: the same index DOES answer a good request");
@@ -1581,7 +1582,7 @@ static void measure_compaction(void)
     struct timespec t0, t1;
     struct pgwt_interval_index_query_result q;
     clock_gettime(CLOCK_MONOTONIC, &t0);
-    int rc = pgwt_interval_index_query(&idx, &f, from, to, 60, BURST_WIN,
+    int rc = pgwt_interval_index_query(&idx, &pgwt_test_no_overlay__, &f, from, to, 60, BURST_WIN,
                                        BURST_THRESH, &q);
     clock_gettime(CLOCK_MONOTONIC, &t1);
     double idx_us = (t1.tv_sec - t0.tv_sec) * 1e6 +
@@ -1598,7 +1599,7 @@ static void measure_compaction(void)
     struct pgwt_concurrency_result ref;
     clock_gettime(CLOCK_MONOTONIC, &t0);
     corrected_loader_clip(ev, n, to, clipped);
-    pgwt_compute_concurrency(clipped, n, &f, from, to, 60, BURST_WIN,
+    pgwt_compute_concurrency(TW(clipped, n), &f, from, to, 60, BURST_WIN,
                              BURST_THRESH, &ref);
     clock_gettime(CLOCK_MONOTONIC, &t1);
     free(clipped);

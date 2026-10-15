@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "test_window.h"
 
 #define MS(n) ((uint64_t)(n) * 1000000ULL)
 #define FROM MS(100)
@@ -37,7 +38,7 @@ int pgwt_visit_summaries(const char *dir, uint64_t from, uint64_t to,
 static void test_empty_window(void)
 {
     struct pgwt_tm_result tm;
-    pgwt_compute_time_model(NULL, 0, &all, FROM, TO, 10.0, &tm);
+    pgwt_compute_time_model(TW(NULL, 0), &all, FROM, TO, 10.0, &tm);
     CHECK(!tm.has_measured_cpu);
     CHECK(tm.db_time_ms == 0.0);
     CHECK(tm.cpu_ms == 0.0);
@@ -65,7 +66,7 @@ static void test_zero_fraction_records(void)
                                shape == 1 ? FROM :
                                shape == 2 ? TO + MS(2) : FROM + MS(5);
             struct pgwt_tm_result tm;
-            pgwt_compute_time_model(ev, 1, &all, FROM, TO, 10.0, &tm);
+            pgwt_compute_time_model(TW(ev, 1), &all, FROM, TO, 10.0, &tm);
             CHECK(!tm.has_measured_cpu);
             CHECK(tm.db_time_ms == 0.0 && tm.offcpu_ms == 0.0);
             CHECK(tm.cpu_ms == 0.0 && tm.wait_gap_cpu_ms == 0.0);
@@ -74,7 +75,7 @@ static void test_zero_fraction_records(void)
         }
     }
     struct pgwt_tm_result tm;
-    pgwt_compute_time_model(events, 8, &all, FROM, TO, 10.0, &tm);
+    pgwt_compute_time_model(TW(events, 8), &all, FROM, TO, 10.0, &tm);
     CHECK(!tm.has_measured_cpu);
     CHECK(tm.db_time_ms == 0.0 && tm.offcpu_ms == 0.0);
     CHECK(tm.rows != NULL && tm.num_rows == 1);
@@ -111,7 +112,7 @@ static void test_nonempty_windows(void)
         case 8: from = events[0].timestamp_ns - 1; to = events[0].timestamp_ns; break;
         }
         struct pgwt_tm_result tm;
-        pgwt_compute_time_model(events, count, &all, from, to, 10.0, &tm);
+        pgwt_compute_time_model(TW(events, count), &all, from, to, 10.0, &tm);
         CHECK(tm.db_time_ms > 0.0);
         CHECK(tm.has_measured_cpu == (shape != 4));
         if (shape == 0 || shape == 7) {

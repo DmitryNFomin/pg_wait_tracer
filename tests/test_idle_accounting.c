@@ -68,6 +68,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include "test_window.h"
 
 static int tests_run = 0;
 static int tests_failed = 0;
@@ -221,7 +222,7 @@ static void test_db_time_excludes_pacing(void)
     struct pgwt_filter f;
     memset(&f, 0, sizeof(f));
     struct pgwt_tm_result tm;
-    pgwt_compute_time_model(ev, n, &f, 0, 0, FIX_WALL_MS, &tm);
+    pgwt_compute_time_model(TW(ev, n), &f, 0, 0, FIX_WALL_MS, &tm);
 
     /* NON-VACUITY FIRST. Everything below is about time being EXCLUDED, and
      * "0 excluded == 0 expected" is the way that passes while broken. Assert
@@ -270,7 +271,7 @@ static void test_pacing_rows_visible(void)
 
     /* 2a. time model sub-event rows: PgSleep and SpinDelay under Timeout. */
     struct pgwt_tm_result tm;
-    pgwt_compute_time_model(ev, n, &f, 0, 0, FIX_WALL_MS, &tm);
+    pgwt_compute_time_model(TW(ev, n), &f, 0, 0, FIX_WALL_MS, &tm);
     const struct pgwt_tm_row *r = row_at(&tm, "Timeout:PgSleep", 2);
     CHECK(r != NULL && NEAR(r->time_ms, 400.0),
           "Timeout:PgSleep sub-row present with 400 ms (got %.1f)",
@@ -285,7 +286,7 @@ static void test_pacing_rows_visible(void)
      * are flagged with the idle %DB sentinel instead of a share of a total
      * they are not part of. Exactly what ClientRead already does. */
     struct pgwt_events_result er;
-    pgwt_compute_top_events(ev, n, &f, 0, 0, FIX_WALL_MS, &er);
+    pgwt_compute_top_events(TW(ev, n), &f, 0, 0, FIX_WALL_MS, &er);
 
     const struct pgwt_event_row *cwd = ev_row(&er, EV_CHECKPOINT_DELAY);
     CHECK(cwd != NULL, "Timeout:CheckpointWriteDelay is LISTED in Top Events");
@@ -436,7 +437,7 @@ static void test_idle_row_named_children(void)
     struct pgwt_filter f;
     memset(&f, 0, sizeof(f));
     struct pgwt_tm_result tm;
-    pgwt_compute_time_model(ev, n, &f, 0, 0, FIX_WALL_MS, &tm);
+    pgwt_compute_time_model(TW(ev, n), &f, 0, 0, FIX_WALL_MS, &tm);
 
     const struct pgwt_tm_row *idle = row_at(&tm, "Idle", 0);
     CHECK(idle != NULL, "an indent-0 \"Idle\" row must exist");
@@ -549,7 +550,7 @@ static void test_conservation_components(void)
     struct pgwt_filter f;
     memset(&f, 0, sizeof(f));
     struct pgwt_tm_result tm;
-    pgwt_compute_time_model(ev, n, &f, 0, 0, FIX_WALL_MS, &tm);
+    pgwt_compute_time_model(TW(ev, n), &f, 0, 0, FIX_WALL_MS, &tm);
 
     /* The identity the docs state (ROADMAP_AND_STATUS "identity holds by
      * construction") and the one demo_rehearsal_lib checks: indent-1 rows sum
@@ -626,7 +627,7 @@ static void cpu_adjacent_case(uint32_t idle_ev, const char *label,
     struct pgwt_filter f;
     memset(&f, 0, sizeof(f));
     struct pgwt_tm_result tm;
-    pgwt_compute_time_model(ev, n, &f, 0, 0, 1000.0, &tm);
+    pgwt_compute_time_model(TW(ev, n), &f, 0, 0, 1000.0, &tm);
     *out_cpu    = tm.cpu_ms;
     *out_db     = tm.db_time_ms;
     *out_idle   = tm.idle_time_ms;
@@ -680,7 +681,7 @@ static void test_cpu_on_and_adjacent_to_pacing(void)
     struct pgwt_filter f;
     memset(&f, 0, sizeof(f));
     struct pgwt_tm_result tm;
-    pgwt_compute_time_model(ev, n, &f, 0, 0, 1000.0, &tm);
+    pgwt_compute_time_model(TW(ev, n), &f, 0, 0, 1000.0, &tm);
     CHECK(NEAR(tm.cpu_ms, 100.0),
           "CPU* clamped to the 100 ms gap, got %.1f", tm.cpu_ms);
     CHECK(NEAR(tm.cpu_clamped_ms, 80.0),
@@ -927,7 +928,7 @@ static void test_idle_breakdown_at_its_bound(void)
     struct pgwt_filter f;
     memset(&f, 0, sizeof(f));
     struct pgwt_tm_result tm;
-    pgwt_compute_time_model(ev, n, &f, 0, 0, FIX_WALL_MS, &tm);
+    pgwt_compute_time_model(TW(ev, n), &f, 0, 0, FIX_WALL_MS, &tm);
 
     const struct pgwt_tm_row *parent = row_at(&tm, "Idle", 0);
     CHECK(parent != NULL, "the Idle parent row exists");
@@ -1008,7 +1009,7 @@ static void test_bypass_suite(void)
     /* 6a. EMPTY INPUT. No rows, no Idle row, DB Time 0 — and crucially the
      * Idle row is ABSENT rather than present-and-zero, so "Idle exists" in
      * section 3 is evidence that something was idle. */
-    pgwt_compute_time_model(NULL, 0, &f, 0, 0, FIX_WALL_MS, &tm);
+    pgwt_compute_time_model(TW(NULL, 0), &f, 0, 0, FIX_WALL_MS, &tm);
     CHECK(tm.db_time_ms == 0.0 && tm.idle_time_ms == 0.0,
           "empty input: db=%.1f idle=%.1f", tm.db_time_ms, tm.idle_time_ms);
     CHECK(row_at(&tm, "Idle", 0) == NULL,
@@ -1029,7 +1030,7 @@ static void test_bypass_suite(void)
     uint64_t t = 4000ULL * 1000000000ULL;
     no_to[n++] = mk(t + 1 * MS, 401, EV_LOCK, 300, PGWT_CPU_NS_UNKNOWN);
     no_to[n++] = mk(t + 2 * MS, 401, EV_IO,   200, PGWT_CPU_NS_UNKNOWN);
-    pgwt_compute_time_model(no_to, n, &f, 0, 0, FIX_WALL_MS, &tm);
+    pgwt_compute_time_model(TW(no_to, n), &f, 0, 0, FIX_WALL_MS, &tm);
     CHECK(NEAR(tm.db_time_ms, 500.0) && tm.idle_time_ms == 0.0,
           "no-Timeout fixture: db=%.1f idle=%.1f — a fixture like this cannot "
           "detect anything about pacing", tm.db_time_ms, tm.idle_time_ms);
@@ -1045,7 +1046,7 @@ static void test_bypass_suite(void)
     n = 0;
     zero[n++] = mk(t + 1 * MS, 402, EV_CHECKPOINT_DELAY, 0, PGWT_CPU_NS_UNKNOWN);
     zero[n++] = mk(t + 2 * MS, 402, EV_LOCK,           300, PGWT_CPU_NS_UNKNOWN);
-    pgwt_compute_time_model(zero, n, &f, 0, 0, FIX_WALL_MS, &tm);
+    pgwt_compute_time_model(TW(zero, n), &f, 0, 0, FIX_WALL_MS, &tm);
     CHECK(NEAR(tm.db_time_ms, 300.0) && tm.idle_time_ms == 0.0,
           "zero-duration pacing event: db=%.1f idle=%.1f", tm.db_time_ms,
           tm.idle_time_ms);
@@ -1062,7 +1063,7 @@ static void test_bypass_suite(void)
     int fn = build_fixture(ev);
     uint64_t far_from = 9000ULL * 1000000000ULL;
     uint64_t far_to   = far_from + 1000ULL * 1000000ULL;
-    pgwt_compute_time_model(ev, fn, &f, far_from, far_to, 1000.0, &tm);
+    pgwt_compute_time_model(TW(ev, fn), &f, far_from, far_to, 1000.0, &tm);
     CHECK(tm.db_time_ms == 0.0 && tm.idle_time_ms == 0.0,
           "a window past the data clips to nothing (db=%.1f idle=%.1f)",
           tm.db_time_ms, tm.idle_time_ms);
@@ -1075,7 +1076,7 @@ static void test_bypass_suite(void)
      * 950 ms". Drive it directly so the failure has a name, then restore. */
     uint32_t saved = pgwt_idle_rule_timeout_mask();
     pgwt_idle_rule_set_timeout_mask(0);
-    pgwt_compute_time_model(ev, fn, &f, 0, 0, FIX_WALL_MS, &tm);
+    pgwt_compute_time_model(TW(ev, fn), &f, 0, 0, FIX_WALL_MS, &tm);
     CHECK(NEAR(tm.db_time_ms, FIX_DB_TIME_MS + 950.0),
           "with an EMPTY pacing mask DB Time returns to %.1f ms — this is the "
           "number a hardcoded-id implementation reports on PG13 (got %.1f)",
@@ -1088,7 +1089,7 @@ static void test_bypass_suite(void)
     CHECK(pgwt_idle_rule_timeout_mask() == saved, "mask restored");
     /* Prove the restore worked, so a later section is not silently running on
      * the mutated mask. */
-    pgwt_compute_time_model(ev, fn, &f, 0, 0, FIX_WALL_MS, &tm);
+    pgwt_compute_time_model(TW(ev, fn), &f, 0, 0, FIX_WALL_MS, &tm);
     CHECK(NEAR(tm.db_time_ms, FIX_DB_TIME_MS),
           "after restore, DB Time is %.1f again (got %.1f)", FIX_DB_TIME_MS,
           tm.db_time_ms);
@@ -1116,7 +1117,7 @@ static void test_bypass_suite(void)
                        10 * (i + 1), PGWT_CPU_NS_UNKNOWN);
         expect_idle += 10.0 * (double)(i + 1);
     }
-    pgwt_compute_time_model(many, n, &f, 0, 0, FIX_WALL_MS, &tm);
+    pgwt_compute_time_model(TW(many, n), &f, 0, 0, FIX_WALL_MS, &tm);
     CHECK(NEAR(tm.idle_time_ms, expect_idle),
           "7 visible idle events: Idle total %.1f expected %.1f",
           tm.idle_time_ms, expect_idle);
@@ -1174,7 +1175,7 @@ static void test_idle_aas_is_a_rate(void)
     struct pgwt_filter f;
     memset(&f, 0, sizeof(f));
     struct pgwt_tm_result tm;
-    pgwt_compute_time_model(ev, n, &f, 0, 0, FIX_WALL_MS, &tm);
+    pgwt_compute_time_model(TW(ev, n), &f, 0, 0, FIX_WALL_MS, &tm);
 
     /* The idle rows this fixture must produce, with the ms each carries read
      * off THE FIXTURE (section 3 pins those same numbers) and the AAS derived
@@ -1289,7 +1290,7 @@ static void test_idle_aas_is_a_rate(void)
      * idle AAS must halve. A hardcoded 0.816667 -- or any value not derived
      * from wall_ms -- passes everything above and fails exactly here. */
     struct pgwt_tm_result tm2;
-    pgwt_compute_time_model(ev, n, &f, 0, 0, 2.0 * FIX_WALL_MS, &tm2);
+    pgwt_compute_time_model(TW(ev, n), &f, 0, 0, 2.0 * FIX_WALL_MS, &tm2);
     for (int i = 0; i < N_IDLE_ROWS; i++) {
         const struct pgwt_tm_row *r = row_at(&tm2, idle_rows[i].name,
                                              idle_rows[i].indent);
@@ -1312,7 +1313,7 @@ static void test_idle_aas_is_a_rate(void)
      * 3000 ms wall clock precisely because a 0 wall clock would satisfy them
      * all without computing anything. */
     struct pgwt_tm_result tm0;
-    pgwt_compute_time_model(ev, n, &f, 0, 0, 0.0, &tm0);
+    pgwt_compute_time_model(TW(ev, n), &f, 0, 0, 0.0, &tm0);
     const struct pgwt_tm_row *p0 = row_at(&tm0, "Idle", 0);
     CHECK(p0 != NULL && NEAR(p0->time_ms, FIX_IDLE_MS),
           "wall_ms=0: the Idle row still carries its %.1f ms (got %.3f), so "
@@ -1336,7 +1337,7 @@ static void test_idle_aas_is_a_rate(void)
     busy[bn++] = mk(bt + 1 * MS, 901, EV_LOCK, 300, PGWT_CPU_NS_UNKNOWN);
     busy[bn++] = mk(bt + 2 * MS, 901, EV_IO,   200, PGWT_CPU_NS_UNKNOWN);
     struct pgwt_tm_result tmb;
-    pgwt_compute_time_model(busy, bn, &f, 0, 0, FIX_WALL_MS, &tmb);
+    pgwt_compute_time_model(TW(busy, bn), &f, 0, 0, FIX_WALL_MS, &tmb);
     CHECK(tmb.idle_time_ms == 0.0 && row_at(&tmb, "Idle", 0) == NULL,
           "no idle time (%.1f ms) => NO Idle row at all, rather than one "
           "reading AAS 0.00", tmb.idle_time_ms);
@@ -1354,7 +1355,7 @@ static void test_idle_aas_is_a_rate(void)
     hid[hn++] = mk(ht + 1 * MS, 902, EV_LOCK,     300, PGWT_CPU_NS_UNKNOWN);
     hid[hn++] = mk(ht + 2 * MS, 902, EV_ACTIVITY, 450, PGWT_CPU_NS_UNKNOWN);
     struct pgwt_tm_result tmh;
-    pgwt_compute_time_model(hid, hn, &f, 0, 0, FIX_WALL_MS, &tmh);
+    pgwt_compute_time_model(TW(hid, hn), &f, 0, 0, FIX_WALL_MS, &tmh);
     const struct pgwt_tm_row *hp = row_at(&tmh, "Idle", 0);
     const struct pgwt_tm_row *ho = row_at(&tmh, "Other (background)", 2);
     CHECK(hp != NULL && NEAR(hp->time_ms, 450.0),
