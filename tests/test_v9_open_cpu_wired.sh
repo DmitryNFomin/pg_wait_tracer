@@ -76,6 +76,16 @@ sys.stdout.write(buf.decode().split("\n")[0])
 PYEOF
 }
 
+MASK_PY="
+import json, sys
+try:
+    r = json.load(sys.stdin)
+except Exception:
+    print(0); raise SystemExit
+v = r.get('exact_probe_attached_mask')
+print(v if isinstance(v, int) else 0)
+"
+
 num() {  # num <json> <key>  -> the numeric value, or the empty string
     printf '%s' "$1" | python3 -c "
 import json, sys
@@ -108,17 +118,32 @@ if [[ ! -S "$SOCK" ]]; then
     exit 2
 fi
 
-STATUS=$(ctl '{"cmd":"status"}')
-TIER=$(printf '%s' "$STATUS" | python3 -c \
-    "import json,sys;print(json.load(sys.stdin).get('tier',''))" 2>/dev/null)
-if [[ "$TIER" != "exact" ]]; then
-    echo "REFUSE: tier is '$TIER', not 'exact' -- the v9 producer only runs"
-    echo "        where watchpoint intervals exist, so a zero here would be"
-    echo "        correct and this check would be measuring nothing."
+# The precondition is "watchpoint intervals exist", because that is what
+# gates pgwt_read_state_map and therefore the producer. It is NOT
+# tier == "exact": a `--mode full` daemon on the gate box reports
+# tier="escalated" with exact_probe_attached_mask=3, and the first version
+# of this check refused on exactly that -- loudly, which is the only reason
+# the mistake was visible instead of becoming a permanent silent skip. The
+# mask is the fact; the tier label describes how the daemon got there.
+STATUS=""
+MASK=0
+for _ in $(seq 1 20); do
+    STATUS=$(ctl '{"cmd":"status"}')
+    MASK=$(printf '%s' "$STATUS" | python3 -c "$MASK_PY" 2>/dev/null)
+    [[ -n "$MASK" ]] && [[ "$MASK" -gt 0 ]] && break
+    sleep 1
+done
+if [[ -z "$MASK" ]] || [[ "$MASK" -le 0 ]]; then
+    echo "REFUSE: no watchpoint probes attached (exact_probe_attached_mask="
+    echo "        ${MASK:-absent}) after 20 s. The producer loop is"
+    echo "        unreachable here, so a zero would be correct and this"
+    echo "        check would be measuring nothing."
     echo "  status: $STATUS"
     exit 2
 fi
-echo "  ok: daemon is in tier=exact, so the producer loop is reachable"
+TIER=$(printf '%s' "$STATUS" | python3 -c \
+    "import json,sys;print(json.load(sys.stdin).get('tier',''))" 2>/dev/null)
+echo "  ok: watchpoints attached (mask=$MASK, tier=$TIER) -- producer reachable"
 
 M0=$(ctl '{"cmd":"metrics"}')
 CPU0=$(num "$M0" cpu_ns_total)
@@ -142,11 +167,42 @@ echo "  ok: all seven v9 control keys present and numeric"
 
 # ── the stimulus: a statement that is on-CPU, with NO wait event, across
 #    several 1 s ticks. generate_series is pure CPU in the backend. ───────
+# EVERY leg is bounded. The first version of this block ran three
+# unbounded psql children and then a bare `wait`, and the whole test was
+# killed by its harness at 400 s with no verdict -- a HANG, which is the
+# one outcome worse than a failure because it reports nothing. A psql that
+# blocks on authentication, or a generate_series sized for a faster box,
+# produces exactly that. Each child now self-terminates, and the stimulus
+# not completing is a REFUSAL, not a silent pass.
+STIM_PIDS=""
+STIM_T0=$(date +%s)
 for _ in 1 2 3; do
-    psql -U postgres -d postgres -tAc \
-        "SELECT count(*) FROM generate_series(1,20000000);" >/dev/null 2>&1 &
+    timeout 45 psql -U postgres -d postgres -tAc \
+        "SELECT count(*) FROM generate_series(1,60000000);" >/dev/null 2>&1 &
+    STIM_PIDS="$STIM_PIDS $!"
 done
-wait
+stim_ok=0
+for pid in $STIM_PIDS; do
+    if wait "$pid"; then stim_ok=$((stim_ok + 1)); fi
+done
+if [[ "$stim_ok" -eq 0 ]]; then
+    echo "REFUSE: no CPU statement completed (0 of 3; psql missing, refused"
+    echo "        a connection, or timed out). Nothing was measured."
+    exit 2
+fi
+STIM_S=$(( $(date +%s) - STIM_T0 ))
+# v9 credits an OPEN interval PER SECOND, so a statement that begins and
+# ends inside one second has nothing to spread and a zero would be correct.
+# The stimulus must therefore be on-CPU ACROSS tick boundaries, and that --
+# not merely "cpu_ns_total moved" -- is what has to be proven. 5 M rows ran
+# in ~0.75 s and proved nothing; 60 M spans several seconds.
+if [[ "$STIM_S" -lt 3 ]]; then
+    echo "REFUSE: the CPU statements finished in ${STIM_S}s, too fast to"
+    echo "        span the tick boundaries v9 credits across. A zero would"
+    echo "        be correct and this check would be measuring nothing."
+    exit 2
+fi
+echo "  ok: $stim_ok of 3 CPU statements completed, spanning ${STIM_S}s of ticks"
 sleep 3   # let the ticks after the statements land
 
 M1=$(ctl '{"cmd":"metrics"}')
