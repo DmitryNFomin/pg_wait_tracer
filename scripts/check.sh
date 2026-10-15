@@ -64,6 +64,22 @@ run tests/test_check_snapshot_history.sh
 step "snapshot-history guard (this branch vs origin/master)"
 run scripts/check-snapshot-history.sh
 
+# Link-closure guard (#424, 2026-10-15). Adding one call to src/map_reader.c
+# compiled everywhere and broke the LINK of test_event_reader and
+# test_concurrent_rw on Linux, because both link map_reader.o for its
+# accumulator core alone. It cost two ephemeral VMs and two `box-check` exits
+# before anyone knew, with every test that ran passing. "It compiles" cannot
+# see that; comparing the TU's undefined-symbol set against the merge base
+# can, in about a second, here. The guard REFUSES (and so fails this step)
+# when it cannot resolve a base, when the base revision will not compile,
+# when the compiler is missing, or when the object it built is not the TU it
+# claims -- a closure check with no baseline approves everything.
+step "link-closure guard self-test"
+run tests/test_check_link_closure.sh
+
+step "link-closure guard (src/map_reader.c vs merge base)"
+run scripts/check-link-closure.sh
+
 step "web builder unit tests (node)"
 run node --test 'tests/web_unit/*.test.mjs'
 

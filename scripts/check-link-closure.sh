@@ -16,12 +16,19 @@
 # target happens to supply it, because the next target that links map_reader.o
 # will not.
 #
-# Usage: link-closure-check.sh [base-ref]        (default: merge-base with
-#                                                 origin/master)
+# Runs in `make check`: seconds, Mac-side, no box. The break it catches cost
+# two ephemeral VMs and two `box-check` exits before anyone saw it.
+#
+# Usage: check-link-closure.sh [base-ref]        (default: merge-base with
+#                                                origin/master, then
+#                                                origin/main, then master)
+# Env:   TU      translation unit to check (default src/map_reader.c)
+#        ANCHOR  a symbol the TU must DEFINE, as the positive control
+#        ROOT    repo root (the self-test points this at a synthetic repo)
 # Exit: 0 clean, 1 the closure grew, 2 CANNOT VERIFY (refuses — never passes
 #       on an input it could not resolve).
 set -uo pipefail
-cd "$(dirname "$0")/../../.." || exit 2
+cd "${ROOT:-$(dirname "$0")/..}" || exit 2
 
 TU=${TU:-src/map_reader.c}
 CC_BIN=${CC:-gcc}
@@ -32,10 +39,15 @@ command -v nm >/dev/null || {
 
 base=${1:-}
 if [[ -z "$base" ]]; then
-    base=$(git merge-base HEAD origin/master 2>/dev/null)
+    # In order, and a miss is a refusal rather than a guess: a closure check
+    # with no baseline approves everything.
+    for ref in origin/master origin/main master main; do
+        base=$(git merge-base HEAD "$ref" 2>/dev/null) && [[ -n "$base" ]] && break
+        base=
+    done
 fi
 if [[ -z "$base" ]] || ! git rev-parse --verify --quiet "$base^{commit}" >/dev/null 2>&1; then
-    echo "CANNOT VERIFY: cannot resolve a base commit (tried '${1:-merge-base HEAD origin/master}')" >&2
+    echo "CANNOT VERIFY: cannot resolve a base commit (tried '${1:-merge-base with origin/master, origin/main, master, main}')" >&2
     echo "  a closure check with no baseline approves everything; refusing" >&2
     exit 2
 fi
@@ -135,23 +147,28 @@ fi
 nm -u "$work/base.o" | sed 's/^ *//' | sort -u > "$work/base.txt"
 nm -u "$work/head.o" | sed 's/^ *//' | sort -u > "$work/head.txt"
 
-# POSITIVE CONTROL. An empty or near-empty symbol set compares equal to
-# anything: if the TU somehow produced no references (wrong file, everything
-# preprocessed away), the diff below would be silently green. Require that
-# both objects actually reference something and that the file's own anchor
-# symbol is DEFINED in the head object.
-nb=$(wc -l < "$work/base.txt"); nh=$(wc -l < "$work/head.txt")
-if [[ "$nb" -lt 5 || "$nh" -lt 5 ]]; then
-    echo "CANNOT VERIFY: symbol sets are implausibly small (base=$nb head=$nh)" >&2
-    exit 2
-fi
+# POSITIVE CONTROL. Two empty symbol sets compare equal, so a TU that was
+# compiled away to nothing — wrong file, or its whole body behind an #ifdef
+# that happens to be off — would read as "clean" forever. The check is not a
+# threshold on how many symbols look plausible (that number is a guess, and it
+# refused legitimately small translation units); it is that BOTH objects
+# actually contain this TU, proven by its own anchor symbol being DEFINED in
+# each. If the anchor is absent, the object is not what it claims and the
+# comparison means nothing.
 anchor=${ANCHOR:-_pgwt_read_state_map}
-if ! nm "$work/head.o" | grep -q " T ${anchor}\| t ${anchor}\| T ${anchor#_}\| t ${anchor#_}"; then
-    echo "CANNOT VERIFY: $TU's anchor symbol ${anchor} is not defined in the" >&2
-    echo "  object just built — this is not the translation unit it claims" >&2
-    exit 2
-fi
-echo "base references $nb symbols, head $nh; anchor ${anchor} present"
+has_anchor() {   # has_anchor <object>
+    nm "$1" 2>/dev/null | grep -qE " [TtSs] (${anchor}|${anchor#_})$"
+}
+for which in base head; do
+    if ! has_anchor "$work/$which.o"; then
+        echo "CANNOT VERIFY: $TU's anchor symbol ${anchor} is not defined in" >&2
+        echo "  the $which object — that object is not the translation unit" >&2
+        echo "  it claims, so comparing symbol sets proves nothing" >&2
+        exit 2
+    fi
+done
+nb=$(wc -l < "$work/base.txt" | tr -d ' '); nh=$(wc -l < "$work/head.txt" | tr -d ' ')
+echo "base references $nb symbols, head $nh; anchor ${anchor} present in both"
 
 added=$(comm -13 "$work/base.txt" "$work/head.txt")
 if [[ -z "$added" ]]; then
