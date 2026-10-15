@@ -387,23 +387,38 @@ static long select_walk(const struct pgwt_interval_index *idx,
             }
             if (stats) {
                 stats->rows_examined++;
+                /* Still counted: this is the SELECTION fact (an admitted
+                 * interval that closes past `to`), which is what the
+                 * differential needs to prove the overlap rule was reached.
+                 * It is no longer the count of rows this function rewrote,
+                 * because it rewrites none. */
                 if (iv->end_ns > to_ns)
                     stats->clipped_open_past_to++;
             }
             if (fill) {
                 struct pgwt_trace_event *e = &fill[n];
                 memset(e, 0, sizeof(*e));
-                /* CLIPPED TIME. Still open at `to`: hand the computation the
-                 * interval cut at the window edge. end - duration is still
-                 * the TRUE start, so the burst onset and the low bucket are
-                 * untouched and only the high bucket is clipped. */
-                if (iv->end_ns > to_ns) {
-                    e->timestamp_ns = to_ns;
-                    e->duration_ns = to_ns - iv->start_ns;
-                } else {
-                    e->timestamp_ns = iv->end_ns;
-                    e->duration_ns = iv->end_ns - iv->start_ns;
-                }
+                /* TRUE end, TRUE duration -- the index does NOT clip.
+                 *
+                 * It used to: version 2 rewrote a right-open interval to
+                 * `timestamp_ns = to_ns, duration_ns = to_ns - start_ns`.
+                 * That was scaffolding for a base whose compute.c still
+                 * selected on the close, where compute would have dropped
+                 * the extra records itself and index and oracle would have
+                 * agreed while both were wrong. On the corrected compute.c
+                 * this branch is now merged with, pgwt_compute_concurrency
+                 * clamps b_hi to the last bucket itself (src/compute.c, and
+                 * the comment there says not to simplify it away), so the
+                 * clip here was a SECOND implementation of one rule --
+                 * which is how two paths drift apart while each looks
+                 * right. The index's job is SELECTION; clipping is
+                 * contribution, and contribution belongs to compute.
+                 *
+                 * A consequence worth stating: the materialised array is
+                 * now sorted by its own timestamp again, because nothing
+                 * rewrites a timestamp to to_ns any more. */
+                e->timestamp_ns = iv->end_ns;
+                e->duration_ns = iv->end_ns - iv->start_ns;
                 e->pid = iv->pid;
                 e->old_event = iv->event_id;
                 e->new_event = 0;          /* the wait ended */

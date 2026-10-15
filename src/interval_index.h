@@ -45,15 +45,16 @@
  *     interval ending exactly at `from` and one starting exactly at `to`
  *     are both IN (neither contributes to a bucket, but both are real
  *     occurrences and both can anchor a burst).
- *   - contribution: the interval is CLIPPED to the window. Version 2 does
- *     the clipping itself, at materialisation: a selected interval whose
- *     end lies past `to` is handed to pgwt_compute_concurrency as
- *     `timestamp_ns = to_ns, duration_ns = to_ns - start_ns`. That keeps
- *     `timestamp_ns - duration_ns` equal to the TRUE start, so the burst
- *     onset and the low bucket are unchanged and only the high bucket is
- *     clipped to the window's last bucket. Nothing else is clipped: the
- *     low end needs none, because pgwt_compute_concurrency's own b_lo
- *     arithmetic already floors at bucket 0.
+ *   - contribution: the interval is CLIPPED to the window, and the index
+ *     does NOT do that clipping. It materialises each selected interval
+ *     with its TRUE end and TRUE duration and hands it to
+ *     pgwt_compute_concurrency, whose own b_hi clamp cuts it at the
+ *     window's last bucket (b_lo already floors at bucket 0). Version 2
+ *     briefly clipped here as well, as scaffolding for a base whose
+ *     compute.c still selected on the close; against corrected compute
+ *     that is a second implementation of one rule, so it is gone. The
+ *     index decides WHICH intervals; compute decides how much of each
+ *     counts.
  *
  * WHAT CHANGED FROM VERSION 1, AND WHY. Version 1 selected on the END
  * timestamp alone (`from <= end <= to`), so a wait still OPEN at `to` was
@@ -89,10 +90,12 @@
  * MATERIALISATION ORDER IS PART OF THE ANSWER. pgwt_compute_concurrency
  * gives a bucket to the FIRST record that REACHES a count, so the array
  * handed to it must be in the raw path's order: ascending TRUE end_ns, the
- * order the records were fed in. Clipping rewrites `timestamp_ns` to `to_ns`
- * for every clipped row, so the materialised array is NOT sorted by its own
- * timestamps and must never be re-sorted by them — nor by start_ns, which
- * is a different order entirely for a long interval. The walk below visits
+ * order the records were fed in. That order must never be re-derived by
+ * sorting: not by start_ns, which is a different order entirely for a long
+ * interval, and not by timestamp_ns either — it happens to agree now that
+ * the materialisation no longer rewrites a right-open row's timestamp to
+ * to_ns, but re-sorting would make the answer depend on that coincidence
+ * instead of on the feed order the raw path has. The walk below visits
  * rows in ascending row index, which IS ascending true end_ns, and does
  * nothing else.
  *
