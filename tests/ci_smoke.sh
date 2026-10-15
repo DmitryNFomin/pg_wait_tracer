@@ -205,13 +205,22 @@ else
             python3 "$SCRIPT_DIR/test_capture_smoke.py" --mode full --pid "$PM_PID"
         run_section "deterministic accuracy: exact counts/durations (--mode full)" \
             python3 "$SCRIPT_DIR/test_deterministic.py" --pid "$PM_PID"
-        # #424 / summary v9: the writer can be present and the producer
-        # never fed, in which case every other section here still passes.
-        # Belongs in the WP==yes branch because the producer runs only
-        # where watchpoint intervals exist; the script REFUSES (exit 2)
-        # rather than passing if it lands anywhere else.
-        run_section "summary v9 open-CPU producer is wired (--mode full)" \
-            bash "$SCRIPT_DIR/test_v9_open_cpu_wired.sh" --pid "$PM_PID"
+        # NOT invoked here: tests/test_v9_open_cpu_wired.sh. The v9 open-CPU
+        # producer was reverted (agent/424-daemon fc7d7f5), so the check has
+        # no wired producer to confirm and BOTH its outcomes are non-zero --
+        # FAIL when seconds demonstrably sealed, REFUSE (exit 2) when they
+        # did not. run_section sets overall=1 on any non-zero exit, so either
+        # one reddens the CI job that runs this file (.github/workflows/
+        # ci.yml and nightly.yml, on the self-hosted gate boxes, which do
+        # have watchpoints).
+        #
+        # Worth stating because it is the same hole twice, mirrored: this
+        # invocation survived a green 134/134 box-check for exactly the
+        # reason the FIRST version of the gate was invisible -- run_all.sh
+        # never invokes ci_smoke.sh, so box-check can see neither its
+        # presence nor its absence. The script stays in tests/ as the
+        # acceptance test; re-add it here and in run_all.sh's LIVE_TESTS in
+        # the same commit that wires the producer.
     else
         summary "### WARNING: full-mode watchpoint assertions SKIPPED"
         summary "perf hardware breakpoints are unavailable in this environment"

@@ -482,16 +482,34 @@
  *     per-interval measured identity in piece 2 can fail to hold exactly;
  *     the WALL identity never can.
  *
- * WHY THE VERSION HAS TO MOVE: it is an ACCOUNTING-RULE change, v3-v8's
- * reason. A v8 second holds a long CPU gap's whole wall and measurement and
- * a v9 second holds one second of each, so a window holding both
- * double-counts the overlap. The layout is unchanged, so the bump is
- * conventional rather than forced -- which v5's note calls the most
- * dangerous case to skip. The machinery for files already on disk is
- * unchanged: pgwt_summary_reader_open refuses any version that is not
+ * WHY THE VERSION WILL HAVE TO MOVE, AND WHY IT HAS NOT YET. The rule above
+ * is an ACCOUNTING-RULE change, v3-v8's reason: a v8 second holds a long CPU
+ * gap's whole wall and measurement, a v9 second holds one second of each, and
+ * a window holding both double-counts the overlap.
+ *
+ * But NO PRODUCER CALLS pgwt_summary_note_open_ex. The live wiring was
+ * reverted (agent/424-daemon fc7d7f5) once its counters showed it had never
+ * been reached, so nothing credits an open on-CPU interval and v9's only
+ * difference from v8 -- the widened cpu_measured_records -- never
+ * materialises. A build shipping this constant at 9 writes a v8 file wearing
+ * a 9.
+ *
+ * That is worse than merely untidy. pgwt_summaries_window_current compares
+ * the NUMBER, so if 9 ships now and the producer is wired later without
+ * another bump, 9 names two different accounting rules and no reader can
+ * tell the resulting files apart -- the exact mixing the version exists to
+ * prevent. The project's rule is never to ship a version whose contract is
+ * not yet true, so the constant stays at 8 and the commit that WIRES the
+ * producer is the one that sets it to 9. The writer-side capability below
+ * is dormant, not absent: it is implemented and unit-tested
+ * (tests/test_open_cpu_accounting.c), and tests/test_v9_open_cpu_wired.sh
+ * is its acceptance test, deliberately registered nowhere until then.
+ *
+ * The machinery for files already on disk is unchanged either way:
+ * pgwt_summary_reader_open refuses any version that is not
  * PGWT_SUMMARY_VERSION and the server preflights the window, so a refusal
  * becomes a RAW RECOMPUTE, never a plausible partial answer. */
-#define PGWT_SUMMARY_VERSION  9
+#define PGWT_SUMMARY_VERSION  8
 
 /* `eff_event` sentinel: the producer resolved no effective wait id, so the
  * writer uses evt->old_event and counts the push. Not 0 -- 0 is a valid id
