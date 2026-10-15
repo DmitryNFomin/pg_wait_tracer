@@ -73,6 +73,7 @@ int pgwt_run_replay(struct pgwt_daemon *d, const char *from_str,
     int files_read = 0;
     bool pg_version_set = false;
     struct pgwt_replay_stats rstats = {0};
+    int lookahead = PGWT_REPLAY_LOOKAHEAD_BLOCKS;
 
     for (int fi = 0; fi < nfiles; fi++) {
         /* Quick filter: skip files that end before our --from time */
@@ -102,32 +103,33 @@ int pgwt_run_replay(struct pgwt_daemon *d, const char *from_str,
         if (to_wall > 0)
             to_mono = pgwt_reader_wall_to_mono(&reader, to_wall);
 
-        /* Find starting block */
-        int start_block = 0;
-        if (from_mono > 0)
-            start_block = pgwt_reader_find_block(&reader, from_mono);
-
+        /* #429: pgwt_replay_file examines every block by its header rather
+         * than trusting a start index, so there is no "starting block" to
+         * report any more. What IS worth reporting is whether this file's
+         * block index is in timestamp order at all: it is written in commit
+         * order, and a lagging drain makes the two disagree — the condition
+         * under which the old binary search returned an arbitrary block and
+         * windows came back silently short. */
         if (d->verbose)
-            fprintf(stderr, "INFO: %s: %d blocks, starting at block %d\n",
-                    files[fi].path, reader.num_blocks, start_block);
+            fprintf(stderr, "INFO: %s: %d blocks, index %s\n",
+                    files[fi].path, reader.num_blocks,
+                    reader.block_index_sorted
+                        ? "in timestamp order"
+                        : "NOT in timestamp order (commit order differs — "
+                          "scanning every block by header)");
 
-        for (int bi = start_block; bi < reader.num_blocks; bi++) {
-            /* Quick check: if block starts after --to, we're done with this file */
-            if (to_mono > 0 &&
-                reader.block_index[bi].timestamp_ns > to_mono)
-                break;
-
-            struct pgwt_block_info binfo;
-            int count = pgwt_reader_decode_block_info(&reader, bi, events,
-                                                      PGWT_BLOCK_EVENTS,
-                                                      &binfo);
-            if (count <= 0)
-                continue;
-
-            pgwt_replay_events(&d->accum, events, count, from_mono, to_mono,
-                               &binfo, &rstats);
-            total_events += count;
-        }
+        /* The block scan, including the budgeted right-edge lookahead, lives
+         * in pgwt_replay_file (src/event_reader.c) next to the record rule it
+         * has to agree with. It used to be a loop here that stopped at the
+         * last block before --to, which discarded every record still running
+         * at --to before the record loop could clip it (#424). `lookahead`
+         * is deliberately declared OUTSIDE the file loop: a straddler's
+         * closing record can sit in the next hourly file, and one budget for
+         * the whole replay is what keeps that bounded. */
+        uint64_t decoded = 0;
+        pgwt_replay_file(&reader, &d->accum, from_mono, to_mono, events,
+                         PGWT_BLOCK_EVENTS, &lookahead, &rstats, &decoded);
+        total_events += decoded;
 
         pgwt_reader_close(&reader);
         files_read++;
@@ -167,6 +169,27 @@ int pgwt_run_replay(struct pgwt_daemon *d, const char *from_str,
     if (d->verbose)
         fprintf(stderr, "INFO: replayed %lu events from %d file(s)\n",
                 (unsigned long)total_events, files_read);
+
+    /* #424: the forward scan for waits still running at --to is budgeted
+     * (PGWT_REPLAY_LOOKAHEAD_BLOCKS), because nothing in the trace format
+     * bounds how long one wait can be. If it ran out, say so: a window whose
+     * tail may be short is not the same answer as a complete one, and the
+     * failure this project keeps hitting is the partial scan that reports
+     * like a whole one. */
+    if (rstats.right_edge_truncated) {
+        printf("NOTE: the scan for waits still running at --to stopped after "
+               "%d block(s).\n"
+               "      Time for waits that close far beyond --to may be "
+               "under-reported in this window.\n\n",
+               PGWT_REPLAY_LOOKAHEAD_BLOCKS);
+    }
+
+    if (rstats.blocks_unreadable > 0) {
+        printf("NOTE: %llu block(s) in this trace could not be decoded and "
+               "are missing from\n"
+               "      these numbers (corrupt or truncated trace file).\n\n",
+               (unsigned long long)rstats.blocks_unreadable);
+    }
 
     /* Fidelity notice (FID-5): a tiered trace is mostly SAMPLES records.
      * Their time contributions are ASH estimates (count × sample period),

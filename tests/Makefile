@@ -46,7 +46,8 @@ TESTS     = test_wait_event test_cmdline test_backend_lifecycle test_spawn test_
             test_block_agg bench_block_agg test_transitions_loader \
             test_top_wait_backfill \
             test_window_overlap \
-            test_open_overlay
+            test_open_overlay \
+            test_replay_window
 
 .PHONY: all clean check
 
@@ -763,6 +764,19 @@ test_interval_index: test_interval_index.c ../src/interval_index.c \
 # deadline, ...) and requires THIS binary to go red for each.
 test_open_overlay: test_open_overlay.c ../src/open_overlay.c ../src/cJSON.c
 	$(CC) $(CFLAGS) -o $@ $^
+# test_replay_window: #424 — `--replay --from/--to` selects by OVERLAP and
+# clips, while per-occurrence statistics stay selected by the record's own
+# close timestamp. Covers BOTH halves (the record rule in pgwt_replay_events
+# and the block scan in pgwt_replay_file, which must look PAST --to or the
+# record rule is unreachable), plus a bypass suite for the lookahead budget,
+# an unreadable block header and a SAMPLES tail. Same build shape as
+# test_replay_fidelity: the daemon-flavour event_reader.c against the BPF-free
+# accumulator core, so no bpftool is needed.
+test_replay_window: test_replay_window.c ../src/event_reader.c \
+                    map_reader_core.o $(BUILD)/server_event_writer.o \
+                    $(BUILD)/server_wait_event.o $(BUILD)/server_idle_rule.o \
+                    $(BUILD)/server_spawn.o $(BUILD)/server_cJSON.o
+	$(CC) $(CFLAGS) -o $@ $^ -llz4 -lz
 
 clean:
 	rm -f $(TESTS) test_exec_index map_reader_core.o

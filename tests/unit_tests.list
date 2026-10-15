@@ -663,3 +663,24 @@ test_open_overlay
 # the majority verdict and so was invisible until the fixture started
 # carrying the daemon's cmd_open_ns as well.
 test_open_overlay_mutations.sh
+# #424: `--replay --from/--to` was the last reader still adding duration_ns
+# WHOLE (left straddlers over-reported) and selecting on the close timestamp
+# alone (waits still running at --to contributed 0 -- and src/replay.c also
+# stopped at the last block before --to, so the record rule could never see
+# them). Time is now overlap-selected and clipped; count/histogram/min/max
+# stay selected by the record's own close, so widening admission cannot
+# double-count one close in two windows. Includes the bypass suite for the
+# budgeted right-edge scan: exhausted budget, unreadable block header, a
+# SAMPLES tail that must cost no budget, bad arguments, empty input.
+#
+# #429: and the lookup underneath all of that. block_index[] is written
+# in COMMIT order and nothing sorts it, so pgwt_reader_find_block's
+# binary search had no precondition -- on a lagging --mode full drain a
+# SAMPLES block commits with a far-future first timestamp and the next
+# TRANSITIONS block commits after it with an earlier one. The search then
+# returns an ARBITRARY block, and a window can come back EMPTY while
+# reporting itself complete. The fixture here interleaves the two streams
+# so commit order and timestamp order genuinely disagree, and ASSERTS
+# that they do before asserting anything else -- a fixture where the two
+# orders coincide passes while the code is broken.
+test_replay_window
