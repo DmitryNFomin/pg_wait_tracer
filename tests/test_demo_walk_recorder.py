@@ -3,6 +3,7 @@ import importlib.util
 import base64
 import io
 import json
+import math
 from pathlib import Path
 import sys
 import tempfile
@@ -152,6 +153,35 @@ class RecorderTests(unittest.TestCase):
         outer = [100, 100, 500, 300]  # left edge at 100
         inner = {"top": 150, "left": 50, "right": 300, "bottom": 350}
         self.assertFalse(driver._rect_contains(outer, inner))
+
+    def test_video_verify_timeout_scales_with_duration(self):
+        """issue found live: encode_video()'s own decode/seek verification
+        used a flat 10s budget for an artifact (walk.webm) whose size
+        varies with the walk -- three live runs each ~100-150 frames
+        longer than ones that passed failed this SAME check 3/3 times.
+        A longer video needs a proportionally larger budget, not a number
+        sized for whatever walk happened to be running when it was
+        written."""
+        self.assertEqual(driver.video_verify_timeout_ms(140_900), 14_090)
+        self.assertEqual(driver.video_verify_timeout_ms(300_000), 30_000)
+
+    def test_video_verify_timeout_never_shrinks_below_the_original_floor(self):
+        """A short clip's budget must never be LESS than the flat 10s that
+        has always worked -- the floor means this change can only add
+        margin, never remove it."""
+        for duration_ms in [0, 1000, 50_000, 99_999]:
+            self.assertGreaterEqual(driver.video_verify_timeout_ms(duration_ms),
+                                    driver.VERIFY_MIN_MS)
+
+    def test_video_verify_timeout_is_always_finite_and_bounded(self):
+        """The check must keep its teeth: whatever the formula computes is
+        always a concrete, finite number of milliseconds -- a genuinely
+        stuck/undecodable video still times out eventually; it is never
+        given an unbounded budget."""
+        for duration_ms in [0, 140_900, 1_000_000]:
+            t = driver.video_verify_timeout_ms(duration_ms)
+            self.assertTrue(math.isfinite(t))
+            self.assertLess(t, 10_000_000)  # sanity ceiling: never absurdly large
 
     def test_gif_animation_and_strict_byte_limit(self):
         with tempfile.TemporaryDirectory() as temp:

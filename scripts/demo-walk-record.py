@@ -25,6 +25,36 @@ from PIL import Image, ImageChops
 
 WIDTH, HEIGHT, DPR = 1710, 981, 2
 RESULTS = ROOT / "tests/results/demo_walk"
+
+# issue found live (same family as #411's MOTION_FLOOR and #413's
+# DECODED_MIN_FPS): encode_video()'s own post-encode decode/seek
+# verification used to budget a flat 10 seconds, sized for whatever walk
+# happened to be running when it was written -- but it verifies an
+# artifact (walk.webm) whose size VARIES with the walk's own length.
+# Measured today: three live runs encoding 133-141s of video (3240-3380
+# frames) passed; three later runs, each ~100-150 frames longer (from
+# measurement round trips since removed -- see _tooltip_bboxes_at()),
+# failed this SAME check 3/3 times with "WebM seek timed out" -- not a
+# broken video, a bigger one taking longer to seek. The passing runs
+# themselves only cleared the old flat budget by ~2s out of 10 -- a near
+# miss, not a comfortable margin. Scale the budget with the video's own
+# duration instead. VERIFY_MS_PER_VIDEO_SECOND is deliberately generous:
+# at 100ms of verification budget per 1s of video, the longest passing
+# walk measured today (140.9s) gets 14.1s, real margin instead of a near
+# miss, and a hypothetical 300s walk gets 30s. VERIFY_MIN_MS is the
+# original flat floor, unchanged, so a short clip's budget can only grow
+# from this change, never shrink below what has always worked. This still
+# has teeth: whatever it computes is a concrete, finite number of
+# milliseconds -- a genuinely stuck/undecodable video still times out,
+# it is never given an unbounded budget (test_video_verify_timeout_*).
+VERIFY_MS_PER_VIDEO_SECOND = 100
+VERIFY_MIN_MS = 10_000
+
+
+def video_verify_timeout_ms(duration_ms):
+    return max(VERIFY_MIN_MS, VERIFY_MS_PER_VIDEO_SECOND * duration_ms / 1000)
+
+
 AMBIGUITIES = [
     "Section 4 specifies no per-tab dwell times; explicit default is 10 seconds per tab, overridable by --dwells JSON.",
     "Section 4 says 'in the order the UI lists them' but Timeline requires a return to Sessions after Histogram; the numbered order is retained and that return is a navigation step.",
@@ -434,6 +464,45 @@ def _tooltip_bbox(page):
     }""")
 
 
+def _tooltip_bboxes_at(page, points):
+    """Batched sibling of _tooltip_bbox(): measures the tooltip's bounding
+    box at EACH of several candidate (x, y) positions in ONE round trip,
+    instead of one Playwright page.mouse.move() + capture pulse per
+    candidate. Each position is a synthetic 'mousemove' dispatched to the
+    chart's own canvas -- ECharts/zrender's handler reads clientX/clientY
+    off the event, the same for a synthetic one as a real one, so this
+    reproduces the same tooltip the real sweep in dwell() would show
+    without moving the real OS-level cursor at all. requestAnimationFrame
+    yields one frame between dispatch and measurement so the tooltip DOM
+    has settled. Returns a list of bboxes/None, same order as `points`.
+
+    This exists because the per-candidate round trips it replaces are
+    exactly what grew a live walk by ~100-150 frames and, measured 3/3,
+    tipped encode_video()'s own video-verification timeout over its old
+    flat budget (see VERIFY_MS_PER_VIDEO_SECOND's comment) -- removing the
+    cause, not raising a different budget to tolerate it."""
+    return page.evaluate("""async ([points]) => {
+        const el = document.querySelector('#waterfall-chart');
+        const target = el.querySelector('canvas') || el;
+        const results = [];
+        for (const {x, y} of points) {
+            target.dispatchEvent(new MouseEvent('mousemove',
+                {clientX: x, clientY: y, bubbles: true, cancelable: true}));
+            await new Promise(r => requestAnimationFrame(r));
+            let box = null;
+            document.querySelectorAll('div').forEach(d => {
+                const s = getComputedStyle(d);
+                if (s.position === 'absolute' && d.innerText && d.innerText.includes('Lane:')) {
+                    const r2 = d.getBoundingClientRect();
+                    box = {top: r2.top, left: r2.left, right: r2.right, bottom: r2.bottom};
+                }
+            });
+            results.push(box);
+        }
+        return results;
+    }""", [points])
+
+
 def _rect_contains(outer, inner):
     """outer=[x,y,w,h] (a rect() result); inner={top,left,right,bottom} (a
     _tooltip_bbox() result). True iff inner is fully within the region
@@ -676,19 +745,18 @@ def drill(page, smoke, capture, timeout, archived=False):
     # count and motion gates -- but only where the tooltip is PROVEN to fit
     # at both ends; otherwise hold the cursor at the bar's center (already
     # verified safe above) rather than risk the edge-clipping this replaces.
-    def _tooltip_fits_at(x):
-        page.mouse.move(x, point["y"])
-        capture.pulse()
-        page.wait_for_timeout(80)
-        capture.guard()
-        box = _tooltip_bbox(page)
-        return box is None or _rect_contains(execution_crop, box)
+    # Measured in ONE round trip via _tooltip_bboxes_at() (synthetic events,
+    # not real mouse moves) -- the real recorded dwell below is the only
+    # place the actual cursor moves. The center is re-dispatched last so the
+    # tooltip's own DOM state matches the already-verified real position
+    # regardless of which path is chosen next.
     sweep_margin = (point["x1"]-point["x0"]) * 0.3
     lo, hi = point["x0"]+sweep_margin, point["x1"]-sweep_margin
-    inspect_path = [lo, hi, point["y"]] if (_tooltip_fits_at(lo) and _tooltip_fits_at(hi)) else None
-    if inspect_path is None:
-        page.mouse.move(point["x"], point["y"])  # back to the verified-safe center
-        capture.pulse()
+    lo_box, hi_box, _ = _tooltip_bboxes_at(page, [
+        {"x": lo, "y": point["y"]}, {"x": hi, "y": point["y"]}, {"x": point["x"], "y": point["y"]}])
+    capture.pulse()
+    both_fit = all(box is None or _rect_contains(execution_crop, box) for box in (lo_box, hi_box))
+    inspect_path = [lo, hi, point["y"]] if both_fit else None
     after = dwell(page, "waterfall", 5, smoke, capture, inspect_path)
     end = page.evaluate("Date.now()/1000")
     checked = coverage(capture.frames, start, end, capture.fps)
@@ -735,24 +803,25 @@ def encode_video(context, root, frames):
         else:
             route.fulfill(path=str(path),content_type="video/webm",headers={"Accept-Ranges":"bytes"})
     page.route("**/__demo_video__",serve_video)
-    actual = page.evaluate("""async () => {
+    verify_timeout_ms = video_verify_timeout_ms(duration_ms)
+    actual = page.evaluate("""async ([timeoutMs]) => {
         const v=document.createElement('video');v.src='/__demo_video__';
         document.body.append(v);
         await new Promise((resolve,reject)=>{
-            const timer=setTimeout(()=>reject(new Error('WebM load timed out')),10000);
+            const timer=setTimeout(()=>reject(new Error('WebM load timed out')),timeoutMs);
             v.onloadeddata=()=>{clearTimeout(timer);resolve();};
             v.onerror=()=>{clearTimeout(timer);reject(new Error('WebM decode failed'));};
         });
         const decoded=[];
         for(const at of [v.duration*0.5,Math.max(0,v.duration-0.5)]) {
             await new Promise((resolve,reject)=>{
-                const timer=setTimeout(()=>reject(new Error('WebM seek timed out')),10000);
+                const timer=setTimeout(()=>reject(new Error('WebM seek timed out')),timeoutMs);
                 v.onseeked=()=>{clearTimeout(timer);resolve();};v.currentTime=at;
             });
             decoded.push(v.currentTime);
         }
         return {width:v.videoWidth,height:v.videoHeight,duration:v.duration,decoded_seek_times_s:decoded};
-    }""")
+    }""", [verify_timeout_ms])
     desired=[duration_ms/2000,max(0,duration_ms/1000-0.5)]
     if ((actual["width"],actual["height"]) != (WIDTH,HEIGHT)
             or abs(actual["duration"]-duration_ms/1000)>0.1
