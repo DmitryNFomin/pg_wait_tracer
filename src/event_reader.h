@@ -107,11 +107,31 @@ struct pgwt_accumulator;
 /* Counters replay maintains so the caller can report honestly what the
  * accumulated numbers are made of. */
 struct pgwt_replay_stats {
-    uint64_t transitions;       /* exact records accumulated */
+    uint64_t transitions;       /* exact records that CLOSED in the window */
     uint64_t samples;           /* sampled records accumulated (ASH math) */
     uint64_t markers_skipped;   /* structural markers skipped */
     uint64_t sample_period_ns;  /* sample period seen (0 if none) */
+    /* #424: exact records admitted by OVERLAP whose close is past `to` —
+     * clipped time was credited, no occurrence was counted. Non-zero means
+     * the right-edge scan actually found something, which is what makes a
+     * later refactor that drops the lookahead visible instead of silent. */
+    uint64_t straddlers_admitted;
+    /* The right-edge scan stopped early (lookahead budget exhausted, or a
+     * block header could not be read). The window's tail may under-report:
+     * say so rather than return a short answer as if it were complete. */
+    int      right_edge_truncated;
+    /* Blocks that could not be decoded at all (corrupt or truncated file).
+     * Their records are missing from the answer; the old loop skipped them
+     * without a word, which reads as a complete smaller window. */
+    uint64_t blocks_unreadable;
 };
+
+/* How many TRANSITIONS blocks past `--to` one replay run may decode looking
+ * for still-running straddlers before it gives up and sets
+ * right_edge_truncated. A block holds up to PGWT_BLOCK_EVENTS records, so
+ * this is a large window in practice; it exists because the trace format
+ * carries no bound on how long a single wait can be. */
+#define PGWT_REPLAY_LOOKAHEAD_BLOCKS 1024
 
 /* Replay one decoded block into an accumulator, filtering by time range.
  * `bi` is the block's header info (required):
@@ -121,11 +141,41 @@ struct pgwt_replay_stats {
  *     sample_period_ns of time (ASH estimate) for counts/time-model/query
  *     totals, but contributes NOTHING to min/max/histograms — those are
  *     real-latency-only and would be fabricated from samples.
- * `st` (optional) is updated with what was accumulated. */
+ * `st` (optional) is updated with what was accumulated.
+ *
+ * Window rule (#424), identical to the server's raw path:
+ *   - TIME (event/class/session/query totals) is selected by OVERLAP
+ *     (close >= from && start <= to) and CLIPPED to [from, to];
+ *   - per-OCCURRENCE statistics (count, histogram, min/max) are selected by
+ *     the record's own close timestamp and use the whole duration, so a
+ *     straddler is never counted twice across adjacent windows.
+ * from_mono_ns == 0 / to_mono_ns == 0 mean unbounded on that side. */
 void pgwt_replay_events(struct pgwt_accumulator *acc,
                          const struct pgwt_trace_event *events, int count,
                          uint64_t from_mono_ns, uint64_t to_mono_ns,
                          const struct pgwt_block_info *bi,
                          struct pgwt_replay_stats *st);
+
+/* Replay one open trace file into `acc`, decoding blocks through `buf`
+ * (capacity `max_events`, normally PGWT_BLOCK_EVENTS).
+ *
+ * Holds the block-level half of the window rule above: the scan starts at
+ * the block containing `from_mono_ns` and, crucially, does NOT stop at the
+ * last block before `to_mono_ns` — a wait still running at `to` closes in a
+ * later block (or a later file), and stopping made the record-level overlap
+ * rule unreachable. That forward scan is budgeted: `lookahead_budget`
+ * (optional, normally PGWT_REPLAY_LOOKAHEAD_BLOCKS, shared across all files
+ * of one replay) counts TRANSITIONS blocks decoded past `to`; when it runs
+ * out, or a block header cannot be read, st->right_edge_truncated is set.
+ *
+ * Returns 0, or -1 on bad arguments. `out_decoded` (optional) receives the
+ * number of records decoded. */
+int pgwt_replay_file(struct pgwt_event_reader *r,
+                     struct pgwt_accumulator *acc,
+                     uint64_t from_mono_ns, uint64_t to_mono_ns,
+                     struct pgwt_trace_event *buf, int max_events,
+                     int *lookahead_budget,
+                     struct pgwt_replay_stats *st,
+                     uint64_t *out_decoded);
 
 #endif /* PGWT_EVENT_READER_H */

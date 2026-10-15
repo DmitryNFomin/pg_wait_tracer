@@ -590,3 +590,13 @@ test_backend_lifecycle
 # whose magnitude changed. Pure Python, milliseconds -- so a regression in
 # the gate's own logic does not need a 40-minute box run to surface.
 test_summary_raw_parity_lib.py
+# #424: `--replay --from/--to` was the last reader still adding duration_ns
+# WHOLE (left straddlers over-reported) and selecting on the close timestamp
+# alone (waits still running at --to contributed 0 -- and src/replay.c also
+# stopped at the last block before --to, so the record rule could never see
+# them). Time is now overlap-selected and clipped; count/histogram/min/max
+# stay selected by the record's own close, so widening admission cannot
+# double-count one close in two windows. Includes the bypass suite for the
+# budgeted right-edge scan: exhausted budget, unreadable block header, a
+# SAMPLES tail that must cost no budget, bad arguments, empty input.
+test_replay_window
