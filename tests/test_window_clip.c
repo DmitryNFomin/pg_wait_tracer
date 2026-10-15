@@ -74,6 +74,18 @@ static int checks   = 0;
     else printf("  ok: %s (%.6f ms)\n", msg, _g);                    \
 } while (0)
 
+/* Occurrence counts — printed with got/want so a failure names the inflation
+ * instead of just saying "false". */
+#define CHECK_U64(got, want, msg) do {                               \
+    checks++;                                                        \
+    unsigned long long _g = (unsigned long long)(got);               \
+    unsigned long long _w = (unsigned long long)(want);              \
+    if (_g != _w) { failures++;                                      \
+        printf("  FAIL: %s — got %llu, want %llu (%s:%d)\n",          \
+               msg, _g, _w, __FILE__, __LINE__); }                   \
+    else printf("  ok: %s (%llu)\n", msg, _g);                       \
+} while (0)
+
 /* compute.c's only foreign symbol (summary streaming) — unused here. */
 int pgwt_visit_summaries(const char *trace_dir, uint64_t from_wall_ns,
                          uint64_t to_wall_ns, pgwt_summary_visitor visitor,
@@ -159,6 +171,25 @@ static const struct pgwt_event_row *ev_row(const struct pgwt_events_result *r,
     for (int i = 0; i < r->num_rows; i++)
         if (r->rows[i].event_id == id) return &r->rows[i];
     return NULL;
+}
+
+/* Occurrences of one event id. An ABSENT row reads 0 — which is the honest
+ * answer for "how many times did this wait close inside the window", and is
+ * what section 6 asserts. The helper is kept from being vacuous by
+ * test_right_edge_counted_window(), which requires the SAME helper to return
+ * a non-zero count on a fixture that does close in-window. */
+static uint64_t ev_count(const struct pgwt_events_result *r, uint32_t id)
+{
+    for (int i = 0; i < r->num_rows; i++)
+        if (r->rows[i].event_id == id) return r->rows[i].count;
+    return 0;
+}
+
+static uint64_t ev_exact_count(const struct pgwt_events_result *r, uint32_t id)
+{
+    for (int i = 0; i < r->num_rows; i++)
+        if (r->rows[i].event_id == id) return r->rows[i].exact_count;
+    return 0;
 }
 
 static double sess_ms(const struct pgwt_sessions_result *r, uint32_t pid)
@@ -552,6 +583,320 @@ static void test_latency_columns_keep_full_duration(void)
     free(tq.rows);
 }
 
+/* ── 6. The RIGHT edge: INSTANT vs INTERVAL (#424) ────────────────────
+ *
+ * #424 is the mirror of section 1, one layer down. The raw loader
+ * (server_load_events_fi_mode / load_file_range_mono, src/server.c) admits a
+ * non-sample record only when its CLOSE timestamp falls in [from, to]. The
+ * correct admission rule is OVERLAP: close >= from AND start <= to. The right
+ * half is implemented nowhere, so a wait still open at the window's right edge
+ * contributes 0, and a wait spanning the whole window is dropped entirely.
+ *
+ * This section does NOT test the loader (it lives in server.c and needs a
+ * trace dir — tests/test_window_additivity.py does that end to end). It pins
+ * the semantics the loader fix has to deliver records INTO, and that is a
+ * separate defect: compute.c clips TIME on both sides already
+ * (event_window_ns), but every PER-OCCURRENCE quantity — count, exact_count,
+ * max_ns, the latency histogram — is incremented for whatever record it is
+ * handed, with no test on the record's own timestamp (src/compute.c:1587-1596,
+ * :1883-1886). Today that is latent because admission never delivers a
+ * right-open record. The moment admission is widened it stops being latent and
+ * becomes inflation: counts, max latency and percentiles that include waits
+ * which had not finished yet. A fix that corrects admission without this
+ * distinction replaces an old wrong number with a new one.
+ *
+ * THE RULE, in one line:
+ *   TIME        is selected by OVERLAP and CLIPPED to the window;
+ *   OCCURRENCES (count, exact_count, max, histogram) are selected by the
+ *               record's OWN close timestamp and must EXCLUDE right-open ones.
+ *
+ * Which of these are red on 304a772 is stated per assertion below: the time
+ * legs are green here (they are red one layer down, through the loader) and
+ * are the over-clip guard; the occurrence legs are red.
+ */
+
+#define RT        (T0 + S(100))          /* "T": the right-edge close time */
+#define RA_FROM   (RT - S(20))
+#define RA_TO     (RT - S(2))            /* 18 s window, closing BEFORE T */
+
+/* 6a. A 10 s wait closing at T, with an interior 3 s wait of the same event
+ * beside it so the row exists on both sides of the fix and max/count have a
+ * baseline that is NOT the straddler's. */
+static void test_right_edge_open_wait(void)
+{
+    printf("--- 6a. wait open at `to`: time clipped in, occurrence out ---\n");
+
+    struct pgwt_trace_event evs[] = {
+        /* right-open: [T-10, T]; overlap with [T-20, T-2] is 8 s */
+        mk(5001, LOCK_RELATION, RT,        S(10), 88, PGWT_CPU_NS_UNKNOWN),
+        /* interior:   [T-8, T-5] — wholly inside the window */
+        mk(5001, LOCK_RELATION, RT - S(5), S(3),  88, PGWT_CPU_NS_UNKNOWN),
+    };
+    struct pgwt_filter f;
+    memset(&f, 0, sizeof(f));
+
+    /* Fixture self-test: without this, 6a could pass by looking at a record
+     * that does not actually cross `to`. */
+    CHECK(evs[0].timestamp_ns > RA_TO &&
+          evs[0].timestamp_ns - evs[0].duration_ns < RA_TO,
+          "fixture really crosses `to` (closes 2 s after the window ends)");
+
+    struct pgwt_tm_result tm;
+    pgwt_compute_time_model(evs, 2, &f, RA_FROM, RA_TO, 18000.0, &tm);
+    /* TIME legs — green on 304a772 at this layer, red through the loader. */
+    CHECK_MS(tm.db_time_ms, 11000.0,
+             "time_model DB Time = 8 s clipped straddler + 3 s interior");
+    CHECK_MS(tm_class_ms(&tm, "Lock"), 11000.0, "time_model Lock row = 11 s");
+    free(tm.rows);
+
+    struct pgwt_events_result te;
+    pgwt_compute_top_events(evs, 2, &f, RA_FROM, RA_TO, 18000.0, &te);
+    CHECK_MS(ev_total_ms(&te, LOCK_RELATION), 11000.0,
+             "top_events Lock:relation time = 11 s");
+    /* OCCURRENCE legs — RED on 304a772: count 2, exact_count 2, max 10 s. */
+    CHECK_U64(ev_count(&te, LOCK_RELATION), 1,
+              "top_events counts ONLY the wait that closed in-window");
+    CHECK_U64(ev_exact_count(&te, LOCK_RELATION), 1,
+              "…exact_count likewise excludes the right-open wait");
+    const struct pgwt_event_row *r = ev_row(&te, LOCK_RELATION);
+    CHECK(r != NULL, "top_events has the Lock:relation row");
+    if (r) {
+        CHECK_NUM(r->max_us, 3000000.0,
+                  "…max latency (us) is the 3 s wait that finished, not the "
+                  "open 10 s");
+        /* The histogram is only observable through the latency columns the
+         * server derives from it; a 10 s observation in it would move both
+         * of the above. has_latency_dist must still be set — one real
+         * observation remains. */
+        CHECK(r->has_latency_dist == 1,
+              "…the row still HAS a distribution (the 3 s observation)");
+    }
+    free(te.rows);
+
+    struct pgwt_sessions_result ts;
+    pgwt_compute_top_sessions(evs, 2, &f, RA_FROM, RA_TO, 18000.0, &ts);
+    CHECK_MS(sess_ms(&ts, 5001), 11000.0, "top_sessions pid 5001 = 11 s");
+    free(ts.rows);
+
+    struct pgwt_queries_result tq;
+    pgwt_compute_top_queries(evs, 2, &f, RA_FROM, RA_TO, 18000.0, &tq);
+    const struct pgwt_query_row *q = qrow(&tq, 88);
+    CHECK(q != NULL, "top_queries has the query row");
+    if (q) {
+        CHECK_MS(q->total_ms, 11000.0, "top_queries query 88 time = 11 s");
+        CHECK_U64(q->count, 1,
+                  "…and counts only the wait that closed in-window");
+    }
+    free(tq.rows);
+}
+
+/* 6b. The SAME fixture with the window extended past T. Now both waits close
+ * inside, so both are occurrences and the full 10 s is in. This is the
+ * over-correction guard: a fix that drops right-open records from TIME as
+ * well, or that stops counting by position rather than by close timestamp,
+ * goes red here. Green on 304a772 and must stay green. */
+static void test_right_edge_counted_window(void)
+{
+    printf("--- 6b. window extended past T: the wait is counted in full ---\n");
+
+    struct pgwt_trace_event evs[] = {
+        mk(5001, LOCK_RELATION, RT,        S(10), 88, PGWT_CPU_NS_UNKNOWN),
+        mk(5001, LOCK_RELATION, RT - S(5), S(3),  88, PGWT_CPU_NS_UNKNOWN),
+    };
+    struct pgwt_filter f;
+    memset(&f, 0, sizeof(f));
+
+    struct pgwt_events_result te;
+    pgwt_compute_top_events(evs, 2, &f, RA_FROM, RT + S(1), 21000.0, &te);
+    CHECK_MS(ev_total_ms(&te, LOCK_RELATION), 13000.0,
+             "both waits whole: 10 s + 3 s");
+    CHECK_U64(ev_count(&te, LOCK_RELATION), 2,
+              "both waits counted — ev_count() is not stuck at 0");
+    const struct pgwt_event_row *r = ev_row(&te, LOCK_RELATION);
+    if (r) CHECK_NUM(r->max_us, 10000000.0,
+                     "…max latency (us) is now the 10 s wait, which closed "
+                     "in-window");
+    free(te.rows);
+}
+
+/* 6c. A wait spanning the ENTIRE window: starts before `from`, closes after
+ * `to`. The window sees nothing but this wait, so the answer is the full
+ * window width with zero occurrences. Through the loader this row is 0 today
+ * (#424's worst case); at this layer the time is already right and the
+ * occurrence is not.
+ *
+ * NOTE for the fix: pgwt_compute_top_events uses count == 0 as its hash
+ * table's empty-slot marker and skips count == 0 rows when collecting
+ * results, so "time but no occurrence" needs a real occupancy flag. That is
+ * why the time here is asserted on db_time_ms (an accumulator independent of
+ * the row) as well as on the row. */
+static void test_right_edge_whole_window_spanner(void)
+{
+    printf("--- 6c. a wait spanning the whole window ---\n");
+
+    struct pgwt_trace_event evs[] = {
+        /* [T-50, T+50] — the window [T-20, T-2] is strictly inside it */
+        mk(5002, TIMEOUT_PGSLEEP, RT + S(50), S(100), 0, PGWT_CPU_NS_UNKNOWN),
+    };
+    struct pgwt_filter f;
+    memset(&f, 0, sizeof(f));
+
+    CHECK(evs[0].timestamp_ns - evs[0].duration_ns < RA_FROM &&
+          evs[0].timestamp_ns > RA_TO,
+          "fixture really spans the whole window on both sides");
+
+    struct pgwt_tm_result tm;
+    pgwt_compute_time_model(evs, 1, &f, RA_FROM, RA_TO, 18000.0, &tm);
+    CHECK_MS(tm.db_time_ms, 18000.0, "spanner fills the window: 18 s");
+    CHECK_MS(tm_class_ms(&tm, "Timeout"), 18000.0, "…on the Timeout row");
+    free(tm.rows);
+
+    struct pgwt_events_result te;
+    pgwt_compute_top_events(evs, 1, &f, RA_FROM, RA_TO, 18000.0, &te);
+    CHECK_MS(te.db_time_ms, 18000.0,
+             "top_events still REPORTS the 18 s (independent accumulator)");
+    CHECK_U64(ev_count(&te, TIMEOUT_PGSLEEP), 0,
+              "…with zero occurrences: the wait closed outside the window");
+    free(te.rows);
+
+    struct pgwt_sessions_result ts;
+    pgwt_compute_top_sessions(evs, 1, &f, RA_FROM, RA_TO, 18000.0, &ts);
+    CHECK_MS(sess_ms(&ts, 5002), 18000.0, "top_sessions pid 5002 = 18 s");
+    free(ts.rows);
+}
+
+/* 6d. Adjacent-window sweep over one 10 s wait: Σ time == the duration (no
+ * part lost, none double-counted) and Σ count == 1 (the occurrence belongs to
+ * exactly ONE window — the one its close falls in). The second is the
+ * double-count hazard in one number: on 304a772 the record is counted in
+ * every window of the sweep, including the two it does not overlap at all. */
+static void test_right_edge_adjacent_sweep(void)
+{
+    printf("--- 6d. adjacent-window sweep: Σ time == duration, Σ count == 1 ---\n");
+
+    struct pgwt_trace_event evs[] = {
+        mk(5001, LOCK_RELATION, RT, S(10), 88, PGWT_CPU_NS_UNKNOWN),
+    };
+    struct pgwt_filter f;
+    memset(&f, 0, sizeof(f));
+
+    /* Edges chosen so T falls STRICTLY inside one window (never on an edge),
+     * which keeps "which window owns the occurrence" unambiguous. */
+    const uint64_t edges[] = {
+        RT - S(14), RT - S(10), RT - S(6), RT - S(2), RT + S(2), RT + S(6),
+    };
+    const int nwin = (int)(sizeof(edges) / sizeof(edges[0])) - 1;
+
+    double  sum_ms    = 0.0;
+    uint64_t sum_count = 0;
+    int owning_window = -1;
+    for (int i = 0; i < nwin; i++) {
+        struct pgwt_events_result te;
+        pgwt_compute_top_events(evs, 1, &f, edges[i], edges[i + 1],
+                                (double)(edges[i + 1] - edges[i]) / 1e6, &te);
+        double  ms = ev_total_ms(&te, LOCK_RELATION);
+        uint64_t c = ev_count(&te, LOCK_RELATION);
+        if (ms > 0) sum_ms += ms;
+        sum_count += c;
+        if (c > 0 && owning_window < 0) owning_window = i;
+        free(te.rows);
+    }
+    CHECK_MS(sum_ms, 10000.0, "Σ clipped time over the sweep == the 10 s wait");
+    CHECK_U64(sum_count, 1, "Σ count over the sweep == 1 occurrence");
+    CHECK_U64(owning_window, 3,
+              "…and it belongs to window 3, [T-2, T+2], the one T falls in");
+}
+
+/* 6e. False-negative legs for section 6. Each is a way the right-edge rule
+ * could be "satisfied" without looking at anything. */
+static void test_right_edge_bypass(void)
+{
+    printf("--- 6e. right-edge false-negative suite ---\n");
+
+    struct pgwt_filter f;
+    memset(&f, 0, sizeof(f));
+
+    struct pgwt_trace_event evs[] = {
+        mk(5001, LOCK_RELATION,   RT,        S(10), 88, PGWT_CPU_NS_UNKNOWN),
+        mk(5001, LOCK_RELATION,   RT - S(5), S(3),  88, PGWT_CPU_NS_UNKNOWN),
+        mk(5002, TIMEOUT_PGSLEEP, RT + S(50), S(100), 0, PGWT_CPU_NS_UNKNOWN),
+    };
+
+    /* 6e-1. UNBOUNDED (to_ns == 0) must be BIT-IDENTICAL to today: no
+     * admission rule applies, every record is whole, every record counts. */
+    struct pgwt_events_result tu;
+    pgwt_compute_top_events(evs, 3, &f, 0, 0, 170000.0, &tu);
+    CHECK_MS(ev_total_ms(&tu, LOCK_RELATION), 13000.0,
+             "unbounded: Lock keeps 10 s + 3 s");
+    CHECK_U64(ev_count(&tu, LOCK_RELATION), 2,
+              "unbounded: both Lock waits count");
+    CHECK_MS(ev_total_ms(&tu, TIMEOUT_PGSLEEP), 100000.0,
+             "unbounded: the 100 s spanner keeps its full duration");
+    CHECK_U64(ev_count(&tu, TIMEOUT_PGSLEEP), 1,
+              "unbounded: the spanner counts");
+    free(tu.rows);
+
+    /* 6e-2. A fixture that does NOT straddle must produce a NON-ZERO value,
+     * so none of section 6 can pass by looking at nothing. */
+    struct pgwt_events_result tn;
+    pgwt_compute_top_events(&evs[1], 1, &f, RA_FROM, RA_TO, 18000.0, &tn);
+    CHECK_MS(ev_total_ms(&tn, LOCK_RELATION), 3000.0,
+             "non-straddling fixture is non-zero (3 s), so 0 is a real answer");
+    CHECK_U64(ev_count(&tn, LOCK_RELATION), 1,
+              "…and counts its one occurrence");
+    free(tn.rows);
+
+    /* 6e-3. Zero-width window at a point no record closes in: no time, no
+     * occurrence — and no divide-by-zero in the in-window fraction. */
+    struct pgwt_events_result tz;
+    pgwt_compute_top_events(evs, 3, &f, RT - S(3), RT - S(3), 0.0, &tz);
+    CHECK_MS(tz.db_time_ms, 0.0, "zero-width window: 0 ms");
+    CHECK_U64(ev_count(&tz, LOCK_RELATION), 0,
+              "zero-width window: 0 occurrences");
+    free(tz.rows);
+
+    /* 6e-4. A zero-duration record closing exactly at `to`: no time, but it
+     * IS an occurrence — "instant" is the whole point of the rule. */
+    struct pgwt_trace_event instant = mk(5003, LOCK_RELATION, RA_TO, 0, 88, 0);
+    struct pgwt_events_result ti;
+    pgwt_compute_top_events(&instant, 1, &f, RA_FROM, RA_TO, 18000.0, &ti);
+    CHECK_MS(ev_total_ms(&ti, LOCK_RELATION), 0.0,
+             "zero-duration record at `to`: 0 ms of time");
+    CHECK_U64(ev_count(&ti, LOCK_RELATION), 1,
+              "…but one occurrence: it closed inside the window");
+    free(ti.rows);
+
+    /* 6e-5. A record WHOLLY past `to` (starts after the window too): neither
+     * time nor occurrence. The distinction from 6a is the point — "closes
+     * after `to`" is not by itself a reason to keep a record. */
+    struct pgwt_trace_event past =
+        mk(5004, LOCK_RELATION, RT + S(30), S(2), 88, PGWT_CPU_NS_UNKNOWN);
+    struct pgwt_events_result tp;
+    pgwt_compute_top_events(&past, 1, &f, RA_FROM, RA_TO, 18000.0, &tp);
+    CHECK_MS(tp.db_time_ms, 0.0, "record wholly past `to`: 0 ms");
+    CHECK_U64(ev_count(&tp, LOCK_RELATION), 0,
+              "record wholly past `to`: 0 occurrences");
+    free(tp.rows);
+
+    /* 6e-6. A record wholly BEFORE `from`: same, on the other side. */
+    struct pgwt_trace_event before =
+        mk(5005, LOCK_RELATION, RA_FROM - S(1), S(2), 88, PGWT_CPU_NS_UNKNOWN);
+    struct pgwt_events_result tb;
+    pgwt_compute_top_events(&before, 1, &f, RA_FROM, RA_TO, 18000.0, &tb);
+    CHECK_MS(tb.db_time_ms, 0.0, "record wholly before `from`: 0 ms");
+    CHECK_U64(ev_count(&tb, LOCK_RELATION), 0,
+              "record wholly before `from`: 0 occurrences");
+    free(tb.rows);
+
+    /* 6e-7. Empty input: a real zero, not an unexamined one. Paired with
+     * 6e-2 above, which proves the same call is non-zero on real data. */
+    struct pgwt_events_result t0;
+    pgwt_compute_top_events(NULL, 0, &f, RA_FROM, RA_TO, 18000.0, &t0);
+    CHECK_MS(t0.db_time_ms, 0.0, "empty input: 0 ms");
+    CHECK_U64(t0.num_rows, 0, "empty input: no rows");
+    free(t0.rows);
+}
+
 int main(void)
 {
     printf("=== test_window_clip ===\n");
@@ -562,9 +907,14 @@ int main(void)
     test_unbounded_window_unchanged();
     test_bypass_paths();
     test_latency_columns_keep_full_duration();
+    test_right_edge_open_wait();
+    test_right_edge_counted_window();
+    test_right_edge_whole_window_spanner();
+    test_right_edge_adjacent_sweep();
+    test_right_edge_bypass();
 
     /* A suite that ran no assertions is a suite that proved nothing. */
-    if (checks < 40) {
+    if (checks < 80) {
         printf("FAIL: only %d assertions ran — the suite did not execute\n",
                checks);
         return 1;
