@@ -887,6 +887,29 @@ def section_forward_gap(tr):
         err = os.path.join(tmp, "gap.err")
         env = dict(STATS_ENV)
         env["PGWT_CURRENT_TRACE_CACHE"] = "1"
+        # #424: the straddler lookahead reads up to PGWT_STRADDLE_LOOKAHEAD_NS
+        # (300 s by default) past `to`, looking for a wait that was still
+        # running at the right edge. With the default horizon the early
+        # window below reads through the late window's blocks and caches the
+        # whole fixture, so the gap this section exists to exercise stops
+        # existing -- which is exactly what the premise assertion caught.
+        #
+        # The GAP IS STILL REACHABLE in the product, so this section is
+        # widened rather than retired: the docstring's own scenario is a tab
+        # that stopped refreshing while the display slept, which is minutes,
+        # not 27 s. A jump larger than the horizon (or more than
+        # PGWT_STRADDLE_MAX_BLOCKS blocks) still lands past the retained run.
+        # Shrinking the horizon models that jump exactly, and costs a fixture
+        # spanning > 300 s of trace that every other section would then pay
+        # for. The premise assertion below is what keeps this honest: if the
+        # knob ever stops working, the section goes red instead of passing
+        # vacuously.
+        #
+        # Set on BOTH harnesses, including the uncached control at the end:
+        # the horizon changes which records are ADMITTED, so a control
+        # running the default would differ in body and the comparison would
+        # be measuring the knob instead of the cache.
+        env["PGWT_STRADDLE_LOOKAHEAD_NS"] = str(1 * S)
         # Early and late slices of the same capture, far enough apart that the
         # late one's first block is past the end of the early one's run.
         early = (BASE - 1 * S, BASE + 4 * S)
@@ -939,8 +962,12 @@ def section_forward_gap(tr):
                  "repeating it is served from the restarted run "
                  "(served %d -> %d)" % (b["served"], c["served"]))
         # Correctness, not just bookkeeping: same answers as the old path.
+        # Same straddler horizon as above -- it decides which records are
+        # ADMITTED, so a control on the default horizon would compare two
+        # different questions and call the difference a cache bug.
         with ServerHarness(trace_dir,
-                           env={"PGWT_CURRENT_TRACE_CACHE": "0"}) as srv:
+                           env={"PGWT_CURRENT_TRACE_CACHE": "0",
+                                "PGWT_STRADDLE_LOOKAHEAD_NS": str(1 * S)}) as srv:
             ctl_a = srv.query(PROBE_CMD, from_=str(early[0]),
                               to_=str(early[1]))
             ctl_b = srv.query(PROBE_CMD, from_=str(late[0]),

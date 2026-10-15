@@ -1,0 +1,15 @@
+
+### 3b. the window jumps forward past the cached run ###
+    early {'enabled': 1, 'lo': 0, 'blocks': 8, 'events': 32320, 'cap': 1048576, 'decoded': 8, 'served': 0, 'resets': 0}
+    jump  {'enabled': 1, 'lo': 0, 'blocks': 8, 'events': 32320, 'cap': 1048576, 'decoded': 8, 'served': 2, 'resets': 0}
+    again {'enabled': 1, 'lo': 0, 'blocks': 8, 'events': 32320, 'cap': 1048576, 'decoded': 8, 'served': 4, 'resets': 0}
+  PASS: the early window saw events (3517)
+  PASS: the late window saw events (4404)
+  FAIL: the jumped-to window's first block (0) really is past the old run's end (8) -- there was a gap to restart over
+  FAIL: the run restarted ON the new blocks instead of freezing (lo 0 -> 0, blocks=8)
+  FAIL: the gap dropped the stale run rather than keeping it for nothing (resets 0 -> 0)
+  PASS: repeating the jumped-to window decodes nothing new (decoded stayed 8)
+  PASS: repeating it is served from the restarted run (served 2 -> 4)
+  PASS: the early window matches the uncached read
+  PASS: the window read from the RESTARTED run matches the uncached read
+6 passed, 3 failed

@@ -1080,6 +1080,125 @@ out:
     free(srv);
 }
 
+/* ── 14. INSTANT selection has TWO bounds ─────────────────────────────
+ *
+ * The first cut of the per-occurrence gate implemented only the upper half
+ * (`!event_right_open(...)`), so a record whose close lies BEFORE `from`
+ * still passed it and was counted. The rule had always been stated as
+ * `timestamp_ns in [from, to]`; only half of it was code.
+ *
+ * Every section above went through the loader, which rejects `ts < from_m`
+ * before compute ever sees the array — so the server path covered for the
+ * missing bound and this suite could not see it. tests/test_window_clip.c
+ * section 6 calls pgwt_compute_top_events() DIRECTLY with hand-built
+ * arrays, and failed three ways on the Linux box (a sweep counting one
+ * record twice, a zero-width window reporting one occurrence, and a record
+ * wholly before `from` reporting one). This section builds its arrays the
+ * same way, so the two suites now assert the same contract instead of one
+ * covering for the other.
+ *
+ * 14d is the counterweight: INCLUSIVE at `to` must survive the fix. Making
+ * selection half-open at the end is the deferred #427 migration, and it
+ * must not arrive as a side effect of adding a lower bound. */
+static void test_instant_two_bounds(void)
+{
+    printf("--- 14. per-occurrence selection is [from, to], both ends ---\n");
+    struct pgwt_filter f;
+    memset(&f, 0, sizeof(f));
+
+    /* One record, closing at 15 s after a 1 s wait. No RIGHT_OPEN flag and
+     * no loader anywhere: compute must gate on its own. */
+    struct pgwt_trace_event ev;
+    memset(&ev, 0, sizeof(ev));
+    ev.timestamp_ns = 15 * ONE_SEC;
+    ev.pid = INSIDE_PID;
+    ev.old_event = EV_LOCK;
+    ev.new_event = EV_IO;
+    ev.duration_ns = 1 * ONE_SEC;
+    ev.query_id = 0x4242;
+    ev.cpu_ns = PGWT_CPU_NS_UNKNOWN;
+
+    struct pgwt_events_result res;
+    const struct pgwt_event_row *row;
+
+    /* 14a. A window that OPENS AFTER the record closed. */
+    pgwt_compute_top_events(&ev, 1, &f, 20 * ONE_SEC, 30 * ONE_SEC,
+                            10000.0, &res);
+    row = row_for(&res, EV_LOCK);
+    CHECK(row == NULL || row->count == 0,
+          "14a. a record closing 5 s BEFORE `from` is not an occurrence of "
+          "this window (count=%llu) -- the upper-bound-only gate counted it",
+          (unsigned long long)(row ? row->count : 0));
+    free(res.rows);
+
+    /* 14b. The sweep: two adjacent windows, one record, one occurrence
+     * TOTAL. The record is strictly interior to the first window, so this
+     * is not a shared-boundary question. */
+    uint64_t total = 0;
+    pgwt_compute_top_events(&ev, 1, &f, 10 * ONE_SEC, 16 * ONE_SEC,
+                            6000.0, &res);
+    row = row_for(&res, EV_LOCK);
+    total += row ? row->count : 0;
+    free(res.rows);
+    pgwt_compute_top_events(&ev, 1, &f, 16 * ONE_SEC, 22 * ONE_SEC,
+                            6000.0, &res);
+    row = row_for(&res, EV_LOCK);
+    total += row ? row->count : 0;
+    free(res.rows);
+    CHECK(total == 1,
+          "14b. one record swept by two adjacent windows is counted ONCE "
+          "(got %llu) -- 2 is the same defect seen as a double count",
+          (unsigned long long)total);
+
+    /* 14c. A zero-width window after the close. */
+    pgwt_compute_top_events(&ev, 1, &f, 20 * ONE_SEC, 20 * ONE_SEC,
+                            0.0, &res);
+    row = row_for(&res, EV_LOCK);
+    CHECK(row == NULL || row->count == 0,
+          "14c. a zero-width window at 20 s holds no occurrence of a record "
+          "that closed at 15 s (count=%llu)",
+          (unsigned long long)(row ? row->count : 0));
+    free(res.rows);
+
+    /* 14d. INCLUSIVE at `to`, unchanged. A record closing exactly at the
+     * right edge lies wholly inside the window and is ONE occurrence. */
+    pgwt_compute_top_events(&ev, 1, &f, 10 * ONE_SEC, 15 * ONE_SEC,
+                            5000.0, &res);
+    row = row_for(&res, EV_LOCK);
+    CHECK(row && row->count == 1,
+          "14d. a record closing exactly AT `to` is still one occurrence "
+          "(count=%llu) -- adding the lower bound must not quietly make "
+          "selection half-open at the end (that is #427, deferred)",
+          (unsigned long long)(row ? row->count : 0));
+    free(res.rows);
+
+    /* 14e. And exactly AT `from` too — the bound is >=, not >. */
+    pgwt_compute_top_events(&ev, 1, &f, 15 * ONE_SEC, 25 * ONE_SEC,
+                            10000.0, &res);
+    row = row_for(&res, EV_LOCK);
+    CHECK(row && row->count == 1,
+          "14e. a record closing exactly AT `from` is one occurrence "
+          "(count=%llu) -- the new bound is inclusive, not an off-by-one "
+          "that drops the boundary record",
+          (unsigned long long)(row ? row->count : 0));
+    free(res.rows);
+
+    /* 14f. The SECOND gated site: top_queries keeps its own count and
+     * full_ns, so it needs its own leg rather than inheriting trust. */
+    struct pgwt_queries_result qres;
+    pgwt_compute_top_queries(&ev, 1, &f, 20 * ONE_SEC, 30 * ONE_SEC,
+                             10000.0, &qres);
+    uint64_t qcount = 0;
+    for (int i = 0; i < qres.num_rows; i++)
+        if (qres.rows[i].query_id == 0x4242)
+            qcount = qres.rows[i].count;
+    CHECK(qcount == 0,
+          "14f. top_queries applies the same lower bound (count=%llu for a "
+          "query whose only record closed before `from`)",
+          (unsigned long long)qcount);
+    free(qres.rows);
+}
+
 int main(void)
 {
     printf("=== test_window_overlap (#424) ===\n");
@@ -1131,6 +1250,7 @@ int main(void)
     }
     build_interleaved_fixture(dir_il, base);
     test_block_lookup(dir_il, dir);
+    test_instant_two_bounds();
 
     printf("\n%d checks, %d failed\n", tests_run, tests_failed);
     return tests_failed ? 1 : 0;
