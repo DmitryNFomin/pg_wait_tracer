@@ -36,6 +36,7 @@ TESTS     = test_wait_event test_cmdline test_backend_lifecycle test_spawn test_
             test_io_worker_summary test_io_worker_parity \
             test_cpu_split_parity \
             test_straddler_accounting \
+            test_open_cpu_accounting \
             test_exec_index \
             test_interval_index \
             test_alloc_tune \
@@ -664,6 +665,32 @@ test_cpu_split_parity: test_cpu_split_parity.c ../src/compute.c \
 # an io_worker, a full table, a missing trace dir (the read-back must refuse)
 # and a late first note. Server build, no BPF, no live PG; ~0.2 s.
 test_straddler_accounting: test_straddler_accounting.c \
+                   $(BUILD)/server_summary_writer.o \
+                   $(BUILD)/server_summary_reader.o \
+                   $(BUILD)/server_event_writer.o \
+                   $(BUILD)/server_event_reader.o \
+                   $(BUILD)/server_wait_event.o $(BUILD)/server_idle_rule.o \
+                   $(BUILD)/server_spawn.o $(BUILD)/server_cJSON.o
+	$(CC) $(CFLAGS) -DPGWT_SERVER -o $@ $^ -llz4 -lz -lm
+
+# test_open_cpu_accounting: #424 / summary v9 -- the residual v8 deliberately
+# left open. An OPEN ON-CPU interval must be credited to the seconds it
+# occupies WITHOUT destroying v7's measured-CPU split, which v8 argued was
+# impossible because a per-second credit has no cpu_ns. It has one now: the
+# producer passes the measurement it already computes for the live view
+# (pgwt_summary_note_open_ex + struct pgwt_summary_open_cpu). Asserted:
+# placement AND the split in the same fixture (ten seconds of 1 s each,
+# 6000 ms measured, 0 clamped), conservation with the two sides from
+# different provenance, either tick/close order, the CLASSIFICATION FREEZE
+# (the command-majority answer over the open prefix can flip before close
+# while written seconds are immutable, so one interval carries ONE label and
+# the divergence is counted), both measurement tiers and a tier flip, and
+# NON-VACUITY (no open CPU => bit-identical records). Bypass suite: the
+# observation withheld (reachability), stale, exit, mismatch, io_worker, an
+# illegal eff_we, a full table, missing/empty dir, a PREVIOUS-VERSION file, a
+# disabled writer, a sub-second gap, and the open-credit-only round trip.
+# Server build, no BPF, no live PG; ~0.3 s.
+test_open_cpu_accounting: test_open_cpu_accounting.c \
                    $(BUILD)/server_summary_writer.o \
                    $(BUILD)/server_summary_reader.o \
                    $(BUILD)/server_event_writer.o \
